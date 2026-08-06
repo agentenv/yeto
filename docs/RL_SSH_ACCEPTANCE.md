@@ -172,13 +172,18 @@ yeto-rl-ssh verify --plan "$PLAN" \
 
 Collection retains every container log and status, each island's local
 checkpoint and event tape, f32 round evidence, and the syncer's log, event
-tape, and authoritative checkpoint. Verification requires:
+tape, and authoritative checkpoint. Strict-AVG verification requires:
 
 - one ordered fixed-roster f32 AVG commit per configured round;
 - identical canonical f32 bases on both islands;
 - an independent average of both recorded deltas at every round;
 - each average to equal the next exact base and final syncer checkpoint;
 - the complete two-member ledger and final policy hash on both islands.
+
+Decoupled verification instead requires the complete ordered fragment schedule,
+the exact raw base and fixed two-island roster for every fragment commit, a
+checkpoint ledger equal to the syncer tape, a complete terminal fragment cut,
+and the same applied final policy hash on both islands.
 
 When `--export-dir` is present, verification also exports the authoritative
 checkpoint through the standard Yeto RL PEFT exporter. Use `stop` only for an

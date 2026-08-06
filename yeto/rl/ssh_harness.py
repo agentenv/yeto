@@ -1300,6 +1300,105 @@ def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
     return final_hash
 
 
+def _verify_decoupled(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
+    learner = plan["learner"]
+    fragments = learner["fragments"]
+    total_steps = learner["total_fragment_steps"]
+    local_horizon = learner["local_horizon"]
+    terminal_versions = tuple(range(total_steps - fragments + 1, total_steps + 1))
+    versions = tuple(version for version, _, _ in checkpoint.fragments)
+    if (
+        checkpoint.global_step != total_steps
+        or len(checkpoint.fragments) != fragments
+        or versions != terminal_versions
+        or not _SHA256.fullmatch(checkpoint.layout_hash or "")
+    ):
+        raise HarnessError("authoritative checkpoint is not a complete decoupled cut")
+
+    syncer_events = sorted(
+        (
+            event
+            for event in _json_lines(artifacts / "syncer" / "events.jsonl")
+            if "step" in event
+        ),
+        key=lambda event: event.get("step", -1),
+    )
+    if [event.get("step") for event in syncer_events] != list(
+        range(1, total_steps + 1)
+    ):
+        raise HarnessError("syncer tape is not one complete decoupled schedule")
+
+    roster = list(range(LEARNERS))
+    ledger = {learner_id: [0, 0, 0] for learner_id in roster}
+    for event in syncer_events:
+        step = event["step"]
+        if event.get("fragment") != (step - 1) % fragments:
+            raise HarnessError("decoupled syncer tape violates fragment schedule")
+        base_version = max(0, step - fragments)
+        responders = sorted(
+            event.get("responders", []), key=lambda item: item.get("id", -1)
+        )
+        if (
+            event.get("launch_base_version") != base_version
+            or event.get("expected") != roster
+            or event.get("responded") != roster
+            or event.get("sync/layout_hash") != checkpoint.layout_hash
+            or [item.get("id") for item in responders] != roster
+        ):
+            raise HarnessError(
+                f"decoupled syncer commit {step} violates the fixed roster"
+            )
+        for responder in responders:
+            learner_id = responder["id"]
+            c_steps = responder.get("c_steps")
+            c_tokens = responder.get("c_tokens")
+            if (
+                responder.get("base_version") != base_version
+                or not isinstance(c_steps, int)
+                or c_steps < local_horizon
+                or not isinstance(c_tokens, int)
+                or c_tokens < 0
+            ):
+                raise HarnessError(
+                    f"decoupled syncer commit {step} has invalid progress evidence"
+                )
+            ledger[learner_id][0] += 1
+            ledger[learner_id][1] += c_steps
+            ledger[learner_id][2] += c_tokens
+    expected_ledger = {
+        learner_id: tuple(progress) for learner_id, progress in ledger.items()
+    }
+    if checkpoint.ledger != expected_ledger:
+        raise HarnessError("authoritative checkpoint differs from decoupled tape")
+
+    final_hashes = []
+    for learner_id in roster:
+        events = _json_lines(_event_path(artifacts, learner_id))
+        snapshots = [
+            event
+            for event in events
+            if event.get("event") == "rl_policy_snapshot"
+            and event.get("rl/fragment_versions") == list(terminal_versions)
+        ]
+        if not snapshots:
+            raise HarnessError(f"learner {learner_id} lacks the final policy snapshot")
+        final_hash = snapshots[-1].get("rl/policy_hash")
+        if not isinstance(final_hash, str) or not _SHA256.fullmatch(final_hash):
+            raise HarnessError(f"learner {learner_id} has an invalid final policy hash")
+        if not any(
+            event.get("event") == "rl_policy_apply"
+            and event.get("sync/global_policy_hash") == final_hash
+            for event in events
+        ):
+            raise HarnessError(f"learner {learner_id} did not apply the final policy")
+        if not any(event.get("event") == "rl_final_cut" for event in events):
+            raise HarnessError(f"learner {learner_id} did not acknowledge the final cut")
+        final_hashes.append(final_hash)
+    if len(set(final_hashes)) != 1:
+        raise HarnessError("learners disagree on the final decoupled policy hash")
+    return final_hashes[0]
+
+
 def _container_succeeded(inspection: Any) -> bool:
     if not isinstance(inspection, list) or not inspection:
         return False
@@ -1332,11 +1431,20 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
 
     checkpoint_path = artifacts / "syncer" / "state.ckpt"
     checkpoint = parse_checkpoint(checkpoint_path)
-    final_hash = _verify_oracle(plan, checkpoint, artifacts)
-    print(
-        f"verified v{checkpoint.global_step} fixed-roster checkpoint and ordered-f32 oracle "
-        f"({final_hash})"
-    )
+    learner = plan["learner"]
+    sync_preset = learner.get("sync_preset", "strict-avg")
+    if sync_preset == "decoupled":
+        final_hash = _verify_decoupled(plan, checkpoint, artifacts)
+        print(
+            f"verified outer fragment step {checkpoint.global_step} fixed-roster "
+            f"decoupled cut ({final_hash})"
+        )
+    else:
+        final_hash = _verify_oracle(plan, checkpoint, artifacts)
+        print(
+            f"verified v{checkpoint.global_step} fixed-roster checkpoint and "
+            f"ordered-f32 oracle ({final_hash})"
+        )
     if export_dir:
         from .export import export_rl_checkpoint
 
@@ -1348,6 +1456,10 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
             rank=plan["learner"]["lora_r"],
             lora_targets=plan["learner"]["lora_targets"],
             trust_remote_code=plan["learner"]["trust_remote_code"],
+            sync_preset=sync_preset,
+            fragments=learner.get("fragments", 1),
+            pipeline=learner.get("pipeline", 1),
+            local_horizon=learner.get("local_horizon", 1),
         )
         print(f"exported standard PEFT adapter to {Path(export_dir).expanduser()}")
 

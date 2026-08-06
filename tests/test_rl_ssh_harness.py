@@ -204,6 +204,78 @@ def _oracle_fixture(tmp_path: Path):
     return plan, checkpoint
 
 
+def _decoupled_oracle_fixture(tmp_path: Path):
+    plan = _plan()
+    plan["learner"].update(
+        {
+            "sync_preset": "decoupled",
+            "fragments": 2,
+            "pipeline": 2,
+            "local_horizon": 2,
+            "total_fragment_steps": 4,
+        }
+    )
+    final_hash = "9" * 64
+    terminal_versions = [3, 4]
+    syncer_events = []
+    token_totals = {0: 0, 1: 0}
+    for step in range(1, 5):
+        base_version = max(0, step - 2)
+        responders = []
+        for learner_id, tokens in ((0, 10), (1, 20)):
+            token_totals[learner_id] += tokens
+            responders.append(
+                {
+                    "id": learner_id,
+                    "base_version": base_version,
+                    "c_steps": 2,
+                    "c_tokens": tokens,
+                }
+            )
+        syncer_events.append(
+            {
+                "step": step,
+                "fragment": (step - 1) % 2,
+                "launch_base_version": base_version,
+                "expected": [0, 1],
+                "responded": [0, 1],
+                "sync/layout_hash": LAYOUT_HASH,
+                "responders": responders,
+            }
+        )
+    _write_jsonl(tmp_path / "syncer" / "events.jsonl", reversed(syncer_events))
+
+    for learner_id in range(2):
+        _write_jsonl(
+            tmp_path / f"island-{learner_id}" / "events.jsonl",
+            [
+                {
+                    "event": "rl_policy_apply",
+                    "sync/global_policy_hash": final_hash,
+                },
+                {
+                    "event": "rl_policy_snapshot",
+                    "rl/fragment_versions": terminal_versions,
+                    "rl/policy_hash": final_hash,
+                },
+                {"event": "rl_final_cut"},
+            ],
+        )
+    checkpoint = SimpleNamespace(
+        global_step=4,
+        fragments=[
+            (3, torch.tensor([1.0]), torch.tensor([0.0])),
+            (4, torch.tensor([2.0]), torch.tensor([0.0])),
+        ],
+        ledger={
+            learner_id: (4, 8, token_totals[learner_id])
+            for learner_id in range(2)
+        },
+        layout_hash=LAYOUT_HASH,
+    )
+    return plan, checkpoint, final_hash
+
+
 def test_oracle_matches_each_ordered_f32_average_and_final_apply(tmp_path):
     plan, checkpoint = _oracle_fixture(tmp_path)
     _verify_oracle(plan, checkpoint, tmp_path)
@@ -212,6 +284,62 @@ def test_oracle_matches_each_ordered_f32_average_and_final_apply(tmp_path):
     delta.write_bytes(torch.tensor([9.0, 9.0]).numpy().astype("<f4").tobytes())
     with pytest.raises(HarnessError, match="audit identity mismatch"):
         _verify_oracle(plan, checkpoint, tmp_path)
+
+
+def test_decoupled_oracle_checks_terminal_fragment_cut_and_fixed_roster(tmp_path):
+    plan, checkpoint, final_hash = _decoupled_oracle_fixture(tmp_path)
+
+    assert ssh_harness._verify_decoupled(plan, checkpoint, tmp_path) == final_hash
+
+    events = tmp_path / "syncer" / "events.jsonl"
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    rows[0]["fragment"] = 0
+    _write_jsonl(events, rows)
+    with pytest.raises(HarnessError, match="fragment schedule"):
+        ssh_harness._verify_decoupled(plan, checkpoint, tmp_path)
+
+
+def test_verify_dispatches_and_exports_with_decoupled_plan(tmp_path, monkeypatch):
+    plan, checkpoint, final_hash = _decoupled_oracle_fixture(tmp_path / "fixture")
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    artifacts = tmp_path / "artifacts"
+    for learner_id, island in enumerate(plan["islands"]):
+        for node_id in range(len(island["hosts"])):
+            path = artifacts / f"island-{learner_id}" / f"node-{node_id}.inspect.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps([{"State": {"Status": "exited", "ExitCode": 0}}])
+            )
+
+    import yeto.export as checkpoint_export
+    from yeto.rl import export as rl_export
+
+    monkeypatch.setattr(checkpoint_export, "parse_checkpoint", lambda _path: checkpoint)
+    monkeypatch.setattr(
+        ssh_harness,
+        "_verify_oracle",
+        lambda *_args: pytest.fail("strict oracle used for a decoupled plan"),
+    )
+    monkeypatch.setattr(
+        ssh_harness,
+        "_verify_decoupled",
+        lambda *_args: final_hash,
+        raising=False,
+    )
+    exported = {}
+    monkeypatch.setattr(
+        rl_export,
+        "export_rl_checkpoint",
+        lambda *_args, **kwargs: exported.update(kwargs),
+    )
+
+    ssh_harness.verify(plan_path, str(tmp_path / "adapter"))
+
+    assert exported["sync_preset"] == "decoupled"
+    assert exported["fragments"] == 2
+    assert exported["pipeline"] == 2
+    assert exported["local_horizon"] == 2
 
 
 def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
