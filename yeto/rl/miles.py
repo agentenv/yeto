@@ -194,11 +194,11 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
             args, "dynamic_sampling_filter_path", None
         ),
         "dynamic_sampling_max_replacements": getattr(
-            args, "dynamic_sampling_max_replacements", None
+            args, "yeto_rl_dynamic_sampling_max_replacements", None
         ),
-        "rl_offload_train": bool(getattr(args, "rl_offload_train", False)),
+        "rl_offload_train": bool(getattr(args, "offload_train", False)),
         "rl_distributed_timeout_minutes": getattr(
-            args, "rl_distributed_timeout_minutes", 10
+            args, "distributed_timeout_minutes", 10
         ),
         "reward_sha256": args.yeto_rl_reward_sha256,
         "rollout_batch_size": args.rollout_batch_size,
@@ -312,6 +312,20 @@ async def _ensure_actor_awake_for_export(args, actor_model) -> None:
             "before adapter export"
         )
     await wake_up()
+
+
+async def _restore_actor_offload(args, actor_model) -> None:
+    if not getattr(args, "offload_train", False):
+        return
+    offload = getattr(actor_model, "offload", None)
+    if not callable(offload):
+        offload = getattr(actor_model, "sleep", None)
+    if not callable(offload):
+        raise RuntimeError(
+            "Miles offload_train actor group does not expose offload/sleep "
+            "after adapter export"
+        )
+    await offload()
 
 
 def queue_completed_groups(args, all_samples, data_source) -> None:
@@ -742,10 +756,8 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             round_metrics["rl/dynamic_filter/forced_groups"] = float(
                 bounded_state.get("forced", 0)
             )
-        if dynamic_stats.get("drop_reasons"):
-            round_metrics["rl/dynamic_filter/drop_reasons"] = json.dumps(
-                dynamic_stats["drop_reasons"], sort_keys=True
-            )
+        for reason, count in dynamic_stats.get("drop_reasons", {}).items():
+            round_metrics[f"rl/dynamic_filter/drop_reason/{reason}"] = float(count)
         _save_completed_groups(
             args,
             rollout_id,
@@ -1000,7 +1012,6 @@ class MilesPolicySync:
 
         self.actor_model = actor_model
         self.rollout_manager = rollout_manager
-        await _ensure_actor_awake_for_export(self.args, actor_model)
         initial = self._canonical_state(await actor_model.export_trainable_state())
         runtime = _BridgeRuntime(initial, self.args)
         self.bridge = StrictRlBridge(runtime, self.args.yeto_rl_bridge_config)
@@ -1012,6 +1023,7 @@ class MilesPolicySync:
             self.permit = self.bridge.wait_for_round()
 
     async def initialize(self, *, actor_model, rollout_manager) -> None:
+        await _ensure_actor_awake_for_export(self.args, actor_model)
         try:
             await self._initialize(
                 actor_model=actor_model,
@@ -1020,6 +1032,8 @@ class MilesPolicySync:
         except StrictRlInvariantError as error:
             self._record_strict_failure(error)
             raise
+        finally:
+            await _restore_actor_offload(self.args, actor_model)
 
     async def _after_local_train(
         self, *, rollout_id, actor_model, rollout_data
@@ -1250,7 +1264,6 @@ class DecoupledMilesPolicySync(MilesPolicySync):
 
         self.actor_model = actor_model
         self.rollout_manager = rollout_manager
-        await _ensure_actor_awake_for_export(self.args, actor_model)
         initial = self._canonical_state(await actor_model.export_trainable_state())
         initial_adapter = getattr(self.args, "yeto_rl_initial_adapter", None)
         initial_adapter_sha256 = getattr(

@@ -527,6 +527,12 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
         n_samples_per_prompt=2,
         num_steps_per_rollout=1,
         over_sampling_batch_size=2,
+        dynamic_sampling_max_replacements=99,
+        yeto_rl_dynamic_sampling_max_replacements=8,
+        rl_offload_train=False,
+        offload_train=True,
+        rl_distributed_timeout_minutes=99,
+        distributed_timeout_minutes=7,
         yeto_rl_reward_sha256="e" * 64,
         rollout_batch_size=1,
         seq_length=128,
@@ -589,6 +595,9 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
         "dataset": "org/data",
         "seq_length": 128,
         "seed": 7,
+        "dynamic_sampling_max_replacements": 8,
+        "rl_offload_train": True,
+        "rl_distributed_timeout_minutes": 7,
     }.items():
         assert payload["config"][name] == value
     assert payload["completed_groups"][0][0]["status"] == "completed"
@@ -709,6 +718,63 @@ def test_queue_completed_groups_filters_zero_variance_groups_and_records_replace
     }
 
 
+def test_generate_rollout_records_drop_reasons_as_numeric_metrics(monkeypatch):
+    samples = [
+        SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            weight_versions=["yeto:3"],
+            index=index,
+            non_generation_time=0.0,
+        )
+        for index in range(2)
+    ]
+    output = SimpleNamespace(samples=[samples], metrics={})
+    args = SimpleNamespace(
+        n_samples_per_prompt=2,
+        rollout_batch_size=1,
+        dynamic_sampling_filter_path="test.filter",
+    )
+    source = SimpleNamespace(buffer=[])
+    captured = {}
+
+    package = types.ModuleType("miles")
+    rollout = types.ModuleType("miles.rollout")
+    upstream = types.ModuleType("miles.rollout.sglang_rollout")
+    upstream.generate_rollout = lambda *_args, **_kwargs: output
+    package.rollout = rollout
+    rollout.sglang_rollout = upstream
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", upstream)
+    monkeypatch.setattr(miles, "_restore_completed_groups", lambda *_args: None)
+
+    def run(*_args):
+        args._yeto_dynamic_sampling_stats = {
+            "generated_groups": 2,
+            "accepted_groups": 1,
+            "dropped_groups": 1,
+            "drop_reasons": {"zero_std_-1.0": 1},
+        }
+        return output, {
+            "active": 0,
+            "peak_active": 0,
+            "cancelled": 0,
+            "durations": [],
+        }
+
+    monkeypatch.setattr(miles, "_run_rollout_with_metrics", run)
+    monkeypatch.setattr(
+        miles,
+        "_save_completed_groups",
+        lambda _args, _policy, _next, _source, metrics: captured.update(metrics),
+    )
+
+    miles.generate_rollout(args, 3, source)
+
+    assert captured["rl/dynamic_filter/drop_reason/zero_std_-1.0"] == 1.0
+    assert all(isinstance(value, (int, float)) for value in captured.values())
+
+
 def test_bounded_variance_filter_forces_progress_after_replacement_budget():
     def sample(index, reward):
         return SimpleNamespace(index=index, reward=reward)
@@ -746,6 +812,26 @@ def test_offload_train_wakes_actor_before_adapter_export():
     )
 
     assert calls == ["onload"]
+
+
+def test_policy_sync_restores_actor_offload_after_initialization():
+    calls = []
+
+    class Actor:
+        async def onload(self):
+            calls.append("onload")
+
+        async def offload(self):
+            calls.append("offload")
+
+    class PolicySync(MilesPolicySync):
+        async def _initialize(self, *, actor_model, rollout_manager):
+            calls.append("initialize")
+
+    sync = PolicySync(SimpleNamespace(offload_train=True))
+    asyncio.run(sync.initialize(actor_model=Actor(), rollout_manager=object()))
+
+    assert calls == ["onload", "initialize", "offload"]
 
 
 def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch):
