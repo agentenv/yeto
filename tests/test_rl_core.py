@@ -29,7 +29,7 @@ from yeto.rl.core import (
     tensors_from_flat,
 )
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
-from yeto.rl.miles import MilesPolicySync, _ensure_actor_awake_for_export
+from yeto.rl.miles import MilesPolicySync
 from yeto.rl.filters import bounded_nonzero_reward_std
 
 
@@ -797,24 +797,7 @@ def test_bounded_variance_filter_forces_progress_after_replacement_budget():
     assert args._yeto_bounded_filter_state["forced"] == 1
 
 
-def test_offload_train_wakes_actor_before_adapter_export():
-    calls = []
-
-    class Actor:
-        async def onload(self):
-            calls.append("onload")
-
-    asyncio.run(
-        _ensure_actor_awake_for_export(
-            SimpleNamespace(offload_train=True),
-            Actor(),
-        )
-    )
-
-    assert calls == ["onload"]
-
-
-def test_policy_sync_restores_actor_offload_after_initialization():
+def test_policy_sync_leaves_actor_offload_lifecycle_to_miles():
     calls = []
 
     class Actor:
@@ -831,7 +814,7 @@ def test_policy_sync_restores_actor_offload_after_initialization():
     sync = PolicySync(SimpleNamespace(offload_train=True))
     asyncio.run(sync.initialize(actor_model=Actor(), rollout_manager=object()))
 
-    assert calls == ["onload", "initialize", "offload"]
+    assert calls == ["initialize"]
 
 
 def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch):

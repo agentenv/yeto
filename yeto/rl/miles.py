@@ -289,45 +289,6 @@ def _dynamic_sampling_keep(args, group: object) -> tuple[bool, str | None]:
     return keep, None if reason is None else str(reason)
 
 
-async def _ensure_actor_awake_for_export(args, actor_model) -> None:
-    """Rebuild Miles process groups before Yeto exports an offloaded actor.
-
-    Miles' colocated ``--offload-train`` mode sleeps the actor at construction
-    time and destroys its process groups.  Adapter export uses Megatron
-    collectives, so the initial Yeto export must explicitly wake the actor
-    first.  Later train hooks already run after Miles wakes the actor.
-    """
-
-    if not getattr(args, "offload_train", False):
-        return
-    # The Ray actor-group facade calls this ``onload``; the underlying
-    # Megatron actor method is named ``wake_up``.  Support both APIs because
-    # pinned Miles revisions expose different layers here.
-    wake_up = getattr(actor_model, "onload", None)
-    if not callable(wake_up):
-        wake_up = getattr(actor_model, "wake_up", None)
-    if not callable(wake_up):
-        raise RuntimeError(
-            "Miles offload_train actor group does not expose onload/wake_up "
-            "before adapter export"
-        )
-    await wake_up()
-
-
-async def _restore_actor_offload(args, actor_model) -> None:
-    if not getattr(args, "offload_train", False):
-        return
-    offload = getattr(actor_model, "offload", None)
-    if not callable(offload):
-        offload = getattr(actor_model, "sleep", None)
-    if not callable(offload):
-        raise RuntimeError(
-            "Miles offload_train actor group does not expose offload/sleep "
-            "after adapter export"
-        )
-    await offload()
-
-
 def queue_completed_groups(args, all_samples, data_source) -> None:
     """Retain complete oversampling results until this round selects its batch."""
 
@@ -1023,7 +984,6 @@ class MilesPolicySync:
             self.permit = self.bridge.wait_for_round()
 
     async def initialize(self, *, actor_model, rollout_manager) -> None:
-        await _ensure_actor_awake_for_export(self.args, actor_model)
         try:
             await self._initialize(
                 actor_model=actor_model,
@@ -1032,8 +992,6 @@ class MilesPolicySync:
         except StrictRlInvariantError as error:
             self._record_strict_failure(error)
             raise
-        finally:
-            await _restore_actor_offload(self.args, actor_model)
 
     async def _after_local_train(
         self, *, rollout_id, actor_model, rollout_data
