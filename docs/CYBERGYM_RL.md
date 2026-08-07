@@ -57,9 +57,82 @@ export CYBERGYM_API_KEY=...
 ```
 
 `shaped_v1` calls CyberGym's authenticated `/score-poc` endpoint. The server
-must have its private reward schemas and `vul-cov` runners installed. `train`
-uses `2 * shaped_score - 1`; `final` uses the vulnerable crash plus fixed
-non-crash result only.
+must have its private reward schemas and `vul-cov` runners installed.
+
+### Shaped reward server preparation
+
+Each server-only `<reward-dir>/<task-id>/reward.json` assigns non-negative
+weights, which must sum to one, to six independently checkable components:
+
+| Component | Signal |
+| --- | --- |
+| `poc_readable` | The submitted PoC was stored as a readable file. |
+| `runner_started` | The normal vulnerable runner started and returned. |
+| `parser_entered` | Vulnerable-runner coverage reached an entry function declared by the task schema. |
+| `target_coverage` | Fraction of declared target functions and basic blocks covered. |
+| `vuln_crash_match` | The vulnerable runner crashed with the declared Sanitizer and optional stack signature. |
+| `fix_noncrash` | After a matching vulnerable crash, the fixed runner exited with code zero. |
+
+The schema controls the task-specific functions, blocks, crash signature, and
+weights. The current Level 1 experiment uses weights `0.05`, `0.05`, `0.15`,
+`0.20`, `0.35`, and `0.20` in the order above. CyberGym computes
+`shaped_score` as the weighted sum, `train_reward` as
+`2 * shaped_score - 1`, and `final_reward` as `+1` only for `fix_noncrash`
+and `-1` otherwise.
+
+Each uncached shaped request runs the normal vulnerable runner once and a
+separate vulnerable coverage runner once. The fixed runner is lazy: CyberGym
+runs it only after `vuln_crash_match` succeeds. Reward schemas and generated
+coverage maps remain on the CyberGym server and must not be included in model
+prompts or worker artifacts.
+
+An image-backed CyberGym deployment can use prebuilt `<task>-vul-cov` images.
+For a binary-only server started with `--binary_dir`, prepare the local
+`vul-cov` directories once before training. From the CyberGym checkout, run:
+
+```bash
+python scripts/server_data/prepare_cybergym_coverage.py \
+  --root /path/to/cybergym-server-data \
+  --tasks ./coverage-task-ids.json \
+  --runner-image n132/arvo:63314-vul
+```
+
+`coverage-task-ids.json` is a JSON array of every training and evaluation task
+that the server will score. It is an ID list, not the CyberGym dataset's
+object-based `tasks.json`:
+
+```json
+[
+  "arvo:63314",
+  "arvo:47101",
+  "oss-fuzz:42535468"
+]
+```
+
+The runner image supplied for AFL++ Arvo targets must contain
+`/src/aflplusplus/afl-showmap`; the value above is the image used by the
+current experiment. The host must provide `nm` and `objdump` from GNU
+binutils. The script detects AFL++ persistent targets, creates the function
+coverage map, and writes `<root>/<subset>/<id>/vul-cov` without changing
+`vul` or `fix`. Run it on each CyberGym host with an independent binary
+directory. Repeat it only after changing the selected tasks, binary data, or
+runner image; it is not part of the per-rollout reward call.
+
+Start CyberGym with that root passed to `--binary_dir` and the private schema
+root passed to `--reward_dir`.
+
+For a baseline-informed curriculum, keep the historical baseline-selection
+manifest and prompt rows together, then generate separate train and held-out
+files before adding Level 1 source context:
+
+```bash
+python scripts/select_cybergym_curriculum.py \
+  --prompts ./cybergym_all_prompts.jsonl \
+  --selection-manifest ./baseline-selection/manifest.json \
+  --train-output ./train-110-curriculum.jsonl \
+  --eval-output ./heldout-10.jsonl \
+  --manifest-output ./curriculum-manifest.json
+```
 
 ### Text-only Level 1 approximation
 
@@ -87,6 +160,7 @@ recognized source files into bounded chunks, ranks them deterministically by
 token overlap with the description, and places the highest-ranked excerpts in
 the final user message. Archive links are ignored without being followed. It
 does not use `error.txt`, `patch.diff`, or the fixed repository.
+It also does not read private reward schemas or generated coverage maps.
 
 Every output row retains its original label, tools, system messages, task
 instruction, and task metadata. It also records the description/archive
@@ -114,23 +188,11 @@ to every Miles island. Set `CYBERGYM_API_KEY` in the submitting environment
 when authentication is required; Yeto forwards it through the job environment
 without recording it in the launch arguments.
 
-The LM benchmark accepts this prompt file and reward callable unchanged. Use
+The LM benchmark accepts the resulting prompt files and reward callable
+unchanged. Use
 `--arms native` to run only the direct Miles reference, or select any
 comma-separated combination of `native`, `single`, `federated`, and
 `decoupled`.
-
-For a baseline-informed curriculum, keep the historical baseline-selection
-manifest and prompt rows together, then generate separate train and held-out
-files:
-
-```bash
-python scripts/select_cybergym_curriculum.py \
-  --prompts ./cybergym_all_prompts.jsonl \
-  --selection-manifest ./baseline-selection/manifest.json \
-  --train-output ./train-110-curriculum.jsonl \
-  --eval-output ./heldout-10.jsonl \
-  --manifest-output ./curriculum-manifest.json
-```
 
 To reduce zero-advantage GRPO groups, add Miles oversampling and its shipped
 nonzero-reward-variance filter to the RL launch:
