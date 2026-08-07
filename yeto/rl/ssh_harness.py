@@ -600,6 +600,7 @@ def deploy(plan_path: str | Path) -> None:
         "syncer/target/",
         "checkpoints/",
         "runs/",
+        "compare-report/",
         "wandb/",
         "build/",
         "dist/",

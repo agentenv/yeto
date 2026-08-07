@@ -497,6 +497,7 @@ def test_deploy_marks_partial_copy_for_idempotent_retry(tmp_path, monkeypatch):
     )
     source_rsync = next(command for command in commands if "--delete" in command)
     assert ".env" in source_rsync and ".env.*" in source_rsync
+    assert "compare-report/" in source_rsync
 
 
 def test_deploy_copies_local_prompts_to_every_host_and_mounts_read_only(
