@@ -49,6 +49,7 @@ def parse_args(argv=None):
     parser.add_argument("--rl-distributed-timeout-minutes", type=int, default=10)
     parser.add_argument("--optimizer-steps", type=int, required=True)
     parser.add_argument("--rollout-max-response-len", type=int, required=True)
+    parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default=None)
     parser.add_argument("--custom-generate-function-path", default=None)
     parser.add_argument("--use-session-server", action="store_true")
     parser.add_argument("--session-server-ip", default=None)

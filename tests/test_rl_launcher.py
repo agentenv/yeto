@@ -397,6 +397,16 @@ def test_rl_sequence_capacity_covers_the_response_cap():
     assert args.seq_len == 4096
 
 
+def test_rl_accepts_chat_template_kwargs():
+    args = _args(
+        ("--apply-chat-template-kwargs", '{"enable_thinking": false}')
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.apply_chat_template_kwargs == {"enable_thinking": False}
+
+
 def test_rl_accepts_single_and_multigpu_islands():
     single = _args(("--gpu", "aws:8xa100@us-east-1"))
     _prepare_rl_args(single)

@@ -635,6 +635,23 @@ def test_learner_command_uses_current_multinode_miles_contract():
     assert _container_name(plan, 1, 0) == "yeto-rl-acceptance-i1-n0"
 
 
+def test_harness_forwards_chat_template_kwargs_to_the_learner():
+    plan = _plan()
+    plan["learner"]["apply_chat_template_kwargs"] = {
+        "enable_thinking": False
+    }
+
+    ssh_harness._validate_plan(plan)
+    argv = _learner_argv(plan, 0)
+
+    assert json.loads(argv[argv.index("--apply-chat-template-kwargs") + 1]) == {
+        "enable_thinking": False
+    }
+    assert parse_learner_args(argv[3:]).apply_chat_template_kwargs == {
+        "enable_thinking": False
+    }
+
+
 def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     plan = _plan()
     plan["learner"].update(

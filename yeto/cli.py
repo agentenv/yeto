@@ -145,6 +145,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="bounded Miles distributed/Gloo timeout (default: 10 minutes)",
     )
     rl.add_argument("--rollout-max-response-len", type=int, default=32768)
+    rl.add_argument("--apply-chat-template-kwargs", type=json.loads, default=None)
     rl.add_argument("--custom-generate-function-path", default=None)
     rl.add_argument("--use-session-server", action="store_true")
     rl.add_argument("--session-server-ip", default=None)

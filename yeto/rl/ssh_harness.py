@@ -485,6 +485,9 @@ def prepare(namespace) -> Path:
             ),
             "optimizer_steps": 1,
             "rollout_max_response_len": args.rollout_max_response_len,
+            "apply_chat_template_kwargs": getattr(
+                args, "apply_chat_template_kwargs", None
+            ),
             "custom_generate_function_path": args.custom_generate_function_path,
             "use_session_server": args.use_session_server,
             "session_server_ip": args.session_server_ip,
@@ -863,6 +866,17 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--wan-streams", learner["wan_streams"]),
         ("--miles-root", "/workspace/miles"),
     )
+    if learner.get("apply_chat_template_kwargs"):
+        values.extend(
+            (
+                "--apply-chat-template-kwargs",
+                json.dumps(
+                    learner["apply_chat_template_kwargs"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
     if learner.get("dynamic_sampling_max_replacements") is not None:
         values.extend(
             (
