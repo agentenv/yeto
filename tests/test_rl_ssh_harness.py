@@ -373,8 +373,8 @@ def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
         load_plan(plan_path)
 
 
-def test_miles_pin_includes_the_patched_sglang_build():
-    assert MILES_COMMIT == "a503e41e264c06693277c84fb03e1421d72a16bd"
+def test_miles_pin_includes_the_patched_sglang_compatibility_build():
+    assert MILES_COMMIT == "a874aa37590e1953e574db0ae41a12b82c4c3aa4"
 
 
 def test_plan_requires_the_patched_sglang_pin():
