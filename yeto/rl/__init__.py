@@ -1,11 +1,11 @@
 """Pinned Miles reinforcement-learning integration."""
 
 MILES_REPOSITORY = "https://github.com/agentenv/miles"
-MILES_COMMIT = "0e161f4c5c7fceeb6ccbb240dfdfbf898f49e910"
+MILES_COMMIT = "a5568756b64da5d4c3cdaa5fb80f6bf322308c5e"
 MILES_PEFT_VERSION = "0.20.0"
 SGLANG_REPOSITORY = "https://github.com/agentenv/sglang"
 SGLANG_COMMIT = "b34df47444271ebda0673d68fe000399804c181b"
 MILES_IMAGE = (
-    "docker:ghcr.io/agentenv/miles@sha256:"
-    "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
+    "docker:ghcr.io/alexeisie/miles@sha256:"
+    "5be3e0722c7b0174c3c1a5526064872987c7bc367af700117a3589efbd6b19bd"
 )
