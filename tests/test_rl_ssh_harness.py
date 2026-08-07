@@ -375,7 +375,7 @@ def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
 
 
 def test_miles_and_sglang_pins_include_the_compatible_builds():
-    assert MILES_COMMIT == "a5568756b64da5d4c3cdaa5fb80f6bf322308c5e"
+    assert MILES_COMMIT == "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
     assert SGLANG_COMMIT == "b34df47444271ebda0673d68fe000399804c181b"
     assert MILES_IMAGE == (
         "docker:ghcr.io/alexeisie/miles@sha256:"
