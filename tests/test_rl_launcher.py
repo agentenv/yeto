@@ -17,7 +17,13 @@ from yeto.launcher import (
     make_miles_island_task,
     syncer_command,
 )
-from yeto.rl import MILES_COMMIT, MILES_PEFT_VERSION, MILES_REPOSITORY
+from yeto.rl import (
+    MILES_COMMIT,
+    MILES_PEFT_VERSION,
+    MILES_REPOSITORY,
+    SGLANG_COMMIT,
+    SGLANG_REPOSITORY,
+)
 from yeto.rl import learner as rl_learner
 from yeto.rl.core import CanonicalTensorSpec
 from yeto.rl.decoupled import DecoupledBridgeConfig
@@ -680,6 +686,8 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     )
     assert MILES_REPOSITORY in task.setup
     assert MILES_COMMIT in task.setup
+    assert SGLANG_REPOSITORY in task.setup
+    assert SGLANG_COMMIT in task.setup
     assert "checkout --detach" in task.setup
     for duplicate_check in (
         "config --get remote.origin.url",
@@ -689,10 +697,8 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
         "import megatron.bridge",
     ):
         assert duplicate_check not in task.setup
-    assert (
-        f"pip install -q --no-deps -e ~/miles 'peft=={MILES_PEFT_VERSION}'\n(nohup"
-        in task.setup
-    )
+    assert f"pip install -q --no-deps -e ~/miles 'peft=={MILES_PEFT_VERSION}'" in task.setup
+    assert "pip install -q --no-deps -e ~/sglang/python" in task.setup
     assert task.envs["NVTE_FLASH_ATTN"] == "0"
     assert task.envs["NVTE_FUSED_ATTN"] == "0"
     assert task.envs["NVTE_UNFUSED_ATTN"] == "1"
@@ -703,6 +709,7 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert task.envs["CYBERGYM_REWARD_SCHEME"] == "shaped_v1"
     assert task.envs["CYBERGYM_REWARD_VIEW"] == "train"
     assert "python3 -m yeto.rl.learner" in task.run
+    assert "$HOME/sglang/python" in task.run
     assert "--initial-adapter" not in task.run
     assert "--num-learners" not in task.run
     assert "ray start --head" in task.run

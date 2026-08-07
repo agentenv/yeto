@@ -18,7 +18,13 @@ from typing import Any
 
 import torch
 
-from . import MILES_COMMIT, MILES_PEFT_VERSION, MILES_REPOSITORY
+from . import (
+    MILES_COMMIT,
+    MILES_PEFT_VERSION,
+    MILES_REPOSITORY,
+    SGLANG_COMMIT,
+    SGLANG_REPOSITORY,
+)
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
 PLAN_SCHEMA = 1
@@ -208,6 +214,11 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         "peft_version": MILES_PEFT_VERSION,
     }:
         raise HarnessError("plan does not use the current pinned Miles revision")
+    if plan.get("sglang") != {
+        "repository": SGLANG_REPOSITORY,
+        "commit": SGLANG_COMMIT,
+    }:
+        raise HarnessError("plan does not use the current pinned SGLang revision")
     for name in ("source_sha256", "reward_sha256", "syncer_source_sha256"):
         if not _SHA256.fullmatch(str(plan.get(name, ""))):
             raise HarnessError(f"plan has an invalid {name}")
@@ -436,6 +447,10 @@ def prepare(namespace) -> Path:
             "commit": MILES_COMMIT,
             "peft_version": MILES_PEFT_VERSION,
         },
+        "sglang": {
+            "repository": SGLANG_REPOSITORY,
+            "commit": SGLANG_COMMIT,
+        },
         "source_sha256": args.source_sha256,
         "reward_sha256": args.reward_sha256,
         "syncer_source_sha256": _syncer_source_sha256(),
@@ -654,6 +669,7 @@ mv "$RUN/control/deploying.sha256" "$RUN/control/plan.sha256" 2>/dev/null || \
 
 
 def _host_setup_script(plan: dict[str, Any], gpus_per_node: int) -> str:
+    sglang = plan["sglang"]
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 test "$(cat "$RUN/control/plan.sha256")" = {shlex.quote(_plan_digest(plan))}
@@ -662,7 +678,7 @@ command -v git >/dev/null
 command -v nvidia-smi >/dev/null
 test "$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)" -ge {gpus_per_node}
 docker info >/dev/null
-mkdir -p "$HOME/.cache/huggingface" "$RUN/miles"
+mkdir -p "$HOME/.cache/huggingface" "$RUN/miles" "$RUN/sglang"
 docker pull {shlex.quote(plan['docker_image'])}
 if [ ! -d "$RUN/miles/.git" ]; then
   rmdir "$RUN/miles"
@@ -670,6 +686,12 @@ if [ ! -d "$RUN/miles/.git" ]; then
 fi
 git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(MILES_COMMIT)}
 git -C "$RUN/miles" checkout --detach {shlex.quote(MILES_COMMIT)}
+if [ ! -d "$RUN/sglang/.git" ]; then
+  rmdir "$RUN/sglang"
+  git clone --no-checkout {shlex.quote(sglang['repository'])} "$RUN/sglang"
+fi
+git -C "$RUN/sglang" fetch --depth 1 {shlex.quote(sglang['repository'])} {shlex.quote(sglang['commit'])}
+git -C "$RUN/sglang" checkout --detach {shlex.quote(sglang['commit'])}
 """
 
 
@@ -911,7 +933,7 @@ def _node_start_script(
     )
     common = (
         f"python3 -m pip install -q --no-deps 'peft=={MILES_PEFT_VERSION}'; "
-        "export PYTHONPATH=/workspace/yeto:/workspace/miles${PYTHONPATH:+:$PYTHONPATH}; "
+        "export PYTHONPATH=/workspace/sglang/python:/workspace/yeto:/workspace/miles${PYTHONPATH:+:$PYTHONPATH}; "
         "ray stop --force >/dev/null 2>&1 || true; "
     )
     if node_id == 0:
@@ -966,6 +988,7 @@ docker run --detach \
   --env CYBERGYM_REWARD_SCHEME={reward_scheme} \
   --env CYBERGYM_REWARD_VIEW={reward_view} \
 {data_volume}  --volume "$RUN/source:/workspace/yeto:ro" \
+  --volume "$RUN/sglang:/workspace/sglang:ro" \
   --volume "$RUN/miles:/workspace/miles" \
   --volume "$RUN/island-{learner_id}/state:/workspace/state" \
   --volume "$RUN/island-{learner_id}/output:/workspace/output" \

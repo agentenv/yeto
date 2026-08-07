@@ -6,7 +6,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl import MILES_COMMIT, MILES_PEFT_VERSION, MILES_REPOSITORY, ssh_harness
+from yeto.rl import (
+    MILES_COMMIT,
+    MILES_PEFT_VERSION,
+    MILES_REPOSITORY,
+    SGLANG_COMMIT,
+    SGLANG_REPOSITORY,
+    ssh_harness,
+)
 from yeto.rl.bridge import _write_round_audit
 from yeto.rl.core import (
     CanonicalTensorSpec,
@@ -21,6 +28,7 @@ from yeto.rl.ssh_harness import (
     _container_name,
     _container_succeeded,
     _docker_ref,
+    _host_setup_script,
     _learner_argv,
     _node_start_script,
     _syncer_argv,
@@ -59,6 +67,10 @@ def _plan():
             "repository": MILES_REPOSITORY,
             "commit": MILES_COMMIT,
             "peft_version": MILES_PEFT_VERSION,
+        },
+        "sglang": {
+            "repository": SGLANG_REPOSITORY,
+            "commit": SGLANG_COMMIT,
         },
         "source_sha256": "c" * 64,
         "reward_sha256": "e" * 64,
@@ -361,6 +373,18 @@ def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
         load_plan(plan_path)
 
 
+def test_miles_pin_includes_the_patched_sglang_build():
+    assert MILES_COMMIT == "a503e41e264c06693277c84fb03e1421d72a16bd"
+
+
+def test_plan_requires_the_patched_sglang_pin():
+    plan = _plan()
+    plan.pop("sglang")
+
+    with pytest.raises(HarnessError, match="SGLang"):
+        ssh_harness._validate_plan(plan)
+
+
 def test_local_prompt_plan_is_content_bound_without_a_hub_revision(tmp_path):
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text('{"messages": []}\n', encoding="utf-8")
@@ -632,10 +656,15 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     assert "--gpus '\"device=0,1,2,3\"'" in head
     assert "ray start --address=a0:6379" in worker
     assert "python3 -m yeto.rl.learner" not in worker
+    setup = _host_setup_script(plan, 4)
+    assert SGLANG_REPOSITORY in setup
+    assert SGLANG_COMMIT in setup
+    assert '"$RUN/sglang"' in setup
     for script in (head, worker):
         assert "--env CYBERGYM_REWARD_SCHEME=shaped_v1" in script
         assert "--env CYBERGYM_REWARD_VIEW=train" in script
-        assert "export PYTHONPATH=/workspace/yeto:/workspace/miles" in script
+        assert '--volume "$RUN/sglang:/workspace/sglang:ro"' in script
+        assert "export PYTHONPATH=/workspace/sglang/python:/workspace/yeto:/workspace/miles" in script
         assert script.index("export PYTHONPATH=") < script.index("ray start")
 
     plan["remote_env_file"] = ".config/yeto/rl.env"

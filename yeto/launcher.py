@@ -1003,7 +1003,13 @@ def make_miles_island_task(
     from .datasource import learner_data_arg, learner_file_mounts
     from .models import resolve
     from .provenance import is_local_reference
-    from .rl import MILES_COMMIT, MILES_PEFT_VERSION, MILES_REPOSITORY
+    from .rl import (
+        MILES_COMMIT,
+        MILES_PEFT_VERSION,
+        MILES_REPOSITORY,
+        SGLANG_COMMIT,
+        SGLANG_REPOSITORY,
+    )
 
     if not getattr(args, "source_sha256", None) or not getattr(
         args, "reward_sha256", None
@@ -1092,6 +1098,14 @@ def make_miles_island_task(
         f"python3 -m pip install -q --no-deps -e ~/miles "
         f"'peft=={MILES_PEFT_VERSION}'"
     )
+    sglang_setup = (
+        f"if [ ! -d ~/sglang/.git ]; then git clone --no-checkout "
+        f"{shlex.quote(SGLANG_REPOSITORY)} ~/sglang; fi\n"
+        f"git -C ~/sglang fetch --depth 1 {shlex.quote(SGLANG_REPOSITORY)} "
+        f"{SGLANG_COMMIT}\n"
+        f"git -C ~/sglang checkout --detach {SGLANG_COMMIT}\n"
+        "python3 -m pip install -q --no-deps -e ~/sglang/python"
+    )
     model = resolve(args.model)
     if is_local_reference(model):
         prefetch = ": # local model; no Hub prefetch"
@@ -1131,7 +1145,7 @@ def make_miles_island_task(
     for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
         if os.environ.get(name):
             envs[name] = os.environ[name]
-    setup_steps = [WAN_TUNING, HF_TOKEN_ENV, miles_setup]
+    setup_steps = [WAN_TUNING, HF_TOKEN_ENV, miles_setup, sglang_setup]
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
     setup_steps.append(prefetch)
@@ -1148,7 +1162,7 @@ def make_miles_island_task(
             "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
             "--port=6379 --include-dashboard=false\n"
             "  trap 'ray stop --force >/dev/null 2>&1 || true' EXIT\n"
-            "  PYTHONPATH=~/sky_workdir "
+            "  PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
             f"python3 -m yeto.rl.learner{flags}\n"
             "else\n"
             "  until ray start --address=\"$MASTER_ADDR:6379\"; do sleep 2; done\n"
