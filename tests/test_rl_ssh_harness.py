@@ -964,6 +964,63 @@ def test_deepseek_v4_nodes_use_the_verified_sglang_environment():
     assert "NVTE_FLASH_ATTN" not in script
 
 
+def test_expert_full_plan_forwards_attestation_and_runtime_environment():
+    plan = _plan()
+    plan["islands"] = [
+        {
+            "hosts": ["root@h200-n1", "root@h200-n2"],
+            "gpus_per_node": 8,
+            "accelerator": "H200",
+        }
+    ]
+    plan["learner"].update(
+        {
+            "rl_model_recipe": "deepseek-v4-flash",
+            "global_rounds": 1,
+            "groups_per_round": 1,
+            "samples_per_group": 2,
+            "over_sampling_batch_size": 1,
+            "lora_r": 8,
+            "lora_targets": "attention",
+            "inner_lr": 1e-5,
+            "expert_full_count": 16,
+            "expert_full_lr": 1e-6,
+            "expert_selection_sha256": "a" * 64,
+            "expert_selection_contract_sha256": "b" * 64,
+            "tensor_parallel": 8,
+            "pipeline_parallel": 1,
+            "expert_parallel": 8,
+            "rollout_num_gpus_per_engine": 8,
+            "sglang_tp_size": 8,
+            "sglang_dp_size": 1,
+            "sglang_ep_size": 8,
+            "sglang_attention_backend": "dsv4",
+            "sglang_deterministic_inference": False,
+            "sglang_page_size": 256,
+        }
+    )
+
+    ssh_harness._validate_plan(plan)
+    argv = _learner_argv(plan, 0)
+    parsed = parse_learner_args(argv[3:])
+    script = _node_start_script(plan, 0, 0)
+
+    assert parsed.expert_full_count == 16
+    assert parsed.expert_full_lr == 1e-6
+    assert parsed.expert_selection_sha256 == "a" * 64
+    assert parsed.expert_selection_contract_sha256 == "b" * 64
+    for value in (
+        "YETO_DSV4_EXPERT_CLONE=1",
+        "YETO_DSV4_EXPERT_FULL=1",
+        "YETO_DSV4_EXPERT_FULL_COUNT=16",
+        "YETO_DSV4_EXPERT_FULL_LR=1e-06",
+        "NVTE_GROUPED_LINEAR_SINGLE_PARAM=0",
+        "--shm-size 64g",
+    ):
+        assert value in script
+    assert "YETO_DSV4_CLONE_ONLY_LORA" not in script
+
+
 def test_harness_forwards_chat_template_kwargs_to_the_learner():
     plan = _plan()
     plan["learner"]["apply_chat_template_kwargs"] = {"enable_thinking": False}

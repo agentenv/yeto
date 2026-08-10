@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -512,6 +513,114 @@ def test_rl_accepts_two_node_deepseek_model_parallel_island():
     assert args.sglang_deterministic_inference is False
 
 
+def test_rl_accepts_attested_sixteen_expert_full_deepseek_recipe():
+    args = _args(
+        (
+            "--gpu",
+            "ssh:2x8xh200@island-0",
+            "--rollout-model",
+            "/data/models/deepseek-v4-flash-fp8",
+            "--rollout-model-revision",
+            "7eb21d27aee405755da5251f4458e9fff87c047b",
+            "--rl-model-recipe",
+            "deepseek-v4-flash",
+            "--lora-targets",
+            "attention",
+            "--expert-full-count",
+            "16",
+            "--expert-full-lr",
+            "1e-6",
+            "--expert-selection-sha256",
+            "a" * 64,
+            "--expert-selection-contract-sha256",
+            "b" * 64,
+            "--tensor-parallel",
+            "8",
+            "--expert-parallel",
+            "8",
+            "--rollout-num-gpus-per-engine",
+            "8",
+            "--sglang-tp-size",
+            "8",
+            "--sglang-ep-size",
+            "8",
+            "--sglang-attention-backend",
+            "dsv4",
+            "--no-sglang-deterministic-inference",
+            "--sglang-page-size",
+            "256",
+        )
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.expert_full_count == 16
+    assert args.expert_full_lr == 1e-6
+    assert args.expert_selection_sha256 == "a" * 64
+    assert args.expert_selection_contract_sha256 == "b" * 64
+
+
+@pytest.mark.parametrize(
+    "extra,match",
+    [
+        (("--expert-full-count", "33"), "between 1 and 32"),
+        (
+            (
+                "--expert-full-count",
+                "16",
+                "--expert-full-lr",
+                "1e-6",
+                "--expert-selection-sha256",
+                "a" * 64,
+                "--expert-selection-contract-sha256",
+                "b" * 64,
+            ),
+            "only supported by --rl-model-recipe deepseek-v4-flash",
+        ),
+        (
+            (
+                "--rl-model-recipe",
+                "deepseek-v4-flash",
+                "--lora-targets",
+                "attention-routed-experts",
+                "--expert-full-count",
+                "16",
+                "--expert-full-lr",
+                "1e-6",
+                "--expert-selection-sha256",
+                "a" * 64,
+                "--expert-selection-contract-sha256",
+                "b" * 64,
+            ),
+            "requires --lora-targets attention",
+        ),
+        (
+            (
+                "--rl-model-recipe",
+                "deepseek-v4-flash",
+                "--lora-targets",
+                "attention",
+                "--expert-full-count",
+                "16",
+                "--expert-full-lr",
+                "1e-6",
+                "--expert-selection-sha256",
+                "A" * 64,
+                "--expert-selection-contract-sha256",
+                "b" * 64,
+            ),
+            "64 lowercase hex",
+        ),
+        (("--expert-selection-sha256", "a" * 64), "requires --expert-full-count"),
+    ],
+)
+def test_rl_rejects_invalid_expert_full_contract(extra, match):
+    args = _args(extra)
+
+    with pytest.raises(ValueError, match=match):
+        _prepare_rl_args(args)
+
+
 def test_rl_provenance_hashes_reward_inside_synced_workdir(monkeypatch):
     args = _args()
     args._provenance = {
@@ -681,6 +790,83 @@ class _Storage(_Resources):
 
 class _StorageMode:
     MOUNT = "mount"
+
+
+def test_miles_task_forwards_expert_full_contract_and_runtime_environment(
+    monkeypatch,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "sky",
+        types.SimpleNamespace(
+            Task=_Task,
+            Resources=_Resources,
+            Storage=_Storage,
+            StorageMode=_StorageMode,
+        ),
+    )
+    args = _args(
+        (
+            "--gpu",
+            "ssh:2x8xh200@island-0",
+            "--rollout-model",
+            "/data/models/deepseek-v4-flash-fp8",
+            "--rollout-model-revision",
+            "7eb21d27aee405755da5251f4458e9fff87c047b",
+            "--rl-model-recipe",
+            "deepseek-v4-flash",
+            "--lora-targets",
+            "attention",
+            "--expert-full-count",
+            "16",
+            "--expert-full-lr",
+            "1e-6",
+            "--expert-selection-sha256",
+            "a" * 64,
+            "--expert-selection-contract-sha256",
+            "b" * 64,
+            "--tensor-parallel",
+            "8",
+            "--expert-parallel",
+            "8",
+            "--rollout-num-gpus-per-engine",
+            "8",
+            "--sglang-tp-size",
+            "8",
+            "--sglang-ep-size",
+            "8",
+            "--sglang-attention-backend",
+            "dsv4",
+            "--no-sglang-deterministic-inference",
+            "--sglang-page-size",
+            "256",
+        )
+    )
+    args.model_revision = "c" * 40
+    args.data_revision = "d" * 40
+    args.source_sha256 = "e" * 64
+    args.reward_sha256 = "f" * 64
+    _prepare_rl_args(args)
+    from yeto.gpu_spec import parse_gpu_spec
+
+    task = make_miles_island_task(
+        args,
+        parse_gpu_spec(args.gpu)[0],
+        0,
+        1,
+        "127.0.0.1:29400",
+    )
+
+    assert "--expert-full-count 16" in task.run
+    assert "--expert-full-lr 1e-06" in task.run
+    assert f"--expert-selection-sha256 {'a' * 64}" in task.run
+    assert f"--expert-selection-contract-sha256 {'b' * 64}" in task.run
+    assert task.envs["YETO_DSV4_EXPERT_CLONE"] == "1"
+    assert task.envs["YETO_DSV4_EXPERT_FULL"] == "1"
+    assert task.envs["YETO_DSV4_EXPERT_FULL_COUNT"] == "16"
+    assert task.envs["YETO_DSV4_EXPERT_FULL_LR"] == "1e-06"
+    assert task.envs["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] == "0"
+    assert "YETO_DSV4_CLONE_ONLY_LORA" not in task.envs
 
 
 def test_miles_tasks_mount_the_same_attested_initial_adapter(
@@ -931,7 +1117,20 @@ def test_miles_runtime_requires_exact_detached_clean_checkout(tmp_path, monkeypa
         verify_miles_revision(root)
 
 
-def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
+def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
+    monkeypatch,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "miles.utils.chat_template_utils",
+        types.SimpleNamespace(
+            resolve_reasoning_and_tool_call_parser=lambda model: (
+                ("deepseek-v4", "deepseekv4")
+                if model == "deepseekv4"
+                else ("qwen3", "qwen25")
+            )
+        ),
+    )
     args = argparse.Namespace(
         seq_len=128,
         groups_per_round=4,
@@ -1190,6 +1389,28 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
     assert clone_argv[clone_argv.index("--sglang-moe-runner-backend") + 1] == (
         "triton"
     )
+
+    full_recipe_args = argparse.Namespace(**recipe_values)
+    full_recipe_args.lora_targets = "attention"
+    full_recipe_args.expert_full_count = 16
+    full_recipe_args.expert_full_lr = 1e-6
+    full_argv = build_miles_argv(
+        full_recipe_args,
+        model_path="/models/deepseek-v4-flash-bf16-e288",
+        rollout_model_path="/models/deepseek-v4-flash-fp8-e288",
+        prompt_path="/prompts.jsonl",
+        provider=uneven_provider,
+        target_modules=["decoder.layers.0.self_attention.linear_q_down_proj"],
+    )
+    assert full_argv[full_argv.index("--lora-type") + 1] == "canonical_lora"
+    assert "--accumulate-allreduce-grads-in-fp32" in full_argv
+    assert full_argv[full_argv.index("--optimizer") + 1] == "adam"
+    assert full_argv[full_argv.index("--adam-beta1") + 1] == "0.9"
+    assert full_argv[full_argv.index("--adam-beta2") + 1] == "0.98"
+    assert full_argv[full_argv.index("--adam-eps") + 1] == "1e-08"
+    assert full_argv[full_argv.index("--weight-decay") + 1] == "0"
+    assert full_argv[full_argv.index("--clip-grad") + 1] == "1.0"
+    assert full_argv[full_argv.index("--kl-coef") + 1] == "0.001"
 
     native_argv = build_miles_argv(
         args,
@@ -1588,6 +1809,142 @@ def test_miles_runner_builds_the_decoupled_runtime_contract(monkeypatch, tmp_pat
     assert len(miles_args.yeto_rl_sync_layout_fingerprint) == 64
     assert miles_args.yeto_rl_initial_adapter == "/parent-adapter"
     assert miles_args.yeto_rl_initial_adapter_sha256 == "9" * 64
+
+
+def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
+    monkeypatch,
+    tmp_path,
+):
+    captured = {}
+
+    class Provider:
+        def finalize(self):
+            pass
+
+    class Bridge:
+        def to_megatron_provider(self, load_weights):
+            assert load_weights is False
+            return Provider()
+
+    class AutoBridge:
+        @staticmethod
+        def from_hf_pretrained(*_args, **_kwargs):
+            return Bridge()
+
+    async def train(args):
+        captured["miles_args"] = args
+
+    attention_specs = (
+        CanonicalTensorSpec(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight",
+            (8, 16),
+            "float32",
+            128,
+        ),
+    )
+    expert_specs = (
+        CanonicalTensorSpec(
+            "base_model.model.model.layers.0.mlp.experts.256.gate_proj.weight",
+            (8, 16),
+            "float32",
+            128,
+        ),
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "megatron.bridge",
+        types.SimpleNamespace(AutoBridge=AutoBridge),
+    )
+    monkeypatch.setitem(sys.modules, "train", types.SimpleNamespace(train=train))
+    monkeypatch.setattr(
+        rl_learner,
+        "derive_peft_lora_specs",
+        lambda *a, **k: attention_specs,
+    )
+
+    def build_expert_specs(config, **kwargs):
+        captured["expert_config"] = config
+        captured["expert_kwargs"] = kwargs
+        return expert_specs
+
+    monkeypatch.setattr(
+        "yeto.rl.deepseek_v4_bridge.ensure_deepseek_v4_bridge",
+        lambda: None,
+    )
+    monkeypatch.setattr(rl_learner, "expert_full_specs", build_expert_specs)
+    monkeypatch.setattr(
+        "transformers.AutoConfig.from_pretrained",
+        lambda *_args, **_kwargs: types.SimpleNamespace(marker="config"),
+    )
+    monkeypatch.setattr(rl_learner, "adapter_targets", lambda specs: ["q_proj"])
+    monkeypatch.setattr(
+        rl_learner,
+        "megatron_adapter_targets",
+        lambda specs, *_args, **_kwargs: ["linear_q"],
+    )
+    monkeypatch.setattr(rl_learner, "build_miles_argv", lambda *a, **k: ["train.py"])
+    monkeypatch.setattr(
+        rl_learner,
+        "_parse_miles_args",
+        lambda argv: argparse.Namespace(argv=argv),
+    )
+    args = argparse.Namespace(
+        trust_remote_code=True,
+        rl_model_recipe="deepseek-v4-flash",
+        lora_r=8,
+        lora_targets="attention",
+        expert_full_count=16,
+        expert_full_lr=1e-6,
+        expert_selection_sha256="a" * 64,
+        expert_selection_contract_sha256="b" * 64,
+        learner_id=0,
+        model="/model",
+        data="/data",
+        model_revision="c" * 40,
+        rollout_model_revision="d" * 40,
+        data_revision=None,
+        reward_sha256="e" * 64,
+        completed_groups_path=str(tmp_path / "island.pt"),
+        event_tape=str(tmp_path / "events.jsonl"),
+        syncer="127.0.0.1:29400",
+        global_rounds=1,
+        sync_preset="strict-avg",
+        groups_per_round=1,
+        samples_per_group=2,
+        optimizer_steps=1,
+        wan_streams=0,
+        audit_dir=str(tmp_path / "audit"),
+    )
+
+    rl_learner.run_miles(
+        args,
+        model_path="/model",
+        rollout_model_path="/rollout",
+        prompt_path="/prompts.jsonl",
+    )
+
+    miles_args = captured["miles_args"]
+    assert captured["expert_config"].marker == "config"
+    assert captured["expert_kwargs"] == {
+        "expert_count": 16,
+        "expected_selection_sha256": "a" * 64,
+        "expected_selection_contract_sha256": "b" * 64,
+    }
+    assert miles_args.yeto_rl_expected_specs == tuple(
+        sorted(attention_specs + expert_specs)
+    )
+    for name in (
+        "yeto_rl_expert_full_count",
+        "yeto_rl_expert_full_lr",
+        "yeto_rl_expert_selection_sha256",
+        "yeto_rl_expert_selection_contract_sha256",
+    ):
+        assert not hasattr(miles_args, name)
+    assert os.environ["YETO_DSV4_EXPERT_FULL"] == "1"
+    assert os.environ["YETO_DSV4_EXPERT_FULL_COUNT"] == "16"
+    assert os.environ["YETO_DSV4_EXPERT_FULL_LR"] == "1e-06"
+    assert os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] == "0"
 
 
 def test_decoupled_runner_rejects_multiple_optimizer_steps_per_rollout(tmp_path):

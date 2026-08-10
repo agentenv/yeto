@@ -788,11 +788,45 @@ def _prepare_rl_args(
             "DeepSeek V4 dsv4/compressed attention requires "
             "--no-sglang-deterministic-inference"
         )
+    expert_full_count = getattr(args, "expert_full_count", 0)
+    selection_sha256 = getattr(args, "expert_selection_sha256", None)
+    selection_contract_sha256 = getattr(
+        args,
+        "expert_selection_contract_sha256",
+        None,
+    )
+    if expert_full_count < 0 or expert_full_count > 32:
+        raise ValueError("--expert-full-count must be between 1 and 32 when enabled")
+    if expert_full_count == 0:
+        if selection_sha256 is not None or selection_contract_sha256 is not None:
+            raise ValueError("expert selection hash requires --expert-full-count")
+    else:
+        if getattr(args, "rl_model_recipe", "generic") != "deepseek-v4-flash":
+            raise ValueError(
+                "--expert-full-count is only supported by "
+                "--rl-model-recipe deepseek-v4-flash"
+            )
+        if args.lora_targets != "attention":
+            raise ValueError("expert-full RL requires --lora-targets attention")
+        if not 0 < args.expert_full_lr < float("inf"):
+            raise ValueError("--expert-full-lr must be finite and positive")
+        for flag, value in (
+            ("--expert-selection-sha256", selection_sha256),
+            (
+                "--expert-selection-contract-sha256",
+                selection_contract_sha256,
+            ),
+        ):
+            if not re.fullmatch(r"[0-9a-f]{64}", str(value or "")):
+                raise ValueError(f"{flag} must be 64 lowercase hex characters")
     if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":
-        if args.lora_targets != "attention-routed-experts":
+        expected_lora_targets = (
+            "attention" if expert_full_count else "attention-routed-experts"
+        )
+        if args.lora_targets != expected_lora_targets:
             raise ValueError(
                 "expanded DeepSeek V4 Flash recipe requires "
-                "--lora-targets attention-routed-experts"
+                f"--lora-targets {expected_lora_targets}"
             )
         if (
             args.tensor_parallel != 8
@@ -1195,6 +1229,17 @@ def make_miles_island_task(
             " --rollout-model-revision "
             f"{shlex.quote(args.rollout_model_revision)}"
         )
+    if getattr(args, "expert_full_count", 0):
+        flags += f" --expert-full-count {args.expert_full_count}"
+        flags += f" --expert-full-lr {args.expert_full_lr}"
+        flags += (
+            " --expert-selection-sha256 "
+            f"{shlex.quote(args.expert_selection_sha256)}"
+        )
+        flags += (
+            " --expert-selection-contract-sha256 "
+            f"{shlex.quote(args.expert_selection_contract_sha256)}"
+        )
     dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
     if dynamic_filter:
         flags += (
@@ -1327,6 +1372,16 @@ def make_miles_island_task(
                 "SGLANG_DG_CACHE_DIR_PER_PROCESS": "1",
                 "SGLANG_OPT_FP8_WO_A_GEMM": "0",
                 "SGLANG_OPT_FUSE_WQA_WKV": "0",
+            }
+        )
+    if getattr(args, "expert_full_count", 0):
+        envs.update(
+            {
+                "YETO_DSV4_EXPERT_CLONE": "1",
+                "YETO_DSV4_EXPERT_FULL": "1",
+                "YETO_DSV4_EXPERT_FULL_COUNT": str(args.expert_full_count),
+                "YETO_DSV4_EXPERT_FULL_LR": str(args.expert_full_lr),
+                "NVTE_GROUPED_LINEAR_SINGLE_PARAM": "0",
             }
         )
     if os.environ.get("HF_TOKEN"):

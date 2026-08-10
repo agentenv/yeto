@@ -97,6 +97,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="model-specific Miles memory/kernel contract",
     )
     rl.add_argument(
+        "--expert-full-count",
+        type=int,
+        default=0,
+        help="DeepSeek V4 only: number of attested clone experts per layer to tune fully",
+    )
+    rl.add_argument("--expert-full-lr", type=float, default=1e-6)
+    rl.add_argument("--expert-selection-sha256", default=None)
+    rl.add_argument("--expert-selection-contract-sha256", default=None)
+    rl.add_argument(
         "--rollout-model",
         default=None,
         help=(

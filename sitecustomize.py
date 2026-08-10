@@ -11,6 +11,11 @@ if os.environ.get("YETO_DSV4_EXPERT_CLONE") == "1":
 
     install()
 
+if os.environ.get("YETO_DSV4_EXPERT_FULL") == "1":
+    from yeto.rl.deepseek_v4_expert_full_runtime import install
+
+    install()
+
 
 def _install_tms_post_pause_hold() -> None:
     """Hold a Miles trainer actor after TMS pause for crash attribution.

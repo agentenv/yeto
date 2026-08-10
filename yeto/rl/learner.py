@@ -14,6 +14,7 @@ from typing import Any
 
 from .bridge import BridgeConfig
 from .decoupled import DecoupledBridgeConfig
+from .deepseek_v4_expert_full import expert_full_specs
 from .export import adapter_targets, derive_peft_lora_specs
 from .miles import verify_miles_revision
 
@@ -28,6 +29,10 @@ def parse_args(argv=None):
         choices=["generic", "deepseek-v4-flash"],
         default="generic",
     )
+    parser.add_argument("--expert-full-count", type=int, default=0)
+    parser.add_argument("--expert-full-lr", type=float, default=1e-6)
+    parser.add_argument("--expert-selection-sha256", default=None)
+    parser.add_argument("--expert-selection-contract-sha256", default=None)
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--data-revision", default=None)
@@ -277,6 +282,17 @@ def build_miles_argv(
         raise ValueError(
             "attention-routed-experts is reserved for the expanded DeepSeek V4 recipe"
         )
+    expert_full_count = int(getattr(args, "expert_full_count", 0) or 0)
+    if not 0 <= expert_full_count <= 32:
+        raise ValueError("expert-full count must be between 1 and 32 when enabled")
+    expert_full = expert_full_count > 0
+    if expert_full and (
+        getattr(args, "rl_model_recipe", "generic") != "deepseek-v4-flash"
+        or args.lora_targets != "attention"
+    ):
+        raise ValueError(
+            "expert-full tuning requires the DeepSeek V4 recipe and attention LoRA"
+        )
     data_parallel = actor_gpus // model_parallel
     global_batch = (
         args.groups_per_round * args.samples_per_group // args.optimizer_steps
@@ -288,9 +304,13 @@ def build_miles_argv(
     target_value = ",".join(target_modules)
     recipe = getattr(args, "rl_model_recipe", "generic")
     if recipe == "deepseek-v4-flash":
-        if args.lora_targets != "attention-routed-experts":
+        expected_lora_targets = (
+            "attention" if expert_full else "attention-routed-experts"
+        )
+        if args.lora_targets != expected_lora_targets:
             raise ValueError(
-                "expanded DeepSeek V4 recipe requires attention-routed-experts"
+                "expanded DeepSeek V4 recipe requires "
+                f"{expected_lora_targets}"
             )
         if (
             tensor_parallel != 8
@@ -399,6 +419,25 @@ def build_miles_argv(
         "--sglang-max-lora-rank", str(args.lora_r),
         "--pin-rollout-manager-to-head",
     ]
+    if expert_full:
+        values.extend(
+            (
+                "--optimizer",
+                "adam",
+                "--adam-beta1",
+                "0.9",
+                "--adam-beta2",
+                "0.98",
+                "--adam-eps",
+                str(1e-8),
+                "--weight-decay",
+                "0",
+                "--clip-grad",
+                "1.0",
+                "--kl-coef",
+                "0.001",
+            )
+        )
     if getattr(args, "sglang_deterministic_inference", True):
         values.append("--sglang-enable-deterministic-inference")
     if recipe == "deepseek-v4-flash":
@@ -721,21 +760,33 @@ def run_miles(
         raise ValueError("decoupled RL requires one optimizer step per rollout")
 
     clone_only_lora = args.lora_targets == "attention-routed-experts"
+    expert_full = int(getattr(args, "expert_full_count", 0) or 0) > 0
+
+    def require_env(name: str, value: str) -> None:
+        current = os.environ.get(name)
+        if current not in (None, value):
+            raise ValueError(f"{name} must be unset or {value}, got {current!r}")
+        os.environ[name] = value
+
+    if clone_only_lora or expert_full:
+        require_env("YETO_DSV4_EXPERT_CLONE", "1")
     if clone_only_lora:
-        for name in (
-            "YETO_DSV4_EXPERT_CLONE",
-            "YETO_DSV4_CLONE_ONLY_LORA",
-        ):
-            current = os.environ.get(name)
-            if current not in (None, "1"):
-                raise ValueError(f"{name} must be unset or 1, got {current!r}")
-            os.environ[name] = "1"
+        require_env("YETO_DSV4_CLONE_ONLY_LORA", "1")
+    if clone_only_lora or expert_full:
         fuse_wqa_wkv = os.environ.get("SGLANG_OPT_FUSE_WQA_WKV")
         if fuse_wqa_wkv not in (None, "0"):
             raise ValueError(
                 "SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA"
             )
         os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
+    if expert_full:
+        require_env("YETO_DSV4_EXPERT_FULL", "1")
+        require_env(
+            "YETO_DSV4_EXPERT_FULL_COUNT",
+            str(args.expert_full_count),
+        )
+        require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
+        require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
 
     if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":
         from .deepseek_v4_bridge import ensure_deepseek_v4_bridge
@@ -750,16 +801,37 @@ def run_miles(
     )
     provider = model_bridge.to_megatron_provider(load_weights=False)
     provider.finalize()
-    specs = derive_peft_lora_specs(
+    attention_specs = derive_peft_lora_specs(
         model_path,
         None,
         rank=args.lora_r,
         targets=args.lora_targets,
         trust_remote_code=args.trust_remote_code,
     )
-    canonical_targets = adapter_targets(specs)
+    specs = tuple(attention_specs)
+    if expert_full:
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(
+            model_path,
+            trust_remote_code=args.trust_remote_code,
+        )
+        specs = tuple(
+            sorted(
+                specs
+                + expert_full_specs(
+                    config,
+                    expert_count=args.expert_full_count,
+                    expected_selection_sha256=args.expert_selection_sha256,
+                    expected_selection_contract_sha256=(
+                        args.expert_selection_contract_sha256
+                    ),
+                )
+            )
+        )
+    canonical_targets = adapter_targets(attention_specs)
     miles_targets = megatron_adapter_targets(
-        specs,
+        attention_specs,
         model_bridge,
         standard_grouped_experts=clone_only_lora,
     )
@@ -799,6 +871,8 @@ def run_miles(
         miles_args.yeto_rl_lora_config_hash = lora_config_hash
         miles_args.yeto_rl_layout_hash = layout_hash
         miles_args.yeto_rl_clone_only_lora = clone_only_lora
+        if expert_full:
+            miles_args.yeto_rl_expected_specs = specs
         if clone_only_lora:
             # The Bridge exposes one representative mapping per packed expert
             # parameter.  Miles needs the full canonical set at the external
