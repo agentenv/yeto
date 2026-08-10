@@ -202,8 +202,9 @@ metric tables, and reproducibility rules.
 per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
 [docs/MILES_RL.md](docs/MILES_RL.md) — fixed-roster Miles RL across causal-LM
 LoRA islands: rollout/training boundaries, recovery, export, and limitations.
-[docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) — experimental local PPO and the
-CyberGym reward integration used for real environment evaluation.
+[yeto/tasks/cybergym/CYBERGYM_RL.md](yeto/tasks/cybergym/CYBERGYM_RL.md) —
+the CyberGym task integration, including experimental local PPO and the Miles
+reward callable used for real environment evaluation.
 [docs/RL_BENCHMARK.md](docs/RL_BENCHMARK.md) — equal-hardware native Miles,
 single-island Yeto, and federated Yeto RL benchmark contract and runner.
 [docs/RL_SSH_ACCEPTANCE.md](docs/RL_SSH_ACCEPTANCE.md) — direct existing-host

@@ -558,7 +558,7 @@ def test_dry_run_can_select_only_the_current_native_miles_arm(capsys):
             "--data-revision",
             "b" * 40,
             "--reward-function",
-            "yeto_miles_cybergym.reward:score",
+            "yeto.tasks.cybergym.reward:score",
             "--arms",
             "native",
             "--islands",

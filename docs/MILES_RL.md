@@ -18,11 +18,32 @@ Selecting `decoupled` is intentional. The launcher never infers it from the
 model, island count, or generic DiLoCo flags.
 
 > **Status:** `strict-avg` has real-model GPU and recovery evidence. The
-> `decoupled` source implementation and automated protocol/oracle coverage are
-> present, and `MILES_COMMIT` pins the reviewed stop-capable Miles commit.
-> Release use additionally requires that commit to be available from the
-> configured Miles repository and the real GPU matrix in the design to pass.
-> The runtime verifier deliberately rejects a dirty or mismatched checkout.
+> `decoupled` implementation has automated protocol and oracle coverage, but
+> remains gated on its real causal-LM GPU matrix, including cross-machine and
+> failure runs. The launcher verifies the configured Miles checkout and source
+> provenance before starting an island.
+
+## Pinned Runtime
+
+The RL path is a three-repository integration. The launcher checks out and
+installs these exact revisions rather than following an upstream branch:
+
+| component | source | pinned value |
+| --- | --- | --- |
+| Miles | `https://github.com/agentenv/miles` | `674498f4c4b12e58ad6b85e7b34c58e040d6651a` |
+| Miles PEFT | PyPI | `0.20.0` |
+| SGLang | `https://github.com/agentenv/sglang` | `95d4d69665f1712bc6fd3f503af2655b9b301e13` |
+| island image | GHCR | `ghcr.io/alexeisie/miles@sha256:5be3e0722c7b0174c3c1a5526064872987c7bc367af700117a3589efbd6b19bd` |
+
+The Miles revision supplies the external-policy-sync and offload-safe
+publication lifecycle. The SGLang revision supplies the compatible LoRA
+transport used by that lifecycle. They are part of the supported contract, not
+interchangeable with either upstream `main` branch without revalidation.
+
+Before the learner starts, Yeto verifies the Miles remote URL and detached
+commit, the attested Yeto source tree, immutable model and dataset revisions,
+and the reward callable's source digest. The launcher checks out SGLang at its
+pinned commit and places it before the worker source on `PYTHONPATH`.
 
 ## Supported Boundary
 
@@ -60,9 +81,11 @@ The following remain outside this boundary:
 - Miles' experimental fault-tolerant actor path;
 - a new dashboard, controller, storage system, or generic recovery framework.
 
-Local PPO and CyberGym-specific features are separate from this integration.
-Miles custom generation and reward callables can still use existing tool or
-environment runtimes without Yeto defining another trajectory format.
+Task-specific local PPO and CyberGym support lives in
+[`yeto/tasks/cybergym`](../yeto/tasks/cybergym/CYBERGYM_RL.md). It is separate
+from the distributed Miles contract. Miles custom generation and reward
+callables can still use existing tool or environment runtimes without Yeto
+defining another trajectory format.
 
 ## Runtime Ownership
 
@@ -95,6 +118,12 @@ The Miles boundary provides:
 - a stop result from the hook that takes effect only after Miles completes one
   full `update_weights()` publication;
 - normal final hook cleanup after the loop exits.
+
+For `--rl-offload-train`, the pinned Miles runtime owns onload/offload and
+publishes the staged LoRA through its normal SGLang publication lifecycle.
+Yeto does not publish actor weights directly; it supplies the coherent policy
+and returns the stop decision only after the authoritative final cut is
+applied.
 
 Native Miles and `strict-avg` keep their bounded rollout loops. Only the
 `decoupled` external-sync path runs until the authoritative final cut asks it
@@ -223,10 +252,10 @@ invalid fragment/version identities fail. Ordinary hooks report zero remote
 quorum wait because no hook waits for its own PUSH to merge.
 
 Initial fragments use the same ordering: assemble a staged cut, apply and
-hash-check it, then commit its bridge state. The protocol wire is unchanged;
-the Python receiver records only a local monotonic arrival time. PULL-to-PUSH
-is measured from local PULL receipt to PUSH enqueue, while BCAST queue time is
-measured from local receipt to safe-boundary drain.
+hash-check it, then commit its bridge state. The Python receiver records the
+local monotonic receipt time used for queue metrics. PULL-to-PUSH is measured
+from local PULL receipt to PUSH enqueue, while BCAST queue time is measured
+from local receipt to safe-boundary drain.
 
 ### Outer update
 
@@ -241,9 +270,22 @@ m_p     = 0.9 * m_p + g_p
 Theta_p = Theta_p - 0.7 * (g_p + 0.9 * m_p)
 ```
 
-The existing Rust syncer owns this f32 Nesterov update, fragment versions,
-checkpoint-before-broadcast ordering, and exact full-roster validation. Yeto
-adds no RL wire message and does not modify the Rust syncer.
+The Rust syncer owns this f32 Nesterov update and fragment versions. The RL
+launcher configures it with `--max-base-lag 0`, `--learner-weight equal`, a
+fixed full roster, zero grace, and a checkpoint after every committed round.
+The RL integration also extends the scheduler and checkpoint contract to:
+
+- preserve the canonical layout fingerprint and reject a mismatched resume;
+- reject stale, future, duplicate, and mid-round replacement contributions
+  under exact-base mode;
+- replay a pending PULL only to a replacement generation of the same logical
+  learner; and
+- record strict failures and semantic event-tape fields alongside the normal
+  fragment transport.
+
+RL uses the existing fragment messages (`INIT_PARAMS`, `PULL_REQ`,
+`PUSH_FRAGMENT`, `BCAST_FRAGMENT`, and finalization frames); it does not add a
+second learner-to-syncer transport.
 
 ### Inner optimizer and scheduler
 
@@ -296,12 +338,22 @@ Add the following for decoupled synchronization:
 The initial validation configuration is `P=8`, `tau=2`, `H=4`; it is not
 claimed to be optimal for every model.
 
+Yeto derives the rest of the synchronization contract instead of accepting
+generic DiLoCo tuning for this path. `strict-avg` uses one fragment, pipeline
+one, zero grace, f32 transport, equal weights, outer LR 1, and zero outer
+momentum. `decoupled` fixes zero grace, f32 transport, exact-base admission,
+equal weights, AVG fragments, outer LR 0.7, and outer momentum 0.9. It rejects
+`--experimental-rl-sync`, a non-binpack fragment pattern, or more than one
+optimizer step per rollout.
+
 ### Variance-aware GRPO sampling
 
-CyberGym rewards can be identical across every sample in a group. Such a
-zero-variance group has zero GRPO advantage and contributes no useful update.
-Enable Miles' DAPO-style filter together with oversampling to replace those
-groups before the training batch is formed:
+Sparse external rewards, including the
+[CyberGym task integration](../yeto/tasks/cybergym/CYBERGYM_RL.md), can be
+identical across every sample in a group. Such a zero-variance group has zero
+GRPO advantage and contributes no useful update. Enable Miles' DAPO-style
+filter together with oversampling to replace those groups before the training
+batch is formed:
 
 ```bash
   --rollout-batch-size 4 \
@@ -328,21 +380,22 @@ reported as `rl/dynamic_filter/forced_groups`. Yeto also records generated,
 accepted, dropped, replacement, and drop-reason metrics in the round evidence,
 so the extra rollout work is visible in the benchmark report.
 
-With `--rl-offload-train`, Miles keeps the trainer onloaded through external
-policy initialization and the initial weight publication, then offloads it
-before rollout zero. This is the safer setting for a large model when a weight
-publication has timed out. The timeout is a fail-fast bound for the distributed
-barrier, not a quality setting.
+With `--rl-offload-train`, the pinned Miles runtime owns the initial onload,
+offload, and final LoRA publication lifecycle. Yeto never invokes a separate
+weight-copy path around it. `--rl-distributed-timeout-minutes` is a fail-fast
+bound for the Miles distributed barrier, not a quality setting.
 
-`--trust-remote-code` is required by the pinned Miles model-loading path. Keep
-model and dataset revisions immutable and enable it only for trusted sources.
-The reward callable uses `package.module:function`; Yeto hashes its source
-before provisioning and the learner verifies that digest before import.
+Pass `--trust-remote-code` only when the selected model requires it. Yeto
+forwards the value to Megatron-Bridge, while model and dataset revisions remain
+immutable. The reward callable uses `package.module:function`; Yeto hashes its
+source before provisioning and the learner verifies that digest before import.
 
 Prompt rows provide `messages`, or a string `prompt`/`input` that Yeto converts
 to a user message. `label`, `metadata`, and `tools` remain available to Miles
 and the reward callable. Existing custom generation, session-server, and TITO
-arguments are forwarded unchanged.
+arguments are forwarded unchanged. `--apply-chat-template-kwargs` accepts a
+JSON object and is forwarded unchanged through the Yeto launcher and SSH
+acceptance harness to Miles.
 
 ## Checkpoint and Recovery
 
@@ -370,7 +423,9 @@ Production clients keep `max_reconnects=0`: connection loss exits the island
 and relies on the existing launcher/provider task recovery. The feature does
 not add roster shrinking or a new fleet restart controller. Syncer restart can
 resume when its checkpoint disk survives; losing that VM and disk remains a
-deployment-level durability gap.
+deployment-level durability gap. The benchmark-only fixed-work consolidation
+path is the exception: it permits reconnects while all learners report their
+budget and complete the one final fragment sweep.
 
 ## Finalization and Export
 
@@ -383,7 +438,8 @@ boundary, each island:
 3. verifies the trainer's full-policy hash;
 4. writes its final progress checkpoint;
 5. acknowledges the exact manifest;
-6. asks Miles to stop only after one complete SGLang weight publication.
+6. returns a stop result to Miles, which completes one normal SGLang weight
+   publication before it exits.
 
 A replacement island that joins while finalization is pending consumes the
 terminal manifest directly, applies it with recovery optimizer reset,
@@ -501,7 +557,11 @@ Island JSONL records include:
 
 The syncer tape remains authoritative for outer step, fragment, exact base,
 round attempt, full responder roster, Nesterov update norm, merge time, and
-layout fingerprint. No dashboard is enabled by this feature.
+layout fingerprint. It emits the stable `sync/layout_hash`,
+`sync/base_version`, `sync/responders`, `sync/quorum`,
+`sync/rejected_stale_updates`, `sync/merge_seconds`, and
+`sync/global_delta_norm` fields, plus an `rl_strict_failure` event when a
+strict invariant fails. No dashboard is enabled by this feature.
 
 Payload traffic counts PUSH, ordinary BCAST, and ordinary final-cut fragment
 tensors. It intentionally excludes message headers, framing, chunks, and
@@ -515,7 +575,8 @@ staged BCAST commit, duplicate and invalid protocol messages, multi-fragment
 deltas, optimizer preservation, scheduler and exact-snapshot group recovery,
 unequal fragment cuts, terminal replacement, budget consolidation, f32
 two-island Nesterov oracle behavior, terminal export, standard PEFT reload,
-fresh-phase adapter validation and initialization, benchmark fairness, and
+fresh-phase adapter validation and initialization, benchmark fairness,
+checkpoint-layout validation, exact-base reconnect/PULL replay behavior, and
 Miles stop-after-publication ordering.
 
 Existing strict-avg evidence includes real dense and MoE LoRA GRPO runs,
@@ -541,8 +602,9 @@ The implementation is intentionally confined to the RL boundary:
 | `yeto/rl/export.py` | authoritative checkpoint to standard PEFT |
 | `yeto/rl/initial_adapter.py` | validated Decoupled PEFT policy warm start |
 | `scripts/benchmark_rl.py` | equal-work native/strict/decoupled comparison |
-| `agentenv/miles:train.py` | optional run-until-stop and stop-after-publication ordering |
-| `syncer/src/**` | unchanged general fragment scheduler and outer optimizer |
+| `yeto/tasks/cybergym/**` | CyberGym-specific reward, prompt, and Level 1 task helpers |
+| `agentenv/miles:train.py` | external-policy sync, run-until-stop, and stop-after-publication ordering |
+| `syncer/src/**` | exact-base RL scheduler, layout-aware checkpoints, and outer optimizer |
 
 Preserve these invariants when extending the path:
 

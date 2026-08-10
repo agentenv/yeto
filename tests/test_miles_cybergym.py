@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl.learner import prepare_prompt_data
-from yeto_miles_cybergym import reward
-from yeto_miles_cybergym.prompts import prompt_rows
+from yeto.tasks.cybergym import reward
+from yeto.tasks.cybergym.prompts import prompt_rows
 
 
 class Response:

@@ -1,5 +1,9 @@
 # CyberGym RL
 
+This task directory owns the CyberGym-specific reward callable, prompt
+generators, and Level 1 text preparation. The generic Miles synchronization
+contract remains in [Miles RL](../../../docs/MILES_RL.md).
+
 Yeto provides an experimental single-process PPO command for exercising a
 causal language model against a local CyberGym server. It is independent of
 the distributed Miles RL path used by `yeto launch --training-mode rl`.
@@ -38,12 +42,12 @@ verified benchmark solve against the fixed runner.
 
 ## Miles reward adapter
 
-`yeto_miles_cybergym.reward:score` implements the same CyberGym submission
+`yeto.tasks.cybergym.reward:score` implements the same CyberGym submission
 contract for distributed Miles RL. Generate a deterministic JSONL prompt set
 with task IDs preserved in each row's metadata:
 
 ```bash
-python -m yeto_miles_cybergym.prompts \
+python -m yeto.tasks.cybergym.prompts \
   --output ./cybergym_prompts.jsonl
 ```
 
@@ -142,7 +146,7 @@ available at Level 1, materialize source-enriched prompt rows before training
 or evaluation:
 
 ```bash
-python -m yeto_miles_cybergym.text_level1 \
+python -m yeto.tasks.cybergym.text_level1 \
   --prompts ./train-110-curriculum.jsonl \
   --tasks /path/to/cybergym-data/tasks.json \
   --data-root /path/to/cybergym-data \

@@ -220,7 +220,7 @@ def test_rl_head_forwards_cybergym_secret_without_serializing_it(
             "--training-mode",
             "rl",
             "--reward-function",
-            "yeto_miles_cybergym.reward:score",
+            "yeto.tasks.cybergym.reward:score",
         ]
     )
 
@@ -255,7 +255,7 @@ def test_rl_head_stages_the_initial_adapter_for_learner_mounts(
             "--training-mode",
             "rl",
             "--reward-function",
-            "yeto_miles_cybergym.reward:score",
+            "yeto.tasks.cybergym.reward:score",
             "--rl-sync-preset",
             "decoupled",
             "--rl-initial-adapter",
