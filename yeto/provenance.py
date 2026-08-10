@@ -371,6 +371,7 @@ def resolve_reference(
     *,
     repo_type: str,
     original_identifier: str | None = None,
+    allow_remote_local_revision: bool = False,
     api=None,
 ) -> dict[str, Any]:
     if _URI_RE.match(identifier):
@@ -388,10 +389,22 @@ def resolve_reference(
         }
     if is_local_reference(identifier):
         if requested_revision is not None:
-            raise ProvenanceError(
-                f"--{repo_type}-revision applies only to Hugging Face repositories; "
-                f"{identifier!r} is a local path"
-            )
+            if not allow_remote_local_revision or not is_immutable_commit(
+                requested_revision
+            ):
+                raise ProvenanceError(
+                    f"--{repo_type}-revision applies only to Hugging Face repositories; "
+                    f"{identifier!r} is a local path"
+                )
+            return {
+                "source": "remote-local",
+                "requested_identifier": original_identifier or identifier,
+                "resolved_identifier": str(
+                    Path(identifier).expanduser().resolve(strict=False)
+                ),
+                "requested_revision": requested_revision.lower(),
+                "resolved_revision": requested_revision.lower(),
+            }
         return {
             "source": "local",
             "requested_identifier": original_identifier or identifier,
@@ -414,7 +427,13 @@ def resolve_reference(
     }
 
 
-def pin_runtime_provenance(args, *, include_data: bool = True, api=None) -> dict[str, Any]:
+def pin_runtime_provenance(
+    args,
+    *,
+    include_data: bool = True,
+    allow_remote_model: bool = False,
+    api=None,
+) -> dict[str, Any]:
     """Resolve remote runtime inputs and apply their commits back to *args*."""
 
     from .models import resolve
@@ -430,6 +449,7 @@ def pin_runtime_provenance(args, *, include_data: bool = True, api=None) -> dict
         original_identifier=getattr(
             args, "model_requested_identifier", None
         ) or requested_model,
+        allow_remote_local_revision=allow_remote_model,
         api=api,
     )
     if getattr(args, "model_requested_revision", None) is not None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import struct
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,6 +20,7 @@ from yeto.rl.core import (
     tensors_from_flat,
 )
 from yeto.rl.export import derive_peft_lora_specs, export_rl_checkpoint
+from yeto.rl.deepseek_v4_expert_clone import ExpertCloneContract, NUM_LAYERS
 from yeto.tensor_io import fragment_flat
 
 
@@ -108,6 +110,53 @@ def test_attention_regex_is_resolved_before_peft_moe_conversion(tmp_path):
 
     assert specs
     assert all("self_attn" in spec.name for spec in specs)
+
+
+def _expanded_deepseek_v4_config():
+    contract = ExpertCloneContract(
+        tuple(tuple(range(32)) for _ in range(NUM_LAYERS)),
+        "a" * 64,
+        "b" * 64,
+    )
+    return SimpleNamespace(
+        model_type="deepseek_v4",
+        architectures=["DeepseekV4ForCausalLM"],
+        hidden_size=4096,
+        moe_intermediate_size=2048,
+        num_hidden_layers=43,
+        n_routed_experts=288,
+        num_experts_per_tok=6,
+        num_nextn_predict_layers=0,
+        yeto_routed_expert_clone=contract.config_value(),
+    )
+
+
+def test_e288_fused_expert_specs_are_complete_and_have_canonical_shapes():
+    specs = rl_export._deepseek_v4_clone_expert_lora_specs(
+        _expanded_deepseek_v4_config(),
+        rank=8,
+    )
+
+    assert specs == tuple(sorted(specs))
+    assert len(specs) == 43 * 288 * 3 * 2 == 74_304
+    assert sum(spec.numel for spec in specs) == 1_826_095_104
+    by_name = {spec.name: spec for spec in specs}
+    prefix = "base_model.model.model.layers.42.mlp.experts.287"
+    assert by_name[f"{prefix}.gate_proj.lora_A.weight"].shape == (8, 4096)
+    assert by_name[f"{prefix}.gate_proj.lora_B.weight"].shape == (2048, 8)
+    assert by_name[f"{prefix}.up_proj.lora_A.weight"].shape == (8, 4096)
+    assert by_name[f"{prefix}.up_proj.lora_B.weight"].shape == (2048, 8)
+    assert by_name[f"{prefix}.down_proj.lora_A.weight"].shape == (8, 2048)
+    assert by_name[f"{prefix}.down_proj.lora_B.weight"].shape == (4096, 8)
+
+
+def test_e288_fused_expert_specs_fail_closed_without_the_clone_contract():
+    config = _expanded_deepseek_v4_config()
+    config.yeto_routed_expert_clone = None
+    config.n_routed_experts = 256
+
+    with pytest.raises(ValueError, match="expanded E288 clone contract"):
+        rl_export._deepseek_v4_clone_expert_lora_specs(config, rank=8)
 
 
 MODEL_REVISION = "a" * 40

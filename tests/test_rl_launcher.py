@@ -130,6 +130,26 @@ def test_bounded_variance_filter_and_large_run_safety_options():
     assert args.rl_distributed_timeout_minutes == 7
 
 
+def test_signed_secrlenv_variance_filter_accepts_a_bounded_replacement_budget():
+    args = _args(
+        [
+            "--over-sampling-batch-size",
+            "8",
+            "--dynamic-sampling-filter-path",
+            "yeto_miles_secrlenv.reward.check_group",
+            "--dynamic-sampling-max-replacements",
+            "4",
+        ]
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.dynamic_sampling_filter_path == (
+        "yeto_miles_secrlenv.reward.check_group"
+    )
+    assert args.dynamic_sampling_max_replacements == 4
+
+
 def test_decoupled_rl_preset_fixes_the_fragment_outer_contract():
     args = _args(
         (
@@ -301,7 +321,13 @@ def test_rl_maps_long_task_and_oversampling_options_to_miles():
             "--over-sampling-batch-size",
             "8",
             "--custom-generate-function-path",
-            "pkg.agent.generate",
+            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            "--custom-agent-function-path",
+            "pkg.agent.run",
+            "--agent-max-seq-len",
+            "4096",
+            "--seq-len",
+            "4096",
             "--use-session-server",
             "--session-server-ip",
             "127.0.0.1",
@@ -309,16 +335,23 @@ def test_rl_maps_long_task_and_oversampling_options_to_miles():
             "31000",
             "31002",
             "--tito-model",
-            "qwen3",
+            "deepseekv4",
+            "--tito-allowed-append-roles",
+            "tool",
+            "user",
+            "tool",
         )
     )
     _prepare_rl_args(args)
     assert args.over_sampling_batch_size == 8
-    assert args.custom_generate_function_path == "pkg.agent.generate"
+    assert args.custom_generate_function_path.endswith("agentic_tool_call.generate")
+    assert args.custom_agent_function_path == "pkg.agent.run"
+    assert args.agent_max_seq_len == 4096
     assert args.use_session_server
     assert args.session_server_ip == "127.0.0.1"
     assert args.session_server_port == [31000, 31002]
-    assert args.tito_model == "qwen3"
+    assert args.tito_model == "deepseekv4"
+    assert args.tito_allowed_append_roles == ["tool", "user"]
 
 
 def test_rl_parses_cybergym_worker_configuration():
@@ -354,7 +387,7 @@ def test_default_sft_parse_is_unchanged():
     [
         (("--tuning", "full"), "lora"),
         (("--lora-r", "0"), "positive LoRA rank"),
-        (("--tensor-parallel", "2"), "TP=PP=1"),
+        (("--tensor-parallel", "0"), "parallelism must be positive"),
         (("--expert-parallel", "3"), "divide every island"),
         (("--local-rl-rounds-per-sync", "2"), "requires --local"),
         (("--rl-image", "docker:example/miles:latest"), "sha256"),
@@ -362,6 +395,21 @@ def test_default_sft_parse_is_unchanged():
         (("--reward-function", "bad"), "package.module:function"),
         (("--over-sampling-batch-size", "3"), "at least --rollout-batch-size"),
         (("--custom-generate-function-path", "bad"), "package.module.function"),
+        (
+            ("--sglang-attention-backend", "dsv4"),
+            "no-sglang-deterministic-inference",
+        ),
+        (("--custom-agent-function-path", "pkg.agent.run"), "requires --custom-generate"),
+        (
+            (
+                "--custom-generate-function-path",
+                "pkg.agent.generate",
+                "--custom-agent-function-path",
+                "pkg.agent.run",
+            ),
+            "requires --use-session-server",
+        ),
+        (("--agent-max-seq-len", "4096"), "requires --custom-agent"),
         (("--session-server-ip", "127.0.0.1"), "requires --use-session-server"),
         (
             ("--use-session-server", "--session-server-port", "0"),
@@ -414,6 +462,54 @@ def test_rl_accepts_single_and_multigpu_islands():
     multi = _args(("--gpu", "aws:2x4xa100@us-east-1,gcp:8xa100"))
     _prepare_rl_args(multi)
     assert multi.quorum == 2
+
+
+def test_rl_accepts_two_node_deepseek_model_parallel_island():
+    args = _args(
+        (
+            "--gpu",
+            "ssh:2x8xh200@island-0",
+            "--rollout-model",
+            "/data/models/deepseek-v4-flash-fp8",
+            "--rollout-model-revision",
+            "7eb21d27aee405755da5251f4458e9fff87c047b",
+            "--rl-model-recipe",
+            "deepseek-v4-flash",
+            "--lora-targets",
+            "attention-routed-experts",
+            "--tensor-parallel",
+            "8",
+            "--pipeline-parallel",
+            "1",
+            "--expert-parallel",
+            "8",
+            "--rollout-num-gpus-per-engine",
+            "8",
+            "--sglang-tp-size",
+            "8",
+            "--sglang-ep-size",
+            "8",
+            "--sglang-attention-backend",
+            "dsv4",
+            "--no-sglang-deterministic-inference",
+            "--sglang-page-size",
+            "256",
+            "--use-rollout-routing-replay",
+        )
+    )
+    _prepare_rl_args(args)
+
+    assert args.tensor_parallel == 8
+    assert args.pipeline_parallel == 1
+    assert args.expert_parallel == 8
+    assert args.rollout_num_gpus_per_engine == 8
+    assert args.rollout_model == "/data/models/deepseek-v4-flash-fp8"
+    assert args.rollout_model_revision == (
+        "7eb21d27aee405755da5251f4458e9fff87c047b"
+    )
+    assert args.rl_model_recipe == "deepseek-v4-flash"
+    assert args.sglang_attention_backend == "dsv4"
+    assert args.sglang_deterministic_inference is False
 
 
 def test_rl_provenance_hashes_reward_inside_synced_workdir(monkeypatch):
@@ -664,14 +760,23 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
             "--rl-distributed-timeout-minutes",
             "7",
             "--custom-generate-function-path",
-            "pkg.agent.generate",
+            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            "--custom-agent-function-path",
+            "pkg.agent.run",
+            "--agent-max-seq-len",
+            "4096",
+            "--seq-len",
+            "4096",
             "--use-session-server",
             "--session-server-ip",
             "127.0.0.1",
             "--session-server-port",
             "31000",
             "--tito-model",
-            "qwen3",
+            "deepseekv4",
+            "--tito-allowed-append-roles",
+            "tool",
+            "user",
             "--cybergym-url",
             "http://10.0.0.8:8666",
             "--cybergym-agent-id",
@@ -731,11 +836,14 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert "--dynamic-sampling-max-replacements 8" in task.run
     assert "--rl-offload-train" in task.run
     assert "--rl-distributed-timeout-minutes 7" in task.run
-    assert "--custom-generate-function-path pkg.agent.generate" in task.run
+    assert "--custom-generate-function-path miles.rollout.generate_hub.agentic_tool_call.generate" in task.run
+    assert "--custom-agent-function-path pkg.agent.run" in task.run
+    assert "--agent-max-seq-len 4096" in task.run
     assert "--use-session-server" in task.run
     assert "--session-server-ip 127.0.0.1" in task.run
     assert "--session-server-port 31000" in task.run
-    assert "--tito-model qwen3" in task.run
+    assert "--tito-model deepseekv4" in task.run
+    assert "--tito-allowed-append-roles tool user" in task.run
     assert task.num_nodes == 2
     assert task.resources.image_id == args.rl_image
     assert task.resources.network_tier == "best"
@@ -839,10 +947,13 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
         over_sampling_batch_size=6,
         rollout_max_response_len=64,
         custom_generate_function_path="pkg.agent.generate",
+        custom_agent_function_path="pkg.agent.run",
+        agent_max_seq_len=96,
         use_session_server=True,
         session_server_ip="127.0.0.1",
         session_server_port=[31000, 31002],
         tito_model="qwen3",
+        tito_allowed_append_roles=["tool", "user"],
         actor_num_nodes=1,
         actor_num_gpus_per_node=8,
         expert_parallel=None,
@@ -887,7 +998,7 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
     )
     assert "--add-qkv-bias" in argv
     assert "--qk-layernorm" in argv
-    assert "--group-query-attention" in argv
+    assert "--group-query-attention" not in argv
     assert argv[argv.index("--target-modules") + 1] == "qkv_proj,out_proj"
     assert argv[argv.index("--max-position-embeddings") + 1] == "256"
     assert argv[argv.index("--rotary-base") + 1] == "10000"
@@ -917,11 +1028,18 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
         argv[argv.index("--custom-generate-function-path") + 1]
         == "pkg.agent.generate"
     )
+    assert argv[argv.index("--custom-agent-function-path") + 1] == "pkg.agent.run"
+    assert argv[argv.index("--max-seq-len") + 1] == "96"
+    assert "--apply-chat-template" not in argv
     assert "--use-session-server" in argv
     assert argv[argv.index("--session-server-ip") + 1] == "127.0.0.1"
     port = argv.index("--session-server-port")
     assert argv[port + 1 : port + 3] == ["31000", "31002"]
     assert argv[argv.index("--tito-model") + 1] == "qwen3"
+    assert argv[argv.index("--sglang-reasoning-parser") + 1] == "qwen3"
+    assert argv[argv.index("--sglang-tool-call-parser") + 1] == "qwen25"
+    roles = argv.index("--tito-allowed-append-roles")
+    assert argv[roles + 1 : roles + 3] == ["tool", "user"]
     assert (
         argv[argv.index("--rollout-all-samples-process-path") + 1]
         == "yeto.rl.miles.queue_completed_groups"
@@ -957,6 +1075,121 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
         "--hidden-dropout",
     ):
         assert recipe_flag not in argv
+
+    parallel_values = vars(args).copy()
+    parallel_values.update(
+        actor_num_nodes=2,
+        actor_num_gpus_per_node=8,
+        tensor_parallel=8,
+        pipeline_parallel=2,
+        expert_parallel=8,
+        rollout_num_gpus_per_engine=8,
+        sglang_tp_size=8,
+        sglang_dp_size=1,
+        sglang_ep_size=8,
+        sglang_mem_fraction_static=0.5,
+        sglang_attention_backend="dsv4",
+        sglang_deterministic_inference=False,
+        sglang_page_size=256,
+        sglang_max_running_requests=8,
+        sglang_chunked_prefill_size=4096,
+        use_rollout_routing_replay=True,
+    )
+    parallel_args = argparse.Namespace(**parallel_values)
+    parallel_argv = build_miles_argv(
+        parallel_args,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=provider,
+        target_modules=["qkv_proj", "out_proj"],
+    )
+    assert parallel_argv[parallel_argv.index("--tensor-model-parallel-size") + 1] == "8"
+    assert parallel_argv[parallel_argv.index("--pipeline-model-parallel-size") + 1] == "2"
+    assert parallel_argv[parallel_argv.index("--rollout-num-gpus-per-engine") + 1] == "8"
+    assert parallel_argv[parallel_argv.index("--sglang-tp-size") + 1] == "8"
+    assert parallel_argv[parallel_argv.index("--sglang-ep-size") + 1] == "8"
+    assert parallel_argv[parallel_argv.index("--sglang-attention-backend") + 1] == "dsv4"
+    assert "--sequence-parallel" in parallel_argv
+    assert "--use-rollout-routing-replay" in parallel_argv
+    assert "--sglang-enable-deterministic-inference" not in parallel_argv
+
+    uneven_provider = argparse.Namespace(**vars(provider))
+    uneven_provider.num_layers = 43
+    uneven_provider.moe_layer_freq = [1] * 43
+    recipe_values = vars(parallel_args).copy()
+    recipe_values.update(
+        rl_model_recipe="deepseek-v4-flash",
+        pipeline_parallel=1,
+        lora_targets="attention-routed-experts",
+        tito_model="deepseekv4",
+    )
+    recipe_args = argparse.Namespace(**recipe_values)
+    uneven_argv = build_miles_argv(
+        recipe_args,
+        model_path="/models/deepseek-v4-flash-bf16",
+        rollout_model_path="/models/deepseek-v4-flash-fp8",
+        prompt_path="/prompts.jsonl",
+        provider=uneven_provider,
+        target_modules=["qkv_proj", "out_proj"],
+    )
+    assert uneven_argv[uneven_argv.index("--hf-checkpoint") + 1] == (
+        "/models/deepseek-v4-flash-fp8"
+    )
+    assert uneven_argv[uneven_argv.index("--ref-load") + 1] == (
+        "/models/deepseek-v4-flash-bf16"
+    )
+    assert "--load" not in uneven_argv
+    assert uneven_argv[uneven_argv.index("--model-name") + 1] == "deepseekv4"
+    assert uneven_argv[uneven_argv.index("--attention-backend") + 1] == "flash"
+    assert uneven_argv[uneven_argv.index("--qkv-format") + 1] == "bshd"
+    assert uneven_argv[uneven_argv.index("--transformer-impl") + 1] == (
+        "transformer_engine"
+    )
+    assert "--recompute-granularity" in uneven_argv
+    assert "--moe-router-freeze-gate" in uneven_argv
+    assert "--freeze-e-score-correction-bias" in uneven_argv
+    assert "--decoder-first-pipeline-num-layers" not in uneven_argv
+    assert "--decoder-last-pipeline-num-layers" not in uneven_argv
+    assert uneven_argv[uneven_argv.index("--moe-layer-freq") + 1] == "1"
+    assert uneven_argv[
+        uneven_argv.index("--sglang-reasoning-parser") + 1
+    ] == "deepseek-v4"
+    assert uneven_argv[
+        uneven_argv.index("--sglang-tool-call-parser") + 1
+    ] == "deepseekv4"
+
+    bad_v4_provider = argparse.Namespace(**vars(uneven_provider))
+    bad_v4_provider.moe_layer_freq = [1] * 42 + [0]
+    with pytest.raises(ValueError, match="every one of its 43 layers"):
+        build_miles_argv(
+            recipe_args,
+            model_path="/models/deepseek-v4-flash-bf16",
+            rollout_model_path="/models/deepseek-v4-flash-fp8",
+            prompt_path="/prompts.jsonl",
+            provider=bad_v4_provider,
+            target_modules=["qkv_proj", "out_proj"],
+        )
+
+    clone_recipe_args = argparse.Namespace(**recipe_values)
+    clone_recipe_args.lora_targets = "attention-routed-experts"
+    clone_argv = build_miles_argv(
+        clone_recipe_args,
+        model_path="/models/deepseek-v4-flash-bf16-e288",
+        rollout_model_path="/models/deepseek-v4-flash-fp8-e288",
+        prompt_path="/prompts.jsonl",
+        provider=uneven_provider,
+        target_modules=[
+            "decoder.layers.0.self_attention.linear_q_down_proj",
+            "decoder.layers.0.mlp.experts.linear_fc1",
+            "decoder.layers.0.mlp.experts.linear_fc2",
+        ],
+    )
+    assert clone_argv[clone_argv.index("--lora-type") + 1] == "lora"
+    assert "--no-sglang-lora-use-virtual-experts" in clone_argv
+    assert "--sglang-disable-shared-experts-fusion" in clone_argv
+    assert clone_argv[clone_argv.index("--sglang-moe-runner-backend") + 1] == (
+        "triton"
+    )
 
     native_argv = build_miles_argv(
         args,
@@ -1162,6 +1395,35 @@ def test_megatron_targets_reject_a_peft_module_without_a_bridge_mapping():
         rl_learner.megatron_adapter_targets(specs, bridge)
 
 
+def test_megatron_targets_collapse_e288_experts_to_standard_grouped_modules():
+    specs = tuple(
+        types.SimpleNamespace(
+            name=(
+                "base_model.model.model.layers.3.mlp.experts.287."
+                f"{projection}.lora_{side}.weight"
+            )
+        )
+        for projection in ("gate_proj", "up_proj", "down_proj")
+        for side in ("A", "B")
+    )
+    bridge = types.SimpleNamespace(
+        _model_bridge=types.SimpleNamespace(
+            mapping_registry=lambda: types.SimpleNamespace(
+                hf_to_megatron_lookup=lambda _name: None
+            )
+        )
+    )
+
+    assert rl_learner.megatron_adapter_targets(
+        specs,
+        bridge,
+        standard_grouped_experts=True,
+    ) == [
+        "decoder.layers.3.mlp.experts.linear_fc1",
+        "decoder.layers.3.mlp.experts.linear_fc2",
+    ]
+
+
 def test_miles_runner_keeps_native_arm_outside_yeto_policy_sync(monkeypatch):
     captured = {}
 
@@ -1199,7 +1461,7 @@ def test_miles_runner_keeps_native_arm_outside_yeto_policy_sync(monkeypatch):
     monkeypatch.setattr(
         rl_learner,
         "megatron_adapter_targets",
-        lambda specs, bridge: [],
+        lambda specs, bridge, **_kwargs: [],
     )
     monkeypatch.setattr(rl_learner, "build_miles_argv", build)
     monkeypatch.setattr(
@@ -1271,7 +1533,7 @@ def test_miles_runner_builds_the_decoupled_runtime_contract(monkeypatch, tmp_pat
     monkeypatch.setattr(
         rl_learner,
         "megatron_adapter_targets",
-        lambda *_args: ["layer"],
+        lambda *_args, **_kwargs: ["layer"],
     )
     monkeypatch.setattr(rl_learner, "build_miles_argv", lambda *a, **k: ["train.py"])
     monkeypatch.setattr(

@@ -433,7 +433,12 @@ def resolve_loss_function(
     return _stage_pickled_loss(cloudpickle.dumps(fn))
 
 
-def prepare_launch_args(args, *, allow_local_rl_data: bool = False) -> None:
+def prepare_launch_args(
+    args,
+    *,
+    allow_local_rl_data: bool = False,
+    allow_remote_rl_model: bool = False,
+) -> None:
     """Resolve immutable inputs and executable artifacts before cloud spend."""
 
     from .provenance import (
@@ -447,7 +452,9 @@ def prepare_launch_args(args, *, allow_local_rl_data: bool = False) -> None:
     args.source_sha256 = verify_source_tree_sha256(
         getattr(args, "source_sha256", None)
     )
-    payload = pin_runtime_provenance(args)
+    payload = pin_runtime_provenance(
+        args, allow_remote_model=allow_remote_rl_model
+    )
     args.model_requested_identifier = payload["model"]["requested_identifier"]
     args.model_requested_revision = payload["model"]["requested_revision"]
     if "dataset" in payload:
@@ -519,7 +526,11 @@ def prepare_launch_args(args, *, allow_local_rl_data: bool = False) -> None:
                 f"{expected_adapter_sha256.lower()}, got {adapter_sha256}"
             )
         args.diffusion_adapter_sha256 = adapter_sha256
-    _prepare_rl_args(args, allow_local_data=allow_local_rl_data)
+    _prepare_rl_args(
+        args,
+        allow_local_data=allow_local_rl_data,
+        allow_remote_model=allow_remote_rl_model,
+    )
 
 
 def _rl_callable(value: str | None, flag: str, *, required: bool) -> None:
@@ -545,7 +556,12 @@ def _rl_miles_function(
         raise ValueError(f"{flag} must be package.module.function")
 
 
-def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
+def _prepare_rl_args(
+    args,
+    *,
+    allow_local_data: bool = False,
+    allow_remote_model: bool = False,
+) -> None:
     if getattr(args, "training_mode", "sft") != "rl":
         if getattr(args, "rl_initial_adapter", None) is not None or getattr(
             args, "rl_initial_adapter_sha256", None
@@ -596,6 +612,17 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
         raise ValueError("RL v0 requires a positive LoRA rank")
     if args.total_steps <= 0:
         raise ValueError("RL v0 requires --total-steps > 0")
+    rollout_model = getattr(args, "rollout_model", None)
+    rollout_revision = getattr(args, "rollout_model_revision", None)
+    if rollout_model is None and rollout_revision is not None:
+        raise ValueError("--rollout-model-revision requires --rollout-model")
+    if rollout_model is not None and rollout_model != args.model:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", str(rollout_revision or "")):
+            raise ValueError(
+                "a distinct --rollout-model requires an immutable "
+                "--rollout-model-revision"
+            )
+        args.rollout_model_revision = rollout_revision.lower()
     if args.rollout_batch_size <= 0 or args.n_samples_per_prompt <= 0:
         raise ValueError("RL v0 requires positive rollout batch and sample counts")
     if args.rollout_max_response_len <= 0:
@@ -627,6 +654,37 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
             "RL --over-sampling-batch-size must be at least --rollout-batch-size"
         )
     _rl_miles_function(args.custom_generate_function_path)
+    custom_agent = getattr(args, "custom_agent_function_path", None)
+    _rl_miles_function(custom_agent, "--custom-agent-function-path")
+    if custom_agent is not None:
+        if args.custom_generate_function_path is None:
+            raise ValueError(
+                "--custom-agent-function-path requires "
+                "--custom-generate-function-path"
+            )
+        if not args.use_session_server:
+            raise ValueError(
+                "--custom-agent-function-path requires --use-session-server"
+            )
+        if args.tito_model is None:
+            raise ValueError(
+                "--custom-agent-function-path requires --tito-model"
+            )
+        if args.apply_chat_template_kwargs is not None:
+            raise ValueError(
+                "agentic session rollouts preserve raw messages and do not accept "
+                "--apply-chat-template-kwargs"
+            )
+    agent_max_seq_len = getattr(args, "agent_max_seq_len", None)
+    if agent_max_seq_len is not None:
+        if custom_agent is None:
+            raise ValueError(
+                "--agent-max-seq-len requires --custom-agent-function-path"
+            )
+        if agent_max_seq_len <= 0 or agent_max_seq_len > args.seq_len:
+            raise ValueError(
+                "--agent-max-seq-len must be positive and no greater than --seq-len"
+            )
     dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
     _rl_miles_function(
         dynamic_filter,
@@ -653,21 +711,27 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
         bounded_filter = "yeto.rl.filters.bounded_nonzero_reward_std"
         if dynamic_filter == stock_filter:
             args.dynamic_sampling_filter_path = bounded_filter
-        elif dynamic_filter != bounded_filter:
+        elif dynamic_filter not in {
+            bounded_filter,
+            "yeto_miles_secrlenv.reward.check_group",
+        }:
             raise ValueError(
                 "--dynamic-sampling-max-replacements is only supported with "
-                "the stock nonzero-variance filter or "
-                "yeto.rl.filters.bounded_nonzero_reward_std"
+                "an approved bounded nonzero-variance filter"
             )
     if not args.use_session_server and (
         args.session_server_ip is not None
         or args.session_server_port is not None
         or args.tito_model is not None
+        or getattr(args, "tito_allowed_append_roles", None) is not None
     ):
         raise ValueError(
-            "--session-server-ip/--session-server-port/--tito-model requires "
-            "--use-session-server"
+            "--session-server-ip/--session-server-port/--tito-model/"
+            "--tito-allowed-append-roles requires --use-session-server"
         )
+    roles = getattr(args, "tito_allowed_append_roles", None)
+    if roles is not None:
+        args.tito_allowed_append_roles = list(dict.fromkeys(roles))
     if args.session_server_port is not None and (
         len(args.session_server_port) not in {1, 2}
         or any(port <= 0 or port > 65535 for port in args.session_server_port)
@@ -683,20 +747,82 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
     specs = parse_gpu_spec(args.gpu)
     if getattr(args, "external_learners", 0):
         raise ValueError("RL v0 does not support external learner slots")
-    if args.tensor_parallel != 1 or args.pipeline_parallel != 1:
-        raise ValueError("RL v0 requires TP=PP=1")
+    if args.tensor_parallel <= 0 or args.pipeline_parallel <= 0:
+        raise ValueError("RL tensor and pipeline parallelism must be positive")
+    model_parallel = args.tensor_parallel * args.pipeline_parallel
     if args.expert_parallel is not None:
         if args.expert_parallel <= 0:
             raise ValueError("RL expert parallelism must be positive")
         if any(spec.total_gpus % args.expert_parallel for spec in specs):
             raise ValueError("RL expert parallelism must divide every island")
     for spec in specs:
-        dp = spec.total_gpus  # TP=PP=CP=1 in the fixed Miles/Megatron path.
+        if spec.total_gpus % model_parallel:
+            raise ValueError(
+                "RL TP*PP must divide every island GPU world size"
+            )
+        dp = spec.total_gpus // model_parallel
         if args.rollout_batch_size * args.n_samples_per_prompt % dp:
             raise ValueError(
                 "RL rollout_batch_size*n_samples_per_prompt must be divisible "
                 "by every island data-parallel size"
             )
+        if (
+            args.rollout_num_gpus_per_engine <= 0
+            or spec.total_gpus % args.rollout_num_gpus_per_engine
+        ):
+            raise ValueError(
+                "RL --rollout-num-gpus-per-engine must be positive and divide "
+                "every island GPU world size"
+            )
+    for name in ("sglang_tp_size", "sglang_dp_size", "sglang_ep_size"):
+        value = getattr(args, name, None)
+        if value is not None and value <= 0:
+            raise ValueError(f"RL --{name.replace('_', '-')} must be positive")
+    if not 0.0 < args.sglang_mem_fraction_static < 1.0:
+        raise ValueError("RL --sglang-mem-fraction-static must be between 0 and 1")
+    if (
+        getattr(args, "sglang_deterministic_inference", True)
+        and getattr(args, "sglang_attention_backend", None) in {"dsv4", "compressed"}
+    ):
+        raise ValueError(
+            "DeepSeek V4 dsv4/compressed attention requires "
+            "--no-sglang-deterministic-inference"
+        )
+    if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":
+        if args.lora_targets != "attention-routed-experts":
+            raise ValueError(
+                "expanded DeepSeek V4 Flash recipe requires "
+                "--lora-targets attention-routed-experts"
+            )
+        if (
+            args.tensor_parallel != 8
+            or args.pipeline_parallel != 1
+            or args.expert_parallel != 8
+            or args.rollout_num_gpus_per_engine != 8
+            or args.sglang_tp_size != 8
+            or args.sglang_ep_size != 8
+            or args.sglang_dp_size not in (None, 1)
+        ):
+            raise ValueError(
+                "expanded DeepSeek V4 Flash requires per-node "
+                "TP8/EP8/PP1 rollout replicas and cross-node DP only"
+            )
+        if args.sglang_attention_backend not in {"dsv4", "compressed"}:
+            raise ValueError(
+                "DeepSeek V4 Flash recipe requires --sglang-attention-backend dsv4"
+            )
+        if args.sglang_page_size != 256:
+            raise ValueError(
+                "DeepSeek V4 Flash recipe requires --sglang-page-size 256"
+            )
+    for name in (
+        "sglang_page_size",
+        "sglang_max_running_requests",
+        "sglang_chunked_prefill_size",
+    ):
+        value = getattr(args, name, None)
+        if value is not None and value <= 0:
+            raise ValueError(f"RL --{name.replace('_', '-')} must be positive")
 
     _rl_callable(args.reward_function, "--reward-function", required=True)
     if not re.fullmatch(
@@ -760,6 +886,13 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
                 and allow_local_data
                 and source.get("source") == "local"
                 and source.get("resolved_revision") is None
+            ):
+                continue
+            if (
+                name == "model"
+                and allow_remote_model
+                and source.get("source") == "remote-local"
+                and source.get("resolved_revision")
             ):
                 continue
             if source.get("source") != "huggingface" or not source.get(
@@ -1004,9 +1137,12 @@ def make_miles_island_task(
     from .models import resolve
     from .provenance import is_local_reference
     from .rl import (
+        MILES_BUNDLE_PATH,
+        MILES_BUNDLE_SHA256,
         MILES_COMMIT,
         MILES_PEFT_VERSION,
         MILES_REPOSITORY,
+        MILES_UPSTREAM_COMMIT,
         SGLANG_COMMIT,
         SGLANG_REPOSITORY,
     )
@@ -1018,6 +1154,7 @@ def make_miles_island_task(
 
     flags = (
         f" --model {shlex.quote(args.model)}"
+        f" --rl-model-recipe {shlex.quote(args.rl_model_recipe)}"
         f" --data {shlex.quote(learner_data_arg(args.data))}"
         " --syncer $SYNCER_ADDR"
         " --learner-id $LEARNER_ID"
@@ -1040,6 +1177,10 @@ def make_miles_island_task(
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
         f" --actor-num-nodes {spec.num_nodes}"
         f" --actor-num-gpus-per-node {spec.gpus_per_node}"
+        f" --tensor-parallel {args.tensor_parallel}"
+        f" --pipeline-parallel {args.pipeline_parallel}"
+        f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
+        f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
         f" --lora-r {args.lora_r}"
         f" --lora-targets {args.lora_targets}"
         f" --inner-lr {args.inner_lr}"
@@ -1048,6 +1189,12 @@ def make_miles_island_task(
         f" --wan-streams {args.wan_streams}"
         " --miles-root ~/miles"
     )
+    if getattr(args, "rollout_model", None):
+        flags += f" --rollout-model {shlex.quote(args.rollout_model)}"
+        flags += (
+            " --rollout-model-revision "
+            f"{shlex.quote(args.rollout_model_revision)}"
+        )
     dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
     if dynamic_filter:
         flags += (
@@ -1063,11 +1210,34 @@ def make_miles_island_task(
         flags += " --rl-offload-train"
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
+    for flag, name in (
+        ("--sglang-tp-size", "sglang_tp_size"),
+        ("--sglang-dp-size", "sglang_dp_size"),
+        ("--sglang-ep-size", "sglang_ep_size"),
+        ("--sglang-attention-backend", "sglang_attention_backend"),
+        ("--sglang-page-size", "sglang_page_size"),
+        ("--sglang-max-running-requests", "sglang_max_running_requests"),
+        ("--sglang-chunked-prefill-size", "sglang_chunked_prefill_size"),
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            flags += f" {flag} {shlex.quote(str(value))}"
+    if args.use_rollout_routing_replay:
+        flags += " --use-rollout-routing-replay"
+    if not getattr(args, "sglang_deterministic_inference", True):
+        flags += " --no-sglang-deterministic-inference"
     if args.custom_generate_function_path:
         flags += (
             " --custom-generate-function-path "
             f"{shlex.quote(args.custom_generate_function_path)}"
         )
+    if getattr(args, "custom_agent_function_path", None):
+        flags += (
+            " --custom-agent-function-path "
+            f"{shlex.quote(args.custom_agent_function_path)}"
+        )
+    if getattr(args, "agent_max_seq_len", None) is not None:
+        flags += f" --agent-max-seq-len {args.agent_max_seq_len}"
     if args.use_session_server:
         flags += " --use-session-server"
         if args.session_server_ip:
@@ -1077,6 +1247,11 @@ def make_miles_island_task(
             flags += f" --session-server-port {ports}"
         if args.tito_model:
             flags += f" --tito-model {shlex.quote(args.tito_model)}"
+        if getattr(args, "tito_allowed_append_roles", None):
+            roles = " ".join(
+                shlex.quote(role) for role in args.tito_allowed_append_roles
+            )
+            flags += f" --tito-allowed-append-roles {roles}"
     if args.model_revision:
         flags += f" --model-revision {shlex.quote(args.model_revision)}"
     if args.data_revision:
@@ -1093,7 +1268,10 @@ def make_miles_island_task(
         "set -e\n"
         f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
         f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
-        f"git -C ~/miles fetch --depth 1 origin {MILES_COMMIT}\n"
+        f"printf '%s  %s\\n' {MILES_BUNDLE_SHA256} "
+        f"~/sky_workdir/{MILES_BUNDLE_PATH} | sha256sum --check -\n"
+        f"git -C ~/miles fetch --depth 1 origin {MILES_UPSTREAM_COMMIT}\n"
+        f"git -C ~/miles fetch ~/sky_workdir/{MILES_BUNDLE_PATH} HEAD\n"
         f"git -C ~/miles checkout --detach {MILES_COMMIT}\n"
         f"python3 -m pip install -q --no-deps -e ~/miles "
         f"'peft=={MILES_PEFT_VERSION}'"
@@ -1138,6 +1316,19 @@ def make_miles_island_task(
         "CYBERGYM_AGENT_ID": args.cybergym_agent_id,
         "CYBERGYM_TIMEOUT": str(args.cybergym_timeout),
     }
+    if args.rl_model_recipe == "deepseek-v4-flash":
+        for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+            envs.pop(name, None)
+        envs.update(
+            {
+                "SGLANG_SKIP_CHECKPOINT_LOAD_CHECK": "1",
+                "SGLANG_DSV4_FP4_EXPERTS": "0",
+                "SGLANG_HEALTH_CHECK_TIMEOUT": "120",
+                "SGLANG_DG_CACHE_DIR_PER_PROCESS": "1",
+                "SGLANG_OPT_FP8_WO_A_GEMM": "0",
+                "SGLANG_OPT_FUSE_WQA_WKV": "0",
+            }
+        )
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
     if os.environ.get("CYBERGYM_API_KEY"):

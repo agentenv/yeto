@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,6 +21,13 @@ from .miles import verify_miles_revision
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.learner")
     parser.add_argument("--model", required=True)
+    parser.add_argument("--rollout-model", default=None)
+    parser.add_argument("--rollout-model-revision", default=None)
+    parser.add_argument(
+        "--rl-model-recipe",
+        choices=["generic", "deepseek-v4-flash"],
+        default="generic",
+    )
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--data-revision", default=None)
@@ -51,20 +59,50 @@ def parse_args(argv=None):
     parser.add_argument("--rollout-max-response-len", type=int, required=True)
     parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default=None)
     parser.add_argument("--custom-generate-function-path", default=None)
+    parser.add_argument("--custom-agent-function-path", default=None)
+    parser.add_argument("--agent-max-seq-len", type=int, default=None)
     parser.add_argument("--use-session-server", action="store_true")
     parser.add_argument("--session-server-ip", default=None)
     parser.add_argument("--session-server-port", type=int, nargs="+", default=None)
     parser.add_argument("--tito-model", default=None)
+    parser.add_argument(
+        "--tito-allowed-append-roles",
+        nargs="+",
+        choices=["tool", "user", "system"],
+        default=None,
+    )
     parser.add_argument("--completed-groups-path", required=True)
     parser.add_argument("--event-tape", required=True)
     parser.add_argument("--audit-dir", default=None)
     parser.add_argument("--actor-num-nodes", type=int, required=True)
     parser.add_argument("--actor-num-gpus-per-node", type=int, required=True)
+    parser.add_argument("--tensor-parallel", type=int, default=1)
+    parser.add_argument("--pipeline-parallel", type=int, default=1)
     parser.add_argument("--expert-parallel", type=int, default=None)
+    parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
+    parser.add_argument("--sglang-tp-size", type=int, default=None)
+    parser.add_argument("--sglang-dp-size", type=int, default=None)
+    parser.add_argument("--sglang-ep-size", type=int, default=None)
+    parser.add_argument("--sglang-mem-fraction-static", type=float, default=0.4)
+    parser.add_argument("--sglang-attention-backend", default=None)
+    parser.add_argument(
+        "--sglang-deterministic-inference",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--sglang-page-size", type=int, default=None)
+    parser.add_argument("--sglang-max-running-requests", type=int, default=None)
+    parser.add_argument("--sglang-chunked-prefill-size", type=int, default=None)
+    parser.add_argument("--use-rollout-routing-replay", action="store_true")
     parser.add_argument("--lora-r", type=int, required=True)
     parser.add_argument(
         "--lora-targets",
-        choices=["auto", "attention", "all-linear"],
+        choices=[
+            "auto",
+            "attention",
+            "attention-routed-experts",
+            "all-linear",
+        ],
         required=True,
     )
     parser.add_argument("--inner-lr", type=float, required=True)
@@ -104,7 +142,18 @@ def _miles_callable(spec: str) -> str:
     return f"{module}.{function}"
 
 
-def megatron_adapter_targets(specs, bridge) -> list[str]:
+_ROUTED_EXPERT_LORA_MODULE = re.compile(
+    r"^model\.layers\.(?P<layer>\d+)\.mlp\.experts\.\d+\."
+    r"(?P<projection>gate_proj|up_proj|down_proj)$"
+)
+
+
+def megatron_adapter_targets(
+    specs,
+    bridge,
+    *,
+    standard_grouped_experts: bool = False,
+) -> list[str]:
     """Map the exact PEFT contract onto Bridge's Megatron module paths."""
 
     model_bridge = getattr(bridge, "_model_bridge", None)
@@ -117,6 +166,17 @@ def megatron_adapter_targets(specs, bridge) -> list[str]:
     }
     targets = set()
     for module in modules:
+        expert = _ROUTED_EXPERT_LORA_MODULE.fullmatch(module)
+        if standard_grouped_experts and expert is not None:
+            branch = (
+                "linear_fc2"
+                if expert.group("projection") == "down_proj"
+                else "linear_fc1"
+            )
+            targets.add(
+                f"decoder.layers.{expert.group('layer')}.mlp.experts.{branch}"
+            )
+            continue
         hf_weight = f"{module}.weight"
         mapping = registry.hf_to_megatron_lookup(hf_weight)
         if mapping is None:
@@ -153,6 +213,7 @@ def build_miles_argv(
     args,
     *,
     model_path: str | Path,
+    rollout_model_path: str | Path | None = None,
     prompt_path: str | Path,
     provider,
     target_modules: list[str],
@@ -165,6 +226,9 @@ def build_miles_argv(
     layers = _positive_int(provider, "num_layers")
     ffn = _positive_int(provider, "ffn_hidden_size")
     query_groups = int(getattr(provider, "num_query_groups", heads))
+    multi_latent_attention = bool(
+        getattr(provider, "multi_latent_attention", False)
+    )
     kv_channels = int(getattr(provider, "kv_channels", hidden // heads))
     max_positions = int(
         _provider_value(
@@ -190,6 +254,11 @@ def build_miles_argv(
     rotary_base = int(getattr(provider, "rotary_base", 10000))
     rotary_percent = float(getattr(provider, "rotary_percent", 1.0))
     actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+    tensor_parallel = getattr(args, "tensor_parallel", 1)
+    pipeline_parallel = getattr(args, "pipeline_parallel", 1)
+    model_parallel = tensor_parallel * pipeline_parallel
+    if tensor_parallel <= 0 or pipeline_parallel <= 0 or actor_gpus % model_parallel:
+        raise ValueError("Miles actor world must be divisible by TP*PP")
     is_moe = getattr(provider, "num_moe_experts", None) is not None
     expert_parallel = getattr(args, "expert_parallel", None) or (
         actor_gpus if is_moe else 1
@@ -202,9 +271,13 @@ def build_miles_argv(
         raise ValueError(
             "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
         )
-    # Megatron DP includes the ranks rearranged into EP groups. With the v0
-    # TP=PP=CP=1 contract, Miles reports one rollout shard per actor rank.
-    data_parallel = actor_gpus
+    if args.lora_targets == "attention-routed-experts" and (
+        not is_moe or getattr(args, "rl_model_recipe", "generic") != "deepseek-v4-flash"
+    ):
+        raise ValueError(
+            "attention-routed-experts is reserved for the expanded DeepSeek V4 recipe"
+        )
+    data_parallel = actor_gpus // model_parallel
     global_batch = (
         args.groups_per_round * args.samples_per_group // args.optimizer_steps
     )
@@ -213,14 +286,38 @@ def build_miles_argv(
     if not target_modules:
         raise ValueError("PEFT selected no LoRA target modules")
     target_value = ",".join(target_modules)
+    recipe = getattr(args, "rl_model_recipe", "generic")
+    if recipe == "deepseek-v4-flash":
+        if args.lora_targets != "attention-routed-experts":
+            raise ValueError(
+                "expanded DeepSeek V4 recipe requires attention-routed-experts"
+            )
+        if (
+            tensor_parallel != 8
+            or pipeline_parallel != 1
+            or expert_parallel != 8
+            or getattr(args, "rollout_num_gpus_per_engine", 1) != 8
+        ):
+            raise ValueError(
+                "expanded DeepSeek V4 requires TP8/EP8/PP1 per-node replicas"
+            )
+        if layers != 43 or not is_moe or not multi_latent_attention:
+            raise ValueError(
+                "DeepSeek V4 Flash recipe requires the 43-layer MoE/MLA provider"
+            )
+        model_name = "deepseekv4"
+        training_attention_backend = "flash"
+    else:
+        model_name = type(provider).__name__
+        training_attention_backend = "unfused"
 
     values = [
         "train.py",
         "--train-backend", "megatron",
-        "--hf-checkpoint", str(model_path),
-        "--load", str(model_path),
+        "--hf-checkpoint", str(rollout_model_path or model_path),
+        "--ref-load", str(model_path),
         "--megatron-to-hf-mode", "bridge",
-        "--model-name", type(provider).__name__,
+        "--model-name", model_name,
         "--num-layers", str(layers),
         "--hidden-size", str(hidden),
         "--num-attention-heads", str(heads),
@@ -238,22 +335,29 @@ def build_miles_argv(
         "--lora-rank", str(args.lora_r),
         "--lora-alpha", str(args.lora_r),
         "--lora-dropout", "0",
-        "--lora-type", "canonical_lora",
+        "--lora-type",
+        (
+            "lora"
+            if args.lora_targets == "attention-routed-experts"
+            else "canonical_lora"
+        ),
         "--target-modules", target_value,
         "--lora-base-cpu-backup",
         "--actor-num-nodes", str(args.actor_num_nodes),
         "--actor-num-gpus-per-node", str(args.actor_num_gpus_per_node),
         "--num-gpus-per-node", str(args.actor_num_gpus_per_node),
-        "--rollout-num-gpus-per-engine", "1",
+        "--rollout-num-gpus-per-engine",
+        str(getattr(args, "rollout_num_gpus_per_engine", 1)),
         "--colocate",
         (
             "--offload-train"
             if getattr(args, "rl_offload_train", False)
             else "--no-offload-train"
         ),
-        "--sglang-mem-fraction-static", "0.4",
-        "--tensor-model-parallel-size", "1",
-        "--pipeline-model-parallel-size", "1",
+        "--sglang-mem-fraction-static",
+        str(getattr(args, "sglang_mem_fraction_static", 0.4)),
+        "--tensor-model-parallel-size", str(tensor_parallel),
+        "--pipeline-model-parallel-size", str(pipeline_parallel),
         "--context-parallel-size", "1",
         "--expert-model-parallel-size", str(expert_parallel),
         "--expert-tensor-parallel-size", "1",
@@ -261,10 +365,8 @@ def build_miles_argv(
         "--input-key", "messages",
         "--label-key", "label",
         "--metadata-key", "metadata",
-        "--apply-chat-template",
         "--rollout-seed",
         str(getattr(args, "rollout_seed", args.seed + args.learner_id)),
-        "--sglang-enable-deterministic-inference",
         "--num-rollout", str(args.global_rounds),
         "--rollout-batch-size", str(args.groups_per_round),
         "--n-samples-per-prompt", str(args.samples_per_group),
@@ -285,7 +387,7 @@ def build_miles_argv(
         "--lr", str(args.inner_lr),
         "--accumulate-allreduce-grads-in-fp32",
         "--attention-softmax-in-fp32",
-        "--attention-backend", "unfused",
+        "--attention-backend", training_attention_backend,
         "--no-gradient-accumulation-fusion",
         "--bf16",
         "--no-load-optim",
@@ -297,6 +399,60 @@ def build_miles_argv(
         "--sglang-max-lora-rank", str(args.lora_r),
         "--pin-rollout-manager-to-head",
     ]
+    if getattr(args, "sglang_deterministic_inference", True):
+        values.append("--sglang-enable-deterministic-inference")
+    if recipe == "deepseek-v4-flash":
+        values.extend(
+            (
+                "--transformer-impl",
+                "transformer_engine",
+                "--qkv-format",
+                "bshd",
+                "--recompute-granularity",
+                "full",
+                "--recompute-method",
+                "uniform",
+                "--recompute-num-layers",
+                "1",
+                "--micro-batch-size",
+                "1",
+                "--train-memory-margin-bytes",
+                str(3 * 1024**3),
+                "--moe-token-dispatcher-type",
+                "alltoall",
+                "--moe-router-freeze-gate",
+                "--freeze-e-score-correction-bias",
+                "--attention-dropout",
+                "0.0",
+                "--hidden-dropout",
+                "0.0",
+                "--sglang-moe-runner-backend",
+                "triton",
+                "--sglang-disable-shared-experts-fusion",
+            )
+        )
+        if args.lora_targets == "attention-routed-experts":
+            values.append("--no-sglang-lora-use-virtual-experts")
+    if pipeline_parallel > 1 and layers % pipeline_parallel:
+        middle_layers = layers // pipeline_parallel
+        remainder = layers - middle_layers * pipeline_parallel
+        first_layers = middle_layers + (remainder + 1) // 2
+        last_layers = middle_layers + remainder // 2
+        values.extend(
+            (
+                "--decoder-first-pipeline-num-layers",
+                str(first_layers),
+                "--decoder-last-pipeline-num-layers",
+                str(last_layers),
+            )
+        )
+    # Agentic session generation must receive the original message list.  A
+    # pre-render here would be rendered again by the session server and breaks
+    # both tool-role validation and TITO token identity.
+    if not getattr(args, "custom_agent_function_path", None):
+        values.append("--apply-chat-template")
+    if tensor_parallel > 1:
+        values.append("--sequence-parallel")
     values.extend(
         (
             "--distributed-timeout-minutes",
@@ -329,11 +485,34 @@ def build_miles_argv(
         value = getattr(args, name, None)
         if value is not None:
             values.extend((flag, str(value)))
+    for flag, name in (
+        ("--sglang-tp-size", "sglang_tp_size"),
+        ("--sglang-dp-size", "sglang_dp_size"),
+        ("--sglang-ep-size", "sglang_ep_size"),
+        ("--sglang-attention-backend", "sglang_attention_backend"),
+        ("--sglang-page-size", "sglang_page_size"),
+        ("--sglang-max-running-requests", "sglang_max_running_requests"),
+        ("--sglang-chunked-prefill-size", "sglang_chunked_prefill_size"),
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            values.extend((flag, str(value)))
+    if getattr(args, "use_rollout_routing_replay", False):
+        values.append("--use-rollout-routing-replay")
     if args.custom_generate_function_path:
         values.extend(
             (
                 "--custom-generate-function-path",
                 args.custom_generate_function_path,
+            )
+        )
+    if getattr(args, "custom_agent_function_path", None):
+        values.extend(
+            (
+                "--custom-agent-function-path",
+                args.custom_agent_function_path,
+                "--max-seq-len",
+                str(getattr(args, "agent_max_seq_len", None) or args.seq_len),
             )
         )
     dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
@@ -352,8 +531,29 @@ def build_miles_argv(
             values.append("--session-server-port")
             values.extend(str(port) for port in args.session_server_port)
         if args.tito_model:
+            from miles.utils.chat_template_utils import (
+                resolve_reasoning_and_tool_call_parser,
+            )
+
             values.extend(("--tito-model", args.tito_model))
-    if query_groups < heads:
+            reasoning_parser, tool_call_parser = (
+                resolve_reasoning_and_tool_call_parser(args.tito_model)
+            )
+            if reasoning_parser is not None:
+                values.extend(
+                    ("--sglang-reasoning-parser", reasoning_parser)
+                )
+            if tool_call_parser is not None:
+                values.extend(
+                    ("--sglang-tool-call-parser", tool_call_parser)
+                )
+        if getattr(args, "tito_allowed_append_roles", None):
+            values.append("--tito-allowed-append-roles")
+            values.extend(args.tito_allowed_append_roles)
+    # Megatron rejects GQA together with MLA.  MLA's compressed KV geometry is
+    # expressed by its own rank/head arguments even when the provider exposes
+    # fewer query groups than attention heads.
+    if query_groups < heads and not multi_latent_attention:
         values.append("--group-query-attention")
     if rope_type is not None:
         values.extend(("--rope-type", rope_type))
@@ -377,6 +577,22 @@ def build_miles_argv(
     ):
         values.extend(("--qkv-format", "bshd"))
     if getattr(provider, "num_moe_experts", None) is not None:
+        moe_layer_freq = _provider_value(provider, "moe_layer_freq")
+        if recipe == "deepseek-v4-flash":
+            if isinstance(moe_layer_freq, (list, tuple)):
+                mask = tuple(int(value) for value in moe_layer_freq)
+                if len(mask) != layers or set(mask) != {1}:
+                    raise ValueError(
+                        "DeepSeek V4 Flash requires every one of its 43 layers "
+                        "to be an MoE layer"
+                    )
+            elif int(moe_layer_freq) != 1:
+                raise ValueError(
+                    "DeepSeek V4 Flash requires moe_layer_freq=1"
+                )
+            # Pinned Miles' moe_freq_type parser accepts the uniform topology
+            # as a scalar, not the provider's Python list string.
+            moe_layer_freq = 1
         values.extend(
             (
                 "--num-experts",
@@ -386,7 +602,7 @@ def build_miles_argv(
                 "--moe-router-topk",
                 str(_positive_int(provider, "moe_router_topk")),
                 "--moe-layer-freq",
-                str(_provider_value(provider, "moe_layer_freq")),
+                str(moe_layer_freq),
             )
         )
         shared = getattr(provider, "moe_shared_expert_intermediate_size", None)
@@ -394,7 +610,7 @@ def build_miles_argv(
             values.extend(
                 ("--moe-shared-expert-intermediate-size", str(int(shared)))
             )
-    if bool(getattr(provider, "multi_latent_attention", False)):
+    if multi_latent_attention:
         values.append("--multi-latent-attention")
         for name in (
             "q_lora_rank",
@@ -490,6 +706,7 @@ def run_miles(
     args,
     *,
     model_path: str | Path,
+    rollout_model_path: str | Path | None = None,
     prompt_path: str | Path,
     yeto_policy_sync: bool = True,
     extra_argv: Sequence[str] = (),
@@ -502,6 +719,28 @@ def run_miles(
         and args.optimizer_steps != 1
     ):
         raise ValueError("decoupled RL requires one optimizer step per rollout")
+
+    clone_only_lora = args.lora_targets == "attention-routed-experts"
+    if clone_only_lora:
+        for name in (
+            "YETO_DSV4_EXPERT_CLONE",
+            "YETO_DSV4_CLONE_ONLY_LORA",
+        ):
+            current = os.environ.get(name)
+            if current not in (None, "1"):
+                raise ValueError(f"{name} must be unset or 1, got {current!r}")
+            os.environ[name] = "1"
+        fuse_wqa_wkv = os.environ.get("SGLANG_OPT_FUSE_WQA_WKV")
+        if fuse_wqa_wkv not in (None, "0"):
+            raise ValueError(
+                "SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA"
+            )
+        os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
+
+    if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":
+        from .deepseek_v4_bridge import ensure_deepseek_v4_bridge
+
+        ensure_deepseek_v4_bridge()
 
     from megatron.bridge import AutoBridge
 
@@ -519,10 +758,15 @@ def run_miles(
         trust_remote_code=args.trust_remote_code,
     )
     canonical_targets = adapter_targets(specs)
-    miles_targets = megatron_adapter_targets(specs, model_bridge)
+    miles_targets = megatron_adapter_targets(
+        specs,
+        model_bridge,
+        standard_grouped_experts=clone_only_lora,
+    )
     miles_argv = build_miles_argv(
         args,
         model_path=model_path,
+        rollout_model_path=rollout_model_path,
         prompt_path=prompt_path,
         provider=provider,
         target_modules=miles_targets,
@@ -548,9 +792,20 @@ def run_miles(
         miles_args.yeto_rl_model = args.model
         miles_args.yeto_rl_data = args.data
         miles_args.yeto_rl_base_model_revision = args.model_revision
+        miles_args.yeto_rl_rollout_model_revision = (
+            getattr(args, "rollout_model_revision", None) or args.model_revision
+        )
         miles_args.yeto_rl_data_revision = args.data_revision
         miles_args.yeto_rl_lora_config_hash = lora_config_hash
         miles_args.yeto_rl_layout_hash = layout_hash
+        miles_args.yeto_rl_clone_only_lora = clone_only_lora
+        if clone_only_lora:
+            # The Bridge exposes one representative mapping per packed expert
+            # parameter.  Miles needs the full canonical set at the external
+            # policy boundary, including exact-zero original-expert tensors.
+            miles_args.yeto_rl_canonical_lora_names = tuple(
+                spec.name for spec in specs
+            )
         miles_args.yeto_rl_reward_sha256 = args.reward_sha256
         miles_args.yeto_rl_dynamic_sampling_max_replacements = getattr(
             args, "dynamic_sampling_max_replacements", None
@@ -656,6 +911,8 @@ def main(argv=None) -> None:
     load_function(_miles_callable(args.reward_function))
     if args.custom_generate_function_path:
         load_function(args.custom_generate_function_path)
+    if args.custom_agent_function_path:
+        load_function(args.custom_agent_function_path)
     from huggingface_hub import snapshot_download
 
     from ..models import resolve
@@ -664,12 +921,29 @@ def main(argv=None) -> None:
         model_path = str(Path(model).expanduser().resolve())
     else:
         model_path = snapshot_download(repo_id=model, revision=args.model_revision)
+    rollout_model = resolve(args.rollout_model) if args.rollout_model else model
+    if rollout_model == model:
+        rollout_model_path = model_path
+    elif is_local_reference(rollout_model):
+        rollout_model_path = str(Path(rollout_model).expanduser().resolve())
+        if not Path(rollout_model_path).is_dir():
+            raise ValueError("--rollout-model local directory does not exist")
+    else:
+        rollout_model_path = snapshot_download(
+            repo_id=rollout_model,
+            revision=args.rollout_model_revision,
+        )
     prompt_path = prepare_prompt_data(
         args.data,
         args.data_revision,
         "~/yeto-rl/prompts.jsonl",
     )
-    run_miles(args, model_path=model_path, prompt_path=prompt_path)
+    run_miles(
+        args,
+        model_path=model_path,
+        rollout_model_path=rollout_model_path,
+        prompt_path=prompt_path,
+    )
 
 
 if __name__ == "__main__":

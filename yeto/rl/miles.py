@@ -180,6 +180,9 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "model": args.yeto_rl_model,
         "dataset": args.yeto_rl_data,
         "base_model_revision": args.yeto_rl_base_model_revision,
+        "rollout_model_revision": getattr(
+            args, "yeto_rl_rollout_model_revision", args.yeto_rl_base_model_revision
+        ),
         "data_revision": args.yeto_rl_data_revision,
         "seq_length": args.seq_length,
         "seed": args.seed,
@@ -840,7 +843,23 @@ class MilesPolicySync:
         references = data_pack.get("data_ref")
         if not isinstance(references, list):
             raise RuntimeError("Miles returned an invalid rollout shard list")
-        expected = self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
+        world_size = (
+            int(self.args.actor_num_nodes)
+            * int(self.args.actor_num_gpus_per_node)
+        )
+        model_parallel_size = (
+            int(getattr(self.args, "tensor_model_parallel_size", 1))
+            * int(getattr(self.args, "pipeline_model_parallel_size", 1))
+            * int(getattr(self.args, "context_parallel_size", 1))
+        )
+        if world_size <= 0 or model_parallel_size <= 0:
+            raise RuntimeError("Miles returned an invalid actor topology")
+        if world_size % model_parallel_size:
+            raise RuntimeError(
+                "Miles actor world size is not divisible by its "
+                "TP/PP/CP model-parallel size"
+            )
+        expected = world_size // model_parallel_size
         if len(references) != expected:
             raise RuntimeError(
                 f"Miles returned {len(references)} DP shards, expected {expected}"

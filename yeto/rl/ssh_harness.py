@@ -19,23 +19,43 @@ from typing import Any
 import torch
 
 from . import (
+    MILES_BUNDLE_PATH,
+    MILES_BUNDLE_SHA256,
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
+    MILES_UPSTREAM_COMMIT,
+    SGLANG_BUNDLE_PATH,
+    SGLANG_BUNDLE_SHA256,
     SGLANG_COMMIT,
     SGLANG_REPOSITORY,
+    SGLANG_UPSTREAM_COMMIT,
 )
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
 PLAN_SCHEMA = 1
-LEARNERS = 2
 SYNCER_PORT = 29400
 RAY_PORT = 6379
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REMOTE_ROOT = ".cache/yeto-rl-ssh"
+TMS_PRELOAD_PATCH_REPOSITORY = "https://github.com/fzyzcjy/torch_memory_saver"
+TMS_PRELOAD_PATCH_BASE_COMMIT = "fdb09ad342f8d150e11afe719f798453cef742ad"
+TMS_PRELOAD_PATCH_COMMIT = "d7a3a51bce723a80736dabf233017b927de03df8"
+TMS_PRELOAD_PATCH_CONTAINER_PATH = (
+    "/usr/local/lib/python3.12/dist-packages/"
+    "torch_memory_saver_hook_mode_preload_cu13.abi3.so"
+)
+TMS_PRELOAD_BASE_BINARY_SHA256 = (
+    "27fd2a983e6dca2bc30ebe834c32221b6a16afe9d44cd5ab78f06ba6d7a99b60"
+)
+TMS_TRAIN_DISK_BACKUP_CONTAINER_PATH = "/workspace/tms-disk-backup"
+TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB = 256
+TMS_TRAIN_DISK_BACKUP_ROOT = PurePosixPath("/data/yeto-rl/tms-disk-backup")
+
 
 _RUN_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,47}\Z")
 _REMOTE_PATH = re.compile(r"[a-zA-Z0-9._/-]+\Z")
+_REMOTE_ABSOLUTE_PATH = re.compile(r"/data/[a-zA-Z0-9._/-]+\Z")
 _SSH_TARGET = re.compile(r"(?:[a-zA-Z0-9._-]+@)?[a-zA-Z0-9._-]+\Z")
 _HOST = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9.-]*\Z")
 _DOCKER_DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
@@ -45,6 +65,13 @@ _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 class HarnessError(RuntimeError):
     pass
+
+
+def _learner_count(plan: dict[str, Any]) -> int:
+    islands = plan.get("islands")
+    if not isinstance(islands, list) or not islands:
+        raise HarnessError("plan must contain at least one Miles island")
+    return len(islands)
 
 
 def _atomic_bytes(path: Path, data: bytes) -> None:
@@ -81,6 +108,44 @@ def _validate_target(value: str) -> str:
     if not _SSH_TARGET.fullmatch(value):
         raise HarnessError(f"invalid SSH target {value!r}")
     return value
+
+
+def _remote_model_mount(reference: str | None) -> str | None:
+    if reference is None or not reference.startswith("/"):
+        return None
+    path = PurePosixPath(reference)
+    if (
+        not _REMOTE_ABSOLUTE_PATH.fullmatch(reference)
+        or ".." in path.parts
+        or len(path.parts) < 4
+    ):
+        raise HarnessError(
+            "remote model paths must be specific directories under /data"
+        )
+    if "snapshots" in path.parts:
+        index = path.parts.index("snapshots")
+        if index < 3 or index + 1 >= len(path.parts):
+            raise HarnessError("remote Hugging Face snapshot path is incomplete")
+        # Snapshot entries are relative symlinks into the repository's blobs/
+        # directory, so mount the narrow models--ORG--NAME root, not /data/hf.
+        path = PurePosixPath(*path.parts[:index])
+    return path.as_posix()
+
+
+def _remote_model_mounts(learner: dict[str, Any]) -> list[str]:
+    mounts = {
+        mount
+        for mount in (
+            _remote_model_mount(str(learner.get("model", ""))),
+            _remote_model_mount(
+                str(learner["rollout_model"])
+                if learner.get("rollout_model") is not None
+                else None
+            ),
+        )
+        if mount is not None
+    }
+    return sorted(mounts)
 
 
 def _target_host(target: str) -> str:
@@ -126,6 +191,151 @@ def _syncer_source_sha256() -> str:
         digest.update(len(data).to_bytes(8, "big"))
         digest.update(data)
     return digest.hexdigest()
+
+
+def _tms_preload_patch(path: str | Path) -> dict[str, str]:
+    """Attest the narrow upstream fix over the pinned Miles image binary."""
+
+    from ..provenance import file_sha256
+
+    source = Path(path).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise HarnessError("--tms-preload-patch must be a regular, non-symlink file")
+    source = source.resolve()
+    try:
+        relative = source.relative_to(REPO_ROOT.resolve())
+    except ValueError as exc:
+        raise HarnessError(
+            "--tms-preload-patch must be inside the Yeto source tree"
+        ) from exc
+    source_path = relative.as_posix()
+    if (
+        not _REMOTE_PATH.fullmatch(source_path)
+        or ".." in relative.parts
+        or source.suffix != ".so"
+    ):
+        raise HarnessError("--tms-preload-patch has an unsafe source path")
+    return {
+        "repository": TMS_PRELOAD_PATCH_REPOSITORY,
+        "base_commit": TMS_PRELOAD_PATCH_BASE_COMMIT,
+        "patch_commit": TMS_PRELOAD_PATCH_COMMIT,
+        "source_path": source_path,
+        "container_path": TMS_PRELOAD_PATCH_CONTAINER_PATH,
+        "base_binary_sha256": TMS_PRELOAD_BASE_BINARY_SHA256,
+        "binary_sha256": file_sha256(source),
+    }
+
+
+def _validate_tms_preload_patch(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise HarnessError("offloaded training requires an attested TMS preload patch")
+    if set(value) != {
+        "repository",
+        "base_commit",
+        "patch_commit",
+        "source_path",
+        "container_path",
+        "base_binary_sha256",
+        "binary_sha256",
+    }:
+        raise HarnessError("plan has an invalid TMS preload patch contract")
+    if (
+        value.get("repository") != TMS_PRELOAD_PATCH_REPOSITORY
+        or value.get("base_commit") != TMS_PRELOAD_PATCH_BASE_COMMIT
+        or value.get("patch_commit") != TMS_PRELOAD_PATCH_COMMIT
+        or value.get("container_path") != TMS_PRELOAD_PATCH_CONTAINER_PATH
+        or value.get("base_binary_sha256") != TMS_PRELOAD_BASE_BINARY_SHA256
+    ):
+        raise HarnessError("plan does not use the pinned TMS free-while-paused fix")
+    source_path = str(value.get("source_path", ""))
+    relative = PurePosixPath(source_path)
+    if (
+        not source_path
+        or source_path.startswith(("/", "~"))
+        or not _REMOTE_PATH.fullmatch(source_path)
+        or ".." in relative.parts
+        or relative.suffix != ".so"
+    ):
+        raise HarnessError("plan has an invalid TMS preload patch source path")
+    if not _SHA256.fullmatch(str(value.get("binary_sha256", ""))):
+        raise HarnessError("plan has an invalid TMS preload patch SHA256")
+
+
+def _validate_tms_train_disk_backup_root(value: str) -> str:
+    path = PurePosixPath(value)
+    prefix = TMS_TRAIN_DISK_BACKUP_ROOT
+    if (
+        not value
+        or not _REMOTE_ABSOLUTE_PATH.fullmatch(value)
+        or ".." in path.parts
+        or path.parts[: len(prefix.parts)] != prefix.parts
+    ):
+        raise HarnessError(
+            "--tms-train-disk-backup-root must be the dedicated "
+            "/data/yeto-rl/tms-disk-backup directory or one of its descendants"
+        )
+    return path.as_posix()
+
+
+def _validate_tms_train_disk_backup_chunk_mb(value: Any) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or value > 4096
+    ):
+        raise HarnessError(
+            "--tms-train-disk-backup-chunk-mb must be an integer from 1 to 4096"
+        )
+    return value
+
+
+def _tms_train_disk_backup_contract(
+    host_root: str,
+    run_id: str,
+    islands: list[dict[str, Any]],
+    chunk_mb: int,
+) -> dict[str, Any]:
+    root = _validate_tms_train_disk_backup_root(host_root)
+    run_id = _validate_run_id(run_id)
+    chunk_mb = _validate_tms_train_disk_backup_chunk_mb(chunk_mb)
+    node_paths = {}
+    for learner_id, island in enumerate(islands):
+        for node_id, target in enumerate(island["hosts"]):
+            node_paths[target] = (
+                PurePosixPath(root)
+                / run_id
+                / f"island-{learner_id}-node-{node_id}"
+            ).as_posix()
+    return {
+        "host_root": root,
+        "container_path": TMS_TRAIN_DISK_BACKUP_CONTAINER_PATH,
+        "chunk_mb": chunk_mb,
+        "node_paths": node_paths,
+    }
+
+
+def _validate_tms_train_disk_backup(
+    value: Any,
+    plan: dict[str, Any],
+) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "host_root",
+        "container_path",
+        "chunk_mb",
+        "node_paths",
+    }:
+        raise HarnessError(
+            "offloaded training requires a TMS trainer disk-backup contract"
+        )
+    expected = _tms_train_disk_backup_contract(
+        str(value.get("host_root", "")),
+        str(plan.get("run_id", "")),
+        plan["islands"],
+        value.get("chunk_mb"),
+    )
+    if value != expected:
+        raise HarnessError("plan has an invalid TMS trainer disk-backup contract")
 
 
 def _local_data_sha256(path: str | Path) -> str:
@@ -185,23 +395,35 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if plan.get("remote_env_file") is not None:
         _validate_remote_path(plan["remote_env_file"], "remote_env_file")
     islands = plan.get("islands")
-    if not isinstance(islands, list) or len(islands) != LEARNERS:
-        raise HarnessError("plan must contain exactly two Miles islands")
+    if not isinstance(islands, list) or not islands:
+        raise HarnessError("plan must contain at least one Miles island")
     all_hosts = []
     node_counts = set()
     gpu_counts = set()
+    accelerators = set()
     for island in islands:
         hosts = island.get("hosts") if isinstance(island, dict) else None
         gpus = island.get("gpus_per_node") if isinstance(island, dict) else None
-        if not isinstance(hosts, list) or not hosts or not isinstance(gpus, int) or gpus <= 0:
+        if (
+            not isinstance(hosts, list)
+            or not hosts
+            or not isinstance(gpus, int)
+            or gpus <= 0
+        ):
             raise HarnessError("each island needs hosts and a positive GPU count")
         node_counts.add(len(hosts))
         gpu_counts.add(gpus)
+        accelerator = island.get("accelerator", "H200")
+        if accelerator != "H200":
+            raise HarnessError("the direct SSH RL harness is pinned to H200")
+        accelerators.add(accelerator)
         all_hosts.extend(_validate_target(host) for host in hosts)
     if len(node_counts) != 1:
-        raise HarnessError("both acceptance islands must use the same node count")
+        raise HarnessError("all acceptance islands must use the same node count")
     if len(gpu_counts) != 1:
-        raise HarnessError("both acceptance islands must use the same GPU count")
+        raise HarnessError("all acceptance islands must use the same GPU count")
+    if accelerators != {"H200"}:
+        raise HarnessError("all acceptance islands must record H200")
     if len(set(all_hosts)) != len(all_hosts):
         raise HarnessError("each SSH target may belong to only one island")
     _, port = _validate_address(str(plan.get("syncer_address", "")))
@@ -210,13 +432,19 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     _docker_ref(str(plan.get("docker_image", "")))
     if plan.get("miles") != {
         "repository": MILES_REPOSITORY,
+        "upstream_commit": MILES_UPSTREAM_COMMIT,
         "commit": MILES_COMMIT,
+        "bundle_path": MILES_BUNDLE_PATH,
+        "bundle_sha256": MILES_BUNDLE_SHA256,
         "peft_version": MILES_PEFT_VERSION,
     }:
         raise HarnessError("plan does not use the current pinned Miles revision")
     if plan.get("sglang") != {
         "repository": SGLANG_REPOSITORY,
+        "upstream_commit": SGLANG_UPSTREAM_COMMIT,
         "commit": SGLANG_COMMIT,
+        "bundle_path": SGLANG_BUNDLE_PATH,
+        "bundle_sha256": SGLANG_BUNDLE_SHA256,
     }:
         raise HarnessError("plan does not use the current pinned SGLang revision")
     for name in ("source_sha256", "reward_sha256", "syncer_source_sha256"):
@@ -225,8 +453,44 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     learner = plan.get("learner")
     if not isinstance(learner, dict):
         raise HarnessError("plan has no learner configuration")
+    tms_patch = plan.get("tms_preload_patch")
+    tms_train_disk_backup = plan.get("tms_train_disk_backup")
+    if learner.get("rl_offload_train"):
+        _validate_tms_preload_patch(tms_patch)
+        _validate_tms_train_disk_backup(tms_train_disk_backup, plan)
+    else:
+        if tms_patch is not None:
+            _validate_tms_preload_patch(tms_patch)
+        if tms_train_disk_backup is not None:
+            raise HarnessError("TMS trainer disk backup requires --rl-offload-train")
+    if learner.get("rl_model_recipe", "generic") not in {
+        "generic",
+        "deepseek-v4-flash",
+    }:
+        raise HarnessError("plan has invalid rl_model_recipe")
+    if learner.get("model_mounts") != _remote_model_mounts(learner):
+        raise HarnessError("plan has invalid remote model mounts")
+    model_manifest_sha256 = learner.get("model_manifest_sha256")
+    if str(learner.get("model", "")).startswith("/"):
+        if not _SHA256.fullmatch(str(model_manifest_sha256 or "")):
+            raise HarnessError(
+                "remote-local model requires an immutable conversion manifest SHA256"
+            )
+    elif model_manifest_sha256 is not None:
+        raise HarnessError("Hub model may not declare a local conversion manifest")
     if not _REVISION.fullmatch(str(learner.get("model_revision", ""))):
         raise HarnessError("plan model revision must be an immutable commit")
+    rollout_model = learner.get("rollout_model")
+    rollout_revision = learner.get("rollout_model_revision")
+    if rollout_model is not None and rollout_model != learner.get("model"):
+        if not _REVISION.fullmatch(str(rollout_revision or "")):
+            raise HarnessError(
+                "plan rollout model revision must be an immutable commit"
+            )
+    elif rollout_revision is not None and not _REVISION.fullmatch(
+        str(rollout_revision)
+    ):
+        raise HarnessError("plan has invalid rollout model revision")
     data_revision = learner.get("data_revision")
     data_local_path = learner.get("data_local_path")
     data_sha256 = learner.get("data_sha256")
@@ -260,9 +524,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     fragments = learner.get("fragments", 1)
     pipeline = learner.get("pipeline", 1)
     local_horizon = learner.get("local_horizon", 1)
-    total_fragment_steps = learner.get(
-        "total_fragment_steps", learner["global_rounds"]
-    )
+    total_fragment_steps = learner.get("total_fragment_steps", learner["global_rounds"])
     for name, value in (
         ("fragments", fragments),
         ("pipeline", pipeline),
@@ -286,16 +548,11 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         or total_fragment_steps != learner["global_rounds"] * fragments
     ):
         raise HarnessError("invalid decoupled learner settings")
-    world = len(islands[0]["hosts"]) * islands[0]["gpus_per_node"]
-    if learner["groups_per_round"] * learner["samples_per_group"] % world:
-        raise HarnessError("plan Miles batch does not divide across island GPUs")
     dynamic_filter = learner.get("dynamic_sampling_filter_path")
     if dynamic_filter:
         parts = str(dynamic_filter).split(".")
         if len(parts) < 2 or any(not part.isidentifier() for part in parts):
-            raise HarnessError(
-                "plan has an invalid dynamic_sampling_filter_path"
-            )
+            raise HarnessError("plan has an invalid dynamic_sampling_filter_path")
         if learner["over_sampling_batch_size"] <= learner["groups_per_round"]:
             raise HarnessError(
                 "variance-aware filtering requires oversampling beyond the training batch"
@@ -304,14 +561,73 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if max_replacements is not None and (
         not isinstance(max_replacements, int) or max_replacements < 0
     ):
-        raise HarnessError(
-            "plan has an invalid dynamic_sampling_max_replacements"
-        )
+        raise HarnessError("plan has an invalid dynamic_sampling_max_replacements")
     timeout_minutes = learner.get("rl_distributed_timeout_minutes", 10)
     if not isinstance(timeout_minutes, int) or timeout_minutes <= 0:
+        raise HarnessError("plan has an invalid rl_distributed_timeout_minutes")
+    tensor_parallel = learner.get("tensor_parallel", 1)
+    pipeline_parallel = learner.get("pipeline_parallel", 1)
+    if (
+        not isinstance(tensor_parallel, int)
+        or tensor_parallel <= 0
+        or not isinstance(pipeline_parallel, int)
+        or pipeline_parallel <= 0
+    ):
+        raise HarnessError("plan has invalid tensor/pipeline parallelism")
+    world = islands[0]["gpus_per_node"] * len(islands[0]["hosts"])
+    if world % (tensor_parallel * pipeline_parallel):
+        raise HarnessError("plan TP*PP does not divide the island GPU world")
+    data_parallel = world // (tensor_parallel * pipeline_parallel)
+    if (learner["groups_per_round"] * learner["samples_per_group"]) % data_parallel:
+        raise HarnessError("plan Miles batch does not divide across data parallelism")
+    rollout_gpus = learner.get("rollout_num_gpus_per_engine", 1)
+    if not isinstance(rollout_gpus, int) or rollout_gpus <= 0 or world % rollout_gpus:
+        raise HarnessError("plan has invalid rollout_num_gpus_per_engine")
+    memory_fraction = learner.get("sglang_mem_fraction_static", 0.4)
+    if not isinstance(memory_fraction, (int, float)) or not 0 < memory_fraction < 1:
+        raise HarnessError("plan has invalid sglang_mem_fraction_static")
+    deterministic = learner.get("sglang_deterministic_inference", True)
+    if not isinstance(deterministic, bool):
+        raise HarnessError("plan has invalid sglang_deterministic_inference")
+    if deterministic and learner.get("sglang_attention_backend") in {
+        "dsv4",
+        "compressed",
+    }:
         raise HarnessError(
-            "plan has an invalid rl_distributed_timeout_minutes"
+            "dsv4/compressed attention is incompatible with deterministic inference"
         )
+    if learner.get("rl_model_recipe") == "deepseek-v4-flash":
+        if (
+            learner.get("lora_targets") != "attention-routed-experts"
+            or tensor_parallel != 8
+            or pipeline_parallel != 1
+            or learner.get("expert_parallel") != 8
+            or rollout_gpus != 8
+            or learner.get("sglang_tp_size") != 8
+            or learner.get("sglang_ep_size") != 8
+            or learner.get("sglang_dp_size") not in (None, 1)
+        ):
+            raise HarnessError(
+                "expanded DeepSeek V4 plan must use per-node "
+                "TP8/EP8/PP1 replicas and cross-node DP only"
+            )
+    custom_agent = learner.get("custom_agent_function_path")
+    if custom_agent is not None:
+        if (
+            not isinstance(custom_agent, str)
+            or not learner.get("custom_generate_function_path")
+            or not learner.get("use_session_server")
+            or not learner.get("tito_model")
+        ):
+            raise HarnessError("plan has an incomplete agentic session contract")
+    roles = learner.get("tito_allowed_append_roles")
+    if roles is not None and (
+        not isinstance(roles, list)
+        or not roles
+        or any(role not in {"tool", "user", "system"} for role in roles)
+        or len(set(roles)) != len(roles)
+    ):
+        raise HarnessError("plan has invalid tito_allowed_append_roles")
     if learner.get("cybergym_reward_scheme", "binary") not in {
         "binary",
         "shaped_v1",
@@ -345,16 +661,22 @@ def _strip_separator(values: Sequence[str]) -> list[str]:
 
 
 def _parse_islands(values: Sequence[str], gpus_per_node: int) -> list[dict[str, Any]]:
-    if len(values) != LEARNERS or gpus_per_node <= 0:
-        raise HarnessError("prepare requires two --host groups and positive GPUs per node")
+    if not values or gpus_per_node <= 0:
+        raise HarnessError(
+            "prepare requires one or more --host groups and positive GPUs per node"
+        )
     islands = []
     for value in values:
-        hosts = [_validate_target(item.strip()) for item in value.split(",") if item.strip()]
+        hosts = [
+            _validate_target(item.strip()) for item in value.split(",") if item.strip()
+        ]
         if not hosts:
             raise HarnessError("each --host must contain at least one SSH target")
-        islands.append({"hosts": hosts, "gpus_per_node": gpus_per_node})
+        islands.append(
+            {"hosts": hosts, "gpus_per_node": gpus_per_node, "accelerator": "H200"}
+        )
     if len({len(island["hosts"]) for island in islands}) != 1:
-        raise HarnessError("both --host groups must contain the same number of nodes")
+        raise HarnessError("all --host groups must contain the same number of nodes")
     if len({host for island in islands for host in island["hosts"]}) != sum(
         len(island["hosts"]) for island in islands
     ):
@@ -377,7 +699,7 @@ def _resolved_launch_args(namespace, islands):
         if _has_option(launch_args, reserved):
             raise HarnessError(f"{reserved} is set by the SSH harness")
     gpu = ",".join(
-        f"ssh:{len(island['hosts'])}x{island['gpus_per_node']}xa100@island-{index}"
+        f"ssh:{len(island['hosts'])}x{island['gpus_per_node']}xh200@island-{index}"
         for index, island in enumerate(islands)
     )
     argv = [
@@ -395,7 +717,11 @@ def _resolved_launch_args(namespace, islands):
         *launch_args,
     ]
     args = build_parser().parse_args(argv)
-    prepare_launch_args(args, allow_local_rl_data=True)
+    prepare_launch_args(
+        args,
+        allow_local_rl_data=True,
+        allow_remote_rl_model=True,
+    )
     return args
 
 
@@ -431,6 +757,41 @@ def prepare(namespace) -> Path:
         if source.is_file():
             data += source.suffix
 
+    tms_patch_path = getattr(namespace, "tms_preload_patch", None)
+    tms_preload_patch = (
+        _tms_preload_patch(tms_patch_path) if tms_patch_path is not None else None
+    )
+    tms_train_disk_backup_root = getattr(
+        namespace,
+        "tms_train_disk_backup_root",
+        None,
+    )
+    tms_train_disk_backup = None
+    if bool(getattr(args, "rl_offload_train", False)):
+        if tms_preload_patch is None:
+            raise HarnessError(
+                "--rl-offload-train requires --tms-preload-patch with the pinned "
+                "free-while-paused fix"
+            )
+        if tms_train_disk_backup_root is None:
+            raise HarnessError(
+                "--rl-offload-train requires --tms-train-disk-backup-root"
+            )
+        tms_train_disk_backup = _tms_train_disk_backup_contract(
+            tms_train_disk_backup_root,
+            run_id,
+            islands,
+            getattr(
+                namespace,
+                "tms_train_disk_backup_chunk_mb",
+                TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB,
+            ),
+        )
+    elif tms_train_disk_backup_root is not None:
+        raise HarnessError(
+            "--tms-train-disk-backup-root requires --rl-offload-train"
+        )
+
     plan = {
         "schema": PLAN_SCHEMA,
         "run_id": run_id,
@@ -444,18 +805,36 @@ def prepare(namespace) -> Path:
         "docker_image": _docker_ref(args.rl_image),
         "miles": {
             "repository": MILES_REPOSITORY,
+            "upstream_commit": MILES_UPSTREAM_COMMIT,
             "commit": MILES_COMMIT,
+            "bundle_path": MILES_BUNDLE_PATH,
+            "bundle_sha256": MILES_BUNDLE_SHA256,
             "peft_version": MILES_PEFT_VERSION,
         },
         "sglang": {
             "repository": SGLANG_REPOSITORY,
+            "upstream_commit": SGLANG_UPSTREAM_COMMIT,
             "commit": SGLANG_COMMIT,
+            "bundle_path": SGLANG_BUNDLE_PATH,
+            "bundle_sha256": SGLANG_BUNDLE_SHA256,
         },
         "source_sha256": args.source_sha256,
         "reward_sha256": args.reward_sha256,
         "syncer_source_sha256": _syncer_source_sha256(),
+        "tms_preload_patch": tms_preload_patch,
+        "tms_train_disk_backup": tms_train_disk_backup,
         "learner": {
             "model": args.model,
+            "rollout_model": getattr(args, "rollout_model", None),
+            "rollout_model_revision": getattr(args, "rollout_model_revision", None),
+            "rl_model_recipe": args.rl_model_recipe,
+            "model_mounts": _remote_model_mounts(
+                {
+                    "model": args.model,
+                    "rollout_model": getattr(args, "rollout_model", None),
+                }
+            ),
+            "model_manifest_sha256": namespace.model_manifest_sha256,
             "model_revision": args.model_revision,
             "data": data,
             "data_revision": args.data_revision,
@@ -489,11 +868,31 @@ def prepare(namespace) -> Path:
                 args, "apply_chat_template_kwargs", None
             ),
             "custom_generate_function_path": args.custom_generate_function_path,
+            "custom_agent_function_path": getattr(
+                args, "custom_agent_function_path", None
+            ),
+            "agent_max_seq_len": getattr(args, "agent_max_seq_len", None),
             "use_session_server": args.use_session_server,
             "session_server_ip": args.session_server_ip,
             "session_server_port": args.session_server_port,
             "tito_model": args.tito_model,
+            "tito_allowed_append_roles": getattr(
+                args, "tito_allowed_append_roles", None
+            ),
+            "tensor_parallel": args.tensor_parallel,
+            "pipeline_parallel": args.pipeline_parallel,
             "expert_parallel": args.expert_parallel,
+            "rollout_num_gpus_per_engine": args.rollout_num_gpus_per_engine,
+            "sglang_tp_size": args.sglang_tp_size,
+            "sglang_dp_size": args.sglang_dp_size,
+            "sglang_ep_size": args.sglang_ep_size,
+            "sglang_mem_fraction_static": args.sglang_mem_fraction_static,
+            "sglang_attention_backend": args.sglang_attention_backend,
+            "sglang_deterministic_inference": args.sglang_deterministic_inference,
+            "sglang_page_size": args.sglang_page_size,
+            "sglang_max_running_requests": args.sglang_max_running_requests,
+            "sglang_chunked_prefill_size": args.sglang_chunked_prefill_size,
+            "use_rollout_routing_replay": args.use_rollout_routing_replay,
             "lora_r": args.lora_r,
             "lora_targets": args.lora_targets,
             "inner_lr": args.inner_lr,
@@ -526,9 +925,7 @@ def _run(
     command: Sequence[str], *, capture: bool = False, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
     print("+", shlex.join(command), flush=True)
-    return subprocess.run(
-        list(command), check=check, text=True, capture_output=capture
-    )
+    return subprocess.run(list(command), check=check, text=True, capture_output=capture)
 
 
 def _ssh_command(plan: dict[str, Any], target: str, script: str) -> list[str]:
@@ -566,19 +963,36 @@ def _all_hosts(plan: dict[str, Any]) -> list[str]:
 
 
 def _attest_local(plan: dict[str, Any]) -> None:
-    from ..provenance import python_spec_sha256, verify_source_tree_sha256
+    from ..provenance import file_sha256, python_spec_sha256, verify_source_tree_sha256
 
     verify_source_tree_sha256(plan["source_sha256"])
     if _syncer_source_sha256() != plan["syncer_source_sha256"]:
         raise HarnessError("syncer source changed after the plan was prepared")
-    if python_spec_sha256(plan["learner"]["reward_function"], base_dir=REPO_ROOT) != plan[
-        "reward_sha256"
-    ]:
+    tms_patch = plan.get("tms_preload_patch")
+    if tms_patch is not None:
+        patch_path = REPO_ROOT / tms_patch["source_path"]
+        if (
+            patch_path.is_symlink()
+            or not patch_path.is_file()
+            or file_sha256(patch_path) != tms_patch["binary_sha256"]
+        ):
+            raise HarnessError("TMS preload patch changed after the plan was prepared")
+    bundle = REPO_ROOT / plan["miles"]["bundle_path"]
+    if file_sha256(bundle) != plan["miles"]["bundle_sha256"]:
+        raise HarnessError("Miles bundle changed after the plan was prepared")
+    sglang_bundle = REPO_ROOT / plan["sglang"]["bundle_path"]
+    if file_sha256(sglang_bundle) != plan["sglang"]["bundle_sha256"]:
+        raise HarnessError("SGLang bundle changed after the plan was prepared")
+    if (
+        python_spec_sha256(plan["learner"]["reward_function"], base_dir=REPO_ROOT)
+        != plan["reward_sha256"]
+    ):
         raise HarnessError("reward source changed after the plan was prepared")
     data_local_path = plan["learner"].get("data_local_path")
-    if data_local_path is not None and _local_data_sha256(data_local_path) != plan[
-        "learner"
-    ]["data_sha256"]:
+    if (
+        data_local_path is not None
+        and _local_data_sha256(data_local_path) != plan["learner"]["data_sha256"]
+    ):
         raise HarnessError("local dataset changed after the plan was prepared")
 
 
@@ -674,6 +1088,27 @@ mv "$RUN/control/deploying.sha256" "$RUN/control/plan.sha256" 2>/dev/null || \
 
 def _host_setup_script(plan: dict[str, Any], gpus_per_node: int) -> str:
     sglang = plan["sglang"]
+    miles = plan["miles"]
+    learner = plan["learner"]
+    if learner.get("model_manifest_sha256"):
+        model_manifest_check = (
+            f"printf '%s  %s\\n' "
+            f"{shlex.quote(learner['model_manifest_sha256'])} "
+            f"{shlex.quote(learner['model'] + '/conversion_manifest.json')} "
+            "| sha256sum --check -\n"
+        )
+    else:
+        model_manifest_check = ""
+    tms_patch = plan.get("tms_preload_patch")
+    if tms_patch is not None:
+        tms_patch_check = f"""TMS_PATCH="$RUN/source/{tms_patch['source_path']}"
+test -f "$TMS_PATCH" && test ! -L "$TMS_PATCH"
+printf '%s  %s\n' {shlex.quote(tms_patch['binary_sha256'])} "$TMS_PATCH" | sha256sum --check -
+TMS_BASE_ACTUAL="$(docker run --rm --entrypoint sha256sum {shlex.quote(plan['docker_image'])} {shlex.quote(tms_patch['container_path'])} | awk '{{print $1}}')"
+test "$TMS_BASE_ACTUAL" = {shlex.quote(tms_patch['base_binary_sha256'])}
+"""
+    else:
+        tms_patch_check = ""
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 test "$(cat "$RUN/control/plan.sha256")" = {shlex.quote(_plan_digest(plan))}
@@ -682,19 +1117,30 @@ command -v git >/dev/null
 command -v nvidia-smi >/dev/null
 test "$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)" -ge {gpus_per_node}
 docker info >/dev/null
-mkdir -p "$HOME/.cache/huggingface" "$RUN/miles" "$RUN/sglang"
-docker pull {shlex.quote(plan['docker_image'])}
-if [ ! -d "$RUN/miles/.git" ]; then
+{model_manifest_check}mkdir -p "$HOME/.cache/huggingface" "$RUN/miles" "$RUN/sglang"
+if ! docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null 2>&1; then
+  docker pull {shlex.quote(plan['docker_image'])}
+fi
+docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
+{tms_patch_check}if [ ! -d "$RUN/miles/.git" ]; then
   rmdir "$RUN/miles"
   git clone --no-checkout {shlex.quote(MILES_REPOSITORY)} "$RUN/miles"
 fi
-git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(MILES_COMMIT)}
-git -C "$RUN/miles" checkout --detach {shlex.quote(MILES_COMMIT)}
+git -C "$RUN/miles" remote set-url origin {shlex.quote(MILES_REPOSITORY)}
+MILES_BUNDLE="$RUN/source/{MILES_BUNDLE_PATH}"
+printf '%s  %s\n' {shlex.quote(miles['bundle_sha256'])} "$MILES_BUNDLE" | sha256sum --check -
+git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(miles['upstream_commit'])}
+git -C "$RUN/miles" fetch "$MILES_BUNDLE" HEAD
+git -C "$RUN/miles" checkout --detach {shlex.quote(miles['commit'])}
 if [ ! -d "$RUN/sglang/.git" ]; then
   rmdir "$RUN/sglang"
   git clone --no-checkout {shlex.quote(sglang['repository'])} "$RUN/sglang"
 fi
-git -C "$RUN/sglang" fetch --depth 1 {shlex.quote(sglang['repository'])} {shlex.quote(sglang['commit'])}
+git -C "$RUN/sglang" remote set-url origin {shlex.quote(SGLANG_REPOSITORY)}
+SGLANG_BUNDLE="$RUN/source/{SGLANG_BUNDLE_PATH}"
+printf '%s  %s\n' {shlex.quote(sglang['bundle_sha256'])} "$SGLANG_BUNDLE" | sha256sum --check -
+git -C "$RUN/sglang" fetch --depth 1 origin {shlex.quote(sglang['upstream_commit'])}
+git -C "$RUN/sglang" fetch "$SGLANG_BUNDLE" HEAD
 git -C "$RUN/sglang" checkout --detach {shlex.quote(sglang['commit'])}
 """
 
@@ -755,8 +1201,8 @@ def _syncer_argv(plan: dict[str, Any]) -> list[str]:
     return _argv(
         ["$RUN/state/yeto-syncer"],
         ("--port", plan["syncer_port"]),
-        ("--learners", LEARNERS),
-        ("--quorum", LEARNERS),
+        ("--learners", _learner_count(plan)),
+        ("--quorum", _learner_count(plan)),
         ("--grace-ms", 0),
         ("--pipeline", learner.get("pipeline", 1) if decoupled else 1),
         (
@@ -766,9 +1212,11 @@ def _syncer_argv(plan: dict[str, Any]) -> list[str]:
         ("--delta-correction", "none"),
         (
             "--total-steps",
-            learner.get("total_fragment_steps", learner["global_rounds"])
-            if decoupled
-            else learner["global_rounds"],
+            (
+                learner.get("total_fragment_steps", learner["global_rounds"])
+                if decoupled
+                else learner["global_rounds"]
+            ),
         ),
         ("--outer-lr", 0.7 if decoupled else 1),
         ("--outer-momentum", 0.9 if decoupled else 0),
@@ -822,13 +1270,14 @@ done
 
 
 def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
-    if learner_id not in range(LEARNERS):
-        raise HarnessError("--learner-id must be 0 or 1")
+    if learner_id not in range(_learner_count(plan)):
+        raise HarnessError("--learner-id is outside the fixed island roster")
     learner = plan["learner"]
     island = plan["islands"][learner_id]
     values = _argv(
         ["python3", "-m", "yeto.rl.learner"],
         ("--model", learner["model"]),
+        ("--rl-model-recipe", learner.get("rl_model_recipe", "generic")),
         ("--model-revision", learner["model_revision"]),
         ("--data", learner["data"]),
         ("--syncer", plan["syncer_address"]),
@@ -859,6 +1308,16 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--audit-dir", "/workspace/audit"),
         ("--actor-num-nodes", len(island["hosts"])),
         ("--actor-num-gpus-per-node", island["gpus_per_node"]),
+        ("--tensor-parallel", learner.get("tensor_parallel", 1)),
+        ("--pipeline-parallel", learner.get("pipeline_parallel", 1)),
+        (
+            "--rollout-num-gpus-per-engine",
+            learner.get("rollout_num_gpus_per_engine", 1),
+        ),
+        (
+            "--sglang-mem-fraction-static",
+            learner.get("sglang_mem_fraction_static", 0.4),
+        ),
         ("--lora-r", learner["lora_r"]),
         ("--lora-targets", learner["lora_targets"]),
         ("--inner-lr", learner["inner_lr"]),
@@ -867,6 +1326,14 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--wan-streams", learner["wan_streams"]),
         ("--miles-root", "/workspace/miles"),
     )
+    if learner.get("rollout_model") is not None:
+        values.extend(("--rollout-model", learner["rollout_model"]))
+        values.extend(
+            (
+                "--rollout-model-revision",
+                learner["rollout_model_revision"],
+            )
+        )
     if learner.get("apply_chat_template_kwargs"):
         values.extend(
             (
@@ -898,6 +1365,24 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         values.extend(("--data-revision", learner["data_revision"]))
     if learner.get("expert_parallel") is not None:
         values.extend(("--expert-parallel", str(learner["expert_parallel"])))
+    for flag, name in (
+        ("--sglang-tp-size", "sglang_tp_size"),
+        ("--sglang-dp-size", "sglang_dp_size"),
+        ("--sglang-ep-size", "sglang_ep_size"),
+        ("--sglang-attention-backend", "sglang_attention_backend"),
+        ("--sglang-page-size", "sglang_page_size"),
+        ("--sglang-max-running-requests", "sglang_max_running_requests"),
+        ("--sglang-chunked-prefill-size", "sglang_chunked_prefill_size"),
+    ):
+        if learner.get(name) is not None:
+            values.extend((flag, str(learner[name])))
+    if learner.get("use_rollout_routing_replay"):
+        values.append("--use-rollout-routing-replay")
+    values.append(
+        "--sglang-deterministic-inference"
+        if learner.get("sglang_deterministic_inference", True)
+        else "--no-sglang-deterministic-inference"
+    )
     if learner.get("custom_generate_function_path"):
         values.extend(
             (
@@ -905,6 +1390,15 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
                 learner["custom_generate_function_path"],
             )
         )
+    if learner.get("custom_agent_function_path"):
+        values.extend(
+            (
+                "--custom-agent-function-path",
+                learner["custom_agent_function_path"],
+            )
+        )
+    if learner.get("agent_max_seq_len") is not None:
+        values.extend(("--agent-max-seq-len", str(learner["agent_max_seq_len"])))
     if learner.get("use_session_server"):
         values.append("--use-session-server")
         if learner.get("session_server_ip"):
@@ -914,6 +1408,9 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
             values.extend(str(port) for port in learner["session_server_port"])
         if learner.get("tito_model"):
             values.extend(("--tito-model", learner["tito_model"]))
+        if learner.get("tito_allowed_append_roles"):
+            values.append("--tito-allowed-append-roles")
+            values.extend(learner["tito_allowed_append_roles"])
     if learner["trust_remote_code"]:
         values.append("--trust-remote-code")
     return values
@@ -923,9 +1420,7 @@ def _container_name(plan: dict[str, Any], learner_id: int, node_id: int) -> str:
     return f"yeto-rl-{plan['run_id']}-i{learner_id}-n{node_id}"
 
 
-def _node_start_script(
-    plan: dict[str, Any], learner_id: int, node_id: int
-) -> str:
+def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> str:
     island = plan["islands"][learner_id]
     if node_id not in range(len(island["hosts"])):
         raise HarnessError("node ID is outside the island topology")
@@ -939,6 +1434,11 @@ def _node_start_script(
         else ""
     )
     learner = plan["learner"]
+    agent_env = (
+        "  --env MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1 \\\n"
+        if learner.get("custom_agent_function_path")
+        else ""
+    )
     reward_scheme = shlex.quote(learner.get("cybergym_reward_scheme", "binary"))
     reward_view = shlex.quote(learner.get("cybergym_reward_view", "train"))
     data_volume = (
@@ -946,6 +1446,72 @@ def _node_start_script(
         if learner.get("data_local_path") is not None
         else ""
     )
+    model_volumes = "".join(
+        f"  --volume {shlex.quote(f'{mount}:{mount}:ro')} \\\n"
+        for mount in learner.get("model_mounts", [])
+    )
+    tms_patch = plan.get("tms_preload_patch")
+    tms_patch_volume = (
+        "  --volume "
+        f'"$RUN/source/{tms_patch["source_path"]}:'
+        f'{tms_patch["container_path"]}:ro" \\\n'
+        if tms_patch is not None
+        else ""
+    )
+    tms_train_disk_backup = plan.get("tms_train_disk_backup")
+    if tms_train_disk_backup is not None:
+        target = island["hosts"][node_id]
+        host_path = tms_train_disk_backup["node_paths"][target]
+        container_path = tms_train_disk_backup["container_path"]
+        chunk_mb = tms_train_disk_backup["chunk_mb"]
+        tms_disk_setup = f"""TMS_DISK_BACKUP_HOST={shlex.quote(host_path)}
+mkdir -p "$TMS_DISK_BACKUP_HOST"
+test -d "$TMS_DISK_BACKUP_HOST" && test ! -L "$TMS_DISK_BACKUP_HOST"
+test "$(realpath -m "$TMS_DISK_BACKUP_HOST")" = "$TMS_DISK_BACKUP_HOST"
+"""
+        tms_disk_env = (
+            "  --env "
+            f"MILES_TMS_TRAIN_DISK_BACKUP_DIR={shlex.quote(container_path)} "
+            "--env "
+            f"MILES_TMS_TRAIN_DISK_BACKUP_CHUNK_MB={chunk_mb} "
+        )
+        tms_disk_volume = (
+            '  --volume "$TMS_DISK_BACKUP_HOST:'
+            f'{container_path}" '
+        )
+    else:
+        tms_disk_setup = ""
+        tms_disk_env = ""
+        tms_disk_volume = ""
+    if learner.get("rl_model_recipe") == "deepseek-v4-flash":
+        attention_env = ""
+        recipe_env = (
+            "  --env YETO_DSV4_EXPERT_CLONE=1 "
+            "--env YETO_DSV4_CLONE_ONLY_LORA=1 "
+            "--env SGLANG_SKIP_CHECKPOINT_LOAD_CHECK=1 "
+            "--env SGLANG_DSV4_FP4_EXPERTS=0 "
+            "--env SGLANG_HEALTH_CHECK_TIMEOUT=120 "
+            "--env SGLANG_DG_CACHE_DIR_PER_PROCESS=1 "
+            "--env SGLANG_OPT_FP8_WO_A_GEMM=0 "
+            "--env SGLANG_OPT_FUSE_WQA_WKV=0 \\\n"
+        )
+        diagnostics_env = (
+            "  --env PYTHONFAULTHANDLER=1 "
+            "--env TORCH_SHOW_CPP_STACKTRACES=1 "
+            "--env TORCH_NCCL_DUMP_ON_TIMEOUT=1 "
+            "--env TORCH_NCCL_TRACE_BUFFER_SIZE=1048576 "
+            "--env TORCH_FR_BUFFER_SIZE=1048576 "
+            "--env NCCL_DEBUG=INFO "
+            "--env NCCL_DEBUG_SUBSYS=INIT,NET "
+            "--env YETO_TMS_POST_PAUSE_IDLE_S=30 \\\n"
+        )
+    else:
+        attention_env = (
+            "  --env NVTE_FLASH_ATTN=0 --env NVTE_FUSED_ATTN=0 "
+            "--env NVTE_UNFUSED_ATTN=1 \\\n"
+        )
+        recipe_env = ""
+        diagnostics_env = ""
     common = (
         f"python3 -m pip install -q --no-deps 'peft=={MILES_PEFT_VERSION}'; "
         "export PYTHONPATH=/workspace/sglang/python:/workspace/yeto:/workspace/miles${PYTHONPATH:+:$PYTHONPATH}; "
@@ -966,11 +1532,12 @@ PY
         command = (
             common
             + f"HEAD_IP=$(getent ahostsv4 {shlex.quote(head)} | awk 'NR == 1 {{print $1}}'); "
-            + "test -n \"$HEAD_IP\"; "
-            + "ray start --head --node-ip-address=\"$HEAD_IP\" "
+            + 'test -n "$HEAD_IP"; '
+            + 'ray start --head --node-ip-address="$HEAD_IP" '
             f"--port={RAY_PORT} --include-dashboard=true; "
             + wait
-            + "exec " + shlex.join(_learner_argv(plan, learner_id))
+            + "exec "
+            + shlex.join(_learner_argv(plan, learner_id))
         )
     else:
         command = (
@@ -987,27 +1554,31 @@ if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
   echo 'container exists but is not running; use restart-learner' >&2
   exit 1
 fi
-mkdir -p "$RUN/island-{learner_id}"/{{state,output,audit}}
+{tms_disk_setup}mkdir -p "$RUN/island-{learner_id}"/{{state,output,audit,cores}}
 docker run --detach \
   --name {shlex.quote(name)} \
   --gpus {shlex.quote(gpu_request)} \
   --network host --ipc host --shm-size 64g \
-  --ulimit memlock=-1 --ulimit stack=67108864 \
+  --ulimit memlock=-1 --ulimit nofile=1048576:1048576 \
+  --ulimit stack=67108864 --ulimit core=-1 \
   --env PYTHONUNBUFFERED=1 \
   --env HF_HOME=/workspace/hf \
   --env HF_HUB_ENABLE_HF_TRANSFER=1{env_file} \
-  --env NVTE_FLASH_ATTN=0 --env NVTE_FUSED_ATTN=0 --env NVTE_UNFUSED_ATTN=1 \
-  --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
+  --env NCCL_IB_DISABLE=1 --env NCCL_SOCKET_IFNAME=eno3 \
+  --env GLOO_SOCKET_IFNAME=eno3 --env TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+  --env CUDA_DEVICE_MAX_CONNECTIONS=1 \
+{attention_env}{recipe_env}{diagnostics_env}{tms_disk_env}{agent_env}  --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
   --env CYBERGYM_AGENT_ID={shlex.quote(learner['cybergym_agent_id'])} \
   --env CYBERGYM_TIMEOUT={shlex.quote(str(learner['cybergym_timeout']))} \
   --env CYBERGYM_REWARD_SCHEME={reward_scheme} \
   --env CYBERGYM_REWARD_VIEW={reward_view} \
-{data_volume}  --volume "$RUN/source:/workspace/yeto:ro" \
+{data_volume}{model_volumes}{tms_patch_volume}{tms_disk_volume}  --volume "$RUN/source:/workspace/yeto:ro" \
   --volume "$RUN/sglang:/workspace/sglang:ro" \
   --volume "$RUN/miles:/workspace/miles" \
   --volume "$RUN/island-{learner_id}/state:/workspace/state" \
   --volume "$RUN/island-{learner_id}/output:/workspace/output" \
   --volume "$RUN/island-{learner_id}/audit:/workspace/audit" \
+  --volume "$RUN/island-{learner_id}/cores:/var/lib/vastai_kaalia/data" \
   --volume "$HOME/.cache/huggingface:/workspace/hf" \
   --entrypoint bash {shlex.quote(plan['docker_image'])} -lc {shlex.quote(command)}
 """
@@ -1032,7 +1603,7 @@ def start(plan_path: str | Path) -> None:
     _build_syncer(plan)
     _start_syncer(plan)
     _wait_for_syncer(plan)
-    for learner_id in range(LEARNERS):
+    for learner_id in range(_learner_count(plan)):
         _start_island(plan, learner_id)
     print(f"started Miles RL acceptance run {plan['run_id']}")
 
@@ -1067,8 +1638,8 @@ else echo container=missing; fi
 
 def kill_learner(plan_path: str | Path, learner_id: int) -> None:
     _, plan = load_plan(plan_path)
-    if learner_id not in range(LEARNERS):
-        raise HarnessError("--learner-id must be 0 or 1")
+    if learner_id not in range(_learner_count(plan)):
+        raise HarnessError("--learner-id is outside the fixed island roster")
     nodes = list(enumerate(plan["islands"][learner_id]["hosts"]))
     for node_id, target in reversed(nodes):
         name = _container_name(plan, learner_id, node_id)
@@ -1077,8 +1648,8 @@ def kill_learner(plan_path: str | Path, learner_id: int) -> None:
 
 def restart_learner(plan_path: str | Path, learner_id: int) -> None:
     _, plan = load_plan(plan_path)
-    if learner_id not in range(LEARNERS):
-        raise HarnessError("--learner-id must be 0 or 1")
+    if learner_id not in range(_learner_count(plan)):
+        raise HarnessError("--learner-id is outside the fixed island roster")
     _wait_for_syncer(plan)
     for node_id, target in enumerate(plan["islands"][learner_id]["hosts"]):
         name = _container_name(plan, learner_id, node_id)
@@ -1151,9 +1722,7 @@ def collect(plan_path: str | Path) -> Path:
                 capture=True,
                 check=False,
             )
-            _atomic_bytes(
-                destination / f"node-{node_id}.log", logs.stdout.encode()
-            )
+            _atomic_bytes(destination / f"node-{node_id}.log", logs.stdout.encode())
             inspect = _ssh(
                 plan,
                 target,
@@ -1225,11 +1794,16 @@ def _read_f32(path: Path, numel: int) -> tuple[torch.Tensor, bytes]:
 
 def _event_path(artifacts: Path, learner_id: int) -> Path:
     output = artifacts / f"island-{learner_id}" / "output" / "events.jsonl"
-    return output if output.exists() else artifacts / f"island-{learner_id}" / "events.jsonl"
+    return (
+        output
+        if output.exists()
+        else artifacts / f"island-{learner_id}" / "events.jsonl"
+    )
 
 
 def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
     rounds = plan["learner"]["global_rounds"]
+    roster = list(range(_learner_count(plan)))
     syncer_events = [
         event
         for event in _json_lines(artifacts / "syncer" / "events.jsonl")
@@ -1238,24 +1812,25 @@ def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
     if [event.get("step") for event in syncer_events] != list(range(1, rounds + 1)):
         raise HarnessError("syncer tape is not one ordered commit per RL round")
     island_events = [
-        _json_lines(_event_path(artifacts, learner_id))
-        for learner_id in range(LEARNERS)
+        _json_lines(_event_path(artifacts, learner_id)) for learner_id in roster
     ]
     expected_base = None
     specs = None
     identity = None
     for step, sync_event in enumerate(syncer_events, start=1):
-        responders = sorted(sync_event.get("responders", []), key=lambda item: item.get("id", -1))
+        responders = sorted(
+            sync_event.get("responders", []), key=lambda item: item.get("id", -1)
+        )
         if (
             sync_event.get("launch_base_version") != step - 1
-            or sync_event.get("expected") != [0, 1]
-            or sync_event.get("responded") != [0, 1]
-            or [item.get("id") for item in responders] != [0, 1]
+            or sync_event.get("expected") != roster
+            or sync_event.get("responded") != roster
+            or [item.get("id") for item in responders] != roster
             or any(
                 item.get("base_version") != step - 1
                 or item.get("c_steps") != 1
                 or item.get("c_tokens") != 1
-                or item.get("contribution") != 0.5
+                or item.get("contribution") != 1.0 / len(roster)
                 for item in responders
             )
         ):
@@ -1263,7 +1838,7 @@ def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
         bases = []
         base_bytes = []
         deltas = []
-        for learner_id in range(LEARNERS):
+        for learner_id in roster:
             audit = artifacts / f"island-{learner_id}" / "audit"
             stem = f"round-{step:08d}"
             try:
@@ -1274,7 +1849,13 @@ def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
                     )
                     for item in metadata["specs"]
                 )
-            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (
+                OSError,
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
                 raise HarnessError(
                     f"cannot read learner {learner_id} audit for v{step}"
                 ) from exc
@@ -1293,8 +1874,10 @@ def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
                 or metadata.get("learner_id") != learner_id
                 or metadata.get("base_version") != step - 1
                 or metadata.get("target_step") != step
-                or metadata.get("base_f32_sha256") != hashlib.sha256(raw_base).hexdigest()
-                or metadata.get("delta_f32_sha256") != hashlib.sha256(raw_delta).hexdigest()
+                or metadata.get("base_f32_sha256")
+                != hashlib.sha256(raw_base).hexdigest()
+                or metadata.get("delta_f32_sha256")
+                != hashlib.sha256(raw_delta).hexdigest()
                 or current_specs != specs
                 or current_identity != identity
                 or current_identity[0] != plan["learner"]["model_revision"]
@@ -1314,12 +1897,12 @@ def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
             bases.append(base)
             base_bytes.append(raw_base)
             deltas.append(delta)
-        if base_bytes[0] != base_bytes[1]:
+        if any(raw != base_bytes[0] for raw in base_bytes[1:]):
             raise HarnessError(f"learners did not use the same f32 base at v{step - 1}")
         if expected_base is not None and not torch.equal(bases[0], expected_base):
             raise HarnessError(f"oracle v{step - 1} is not the next exact f32 base")
         merged = torch.zeros_like(bases[0])
-        weight = torch.tensor(0.5, dtype=torch.float32)
+        weight = torch.tensor(1.0 / len(roster), dtype=torch.float32)
         for delta in deltas:
             merged.add_(delta * weight)
         expected_base = bases[0] + merged
@@ -1330,13 +1913,20 @@ def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
         or len(checkpoint.fragments) != 1
         or checkpoint.fragments[0][0] != rounds
         or checkpoint.ledger
-        != {learner_id: (rounds, rounds, rounds) for learner_id in range(LEARNERS)}
+        != {learner_id: (rounds, rounds, rounds) for learner_id in roster}
         or not torch.equal(checkpoint.fragments[0][1], expected_base)
     ):
         raise HarnessError("authoritative checkpoint differs from the f32 oracle")
+    # torch.equal deliberately treats +0.0 and -0.0 as the same f32 value.
+    # Rust's outer-gradient sign flip can preserve a different zero sign than
+    # the independently evaluated PyTorch expression even when the two cuts
+    # are numerically exact. policy_hash is byte-exact, so after validating
+    # the oracle above, hash the authoritative checkpoint bytes that learners
+    # actually receive and apply.
+    authoritative_final = checkpoint.fragments[0][1]
     final = canonical_state(
         rounds,
-        tensors_from_flat(expected_base, specs),
+        tensors_from_flat(authoritative_final, specs),
         base_model_revision=identity[0],
         lora_config_hash=identity[1],
         layout_hash=identity[2],
@@ -1381,7 +1971,7 @@ def _verify_decoupled(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
     ):
         raise HarnessError("syncer tape is not one complete decoupled schedule")
 
-    roster = list(range(LEARNERS))
+    roster = list(range(_learner_count(plan)))
     ledger = {learner_id: [0, 0, 0] for learner_id in roster}
     for event in syncer_events:
         step = event["step"]
@@ -1445,7 +2035,9 @@ def _verify_decoupled(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
         ):
             raise HarnessError(f"learner {learner_id} did not apply the final policy")
         if not any(event.get("event") == "rl_final_cut" for event in events):
-            raise HarnessError(f"learner {learner_id} did not acknowledge the final cut")
+            raise HarnessError(
+                f"learner {learner_id} did not acknowledge the final cut"
+            )
         final_hashes.append(final_hash)
     if len(set(final_hashes)) != 1:
         raise HarnessError("learners disagree on the final decoupled policy hash")
@@ -1525,7 +2117,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--host",
         action="append",
         required=True,
-        help="comma-separated SSH nodes for one island; pass exactly twice",
+        help="comma-separated SSH nodes for one island; repeat for each island",
     )
     prepare_parser.add_argument("--gpus-per-node", type=int, default=1)
     prepare_parser.add_argument("--syncer-address", default=None)
@@ -1533,6 +2125,17 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--output-dir", default=None)
     prepare_parser.add_argument("--remote-root", default=DEFAULT_REMOTE_ROOT)
     prepare_parser.add_argument("--remote-env-file", default=None)
+    prepare_parser.add_argument("--model-manifest-sha256", default=None)
+    prepare_parser.add_argument("--tms-preload-patch", default=None)
+    prepare_parser.add_argument(
+        "--tms-train-disk-backup-root",
+        default=None,
+    )
+    prepare_parser.add_argument(
+        "--tms-train-disk-backup-chunk-mb",
+        type=int,
+        default=TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB,
+    )
     prepare_parser.add_argument("--ssh-option", action="append", default=[])
     prepare_parser.add_argument("launch_args", nargs=argparse.REMAINDER)
 

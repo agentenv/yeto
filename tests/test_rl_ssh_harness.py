@@ -7,12 +7,18 @@ import pytest
 import torch
 
 from yeto.rl import (
+    MILES_BUNDLE_PATH,
+    MILES_BUNDLE_SHA256,
     MILES_COMMIT,
     MILES_IMAGE,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
+    MILES_UPSTREAM_COMMIT,
+    SGLANG_BUNDLE_PATH,
+    SGLANG_BUNDLE_SHA256,
     SGLANG_COMMIT,
     SGLANG_REPOSITORY,
+    SGLANG_UPSTREAM_COMMIT,
     ssh_harness,
 )
 from yeto.rl.bridge import _write_round_audit
@@ -32,6 +38,7 @@ from yeto.rl.ssh_harness import (
     _host_setup_script,
     _learner_argv,
     _node_start_script,
+    _parse_islands,
     _syncer_argv,
     _target_host,
     _verify_oracle,
@@ -43,9 +50,7 @@ MODEL_REVISION = "a" * 40
 LORA_CONFIG_HASH = "b" * 64
 IMAGE = "radixark/miles@sha256:" + "d" * 64
 SPECS = (
-    CanonicalTensorSpec(
-        "base_model.model.layer.lora_A.weight", (2,), "float32", 2
-    ),
+    CanonicalTensorSpec("base_model.model.layer.lora_A.weight", (2,), "float32", 2),
 )
 LAYOUT_HASH = canonical_layout_hash(SPECS)
 
@@ -58,26 +63,45 @@ def _plan():
         "remote_env_file": None,
         "ssh_options": [],
         "islands": [
-            {"hosts": ["alice@a0", "alice@a1"], "gpus_per_node": 4},
-            {"hosts": ["alice@b0", "alice@b1"], "gpus_per_node": 4},
+            {
+                "hosts": ["alice@a0", "alice@a1"],
+                "gpus_per_node": 4,
+                "accelerator": "H200",
+            },
+            {
+                "hosts": ["alice@b0", "alice@b1"],
+                "gpus_per_node": 4,
+                "accelerator": "H200",
+            },
         ],
         "syncer_address": "a0:29400",
         "syncer_port": 29400,
         "docker_image": IMAGE,
         "miles": {
             "repository": MILES_REPOSITORY,
+            "upstream_commit": MILES_UPSTREAM_COMMIT,
             "commit": MILES_COMMIT,
+            "bundle_path": MILES_BUNDLE_PATH,
+            "bundle_sha256": MILES_BUNDLE_SHA256,
             "peft_version": MILES_PEFT_VERSION,
         },
         "sglang": {
             "repository": SGLANG_REPOSITORY,
+            "upstream_commit": SGLANG_UPSTREAM_COMMIT,
             "commit": SGLANG_COMMIT,
+            "bundle_path": SGLANG_BUNDLE_PATH,
+            "bundle_sha256": SGLANG_BUNDLE_SHA256,
         },
         "source_sha256": "c" * 64,
         "reward_sha256": "e" * 64,
         "syncer_source_sha256": "1" * 64,
         "learner": {
             "model": "org/model",
+            "rollout_model": None,
+            "rollout_model_revision": None,
+            "rl_model_recipe": "generic",
+            "model_mounts": [],
+            "model_manifest_sha256": None,
             "model_revision": MODEL_REVISION,
             "data": "org/data",
             "data_revision": "f" * 40,
@@ -91,11 +115,27 @@ def _plan():
             "optimizer_steps": 1,
             "rollout_max_response_len": 128,
             "custom_generate_function_path": None,
+            "custom_agent_function_path": None,
+            "agent_max_seq_len": None,
             "use_session_server": False,
             "session_server_ip": None,
             "session_server_port": None,
             "tito_model": None,
+            "tito_allowed_append_roles": None,
+            "tensor_parallel": 1,
+            "pipeline_parallel": 1,
             "expert_parallel": 1,
+            "rollout_num_gpus_per_engine": 1,
+            "sglang_tp_size": None,
+            "sglang_dp_size": None,
+            "sglang_ep_size": None,
+            "sglang_mem_fraction_static": 0.4,
+            "sglang_attention_backend": None,
+            "sglang_deterministic_inference": True,
+            "sglang_page_size": None,
+            "sglang_max_running_requests": None,
+            "sglang_chunked_prefill_size": None,
+            "use_rollout_routing_replay": False,
             "lora_r": 8,
             "lora_targets": "attention",
             "inner_lr": 1e-5,
@@ -121,6 +161,30 @@ def _local_data_plan(path: Path):
         }
     )
     return plan
+
+
+def _tms_patch_contract():
+    return {
+        "repository": ssh_harness.TMS_PRELOAD_PATCH_REPOSITORY,
+        "base_commit": ssh_harness.TMS_PRELOAD_PATCH_BASE_COMMIT,
+        "patch_commit": ssh_harness.TMS_PRELOAD_PATCH_COMMIT,
+        "source_path": (
+            "yeto/rl/vendor/torch_memory_saver/"
+            "torch_memory_saver_hook_mode_preload_cu13.abi3.so"
+        ),
+        "container_path": ssh_harness.TMS_PRELOAD_PATCH_CONTAINER_PATH,
+        "base_binary_sha256": ssh_harness.TMS_PRELOAD_BASE_BINARY_SHA256,
+        "binary_sha256": "2" * 64,
+    }
+
+
+def _tms_disk_backup_contract(plan):
+    return ssh_harness._tms_train_disk_backup_contract(
+        "/data/yeto-rl/tms-disk-backup",
+        plan["run_id"],
+        plan["islands"],
+        256,
+    )
 
 
 def _write_jsonl(path: Path, rows):
@@ -281,8 +345,7 @@ def _decoupled_oracle_fixture(tmp_path: Path):
             (4, torch.tensor([2.0]), torch.tensor([0.0])),
         ],
         ledger={
-            learner_id: (4, 8, token_totals[learner_id])
-            for learner_id in range(2)
+            learner_id: (4, 8, token_totals[learner_id]) for learner_id in range(2)
         },
         layout_hash=LAYOUT_HASH,
     )
@@ -297,6 +360,46 @@ def test_oracle_matches_each_ordered_f32_average_and_final_apply(tmp_path):
     delta.write_bytes(torch.tensor([9.0, 9.0]).numpy().astype("<f4").tobytes())
     with pytest.raises(HarnessError, match="audit identity mismatch"):
         _verify_oracle(plan, checkpoint, tmp_path)
+
+
+def test_oracle_hashes_authoritative_checkpoint_signed_zero_bits(tmp_path):
+    plan, checkpoint = _oracle_fixture(tmp_path)
+    round_inputs = (
+        (1, _state(0, [0.0, 0.0]), ((-0.0, 3.0), (-0.0, 1.0))),
+        (2, _state(1, [0.0, 2.0]), ((-0.0, 0.0), (-0.0, 2.0))),
+    )
+    for step, base, learner_deltas in round_inputs:
+        for learner_id, values in enumerate(learner_deltas):
+            _write_round_audit(
+                tmp_path / f"island-{learner_id}" / "audit",
+                learner_id=learner_id,
+                target_step=step,
+                base=base,
+                delta=torch.tensor(values, dtype=torch.float32),
+            )
+
+    checkpoint_params = torch.tensor([-0.0, 3.0], dtype=torch.float32)
+    checkpoint.fragments[0] = (2, checkpoint_params, torch.zeros(2))
+    final = _state(2, [-0.0, 3.0])
+    for learner_id in range(2):
+        path = tmp_path / f"island-{learner_id}" / "events.jsonl"
+        events = [
+            json.loads(line) for line in path.read_text().splitlines() if line
+        ]
+        events.append(
+            {
+                "event": "rl_policy_apply",
+                "policy_version": 2,
+                "sync/global_policy_hash": policy_hash(final),
+            }
+        )
+        _write_jsonl(path, events)
+
+    independent = torch.tensor([0.0, 3.0], dtype=torch.float32)
+    assert torch.equal(checkpoint_params, independent)
+    assert torch.signbit(checkpoint_params[0])
+    assert not torch.signbit(independent[0])
+    assert _verify_oracle(plan, checkpoint, tmp_path) == policy_hash(final)
 
 
 def test_decoupled_oracle_checks_terminal_fragment_cut_and_fixed_roster(tmp_path):
@@ -375,8 +478,16 @@ def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
 
 
 def test_miles_and_sglang_pins_include_the_compatible_builds():
-    assert MILES_COMMIT == "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
-    assert SGLANG_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
+    assert MILES_UPSTREAM_COMMIT == "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
+    assert MILES_COMMIT == "adc54c5490c20c2c3edbf4934221b0b70505e375"
+    assert MILES_BUNDLE_SHA256 == (
+        "02acc8b9c0c0b2353fda147c61c3aceee298bdf021cf58eb6383c13d1a611b8a"
+    )
+    assert SGLANG_UPSTREAM_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
+    assert SGLANG_COMMIT == "c2cb40a774dc8cba85eb651f28471d889178b5ee"
+    assert SGLANG_BUNDLE_SHA256 == (
+        "3da2f8e3833828df9e31f9975c3bf69cecc1cd76e484718590f06deead98188e"
+    )
     assert MILES_IMAGE == (
         "docker:ghcr.io/alexeisie/miles@sha256:"
         "5be3e0722c7b0174c3c1a5526064872987c7bc367af700117a3589efbd6b19bd"
@@ -401,9 +512,10 @@ def test_local_prompt_plan_is_content_bound_without_a_hub_revision(tmp_path):
 
     assert plan["learner"]["data"] == "/workspace/data/dataset.jsonl"
     assert plan["learner"]["data_revision"] is None
-    assert plan["learner"]["data_sha256"] == hashlib.sha256(
-        prompts.read_bytes()
-    ).hexdigest()
+    assert (
+        plan["learner"]["data_sha256"]
+        == hashlib.sha256(prompts.read_bytes()).hexdigest()
+    )
 
 
 def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeypatch):
@@ -430,6 +542,7 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
         gpus_per_node=1,
         remote_root=".cache/yeto-rl-ssh",
         remote_env_file=None,
+        model_manifest_sha256=None,
         syncer_address=None,
         output_dir=tmp_path / "run",
         ssh_option=[],
@@ -468,7 +581,9 @@ def test_local_prompt_change_is_rejected_before_deploy(tmp_path, monkeypatch):
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text('{"messages": []}\n', encoding="utf-8")
     plan = _local_data_plan(prompts)
-    monkeypatch.setattr("yeto.provenance.verify_source_tree_sha256", lambda value: value)
+    monkeypatch.setattr(
+        "yeto.provenance.verify_source_tree_sha256", lambda value: value
+    )
     monkeypatch.setattr("yeto.provenance.python_spec_sha256", lambda *a, **k: "e" * 64)
     monkeypatch.setattr(ssh_harness, "_syncer_source_sha256", lambda: "1" * 64)
     prompts.write_text('{"messages": [{"role": "user"}]}\n', encoding="utf-8")
@@ -497,8 +612,7 @@ def test_deploy_marks_partial_copy_for_idempotent_retry(tmp_path, monkeypatch):
 
     assert any("control/deploying.sha256" in script for script in scripts)
     assert any(
-        'mv "$RUN/control/deploying.sha256" "$RUN/control/plan.sha256"'
-        in script
+        'mv "$RUN/control/deploying.sha256" "$RUN/control/plan.sha256"' in script
         for script in scripts
     )
     source_rsync = next(command for command in commands if "--delete" in command)
@@ -593,8 +707,8 @@ def test_kill_syncer_waits_for_the_old_process_before_restart(tmp_path, monkeypa
 
     ssh_harness.kill_syncer(plan_path)
 
-    assert "kill -KILL -- -\"$PID\"" in scripts[0]
-    assert "kill -0 \"$PID\"" in scripts[0]
+    assert 'kill -KILL -- -"$PID"' in scripts[0]
+    assert 'kill -0 "$PID"' in scripts[0]
     assert "syncer did not exit after SIGKILL" in scripts[0]
 
 
@@ -612,7 +726,7 @@ def test_syncer_source_is_rehashed_remotely_before_build(monkeypatch):
     assert "remote syncer source identity mismatch" in script
     assert "1" * 64 in script
     assert script.index('ACTUAL="$(docker run') < script.index("build --release")
-    assert script.index('$HOME/.cargo/bin/cargo') < script.index("command -v cargo")
+    assert script.index("$HOME/.cargo/bin/cargo") < script.index("command -v cargo")
 
 
 def test_harness_requires_one_digest_pinned_docker_image():
@@ -626,12 +740,58 @@ def test_target_host_strips_only_the_ssh_user():
     assert _target_host("100.64.1.2") == "100.64.1.2"
 
 
+def test_harness_accepts_runtime_sized_h200_rosters():
+    islands = _parse_islands(
+        ["root@h200-n1,root@h200-n2", "root@h200-n4,root@h200-n5"],
+        8,
+    )
+    assert [island["accelerator"] for island in islands] == ["H200", "H200"]
+
+    one = _plan()
+    one["islands"] = [one["islands"][0]]
+    ssh_harness._validate_plan(one)
+    syncer = _syncer_argv(one)
+    assert syncer[syncer.index("--learners") + 1] == "1"
+    assert syncer[syncer.index("--quorum") + 1] == "1"
+    assert _learner_argv(one, 0)
+    with pytest.raises(HarnessError, match="outside the fixed island roster"):
+        _learner_argv(one, 1)
+
+    one["learner"].update(
+        {
+            "sglang_attention_backend": "dsv4",
+            "sglang_deterministic_inference": False,
+        }
+    )
+    ssh_harness._validate_plan(one)
+    argv = _learner_argv(one, 0)
+    assert "--no-sglang-deterministic-inference" in argv
+
+    three = _plan()
+    three["islands"].append(
+        {"hosts": ["alice@c0", "alice@c1"], "gpus_per_node": 4, "accelerator": "H200"}
+    )
+    ssh_harness._validate_plan(three)
+    syncer = _syncer_argv(three)
+    assert syncer[syncer.index("--learners") + 1] == "3"
+    assert syncer[syncer.index("--quorum") + 1] == "3"
+
+
 def test_learner_command_uses_current_multinode_miles_contract():
     plan = _plan()
+    plan["learner"]["rollout_model"] = "/data/models/deepseek-v4-flash-fp8"
+    plan["learner"]["rollout_model_revision"] = "7" * 40
     argv = _learner_argv(plan, 1)
     assert argv[argv.index("--learner-id") + 1] == "1"
     assert argv[argv.index("--actor-num-nodes") + 1] == "2"
     assert argv[argv.index("--actor-num-gpus-per-node") + 1] == "4"
+    assert argv[argv.index("--rollout-model") + 1] == (
+        "/data/models/deepseek-v4-flash-fp8"
+    )
+    assert parse_learner_args(argv[3:]).rollout_model == (
+        "/data/models/deepseek-v4-flash-fp8"
+    )
+    assert parse_learner_args(argv[3:]).rollout_model_revision == "7" * 40
     assert argv[argv.index("--completed-groups-path") + 1] == (
         "/workspace/state/island-checkpoint.pt"
     )
@@ -642,11 +802,145 @@ def test_learner_command_uses_current_multinode_miles_contract():
     assert _container_name(plan, 1, 0) == "yeto-rl-acceptance-i1-n0"
 
 
+def test_node_mounts_only_exact_remote_model_roots():
+    plan = _plan()
+    plan["learner"].update(
+        {
+            "model": "/data/yeto-rl/models/deepseek-v4-flash-bf16",
+            "rollout_model": (
+                "/data/hf/models--AtlasCloud--DeepSeek-V4-Flash-0731-FP8-DSpark/"
+                "snapshots/7eb21d27aee405755da5251f4458e9fff87c047b"
+            ),
+            "rollout_model_revision": ("7eb21d27aee405755da5251f4458e9fff87c047b"),
+            "model_mounts": [
+                "/data/hf/models--AtlasCloud--DeepSeek-V4-Flash-0731-FP8-DSpark",
+                "/data/yeto-rl/models/deepseek-v4-flash-bf16",
+            ],
+            "model_manifest_sha256": "9" * 64,
+        }
+    )
+
+    ssh_harness._validate_plan(plan)
+    script = _node_start_script(plan, 0, 0)
+
+    for mount in plan["learner"]["model_mounts"]:
+        assert f"--volume {mount}:{mount}:ro" in script
+    assert "9" * 64 in _host_setup_script(plan, 8)
+    assert "/conversion_manifest.json" in _host_setup_script(plan, 8)
+    assert "--volume /data:/data" not in script
+    assert "--volume /data/hf:/data/hf" not in script
+
+
+def test_offloaded_training_requires_attests_and_mounts_the_tms_fix():
+    plan = _plan()
+    plan["learner"]["rl_offload_train"] = True
+
+    with pytest.raises(HarnessError, match="TMS preload patch"):
+        ssh_harness._validate_plan(plan)
+
+    plan["tms_preload_patch"] = _tms_patch_contract()
+    with pytest.raises(HarnessError, match="disk-backup contract"):
+        ssh_harness._validate_plan(plan)
+
+    plan["tms_train_disk_backup"] = _tms_disk_backup_contract(plan)
+    ssh_harness._validate_plan(plan)
+    setup = _host_setup_script(plan, 4)
+    start = _node_start_script(plan, 0, 0)
+    second = _node_start_script(plan, 0, 1)
+
+    assert plan["tms_preload_patch"]["binary_sha256"] in setup
+    assert ssh_harness.TMS_PRELOAD_BASE_BINARY_SHA256 in setup
+    assert "docker run --rm --entrypoint sha256sum" in setup
+    assert "MILES_TMS_TRAIN_DISK_BACKUP_DIR=/workspace/tms-disk-backup" in start
+    assert "MILES_TMS_TRAIN_DISK_BACKUP_CHUNK_MB=256" in start
+    assert "acceptance/island-0-node-0" in start
+    assert "acceptance/island-0-node-1" in second
+    assert '--volume "$TMS_DISK_BACKUP_HOST:/workspace/tms-disk-backup"' in start
+    assert "--volume /data:/data" not in start
+    assert (
+        '"$RUN/source/yeto/rl/vendor/torch_memory_saver/'
+        "torch_memory_saver_hook_mode_preload_cu13.abi3.so:"
+        "/usr/local/lib/python3.12/dist-packages/"
+        'torch_memory_saver_hook_mode_preload_cu13.abi3.so:ro"'
+    ) in start
+
+    with pytest.raises(HarnessError, match="dedicated"):
+        ssh_harness._tms_train_disk_backup_contract(
+            "/data",
+            plan["run_id"],
+            plan["islands"],
+            256,
+        )
+
+    plan["tms_preload_patch"]["patch_commit"] = "3" * 40
+    with pytest.raises(HarnessError, match="pinned TMS"):
+        ssh_harness._validate_plan(plan)
+
+
+def test_tms_disk_backup_cli_and_non_offload_rejection():
+    parsed = ssh_harness.build_parser().parse_args(
+        [
+            "prepare",
+            "--host",
+            "alice@a0,alice@a1",
+            "--run-id",
+            "disk-test",
+            "--tms-train-disk-backup-root",
+            "/data/yeto-rl/tms-disk-backup",
+            "--tms-train-disk-backup-chunk-mb",
+            "128",
+        ]
+    )
+    assert parsed.tms_train_disk_backup_root == (
+        "/data/yeto-rl/tms-disk-backup"
+    )
+    assert parsed.tms_train_disk_backup_chunk_mb == 128
+
+    plan = _plan()
+    plan["tms_preload_patch"] = _tms_patch_contract()
+    plan["tms_train_disk_backup"] = _tms_disk_backup_contract(plan)
+    with pytest.raises(HarnessError, match="requires --rl-offload-train"):
+        ssh_harness._validate_plan(plan)
+
+
+def test_deepseek_v4_nodes_use_the_verified_sglang_environment():
+    plan = _plan()
+    plan["learner"]["rl_model_recipe"] = "deepseek-v4-flash"
+
+    script = _node_start_script(plan, 0, 0)
+
+    for value in (
+        "YETO_DSV4_EXPERT_CLONE=1",
+        "YETO_DSV4_CLONE_ONLY_LORA=1",
+        "SGLANG_SKIP_CHECKPOINT_LOAD_CHECK=1",
+        "SGLANG_DSV4_FP4_EXPERTS=0",
+        "SGLANG_HEALTH_CHECK_TIMEOUT=120",
+        "SGLANG_DG_CACHE_DIR_PER_PROCESS=1",
+        "SGLANG_OPT_FP8_WO_A_GEMM=0",
+        "SGLANG_OPT_FUSE_WQA_WKV=0",
+        "NCCL_IB_DISABLE=1",
+        "NCCL_SOCKET_IFNAME=eno3",
+        "GLOO_SOCKET_IFNAME=eno3",
+        "CUDA_DEVICE_MAX_CONNECTIONS=1",
+        "--ulimit nofile=1048576:1048576",
+        "--ulimit core=-1",
+        "PYTHONFAULTHANDLER=1",
+        "TORCH_SHOW_CPP_STACKTRACES=1",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT=1",
+        "TORCH_NCCL_TRACE_BUFFER_SIZE=1048576",
+        "TORCH_FR_BUFFER_SIZE=1048576",
+        "NCCL_DEBUG=INFO",
+        "NCCL_DEBUG_SUBSYS=INIT,NET",
+        "YETO_TMS_POST_PAUSE_IDLE_S=30",
+        "cores:/var/lib/vastai_kaalia/data",
+    ):
+        assert value in script
+    assert "NVTE_FLASH_ATTN" not in script
+
+
 def test_harness_forwards_chat_template_kwargs_to_the_learner():
     plan = _plan()
-    plan["learner"]["apply_chat_template_kwargs"] = {
-        "enable_thinking": False
-    }
+    plan["learner"]["apply_chat_template_kwargs"] = {"enable_thinking": False}
 
     ssh_harness._validate_plan(plan)
     argv = _learner_argv(plan, 0)
@@ -657,6 +951,44 @@ def test_harness_forwards_chat_template_kwargs_to_the_learner():
     assert parse_learner_args(argv[3:]).apply_chat_template_kwargs == {
         "enable_thinking": False
     }
+
+
+def test_harness_forwards_agentic_session_contract_to_the_learner():
+    plan = _plan()
+    plan["learner"].update(
+        {
+            "custom_generate_function_path": (
+                "miles.rollout.generate_hub.agentic_tool_call.generate"
+            ),
+            "custom_agent_function_path": "secrlenv_miles.agent.run",
+            "agent_max_seq_len": 384,
+            "use_session_server": True,
+            "session_server_port": [31000],
+            "tito_model": "deepseekv4",
+            "tito_allowed_append_roles": ["tool", "user"],
+        }
+    )
+
+    ssh_harness._validate_plan(plan)
+    argv = _learner_argv(plan, 0)
+    parsed = parse_learner_args(argv[3:])
+
+    assert parsed.custom_agent_function_path == "secrlenv_miles.agent.run"
+    assert parsed.agent_max_seq_len == 384
+    assert parsed.tito_model == "deepseekv4"
+    assert parsed.tito_allowed_append_roles == ["tool", "user"]
+    for node_id in (0, 1):
+        script = _node_start_script(plan, 0, node_id)
+        assert "--env MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1" in script
+
+
+def test_harness_forwards_deepseek_v4_recipe_to_the_learner():
+    plan = _plan()
+    plan["learner"]["rl_model_recipe"] = "deepseek-v4-flash"
+
+    argv = _learner_argv(plan, 0)
+
+    assert parse_learner_args(argv[3:]).rl_model_recipe == "deepseek-v4-flash"
 
 
 def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
@@ -683,19 +1015,28 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     setup = _host_setup_script(plan, 4)
     assert SGLANG_REPOSITORY in setup
     assert SGLANG_COMMIT in setup
+    assert f'git -C "$RUN/miles" remote set-url origin {MILES_REPOSITORY}' in setup
+    assert f'git -C "$RUN/sglang" remote set-url origin {SGLANG_REPOSITORY}' in setup
     assert '"$RUN/sglang"' in setup
+    assert SGLANG_BUNDLE_PATH in setup
+    assert SGLANG_BUNDLE_SHA256 in setup
+    assert SGLANG_UPSTREAM_COMMIT in setup
+    assert 'git -C "$RUN/sglang" fetch "$SGLANG_BUNDLE" HEAD' in setup
+    assert setup.count("docker image inspect") == 2
+    assert setup.index("docker image inspect") < setup.index("docker pull")
     for script in (head, worker):
         assert "--env CYBERGYM_REWARD_SCHEME=shaped_v1" in script
         assert "--env CYBERGYM_REWARD_VIEW=train" in script
         assert '--volume "$RUN/sglang:/workspace/sglang:ro"' in script
-        assert "export PYTHONPATH=/workspace/sglang/python:/workspace/yeto:/workspace/miles" in script
+        assert (
+            "export PYTHONPATH=/workspace/sglang/python:/workspace/yeto:/workspace/miles"
+            in script
+        )
         assert script.index("export PYTHONPATH=") < script.index("ray start")
 
     plan["remote_env_file"] = ".config/yeto/rl.env"
     with_secrets = _node_start_script(plan, 0, 0)
-    assert with_secrets.index("--env-file") < with_secrets.index(
-        "--env CYBERGYM_URL"
-    )
+    assert with_secrets.index("--env-file") < with_secrets.index("--env CYBERGYM_URL")
 
 
 def test_decoupled_plan_propagates_fragment_and_variance_filter_settings():
@@ -719,6 +1060,8 @@ def test_decoupled_plan_propagates_fragment_and_variance_filter_settings():
             "rl_distributed_timeout_minutes": 7,
         }
     )
+    plan["tms_preload_patch"] = _tms_patch_contract()
+    plan["tms_train_disk_backup"] = _tms_disk_backup_contract(plan)
     ssh_harness._validate_plan(plan)
 
     syncer = _syncer_argv(plan)
@@ -744,9 +1087,5 @@ def test_decoupled_plan_propagates_fragment_and_variance_filter_settings():
 
 def test_verification_requires_an_exited_zero_status_container():
     assert _container_succeeded([{"State": {"Status": "exited", "ExitCode": 0}}])
-    assert not _container_succeeded(
-        [{"State": {"Status": "running", "ExitCode": 0}}]
-    )
-    assert not _container_succeeded(
-        [{"State": {"Status": "exited", "ExitCode": 1}}]
-    )
+    assert not _container_succeeded([{"State": {"Status": "running", "ExitCode": 0}}])
+    assert not _container_succeeded([{"State": {"Status": "exited", "ExitCode": 1}}])

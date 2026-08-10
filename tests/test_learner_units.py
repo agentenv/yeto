@@ -696,7 +696,12 @@ def test_dataset_smaller_than_accumulation_group_fails_instead_of_spinning():
 def test_lora_targets_resolution():
     from types import SimpleNamespace
 
-    from yeto.learner import _ATTENTION_TARGETS, is_moe_config, resolve_lora_targets
+    from yeto.learner import (
+        _ATTENTION_ROUTED_EXPERT_TARGETS,
+        _ATTENTION_TARGETS,
+        is_moe_config,
+        resolve_lora_targets,
+    )
 
     dense = SimpleNamespace()
     moe = SimpleNamespace(n_routed_experts=256)
@@ -705,6 +710,12 @@ def test_lora_targets_resolution():
     assert resolve_lora_targets("auto", moe) == _ATTENTION_TARGETS
     assert resolve_lora_targets("auto", dense) == "all-linear"
     assert resolve_lora_targets("attention", dense) == _ATTENTION_TARGETS
+    assert (
+        resolve_lora_targets("attention-routed-experts", moe)
+        == _ATTENTION_ROUTED_EXPERT_TARGETS
+    )
+    with pytest.raises(ValueError, match="mixture-of-experts"):
+        resolve_lora_targets("attention-routed-experts", dense)
     assert resolve_lora_targets("all-linear", moe) == "all-linear"  # warned, honored
 
 

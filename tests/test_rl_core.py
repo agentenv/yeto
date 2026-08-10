@@ -971,3 +971,34 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
     assert stats.ess_ratio == 0.8
     assert stats.clip_fraction == 0.25
     assert stats.train_seconds == 1.5
+
+
+def test_miles_policy_hook_counts_data_parallel_shards_after_model_parallelism(
+    monkeypatch,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "ray",
+        SimpleNamespace(get=lambda reference: reference),
+    )
+    hook = MilesPolicySync(
+        SimpleNamespace(
+            actor_num_nodes=2,
+            actor_num_gpus_per_node=8,
+            tensor_model_parallel_size=8,
+            pipeline_model_parallel_size=1,
+            context_parallel_size=1,
+            expert_model_parallel_size=8,
+        )
+    )
+    shards = [
+        SimpleNamespace(inner={"sample_indices": [0]}),
+        SimpleNamespace(inner={"sample_indices": [1]}),
+    ]
+
+    assert hook._rollout_batches({"data_ref": shards}) == [
+        {"sample_indices": [0]},
+        {"sample_indices": [1]},
+    ]
+    with pytest.raises(RuntimeError, match="1 DP shards, expected 2"):
+        hook._rollout_batches({"data_ref": shards[:1]})

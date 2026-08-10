@@ -58,6 +58,75 @@ def target_modules(choice: str, config) -> str:
     return resolve_lora_targets(choice, config)
 
 
+def _deepseek_v4_clone_expert_lora_specs(
+    config,
+    *,
+    rank: int,
+) -> tuple[CanonicalTensorSpec, ...]:
+    """Synthesize PEFT's per-expert contract for fused E288 expert modules.
+
+    Transformers exposes DeepSeek V4's routed experts as one fused
+    ``DeepseekV4Experts`` module, so walking ``named_modules()`` cannot discover
+    the logical ``experts.<id>.(gate|up|down)_proj`` leaves used by
+    Megatron-Bridge and SGLang.  The expanded checkpoint contract fixes the
+    geometry, making those canonical tensor names and shapes deterministic.
+    """
+
+    from .deepseek_v4_expert_clone import (
+        NUM_LAYERS,
+        TOTAL_EXPERTS,
+        contract_from_config,
+    )
+
+    if rank <= 0:
+        raise ValueError("LoRA rank must be positive")
+    contract = contract_from_config(config)
+    if contract is None:
+        raise ValueError(
+            "attention-routed-experts requires an expanded E288 clone contract"
+        )
+    model_type = str(getattr(config, "model_type", ""))
+    architectures = tuple(getattr(config, "architectures", None) or ())
+    if model_type != "deepseek_v4" or "DeepseekV4ForCausalLM" not in architectures:
+        raise ValueError(
+            "attention-routed-experts requires the pinned DeepSeek V4 architecture"
+        )
+    hidden_size = int(getattr(config, "hidden_size", 0) or 0)
+    expert_size = int(getattr(config, "moe_intermediate_size", 0) or 0)
+    if (hidden_size, expert_size) != (4096, 2048):
+        raise ValueError(
+            "expanded DeepSeek V4 LoRA requires hidden_size=4096 and "
+            "moe_intermediate_size=2048"
+        )
+
+    shapes = {
+        ("gate_proj", "A"): (rank, hidden_size),
+        ("gate_proj", "B"): (expert_size, rank),
+        ("up_proj", "A"): (rank, hidden_size),
+        ("up_proj", "B"): (expert_size, rank),
+        ("down_proj", "A"): (rank, expert_size),
+        ("down_proj", "B"): (hidden_size, rank),
+    }
+    specs = []
+    for layer in range(NUM_LAYERS):
+        for expert in range(TOTAL_EXPERTS):
+            for (projection, side), shape in shapes.items():
+                name = (
+                    "base_model.model.model.layers."
+                    f"{layer}.mlp.experts.{expert}.{projection}."
+                    f"lora_{side}.weight"
+                )
+                specs.append(
+                    CanonicalTensorSpec(
+                        name,
+                        shape,
+                        "float32",
+                        shape[0] * shape[1],
+                    )
+                )
+    return tuple(sorted(specs))
+
+
 def derive_peft_lora_specs(
     model: str,
     revision: str | None,
@@ -77,7 +146,17 @@ def derive_peft_lora_specs(
         revision=revision,
         trust_remote_code=trust_remote_code,
     )
-    if isinstance(targets, str) and targets in {
+    clone_expert_mode = targets == "attention-routed-experts"
+    expert_specs = (
+        _deepseek_v4_clone_expert_lora_specs(config, rank=rank)
+        if clone_expert_mode
+        else ()
+    )
+    if clone_expert_mode:
+        # Only ask PEFT to discover attention leaves.  Routed experts are a
+        # fused module in Transformers 5 and are synthesized above.
+        targets = target_modules("attention", config)
+    elif isinstance(targets, str) and targets in {
         "auto",
         "attention",
         "all-linear",
@@ -107,7 +186,7 @@ def derive_peft_lora_specs(
     state = get_peft_model_state_dict(adapter)
     if not state:
         raise ValueError("PEFT found no LoRA tensors for the requested model")
-    return tuple(
+    peft_specs = tuple(
         CanonicalTensorSpec(
             name,
             tuple(int(dim) for dim in tensor.shape),
@@ -116,6 +195,11 @@ def derive_peft_lora_specs(
         )
         for name, tensor in sorted(state.items())
     )
+    names = {spec.name for spec in peft_specs}
+    overlap = names.intersection(spec.name for spec in expert_specs)
+    if overlap:
+        raise RuntimeError(f"duplicate synthesized expert LoRA tensors: {sorted(overlap)[:4]}")
+    return tuple(sorted((*peft_specs, *expert_specs)))
 
 
 def adapter_targets(specs: Sequence[CanonicalTensorSpec]) -> list[str]:
@@ -313,7 +397,12 @@ def parse_args(argv=None):
     parser.add_argument("--lora-r", type=int, required=True)
     parser.add_argument(
         "--lora-targets",
-        choices=["auto", "attention", "all-linear"],
+        choices=[
+            "auto",
+            "attention",
+            "attention-routed-experts",
+            "all-linear",
+        ],
         default="auto",
     )
     parser.add_argument("--trust-remote-code", action="store_true")

@@ -521,6 +521,11 @@ _ATTENTION_TARGETS = (
     r".*\.(q_proj|k_proj|v_proj|o_proj|qkv_proj|out_proj"
     r"|q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj)$"
 )
+_ATTENTION_ROUTED_EXPERT_TARGETS = (
+    r"(?:.*\.(q_proj|k_proj|v_proj|o_proj|qkv_proj|out_proj"
+    r"|q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj)"
+    r"|.*\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj))$"
+)
 # Config attributes that mark a mixture-of-experts architecture.
 _MOE_CONFIG_MARKERS = ("n_routed_experts", "num_experts", "num_local_experts")
 
@@ -543,6 +548,12 @@ def resolve_lora_targets(choice: str, config) -> str:
         return _ATTENTION_TARGETS if is_moe_config(config) else "all-linear"
     if choice == "attention":
         return _ATTENTION_TARGETS
+    if choice == "attention-routed-experts":
+        if not is_moe_config(config):
+            raise ValueError(
+                "attention-routed-experts requires a mixture-of-experts model"
+            )
+        return _ATTENTION_ROUTED_EXPERT_TARGETS
     if choice == "all-linear" and is_moe_config(config):
         log.warning(
             "--lora-targets all-linear on a MoE model adapts every routed "

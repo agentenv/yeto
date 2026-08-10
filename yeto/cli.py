@@ -91,6 +91,25 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
     rl.add_argument("--rl-image", default=MILES_IMAGE)
     rl.add_argument(
+        "--rl-model-recipe",
+        choices=["generic", "deepseek-v4-flash"],
+        default="generic",
+        help="model-specific Miles memory/kernel contract",
+    )
+    rl.add_argument(
+        "--rollout-model",
+        default=None,
+        help=(
+            "optional inference checkpoint for Miles/SGLang; defaults to --model. "
+            "Use this to pair an FP8 rollout checkpoint with a BF16 --model"
+        ),
+    )
+    rl.add_argument(
+        "--rollout-model-revision",
+        default=None,
+        help="immutable Hugging Face commit represented by --rollout-model",
+    )
+    rl.add_argument(
         "--reward-function",
         default=None,
         help="RL reward callable as package.module:function",
@@ -144,13 +163,58 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default=10,
         help="bounded Miles distributed/Gloo timeout (default: 10 minutes)",
     )
+    rl.add_argument(
+        "--rollout-num-gpus-per-engine",
+        type=int,
+        default=1,
+        help="GPUs assigned to each colocated SGLang rollout engine",
+    )
+    rl.add_argument("--sglang-tp-size", type=int, default=None)
+    rl.add_argument("--sglang-dp-size", type=int, default=None)
+    rl.add_argument("--sglang-ep-size", type=int, default=None)
+    rl.add_argument("--sglang-mem-fraction-static", type=float, default=0.4)
+    rl.add_argument("--sglang-attention-backend", default=None)
+    rl.add_argument(
+        "--sglang-deterministic-inference",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "enable deterministic SGLang kernels when supported; disable for "
+            "DeepSeek V4 dsv4/compressed attention"
+        ),
+    )
+    rl.add_argument("--sglang-page-size", type=int, default=None)
+    rl.add_argument("--sglang-max-running-requests", type=int, default=None)
+    rl.add_argument("--sglang-chunked-prefill-size", type=int, default=None)
+    rl.add_argument("--use-rollout-routing-replay", action="store_true")
     rl.add_argument("--rollout-max-response-len", type=int, default=32768)
     rl.add_argument("--apply-chat-template-kwargs", type=json.loads, default=None)
     rl.add_argument("--custom-generate-function-path", default=None)
+    rl.add_argument(
+        "--custom-agent-function-path",
+        default=None,
+        help=(
+            "Miles async agent callable used by an agentic custom generate "
+            "function (package.module.function)"
+        ),
+    )
     rl.add_argument("--use-session-server", action="store_true")
     rl.add_argument("--session-server-ip", default=None)
     rl.add_argument("--session-server-port", type=int, nargs="+", default=None)
     rl.add_argument("--tito-model", default=None)
+    rl.add_argument(
+        "--tito-allowed-append-roles",
+        nargs="+",
+        choices=["tool", "user", "system"],
+        default=None,
+        help="message roles the Miles TITO session may append after generation",
+    )
+    rl.add_argument(
+        "--agent-max-seq-len",
+        type=int,
+        default=None,
+        help="hard total-token cap for one multi-turn agent trajectory",
+    )
     rl.add_argument("--local-rl-rounds-per-sync", type=int, default=1)
     rl.add_argument(
         "--rl-sync-preset",
@@ -300,10 +364,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     tune.add_argument("--lora-alpha", type=int, default=32)
     tune.add_argument(
         "--lora-targets",
-        choices=["auto", "attention", "all-linear"],
+        choices=[
+            "auto",
+            "attention",
+            "attention-routed-experts",
+            "all-linear",
+        ],
         default="auto",
-        help="adapter placement: attention-only, every linear, or auto "
-        "(attention for MoE — router and routed experts stay frozen)",
+        help="adapter placement: attention-only, expanded-V4 "
+        "attention+routed-expert clones, every linear, or auto "
+        "(attention for ordinary MoE — router and routed experts stay frozen)",
     )
     parent = tune.add_mutually_exclusive_group()
     parent.add_argument(
