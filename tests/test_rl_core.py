@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import yeto.rl.core as core_module
 from yeto.fragments import MERGE_AVG
 from yeto.protocol import PullRequest
 from yeto.rl import miles
@@ -76,6 +77,45 @@ def test_flat_round_trip_and_delta_use_the_exact_tensor_contract():
         expected_specs=base.specs,
     )
     assert torch.equal(policy_delta(local, base), torch.full_like(flat, 0.5))
+
+
+def test_flatten_and_delta_preallocate_without_tensor_list_concatenation(monkeypatch):
+    base = state(2, tensors())
+    local = state(
+        2,
+        {name: value + 0.5 for name, value in base.tensors.items()},
+        expected_specs=base.specs,
+    )
+
+    monkeypatch.setattr(
+        core_module.torch,
+        "cat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("large policy paths must preallocate")
+        ),
+    )
+
+    flat = core_module.flat_tensor(base.tensors, base.specs)
+    assert torch.equal(flat, torch.tensor([1.0, 2.0, 3.0, 4.0]))
+    assert torch.equal(core_module.policy_delta(local, base), torch.full_like(flat, 0.5))
+
+
+def test_tensors_from_flat_does_not_copy_the_complete_flat_input(monkeypatch):
+    base = state(2, tensors())
+    flat = flat_tensor(base.tensors, base.specs)
+    original = core_module._canonical_tensor
+
+    def reject_full_flat_copy(tensor, name):
+        if name == "flat LoRA policy":
+            raise AssertionError("the complete flat policy must not be cloned")
+        return original(tensor, name)
+
+    monkeypatch.setattr(core_module, "_canonical_tensor", reject_full_flat_copy)
+    rebuilt = core_module.tensors_from_flat(flat, base.specs)
+
+    assert all(torch.equal(base.tensors[name], rebuilt[name]) for name in rebuilt)
+    flat.zero_()
+    assert all(torch.count_nonzero(value).item() for value in rebuilt.values())
 
 
 def test_policy_delta_rejects_canonical_identity_mismatch():

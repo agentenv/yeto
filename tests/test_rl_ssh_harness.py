@@ -192,6 +192,32 @@ def _write_jsonl(path: Path, rows):
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
+def test_round_audit_streams_f32_files_without_path_write_bytes(tmp_path, monkeypatch):
+    state = _state(0, [1.0, 2.0])
+    original = Path.write_bytes
+
+    def reject_large_write_bytes(path, payload):
+        if path.suffix == ".f32":
+            raise AssertionError("round audit tensors must be streamed")
+        return original(path, payload)
+
+    monkeypatch.setattr(Path, "write_bytes", reject_large_write_bytes)
+    _write_round_audit(
+        tmp_path,
+        learner_id=0,
+        target_step=1,
+        base=state,
+        delta=torch.tensor([0.25, -0.5], dtype=torch.float32),
+    )
+
+    assert (tmp_path / "round-00000001.base.f32").read_bytes() == (
+        torch.tensor([1.0, 2.0], dtype=torch.float32).numpy().tobytes()
+    )
+    assert (tmp_path / "round-00000001.delta.f32").read_bytes() == (
+        torch.tensor([0.25, -0.5], dtype=torch.float32).numpy().tobytes()
+    )
+
+
 def _state(version: int, values: list[float]):
     return canonical_state(
         version,

@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+import torch
+
 from ..protocol import DTYPE_F32, FinalManifest, PullRequest, SyncerClient
 from ..tensor_io import pack_tensor, unpack_fragment
 from .core import (
@@ -77,10 +79,34 @@ def _write_round_audit(
     root = Path(directory).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     stem = f"round-{target_step:08d}"
-    base_bytes = flat_tensor(base.tensors, base.specs).numpy().astype(
-        "<f4", copy=False
-    ).tobytes()
-    delta_bytes = delta.numpy().astype("<f4", copy=False).tobytes()
+    def write_f32(path: Path, tensors) -> str:
+        temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        digest = hashlib.sha256()
+        try:
+            with temporary.open("wb") as handle:
+                for tensor in tensors:
+                    value = tensor.detach().to(
+                        device="cpu", dtype=torch.float32
+                    ).contiguous()
+                    if not torch.isfinite(value).all().item():
+                        raise ValueError(f"audit tensor {path.name!r} contains NaN or Inf")
+                    raw = memoryview(value.numpy()).cast("B")
+                    for offset in range(0, len(raw), 64 * 1024 * 1024):
+                        chunk = raw[offset : offset + 64 * 1024 * 1024]
+                        handle.write(chunk)
+                        digest.update(chunk)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return digest.hexdigest()
+
+    base_path = root / f"{stem}.base.f32"
+    delta_path = root / f"{stem}.delta.f32"
+    base_sha256 = write_f32(
+        base_path,
+        (base.tensors[spec.name] for spec in base.specs),
+    )
+    delta_sha256 = write_f32(delta_path, (delta,))
     metadata = {
         "schema": 1,
         "learner_id": learner_id,
@@ -90,24 +116,19 @@ def _write_round_audit(
         "lora_config_hash": base.lora_config_hash,
         "layout_hash": base.layout_hash,
         "specs": [asdict(spec) for spec in base.specs],
-        "base_f32_sha256": hashlib.sha256(base_bytes).hexdigest(),
-        "delta_f32_sha256": hashlib.sha256(delta_bytes).hexdigest(),
+        "base_f32_sha256": base_sha256,
+        "delta_f32_sha256": delta_sha256,
     }
-    values = (
-        (root / f"{stem}.base.f32", base_bytes),
-        (root / f"{stem}.delta.f32", delta_bytes),
-        (
-            root / f"{stem}.json",
-            (json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n").encode(),
-        ),
-    )
-    for path, payload in values:
-        temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-        try:
-            temporary.write_bytes(payload)
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+    path = root / f"{stem}.json"
+    payload = (
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class StrictRlBridge:

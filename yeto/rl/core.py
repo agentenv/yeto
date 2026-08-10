@@ -15,6 +15,11 @@ from ..fragments import MERGE_AVG, Fragment, FragmentLayout
 from ..protocol import layout_fingerprint
 
 _PEFT_LORA_NAME = re.compile(r"\.lora_(?:A|B)\.weight\Z")
+_CLONE_EXPERT_FULL_NAME = re.compile(
+    r"^base_model\.model\.model\.layers\.(?:[0-9]|[1-3][0-9]|4[0-2])\."
+    r"mlp\.experts\.(?:25[6-9]|26[0-9]|27[0-9]|28[0-7])\."
+    r"(?:gate_proj|up_proj|down_proj)\.weight\Z"
+)
 
 
 class StrictRlInvariantError(RuntimeError):
@@ -33,7 +38,10 @@ class CanonicalTensorSpec:
     numel: int
 
     def __post_init__(self) -> None:
-        if not self.name or not _PEFT_LORA_NAME.search(self.name):
+        if not self.name or not (
+            _PEFT_LORA_NAME.search(self.name)
+            or _CLONE_EXPERT_FULL_NAME.fullmatch(self.name)
+        ):
             raise ValueError(f"not a canonical PEFT LoRA tensor name: {self.name!r}")
         if not self.shape or any(dim <= 0 for dim in self.shape):
             raise ValueError(f"invalid shape for {self.name!r}: {self.shape}")
@@ -159,12 +167,16 @@ def canonical_lora_config_hash(
 
 
 def _canonical_tensor(tensor: torch.Tensor, name: str) -> torch.Tensor:
+    return _canonical_view(tensor, name).clone()
+
+
+def _canonical_view(tensor: torch.Tensor, name: str) -> torch.Tensor:
     if not isinstance(tensor, torch.Tensor) or not tensor.is_floating_point():
         raise TypeError(f"{name!r} must be a floating-point torch.Tensor")
     value = tensor.detach().to(device="cpu", dtype=torch.float32).contiguous()
     if not torch.isfinite(value).all().item():
         raise ValueError(f"{name!r} contains NaN or Inf")
-    return value.clone()
+    return value
 
 
 def canonical_state(
@@ -202,13 +214,19 @@ def flat_tensor(
     specs = tuple(sorted(specs or canonical_specs(tensors)))
     if set(tensors) != {spec.name for spec in specs}:
         raise ValueError("tensor names do not match canonical specs")
-    values = []
+    flat = torch.empty(
+        sum(spec.numel for spec in specs),
+        dtype=torch.float32,
+        device="cpu",
+    )
+    offset = 0
     for spec in specs:
-        tensor = _canonical_tensor(tensors[spec.name], spec.name)
+        tensor = _canonical_view(tensors[spec.name], spec.name)
         if tuple(tensor.shape) != spec.shape:
             raise ValueError(f"shape mismatch for {spec.name!r}")
-        values.append(tensor.reshape(-1))
-    return torch.cat(values)
+        flat[offset : offset + spec.numel].copy_(tensor.reshape(-1))
+        offset += spec.numel
+    return flat
 
 
 def tensors_from_flat(
@@ -218,7 +236,11 @@ def tensors_from_flat(
     specs = tuple(specs)
     if specs != tuple(sorted(specs)):
         raise ValueError("canonical LoRA specs are not sorted")
-    flat = _canonical_tensor(flat.reshape(-1), "flat LoRA policy")
+    if not isinstance(flat, torch.Tensor) or not flat.is_floating_point():
+        raise TypeError("'flat LoRA policy' must be a floating-point torch.Tensor")
+    flat = flat.detach().reshape(-1).to(
+        device="cpu", dtype=torch.float32
+    ).contiguous()
     expected = sum(spec.numel for spec in specs)
     if flat.numel() != expected:
         raise ValueError(
@@ -227,9 +249,10 @@ def tensors_from_flat(
     tensors = {}
     offset = 0
     for spec in specs:
-        tensors[spec.name] = flat[
-            offset : offset + spec.numel
-        ].reshape(spec.shape).clone()
+        value = flat[offset : offset + spec.numel]
+        if not torch.isfinite(value).all().item():
+            raise ValueError("'flat LoRA policy' contains NaN or Inf")
+        tensors[spec.name] = value.reshape(spec.shape).clone()
         offset += spec.numel
     return tensors
 
@@ -249,12 +272,21 @@ def policy_delta(local: CanonicalLoraState, base: CanonicalLoraState) -> torch.T
         base.layout_hash,
     ):
         raise ValueError("local and base canonical LoRA identities differ")
-    delta = flat_tensor(local.tensors, local.specs) - flat_tensor(
-        base.tensors, base.specs
+    delta = torch.empty(
+        sum(spec.numel for spec in local.specs),
+        dtype=torch.float32,
+        device="cpu",
     )
-    if not torch.isfinite(delta).all().item():
-        raise ValueError("local LoRA delta contains NaN or Inf")
-    return delta.contiguous()
+    offset = 0
+    for spec in local.specs:
+        local_tensor = _canonical_view(local.tensors[spec.name], spec.name)
+        base_tensor = _canonical_view(base.tensors[spec.name], spec.name)
+        target = delta[offset : offset + spec.numel].view(spec.shape)
+        torch.sub(local_tensor, base_tensor, out=target)
+        if not torch.isfinite(target).all().item():
+            raise ValueError("local LoRA delta contains NaN or Inf")
+        offset += spec.numel
+    return delta
 
 
 def policy_hash(state: CanonicalLoraState) -> str:
