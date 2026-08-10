@@ -354,7 +354,11 @@ def test_resume_keys_cover_every_seed_m_and_arm():
         )
 
 
-def test_resume_identity_survives_json_round_trip():
+def test_resume_identity_survives_json_round_trip(monkeypatch):
+    monkeypatch.setattr(
+        "yeto.benchmark_resume.implementation_fingerprint",
+        lambda _root, _paths: "d" * 64,
+    )
     args = benchmark.build_parser().parse_args(
         [
             "--model",
@@ -380,6 +384,7 @@ def test_resume_identity_survives_json_round_trip():
 
     assert json.loads(json.dumps(identity)) == identity
     assert identity["arguments"]["reward_sha256"] == "c" * 64
+    assert identity["implementation_sha256"] == "d" * 64
 
 
 def test_resume_identity_fingerprints_all_yeto_sources_and_syncer_binary(
