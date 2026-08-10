@@ -53,8 +53,8 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   calibrated.
 - Existing causal LoRA SFT artifacts can be continued with `--resume-from`
   when the recorded model, data, and recipe match, or used as a new lineage
-  with `--branch-from`. `yeto merge` safely folds an adapter into its base and
-  writes deployment-ready SafeTensors shards. See
+  with `--branch-from`. `yeto merge --max-shard-size 2GB ...` safely folds an
+  adapter into its base and writes deployment-ready SafeTensors shards. See
   [docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md).
 - `--output`: any sky-supported store URI or `hf://org/repo` — the head
   fetches the model from the winning learner, uploads it, and **terminates

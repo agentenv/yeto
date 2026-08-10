@@ -197,8 +197,6 @@ def test_local_launch_source_is_attested_and_cloud_requires_digest(tmp_path):
                 adapter_sha256="not-a-digest",
             )
         )
-
-
 def test_training_recipe_normalizes_learner_only_defaults():
     run_args = args()
     for name in (

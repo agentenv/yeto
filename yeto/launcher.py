@@ -487,6 +487,8 @@ def prepare_launch_args(args, *, allow_local_rl_data: bool = False) -> None:
         from .datasource import kind
 
         if kind(parent_source) == "local":
+            # Fail on malformed artifacts and recipe drift on the submitter
+            # (and again on every learner), before provisioning GPU capacity.
             inspect_parent_adapter(
                 args,
                 expected_sha256=args.adapter_sha256,
@@ -1325,6 +1327,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         f" --inner-lr {args.inner_lr}"
         f" --fragments {args.fragments}"
         f" --fragment-pattern {args.fragment_pattern}"
+        f" --matrix-merge {getattr(args, 'matrix_merge', 'rda')}"
         f" --merge-alpha {args.merge_alpha}"
         f" --wire-dtype {args.wire_dtype}"
         f" --wan-streams {args.wan_streams}"
@@ -1333,7 +1336,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     parent_arg = learner_parent_arg(args)
     if parent_mode is not None and parent_arg is not None:
         common_flags += f" --{parent_mode}-from {shlex.quote(parent_arg)}"
-        common_flags += f" --adapter-sha256 {shlex.quote(args.adapter_sha256)}"
+        common_flags += (
+            f" --adapter-sha256 {shlex.quote(args.adapter_sha256)}"
+        )
     if getattr(args, "model_revision", None):
         common_flags += f" --model-revision {shlex.quote(args.model_revision)}"
     if getattr(args, "data_revision", None):
