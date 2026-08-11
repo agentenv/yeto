@@ -19,8 +19,12 @@ from yeto.rl.core import (
     policy_tensor_hash,
     tensors_from_flat,
 )
+from yeto.rl.deepseek_v4_expert_clone import (
+    NUM_LAYERS,
+    ORIGINAL_EXPERTS,
+    ExpertCloneContract,
+)
 from yeto.rl.export import derive_peft_lora_specs, export_rl_checkpoint
-from yeto.rl.deepseek_v4_expert_clone import ExpertCloneContract, NUM_LAYERS
 from yeto.tensor_io import fragment_flat
 
 
@@ -131,16 +135,21 @@ def _expanded_deepseek_v4_config():
     )
 
 
-def test_e288_fused_expert_specs_are_complete_and_have_canonical_shapes():
+def test_e288_fused_clone_expert_specs_are_sparse_and_have_canonical_shapes():
     specs = rl_export._deepseek_v4_clone_expert_lora_specs(
         _expanded_deepseek_v4_config(),
         rank=8,
     )
 
     assert specs == tuple(sorted(specs))
-    assert len(specs) == 43 * 288 * 3 * 2 == 74_304
-    assert sum(spec.numel for spec in specs) == 1_826_095_104
+    assert len(specs) == 43 * 32 * 3 * 2 == 8_256
+    assert sum(spec.numel for spec in specs) == 202_899_456
     by_name = {spec.name: spec for spec in specs}
+    assert all(
+        int(spec.name.split(".experts.", 1)[1].split(".", 1)[0])
+        >= ORIGINAL_EXPERTS
+        for spec in specs
+    )
     prefix = "base_model.model.model.layers.42.mlp.experts.287"
     assert by_name[f"{prefix}.gate_proj.lora_A.weight"].shape == (8, 4096)
     assert by_name[f"{prefix}.gate_proj.lora_B.weight"].shape == (2048, 8)

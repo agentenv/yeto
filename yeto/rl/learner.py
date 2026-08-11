@@ -875,8 +875,8 @@ def run_miles(
             miles_args.yeto_rl_expected_specs = specs
         if clone_only_lora:
             # The Bridge exposes one representative mapping per packed expert
-            # parameter.  Miles needs the full canonical set at the external
-            # policy boundary, including exact-zero original-expert tensors.
+            # parameter.  Miles needs the sparse canonical clone set at the
+            # external policy boundary and reconstructs frozen originals as zeros.
             miles_args.yeto_rl_canonical_lora_names = tuple(
                 spec.name for spec in specs
             )

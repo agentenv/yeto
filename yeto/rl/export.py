@@ -74,6 +74,7 @@ def _deepseek_v4_clone_expert_lora_specs(
 
     from .deepseek_v4_expert_clone import (
         NUM_LAYERS,
+        ORIGINAL_EXPERTS,
         TOTAL_EXPERTS,
         contract_from_config,
     )
@@ -109,7 +110,7 @@ def _deepseek_v4_clone_expert_lora_specs(
     }
     specs = []
     for layer in range(NUM_LAYERS):
-        for expert in range(TOTAL_EXPERTS):
+        for expert in range(ORIGINAL_EXPERTS, TOTAL_EXPERTS):
             for (projection, side), shape in shapes.items():
                 name = (
                     "base_model.model.model.layers."
