@@ -57,8 +57,9 @@
 
 - [ ] Add failing tests proving all eight ranks collectively own every clone once and each owns four clones for a 32-expert policy.
 - [ ] Add failing task/view tests showing physical expert 32 represents logical clone 256 while physical 256 is an original.
+- [ ] Add a failing EP8 task-topology test proving every rank executes the same local clone offsets before Bridge collectives, then filters gathered logical names to the selected prefix.
 - [ ] Derive local logical IDs from physical slots in expert configuration.
-- [ ] Translate conversion-task expert names to logical IDs before selection and canonical matching.
+- [ ] Translate conversion-task expert names to logical IDs for local ownership and canonical matching; keep the collective filter based on identical physical offsets.
 - [ ] Re-run expert-full tests, including the PP stage-local case, and verify they pass.
 
 ### Task 5: Update runtime validation and complete regression checks

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -7,6 +8,12 @@ import pytest
 import torch
 
 from yeto.rl import deepseek_v4_expert_full_runtime as runtime
+from yeto.rl.deepseek_v4_expert_clone import (
+    EXPERT_PARALLEL_SIZE,
+    NUM_LAYERS,
+    ORIGINAL_EXPERTS_PER_RANK,
+    TRAINING_EXPERTS_PER_RANK,
+)
 from yeto.rl.deepseek_v4_expert_full_runtime import (
     filter_selected_expert_tasks,
     install_on_arguments,
@@ -16,11 +23,133 @@ from yeto.rl.deepseek_v4_expert_full_runtime import (
 )
 
 
-def _expert_name(expert: int, projection: str = "gate_proj") -> str:
+def _expert_name(
+    expert: int,
+    projection: str = "gate_proj",
+    *,
+    layer: int = 0,
+) -> str:
     return (
-        "base_model.model.model.layers.0.mlp.experts."
+        f"base_model.model.model.layers.{layer}.mlp.experts."
         f"{expert}.{projection}.weight"
     )
+
+
+def _expert_tasks(expert: int, *, layer: int = 0) -> tuple[SimpleNamespace, ...]:
+    return (
+        SimpleNamespace(
+            mapping=SimpleNamespace(
+                hf_param={
+                    "gate": _expert_name(expert, layer=layer),
+                    "up": _expert_name(expert, "up_proj", layer=layer),
+                }
+            )
+        ),
+        SimpleNamespace(
+            mapping=SimpleNamespace(
+                hf_param=_expert_name(expert, "down_proj", layer=layer)
+            )
+        ),
+    )
+
+
+def test_collective_expert_tasks_have_identical_ep8_topology():
+    expected_count = NUM_LAYERS * 4 * 2
+    for rank in range(EXPERT_PARALLEL_SIZE):
+        tasks = [
+            task
+            for layer in range(NUM_LAYERS)
+            for expert in range(
+                rank * TRAINING_EXPERTS_PER_RANK,
+                (rank + 1) * TRAINING_EXPERTS_PER_RANK,
+            )
+            for task in _expert_tasks(expert, layer=layer)
+        ]
+
+        selected = runtime.filter_collective_expert_tasks(tasks, expert_count=16)
+
+        physical_ids = [
+            int(runtime._mapping_hf_names(task)[0].split(".experts.")[1].split(".")[0])
+            for task in selected
+        ]
+        assert len(selected) == expected_count
+        assert {expert % TRAINING_EXPERTS_PER_RANK for expert in physical_ids} == {
+            ORIGINAL_EXPERTS_PER_RANK + offset for offset in range(4)
+        }
+        assert {expert // TRAINING_EXPERTS_PER_RANK for expert in physical_ids} == {
+            rank
+        }
+
+
+def test_weight_iterator_filters_after_collective_export(monkeypatch):
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "5")
+    monkeypatch.setattr(runtime, "NUM_LAYERS", 1)
+    rank = EXPERT_PARALLEL_SIZE - 1
+    tasks = [
+        task
+        for expert in range(
+            rank * TRAINING_EXPERTS_PER_RANK,
+            (rank + 1) * TRAINING_EXPERTS_PER_RANK,
+        )
+        for task in _expert_tasks(expert)
+    ]
+
+    class Bridge:
+        def get_conversion_tasks(self, _model):
+            return tasks
+
+        def export_hf_weights(self, _model, **kwargs):
+            self.exported_tasks = tuple(kwargs["conversion_tasks"])
+            return (
+                (_expert_name(expert, projection), torch.ones(1), "megatron-name")
+                for expert in range(256, 288)
+                for projection in ("gate_proj", "up_proj", "down_proj")
+            )
+
+    class Iterator:
+        def get_hf_weight_chunks(self, _weights, weight_type="base"):
+            yield ("original", weight_type)
+
+        def _postprocess_and_quantize(self, named_weights, _weight_type):
+            return named_weights
+
+    iterator_module = SimpleNamespace(
+        HfWeightIteratorBridge=Iterator,
+        strip_param_name_prefix=lambda name: name,
+        megatron_bridge_utils=SimpleNamespace(
+            patch_megatron_model=lambda _model: nullcontext()
+        ),
+        _process_conversion_tasks=lambda selected, _weights: list(selected),
+        is_lora_weight_name=lambda _name: False,
+        get_atomic_update_groups=lambda _args, _model_name: (),
+        _stream_atomic_units=lambda items, _groups: (
+            [(name, weight)] for name, weight, _megatron_name in items
+        ),
+        _chunk_atomic_units_by_size=lambda units, chunk_size: units,
+    )
+    runtime.install_on_weight_iterator(iterator_module)
+    bridge = Bridge()
+    iterator = Iterator()
+    iterator._bridge = bridge
+    iterator.model = object()
+    iterator.args = SimpleNamespace(update_weight_buffer_size=1)
+    iterator.model_name = "deepseek-v4"
+
+    chunks = list(iterator.get_hf_weight_chunks({}, weight_type="base"))
+
+    task_experts = [
+        int(runtime._mapping_hf_names(task)[0].split(".experts.")[1].split(".")[0])
+        for task in bridge.exported_tasks
+    ]
+    assert len(bridge.exported_tasks) == 4 * 2
+    assert {expert % TRAINING_EXPERTS_PER_RANK for expert in task_experts} == {
+        ORIGINAL_EXPERTS_PER_RANK + offset for offset in range(4)
+    }
+    assert {name for chunk in chunks for name, _weight in chunk} == {
+        _expert_name(expert, projection)
+        for expert in range(256, 261)
+        for projection in ("gate_proj", "up_proj", "down_proj")
+    }
 
 
 def test_selected_expert_task_filter_keeps_only_the_requested_safe_clone_prefix():

@@ -12,9 +12,12 @@ from types import ModuleType
 from typing import Any
 
 from .deepseek_v4_expert_clone import (
+    CLONES_PER_EXPERT_RANK,
     CLONES_PER_LAYER,
     NUM_LAYERS,
     ORIGINAL_EXPERTS,
+    TRAINING_EXPERTS_PER_RANK,
+    logical_to_training_expert_id,
     training_to_logical_expert_name,
 )
 
@@ -75,6 +78,28 @@ def filter_selected_expert_tasks(tasks, *, expert_count: int) -> list[Any]:
         if names and all(
             selected_expert_hf_name(name, expert_count=expert_count)
             for name in names
+        ):
+            selected.append(task)
+    return selected
+
+
+def filter_collective_expert_tasks(tasks, *, expert_count: int) -> list[Any]:
+    """Select identical local expert offsets on every EP rank."""
+
+    selected_offsets = {
+        logical_to_training_expert_id(expert) % TRAINING_EXPERTS_PER_RANK
+        for expert in range(ORIGINAL_EXPERTS, ORIGINAL_EXPERTS + expert_count)
+    }
+    selected = []
+    for task in tasks:
+        matches = tuple(
+            _EXPERT_WEIGHT.fullmatch(name) for name in _mapping_hf_names(task)
+        )
+        if matches and all(
+            match is not None
+            and int(match.group("expert")) % TRAINING_EXPERTS_PER_RANK
+            in selected_offsets
+            for match in matches
         ):
             selected.append(task)
     return selected
@@ -680,11 +705,12 @@ def install_on_weight_iterator(module: ModuleType) -> None:
             for name, value in megatron_local_weights.items()
         }
         with module.megatron_bridge_utils.patch_megatron_model(self.model):
-            tasks = filter_selected_expert_tasks(
+            expert_count = _expert_count()
+            tasks = filter_collective_expert_tasks(
                 self._bridge.get_conversion_tasks(self.model),
-                expert_count=_expert_count(),
+                expert_count=expert_count,
             )
-            expected = NUM_LAYERS * _expert_count() * 2
+            expected = NUM_LAYERS * min(expert_count, CLONES_PER_EXPERT_RANK) * 2
             if len(tasks) != expected:
                 raise RuntimeError(
                     f"expert-full base sync found {len(tasks)} conversion tasks, "
@@ -696,6 +722,11 @@ def install_on_weight_iterator(module: ModuleType) -> None:
                 cpu=False,
                 conversion_tasks=tasks,
                 merge_adapter_weights=False,
+            )
+            named_weights = (
+                item
+                for item in named_weights
+                if selected_expert_hf_name(item[0], expert_count=expert_count)
             )
             named_weights = self._postprocess_and_quantize(named_weights, weight_type)
             named_weights = (

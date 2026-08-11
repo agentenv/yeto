@@ -212,6 +212,14 @@ def _training_expert_weights(
     return _remap_expert_weights(weights, logical_to_training_expert_name)
 
 
+def _balanced_experts_from_config(config: Any) -> bool:
+    if config is None:
+        return False
+    from .deepseek_v4_expert_clone import contract_from_config
+
+    return contract_from_config(config) is not None
+
+
 def _normalized_config(config: Any) -> Any:
     normalized = copy.deepcopy(config)
     ratios = _compression_ratios(normalized)
@@ -457,7 +465,7 @@ def ensure_deepseek_v4_bridge() -> type:
             if configured is not None:
                 return bool(configured)
             config = getattr(self, "hf_config", None)
-            return getattr(config, "yeto_routed_expert_clone", None) is not None
+            return _balanced_experts_from_config(config)
 
         def provider_bridge(self, hf_pretrained):
             from .deepseek_v4_expert_clone import contract_from_config

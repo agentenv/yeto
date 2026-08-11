@@ -11,6 +11,44 @@ from yeto.rl.deepseek_v4_bridge import (
     _normalized_config,
     _rope_scaling_contract,
 )
+from yeto.rl.deepseek_v4_expert_clone import (
+    CLONES_PER_LAYER,
+    NUM_LAYERS,
+    TOPK,
+    TOTAL_EXPERTS,
+    ExpertCloneContract,
+)
+
+
+def _balanced_clone_config() -> SimpleNamespace:
+    contract = ExpertCloneContract(
+        tuple(tuple(range(CLONES_PER_LAYER)) for _ in range(NUM_LAYERS)),
+        "1" * 64,
+        "2" * 64,
+    )
+    return SimpleNamespace(
+        n_routed_experts=TOTAL_EXPERTS,
+        num_hidden_layers=NUM_LAYERS,
+        num_experts_per_tok=TOPK,
+        num_nextn_predict_layers=0,
+        yeto_routed_expert_clone=contract.config_value(),
+    )
+
+
+def test_balanced_bridge_fallback_requires_a_complete_clone_contract():
+    assert not bridge_module._balanced_experts_from_config(None)
+    assert not bridge_module._balanced_experts_from_config(
+        SimpleNamespace(n_routed_experts=256)
+    )
+    assert bridge_module._balanced_experts_from_config(_balanced_clone_config())
+
+
+def test_balanced_bridge_fallback_rejects_a_malformed_clone_contract():
+    config = _balanced_clone_config()
+    config.yeto_routed_expert_clone = {"schema": 1}
+
+    with pytest.raises(ValueError, match="invalid clone contract field"):
+        bridge_module._balanced_experts_from_config(config)
 
 
 def test_miles_trainer_helper_registers_v4_bridge_once(monkeypatch):

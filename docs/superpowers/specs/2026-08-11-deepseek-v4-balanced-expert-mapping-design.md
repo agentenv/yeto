@@ -21,7 +21,7 @@ Megatron-Bridge translates physical expert names back to logical names when load
 
 Clone-only grouped LoRA activates the final four physical slots on every EP rank and records their logical clone IDs. A Yeto runtime hook replaces the two pinned Miles helpers that apply sparse canonical clone tensors and validate frozen original optimizer masters, so each rank reads its own four logical clones and writes physical offsets `32..35`.
 
-Expert-full tuning maps every local physical parameter slot to its logical ID, enabling only the selected logical clone prefix. Its runtime translates Bridge task names to logical IDs before filtering and matching canonical policy tensors. Existing PP stage-local layer mapping remains unchanged.
+Expert-full tuning maps every local physical parameter slot to its logical ID, enabling only the selected logical clone prefix. Its local canonical-state path translates Bridge task names to logical IDs before ownership filtering and matching. Miles base-weight sync instead selects the same local physical clone offsets on every EP rank, lets Bridge complete its EP collectives, and then filters the restored logical output names to the selected prefix. Existing PP stage-local layer mapping remains unchanged.
 
 ## Alternatives Rejected
 
@@ -29,8 +29,8 @@ Changing only the trainable mask would route logical experts to the wrong weight
 
 ## Failure Handling
 
-Mapping helpers reject IDs outside `0..287`. EP-dependent clone-only and expert-full paths require the established EP8 geometry and 36 local slots. Bridge remapping is enabled only for an attested expanded clone config, leaving ordinary 256-expert DeepSeek V4 unchanged. Runtime installers are idempotent and fail closed on unsupported packed shapes or incomplete expert mappings.
+Mapping helpers reject IDs outside `0..287`. EP-dependent clone-only and expert-full paths require the established EP8 geometry and 36 local slots. Every rank must execute an identical expert-full Bridge collective sequence. Bridge remapping is enabled only for a fully attested expanded clone config, leaving ordinary 256-expert DeepSeek V4 unchanged and rejecting malformed non-empty contracts. Runtime installers are idempotent and fail closed on unsupported packed shapes or incomplete expert mappings.
 
 ## Verification
 
-Tests cover the 288-ID bijection, per-rank ownership, dense trainer routing versus logical SGLang routing, Bridge load/export/adapter naming, clone-only masks and Miles sparse apply on multiple ranks, expert-full ownership across all eight ranks, physical conversion-task filtering, and PP stage-local expert views. Related DeepSeek V4 regressions, runtime scripts, compilation, and whitespace checks run before synchronization.
+Tests cover the 288-ID bijection, per-rank ownership, dense trainer routing versus logical SGLang routing, Bridge load/export/adapter naming and contract validation, clone-only masks and Miles sparse apply on multiple ranks, expert-full ownership across all eight ranks, identical EP8 collective task topology, post-gather logical output filtering, and PP stage-local expert views. Related DeepSeek V4 regressions, runtime scripts, compilation, and whitespace checks run before synchronization.
