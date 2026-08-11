@@ -507,10 +507,10 @@ def main() -> None:
         raise RuntimeError(
             f"original expert adapters exported nonzero values: {original_nonzero[:4]}"
         )
-    if expert_ids != set(range(288)):
+    if expert_ids != set(range(256, 288)):
         raise RuntimeError(
             f"collective adapter export covered expert IDs {sorted(expert_ids)[:4]}.."
-            f"{sorted(expert_ids)[-4:] if expert_ids else []}, not 0..287"
+            f"{sorted(expert_ids)[-4:] if expert_ids else []}, not 256..287"
         )
     if shared_tensors:
         raise RuntimeError("clone-only target unexpectedly adapted shared experts")

@@ -11,6 +11,11 @@ if os.environ.get("YETO_DSV4_EXPERT_CLONE") == "1":
 
     install()
 
+if os.environ.get("YETO_DSV4_CLONE_ONLY_LORA") == "1":
+    from yeto.rl.deepseek_v4_clone_lora import install
+
+    install()
+
 if os.environ.get("YETO_DSV4_EXPERT_FULL") == "1":
     from yeto.rl.deepseek_v4_expert_full_runtime import install
 

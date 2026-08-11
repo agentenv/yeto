@@ -11,7 +11,12 @@ from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
 
-from .deepseek_v4_expert_clone import CLONES_PER_LAYER, NUM_LAYERS, ORIGINAL_EXPERTS
+from .deepseek_v4_expert_clone import (
+    CLONES_PER_LAYER,
+    NUM_LAYERS,
+    ORIGINAL_EXPERTS,
+    training_to_logical_expert_name,
+)
 
 
 _EXPERT_WEIGHT = re.compile(
@@ -56,10 +61,17 @@ def _mapping_hf_names(task: Any) -> tuple[str, ...]:
     return ()
 
 
+def _logical_mapping_hf_names(task: Any) -> tuple[str, ...]:
+    return tuple(
+        training_to_logical_expert_name(name)
+        for name in _mapping_hf_names(task)
+    )
+
+
 def filter_selected_expert_tasks(tasks, *, expert_count: int) -> list[Any]:
     selected = []
     for task in tasks:
-        names = _mapping_hf_names(task)
+        names = _logical_mapping_hf_names(task)
         if names and all(
             selected_expert_hf_name(name, expert_count=expert_count)
             for name in names
@@ -318,7 +330,9 @@ def _expert_views(actor) -> dict[str, Any]:
             raise RuntimeError(
                 "expert-full conversion task does not own a local trainable parameter"
             )
-        names = tuple(_canonical_name(name) for name in _mapping_hf_names(task))
+        names = tuple(
+            _canonical_name(name) for name in _logical_mapping_hf_names(task)
+        )
         projections = {}
         for name in names:
             match = _EXPERT_WEIGHT.fullmatch(name)

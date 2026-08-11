@@ -147,8 +147,8 @@ class _IndividualModel(torch.nn.Module):
         self.attention_lora = torch.nn.Parameter(torch.ones(1))
 
 
-def test_individual_grouped_weights_train_exactly_sixteen_clone_experts():
-    model = _IndividualModel()
+def test_individual_grouped_weights_train_selected_clones_on_their_balanced_rank():
+    model = _IndividualModel(num_layers=1)
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     model.attention_lora.requires_grad_(True)
@@ -156,25 +156,54 @@ def test_individual_grouped_weights_train_exactly_sixteen_clone_experts():
     records = configure_clone_expert_full(
         model,
         expert_count=16,
-        expert_parallel_rank=7,
+        expert_parallel_rank=3,
         expert_parallel_size=8,
     )
 
-    assert len(records) == NUM_LAYERS * 2 * 36
+    assert len(records) == 2 * 36
     trainable = {
         record.local_expert_ids[0]
         for record in records
         if record.trainable_clone_ids
     }
-    assert trainable == set(range(256, 272))
+    assert trainable == set(range(268, 272))
     for name, parameter in model.named_parameters():
         if ".mlp.experts.linear_fc" not in name:
             continue
         local_id = int(name.rsplit("weight", 1)[1])
-        assert parameter.requires_grad == (4 <= local_id < 20)
+        assert parameter.requires_grad == (local_id >= 32)
         if parameter.requires_grad:
-            assert parameter._yeto_expert_id == 252 + local_id
+            assert parameter._yeto_expert_id == 236 + local_id
             assert parameter._yeto_expert_full
+
+
+@pytest.mark.parametrize("expert_parallel_rank", range(8))
+def test_full_32_policy_trains_four_clones_on_every_ep8_rank(
+    expert_parallel_rank,
+):
+    model = _IndividualModel(num_layers=1)
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+
+    records = configure_clone_expert_full(
+        model,
+        expert_count=32,
+        expert_parallel_rank=expert_parallel_rank,
+        expert_parallel_size=8,
+    )
+
+    expected = set(
+        range(
+            ORIGINAL_EXPERTS + expert_parallel_rank * 4,
+            ORIGINAL_EXPERTS + (expert_parallel_rank + 1) * 4,
+        )
+    )
+    assert {
+        record.trainable_clone_ids[0]
+        for record in records
+        if record.trainable_clone_ids
+    } == expected
+    assert sum(parameter.requires_grad for parameter in model.parameters()) == 8
 
 
 def test_packed_expert_weights_are_rejected_by_the_pinned_individual_layout():
@@ -207,20 +236,20 @@ def test_pipeline_stage_validates_only_its_local_expert_layers():
     assert len(records) == 22 * 2 * 36
 
 
-def test_non_owner_ep_ranks_keep_every_expert_parameter_frozen():
-    model = _IndividualModel()
+def test_rank_outside_a_selected_clone_prefix_keeps_experts_frozen():
+    model = _IndividualModel(num_layers=1)
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     model.attention_lora.requires_grad_(True)
 
     records = configure_clone_expert_full(
         model,
-        expert_count=32,
-        expert_parallel_rank=0,
+        expert_count=16,
+        expert_parallel_rank=7,
         expert_parallel_size=8,
     )
 
-    assert len(records) == NUM_LAYERS * 2 * 36
+    assert len(records) == 2 * 36
     assert all(not record.trainable_clone_ids for record in records)
     assert all(
         not parameter.requires_grad
@@ -261,4 +290,4 @@ def test_attention_lora_proxy_enables_experts_only_after_lora_freeze():
     for name, parameter in model.named_parameters():
         if ".mlp.experts.linear_fc" in name:
             local_id = int(name.rsplit("weight", 1)[1])
-            assert parameter.requires_grad == (local_id >= 4)
+            assert parameter.requires_grad == (local_id >= 32)

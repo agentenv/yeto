@@ -6,6 +6,7 @@ import json
 import pytest
 import torch
 
+import yeto.rl.deepseek_v4_expert_clone as expert_clone
 from yeto.rl.deepseek_v4_expert_clone import (
     CLONES_PER_LAYER,
     NUM_LAYERS,
@@ -88,6 +89,46 @@ def test_token_split_is_stable_and_non_degenerate():
     assert 0.49 < sum(values) / len(values) < 0.51
 
 
+def test_training_expert_layout_is_a_balanced_ep8_bijection():
+    physical_ids = [
+        expert_clone.logical_to_training_expert_id(logical_id)
+        for logical_id in range(TOTAL_EXPERTS)
+    ]
+
+    assert sorted(physical_ids) == list(range(TOTAL_EXPERTS))
+    assert [
+        expert_clone.training_to_logical_expert_id(physical_id)
+        for physical_id in physical_ids
+    ] == list(range(TOTAL_EXPERTS))
+    for rank in range(8):
+        local_logical_ids = tuple(
+            expert_clone.training_to_logical_expert_id(physical_id)
+            for physical_id in range(rank * 36, (rank + 1) * 36)
+        )
+        assert local_logical_ids == (
+            *range(rank * 32, (rank + 1) * 32),
+            *range(ORIGINAL_EXPERTS + rank * 4, ORIGINAL_EXPERTS + (rank + 1) * 4),
+        )
+
+
+def test_expert_parameter_names_round_trip_between_logical_and_training_ids():
+    logical = "base_model.model.model.layers.3.mlp.experts.256.gate_proj.weight"
+    training = "base_model.model.model.layers.3.mlp.experts.32.gate_proj.weight"
+
+    assert expert_clone.logical_to_training_expert_name(logical) == training
+    assert expert_clone.training_to_logical_expert_name(training) == logical
+    assert (
+        expert_clone.training_to_logical_expert_name(
+            "model.layers.3.self_attn.q_proj.weight"
+        )
+        == "model.layers.3.self_attn.q_proj.weight"
+    )
+    with pytest.raises(ValueError, match="outside"):
+        expert_clone.logical_to_training_expert_name(
+            "model.layers.3.mlp.experts.288.down_proj.weight"
+        )
+
+
 def test_route_expansion_preserves_topk_probs_and_mutual_exclusion():
     sources = tuple(range(CLONES_PER_LAYER))
     token_ids = torch.arange(128, dtype=torch.long)
@@ -111,17 +152,27 @@ def test_route_expansion_preserves_topk_probs_and_mutual_exclusion():
     assert torch.allclose(probs.sum(dim=1), base_probs.sum(dim=1))
     for rank, source in enumerate(sources):
         clone = ORIGINAL_EXPERTS + rank
-        assert not torch.any(routing_map[:, source] & routing_map[:, clone])
+        training_source = expert_clone.logical_to_training_expert_id(source)
+        training_clone = expert_clone.logical_to_training_expert_id(clone)
+        assert not torch.any(
+            routing_map[:, training_source] & routing_map[:, training_clone]
+        )
         assert torch.equal(
-            routing_map[:, source] | routing_map[:, clone],
+            routing_map[:, training_source] | routing_map[:, training_clone],
             base_map[:, source],
         )
         assert torch.equal(
-            probs[:, source] + probs[:, clone],
+            probs[:, training_source] + probs[:, training_clone],
             base_probs[:, source],
         )
-    assert routing_map[:, ORIGINAL_EXPERTS:].any()
-    assert (~routing_map[:, ORIGINAL_EXPERTS:]).any()
+    training_clone_ids = torch.tensor(
+        [
+            expert_clone.logical_to_training_expert_id(expert)
+            for expert in range(ORIGINAL_EXPERTS, TOTAL_EXPERTS)
+        ]
+    )
+    assert routing_map.index_select(1, training_clone_ids).any()
+    assert (~routing_map.index_select(1, training_clone_ids)).any()
 
 
 def test_compact_topk_remap_matches_dense_route_expansion():
@@ -157,8 +208,17 @@ def test_compact_topk_remap_matches_dense_route_expansion():
     )
     compact_map = torch.zeros_like(expanded_map)
     compact_map.scatter_(1, remapped.long(), True)
+    logical_dense_map = expanded_map.index_select(
+        1,
+        torch.tensor(
+            [
+                expert_clone.logical_to_training_expert_id(expert)
+                for expert in range(TOTAL_EXPERTS)
+            ]
+        ),
+    )
 
-    assert torch.equal(compact_map, expanded_map)
+    assert torch.equal(compact_map, logical_dense_map)
     assert torch.any(remapped >= ORIGINAL_EXPERTS)
 
 

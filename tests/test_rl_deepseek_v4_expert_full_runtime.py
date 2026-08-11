@@ -25,17 +25,20 @@ def _expert_name(expert: int, projection: str = "gate_proj") -> str:
 
 def test_selected_expert_task_filter_keeps_only_the_requested_safe_clone_prefix():
     tasks = [
-        SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(255))),
+        # Bridge task names carry trainer-physical IDs.  Physical 283 is
+        # logical original 255; physical 32 is logical clone 256.
+        SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(283))),
         SimpleNamespace(
             mapping=SimpleNamespace(
                 hf_param={
-                    "gate": _expert_name(256),
-                    "up": _expert_name(256, "up_proj"),
+                    "gate": _expert_name(32),
+                    "up": _expert_name(32, "up_proj"),
                 }
             )
         ),
-        SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(271))),
-        SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(272))),
+        SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(143))),
+        SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(176))),
+        SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(256))),
         SimpleNamespace(mapping=SimpleNamespace(hf_param="model.layers.0.self_attn.q_proj.weight")),
     ]
 
@@ -187,8 +190,10 @@ def test_attention_mapping_retains_remote_pipeline_sides(monkeypatch):
 
 def test_expert_views_use_global_bridge_layer_on_pipeline_stage(monkeypatch):
     monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
-    gate = _expert_name(256).replace("layers.0", "layers.22")
-    up = _expert_name(256, "up_proj").replace("layers.0", "layers.22")
+    canonical_gate = _expert_name(256).replace("layers.0", "layers.22")
+    canonical_up = _expert_name(256, "up_proj").replace("layers.0", "layers.22")
+    physical_gate = _expert_name(32).replace("layers.0", "layers.22")
+    physical_up = _expert_name(32, "up_proj").replace("layers.0", "layers.22")
     parameter = torch.nn.Parameter(torch.arange(12).reshape(4, 3).float())
     parameter._yeto_expert_full = True
     parameter._yeto_expert_id = 256
@@ -197,7 +202,9 @@ def test_expert_views_use_global_bridge_layer_on_pipeline_stage(monkeypatch):
     chunk = torch.nn.Module()
     chunk.register_parameter("local_stage_expert", parameter)
     task = SimpleNamespace(
-        mapping=SimpleNamespace(hf_param={"gate": gate, "up": up}),
+        mapping=SimpleNamespace(
+            hf_param={"gate": physical_gate, "up": physical_up}
+        ),
         param_weight=parameter,
     )
     bridge = SimpleNamespace(get_conversion_tasks=lambda _model: [task])
@@ -206,8 +213,8 @@ def test_expert_views_use_global_bridge_layer_on_pipeline_stage(monkeypatch):
     actor = SimpleNamespace(
         args=SimpleNamespace(
             yeto_rl_expected_specs=(
-                SimpleNamespace(name=gate),
-                SimpleNamespace(name=up),
+                SimpleNamespace(name=canonical_gate),
+                SimpleNamespace(name=canonical_up),
             )
         ),
         model=[chunk],
@@ -216,6 +223,6 @@ def test_expert_views_use_global_bridge_layer_on_pipeline_stage(monkeypatch):
     views = runtime._expert_views(actor)
 
     expected_gate, expected_up = parameter.chunk(2, dim=0)
-    assert set(views) == {gate, up}
-    assert torch.equal(views[gate], expected_gate)
-    assert torch.equal(views[up], expected_up)
+    assert set(views) == {canonical_gate, canonical_up}
+    assert torch.equal(views[canonical_gate], expected_gate)
+    assert torch.equal(views[canonical_up], expected_up)

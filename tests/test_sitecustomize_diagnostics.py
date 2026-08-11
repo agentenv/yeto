@@ -34,6 +34,7 @@ def test_tms_post_pause_hold_wraps_only_the_trainer_sleep(monkeypatch, capsys):
         monkeypatch.setitem(sys.modules, name, module)
 
     monkeypatch.delenv("YETO_DSV4_EXPERT_CLONE", raising=False)
+    monkeypatch.delenv("YETO_DSV4_CLONE_ONLY_LORA", raising=False)
     monkeypatch.setenv("TMS_INIT_ENABLE", "1")
     monkeypatch.setenv("YETO_TMS_POST_PAUSE_IDLE_S", "0")
     runpy.run_path(str(ROOT / "sitecustomize.py"), run_name="_sitecustomize_test")
@@ -53,8 +54,25 @@ def test_tms_post_pause_hold_is_not_installed_without_tms(monkeypatch):
 
     original = FakeMegatronTrainRayActor.sleep
     monkeypatch.delenv("YETO_DSV4_EXPERT_CLONE", raising=False)
+    monkeypatch.delenv("YETO_DSV4_CLONE_ONLY_LORA", raising=False)
     monkeypatch.delenv("TMS_INIT_ENABLE", raising=False)
     monkeypatch.setenv("YETO_TMS_POST_PAUSE_IDLE_S", "30")
     runpy.run_path(str(ROOT / "sitecustomize.py"), run_name="_sitecustomize_no_tms_test")
 
     assert FakeMegatronTrainRayActor.sleep is original
+
+
+def test_clone_only_lora_arms_the_miles_balanced_layout_hook(monkeypatch):
+    import yeto.rl.deepseek_v4_clone_lora as clone_lora
+
+    calls = []
+    monkeypatch.setattr(clone_lora, "install", lambda: calls.append("installed"), raising=False)
+    monkeypatch.delenv("YETO_DSV4_EXPERT_CLONE", raising=False)
+    monkeypatch.delenv("YETO_DSV4_EXPERT_FULL", raising=False)
+    monkeypatch.delenv("TMS_INIT_ENABLE", raising=False)
+    monkeypatch.delenv("YETO_TMS_POST_PAUSE_IDLE_S", raising=False)
+    monkeypatch.setenv("YETO_DSV4_CLONE_ONLY_LORA", "1")
+
+    runpy.run_path(str(ROOT / "sitecustomize.py"), run_name="_sitecustomize_clone_test")
+
+    assert calls == ["installed"]

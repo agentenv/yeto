@@ -204,3 +204,45 @@ def test_v4_canonical_peft_names_resolve_to_pinned_checkpoint_names(
     canonical, checkpoint
 ):
     assert _checkpoint_parameter_name(canonical) == checkpoint
+
+
+def test_balanced_bridge_loads_physical_tasks_from_logical_checkpoint_names():
+    physical_gate = "model.layers.2.mlp.experts.32.gate_proj.weight"
+    physical_up = "model.layers.2.mlp.experts.32.up_proj.weight"
+    logical_gate = "model.layers.2.mlp.experts.256.gate_proj.weight"
+    logical_up = "model.layers.2.mlp.experts.256.up_proj.weight"
+    state = {logical_gate: "gate-256", logical_up: "up-256"}
+
+    assert bridge_module._load_hf_parameter(
+        {"gate": physical_gate, "up": physical_up},
+        state,
+        balanced_experts=True,
+    ) == {"gate": "gate-256", "up": "up-256"}
+    with pytest.raises(KeyError):
+        bridge_module._load_hf_parameter(
+            physical_gate,
+            state,
+            balanced_experts=False,
+        )
+
+
+def test_balanced_bridge_exports_logical_expert_names_and_merges_physical_slices():
+    physical = "model.layers.2.mlp.experts.32.down_proj.weight"
+    logical = "model.layers.2.mlp.experts.256.down_proj.weight"
+
+    assert bridge_module._logical_expert_weights(
+        {physical: "weight"},
+        balanced_experts=True,
+    ) == {logical: "weight"}
+    assert bridge_module._logical_expert_names(
+        [physical],
+        balanced_experts=True,
+    ) == [logical]
+    assert bridge_module._training_expert_weights(
+        {logical: "weight"},
+        balanced_experts=True,
+    ) == {physical: "weight"}
+    assert bridge_module._logical_expert_weights(
+        {physical: "weight"},
+        balanced_experts=False,
+    ) == {physical: "weight"}

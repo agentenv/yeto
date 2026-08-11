@@ -146,6 +146,72 @@ def _checkpoint_parameter_name(name: str) -> str:
     return name
 
 
+def _load_hf_parameter(
+    hf_param,
+    hf_state_dict,
+    *,
+    balanced_experts: bool,
+):
+    """Load a physical Bridge task from the logical checkpoint namespace."""
+
+    from .deepseek_v4_expert_clone import training_to_logical_expert_name
+
+    def load(name: str):
+        if balanced_experts:
+            name = training_to_logical_expert_name(name)
+        return hf_state_dict[_checkpoint_parameter_name(name)]
+
+    if isinstance(hf_param, str):
+        return load(hf_param)
+    return {component: load(name) for component, name in hf_param.items()}
+
+
+def _remap_expert_weights(weights, remap) -> dict[str, Any]:
+    remapped = {}
+    for name, value in weights.items():
+        destination = remap(name)
+        if destination in remapped:
+            raise RuntimeError(f"duplicate remapped expert weight {destination!r}")
+        remapped[destination] = value
+    return remapped
+
+
+def _logical_expert_names(
+    names: list[str],
+    *,
+    balanced_experts: bool,
+) -> list[str]:
+    if not balanced_experts:
+        return list(names)
+    from .deepseek_v4_expert_clone import training_to_logical_expert_name
+
+    return [training_to_logical_expert_name(name) for name in names]
+
+
+def _logical_expert_weights(
+    weights,
+    *,
+    balanced_experts: bool,
+) -> dict[str, Any]:
+    if not balanced_experts:
+        return dict(weights)
+    from .deepseek_v4_expert_clone import training_to_logical_expert_name
+
+    return _remap_expert_weights(weights, training_to_logical_expert_name)
+
+
+def _training_expert_weights(
+    weights,
+    *,
+    balanced_experts: bool,
+) -> dict[str, Any]:
+    if not balanced_experts:
+        return dict(weights)
+    from .deepseek_v4_expert_clone import logical_to_training_expert_name
+
+    return _remap_expert_weights(weights, logical_to_training_expert_name)
+
+
 def _normalized_config(config: Any) -> Any:
     normalized = copy.deepcopy(config)
     ratios = _compression_ratios(normalized)
@@ -386,6 +452,13 @@ def ensure_deepseek_v4_bridge() -> type:
     class DeepSeekV4Bridge(MegatronModelBridge):
         """NVIDIA Bridge facade for the pinned Miles V4 implementation."""
 
+        def _uses_balanced_experts(self) -> bool:
+            configured = getattr(self, "_yeto_balanced_experts", None)
+            if configured is not None:
+                return bool(configured)
+            config = getattr(self, "hf_config", None)
+            return getattr(config, "yeto_routed_expert_clone", None) is not None
+
         def provider_bridge(self, hf_pretrained):
             from .deepseek_v4_expert_clone import contract_from_config
 
@@ -396,6 +469,7 @@ def ensure_deepseek_v4_bridge() -> type:
             # capture it before invoking that mutating compatibility bridge.
             main_rope_theta = float(hf_config.rope_theta)
             clone_contract = contract_from_config(hf_config)
+            self._yeto_balanced_experts = clone_contract is not None
             rope_scaling = _rope_scaling_contract(hf_config)
             legacy = LegacyV4(
                 hf_config,
@@ -443,12 +517,66 @@ def ensure_deepseek_v4_bridge() -> type:
             return MLAModelProvider(**kwargs)
 
         def maybe_modify_loaded_hf_weight(self, hf_param, hf_state_dict):
-            def load(name: str):
-                return hf_state_dict[_checkpoint_parameter_name(name)]
+            return _load_hf_parameter(
+                hf_param,
+                hf_state_dict,
+                balanced_experts=self._uses_balanced_experts(),
+            )
 
-            if isinstance(hf_param, str):
-                return load(hf_param)
-            return {component: load(name) for component, name in hf_param.items()}
+        def maybe_modify_converted_hf_weight(
+            self,
+            task,
+            converted_weights_dict,
+            hf_state_dict,
+        ):
+            converted = super().maybe_modify_converted_hf_weight(
+                task,
+                converted_weights_dict,
+                hf_state_dict,
+            )
+            return _logical_expert_weights(
+                converted,
+                balanced_experts=self._uses_balanced_experts(),
+            )
+
+        def _get_base_hf_param_names_for_adapter(
+            self,
+            mapping_registry,
+            global_base_prefix,
+            adapter_key,
+            base_suffix,
+        ):
+            names = super()._get_base_hf_param_names_for_adapter(
+                mapping_registry,
+                global_base_prefix,
+                adapter_key,
+                base_suffix,
+            )
+            return _logical_expert_names(
+                names,
+                balanced_experts=self._uses_balanced_experts(),
+            )
+
+        def _merge_lora_adapter_weights(
+            self,
+            megatron_model,
+            converted_weights_dict,
+            adapter_weights,
+        ):
+            balanced = self._uses_balanced_experts()
+            training_weights = _training_expert_weights(
+                converted_weights_dict,
+                balanced_experts=balanced,
+            )
+            merged = super()._merge_lora_adapter_weights(
+                megatron_model,
+                training_weights,
+                adapter_weights,
+            )
+            return _logical_expert_weights(
+                merged,
+                balanced_experts=balanced,
+            )
 
         def mapping_registry(self):
             mappings = [

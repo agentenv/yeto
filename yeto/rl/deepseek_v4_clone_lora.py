@@ -14,17 +14,29 @@ checkpoint format.
 
 from __future__ import annotations
 
+import importlib.abc
+import importlib.machinery
 import re
+import sys
 from dataclasses import dataclass
 from typing import Any
 
-from .deepseek_v4_expert_clone import ORIGINAL_EXPERTS, TOTAL_EXPERTS
+from .deepseek_v4_expert_clone import (
+    EXPERT_PARALLEL_SIZE,
+    ORIGINAL_EXPERTS,
+    ORIGINAL_EXPERTS_PER_RANK,
+    TOTAL_EXPERTS,
+    TRAINING_EXPERTS_PER_RANK,
+    training_to_logical_expert_id,
+)
 
 
 _ROUTED_ADAPTER = re.compile(
     r"(?:^|\.)decoder\.layers\.(?P<layer>\d+)\.mlp\.experts\."
     r"(?P<branch>linear_fc[12])$"
 )
+_MILES_TRAINABLE_STATE = "miles.backends.megatron_utils.trainable_state"
+_MILES_TRAINABLE_STATE_FINDER = None
 
 
 @dataclass(frozen=True)
@@ -66,9 +78,9 @@ def _parallel_coordinates(
         raise ValueError(
             f"invalid expert-parallel coordinates rank={rank}, size={size}"
         )
-    if TOTAL_EXPERTS % size:
+    if size != EXPERT_PARALLEL_SIZE:
         raise ValueError(
-            f"{TOTAL_EXPERTS} routed experts are not divisible by EP size {size}"
+            f"balanced E288 training requires EP size {EXPERT_PARALLEL_SIZE}, got {size}"
         )
     return rank, size
 
@@ -105,7 +117,10 @@ def configure_clone_only_grouped_lora(
     )
     local_count = TOTAL_EXPERTS // ep_size
     local_start = ep_rank * local_count
-    local_ids = tuple(range(local_start, local_start + local_count))
+    local_ids = tuple(
+        training_to_logical_expert_id(expert)
+        for expert in range(local_start, local_start + local_count)
+    )
     active = torch.tensor(
         [expert >= ORIGINAL_EXPERTS for expert in local_ids],
         dtype=torch.bool,
@@ -189,6 +204,191 @@ def configure_clone_only_grouped_lora(
     if incomplete:
         raise RuntimeError(f"clone-only LoRA has incomplete expert branches: {incomplete}")
     return tuple(sorted(records, key=lambda item: item.base_linear_name))
+
+
+def _require_miles_packed_layout(
+    parameter,
+    *,
+    expert_parallel_rank: int,
+    expert_parallel_size: int,
+) -> int:
+    rank, size = int(expert_parallel_rank), int(expert_parallel_size)
+    if size != EXPERT_PARALLEL_SIZE or not 0 <= rank < size:
+        raise RuntimeError(
+            "balanced clone-only policy requires "
+            f"EP{EXPERT_PARALLEL_SIZE}, got rank={rank}, size={size}"
+        )
+    local_count = int(parameter.shape[0])
+    if local_count != TRAINING_EXPERTS_PER_RANK:
+        raise RuntimeError(
+            "balanced clone-only policy requires "
+            f"{TRAINING_EXPERTS_PER_RANK} packed experts per rank, got {local_count}"
+        )
+    return rank * local_count
+
+
+def _sparse_expert_updates(
+    module,
+    name: str,
+    side: Any,
+    tensors,
+    *,
+    expert_parallel_rank: int,
+    expert_parallel_size: int,
+):
+    """Prepare each EP8 rank's four logical clone writes for pinned Miles."""
+
+    import torch
+
+    match = module._EXPERT_LORA.fullmatch(name)
+    if match is None:
+        raise RuntimeError(f"cannot pack non-expert LoRA side {name!r}")
+    parameter = side.param_weight
+    if parameter is None or parameter.ndim != 3:
+        raise RuntimeError(f"packed expert side {name!r} is not a rank-3 parameter")
+    start = _require_miles_packed_layout(
+        parameter,
+        expert_parallel_rank=expert_parallel_rank,
+        expert_parallel_size=expert_parallel_size,
+    )
+    projection = match.group("projection")
+    adapter_side = match.group("side")
+    if projection == "up_proj":
+        raise RuntimeError("packed fc1 representative unexpectedly uses up_proj")
+
+    updates = []
+    for local_index in range(
+        ORIGINAL_EXPERTS_PER_RANK,
+        TRAINING_EXPERTS_PER_RANK,
+    ):
+        expert = training_to_logical_expert_id(start + local_index)
+        if projection == "down_proj":
+            value = tensors[
+                module._expert_name(match, expert, "down_proj", adapter_side)
+            ]
+        elif adapter_side == "A":
+            gate = tensors[module._expert_name(match, expert, "gate_proj", "A")]
+            up = tensors[module._expert_name(match, expert, "up_proj", "A")]
+            if not torch.equal(gate, up):
+                raise RuntimeError(
+                    "fused fc1 gate/up LoRA A tensors differ for layer "
+                    f"{match.group('layer')} expert {expert}"
+                )
+            value = gate
+        else:
+            gate = tensors[module._expert_name(match, expert, "gate_proj", "B")]
+            up = tensors[module._expert_name(match, expert, "up_proj", "B")]
+            value = torch.cat((gate, up), dim=0)
+        if tuple(value.shape) != tuple(parameter.shape[1:]):
+            raise RuntimeError(
+                f"packed expert LoRA slice mismatch for {name!r}: "
+                f"got {tuple(value.shape)}, expected {tuple(parameter.shape[1:])}"
+            )
+        updates.append((local_index, value))
+
+    return (
+        parameter.main_param.view(parameter.shape),
+        ORIGINAL_EXPERTS_PER_RANK,
+        tuple(updates),
+    )
+
+
+def _assert_original_packed_masters_zero(
+    module,
+    sides,
+    *,
+    expert_parallel_rank: int,
+) -> None:
+    import torch
+
+    found = 0
+    for name, side in sides:
+        match = module._EXPERT_LORA.fullmatch(name)
+        parameter = side.param_weight
+        if match is None or parameter is None:
+            continue
+        found += 1
+        _require_miles_packed_layout(
+            parameter,
+            expert_parallel_rank=expert_parallel_rank,
+            expert_parallel_size=EXPERT_PARALLEL_SIZE,
+        )
+        master = parameter.main_param.view(parameter.shape)
+        if torch.count_nonzero(master[:ORIGINAL_EXPERTS_PER_RANK]).item():
+            raise RuntimeError(
+                f"original packed expert LoRA master is nonzero for {name!r}"
+            )
+    if not found:
+        raise RuntimeError("clone-only actor has no packed expert LoRA sides")
+
+
+def install_on_trainable_state(module) -> None:
+    """Patch the two pinned Miles helpers that encode EP expert ownership."""
+
+    if getattr(module, "_yeto_balanced_expert_layout_installed", False):
+        return
+
+    def sparse_expert_updates(name, side, tensors, **coordinates):
+        return _sparse_expert_updates(
+            module,
+            name,
+            side,
+            tensors,
+            **coordinates,
+        )
+
+    def assert_original_packed_masters_zero(sides, **coordinates):
+        return _assert_original_packed_masters_zero(
+            module,
+            sides,
+            **coordinates,
+        )
+
+    module._sparse_expert_updates = sparse_expert_updates
+    module._assert_original_packed_masters_zero = (
+        assert_original_packed_masters_zero
+    )
+    module._yeto_balanced_expert_layout_installed = True
+
+
+class _MilesTrainableStateLoader(importlib.abc.Loader):
+    def __init__(self, wrapped) -> None:
+        self.wrapped = wrapped
+
+    def create_module(self, spec):
+        create = getattr(self.wrapped, "create_module", None)
+        return None if create is None else create(spec)
+
+    def exec_module(self, module) -> None:
+        self.wrapped.exec_module(module)
+        install_on_trainable_state(module)
+
+
+class _MilesTrainableStateFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != _MILES_TRAINABLE_STATE:
+            return None
+        try:
+            sys.meta_path.remove(self)
+            spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        finally:
+            sys.meta_path.insert(0, self)
+        if spec is None or spec.loader is None:
+            return spec
+        spec.loader = _MilesTrainableStateLoader(spec.loader)
+        return spec
+
+
+def install() -> None:
+    """Patch imported Miles trainable state or arm its lazy import hook."""
+
+    global _MILES_TRAINABLE_STATE_FINDER
+    loaded = sys.modules.get(_MILES_TRAINABLE_STATE)
+    if loaded is not None:
+        install_on_trainable_state(loaded)
+    elif _MILES_TRAINABLE_STATE_FINDER is None:
+        _MILES_TRAINABLE_STATE_FINDER = _MilesTrainableStateFinder()
+        sys.meta_path.insert(0, _MILES_TRAINABLE_STATE_FINDER)
 
 
 def assert_original_expert_lora_zero(models: Any) -> None:

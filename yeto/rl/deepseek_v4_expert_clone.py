@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,11 @@ TOTAL_EXPERTS = ORIGINAL_EXPERTS + CLONES_PER_LAYER
 NUM_LAYERS = 43
 TOPK = 6
 
+EXPERT_PARALLEL_SIZE = 8
+TRAINING_EXPERTS_PER_RANK = TOTAL_EXPERTS // EXPERT_PARALLEL_SIZE
+ORIGINAL_EXPERTS_PER_RANK = ORIGINAL_EXPERTS // EXPERT_PARALLEL_SIZE
+CLONES_PER_EXPERT_RANK = CLONES_PER_LAYER // EXPERT_PARALLEL_SIZE
+
 SPLIT_ALGORITHM = "token-id-affine-mod-prime-v1"
 SPLIT_MODULUS = 2_147_483_647
 SPLIT_THRESHOLD = 1_073_741_824
@@ -39,6 +45,67 @@ SPLIT_LAYER_MULTIPLIER = 12_345
 SPLIT_SOURCE_MULTIPLIER = 2_654_435_761
 
 _HEX = frozenset("0123456789abcdef")
+_EXPERT_IN_HF_NAME = re.compile(
+    r"(?P<prefix>\.mlp\.experts\.)(?P<expert>\d+)(?=\.)"
+)
+
+
+def logical_to_training_expert_id(expert_id: int) -> int:
+    """Map a checkpoint/policy expert ID to Megatron's balanced EP8 layout."""
+
+    if not 0 <= expert_id < TOTAL_EXPERTS:
+        raise ValueError(f"logical expert ID {expert_id} is outside 0..287")
+    if expert_id < ORIGINAL_EXPERTS:
+        rank, offset = divmod(expert_id, ORIGINAL_EXPERTS_PER_RANK)
+        return rank * TRAINING_EXPERTS_PER_RANK + offset
+    clone = expert_id - ORIGINAL_EXPERTS
+    rank, offset = divmod(clone, CLONES_PER_EXPERT_RANK)
+    return (
+        rank * TRAINING_EXPERTS_PER_RANK
+        + ORIGINAL_EXPERTS_PER_RANK
+        + offset
+    )
+
+
+def training_to_logical_expert_id(expert_id: int) -> int:
+    """Map a Megatron balanced-layout expert ID to its external logical ID."""
+
+    if not 0 <= expert_id < TOTAL_EXPERTS:
+        raise ValueError(f"training expert ID {expert_id} is outside 0..287")
+    rank, offset = divmod(expert_id, TRAINING_EXPERTS_PER_RANK)
+    if offset < ORIGINAL_EXPERTS_PER_RANK:
+        return rank * ORIGINAL_EXPERTS_PER_RANK + offset
+    return (
+        ORIGINAL_EXPERTS
+        + rank * CLONES_PER_EXPERT_RANK
+        + offset
+        - ORIGINAL_EXPERTS_PER_RANK
+    )
+
+
+def _remap_expert_name(name: str, remap) -> str:
+    match = _EXPERT_IN_HF_NAME.search(name)
+    if match is None:
+        return name
+    expert_id = remap(int(match.group("expert")))
+    return name[: match.start("expert")] + str(expert_id) + name[match.end("expert") :]
+
+
+def logical_to_training_expert_name(name: str) -> str:
+    """Translate an HF expert parameter name into trainer-physical numbering."""
+
+    return _remap_expert_name(name, logical_to_training_expert_id)
+
+
+def training_to_logical_expert_name(name: str) -> str:
+    """Translate a trainer-physical expert parameter name into HF numbering."""
+
+    return _remap_expert_name(name, training_to_logical_expert_id)
+
+
+_LOGICAL_TO_TRAINING_IDS = tuple(
+    logical_to_training_expert_id(expert) for expert in range(TOTAL_EXPERTS)
+)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -256,7 +323,7 @@ def expand_routes_torch(
     layer_id: int,
     source_experts: Sequence[int],
 ) -> tuple[Any, Any]:
-    """Move selected 256-way routes into the 288-way source/clone layout."""
+    """Move selected logical routes into Megatron's balanced 288-way layout."""
 
     import torch
 
@@ -286,15 +353,23 @@ def expand_routes_torch(
     selected = base_map.index_select(1, source_ids).bool()
     clone_selected = selected & (buckets < SPLIT_THRESHOLD)
     source_probs = base_probs.index_select(1, source_ids)
+    logical_to_training = torch.tensor(
+        _LOGICAL_TO_TRAINING_IDS,
+        dtype=torch.long,
+        device=base_probs.device,
+    )
+    training_original_ids = logical_to_training[:ORIGINAL_EXPERTS]
+    training_source_ids = training_original_ids.index_select(0, source_ids)
+    training_clone_ids = logical_to_training[ORIGINAL_EXPERTS:TOTAL_EXPERTS]
 
     expanded_probs = base_probs.new_zeros((base_probs.shape[0], TOTAL_EXPERTS))
-    expanded_probs[:, :ORIGINAL_EXPERTS] = base_probs
-    expanded_probs[:, source_ids] = torch.where(
+    expanded_probs[:, training_original_ids] = base_probs
+    expanded_probs[:, training_source_ids] = torch.where(
         clone_selected,
         torch.zeros_like(source_probs),
         source_probs,
     )
-    expanded_probs[:, ORIGINAL_EXPERTS:TOTAL_EXPERTS] = torch.where(
+    expanded_probs[:, training_clone_ids] = torch.where(
         clone_selected,
         source_probs,
         torch.zeros_like(source_probs),
@@ -305,9 +380,9 @@ def expand_routes_torch(
         dtype=torch.bool,
         device=base_map.device,
     )
-    expanded_map[:, :ORIGINAL_EXPERTS] = base_map.bool()
-    expanded_map[:, source_ids] = selected & ~clone_selected
-    expanded_map[:, ORIGINAL_EXPERTS:TOTAL_EXPERTS] = clone_selected
+    expanded_map[:, training_original_ids] = base_map.bool()
+    expanded_map[:, training_source_ids] = selected & ~clone_selected
+    expanded_map[:, training_clone_ids] = clone_selected
 
     if not torch.equal(expanded_map.sum(dim=1), base_map.bool().sum(dim=1)):
         raise RuntimeError("clone split changed the number of active experts")

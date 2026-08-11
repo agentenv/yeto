@@ -8,10 +8,12 @@ from typing import Any
 
 from .deepseek_v4_expert_clone import (
     CLONES_PER_LAYER,
+    EXPERT_PARALLEL_SIZE,
     NUM_LAYERS,
     ORIGINAL_EXPERTS,
     TOTAL_EXPERTS,
     contract_from_config,
+    training_to_logical_expert_id,
 )
 
 
@@ -123,7 +125,7 @@ def _parallel_coordinates(
                 parallel_state.get_expert_model_parallel_world_size()
             )
     rank, size = int(expert_parallel_rank), int(expert_parallel_size)
-    if size <= 0 or not 0 <= rank < size or TOTAL_EXPERTS % size:
+    if size != EXPERT_PARALLEL_SIZE or not 0 <= rank < size:
         raise ValueError(f"invalid expert-parallel coordinates rank={rank}, size={size}")
     return rank, size
 
@@ -148,7 +150,10 @@ def configure_clone_expert_full(
     )
     local_count = TOTAL_EXPERTS // size
     local_start = rank * local_count
-    local_ids = tuple(range(local_start, local_start + local_count))
+    local_ids = tuple(
+        training_to_logical_expert_id(expert)
+        for expert in range(local_start, local_start + local_count)
+    )
     selected_end = ORIGINAL_EXPERTS + expert_count
     trainable_ids = tuple(
         expert
@@ -166,7 +171,7 @@ def configure_clone_expert_full(
                 raise RuntimeError(
                     f"{name} is not one of {local_count} individual expert weights"
                 )
-            parameter_ids = (local_start + local_expert,)
+            parameter_ids = (local_ids[local_expert],)
             parameter_trainable_ids = tuple(
                 expert for expert in parameter_ids if expert in trainable_ids
             )

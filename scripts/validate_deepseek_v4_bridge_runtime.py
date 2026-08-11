@@ -145,6 +145,7 @@ def _validate_clone_routers(models, contract, hidden_size: int, vocab_size: int)
     from yeto.rl.deepseek_v4_expert_clone import (
         ORIGINAL_EXPERTS,
         TOTAL_EXPERTS,
+        logical_to_training_expert_id,
     )
 
     records = []
@@ -192,12 +193,19 @@ def _validate_clone_routers(models, contract, hidden_size: int, vocab_size: int)
             assert torch.all(torch.isfinite(probs)).item()
             for rank, source in enumerate(sources):
                 clone = ORIGINAL_EXPERTS + rank
+                training_source = logical_to_training_expert_id(source)
+                training_clone = logical_to_training_expert_id(clone)
                 assert not torch.any(
-                    routing_map[:, source] & routing_map[:, clone]
+                    routing_map[:, training_source]
+                    & routing_map[:, training_clone]
                 ).item()
             if module.tid2eid is not None:
-                assert routing_map[:, ORIGINAL_EXPERTS].any().item()
-                assert routing_map[:, sources[0]].any().item()
+                assert routing_map[
+                    :, logical_to_training_expert_id(ORIGINAL_EXPERTS)
+                ].any().item()
+                assert routing_map[
+                    :, logical_to_training_expert_id(sources[0])
+                ].any().item()
             records.append(
                 {
                     "name": name,
