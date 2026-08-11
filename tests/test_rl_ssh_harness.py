@@ -505,9 +505,9 @@ def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
 
 def test_miles_and_sglang_pins_include_the_compatible_builds():
     assert MILES_UPSTREAM_COMMIT == "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
-    assert MILES_COMMIT == "fa47aec08c54fe6b69b6f302dc6deef1b0091fe5"
+    assert MILES_COMMIT == "ed9f8c36d89d560c9cd05820225f044cfef074f7"
     assert MILES_BUNDLE_SHA256 == (
-        "1755daa082c522365ad332dca32988e1ef89e38127086a9f27b6c0848c6e5e14"
+        "4e2e86d5e144633a6cde95a5d0aa999fe0c7a9e3b4ff4521879444529c487d0d"
     )
     assert SGLANG_UPSTREAM_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
     assert SGLANG_COMMIT == "c2cb40a774dc8cba85eb651f28471d889178b5ee"
