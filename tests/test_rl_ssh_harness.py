@@ -52,7 +52,7 @@ LAYOUT_HASH = canonical_layout_hash(SPECS)
 
 def _plan():
     return {
-        "schema": 1,
+        "schema": 2,
         "run_id": "acceptance",
         "remote_run": ".cache/yeto-rl-ssh/acceptance",
         "remote_env_file": None,
@@ -95,6 +95,7 @@ def _plan():
             "session_server_ip": None,
             "session_server_port": None,
             "tito_model": None,
+            "pipeline_parallel": 1,
             "expert_parallel": 1,
             "lora_r": 8,
             "lora_targets": "attention",
@@ -374,6 +375,48 @@ def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
         load_plan(plan_path)
 
 
+def test_pipeline_parallel_plan_uses_data_parallel_batch_and_expert_layout():
+    plan = _plan()
+    plan["learner"].update(
+        {
+            "pipeline_parallel": 2,
+            "groups_per_round": 2,
+            "samples_per_group": 2,
+            "expert_parallel": 4,
+        }
+    )
+
+    ssh_harness._validate_plan(plan)
+    argv = _learner_argv(plan, 0)
+
+    assert argv[argv.index("--pipeline-parallel") + 1] == "2"
+    assert parse_learner_args(argv[3:]).pipeline_parallel == 2
+
+
+@pytest.mark.parametrize("pipeline_parallel", [None, 0, 3])
+def test_plan_rejects_invalid_pipeline_parallelism(pipeline_parallel):
+    plan = _plan()
+    plan["learner"]["pipeline_parallel"] = pipeline_parallel
+
+    with pytest.raises(HarnessError, match="pipeline parallelism"):
+        ssh_harness._validate_plan(plan)
+
+
+def test_plan_rejects_batch_and_expert_layouts_that_do_not_divide_dp():
+    plan = _plan()
+    plan["learner"].update(
+        {"pipeline_parallel": 2, "groups_per_round": 1, "samples_per_group": 2}
+    )
+    with pytest.raises(HarnessError, match="data parallelism"):
+        ssh_harness._validate_plan(plan)
+
+    plan["learner"].update(
+        {"groups_per_round": 2, "samples_per_group": 2, "expert_parallel": 8}
+    )
+    with pytest.raises(HarnessError, match="expert parallelism"):
+        ssh_harness._validate_plan(plan)
+
+
 def test_miles_and_sglang_pins_include_the_compatible_builds():
     assert MILES_COMMIT == "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
     assert SGLANG_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
@@ -443,6 +486,7 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
     assert plan["learner"]["data"] == "/workspace/data/dataset.jsonl"
     assert plan["learner"]["data_local_path"] == str(prompts.resolve())
     assert plan["learner"]["data_revision"] is None
+    assert plan["learner"]["pipeline_parallel"] == 1
 
 
 def test_local_prompt_directory_hash_is_stable_and_rejects_symlinks(tmp_path):
@@ -632,6 +676,7 @@ def test_learner_command_uses_current_multinode_miles_contract():
     assert argv[argv.index("--learner-id") + 1] == "1"
     assert argv[argv.index("--actor-num-nodes") + 1] == "2"
     assert argv[argv.index("--actor-num-gpus-per-node") + 1] == "4"
+    assert argv[argv.index("--pipeline-parallel") + 1] == "1"
     assert argv[argv.index("--completed-groups-path") + 1] == (
         "/workspace/state/island-checkpoint.pt"
     )

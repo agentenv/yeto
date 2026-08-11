@@ -168,14 +168,15 @@ def _record_strict_failure(args, error: StrictRlInvariantError, bridge=None) -> 
         bridge.client.close()
 
 
-_ISLAND_CHECKPOINT_SCHEMA = 2
-_DECOUPLED_CHECKPOINT_SCHEMA = 3
+_ISLAND_CHECKPOINT_SCHEMA = 3
+_DECOUPLED_CHECKPOINT_SCHEMA = 4
 
 
 def _island_checkpoint_config(args) -> dict[str, Any]:
     config = {
         "actor_num_gpus_per_node": args.actor_num_gpus_per_node,
         "actor_num_nodes": args.actor_num_nodes,
+        "pipeline_model_parallel_size": args.pipeline_model_parallel_size,
         "advantage_estimator": args.advantage_estimator,
         "model": args.yeto_rl_model,
         "dataset": args.yeto_rl_data,
@@ -840,7 +841,11 @@ class MilesPolicySync:
         references = data_pack.get("data_ref")
         if not isinstance(references, list):
             raise RuntimeError("Miles returned an invalid rollout shard list")
-        expected = self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
+        expected = (
+            self.args.actor_num_nodes
+            * self.args.actor_num_gpus_per_node
+            // self.args.pipeline_model_parallel_size
+        )
         if len(references) != expected:
             raise RuntimeError(
                 f"Miles returned {len(references)} DP shards, expected {expected}"

@@ -526,6 +526,7 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
         yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
         n_samples_per_prompt=2,
         num_steps_per_rollout=1,
+        pipeline_model_parallel_size=1,
         over_sampling_batch_size=2,
         dynamic_sampling_max_replacements=99,
         yeto_rl_dynamic_sampling_max_replacements=8,
@@ -891,7 +892,7 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
 ):
     checkpoint = tmp_path / "island.pt"
     args = SimpleNamespace(
-        actor_num_gpus_per_node=2,
+        actor_num_gpus_per_node=4,
         actor_num_nodes=1,
         advantage_estimator="grpo",
         yeto_rl_model="org/model",
@@ -904,6 +905,7 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
         yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
         n_samples_per_prompt=2,
         num_steps_per_rollout=1,
+        pipeline_model_parallel_size=2,
         over_sampling_batch_size=2,
         yeto_rl_reward_sha256="e" * 64,
         rollout_batch_size=2,
@@ -916,6 +918,9 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
         yeto_rl_completed_groups_path=str(checkpoint),
         yeto_rl_learner_id=0,
     )
+    assert miles._island_checkpoint_config(args)[
+        "pipeline_model_parallel_size"
+    ] == 2
     torch.save(
         {
             "schema_version": miles._ISLAND_CHECKPOINT_SCHEMA,

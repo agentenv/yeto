@@ -477,6 +477,7 @@ def _checkpoint_args(tmp_path):
         yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
         n_samples_per_prompt=2,
         num_steps_per_rollout=1,
+        pipeline_model_parallel_size=1,
         over_sampling_batch_size=2,
         yeto_rl_reward_sha256="d" * 64,
         yeto_rl_source_sha256="f" * 64,
@@ -515,7 +516,7 @@ def test_decoupled_checkpoint_round_trips_progress_without_local_lora(tmp_path):
     )
     payload = miles._load_decoupled_checkpoint(args)
 
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["next_rollout_id"] == 3
     assert payload["optimizer_steps"] == 3
     assert payload["action_tokens"] == 41

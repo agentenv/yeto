@@ -27,7 +27,7 @@ from . import (
 )
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
-PLAN_SCHEMA = 1
+PLAN_SCHEMA = 2
 LEARNERS = 2
 SYNCER_PORT = 29400
 RAY_PORT = 6379
@@ -287,8 +287,32 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     ):
         raise HarnessError("invalid decoupled learner settings")
     world = len(islands[0]["hosts"]) * islands[0]["gpus_per_node"]
-    if learner["groups_per_round"] * learner["samples_per_group"] % world:
-        raise HarnessError("plan Miles batch does not divide across island GPUs")
+    pipeline_parallel = learner.get("pipeline_parallel")
+    if (
+        not isinstance(pipeline_parallel, int)
+        or pipeline_parallel <= 0
+        or world % pipeline_parallel
+    ):
+        raise HarnessError(
+            "plan pipeline parallelism must divide the island GPU count"
+        )
+    data_parallel = world // pipeline_parallel
+    expert_parallel = learner.get("expert_parallel")
+    if expert_parallel is not None and (
+        not isinstance(expert_parallel, int)
+        or expert_parallel <= 0
+        or data_parallel % expert_parallel
+    ):
+        raise HarnessError(
+            "plan expert parallelism must divide data parallelism"
+        )
+    if (
+        learner["groups_per_round"] * learner["samples_per_group"]
+        % data_parallel
+    ):
+        raise HarnessError(
+            "plan Miles batch does not divide across data parallelism"
+        )
     dynamic_filter = learner.get("dynamic_sampling_filter_path")
     if dynamic_filter:
         parts = str(dynamic_filter).split(".")
@@ -493,6 +517,7 @@ def prepare(namespace) -> Path:
             "session_server_ip": args.session_server_ip,
             "session_server_port": args.session_server_port,
             "tito_model": args.tito_model,
+            "pipeline_parallel": args.pipeline_parallel,
             "expert_parallel": args.expert_parallel,
             "lora_r": args.lora_r,
             "lora_targets": args.lora_targets,
@@ -859,6 +884,7 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--audit-dir", "/workspace/audit"),
         ("--actor-num-nodes", len(island["hosts"])),
         ("--actor-num-gpus-per-node", island["gpus_per_node"]),
+        ("--pipeline-parallel", learner["pipeline_parallel"]),
         ("--lora-r", learner["lora_r"]),
         ("--lora-targets", learner["lora_targets"]),
         ("--inner-lr", learner["inner_lr"]),

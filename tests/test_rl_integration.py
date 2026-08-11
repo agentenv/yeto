@@ -750,6 +750,7 @@ def test_miles_public_hook_runs_against_real_syncer(
         yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
         n_samples_per_prompt=2,
         num_steps_per_rollout=1,
+        pipeline_model_parallel_size=1,
         over_sampling_batch_size=1,
         rollout_batch_size=1,
         seq_length=128,
@@ -797,7 +798,7 @@ def test_miles_public_hook_runs_against_real_syncer(
         )
         torch.save(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "config": _island_checkpoint_config(args),
                 "policy_version": 0,
                 "rollout_metrics": {
