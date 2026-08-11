@@ -742,7 +742,13 @@ def main(argv=None) -> None:
             artifact=artifact,
         )
 
-    from .adapter_lifecycle import inspect_parent_adapter, training_recipe
+    # Capture the requested recipe before auto-batching mutates the runtime
+    # micro-batch and accumulation values. Resume compares user intent, while
+    # the resolved values remain visible in ordinary metrics/logs.
+    from .adapter_lifecycle import (
+        inspect_parent_adapter,
+        training_recipe,
+    )
 
     args._training_recipe = training_recipe(args)
     args._adapter_lineage = inspect_parent_adapter(
