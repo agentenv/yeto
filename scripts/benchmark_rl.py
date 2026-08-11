@@ -201,17 +201,21 @@ def validate_workload(args) -> None:
         "samples_per_group",
         "optimizer_steps",
         "gpus_per_island",
+        "pipeline_parallel",
     ):
         if getattr(args, name) <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if args.optimizer_steps != 1:
         raise ValueError("Miles RL benchmark requires one optimizer step per rollout")
+    if args.gpus_per_island % args.pipeline_parallel:
+        raise ValueError("--pipeline-parallel must divide --gpus-per-island")
     samples = args.groups_per_island * args.samples_per_group
-    divisor = args.optimizer_steps * args.gpus_per_island
+    data_parallel = args.gpus_per_island // args.pipeline_parallel
+    divisor = args.optimizer_steps * data_parallel
     if samples % divisor:
         raise ValueError(
             "groups-per-island*samples-per-group must be divisible by "
-            "optimizer-steps*gpus-per-island"
+            "optimizer-steps*data-parallel-size"
         )
 
 
@@ -560,6 +564,7 @@ def worker_payload(
         "audit_dir": str(worker_dir / "audit"),
         "actor_num_nodes": 1,
         "actor_num_gpus_per_node": worker.gpus,
+        "pipeline_parallel": args.pipeline_parallel,
         "expert_parallel": args.expert_parallel,
         "lora_r": args.lora_r,
         "lora_targets": args.lora_targets,
@@ -1949,10 +1954,11 @@ def validate_args(args, arms: list[Arm], *, check_runtime: bool) -> None:
     args._pass_ks = tuple(_positive_csv(args.pass_k, "--pass-k"))
     if max(args._pass_ks) > args.eval_samples_per_prompt:
         raise ValueError("pass@k cannot exceed --eval-samples-per-prompt")
+    data_parallel = args.gpus_per_island // args.pipeline_parallel
     if args.expert_parallel is not None and (
-        args.expert_parallel <= 0 or args.gpus_per_island % args.expert_parallel
+        args.expert_parallel <= 0 or data_parallel % args.expert_parallel
     ):
-        raise ValueError("--expert-parallel must divide --gpus-per-island")
+        raise ValueError("--expert-parallel must divide data parallelism")
     port_range_end = (
         args.miles_port_base
         + max(arm.benchmark_islands for arm in arms) * _MILES_PORT_STRIDE
@@ -2427,6 +2433,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dynamic-sampling-filter-path", default=None)
     parser.add_argument("--optimizer-steps", type=int, default=1)
     parser.add_argument("--gpus-per-island", type=int, default=1)
+    parser.add_argument("--pipeline-parallel", type=int, default=1)
     parser.add_argument("--fragments", type=int, default=8)
     parser.add_argument("--pipeline", type=int, default=2)
     parser.add_argument("--local-horizon", type=int, default=4)
@@ -2483,6 +2490,7 @@ def build_parser() -> argparse.ArgumentParser:
 def print_plan(args, arms: list[Arm]) -> None:
     plan = {
         "model": args.model,
+        "pipeline_parallel": args.pipeline_parallel,
         "expert_parallel": args.expert_parallel,
         "seeds": parse_seeds(args.seeds),
         "arms": [
@@ -2501,6 +2509,7 @@ def print_plan(args, arms: list[Arm]) -> None:
             "same_prompt_groups": True,
             "same_trajectories": True,
             "same_per_rank_batch": True,
+            "same_pipeline_parallel": True,
             "same_expert_parallel": True,
             "paired_prompt_streams": True,
         },

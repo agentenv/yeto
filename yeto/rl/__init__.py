@@ -1,7 +1,7 @@
 """Pinned Miles reinforcement-learning integration."""
 
 MILES_REPOSITORY = "https://github.com/agentenv/miles"
-MILES_COMMIT = "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
+MILES_COMMIT = "f14f12465ed277677757a13f674bab7a266dcc4b"
 MILES_PEFT_VERSION = "0.20.0"
 SGLANG_REPOSITORY = "https://github.com/agentenv/sglang"
 SGLANG_COMMIT = "95d4d69665f1712bc6fd3f503af2655b9b301e13"

@@ -418,7 +418,7 @@ def test_plan_rejects_batch_and_expert_layouts_that_do_not_divide_dp():
 
 
 def test_miles_and_sglang_pins_include_the_compatible_builds():
-    assert MILES_COMMIT == "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
+    assert MILES_COMMIT == "f14f12465ed277677757a13f674bab7a266dcc4b"
     assert SGLANG_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
     assert MILES_IMAGE == (
         "docker:ghcr.io/alexeisie/miles@sha256:"
