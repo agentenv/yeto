@@ -32,6 +32,7 @@ def _args(**overrides):
         "samples_per_group": 2,
         "optimizer_steps": 1,
         "gpus_per_island": 2,
+        "pipeline_parallel": 1,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -104,8 +105,20 @@ def test_decoupled_arm_requires_the_fixed_fragment_contract():
 
 def test_workload_validation_requires_equal_per_rank_batch():
     benchmark.validate_workload(_args())
+    benchmark.validate_workload(
+        _args(
+            groups_per_island=1,
+            samples_per_group=2,
+            gpus_per_island=4,
+            pipeline_parallel=2,
+        )
+    )
     with pytest.raises(ValueError, match="one optimizer step"):
         benchmark.validate_workload(_args(optimizer_steps=2))
+    with pytest.raises(ValueError, match="pipeline-parallel"):
+        benchmark.validate_workload(
+            _args(gpus_per_island=4, pipeline_parallel=3)
+        )
     with pytest.raises(ValueError, match="divisible"):
         benchmark.validate_workload(_args(groups_per_island=3, samples_per_group=3))
 
@@ -167,6 +180,37 @@ def test_expert_parallel_default_is_fixed_across_all_arms():
     )
 
     assert args.expert_parallel == 1
+    assert args.pipeline_parallel == 1
+
+
+def test_expert_parallel_must_divide_pipeline_derived_data_parallelism():
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--model-revision",
+            "a" * 40,
+            "--data",
+            "org/data",
+            "--data-revision",
+            "b" * 40,
+            "--reward-function",
+            "pkg.reward:score",
+            "--gpus-per-island",
+            "4",
+            "--pipeline-parallel",
+            "2",
+            "--expert-parallel",
+            "4",
+        ]
+    )
+    args.eval_samples_per_prompt = args.samples_per_group
+    arms = benchmark.select_arms(
+        args.islands, args.gpus_per_island, args.groups_per_island
+    )
+
+    with pytest.raises(ValueError, match="expert-parallel.*data parallelism"):
+        benchmark.validate_args(args, arms, check_runtime=False)
 
 
 def test_chat_template_kwargs_are_forwarded_to_training_workers(tmp_path):
@@ -276,6 +320,8 @@ def test_federated_workers_use_disjoint_miles_host_ports(tmp_path):
             "b" * 40,
             "--reward-function",
             "pkg.reward:score",
+            "--pipeline-parallel",
+            "2",
         ]
     )
     args._active_seed = 17
@@ -314,6 +360,9 @@ def test_federated_workers_use_disjoint_miles_host_ports(tmp_path):
         22002,
     ]
     assert {payload["arguments"]["expert_parallel"] for payload in payloads} == {1}
+    assert {payload["arguments"]["pipeline_parallel"] for payload in payloads} == {
+        2
+    }
 
 
 def test_reward_summary_uses_standard_pass_at_k_estimator():
@@ -531,6 +580,10 @@ def test_dry_run_does_not_import_ray_or_materialize_data(monkeypatch, capsys):
             "pkg.reward:score",
             "--islands",
             "2",
+            "--gpus-per-island",
+            "2",
+            "--pipeline-parallel",
+            "2",
             "--dry-run",
         ]
     )
@@ -543,7 +596,9 @@ def test_dry_run_does_not_import_ray_or_materialize_data(monkeypatch, capsys):
     plan = json.loads(output.split("PLAN_JSON ", 1)[1])
     assert plan["fairness"]["same_total_gpus"]
     assert plan["fairness"]["same_expert_parallel"]
+    assert plan["fairness"]["same_pipeline_parallel"]
     assert plan["expert_parallel"] == 1
+    assert plan["pipeline_parallel"] == 2
 
 
 def test_dry_run_can_select_only_the_current_native_miles_arm(capsys):

@@ -57,7 +57,7 @@ LAYOUT_HASH = canonical_layout_hash(SPECS)
 
 def _plan():
     return {
-        "schema": 1,
+        "schema": 2,
         "run_id": "acceptance",
         "remote_run": ".cache/yeto-rl-ssh/acceptance",
         "remote_env_file": None,
@@ -503,11 +503,22 @@ def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
         load_plan(plan_path)
 
 
+def test_plan_rejects_previous_pipeline_identity_schema():
+    plan = _plan()
+    plan["schema"] = 1
+
+    with pytest.raises(HarnessError, match="plan schema"):
+        ssh_harness._validate_plan(plan)
+
+
 def test_miles_and_sglang_pins_include_the_compatible_builds():
     assert MILES_UPSTREAM_COMMIT == "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
-    assert MILES_COMMIT == "ed9f8c36d89d560c9cd05820225f044cfef074f7"
+    assert MILES_COMMIT == "c252d87f12a2b3b11aa953e4d514a6aceb1a91b5"
+    assert MILES_BUNDLE_PATH == (
+        "yeto/rl/vendor/miles-c252d87f12a2b3b11aa953e4d514a6aceb1a91b5.bundle"
+    )
     assert MILES_BUNDLE_SHA256 == (
-        "4e2e86d5e144633a6cde95a5d0aa999fe0c7a9e3b4ff4521879444529c487d0d"
+        "41248edabfe52e87ea0ead286e4735f9ab8f66869e4cfa8b611c43d7436e874c"
     )
     assert SGLANG_UPSTREAM_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
     assert SGLANG_COMMIT == "c2cb40a774dc8cba85eb651f28471d889178b5ee"

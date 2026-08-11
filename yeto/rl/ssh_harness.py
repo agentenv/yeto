@@ -33,7 +33,7 @@ from . import (
 )
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
-PLAN_SCHEMA = 1
+PLAN_SCHEMA = 2
 SYNCER_PORT = 29400
 RAY_PORT = 6379
 REPO_ROOT = Path(__file__).resolve().parents[2]
