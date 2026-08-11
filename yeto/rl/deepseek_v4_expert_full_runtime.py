@@ -278,8 +278,6 @@ def _attention_sides(actor) -> dict[str, Any]:
                 name = _canonical_name(str(side.mapping.hf_param))
                 if not name.endswith((".lora_A.weight", ".lora_B.weight")):
                     continue
-                if side.param_weight is None:
-                    raise RuntimeError(f"attention LoRA parameter {name!r} is missing locally")
                 if name in sides:
                     raise RuntimeError(f"duplicate attention LoRA mapping {name!r}")
                 sides[name] = side
@@ -299,36 +297,64 @@ def _expert_views(actor) -> dict[str, Any]:
     if cached is not None:
         return cached
     views = {}
-    expert_parameters = set()
+    expert_parameters = {}
     for chunk in _model_chunks(actor.model):
         for parameter in chunk.parameters():
             if not getattr(parameter, "_yeto_expert_full", False):
                 continue
-            expert_parameters.add(id(parameter))
-            layer = int(parameter._yeto_expert_layer)
-            branch = str(parameter._yeto_expert_branch)
-            items = ((int(parameter._yeto_expert_id), parameter),)
-            for expert, value in items:
-                prefix = (
-                    "base_model.model.model.layers."
-                    f"{layer}.mlp.experts.{expert}."
+            expert_parameters[id(parameter)] = parameter
+
+    expected = {spec.name for spec in _expert_specs(actor)}
+    mapped_parameters = set()
+    tasks = filter_selected_expert_tasks(
+        _actor_bridge(actor).get_conversion_tasks(actor.model),
+        expert_count=_expert_count(),
+    )
+    for task in tasks:
+        parameter = getattr(task, "param_weight", None)
+        if parameter is None:
+            continue
+        if id(parameter) not in expert_parameters:
+            raise RuntimeError(
+                "expert-full conversion task does not own a local trainable parameter"
+            )
+        names = tuple(_canonical_name(name) for name in _mapping_hf_names(task))
+        projections = {}
+        for name in names:
+            match = _EXPERT_WEIGHT.fullmatch(name)
+            if match is None or name not in expected:
+                raise RuntimeError(
+                    f"expert-full conversion task is outside the policy: {name!r}"
                 )
-                if branch == "linear_fc1":
-                    gate, up = value.chunk(2, dim=0)
-                    views[prefix + "gate_proj.weight"] = gate
-                    views[prefix + "up_proj.weight"] = up
-                elif branch == "linear_fc2":
-                    views[prefix + "down_proj.weight"] = value
-                else:
-                    raise RuntimeError(f"unknown expert-full branch {branch!r}")
-    expected_local = {
-        spec.name for spec in _expert_specs(actor) if spec.name in views
-    }
-    if set(views) != expected_local:
-        raise RuntimeError("expert-full model produced duplicate or unexpected views")
+            if int(match.group("expert")) != int(parameter._yeto_expert_id):
+                raise RuntimeError(
+                    f"expert-full conversion task has the wrong owner: {name!r}"
+                )
+            projection = match.group("projection")
+            if projection in projections or name in views:
+                raise RuntimeError(
+                    f"duplicate expert-full conversion mapping: {name!r}"
+                )
+            projections[projection] = name
+        branch = str(parameter._yeto_expert_branch)
+        if branch == "linear_fc1" and set(projections) == {"gate_proj", "up_proj"}:
+            gate, up = parameter.chunk(2, dim=0)
+            views[projections["gate_proj"]] = gate
+            views[projections["up_proj"]] = up
+        elif branch == "linear_fc2" and set(projections) == {"down_proj"}:
+            views[projections["down_proj"]] = parameter
+        else:
+            raise RuntimeError(
+                f"expert-full conversion task does not match {branch!r}: {names!r}"
+            )
+        mapped_parameters.add(id(parameter))
+    if mapped_parameters != set(expert_parameters):
+        raise RuntimeError("expert-full conversion tasks do not cover local parameters")
 
     attention_parameters = {
-        id(side.param_weight) for side in _attention_sides(actor).values()
+        id(side.param_weight)
+        for side in _attention_sides(actor).values()
+        if side.param_weight is not None
     }
     trainable = {
         id(parameter)
@@ -336,7 +362,7 @@ def _expert_views(actor) -> dict[str, Any]:
         for parameter in chunk.parameters()
         if parameter.requires_grad
     }
-    if trainable != expert_parameters | attention_parameters:
+    if trainable != set(expert_parameters) | attention_parameters:
         raise RuntimeError("hybrid policy does not cover every trainable parameter")
     actor._yeto_expert_full_views = views
     return views
@@ -514,11 +540,13 @@ def apply_hybrid_trainable_state(
     for spec in _attention_specs(actor):
         value = _broadcast_policy_tensor(spec, state)
         side = sides[spec.name]
-        mapped = side.mapping.hf_to_megatron(value, side.megatron_module)
-        if mapped is None or mapped.numel() != side.param_weight.numel():
-            raise RuntimeError(f"attention LoRA shape mismatch for {spec.name!r}")
-        side.param_weight.copy_(mapped.reshape(side.param_weight.shape))
-        del mapped, value
+        if side.param_weight is not None:
+            mapped = side.mapping.hf_to_megatron(value, side.megatron_module)
+            if mapped is None or mapped.numel() != side.param_weight.numel():
+                raise RuntimeError(f"attention LoRA shape mismatch for {spec.name!r}")
+            side.param_weight.copy_(mapped.reshape(side.param_weight.shape))
+            del mapped
+        del value
 
     views = _expert_views(actor)
     for spec in _expert_specs(actor):

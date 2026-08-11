@@ -990,7 +990,7 @@ def test_expert_full_plan_forwards_attestation_and_runtime_environment():
             "expert_selection_sha256": "a" * 64,
             "expert_selection_contract_sha256": "b" * 64,
             "tensor_parallel": 8,
-            "pipeline_parallel": 1,
+            "pipeline_parallel": 2,
             "expert_parallel": 8,
             "rollout_num_gpus_per_engine": 8,
             "sglang_tp_size": 8,
@@ -1009,6 +1009,7 @@ def test_expert_full_plan_forwards_attestation_and_runtime_environment():
 
     assert parsed.expert_full_count == 16
     assert parsed.expert_full_lr == 1e-6
+    assert parsed.pipeline_parallel == 2
     assert parsed.expert_selection_sha256 == "a" * 64
     assert parsed.expert_selection_contract_sha256 == "b" * 64
     for value in (

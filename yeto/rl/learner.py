@@ -314,12 +314,12 @@ def build_miles_argv(
             )
         if (
             tensor_parallel != 8
-            or pipeline_parallel != 1
             or expert_parallel != 8
             or getattr(args, "rollout_num_gpus_per_engine", 1) != 8
         ):
             raise ValueError(
-                "expanded DeepSeek V4 requires TP8/EP8/PP1 per-node replicas"
+                "expanded DeepSeek V4 requires TP8/EP8 pipeline stages and "
+                "per-node eight-GPU rollout replicas"
             )
         if layers != 43 or not is_moe or not multi_latent_attention:
             raise ValueError(

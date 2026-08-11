@@ -190,7 +190,10 @@ def configure_clone_expert_full(
                 )
             )
 
-    expected = NUM_LAYERS * 2 * local_count
+    local_layers = {record.layer for record in records}
+    if not local_layers:
+        raise RuntimeError("expert-full policy found no individual expert weights")
+    expected = len(local_layers) * 2 * local_count
     if len(records) != expected:
         raise RuntimeError(
             "expert-full policy found "
@@ -202,7 +205,7 @@ def configure_clone_expert_full(
     }
     required = {
         (layer, branch, expert)
-        for layer in range(NUM_LAYERS)
+        for layer in local_layers
         for branch in ("linear_fc1", "linear_fc2")
         for expert in local_ids
     }

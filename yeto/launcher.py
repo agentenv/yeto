@@ -832,7 +832,6 @@ def _prepare_rl_args(
             )
         if (
             args.tensor_parallel != 8
-            or args.pipeline_parallel != 1
             or args.expert_parallel != 8
             or args.rollout_num_gpus_per_engine != 8
             or args.sglang_tp_size != 8
@@ -840,8 +839,8 @@ def _prepare_rl_args(
             or args.sglang_dp_size not in (None, 1)
         ):
             raise ValueError(
-                "expanded DeepSeek V4 Flash requires per-node "
-                "TP8/EP8/PP1 rollout replicas and cross-node DP only"
+                "expanded DeepSeek V4 Flash requires TP8/EP8 pipeline stages "
+                "and per-node eight-GPU rollout replicas"
             )
         if args.sglang_attention_backend not in {"dsv4", "compressed"}:
             raise ValueError(

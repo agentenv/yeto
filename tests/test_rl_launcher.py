@@ -481,7 +481,7 @@ def test_rl_accepts_two_node_deepseek_model_parallel_island():
             "--tensor-parallel",
             "8",
             "--pipeline-parallel",
-            "1",
+            "2",
             "--expert-parallel",
             "8",
             "--rollout-num-gpus-per-engine",
@@ -501,7 +501,7 @@ def test_rl_accepts_two_node_deepseek_model_parallel_island():
     _prepare_rl_args(args)
 
     assert args.tensor_parallel == 8
-    assert args.pipeline_parallel == 1
+    assert args.pipeline_parallel == 2
     assert args.expert_parallel == 8
     assert args.rollout_num_gpus_per_engine == 8
     assert args.rollout_model == "/data/models/deepseek-v4-flash-fp8"
@@ -536,6 +536,8 @@ def test_rl_accepts_attested_sixteen_expert_full_deepseek_recipe():
             "b" * 64,
             "--tensor-parallel",
             "8",
+            "--pipeline-parallel",
+            "2",
             "--expert-parallel",
             "8",
             "--rollout-num-gpus-per-engine",
@@ -555,6 +557,7 @@ def test_rl_accepts_attested_sixteen_expert_full_deepseek_recipe():
     _prepare_rl_args(args)
 
     assert args.expert_full_count == 16
+    assert args.pipeline_parallel == 2
     assert args.expert_full_lr == 1e-6
     assert args.expert_selection_sha256 == "a" * 64
     assert args.expert_selection_contract_sha256 == "b" * 64
@@ -1324,7 +1327,7 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
     recipe_values = vars(parallel_args).copy()
     recipe_values.update(
         rl_model_recipe="deepseek-v4-flash",
-        pipeline_parallel=1,
+        pipeline_parallel=2,
         lora_targets="attention-routed-experts",
         tito_model="deepseekv4",
     )
@@ -1353,8 +1356,12 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
     assert "--recompute-granularity" in uneven_argv
     assert "--moe-router-freeze-gate" in uneven_argv
     assert "--freeze-e-score-correction-bias" in uneven_argv
-    assert "--decoder-first-pipeline-num-layers" not in uneven_argv
-    assert "--decoder-last-pipeline-num-layers" not in uneven_argv
+    assert uneven_argv[
+        uneven_argv.index("--decoder-first-pipeline-num-layers") + 1
+    ] == "22"
+    assert uneven_argv[
+        uneven_argv.index("--decoder-last-pipeline-num-layers") + 1
+    ] == "21"
     assert uneven_argv[uneven_argv.index("--moe-layer-freq") + 1] == "1"
     assert uneven_argv[
         uneven_argv.index("--sglang-reasoning-parser") + 1

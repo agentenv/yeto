@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from yeto.rl import deepseek_v4_expert_full_runtime as runtime
 from yeto.rl.deepseek_v4_expert_full_runtime import (
     filter_selected_expert_tasks,
     install_on_arguments,
@@ -133,3 +134,88 @@ def test_arguments_hook_only_restores_the_required_distributed_optimizer():
     assert result.use_distributed_optimizer is True
     assert result.accumulate_allreduce_grads_in_fp32 is True
     assert result.optimizer_cpu_offload is True
+
+
+def test_attention_mapping_retains_remote_pipeline_sides(monkeypatch):
+    names = (
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight",
+        "base_model.model.model.layers.22.self_attn.q_proj.lora_A.weight",
+    )
+    local = torch.nn.Parameter(torch.ones(1))
+
+    def side(name, parameter):
+        return SimpleNamespace(
+            mapping=SimpleNamespace(hf_param=name),
+            param_weight=parameter,
+        )
+
+    tasks = {
+        "local": [
+            SimpleNamespace(
+                linear_in_task=side(names[0], local),
+                linear_out_task=side("ignored", None),
+            )
+        ],
+        "remote": [
+            SimpleNamespace(
+                linear_in_task=side(names[1], None),
+                linear_out_task=side("ignored", None),
+            )
+        ],
+    }
+    bridge = SimpleNamespace(
+        _model_bridge=SimpleNamespace(
+            build_adapter_conversion_tasks=lambda _model: tasks
+        )
+    )
+    monkeypatch.setattr(runtime, "_actor_bridge", lambda _actor: bridge)
+    actor = SimpleNamespace(
+        args=SimpleNamespace(
+            yeto_rl_expected_specs=tuple(
+                SimpleNamespace(name=name) for name in names
+            )
+        ),
+        model=[],
+    )
+
+    sides = runtime._attention_sides(actor)
+
+    assert set(sides) == set(names)
+    assert sides[names[0]].param_weight is local
+    assert sides[names[1]].param_weight is None
+
+
+def test_expert_views_use_global_bridge_layer_on_pipeline_stage(monkeypatch):
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
+    gate = _expert_name(256).replace("layers.0", "layers.22")
+    up = _expert_name(256, "up_proj").replace("layers.0", "layers.22")
+    parameter = torch.nn.Parameter(torch.arange(12).reshape(4, 3).float())
+    parameter._yeto_expert_full = True
+    parameter._yeto_expert_id = 256
+    parameter._yeto_expert_layer = 0
+    parameter._yeto_expert_branch = "linear_fc1"
+    chunk = torch.nn.Module()
+    chunk.register_parameter("local_stage_expert", parameter)
+    task = SimpleNamespace(
+        mapping=SimpleNamespace(hf_param={"gate": gate, "up": up}),
+        param_weight=parameter,
+    )
+    bridge = SimpleNamespace(get_conversion_tasks=lambda _model: [task])
+    monkeypatch.setattr(runtime, "_actor_bridge", lambda _actor: bridge)
+    monkeypatch.setattr(runtime, "_attention_sides", lambda _actor: {})
+    actor = SimpleNamespace(
+        args=SimpleNamespace(
+            yeto_rl_expected_specs=(
+                SimpleNamespace(name=gate),
+                SimpleNamespace(name=up),
+            )
+        ),
+        model=[chunk],
+    )
+
+    views = runtime._expert_views(actor)
+
+    expected_gate, expected_up = parameter.chunk(2, dim=0)
+    assert set(views) == {gate, up}
+    assert torch.equal(views[gate], expected_gate)
+    assert torch.equal(views[up], expected_up)

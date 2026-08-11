@@ -629,7 +629,6 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         if (
             learner.get("lora_targets") != expected_lora_targets
             or tensor_parallel != 8
-            or pipeline_parallel != 1
             or learner.get("expert_parallel") != 8
             or rollout_gpus != 8
             or learner.get("sglang_tp_size") != 8
@@ -637,8 +636,8 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             or learner.get("sglang_dp_size") not in (None, 1)
         ):
             raise HarnessError(
-                "expanded DeepSeek V4 plan must use per-node "
-                "TP8/EP8/PP1 replicas and cross-node DP only"
+                "expanded DeepSeek V4 plan must use TP8/EP8 pipeline stages "
+                "and per-node eight-GPU rollout replicas"
             )
     custom_agent = learner.get("custom_agent_function_path")
     if custom_agent is not None:

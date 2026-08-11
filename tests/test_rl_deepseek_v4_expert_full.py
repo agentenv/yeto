@@ -133,17 +133,17 @@ class _IndividualLayer(torch.nn.Module):
 
 
 class _IndividualDecoder(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_layers=NUM_LAYERS):
         super().__init__()
         self.layers = torch.nn.ModuleList(
-            _IndividualLayer() for _ in range(NUM_LAYERS)
+            _IndividualLayer() for _ in range(num_layers)
         )
 
 
 class _IndividualModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_layers=NUM_LAYERS):
         super().__init__()
-        self.decoder = _IndividualDecoder()
+        self.decoder = _IndividualDecoder(num_layers)
         self.attention_lora = torch.nn.Parameter(torch.ones(1))
 
 
@@ -190,6 +190,21 @@ def test_packed_expert_weights_are_rejected_by_the_pinned_individual_layout():
             expert_parallel_rank=7,
             expert_parallel_size=8,
         )
+
+
+def test_pipeline_stage_validates_only_its_local_expert_layers():
+    model = _IndividualModel(num_layers=22)
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+
+    records = configure_clone_expert_full(
+        model,
+        expert_count=32,
+        expert_parallel_rank=7,
+        expert_parallel_size=8,
+    )
+
+    assert len(records) == 22 * 2 * 36
 
 
 def test_non_owner_ep_ranks_keep_every_expert_parameter_frozen():
