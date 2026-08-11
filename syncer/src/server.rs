@@ -30,6 +30,13 @@ const WRITER_QUEUE: usize = 128;
 #[derive(Clone)]
 pub struct Config {
     pub port: u16,
+    /// Address to listen on. Defaults to `0.0.0.0` because the fleet path puts
+    /// learners on other hosts, but the wire protocol has no authentication
+    /// beyond a 4-byte magic (see `protocol.rs`), so anything that can reach
+    /// this port can pull parameters or push deltas. A single-box run — syncer
+    /// and learner on the same machine, learner dialing 127.0.0.1 — should pass
+    /// `--bind 127.0.0.1` and expose nothing.
+    pub bind: String,
     pub learners: u32,
     pub quorum: u32,
     /// Upper bound on the grace window; the actual wait adapts per round
@@ -366,10 +373,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         // before accepting any learner so every early failure stays recovery-only.
         remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
     }
-    let listener = TcpListener::bind(("0.0.0.0", cfg.port))
+    let listener = TcpListener::bind((cfg.bind.as_str(), cfg.port))
         .await
-        .with_context(|| format!("bind port {}", cfg.port))?;
-    info!(port = cfg.port, "syncer listening");
+        .with_context(|| format!("bind {}:{}", cfg.bind, cfg.port))?;
+    info!(bind = %cfg.bind, port = cfg.port, "syncer listening");
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
     let session: Session = Arc::new(Mutex::new(None));

@@ -13,6 +13,12 @@ struct Args {
     /// TCP port to listen on.
     #[arg(long, default_value_t = 29400)]
     port: u16,
+    /// Address to listen on. Default 0.0.0.0 keeps the fleet path working
+    /// (learners live on other hosts). Pass 127.0.0.1 for a single-box run:
+    /// the protocol authenticates nothing beyond a 4-byte magic, so a public
+    /// bind lets any reachable host pull parameters or push deltas.
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: String,
     /// Number of learners expected before training starts (M).
     #[arg(long)]
     learners: u32,
@@ -101,6 +107,7 @@ fn main() -> anyhow::Result<()> {
     };
     let cfg = server::Config {
         port: args.port,
+        bind: args.bind,
         learners: args.learners,
         quorum: args.quorum,
         grace_ms: args.grace_ms,
