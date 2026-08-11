@@ -685,15 +685,24 @@ def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
     specs = parse_gpu_spec(args.gpu)
     if getattr(args, "external_learners", 0):
         raise ValueError("RL v0 does not support external learner slots")
-    if args.tensor_parallel != 1 or args.pipeline_parallel != 1:
-        raise ValueError("RL v0 requires TP=PP=1")
+    if args.tensor_parallel != 1:
+        raise ValueError("RL v0 requires TP=1")
+    if args.pipeline_parallel <= 0:
+        raise ValueError("RL pipeline parallelism must be positive")
+    if any(spec.total_gpus % args.pipeline_parallel for spec in specs):
+        raise ValueError("RL pipeline parallelism must divide every island")
     if args.expert_parallel is not None:
         if args.expert_parallel <= 0:
             raise ValueError("RL expert parallelism must be positive")
-        if any(spec.total_gpus % args.expert_parallel for spec in specs):
-            raise ValueError("RL expert parallelism must divide every island")
+        if any(
+            (spec.total_gpus // args.pipeline_parallel) % args.expert_parallel
+            for spec in specs
+        ):
+            raise ValueError(
+                "RL expert parallelism must divide every island data-parallel size"
+            )
     for spec in specs:
-        dp = spec.total_gpus  # TP=PP=CP=1 in the fixed Miles/Megatron path.
+        dp = spec.total_gpus // args.pipeline_parallel
         if args.rollout_batch_size * args.n_samples_per_prompt % dp:
             raise ValueError(
                 "RL rollout_batch_size*n_samples_per_prompt must be divisible "
@@ -1042,6 +1051,7 @@ def make_miles_island_task(
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
         f" --actor-num-nodes {spec.num_nodes}"
         f" --actor-num-gpus-per-node {spec.gpus_per_node}"
+        f" --pipeline-parallel {args.pipeline_parallel}"
         f" --lora-r {args.lora_r}"
         f" --lora-targets {args.lora_targets}"
         f" --inner-lr {args.inner_lr}"

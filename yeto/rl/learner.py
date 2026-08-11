@@ -60,6 +60,7 @@ def parse_args(argv=None):
     parser.add_argument("--audit-dir", default=None)
     parser.add_argument("--actor-num-nodes", type=int, required=True)
     parser.add_argument("--actor-num-gpus-per-node", type=int, required=True)
+    parser.add_argument("--pipeline-parallel", type=int, default=1)
     parser.add_argument("--expert-parallel", type=int, default=None)
     parser.add_argument("--lora-r", type=int, required=True)
     parser.add_argument(
@@ -190,21 +191,22 @@ def build_miles_argv(
     rotary_base = int(getattr(provider, "rotary_base", 10000))
     rotary_percent = float(getattr(provider, "rotary_percent", 1.0))
     actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+    pipeline_parallel = getattr(args, "pipeline_parallel", 1)
+    if pipeline_parallel <= 0 or actor_gpus % pipeline_parallel:
+        raise ValueError("pipeline parallelism must divide Miles actor world size")
+    data_parallel = actor_gpus // pipeline_parallel
     is_moe = getattr(provider, "num_moe_experts", None) is not None
     expert_parallel = getattr(args, "expert_parallel", None) or (
-        actor_gpus if is_moe else 1
+        data_parallel if is_moe else 1
     )
     if not is_moe and expert_parallel != 1:
         raise ValueError("EP>1 requires a MoE model")
-    if actor_gpus % expert_parallel:
-        raise ValueError("expert parallelism must divide Miles actor world size")
+    if data_parallel % expert_parallel:
+        raise ValueError("expert parallelism must divide data parallelism")
     if is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
         raise ValueError(
             "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
         )
-    # Megatron DP includes the ranks rearranged into EP groups. With the v0
-    # TP=PP=CP=1 contract, Miles reports one rollout shard per actor rank.
-    data_parallel = actor_gpus
     global_batch = (
         args.groups_per_round * args.samples_per_group // args.optimizer_steps
     )
@@ -253,7 +255,7 @@ def build_miles_argv(
         ),
         "--sglang-mem-fraction-static", "0.4",
         "--tensor-model-parallel-size", "1",
-        "--pipeline-model-parallel-size", "1",
+        "--pipeline-model-parallel-size", str(pipeline_parallel),
         "--context-parallel-size", "1",
         "--expert-model-parallel-size", str(expert_parallel),
         "--expert-tensor-parallel-size", "1",

@@ -354,7 +354,12 @@ def test_default_sft_parse_is_unchanged():
     [
         (("--tuning", "full"), "lora"),
         (("--lora-r", "0"), "positive LoRA rank"),
-        (("--tensor-parallel", "2"), "TP=PP=1"),
+        (("--tensor-parallel", "2"), "TP=1"),
+        (("--pipeline-parallel", "0"), "pipeline parallelism must be positive"),
+        (
+            ("--gpu", "aws:4xa100@us-east-1", "--pipeline-parallel", "3"),
+            "pipeline parallelism must divide every island",
+        ),
         (("--expert-parallel", "3"), "divide every island"),
         (("--local-rl-rounds-per-sync", "2"), "requires --local"),
         (("--rl-image", "docker:example/miles:latest"), "sha256"),
@@ -414,6 +419,55 @@ def test_rl_accepts_single_and_multigpu_islands():
     multi = _args(("--gpu", "aws:2x4xa100@us-east-1,gcp:8xa100"))
     _prepare_rl_args(multi)
     assert multi.quorum == 2
+
+
+def test_rl_pipeline_parallelism_uses_data_parallel_batch_divisibility():
+    args = _args(
+        (
+            "--gpu",
+            "aws:4xa100@us-east-1",
+            "--pipeline-parallel",
+            "2",
+            "--rollout-batch-size",
+            "1",
+            "--n-samples-per-prompt",
+            "2",
+        )
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.pipeline_parallel == 2
+
+
+def test_rl_expert_parallelism_and_batch_must_divide_pipeline_derived_dp():
+    expert = _args(
+        (
+            "--gpu",
+            "aws:8xa100@us-east-1",
+            "--pipeline-parallel",
+            "2",
+            "--expert-parallel",
+            "8",
+        )
+    )
+    with pytest.raises(ValueError, match="divide every island data-parallel size"):
+        _prepare_rl_args(expert)
+
+    batch = _args(
+        (
+            "--gpu",
+            "aws:8xa100@us-east-1",
+            "--pipeline-parallel",
+            "2",
+            "--rollout-batch-size",
+            "3",
+            "--n-samples-per-prompt",
+            "2",
+        )
+    )
+    with pytest.raises(ValueError, match="data-parallel size"):
+        _prepare_rl_args(batch)
 
 
 def test_rl_provenance_hashes_reward_inside_synced_workdir(monkeypatch):
@@ -654,6 +708,8 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
         (
             "--gpu",
             "aws:2x4xa100@us-east-1",
+            "--pipeline-parallel",
+            "2",
             "--over-sampling-batch-size",
             "6",
             "--dynamic-sampling-filter-path",
@@ -726,6 +782,7 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert 'ray start --address="$MASTER_ADDR:6379"' in task.run
     assert "--actor-num-nodes 2" in task.run
     assert "--actor-num-gpus-per-node 4" in task.run
+    assert "--pipeline-parallel 2" in task.run
     assert "--over-sampling-batch-size 6" in task.run
     assert "--dynamic-sampling-filter-path yeto.rl.filters.bounded_nonzero_reward_std" in task.run
     assert "--dynamic-sampling-max-replacements 8" in task.run
@@ -845,6 +902,7 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
         tito_model="qwen3",
         actor_num_nodes=1,
         actor_num_gpus_per_node=8,
+        pipeline_parallel=2,
         expert_parallel=None,
         apply_chat_template_kwargs={"enable_thinking": False},
     )
@@ -906,7 +964,8 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
     assert argv[argv.index("--lr") + 1] == "0.0001"
     assert argv[argv.index("--actor-num-nodes") + 1] == "1"
     assert argv[argv.index("--actor-num-gpus-per-node") + 1] == "8"
-    assert argv[argv.index("--expert-model-parallel-size") + 1] == "8"
+    assert argv[argv.index("--pipeline-model-parallel-size") + 1] == "2"
+    assert argv[argv.index("--expert-model-parallel-size") + 1] == "4"
     assert argv[argv.index("--over-sampling-batch-size") + 1] == "6"
     assert "--balance-data" in argv
     assert json.loads(argv[argv.index("--apply-chat-template-kwargs") + 1]) == {
@@ -1035,6 +1094,41 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches():
             provider=dense_provider,
             target_modules=["qkv_proj", "out_proj"],
         )
+
+    invalid_pipeline = argparse.Namespace(**vars(args))
+    invalid_pipeline.pipeline_parallel = 3
+    with pytest.raises(ValueError, match="pipeline parallelism must divide"):
+        build_miles_argv(
+            invalid_pipeline,
+            model_path="/model",
+            prompt_path="/prompts.jsonl",
+            provider=provider,
+            target_modules=["qkv_proj", "out_proj"],
+        )
+
+    invalid_expert = argparse.Namespace(**vars(args))
+    invalid_expert.expert_parallel = 8
+    with pytest.raises(ValueError, match="expert parallelism must divide data parallelism"):
+        build_miles_argv(
+            invalid_expert,
+            model_path="/model",
+            prompt_path="/prompts.jsonl",
+            provider=provider,
+            target_modules=["qkv_proj", "out_proj"],
+        )
+
+    dp_batch = argparse.Namespace(**vars(args))
+    dp_batch.actor_num_gpus_per_node = 4
+    dp_batch.groups_per_round = 1
+    dp_batch.samples_per_group = 2
+    dp_argv = build_miles_argv(
+        dp_batch,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=provider,
+        target_modules=["qkv_proj", "out_proj"],
+    )
+    assert dp_argv[dp_argv.index("--global-batch-size") + 1] == "2"
 
     too_long = argparse.Namespace(**vars(args))
     too_long.seq_len = 257
