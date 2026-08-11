@@ -987,6 +987,12 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     )
     assert MILES_REPOSITORY in task.setup
     assert MILES_COMMIT in task.setup
+    assert (
+        f"git -C ~/miles fetch --depth 1 origin {MILES_COMMIT}"
+        in task.setup
+    )
+    assert "MILES_BUNDLE" not in task.setup
+    assert "git -C ~/miles fetch ~/sky_workdir/" not in task.setup
     assert SGLANG_REPOSITORY in task.setup
     assert SGLANG_COMMIT in task.setup
     assert "checkout --detach" in task.setup

@@ -1173,12 +1173,9 @@ def make_miles_island_task(
     from .models import resolve
     from .provenance import is_local_reference
     from .rl import (
-        MILES_BUNDLE_PATH,
-        MILES_BUNDLE_SHA256,
         MILES_COMMIT,
         MILES_PEFT_VERSION,
         MILES_REPOSITORY,
-        MILES_UPSTREAM_COMMIT,
         SGLANG_COMMIT,
         SGLANG_REPOSITORY,
     )
@@ -1315,10 +1312,7 @@ def make_miles_island_task(
         "set -e\n"
         f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
         f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
-        f"printf '%s  %s\\n' {MILES_BUNDLE_SHA256} "
-        f"~/sky_workdir/{MILES_BUNDLE_PATH} | sha256sum --check -\n"
-        f"git -C ~/miles fetch --depth 1 origin {MILES_UPSTREAM_COMMIT}\n"
-        f"git -C ~/miles fetch ~/sky_workdir/{MILES_BUNDLE_PATH} HEAD\n"
+        f"git -C ~/miles fetch --depth 1 origin {MILES_COMMIT}\n"
         f"git -C ~/miles checkout --detach {MILES_COMMIT}\n"
         f"python3 -m pip install -q --no-deps -e ~/miles "
         f"'peft=={MILES_PEFT_VERSION}'"

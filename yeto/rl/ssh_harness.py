@@ -19,12 +19,9 @@ from typing import Any
 import torch
 
 from . import (
-    MILES_BUNDLE_PATH,
-    MILES_BUNDLE_SHA256,
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
-    MILES_UPSTREAM_COMMIT,
     SGLANG_BUNDLE_PATH,
     SGLANG_BUNDLE_SHA256,
     SGLANG_COMMIT,
@@ -432,10 +429,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     _docker_ref(str(plan.get("docker_image", "")))
     if plan.get("miles") != {
         "repository": MILES_REPOSITORY,
-        "upstream_commit": MILES_UPSTREAM_COMMIT,
         "commit": MILES_COMMIT,
-        "bundle_path": MILES_BUNDLE_PATH,
-        "bundle_sha256": MILES_BUNDLE_SHA256,
         "peft_version": MILES_PEFT_VERSION,
     }:
         raise HarnessError("plan does not use the current pinned Miles revision")
@@ -840,10 +834,7 @@ def prepare(namespace) -> Path:
         "docker_image": _docker_ref(args.rl_image),
         "miles": {
             "repository": MILES_REPOSITORY,
-            "upstream_commit": MILES_UPSTREAM_COMMIT,
             "commit": MILES_COMMIT,
-            "bundle_path": MILES_BUNDLE_PATH,
-            "bundle_sha256": MILES_BUNDLE_SHA256,
             "peft_version": MILES_PEFT_VERSION,
         },
         "sglang": {
@@ -1021,9 +1012,6 @@ def _attest_local(plan: dict[str, Any]) -> None:
             or file_sha256(patch_path) != tms_patch["binary_sha256"]
         ):
             raise HarnessError("TMS preload patch changed after the plan was prepared")
-    bundle = REPO_ROOT / plan["miles"]["bundle_path"]
-    if file_sha256(bundle) != plan["miles"]["bundle_sha256"]:
-        raise HarnessError("Miles bundle changed after the plan was prepared")
     sglang_bundle = REPO_ROOT / plan["sglang"]["bundle_path"]
     if file_sha256(sglang_bundle) != plan["sglang"]["bundle_sha256"]:
         raise HarnessError("SGLang bundle changed after the plan was prepared")
@@ -1171,10 +1159,7 @@ docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
   git clone --no-checkout {shlex.quote(MILES_REPOSITORY)} "$RUN/miles"
 fi
 git -C "$RUN/miles" remote set-url origin {shlex.quote(MILES_REPOSITORY)}
-MILES_BUNDLE="$RUN/source/{MILES_BUNDLE_PATH}"
-printf '%s  %s\n' {shlex.quote(miles['bundle_sha256'])} "$MILES_BUNDLE" | sha256sum --check -
-git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(miles['upstream_commit'])}
-git -C "$RUN/miles" fetch "$MILES_BUNDLE" HEAD
+git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(miles['commit'])}
 git -C "$RUN/miles" checkout --detach {shlex.quote(miles['commit'])}
 if [ ! -d "$RUN/sglang/.git" ]; then
   rmdir "$RUN/sglang"

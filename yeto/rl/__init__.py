@@ -1,12 +1,7 @@
 """Pinned Miles reinforcement-learning integration."""
 
 MILES_REPOSITORY = "https://github.com/agentenv/miles"
-MILES_UPSTREAM_COMMIT = "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
 MILES_COMMIT = "c252d87f12a2b3b11aa953e4d514a6aceb1a91b5"
-MILES_BUNDLE_PATH = (
-    "yeto/rl/vendor/miles-c252d87f12a2b3b11aa953e4d514a6aceb1a91b5.bundle"
-)
-MILES_BUNDLE_SHA256 = "41248edabfe52e87ea0ead286e4735f9ab8f66869e4cfa8b611c43d7436e874c"
 MILES_PEFT_VERSION = "0.20.0"
 SGLANG_REPOSITORY = "https://github.com/agentenv/sglang"
 SGLANG_UPSTREAM_COMMIT = "95d4d69665f1712bc6fd3f503af2655b9b301e13"

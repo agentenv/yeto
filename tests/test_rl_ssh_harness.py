@@ -6,14 +6,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import yeto.rl as rl_config
 from yeto.rl import (
-    MILES_BUNDLE_PATH,
-    MILES_BUNDLE_SHA256,
     MILES_COMMIT,
     MILES_IMAGE,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
-    MILES_UPSTREAM_COMMIT,
     SGLANG_BUNDLE_PATH,
     SGLANG_BUNDLE_SHA256,
     SGLANG_COMMIT,
@@ -79,10 +77,7 @@ def _plan():
         "docker_image": IMAGE,
         "miles": {
             "repository": MILES_REPOSITORY,
-            "upstream_commit": MILES_UPSTREAM_COMMIT,
             "commit": MILES_COMMIT,
-            "bundle_path": MILES_BUNDLE_PATH,
-            "bundle_sha256": MILES_BUNDLE_SHA256,
             "peft_version": MILES_PEFT_VERSION,
         },
         "sglang": {
@@ -512,14 +507,10 @@ def test_plan_rejects_previous_pipeline_identity_schema():
 
 
 def test_miles_and_sglang_pins_include_the_compatible_builds():
-    assert MILES_UPSTREAM_COMMIT == "674498f4c4b12e58ad6b85e7b34c58e040d6651a"
     assert MILES_COMMIT == "c252d87f12a2b3b11aa953e4d514a6aceb1a91b5"
-    assert MILES_BUNDLE_PATH == (
-        "yeto/rl/vendor/miles-c252d87f12a2b3b11aa953e4d514a6aceb1a91b5.bundle"
-    )
-    assert MILES_BUNDLE_SHA256 == (
-        "41248edabfe52e87ea0ead286e4735f9ab8f66869e4cfa8b611c43d7436e874c"
-    )
+    assert not hasattr(rl_config, "MILES_UPSTREAM_COMMIT")
+    assert not hasattr(rl_config, "MILES_BUNDLE_PATH")
+    assert not hasattr(rl_config, "MILES_BUNDLE_SHA256")
     assert SGLANG_UPSTREAM_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
     assert SGLANG_COMMIT == "c2cb40a774dc8cba85eb651f28471d889178b5ee"
     assert SGLANG_BUNDLE_SHA256 == (
@@ -1110,6 +1101,11 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     assert SGLANG_REPOSITORY in setup
     assert SGLANG_COMMIT in setup
     assert f'git -C "$RUN/miles" remote set-url origin {MILES_REPOSITORY}' in setup
+    assert (
+        f'git -C "$RUN/miles" fetch --depth 1 origin {MILES_COMMIT}'
+        in setup
+    )
+    assert "MILES_BUNDLE" not in setup
     assert f'git -C "$RUN/sglang" remote set-url origin {SGLANG_REPOSITORY}' in setup
     assert '"$RUN/sglang"' in setup
     assert SGLANG_BUNDLE_PATH in setup
