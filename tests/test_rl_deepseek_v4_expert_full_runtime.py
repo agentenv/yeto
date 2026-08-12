@@ -704,6 +704,53 @@ def test_v1_actor_group_merges_export_shards_and_sends_top_level_chunk_refs(
     assert calls[5][1:] == ((), {})
 
 
+def _actor_module_with_value_preserving_restore():
+    class MegatronTrainRayActor:
+        def __init__(self):
+            self.model = torch.nn.Module()
+            frozen = torch.nn.Parameter(torch.ones(2), requires_grad=False)
+            frozen._yeto_expert_full_configured = True
+            self.model.register_parameter("frozen_expert", frozen)
+
+        def _switch_model(self, target_tag):
+            if target_tag == "actor":
+                with torch.no_grad():
+                    self.model.frozen_expert.copy_(self.model.frozen_expert)
+            return target_tag
+
+    return SimpleNamespace(
+        MegatronTrainRayActor=MegatronTrainRayActor,
+        export_external_trainable_state=lambda *_args, **_kwargs: None,
+        apply_external_trainable_state=lambda *_args, **_kwargs: 0,
+    )
+
+
+def test_actor_restore_refreshes_frozen_expert_version_baseline():
+    actor_module = _actor_module_with_value_preserving_restore()
+    runtime.install_on_actor(actor_module)
+    actor = actor_module.MegatronTrainRayActor()
+    runtime._assert_frozen_experts_unchanged(actor)
+    previous_version = actor.model.frozen_expert._version
+
+    assert actor._switch_model("actor") == "actor"
+
+    assert actor.model.frozen_expert._version > previous_version
+    runtime._assert_frozen_experts_unchanged(actor)
+
+
+def test_actor_restore_keeps_guard_for_later_frozen_expert_modification():
+    actor_module = _actor_module_with_value_preserving_restore()
+    runtime.install_on_actor(actor_module)
+    actor = actor_module.MegatronTrainRayActor()
+    actor._switch_model("actor")
+
+    with torch.no_grad():
+        actor.model.frozen_expert.add_(1)
+
+    with pytest.raises(RuntimeError, match="frozen original or unselected"):
+        runtime._assert_frozen_experts_unchanged(actor)
+
+
 def test_chunk_apply_lifecycle_rejects_out_of_order_and_publishes_only_at_finish(
     monkeypatch,
 ):

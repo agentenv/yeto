@@ -708,14 +708,18 @@ def _expert_views(actor) -> dict[str, Any]:
     return views
 
 
-def _assert_frozen_experts_unchanged(actor) -> None:
-    current = {
+def _frozen_expert_versions(actor) -> dict[int, int]:
+    return {
         id(parameter): int(parameter._version)
         for chunk in _model_chunks(actor.model)
         for parameter in chunk.parameters()
         if getattr(parameter, "_yeto_expert_full_configured", False)
         and not getattr(parameter, "_yeto_expert_full", False)
     }
+
+
+def _assert_frozen_experts_unchanged(actor) -> None:
+    current = _frozen_expert_versions(actor)
     previous = getattr(actor, "_yeto_frozen_expert_versions", None)
     if previous is not None and current != previous:
         raise RuntimeError("a frozen original or unselected expert was modified")
@@ -1226,6 +1230,17 @@ def install_on_trainable_state(module: ModuleType) -> None:
 def install_on_actor(module: ModuleType) -> None:
     if getattr(module, "_yeto_expert_full_installed", False):
         return
+    original_switch_model = getattr(
+        module.MegatronTrainRayActor,
+        "_switch_model",
+        None,
+    )
+
+    def _switch_model(self, target_tag):
+        result = original_switch_model(self, target_tag)
+        if target_tag == "actor":
+            self._yeto_frozen_expert_versions = _frozen_expert_versions(self)
+        return result
 
     def export_trainable_state(self):
         state = module.export_external_trainable_state(
@@ -1260,6 +1275,8 @@ def install_on_actor(module: ModuleType) -> None:
 
         return finish_chunked_hybrid_apply(state_module, self)
 
+    if original_switch_model is not None:
+        module.MegatronTrainRayActor._switch_model = _switch_model
     module.MegatronTrainRayActor.export_trainable_state = export_trainable_state
     module.MegatronTrainRayActor.apply_trainable_state = apply_trainable_state
     module.MegatronTrainRayActor.begin_chunked_trainable_state = (
