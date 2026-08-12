@@ -42,6 +42,7 @@ class _TrainableStateFragment:
     policy_version: int
     expected_names: tuple[str, ...]
     tensors: Mapping[str, Any]
+    is_metrics_source: bool = False
     train_rollout_kl: float | None = None
     ess_ratio: float | None = None
     pg_clipfrac: float | None = None
@@ -252,12 +253,20 @@ def _merge_export_fragments(module: ModuleType, fragments):
         raise RuntimeError("Megatron ranks disagree on hybrid policy version")
     if any(fragment.expected_names != expected_names for fragment in fragments):
         raise RuntimeError("Megatron ranks disagree on hybrid tensor layout")
+    metrics_sources = [
+        fragment for fragment in fragments if fragment.is_metrics_source
+    ]
+    if len(metrics_sources) != 1:
+        raise RuntimeError(
+            "hybrid state fragments must contain one Megatron metrics source"
+        )
+    metrics_source = metrics_sources[0]
     if any(
         any(value is not None for value in _state_metrics(fragment).values())
         for fragment in fragments
-        if fragment.source_rank != 0
+        if not fragment.is_metrics_source
     ):
-        raise RuntimeError("nonzero rank returned hybrid training metrics")
+        raise RuntimeError("non-main rank returned hybrid training metrics")
 
     tensors = {}
     for fragment in sorted(fragments, key=lambda item: item.source_rank):
@@ -281,7 +290,7 @@ def _merge_export_fragments(module: ModuleType, fragments):
         module,
         root.policy_version,
         tensors,
-        **_state_metrics(root),
+        **_state_metrics(metrics_source),
     )
 
 
@@ -874,20 +883,24 @@ def export_hybrid_trainable_state(module: ModuleType, actor, *, policy_version: 
     )
     if not tensors:
         return None
+    is_metrics_source = bool(
+        getattr(actor, "_is_first_replica_megatron_main_rank", False)
+    )
     metrics = {}
-    if rank == 0 and getattr(actor.args, "external_policy_sync_path", None) is not None:
+    if is_metrics_source and getattr(actor.args, "external_policy_sync_path", None) is not None:
         metrics = getattr(actor.args, "_external_train_metrics", {})
     return _TrainableStateFragment(
         source_rank=rank,
         policy_version=policy_version,
         expected_names=tuple(spec.name for spec in _expected_specs(actor)),
         tensors=tensors,
+        is_metrics_source=is_metrics_source,
         train_rollout_kl=metrics.get("train/train_rollout_kl"),
         ess_ratio=metrics.get("train/ess_ratio"),
         pg_clipfrac=metrics.get("train/pg_clipfrac"),
         train_seconds=(
             getattr(actor.args, "_external_train_seconds", None)
-            if rank == 0
+            if is_metrics_source
             else None
         ),
     )

@@ -323,6 +323,83 @@ class _FakeRay:
         return self.Ref(len(self.objects) - 1)
 
 
+def test_pp2_hybrid_export_preserves_metrics_from_megatron_main_rank(
+    monkeypatch,
+):
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
+    monkeypatch.setattr(runtime, "NUM_LAYERS", 1)
+    tensors = _tiny_hybrid_tensors()
+    names = tuple(tensors)
+    current_rank = {"value": 0}
+    monkeypatch.setattr(
+        runtime,
+        "_assert_frozen_experts_unchanged",
+        lambda _actor: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_export_attention",
+        lambda _actor, *, retain: {names[0]: tensors[names[0]]} if retain else {},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_export_experts",
+        lambda _actor, **_kwargs: (
+            {name: tensors[name] for name in names[1:]}
+            if current_rank["value"] == 8
+            else {}
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_expected_specs",
+        lambda _actor: tuple(SimpleNamespace(name=name) for name in names),
+    )
+    monkeypatch.setattr(
+        torch.distributed,
+        "get_rank",
+        lambda: current_rank["value"],
+    )
+
+    root_actor = SimpleNamespace(
+        args=SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync"),
+        _is_first_replica_megatron_main_rank=False,
+    )
+    main_actor = SimpleNamespace(
+        args=SimpleNamespace(
+            external_policy_sync_path="yeto.rl.miles:sync",
+            _external_train_metrics={
+                "train/train_rollout_kl": 0.125,
+                "train/ess_ratio": 0.875,
+                "train/pg_clipfrac": 0.25,
+            },
+            _external_train_seconds=7.5,
+        ),
+        _is_first_replica_megatron_main_rank=True,
+    )
+
+    root = runtime.export_hybrid_trainable_state(
+        _TrainableStateModule,
+        root_actor,
+        policy_version=4,
+    )
+    current_rank["value"] = 8
+    main = runtime.export_hybrid_trainable_state(
+        _TrainableStateModule,
+        main_actor,
+        policy_version=4,
+    )
+    state = runtime._merge_export_fragments(
+        _TrainableStateModule,
+        [root, None, None, None, None, None, None, None, main],
+    )
+
+    assert state.train_rollout_kl == 0.125
+    assert state.ess_ratio == 0.875
+    assert state.pg_clipfrac == 0.25
+    assert state.train_seconds == 7.5
+
+
 def test_owner_sharded_export_merge_requires_exact_disjoint_coverage(monkeypatch):
     monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
     monkeypatch.setattr(runtime, "NUM_LAYERS", 1)
@@ -333,6 +410,7 @@ def test_owner_sharded_export_merge_requires_exact_disjoint_coverage(monkeypatch
         policy_version=4,
         expected_names=names,
         tensors={names[0]: tensors[names[0]], names[1]: tensors[names[1]]},
+        is_metrics_source=True,
         train_rollout_kl=0.125,
         ess_ratio=0.875,
         pg_clipfrac=0.25,
@@ -396,7 +474,7 @@ def test_owner_sharded_export_merge_requires_exact_disjoint_coverage(monkeypatch
         tensors={names[2]: tensors[names[2]], names[3]: tensors[names[3]]},
         train_seconds=1.0,
     )
-    with pytest.raises(RuntimeError, match="nonzero rank"):
+    with pytest.raises(RuntimeError, match="non-main rank"):
         runtime._merge_export_fragments(
             _TrainableStateModule,
             [root, None, None, None, None, None, None, peer_with_metrics],
@@ -603,6 +681,7 @@ def test_v1_actor_group_merges_export_shards_and_sends_top_level_chunk_refs(
             policy_version=6,
             expected_names=names,
             tensors={names[0]: tensors[names[0]], names[1]: tensors[names[1]]},
+            is_metrics_source=True,
         ),
         runtime._TrainableStateFragment(
             source_rank=1,
