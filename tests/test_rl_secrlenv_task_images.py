@@ -167,7 +167,27 @@ def test_missing_raw_id_task_image_fails_without_pull(tmp_path):
     service = {"immutable": image_id, "image_id": image_id}
     pulled: list[str] = []
 
-    with pytest.raises(TaskImagePreflightError, match="cannot be registry-pulled"):
+    with pytest.raises(TaskImagePreflightError, match="provisioned locally"):
+        preflight_task_images(
+            tmp_path,
+            "a" * 64,
+            load_pack=lambda _path: _pack(service),
+            inspect_image=lambda _reference: None,
+            pull_image=pulled.append,
+            data_free_bytes=lambda _path: MIN_DATA_FREE_BYTES,
+        )
+    assert pulled == []
+
+
+def test_missing_local_registry_task_image_fails_without_pull(tmp_path):
+    image_id = "sha256:" + "1" * 64
+    service = {
+        "immutable": "localhost/task@sha256:" + "2" * 64,
+        "image_id": image_id,
+    }
+    pulled: list[str] = []
+
+    with pytest.raises(TaskImagePreflightError, match="provisioned locally"):
         preflight_task_images(
             tmp_path,
             "a" * 64,

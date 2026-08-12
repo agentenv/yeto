@@ -96,6 +96,13 @@ def _data_free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
 
+def _can_registry_pull(reference: str) -> bool:
+    if not _NAMED_DIGEST.fullmatch(reference):
+        return False
+    registry = reference.split("/", 1)[0].split(":", 1)[0]
+    return registry not in {"localhost", "127.0.0.1", "[::1]"}
+
+
 def preflight_task_images(
     task_pack: Path,
     expected_task_pack_sha256: str,
@@ -125,9 +132,9 @@ def preflight_task_images(
     for reference, expected_id in pins:
         actual_id = inspect_image(reference)
         if actual_id is None:
-            if not _NAMED_DIGEST.fullmatch(reference):
+            if not _can_registry_pull(reference):
                 raise TaskImagePreflightError(
-                    "missing raw-ID task image cannot be registry-pulled"
+                    "missing task image must be provisioned locally"
                 )
             if data_free_bytes(data_root) < minimum_free_bytes:
                 raise TaskImagePreflightError(

@@ -9,9 +9,11 @@ still in progress, so this should not yet be described as generally
 production-ready PP2 support.
 
 The next acceptance gate is a fresh two-node, 16-GPU run on `h200-n4` and
-`h200-n5`. The preceding v56 gate reached daemon-backed rollout, exposed a
-missing task-image preflight, and was stopped with its state preserved. A
-four-node DP2/full32 acceptance run remains gated on the fresh DP1 run.
+`h200-n5`. v56 reached daemon-backed rollout and exposed a missing task-image
+preflight. v57 proved the new preflight fails safely before daemon/GPU startup,
+then exposed missing host registry authorization and one locally provisioned
+image. Both run states are preserved. A four-node DP2/full32 acceptance run
+remains gated on a fresh DP1 run.
 
 This document records the implementation contract, validation evidence,
 failure history, and operational handoff. It deliberately contains no
@@ -186,6 +188,7 @@ finalization. Those remain acceptance milestones for a fresh DP1 run.
 | v54 | Conversion tasks were discovered from the FP8 rollout layout instead of the BF16 trainer layout | Use `ref_load` for actor and base-publication task Bridges |
 | v55 | A Ray rank vanished at the monolithic 64.5-GiB export/serialization boundary | Replace monolithic export/apply transport with owner shards and bounded sequential chunks |
 | v56 | Daemon-backed rollout could not provision tasks because task images were absent on the hosts | Attest the task pack and prefetch every exact image identity before daemon or GPU startup |
+| v57 | The new preflight stopped before GPU work because host registry authorization and a local-only task image were not provisioned | Provision read-only registry access out of band, supply the local image from the trusted pack-building path, then require all image IDs exact before a fresh run |
 
 The v55 worker ended with Ray `SYSTEM_ERROR`/EOF and no preserved numeric
 signal. Docker OOM, Ray/host/cgroup memory pressure, GPU Xid, Python traceback,
@@ -202,8 +205,9 @@ The progression is intentionally ordered:
 1. Real two-GPU TP1 x PP2 mapping and FP32-master component validation — passed.
 2. Pinned two-node world16 TP8 x PP2 x EP8 validator — passed.
 3. Two-node full16 TP8 x PP2 x EP8 DP1 daemon-backed smoke (v56) — reached rollout, then stopped on missing task-image infrastructure.
-4. Fresh two-node DP1 gate with fail-closed task-image preflight — pending.
-5. Fresh four-node n4-n7 full32 TP8 x PP2 x EP8 DP2 acceptance — gated on step 4.
+4. Fresh two-node DP1 gate with fail-closed task-image preflight (v57) — stopped before daemon/GPU work on missing external image provisioning.
+5. Fresh two-node DP1 gate after all 295 image identities attest — pending.
+6. Fresh four-node n4-n7 full32 TP8 x PP2 x EP8 DP2 acceptance — gated on step 5.
 
 The DP1 gate succeeds only after all of the following are evidenced:
 
@@ -222,19 +226,20 @@ Never restart or reuse failed run state.
 
 ## Latest gate handoff
 
-As of 2026-08-12 03:35 UTC:
+As of 2026-08-12 03:50 UTC:
 
 | Item | Value |
 | --- | --- |
-| Run ID | `dsv4-e288-safety32-full16-pp2-smoke-v56` |
+| Latest run ID | `dsv4-e288-safety32-full16-pp2-smoke-v57` |
 | Hosts | `h200-n4`, `h200-n5` only |
-| Plan attestation | `391e37321bf766ad7f9889870ca03dd3ca968637467bedc4968d85027f56d572` |
-| Source attestation | `5aa2f2433ded4e58ae55bb959d22efd2f9188c5b814910c3d096b41fb19969ca` |
+| Plan attestation | `138f37cd86f11ee4556f3d1bdd74254439b168cd1925bdf0b22dcaa1a190e3d4` |
+| Source attestation | `8d9d122e78cc72987fc03dd565c965c270305a328f566f157fe4be97b9e202d4` |
 | JIT compatibility | `efeaa0f219199514953bebba61fc1fd6dff5ab4aba75c0b0933807650957dd97` |
 | Monitor | `monitor-staged-pp2-validation-every-minute` (hourly schedule) |
-| Last completed stage | model load, TMS lifecycle, PP2 restore, and entry into daemon-backed rollout |
-| Current health | v56 stopped safely; containers, daemons, and syncer stopped; GPUs idle; state preserved |
-| Next step | officially prepare a fresh DP1 run with the task-image preflight, then require rollout, apply, optimizer, checkpoint, final cut, and natural exits |
+| Last completed stage | source/task-pack attestation and safe disk gate; stopped on registry authorization before daemon/GPU startup |
+| Current health | no containers, daemons, syncer, GPU processes, or JIT writers; v56/v57 state preserved |
+| External prerequisite | read-only host registry authorization plus the trusted local-only task image; all 295 exact IDs must attest on both hosts |
+| Next step | after provisioning, officially prepare a fresh DP1 run, then require rollout, apply, optimizer, checkpoint, final cut, and natural exits |
 
 Operational state is stored under run-ID-specific SSH-harness, daemon, and TMS
 roots. Preserve those roots. Do not collect until a safe disk check has passed.
