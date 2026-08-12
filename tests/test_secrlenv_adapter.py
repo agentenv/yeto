@@ -5,12 +5,18 @@ import copy
 import json
 import sys
 import types
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
 
 from yeto_miles_secrlenv import agent, reward
-from yeto_miles_secrlenv.client import EpisodeClient, EpisodeClientError
+from yeto_miles_secrlenv.client import (
+    EpisodeClient,
+    EpisodeClientError,
+    EpisodeTransportError,
+    require_daemon_ready,
+)
 
 
 class FakeMessage:
@@ -443,3 +449,66 @@ def test_client_refuses_non_loopback_or_credentialed_origins():
     ):
         with pytest.raises(EpisodeClientError):
             EpisodeClient(value, token)
+
+
+def test_daemon_readiness_fails_fast_without_a_listener(monkeypatch):
+    monkeypatch.setenv("SECRLENV_DAEMON_URL", "http://127.0.0.1:8765")
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError
+
+    monkeypatch.setattr("yeto_miles_secrlenv.client.urlopen", unavailable)
+    with pytest.raises(EpisodeTransportError, match="not healthy"):
+        require_daemon_ready(timeout_seconds=0.1)
+
+
+def test_daemon_readiness_attests_health_and_task_pack(monkeypatch):
+    expected = "a" * 64
+    monkeypatch.setenv("SECRLENV_DAEMON_URL", "http://127.0.0.1:8765")
+    monkeypatch.setenv("SECRLENV_TASK_PACK_SHA256", expected)
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return BytesIO(
+                json.dumps({"ok": True, "task_pack_sha256": expected}).encode()
+            ).read()
+
+    monkeypatch.setattr(
+        "yeto_miles_secrlenv.client.urlopen", lambda *_a, **_k: Response()
+    )
+    require_daemon_ready(timeout_seconds=0.1)
+
+    monkeypatch.setenv("SECRLENV_TASK_PACK_SHA256", "b" * 64)
+    with pytest.raises(EpisodeTransportError, match="task-pack identity"):
+        require_daemon_ready(timeout_seconds=0.1)
+
+
+def test_capacity_retry_default_is_bounded_to_two_minutes(monkeypatch):
+    monkeypatch.delenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", raising=False)
+    observed = []
+
+    def positive_env(name, default):
+        observed.append((name, default))
+        return 0.001
+
+    class UnavailableClient:
+        async def create(self, *_args):
+            raise EpisodeTransportError("offline")
+
+    monkeypatch.setattr(agent, "_positive_env", positive_env)
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.0)
+    with pytest.raises(EpisodeTransportError, match="offline"):
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                UnavailableClient(), "CVE-2024-1234", "l2"
+            )
+        )
+    assert observed == [("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", 120.0)]

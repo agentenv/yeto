@@ -8,7 +8,9 @@ import os
 import re
 import sys
 from collections.abc import Mapping
-from types import ModuleType
+from contextlib import contextmanager
+from dataclasses import dataclass
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 from .deepseek_v4_expert_clone import (
@@ -21,12 +23,51 @@ from .deepseek_v4_expert_clone import (
     training_to_logical_expert_name,
 )
 
-
 _EXPERT_WEIGHT = re.compile(
     r"^(?:base_model\.model\.)?model\.layers\.(?P<layer>\d+)\.mlp\."
     r"experts\.(?P<expert>\d+)\."
     r"(?P<projection>gate_proj|up_proj|down_proj)\.weight$"
 )
+
+# Leave one 32 MiB tensor's headroom below Ray's 1 GiB transport boundary for
+# mapping metadata and serializer framing.
+_RAY_STATE_CHUNK_BYTES = 31 * (1 << 25)
+
+
+@dataclass(frozen=True)
+class _TrainableStateFragment:
+    """One canonical rank's disjoint share of an exported trainable state."""
+
+    source_rank: int
+    policy_version: int
+    expected_names: tuple[str, ...]
+    tensors: Mapping[str, Any]
+    train_rollout_kl: float | None = None
+    ess_ratio: float | None = None
+    pg_clipfrac: float | None = None
+    train_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class _ChunkedStateManifest:
+    """Small Ray message whose payload remains in bounded object-store objects."""
+
+    policy_version: int
+    layout_hash: str
+    tensor_names: tuple[str, ...]
+    chunk_tensor_names: tuple[tuple[str, ...], ...]
+    chunk_tensor_bytes: tuple[int, ...]
+    train_rollout_kl: float | None = None
+    ess_ratio: float | None = None
+    pg_clipfrac: float | None = None
+    train_seconds: float | None = None
+
+
+@dataclass
+class _ChunkApplyContext:
+    manifest: _ChunkedStateManifest
+    reset_optimizer: bool
+    next_chunk: int = 0
 
 
 def _expert_count() -> int:
@@ -156,7 +197,7 @@ def make_hybrid_trainable_state(
     canonical = {}
     for name, tensor in sorted(tensors.items()):
         if not isinstance(tensor, torch.Tensor):
-            raise ValueError(f"hybrid policy tensor {name!r} is not a tensor")
+            raise TypeError(f"hybrid policy tensor {name!r} is not a tensor")
         value = tensor.detach() if tensor.requires_grad else tensor
         if value.device.type != "cpu" or value.dtype != torch.float32 or not value.is_contiguous():
             value = value.to(device="cpu", dtype=torch.float32).contiguous()
@@ -171,6 +212,224 @@ def make_hybrid_trainable_state(
         ess_ratio,
         pg_clipfrac,
         train_seconds,
+    )
+
+
+def _state_metrics(state) -> dict[str, float | None]:
+    return {
+        "train_rollout_kl": getattr(state, "train_rollout_kl", None),
+        "ess_ratio": getattr(state, "ess_ratio", None),
+        "pg_clipfrac": getattr(state, "pg_clipfrac", None),
+        "train_seconds": getattr(state, "train_seconds", None),
+    }
+
+
+def _merge_export_fragments(module: ModuleType, fragments):
+    indexed_fragments = [
+        (rank, fragment)
+        for rank, fragment in enumerate(fragments)
+        if fragment is not None
+    ]
+    fragments = [fragment for _rank, fragment in indexed_fragments]
+    if not fragments:
+        raise RuntimeError("no Megatron rank exported a hybrid state fragment")
+    if any(not isinstance(fragment, _TrainableStateFragment) for fragment in fragments):
+        raise TypeError("Megatron rank returned an invalid hybrid state fragment")
+    if any(rank != fragment.source_rank for rank, fragment in indexed_fragments):
+        raise RuntimeError("hybrid state fragment source rank does not match result rank")
+
+    ranks = [fragment.source_rank for fragment in fragments]
+    if len(set(ranks)) != len(ranks):
+        raise RuntimeError("duplicate Megatron rank in hybrid state fragments")
+    roots = [fragment for fragment in fragments if fragment.source_rank == 0]
+    if len(roots) != 1:
+        raise RuntimeError("hybrid state fragments must contain rank zero exactly once")
+    root = roots[0]
+    expected_names = root.expected_names
+    if len(set(expected_names)) != len(expected_names):
+        raise RuntimeError("hybrid state fragment contains duplicate expected names")
+    if any(fragment.policy_version != root.policy_version for fragment in fragments):
+        raise RuntimeError("Megatron ranks disagree on hybrid policy version")
+    if any(fragment.expected_names != expected_names for fragment in fragments):
+        raise RuntimeError("Megatron ranks disagree on hybrid tensor layout")
+    if any(
+        any(value is not None for value in _state_metrics(fragment).values())
+        for fragment in fragments
+        if fragment.source_rank != 0
+    ):
+        raise RuntimeError("nonzero rank returned hybrid training metrics")
+
+    tensors = {}
+    for fragment in sorted(fragments, key=lambda item: item.source_rank):
+        overlap = set(tensors).intersection(fragment.tensors)
+        if overlap:
+            raise RuntimeError(
+                "hybrid state fragments contain duplicate tensor "
+                f"{min(overlap)!r}"
+            )
+        tensors.update(fragment.tensors)
+    actual_names = set(tensors)
+    expected_set = set(expected_names)
+    missing = sorted(expected_set - actual_names)
+    extra = sorted(actual_names - expected_set)
+    if missing or extra:
+        raise RuntimeError(
+            "hybrid state fragments do not exactly cover the policy: "
+            f"missing={missing[:1]}, extra={extra[:1]}"
+        )
+    return make_hybrid_trainable_state(
+        module,
+        root.policy_version,
+        tensors,
+        **_state_metrics(root),
+    )
+
+
+def _tensor_bytes(name: str, tensor: Any) -> int:
+    size = getattr(tensor, "numel", None)
+    element_size = getattr(tensor, "element_size", None)
+    if size is None or element_size is None:
+        raise TypeError(f"hybrid policy tensor {name!r} is not a tensor")
+    return int(size()) * int(element_size())
+
+
+def _chunk_state_for_ray(
+    state,
+    *,
+    ray_module=None,
+    max_chunk_bytes: int = _RAY_STATE_CHUNK_BYTES,
+) -> tuple[_ChunkedStateManifest, tuple[Any, ...]]:
+    if max_chunk_bytes <= 0:
+        raise ValueError("Ray state chunk size must be positive")
+    if ray_module is None:
+        import ray as ray_module
+
+    names, chunk_names, chunk_sizes = _plan_state_chunks(
+        state,
+        max_chunk_bytes=max_chunk_bytes,
+    )
+    chunk_refs = tuple(
+        ray_module.put({name: state.tensors[name] for name in names_in_chunk})
+        for names_in_chunk in chunk_names
+    )
+    manifest = _ChunkedStateManifest(
+        policy_version=state.policy_version,
+        layout_hash=state.layout_hash,
+        tensor_names=names,
+        chunk_tensor_names=chunk_names,
+        chunk_tensor_bytes=chunk_sizes,
+        **_state_metrics(state),
+    )
+    return manifest, chunk_refs
+
+
+def _plan_state_chunks(state, *, max_chunk_bytes: int):
+    if max_chunk_bytes <= 0:
+        raise ValueError("Ray state chunk size must be positive")
+    names = tuple(sorted(state.tensors))
+    if not names:
+        raise ValueError("cannot chunk an empty trainable state")
+    chunks = []
+    sizes = []
+    chunk = []
+    chunk_bytes = 0
+    for name in names:
+        tensor_bytes = _tensor_bytes(name, state.tensors[name])
+        if tensor_bytes > max_chunk_bytes:
+            raise ValueError(
+                f"hybrid policy tensor {name!r} exceeds the Ray chunk cap"
+            )
+        if chunk and chunk_bytes + tensor_bytes > max_chunk_bytes:
+            chunks.append(tuple(chunk))
+            sizes.append(chunk_bytes)
+            chunk = []
+            chunk_bytes = 0
+        chunk.append(name)
+        chunk_bytes += tensor_bytes
+    if chunk:
+        chunks.append(tuple(chunk))
+        sizes.append(chunk_bytes)
+    return names, tuple(chunks), tuple(sizes)
+
+
+def _chunk_manifest(state, *, max_chunk_bytes: int = _RAY_STATE_CHUNK_BYTES):
+    """Describe canonical chunks without allocating or pinning Ray objects."""
+
+    names, chunk_names, chunk_sizes = _plan_state_chunks(
+        state,
+        max_chunk_bytes=max_chunk_bytes,
+    )
+    return _ChunkedStateManifest(
+        policy_version=state.policy_version,
+        layout_hash=state.layout_hash,
+        tensor_names=names,
+        chunk_tensor_names=chunk_names,
+        chunk_tensor_bytes=chunk_sizes,
+        **_state_metrics(state),
+    )
+
+
+def _state_from_chunk_manifest(
+    module: ModuleType,
+    manifest: _ChunkedStateManifest,
+    *,
+    chunks,
+):
+    if not isinstance(manifest, _ChunkedStateManifest):
+        raise TypeError("rank zero did not receive a chunked hybrid state manifest")
+    chunks = tuple(chunks)
+    if not (
+        len(chunks)
+        == len(manifest.chunk_tensor_names)
+        == len(manifest.chunk_tensor_bytes)
+    ):
+        raise RuntimeError("chunked hybrid state manifest is inconsistent")
+    if not chunks:
+        raise RuntimeError("chunked hybrid state manifest is empty")
+    if len(set(manifest.tensor_names)) != len(manifest.tensor_names):
+        raise RuntimeError("chunked hybrid state manifest has duplicate tensor names")
+    tensors = {}
+    for index, (chunk, expected_names, expected_bytes) in enumerate(
+        zip(
+            chunks,
+            manifest.chunk_tensor_names,
+            manifest.chunk_tensor_bytes,
+            strict=True,
+        )
+    ):
+        if not isinstance(chunk, Mapping) or not chunk:
+            raise RuntimeError(f"hybrid state chunk {index} is empty or invalid")
+        actual_bytes = sum(_tensor_bytes(name, tensor) for name, tensor in chunk.items())
+        if actual_bytes != expected_bytes or actual_bytes > _RAY_STATE_CHUNK_BYTES:
+            raise RuntimeError(f"hybrid state chunk {index} violates its size manifest")
+        if set(chunk) != set(expected_names) or len(chunk) != len(expected_names):
+            raise RuntimeError(
+                f"hybrid state chunk {index} does not match its name manifest"
+            )
+        overlap = set(tensors).intersection(chunk)
+        if overlap:
+            raise RuntimeError(
+                f"hybrid state chunks contain duplicate tensor {min(overlap)!r}"
+            )
+        tensors.update(chunk)
+    if set(tensors) != set(manifest.tensor_names):
+        missing = sorted(set(manifest.tensor_names) - set(tensors))
+        extra = sorted(set(tensors) - set(manifest.tensor_names))
+        raise RuntimeError(
+            "hybrid state chunks do not exactly cover their manifest: "
+            f"missing={missing[:1]}, extra={extra[:1]}"
+        )
+    layout_hash = module._layout_hash(tensors)
+    if layout_hash != manifest.layout_hash:
+        raise RuntimeError("chunked hybrid trainable-state layout hash mismatch")
+    return module.TrainableState(
+        manifest.policy_version,
+        layout_hash,
+        tensors,
+        manifest.train_rollout_kl,
+        manifest.ess_ratio,
+        manifest.pg_clipfrac,
+        manifest.train_seconds,
     )
 
 
@@ -263,6 +522,37 @@ def _model_chunks(models: Any) -> tuple[Any, ...]:
     return tuple(models) if isinstance(models, (list, tuple)) else (models,)
 
 
+def _optimizer_master_view(parameter):
+    import torch
+
+    main = getattr(parameter, "main_param", None)
+    if (
+        main is None
+        or main.dtype != torch.float32
+        or main.numel() != parameter.numel()
+    ):
+        raise RuntimeError("trainable parameter has no complete FP32 optimizer master")
+    return main.view(parameter.shape)
+
+
+@contextmanager
+def _attention_masters_as_model_parameters(sides):
+    """Expose FP32 attention masters while Bridge builds apply transforms."""
+
+    originals = []
+    for side in sides.values():
+        parameter = side.param_weight
+        if parameter is None:
+            continue
+        originals.append((parameter, parameter.data))
+        parameter.data = _optimizer_master_view(parameter)
+    try:
+        yield
+    finally:
+        for parameter, original in originals:
+            parameter.data = original
+
+
 def _expected_specs(actor) -> tuple[Any, ...]:
     specs = tuple(getattr(actor.args, "yeto_rl_expected_specs", ()))
     if not specs:
@@ -290,10 +580,20 @@ def _actor_bridge(actor):
     cached = getattr(actor, "_yeto_expert_full_bridge", None)
     if cached is not None:
         return cached
+    # Conversion tasks must use the HuggingFace key layout that was loaded into
+    # the trainer.  Quantized rollout checkpoints can expose an engine-specific
+    # layout that omits the canonical expert names required by Megatron-Bridge.
+    source = getattr(actor.args, "ref_load", None) or getattr(
+        actor.args, "hf_checkpoint", None
+    )
+    if not source:
+        raise RuntimeError(
+            "expert-full actor has no HuggingFace checkpoint for Bridge tasks"
+        )
     from megatron.bridge import AutoBridge
 
     cached = AutoBridge.from_hf_pretrained(
-        actor.args.hf_checkpoint,
+        source,
         trust_remote_code=bool(actor.args.yeto_rl_trust_remote_code),
     )
     actor._yeto_expert_full_bridge = cached
@@ -375,13 +675,14 @@ def _expert_views(actor) -> dict[str, Any]:
                     f"duplicate expert-full conversion mapping: {name!r}"
                 )
             projections[projection] = name
+        master = _optimizer_master_view(parameter)
         branch = str(parameter._yeto_expert_branch)
         if branch == "linear_fc1" and set(projections) == {"gate_proj", "up_proj"}:
-            gate, up = parameter.chunk(2, dim=0)
+            gate, up = master.chunk(2, dim=0)
             views[projections["gate_proj"]] = gate
             views[projections["up_proj"]] = up
         elif branch == "linear_fc2" and set(projections) == {"down_proj"}:
-            views[projections["down_proj"]] = parameter
+            views[projections["down_proj"]] = master
         else:
             raise RuntimeError(
                 f"expert-full conversion task does not match {branch!r}: {names!r}"
@@ -423,30 +724,90 @@ def _assert_frozen_experts_unchanged(actor) -> None:
 
 def _export_attention(actor, *, retain: bool) -> dict[str, Any]:
     import torch
+    import torch.distributed as dist
 
-    expected = {spec.name for spec in _attention_specs(actor)}
+    specs = _attention_specs(actor)
+    sides = _attention_sides(actor)
+    local = {}
+    with torch.no_grad():
+        for spec in specs:
+            side = sides[spec.name]
+            parameter = (
+                None
+                if side.param_weight is None
+                else _optimizer_master_view(side.param_weight)
+            )
+            exported = {
+                _canonical_name(str(name)): value
+                for name, value in side.mapping.megatron_to_hf(
+                    parameter,
+                    side.megatron_module,
+                ).items()
+            }
+            if set(exported) != {spec.name}:
+                raise RuntimeError(
+                    f"attention LoRA export mapping mismatch for {spec.name!r}"
+                )
+            # The mapping call already broadcasts across PP and gathers TP shards.
+            # A None parameter means the task is remote, not that its mapped value
+            # is absent; retain rank 0's canonical copy plus physical-owner copies
+            # used by the world-level replica validation below.
+            if side.param_weight is not None or dist.get_rank() == 0:
+                local[spec.name] = exported[spec.name].detach().to(
+                    device="cpu"
+                ).contiguous()
+
+    local_meta = {
+        name: (tuple(value.shape), str(value.dtype))
+        for name, value in local.items()
+    }
+    gathered = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, local_meta)
     tensors = {}
-    seen = set()
-    for item in _actor_bridge(actor).export_adapter_weights(
-        actor.model,
-        cpu=True,
-        show_progress=False,
-    ):
-        name, value = item[0], item[1]
-        name = _canonical_name(name)
-        if name not in expected:
-            raise RuntimeError(f"unexpected adapter tensor in hybrid export: {name!r}")
-        if name in seen:
-            raise RuntimeError(f"duplicate adapter tensor in hybrid export: {name!r}")
-        seen.add(name)
+    for spec in specs:
+        owners = [rank for rank, meta in enumerate(gathered) if spec.name in meta]
+        if not owners:
+            raise RuntimeError(f"no pipeline stage owns attention tensor {spec.name!r}")
+        shapes = {gathered[rank][spec.name][0] for rank in owners}
+        dtypes = {gathered[rank][spec.name][1] for rank in owners}
+        if shapes != {tuple(spec.shape)} or len(dtypes) != 1:
+            raise RuntimeError(
+                f"pipeline-stage owners disagree on attention tensor {spec.name!r}"
+            )
+        source = min(owners)
+        sample = next(iter(local.values()), None)
+        device = (
+            sample.device
+            if sample is not None and sample.device.type != "cpu"
+            else torch.device("cuda", torch.cuda.current_device())
+        )
+        dtype = getattr(torch, next(iter(dtypes)).removeprefix("torch."))
+        if dist.get_rank() == source:
+            value = local[spec.name].to(device=device, dtype=dtype).contiguous()
+        else:
+            value = torch.empty(spec.shape, device=device, dtype=dtype)
+        dist.broadcast(value, src=source)
+        if dist.get_rank() in owners and dist.get_rank() != source:
+            replica = local[spec.name].to(device=device, dtype=dtype).contiguous()
+            if not torch.equal(replica, value):
+                raise RuntimeError(
+                    f"pipeline-stage replicas disagree on attention tensor {spec.name!r}"
+                )
+            del replica
         if retain:
-            tensors[name] = value.detach().to(dtype=torch.float32).contiguous()
-    if seen != expected:
-        raise RuntimeError("hybrid export did not produce every attention LoRA tensor")
+            tensors[spec.name] = value.to(
+                device="cpu", dtype=torch.float32
+            ).contiguous()
+        del value
     return tensors
 
 
-def _export_experts(actor, *, retain: bool) -> dict[str, Any]:
+def _export_experts(
+    actor,
+    *,
+    retain: bool,
+    canonical_sources_only: bool = False,
+) -> dict[str, Any]:
     import torch
     import torch.distributed as dist
 
@@ -478,12 +839,15 @@ def _export_experts(actor, *, retain: bool) -> dict[str, Any]:
             dtype = getattr(torch, next(iter(dtypes)).removeprefix("torch."))
             value = torch.empty(spec.shape, device=device, dtype=dtype)
         dist.broadcast(value, src=source)
-        if dist.get_rank() in owners and dist.get_rank() != source:
-            if not torch.equal(local[spec.name], value):
-                raise RuntimeError(
-                    f"DP replicas disagree on expert tensor {spec.name!r}"
-                )
-        if retain:
+        if (
+            dist.get_rank() in owners
+            and dist.get_rank() != source
+            and not torch.equal(local[spec.name], value)
+        ):
+            raise RuntimeError(
+                f"DP replicas disagree on expert tensor {spec.name!r}"
+            )
+        if retain and (not canonical_sources_only or dist.get_rank() == source):
             tensors[spec.name] = value.to(
                 device="cpu", dtype=torch.float32
             ).contiguous()
@@ -495,24 +859,33 @@ def export_hybrid_trainable_state(module: ModuleType, actor, *, policy_version: 
     import torch.distributed as dist
 
     _assert_frozen_experts_unchanged(actor)
-    retain = dist.get_rank() == 0
-    tensors = _export_attention(actor, retain=retain)
-    tensors.update(_export_experts(actor, retain=retain))
-    if not retain:
-        return None
-    metrics = (
-        getattr(actor.args, "_external_train_metrics", {})
-        if getattr(actor.args, "external_policy_sync_path", None) is not None
-        else {}
+    rank = dist.get_rank()
+    tensors = _export_attention(actor, retain=rank == 0)
+    tensors.update(
+        _export_experts(
+            actor,
+            retain=True,
+            canonical_sources_only=True,
+        )
     )
-    return make_hybrid_trainable_state(
-        module,
-        policy_version,
-        tensors,
+    if not tensors:
+        return None
+    metrics = {}
+    if rank == 0 and getattr(actor.args, "external_policy_sync_path", None) is not None:
+        metrics = getattr(actor.args, "_external_train_metrics", {})
+    return _TrainableStateFragment(
+        source_rank=rank,
+        policy_version=policy_version,
+        expected_names=tuple(spec.name for spec in _expected_specs(actor)),
+        tensors=tensors,
         train_rollout_kl=metrics.get("train/train_rollout_kl"),
         ess_ratio=metrics.get("train/ess_ratio"),
         pg_clipfrac=metrics.get("train/pg_clipfrac"),
-        train_seconds=getattr(actor.args, "_external_train_seconds", None),
+        train_seconds=(
+            getattr(actor.args, "_external_train_seconds", None)
+            if rank == 0
+            else None
+        ),
     )
 
 
@@ -525,13 +898,13 @@ def _broadcast_policy_tensor(spec, state):
             raise RuntimeError(f"global hybrid policy is missing {spec.name!r}")
         value = state.tensors[spec.name].to(
             device=torch.device("cuda", torch.cuda.current_device()),
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
         ).contiguous()
     else:
         value = torch.empty(
             spec.shape,
             device=torch.device("cuda", torch.cuda.current_device()),
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
         )
     dist.broadcast(value, src=0)
     return value
@@ -539,6 +912,239 @@ def _broadcast_policy_tensor(spec, state):
 
 def _optimizer_children(optimizer) -> list[Any]:
     return list(getattr(optimizer, "chained_optimizers", (optimizer,)))
+
+
+def _copy_optimizer_masters_to_model(optimizer) -> None:
+    for child in _optimizer_children(optimizer):
+        copy = getattr(child, "_copy_main_params_to_model_params", None)
+        if copy is None:
+            raise RuntimeError("Megatron optimizer lacks main-to-model copy")
+        copy()
+
+
+def _apply_policy_specs(actor, state, specs) -> None:
+    import torch
+
+    sides = _attention_sides(actor)
+    views = _expert_views(actor)
+    with _attention_masters_as_model_parameters(sides):
+        for spec in specs:
+            value = _broadcast_policy_tensor(spec, state)
+            if spec.name.endswith((".lora_A.weight", ".lora_B.weight")):
+                side = sides[spec.name]
+                if side.param_weight is not None:
+                    mapped = side.mapping.hf_to_megatron(
+                        value,
+                        side.megatron_module,
+                    )
+                    if mapped is None or mapped.numel() != side.param_weight.numel():
+                        raise RuntimeError(
+                            f"attention LoRA shape mismatch for {spec.name!r}"
+                        )
+                    with torch.no_grad():
+                        _optimizer_master_view(side.param_weight).copy_(
+                            mapped.reshape(side.param_weight.shape)
+                        )
+                    del mapped
+            elif selected_expert_hf_name(
+                spec.name,
+                expert_count=_expert_count(),
+            ):
+                target = views.get(spec.name)
+                if target is not None:
+                    if target.shape != value.shape:
+                        raise RuntimeError(
+                            f"expert shape mismatch for {spec.name!r}"
+                        )
+                    with torch.no_grad():
+                        target.copy_(value)
+            else:
+                raise RuntimeError(
+                    f"hybrid apply received unsupported tensor {spec.name!r}"
+                )
+            del value
+
+
+def _finish_hybrid_apply(
+    module: ModuleType,
+    actor,
+    *,
+    policy_version: int,
+    reset_optimizer: bool,
+) -> int:
+    import torch
+    import torch.distributed as dist
+
+    module._align_scheduler(actor, policy_version)
+    with torch.no_grad():
+        _copy_optimizer_masters_to_model(actor.optimizer)
+    if dist.is_initialized():
+        dist.barrier()
+    if reset_optimizer:
+        for child in _optimizer_children(actor.optimizer):
+            inner = getattr(child, "optimizer", child)
+            inner.state.clear()
+    actor.weights_backuper.backup("actor")
+    _assert_frozen_experts_unchanged(actor)
+    if dist.is_initialized():
+        dist.barrier()
+    actor._external_policy_version = policy_version
+    return len(_expected_specs(actor)) if reset_optimizer else 0
+
+
+def _validate_chunk_manifest(module: ModuleType, actor, manifest) -> None:
+    import torch
+
+    if not isinstance(manifest, _ChunkedStateManifest):
+        raise TypeError("chunked hybrid apply requires a state manifest")
+    if manifest.policy_version < 0:
+        raise ValueError("policy version must be non-negative")
+    if not (
+        manifest.chunk_tensor_names
+        and len(manifest.chunk_tensor_names) == len(manifest.chunk_tensor_bytes)
+    ):
+        raise RuntimeError("chunked hybrid state manifest is inconsistent")
+    expected_specs = tuple(sorted(_expected_specs(actor), key=lambda spec: spec.name))
+    expected_names = tuple(spec.name for spec in expected_specs)
+    if manifest.tensor_names != expected_names:
+        raise RuntimeError("chunked hybrid state does not match actor tensor names")
+    flattened = tuple(
+        name for names in manifest.chunk_tensor_names for name in names
+    )
+    if flattened != expected_names or len(set(flattened)) != len(flattened):
+        raise RuntimeError(
+            "chunked hybrid state chunks do not follow canonical tensor order"
+        )
+    if any(
+        size <= 0 or size > _RAY_STATE_CHUNK_BYTES
+        for size in manifest.chunk_tensor_bytes
+    ):
+        raise RuntimeError("chunked hybrid state exceeds the transport cap")
+    expected_layout = module._layout_hash(
+        {
+            spec.name: torch.empty(spec.shape, dtype=torch.float32, device="meta")
+            for spec in expected_specs
+        }
+    )
+    if manifest.layout_hash != expected_layout:
+        raise RuntimeError("chunked hybrid state layout does not match the actor")
+
+
+def begin_chunked_hybrid_apply(
+    module: ModuleType,
+    actor,
+    manifest,
+    *,
+    reset_optimizer: bool,
+) -> int:
+    if getattr(actor, "_yeto_chunk_apply", None) is not None:
+        raise RuntimeError("a chunked hybrid apply is already active")
+    _validate_chunk_manifest(module, actor, manifest)
+    actor._yeto_chunk_apply = _ChunkApplyContext(
+        manifest=manifest,
+        reset_optimizer=reset_optimizer,
+    )
+    return len(manifest.chunk_tensor_names)
+
+
+def _validated_chunk_tensors(
+    chunk,
+    *,
+    expected_names: tuple[str, ...],
+    expected_shapes: Mapping[str, tuple[int, ...]],
+    expected_bytes: int,
+) -> dict[str, Any]:
+    import torch
+
+    if not isinstance(chunk, Mapping) or not chunk:
+        raise RuntimeError("hybrid state chunk is empty or invalid")
+    if tuple(chunk) != expected_names:
+        raise RuntimeError("hybrid state chunk does not match canonical tensor order")
+    canonical = {}
+    for name, tensor in chunk.items():
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"hybrid policy tensor {name!r} is not a tensor")
+        if tuple(tensor.shape) != tuple(expected_shapes[name]):
+            raise RuntimeError(f"hybrid policy tensor {name!r} has the wrong shape")
+        value = tensor.detach() if tensor.requires_grad else tensor
+        if (
+            value.device.type != "cpu"
+            or value.dtype != torch.float32
+            or not value.is_contiguous()
+        ):
+            value = value.to(device="cpu", dtype=torch.float32).contiguous()
+        if not torch.isfinite(value).all().item():
+            raise ValueError(f"{name!r} contains NaN or Inf")
+        canonical[name] = value
+    actual_bytes = sum(
+        _tensor_bytes(name, tensor) for name, tensor in canonical.items()
+    )
+    if actual_bytes != expected_bytes or actual_bytes > _RAY_STATE_CHUNK_BYTES:
+        raise RuntimeError("hybrid state chunk violates its size manifest")
+    return canonical
+
+
+def apply_chunked_hybrid_state(
+    actor,
+    chunk_index: int,
+    chunk,
+) -> int:
+    import torch.distributed as dist
+
+    context = getattr(actor, "_yeto_chunk_apply", None)
+    if context is None:
+        raise RuntimeError("no chunked hybrid apply is active")
+    if chunk_index != context.next_chunk:
+        raise RuntimeError(
+            "hybrid state chunk is duplicate or out of order: "
+            f"expected {context.next_chunk}, got {chunk_index}"
+        )
+    manifest = context.manifest
+    expected_names = manifest.chunk_tensor_names[chunk_index]
+    expected_bytes = manifest.chunk_tensor_bytes[chunk_index]
+    specs_by_name = {spec.name: spec for spec in _expected_specs(actor)}
+    status = [None]
+    tensors = None
+    if dist.get_rank() == 0:
+        try:
+            tensors = _validated_chunk_tensors(
+                chunk,
+                expected_names=expected_names,
+                expected_shapes={
+                    name: tuple(specs_by_name[name].shape)
+                    for name in expected_names
+                },
+                expected_bytes=expected_bytes,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            status[0] = f"{type(exc).__name__}: {exc}"
+    elif chunk is not None:
+        raise RuntimeError("nonzero rank received a hybrid state chunk")
+    dist.broadcast_object_list(status, src=0)
+    if status[0] is not None:
+        raise RuntimeError(f"rank-zero hybrid chunk validation failed: {status[0]}")
+    specs = tuple(specs_by_name[name] for name in expected_names)
+    state = SimpleNamespace(tensors=tensors) if dist.get_rank() == 0 else None
+    _apply_policy_specs(actor, state, specs)
+    context.next_chunk += 1
+    return len(specs)
+
+
+def finish_chunked_hybrid_apply(module: ModuleType, actor) -> int:
+    context = getattr(actor, "_yeto_chunk_apply", None)
+    if context is None:
+        raise RuntimeError("no chunked hybrid apply is active")
+    manifest = context.manifest
+    if context.next_chunk != len(manifest.chunk_tensor_names):
+        raise RuntimeError("chunked hybrid apply is missing state chunks")
+    result = _finish_hybrid_apply(
+        module,
+        actor,
+        policy_version=manifest.policy_version,
+        reset_optimizer=context.reset_optimizer,
+    )
+    del actor._yeto_chunk_apply
+    return result
 
 
 def apply_hybrid_trainable_state(
@@ -575,40 +1181,13 @@ def apply_hybrid_trainable_state(
     if layout_hash != expected_layout:
         raise RuntimeError("global hybrid policy layout does not match the actor")
 
-    sides = _attention_sides(actor)
-    for spec in _attention_specs(actor):
-        value = _broadcast_policy_tensor(spec, state)
-        side = sides[spec.name]
-        if side.param_weight is not None:
-            mapped = side.mapping.hf_to_megatron(value, side.megatron_module)
-            if mapped is None or mapped.numel() != side.param_weight.numel():
-                raise RuntimeError(f"attention LoRA shape mismatch for {spec.name!r}")
-            side.param_weight.copy_(mapped.reshape(side.param_weight.shape))
-            del mapped
-        del value
-
-    views = _expert_views(actor)
-    for spec in _expert_specs(actor):
-        value = _broadcast_policy_tensor(spec, state)
-        target = views.get(spec.name)
-        if target is not None:
-            if target.shape != value.shape:
-                raise RuntimeError(f"expert shape mismatch for {spec.name!r}")
-            target.copy_(value)
-        del value
-
-    module._align_scheduler(actor, policy_version)
-    actor.optimizer.reload_model_params()
-    if dist.is_initialized():
-        dist.barrier()
-    if reset_optimizer:
-        for child in _optimizer_children(actor.optimizer):
-            inner = getattr(child, "optimizer", child)
-            inner.state.clear()
-    actor.weights_backuper.backup("actor")
-    _assert_frozen_experts_unchanged(actor)
-    actor._external_policy_version = policy_version
-    return len(_expected_specs(actor)) if reset_optimizer else 0
+    _apply_policy_specs(actor, state, _expected_specs(actor))
+    return _finish_hybrid_apply(
+        module,
+        actor,
+        policy_version=policy_version,
+        reset_optimizer=reset_optimizer,
+    )
 
 
 def install_on_trainable_state(module: ModuleType) -> None:
@@ -663,8 +1242,35 @@ def install_on_actor(module: ModuleType) -> None:
         )
         return reset_count
 
+    def begin_chunked_trainable_state(self, manifest, *, reset_optimizer):
+        from miles.backends.megatron_utils import trainable_state as state_module
+
+        return begin_chunked_hybrid_apply(
+            state_module,
+            self,
+            manifest,
+            reset_optimizer=reset_optimizer,
+        )
+
+    def apply_trainable_state_chunk(self, chunk_index, chunk):
+        return apply_chunked_hybrid_state(self, chunk_index, chunk)
+
+    def finish_chunked_trainable_state(self):
+        from miles.backends.megatron_utils import trainable_state as state_module
+
+        return finish_chunked_hybrid_apply(state_module, self)
+
     module.MegatronTrainRayActor.export_trainable_state = export_trainable_state
     module.MegatronTrainRayActor.apply_trainable_state = apply_trainable_state
+    module.MegatronTrainRayActor.begin_chunked_trainable_state = (
+        begin_chunked_trainable_state
+    )
+    module.MegatronTrainRayActor.apply_trainable_state_chunk = (
+        apply_trainable_state_chunk
+    )
+    module.MegatronTrainRayActor.finish_chunked_trainable_state = (
+        finish_chunked_trainable_state
+    )
     module._yeto_expert_full_installed = True
 
 
@@ -672,23 +1278,86 @@ def install_on_actor_group(module: ModuleType) -> None:
     if getattr(module, "_yeto_expert_full_installed", False):
         return
 
+    async def export_trainable_state(self):
+        from miles.backends.megatron_utils import trainable_state as state_module
+
+        fragments = await self._broadcast("export_trainable_state")
+        return _merge_export_fragments(state_module, fragments)
+
     async def apply_trainable_state(self, state, *, reset_optimizer):
         import asyncio
 
-        refs = [
-            actor.apply_trainable_state.remote(
-                state if rank == 0 else None,
-                reset_optimizer=reset_optimizer,
+        import ray
+
+        manifest = _chunk_manifest(state)
+        begin_results = await asyncio.gather(
+            *(
+                actor.begin_chunked_trainable_state.remote(
+                    manifest,
+                    reset_optimizer=reset_optimizer,
+                )
+                for actor in self._actor_handles
             )
-            for rank, actor in enumerate(self._actor_handles)
-        ]
-        results = await asyncio.gather(*refs)
+        )
+        if not begin_results or any(
+            result != len(manifest.chunk_tensor_names) for result in begin_results
+        ):
+            raise RuntimeError("Megatron ranks disagree on hybrid chunk manifest")
+        for chunk_index, chunk_names in enumerate(manifest.chunk_tensor_names):
+            chunk = {name: state.tensors[name] for name in chunk_names}
+            chunk_ref = ray.put(chunk)
+            try:
+                chunk_results = await asyncio.gather(
+                    *(
+                        actor.apply_trainable_state_chunk.remote(
+                            chunk_index,
+                            chunk_ref if rank == 0 else None,
+                        )
+                        for rank, actor in enumerate(self._actor_handles)
+                    )
+                )
+            finally:
+                del chunk_ref, chunk
+            expected_count = len(manifest.chunk_tensor_names[chunk_index])
+            if any(result != expected_count for result in chunk_results):
+                raise RuntimeError(
+                    f"Megatron ranks disagree after hybrid chunk {chunk_index}"
+                )
+        results = await asyncio.gather(
+            *(
+                actor.finish_chunked_trainable_state.remote()
+                for actor in self._actor_handles
+            )
+        )
         if not results or any(result != results[0] for result in results[1:]):
             raise RuntimeError("Megatron ranks disagree after applying hybrid state")
         return results[0]
 
+    module.RayTrainGroup.export_trainable_state = export_trainable_state
     module.RayTrainGroup.apply_trainable_state = apply_trainable_state
     module._yeto_expert_full_installed = True
+
+
+def _weight_iterator_task_bridge(iterator):
+    cached = getattr(iterator, "_yeto_expert_full_task_bridge", None)
+    if cached is not None:
+        return cached
+    source = getattr(iterator.args, "ref_load", None) or getattr(
+        iterator.args, "hf_checkpoint", None
+    )
+    if not source:
+        raise RuntimeError(
+            "expert-full weight iterator has no HuggingFace checkpoint for "
+            "Bridge tasks"
+        )
+    from megatron.bridge import AutoBridge
+
+    cached = AutoBridge.from_hf_pretrained(
+        source,
+        trust_remote_code=bool(iterator.args.yeto_rl_trust_remote_code),
+    )
+    iterator._yeto_expert_full_task_bridge = cached
+    return cached
 
 
 def install_on_weight_iterator(module: ModuleType) -> None:
@@ -706,8 +1375,9 @@ def install_on_weight_iterator(module: ModuleType) -> None:
         }
         with module.megatron_bridge_utils.patch_megatron_model(self.model):
             expert_count = _expert_count()
+            task_bridge = _weight_iterator_task_bridge(self)
             tasks = filter_collective_expert_tasks(
-                self._bridge.get_conversion_tasks(self.model),
+                task_bridge.get_conversion_tasks(self.model),
                 expert_count=expert_count,
             )
             expected = NUM_LAYERS * min(expert_count, CLONES_PER_EXPERT_RANK) * 2
@@ -717,7 +1387,7 @@ def install_on_weight_iterator(module: ModuleType) -> None:
                     f"expected {expected}"
                 )
             tasks = module._process_conversion_tasks(tasks, renamed)
-            named_weights = self._bridge.export_hf_weights(
+            named_weights = task_bridge.export_hf_weights(
                 self.model,
                 cpu=False,
                 conversion_tasks=tasks,

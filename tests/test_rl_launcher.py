@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -1629,6 +1630,52 @@ def test_megatron_targets_reject_a_peft_module_without_a_bridge_mapping():
         rl_learner.megatron_adapter_targets(specs, bridge)
 
 
+def test_megatron_targets_wildcard_layers_for_pipeline_parallel():
+    def lookup(name):
+        match = re.fullmatch(
+            r"model\.layers\.(\d+)\.self_attn\.compressor\.indexer\."
+            r"q_b_proj\.weight",
+            name,
+        )
+        if match is None:
+            return None
+        layer = match.group(1)
+        return types.SimpleNamespace(
+            megatron_param=(
+                f"decoder.layers.{layer}.self_attention.indexer."
+                "linear_wq_b.weight"
+            ),
+            hf_param=name,
+        )
+
+    bridge = types.SimpleNamespace(
+        _model_bridge=types.SimpleNamespace(
+            mapping_registry=lambda: types.SimpleNamespace(
+                hf_to_megatron_lookup=lookup
+            )
+        )
+    )
+    specs = tuple(
+        types.SimpleNamespace(
+            name=(
+                "base_model.model.model.layers."
+                f"{layer}.self_attn.compressor.indexer.q_b_proj."
+                f"lora_{side}.weight"
+            )
+        )
+        for layer in (2, 22)
+        for side in ("A", "B")
+    )
+
+    assert rl_learner.megatron_adapter_targets(
+        specs,
+        bridge,
+        pipeline_parallel=2,
+    ) == [
+        "decoder.layers.*.self_attention.indexer.linear_wq_b"
+    ]
+
+
 def test_megatron_targets_collapse_e288_experts_to_standard_grouped_modules():
     specs = tuple(
         types.SimpleNamespace(
@@ -1655,6 +1702,16 @@ def test_megatron_targets_collapse_e288_experts_to_standard_grouped_modules():
     ) == [
         "decoder.layers.3.mlp.experts.linear_fc1",
         "decoder.layers.3.mlp.experts.linear_fc2",
+    ]
+
+    assert rl_learner.megatron_adapter_targets(
+        specs,
+        bridge,
+        standard_grouped_experts=True,
+        pipeline_parallel=2,
+    ) == [
+        "decoder.layers.*.mlp.experts.linear_fc1",
+        "decoder.layers.*.mlp.experts.linear_fc2",
     ]
 
 
@@ -1891,10 +1948,16 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
         lambda *_args, **_kwargs: types.SimpleNamespace(marker="config"),
     )
     monkeypatch.setattr(rl_learner, "adapter_targets", lambda specs: ["q_proj"])
+
+    def build_megatron_targets(specs, *_args, **kwargs):
+        captured["megatron_target_specs"] = specs
+        captured["megatron_target_kwargs"] = kwargs
+        return ["linear_q"]
+
     monkeypatch.setattr(
         rl_learner,
         "megatron_adapter_targets",
-        lambda specs, *_args, **_kwargs: ["linear_q"],
+        build_megatron_targets,
     )
     monkeypatch.setattr(rl_learner, "build_miles_argv", lambda *a, **k: ["train.py"])
     monkeypatch.setattr(
@@ -1926,6 +1989,7 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
         groups_per_round=1,
         samples_per_group=2,
         optimizer_steps=1,
+        pipeline_parallel=2,
         wan_streams=0,
         audit_dir=str(tmp_path / "audit"),
     )
@@ -1943,6 +2007,11 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
         "expert_count": 16,
         "expected_selection_sha256": "a" * 64,
         "expected_selection_contract_sha256": "b" * 64,
+    }
+    assert captured["megatron_target_specs"] == attention_specs
+    assert captured["megatron_target_kwargs"] == {
+        "pipeline_parallel": 2,
+        "standard_grouped_experts": False,
     }
     assert miles_args.yeto_rl_expected_specs == tuple(
         sorted(attention_specs + expert_specs)

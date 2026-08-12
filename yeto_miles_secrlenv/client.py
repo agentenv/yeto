@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 import aiohttp
 
@@ -67,6 +70,35 @@ def daemon_url_from_env() -> str:
     return value
 
 
+def require_daemon_ready(*, timeout_seconds: float = 10.0) -> None:
+    """Fail before GPU initialization unless the expected daemon is healthy."""
+
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("episode daemon readiness timeout must be positive")
+    try:
+        with urlopen(
+            f"{daemon_url_from_env()}/healthz", timeout=timeout_seconds
+        ) as response:
+            if response.status != 200:
+                raise EpisodeTransportError(
+                    f"secrlenv episode daemon health check returned {response.status}"
+                )
+            value = json.loads(response.read())
+    except EpisodeTransportError:
+        raise
+    except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
+        raise EpisodeTransportError(
+            "secrlenv episode daemon is not healthy on its configured loopback origin"
+        ) from exc
+    if not isinstance(value, dict) or value.get("ok") is not True:
+        raise EpisodeTransportError("secrlenv episode daemon health response is invalid")
+    expected_task_pack = os.getenv("SECRLENV_TASK_PACK_SHA256", "").strip()
+    if expected_task_pack and value.get("task_pack_sha256") != expected_task_pack:
+        raise EpisodeTransportError(
+            "secrlenv episode daemon task-pack identity does not match the run plan"
+        )
+
+
 class EpisodeClient:
     def __init__(
         self,
@@ -96,7 +128,7 @@ class EpisodeClient:
         self.timeout = aiohttp.ClientTimeout(total=total_timeout_seconds)
         self._session: aiohttp.ClientSession | None = None
 
-    async def __aenter__(self) -> "EpisodeClient":
+    async def __aenter__(self) -> Self:
         self._session = aiohttp.ClientSession(
             timeout=self.timeout,
             connector=aiohttp.TCPConnector(limit=4),
@@ -104,7 +136,7 @@ class EpisodeClient:
         )
         return self
 
-    async def __aexit__(self, *_exc: Any) -> None:
+    async def __aexit__(self, *_exc: object) -> None:
         if self._session is not None:
             await self._session.close()
             self._session = None
