@@ -20,14 +20,18 @@ from urllib.parse import urlparse, urlunparse
 
 from yeto.rl import SECRLENV_AGENT_SHA256
 
-from .client import EpisodeAPIError, EpisodeClient, EpisodeClientError, EpisodeTransportError
+from .client import (
+    EpisodeAPIError,
+    EpisodeClient,
+    EpisodeClientError,
+    EpisodeTransportError,
+)
 from .reward import (
     INFRASTRUCTURE_STATUS,
     MAC_KEY,
     OUTCOME_KEY,
     sign_outcome,
 )
-
 
 LOGGER = logging.getLogger(__name__)
 _TASK_ID = re.compile(r"CVE-\d{4}-\d{4,}")
@@ -197,7 +201,7 @@ def _session_url(base_url: str) -> str:
 def _tool_arguments(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     function = call.get("function")
     if not isinstance(function, dict) or not isinstance(function.get("name"), str):
-        raise ValueError("tool call has no function name")
+        raise TypeError("tool call has no function name")
     arguments = function.get("arguments", "{}")
     if isinstance(arguments, str):
         try:
@@ -205,7 +209,7 @@ def _tool_arguments(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         except json.JSONDecodeError as exc:
             raise ValueError("tool arguments are not valid JSON") from exc
     if not isinstance(arguments, dict):
-        raise ValueError("tool arguments must be a JSON object")
+        raise TypeError("tool arguments must be a JSON object")
     return function["name"], arguments
 
 
@@ -457,19 +461,34 @@ def _infrastructure_outcome(task_id: str, episode_id: str) -> dict[str, Any]:
 async def _create_with_capacity_retry(
     client: EpisodeClient, task_id: str, tier: str
 ) -> dict[str, Any]:
-    max_wait = _positive_env("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", 1800.0)
+    max_wait = _positive_env("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", 120.0)
     deadline = time.monotonic() + max_wait
+    started = time.monotonic()
+    attempts = 0
+    next_log = started
     while True:
+        attempts += 1
         try:
             return await client.create(task_id, tier)
         except EpisodeAPIError as exc:
             if exc.code != "capacity_reached" or time.monotonic() >= deadline:
                 raise
-            await asyncio.sleep(random.uniform(0.5, 3.0))
+            reason = "capacity"
         except EpisodeTransportError:
             if time.monotonic() >= deadline:
                 raise
-            await asyncio.sleep(random.uniform(0.5, 3.0))
+            reason = "transport"
+        now = time.monotonic()
+        if now >= next_log:
+            LOGGER.warning(
+                "waiting for secrlenv episode daemon reason=%s attempts=%d elapsed_s=%.1f max_wait_s=%.1f",
+                reason,
+                attempts,
+                now - started,
+                max_wait,
+            )
+            next_log = now + 15.0
+        await asyncio.sleep(min(random.uniform(0.5, 3.0), max(0.0, deadline - now)))
 
 
 async def run(

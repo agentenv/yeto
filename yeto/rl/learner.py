@@ -152,12 +152,30 @@ _ROUTED_EXPERT_LORA_MODULE = re.compile(
     r"(?P<projection>gate_proj|up_proj|down_proj)$"
 )
 
+_MEGATRON_LAYER_MODULE = re.compile(
+    r"^(?P<prefix>(?:.*\.)?decoder\.layers\.)\d+(?P<suffix>\..+)$"
+)
+
+
+def _pipeline_local_target(target: str, pipeline_parallel: int) -> str:
+    if pipeline_parallel <= 1:
+        return target
+    # Pipeline stages renumber their physical decoder layers from zero.
+    # Bridge's PEFT matcher accepts ``*`` here, so retain the exact module
+    # type while making the target independent of that local renumbering.
+    # Canonical HF specs still define and validate global layer ownership.
+    match = _MEGATRON_LAYER_MODULE.fullmatch(target)
+    if match is None:
+        return target
+    return f"{match.group('prefix')}*{match.group('suffix')}"
+
 
 def megatron_adapter_targets(
     specs,
     bridge,
     *,
     standard_grouped_experts: bool = False,
+    pipeline_parallel: int = 1,
 ) -> list[str]:
     """Map the exact PEFT contract onto Bridge's Megatron module paths."""
 
@@ -179,7 +197,10 @@ def megatron_adapter_targets(
                 else "linear_fc1"
             )
             targets.add(
-                f"decoder.layers.{expert.group('layer')}.mlp.experts.{branch}"
+                _pipeline_local_target(
+                    f"decoder.layers.{expert.group('layer')}.mlp.experts.{branch}",
+                    pipeline_parallel,
+                )
             )
             continue
         hf_weight = f"{module}.weight"
@@ -210,7 +231,8 @@ def megatron_adapter_targets(
                 if leaf == "linear_qkv"
                 else f"linear_fc1_{component}"
             )
-        targets.add(f"{prefix}.{leaf}")
+        target = f"{prefix}.{leaf}"
+        targets.add(_pipeline_local_target(target, pipeline_parallel))
     return sorted(targets)
 
 
@@ -834,6 +856,7 @@ def run_miles(
         attention_specs,
         model_bridge,
         standard_grouped_experts=clone_only_lora,
+        pipeline_parallel=getattr(args, "pipeline_parallel", 1),
     )
     miles_argv = build_miles_argv(
         args,
@@ -987,6 +1010,11 @@ def main(argv=None) -> None:
         load_function(args.custom_generate_function_path)
     if args.custom_agent_function_path:
         load_function(args.custom_agent_function_path)
+    if args.custom_agent_function_path == "yeto_miles_secrlenv.agent.run":
+        from yeto_miles_secrlenv.client import require_daemon_ready
+
+        require_daemon_ready()
+        print("[rl] secrlenv episode daemon ready")
     from huggingface_hub import snapshot_download
 
     from ..models import resolve

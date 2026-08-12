@@ -48,6 +48,20 @@ TMS_PRELOAD_BASE_BINARY_SHA256 = (
 TMS_TRAIN_DISK_BACKUP_CONTAINER_PATH = "/workspace/tms-disk-backup"
 TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB = 256
 TMS_TRAIN_DISK_BACKUP_ROOT = PurePosixPath("/data/yeto-rl/tms-disk-backup")
+JIT_CACHE_SCHEMA = 1
+JIT_CACHE_ROOT = PurePosixPath("/data/yeto-rl/jit-cache")
+JIT_CACHE_MOUNTS = (
+    ("deep-gemm", "/tmp/sglang_deep_gemm"),
+    ("tvm-ffi", "/root/.cache/tvm-ffi"),
+    ("triton", "/root/.triton"),
+    ("flashinfer", "/root/.cache/flashinfer"),
+    ("sglang", "/root/.cache/sglang"),
+    ("cuda", "/root/.nv/ComputeCache"),
+    ("tilelang", "/root/.tilelang"),
+    ("cupy", "/root/.cupy/kernel_cache"),
+    ("cutlass-python", "/tmp/root/cutlass_python_cache"),
+    ("torchinductor", "/tmp/torchinductor_root"),
+)
 
 
 _RUN_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,47}\Z")
@@ -55,9 +69,12 @@ _REMOTE_PATH = re.compile(r"[a-zA-Z0-9._/-]+\Z")
 _REMOTE_ABSOLUTE_PATH = re.compile(r"/data/[a-zA-Z0-9._/-]+\Z")
 _SSH_TARGET = re.compile(r"(?:[a-zA-Z0-9._-]+@)?[a-zA-Z0-9._-]+\Z")
 _HOST = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9.-]*\Z")
+_NETWORK_INTERFACE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}\Z")
 _DOCKER_DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
+_SAFE_IMAGE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]+\Z")
+SECRLENV_AGENT = "yeto_miles_secrlenv.agent.run"
 
 
 class HarnessError(RuntimeError):
@@ -98,6 +115,17 @@ def _validate_remote_path(value: str, flag: str) -> str:
         or ".." in path.parts
     ):
         raise HarnessError(f"{flag} must be a safe path relative to remote $HOME")
+    return value.rstrip("/")
+
+
+def _validate_data_path(value: str, flag: str) -> str:
+    path = PurePosixPath(value)
+    if (
+        not _REMOTE_ABSOLUTE_PATH.fullmatch(value)
+        or ".." in path.parts
+        or len(path.parts) < 3
+    ):
+        raise HarnessError(f"{flag} must be a safe absolute path below /data")
     return value.rstrip("/")
 
 
@@ -335,6 +363,56 @@ def _validate_tms_train_disk_backup(
         raise HarnessError("plan has an invalid TMS trainer disk-backup contract")
 
 
+def _validate_jit_cache_root(value: str) -> str:
+    path = PurePosixPath(value)
+    prefix = JIT_CACHE_ROOT
+    if (
+        not value
+        or not _REMOTE_ABSOLUTE_PATH.fullmatch(value)
+        or ".." in path.parts
+        or path.parts[: len(prefix.parts)] != prefix.parts
+    ):
+        raise HarnessError(
+            "--jit-cache-root must be the dedicated /data/yeto-rl/jit-cache "
+            "directory or one of its descendants"
+        )
+    return path.as_posix()
+
+
+def _jit_cache_compatibility_sha256(plan: dict[str, Any]) -> str:
+    identity = {
+        "schema": JIT_CACHE_SCHEMA,
+        "accelerator": "H200",
+        "docker_image": plan.get("docker_image"),
+        "miles_commit": plan.get("miles", {}).get("commit"),
+        "sglang_commit": plan.get("sglang", {}).get("commit"),
+        "sglang_bundle_sha256": plan.get("sglang", {}).get("bundle_sha256"),
+        "mounts": list(JIT_CACHE_MOUNTS),
+    }
+    return hashlib.sha256(_canonical_json(identity).encode()).hexdigest()
+
+
+def _jit_cache_contract(
+    host_root: str,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "host_root": _validate_jit_cache_root(host_root),
+        "compatibility_sha256": _jit_cache_compatibility_sha256(plan),
+    }
+
+
+def _validate_jit_cache(value: Any, plan: dict[str, Any]) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "host_root",
+        "compatibility_sha256",
+    }:
+        raise HarnessError("plan has an invalid JIT cache contract")
+    expected = _jit_cache_contract(str(value.get("host_root", "")), plan)
+    if value != expected:
+        raise HarnessError("plan has an invalid JIT cache compatibility identity")
+
+
 def _local_data_sha256(path: str | Path) -> str:
     from ..provenance import file_sha256
 
@@ -426,6 +504,8 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     _, port = _validate_address(str(plan.get("syncer_address", "")))
     if plan.get("syncer_port") != port:
         raise HarnessError("plan syncer port does not match its address")
+    if not _NETWORK_INTERFACE.fullmatch(str(plan.get("network_interface", "eno3"))):
+        raise HarnessError("plan has an invalid network interface")
     _docker_ref(str(plan.get("docker_image", "")))
     if plan.get("miles") != {
         "repository": MILES_REPOSITORY,
@@ -441,12 +521,40 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         "bundle_sha256": SGLANG_BUNDLE_SHA256,
     }:
         raise HarnessError("plan does not use the current pinned SGLang revision")
+    jit_cache = plan.get("jit_cache")
+    if jit_cache is not None:
+        _validate_jit_cache(jit_cache, plan)
     for name in ("source_sha256", "reward_sha256", "syncer_source_sha256"):
         if not _SHA256.fullmatch(str(plan.get(name, ""))):
             raise HarnessError(f"plan has an invalid {name}")
     learner = plan.get("learner")
     if not isinstance(learner, dict):
         raise HarnessError("plan has no learner configuration")
+    daemon = plan.get("secrlenv_daemon")
+    if learner.get("custom_agent_function_path") == SECRLENV_AGENT:
+        if not isinstance(daemon, dict):
+            raise HarnessError("secrlenv agent requires a pinned daemon contract")
+        for name in ("source_root", "task_pack", "state_root"):
+            _validate_data_path(str(daemon.get(name, "")), f"secrlenv {name}")
+        for name in ("source_sha256", "task_pack_sha256"):
+            if not _SHA256.fullmatch(str(daemon.get(name, ""))):
+                raise HarnessError(f"secrlenv daemon has an invalid {name}")
+        if (
+            daemon.get("bind") != "127.0.0.1"
+            or not isinstance(daemon.get("port"), int)
+            or not 1024 <= daemon["port"] <= 65535
+            or not isinstance(daemon.get("max_active_episodes"), int)
+            or daemon["max_active_episodes"] <= 0
+            or not _SAFE_IMAGE.fullmatch(str(daemon.get("operator_image", "")))
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(daemon.get("operator_image_id", ""))
+            )
+        ):
+            raise HarnessError("secrlenv daemon contract is invalid")
+        if not plan.get("remote_env_file"):
+            raise HarnessError("secrlenv daemon requires --remote-env-file")
+    elif daemon is not None:
+        raise HarnessError("secrlenv daemon requires the secrlenv custom agent")
     tms_patch = plan.get("tms_preload_patch")
     tms_train_disk_backup = plan.get("tms_train_disk_backup")
     if learner.get("rl_offload_train"):
@@ -640,14 +748,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
                 "and per-node eight-GPU rollout replicas"
             )
     custom_agent = learner.get("custom_agent_function_path")
-    if custom_agent is not None:
-        if (
-            not isinstance(custom_agent, str)
-            or not learner.get("custom_generate_function_path")
-            or not learner.get("use_session_server")
-            or not learner.get("tito_model")
-        ):
-            raise HarnessError("plan has an incomplete agentic session contract")
+    if custom_agent is not None and (
+        not isinstance(custom_agent, str)
+        or not learner.get("custom_generate_function_path")
+        or not learner.get("use_session_server")
+        or not learner.get("tito_model")
+    ):
+        raise HarnessError("plan has an incomplete agentic session contract")
     roles = learner.get("tito_allowed_append_roles")
     if roles is not None and (
         not isinstance(roles, list)
@@ -763,6 +870,9 @@ def prepare(namespace) -> Path:
         f"{_target_host(islands[0]['hosts'][0])}:{SYNCER_PORT}"
     )
     _, syncer_port = _validate_address(syncer_address)
+    network_interface = str(getattr(namespace, "network_interface", "eno3"))
+    if not _NETWORK_INTERFACE.fullmatch(network_interface):
+        raise HarnessError("--network-interface is invalid")
     args = _resolved_launch_args(namespace, islands)
     local_run = (
         Path(namespace.output_dir).expanduser()
@@ -830,6 +940,7 @@ def prepare(namespace) -> Path:
         "islands": islands,
         "syncer_address": syncer_address,
         "syncer_port": syncer_port,
+        "network_interface": network_interface,
         "docker_image": _docker_ref(args.rl_image),
         "miles": {
             "repository": MILES_REPOSITORY,
@@ -934,6 +1045,48 @@ def prepare(namespace) -> Path:
             "cybergym_reward_view": os.environ.get("CYBERGYM_REWARD_VIEW", "train"),
         },
     }
+    jit_cache_root = getattr(namespace, "jit_cache_root", None)
+    if jit_cache_root is not None:
+        plan["jit_cache"] = _jit_cache_contract(jit_cache_root, plan)
+    daemon_source_root = getattr(namespace, "secrlenv_source_root", None)
+    if args.custom_agent_function_path == SECRLENV_AGENT:
+        required = {
+            "--secrlenv-source-root": daemon_source_root,
+            "--secrlenv-source-sha256": getattr(
+                namespace, "secrlenv_source_sha256", None
+            ),
+            "--secrlenv-task-pack": getattr(namespace, "secrlenv_task_pack", None),
+            "--secrlenv-task-pack-sha256": getattr(
+                namespace, "secrlenv_task_pack_sha256", None
+            ),
+            "--secrlenv-operator-image": getattr(
+                namespace, "secrlenv_operator_image", None
+            ),
+            "--secrlenv-operator-image-id": getattr(
+                namespace, "secrlenv_operator_image_id", None
+            ),
+        }
+        missing = [flag for flag, value in required.items() if not value]
+        if missing:
+            raise HarnessError(
+                "secrlenv custom agent requires " + ", ".join(missing)
+            )
+        plan["secrlenv_daemon"] = {
+            "source_root": daemon_source_root,
+            "source_sha256": namespace.secrlenv_source_sha256,
+            "task_pack": namespace.secrlenv_task_pack,
+            "task_pack_sha256": namespace.secrlenv_task_pack_sha256,
+            "state_root": f"/data/yeto-rl/secrlenv-runs/{run_id}",
+            "bind": "127.0.0.1",
+            "port": namespace.secrlenv_port,
+            "operator_image": namespace.secrlenv_operator_image,
+            "operator_image_id": namespace.secrlenv_operator_image_id,
+            "max_active_episodes": namespace.secrlenv_max_active_episodes,
+        }
+    elif daemon_source_root is not None:
+        raise HarnessError(
+            "--secrlenv-source-root requires the secrlenv custom agent"
+        )
     if getattr(args, "expert_full_count", 0):
         plan["learner"].update(
             expert_full_count=args.expert_full_count,
@@ -990,6 +1143,131 @@ def _rsync_shell(plan: dict[str, Any]) -> str:
 
 def _remote_vars(plan: dict[str, Any]) -> str:
     return f'RUN="$HOME/{plan["remote_run"]}"'
+
+
+def _secrlenv_daemon_script(plan: dict[str, Any]) -> str:
+    daemon = plan["secrlenv_daemon"]
+    return f"""set -euo pipefail
+SOURCE={shlex.quote(daemon['source_root'])}
+TASK_PACK={shlex.quote(daemon['task_pack'])}
+STATE_ROOT={shlex.quote(daemon['state_root'])}
+ENV_FILE="$HOME/{plan['remote_env_file']}"
+test -d "$SOURCE/secrlenv_rl"
+test -d "$TASK_PACK"
+test -f "$ENV_FILE" && test ! -L "$ENV_FILE"
+test "$(stat -c '%a' "$ENV_FILE")" = 600
+SOURCE_SHA="$(cd "$SOURCE" && find secrlenv_rl -type f -name '*.py' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
+test "$SOURCE_SHA" = {shlex.quote(daemon['source_sha256'])}
+IMAGE_ID="$(docker image inspect --format '{{{{.Id}}}}' {shlex.quote(daemon['operator_image'])})"
+test "$IMAGE_ID" = {shlex.quote(daemon['operator_image_id'])}
+if [ -s "$STATE_ROOT/daemon.pid" ]; then
+  PID="$(cat "$STATE_ROOT/daemon.pid")"
+  ARGS="$(ps -p "$PID" -o args= 2>/dev/null || true)"
+  case "$ARGS" in
+    *secrlenv_rl.server*"$STATE_ROOT/state"*) ;;
+    *) echo 'existing secrlenv daemon PID has the wrong identity' >&2; exit 1 ;;
+  esac
+else
+  if python3 - <<'PY'
+import socket
+s = socket.socket()
+try:
+    s.bind(({daemon['bind']!r}, {daemon['port']}))
+finally:
+    s.close()
+PY
+  then :; else
+    echo 'secrlenv daemon port is occupied by an unattested process' >&2
+    exit 1
+  fi
+  mkdir -p "$STATE_ROOT/state"
+  TOKEN_FILE="$STATE_ROOT/daemon.token"
+  if [ ! -e "$TOKEN_FILE" ]; then
+    umask 077
+    python3 - <<'PY' >"$TOKEN_FILE"
+import secrets
+
+print(secrets.token_hex(32))
+PY
+  fi
+  test -f "$TOKEN_FILE" && test ! -L "$TOKEN_FILE"
+  test "$(stat -c '%a' "$TOKEN_FILE")" = 600
+  cd "$SOURCE"
+  nohup setsid env PYTHONPATH="$SOURCE${{PYTHONPATH:+:$PYTHONPATH}}" \
+    python3 -m secrlenv_rl.server \
+      --task-pack "$TASK_PACK" \
+      --state-dir "$STATE_ROOT/state" \
+      --repository-root "$SOURCE" \
+      --token-file "$TOKEN_FILE" \
+      --bind {shlex.quote(daemon['bind'])} \
+      --port {daemon['port']} \
+      --operator-image {shlex.quote(daemon['operator_image'])} \
+      --max-active-episodes {daemon['max_active_episodes']} \
+      >"$STATE_ROOT/daemon.log" 2>&1 < /dev/null &
+  echo "$!" > "$STATE_ROOT/daemon.pid"
+fi
+python3 - <<'PY'
+import json
+import time
+from urllib.request import urlopen
+
+deadline = time.monotonic() + 60
+last_error = None
+while time.monotonic() < deadline:
+    try:
+        with urlopen("http://{daemon['bind']}:{daemon['port']}/healthz", timeout=2) as response:
+            value = json.load(response)
+        if (
+            response.status == 200
+            and value.get("ok") is True
+            and value.get("task_pack_sha256") == {daemon['task_pack_sha256']!r}
+            and value.get("max_active_episodes") == {daemon['max_active_episodes']}
+        ):
+            print("secrlenv_daemon=ready task_pack=" + value["task_pack_sha256"])
+            raise SystemExit(0)
+        last_error = "health identity mismatch"
+    except Exception as exc:
+        last_error = str(exc)
+    time.sleep(1)
+raise SystemExit("secrlenv daemon did not become ready: " + str(last_error))
+PY
+"""
+
+
+def _start_secrlenv_daemons(plan: dict[str, Any]) -> None:
+    if plan.get("secrlenv_daemon") is None:
+        return
+    for target in _all_hosts(plan):
+        _ssh(plan, target, _secrlenv_daemon_script(plan))
+
+
+def _stop_secrlenv_daemons(plan: dict[str, Any]) -> None:
+    daemon = plan.get("secrlenv_daemon")
+    if daemon is None:
+        return
+    for target in _all_hosts(plan):
+        _ssh(
+            plan,
+            target,
+            f"""set -euo pipefail
+STATE_ROOT={shlex.quote(daemon['state_root'])}
+if [ ! -s "$STATE_ROOT/daemon.pid" ]; then exit 0; fi
+PID="$(cat "$STATE_ROOT/daemon.pid")"
+ARGS="$(ps -p "$PID" -o args= 2>/dev/null || true)"
+case "$ARGS" in
+  *secrlenv_rl.server*"$STATE_ROOT/state"*) ;;
+  '') exit 0 ;;
+  *) echo 'refusing to stop a process with the wrong identity' >&2; exit 1 ;;
+esac
+kill -TERM -- -"$PID"
+for _ in {{1..600}}; do
+  kill -0 "$PID" 2>/dev/null || exit 0
+  sleep 0.1
+done
+echo 'secrlenv daemon did not exit after SIGTERM' >&2
+exit 1
+""",
+        )
 
 
 def _all_hosts(plan: dict[str, Any]) -> list[str]:
@@ -1140,6 +1418,33 @@ test "$TMS_BASE_ACTUAL" = {shlex.quote(tms_patch['base_binary_sha256'])}
 """
     else:
         tms_patch_check = ""
+    jit_cache = plan.get("jit_cache")
+    if jit_cache is not None:
+        cache_names = " ".join(shlex.quote(name) for name, _ in JIT_CACHE_MOUNTS)
+        jit_cache_setup = f"""JIT_CACHE_ROOT={shlex.quote(jit_cache['host_root'])}
+JIT_CACHE_COMPAT={shlex.quote(jit_cache['compatibility_sha256'])}
+JIT_RUNTIME_ID="$(nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader,nounits | sort -u)"
+test "$(printf '%s\n' "$JIT_RUNTIME_ID" | sed '/^$/d' | wc -l)" -eq 1
+JIT_RUNTIME_SHA="$(printf '%s' "$JIT_RUNTIME_ID" | sha256sum | awk '{{print $1}}')"
+JIT_CACHE_HOST="$JIT_CACHE_ROOT/$JIT_CACHE_COMPAT/$JIT_RUNTIME_SHA"
+umask 077
+mkdir -p "$JIT_CACHE_HOST"
+test -d "$JIT_CACHE_HOST" && test ! -L "$JIT_CACHE_HOST"
+test "$(realpath -m "$JIT_CACHE_HOST")" = "$JIT_CACHE_HOST"
+case "$JIT_CACHE_HOST" in "$JIT_CACHE_ROOT/$JIT_CACHE_COMPAT/"*) ;; *) exit 1 ;; esac
+chmod 0700 "$JIT_CACHE_HOST"
+for JIT_CACHE_NAME in {cache_names}; do
+  JIT_CACHE_DIR="$JIT_CACHE_HOST/$JIT_CACHE_NAME"
+  mkdir -p "$JIT_CACHE_DIR"
+  test -d "$JIT_CACHE_DIR" && test ! -L "$JIT_CACHE_DIR"
+  test "$(realpath -m "$JIT_CACHE_DIR")" = "$JIT_CACHE_DIR"
+  chmod 0700 "$JIT_CACHE_DIR"
+done
+printf '%s\n' "$JIT_CACHE_HOST" > "$RUN/control/jit-cache-host-path"
+chmod 0600 "$RUN/control/jit-cache-host-path"
+"""
+    else:
+        jit_cache_setup = ""
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 test "$(cat "$RUN/control/plan.sha256")" = {shlex.quote(_plan_digest(plan))}
@@ -1153,7 +1458,7 @@ if ! docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null 2>&1; t
   docker pull {shlex.quote(plan['docker_image'])}
 fi
 docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
-{tms_patch_check}if [ ! -d "$RUN/miles/.git" ]; then
+{tms_patch_check}{jit_cache_setup}if [ ! -d "$RUN/miles/.git" ]; then
   rmdir "$RUN/miles"
   git clone --no-checkout {shlex.quote(MILES_REPOSITORY)} "$RUN/miles"
 fi
@@ -1469,6 +1774,7 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
     head = _target_host(island["hosts"][0])
     gpus = island["gpus_per_node"]
     gpu_request = '"device=' + ",".join(str(index) for index in range(gpus)) + '"'
+    network_interface = shlex.quote(plan.get("network_interface", "eno3"))
     env_file = (
         f' --env-file "$HOME/{plan["remote_env_file"]}"'
         if plan.get("remote_env_file")
@@ -1478,6 +1784,22 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
     agent_env = (
         "  --env MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1 \\\n"
         if learner.get("custom_agent_function_path")
+        else ""
+    )
+    daemon_env = (
+        "  --env SECRLENV_DAEMON_URL="
+        f"http://127.0.0.1:{plan['secrlenv_daemon']['port']} "
+        "--env SECRLENV_TASK_PACK_SHA256="
+        f"{plan['secrlenv_daemon']['task_pack_sha256']} "
+        "--env SECRLENV_BEARER_TOKEN_FILE=/run/secrlenv/daemon.token \\\n"
+        if plan.get("secrlenv_daemon")
+        else ""
+    )
+    daemon_volume = (
+        "  --volume "
+        f"{shlex.quote(plan['secrlenv_daemon']['state_root'])}/daemon.token:"
+        "/run/secrlenv/daemon.token:ro \\\n"
+        if plan.get("secrlenv_daemon")
         else ""
     )
     reward_scheme = shlex.quote(learner.get("cybergym_reward_scheme", "binary"))
@@ -1524,6 +1846,33 @@ test "$(realpath -m "$TMS_DISK_BACKUP_HOST")" = "$TMS_DISK_BACKUP_HOST"
         tms_disk_setup = ""
         tms_disk_env = ""
         tms_disk_volume = ""
+    jit_cache = plan.get("jit_cache")
+    if jit_cache is not None:
+        jit_cache_prefix = (
+            PurePosixPath(jit_cache["host_root"])
+            / jit_cache["compatibility_sha256"]
+        ).as_posix()
+        cache_names = " ".join(shlex.quote(name) for name, _ in JIT_CACHE_MOUNTS)
+        jit_cache_setup = f"""JIT_CACHE_FILE="$RUN/control/jit-cache-host-path"
+test -f "$JIT_CACHE_FILE" && test ! -L "$JIT_CACHE_FILE"
+JIT_CACHE_HOST="$(cat "$JIT_CACHE_FILE")"
+case "$JIT_CACHE_HOST" in {shlex.quote(jit_cache_prefix + '/')}*) ;; *) exit 1 ;; esac
+test -d "$JIT_CACHE_HOST" && test ! -L "$JIT_CACHE_HOST"
+test "$(realpath -m "$JIT_CACHE_HOST")" = "$JIT_CACHE_HOST"
+for JIT_CACHE_NAME in {cache_names}; do
+  JIT_CACHE_DIR="$JIT_CACHE_HOST/$JIT_CACHE_NAME"
+  test -d "$JIT_CACHE_DIR" && test ! -L "$JIT_CACHE_DIR"
+  test "$(realpath -m "$JIT_CACHE_DIR")" = "$JIT_CACHE_DIR"
+done
+"""
+        jit_cache_volumes = "".join(
+            "  --volume "
+            f'"$JIT_CACHE_HOST/{name}:{container_path}" \\\n'
+            for name, container_path in JIT_CACHE_MOUNTS
+        )
+    else:
+        jit_cache_setup = ""
+        jit_cache_volumes = ""
     expert_full = bool(learner.get("expert_full_count", 0))
     if learner.get("rl_model_recipe") == "deepseek-v4-flash":
         attention_env = ""
@@ -1565,6 +1914,14 @@ test "$(realpath -m "$TMS_DISK_BACKUP_HOST")" = "$TMS_DISK_BACKUP_HOST"
     common = (
         f"python3 -m pip install -q --no-deps 'peft=={MILES_PEFT_VERSION}'; "
         "export PYTHONPATH=/workspace/sglang/python:/workspace/yeto:/workspace/miles${PYTHONPATH:+:$PYTHONPATH}; "
+        f"NETWORK_INTERFACE={network_interface}; "
+        "NODE_IP=$(python3 -c 'import fcntl, socket, struct, sys; "
+        "sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); "
+        "data = fcntl.ioctl(sock.fileno(), 0x8915, "
+        "struct.pack(\"256s\", sys.argv[1].encode()[:15])); "
+        "print(socket.inet_ntoa(data[20:24]))' \"$NETWORK_INTERFACE\"); "
+        "test -n \"$NODE_IP\"; "
+        "export MILES_HOST_IP=\"$NODE_IP\"; "
         "ray stop --force >/dev/null 2>&1 || true; "
     )
     if node_id == 0:
@@ -1581,9 +1938,8 @@ PY
 """
         command = (
             common
-            + f"HEAD_IP=$(getent ahostsv4 {shlex.quote(head)} | awk 'NR == 1 {{print $1}}'); "
-            + 'test -n "$HEAD_IP"; '
-            + 'ray start --head --node-ip-address="$HEAD_IP" '
+            + 'HEAD_IP="$NODE_IP"; '
+            + 'ray start --head --node-ip-address="$NODE_IP" '
             f"--port={RAY_PORT} --include-dashboard=true; "
             + wait
             + "exec "
@@ -1592,7 +1948,8 @@ PY
     else:
         command = (
             common
-            + f"until ray start --address={shlex.quote(head)}:{RAY_PORT}; do sleep 2; done; "
+            + f"until ray start --address={shlex.quote(head)}:{RAY_PORT} "
+            + '--node-ip-address="$NODE_IP"; do sleep 2; done; '
             + f"while ray status --address={shlex.quote(head)}:{RAY_PORT} >/dev/null 2>&1; "
             "do sleep 5; done"
         )
@@ -1604,7 +1961,7 @@ if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
   echo 'container exists but is not running; use restart-learner' >&2
   exit 1
 fi
-{tms_disk_setup}mkdir -p "$RUN/island-{learner_id}"/{{state,output,audit,cores}}
+{tms_disk_setup}{jit_cache_setup}mkdir -p "$RUN/island-{learner_id}"/{{state,output,audit,cores}}
 docker run --detach \
   --name {shlex.quote(name)} \
   --gpus {shlex.quote(gpu_request)} \
@@ -1614,15 +1971,15 @@ docker run --detach \
   --env PYTHONUNBUFFERED=1 \
   --env HF_HOME=/workspace/hf \
   --env HF_HUB_ENABLE_HF_TRANSFER=1{env_file} \
-  --env NCCL_IB_DISABLE=1 --env NCCL_SOCKET_IFNAME=eno3 \
-  --env GLOO_SOCKET_IFNAME=eno3 --env TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+  --env NCCL_IB_DISABLE=1 --env NCCL_SOCKET_IFNAME={network_interface} \
+  --env GLOO_SOCKET_IFNAME={network_interface} --env TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   --env CUDA_DEVICE_MAX_CONNECTIONS=1 \
-{attention_env}{recipe_env}{diagnostics_env}{tms_disk_env}{agent_env}  --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
+{attention_env}{recipe_env}{diagnostics_env}{tms_disk_env}{agent_env}{daemon_env}  --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
   --env CYBERGYM_AGENT_ID={shlex.quote(learner['cybergym_agent_id'])} \
   --env CYBERGYM_TIMEOUT={shlex.quote(str(learner['cybergym_timeout']))} \
   --env CYBERGYM_REWARD_SCHEME={reward_scheme} \
   --env CYBERGYM_REWARD_VIEW={reward_view} \
-{data_volume}{model_volumes}{tms_patch_volume}{tms_disk_volume}  --volume "$RUN/source:/workspace/yeto:ro" \
+{data_volume}{model_volumes}{tms_patch_volume}{tms_disk_volume}{jit_cache_volumes}{daemon_volume}  --volume "$RUN/source:/workspace/yeto:ro" \
   --volume "$RUN/sglang:/workspace/sglang:ro" \
   --volume "$RUN/miles:/workspace/miles" \
   --volume "$RUN/island-{learner_id}/state:/workspace/state" \
@@ -1647,6 +2004,7 @@ def _start_island(plan: dict[str, Any], learner_id: int) -> None:
 def start(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
     deploy(plan_path)
+    _start_secrlenv_daemons(plan)
     for island in plan["islands"]:
         for target in island["hosts"]:
             _ssh(plan, target, _host_setup_script(plan, island["gpus_per_node"]))
@@ -1752,6 +2110,7 @@ def stop(plan_path: str | Path) -> None:
 if [ -s "$RUN/state/syncer.pid" ]; then kill -TERM -- -"$(cat "$RUN/state/syncer.pid")" 2>/dev/null || true; fi
 """,
     )
+    _stop_secrlenv_daemons(plan)
 
 
 def collect(plan_path: str | Path) -> Path:
@@ -2171,11 +2530,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prepare_parser.add_argument("--gpus-per-node", type=int, default=1)
     prepare_parser.add_argument("--syncer-address", default=None)
+    prepare_parser.add_argument("--network-interface", default="eno3")
     prepare_parser.add_argument("--run-id", required=True)
     prepare_parser.add_argument("--output-dir", default=None)
     prepare_parser.add_argument("--remote-root", default=DEFAULT_REMOTE_ROOT)
     prepare_parser.add_argument("--remote-env-file", default=None)
     prepare_parser.add_argument("--model-manifest-sha256", default=None)
+    prepare_parser.add_argument("--secrlenv-source-root", default=None)
+    prepare_parser.add_argument("--secrlenv-source-sha256", default=None)
+    prepare_parser.add_argument("--secrlenv-task-pack", default=None)
+    prepare_parser.add_argument("--secrlenv-task-pack-sha256", default=None)
+    prepare_parser.add_argument("--secrlenv-operator-image", default=None)
+    prepare_parser.add_argument("--secrlenv-operator-image-id", default=None)
+    prepare_parser.add_argument("--secrlenv-port", type=int, default=28765)
+    prepare_parser.add_argument(
+        "--secrlenv-max-active-episodes", type=int, default=16
+    )
     prepare_parser.add_argument("--tms-preload-patch", default=None)
     prepare_parser.add_argument(
         "--tms-train-disk-backup-root",
@@ -2186,6 +2556,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB,
     )
+    prepare_parser.add_argument("--jit-cache-root", default=None)
     prepare_parser.add_argument("--ssh-option", action="append", default=[])
     prepare_parser.add_argument("launch_args", nargs=argparse.REMAINDER)
 

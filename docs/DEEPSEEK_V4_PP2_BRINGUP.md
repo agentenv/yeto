@@ -3,10 +3,10 @@
 ## Status
 
 Pipeline-parallel (`PP=2`) support for the DeepSeek V4 expert-full Miles RL
-path is implemented in the working tree on
-`fix/secrlenv-r64-main-sync`. Component and pinned multi-node validation have
-passed. Daemon-backed end-to-end acceptance is still in progress, so this
-should not yet be described as generally production-ready PP2 support.
+path is implemented on `fix/secrlenv-r64-pp2-support`. Component and pinned
+multi-node validation have passed. Daemon-backed end-to-end acceptance is
+still in progress, so this should not yet be described as generally
+production-ready PP2 support.
 
 The current acceptance gate is the two-node, 16-GPU run
 `dsv4-e288-safety32-full16-pp2-smoke-v56` on `h200-n4` and `h200-n5`.
@@ -252,8 +252,6 @@ Specifically watch for recurrence of:
 
 ## Branch and commit note
 
-This document was prepared on `fix/secrlenv-r64-main-sync`, whose base before
-the documentation commit was `d841f0f67d8779f163446d60bd8afdafefd6664b`.
-The PP2 implementation and tests were still uncommitted working-tree changes
-at that point. The documentation-only commit intentionally does not stage,
-commit, push, reset, or otherwise alter those implementation changes.
+The implementation, required run support, pinned runtime bundle, tests, and
+this document live on `fix/secrlenv-r64-pp2-support`. Its history is based on
+`origin/main`; it is intended for review and remains unmerged.

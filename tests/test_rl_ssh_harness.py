@@ -145,6 +145,31 @@ def _plan():
     }
 
 
+def _secrlenv_daemon_contract(run_id="acceptance"):
+    return {
+        "source_root": "/data/yeto-rl/src/secrlenv-v24",
+        "source_sha256": "2" * 64,
+        "task_pack": "/data/yeto-rl/taskpacks/" + "3" * 64,
+        "task_pack_sha256": "3" * 64,
+        "state_root": f"/data/yeto-rl/secrlenv-runs/{run_id}",
+        "bind": "127.0.0.1",
+        "port": 28765,
+        "operator_image": "secrlenv-operator:pinned",
+        "operator_image_id": "sha256:" + "4" * 64,
+        "max_active_episodes": 16,
+    }
+
+
+def _enable_secrlenv_agent(plan):
+    plan["remote_env_file"] = ".config/yeto/rl.env"
+    plan["learner"].update(
+        custom_agent_function_path="yeto_miles_secrlenv.agent.run",
+        custom_generate_function_path="miles.rollout.generate",
+        use_session_server=True,
+        tito_model="org/model",
+    )
+
+
 def _local_data_plan(path: Path):
     plan = _plan()
     plan["learner"].update(
@@ -512,9 +537,9 @@ def test_miles_and_sglang_pins_include_the_compatible_builds():
     assert not hasattr(rl_config, "MILES_BUNDLE_PATH")
     assert not hasattr(rl_config, "MILES_BUNDLE_SHA256")
     assert SGLANG_UPSTREAM_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
-    assert SGLANG_COMMIT == "c2cb40a774dc8cba85eb651f28471d889178b5ee"
+    assert SGLANG_COMMIT == "e1b57eb8e7749235c987cc6b1b2824ce3265369b"
     assert SGLANG_BUNDLE_SHA256 == (
-        "3da2f8e3833828df9e31f9975c3bf69cecc1cd76e484718590f06deead98188e"
+        "fdb6bd844507a33d870fb28857011c62ab6ec97d96425a020f42aeb0115582f9"
     )
     assert MILES_IMAGE == (
         "docker:ghcr.io/alexeisie/miles@sha256:"
@@ -570,6 +595,7 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
         gpus_per_node=1,
         remote_root=".cache/yeto-rl-ssh",
         remote_env_file=None,
+        jit_cache_root="/data/yeto-rl/jit-cache",
         model_manifest_sha256=None,
         syncer_address=None,
         output_dir=tmp_path / "run",
@@ -584,6 +610,9 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
     assert plan["learner"]["data"] == "/workspace/data/dataset.jsonl"
     assert plan["learner"]["data_local_path"] == str(prompts.resolve())
     assert plan["learner"]["data_revision"] is None
+    assert plan["jit_cache"] == ssh_harness._jit_cache_contract(
+        "/data/yeto-rl/jit-cache", plan
+    )
 
 
 def test_local_prompt_directory_hash_is_stable_and_rejects_symlinks(tmp_path):
@@ -917,12 +946,15 @@ def test_tms_disk_backup_cli_and_non_offload_rejection():
             "/data/yeto-rl/tms-disk-backup",
             "--tms-train-disk-backup-chunk-mb",
             "128",
+            "--jit-cache-root",
+            "/data/yeto-rl/jit-cache",
         ]
     )
     assert parsed.tms_train_disk_backup_root == (
         "/data/yeto-rl/tms-disk-backup"
     )
     assert parsed.tms_train_disk_backup_chunk_mb == 128
+    assert parsed.jit_cache_root == "/data/yeto-rl/jit-cache"
 
     plan = _plan()
     plan["tms_preload_patch"] = _tms_patch_contract()
@@ -964,6 +996,103 @@ def test_deepseek_v4_nodes_use_the_verified_sglang_environment():
     ):
         assert value in script
     assert "NVTE_FLASH_ATTN" not in script
+
+
+def test_jit_cache_is_future_only_attested_and_narrowly_mounted():
+    plan = _plan()
+    plan["learner"].update(
+        rl_model_recipe="deepseek-v4-flash",
+        tensor_parallel=8,
+        expert_parallel=8,
+        rollout_num_gpus_per_engine=8,
+        sglang_tp_size=8,
+        sglang_dp_size=1,
+        sglang_ep_size=8,
+        sglang_deterministic_inference=False,
+        lora_targets="attention-routed-experts",
+    )
+    legacy_setup = _host_setup_script(plan, 4)
+    legacy_start = _node_start_script(plan, 0, 0)
+    assert "JIT_CACHE_HOST" not in legacy_setup
+    assert "JIT_CACHE_HOST" not in legacy_start
+
+    plan["jit_cache"] = ssh_harness._jit_cache_contract(
+        "/data/yeto-rl/jit-cache", plan
+    )
+    ssh_harness._validate_plan(plan)
+    setup = _host_setup_script(plan, 4)
+    start = _node_start_script(plan, 0, 0)
+
+    assert "--query-gpu=name,compute_cap,driver_version" in setup
+    assert plan["jit_cache"]["compatibility_sha256"] in setup
+    assert 'test ! -L "$JIT_CACHE_HOST"' in setup
+    assert 'chmod 0700 "$JIT_CACHE_HOST"' in setup
+    assert '"$RUN/control/jit-cache-host-path"' in setup
+    for name, container_path in ssh_harness.JIT_CACHE_MOUNTS:
+        assert f'"$JIT_CACHE_HOST/{name}:{container_path}"' in start
+    assert '"$JIT_CACHE_HOST/deep-gemm:/tmp/sglang_deep_gemm"' in start
+    assert '"$JIT_CACHE_HOST/tvm-ffi:/root/.cache/tvm-ffi"' in start
+    assert "SGLANG_DG_CACHE_DIR_PER_PROCESS=1" in start
+    assert "--volume /data:/data" not in start
+    assert "--volume /root/.cache:/root/.cache" not in start
+
+
+def test_jit_cache_identity_is_run_independent_and_strictly_validated():
+    first = _plan()
+    second = _plan()
+    second["run_id"] = "next-run"
+    second["remote_run"] = ".cache/yeto-rl-ssh/next-run"
+    first_contract = ssh_harness._jit_cache_contract(
+        "/data/yeto-rl/jit-cache", first
+    )
+    second_contract = ssh_harness._jit_cache_contract(
+        "/data/yeto-rl/jit-cache", second
+    )
+    assert first_contract == second_contract
+
+    changed_image = _plan()
+    changed_image["docker_image"] = "radixark/miles@sha256:" + "a" * 64
+    assert ssh_harness._jit_cache_contract(
+        "/data/yeto-rl/jit-cache", changed_image
+    ) != first_contract
+
+    with pytest.raises(HarnessError, match="dedicated"):
+        ssh_harness._jit_cache_contract("/data/yeto-rl/other", first)
+    with pytest.raises(HarnessError, match="dedicated"):
+        ssh_harness._jit_cache_contract(
+            "/data/yeto-rl/jit-cache/../escape", first
+        )
+
+    first["jit_cache"] = dict(first_contract)
+    first["jit_cache"]["compatibility_sha256"] = "0" * 64
+    with pytest.raises(HarnessError, match="compatibility identity"):
+        ssh_harness._validate_plan(first)
+
+    first["jit_cache"] = {**first_contract, "unexpected": True}
+    with pytest.raises(HarnessError, match="invalid JIT cache contract"):
+        ssh_harness._validate_plan(first)
+
+
+def test_node_network_interface_is_attested_and_propagated():
+    plan = _plan()
+    plan["network_interface"] = "tailscale0"
+
+    ssh_harness._validate_plan(plan)
+    script = _node_start_script(plan, 0, 0)
+
+    assert "NCCL_SOCKET_IFNAME=tailscale0" in script
+    assert "GLOO_SOCKET_IFNAME=tailscale0" in script
+    assert "NETWORK_INTERFACE=tailscale0" in script
+    assert "fcntl.ioctl" in script
+    assert "sys.argv[1].encode()[:15]" in script
+    assert '"$NETWORK_INTERFACE"' in script
+    assert "ip -4 -o addr" not in script
+    assert '--node-ip-address="$NODE_IP"' in script
+    assert 'export MILES_HOST_IP="$NODE_IP"' in script
+
+    plan["network_interface"] = "bad interface"
+    with pytest.raises(HarnessError, match="invalid network interface"):
+        ssh_harness._validate_plan(plan)
 
 
 def test_expert_full_plan_forwards_attestation_and_runtime_environment():
@@ -1092,11 +1221,12 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     worker = _node_start_script(plan, 0, 1)
     assert "ray start --head" in head
     assert "--include-dashboard=true" in head
-    assert "HEAD_IP=$(getent ahostsv4 a0" in head
-    assert '--node-ip-address="$HEAD_IP"' in head
+    assert 'HEAD_IP="$NODE_IP"' in head
+    assert '--node-ip-address="$NODE_IP"' in head
     assert "python3 -m yeto.rl.learner" in head
     assert "--gpus '\"device=0,1,2,3\"'" in head
     assert "ray start --address=a0:6379" in worker
+    assert '--node-ip-address="$NODE_IP"' in worker
     assert "python3 -m yeto.rl.learner" not in worker
     setup = _host_setup_script(plan, 4)
     assert SGLANG_REPOSITORY in setup
@@ -1174,6 +1304,65 @@ def test_decoupled_plan_propagates_fragment_and_variance_filter_settings():
     assert learner[learner.index("--dynamic-sampling-max-replacements") + 1] == "8"
     assert "--rl-offload-train" in learner
     assert learner[learner.index("--rl-distributed-timeout-minutes") + 1] == "7"
+
+
+def test_secrlenv_daemon_contract_is_required_and_propagated_to_nodes():
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+
+    with pytest.raises(HarnessError, match="pinned daemon contract"):
+        ssh_harness._validate_plan(plan)
+
+    plan["secrlenv_daemon"] = _secrlenv_daemon_contract()
+    script = ssh_harness._secrlenv_daemon_script(plan)
+    node = _node_start_script(plan, 0, 0)
+
+    assert "python3 -m secrlenv_rl.server" in script
+    assert "--enable-dind-debug" not in script
+    assert "task_pack_sha256" in script
+    assert "secrlenv_daemon=ready" in script
+    assert 'ENV_FILE="$HOME/.config/yeto/rl.env"' in script
+    assert 'TOKEN_FILE="$STATE_ROOT/daemon.token"' in script
+    assert "secrets.token_hex(32)" in script
+    assert '--token-file "$TOKEN_FILE"' in script
+    assert "--env SECRLENV_DAEMON_URL=http://127.0.0.1:28765" in node
+    assert ("--env SECRLENV_TASK_PACK_SHA256=" + "3" * 64) in node
+    assert (
+        "--env SECRLENV_BEARER_TOKEN_FILE=/run/secrlenv/daemon.token" in node
+    )
+    assert (
+        "/data/yeto-rl/secrlenv-runs/acceptance/daemon.token:"
+        "/run/secrlenv/daemon.token:ro" in node
+    )
+
+
+def test_start_attests_secrlenv_daemons_before_host_gpu_setup(tmp_path, monkeypatch):
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+    plan["secrlenv_daemon"] = _secrlenv_daemon_contract()
+    path = _write_plan(tmp_path / "plan.json", plan)
+    events = []
+
+    monkeypatch.setattr(ssh_harness, "deploy", lambda _path: events.append("deploy"))
+    monkeypatch.setattr(
+        ssh_harness,
+        "_start_secrlenv_daemons",
+        lambda _plan: events.append("daemon"),
+    )
+    monkeypatch.setattr(ssh_harness, "_host_setup_script", lambda *_args: "setup")
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda *_args, **_kwargs: events.append("host_setup"),
+    )
+    monkeypatch.setattr(ssh_harness, "_build_syncer", lambda _plan: None)
+    monkeypatch.setattr(ssh_harness, "_start_syncer", lambda _plan: None)
+    monkeypatch.setattr(ssh_harness, "_wait_for_syncer", lambda _plan: None)
+    monkeypatch.setattr(ssh_harness, "_start_island", lambda *_args: None)
+
+    ssh_harness.start(path)
+
+    assert events[:3] == ["deploy", "daemon", "host_setup"]
 
 
 def test_verification_requires_an_exited_zero_status_container():
