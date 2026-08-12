@@ -1148,6 +1148,7 @@ def _remote_vars(plan: dict[str, Any]) -> str:
 def _secrlenv_daemon_script(plan: dict[str, Any]) -> str:
     daemon = plan["secrlenv_daemon"]
     return f"""set -euo pipefail
+{_remote_vars(plan)}
 SOURCE={shlex.quote(daemon['source_root'])}
 TASK_PACK={shlex.quote(daemon['task_pack'])}
 STATE_ROOT={shlex.quote(daemon['state_root'])}
@@ -1158,6 +1159,11 @@ test -f "$ENV_FILE" && test ! -L "$ENV_FILE"
 test "$(stat -c '%a' "$ENV_FILE")" = 600
 SOURCE_SHA="$(cd "$SOURCE" && find secrlenv_rl -type f -name '*.py' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
 test "$SOURCE_SHA" = {shlex.quote(daemon['source_sha256'])}
+PYTHONPATH="$RUN/source:$SOURCE${{PYTHONPATH:+:$PYTHONPATH}}" \
+  python3 -m yeto.rl.secrlenv_task_images \
+    --task-pack "$TASK_PACK" \
+    --expected-task-pack-sha256 {shlex.quote(daemon['task_pack_sha256'])} \
+    --data-root /data
 IMAGE_ID="$(docker image inspect --format '{{{{.Id}}}}' {shlex.quote(daemon['operator_image'])})"
 test "$IMAGE_ID" = {shlex.quote(daemon['operator_image_id'])}
 if [ -s "$STATE_ROOT/daemon.pid" ]; then

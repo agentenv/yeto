@@ -1320,6 +1320,11 @@ def test_secrlenv_daemon_contract_is_required_and_propagated_to_nodes():
     assert "python3 -m secrlenv_rl.server" in script
     assert "--enable-dind-debug" not in script
     assert "task_pack_sha256" in script
+    assert "python3 -m yeto.rl.secrlenv_task_images" in script
+    assert "secrlenv_task_images=ready" not in script
+    assert script.index('test "$SOURCE_SHA"') < script.index(
+        "python3 -m yeto.rl.secrlenv_task_images"
+    ) < script.index("python3 -m secrlenv_rl.server")
     assert "secrlenv_daemon=ready" in script
     assert 'ENV_FILE="$HOME/.config/yeto/rl.env"' in script
     assert 'TOKEN_FILE="$STATE_ROOT/daemon.token"' in script

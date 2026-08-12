@@ -8,9 +8,10 @@ multi-node validation have passed. Daemon-backed end-to-end acceptance is
 still in progress, so this should not yet be described as generally
 production-ready PP2 support.
 
-The current acceptance gate is the two-node, 16-GPU run
-`dsv4-e288-safety32-full16-pp2-smoke-v56` on `h200-n4` and `h200-n5`.
-A four-node DP2/full32 acceptance run is gated on v56 completing successfully.
+The next acceptance gate is a fresh two-node, 16-GPU run on `h200-n4` and
+`h200-n5`. The preceding v56 gate reached daemon-backed rollout, exposed a
+missing task-image preflight, and was stopped with its state preserved. A
+four-node DP2/full32 acceptance run remains gated on the fresh DP1 run.
 
 This document records the implementation contract, validation evidence,
 failure history, and operational handoff. It deliberately contains no
@@ -128,9 +129,23 @@ CUTLASS-Python, and TorchInductor cache paths are mounted.
 Do not mount broad `/data` or `/root/.cache`, overlap writers in the same host
 namespace, or delete the cache automatically.
 
+### SecrlEnv task-image preflight
+
+The source-attested `TaskPack` is loaded and its SHA-256 is verified before
+any task-image operation. Service image pins are deduplicated, conflicting
+image IDs are rejected, and each existing or newly pulled image must match its
+exact content ID. Registry-qualified digest references may be pulled; missing
+raw image IDs fail without attempting a pull.
+
+This preflight runs independently on every host before the episode daemon is
+started and before any GPU setup. It checks that `/data` has at least 2 TiB
+free before preflight and before and after every pull. Output is one aggregate
+readiness record; it does not reveal task IDs, service names, or image refs.
+Per-episode image verification remains in place as defense in depth.
+
 ## Validation evidence
 
-The tested source for v56 is
+The PP2 transport source tested by v56 is
 `5aa2f2433ded4e58ae55bb959d22efd2f9188c5b814910c3d096b41fb19969ca`.
 
 Automated validation completed:
@@ -158,7 +173,7 @@ chunk with no overlap.
 
 The component validator does not prove checkpoint load, TMS lifecycle,
 rollout, optimizer step, authoritative checkpoint, or natural end-to-end
-finalization. Those are acceptance milestones for v56.
+finalization. Those remain acceptance milestones for a fresh DP1 run.
 
 ## Failure history and fixes
 
@@ -170,6 +185,7 @@ finalization. Those are acceptance milestones for v56.
 | v52 | Global concrete injection targets did not match later-stage physical local layer 0 | Use PP-local wildcard injection while preserving canonical global identity |
 | v54 | Conversion tasks were discovered from the FP8 rollout layout instead of the BF16 trainer layout | Use `ref_load` for actor and base-publication task Bridges |
 | v55 | A Ray rank vanished at the monolithic 64.5-GiB export/serialization boundary | Replace monolithic export/apply transport with owner shards and bounded sequential chunks |
+| v56 | Daemon-backed rollout could not provision tasks because task images were absent on the hosts | Attest the task pack and prefetch every exact image identity before daemon or GPU startup |
 
 The v55 worker ended with Ray `SYSTEM_ERROR`/EOF and no preserved numeric
 signal. Docker OOM, Ray/host/cgroup memory pressure, GPU Xid, Python traceback,
@@ -185,8 +201,9 @@ The progression is intentionally ordered:
 
 1. Real two-GPU TP1 x PP2 mapping and FP32-master component validation — passed.
 2. Pinned two-node world16 TP8 x PP2 x EP8 validator — passed.
-3. Two-node full16 TP8 x PP2 x EP8 DP1 daemon-backed smoke (v56) — active.
-4. Fresh four-node n4-n7 full32 TP8 x PP2 x EP8 DP2 acceptance — gated on step 3.
+3. Two-node full16 TP8 x PP2 x EP8 DP1 daemon-backed smoke (v56) — reached rollout, then stopped on missing task-image infrastructure.
+4. Fresh two-node DP1 gate with fail-closed task-image preflight — pending.
+5. Fresh four-node n4-n7 full32 TP8 x PP2 x EP8 DP2 acceptance — gated on step 4.
 
 The DP1 gate succeeds only after all of the following are evidenced:
 
@@ -203,9 +220,9 @@ The DP1 gate succeeds only after all of the following are evidenced:
 After success, use an officially prepared, freshly attested run ID for DP2.
 Never restart or reuse failed run state.
 
-## Active gate handoff
+## Latest gate handoff
 
-As of 2026-08-12 02:00 UTC:
+As of 2026-08-12 03:35 UTC:
 
 | Item | Value |
 | --- | --- |
@@ -214,10 +231,10 @@ As of 2026-08-12 02:00 UTC:
 | Plan attestation | `391e37321bf766ad7f9889870ca03dd3ca968637467bedc4968d85027f56d572` |
 | Source attestation | `5aa2f2433ded4e58ae55bb959d22efd2f9188c5b814910c3d096b41fb19969ca` |
 | JIT compatibility | `efeaa0f219199514953bebba61fc1fd6dff5ab4aba75c0b0933807650957dd97` |
-| Monitor | `monitor-staged-pp2-validation-every-minute` |
-| Current stage | TMS backup/offload completed substantially; process groups/model state restoring |
-| Current health | both containers/daemons running; no OOM or fatal signature |
-| Pending | export, `INIT_PARAMS`, rollout, apply, optimizer, checkpoint, final cut, natural exits |
+| Monitor | `monitor-staged-pp2-validation-every-minute` (hourly schedule) |
+| Last completed stage | model load, TMS lifecycle, PP2 restore, and entry into daemon-backed rollout |
+| Current health | v56 stopped safely; containers, daemons, and syncer stopped; GPUs idle; state preserved |
+| Next step | officially prepare a fresh DP1 run with the task-image preflight, then require rollout, apply, optimizer, checkpoint, final cut, and natural exits |
 
 Operational state is stored under run-ID-specific SSH-harness, daemon, and TMS
 roots. Preserve those roots. Do not collect until a safe disk check has passed.
