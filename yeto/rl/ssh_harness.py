@@ -22,11 +22,8 @@ from . import (
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
-    SGLANG_BUNDLE_PATH,
-    SGLANG_BUNDLE_SHA256,
     SGLANG_COMMIT,
     SGLANG_REPOSITORY,
-    SGLANG_UPSTREAM_COMMIT,
 )
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
@@ -386,7 +383,6 @@ def _jit_cache_compatibility_sha256(plan: dict[str, Any]) -> str:
         "docker_image": plan.get("docker_image"),
         "miles_commit": plan.get("miles", {}).get("commit"),
         "sglang_commit": plan.get("sglang", {}).get("commit"),
-        "sglang_bundle_sha256": plan.get("sglang", {}).get("bundle_sha256"),
         "mounts": list(JIT_CACHE_MOUNTS),
     }
     return hashlib.sha256(_canonical_json(identity).encode()).hexdigest()
@@ -515,10 +511,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise HarnessError("plan does not use the current pinned Miles revision")
     if plan.get("sglang") != {
         "repository": SGLANG_REPOSITORY,
-        "upstream_commit": SGLANG_UPSTREAM_COMMIT,
         "commit": SGLANG_COMMIT,
-        "bundle_path": SGLANG_BUNDLE_PATH,
-        "bundle_sha256": SGLANG_BUNDLE_SHA256,
     }:
         raise HarnessError("plan does not use the current pinned SGLang revision")
     jit_cache = plan.get("jit_cache")
@@ -949,10 +942,7 @@ def prepare(namespace) -> Path:
         },
         "sglang": {
             "repository": SGLANG_REPOSITORY,
-            "upstream_commit": SGLANG_UPSTREAM_COMMIT,
             "commit": SGLANG_COMMIT,
-            "bundle_path": SGLANG_BUNDLE_PATH,
-            "bundle_sha256": SGLANG_BUNDLE_SHA256,
         },
         "source_sha256": args.source_sha256,
         "reward_sha256": args.reward_sha256,
@@ -1295,9 +1285,6 @@ def _attest_local(plan: dict[str, Any]) -> None:
             or file_sha256(patch_path) != tms_patch["binary_sha256"]
         ):
             raise HarnessError("TMS preload patch changed after the plan was prepared")
-    sglang_bundle = REPO_ROOT / plan["sglang"]["bundle_path"]
-    if file_sha256(sglang_bundle) != plan["sglang"]["bundle_sha256"]:
-        raise HarnessError("SGLang bundle changed after the plan was prepared")
     if (
         python_spec_sha256(plan["learner"]["reward_function"], base_dir=REPO_ROOT)
         != plan["reward_sha256"]
@@ -1476,10 +1463,7 @@ if [ ! -d "$RUN/sglang/.git" ]; then
   git clone --no-checkout {shlex.quote(sglang['repository'])} "$RUN/sglang"
 fi
 git -C "$RUN/sglang" remote set-url origin {shlex.quote(SGLANG_REPOSITORY)}
-SGLANG_BUNDLE="$RUN/source/{SGLANG_BUNDLE_PATH}"
-printf '%s  %s\n' {shlex.quote(sglang['bundle_sha256'])} "$SGLANG_BUNDLE" | sha256sum --check -
-git -C "$RUN/sglang" fetch --depth 1 origin {shlex.quote(sglang['upstream_commit'])}
-git -C "$RUN/sglang" fetch "$SGLANG_BUNDLE" HEAD
+git -C "$RUN/sglang" fetch --depth 1 origin {shlex.quote(sglang['commit'])}
 git -C "$RUN/sglang" checkout --detach {shlex.quote(sglang['commit'])}
 """
 

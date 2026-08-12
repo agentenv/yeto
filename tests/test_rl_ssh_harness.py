@@ -12,11 +12,8 @@ from yeto.rl import (
     MILES_IMAGE,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
-    SGLANG_BUNDLE_PATH,
-    SGLANG_BUNDLE_SHA256,
     SGLANG_COMMIT,
     SGLANG_REPOSITORY,
-    SGLANG_UPSTREAM_COMMIT,
     ssh_harness,
 )
 from yeto.rl.bridge import _write_round_audit
@@ -82,10 +79,7 @@ def _plan():
         },
         "sglang": {
             "repository": SGLANG_REPOSITORY,
-            "upstream_commit": SGLANG_UPSTREAM_COMMIT,
             "commit": SGLANG_COMMIT,
-            "bundle_path": SGLANG_BUNDLE_PATH,
-            "bundle_sha256": SGLANG_BUNDLE_SHA256,
         },
         "source_sha256": "c" * 64,
         "reward_sha256": "e" * 64,
@@ -536,11 +530,10 @@ def test_miles_and_sglang_pins_include_the_compatible_builds():
     assert not hasattr(rl_config, "MILES_UPSTREAM_COMMIT")
     assert not hasattr(rl_config, "MILES_BUNDLE_PATH")
     assert not hasattr(rl_config, "MILES_BUNDLE_SHA256")
-    assert SGLANG_UPSTREAM_COMMIT == "95d4d69665f1712bc6fd3f503af2655b9b301e13"
     assert SGLANG_COMMIT == "e1b57eb8e7749235c987cc6b1b2824ce3265369b"
-    assert SGLANG_BUNDLE_SHA256 == (
-        "fdb6bd844507a33d870fb28857011c62ab6ec97d96425a020f42aeb0115582f9"
-    )
+    assert not hasattr(rl_config, "SGLANG_UPSTREAM_COMMIT")
+    assert not hasattr(rl_config, "SGLANG_BUNDLE_PATH")
+    assert not hasattr(rl_config, "SGLANG_BUNDLE_SHA256")
     assert MILES_IMAGE == (
         "docker:ghcr.io/alexeisie/miles@sha256:"
         "5be3e0722c7b0174c3c1a5526064872987c7bc367af700117a3589efbd6b19bd"
@@ -1239,10 +1232,11 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     assert "MILES_BUNDLE" not in setup
     assert f'git -C "$RUN/sglang" remote set-url origin {SGLANG_REPOSITORY}' in setup
     assert '"$RUN/sglang"' in setup
-    assert SGLANG_BUNDLE_PATH in setup
-    assert SGLANG_BUNDLE_SHA256 in setup
-    assert SGLANG_UPSTREAM_COMMIT in setup
-    assert 'git -C "$RUN/sglang" fetch "$SGLANG_BUNDLE" HEAD' in setup
+    assert "SGLANG_BUNDLE" not in setup
+    assert (
+        f'git -C "$RUN/sglang" fetch --depth 1 origin {SGLANG_COMMIT}'
+        in setup
+    )
     assert setup.count("docker image inspect") == 2
     assert setup.index("docker image inspect") < setup.index("docker pull")
     for script in (head, worker):
