@@ -243,7 +243,7 @@ class PullRequest:
 class BcastFragment:
     fragment_id: int
     version: int
-    data: bytes  # raw tensor bytes in the session dtype
+    data: bytes | memoryview  # raw tensor buffer in the session dtype
     received_at: float = field(default_factory=time.monotonic, compare=False)
 
 
@@ -251,7 +251,7 @@ class BcastFragment:
 class FinalFragment:
     fragment_id: int
     version: int
-    data: bytes  # authoritative coordinator tensor bytes, always f32
+    data: bytes | memoryview  # authoritative coordinator tensor buffer, always f32
 
 
 @dataclass(frozen=True)
@@ -862,7 +862,9 @@ class SyncerClient:
         except KeyError:
             raise ValueError(f"unexpected syncer message type {msg_type}") from None
 
-    def _reassemble(self, gen: int, payload: bytes) -> tuple[int, bytes] | None:
+    def _reassemble(
+        self, gen: int, payload: bytes
+    ) -> tuple[int, memoryview] | None:
         if len(payload) < _CHUNK_HEAD.size:
             raise ValueError("chunk header truncated")
         msg_id, total, offset = _CHUNK_HEAD.unpack_from(payload)
@@ -899,12 +901,14 @@ class SyncerClient:
             if filled[0] != total:
                 raise ValueError("chunk byte count exceeds frame length")
             del self._reasm[msg_id]
-        magic, msg_type, length = _HEADER.unpack_from(bytes(buf[: _HEADER.size]))
+        magic, msg_type, length = _HEADER.unpack_from(buf)
         if magic != MAGIC or length != total - _HEADER.size:
             raise ValueError("corrupt reassembled frame")
-        return msg_type, bytes(buf[_HEADER.size :])
+        return msg_type, memoryview(buf)[_HEADER.size :]
 
-    def _dispatch(self, gen: int, msg_type: int, payload: bytes) -> None:
+    def _dispatch(
+        self, gen: int, msg_type: int, payload: bytes | memoryview
+    ) -> None:
         with self._lock:
             if gen != self._gen:
                 return  # late message from a dead group
@@ -914,7 +918,9 @@ class SyncerClient:
             # then publish a stale terminal manifest or shutdown afterward.
             self._dispatch_live(gen, msg_type, payload)
 
-    def _dispatch_live(self, gen: int, msg_type: int, payload: bytes) -> None:
+    def _dispatch_live(
+        self, gen: int, msg_type: int, payload: bytes | memoryview
+    ) -> None:
         if msg_type == MSG_ERROR:
             message = payload.decode("utf-8", errors="replace")
             self._protocol_failed(
