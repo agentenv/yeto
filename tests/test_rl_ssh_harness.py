@@ -979,6 +979,7 @@ def test_deepseek_v4_nodes_use_the_verified_sglang_environment():
         "--ulimit core=-1",
         "PYTHONFAULTHANDLER=1",
         "TORCH_SHOW_CPP_STACKTRACES=1",
+        "TORCH_DISABLE_ADDR2LINE=1",
         "TORCH_NCCL_DUMP_ON_TIMEOUT=1",
         "TORCH_NCCL_TRACE_BUFFER_SIZE=1048576",
         "TORCH_FR_BUFFER_SIZE=1048576",

@@ -1887,6 +1887,7 @@ done
         diagnostics_env = (
             "  --env PYTHONFAULTHANDLER=1 "
             "--env TORCH_SHOW_CPP_STACKTRACES=1 "
+            "--env TORCH_DISABLE_ADDR2LINE=1 "
             "--env TORCH_NCCL_DUMP_ON_TIMEOUT=1 "
             "--env TORCH_NCCL_TRACE_BUFFER_SIZE=1048576 "
             "--env TORCH_FR_BUFFER_SIZE=1048576 "
