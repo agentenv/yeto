@@ -526,7 +526,7 @@ def test_plan_rejects_previous_pipeline_identity_schema():
 
 
 def test_miles_and_sglang_pins_include_the_compatible_builds():
-    assert MILES_COMMIT == "c252d87f12a2b3b11aa953e4d514a6aceb1a91b5"
+    assert MILES_COMMIT == "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
     assert not hasattr(rl_config, "MILES_UPSTREAM_COMMIT")
     assert not hasattr(rl_config, "MILES_BUNDLE_PATH")
     assert not hasattr(rl_config, "MILES_BUNDLE_SHA256")
