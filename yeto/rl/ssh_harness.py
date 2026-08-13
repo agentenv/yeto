@@ -174,6 +174,13 @@ def _target_host(target: str) -> str:
     return target.rsplit("@", 1)[-1]
 
 
+def _syncer_host(plan: dict[str, Any]) -> str:
+    target = plan.get("syncer_host")
+    if target is None:
+        target = plan["islands"][0]["hosts"][0]
+    return _validate_target(str(target))
+
+
 def _validate_address(value: str) -> tuple[str, int]:
     host, separator, raw_port = value.rpartition(":")
     if not separator or not _HOST.fullmatch(host):
@@ -497,6 +504,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise HarnessError("all acceptance islands must record H200")
     if len(set(all_hosts)) != len(all_hosts):
         raise HarnessError("each SSH target may belong to only one island")
+    _syncer_host(plan)
     _, port = _validate_address(str(plan.get("syncer_address", "")))
     if plan.get("syncer_port") != port:
         raise HarnessError("plan syncer port does not match its address")
@@ -859,8 +867,10 @@ def prepare(namespace) -> Path:
     remote_root = _validate_remote_path(namespace.remote_root, "--remote-root")
     if namespace.remote_env_file is not None:
         _validate_remote_path(namespace.remote_env_file, "--remote-env-file")
+    syncer_host = getattr(namespace, "syncer_host", None) or islands[0]["hosts"][0]
+    _validate_target(syncer_host)
     syncer_address = namespace.syncer_address or (
-        f"{_target_host(islands[0]['hosts'][0])}:{SYNCER_PORT}"
+        f"{_target_host(syncer_host)}:{SYNCER_PORT}"
     )
     _, syncer_port = _validate_address(syncer_address)
     network_interface = str(getattr(namespace, "network_interface", "eno3"))
@@ -931,6 +941,7 @@ def prepare(namespace) -> Path:
         "remote_env_file": namespace.remote_env_file,
         "ssh_options": list(namespace.ssh_option),
         "islands": islands,
+        "syncer_host": syncer_host,
         "syncer_address": syncer_address,
         "syncer_port": syncer_port,
         "network_interface": network_interface,
@@ -1089,7 +1100,7 @@ def prepare(namespace) -> Path:
     _validate_plan(plan)
     _write_plan(plan_path, plan)
     print(f"prepared {plan_path}")
-    print(f"syncer {syncer_address} on {islands[0]['hosts'][0]}")
+    print(f"syncer {syncer_address} on {syncer_host}")
     return plan_path
 
 
@@ -1270,6 +1281,12 @@ def _all_hosts(plan: dict[str, Any]) -> list[str]:
     return [host for island in plan["islands"] for host in island["hosts"]]
 
 
+def _deployment_hosts(plan: dict[str, Any]) -> list[str]:
+    hosts = _all_hosts(plan)
+    syncer_host = _syncer_host(plan)
+    return hosts if syncer_host in hosts else [*hosts, syncer_host]
+
+
 def _attest_local(plan: dict[str, Any]) -> None:
     from ..provenance import file_sha256, python_spec_sha256, verify_source_tree_sha256
 
@@ -1321,8 +1338,10 @@ def deploy(plan_path: str | Path) -> None:
         "build/",
         "dist/",
     )
-    for target in _all_hosts(plan):
-        data_directory = '\nmkdir -p "$RUN/data"' if local_data is not None else ""
+    learner_hosts = set(_all_hosts(plan))
+    for target in _deployment_hosts(plan):
+        deploy_data = local_data is not None and target in learner_hosts
+        data_directory = '\nmkdir -p "$RUN/data"' if deploy_data else ""
         initialize = f"""set -euo pipefail
 {_remote_vars(plan)}
 if [ -f "$RUN/control/plan.sha256" ]; then
@@ -1361,7 +1380,7 @@ fi
                 f"{target}:{plan['remote_run']}/control/plan.json",
             ]
         )
-        if local_data is not None:
+        if deploy_data:
             source = Path(local_data)
             is_directory = source.is_dir()
             _run(
@@ -1385,7 +1404,7 @@ mv "$RUN/control/deploying.sha256" "$RUN/control/plan.sha256" 2>/dev/null || \
   test "$(cat "$RUN/control/plan.sha256")" = {shlex.quote(digest)}
 """,
         )
-    print(f"deployed {plan['run_id']} to {len(_all_hosts(plan))} host(s)")
+    print(f"deployed {plan['run_id']} to {len(_deployment_hosts(plan))} host(s)")
 
 
 def _host_setup_script(plan: dict[str, Any], gpus_per_node: int) -> str:
@@ -1468,6 +1487,19 @@ git -C "$RUN/sglang" checkout --detach {shlex.quote(sglang['commit'])}
 """
 
 
+def _syncer_host_setup_script(plan: dict[str, Any]) -> str:
+    return f"""set -euo pipefail
+{_remote_vars(plan)}
+test "$(cat "$RUN/control/plan.sha256")" = {shlex.quote(_plan_digest(plan))}
+command -v docker >/dev/null
+docker info >/dev/null
+if ! docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null 2>&1; then
+  docker pull {shlex.quote(plan['docker_image'])}
+fi
+docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
+"""
+
+
 def _build_syncer(plan: dict[str, Any]) -> None:
     script = f"""set -euo pipefail
 {_remote_vars(plan)}
@@ -1505,7 +1537,7 @@ command -v cc >/dev/null
 mkdir -p "$RUN/state"
 install -m 0755 "$RUN/source/syncer/target/release/yeto-syncer" "$RUN/state/yeto-syncer"
 """
-    _ssh(plan, plan["islands"][0]["hosts"][0], script)
+    _ssh(plan, _syncer_host(plan), script)
 
 
 def _argv(command: Sequence[str], *options: tuple[str, Any]) -> list[str]:
@@ -1573,7 +1605,7 @@ printf '%s\n' "$PID" > "$PID_FILE"
 sleep 1
 kill -0 "$PID"
 """
-    _ssh(plan, plan["islands"][0]["hosts"][0], script)
+    _ssh(plan, _syncer_host(plan), script)
 
 
 def _wait_for_syncer(plan: dict[str, Any], timeout_s: int = 120) -> None:
@@ -1999,6 +2031,8 @@ def start(plan_path: str | Path) -> None:
     for island in plan["islands"]:
         for target in island["hosts"]:
             _ssh(plan, target, _host_setup_script(plan, island["gpus_per_node"]))
+    if _syncer_host(plan) not in _all_hosts(plan):
+        _ssh(plan, _syncer_host(plan), _syncer_host_setup_script(plan))
     _build_syncer(plan)
     _start_syncer(plan)
     _wait_for_syncer(plan)
@@ -2009,11 +2043,26 @@ def start(plan_path: str | Path) -> None:
 
 def status(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
+    if _syncer_host(plan) not in _all_hosts(plan):
+        result = _ssh(
+            plan,
+            _syncer_host(plan),
+            f"""set -u
+{_remote_vars(plan)}
+echo host={shlex.quote(_syncer_host(plan))} role=syncer
+if [ -s "$RUN/state/syncer.pid" ] && kill -0 "$(cat "$RUN/state/syncer.pid")" 2>/dev/null; then echo syncer=running; else echo syncer=stopped; fi
+""",
+            capture=True,
+            check=False,
+        )
+        print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
     for learner_id, island in enumerate(plan["islands"]):
         for node_id, target in enumerate(island["hosts"]):
             name = _container_name(plan, learner_id, node_id)
             syncer = ""
-            if learner_id == node_id == 0:
+            if learner_id == node_id == 0 and _syncer_host(plan) == target:
                 syncer = """if [ -s "$RUN/state/syncer.pid" ] && kill -0 "$(cat "$RUN/state/syncer.pid")" 2>/dev/null; then echo syncer=running; else echo syncer=stopped; fi
 """
             result = _ssh(
@@ -2060,7 +2109,7 @@ def kill_syncer(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
     _ssh(
         plan,
-        plan["islands"][0]["hosts"][0],
+        _syncer_host(plan),
         f"""set -euo pipefail
 {_remote_vars(plan)}
 test -s "$RUN/state/syncer.pid"
@@ -2095,7 +2144,7 @@ def stop(plan_path: str | Path) -> None:
             )
     _ssh(
         plan,
-        plan["islands"][0]["hosts"][0],
+        _syncer_host(plan),
         f"""set -u
 {_remote_vars(plan)}
 if [ -s "$RUN/state/syncer.pid" ]; then kill -TERM -- -"$(cat "$RUN/state/syncer.pid")" 2>/dev/null || true; fi
@@ -2156,7 +2205,7 @@ def collect(plan_path: str | Path) -> Path:
             "-az",
             "-e",
             _rsync_shell(plan),
-            f"{plan['islands'][0]['hosts'][0]}:{plan['remote_run']}/state/",
+            f"{_syncer_host(plan)}:{plan['remote_run']}/state/",
             f"{syncer}/",
         ]
     )
@@ -2520,6 +2569,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated SSH nodes for one island; repeat for each island",
     )
     prepare_parser.add_argument("--gpus-per-node", type=int, default=1)
+    prepare_parser.add_argument(
+        "--syncer-host",
+        default=None,
+        help="SSH target that runs the syncer; defaults to the first learner host",
+    )
     prepare_parser.add_argument("--syncer-address", default=None)
     prepare_parser.add_argument("--network-interface", default="eno3")
     prepare_parser.add_argument("--run-id", required=True)

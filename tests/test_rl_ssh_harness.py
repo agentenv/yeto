@@ -590,7 +590,8 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
         remote_env_file=None,
         jit_cache_root="/data/yeto-rl/jit-cache",
         model_manifest_sha256=None,
-        syncer_address=None,
+        syncer_address="100.64.0.6:29400",
+        syncer_host="root@syncer0",
         output_dir=tmp_path / "run",
         ssh_option=[],
     )
@@ -603,6 +604,8 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
     assert plan["learner"]["data"] == "/workspace/data/dataset.jsonl"
     assert plan["learner"]["data_local_path"] == str(prompts.resolve())
     assert plan["learner"]["data_revision"] is None
+    assert plan["syncer_address"] == "100.64.0.6:29400"
+    assert plan["syncer_host"] == "root@syncer0"
     assert plan["jit_cache"] == ssh_harness._jit_cache_contract(
         "/data/yeto-rl/jit-cache", plan
     )
@@ -668,6 +671,40 @@ def test_deploy_marks_partial_copy_for_idempotent_retry(tmp_path, monkeypatch):
     source_rsync = next(command for command in commands if "--delete" in command)
     assert ".env" in source_rsync and ".env.*" in source_rsync
     assert "compare-report/" in source_rsync
+
+
+def test_deploy_includes_a_dedicated_syncer_host(tmp_path, monkeypatch):
+    plan = _plan()
+    plan["syncer_host"] = "root@syncer0"
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    targets = []
+    commands = []
+    monkeypatch.setattr(ssh_harness, "_require_program", lambda name: None)
+    monkeypatch.setattr(ssh_harness, "_attest_local", lambda value: None)
+    monkeypatch.setattr(
+        ssh_harness, "_run", lambda command, **kwargs: commands.append(command)
+    )
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda plan, target, script, **kwargs: targets.append(target),
+    )
+
+    ssh_harness.deploy(plan_path)
+
+    assert set(targets) == {
+        "alice@a0",
+        "alice@a1",
+        "alice@b0",
+        "alice@b1",
+        "root@syncer0",
+    }
+    source_copies = [command for command in commands if "--delete" in command]
+    assert len(source_copies) == 5
+    assert any(
+        command[-1].startswith("root@syncer0:") for command in source_copies
+    )
 
 
 def test_deploy_copies_local_prompts_to_every_host_and_mounts_read_only(
@@ -760,6 +797,83 @@ def test_kill_syncer_waits_for_the_old_process_before_restart(tmp_path, monkeypa
     assert 'kill -KILL -- -"$PID"' in scripts[0]
     assert 'kill -0 "$PID"' in scripts[0]
     assert "syncer did not exit after SIGKILL" in scripts[0]
+
+
+def test_syncer_lifecycle_uses_the_dedicated_host(tmp_path, monkeypatch):
+    plan = _plan()
+    plan["syncer_host"] = "root@syncer0"
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    calls = []
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda plan, target, script, **kwargs: calls.append((target, script)),
+    )
+
+    ssh_harness._build_syncer(plan)
+    ssh_harness._start_syncer(plan)
+    ssh_harness.kill_syncer(plan_path)
+
+    assert [target for target, _ in calls] == ["root@syncer0"] * 3
+
+
+def test_syncer_host_defaults_to_the_first_learner_and_is_validated():
+    plan = _plan()
+    assert ssh_harness._syncer_host(plan) == "alice@a0"
+
+    plan["syncer_host"] = "root@syncer0"
+    ssh_harness._validate_plan(plan)
+    assert ssh_harness._syncer_host(plan) == "root@syncer0"
+
+    plan["syncer_host"] = "root@bad host"
+    with pytest.raises(HarnessError, match="invalid SSH target"):
+        ssh_harness._validate_plan(plan)
+
+
+def test_status_and_stop_use_the_dedicated_syncer_host(tmp_path, monkeypatch):
+    plan = _plan()
+    plan["syncer_host"] = "root@syncer0"
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    calls = []
+
+    def fake_ssh(plan, target, script, **kwargs):
+        calls.append((target, script))
+        return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(ssh_harness, "_ssh", fake_ssh)
+
+    ssh_harness.status(plan_path)
+    ssh_harness.stop(plan_path)
+
+    syncer_calls = [target for target, script in calls if "syncer.pid" in script]
+    assert syncer_calls == ["root@syncer0", "root@syncer0"]
+
+
+def test_collect_reads_syncer_state_from_the_dedicated_host(tmp_path, monkeypatch):
+    plan = _plan()
+    plan["syncer_host"] = "root@syncer0"
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    commands = []
+    monkeypatch.setattr(ssh_harness, "_require_program", lambda name: None)
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda *args, **kwargs: SimpleNamespace(stdout="[]", stderr=""),
+    )
+    monkeypatch.setattr(
+        ssh_harness, "_run", lambda command, **kwargs: commands.append(command)
+    )
+
+    ssh_harness.collect(plan_path)
+
+    assert any(
+        command[-2].startswith("root@syncer0:")
+        and command[-2].endswith("/state/")
+        for command in commands
+    )
 
 
 def test_syncer_source_is_rehashed_remotely_before_build(monkeypatch):
@@ -1363,6 +1477,43 @@ def test_start_attests_secrlenv_daemons_before_host_gpu_setup(tmp_path, monkeypa
     ssh_harness.start(path)
 
     assert events[:3] == ["deploy", "daemon", "host_setup"]
+
+
+def test_start_sets_up_a_dedicated_syncer_without_gpu_requirements(
+    tmp_path, monkeypatch
+):
+    plan = _plan()
+    plan["syncer_host"] = "root@syncer0"
+    path = _write_plan(tmp_path / "plan.json", plan)
+    calls = []
+
+    monkeypatch.setattr(ssh_harness, "deploy", lambda _path: None)
+    monkeypatch.setattr(ssh_harness, "_start_secrlenv_daemons", lambda _plan: None)
+    monkeypatch.setattr(
+        ssh_harness, "_host_setup_script", lambda *_args: "learner-setup"
+    )
+    monkeypatch.setattr(
+        ssh_harness,
+        "_syncer_host_setup_script",
+        lambda _plan: "syncer-setup",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda plan, target, script, **kwargs: calls.append((target, script)),
+    )
+    monkeypatch.setattr(ssh_harness, "_build_syncer", lambda _plan: None)
+    monkeypatch.setattr(ssh_harness, "_start_syncer", lambda _plan: None)
+    monkeypatch.setattr(ssh_harness, "_wait_for_syncer", lambda _plan: None)
+    monkeypatch.setattr(ssh_harness, "_start_island", lambda *_args: None)
+
+    ssh_harness.start(path)
+
+    assert calls.count(("root@syncer0", "syncer-setup")) == 1
+    assert all(
+        target != "root@syncer0" for target, script in calls if script == "learner-setup"
+    )
 
 
 def test_verification_requires_an_exited_zero_status_container():
