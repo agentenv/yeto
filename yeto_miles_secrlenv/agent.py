@@ -12,6 +12,7 @@ import os
 import random
 import re
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -35,8 +36,76 @@ from .reward import (
 
 LOGGER = logging.getLogger(__name__)
 _TASK_ID = re.compile(r"CVE-\d{4}-\d{4,}")
-_ACTIVE_EPISODES: set[str] = set()
+_EPISODE_PHASES: dict[str, str] = {}
 _ACTIVE_LOCK = Lock()
+
+
+def _register_episode(episode_id: str) -> None:
+    with _ACTIVE_LOCK:
+        _EPISODE_PHASES[episode_id] = "driving"
+
+
+def _claim_episode_finalization(episode_id: str) -> bool:
+    """Transfer one episode from policy driving to evaluation ownership."""
+
+    with _ACTIVE_LOCK:
+        phase = _EPISODE_PHASES.get(episode_id)
+        if phase == "finalizing":
+            return True
+        if phase != "driving":
+            return False
+        _EPISODE_PHASES[episode_id] = "finalizing"
+        return True
+
+
+def _claim_episode_cleanup(episode_id: str) -> bool:
+    """Claim cleanup unless the oversampling abort hook already owns it."""
+
+    with _ACTIVE_LOCK:
+        phase = _EPISODE_PHASES.get(episode_id)
+        if phase is None or phase == "aborting":
+            return False
+        _EPISODE_PHASES[episode_id] = "aborting"
+        return True
+
+
+def _claim_driving_episodes_for_abort() -> list[str]:
+    """Atomically claim only episodes that have not entered evaluation."""
+
+    with _ACTIVE_LOCK:
+        episode_ids = [
+            episode_id
+            for episode_id, phase in _EPISODE_PHASES.items()
+            if phase == "driving"
+        ]
+        for episode_id in episode_ids:
+            _EPISODE_PHASES[episode_id] = "aborting"
+        return episode_ids
+
+
+def _restore_aborting_episodes(episode_ids: list[str]) -> None:
+    """Return unclosed abort claims to policy ownership for a later retry."""
+
+    with _ACTIVE_LOCK:
+        for episode_id in episode_ids:
+            if _EPISODE_PHASES.get(episode_id) == "aborting":
+                _EPISODE_PHASES[episode_id] = "driving"
+
+
+def _release_episode(episode_id: str) -> None:
+    with _ACTIVE_LOCK:
+        _EPISODE_PHASES.pop(episode_id, None)
+
+
+async def _await_policy_and_claim_finalization(
+    episode_id: str, policy_result: Awaitable[str]
+) -> str:
+    """Claim evaluation ownership before a completed policy await can yield."""
+
+    try:
+        return await policy_result
+    finally:
+        _claim_episode_finalization(episode_id)
 
 
 def _verify_pinned_source() -> None:
@@ -527,21 +596,23 @@ async def run(
             episode_id = episode.get("episode_id")
             if not isinstance(episode_id, str):
                 raise EpisodeClientError("episode daemon returned no episode ID")
-            with _ACTIVE_LOCK:
-                _ACTIVE_EPISODES.add(episode_id)
+            _register_episode(episode_id)
 
             rollout_timeout = _positive_env(
                 "SECRLENV_MAX_ROLLOUT_TIME_SECONDS", 3600.0
             )
             try:
                 outcome_status = await asyncio.wait_for(
-                    _drive_policy(
-                        policy,
-                        client,
-                        episode,
-                        request_kwargs,
-                        metrics,
-                        max_seq_len=max_seq_len,
+                    _await_policy_and_claim_finalization(
+                        episode_id,
+                        _drive_policy(
+                            policy,
+                            client,
+                            episode,
+                            request_kwargs,
+                            metrics,
+                            max_seq_len=max_seq_len,
+                        ),
                     ),
                     timeout=rollout_timeout,
                 )
@@ -559,31 +630,38 @@ async def run(
                 infrastructure_failure = True
                 LOGGER.exception("secrlenv policy/tool loop failed")
 
-            started = time.monotonic()
-            try:
-                evaluation = await asyncio.shield(client.evaluate(episode_id))
-            except Exception:
-                infrastructure_failure = True
-                LOGGER.exception("secrlenv evaluation failed")
-            finally:
-                metrics.evaluate_time = time.monotonic() - started
+            if _claim_episode_finalization(episode_id):
+                started = time.monotonic()
+                try:
+                    evaluation = await asyncio.shield(client.evaluate(episode_id))
+                except Exception:
+                    infrastructure_failure = True
+                    LOGGER.exception("secrlenv evaluation failed")
+                finally:
+                    metrics.evaluate_time = time.monotonic() - started
 
-            started = time.monotonic()
-            try:
-                await asyncio.shield(client.close(episode_id))
-            except Exception:
+                started = time.monotonic()
+                try:
+                    await asyncio.shield(client.close(episode_id))
+                except Exception:
+                    infrastructure_failure = True
+                    LOGGER.exception("secrlenv teardown failed")
+                finally:
+                    _release_episode(episode_id)
+                    metrics.close_time = time.monotonic() - started
+                    metrics.total_tool_time += (
+                        metrics.create_time
+                        + metrics.evaluate_time
+                        + metrics.close_time
+                    )
+            else:
                 infrastructure_failure = True
-                LOGGER.exception("secrlenv teardown failed")
-            finally:
-                with _ACTIVE_LOCK:
-                    _ACTIVE_EPISODES.discard(episode_id)
-                metrics.close_time = time.monotonic() - started
-                metrics.total_tool_time += (
-                    metrics.create_time + metrics.evaluate_time + metrics.close_time
+                LOGGER.warning(
+                    "secrlenv episode was claimed by the abort hook before evaluation"
                 )
     except asyncio.CancelledError:
         LOGGER.warning("secrlenv rollout cancelled")
-        if episode_id is not None:
+        if episode_id is not None and _claim_episode_cleanup(episode_id):
             try:
                 async with EpisodeClient(total_timeout_seconds=180.0) as cleanup_client:
                     await asyncio.shield(cleanup_client.close(episode_id))
@@ -592,8 +670,7 @@ async def run(
                     "cancelled episode cleanup failed for %s", episode_id, exc_info=True
                 )
             finally:
-                with _ACTIVE_LOCK:
-                    _ACTIVE_EPISODES.discard(episode_id)
+                _release_episode(episode_id)
         raise
     except Exception:
         LOGGER.exception("secrlenv episode failed before a trustworthy verdict")
@@ -630,8 +707,7 @@ async def run(
 async def abort(_args: Any = None) -> None:
     """Miles oversampling abort hook: tear down every in-flight local episode."""
 
-    with _ACTIVE_LOCK:
-        episode_ids = list(_ACTIVE_EPISODES)
+    episode_ids = _claim_driving_episodes_for_abort()
     if not episode_ids:
         return
     try:
@@ -650,11 +726,11 @@ async def abort(_args: Any = None) -> None:
                         "abort teardown failed for %s", episode_id, exc_info=True
                     )
                 finally:
-                    with _ACTIVE_LOCK:
-                        _ACTIVE_EPISODES.discard(episode_id)
+                    _release_episode(episode_id)
 
             await asyncio.gather(
                 *(close_one(episode_id) for episode_id in episode_ids)
             )
     except Exception:
+        _restore_aborting_episodes(episode_ids)
         LOGGER.warning("could not initialize secrlenv abort client", exc_info=True)

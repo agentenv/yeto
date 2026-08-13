@@ -67,6 +67,77 @@ class FakeEpisodeClient:
         return {"accepted": True}
 
 
+def test_episode_finalization_cannot_be_claimed_by_abort():
+    episode_id = "f" * 24
+    agent._register_episode(episode_id)
+    try:
+        assert agent._claim_episode_finalization(episode_id)
+        assert agent._claim_driving_episodes_for_abort() == []
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_abort_claim_preempts_finalization_once():
+    episode_id = "a" * 24
+    agent._register_episode(episode_id)
+    try:
+        assert agent._claim_driving_episodes_for_abort() == [episode_id]
+        assert not agent._claim_episode_finalization(episode_id)
+        assert not agent._claim_episode_cleanup(episode_id)
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_policy_completion_claims_finalization_before_abort_callback():
+    episode_id = "b" * 24
+    abort_claims = []
+
+    async def complete_policy():
+        asyncio.get_running_loop().call_soon(
+            lambda: abort_claims.extend(
+                agent._claim_driving_episodes_for_abort()
+            )
+        )
+        return "completed"
+
+    async def scenario():
+        result = await agent._await_policy_and_claim_finalization(
+            episode_id, complete_policy()
+        )
+        await asyncio.sleep(0)
+        return result
+
+    agent._register_episode(episode_id)
+    try:
+        assert asyncio.run(scenario()) == "completed"
+        assert abort_claims == []
+        assert agent._claim_episode_finalization(episode_id)
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_abort_client_initialization_failure_restores_episode(monkeypatch):
+    episode_id = "c" * 24
+
+    class FailingEpisodeClient:
+        def __init__(self, *, total_timeout_seconds):
+            assert total_timeout_seconds == 180.0
+
+        async def __aenter__(self):
+            raise RuntimeError("client unavailable")
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+    monkeypatch.setattr(agent, "EpisodeClient", FailingEpisodeClient)
+    agent._register_episode(episode_id)
+    try:
+        asyncio.run(agent.abort())
+        assert agent._claim_episode_finalization(episode_id)
+    finally:
+        agent._release_episode(episode_id)
+
+
 def _tool_call(identifier, name, arguments):
     return {
         "id": identifier,
