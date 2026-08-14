@@ -810,14 +810,21 @@ def test_apply_transport_rejects_missing_and_duplicate_tensors(
         )
 
 
-def test_v1_actor_group_merges_export_shards_and_sends_top_level_chunk_refs(
+def test_v1_actor_group_compacts_flat_views_before_sending_chunk_refs(
     monkeypatch,
 ):
     import asyncio
 
     monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
     monkeypatch.setattr(runtime, "NUM_LAYERS", 1)
-    tensors = _tiny_hybrid_tensors()
+    source = _tiny_hybrid_tensors()
+    flat = torch.zeros(1024, dtype=torch.float32)
+    tensors = {}
+    offset = 0
+    for name, value in source.items():
+        flat[offset : offset + value.numel()].copy_(value.reshape(-1))
+        tensors[name] = flat[offset : offset + value.numel()].view_as(value)
+        offset += value.numel()
     names = tuple(tensors)
     fragments = (
         runtime._TrainableStateFragment(
@@ -918,6 +925,11 @@ def test_v1_actor_group_merges_export_shards_and_sends_top_level_chunk_refs(
     )
     assert reset == 4
     assert len(fake_ray.objects) == 3
+    assert all(
+        tensor.untyped_storage().nbytes()
+        == tensor.numel() * tensor.element_size()
+        for tensor in fake_ray.objects[-1].values()
+    )
     assert [call[0][1] for call in calls] == [
         "begin",
         "begin",

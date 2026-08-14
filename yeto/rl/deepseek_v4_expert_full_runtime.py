@@ -1748,7 +1748,9 @@ def install_on_actor_group(module: ModuleType) -> None:
         ):
             raise RuntimeError("Megatron ranks disagree on hybrid chunk manifest")
         for chunk_index, chunk_names in enumerate(manifest.chunk_tensor_names):
-            chunk = {name: state.tensors[name] for name in chunk_names}
+            # Wire-decoded tensors share one model-sized flat storage.  Compact
+            # only this bounded chunk before Ray serializes its backing storage.
+            chunk = {name: state.tensors[name].clone() for name in chunk_names}
             chunk_ref = ray.put(chunk)
             try:
                 chunk_results = await asyncio.gather(
