@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -812,6 +813,7 @@ def test_apply_transport_rejects_missing_and_duplicate_tensors(
 
 def test_v1_actor_group_compacts_flat_views_before_sending_chunk_refs(
     monkeypatch,
+    capsys,
 ):
     import asyncio
 
@@ -947,6 +949,41 @@ def test_v1_actor_group_compacts_flat_views_before_sending_chunk_refs(
     assert calls[2][2] == calls[3][2] == {}
     assert calls[4][1:] == ((), {})
     assert calls[5][1:] == ((), {})
+    output = capsys.readouterr().out
+    markers = [
+        json.loads(line.split(" ", 1)[1])
+        for line in output.splitlines()
+        if line.startswith("[yeto-rl-policy-apply-progress] ")
+    ]
+    assert markers == [
+        {
+            "completed_chunks": 1,
+            "event": "rl_policy_apply_progress",
+            "phase": "chunk_progress",
+            "policy_version": 6,
+            "total_chunks": 1,
+        },
+        {
+            "event": "rl_policy_apply_progress",
+            "phase": "chunks_finished",
+            "policy_version": 6,
+            "total_chunks": 1,
+        },
+    ]
+    assert not any(name in output for name in names)
+
+
+def test_apply_progress_is_monotonic_final_and_bounded():
+    total = 1_000
+    completed = [
+        value
+        for value in range(1, total + 1)
+        if runtime._apply_progress_due(value, total)
+    ]
+
+    assert completed == sorted(set(completed))
+    assert completed[-1] == total
+    assert len(completed) <= runtime._MAX_APPLY_PROGRESS_MARKERS + 1
 
 
 def test_actor_places_export_fragment_in_bounded_ray_objects(monkeypatch):

@@ -1561,6 +1561,8 @@ def _syncer_argv(plan: dict[str, Any]) -> list[str]:
         ("--port", plan["syncer_port"]),
         ("--learners", _learner_count(plan)),
         ("--quorum", _learner_count(plan)),
+        ("--quorum-timeout-s", 900),
+        ("--final-ack-timeout-s", 3600),
         ("--grace-ms", 0),
         ("--pipeline", learner.get("pipeline", 1) if decoupled else 1),
         (

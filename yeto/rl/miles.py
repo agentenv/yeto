@@ -848,13 +848,22 @@ class MilesPolicySync:
         digest.update(expected.layout_hash.encode("ascii"))
         digest.update(expected.policy_version.to_bytes(8, "little"))
         try:
-            for group in groups:
+            total_groups = len(groups)
+            for group_index, group in enumerate(groups):
                 tensors = exported.take_tensors(group)
                 for spec in group:
                     value = tensors[spec.name]
                     digest.update(spec.name.encode("utf-8"))
                     digest.update(memoryview(value.numpy()).cast("B"))
                 del tensors
+                completed_groups = group_index + 1
+                if self._policy_progress_due(completed_groups, total_groups):
+                    self._record_policy_apply_progress(
+                        expected.policy_version,
+                        "hash_progress",
+                        completed_groups=completed_groups,
+                        total_groups=total_groups,
+                    )
             exported.finish()
         except BaseException:
             exported.discard()
@@ -882,15 +891,18 @@ class MilesPolicySync:
     async def _apply_global_policy(self, state: CanonicalLoraState) -> None:
         from miles.backends.megatron_utils.trainable_state import make_trainable_state
 
+        self._record_policy_apply_progress(state.policy_version, "begin")
         reset_count = await self.actor_model.apply_trainable_state(
             make_trainable_state(state.policy_version, state.tensors),
             reset_optimizer=True,
         )
+        self._record_policy_apply_progress(state.policy_version, "apply_finished")
         export_chunks = getattr(
             self.actor_model,
             "export_trainable_state_chunks",
             None,
         )
+        self._record_policy_apply_progress(state.policy_version, "hash_begin")
         if callable(export_chunks):
             groups = self._strict_export_groups()
             exported = await export_chunks(self._group_names(groups))
@@ -909,6 +921,7 @@ class MilesPolicySync:
                 "policy_hash_mismatch_after_apply",
                 "policy hash mismatch after trainer apply",
             )
+        self._record_policy_apply_progress(state.policy_version, "hash_finished")
         await self._set_rollout_version(state.policy_version)
         self.optimizer_reset_count += 1
         self._append_event(
@@ -1180,6 +1193,32 @@ class MilesPolicySync:
 
     def _append_event(self, event: dict[str, Any]) -> None:
         _append_rl_event(self.args, event)
+
+    @staticmethod
+    def _policy_progress_due(completed: int, total: int) -> bool:
+        if completed <= 0 or completed > total or total <= 0:
+            return False
+        stride = max(1, (total + 15) // 16)
+        return completed == total or completed % stride == 0
+
+    def _record_policy_apply_progress(
+        self,
+        policy_version: int,
+        phase: str,
+        **progress: int,
+    ) -> None:
+        marker = {
+            "event": "rl_policy_apply_progress",
+            "phase": phase,
+            "policy_version": int(policy_version),
+            **{name: int(value) for name, value in progress.items()},
+        }
+        self._append_event(marker)
+        print(
+            "[yeto-rl-policy-apply-progress] "
+            + json.dumps(marker, sort_keys=True, separators=(",", ":")),
+            flush=True,
+        )
 
     def _record_strict_failure(self, error: StrictRlInvariantError) -> None:
         _record_strict_failure(self.args, error, self.bridge)

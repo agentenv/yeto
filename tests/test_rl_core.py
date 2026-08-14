@@ -1244,7 +1244,11 @@ def test_policy_sync_leaves_actor_offload_lifecycle_to_miles():
     assert calls == ["initialize"]
 
 
-def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch):
+def test_miles_policy_hook_uses_public_trainable_state_api(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
     canonical = state(1, tensors())
     trainable_state = types.ModuleType(
         "miles.backends.megatron_utils.trainable_state"
@@ -1308,9 +1312,25 @@ def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch
     asyncio.run(hook._apply_global_policy(canonical))
 
     assert versions == ["yeto:1"]
-    event = json.loads((tmp_path / "events.jsonl").read_text())
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text().splitlines()
+    ]
+    progress = [
+        event for event in events if event["event"] == "rl_policy_apply_progress"
+    ]
+    assert [event["phase"] for event in progress] == [
+        "begin",
+        "apply_finished",
+        "hash_begin",
+        "hash_finished",
+    ]
+    event = next(event for event in events if event["event"] == "rl_policy_apply")
     assert event["reset_parameter_count"] == 2
     assert event["sync/global_policy_hash"]
+    output = capsys.readouterr().out
+    assert output.count("[yeto-rl-policy-apply-progress] ") == 4
+    assert not any(name in output for name in canonical.tensors)
 
 
 def test_miles_strict_path_releases_both_base_aliases_before_waiting_for_cut():

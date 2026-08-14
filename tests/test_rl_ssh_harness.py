@@ -1475,6 +1475,8 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     syncer = _syncer_argv(plan)
     assert syncer[syncer.index("--learners") + 1] == "2"
     assert syncer[syncer.index("--quorum") + 1] == "2"
+    assert syncer[syncer.index("--quorum-timeout-s") + 1] == "900"
+    assert syncer[syncer.index("--final-ack-timeout-s") + 1] == "3600"
     assert syncer[syncer.index("--learner-weight") + 1] == "equal"
     assert "--mark-final-checkpoint" not in syncer
 

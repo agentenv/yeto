@@ -71,6 +71,8 @@ pub struct Config {
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
     pub quorum_timeout_s: u64,
+    /// Bounded wait for learners to apply and acknowledge the terminal cut.
+    pub final_ack_timeout_s: u64,
     pub total_steps: u64,
     pub outer_lr: f32,
     pub outer_momentum: f32,
@@ -2083,7 +2085,7 @@ async fn finalize_learners(
         }
     }
 
-    let deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+    let deadline = Instant::now() + Duration::from_secs(cfg.final_ack_timeout_s);
     let mut acknowledged: HashMap<u32, Member> = HashMap::new();
     while acknowledged.len() < expected.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -2098,7 +2100,7 @@ async fn finalize_learners(
                 missing.sort_unstable();
                 anyhow::anyhow!(
                     "finalization timed out after {}s waiting for learner acknowledgements: {:?}",
-                    cfg.quorum_timeout_s,
+                    cfg.final_ack_timeout_s,
                     missing
                 )
             })?
@@ -2577,6 +2579,7 @@ mod tests {
             sync_interval_steps: 0.0,
             delta_correction: false,
             quorum_timeout_s: 1,
+            final_ack_timeout_s: 1,
             total_steps,
             outer_lr: 1.0,
             outer_momentum: 0.0,
@@ -2763,6 +2766,65 @@ mod tests {
             FinalAckDisposition::Accepted
         );
         assert_eq!(acknowledged, HashMap::from([(0, first), (1, reconnected)]));
+    }
+
+    #[tokio::test]
+    async fn final_ack_after_quorum_timeout_but_before_final_timeout_succeeds() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group.clone());
+        let expected = HashSet::from([group.member.learner_id]);
+        let (event_sender, mut events) = mpsc::channel(1);
+        let delayed_member = group.member;
+        let delayed_step = state.global_step;
+        let sender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+            event_sender
+                .send(Event::FinalAck {
+                    member: delayed_member,
+                    global_step: delayed_step,
+                })
+                .await
+                .unwrap();
+        });
+        let mut cfg = round_test_config(0);
+        cfg.quorum_timeout_s = 1;
+        cfg.final_ack_timeout_s = 3;
+        let started = Instant::now();
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected)
+            .await
+            .unwrap();
+        sender.await.unwrap();
+
+        assert!(started.elapsed() >= Duration::from_millis(1_000));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn missing_final_ack_fails_at_final_timeout() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group.clone());
+        let expected = HashSet::from([group.member.learner_id]);
+        let (_event_sender, mut events) = mpsc::channel(1);
+        let mut cfg = round_test_config(0);
+        cfg.quorum_timeout_s = 3;
+        cfg.final_ack_timeout_s = 1;
+        let started = Instant::now();
+
+        let error = finalize_learners(&cfg, &state, &mut events, &registry, &expected)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains(
+                "finalization timed out after 1s waiting for learner acknowledgements: [0]"
+            ),
+            "unexpected error: {error:#}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]
