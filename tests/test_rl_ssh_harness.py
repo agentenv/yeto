@@ -795,7 +795,7 @@ def test_kill_syncer_waits_for_the_old_process_before_restart(tmp_path, monkeypa
 
     ssh_harness.kill_syncer(plan_path)
 
-    assert "systemctl kill --signal=SIGKILL --kill-whom=all" in scripts[0]
+    assert "systemctl kill --signal=SIGKILL --kill-who=all" in scripts[0]
     assert "exit_status=9" in scripts[0]
     assert 'kill -KILL -- -"$PID"' in scripts[0]
     assert 'kill -0 "$PID"' in scripts[0]

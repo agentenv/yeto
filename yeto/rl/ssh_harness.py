@@ -2301,7 +2301,7 @@ EVENT_TAPE="$RUN/state/events.jsonl"
 {_legacy_syncer_pid_function()}
 if command -v systemctl >/dev/null && systemctl is-active --quiet "$UNIT"; then
   PID="$(systemctl show --property=MainPID --value "$UNIT")"
-  systemctl kill --signal=SIGKILL --kill-whom=all "$UNIT"
+  systemctl kill --signal=SIGKILL --kill-who=all "$UNIT"
   TMP="$EXIT_FILE.tmp.$$"
   umask 077
   printf 'result=signal\nexit_code=killed\nexit_status=9\ntimestamp=%s\n' \
