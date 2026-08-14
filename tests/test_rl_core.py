@@ -371,6 +371,34 @@ def _bridge_config(tmp_path="/tmp/yeto-rl-test-events.jsonl"):
     )
 
 
+def test_strict_bridge_start_streams_initial_policy_in_canonical_order():
+    bridge = StrictRlBridge(_VersionedRuntime(), _bridge_config())
+    started = []
+    parts = []
+
+    class Client:
+        def start(self):
+            started.append(True)
+
+        def send_init(self, *_args):
+            raise AssertionError("strict startup must not build a whole INIT payload")
+
+        def send_init_parts(self, fragment_id, tensor_parts):
+            assert fragment_id == 0
+            parts.extend(bytes(part) for part in tensor_parts)
+            return True
+
+    bridge.client = Client()
+    bridge.start()
+
+    expected = b"".join(
+        memoryview(bridge.initial.tensors[spec.name].numpy()).cast("B")
+        for spec in bridge.specs
+    )
+    assert started == [True]
+    assert b"".join(parts) == expected
+
+
 def test_policy_delta_rejects_exported_policy_version_drift():
     runtime = _VersionedRuntime()
     bridge = StrictRlBridge(runtime, _bridge_config())

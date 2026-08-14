@@ -95,6 +95,25 @@ def test_streaming_push_reassembles_to_exact_legacy_inner_frame():
     assert max(envelope_sizes) <= CHUNK_SIZE + _HEADER.size + _CHUNK_HEAD.size
 
 
+def test_streaming_init_reassembles_to_exact_legacy_inner_frame():
+    tensor = bytes(range(16))
+    legacy = _client(len(tensor))
+    streamed = _client(len(tensor))
+    tail = bytearray(tensor[11:])
+
+    legacy.send_init(0, tensor)
+    assert streamed.send_init_parts(
+        0,
+        [tensor[:3], memoryview(tensor)[3:11], tail],
+    )
+    tail[:] = b"z" * len(tail)
+
+    legacy_inner, _, _ = _queued_inner(legacy)
+    streamed_inner, _, envelope_sizes = _queued_inner(streamed)
+    assert streamed_inner == legacy_inner
+    assert max(envelope_sizes) <= CHUNK_SIZE + _HEADER.size + _CHUNK_HEAD.size
+
+
 def test_streaming_push_consumes_parts_incrementally_and_stripes_bounded_chunks():
     tensor_bytes = 2 * CHUNK_SIZE
     client = _client(tensor_bytes, streams=3)

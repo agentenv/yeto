@@ -551,6 +551,25 @@ class SyncerClient:
             )
         self._send_large(MSG_INIT_PARAMS, struct.pack("<I", fragment_id) + tensor_bytes)
 
+    def send_init_parts(
+        self,
+        fragment_id: int,
+        tensor_parts: Iterable[bytes | bytearray | memoryview],
+    ) -> bool:
+        """Stream INIT_PARAMS without materializing its complete tensor."""
+        if not 0 <= fragment_id < self.layout.num_fragments:
+            raise ValueError(f"INIT_PARAMS for unknown fragment {fragment_id}")
+        expected = _tensor_nbytes(
+            bulk_dtype(self.dtype), self.layout.fragments[fragment_id].numel
+        )
+        return self._send_large_parts(
+            MSG_INIT_PARAMS,
+            struct.pack("<I", fragment_id),
+            tensor_parts,
+            expected,
+            label=f"INIT_PARAMS fragment {fragment_id}",
+        )
+
     def push_fragment(
         self,
         fragment_id: int,

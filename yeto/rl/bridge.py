@@ -26,7 +26,6 @@ from .core import (
     canonical_state,
     canonical_state_from_owned_tensors,
     canonical_state_from_validated_owned_tensors,
-    flat_tensor,
     policy_delta,
     tensors_from_flat_owned,
 )
@@ -326,13 +325,13 @@ class StrictRlBridge:
         if self.config.learner_id == 0:
             if self.initial is None:
                 raise RuntimeError("RL initial policy was released before INIT_PARAMS")
-            self.client.send_init(
-                0,
-                pack_tensor(
-                    flat_tensor(self.initial.tensors, self.specs),
-                    DTYPE_F32,
-                ),
-            )
+
+            def tensor_parts():
+                for spec in self.specs:
+                    value = self.initial.tensors[spec.name]
+                    yield memoryview(value.numpy()).cast("B")
+
+            self.client.send_init_parts(0, tensor_parts())
 
     def wait_for_global_policy(self, version: int) -> CanonicalLoraState:
         while (
