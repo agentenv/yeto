@@ -9,7 +9,7 @@ import re
 import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -47,6 +47,77 @@ class _TrainableStateFragment:
     ess_ratio: float | None = None
     pg_clipfrac: float | None = None
     train_seconds: float | None = None
+
+
+@dataclass
+class _ChunkedExportFragment:
+    """One rank's export metadata plus bounded Ray object references."""
+
+    source_rank: int
+    policy_version: int
+    expected_names: tuple[str, ...]
+    chunk_tensor_names: tuple[tuple[str, ...], ...]
+    chunk_tensor_bytes: tuple[int, ...]
+    chunk_refs: list[Any]
+    is_metrics_source: bool = False
+    train_rollout_kl: float | None = None
+    ess_ratio: float | None = None
+    pg_clipfrac: float | None = None
+    train_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class _OwnedTrainableState:
+    """Canonical exported state whose fresh CPU tensor storage is transferable."""
+
+    policy_version: int
+    layout_hash: str
+    tensors: Mapping[str, Any]
+    train_rollout_kl: float | None = None
+    ess_ratio: float | None = None
+    pg_clipfrac: float | None = None
+    train_seconds: float | None = None
+    _yeto_owned_tensors: str = "canonical-v1"
+
+
+@dataclass
+class _ChunkedPolicyExport:
+    """Validated owner-sharded export whose payload remains in Ray objects."""
+
+    policy_version: int
+    expected_names: tuple[str, ...]
+    fragments: tuple[_ChunkedExportFragment, ...]
+    train_rollout_kl: float | None = None
+    ess_ratio: float | None = None
+    pg_clipfrac: float | None = None
+    train_seconds: float | None = None
+    _remaining_names: set[str] = field(init=False, repr=False)
+    _yeto_chunked_export: str = "owner-sharded-v1"
+
+    def __post_init__(self) -> None:
+        self._remaining_names = set(self.expected_names)
+
+    def take_tensors(self, expected_specs, *, resolve_ref=None):
+        return _take_chunked_export_tensors(
+            self,
+            expected_specs,
+            resolve_ref=resolve_ref,
+        )
+
+    def finish(self) -> None:
+        if self._remaining_names:
+            raise RuntimeError("chunked hybrid export was not completely consumed")
+        if any(
+            reference is not None
+            for fragment in self.fragments
+            for reference in fragment.chunk_refs
+        ):
+            raise RuntimeError("chunked hybrid export retained a Ray object reference")
+
+    def discard(self) -> None:
+        for fragment in self.fragments:
+            fragment.chunk_refs[:] = [None] * len(fragment.chunk_refs)
+        self._remaining_names.clear()
 
 
 @dataclass(frozen=True)
@@ -300,6 +371,325 @@ def _tensor_bytes(name: str, tensor: Any) -> int:
     if size is None or element_size is None:
         raise TypeError(f"hybrid policy tensor {name!r} is not a tensor")
     return int(size()) * int(element_size())
+
+
+def _chunk_export_fragment_for_ray(
+    fragment: _TrainableStateFragment,
+    *,
+    ray_module=None,
+    max_chunk_bytes: int = _RAY_STATE_CHUNK_BYTES,
+    tensor_groups: tuple[tuple[str, ...], ...] | None = None,
+) -> _ChunkedExportFragment:
+    """Move a rank-local export into bounded Ray objects before returning it."""
+
+    if not isinstance(fragment, _TrainableStateFragment):
+        raise TypeError("Megatron rank produced an invalid hybrid state fragment")
+    if not isinstance(fragment.tensors, dict):
+        raise TypeError("hybrid export fragment does not own mutable tensor storage")
+    if ray_module is None:
+        import ray as ray_module
+
+    if tensor_groups is None:
+        groups = (tuple(fragment.tensors),)
+    else:
+        flattened = tuple(name for group in tensor_groups for name in group)
+        if len(set(flattened)) != len(flattened) or set(flattened) != set(
+            fragment.expected_names
+        ):
+            raise RuntimeError(
+                "chunked hybrid export groups do not exactly cover the policy"
+            )
+        groups = tensor_groups
+    chunk_names = []
+    chunk_sizes = []
+    for group in groups:
+        local = {
+            name: fragment.tensors[name]
+            for name in group
+            if name in fragment.tensors
+        }
+        if not local:
+            continue
+        _names, local_chunks, local_sizes = _plan_state_chunks(
+            SimpleNamespace(tensors=local),
+            max_chunk_bytes=max_chunk_bytes,
+        )
+        chunk_names.extend(local_chunks)
+        chunk_sizes.extend(local_sizes)
+    chunk_names = tuple(chunk_names)
+    chunk_sizes = tuple(chunk_sizes)
+    chunk_refs = []
+    for names_in_chunk in chunk_names:
+        chunk = {name: fragment.tensors[name] for name in names_in_chunk}
+        chunk_refs.append(ray_module.put(chunk))
+        for name in names_in_chunk:
+            fragment.tensors.pop(name)
+        del chunk
+    if fragment.tensors:
+        raise RuntimeError("chunked hybrid export did not consume its tensor storage")
+    return _ChunkedExportFragment(
+        source_rank=fragment.source_rank,
+        policy_version=fragment.policy_version,
+        expected_names=fragment.expected_names,
+        chunk_tensor_names=chunk_names,
+        chunk_tensor_bytes=chunk_sizes,
+        chunk_refs=chunk_refs,
+        is_metrics_source=fragment.is_metrics_source,
+        **_state_metrics(fragment),
+    )
+
+
+def _validate_chunked_export_metadata(fragments):
+    indexed_fragments = [
+        (rank, fragment)
+        for rank, fragment in enumerate(fragments)
+        if fragment is not None
+    ]
+    fragments = [fragment for _rank, fragment in indexed_fragments]
+    if not fragments:
+        raise RuntimeError("no Megatron rank exported a hybrid state fragment")
+    if any(not isinstance(fragment, _ChunkedExportFragment) for fragment in fragments):
+        raise TypeError("Megatron rank returned an invalid chunked export fragment")
+    if any(rank != fragment.source_rank for rank, fragment in indexed_fragments):
+        raise RuntimeError(
+            "hybrid state fragment source rank does not match result rank"
+        )
+    ranks = [fragment.source_rank for fragment in fragments]
+    if len(set(ranks)) != len(ranks):
+        raise RuntimeError("duplicate Megatron rank in hybrid state fragments")
+    roots = [fragment for fragment in fragments if fragment.source_rank == 0]
+    if len(roots) != 1:
+        raise RuntimeError("hybrid state fragments must contain rank zero exactly once")
+    root = roots[0]
+    expected_names = root.expected_names
+    if len(set(expected_names)) != len(expected_names):
+        raise RuntimeError("hybrid state fragment contains duplicate expected names")
+    if any(fragment.policy_version != root.policy_version for fragment in fragments):
+        raise RuntimeError("Megatron ranks disagree on hybrid policy version")
+    if any(fragment.expected_names != expected_names for fragment in fragments):
+        raise RuntimeError("Megatron ranks disagree on hybrid tensor layout")
+    metrics_sources = [fragment for fragment in fragments if fragment.is_metrics_source]
+    if len(metrics_sources) != 1:
+        raise RuntimeError(
+            "hybrid state fragments must contain one Megatron metrics source"
+        )
+    metrics_source = metrics_sources[0]
+    if any(
+        any(value is not None for value in _state_metrics(fragment).values())
+        for fragment in fragments
+        if not fragment.is_metrics_source
+    ):
+        raise RuntimeError("non-main rank returned hybrid training metrics")
+
+    exported_names = []
+    for fragment in fragments:
+        if not (
+            fragment.chunk_tensor_names
+            and len(fragment.chunk_tensor_names)
+            == len(fragment.chunk_tensor_bytes)
+            == len(fragment.chunk_refs)
+        ):
+            raise RuntimeError("chunked hybrid export manifest is inconsistent")
+        names = tuple(
+            name
+            for names_in_chunk in fragment.chunk_tensor_names
+            for name in names_in_chunk
+        )
+        if (
+            not names
+            or any(
+                not names_in_chunk
+                or names_in_chunk != tuple(sorted(names_in_chunk))
+                for names_in_chunk in fragment.chunk_tensor_names
+            )
+            or len(set(names)) != len(names)
+        ):
+            raise RuntimeError(
+                "chunked hybrid export does not follow canonical tensor order"
+            )
+        if any(
+            size <= 0 or size > _RAY_STATE_CHUNK_BYTES
+            for size in fragment.chunk_tensor_bytes
+        ):
+            raise RuntimeError("chunked hybrid export exceeds the transport cap")
+        exported_names.extend(names)
+    if len(set(exported_names)) != len(exported_names):
+        raise RuntimeError("hybrid state fragments contain a duplicate tensor")
+    actual_names = set(exported_names)
+    expected_set = set(expected_names)
+    missing = sorted(expected_set - actual_names)
+    extra = sorted(actual_names - expected_set)
+    if missing or extra:
+        raise RuntimeError(
+            "hybrid state fragments do not exactly cover the policy: "
+            f"missing={missing[:1]}, extra={extra[:1]}"
+        )
+    return sorted(fragments, key=lambda item: item.source_rank), root, metrics_source
+
+
+def _prepare_chunked_policy_export(fragments) -> _ChunkedPolicyExport:
+    fragments, root, metrics_source = _validate_chunked_export_metadata(fragments)
+    return _ChunkedPolicyExport(
+        policy_version=root.policy_version,
+        expected_names=root.expected_names,
+        fragments=tuple(fragments),
+        **_state_metrics(metrics_source),
+    )
+
+
+def _take_chunked_export_tensors(
+    export: _ChunkedPolicyExport,
+    expected_specs,
+    *,
+    resolve_ref=None,
+):
+    """Resolve and relinquish exactly one pre-aligned logical tensor group."""
+
+    import torch
+
+    if resolve_ref is None:
+        import ray
+
+        resolve_ref = ray.get
+    specs = tuple(expected_specs)
+    names = tuple(spec.name for spec in specs)
+    if not names or len(set(names)) != len(names):
+        raise RuntimeError("chunked export request has invalid tensor specs")
+    requested = set(names)
+    if not requested <= export._remaining_names:
+        raise RuntimeError("chunked export tensor group was already consumed or unknown")
+    spec_by_name = {spec.name: spec for spec in specs}
+    tensors = {}
+    for fragment in export.fragments:
+        for chunk_index, (chunk_names, expected_bytes, reference) in enumerate(
+            zip(
+                fragment.chunk_tensor_names,
+                fragment.chunk_tensor_bytes,
+                fragment.chunk_refs,
+                strict=True,
+            )
+        ):
+            if reference is None or not requested.intersection(chunk_names):
+                continue
+            if not set(chunk_names) <= requested:
+                raise RuntimeError(
+                    "chunked hybrid export was not aligned to the requested group"
+                )
+            try:
+                chunk = resolve_ref(reference)
+                if not isinstance(chunk, Mapping) or tuple(chunk) != chunk_names:
+                    raise RuntimeError(
+                        "hybrid export chunk does not match its tensor manifest"
+                    )
+                for name, tensor in chunk.items():
+                    spec = spec_by_name[name]
+                    if not isinstance(tensor, torch.Tensor):
+                        raise TypeError(f"hybrid policy tensor {name!r} is not a tensor")
+                    value = tensor.detach() if tensor.requires_grad else tensor
+                    if (
+                        value.device.type != "cpu"
+                        or value.dtype != torch.float32
+                        or not value.is_contiguous()
+                    ):
+                        value = value.to(
+                            device="cpu",
+                            dtype=torch.float32,
+                        ).contiguous()
+                    if tuple(value.shape) != spec.shape or value.numel() != spec.numel:
+                        raise RuntimeError(
+                            f"hybrid policy tensor {name!r} changed shape"
+                        )
+                    if not torch.isfinite(value).all().item():
+                        raise ValueError(f"{name!r} contains NaN or Inf")
+                    tensors[name] = value
+                actual_bytes = sum(
+                    _tensor_bytes(name, tensor) for name, tensor in tensors.items()
+                    if name in chunk_names
+                )
+                if actual_bytes != expected_bytes:
+                    raise RuntimeError(
+                        "hybrid export chunk violates its size manifest"
+                    )
+                del chunk
+            finally:
+                fragment.chunk_refs[chunk_index] = None
+    if set(tensors) != requested:
+        missing = sorted(requested - set(tensors))
+        raise RuntimeError(
+            f"chunked hybrid export did not resolve requested tensors: {missing[:1]}"
+        )
+    export._remaining_names.difference_update(requested)
+    return {name: tensors[name] for name in names}
+
+
+def _merge_chunked_export_fragments(
+    module: ModuleType,
+    fragments,
+    *,
+    resolve_ref=None,
+):
+    """Resolve a distributed export one bounded chunk at a time."""
+
+    import torch
+
+    if resolve_ref is None:
+        import ray
+
+        resolve_ref = ray.get
+    fragments, root, metrics_source = _validate_chunked_export_metadata(fragments)
+    tensors = {}
+    for fragment in fragments:
+        for chunk_index, (names, expected_bytes, reference) in enumerate(
+            zip(
+                fragment.chunk_tensor_names,
+                fragment.chunk_tensor_bytes,
+                fragment.chunk_refs,
+                strict=True,
+            )
+        ):
+            try:
+                chunk = resolve_ref(reference)
+                if not isinstance(chunk, Mapping) or not chunk:
+                    raise RuntimeError("hybrid export chunk is empty or invalid")
+                if tuple(chunk) != names:
+                    raise RuntimeError(
+                        "hybrid export chunk does not match canonical tensor order"
+                    )
+                canonical = {}
+                for name, tensor in chunk.items():
+                    if not isinstance(tensor, torch.Tensor):
+                        raise TypeError(f"hybrid policy tensor {name!r} is not a tensor")
+                    value = tensor.detach() if tensor.requires_grad else tensor
+                    if (
+                        value.device.type != "cpu"
+                        or value.dtype != torch.float32
+                        or not value.is_contiguous()
+                    ):
+                        value = value.to(device="cpu", dtype=torch.float32).contiguous()
+                    if not torch.isfinite(value).all().item():
+                        raise ValueError(f"{name!r} contains NaN or Inf")
+                    canonical[name] = value
+                actual_bytes = sum(
+                    _tensor_bytes(name, tensor) for name, tensor in canonical.items()
+                )
+                if actual_bytes != expected_bytes:
+                    raise RuntimeError("hybrid export chunk violates its size manifest")
+                tensors.update(canonical)
+                del canonical, chunk
+            finally:
+                # Drop the producer-owned object as soon as its canonical
+                # tensors have been retained.  If Ray deserialized by copy,
+                # this releases that transport copy before the next chunk.
+                fragment.chunk_refs[chunk_index] = None
+    tensors = dict(sorted(tensors.items()))
+    _validate_hybrid_names(tensors, _expert_count())
+    layout_hash = module._layout_hash(tensors)
+    return _OwnedTrainableState(
+        policy_version=root.policy_version,
+        layout_hash=layout_hash,
+        tensors=tensors,
+        **_state_metrics(metrics_source),
+    )
 
 
 def _chunk_state_for_ray(
@@ -1256,11 +1646,25 @@ def install_on_actor(module: ModuleType) -> None:
         return result
 
     def export_trainable_state(self):
-        state = module.export_external_trainable_state(
+        fragment = module.export_external_trainable_state(
             self,
             policy_version=getattr(self, "_external_policy_version", 0),
         )
-        return state
+        if fragment is None:
+            return None
+        return _chunk_export_fragment_for_ray(fragment)
+
+    def export_trainable_state_chunks(self, tensor_groups):
+        fragment = module.export_external_trainable_state(
+            self,
+            policy_version=getattr(self, "_external_policy_version", 0),
+        )
+        if fragment is None:
+            return None
+        return _chunk_export_fragment_for_ray(
+            fragment,
+            tensor_groups=tuple(tuple(group) for group in tensor_groups),
+        )
 
     def apply_trainable_state(self, state, *, reset_optimizer):
         reset_count = module.apply_external_trainable_state(
@@ -1291,6 +1695,9 @@ def install_on_actor(module: ModuleType) -> None:
     if original_switch_model is not None:
         module.MegatronTrainRayActor._switch_model = _switch_model
     module.MegatronTrainRayActor.export_trainable_state = export_trainable_state
+    module.MegatronTrainRayActor.export_trainable_state_chunks = (
+        export_trainable_state_chunks
+    )
     module.MegatronTrainRayActor.apply_trainable_state = apply_trainable_state
     module.MegatronTrainRayActor.begin_chunked_trainable_state = (
         begin_chunked_trainable_state
@@ -1312,7 +1719,14 @@ def install_on_actor_group(module: ModuleType) -> None:
         from miles.backends.megatron_utils import trainable_state as state_module
 
         fragments = await self._broadcast("export_trainable_state")
-        return _merge_export_fragments(state_module, fragments)
+        return _merge_chunked_export_fragments(state_module, fragments)
+
+    async def export_trainable_state_chunks(self, tensor_groups):
+        fragments = await self._broadcast(
+            "export_trainable_state_chunks",
+            tensor_groups,
+        )
+        return _prepare_chunked_policy_export(fragments)
 
     async def apply_trainable_state(self, state, *, reset_optimizer):
         import asyncio
@@ -1364,6 +1778,9 @@ def install_on_actor_group(module: ModuleType) -> None:
         return results[0]
 
     module.RayTrainGroup.export_trainable_state = export_trainable_state
+    module.RayTrainGroup.export_trainable_state_chunks = (
+        export_trainable_state_chunks
+    )
     module.RayTrainGroup.apply_trainable_state = apply_trainable_state
     module._yeto_expert_full_installed = True
 

@@ -12,6 +12,7 @@ import pytest
 
 from yeto_miles_secrlenv import agent, reward
 from yeto_miles_secrlenv.client import (
+    EpisodeAPIError,
     EpisodeClient,
     EpisodeClientError,
     EpisodeTransportError,
@@ -67,6 +68,20 @@ class FakeEpisodeClient:
         return {"accepted": True}
 
 
+def _install_run_openai(monkeypatch):
+    class RunPolicy:
+        async def close(self):
+            return None
+
+    openai = types.ModuleType("openai")
+    openai.AsyncOpenAI = lambda **_kwargs: RunPolicy()
+    monkeypatch.setitem(sys.modules, "openai", openai)
+
+
+def _run_metadata():
+    return {"task_id": "CVE-2024-1234", "prompt_tier": "l2"}
+
+
 def test_episode_finalization_cannot_be_claimed_by_abort():
     episode_id = "f" * 24
     agent._register_episode(episode_id)
@@ -84,6 +99,17 @@ def test_abort_claim_preempts_finalization_once():
         assert agent._claim_driving_episodes_for_abort() == [episode_id]
         assert not agent._claim_episode_finalization(episode_id)
         assert not agent._claim_episode_cleanup(episode_id)
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_finalizing_episode_cannot_be_claimed_for_cancelled_cleanup():
+    episode_id = "e" * 24
+    agent._register_episode(episode_id)
+    try:
+        assert agent._claim_episode_finalization(episode_id)
+        assert not agent._claim_episode_cleanup(episode_id)
+        assert agent._claim_episode_finalization(episode_id)
     finally:
         agent._release_episode(episode_id)
 
@@ -116,7 +142,508 @@ def test_policy_completion_claims_finalization_before_abort_callback():
         agent._release_episode(episode_id)
 
 
-def test_abort_client_initialization_failure_restores_episode(monkeypatch):
+def test_registered_policy_task_includes_finalization_boundary():
+    episode_id = "6" * 24
+    abort_claims = []
+
+    async def complete_policy():
+        asyncio.get_running_loop().call_soon(
+            lambda: abort_claims.extend(
+                agent._claim_driving_episodes_for_abort()
+            )
+        )
+        return "completed"
+
+    async def scenario():
+        policy_task = asyncio.create_task(
+            agent._await_policy_and_claim_finalization(
+                episode_id, complete_policy()
+            )
+        )
+        agent._register_episode(episode_id, policy_task)
+        result = await asyncio.wait_for(policy_task, timeout=1.0)
+        await asyncio.sleep(0)
+        return result
+
+    try:
+        assert asyncio.run(scenario()) == "completed"
+        assert abort_claims == []
+        assert agent._claim_episode_finalization(episode_id)
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_cancelled_run_can_transfer_its_drained_boundary_to_cleanup():
+    episode_id = "5" * 24
+
+    async def scenario():
+        policy_task = asyncio.create_task(
+            agent._await_policy_and_claim_finalization(
+                episode_id, asyncio.sleep(0, result="completed")
+            )
+        )
+        agent._register_episode(episode_id, policy_task)
+        await policy_task
+        assert not agent._claim_episode_cleanup(episode_id)
+        assert agent._claim_cancelled_policy_cleanup(episode_id, policy_task)
+
+    try:
+        asyncio.run(scenario())
+        assert agent._EPISODE_PHASES[episode_id] == "aborting"
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_run_cancellation_drains_evaluation_before_cleanup_close(monkeypatch):
+    episode_id = "3" * 24
+    evaluation_started = None
+    evaluation_live = False
+    close_observations = []
+
+    class RunClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        async def create(self, _task_id, _tier):
+            return {"episode_id": episode_id, "prompt": "task"}
+
+        async def evaluate(self, value):
+            assert value == episode_id
+            nonlocal evaluation_live
+            evaluation_live = True
+            evaluation_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                evaluation_live = False
+
+        async def close(self, value):
+            assert value == episode_id
+            close_observations.append(evaluation_live)
+            return {}
+
+    async def complete_policy(*_args, **_kwargs):
+        return "completed"
+
+    async def scenario():
+        nonlocal evaluation_started
+        evaluation_started = asyncio.Event()
+        run_task = asyncio.create_task(
+            agent.run("http://127.0.0.1:8000/v1", None, metadata=_run_metadata())
+        )
+        await evaluation_started.wait()
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    _install_run_openai(monkeypatch)
+    monkeypatch.setattr(agent, "EpisodeClient", RunClient)
+    monkeypatch.setattr(agent, "_drive_policy", complete_policy)
+    asyncio.run(scenario())
+    assert close_observations == [False]
+    assert episode_id not in agent._EPISODE_PHASES
+
+
+def test_run_cancellation_drains_normal_close_before_cleanup_retry(monkeypatch):
+    episode_id = "2" * 24
+    first_close_started = None
+    first_close_live = False
+    close_observations = []
+
+    class RunClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        async def create(self, _task_id, _tier):
+            return {"episode_id": episode_id, "prompt": "task"}
+
+        async def evaluate(self, value):
+            assert value == episode_id
+            return {}
+
+        async def close(self, value):
+            assert value == episode_id
+            nonlocal first_close_live
+            close_observations.append(first_close_live)
+            if len(close_observations) == 1:
+                first_close_live = True
+                first_close_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    first_close_live = False
+            assert not first_close_live
+            return {}
+
+    async def complete_policy(*_args, **_kwargs):
+        return "completed"
+
+    async def scenario():
+        nonlocal first_close_started
+        first_close_started = asyncio.Event()
+        run_task = asyncio.create_task(
+            agent.run("http://127.0.0.1:8000/v1", None, metadata=_run_metadata())
+        )
+        await first_close_started.wait()
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    _install_run_openai(monkeypatch)
+    monkeypatch.setattr(agent, "EpisodeClient", RunClient)
+    monkeypatch.setattr(agent, "_drive_policy", complete_policy)
+    asyncio.run(scenario())
+    assert close_observations == [False, False]
+    assert episode_id not in agent._EPISODE_PHASES
+
+
+def test_run_close_failure_retains_cleanup_pending_ownership(monkeypatch):
+    episode_id = "1" * 24
+
+    class RunClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        async def create(self, _task_id, _tier):
+            return {"episode_id": episode_id, "prompt": "task"}
+
+        async def evaluate(self, value):
+            assert value == episode_id
+            return {
+                "task_id": "CVE-2024-1234",
+                "episode_id": episode_id,
+                "reward": 0.0,
+                "passed": False,
+            }
+
+        async def close(self, value):
+            assert value == episode_id
+            raise EpisodeTransportError("close failed")
+
+    async def complete_policy(*_args, **_kwargs):
+        return "completed"
+
+    _install_run_openai(monkeypatch)
+    monkeypatch.setattr(agent, "EpisodeClient", RunClient)
+    monkeypatch.setattr(agent, "_drive_policy", complete_policy)
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "k" * 48)
+    try:
+        result = asyncio.run(
+            agent.run("http://127.0.0.1:8000/v1", None, metadata=_run_metadata())
+        )
+        assert result is not None
+        assert agent._EPISODE_PHASES[episode_id] == "cleanup_pending"
+        assert agent._claim_episodes_and_tasks_for_abort() == [
+            (episode_id, agent._EPISODE_POLICY_TASKS[episode_id])
+        ]
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_second_run_cancellation_drains_cleanup_close_before_handoff(monkeypatch):
+    episode_id = "0" * 24
+    policy_started = None
+    cleanup_close_started = None
+    close_live = False
+    close_observations = []
+
+    class RunClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        async def create(self, _task_id, _tier):
+            return {"episode_id": episode_id, "prompt": "task"}
+
+        async def close(self, value):
+            assert value == episode_id
+            nonlocal close_live
+            close_observations.append(close_live)
+            if len(close_observations) == 1:
+                close_live = True
+                cleanup_close_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    close_live = False
+            assert not close_live
+            return {}
+
+    async def blocked_policy(*_args, **_kwargs):
+        policy_started.set()
+        await asyncio.Event().wait()
+
+    async def scenario():
+        nonlocal policy_started, cleanup_close_started
+        policy_started = asyncio.Event()
+        cleanup_close_started = asyncio.Event()
+        run_task = asyncio.create_task(
+            agent.run("http://127.0.0.1:8000/v1", None, metadata=_run_metadata())
+        )
+        await policy_started.wait()
+        run_task.cancel()
+        await cleanup_close_started.wait()
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        assert not close_live
+        assert agent._EPISODE_PHASES[episode_id] == "cleanup_pending"
+        await agent.abort()
+
+    _install_run_openai(monkeypatch)
+    monkeypatch.setattr(agent, "EpisodeClient", RunClient)
+    monkeypatch.setattr(agent, "_drive_policy", blocked_policy)
+    asyncio.run(scenario())
+    assert close_observations == [False, False]
+    assert episode_id not in agent._EPISODE_PHASES
+
+
+def test_abort_drains_pending_policy_before_close(monkeypatch):
+    episode_id = "d" * 24
+    events = []
+
+    class AbortClient:
+        def __init__(self, *, total_timeout_seconds):
+            assert total_timeout_seconds == 180.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        async def close(self, value):
+            assert value == episode_id
+            assert policy_task.done()
+            events.append("close")
+            return {}
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def pending_policy():
+            events.append("policy_started")
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append("policy_drained")
+
+        nonlocal policy_task
+        policy_task = asyncio.create_task(pending_policy())
+        agent._register_episode(episode_id, policy_task)
+        await started.wait()
+        await agent.abort()
+        assert policy_task.cancelled()
+
+    policy_task = None
+    monkeypatch.setattr(agent, "EpisodeClient", AbortClient)
+    try:
+        asyncio.run(scenario())
+        assert events == ["policy_started", "policy_drained", "close"]
+        assert episode_id not in agent._EPISODE_PHASES
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_abort_close_retries_episode_conflict_without_releasing_ownership(
+    monkeypatch,
+):
+    episode_id = "9" * 24
+    phases = []
+
+    class ConflictClient:
+        async def close(self, value):
+            assert value == episode_id
+            phases.append(agent._EPISODE_PHASES.get(episode_id))
+            if len(phases) < 3:
+                raise EpisodeAPIError(409, "episode_conflict", "still active")
+            return {}
+
+    async def no_wait(_delay):
+        return None
+
+    monkeypatch.setattr(agent.asyncio, "sleep", no_wait)
+    agent._register_episode(episode_id)
+    try:
+        assert agent._claim_driving_episodes_for_abort() == [episode_id]
+        assert asyncio.run(
+            agent._close_aborted_episode(
+                ConflictClient(),
+                episode_id,
+                retry_timeout_seconds=1.0,
+            )
+        )
+        assert phases == ["aborting", "aborting", "aborting"]
+        assert episode_id not in agent._EPISODE_PHASES
+    finally:
+        agent._release_episode(episode_id)
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(409, "episode_conflict"), (500, "internal_error")],
+)
+def test_failed_abort_close_retains_retryable_cleanup_ownership(status, code):
+    episode_id = "8" * 24
+
+    class FailingClient:
+        async def close(self, value):
+            assert value == episode_id
+            raise EpisodeAPIError(status, code, "not closed")
+
+    agent._register_episode(episode_id)
+    try:
+        assert agent._claim_driving_episodes_for_abort() == [episode_id]
+        assert not asyncio.run(
+            agent._close_aborted_episode(
+                FailingClient(),
+                episode_id,
+                retry_timeout_seconds=0.0,
+            )
+        )
+        assert agent._EPISODE_PHASES[episode_id] == "aborting"
+        assert agent._claim_episodes_and_tasks_for_abort() == []
+        agent._mark_episode_cleanup_pending(episode_id)
+        assert agent._EPISODE_PHASES[episode_id] == "cleanup_pending"
+        assert agent._claim_episodes_and_tasks_for_abort() == [(episode_id, None)]
+        assert agent._EPISODE_PHASES[episode_id] == "aborting"
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_failed_close_cannot_be_reclaimed_before_owner_finishes(monkeypatch):
+    episode_id = "4" * 24
+
+    class FailingClient:
+        async def close(self, value):
+            assert value == episode_id
+            raise EpisodeAPIError(500, "internal_error", "not closed")
+
+    class UnexpectedAbortClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("overlapping abort reclaimed live cleanup ownership")
+
+    async def scenario():
+        assert not await agent._close_aborted_episode(
+            FailingClient(),
+            episode_id,
+            retry_timeout_seconds=0.0,
+        )
+        assert agent._EPISODE_PHASES[episode_id] == "aborting"
+        await agent.abort()
+        assert agent._EPISODE_PHASES[episode_id] == "aborting"
+        agent._mark_episode_cleanup_pending(episode_id)
+
+    monkeypatch.setattr(agent, "EpisodeClient", UnexpectedAbortClient)
+    agent._register_episode(episode_id)
+    try:
+        assert agent._claim_driving_episodes_for_abort() == [episode_id]
+        asyncio.run(scenario())
+        assert agent._EPISODE_PHASES[episode_id] == "cleanup_pending"
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_timed_out_policy_drain_retains_live_owner_until_abort_returns():
+    episode_id = "a" * 23 + "0"
+
+    async def scenario():
+        release = asyncio.Event()
+
+        async def slow_cancellation():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        task = asyncio.create_task(slow_cancellation())
+        agent._register_episode(episode_id, task)
+        await asyncio.sleep(0)
+        assert agent._claim_episodes_and_tasks_for_abort() == [(episode_id, task)]
+        assert not await agent._drain_aborted_policy_task(task, timeout_seconds=0.0)
+        assert agent._EPISODE_PHASES[episode_id] == "aborting"
+        assert agent._claim_episodes_and_tasks_for_abort() == []
+        release.set()
+        await task
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_abort_without_claimable_episodes_does_not_initialize_client(monkeypatch):
+    class UnexpectedClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("abort client initialized without cleanup work")
+
+    monkeypatch.setattr(agent, "EpisodeClient", UnexpectedClient)
+    asyncio.run(agent.abort())
+
+
+def test_cancelled_abort_retains_cleanup_pending_ownership(monkeypatch):
+    episode_id = "7" * 24
+
+    class BlockingClient:
+        def __init__(self, *, total_timeout_seconds):
+            assert total_timeout_seconds == 180.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        async def close(self, value):
+            assert value == episode_id
+            close_started.set()
+            await asyncio.Event().wait()
+
+    async def scenario():
+        nonlocal close_started
+        close_started = asyncio.Event()
+        abort_task = asyncio.create_task(agent.abort())
+        await close_started.wait()
+        abort_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await abort_task
+
+    close_started = None
+    monkeypatch.setattr(agent, "EpisodeClient", BlockingClient)
+    agent._register_episode(episode_id)
+    try:
+        asyncio.run(scenario())
+        assert agent._EPISODE_PHASES[episode_id] == "cleanup_pending"
+        assert agent._claim_episodes_and_tasks_for_abort() == [(episode_id, None)]
+    finally:
+        agent._release_episode(episode_id)
+
+
+def test_abort_client_initialization_failure_retains_cleanup_ownership(monkeypatch):
     episode_id = "c" * 24
 
     class FailingEpisodeClient:
@@ -133,7 +660,9 @@ def test_abort_client_initialization_failure_restores_episode(monkeypatch):
     agent._register_episode(episode_id)
     try:
         asyncio.run(agent.abort())
-        assert agent._claim_episode_finalization(episode_id)
+        assert not agent._claim_episode_finalization(episode_id)
+        assert agent._EPISODE_PHASES[episode_id] == "cleanup_pending"
+        assert agent._claim_episodes_and_tasks_for_abort() == [(episode_id, None)]
     finally:
         agent._release_episode(episode_id)
 

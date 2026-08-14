@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -794,6 +795,8 @@ def test_kill_syncer_waits_for_the_old_process_before_restart(tmp_path, monkeypa
 
     ssh_harness.kill_syncer(plan_path)
 
+    assert "systemctl kill --signal=SIGKILL --kill-whom=all" in scripts[0]
+    assert "exit_status=9" in scripts[0]
     assert 'kill -KILL -- -"$PID"' in scripts[0]
     assert 'kill -0 "$PID"' in scripts[0]
     assert "syncer did not exit after SIGKILL" in scripts[0]
@@ -816,6 +819,122 @@ def test_syncer_lifecycle_uses_the_dedicated_host(tmp_path, monkeypatch):
     ssh_harness.kill_syncer(plan_path)
 
     assert [target for target, _ in calls] == ["root@syncer0"] * 3
+
+
+def test_syncer_launch_uses_a_durable_systemd_service(monkeypatch):
+    plan = _plan()
+    plan["syncer_host"] = "root@syncer0"
+    calls = []
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda plan, target, script, **kwargs: calls.append((target, script)),
+    )
+
+    ssh_harness._start_syncer(plan)
+
+    assert len(calls) == 1
+    target, script = calls[0]
+    assert target == "root@syncer0"
+    assert "systemd-run --quiet" in script
+    assert "--service-type=exec" in script
+    assert "--property=StandardInput=null" in script
+    assert "--property=KillMode=mixed" in script
+    assert '"$WRAPPER" "$EXIT_FILE"' in script
+    assert "yeto-rl-syncer-acceptance.service" in script
+    assert 'EXIT_FILE="$RUN/state/syncer.exit"' in script
+    assert "nohup" not in script
+    assert "setsid" not in script
+    assert '[ ! -e "$UNIT_FILE" ] || return 1' in script
+    assert 'ACTUAL_EXE="$(readlink -f "/proc/$PID/exe"' in script
+    assert 'grep -Fqx -- "$CHECKPOINT_PATH"' in script
+    assert 'if [ -n "$LEGACY_PID" ] && [ ! -s "$EXIT_FILE" ]' in script
+    assert 'rm -f "$PID_FILE"' in script
+
+
+@pytest.mark.parametrize(
+    ("child", "returncode", "exit_result", "exit_code", "exit_status"),
+    (
+        (("/bin/sh", "-c", "exit 23"), 23, "exit-code", "exited", "23"),
+        (("/bin/sh", "-c", "kill -TERM $$"), 143, "signal", "killed", "15"),
+    ),
+)
+def test_syncer_service_wrapper_records_a_failed_exit(
+    tmp_path, child, returncode, exit_result, exit_code, exit_status
+):
+    script = ssh_harness._syncer_start_script(_plan())
+    prefix = "cat > \"$WRAPPER\" <<'SH'\n"
+    wrapper_source = script.split(prefix, 1)[1].split("\nSH\n", 1)[0]
+    wrapper = tmp_path / "run-syncer"
+    exit_file = tmp_path / "syncer.exit"
+    wrapper.write_text(wrapper_source)
+    wrapper.chmod(0o700)
+
+    result = ssh_harness.subprocess.run(
+        [str(wrapper), str(exit_file), *child],
+        check=False,
+    )
+
+    assert result.returncode == returncode
+    fields = dict(
+        line.split("=", 1) for line in exit_file.read_text().splitlines()
+    )
+    assert fields["result"] == exit_result
+    assert fields["exit_code"] == exit_code
+    assert fields["exit_status"] == exit_status
+    assert fields["timestamp"].endswith("Z")
+    assert not list(tmp_path.glob("syncer.exit.tmp.*"))
+
+
+def test_syncer_status_reports_the_recorded_exit_cause(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "syncer.exit").write_text(
+        "result=signal\n"
+        "exit_code=killed\n"
+        "exit_status=15\n"
+        "timestamp=2026-08-13T18:26:08Z\n"
+    )
+    script = f'RUN={ssh_harness.shlex.quote(str(tmp_path))}\n'
+    script += ssh_harness._syncer_status_script(_plan())
+
+    result = ssh_harness.subprocess.run(
+        ["/bin/bash", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == (
+        "syncer=stopped unit=yeto-rl-syncer-acceptance.service "
+        "result=signal exit_code=killed exit_status=15 "
+        "timestamp=2026-08-13T18:26:08Z"
+    )
+
+
+def test_syncer_status_prefers_exit_record_over_a_live_stale_pid(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "syncer.pid").write_text(f"{os.getpid()}\n")
+    (state / "syncer.exit").write_text(
+        "result=exit-code\n"
+        "exit_code=exited\n"
+        "exit_status=23\n"
+        "timestamp=2026-08-13T18:26:08Z\n"
+    )
+    script = f'RUN={ssh_harness.shlex.quote(str(tmp_path))}\n'
+    script += ssh_harness._syncer_status_script(_plan())
+
+    result = ssh_harness.subprocess.run(
+        ["/bin/bash", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "syncer=stopped" in result.stdout
+    assert "result=exit-code" in result.stdout
+    assert "mode=legacy" not in result.stdout
 
 
 def test_syncer_host_defaults_to_the_first_learner_and_is_validated():
@@ -849,6 +968,40 @@ def test_status_and_stop_use_the_dedicated_syncer_host(tmp_path, monkeypatch):
 
     syncer_calls = [target for target, script in calls if "syncer.pid" in script]
     assert syncer_calls == ["root@syncer0", "root@syncer0"]
+    assert "systemctl is-active" in calls[0][1]
+    assert "syncer.exit" in calls[0][1]
+    assert "systemctl stop" in calls[-1][1]
+    assert "systemctl stop \"$UNIT\" || true" not in calls[-1][1]
+    assert "syncer unit did not become inactive" in calls[-1][1]
+    assert 'kill -0 "$PID"' in calls[-1][1]
+    assert "legacy syncer did not exit after SIGTERM" in calls[-1][1]
+
+
+def test_syncer_stop_propagates_systemctl_failure(tmp_path, monkeypatch):
+    plan = _plan()
+    script = ssh_harness._syncer_stop_script(plan)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "systemctl").write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  show) printf 'loaded\\n' ;;\n"
+        "  stop) exit 42 ;;\n"
+        "esac\n"
+    )
+    (bin_dir / "systemctl").chmod(0o700)
+    home = tmp_path / "home"
+    (home / plan["remote_run"] / "state").mkdir(parents=True)
+
+    result = ssh_harness.subprocess.run(
+        ["/bin/bash", "-c", script],
+        env={"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 42
 
 
 def test_collect_reads_syncer_state_from_the_dedicated_host(tmp_path, monkeypatch):

@@ -34,7 +34,7 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from .fragments import MERGE_ISO, FragmentLayout
@@ -198,6 +198,27 @@ def _q4_nbytes(numel: int) -> int:
     return -(-numel // Q4_BLOCK) * (4 + Q4_BLOCK // 2)
 
 
+def _contiguous_bytes_view(
+    part: bytes | bytearray | memoryview,
+    index: int,
+    label: str,
+) -> memoryview:
+    try:
+        view = memoryview(part)
+    except TypeError as exc:
+        raise TypeError(f"{label} part {index} is not bytes-like") from exc
+    if not view.c_contiguous:
+        view.release()
+        raise ValueError(f"{label} part {index} is not C-contiguous")
+    try:
+        return view.cast("B")
+    except (TypeError, ValueError) as exc:
+        view.release()
+        raise ValueError(
+            f"{label} part {index} cannot be viewed as contiguous bytes"
+        ) from exc
+
+
 class ProtocolError(RuntimeError):
     """The peer rejected this client as wire- or session-incompatible."""
 
@@ -262,7 +283,7 @@ class FinalManifest:
 
 @dataclass
 class _Outbound:
-    data: bytes
+    data: bytes | bytearray
     sent: threading.Event | None = None
 
 
@@ -571,6 +592,60 @@ class SyncerClient:
         )
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 
+    def push_fragment_parts(
+        self,
+        fragment_id: int,
+        global_step: int,
+        round_attempt: int,
+        base_version: int,
+        local_step: int,
+        c_steps: int,
+        c_tokens: int,
+        tensor_parts: Iterable[bytes | bytearray | memoryview],
+        *,
+        before_last_enqueue: Callable[[], None] | None = None,
+    ) -> bool:
+        """Stream one PUSH_FRAGMENT from bounded contiguous byte parts.
+
+        The syncer observes the same logical inner frame as ``push_fragment``.
+        Only one CHUNK-sized envelope is assembled at a time; neither the
+        complete tensor nor the complete inner frame is materialized here.
+        Returns ``True`` only after every chunk is queued and ``False`` when
+        none could be queued. A failure after the first chunk poisons that
+        connection generation and raises so callers cannot mark the push done.
+        """
+        if not 0 <= fragment_id < self.layout.num_fragments:
+            raise ValueError(f"PUSH_FRAGMENT for unknown fragment {fragment_id}")
+        if round_attempt < 1:
+            raise ValueError("round_attempt must be positive")
+        if c_steps < 1:
+            raise ValueError("c_steps must be positive")
+        numel = self.layout.fragments[fragment_id].numel
+        expected = (
+            _q4_nbytes(numel)
+            if self.dtype == DTYPE_Q4
+            else _tensor_nbytes(self.dtype, numel)
+        )
+        head = struct.pack(
+            "<IIQIQQIQ",
+            self.learner_id,
+            fragment_id,
+            global_step,
+            round_attempt,
+            base_version,
+            local_step,
+            c_steps,
+            c_tokens,
+        )
+        return self._send_large_parts(
+            MSG_PUSH_FRAGMENT,
+            head,
+            tensor_parts,
+            expected,
+            label=f"PUSH_FRAGMENT fragment {fragment_id}",
+            before_last_enqueue=before_last_enqueue,
+        )
+
     def heartbeat(self, local_step: int) -> None:
         self._enqueue(0, self._frame(MSG_HEARTBEAT, struct.pack("<IQ", self.learner_id, local_step)))
 
@@ -793,6 +868,159 @@ class SyncerClient:
             stream = 1 + next(self._rr) % self.num_streams
             if not self._enqueue(stream, envelope, gen=gen):
                 return  # group died mid-message; drop the remainder
+
+    def _send_large_parts(
+        self,
+        msg_type: int,
+        payload_prefix: bytes,
+        parts: Iterable[bytes | bytearray | memoryview],
+        parts_size: int,
+        *,
+        label: str,
+        before_last_enqueue: Callable[[], None] | None = None,
+    ) -> bool:
+        """Emit one logical frame without joining its bytes-like parts."""
+        payload_size = len(payload_prefix) + parts_size
+        fixed = _HEADER.pack(MAGIC, msg_type, payload_size) + payload_prefix
+        total = len(fixed) + parts_size
+        with self._lock:
+            if (
+                self._closed.is_set()
+                or self.shutdown.is_set()
+                or not self._connected.is_set()
+            ):
+                return False  # outage: explicitly report a whole-message drop
+            gen = self._gen
+
+        part_iter = iter(parts)
+        part_index = 0
+        pending: memoryview | None = None
+        pending_offset = 0
+        parts_seen = 0
+        msg_id = next(self._msg_id)
+        offset = 0
+        envelope_prefix = _HEADER.size + _CHUNK_HEAD.size
+        enqueued_chunks = 0
+
+        try:
+            while offset < total:
+                inner_size = min(CHUNK_SIZE, total - offset)
+                envelope = bytearray(envelope_prefix + inner_size)
+                _HEADER.pack_into(
+                    envelope,
+                    0,
+                    MAGIC,
+                    MSG_CHUNK,
+                    _CHUNK_HEAD.size + inner_size,
+                )
+                _CHUNK_HEAD.pack_into(
+                    envelope,
+                    _HEADER.size,
+                    msg_id,
+                    total,
+                    offset,
+                )
+
+                inner_end = offset + inner_size
+                write_at = envelope_prefix
+                if offset < len(fixed):
+                    fixed_end = min(inner_end, len(fixed))
+                    fixed_bytes = fixed[offset:fixed_end]
+                    envelope[write_at : write_at + len(fixed_bytes)] = fixed_bytes
+                    write_at += len(fixed_bytes)
+
+                remaining = envelope_prefix + inner_size - write_at
+                while remaining:
+                    if pending is None:
+                        try:
+                            part = next(part_iter)
+                        except StopIteration:
+                            raise ValueError(
+                                f"{label} has {parts_seen} delta bytes, "
+                                f"expected {parts_size}"
+                            ) from None
+                        pending = _contiguous_bytes_view(part, part_index, label)
+                        part_index += 1
+                        pending_offset = 0
+                        if pending.nbytes == 0:
+                            pending.release()
+                            pending = None
+                            continue
+                        if parts_seen + pending.nbytes > parts_size:
+                            raise ValueError(
+                                f"{label} exceeds expected {parts_size} delta bytes"
+                            )
+
+                    available = pending.nbytes - pending_offset
+                    take = min(remaining, available)
+                    envelope[write_at : write_at + take] = pending[
+                        pending_offset : pending_offset + take
+                    ]
+                    write_at += take
+                    remaining -= take
+                    pending_offset += take
+                    parts_seen += take
+                    if pending_offset == pending.nbytes:
+                        pending.release()
+                        pending = None
+
+                if inner_end == total:
+                    if parts_seen != parts_size:
+                        raise ValueError(
+                            f"{label} has {parts_seen} delta bytes, "
+                            f"expected {parts_size}"
+                        )
+                    for part in part_iter:
+                        extra = _contiguous_bytes_view(part, part_index, label)
+                        part_index += 1
+                        try:
+                            if extra.nbytes:
+                                raise ValueError(
+                                    f"{label} exceeds expected {parts_size} delta bytes"
+                                )
+                        finally:
+                            extra.release()
+                    if before_last_enqueue is not None:
+                        callback = before_last_enqueue
+                        before_last_enqueue = None
+                        callback()
+
+                stream = (
+                    0
+                    if self.num_streams == 0
+                    else 1 + next(self._rr) % self.num_streams
+                )
+                if not self._enqueue(stream, envelope, gen=gen):
+                    if enqueued_chunks:
+                        raise RuntimeError(
+                            f"connection generation {gen} dropped after "
+                            f"{enqueued_chunks} {label} chunks were queued"
+                        )
+                    return False
+                enqueued_chunks += 1
+                offset = inner_end
+            return True
+        except BaseException as exc:
+            if enqueued_chunks:
+                self._poison_outbound_generation(gen, exc)
+            raise
+        finally:
+            if pending is not None:
+                pending.release()
+
+    def _poison_outbound_generation(self, gen: int, exc: BaseException) -> None:
+        """Invalidate and promptly close a generation holding a partial frame."""
+        with self._lock:
+            if gen != self._gen:
+                return
+            self._last_err = exc
+            self._connected.clear()
+            self._failure.set()
+            socks = list(self._socks)
+        for sock in socks:
+            _close_socket(sock)
+        with self._final_cond:
+            self._final_cond.notify_all()
 
     def _socket_failed(self, gen: int, exc: BaseException) -> None:
         if self.shutdown.is_set() or self._closed.is_set():

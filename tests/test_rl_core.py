@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import sys
+import threading
 import types
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+import yeto.rl.bridge as bridge_module
 import yeto.rl.core as core_module
 from yeto.fragments import MERGE_AVG
-from yeto.protocol import PullRequest
+from yeto.protocol import BcastFragment, FinalFragment, FinalManifest, PullRequest
 from yeto.rl import miles
 from yeto.rl.bridge import BridgeConfig, StrictRlBridge
 from yeto.rl.core import (
@@ -19,10 +23,12 @@ from yeto.rl.core import (
     LocalRoundStats,
     PolicySnapshot,
     StrictRlInvariantError,
+    bounded_tensor_groups,
     build_avg_layout,
     build_rl_fragment_layout,
     canonical_layout_hash,
     canonical_state,
+    canonical_state_from_owned_tensors,
     flat_tensor,
     parse_policy_snapshot_token,
     policy_delta,
@@ -30,8 +36,8 @@ from yeto.rl.core import (
     tensors_from_flat,
 )
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
-from yeto.rl.miles import MilesPolicySync
 from yeto.rl.filters import bounded_nonzero_reward_std
+from yeto.rl.miles import MilesPolicySync, _BridgeRuntime
 
 
 def tensors():
@@ -64,6 +70,25 @@ def test_canonical_lora_is_sorted_f32_cpu_and_one_avg_fragment():
     layout = build_avg_layout(canonical.specs)
     assert len(layout.fragments) == 1
     assert layout.fragments[0].merge_mode == MERGE_AVG
+
+
+def test_owned_canonical_state_revalidates_without_copying_tensor_storage():
+    values = tensors()
+    canonical = canonical_state_from_owned_tensors(
+        7,
+        values,
+        base_model_revision=MODEL_REVISION,
+        lora_config_hash=LORA_CONFIG_HASH,
+    )
+
+    assert canonical._owns_tensor_storage
+    assert all(
+        canonical.tensors[name].data_ptr() == values[name].data_ptr() for name in values
+    )
+    copied = state(7, values)
+    assert all(
+        copied.tensors[name].data_ptr() != values[name].data_ptr() for name in values
+    )
 
 
 def test_flat_round_trip_and_delta_use_the_exact_tensor_contract():
@@ -151,6 +176,16 @@ def test_avg_layout_rejects_duplicate_names():
     )
     with pytest.raises(ValueError, match="unique"):
         build_avg_layout((spec, spec))
+
+
+def test_bounded_tensor_groups_preserve_canonical_order_and_cap():
+    specs = tuple(state(0, tensors()).specs)
+    groups = bounded_tensor_groups(specs, max_bytes=8)
+
+    assert tuple(spec for group in groups for spec in group) == specs
+    assert all(sum(spec.numel * 4 for spec in group) <= 8 for group in groups)
+    with pytest.raises(ValueError, match="exceeds the stream chunk cap"):
+        bounded_tensor_groups(specs, max_bytes=4)
 
 
 def test_rl_fragment_layout_is_deterministic_all_avg_binpack():
@@ -384,6 +419,329 @@ def test_local_round_event_contains_every_init_metric(tmp_path):
     }
     assert expected <= event.keys()
     assert event["sync/bytes_sent"] == 48 + len(pushed[0][-1])
+
+
+def test_bridge_does_not_recopy_owned_canonical_export(tmp_path, monkeypatch):
+    runtime = _VersionedRuntime()
+    event_tape = tmp_path / "events.jsonl"
+    bridge = StrictRlBridge(runtime, _bridge_config(event_tape))
+    bridge.current = bridge.initial
+    bridge.client = SimpleNamespace(push_fragment=lambda *_args: None)
+    values = {name: value + 0.5 for name, value in bridge.initial.tensors.items()}
+    local = canonical_state_from_owned_tensors(
+        bridge.initial.policy_version,
+        values,
+        base_model_revision=bridge.initial.base_model_revision,
+        lora_config_hash=bridge.initial.lora_config_hash,
+        layout_hash=bridge.initial.layout_hash,
+        expected_specs=bridge.specs,
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "canonical_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("owned canonical export must not be cloned")
+        ),
+    )
+
+    bridge.submit_local_state(
+        PullRequest(0, 1, 1),
+        bridge.initial,
+        local,
+        runtime.run_local_round(),
+    )
+
+    assert all(
+        local.tensors[name].data_ptr() == values[name].data_ptr() for name in values
+    )
+
+
+class _FakeChunkedExport:
+    _yeto_chunked_export = "owner-sharded-v1"
+
+    def __init__(self, base, *, increment=0.5):
+        self.policy_version = base.policy_version
+        self.expected_names = tuple(spec.name for spec in base.specs)
+        self.train_rollout_kl = 0.1
+        self.ess_ratio = 0.9
+        self.pg_clipfrac = 0.2
+        self.train_seconds = 1.0
+        self._values = {
+            spec.name: base.tensors[spec.name].clone().add_(increment)
+            for spec in base.specs
+        }
+        self._previous = []
+        self.peak_group_bytes = 0
+        self.discarded = False
+
+    def take_tensors(self, specs):
+        gc.collect()
+        assert all(reference() is None for reference in self._previous)
+        result = {spec.name: self._values.pop(spec.name) for spec in specs}
+        self._previous = [weakref.ref(value) for value in result.values()]
+        self.peak_group_bytes = max(
+            self.peak_group_bytes,
+            sum(value.numel() * value.element_size() for value in result.values()),
+        )
+        return result
+
+    def finish(self):
+        assert not self._values
+
+    def discard(self):
+        self.discarded = True
+        self._values.clear()
+
+
+def test_strict_chunk_submit_is_byte_exact_and_never_builds_full_delta(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = _VersionedRuntime()
+    bridge = StrictRlBridge(runtime, _bridge_config(tmp_path / "events.jsonl"))
+    base = bridge.initial
+    bridge.current = base
+    groups = tuple((spec,) for spec in bridge.specs)
+    monkeypatch.setattr(bridge, "export_tensor_groups", lambda: groups)
+    monkeypatch.setattr(
+        bridge_module,
+        "policy_delta",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("strict chunk path must not build a full policy delta")
+        ),
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "pack_tensor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("strict chunk path must not pack a full payload")
+        ),
+    )
+    parts = []
+    base_references = [weakref.ref(value) for value in base.tensors.values()]
+
+    def push_parts(*args, **kwargs):
+        streamed_parts = iter(args[-1])
+        for group_index, part in enumerate(streamed_parts):
+            if group_index == len(groups) - 1:
+                # This is the boundary immediately before the last delta part
+                # would be framed/enqueued. The complete base must already be
+                # absent so syncer completion cannot overlap it with FINAL.
+                gc.collect()
+                assert all(reference() is None for reference in base_references)
+            parts.append(bytes(part))
+        with pytest.raises(StopIteration):
+            next(streamed_parts)
+        callback = kwargs.get("before_last_enqueue")
+        if callback is not None:
+            callback()
+        return True
+
+    bridge.client = SimpleNamespace(push_fragment_parts=push_parts)
+    exported = _FakeChunkedExport(base)
+    release_barrier = []
+
+    def release_base():
+        bridge.release_current(0)
+        gc.collect()
+        assert bridge.current is None
+        assert all(reference() is None for reference in base_references)
+        release_barrier.append(True)
+
+    result = bridge.submit_chunked_local_state(
+        PullRequest(0, 1, 1),
+        base,
+        exported,
+        runtime.run_local_round(),
+        before_last_enqueue=release_base,
+    )
+
+    expected = torch.full(
+        (sum(spec.numel for spec in bridge.specs),),
+        0.5,
+        dtype=torch.float32,
+    )
+    assert b"".join(parts) == memoryview(expected.numpy()).cast("B")
+    assert result.delta_l2_norm == pytest.approx(float(expected.norm().item()))
+    assert exported.peak_group_bytes == max(spec.numel * 4 for spec in bridge.specs)
+    assert not exported.discarded
+    assert not base.tensors
+    assert release_barrier == [True]
+    assert bridge.pushed_step == 1
+
+
+def test_strict_chunk_submit_discards_unconsumed_refs_on_sender_drop(tmp_path):
+    runtime = _VersionedRuntime()
+    bridge = StrictRlBridge(runtime, _bridge_config(tmp_path / "events.jsonl"))
+    base = bridge.initial
+    bridge.current = base
+    bridge.client = SimpleNamespace(
+        push_fragment_parts=lambda *_args, **_kwargs: False
+    )
+    exported = _FakeChunkedExport(base)
+
+    with pytest.raises(RuntimeError, match="not completely queued"):
+        bridge.submit_chunked_local_state(
+            PullRequest(0, 1, 1),
+            base,
+            exported,
+            runtime.run_local_round(),
+        )
+
+    assert exported.discarded
+    assert bridge.pushed_step is None
+
+
+def test_initial_policy_storage_is_released_after_authoritative_broadcast(
+    tmp_path,
+):
+    initial = canonical_state_from_owned_tensors(
+        0,
+        tensors(),
+        base_model_revision=MODEL_REVISION,
+        lora_config_hash=LORA_CONFIG_HASH,
+    )
+    reference = weakref.ref(next(iter(initial.tensors.values())))
+    config = _bridge_config(tmp_path / "events.jsonl")
+    runtime = _BridgeRuntime(initial, SimpleNamespace())
+    bridge = StrictRlBridge(runtime, config)
+    payload = bridge_module.pack_tensor(
+        flat_tensor(bridge.initial.tensors, bridge.specs),
+        bridge_module.DTYPE_F32,
+    )
+    del initial
+    bridge.client = SimpleNamespace(
+        drain_updates=lambda: [BcastFragment(0, 0, bytearray(payload))],
+        drain_pulls=list,
+    )
+
+    bridge._drain_messages()
+    gc.collect()
+
+    assert runtime.initial is None
+    assert bridge.initial is None
+    assert reference() is None
+
+
+def test_committed_base_storage_is_released_before_next_cut_reassembly(tmp_path):
+    initial = canonical_state_from_owned_tensors(
+        0,
+        tensors(),
+        base_model_revision=MODEL_REVISION,
+        lora_config_hash=LORA_CONFIG_HASH,
+    )
+    bridge = StrictRlBridge(
+        _BridgeRuntime(initial, SimpleNamespace()),
+        _bridge_config(tmp_path / "events.jsonl"),
+    )
+    payload = bytearray(
+        bridge_module.pack_tensor(
+            flat_tensor(bridge.initial.tensors, bridge.specs),
+            bridge_module.DTYPE_F32,
+        )
+    )
+    bridge.client = SimpleNamespace(
+        drain_updates=lambda: [BcastFragment(0, 0, payload)],
+        drain_pulls=list,
+    )
+    bridge._drain_messages()
+    base_tensor = next(iter(bridge.current.tensors.values()))
+    reference = weakref.ref(base_tensor)
+    del initial, base_tensor
+
+    bridge.release_current(0)
+    gc.collect()
+
+    assert bridge.current is None
+    assert bridge.current_version == 0
+    assert reference() is None
+
+
+def test_terminal_wait_installs_and_finalizes_one_cached_f32_policy(tmp_path):
+    runtime = _VersionedRuntime()
+    bridge = StrictRlBridge(runtime, _bridge_config(tmp_path / "events.jsonl"))
+    bridge.current = bridge.initial
+    bridge.release_current(0)
+    finalizing = threading.Event()
+    finalizing.set()
+    final_values = {
+        name: value + 2.0 for name, value in bridge.initial.tensors.items()
+    }
+    payload = bytearray(
+        bridge_module.pack_tensor(
+            flat_tensor(final_values, bridge.specs),
+            bridge_module.DTYPE_F32,
+        )
+    )
+    manifest = FinalManifest(1, (1,))
+    fragment = FinalFragment(0, 1, payload)
+    acknowledged = []
+    waits = []
+    bridge.client = SimpleNamespace(
+        finalizing=finalizing,
+        check_health=lambda: None,
+        wait_for_final_fragments=lambda: (
+            waits.append(True) or (manifest, [fragment])
+        ),
+        acknowledge_finalization=lambda value: acknowledged.append(value),
+    )
+
+    installed = bridge.wait_for_global_policy(1)
+    finalized = bridge.finalize()
+
+    assert finalized is installed
+    assert bridge.current is installed
+    assert bridge._terminal_policy is installed
+    assert waits == [True]
+    assert acknowledged == [manifest]
+    assert all(
+        torch.equal(installed.tensors[name], final_values[name])
+        for name in final_values
+    )
+
+
+def test_inbound_f32_policy_owns_wire_storage_without_full_clone():
+    runtime = _VersionedRuntime()
+    bridge = StrictRlBridge(runtime, _bridge_config())
+    payload = bytearray(
+        bridge_module.pack_tensor(
+            flat_tensor(bridge.initial.tensors, bridge.specs),
+            bridge_module.DTYPE_F32,
+        )
+    )
+
+    rebuilt = bridge._state_from_payload(0, payload)
+    first = rebuilt.tensors[bridge.specs[0].name].reshape(-1)
+    raw = torch.frombuffer(payload, dtype=torch.float32)
+    raw[0] = raw[0] + 7
+
+    assert first[0] == raw[0]
+    assert rebuilt._owns_tensor_storage
+
+
+def test_miles_owned_trainable_export_becomes_canonical_without_copy():
+    canonical = state(3, tensors())
+    exported = SimpleNamespace(
+        policy_version=canonical.policy_version,
+        layout_hash=canonical.layout_hash,
+        tensors=canonical.tensors,
+        _yeto_owned_tensors="canonical-v1",
+    )
+    hook = MilesPolicySync(
+        SimpleNamespace(
+            yeto_rl_base_model_revision=canonical.base_model_revision,
+            yeto_rl_lora_config_hash=canonical.lora_config_hash,
+            yeto_rl_layout_hash=canonical.layout_hash,
+        )
+    )
+
+    normalized = hook._canonical_state(exported)
+
+    assert normalized._owns_tensor_storage
+    assert all(
+        normalized.tensors[name].data_ptr() == canonical.tensors[name].data_ptr()
+        for name in canonical.tensors
+    )
 
 
 def test_miles_rollout_lifecycle_metrics_use_real_task_completion(monkeypatch):
@@ -925,6 +1283,93 @@ def test_miles_policy_hook_uses_public_trainable_state_api(tmp_path, monkeypatch
     event = json.loads((tmp_path / "events.jsonl").read_text())
     assert event["reset_parameter_count"] == 2
     assert event["sync/global_policy_hash"]
+
+
+def test_miles_strict_path_releases_both_base_aliases_before_waiting_for_cut():
+    base = canonical_state_from_owned_tensors(
+        0,
+        tensors(),
+        base_model_revision=MODEL_REVISION,
+        lora_config_hash=LORA_CONFIG_HASH,
+    )
+    final = state(1, {name: value + 1.0 for name, value in base.tensors.items()})
+    exported = _FakeChunkedExport(base)
+    base_reference = weakref.ref(next(iter(base.tensors.values())))
+    events = []
+
+    class Actor:
+        async def export_trainable_state_chunks(self, groups):
+            assert groups
+            events.append("export")
+            return exported
+
+    actor = Actor()
+
+    class Bridge:
+        def __init__(self, current):
+            self.current = current
+            self.specs = current.specs
+
+        def export_tensor_groups(self):
+            return tuple((spec,) for spec in self.specs)
+
+        def submit_chunked_local_state(
+            self,
+            permit,
+            submitted_base,
+            value,
+            stats,
+            *,
+            before_last_enqueue,
+        ):
+            assert permit == PullRequest(0, 1, 1)
+            assert submitted_base is self.current
+            assert value is exported
+            assert stats.base_policy_version == 0
+            value.discard()
+            events.append("submit")
+            before_last_enqueue()
+
+        def release_current(self, expected_version):
+            assert expected_version == 0
+            self.current = None
+            events.append("release")
+
+        def wait_for_global_policy(self, expected_version):
+            assert expected_version == 1
+            gc.collect()
+            assert base_reference() is None
+            events.append("wait")
+            self.current = final
+            return final
+
+        def wait_for_round(self):
+            raise AssertionError("terminal strict round must not request another permit")
+
+    hook = MilesPolicySync(SimpleNamespace(num_rollout=1))
+    hook.actor_model = actor
+    hook.bridge = Bridge(base)
+    hook.current = base
+    hook.permit = PullRequest(0, 1, 1)
+    hook._round_stats = lambda *_args: _VersionedRuntime().run_local_round()
+
+    async def apply_global_policy(value):
+        assert value is final
+        events.append("apply")
+
+    hook._apply_global_policy = apply_global_policy
+    del base
+
+    asyncio.run(
+        hook._after_local_train(
+            rollout_id=0,
+            actor_model=actor,
+            rollout_data=object(),
+        )
+    )
+
+    assert hook.current is final
+    assert events == ["export", "submit", "release", "wait", "apply"]
 
 
 def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(

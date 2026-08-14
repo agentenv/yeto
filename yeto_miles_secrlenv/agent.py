@@ -37,12 +37,17 @@ from .reward import (
 LOGGER = logging.getLogger(__name__)
 _TASK_ID = re.compile(r"CVE-\d{4}-\d{4,}")
 _EPISODE_PHASES: dict[str, str] = {}
+_EPISODE_POLICY_TASKS: dict[str, asyncio.Task[str]] = {}
 _ACTIVE_LOCK = Lock()
 
 
-def _register_episode(episode_id: str) -> None:
+def _register_episode(
+    episode_id: str, policy_task: asyncio.Task[str] | None = None
+) -> None:
     with _ACTIVE_LOCK:
         _EPISODE_PHASES[episode_id] = "driving"
+        if policy_task is not None:
+            _EPISODE_POLICY_TASKS[episode_id] = policy_task
 
 
 def _claim_episode_finalization(episode_id: str) -> bool:
@@ -59,14 +64,46 @@ def _claim_episode_finalization(episode_id: str) -> bool:
 
 
 def _claim_episode_cleanup(episode_id: str) -> bool:
-    """Claim cleanup unless the oversampling abort hook already owns it."""
+    """Claim cancelled-policy cleanup only while policy still owns the episode."""
 
     with _ACTIVE_LOCK:
         phase = _EPISODE_PHASES.get(episode_id)
-        if phase is None or phase == "aborting":
+        if phase != "driving":
             return False
         _EPISODE_PHASES[episode_id] = "aborting"
         return True
+
+
+def _claim_cancelled_policy_cleanup(
+    episode_id: str, policy_task: asyncio.Task[str] | None
+) -> bool:
+    """Transfer this run's drained finalization boundary to cleanup ownership."""
+
+    if policy_task is None or not policy_task.done():
+        return False
+    with _ACTIVE_LOCK:
+        if (
+            _EPISODE_POLICY_TASKS.get(episode_id) is not policy_task
+            or _EPISODE_PHASES.get(episode_id) != "finalizing"
+        ):
+            return False
+        _EPISODE_PHASES[episode_id] = "aborting"
+        return True
+
+
+def _mark_finalizing_episode_cleanup_pending(
+    episode_id: str, policy_task: asyncio.Task[str] | None
+) -> None:
+    """Retain a failed normal close for a later abort-owned retry."""
+
+    if policy_task is None or not policy_task.done():
+        return
+    with _ACTIVE_LOCK:
+        if (
+            _EPISODE_POLICY_TASKS.get(episode_id) is policy_task
+            and _EPISODE_PHASES.get(episode_id) == "finalizing"
+        ):
+            _EPISODE_PHASES[episode_id] = "cleanup_pending"
 
 
 def _claim_driving_episodes_for_abort() -> list[str]:
@@ -83,18 +120,32 @@ def _claim_driving_episodes_for_abort() -> list[str]:
         return episode_ids
 
 
-def _restore_aborting_episodes(episode_ids: list[str]) -> None:
-    """Return unclosed abort claims to policy ownership for a later retry."""
+def _claim_episodes_and_tasks_for_abort() -> list[tuple[str, asyncio.Task[str] | None]]:
+    """Atomically transfer policy ownership and snapshot its in-flight tasks."""
 
     with _ACTIVE_LOCK:
-        for episode_id in episode_ids:
-            if _EPISODE_PHASES.get(episode_id) == "aborting":
-                _EPISODE_PHASES[episode_id] = "driving"
+        claimed = [
+            (episode_id, _EPISODE_POLICY_TASKS.get(episode_id))
+            for episode_id, phase in _EPISODE_PHASES.items()
+            if phase in {"driving", "cleanup_pending"}
+        ]
+        for episode_id, _task in claimed:
+            _EPISODE_PHASES[episode_id] = "aborting"
+        return claimed
+
+
+def _mark_episode_cleanup_pending(episode_id: str) -> None:
+    """Retain abort ownership while making a failed close retryable."""
+
+    with _ACTIVE_LOCK:
+        if _EPISODE_PHASES.get(episode_id) == "aborting":
+            _EPISODE_PHASES[episode_id] = "cleanup_pending"
 
 
 def _release_episode(episode_id: str) -> None:
     with _ACTIVE_LOCK:
         _EPISODE_PHASES.pop(episode_id, None)
+        _EPISODE_POLICY_TASKS.pop(episode_id, None)
 
 
 async def _await_policy_and_claim_finalization(
@@ -106,6 +157,65 @@ async def _await_policy_and_claim_finalization(
         return await policy_result
     finally:
         _claim_episode_finalization(episode_id)
+
+
+async def _drain_aborted_policy_task(
+    task: asyncio.Task[str] | None, *, timeout_seconds: float
+) -> bool:
+    """Cancel and await policy work before the abort hook closes its episode."""
+
+    if task is None:
+        return True
+    if not task.done():
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
+        if not done:
+            LOGGER.warning(
+                "aborted secrlenv policy task did not drain within %.1fs",
+                timeout_seconds,
+            )
+            return False
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        LOGGER.warning(
+            "aborted secrlenv policy task failed while draining", exc_info=True
+        )
+    return True
+
+
+async def _close_aborted_episode(
+    client: EpisodeClient,
+    episode_id: str,
+    *,
+    retry_timeout_seconds: float,
+) -> bool:
+    """Close one abort-owned episode, retrying only transient lifecycle conflicts."""
+
+    deadline = time.monotonic() + retry_timeout_seconds
+    retry_delay = 0.25
+    while True:
+        try:
+            await client.close(episode_id)
+        except EpisodeAPIError as exc:
+            if exc.status == 404:
+                _release_episode(episode_id)
+                return True
+            retryable = exc.status == 409 and exc.code == "episode_conflict"
+            remaining = deadline - time.monotonic()
+            if not retryable or remaining <= 0:
+                LOGGER.warning("abort teardown failed for %s: %s", episode_id, exc)
+                return False
+            await asyncio.sleep(min(retry_delay, remaining))
+            retry_delay = min(retry_delay * 2.0, 2.0)
+        except Exception:
+            LOGGER.warning("abort teardown failed for %s", episode_id, exc_info=True)
+            return False
+        else:
+            _release_episode(episode_id)
+            return True
 
 
 def _verify_pinned_source() -> None:
@@ -585,6 +695,7 @@ async def run(
     infrastructure_failure = False
     evaluation: dict[str, Any] | None = None
     policy = None
+    policy_task: asyncio.Task[str] | None = None
     try:
         from openai import AsyncOpenAI
 
@@ -596,24 +707,27 @@ async def run(
             episode_id = episode.get("episode_id")
             if not isinstance(episode_id, str):
                 raise EpisodeClientError("episode daemon returned no episode ID")
-            _register_episode(episode_id)
 
             rollout_timeout = _positive_env(
                 "SECRLENV_MAX_ROLLOUT_TIME_SECONDS", 3600.0
             )
+            policy_task = asyncio.create_task(
+                _await_policy_and_claim_finalization(
+                    episode_id,
+                    _drive_policy(
+                        policy,
+                        client,
+                        episode,
+                        request_kwargs,
+                        metrics,
+                        max_seq_len=max_seq_len,
+                    ),
+                )
+            )
+            _register_episode(episode_id, policy_task)
             try:
                 outcome_status = await asyncio.wait_for(
-                    _await_policy_and_claim_finalization(
-                        episode_id,
-                        _drive_policy(
-                            policy,
-                            client,
-                            episode,
-                            request_kwargs,
-                            metrics,
-                            max_seq_len=max_seq_len,
-                        ),
-                    ),
+                    policy_task,
                     timeout=rollout_timeout,
                 )
             except asyncio.TimeoutError:
@@ -633,7 +747,7 @@ async def run(
             if _claim_episode_finalization(episode_id):
                 started = time.monotonic()
                 try:
-                    evaluation = await asyncio.shield(client.evaluate(episode_id))
+                    evaluation = await client.evaluate(episode_id)
                 except Exception:
                     infrastructure_failure = True
                     LOGGER.exception("secrlenv evaluation failed")
@@ -642,12 +756,25 @@ async def run(
 
                 started = time.monotonic()
                 try:
-                    await asyncio.shield(client.close(episode_id))
+                    await client.close(episode_id)
+                except asyncio.CancelledError:
+                    raise
+                except EpisodeAPIError as exc:
+                    if exc.status == 404:
+                        _release_episode(episode_id)
+                    else:
+                        infrastructure_failure = True
+                        LOGGER.exception("secrlenv teardown failed")
+                        _mark_finalizing_episode_cleanup_pending(
+                            episode_id, policy_task
+                        )
                 except Exception:
                     infrastructure_failure = True
                     LOGGER.exception("secrlenv teardown failed")
-                finally:
+                    _mark_finalizing_episode_cleanup_pending(episode_id, policy_task)
+                else:
                     _release_episode(episode_id)
+                finally:
                     metrics.close_time = time.monotonic() - started
                     metrics.total_tool_time += (
                         metrics.create_time
@@ -661,16 +788,27 @@ async def run(
                 )
     except asyncio.CancelledError:
         LOGGER.warning("secrlenv rollout cancelled")
-        if episode_id is not None and _claim_episode_cleanup(episode_id):
+        cleanup_claimed = episode_id is not None and (
+            _claim_episode_cleanup(episode_id)
+            or _claim_cancelled_policy_cleanup(episode_id, policy_task)
+        )
+        if cleanup_claimed:
             try:
                 async with EpisodeClient(total_timeout_seconds=180.0) as cleanup_client:
-                    await asyncio.shield(cleanup_client.close(episode_id))
+                    retry_timeout = _positive_env(
+                        "SECRLENV_ABORT_CLOSE_RETRY_SECONDS", 180.0
+                    )
+                    await _close_aborted_episode(
+                        cleanup_client,
+                        episode_id,
+                        retry_timeout_seconds=retry_timeout,
+                    )
             except Exception:
                 LOGGER.warning(
                     "cancelled episode cleanup failed for %s", episode_id, exc_info=True
                 )
             finally:
-                _release_episode(episode_id)
+                _mark_episode_cleanup_pending(episode_id)
         raise
     except Exception:
         LOGGER.exception("secrlenv episode failed before a trustworthy verdict")
@@ -707,30 +845,42 @@ async def run(
 async def abort(_args: Any = None) -> None:
     """Miles oversampling abort hook: tear down every in-flight local episode."""
 
-    episode_ids = _claim_driving_episodes_for_abort()
-    if not episode_ids:
+    claimed = _claim_episodes_and_tasks_for_abort()
+    if not claimed:
         return
     try:
-        async with EpisodeClient(total_timeout_seconds=180.0) as client:
-
-            async def close_one(episode_id: str) -> None:
-                try:
-                    await client.close(episode_id)
-                except EpisodeAPIError as exc:
-                    if exc.status != 404:
-                        LOGGER.warning(
-                            "abort teardown failed for %s: %s", episode_id, exc
-                        )
-                except Exception:
-                    LOGGER.warning(
-                        "abort teardown failed for %s", episode_id, exc_info=True
-                    )
-                finally:
-                    _release_episode(episode_id)
-
-            await asyncio.gather(
-                *(close_one(episode_id) for episode_id in episode_ids)
+        retry_timeout = _positive_env("SECRLENV_ABORT_CLOSE_RETRY_SECONDS", 180.0)
+        drain_timeout = _positive_env("SECRLENV_ABORT_DRAIN_TIMEOUT_SECONDS", 30.0)
+        drained = await asyncio.gather(
+            *(
+                _drain_aborted_policy_task(
+                    task,
+                    timeout_seconds=drain_timeout,
+                )
+                for _episode_id, task in claimed
             )
+        )
+        close_ids = []
+        for (episode_id, _task), task_drained in zip(claimed, drained, strict=True):
+            if task_drained:
+                close_ids.append(episode_id)
+        if not close_ids:
+            return
+        async with EpisodeClient(total_timeout_seconds=180.0) as client:
+            await asyncio.gather(
+                *(
+                    _close_aborted_episode(
+                        client,
+                        episode_id,
+                        retry_timeout_seconds=retry_timeout,
+                    )
+                    for episode_id in close_ids
+                )
+            )
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        _restore_aborting_episodes(episode_ids)
-        LOGGER.warning("could not initialize secrlenv abort client", exc_info=True)
+        LOGGER.warning("secrlenv abort cleanup failed", exc_info=True)
+    finally:
+        for episode_id, _task in claimed:
+            _mark_episode_cleanup_pending(episode_id)

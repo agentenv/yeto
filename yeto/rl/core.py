@@ -7,7 +7,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -20,6 +20,7 @@ _CLONE_EXPERT_FULL_NAME = re.compile(
     r"mlp\.experts\.(?:25[6-9]|26[0-9]|27[0-9]|28[0-7])\."
     r"(?:gate_proj|up_proj|down_proj)\.weight\Z"
 )
+STRICT_STREAM_CHUNK_BYTES = 31 * (1 << 25)
 
 
 class StrictRlInvariantError(RuntimeError):
@@ -58,6 +59,7 @@ class CanonicalLoraState:
     layout_hash: str
     policy_version: int
     tensors: Mapping[str, torch.Tensor]
+    _owns_tensor_storage: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[0-9a-f]{40}", self.base_model_revision):
@@ -107,6 +109,38 @@ def build_avg_layout(specs: Sequence[CanonicalTensorSpec]) -> FragmentLayout:
             )
         ]
     )
+
+
+def bounded_tensor_groups(
+    specs: Sequence[CanonicalTensorSpec],
+    *,
+    max_bytes: int = STRICT_STREAM_CHUNK_BYTES,
+) -> tuple[tuple[CanonicalTensorSpec, ...], ...]:
+    """Partition canonical f32 tensors into deterministic bounded groups."""
+
+    ordered = tuple(sorted(specs))
+    if not ordered or max_bytes <= 0:
+        raise ValueError("bounded tensor groups require specs and a positive cap")
+    if len({spec.name for spec in ordered}) != len(ordered):
+        raise ValueError("canonical LoRA tensor names must be unique")
+    groups: list[tuple[CanonicalTensorSpec, ...]] = []
+    pending: list[CanonicalTensorSpec] = []
+    pending_bytes = 0
+    for spec in ordered:
+        tensor_bytes = spec.numel * 4
+        if tensor_bytes > max_bytes:
+            raise ValueError(
+                f"canonical tensor {spec.name!r} exceeds the stream chunk cap"
+            )
+        if pending and pending_bytes + tensor_bytes > max_bytes:
+            groups.append(tuple(pending))
+            pending = []
+            pending_bytes = 0
+        pending.append(spec)
+        pending_bytes += tensor_bytes
+    if pending:
+        groups.append(tuple(pending))
+    return tuple(groups)
 
 
 def build_rl_fragment_layout(
@@ -188,8 +222,96 @@ def canonical_state(
     layout_hash: str | None = None,
     expected_specs: Sequence[CanonicalTensorSpec] | None = None,
 ) -> CanonicalLoraState:
+    return _canonical_state(
+        policy_version,
+        tensors,
+        base_model_revision=base_model_revision,
+        lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash,
+        expected_specs=expected_specs,
+        copy_tensors=True,
+    )
+
+
+def canonical_state_from_owned_tensors(
+    policy_version: int,
+    tensors: Mapping[str, torch.Tensor],
+    *,
+    base_model_revision: str,
+    lora_config_hash: str,
+    layout_hash: str | None = None,
+    expected_specs: Sequence[CanonicalTensorSpec] | None = None,
+) -> CanonicalLoraState:
+    """Validate canonical tensors whose storage ownership is transferred.
+
+    The caller must not mutate ``tensors`` after this call.  Unlike
+    :func:`canonical_state`, already-canonical CPU f32 tensors are retained
+    without a clone.  This is reserved for bounded export paths that created
+    fresh tensor storage specifically for the returned state.
+    """
+
+    return _canonical_state(
+        policy_version,
+        tensors,
+        base_model_revision=base_model_revision,
+        lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash,
+        expected_specs=expected_specs,
+        copy_tensors=False,
+    )
+
+
+def canonical_state_from_validated_owned_tensors(
+    policy_version: int,
+    tensors: Mapping[str, torch.Tensor],
+    *,
+    base_model_revision: str,
+    lora_config_hash: str,
+    layout_hash: str | None = None,
+    expected_specs: Sequence[CanonicalTensorSpec] | None = None,
+) -> CanonicalLoraState:
+    """Take storage already value-validated by a trusted bounded export path."""
+
+    normalized = dict(sorted(tensors.items()))
+    for name, tensor in normalized.items():
+        if (
+            not isinstance(tensor, torch.Tensor)
+            or tensor.device.type != "cpu"
+            or tensor.dtype != torch.float32
+            or not tensor.is_contiguous()
+        ):
+            raise ValueError(
+                f"validated owned tensor {name!r} is not canonical CPU f32 storage"
+            )
+    specs = canonical_specs(normalized)
+    if expected_specs is not None and specs != tuple(expected_specs):
+        raise ValueError("canonical LoRA names, shapes, or dtypes changed")
+    actual_layout_hash = canonical_layout_hash(specs)
+    if layout_hash is not None and layout_hash != actual_layout_hash:
+        raise ValueError("canonical LoRA layout hash changed")
+    return CanonicalLoraState(
+        base_model_revision,
+        lora_config_hash,
+        actual_layout_hash,
+        policy_version,
+        normalized,
+        True,
+    )
+
+
+def _canonical_state(
+    policy_version: int,
+    tensors: Mapping[str, torch.Tensor],
+    *,
+    base_model_revision: str,
+    lora_config_hash: str,
+    layout_hash: str | None,
+    expected_specs: Sequence[CanonicalTensorSpec] | None,
+    copy_tensors: bool,
+) -> CanonicalLoraState:
+    normalize = _canonical_tensor if copy_tensors else _canonical_view
     normalized = {
-        name: _canonical_tensor(tensor, name)
+        name: normalize(tensor, name)
         for name, tensor in sorted(tensors.items())
     }
     specs = canonical_specs(normalized)
@@ -204,6 +326,7 @@ def canonical_state(
         actual_layout_hash,
         policy_version,
         normalized,
+        not copy_tensors,
     )
 
 
@@ -257,6 +380,37 @@ def tensors_from_flat(
     return tensors
 
 
+def tensors_from_flat_owned(
+    flat: torch.Tensor,
+    specs: Sequence[CanonicalTensorSpec],
+) -> dict[str, torch.Tensor]:
+    """Transfer one canonical flat buffer into named tensor views without copies."""
+
+    specs = tuple(specs)
+    if specs != tuple(sorted(specs)):
+        raise ValueError("canonical LoRA specs are not sorted")
+    if not isinstance(flat, torch.Tensor) or not flat.is_floating_point():
+        raise TypeError("'flat LoRA policy' must be a floating-point torch.Tensor")
+    value = flat.detach().reshape(-1).to(
+        device="cpu", dtype=torch.float32
+    ).contiguous()
+    expected = sum(spec.numel for spec in specs)
+    if value.numel() != expected:
+        raise ValueError(
+            f"flat LoRA policy has {value.numel()} values, expected {expected}"
+        )
+    if not torch.isfinite(value).all().item():
+        raise ValueError("'flat LoRA policy' contains NaN or Inf")
+    tensors = {}
+    offset = 0
+    for spec in specs:
+        tensors[spec.name] = value[
+            offset : offset + spec.numel
+        ].reshape(spec.shape)
+        offset += spec.numel
+    return tensors
+
+
 def policy_delta(local: CanonicalLoraState, base: CanonicalLoraState) -> torch.Tensor:
     if local.policy_version != base.policy_version:
         raise ValueError("local and base policy versions differ")
@@ -298,7 +452,8 @@ def policy_hash(state: CanonicalLoraState) -> str:
     digest.update(state.policy_version.to_bytes(8, "little"))
     for spec in state.specs:
         digest.update(spec.name.encode("utf-8"))
-        digest.update(_canonical_tensor(state.tensors[spec.name], spec.name).numpy().tobytes())
+        value = _canonical_view(state.tensors[spec.name], spec.name)
+        digest.update(memoryview(value.numpy()).cast("B"))
     return digest.hexdigest()
 
 
@@ -312,9 +467,8 @@ def policy_tensor_hash(state: CanonicalLoraState) -> str:
     digest.update(state.layout_hash.encode("ascii"))
     for spec in state.specs:
         digest.update(spec.name.encode("utf-8"))
-        digest.update(
-            _canonical_tensor(state.tensors[spec.name], spec.name).numpy().tobytes()
-        )
+        value = _canonical_view(state.tensors[spec.name], spec.name)
+        digest.update(memoryview(value.numpy()).cast("B"))
     return digest.hexdigest()
 
 

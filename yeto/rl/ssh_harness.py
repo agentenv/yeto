@@ -1492,6 +1492,9 @@ def _syncer_host_setup_script(plan: dict[str, Any]) -> str:
 {_remote_vars(plan)}
 test "$(cat "$RUN/control/plan.sha256")" = {shlex.quote(_plan_digest(plan))}
 command -v docker >/dev/null
+command -v systemctl >/dev/null
+command -v systemd-run >/dev/null
+test -d /run/systemd/system
 docker info >/dev/null
 if ! docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null 2>&1; then
   docker pull {shlex.quote(plan['docker_image'])}
@@ -1590,22 +1593,155 @@ def _shell_join_with_run(values: Sequence[str]) -> str:
     )
 
 
-def _start_syncer(plan: dict[str, Any]) -> None:
+def _syncer_unit_name(plan: dict[str, Any]) -> str:
+    return f"yeto-rl-syncer-{plan['run_id']}.service"
+
+
+def _legacy_syncer_pid_function() -> str:
+    return r"""legacy_syncer_pid() {
+  [ ! -e "$UNIT_FILE" ] || return 1
+  [ -s "$PID_FILE" ] || return 1
+  PID="$(cat "$PID_FILE")"
+  case "$PID" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$PID" -gt 1 ] || return 1
+  EXPECTED_EXE="$(readlink -f "$SYNCER_BINARY" 2>/dev/null || true)"
+  ACTUAL_EXE="$(readlink -f "/proc/$PID/exe" 2>/dev/null || true)"
+  [ -n "$EXPECTED_EXE" ] && [ "$ACTUAL_EXE" = "$EXPECTED_EXE" ] || return 1
+  [ -r "/proc/$PID/cmdline" ] || return 1
+  tr '\0' '\n' < "/proc/$PID/cmdline" | grep -Fqx -- "$CHECKPOINT_PATH" || return 1
+  tr '\0' '\n' < "/proc/$PID/cmdline" | grep -Fqx -- "$EVENT_TAPE" || return 1
+  printf '%s\n' "$PID"
+}
+"""
+
+
+def _syncer_start_script(plan: dict[str, Any]) -> str:
     command = _shell_join_with_run(_syncer_argv(plan))
-    script = f"""set -euo pipefail
+    unit = shlex.quote(_syncer_unit_name(plan))
+    return f"""set -euo pipefail
 {_remote_vars(plan)}
+command -v systemctl >/dev/null
+command -v systemd-run >/dev/null
+test -d /run/systemd/system
+UNIT={unit}
+UNIT_FILE="$RUN/state/syncer.unit"
 PID_FILE="$RUN/state/syncer.pid"
-if [ -s "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "syncer already running pid=$(cat "$PID_FILE")"
+EXIT_FILE="$RUN/state/syncer.exit"
+WRAPPER="$RUN/state/run-syncer"
+LOG_FILE="$RUN/state/syncer.log"
+SYNCER_BINARY="$RUN/state/yeto-syncer"
+CHECKPOINT_PATH="$RUN/state/state.ckpt"
+EVENT_TAPE="$RUN/state/events.jsonl"
+{_legacy_syncer_pid_function()}
+if systemctl is-active --quiet "$UNIT"; then
+  PID="$(systemctl show --property=MainPID --value "$UNIT")"
+  printf '%s\n' "$UNIT" > "$UNIT_FILE"
+  printf '%s\n' "$PID" > "$PID_FILE"
+  echo "syncer already running unit=$UNIT pid=$PID"
   exit 0
 fi
-nohup setsid {command} >> "$RUN/state/syncer.log" 2>&1 &
-PID=$!
-printf '%s\n' "$PID" > "$PID_FILE"
+LEGACY_PID="$(legacy_syncer_pid || true)"
+if [ -n "$LEGACY_PID" ] && [ ! -s "$EXIT_FILE" ]; then
+  echo "legacy syncer already running pid=$LEGACY_PID"
+  exit 0
+fi
+if [ -n "$LEGACY_PID" ]; then
+  echo "running legacy syncer conflicts with recorded terminal state" >&2
+  exit 1
+fi
+rm -f "$PID_FILE"
+# A failed transient unit remains loaded until reset. Give systemd a bounded
+# interval to garbage-collect it before recreating this run's deterministic unit.
+systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+for _ in {{1..50}}; do
+  [ "$(systemctl show --property=LoadState --value "$UNIT" 2>/dev/null || true)" = not-found ] && break
+  sleep 0.1
+done
+if [ "$(systemctl show --property=LoadState --value "$UNIT" 2>/dev/null || true)" != not-found ]; then
+  echo "stale syncer unit could not be unloaded: $UNIT" >&2
+  exit 1
+fi
+rm -f "$PID_FILE" "$EXIT_FILE"
+cat > "$WRAPPER" <<'SH'
+#!/usr/bin/env bash
+set -uo pipefail
+
+EXIT_FILE=$1
+shift
+CHILD=""
+
+record_exit() {{
+  local result=$1 code=$2 status=$3 tmp
+  tmp="$EXIT_FILE.tmp.$$"
+  umask 077
+  printf 'result=%s\nexit_code=%s\nexit_status=%s\ntimestamp=%s\n' \
+    "$result" "$code" "$status" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
+  mv -f "$tmp" "$EXIT_FILE"
+}}
+
+terminate() {{
+  local signal=$1
+  trap - HUP INT TERM
+  if [ -n "$CHILD" ] && kill -0 "$CHILD" 2>/dev/null; then
+    kill -"$signal" "$CHILD" 2>/dev/null || true
+    wait "$CHILD" 2>/dev/null || true
+  fi
+  record_exit signal killed "$signal"
+  exit 0
+}}
+
+trap 'terminate 1' HUP
+trap 'terminate 2' INT
+trap 'terminate 15' TERM
+
+"$@" &
+CHILD=$!
+wait "$CHILD"
+RC=$?
+if [ "$RC" -eq 0 ]; then
+  record_exit success exited 0
+elif [ "$RC" -gt 128 ]; then
+  record_exit signal killed "$((RC - 128))"
+else
+  record_exit exit-code exited "$RC"
+fi
+exit "$RC"
+SH
+chmod 0700 "$WRAPPER"
+printf '%s\n' "$UNIT" > "$UNIT_FILE"
+chmod 0600 "$UNIT_FILE"
+SYNCER_PYTHONPATH="$RUN/source${{PYTHONPATH:+:$PYTHONPATH}}"
+systemd-run --quiet \
+  --unit="$UNIT" \
+  --service-type=exec \
+  --property=Restart=no \
+  --property=KillMode=mixed \
+  --property=TimeoutStopSec=30s \
+  --property=StandardInput=null \
+  --property="StandardOutput=append:$LOG_FILE" \
+  --property="StandardError=append:$LOG_FILE" \
+  --setenv="PYTHONPATH=$SYNCER_PYTHONPATH" \
+  "$WRAPPER" "$EXIT_FILE" {command}
 sleep 1
+if ! systemctl is-active --quiet "$UNIT"; then
+  systemctl show "$UNIT" \
+    --property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus \
+    --no-pager >&2 || true
+  echo "syncer did not remain active after launch" >&2
+  exit 1
+fi
+PID="$(systemctl show --property=MainPID --value "$UNIT")"
+test "$PID" -gt 1
 kill -0 "$PID"
+printf '%s\n' "$PID" > "$PID_FILE"
+chmod 0600 "$PID_FILE"
 """
-    _ssh(plan, _syncer_host(plan), script)
+
+
+def _start_syncer(plan: dict[str, Any]) -> None:
+    _ssh(plan, _syncer_host(plan), _syncer_start_script(plan))
 
 
 def _wait_for_syncer(plan: dict[str, Any], timeout_s: int = 120) -> None:
@@ -2041,6 +2177,49 @@ def start(plan_path: str | Path) -> None:
     print(f"started Miles RL acceptance run {plan['run_id']}")
 
 
+def _syncer_status_script(plan: dict[str, Any]) -> str:
+    unit = shlex.quote(_syncer_unit_name(plan))
+    return f"""UNIT={unit}
+UNIT_FILE="$RUN/state/syncer.unit"
+PID_FILE="$RUN/state/syncer.pid"
+EXIT_FILE="$RUN/state/syncer.exit"
+SYNCER_BINARY="$RUN/state/yeto-syncer"
+CHECKPOINT_PATH="$RUN/state/state.ckpt"
+EVENT_TAPE="$RUN/state/events.jsonl"
+{_legacy_syncer_pid_function()}
+if command -v systemctl >/dev/null && systemctl is-active --quiet "$UNIT"; then
+  PID="$(systemctl show --property=MainPID --value "$UNIT")"
+  echo "syncer=running unit=$UNIT pid=$PID"
+elif [ -s "$EXIT_FILE" ]; then
+  RESULT=unknown
+  EXIT_CODE=unknown
+  EXIT_STATUS=unknown
+  TIMESTAMP=unknown
+  while IFS='=' read -r KEY VALUE; do
+    case "$VALUE" in
+      *[!A-Za-z0-9_.:+-]*|'') VALUE=unknown ;;
+    esac
+    case "$KEY" in
+      result) RESULT=$VALUE ;;
+      exit_code) EXIT_CODE=$VALUE ;;
+      exit_status) EXIT_STATUS=$VALUE ;;
+      timestamp) TIMESTAMP=$VALUE ;;
+    esac
+  done < "$EXIT_FILE"
+  echo "syncer=stopped unit=$UNIT result=$RESULT exit_code=$EXIT_CODE exit_status=$EXIT_STATUS timestamp=$TIMESTAMP"
+elif LEGACY_PID="$(legacy_syncer_pid || true)" && [ -n "$LEGACY_PID" ]; then
+  echo "syncer=running mode=legacy pid=$LEGACY_PID"
+elif command -v systemctl >/dev/null && systemctl show "$UNIT" >/dev/null 2>&1; then
+  RESULT="$(systemctl show --property=Result --value "$UNIT")"
+  EXIT_CODE="$(systemctl show --property=ExecMainCode --value "$UNIT")"
+  EXIT_STATUS="$(systemctl show --property=ExecMainStatus --value "$UNIT")"
+  echo "syncer=stopped unit=$UNIT result=$RESULT exit_code=$EXIT_CODE exit_status=$EXIT_STATUS timestamp=unknown"
+else
+  echo "syncer=stopped"
+fi
+"""
+
+
 def status(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
     if _syncer_host(plan) not in _all_hosts(plan):
@@ -2050,7 +2229,7 @@ def status(plan_path: str | Path) -> None:
             f"""set -u
 {_remote_vars(plan)}
 echo host={shlex.quote(_syncer_host(plan))} role=syncer
-if [ -s "$RUN/state/syncer.pid" ] && kill -0 "$(cat "$RUN/state/syncer.pid")" 2>/dev/null; then echo syncer=running; else echo syncer=stopped; fi
+{_syncer_status_script(plan)}
 """,
             capture=True,
             check=False,
@@ -2063,8 +2242,7 @@ if [ -s "$RUN/state/syncer.pid" ] && kill -0 "$(cat "$RUN/state/syncer.pid")" 2>
             name = _container_name(plan, learner_id, node_id)
             syncer = ""
             if learner_id == node_id == 0 and _syncer_host(plan) == target:
-                syncer = """if [ -s "$RUN/state/syncer.pid" ] && kill -0 "$(cat "$RUN/state/syncer.pid")" 2>/dev/null; then echo syncer=running; else echo syncer=stopped; fi
-"""
+                syncer = _syncer_status_script(plan)
             result = _ssh(
                 plan,
                 target,
@@ -2107,16 +2285,50 @@ def restart_learner(plan_path: str | Path, learner_id: int) -> None:
 
 def kill_syncer(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
+    unit = shlex.quote(_syncer_unit_name(plan))
     _ssh(
         plan,
         _syncer_host(plan),
         f"""set -euo pipefail
 {_remote_vars(plan)}
-test -s "$RUN/state/syncer.pid"
-PID="$(cat "$RUN/state/syncer.pid")"
+UNIT={unit}
+UNIT_FILE="$RUN/state/syncer.unit"
+PID_FILE="$RUN/state/syncer.pid"
+EXIT_FILE="$RUN/state/syncer.exit"
+SYNCER_BINARY="$RUN/state/yeto-syncer"
+CHECKPOINT_PATH="$RUN/state/state.ckpt"
+EVENT_TAPE="$RUN/state/events.jsonl"
+{_legacy_syncer_pid_function()}
+if command -v systemctl >/dev/null && systemctl is-active --quiet "$UNIT"; then
+  PID="$(systemctl show --property=MainPID --value "$UNIT")"
+  systemctl kill --signal=SIGKILL --kill-whom=all "$UNIT"
+  TMP="$EXIT_FILE.tmp.$$"
+  umask 077
+  printf 'result=signal\nexit_code=killed\nexit_status=9\ntimestamp=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TMP"
+  mv -f "$TMP" "$EXIT_FILE"
+  for _ in {{1..50}}; do
+    if ! systemctl is-active --quiet "$UNIT" && ! kill -0 "$PID" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      exit 0
+    fi
+    sleep 0.1
+  done
+  echo "syncer unit did not exit after SIGKILL: $UNIT pid=$PID" >&2
+  exit 1
+fi
+PID="$(legacy_syncer_pid || true)"
+if [ -z "$PID" ]; then
+  rm -f "$PID_FILE"
+  echo "syncer is not running" >&2
+  exit 1
+fi
 kill -KILL -- -"$PID"
 for _ in {{1..50}}; do
-  kill -0 "$PID" 2>/dev/null || exit 0
+  if ! kill -0 "$PID" 2>/dev/null; then
+    rm -f "$PID_FILE"
+    exit 0
+  fi
   sleep 0.1
 done
 echo "syncer did not exit after SIGKILL" >&2
@@ -2129,6 +2341,59 @@ def restart_syncer(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
     _start_syncer(plan)
     _wait_for_syncer(plan)
+
+
+def _syncer_stop_script(plan: dict[str, Any]) -> str:
+    unit = shlex.quote(_syncer_unit_name(plan))
+    return f"""set -euo pipefail
+{_remote_vars(plan)}
+UNIT={unit}
+UNIT_FILE="$RUN/state/syncer.unit"
+PID_FILE="$RUN/state/syncer.pid"
+EXIT_FILE="$RUN/state/syncer.exit"
+SYNCER_BINARY="$RUN/state/yeto-syncer"
+CHECKPOINT_PATH="$RUN/state/state.ckpt"
+EVENT_TAPE="$RUN/state/events.jsonl"
+{_legacy_syncer_pid_function()}
+LOAD_STATE="$(systemctl show --property=LoadState --value "$UNIT" 2>/dev/null || true)"
+if [ -n "$LOAD_STATE" ] && [ "$LOAD_STATE" != not-found ]; then
+  PID="$(systemctl show --property=MainPID --value "$UNIT")"
+  case "$PID" in
+    ''|*[!0-9]*) PID=0 ;;
+  esac
+  systemctl stop "$UNIT"
+  STOPPED=0
+  for _ in {{1..100}}; do
+    ACTIVE_STATE="$(systemctl show --property=ActiveState --value "$UNIT" 2>/dev/null || true)"
+    if {{ [ -z "$ACTIVE_STATE" ] || [ "$ACTIVE_STATE" = inactive ] || [ "$ACTIVE_STATE" = failed ]; }} \
+      && {{ [ "$PID" -le 1 ] || ! kill -0 "$PID" 2>/dev/null; }}; then
+      STOPPED=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$STOPPED" -ne 1 ]; then
+    echo "syncer unit did not become inactive with its process dead: $UNIT pid=$PID" >&2
+    exit 1
+  fi
+  rm -f "$PID_FILE"
+  exit 0
+fi
+LEGACY_PID="$(legacy_syncer_pid || true)"
+if [ -n "$LEGACY_PID" ]; then
+  kill -TERM -- -"$LEGACY_PID"
+  for _ in {{1..100}}; do
+    if ! kill -0 "$LEGACY_PID" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      exit 0
+    fi
+    sleep 0.1
+  done
+  echo "legacy syncer did not exit after SIGTERM: pid=$LEGACY_PID" >&2
+  exit 1
+fi
+rm -f "$PID_FILE"
+"""
 
 
 def stop(plan_path: str | Path) -> None:
@@ -2145,10 +2410,7 @@ def stop(plan_path: str | Path) -> None:
     _ssh(
         plan,
         _syncer_host(plan),
-        f"""set -u
-{_remote_vars(plan)}
-if [ -s "$RUN/state/syncer.pid" ]; then kill -TERM -- -"$(cat "$RUN/state/syncer.pid")" 2>/dev/null || true; fi
-""",
+        _syncer_stop_script(plan),
     )
     _stop_secrlenv_daemons(plan)
 

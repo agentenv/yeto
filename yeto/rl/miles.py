@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import math
@@ -20,11 +21,13 @@ import torch
 
 from . import MILES_COMMIT, MILES_REPOSITORY
 from .core import (
+    STRICT_STREAM_CHUNK_BYTES,
     CanonicalLoraState,
     LocalRoundStats,
     PolicySnapshot,
     StrictRlInvariantError,
     canonical_state,
+    canonical_state_from_validated_owned_tensors,
     parse_policy_snapshot_token,
     policy_hash,
     policy_tensor_hash,
@@ -739,7 +742,11 @@ class _BridgeRuntime:
         self.args = args
 
     def initialize(self) -> CanonicalLoraState:
-        return self.initial
+        if self.initial is None:
+            raise RuntimeError("Miles initial policy was already consumed")
+        initial = self.initial
+        self.initial = None
+        return initial
 
     def apply_global_policy(self, _state: CanonicalLoraState) -> None:
         pass
@@ -778,7 +785,12 @@ class MilesPolicySync:
         self.optimizer_reset_count = 0
 
     def _canonical_state(self, state) -> CanonicalLoraState:
-        canonical = canonical_state(
+        normalize = (
+            canonical_state_from_validated_owned_tensors
+            if getattr(state, "_yeto_owned_tensors", None) == "canonical-v1"
+            else canonical_state
+        )
+        canonical = normalize(
             state.policy_version,
             state.tensors,
             base_model_revision=self.args.yeto_rl_base_model_revision,
@@ -791,6 +803,63 @@ class MilesPolicySync:
                 "Miles and Yeto computed different LoRA layouts",
             )
         return canonical
+
+    def _strict_export_groups(self):
+        if self.bridge is None:
+            raise RuntimeError("Miles strict bridge is not initialized")
+        return self.bridge.export_tensor_groups()
+
+    @staticmethod
+    def _group_names(groups) -> tuple[tuple[str, ...], ...]:
+        return tuple(tuple(spec.name for spec in group) for group in groups)
+
+    def _requires_chunked_export(self) -> bool:
+        if self.bridge is None:
+            return False
+        return (
+            sum(spec.numel for spec in self.bridge.specs) * 4
+            > STRICT_STREAM_CHUNK_BYTES
+        )
+
+    def _streamed_policy_hash(
+        self,
+        exported,
+        expected: CanonicalLoraState,
+    ) -> str:
+        groups = self._strict_export_groups()
+        expected_names = tuple(spec.name for group in groups for spec in group)
+        if (
+            getattr(exported, "_yeto_chunked_export", None)
+            != "owner-sharded-v1"
+            or exported.policy_version != expected.policy_version
+            or tuple(exported.expected_names) != expected_names
+        ):
+            discard = getattr(exported, "discard", None)
+            if callable(discard):
+                discard()
+            raise StrictRlInvariantError(
+                "layout_hash_mismatch",
+                "chunked applied policy identity or canonical order changed",
+            )
+        digest = hashlib.sha256()
+        digest.update(b"yeto-rl-policy-v1\0")
+        digest.update(expected.base_model_revision.encode("ascii"))
+        digest.update(expected.lora_config_hash.encode("ascii"))
+        digest.update(expected.layout_hash.encode("ascii"))
+        digest.update(expected.policy_version.to_bytes(8, "little"))
+        try:
+            for group in groups:
+                tensors = exported.take_tensors(group)
+                for spec in group:
+                    value = tensors[spec.name]
+                    digest.update(spec.name.encode("utf-8"))
+                    digest.update(memoryview(value.numpy()).cast("B"))
+                del tensors
+            exported.finish()
+        except BaseException:
+            exported.discard()
+            raise
+        return digest.hexdigest()
 
     async def _engines(self) -> list[Any]:
         info = await self.rollout_manager.get_updatable_engines_and_lock.remote()
@@ -817,8 +886,24 @@ class MilesPolicySync:
             make_trainable_state(state.policy_version, state.tensors),
             reset_optimizer=True,
         )
-        applied = self._canonical_state(await self.actor_model.export_trainable_state())
-        applied_hash = policy_hash(applied)
+        export_chunks = getattr(
+            self.actor_model,
+            "export_trainable_state_chunks",
+            None,
+        )
+        if callable(export_chunks):
+            groups = self._strict_export_groups()
+            exported = await export_chunks(self._group_names(groups))
+            applied_hash = self._streamed_policy_hash(exported, state)
+        else:
+            if self._requires_chunked_export():
+                raise RuntimeError(
+                    "large strict policy runtime lacks bounded chunk export"
+                )
+            applied = self._canonical_state(
+                await self.actor_model.export_trainable_state()
+            )
+            applied_hash = policy_hash(applied)
         if applied_hash != policy_hash(state):
             raise StrictRlInvariantError(
                 "policy_hash_mismatch_after_apply",
@@ -996,6 +1081,7 @@ class MilesPolicySync:
         initial = self._canonical_state(await actor_model.export_trainable_state())
         runtime = _BridgeRuntime(initial, self.args)
         self.bridge = StrictRlBridge(runtime, self.args.yeto_rl_bridge_config)
+        del initial
         self.bridge.start()
         self.current = self.bridge.wait_for_initial_policy()
         await self._apply_global_policy(self.current)
@@ -1028,10 +1114,44 @@ class MilesPolicySync:
             raise RuntimeError(
                 "Miles rollout ID differs from the global policy version"
             )
-        train_state = await actor_model.export_trainable_state()
-        local = self._canonical_state(train_state)
-        stats = self._round_stats(rollout_id, rollout_data, train_state)
-        self.bridge.submit_local_state(self.permit, self.current, local, stats)
+        export_chunks = getattr(actor_model, "export_trainable_state_chunks", None)
+        base_released = False
+
+        def release_base_before_commit() -> None:
+            nonlocal base_released
+            if base_released:
+                raise RuntimeError("strict base release barrier ran more than once")
+            self.bridge.release_current(rollout_id)
+            self.current = None
+            base_released = True
+
+        if callable(export_chunks):
+            groups = self._strict_export_groups()
+            train_state = await export_chunks(self._group_names(groups))
+            try:
+                stats = self._round_stats(rollout_id, rollout_data, train_state)
+                self.bridge.submit_chunked_local_state(
+                    self.permit,
+                    self.current,
+                    train_state,
+                    stats,
+                    before_last_enqueue=release_base_before_commit,
+                )
+            except BaseException:
+                train_state.discard()
+                raise
+        else:
+            if self._requires_chunked_export():
+                raise RuntimeError(
+                    "large strict policy runtime lacks bounded chunk export"
+                )
+            train_state = await actor_model.export_trainable_state()
+            local = self._canonical_state(train_state)
+            stats = self._round_stats(rollout_id, rollout_data, train_state)
+            self.bridge.submit_local_state(self.permit, self.current, local, stats)
+            release_base_before_commit()
+        if not base_released:
+            raise RuntimeError("strict base was not released before PUSH commit")
         self.current = self.bridge.wait_for_global_policy(rollout_id + 1)
         await self._apply_global_policy(self.current)
         if self.current.policy_version < self.args.num_rollout:

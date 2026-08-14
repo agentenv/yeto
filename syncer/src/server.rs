@@ -97,6 +97,23 @@ struct OutFrame {
     parts: Vec<bytes::Bytes>,
 }
 
+#[derive(Debug)]
+struct OutboundStreamClosed {
+    member: Member,
+}
+
+impl std::fmt::Display for OutboundStreamClosed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "learner {} generation {} outbound stream closed",
+            self.member.learner_id, self.member.generation
+        )
+    }
+}
+
+impl std::error::Error for OutboundStreamClosed {}
+
 struct PartialMsg {
     buf: Vec<u8>,
     filled: usize,
@@ -142,9 +159,7 @@ impl Group {
             })
     }
 
-    /// Send a large inner frame, striped as CHUNK envelopes across data
-    /// streams (or unchunked on the control stream when none exist).
-    async fn send_large(&self, msg_type: u8, payload: bytes::Bytes) -> Result<()> {
+    fn chunk_streams(&self) -> Vec<mpsc::Sender<OutFrame>> {
         let mut streams: Vec<(u16, mpsc::Sender<OutFrame>)> = self
             .data
             .lock()
@@ -153,46 +168,146 @@ impl Group {
             .map(|(index, sender)| (*index, sender.clone()))
             .collect();
         streams.sort_unstable_by_key(|(index, _)| *index);
-        let streams: Vec<mpsc::Sender<OutFrame>> =
+        let mut streams: Vec<mpsc::Sender<OutFrame>> =
             streams.into_iter().map(|(_, sender)| sender).collect();
         if streams.is_empty() {
-            return self.send_small(msg_type, payload).await;
+            streams.push(self.control.clone());
         }
-        // Inner frame = header + payload, chunked over its full byte length.
-        let mut inner = Vec::with_capacity(13 + payload.len());
-        inner.extend_from_slice(&MAGIC.to_le_bytes());
-        inner.push(msg_type);
-        inner.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        inner.extend_from_slice(&payload);
-        let inner = bytes::Bytes::from(inner);
+        streams
+    }
+
+    /// Stream one model-sized tensor as CHUNK envelopes without ever
+    /// materializing a complete encoded tensor or inner frame. The receiver
+    /// observes exactly the same inner frame as `header + prefix + tensor`.
+    async fn send_tensor_large(
+        &self,
+        msg_type: u8,
+        prefix: &[u8],
+        dtype: u8,
+        values: &[f32],
+    ) -> Result<()> {
+        self.send_tensor_large_chunked(msg_type, prefix, dtype, values, CHUNK_SIZE)
+            .await
+    }
+
+    async fn send_tensor_large_chunked(
+        &self,
+        msg_type: u8,
+        prefix: &[u8],
+        dtype: u8,
+        values: &[f32],
+        chunk_size: usize,
+    ) -> Result<()> {
+        if chunk_size == 0 {
+            bail!("tensor chunk size must be positive");
+        }
+        let tensor_len = tensor_nbytes(dtype, values.len())?;
+        let payload_len = prefix
+            .len()
+            .checked_add(tensor_len)
+            .context("tensor frame payload length overflow")?;
+        let total = 13usize
+            .checked_add(payload_len)
+            .context("tensor inner-frame length overflow")?;
+        let payload_len_u64 = u64::try_from(payload_len).context("tensor payload is too large")?;
+        let total_u64 = u64::try_from(total).context("tensor inner frame is too large")?;
+
+        let mut fixed = Vec::new();
+        fixed
+            .try_reserve_exact(13 + prefix.len())
+            .context("cannot allocate tensor frame prefix")?;
+        fixed.extend_from_slice(&MAGIC.to_le_bytes());
+        fixed.push(msg_type);
+        fixed.extend_from_slice(&payload_len_u64.to_le_bytes());
+        fixed.extend_from_slice(prefix);
+
+        let streams = self.chunk_streams();
 
         let msg_id = self.msg_id.fetch_add(1, Ordering::Relaxed);
-        let total = inner.len() as u64;
         let mut offset = 0usize;
-        while offset < inner.len() {
-            let end = (offset + CHUNK_SIZE).min(inner.len());
+        while offset < total {
+            let end = offset.saturating_add(chunk_size).min(total);
+            let mut chunk = Vec::new();
+            chunk
+                .try_reserve_exact(end - offset)
+                .context("cannot allocate tensor wire chunk")?;
+            if offset < fixed.len() {
+                chunk.extend_from_slice(&fixed[offset..end.min(fixed.len())]);
+            }
+            if end > fixed.len() {
+                let tensor_start = offset.saturating_sub(fixed.len());
+                let tensor_end = end - fixed.len();
+                append_tensor_bytes(
+                    dtype,
+                    values,
+                    tensor_start,
+                    tensor_end - tensor_start,
+                    &mut chunk,
+                )?;
+            }
+            debug_assert_eq!(chunk.len(), end - offset);
+
             let mut head = Vec::with_capacity(24);
             head.extend_from_slice(&msg_id.to_le_bytes());
-            head.extend_from_slice(&total.to_le_bytes());
+            head.extend_from_slice(&total_u64.to_le_bytes());
             head.extend_from_slice(&(offset as u64).to_le_bytes());
             let idx = self.rr.fetch_add(1, Ordering::Relaxed) % streams.len();
             streams[idx]
                 .send(OutFrame {
                     msg_type: MSG_CHUNK,
-                    parts: vec![bytes::Bytes::from(head), inner.slice(offset..end)],
+                    parts: vec![bytes::Bytes::from(head), bytes::Bytes::from(chunk)],
                 })
                 .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "learner {} generation {} data stream closed",
-                        self.member.learner_id,
-                        self.member.generation
-                    )
+                .map_err(|_| OutboundStreamClosed {
+                    member: self.member,
                 })?;
             offset = end;
         }
         Ok(())
     }
+}
+
+fn append_tensor_bytes(
+    dtype: u8,
+    values: &[f32],
+    byte_offset: usize,
+    byte_len: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let width = match dtype {
+        DTYPE_F32 => 4,
+        DTYPE_BF16 => 2,
+        _ => bail!("unknown dtype {dtype}"),
+    };
+    let tensor_len = tensor_nbytes(dtype, values.len())?;
+    let byte_end = byte_offset
+        .checked_add(byte_len)
+        .context("tensor byte range overflow")?;
+    if byte_end > tensor_len {
+        bail!("tensor byte range exceeds encoded length");
+    }
+    out.try_reserve_exact(byte_len)
+        .context("cannot allocate encoded tensor chunk")?;
+    if byte_len == 0 {
+        return Ok(());
+    }
+    let first = byte_offset / width;
+    let last = byte_end.div_ceil(width);
+    for (index, value) in values[first..last].iter().enumerate() {
+        let value_index = first + index;
+        let value_start = value_index * width;
+        let start = byte_offset.saturating_sub(value_start);
+        let end = (byte_end - value_start).min(width);
+        match dtype {
+            DTYPE_F32 => out.extend_from_slice(&value.to_le_bytes()[start..end]),
+            DTYPE_BF16 => {
+                let bytes = half::bf16::from_f32(*value).to_bits().to_le_bytes();
+                out.extend_from_slice(&bytes[start..end]);
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
 }
 
 enum Event {
@@ -1189,7 +1304,11 @@ async fn scheduler(
     }
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
-    broadcast_all_fragments(&st, &registry).await;
+    // A checkpoint already at the terminal cut goes straight to lossless
+    // FINAL delivery; a redundant full BCAST would only inflate receiver RSS.
+    if st.global_step < cfg.total_steps {
+        broadcast_all_fragments(&st, &registry).await;
+    }
 
     // Phase 2: the outer loop. One fragment per global step, round-robin,
     // with up to `pipeline` rounds in flight at once: while round t sits in
@@ -1412,10 +1531,36 @@ async fn scheduler(
                 }
                 Event::Hello { group } => {
                     // Rejoining learner: catch it up to the current state.
-                    send_all_fragments(&st, &group).await;
+                    if st.global_step < cfg.total_steps {
+                        send_all_fragments(&st, &group).await;
+                    }
                     if fixed_roster && is_current_member(&registry, group.member) {
                         for round in &inflight {
                             if should_replay_pull(round, group.member) {
+                                // If the terminal round completed out of order,
+                                // send only the older fragment needed by this
+                                // replay. The terminal fragment itself is held
+                                // for the single lossless FINAL cut.
+                                if st.global_step >= cfg.total_steps {
+                                    match send_fragment(
+                                        &st,
+                                        &group,
+                                        round.p,
+                                        MSG_BCAST_FRAGMENT,
+                                        bulk_dtype(st.wire_dtype),
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {}
+                                        Err(error) => warn!(
+                                            learner_id = group.member.learner_id,
+                                            generation = group.member.generation,
+                                            fragment = round.p,
+                                            %error,
+                                            "recovery fragment send failed"
+                                        ),
+                                    }
+                                }
                                 let _ = group.send_small(MSG_PULL_REQ, round.pull.clone()).await;
                             }
                         }
@@ -1690,7 +1835,9 @@ fn route_push(
     PushDisposition::Accepted
 }
 
-/// Merge a gathered round, apply the outer step, broadcast, and record it.
+/// Merge a gathered round, apply the outer step, broadcast a non-terminal
+/// update, and record it. The terminal cut is sent once by FINAL_FRAGMENT;
+/// emitting the same model-sized cut as BCAST first would double receiver RSS.
 /// Called from the single scheduler task, so merges are serialized even
 /// with several rounds in flight; concurrent rounds target distinct
 /// fragments, so each merge touches disjoint params/momentum.
@@ -1757,10 +1904,13 @@ async fn complete_round(
         }
     }
 
-    // Broadcast the updated fragment.
-    let payload = encode_bcast(st, p)?;
-    for g in current_groups(registry) {
-        let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
+    // A disconnected learner can catch up after reconnecting. Deterministic
+    // local encoding/allocation failures must terminate the coordinator
+    // instead of silently committing a cut that was never broadcastable.
+    // The terminal round is the sole exception: finalize_learners publishes
+    // its exact f32 cut immediately after the scheduler reaches quiescence.
+    if t < cfg.total_steps {
+        broadcast_updated_fragment(st, registry, p).await?;
     }
     *last_sync_secs = sync_start.elapsed().as_secs_f64();
     let sync_ms = (*last_sync_secs * 1000.0).round() as u64;
@@ -1793,8 +1943,9 @@ async fn complete_round(
             &st.layout_fingerprint,
         );
     }
-    // Consistent cut: this round is fully applied and broadcast, and every
-    // other in-flight round is still gathering (it has not touched state).
+    // Consistent cut: this round is fully applied and every other in-flight
+    // round is still gathering (it has not touched state). Non-terminal cuts
+    // have also been broadcast; the terminal cut is delivered by FINAL.
     // A crash-resume loses those gathers; their fragments simply merge on
     // a later cycle, which the quorum design already tolerates.
     if !checkpoint_each_round {
@@ -1847,9 +1998,7 @@ async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
 /// is locally available.
 async fn send_final_cut(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
     for p in 0..st.layout.fragments.len() {
-        group
-            .send_large(MSG_FINAL_FRAGMENT, encode_final_fragment(st, p)?)
-            .await?;
+        send_fragment(st, group, p, MSG_FINAL_FRAGMENT, DTYPE_F32).await?;
     }
     group
         .send_small(
@@ -2062,38 +2211,46 @@ async fn finalize_learners(
 
 async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) {
     for p in 0..st.layout.fragments.len() {
-        match encode_bcast(st, p) {
-            Ok(payload) => {
-                let _ = group.send_large(MSG_BCAST_FRAGMENT, payload).await;
-            }
-            Err(e) => warn!("encode fragment {p} failed: {e}"),
+        match send_fragment(st, group, p, MSG_BCAST_FRAGMENT, bulk_dtype(st.wire_dtype)).await {
+            Ok(()) => {}
+            Err(e) => warn!("send fragment {p} failed: {e}"),
         }
     }
 }
 
-fn encode_bcast(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
-    // All learners share one dtype (validated at HELLO); use the state dtype.
-    // Broadcasts are full parameters, so a q4 session still sends bf16.
-    let mut body = Vec::new();
-    encode_tensor(bulk_dtype(st.wire_dtype), &st.params[p], &mut body)?;
-    let mut payload = Vec::with_capacity(12 + body.len());
-    payload.extend_from_slice(&(p as u32).to_le_bytes());
-    payload.extend_from_slice(&st.versions[p].to_le_bytes());
-    payload.extend_from_slice(&body);
-    Ok(bytes::Bytes::from(payload))
+async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: usize) -> Result<()> {
+    let dtype = bulk_dtype(st.wire_dtype);
+    for group in current_groups(registry) {
+        match send_fragment(st, &group, p, MSG_BCAST_FRAGMENT, dtype).await {
+            Ok(()) => {}
+            Err(error) if error.downcast_ref::<OutboundStreamClosed>().is_some() => warn!(
+                learner_id = group.member.learner_id,
+                generation = group.member.generation,
+                fragment = p,
+                %error,
+                "updated fragment broadcast skipped for closed learner stream"
+            ),
+            Err(error) => {
+                return Err(error.context(format!("cannot broadcast updated fragment {p}")));
+            }
+        }
+    }
+    Ok(())
 }
 
-fn encode_final_fragment(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
-    // The coordinator's authoritative params and checkpoint are f32. The
-    // terminal path is deliberately independent of the ordinary wire dtype
-    // so bf16/q4 sessions do not round the artifact a second time.
-    let mut body = Vec::new();
-    encode_tensor(DTYPE_F32, &st.params[p], &mut body)?;
-    let mut payload = Vec::with_capacity(12 + body.len());
-    payload.extend_from_slice(&(p as u32).to_le_bytes());
-    payload.extend_from_slice(&st.versions[p].to_le_bytes());
-    payload.extend_from_slice(&body);
-    Ok(bytes::Bytes::from(payload))
+async fn send_fragment(
+    st: &GlobalState,
+    group: &Arc<Group>,
+    p: usize,
+    msg_type: u8,
+    dtype: u8,
+) -> Result<()> {
+    let mut prefix = [0u8; 12];
+    prefix[..4].copy_from_slice(&(p as u32).to_le_bytes());
+    prefix[4..].copy_from_slice(&st.versions[p].to_le_bytes());
+    group
+        .send_tensor_large(msg_type, &prefix, dtype, &st.params[p])
+        .await
 }
 
 /// One JSONL record per merge: the event tape.
@@ -2277,6 +2434,271 @@ mod tests {
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn streaming_test_group(
+        dtype: u8,
+        data_stream: bool,
+    ) -> (Arc<Group>, mpsc::Receiver<OutFrame>) {
+        let (control, control_rx) = mpsc::channel(64);
+        let (data, data_rx) = mpsc::channel(64);
+        let mut streams = HashMap::new();
+        if data_stream {
+            streams.insert(0, data);
+        }
+        let group = Arc::new(Group {
+            member: member(0, 10),
+            dtype,
+            layout: Layout {
+                fragments: Vec::new(),
+            },
+            layout_fingerprint: [0; 32],
+            num_streams: u16::from(data_stream),
+            max_init_payload: 0,
+            max_push_payload: 0,
+            max_chunked_inner: u64::MAX,
+            control,
+            data: Mutex::new(streams),
+            msg_id: AtomicU64::new(0),
+            rr: AtomicUsize::new(0),
+            reasm: Mutex::new(HashMap::new()),
+        });
+        (group, if data_stream { data_rx } else { control_rx })
+    }
+
+    fn buffered_tensor_inner(msg_type: u8, prefix: &[u8], dtype: u8, values: &[f32]) -> Vec<u8> {
+        let mut tensor = Vec::new();
+        encode_tensor(dtype, values, &mut tensor).unwrap();
+        let payload_len = prefix.len() + tensor.len();
+        let mut inner = Vec::with_capacity(13 + payload_len);
+        inner.extend_from_slice(&MAGIC.to_le_bytes());
+        inner.push(msg_type);
+        inner.extend_from_slice(&(payload_len as u64).to_le_bytes());
+        inner.extend_from_slice(prefix);
+        inner.extend_from_slice(&tensor);
+        inner
+    }
+
+    async fn streamed_tensor_inner(
+        msg_type: u8,
+        prefix: &[u8],
+        dtype: u8,
+        values: &[f32],
+        chunk_size: usize,
+        data_stream: bool,
+    ) -> Vec<u8> {
+        let (group, mut receiver) = streaming_test_group(dtype, data_stream);
+        group
+            .send_tensor_large_chunked(msg_type, prefix, dtype, values, chunk_size)
+            .await
+            .unwrap();
+
+        let total = 13 + prefix.len() + tensor_nbytes(dtype, values.len()).unwrap();
+        let frame_count = total.div_ceil(chunk_size);
+        let mut inner = Vec::with_capacity(total);
+        let mut msg_id = None;
+        for _ in 0..frame_count {
+            let frame = receiver.recv().await.unwrap();
+            assert_eq!(frame.msg_type, MSG_CHUNK);
+            assert_eq!(frame.parts.len(), 2);
+            assert_eq!(frame.parts[0].len(), CHUNK_HEADER_SIZE as usize);
+            assert!(frame.parts[1].len() <= chunk_size);
+            assert!(
+                frame.parts.iter().map(bytes::Bytes::len).sum::<usize>()
+                    <= CHUNK_HEADER_SIZE as usize + chunk_size
+            );
+
+            let head = &frame.parts[0];
+            let frame_msg_id = u64::from_le_bytes(head[0..8].try_into().unwrap());
+            let frame_total = u64::from_le_bytes(head[8..16].try_into().unwrap());
+            let frame_offset = u64::from_le_bytes(head[16..24].try_into().unwrap());
+            assert_eq!(*msg_id.get_or_insert(frame_msg_id), frame_msg_id);
+            assert_eq!(frame_total as usize, total);
+            assert_eq!(frame_offset as usize, inner.len());
+            inner.extend_from_slice(&frame.parts[1]);
+        }
+        assert_eq!(inner.len(), total);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        inner
+    }
+
+    #[tokio::test]
+    async fn streamed_tensor_frames_are_byte_identical_and_chunk_bounded() {
+        let values: Vec<f32> = (0..47).map(|value| value as f32 / 8.0 - 2.5).collect();
+        let mut prefix = [0u8; 12];
+        prefix[..4].copy_from_slice(&3u32.to_le_bytes());
+        prefix[4..].copy_from_slice(&9u64.to_le_bytes());
+        let chunk_size = 17;
+
+        for (msg_type, dtype, data_stream) in [
+            (MSG_BCAST_FRAGMENT, DTYPE_BF16, true),
+            (MSG_FINAL_FRAGMENT, DTYPE_F32, false),
+        ] {
+            let expected = buffered_tensor_inner(msg_type, &prefix, dtype, &values);
+            let actual =
+                streamed_tensor_inner(msg_type, &prefix, dtype, &values, chunk_size, data_stream)
+                    .await;
+            assert_eq!(actual, expected);
+        }
+    }
+
+    fn broadcast_test_state(dtype: u8) -> GlobalState {
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: crate::state::MERGE_AVG,
+                tensor_numels: vec![4],
+                tensor_shapes: None,
+            }],
+        };
+        let mut state = GlobalState::new(layout, 1.0, 0.0, dtype).unwrap();
+        state.init_fragment(0, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        state
+    }
+
+    fn registry_with_group(group: Arc<Group>) -> Registry {
+        let registry = Arc::new(Mutex::new(RegistryState::default()));
+        registry.lock().unwrap().register_group(group).unwrap();
+        registry
+    }
+
+    fn round_test_config(total_steps: u64) -> Config {
+        Config {
+            port: 0,
+            learners: 1,
+            quorum: 1,
+            grace_ms: 0,
+            grace_gamma: 0.5,
+            grace_tau: 0.0,
+            pipeline: 1,
+            min_round_interval_ms: 0,
+            sync_interval_steps: 0.0,
+            delta_correction: false,
+            quorum_timeout_s: 1,
+            total_steps,
+            outer_lr: 1.0,
+            outer_momentum: 0.0,
+            final_state: None,
+            checkpoint_path: None,
+            checkpoint_every: 0,
+            resume: false,
+            mark_final_checkpoint: false,
+            learner_budget_steps: None,
+            event_tape: None,
+            max_base_lag: Some(0),
+            learner_weight: LearnerWeight::Equal,
+        }
+    }
+
+    fn terminal_test_round(step: u64, member: Member) -> Round {
+        Round {
+            t: step,
+            p: 0,
+            base_version: 0,
+            attempt: 1,
+            pull: bytes::Bytes::new(),
+            started: Instant::now(),
+            expected_members: vec![member],
+            quorum_deadline: Instant::now(),
+            grace_deadline: None,
+            quorum_size: 1,
+            quorum_ms: Some(0),
+            grace_ms: Some(0),
+            pushes: HashMap::from([(
+                member,
+                Push {
+                    learner_id: member.learner_id,
+                    fragment_id: 0,
+                    global_step: step,
+                    round_attempt: 1,
+                    base_version: 0,
+                    local_step: step,
+                    c_steps: 1,
+                    c_tokens: 1,
+                    outer_gradient: vec![0.25; 4],
+                },
+            )]),
+        }
+    }
+
+    fn chunked_inner_type(frame: &OutFrame) -> u8 {
+        assert_eq!(frame.msg_type, MSG_CHUNK);
+        assert_eq!(frame.parts.len(), 2);
+        frame.parts[1][4]
+    }
+
+    #[tokio::test]
+    async fn terminal_round_skips_redundant_broadcast_and_uses_final_cut_once() {
+        let learner = member(0, 30);
+
+        let mut nonterminal_state = broadcast_test_state(DTYPE_F32);
+        let (nonterminal_group, mut nonterminal_rx) =
+            streaming_test_group(DTYPE_F32, false);
+        let nonterminal_registry = registry_with_group(nonterminal_group);
+        let mut nonterminal_sync_secs = 0.0;
+        complete_round(
+            &round_test_config(2),
+            &mut nonterminal_state,
+            &nonterminal_registry,
+            &mut nonterminal_sync_secs,
+            terminal_test_round(1, learner),
+        )
+        .await
+        .unwrap();
+        let bcast = nonterminal_rx.try_recv().unwrap();
+        assert_eq!(chunked_inner_type(&bcast), MSG_BCAST_FRAGMENT);
+        assert!(matches!(
+            nonterminal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let mut terminal_state = broadcast_test_state(DTYPE_F32);
+        let (terminal_group, mut terminal_rx) = streaming_test_group(DTYPE_F32, false);
+        let terminal_registry = registry_with_group(terminal_group.clone());
+        let mut terminal_sync_secs = 0.0;
+        complete_round(
+            &round_test_config(1),
+            &mut terminal_state,
+            &terminal_registry,
+            &mut terminal_sync_secs,
+            terminal_test_round(1, learner),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            terminal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        send_final_cut(&terminal_state, &terminal_group).await.unwrap();
+        let final_fragment = terminal_rx.try_recv().unwrap();
+        assert_eq!(chunked_inner_type(&final_fragment), MSG_FINAL_FRAGMENT);
+        assert_eq!(terminal_rx.try_recv().unwrap().msg_type, MSG_FINAL_MANIFEST);
+        assert!(matches!(
+            terminal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn updated_broadcast_propagates_local_errors_but_tolerates_closed_streams() {
+        let invalid_state = broadcast_test_state(255);
+        let (connected, _receiver) = streaming_test_group(DTYPE_F32, false);
+        let error = broadcast_updated_fragment(&invalid_state, &registry_with_group(connected), 0)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unknown tensor dtype 255"),
+            "unexpected error: {error:#}"
+        );
+
+        let valid_state = broadcast_test_state(DTYPE_F32);
+        let disconnected = test_group(member(0, 20));
+        broadcast_updated_fragment(&valid_state, &registry_with_group(disconnected), 0)
+            .await
+            .unwrap();
     }
 
     #[test]

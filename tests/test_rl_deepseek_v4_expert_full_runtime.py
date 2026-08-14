@@ -322,6 +322,9 @@ class _FakeRay:
         self.objects.append(value)
         return self.Ref(len(self.objects) - 1)
 
+    def get(self, reference):
+        return self.objects[reference.index]
+
 
 def test_pp2_hybrid_export_preserves_metrics_from_megatron_main_rank(
     monkeypatch,
@@ -479,6 +482,147 @@ def test_owner_sharded_export_merge_requires_exact_disjoint_coverage(monkeypatch
             _TrainableStateModule,
             [root, None, None, None, None, None, None, peer_with_metrics],
         )
+
+
+def test_chunked_owner_export_transfers_storage_without_full_state_copy(
+    monkeypatch,
+):
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
+    monkeypatch.setattr(runtime, "NUM_LAYERS", 1)
+    tensors = _tiny_hybrid_tensors()
+    names = tuple(tensors)
+    root = runtime._TrainableStateFragment(
+        source_rank=0,
+        policy_version=4,
+        expected_names=names,
+        tensors={names[0]: tensors[names[0]], names[1]: tensors[names[1]]},
+        is_metrics_source=True,
+        train_seconds=3.5,
+    )
+    peer = runtime._TrainableStateFragment(
+        source_rank=1,
+        policy_version=4,
+        expected_names=names,
+        tensors={names[2]: tensors[names[2]], names[3]: tensors[names[3]]},
+    )
+    ray = _FakeRay()
+    fragments = tuple(
+        runtime._chunk_export_fragment_for_ray(
+            fragment,
+            ray_module=ray,
+            max_chunk_bytes=8,
+        )
+        for fragment in (root, peer)
+    )
+    assert not root.tensors
+    assert not peer.tensors
+
+    state = runtime._merge_chunked_export_fragments(
+        _TrainableStateModule,
+        fragments,
+        resolve_ref=ray.get,
+    )
+
+    ray_tensors = {
+        name: tensor for chunk in ray.objects for name, tensor in chunk.items()
+    }
+    assert state._yeto_owned_tensors == "canonical-v1"
+    assert state.policy_version == 4
+    assert state.train_seconds == 3.5
+    assert set(state.tensors) == set(names)
+    assert all(
+        state.tensors[name].data_ptr() == ray_tensors[name].data_ptr() for name in names
+    )
+    assert all(
+        size <= 8 for fragment in fragments for size in fragment.chunk_tensor_bytes
+    )
+
+
+def test_chunked_owner_export_releases_each_resolved_chunk_before_next(
+    monkeypatch,
+):
+    import gc
+    import weakref
+
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
+    monkeypatch.setattr(runtime, "NUM_LAYERS", 1)
+    tensors = _tiny_hybrid_tensors()
+    names = tuple(tensors)
+    fragment = runtime._TrainableStateFragment(
+        source_rank=0,
+        policy_version=2,
+        expected_names=names,
+        tensors=tensors,
+        is_metrics_source=True,
+    )
+    ray = _FakeRay()
+    chunked = runtime._chunk_export_fragment_for_ray(
+        fragment,
+        ray_module=ray,
+        max_chunk_bytes=8,
+    )
+    previous = []
+    peak_live = 0
+
+    class ResolvedChunk(dict):
+        pass
+
+    def resolve(reference):
+        nonlocal peak_live
+        gc.collect()
+        assert all(
+            item is None for item in chunked.chunk_refs[: len(previous)]
+        )
+        assert not previous or previous[-1]() is None
+        chunk = ResolvedChunk(ray.get(reference))
+        previous.append(weakref.ref(chunk))
+        peak_live = max(
+            peak_live,
+            sum(item() is not None for item in previous),
+        )
+        return chunk
+
+    state = runtime._merge_chunked_export_fragments(
+        _TrainableStateModule,
+        [chunked],
+        resolve_ref=resolve,
+    )
+
+    assert len(chunked.chunk_refs) == len(names)
+    assert chunked.chunk_refs == [None] * len(names)
+    assert peak_live == 1
+    assert set(state.tensors) == set(names)
+
+
+def test_chunked_owner_export_validates_complete_ownership_before_resolve(
+    monkeypatch,
+):
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
+    monkeypatch.setattr(runtime, "NUM_LAYERS", 1)
+    tensors = _tiny_hybrid_tensors()
+    names = tuple(tensors)
+    ray = _FakeRay()
+    fragment = runtime._chunk_export_fragment_for_ray(
+        runtime._TrainableStateFragment(
+            source_rank=0,
+            policy_version=2,
+            expected_names=names,
+            tensors={name: tensors[name] for name in names[:-1]},
+            is_metrics_source=True,
+        ),
+        ray_module=ray,
+        max_chunk_bytes=8,
+    )
+    resolve_calls = []
+
+    with pytest.raises(RuntimeError, match="do not exactly cover"):
+        runtime._merge_chunked_export_fragments(
+            _TrainableStateModule,
+            [fragment],
+            resolve_ref=lambda reference: resolve_calls.append(reference),
+        )
+
+    assert not resolve_calls
 
 
 @pytest.mark.parametrize(("rank", "retained"), ((0, True), (1, False)))
@@ -717,6 +861,7 @@ def test_v1_actor_group_merges_export_shards_and_sends_top_level_chunk_refs(
     fake_ray = _FakeRay()
     ray = ModuleType("ray")
     ray.put = fake_ray.put
+    ray.get = fake_ray.get
     monkeypatch.setitem(sys.modules, "ray", ray)
 
     calls = []
@@ -751,9 +896,18 @@ def test_v1_actor_group_merges_export_shards_and_sends_top_level_chunk_refs(
     group = RayTrainGroup()
     group._actor_handles = [Actor(0), Actor(1)]
 
+    chunked_fragments = tuple(
+        runtime._chunk_export_fragment_for_ray(
+            fragment,
+            ray_module=fake_ray,
+            max_chunk_bytes=16,
+        )
+        for fragment in fragments
+    )
+
     async def broadcast(name):
         assert name == "export_trainable_state"
-        return fragments
+        return chunked_fragments
 
     group._broadcast = broadcast
     state = asyncio.run(group.export_trainable_state())
@@ -763,7 +917,7 @@ def test_v1_actor_group_merges_export_shards_and_sends_top_level_chunk_refs(
         group.apply_trainable_state(state, reset_optimizer=True)
     )
     assert reset == 4
-    assert len(fake_ray.objects) == 1
+    assert len(fake_ray.objects) == 3
     assert [call[0][1] for call in calls] == [
         "begin",
         "begin",
@@ -776,11 +930,47 @@ def test_v1_actor_group_merges_export_shards_and_sends_top_level_chunk_refs(
     assert calls[0][2] == {"reset_optimizer": True}
     assert calls[1][1][0] is calls[0][1][0]
     assert calls[1][2] == {"reset_optimizer": True}
-    assert calls[2][1] == (0, _FakeRay.Ref(0))
+    assert calls[2][1] == (0, _FakeRay.Ref(2))
     assert calls[3][1] == (0, None)
     assert calls[2][2] == calls[3][2] == {}
     assert calls[4][1:] == ((), {})
     assert calls[5][1:] == ((), {})
+
+
+def test_actor_places_export_fragment_in_bounded_ray_objects(monkeypatch):
+    tensors = _tiny_hybrid_tensors()
+    names = tuple(tensors)
+    fragment = runtime._TrainableStateFragment(
+        source_rank=0,
+        policy_version=6,
+        expected_names=names,
+        tensors=tensors,
+        is_metrics_source=True,
+    )
+    fake_ray = _FakeRay()
+    ray = ModuleType("ray")
+    ray.put = fake_ray.put
+    monkeypatch.setitem(sys.modules, "ray", ray)
+
+    class MegatronTrainRayActor:
+        _external_policy_version = 6
+
+    actor_module = SimpleNamespace(
+        MegatronTrainRayActor=MegatronTrainRayActor,
+        export_external_trainable_state=lambda *_args, **_kwargs: fragment,
+        apply_external_trainable_state=lambda *_args, **_kwargs: 0,
+    )
+    runtime.install_on_actor(actor_module)
+
+    exported = MegatronTrainRayActor().export_trainable_state()
+
+    assert isinstance(exported, runtime._ChunkedExportFragment)
+    assert exported.source_rank == 0
+    assert exported.policy_version == 6
+    assert exported.chunk_refs == [_FakeRay.Ref(0)]
+    assert not fragment.tensors
+    assert fake_ray.objects[0] is not fragment.tensors
+    assert set(fake_ray.objects[0]) == set(names)
 
 
 def _actor_module_with_value_preserving_restore():
