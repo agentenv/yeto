@@ -244,7 +244,8 @@ def test_clone_only_install_exposes_group_aligned_chunked_policy_export(
 
     fake_ray = FakeRay()
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 8)
 
     class MegatronTrainRayActor:
         _external_policy_version = 7
@@ -288,12 +289,13 @@ def test_clone_only_install_exposes_group_aligned_chunked_policy_export(
     assert hasattr(RayTrainGroup, "export_trainable_state_chunks")
     tensor_groups = ((names[0],), (names[1],))
     fragment = MegatronTrainRayActor().export_trainable_state_chunks(tensor_groups)
+    assert fragment.source_rank == 0
     group = RayTrainGroup()
 
     async def broadcast(method_name, groups):
         assert method_name == "export_trainable_state_chunks"
         assert groups == tensor_groups
-        return [fragment]
+        return [None] * 8 + [fragment]
 
     group._broadcast = broadcast
     exported = asyncio.run(group.export_trainable_state_chunks(tensor_groups))

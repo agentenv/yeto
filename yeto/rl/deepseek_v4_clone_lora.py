@@ -360,8 +360,6 @@ def install_on_streaming_actor(module) -> None:
         return
 
     def export_trainable_state_chunks(self, tensor_groups):
-        import torch.distributed as dist
-
         from .deepseek_v4_expert_full_runtime import (
             _TrainableStateFragment,
             _chunk_export_fragment_for_ray,
@@ -381,7 +379,8 @@ def install_on_streaming_actor(module) -> None:
         if not isinstance(tensors, dict):
             tensors = dict(tensors)
         fragment = _TrainableStateFragment(
-            source_rank=dist.get_rank() if dist.is_initialized() else 0,
+            # PP's physical main rank owns one complete clone-only policy.
+            source_rank=0,
             policy_version=state.policy_version,
             expected_names=expected_names,
             tensors=tensors,
@@ -417,7 +416,9 @@ def install_on_streaming_actor_group(module) -> None:
             "export_trainable_state_chunks",
             tensor_groups,
         )
-        return _prepare_chunked_policy_export(fragments)
+        return _prepare_chunked_policy_export(
+            tuple(fragment for fragment in fragments if fragment is not None)
+        )
 
     module.RayTrainGroup.export_trainable_state_chunks = (
         export_trainable_state_chunks
