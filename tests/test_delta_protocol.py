@@ -17,6 +17,7 @@ from yeto.protocol import (
     FINALIZATION_REVISION,
     MAGIC,
     MSG_ERROR,
+    MSG_CHUNK,
     MSG_FINAL_ACK,
     MSG_FINAL_FRAGMENT,
     MSG_FINAL_MANIFEST,
@@ -25,6 +26,7 @@ from yeto.protocol import (
     MSG_PULL_REQ,
     MSG_PUSH_FRAGMENT,
     PROTOCOL_VERSION,
+    _CHUNK_HEAD,
     _HEADER,
     bulk_dtype,
     decode_final_manifest,
@@ -87,6 +89,7 @@ class RawLearner:
         self.generation = generation
         self.layout = layout
         self.dtype = dtype
+        self._partials: dict[int, bytearray] = {}
         write_frame(
             self.sock,
             MSG_HELLO,
@@ -97,7 +100,22 @@ class RawLearner:
         self.sock.close()
 
     def recv(self) -> tuple[int, bytes]:
-        return read_frame(self.sock)
+        while True:
+            msg_type, payload = read_frame(self.sock)
+            if msg_type != MSG_CHUNK:
+                return msg_type, payload
+            msg_id, total, offset = _CHUNK_HEAD.unpack_from(payload)
+            part = payload[_CHUNK_HEAD.size :]
+            partial = self._partials.setdefault(msg_id, bytearray())
+            if offset != len(partial):
+                raise AssertionError("raw learner received an out-of-order chunk")
+            partial.extend(part)
+            if len(partial) == total:
+                inner = bytes(self._partials.pop(msg_id))
+                magic, inner_type, length = _HEADER.unpack_from(inner)
+                if magic != MAGIC or length != len(inner) - _HEADER.size:
+                    raise AssertionError("raw learner received an invalid inner frame")
+                return inner_type, inner[_HEADER.size :]
 
     def recv_pull(self, step: int) -> tuple[int, int, int]:
         deadline = time.monotonic() + 10

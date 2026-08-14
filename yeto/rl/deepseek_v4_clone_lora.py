@@ -36,6 +36,8 @@ _ROUTED_ADAPTER = re.compile(
     r"(?P<branch>linear_fc[12])$"
 )
 _MILES_TRAINABLE_STATE = "miles.backends.megatron_utils.trainable_state"
+_MILES_ACTOR = "miles.backends.megatron_utils.actor"
+_MILES_ACTOR_GROUP = "miles.ray.actor_group"
 _MILES_TRAINABLE_STATE_FINDER = None
 
 
@@ -351,6 +353,78 @@ def install_on_trainable_state(module) -> None:
     module._yeto_balanced_expert_layout_installed = True
 
 
+def install_on_streaming_actor(module) -> None:
+    """Export clone-only policy tensors into bounded Ray objects."""
+
+    if getattr(module, "_yeto_clone_stream_export_installed", False):
+        return
+
+    def export_trainable_state_chunks(self, tensor_groups):
+        import torch.distributed as dist
+
+        from .deepseek_v4_expert_full_runtime import (
+            _TrainableStateFragment,
+            _chunk_export_fragment_for_ray,
+        )
+
+        groups = tuple(tuple(group) for group in tensor_groups)
+        expected_names = tuple(name for group in groups for name in group)
+        state = module.export_external_trainable_state(
+            self,
+            policy_version=getattr(self, "_external_policy_version", 0),
+        )
+        if state is None:
+            return None
+        if state.policy_version != getattr(self, "_external_policy_version", 0):
+            raise RuntimeError("clone-only export changed policy version")
+        tensors = state.tensors
+        if not isinstance(tensors, dict):
+            tensors = dict(tensors)
+        fragment = _TrainableStateFragment(
+            source_rank=dist.get_rank() if dist.is_initialized() else 0,
+            policy_version=state.policy_version,
+            expected_names=expected_names,
+            tensors=tensors,
+            is_metrics_source=True,
+            train_rollout_kl=getattr(state, "train_rollout_kl", None),
+            ess_ratio=getattr(state, "ess_ratio", None),
+            pg_clipfrac=getattr(state, "pg_clipfrac", None),
+            train_seconds=getattr(state, "train_seconds", None),
+        )
+        return _chunk_export_fragment_for_ray(
+            fragment,
+            tensor_groups=groups,
+        )
+
+    module.MegatronTrainRayActor.export_trainable_state_chunks = (
+        export_trainable_state_chunks
+    )
+    module._yeto_clone_stream_export_installed = True
+
+
+def install_on_streaming_actor_group(module) -> None:
+    """Expose the bounded clone-only export through Miles' v1 train group."""
+
+    if getattr(module, "_yeto_clone_stream_export_installed", False):
+        return
+
+    async def export_trainable_state_chunks(self, tensor_groups):
+        from .deepseek_v4_expert_full_runtime import (
+            _prepare_chunked_policy_export,
+        )
+
+        fragments = await self._broadcast(
+            "export_trainable_state_chunks",
+            tensor_groups,
+        )
+        return _prepare_chunked_policy_export(fragments)
+
+    module.RayTrainGroup.export_trainable_state_chunks = (
+        export_trainable_state_chunks
+    )
+    module._yeto_clone_stream_export_installed = True
+
+
 class _MilesTrainableStateLoader(importlib.abc.Loader):
     def __init__(self, wrapped) -> None:
         self.wrapped = wrapped
@@ -380,7 +454,7 @@ class _MilesTrainableStateFinder(importlib.abc.MetaPathFinder):
 
 
 def install() -> None:
-    """Patch imported Miles trainable state or arm its lazy import hook."""
+    """Patch clone-only Miles state/export paths or arm lazy import hooks."""
 
     global _MILES_TRAINABLE_STATE_FINDER
     loaded = sys.modules.get(_MILES_TRAINABLE_STATE)
@@ -389,6 +463,11 @@ def install() -> None:
     elif _MILES_TRAINABLE_STATE_FINDER is None:
         _MILES_TRAINABLE_STATE_FINDER = _MilesTrainableStateFinder()
         sys.meta_path.insert(0, _MILES_TRAINABLE_STATE_FINDER)
+
+    from .deepseek_v4_expert_full_runtime import _install_or_defer
+
+    _install_or_defer(_MILES_ACTOR, install_on_streaming_actor)
+    _install_or_defer(_MILES_ACTOR_GROUP, install_on_streaming_actor_group)
 
 
 def assert_original_expert_lora_zero(models: Any) -> None:

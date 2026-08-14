@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -213,6 +216,103 @@ def test_clone_only_lora_rejects_wrong_layout_and_double_install():
             expert_parallel_size=8,
             adapter_type=_FakeGroupedAdapter,
         )
+
+
+def test_clone_only_install_exposes_group_aligned_chunked_policy_export(
+    monkeypatch,
+):
+    names = (
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight",
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight",
+    )
+    tensors = {
+        names[0]: torch.arange(4, dtype=torch.float32).reshape(2, 2),
+        names[1]: torch.arange(6, dtype=torch.float32).reshape(2, 3),
+    }
+
+    class FakeRay(types.ModuleType):
+        def __init__(self):
+            super().__init__("ray")
+            self.objects = []
+
+        def put(self, value):
+            self.objects.append(value)
+            return len(self.objects) - 1
+
+        def get(self, reference):
+            return self.objects[reference]
+
+    fake_ray = FakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+
+    class MegatronTrainRayActor:
+        _external_policy_version = 7
+        _is_first_replica_megatron_main_rank = True
+
+    def export_external_trainable_state(_actor, *, policy_version):
+        return SimpleNamespace(
+            policy_version=policy_version,
+            tensors=dict(tensors),
+            train_rollout_kl=0.1,
+            ess_ratio=0.9,
+            pg_clipfrac=0.2,
+            train_seconds=1.5,
+        )
+
+    actor_module = types.ModuleType("miles.backends.megatron_utils.actor")
+    actor_module.MegatronTrainRayActor = MegatronTrainRayActor
+    actor_module.export_external_trainable_state = export_external_trainable_state
+
+    class RayTrainGroup:
+        pass
+
+    group_module = types.ModuleType("miles.ray.actor_group")
+    group_module.RayTrainGroup = RayTrainGroup
+    trainable_state_module = _fake_miles_trainable_state_module()
+    monkeypatch.setitem(
+        sys.modules,
+        "miles.backends.megatron_utils.trainable_state",
+        trainable_state_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "miles.backends.megatron_utils.actor",
+        actor_module,
+    )
+    monkeypatch.setitem(sys.modules, "miles.ray.actor_group", group_module)
+
+    clone_lora.install()
+
+    assert hasattr(MegatronTrainRayActor, "export_trainable_state_chunks")
+    assert hasattr(RayTrainGroup, "export_trainable_state_chunks")
+    tensor_groups = ((names[0],), (names[1],))
+    fragment = MegatronTrainRayActor().export_trainable_state_chunks(tensor_groups)
+    group = RayTrainGroup()
+
+    async def broadcast(method_name, groups):
+        assert method_name == "export_trainable_state_chunks"
+        assert groups == tensor_groups
+        return [fragment]
+
+    group._broadcast = broadcast
+    exported = asyncio.run(group.export_trainable_state_chunks(tensor_groups))
+    specs = {
+        name: SimpleNamespace(
+            name=name,
+            shape=tuple(value.shape),
+            numel=value.numel(),
+        )
+        for name, value in tensors.items()
+    }
+
+    first = exported.take_tensors((specs[names[0]],))
+    second = exported.take_tensors((specs[names[1]],))
+    exported.finish()
+
+    assert exported._yeto_chunked_export == "owner-sharded-v1"
+    assert torch.equal(first[names[0]], tensors[names[0]])
+    assert torch.equal(second[names[1]], tensors[names[1]])
 
 
 def test_lora_proxy_configures_transformed_model_and_delegates_methods():

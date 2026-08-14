@@ -900,13 +900,10 @@ def test_fixed_roster_exact_base_duplicate_disconnect_and_manual_average(
 
         _push(client0, 2, 1, [2, 0])
         _push(replacement1, 2, 1, [0, 2])
-        for client in (client0, replacement1):
-            update = _wait_item(client.drain_updates, lambda item: item.version == 2)
-            value = unpack_fragment(layout.fragments[0], update.data, DTYPE_F32)
-            assert torch.equal(value, torch.tensor([3.0, 5.0]))
 
         finals = []
         for client in (client0, replacement1):
+            assert client.drain_updates() == []
             manifest, fragments = client.wait_for_final_fragments(timeout=10)
             assert manifest.global_step == 2
             finals.append(
@@ -1074,8 +1071,8 @@ def test_restart_before_and_after_commit_recovers_old_and_new_cut(
     _close_all(client0, client1)
     checkpoint_path.with_suffix(".tmp").mkdir()
 
-    # A second restart broadcasts/finalizes the committed new cut, without
-    # asking either learner to merge version zero again.
+    # A second restart finalizes the committed new cut without redundantly
+    # broadcasting it or asking either learner to merge version zero again.
     port = _port()
     process = _start(syncer_binary, port, checkpoint_path, rounds=1)
     client0 = _client(port, 0, layout)
@@ -1083,11 +1080,15 @@ def test_restart_before_and_after_commit_recovers_old_and_new_cut(
     client1 = _client(port, 1, layout)
     try:
         for client in (client0, client1):
-            update = _wait_item(client.drain_updates, lambda item: item.version == 1)
-            value = unpack_fragment(layout.fragments[0], update.data, DTYPE_F32)
-            assert torch.equal(value, torch.tensor([3.0, 3.0]))
+            assert client.drain_updates() == []
             assert client.drain_pulls() == []
-            manifest, _ = client.wait_for_final_fragments(timeout=10)
+            manifest, fragments = client.wait_for_final_fragments(timeout=10)
+            value = unpack_fragment(
+                layout.fragments[0],
+                fragments[0].data,
+                DTYPE_F32,
+            )
+            assert torch.equal(value, torch.tensor([3.0, 3.0]))
             client.acknowledge_finalization(manifest, timeout=10)
         assert process.wait(timeout=10) == 0
         checkpoint = parse_checkpoint(checkpoint_path)
