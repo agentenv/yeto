@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
+from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +137,67 @@ def parse_args(argv=None):
 def _canonical_sha256(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _strict_json_file_semantics(path: Path) -> tuple[Any, ...]:
+    """Parse exact, typed JSON semantics independent of object-key order."""
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for name, item in pairs:
+            if name in value:
+                raise ValueError(f"duplicate JSON object key: {name!r}")
+            value[name] = item
+        return value
+
+    def finite_number(name: str) -> None:
+        raise ValueError(f"non-finite JSON number: {name}")
+
+    try:
+        value = json.loads(
+            path.read_bytes(),
+            object_pairs_hook=unique_object,
+            parse_constant=finite_number,
+            parse_float=Decimal,
+            parse_int=Decimal,
+        )
+    except (OSError, UnicodeError, ValueError, DecimalException) as exc:
+        raise ValueError("Codex app-server schema is malformed JSON") from exc
+
+    def typed_semantics(item: Any) -> tuple[Any, ...]:
+        if item is None:
+            return ("null",)
+        if isinstance(item, bool):
+            return ("boolean", item)
+        if isinstance(item, Decimal):
+            return ("number", item)
+        if isinstance(item, str):
+            return ("string", item)
+        if isinstance(item, list):
+            return ("array", tuple(typed_semantics(value) for value in item))
+        if isinstance(item, dict):
+            return (
+                "object",
+                tuple(
+                    sorted(
+                        (name, typed_semantics(value))
+                        for name, value in item.items()
+                    )
+                ),
+            )
+        raise TypeError(f"unsupported parsed JSON value: {type(item).__name__}")
+
+    return typed_semantics(value)
+
+
+def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
+    try:
+        pinned_semantics = _strict_json_file_semantics(pinned)
+        generated_semantics = _strict_json_file_semantics(generated)
+    except ValueError as exc:
+        raise ValueError("live stock Codex app-server schema drifted") from exc
+    if generated_semantics != pinned_semantics:
+        raise ValueError("live stock Codex app-server schema drifted")
 
 
 def _preflight_codex_harness(args) -> None:
@@ -322,9 +384,9 @@ def _preflight_codex_harness(args) -> None:
             if (
                 generated_schema.is_symlink()
                 or not generated_schema.is_file()
-                or file_sha256(generated_schema) != CODEX_APP_SERVER_SCHEMA_SHA256
             ):
                 raise ValueError("live stock Codex app-server schema drifted")
+            _verify_live_codex_app_server_schema(schema, generated_schema)
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("cannot verify the stock Codex app-server schema") from exc
     expected_env = {
