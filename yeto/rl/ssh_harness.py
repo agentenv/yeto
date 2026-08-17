@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -19,6 +21,24 @@ from typing import Any
 import torch
 
 from . import (
+    CODEX_APP_SERVER_PROTOCOL_REVISION,
+    CODEX_APP_SERVER_SCHEMA_SHA256,
+    CODEX_BASE_INSTRUCTIONS_SHA256,
+    CODEX_CLI_VERSION,
+    CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH,
+    CODEX_CONTAINER_BINARY_PATH,
+    CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
+    CODEX_HARNESS_AGENT,
+    CODEX_HARNESS_AGENT_PATH,
+    CODEX_HARNESS_AGENT_SHA256,
+    CODEX_LINUX_BINARY_SHA256,
+    CODEX_LINUX_BINARY_SIZE_BYTES,
+    CODEX_LINUX_TARGET,
+    CODEX_NPM_PACKAGE,
+    CODEX_NPM_TARBALL_SHA256,
+    CODEX_PACKAGE_MANIFEST_SHA256,
+    CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
+    CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
@@ -45,6 +65,7 @@ TMS_PRELOAD_BASE_BINARY_SHA256 = (
 TMS_TRAIN_DISK_BACKUP_CONTAINER_PATH = "/workspace/tms-disk-backup"
 TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB = 256
 TMS_TRAIN_DISK_BACKUP_ROOT = PurePosixPath("/data/yeto-rl/tms-disk-backup")
+SYNCER_CHECKPOINT_MAGIC = 0xD170_5A7E
 JIT_CACHE_SCHEMA = 1
 JIT_CACHE_ROOT = PurePosixPath("/data/yeto-rl/jit-cache")
 JIT_CACHE_MOUNTS = (
@@ -71,7 +92,228 @@ _DOCKER_DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _SAFE_IMAGE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]+\Z")
+_EVAL_DATASET_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}\Z")
 SECRLENV_AGENT = "yeto_miles_secrlenv.agent.run"
+SECRLENV_REWARD = "yeto_miles_secrlenv.reward:reward_func"
+SECRLENV_AGENTS = frozenset((SECRLENV_AGENT, CODEX_HARNESS_AGENT))
+CODEX_REMOTE_BUNDLE_PATH = "codex/codex-x86_64-unknown-linux-musl"
+CODEX_REMOTE_MANIFEST_PATH = "codex/codex-package.json"
+CODEX_REMOTE_SCHEMA_PATH = "codex/codex_app_server_protocol.v2.schemas.json"
+_CONTAINER_STATE_FORMAT = (
+    '{"Status":{{json .State.Status}},'
+    '"ExitCode":{{.State.ExitCode}},'
+    '"OOMKilled":{{.State.OOMKilled}},'
+    '"RestartCount":{{.RestartCount}}}'
+)
+_EVENT_EVIDENCE_FILTER = r"""
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+mode = sys.argv[2]
+allowed = {
+    "strict-learner": {
+        "rl_local_round": ("event", "local_round_id", "base_policy_version"),
+        "rl_policy_apply": ("event", "policy_version", "sync/global_policy_hash"),
+    },
+    "decoupled-learner": {
+        "rl_policy_snapshot": ("event", "rl/fragment_versions", "rl/policy_hash"),
+        "rl_policy_apply": ("event", "sync/global_policy_hash"),
+        "rl_final_cut": ("event",),
+    },
+    "eval-learner": {
+        "rl_policy_apply": (
+            "event", "island_id", "policy_version", "sync/global_policy_hash"
+        ),
+        "rl_eval_result": (
+            "event", "island_id", "rollout_id", "policy_version", "dataset_name",
+            "sample_count", "rl/eval/result", "rl/eval/pass_at_1"
+        ),
+    },
+    "syncer": {
+        "syncer_commit": (
+            "step", "fragment", "launch_base_version", "expected", "responded",
+            "responders", "sync/layout_hash"
+        ),
+    },
+}
+
+if mode not in allowed or path.is_symlink() or not path.is_file():
+    raise SystemExit("invalid event evidence source")
+if path.stat().st_size > 64 * 1024 * 1024:
+    raise SystemExit("event evidence source is too large")
+
+sha256 = re.compile(r"[0-9a-f]{64}\Z")
+safe_name = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+integer_fields = {
+    "local_round_id", "base_policy_version", "policy_version", "island_id",
+    "rollout_id", "sample_count", "step", "fragment", "launch_base_version",
+    "id", "base_version", "c_steps", "c_tokens",
+}
+hash_fields = {"sync/global_policy_hash", "rl/policy_hash", "sync/layout_hash"}
+list_integer_fields = {"rl/fragment_versions", "expected", "responded"}
+float_fields = {"contribution", "rl/eval/result", "rl/eval/pass_at_1"}
+responder_fields = ("id", "base_version", "c_steps", "c_tokens", "contribution")
+
+def scalar(name, value):
+    if name in integer_fields:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10**12:
+            raise ValueError
+    elif name in hash_fields:
+        if not isinstance(value, str) or not sha256.fullmatch(value):
+            raise ValueError
+    elif name in list_integer_fields:
+        if (
+            not isinstance(value, list) or len(value) > 1024
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value)
+        ):
+            raise ValueError
+    elif name in float_fields:
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or not 0.0 <= value <= 1.0
+        ):
+            raise ValueError
+    elif name == "dataset_name":
+        if not isinstance(value, str) or not safe_name.fullmatch(value):
+            raise ValueError
+    elif name == "event":
+        if not isinstance(value, str) or value not in {
+            "rl_local_round", "rl_policy_apply", "rl_policy_snapshot",
+            "rl_final_cut", "rl_eval_result"
+        }:
+            raise ValueError
+    else:
+        raise ValueError
+    return value
+
+count = 0
+try:
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            if len(line.encode()) > 1024 * 1024:
+                raise ValueError
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError
+            if mode == "syncer":
+                if "step" not in event:
+                    continue
+                fields = allowed[mode]["syncer_commit"]
+            else:
+                event_name = event.get("event")
+                fields = allowed[mode].get(event_name)
+                if fields is None:
+                    continue
+            evidence = {}
+            for name in fields:
+                if name not in event:
+                    continue
+                if name == "responders":
+                    responders = event[name]
+                    if not isinstance(responders, list) or len(responders) > 1024:
+                        raise ValueError
+                    evidence[name] = [
+                        {
+                            field: scalar(field, responder[field])
+                            for field in responder_fields
+                            if field in responder
+                        }
+                        for responder in responders
+                        if isinstance(responder, dict)
+                    ]
+                    if len(evidence[name]) != len(responders):
+                        raise ValueError
+                else:
+                    evidence[name] = scalar(name, event[name])
+            encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+            if len(encoded) > 1024 * 1024:
+                raise ValueError
+            print(encoded)
+            count += 1
+            if count > 100000:
+                raise ValueError
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    raise SystemExit("invalid event evidence source")
+"""
+_SYNCER_LIFECYCLE_EVIDENCE = r"""
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+    raise SystemExit("invalid syncer lifecycle source")
+resume = 0
+final_ack = 0
+try:
+    with path.open(encoding="utf-8", errors="strict") as source:
+        for line in source:
+            resume += line.count("resumed from checkpoint")
+            final_ack += line.count("learner finalized authoritative parameters")
+except (OSError, UnicodeError):
+    raise SystemExit("invalid syncer lifecycle source")
+print(json.dumps({"schema": 1, "resume_count": resume, "final_ack_count": final_ack},
+                 sort_keys=True, separators=(",", ":")))
+"""
+_EVENT_EVIDENCE_FIELDS = {
+    "strict-learner": {
+        "rl_local_round": {
+            "event",
+            "local_round_id",
+            "base_policy_version",
+        },
+        "rl_policy_apply": {
+            "event",
+            "policy_version",
+            "sync/global_policy_hash",
+        },
+    },
+    "decoupled-learner": {
+        "rl_policy_snapshot": {
+            "event",
+            "rl/fragment_versions",
+            "rl/policy_hash",
+        },
+        "rl_policy_apply": {
+            "event",
+            "sync/global_policy_hash",
+        },
+        "rl_final_cut": {"event"},
+    },
+    "eval-learner": {
+        "rl_policy_apply": {
+            "event",
+            "island_id",
+            "policy_version",
+            "sync/global_policy_hash",
+        },
+        "rl_eval_result": {
+            "event",
+            "island_id",
+            "rollout_id",
+            "policy_version",
+            "dataset_name",
+            "sample_count",
+            "rl/eval/result",
+            "rl/eval/pass_at_1",
+        },
+    },
+    "syncer": {
+        "syncer_commit": {
+            "step",
+            "fragment",
+            "launch_base_version",
+            "expected",
+            "responded",
+            "responders",
+            "sync/layout_hash",
+        },
+    },
+}
 
 
 class HarnessError(RuntimeError):
@@ -220,6 +462,212 @@ def _syncer_source_sha256() -> str:
         digest.update(len(data).to_bytes(8, "big"))
         digest.update(data)
     return digest.hexdigest()
+
+
+def _codex_adapter_identity() -> dict[str, str]:
+    """Read hashes derived by the live Yeto Codex adapter, never user input."""
+
+    try:
+        from yeto_miles_secrlenv import codex_harness_agent
+
+        identity = codex_harness_agent.codex_harness_identity()
+    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
+        raise HarnessError("cannot attest the Yeto Codex harness adapter") from exc
+    required = {
+        "base_instructions_sha256",
+        "terminal_exec_tool_schema_sha256",
+        "submit_tool_schema_sha256",
+        "dynamic_tools_schema_sha256",
+    }
+    if not isinstance(identity, dict) or set(identity) != required:
+        raise HarnessError("Yeto Codex adapter returned an invalid identity contract")
+    normalized = {name: str(value).lower() for name, value in identity.items()}
+    if any(not _SHA256.fullmatch(value) for value in normalized.values()):
+        raise HarnessError("Yeto Codex adapter identity contains an invalid SHA256")
+    expected = {
+        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
+        "terminal_exec_tool_schema_sha256": (
+            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
+        ),
+        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
+        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
+    }
+    if normalized != expected:
+        raise HarnessError("Yeto Codex adapter identity does not match its Yeto pins")
+    return normalized
+
+
+def _codex_harness_contract(namespace, args) -> dict[str, Any]:
+    """Attest the official Linux Codex artifact and the Yeto adapter surface."""
+
+    from ..provenance import file_sha256
+
+    binary_value = getattr(namespace, "codex_harness_binary", None)
+    manifest_value = getattr(namespace, "codex_package_manifest", None)
+    schema_value = getattr(namespace, "codex_app_server_schema", None)
+    if not binary_value or not manifest_value or not schema_value:
+        raise HarnessError(
+            "the stock Codex agent requires --codex-harness-binary and "
+            "--codex-package-manifest and --codex-app-server-schema"
+        )
+    binary = Path(binary_value).expanduser()
+    manifest = Path(manifest_value).expanduser()
+    schema = Path(schema_value).expanduser()
+    for path, flag in (
+        (binary, "--codex-harness-binary"),
+        (manifest, "--codex-package-manifest"),
+        (schema, "--codex-app-server-schema"),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise HarnessError(f"{flag} must be a regular, non-symlink file")
+    binary = binary.resolve()
+    manifest = manifest.resolve()
+    schema = schema.resolve()
+    if not binary.stat().st_mode & 0o111:
+        raise HarnessError("--codex-harness-binary must be executable")
+    if binary.stat().st_size != CODEX_LINUX_BINARY_SIZE_BYTES:
+        raise HarnessError("Codex Linux binary size does not match its Yeto pin")
+    if file_sha256(binary) != CODEX_LINUX_BINARY_SHA256:
+        raise HarnessError("Codex Linux binary SHA256 does not match its Yeto pin")
+    if file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256:
+        raise HarnessError("Codex package manifest SHA256 does not match its Yeto pin")
+    if file_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256:
+        raise HarnessError("Codex app-server schema SHA256 does not match its Yeto pin")
+    identity = _codex_adapter_identity()
+    adapter_path = REPO_ROOT / CODEX_HARNESS_AGENT_PATH
+    if adapter_path.is_symlink() or not adapter_path.is_file():
+        raise HarnessError("Yeto Codex harness adapter is missing")
+    if file_sha256(adapter_path) != CODEX_HARNESS_AGENT_SHA256:
+        raise HarnessError("Yeto Codex harness adapter source does not match its pin")
+    return {
+        "agent_function_path": CODEX_HARNESS_AGENT,
+        "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
+        "controller_binary_path": str(binary),
+        "controller_package_manifest_path": str(manifest),
+        "controller_app_server_schema_path": str(schema),
+        "bundle_binary_path": CODEX_REMOTE_BUNDLE_PATH,
+        "bundle_package_manifest_path": CODEX_REMOTE_MANIFEST_PATH,
+        "bundle_app_server_schema_path": CODEX_REMOTE_SCHEMA_PATH,
+        "container_binary_path": CODEX_CONTAINER_BINARY_PATH,
+        "container_app_server_schema_path": (
+            CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH
+        ),
+        "binary_sha256": CODEX_LINUX_BINARY_SHA256,
+        "binary_size_bytes": CODEX_LINUX_BINARY_SIZE_BYTES,
+        "cli_version": CODEX_CLI_VERSION,
+        "npm_package": CODEX_NPM_PACKAGE,
+        "target": CODEX_LINUX_TARGET,
+        "npm_tarball_sha256": CODEX_NPM_TARBALL_SHA256,
+        "package_manifest_sha256": CODEX_PACKAGE_MANIFEST_SHA256,
+        "app_server_protocol_revision": CODEX_APP_SERVER_PROTOCOL_REVISION,
+        "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
+        **identity,
+        "reasoning_effort": args.codex_reasoning_effort,
+        "backend": {
+            "model": args.tito_model,
+            "max_tokens": args.rollout_max_response_len,
+            "reasoning_effort": "max",
+            "thinking": {"type": "enabled"},
+            "chat_template": args.tito_model,
+            "chat_template_kwargs": dict(args.apply_chat_template_kwargs),
+            "tito_allowed_append_roles": list(args.tito_allowed_append_roles),
+        },
+    }
+
+
+def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
+    required = {
+        "agent_function_path",
+        "agent_source_sha256",
+        "controller_binary_path",
+        "controller_package_manifest_path",
+        "controller_app_server_schema_path",
+        "bundle_binary_path",
+        "bundle_package_manifest_path",
+        "bundle_app_server_schema_path",
+        "container_binary_path",
+        "container_app_server_schema_path",
+        "binary_sha256",
+        "binary_size_bytes",
+        "cli_version",
+        "npm_package",
+        "target",
+        "npm_tarball_sha256",
+        "package_manifest_sha256",
+        "app_server_protocol_revision",
+        "app_server_schema_sha256",
+        "base_instructions_sha256",
+        "terminal_exec_tool_schema_sha256",
+        "submit_tool_schema_sha256",
+        "dynamic_tools_schema_sha256",
+        "reasoning_effort",
+        "backend",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise HarnessError("plan has an invalid stock Codex harness contract")
+    pinned = {
+        "agent_function_path": CODEX_HARNESS_AGENT,
+        "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
+        "bundle_binary_path": CODEX_REMOTE_BUNDLE_PATH,
+        "bundle_package_manifest_path": CODEX_REMOTE_MANIFEST_PATH,
+        "bundle_app_server_schema_path": CODEX_REMOTE_SCHEMA_PATH,
+        "container_binary_path": CODEX_CONTAINER_BINARY_PATH,
+        "container_app_server_schema_path": (
+            CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH
+        ),
+        "binary_sha256": CODEX_LINUX_BINARY_SHA256,
+        "binary_size_bytes": CODEX_LINUX_BINARY_SIZE_BYTES,
+        "cli_version": CODEX_CLI_VERSION,
+        "npm_package": CODEX_NPM_PACKAGE,
+        "target": CODEX_LINUX_TARGET,
+        "npm_tarball_sha256": CODEX_NPM_TARBALL_SHA256,
+        "package_manifest_sha256": CODEX_PACKAGE_MANIFEST_SHA256,
+        "app_server_protocol_revision": CODEX_APP_SERVER_PROTOCOL_REVISION,
+        "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
+        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
+        "terminal_exec_tool_schema_sha256": (
+            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
+        ),
+        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
+        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
+        "reasoning_effort": "xhigh",
+    }
+    if any(value.get(name) != expected for name, expected in pinned.items()):
+        raise HarnessError("plan does not use the pinned stock Codex runtime")
+    for name in (
+        "controller_binary_path",
+        "controller_package_manifest_path",
+        "controller_app_server_schema_path",
+    ):
+        path = Path(str(value.get(name, "")))
+        if not path.is_absolute() or ".." in path.parts:
+            raise HarnessError(f"stock Codex contract has an invalid {name}")
+    backend = value.get("backend")
+    expected_backend = {
+        "model": "deepseekv4",
+        "max_tokens": learner.get("rollout_max_response_len"),
+        "reasoning_effort": "max",
+        "thinking": {"type": "enabled"},
+        "chat_template": "deepseekv4",
+        "chat_template_kwargs": {
+            "thinking_mode": "thinking",
+            "reasoning_effort": "max",
+            "drop_thinking": False,
+        },
+        "tito_allowed_append_roles": ["tool", "user"],
+    }
+    if backend != expected_backend:
+        raise HarnessError("stock Codex backend/TITO contract drifted")
+    if (
+        learner.get("rl_model_recipe") != "deepseek-v4-flash"
+        or learner.get("custom_agent_function_path") != CODEX_HARNESS_AGENT
+        or learner.get("codex_reasoning_effort") != "xhigh"
+        or learner.get("apply_chat_template_kwargs")
+        != expected_backend["chat_template_kwargs"]
+        or learner.get("tito_model") != "deepseekv4"
+        or learner.get("tito_allowed_append_roles") != ["tool", "user"]
+    ):
+        raise HarnessError("stock Codex is restricted to the signed DSV4 agent path")
 
 
 def _tms_preload_patch(path: str | Path) -> dict[str, str]:
@@ -447,6 +895,49 @@ def _local_data_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _local_jsonl_record_count(path: str | Path) -> int:
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise HarnessError("evaluation dataset must be one regular JSONL file")
+    try:
+        with source.open("rb") as handle:
+            count = sum(1 for line in handle if line.strip())
+    except OSError as error:
+        raise HarnessError("cannot read evaluation dataset") from error
+    if count <= 0:
+        raise HarnessError("evaluation dataset is empty")
+    return count
+
+
+def _eval_checkpoint_contract(
+    source_host: str,
+    source_path: str,
+    sha256: str,
+    size_bytes: int,
+    global_step: int,
+) -> dict[str, Any]:
+    """Pin a remote terminal checkpoint without staging it on the controller."""
+
+    source_host = _validate_target(source_host)
+    source_path = _validate_remote_path(source_path, "--eval-checkpoint-path")
+    sha256 = str(sha256).lower()
+    if not _SHA256.fullmatch(sha256):
+        raise HarnessError("--eval-checkpoint-sha256 must be a lowercase SHA256")
+    for flag, value in (
+        ("--eval-checkpoint-size-bytes", size_bytes),
+        ("--eval-checkpoint-global-step", global_step),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise HarnessError(f"{flag} must be a positive integer")
+    return {
+        "source_host": source_host,
+        "source_path": source_path,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+        "global_step": global_step,
+    }
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -508,6 +999,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     _, port = _validate_address(str(plan.get("syncer_address", "")))
     if plan.get("syncer_port") != port:
         raise HarnessError("plan syncer port does not match its address")
+    final_ack_timeout_s = plan.get("final_ack_timeout_s")
+    if final_ack_timeout_s is not None and (
+        not isinstance(final_ack_timeout_s, int)
+        or isinstance(final_ack_timeout_s, bool)
+        or final_ack_timeout_s <= 0
+    ):
+        raise HarnessError("plan has an invalid final_ack_timeout_s")
     if not _NETWORK_INTERFACE.fullmatch(str(plan.get("network_interface", "eno3"))):
         raise HarnessError("plan has an invalid network interface")
     _docker_ref(str(plan.get("docker_image", "")))
@@ -532,7 +1030,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if not isinstance(learner, dict):
         raise HarnessError("plan has no learner configuration")
     daemon = plan.get("secrlenv_daemon")
-    if learner.get("custom_agent_function_path") == SECRLENV_AGENT:
+    if learner.get("custom_agent_function_path") in SECRLENV_AGENTS:
         if not isinstance(daemon, dict):
             raise HarnessError("secrlenv agent requires a pinned daemon contract")
         for name in ("source_root", "task_pack", "state_root"):
@@ -624,6 +1122,126 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     sync_preset = learner.get("sync_preset", "strict-avg")
     if sync_preset not in {"strict-avg", "decoupled"}:
         raise HarnessError("plan has an invalid learner sync_preset")
+    evaluation = learner.get("evaluation")
+    if evaluation is not None:
+        if not isinstance(evaluation, dict):
+            raise HarnessError("plan has an invalid learner evaluation")
+        if evaluation.get("eval_only") is not True:
+            raise HarnessError("SSH evaluation must use a separate eval-only run")
+        if learner.get("custom_agent_function_path") not in SECRLENV_AGENTS:
+            raise HarnessError("SSH evaluation is restricted to the secrlenv agent")
+        if learner.get("reward_function") != SECRLENV_REWARD:
+            raise HarnessError(
+                "SSH evaluation requires the signed secrlenv reward contract"
+            )
+        if sync_preset != "strict-avg":
+            raise HarnessError(
+                "final SSH evaluation requires strict-avg synchronization"
+            )
+        if data_local_path is None or not PurePosixPath(
+            str(learner.get("data", ""))
+        ).suffix:
+            raise HarnessError(
+                "SSH evaluation requires one local training dataset file"
+            )
+        if (
+            evaluation.get("data") != learner.get("data")
+            or evaluation.get("data_sha256") != data_sha256
+        ):
+            raise HarnessError(
+                "evaluation must reuse the exact training dataset path and SHA256"
+            )
+        if not _EVAL_DATASET_NAME.fullmatch(
+            str(evaluation.get("dataset_name", ""))
+        ):
+            raise HarnessError("plan has an invalid evaluation dataset_name")
+        interval = evaluation.get("interval")
+        samples = evaluation.get("samples_per_prompt")
+        prompt_count = evaluation.get("prompt_count")
+        if (
+            not isinstance(interval, int)
+            or isinstance(interval, bool)
+            or interval != 1
+        ):
+            raise HarnessError("eval-only Miles evaluation interval must be 1")
+        if (
+            not isinstance(samples, int)
+            or isinstance(samples, bool)
+            or samples <= 0
+        ):
+            raise HarnessError("plan has an invalid evaluation samples_per_prompt")
+        if (
+            not isinstance(prompt_count, int)
+            or isinstance(prompt_count, bool)
+            or prompt_count <= 0
+        ):
+            raise HarnessError("plan has an invalid evaluation prompt_count")
+        if evaluation.get("skip_before_train") is not True:
+            raise HarnessError(
+                "post-training evaluation must skip pre-train evaluation"
+            )
+        if final_ack_timeout_s is None or final_ack_timeout_s <= 3600:
+            raise HarnessError(
+                "evaluation requires an explicitly extended final_ack_timeout_s"
+            )
+        temperature = evaluation.get("temperature")
+        if temperature is not None and (
+            not isinstance(temperature, (int, float))
+            or isinstance(temperature, bool)
+            or not math.isfinite(temperature)
+            or temperature < 0
+        ):
+            raise HarnessError("plan has an invalid evaluation temperature")
+        top_p = evaluation.get("top_p")
+        if top_p is not None and (
+            not isinstance(top_p, (int, float))
+            or isinstance(top_p, bool)
+            or not math.isfinite(top_p)
+            or not 0 < top_p <= 1
+        ):
+            raise HarnessError("plan has an invalid evaluation top_p")
+        for name in ("max_prompt_len", "max_response_len", "max_context_len"):
+            value = evaluation.get(name)
+            if value is not None and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value <= 0
+                or value > learner["seq_len"]
+            ):
+                raise HarnessError(f"plan has an invalid evaluation {name}")
+        checkpoint = plan.get("eval_checkpoint")
+        if not isinstance(checkpoint, dict) or set(checkpoint) != {
+            "source_host",
+            "source_path",
+            "sha256",
+            "size_bytes",
+            "global_step",
+        }:
+            raise HarnessError("eval-only plan requires an attested syncer checkpoint")
+        try:
+            _validate_target(str(checkpoint.get("source_host", "")))
+            _validate_remote_path(
+                str(checkpoint.get("source_path", "")),
+                "eval checkpoint source_path",
+            )
+        except HarnessError as error:
+            raise HarnessError("plan has an invalid eval checkpoint identity") from error
+        if (
+            not _SHA256.fullmatch(str(checkpoint.get("sha256", "")))
+            or not isinstance(checkpoint.get("size_bytes"), int)
+            or isinstance(checkpoint.get("size_bytes"), bool)
+            or checkpoint["size_bytes"] <= 12
+            or checkpoint.get("global_step") != learner["global_rounds"]
+        ):
+            raise HarnessError("plan has an invalid eval checkpoint identity")
+        if (
+            checkpoint["source_host"] == _syncer_host(plan)
+            and checkpoint["source_path"]
+            == f"{plan['remote_run']}/state/state.ckpt"
+        ):
+            raise HarnessError("eval checkpoint source and fresh destination coincide")
+    elif plan.get("eval_checkpoint") is not None:
+        raise HarnessError("eval checkpoint requires an eval-only learner")
     fragments = learner.get("fragments", 1)
     pipeline = learner.get("pipeline", 1)
     local_horizon = learner.get("local_horizon", 1)
@@ -756,6 +1374,11 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         or not learner.get("tito_model")
     ):
         raise HarnessError("plan has an incomplete agentic session contract")
+    codex_harness = plan.get("codex_harness")
+    if custom_agent == CODEX_HARNESS_AGENT:
+        _validate_codex_harness(codex_harness, learner)
+    elif codex_harness is not None:
+        raise HarnessError("stock Codex contract requires the signed Codex agent")
     roles = learner.get("tito_allowed_append_roles")
     if roles is not None and (
         not isinstance(roles, list)
@@ -889,6 +1512,7 @@ def prepare(namespace) -> Path:
     data = args.data
     data_local_path = None
     data_sha256 = None
+    data_prompt_count = None
     if dataset["source"] == "local":
         source = Path(args.data).expanduser().absolute()
         data_sha256 = _local_data_sha256(source)
@@ -897,6 +1521,8 @@ def prepare(namespace) -> Path:
         data = "/workspace/data/dataset"
         if source.is_file():
             data += source.suffix
+            if getattr(namespace, "eval_checkpoint_host", None) is not None:
+                data_prompt_count = _local_jsonl_record_count(source)
 
     tms_patch_path = getattr(namespace, "tms_preload_patch", None)
     tms_preload_patch = (
@@ -1008,6 +1634,9 @@ def prepare(namespace) -> Path:
             "custom_agent_function_path": getattr(
                 args, "custom_agent_function_path", None
             ),
+            "codex_reasoning_effort": getattr(
+                args, "codex_reasoning_effort", None
+            ),
             "agent_max_seq_len": getattr(args, "agent_max_seq_len", None),
             "use_session_server": args.use_session_server,
             "session_server_ip": args.session_server_ip,
@@ -1046,11 +1675,77 @@ def prepare(namespace) -> Path:
             "cybergym_reward_view": os.environ.get("CYBERGYM_REWARD_VIEW", "train"),
         },
     }
+    final_ack_timeout_s = getattr(namespace, "final_ack_timeout_s", None)
+    if final_ack_timeout_s is not None:
+        plan["final_ack_timeout_s"] = final_ack_timeout_s
+    eval_checkpoint_host = getattr(namespace, "eval_checkpoint_host", None)
+    eval_checkpoint_path = getattr(namespace, "eval_checkpoint_path", None)
+    eval_checkpoint_sha256 = getattr(namespace, "eval_checkpoint_sha256", None)
+    eval_checkpoint_size_bytes = getattr(
+        namespace, "eval_checkpoint_size_bytes", None
+    )
+    eval_checkpoint_global_step = getattr(
+        namespace, "eval_checkpoint_global_step", None
+    )
+    checkpoint_values = (
+        eval_checkpoint_host,
+        eval_checkpoint_path,
+        eval_checkpoint_sha256,
+        eval_checkpoint_size_bytes,
+        eval_checkpoint_global_step,
+    )
+    if any(value is not None for value in checkpoint_values) and any(
+        value is None for value in checkpoint_values
+    ):
+        raise HarnessError(
+            "all remote eval checkpoint identity options are required together"
+        )
+    eval_interval = getattr(namespace, "eval_interval", None)
+    eval_dataset_name = getattr(namespace, "eval_dataset_name", None)
+    eval_options = {
+        "temperature": getattr(namespace, "eval_temperature", None),
+        "top_p": getattr(namespace, "eval_top_p", None),
+        "max_prompt_len": getattr(namespace, "eval_max_prompt_len", None),
+        "max_response_len": getattr(namespace, "eval_max_response_len", None),
+        "max_context_len": getattr(namespace, "eval_max_context_len", None),
+    }
+    if eval_checkpoint_host is None:
+        if (
+            eval_interval is not None
+            or eval_dataset_name is not None
+            or getattr(namespace, "eval_samples_per_prompt", None) is not None
+            or any(value is not None for value in eval_options.values())
+        ):
+            raise HarnessError("evaluation options require --eval-checkpoint-host")
+    else:
+        plan["eval_checkpoint"] = _eval_checkpoint_contract(
+            eval_checkpoint_host,
+            eval_checkpoint_path,
+            eval_checkpoint_sha256,
+            eval_checkpoint_size_bytes,
+            eval_checkpoint_global_step,
+        )
+        eval_samples_per_prompt = getattr(
+            namespace, "eval_samples_per_prompt", None
+        )
+        plan["learner"]["evaluation"] = {
+            "eval_only": True,
+            "dataset_name": eval_dataset_name,
+            "data": data,
+            "data_sha256": data_sha256,
+            "interval": 1 if eval_interval is None else eval_interval,
+            "samples_per_prompt": (
+                1 if eval_samples_per_prompt is None else eval_samples_per_prompt
+            ),
+            "prompt_count": data_prompt_count,
+            "skip_before_train": True,
+            **eval_options,
+        }
     jit_cache_root = getattr(namespace, "jit_cache_root", None)
     if jit_cache_root is not None:
         plan["jit_cache"] = _jit_cache_contract(jit_cache_root, plan)
     daemon_source_root = getattr(namespace, "secrlenv_source_root", None)
-    if args.custom_agent_function_path == SECRLENV_AGENT:
+    if args.custom_agent_function_path in SECRLENV_AGENTS:
         required = {
             "--secrlenv-source-root": daemon_source_root,
             "--secrlenv-source-sha256": getattr(
@@ -1087,6 +1782,15 @@ def prepare(namespace) -> Path:
     elif daemon_source_root is not None:
         raise HarnessError(
             "--secrlenv-source-root requires the secrlenv custom agent"
+        )
+    codex_binary = getattr(namespace, "codex_harness_binary", None)
+    codex_manifest = getattr(namespace, "codex_package_manifest", None)
+    codex_schema = getattr(namespace, "codex_app_server_schema", None)
+    if args.custom_agent_function_path == CODEX_HARNESS_AGENT:
+        plan["codex_harness"] = _codex_harness_contract(namespace, args)
+    elif any(value is not None for value in (codex_binary, codex_manifest, codex_schema)):
+        raise HarnessError(
+            "Codex artifact options require the signed stock Codex agent"
         )
     if getattr(args, "expert_full_count", 0):
         plan["learner"].update(
@@ -1307,12 +2011,59 @@ def _attest_local(plan: dict[str, Any]) -> None:
         != plan["reward_sha256"]
     ):
         raise HarnessError("reward source changed after the plan was prepared")
+    learner = plan["learner"]
+    codex_harness = plan.get("codex_harness")
+    if codex_harness is not None:
+        _validate_codex_harness(codex_harness, learner)
+        binary = Path(codex_harness["controller_binary_path"])
+        manifest = Path(codex_harness["controller_package_manifest_path"])
+        schema = Path(codex_harness["controller_app_server_schema_path"])
+        for path, expected_size, expected_sha256, executable in (
+            (
+                binary,
+                codex_harness["binary_size_bytes"],
+                codex_harness["binary_sha256"],
+                True,
+            ),
+            (manifest, None, codex_harness["package_manifest_sha256"], False),
+            (schema, None, codex_harness["app_server_schema_sha256"], False),
+        ):
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or (executable and not path.stat().st_mode & 0o111)
+                or (expected_size is not None and path.stat().st_size != expected_size)
+                or file_sha256(path) != expected_sha256
+            ):
+                raise HarnessError("Codex controller artifact changed after prepare")
+        adapter_path = REPO_ROOT / CODEX_HARNESS_AGENT_PATH
+        if (
+            adapter_path.is_symlink()
+            or not adapter_path.is_file()
+            or file_sha256(adapter_path) != codex_harness["agent_source_sha256"]
+            or _codex_adapter_identity()
+            != {
+                name: codex_harness[name]
+                for name in (
+                    "base_instructions_sha256",
+                    "terminal_exec_tool_schema_sha256",
+                    "submit_tool_schema_sha256",
+                    "dynamic_tools_schema_sha256",
+                )
+            }
+        ):
+            raise HarnessError("Yeto Codex adapter changed after prepare")
     data_local_path = plan["learner"].get("data_local_path")
     if (
         data_local_path is not None
         and _local_data_sha256(data_local_path) != plan["learner"]["data_sha256"]
     ):
         raise HarnessError("local dataset changed after the plan was prepared")
+    evaluation = plan["learner"].get("evaluation")
+    if evaluation is not None and _local_jsonl_record_count(
+        data_local_path
+    ) != evaluation.get("prompt_count"):
+        raise HarnessError("evaluation dataset record count changed after prepare")
 
 
 def deploy(plan_path: str | Path) -> None:
@@ -1322,6 +2073,31 @@ def deploy(plan_path: str | Path) -> None:
     _attest_local(plan)
     digest = _plan_digest(plan)
     local_data = plan["learner"].get("data_local_path")
+    eval_checkpoint = plan.get("eval_checkpoint")
+    if eval_checkpoint is not None:
+        _require_program("scp")
+        source_path = eval_checkpoint["source_path"]
+        _ssh(
+            plan,
+            eval_checkpoint["source_host"],
+            f"""set -euo pipefail
+SOURCE="$HOME/{source_path}"
+test -f "$SOURCE" && test ! -L "$SOURCE"
+test "$(stat -c %s "$SOURCE")" = {eval_checkpoint['size_bytes']}
+printf '%s  %s\n' {shlex.quote(eval_checkpoint['sha256'])} "$SOURCE" | sha256sum --check -
+python3 - "$SOURCE" {eval_checkpoint['global_step']} <<'PY'
+import sys
+from pathlib import Path
+
+header = Path(sys.argv[1]).open("rb").read(12)
+expected_step = int(sys.argv[2])
+if len(header) != 12 or int.from_bytes(header[:4], "little") != {SYNCER_CHECKPOINT_MAGIC}:
+    raise SystemExit("invalid syncer checkpoint header")
+if int.from_bytes(header[4:12], "little") != expected_step:
+    raise SystemExit("syncer checkpoint global step mismatch")
+PY
+""",
+        )
     excludes = (
         ".git/",
         ".venv/",
@@ -1341,7 +2117,11 @@ def deploy(plan_path: str | Path) -> None:
     learner_hosts = set(_all_hosts(plan))
     for target in _deployment_hosts(plan):
         deploy_data = local_data is not None and target in learner_hosts
+        deploy_checkpoint = eval_checkpoint is not None and target == _syncer_host(plan)
+        deploy_codex = plan.get("codex_harness") is not None and target in learner_hosts
         data_directory = '\nmkdir -p "$RUN/data"' if deploy_data else ""
+        state_directory = '\nmkdir -p "$RUN/state"' if deploy_checkpoint else ""
+        codex_directory = '\nmkdir -p "$RUN/codex"' if deploy_codex else ""
         initialize = f"""set -euo pipefail
 {_remote_vars(plan)}
 if [ -f "$RUN/control/plan.sha256" ]; then
@@ -1355,7 +2135,7 @@ else
     printf '%s\n' {shlex.quote(digest)} > "$RUN/control/deploying.sha256"
   fi
 fi
-{data_directory}
+{data_directory}{state_directory}{codex_directory}
 """
         _ssh(plan, target, initialize)
         _run(
@@ -1395,6 +2175,69 @@ fi
                     + ("/" if is_directory else ""),
                 ]
             )
+        if deploy_codex:
+            codex = plan["codex_harness"]
+            for source_path, bundle_path in (
+                (codex["controller_binary_path"], codex["bundle_binary_path"]),
+                (
+                    codex["controller_package_manifest_path"],
+                    codex["bundle_package_manifest_path"],
+                ),
+                (
+                    codex["controller_app_server_schema_path"],
+                    codex["bundle_app_server_schema_path"],
+                ),
+            ):
+                _run(
+                    [
+                        "rsync",
+                        "-az",
+                        "-e",
+                        _rsync_shell(plan),
+                        source_path,
+                        f"{target}:{plan['remote_run']}/{bundle_path}",
+                    ]
+                )
+            _ssh(
+                plan,
+                target,
+                f"""set -euo pipefail
+{_remote_vars(plan)}
+CODEX="$RUN/{codex['bundle_binary_path']}"
+MANIFEST="$RUN/{codex['bundle_package_manifest_path']}"
+SCHEMA="$RUN/{codex['bundle_app_server_schema_path']}"
+test -f "$CODEX" && test ! -L "$CODEX" && test -x "$CODEX"
+test "$(stat -c %s "$CODEX")" = {codex['binary_size_bytes']}
+printf '%s  %s\n' {shlex.quote(codex['binary_sha256'])} "$CODEX" | sha256sum --check -
+test -f "$MANIFEST" && test ! -L "$MANIFEST"
+printf '%s  %s\n' {shlex.quote(codex['package_manifest_sha256'])} "$MANIFEST" | sha256sum --check -
+test -f "$SCHEMA" && test ! -L "$SCHEMA"
+printf '%s  %s\n' {shlex.quote(codex['app_server_schema_sha256'])} "$SCHEMA" | sha256sum --check -
+""",
+            )
+        if deploy_checkpoint:
+            if eval_checkpoint["source_host"] == target:
+                _ssh(
+                    plan,
+                    target,
+                    f"""set -euo pipefail
+{_remote_vars(plan)}
+cp --reflink=auto -- "$HOME/{eval_checkpoint['source_path']}" "$RUN/state/state.ckpt"
+""",
+                )
+            else:
+                _run(
+                    [
+                        "scp",
+                        "-3",
+                        *plan.get("ssh_options", []),
+                        (
+                            f"{eval_checkpoint['source_host']}:"
+                            f"{eval_checkpoint['source_path']}"
+                        ),
+                        f"{target}:{plan['remote_run']}/state/state.ckpt",
+                    ]
+                )
         _ssh(
             plan,
             target,
@@ -1562,7 +2405,7 @@ def _syncer_argv(plan: dict[str, Any]) -> list[str]:
         ("--learners", _learner_count(plan)),
         ("--quorum", _learner_count(plan)),
         ("--quorum-timeout-s", 900),
-        ("--final-ack-timeout-s", 3600),
+        ("--final-ack-timeout-s", plan.get("final_ack_timeout_s", 3600)),
         ("--grace-ms", 0),
         ("--pipeline", learner.get("pipeline", 1) if decoupled else 1),
         (
@@ -1619,12 +2462,135 @@ def _legacy_syncer_pid_function() -> str:
 """
 
 
+def _syncer_runtime_identity_functions() -> str:
+    """Shell helpers that bind the listener to this run's exact systemd unit."""
+
+    return r"""syncer_unit_pid() {
+  systemctl is-active --quiet "$UNIT" || return 1
+  [ -s "$UNIT_FILE" ] && [ "$(cat "$UNIT_FILE")" = "$UNIT" ] || return 1
+  PID="$(systemctl show --property=MainPID --value "$UNIT")"
+  case "$PID" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$PID" -gt 1 ] && kill -0 "$PID" 2>/dev/null || return 1
+  FRAGMENT="$(systemctl show --property=FragmentPath --value "$UNIT")"
+  [ "$FRAGMENT" = "/run/systemd/transient/$UNIT" ] || return 1
+  [ "$(systemctl show --property=Restart --value "$UNIT")" = no ] || return 1
+  [ "$(systemctl show --property=NRestarts --value "$UNIT")" = 0 ] || return 1
+  CONTROL_GROUP="$(systemctl show --property=ControlGroup --value "$UNIT")"
+  case "$CONTROL_GROUP" in
+    /system.slice/*) ;;
+    *) return 1 ;;
+  esac
+  CGROUP_PROCS="/sys/fs/cgroup$CONTROL_GROUP/cgroup.procs"
+  [ -r "$CGROUP_PROCS" ] && grep -Fqx -- "$PID" "$CGROUP_PROCS" || return 1
+  [ -r "/proc/$PID/cmdline" ] || return 1
+  mapfile -d '' -t ACTUAL_ARGV < "/proc/$PID/cmdline"
+  START=-1
+  for INDEX in "${!ACTUAL_ARGV[@]}"; do
+    if [ "${ACTUAL_ARGV[$INDEX]}" = "$WRAPPER" ]; then
+      START=$INDEX
+      break
+    fi
+  done
+  [ "$START" -ge 0 ] || return 1
+  [ "$((${#ACTUAL_ARGV[@]} - START))" -eq "${#EXPECTED_UNIT_ARGV[@]}" ] || return 1
+  for INDEX in "${!EXPECTED_UNIT_ARGV[@]}"; do
+    [ "${ACTUAL_ARGV[$((START + INDEX))]}" = "${EXPECTED_UNIT_ARGV[$INDEX]}" ] || return 1
+  done
+  printf '%s\n' "$PID"
+}
+
+syncer_child_pid() {
+  CHILD_PID=$1
+  case "$CHILD_PID" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$CHILD_PID" -gt 1 ] && kill -0 "$CHILD_PID" 2>/dev/null || return 1
+  EXPECTED_EXE="$(readlink -f "$SYNCER_BINARY" 2>/dev/null || true)"
+  ACTUAL_EXE="$(readlink -f "/proc/$CHILD_PID/exe" 2>/dev/null || true)"
+  [ -n "$EXPECTED_EXE" ] && [ "$ACTUAL_EXE" = "$EXPECTED_EXE" ] || return 1
+  [ -r "/proc/$CHILD_PID/cmdline" ] || return 1
+  mapfile -d '' -t CHILD_ARGV < "/proc/$CHILD_PID/cmdline"
+  [ "${#CHILD_ARGV[@]}" -eq "${#EXPECTED_SYNCER_ARGV[@]}" ] || return 1
+  for INDEX in "${!EXPECTED_SYNCER_ARGV[@]}"; do
+    [ "${CHILD_ARGV[$INDEX]}" = "${EXPECTED_SYNCER_ARGV[$INDEX]}" ] || return 1
+  done
+  printf '%s\n' "$CHILD_PID"
+}
+
+syncer_listener_inodes() {
+  PORT_HEX="$(printf '%04X' "$SYNCER_PORT")"
+  for TABLE in /proc/net/tcp /proc/net/tcp6; do
+    [ ! -r "$TABLE" ] || awk -v port="$PORT_HEX" '
+      $4 == "0A" {
+        split($2, address, ":")
+        if (toupper(address[2]) == port) print $10
+      }
+    ' "$TABLE"
+  done | sort -u
+}
+
+syncer_pid_socket_inodes() {
+  SOCKET_PID=$1
+  for FD in "/proc/$SOCKET_PID/fd"/*; do
+    LINK="$(readlink "$FD" 2>/dev/null || true)"
+    case "$LINK" in
+      'socket:['*']')
+        INODE="${LINK#socket:[}"
+        printf '%s\n' "${INODE%]}"
+        ;;
+    esac
+  done | sort -u
+}
+
+syncer_listener_owned_by_pid() {
+  OWNER_PID="$(syncer_child_pid "$1")" || return 1
+  LISTEN_INODES="$(syncer_listener_inodes)"
+  [ -n "$LISTEN_INODES" ] || return 1
+  OWNED_INODES="$(syncer_pid_socket_inodes "$OWNER_PID")"
+  [ -n "$OWNED_INODES" ] || return 1
+  while read -r INODE; do
+    printf '%s\n' "$OWNED_INODES" | grep -Fqx -- "$INODE" || return 1
+  done <<< "$LISTEN_INODES"
+  printf '%s\n' "$OWNER_PID"
+}
+
+syncer_listener_owned_by_unit() {
+  PID="$(syncer_unit_pid)" || return 1
+  CONTROL_GROUP="$(systemctl show --property=ControlGroup --value "$UNIT")"
+  CGROUP_PROCS="/sys/fs/cgroup$CONTROL_GROUP/cgroup.procs"
+  LISTEN_INODES="$(syncer_listener_inodes)"
+  [ -n "$LISTEN_INODES" ] || return 1
+  while read -r INODE; do
+    OWNER_COUNT=0
+    while read -r CGPID; do
+      case "$CGPID" in ''|*[!0-9]*) continue ;; esac
+      if syncer_pid_socket_inodes "$CGPID" | grep -Fqx -- "$INODE"; then
+        syncer_child_pid "$CGPID" >/dev/null || return 1
+        OWNER_COUNT=$((OWNER_COUNT + 1))
+      fi
+    done < "$CGROUP_PROCS"
+    [ "$OWNER_COUNT" -eq 1 ] || return 1
+  done <<< "$LISTEN_INODES"
+  printf '%s\n' "$PID"
+}
+"""
+
+
 def _syncer_start_script(plan: dict[str, Any]) -> str:
     command = _shell_join_with_run(_syncer_argv(plan))
     unit = shlex.quote(_syncer_unit_name(plan))
+    eval_checkpoint = plan.get("eval_checkpoint")
+    checkpoint_check = ""
+    if eval_checkpoint is not None:
+        checkpoint_check = f"""test -f "$RUN/state/state.ckpt"
+test "$(stat -c %s "$RUN/state/state.ckpt")" = {eval_checkpoint['size_bytes']}
+printf '%s  %s\n' {shlex.quote(eval_checkpoint['sha256'])} "$RUN/state/state.ckpt" | sha256sum --check -
+"""
     return f"""set -euo pipefail
 {_remote_vars(plan)}
-command -v systemctl >/dev/null
+{checkpoint_check}command -v systemctl >/dev/null
 command -v systemd-run >/dev/null
 test -d /run/systemd/system
 UNIT={unit}
@@ -1636,10 +2602,16 @@ LOG_FILE="$RUN/state/syncer.log"
 SYNCER_BINARY="$RUN/state/yeto-syncer"
 CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
+SYNCER_PORT={plan['syncer_port']}
+EXPECTED_SYNCER_ARGV=({command})
+EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
 {_legacy_syncer_pid_function()}
+{_syncer_runtime_identity_functions()}
 if systemctl is-active --quiet "$UNIT"; then
-  PID="$(systemctl show --property=MainPID --value "$UNIT")"
-  printf '%s\n' "$UNIT" > "$UNIT_FILE"
+  PID="$(syncer_listener_owned_by_unit)" || {{
+    echo "active syncer unit or listener identity drifted: $UNIT" >&2
+    exit 1
+  }}
   printf '%s\n' "$PID" > "$PID_FILE"
   echo "syncer already running unit=$UNIT pid=$PID"
   exit 0
@@ -1651,6 +2623,10 @@ if [ -n "$LEGACY_PID" ] && [ ! -s "$EXIT_FILE" ]; then
 fi
 if [ -n "$LEGACY_PID" ]; then
   echo "running legacy syncer conflicts with recorded terminal state" >&2
+  exit 1
+fi
+if [ -n "$(syncer_listener_inodes)" ]; then
+  echo "stale or unrelated process already listens on syncer port $SYNCER_PORT" >&2
   exit 1
 fi
 rm -f "$PID_FILE"
@@ -1748,6 +2724,53 @@ def _start_syncer(plan: dict[str, Any]) -> None:
 
 def _wait_for_syncer(plan: dict[str, Any], timeout_s: int = 120) -> None:
     host, port = _validate_address(plan["syncer_address"])
+    command = _shell_join_with_run(_syncer_argv(plan))
+    unit = shlex.quote(_syncer_unit_name(plan))
+    _ssh(
+        plan,
+        _syncer_host(plan),
+        f"""set -euo pipefail
+{_remote_vars(plan)}
+UNIT={unit}
+UNIT_FILE="$RUN/state/syncer.unit"
+WRAPPER="$RUN/state/run-syncer"
+SYNCER_BINARY="$RUN/state/yeto-syncer"
+CHECKPOINT_PATH="$RUN/state/state.ckpt"
+EVENT_TAPE="$RUN/state/events.jsonl"
+EXIT_FILE="$RUN/state/syncer.exit"
+SYNCER_PORT={port}
+EXPECTED_SYNCER_ARGV=({command})
+EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
+{_syncer_runtime_identity_functions()}
+SYNCER_ADDRESS_HOST={shlex.quote(host)}
+command -v getent >/dev/null
+command -v ip >/dev/null
+RESOLVED_IPS="$(getent ahosts "$SYNCER_ADDRESS_HOST" | awk '{{print $1}}' | sort -u)"
+LOCAL_IPS="$(ip -o addr show | awk '{{split($4, address, "/"); print address[1]}}' | sort -u)"
+[ -n "$RESOLVED_IPS" ] && [ -n "$LOCAL_IPS" ] || {{
+  echo "cannot resolve syncer address ownership" >&2
+  exit 1
+}}
+ADDRESS_IS_LOCAL=0
+while read -r RESOLVED_IP; do
+  if printf '%s\n' "$LOCAL_IPS" | grep -Fqx -- "$RESOLVED_IP"; then
+    ADDRESS_IS_LOCAL=1
+  fi
+done <<< "$RESOLVED_IPS"
+[ "$ADDRESS_IS_LOCAL" -eq 1 ] || {{
+  echo "syncer address does not resolve to the configured syncer host" >&2
+  exit 1
+}}
+deadline=$((SECONDS + {timeout_s}))
+until syncer_listener_owned_by_unit >/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] || {{
+    echo "syncer unit/listener identity did not become ready" >&2
+    exit 1
+  }}
+  sleep 2
+done
+""",
+    )
     for target in _all_hosts(plan):
         _ssh(
             plan,
@@ -1819,6 +2842,30 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--wan-streams", learner["wan_streams"]),
         ("--miles-root", "/workspace/miles"),
     )
+    evaluation = learner.get("evaluation")
+    if evaluation is not None:
+        values.append("--eval-only")
+        values.extend(
+            (
+                "--eval-dataset-name",
+                evaluation["dataset_name"],
+                "--eval-data-sha256",
+                evaluation["data_sha256"],
+                "--eval-interval",
+                str(evaluation["interval"]),
+                "--eval-samples-per-prompt",
+                str(evaluation["samples_per_prompt"]),
+            )
+        )
+        for flag, name in (
+            ("--eval-temperature", "temperature"),
+            ("--eval-top-p", "top_p"),
+            ("--eval-max-prompt-len", "max_prompt_len"),
+            ("--eval-max-response-len", "max_response_len"),
+            ("--eval-max-context-len", "max_context_len"),
+        ):
+            if evaluation.get(name) is not None:
+                values.extend((flag, str(evaluation[name])))
     if learner.get("rollout_model") is not None:
         values.extend(("--rollout-model", learner["rollout_model"]))
         values.extend(
@@ -1903,6 +2950,13 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
                 learner["custom_agent_function_path"],
             )
         )
+    if plan.get("codex_harness") is not None:
+        values.extend(
+            (
+                "--codex-harness-contract",
+                _canonical_json(plan["codex_harness"]),
+            )
+        )
     if learner.get("agent_max_seq_len") is not None:
         values.extend(("--agent-max-seq-len", str(learner["agent_max_seq_len"])))
     if learner.get("use_session_server"):
@@ -1973,6 +3027,64 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
         f"  --volume {shlex.quote(f'{mount}:{mount}:ro')} \\\n"
         for mount in learner.get("model_mounts", [])
     )
+    codex = plan.get("codex_harness")
+    if codex is not None:
+        codex_contract_sha256 = _plan_digest(codex)
+        codex_setup = f"""CODEX_HOST="$RUN/{codex['bundle_binary_path']}"
+CODEX_MANIFEST_HOST="$RUN/{codex['bundle_package_manifest_path']}"
+CODEX_SCHEMA_HOST="$RUN/{codex['bundle_app_server_schema_path']}"
+test -f "$CODEX_HOST" && test ! -L "$CODEX_HOST" && test -x "$CODEX_HOST"
+test "$(stat -c %s "$CODEX_HOST")" = {codex['binary_size_bytes']}
+printf '%s  %s\n' {shlex.quote(codex['binary_sha256'])} "$CODEX_HOST" | sha256sum --check -
+test -f "$CODEX_MANIFEST_HOST" && test ! -L "$CODEX_MANIFEST_HOST"
+printf '%s  %s\n' {shlex.quote(codex['package_manifest_sha256'])} "$CODEX_MANIFEST_HOST" | sha256sum --check -
+test -f "$CODEX_SCHEMA_HOST" && test ! -L "$CODEX_SCHEMA_HOST"
+printf '%s  %s\n' {shlex.quote(codex['app_server_schema_sha256'])} "$CODEX_SCHEMA_HOST" | sha256sum --check -
+"""
+        codex_env = (
+            "  --env YETO_CODEX_BINARY_PATH="
+            f"{shlex.quote(codex['container_binary_path'])} "
+            "--env YETO_CODEX_BINARY_SHA256="
+            f"{codex['binary_sha256']} "
+            f"--env YETO_CODEX_BINARY_SIZE_BYTES={codex['binary_size_bytes']} "
+            f"--env YETO_CODEX_VERSION={shlex.quote(codex['cli_version'])} "
+            "--env YETO_CODEX_APP_SERVER_PROTOCOL_REVISION="
+            f"{codex['app_server_protocol_revision']} "
+            "--env YETO_CODEX_APP_SERVER_SCHEMA_SHA256="
+            f"{codex['app_server_schema_sha256']} "
+            "--env YETO_CODEX_BASE_INSTRUCTIONS_SHA256="
+            f"{codex['base_instructions_sha256']} "
+            "--env YETO_CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256="
+            f"{codex['terminal_exec_tool_schema_sha256']} "
+            "--env YETO_CODEX_SUBMIT_TOOL_SCHEMA_SHA256="
+            f"{codex['submit_tool_schema_sha256']} "
+            "--env YETO_CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256="
+            f"{codex['dynamic_tools_schema_sha256']} "
+            f"--env YETO_CODEX_REASONING_EFFORT={codex['reasoning_effort']} "
+            "--env YETO_CODEX_BACKEND_MAX_TOKENS="
+            f"{codex['backend']['max_tokens']} "
+            "--env YETO_CODEX_BACKEND_REASONING_EFFORT="
+            f"{codex['backend']['reasoning_effort']} "
+            "--env YETO_CODEX_BACKEND_THINKING="
+            f"{codex['backend']['thinking']['type']} "
+            f"--env YETO_CODEX_CHAT_TEMPLATE={codex['backend']['chat_template']} "
+            "--env YETO_CODEX_CHAT_TEMPLATE_KWARGS="
+            f"{shlex.quote(_canonical_json(codex['backend']['chat_template_kwargs']))} "
+            "--env YETO_CODEX_TITO_ALLOWED_APPEND_ROLES=tool,user "
+            f"--env YETO_CODEX_HARNESS_CONTRACT_SHA256={codex_contract_sha256} \\\n"
+        )
+        codex_volumes = (
+            "  --volume \"$CODEX_HOST:"
+            f"{codex['container_binary_path']}:ro\" \\\n"
+            "  --volume \"$CODEX_MANIFEST_HOST:/opt/yeto/codex/"
+            "codex-package.json:ro\" \\\n"
+            "  --volume \"$CODEX_SCHEMA_HOST:"
+            f"{codex['container_app_server_schema_path']}:ro\" \\\n"
+        )
+    else:
+        codex_setup = ""
+        codex_env = ""
+        codex_volumes = ""
     tms_patch = plan.get("tms_preload_patch")
     tms_patch_volume = (
         "  --volume "
@@ -2117,12 +3229,10 @@ PY
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
-  STATUS="$(docker inspect --format '{{{{.State.Status}}}}' {shlex.quote(name)})"
-  if [ "$STATUS" = running ]; then exit 0; fi
-  echo 'container exists but is not running; use restart-learner' >&2
+  echo 'refusing to reuse a same-name learner container; use status or explicit restart-learner' >&2
   exit 1
 fi
-{tms_disk_setup}{jit_cache_setup}mkdir -p "$RUN/island-{learner_id}"/{{state,output,audit,cores}}
+{codex_setup}{tms_disk_setup}{jit_cache_setup}mkdir -p "$RUN/island-{learner_id}"/{{state,output,audit,cores}}
 docker run --detach \
   --name {shlex.quote(name)} \
   --gpus {shlex.quote(gpu_request)} \
@@ -2135,12 +3245,12 @@ docker run --detach \
   --env NCCL_IB_DISABLE=1 --env NCCL_SOCKET_IFNAME={network_interface} \
   --env GLOO_SOCKET_IFNAME={network_interface} --env TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   --env CUDA_DEVICE_MAX_CONNECTIONS=1 \
-{attention_env}{recipe_env}{diagnostics_env}{tms_disk_env}{agent_env}{daemon_env}  --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
+{attention_env}{recipe_env}{diagnostics_env}{tms_disk_env}{agent_env}{daemon_env}{codex_env}  --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
   --env CYBERGYM_AGENT_ID={shlex.quote(learner['cybergym_agent_id'])} \
   --env CYBERGYM_TIMEOUT={shlex.quote(str(learner['cybergym_timeout']))} \
   --env CYBERGYM_REWARD_SCHEME={reward_scheme} \
   --env CYBERGYM_REWARD_VIEW={reward_view} \
-{data_volume}{model_volumes}{tms_patch_volume}{tms_disk_volume}{jit_cache_volumes}{daemon_volume}  --volume "$RUN/source:/workspace/yeto:ro" \
+{data_volume}{model_volumes}{tms_patch_volume}{tms_disk_volume}{jit_cache_volumes}{daemon_volume}{codex_volumes}  --volume "$RUN/source:/workspace/yeto:ro" \
   --volume "$RUN/sglang:/workspace/sglang:ro" \
   --volume "$RUN/miles:/workspace/miles" \
   --volume "$RUN/island-{learner_id}/state:/workspace/state" \
@@ -2181,16 +3291,25 @@ def start(plan_path: str | Path) -> None:
 
 def _syncer_status_script(plan: dict[str, Any]) -> str:
     unit = shlex.quote(_syncer_unit_name(plan))
+    command = _shell_join_with_run(_syncer_argv(plan))
     return f"""UNIT={unit}
 UNIT_FILE="$RUN/state/syncer.unit"
 PID_FILE="$RUN/state/syncer.pid"
 EXIT_FILE="$RUN/state/syncer.exit"
+WRAPPER="$RUN/state/run-syncer"
 SYNCER_BINARY="$RUN/state/yeto-syncer"
 CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
+SYNCER_PORT={plan['syncer_port']}
+EXPECTED_SYNCER_ARGV=({command})
+EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
 {_legacy_syncer_pid_function()}
+{_syncer_runtime_identity_functions()}
 if command -v systemctl >/dev/null && systemctl is-active --quiet "$UNIT"; then
-  PID="$(systemctl show --property=MainPID --value "$UNIT")"
+  PID="$(syncer_listener_owned_by_unit)" || {{
+    echo "syncer=identity-drifted unit=$UNIT" >&2
+    exit 1
+  }}
   echo "syncer=running unit=$UNIT pid=$PID"
 elif [ -s "$EXIT_FILE" ]; then
   RESULT=unknown
@@ -2210,12 +3329,14 @@ elif [ -s "$EXIT_FILE" ]; then
   done < "$EXIT_FILE"
   echo "syncer=stopped unit=$UNIT result=$RESULT exit_code=$EXIT_CODE exit_status=$EXIT_STATUS timestamp=$TIMESTAMP"
 elif LEGACY_PID="$(legacy_syncer_pid || true)" && [ -n "$LEGACY_PID" ]; then
-  echo "syncer=running mode=legacy pid=$LEGACY_PID"
+  PID="$(syncer_listener_owned_by_pid "$LEGACY_PID")" || {{
+    echo "syncer=legacy-identity-drifted" >&2
+    exit 1
+  }}
+  echo "syncer=running mode=legacy pid=$PID"
 elif command -v systemctl >/dev/null && systemctl show "$UNIT" >/dev/null 2>&1; then
-  RESULT="$(systemctl show --property=Result --value "$UNIT")"
-  EXIT_CODE="$(systemctl show --property=ExecMainCode --value "$UNIT")"
-  EXIT_STATUS="$(systemctl show --property=ExecMainStatus --value "$UNIT")"
-  echo "syncer=stopped unit=$UNIT result=$RESULT exit_code=$EXIT_CODE exit_status=$EXIT_STATUS timestamp=unknown"
+  echo "syncer=identity-unverified unit=$UNIT" >&2
+  exit 1
 else
   echo "syncer=stopped"
 fi
@@ -2243,7 +3364,7 @@ echo host={shlex.quote(_syncer_host(plan))} role=syncer
         for node_id, target in enumerate(island["hosts"]):
             name = _container_name(plan, learner_id, node_id)
             syncer = ""
-            if learner_id == node_id == 0 and _syncer_host(plan) == target:
+            if _syncer_host(plan) == target:
                 syncer = _syncer_status_script(plan)
             result = _ssh(
                 plan,
@@ -2252,8 +3373,8 @@ echo host={shlex.quote(_syncer_host(plan))} role=syncer
 {_remote_vars(plan)}
 echo host={shlex.quote(target)} island={learner_id} node={node_id}
 {syncer}if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
-  docker inspect --format 'container={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}}' {shlex.quote(name)}
-  docker logs --tail 12 {shlex.quote(name)} 2>&1 || true
+  printf 'container='
+  docker inspect --format {shlex.quote(_CONTAINER_STATE_FORMAT)} {shlex.quote(name)}
 else echo container=missing; fi
 """,
                 capture=True,
@@ -2288,6 +3409,7 @@ def restart_learner(plan_path: str | Path, learner_id: int) -> None:
 def kill_syncer(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
     unit = shlex.quote(_syncer_unit_name(plan))
+    command = _shell_join_with_run(_syncer_argv(plan))
     _ssh(
         plan,
         _syncer_host(plan),
@@ -2297,12 +3419,20 @@ UNIT={unit}
 UNIT_FILE="$RUN/state/syncer.unit"
 PID_FILE="$RUN/state/syncer.pid"
 EXIT_FILE="$RUN/state/syncer.exit"
+WRAPPER="$RUN/state/run-syncer"
 SYNCER_BINARY="$RUN/state/yeto-syncer"
 CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
+SYNCER_PORT={plan['syncer_port']}
+EXPECTED_SYNCER_ARGV=({command})
+EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
 {_legacy_syncer_pid_function()}
+{_syncer_runtime_identity_functions()}
 if command -v systemctl >/dev/null && systemctl is-active --quiet "$UNIT"; then
-  PID="$(systemctl show --property=MainPID --value "$UNIT")"
+  PID="$(syncer_listener_owned_by_unit)" || {{
+    echo "refusing to kill a syncer unit with drifted identity" >&2
+    exit 1
+  }}
   systemctl kill --signal=SIGKILL --kill-who=all "$UNIT"
   TMP="$EXIT_FILE.tmp.$$"
   umask 077
@@ -2310,7 +3440,9 @@ if command -v systemctl >/dev/null && systemctl is-active --quiet "$UNIT"; then
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TMP"
   mv -f "$TMP" "$EXIT_FILE"
   for _ in {{1..50}}; do
-    if ! systemctl is-active --quiet "$UNIT" && ! kill -0 "$PID" 2>/dev/null; then
+    if ! systemctl is-active --quiet "$UNIT" \
+      && ! kill -0 "$PID" 2>/dev/null \
+      && [ -z "$(syncer_listener_inodes)" ]; then
       rm -f "$PID_FILE"
       exit 0
     fi
@@ -2325,9 +3457,13 @@ if [ -z "$PID" ]; then
   echo "syncer is not running" >&2
   exit 1
 fi
+PID="$(syncer_listener_owned_by_pid "$PID")" || {{
+  echo "refusing to kill a legacy syncer with drifted identity" >&2
+  exit 1
+}}
 kill -KILL -- -"$PID"
 for _ in {{1..50}}; do
-  if ! kill -0 "$PID" 2>/dev/null; then
+  if ! kill -0 "$PID" 2>/dev/null && [ -z "$(syncer_listener_inodes)" ]; then
     rm -f "$PID_FILE"
     exit 0
   fi
@@ -2347,28 +3483,35 @@ def restart_syncer(plan_path: str | Path) -> None:
 
 def _syncer_stop_script(plan: dict[str, Any]) -> str:
     unit = shlex.quote(_syncer_unit_name(plan))
+    command = _shell_join_with_run(_syncer_argv(plan))
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 UNIT={unit}
 UNIT_FILE="$RUN/state/syncer.unit"
 PID_FILE="$RUN/state/syncer.pid"
 EXIT_FILE="$RUN/state/syncer.exit"
+WRAPPER="$RUN/state/run-syncer"
 SYNCER_BINARY="$RUN/state/yeto-syncer"
 CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
+SYNCER_PORT={plan['syncer_port']}
+EXPECTED_SYNCER_ARGV=({command})
+EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
 {_legacy_syncer_pid_function()}
+{_syncer_runtime_identity_functions()}
 LOAD_STATE="$(systemctl show --property=LoadState --value "$UNIT" 2>/dev/null || true)"
-if [ -n "$LOAD_STATE" ] && [ "$LOAD_STATE" != not-found ]; then
-  PID="$(systemctl show --property=MainPID --value "$UNIT")"
-  case "$PID" in
-    ''|*[!0-9]*) PID=0 ;;
-  esac
+if systemctl is-active --quiet "$UNIT"; then
+  PID="$(syncer_listener_owned_by_unit)" || {{
+    echo "refusing to stop a syncer unit with drifted identity" >&2
+    exit 1
+  }}
   systemctl stop "$UNIT"
   STOPPED=0
   for _ in {{1..100}}; do
     ACTIVE_STATE="$(systemctl show --property=ActiveState --value "$UNIT" 2>/dev/null || true)"
     if {{ [ -z "$ACTIVE_STATE" ] || [ "$ACTIVE_STATE" = inactive ] || [ "$ACTIVE_STATE" = failed ]; }} \
-      && {{ [ "$PID" -le 1 ] || ! kill -0 "$PID" 2>/dev/null; }}; then
+      && ! kill -0 "$PID" 2>/dev/null \
+      && [ -z "$(syncer_listener_inodes)" ]; then
       STOPPED=1
       break
     fi
@@ -2381,11 +3524,24 @@ if [ -n "$LOAD_STATE" ] && [ "$LOAD_STATE" != not-found ]; then
   rm -f "$PID_FILE"
   exit 0
 fi
+if [ -n "$LOAD_STATE" ] && [ "$LOAD_STATE" != not-found ]; then
+  if [ -s "$EXIT_FILE" ] && [ -z "$(syncer_listener_inodes)" ]; then
+    rm -f "$PID_FILE"
+    exit 0
+  fi
+  echo "refusing to act on an inactive syncer unit without exact run evidence" >&2
+  exit 1
+fi
 LEGACY_PID="$(legacy_syncer_pid || true)"
 if [ -n "$LEGACY_PID" ]; then
+  LEGACY_PID="$(syncer_listener_owned_by_pid "$LEGACY_PID")" || {{
+    echo "refusing to stop a legacy syncer with drifted identity" >&2
+    exit 1
+  }}
   kill -TERM -- -"$LEGACY_PID"
   for _ in {{1..100}}; do
-    if ! kill -0 "$LEGACY_PID" 2>/dev/null; then
+    if ! kill -0 "$LEGACY_PID" 2>/dev/null \
+      && [ -z "$(syncer_listener_inodes)" ]; then
       rm -f "$PID_FILE"
       exit 0
     fi
@@ -2417,56 +3573,225 @@ def stop(plan_path: str | Path) -> None:
     _stop_secrlenv_daemons(plan)
 
 
+def _collect_event_evidence(
+    plan: dict[str, Any],
+    target: str,
+    remote_relative_path: str,
+    mode: str,
+    destination: Path,
+) -> None:
+    relative = PurePosixPath(remote_relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HarnessError("event evidence path must stay inside the run root")
+    result = _ssh(
+        plan,
+        target,
+        f"{_remote_vars(plan)}\n"
+        "python3 -c "
+        f"{shlex.quote(_EVENT_EVIDENCE_FILTER)} "
+        f'"$RUN/{relative.as_posix()}" {shlex.quote(mode)}',
+        capture=True,
+    )
+    payload = result.stdout.encode()
+    if len(payload) > 64 * 1024 * 1024:
+        raise HarnessError("filtered event evidence is unexpectedly large")
+    try:
+        records = [json.loads(line) for line in result.stdout.splitlines() if line]
+    except json.JSONDecodeError as error:
+        raise HarnessError("filtered event evidence is malformed") from error
+    schema = _EVENT_EVIDENCE_FIELDS.get(mode)
+    if schema is None:
+        raise HarnessError("filtered event evidence uses an unknown mode")
+    for record in records:
+        if not isinstance(record, dict):
+            raise HarnessError("filtered event evidence contains a non-object")
+        event_name = "syncer_commit" if mode == "syncer" else record.get("event")
+        if event_name not in schema or set(record) != schema[event_name]:
+            raise HarnessError("filtered event evidence has unapproved fields")
+        for name, value in record.items():
+            if name in {
+                "event",
+                "dataset_name",
+                "sync/global_policy_hash",
+                "rl/policy_hash",
+                "sync/layout_hash",
+            } and (not isinstance(value, str) or len(value) > 128):
+                raise HarnessError("filtered event evidence has an unsafe string")
+    _atomic_bytes(destination, payload)
+
+
+def _parse_syncer_lifecycle_evidence(raw: str) -> dict[str, int]:
+    if len(raw.encode()) > 4096:
+        raise HarnessError("syncer lifecycle evidence is unexpectedly large")
+    try:
+        evidence = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise HarnessError("syncer lifecycle evidence is malformed") from error
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "schema",
+        "resume_count",
+        "final_ack_count",
+    }:
+        raise HarnessError("syncer lifecycle evidence has unapproved fields")
+    if (
+        evidence.get("schema") != 1
+        or any(
+            isinstance(evidence.get(name), bool)
+            or not isinstance(evidence.get(name), int)
+            or not 0 <= evidence[name] <= 1_000_000
+            for name in ("resume_count", "final_ack_count")
+        )
+    ):
+        raise HarnessError("syncer lifecycle evidence has invalid counters")
+    return evidence
+
+
+def _collect_capacity_preflight(plan: dict[str, Any], artifacts: Path) -> None:
+    """Refuse a large training transfer before it can fill the controller disk."""
+
+    if plan["learner"].get("evaluation") is not None:
+        return
+    total_bytes = (len(plan["islands"]) + 1) * 64 * 1024 * 1024
+    if plan["learner"].get("sync_preset", "strict-avg") != "decoupled":
+        for learner_id, island in enumerate(plan["islands"]):
+            result = _ssh(
+                plan,
+                island["hosts"][0],
+                f"""set -euo pipefail
+{_remote_vars(plan)}
+find "$RUN/island-{learner_id}/audit" -maxdepth 1 -type f -name 'round-*.json' -printf '%s\n'
+find "$RUN/island-{learner_id}/audit" -maxdepth 1 -type f -name 'round-*.base.f32' -printf '%s\n'
+find "$RUN/island-{learner_id}/audit" -maxdepth 1 -type f -name 'round-*.delta.f32' -printf '%s\n'
+""",
+                capture=True,
+            )
+            sizes = result.stdout.splitlines()
+            if any(not re.fullmatch(r"[0-9]+", size) for size in sizes):
+                raise HarnessError("cannot determine remote audit evidence size")
+            total_bytes += sum(map(int, sizes))
+    checkpoint = _ssh(
+        plan,
+        _syncer_host(plan),
+        f"""set -euo pipefail
+{_remote_vars(plan)}
+stat -c %s "$RUN/state/state.ckpt"
+""",
+        capture=True,
+    )
+    if not re.fullmatch(r"[0-9]+\n?", checkpoint.stdout):
+        raise HarnessError("cannot determine remote checkpoint size")
+    total_bytes += int(checkpoint.stdout)
+    reserve = 5 * 1024 * 1024 * 1024
+    available = shutil.disk_usage(artifacts).free
+    if total_bytes + reserve > available:
+        raise HarnessError(
+            "controller lacks space for privacy-safe training evidence; keep the "
+            "checkpoint remote and launch the eval handoff there"
+        )
+
+
 def collect(plan_path: str | Path) -> Path:
     plan_file, plan = load_plan(plan_path)
     _require_program("ssh")
     _require_program("rsync")
     artifacts = plan_file.parent / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
+    _collect_capacity_preflight(plan, artifacts)
+    eval_only = plan["learner"].get("evaluation") is not None
+    sync_preset = plan["learner"].get("sync_preset", "strict-avg")
+    learner_event_mode = (
+        "eval-learner"
+        if eval_only
+        else (
+            "decoupled-learner"
+            if sync_preset == "decoupled"
+            else "strict-learner"
+        )
+    )
     for learner_id, island in enumerate(plan["islands"]):
         destination = artifacts / f"island-{learner_id}"
         destination.mkdir(parents=True, exist_ok=True)
         for node_id, target in enumerate(island["hosts"]):
             name = _container_name(plan, learner_id, node_id)
-            logs = _ssh(
-                plan,
-                target,
-                f"docker logs --timestamps {shlex.quote(name)} 2>&1",
-                capture=True,
-                check=False,
-            )
-            _atomic_bytes(destination / f"node-{node_id}.log", logs.stdout.encode())
             inspect = _ssh(
                 plan,
                 target,
-                f"docker inspect {shlex.quote(name)}",
+                "docker inspect --format "
+                f"{shlex.quote(_CONTAINER_STATE_FORMAT)} {shlex.quote(name)}",
                 capture=True,
                 check=False,
             )
+            inspection = _parse_container_inspection(inspect.stdout)
             _atomic_bytes(
                 destination / f"node-{node_id}.inspect.json",
-                inspect.stdout.encode(),
+                (_canonical_json(inspection) + "\n").encode(),
             )
         head = island["hosts"][0]
-        for remote_name in ("state", "output", "audit"):
-            local = destination / remote_name
-            local.mkdir(parents=True, exist_ok=True)
+        output = destination / "output"
+        output.mkdir(parents=True, exist_ok=True)
+        _collect_event_evidence(
+            plan,
+            head,
+            f"island-{learner_id}/output/events.jsonl",
+            learner_event_mode,
+            output / "events.jsonl",
+        )
+        if not eval_only and sync_preset != "decoupled":
+            audit = destination / "audit"
+            audit.mkdir(parents=True, exist_ok=True)
+            audit_includes = [
+                f"--include=/round-{step:08d}{suffix}"
+                for step in range(1, plan["learner"]["global_rounds"] + 1)
+                for suffix in (".json", ".base.f32", ".delta.f32")
+            ]
             _run(
                 [
                     "rsync",
                     "-az",
+                    *audit_includes,
+                    "--exclude=*",
                     "-e",
                     _rsync_shell(plan),
-                    f"{head}:{plan['remote_run']}/island-{learner_id}/{remote_name}/",
-                    f"{local}/",
+                    f"{head}:{plan['remote_run']}/island-{learner_id}/audit/",
+                    f"{audit}/",
                 ]
             )
     syncer = artifacts / "syncer"
     syncer.mkdir(parents=True, exist_ok=True)
+    if eval_only:
+        lifecycle = _ssh(
+            plan,
+            _syncer_host(plan),
+            f"{_remote_vars(plan)}\n"
+            "python3 -c "
+            f"{shlex.quote(_SYNCER_LIFECYCLE_EVIDENCE)} "
+            '"$RUN/state/syncer.log"',
+            capture=True,
+        )
+        evidence = _parse_syncer_lifecycle_evidence(lifecycle.stdout)
+        _atomic_bytes(
+            syncer / "lifecycle-evidence.json",
+            (_canonical_json(evidence) + "\n").encode(),
+        )
+        syncer_includes = ("--include=/syncer.exit",)
+    else:
+        _collect_event_evidence(
+            plan,
+            _syncer_host(plan),
+            "state/events.jsonl",
+            "syncer",
+            syncer / "events.jsonl",
+        )
+        syncer_includes = (
+            "--include=/state.ckpt",
+            "--include=/syncer.exit",
+        )
     _run(
         [
             "rsync",
             "-az",
+            *syncer_includes,
+            "--exclude=*",
             "-e",
             _rsync_shell(plan),
             f"{_syncer_host(plan)}:{plan['remote_run']}/state/",
@@ -2757,11 +4082,168 @@ def _verify_decoupled(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
     return final_hashes[0]
 
 
+def _parse_container_inspection(raw: str) -> dict[str, Any]:
+    """Accept only the four non-sensitive fields selected on the remote host."""
+
+    if len(raw.encode()) > 4096:
+        raise HarnessError("learner container state record is unexpectedly large")
+    try:
+        inspection = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise HarnessError("learner container state record is malformed") from error
+    if not isinstance(inspection, dict) or set(inspection) != {
+        "Status",
+        "ExitCode",
+        "OOMKilled",
+        "RestartCount",
+    }:
+        raise HarnessError("learner container state record has unapproved fields")
+    if (
+        not isinstance(inspection["Status"], str)
+        or not inspection["Status"]
+        or not isinstance(inspection["ExitCode"], int)
+        or isinstance(inspection["ExitCode"], bool)
+        or inspection["ExitCode"] < 0
+        or not isinstance(inspection["OOMKilled"], bool)
+        or not isinstance(inspection["RestartCount"], int)
+        or isinstance(inspection["RestartCount"], bool)
+        or inspection["RestartCount"] < 0
+    ):
+        raise HarnessError("learner container state record has invalid values")
+    return inspection
+
+
 def _container_succeeded(inspection: Any) -> bool:
-    if not isinstance(inspection, list) or not inspection:
+    if not isinstance(inspection, dict) or set(inspection) != {
+        "Status",
+        "ExitCode",
+        "OOMKilled",
+        "RestartCount",
+    }:
         return False
-    state = inspection[0].get("State", {})
-    return state.get("Status") == "exited" and state.get("ExitCode") == 0
+    return (
+        isinstance(inspection.get("Status"), str)
+        and inspection.get("Status") == "exited"
+        and isinstance(inspection.get("ExitCode"), int)
+        and not isinstance(inspection.get("ExitCode"), bool)
+        and inspection.get("ExitCode") == 0
+        and inspection.get("OOMKilled") is False
+        and isinstance(inspection.get("RestartCount"), int)
+        and not isinstance(inspection.get("RestartCount"), bool)
+        and inspection["RestartCount"] == 0
+    )
+
+
+def _read_successful_syncer_exit(path: Path) -> None:
+    try:
+        if path.stat().st_size > 4096:
+            raise HarnessError("eval syncer exit record is unexpectedly large")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        pairs = [line.split("=", 1) for line in lines]
+    except OSError as error:
+        raise HarnessError("missing eval syncer exit record") from error
+    if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(
+        pairs
+    ):
+        raise HarnessError("eval syncer exit record is malformed")
+    fields = dict(pairs)
+    if (
+        fields.get("result") != "success"
+        or fields.get("exit_code") != "exited"
+        or fields.get("exit_status") != "0"
+    ):
+        raise HarnessError("eval syncer did not exit successfully after FINAL_ACK")
+
+
+def _eval_metric(event: dict[str, Any], name: str) -> float:
+    value = event.get(name)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or not 0.0 <= value <= 1.0
+    ):
+        raise HarnessError(f"eval event has an invalid {name}")
+    return float(value)
+
+
+def _verify_eval(
+    plan: dict[str, Any], artifacts: Path
+) -> tuple[str, int, int, float, float]:
+    learner = plan["learner"]
+    evaluation = learner["evaluation"]
+    expected_version = learner["global_rounds"]
+    expected_samples = (
+        evaluation["prompt_count"] * evaluation["samples_per_prompt"]
+    )
+    if (artifacts / "syncer" / "state.ckpt").exists():
+        raise HarnessError("eval artifact collection must not contain state.ckpt")
+    _read_successful_syncer_exit(artifacts / "syncer" / "syncer.exit")
+    try:
+        lifecycle = _parse_syncer_lifecycle_evidence(
+            (artifacts / "syncer" / "lifecycle-evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    except OSError as error:
+        raise HarnessError("missing eval syncer lifecycle evidence") from error
+    if lifecycle["resume_count"] != 1:
+        raise HarnessError("eval syncer lacks one checkpoint resume event")
+    if lifecycle["final_ack_count"] != _learner_count(plan):
+        raise HarnessError("eval syncer lacks one FINAL_ACK per learner")
+
+    hashes = set()
+    results = []
+    pass_at_1 = []
+    for learner_id in range(_learner_count(plan)):
+        events = _json_lines(_event_path(artifacts, learner_id))
+        apply_indices = [
+            index
+            for index, event in enumerate(events)
+            if event.get("event") == "rl_policy_apply"
+            and event.get("policy_version") == expected_version
+        ]
+        eval_indices = [
+            index
+            for index, event in enumerate(events)
+            if event.get("event") == "rl_eval_result"
+            and event.get("dataset_name") == evaluation["dataset_name"]
+        ]
+        if len(apply_indices) != 1 or len(eval_indices) != 1:
+            raise HarnessError(
+                f"eval learner {learner_id} lacks one final apply/result event"
+            )
+        if apply_indices[0] >= eval_indices[0]:
+            raise HarnessError(
+                f"eval learner {learner_id} evaluated before final policy apply"
+            )
+        apply_event = events[apply_indices[0]]
+        eval_event = events[eval_indices[0]]
+        policy_hash = apply_event.get("sync/global_policy_hash")
+        if not isinstance(policy_hash, str) or not _SHA256.fullmatch(policy_hash):
+            raise HarnessError(f"eval learner {learner_id} has no final policy hash")
+        if (
+            apply_event.get("island_id") != learner_id
+            or eval_event.get("island_id") != learner_id
+            or eval_event.get("rollout_id") != 0
+            or eval_event.get("policy_version") != expected_version
+            or eval_event.get("sample_count") != expected_samples
+        ):
+            raise HarnessError(
+                f"eval learner {learner_id} result has the wrong policy/sample identity"
+            )
+        hashes.add(policy_hash)
+        results.append(_eval_metric(eval_event, "rl/eval/result"))
+        pass_at_1.append(_eval_metric(eval_event, "rl/eval/pass_at_1"))
+    if len(hashes) != 1:
+        raise HarnessError("eval learners applied different terminal policies")
+    return (
+        evaluation["dataset_name"],
+        evaluation["prompt_count"],
+        evaluation["samples_per_prompt"],
+        statistics.fmean(results),
+        statistics.fmean(pass_at_1),
+    )
 
 
 def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
@@ -2785,6 +4267,15 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
                 raise HarnessError(
                     f"island {learner_id} node {node_id} did not exit successfully"
                 )
+    if plan["learner"].get("evaluation") is not None:
+        if export_dir:
+            raise HarnessError("eval-only verification cannot export a checkpoint")
+        dataset, prompts, samples, result, pass_at_1 = _verify_eval(plan, artifacts)
+        print(
+            f"verified terminal eval {dataset}: {prompts} prompts x {samples} "
+            f"sample(s), result={result:.6f}, pass@1={pass_at_1:.6f}"
+        )
+        return
     from ..export import parse_checkpoint
 
     checkpoint_path = artifacts / "syncer" / "state.ckpt"
@@ -2844,6 +4335,20 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--output-dir", default=None)
     prepare_parser.add_argument("--remote-root", default=DEFAULT_REMOTE_ROOT)
     prepare_parser.add_argument("--remote-env-file", default=None)
+    prepare_parser.add_argument("--final-ack-timeout-s", type=int, default=None)
+    prepare_parser.add_argument("--eval-checkpoint-host", default=None)
+    prepare_parser.add_argument("--eval-checkpoint-path", default=None)
+    prepare_parser.add_argument("--eval-checkpoint-sha256", default=None)
+    prepare_parser.add_argument("--eval-checkpoint-size-bytes", type=int, default=None)
+    prepare_parser.add_argument("--eval-checkpoint-global-step", type=int, default=None)
+    prepare_parser.add_argument("--eval-dataset-name", default=None)
+    prepare_parser.add_argument("--eval-interval", type=int, default=None)
+    prepare_parser.add_argument("--eval-samples-per-prompt", type=int, default=None)
+    prepare_parser.add_argument("--eval-temperature", type=float, default=None)
+    prepare_parser.add_argument("--eval-top-p", type=float, default=None)
+    prepare_parser.add_argument("--eval-max-prompt-len", type=int, default=None)
+    prepare_parser.add_argument("--eval-max-response-len", type=int, default=None)
+    prepare_parser.add_argument("--eval-max-context-len", type=int, default=None)
     prepare_parser.add_argument("--model-manifest-sha256", default=None)
     prepare_parser.add_argument("--secrlenv-source-root", default=None)
     prepare_parser.add_argument("--secrlenv-source-sha256", default=None)
@@ -2854,6 +4359,21 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--secrlenv-port", type=int, default=28765)
     prepare_parser.add_argument(
         "--secrlenv-max-active-episodes", type=int, default=16
+    )
+    prepare_parser.add_argument(
+        "--codex-harness-binary",
+        default=None,
+        help="controller path to the pinned official Codex Linux binary",
+    )
+    prepare_parser.add_argument(
+        "--codex-package-manifest",
+        default=None,
+        help="controller path to the pinned codex-package.json identity",
+    )
+    prepare_parser.add_argument(
+        "--codex-app-server-schema",
+        default=None,
+        help="controller path to the pinned experimental v2 app-server schema",
     )
     prepare_parser.add_argument("--tms-preload-patch", default=None)
     prepare_parser.add_argument(

@@ -569,6 +569,8 @@ def _prepare_rl_args(
             args, "rl_initial_adapter_sha256", None
         ) is not None:
             raise ValueError("--rl-initial-adapter requires --training-mode rl")
+        if getattr(args, "codex_reasoning_effort", None) is not None:
+            raise ValueError("--codex-reasoning-effort requires --training-mode rl")
         return
 
     from .adapter_lifecycle import directory_sha256, selected_parent
@@ -658,6 +660,8 @@ def _prepare_rl_args(
     _rl_miles_function(args.custom_generate_function_path)
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")
+    from .rl import CODEX_HARNESS_AGENT
+
     if custom_agent is not None:
         if args.custom_generate_function_path is None:
             raise ValueError(
@@ -672,11 +676,55 @@ def _prepare_rl_args(
             raise ValueError(
                 "--custom-agent-function-path requires --tito-model"
             )
-        if args.apply_chat_template_kwargs is not None:
+        if (
+            args.apply_chat_template_kwargs is not None
+            and custom_agent != CODEX_HARNESS_AGENT
+        ):
             raise ValueError(
                 "agentic session rollouts preserve raw messages and do not accept "
                 "--apply-chat-template-kwargs"
             )
+
+    codex_reasoning_effort = getattr(args, "codex_reasoning_effort", None)
+    if custom_agent == CODEX_HARNESS_AGENT:
+        if codex_reasoning_effort != "xhigh":
+            raise ValueError(
+                "the stock Codex harness requires --codex-reasoning-effort xhigh"
+            )
+        if getattr(args, "rl_model_recipe", "generic") != "deepseek-v4-flash":
+            raise ValueError(
+                "the stock Codex harness is pinned to --rl-model-recipe "
+                "deepseek-v4-flash"
+            )
+        if args.tito_model != "deepseekv4":
+            raise ValueError(
+                "the stock Codex harness requires --tito-model deepseekv4"
+            )
+        if list(getattr(args, "tito_allowed_append_roles", None) or ()) != [
+            "tool",
+            "user",
+        ]:
+            raise ValueError(
+                "the stock Codex harness requires "
+                "--tito-allowed-append-roles tool user"
+            )
+        codex_chat_template_kwargs = {
+            "thinking_mode": "thinking",
+            "reasoning_effort": "max",
+            "drop_thinking": False,
+        }
+        if args.apply_chat_template_kwargs is None:
+            args.apply_chat_template_kwargs = codex_chat_template_kwargs
+        elif args.apply_chat_template_kwargs != codex_chat_template_kwargs:
+            raise ValueError(
+                "the stock Codex harness requires exact DeepSeek V4 chat-template "
+                "kwargs: thinking_mode=thinking, reasoning_effort=max, "
+                "drop_thinking=false"
+            )
+    elif codex_reasoning_effort is not None:
+        raise ValueError(
+            "--codex-reasoning-effort requires the signed stock Codex agent"
+        )
     agent_max_seq_len = getattr(args, "agent_max_seq_len", None)
     if agent_max_seq_len is not None:
         if custom_agent is None:
@@ -1172,6 +1220,7 @@ def make_miles_island_task(
     from .models import resolve
     from .provenance import is_local_reference
     from .rl import (
+        CODEX_HARNESS_AGENT,
         MILES_COMMIT,
         MILES_PEFT_VERSION,
         MILES_REPOSITORY,
@@ -1183,6 +1232,11 @@ def make_miles_island_task(
         args, "reward_sha256", None
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
+    if getattr(args, "custom_agent_function_path", None) == CODEX_HARNESS_AGENT:
+        raise ValueError(
+            "the stock Codex harness requires the direct SSH harness so its "
+            "Linux binary can be attested and frozen into the run bundle"
+        )
 
     flags = (
         f" --model {shlex.quote(args.model)}"

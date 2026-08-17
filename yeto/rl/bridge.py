@@ -67,6 +67,7 @@ class BridgeConfig:
     event_tape: str
     audit_dir: str | None = None
     wan_streams: int = 4
+    send_initial_params: bool = True
 
 
 def _write_round_audit(
@@ -322,6 +323,12 @@ class StrictRlBridge:
 
     def start(self) -> None:
         self.client.start()
+        if not self.config.send_initial_params:
+            # A terminal-checkpoint eval syncer already owns the authoritative
+            # state. Drop the private version-zero copy before FINAL arrives;
+            # sending or retaining it would recreate a model-sized overlap.
+            self.initial = None
+            return
         if self.config.learner_id == 0:
             if self.initial is None:
                 raise RuntimeError("RL initial policy was released before INIT_PARAMS")

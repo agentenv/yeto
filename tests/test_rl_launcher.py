@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -354,6 +355,64 @@ def test_rl_maps_long_task_and_oversampling_options_to_miles():
     assert args.session_server_port == [31000, 31002]
     assert args.tito_model == "deepseekv4"
     assert args.tito_allowed_append_roles == ["tool", "user"]
+
+
+def test_stock_codex_harness_requires_explicit_signed_xhigh_dsv4_contract():
+    args = _args(("--codex-reasoning-effort", "xhigh"))
+    with pytest.raises(ValueError, match="signed stock Codex agent"):
+        _prepare_rl_args(args)
+
+    args = _args(
+        (
+            "--gpu",
+            "aws:8xh200@us-east-1,aws:8xh200@us-west-2",
+            "--rl-model-recipe",
+            "deepseek-v4-flash",
+            "--lora-targets",
+            "attention-routed-experts",
+            "--tensor-parallel",
+            "8",
+            "--expert-parallel",
+            "8",
+            "--rollout-num-gpus-per-engine",
+            "8",
+            "--sglang-tp-size",
+            "8",
+            "--sglang-ep-size",
+            "8",
+            "--sglang-attention-backend",
+            "dsv4",
+            "--sglang-page-size",
+            "256",
+            "--no-sglang-deterministic-inference",
+            "--custom-generate-function-path",
+            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            "--custom-agent-function-path",
+            "yeto_miles_secrlenv.codex_harness_agent.run",
+            "--codex-reasoning-effort",
+            "xhigh",
+            "--use-session-server",
+            "--tito-model",
+            "deepseekv4",
+            "--tito-allowed-append-roles",
+            "tool",
+            "user",
+        )
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.codex_reasoning_effort == "xhigh"
+    assert args.tito_allowed_append_roles == ["tool", "user"]
+    assert args.apply_chat_template_kwargs == {
+        "thinking_mode": "thinking",
+        "reasoning_effort": "max",
+        "drop_thinking": False,
+    }
+
+    args.apply_chat_template_kwargs["drop_thinking"] = True
+    with pytest.raises(ValueError, match="exact DeepSeek V4 chat-template"):
+        _prepare_rl_args(args)
 
 
 def test_rl_parses_cybergym_worker_configuration():
@@ -1127,6 +1186,23 @@ def test_miles_runtime_requires_exact_detached_clean_checkout(tmp_path, monkeypa
         verify_miles_revision(root)
 
 
+def test_eval_dataset_identity_is_verified_again_inside_the_learner(tmp_path):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    expected = hashlib.sha256(prompts.read_bytes()).hexdigest()
+    args = argparse.Namespace(
+        data=str(prompts),
+        eval_only=True,
+        eval_interval=1,
+        eval_data_sha256=expected,
+    )
+
+    rl_learner._verify_eval_dataset_identity(args)
+    prompts.write_text('{"messages": [{"role": "user"}]}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        rl_learner._verify_eval_dataset_identity(args)
+
+
 def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
     monkeypatch,
 ):
@@ -1264,6 +1340,9 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
     assert "--sglang-enable-deterministic-inference" in argv
     assert argv[argv.index("--rollout-seed") + 1] == "1"
     assert "--pin-rollout-manager-to-head" in argv
+    assert "--eval-prompt-data" not in argv
+    assert "--eval-function-path" not in argv
+    assert "--eval-interval" not in argv
     for recipe_flag in (
         "--rollout-shuffle",
         "--rollout-temperature",
@@ -1284,6 +1363,47 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
         "--hidden-dropout",
     ):
         assert recipe_flag not in argv
+
+    eval_args = argparse.Namespace(
+        **vars(args),
+        eval_only=True,
+        eval_dataset_name="flaky100",
+        eval_data_sha256="f" * 64,
+        eval_interval=1,
+        eval_samples_per_prompt=3,
+        eval_temperature=0.6,
+        eval_top_p=0.9,
+        eval_max_prompt_len=96,
+        eval_max_response_len=64,
+        eval_max_context_len=128,
+    )
+    eval_argv = build_miles_argv(
+        eval_args,
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=provider,
+        target_modules=["qkv_proj", "out_proj"],
+    )
+    assert eval_argv[eval_argv.index("--prompt-data") + 1] == "/prompts.jsonl"
+    eval_data = eval_argv.index("--eval-prompt-data")
+    assert eval_argv[eval_data + 1 : eval_data + 3] == [
+        "flaky100",
+        "/prompts.jsonl",
+    ]
+    assert eval_argv[eval_argv.index("--eval-function-path") + 1] == (
+        "yeto.rl.miles.generate_rollout"
+    )
+    assert eval_argv[eval_argv.index("--num-rollout") + 1] == "0"
+    assert eval_argv[eval_argv.index("--eval-interval") + 1] == "1"
+    assert "--skip-eval-before-train" in eval_argv
+    assert eval_argv[eval_argv.index("--n-samples-per-eval-prompt") + 1] == "3"
+    assert "--log-passrate" in eval_argv
+    assert eval_argv[eval_argv.index("--eval-temperature") + 1] == "0.6"
+    assert eval_argv[eval_argv.index("--eval-top-p") + 1] == "0.9"
+    assert eval_argv[eval_argv.index("--eval-max-prompt-len") + 1] == "96"
+    assert eval_argv[eval_argv.index("--eval-max-response-len") + 1] == "64"
+    assert eval_argv[eval_argv.index("--eval-max-context-len") + 1] == "128"
+    assert eval_argv[eval_argv.index("--max-seq-len") + 1] == "128"
 
     parallel_values = vars(args).copy()
     parallel_values.update(
@@ -2016,6 +2136,7 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
     assert miles_args.yeto_rl_expected_specs == tuple(
         sorted(attention_specs + expert_specs)
     )
+    assert miles_args.yeto_rl_bridge_config.send_initial_params is True
     for name in (
         "yeto_rl_expert_full_count",
         "yeto_rl_expert_full_lr",
@@ -2027,6 +2148,18 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
     assert os.environ["YETO_DSV4_EXPERT_FULL_COUNT"] == "16"
     assert os.environ["YETO_DSV4_EXPERT_FULL_LR"] == "1e-06"
     assert os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] == "0"
+
+    args.eval_only = True
+    rl_learner.run_miles(
+        args,
+        model_path="/model",
+        rollout_model_path="/rollout",
+        prompt_path="/prompts.jsonl",
+    )
+    assert (
+        captured["miles_args"].yeto_rl_bridge_config.send_initial_params is False
+    )
+    assert captured["miles_args"].yeto_rl_eval_policy_version == 1
 
 
 def test_decoupled_runner_rejects_multiple_optimizer_steps_per_rollout(tmp_path):

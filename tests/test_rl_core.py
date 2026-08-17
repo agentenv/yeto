@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import logging
 import sys
 import threading
 import types
@@ -239,6 +240,101 @@ def test_policy_snapshot_token_binds_rollout_to_full_tensor_hash():
     )
 
 
+def test_generate_rollout_preserves_the_miles_evaluation_boundary(
+    monkeypatch, caplog
+):
+    upstream = types.ModuleType("miles.rollout.sglang_rollout")
+    sentinel = object()
+    upstream.generate_rollout = sentinel
+    rollout = types.ModuleType("miles.rollout")
+    rollout.sglang_rollout = upstream
+    package = types.ModuleType("miles")
+    package.rollout = rollout
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", upstream)
+    events = []
+    monkeypatch.setattr(
+        miles,
+        "_append_rl_event",
+        lambda _args, event: events.append(event),
+    )
+    completed = SimpleNamespace(value="completed")
+    output = SimpleNamespace(
+        data={
+            "flaky100": {
+                "rewards": [1.0, 0.0, 1.0, 0.0],
+                "samples": [SimpleNamespace(status=completed) for _ in range(4)],
+            }
+        },
+        metrics=None,
+    )
+    observed = {}
+
+    def run(generate, args, rollout_id, data_source, evaluation):
+        upstream_logger = logging.getLogger("miles.rollout.sglang_rollout")
+        upstream_logger.info(
+            "eval_rollout_single_dataset example data: secret prompt/response"
+        )
+        upstream_logger.info("evaluation completed without payload data")
+        observed.update(
+            generate=generate,
+            args=args,
+            rollout_id=rollout_id,
+            data_source=data_source,
+            evaluation=evaluation,
+        )
+        return output, {}
+
+    monkeypatch.setattr(miles, "_run_rollout_with_metrics", run)
+    args = SimpleNamespace(yeto_rl_eval_policy_version=9)
+    data_source = object()
+
+    with caplog.at_level(logging.INFO, logger="miles.rollout.sglang_rollout"):
+        assert miles.generate_rollout(args, 7, data_source, evaluation=True) is output
+    assert observed == {
+        "generate": sentinel,
+        "args": args,
+        "rollout_id": 7,
+        "data_source": data_source,
+        "evaluation": True,
+    }
+    assert output.metrics == {
+        "eval/flaky100": 0.5,
+        "eval/flaky100-pass@1": 0.5,
+    }
+    assert events == [
+        {
+            "event": "rl_eval_result",
+            "rollout_id": 7,
+            "policy_version": 9,
+            "dataset_name": "flaky100",
+            "sample_count": 4,
+            "rl/eval/result": 0.5,
+            "rl/eval/pass_at_1": 0.5,
+        }
+    ]
+    assert "secret prompt/response" not in caplog.text
+    assert "evaluation completed without payload data" in caplog.text
+
+
+def test_eval_scalars_reject_aborted_episode_evidence():
+    output = SimpleNamespace(
+        data={
+            "flaky100": {
+                "rewards": [0.0],
+                "samples": [
+                    SimpleNamespace(status=SimpleNamespace(value="aborted"))
+                ],
+            }
+        },
+        metrics=None,
+    )
+
+    with pytest.raises(RuntimeError, match="aborted sample"):
+        miles._attach_eval_scalar_metrics(output)
+
+
 @pytest.mark.parametrize(
     "token",
     ["yeto:1", "yeto:-1:" + "a" * 64, "yeto:1:not-a-hash", "other:1:" + "a" * 64],
@@ -353,7 +449,9 @@ class _VersionedRuntime:
         pass
 
 
-def _bridge_config(tmp_path="/tmp/yeto-rl-test-events.jsonl"):
+def _bridge_config(
+    tmp_path="/tmp/yeto-rl-test-events.jsonl", *, send_initial_params=True
+):
     canonical = state(0, tensors())
     return BridgeConfig(
         syncer_addr=("127.0.0.1", 1),
@@ -368,6 +466,7 @@ def _bridge_config(tmp_path="/tmp/yeto-rl-test-events.jsonl"):
         layout_hash=canonical.layout_hash,
         event_tape=str(tmp_path),
         wan_streams=0,
+        send_initial_params=send_initial_params,
     )
 
 
@@ -397,6 +496,27 @@ def test_strict_bridge_start_streams_initial_policy_in_canonical_order():
     )
     assert started == [True]
     assert b"".join(parts) == expected
+
+
+def test_terminal_resume_drops_initial_policy_without_sending_it():
+    bridge = StrictRlBridge(
+        _VersionedRuntime(),
+        _bridge_config(send_initial_params=False),
+    )
+    started = []
+
+    class Client:
+        def start(self):
+            started.append(True)
+
+        def send_init_parts(self, *_args):
+            raise AssertionError("terminal resume must not send INIT_PARAMS")
+
+    bridge.client = Client()
+    bridge.start()
+
+    assert started == [True]
+    assert bridge.initial is None
 
 
 def test_policy_delta_rejects_exported_policy_version_drift():
@@ -1448,12 +1568,20 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
         custom_generate_function_path=None,
         use_session_server=False,
         tito_model="default",
+        yeto_rl_codex_harness_contract={
+            "agent_function_path": "yeto_miles_secrlenv.codex_harness_agent.run",
+            "reasoning_effort": "xhigh",
+            "app_server_schema_sha256": "f" * 64,
+        },
         yeto_rl_completed_groups_path=str(checkpoint),
         yeto_rl_learner_id=0,
     )
     assert miles._island_checkpoint_config(args)[
         "pipeline_model_parallel_size"
     ] == 2
+    assert miles._island_checkpoint_config(args)[
+        "codex_harness_contract"
+    ] == args.yeto_rl_codex_harness_contract
     torch.save(
         {
             "schema_version": miles._ISLAND_CHECKPOINT_SCHEMA,
