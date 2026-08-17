@@ -900,7 +900,10 @@ def install_on_arguments(module: ModuleType) -> None:
         args = original(args)
         if (args.optimizer or "adam").lower() != "adam":
             raise RuntimeError("expert-full RL requires the Adam optimizer")
-        args.use_distributed_optimizer = True
+        # Hybrid state export/apply operates on complete FP32 masters.  Megatron's
+        # distributed optimizer stores only one DP-owned shard (and ``None`` on
+        # non-owners), so DP1 can mask an invalid configuration that fails at DP2.
+        args.use_distributed_optimizer = False
         return args
 
     module.set_default_megatron_args = set_default_megatron_args
@@ -923,6 +926,10 @@ def install_on_model(module: ModuleType) -> None:
         from megatron.core.optimizer import get_standard_config_overrides
         from megatron.core.optimizer.optimizer_config import ParamKey
 
+        if config.use_distributed_optimizer:
+            raise RuntimeError(
+                "expert-full RL requires replicated FP32 optimizer masters"
+            )
         overrides = (
             get_standard_config_overrides(config)
             if config_overrides is None
@@ -932,13 +939,15 @@ def install_on_model(module: ModuleType) -> None:
             "max_lr": _expert_lr(),
             "min_lr": _expert_lr(),
         }
-        return original(
+        optimizer = original(
             config=config,
             model_chunks=model_chunks,
             config_overrides=overrides,
             use_gloo_process_groups=use_gloo_process_groups,
             **kwargs,
         )
+        _validate_complete_optimizer_masters(model_chunks, optimizer)
+        return optimizer
 
     module.get_megatron_optimizer = get_megatron_optimizer
     module._yeto_expert_full_installed = True
@@ -963,6 +972,50 @@ def _optimizer_master_view(parameter):
     ):
         raise RuntimeError("trainable parameter has no complete FP32 optimizer master")
     return main.view(parameter.shape)
+
+
+def _validate_complete_optimizer_masters(model_chunks, optimizer) -> None:
+    """Require every trainable model parameter's replicated optimizer master."""
+
+    import torch
+
+    optimizer_parameters = set()
+    for child in _optimizer_children(optimizer):
+        inner = getattr(child, "optimizer", None)
+        param_groups = getattr(inner, "param_groups", None)
+        if param_groups is None:
+            param_groups = getattr(child, "param_groups", None)
+        if param_groups is None:
+            if getattr(child, "is_stub_optimizer", False):
+                continue
+            raise RuntimeError("expert-full Adam child has no parameter groups")
+        for group in param_groups:
+            if not isinstance(group, Mapping) or "params" not in group:
+                raise RuntimeError("expert-full Adam parameter group is invalid")
+            optimizer_parameters.update(id(parameter) for parameter in group["params"])
+
+    trainable = []
+    seen = set()
+    for chunk in _model_chunks(model_chunks):
+        for parameter in chunk.parameters():
+            if parameter.requires_grad and id(parameter) not in seen:
+                trainable.append(parameter)
+                seen.add(id(parameter))
+    if not trainable:
+        raise RuntimeError("expert-full optimizer has no trainable parameters")
+    for parameter in trainable:
+        main = getattr(parameter, "main_param", None)
+        if (
+            getattr(parameter, "main_param_sharded", False)
+            or main is None
+            or main.dtype != torch.float32
+            or main.numel() != parameter.numel()
+            or id(main) not in optimizer_parameters
+        ):
+            raise RuntimeError(
+                "expert-full trainable parameter lacks a complete, "
+                "optimizer-owned FP32 master"
+            )
 
 
 @contextmanager

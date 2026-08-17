@@ -4,16 +4,16 @@ This intentionally builds a small decoder with the production V4 attention
 geometry.  It validates the complete 43-layer PEFT contract on meta tensors,
 then validates real Megatron LoRA injection and collective conversion on the
 small decoder.  The optional PP2 mode has two deliberately narrow components:
-two GPUs prove the stage-local attention mapping, while 16 ranks can reproduce
-the production TP8 x PP2 x EP8 expert-full task ownership on only four decoder
-layers.  The latter fails before rollout if Bridge conversion tasks do not
-cover every locally flagged expert parameter.  Optional DDP and real-optimizer
-flags reproduce the production wrapper and FP32-master lifecycle without
-loading a checkpoint, starting TMS, or launching rollout.  The sleep-process-
-group gate additionally isolates Miles' pre-TMS process-group teardown.  Run
-it inside the pinned Miles image under ``torchrun``.  ``--task-bridge-model``
-keeps construction on ``--model`` while resolving task mappings through the
-same dual-source actor path as production.
+two GPUs prove the stage-local attention mapping, while 16 or 32 ranks reproduce
+the production TP8 x PP2 x EP8 expert-full task ownership at DP1 or DP2 on only
+four decoder layers.  The latter fails before rollout if Bridge conversion
+tasks do not cover every locally flagged expert parameter.  Optional DDP and
+real-optimizer flags reproduce the production replicated-Adam FP32-master
+lifecycle without loading a checkpoint, starting TMS, or launching rollout.
+The sleep-process-group gate additionally isolates Miles' pre-TMS process-group
+teardown.  Run it inside the pinned Miles image under ``torchrun``.
+``--task-bridge-model`` keeps construction on ``--model`` while resolving task
+mappings through the same dual-source actor path as production.
 """
 
 from __future__ import annotations
@@ -86,14 +86,14 @@ def _parallel_sizes(
         return 1, 2, 1
     if (
         pipeline_parallel == 2
-        and world_size == 16
+        and world_size in (16, 32)
         and expert_full_count == 16
     ):
         return 8, 2, 8
     if expert_full_count:
         raise ValueError(
-            "PP2 expert-full validation requires exactly 16 ranks "
-            "(TP8 x PP2 x EP8)"
+            "PP2 expert-full validation requires exactly 16 or 32 ranks "
+            "(TP8 x PP2 x EP8 at DP1 or DP2)"
         )
     raise ValueError(
         "PP2 bridge validation requires exactly two ranks (TP1 x PP2 x EP1)"
@@ -105,12 +105,13 @@ def _expected_router_modes(
     layers: int,
     pipeline_parallel: int,
     tensor_parallel: int,
+    data_parallel: int = 1,
 ) -> list[tuple[bool, bool]]:
     """Return router modes at the scope used by the runtime assertion.
 
     PP1 validates the current rank's local layers.  PP2 gathers router
-    records across the full DP1 world, so each global layer occurs once for
-    every TP/EP coordinate (eight times in the production component).
+    records across the full world, so each global layer occurs once for every
+    TP/EP coordinate and DP replica.
     """
 
     if layers < 4:
@@ -120,7 +121,9 @@ def _expected_router_modes(
         return modes
     if pipeline_parallel != 2 or tensor_parallel <= 0:
         raise ValueError("invalid PP/TP router validation topology")
-    return modes * tensor_parallel
+    if data_parallel <= 0:
+        raise ValueError("data parallel size must be positive")
+    return modes * tensor_parallel * data_parallel
 
 
 def _pipeline_layer_counts(
@@ -449,11 +452,13 @@ def _pp2_expert_task_coverage(
         name: [rank for rank, names in enumerate(gathered_names) if name in names]
         for name in expected_names
     }
+    replicas = len(coverage) // (2 * 8)
+    assert replicas in (1, 2) and len(coverage) == 2 * 8 * replicas
     invalid_owners = {
-        name: ranks for name, ranks in owners.items() if len(ranks) != 1
+        name: ranks for name, ranks in owners.items() if len(ranks) != replicas
     }
     assert not invalid_owners, (
-        "expert-full canonical views do not have one DP1 owner: "
+        "expert-full canonical views do not have one owner per DP replica: "
         f"{dict(sorted(invalid_owners.items())[:4])}"
     )
 
@@ -461,31 +466,33 @@ def _pp2_expert_task_coverage(
         record["canonical_views"] = len(names)
     expected_ep_balance = [4, 4, 4, 4, 0, 0, 0, 0]
     for pipeline_rank, stage_layers in enumerate(pipeline_layer_counts):
-        stage = sorted(
-            (
-                record
-                for record in coverage
-                if record["pipeline_rank"] == pipeline_rank
-            ),
-            key=lambda record: record["expert_rank"],
-        )
-        assert [record["expert_rank"] for record in stage] == list(range(8))
+        stage = [
+            record
+            for record in coverage
+            if record["pipeline_rank"] == pipeline_rank
+        ]
+        assert len(stage) == 8 * replicas
         parameters_per_expert = stage_layers * 2
         views_per_expert = stage_layers * 3
-        assert [
-            record["flagged_parameters"] // parameters_per_expert
-            for record in stage
-        ] == (
-            expected_ep_balance
-        )
-        assert [
-            record["canonical_views"] // views_per_expert for record in stage
-        ] == (
-            expected_ep_balance
-        )
+        for expert_rank, expected_balance in enumerate(expected_ep_balance):
+            rank_records = [
+                record for record in stage if record["expert_rank"] == expert_rank
+            ]
+            assert len(rank_records) == replicas
+            assert all(
+                record["flagged_parameters"] // parameters_per_expert
+                == expected_balance
+                for record in rank_records
+            )
+            assert all(
+                record["canonical_views"] // views_per_expert
+                == expected_balance
+                for record in rank_records
+            )
 
     return {
         "expected_ep_expert_balance": expected_ep_balance,
+        "data_parallel_replicas": replicas,
         "canonical_expert_tensors": len(expected_names),
         "rank_coverage": coverage,
     }
@@ -661,6 +668,10 @@ def _expert_task_coverage_snapshot(
         and parameter.main_param.numel() == parameter.numel()
         for parameter in flagged_parameters
     )
+    local_record["sharded_optimizer_master_parameters"] = sum(
+        bool(getattr(parameter, "main_param_sharded", False))
+        for parameter in flagged_parameters
+    )
     current_parameter_ids = set(_flagged_expert_parameters(models))
     if pre_wrap_parameter_ids is not None:
         local_record["pre_wrap_flagged_parameters"] = len(
@@ -715,6 +726,7 @@ def _expert_task_coverage_failures(coverage) -> list[dict[str, object]]:
         or record.get("flagged_parameters") != record.get("task_parameters")
         or record.get("optimizer_master_parameters")
         != record.get("flagged_parameters")
+        or record.get("sharded_optimizer_master_parameters", 0)
         or record.get("ddp_preserved_parameter_ids") is False
     ]
 
@@ -738,6 +750,7 @@ def _compact_coverage_failure(record) -> dict[str, object]:
             "selected_tasks",
             "task_parameters",
             "optimizer_master_parameters",
+            "sharded_optimizer_master_parameters",
             "unexpected_task_parameters",
             "snapshot_error",
             "expert_views_error",
@@ -1019,7 +1032,7 @@ def _validate_clone_routers(models, contract, hidden_size: int, vocab_size: int)
 
 
 def _build_real_optimizer(models, args):
-    """Build the patched production distributed optimizer without training."""
+    """Build the patched production replicated Adam without training."""
 
     from megatron.core.optimizer import OptimizerConfig
     from miles.backends.megatron_utils import model as miles_model
@@ -1029,7 +1042,7 @@ def _build_real_optimizer(models, args):
         lr=args.expert_full_lr,
         min_lr=args.expert_full_lr,
         weight_decay=0.0,
-        use_distributed_optimizer=True,
+        use_distributed_optimizer=False,
         bf16=True,
         clip_grad=1.0,
         adam_beta1=0.9,
@@ -1183,6 +1196,8 @@ def main() -> None:
         args.pipeline_parallel,
         expert_full_count=args.expert_full_count,
     )
+    data_parallel = world_size // (tensor_parallel * pipeline_parallel)
+    assert data_parallel * tensor_parallel * pipeline_parallel == world_size
     provider.tensor_model_parallel_size = tensor_parallel
     provider.pipeline_model_parallel_size = pipeline_parallel
     provider.expert_model_parallel_size = expert_parallel
@@ -1258,7 +1273,7 @@ def main() -> None:
         from megatron.bridge.training.config import DistributedDataParallelConfig
 
         ddp_config = DistributedDataParallelConfig(
-            use_distributed_optimizer=True,
+            use_distributed_optimizer=False,
             grad_reduce_in_fp32=True,
         )
         ddp_config.finalize()
@@ -1297,6 +1312,7 @@ def main() -> None:
             layers=args.layers,
             pipeline_parallel=pipeline_parallel,
             tensor_parallel=tensor_parallel,
+            data_parallel=data_parallel,
         )
     ), routers
 
@@ -1433,6 +1449,7 @@ def main() -> None:
                     "tensor_parallel_size": tensor_parallel,
                     "pipeline_parallel_size": pipeline_parallel,
                     "expert_parallel_size": expert_parallel,
+                    "data_parallel_size": data_parallel,
                     "pipeline_layer_counts": pipeline_layer_counts,
                     "wrapped_with_ddp": args.wrap_with_ddp,
                     "real_optimizer": optimizer is not None,
