@@ -875,6 +875,7 @@ def test_prepare_wires_final_secrlenv_eval_and_same_dataset_sha(tmp_path, monkey
     )
     assert plan["eval_checkpoint"]["sha256"] == checkpoint_sha256
     assert plan["eval_checkpoint"]["global_step"] == learner["global_rounds"]
+    assert plan["secrlenv_daemon"]["placement"] == "island-heads"
 
 
 def test_local_prompt_directory_hash_is_stable_and_rejects_symlinks(tmp_path):
@@ -2323,6 +2324,89 @@ def test_secrlenv_daemon_contract_is_required_and_propagated_to_nodes():
         "/data/yeto-rl/secrlenv-runs/acceptance/daemon.token:"
         "/run/secrlenv/daemon.token:ro" in node
     )
+
+
+def test_secrlenv_island_head_placement_is_explicit_and_fail_closed(
+    tmp_path, monkeypatch
+):
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+    plan["secrlenv_daemon"] = {
+        **_secrlenv_daemon_contract(),
+        "placement": "island-heads",
+    }
+    ssh_harness._validate_plan(plan)
+
+    assert ssh_harness._secrlenv_daemon_hosts(plan) == [
+        "alice@a0",
+        "alice@b0",
+    ]
+    for learner_id in range(2):
+        head = _node_start_script(plan, learner_id, 0)
+        worker = _node_start_script(plan, learner_id, 1)
+        assert "SECRLENV_DAEMON_URL=" in head
+        assert "/run/secrlenv/daemon.token:ro" in head
+        assert "SECRLENV_DAEMON_URL=" not in worker
+        assert "/run/secrlenv/daemon.token:ro" not in worker
+
+    calls = []
+
+    def fake_ssh(plan, target, script, **kwargs):
+        calls.append((target, script))
+        return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(ssh_harness, "_ssh", fake_ssh)
+    ssh_harness._start_secrlenv_daemons(plan)
+    assert [target for target, _script in calls] == ["alice@a0", "alice@b0"]
+    assert all(
+        "python3 -m yeto.rl.secrlenv_task_images" in script
+        for _target, script in calls
+    )
+
+    calls.clear()
+    plan_path = _write_plan(tmp_path / "plan.json", plan)
+    ssh_harness.status(plan_path)
+    daemon_status_targets = [
+        target
+        for target, script in calls
+        if "secrlenv_daemon=running" in script
+    ]
+    assert daemon_status_targets == ["alice@a0", "alice@b0"]
+
+    calls.clear()
+    ssh_harness._stop_secrlenv_daemons(plan)
+    assert [target for target, _script in calls] == ["alice@a0", "alice@b0"]
+
+    plan["secrlenv_daemon"]["placement"] = "unknown"
+    with pytest.raises(HarnessError, match="daemon contract"):
+        ssh_harness._validate_plan(plan)
+    with pytest.raises(HarnessError, match="invalid placement"):
+        ssh_harness._secrlenv_daemon_hosts(plan)
+
+
+def test_legacy_secrlenv_plan_without_placement_retains_all_host_semantics(
+    monkeypatch,
+):
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+    plan["secrlenv_daemon"] = _secrlenv_daemon_contract()
+    ssh_harness._validate_plan(plan)
+
+    assert ssh_harness._secrlenv_daemon_hosts(plan) == ssh_harness._all_hosts(plan)
+    assert "SECRLENV_DAEMON_URL=" in _node_start_script(plan, 0, 1)
+
+    calls = []
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda plan, target, script, **kwargs: calls.append((target, script)),
+    )
+    ssh_harness._start_secrlenv_daemons(plan)
+    assert [target for target, _script in calls] == ssh_harness._all_hosts(plan)
+
+    calls.clear()
+    ssh_harness._stop_secrlenv_daemons(plan)
+    assert [target for target, _script in calls] == ssh_harness._all_hosts(plan)
 
 
 def test_start_attests_secrlenv_daemons_before_host_gpu_setup(tmp_path, monkeypatch):

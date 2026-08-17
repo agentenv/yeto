@@ -1040,6 +1040,8 @@ def _validate_plan(plan: dict[str, Any]) -> None:
                 raise HarnessError(f"secrlenv daemon has an invalid {name}")
         if (
             daemon.get("bind") != "127.0.0.1"
+            or daemon.get("placement", "all-hosts")
+            not in {"all-hosts", "island-heads"}
             or not isinstance(daemon.get("port"), int)
             or not 1024 <= daemon["port"] <= 65535
             or not isinstance(daemon.get("max_active_episodes"), int)
@@ -1774,6 +1776,7 @@ def prepare(namespace) -> Path:
             "task_pack_sha256": namespace.secrlenv_task_pack_sha256,
             "state_root": f"/data/yeto-rl/secrlenv-runs/{run_id}",
             "bind": "127.0.0.1",
+            "placement": "island-heads",
             "port": namespace.secrlenv_port,
             "operator_image": namespace.secrlenv_operator_image,
             "operator_image_id": namespace.secrlenv_operator_image_id,
@@ -1948,7 +1951,7 @@ PY
 def _start_secrlenv_daemons(plan: dict[str, Any]) -> None:
     if plan.get("secrlenv_daemon") is None:
         return
-    for target in _all_hosts(plan):
+    for target in _secrlenv_daemon_hosts(plan):
         _ssh(plan, target, _secrlenv_daemon_script(plan))
 
 
@@ -1956,7 +1959,7 @@ def _stop_secrlenv_daemons(plan: dict[str, Any]) -> None:
     daemon = plan.get("secrlenv_daemon")
     if daemon is None:
         return
-    for target in _all_hosts(plan):
+    for target in _secrlenv_daemon_hosts(plan):
         _ssh(
             plan,
             target,
@@ -1981,8 +1984,67 @@ exit 1
         )
 
 
+def _secrlenv_daemon_status_script(plan: dict[str, Any]) -> str:
+    daemon = plan.get("secrlenv_daemon")
+    if daemon is None:
+        return ""
+    return f"""STATE_ROOT={shlex.quote(daemon['state_root'])}
+if [ ! -s "$STATE_ROOT/daemon.pid" ]; then
+  echo 'secrlenv_daemon=stopped'
+else
+  PID="$(cat "$STATE_ROOT/daemon.pid")"
+  case "$PID" in
+    ''|*[!0-9]*) echo 'secrlenv_daemon=identity-drifted' >&2; exit 1 ;;
+  esac
+  ARGS="$(ps -p "$PID" -o args= 2>/dev/null || true)"
+  case "$ARGS" in
+    *secrlenv_rl.server*"$STATE_ROOT/state"*) ;;
+    '') echo 'secrlenv_daemon=stopped' ;;
+    *) echo 'secrlenv_daemon=identity-drifted' >&2; exit 1 ;;
+  esac
+  if [ -n "$ARGS" ]; then
+    python3 - "$PID" <<'PY' || exit 1
+import json
+import sys
+from urllib.request import urlopen
+
+try:
+    with urlopen("http://{daemon['bind']}:{daemon['port']}/healthz", timeout=2) as response:
+        value = json.load(response)
+except Exception:
+    print("secrlenv_daemon=unhealthy")
+    raise SystemExit(1)
+if not (
+    response.status == 200
+    and value.get("ok") is True
+    and value.get("task_pack_sha256") == {daemon['task_pack_sha256']!r}
+    and value.get("max_active_episodes") == {daemon['max_active_episodes']}
+):
+    print("secrlenv_daemon=identity-drifted")
+    raise SystemExit(1)
+print("secrlenv_daemon=running pid=" + sys.argv[1])
+PY
+  fi
+fi
+"""
+
+
 def _all_hosts(plan: dict[str, Any]) -> list[str]:
     return [host for island in plan["islands"] for host in island["hosts"]]
+
+
+def _secrlenv_daemon_hosts(plan: dict[str, Any]) -> list[str]:
+    """Return the pinned daemon roster, retaining old-plan cleanup semantics."""
+
+    daemon = plan.get("secrlenv_daemon")
+    if daemon is None:
+        return []
+    placement = daemon.get("placement", "all-hosts")
+    if placement == "all-hosts":
+        return _all_hosts(plan)
+    if placement == "island-heads":
+        return [island["hosts"][0] for island in plan["islands"]]
+    raise HarnessError("secrlenv daemon has an invalid placement")
 
 
 def _deployment_hosts(plan: dict[str, Any]) -> list[str]:
@@ -2984,6 +3046,7 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
     island = plan["islands"][learner_id]
     if node_id not in range(len(island["hosts"])):
         raise HarnessError("node ID is outside the island topology")
+    daemon_on_node = island["hosts"][node_id] in _secrlenv_daemon_hosts(plan)
     name = _container_name(plan, learner_id, node_id)
     head = _target_host(island["hosts"][0])
     gpus = island["gpus_per_node"]
@@ -3006,14 +3069,14 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
         "--env SECRLENV_TASK_PACK_SHA256="
         f"{plan['secrlenv_daemon']['task_pack_sha256']} "
         "--env SECRLENV_BEARER_TOKEN_FILE=/run/secrlenv/daemon.token \\\n"
-        if plan.get("secrlenv_daemon")
+        if daemon_on_node
         else ""
     )
     daemon_volume = (
         "  --volume "
         f"{shlex.quote(plan['secrlenv_daemon']['state_root'])}/daemon.token:"
         "/run/secrlenv/daemon.token:ro \\\n"
-        if plan.get("secrlenv_daemon")
+        if daemon_on_node
         else ""
     )
     reward_scheme = shlex.quote(learner.get("cybergym_reward_scheme", "binary"))
@@ -3345,6 +3408,7 @@ fi
 
 def status(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
+    daemon_hosts = set(_secrlenv_daemon_hosts(plan))
     if _syncer_host(plan) not in _all_hosts(plan):
         result = _ssh(
             plan,
@@ -3366,13 +3430,18 @@ echo host={shlex.quote(_syncer_host(plan))} role=syncer
             syncer = ""
             if _syncer_host(plan) == target:
                 syncer = _syncer_status_script(plan)
+            daemon = (
+                _secrlenv_daemon_status_script(plan)
+                if target in daemon_hosts
+                else ""
+            )
             result = _ssh(
                 plan,
                 target,
                 f"""set -u
 {_remote_vars(plan)}
 echo host={shlex.quote(target)} island={learner_id} node={node_id}
-{syncer}if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
+{syncer}{daemon}if docker inspect {shlex.quote(name)} >/dev/null 2>&1; then
   printf 'container='
   docker inspect --format {shlex.quote(_CONTAINER_STATE_FORMAT)} {shlex.quote(name)}
 else echo container=missing; fi
