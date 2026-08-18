@@ -74,6 +74,9 @@ def parse_args(argv=None):
     parser.add_argument("--wan-streams", type=int, default=4)
     parser.add_argument("--miles-root", required=True)
     parser.add_argument("--trust-remote-code", action="store_true")
+    from ..wandb_logger import add_arguments as add_wandb_arguments
+
+    add_wandb_arguments(parser)
     return parser.parse_args(argv)
 
 
@@ -560,6 +563,12 @@ def run_miles(
         miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
         miles_args.yeto_rl_event_tape = args.event_tape
         miles_args.yeto_rl_learner_id = args.learner_id
+        # W&B reads the same namespace the rest of the yeto context rides in;
+        # yeto.rl.wandb_rl starts the island's run off these.
+        miles_args.wandb = getattr(args, "wandb", False)
+        miles_args.wandb_project = getattr(args, "wandb_project", "yeto")
+        miles_args.wandb_entity = getattr(args, "wandb_entity", None)
+        miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
         sync_preset = getattr(args, "sync_preset", "strict-avg")
         miles_args.yeto_rl_sync_preset = sync_preset
         miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"

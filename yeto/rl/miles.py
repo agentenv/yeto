@@ -147,6 +147,12 @@ def _append_rl_event(args, event: dict[str, Any]) -> None:
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+    # The tape is the island's telemetry; W&B is a second reader of it, not
+    # a second instrumentation pass. Writing the file first keeps the tape
+    # authoritative when the network is not.
+    from .wandb_rl import tee as _wandb_tee
+
+    _wandb_tee(args, event)
 
 
 def _record_strict_failure(args, error: StrictRlInvariantError, bridge=None) -> None:
