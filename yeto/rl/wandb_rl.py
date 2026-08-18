@@ -38,14 +38,22 @@ _NOT_A_SERIES = frozenset(
     }
 )
 
-# Preferred x-axes, in order. Whichever appears first in an event is the
-# one its metrics are plotted against.
-_STEP_KEYS = ("rl/rollout_id", "global_step", "version")
+# No single key is present on every RL event kind: a rollout round carries
+# base_policy_version and local_round_id, a policy apply carries
+# policy_version, and an apply-progress tick carries only policy_version.
+# event_metrics therefore synthesizes rl/step from the first of these that
+# is present, in island-local order, so every event lands on one x-axis.
+# (Checked against a real DeepSeek-V4 island tape: an earlier guess of
+# "rl/rollout_id" appears in no event at all, which silently demoted every
+# curve to W&B's internal step counter.)
+_STEP_KEYS = ("policy_version", "base_policy_version", "local_round_id")
+
+STEP_KEY = "rl/step"
 
 STEP_METRICS = {
-    "rl/*": "rl/rollout_id",
-    "sync/*": "rl/rollout_id",
-    "event/*": "rl/rollout_id",
+    "rl/*": STEP_KEY,
+    "sync/*": STEP_KEY,
+    "event/*": STEP_KEY,
 }
 
 
@@ -68,8 +76,13 @@ def event_metrics(event: dict[str, Any]) -> dict[str, Any] | None:
             metrics[key] = value
         elif isinstance(value, (list, tuple)):
             metrics[f"{key}_count"] = len(value)
+    for key in _STEP_KEYS:
+        value = event.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            metrics[STEP_KEY] = value
+            break
     # An event with nothing but its own name is noise on every curve.
-    if len(metrics) == 1 and not any(k in event for k in _STEP_KEYS):
+    if len(metrics) == 1:
         return None
     return metrics
 
