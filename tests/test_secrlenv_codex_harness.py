@@ -809,6 +809,88 @@ class _RecoveringEpisodeClient(_FakeEpisodeClient):
         return await super().submit(episode_id, value)
 
 
+def test_run_does_not_start_codex_before_capacity_retry_creates_episode(
+    monkeypatch,
+):
+    episode_id = "e" * 24
+    events: list[str] = []
+
+    class CapacityThenReadyClient:
+        def __init__(self) -> None:
+            self.create_calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def create(self, task_id: str, tier: str):
+            assert (task_id, tier) == ("CVE-2024-1234", "l2")
+            self.create_calls += 1
+            events.append("create")
+            if self.create_calls == 1:
+                raise harness.EpisodeAPIError(
+                    503, "capacity_reached", "busy"
+                )
+            return {
+                "episode_id": episode_id,
+                "prompt": "immutable task",
+            }
+
+        async def evaluate(self, value: str):
+            assert value == episode_id
+            events.append("evaluate")
+            return {
+                "task_id": "CVE-2024-1234",
+                "episode_id": episode_id,
+                "reward": 1.0,
+                "passed": True,
+            }
+
+        async def close(self, value: str):
+            assert value == episode_id
+            events.append("close")
+            return {"closed": True}
+
+    async def drive_after_create(
+        _binary,
+        _base_url,
+        _client,
+        episode,
+        _request_kwargs,
+        _metrics,
+        *,
+        max_seq_len,
+    ):
+        assert episode["episode_id"] == episode_id
+        assert max_seq_len is None
+        assert events == ["create", "create"]
+        events.append("drive")
+        return "completed"
+
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
+    monkeypatch.setattr(harness, "EpisodeClient", CapacityThenReadyClient)
+    monkeypatch.setattr(harness, "_attest_runtime", lambda: Path("/codex"))
+    monkeypatch.setattr(harness, "_drive_codex", drive_after_create)
+    monkeypatch.setattr(harness, "sign_outcome", lambda _outcome: "signed")
+    monkeypatch.setattr(harness.legacy.random, "uniform", lambda *_args: 0.0)
+    try:
+        result = asyncio.run(
+            harness.run(
+                "http://127.0.0.1:1",
+                None,
+                metadata={"task_id": "CVE-2024-1234", "prompt_tier": "l2"},
+            )
+        )
+    finally:
+        harness.legacy._release_episode(episode_id)
+
+    assert result is not None
+    assert result["exit_status"] == "completed"
+    assert events == ["create", "create", "drive", "evaluate", "close"]
+
+
 def test_driver_rejects_mutated_arguments_but_preserves_bounded_truncation(monkeypatch):
     _set_bridge_env(monkeypatch)
 

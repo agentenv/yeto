@@ -11,7 +11,7 @@ MILES_IMAGE = (
 )
 
 SECRLENV_AGENT_PATH = "yeto_miles_secrlenv/agent.py"
-SECRLENV_AGENT_SHA256 = "750e9432f81b9467d5600423a8b2c80f31156d25b2ae0db0e4f73c4d080afadb"
+SECRLENV_AGENT_SHA256 = "42322741664cf58d58bca85800877efb2ff0d698ed84d68f8c21b2b9792e01af"
 
 # Stock Codex is part of the signed Yeto security-environment harness.  These
 # pins identify the official Linux artifact, not the controller's host binary.
