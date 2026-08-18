@@ -56,6 +56,7 @@ def sync_diloco_boundary(
     device: torch.device | None = None,
     reset_counters_on_replicas: bool = False,
     shutdown_after_pulls: bool = False,
+    observer: Callable[[dict], None] | None = None,
 ) -> bool:
     """Run one learner's non-blocking DiLoCo synchronization boundary.
 
@@ -63,6 +64,11 @@ def sync_diloco_boundary(
     ``apply_flat`` bridge those values to the learner's model representation;
     a snapshot is built lazily and independently for merge and push phases.
     Returns true only after authoritative finalization has completed.
+
+    ``observer`` receives one metrics dict per boundary that actually
+    merged or pushed something. Every backend routes its sync through this
+    function, so an observer attached here covers all four of them; quiet
+    boundaries are skipped because "no fragment moved" is not an event.
     """
     actions: list[tuple[int, int, torch.Tensor]] = []
     finalizing = False
@@ -125,6 +131,9 @@ def sync_diloco_boundary(
             state.fragment_versions[fid] = version
         state.global_step = max(state.global_step, version)
 
+    pushed = 0
+    pushed_bytes = 0
+    pushed_delta_norm = 0.0
     if rank == 0 and client is not None:
         state.pending_pulls.extend(client.drain_pulls())
         still_pending = []
@@ -157,8 +166,31 @@ def sync_diloco_boundary(
                 c_units,
                 payload,
             )
+            if observer is not None:
+                pushed += 1
+                pushed_bytes += len(payload)
+                pushed_delta_norm = max(pushed_delta_norm, float(delta.norm()))
         state.pending_pulls = still_pending
         if shutdown_after_pulls:
             state.shutdown = client.shutdown.is_set()
+
+    if observer is not None and rank == 0 and (actions or pushed):
+        # Per-fragment lag behind the newest global version this island has
+        # seen: the single clearest signal that an island is falling behind
+        # the fleet rather than merely training slowly.
+        staleness = [state.global_step - v for v in state.fragment_versions]
+        observer(
+            {
+                "sync/merges_applied": len(actions),
+                "sync/pushes": pushed,
+                "sync/push_bytes": pushed_bytes,
+                "sync/push_delta_norm": pushed_delta_norm,
+                "sync/pending_pulls": len(state.pending_pulls),
+                "sync/staleness_max": max(staleness),
+                "sync/staleness_mean": sum(staleness) / len(staleness),
+                "local_step": steps_total,
+                "global_step": state.global_step,
+            }
+        )
 
     return False

@@ -225,6 +225,25 @@ def build_syncer_binary() -> Path:
     return binary
 
 
+# The syncer's JSONL merge log. Head-controller mode tails it into W&B
+# (yeto.wandb_tape), so the path has to be the same on both sides — and RL
+# runs put it under the output dir they collect, so it varies by mode.
+SYNCER_EVENT_TAPE = "~/yeto-tape.jsonl"
+RL_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-tape.jsonl"
+
+
+def syncer_event_tape(args) -> str:
+    """Where the syncer writes its merge record for this run's mode.
+
+    syncer_command, LocalSyncer's strict-failure reader, and the W&B tape
+    forwarder all resolve the path through here, so none of them can drift
+    onto a file the syncer is not writing.
+    """
+    if getattr(args, "training_mode", "sft") == "rl":
+        return RL_SYNCER_EVENT_TAPE
+    return SYNCER_EVENT_TAPE
+
+
 def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
@@ -249,7 +268,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
             " --max-base-lag 0 --learner-weight equal"
             " --checkpoint-path ~/yeto-output/yeto-state.ckpt"
             " --checkpoint-every 1 --resume"
-            " --event-tape ~/yeto-output/yeto-tape.jsonl"
+            f" --event-tape {RL_SYNCER_EVENT_TAPE}"
         )
     return (
         f"{binary}"
@@ -267,7 +286,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --outer-momentum {args.outer_momentum}"
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
         f" --mark-final-checkpoint"
-        f" --event-tape ~/yeto-tape.jsonl"
+        f" --event-tape {SYNCER_EVENT_TAPE}"
     )
 
 
@@ -286,6 +305,59 @@ SYNCER_REMOTE_BUILD = (
 )
 
 
+def syncer_tape_sidecar(args, num_learners: int, binary: str = "~/yeto-syncer") -> tuple[str, str, dict]:
+    """Setup step, run prefix, and envs that put a W&B tape forwarder on the
+    syncer VM. Returns empty strings when telemetry is off.
+
+    Local controller mode runs the syncer on its own cluster, so the event
+    tape is not reachable from the controller on the submitting machine.
+    Rather than shipping the tape back, the reader goes to the tape:
+    `yeto.wandb_tape --follow` runs beside the syncer.
+
+    It is backgrounded deliberately. The syncer must stay the job's
+    foreground process, because FleetController reads that job's exit code
+    as the syncer's health; and as a separate process the forwarder cannot
+    take the syncer down with it. The forwarder resumes from its stored
+    byte offset, so a restarted job continues the tape instead of logging
+    every past merge a second time.
+
+    Only yeto.wandb_tape and yeto.wandb_logger are imported over there, and
+    both are stdlib-only — the syncer VM never needs the training stack.
+    """
+    if not getattr(args, "wandb", False):
+        return "", "", {}
+    setup = (
+        "\npip install -q wandb || echo '[yeto-setup] wandb install failed; "
+        "the syncer will run without telemetry' >&2"
+    )
+    forwarder = (
+        f"python3 -m yeto.wandb_tape {syncer_event_tape(args)} --follow"
+        f" --wandb-group {shlex.quote(args.cluster_prefix)}"
+        f" --wandb-project {shlex.quote(args.wandb_project)}"
+        f" --wandb-mode {args.wandb_mode}"
+    )
+    if getattr(args, "wandb_entity", None):
+        forwarder += f" --wandb-entity {shlex.quote(args.wandb_entity)}"
+    # Head mode's forwarder is handed the launch namespace directly; the
+    # sidecar is a separate process, so the same config rides across as JSON
+    # (the head job itself is launched the same way, see cli.cmd_launch_head).
+    # build_config drops anything credential-shaped before it is serialized.
+    from .wandb_logger import build_config
+
+    config = build_config(
+        args, {"syncer_command": syncer_command(args, num_learners, binary=binary)}
+    )
+    forwarder += f" --config-json {shlex.quote(json.dumps(config, sort_keys=True))}"
+    run_prefix = (
+        "(cd ~/sky_workdir && PYTHONPATH=~/sky_workdir nohup "
+        f"{forwarder} >/tmp/yeto-tape-wandb.log 2>&1 &) || true\n"
+    )
+    envs = {"YETO_RUN_GROUP": args.cluster_prefix}
+    if os.environ.get("WANDB_API_KEY"):
+        envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
+    return setup, run_prefix, envs
+
+
 def make_syncer_task(args, num_learners: int):
     import platform
 
@@ -293,12 +365,14 @@ def make_syncer_task(args, num_learners: int):
 
     cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
     if cross:
+        tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
         print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
         task = sky.Task(
             name="yeto-syncer",
-            setup=WAN_TUNING + "\n" + SYNCER_REMOTE_BUILD,
-            run=syncer_command(args, num_learners),
+            setup=WAN_TUNING + "\n" + SYNCER_REMOTE_BUILD + tape_setup,
+            run=tape_run + syncer_command(args, num_learners),
             workdir=str(REPO_ROOT),
+            envs=tape_envs,
         )
         infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
         task.set_resources(
@@ -313,12 +387,18 @@ def make_syncer_task(args, num_learners: int):
         return task
 
     binary = build_syncer_binary()
-    cmd = "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
+    tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
+    cmd = tape_run + "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
     task = sky.Task(
         name="yeto-syncer",
-        setup=WAN_TUNING,
+        setup=WAN_TUNING + tape_setup,
         run=cmd,
         file_mounts={"~/yeto-syncer": str(binary)},
+        # The fast path normally ships only the binary; the forwarder needs
+        # the yeto package, so telemetry pulls in the same workdir the
+        # cross-build path already uses.
+        workdir=str(REPO_ROOT) if getattr(args, "wandb", False) else None,
+        envs=tape_envs,
     )
     # --syncer-region accepts "region" (AWS assumed) or "cloud/region".
     infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
@@ -1221,6 +1301,12 @@ def make_miles_island_task(
         f" --wan-streams {args.wan_streams}"
         " --miles-root ~/miles"
     )
+    if getattr(args, "wandb", False):
+        flags += " --wandb"
+        flags += f" --wandb-project {shlex.quote(args.wandb_project)}"
+        flags += f" --wandb-mode {args.wandb_mode}"
+        if getattr(args, "wandb_entity", None):
+            flags += f" --wandb-entity {shlex.quote(args.wandb_entity)}"
     if getattr(args, "rollout_model", None):
         flags += f" --rollout-model {shlex.quote(args.rollout_model)}"
         flags += (
@@ -1386,7 +1472,17 @@ def make_miles_island_task(
     for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
         if os.environ.get(name):
             envs[name] = os.environ[name]
+    if getattr(args, "wandb", False):
+        # RL islands join the same fleet group as the syncer's tape run.
+        envs["YETO_RUN_GROUP"] = args.cluster_prefix
+        if os.environ.get("WANDB_API_KEY"):
+            envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
     setup_steps = [WAN_TUNING, HF_TOKEN_ENV, miles_setup, sglang_setup]
+    if getattr(args, "wandb", False):
+        setup_steps.append(
+            "pip install -q wandb || echo '[yeto-setup] wandb install failed; "
+            "the island will train without telemetry' >&2"
+        )
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
     setup_steps.append(prefetch)
@@ -1590,6 +1686,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         common_flags += f" --loss-sha256 {shlex.quote(args.loss_sha256)}"
     if getattr(args, "source_sha256", None):
         common_flags += f" --source-sha256 {shlex.quote(args.source_sha256)}"
+    if getattr(args, "wandb", False):
+        common_flags += " --wandb"
+        common_flags += f" --wandb-project {shlex.quote(args.wandb_project)}"
+        common_flags += f" --wandb-mode {args.wandb_mode}"
+        if getattr(args, "wandb_entity", None):
+            common_flags += f" --wandb-entity {shlex.quote(args.wandb_entity)}"
     for name in (
         "model_requested_identifier",
         "model_requested_revision",
@@ -1716,6 +1818,15 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
                        "pip install -q -r requirements.txt"]
         setup_steps.extend(causal_kernel_setup_steps(args))
 
+    if getattr(args, "wandb", False):
+        # Telemetry is never worth losing an island over: a failed install
+        # is reported and the learner trains on (yeto.wandb_logger falls
+        # back to a no-op sink when the import fails).
+        setup_steps.append(
+            "pip install -q wandb || echo '[yeto-setup] wandb install failed; "
+            "the island will train without telemetry' >&2"
+        )
+
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
@@ -1732,6 +1843,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     }
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    if getattr(args, "wandb", False):
+        # Every island joins the fleet's W&B group under the run's name, so
+        # the islands and the syncer's tape run land on one comparison view.
+        envs["YETO_RUN_GROUP"] = args.cluster_prefix
+        if os.environ.get("WANDB_API_KEY"):
+            envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
     if spec.num_nodes > 1:
         # Surface NCCL's chosen transport in the job logs so an EFA-less
         # fallback to TCP sockets is visible, not silent.
@@ -2216,8 +2333,10 @@ class LocalSyncer:
         self.command = syncer_command(args, num_learners, binary=binary)
         self.binary = os.path.expanduser(binary)
         self.log_file = os.path.expanduser(log_file)
-        self.event_tape = os.path.expanduser("~/yeto-output/yeto-tape.jsonl")
+        self.event_tape = os.path.expanduser(syncer_event_tape(args))
         self.proc: subprocess.Popen | None = None
+        self.tape_forwarder = None
+        self.tape_run = None
         # The log file persists across controller jobs on a reused head;
         # forward only what this controller's syncer writes, not history.
         self._log_offset = os.path.getsize(self.log_file) if os.path.exists(self.log_file) else 0
@@ -2289,6 +2408,45 @@ class LocalSyncer:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._signal_tree(signal.SIGKILL)
+        if self.tape_forwarder is not None:
+            self.tape_forwarder.stop()
+            self.tape_forwarder = None
+        if self.tape_run is not None:
+            self.tape_run.finish()
+            self.tape_run = None
+
+    def start_tape_forwarder(self, args) -> None:
+        """Tail the syncer's event tape into a W&B run.
+
+        The syncer is Rust and stays that way: its merge records already
+        carry quorum/grace timings, per-island staleness, and per-island
+        contribution, so a reader on this host turns them into the fleet's
+        syncer-side curves with no change to the hot path. Survives a
+        syncer restart because the tape is appended to, not rewritten.
+        """
+        if not getattr(args, "wandb", False):
+            return
+        from . import wandb_logger
+        from .wandb_tape import OffsetStore, TapeForwarder, offset_path_for
+
+        run = wandb_logger.init(
+            args,
+            job_type="syncer",
+            name="syncer",
+            step_metrics={"sync/*": "global_step", "learner/*": "global_step"},
+            config_extra={"syncer_command": self.command},
+        )
+        if not run.enabled:
+            return
+        self.tape_run = run
+        self.tape_forwarder = TapeForwarder(
+            run,
+            self.event_tape,
+            # A reused head keeps the previous controller job's tape; the
+            # stored offset stops this one from re-logging its merges.
+            offsets=OffsetStore(offset_path_for(self.event_tape)),
+        )
+        self.tape_forwarder.start()
 
     def _signal_tree(self, sig: int) -> None:
         """Signal the syncer's whole process group (see start()), falling
@@ -2764,6 +2922,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             syncer_addr = f"{os.environ['SYNCER_PUBLIC_IP']}:{SYNCER_PORT}"
             print(f"[launcher] syncer runs on this head node at {syncer_addr}")
         else:
+            if getattr(args, "wandb", False):
+                print(
+                    "[launcher] --wandb: the syncer cluster carries its own "
+                    "event-tape forwarder (log: /tmp/yeto-tape-wandb.log)"
+                )
             print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
             syncer_task = make_syncer_task(args, num_learners)
             rid = sky.launch(syncer_task, cluster_name=syncer_cluster)

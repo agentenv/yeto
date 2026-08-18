@@ -141,6 +141,9 @@ def test_cmd_head_reconstructs_args_and_starts_syncer(monkeypatch):
         def start_log_forwarder(self):
             seen["forwarder"] = True
 
+        def start_tape_forwarder(self, args):
+            seen["tape_forwarder"] = getattr(args, "wandb", False)
+
         def stop(self):
             seen["stopped"] = True
 
@@ -158,6 +161,9 @@ def test_cmd_head_reconstructs_args_and_starts_syncer(monkeypatch):
     assert rc == 0
     assert seen["num_learners"] == 2
     assert seen["started"] and seen["forwarder"] and seen["stopped"]
+    # The tape forwarder is offered the run's args every time and decides
+    # for itself; without --wandb it does nothing.
+    assert seen["tape_forwarder"] is False
     assert isinstance(seen["local_syncer"], FakeLocalSyncer)
     args = seen["args"]
     assert args.gpu == ns.gpu

@@ -668,6 +668,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="fleet-controller health poll interval (seconds)",
     )
 
+    # W&B telemetry. One group per fleet (this run's name), one run per
+    # island plus one for the syncer's event tape; see docs/WANDB.md.
+    from .wandb_logger import add_arguments as add_wandb_arguments
+
+    add_wandb_arguments(p)
+
 
 def parse_args(argv=None):
     """Parse launch flags only (kept for callers that predate subcommands)."""
@@ -1236,12 +1242,16 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         # it onto learners from there).
         loss_path = pickled_loss_path(args.loss_function)
         file_mounts[f"~/sky_workdir/{loss_path.name}"] = str(loss_path)
+    head_pip = HEAD_SETUP_PIP
+    if getattr(args, "wandb", False):
+        # The head tails the syncer's event tape into W&B (yeto.wandb_tape).
+        head_pip += " && pip install -q wandb"
     task = sky.Task(
         name="yeto-head",
         setup=(
             "set -e\n"
             f"{WAN_TUNING}\n"
-            f"{HEAD_SETUP_PIP}\n"
+            f"{head_pip}\n"
             f"{SYNCER_REMOTE_BUILD}\n"
             f"touch {HEAD_READY_MARKER}"
         ),
@@ -1360,6 +1370,10 @@ def cmd_launch_head(args) -> int:
         for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
             if os.environ.get(name):
                 envs[name] = os.environ[name]
+    if getattr(args, "wandb", False) and os.environ.get("WANDB_API_KEY"):
+        # The head authenticates its own event-tape run and re-exports the
+        # key onto every learner cluster it launches.
+        envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
     job_task = sky.Task(
         name="yeto-head-job",
         run=(
@@ -1403,6 +1417,7 @@ def cmd_head(payload: str) -> int:
     syncer = launcher.LocalSyncer(args, num_learners)
     syncer.start()
     syncer.start_log_forwarder()
+    syncer.start_tape_forwarder(args)
     try:
         code = launcher.run(args, local_syncer=syncer)
     except BaseException:
