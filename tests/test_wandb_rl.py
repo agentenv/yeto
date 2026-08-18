@@ -6,16 +6,29 @@ sink never reaches the RL loop.
 """
 
 import argparse
+import json
+from pathlib import Path
 
 import pytest
 
-from yeto.rl.wandb_rl import RlTelemetry, event_metrics, tee
+from yeto.rl.wandb_rl import STEP_KEY, RlTelemetry, event_metrics, tee
+
+# Captured from a real DeepSeek-V4 island tape, one of each event kind the
+# RL path actually emits. Synthetic fixtures hid an x-axis that no real
+# event carries; these do not.
+REAL_EVENTS = [
+    json.loads(line)
+    for line in (Path(__file__).parent / "data" / "real_rl_events.jsonl")
+    .read_text()
+    .splitlines()
+    if line.strip()
+]
 
 LOCAL_ROUND = {
     "event": "rl_local_round",
     "island_id": 1,
     "time_unix": 1.0,
-    "rl/rollout_id": 7,
+    "local_round_id": 7,
     "rl/reward_mean": 0.42,
     "rl/reward_std": 0.1,
     "rl/action_tokens": 2048,
@@ -38,7 +51,7 @@ def test_the_rl_signals_that_matter_survive_the_projection():
         "sync/fragment_payload_bytes_sent",
     ):
         assert m[key] == LOCAL_ROUND[key], key
-    assert m["rl/rollout_id"] == 7  # the x-axis
+    assert m[STEP_KEY] == 7  # the x-axis
     assert m["event/rl_local_round"] == 1
 
 
@@ -63,7 +76,7 @@ def test_lists_become_counts():
 
 
 def test_booleans_become_numbers_so_they_can_be_charted():
-    m = event_metrics({"event": "e", "rl/rollout_id": 1, "flag": True})
+    m = event_metrics({"event": "e", "local_round_id": 1, "flag": True})
     assert m["flag"] == 1
 
 
@@ -141,7 +154,7 @@ def test_the_island_run_joins_the_fleet_group(monkeypatch):
     assert seen["name"] == "learner-3"
     assert seen["config_extra"]["island_backend"] == "rl-miles"
     assert seen["config_extra"]["rl_sync_preset"] == "decoupled"
-    assert seen["step_metrics"]["rl/*"] == "rl/rollout_id"
+    assert seen["step_metrics"]["rl/*"] == STEP_KEY
     assert seen["logged"][0]["rl/reward_mean"] == 0.42
 
 
@@ -241,3 +254,44 @@ def test_the_plan_never_carries_the_credential():
     plan = _harness_plan(wandb=True, wandb_project="p", wandb_entity="e", wandb_mode="online")
     assert "WANDB_API_KEY" not in json.dumps(plan)
     assert not [k for k in plan["learner"] if k.endswith("_key") or k.endswith("_token")]
+
+
+# --------------------------------------------------------------------------
+# against the real tape
+
+
+@pytest.mark.parametrize("event", REAL_EVENTS, ids=lambda e: e["event"])
+def test_every_real_event_kind_lands_on_the_shared_x_axis(event):
+    """Each event kind names its policy version differently; without a
+    synthesized step key their curves fall back to W&B's internal counter
+    and stop being comparable to each other."""
+    metrics = event_metrics(event)
+    assert metrics is not None
+    assert STEP_KEY in metrics
+    assert isinstance(metrics[STEP_KEY], (int, float))
+
+
+def test_the_real_rollout_round_keeps_its_learning_signals():
+    round_event = next(e for e in REAL_EVENTS if e["event"] == "rl_local_round")
+    metrics = event_metrics(round_event)
+    for key in (
+        "reward_mean", "reward_std", "mean_kl", "ess_ratio", "clip_fraction",
+        "action_tokens", "completed_trajectories", "delta_l2_norm",
+        "group_p50_seconds", "group_p99_seconds", "zero_variance_group_ratio",
+        "rl/reward_mean", "rl/current_vs_rollout_kl", "sync/bytes_sent",
+    ):
+        assert key in metrics, key
+        assert metrics[key] == round_event[key]
+
+
+def test_the_real_events_drop_only_identity_and_prose():
+    dropped = set()
+    for event in REAL_EVENTS:
+        metrics = event_metrics(event)
+        for key in event:
+            if key not in metrics and f"{key}_count" not in metrics:
+                dropped.add(key)
+    # event becomes the event/<name> counter; the rest name a state or a
+    # moment rather than measuring one.
+    assert dropped == {"event", "island_id", "time_unix", "phase",
+                       "sync/global_policy_hash"}

@@ -89,8 +89,12 @@ failure. W&B is a second reader of that tape, not a second instrumentation
 pass: `yeto/rl/wandb_rl.py` tees each event as it is appended. The file is
 written first, so the tape stays authoritative when the network is not.
 
-RL runs join the fleet's group with `job_type="rl-learner"`, x-axis
-`rl/rollout_id`:
+RL runs join the fleet's group with `job_type="rl-learner"`. No single
+key is present on every event kind — a rollout round carries
+`base_policy_version` and `local_round_id`, a policy apply carries
+`policy_version`, an apply-progress tick carries only `policy_version` —
+so the projection synthesizes `rl/step` from the first of those present,
+and every RL curve is plotted against it:
 
 | metric | meaning |
 |---|---|
