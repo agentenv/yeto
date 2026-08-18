@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
@@ -27,6 +28,8 @@ def _completion(
     return {
         "id": f"chatcmpl-{call_id}",
         "object": "chat.completion",
+        "created": 1,
+        "model": harness.BACKEND_MODEL,
         "choices": [
             {
                 "index": 0,
@@ -56,6 +59,46 @@ def _completion(
     }
 
 
+def _fake_miles_sse(completion: dict[str, Any]) -> bytes:
+    choice = completion["choices"][0]
+    message = choice["message"]
+    delta = {
+        "role": message.get("role", "assistant"),
+        "content": message.get("content"),
+    }
+    if message.get("reasoning_content") is not None:
+        delta["reasoning_content"] = message["reasoning_content"]
+    if message.get("tool_calls"):
+        delta["tool_calls"] = [
+            {**tool_call, "index": index}
+            for index, tool_call in enumerate(message["tool_calls"])
+        ]
+    chunk = {
+        "id": completion.get("id"),
+        "object": "chat.completion.chunk",
+        "created": completion.get("created", 1),
+        "model": completion.get("model", harness.BACKEND_MODEL),
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": choice.get("finish_reason"),
+            }
+        ],
+        "usage": completion.get("usage"),
+    }
+    return (
+        b"data: "
+        + json.dumps(
+            chunk,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n\ndata: [DONE]\n\n"
+    )
+
+
 async def _fake_miles(
     completions: Iterable[dict[str, Any]],
 ) -> tuple[web.AppRunner, str, list[dict[str, Any]]]:
@@ -66,7 +109,10 @@ async def _fake_miles(
         requests.append(await request.json())
         if not queue:
             return web.json_response({"error": "unexpected sample"}, status=409)
-        return web.json_response(queue.pop(0))
+        return web.Response(
+            body=_fake_miles_sse(queue.pop(0)),
+            content_type="text/event-stream",
+        )
 
     app = web.Application()
     app.router.add_post("/v1/chat/completions", chat)
@@ -77,6 +123,25 @@ async def _fake_miles(
     sockets = site._server.sockets if site._server is not None else []
     assert len(sockets) == 1
     return runner, f"http://127.0.0.1:{sockets[0].getsockname()[1]}", requests
+
+
+async def _fake_miles_wire(
+    body: bytes,
+    *,
+    content_type: str = "text/event-stream",
+) -> tuple[web.AppRunner, str]:
+    async def chat(_request: web.Request) -> web.Response:
+        return web.Response(body=body, headers={"Content-Type": content_type})
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", chat)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    sockets = site._server.sockets if site._server is not None else []
+    assert len(sockets) == 1
+    return runner, f"http://127.0.0.1:{sockets[0].getsockname()[1]}"
 
 
 def _codex_body(input_items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -230,6 +295,311 @@ def test_sampling_cannot_override_signed_miles_fields(monkeypatch):
         )
 
 
+def test_miles_fake_stream_round_trips_usage_reasoning_and_tool_call():
+    raw_arguments = '{ "command": "printf café" }'
+    completion = _completion(
+        "terminal.exec",
+        raw_arguments,
+        "call-stream",
+        "inspect café",
+        321,
+    )
+
+    normalized = harness._parse_miles_sse(_fake_miles_sse(completion))
+
+    assert normalized["object"] == "chat.completion"
+    assert normalized["usage"] == completion["usage"]
+    choice = normalized["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"] == {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "inspect café",
+        "tool_calls": [
+            {
+                "id": "call-stream",
+                "type": "function",
+                "function": {
+                    "name": "terminal.exec",
+                    "arguments": raw_arguments,
+                },
+            }
+        ],
+    }
+
+
+def test_miles_fake_stream_preserves_length_as_sequence_policy_boundary(monkeypatch):
+    _set_bridge_env(monkeypatch)
+    completion = _completion(
+        "terminal.exec",
+        '{"command":"id"}',
+        "call-length",
+        "inspect",
+        321,
+    )
+    completion["choices"][0]["finish_reason"] = "length"
+
+    normalized = harness._parse_miles_sse(_fake_miles_sse(completion))
+
+    assert normalized["choices"][0]["finish_reason"] == "length"
+    bridge = harness._ResponsesBridge(
+        "http://127.0.0.1:1",
+        "task",
+        {"max_tokens": 64},
+        harness.legacy.AgentMetrics(),
+        max_seq_len=512,
+    )
+    with pytest.raises(harness.CodexSequenceLimit, match="truncated"):
+        bridge._translate_completion(normalized)
+
+
+def test_miles_fake_stream_rejects_malformed_framing_and_shapes():
+    valid = _fake_miles_sse(
+        _completion(
+            "terminal.exec",
+            '{"command":"id"}',
+            "call-stream",
+            "inspect",
+            32,
+        )
+    )
+    json_event, done_event, _empty = valid.split(b"\n\n")
+    chunk = json.loads(json_event[len(b"data: ") :])
+    invalid_chunks = []
+    for mutate in (
+        lambda value: value.update({"extra": True}),
+        lambda value: value.update({"choices": []}),
+        lambda value: value["choices"][0].update({"index": False}),
+        lambda value: value["choices"][0]["delta"]["tool_calls"][0].update(
+            {"index": False}
+        ),
+        lambda value: value["choices"][0].update({"delta": {"role": "assistant"}}),
+    ):
+        value = copy.deepcopy(chunk)
+        mutate(value)
+        invalid_chunks.append(
+            b"data: "
+            + json.dumps(value, separators=(",", ":")).encode()
+            + b"\n\ndata: [DONE]\n\n"
+        )
+    malformed = [
+        b"",
+        b"data: [DONE]\n\n",
+        json_event + b"\n\n",
+        done_event + b"\n\n" + json_event + b"\n\n",
+        json_event + b"\n\n" + done_event + b"\n\n" + done_event + b"\n\n",
+        json_event + b"\n\n" + json_event + b"\n\n" + done_event + b"\n\n",
+        b"data: \xff\n\ndata: [DONE]\n\n",
+        b"data: {not-json}\n\ndata: [DONE]\n\n",
+        b'data: {"id":"first","id":"second"}\n\ndata: [DONE]\n\n',
+        b'data: {"created":NaN}\n\ndata: [DONE]\n\n',
+        *invalid_chunks,
+    ]
+
+    for raw in malformed:
+        with pytest.raises(harness.CodexHarnessError, match="Miles session returned"):
+            harness._parse_miles_sse(raw)
+
+
+def test_miles_fake_stream_omits_large_tito_metadata_from_client(monkeypatch):
+    _set_bridge_env(monkeypatch, max_tokens=32_768)
+
+    async def scenario() -> None:
+        completion = _completion(
+            "terminal.exec",
+            '{"command":"id"}',
+            "call-large-record",
+            "inspect",
+            32_768,
+        )
+        completion["choices"][0]["meta_info"] = {
+            "output_token_logprobs": "x" * (harness.MAX_MILES_RESPONSE_BYTES + 1)
+        }
+        assert len(json.dumps(completion).encode()) > (harness.MAX_MILES_RESPONSE_BYTES)
+        runner, miles_url, miles_requests = await _fake_miles([completion])
+        try:
+            async with harness._ResponsesBridge(
+                miles_url,
+                "task",
+                {"max_tokens": 32_768},
+                harness.legacy.AgentMetrics(),
+                max_seq_len=65_536,
+            ) as bridge:
+                normalized = await bridge._sample_miles()
+        finally:
+            await runner.cleanup()
+
+        assert normalized["choices"][0]["message"]["reasoning_content"] == ("inspect")
+        assert "meta_info" not in normalized["choices"][0]
+        assert miles_requests[0]["stream"] is True
+
+    asyncio.run(scenario())
+
+
+def test_miles_response_reader_rejects_exact_cap_plus_one_without_unbounded_read():
+    class NeverReadContent:
+        calls = 0
+
+        def iter_chunked(self, _size):
+            self.calls += 1
+            raise AssertionError("oversized Content-Length must not be read")
+
+        async def read(self):
+            raise AssertionError("unbounded read is forbidden")
+
+    declared_content = NeverReadContent()
+    declared = SimpleNamespace(
+        content_length=harness.MAX_MILES_RESPONSE_BYTES + 1,
+        content=declared_content,
+    )
+    with pytest.raises(harness.CodexHarnessError, match="oversized"):
+        asyncio.run(harness._read_bounded_miles_response(declared))
+    assert declared_content.calls == 0
+
+    class ChunkedContent:
+        def __init__(self):
+            self.yields = 0
+            self.read_past_limit = False
+
+        def iter_chunked(self, size):
+            assert size == harness._MILES_RESPONSE_READ_CHUNK_BYTES
+
+            async def chunks():
+                block = b"x" * size
+                for _ in range(harness.MAX_MILES_RESPONSE_BYTES // size):
+                    self.yields += 1
+                    yield block
+                self.yields += 1
+                yield b"x"
+                self.read_past_limit = True
+                yield b"must-not-be-read"
+
+            return chunks()
+
+        async def read(self):
+            raise AssertionError("unbounded read is forbidden")
+
+    chunked_content = ChunkedContent()
+    chunked = SimpleNamespace(content_length=None, content=chunked_content)
+    with pytest.raises(harness.CodexHarnessError, match="oversized"):
+        asyncio.run(harness._read_bounded_miles_response(chunked))
+    assert chunked_content.yields == 65
+    assert chunked_content.read_past_limit is False
+
+
+def test_miles_non_200_response_is_closed_without_reading_body(monkeypatch):
+    _set_bridge_env(monkeypatch)
+
+    class NeverReadContent:
+        calls = 0
+
+        def iter_chunked(self, _size):
+            self.calls += 1
+            raise AssertionError("non-200 response body must not be read")
+
+        async def read(self):
+            raise AssertionError("unbounded read is forbidden")
+
+    class Response:
+        status = 503
+        content_type = "application/json"
+        content_length = harness.MAX_MILES_RESPONSE_BYTES + 1
+        content = NeverReadContent()
+        closed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            self.closed = True
+
+    class Session:
+        def __init__(self, response):
+            self.response = response
+            self.payload = None
+
+        def post(self, _url, *, json):
+            self.payload = json
+            return self.response
+
+    async def scenario() -> None:
+        response = Response()
+        session = Session(response)
+        bridge = harness._ResponsesBridge(
+            "http://127.0.0.1:1",
+            "task",
+            {"max_tokens": 64},
+            harness.legacy.AgentMetrics(),
+            max_seq_len=512,
+        )
+        bridge._session = session
+        with pytest.raises(harness.CodexHarnessError, match="HTTP 503"):
+            await bridge._sample_miles()
+        assert session.payload["stream"] is True
+        assert response.content.calls == 0
+        assert response.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_miles_sample_accepts_content_type_parameters_and_enforces_cap(monkeypatch):
+    _set_bridge_env(monkeypatch)
+
+    async def accepted() -> None:
+        completion = _completion(
+            "terminal.exec",
+            '{"command":"id"}',
+            "call-media-type",
+            "inspect",
+            32,
+        )
+        runner, miles_url = await _fake_miles_wire(
+            _fake_miles_sse(completion),
+            content_type="text/event-stream; charset=utf-8",
+        )
+        try:
+            async with harness._ResponsesBridge(
+                miles_url,
+                "task",
+                {"max_tokens": 64},
+                harness.legacy.AgentMetrics(),
+                max_seq_len=512,
+            ) as bridge:
+                assert await bridge._sample_miles() == harness._parse_miles_sse(
+                    _fake_miles_sse(completion)
+                )
+        finally:
+            await runner.cleanup()
+
+    async def rejected(body: bytes, content_type: str, match: str) -> None:
+        runner, miles_url = await _fake_miles_wire(
+            body,
+            content_type=content_type,
+        )
+        try:
+            async with harness._ResponsesBridge(
+                miles_url,
+                "task",
+                {"max_tokens": 64},
+                harness.legacy.AgentMetrics(),
+                max_seq_len=512,
+            ) as bridge:
+                with pytest.raises(harness.CodexHarnessError, match=match):
+                    await bridge._sample_miles()
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(accepted())
+    asyncio.run(rejected(b"{}", "application/json", "media type"))
+    asyncio.run(
+        rejected(
+            b"x" * (harness.MAX_MILES_RESPONSE_BYTES + 1),
+            "text/event-stream",
+            "oversized",
+        )
+    )
+
+
 def test_fake_codex_bridge_preserves_history_and_filters_only_update_plan(monkeypatch):
     _set_bridge_env(monkeypatch)
 
@@ -314,7 +684,7 @@ def test_fake_codex_bridge_preserves_history_and_filters_only_update_plan(monkey
         assert miles_requests[0]["max_tokens"] == 128
         assert miles_requests[0]["temperature"] == 0.7
         assert miles_requests[0]["top_p"] == 0.9
-        assert miles_requests[0]["stream"] is False
+        assert miles_requests[0]["stream"] is True
         assert miles_requests[0]["parallel_tool_calls"] is False
         assert miles_requests[0]["reasoning_effort"] == "max"
         assert miles_requests[0]["thinking"] == {"type": "enabled"}

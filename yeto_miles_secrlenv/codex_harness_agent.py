@@ -49,6 +49,8 @@ BACKEND_CHAT_TEMPLATE_KWARGS = {
 MAX_TOOL_OUTPUT_BYTES = 32_768
 CODEX_TOOL_OUTPUT_TOKEN_LIMIT = 65_536
 MAX_APP_SERVER_FRAME_BYTES = 2 * 1024 * 1024
+MAX_MILES_RESPONSE_BYTES = 4 * 1024 * 1024
+_MILES_RESPONSE_READ_CHUNK_BYTES = 64 * 1024
 
 _SAMPLING_FIELDS = frozenset(
     {
@@ -506,6 +508,183 @@ def _usage(completion: dict[str, Any]) -> tuple[dict[str, Any], int | None]:
     }, total
 
 
+async def _read_bounded_miles_response(response: Any) -> bytes:
+    """Read one Miles response without ever buffering past the signed cap."""
+
+    content_length = response.content_length
+    if content_length is not None and content_length > MAX_MILES_RESPONSE_BYTES:
+        raise CodexHarnessError("Miles session response is oversized")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.content.iter_chunked(_MILES_RESPONSE_READ_CHUNK_BYTES):
+        if len(chunk) > MAX_MILES_RESPONSE_BYTES - size:
+            raise CodexHarnessError("Miles session response is oversized")
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
+def _normalize_miles_stream_chunk(value: Any) -> dict[str, Any]:
+    """Normalize pinned Miles' one fake-stream chunk to a completion."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "id",
+        "object",
+        "created",
+        "model",
+        "choices",
+        "usage",
+    }:
+        raise CodexHarnessError("Miles session returned an invalid SSE chunk")
+    identifier = value.get("id")
+    created = value.get("created")
+    if (
+        not isinstance(identifier, str)
+        or not identifier
+        or value.get("object") != "chat.completion.chunk"
+        or value.get("model") != BACKEND_MODEL
+        or isinstance(created, bool)
+        or not isinstance(created, int)
+        or created < 0
+        or not isinstance(value.get("usage"), dict)
+    ):
+        raise CodexHarnessError("Miles session returned an invalid SSE chunk")
+    choices = value.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise CodexHarnessError("Miles session returned an invalid SSE chunk")
+    choice = choices[0]
+    if not isinstance(choice, dict) or set(choice) != {
+        "index",
+        "delta",
+        "finish_reason",
+    }:
+        raise CodexHarnessError("Miles session returned an invalid SSE chunk")
+    choice_index = choice.get("index")
+    finish_reason = choice.get("finish_reason")
+    if (
+        isinstance(choice_index, bool)
+        or not isinstance(choice_index, int)
+        or choice_index != 0
+        or finish_reason
+        not in {
+            "stop",
+            "length",
+            "tool_calls",
+            "content_filter",
+            "function_call",
+            "abort",
+        }
+    ):
+        raise CodexHarnessError("Miles session returned an invalid SSE chunk")
+    delta = choice.get("delta")
+    if (
+        not isinstance(delta, dict)
+        or not {"role", "content"}.issubset(delta)
+        or not set(delta).issubset(
+            {"role", "content", "reasoning_content", "tool_calls"}
+        )
+        or delta.get("role") != "assistant"
+        or not isinstance(delta.get("content"), str)
+    ):
+        raise CodexHarnessError("Miles session returned an invalid SSE delta")
+    reasoning = delta.get("reasoning_content")
+    if reasoning is not None and not isinstance(reasoning, str):
+        raise CodexHarnessError("Miles session returned an invalid SSE delta")
+    raw_calls = delta.get("tool_calls")
+    calls = None
+    if raw_calls is not None:
+        if not isinstance(raw_calls, list):
+            raise CodexHarnessError("Miles session returned an invalid SSE delta")
+        calls = []
+        for index, raw_call in enumerate(raw_calls):
+            call_index = raw_call.get("index") if isinstance(raw_call, dict) else None
+            if (
+                not isinstance(raw_call, dict)
+                or set(raw_call) != {"id", "index", "type", "function"}
+                or isinstance(call_index, bool)
+                or not isinstance(call_index, int)
+                or call_index != index
+                or raw_call.get("type") != "function"
+                or not isinstance(raw_call.get("id"), str)
+                or not raw_call["id"]
+            ):
+                raise CodexHarnessError("Miles session returned an invalid SSE delta")
+            function = raw_call.get("function")
+            if (
+                not isinstance(function, dict)
+                or set(function) != {"name", "arguments"}
+                or not isinstance(function.get("name"), str)
+                or not isinstance(function.get("arguments"), str)
+            ):
+                raise CodexHarnessError("Miles session returned an invalid SSE delta")
+            calls.append(
+                {
+                    "id": raw_call["id"],
+                    "type": "function",
+                    "function": copy.deepcopy(function),
+                }
+            )
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": delta["content"],
+    }
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
+    if calls is not None:
+        message["tool_calls"] = calls
+    return {
+        "id": identifier,
+        "object": "chat.completion",
+        "created": created,
+        "model": BACKEND_MODEL,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": copy.deepcopy(value["usage"]),
+    }
+
+
+def _parse_miles_sse(raw: bytes) -> dict[str, Any]:
+    """Parse exactly one pinned Miles data event followed by ``[DONE]``."""
+
+    def object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON object key")
+            value[key] = item
+        return value
+
+    def reject_nonfinite_constant(_value: str) -> None:
+        raise ValueError("non-finite JSON number")
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CodexHarnessError("Miles session returned invalid UTF-8") from exc
+    blocks = text.split("\n\n")
+    if len(blocks) != 3 or blocks[-1] or any("\n" in block for block in blocks[:-1]):
+        raise CodexHarnessError("Miles session returned malformed SSE")
+    if not all(block.startswith("data: ") for block in blocks[:-1]):
+        raise CodexHarnessError("Miles session returned malformed SSE")
+    payload, done = (block[len("data: ") :] for block in blocks[:-1])
+    if done != "[DONE]":
+        raise CodexHarnessError("Miles session returned malformed SSE")
+    try:
+        value = json.loads(
+            payload,
+            object_pairs_hook=object_without_duplicates,
+            parse_constant=reject_nonfinite_constant,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise CodexHarnessError("Miles session returned invalid SSE JSON") from exc
+    return _normalize_miles_stream_chunk(value)
+
+
 def _sse_response(
     *,
     request: dict[str, Any],
@@ -843,7 +1022,9 @@ class _ResponsesBridge:
             "tools": copy.deepcopy(_MILES_TOOLS),
             "tool_choice": "auto",
             "parallel_tool_calls": False,
-            "stream": False,
+            # Pinned Miles fake-streams one compact client event while retaining
+            # the full token/logprob response in its session record for TITO.
+            "stream": True,
             "max_tokens": max_tokens,
             "reasoning_effort": "max",
             "thinking": {"type": "enabled"},
@@ -852,31 +1033,19 @@ class _ResponsesBridge:
         started = time.monotonic()
         try:
             async with self._session.post(self._miles_url, json=payload) as response:
-                content_length = response.content_length
-                if content_length is not None and content_length > 4 * 1024 * 1024:
-                    raise CodexHarnessError("Miles session response is oversized")
-                chunks: list[bytes] = []
-                size = 0
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    size += len(chunk)
-                    if size > 4 * 1024 * 1024:
-                        raise CodexHarnessError("Miles session response is oversized")
-                    chunks.append(chunk)
-                raw = b"".join(chunks)
                 status = response.status
+                if status != 200:
+                    raise CodexHarnessError(f"Miles session returned HTTP {status}")
+                if response.content_type != "text/event-stream":
+                    raise CodexHarnessError(
+                        "Miles session returned an unexpected media type"
+                    )
+                raw = await _read_bounded_miles_response(response)
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise CodexHarnessError("Miles session transport failed") from exc
         finally:
             self._metrics.total_generation_time += time.monotonic() - started
-        if status != 200:
-            raise CodexHarnessError(f"Miles session returned HTTP {status}")
-        try:
-            value = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise CodexHarnessError("Miles session returned invalid JSON") from exc
-        if not isinstance(value, dict):
-            raise CodexHarnessError("Miles session returned a non-object")
-        return value
+        return _parse_miles_sse(raw)
 
     def _translate_completion(self, completion: dict[str, Any]) -> list[dict[str, Any]]:
         choices = completion.get("choices")
