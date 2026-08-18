@@ -56,6 +56,10 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   `--branch-from`. `yeto merge --max-shard-size 2GB ...` safely folds an
   adapter into its base and writes deployment-ready SafeTensors shards. See
   [docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md).
+- `--wandb`: stream the fleet to Weights & Biases — one W&B group per run,
+  one run per learner island plus one fed by the syncer's event tape, so
+  per-island staleness, contribution, and quorum/grace timings are curves
+  instead of a log grep. Off by default; see [docs/WANDB.md](docs/WANDB.md).
 - `--output`: any sky-supported store URI or `hf://org/repo` — the head
   fetches the model from the winning learner, uploads it, and **terminates
   itself** (fully self-cleaning run). Local path or omitted: the artifact
@@ -200,6 +204,8 @@ equal-hardware diffusion benchmark contract, media controls, complete arm and
 metric tables, and reproducibility rules.
 [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) — aggregate and
 per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
+[docs/WANDB.md](docs/WANDB.md) — opt-in W&B telemetry: the group/run topology
+for a fleet, the metric tables, the debugging map, and the failure policy.
 
 ## Testing and CI
 

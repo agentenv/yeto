@@ -221,6 +221,11 @@ def build_syncer_binary() -> Path:
     return binary
 
 
+# The syncer's JSONL merge log. Head-controller mode tails it into W&B
+# (yeto.wandb_tape), so the path has to be the same on both sides.
+SYNCER_EVENT_TAPE = "~/yeto-tape.jsonl"
+
+
 def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
@@ -241,7 +246,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --outer-momentum {args.outer_momentum}"
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
         f" --mark-final-checkpoint"
-        f" --event-tape ~/yeto-tape.jsonl"
+        f" --event-tape {SYNCER_EVENT_TAPE}"
     )
 
 
@@ -823,6 +828,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         common_flags += f" --loss-sha256 {shlex.quote(args.loss_sha256)}"
     if getattr(args, "source_sha256", None):
         common_flags += f" --source-sha256 {shlex.quote(args.source_sha256)}"
+    if getattr(args, "wandb", False):
+        common_flags += " --wandb"
+        common_flags += f" --wandb-project {shlex.quote(args.wandb_project)}"
+        common_flags += f" --wandb-mode {args.wandb_mode}"
+        if getattr(args, "wandb_entity", None):
+            common_flags += f" --wandb-entity {shlex.quote(args.wandb_entity)}"
     for name in (
         "model_requested_identifier",
         "model_requested_revision",
@@ -949,6 +960,15 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
                        "pip install -q -r requirements.txt"]
         setup_steps.extend(causal_kernel_setup_steps(args))
 
+    if getattr(args, "wandb", False):
+        # Telemetry is never worth losing an island over: a failed install
+        # is reported and the learner trains on (yeto.wandb_logger falls
+        # back to a no-op sink when the import fails).
+        setup_steps.append(
+            "pip install -q wandb || echo '[yeto-setup] wandb install failed; "
+            "the island will train without telemetry' >&2"
+        )
+
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
@@ -965,6 +985,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     }
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    if getattr(args, "wandb", False):
+        # Every island joins the fleet's W&B group under the run's name, so
+        # the islands and the syncer's tape run land on one comparison view.
+        envs["YETO_RUN_GROUP"] = args.cluster_prefix
+        if os.environ.get("WANDB_API_KEY"):
+            envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
     if spec.num_nodes > 1:
         # Surface NCCL's chosen transport in the job logs so an EFA-less
         # fallback to TCP sockets is visible, not silent.
@@ -1428,7 +1454,10 @@ class LocalSyncer:
         self.command = syncer_command(args, num_learners, binary=binary)
         self.binary = os.path.expanduser(binary)
         self.log_file = os.path.expanduser(log_file)
+        self.tape_file = os.path.expanduser(SYNCER_EVENT_TAPE)
         self.proc: subprocess.Popen | None = None
+        self.tape_forwarder = None
+        self.tape_run = None
         # The log file persists across controller jobs on a reused head;
         # forward only what this controller's syncer writes, not history.
         self._log_offset = os.path.getsize(self.log_file) if os.path.exists(self.log_file) else 0
@@ -1479,6 +1508,39 @@ class LocalSyncer:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._signal_tree(signal.SIGKILL)
+        if self.tape_forwarder is not None:
+            self.tape_forwarder.stop()
+            self.tape_forwarder = None
+        if self.tape_run is not None:
+            self.tape_run.finish()
+            self.tape_run = None
+
+    def start_tape_forwarder(self, args) -> None:
+        """Tail the syncer's event tape into a W&B run.
+
+        The syncer is Rust and stays that way: its merge records already
+        carry quorum/grace timings, per-island staleness, and per-island
+        contribution, so a reader on this host turns them into the fleet's
+        syncer-side curves with no change to the hot path. Survives a
+        syncer restart because the tape is appended to, not rewritten.
+        """
+        if not getattr(args, "wandb", False):
+            return
+        from . import wandb_logger
+        from .wandb_tape import TapeForwarder
+
+        run = wandb_logger.init(
+            args,
+            job_type="syncer",
+            name="syncer",
+            step_metrics={"sync/*": "global_step", "learner/*": "global_step"},
+            config_extra={"syncer_command": self.command},
+        )
+        if not run.enabled:
+            return
+        self.tape_run = run
+        self.tape_forwarder = TapeForwarder(run, self.tape_file)
+        self.tape_forwarder.start()
 
     def _signal_tree(self, sig: int) -> None:
         """Signal the syncer's whole process group (see start()), falling
@@ -1922,6 +1984,15 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             syncer_addr = f"{os.environ['SYNCER_PUBLIC_IP']}:{SYNCER_PORT}"
             print(f"[launcher] syncer runs on this head node at {syncer_addr}")
         else:
+            if getattr(args, "wandb", False):
+                # The tape lives on the syncer VM, which this process only
+                # reaches through sky; islands still report themselves.
+                print(
+                    "[launcher] --wandb with --controller local: island "
+                    "metrics stream, syncer merge metrics do not. Replay "
+                    "them from the syncer VM with: python -m yeto.wandb_tape "
+                    f"{SYNCER_EVENT_TAPE} --wandb-group {args.cluster_prefix}"
+                )
             print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
             syncer_task = make_syncer_task(args, num_learners)
             rid = sky.launch(syncer_task, cluster_name=syncer_cluster)

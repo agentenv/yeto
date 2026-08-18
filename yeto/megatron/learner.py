@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import shutil
+import time
 
 log = logging.getLogger("megatron-learner")
 MEGATRON_ADAPTER_METADATA_FILE = "yeto_megatron_adapter.json"
@@ -107,6 +108,9 @@ def parse_args(argv=None):
     p.add_argument("--expert-parallel", type=int, default=1)
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--pipeline-parallel", type=int, default=1)
+    from ..wandb_logger import add_arguments as add_wandb_arguments
+
+    add_wandb_arguments(p)
     return p.parse_args(argv)
 
 
@@ -445,10 +449,28 @@ def main(argv=None):
                 client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
-    _run_inner_loop(
-        args, model, params, layout, opt, forward_backward, client, rank, world, device,
-        apply_fragment=apply_fragment,
+    from .. import wandb_logger
+
+    wb = wandb_logger.init(
+        args,
+        job_type="learner",
+        name=f"learner-{args.learner_id}",
+        rank=rank,
+        config_extra={
+            "island_backend": "megatron",
+            "world_size": world,
+            "num_fragments": layout.num_fragments,
+        },
     )
+    try:
+        _run_inner_loop(
+            args, model, params, layout, opt, forward_backward, client, rank, world, device,
+            apply_fragment=apply_fragment,
+            wandb_run=wb,
+        )
+    except BaseException:
+        wb.finish(exit_code=1)
+        raise
 
     # Avoid collectives in the shutdown/save path. Megatron's distributed
     # optimizer may still have bookkeeping collectives in flight on some
@@ -467,11 +489,14 @@ def main(argv=None):
         if client is not None:
             client.close()
     dist.destroy_process_group()
+    # Finished only once the adapter is saved: a failed save leaves the run
+    # unfinished, which wandb's own atexit hook records as a crash.
+    wb.finish()
 
 
 def _run_inner_loop(
     args, model, params, layout, opt, forward_backward, client, rank, world, device,
-    *, apply_fragment,
+    *, apply_fragment, wandb_run=None,
 ):
     """N inner Megatron steps, pausing at each step boundary to run the DiLoCo
     fragment sync. The inner step differs from the torch learner (Megatron's
@@ -481,6 +506,11 @@ def _run_inner_loop(
 
     from ..diloco_sync import DiLoCoSyncState, sync_diloco_boundary
     from ..finalization import finalize_torch_island
+    from ..wandb_logger import NullRun
+
+    if wandb_run is None:
+        wandb_run = NullRun()
+    observer = wandb_run.log if wandb_run.enabled else None
     mbs = 1 if args.micro_batch_size == "auto" else int(args.micro_batch_size)
     tokenizer = _load_tokenizer(args)
     dataset = _packed_blocks(args, tokenizer)
@@ -531,6 +561,7 @@ def _run_inner_loop(
             device=device,
         )
 
+    t_last = time.monotonic()
     while not sync_state.shutdown and steps_total < args.max_local_steps:
         for m in model:
             m.zero_grad_buffer()
@@ -548,6 +579,22 @@ def _run_inner_loop(
         steps_total += 1
         tokens_total += tokens_per_inner_step
 
+        if steps_total % 10 == 0 and rank == 0:
+            now = time.monotonic()
+            dt = now - t_last
+            t_last = now
+            wandb_run.log(
+                {
+                    "train/sec_per_step": dt / 10,
+                    "train/tokens_per_sec": (
+                        10 * tokens_per_inner_step / dt if dt > 0 else 0.0
+                    ),
+                    "train/raw_tokens_total": tokens_total,
+                    "local_step": steps_total,
+                    "global_step": sync_state.global_step,
+                }
+            )
+
         # --- fragment sync at the step boundary (never blocks) ---
         if sync_diloco_boundary(
             client,
@@ -563,6 +610,7 @@ def _run_inner_loop(
             world=world,
             device=device,
             reset_counters_on_replicas=True,
+            observer=observer,
         ):
             break
     if rank == 0 and client is not None and not client.finalized.is_set():

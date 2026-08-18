@@ -469,11 +469,15 @@ class _RecordingOptimizer:
 
 
 class _Scheduler:
-    def __init__(self):
+    def __init__(self, lr=1e-4):
         self.steps = 0
+        self.lr = lr
 
     def step(self):
         self.steps += 1
+
+    def get_last_lr(self):
+        return [self.lr]
 
 
 def _loop_args(grad_accum=2):
@@ -1021,3 +1025,86 @@ def test_lm_row_shards_pair_with_matching_baseline_rank():
             assert island_rows[rank::ranks_per_learner] == baseline_rows[
                 baseline_rank :: learners * ranks_per_learner
             ]
+
+
+class _RecordingRun:
+    """Stands in for a live W&B run (yeto.wandb_logger.WandbRun)."""
+
+    enabled = True
+
+    def __init__(self):
+        self.logged = []
+
+    def log(self, metrics):
+        self.logged.append(metrics)
+
+    def summary(self, metrics):
+        pass
+
+    def finish(self, exit_code=0):
+        pass
+
+
+def _telemetry_loop(wandb_run, *, max_local_steps=10, batches=None):
+    batches = batches or [_batch([0, 1, 2, 3], [0, 1, 1, 1])] * (2 * max_local_steps)
+    model = _TinyLM()
+    args = _loop_args()
+    args.max_local_steps = max_local_steps
+    return run_inner_loop(
+        args,
+        model,
+        {"weight": model.weight},
+        _layout(),
+        _RecordingOptimizer([model.weight]),
+        _Scheduler(),
+        _Loader(batches),
+        None,
+        rank=0,
+        world=1,
+        device=torch.device("cpu"),
+        wandb_run=wandb_run,
+    )
+
+
+def test_training_metrics_ride_the_existing_ten_step_log():
+    run = _RecordingRun()
+    counters = _telemetry_loop(run, max_local_steps=10)
+
+    assert counters.local_steps == 10
+    # One point per ten steps, on the same cadence as the log line.
+    assert len(run.logged) == 1
+    metrics = run.logged[0]
+    assert metrics["local_step"] == 10
+    assert metrics["global_step"] == 0
+    assert metrics["train/loss_per_token"] > 0
+    assert metrics["train/lr"] == 1e-4
+    assert metrics["train/raw_tokens_total"] == counters.raw_tokens
+    assert metrics["train/target_tokens_total"] == counters.target_tokens
+    assert metrics["train/sec_per_step"] >= 0
+    assert metrics["train/tokens_per_sec"] >= 0
+
+
+def test_no_telemetry_before_the_first_ten_steps():
+    run = _RecordingRun()
+    _telemetry_loop(run, max_local_steps=5)
+    assert run.logged == []
+
+
+def test_the_loop_runs_unchanged_without_a_run_object():
+    # The default path (no --wandb) must not require the caller to pass a
+    # sink; every existing call site relies on this.
+    counters = _telemetry_loop(None, max_local_steps=10)
+    assert counters.local_steps == 10
+
+
+def test_throughput_is_measured_per_window_not_cumulatively():
+    run = _RecordingRun()
+    counters = _telemetry_loop(run, max_local_steps=20)
+    assert len(run.logged) == 2
+    first, second = run.logged
+    # Each window reports the tokens of that window only; the running total
+    # is a separate series.
+    assert second["train/raw_tokens_total"] == counters.raw_tokens
+    assert first["train/raw_tokens_total"] == counters.raw_tokens // 2
+    window_tokens = second["train/tokens_per_sec"] * second["train/sec_per_step"] * 10
+    assert window_tokens == pytest.approx(counters.raw_tokens / 2, rel=1e-6)

@@ -33,12 +33,14 @@ diffusion = ["diffusers>=0.35", "safetensors", "pillow", "imageio[ffmpeg]", "bit
 diffusion-protenix = ["protenix; python_version >= '3.11'"]
 a100-liger = ["liger-kernel==0.8.0", "peft==0.19.1"]
 a100-flash-attn = ["flash-attn==2.8.3"]
+wandb = ["wandb>=0.18"]
 dev = ["pytest", "pytest-timeout"]
 
 [project.scripts]
 yeto = "yeto.cli:main"
 yeto-export = "yeto.export:main"
 yeto-codex-traces = "yeto.codex_traces:main"
+yeto-wandb-tape = "yeto.wandb_tape:main"
 yeto-diffusion-export = "yeto.diffusion.export:main"
 yeto-diffusion-sample = "yeto.diffusion.sample:main"
 yeto-protenix-export-batch = "yeto.diffusion.protenix_export:main"

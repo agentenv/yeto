@@ -264,6 +264,9 @@ def parse_args(argv=None):
     )
     p.add_argument("--output-dir", default="checkpoints/out")
     p.add_argument("--device", default=None)
+    from .wandb_logger import add_arguments as add_wandb_arguments
+
+    add_wandb_arguments(p)
     return p.parse_args(argv)
 
 
@@ -1066,19 +1069,47 @@ def main(argv=None) -> None:
                 client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
-    run_inner_loop(
+    from . import wandb_logger
+
+    wb = wandb_logger.init(
         args,
-        model,
-        params,
-        layout,
-        opt,
-        sched,
-        loader,
-        client,
-        rank,
-        world,
-        device,
-        loss_payload=loss_payload,
+        job_type="learner",
+        name=f"learner-{args.learner_id}",
+        rank=rank,
+        config_extra={
+            "island_backend": "torch",
+            "world_size": world,
+            "device_type": device.type,
+            "num_fragments": layout.num_fragments,
+            "training_recipe": getattr(args, "_training_recipe", None),
+        },
+    )
+    try:
+        counters = run_inner_loop(
+            args,
+            model,
+            params,
+            layout,
+            opt,
+            sched,
+            loader,
+            client,
+            rank,
+            world,
+            device,
+            loss_payload=loss_payload,
+            wandb_run=wb,
+        )
+    except BaseException:
+        wb.finish(exit_code=1)
+        raise
+    wb.summary(
+        {
+            "final/local_steps": counters.local_steps,
+            "final/global_step": counters.global_step,
+            "final/raw_tokens": counters.raw_tokens,
+            "final/target_tokens": counters.target_tokens,
+        }
     )
 
     if rank == 0:
@@ -1118,6 +1149,9 @@ def main(argv=None) -> None:
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
+    # Finished only once the artifact is saved: a failed save leaves the run
+    # unfinished, which wandb's own atexit hook records as a crash.
+    wb.finish()
 
 
 def run_inner_loop(
@@ -1134,6 +1168,7 @@ def run_inner_loop(
     device,
     *,
     loss_payload: bytes | None = None,
+    wandb_run=None,
 ) -> TrainingCounters:
     # Counters (Alg. 1): incremented for all fragments each step, reset per
     # fragment on receipt. Tracked as global totals + per-fragment snapshots.
@@ -1186,8 +1221,15 @@ def run_inner_loop(
     else:
         compute_loss = lambda logits, ids, w: sft_loss(logits, ids, args.loss_function, w)  # noqa: E731
 
+    if wandb_run is None:
+        from .wandb_logger import NullRun
+
+        wandb_run = NullRun()
+    observer = wandb_run.log if wandb_run.enabled else None
+
     epoch = 0
     t_last = time.monotonic()
+    tokens_at_last_log = 0
     while not sync_state.shutdown and steps_total < args.max_local_steps:
         steps_at_epoch_start = steps_total
         sampler = getattr(loader, "sampler", None)
@@ -1285,6 +1327,24 @@ def run_inner_loop(
                         target_tokens_total,
                         dt / 10,
                     )
+                    wandb_run.log(
+                        {
+                            "train/loss_per_token": loss_sum / global_targets,
+                            "train/lr": sched.get_last_lr()[0],
+                            "train/raw_tokens_total": tokens_total,
+                            "train/target_tokens_total": target_tokens_total,
+                            "train/sec_per_step": dt / 10,
+                            "train/tokens_per_sec": (
+                                (tokens_total - tokens_at_last_log) / dt
+                                if dt > 0
+                                else 0.0
+                            ),
+                            "train/epoch": epoch,
+                            "local_step": steps_total,
+                            "global_step": sync_state.global_step,
+                        }
+                    )
+                    tokens_at_last_log = tokens_total
 
             # --- fragment sync at the step boundary (never blocks) ---
             if sync_diloco_boundary(
@@ -1300,6 +1360,7 @@ def run_inner_loop(
                 rank=rank,
                 world=world,
                 device=device,
+                observer=observer,
             ):
                 break
 
