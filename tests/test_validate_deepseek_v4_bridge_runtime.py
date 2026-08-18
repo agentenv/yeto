@@ -36,7 +36,7 @@ def test_pp2_attention_topology_is_deliberately_two_gpu_only():
         validator._parallel_sizes(4, 2)
 
 
-def test_pp2_expert_full_component_requires_exact_smoke_topology():
+def test_pp2_expert_full_component_accepts_dp1_and_dp2_smoke_topologies():
     args = validator._args(
         [
             "--model",
@@ -56,10 +56,15 @@ def test_pp2_expert_full_component_requires_exact_smoke_topology():
         2,
         expert_full_count=16,
     ) == (8, 2, 8)
+    assert validator._parallel_sizes(
+        32,
+        2,
+        expert_full_count=16,
+    ) == (8, 2, 8)
     assert validator._pipeline_layer_counts(4, 2) == (2, 2)
     assert validator._pipeline_layer_counts(5, 2) == (3, 2)
     assert validator._pipeline_layer_counts(43, 2) == (22, 21)
-    with pytest.raises(ValueError, match="exactly 16 ranks"):
+    with pytest.raises(ValueError, match="exactly 16 or 32 ranks"):
         validator._parallel_sizes(2, 2, expert_full_count=16)
     with pytest.raises(ValueError, match="requires PP2"):
         validator._parallel_sizes(16, 1, expert_full_count=16)
@@ -130,6 +135,16 @@ def test_pp2_router_modes_include_every_tp_replica():
     assert len(uneven) == 40
     assert uneven.count((True, False)) == 24
     assert uneven.count((False, True)) == 16
+
+    dp2 = validator._expected_router_modes(
+        layers=4,
+        pipeline_parallel=2,
+        tensor_parallel=8,
+        data_parallel=2,
+    )
+    assert len(dp2) == 64
+    assert dp2.count((True, False)) == 48
+    assert dp2.count((False, True)) == 16
 
 
 def test_pp2_expert_full_cli_accepts_ddp_real_optimizer_lifecycle_mode():
@@ -417,7 +432,7 @@ def test_expert_full_component_requires_runtime_hooks_before_python_start(
     validator._validate_expert_full_component_environment(args)
 
 
-def test_real_optimizer_builder_uses_production_distributed_contract(monkeypatch):
+def test_real_optimizer_builder_uses_production_replicated_contract(monkeypatch):
     captured = {}
 
     class OptimizerConfig:
@@ -467,7 +482,7 @@ def test_real_optimizer_builder_uses_production_distributed_contract(monkeypatch
         "lr": 1e-6,
         "min_lr": 1e-6,
         "weight_decay": 0.0,
-        "use_distributed_optimizer": True,
+        "use_distributed_optimizer": False,
         "bf16": True,
         "clip_grad": 1.0,
         "adam_beta1": 0.9,
@@ -477,6 +492,84 @@ def test_real_optimizer_builder_uses_production_distributed_contract(monkeypatch
     assert captured["call"]["model_chunks"] is models
     assert captured["call"]["use_gloo_process_groups"] is False
     assert captured["call"]["config"].timers is None
+
+
+def test_task_coverage_rejects_any_sharded_optimizer_master():
+    record = {
+        "flagged_parameters": 1,
+        "task_parameters": 1,
+        "optimizer_master_parameters": 1,
+        "sharded_optimizer_master_parameters": 1,
+    }
+
+    assert validator._expert_task_coverage_failures([record]) == [record]
+
+
+def test_pp2_expert_task_coverage_requires_one_owner_per_dp2_replica(monkeypatch):
+    import torch
+
+    from yeto.rl import deepseek_v4_expert_full_runtime as expert_runtime
+
+    coverage = []
+    gathered_names = []
+    expected_specs = {}
+    for pipeline_rank in range(2):
+        names_by_expert_rank = []
+        for expert_rank in range(8):
+            count = 24 if expert_rank < 4 else 0
+            names = [
+                f"tensor.{pipeline_rank}.{expert_rank}.{index}"
+                for index in range(count)
+            ]
+            names_by_expert_rank.append(names)
+            expected_specs.update(
+                (name, SimpleNamespace(name=name)) for name in names
+            )
+        for _data_parallel_rank in range(2):
+            for expert_rank, names in enumerate(names_by_expert_rank):
+                flagged = 16 if expert_rank < 4 else 0
+                coverage.append(
+                    {
+                        "pipeline_rank": pipeline_rank,
+                        "expert_rank": expert_rank,
+                        "flagged_parameters": flagged,
+                        "task_parameters": flagged,
+                        "optimizer_master_parameters": flagged,
+                        "sharded_optimizer_master_parameters": 0,
+                    }
+                )
+                gathered_names.append(list(names))
+
+    monkeypatch.setattr(expert_runtime, "_expert_views", lambda _actor: {})
+    monkeypatch.setattr(
+        expert_runtime,
+        "selected_expert_hf_name",
+        lambda _name, *, expert_count: expert_count == 16,
+    )
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 32)
+
+    def run(names):
+        payloads = iter((coverage, names))
+
+        def all_gather_object(output, _local):
+            output[:] = next(payloads)
+
+        monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+        return validator._pp2_expert_task_coverage(
+            bridge=object(),
+            models=[],
+            expected_specs=expected_specs,
+            pipeline_layer_counts=(2, 2),
+            actor_and_record=(object(), {}),
+        )
+
+    result = run(gathered_names)
+    assert result["data_parallel_replicas"] == 2
+
+    missing_replica = [list(names) for names in gathered_names]
+    missing_replica[8].pop()
+    with pytest.raises(AssertionError, match="one owner per DP replica"):
+        run(missing_replica)
 
 
 def test_local_expert_task_coverage_exposes_missing_flagged_parameter():

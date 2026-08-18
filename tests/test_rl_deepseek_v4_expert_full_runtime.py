@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -812,6 +813,7 @@ def test_apply_transport_rejects_missing_and_duplicate_tensors(
 
 def test_v1_actor_group_compacts_flat_views_before_sending_chunk_refs(
     monkeypatch,
+    capsys,
 ):
     import asyncio
 
@@ -947,6 +949,41 @@ def test_v1_actor_group_compacts_flat_views_before_sending_chunk_refs(
     assert calls[2][2] == calls[3][2] == {}
     assert calls[4][1:] == ((), {})
     assert calls[5][1:] == ((), {})
+    output = capsys.readouterr().out
+    markers = [
+        json.loads(line.split(" ", 1)[1])
+        for line in output.splitlines()
+        if line.startswith("[yeto-rl-policy-apply-progress] ")
+    ]
+    assert markers == [
+        {
+            "completed_chunks": 1,
+            "event": "rl_policy_apply_progress",
+            "phase": "chunk_progress",
+            "policy_version": 6,
+            "total_chunks": 1,
+        },
+        {
+            "event": "rl_policy_apply_progress",
+            "phase": "chunks_finished",
+            "policy_version": 6,
+            "total_chunks": 1,
+        },
+    ]
+    assert not any(name in output for name in names)
+
+
+def test_apply_progress_is_monotonic_final_and_bounded():
+    total = 1_000
+    completed = [
+        value
+        for value in range(1, total + 1)
+        if runtime._apply_progress_due(value, total)
+    ]
+
+    assert completed == sorted(set(completed))
+    assert completed[-1] == total
+    assert len(completed) <= runtime._MAX_APPLY_PROGRESS_MARKERS + 1
 
 
 def test_actor_places_export_fragment_in_bounded_ray_objects(monkeypatch):
@@ -1199,7 +1236,7 @@ def test_lora_factory_is_wrapped_for_attention_plus_expert_full(monkeypatch):
     assert LoraModule._yeto_expert_full_installed
 
 
-def test_arguments_hook_only_restores_the_required_distributed_optimizer():
+def test_arguments_hook_requires_replicated_adam_masters():
     class ArgumentsModule:
         @staticmethod
         def set_default_megatron_args(args):
@@ -1215,9 +1252,105 @@ def test_arguments_hook_only_restores_the_required_distributed_optimizer():
     install_on_arguments(ArgumentsModule)
     result = ArgumentsModule.set_default_megatron_args(args)
 
-    assert result.use_distributed_optimizer is True
+    assert result.use_distributed_optimizer is False
     assert result.accumulate_allreduce_grads_in_fp32 is True
     assert result.optimizer_cpu_offload is True
+
+
+def _optimizer_fixture(*, sharded=False, optimizer_owned=True, complete=True):
+    parameter = torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
+    main = torch.nn.Parameter(
+        torch.zeros(4 if complete else 2, dtype=torch.float32)
+    )
+    parameter.main_param = main
+    parameter.main_param_sharded = sharded
+    chunk = torch.nn.Module()
+    chunk.register_parameter("weight", parameter)
+    owned = main if optimizer_owned else torch.nn.Parameter(torch.zeros(4))
+    optimizer = SimpleNamespace(
+        optimizer=SimpleNamespace(param_groups=[{"params": [owned]}])
+    )
+    return chunk, optimizer
+
+
+def test_complete_optimizer_master_gate_accepts_replicated_owned_fp32():
+    chunk, optimizer = _optimizer_fixture()
+
+    runtime._validate_complete_optimizer_masters([chunk], optimizer)
+
+
+@pytest.mark.parametrize(
+    ("fixture_kwargs", "match"),
+    (
+        ({"sharded": True}, "complete, optimizer-owned"),
+        ({"optimizer_owned": False}, "complete, optimizer-owned"),
+        ({"complete": False}, "complete, optimizer-owned"),
+    ),
+)
+def test_complete_optimizer_master_gate_rejects_dp_shards_and_drift(
+    fixture_kwargs,
+    match,
+):
+    chunk, optimizer = _optimizer_fixture(**fixture_kwargs)
+
+    with pytest.raises(RuntimeError, match=match):
+        runtime._validate_complete_optimizer_masters([chunk], optimizer)
+
+
+def test_model_optimizer_hook_rejects_distributed_adam_before_build(monkeypatch):
+    optimizer_module = ModuleType("megatron.core.optimizer")
+    optimizer_module.get_standard_config_overrides = lambda _config: {}
+    config_module = ModuleType("megatron.core.optimizer.optimizer_config")
+    config_module.ParamKey = lambda *, attr: attr
+    monkeypatch.setitem(sys.modules, optimizer_module.__name__, optimizer_module)
+    monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+    calls = []
+
+    class ModelModule:
+        @staticmethod
+        def get_megatron_optimizer(**kwargs):
+            calls.append(kwargs)
+            return object()
+
+    runtime.install_on_model(ModelModule)
+
+    with pytest.raises(RuntimeError, match="replicated FP32"):
+        ModelModule.get_megatron_optimizer(
+            config=SimpleNamespace(use_distributed_optimizer=True),
+            model_chunks=[],
+        )
+    assert calls == []
+
+
+def test_model_optimizer_hook_rejects_sharded_master_after_build(monkeypatch):
+    optimizer_module = ModuleType("megatron.core.optimizer")
+    optimizer_module.get_standard_config_overrides = lambda _config: {}
+    config_module = ModuleType("megatron.core.optimizer.optimizer_config")
+    config_module.ParamKey = lambda *, attr: attr
+    monkeypatch.setitem(sys.modules, optimizer_module.__name__, optimizer_module)
+    monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_LR", "1e-6")
+    chunk, optimizer = _optimizer_fixture(sharded=True)
+    calls = []
+
+    class ModelModule:
+        @staticmethod
+        def get_megatron_optimizer(**kwargs):
+            calls.append(kwargs)
+            return optimizer
+
+    runtime.install_on_model(ModelModule)
+
+    with pytest.raises(RuntimeError, match="complete, optimizer-owned"):
+        ModelModule.get_megatron_optimizer(
+            config=SimpleNamespace(use_distributed_optimizer=False),
+            model_chunks=[chunk],
+        )
+    assert len(calls) == 1
+    assert calls[0]["config_overrides"]["_yeto_expert_full"] == {
+        "max_lr": 1e-6,
+        "min_lr": 1e-6,
+    }
 
 
 def test_attention_mapping_retains_remote_pipeline_sides(monkeypatch):

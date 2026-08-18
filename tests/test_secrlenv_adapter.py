@@ -1091,7 +1091,9 @@ def test_daemon_readiness_attests_health_and_task_pack(monkeypatch):
         require_daemon_ready(timeout_seconds=0.1)
 
 
-def test_capacity_retry_default_is_bounded_to_two_minutes(monkeypatch):
+def test_create_retry_default_covers_sixty_rollouts_at_capacity_sixteen(
+    monkeypatch,
+):
     monkeypatch.delenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", raising=False)
     observed = []
 
@@ -1100,15 +1102,300 @@ def test_capacity_retry_default_is_bounded_to_two_minutes(monkeypatch):
         return 0.001
 
     class UnavailableClient:
+        calls = 0
+
         async def create(self, *_args):
+            self.calls += 1
             raise EpisodeTransportError("offline")
 
+    client = UnavailableClient()
     monkeypatch.setattr(agent, "_positive_env", positive_env)
-    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.0)
     with pytest.raises(EpisodeTransportError, match="offline"):
         asyncio.run(
             agent._create_with_capacity_retry(
-                UnavailableClient(), "CVE-2024-1234", "l2"
+                client, "CVE-2024-1234", "l2"
             )
         )
-    assert observed == [("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", 120.0)]
+    assert client.calls == 1
+    assert observed == [("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", 14400.0)]
+    rollout_count = 60
+    max_active = 16
+    rollout_timeout_seconds = 3600.0
+    admission_waves = (rollout_count + max_active - 1) // max_active
+    assert observed[0][1] >= admission_waves * rollout_timeout_seconds
+
+
+def test_create_retries_capacity_then_one_infrastructure_error_same_identity(
+    monkeypatch,
+):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
+    expected = {"episode_id": "a" * 24}
+    responses = [
+        EpisodeAPIError(503, "capacity_reached", "busy"),
+        EpisodeAPIError(503, "infrastructure_error", "provisioning failed"),
+        expected,
+    ]
+    calls = []
+    delays = []
+
+    class RecoveringClient:
+        async def create(self, task_id, tier):
+            calls.append((task_id, tier))
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    async def no_wait(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(agent.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.5)
+    result = asyncio.run(
+        agent._create_with_capacity_retry(
+            RecoveringClient(), "CVE-2024-1234", "l2"
+        )
+    )
+    assert result == expected
+    assert calls == [("CVE-2024-1234", "l2")] * 3
+    assert delays == [0.5, 0.5]
+
+
+def test_capacity_retry_stops_at_the_configured_deadline(monkeypatch):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "0.02")
+    calls = 0
+
+    class BusyClient:
+        async def create(self, *_args):
+            nonlocal calls
+            calls += 1
+            raise EpisodeAPIError(503, "capacity_reached", "busy")
+
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.005)
+    with pytest.raises(EpisodeAPIError) as caught:
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                BusyClient(), "CVE-2024-1234", "l2"
+            )
+        )
+    assert caught.value.code == "capacity_reached"
+    assert 2 <= calls < 20
+
+
+def test_capacity_retry_rejects_success_exactly_at_deadline(monkeypatch):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "1")
+    clock = [0.0]
+    failure = EpisodeAPIError(503, "capacity_reached", "busy")
+    calls = []
+
+    class DeadlineClient:
+        async def create(self, *_args):
+            calls.append(clock[0])
+            if len(calls) == 1:
+                raise failure
+            clock[0] = 1.0
+            return {"episode_id": "a" * 24}
+
+    async def advance(delay):
+        clock[0] += delay
+
+    monkeypatch.setattr(
+        agent, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(agent.asyncio, "sleep", advance)
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.1)
+    with pytest.raises(EpisodeAPIError) as caught:
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                DeadlineClient(), "CVE-2024-1234", "l2"
+            )
+        )
+    assert caught.value is failure
+    assert calls == [0.0, 0.1]
+
+
+def test_capacity_retry_does_not_create_at_the_deadline(monkeypatch):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "1")
+    clock = [0.0]
+    failure = EpisodeAPIError(503, "capacity_reached", "busy")
+    calls = 0
+
+    class DeadlineClient:
+        async def create(self, *_args):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise AssertionError("a retry began at or after its deadline")
+            raise failure
+
+    async def advance(delay):
+        clock[0] += delay
+
+    monkeypatch.setattr(
+        agent, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(agent.asyncio, "sleep", advance)
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 3.0)
+    with pytest.raises(EpisodeAPIError) as caught:
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                DeadlineClient(), "CVE-2024-1234", "l2"
+            )
+        )
+    assert caught.value is failure
+    assert calls == 1
+
+
+def test_capacity_retry_bounds_a_blocked_retry_by_remaining_time(monkeypatch):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "0.05")
+    failure = EpisodeAPIError(503, "capacity_reached", "busy")
+    calls = 0
+    retry_cancelled = False
+
+    class BlockingClient:
+        async def create(self, *_args):
+            nonlocal calls, retry_cancelled
+            calls += 1
+            if calls == 1:
+                raise failure
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                retry_cancelled = True
+                raise
+
+    async def no_wait(_delay):
+        return None
+
+    monkeypatch.setattr(agent.asyncio, "sleep", no_wait)
+    with pytest.raises(EpisodeAPIError) as caught:
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                BlockingClient(), "CVE-2024-1234", "l2"
+            )
+        )
+    assert caught.value is failure
+    assert calls == 2
+    assert retry_cancelled is True
+
+
+def test_capacity_retry_preserves_external_cancellation(monkeypatch):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
+    retry_started = asyncio.Event()
+    retry_cancelled = False
+    calls = 0
+
+    class BlockingClient:
+        async def create(self, *_args):
+            nonlocal calls, retry_cancelled
+            calls += 1
+            if calls == 1:
+                raise EpisodeAPIError(503, "capacity_reached", "busy")
+            retry_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                retry_cancelled = True
+                raise
+
+    async def no_wait(_delay):
+        return None
+
+    async def drive_and_cancel():
+        task = asyncio.create_task(
+            agent._create_with_capacity_retry(
+                BlockingClient(), "CVE-2024-1234", "l2"
+            )
+        )
+        await retry_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    monkeypatch.setattr(agent.asyncio, "sleep", no_wait)
+    asyncio.run(drive_and_cancel())
+    assert calls == 2
+    assert retry_cancelled is True
+
+
+def test_infrastructure_error_is_retried_at_most_once(monkeypatch):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
+    calls = 0
+    delays = []
+
+    class BrokenClient:
+        async def create(self, *_args):
+            nonlocal calls
+            calls += 1
+            raise EpisodeAPIError(
+                503, "infrastructure_error", "provisioning failed"
+            )
+
+    async def no_wait(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(agent.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.5)
+    with pytest.raises(EpisodeAPIError) as caught:
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                BrokenClient(), "CVE-2024-1234", "l2"
+            )
+        )
+    assert caught.value.code == "infrastructure_error"
+    assert calls == 2
+    assert delays == [0.5]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        EpisodeAPIError(400, "invalid_request", "bad task"),
+        EpisodeAPIError(400, "capacity_reached", "wrong status"),
+        EpisodeAPIError(500, "internal_error", "unexpected failure"),
+        EpisodeTransportError("ambiguous transport failure"),
+    ],
+    ids=("invalid-request", "wrong-capacity-status", "internal-error", "transport"),
+)
+def test_create_does_not_retry_nonretryable_or_transport_errors(
+    monkeypatch, failure
+):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
+    calls = 0
+
+    class FailingClient:
+        async def create(self, *_args):
+            nonlocal calls
+            calls += 1
+            raise failure
+
+    async def unexpected_wait(_delay):
+        raise AssertionError("single-shot failures must not back off")
+
+    monkeypatch.setattr(agent.asyncio, "sleep", unexpected_wait)
+    with pytest.raises(type(failure)) as caught:
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                FailingClient(), "CVE-2024-1234", "l2"
+            )
+        )
+    assert caught.value is failure
+    assert calls == 1
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "invalid"])
+def test_create_retry_rejects_invalid_capacity_deadline_before_create(
+    monkeypatch, value
+):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", value)
+
+    class UnexpectedClient:
+        async def create(self, *_args):
+            raise AssertionError("invalid retry configuration must fail first")
+
+    with pytest.raises(ValueError, match="SECRLENV_CAPACITY_MAX_WAIT_SECONDS"):
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                UnexpectedClient(), "CVE-2024-1234", "l2"
+            )
+        )

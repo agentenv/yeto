@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import importlib
 import json
+import logging
 import math
 import os
 import statistics
@@ -220,6 +221,13 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "use_session_server": args.use_session_server,
         "tito_model": args.tito_model,
     }
+    codex_harness_contract = getattr(
+        args,
+        "yeto_rl_codex_harness_contract",
+        None,
+    )
+    if codex_harness_contract is not None:
+        config["codex_harness_contract"] = codex_harness_contract
     initial_adapter_sha256 = getattr(
         args,
         "yeto_rl_initial_adapter_sha256",
@@ -644,6 +652,70 @@ def _run_rollout_with_metrics(generate, args, rollout_id, data_source, evaluatio
         generate_state.submit_generate_tasks = original
 
 
+class _SuppressMilesEvalPayload(logging.Filter):
+    """Drop Miles' one prompt/response example while retaining scalar logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith(
+            "eval_rollout_single_dataset example data:"
+        )
+
+
+def _attach_eval_scalar_metrics(output: Any) -> list[dict[str, Any]]:
+    """Add payload-free SecRLEnv result/pass@1 metrics to Miles' eval output."""
+
+    data = getattr(output, "data", None)
+    if not isinstance(data, Mapping) or not data:
+        raise RuntimeError("Miles evaluation returned no named datasets")
+    metrics = dict(getattr(output, "metrics", None) or {})
+    results = []
+    for dataset_name, dataset in data.items():
+        rewards = dataset.get("rewards") if isinstance(dataset, Mapping) else None
+        if not isinstance(rewards, list) or not rewards:
+            raise RuntimeError(
+                f"Miles evaluation dataset {dataset_name!r} returned no rewards"
+            )
+        samples = dataset.get("samples")
+        if not isinstance(samples, list) or len(samples) != len(rewards):
+            raise RuntimeError("Miles evaluation returned incomplete sample evidence")
+        statuses = [
+            getattr(getattr(sample, "status", None), "value", None)
+            for sample in samples
+        ]
+        if any(status not in {"completed", "truncated"} for status in statuses):
+            raise RuntimeError("Miles evaluation returned an aborted sample")
+        values = []
+        for reward in rewards:
+            if isinstance(reward, bool):
+                raise RuntimeError("Miles evaluation returned a non-numeric reward")
+            try:
+                value = float(reward)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    "Miles evaluation returned a non-numeric reward"
+                ) from error
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise RuntimeError("Miles evaluation reward is outside [0, 1]")
+            values.append(value)
+        prefix = f"eval/{dataset_name}"
+        result = statistics.fmean(values)
+        pass_at_1 = statistics.fmean(
+            1.0 if value == 1.0 else 0.0 for value in values
+        )
+        metrics[prefix] = result
+        metrics[f"{prefix}-pass@1"] = pass_at_1
+        results.append(
+            {
+                "dataset_name": str(dataset_name),
+                "sample_count": len(values),
+                "rl/eval/result": result,
+                "rl/eval/pass_at_1": pass_at_1,
+            }
+        )
+    output.metrics = metrics
+    return results
+
+
 def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = False):
     """Keep Miles rollout, adding group/version queue contracts."""
 
@@ -665,13 +737,37 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             )
         ]
     rollout_started = time.monotonic()
-    output, lifecycle = _run_rollout_with_metrics(
-        miles_generate,
-        args,
-        rollout_id,
-        data_source,
-        evaluation,
-    )
+    payload_filter = None
+    upstream_logger = None
+    if evaluation:
+        payload_filter = _SuppressMilesEvalPayload()
+        upstream_logger = logging.getLogger("miles.rollout.sglang_rollout")
+        upstream_logger.addFilter(payload_filter)
+    try:
+        output, lifecycle = _run_rollout_with_metrics(
+            miles_generate,
+            args,
+            rollout_id,
+            data_source,
+            evaluation,
+        )
+    finally:
+        if payload_filter is not None and upstream_logger is not None:
+            upstream_logger.removeFilter(payload_filter)
+    if evaluation:
+        policy_version = int(getattr(args, "yeto_rl_eval_policy_version", -1))
+        if policy_version < 0:
+            raise RuntimeError("Miles evaluation has no applied policy version")
+        for result in _attach_eval_scalar_metrics(output):
+            _append_rl_event(
+                args,
+                {
+                    "event": "rl_eval_result",
+                    "rollout_id": int(rollout_id),
+                    "policy_version": policy_version,
+                    **result,
+                },
+            )
     if not evaluation:
         if lifecycle["active"] != 0:
             raise RuntimeError("Miles returned with rollout groups still active")
@@ -854,13 +950,22 @@ class MilesPolicySync:
         digest.update(expected.layout_hash.encode("ascii"))
         digest.update(expected.policy_version.to_bytes(8, "little"))
         try:
-            for group in groups:
+            total_groups = len(groups)
+            for group_index, group in enumerate(groups):
                 tensors = exported.take_tensors(group)
                 for spec in group:
                     value = tensors[spec.name]
                     digest.update(spec.name.encode("utf-8"))
                     digest.update(memoryview(value.numpy()).cast("B"))
                 del tensors
+                completed_groups = group_index + 1
+                if self._policy_progress_due(completed_groups, total_groups):
+                    self._record_policy_apply_progress(
+                        expected.policy_version,
+                        "hash_progress",
+                        completed_groups=completed_groups,
+                        total_groups=total_groups,
+                    )
             exported.finish()
         except BaseException:
             exported.discard()
@@ -888,15 +993,18 @@ class MilesPolicySync:
     async def _apply_global_policy(self, state: CanonicalLoraState) -> None:
         from miles.backends.megatron_utils.trainable_state import make_trainable_state
 
+        self._record_policy_apply_progress(state.policy_version, "begin")
         reset_count = await self.actor_model.apply_trainable_state(
             make_trainable_state(state.policy_version, state.tensors),
             reset_optimizer=True,
         )
+        self._record_policy_apply_progress(state.policy_version, "apply_finished")
         export_chunks = getattr(
             self.actor_model,
             "export_trainable_state_chunks",
             None,
         )
+        self._record_policy_apply_progress(state.policy_version, "hash_begin")
         if callable(export_chunks):
             groups = self._strict_export_groups()
             exported = await export_chunks(self._group_names(groups))
@@ -915,6 +1023,7 @@ class MilesPolicySync:
                 "policy_hash_mismatch_after_apply",
                 "policy hash mismatch after trainer apply",
             )
+        self._record_policy_apply_progress(state.policy_version, "hash_finished")
         await self._set_rollout_version(state.policy_version)
         self.optimizer_reset_count += 1
         self._append_event(
@@ -1186,6 +1295,32 @@ class MilesPolicySync:
 
     def _append_event(self, event: dict[str, Any]) -> None:
         _append_rl_event(self.args, event)
+
+    @staticmethod
+    def _policy_progress_due(completed: int, total: int) -> bool:
+        if completed <= 0 or completed > total or total <= 0:
+            return False
+        stride = max(1, (total + 15) // 16)
+        return completed == total or completed % stride == 0
+
+    def _record_policy_apply_progress(
+        self,
+        policy_version: int,
+        phase: str,
+        **progress: int,
+    ) -> None:
+        marker = {
+            "event": "rl_policy_apply_progress",
+            "phase": phase,
+            "policy_version": int(policy_version),
+            **{name: int(value) for name, value in progress.items()},
+        }
+        self._append_event(marker)
+        print(
+            "[yeto-rl-policy-apply-progress] "
+            + json.dumps(marker, sort_keys=True, separators=(",", ":")),
+            flush=True,
+        )
 
     def _record_strict_failure(self, error: StrictRlInvariantError) -> None:
         _record_strict_failure(self.args, error, self.bridge)

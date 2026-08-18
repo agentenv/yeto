@@ -25,7 +25,6 @@ from .client import (
     EpisodeAPIError,
     EpisodeClient,
     EpisodeClientError,
-    EpisodeTransportError,
 )
 from .reward import (
     INFRASTRUCTURE_STATUS,
@@ -640,24 +639,51 @@ def _infrastructure_outcome(task_id: str, episode_id: str) -> dict[str, Any]:
 async def _create_with_capacity_retry(
     client: EpisodeClient, task_id: str, tier: str
 ) -> dict[str, Any]:
-    max_wait = _positive_env("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", 120.0)
-    deadline = time.monotonic() + max_wait
+    max_wait = _positive_env("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", 14400.0)
     started = time.monotonic()
+    deadline = started + max_wait
     attempts = 0
+    infrastructure_retries = 0
     next_log = started
+    last_retryable: EpisodeAPIError | None = None
     while True:
+        remaining: float | None = None
+        if last_retryable is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise last_retryable
         attempts += 1
         try:
-            return await client.create(task_id, tier)
+            if remaining is None:
+                result = await client.create(task_id, tier)
+            else:
+                create_task = asyncio.create_task(client.create(task_id, tier))
+                try:
+                    result = await asyncio.wait_for(create_task, timeout=remaining)
+                except asyncio.TimeoutError:
+                    if create_task.cancelled():
+                        raise last_retryable from None
+                    raise
         except EpisodeAPIError as exc:
-            if exc.code != "capacity_reached" or time.monotonic() >= deadline:
+            now = time.monotonic()
+            if exc.status == 503 and exc.code == "capacity_reached":
+                reason = "capacity"
+            elif (
+                exc.status == 503
+                and exc.code == "infrastructure_error"
+                and infrastructure_retries < 1
+            ):
+                infrastructure_retries += 1
+                reason = "infrastructure"
+            else:
                 raise
-            reason = "capacity"
-        except EpisodeTransportError:
-            if time.monotonic() >= deadline:
+            if now >= deadline:
                 raise
-            reason = "transport"
-        now = time.monotonic()
+            last_retryable = exc
+        else:
+            if last_retryable is not None and time.monotonic() >= deadline:
+                raise last_retryable
+            return result
         if now >= next_log:
             LOGGER.warning(
                 "waiting for secrlenv episode daemon reason=%s attempts=%d elapsed_s=%.1f max_wait_s=%.1f",

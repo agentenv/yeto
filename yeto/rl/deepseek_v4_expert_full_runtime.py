@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.abc
 import importlib.machinery
+import json
 import os
 import re
 import sys
@@ -32,6 +33,36 @@ _EXPERT_WEIGHT = re.compile(
 # Leave one 32 MiB tensor's headroom below Ray's 1 GiB transport boundary for
 # mapping metadata and serializer framing.
 _RAY_STATE_CHUNK_BYTES = 31 * (1 << 25)
+_MAX_APPLY_PROGRESS_MARKERS = 16
+
+
+def _emit_apply_progress(
+    policy_version: int,
+    phase: str,
+    **progress: int,
+) -> None:
+    marker = {
+        "event": "rl_policy_apply_progress",
+        "phase": phase,
+        "policy_version": int(policy_version),
+        **{name: int(value) for name, value in progress.items()},
+    }
+    print(
+        "[yeto-rl-policy-apply-progress] "
+        + json.dumps(marker, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
+
+
+def _apply_progress_due(completed: int, total: int) -> bool:
+    if completed <= 0 or completed > total or total <= 0:
+        return False
+    stride = max(
+        1,
+        (total + _MAX_APPLY_PROGRESS_MARKERS - 1)
+        // _MAX_APPLY_PROGRESS_MARKERS,
+    )
+    return completed == total or completed % stride == 0
 
 
 @dataclass(frozen=True)
@@ -869,7 +900,10 @@ def install_on_arguments(module: ModuleType) -> None:
         args = original(args)
         if (args.optimizer or "adam").lower() != "adam":
             raise RuntimeError("expert-full RL requires the Adam optimizer")
-        args.use_distributed_optimizer = True
+        # Hybrid state export/apply operates on complete FP32 masters.  Megatron's
+        # distributed optimizer stores only one DP-owned shard (and ``None`` on
+        # non-owners), so DP1 can mask an invalid configuration that fails at DP2.
+        args.use_distributed_optimizer = False
         return args
 
     module.set_default_megatron_args = set_default_megatron_args
@@ -892,6 +926,10 @@ def install_on_model(module: ModuleType) -> None:
         from megatron.core.optimizer import get_standard_config_overrides
         from megatron.core.optimizer.optimizer_config import ParamKey
 
+        if config.use_distributed_optimizer:
+            raise RuntimeError(
+                "expert-full RL requires replicated FP32 optimizer masters"
+            )
         overrides = (
             get_standard_config_overrides(config)
             if config_overrides is None
@@ -901,13 +939,15 @@ def install_on_model(module: ModuleType) -> None:
             "max_lr": _expert_lr(),
             "min_lr": _expert_lr(),
         }
-        return original(
+        optimizer = original(
             config=config,
             model_chunks=model_chunks,
             config_overrides=overrides,
             use_gloo_process_groups=use_gloo_process_groups,
             **kwargs,
         )
+        _validate_complete_optimizer_masters(model_chunks, optimizer)
+        return optimizer
 
     module.get_megatron_optimizer = get_megatron_optimizer
     module._yeto_expert_full_installed = True
@@ -932,6 +972,50 @@ def _optimizer_master_view(parameter):
     ):
         raise RuntimeError("trainable parameter has no complete FP32 optimizer master")
     return main.view(parameter.shape)
+
+
+def _validate_complete_optimizer_masters(model_chunks, optimizer) -> None:
+    """Require every trainable model parameter's replicated optimizer master."""
+
+    import torch
+
+    optimizer_parameters = set()
+    for child in _optimizer_children(optimizer):
+        inner = getattr(child, "optimizer", None)
+        param_groups = getattr(inner, "param_groups", None)
+        if param_groups is None:
+            param_groups = getattr(child, "param_groups", None)
+        if param_groups is None:
+            if getattr(child, "is_stub_optimizer", False):
+                continue
+            raise RuntimeError("expert-full Adam child has no parameter groups")
+        for group in param_groups:
+            if not isinstance(group, Mapping) or "params" not in group:
+                raise RuntimeError("expert-full Adam parameter group is invalid")
+            optimizer_parameters.update(id(parameter) for parameter in group["params"])
+
+    trainable = []
+    seen = set()
+    for chunk in _model_chunks(model_chunks):
+        for parameter in chunk.parameters():
+            if parameter.requires_grad and id(parameter) not in seen:
+                trainable.append(parameter)
+                seen.add(id(parameter))
+    if not trainable:
+        raise RuntimeError("expert-full optimizer has no trainable parameters")
+    for parameter in trainable:
+        main = getattr(parameter, "main_param", None)
+        if (
+            getattr(parameter, "main_param_sharded", False)
+            or main is None
+            or main.dtype != torch.float32
+            or main.numel() != parameter.numel()
+            or id(main) not in optimizer_parameters
+        ):
+            raise RuntimeError(
+                "expert-full trainable parameter lacks a complete, "
+                "optimizer-owned FP32 master"
+            )
 
 
 @contextmanager
@@ -1747,6 +1831,7 @@ def install_on_actor_group(module: ModuleType) -> None:
             result != len(manifest.chunk_tensor_names) for result in begin_results
         ):
             raise RuntimeError("Megatron ranks disagree on hybrid chunk manifest")
+        total_chunks = len(manifest.chunk_tensor_names)
         for chunk_index, chunk_names in enumerate(manifest.chunk_tensor_names):
             # Wire-decoded tensors share one model-sized flat storage.  Compact
             # only this bounded chunk before Ray serializes its backing storage.
@@ -1769,6 +1854,14 @@ def install_on_actor_group(module: ModuleType) -> None:
                 raise RuntimeError(
                     f"Megatron ranks disagree after hybrid chunk {chunk_index}"
                 )
+            completed_chunks = chunk_index + 1
+            if _apply_progress_due(completed_chunks, total_chunks):
+                _emit_apply_progress(
+                    manifest.policy_version,
+                    "chunk_progress",
+                    completed_chunks=completed_chunks,
+                    total_chunks=total_chunks,
+                )
         results = await asyncio.gather(
             *(
                 actor.finish_chunked_trainable_state.remote()
@@ -1777,6 +1870,11 @@ def install_on_actor_group(module: ModuleType) -> None:
         )
         if not results or any(result != results[0] for result in results[1:]):
             raise RuntimeError("Megatron ranks disagree after applying hybrid state")
+        _emit_apply_progress(
+            manifest.policy_version,
+            "chunks_finished",
+            total_chunks=total_chunks,
+        )
         return results[0]
 
     module.RayTrainGroup.export_trainable_state = export_trainable_state

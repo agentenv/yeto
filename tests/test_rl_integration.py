@@ -650,6 +650,79 @@ def test_terminal_replacement_receives_final_policy(syncer_binary, tmp_path):
             process.wait()
 
 
+def test_terminal_checkpoint_eval_resume_skips_init_and_finalizes(
+    syncer_binary, tmp_path
+):
+    layout = _layout()
+    checkpoint_path = tmp_path / "state.ckpt"
+    source_port = _port()
+    source = _start(
+        syncer_binary,
+        source_port,
+        checkpoint_path,
+        rounds=1,
+        learners=1,
+    )
+    client = _client(source_port, 0, layout)
+    resumed = None
+    bridge = None
+    try:
+        client.send_init(0, pack_tensor(torch.zeros(2), DTYPE_F32))
+        assert _wait_item(client.drain_updates).version == 0
+        assert _wait_item(client.drain_pulls).global_step == 1
+        _push(client, 1, 0, [1, 3])
+        manifest, _ = client.wait_for_final_fragments(timeout=10)
+        client.acknowledge_finalization(manifest)
+        assert source.wait(timeout=10) == 0
+        client.close()
+
+        resume_port = _port()
+        resumed = _start(
+            syncer_binary,
+            resume_port,
+            checkpoint_path,
+            rounds=1,
+            learners=1,
+        )
+        runtime = _FakeMiles([0, 0], 0)
+        bridge = StrictRlBridge(
+            runtime,
+            BridgeConfig(
+                syncer_addr=("127.0.0.1", resume_port),
+                learner_id=0,
+                global_rounds=1,
+                groups_per_round=1,
+                samples_per_group=1,
+                local_optimizer_steps=1,
+                wan_streams=0,
+                expected_specs=runtime.current.specs,
+                base_model_revision=runtime.current.base_model_revision,
+                lora_config_hash=runtime.current.lora_config_hash,
+                layout_hash=runtime.current.layout_hash,
+                event_tape=str(tmp_path / "eval-resume.jsonl"),
+                send_initial_params=False,
+            ),
+        )
+        bridge.start()
+        final = bridge.wait_for_initial_policy()
+        assert final.policy_version == 1
+        assert bridge.initial is None
+        assert torch.equal(
+            next(iter(final.tensors.values())),
+            torch.tensor([[1.0, 3.0]]),
+        )
+        assert bridge.finalize().policy_version == 1
+        assert resumed.wait(timeout=10) == 0
+    finally:
+        client.close()
+        if bridge is not None:
+            bridge.client.close()
+        for process in (source, resumed):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+
+
 def test_miles_public_hook_runs_against_real_syncer(
     syncer_binary, tmp_path, monkeypatch
 ):

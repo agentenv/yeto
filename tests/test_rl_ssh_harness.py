@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +10,7 @@ import pytest
 import torch
 
 import yeto.rl as rl_config
+from yeto.provenance import python_spec_sha256
 from yeto.rl import (
     MILES_COMMIT,
     MILES_IMAGE,
@@ -175,6 +178,38 @@ def _local_data_plan(path: Path):
             "data_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
     )
+    return plan
+
+
+def _secrlenv_eval_plan(path: Path):
+    plan = _local_data_plan(path)
+    _enable_secrlenv_agent(plan)
+    plan["learner"]["reward_function"] = ssh_harness.SECRLENV_REWARD
+    plan["reward_sha256"] = python_spec_sha256(ssh_harness.SECRLENV_REWARD)
+    plan["secrlenv_daemon"] = _secrlenv_daemon_contract(plan["run_id"])
+    plan["final_ack_timeout_s"] = 21600
+    plan["eval_checkpoint"] = ssh_harness._eval_checkpoint_contract(
+        "root@h200-n6",
+        "yeto-rl-ssh-data/train-run/state/state.ckpt",
+        "f" * 64,
+        138_632_000_000,
+        plan["learner"]["global_rounds"],
+    )
+    plan["learner"]["evaluation"] = {
+        "eval_only": True,
+        "dataset_name": "flaky100",
+        "data": plan["learner"]["data"],
+        "data_sha256": plan["learner"]["data_sha256"],
+        "interval": 1,
+        "samples_per_prompt": 2,
+        "prompt_count": 1,
+        "skip_before_train": True,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "max_prompt_len": 256,
+        "max_response_len": 256,
+        "max_context_len": 512,
+    }
     return plan
 
 
@@ -466,7 +501,14 @@ def test_verify_dispatches_and_exports_with_decoupled_plan(tmp_path, monkeypatch
             path = artifacts / f"island-{learner_id}" / f"node-{node_id}.inspect.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps([{"State": {"Status": "exited", "ExitCode": 0}}])
+                json.dumps(
+                    {
+                        "Status": "exited",
+                        "ExitCode": 0,
+                        "OOMKilled": False,
+                        "RestartCount": 0,
+                    }
+                )
             )
 
     import yeto.export as checkpoint_export
@@ -526,6 +568,61 @@ def test_plan_rejects_previous_pipeline_identity_schema():
         ssh_harness._validate_plan(plan)
 
 
+def test_prepare_cli_exposes_final_secrlenv_eval_controls():
+    args = ssh_harness.build_parser().parse_args(
+        [
+            "prepare",
+            "--host",
+            "root@h200-n1,root@h200-n2",
+            "--run-id",
+            "flaky100",
+            "--final-ack-timeout-s",
+            "21600",
+            "--eval-checkpoint-host",
+            "root@h200-n6",
+            "--eval-checkpoint-path",
+            "yeto-rl-ssh-data/train/state/state.ckpt",
+            "--eval-checkpoint-sha256",
+            "f" * 64,
+            "--eval-checkpoint-size-bytes",
+            "138632000000",
+            "--eval-checkpoint-global-step",
+            "8",
+            "--eval-dataset-name",
+            "flaky100",
+            "--eval-interval",
+            "1",
+            "--eval-samples-per-prompt",
+            "2",
+            "--eval-temperature",
+            "0.7",
+            "--eval-top-p",
+            "0.95",
+            "--eval-max-prompt-len",
+            "4096",
+            "--eval-max-response-len",
+            "32768",
+            "--eval-max-context-len",
+            "32768",
+        ]
+    )
+
+    assert args.final_ack_timeout_s == 21600
+    assert args.eval_checkpoint_host == "root@h200-n6"
+    assert args.eval_checkpoint_path.endswith("train/state/state.ckpt")
+    assert args.eval_checkpoint_sha256 == "f" * 64
+    assert args.eval_checkpoint_size_bytes == 138_632_000_000
+    assert args.eval_checkpoint_global_step == 8
+    assert args.eval_dataset_name == "flaky100"
+    assert args.eval_interval == 1
+    assert args.eval_samples_per_prompt == 2
+    assert args.eval_temperature == 0.7
+    assert args.eval_top_p == 0.95
+    assert args.eval_max_prompt_len == 4096
+    assert args.eval_max_response_len == 32768
+    assert args.eval_max_context_len == 32768
+
+
 def test_miles_and_sglang_pins_include_the_compatible_builds():
     assert MILES_COMMIT == "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
     assert not hasattr(rl_config, "MILES_UPSTREAM_COMMIT")
@@ -563,6 +660,88 @@ def test_local_prompt_plan_is_content_bound_without_a_hub_revision(tmp_path):
         plan["learner"]["data_sha256"]
         == hashlib.sha256(prompts.read_bytes()).hexdigest()
     )
+
+
+def test_secrlenv_eval_reuses_the_attested_training_dataset_and_extends_final_ack(
+    tmp_path,
+):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    plan = _secrlenv_eval_plan(prompts)
+
+    ssh_harness._validate_plan(plan)
+    evaluation = plan["learner"]["evaluation"]
+    assert evaluation["data"] == plan["learner"]["data"]
+    assert evaluation["data_sha256"] == plan["learner"]["data_sha256"]
+    assert evaluation["eval_only"] is True
+    assert evaluation["interval"] == 1
+    assert evaluation["prompt_count"] == 1
+    assert plan["learner"]["reward_function"] == ssh_harness.SECRLENV_REWARD
+    assert plan["reward_sha256"] == python_spec_sha256(
+        ssh_harness.SECRLENV_REWARD
+    )
+    assert plan["eval_checkpoint"]["global_step"] == plan["learner"][
+        "global_rounds"
+    ]
+    syncer = _syncer_argv(plan)
+    assert syncer[syncer.index("--final-ack-timeout-s") + 1] == "21600"
+
+    argv = _learner_argv(plan, 0)
+    parsed = parse_learner_args(argv[3:])
+    assert parsed.eval_only is True
+    assert parsed.eval_dataset_name == "flaky100"
+    assert parsed.eval_data_sha256 == plan["learner"]["data_sha256"]
+    assert parsed.eval_interval == 1
+    assert parsed.eval_samples_per_prompt == 2
+    assert parsed.reward_function == ssh_harness.SECRLENV_REWARD
+    assert parsed.eval_temperature == 0.7
+    assert parsed.eval_top_p == 0.95
+    assert parsed.eval_max_prompt_len == 256
+    assert parsed.eval_max_response_len == 256
+    assert parsed.eval_max_context_len == 512
+
+
+@pytest.mark.parametrize("field", ["data", "data_sha256"])
+def test_secrlenv_eval_rejects_a_distinct_training_dataset_identity(tmp_path, field):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    plan = _secrlenv_eval_plan(prompts)
+    plan["learner"]["evaluation"][field] = (
+        "/workspace/data/other.jsonl" if field == "data" else "0" * 64
+    )
+
+    with pytest.raises(HarnessError, match="exact training dataset"):
+        ssh_harness._validate_plan(plan)
+
+
+def test_secrlenv_eval_requires_an_explicitly_extended_final_ack_timeout(tmp_path):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    plan = _secrlenv_eval_plan(prompts)
+    plan.pop("final_ack_timeout_s")
+
+    with pytest.raises(HarnessError, match="extended final_ack_timeout"):
+        ssh_harness._validate_plan(plan)
+
+
+def test_secrlenv_eval_rejects_a_different_reward_contract(tmp_path):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    plan = _secrlenv_eval_plan(prompts)
+    plan["learner"]["reward_function"] = "pkg.reward:score"
+
+    with pytest.raises(HarnessError, match="signed secrlenv reward"):
+        ssh_harness._validate_plan(plan)
+
+
+def test_secrlenv_eval_checkpoint_step_must_match_terminal_training_step(tmp_path):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    plan = _secrlenv_eval_plan(prompts)
+    plan["eval_checkpoint"]["global_step"] -= 1
+
+    with pytest.raises(HarnessError, match="eval checkpoint identity"):
+        ssh_harness._validate_plan(plan)
 
 
 def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeypatch):
@@ -607,9 +786,96 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
     assert plan["learner"]["data_revision"] is None
     assert plan["syncer_address"] == "100.64.0.6:29400"
     assert plan["syncer_host"] == "root@syncer0"
+    assert "evaluation" not in plan["learner"]
+    assert "eval_checkpoint" not in plan
+    assert "final_ack_timeout_s" not in plan
     assert plan["jit_cache"] == ssh_harness._jit_cache_contract(
         "/data/yeto-rl/jit-cache", plan
     )
+
+
+def test_prepare_wires_final_secrlenv_eval_and_same_dataset_sha(tmp_path, monkeypatch):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    learner = _plan()["learner"]
+    learner.update(
+        custom_agent_function_path="yeto_miles_secrlenv.agent.run",
+        custom_generate_function_path="miles.rollout.generate",
+        use_session_server=True,
+        tito_model="org/model",
+        reward_function=ssh_harness.SECRLENV_REWARD,
+    )
+    args = SimpleNamespace(
+        **{
+            **learner,
+            "data": str(prompts),
+            "data_revision": None,
+            "total_steps": learner["global_rounds"],
+            "rollout_batch_size": learner["groups_per_round"],
+            "n_samples_per_prompt": learner["samples_per_group"],
+            "rl_image": "docker:" + IMAGE,
+            "source_sha256": "c" * 64,
+            "reward_sha256": python_spec_sha256(ssh_harness.SECRLENV_REWARD),
+            "_provenance": {"dataset": {"source": "local"}},
+        }
+    )
+    daemon = _secrlenv_daemon_contract("final-eval")
+    checkpoint_sha256 = "f" * 64
+    namespace = SimpleNamespace(
+        run_id="final-eval",
+        host=["alice@a0", "alice@b0"],
+        gpus_per_node=1,
+        remote_root=".cache/yeto-rl-ssh",
+        remote_env_file=".config/yeto/rl.env",
+        model_manifest_sha256=None,
+        syncer_address="100.64.0.6:29400",
+        syncer_host="root@syncer0",
+        output_dir=tmp_path / "run",
+        ssh_option=[],
+        final_ack_timeout_s=21600,
+        eval_checkpoint_host="root@h200-n6",
+        eval_checkpoint_path="yeto-rl-ssh-data/train/state/state.ckpt",
+        eval_checkpoint_sha256=checkpoint_sha256,
+        eval_checkpoint_size_bytes=138_632_000_000,
+        eval_checkpoint_global_step=learner["global_rounds"],
+        eval_dataset_name="flaky100",
+        eval_interval=1,
+        eval_samples_per_prompt=2,
+        eval_temperature=0.7,
+        eval_top_p=0.95,
+        eval_max_prompt_len=256,
+        eval_max_response_len=256,
+        eval_max_context_len=512,
+        secrlenv_source_root=daemon["source_root"],
+        secrlenv_source_sha256=daemon["source_sha256"],
+        secrlenv_task_pack=daemon["task_pack"],
+        secrlenv_task_pack_sha256=daemon["task_pack_sha256"],
+        secrlenv_operator_image=daemon["operator_image"],
+        secrlenv_operator_image_id=daemon["operator_image_id"],
+        secrlenv_port=daemon["port"],
+        secrlenv_max_active_episodes=daemon["max_active_episodes"],
+    )
+    monkeypatch.setattr(ssh_harness, "_resolved_launch_args", lambda *unused: args)
+    monkeypatch.setattr(ssh_harness, "_syncer_source_sha256", lambda: "1" * 64)
+
+    plan_path = ssh_harness.prepare(namespace)
+    _, plan = load_plan(plan_path)
+    evaluation = plan["learner"]["evaluation"]
+
+    assert evaluation["data"] == plan["learner"]["data"]
+    assert evaluation["data_sha256"] == plan["learner"]["data_sha256"]
+    assert evaluation["eval_only"] is True
+    assert evaluation["interval"] == 1
+    assert evaluation["prompt_count"] == 1
+    assert evaluation["skip_before_train"] is True
+    assert plan["final_ack_timeout_s"] == 21600
+    assert plan["eval_checkpoint"]["source_host"] == "root@h200-n6"
+    assert plan["eval_checkpoint"]["source_path"].endswith(
+        "train/state/state.ckpt"
+    )
+    assert plan["eval_checkpoint"]["sha256"] == checkpoint_sha256
+    assert plan["eval_checkpoint"]["global_step"] == learner["global_rounds"]
+    assert plan["secrlenv_daemon"]["placement"] == "island-heads"
 
 
 def test_local_prompt_directory_hash_is_stable_and_rejects_symlinks(tmp_path):
@@ -731,6 +997,185 @@ def test_deploy_copies_local_prompts_to_every_host_and_mounts_read_only(
     assert all(command[-1].endswith("/data/dataset.jsonl") for command in copies)
 
 
+def test_eval_deploy_copies_terminal_checkpoint_only_to_fresh_syncer(
+    tmp_path, monkeypatch
+):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    plan = _secrlenv_eval_plan(prompts)
+    plan["syncer_host"] = "root@syncer0"
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    commands = []
+    scripts = []
+    monkeypatch.setattr(ssh_harness, "_require_program", lambda name: None)
+    monkeypatch.setattr(ssh_harness, "_attest_local", lambda value: None)
+    monkeypatch.setattr(
+        ssh_harness, "_run", lambda command, **kwargs: commands.append(command)
+    )
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda _plan, target, script, **kwargs: scripts.append((target, script)),
+    )
+
+    ssh_harness.deploy(plan_path)
+
+    checkpoint_copies = [command for command in commands if command[:2] == ["scp", "-3"]]
+    assert len(checkpoint_copies) == 1
+    assert checkpoint_copies[0][-2] == (
+        "root@h200-n6:yeto-rl-ssh-data/train-run/state/state.ckpt"
+    )
+    assert checkpoint_copies[0][-1].endswith(
+        "root@syncer0:.cache/yeto-rl-ssh/acceptance/state/state.ckpt"
+    )
+    source_attestation = next(
+        script for target, script in scripts if target == "root@h200-n6"
+    )
+    assert plan["eval_checkpoint"]["sha256"] in source_attestation
+    assert str(plan["eval_checkpoint"]["size_bytes"]) in source_attestation
+    assert "syncer checkpoint global step mismatch" in source_attestation
+    syncer_script = ssh_harness._syncer_start_script(plan)
+    assert plan["eval_checkpoint"]["sha256"] in syncer_script
+    assert 'sha256sum --check -' in syncer_script
+
+
+def test_eval_collect_whitelists_small_evidence_and_excludes_checkpoint(
+    tmp_path, monkeypatch
+):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    plan = _secrlenv_eval_plan(prompts)
+    plan["islands"] = [plan["islands"][0]]
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    commands = []
+    ssh_scripts = []
+
+    def ssh(_plan, _target, script, **_kwargs):
+        ssh_scripts.append(script)
+        if script.startswith("docker inspect"):
+            stdout = json.dumps(
+                {
+                    "Status": "exited",
+                    "ExitCode": 0,
+                    "OOMKilled": False,
+                    "RestartCount": 0,
+                }
+            )
+        elif "final_ack_count" in script:
+            stdout = json.dumps(
+                {"schema": 1, "resume_count": 1, "final_ack_count": 1}
+            )
+        else:
+            stdout = ""
+        return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+    monkeypatch.setattr(ssh_harness, "_require_program", lambda _name: None)
+    monkeypatch.setattr(ssh_harness, "_ssh", ssh)
+    monkeypatch.setattr(
+        ssh_harness, "_run", lambda command, **_kwargs: commands.append(command)
+    )
+
+    ssh_harness.collect(plan_path)
+
+    remote_sources = [command[-2] for command in commands]
+    assert not any("/island-0/state/" in source for source in remote_sources)
+    assert not any("/island-0/audit/" in source for source in remote_sources)
+    assert not any("/island-0/output/" in source for source in remote_sources)
+    learner_filters = [script for script in ssh_scripts if "eval-learner" in script]
+    assert len(learner_filters) == 1
+    syncer = next(command for command in commands if command[-2].endswith("/state/"))
+    assert "--include=/syncer.exit" in syncer
+    assert "--include=/syncer.log" not in syncer
+    assert "--include=/events.jsonl" not in syncer
+    assert "--exclude=*" in syncer
+    assert not any("state.ckpt" in value for value in syncer)
+    assert not any("docker logs" in script for script in ssh_scripts)
+    inspect_scripts = [
+        script for script in ssh_scripts if script.startswith("docker inspect")
+    ]
+    assert inspect_scripts
+    assert all("--format" in script for script in inspect_scripts)
+    for inspection in (tmp_path / "artifacts").glob(
+        "island-*/node-*.inspect.json"
+    ):
+        assert set(json.loads(inspection.read_text())) == {
+            "Status",
+            "ExitCode",
+            "OOMKilled",
+            "RestartCount",
+        }
+    lifecycle = json.loads(
+        (tmp_path / "artifacts/syncer/lifecycle-evidence.json").read_text()
+    )
+    assert lifecycle == {"schema": 1, "resume_count": 1, "final_ack_count": 1}
+    assert not list((tmp_path / "artifacts").glob("island-*/state"))
+
+
+def test_eval_verify_uses_scalar_final_ack_evidence_without_checkpoint(
+    tmp_path, capsys
+):
+    prompts = tmp_path / "flaky100.jsonl"
+    prompts.write_text('{"messages": []}\n', encoding="utf-8")
+    plan = _secrlenv_eval_plan(prompts)
+    plan["islands"] = [plan["islands"][0]]
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    artifacts = tmp_path / "artifacts"
+    island = artifacts / "island-0"
+    output = island / "output"
+    output.mkdir(parents=True)
+    for node_id in range(len(plan["islands"][0]["hosts"])):
+        (island / f"node-{node_id}.inspect.json").write_text(
+            json.dumps(
+                {
+                    "Status": "exited",
+                    "ExitCode": 0,
+                    "OOMKilled": False,
+                    "RestartCount": 0,
+                }
+            )
+        )
+    _write_jsonl(
+        output / "events.jsonl",
+        [
+            {
+                "event": "rl_policy_apply",
+                "island_id": 0,
+                "policy_version": plan["learner"]["global_rounds"],
+                "sync/global_policy_hash": "a" * 64,
+            },
+            {
+                "event": "rl_eval_result",
+                "island_id": 0,
+                "rollout_id": 0,
+                "policy_version": plan["learner"]["global_rounds"],
+                "dataset_name": "flaky100",
+                "sample_count": 2,
+                "rl/eval/result": 0.5,
+                "rl/eval/pass_at_1": 0.5,
+            },
+        ],
+    )
+    syncer = artifacts / "syncer"
+    syncer.mkdir()
+    (syncer / "syncer.exit").write_text(
+        "result=success\n"
+        "exit_code=exited\n"
+        "exit_status=0\n"
+        "timestamp=2026-08-17T00:00:00Z\n"
+    )
+    (syncer / "lifecycle-evidence.json").write_text(
+        json.dumps({"schema": 1, "resume_count": 1, "final_ack_count": 1})
+    )
+
+    ssh_harness.verify(plan_path)
+
+    assert "verified terminal eval flaky100" in capsys.readouterr().out
+    assert not (syncer / "state.ckpt").exists()
+
+
 def test_local_prompt_learner_command_omits_hub_revision_and_mounts_read_only(
     tmp_path,
 ):
@@ -739,9 +1184,13 @@ def test_local_prompt_learner_command_omits_hub_revision_and_mounts_read_only(
     plan = _local_data_plan(prompts)
     argv = _learner_argv(plan, 0)
     assert "--data-revision" not in argv
+    assert "--eval-only" not in argv
+    assert "--eval-interval" not in argv
     assert parse_learner_args(argv[3:]).data_revision is None
     node = _node_start_script(plan, 0, 0)
     assert '--volume "$RUN/data:/workspace/data:ro"' in node
+    assert "refusing to reuse a same-name learner container" in node
+    assert 'if [ "$STATUS" = running ]; then exit 0; fi' not in node
 
 
 def test_restart_removes_every_old_island_node_before_starting_ray(
@@ -850,6 +1299,49 @@ def test_syncer_launch_uses_a_durable_systemd_service(monkeypatch):
     assert 'grep -Fqx -- "$CHECKPOINT_PATH"' in script
     assert 'if [ -n "$LEGACY_PID" ] && [ ! -s "$EXIT_FILE" ]' in script
     assert 'rm -f "$PID_FILE"' in script
+    assert 'FRAGMENT="$(systemctl show --property=FragmentPath' in script
+    assert "--property=Restart --value" in script
+    assert "--property=NRestarts --value" in script
+    assert 'mapfile -d \'\' -t ACTUAL_ARGV' in script
+    assert "syncer_child_pid" in script
+    assert "EXPECTED_SYNCER_ARGV" in script
+    assert "syncer_listener_owned_by_unit" in script
+    assert "/sys/fs/cgroup$CONTROL_GROUP/cgroup.procs" in script
+    assert "/proc/net/tcp6" in script
+    assert "stale or unrelated process already listens" in script
+    syntax = subprocess.run(
+        ["bash", "-n"], input=script, text=True, capture_output=True, check=False
+    )
+    assert syntax.returncode == 0, syntax.stderr
+
+
+def test_syncer_readiness_attests_exact_unit_and_listener_before_tcp(
+    monkeypatch,
+):
+    plan = _plan()
+    plan["syncer_host"] = "alice@b1"
+    calls = []
+
+    def fake_ssh(plan, target, script, **kwargs):
+        calls.append((target, script))
+        return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(ssh_harness, "_ssh", fake_ssh)
+
+    ssh_harness._wait_for_syncer(plan, timeout_s=3)
+
+    assert calls[0][0] == "alice@b1"
+    identity_script = calls[0][1]
+    assert "syncer_unit_pid" in identity_script
+    assert "syncer_listener_owned_by_unit" in identity_script
+    assert "EXPECTED_UNIT_ARGV" in identity_script
+    assert "syncer unit/listener identity did not become ready" in identity_script
+    assert "/sys/fs/cgroup$CONTROL_GROUP/cgroup.procs" in identity_script
+    assert "getent ahosts" in identity_script
+    assert "ip -o addr show" in identity_script
+    assert "syncer address does not resolve" in identity_script
+    assert [target for target, _script in calls[1:]] == ssh_harness._all_hosts(plan)
+    assert all("/dev/tcp/" in script for _target, script in calls[1:])
 
 
 @pytest.mark.parametrize(
@@ -975,9 +1467,33 @@ def test_status_and_stop_use_the_dedicated_syncer_host(tmp_path, monkeypatch):
     assert "syncer unit did not become inactive" in calls[-1][1]
     assert 'kill -0 "$PID"' in calls[-1][1]
     assert "legacy syncer did not exit after SIGTERM" in calls[-1][1]
+    assert not any("docker logs" in script for _target, script in calls)
 
 
-def test_syncer_stop_propagates_systemctl_failure(tmp_path, monkeypatch):
+def test_status_includes_a_syncer_colocated_on_a_nonfirst_learner(
+    tmp_path, monkeypatch
+):
+    plan = _plan()
+    plan["syncer_host"] = "alice@b1"
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, plan)
+    calls = []
+
+    def fake_ssh(plan, target, script, **kwargs):
+        calls.append((target, script))
+        return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(ssh_harness, "_ssh", fake_ssh)
+
+    ssh_harness.status(plan_path)
+
+    syncer_calls = [target for target, script in calls if "syncer.pid" in script]
+    assert syncer_calls == ["alice@b1"]
+
+
+def test_syncer_stop_refuses_a_same_name_unit_without_exact_identity(
+    tmp_path, monkeypatch
+):
     plan = _plan()
     script = ssh_harness._syncer_stop_script(plan)
     bin_dir = tmp_path / "bin"
@@ -1001,7 +1517,8 @@ def test_syncer_stop_propagates_systemctl_failure(tmp_path, monkeypatch):
         text=True,
     )
 
-    assert result.returncode == 42
+    assert result.returncode == 1
+    assert "drifted identity" in result.stderr
 
 
 def test_collect_reads_syncer_state_from_the_dedicated_host(tmp_path, monkeypatch):
@@ -1012,9 +1529,29 @@ def test_collect_reads_syncer_state_from_the_dedicated_host(tmp_path, monkeypatc
     commands = []
     monkeypatch.setattr(ssh_harness, "_require_program", lambda name: None)
     monkeypatch.setattr(
+        ssh_harness, "_collect_capacity_preflight", lambda _plan, _artifacts: None
+    )
+
+    def ssh(*args, **kwargs):
+        script = args[2]
+        stdout = (
+            json.dumps(
+                {
+                    "Status": "exited",
+                    "ExitCode": 0,
+                    "OOMKilled": False,
+                    "RestartCount": 0,
+                }
+            )
+            if script.startswith("docker inspect")
+            else ""
+        )
+        return SimpleNamespace(stdout=stdout, stderr="")
+
+    monkeypatch.setattr(
         ssh_harness,
         "_ssh",
-        lambda *args, **kwargs: SimpleNamespace(stdout="[]", stderr=""),
+        ssh,
     )
     monkeypatch.setattr(
         ssh_harness, "_run", lambda command, **kwargs: commands.append(command)
@@ -1458,6 +1995,190 @@ def test_harness_forwards_agentic_session_contract_to_the_learner():
         assert "--env MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1" in script
 
 
+def test_harness_freezes_stock_codex_identity_and_binary_mount():
+    plan = _plan()
+    plan["remote_env_file"] = ".config/yeto/rl.env"
+    plan["secrlenv_daemon"] = _secrlenv_daemon_contract()
+    plan["learner"].update(
+        {
+            "rl_model_recipe": "deepseek-v4-flash",
+            "custom_generate_function_path": (
+                "miles.rollout.generate_hub.agentic_tool_call.generate"
+            ),
+            "custom_agent_function_path": rl_config.CODEX_HARNESS_AGENT,
+            "codex_reasoning_effort": "xhigh",
+            "use_session_server": True,
+            "tito_model": "deepseekv4",
+            "tito_allowed_append_roles": ["tool", "user"],
+            "tensor_parallel": 8,
+            "expert_parallel": 8,
+            "rollout_num_gpus_per_engine": 8,
+            "sglang_tp_size": 8,
+            "sglang_dp_size": 1,
+            "sglang_ep_size": 8,
+            "lora_targets": "attention-routed-experts",
+            "apply_chat_template_kwargs": {
+                "thinking_mode": "thinking",
+                "reasoning_effort": "max",
+                "drop_thinking": False,
+            },
+        }
+    )
+    plan["codex_harness"] = {
+        "agent_function_path": rl_config.CODEX_HARNESS_AGENT,
+        "agent_source_sha256": rl_config.CODEX_HARNESS_AGENT_SHA256,
+        "controller_binary_path": "/controller/codex",
+        "controller_package_manifest_path": "/controller/codex-package.json",
+        "controller_app_server_schema_path": "/controller/app-server-v2.json",
+        "bundle_binary_path": ssh_harness.CODEX_REMOTE_BUNDLE_PATH,
+        "bundle_package_manifest_path": ssh_harness.CODEX_REMOTE_MANIFEST_PATH,
+        "bundle_app_server_schema_path": ssh_harness.CODEX_REMOTE_SCHEMA_PATH,
+        "container_binary_path": rl_config.CODEX_CONTAINER_BINARY_PATH,
+        "container_app_server_schema_path": (
+            rl_config.CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH
+        ),
+        "binary_sha256": rl_config.CODEX_LINUX_BINARY_SHA256,
+        "binary_size_bytes": rl_config.CODEX_LINUX_BINARY_SIZE_BYTES,
+        "cli_version": rl_config.CODEX_CLI_VERSION,
+        "npm_package": rl_config.CODEX_NPM_PACKAGE,
+        "target": rl_config.CODEX_LINUX_TARGET,
+        "npm_tarball_sha256": rl_config.CODEX_NPM_TARBALL_SHA256,
+        "package_manifest_sha256": rl_config.CODEX_PACKAGE_MANIFEST_SHA256,
+        "app_server_protocol_revision": (
+            rl_config.CODEX_APP_SERVER_PROTOCOL_REVISION
+        ),
+        "app_server_schema_sha256": rl_config.CODEX_APP_SERVER_SCHEMA_SHA256,
+        "base_instructions_sha256": rl_config.CODEX_BASE_INSTRUCTIONS_SHA256,
+        "terminal_exec_tool_schema_sha256": (
+            rl_config.CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
+        ),
+        "submit_tool_schema_sha256": (
+            rl_config.CODEX_SUBMIT_TOOL_SCHEMA_SHA256
+        ),
+        "dynamic_tools_schema_sha256": (
+            rl_config.CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256
+        ),
+        "reasoning_effort": "xhigh",
+        "backend": {
+            "model": "deepseekv4",
+            "max_tokens": plan["learner"]["rollout_max_response_len"],
+            "reasoning_effort": "max",
+            "thinking": {"type": "enabled"},
+            "chat_template": "deepseekv4",
+            "chat_template_kwargs": {
+                "thinking_mode": "thinking",
+                "reasoning_effort": "max",
+                "drop_thinking": False,
+            },
+            "tito_allowed_append_roles": ["tool", "user"],
+        },
+    }
+
+    ssh_harness._validate_plan(plan)
+    argv = _learner_argv(plan, 0)
+    parsed = parse_learner_args(argv[3:])
+
+    assert parsed.codex_harness_contract == plan["codex_harness"]
+    for node_id in (0, 1):
+        script = _node_start_script(plan, 0, node_id)
+        assert rl_config.CODEX_CONTAINER_BINARY_PATH in script
+        assert "YETO_CODEX_REASONING_EFFORT=xhigh" in script
+        assert "YETO_CODEX_APP_SERVER_SCHEMA_SHA256=" in script
+        assert "YETO_CODEX_HARNESS_CONTRACT_SHA256=" in script
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+
+    drifted = json.loads(json.dumps(plan))
+    drifted["codex_harness"]["backend"]["chat_template_kwargs"][
+        "drop_thinking"
+    ] = True
+    with pytest.raises(HarnessError, match="backend/TITO contract drifted"):
+        ssh_harness._validate_plan(drifted)
+
+    for field in (
+        "agent_source_sha256",
+        "base_instructions_sha256",
+        "terminal_exec_tool_schema_sha256",
+        "submit_tool_schema_sha256",
+        "dynamic_tools_schema_sha256",
+    ):
+        drifted = json.loads(json.dumps(plan))
+        drifted["codex_harness"][field] = "0" * 64
+        with pytest.raises(HarnessError, match="pinned stock Codex runtime"):
+            ssh_harness._validate_plan(drifted)
+
+
+def test_codex_controller_artifacts_are_attested_before_plan_write(
+    tmp_path, monkeypatch
+):
+    binary = tmp_path / "codex"
+    manifest = tmp_path / "codex-package.json"
+    schema = tmp_path / "app-server-v2.json"
+    binary.write_bytes(b"stock-linux-codex")
+    binary.chmod(0o555)
+    manifest.write_bytes(b"signed-package-manifest")
+    schema.write_bytes(b"signed-v2-schema")
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        ssh_harness, "CODEX_LINUX_BINARY_SIZE_BYTES", binary.stat().st_size
+    )
+    monkeypatch.setattr(ssh_harness, "CODEX_LINUX_BINARY_SHA256", digest(binary))
+    monkeypatch.setattr(
+        ssh_harness, "CODEX_PACKAGE_MANIFEST_SHA256", digest(manifest)
+    )
+    monkeypatch.setattr(
+        ssh_harness, "CODEX_APP_SERVER_SCHEMA_SHA256", digest(schema)
+    )
+    identity = {
+        "base_instructions_sha256": rl_config.CODEX_BASE_INSTRUCTIONS_SHA256,
+        "terminal_exec_tool_schema_sha256": (
+            rl_config.CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
+        ),
+        "submit_tool_schema_sha256": (
+            rl_config.CODEX_SUBMIT_TOOL_SCHEMA_SHA256
+        ),
+        "dynamic_tools_schema_sha256": (
+            rl_config.CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256
+        ),
+    }
+    monkeypatch.setattr(ssh_harness, "_codex_adapter_identity", lambda: identity)
+    namespace = SimpleNamespace(
+        codex_harness_binary=str(binary),
+        codex_package_manifest=str(manifest),
+        codex_app_server_schema=str(schema),
+    )
+    args = SimpleNamespace(
+        codex_reasoning_effort="xhigh",
+        tito_model="deepseekv4",
+        rollout_max_response_len=4096,
+        tito_allowed_append_roles=["tool", "user"],
+        apply_chat_template_kwargs={
+            "thinking_mode": "thinking",
+            "reasoning_effort": "max",
+            "drop_thinking": False,
+        },
+    )
+
+    contract = ssh_harness._codex_harness_contract(namespace, args)
+
+    assert contract["controller_binary_path"] == str(binary)
+    assert contract["binary_sha256"] == digest(binary)
+    assert contract["app_server_schema_sha256"] == digest(schema)
+    assert contract["backend"]["reasoning_effort"] == "max"
+
+    binary.chmod(0o755)
+    binary.write_bytes(b"drifted")
+    binary.chmod(0o555)
+    with pytest.raises(HarnessError, match="binary size"):
+        ssh_harness._codex_harness_contract(namespace, args)
+
+
 def test_harness_forwards_deepseek_v4_recipe_to_the_learner():
     plan = _plan()
     plan["learner"]["rl_model_recipe"] = "deepseek-v4-flash"
@@ -1475,6 +2196,8 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     syncer = _syncer_argv(plan)
     assert syncer[syncer.index("--learners") + 1] == "2"
     assert syncer[syncer.index("--quorum") + 1] == "2"
+    assert syncer[syncer.index("--quorum-timeout-s") + 1] == "900"
+    assert syncer[syncer.index("--final-ack-timeout-s") + 1] == "3600"
     assert syncer[syncer.index("--learner-weight") + 1] == "equal"
     assert "--mark-final-checkpoint" not in syncer
 
@@ -1603,6 +2326,89 @@ def test_secrlenv_daemon_contract_is_required_and_propagated_to_nodes():
     )
 
 
+def test_secrlenv_island_head_placement_is_explicit_and_fail_closed(
+    tmp_path, monkeypatch
+):
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+    plan["secrlenv_daemon"] = {
+        **_secrlenv_daemon_contract(),
+        "placement": "island-heads",
+    }
+    ssh_harness._validate_plan(plan)
+
+    assert ssh_harness._secrlenv_daemon_hosts(plan) == [
+        "alice@a0",
+        "alice@b0",
+    ]
+    for learner_id in range(2):
+        head = _node_start_script(plan, learner_id, 0)
+        worker = _node_start_script(plan, learner_id, 1)
+        assert "SECRLENV_DAEMON_URL=" in head
+        assert "/run/secrlenv/daemon.token:ro" in head
+        assert "SECRLENV_DAEMON_URL=" not in worker
+        assert "/run/secrlenv/daemon.token:ro" not in worker
+
+    calls = []
+
+    def fake_ssh(plan, target, script, **kwargs):
+        calls.append((target, script))
+        return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(ssh_harness, "_ssh", fake_ssh)
+    ssh_harness._start_secrlenv_daemons(plan)
+    assert [target for target, _script in calls] == ["alice@a0", "alice@b0"]
+    assert all(
+        "python3 -m yeto.rl.secrlenv_task_images" in script
+        for _target, script in calls
+    )
+
+    calls.clear()
+    plan_path = _write_plan(tmp_path / "plan.json", plan)
+    ssh_harness.status(plan_path)
+    daemon_status_targets = [
+        target
+        for target, script in calls
+        if "secrlenv_daemon=running" in script
+    ]
+    assert daemon_status_targets == ["alice@a0", "alice@b0"]
+
+    calls.clear()
+    ssh_harness._stop_secrlenv_daemons(plan)
+    assert [target for target, _script in calls] == ["alice@a0", "alice@b0"]
+
+    plan["secrlenv_daemon"]["placement"] = "unknown"
+    with pytest.raises(HarnessError, match="daemon contract"):
+        ssh_harness._validate_plan(plan)
+    with pytest.raises(HarnessError, match="invalid placement"):
+        ssh_harness._secrlenv_daemon_hosts(plan)
+
+
+def test_legacy_secrlenv_plan_without_placement_retains_all_host_semantics(
+    monkeypatch,
+):
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+    plan["secrlenv_daemon"] = _secrlenv_daemon_contract()
+    ssh_harness._validate_plan(plan)
+
+    assert ssh_harness._secrlenv_daemon_hosts(plan) == ssh_harness._all_hosts(plan)
+    assert "SECRLENV_DAEMON_URL=" in _node_start_script(plan, 0, 1)
+
+    calls = []
+    monkeypatch.setattr(
+        ssh_harness,
+        "_ssh",
+        lambda plan, target, script, **kwargs: calls.append((target, script)),
+    )
+    ssh_harness._start_secrlenv_daemons(plan)
+    assert [target for target, _script in calls] == ssh_harness._all_hosts(plan)
+
+    calls.clear()
+    ssh_harness._stop_secrlenv_daemons(plan)
+    assert [target for target, _script in calls] == ssh_harness._all_hosts(plan)
+
+
 def test_start_attests_secrlenv_daemons_before_host_gpu_setup(tmp_path, monkeypatch):
     plan = _plan()
     _enable_secrlenv_agent(plan)
@@ -1670,6 +2476,89 @@ def test_start_sets_up_a_dedicated_syncer_without_gpu_requirements(
 
 
 def test_verification_requires_an_exited_zero_status_container():
-    assert _container_succeeded([{"State": {"Status": "exited", "ExitCode": 0}}])
-    assert not _container_succeeded([{"State": {"Status": "running", "ExitCode": 0}}])
-    assert not _container_succeeded([{"State": {"Status": "exited", "ExitCode": 1}}])
+    inspection = {
+        "Status": "exited",
+        "ExitCode": 0,
+        "OOMKilled": False,
+        "RestartCount": 0,
+    }
+    assert _container_succeeded(inspection)
+    assert not _container_succeeded({**inspection, "Status": "running"})
+    assert not _container_succeeded({**inspection, "ExitCode": 1})
+    assert not _container_succeeded({**inspection, "OOMKilled": True})
+    assert not _container_succeeded({**inspection, "RestartCount": 1})
+
+
+def test_container_state_filter_rejects_secret_bearing_inspect_payload():
+    raw = json.dumps(
+        {
+            "Status": "exited",
+            "ExitCode": 0,
+            "OOMKilled": False,
+            "RestartCount": 0,
+            "Config": {"Env": ["SECRET=do-not-collect"]},
+        }
+    )
+
+    with pytest.raises(HarnessError, match="unapproved fields"):
+        ssh_harness._parse_container_inspection(raw)
+
+
+def test_remote_event_filters_never_emit_prompt_or_tool_payloads(tmp_path):
+    events = tmp_path / "events.jsonl"
+    secret = "SECRET prompt response and tool payload"
+    events.write_text(
+        json.dumps(
+            {
+                "event": "rl_policy_apply",
+                "policy_version": 2,
+                "sync/global_policy_hash": "a" * 64,
+                "prompt": secret,
+                "response": secret,
+            }
+        )
+        + "\n"
+        + json.dumps({"event": "unapproved", "payload": secret})
+        + "\n"
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            ssh_harness._EVENT_EVIDENCE_FILTER,
+            str(events),
+            "strict-learner",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert secret not in result.stdout
+    assert json.loads(result.stdout) == {
+        "event": "rl_policy_apply",
+        "policy_version": 2,
+        "sync/global_policy_hash": "a" * 64,
+    }
+
+
+def test_training_collect_capacity_fails_before_large_transfer(tmp_path, monkeypatch):
+    plan = _plan()
+    calls = []
+
+    def fake_ssh(_plan, target, script, **_kwargs):
+        calls.append((target, script))
+        return SimpleNamespace(stdout="10000000000\n", stderr="")
+
+    monkeypatch.setattr(ssh_harness, "_ssh", fake_ssh)
+    monkeypatch.setattr(
+        ssh_harness.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=1024),
+    )
+
+    with pytest.raises(HarnessError, match="lacks space"):
+        ssh_harness._collect_capacity_preflight(plan, tmp_path)
+
+    assert calls

@@ -48,9 +48,13 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
-    /// Give up waiting for quorum (or final learner ACKs) after this long.
+    /// Give up waiting for quorum after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
+    /// Give up waiting for final learner ACKs after this long. When omitted,
+    /// inherit --quorum-timeout-s for backward compatibility.
+    #[arg(long)]
+    final_ack_timeout_s: Option<u64>,
     /// Total number of outer steps T (each syncs one fragment).
     #[arg(long)]
     total_steps: u64,
@@ -90,6 +94,12 @@ struct Args {
     learner_weight: String,
 }
 
+impl Args {
+    fn resolved_final_ack_timeout_s(&self) -> u64 {
+        self.final_ack_timeout_s.unwrap_or(self.quorum_timeout_s)
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         // Logs are consumed by launchers, tests, and event collectors. Keep
@@ -125,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         sync_interval_steps: args.sync_interval_steps,
         delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
+        final_ack_timeout_s: args.resolved_final_ack_timeout_s(),
         total_steps: args.total_steps,
         outer_lr: args.outer_lr,
         outer_momentum: args.outer_momentum,
@@ -142,4 +153,38 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_ack_timeout_is_compatible_when_omitted_and_distinct_when_set() {
+        let inherited = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--quorum-timeout-s",
+            "2",
+            "--total-steps",
+            "1",
+        ])
+        .unwrap();
+        assert_eq!(inherited.resolved_final_ack_timeout_s(), 2);
+
+        let explicit = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--quorum-timeout-s",
+            "900",
+            "--final-ack-timeout-s",
+            "3600",
+            "--total-steps",
+            "1",
+        ])
+        .unwrap();
+        assert_eq!(explicit.resolved_final_ack_timeout_s(), 3600);
+    }
 }

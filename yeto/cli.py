@@ -207,6 +207,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
             "function (package.module.function)"
         ),
     )
+    rl.add_argument(
+        "--codex-reasoning-effort",
+        choices=["xhigh"],
+        default=None,
+        help=(
+            "stock Codex harness only: pin Codex reasoning effort to xhigh; "
+            "the attested binary is supplied by the direct SSH harness"
+        ),
+    )
     rl.add_argument("--use-session-server", action="store_true")
     rl.add_argument("--session-server-ip", default=None)
     rl.add_argument("--session-server-port", type=int, nargs="+", default=None)

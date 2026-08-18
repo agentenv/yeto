@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
+from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +40,16 @@ def parse_args(argv=None):
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--data-revision", default=None)
+    parser.add_argument("--eval-dataset-name", default=None)
+    parser.add_argument("--eval-data-sha256", default=None)
+    parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--eval-interval", type=int, default=None)
+    parser.add_argument("--eval-samples-per-prompt", type=int, default=None)
+    parser.add_argument("--eval-temperature", type=float, default=None)
+    parser.add_argument("--eval-top-p", type=float, default=None)
+    parser.add_argument("--eval-max-prompt-len", type=int, default=None)
+    parser.add_argument("--eval-max-response-len", type=int, default=None)
+    parser.add_argument("--eval-max-context-len", type=int, default=None)
     parser.add_argument("--syncer", required=True)
     parser.add_argument("--learner-id", type=int, required=True)
     parser.add_argument("--reward-function", required=True)
@@ -65,6 +79,7 @@ def parse_args(argv=None):
     parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default=None)
     parser.add_argument("--custom-generate-function-path", default=None)
     parser.add_argument("--custom-agent-function-path", default=None)
+    parser.add_argument("--codex-harness-contract", type=json.loads, default=None)
     parser.add_argument("--agent-max-seq-len", type=int, default=None)
     parser.add_argument("--use-session-server", action="store_true")
     parser.add_argument("--session-server-ip", default=None)
@@ -120,6 +135,304 @@ def parse_args(argv=None):
 
     add_wandb_arguments(parser)
     return parser.parse_args(argv)
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _strict_json_file_semantics(path: Path) -> tuple[Any, ...]:
+    """Parse exact, typed JSON semantics independent of object-key order."""
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for name, item in pairs:
+            if name in value:
+                raise ValueError(f"duplicate JSON object key: {name!r}")
+            value[name] = item
+        return value
+
+    def finite_number(name: str) -> None:
+        raise ValueError(f"non-finite JSON number: {name}")
+
+    try:
+        value = json.loads(
+            path.read_bytes(),
+            object_pairs_hook=unique_object,
+            parse_constant=finite_number,
+            parse_float=Decimal,
+            parse_int=Decimal,
+        )
+    except (OSError, UnicodeError, ValueError, DecimalException) as exc:
+        raise ValueError("Codex app-server schema is malformed JSON") from exc
+
+    def typed_semantics(item: Any) -> tuple[Any, ...]:
+        if item is None:
+            return ("null",)
+        if isinstance(item, bool):
+            return ("boolean", item)
+        if isinstance(item, Decimal):
+            return ("number", item)
+        if isinstance(item, str):
+            return ("string", item)
+        if isinstance(item, list):
+            return ("array", tuple(typed_semantics(value) for value in item))
+        if isinstance(item, dict):
+            return (
+                "object",
+                tuple(
+                    sorted(
+                        (name, typed_semantics(value))
+                        for name, value in item.items()
+                    )
+                ),
+            )
+        raise TypeError(f"unsupported parsed JSON value: {type(item).__name__}")
+
+    return typed_semantics(value)
+
+
+def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
+    try:
+        pinned_semantics = _strict_json_file_semantics(pinned)
+        generated_semantics = _strict_json_file_semantics(generated)
+    except ValueError as exc:
+        raise ValueError("live stock Codex app-server schema drifted") from exc
+    if generated_semantics != pinned_semantics:
+        raise ValueError("live stock Codex app-server schema drifted")
+
+
+def _preflight_codex_harness(args) -> None:
+    """Fail before model allocation if the signed Codex surface has drifted."""
+
+    from . import (
+        CODEX_APP_SERVER_PROTOCOL_REVISION,
+        CODEX_APP_SERVER_SCHEMA_SHA256,
+        CODEX_BASE_INSTRUCTIONS_SHA256,
+        CODEX_CLI_VERSION,
+        CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH,
+        CODEX_CONTAINER_BINARY_PATH,
+        CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
+        CODEX_HARNESS_AGENT,
+        CODEX_HARNESS_AGENT_SHA256,
+        CODEX_LINUX_BINARY_SHA256,
+        CODEX_LINUX_BINARY_SIZE_BYTES,
+        CODEX_LINUX_TARGET,
+        CODEX_NPM_PACKAGE,
+        CODEX_NPM_TARBALL_SHA256,
+        CODEX_PACKAGE_MANIFEST_SHA256,
+        CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
+        CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
+    )
+
+    contract = getattr(args, "codex_harness_contract", None)
+    if args.custom_agent_function_path != CODEX_HARNESS_AGENT:
+        if contract is not None:
+            raise ValueError(
+                "--codex-harness-contract requires the signed stock Codex agent"
+            )
+        return
+    if not isinstance(contract, dict):
+        raise ValueError("the signed stock Codex agent requires its harness contract")
+    required = {
+        "agent_function_path",
+        "agent_source_sha256",
+        "controller_binary_path",
+        "controller_package_manifest_path",
+        "controller_app_server_schema_path",
+        "bundle_binary_path",
+        "bundle_package_manifest_path",
+        "bundle_app_server_schema_path",
+        "container_binary_path",
+        "container_app_server_schema_path",
+        "binary_sha256",
+        "binary_size_bytes",
+        "cli_version",
+        "npm_package",
+        "target",
+        "npm_tarball_sha256",
+        "package_manifest_sha256",
+        "app_server_protocol_revision",
+        "app_server_schema_sha256",
+        "base_instructions_sha256",
+        "terminal_exec_tool_schema_sha256",
+        "submit_tool_schema_sha256",
+        "dynamic_tools_schema_sha256",
+        "reasoning_effort",
+        "backend",
+    }
+    if set(contract) != required:
+        raise ValueError("stock Codex harness contract shape drifted")
+    pinned = {
+        "agent_function_path": CODEX_HARNESS_AGENT,
+        "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
+        "container_binary_path": CODEX_CONTAINER_BINARY_PATH,
+        "container_app_server_schema_path": (
+            CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH
+        ),
+        "binary_sha256": CODEX_LINUX_BINARY_SHA256,
+        "binary_size_bytes": CODEX_LINUX_BINARY_SIZE_BYTES,
+        "cli_version": CODEX_CLI_VERSION,
+        "npm_package": CODEX_NPM_PACKAGE,
+        "target": CODEX_LINUX_TARGET,
+        "npm_tarball_sha256": CODEX_NPM_TARBALL_SHA256,
+        "package_manifest_sha256": CODEX_PACKAGE_MANIFEST_SHA256,
+        "app_server_protocol_revision": CODEX_APP_SERVER_PROTOCOL_REVISION,
+        "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
+        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
+        "terminal_exec_tool_schema_sha256": (
+            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
+        ),
+        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
+        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
+        "reasoning_effort": "xhigh",
+    }
+    if any(contract.get(name) != expected for name, expected in pinned.items()):
+        raise ValueError("stock Codex runtime identity drifted")
+    expected_backend = {
+        "model": "deepseekv4",
+        "max_tokens": args.rollout_max_response_len,
+        "reasoning_effort": "max",
+        "thinking": {"type": "enabled"},
+        "chat_template": "deepseekv4",
+        "chat_template_kwargs": {
+            "thinking_mode": "thinking",
+            "reasoning_effort": "max",
+            "drop_thinking": False,
+        },
+        "tito_allowed_append_roles": ["tool", "user"],
+    }
+    if (
+        contract.get("backend") != expected_backend
+        or args.rl_model_recipe != "deepseek-v4-flash"
+        or args.tito_model != "deepseekv4"
+        or args.tito_allowed_append_roles != ["tool", "user"]
+        or args.apply_chat_template_kwargs
+        != expected_backend["chat_template_kwargs"]
+    ):
+        raise ValueError("stock Codex DSV4 backend/TITO identity drifted")
+    try:
+        from yeto_miles_secrlenv import codex_harness_agent
+
+        live_identity = codex_harness_agent.codex_harness_identity()
+    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
+        raise ValueError("cannot attest the Yeto Codex harness adapter") from exc
+    identity_names = (
+        "base_instructions_sha256",
+        "terminal_exec_tool_schema_sha256",
+        "submit_tool_schema_sha256",
+        "dynamic_tools_schema_sha256",
+    )
+    if live_identity != {name: contract.get(name) for name in identity_names}:
+        raise ValueError("Yeto Codex adapter identity drifted")
+
+    from ..provenance import file_sha256
+
+    adapter_path = Path(codex_harness_agent.__file__)
+    if adapter_path.is_symlink() or not adapter_path.is_file():
+        raise ValueError("Yeto Codex adapter source identity drifted")
+    adapter_path = adapter_path.resolve()
+    if file_sha256(adapter_path) != contract.get("agent_source_sha256"):
+        raise ValueError("Yeto Codex adapter source identity drifted")
+    binary = Path(CODEX_CONTAINER_BINARY_PATH)
+    manifest = Path("/opt/yeto/codex/codex-package.json")
+    schema = Path(CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH)
+    if (
+        binary.is_symlink()
+        or not binary.is_file()
+        or binary.stat().st_size != CODEX_LINUX_BINARY_SIZE_BYTES
+        or file_sha256(binary) != CODEX_LINUX_BINARY_SHA256
+        or manifest.is_symlink()
+        or not manifest.is_file()
+        or file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256
+        or schema.is_symlink()
+        or not schema.is_file()
+        or file_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
+    ):
+        raise ValueError("mounted stock Codex artifact does not match its Yeto pin")
+    try:
+        version = subprocess.run(
+            [str(binary), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("cannot execute the pinned stock Codex binary") from exc
+    if version != CODEX_CLI_VERSION:
+        raise ValueError("stock Codex executable version drifted")
+    try:
+        with tempfile.TemporaryDirectory(prefix="yeto-codex-schema-") as temporary:
+            root = Path(temporary)
+            output = root / "schema"
+            subprocess.run(
+                [
+                    str(binary),
+                    "app-server",
+                    "generate-json-schema",
+                    "--experimental",
+                    "--out",
+                    str(output),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            generated_schema = (
+                output / "codex_app_server_protocol.v2.schemas.json"
+            )
+            if (
+                generated_schema.is_symlink()
+                or not generated_schema.is_file()
+            ):
+                raise ValueError("live stock Codex app-server schema drifted")
+            _verify_live_codex_app_server_schema(schema, generated_schema)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("cannot verify the stock Codex app-server schema") from exc
+    expected_env = {
+        "YETO_CODEX_BINARY_PATH": CODEX_CONTAINER_BINARY_PATH,
+        "YETO_CODEX_BINARY_SHA256": CODEX_LINUX_BINARY_SHA256,
+        "YETO_CODEX_BINARY_SIZE_BYTES": str(CODEX_LINUX_BINARY_SIZE_BYTES),
+        "YETO_CODEX_VERSION": CODEX_CLI_VERSION,
+        "YETO_CODEX_APP_SERVER_PROTOCOL_REVISION": (
+            CODEX_APP_SERVER_PROTOCOL_REVISION
+        ),
+        "YETO_CODEX_APP_SERVER_SCHEMA_SHA256": CODEX_APP_SERVER_SCHEMA_SHA256,
+        "YETO_CODEX_BASE_INSTRUCTIONS_SHA256": contract[
+            "base_instructions_sha256"
+        ],
+        "YETO_CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256": contract[
+            "terminal_exec_tool_schema_sha256"
+        ],
+        "YETO_CODEX_SUBMIT_TOOL_SCHEMA_SHA256": contract[
+            "submit_tool_schema_sha256"
+        ],
+        "YETO_CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256": contract[
+            "dynamic_tools_schema_sha256"
+        ],
+        "YETO_CODEX_REASONING_EFFORT": "xhigh",
+        "YETO_CODEX_BACKEND_MAX_TOKENS": str(args.rollout_max_response_len),
+        "YETO_CODEX_BACKEND_REASONING_EFFORT": "max",
+        "YETO_CODEX_BACKEND_THINKING": "enabled",
+        "YETO_CODEX_CHAT_TEMPLATE": "deepseekv4",
+        "YETO_CODEX_CHAT_TEMPLATE_KWARGS": json.dumps(
+            expected_backend["chat_template_kwargs"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "YETO_CODEX_TITO_ALLOWED_APPEND_ROLES": "tool,user",
+        "YETO_CODEX_HARNESS_CONTRACT_SHA256": _canonical_sha256(contract),
+    }
+    mismatched = [
+        name for name, expected in expected_env.items() if os.getenv(name) != expected
+    ]
+    if mismatched:
+        raise ValueError(
+            "stock Codex container environment drifted: " + ", ".join(mismatched)
+        )
 
 
 def _provider_value(provider, *names: str):
@@ -412,7 +725,8 @@ def build_miles_argv(
         "--metadata-key", "metadata",
         "--rollout-seed",
         str(getattr(args, "rollout_seed", args.seed + args.learner_id)),
-        "--num-rollout", str(args.global_rounds),
+        "--num-rollout",
+        str(0 if getattr(args, "eval_only", False) else args.global_rounds),
         "--rollout-batch-size", str(args.groups_per_round),
         "--n-samples-per-prompt", str(args.samples_per_group),
         "--over-sampling-batch-size", str(args.over_sampling_batch_size),
@@ -444,6 +758,48 @@ def build_miles_argv(
         "--sglang-max-lora-rank", str(args.lora_r),
         "--pin-rollout-manager-to-head",
     ]
+    eval_interval = getattr(args, "eval_interval", None)
+    if eval_interval is not None:
+        if not yeto_policy_sync:
+            raise ValueError("Yeto evaluation requires the external policy boundary")
+        if eval_interval <= 0:
+            raise ValueError("evaluation interval must be positive")
+        if not getattr(args, "eval_only", False) or eval_interval != 1:
+            raise ValueError("SSH evaluation must be one separate eval-only run")
+        eval_name = getattr(args, "eval_dataset_name", None)
+        eval_samples = getattr(args, "eval_samples_per_prompt", None)
+        if not eval_name or not isinstance(eval_samples, int) or eval_samples <= 0:
+            raise ValueError(
+                "evaluation requires a dataset name and positive sample count"
+            )
+        # Point Miles at the exact normalized prompt file used for training.
+        # Leaving no second preparation/copy path is what makes the train/eval
+        # task identity mechanically checkable.
+        values.extend(
+            (
+                "--eval-function-path",
+                "yeto.rl.miles.generate_rollout",
+                "--eval-prompt-data",
+                str(eval_name),
+                str(prompt_path),
+                "--eval-interval",
+                str(eval_interval),
+                "--skip-eval-before-train",
+                "--n-samples-per-eval-prompt",
+                str(eval_samples),
+                "--log-passrate",
+            )
+        )
+        for flag, name in (
+            ("--eval-temperature", "eval_temperature"),
+            ("--eval-top-p", "eval_top_p"),
+            ("--eval-max-prompt-len", "eval_max_prompt_len"),
+            ("--eval-max-response-len", "eval_max_response_len"),
+            ("--eval-max-context-len", "eval_max_context_len"),
+        ):
+            value = getattr(args, name, None)
+            if value is not None:
+                values.extend((flag, str(value)))
     if expert_full:
         values.extend(
             (
@@ -571,12 +927,17 @@ def build_miles_argv(
             )
         )
     if getattr(args, "custom_agent_function_path", None):
+        agent_max_seq_len = getattr(args, "agent_max_seq_len", None) or args.seq_len
+        if eval_interval is not None and getattr(
+            args, "eval_max_context_len", None
+        ) is not None:
+            agent_max_seq_len = args.eval_max_context_len
         values.extend(
             (
                 "--custom-agent-function-path",
                 args.custom_agent_function_path,
                 "--max-seq-len",
-                str(getattr(args, "agent_max_seq_len", None) or args.seq_len),
+                str(agent_max_seq_len),
             )
         )
     dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
@@ -748,6 +1109,30 @@ def prepare_prompt_data(
     return output
 
 
+def _verify_eval_dataset_identity(args) -> None:
+    """Verify the source bytes attested by an SSH evaluation plan."""
+
+    if getattr(args, "eval_interval", None) is None:
+        if getattr(args, "eval_only", False):
+            raise ValueError("--eval-only requires evaluation configuration")
+        return
+    if not getattr(args, "eval_only", False):
+        raise ValueError("evaluation configuration requires --eval-only")
+    expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("evaluation dataset requires an immutable SHA256")
+    source = Path(args.data).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("evaluation requires one regular local training dataset file")
+    from ..provenance import file_sha256
+
+    actual = file_sha256(source)
+    if actual != expected:
+        raise ValueError(
+            f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
+        )
+
+
 def _parse_miles_args(argv: list[str]):
     previous = sys.argv
     try:
@@ -907,6 +1292,11 @@ def run_miles(
                 spec.name for spec in specs
             )
         miles_args.yeto_rl_reward_sha256 = args.reward_sha256
+        miles_args.yeto_rl_codex_harness_contract = getattr(
+            args,
+            "codex_harness_contract",
+            None,
+        )
         miles_args.yeto_rl_dynamic_sampling_max_replacements = getattr(
             args, "dynamic_sampling_max_replacements", None
         )
@@ -919,6 +1309,8 @@ def run_miles(
         miles_args.wandb_project = getattr(args, "wandb_project", "yeto")
         miles_args.wandb_entity = getattr(args, "wandb_entity", None)
         miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
+        if getattr(args, "eval_only", False):
+            miles_args.yeto_rl_eval_policy_version = args.global_rounds
         sync_preset = getattr(args, "sync_preset", "strict-avg")
         miles_args.yeto_rl_sync_preset = sync_preset
         miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"
@@ -977,6 +1369,7 @@ def run_miles(
                 layout_hash=layout_hash,
                 event_tape=args.event_tape,
                 audit_dir=args.audit_dir,
+                send_initial_params=not getattr(args, "eval_only", False),
             )
 
     from train import train as miles_train
@@ -1007,6 +1400,7 @@ def main(argv=None) -> None:
             f"reward source SHA256 mismatch: expected {args.reward_sha256.lower()}, "
             f"got {reward_sha256}"
         )
+    _preflight_codex_harness(args)
     verify_miles_revision(args.miles_root)
     miles_root = str(Path(args.miles_root).expanduser().resolve())
     if miles_root not in sys.path:
@@ -1019,7 +1413,12 @@ def main(argv=None) -> None:
         load_function(args.custom_generate_function_path)
     if args.custom_agent_function_path:
         load_function(args.custom_agent_function_path)
-    if args.custom_agent_function_path == "yeto_miles_secrlenv.agent.run":
+    from . import CODEX_HARNESS_AGENT
+
+    if args.custom_agent_function_path in {
+        "yeto_miles_secrlenv.agent.run",
+        CODEX_HARNESS_AGENT,
+    }:
         from yeto_miles_secrlenv.client import require_daemon_ready
 
         require_daemon_ready()
@@ -1044,6 +1443,7 @@ def main(argv=None) -> None:
             repo_id=rollout_model,
             revision=args.rollout_model_revision,
         )
+    _verify_eval_dataset_identity(args)
     prompt_path = prepare_prompt_data(
         args.data,
         args.data_revision,
