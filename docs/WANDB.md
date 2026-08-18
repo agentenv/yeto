@@ -93,21 +93,45 @@ count — so a curve can be filtered by cloud, region, or GPU.
 ## The syncer stays Rust
 
 The syncer writes its merge record already; nothing was added to its hot
-path. In head-controller mode (the default) `LocalSyncer.start_tape_forwarder`
-runs a daemon thread on the head that tails `~/yeto-tape.jsonl` and turns
-each record into the table above. Because the tape is append-only, a syncer
-restart resumes the stream instead of replaying it.
+path. Instead of shipping the tape to a reader, the reader goes to the
+tape — in both controller modes:
+
+| mode | where the syncer runs | who tails the tape |
+|---|---|---|
+| `head` (default) | a subprocess on the head VM | `LocalSyncer.start_tape_forwarder`, a daemon thread in the controller |
+| `local` | its own `<prefix>-syncer` cluster | `yeto.wandb_tape --follow`, a sidecar process on that VM |
+
+The sidecar (`syncer_tape_sidecar` in `yeto/launcher.py`) is backgrounded
+on purpose. The syncer has to stay the job's **foreground** process,
+because FleetController reads that job's exit code as the syncer's health;
+and as a separate process the forwarder cannot take the syncer down with
+it. Telemetry also pulls the repo workdir onto the syncer VM, which the
+cross-build path already did — `yeto.wandb_tape` and `yeto.wandb_logger`
+are stdlib-only, so the syncer VM never needs the training stack. A test
+pins that.
 
 `tests/test_wandb_tape.py` parses the Rust format literal in
 `syncer/src/server.rs` and fails if a field is added there without a
 decision on the Python side.
 
-With `--controller local` the tape lives on a separate syncer VM that the
-controller only reaches through sky, so island metrics stream and merge
-metrics do not. Fetch the tape afterwards and replay it:
+### Resuming, not replaying
+
+A forwarder records the byte offset of the last record it forwarded next
+to the tape (`~/yeto-tape.jsonl.offset`). A restarted forwarder — a
+restarted sky job, a reused head — picks up from there instead of logging
+every past merge a second time. Writes are throttled to one every two
+seconds and flushed on shutdown; **sky ends a job with SIGTERM, so the
+follow loop handles it** rather than dying with unflushed offsets. A tape
+shorter than the stored offset is a different tape and is read from the
+top.
+
+The bounded cost of a hard kill (SIGKILL, VM loss) is up to two seconds of
+re-logged merges. `--from-start` ignores a stored offset deliberately.
+
+### Replaying a finished tape
 
     python -m yeto.wandb_tape ~/yeto-tape.jsonl --wandb-group <run-name>
-    python -m yeto.wandb_tape ~/yeto-tape.jsonl --follow    # live, on the VM
+    python -m yeto.wandb_tape ~/yeto-tape.jsonl --follow    # live
 
 ## Failure policy
 
@@ -122,7 +146,8 @@ Telemetry never costs a run:
 
 `WANDB_API_KEY` follows the same path as `HF_TOKEN`: read from the
 submitting machine's environment, forwarded through sky `envs` to the head
-and to every learner, and only when `--wandb` was passed. It is never
+(or the syncer cluster) and to every learner, and only when `--wandb` was
+passed. It is never
 written into `wandb.config` (`build_config` drops anything whose name looks
 like a credential).
 

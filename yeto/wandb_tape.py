@@ -25,9 +25,10 @@ import argparse
 import json
 import logging
 import os
+import signal
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from .wandb_logger import NullRun, WandbRun
@@ -96,16 +97,21 @@ def tape_metrics(rec: dict) -> dict:
 def follow_jsonl(
     path: str | os.PathLike,
     *,
-    from_start: bool = True,
+    start_offset: int = 0,
+    on_offset: Callable[[int], None] | None = None,
     stop: threading.Event | None = None,
     poll_seconds: float = POLL_SECONDS,
 ) -> Iterator[dict]:
     """Yield JSON objects from a growing JSONL file.
 
-    Only complete, newline-terminated lines are parsed: the syncer
-    appends with a single ``write_all`` per record, but a reader can
-    still catch a short write, and half a record is not a merge.
-    Returns when ``stop`` is set; without one it follows forever.
+    Read in binary so positions are real byte offsets: ``on_offset`` is
+    called with the offset just past each record it yields, which is what
+    a restarted forwarder passes back as ``start_offset``.
+
+    Only complete, newline-terminated lines are parsed. The syncer appends
+    with a single ``write_all`` per record, but a reader can still catch a
+    short write, and half a record is not a merge. Returns when ``stop``
+    is set; without one it follows forever.
     """
     path = Path(os.path.expanduser(str(path)))
     while not path.exists():
@@ -113,13 +119,15 @@ def follow_jsonl(
             return
         if stop is None:
             time.sleep(poll_seconds)
-    with open(path, encoding="utf-8", errors="replace") as f:
-        if not from_start:
-            f.seek(0, os.SEEK_END)
+    with open(path, "rb") as f:
+        if start_offset:
+            # A tape that shrank is a different tape; re-read it whole.
+            size = os.fstat(f.fileno()).st_size
+            f.seek(start_offset if start_offset <= size else 0)
         while True:
             position = f.tell()
             line = f.readline()
-            if not line.endswith("\n"):
+            if not line.endswith(b"\n"):
                 # Incomplete tail (or EOF): rewind and wait for the rest.
                 f.seek(position)
                 if stop is not None and stop.is_set():
@@ -130,21 +138,80 @@ def follow_jsonl(
                 else:
                     time.sleep(poll_seconds)
                 continue
-            line = line.strip()
-            if not line:
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
                 continue
             try:
-                yield json.loads(line)
+                record = json.loads(text)
             except json.JSONDecodeError as e:
                 log.warning("skipping unparsable event-tape line: %s", e)
+                continue
+            yield record
+            if on_offset is not None:
+                on_offset(f.tell())
+
+
+def offset_path_for(tape_path: str | os.PathLike) -> str:
+    """Where a forwarder remembers how far it read into ``tape_path``."""
+    return os.path.expanduser(str(tape_path)) + ".offset"
+
+
+class OffsetStore:
+    """The byte offset of the last forwarded record, kept on disk.
+
+    A forwarder that dies with its host process (a restarted sky job, say)
+    would otherwise re-read the tape from the top and log every merge a
+    second time. Writes are throttled and atomic; a missing or unreadable
+    file simply means "start from the beginning".
+    """
+
+    def __init__(self, path: str | os.PathLike, min_interval: float = 2.0):
+        self.path = os.path.expanduser(str(path))
+        self.min_interval = min_interval
+        self._last_write = float("-inf")  # the first offset always lands
+        self._pending: int | None = None
+
+    def read(self) -> int:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return max(0, int(f.read().strip()))
+        except (OSError, ValueError):
+            return 0
+
+    def record(self, offset: int) -> None:
+        """Note an offset; flushed at most every ``min_interval`` seconds."""
+        self._pending = offset
+        now = time.monotonic()
+        if now - self._last_write >= self.min_interval:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._pending is None:
+            return
+        offset, self._pending = self._pending, None
+        self._last_write = time.monotonic()
+        tmp = f"{self.path}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(str(offset))
+            os.replace(tmp, self.path)
+        except OSError as e:
+            log.warning("could not persist event-tape offset: %s", e)
 
 
 class TapeForwarder:
     """Daemon thread tailing an event tape into a W&B run."""
 
-    def __init__(self, run: NullRun | WandbRun, tape_path: str | os.PathLike):
+    def __init__(
+        self,
+        run: NullRun | WandbRun,
+        tape_path: str | os.PathLike,
+        *,
+        offsets: OffsetStore | None = None,
+    ):
         self.run = run
         self.tape_path = tape_path
+        self.offsets = offsets
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.records = 0
@@ -159,8 +226,16 @@ class TapeForwarder:
         log.info("forwarding syncer event tape %s to W&B", self.tape_path)
 
     def _forward(self) -> None:
+        start = self.offsets.read() if self.offsets is not None else 0
+        if start:
+            log.info("resuming the event tape at byte %d", start)
         try:
-            for rec in follow_jsonl(self.tape_path, stop=self._stop):
+            for rec in follow_jsonl(
+                self.tape_path,
+                start_offset=start,
+                on_offset=None if self.offsets is None else self.offsets.record,
+                stop=self._stop,
+            ):
                 self.run.log(tape_metrics(rec))
                 self.records += 1
         except Exception as e:  # noqa: BLE001 - telemetry never breaks the run
@@ -170,6 +245,8 @@ class TapeForwarder:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+        if self.offsets is not None:
+            self.offsets.flush()
         self.run.summary({"sync/tape_records": self.records})
 
 
@@ -203,6 +280,11 @@ def main(argv=None) -> int:
     p.add_argument("--wandb-group", default=None, help="run name / --cluster-prefix")
     p.add_argument("--wandb-mode", choices=["online", "offline"], default="online")
     p.add_argument("--follow", action="store_true", help="tail a live tape instead")
+    p.add_argument(
+        "--from-start",
+        action="store_true",
+        help="ignore a stored offset and re-read the whole tape (--follow only)",
+    )
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s wandb-tape %(levelname)s %(message)s")
@@ -220,13 +302,17 @@ def main(argv=None) -> int:
         print("[yeto] W&B is unavailable; nothing was logged.")
         return 1
     if args.follow:
-        forwarder = TapeForwarder(run, args.tape)
+        offsets = None if args.from_start else OffsetStore(offset_path_for(args.tape))
+        forwarder = TapeForwarder(run, args.tape, offsets=offsets)
         forwarder.start()
-        try:
-            while True:
-                time.sleep(POLL_SECONDS)
-        except KeyboardInterrupt:
-            forwarder.stop()
+        # sky ends a job with SIGTERM. Without handling it the throttled
+        # offsets never reach disk and a restarted forwarder re-logs every
+        # merge since the last flush, which is the whole point of the store.
+        done = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: done.set())
+        done.wait()
+        forwarder.stop()
     else:
         count = replay(args.tape, run)
         print(f"[yeto] replayed {count} merge records into W&B")

@@ -6,12 +6,23 @@ fails if a field is added there without a decision on this side.
 """
 
 import json
+import os
 import re
+import signal
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
-from yeto.wandb_tape import TapeForwarder, follow_jsonl, replay, tape_metrics
+from yeto.wandb_tape import (
+    OffsetStore,
+    TapeForwarder,
+    follow_jsonl,
+    offset_path_for,
+    replay,
+    tape_metrics,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -220,3 +231,158 @@ def test_forwarder_streams_a_growing_tape(tmp_path):
     forwarder.stop()
     assert run.logged[0]["global_step"] == 7
     assert run.summaries[-1] == {"sync/tape_records": 1}
+
+
+# --------------------------------------------------------------------------
+# offset persistence: a restarted forwarder resumes instead of replaying
+
+
+def _drain(tape, seen, stop, **kw):
+    def run():
+        for rec in follow_jsonl(tape, stop=stop, poll_seconds=0.01, **kw):
+            seen.append(rec)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_offsets_are_byte_positions_that_resume_exactly(tmp_path):
+    tape = tmp_path / "tape.jsonl"
+    line = json.dumps(REAL_RECORD) + "\n"
+    tape.write_text(line * 3)
+
+    offsets = []
+    stop = threading.Event()
+    seen = []
+    t = _drain(tape, seen, stop, on_offset=offsets.append)
+    assert _wait_for(lambda: len(seen) == 3)
+    stop.set()
+    t.join(timeout=5)
+    assert offsets == [len(line), 2 * len(line), 3 * len(line)]
+
+    # A second pass from the last offset sees only what was appended after.
+    tape.write_text(line * 4)
+    stop2 = threading.Event()
+    seen2 = []
+    t2 = _drain(tape, seen2, stop2, start_offset=offsets[-1])
+    assert _wait_for(lambda: len(seen2) == 1)
+    stop2.set()
+    t2.join(timeout=5)
+    assert len(seen2) == 1
+
+
+def test_a_truncated_tape_is_read_from_the_top(tmp_path):
+    # A shorter file is a different tape (a fresh syncer VM, say), not a
+    # tape we are already 10 MB into.
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text(json.dumps(REAL_RECORD) + "\n")
+    stop = threading.Event()
+    seen = []
+    t = _drain(tape, seen, stop, start_offset=10_000)
+    assert _wait_for(lambda: len(seen) == 1)
+    stop.set()
+    t.join(timeout=5)
+
+
+def test_offset_store_round_trips_and_tolerates_junk(tmp_path):
+    store = OffsetStore(tmp_path / "tape.offset", min_interval=0)
+    assert store.read() == 0  # missing file
+    store.record(4096)
+    assert store.read() == 4096
+    (tmp_path / "tape.offset").write_text("not a number")
+    assert store.read() == 0
+
+
+def test_offset_writes_are_throttled_but_flushed_on_stop(tmp_path):
+    store = OffsetStore(tmp_path / "tape.offset", min_interval=3600)
+    store.record(10)
+    assert store.read() == 10  # the first offset lands immediately
+    store.record(20)
+    store.record(30)
+    assert store.read() == 10  # the rest are throttled
+    store.flush()
+    assert store.read() == 30  # and only the latest survives the flush
+
+
+def test_a_restarted_forwarder_does_not_relog_the_tape(tmp_path):
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text((json.dumps(REAL_RECORD) + "\n") * 3)
+    store = OffsetStore(offset_path_for(tape), min_interval=0)
+
+    first = _RecordingRun()
+    forwarder = TapeForwarder(first, tape, offsets=store)
+    forwarder.start()
+    assert _wait_for(lambda: len(first.logged) == 3)
+    forwarder.stop()
+
+    # The syncer VM's job restarts; the tape is still there, two merges longer.
+    with open(tape, "a") as f:
+        f.write((json.dumps(REAL_RECORD) + "\n") * 2)
+    second = _RecordingRun()
+    resumed = TapeForwarder(second, tape, offsets=OffsetStore(offset_path_for(tape)))
+    resumed.start()
+    assert _wait_for(lambda: len(second.logged) == 2)
+    time.sleep(0.05)  # nothing further should arrive
+    resumed.stop()
+    assert len(second.logged) == 2
+
+
+def test_from_start_is_the_default_without_an_offset_store(tmp_path):
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text((json.dumps(REAL_RECORD) + "\n") * 2)
+    run = _RecordingRun()
+    forwarder = TapeForwarder(run, tape)  # no offsets
+    forwarder.start()
+    assert _wait_for(lambda: len(run.logged) == 2)
+    forwarder.stop()
+    assert not (tmp_path / "tape.jsonl.offset").exists()
+
+
+def test_sigterm_flushes_the_offset_before_the_process_dies(tmp_path):
+    """sky ends a job with SIGTERM, so the follow loop must flush there.
+
+    In-process tests miss this: they call stop() directly. Only a real
+    signal to a real process exercises the path a restarted sky job takes,
+    and getting it wrong silently re-logs every merge since the last flush.
+    """
+    stub = tmp_path / "stub" / "wandb"
+    stub.mkdir(parents=True)
+    (stub / "__init__.py").write_text(
+        "class _Run:\n"
+        "    summary = {}\n"
+        "    def finish(self, exit_code=0): pass\n"
+        "def init(**kw): return _Run()\n"
+        "def log(m): pass\n"
+        "def define_metric(n, step_metric=None): pass\n"
+    )
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text((json.dumps(REAL_RECORD) + "\n") * 3)
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(tmp_path / "stub"), str(REPO_ROOT)])
+    env["WANDB_API_KEY"] = "stub"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "yeto.wandb_tape", str(tape), "--follow",
+         "--wandb-group", "g", "--wandb-project", "p"],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    offset_file = Path(offset_path_for(tape))
+    try:
+        # Wait for the tape to be fully consumed (the first offset lands at
+        # once; the rest are throttled until the flush on shutdown).
+        assert _wait_for(offset_file.exists, timeout=15)
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=15) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert int(offset_file.read_text()) == tape.stat().st_size

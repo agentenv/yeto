@@ -10,7 +10,13 @@ import json
 import pytest
 
 from yeto.gpu_spec import ClusterSpec
-from yeto.launcher import SYNCER_EVENT_TAPE, LocalSyncer, make_learner_task, syncer_command
+from yeto.launcher import (
+    SYNCER_EVENT_TAPE,
+    LocalSyncer,
+    make_learner_task,
+    syncer_command,
+    syncer_tape_sidecar,
+)
 
 _SPEC = ClusterSpec(cloud="aws", region="us-east-2", num_nodes=1, gpus_per_node=8, gpu="B200")
 
@@ -233,3 +239,74 @@ def test_launch_defaults_leave_telemetry_off():
 
     args = parse_args(["--model", "qwen35-9b", "--data", "org/chat"])
     assert args.wandb is False
+
+
+# --------------------------------------------------------------------------
+# the syncer VM's tape sidecar (local controller mode)
+
+
+def test_the_syncer_task_is_untouched_without_the_flag(monkeypatch):
+    monkeypatch.setenv("WANDB_API_KEY", "secret")
+    setup, run, envs = syncer_tape_sidecar(_syncer_args(wandb=False))
+    assert (setup, run, envs) == ("", "", {})
+
+
+def test_the_forwarder_runs_beside_the_syncer_not_instead_of_it(monkeypatch):
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    _setup, run, _envs = syncer_tape_sidecar(_syncer_args(wandb=True))
+    # Backgrounded in a subshell: FleetController reads the job's exit code
+    # as the syncer's health, so the syncer must stay in the foreground.
+    assert run.startswith("(")
+    assert run.rstrip().endswith("&) || true")
+    assert run.endswith("\n")
+    assert "-m yeto.wandb_tape" in run
+    assert "--follow" in run
+
+
+def test_the_sidecar_is_pointed_at_the_syncer_tape_and_the_run_group(monkeypatch):
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    _setup, run, envs = syncer_tape_sidecar(
+        _syncer_args(wandb=True, wandb_project="fleet-lab", wandb_entity="acme", wandb_mode="offline")
+    )
+    assert SYNCER_EVENT_TAPE in run
+    assert "--wandb-group my-fleet" in run
+    assert "--wandb-project fleet-lab" in run
+    assert "--wandb-entity acme" in run
+    assert "--wandb-mode offline" in run
+    assert envs["YETO_RUN_GROUP"] == "my-fleet"
+
+
+def test_the_sidecar_credential_follows_the_hf_token_rule(monkeypatch):
+    monkeypatch.setenv("WANDB_API_KEY", "secret")
+    _s, _r, envs = syncer_tape_sidecar(_syncer_args(wandb=True))
+    assert envs["WANDB_API_KEY"] == "secret"
+    monkeypatch.delenv("WANDB_API_KEY")
+    _s, _r, envs = syncer_tape_sidecar(_syncer_args(wandb=True))
+    assert "WANDB_API_KEY" not in envs
+
+
+def test_a_failed_sidecar_install_does_not_fail_the_syncer(monkeypatch):
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    setup, _run, _envs = syncer_tape_sidecar(_syncer_args(wandb=True))
+    assert "pip install -q wandb" in setup
+    assert "||" in setup
+
+
+def test_the_sidecar_only_needs_stdlib_modules():
+    """The syncer VM gets the repo but never the training stack, so the two
+    modules it imports must not reach for torch/transformers/peft."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    heavy = {"torch", "transformers", "peft", "datasets", "accelerate", "sky", "diffusers"}
+    for name in ("wandb_tape.py", "wandb_logger.py"):
+        tree = ast.parse((root / "yeto" / name).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots = {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                roots = {(node.module or "").split(".")[0]}
+            else:
+                continue
+            assert not (roots & heavy), f"{name} imports {roots & heavy}"
