@@ -20,6 +20,7 @@ same sink instead of interrupting training.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Any
 
@@ -56,6 +57,14 @@ _SECRET_SUBSTRINGS = ("token", "key", "secret", "password", "credential")
 def _is_secret(name: str) -> bool:
     lowered = name.lower()
     return any(s in lowered for s in _SECRET_SUBSTRINGS)
+
+
+def _safe_config_scalar(value: object) -> bool:
+    if value is None or isinstance(value, (bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, str) and len(value) <= 256 and "\x00" not in value
 
 
 def add_arguments(p) -> None:
@@ -106,13 +115,13 @@ class NullRun:
 
     enabled = False
 
-    def log(self, metrics: dict) -> None:  # noqa: ARG002
+    def log(self, metrics: dict) -> None:
         pass
 
-    def summary(self, metrics: dict) -> None:  # noqa: ARG002
+    def summary(self, metrics: dict) -> None:
         pass
 
-    def finish(self, exit_code: int = 0) -> None:  # noqa: ARG002
+    def finish(self, exit_code: int = 0) -> None:
         pass
 
 
@@ -155,9 +164,12 @@ class WandbRun:
         except Exception as e:  # noqa: BLE001
             self._fail(e)
 
-    def _fail(self, e: Exception) -> None:
+    def _fail(self, error: Exception) -> None:
         self._broken = True
-        log.warning("W&B telemetry disabled after an error: %s", e)
+        log.warning(
+            "W&B telemetry disabled after a %s",
+            type(error).__name__,
+        )
 
 
 def _resolve_mode(requested: str) -> str:
@@ -195,6 +207,7 @@ def init(
     rank: int = 0,
     group: str | None = None,
     config_extra: dict | None = None,
+    config_override: dict[str, str | int | float | bool | None] | None = None,
     step_metrics: dict[str, str] | None = None,
 ) -> NullRun | WandbRun:
     """Start this process's W&B run, or return a no-op sink.
@@ -220,13 +233,36 @@ def init(
         )
         return NullRun()
 
-    group = group or os.environ.get("YETO_RUN_GROUP") or getattr(args, "cluster_prefix", None)
-    mode = _resolve_mode(getattr(args, "wandb_mode", None) or os.environ.get("WANDB_MODE") or "online")
+    group = (
+        group
+        or os.environ.get("YETO_RUN_GROUP")
+        or getattr(args, "cluster_prefix", None)
+    )
+    mode = _resolve_mode(
+        getattr(args, "wandb_mode", None) or os.environ.get("WANDB_MODE") or "online"
+    )
     # A deterministic id plus resume="allow" is what keeps a preempted spot
     # island on ONE curve: the fleet controller relaunches the learner and
     # the new process reattaches to the run it left behind.
     run_id = f"{group}-{name}" if group else name
     try:
+        if config_override is None:
+            config = build_config(args, config_extra)
+        else:
+            if config_extra is not None:
+                raise ValueError(
+                    "config_override and config_extra are mutually exclusive"
+                )
+            if any(
+                not isinstance(key, str) or key.startswith("_") or _is_secret(key)
+                for key in config_override
+            ):
+                raise ValueError("W&B config override contains a private field")
+            if not all(
+                _safe_config_scalar(value) for value in config_override.values()
+            ):
+                raise ValueError("W&B config override contains a non-scalar value")
+            config = dict(config_override)
         run = wandb.init(
             project=getattr(args, "wandb_project", None) or "yeto",
             entity=getattr(args, "wandb_entity", None),
@@ -236,15 +272,18 @@ def init(
             id=run_id,
             resume="allow",
             mode=mode,
-            config=build_config(args, config_extra),
+            config=config,
         )
         metrics = step_metrics or {"train/*": "local_step", "sync/*": "global_step"}
         for axis in sorted(set(metrics.values())):
             wandb.define_metric(axis)
         for glob, axis in metrics.items():
             wandb.define_metric(glob, step_metric=axis)
-    except Exception as e:  # noqa: BLE001 - telemetry never breaks training
-        log.warning("could not start W&B telemetry (%s); continuing without it", e)
+    except Exception as error:  # noqa: BLE001 - telemetry never breaks training
+        log.warning(
+            "could not start W&B telemetry after a %s; continuing without it",
+            type(error).__name__,
+        )
         return NullRun()
     log.info("W&B run %s/%s started (mode=%s)", group, name, mode)
     return WandbRun(run, wandb)

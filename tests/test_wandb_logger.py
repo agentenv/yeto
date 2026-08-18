@@ -48,15 +48,15 @@ def fake_wandb(monkeypatch):
 
 
 def _args(**overrides):
-    base = dict(
-        wandb=True,
-        wandb_project="yeto",
-        wandb_entity=None,
-        wandb_mode="online",
-        cluster_prefix="my-run",
-        model="qwen35-9b",
-        inner_lr=1e-5,
-    )
+    base = {
+        "wandb": True,
+        "wandb_project": "yeto",
+        "wandb_entity": None,
+        "wandb_mode": "online",
+        "cluster_prefix": "my-run",
+        "model": "qwen35-9b",
+        "inner_lr": 1e-5,
+    }
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -122,28 +122,34 @@ def test_netrc_entry_keeps_the_run_online(fake_wandb, monkeypatch, tmp_path):
     assert fake_wandb.init_kwargs["mode"] == "online"
 
 
-def test_a_failing_init_never_reaches_the_caller(fake_wandb, monkeypatch):
+def test_a_failing_init_never_reaches_the_caller(fake_wandb, monkeypatch, caplog):
     def boom(**kwargs):
-        raise RuntimeError("wandb backend is down")
+        raise RuntimeError("private response from backend")
 
     monkeypatch.setattr(fake_wandb, "init", boom)
     run = init(_args(), job_type="learner", name="learner-0")
     assert isinstance(run, NullRun)
+    assert "RuntimeError" in caplog.text
+    assert "private response" not in caplog.text
 
 
-def test_a_failing_log_disables_telemetry_instead_of_raising(fake_wandb, monkeypatch):
+def test_a_failing_log_disables_telemetry_instead_of_raising(
+    fake_wandb, monkeypatch, caplog
+):
     run = init(_args(), job_type="learner", name="learner-0")
     calls = []
 
     def boom(metrics):
         calls.append(metrics)
-        raise RuntimeError("network partition")
+        raise RuntimeError("private tool result")
 
     monkeypatch.setattr(fake_wandb, "log", boom)
     run.log({"train/loss_per_token": 1.0})  # must not raise
     run.log({"train/loss_per_token": 2.0})
     # One failed attempt, then the run stops trying for the rest of training.
     assert len(calls) == 1
+    assert "RuntimeError" in caplog.text
+    assert "private tool result" not in caplog.text
 
 
 def test_config_drops_credentials_and_private_scratch():
@@ -158,6 +164,60 @@ def test_config_drops_credentials_and_private_scratch():
     assert config["island_backend"] == "torch"
     # The wandb flags themselves are noise in a config table.
     assert "wandb_project" not in config
+
+
+def test_privacy_bounded_config_override_does_not_copy_the_namespace(fake_wandb):
+    init(
+        _args(
+            prompt="private prompt",
+            response="private response",
+            tools=[{"name": "private"}],
+            api_key="private-key",
+        ),
+        job_type="rl-learner",
+        name="learner-0",
+        config_override={
+            "island_backend": "rl-miles",
+            "learner_id": 0,
+            "rl_sync_preset": "decoupled",
+        },
+    )
+    assert fake_wandb.init_kwargs["config"] == {
+        "island_backend": "rl-miles",
+        "learner_id": 0,
+        "rl_sync_preset": "decoupled",
+    }
+
+
+def test_private_config_override_fails_closed_without_hurting_training(fake_wandb):
+    run = init(
+        _args(),
+        job_type="rl-learner",
+        name="learner-0",
+        config_override={"WANDB_API_KEY": "private"},
+    )
+    assert isinstance(run, NullRun)
+    assert fake_wandb.init_kwargs is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        {"prompt": "private"},
+        ["private response"],
+        float("nan"),
+        "x" * 257,
+    ),
+)
+def test_config_override_accepts_only_bounded_scalars(fake_wandb, value):
+    run = init(
+        _args(),
+        job_type="rl-learner",
+        name="learner-0",
+        config_override={"island_backend": value},
+    )
+    assert isinstance(run, NullRun)
+    assert fake_wandb.init_kwargs is None
 
 
 def test_config_survives_unserializable_values():
@@ -180,5 +240,7 @@ def test_add_arguments_matches_the_learner_defaults():
     assert args.wandb is False
     assert args.wandb_project == "yeto"
     assert args.wandb_mode == "online"
-    args = p.parse_args(["--wandb", "--wandb-mode", "offline", "--wandb-entity", "acme"])
+    args = p.parse_args(
+        ["--wandb", "--wandb-mode", "offline", "--wandb-entity", "acme"]
+    )
     assert (args.wandb, args.wandb_mode, args.wandb_entity) == (True, "offline", "acme")

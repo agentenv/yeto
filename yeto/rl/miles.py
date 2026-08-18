@@ -131,9 +131,13 @@ def _validate_rollout_policy_versions(data: list[list[Any]], expected: str) -> N
     for group in data:
         for sample in group:
             versions = getattr(sample, "weight_versions", None)
-            if not isinstance(versions, list) or not versions or any(
-                not isinstance(version, str) or version != expected
-                for version in versions
+            if (
+                not isinstance(versions, list)
+                or not versions
+                or any(
+                    not isinstance(version, str) or version != expected
+                    for version in versions
+                )
             ):
                 raise StrictRlInvariantError(
                     "mixed_version_group_count",
@@ -492,9 +496,7 @@ def _restore_completed_groups(args, policy_version: int, data_source) -> None:
             return
         groups = [
             group
-            for group in _deserialize_completed_groups(
-                payload.get("completed_groups")
-            )
+            for group in _deserialize_completed_groups(payload.get("completed_groups"))
             if _complete_group_for_policy(
                 group,
                 expected_token,
@@ -519,14 +521,14 @@ def _restore_completed_groups(args, policy_version: int, data_source) -> None:
         or payload.get("policy_version") != policy_version
         or payload.get("config") != expected_config
     ):
-        print(f"[rl] discarded island checkpoint outside policy/config contract: {path}")
+        print(
+            f"[rl] discarded island checkpoint outside policy/config contract: {path}"
+        )
         return
     groups = [
         group
         for group in _deserialize_completed_groups(payload.get("completed_groups"))
-        if _complete_group_for_policy(
-            group, policy_version, args.n_samples_per_prompt
-        )
+        if _complete_group_for_policy(group, policy_version, args.n_samples_per_prompt)
     ]
     if groups:
         data_source.add_samples(groups)
@@ -546,9 +548,7 @@ def _save_completed_groups(
     completed = [
         group
         for group in buffer
-        if _complete_group_for_policy(
-            group, policy_token, args.n_samples_per_prompt
-        )
+        if _complete_group_for_policy(group, policy_token, args.n_samples_per_prompt)
     ]
     buffer[:] = completed
     numeric_metrics = {
@@ -699,9 +699,7 @@ def _attach_eval_scalar_metrics(output: Any) -> list[dict[str, Any]]:
             values.append(value)
         prefix = f"eval/{dataset_name}"
         result = statistics.fmean(values)
-        pass_at_1 = statistics.fmean(
-            1.0 if value == 1.0 else 0.0 for value in values
-        )
+        pass_at_1 = statistics.fmean(1.0 if value == 1.0 else 0.0 for value in values)
         metrics[prefix] = result
         metrics[f"{prefix}-pass@1"] = pass_at_1
         results.append(
@@ -789,8 +787,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
         ]
         samples = [sample for group in output.samples for sample in group]
         tool_wait_seconds = sum(
-            float(getattr(sample, "non_generation_time", 0.0))
-            for sample in samples
+            float(getattr(sample, "non_generation_time", 0.0)) for sample in samples
         )
         round_metrics = {
             "rollout_seconds": time.monotonic() - rollout_started,
@@ -931,8 +928,7 @@ class MilesPolicySync:
         groups = self._strict_export_groups()
         expected_names = tuple(spec.name for group in groups for spec in group)
         if (
-            getattr(exported, "_yeto_chunked_export", None)
-            != "owner-sharded-v1"
+            getattr(exported, "_yeto_chunked_export", None) != "owner-sharded-v1"
             or exported.policy_version != expected.policy_version
             or tuple(exported.expected_names) != expected_names
         ):
@@ -1044,9 +1040,8 @@ class MilesPolicySync:
         references = data_pack.get("data_ref")
         if not isinstance(references, list):
             raise RuntimeError("Miles returned an invalid rollout shard list")
-        world_size = (
-            int(self.args.actor_num_nodes)
-            * int(self.args.actor_num_gpus_per_node)
+        world_size = int(self.args.actor_num_nodes) * int(
+            self.args.actor_num_gpus_per_node
         )
         model_parallel_size = (
             int(getattr(self.args, "tensor_model_parallel_size", 1))
@@ -1079,8 +1074,7 @@ class MilesPolicySync:
             ):
                 raise RuntimeError("Miles island checkpoint lacks rollout metrics")
             return {
-                name: float(value)
-                for name, value in payload["rollout_metrics"].items()
+                name: float(value) for name, value in payload["rollout_metrics"].items()
             }
         path = Path(self.args.yeto_rl_completed_groups_path).expanduser()
         payload = torch.load(path, map_location="cpu", weights_only=True)
@@ -1094,8 +1088,7 @@ class MilesPolicySync:
             raise RuntimeError("Miles island checkpoint lacks rollout metrics")
         try:
             return {
-                name: float(value)
-                for name, value in payload["rollout_metrics"].items()
+                name: float(value) for name, value in payload["rollout_metrics"].items()
             }
         except (TypeError, ValueError) as error:
             raise RuntimeError("Miles returned invalid Yeto group metrics") from error
@@ -1109,9 +1102,7 @@ class MilesPolicySync:
             for value in batch.get("response_lengths", [])
         ]
         sample_indices = [
-            int(value)
-            for batch in batches
-            for value in batch.get("sample_indices", [])
+            int(value) for batch in batches for value in batch.get("sample_indices", [])
         ]
         if (
             len(response_lengths) != expected_samples
@@ -1147,6 +1138,20 @@ class MilesPolicySync:
             raise RuntimeError(
                 "Miles did not export valid round train statistics"
             ) from error
+        telemetry = getattr(train_state, "telemetry", None)
+        if telemetry is not None:
+            from .deepseek_v4_expert_full_runtime import _TrainTelemetry
+
+            if not isinstance(telemetry, _TrainTelemetry):
+                raise RuntimeError("Miles exported invalid typed training telemetry")
+            # ``deepseek_v4_expert_full_runtime`` has already reduced the
+            # metrics-owner dictionary to a closed scalar-only capsule.  Never
+            # forward the original Miles record or inspect arbitrary keys here.
+            mean_kl = telemetry.kl if telemetry.kl is not None else mean_kl
+            ess_ratio = telemetry.ess if telemetry.ess is not None else ess_ratio
+            clip_fraction = (
+                telemetry.clipfrac if telemetry.clipfrac is not None else clip_fraction
+            )
         if train_seconds < 0:
             raise RuntimeError("Miles exported a negative train duration")
         metrics = self._rollout_metrics(rollout_id)
@@ -1177,6 +1182,12 @@ class MilesPolicySync:
             delta_l2_norm=0.0,
             rollout_seconds=metrics["rollout_seconds"],
             train_seconds=train_seconds,
+            train_step=None if telemetry is None else telemetry.step,
+            loss=None if telemetry is None else telemetry.loss,
+            pg_loss=None if telemetry is None else telemetry.pg_loss,
+            grad_norm=None if telemetry is None else telemetry.grad_norm,
+            lr=None if telemetry is None else telemetry.lr,
+            pass_rate=None if telemetry is None else telemetry.pass_rate,
             dynamic_filter_generated_groups=int(
                 metrics.get("rl/dynamic_filter/generated_groups", 0)
             ),
@@ -1441,10 +1452,30 @@ class DecoupledMilesPolicySync(MilesPolicySync):
         submissions: tuple[FragmentSubmission, ...] = (),
         additional_payload_bytes_received: int = 0,
     ) -> None:
+        train_metrics = {}
+        if stats.train_step is not None:
+            train_metrics = {
+                "train/step": stats.train_step,
+                **{
+                    name: value
+                    for name, value in (
+                        ("train/loss", stats.loss),
+                        ("train/pg_loss", stats.pg_loss),
+                        ("train/grad_norm", stats.grad_norm),
+                        ("train/train_rollout_kl", stats.mean_kl),
+                        ("train/ess_ratio", stats.ess_ratio),
+                        ("train/pg_clipfrac", stats.clip_fraction),
+                        ("train/lr", stats.lr),
+                        ("train/pass_rate", stats.pass_rate),
+                    )
+                    if value is not None
+                },
+            }
         self._append_event(
             {
                 "event": "rl_local_round",
                 **asdict(stats),
+                **train_metrics,
                 "rl/rollout_id": rollout_id,
                 "rl/policy_hash": self.snapshot.policy_hash,
                 "rl/fragment_versions": list(self.snapshot.fragment_versions),
@@ -1682,7 +1713,9 @@ class DecoupledMilesPolicySync(MilesPolicySync):
         self.optimizer_steps += 1
         self.action_tokens += stats.action_tokens
         if self.optimizer_steps != next_rollout_id:
-            raise RuntimeError("decoupled RL optimizer progress diverged from rollout ID")
+            raise RuntimeError(
+                "decoupled RL optimizer progress diverged from rollout ID"
+            )
         if self.bridge.finalizing:
             self._record_local_round(stats, rollout_id=rollout_id)
             return await self._finish(

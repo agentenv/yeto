@@ -267,7 +267,9 @@ def test_selected_expert_task_filter_keeps_only_the_requested_safe_clone_prefix(
         SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(143))),
         SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(176))),
         SimpleNamespace(mapping=SimpleNamespace(hf_param=_expert_name(256))),
-        SimpleNamespace(mapping=SimpleNamespace(hf_param="model.layers.0.self_attn.q_proj.weight")),
+        SimpleNamespace(
+            mapping=SimpleNamespace(hf_param="model.layers.0.self_attn.q_proj.weight")
+        ),
     ]
 
     selected = filter_selected_expert_tasks(tasks, expert_count=16)
@@ -299,15 +301,12 @@ class _TrainableStateModule:
 
 def _tiny_hybrid_tensors() -> dict[str, torch.Tensor]:
     return {
-        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight":
-            torch.tensor([0.25, 0.5], dtype=torch.float32),
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.tensor(
+            [0.25, 0.5], dtype=torch.float32
+        ),
         _expert_name(256): torch.tensor([1.0, 2.0], dtype=torch.float32),
-        _expert_name(256, "up_proj"): torch.tensor(
-            [3.0, 4.0], dtype=torch.float32
-        ),
-        _expert_name(256, "down_proj"): torch.tensor(
-            [5.0, 6.0], dtype=torch.float32
-        ),
+        _expert_name(256, "up_proj"): torch.tensor([3.0, 4.0], dtype=torch.float32),
+        _expert_name(256, "down_proj"): torch.tensor([5.0, 6.0], dtype=torch.float32),
     }
 
 
@@ -369,16 +368,43 @@ def test_pp2_hybrid_export_preserves_metrics_from_megatron_main_rank(
         args=SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync"),
         _is_first_replica_megatron_main_rank=False,
     )
+    main_args = SimpleNamespace(
+        external_policy_sync_path="yeto.rl.miles:sync",
+        _external_train_seconds=7.5,
+    )
+    runtime._capture_external_train_telemetry(
+        main_args,
+        {
+            "train/step": 17,
+            "train/loss": -0.4,
+            "train/pg_loss": -0.5,
+            "train/grad_norm": 1.25,
+            "train/train_rollout_kl": 0.125,
+            "train/ess_ratio": 0.875,
+            "train/pg_clipfrac": 0.25,
+            "train/lr-pg_0": 1e-6,
+            "train/pass_rate": 0.5,
+            "prompt": "private prompt",
+            "response": "private response",
+            "tools": [{"name": "private tool"}],
+            "env": {"PRIVATE": "value"},
+            "secret_numeric": 1234,
+        },
+        is_metrics_source=True,
+    )
+    assert main_args._external_train_metrics == runtime._TrainTelemetry(
+        step=17,
+        loss=-0.4,
+        pg_loss=-0.5,
+        grad_norm=1.25,
+        kl=0.125,
+        ess=0.875,
+        clipfrac=0.25,
+        lr=1e-6,
+        pass_rate=0.5,
+    )
     main_actor = SimpleNamespace(
-        args=SimpleNamespace(
-            external_policy_sync_path="yeto.rl.miles:sync",
-            _external_train_metrics={
-                "train/train_rollout_kl": 0.125,
-                "train/ess_ratio": 0.875,
-                "train/pg_clipfrac": 0.25,
-            },
-            _external_train_seconds=7.5,
-        ),
+        args=main_args,
         _is_first_replica_megatron_main_rank=True,
     )
 
@@ -402,6 +428,157 @@ def test_pp2_hybrid_export_preserves_metrics_from_megatron_main_rank(
     assert state.ess_ratio == 0.875
     assert state.pg_clipfrac == 0.25
     assert state.train_seconds == 7.5
+    assert state.telemetry == runtime._TrainTelemetry(
+        step=17,
+        loss=-0.4,
+        pg_loss=-0.5,
+        grad_norm=1.25,
+        kl=0.125,
+        ess=0.875,
+        clipfrac=0.25,
+        lr=1e-6,
+        pass_rate=0.5,
+    )
+    assert not hasattr(state.telemetry, "prompt")
+    assert not hasattr(state.telemetry, "secret_numeric")
+
+    # Exercise the deployed scalar path end to end: Miles' producer capture,
+    # the metrics-owner Ray export, the round event, and the W&B projection.
+    from yeto.rl.miles import DecoupledMilesPolicySync, MilesPolicySync
+    from yeto.rl.wandb_rl import STEP_KEY, TRAIN_STEP_KEY, event_metrics
+
+    hook = MilesPolicySync(
+        SimpleNamespace(
+            rollout_batch_size=1,
+            n_samples_per_prompt=2,
+            yeto_rl_learner_id=0,
+        )
+    )
+    hook._rollout_batches = lambda _data: [
+        {
+            "response_lengths": [1, 2],
+            "sample_indices": [0, 1],
+            "raw_reward": [0.0, 1.0],
+        }
+    ]
+    hook._rollout_metrics = lambda _rollout_id: {
+        "active_groups": 1,
+        "cancelled_groups": 0,
+        "tool_wait_seconds": 0.0,
+        "group_p50_seconds": 1.0,
+        "group_p95_seconds": 1.0,
+        "group_p99_seconds": 1.0,
+        "rollout_seconds": 2.0,
+    }
+    stats = hook._round_stats(0, object(), state)
+    events = []
+    recorder = object.__new__(DecoupledMilesPolicySync)
+    recorder.snapshot = SimpleNamespace(
+        policy_hash="private-policy-hash",
+        fragment_versions=(0,),
+    )
+    recorder._append_event = events.append
+    recorder._record_local_round(stats, rollout_id=0)
+
+    assert event_metrics(events[0]) == {
+        "train/loss": -0.4,
+        "train/pg_loss": -0.5,
+        "train/grad_norm": 1.25,
+        "train/train_rollout_kl": 0.125,
+        "train/ess_ratio": 0.875,
+        "train/pg_clipfrac": 0.25,
+        "train/lr": 1e-6,
+        "rl/reward_mean": 0.5,
+        "rl/pass_rate": 0.5,
+        TRAIN_STEP_KEY: 17,
+        STEP_KEY: 0,
+    }
+
+
+def test_train_telemetry_extractor_is_closed_finite_and_step_bound():
+    telemetry = runtime._extract_train_telemetry(
+        {
+            "train/step": 3,
+            "train/loss": -0.25,
+            "train/pg_loss": -0.5,
+            "train/grad_norm": 2.0,
+            "train/ppo_kl": 0.1,
+            "train/ess_ratio": 0.9,
+            "train/clip_fraction": 0.2,
+            "train/lr-pg_2": 3e-6,
+            "train/lr-pg_1": 2e-6,
+            "train/pass@1": 0.75,
+            "prompt": "private",
+            "tool_result": "private",
+            "unknown_numeric": 42,
+        }
+    )
+    assert telemetry == runtime._TrainTelemetry(
+        step=3,
+        loss=-0.25,
+        pg_loss=-0.5,
+        grad_norm=2.0,
+        kl=0.1,
+        ess=0.9,
+        clipfrac=0.2,
+        lr=2e-6,
+        pass_rate=0.75,
+    )
+    assert runtime._extract_train_telemetry({"train/loss": 1.0}) is None
+    assert (
+        runtime._extract_train_telemetry({"train/step": 1, "train/loss": float("nan")})
+        is None
+    )
+    assert (
+        runtime._extract_train_telemetry({"train/step": 1, "train/loss": True}) is None
+    )
+    assert (
+        runtime._extract_train_telemetry({"train/step": 2**63, "train/loss": 1.0})
+        is None
+    )
+
+
+def test_train_telemetry_capture_is_owner_only_typed_and_adversarially_closed():
+    owner = SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync")
+    runtime._capture_external_train_telemetry(
+        owner,
+        {
+            "train/step": 9,
+            "train/loss": -0.25,
+            "train/pg_loss": "private response",
+            "train/grad_norm": [1.0],
+            "train/train_rollout_kl": {"private": 1},
+            "train/ess_ratio": True,
+            "train/pg_clipfrac": float("inf"),
+            "train/lr": 10**10_000,
+            "train/pass_rate": -1.0,
+            "unknown_numeric": 42,
+            "prompt": "private prompt",
+            "tools": [{"name": "private tool"}],
+            "env": {"PRIVATE": "value"},
+        },
+        is_metrics_source=True,
+    )
+    assert owner._external_train_metrics == runtime._TrainTelemetry(
+        step=9,
+        loss=-0.25,
+    )
+
+    peer = SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync")
+    runtime._capture_external_train_telemetry(
+        peer,
+        {"train/step": 9, "train/loss": -0.25},
+        is_metrics_source=False,
+    )
+    assert not hasattr(peer, "_external_train_metrics")
+
+    disabled = SimpleNamespace(external_policy_sync_path=None)
+    runtime._capture_external_train_telemetry(
+        disabled,
+        {"train/step": 9, "train/loss": -0.25},
+        is_metrics_source=True,
+    )
+    assert not hasattr(disabled, "_external_train_metrics")
 
 
 def test_owner_sharded_export_merge_requires_exact_disjoint_coverage(monkeypatch):
@@ -419,6 +596,7 @@ def test_owner_sharded_export_merge_requires_exact_disjoint_coverage(monkeypatch
         ess_ratio=0.875,
         pg_clipfrac=0.25,
         train_seconds=3.5,
+        telemetry=runtime._TrainTelemetry(step=4, loss=-0.5),
     )
     peer = runtime._TrainableStateFragment(
         source_rank=7,
@@ -439,6 +617,7 @@ def test_owner_sharded_export_merge_requires_exact_disjoint_coverage(monkeypatch
     assert state.ess_ratio == 0.875
     assert state.pg_clipfrac == 0.25
     assert state.train_seconds == 3.5
+    assert state.telemetry == runtime._TrainTelemetry(step=4, loss=-0.5)
 
     missing = runtime._TrainableStateFragment(
         source_rank=7,
@@ -484,6 +663,19 @@ def test_owner_sharded_export_merge_requires_exact_disjoint_coverage(monkeypatch
             [root, None, None, None, None, None, None, peer_with_metrics],
         )
 
+    peer_with_telemetry = runtime._TrainableStateFragment(
+        source_rank=7,
+        policy_version=4,
+        expected_names=names,
+        tensors={names[2]: tensors[names[2]], names[3]: tensors[names[3]]},
+        telemetry=runtime._TrainTelemetry(step=4, loss=-0.5),
+    )
+    with pytest.raises(RuntimeError, match="non-main rank"):
+        runtime._merge_export_fragments(
+            _TrainableStateModule,
+            [root, None, None, None, None, None, None, peer_with_telemetry],
+        )
+
 
 def test_chunked_owner_export_transfers_storage_without_full_state_copy(
     monkeypatch,
@@ -499,6 +691,7 @@ def test_chunked_owner_export_transfers_storage_without_full_state_copy(
         tensors={names[0]: tensors[names[0]], names[1]: tensors[names[1]]},
         is_metrics_source=True,
         train_seconds=3.5,
+        telemetry=runtime._TrainTelemetry(step=4, loss=-0.5),
     )
     peer = runtime._TrainableStateFragment(
         source_rank=1,
@@ -530,6 +723,7 @@ def test_chunked_owner_export_transfers_storage_without_full_state_copy(
     assert state._yeto_owned_tensors == "canonical-v1"
     assert state.policy_version == 4
     assert state.train_seconds == 3.5
+    assert state.telemetry == runtime._TrainTelemetry(step=4, loss=-0.5)
     assert set(state.tensors) == set(names)
     assert all(
         state.tensors[name].data_ptr() == ray_tensors[name].data_ptr() for name in names
@@ -571,9 +765,7 @@ def test_chunked_owner_export_releases_each_resolved_chunk_before_next(
     def resolve(reference):
         nonlocal peak_live
         gc.collect()
-        assert all(
-            item is None for item in chunked.chunk_refs[: len(previous)]
-        )
+        assert all(item is None for item in chunked.chunk_refs[: len(previous)])
         assert not previous or previous[-1]() is None
         chunk = ResolvedChunk(ray.get(reference))
         previous.append(weakref.ref(chunk))
@@ -754,9 +946,7 @@ def test_apply_transport_chunks_below_cap_and_round_trips_state(monkeypatch):
 
 
 @pytest.mark.parametrize("corruption", ("missing", "duplicate"))
-def test_apply_transport_rejects_missing_and_duplicate_tensors(
-    monkeypatch, corruption
-):
+def test_apply_transport_rejects_missing_and_duplicate_tensors(monkeypatch, corruption):
     monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
     monkeypatch.setattr(runtime, "NUM_LAYERS", 1)
     state = make_hybrid_trainable_state(
@@ -844,9 +1034,7 @@ def test_v1_actor_group_compacts_flat_views_before_sending_chunk_refs(
         ),
     )
 
-    trainable_state = ModuleType(
-        "miles.backends.megatron_utils.trainable_state"
-    )
+    trainable_state = ModuleType("miles.backends.megatron_utils.trainable_state")
     trainable_state.TrainableState = _State
     trainable_state._layout_hash = _TrainableStateModule._layout_hash
     megatron_utils = ModuleType("miles.backends.megatron_utils")
@@ -889,13 +1077,9 @@ def test_v1_actor_group_compacts_flat_views_before_sending_chunk_refs(
 
     class Actor:
         def __init__(self, rank):
-            self.begin_chunked_trainable_state = RemoteMethod(
-                (rank, "begin")
-            )
+            self.begin_chunked_trainable_state = RemoteMethod((rank, "begin"))
             self.apply_trainable_state_chunk = RemoteMethod((rank, "chunk"))
-            self.finish_chunked_trainable_state = RemoteMethod(
-                (rank, "finish")
-            )
+            self.finish_chunked_trainable_state = RemoteMethod((rank, "finish"))
 
     class RayTrainGroup:
         pass
@@ -922,14 +1106,11 @@ def test_v1_actor_group_compacts_flat_views_before_sending_chunk_refs(
     state = asyncio.run(group.export_trainable_state())
     assert set(state.tensors) == set(names)
 
-    reset = asyncio.run(
-        group.apply_trainable_state(state, reset_optimizer=True)
-    )
+    reset = asyncio.run(group.apply_trainable_state(state, reset_optimizer=True))
     assert reset == 4
     assert len(fake_ray.objects) == 3
     assert all(
-        tensor.untyped_storage().nbytes()
-        == tensor.numel() * tensor.element_size()
+        tensor.untyped_storage().nbytes() == tensor.numel() * tensor.element_size()
         for tensor in fake_ray.objects[-1].values()
     )
     assert [call[0][1] for call in calls] == [
@@ -1187,11 +1368,14 @@ def test_chunk_apply_broadcasts_rank_zero_validation_failure(
     assert actor._yeto_chunk_apply.next_chunk == 0
 
 
-def test_hybrid_state_accepts_attention_lora_and_exact_expert_full_contract(monkeypatch):
+def test_hybrid_state_accepts_attention_lora_and_exact_expert_full_contract(
+    monkeypatch,
+):
     monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "16")
     tensors = {
-        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight":
-            torch.ones(1, dtype=torch.float32),
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(
+            1, dtype=torch.float32
+        ),
     }
     for layer in range(43):
         for expert in range(256, 272):
@@ -1259,9 +1443,7 @@ def test_arguments_hook_requires_replicated_adam_masters():
 
 def _optimizer_fixture(*, sharded=False, optimizer_owned=True, complete=True):
     parameter = torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
-    main = torch.nn.Parameter(
-        torch.zeros(4 if complete else 2, dtype=torch.float32)
-    )
+    main = torch.nn.Parameter(torch.zeros(4 if complete else 2, dtype=torch.float32))
     parameter.main_param = main
     parameter.main_param_sharded = sharded
     chunk = torch.nn.Module()
@@ -1320,6 +1502,27 @@ def test_model_optimizer_hook_rejects_distributed_adam_before_build(monkeypatch)
             model_chunks=[],
         )
     assert calls == []
+
+
+def test_model_metric_capture_hook_rechecks_the_authoritative_owner():
+    owner = {"value": False}
+
+    class ModelModule:
+        get_megatron_optimizer = staticmethod(lambda **_kwargs: object())
+        is_first_replica_megatron_main_rank = staticmethod(lambda: owner["value"])
+
+    runtime.install_on_model(ModelModule)
+    args = SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync")
+    metrics = {"train/step": 3, "train/loss": -0.5}
+    ModelModule._capture_external_train_metrics(args, metrics)
+    assert not hasattr(args, "_external_train_metrics")
+
+    owner["value"] = True
+    ModelModule._capture_external_train_metrics(args, metrics)
+    assert args._external_train_metrics == runtime._TrainTelemetry(
+        step=3,
+        loss=-0.5,
+    )
 
 
 def test_model_optimizer_hook_rejects_sharded_master_after_build(monkeypatch):
@@ -1388,9 +1591,7 @@ def test_attention_mapping_retains_remote_pipeline_sides(monkeypatch):
     monkeypatch.setattr(runtime, "_actor_bridge", lambda _actor: bridge)
     actor = SimpleNamespace(
         args=SimpleNamespace(
-            yeto_rl_expected_specs=tuple(
-                SimpleNamespace(name=name) for name in names
-            )
+            yeto_rl_expected_specs=tuple(SimpleNamespace(name=name) for name in names)
         ),
         model=[],
     )
@@ -1465,9 +1666,11 @@ def test_attention_export_unions_pipeline_stage_tensors(monkeypatch):
     monkeypatch.setattr(
         torch,
         "device",
-        lambda *args, **kwargs: original_device("cpu")
-        if args and args[0] == "cuda"
-        else original_device(*args, **kwargs),
+        lambda *args, **kwargs: (
+            original_device("cpu")
+            if args and args[0] == "cuda"
+            else original_device(*args, **kwargs)
+        ),
     )
 
     tensors = runtime._export_attention(actor, retain=True)
@@ -1521,9 +1724,11 @@ def test_attention_export_uses_global_name_on_later_pipeline_stage(monkeypatch):
     monkeypatch.setattr(
         torch,
         "device",
-        lambda *args, **kwargs: original_device("cpu")
-        if args and args[0] == "cuda"
-        else original_device(*args, **kwargs),
+        lambda *args, **kwargs: (
+            original_device("cpu")
+            if args and args[0] == "cuda"
+            else original_device(*args, **kwargs)
+        ),
     )
 
     tensors = runtime._export_attention(actor, retain=True)
@@ -1568,9 +1773,11 @@ def test_attention_export_retains_rank_zero_pp_broadcast(monkeypatch):
     monkeypatch.setattr(
         torch,
         "device",
-        lambda *args, **kwargs: original_device("cpu")
-        if args and args[0] == "cuda"
-        else original_device(*args, **kwargs),
+        lambda *args, **kwargs: (
+            original_device("cpu")
+            if args and args[0] == "cuda"
+            else original_device(*args, **kwargs)
+        ),
     )
 
     tensors = runtime._export_attention(actor, retain=True)
@@ -1641,9 +1848,11 @@ def test_attention_export_validates_dp_replica_on_non_root_stage(monkeypatch):
     monkeypatch.setattr(
         torch,
         "device",
-        lambda *args, **kwargs: original_device("cpu")
-        if args and args[0] == "cuda"
-        else original_device(*args, **kwargs),
+        lambda *args, **kwargs: (
+            original_device("cpu")
+            if args and args[0] == "cuda"
+            else original_device(*args, **kwargs)
+        ),
     )
 
     assert runtime._export_attention(actor, retain=False) == {}
@@ -1664,9 +1873,7 @@ def test_expert_views_use_global_bridge_layer_on_pipeline_stage(monkeypatch):
     chunk = torch.nn.Module()
     chunk.register_parameter("local_stage_expert", parameter)
     task = SimpleNamespace(
-        mapping=SimpleNamespace(
-            hf_param={"gate": physical_gate, "up": physical_up}
-        ),
+        mapping=SimpleNamespace(hf_param={"gate": physical_gate, "up": physical_up}),
         param_weight=parameter,
     )
     bridge = SimpleNamespace(get_conversion_tasks=lambda _model: [task])
@@ -1692,9 +1899,7 @@ def test_expert_views_use_global_bridge_layer_on_pipeline_stage(monkeypatch):
 
 def test_apply_on_remote_rank_updates_fp32_masters_under_no_grad(monkeypatch):
     monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_COUNT", "1")
-    attention_name = (
-        "base_model.model.model.layers.22.self_attn.q_proj.lora_A.weight"
-    )
+    attention_name = "base_model.model.model.layers.22.self_attn.q_proj.lora_A.weight"
     expert_name = _expert_name(256).replace("layers.0", "layers.22")
     specs = (
         SimpleNamespace(name=attention_name, shape=(2,)),
@@ -1704,9 +1909,7 @@ def test_apply_on_remote_rank_updates_fp32_masters_under_no_grad(monkeypatch):
         attention_name: torch.tensor([1.001, 2.003], dtype=torch.float32),
         expert_name: torch.tensor([3.005, 4.007], dtype=torch.float32),
     }
-    attention_parameter = torch.nn.Parameter(
-        torch.zeros(2, dtype=torch.bfloat16)
-    )
+    attention_parameter = torch.nn.Parameter(torch.zeros(2, dtype=torch.bfloat16))
     attention_parameter.main_param = torch.nn.Parameter(torch.zeros(2))
     expert_parameter = torch.nn.Parameter(torch.zeros(2, dtype=torch.bfloat16))
     expert_parameter.main_param = torch.nn.Parameter(torch.zeros(2))
@@ -1747,13 +1950,17 @@ def test_apply_on_remote_rank_updates_fp32_masters_under_no_grad(monkeypatch):
         _layout_hash=lambda _tensors: "layout",
         _align_scheduler=lambda _actor, version: aligned.append(version),
     )
-    monkeypatch.setattr(runtime, "_attention_sides", lambda _actor: {attention_name: side})
+    monkeypatch.setattr(
+        runtime, "_attention_sides", lambda _actor: {attention_name: side}
+    )
     monkeypatch.setattr(
         runtime,
         "_expert_views",
         lambda _actor: {expert_name: expert_parameter.main_param.view(2)},
     )
-    monkeypatch.setattr(runtime, "_assert_frozen_experts_unchanged", lambda _actor: None)
+    monkeypatch.setattr(
+        runtime, "_assert_frozen_experts_unchanged", lambda _actor: None
+    )
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 1)
 
     def broadcast_object_list(header, *, src):
@@ -1766,7 +1973,9 @@ def test_apply_on_remote_rank_updates_fp32_masters_under_no_grad(monkeypatch):
         assert src == 0
         value.copy_(next(values))
 
-    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
+    monkeypatch.setattr(
+        torch.distributed, "broadcast_object_list", broadcast_object_list
+    )
     monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
@@ -1774,9 +1983,11 @@ def test_apply_on_remote_rank_updates_fp32_masters_under_no_grad(monkeypatch):
     monkeypatch.setattr(
         torch,
         "device",
-        lambda *args, **kwargs: original_device("cpu")
-        if args and args[0] == "cuda"
-        else original_device(*args, **kwargs),
+        lambda *args, **kwargs: (
+            original_device("cpu")
+            if args and args[0] == "cuda"
+            else original_device(*args, **kwargs)
+        ),
     )
 
     reset_count = runtime.apply_hybrid_trainable_state(

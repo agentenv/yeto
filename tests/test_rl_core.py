@@ -123,7 +123,9 @@ def test_flatten_and_delta_preallocate_without_tensor_list_concatenation(monkeyp
 
     flat = core_module.flat_tensor(base.tensors, base.specs)
     assert torch.equal(flat, torch.tensor([1.0, 2.0, 3.0, 4.0]))
-    assert torch.equal(core_module.policy_delta(local, base), torch.full_like(flat, 0.5))
+    assert torch.equal(
+        core_module.policy_delta(local, base), torch.full_like(flat, 0.5)
+    )
 
 
 def test_tensors_from_flat_does_not_copy_the_complete_flat_input(monkeypatch):
@@ -172,9 +174,7 @@ def test_canonical_lora_rejects_non_peft_names_and_shape_drift():
 
 
 def test_avg_layout_rejects_duplicate_names():
-    spec = CanonicalTensorSpec(
-        "base_model.model.x.lora_A.weight", (1, 2), "float32", 2
-    )
+    spec = CanonicalTensorSpec("base_model.model.x.lora_A.weight", (1, 2), "float32", 2)
     with pytest.raises(ValueError, match="unique"):
         build_avg_layout((spec, spec))
 
@@ -240,9 +240,7 @@ def test_policy_snapshot_token_binds_rollout_to_full_tensor_hash():
     )
 
 
-def test_generate_rollout_preserves_the_miles_evaluation_boundary(
-    monkeypatch, caplog
-):
+def test_generate_rollout_preserves_the_miles_evaluation_boundary(monkeypatch, caplog):
     upstream = types.ModuleType("miles.rollout.sglang_rollout")
     sentinel = object()
     upstream.generate_rollout = sentinel
@@ -323,9 +321,7 @@ def test_eval_scalars_reject_aborted_episode_evidence():
         data={
             "flaky100": {
                 "rewards": [0.0],
-                "samples": [
-                    SimpleNamespace(status=SimpleNamespace(value="aborted"))
-                ],
+                "samples": [SimpleNamespace(status=SimpleNamespace(value="aborted"))],
             }
         },
         metrics=None,
@@ -723,9 +719,7 @@ def test_strict_chunk_submit_discards_unconsumed_refs_on_sender_drop(tmp_path):
     bridge = StrictRlBridge(runtime, _bridge_config(tmp_path / "events.jsonl"))
     base = bridge.initial
     bridge.current = base
-    bridge.client = SimpleNamespace(
-        push_fragment_parts=lambda *_args, **_kwargs: False
-    )
+    bridge.client = SimpleNamespace(push_fragment_parts=lambda *_args, **_kwargs: False)
     exported = _FakeChunkedExport(base)
 
     with pytest.raises(RuntimeError, match="not completely queued"):
@@ -812,9 +806,7 @@ def test_terminal_wait_installs_and_finalizes_one_cached_f32_policy(tmp_path):
     bridge.release_current(0)
     finalizing = threading.Event()
     finalizing.set()
-    final_values = {
-        name: value + 2.0 for name, value in bridge.initial.tensors.items()
-    }
+    final_values = {name: value + 2.0 for name, value in bridge.initial.tensors.items()}
     payload = bytearray(
         bridge_module.pack_tensor(
             flat_tensor(final_values, bridge.specs),
@@ -828,9 +820,7 @@ def test_terminal_wait_installs_and_finalizes_one_cached_f32_policy(tmp_path):
     bridge.client = SimpleNamespace(
         finalizing=finalizing,
         check_health=lambda: None,
-        wait_for_final_fragments=lambda: (
-            waits.append(True) or (manifest, [fragment])
-        ),
+        wait_for_final_fragments=lambda: waits.append(True) or (manifest, [fragment]),
         acknowledge_finalization=lambda value: acknowledged.append(value),
     )
 
@@ -921,9 +911,7 @@ def test_miles_rollout_lifecycle_metrics_use_real_task_completion(monkeypatch):
     def generate(*_args, **_kwargs):
         async def run():
             state = GenerateState()
-            state.submit_generate_tasks(
-                [[Sample("completed")], [Sample("aborted")]]
-            )
+            state.submit_generate_tasks([[Sample("completed")], [Sample("aborted")]])
             await asyncio.gather(*state.pendings)
 
         asyncio.run(run())
@@ -998,8 +986,7 @@ def test_generate_rollout_rejects_invalid_policy_versions_before_train(
 
     assert failure.value.metric == "mixed_version_group_count"
     assert (
-        "[yeto-rl-strict-failure] mixed_version_group_count"
-        in capsys.readouterr().err
+        "[yeto-rl-strict-failure] mixed_version_group_count" in capsys.readouterr().err
     )
     event = json.loads(event_tape.read_text())
     assert event["event"] == "rl_strict_failure"
@@ -1247,9 +1234,13 @@ def test_queue_completed_groups_filters_zero_variance_groups_and_records_replace
     monkeypatch.setattr(
         miles,
         "_dynamic_sampling_filter",
-        lambda _args: lambda _args, group: SimpleNamespace(
-            keep=len({sample.reward for sample in group}) > 1,
-            reason="zero_std" if len({sample.reward for sample in group}) == 1 else None,
+        lambda _args: (
+            lambda _args, group: SimpleNamespace(
+                keep=len({sample.reward for sample in group}) > 1,
+                reason="zero_std"
+                if len({sample.reward for sample in group}) == 1
+                else None,
+            )
         ),
     )
     source = DataSource()
@@ -1370,9 +1361,7 @@ def test_miles_policy_hook_uses_public_trainable_state_api(
     capsys,
 ):
     canonical = state(1, tensors())
-    trainable_state = types.ModuleType(
-        "miles.backends.megatron_utils.trainable_state"
-    )
+    trainable_state = types.ModuleType("miles.backends.megatron_utils.trainable_state")
     trainable_state.make_trainable_state = lambda version, values: SimpleNamespace(
         policy_version=version,
         layout_hash=canonical.layout_hash,
@@ -1512,7 +1501,9 @@ def test_miles_strict_path_releases_both_base_aliases_before_waiting_for_cut():
             return final
 
         def wait_for_round(self):
-            raise AssertionError("terminal strict round must not request another permit")
+            raise AssertionError(
+                "terminal strict round must not request another permit"
+            )
 
     hook = MilesPolicySync(SimpleNamespace(num_rollout=1))
     hook.actor_model = actor
@@ -1543,6 +1534,8 @@ def test_miles_strict_path_releases_both_base_aliases_before_waiting_for_cut():
 def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
     tmp_path, monkeypatch
 ):
+    from yeto.rl.deepseek_v4_expert_full_runtime import _TrainTelemetry
+
     checkpoint = tmp_path / "island.pt"
     args = SimpleNamespace(
         actor_num_gpus_per_node=4,
@@ -1576,12 +1569,11 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
         yeto_rl_completed_groups_path=str(checkpoint),
         yeto_rl_learner_id=0,
     )
-    assert miles._island_checkpoint_config(args)[
-        "pipeline_model_parallel_size"
-    ] == 2
-    assert miles._island_checkpoint_config(args)[
-        "codex_harness_contract"
-    ] == args.yeto_rl_codex_harness_contract
+    assert miles._island_checkpoint_config(args)["pipeline_model_parallel_size"] == 2
+    assert (
+        miles._island_checkpoint_config(args)["codex_harness_contract"]
+        == args.yeto_rl_codex_harness_contract
+    )
     torch.save(
         {
             "schema_version": miles._ISLAND_CHECKPOINT_SCHEMA,
@@ -1617,15 +1609,24 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
         SimpleNamespace(get=lambda reference: reference),
     )
     hook = MilesPolicySync(args)
-    data_pack = {
-        "data_ref": [SimpleNamespace(inner=batch) for batch in batches]
-    }
+    data_pack = {"data_ref": [SimpleNamespace(inner=batch) for batch in batches]}
 
     train_state = SimpleNamespace(
         train_rollout_kl=0.1,
         ess_ratio=0.8,
         pg_clipfrac=0.25,
         train_seconds=1.5,
+        telemetry=_TrainTelemetry(
+            step=17,
+            loss=-0.4,
+            pg_loss=-0.5,
+            grad_norm=1.25,
+            kl=0.11,
+            ess=0.81,
+            clipfrac=0.26,
+            lr=1e-6,
+            pass_rate=0.5,
+        ),
     )
     stats = hook._round_stats(3, data_pack, train_state)
 
@@ -1633,10 +1634,20 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
     assert stats.reward_mean == 1.25
     assert stats.zero_variance_group_ratio == 0.5
     assert stats.rollout_seconds == 5
-    assert stats.mean_kl == 0.1
-    assert stats.ess_ratio == 0.8
-    assert stats.clip_fraction == 0.25
+    assert stats.mean_kl == 0.11
+    assert stats.ess_ratio == 0.81
+    assert stats.clip_fraction == 0.26
     assert stats.train_seconds == 1.5
+    assert stats.train_step == 17
+    assert stats.loss == -0.4
+    assert stats.pg_loss == -0.5
+    assert stats.grad_norm == 1.25
+    assert stats.lr == 1e-6
+    assert stats.pass_rate == 0.5
+
+    train_state.telemetry = SimpleNamespace(step=17, loss=-0.4)
+    with pytest.raises(RuntimeError, match="invalid typed training telemetry"):
+        hook._round_stats(3, data_pack, train_state)
 
 
 def test_miles_policy_hook_counts_data_parallel_shards_after_model_parallelism(

@@ -47,7 +47,9 @@ class CanonicalTensorSpec:
         if not self.shape or any(dim <= 0 for dim in self.shape):
             raise ValueError(f"invalid shape for {self.name!r}: {self.shape}")
         if self.dtype != "float32":
-            raise ValueError(f"canonical LoRA dtype must be float32, got {self.dtype!r}")
+            raise ValueError(
+                f"canonical LoRA dtype must be float32, got {self.dtype!r}"
+            )
         if math.prod(self.shape) != self.numel:
             raise ValueError(f"shape/numel mismatch for {self.name!r}")
 
@@ -181,9 +183,7 @@ def canonical_layout_hash(specs: Sequence[CanonicalTensorSpec]) -> str:
     return layout_fingerprint(build_avg_layout(specs)).hex()
 
 
-def canonical_lora_config_hash(
-    *, rank: int, target_modules: Sequence[str]
-) -> str:
+def canonical_lora_config_hash(*, rank: int, target_modules: Sequence[str]) -> str:
     if rank <= 0 or not target_modules:
         raise ValueError("canonical LoRA config requires rank and target modules")
     payload = {
@@ -194,9 +194,7 @@ def canonical_lora_config_hash(
         "target_modules": sorted(set(target_modules)),
         "task_type": "CAUSAL_LM",
     }
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -311,8 +309,7 @@ def _canonical_state(
 ) -> CanonicalLoraState:
     normalize = _canonical_tensor if copy_tensors else _canonical_view
     normalized = {
-        name: normalize(tensor, name)
-        for name, tensor in sorted(tensors.items())
+        name: normalize(tensor, name) for name, tensor in sorted(tensors.items())
     }
     specs = canonical_specs(normalized)
     if expected_specs is not None and specs != tuple(expected_specs):
@@ -361,9 +358,7 @@ def tensors_from_flat(
         raise ValueError("canonical LoRA specs are not sorted")
     if not isinstance(flat, torch.Tensor) or not flat.is_floating_point():
         raise TypeError("'flat LoRA policy' must be a floating-point torch.Tensor")
-    flat = flat.detach().reshape(-1).to(
-        device="cpu", dtype=torch.float32
-    ).contiguous()
+    flat = flat.detach().reshape(-1).to(device="cpu", dtype=torch.float32).contiguous()
     expected = sum(spec.numel for spec in specs)
     if flat.numel() != expected:
         raise ValueError(
@@ -391,9 +386,7 @@ def tensors_from_flat_owned(
         raise ValueError("canonical LoRA specs are not sorted")
     if not isinstance(flat, torch.Tensor) or not flat.is_floating_point():
         raise TypeError("'flat LoRA policy' must be a floating-point torch.Tensor")
-    value = flat.detach().reshape(-1).to(
-        device="cpu", dtype=torch.float32
-    ).contiguous()
+    value = flat.detach().reshape(-1).to(device="cpu", dtype=torch.float32).contiguous()
     expected = sum(spec.numel for spec in specs)
     if value.numel() != expected:
         raise ValueError(
@@ -404,9 +397,7 @@ def tensors_from_flat_owned(
     tensors = {}
     offset = 0
     for spec in specs:
-        tensors[spec.name] = value[
-            offset : offset + spec.numel
-        ].reshape(spec.shape)
+        tensors[spec.name] = value[offset : offset + spec.numel].reshape(spec.shape)
         offset += spec.numel
     return tensors
 
@@ -536,6 +527,12 @@ class LocalRoundStats:
     delta_l2_norm: float
     rollout_seconds: float
     train_seconds: float
+    train_step: int | None = None
+    loss: float | None = None
+    pg_loss: float | None = None
+    grad_norm: float | None = None
+    lr: float | None = None
+    pass_rate: float | None = None
     dynamic_filter_generated_groups: int = 0
     dynamic_filter_dropped_groups: int = 0
     dynamic_filter_replacement_attempts: int = 0
@@ -556,6 +553,13 @@ class LocalRoundStats:
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be non-negative")
+        if self.train_step is not None and (
+            isinstance(self.train_step, bool)
+            or not isinstance(self.train_step, int)
+            or self.train_step < 0
+            or self.train_step > 2**63 - 1
+        ):
+            raise ValueError("train_step must be a non-negative integer when present")
         for name in (
             "reward_mean",
             "reward_std",
@@ -570,7 +574,18 @@ class LocalRoundStats:
         ):
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f"{name} must be finite")
-        for name in ("mean_kl", "ess_ratio", "clip_fraction"):
+        for name in (
+            "mean_kl",
+            "ess_ratio",
+            "clip_fraction",
+            "loss",
+            "pg_loss",
+            "grad_norm",
+            "lr",
+            "pass_rate",
+        ):
             value = getattr(self, name)
             if value is not None and not math.isfinite(value):
                 raise ValueError(f"{name} must be finite when present")
+        if self.pass_rate is not None and not 0.0 <= self.pass_rate <= 1.0:
+            raise ValueError("pass_rate must be in [0, 1] when present")

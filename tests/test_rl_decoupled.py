@@ -702,7 +702,9 @@ def test_decoupled_initialize_seeds_a_fresh_phase_from_final_adapter(
         json.loads(line)
         for line in (tmp_path / "events.jsonl").read_text().splitlines()
     ]
-    initial_events = [event for event in events if event["event"] == "rl_initial_adapter"]
+    initial_events = [
+        event for event in events if event["event"] == "rl_initial_adapter"
+    ]
     assert len(initial_events) == 1
     initial_event = initial_events[0]
     assert initial_event["parent_adapter_sha256"] == "9" * 64
@@ -1067,6 +1069,12 @@ def _stats(rollout_id=0):
         delta_l2_norm=0.0,
         rollout_seconds=0.1,
         train_seconds=0.1,
+        train_step=rollout_id,
+        loss=-0.4,
+        pg_loss=-0.5,
+        grad_norm=1.25,
+        lr=1e-6,
+        pass_rate=0.5,
     )
 
 
@@ -1237,6 +1245,15 @@ def test_decoupled_hook_preserves_optimizer_and_publishes_one_full_snapshot(
     assert local_round["rl/completed_groups"] == 1
     assert local_round["rl/action_tokens"] == 5
     assert local_round["rl/current_vs_rollout_kl"] == 0.0
+    assert local_round["train/step"] == 0
+    assert local_round["train/loss"] == -0.4
+    assert local_round["train/pg_loss"] == -0.5
+    assert local_round["train/grad_norm"] == 1.25
+    assert local_round["train/train_rollout_kl"] == 0.0
+    assert local_round["train/ess_ratio"] == 1.0
+    assert local_round["train/pg_clipfrac"] == 0.0
+    assert local_round["train/lr"] == 1e-6
+    assert local_round["train/pass_rate"] == 0.5
     assert local_round["sync/fragment_payload_bytes_received"] == 8
     assert local_round["sync/fragment_payload_bytes_sent"] == 8
 
