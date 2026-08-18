@@ -486,6 +486,13 @@ def prepare(namespace) -> Path:
             "data_local_path": data_local_path,
             "data_sha256": data_sha256,
             "reward_function": args.reward_function,
+            # Telemetry settings only. WANDB_API_KEY belongs in the remote
+            # env file alongside HF_TOKEN, so the plan keeps its promise of
+            # storing the path and never the contents.
+            "wandb": getattr(args, "wandb", False),
+            "wandb_project": getattr(args, "wandb_project", "yeto"),
+            "wandb_entity": getattr(args, "wandb_entity", None),
+            "wandb_mode": getattr(args, "wandb_mode", "online"),
             "global_rounds": args.total_steps,
             "sync_preset": getattr(args, "rl_sync_preset", "strict-avg"),
             "fragments": getattr(args, "fragments", 1),
@@ -893,6 +900,12 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         ("--wan-streams", learner["wan_streams"]),
         ("--miles-root", "/workspace/miles"),
     )
+    if learner.get("wandb"):
+        values.append("--wandb")
+        values.extend(("--wandb-project", str(learner.get("wandb_project", "yeto"))))
+        values.extend(("--wandb-mode", str(learner.get("wandb_mode", "online"))))
+        if learner.get("wandb_entity"):
+            values.extend(("--wandb-entity", str(learner["wandb_entity"])))
     if learner.get("apply_chat_template_kwargs"):
         values.extend(
             (
@@ -959,6 +972,12 @@ def _node_start_script(
     head = _target_host(island["hosts"][0])
     gpus = island["gpus_per_node"]
     gpu_request = '"device=' + ",".join(str(index) for index in range(gpus)) + '"'
+    # The run id is the fleet's W&B group, so both islands land on one view.
+    wandb_env = (
+        f" --env YETO_RUN_GROUP={shlex.quote(str(plan['run_id']))}"
+        if plan["learner"].get("wandb")
+        else ""
+    )
     env_file = (
         f' --env-file "$HOME/{plan["remote_env_file"]}"'
         if plan.get("remote_env_file")
@@ -1021,7 +1040,7 @@ docker run --detach \
   --ulimit memlock=-1 --ulimit stack=67108864 \
   --env PYTHONUNBUFFERED=1 \
   --env HF_HOME=/workspace/hf \
-  --env HF_HUB_ENABLE_HF_TRANSFER=1{env_file} \
+  --env HF_HUB_ENABLE_HF_TRANSFER=1{env_file}{wandb_env} \
   --env NVTE_FLASH_ATTN=0 --env NVTE_FUSED_ATTN=0 --env NVTE_UNFUSED_ATTN=1 \
   --env CYBERGYM_URL={shlex.quote(learner['cybergym_url'])} \
   --env CYBERGYM_AGENT_ID={shlex.quote(learner['cybergym_agent_id'])} \

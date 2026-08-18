@@ -164,3 +164,80 @@ def test_the_run_starts_once_across_many_events(monkeypatch):
     for _ in range(5):
         telemetry.log(args, LOCAL_ROUND)
     assert len(inits) == 1
+
+
+# --------------------------------------------------------------------------
+# the SSH harness builds its own learner command, so it needs its own wiring
+
+
+def _harness_plan(**learner):
+    base = dict(
+        model="/m", model_revision="r" * 40, data="/workspace/data/dataset.jsonl",
+        reward_function="pkg.mod:f", global_rounds=1, fragments=1, pipeline=1,
+        local_horizon=1, total_fragment_steps=1, groups_per_round=2,
+        samples_per_group=3, over_sampling_batch_size=2, optimizer_steps=1,
+        rollout_max_response_len=4096, tensor_parallel=8, pipeline_parallel=1,
+        rollout_num_gpus_per_engine=8, sglang_mem_fraction_static=0.45,
+        lora_r=8, lora_targets="attention", inner_lr=1e-5, seq_len=8192,
+        seed=1, wan_streams=1, trust_remote_code=True,
+        rl_model_recipe="generic", actor_num_nodes=1,
+    )
+    base.update(learner)
+    return {
+        "run_id": "fleet-x",
+        "syncer_address": "h:29400",
+        "reward_sha256": "a" * 64,
+        "source_sha256": "b" * 64,
+        "islands": [
+            {"hosts": ["root@a"], "gpus_per_node": 8},
+            {"hosts": ["root@b"], "gpus_per_node": 8},
+        ],
+        "learner": base,
+    }
+
+
+def _wandb_flags(argv):
+    out = []
+    for i, a in enumerate(argv):
+        if a.startswith("--wandb"):
+            out.append(a)
+            if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                out.append(argv[i + 1])
+    return out
+
+
+def test_the_harness_forwards_the_flags_to_both_islands():
+    from yeto.rl.ssh_harness import _learner_argv
+
+    plan = _harness_plan(wandb=True, wandb_project="p", wandb_entity="e", wandb_mode="online")
+    for learner_id in (0, 1):
+        flags = _wandb_flags(_learner_argv(plan, learner_id))
+        assert flags == ["--wandb", "--wandb-project", "p", "--wandb-mode", "online",
+                         "--wandb-entity", "e"], learner_id
+
+
+def test_the_harness_command_is_unchanged_without_the_flag():
+    from yeto.rl.ssh_harness import _learner_argv
+
+    assert _wandb_flags(_learner_argv(_harness_plan(wandb=False), 0)) == []
+    assert _wandb_flags(_learner_argv(_harness_plan(), 0)) == []
+
+
+def test_an_omitted_entity_is_not_forwarded_as_none():
+    from yeto.rl.ssh_harness import _learner_argv
+
+    plan = _harness_plan(wandb=True, wandb_project="p", wandb_entity=None, wandb_mode="offline")
+    assert "--wandb-entity" not in _wandb_flags(_learner_argv(plan, 0))
+
+
+def test_the_plan_never_carries_the_credential():
+    """The harness promises to store the env file's path, never its contents.
+
+    WANDB_API_KEY therefore rides in the remote env file next to HF_TOKEN,
+    and the plan holds only which project to write to.
+    """
+    import json
+
+    plan = _harness_plan(wandb=True, wandb_project="p", wandb_entity="e", wandb_mode="online")
+    assert "WANDB_API_KEY" not in json.dumps(plan)
+    assert not [k for k in plan["learner"] if k.endswith("_key") or k.endswith("_token")]
