@@ -279,6 +279,13 @@ def main(argv=None) -> int:
     p.add_argument("--wandb-entity", default=None)
     p.add_argument("--wandb-group", default=None, help="run name / --cluster-prefix")
     p.add_argument("--wandb-mode", choices=["online", "offline"], default="online")
+    p.add_argument(
+        "--config-json",
+        default=None,
+        help="JSON object recorded as this run's wandb.config; the launcher "
+        "passes the fleet's launch flags so the syncer run is filterable by "
+        "model, region, and recipe like the island runs are",
+    )
     p.add_argument("--follow", action="store_true", help="tail a live tape instead")
     p.add_argument(
         "--from-start",
@@ -291,11 +298,18 @@ def main(argv=None) -> int:
     from .wandb_logger import init
 
     args.wandb = True
+    config_extra = {}
+    if args.config_json:
+        try:
+            config_extra = json.loads(args.config_json)
+        except json.JSONDecodeError as e:
+            log.warning("ignoring unparsable --config-json: %s", e)
     run = init(
         args,
         job_type="syncer",
         name="syncer",
         group=args.wandb_group,
+        config_extra=config_extra,
         step_metrics={"sync/*": "global_step", "learner/*": "global_step"},
     )
     if not run.enabled:

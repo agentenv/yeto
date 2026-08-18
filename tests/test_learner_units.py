@@ -1050,6 +1050,7 @@ def _telemetry_loop(wandb_run, *, max_local_steps=10, batches=None):
     model = _TinyLM()
     args = _loop_args()
     args.max_local_steps = max_local_steps
+    args.wandb = True
     return run_inner_loop(
         args,
         model,
@@ -1084,9 +1085,61 @@ def test_training_metrics_ride_the_existing_ten_step_log():
     assert metrics["train/tokens_per_sec"] >= 0
 
 
-def test_no_telemetry_before_the_first_ten_steps():
+def test_a_short_island_still_gets_a_training_curve():
+    # The straggler case seen on real hardware: an island that joins late is
+    # merged a couple of times and stops inside one logging window. Without a
+    # tail point it reports sync curves and no loss at all.
     run = _RecordingRun()
-    _telemetry_loop(run, max_local_steps=5)
+    counters = _telemetry_loop(run, max_local_steps=4)
+
+    assert counters.local_steps == 4
+    assert len(run.logged) == 1
+    metrics = run.logged[0]
+    assert metrics["local_step"] == 4
+    assert metrics["train/loss_per_token"] > 0
+    assert metrics["train/raw_tokens_total"] == counters.raw_tokens
+    # The window is the 4 steps actually taken, not a nominal 10.
+    assert metrics["train/sec_per_step"] * 4 == pytest.approx(
+        counters.raw_tokens / metrics["train/tokens_per_sec"], rel=1e-6
+    )
+
+
+def test_the_tail_point_is_not_a_duplicate_of_a_window_boundary():
+    # Exactly 10 steps is one whole window: the in-loop point is the last
+    # word, and a tail point would double-log it.
+    run = _RecordingRun()
+    _telemetry_loop(run, max_local_steps=10)
+    assert len(run.logged) == 1
+    assert run.logged[0]["local_step"] == 10
+
+
+def test_the_tail_point_follows_a_full_window():
+    run = _RecordingRun()
+    _telemetry_loop(run, max_local_steps=13)
+    assert [m["local_step"] for m in run.logged] == [10, 13]
+
+
+def test_no_tail_point_when_no_step_was_taken():
+    run = _RecordingRun()
+    counters = _telemetry_loop(run, max_local_steps=0)
+    assert counters.local_steps == 0
+    assert run.logged == []
+
+
+def test_the_tail_point_is_skipped_without_the_flag():
+    # The collective inside _global_loss_sum must not run for a fleet that
+    # never asked for telemetry.
+    run = _RecordingRun()
+    batches = [_batch([0, 1, 2, 3], [0, 1, 1, 1])] * 8
+    model = _TinyLM()
+    args = _loop_args()
+    args.max_local_steps = 4
+    args.wandb = False
+    run_inner_loop(
+        args, model, {"weight": model.weight}, _layout(),
+        _RecordingOptimizer([model.weight]), _Scheduler(), _Loader(batches),
+        None, rank=0, world=1, device=torch.device("cpu"), wandb_run=run,
+    )
     assert run.logged == []
 
 

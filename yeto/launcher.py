@@ -20,6 +20,7 @@ Flow:
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import signal
@@ -265,7 +266,7 @@ SYNCER_REMOTE_BUILD = (
 )
 
 
-def syncer_tape_sidecar(args) -> tuple[str, str, dict]:
+def syncer_tape_sidecar(args, num_learners: int, binary: str = "~/yeto-syncer") -> tuple[str, str, dict]:
     """Setup step, run prefix, and envs that put a W&B tape forwarder on the
     syncer VM. Returns empty strings when telemetry is off.
 
@@ -298,6 +299,16 @@ def syncer_tape_sidecar(args) -> tuple[str, str, dict]:
     )
     if getattr(args, "wandb_entity", None):
         forwarder += f" --wandb-entity {shlex.quote(args.wandb_entity)}"
+    # Head mode's forwarder is handed the launch namespace directly; the
+    # sidecar is a separate process, so the same config rides across as JSON
+    # (the head job itself is launched the same way, see cli.cmd_launch_head).
+    # build_config drops anything credential-shaped before it is serialized.
+    from .wandb_logger import build_config
+
+    config = build_config(
+        args, {"syncer_command": syncer_command(args, num_learners, binary=binary)}
+    )
+    forwarder += f" --config-json {shlex.quote(json.dumps(config, sort_keys=True))}"
     run_prefix = (
         "(cd ~/sky_workdir && PYTHONPATH=~/sky_workdir nohup "
         f"{forwarder} >/tmp/yeto-tape-wandb.log 2>&1 &) || true\n"
@@ -313,9 +324,9 @@ def make_syncer_task(args, num_learners: int):
 
     import sky
 
-    tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args)
     cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
     if cross:
+        tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
         print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
         task = sky.Task(
             name="yeto-syncer",
@@ -337,6 +348,7 @@ def make_syncer_task(args, num_learners: int):
         return task
 
     binary = build_syncer_binary()
+    tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
     cmd = tape_run + "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
     task = sky.Task(
         name="yeto-syncer",

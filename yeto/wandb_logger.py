@@ -25,6 +25,11 @@ from typing import Any
 
 log = logging.getLogger("wandb")
 
+# Inner steps between training log lines / W&B points, shared by every
+# backend. A run shorter than one window still emits a final point when its
+# loop ends, so a late-joining island is never left without a curve.
+TELEMETRY_EVERY = 10
+
 # Launch flags that carry secrets or are pure noise in a config table.
 _CONFIG_SKIP = frozenset(
     {
@@ -35,6 +40,12 @@ _CONFIG_SKIP = frozenset(
         "wandb_entity",
         "wandb_mode",
         "wandb_group",
+        # yeto.wandb_tape's own argv: the sidecar's config is the fleet's,
+        # forwarded through --config-json, not how the reader was invoked.
+        "tape",
+        "follow",
+        "from_start",
+        "config_json",
     }
 )
 

@@ -384,7 +384,7 @@ def run_inner_loop(
     from ..diloco_sync import DiLoCoSyncState, sync_diloco_boundary
     from ..protocol import DTYPE_F32
     from ..tensor_io import unpack_fragment
-    from ..wandb_logger import NullRun
+    from ..wandb_logger import TELEMETRY_EVERY, NullRun
 
     if wandb_run is None:
         wandb_run = NullRun()
@@ -460,7 +460,7 @@ def run_inner_loop(
         steps_total += 1
         tokens_total += tokens_per_inner_step
 
-        if steps_total % 10 == 0:
+        if steps_total % TELEMETRY_EVERY == 0:
             dt = time.monotonic() - t_last
             t_last = time.monotonic()
             log.info(
@@ -498,6 +498,22 @@ def run_inner_loop(
             observer=observer,
         ):
             break
+    # A late-joining island can finish inside one logging window; without
+    # this it would report sync curves and no training curve at all.
+    if steps_total > 0 and steps_total % TELEMETRY_EVERY != 0:
+        window = steps_total % TELEMETRY_EVERY
+        dt = time.monotonic() - t_last
+        wandb_run.log(
+            {
+                "train/loss_per_token": loss_val,
+                "train/lr": float(opt.learning_rate),
+                "train/raw_tokens_total": tokens_total,
+                "train/sec_per_step": dt / window,
+                "train/tokens_per_sec": window * tokens_per_inner_step / max(dt, 1e-9),
+                "local_step": steps_total,
+                "global_step": sync_state.global_step,
+            }
+        )
     if client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "MLX learner stopped before authoritative finalization; "

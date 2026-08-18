@@ -48,6 +48,7 @@ from .diloco_sync import DiLoCoSyncState, sync_diloco_boundary
 from .finalization import finalize_torch_island
 from .fragments import build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
+from .wandb_logger import TELEMETRY_EVERY
 from .models import MODEL_ALIASES as MODEL_ALIASES
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from .tensor_io import (
@@ -1227,6 +1228,19 @@ def run_inner_loop(
         wandb_run = NullRun()
     observer = wandb_run.log if wandb_run.enabled else None
 
+    def train_metrics(loss_sum, targets, window, seconds, tokens_since):
+        return {
+            "train/loss_per_token": loss_sum / targets,
+            "train/lr": sched.get_last_lr()[0],
+            "train/raw_tokens_total": tokens_total,
+            "train/target_tokens_total": target_tokens_total,
+            "train/sec_per_step": seconds / window,
+            "train/tokens_per_sec": tokens_since / seconds if seconds > 0 else 0.0,
+            "train/epoch": epoch,
+            "local_step": steps_total,
+            "global_step": sync_state.global_step,
+        }
+
     epoch = 0
     t_last = time.monotonic()
     tokens_at_last_log = 0
@@ -1313,7 +1327,7 @@ def run_inner_loop(
             tokens_total += global_raw
             target_tokens_total += global_targets
 
-            if steps_total % 10 == 0:
+            if steps_total % TELEMETRY_EVERY == 0:
                 loss_sum = _global_loss_sum(step_loss_local, world)
                 if rank == 0:
                     dt = time.monotonic() - t_last
@@ -1325,24 +1339,16 @@ def run_inner_loop(
                         sync_state.global_step,
                         loss_sum / global_targets,
                         target_tokens_total,
-                        dt / 10,
+                        dt / TELEMETRY_EVERY,
                     )
                     wandb_run.log(
-                        {
-                            "train/loss_per_token": loss_sum / global_targets,
-                            "train/lr": sched.get_last_lr()[0],
-                            "train/raw_tokens_total": tokens_total,
-                            "train/target_tokens_total": target_tokens_total,
-                            "train/sec_per_step": dt / 10,
-                            "train/tokens_per_sec": (
-                                (tokens_total - tokens_at_last_log) / dt
-                                if dt > 0
-                                else 0.0
-                            ),
-                            "train/epoch": epoch,
-                            "local_step": steps_total,
-                            "global_step": sync_state.global_step,
-                        }
+                        train_metrics(
+                            loss_sum,
+                            global_targets,
+                            TELEMETRY_EVERY,
+                            dt,
+                            tokens_total - tokens_at_last_log,
+                        )
                     )
                     tokens_at_last_log = tokens_total
 
@@ -1377,6 +1383,28 @@ def run_inner_loop(
                 "reduce the number of data-parallel consumers"
             )
         epoch += 1
+    # An island that ran fewer steps than one logging window — a late joiner
+    # the fleet merged only a couple of times — would otherwise finish with
+    # sync curves but no training curve at all. The condition is identical on
+    # every rank, so the collective inside _global_loss_sum stays balanced.
+    if (
+        getattr(args, "wandb", False)
+        and steps_total > 0
+        and steps_total % TELEMETRY_EVERY != 0
+    ):
+        window = steps_total % TELEMETRY_EVERY
+        loss_sum = _global_loss_sum(step_loss_local, world)
+        if rank == 0:
+            wandb_run.log(
+                train_metrics(
+                    loss_sum,
+                    global_targets,
+                    window,
+                    time.monotonic() - t_last,
+                    tokens_total - tokens_at_last_log,
+                )
+            )
+
     learner_budget_steps = getattr(args, "learner_budget_steps", None)
     if (
         learner_budget_steps is not None

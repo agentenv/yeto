@@ -506,7 +506,7 @@ def _run_inner_loop(
 
     from ..diloco_sync import DiLoCoSyncState, sync_diloco_boundary
     from ..finalization import finalize_torch_island
-    from ..wandb_logger import NullRun
+    from ..wandb_logger import TELEMETRY_EVERY, NullRun
 
     if wandb_run is None:
         wandb_run = NullRun()
@@ -579,15 +579,15 @@ def _run_inner_loop(
         steps_total += 1
         tokens_total += tokens_per_inner_step
 
-        if steps_total % 10 == 0 and rank == 0:
+        if steps_total % TELEMETRY_EVERY == 0 and rank == 0:
             now = time.monotonic()
             dt = now - t_last
             t_last = now
             wandb_run.log(
                 {
-                    "train/sec_per_step": dt / 10,
+                    "train/sec_per_step": dt / TELEMETRY_EVERY,
                     "train/tokens_per_sec": (
-                        10 * tokens_per_inner_step / dt if dt > 0 else 0.0
+                        TELEMETRY_EVERY * tokens_per_inner_step / dt if dt > 0 else 0.0
                     ),
                     "train/raw_tokens_total": tokens_total,
                     "local_step": steps_total,
@@ -613,6 +613,22 @@ def _run_inner_loop(
             observer=observer,
         ):
             break
+    # A late-joining island can finish inside one logging window; without
+    # this it would report sync curves and no training curve at all.
+    if rank == 0 and steps_total > 0 and steps_total % TELEMETRY_EVERY != 0:
+        window = steps_total % TELEMETRY_EVERY
+        dt = time.monotonic() - t_last
+        wandb_run.log(
+            {
+                "train/sec_per_step": dt / window,
+                "train/tokens_per_sec": (
+                    window * tokens_per_inner_step / dt if dt > 0 else 0.0
+                ),
+                "train/raw_tokens_total": tokens_total,
+                "local_step": steps_total,
+                "global_step": sync_state.global_step,
+            }
+        )
     if rank == 0 and client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "Megatron learner stopped before authoritative finalization; "

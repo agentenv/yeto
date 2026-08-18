@@ -6,6 +6,7 @@ learner in another cloud, and it must be invisible when it is off.
 
 import argparse
 import json
+import shlex
 
 import pytest
 
@@ -247,13 +248,13 @@ def test_launch_defaults_leave_telemetry_off():
 
 def test_the_syncer_task_is_untouched_without_the_flag(monkeypatch):
     monkeypatch.setenv("WANDB_API_KEY", "secret")
-    setup, run, envs = syncer_tape_sidecar(_syncer_args(wandb=False))
+    setup, run, envs = syncer_tape_sidecar(_syncer_args(wandb=False), 2)
     assert (setup, run, envs) == ("", "", {})
 
 
 def test_the_forwarder_runs_beside_the_syncer_not_instead_of_it(monkeypatch):
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
-    _setup, run, _envs = syncer_tape_sidecar(_syncer_args(wandb=True))
+    _setup, run, _envs = syncer_tape_sidecar(_syncer_args(wandb=True), 2)
     # Backgrounded in a subshell: FleetController reads the job's exit code
     # as the syncer's health, so the syncer must stay in the foreground.
     assert run.startswith("(")
@@ -266,7 +267,8 @@ def test_the_forwarder_runs_beside_the_syncer_not_instead_of_it(monkeypatch):
 def test_the_sidecar_is_pointed_at_the_syncer_tape_and_the_run_group(monkeypatch):
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     _setup, run, envs = syncer_tape_sidecar(
-        _syncer_args(wandb=True, wandb_project="fleet-lab", wandb_entity="acme", wandb_mode="offline")
+        _syncer_args(wandb=True, wandb_project="fleet-lab", wandb_entity="acme", wandb_mode="offline"),
+        2,
     )
     assert SYNCER_EVENT_TAPE in run
     assert "--wandb-group my-fleet" in run
@@ -278,16 +280,16 @@ def test_the_sidecar_is_pointed_at_the_syncer_tape_and_the_run_group(monkeypatch
 
 def test_the_sidecar_credential_follows_the_hf_token_rule(monkeypatch):
     monkeypatch.setenv("WANDB_API_KEY", "secret")
-    _s, _r, envs = syncer_tape_sidecar(_syncer_args(wandb=True))
+    _s, _r, envs = syncer_tape_sidecar(_syncer_args(wandb=True), 2)
     assert envs["WANDB_API_KEY"] == "secret"
     monkeypatch.delenv("WANDB_API_KEY")
-    _s, _r, envs = syncer_tape_sidecar(_syncer_args(wandb=True))
+    _s, _r, envs = syncer_tape_sidecar(_syncer_args(wandb=True), 2)
     assert "WANDB_API_KEY" not in envs
 
 
 def test_a_failed_sidecar_install_does_not_fail_the_syncer(monkeypatch):
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
-    setup, _run, _envs = syncer_tape_sidecar(_syncer_args(wandb=True))
+    setup, _run, _envs = syncer_tape_sidecar(_syncer_args(wandb=True), 2)
     assert "pip install -q wandb" in setup
     assert "||" in setup
 
@@ -310,3 +312,39 @@ def test_the_sidecar_only_needs_stdlib_modules():
             else:
                 continue
             assert not (roots & heavy), f"{name} imports {roots & heavy}"
+
+
+def test_the_sidecar_carries_the_fleet_config_like_head_mode_does(monkeypatch):
+    """A syncer run with no config cannot be filtered by model or recipe.
+
+    Head mode hands its forwarder the launch namespace directly; the sidecar
+    is a separate process, so the same config has to ride across as JSON.
+    """
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    args = _syncer_args(wandb=True, model="qwen35-9b", gpu="aws:8xa100@us-east-2")
+    _setup, run, _envs = syncer_tape_sidecar(args, 2)
+    flag = run.split("--config-json ")[1]
+    config = json.loads(shlex.split(flag)[0])
+    assert config["model"] == "qwen35-9b"
+    assert config["gpu"] == "aws:8xa100@us-east-2"
+    assert config["total_steps"] == 1000
+    assert config["quorum"] == 2
+    # Same extra head mode records, so the two runs are comparable.
+    assert "--total-steps 1000" in config["syncer_command"]
+
+
+def test_the_sidecar_config_never_carries_a_credential(monkeypatch):
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    args = _syncer_args(wandb=True, hf_token="secret", wandb_api_key="secret")
+    _setup, run, _envs = syncer_tape_sidecar(args, 2)
+    config = json.loads(shlex.split(run.split("--config-json ")[1])[0])
+    assert not [k for k in config if "token" in k or "key" in k]
+
+
+def test_the_sidecar_config_survives_the_shell(monkeypatch):
+    """The JSON goes through a shell command line; quoting has to hold."""
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    args = _syncer_args(wandb=True, data="s3://bucket/a b/c'd\"e")
+    _setup, run, _envs = syncer_tape_sidecar(args, 2)
+    config = json.loads(shlex.split(run.split("--config-json ")[1])[0])
+    assert config["data"] == "s3://bucket/a b/c'd\"e"
