@@ -1772,6 +1772,11 @@ def test_offloaded_training_requires_attests_and_mounts_the_tms_fix():
             256,
         )
 
+    plan["tms_preload_patch"]["base_binary_sha256"] = "3" * 64
+    with pytest.raises(HarnessError, match="pinned TMS"):
+        ssh_harness._validate_plan(plan)
+
+    plan["tms_preload_patch"] = _tms_patch_contract()
     plan["tms_preload_patch"]["patch_commit"] = "3" * 40
     with pytest.raises(HarnessError, match="pinned TMS"):
         ssh_harness._validate_plan(plan)

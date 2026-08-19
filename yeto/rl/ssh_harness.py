@@ -66,7 +66,7 @@ TMS_PRELOAD_PATCH_CONTAINER_PATH = (
     "torch_memory_saver_hook_mode_preload_cu13.abi3.so"
 )
 TMS_PRELOAD_BASE_BINARY_SHA256 = (
-    "27fd2a983e6dca2bc30ebe834c32221b6a16afe9d44cd5ab78f06ba6d7a99b60"
+    "c26551247616cabb0bb79dbd26abb61a688a4bb47c9b6a6f9873cfc98093640d"
 )
 TMS_TRAIN_DISK_BACKUP_CONTAINER_PATH = "/workspace/tms-disk-backup"
 TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB = 256
