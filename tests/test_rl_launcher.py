@@ -24,6 +24,7 @@ from yeto.rl import (
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
+    SECRLENV_GENERATE,
     SECRLENV_GROUP_FILTER,
     SECRLENV_REWARD,
     SGLANG_COMMIT,
@@ -161,7 +162,7 @@ def test_legacy_secrlenv_agent_auto_binds_exact_replacement_contract():
             "--reward-function",
             SECRLENV_REWARD,
             "--custom-generate-function-path",
-            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            SECRLENV_GENERATE,
             "--custom-agent-function-path",
             "yeto_miles_secrlenv.agent.run",
             "--use-session-server",
@@ -176,6 +177,25 @@ def test_legacy_secrlenv_agent_auto_binds_exact_replacement_contract():
     assert args.dynamic_sampling_max_replacements == 0
     assert args.secrlenv_max_infrastructure_replacements == 1
     assert args.over_sampling_batch_size == args.rollout_batch_size + 1
+
+
+def test_secrlenv_agent_rejects_the_unwrapped_miles_generator():
+    args = _args(
+        [
+            "--reward-function",
+            SECRLENV_REWARD,
+            "--custom-generate-function-path",
+            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            "--custom-agent-function-path",
+            "yeto_miles_secrlenv.agent.run",
+            "--use-session-server",
+            "--tito-model",
+            "org/model",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="signed SecRLEnv generate wrapper"):
+        _prepare_rl_args(args)
 
 
 @pytest.mark.parametrize(
@@ -205,7 +225,7 @@ def test_secrlenv_agent_rejects_conflicting_replacement_contract(extra, match):
             "--reward-function",
             SECRLENV_REWARD,
             "--custom-generate-function-path",
-            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            SECRLENV_GENERATE,
             "--custom-agent-function-path",
             "yeto_miles_secrlenv.agent.run",
             "--use-session-server",
@@ -452,7 +472,7 @@ def test_stock_codex_harness_requires_explicit_signed_xhigh_dsv4_contract():
             "256",
             "--no-sglang-deterministic-inference",
             "--custom-generate-function-path",
-            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            SECRLENV_GENERATE,
             "--custom-agent-function-path",
             "yeto_miles_secrlenv.codex_harness_agent.run",
             "--reward-function",

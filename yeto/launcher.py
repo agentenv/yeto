@@ -743,6 +743,7 @@ def _prepare_rl_args(
     from .rl import (
         CODEX_HARNESS_AGENT,
         SECRLENV_AGENTS,
+        SECRLENV_GENERATE,
         SECRLENV_GROUP_FILTER,
         SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
         SECRLENV_REWARD,
@@ -816,6 +817,10 @@ def _prepare_rl_args(
         args, "secrlenv_max_infrastructure_replacements", None
     )
     if custom_agent in SECRLENV_AGENTS:
+        if args.custom_generate_function_path != SECRLENV_GENERATE:
+            raise ValueError(
+                "the SecRLEnv agents require the signed SecRLEnv generate wrapper"
+            )
         if args.reward_function != SECRLENV_REWARD:
             raise ValueError(
                 "the SecRLEnv agents require the signed SecRLEnv reward function"

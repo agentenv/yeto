@@ -11,10 +11,14 @@ MILES_IMAGE = (
 )
 
 SECRLENV_AGENT_PATH = "yeto_miles_secrlenv/agent.py"
-SECRLENV_AGENT_SHA256 = "f58b717b7d6e4889adea9d4f5c37eecd70e91f4a5b6d07591dcf5f1c13565689"
+SECRLENV_AGENT_SHA256 = "0f76c7fbd81135bc5b02cab2488629aaff1bb58dc59eae9228ca317583d90c26"
 SECRLENV_AGENT = "yeto_miles_secrlenv.agent.run"
 SECRLENV_REWARD = "yeto_miles_secrlenv.reward:reward_func"
 SECRLENV_GROUP_FILTER = "yeto_miles_secrlenv.reward.check_group"
+SECRLENV_GENERATE = "yeto_miles_secrlenv.generate.generate"
+SECRLENV_GENERATE_SHA256 = (
+    "9e034d6b2e9fec642501ea4a638a8fe196819dacde614ce2903359fc54ea1713"
+)
 SECRLENV_ZERO_VARIANCE_REPLACEMENTS = 0
 SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1
 
@@ -23,7 +27,7 @@ SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1
 CODEX_HARNESS_AGENT = "yeto_miles_secrlenv.codex_harness_agent.run"
 CODEX_HARNESS_AGENT_PATH = "yeto_miles_secrlenv/codex_harness_agent.py"
 CODEX_HARNESS_AGENT_SHA256 = (
-    "4dfbd86fe2a45f1a4824a90a41cf4a33d5730659cd232f283a9e07a7b756ab3e"
+    "f8bf49f50b8143f922e36d26ef63f0f868c1934454c2780bf5a618d2d4e3b844"
 )
 CODEX_BASE_INSTRUCTIONS_SHA256 = (
     "55622eb2d7246eb199fd95b0bbb97b34698feb550aca5c0a62c4557242e5f8b1"

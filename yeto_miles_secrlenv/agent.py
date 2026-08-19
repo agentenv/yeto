@@ -11,6 +11,7 @@ import math
 import os
 import random
 import re
+import secrets
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass
@@ -26,7 +27,14 @@ from .client import (
     EpisodeClient,
     EpisodeClientError,
 )
+from .generate import capture_agent_metadata
 from .reward import (
+    ADMISSION_ERROR_CODE,
+    ADMISSION_ERROR_CODE_KEY,
+    ADMISSION_NONCE_KEY,
+    ADMISSION_PHASE,
+    ADMISSION_PHASE_KEY,
+    ADMISSION_SCHEMA,
     CLEANUP_ERROR_STATUS,
     INFRASTRUCTURE_503_RETRIES_KEY,
     INFRASTRUCTURE_STATUS,
@@ -34,6 +42,18 @@ from .reward import (
     OUTCOME_KEY,
     sign_outcome,
 )
+
+
+class _AdmissionInfrastructureExhausted(EpisodeAPIError):
+    """An exact current pre-create infrastructure response exhausted its ledger."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            ADMISSION_ERROR_CODE,
+            "admission infrastructure exhausted",
+        )
+
 
 LOGGER = logging.getLogger(__name__)
 _TASK_ID = re.compile(r"CVE-\d{4}-\d{4,}")
@@ -667,6 +687,44 @@ def _infrastructure_outcome(
     }
 
 
+def _admission_infrastructure_outcome(
+    task_id: str,
+    infrastructure_503_retries: int,
+    *,
+    nonce: str | None = None,
+) -> dict[str, Any]:
+    """Build evidence for one exhausted authenticated pre-create 503."""
+
+    if infrastructure_503_retries != 1:
+        raise ValueError("invalid SecRLEnv admission retry ledger")
+    return {
+        "schema": ADMISSION_SCHEMA,
+        "status": INFRASTRUCTURE_STATUS,
+        "episode_id": None,
+        "task_id": task_id,
+        "reward": 0.0,
+        "passed": False,
+        "class": None,
+        INFRASTRUCTURE_503_RETRIES_KEY: infrastructure_503_retries,
+        ADMISSION_PHASE_KEY: ADMISSION_PHASE,
+        ADMISSION_ERROR_CODE_KEY: ADMISSION_ERROR_CODE,
+        ADMISSION_NONCE_KEY: nonce or secrets.token_hex(16),
+    }
+
+
+def _signed_agent_result(
+    outcome: dict[str, Any], outcome_status: str, metrics: AgentMetrics
+) -> dict[str, Any]:
+    result = {
+        OUTCOME_KEY: outcome,
+        MAC_KEY: sign_outcome(outcome),
+        "exit_status": outcome_status,
+        "agent_metrics": metrics.to_dict(),
+    }
+    capture_agent_metadata(result)
+    return result
+
+
 def _cleanup_error_outcome(
     task_id: str,
     episode_id: str,
@@ -716,18 +774,18 @@ async def _create_with_capacity_retry(
                 try:
                     result = await asyncio.wait_for(create_task, timeout=remaining)
                 except asyncio.TimeoutError:
-                    if create_task.cancelled():
-                        raise last_retryable from None
-                    raise
+                    if last_retryable.code == ADMISSION_ERROR_CODE:
+                        raise EpisodeClientError(
+                            "secrlenv episode admission retry timed out"
+                        ) from None
+                    raise last_retryable from None
         except EpisodeAPIError as exc:
             now = time.monotonic()
             if exc.status == 503 and exc.code == "capacity_reached":
                 reason = "capacity"
-            elif (
-                exc.status == 503
-                and exc.code == "infrastructure_error"
-                and infrastructure_retries < 1
-            ):
+            elif exc.status == 503 and exc.code == ADMISSION_ERROR_CODE:
+                if infrastructure_retries >= 1:
+                    raise _AdmissionInfrastructureExhausted() from None
                 infrastructure_retries += 1
                 retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY] = infrastructure_retries
                 reason = "infrastructure"
@@ -737,8 +795,8 @@ async def _create_with_capacity_retry(
                 raise
             last_retryable = exc
         else:
-            if last_retryable is not None and time.monotonic() >= deadline:
-                raise last_retryable
+            # Once create returns an episode it must be tracked and closed. A
+            # deadline-edge success cannot be discarded as a stale prior 503.
             return result
         if now >= next_log:
             LOGGER.warning(
@@ -908,6 +966,25 @@ async def run(
             finally:
                 _mark_episode_cleanup_pending(episode_id)
         raise
+    except _AdmissionInfrastructureExhausted:
+        if (
+            episode_id is None
+            and retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY] == 1
+        ):
+            try:
+                outcome = _admission_infrastructure_outcome(
+                    task_id,
+                    retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY],
+                )
+                return _signed_agent_result(outcome, INFRASTRUCTURE_STATUS, metrics)
+            except Exception:
+                LOGGER.exception("refusing untrusted secrlenv admission metadata")
+                return None
+        LOGGER.error("invalid secrlenv admission infrastructure state")
+        return None
+    except EpisodeAPIError:
+        LOGGER.exception("secrlenv episode failed before a trustworthy verdict")
+        return None
     except Exception:
         LOGGER.exception("secrlenv episode failed before a trustworthy verdict")
         return None
@@ -945,16 +1022,11 @@ async def run(
                     INFRASTRUCTURE_503_RETRIES_KEY
                 ],
             )
-        signature = sign_outcome(outcome)
+        result = _signed_agent_result(outcome, outcome_status, metrics)
     except Exception:
         LOGGER.exception("refusing untrusted secrlenv evaluation metadata")
         return None
-    return {
-        OUTCOME_KEY: outcome,
-        MAC_KEY: signature,
-        "exit_status": outcome_status,
-        "agent_metrics": metrics.to_dict(),
-    }
+    return result
 
 
 async def abort(_args: Any = None) -> None:

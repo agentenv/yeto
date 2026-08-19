@@ -43,6 +43,7 @@ from . import (
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
     SECRLENV_AGENTS,
+    SECRLENV_GENERATE,
     SECRLENV_GROUP_FILTER,
     SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
     SECRLENV_REWARD,
@@ -1292,6 +1293,10 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     )
     agent_function = learner.get("custom_agent_function_path")
     if agent_function in SECRLENV_AGENTS:
+        if learner.get("custom_generate_function_path") != SECRLENV_GENERATE:
+            raise HarnessError(
+                "secrlenv agent requires the signed generate wrapper"
+            )
         if learner.get("reward_function") != SECRLENV_REWARD:
             raise HarnessError("secrlenv agent requires the signed reward function")
         if dynamic_filter != SECRLENV_GROUP_FILTER:

@@ -12,6 +12,7 @@ import pytest
 
 from yeto.rl import miles as rl_miles
 from yeto_miles_secrlenv import agent, reward
+from yeto_miles_secrlenv import generate as secrlenv_generate
 from yeto_miles_secrlenv.client import (
     EpisodeAPIError,
     EpisodeClient,
@@ -81,6 +82,112 @@ def _install_run_openai(monkeypatch):
 
 def _run_metadata():
     return {"task_id": "CVE-2024-1234", "prompt_tier": "l2"}
+
+
+def test_exhausted_precreate_infrastructure_503_returns_signed_admission(
+    monkeypatch,
+):
+    attempts = []
+
+    class AdmissionClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def create(self, task_id, tier):
+            attempts.append((task_id, tier))
+            raise EpisodeAPIError(503, "infrastructure_error", "unavailable")
+
+    _install_run_openai(monkeypatch)
+    monkeypatch.setattr(agent, "EpisodeClient", AdmissionClient)
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.0)
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "a" * 48)
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
+
+    result = asyncio.run(
+        agent.run("http://127.0.0.1:8000/v1", None, metadata=_run_metadata())
+    )
+
+    assert result is not None
+    outcome, value = reward._verified_outcome(result)
+    assert len(attempts) == 2
+    assert outcome["schema"] == reward.ADMISSION_SCHEMA
+    assert outcome["status"] == reward.INFRASTRUCTURE_STATUS
+    assert outcome["episode_id"] is None
+    assert outcome[reward.INFRASTRUCTURE_503_RETRIES_KEY] == 1
+    assert value == 0.0
+    agent.require_no_episode_residue()
+
+
+def test_precreate_transport_failure_remains_unsigned_and_fatal(monkeypatch):
+    class TransportFailingClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def create(self, _task_id, _tier):
+            raise EpisodeTransportError("unavailable")
+
+    _install_run_openai(monkeypatch)
+    monkeypatch.setattr(agent, "EpisodeClient", TransportFailingClient)
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "a" * 48)
+
+    assert (
+        asyncio.run(
+            agent.run(
+                "http://127.0.0.1:8000/v1", None, metadata=_run_metadata()
+            )
+        )
+        is None
+    )
+    agent.require_no_episode_residue()
+
+
+def test_precreate_infrastructure_retry_timeout_remains_unsigned(monkeypatch):
+    attempts = 0
+
+    class AdmissionTimeoutClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def create(self, _task_id, _tier):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise EpisodeAPIError(
+                    503, "infrastructure_error", "unavailable"
+                )
+            await asyncio.Event().wait()
+
+    _install_run_openai(monkeypatch)
+    monkeypatch.setattr(agent, "EpisodeClient", AdmissionTimeoutClient)
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.0)
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "a" * 48)
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "0.01")
+
+    result = asyncio.run(
+        agent.run("http://127.0.0.1:8000/v1", None, metadata=_run_metadata())
+    )
+
+    assert result is None
+    assert attempts == 2
+    agent.require_no_episode_residue()
 
 
 def test_episode_finalization_cannot_be_claimed_by_abort():
@@ -1016,6 +1123,183 @@ def test_signed_infrastructure_outcome_is_only_an_abort_signal(monkeypatch):
     assert forged_sample.status == "completed"
 
 
+def test_admission_outcome_schema_is_strict_and_nonce_distinguishes_attempts(
+    monkeypatch,
+):
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "n" * 48)
+    first = agent._admission_infrastructure_outcome(
+        "CVE-2024-1234", 1, nonce="1" * 32
+    )
+    second = agent._admission_infrastructure_outcome(
+        "CVE-2024-1234", 1, nonce="2" * 32
+    )
+    first_metadata = {
+        reward.OUTCOME_KEY: first,
+        reward.MAC_KEY: reward.sign_outcome(first),
+    }
+    second_metadata = {
+        reward.OUTCOME_KEY: second,
+        reward.MAC_KEY: reward.sign_outcome(second),
+    }
+
+    assert reward._verified_outcome(first_metadata)[1] == 0.0
+    assert reward._group_key(
+        [SimpleNamespace(index=9, metadata=first_metadata)]
+    ) != reward._group_key([SimpleNamespace(index=9, metadata=second_metadata)])
+
+    for field, invalid in (
+        (reward.ADMISSION_PHASE_KEY, "post_create"),
+        (reward.ADMISSION_ERROR_CODE_KEY, "capacity_reached"),
+        (reward.ADMISSION_NONCE_KEY, "bad"),
+        (reward.INFRASTRUCTURE_503_RETRIES_KEY, 0),
+        ("episode_id", "not-null"),
+    ):
+        forged = copy.deepcopy(first)
+        forged[field] = invalid
+        metadata = {
+            reward.OUTCOME_KEY: forged,
+            reward.MAC_KEY: reward.sign_outcome(forged),
+        }
+        with pytest.raises(reward.UntrustedOutcome, match="admission outcome"):
+            reward._verified_outcome(metadata)
+
+    extra = copy.deepcopy(first)
+    extra["unexpected"] = True
+    with pytest.raises(reward.UntrustedOutcome, match="admission outcome"):
+        reward._verified_outcome(
+            {
+                reward.OUTCOME_KEY: extra,
+                reward.MAC_KEY: reward.sign_outcome(extra),
+            }
+        )
+
+
+def _install_generate_upstream(monkeypatch, upstream):
+    package = types.ModuleType("miles")
+    rollout = types.ModuleType("miles.rollout")
+    hub = types.ModuleType("miles.rollout.generate_hub")
+    upstream_module = types.ModuleType(
+        "miles.rollout.generate_hub.agentic_tool_call"
+    )
+    upstream_module.generate = upstream
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.generate_hub", hub)
+    monkeypatch.setitem(
+        sys.modules, "miles.rollout.generate_hub.agentic_tool_call", upstream_module
+    )
+
+
+def test_generate_wrapper_preserves_only_verified_metadata_on_aborted_fallback(
+    monkeypatch,
+):
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "g" * 48)
+    sample = SimpleNamespace(status=SimpleNamespace(value="aborted"), metadata={})
+    outcome = agent._admission_infrastructure_outcome(
+        "CVE-2024-1234", 1, nonce="3" * 32
+    )
+    signed = {
+        reward.OUTCOME_KEY: outcome,
+        reward.MAC_KEY: reward.sign_outcome(outcome),
+        "exit_status": reward.INFRASTRUCTURE_STATUS,
+        "agent_metrics": {},
+    }
+
+    async def upstream(_input):
+        secrlenv_generate.capture_agent_metadata(signed)
+        return SimpleNamespace(samples=sample)
+
+    _install_generate_upstream(monkeypatch, upstream)
+    output = asyncio.run(secrlenv_generate.generate(SimpleNamespace()))
+
+    assert output.samples is sample
+    assert sample.status.value == "aborted"
+    assert reward._verified_outcome(sample.metadata)[0] == outcome
+    assert set(sample.metadata) == {reward.OUTCOME_KEY, reward.MAC_KEY}
+
+
+def test_generate_wrapper_rejects_forged_or_missing_fallback_metadata(monkeypatch):
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "g" * 48)
+    captured = {"value": None}
+    sample_metadata = {"value": {}}
+
+    async def upstream(_input):
+        if captured["value"] is not None:
+            secrlenv_generate.capture_agent_metadata(captured["value"])
+        return SimpleNamespace(
+            samples=SimpleNamespace(
+                status=SimpleNamespace(value="aborted"),
+                metadata=copy.deepcopy(sample_metadata["value"]),
+            )
+        )
+
+    _install_generate_upstream(monkeypatch, upstream)
+    with pytest.raises(reward.UntrustedOutcome):
+        asyncio.run(secrlenv_generate.generate(SimpleNamespace()))
+
+    outcome = agent._admission_infrastructure_outcome(
+        "CVE-2024-1234", 1, nonce="4" * 32
+    )
+    captured["value"] = {
+        reward.OUTCOME_KEY: outcome,
+        reward.MAC_KEY: "0" * 64,
+    }
+    with pytest.raises(reward.UntrustedOutcome, match="signature mismatch"):
+        asyncio.run(secrlenv_generate.generate(SimpleNamespace()))
+
+    sample_metadata["value"] = {reward.OUTCOME_KEY: outcome}
+    with pytest.raises(reward.UntrustedOutcome, match="lost signed outcome metadata"):
+        asyncio.run(secrlenv_generate.generate(SimpleNamespace()))
+
+
+def test_admission_replacement_nonce_preserves_shared_retry_exhaustion(monkeypatch):
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "r" * 48)
+    _install_filter_types(monkeypatch)
+    calls = []
+
+    def retry(group, **kwargs):
+        assert kwargs["infrastructure_503_retries"] == {201: 1}
+        if calls:
+            raise rl_miles.SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout replacement budget was exhausted"
+            )
+        calls.append((group, kwargs))
+
+    def admission_sample(nonce):
+        outcome = agent._admission_infrastructure_outcome(
+            "CVE-2024-1234", 1, nonce=nonce
+        )
+        return SimpleNamespace(
+            index=201,
+            status="aborted",
+            metadata={
+                reward.OUTCOME_KEY: outcome,
+                reward.MAC_KEY: reward.sign_outcome(outcome),
+            },
+        )
+
+    args = SimpleNamespace(
+        yeto_rl_policy_version=92,
+        yeto_rl_dynamic_sampling_max_replacements=0,
+        _yeto_secrlenv_retry_callback=retry,
+    )
+    first = [admission_sample("5" * 32)]
+    exhausted = [admission_sample("6" * 32)]
+
+    initial = reward.check_group(args, first)
+    with pytest.raises(
+        rl_miles.SecRLEnvReplacementExhausted,
+        match="budget was exhausted",
+    ):
+        reward.check_group(args, exhausted)
+
+    assert (initial.keep, initial.reason) == (
+        False,
+        "secrlenv_infrastructure_failure",
+    )
+    assert len(calls) == 1
+
+
 def test_signed_cleanup_failure_is_terminal_without_replacement(monkeypatch):
     monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "c" * 48)
     _install_filter_types(monkeypatch)
@@ -1350,7 +1634,7 @@ def test_capacity_retry_stops_at_the_configured_deadline(monkeypatch):
     assert 2 <= calls < 20
 
 
-def test_capacity_retry_rejects_success_exactly_at_deadline(monkeypatch):
+def test_capacity_retry_accepts_success_exactly_at_deadline(monkeypatch):
     monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "1")
     clock = [0.0]
     failure = EpisodeAPIError(503, "capacity_reached", "busy")
@@ -1372,14 +1656,54 @@ def test_capacity_retry_rejects_success_exactly_at_deadline(monkeypatch):
     )
     monkeypatch.setattr(agent.asyncio, "sleep", advance)
     monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.1)
-    with pytest.raises(EpisodeAPIError) as caught:
-        asyncio.run(
-            agent._create_with_capacity_retry(
-                DeadlineClient(), "CVE-2024-1234", "l2"
-            )
+    result = asyncio.run(
+        agent._create_with_capacity_retry(
+            DeadlineClient(), "CVE-2024-1234", "l2"
         )
-    assert caught.value is failure
+    )
+    assert result == {"episode_id": "a" * 24}
     assert calls == [0.0, 0.1]
+
+
+def test_infrastructure_retry_accepts_late_create_instead_of_stale_503(
+    monkeypatch,
+):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "1")
+    clock = [0.0]
+    calls = []
+    ledger = {reward.INFRASTRUCTURE_503_RETRIES_KEY: 0}
+
+    class DeadlineClient:
+        async def create(self, *_args):
+            calls.append(clock[0])
+            if len(calls) == 1:
+                raise EpisodeAPIError(
+                    503, "infrastructure_error", "unavailable"
+                )
+            clock[0] = 1.0
+            return {"episode_id": "b" * 24}
+
+    async def advance(delay):
+        clock[0] += delay
+
+    monkeypatch.setattr(
+        agent, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(agent.asyncio, "sleep", advance)
+    monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.1)
+
+    result = asyncio.run(
+        agent._create_with_capacity_retry(
+            DeadlineClient(),
+            "CVE-2024-1234",
+            "l2",
+            retry_ledger=ledger,
+        )
+    )
+
+    assert result == {"episode_id": "b" * 24}
+    assert calls == [0.0, 0.1]
+    assert ledger == {reward.INFRASTRUCTURE_503_RETRIES_KEY: 1}
 
 
 def test_capacity_retry_does_not_create_at_the_deadline(monkeypatch):

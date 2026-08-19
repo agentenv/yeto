@@ -7,6 +7,7 @@ import hmac
 import json
 import math
 import os
+import re
 import stat
 import statistics
 from pathlib import Path
@@ -17,6 +18,13 @@ MAC_KEY = "secrlenv_trusted_outcome_hmac"
 INFRASTRUCTURE_STATUS = "infrastructure_error"
 CLEANUP_ERROR_STATUS = "cleanup_error"
 INFRASTRUCTURE_503_RETRIES_KEY = "secrlenv_infrastructure_503_retries"
+ADMISSION_SCHEMA = 2
+ADMISSION_PHASE_KEY = "admission_phase"
+ADMISSION_ERROR_CODE_KEY = "admission_error_code"
+ADMISSION_NONCE_KEY = "admission_nonce"
+ADMISSION_PHASE = "pre_create"
+ADMISSION_ERROR_CODE = "infrastructure_error"
+_ADMISSION_NONCE = re.compile(r"[0-9a-f]{32}")
 _SIGNED_STATUSES = {
     "completed",
     "timeout",
@@ -68,7 +76,9 @@ def _verified_outcome(metadata: Any) -> tuple[dict[str, Any], float]:
     expected_mac = sign_outcome(outcome)
     if not hmac.compare_digest(expected_mac, supplied_mac):
         raise UntrustedOutcome("secrlenv outcome signature mismatch")
-    if outcome.get("schema") != 1 or outcome.get("status") not in _SIGNED_STATUSES:
+    schema = outcome.get("schema")
+    status = outcome.get("status")
+    if schema not in {1, ADMISSION_SCHEMA} or status not in _SIGNED_STATUSES:
         raise UntrustedOutcome("secrlenv outcome has an invalid schema or status")
     infrastructure_503_retries = outcome.get(INFRASTRUCTURE_503_RETRIES_KEY)
     if (
@@ -82,8 +92,47 @@ def _verified_outcome(metadata: Any) -> tuple[dict[str, Any], float]:
     value = float(reward)
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise UntrustedOutcome("secrlenv outcome reward is outside [0, 1]")
-    if not isinstance(outcome.get("episode_id"), str) or not isinstance(
-        outcome.get("task_id"), str
+    if not isinstance(outcome.get("task_id"), str):
+        raise UntrustedOutcome("secrlenv outcome has no episode/task identity")
+    if schema == ADMISSION_SCHEMA:
+        expected_keys = {
+            "schema",
+            "status",
+            "episode_id",
+            "task_id",
+            "reward",
+            "passed",
+            "class",
+            INFRASTRUCTURE_503_RETRIES_KEY,
+            ADMISSION_PHASE_KEY,
+            ADMISSION_ERROR_CODE_KEY,
+            ADMISSION_NONCE_KEY,
+        }
+        if (
+            set(outcome) != expected_keys
+            or status != INFRASTRUCTURE_STATUS
+            or outcome.get("episode_id") is not None
+            or not outcome["task_id"]
+            or outcome.get(ADMISSION_PHASE_KEY) != ADMISSION_PHASE
+            or outcome.get(ADMISSION_ERROR_CODE_KEY) != ADMISSION_ERROR_CODE
+            or not isinstance(outcome.get(ADMISSION_NONCE_KEY), str)
+            or _ADMISSION_NONCE.fullmatch(outcome[ADMISSION_NONCE_KEY]) is None
+            or infrastructure_503_retries != 1
+            or value != 0.0
+            or outcome.get("passed") is not False
+            or outcome.get("class") is not None
+        ):
+            raise UntrustedOutcome("secrlenv admission outcome is invalid")
+    elif (
+        not isinstance(outcome.get("episode_id"), str)
+        or any(
+            key in outcome
+            for key in (
+                ADMISSION_PHASE_KEY,
+                ADMISSION_ERROR_CODE_KEY,
+                ADMISSION_NONCE_KEY,
+            )
+        )
     ):
         raise UntrustedOutcome("secrlenv outcome has no episode/task identity")
     return outcome, value

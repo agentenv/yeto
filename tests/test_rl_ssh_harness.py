@@ -163,7 +163,7 @@ def _enable_secrlenv_agent(plan):
     plan["remote_env_file"] = ".config/yeto/rl.env"
     plan["learner"].update(
         custom_agent_function_path="yeto_miles_secrlenv.agent.run",
-        custom_generate_function_path="miles.rollout.generate",
+        custom_generate_function_path=ssh_harness.SECRLENV_GENERATE,
         use_session_server=True,
         tito_model="org/model",
         reward_function=ssh_harness.SECRLENV_REWARD,
@@ -201,6 +201,10 @@ def test_secrlenv_plan_round_trip_requires_exact_replacement_contract():
     assert parsed.over_sampling_batch_size == parsed.groups_per_round + 1
 
     mutations = [
+        (
+            "custom_generate_function_path",
+            "miles.rollout.generate_hub.agentic_tool_call.generate",
+        ),
         ("reward_function", "other.reward:score"),
         ("dynamic_sampling_filter_path", None),
         ("dynamic_sampling_filter_path", "other.filter"),
@@ -838,7 +842,7 @@ def test_prepare_wires_final_secrlenv_eval_and_same_dataset_sha(tmp_path, monkey
     learner = _plan()["learner"]
     learner.update(
         custom_agent_function_path="yeto_miles_secrlenv.agent.run",
-        custom_generate_function_path="miles.rollout.generate",
+        custom_generate_function_path=ssh_harness.SECRLENV_GENERATE,
         use_session_server=True,
         tito_model="org/model",
         reward_function=ssh_harness.SECRLENV_REWARD,
@@ -2044,9 +2048,7 @@ def test_harness_freezes_stock_codex_identity_and_binary_mount():
     plan["learner"].update(
         {
             "rl_model_recipe": "deepseek-v4-flash",
-            "custom_generate_function_path": (
-                "miles.rollout.generate_hub.agentic_tool_call.generate"
-            ),
+            "custom_generate_function_path": rl_config.SECRLENV_GENERATE,
             "custom_agent_function_path": rl_config.CODEX_HARNESS_AGENT,
             "codex_reasoning_effort": "xhigh",
             "use_session_server": True,

@@ -16,6 +16,7 @@ import pytest
 from aiohttp import web
 
 from yeto_miles_secrlenv import codex_harness_agent as harness
+from yeto_miles_secrlenv import reward as secrlenv_reward
 
 
 def _completion(
@@ -807,6 +808,86 @@ class _RecoveringEpisodeClient(_FakeEpisodeClient):
             self.submissions.append((episode_id, value))
             raise harness.EpisodeAPIError(400, "invalid_submission", "evidence rejected")
         return await super().submit(episode_id, value)
+
+
+def test_codex_exhausted_precreate_503_returns_signed_admission(monkeypatch):
+    attempts = []
+
+    class AdmissionClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def create(self, task_id, tier):
+            attempts.append((task_id, tier))
+            raise harness.EpisodeAPIError(
+                503, "infrastructure_error", "unavailable"
+            )
+
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "a" * 48)
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
+    monkeypatch.setattr(harness, "EpisodeClient", AdmissionClient)
+    monkeypatch.setattr(harness, "_attest_runtime", lambda: Path("/codex"))
+    monkeypatch.setattr(harness.legacy.random, "uniform", lambda *_args: 0.0)
+
+    result = asyncio.run(
+        harness.run(
+            "http://127.0.0.1:1",
+            None,
+            metadata={"task_id": "CVE-2024-1234", "prompt_tier": "l2"},
+        )
+    )
+
+    assert result is not None
+    outcome, value = secrlenv_reward._verified_outcome(result)
+    assert len(attempts) == 2
+    assert outcome["schema"] == 2
+    assert outcome["episode_id"] is None
+    assert outcome[harness.INFRASTRUCTURE_503_RETRIES_KEY] == 1
+    assert value == 0.0
+    harness.legacy.require_no_episode_residue()
+
+
+def test_codex_precreate_infrastructure_retry_timeout_remains_unsigned(
+    monkeypatch,
+):
+    attempts = 0
+
+    class AdmissionTimeoutClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def create(self, _task_id, _tier):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise harness.EpisodeAPIError(
+                    503, "infrastructure_error", "unavailable"
+                )
+            await asyncio.Event().wait()
+
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "a" * 48)
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "0.01")
+    monkeypatch.setattr(harness, "EpisodeClient", AdmissionTimeoutClient)
+    monkeypatch.setattr(harness, "_attest_runtime", lambda: Path("/codex"))
+    monkeypatch.setattr(harness.legacy.random, "uniform", lambda *_args: 0.0)
+
+    result = asyncio.run(
+        harness.run(
+            "http://127.0.0.1:1",
+            None,
+            metadata={"task_id": "CVE-2024-1234", "prompt_tier": "l2"},
+        )
+    )
+
+    assert result is None
+    assert attempts == 2
+    harness.legacy.require_no_episode_residue()
 
 
 def test_run_does_not_start_codex_before_capacity_retry_creates_episode(

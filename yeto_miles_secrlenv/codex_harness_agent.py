@@ -31,6 +31,7 @@ from aiohttp import web
 
 from . import agent as legacy
 from .client import EpisodeAPIError, EpisodeClient, EpisodeClientError
+from .generate import capture_agent_metadata
 from .reward import (
     INFRASTRUCTURE_503_RETRIES_KEY,
     INFRASTRUCTURE_STATUS,
@@ -1631,6 +1632,27 @@ async def run(
             finally:
                 legacy._mark_episode_cleanup_pending(episode_id)
         raise
+    except legacy._AdmissionInfrastructureExhausted:
+        if (
+            episode_id is None
+            and retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY] == 1
+        ):
+            try:
+                outcome = legacy._admission_infrastructure_outcome(
+                    task_id,
+                    retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY],
+                )
+                return legacy._signed_agent_result(
+                    outcome, INFRASTRUCTURE_STATUS, metrics
+                )
+            except Exception:
+                LOGGER.exception("refusing untrusted Codex admission metadata")
+                return None
+        LOGGER.error("invalid stock Codex admission infrastructure state")
+        return None
+    except EpisodeAPIError:
+        LOGGER.exception("stock Codex episode failed before a trustworthy verdict")
+        return None
     except Exception:
         LOGGER.exception("stock Codex episode failed before a trustworthy verdict")
         return None
@@ -1662,16 +1684,17 @@ async def run(
                     INFRASTRUCTURE_503_RETRIES_KEY
                 ],
             )
-        signature = sign_outcome(outcome)
+        result = {
+            OUTCOME_KEY: outcome,
+            MAC_KEY: sign_outcome(outcome),
+            "exit_status": outcome_status,
+            "agent_metrics": metrics.to_dict(),
+        }
+        capture_agent_metadata(result)
     except Exception:
         LOGGER.exception("refusing untrusted secrlenv evaluation metadata")
         return None
-    return {
-        OUTCOME_KEY: outcome,
-        MAC_KEY: signature,
-        "exit_status": outcome_status,
-        "agent_metrics": metrics.to_dict(),
-    }
+    return result
 
 
 abort = legacy.abort
