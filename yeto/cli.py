@@ -159,6 +159,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--secrlenv-max-infrastructure-replacements",
+        type=int,
+        default=None,
+        help=(
+            "bound authenticated SecRLEnv infrastructure-group retries; "
+            "the signed SecRLEnv contract requires exactly one same-task retry"
+        ),
+    )
+    rl.add_argument(
         "--rl-offload-train",
         action="store_true",
         help=(

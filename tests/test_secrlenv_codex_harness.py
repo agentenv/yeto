@@ -891,6 +891,61 @@ def test_run_does_not_start_codex_before_capacity_retry_creates_episode(
     assert events == ["create", "create", "drive", "evaluate", "close"]
 
 
+def test_run_close_failure_returns_terminal_cleanup_evidence(monkeypatch):
+    episode_id = "d" * 24
+    close_calls = []
+
+    class CloseFailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def create(self, _task_id: str, _tier: str):
+            return {"episode_id": episode_id, "prompt": "immutable task"}
+
+        async def evaluate(self, value: str):
+            assert value == episode_id
+            return {
+                "task_id": "CVE-2024-1234",
+                "episode_id": episode_id,
+                "reward": 1.0,
+                "passed": True,
+            }
+
+        async def close(self, value: str):
+            assert value == episode_id
+            close_calls.append(value)
+            raise harness.EpisodeClientError("close failed")
+
+    async def complete_policy(*_args, **_kwargs):
+        return "completed"
+
+    monkeypatch.setattr(harness, "EpisodeClient", CloseFailingClient)
+    monkeypatch.setattr(harness, "_attest_runtime", lambda: Path("/codex"))
+    monkeypatch.setattr(harness, "_drive_codex", complete_policy)
+    monkeypatch.setattr(harness, "sign_outcome", lambda _outcome: "signed")
+    try:
+        result = asyncio.run(
+            harness.run(
+                "http://127.0.0.1:1",
+                None,
+                metadata={"task_id": "CVE-2024-1234", "prompt_tier": "l2"},
+            )
+        )
+        assert result is not None
+        assert result["exit_status"] == harness.legacy.CLEANUP_ERROR_STATUS
+        assert (
+            result[harness.OUTCOME_KEY]["status"]
+            == harness.legacy.CLEANUP_ERROR_STATUS
+        )
+        assert len(close_calls) == 2
+        assert harness.legacy._EPISODE_PHASES[episode_id] == "cleanup_pending"
+    finally:
+        harness.legacy._release_episode(episode_id)
+
+
 def test_driver_rejects_mutated_arguments_but_preserves_bounded_truncation(monkeypatch):
     _set_bridge_env(monkeypatch)
 

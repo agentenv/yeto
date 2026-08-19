@@ -740,7 +740,14 @@ def _prepare_rl_args(
     _rl_miles_function(args.custom_generate_function_path)
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")
-    from .rl import CODEX_HARNESS_AGENT
+    from .rl import (
+        CODEX_HARNESS_AGENT,
+        SECRLENV_AGENTS,
+        SECRLENV_GROUP_FILTER,
+        SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
+        SECRLENV_REWARD,
+        SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
+    )
 
     if custom_agent is not None:
         if args.custom_generate_function_path is None:
@@ -804,6 +811,56 @@ def _prepare_rl_args(
     elif codex_reasoning_effort is not None:
         raise ValueError(
             "--codex-reasoning-effort requires the signed stock Codex agent"
+        )
+    secrlenv_infrastructure_replacements = getattr(
+        args, "secrlenv_max_infrastructure_replacements", None
+    )
+    if custom_agent in SECRLENV_AGENTS:
+        if args.reward_function != SECRLENV_REWARD:
+            raise ValueError(
+                "the SecRLEnv agents require the signed SecRLEnv reward function"
+            )
+        configured_filter = getattr(args, "dynamic_sampling_filter_path", None)
+        if configured_filter not in {None, SECRLENV_GROUP_FILTER}:
+            raise ValueError(
+                "the SecRLEnv agents require the exact signed group filter"
+            )
+        zero_variance_replacements = getattr(
+            args, "dynamic_sampling_max_replacements", None
+        )
+        if zero_variance_replacements not in {
+            None,
+            SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
+        } or isinstance(zero_variance_replacements, bool):
+            raise ValueError(
+                "the SecRLEnv agents require zero variance replacements"
+            )
+        if secrlenv_infrastructure_replacements not in {
+            None,
+            SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
+        } or isinstance(secrlenv_infrastructure_replacements, bool):
+            raise ValueError(
+                "the SecRLEnv agents require exactly one infrastructure replacement"
+            )
+        expected_oversampling = args.rollout_batch_size + 1
+        if args.over_sampling_batch_size == args.rollout_batch_size:
+            args.over_sampling_batch_size = expected_oversampling
+        elif args.over_sampling_batch_size != expected_oversampling:
+            raise ValueError(
+                "the SecRLEnv agents require oversampling equal to the training "
+                "batch plus one"
+            )
+        args.dynamic_sampling_filter_path = SECRLENV_GROUP_FILTER
+        args.dynamic_sampling_max_replacements = (
+            SECRLENV_ZERO_VARIANCE_REPLACEMENTS
+        )
+        args.secrlenv_max_infrastructure_replacements = (
+            SECRLENV_INFRASTRUCTURE_REPLACEMENTS
+        )
+    elif secrlenv_infrastructure_replacements is not None:
+        raise ValueError(
+            "--secrlenv-max-infrastructure-replacements requires a signed "
+            "SecRLEnv agent"
         )
     agent_max_seq_len = getattr(args, "agent_max_seq_len", None)
     if agent_max_seq_len is not None:
@@ -1388,6 +1445,11 @@ def make_miles_island_task(
         flags += (
             " --dynamic-sampling-max-replacements "
             f"{args.dynamic_sampling_max_replacements}"
+        )
+    if getattr(args, "secrlenv_max_infrastructure_replacements", None) is not None:
+        flags += (
+            " --secrlenv-max-infrastructure-replacements "
+            f"{args.secrlenv_max_infrastructure_replacements}"
         )
     if args.rl_offload_train:
         flags += " --rl-offload-train"

@@ -42,6 +42,11 @@ from . import (
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
+    SECRLENV_AGENTS,
+    SECRLENV_GROUP_FILTER,
+    SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
+    SECRLENV_REWARD,
+    SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
     SGLANG_COMMIT,
     SGLANG_REPOSITORY,
 )
@@ -93,9 +98,6 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _SAFE_IMAGE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]+\Z")
 _EVAL_DATASET_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}\Z")
-SECRLENV_AGENT = "yeto_miles_secrlenv.agent.run"
-SECRLENV_REWARD = "yeto_miles_secrlenv.reward:reward_func"
-SECRLENV_AGENTS = frozenset((SECRLENV_AGENT, CODEX_HARNESS_AGENT))
 CODEX_REMOTE_BUNDLE_PATH = "codex/codex-x86_64-unknown-linux-musl"
 CODEX_REMOTE_MANIFEST_PATH = "codex/codex-package.json"
 CODEX_REMOTE_SCHEMA_PATH = "codex/codex_app_server_protocol.v2.schemas.json"
@@ -1282,9 +1284,40 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             )
     max_replacements = learner.get("dynamic_sampling_max_replacements")
     if max_replacements is not None and (
-        not isinstance(max_replacements, int) or max_replacements < 0
+        type(max_replacements) is not int or max_replacements < 0
     ):
         raise HarnessError("plan has an invalid dynamic_sampling_max_replacements")
+    infrastructure_replacements = learner.get(
+        "secrlenv_max_infrastructure_replacements"
+    )
+    agent_function = learner.get("custom_agent_function_path")
+    if agent_function in SECRLENV_AGENTS:
+        if learner.get("reward_function") != SECRLENV_REWARD:
+            raise HarnessError("secrlenv agent requires the signed reward function")
+        if dynamic_filter != SECRLENV_GROUP_FILTER:
+            raise HarnessError("secrlenv agent requires the signed group filter")
+        if max_replacements != SECRLENV_ZERO_VARIANCE_REPLACEMENTS or isinstance(
+            max_replacements, bool
+        ):
+            raise HarnessError(
+                "secrlenv agent requires zero variance replacements"
+            )
+        if (
+            infrastructure_replacements
+            != SECRLENV_INFRASTRUCTURE_REPLACEMENTS
+            or isinstance(infrastructure_replacements, bool)
+        ):
+            raise HarnessError(
+                "secrlenv agent requires exactly one infrastructure replacement"
+            )
+        if learner["over_sampling_batch_size"] != learner["groups_per_round"] + 1:
+            raise HarnessError(
+                "secrlenv agent requires one reserved same-task retry slot"
+            )
+    elif infrastructure_replacements is not None:
+        raise HarnessError(
+            "secrlenv infrastructure replacements require a secrlenv agent"
+        )
     timeout_minutes = learner.get("rl_distributed_timeout_minutes", 10)
     if not isinstance(timeout_minutes, int) or timeout_minutes <= 0:
         raise HarnessError("plan has an invalid rl_distributed_timeout_minutes")
@@ -1629,6 +1662,9 @@ def prepare(namespace) -> Path:
             ),
             "dynamic_sampling_max_replacements": getattr(
                 args, "dynamic_sampling_max_replacements", None
+            ),
+            "secrlenv_max_infrastructure_replacements": getattr(
+                args, "secrlenv_max_infrastructure_replacements", None
             ),
             "rl_offload_train": bool(getattr(args, "rl_offload_train", False)),
             "rl_distributed_timeout_minutes": getattr(
@@ -2978,6 +3014,13 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
             (
                 "--dynamic-sampling-max-replacements",
                 str(learner["dynamic_sampling_max_replacements"]),
+            )
+        )
+    if learner.get("secrlenv_max_infrastructure_replacements") is not None:
+        values.extend(
+            (
+                "--secrlenv-max-infrastructure-replacements",
+                str(learner["secrlenv_max_infrastructure_replacements"]),
             )
         )
     if learner.get("dynamic_sampling_filter_path"):

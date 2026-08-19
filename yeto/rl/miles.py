@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import importlib
 import json
@@ -20,7 +21,12 @@ from typing import Any
 
 import torch
 
-from . import MILES_COMMIT, MILES_REPOSITORY
+from . import (
+    MILES_COMMIT,
+    MILES_REPOSITORY,
+    SECRLENV_AGENTS,
+    SECRLENV_GROUP_FILTER,
+)
 from .core import (
     STRICT_STREAM_CHUNK_BYTES,
     CanonicalLoraState,
@@ -214,6 +220,11 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "dynamic_sampling_max_replacements": getattr(
             args, "yeto_rl_dynamic_sampling_max_replacements", None
         ),
+        "secrlenv_max_infrastructure_replacements": getattr(
+            args,
+            "yeto_rl_secrlenv_max_infrastructure_replacements",
+            None,
+        ),
         "rl_offload_train": bool(getattr(args, "offload_train", False)),
         "rl_distributed_timeout_minutes": getattr(
             args, "distributed_timeout_minutes", 10
@@ -287,6 +298,267 @@ def _group_indices(group: object) -> tuple[int, ...] | None:
         return tuple(int(sample.index) for sample in group)
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+class SecRLEnvRolloutTerminalError(RuntimeError):
+    """Sanitized base class for non-recoverable SecRLEnv rollout failures."""
+
+
+class SecRLEnvReplacementExhausted(SecRLEnvRolloutTerminalError):
+    """The one authenticated same-task replacement did not restore progress."""
+
+
+class SecRLEnvUntrustedEvidence(SecRLEnvRolloutTerminalError):
+    """A rollout group did not carry authentic SecRLEnv evidence."""
+
+
+class SecRLEnvRolloutCleanupError(SecRLEnvRolloutTerminalError):
+    """Pinned Miles could not drain a terminal SecRLEnv rollout."""
+
+
+_SECRLENV_TERMINAL_CLEANUP_TIMEOUT_SECONDS = 240.0
+
+
+def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
+    """Prevent a timed-out cleanup task from surfacing payload-bearing errors."""
+
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        pass
+
+
+def _retry_group_indices(group: object) -> tuple[int, ...] | None:
+    if not isinstance(group, list) or not group:
+        return None
+    values = []
+    for item in group:
+        while isinstance(item, list):
+            if not item:
+                return None
+            item = item[0]
+        try:
+            values.append(int(item.index))
+        except (AttributeError, TypeError, ValueError):
+            return None
+    return tuple(values)
+
+
+def _sample_statuses(group: object) -> list[str | None]:
+    values: list[str | None] = []
+    if not isinstance(group, list):
+        return values
+    pending = list(group)
+    while pending:
+        item = pending.pop(0)
+        if isinstance(item, list):
+            pending[0:0] = item
+            continue
+        status = getattr(item, "status", None)
+        value = getattr(status, "value", status)
+        values.append(value if isinstance(value, str) else None)
+    return values
+
+
+class _SecRLEnvRetryDataSource:
+    """Reserve Miles' one spare slot for an exact same-task retry."""
+
+    def __init__(self, args: Any, source: Any) -> None:
+        target = getattr(args, "rollout_batch_size", None)
+        capacity = getattr(args, "over_sampling_batch_size", None)
+        limit = getattr(
+            args,
+            "yeto_rl_secrlenv_max_infrastructure_replacements",
+            None,
+        )
+        if (
+            type(target) is not int
+            or target <= 0
+            or type(capacity) is not int
+            or capacity != target + 1
+            or type(limit) is not int
+            or limit != 1
+        ):
+            raise SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout replacement contract is invalid"
+            )
+        self.args = args
+        self.source = source
+        self.target = target
+        self.capacity = capacity
+        self.limit = limit
+        self.initialized = False
+        self.templates: dict[tuple[int, ...], list[Any]] = {}
+        self.queued: list[list[Any]] = []
+        self.seen_evidence: set[object] = set()
+        self.used = 0
+        self.stats = {
+            "replacement_attempts": 0,
+            "nontrainable_groups": 0,
+            "infrastructure_groups": 0,
+            "aborted_groups": 0,
+            "pending_groups": 0,
+            "failed_groups": 0,
+        }
+        args._yeto_secrlenv_retry_stats = self.stats
+
+    def _remember(self, groups: list[list[Any]]) -> None:
+        for group in groups:
+            key = _retry_group_indices(group)
+            if key is None:
+                raise SecRLEnvReplacementExhausted(
+                    "SecRLEnv rollout task identity is unavailable"
+                )
+            self.templates[key] = copy.deepcopy(group)
+
+    def get_samples(self, requested: int) -> list[list[Any]]:
+        if type(requested) is not int or requested != self.capacity:
+            raise SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout refill contract is invalid"
+            )
+        if not self.initialized:
+            groups = self.source.get_samples(self.target)
+            if not isinstance(groups, list) or len(groups) != self.target:
+                raise SecRLEnvReplacementExhausted(
+                    "SecRLEnv rollout did not receive its exact task batch"
+                )
+            self._remember(groups)
+            self.initialized = True
+            return groups
+        if not self.queued:
+            raise SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout refill had no authenticated task retry"
+            )
+        groups, self.queued = self.queued, []
+        return groups
+
+    def add_samples(self, groups: list[list[Any]]) -> None:
+        self.source.add_samples(groups)
+
+    def request_retry(
+        self,
+        group: list[Any],
+        *,
+        evidence_key: object,
+        reason: str,
+        infrastructure_503_retries: Mapping[int, int],
+    ) -> None:
+        if evidence_key in self.seen_evidence:
+            return
+        self.seen_evidence.add(evidence_key)
+        if self.used >= self.limit or self.queued:
+            raise SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout replacement budget was exhausted"
+            )
+        key = _retry_group_indices(group)
+        template = self.templates.get(key) if key is not None else None
+        if template is None:
+            raise SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout replacement task identity did not match"
+            )
+        expected_indices = set(key)
+        if (
+            not isinstance(infrastructure_503_retries, Mapping)
+            or set(infrastructure_503_retries) != expected_indices
+            or any(
+                type(index) is not int
+                or type(value) is not int
+                or value not in {0, 1}
+                for index, value in infrastructure_503_retries.items()
+            )
+        ):
+            raise SecRLEnvUntrustedEvidence(
+                "SecRLEnv rollout retry ledger authentication failed"
+            )
+        retry = copy.deepcopy(template)
+        for sample in retry:
+            reset = getattr(sample, "reset_for_retry", None)
+            if not callable(reset):
+                raise SecRLEnvReplacementExhausted(
+                    "SecRLEnv rollout sample cannot be reset safely"
+                )
+            reset()
+            metadata = getattr(sample, "metadata", None)
+            if isinstance(metadata, dict):
+                metadata.pop("secrlenv_trusted_outcome", None)
+                metadata.pop("secrlenv_trusted_outcome_hmac", None)
+                metadata["secrlenv_infrastructure_503_retries"] = (
+                    infrastructure_503_retries[int(sample.index)]
+                )
+        statuses = _sample_statuses(group)
+        self.stats["nontrainable_groups"] += 1
+        self.stats["aborted_groups"] += int("aborted" in statuses)
+        self.stats["pending_groups"] += int("pending" in statuses)
+        self.stats["failed_groups"] += int("failed" in statuses)
+        self.stats["infrastructure_groups"] += int(
+            reason == "secrlenv_infrastructure_failure"
+        )
+        self.used += 1
+        self.stats["replacement_attempts"] = self.used
+        self.queued.append(retry)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.source, name)
+
+
+def _secrlenv_generate_with_cleanup(
+    args: Any,
+    rollout_id: int,
+    data_source: Any,
+    *,
+    evaluation: bool = False,
+):
+    """Run pinned Miles and drain its in-flight work on a terminal filter error."""
+
+    from miles.rollout import sglang_rollout
+    from miles.utils.async_utils import run
+
+    from yeto_miles_secrlenv.reward import UntrustedOutcome
+
+    if evaluation:
+        return sglang_rollout.generate_rollout(
+            args, rollout_id, data_source, evaluation=True
+        )
+
+    async def generate():
+        try:
+            output, aborted = await sglang_rollout.generate_rollout_async(
+                args, rollout_id, data_source.get_samples
+            )
+        except (SecRLEnvRolloutTerminalError, UntrustedOutcome) as error:
+            if isinstance(error, UntrustedOutcome):
+                terminal_error = SecRLEnvUntrustedEvidence(
+                    "SecRLEnv rollout evidence authentication failed"
+                )
+            else:
+                terminal_error = error
+            try:
+                abort_task = asyncio.create_task(
+                    sglang_rollout.abort(args, rollout_id)
+                )
+                done, _pending = await asyncio.wait(
+                    {abort_task},
+                    timeout=_SECRLENV_TERMINAL_CLEANUP_TIMEOUT_SECONDS,
+                )
+                if not done:
+                    abort_task.add_done_callback(_consume_background_task_result)
+                    abort_task.cancel()
+                    raise TimeoutError
+                await abort_task
+                from yeto_miles_secrlenv.agent import require_no_episode_residue
+
+                require_no_episode_residue()
+            except Exception:
+                raise SecRLEnvRolloutCleanupError(
+                    "SecRLEnv terminal rollout cleanup failed"
+                ) from None
+            raise terminal_error from None
+        data_source.add_samples(aborted)
+        return output
+
+    return run(generate())
 
 
 def _dynamic_sampling_filter(args):
@@ -735,6 +1007,21 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             )
         ]
     rollout_started = time.monotonic()
+    rollout_data_source = data_source
+    rollout_generate = miles_generate
+    retry_callback = None
+    if (
+        not evaluation
+        and getattr(args, "custom_agent_function_path", None) in SECRLENV_AGENTS
+    ):
+        if getattr(args, "dynamic_sampling_filter_path", None) != SECRLENV_GROUP_FILTER:
+            raise SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout group filter contract is invalid"
+            )
+        rollout_data_source = _SecRLEnvRetryDataSource(args, data_source)
+        retry_callback = rollout_data_source.request_retry
+        args._yeto_secrlenv_retry_callback = retry_callback
+        rollout_generate = _secrlenv_generate_with_cleanup
     payload_filter = None
     upstream_logger = None
     if evaluation:
@@ -743,13 +1030,19 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
         upstream_logger.addFilter(payload_filter)
     try:
         output, lifecycle = _run_rollout_with_metrics(
-            miles_generate,
+            rollout_generate,
             args,
             rollout_id,
-            data_source,
+            rollout_data_source,
             evaluation,
         )
     finally:
+        if (
+            retry_callback is not None
+            and getattr(args, "_yeto_secrlenv_retry_callback", None)
+            == retry_callback
+        ):
+            del args._yeto_secrlenv_retry_callback
         if payload_filter is not None and upstream_logger is not None:
             upstream_logger.removeFilter(payload_filter)
     if evaluation:
@@ -799,10 +1092,19 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             "group_p99_seconds": _percentile(lifecycle["durations"], 0.99),
         }
         dynamic_stats = getattr(args, "_yeto_dynamic_sampling_stats", None) or {}
+        retry_stats_value = getattr(args, "_yeto_secrlenv_retry_stats", None)
+        retry_stats = retry_stats_value if isinstance(retry_stats_value, Mapping) else {}
+        retry_attempts = int(retry_stats.get("replacement_attempts", 0))
+        nontrainable_groups = int(retry_stats.get("nontrainable_groups", 0))
         generated_groups = int(
             dynamic_stats.get("generated_groups", args.rollout_batch_size)
         )
-        dropped_groups = int(dynamic_stats.get("dropped_groups", 0))
+        generated_groups = max(
+            generated_groups, args.rollout_batch_size + retry_attempts
+        )
+        dropped_groups = (
+            int(dynamic_stats.get("dropped_groups", 0)) + nontrainable_groups
+        )
         round_metrics.update(
             {
                 "rl/dynamic_filter/enabled": float(
@@ -814,10 +1116,23 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
                 ),
                 "rl/dynamic_filter/dropped_groups": float(dropped_groups),
                 "rl/dynamic_filter/replacement_attempts": float(
-                    max(0, generated_groups - args.rollout_batch_size)
+                    max(
+                        retry_attempts,
+                        generated_groups - args.rollout_batch_size,
+                    )
                 ),
             }
         )
+        if isinstance(retry_stats_value, Mapping):
+            for name in (
+                "infrastructure_groups",
+                "aborted_groups",
+                "pending_groups",
+                "failed_groups",
+            ):
+                round_metrics[f"rl/secrlenv/{name}"] = float(
+                    retry_stats.get(name, 0)
+                )
         bounded_state = getattr(args, "_yeto_bounded_filter_state", None)
         if isinstance(bounded_state, Mapping):
             round_metrics["rl/dynamic_filter/forced_groups"] = float(

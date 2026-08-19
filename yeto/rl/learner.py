@@ -72,6 +72,9 @@ def parse_args(argv=None):
     parser.add_argument("--over-sampling-batch-size", type=int, required=True)
     parser.add_argument("--dynamic-sampling-filter-path", default=None)
     parser.add_argument("--dynamic-sampling-max-replacements", type=int, default=None)
+    parser.add_argument(
+        "--secrlenv-max-infrastructure-replacements", type=int, default=None
+    )
     parser.add_argument("--rl-offload-train", action="store_true")
     parser.add_argument("--rl-distributed-timeout-minutes", type=int, default=10)
     parser.add_argument("--optimizer-steps", type=int, required=True)
@@ -1299,6 +1302,9 @@ def run_miles(
         )
         miles_args.yeto_rl_dynamic_sampling_max_replacements = getattr(
             args, "dynamic_sampling_max_replacements", None
+        )
+        miles_args.yeto_rl_secrlenv_max_infrastructure_replacements = getattr(
+            args, "secrlenv_max_infrastructure_replacements", None
         )
         miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
         miles_args.yeto_rl_event_tape = args.event_tape

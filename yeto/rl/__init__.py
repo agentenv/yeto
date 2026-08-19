@@ -11,14 +11,19 @@ MILES_IMAGE = (
 )
 
 SECRLENV_AGENT_PATH = "yeto_miles_secrlenv/agent.py"
-SECRLENV_AGENT_SHA256 = "42322741664cf58d58bca85800877efb2ff0d698ed84d68f8c21b2b9792e01af"
+SECRLENV_AGENT_SHA256 = "f58b717b7d6e4889adea9d4f5c37eecd70e91f4a5b6d07591dcf5f1c13565689"
+SECRLENV_AGENT = "yeto_miles_secrlenv.agent.run"
+SECRLENV_REWARD = "yeto_miles_secrlenv.reward:reward_func"
+SECRLENV_GROUP_FILTER = "yeto_miles_secrlenv.reward.check_group"
+SECRLENV_ZERO_VARIANCE_REPLACEMENTS = 0
+SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1
 
 # Stock Codex is part of the signed Yeto security-environment harness.  These
 # pins identify the official Linux artifact, not the controller's host binary.
 CODEX_HARNESS_AGENT = "yeto_miles_secrlenv.codex_harness_agent.run"
 CODEX_HARNESS_AGENT_PATH = "yeto_miles_secrlenv/codex_harness_agent.py"
 CODEX_HARNESS_AGENT_SHA256 = (
-    "6d9a62765f55605d8e25c8c21c46f7ff754c33fbe631f7e8d36585f9dc345a7d"
+    "4dfbd86fe2a45f1a4824a90a41cf4a33d5730659cd232f283a9e07a7b756ab3e"
 )
 CODEX_BASE_INSTRUCTIONS_SHA256 = (
     "55622eb2d7246eb199fd95b0bbb97b34698feb550aca5c0a62c4557242e5f8b1"
@@ -55,3 +60,5 @@ CODEX_CONTAINER_BINARY_PATH = (
 CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH = (
     "/opt/yeto/codex/codex_app_server_protocol.v2.schemas.json"
 )
+
+SECRLENV_AGENTS = frozenset((SECRLENV_AGENT, CODEX_HARNESS_AGENT))

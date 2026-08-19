@@ -27,6 +27,8 @@ from .client import (
     EpisodeClientError,
 )
 from .reward import (
+    CLEANUP_ERROR_STATUS,
+    INFRASTRUCTURE_503_RETRIES_KEY,
     INFRASTRUCTURE_STATUS,
     MAC_KEY,
     OUTCOME_KEY,
@@ -90,19 +92,29 @@ def _claim_cancelled_policy_cleanup(
         return True
 
 
-def _mark_finalizing_episode_cleanup_pending(
-    episode_id: str, policy_task: asyncio.Task[str] | None
-) -> None:
-    """Retain a failed normal close for a later abort-owned retry."""
+async def _recover_failed_normal_close(
+    client: EpisodeClient,
+    episode_id: str,
+    policy_task: asyncio.Task[str] | None,
+) -> bool:
+    """Own and bound a close retry before a rollout may be replaced."""
 
-    if policy_task is None or not policy_task.done():
-        return
-    with _ACTIVE_LOCK:
-        if (
-            _EPISODE_POLICY_TASKS.get(episode_id) is policy_task
-            and _EPISODE_PHASES.get(episode_id) == "finalizing"
-        ):
-            _EPISODE_PHASES[episode_id] = "cleanup_pending"
+    if not _claim_cancelled_policy_cleanup(episode_id, policy_task):
+        return False
+    closed = False
+    try:
+        closed = await _close_aborted_episode(
+            client,
+            episode_id,
+            retry_timeout_seconds=min(
+                _positive_env("SECRLENV_ABORT_CLOSE_RETRY_SECONDS", 180.0),
+                30.0,
+            ),
+        )
+        return closed
+    finally:
+        if not closed:
+            _mark_episode_cleanup_pending(episode_id)
 
 
 def _claim_driving_episodes_for_abort() -> list[str]:
@@ -145,6 +157,14 @@ def _release_episode(episode_id: str) -> None:
     with _ACTIVE_LOCK:
         _EPISODE_PHASES.pop(episode_id, None)
         _EPISODE_POLICY_TASKS.pop(episode_id, None)
+
+
+def require_no_episode_residue() -> None:
+    """Fail without exposing episode identity when terminal cleanup is incomplete."""
+
+    with _ACTIVE_LOCK:
+        if _EPISODE_PHASES or _EPISODE_POLICY_TASKS:
+            raise RuntimeError("SecRLEnv episode cleanup left active residue")
 
 
 async def _await_policy_and_claim_finalization(
@@ -596,7 +616,12 @@ async def _drive_policy(
 
 
 def _validated_outcome(
-    result: dict[str, Any], task_id: str, episode_id: str, status: str
+    result: dict[str, Any],
+    task_id: str,
+    episode_id: str,
+    status: str,
+    *,
+    infrastructure_503_retries: int = 0,
 ) -> dict[str, Any]:
     if result.get("task_id") != task_id or result.get("episode_id") != episode_id:
         raise EpisodeClientError("evaluation response identity mismatch")
@@ -619,10 +644,15 @@ def _validated_outcome(
         "reward": float(reward),
         "passed": passed,
         "class": grader.get("class") if isinstance(grader.get("class"), str) else None,
+        INFRASTRUCTURE_503_RETRIES_KEY: infrastructure_503_retries,
     }
 
 
-def _infrastructure_outcome(task_id: str, episode_id: str) -> dict[str, Any]:
+def _infrastructure_outcome(
+    task_id: str,
+    episode_id: str,
+    infrastructure_503_retries: int = 0,
+) -> dict[str, Any]:
     """Build a signed abort signal, never a synthetic grader verdict."""
 
     return {
@@ -633,17 +663,42 @@ def _infrastructure_outcome(task_id: str, episode_id: str) -> dict[str, Any]:
         "reward": 0.0,
         "passed": False,
         "class": None,
+        INFRASTRUCTURE_503_RETRIES_KEY: infrastructure_503_retries,
     }
 
 
+def _cleanup_error_outcome(
+    task_id: str,
+    episode_id: str,
+    infrastructure_503_retries: int = 0,
+) -> dict[str, Any]:
+    """Build a signed terminal signal when episode release is unproven."""
+
+    outcome = _infrastructure_outcome(
+        task_id,
+        episode_id,
+        infrastructure_503_retries,
+    )
+    outcome["status"] = CLEANUP_ERROR_STATUS
+    return outcome
+
+
 async def _create_with_capacity_retry(
-    client: EpisodeClient, task_id: str, tier: str
+    client: EpisodeClient,
+    task_id: str,
+    tier: str,
+    *,
+    retry_ledger: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     max_wait = _positive_env("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", 14400.0)
     started = time.monotonic()
     deadline = started + max_wait
     attempts = 0
-    infrastructure_retries = 0
+    if retry_ledger is None:
+        retry_ledger = {INFRASTRUCTURE_503_RETRIES_KEY: 0}
+    infrastructure_retries = retry_ledger.get(INFRASTRUCTURE_503_RETRIES_KEY)
+    if type(infrastructure_retries) is not int or infrastructure_retries not in {0, 1}:
+        raise ValueError("invalid SecRLEnv infrastructure retry ledger")
     next_log = started
     last_retryable: EpisodeAPIError | None = None
     while True:
@@ -674,6 +729,7 @@ async def _create_with_capacity_retry(
                 and infrastructure_retries < 1
             ):
                 infrastructure_retries += 1
+                retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY] = infrastructure_retries
                 reason = "infrastructure"
             else:
                 raise
@@ -711,6 +767,14 @@ async def run(
     try:
         task_id, tier = _task_identity(metadata)
         max_seq_len = _metadata_max_seq_len(metadata)
+        infrastructure_503_retries = metadata.get(
+            INFRASTRUCTURE_503_RETRIES_KEY, 0
+        )
+        if (
+            type(infrastructure_503_retries) is not int
+            or infrastructure_503_retries not in {0, 1}
+        ):
+            raise ValueError("invalid SecRLEnv infrastructure retry ledger")
     except ValueError as exc:
         LOGGER.error("invalid secrlenv sample metadata: %s", exc)
         return None
@@ -719,16 +783,22 @@ async def run(
     episode_id: str | None = None
     outcome_status = "completed"
     infrastructure_failure = False
+    cleanup_failure = False
     evaluation: dict[str, Any] | None = None
     policy = None
     policy_task: asyncio.Task[str] | None = None
+    retry_ledger = {
+        INFRASTRUCTURE_503_RETRIES_KEY: infrastructure_503_retries
+    }
     try:
         from openai import AsyncOpenAI
 
         policy = AsyncOpenAI(base_url=_session_url(base_url), api_key="EMPTY")
         async with EpisodeClient() as client:
             started = time.monotonic()
-            episode = await _create_with_capacity_retry(client, task_id, tier)
+            episode = await _create_with_capacity_retry(
+                client, task_id, tier, retry_ledger=retry_ledger
+            )
             metrics.create_time = time.monotonic() - started
             episode_id = episode.get("episode_id")
             if not isinstance(episode_id, str):
@@ -791,13 +861,15 @@ async def run(
                     else:
                         infrastructure_failure = True
                         LOGGER.exception("secrlenv teardown failed")
-                        _mark_finalizing_episode_cleanup_pending(
-                            episode_id, policy_task
+                        cleanup_failure = not await _recover_failed_normal_close(
+                            client, episode_id, policy_task
                         )
                 except Exception:
                     infrastructure_failure = True
                     LOGGER.exception("secrlenv teardown failed")
-                    _mark_finalizing_episode_cleanup_pending(episode_id, policy_task)
+                    cleanup_failure = not await _recover_failed_normal_close(
+                        client, episode_id, policy_task
+                    )
                 else:
                     _release_episode(episode_id)
                 finally:
@@ -849,12 +921,29 @@ async def run(
     if episode_id is None:
         return None
     try:
-        if infrastructure_failure or evaluation is None:
+        if cleanup_failure:
+            outcome_status = CLEANUP_ERROR_STATUS
+            outcome = _cleanup_error_outcome(
+                task_id,
+                episode_id,
+                retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY],
+            )
+        elif infrastructure_failure or evaluation is None:
             outcome_status = INFRASTRUCTURE_STATUS
-            outcome = _infrastructure_outcome(task_id, episode_id)
+            outcome = _infrastructure_outcome(
+                task_id,
+                episode_id,
+                retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY],
+            )
         else:
             outcome = _validated_outcome(
-                evaluation, task_id, episode_id, outcome_status
+                evaluation,
+                task_id,
+                episode_id,
+                outcome_status,
+                infrastructure_503_retries=retry_ledger[
+                    INFRASTRUCTURE_503_RETRIES_KEY
+                ],
             )
         signature = sign_outcome(outcome)
     except Exception:

@@ -31,7 +31,13 @@ from aiohttp import web
 
 from . import agent as legacy
 from .client import EpisodeAPIError, EpisodeClient, EpisodeClientError
-from .reward import INFRASTRUCTURE_STATUS, MAC_KEY, OUTCOME_KEY, sign_outcome
+from .reward import (
+    INFRASTRUCTURE_503_RETRIES_KEY,
+    INFRASTRUCTURE_STATUS,
+    MAC_KEY,
+    OUTCOME_KEY,
+    sign_outcome,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1501,6 +1507,14 @@ async def run(
     try:
         task_id, tier = legacy._task_identity(metadata)
         max_seq_len = legacy._metadata_max_seq_len(metadata)
+        infrastructure_503_retries = metadata.get(
+            INFRASTRUCTURE_503_RETRIES_KEY, 0
+        )
+        if (
+            type(infrastructure_503_retries) is not int
+            or infrastructure_503_retries not in {0, 1}
+        ):
+            raise ValueError("invalid SecRLEnv infrastructure retry ledger")
         binary = _attest_runtime()
     except (ValueError, CodexHarnessError) as exc:
         LOGGER.error("invalid signed Codex episode contract: %s", exc)
@@ -1510,12 +1524,18 @@ async def run(
     episode_id: str | None = None
     outcome_status = "completed"
     infrastructure_failure = False
+    cleanup_failure = False
     evaluation: dict[str, Any] | None = None
     policy_task: asyncio.Task[str] | None = None
+    retry_ledger = {
+        INFRASTRUCTURE_503_RETRIES_KEY: infrastructure_503_retries
+    }
     try:
         async with EpisodeClient() as client:
             started = time.monotonic()
-            episode = await legacy._create_with_capacity_retry(client, task_id, tier)
+            episode = await legacy._create_with_capacity_retry(
+                client, task_id, tier, retry_ledger=retry_ledger
+            )
             metrics.create_time = time.monotonic() - started
             episode_id = episode.get("episode_id")
             if not isinstance(episode_id, str):
@@ -1570,12 +1590,18 @@ async def run(
                         legacy._release_episode(episode_id)
                     else:
                         infrastructure_failure = True
-                        legacy._mark_finalizing_episode_cleanup_pending(
-                            episode_id, policy_task
+                        cleanup_failure = (
+                            not await legacy._recover_failed_normal_close(
+                                client, episode_id, policy_task
+                            )
                         )
                 except Exception:  # noqa: BLE001 - lifecycle cleanup is best-effort
                     infrastructure_failure = True
-                    legacy._mark_finalizing_episode_cleanup_pending(episode_id, policy_task)
+                    cleanup_failure = (
+                        not await legacy._recover_failed_normal_close(
+                            client, episode_id, policy_task
+                        )
+                    )
                 else:
                     legacy._release_episode(episode_id)
                 finally:
@@ -1612,12 +1638,29 @@ async def run(
     if episode_id is None:
         return None
     try:
-        if infrastructure_failure or evaluation is None:
+        if cleanup_failure:
+            outcome_status = legacy.CLEANUP_ERROR_STATUS
+            outcome = legacy._cleanup_error_outcome(
+                task_id,
+                episode_id,
+                retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY],
+            )
+        elif infrastructure_failure or evaluation is None:
             outcome_status = INFRASTRUCTURE_STATUS
-            outcome = legacy._infrastructure_outcome(task_id, episode_id)
+            outcome = legacy._infrastructure_outcome(
+                task_id,
+                episode_id,
+                retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY],
+            )
         else:
             outcome = legacy._validated_outcome(
-                evaluation, task_id, episode_id, outcome_status
+                evaluation,
+                task_id,
+                episode_id,
+                outcome_status,
+                infrastructure_503_retries=retry_ledger[
+                    INFRASTRUCTURE_503_RETRIES_KEY
+                ],
             )
         signature = sign_outcome(outcome)
     except Exception:

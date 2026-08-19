@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from yeto.rl import miles as rl_miles
 from yeto_miles_secrlenv import agent, reward
 from yeto_miles_secrlenv.client import (
     EpisodeAPIError,
@@ -350,12 +351,68 @@ def test_run_close_failure_retains_cleanup_pending_ownership(monkeypatch):
             agent.run("http://127.0.0.1:8000/v1", None, metadata=_run_metadata())
         )
         assert result is not None
+        assert result["exit_status"] == reward.CLEANUP_ERROR_STATUS
+        assert (
+            result[reward.OUTCOME_KEY]["status"]
+            == reward.CLEANUP_ERROR_STATUS
+        )
         assert agent._EPISODE_PHASES[episode_id] == "cleanup_pending"
         assert agent._claim_episodes_and_tasks_for_abort() == [
             (episode_id, agent._EPISODE_POLICY_TASKS[episode_id])
         ]
     finally:
         agent._release_episode(episode_id)
+
+
+def test_run_recovers_close_before_returning_retryable_infrastructure(monkeypatch):
+    episode_id = "2" * 24
+    close_calls = []
+
+    class RunClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        async def create(self, _task_id, _tier):
+            return {"episode_id": episode_id, "prompt": "task"}
+
+        async def evaluate(self, value):
+            assert value == episode_id
+            return {
+                "task_id": "CVE-2024-1234",
+                "episode_id": episode_id,
+                "reward": 0.0,
+                "passed": False,
+            }
+
+        async def close(self, value):
+            assert value == episode_id
+            close_calls.append(value)
+            if len(close_calls) == 1:
+                raise EpisodeTransportError("close failed once")
+            return {"closed": True}
+
+    async def complete_policy(*_args, **_kwargs):
+        return "completed"
+
+    _install_run_openai(monkeypatch)
+    monkeypatch.setattr(agent, "EpisodeClient", RunClient)
+    monkeypatch.setattr(agent, "_drive_policy", complete_policy)
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "k" * 48)
+
+    result = asyncio.run(
+        agent.run("http://127.0.0.1:8000/v1", None, metadata=_run_metadata())
+    )
+
+    assert result is not None
+    assert result["exit_status"] == reward.INFRASTRUCTURE_STATUS
+    assert len(close_calls) == 2
+    agent.require_no_episode_residue()
 
 
 def test_second_run_cancellation_drains_cleanup_close_before_handoff(monkeypatch):
@@ -791,6 +848,7 @@ def test_signed_zero_reward_is_valid_and_tampering_is_rejected(monkeypatch):
         "reward": 0.0,
         "passed": False,
         "class": "rce",
+        reward.INFRASTRUCTURE_503_RETRIES_KEY: 0,
     }
     metadata = {
         reward.OUTCOME_KEY: outcome,
@@ -856,6 +914,10 @@ def _install_filter_types(monkeypatch):
     class Sample:
         class Status:
             ABORTED = "aborted"
+            PENDING = "pending"
+            COMPLETED = "completed"
+            TRUNCATED = "truncated"
+            FAILED = "failed"
 
     miles = types.ModuleType("miles")
     rollout = types.ModuleType("miles.rollout")
@@ -875,13 +937,16 @@ def _install_filter_types(monkeypatch):
     monkeypatch.setitem(sys.modules, "miles.utils.types", sample_types)
 
 
-def _signed_sample(index, value, *, status="completed"):
+def _signed_sample(
+    index, value, *, status="completed", outcome_status="completed"
+):
     outcome = {
         "schema": 1,
-        "status": "completed",
+        "status": outcome_status,
         "episode_id": f"episode-{index:024d}",
         "task_id": "CVE-2019-7859",
         "reward": value,
+        reward.INFRASTRUCTURE_503_RETRIES_KEY: 0,
     }
     return SimpleNamespace(
         index=index,
@@ -916,10 +981,14 @@ def test_signed_infrastructure_outcome_is_only_an_abort_signal(monkeypatch):
         SimpleNamespace(
             yeto_rl_policy_version=10,
             yeto_rl_dynamic_sampling_max_replacements=0,
+            _yeto_secrlenv_retry_callback=lambda *_args, **_kwargs: None,
         ),
         [sample],
     )
-    assert (result.keep, result.reason) == (False, "secrlenv_aborted")
+    assert (result.keep, result.reason) == (
+        False,
+        "secrlenv_infrastructure_failure",
+    )
 
     direct_sample = SimpleNamespace(
         index=31, status="completed", metadata=copy.deepcopy(metadata)
@@ -928,6 +997,7 @@ def test_signed_infrastructure_outcome_is_only_an_abort_signal(monkeypatch):
         SimpleNamespace(
             yeto_rl_policy_version=10,
             yeto_rl_dynamic_sampling_max_replacements=0,
+            _yeto_secrlenv_retry_callback=lambda *_args, **_kwargs: None,
         ),
         [direct_sample],
     )
@@ -946,6 +1016,36 @@ def test_signed_infrastructure_outcome_is_only_an_abort_signal(monkeypatch):
     assert forged_sample.status == "completed"
 
 
+def test_signed_cleanup_failure_is_terminal_without_replacement(monkeypatch):
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "c" * 48)
+    _install_filter_types(monkeypatch)
+    outcome = agent._cleanup_error_outcome("CVE-2024-1234", "e" * 24)
+    metadata = {
+        reward.OUTCOME_KEY: outcome,
+        reward.MAC_KEY: reward.sign_outcome(outcome),
+    }
+    sample = SimpleNamespace(index=33, status="completed", metadata=metadata)
+    replacements = []
+
+    assert asyncio.run(reward.reward_func(None, sample)) == 0.0
+    with pytest.raises(
+        rl_miles.SecRLEnvRolloutCleanupError,
+        match="cleanup could not be verified",
+    ):
+        reward.check_group(
+            SimpleNamespace(
+                yeto_rl_policy_version=10,
+                yeto_rl_dynamic_sampling_max_replacements=0,
+                _yeto_secrlenv_retry_callback=lambda *_args, **_kwargs: (
+                    replacements.append(True)
+                ),
+            ),
+            [sample],
+        )
+
+    assert replacements == []
+
+
 def test_signed_group_filter_accepts_valid_reward_variance(monkeypatch):
     monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "v" * 48)
     _install_filter_types(monkeypatch)
@@ -961,6 +1061,25 @@ def test_signed_group_filter_accepts_valid_reward_variance(monkeypatch):
     assert result.keep is True
     assert result.reason is None
     assert args._yeto_secrlenv_filter_state["rejections"] == 0
+
+
+def test_signed_group_filter_accepts_completed_and_truncated_statuses(monkeypatch):
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "t" * 48)
+    _install_filter_types(monkeypatch)
+    args = SimpleNamespace(
+        yeto_rl_policy_version=71,
+        yeto_rl_dynamic_sampling_max_replacements=0,
+    )
+
+    result = reward.check_group(
+        args,
+        [
+            _signed_sample(101, 0.0, status="completed"),
+            _signed_sample(102, 1.0, status="truncated"),
+        ],
+    )
+
+    assert (result.keep, result.reason) == (True, None)
 
 
 def test_signed_zero_variance_groups_have_a_memoized_replacement_bound(monkeypatch):
@@ -993,23 +1112,72 @@ def test_aborted_and_untrusted_groups_never_use_bounded_fallback(monkeypatch):
     args = SimpleNamespace(
         yeto_rl_policy_version=9,
         yeto_rl_dynamic_sampling_max_replacements=0,
+        _yeto_secrlenv_retry_callback=lambda *_args, **_kwargs: None,
     )
     aborted = [_signed_sample(20, 0.0, status="aborted")]
     forged = _signed_sample(21, 0.0)
     forged.metadata[reward.OUTCOME_KEY]["reward"] = 1.0
 
     aborted_result = reward.check_group(args, aborted)
-    forged_result = reward.check_group(args, [forged])
+    with pytest.raises(
+        rl_miles.SecRLEnvUntrustedEvidence,
+        match="authentication failed",
+    ):
+        reward.check_group(args, [forged])
 
     assert (aborted_result.keep, aborted_result.reason) == (
         False,
         "secrlenv_aborted",
     )
-    assert (forged_result.keep, forged_result.reason) == (
-        False,
-        "secrlenv_untrusted_outcome",
+    assert aborted[0].status == "aborted"
+    assert args._yeto_secrlenv_filter_state["nontrainable_rejections"] == 1
+
+
+def test_signed_infrastructure_replacement_is_memoized_and_exhausts(monkeypatch):
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "r" * 48)
+    _install_filter_types(monkeypatch)
+    calls = []
+
+    def retry(group, **kwargs):
+        if calls:
+            raise rl_miles.SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout replacement budget was exhausted"
+            )
+        calls.append((group, kwargs))
+
+    args = SimpleNamespace(
+        yeto_rl_policy_version=91,
+        yeto_rl_dynamic_sampling_max_replacements=0,
+        _yeto_secrlenv_retry_callback=retry,
     )
-    assert not hasattr(args, "_yeto_secrlenv_filter_state")
+    first = [
+        _signed_sample(
+            201,
+            0.0,
+            status="aborted",
+            outcome_status=reward.INFRASTRUCTURE_STATUS,
+        )
+    ]
+    second = [
+        _signed_sample(
+            202,
+            0.0,
+            status="aborted",
+            outcome_status=reward.INFRASTRUCTURE_STATUS,
+        )
+    ]
+
+    initial = reward.check_group(args, first)
+    duplicate = reward.check_group(args, first)
+    with pytest.raises(
+        rl_miles.SecRLEnvReplacementExhausted,
+        match="budget was exhausted",
+    ):
+        reward.check_group(args, second)
+
+    assert (initial.keep, duplicate.keep) == (False, False)
+    assert len(calls) == 1
+    assert first[0].status == "aborted"
 
 
 def test_evaluation_identity_and_range_are_checked():
@@ -1336,15 +1504,53 @@ def test_infrastructure_error_is_retried_at_most_once(monkeypatch):
 
     monkeypatch.setattr(agent.asyncio, "sleep", no_wait)
     monkeypatch.setattr(agent.random, "uniform", lambda *_args: 0.5)
+    ledger = {reward.INFRASTRUCTURE_503_RETRIES_KEY: 0}
     with pytest.raises(EpisodeAPIError) as caught:
         asyncio.run(
             agent._create_with_capacity_retry(
-                BrokenClient(), "CVE-2024-1234", "l2"
+                BrokenClient(),
+                "CVE-2024-1234",
+                "l2",
+                retry_ledger=ledger,
             )
         )
     assert caught.value.code == "infrastructure_error"
     assert calls == 2
     assert delays == [0.5]
+    assert ledger == {reward.INFRASTRUCTURE_503_RETRIES_KEY: 1}
+
+
+def test_same_task_retry_shares_infrastructure_503_attempt_ledger(monkeypatch):
+    monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
+    calls = 0
+
+    class BrokenClient:
+        async def create(self, *_args):
+            nonlocal calls
+            calls += 1
+            raise EpisodeAPIError(
+                503, "infrastructure_error", "provisioning failed"
+            )
+
+    async def unexpected_wait(_delay):
+        raise AssertionError("a consumed infrastructure retry must not back off")
+
+    monkeypatch.setattr(agent.asyncio, "sleep", unexpected_wait)
+    ledger = {reward.INFRASTRUCTURE_503_RETRIES_KEY: 1}
+
+    with pytest.raises(EpisodeAPIError) as caught:
+        asyncio.run(
+            agent._create_with_capacity_retry(
+                BrokenClient(),
+                "CVE-2024-1234",
+                "l2",
+                retry_ledger=ledger,
+            )
+        )
+
+    assert caught.value.code == "infrastructure_error"
+    assert calls == 1
+    assert ledger == {reward.INFRASTRUCTURE_503_RETRIES_KEY: 1}
 
 
 @pytest.mark.parametrize(

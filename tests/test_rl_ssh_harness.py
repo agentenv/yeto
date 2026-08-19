@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -165,6 +166,11 @@ def _enable_secrlenv_agent(plan):
         custom_generate_function_path="miles.rollout.generate",
         use_session_server=True,
         tito_model="org/model",
+        reward_function=ssh_harness.SECRLENV_REWARD,
+        dynamic_sampling_filter_path=ssh_harness.SECRLENV_GROUP_FILTER,
+        dynamic_sampling_max_replacements=0,
+        secrlenv_max_infrastructure_replacements=1,
+        over_sampling_batch_size=plan["learner"]["groups_per_round"] + 1,
     )
 
 
@@ -179,6 +185,38 @@ def _local_data_plan(path: Path):
         }
     )
     return plan
+
+
+def test_secrlenv_plan_round_trip_requires_exact_replacement_contract():
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+    plan["secrlenv_daemon"] = _secrlenv_daemon_contract(plan["run_id"])
+
+    ssh_harness._validate_plan(plan)
+    parsed = parse_learner_args(_learner_argv(plan, 0)[3:])
+
+    assert parsed.dynamic_sampling_filter_path == ssh_harness.SECRLENV_GROUP_FILTER
+    assert parsed.dynamic_sampling_max_replacements == 0
+    assert parsed.secrlenv_max_infrastructure_replacements == 1
+    assert parsed.over_sampling_batch_size == parsed.groups_per_round + 1
+
+    mutations = [
+        ("reward_function", "other.reward:score"),
+        ("dynamic_sampling_filter_path", None),
+        ("dynamic_sampling_filter_path", "other.filter"),
+        ("dynamic_sampling_max_replacements", None),
+        ("dynamic_sampling_max_replacements", False),
+        ("dynamic_sampling_max_replacements", 1),
+        ("secrlenv_max_infrastructure_replacements", None),
+        ("secrlenv_max_infrastructure_replacements", True),
+        ("secrlenv_max_infrastructure_replacements", 2),
+        ("over_sampling_batch_size", plan["learner"]["groups_per_round"]),
+    ]
+    for name, value in mutations:
+        invalid = copy.deepcopy(plan)
+        invalid["learner"][name] = value
+        with pytest.raises(ssh_harness.HarnessError):
+            ssh_harness._validate_plan(invalid)
 
 
 def _secrlenv_eval_plan(path: Path):
@@ -804,6 +842,10 @@ def test_prepare_wires_final_secrlenv_eval_and_same_dataset_sha(tmp_path, monkey
         use_session_server=True,
         tito_model="org/model",
         reward_function=ssh_harness.SECRLENV_REWARD,
+        dynamic_sampling_filter_path=ssh_harness.SECRLENV_GROUP_FILTER,
+        dynamic_sampling_max_replacements=0,
+        secrlenv_max_infrastructure_replacements=1,
+        over_sampling_batch_size=learner["groups_per_round"] + 1,
     )
     args = SimpleNamespace(
         **{
@@ -2022,6 +2064,11 @@ def test_harness_freezes_stock_codex_identity_and_binary_mount():
                 "reasoning_effort": "max",
                 "drop_thinking": False,
             },
+            "reward_function": ssh_harness.SECRLENV_REWARD,
+            "dynamic_sampling_filter_path": ssh_harness.SECRLENV_GROUP_FILTER,
+            "dynamic_sampling_max_replacements": 0,
+            "secrlenv_max_infrastructure_replacements": 1,
+            "over_sampling_batch_size": plan["learner"]["groups_per_round"] + 1,
         }
     )
     plan["codex_harness"] = {

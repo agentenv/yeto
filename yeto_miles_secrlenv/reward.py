@@ -12,16 +12,18 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-
 OUTCOME_KEY = "secrlenv_trusted_outcome"
 MAC_KEY = "secrlenv_trusted_outcome_hmac"
 INFRASTRUCTURE_STATUS = "infrastructure_error"
+CLEANUP_ERROR_STATUS = "cleanup_error"
+INFRASTRUCTURE_503_RETRIES_KEY = "secrlenv_infrastructure_503_retries"
 _SIGNED_STATUSES = {
     "completed",
     "timeout",
     "max_turns",
     "max_seq_len",
     INFRASTRUCTURE_STATUS,
+    CLEANUP_ERROR_STATUS,
 }
 
 
@@ -68,6 +70,12 @@ def _verified_outcome(metadata: Any) -> tuple[dict[str, Any], float]:
         raise UntrustedOutcome("secrlenv outcome signature mismatch")
     if outcome.get("schema") != 1 or outcome.get("status") not in _SIGNED_STATUSES:
         raise UntrustedOutcome("secrlenv outcome has an invalid schema or status")
+    infrastructure_503_retries = outcome.get(INFRASTRUCTURE_503_RETRIES_KEY)
+    if (
+        type(infrastructure_503_retries) is not int
+        or infrastructure_503_retries not in {0, 1}
+    ):
+        raise UntrustedOutcome("secrlenv outcome has an invalid retry ledger")
     reward = outcome.get("reward")
     if isinstance(reward, bool) or not isinstance(reward, (int, float)):
         raise UntrustedOutcome("secrlenv outcome reward is not numeric")
@@ -83,9 +91,9 @@ def _verified_outcome(metadata: Any) -> tuple[dict[str, Any], float]:
 
 def verify_outcome(metadata: Any) -> float:
     outcome, value = _verified_outcome(metadata)
-    if outcome.get("status") == INFRASTRUCTURE_STATUS:
+    if outcome.get("status") in {INFRASTRUCTURE_STATUS, CLEANUP_ERROR_STATUS}:
         raise UntrustedOutcome(
-            "secrlenv infrastructure outcome is not a grader verdict"
+            "secrlenv non-verdict outcome is not a grader verdict"
         )
     return value
 
@@ -160,40 +168,23 @@ def _replacement_limit(args: Any) -> int | None:
 
 
 def check_group(args: Any, samples: list[Any], **_kwargs: Any):
-    """Authenticate every group and bound valid zero-variance replacements.
-
-    Aborted samples and unsigned/invalid outcomes are always rejected.  Only a
-    fully authenticated zero-variance group consumes the replacement budget;
-    after the configured bound, one such group is accepted so a difficult
-    flaky task cannot deadlock rollout generation.  Decisions are memoized
-    because Miles calls the filter again from Yeto's all-samples hook.
-    """
+    """Authenticate groups and coordinate bounded same-task replacements."""
 
     from miles.rollout.filter_hub.base_types import DynamicFilterOutput
-    from miles.utils.types import Sample
+
+    from yeto.rl.miles import (
+        SecRLEnvReplacementExhausted,
+        SecRLEnvUntrustedEvidence,
+    )
 
     flattened = _flatten_samples(samples)
-    if any(sample.status == Sample.Status.ABORTED for sample in flattened):
-        return DynamicFilterOutput(keep=False, reason="secrlenv_aborted")
-    try:
-        verified = [_verified_outcome(sample.metadata) for sample in flattened]
-    except UntrustedOutcome:
-        return DynamicFilterOutput(keep=False, reason="secrlenv_untrusted_outcome")
-    if any(
-        outcome.get("status") == INFRASTRUCTURE_STATUS
-        for outcome, _ in verified
-    ):
-        return DynamicFilterOutput(
-            keep=False, reason="secrlenv_infrastructure_failure"
-        )
-    rewards = [value for _, value in verified]
-
     rollout_id = getattr(args, "yeto_rl_policy_version", None)
     state = getattr(args, "_yeto_secrlenv_filter_state", None)
     if state is None or state.get("rollout_id") != rollout_id:
         state = {
             "rollout_id": rollout_id,
             "rejections": 0,
+            "nontrainable_rejections": 0,
             "forced": 0,
             "decisions": {},
         }
@@ -204,12 +195,88 @@ def check_group(args: Any, samples: list[Any], **_kwargs: Any):
     if previous is not None:
         return DynamicFilterOutput(keep=previous[0], reason=previous[1])
 
+    try:
+        verified = [_verified_outcome(sample.metadata) for sample in flattened]
+    except UntrustedOutcome:
+        raise SecRLEnvUntrustedEvidence(
+            "SecRLEnv rollout evidence authentication failed"
+        ) from None
+
+    statuses = []
+    for sample in flattened:
+        status = getattr(sample, "status", None)
+        value = getattr(status, "value", status)
+        statuses.append(value if isinstance(value, str) else None)
+    infrastructure = any(
+        outcome.get("status") == INFRASTRUCTURE_STATUS
+        for outcome, _ in verified
+    )
+    cleanup_failure = any(
+        outcome.get("status") == CLEANUP_ERROR_STATUS
+        for outcome, _ in verified
+    )
+    if cleanup_failure:
+        from yeto.rl.miles import SecRLEnvRolloutCleanupError
+
+        raise SecRLEnvRolloutCleanupError(
+            "SecRLEnv episode cleanup could not be verified"
+        )
+    incomplete = any(
+        status not in {"completed", "truncated"} for status in statuses
+    )
+    if infrastructure or incomplete:
+        if infrastructure:
+            reason = "secrlenv_infrastructure_failure"
+        elif "aborted" in statuses:
+            reason = "secrlenv_aborted"
+        elif "pending" in statuses:
+            reason = "secrlenv_pending"
+        elif "failed" in statuses:
+            reason = "secrlenv_failed"
+        else:
+            reason = "secrlenv_incomplete_status"
+        decision = (False, reason)
+        state["decisions"][key] = decision
+        state["nontrainable_rejections"] += 1
+        retry = getattr(args, "_yeto_secrlenv_retry_callback", None)
+        if not callable(retry):
+            raise SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout replacement scheduler is unavailable"
+            )
+        retry_ledger: dict[int, int] = {}
+        for sample, (outcome, _) in zip(flattened, verified, strict=True):
+            try:
+                index = int(sample.index)
+            except (AttributeError, TypeError, ValueError):
+                raise SecRLEnvReplacementExhausted(
+                    "SecRLEnv rollout replacement task identity is unavailable"
+                ) from None
+            value = outcome[INFRASTRUCTURE_503_RETRIES_KEY]
+            previous_retry_count = retry_ledger.setdefault(index, value)
+            if previous_retry_count != value:
+                raise SecRLEnvUntrustedEvidence(
+                    "SecRLEnv rollout retry ledger is inconsistent"
+                )
+        retry(
+            flattened,
+            evidence_key=key,
+            reason=reason,
+            infrastructure_503_retries=retry_ledger,
+        )
+        return DynamicFilterOutput(keep=False, reason=reason)
+
+    rewards = [value for _, value in verified]
+
     std = statistics.pstdev(rewards) if rewards else 0.0
     if math.isfinite(std) and std > 1e-8:
         decision = (True, None)
     else:
         limit = _replacement_limit(args)
-        if limit is None or state["rejections"] < limit:
+        if limit is None:
+            raise SecRLEnvReplacementExhausted(
+                "SecRLEnv zero-variance replacement contract is missing"
+            )
+        if state["rejections"] < limit:
             state["rejections"] += 1
             value = round(rewards[0], 3) if rewards else 0.0
             decision = (False, f"secrlenv_zero_std_{value}")

@@ -1063,6 +1063,7 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
         over_sampling_batch_size=2,
         dynamic_sampling_max_replacements=99,
         yeto_rl_dynamic_sampling_max_replacements=8,
+        yeto_rl_secrlenv_max_infrastructure_replacements=1,
         rl_offload_train=False,
         offload_train=True,
         rl_distributed_timeout_minutes=99,
@@ -1130,6 +1131,7 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
         "seq_length": 128,
         "seed": 7,
         "dynamic_sampling_max_replacements": 8,
+        "secrlenv_max_infrastructure_replacements": 1,
         "rl_offload_train": True,
         "rl_distributed_timeout_minutes": 7,
     }.items():
@@ -1254,6 +1256,315 @@ def test_queue_completed_groups_filters_zero_variance_groups_and_records_replace
         "dropped_groups": 1,
         "drop_reasons": {"zero_std": 1},
     }
+
+
+def test_secrlenv_proxy_retries_same_task_without_advancing_signed_batch():
+    class RetrySample:
+        def __init__(self, index):
+            self.index = index
+            self.status = SimpleNamespace(value="pending")
+            self.response = ""
+            self.reward = None
+            self.weight_versions = []
+            self.metadata = {"task": f"task-{index}"}
+
+        def reset_for_retry(self):
+            self.status = SimpleNamespace(value="aborted")
+            self.response = ""
+            self.reward = None
+            self.weight_versions = []
+
+    class Source:
+        def __init__(self):
+            self.offset = 0
+            self.buffer = []
+
+        def get_samples(self, count):
+            groups = [[RetrySample(index)] for index in range(self.offset, self.offset + count)]
+            self.offset += count
+            return groups
+
+        def add_samples(self, groups):
+            self.buffer.extend(groups)
+
+    args = SimpleNamespace(
+        rollout_batch_size=20,
+        over_sampling_batch_size=21,
+        yeto_rl_secrlenv_max_infrastructure_replacements=1,
+    )
+    source = Source()
+    proxy = miles._SecRLEnvRetryDataSource(args, source)
+
+    initial = proxy.get_samples(21)
+    failed = initial[4]
+    failed[0].status = SimpleNamespace(value="aborted")
+    failed[0].response = "failed-response"
+    failed[0].metadata["secrlenv_trusted_outcome"] = {"status": "infrastructure_error"}
+    failed[0].metadata["secrlenv_trusted_outcome_hmac"] = "signed"
+    proxy.request_retry(
+        failed,
+        evidence_key="first-evidence",
+        reason="secrlenv_infrastructure_failure",
+        infrastructure_503_retries={4: 1},
+    )
+    proxy.request_retry(
+        failed,
+        evidence_key="first-evidence",
+        reason="secrlenv_infrastructure_failure",
+        infrastructure_503_retries={4: 1},
+    )
+    replacement = proxy.get_samples(21)
+
+    assert len(initial) == 20
+    assert source.offset == 20
+    assert len(replacement) == 1
+    assert replacement[0][0].index == failed[0].index
+    assert replacement[0][0].metadata["task"] == failed[0].metadata["task"]
+    assert "secrlenv_trusted_outcome" not in replacement[0][0].metadata
+    assert replacement[0][0].metadata["secrlenv_infrastructure_503_retries"] == 1
+    assert replacement[0][0].response == ""
+    assert failed[0].status.value == "aborted"
+    assert failed[0].response == "failed-response"
+    assert args._yeto_secrlenv_retry_stats["replacement_attempts"] == 1
+
+    replacement[0][0].status = SimpleNamespace(value="truncated")
+    selected = [group for group in initial if group is not failed] + replacement
+    for group in selected[:-1]:
+        group[0].status = SimpleNamespace(value="completed")
+    miles._validate_rollout_groups(selected, 20, 1)
+
+    with pytest.raises(
+        miles.SecRLEnvReplacementExhausted,
+        match="budget was exhausted",
+    ):
+        proxy.request_retry(
+            replacement,
+            evidence_key="second-evidence",
+            reason="secrlenv_infrastructure_failure",
+            infrastructure_503_retries={4: 1},
+        )
+
+
+def test_secrlenv_terminal_filter_error_drains_pinned_rollout(monkeypatch):
+    cleanup = []
+
+    async def generate_rollout_async(*_args, **_kwargs):
+        raise miles.SecRLEnvReplacementExhausted(
+            "SecRLEnv rollout replacement budget was exhausted"
+        )
+
+    async def abort(_args, rollout_id):
+        cleanup.append(rollout_id)
+
+    sglang_rollout = types.ModuleType("miles.rollout.sglang_rollout")
+    sglang_rollout.generate_rollout_async = generate_rollout_async
+    sglang_rollout.abort = abort
+    rollout = types.ModuleType("miles.rollout")
+    rollout.sglang_rollout = sglang_rollout
+    async_utils = types.ModuleType("miles.utils.async_utils")
+    async_utils.run = asyncio.run
+    utils = types.ModuleType("miles.utils")
+    package = types.ModuleType("miles")
+    package.rollout = rollout
+    package.utils = utils
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", sglang_rollout)
+    monkeypatch.setitem(sys.modules, "miles.utils", utils)
+    monkeypatch.setitem(sys.modules, "miles.utils.async_utils", async_utils)
+
+    with pytest.raises(miles.SecRLEnvReplacementExhausted):
+        miles._secrlenv_generate_with_cleanup(
+            SimpleNamespace(),
+            7,
+            SimpleNamespace(get_samples=lambda _count: [], add_samples=lambda _groups: None),
+        )
+
+    assert cleanup == [7]
+
+
+def test_secrlenv_untrusted_reward_error_is_sanitized_and_drained(monkeypatch):
+    from yeto_miles_secrlenv.reward import UntrustedOutcome
+
+    cleanup = []
+
+    async def generate_rollout_async(*_args, **_kwargs):
+        raise UntrustedOutcome("cannot read token file: /private/secret/path")
+
+    async def abort(_args, rollout_id):
+        cleanup.append(rollout_id)
+
+    sglang_rollout = types.ModuleType("miles.rollout.sglang_rollout")
+    sglang_rollout.generate_rollout_async = generate_rollout_async
+    sglang_rollout.abort = abort
+    rollout = types.ModuleType("miles.rollout")
+    rollout.sglang_rollout = sglang_rollout
+    async_utils = types.ModuleType("miles.utils.async_utils")
+    async_utils.run = asyncio.run
+    utils = types.ModuleType("miles.utils")
+    package = types.ModuleType("miles")
+    package.rollout = rollout
+    package.utils = utils
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", sglang_rollout)
+    monkeypatch.setitem(sys.modules, "miles.utils", utils)
+    monkeypatch.setitem(sys.modules, "miles.utils.async_utils", async_utils)
+
+    with pytest.raises(
+        miles.SecRLEnvUntrustedEvidence,
+        match="rollout evidence authentication failed",
+    ) as captured:
+        miles._secrlenv_generate_with_cleanup(
+            SimpleNamespace(),
+            9,
+            SimpleNamespace(
+                get_samples=lambda _count: [],
+                add_samples=lambda _groups: None,
+            ),
+        )
+
+    assert cleanup == [9]
+    assert "/private/secret/path" not in str(captured.value)
+    assert captured.value.__cause__ is None
+
+
+def test_secrlenv_terminal_cleanup_has_outer_deadline(monkeypatch):
+    cleanup_started = []
+
+    async def generate_rollout_async(*_args, **_kwargs):
+        raise miles.SecRLEnvReplacementExhausted(
+            "SecRLEnv rollout replacement budget was exhausted"
+        )
+
+    async def abort(_args, rollout_id):
+        cleanup_started.append(rollout_id)
+        await asyncio.Event().wait()
+
+    sglang_rollout = types.ModuleType("miles.rollout.sglang_rollout")
+    sglang_rollout.generate_rollout_async = generate_rollout_async
+    sglang_rollout.abort = abort
+    rollout = types.ModuleType("miles.rollout")
+    rollout.sglang_rollout = sglang_rollout
+    async_utils = types.ModuleType("miles.utils.async_utils")
+    async_utils.run = asyncio.run
+    utils = types.ModuleType("miles.utils")
+    package = types.ModuleType("miles")
+    package.rollout = rollout
+    package.utils = utils
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", sglang_rollout)
+    monkeypatch.setitem(sys.modules, "miles.utils", utils)
+    monkeypatch.setitem(sys.modules, "miles.utils.async_utils", async_utils)
+    monkeypatch.setattr(
+        miles,
+        "_SECRLENV_TERMINAL_CLEANUP_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    with pytest.raises(
+        miles.SecRLEnvRolloutCleanupError,
+        match="terminal rollout cleanup failed",
+    ) as captured:
+        miles._secrlenv_generate_with_cleanup(
+            SimpleNamespace(),
+            10,
+            SimpleNamespace(
+                get_samples=lambda _count: [],
+                add_samples=lambda _groups: None,
+            ),
+        )
+
+    assert cleanup_started == [10]
+    assert captured.value.__cause__ is None
+
+
+def test_secrlenv_terminal_cleanup_rejects_episode_residue(monkeypatch):
+    from yeto_miles_secrlenv import agent as secrlenv_agent
+
+    cleanup = []
+
+    async def generate_rollout_async(*_args, **_kwargs):
+        raise miles.SecRLEnvReplacementExhausted(
+            "SecRLEnv rollout replacement budget was exhausted"
+        )
+
+    async def abort(_args, rollout_id):
+        cleanup.append(rollout_id)
+
+    sglang_rollout = types.ModuleType("miles.rollout.sglang_rollout")
+    sglang_rollout.generate_rollout_async = generate_rollout_async
+    sglang_rollout.abort = abort
+    rollout = types.ModuleType("miles.rollout")
+    rollout.sglang_rollout = sglang_rollout
+    async_utils = types.ModuleType("miles.utils.async_utils")
+    async_utils.run = asyncio.run
+    utils = types.ModuleType("miles.utils")
+    package = types.ModuleType("miles")
+    package.rollout = rollout
+    package.utils = utils
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", sglang_rollout)
+    monkeypatch.setitem(sys.modules, "miles.utils", utils)
+    monkeypatch.setitem(sys.modules, "miles.utils.async_utils", async_utils)
+    monkeypatch.setattr(
+        secrlenv_agent,
+        "require_no_episode_residue",
+        lambda: (_ for _ in ()).throw(RuntimeError("residue")),
+    )
+
+    with pytest.raises(
+        miles.SecRLEnvRolloutCleanupError,
+        match="terminal rollout cleanup failed",
+    ):
+        miles._secrlenv_generate_with_cleanup(
+            SimpleNamespace(),
+            8,
+            SimpleNamespace(get_samples=lambda _count: [], add_samples=lambda _groups: None),
+        )
+
+    assert cleanup == [8]
+
+
+def test_secrlenv_terminal_rollout_does_not_advance_checkpoint(monkeypatch):
+    upstream = types.ModuleType("miles.rollout.sglang_rollout")
+    upstream.generate_rollout = object()
+    rollout = types.ModuleType("miles.rollout")
+    rollout.sglang_rollout = upstream
+    package = types.ModuleType("miles")
+    package.rollout = rollout
+    monkeypatch.setitem(sys.modules, "miles", package)
+    monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", upstream)
+    monkeypatch.setattr(miles, "_restore_completed_groups", lambda *_args: None)
+    monkeypatch.setattr(
+        miles,
+        "_run_rollout_with_metrics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            miles.SecRLEnvReplacementExhausted(
+                "SecRLEnv rollout replacement budget was exhausted"
+            )
+        ),
+    )
+    saved = []
+    monkeypatch.setattr(miles, "_save_completed_groups", lambda *_args: saved.append(True))
+    args = SimpleNamespace(
+        n_samples_per_prompt=1,
+        rollout_batch_size=1,
+        over_sampling_batch_size=2,
+        custom_agent_function_path="yeto_miles_secrlenv.agent.run",
+        dynamic_sampling_filter_path="yeto_miles_secrlenv.reward.check_group",
+        yeto_rl_secrlenv_max_infrastructure_replacements=1,
+        yeto_rl_sync_preset="strict-avg",
+        yeto_rl_completed_groups_path="unused",
+    )
+
+    with pytest.raises(miles.SecRLEnvReplacementExhausted):
+        miles.generate_rollout(args, 0, SimpleNamespace(buffer=[]))
+
+    assert saved == []
 
 
 def test_generate_rollout_records_drop_reasons_as_numeric_metrics(monkeypatch):

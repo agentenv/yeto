@@ -24,6 +24,8 @@ from yeto.rl import (
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
+    SECRLENV_GROUP_FILTER,
+    SECRLENV_REWARD,
     SGLANG_COMMIT,
     SGLANG_REPOSITORY,
 )
@@ -151,6 +153,70 @@ def test_signed_secrlenv_variance_filter_accepts_a_bounded_replacement_budget():
         "yeto_miles_secrlenv.reward.check_group"
     )
     assert args.dynamic_sampling_max_replacements == 4
+
+
+def test_legacy_secrlenv_agent_auto_binds_exact_replacement_contract():
+    args = _args(
+        [
+            "--reward-function",
+            SECRLENV_REWARD,
+            "--custom-generate-function-path",
+            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            "--custom-agent-function-path",
+            "yeto_miles_secrlenv.agent.run",
+            "--use-session-server",
+            "--tito-model",
+            "org/model",
+        ]
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.dynamic_sampling_filter_path == SECRLENV_GROUP_FILTER
+    assert args.dynamic_sampling_max_replacements == 0
+    assert args.secrlenv_max_infrastructure_replacements == 1
+    assert args.over_sampling_batch_size == args.rollout_batch_size + 1
+
+
+@pytest.mark.parametrize(
+    "extra,match",
+    [
+        (
+            ["--dynamic-sampling-filter-path", "other.filter"],
+            "exact signed group filter",
+        ),
+        (
+            ["--dynamic-sampling-max-replacements", "1"],
+            "zero variance replacements",
+        ),
+        (
+            ["--secrlenv-max-infrastructure-replacements", "2"],
+            "exactly one infrastructure replacement",
+        ),
+        (
+            ["--over-sampling-batch-size", "6"],
+            "training batch plus one",
+        ),
+    ],
+)
+def test_secrlenv_agent_rejects_conflicting_replacement_contract(extra, match):
+    args = _args(
+        [
+            "--reward-function",
+            SECRLENV_REWARD,
+            "--custom-generate-function-path",
+            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            "--custom-agent-function-path",
+            "yeto_miles_secrlenv.agent.run",
+            "--use-session-server",
+            "--tito-model",
+            "org/model",
+            *extra,
+        ]
+    )
+
+    with pytest.raises(ValueError, match=match):
+        _prepare_rl_args(args)
 
 
 def test_decoupled_rl_preset_fixes_the_fragment_outer_contract():
@@ -389,6 +455,8 @@ def test_stock_codex_harness_requires_explicit_signed_xhigh_dsv4_contract():
             "miles.rollout.generate_hub.agentic_tool_call.generate",
             "--custom-agent-function-path",
             "yeto_miles_secrlenv.codex_harness_agent.run",
+            "--reward-function",
+            SECRLENV_REWARD,
             "--codex-reasoning-effort",
             "xhigh",
             "--use-session-server",
@@ -409,6 +477,10 @@ def test_stock_codex_harness_requires_explicit_signed_xhigh_dsv4_contract():
         "reasoning_effort": "max",
         "drop_thinking": False,
     }
+    assert args.dynamic_sampling_filter_path == SECRLENV_GROUP_FILTER
+    assert args.dynamic_sampling_max_replacements == 0
+    assert args.secrlenv_max_infrastructure_replacements == 1
+    assert args.over_sampling_batch_size == args.rollout_batch_size + 1
 
     args.apply_chat_template_kwargs["drop_thinking"] = True
     with pytest.raises(ValueError, match="exact DeepSeek V4 chat-template"):
@@ -2112,6 +2184,8 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
         pipeline_parallel=2,
         wan_streams=0,
         audit_dir=str(tmp_path / "audit"),
+        dynamic_sampling_max_replacements=0,
+        secrlenv_max_infrastructure_replacements=1,
     )
 
     rl_learner.run_miles(
@@ -2137,6 +2211,8 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
         sorted(attention_specs + expert_specs)
     )
     assert miles_args.yeto_rl_bridge_config.send_initial_params is True
+    assert miles_args.yeto_rl_dynamic_sampling_max_replacements == 0
+    assert miles_args.yeto_rl_secrlenv_max_infrastructure_replacements == 1
     for name in (
         "yeto_rl_expert_full_count",
         "yeto_rl_expert_full_lr",
