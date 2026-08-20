@@ -21,6 +21,9 @@ from yeto.launcher import (
     syncer_command,
 )
 from yeto.rl import (
+    MILES_BASE_COMMIT,
+    MILES_BUNDLE_PATH,
+    MILES_BUNDLE_SHA256,
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
@@ -31,6 +34,7 @@ from yeto.rl import (
     SGLANG_REPOSITORY,
 )
 from yeto.rl import learner as rl_learner
+from yeto.rl.codex_backend import QWEN38_MODEL, QWEN38_REVISION
 from yeto.rl.core import CanonicalTensorSpec
 from yeto.rl.decoupled import DecoupledBridgeConfig
 from yeto.rl.learner import build_miles_argv
@@ -503,7 +507,53 @@ def test_stock_codex_harness_requires_explicit_signed_xhigh_dsv4_contract():
     assert args.over_sampling_batch_size == args.rollout_batch_size + 1
 
     args.apply_chat_template_kwargs["drop_thinking"] = True
-    with pytest.raises(ValueError, match="exact DeepSeek V4 chat-template"):
+    with pytest.raises(ValueError, match="chat-template kwargs"):
+        _prepare_rl_args(args)
+
+
+def test_stock_codex_harness_accepts_only_the_exact_qwen38_xhigh_profile():
+    args = _args(
+        (
+            "--model",
+            QWEN38_MODEL,
+            "--model-revision",
+            QWEN38_REVISION,
+            "--lora-targets",
+            "attention",
+            "--custom-generate-function-path",
+            SECRLENV_GENERATE,
+            "--custom-agent-function-path",
+            "yeto_miles_secrlenv.codex_harness_agent.run",
+            "--reward-function",
+            SECRLENV_REWARD,
+            "--codex-reasoning-effort",
+            "xhigh",
+            "--use-session-server",
+            "--tito-model",
+            "qwen38",
+            "--tito-allowed-append-roles",
+            "tool",
+            "user",
+        )
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.rl_model_recipe == "generic"
+    assert args.model == QWEN38_MODEL
+    assert args.model_revision == QWEN38_REVISION
+    assert args.codex_reasoning_effort == "xhigh"
+    assert args.tito_model == "qwen38"
+    assert args.lora_targets == "attention"
+    assert args.expert_full_count == 0
+    assert args.apply_chat_template_kwargs == {
+        "enable_thinking": True,
+        "preserve_thinking": True,
+        "reasoning_effort": "xhigh",
+    }
+
+    args.model_revision = "0" * 40
+    with pytest.raises(ValueError, match="Qwen3.8 model identity"):
         _prepare_rl_args(args)
 
 
@@ -1143,17 +1193,17 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert MILES_REPOSITORY in task.setup
     assert MILES_COMMIT in task.setup
     assert (
-        f"git -C ~/miles fetch --depth 1 origin {MILES_COMMIT}"
+        f"git -C ~/miles fetch --depth 1 origin {MILES_BASE_COMMIT}"
         in task.setup
     )
-    assert "MILES_BUNDLE" not in task.setup
-    assert "git -C ~/miles fetch ~/sky_workdir/" not in task.setup
+    assert f"MILES_BUNDLE=~/sky_workdir/{MILES_BUNDLE_PATH}" in task.setup
+    assert MILES_BUNDLE_SHA256 in task.setup
+    assert f'git -C ~/miles fetch "$MILES_BUNDLE" {MILES_COMMIT}' in task.setup
     assert SGLANG_REPOSITORY in task.setup
     assert SGLANG_COMMIT in task.setup
     assert "checkout --detach" in task.setup
     for duplicate_check in (
         "config --get remote.origin.url",
-        "rev-parse HEAD",
         "diff --quiet",
         "pathlib.Path(miles.__file__)",
         "import megatron.bridge",

@@ -29,6 +29,8 @@ from typing import Any, Self
 import aiohttp
 from aiohttp import web
 
+from yeto.rl.codex_backend import stock_codex_backend_profile
+
 from . import agent as legacy
 from .client import EpisodeAPIError, EpisodeClient, EpisodeClientError
 from .generate import capture_agent_metadata
@@ -47,12 +49,12 @@ CODEX_APP_SERVER_SCHEMA_SHA256 = (
     "f2415ee36b3c9fa16617c800910cd65b8086ce7c7fecee3dac5f7089eb5973b9"
 )
 CODEX_CLI_VERSION = "codex-cli 0.145.0"
-BACKEND_MODEL = "deepseekv4"
-BACKEND_CHAT_TEMPLATE_KWARGS = {
-    "drop_thinking": False,
-    "reasoning_effort": "max",
-    "thinking_mode": "thinking",
-}
+_BACKEND_PROFILE = stock_codex_backend_profile(
+    os.getenv("YETO_CODEX_CHAT_TEMPLATE", "deepseekv4")
+)
+BACKEND_MODEL = _BACKEND_PROFILE["model"]
+BACKEND_REASONING_EFFORT = _BACKEND_PROFILE["backend_reasoning_effort"]
+BACKEND_CHAT_TEMPLATE_KWARGS = _BACKEND_PROFILE["chat_template_kwargs"]
 MAX_TOOL_OUTPUT_BYTES = 32_768
 CODEX_TOOL_OUTPUT_TOKEN_LIMIT = 65_536
 MAX_APP_SERVER_FRAME_BYTES = 2 * 1024 * 1024
@@ -213,9 +215,9 @@ _IDENTITY_ENV = {
     "YETO_CODEX_SUBMIT_TOOL_SCHEMA_SHA256": SUBMIT_TOOL_SCHEMA_SHA256,
     "YETO_CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256": DYNAMIC_TOOLS_SCHEMA_SHA256,
     "YETO_CODEX_REASONING_EFFORT": "xhigh",
-    "YETO_CODEX_BACKEND_REASONING_EFFORT": "max",
+    "YETO_CODEX_BACKEND_REASONING_EFFORT": BACKEND_REASONING_EFFORT,
     "YETO_CODEX_BACKEND_THINKING": "enabled",
-    "YETO_CODEX_CHAT_TEMPLATE": "deepseekv4",
+    "YETO_CODEX_CHAT_TEMPLATE": _BACKEND_PROFILE["chat_template"],
     "YETO_CODEX_CHAT_TEMPLATE_KWARGS": json.dumps(
         BACKEND_CHAT_TEMPLATE_KWARGS,
         sort_keys=True,
@@ -1033,7 +1035,7 @@ class _ResponsesBridge:
             # the full token/logprob response in its session record for TITO.
             "stream": True,
             "max_tokens": max_tokens,
-            "reasoning_effort": "max",
+            "reasoning_effort": BACKEND_REASONING_EFFORT,
             "thinking": {"type": "enabled"},
             "chat_template_kwargs": copy.deepcopy(BACKEND_CHAT_TEMPLATE_KWARGS),
         }

@@ -1,13 +1,18 @@
 """Pinned Miles reinforcement-learning integration."""
 
 MILES_REPOSITORY = "https://github.com/agentenv/miles"
-MILES_COMMIT = "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
+MILES_BASE_COMMIT = "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
+MILES_COMMIT = "e2ad83d84a6b32a0f7d79ff196ad8c64fc67586a"
+MILES_BUNDLE_PATH = "yeto/rl/vendor/miles-qwen38.bundle"
+MILES_BUNDLE_SHA256 = (
+    "ff0e2ed7de75e06926c4637545a8a918c2e3ae1d5ceeb2b49d6b87511c0598b2"
+)
 MILES_PEFT_VERSION = "0.20.0"
 SGLANG_REPOSITORY = "https://github.com/agentenv/sglang"
 SGLANG_COMMIT = "e1b57eb8e7749235c987cc6b1b2824ce3265369b"
 MILES_IMAGE = (
-    "docker:ghcr.io/alexeisie/miles@sha256:"
-    "5be3e0722c7b0174c3c1a5526064872987c7bc367af700117a3589efbd6b19bd"
+    "docker:ghcr.io/agentenv/miles@sha256:"
+    "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
 )
 
 SECRLENV_AGENT_PATH = "yeto_miles_secrlenv/agent.py"
@@ -27,7 +32,7 @@ SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1
 CODEX_HARNESS_AGENT = "yeto_miles_secrlenv.codex_harness_agent.run"
 CODEX_HARNESS_AGENT_PATH = "yeto_miles_secrlenv/codex_harness_agent.py"
 CODEX_HARNESS_AGENT_SHA256 = (
-    "f8bf49f50b8143f922e36d26ef63f0f868c1934454c2780bf5a618d2d4e3b844"
+    "1cc6db89160e3ad93a1a84ca1a2c11432a3c2d17068e7526b4a8738c1e7556df"
 )
 CODEX_BASE_INSTRUCTIONS_SHA256 = (
     "55622eb2d7246eb199fd95b0bbb97b34698feb550aca5c0a62c4557242e5f8b1"

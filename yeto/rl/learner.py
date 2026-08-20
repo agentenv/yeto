@@ -293,28 +293,30 @@ def _preflight_codex_harness(args) -> None:
     }
     if any(contract.get(name) != expected for name, expected in pinned.items()):
         raise ValueError("stock Codex runtime identity drifted")
-    expected_backend = {
-        "model": "deepseekv4",
-        "max_tokens": args.rollout_max_response_len,
-        "reasoning_effort": "max",
-        "thinking": {"type": "enabled"},
-        "chat_template": "deepseekv4",
-        "chat_template_kwargs": {
-            "thinking_mode": "thinking",
-            "reasoning_effort": "max",
-            "drop_thinking": False,
-        },
-        "tito_allowed_append_roles": ["tool", "user"],
-    }
-    if (
-        contract.get("backend") != expected_backend
-        or args.rl_model_recipe != "deepseek-v4-flash"
-        or args.tito_model != "deepseekv4"
-        or args.tito_allowed_append_roles != ["tool", "user"]
-        or args.apply_chat_template_kwargs
-        != expected_backend["chat_template_kwargs"]
-    ):
-        raise ValueError("stock Codex DSV4 backend/TITO identity drifted")
+    from .codex_backend import (
+        stock_codex_backend_contract,
+        validate_stock_codex_fields,
+    )
+
+    expected_backend = stock_codex_backend_contract(
+        args.tito_model,
+        args.rollout_max_response_len,
+    )
+    validate_stock_codex_fields(
+        tito_model=args.tito_model,
+        rl_model_recipe=args.rl_model_recipe,
+        model=args.model,
+        model_revision=args.model_revision,
+        rollout_model=getattr(args, "rollout_model", None),
+        rollout_model_revision=getattr(args, "rollout_model_revision", None),
+        apply_chat_template_kwargs=args.apply_chat_template_kwargs,
+        tito_allowed_append_roles=args.tito_allowed_append_roles,
+        codex_reasoning_effort=args.codex_reasoning_effort,
+        lora_targets=args.lora_targets,
+        expert_full_count=getattr(args, "expert_full_count", 0),
+    )
+    if contract.get("backend") != expected_backend:
+        raise ValueError("stock Codex backend/TITO identity drifted")
     try:
         from yeto_miles_secrlenv import codex_harness_agent
 
@@ -418,9 +420,11 @@ def _preflight_codex_harness(args) -> None:
         ],
         "YETO_CODEX_REASONING_EFFORT": "xhigh",
         "YETO_CODEX_BACKEND_MAX_TOKENS": str(args.rollout_max_response_len),
-        "YETO_CODEX_BACKEND_REASONING_EFFORT": "max",
+        "YETO_CODEX_BACKEND_REASONING_EFFORT": expected_backend[
+            "reasoning_effort"
+        ],
         "YETO_CODEX_BACKEND_THINKING": "enabled",
-        "YETO_CODEX_CHAT_TEMPLATE": "deepseekv4",
+        "YETO_CODEX_CHAT_TEMPLATE": expected_backend["chat_template"],
         "YETO_CODEX_CHAT_TEMPLATE_KWARGS": json.dumps(
             expected_backend["chat_template_kwargs"],
             sort_keys=True,

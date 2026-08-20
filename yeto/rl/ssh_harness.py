@@ -39,6 +39,9 @@ from . import (
     CODEX_PACKAGE_MANIFEST_SHA256,
     CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
     CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
+    MILES_BASE_COMMIT,
+    MILES_BUNDLE_PATH,
+    MILES_BUNDLE_SHA256,
     MILES_COMMIT,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
@@ -542,6 +545,12 @@ def _codex_harness_contract(namespace, args) -> dict[str, Any]:
         raise HarnessError("Yeto Codex harness adapter is missing")
     if file_sha256(adapter_path) != CODEX_HARNESS_AGENT_SHA256:
         raise HarnessError("Yeto Codex harness adapter source does not match its pin")
+    from .codex_backend import stock_codex_backend_contract
+
+    backend = stock_codex_backend_contract(
+        args.tito_model,
+        args.rollout_max_response_len,
+    )
     return {
         "agent_function_path": CODEX_HARNESS_AGENT,
         "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
@@ -566,15 +575,7 @@ def _codex_harness_contract(namespace, args) -> dict[str, Any]:
         "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
         **identity,
         "reasoning_effort": args.codex_reasoning_effort,
-        "backend": {
-            "model": args.tito_model,
-            "max_tokens": args.rollout_max_response_len,
-            "reasoning_effort": "max",
-            "thinking": {"type": "enabled"},
-            "chat_template": args.tito_model,
-            "chat_template_kwargs": dict(args.apply_chat_template_kwargs),
-            "tito_allowed_append_roles": list(args.tito_allowed_append_roles),
-        },
+        "backend": backend,
     }
 
 
@@ -645,32 +646,40 @@ def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
         path = Path(str(value.get(name, "")))
         if not path.is_absolute() or ".." in path.parts:
             raise HarnessError(f"stock Codex contract has an invalid {name}")
+    from .codex_backend import (
+        stock_codex_backend_contract,
+        validate_stock_codex_fields,
+    )
+
     backend = value.get("backend")
-    expected_backend = {
-        "model": "deepseekv4",
-        "max_tokens": learner.get("rollout_max_response_len"),
-        "reasoning_effort": "max",
-        "thinking": {"type": "enabled"},
-        "chat_template": "deepseekv4",
-        "chat_template_kwargs": {
-            "thinking_mode": "thinking",
-            "reasoning_effort": "max",
-            "drop_thinking": False,
-        },
-        "tito_allowed_append_roles": ["tool", "user"],
-    }
+    expected_backend = stock_codex_backend_contract(
+        str(learner.get("tito_model", "")),
+        learner.get("rollout_max_response_len"),
+    )
     if backend != expected_backend:
         raise HarnessError("stock Codex backend/TITO contract drifted")
-    if (
-        learner.get("rl_model_recipe") != "deepseek-v4-flash"
-        or learner.get("custom_agent_function_path") != CODEX_HARNESS_AGENT
-        or learner.get("codex_reasoning_effort") != "xhigh"
-        or learner.get("apply_chat_template_kwargs")
-        != expected_backend["chat_template_kwargs"]
-        or learner.get("tito_model") != "deepseekv4"
-        or learner.get("tito_allowed_append_roles") != ["tool", "user"]
-    ):
-        raise HarnessError("stock Codex is restricted to the signed DSV4 agent path")
+    if learner.get("custom_agent_function_path") != CODEX_HARNESS_AGENT:
+        raise HarnessError("stock Codex contract requires its signed agent path")
+    try:
+        validate_stock_codex_fields(
+            tito_model=str(learner.get("tito_model", "")),
+            rl_model_recipe=str(learner.get("rl_model_recipe", "generic")),
+            model=str(learner.get("model", "")),
+            model_revision=str(learner.get("model_revision", "")),
+            rollout_model=learner.get("rollout_model"),
+            rollout_model_revision=learner.get("rollout_model_revision"),
+            apply_chat_template_kwargs=learner.get(
+                "apply_chat_template_kwargs"
+            ),
+            tito_allowed_append_roles=learner.get(
+                "tito_allowed_append_roles"
+            ),
+            codex_reasoning_effort=learner.get("codex_reasoning_effort"),
+            lora_targets=str(learner.get("lora_targets", "")),
+            expert_full_count=int(learner.get("expert_full_count", 0)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HarnessError("stock Codex model profile drifted") from exc
 
 
 def _tms_preload_patch(path: str | Path) -> dict[str, str]:
@@ -1014,7 +1023,10 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     _docker_ref(str(plan.get("docker_image", "")))
     if plan.get("miles") != {
         "repository": MILES_REPOSITORY,
+        "base_commit": MILES_BASE_COMMIT,
         "commit": MILES_COMMIT,
+        "bundle_path": MILES_BUNDLE_PATH,
+        "bundle_sha256": MILES_BUNDLE_SHA256,
         "peft_version": MILES_PEFT_VERSION,
     }:
         raise HarnessError("plan does not use the current pinned Miles revision")
@@ -1614,7 +1626,10 @@ def prepare(namespace) -> Path:
         "docker_image": _docker_ref(args.rl_image),
         "miles": {
             "repository": MILES_REPOSITORY,
+            "base_commit": MILES_BASE_COMMIT,
             "commit": MILES_COMMIT,
+            "bundle_path": MILES_BUNDLE_PATH,
+            "bundle_sha256": MILES_BUNDLE_SHA256,
             "peft_version": MILES_PEFT_VERSION,
         },
         "sglang": {
@@ -2105,6 +2120,26 @@ def _attest_local(plan: dict[str, Any]) -> None:
     from ..provenance import file_sha256, python_spec_sha256, verify_source_tree_sha256
 
     verify_source_tree_sha256(plan["source_sha256"])
+    miles = plan["miles"]
+    bundle_path = REPO_ROOT / miles["bundle_path"]
+    if (
+        bundle_path.is_symlink()
+        or not bundle_path.is_file()
+        or file_sha256(bundle_path) != miles["bundle_sha256"]
+    ):
+        raise HarnessError("Miles source bundle changed after plan preparation")
+    try:
+        listed = subprocess.run(
+            ["git", "bundle", "list-heads", str(bundle_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        ).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HarnessError("cannot attest the Miles source bundle") from exc
+    if listed != [f"{miles['commit']} refs/heads/codex/qwen38-tito"]:
+        raise HarnessError("Miles source bundle head identity drifted")
     if _syncer_source_sha256() != plan["syncer_source_sha256"]:
         raise HarnessError("syncer source changed after the plan was prepared")
     tms_patch = plan.get("tms_preload_patch")
@@ -2427,9 +2462,17 @@ docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
   rmdir "$RUN/miles"
   git clone --no-checkout {shlex.quote(MILES_REPOSITORY)} "$RUN/miles"
 fi
+MILES_BUNDLE="$RUN/source/{miles['bundle_path']}"
+test -f "$MILES_BUNDLE" && test ! -L "$MILES_BUNDLE"
+printf '%s  %s\n' {shlex.quote(miles['bundle_sha256'])} "$MILES_BUNDLE" | sha256sum --check -
 git -C "$RUN/miles" remote set-url origin {shlex.quote(MILES_REPOSITORY)}
-git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(miles['commit'])}
+git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(miles['base_commit'])}
+git -C "$RUN/miles" checkout --detach {shlex.quote(miles['base_commit'])}
+git -C "$RUN/miles" bundle verify "$MILES_BUNDLE" >/dev/null
+git -C "$RUN/miles" fetch "$MILES_BUNDLE" {shlex.quote(miles['commit'])}
 git -C "$RUN/miles" checkout --detach {shlex.quote(miles['commit'])}
+test "$(git -C "$RUN/miles" rev-parse HEAD)" = {shlex.quote(miles['commit'])}
+test -z "$(git -C "$RUN/miles" status --porcelain --untracked-files=all)"
 if [ ! -d "$RUN/sglang/.git" ]; then
   rmdir "$RUN/sglang"
   git clone --no-checkout {shlex.quote(sglang['repository'])} "$RUN/sglang"

@@ -4,8 +4,10 @@ import asyncio
 import copy
 import hashlib
 import json
+import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,33 @@ from aiohttp import web
 
 from yeto_miles_secrlenv import codex_harness_agent as harness
 from yeto_miles_secrlenv import reward as secrlenv_reward
+
+
+def test_stock_codex_qwen38_adapter_process_binds_exact_xhigh_profile():
+    environment = dict(os.environ)
+    environment["YETO_CODEX_CHAT_TEMPLATE"] = "qwen38"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from yeto_miles_secrlenv import codex_harness_agent as adapter
+assert adapter.BACKEND_MODEL == "qwen38"
+assert adapter.BACKEND_REASONING_EFFORT == "xhigh"
+assert adapter.BACKEND_CHAT_TEMPLATE_KWARGS == {
+    "enable_thinking": True,
+    "preserve_thinking": True,
+    "reasoning_effort": "xhigh",
+}
+""",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _completion(

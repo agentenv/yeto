@@ -13,6 +13,9 @@ import torch
 import yeto.rl as rl_config
 from yeto.provenance import python_spec_sha256
 from yeto.rl import (
+    MILES_BASE_COMMIT,
+    MILES_BUNDLE_PATH,
+    MILES_BUNDLE_SHA256,
     MILES_COMMIT,
     MILES_IMAGE,
     MILES_PEFT_VERSION,
@@ -22,6 +25,11 @@ from yeto.rl import (
     ssh_harness,
 )
 from yeto.rl.bridge import _write_round_audit
+from yeto.rl.codex_backend import (
+    QWEN38_MODEL,
+    QWEN38_REVISION,
+    stock_codex_backend_contract,
+)
 from yeto.rl.core import (
     CanonicalTensorSpec,
     canonical_layout_hash,
@@ -79,7 +87,10 @@ def _plan():
         "docker_image": IMAGE,
         "miles": {
             "repository": MILES_REPOSITORY,
+            "base_commit": MILES_BASE_COMMIT,
             "commit": MILES_COMMIT,
+            "bundle_path": MILES_BUNDLE_PATH,
+            "bundle_sha256": MILES_BUNDLE_SHA256,
             "peft_version": MILES_PEFT_VERSION,
         },
         "sglang": {
@@ -666,17 +677,20 @@ def test_prepare_cli_exposes_final_secrlenv_eval_controls():
 
 
 def test_miles_and_sglang_pins_include_the_compatible_builds():
-    assert MILES_COMMIT == "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
+    assert MILES_BASE_COMMIT == "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
+    assert MILES_COMMIT == "e2ad83d84a6b32a0f7d79ff196ad8c64fc67586a"
     assert not hasattr(rl_config, "MILES_UPSTREAM_COMMIT")
-    assert not hasattr(rl_config, "MILES_BUNDLE_PATH")
-    assert not hasattr(rl_config, "MILES_BUNDLE_SHA256")
+    assert MILES_BUNDLE_PATH == "yeto/rl/vendor/miles-qwen38.bundle"
+    assert MILES_BUNDLE_SHA256 == (
+        "ff0e2ed7de75e06926c4637545a8a918c2e3ae1d5ceeb2b49d6b87511c0598b2"
+    )
     assert SGLANG_COMMIT == "e1b57eb8e7749235c987cc6b1b2824ce3265369b"
     assert not hasattr(rl_config, "SGLANG_UPSTREAM_COMMIT")
     assert not hasattr(rl_config, "SGLANG_BUNDLE_PATH")
     assert not hasattr(rl_config, "SGLANG_BUNDLE_SHA256")
     assert MILES_IMAGE == (
-        "docker:ghcr.io/alexeisie/miles@sha256:"
-        "5be3e0722c7b0174c3c1a5526064872987c7bc367af700117a3589efbd6b19bd"
+        "docker:ghcr.io/agentenv/miles@sha256:"
+        "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
     )
 
 
@@ -2167,6 +2181,53 @@ def test_harness_freezes_stock_codex_identity_and_binary_mount():
         with pytest.raises(HarnessError, match="pinned stock Codex runtime"):
             ssh_harness._validate_plan(drifted)
 
+    qwen = copy.deepcopy(plan)
+    qwen["learner"].update(
+        {
+            "model": QWEN38_MODEL,
+            "model_revision": QWEN38_REVISION,
+            "rollout_model": None,
+            "rollout_model_revision": None,
+            "rl_model_recipe": "generic",
+            "tito_model": "qwen38",
+            "apply_chat_template_kwargs": {
+                "enable_thinking": True,
+                "preserve_thinking": True,
+                "reasoning_effort": "xhigh",
+            },
+            "lora_targets": "attention",
+            "expert_full_count": 0,
+            "expert_parallel": 1,
+            "tensor_parallel": 4,
+            "pipeline_parallel": 2,
+            "rollout_num_gpus_per_engine": 1,
+            "sglang_tp_size": 1,
+            "sglang_dp_size": 1,
+            "sglang_ep_size": 1,
+            "sglang_attention_backend": None,
+            "sglang_page_size": None,
+        }
+    )
+    qwen["codex_harness"]["backend"] = stock_codex_backend_contract(
+        "qwen38",
+        qwen["learner"]["rollout_max_response_len"],
+    )
+
+    ssh_harness._validate_plan(qwen)
+    qwen_args = parse_learner_args(_learner_argv(qwen, 0)[3:])
+    assert qwen_args.model == QWEN38_MODEL
+    assert qwen_args.model_revision == QWEN38_REVISION
+    assert qwen_args.tito_model == "qwen38"
+    assert qwen_args.apply_chat_template_kwargs == {
+        "enable_thinking": True,
+        "preserve_thinking": True,
+        "reasoning_effort": "xhigh",
+    }
+
+    qwen["learner"]["model_revision"] = "0" * 40
+    with pytest.raises(HarnessError, match="model profile drifted"):
+        ssh_harness._validate_plan(qwen)
+
 
 def test_codex_controller_artifacts_are_attested_before_plan_write(
     tmp_path, monkeypatch
@@ -2271,10 +2332,12 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     assert SGLANG_COMMIT in setup
     assert f'git -C "$RUN/miles" remote set-url origin {MILES_REPOSITORY}' in setup
     assert (
-        f'git -C "$RUN/miles" fetch --depth 1 origin {MILES_COMMIT}'
+        f'git -C "$RUN/miles" fetch --depth 1 origin {MILES_BASE_COMMIT}'
         in setup
     )
-    assert "MILES_BUNDLE" not in setup
+    assert f'MILES_BUNDLE="$RUN/source/{MILES_BUNDLE_PATH}"' in setup
+    assert MILES_BUNDLE_SHA256 in setup
+    assert f'git -C "$RUN/miles" fetch "$MILES_BUNDLE" {MILES_COMMIT}' in setup
     assert f'git -C "$RUN/sglang" remote set-url origin {SGLANG_REPOSITORY}' in setup
     assert '"$RUN/sglang"' in setup
     assert "SGLANG_BUNDLE" not in setup

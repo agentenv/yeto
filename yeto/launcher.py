@@ -775,40 +775,30 @@ def _prepare_rl_args(
 
     codex_reasoning_effort = getattr(args, "codex_reasoning_effort", None)
     if custom_agent == CODEX_HARNESS_AGENT:
-        if codex_reasoning_effort != "xhigh":
-            raise ValueError(
-                "the stock Codex harness requires --codex-reasoning-effort xhigh"
-            )
-        if getattr(args, "rl_model_recipe", "generic") != "deepseek-v4-flash":
-            raise ValueError(
-                "the stock Codex harness is pinned to --rl-model-recipe "
-                "deepseek-v4-flash"
-            )
-        if args.tito_model != "deepseekv4":
-            raise ValueError(
-                "the stock Codex harness requires --tito-model deepseekv4"
-            )
-        if list(getattr(args, "tito_allowed_append_roles", None) or ()) != [
-            "tool",
-            "user",
-        ]:
-            raise ValueError(
-                "the stock Codex harness requires "
-                "--tito-allowed-append-roles tool user"
-            )
-        codex_chat_template_kwargs = {
-            "thinking_mode": "thinking",
-            "reasoning_effort": "max",
-            "drop_thinking": False,
-        }
+        from .rl.codex_backend import (
+            stock_codex_backend_profile,
+            validate_stock_codex_fields,
+        )
+
+        codex_profile = stock_codex_backend_profile(str(args.tito_model))
+        codex_chat_template_kwargs = codex_profile["chat_template_kwargs"]
         if args.apply_chat_template_kwargs is None:
             args.apply_chat_template_kwargs = codex_chat_template_kwargs
-        elif args.apply_chat_template_kwargs != codex_chat_template_kwargs:
-            raise ValueError(
-                "the stock Codex harness requires exact DeepSeek V4 chat-template "
-                "kwargs: thinking_mode=thinking, reasoning_effort=max, "
-                "drop_thinking=false"
-            )
+        validate_stock_codex_fields(
+            tito_model=str(args.tito_model),
+            rl_model_recipe=getattr(args, "rl_model_recipe", "generic"),
+            model=str(args.model),
+            model_revision=str(args.model_revision),
+            rollout_model=getattr(args, "rollout_model", None),
+            rollout_model_revision=getattr(args, "rollout_model_revision", None),
+            apply_chat_template_kwargs=args.apply_chat_template_kwargs,
+            tito_allowed_append_roles=list(
+                getattr(args, "tito_allowed_append_roles", None) or ()
+            ),
+            codex_reasoning_effort=codex_reasoning_effort,
+            lora_targets=str(args.lora_targets),
+            expert_full_count=int(getattr(args, "expert_full_count", 0)),
+        )
     elif codex_reasoning_effort is not None:
         raise ValueError(
             "--codex-reasoning-effort requires the signed stock Codex agent"
@@ -1363,6 +1353,9 @@ def make_miles_island_task(
     from .provenance import is_local_reference
     from .rl import (
         CODEX_HARNESS_AGENT,
+        MILES_BASE_COMMIT,
+        MILES_BUNDLE_PATH,
+        MILES_BUNDLE_SHA256,
         MILES_COMMIT,
         MILES_PEFT_VERSION,
         MILES_REPOSITORY,
@@ -1516,10 +1509,19 @@ def make_miles_island_task(
         )
     miles_setup = (
         "set -e\n"
+        f"MILES_BUNDLE=~/sky_workdir/{MILES_BUNDLE_PATH}\n"
+        'test -f "$MILES_BUNDLE" && test ! -L "$MILES_BUNDLE"\n'
+        f"printf '%s  %s\\n' {MILES_BUNDLE_SHA256} \"$MILES_BUNDLE\" "
+        "| sha256sum --check -\n"
         f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
         f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
-        f"git -C ~/miles fetch --depth 1 origin {MILES_COMMIT}\n"
+        f"git -C ~/miles fetch --depth 1 origin {MILES_BASE_COMMIT}\n"
+        f"git -C ~/miles checkout --detach {MILES_BASE_COMMIT}\n"
+        'git -C ~/miles bundle verify "$MILES_BUNDLE" >/dev/null\n'
+        f'git -C ~/miles fetch "$MILES_BUNDLE" {MILES_COMMIT}\n'
         f"git -C ~/miles checkout --detach {MILES_COMMIT}\n"
+        f'test "$(git -C ~/miles rev-parse HEAD)" = {MILES_COMMIT}\n'
+        'test -z "$(git -C ~/miles status --porcelain --untracked-files=all)"\n'
         f"python3 -m pip install -q --no-deps -e ~/miles "
         f"'peft=={MILES_PEFT_VERSION}'"
     )
