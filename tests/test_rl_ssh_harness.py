@@ -167,6 +167,10 @@ def _secrlenv_daemon_contract(run_id="acceptance"):
         "operator_image": "secrlenv-operator:pinned",
         "operator_image_id": "sha256:" + "4" * 64,
         "max_active_episodes": 16,
+        "enable_dind_debug": False,
+        "dind_image": None,
+        "dind_image_id": None,
+        "dind_debug_script_sha256": None,
     }
 
 
@@ -914,6 +918,10 @@ def test_prepare_wires_final_secrlenv_eval_and_same_dataset_sha(tmp_path, monkey
         secrlenv_operator_image_id=daemon["operator_image_id"],
         secrlenv_port=daemon["port"],
         secrlenv_max_active_episodes=daemon["max_active_episodes"],
+        secrlenv_enable_dind_debug=False,
+        secrlenv_dind_image=None,
+        secrlenv_dind_image_id=None,
+        secrlenv_dind_debug_script_sha256=None,
     )
     monkeypatch.setattr(ssh_harness, "_resolved_launch_args", lambda *unused: args)
     monkeypatch.setattr(ssh_harness, "_syncer_source_sha256", lambda: "1" * 64)
@@ -2420,7 +2428,8 @@ def test_secrlenv_daemon_contract_is_required_and_propagated_to_nodes():
     node = _node_start_script(plan, 0, 0)
 
     assert "python3 -m secrlenv_rl.server" in script
-    assert "--enable-dind-debug" not in script
+    assert "\n      --enable-dind-debug" not in script
+    assert "\n      --dind-image" not in script
     assert "task_pack_sha256" in script
     assert "python3 -m yeto.rl.secrlenv_task_images" in script
     assert "secrlenv_task_images=ready" not in script
@@ -2441,6 +2450,60 @@ def test_secrlenv_daemon_contract_is_required_and_propagated_to_nodes():
         "/data/yeto-rl/secrlenv-runs/acceptance/daemon.token:"
         "/run/secrlenv/daemon.token:ro" in node
     )
+
+
+def test_secrlenv_dind_debug_is_explicit_pinned_and_propagated():
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+    plan["secrlenv_daemon"] = {
+        **_secrlenv_daemon_contract(),
+        "enable_dind_debug": True,
+        "dind_image": "docker:24-dind",
+        "dind_image_id": "sha256:" + "5" * 64,
+        "dind_debug_script_sha256": "6" * 64,
+    }
+
+    ssh_harness._validate_plan(plan)
+    script = ssh_harness._secrlenv_daemon_script(plan)
+
+    assert "--enable-dind-debug" in script
+    assert "--dind-image sha256:" + "5" * 64 in script
+    assert "DIND_IMAGE_ID=" in script
+    assert "sha256:" + "5" * 64 in script
+    assert "DIND_DEBUG_SCRIPT=" in script
+    assert "6" * 64 in script
+    assert "existing secrlenv daemon has the wrong DinD debug identity" in script
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"enable_dind_debug": 1}, "explicit boolean"),
+        (
+            {"enable_dind_debug": True},
+            "requires a pinned image and image ID",
+        ),
+        (
+            {
+                "enable_dind_debug": True,
+                "dind_image": "docker:24-dind",
+                "dind_image_id": "sha256:" + "5" * 64,
+            },
+            "requires a pinned debug script",
+        ),
+        (
+            {"dind_image": "docker:24-dind"},
+            "must not carry unused debug identities",
+        ),
+    ],
+)
+def test_secrlenv_dind_debug_contract_fails_closed(updates, message):
+    plan = _plan()
+    _enable_secrlenv_agent(plan)
+    plan["secrlenv_daemon"] = {**_secrlenv_daemon_contract(), **updates}
+
+    with pytest.raises(HarnessError, match=message):
+        ssh_harness._validate_plan(plan)
 
 
 def test_secrlenv_island_head_placement_is_explicit_and_fail_closed(

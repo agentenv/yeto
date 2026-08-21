@@ -1053,6 +1053,32 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         for name in ("source_sha256", "task_pack_sha256"):
             if not _SHA256.fullmatch(str(daemon.get(name, ""))):
                 raise HarnessError(f"secrlenv daemon has an invalid {name}")
+        enable_dind_debug = daemon.get("enable_dind_debug")
+        if type(enable_dind_debug) is not bool:
+            raise HarnessError(
+                "secrlenv daemon enable_dind_debug must be an explicit boolean"
+            )
+        dind_image = daemon.get("dind_image")
+        dind_image_id = daemon.get("dind_image_id")
+        dind_debug_script_sha256 = daemon.get("dind_debug_script_sha256")
+        if enable_dind_debug:
+            if not _SAFE_IMAGE.fullmatch(str(dind_image or "")) or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(dind_image_id or "")
+            ):
+                raise HarnessError(
+                    "enabled secrlenv DinD debug requires a pinned image and image ID"
+                )
+            if not _SHA256.fullmatch(str(dind_debug_script_sha256 or "")):
+                raise HarnessError(
+                    "enabled secrlenv DinD debug requires a pinned debug script"
+                )
+        elif any(
+            value is not None
+            for value in (dind_image, dind_image_id, dind_debug_script_sha256)
+        ):
+            raise HarnessError(
+                "disabled secrlenv DinD debug must not carry unused debug identities"
+            )
         if (
             daemon.get("bind") != "127.0.0.1"
             or daemon.get("placement", "all-hosts")
@@ -1844,6 +1870,22 @@ def prepare(namespace) -> Path:
             "operator_image": namespace.secrlenv_operator_image,
             "operator_image_id": namespace.secrlenv_operator_image_id,
             "max_active_episodes": namespace.secrlenv_max_active_episodes,
+            "enable_dind_debug": bool(namespace.secrlenv_enable_dind_debug),
+            "dind_image": (
+                namespace.secrlenv_dind_image
+                if namespace.secrlenv_enable_dind_debug
+                else None
+            ),
+            "dind_image_id": (
+                namespace.secrlenv_dind_image_id
+                if namespace.secrlenv_enable_dind_debug
+                else None
+            ),
+            "dind_debug_script_sha256": (
+                namespace.secrlenv_dind_debug_script_sha256
+                if namespace.secrlenv_enable_dind_debug
+                else None
+            ),
         }
     elif daemon_source_root is not None:
         raise HarnessError(
@@ -1918,6 +1960,34 @@ def _remote_vars(plan: dict[str, Any]) -> str:
 
 def _secrlenv_daemon_script(plan: dict[str, Any]) -> str:
     daemon = plan["secrlenv_daemon"]
+    dind_image_check = ""
+    dind_server_args = ""
+    dind_existing_identity = """
+  case "$ARGS" in
+    *--enable-dind-debug*)
+      echo 'existing secrlenv daemon unexpectedly enables DinD debug' >&2
+      exit 1
+      ;;
+  esac
+"""
+    if daemon["enable_dind_debug"]:
+        dind_image_check = f"""
+DIND_IMAGE_ID="$(docker image inspect --format '{{{{.Id}}}}' {shlex.quote(daemon['dind_image'])})"
+test "$DIND_IMAGE_ID" = {shlex.quote(daemon['dind_image_id'])}
+DIND_DEBUG_SCRIPT="$SOURCE/pipeline/debug_instance.sh"
+test -f "$DIND_DEBUG_SCRIPT" && test ! -L "$DIND_DEBUG_SCRIPT"
+printf '%s  %s\n' {shlex.quote(daemon['dind_debug_script_sha256'])} "$DIND_DEBUG_SCRIPT" | sha256sum --check -
+"""
+        dind_server_args = (
+            f"      --dind-image {shlex.quote(daemon['dind_image_id'])} \\\n"
+            "      --enable-dind-debug \\\n"
+        )
+        dind_existing_identity = f"""
+  case "$ARGS" in
+    *--dind-image*{shlex.quote(daemon['dind_image_id'])}*--enable-dind-debug*) ;;
+    *) echo 'existing secrlenv daemon has the wrong DinD debug identity' >&2; exit 1 ;;
+  esac
+"""
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 SOURCE={shlex.quote(daemon['source_root'])}
@@ -1937,14 +2007,14 @@ PYTHONPATH="$RUN/source:$SOURCE${{PYTHONPATH:+:$PYTHONPATH}}" \
     --data-root /data
 IMAGE_ID="$(docker image inspect --format '{{{{.Id}}}}' {shlex.quote(daemon['operator_image'])})"
 test "$IMAGE_ID" = {shlex.quote(daemon['operator_image_id'])}
-if [ -s "$STATE_ROOT/daemon.pid" ]; then
+{dind_image_check}if [ -s "$STATE_ROOT/daemon.pid" ]; then
   PID="$(cat "$STATE_ROOT/daemon.pid")"
   ARGS="$(ps -p "$PID" -o args= 2>/dev/null || true)"
   case "$ARGS" in
     *secrlenv_rl.server*"$STATE_ROOT/state"*) ;;
     *) echo 'existing secrlenv daemon PID has the wrong identity' >&2; exit 1 ;;
   esac
-else
+{dind_existing_identity}else
   if python3 - <<'PY'
 import socket
 s = socket.socket()
@@ -1979,7 +2049,7 @@ PY
       --bind {shlex.quote(daemon['bind'])} \
       --port {daemon['port']} \
       --operator-image {shlex.quote(daemon['operator_image'])} \
-      --max-active-episodes {daemon['max_active_episodes']} \
+{dind_server_args}      --max-active-episodes {daemon['max_active_episodes']} \
       >"$STATE_ROOT/daemon.log" 2>&1 < /dev/null &
   echo "$!" > "$STATE_ROOT/daemon.pid"
 fi
@@ -4538,6 +4608,16 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--secrlenv-port", type=int, default=28765)
     prepare_parser.add_argument(
         "--secrlenv-max-active-episodes", type=int, default=16
+    )
+    prepare_parser.add_argument(
+        "--secrlenv-enable-dind-debug",
+        action="store_true",
+        help="give each solver a private flagless DinD challenge copy",
+    )
+    prepare_parser.add_argument("--secrlenv-dind-image", default=None)
+    prepare_parser.add_argument("--secrlenv-dind-image-id", default=None)
+    prepare_parser.add_argument(
+        "--secrlenv-dind-debug-script-sha256", default=None
     )
     prepare_parser.add_argument(
         "--codex-harness-binary",
