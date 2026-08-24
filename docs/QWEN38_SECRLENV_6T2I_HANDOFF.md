@@ -2,6 +2,11 @@
 
 Snapshot time: `2026-08-22T02:43:56Z`
 
+> **Architecture status (2026-08-24):** preserve this run as a diagnostic
+> single-island full-parameter result, but do not use its `6T/2I` topology as
+> the distributed RL template. The replacement multi-learner design is in
+> [DECOUPLED_DILOCO_SECRLENV_PLAN.md](DECOUPLED_DILOCO_SECRLENV_PLAN.md).
+
 ## Authoritative identities
 
 - Yeto branch: `review/wandb-v28-fullrun-20260818`
