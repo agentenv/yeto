@@ -1,4 +1,4 @@
-# Decoupled DiLoCo plan for SecRLEnv agentic RL
+# GRPO, DiLoCo, and PULSE plan for SecRLEnv
 
 Status: architecture proposal; no launch approval
 
@@ -6,346 +6,490 @@ Date: 2026-08-24
 
 ## Decision
 
-Do not scale the existing `6 training + 2 inference` single-node job into a
-cross-node Megatron job. It is a useful full-parameter systems smoke, but it is
-not a DiLoCo RL architecture: it has one tightly coupled trainer, one rollout
-engine, no outer learner aggregation, and no critic.
+Build one actor-only RL system in four gated stages:
 
-The replacement architecture uses independent learner islands. Tensor,
-pipeline, sequence, and data-parallel collectives are confined to the fast
-fabric inside an island. Nodes never participate in one cross-node Megatron or
-DDP process group. Commodity Ethernet carries only trajectories, versioned
-model fragments or sparse patches, and control metadata.
+1. **SecRLEnv GRPO with dense DiLoCo.** Establish the learning and distributed
+   update reference using full FP32 pseudo-gradient exchange and complete BF16
+   inference checkpoints.
+2. **Replace dense trainer exchange with PULSELoCo.** Keep the rollout, reward,
+   GRPO, optimizer, and inference-publication paths unchanged. Add
+   compute-visible sparse pseudo-gradients with FP32 error feedback.
+3. **Add PULSESync for inference refresh.** Keep PULSELoCo between trainers and
+   replace complete inference-checkpoint transfers with bit-exact BF16-visible
+   patches.
+4. **Add Decoupled DiLoCo features incrementally.** Increase the local horizon,
+   stream fragments, tolerate stragglers through quorum and grace, weight by
+   useful work, and prove learner failure/rejoin recovery.
 
-Implement this in two deliberately separated stages:
+Dense DiLoCo and complete inference publication remain supported as validation
+modes. They are not separate final products. They provide an oracle against
+which the PULSE paths can be tested without changing the RL algorithm.
 
-1. **GRPO + Decoupled DiLoCo correctness track.** Every island contains a full
-   policy trainer. GRPO has no learned critic, so there is no omitted critic in
-   this track. This is the shortest path to a literature-backed multi-trainer
-   RL baseline and matches SecRLEnv's verifiable rewards.
-2. **SAO + Decoupled DiLoCo agentic track.** Replace grouped synchronous
-   rollouts with single-rollout asynchronous optimization. Every learner owns
-   both its policy trainer and its value trainer; both trainable states are
-   reconciled through DiLoCo. This is the target for long, highly variable
-   SecRLEnv trajectories, but it is a research integration and must not be
-   treated as already validated by either source paper.
+The final operating loop is:
+```
+SecRLEnv tasks
+    -> inference workers generate rollouts
+    -> SecRLEnv returns verifiable rewards and cleanup evidence
+    -> each learner island performs local GRPO steps
+    -> PULSELoCo reconciles trainer pseudo-gradients
+    -> the synchronizer publishes a complete global policy version
+    -> PULSESync updates inference workers to that version
+    -> next SecRLEnv rollout cycle
+```
 
-Do not add PULSE sparsification until dense fragment exchange is correct and
-measured. PULSESync and PULSELoCo are subsequent bandwidth optimizations, not
-substitutes for a correct actor/critic and staleness design.
+GRPO derives group-relative advantages and therefore needs no learned critic in
+this design.
 
-## Current implementation audit
+## Existing implementation baseline
 
-The repository already has useful Decoupled DiLoCo infrastructure, but the
-current full-parameter run does not exercise it end to end.
+This plan extends working components; it does not reimplement GRPO or
+Decoupled DiLoCo from scratch.
 
-- `syncer/src` and `docs/PROTOCOL.md` implement fragment-wise outer updates,
-  frozen learner generations, quorum, adaptive grace, token-weighted merging,
-  FP32 Nesterov state, recovery, and an event ledger.
-- `yeto/rl/decoupled.py` pipelines RL fragment exchange, but its public state is
-  `CanonicalLoraState` and its identity contract contains a LoRA configuration
-  hash.
-- `yeto/rl/core.py` explicitly defines the canonical boundary as PEFT LoRA
-  values.
-- `yeto/rl/miles.py` exports and applies `actor_model` trainable state. It has no
-  value-model/critic role in the DiLoCo protocol.
-- The v125 handoff records one n7 trainer/rollout container and no Yeto outer
-  syncer or peer learner. It therefore demonstrates local full-parameter
-  Megatron + SGLang + SecRLEnv integration, not distributed DiLoCo RL.
+- The preserved Qwen3.8 path already runs direct, full-parameter Miles/Megatron
+  GRPO with `--advantage-estimator grpo`, three samples per prompt, SecRLEnv
+  verifiable rewards, and trainer-to-SGLang weight publication.
+- That path is one learner island. Its systems smoke reached rollout generation
+  and an optimizer step, but it did not demonstrate repeated nonzero updates or
+  held-out learning improvement.
+- The Rust syncer already implements base-relative fragment updates, frozen
+  learner generations, quorum, adaptive grace, AVG/RDA merging, FP32 Nesterov
+  outer state, checkpoint recovery, and an event ledger.
+- The current Yeto RL bridge exposes `CanonicalLoraState`; its working
+  Decoupled DiLoCo route is therefore LoRA-oriented. The direct full-parameter
+  Qwen GRPO path bypasses that route.
 
-## Why the plan changed
+The missing foundation is the integration boundary: export and apply bounded
+full-parameter fragments from the existing GRPO trainer, preserve its training
+state correctly, and drive those fragments through the existing syncer.
+PULSELoCo and PULSESync are then added behind that same boundary.
 
-- [GRPO](https://cameronrwolfe.substack.com/p/grpo) removes the learned critic
-  by deriving advantages within a group. The current `3 samples/prompt` shape
-  is therefore an actor-only algorithm, not an actor-critic algorithm with a
-  missing service.
-- [Decoupled DiLoCo](https://arxiv.org/abs/2604.21428) consists of independent
-  learners doing local inner optimization and a central synchronizer doing
-  asynchronous, fragment-wise outer optimization with quorum, grace, and
-  token-weighted merging. A pool of rollout workers plus one monolithic trainer
-  is not this architecture.
-- [PULSE/PULSELoCo](https://arxiv.org/abs/2602.03839) is the closest published
-  evidence for DiLoCo-style LLM RL. It separates trainer-to-inference weight
-  refresh from trainer-to-trainer pseudo-gradient exchange. Its GRPO results
-  used four trainers, shared global rollout checkpoints, and modest local
-  horizons (`H=8` for tested Qwen models) because larger horizons increase
-  policy staleness. It was evaluated only up to 7B and on MATH, not a 27B
-  multi-turn agent environment.
-- [SAO](https://arxiv.org/abs/2607.07508) argues that group barriers are a poor
-  fit for asynchronous agentic RL. It trains from each completed rollout,
-  stores rollout-policy token log-probabilities, applies double-sided
-  token-level off-policy masking, uses skip-observation GAE, and updates the
-  critic twice per policy update. SAO itself is not a DiLoCo paper; combining
-  the two is our proposed design and requires new validation.
+## Network and hardware boundary
+
+The final system doesn't require InfiniBand between learner nodes.
+
+- Each learner island is self-contained and holds a full trainable policy plus
+  its local optimizer state.
+- TP, PP, sequence-parallel, and DDP collectives stay within one node or another
+  explicitly fast-fabric island. No NCCL/model-parallel process group spans the
+  ordinary inter-node network.
+- Local H200s use their fastest available peer fabric for tightly coupled
+  training. The preserved 6-training/2-inference run exercised local NCCL
+  through TP2/PP3 and TP2 groups, but did not preserve an explicit topology
+  attestation proving NVLink/NVSwitch specifically. Future plans must record
+  `nvidia-smi topo -m` before selecting a topology.
+- Commodity Ethernet carries trajectories, version metadata, PULSELoCo sparse
+  trainer updates, PULSESync inference patches, and occasional repair
+  checkpoints.
+- A CPU/large-memory synchronizer owns the authoritative global outer state and
+  does not execute model forward passes.
+
+This makes InfiniBand an optional throughput improvement rather than a
+correctness requirement. The claim remains gated on measured payload sizes,
+queueing, synchronization time, and policy staleness under the real Ethernet
+network.
+
+Decoupling removes the need for a fast fabric between islands; it does not
+remove the need for fast collectives within a multi-GPU learner.
+
+Milestones 0-3 and most of Milestone 4 can be developed on one 8-H200 node with
+a smaller model. Partition that node into isolated learner and inference GPU
+sets. Learners must have separate processes, state, and checkpoints, and must
+never join one cross-island NCCL/DDP group. Their only communication uses the
+real DiLoCo/PULSE protocol over loopback or the host network.
+
+A representative layout is three 2-GPU learners, one 2-GPU inference worker,
+and a CPU synchronizer. A smaller model may instead use one GPU per learner.
+Milestone 4 is not complete until the same frozen build passes on at least two
+physical nodes; three are preferred to test `K=M-1`, real node loss,
+independent storage, and actual Ethernet latency and throughput.
+
+For Qwen3.8-27B scale-up, start with one 8-H200 node per learner island. Select
+the within-node trainer/inference split only after a measured memory ledger and
+small-model proof. The earlier 6-training/2-inference result proves that one
+node can execute the model; it does not validate multi-island DiLoCo.
+
+## Why this order
+
+The stages change one synchronization surface at a time:
+
+| Stage | Local RL | Trainer exchange | Inference refresh | Question answered |
+| --- | --- | --- | --- | --- |
+| Dense reference | GRPO | Full FP32 pseudo-gradients | Full BF16 checkpoint | Is distributed GRPO correct? |
+| PULSELoCo | Same GRPO | Sparse update + FP32 error feedback | Full BF16 checkpoint | Does compression preserve trainer behavior? |
+| PULSESync | Same GRPO | PULSELoCo | Sparse BF16-visible patch | Do rollout workers reconstruct the exact policy? |
+| Decoupled | Same GRPO | PULSELoCo, asynchronous/fragmented | PULSESync | Does it remain correct under lag, quorum, and failure? |
+
+The code may be structured for all four modes from the beginning, but the
+release gates stay ordered. Enabling PULSELoCo and PULSESync simultaneously
+before a dense reference would make a learning regression ambiguous among:
+
+- SecRLEnv rollout/reward attribution;
+- GRPO advantage or loss construction;
+- local optimizer behavior;
+- pseudo-gradient construction or outer aggregation;
+- PULSELoCo thresholding/error feedback;
+- PULSESync reconstruction; or
+- stale-policy rollout handling.
+
+The dense and full-transfer modes are therefore test instruments. Production
+eventually uses PULSELoCo + PULSESync.
+
+## Literature boundary
+
+- [GRPO](https://cameronrwolfe.substack.com/p/grpo) supplies the local actor-only
+  RL objective: sample a group for a prompt, calculate verifiable rewards, and
+  normalize advantages within the group instead of fitting a critic.
+- [PULSE/PULSELoCo](https://arxiv.org/abs/2602.03839) separates two communication
+  channels. PULSELoCo sparsifies trainer-to-trainer DiLoCo pseudo-gradients with
+  error feedback; PULSESync sends only BF16-compute-visible new values to
+  inference replicas. Its published GRPO evidence is a starting point, not
+  proof for Qwen3.8-27B or multi-turn SecRLEnv.
+- [Decoupled DiLoCo](https://arxiv.org/abs/2604.21428) supplies independent
+  learners, local inner steps, asynchronous fragment exchange, frozen
+  generations, quorum, adaptive grace, useful-work weighting, outer momentum,
+  catch-up, and an event ledger.
+
+SAO is not included. If asynchronous single-rollout actor-critic work is
+reconsidered later, it gets a separate proposal and does not alter the GRPO
+correctness contract described here.
 
 ## Target architecture
 
 ```text
-                        CPU / large-memory syncer
-                  actor outer state + outer optimizer
-                 critic outer state + outer optimizer*
-                    quorum / grace / version ledger
-                         /         |         \
-             fragments /          |          \ fragments
-                       /           |           \
-              learner island A  learner B  learner C ...
-              local fast fabric local fabric local fabric
-              actor trainer     actor trainer actor trainer
-              critic trainer*   critic*       critic*
-              local Adam state  local Adam    local Adam
-                       \           |           /
-                        \ trajectory stream  /
-                         rollout / environment pool
-                  SGLang replicas + SecRLEnv executors
-                  global actor snapshots only; no trainer
-                  collectives across the commodity network
+                 authoritative CPU/large-memory syncer
+          global policy + FP32 outer state + error feedback
+              version ledger / quorum / recovery state
+                    ^                       |
+       PULSELoCo sparse pseudo-gradients    | global policy publication
+                    |                       v
+       +------------------------+    +----------------------+
+       | independent learners   |    | inference workers    |
+       | local full policy      |    | complete BF16 policy |
+       | local Adam state       |    | SGLang generation    |
+       | local GRPO steps       |    +----------+-----------+
+       +------------------------+               |
+                    ^                           | rollouts
+                    | trajectories/rewards      v
+                    +------------------- SecRLEnv executors
 
-* absent in the GRPO correctness track; mandatory and DiLoCo-managed in SAO
+                 PULSESync applies each complete published
+                 policy version to the inference workers.
 ```
+
+### Shared interfaces
+
+All stages use the same interfaces so a reference backend can be switched for
+the optimized backend without changing learning semantics.
+
+1. **Trajectory envelope**
+   - task/environment identity;
+   - prompt-group identity and sample index;
+   - behavior-policy version and complete snapshot hash;
+   - generated tokens and token-level behavior log-probabilities where needed;
+   - verifiable reward and cleanup evidence;
+   - globally idempotent trajectory ID.
+2. **Local-step receipt**
+   - learner/generation identity;
+   - global anchor version;
+   - deterministic input-batch identity;
+   - accepted trajectories and trained-token count;
+   - local-step count and optimizer-step result;
+   - resulting parameter-layout identity.
+3. **Trainer update**
+   - base and target global versions;
+   - tensor/fragment identity;
+   - dense pseudo-gradient or PULSELoCo sparse payload;
+   - PULSE threshold/error-feedback version;
+   - payload hash, byte count, and completeness proof.
+4. **Inference publication**
+   - base and target global versions;
+   - complete target manifest and target model hash;
+   - full BF16 snapshot or PULSESync patch;
+   - reconstruction receipt from each inference worker.
+
+No rollout may be trained twice, no group may mix behavior-policy versions, and
+no inference worker may serve a partially reconstructed policy.
 
 ### Learner island
 
-An island is the failure and synchronization boundary. It must be able to take
-an inner optimizer step without contacting another island.
-
-- Run all Megatron collectives within the island's local NVLink/NVSwitch
-  domain. Never form TP, PP, EP, FSDP, or DDP groups across ordinary Ethernet.
-- Preserve each island's inner Adam state locally. DiLoCo exchanges
-  base-relative parameter deltas, not inner optimizer state.
-- Apply incoming global fragments only at an explicit safe boundary after
-  backward/optimizer completion and before the next forward pass.
-- Track, for every actor and critic fragment, the raw anchor version, local
-  steps, trained tokens, and latest applied global version.
-- Checkpoint local actor/critic weights, inner optimizer states, data cursor,
-  and fragment anchors atomically. A recovering island rejoins with a new
-  generation; it never silently reuses stale counters.
-
-For Qwen3.8-27B full-parameter GRPO, begin with one 8-H200 node per learner.
-Choose the within-node TP/PP layout only after an isolated memory and throughput
-proof. The old TP2/PP3 six-GPU result is evidence that the model can train, not
-the new topology contract.
-
-For SAO, do not assume that the 27B value model fits beside the policy. First
-measure a full memory ledger for policy weights, gradients, optimizer state,
-activations, value weights, value optimizer state, and checkpoint buffers. If
-one node cannot hold both, define a logical learner as an actor-training node
-plus a critic-training node. They exchange trajectories and scalar/value
-targets over Ethernet but perform no cross-node model-parallel collective.
+- Take inner optimizer steps without contacting another island.
+- Preserve local Adam state locally. Trainer exchange carries parameter-space
+  pseudo-gradients, not local optimizer state.
+- Construct GRPO groups from a single published behavior-policy version and a
+  single immutable reward contract.
+- Apply a newly merged global state only at a safe boundary after an optimizer
+  step and before the next forward pass.
+- Atomically checkpoint local weights, optimizer state, data cursor, current
+  anchor, PULSE error-feedback state, and last applied global version.
+- Rejoin with a new learner generation and perform a complete state catch-up;
+  never silently reuse stale counters or error-feedback buffers.
 
 ### Synchronizer
 
-Reuse the Rust syncer's proven protocol machinery, then generalize its RL state
-model.
+Reuse the existing Rust syncer's protocol strengths while generalizing the RL
+state from LoRA-only values to a bounded, chunked full-parameter policy layout.
 
-- Keep fragmented pulls/pushes, frozen generation membership, minimum quorum,
-  adaptive grace, token-weighted merging, FP32 outer state, Nesterov outer
-  optimization, durable event tape, and full-fragment catch-up.
-- Replace the current LoRA-only identity with a role-qualified full-parameter
-  layout: `actor/<tensor>` and, for SAO, `critic/<tensor>`.
-- Give actor and critic independent fragment versions, local horizons, outer
-  optimizers, and checkpoints. A critic merge may never be interpreted as an
-  actor publication.
-- Publish an atomic actor snapshot manifest only after a complete fragment
-  sweep. Rollout workers consume only such manifests, never a mixture of
-  fragment versions.
-- Make quorum an explicit experiment parameter. Start at all learners for
-  parity tests, then test `K=M-1`. Do not start production with `K=1`.
-- Record per-merge responders, omitted learners, staleness, token weights,
-  payload bytes, queue time, grace time, and global-delta norm.
+Dense DiLoCo is a restricted reference profile of this syncer, not a second
+implementation. Begin with FP32 wire payloads, `H=1`, fixed membership, full
+quorum, one fragment round in flight, no post-quorum omission, and complete
+BF16 policy publication. Existing fragmentation, RDA, grace, pipeline, and
+recovery code remains present but is enabled and validated incrementally in
+Milestone 4.
 
-The current syncer stores full FP32 global state and momentum. A 27B actor is
-roughly 108 GB for each FP32 array before scratch/checkpoint overhead; adding a
-full critic roughly doubles the persistent model-role state. The syncer host
-therefore needs a measured RAM/NVMe budget before 27B SAO.
+- Maintain FP32 global policy/outer-optimizer state and a durable version
+  ledger.
+- Accept either dense or PULSELoCo updates behind the same validated update
+  interface.
+- Keep PULSELoCo error-feedback state versioned and checkpointed. A dropped or
+  duplicated sparse update must not lose or double-apply residual mass.
+- Publish an atomic policy manifest only after a complete merge. Inference may
+  never consume a mixture of fragment versions.
+- Support complete catch-up snapshots even when the steady-state path is
+  sparse.
+- Record responders, omitted learners, trained-token weights, local horizons,
+  staleness, threshold statistics, residual norms, payload bytes, queue/grace
+  time, and global-delta norms.
 
-### Rollout and environment pool
+### Inference and SecRLEnv pool
 
-Rollout generation is decoupled from learner execution but is not allowed to
-be anonymous or arbitrarily stale.
+- Inference workers serve only a complete immutable global-policy version.
+- PULSESync applies new BF16 values relative to an exact base version. It must
+  reject a missing/wrong base and request a complete repair checkpoint.
+- Reconstruction must be bit-identical to the publisher's BF16 target before
+  the worker becomes ready.
+- Rollout admission freezes a policy version for the entire prompt group.
+- SecRLEnv provisioning, flagless DinD debugging, reward verification, and
+  cleanup remain outside the optimizer and fail closed.
+- A durable trajectory queue uses at-least-once delivery plus idempotent IDs;
+  training credit remains exactly once.
+- Policy delay is measured and bounded before a trajectory is accepted for
+  training.
 
-- Serve only complete global actor snapshots identified by manifest hash and
-  monotonically increasing policy version.
-- Attach behavior-policy version, snapshot hash, token log-probabilities,
-  task identity, environment identity, reward evidence, and action/observation
-  masks to every trajectory.
-- Keep SecRLEnv provisioning, flagless DinD debug access, cleanup, and
-  verifiable reward outside the optimizer. No neural reward model is required
-  for the present binary/verifiable reward contract.
-- Route trajectories to learners through a durable queue with at-least-once
-  delivery plus idempotent trajectory IDs. Credit a trajectory exactly once.
-- Enforce a maximum policy-delay gate. Measure first; do not inherit a large
-  pre-training DiLoCo horizon. The initial GRPO gate is `H=1`, then `H=2/4`,
-  and only then `H=8` if KL, clipping, and held-out evaluation remain stable.
-- Initially refresh inference with complete BF16 snapshots. After correctness,
-  implement PULSESync-style compute-visible BF16 patches with bit-identical
-  reconstruction and periodic full-checkpoint repair.
+## Implementation plan
 
-### GRPO correctness track
+### Milestone 0 — freeze contracts and reference fixtures
 
-This track keeps the current verifiable reward and group size but moves the
-trainer into multiple DiLoCo islands.
+- Preserve the direct full-parameter Qwen/SecRLEnv GRPO wrapper, arguments,
+  run artifacts, and failure evidence as the existing one-island semantic and
+  systems reference—not as a distributed-RL topology template.
+- Define the four shared envelopes above and one canonical full-parameter
+  tensor/fragment layout.
+- Capture small deterministic SecRLEnv trajectory fixtures including rewards,
+  cleanup receipts, behavior versions, and GRPO grouping.
+- Implement a replay mode that performs no generation and feeds identical
+  accepted trajectories to every synchronization backend.
+- Add feature switches for dense/PULSELoCo trainer exchange and full/PULSESync
+  inference publication. A switch must not change the GRPO batch or optimizer.
 
-- Each prompt group is generated entirely from one published actor snapshot.
-- A group is trainable only when all retained samples have the same policy
-  version and complete reward/cleanup evidence.
-- Each island takes local GRPO steps on a disjoint, deterministic prompt shard.
-- After `H` local actor steps, it submits actor deltas to the outer syncer.
-- There is no critic to synchronize. Adding a nominal critic to GRPO would add
-  cost without matching the algorithm.
+### Milestone 1 — GRPO with dense DiLoCo
 
-This is the first end-to-end target because the PULSELoCo paper supplies direct
-evidence for GRPO + DiLoCo. It is still only a systems/algorithm bridge at 27B
-and SecRLEnv scale, not a guaranteed quality result.
+- Reuse the existing direct Miles full-parameter GRPO path on a small model as
+  the one-island semantic reference; do not implement another GRPO algorithm.
+- Generalize `CanonicalLoraState` and the existing Miles/DiLoCo bridge to
+  full-parameter, role-qualified, bounded fragments.
+- Prove export/apply at safe training boundaries without changing the GRPO
+  batches, loss, model outputs, checkpoint meaning, or retained training state.
+- Run at least two independent learner islands with local optimizers.
+- Run the existing syncer in its restricted dense reference profile: `H=1`,
+  fixed membership, full quorum, synchronous one-fragment-at-a-time merging,
+  FP32 pseudo-gradients, and complete BF16 inference checkpoints.
+- Replay identical frozen trajectories through centralized GRPO and dense
+  DiLoCo. At `H=1`, verify the expected update relationship within a declared
+  numerical tolerance rather than inferring correctness from reward curves.
+- Then run a small online SecRLEnv experiment and compare held-out evaluation,
+  KL, update norms, and accepted-token accounting across multiple seeds.
 
-### SAO agentic track
+Exit gate: distributed GRPO completes repeated update/publication cycles; all
+model versions, groups, rewards, and tokens reconcile; restart is idempotent;
+and small-model learning is not materially worse than the same-compute
+centralized reference.
 
-Only begin after the GRPO DiLoCo baseline is stable.
+### Milestone 2 — substitute PULSELoCo
 
-- Consume a rollout as soon as it completes; do not wait for sibling samples.
-- Compute the behavior ratio from rollout-time token log-probabilities and the
-  current local policy. Mask tokens outside the configured double-sided trust
-  interval rather than silently clipping them into the loss.
-- Train a value model and update it twice per actor update initially (`K=2`).
-- Compute GAE across action-to-action transitions while excluding observation
-  tokens generated by SecRLEnv rather than the policy.
-- Place the actor trainer and critic trainer inside every logical learner.
-  Synchronize both roles through separate DiLoCo outer states.
-- Do not copy SAO's frozen-attention critic rule blindly to dense Qwen3.8. The
-  paper's reported stability result is architecture-specific. Compare full,
-  shared-backbone/value-head, and frozen-submodule critic designs in a smaller
-  model before selecting the 27B design.
-- Gate training by policy delay, masked-token fraction, importance-ratio
-  quantiles, critic explained variance, critic gradient norm, actor/critic
-  version skew, and held-out task performance.
+- Keep GRPO, trajectories, optimizer settings, local horizon, membership,
+  quorum, and full inference-checkpoint publication unchanged.
+- Add compute-visibility thresholding to dense FP32 pseudo-gradients.
+- Accumulate every unsent value in an FP32 error-feedback buffer and bind that
+  buffer to learner generation, global base version, tensor layout, and
+  threshold contract.
+- Prove duplicate, omitted, reordered, interrupted, and recovered sparse
+  submissions are fail-closed or exactly idempotent.
+- In deterministic replay, compare dense and PULSELoCo accumulated global
+  updates, residual conservation, BF16-visible model values, and total bytes.
+- In online RL, compare held-out quality, KL, global/local drift, residual norm,
+  convergence, and goodput under matched accepted-token and optimizer budgets.
 
-## Implementation work
+Exit gate: PULSELoCo reaches the declared quality/update tolerance to dense
+DiLoCo, conserves residuals across checkpoint/restart, and materially reduces
+trainer-exchange bytes on the real Ethernet path.
 
-### Milestone 0 — freeze the old result
+### Milestone 3 — add PULSESync
 
-- Mark v124/v125 as a single-island full-parameter diagnostic, not the template
-  for a distributed RL run.
-- Preserve its subnet fix, task pack, rollout evidence, and optimizer failure
-  diagnostics. Do not reuse its run ID or checkpoints in the new experiment.
+- Retain PULSELoCo between trainers.
+- Keep complete policy snapshots as an available repair and oracle path.
+- For every publication, calculate changed BF16 indices/new values relative to
+  an exact base version.
+- Apply a patch only to a worker holding that exact base. Otherwise require a
+  complete checkpoint.
+- Reconstruct the target offline and on every inference worker; require exact
+  BF16 tensor equality and complete target-manifest equality before serving.
+- Inject dropped, duplicated, reordered, corrupted, and stale-base patches.
+- Confirm rollout content and behavior-policy attribution are unchanged between
+  full-checkpoint and PULSESync publication modes for deterministic prompts.
 
-### Milestone 1 — full-parameter actor DiLoCo
+Exit gate: PULSESync reconstruction is bit-exact, recovery from any interrupted
+patch converges through a full checkpoint, no partial version serves traffic,
+and inference-publication bytes fall materially without reducing goodput or
+held-out quality.
 
-- Generalize `CanonicalLoraState` and the Miles trainable-state bridge to a
-  bounded, chunked, role-qualified full-parameter state.
-- Add full-parameter export/apply methods that preserve local Adam state across
-  fragment applies and prove safe-boundary application.
-- Add actor snapshot manifests and rollout publication independent from local
-  learner checkpoints.
-- Keep dense FP32 pseudo-gradients initially. Measure real bytes and overlap.
+### Milestone 4 — add Decoupled DiLoCo features one at a time
 
-### Milestone 2 — GRPO multi-island proof
+Keep PULSELoCo + PULSESync enabled, then introduce one semantic change per
+experiment in this order:
 
-- Reproduce a central baseline and two-island DiLoCo on a 1.5B–7B model first.
-- Run two Qwen3.8 learner islands plus a separate rollout pool only after the
-  small-model parity and failure tests pass.
-- Start with `H=1`, full quorum, one outer fragment pipeline, and short context.
-  Increase one dimension at a time.
+1. Increase local horizon from `H=1` to `H=2`, then `H=4`, then at most `H=8`
+   if policy lag, KL, and held-out quality remain within gates.
+2. Stream balanced tensor fragments while learners continue local work.
+3. Add atomic complete-policy publication across asynchronously merged
+   fragments.
+4. Move from fixed full quorum to `K=M-1` after learner-kill tests pass.
+5. Add adaptive grace for stragglers.
+6. Add trained-token/useful-work weighting and the selected outer
+   RDA/Nesterov configuration.
+7. Add learner failure, restart, full catch-up, and generation-safe rejoin.
+8. Test heterogeneous learner speed and controlled network degradation.
 
-### Milestone 3 — bandwidth work
+Each step is compared against the immediately preceding configuration. If it
+changes the accepted trajectories, policy-delay distribution, or effective
+optimization budget, report that difference rather than calling the runs
+identical.
 
-- Implement bit-identical PULSESync-compatible actor publication.
-- Independently implement PULSELoCo-style compute-visible sparse outer deltas
-  with FP32 error feedback.
-- Compare dense DiLoCo and sparse DiLoCo at identical data, seeds, local
-  horizon, reward, and evaluation cadence before enabling sparsity by default.
+Exit gate: one learner can fail or lag without corrupting global state or
+stopping healthy learners; recovery is exact; policy staleness remains bounded;
+and held-out learning remains within the declared reference interval. Same-node
+fault injection is necessary but insufficient: the final gate requires the
+same frozen build on at least two physical nodes, with three preferred for
+quorum and node-loss testing.
 
-### Milestone 4 — SAO actor/critic learner
+### Milestone 5 — scale model, context, and workload
 
-- Add the critic role, optimizer, value pretraining artifact, skip-observation
-  masks/GAE, rollout log-probability contract, and token-level trust mask.
-- Add separate actor and critic outer synchronization namespaces and recovery.
-- Prove one learner against a non-DiLoCo SAO reference, then two learners with
-  `H=1`, before testing asynchronous quorum or longer horizons.
+- Perform Milestones 1–4 on a 1.5B–7B model before Qwen3.8-27B.
+- Scale Qwen3.8 first with short observed contexts and a complete per-role
+  memory ledger.
+- Increase context progressively, for example 16k, 32k, 64k, 128k, then a
+  262k serving maximum. Do not allocate every training sample at 262k merely
+  because the endpoint accepts it.
+- Increase the number of learner islands only after update correctness,
+  Ethernet payload, synchronization latency, policy lag, and quality gates
+  pass.
+- More nodes become more independent learner islands or inference capacity;
+  they do not become one Ethernet-spanning Megatron group.
 
-### Milestone 5 — 27B/long-context scale-up
+## Validation strategy
 
-- Scale context progressively (for example 16k, 32k, 64k, 128k, then a 262k
-  maximum) using observed token lengths and memory ledgers. Do not allocate or
-  train every sample at 262k merely because the serving cap supports it.
-- Increase learner count only after quality parity, policy-lag, and bandwidth
-  gates pass. More GPUs are useful as more independent islands, not as a single
-  Ethernet-spanning Megatron group.
+### Deterministic update tests
 
-## Required tests and gates
+Freeze trajectories, rewards, behavior log-probabilities, group membership,
+advantages, initial weights, and optimizer state. Run the same inputs through:
 
-### Correctness
+1. centralized GRPO;
+2. dense DiLoCo;
+3. PULSELoCo; and
+4. PULSELoCo plus PULSESync reconstruction.
 
-- Full-parameter export/apply round-trip is tensor-identical and optimizer
-  state is unchanged by a fragment apply.
-- A published actor snapshot is complete and bit-identical on every rollout
-  worker.
-- Every trajectory binds one behavior policy and exact token log-probabilities.
-- GRPO groups never mix policy versions. SAO masks or rejects stale tokens under
-  the signed trust policy.
-- Actor and critic checkpoints cannot cross-load or mix fragment generations.
-- Crash/restart at every pull, merge, checkpoint, apply, rollout, reward, and
-  cleanup boundary is idempotent.
+These tests isolate update and communication semantics. They are not learning
+claims. Require:
 
-### Systems
+- exact input/token/group accounting;
+- declared dense numerical tolerance;
+- error-feedback conservation over multiple sparse rounds;
+- bit-exact PULSESync BF16 reconstruction;
+- identical behavior under checkpoint/restart; and
+- fail-closed base-version, layout, identity, and completeness checks.
 
-- Killing one learner does not stop other learners; the syncer advances only
-  with the configured quorum and reintegrates the learner by full catch-up.
-- No cross-node NCCL/model-parallel traffic appears in the launch graph.
-- Report trainer utilization, rollout utilization, useful trajectories/hour,
-  inner-step time, outer-sync time, bytes by channel, and total goodput.
-- Establish measured memory headroom for actor, critic, optimizer, activation,
-  checkpoint, and syncer state before every scale increase.
+### Online learning tests
 
-### Learning
+Online arms will not consume identical trajectories after their policies
+diverge. Match instead:
 
-- Compare against a same-compute centralized baseline, not only against the
-  untrained base model.
-- Use a frozen held-out SecRLEnv evaluation split; training reward alone is not
-  evidence of improvement.
-- Require confidence intervals across at least three seeds for final claims.
-- Track pass@1/pass@k, reward, KL/current-vs-rollout drift, importance-ratio
-  quantiles, masked-token fraction, gradient norms, critic explained variance
-  when applicable, and regression on non-training tasks.
+- immutable initial checkpoint and tokenizer;
+- train/held-out task split;
+- prompt ordering and seed schedule;
+- GRPO group size and reward code;
+- accepted trajectory/token and optimizer-step budgets;
+- local horizon where applicable;
+- GPU allocation and evaluation cadence; and
+- at least three seeds for final quality claims.
 
-### Initial go/no-go sequence
+Report reward, held-out pass@1/pass@k, KL, current-versus-behavior policy lag,
+update/residual norms, useful trajectories per hour, trainer and rollout
+utilization, bytes by channel, synchronization time, and wall-clock goodput.
 
-1. CPU/small-GPU deterministic protocol tests with two actor learners.
-2. Small-model centralized GRPO versus two-island dense DiLoCo, `H=1`.
-3. Learner-kill and straggler test with full quorum, then `K=M-1`.
-4. Small-model `H=2/4/8` staleness sweep with held-out quality.
-5. Qwen3.8 one-island parity smoke.
-6. Qwen3.8 two-island dense DiLoCo smoke plus separate rollout pool.
-7. PULSESync/PULSELoCo A/B only after dense correctness.
-8. SAO one-island actor/critic parity, then two-island DiLoCo.
-9. Full SecRLEnv run only after every preceding gate is green.
+### Failure and recovery tests
 
-Any failure in identity, snapshot completeness, optimizer preservation,
-trajectory attribution, cleanup, staleness bounds, or held-out quality stops the
-scale-up. A successful process launch or optimizer step is not an RL-quality
-gate.
+Test these independently from the quality comparison:
 
-## What can be reused and what must change
+- learner death before/during/after update submission;
+- synchronizer restart around merge/checkpoint/publication;
+- duplicate or reordered trainer fragments;
+- inference patch interruption and stale-base rejection;
+- inference worker restart and full-checkpoint repair;
+- learner full catch-up and new-generation rejoin;
+- rollout queue redelivery with exactly-once training credit; and
+- SecRLEnv task failure and cleanup without checkpoint advancement.
+
+## Required invariants
+
+- No cross-node model-parallel or DDP collective.
+- No learned critic or neural reward model in the GRPO/RLVR path.
+- Every trainable group binds one complete behavior-policy version.
+- Every learner update binds one global anchor and one parameter layout.
+- Every published policy is complete, immutable, and content-addressed.
+- PULSELoCo residuals survive restart and cannot cross learner generations.
+- PULSESync patches apply only to their exact base and reconstruct the exact
+  target before traffic is admitted.
+- A learner or inference worker can always recover via a complete checkpoint.
+- SecRLEnv reward and cleanup evidence remain mandatory and exactly credited.
+- Process launch, rollout completion, or one optimizer step is not evidence of
+  held-out RL improvement.
+
+## Repository work
 
 Reusable:
 
-- Rust fragment protocol and syncer checkpointing
-- quorum, adaptive grace, token weighting, Nesterov outer state, and event tape
-- learner generation/recovery machinery
-- SecRLEnv task packs, environment isolation, verifiable reward, and cleanup
-- Qwen3.8 model/TITO integration and the static-subnet concurrency fix
+- Rust fragment protocol, outer checkpointing, version ledger, and recovery;
+- quorum, adaptive grace, useful-work weighting, outer momentum, and event tape;
+- SecRLEnv task packs, isolation, verifiable rewards, and cleanup;
+- Qwen3.8 model/TITO integration; and
+- the existing full-parameter systems-smoke diagnostics.
 
-Must change:
+Must change or be added:
 
-- the single-node `6T/2I` topology as the distributed-run template
-- LoRA-only RL state typing and policy-only synchronization
-- any full-parameter run path that bypasses the DiLoCo bridge
-- rollout artifacts that omit behavior log-probabilities or exact snapshot IDs
-- synchronous grouped execution as the long-term agentic RL architecture
-- evaluation that infers learning from smoke completion rather than held-out
-  improvement
+- extend the LoRA-only RL state boundary to support bounded full-parameter
+  state from the existing direct Miles GRPO trainer;
+- expose dense and PULSELoCo implementations behind one trainer-update API;
+- expose full-checkpoint and PULSESync implementations behind one inference
+  publication API;
+- add global policy manifests independent of learner-local checkpoints;
+- persist/version PULSE error-feedback state;
+- bind rollout artifacts to behavior-policy versions and exact-once IDs;
+- prohibit cross-node Megatron/DDP topology in the plan validator; and
+- add deterministic replay, bit-exact reconstruction, failure injection, and
+  held-out learning evaluation.
 
-## Immediate recommendation
+## Immediate execution sequence
 
-Do not launch another 27B full run from v125. First implement Milestone 1 and
-run the small-model two-island GRPO parity experiment. That is the minimum test
-that answers whether Yeto is actually doing RL through DiLoCo rather than merely
-running rollout inference beside a conventional trainer.
+1. Freeze shared envelopes and deterministic trajectory/update fixtures.
+2. Connect the existing small-model-capable full-parameter GRPO path to the
+   existing syncer in dense `H=1` reference mode.
+3. Prove centralized/dense update semantics and online held-out learning.
+4. Substitute PULSELoCo and prove residual conservation plus quality parity.
+5. Add PULSESync and prove bit-exact inference reconstruction.
+6. Add Decoupled DiLoCo features one at a time with failure tests.
+7. Run the complete small-model Ethernet architecture.
+8. Scale to Qwen3.8-27B only after all preceding gates pass.
+
+Do not launch another 27B full run as the next architecture experiment. The
+next meaningful artifact is a small-model GRPO + dense DiLoCo reference using
+the final shared interfaces. That gives PULSELoCo and PULSESync a trustworthy
+oracle while avoiding a later architectural rewrite.
