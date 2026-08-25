@@ -118,6 +118,12 @@ pub struct GlobalState {
     pub layout_fingerprint: [u8; 32],
     /// Whether a loaded checkpoint carried and matched the fingerprint.
     pub checkpoint_layout_verified: bool,
+    /// Strict dense-policy sweep profile carried by the checkpoint trailer.
+    /// `None` is the byte-for-byte legacy checkpoint profile.
+    pub policy_sweep_fragments: Option<u32>,
+    /// Opaque semantic/profile/roster identity supplied by every learner.
+    /// Required and checkpointed only for strict dense-policy sweeps.
+    pub session_contract_hash: Option<[u8; 32]>,
     /// Θ_p, flat f32 per fragment (concatenated tensors in layout order).
     pub params: Vec<Vec<f32>>,
     /// Nesterov momentum buffers, same shape as params.
@@ -182,6 +188,8 @@ impl GlobalState {
             layout,
             layout_fingerprint,
             checkpoint_layout_verified: false,
+            policy_sweep_fragments: None,
+            session_contract_hash: None,
             params,
             momentum,
             initialized,
@@ -226,10 +234,24 @@ impl GlobalState {
     }
 
     pub fn record_merge(&mut self, learner_id: u32, c_steps: u32, c_tokens: u64) {
+        self.record_fragment_merge(learner_id, c_steps, c_tokens, true);
+    }
+
+    /// Record one fragment merge, charging local optimizer progress only at
+    /// the atomic accounting boundary selected by the scheduler.
+    pub fn record_fragment_merge(
+        &mut self,
+        learner_id: u32,
+        c_steps: u32,
+        c_tokens: u64,
+        account_local_progress: bool,
+    ) {
         let e = self.ledger.entry(learner_id).or_default();
         e.merges += 1;
-        e.steps += c_steps as u64;
-        e.tokens += c_tokens;
+        if account_local_progress {
+            e.steps += c_steps as u64;
+            e.tokens += c_tokens;
+        }
     }
 
     /// Merge learner outer gradients for fragment `fid` and apply the outer step.
@@ -339,6 +361,8 @@ impl GlobalState {
 }
 
 const CKPT_MAGIC: u32 = 0xD170_5A7E;
+/// Policy-sweep checkpoint marker, followed by the configured fragment count.
+const POLICY_SWEEP_CKPT_MAGIC: u32 = 0x5053_5750;
 const FINAL_MARKER_MAGIC: &str = "YETO_FINAL_V1";
 
 pub fn final_marker_path(path: &std::path::Path) -> std::path::PathBuf {
@@ -404,6 +428,15 @@ impl GlobalState {
                 f.write_all(&l.tokens.to_le_bytes())?;
             }
             f.write_all(&self.layout_fingerprint)?;
+            if let Some(fragments) = self.policy_sweep_fragments {
+                f.write_all(&POLICY_SWEEP_CKPT_MAGIC.to_le_bytes())?;
+                f.write_all(&fragments.to_le_bytes())?;
+                f.write_all(
+                    &self
+                        .session_contract_hash
+                        .context("policy-sweep checkpoint requires a session contract hash")?,
+                )?;
+            }
             f.flush()?;
             f.get_ref().sync_all()?;
         }
@@ -460,17 +493,63 @@ impl GlobalState {
             };
             self.ledger.insert(id, l);
         }
-        self.checkpoint_layout_verified = match r.remaining() {
-            0 => false,
-            32 => {
-                let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
-                if checkpoint_fingerprint != self.layout_fingerprint {
-                    bail!("checkpoint layout fingerprint does not match HELLO");
+        let expected_policy_sweep_fragments = self.policy_sweep_fragments;
+        let (checkpoint_policy_sweep_fragments, checkpoint_session_contract_hash) =
+            match r.remaining() {
+                0 => {
+                    self.checkpoint_layout_verified = false;
+                    (None, None)
                 }
-                true
-            }
-            remaining => bail!("checkpoint has {remaining} trailing bytes"),
-        };
+                32 => {
+                    let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                    if checkpoint_fingerprint != self.layout_fingerprint {
+                        bail!("checkpoint layout fingerprint does not match HELLO");
+                    }
+                    self.checkpoint_layout_verified = true;
+                    (None, None)
+                }
+                40 => {
+                    let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                    if checkpoint_fingerprint != self.layout_fingerprint {
+                        bail!("checkpoint layout fingerprint does not match HELLO");
+                    }
+                    if r.u32()? != POLICY_SWEEP_CKPT_MAGIC {
+                        bail!("checkpoint has an invalid policy-sweep trailer");
+                    }
+                    let fragments = r.u32()?;
+                    if fragments == 0 {
+                        bail!("checkpoint policy-sweep fragment count must be positive");
+                    }
+                    bail!("policy-sweep checkpoint is missing its session contract hash");
+                }
+                72 => {
+                    let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                    if checkpoint_fingerprint != self.layout_fingerprint {
+                        bail!("checkpoint layout fingerprint does not match HELLO");
+                    }
+                    if r.u32()? != POLICY_SWEEP_CKPT_MAGIC {
+                        bail!("checkpoint has an invalid policy-sweep trailer");
+                    }
+                    let fragments = r.u32()?;
+                    if fragments == 0 {
+                        bail!("checkpoint policy-sweep fragment count must be positive");
+                    }
+                    let contract_hash = r.take(32)?.try_into()?;
+                    self.checkpoint_layout_verified = true;
+                    (Some(fragments), Some(contract_hash))
+                }
+                remaining => bail!("checkpoint has {remaining} trailing bytes"),
+            };
+        if checkpoint_policy_sweep_fragments != expected_policy_sweep_fragments {
+            bail!(
+                "checkpoint policy-sweep profile {:?} does not match configured profile {:?}",
+                checkpoint_policy_sweep_fragments,
+                expected_policy_sweep_fragments
+            );
+        }
+        if checkpoint_session_contract_hash != self.session_contract_hash {
+            bail!("checkpoint session contract hash does not match HELLO");
+        }
         Ok(())
     }
 }
@@ -617,6 +696,158 @@ mod tests {
         assert!(st2.checkpoint_layout_verified);
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn policy_sweep_checkpoint_trailer_is_explicit_and_legacy_bytes_are_unchanged() {
+        let dir = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-ckpt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy_path = dir.join("legacy.ckpt");
+        let sweep_path = dir.join("sweep.ckpt");
+
+        let mut state = GlobalState::new_with_layout_fingerprint(
+            layout2(),
+            0.7,
+            0.9,
+            crate::protocol::DTYPE_F32,
+            [9; 32],
+        )
+        .unwrap();
+        state.init_fragment(0, vec![1.0; 4]).unwrap();
+        state.init_fragment(1, vec![2.0; 4]).unwrap();
+        state.save_checkpoint(&legacy_path).unwrap();
+        let legacy = std::fs::read(&legacy_path).unwrap();
+
+        state.policy_sweep_fragments = Some(2);
+        state.session_contract_hash = Some([7; 32]);
+        state.save_checkpoint(&sweep_path).unwrap();
+        let sweep = std::fs::read(&sweep_path).unwrap();
+        assert_eq!(&sweep[..legacy.len()], legacy.as_slice());
+        assert_eq!(sweep.len(), legacy.len() + 40);
+        assert_eq!(
+            &sweep[legacy.len()..legacy.len() + 4],
+            &POLICY_SWEEP_CKPT_MAGIC.to_le_bytes()
+        );
+        assert_eq!(
+            &sweep[legacy.len() + 4..legacy.len() + 8],
+            &2u32.to_le_bytes()
+        );
+        assert_eq!(&sweep[legacy.len() + 8..], &[7; 32]);
+
+        let mut restored = GlobalState::new_with_layout_fingerprint(
+            layout2(),
+            0.7,
+            0.9,
+            crate::protocol::DTYPE_F32,
+            [9; 32],
+        )
+        .unwrap();
+        restored.policy_sweep_fragments = Some(2);
+        restored.session_contract_hash = Some([7; 32]);
+        restored.load_checkpoint(&sweep_path).unwrap();
+        assert_eq!(restored.policy_sweep_fragments, Some(2));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkpoint_resume_rejects_legacy_sweep_and_fragment_profile_mismatches() {
+        let dir = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-mismatch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy_path = dir.join("legacy.ckpt");
+        let sweep_path = dir.join("sweep.ckpt");
+
+        let make_state = || {
+            let mut state = GlobalState::new_with_layout_fingerprint(
+                layout2(),
+                0.7,
+                0.9,
+                crate::protocol::DTYPE_F32,
+                [5; 32],
+            )
+            .unwrap();
+            state.init_fragment(0, vec![1.0; 4]).unwrap();
+            state.init_fragment(1, vec![2.0; 4]).unwrap();
+            state
+        };
+        let legacy = make_state();
+        legacy.save_checkpoint(&legacy_path).unwrap();
+        let mut sweep = make_state();
+        sweep.policy_sweep_fragments = Some(2);
+        sweep.session_contract_hash = Some([5; 32]);
+        sweep.save_checkpoint(&sweep_path).unwrap();
+
+        let mut configured_sweep = make_state();
+        configured_sweep.policy_sweep_fragments = Some(2);
+        configured_sweep.session_contract_hash = Some([5; 32]);
+        let error = configured_sweep.load_checkpoint(&legacy_path).unwrap_err();
+        assert!(format!("{error:#}").contains("does not match configured profile"));
+
+        let mut configured_legacy = make_state();
+        let error = configured_legacy.load_checkpoint(&sweep_path).unwrap_err();
+        assert!(format!("{error:#}").contains("does not match configured profile"));
+
+        let mut configured_three = make_state();
+        configured_three.policy_sweep_fragments = Some(3);
+        configured_three.session_contract_hash = Some([5; 32]);
+        let error = configured_three.load_checkpoint(&sweep_path).unwrap_err();
+        assert!(format!("{error:#}").contains("does not match configured profile"));
+
+        let mut malformed = std::fs::read(&sweep_path).unwrap();
+        let magic_offset = malformed.len() - 40;
+        malformed[magic_offset..magic_offset + 4].copy_from_slice(b"NOPE");
+        let malformed_path = dir.join("malformed.ckpt");
+        std::fs::write(&malformed_path, malformed).unwrap();
+        let mut configured_sweep = make_state();
+        configured_sweep.policy_sweep_fragments = Some(2);
+        configured_sweep.session_contract_hash = Some([5; 32]);
+        let error = configured_sweep
+            .load_checkpoint(&malformed_path)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("invalid policy-sweep trailer"));
+
+        let mut wrong_semantics = make_state();
+        wrong_semantics.policy_sweep_fragments = Some(2);
+        wrong_semantics.session_contract_hash = Some([6; 32]);
+        let error = wrong_semantics.load_checkpoint(&sweep_path).unwrap_err();
+        assert!(format!("{error:#}").contains("session contract hash"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn policy_sweep_accounts_every_merge_and_local_progress_only_at_sweep_end() {
+        let mut state = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        state.record_fragment_merge(7, 1, 123, false);
+        let partial = state.ledger.get(&7).unwrap();
+        assert_eq!(partial.merges, 1);
+        assert_eq!(partial.steps, 0);
+        assert_eq!(partial.tokens, 0);
+
+        state.record_fragment_merge(7, 1, 123, true);
+        let complete = state.ledger.get(&7).unwrap();
+        assert_eq!(complete.merges, 2);
+        assert_eq!(complete.steps, 1);
+        assert_eq!(complete.tokens, 123);
+
+        // The legacy API remains one merge + one progress charge.
+        state.record_merge(8, 2, 456);
+        let legacy = state.ledger.get(&8).unwrap();
+        assert_eq!(legacy.merges, 1);
+        assert_eq!(legacy.steps, 2);
+        assert_eq!(legacy.tokens, 456);
     }
 
     #[test]

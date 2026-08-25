@@ -40,8 +40,10 @@ def parse_args(argv=None):
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--data-revision", default=None)
+    parser.add_argument("--eval-data", default=None)
     parser.add_argument("--eval-dataset-name", default=None)
     parser.add_argument("--eval-data-sha256", default=None)
+    parser.add_argument("--eval-summary-path", default=None)
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--eval-samples-per-prompt", type=int, default=None)
@@ -52,16 +54,24 @@ def parse_args(argv=None):
     parser.add_argument("--eval-max-context-len", type=int, default=None)
     parser.add_argument("--syncer", required=True)
     parser.add_argument("--learner-id", type=int, required=True)
+    parser.add_argument("--num-learners", type=int, default=1)
+    parser.add_argument("--learner-generation", type=int, default=0)
     parser.add_argument("--reward-function", required=True)
     parser.add_argument("--reward-sha256", required=True)
     parser.add_argument("--source-sha256", required=True)
     parser.add_argument("--global-rounds", type=int, required=True)
     parser.add_argument(
+        "--parameter-mode",
+        choices=["lora", "full"],
+        default="lora",
+    )
+    parser.add_argument(
         "--sync-preset",
-        choices=["strict-avg", "decoupled"],
+        choices=["strict-avg", "decoupled", "dense-full"],
         default="strict-avg",
     )
     parser.add_argument("--fragments", type=int, default=1)
+    parser.add_argument("--parameter-layout-sha256", default=None)
     parser.add_argument("--pipeline", type=int, default=1)
     parser.add_argument("--local-horizon", type=int, default=1)
     parser.add_argument("--total-fragment-steps", type=int, default=None)
@@ -83,6 +93,11 @@ def parse_args(argv=None):
     parser.add_argument("--custom-generate-function-path", default=None)
     parser.add_argument("--custom-agent-function-path", default=None)
     parser.add_argument("--codex-harness-contract", type=json.loads, default=None)
+    parser.add_argument(
+        "--codex-reasoning-effort",
+        choices=["xhigh"],
+        default=None,
+    )
     parser.add_argument("--agent-max-seq-len", type=int, default=None)
     parser.add_argument("--use-session-server", action="store_true")
     parser.add_argument("--session-server-ip", default=None)
@@ -103,6 +118,7 @@ def parse_args(argv=None):
     parser.add_argument("--pipeline-parallel", type=int, default=1)
     parser.add_argument("--expert-parallel", type=int, default=None)
     parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
+    parser.add_argument("--rollout-num-gpus", type=int, default=None)
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -117,7 +133,7 @@ def parse_args(argv=None):
     parser.add_argument("--sglang-max-running-requests", type=int, default=None)
     parser.add_argument("--sglang-chunked-prefill-size", type=int, default=None)
     parser.add_argument("--use-rollout-routing-replay", action="store_true")
-    parser.add_argument("--lora-r", type=int, required=True)
+    parser.add_argument("--lora-r", type=int, default=None)
     parser.add_argument(
         "--lora-targets",
         choices=[
@@ -126,23 +142,180 @@ def parse_args(argv=None):
             "attention-routed-experts",
             "all-linear",
         ],
-        required=True,
+        default=None,
     )
     parser.add_argument("--inner-lr", type=float, required=True)
     parser.add_argument("--seq-len", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--wan-streams", type=int, default=4)
     parser.add_argument("--miles-root", required=True)
+    parser.add_argument("--miles-source-sha256", default=None)
+    parser.add_argument("--megatron-ref-load", default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
     from ..wandb_logger import add_arguments as add_wandb_arguments
 
     add_wandb_arguments(parser)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.parameter_mode == "lora" and (
+        args.lora_r is None or args.lora_targets is None
+    ):
+        parser.error("LoRA mode requires --lora-r and --lora-targets")
+    if (args.parameter_mode == "full") != (args.sync_preset == "dense-full"):
+        parser.error("--parameter-mode full requires --sync-preset dense-full")
+    return args
 
 
 def _canonical_sha256(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+_DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
+    {
+        "--rollout-seed",
+        "--rollout-engine-base-port",
+        "--session-server-port",
+        "--sglang-router-port",
+        "--sglang-router-prometheus-port",
+        "--train-master-base-port",
+    }
+)
+
+_DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS = frozenset(
+    {
+        "--session-server-port",
+    }
+)
+
+_DENSE_FULL_QUANTIZATION_CONFIG_KEYS = frozenset(
+    {
+        "compression_config",
+        "modelopt_quant",
+        "quantization",
+        "quantization_config",
+        "torchao_config",
+    }
+)
+
+
+def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> None:
+    """Enable the pinned SGLang BF16 hook fallback only for an exact safe model.
+
+    The public SGLang pin used by the Milestone-1 gate predates the optional
+    begin/end weight-update endpoints.  Miles independently rechecks its live
+    server arguments before accepting a missing endpoint; this early check
+    prevents Yeto from opting into that compatibility path for a quantized
+    rollout model in the first place.
+    """
+
+    config_path = Path(model_path) / "config.json"
+    if not config_path.is_file():
+        raise ValueError("dense full-parameter rollout model has no config.json")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError(f"duplicate rollout config key: {name!r}")
+            result[name] = value
+        return result
+
+    try:
+        config = json.loads(
+            config_path.read_bytes(),
+            object_pairs_hook=unique_object,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("dense full-parameter rollout config is malformed") from exc
+    if not isinstance(config, dict):
+        raise TypeError("dense full-parameter rollout config must be an object")
+    configured = sorted(
+        name
+        for name in _DENSE_FULL_QUANTIZATION_CONFIG_KEYS
+        if config.get(name) is not None
+    )
+    if configured:
+        raise ValueError(
+            "legacy SGLang weight-update hooks require an unquantized rollout "
+            f"model; configured fields: {', '.join(configured)}"
+        )
+
+
+def _dense_full_training_contract_sha256(
+    args: Any,
+    miles_argv: Sequence[str],
+    *,
+    model_config_sha256: str,
+    prompt_data_sha256: str,
+) -> str:
+    """Hash shared training semantics while excluding island-local routing."""
+
+    shared_argv = []
+    index = 0
+    while index < len(miles_argv):
+        value = miles_argv[index]
+        if value in _DENSE_ISLAND_LOCAL_MILES_FLAGS:
+            if index + 1 >= len(miles_argv):
+                raise ValueError(f"Miles flag has no value: {value}")
+            index += 1
+            value_count = 0
+            while index < len(miles_argv) and not miles_argv[index].startswith("--"):
+                index += 1
+                value_count += 1
+                if value not in _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS:
+                    break
+            if value_count < 1:
+                raise ValueError(f"Miles flag has no value: {value}")
+            continue
+        shared_argv.append(value)
+        index += 1
+    explicit_rollout_seed = getattr(args, "rollout_seed", None)
+    rollout_seed_contract = (
+        {"mode": "fixed", "value": explicit_rollout_seed}
+        if explicit_rollout_seed is not None
+        else {"mode": "base-plus-learner-id", "base_seed": args.seed}
+    )
+    return _canonical_sha256(
+        {
+            "schema": "yeto-dense-full-training-contract-v3",
+            "shared_miles_argv": shared_argv,
+            "rollout_seed_contract": rollout_seed_contract,
+            "model": args.model,
+            "model_revision": args.model_revision.lower(),
+            "model_config_sha256": model_config_sha256,
+            "prompt_data_sha256": prompt_data_sha256,
+            "data": args.data,
+            "data_revision": args.data_revision,
+            "evaluation": (
+                None
+                if getattr(args, "eval_interval", None) is None
+                else {
+                    "data": getattr(args, "eval_data", None),
+                    "data_sha256": getattr(args, "eval_data_sha256", None),
+                    "dataset_name": getattr(args, "eval_dataset_name", None),
+                    "interval": args.eval_interval,
+                    "samples_per_prompt": getattr(
+                        args, "eval_samples_per_prompt", None
+                    ),
+                    "temperature": getattr(args, "eval_temperature", None),
+                    "top_p": getattr(args, "eval_top_p", None),
+                    "max_prompt_len": getattr(args, "eval_max_prompt_len", None),
+                    "max_response_len": getattr(
+                        args, "eval_max_response_len", None
+                    ),
+                    "max_context_len": getattr(args, "eval_max_context_len", None),
+                }
+            ),
+            "yeto_source_sha256": args.source_sha256,
+            "miles_source_sha256": args.miles_source_sha256,
+            "reward_sha256": args.reward_sha256,
+            "codex_harness_contract": getattr(
+                args,
+                "codex_harness_contract",
+                None,
+            ),
+        }
+    )
 
 
 def _strict_json_file_semantics(path: Path) -> tuple[Any, ...]:
@@ -312,7 +485,14 @@ def _preflight_codex_harness(args) -> None:
         apply_chat_template_kwargs=args.apply_chat_template_kwargs,
         tito_allowed_append_roles=args.tito_allowed_append_roles,
         codex_reasoning_effort=args.codex_reasoning_effort,
-        lora_targets=args.lora_targets,
+        # The signed Qwen rollout backend profile predates full-parameter
+        # training and uses ``attention`` only as its legacy tuning-profile
+        # discriminator.  Full mode emits no LoRA runtime flags below.
+        lora_targets=(
+            args.lora_targets
+            if getattr(args, "parameter_mode", "lora") == "lora"
+            else "attention"
+        ),
         expert_full_count=getattr(args, "expert_full_count", 0),
     )
     if contract.get("backend") != expected_backend:
@@ -565,11 +745,28 @@ def build_miles_argv(
     model_path: str | Path,
     rollout_model_path: str | Path | None = None,
     prompt_path: str | Path,
+    eval_prompt_path: str | Path | None = None,
     provider,
     target_modules: list[str],
     yeto_policy_sync: bool = True,
 ) -> list[str]:
     """Construct Miles arguments from Bridge's actual model provider."""
+
+    parameter_mode = getattr(args, "parameter_mode", "lora")
+    if parameter_mode not in {"lora", "full"}:
+        raise ValueError("unsupported RL parameter mode")
+    if parameter_mode == "full":
+        if target_modules:
+            raise ValueError("full-parameter Miles must not select LoRA targets")
+    elif not target_modules:
+        raise ValueError("PEFT selected no LoRA target modules")
+
+    from .codex_backend import QWEN35_MODEL, QWEN35_REVISION
+
+    qwen35_recipe = (
+        getattr(args, "model", None) == QWEN35_MODEL
+        and getattr(args, "model_revision", None) == QWEN35_REVISION
+    )
 
     hidden = _positive_int(provider, "hidden_size")
     heads = _positive_int(provider, "num_attention_heads")
@@ -639,15 +836,71 @@ def build_miles_argv(
             "expert-full tuning requires the DeepSeek V4 recipe and attention LoRA"
         )
     data_parallel = actor_gpus // model_parallel
+    if parameter_mode == "full" and data_parallel != 1:
+        raise ValueError("dense full-parameter GRPO requires DP=1")
+    if parameter_mode == "full":
+        rollout_gpus = getattr(args, "rollout_num_gpus", None)
+        rollout_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None)
+        if (
+            args.actor_num_nodes != 1
+            or type(rollout_gpus) is not int
+            or rollout_gpus < 1
+            or type(rollout_gpus_per_engine) is not int
+            or rollout_gpus_per_engine < 1
+            or rollout_gpus % rollout_gpus_per_engine
+        ):
+            raise ValueError(
+                "Milestone-1 dense full-parameter mode requires one node and "
+                "dedicated, evenly partitioned inference engines"
+            )
+        if qwen35_recipe and (
+            rollout_gpus_per_engine != 1
+            or getattr(args, "sglang_tp_size", None) not in {None, 1}
+        ):
+            raise ValueError(
+                "pinned Qwen3.5 requires TP1 SGLang inference engines"
+            )
+        placement_values = [
+            "--rollout-num-gpus",
+            str(rollout_gpus),
+            "--bridge-distributed-weight-sync",
+            "--allow-missing-unquantized-weight-update-hooks",
+            "--update-weight-transfer-mode",
+            "broadcast",
+            "--rollout-weight-version-format",
+            "yeto-policy",
+        ]
+        visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus
+    else:
+        placement_values = ["--colocate"]
+        visible_gpus_per_node = args.actor_num_gpus_per_node
+
+    ref_load = str(model_path)
+    configured_ref_load = getattr(args, "megatron_ref_load", None)
+    if configured_ref_load is not None:
+        configured_path = Path(configured_ref_load).expanduser()
+        if not configured_path.is_absolute():
+            raise ValueError("--megatron-ref-load must be an absolute local path")
+        if configured_path.is_symlink() or not configured_path.is_dir():
+            raise ValueError("--megatron-ref-load must be a real local directory")
+        release_marker = configured_path / "latest_checkpointed_iteration.txt"
+        try:
+            marker = release_marker.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError(
+                "--megatron-ref-load has no readable release marker"
+            ) from exc
+        if release_marker.is_symlink() or marker != "release":
+            raise ValueError("--megatron-ref-load is not a release checkpoint")
+        ref_load = str(configured_path.resolve())
     global_batch = (
         args.groups_per_round * args.samples_per_group // args.optimizer_steps
     )
     if global_batch % data_parallel:
         raise ValueError("Miles global batch must divide evenly across DP ranks")
-    if not target_modules:
-        raise ValueError("PEFT selected no LoRA target modules")
     target_value = ",".join(target_modules)
     recipe = getattr(args, "rl_model_recipe", "generic")
+    model_recipe_values: list[str] = []
     if recipe == "deepseek-v4-flash":
         expected_lora_targets = (
             "attention" if expert_full else "attention-routed-experts"
@@ -672,17 +925,52 @@ def build_miles_argv(
             )
         model_name = "deepseekv4"
         training_attention_backend = "flash"
+    elif qwen35_recipe:
+        model_name = "qwen3_5"
+        training_attention_backend = "flash"
+        model_recipe_values = [
+            "--spec",
+            "miles_plugins.models.qwen3_5",
+            "get_qwen3_5_spec",
+            "--apply-layernorm-1p",
+            "--attention-output-gate",
+            "--attention-dropout",
+            "0.0",
+            "--hidden-dropout",
+            "0.0",
+        ]
     else:
         model_name = type(provider).__name__
         training_attention_backend = "unfused"
+
+    lora_values: list[str] = []
+    if parameter_mode == "lora":
+        lora_values = [
+            "--lora-rank",
+            str(args.lora_r),
+            "--lora-alpha",
+            str(args.lora_r),
+            "--lora-dropout",
+            "0",
+            "--lora-type",
+            (
+                "lora"
+                if args.lora_targets == "attention-routed-experts"
+                else "canonical_lora"
+            ),
+            "--target-modules",
+            target_value,
+            "--lora-base-cpu-backup",
+        ]
 
     values = [
         "train.py",
         "--train-backend", "megatron",
         "--hf-checkpoint", str(rollout_model_path or model_path),
-        "--ref-load", str(model_path),
+        "--ref-load", ref_load,
         "--megatron-to-hf-mode", "bridge",
         "--model-name", model_name,
+        *model_recipe_values,
         "--num-layers", str(layers),
         "--hidden-size", str(hidden),
         "--num-attention-heads", str(heads),
@@ -697,23 +985,13 @@ def build_miles_argv(
         "--rotary-base", str(rotary_base),
         "--rotary-percent", str(rotary_percent),
         "--vocab-size", str(vocab_size),
-        "--lora-rank", str(args.lora_r),
-        "--lora-alpha", str(args.lora_r),
-        "--lora-dropout", "0",
-        "--lora-type",
-        (
-            "lora"
-            if args.lora_targets == "attention-routed-experts"
-            else "canonical_lora"
-        ),
-        "--target-modules", target_value,
-        "--lora-base-cpu-backup",
+        *lora_values,
         "--actor-num-nodes", str(args.actor_num_nodes),
         "--actor-num-gpus-per-node", str(args.actor_num_gpus_per_node),
-        "--num-gpus-per-node", str(args.actor_num_gpus_per_node),
+        "--num-gpus-per-node", str(visible_gpus_per_node),
         "--rollout-num-gpus-per-engine",
         str(getattr(args, "rollout_num_gpus_per_engine", 1)),
-        "--colocate",
+        *placement_values,
         (
             "--offload-train"
             if getattr(args, "rl_offload_train", False)
@@ -762,33 +1040,54 @@ def build_miles_argv(
         "--no-save-rng",
         "--finetune",
         "--seed", str(args.seed),
-        "--sglang-max-lora-rank", str(args.lora_r),
         "--pin-rollout-manager-to-head",
     ]
+    if parameter_mode == "lora":
+        values.extend(("--sglang-max-lora-rank", str(args.lora_r)))
     eval_interval = getattr(args, "eval_interval", None)
     if eval_interval is not None:
         if not yeto_policy_sync:
             raise ValueError("Yeto evaluation requires the external policy boundary")
         if eval_interval <= 0:
             raise ValueError("evaluation interval must be positive")
-        if not getattr(args, "eval_only", False) or eval_interval != 1:
-            raise ValueError("SSH evaluation must be one separate eval-only run")
+        eval_only = getattr(args, "eval_only", False)
+        dense_train_eval = (
+            not eval_only
+            and parameter_mode == "full"
+            and getattr(args, "sync_preset", None) == "dense-full"
+        )
+        if eval_only:
+            if eval_interval != 1:
+                raise ValueError("SSH evaluation must be one separate eval-only run")
+            selected_eval_prompt_path = prompt_path
+        elif dense_train_eval:
+            if eval_interval != args.global_rounds + 1:
+                raise ValueError(
+                    "dense full evaluation interval must remain outside the "
+                    "training-round budget"
+                )
+            if eval_prompt_path is None:
+                raise ValueError("dense full evaluation requires heldout prompt data")
+            selected_eval_prompt_path = eval_prompt_path
+        else:
+            raise ValueError("training-time evaluation is restricted to dense full mode")
         eval_name = getattr(args, "eval_dataset_name", None)
         eval_samples = getattr(args, "eval_samples_per_prompt", None)
         if not eval_name or not isinstance(eval_samples, int) or eval_samples <= 0:
             raise ValueError(
                 "evaluation requires a dataset name and positive sample count"
             )
-        # Point Miles at the exact normalized prompt file used for training.
-        # Leaving no second preparation/copy path is what makes the train/eval
-        # task identity mechanically checkable.
+        # Eval-only reuses its sole normalized prompt file.  Dense training
+        # instead binds a separately normalized, immutable heldout split.  Its
+        # interval sits beyond the rollout budget because the dense policy hook
+        # evaluates only the exact initial and terminal published policies.
         values.extend(
             (
                 "--eval-function-path",
                 "yeto.rl.miles.generate_rollout",
                 "--eval-prompt-data",
                 str(eval_name),
-                str(prompt_path),
+                str(selected_eval_prompt_path),
                 "--eval-interval",
                 str(eval_interval),
                 "--skip-eval-before-train",
@@ -895,12 +1194,18 @@ def build_miles_argv(
             )
         )
     if yeto_policy_sync:
+        policy_sync_path = (
+            "yeto.rl.miles_full_parameter_dense."
+            "create_miles_full_parameter_dense_sync"
+            if parameter_mode == "full"
+            else "yeto.rl.miles.create_policy_sync"
+        )
         values.extend(
             (
                 "--rollout-all-samples-process-path",
                 "yeto.rl.miles.queue_completed_groups",
                 "--external-policy-sync-path",
-                "yeto.rl.miles.create_policy_sync",
+                policy_sync_path,
             )
         )
     for flag, name in (
@@ -1116,21 +1421,34 @@ def prepare_prompt_data(
     return output
 
 
-def _verify_eval_dataset_identity(args) -> None:
-    """Verify the source bytes attested by an SSH evaluation plan."""
+def _verify_eval_dataset_identity(args) -> Path | None:
+    """Verify the immutable source bytes for an eval-only or dense heldout run."""
 
     if getattr(args, "eval_interval", None) is None:
-        if getattr(args, "eval_only", False):
+        if getattr(args, "eval_only", False) or getattr(args, "eval_data", None):
             raise ValueError("--eval-only requires evaluation configuration")
-        return
-    if not getattr(args, "eval_only", False):
-        raise ValueError("evaluation configuration requires --eval-only")
+        return None
+    eval_only = getattr(args, "eval_only", False)
+    dense_train_eval = (
+        not eval_only
+        and getattr(args, "parameter_mode", None) == "full"
+        and getattr(args, "sync_preset", None) == "dense-full"
+    )
+    if not eval_only and not dense_train_eval:
+        raise ValueError(
+            "evaluation configuration requires --eval-only or dense full mode"
+        )
     expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise ValueError("evaluation dataset requires an immutable SHA256")
-    source = Path(args.data).expanduser()
+    source_value = args.data if eval_only else getattr(args, "eval_data", None)
+    if not isinstance(source_value, str) or not source_value:
+        raise ValueError("dense full evaluation requires --eval-data")
+    source = Path(source_value).expanduser()
     if source.is_symlink() or not source.is_file():
-        raise ValueError("evaluation requires one regular local training dataset file")
+        raise ValueError("evaluation requires one regular local dataset file")
+    if dense_train_eval and source.resolve() == Path(args.data).expanduser().resolve():
+        raise ValueError("dense full evaluation must use a distinct heldout dataset")
     from ..provenance import file_sha256
 
     actual = file_sha256(source)
@@ -1138,6 +1456,26 @@ def _verify_eval_dataset_identity(args) -> None:
         raise ValueError(
             f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
         )
+    return source
+
+
+def _jsonl_record_count(path: str | Path) -> int:
+    source = Path(path)
+    count = 0
+    try:
+        with source.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    raise ValueError("evaluation prompt data contains a blank row")
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError("evaluation prompt row is not a JSON object")
+                count += 1
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("evaluation prompt data is not canonical JSONL") from exc
+    if count < 1:
+        raise ValueError("evaluation prompt data is empty")
+    return count
 
 
 def _parse_miles_args(argv: list[str]):
@@ -1164,26 +1502,90 @@ def run_miles(
     model_path: str | Path,
     rollout_model_path: str | Path | None = None,
     prompt_path: str | Path,
+    eval_prompt_path: str | Path | None = None,
     yeto_policy_sync: bool = True,
     extra_argv: Sequence[str] = (),
 ) -> None:
     """Run one Miles job, optionally with Yeto's external policy boundary."""
 
+    parameter_mode = getattr(args, "parameter_mode", "lora")
+    sync_preset = getattr(args, "sync_preset", "strict-avg")
+    dense_full = parameter_mode == "full" or sync_preset == "dense-full"
+    if dense_full and not (
+        parameter_mode == "full" and sync_preset == "dense-full"
+    ):
+        raise ValueError("dense-full sync and full parameter mode must be selected together")
+    if dense_full:
+        if not yeto_policy_sync:
+            raise ValueError("dense full-parameter GRPO requires Yeto policy sync")
+        miles_source_sha256 = getattr(args, "miles_source_sha256", None)
+        if (
+            type(miles_source_sha256) is not str
+            or len(miles_source_sha256) != 64
+            or any(value not in "0123456789abcdef" for value in miles_source_sha256)
+        ):
+            raise ValueError(
+                "dense full-parameter GRPO requires an exact Miles source SHA256"
+            )
+        if (
+            args.optimizer_steps != 1
+            or getattr(args, "local_horizon", 1) != 1
+        ):
+            raise ValueError("dense full-parameter GRPO requires H=1")
+        if getattr(args, "eval_only", False):
+            raise ValueError("Milestone-1 dense full-parameter mode does not run eval-only")
+        if (
+            type(args.global_rounds) is not int
+            or args.global_rounds < 1
+            or type(args.fragments) is not int
+            or args.fragments < 1
+            or args.total_fragment_steps != args.global_rounds * args.fragments
+            or not isinstance(args.parameter_layout_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", args.parameter_layout_sha256)
+        ):
+            raise ValueError(
+                "dense full-parameter fragment budget must equal rounds*fragments"
+            )
+        num_learners = getattr(args, "num_learners", 1)
+        generation = getattr(args, "learner_generation", 0)
+        if (
+            type(num_learners) is not int
+            or num_learners < 1
+            or type(args.learner_id) is not int
+            or args.learner_id not in range(num_learners)
+            or type(generation) is not int
+            or generation != 0
+        ):
+            raise ValueError(
+                "Milestone-1 dense full-parameter mode requires a fixed generation-0 roster"
+            )
+
     if (
         yeto_policy_sync
-        and getattr(args, "sync_preset", "strict-avg") == "decoupled"
+        and sync_preset == "decoupled"
         and args.optimizer_steps != 1
     ):
         raise ValueError("decoupled RL requires one optimizer step per rollout")
 
-    clone_only_lora = args.lora_targets == "attention-routed-experts"
+    clone_only_lora = (
+        parameter_mode == "lora"
+        and args.lora_targets == "attention-routed-experts"
+    )
     expert_full = int(getattr(args, "expert_full_count", 0) or 0) > 0
+    if dense_full and expert_full:
+        raise ValueError("full-parameter mode cannot also select expert-full tuning")
 
     def require_env(name: str, value: str) -> None:
         current = os.environ.get(name)
         if current not in (None, value):
             raise ValueError(f"{name} must be unset or {value}, got {current!r}")
         os.environ[name] = value
+
+    if dense_full:
+        _require_unquantized_dense_full_rollout_model(
+            rollout_model_path or model_path
+        )
+        require_env("MILES_EXPERIMENTAL_FT_TRAINER", "0")
 
     if clone_only_lora or expert_full:
         require_env("YETO_DSV4_EXPERT_CLONE", "1")
@@ -1218,7 +1620,7 @@ def run_miles(
     )
     provider = model_bridge.to_megatron_provider(load_weights=False)
     provider.finalize()
-    attention_specs = derive_peft_lora_specs(
+    attention_specs = () if dense_full else derive_peft_lora_specs(
         model_path,
         None,
         rank=args.lora_r,
@@ -1246,8 +1648,8 @@ def run_miles(
                 )
             )
         )
-    canonical_targets = adapter_targets(attention_specs)
-    miles_targets = megatron_adapter_targets(
+    canonical_targets = [] if dense_full else adapter_targets(attention_specs)
+    miles_targets = [] if dense_full else megatron_adapter_targets(
         attention_specs,
         model_bridge,
         standard_grouped_experts=clone_only_lora,
@@ -1258,6 +1660,7 @@ def run_miles(
         model_path=model_path,
         rollout_model_path=rollout_model_path,
         prompt_path=prompt_path,
+        eval_prompt_path=eval_prompt_path,
         provider=provider,
         target_modules=miles_targets,
         yeto_policy_sync=yeto_policy_sync,
@@ -1266,18 +1669,37 @@ def run_miles(
     miles_args = _parse_miles_args(miles_argv)
 
     if yeto_policy_sync:
-        from ..protocol import layout_fingerprint
-        from .core import (
-            build_rl_fragment_layout,
-            canonical_layout_hash,
-            canonical_lora_config_hash,
-        )
+        if dense_full:
+            from ..provenance import file_sha256
 
-        layout_hash = canonical_layout_hash(specs)
-        lora_config_hash = canonical_lora_config_hash(
-            rank=args.lora_r,
-            target_modules=canonical_targets,
-        )
+            model_config_path = Path(model_path) / "config.json"
+            if not model_config_path.is_file():
+                raise ValueError("full-parameter model has no config.json")
+            model_config_hash = file_sha256(model_config_path)
+            training_contract_hash = _dense_full_training_contract_sha256(
+                args,
+                miles_argv,
+                model_config_sha256=model_config_hash,
+                prompt_data_sha256=file_sha256(prompt_path),
+            )
+            layout_hash = model_config_hash
+            lora_config_hash = _canonical_sha256(
+                {
+                    "schema": "yeto-full-parameter-mode-v1",
+                    "model_config_sha256": model_config_hash,
+                }
+            )
+        else:
+            from .core import (
+                canonical_layout_hash,
+                canonical_lora_config_hash,
+            )
+
+            layout_hash = canonical_layout_hash(specs)
+            lora_config_hash = canonical_lora_config_hash(
+                rank=args.lora_r,
+                target_modules=canonical_targets,
+            )
         miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
         miles_args.yeto_rl_model = args.model
         miles_args.yeto_rl_data = args.data
@@ -1288,6 +1710,7 @@ def run_miles(
         miles_args.yeto_rl_data_revision = args.data_revision
         miles_args.yeto_rl_lora_config_hash = lora_config_hash
         miles_args.yeto_rl_layout_hash = layout_hash
+        miles_args.yeto_rl_parameter_mode = parameter_mode
         miles_args.yeto_rl_clone_only_lora = clone_only_lora
         if expert_full:
             miles_args.yeto_rl_expected_specs = specs
@@ -1321,10 +1744,91 @@ def run_miles(
         miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
         if getattr(args, "eval_only", False):
             miles_args.yeto_rl_eval_policy_version = args.global_rounds
-        sync_preset = getattr(args, "sync_preset", "strict-avg")
+        elif dense_full and getattr(args, "eval_interval", None) is not None:
+            if eval_prompt_path is None:
+                raise ValueError("dense full evaluation prompt path is unavailable")
+            summary_path = Path(
+                str(getattr(args, "eval_summary_path", "") or "")
+            ).expanduser()
+            if (
+                not summary_path.is_absolute()
+                or summary_path.exists()
+                or summary_path.is_symlink()
+                or not summary_path.parent.is_dir()
+                or summary_path.parent.is_symlink()
+            ):
+                raise ValueError(
+                    "dense full evaluation summary requires a fresh absolute path"
+                )
+            miles_args.yeto_rl_eval_policy_versions = (0, args.global_rounds)
+            miles_args.yeto_rl_eval_dataset_name = args.eval_dataset_name
+            miles_args.yeto_rl_eval_prompt_count = _jsonl_record_count(
+                eval_prompt_path
+            )
+            miles_args.yeto_rl_eval_samples_per_prompt = (
+                args.eval_samples_per_prompt
+            )
+            miles_args.yeto_rl_eval_summary_path = str(summary_path)
         miles_args.yeto_rl_sync_preset = sync_preset
         miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"
-        if sync_preset == "decoupled":
+        if dense_full:
+            from .dense_sweep_wire import DenseSweepConfig
+            from .local_learner import ComponentIdentity
+            from .miles_full_parameter_dense import MilesDenseFullParameterConfig
+
+            evidence_parent = (
+                Path(args.audit_dir).expanduser()
+                if getattr(args, "audit_dir", None)
+                else Path(args.completed_groups_path).expanduser().parent
+            )
+            evidence_parent.mkdir(parents=True, exist_ok=True)
+            evidence_directory = Path(
+                tempfile.mkdtemp(
+                    prefix=f"trajectory-evidence-{args.learner_id}-",
+                    dir=evidence_parent,
+                )
+            )
+            if evidence_directory.stat().st_mode & 0o077:
+                raise RuntimeError("trajectory evidence directory is not private")
+            learner_generations = (0,) * getattr(args, "num_learners", 1)
+            miles_args.yeto_rl_model_config_sha256 = model_config_hash
+            miles_args.yeto_rl_miles_source_sha256 = args.miles_source_sha256
+            miles_args.yeto_rl_dense_training_contract_sha256 = (
+                training_contract_hash
+            )
+            miles_args.external_policy_identity_setter_path = (
+                "yeto.rl.miles.set_current_published_policy_identity"
+            )
+            miles_args.yeto_rl_trajectory_evidence_dir = str(evidence_directory)
+            miles_args.yeto_rl_num_fragments = args.fragments
+            miles_args.yeto_rl_total_sweeps = args.global_rounds
+            miles_args.yeto_rl_total_fragment_steps = args.total_fragment_steps
+            miles_args.yeto_rl_learner_generation = 0
+            miles_args.yeto_rl_learner_generations = learner_generations
+            miles_args.yeto_rl_dense_full_parameter_config = (
+                MilesDenseFullParameterConfig(
+                    component=ComponentIdentity(
+                        role="actor",
+                        model_revision=args.model_revision.lower(),
+                        config_hash=model_config_hash,
+                    ),
+                    wire=DenseSweepConfig(
+                        syncer_addr=_syncer_address(args.syncer),
+                        learner_id=args.learner_id,
+                        learner_generation=0,
+                        policy_rounds=args.global_rounds,
+                        wan_streams=args.wan_streams,
+                    ),
+                    learner_generations=learner_generations,
+                    minimum_fragments=args.fragments,
+                    training_contract_hash=training_contract_hash,
+                    expected_layout_hash=args.parameter_layout_sha256,
+                )
+            )
+        elif sync_preset == "decoupled":
+            from ..protocol import layout_fingerprint
+            from .core import build_rl_fragment_layout
+
             miles_args.yeto_rl_source_sha256 = args.source_sha256
             miles_args.yeto_rl_initial_adapter = getattr(
                 args, "initial_adapter", None
@@ -1411,10 +1915,17 @@ def main(argv=None) -> None:
             f"got {reward_sha256}"
         )
     _preflight_codex_harness(args)
-    verify_miles_revision(args.miles_root)
     miles_root = str(Path(args.miles_root).expanduser().resolve())
     if miles_root not in sys.path:
         sys.path.insert(0, miles_root)
+    verify_miles_revision(
+        miles_root,
+        expected_source_sha256=(
+            args.miles_source_sha256
+            if args.parameter_mode == "full"
+            else None
+        ),
+    )
 
     from miles.utils.misc import load_function
 
@@ -1453,17 +1964,29 @@ def main(argv=None) -> None:
             repo_id=rollout_model,
             revision=args.rollout_model_revision,
         )
-    _verify_eval_dataset_identity(args)
+    eval_source = _verify_eval_dataset_identity(args)
     prompt_path = prepare_prompt_data(
         args.data,
         args.data_revision,
         "~/yeto-rl/prompts.jsonl",
     )
+    eval_prompt_path = None
+    if eval_source is not None:
+        eval_prompt_path = (
+            prompt_path
+            if getattr(args, "eval_only", False)
+            else prepare_prompt_data(
+                str(eval_source),
+                None,
+                "~/yeto-rl/eval-prompts.jsonl",
+            )
+        )
     run_miles(
         args,
         model_path=model_path,
         rollout_model_path=rollout_model_path,
         prompt_path=prompt_path,
+        eval_prompt_path=eval_prompt_path,
     )
 
 

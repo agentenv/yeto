@@ -7,6 +7,8 @@ from typing import Any
 
 QWEN38_MODEL = "Qwen/Qwen3.8-27B"
 QWEN38_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+QWEN35_MODEL = "Qwen/Qwen3.5-4B"
+QWEN35_REVISION = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
 
 _PROFILES: dict[str, dict[str, Any]] = {
     "deepseekv4": {
@@ -36,6 +38,21 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "tito_allowed_append_roles": ["tool", "user"],
         "model_identifier": QWEN38_MODEL,
         "model_revision": QWEN38_REVISION,
+        "identity_label": "Qwen3.8",
+    },
+    "qwen35": {
+        "model": "qwen35",
+        "rl_model_recipe": "generic",
+        "backend_reasoning_effort": "xhigh",
+        "thinking": {"type": "enabled"},
+        "chat_template": "qwen35",
+        # Miles' Qwen3.5 TITO profile owns the fixed Qwen3.5 template and
+        # requires retained reasoning across append-only tool/user turns.
+        "chat_template_kwargs": {"clear_thinking": False},
+        "tito_allowed_append_roles": ["tool", "user"],
+        "model_identifier": QWEN35_MODEL,
+        "model_revision": QWEN35_REVISION,
+        "identity_label": "Qwen3.5",
     },
 }
 
@@ -91,13 +108,17 @@ def validate_stock_codex_fields(
         raise ValueError("stock Codex chat-template kwargs do not match its profile")
     if tito_allowed_append_roles != profile["tito_allowed_append_roles"]:
         raise ValueError("stock Codex append roles do not match its profile")
-    if tito_model == "qwen38" and (
-        model != QWEN38_MODEL
-        or model_revision != QWEN38_REVISION
-        or rollout_model not in {None, QWEN38_MODEL}
-        or rollout_model_revision not in {None, QWEN38_REVISION}
+    expected_model = profile.get("model_identifier")
+    expected_revision = profile.get("model_revision")
+    if expected_model is not None and (
+        model != expected_model
+        or model_revision != expected_revision
+        or rollout_model not in {None, expected_model}
+        or rollout_model_revision not in {None, expected_revision}
         or lora_targets != "attention"
         or expert_full_count != 0
     ):
-        raise ValueError("stock Codex Qwen3.8 model identity drifted")
+        raise ValueError(
+            f"stock Codex {profile['identity_label']} model identity drifted"
+        )
     return profile

@@ -27,7 +27,7 @@ const MAX_PARTIAL_MESSAGES: usize = 64;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
 const WRITER_QUEUE: usize = 128;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LearnerWeight {
     Tokens2OverSteps,
     Equal,
@@ -74,6 +74,10 @@ pub struct Config {
     /// Bounded wait for learners to apply and acknowledge the terminal cut.
     pub final_ack_timeout_s: u64,
     pub total_steps: u64,
+    /// Strict dense-policy mode: one logical local step contributes every
+    /// fragment in a serial sweep.  None preserves the legacy independent
+    /// fragment-round behavior.
+    pub policy_sweep_fragments: Option<u32>,
     pub outer_lr: f32,
     pub outer_momentum: f32,
     pub final_state: Option<std::path::PathBuf>,
@@ -86,7 +90,7 @@ pub struct Config {
     pub mark_final_checkpoint: bool,
     /// Benchmark-only exact local optimizer-step target for every learner.
     pub learner_budget_steps: Option<u64>,
-    /// JSONL event tape: one record per merge.
+    /// JSONL event tape: merge records plus sweep ledger reconciliation cuts.
     pub event_tape: Option<std::path::PathBuf>,
     /// Maximum admitted learner base-version lag; None preserves the
     /// existing unbounded behavior.
@@ -133,6 +137,7 @@ struct Group {
     dtype: u8,
     layout: Layout,
     layout_fingerprint: [u8; 32],
+    session_contract_hash: [u8; 32],
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
@@ -361,6 +366,7 @@ struct SessionSpec {
     dtype: u8,
     layout: Layout,
     layout_fingerprint: [u8; 32],
+    session_contract_hash: [u8; 32],
 }
 
 struct ParsedHello {
@@ -369,6 +375,7 @@ struct ParsedHello {
     dtype: u8,
     layout: Layout,
     layout_fingerprint: [u8; 32],
+    session_contract_hash: [u8; 32],
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
@@ -477,7 +484,7 @@ impl StepRates {
 type Registry = Arc<Mutex<RegistryState>>;
 type Session = Arc<Mutex<Option<SessionSpec>>>;
 
-pub async fn run(cfg: Config) -> Result<()> {
+fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.learners == 0 {
         bail!("--learners must be positive");
     }
@@ -487,6 +494,141 @@ pub async fn run(cfg: Config) -> Result<()> {
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
     }
+    if let Some(fragments) = cfg.policy_sweep_fragments {
+        if fragments == 0 {
+            bail!("--policy-sweep-fragments must be positive");
+        }
+        if cfg.total_steps == 0 {
+            bail!("--policy-sweep-fragments requires positive --total-steps");
+        }
+        if cfg.pipeline != 1 {
+            bail!("--policy-sweep-fragments requires --pipeline 1");
+        }
+        if !cfg.total_steps.is_multiple_of(u64::from(fragments)) {
+            bail!("--total-steps must be divisible by --policy-sweep-fragments");
+        }
+        if cfg.max_base_lag != Some(0) || cfg.quorum != cfg.learners || cfg.grace_ms != 0 {
+            bail!(
+                "--policy-sweep-fragments requires a strict fixed roster: \
+                 --max-base-lag 0, --quorum=--learners, and --grace-ms 0"
+            );
+        }
+        if cfg.delta_correction {
+            bail!("--policy-sweep-fragments requires --delta-correction none");
+        }
+        if cfg.outer_lr != 1.0 || cfg.outer_momentum != 0.0 {
+            bail!("--policy-sweep-fragments requires --outer-lr 1 and --outer-momentum 0");
+        }
+        if cfg.learner_weight != LearnerWeight::Equal {
+            bail!("--policy-sweep-fragments requires --learner-weight equal");
+        }
+        if cfg.checkpoint_path.is_none() || cfg.checkpoint_every != 1 || !cfg.resume {
+            bail!(
+                "--policy-sweep-fragments requires --checkpoint-path, \
+                 --checkpoint-every 1, and --resume for crash-safe sweeps"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy_sweep_push(push: &Push, fragments: u32) -> Result<()> {
+    if fragments == 0 {
+        bail!("policy sweep fragment count must be positive");
+    }
+    if push.global_step == 0 {
+        bail!("policy-sweep push global_step must be positive");
+    }
+    let policy_round = push.global_step.div_ceil(u64::from(fragments));
+    if push.local_step != policy_round {
+        bail!(
+            "policy-sweep push at global step {} requires local_step {}, got {}",
+            push.global_step,
+            policy_round,
+            push.local_step
+        );
+    }
+    if push.c_steps != 1 {
+        bail!(
+            "policy-sweep push at global step {} requires c_steps=1, got {}",
+            push.global_step,
+            push.c_steps
+        );
+    }
+    Ok(())
+}
+
+fn expected_sweep_fragment_version(global_step: u64, fragment: u32, fragments: u32) -> u64 {
+    let first = u64::from(fragment) + 1;
+    if global_step < first {
+        0
+    } else {
+        first + ((global_step - first) / u64::from(fragments)) * u64::from(fragments)
+    }
+}
+
+fn validate_resumed_policy_sweep(cfg: &Config, st: &GlobalState) -> Result<()> {
+    let Some(fragments) = cfg.policy_sweep_fragments else {
+        return Ok(());
+    };
+    if st.policy_sweep_fragments != Some(fragments) {
+        bail!(
+            "policy-sweep checkpoint profile {:?} does not match configured profile {fragments}",
+            st.policy_sweep_fragments
+        );
+    }
+    if st.global_step > cfg.total_steps {
+        bail!(
+            "policy-sweep checkpoint step {} exceeds configured total {}",
+            st.global_step,
+            cfg.total_steps
+        );
+    }
+    for (fragment, actual) in st.versions.iter().copied().enumerate() {
+        let expected = expected_sweep_fragment_version(
+            st.global_step,
+            u32::try_from(fragment).context("fragment index does not fit u32")?,
+            fragments,
+        );
+        if actual != expected {
+            bail!(
+                "policy-sweep checkpoint fragment {fragment} has version {actual}, expected {expected}"
+            );
+        }
+    }
+    let expected_steps = st.global_step / u64::from(fragments);
+    if st.global_step == 0 {
+        if !st.ledger.is_empty() {
+            bail!("policy-sweep checkpoint at step zero has learner accounting");
+        }
+        return Ok(());
+    }
+    if st.ledger.len() != cfg.learners as usize {
+        bail!(
+            "policy-sweep checkpoint has accounting for {} learners, expected {}",
+            st.ledger.len(),
+            cfg.learners
+        );
+    }
+    for learner_id in 0..cfg.learners {
+        let ledger = st
+            .ledger
+            .get(&learner_id)
+            .with_context(|| format!("policy-sweep checkpoint is missing learner {learner_id}"))?;
+        if ledger.merges != st.global_step || ledger.steps != expected_steps {
+            bail!(
+                "policy-sweep checkpoint learner {learner_id} has merges={} steps={}, expected merges={} steps={expected_steps}",
+                ledger.merges,
+                ledger.steps,
+                st.global_step
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn run(cfg: Config) -> Result<()> {
+    validate_config(&cfg)?;
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
             bail!("--learner-budget-steps must fit a positive u32");
@@ -588,6 +730,10 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         .take(32)?
         .try_into()
         .context("layout fingerprint must be 32 bytes")?;
+    let session_contract_hash = r
+        .take(32)?
+        .try_into()
+        .context("session contract hash must be 32 bytes")?;
     let num_streams = r.u16()?;
     if r.remaining() != 0 {
         bail!("trailing bytes in HELLO");
@@ -602,6 +748,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         dtype,
         layout,
         layout_fingerprint,
+        session_contract_hash,
         num_streams,
         max_init_payload,
         max_push_payload,
@@ -673,6 +820,7 @@ async fn handle_connection(
                 dtype,
                 layout,
                 layout_fingerprint,
+                session_contract_hash,
                 num_streams,
                 max_init_payload,
                 max_push_payload,
@@ -682,6 +830,7 @@ async fn handle_connection(
                 dtype,
                 layout: layout.clone(),
                 layout_fingerprint,
+                session_contract_hash,
             };
             let mismatch = {
                 let mut guard = session.lock().unwrap();
@@ -725,6 +874,7 @@ async fn handle_connection(
                 dtype,
                 layout,
                 layout_fingerprint,
+                session_contract_hash,
                 num_streams,
                 max_init_payload,
                 max_push_payload,
@@ -1229,6 +1379,23 @@ async fn scheduler(
                                 );
                                 bail!("RL strict failure layout_hash_mismatch: {message}");
                             }
+                            if let Err(error) = validate_resumed_policy_sweep(&cfg, &st) {
+                                let message =
+                                    format!("cannot resume policy-sweep checkpoint: {error:#}");
+                                append_strict_failure(
+                                    cfg.event_tape.as_deref(),
+                                    "policy_sweep_checkpoint_mismatch",
+                                    &message,
+                                );
+                                bail!(
+                                    "RL strict failure policy_sweep_checkpoint_mismatch: {message}"
+                                );
+                            }
+                            if cfg.policy_sweep_fragments.is_some() {
+                                if let Some(tape) = cfg.event_tape.as_deref() {
+                                    append_policy_sweep_ledger_snapshot(tape, &st, "resume")?;
+                                }
+                            }
                             info!(step = st.global_step, "resumed from checkpoint");
                         }
                     }
@@ -1495,6 +1662,20 @@ async fn scheduler(
                     bail!("RL strict failure {metric}: {message}");
                 }
                 Event::Push { member, push } => {
+                    if let Some(fragments) = cfg.policy_sweep_fragments {
+                        if let Err(error) = validate_policy_sweep_push(&push, fragments) {
+                            let message = format!(
+                                "learner {} generation {}: {error:#}",
+                                member.learner_id, member.generation
+                            );
+                            append_strict_failure(
+                                cfg.event_tape.as_deref(),
+                                "policy_sweep_push_mismatch",
+                                &message,
+                            );
+                            bail!("RL strict failure policy_sweep_push_mismatch: {message}");
+                        }
+                    }
                     let learner_id = member.learner_id;
                     let generation = member.generation;
                     let local_step = push.local_step;
@@ -1633,9 +1814,14 @@ async fn scheduler(
                 "final checkpoint written"
             );
         }
-        if cfg.mark_final_checkpoint {
-            write_final_marker(path, st.global_step)?;
+    }
+    if cfg.policy_sweep_fragments.is_some() {
+        if let Some(tape) = cfg.event_tape.as_deref() {
+            append_policy_sweep_ledger_snapshot(tape, &st, "complete")?;
         }
+    }
+    if cfg.mark_final_checkpoint {
+        write_final_marker(cfg.checkpoint_path.as_ref().unwrap(), st.global_step)?;
     }
     if let Some(path) = &cfg.final_state {
         dump_state(&st, path)?;
@@ -1783,12 +1969,14 @@ fn fragment_available(rounds: &[Round], fragment_id: usize) -> bool {
 }
 
 fn should_replay_pull(round: &Round, member: Member) -> bool {
-    round.expected_members.iter().any(|expected| {
-        expected.learner_id == member.learner_id && *expected != member
-    }) && !round
-        .pushes
-        .keys()
-        .any(|accepted| accepted.learner_id == member.learner_id)
+    round
+        .expected_members
+        .iter()
+        .any(|expected| expected.learner_id == member.learner_id && *expected != member)
+        && !round
+            .pushes
+            .keys()
+            .any(|accepted| accepted.learner_id == member.learner_id)
 }
 
 fn route_push(
@@ -1895,7 +2083,18 @@ async fn complete_round(
     // moves forward.
     st.global_step = st.global_step.max(t);
     for push in pushes.values() {
-        st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
+        if let Some(fragments) = cfg.policy_sweep_fragments {
+            st.record_fragment_merge(
+                push.learner_id,
+                push.c_steps,
+                push.c_tokens,
+                t.is_multiple_of(u64::from(fragments)),
+            );
+        } else {
+            // Keep the legacy accounting path exactly as before opt-in sweep
+            // mode existed.
+            st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
+        }
     }
 
     let checkpoint_each_round = cfg.max_base_lag == Some(0) && cfg.checkpoint_every == 1;
@@ -1943,6 +2142,7 @@ async fn complete_round(
             gnorm,
             ms,
             &st.layout_fingerprint,
+            cfg.policy_sweep_fragments,
         );
     }
     // Consistent cut: this round is fully applied and every other in-flight
@@ -1962,6 +2162,17 @@ async fn complete_round(
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
+    if let Some(fragments) = cfg.policy_sweep_fragments {
+        if group.dtype != DTYPE_F32 {
+            bail!("--policy-sweep-fragments requires an FP32 HELLO session");
+        }
+        if group.layout.fragments.len() != fragments as usize {
+            bail!(
+                "--policy-sweep-fragments declares {fragments}, but decoded layout has {} fragments",
+                group.layout.fragments.len()
+            );
+        }
+    }
     let mut st = GlobalState::new_with_layout_fingerprint(
         group.layout.clone(),
         cfg.outer_lr,
@@ -1969,6 +2180,10 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
         group.dtype,
         group.layout_fingerprint,
     )?;
+    st.policy_sweep_fragments = cfg.policy_sweep_fragments;
+    if cfg.policy_sweep_fragments.is_some() {
+        st.session_contract_hash = Some(group.session_contract_hash);
+    }
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
@@ -2276,6 +2491,101 @@ fn append_strict_failure(path: Option<&std::path::Path>, metric: &str, message: 
     }
 }
 
+/// Append an idempotent, fsynced accounting cut after a sweep checkpoint has
+/// become authoritative. A crash between the checkpoint rename and the
+/// ordinary per-merge tape append can lose that diagnostic merge record; the
+/// resume and terminal snapshots make the durable ledger reconcilable without
+/// charging local steps or tokens again.
+fn append_policy_sweep_ledger_snapshot(
+    path: &std::path::Path,
+    st: &GlobalState,
+    phase: &str,
+) -> Result<()> {
+    use std::io::Write;
+
+    let fragments = st
+        .policy_sweep_fragments
+        .context("policy-sweep ledger snapshot requires a sweep profile")?;
+    let layout_hash: String = st
+        .layout_fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let event_id = format!(
+        "policy-sweep-ledger:{layout_hash}:{phase}:{}",
+        st.global_step
+    );
+    let existing = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let needle = format!("\"event_id\":\"{event_id}\"");
+    let already_committed = existing.split_inclusive(|byte| *byte == b'\n').any(|line| {
+        line.ends_with(b"\n")
+            && line
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+    });
+    if already_committed {
+        return Ok(());
+    }
+
+    let versions = st
+        .versions
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let ledger = st
+        .ledger
+        .iter()
+        .map(|(learner_id, entry)| {
+            format!(
+                "{{\"id\":{learner_id},\"merges\":{},\"steps\":{},\"tokens\":{}}}",
+                entry.merges, entry.steps, entry.tokens
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let policy_round = if st.global_step == 0 {
+        0
+    } else {
+        st.global_step.div_ceil(u64::from(fragments))
+    };
+    let sweep_complete = st.global_step.is_multiple_of(u64::from(fragments));
+    let line = format!(
+        "{{\"event\":\"policy_sweep_ledger\",\"event_id\":\"{event_id}\",\"phase\":\"{phase}\",\"protocol_version\":{PROTOCOL_VERSION},\"sync/layout_hash\":\"{layout_hash}\",\"global_step\":{},\"policy_round\":{policy_round},\"sweep_fragments\":{fragments},\"sweep_complete\":{sweep_complete},\"versions\":[{versions}],\"ledger\":[{ledger}]}}\n",
+        st.global_step
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    if existing.last().is_some_and(|byte| *byte != b'\n') {
+        // Preserve a torn diagnostic tail as an independently skippable line.
+        file.write_all(b"\n")?;
+    }
+    file.write_all(line.as_bytes())?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn policy_sweep_event_fields(step: u64, fragments: Option<u32>) -> String {
+    let Some(fragments) = fragments else {
+        return String::new();
+    };
+    let fragments_u64 = u64::from(fragments);
+    let policy_round = step.div_ceil(fragments_u64);
+    let sweep_fragment = (step - 1) % fragments_u64;
+    let sweep_complete = step.is_multiple_of(fragments_u64);
+    format!(
+        ",\"policy_round\":{policy_round},\"sweep_fragment\":{sweep_fragment},\"sweep_fragments\":{fragments},\"sweep_complete\":{sweep_complete}"
+    )
+}
+
 fn append_tape(
     path: &std::path::Path,
     step: u64,
@@ -2291,6 +2601,7 @@ fn append_tape(
     gnorm: f64,
     ms: u64,
     layout_fingerprint: &[u8; 32],
+    policy_sweep_fragments: Option<u32>,
 ) {
     use std::io::Write;
     let mut responded_members: Vec<Member> = pushes.keys().copied().collect();
@@ -2312,24 +2623,41 @@ fn append_tape(
         .iter()
         .map(|member| member.learner_id)
         .collect();
-    let weight_sum: f64 = pushes
-        .values()
-        .map(|p| crate::merge::learner_weight(p.c_tokens, p.c_steps))
-        .sum();
+    let event_weight = |push: &Push| {
+        if policy_sweep_fragments.is_some() {
+            // The sweep profile is validated as equal-weighted; its event
+            // tape must describe the merge that actually happened.
+            1.0
+        } else {
+            crate::merge::learner_weight(push.c_tokens, push.c_steps)
+        }
+    };
+    let weight_sum: f64 = pushes.values().map(event_weight).sum();
     let mut responders: Vec<String> = pushes
         .iter()
         .map(|(member, p)| {
-            let weight = crate::merge::learner_weight(p.c_tokens, p.c_steps);
+            let weight = event_weight(p);
             let contribution = if weight_sum > 0.0 { weight / weight_sum } else { 0.0 };
             let staleness = launch_base_version.saturating_sub(p.base_version);
+            let accounting_fields = policy_sweep_fragments.map_or_else(String::new, |fragments| {
+                let (steps, tokens) = if step.is_multiple_of(u64::from(fragments)) {
+                    (p.c_steps, p.c_tokens)
+                } else {
+                    (0, 0)
+                };
+                format!(
+                    ",\"accounted_c_steps\":{steps},\"accounted_c_tokens\":{tokens}"
+                )
+            });
             format!(
-                "{{\"id\":{},\"generation\":{},\"base_version\":{},\"staleness\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{},\"contribution\":{}}}",
+                "{{\"id\":{},\"generation\":{},\"base_version\":{},\"staleness\":{},\"c_steps\":{},\"c_tokens\":{}{},\"weight\":{},\"contribution\":{}}}",
                 p.learner_id,
                 member.generation,
                 p.base_version,
                 staleness,
                 p.c_steps,
                 p.c_tokens,
+                accounting_fields,
                 weight,
                 contribution
             )
@@ -2343,8 +2671,9 @@ fn append_tape(
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let merge_seconds = sync_ms as f64 / 1000.0;
+    let sweep_fields = policy_sweep_event_fields(step, policy_sweep_fragments);
     let line = format!(
-        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"responders\":[{}]}}\n",
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"responders\":[{}]}}\n",
         responded.len(),
         json_ids(&expected_learners),
         json_members(expected_members),
@@ -2418,14 +2747,22 @@ mod tests {
     }
 
     fn test_group(member: Member) -> Arc<Group> {
+        test_group_with_layout(
+            member,
+            Layout {
+                fragments: Vec::new(),
+            },
+        )
+    }
+
+    fn test_group_with_layout(member: Member, layout: Layout) -> Arc<Group> {
         let (control, _receiver) = mpsc::channel(1);
         Arc::new(Group {
             member,
             dtype: DTYPE_F32,
-            layout: Layout {
-                fragments: Vec::new(),
-            },
+            layout,
             layout_fingerprint: [0; 32],
+            session_contract_hash: [0; 32],
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
@@ -2455,6 +2792,7 @@ mod tests {
                 fragments: Vec::new(),
             },
             layout_fingerprint: [0; 32],
+            session_contract_hash: [0; 32],
             num_streams: u16::from(data_stream),
             max_init_payload: 0,
             max_push_payload: 0,
@@ -2581,6 +2919,7 @@ mod tests {
             quorum_timeout_s: 1,
             final_ack_timeout_s: 1,
             total_steps,
+            policy_sweep_fragments: None,
             outer_lr: 1.0,
             outer_momentum: 0.0,
             final_state: None,
@@ -2593,6 +2932,189 @@ mod tests {
             max_base_lag: Some(0),
             learner_weight: LearnerWeight::Equal,
         }
+    }
+
+    fn sweep_test_config(fragments: u32, total_steps: u64) -> Config {
+        let mut config = round_test_config(total_steps);
+        config.policy_sweep_fragments = Some(fragments);
+        config.checkpoint_path = Some(std::path::PathBuf::from("policy-sweep-test.ckpt"));
+        config.checkpoint_every = 1;
+        config.resume = true;
+        config
+    }
+
+    #[test]
+    fn policy_sweep_static_profile_is_strict_and_legacy_profile_is_unchanged() {
+        assert!(validate_config(&round_test_config(3)).is_ok());
+        assert!(validate_config(&sweep_test_config(2, 4)).is_ok());
+
+        let mut invalid = sweep_test_config(0, 4);
+        assert!(
+            format!("{:#}", validate_config(&invalid).unwrap_err()).contains("must be positive")
+        );
+
+        invalid = sweep_test_config(2, 0);
+        assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+            .contains("requires positive --total-steps"));
+
+        invalid = sweep_test_config(2, 4);
+        invalid.pipeline = 2;
+        assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+            .contains("requires --pipeline 1"));
+
+        invalid = sweep_test_config(3, 4);
+        assert!(
+            format!("{:#}", validate_config(&invalid).unwrap_err()).contains("must be divisible")
+        );
+
+        for mutate in [
+            |config: &mut Config| config.max_base_lag = None,
+            |config: &mut Config| {
+                config.learners = 2;
+                config.quorum = 1;
+            },
+            |config: &mut Config| config.grace_ms = 1,
+        ] {
+            invalid = sweep_test_config(2, 4);
+            mutate(&mut invalid);
+            assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+                .contains("strict fixed roster"));
+        }
+
+        invalid = sweep_test_config(2, 4);
+        invalid.delta_correction = true;
+        assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+            .contains("requires --delta-correction none"));
+
+        invalid = sweep_test_config(2, 4);
+        invalid.learner_weight = LearnerWeight::Tokens2OverSteps;
+        assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+            .contains("requires --learner-weight equal"));
+
+        for mutate in [
+            |config: &mut Config| config.checkpoint_path = None,
+            |config: &mut Config| config.checkpoint_every = 2,
+            |config: &mut Config| config.resume = false,
+        ] {
+            invalid = sweep_test_config(2, 4);
+            mutate(&mut invalid);
+            assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+                .contains("requires --checkpoint-path"));
+        }
+    }
+
+    #[test]
+    fn policy_sweep_must_equal_the_decoded_layout_fragment_count() {
+        let layout = Layout {
+            fragments: vec![
+                crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                },
+                crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                },
+            ],
+        };
+        let group = test_group_with_layout(member(0, 1), layout);
+        assert!(new_state_for(&group, &sweep_test_config(2, 4)).is_ok());
+        let error = new_state_for(&group, &sweep_test_config(1, 4))
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("decoded layout has 2 fragments"));
+    }
+
+    #[test]
+    fn policy_sweep_pushes_bind_fragment_steps_to_one_logical_local_step() {
+        for (global_step, local_step) in [(1, 1), (2, 1), (3, 1), (4, 2), (6, 2)] {
+            let push = Push {
+                learner_id: 0,
+                fragment_id: ((global_step - 1) % 3) as u32,
+                global_step,
+                round_attempt: 1,
+                base_version: 0,
+                local_step,
+                c_steps: 1,
+                c_tokens: 99,
+                outer_gradient: vec![1.0],
+            };
+            validate_policy_sweep_push(&push, 3).unwrap();
+        }
+
+        let mut bad_local_step = test_exact_push(0, 5);
+        bad_local_step.global_step = 4;
+        bad_local_step.local_step = 1;
+        assert!(format!(
+            "{:#}",
+            validate_policy_sweep_push(&bad_local_step, 3).unwrap_err()
+        )
+        .contains("requires local_step 2"));
+
+        let mut bad_c_steps = bad_local_step;
+        bad_c_steps.local_step = 2;
+        bad_c_steps.c_steps = 2;
+        assert!(format!(
+            "{:#}",
+            validate_policy_sweep_push(&bad_c_steps, 3).unwrap_err()
+        )
+        .contains("requires c_steps=1"));
+    }
+
+    #[test]
+    fn policy_sweep_resume_mapping_is_deterministic_mid_sweep() {
+        let expected = [
+            [0, 0, 0],
+            [1, 0, 0],
+            [1, 2, 0],
+            [1, 2, 3],
+            [4, 2, 3],
+            [4, 5, 3],
+            [4, 5, 6],
+        ];
+        for (global_step, versions) in expected.into_iter().enumerate() {
+            let actual = [
+                expected_sweep_fragment_version(global_step as u64, 0, 3),
+                expected_sweep_fragment_version(global_step as u64, 1, 3),
+                expected_sweep_fragment_version(global_step as u64, 2, 3),
+            ];
+            assert_eq!(actual, versions);
+        }
+
+        let layout = Layout {
+            fragments: (0..3)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state = GlobalState::new(layout, 1.0, 0.0, DTYPE_F32).unwrap();
+        state.policy_sweep_fragments = Some(3);
+        state.session_contract_hash = Some([2; 32]);
+        for fragment in 0..3 {
+            state.init_fragment(fragment, vec![0.0]).unwrap();
+        }
+        state.global_step = 2;
+        state.versions = vec![1, 2, 0];
+        for learner_id in 0..2 {
+            state.record_fragment_merge(learner_id, 1, 50, false);
+            state.record_fragment_merge(learner_id, 1, 50, false);
+        }
+        let mut config = sweep_test_config(3, 6);
+        config.learners = 2;
+        config.quorum = 2;
+        validate_resumed_policy_sweep(&config, &state).unwrap();
+
+        state.ledger.get_mut(&0).unwrap().steps = 1;
+        assert!(format!(
+            "{:#}",
+            validate_resumed_policy_sweep(&config, &state).unwrap_err()
+        )
+        .contains("expected merges=2 steps=0"));
     }
 
     fn terminal_test_round(step: u64, member: Member) -> Round {
@@ -2626,6 +3148,123 @@ mod tests {
         }
     }
 
+    fn two_fragment_sweep_state() -> GlobalState {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state =
+            GlobalState::new_with_layout_fingerprint(layout, 1.0, 0.0, DTYPE_F32, [3; 32]).unwrap();
+        state.policy_sweep_fragments = Some(2);
+        state.session_contract_hash = Some([3; 32]);
+        state.init_fragment(0, vec![0.0]).unwrap();
+        state.init_fragment(1, vec![0.0]).unwrap();
+        state
+    }
+
+    fn three_fragment_sweep_state() -> GlobalState {
+        let layout = Layout {
+            fragments: (0..3)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state =
+            GlobalState::new_with_layout_fingerprint(layout, 1.0, 0.0, DTYPE_F32, [4; 32]).unwrap();
+        state.policy_sweep_fragments = Some(3);
+        state.session_contract_hash = Some([4; 32]);
+        for fragment in 0..3 {
+            state.init_fragment(fragment, vec![0.0]).unwrap();
+        }
+        state
+    }
+
+    fn sweep_test_round(
+        step: u64,
+        fragment: usize,
+        policy_round: u64,
+        c_tokens: u64,
+        member: Member,
+    ) -> Round {
+        Round {
+            t: step,
+            p: fragment,
+            base_version: 0,
+            attempt: 1,
+            pull: bytes::Bytes::new(),
+            started: Instant::now(),
+            expected_members: vec![member],
+            quorum_deadline: Instant::now(),
+            grace_deadline: None,
+            quorum_size: 1,
+            quorum_ms: Some(0),
+            grace_ms: Some(0),
+            pushes: HashMap::from([(
+                member,
+                Push {
+                    learner_id: member.learner_id,
+                    fragment_id: fragment as u32,
+                    global_step: step,
+                    round_attempt: 1,
+                    base_version: 0,
+                    local_step: policy_round,
+                    c_steps: 1,
+                    c_tokens,
+                    outer_gradient: vec![0.25],
+                },
+            )]),
+        }
+    }
+
+    fn two_learner_sweep_round(step: u64) -> Round {
+        let policy_round = step.div_ceil(3);
+        let fragment = ((step - 1) % 3) as usize;
+        let base_version = step.saturating_sub(3);
+        let members = [member(0, 30), member(1, 31)];
+        let pushes = members
+            .into_iter()
+            .map(|member| {
+                (
+                    member,
+                    Push {
+                        learner_id: member.learner_id,
+                        fragment_id: fragment as u32,
+                        global_step: step,
+                        round_attempt: 1,
+                        base_version,
+                        local_step: policy_round,
+                        c_steps: 1,
+                        c_tokens: u64::from(member.learner_id + 1) * policy_round * 100,
+                        outer_gradient: vec![policy_round as f32 + 2.0 * member.learner_id as f32],
+                    },
+                )
+            })
+            .collect();
+        Round {
+            t: step,
+            p: fragment,
+            base_version,
+            attempt: 1,
+            pull: bytes::Bytes::new(),
+            started: Instant::now(),
+            expected_members: members.to_vec(),
+            quorum_deadline: Instant::now(),
+            grace_deadline: None,
+            quorum_size: 2,
+            quorum_ms: Some(0),
+            grace_ms: Some(0),
+            pushes,
+        }
+    }
+
     fn chunked_inner_type(frame: &OutFrame) -> u8 {
         assert_eq!(frame.msg_type, MSG_CHUNK);
         assert_eq!(frame.parts.len(), 2);
@@ -2637,8 +3276,7 @@ mod tests {
         let learner = member(0, 30);
 
         let mut nonterminal_state = broadcast_test_state(DTYPE_F32);
-        let (nonterminal_group, mut nonterminal_rx) =
-            streaming_test_group(DTYPE_F32, false);
+        let (nonterminal_group, mut nonterminal_rx) = streaming_test_group(DTYPE_F32, false);
         let nonterminal_registry = registry_with_group(nonterminal_group);
         let mut nonterminal_sync_secs = 0.0;
         complete_round(
@@ -2675,7 +3313,9 @@ mod tests {
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
 
-        send_final_cut(&terminal_state, &terminal_group).await.unwrap();
+        send_final_cut(&terminal_state, &terminal_group)
+            .await
+            .unwrap();
         let final_fragment = terminal_rx.try_recv().unwrap();
         assert_eq!(chunked_inner_type(&final_fragment), MSG_FINAL_FRAGMENT);
         assert_eq!(terminal_rx.try_recv().unwrap().msg_type, MSG_FINAL_MANIFEST);
@@ -2683,6 +3323,170 @@ mod tests {
             terminal_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn policy_sweep_checkpoint_resume_mid_sweep_does_not_double_account() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut config = sweep_test_config(2, 2);
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.checkpoint_every = 1;
+        let mut sync_seconds = 0.0;
+
+        let mut before_crash = two_fragment_sweep_state();
+        complete_round(
+            &config,
+            &mut before_crash,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(1, 0, 1, 321, learner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(before_crash.global_step, 1);
+        assert_eq!(before_crash.versions, vec![1, 0]);
+        let partial = before_crash.ledger.get(&0).unwrap();
+        assert_eq!((partial.merges, partial.steps, partial.tokens), (1, 0, 0));
+        assert!(checkpoint.is_file());
+        assert_eq!(
+            chunked_inner_type(&frames.try_recv().unwrap()),
+            MSG_BCAST_FRAGMENT
+        );
+
+        // Simulate a process crash after the first fragment's durable commit.
+        let mut resumed = two_fragment_sweep_state();
+        resumed.load_checkpoint(&checkpoint).unwrap();
+        validate_resumed_policy_sweep(&config, &resumed).unwrap();
+        assert_eq!(resumed.global_step, 1);
+        assert_eq!(resumed.versions, vec![1, 0]);
+        let partial = resumed.ledger.get(&0).unwrap();
+        assert_eq!((partial.merges, partial.steps, partial.tokens), (1, 0, 0));
+
+        complete_round(
+            &config,
+            &mut resumed,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(2, 1, 1, 321, learner),
+        )
+        .await
+        .unwrap();
+        let complete = resumed.ledger.get(&0).unwrap();
+        assert_eq!(
+            (complete.merges, complete.steps, complete.tokens),
+            (2, 1, 321)
+        );
+        assert_eq!(resumed.global_step, 2);
+        assert_eq!(resumed.versions, vec![1, 2]);
+
+        let mut final_reload = two_fragment_sweep_state();
+        final_reload.load_checkpoint(&checkpoint).unwrap();
+        validate_resumed_policy_sweep(&config, &final_reload).unwrap();
+        let complete = final_reload.ledger.get(&0).unwrap();
+        assert_eq!(
+            (complete.merges, complete.steps, complete.tokens),
+            (2, 1, 321)
+        );
+        assert_eq!(final_reload.params, resumed.params);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn two_learner_three_fragment_sweeps_resume_at_every_mid_sweep_cut_exactly() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-matrix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let registry = registry_with_group(test_group(member(0, 30)));
+        let mut config = sweep_test_config(3, 6);
+        config.learners = 2;
+        config.quorum = 2;
+        let mut sync_seconds = 0.0;
+
+        let uninterrupted_path = directory.join("uninterrupted.ckpt");
+        config.checkpoint_path = Some(uninterrupted_path.clone());
+        let mut uninterrupted = three_fragment_sweep_state();
+        for step in 1..=6 {
+            complete_round(
+                &config,
+                &mut uninterrupted,
+                &registry,
+                &mut sync_seconds,
+                two_learner_sweep_round(step),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(uninterrupted.versions, vec![4, 5, 6]);
+        assert_eq!(uninterrupted.params, vec![vec![-5.0]; 3]);
+        for learner_id in 0..2 {
+            let ledger = uninterrupted.ledger.get(&learner_id).unwrap();
+            assert_eq!(ledger.merges, 6);
+            assert_eq!(ledger.steps, 2);
+            assert_eq!(ledger.tokens, u64::from(learner_id + 1) * (100 + 200));
+        }
+        let uninterrupted_bytes = std::fs::read(&uninterrupted_path).unwrap();
+
+        for crash_step in [1, 2, 4, 5] {
+            let checkpoint = directory.join(format!("resume-{crash_step}.ckpt"));
+            config.checkpoint_path = Some(checkpoint.clone());
+            let mut before_crash = three_fragment_sweep_state();
+            for step in 1..=crash_step {
+                complete_round(
+                    &config,
+                    &mut before_crash,
+                    &registry,
+                    &mut sync_seconds,
+                    two_learner_sweep_round(step),
+                )
+                .await
+                .unwrap();
+            }
+            for learner_id in 0..2 {
+                let ledger = before_crash.ledger.get(&learner_id).unwrap();
+                let completed_sweeps = crash_step / 3;
+                let expected_tokens =
+                    u64::from(learner_id + 1) * 100 * (1..=completed_sweeps).sum::<u64>();
+                assert_eq!(ledger.merges, crash_step);
+                assert_eq!(ledger.steps, completed_sweeps);
+                assert_eq!(ledger.tokens, expected_tokens);
+            }
+
+            let mut resumed = three_fragment_sweep_state();
+            resumed.load_checkpoint(&checkpoint).unwrap();
+            validate_resumed_policy_sweep(&config, &resumed).unwrap();
+            for step in crash_step + 1..=6 {
+                complete_round(
+                    &config,
+                    &mut resumed,
+                    &registry,
+                    &mut sync_seconds,
+                    two_learner_sweep_round(step),
+                )
+                .await
+                .unwrap();
+            }
+            validate_resumed_policy_sweep(&config, &resumed).unwrap();
+            assert_eq!(std::fs::read(&checkpoint).unwrap(), uninterrupted_bytes);
+        }
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[tokio::test]
@@ -3125,9 +3929,9 @@ mod tests {
             0.5,
             44,
             &[7; 32],
+            None,
         );
         let text = std::fs::read_to_string(&path).unwrap();
-        std::fs::remove_file(&path).ok();
         assert!(text.contains("\"expected\":[0,1]"));
         assert!(text.contains("\"expected_members\":[{\"id\":0,\"generation\":10}"));
         assert!(text.contains("\"responded\":[0]"));
@@ -3140,5 +3944,166 @@ mod tests {
         assert!(text.contains("\"delta_semantics\":\"local_minus_raw_anchor\""));
         assert!(text.contains(&format!("\"sync/layout_hash\":\"{}\"", "07".repeat(32))));
         assert!(!text.contains("\"layout_hash\":"));
+        assert!(!text.contains("\"policy_round\":"));
+        assert!(!text.contains("\"accounted_c_steps\":"));
+
+        std::fs::remove_file(&path).unwrap();
+        let push = pushes.values_mut().next().unwrap();
+        push.global_step = 5;
+        push.local_step = 2;
+        push.c_steps = 1;
+        append_tape(
+            &path,
+            5,
+            1,
+            0,
+            1,
+            &[member(0, 10)],
+            1,
+            Some(1),
+            Some(0),
+            2,
+            &pushes,
+            0.5,
+            3,
+            &[7; 32],
+            Some(3),
+        );
+        let partial = std::fs::read_to_string(&path).unwrap();
+        assert!(partial.contains("\"policy_round\":2"));
+        assert!(partial.contains("\"sweep_fragment\":1"));
+        assert!(partial.contains("\"sweep_fragments\":3"));
+        assert!(partial.contains("\"sweep_complete\":false"));
+        assert!(partial.contains("\"accounted_c_steps\":0"));
+        assert!(partial.contains("\"accounted_c_tokens\":0"));
+
+        std::fs::remove_file(&path).unwrap();
+        pushes.values_mut().next().unwrap().global_step = 6;
+        append_tape(
+            &path,
+            6,
+            2,
+            0,
+            1,
+            &[member(0, 10)],
+            1,
+            Some(1),
+            Some(0),
+            2,
+            &pushes,
+            0.5,
+            3,
+            &[7; 32],
+            Some(3),
+        );
+        let complete = std::fs::read_to_string(&path).unwrap();
+        assert!(complete.contains("\"policy_round\":2"));
+        assert!(complete.contains("\"sweep_fragment\":2"));
+        assert!(complete.contains("\"sweep_complete\":true"));
+        assert!(complete.contains("\"accounted_c_steps\":1"));
+        assert!(complete.contains("\"accounted_c_tokens\":40"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn policy_sweep_ledger_snapshots_are_fsynced_idempotent_reconciliation_cuts() {
+        let path = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-ledger-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // A killed diagnostic append may leave an unterminated line. The
+        // authoritative snapshot must remain independently parseable.
+        std::fs::write(&path, b"{\"torn\":").unwrap();
+        let mut state = two_fragment_sweep_state();
+        state.global_step = 2;
+        state.versions = vec![1, 2];
+        state.record_fragment_merge(0, 1, 321, false);
+        state.record_fragment_merge(0, 1, 321, true);
+
+        append_policy_sweep_ledger_snapshot(&path, &state, "resume").unwrap();
+        append_policy_sweep_ledger_snapshot(&path, &state, "resume").unwrap();
+        append_policy_sweep_ledger_snapshot(&path, &state, "complete").unwrap();
+        append_policy_sweep_ledger_snapshot(&path, &state, "complete").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"event\":\"policy_sweep_ledger\"").count(), 2);
+        assert_eq!(text.matches(":resume:2\"").count(), 1);
+        assert_eq!(text.matches(":complete:2\"").count(), 1);
+        assert_eq!(
+            text.matches("\"ledger\":[{\"id\":0,\"merges\":2,\"steps\":1,\"tokens\":321}]")
+                .count(),
+            2
+        );
+        assert!(text.contains("\"versions\":[1,2]"));
+        assert!(text.contains("\"sweep_complete\":true"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn policy_sweep_event_tape_reports_the_enforced_equal_weights() {
+        let path = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-weights-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pushes = HashMap::from([
+            (
+                member(0, 10),
+                Push {
+                    learner_id: 0,
+                    fragment_id: 2,
+                    global_step: 3,
+                    round_attempt: 1,
+                    base_version: 0,
+                    local_step: 1,
+                    c_steps: 1,
+                    c_tokens: 10,
+                    outer_gradient: vec![1.0],
+                },
+            ),
+            (
+                member(1, 20),
+                Push {
+                    learner_id: 1,
+                    fragment_id: 2,
+                    global_step: 3,
+                    round_attempt: 1,
+                    base_version: 0,
+                    local_step: 1,
+                    c_steps: 1,
+                    c_tokens: 1_000,
+                    outer_gradient: vec![2.0],
+                },
+            ),
+        ]);
+        append_tape(
+            &path,
+            3,
+            2,
+            0,
+            1,
+            &[member(0, 10), member(1, 20)],
+            2,
+            Some(1),
+            Some(0),
+            2,
+            &pushes,
+            0.5,
+            3,
+            &[7; 32],
+            Some(3),
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"weight\":1").count(), 2);
+        assert_eq!(text.matches("\"contribution\":0.5").count(), 2);
+        assert_eq!(text.matches("\"accounted_c_steps\":1").count(), 2);
+        std::fs::remove_file(&path).ok();
     }
 }

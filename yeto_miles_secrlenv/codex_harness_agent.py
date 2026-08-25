@@ -1078,7 +1078,7 @@ class _ResponsesBridge:
         calls = message.get("tool_calls")
         if not isinstance(content, str) or not isinstance(reasoning, str) or not reasoning:
             raise CodexModelFailure("DSV4 did not return thinking content")
-        if content:
+        if content.strip():
             raise CodexModelFailure("DSV4 mixed prose with the required tool call")
         if not isinstance(calls, list) or len(calls) != 1:
             raise CodexModelFailure("DSV4 must return exactly one tool call")

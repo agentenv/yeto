@@ -97,11 +97,27 @@ sets. Learners must have separate processes, state, and checkpoints, and must
 never join one cross-island NCCL/DDP group. Their only communication uses the
 real DiLoCo/PULSE protocol over loopback or the host network.
 
-A representative layout is three 2-GPU learners, one 2-GPU inference worker,
-and a CPU synchronizer. A smaller model may instead use one GPU per learner.
-Milestone 4 is not complete until the same frozen build passes on at least two
-physical nodes; three are preferred to test `K=M-1`, real node loss,
-independent storage, and actual Ethernet latency and throughput.
+A representative later layout is three 2-GPU learners, dedicated inference
+capacity, and a CPU synchronizer. The Milestone-1 reference instead uses two
+self-contained islands because the current Miles lifecycle owns inference per
+learner: each island has one TP2 trainer and one separate TP2 inference engine.
+A smaller model may instead use one GPU per role. Milestone 4 is not complete
+until the same frozen build passes on at least two physical nodes; three are
+preferred to test `K=M-1`, real node loss, independent storage, and actual
+Ethernet latency and throughput.
+
+The initial Verda development profile uses one 8xH100 SXM5 80GB node and
+`Qwen/Qwen3.5-4B`. Run two process- and Ray-isolated islands. Island A sees
+GPUs 0-3 and Island B sees GPUs 4-7; within each island, the first pair is a TP2
+full-parameter trainer and the second pair is a dedicated TP2 SGLang engine.
+No model-parallel group crosses an island boundary; only the CPU sync protocol
+does. Qwen3.5-4B is small enough to leave useful activation and runtime headroom
+with two H100s per full-parameter learner, is directly supported by the pinned
+Miles model family, and matches the family used by the independent
+`miles-values` SAO implementation. Start deterministic replay at 4k context and
+online SecRLEnv smoke at 8k; context scaling is not part of the connector
+correctness gate. Resolve and record the immutable model revision when the
+Verda cache is staged rather than following the mutable Hub branch.
 
 For Qwen3.8-27B scale-up, start with one 8-H200 node per learner island. Select
 the within-node trainer/inference split only after a measured memory ledger and
@@ -152,6 +168,15 @@ eventually uses PULSELoCo + PULSESync.
 SAO is not included. If asynchronous single-rollout actor-critic work is
 reconsidered later, it gets a separate proposal and does not alter the GRPO
 correctness contract described here.
+
+The implementation boundary must nevertheless remain SAO-compatible. Every
+trainable tensor is role-qualified (`actor` or `critic`), while the local
+learner interface owns algorithm-specific rollout, advantage, and loss logic.
+GRPO instantiates only the actor role. A future SAO adapter may instantiate
+actor and critic roles and synchronize them through separate fragments without
+changing update versioning, PULSE transport, inference publication, or the
+SecRLEnv reward contract. This is compatibility scaffolding, not permission to
+mix SAO into the GRPO reference experiments.
 
 ## Target architecture
 

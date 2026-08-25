@@ -34,11 +34,16 @@ from yeto.rl import (
     SGLANG_REPOSITORY,
 )
 from yeto.rl import learner as rl_learner
-from yeto.rl.codex_backend import QWEN38_MODEL, QWEN38_REVISION
+from yeto.rl.codex_backend import (
+    QWEN35_MODEL,
+    QWEN35_REVISION,
+    QWEN38_MODEL,
+    QWEN38_REVISION,
+)
 from yeto.rl.core import CanonicalTensorSpec
 from yeto.rl.decoupled import DecoupledBridgeConfig
 from yeto.rl.learner import build_miles_argv
-from yeto.rl.miles import verify_miles_revision
+from yeto.rl.miles import miles_execution_source_sha256, verify_miles_revision
 
 
 def _args(extra=()):
@@ -1328,6 +1333,28 @@ def test_miles_runtime_requires_exact_detached_clean_checkout(tmp_path, monkeypa
         verify_miles_revision(root)
 
 
+def test_miles_runtime_accepts_only_exact_staged_source(tmp_path, monkeypatch):
+    root = tmp_path / "miles-source"
+    (root / "miles").mkdir(parents=True)
+    (root / "miles_plugins").mkdir()
+    (root / "train.py").write_text("pass\n", encoding="utf-8")
+    package = root / "miles/__init__.py"
+    package.write_text("VERSION = 1\n", encoding="utf-8")
+    (root / "miles_plugins/__init__.py").write_text("", encoding="utf-8")
+    expected = miles_execution_source_sha256(root)
+    monkeypatch.setattr(
+        "yeto.rl.miles.importlib.import_module",
+        lambda _name: types.SimpleNamespace(__file__=package),
+    )
+    assert (
+        verify_miles_revision(root, expected_source_sha256=expected)
+        == root.resolve()
+    )
+    package.write_text("VERSION = 2\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="source mismatch"):
+        verify_miles_revision(root, expected_source_sha256=expected)
+
+
 def test_eval_dataset_identity_is_verified_again_inside_the_learner(tmp_path):
     prompts = tmp_path / "flaky100.jsonl"
     prompts.write_text('{"messages": []}\n', encoding="utf-8")
@@ -1776,6 +1803,239 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
             provider=provider,
             target_modules=["qkv_proj", "out_proj"],
         )
+
+
+def test_miles_dense_full_parameter_argv_and_runtime_contract(
+    monkeypatch,
+    tmp_path,
+):
+    captured = {}
+
+    class Provider:
+        hidden_size = 16
+        num_attention_heads = 4
+        num_layers = 2
+        ffn_hidden_size = 32
+        num_query_groups = 2
+        kv_channels = 4
+        seq_length = 256
+        vocab_size = 64
+        layernorm_epsilon = 1e-6
+        position_embedding_type = "rope"
+
+        def finalize(self):
+            captured["finalized"] = True
+
+    class Bridge:
+        def to_megatron_provider(self, load_weights):
+            assert load_weights is False
+            return Provider()
+
+    class AutoBridge:
+        @staticmethod
+        def from_hf_pretrained(*_args, **_kwargs):
+            return Bridge()
+
+    async def train(args):
+        captured["miles_args"] = args
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("full mode must not derive LoRA state")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "megatron.bridge",
+        types.SimpleNamespace(AutoBridge=AutoBridge),
+    )
+    monkeypatch.setitem(sys.modules, "train", types.SimpleNamespace(train=train))
+    monkeypatch.setattr(rl_learner, "derive_peft_lora_specs", forbidden)
+    monkeypatch.setattr(rl_learner, "adapter_targets", forbidden)
+    monkeypatch.setattr(rl_learner, "megatron_adapter_targets", forbidden)
+    monkeypatch.setattr(
+        rl_learner,
+        "_parse_miles_args",
+        lambda argv: argparse.Namespace(argv=argv),
+    )
+    monkeypatch.delenv("MILES_EXPERIMENTAL_FT_TRAINER", raising=False)
+    monkeypatch.delenv(
+        "MILES_ALLOW_MISSING_UNQUANTIZED_WEIGHT_UPDATE_HOOKS",
+        raising=False,
+    )
+
+    model = tmp_path / "model"
+    model.mkdir()
+    config = model / "config.json"
+    config.write_text('{"model_type":"qwen3"}\n', encoding="utf-8")
+    ref_load = tmp_path / "torch-dist"
+    ref_load.mkdir()
+    (ref_load / "latest_checkpointed_iteration.txt").write_text(
+        "release\n", encoding="utf-8"
+    )
+    audit = tmp_path / "audit"
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text('{"messages":[]}\n', encoding="utf-8")
+    args = argparse.Namespace(
+        parameter_mode="full",
+        sync_preset="dense-full",
+        model=QWEN35_MODEL,
+        model_revision=QWEN35_REVISION,
+        data="org/data",
+        data_revision="b" * 40,
+        rollout_model_revision=None,
+        miles_source_sha256="e" * 64,
+        megatron_ref_load=str(ref_load),
+        reward_sha256="c" * 64,
+        source_sha256="d" * 64,
+        reward_function="pkg.reward:score",
+        completed_groups_path=str(tmp_path / "island.pt"),
+        event_tape=str(tmp_path / "events.jsonl"),
+        audit_dir=str(audit),
+        trust_remote_code=True,
+        learner_id=1,
+        num_learners=2,
+        learner_generation=0,
+        syncer="127.0.0.1:29400",
+            global_rounds=3,
+            fragments=2,
+            parameter_layout_sha256="f" * 64,
+            total_fragment_steps=6,
+        local_horizon=1,
+        optimizer_steps=1,
+        groups_per_round=2,
+        samples_per_group=2,
+        over_sampling_batch_size=2,
+        rollout_max_response_len=64,
+        seq_len=128,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=2,
+        tensor_parallel=2,
+        pipeline_parallel=1,
+        expert_parallel=None,
+        rollout_num_gpus=2,
+        rollout_num_gpus_per_engine=1,
+        sglang_tp_size=1,
+        inner_lr=1e-5,
+        seed=7,
+        wan_streams=4,
+        lora_r=None,
+        lora_targets=None,
+        custom_generate_function_path=None,
+        custom_agent_function_path=None,
+        use_session_server=True,
+        session_server_ip=None,
+        session_server_port=[31002, 31003],
+        tito_model=None,
+        tito_allowed_append_roles=None,
+        rl_model_recipe="generic",
+        expert_full_count=0,
+        eval_only=False,
+    )
+
+    rl_learner.run_miles(
+        args,
+        model_path=model,
+        prompt_path=prompts,
+    )
+
+    miles_args = captured["miles_args"]
+    argv = miles_args.argv
+    for flag in (
+        "--lora-rank",
+        "--lora-alpha",
+        "--lora-dropout",
+        "--lora-type",
+        "--target-modules",
+        "--lora-base-cpu-backup",
+        "--sglang-max-lora-rank",
+    ):
+        assert flag not in argv
+    assert argv[argv.index("--num-rollout") + 1] == "3"
+    assert argv[argv.index("--ref-load") + 1] == str(ref_load.resolve())
+    assert argv[argv.index("--actor-num-gpus-per-node") + 1] == "2"
+    assert argv[argv.index("--tensor-model-parallel-size") + 1] == "2"
+    assert argv[argv.index("--pipeline-model-parallel-size") + 1] == "1"
+    assert "--colocate" not in argv
+    assert argv[argv.index("--rollout-num-gpus") + 1] == "2"
+    assert argv[argv.index("--rollout-num-gpus-per-engine") + 1] == "1"
+    assert argv[argv.index("--sglang-tp-size") + 1] == "1"
+    assert argv[argv.index("--model-name") + 1] == "qwen3_5"
+    spec = argv.index("--spec")
+    assert argv[spec + 1 : spec + 3] == [
+        "miles_plugins.models.qwen3_5",
+        "get_qwen3_5_spec",
+    ]
+    assert "--apply-layernorm-1p" in argv
+    assert "--attention-output-gate" in argv
+    assert argv[argv.index("--attention-dropout") + 1] == "0.0"
+    assert argv[argv.index("--hidden-dropout") + 1] == "0.0"
+    assert argv[argv.index("--attention-backend") + 1] == "flash"
+    assert "--bridge-distributed-weight-sync" in argv
+    assert "--allow-missing-unquantized-weight-update-hooks" in argv
+    assert argv[argv.index("--update-weight-transfer-mode") + 1] == "broadcast"
+    assert argv[argv.index("--rollout-weight-version-format") + 1] == "yeto-policy"
+    assert argv[argv.index("--num-gpus-per-node") + 1] == "4"
+    assert (
+        argv[argv.index("--external-policy-sync-path") + 1]
+        == "yeto.rl.miles_full_parameter_dense."
+        "create_miles_full_parameter_dense_sync"
+    )
+    dense = miles_args.yeto_rl_dense_full_parameter_config
+    assert dense.component.model_revision == QWEN35_REVISION
+    assert dense.component.config_hash == hashlib.sha256(config.read_bytes()).hexdigest()
+    assert dense.wire.policy_rounds == 3
+    assert dense.wire.learner_id == 1
+    assert dense.wire.learner_generation == 0
+    assert dense.learner_generations == (0, 0)
+    assert dense.minimum_fragments == 2
+    assert miles_args.yeto_rl_num_fragments == dense.minimum_fragments
+    assert miles_args.yeto_rl_miles_source_sha256 == "e" * 64
+    assert (
+        dense.training_contract_hash
+        == miles_args.yeto_rl_dense_training_contract_sha256
+    )
+    learner_zero_argv = list(argv)
+    learner_zero_argv[learner_zero_argv.index("--rollout-seed") + 1] = "7"
+    session_port = learner_zero_argv.index("--session-server-port")
+    learner_zero_argv[session_port + 1 : session_port + 3] = ["31000", "31001"]
+    learner_zero_args = argparse.Namespace(**vars(args))
+    learner_zero_args.learner_id = 0
+    assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
+        learner_zero_args,
+        learner_zero_argv,
+        model_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
+        prompt_data_sha256=hashlib.sha256(prompts.read_bytes()).hexdigest(),
+    )
+    changed_source_args = argparse.Namespace(**vars(learner_zero_args))
+    changed_source_args.source_sha256 = "f" * 64
+    assert dense.training_contract_hash != rl_learner._dense_full_training_contract_sha256(
+        changed_source_args,
+        learner_zero_argv,
+        model_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
+        prompt_data_sha256=hashlib.sha256(prompts.read_bytes()).hexdigest(),
+    )
+    assert (
+        miles_args.external_policy_identity_setter_path
+        == "yeto.rl.miles.set_current_published_policy_identity"
+    )
+    evidence = Path(miles_args.yeto_rl_trajectory_evidence_dir)
+    assert evidence.parent == audit
+    assert evidence.is_dir() and not evidence.is_symlink()
+    assert evidence.stat().st_mode & 0o077 == 0
+    assert miles_args.external_policy_sync_run_until_stop is False
+    assert os.environ["MILES_EXPERIMENTAL_FT_TRAINER"] == "0"
+    assert "MILES_ALLOW_MISSING_UNQUANTIZED_WEIGHT_UPDATE_HOOKS" not in os.environ
+
+
+def test_dense_full_legacy_weight_hook_rejects_quantized_rollout(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        '{"model_type":"qwen3","quantization_config":{"quant_method":"fp8"}}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="require an unquantized rollout model"):
+        rl_learner._require_unquantized_dense_full_rollout_model(model)
 
 
 def test_miles_argv_preserves_mrope_provider_configuration():

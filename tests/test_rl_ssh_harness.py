@@ -548,6 +548,77 @@ def test_decoupled_oracle_checks_terminal_fragment_cut_and_fixed_roster(tmp_path
         ssh_harness._verify_decoupled(plan, checkpoint, tmp_path)
 
 
+def test_decoupled_oracle_prefers_accounted_sweep_progress(tmp_path):
+    plan, checkpoint, final_hash = _decoupled_oracle_fixture(tmp_path)
+    event_path = tmp_path / "syncer" / "events.jsonl"
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    accounted = {0: [0, 0], 1: [0, 0]}
+    for event in events:
+        complete = event["step"] % plan["learner"]["fragments"] == 0
+        for responder in event["responders"]:
+            responder["accounted_c_steps"] = responder["c_steps"] if complete else 0
+            responder["accounted_c_tokens"] = (
+                responder["c_tokens"] if complete else 0
+            )
+            accounted[responder["id"]][0] += responder["accounted_c_steps"]
+            accounted[responder["id"]][1] += responder["accounted_c_tokens"]
+    _write_jsonl(event_path, events)
+    checkpoint.ledger = {
+        learner_id: (4, steps, tokens)
+        for learner_id, (steps, tokens) in accounted.items()
+    }
+
+    assert ssh_harness._verify_decoupled(plan, checkpoint, tmp_path) == final_hash
+
+
+def test_decoupled_oracle_reconciles_missing_merge_from_final_ledger_snapshot(
+    tmp_path,
+):
+    plan, checkpoint, final_hash = _decoupled_oracle_fixture(tmp_path)
+    event_path = tmp_path / "syncer" / "events.jsonl"
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    # Simulate the exact crash window: step 2 reached the durable checkpoint,
+    # but its ordinary diagnostic append never landed.
+    events = [event for event in events if event.get("step") != 2]
+    events.append(
+        {
+            "event": "policy_sweep_ledger",
+            "event_id": (
+                f"policy-sweep-ledger:{checkpoint.layout_hash}:complete:4"
+            ),
+            "phase": "complete",
+            "protocol_version": 4,
+            "sync/layout_hash": checkpoint.layout_hash,
+            "global_step": 4,
+            "policy_round": 2,
+            "sweep_fragments": 2,
+            "sweep_complete": True,
+            "versions": [3, 4],
+            "ledger": [
+                {
+                    "id": learner_id,
+                    "merges": merges,
+                    "steps": steps,
+                    "tokens": tokens,
+                }
+                for learner_id, (merges, steps, tokens) in checkpoint.ledger.items()
+            ],
+        }
+    )
+    # A short write may leave an invalid diagnostic tail. The Rust syncer
+    # terminates that line before appending the durable snapshot.
+    ordinary, snapshot = events[:-1], events[-1]
+    event_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in ordinary)
+        + '{"step":2,"responders":'
+        + "\n"
+        + json.dumps(snapshot)
+        + "\n"
+    )
+
+    assert ssh_harness._verify_decoupled(plan, checkpoint, tmp_path) == final_hash
+
+
 def test_verify_dispatches_and_exports_with_decoupled_plan(tmp_path, monkeypatch):
     plan, checkpoint, final_hash = _decoupled_oracle_fixture(tmp_path / "fixture")
     plan_path = tmp_path / "plan.json"

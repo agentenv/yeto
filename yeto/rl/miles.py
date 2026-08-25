@@ -42,10 +42,83 @@ from .core import (
 from .decoupled import BroadcastBatch, BudgetConsolidation, FragmentSubmission
 
 
-def verify_miles_revision(root: str | Path) -> Path:
-    """Verify repository, commit, tracked files, and the imported package."""
+def miles_execution_source_sha256(root: str | Path) -> str:
+    """Hash the complete Miles Python/runtime-data source used by an RL job."""
+
+    unresolved = Path(root).expanduser()
+    if unresolved.is_symlink() or not unresolved.is_dir():
+        raise RuntimeError("Miles source root is not a real directory")
+    root = unresolved.resolve()
+    sources = [root / "train.py"]
+    for package_name in ("miles", "miles_plugins"):
+        package = root / package_name
+        if package.is_symlink() or not package.is_dir():
+            raise RuntimeError(f"Miles source package is not a real directory: {package}")
+        for path in package.rglob("*"):
+            relative = path.relative_to(root)
+            if "__pycache__" in relative.parts or path.suffix == ".pyc":
+                continue
+            if path.is_symlink():
+                raise RuntimeError(f"Miles source contains a symlink: {relative}")
+            if path.is_file():
+                sources.append(path)
+            elif not path.is_dir():
+                raise RuntimeError(f"Miles source contains a special file: {relative}")
+    if not sources[0].is_file() or sources[0].is_symlink():
+        raise RuntimeError("Miles source has no regular train.py")
+
+    digest = hashlib.sha256(b"yeto-miles-execution-source-v1\0")
+    for path in sorted(sources, key=lambda value: value.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode()
+        before = path.stat()
+        payload = path.read_bytes()
+        after = path.stat()
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if identity_before != identity_after or len(payload) != after.st_size:
+            raise RuntimeError(f"Miles source changed while hashing: {relative!r}")
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
+def verify_miles_revision(
+    root: str | Path,
+    *,
+    expected_source_sha256: str | None = None,
+) -> Path:
+    """Verify either the pinned clean commit or an exact staged source tree."""
 
     root = Path(root).expanduser().resolve()
+
+    if expected_source_sha256 is not None:
+        expected = expected_source_sha256.lower()
+        if len(expected) != 64 or any(value not in _LOWER_HEX for value in expected):
+            raise ValueError("Miles source SHA256 is malformed")
+        actual = miles_execution_source_sha256(root)
+        if actual != expected:
+            raise RuntimeError(
+                f"Miles source mismatch: expected {expected}, got {actual}"
+            )
+        miles = importlib.import_module("miles")
+        package_path = Path(miles.__file__).resolve()
+        if not package_path.is_relative_to(root):
+            raise RuntimeError(
+                f"imported Miles package {package_path} is outside {root}"
+            )
+        return root
 
     def git(*args: str) -> str:
         try:
@@ -83,6 +156,85 @@ def verify_miles_revision(root: str | Path) -> Path:
 
 def _policy_token(version: int) -> str:
     return f"yeto:{version}"
+
+
+_PUBLISHED_POLICY_IDENTITY_ATTRIBUTE = "_yeto_rl_current_published_policy_identity"
+_LOWER_HEX = frozenset("0123456789abcdef")
+
+
+def _validate_published_policy_identity(
+    policy_version: Any,
+    policy_hash: Any,
+) -> tuple[int, str]:
+    if type(policy_version) is not int or policy_version < 0:
+        raise ValueError("published policy version must be a non-negative integer")
+    if (
+        type(policy_hash) is not str
+        or len(policy_hash) != 64
+        or any(character not in _LOWER_HEX for character in policy_hash)
+    ):
+        raise ValueError("published policy hash must be a lowercase SHA256")
+    return policy_version, policy_hash
+
+
+def set_current_published_policy_identity(
+    args: Any,
+    *,
+    policy_version: int,
+    policy_hash: str,
+) -> tuple[int, str]:
+    """Expose an inference-ready policy identity to trajectory admission.
+
+    The full-parameter policy hook calls this only after the exact policy has
+    been applied atomically to Miles and published successfully to SGLang.
+    """
+
+    identity = _validate_published_policy_identity(policy_version, policy_hash)
+    previous = getattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, None)
+    if previous is not None:
+        if type(previous) is not tuple or len(previous) != 2:
+            raise RuntimeError("current published policy identity is malformed")
+        try:
+            previous_version, previous_hash = _validate_published_policy_identity(
+                *previous
+            )
+        except ValueError as error:
+            raise RuntimeError(
+                "current published policy identity is malformed"
+            ) from error
+        if policy_version < previous_version:
+            raise RuntimeError("published policy identity cannot move backwards")
+        if policy_version == previous_version and policy_hash != previous_hash:
+            raise RuntimeError("published policy hash changed at the same version")
+    setattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, identity)
+    # The RolloutManager owns a serialized args namespace.  Installing the
+    # identity through its remote setter is therefore also the only reliable
+    # way to tell evaluation which exact published policy it is sampling.
+    args.yeto_rl_eval_policy_version = policy_version
+    args.yeto_rl_eval_policy_hash = policy_hash
+    return identity
+
+
+def get_current_published_policy_identity(
+    args: Any,
+    *,
+    expected_policy_version: int,
+) -> tuple[int, str]:
+    """Return the exact inference-ready identity or fail closed."""
+
+    _validate_published_policy_identity(expected_policy_version, "0" * 64)
+    identity = getattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, None)
+    if type(identity) is not tuple or len(identity) != 2:
+        raise RuntimeError("Miles has no current published policy identity")
+    try:
+        policy_version, policy_hash = _validate_published_policy_identity(*identity)
+    except ValueError as error:
+        raise RuntimeError("current published policy identity is malformed") from error
+    if policy_version != expected_policy_version:
+        raise RuntimeError(
+            "current published policy version does not match the rollout"
+        )
+    return policy_version, policy_hash
 
 
 def _version_from_token(token: object) -> int:
@@ -463,9 +615,7 @@ class _SecRLEnvRetryDataSource:
             not isinstance(infrastructure_503_retries, Mapping)
             or set(infrastructure_503_retries) != expected_indices
             or any(
-                type(index) is not int
-                or type(value) is not int
-                or value not in {0, 1}
+                type(index) is not int or type(value) is not int or value not in {0, 1}
                 for index, value in infrastructure_503_retries.items()
             )
         ):
@@ -535,9 +685,7 @@ def _secrlenv_generate_with_cleanup(
             else:
                 terminal_error = error
             try:
-                abort_task = asyncio.create_task(
-                    sglang_rollout.abort(args, rollout_id)
-                )
+                abort_task = asyncio.create_task(sglang_rollout.abort(args, rollout_id))
                 done, _pending = await asyncio.wait(
                     {abort_task},
                     timeout=_SECRLENV_TERMINAL_CLEANUP_TIMEOUT_SECONDS,
@@ -986,6 +1134,31 @@ def _attach_eval_scalar_metrics(output: Any) -> list[dict[str, Any]]:
     return results
 
 
+def _persist_trajectory_evidence(args: Any, rollout_id: int, groups: Any) -> None:
+    """Persist the closed accepted batch before Miles discards Sample metadata."""
+
+    directory = getattr(args, "yeto_rl_trajectory_evidence_dir", None)
+    if directory is None:
+        return
+    _, policy_hash = get_current_published_policy_identity(
+        args,
+        expected_policy_version=rollout_id,
+    )
+    reward_hash = getattr(args, "yeto_rl_reward_sha256", None)
+    from .trajectory_evidence import (
+        build_trajectory_batch_evidence,
+        write_trajectory_batch_evidence,
+    )
+
+    evidence = build_trajectory_batch_evidence(
+        groups,
+        rollout_id=rollout_id,
+        behavior_policy_hash=policy_hash,
+        reward_contract_hash=reward_hash,
+    )
+    write_trajectory_batch_evidence(directory, evidence)
+
+
 def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = False):
     """Keep Miles rollout, adding group/version queue contracts."""
 
@@ -1039,8 +1212,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
     finally:
         if (
             retry_callback is not None
-            and getattr(args, "_yeto_secrlenv_retry_callback", None)
-            == retry_callback
+            and getattr(args, "_yeto_secrlenv_retry_callback", None) == retry_callback
         ):
             del args._yeto_secrlenv_retry_callback
         if payload_filter is not None and upstream_logger is not None:
@@ -1049,6 +1221,16 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
         policy_version = int(getattr(args, "yeto_rl_eval_policy_version", -1))
         if policy_version < 0:
             raise RuntimeError("Miles evaluation has no applied policy version")
+        policy_hash = getattr(args, "yeto_rl_eval_policy_hash", None)
+        if getattr(args, "yeto_rl_sync_preset", None) == "dense-full":
+            identity = get_current_published_policy_identity(
+                args,
+                expected_policy_version=policy_version,
+            )
+            if identity is None or identity[1] != policy_hash:
+                raise RuntimeError(
+                    "dense Miles evaluation has no exact published policy identity"
+                )
         for result in _attach_eval_scalar_metrics(output):
             _append_rl_event(
                 args,
@@ -1056,6 +1238,11 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
                     "event": "rl_eval_result",
                     "rollout_id": int(rollout_id),
                     "policy_version": policy_version,
+                    **(
+                        {"sync/global_policy_hash": policy_hash}
+                        if isinstance(policy_hash, str)
+                        else {}
+                    ),
                     **result,
                 },
             )
@@ -1072,6 +1259,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
         except StrictRlInvariantError as error:
             _record_strict_failure(args, error)
             raise
+        _persist_trajectory_evidence(args, rollout_id, output.samples)
         consumed = {_group_indices(group) for group in output.samples}
         data_source.buffer[:] = [
             group
@@ -1093,7 +1281,9 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
         }
         dynamic_stats = getattr(args, "_yeto_dynamic_sampling_stats", None) or {}
         retry_stats_value = getattr(args, "_yeto_secrlenv_retry_stats", None)
-        retry_stats = retry_stats_value if isinstance(retry_stats_value, Mapping) else {}
+        retry_stats = (
+            retry_stats_value if isinstance(retry_stats_value, Mapping) else {}
+        )
         retry_attempts = int(retry_stats.get("replacement_attempts", 0))
         nontrainable_groups = int(retry_stats.get("nontrainable_groups", 0))
         generated_groups = int(
@@ -1130,9 +1320,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
                 "pending_groups",
                 "failed_groups",
             ):
-                round_metrics[f"rl/secrlenv/{name}"] = float(
-                    retry_stats.get(name, 0)
-                )
+                round_metrics[f"rl/secrlenv/{name}"] = float(retry_stats.get(name, 0))
         bounded_state = getattr(args, "_yeto_bounded_filter_state", None)
         if isinstance(bounded_state, Mapping):
             round_metrics["rl/dynamic_filter/forced_groups"] = float(

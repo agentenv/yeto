@@ -156,7 +156,14 @@ def encode_hello(
     layout: FragmentLayout,
     num_streams: int,
     connection_generation: int = 0,
+    session_contract_hash: bytes | None = None,
 ) -> bytes:
+    if session_contract_hash is None:
+        # Generic/legacy callers still bind the session to the semantic tensor
+        # layout. Restricted profiles may supply a stronger opaque contract.
+        session_contract_hash = layout_fingerprint(layout)
+    if not isinstance(session_contract_hash, bytes) or len(session_contract_hash) != 32:
+        raise ValueError("session contract hash must be exactly 32 bytes")
     parts = [
         _HELLO_HEAD.pack(
             PROTOCOL_VERSION,
@@ -175,6 +182,7 @@ def encode_hello(
             dims = [d for name, _ in frag.tensors for d in frag.shapes[name]]
             parts.append(struct.pack(f"<{len(dims)}Q", *dims))
     parts.append(layout_fingerprint(layout))
+    parts.append(session_contract_hash)
     parts.append(struct.pack("<H", num_streams))
     return b"".join(parts)
 
@@ -264,21 +272,70 @@ class PullRequest:
 class BcastFragment:
     fragment_id: int
     version: int
-    data: bytes | memoryview  # raw tensor buffer in the session dtype
+    data: object  # raw tensor buffer, or a typed object-store reference bundle
     received_at: float = field(default_factory=time.monotonic, compare=False)
+    payload_hash: bytes | None = field(default=None, compare=False)
+    stored: bool = field(default=False, compare=False)
+    discard: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
 class FinalFragment:
     fragment_id: int
     version: int
-    data: bytes | memoryview  # authoritative coordinator tensor buffer, always f32
+    data: object  # raw f32 tensor buffer, or a typed object-store reference bundle
+    payload_hash: bytes | None = field(default=None, compare=False)
+    stored: bool = field(default=False, compare=False)
+    discard: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class FinalManifest:
     global_step: int
     versions: tuple[int, ...]
+
+
+@dataclass
+class StreamedInboundPayload:
+    """One validated tensor payload committed directly into a typed sink."""
+
+    data: object
+    payload_hash: bytes
+    discard: Callable[[], None] | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.payload_hash, bytes) or len(self.payload_hash) != 32:
+            raise ValueError("streamed inbound payload hash must be a SHA256")
+
+
+@dataclass
+class _StagedInboundChunk:
+    offset: int
+    nbytes: int
+    token: object | None
+
+
+@dataclass
+class _StreamedReassembly:
+    total: int
+    sink: object
+    transaction: object
+    filled: int = 0
+    ranges: list[tuple[int, int]] = field(default_factory=list)
+    pending: dict[int, _StagedInboundChunk] = field(default_factory=dict)
+    next_payload_offset: int = 0
+    msg_type: int | None = None
+    fragment_id: int | None = None
+    version: int | None = None
+    payload_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class _StreamedInboundFragment:
+    msg_type: int
+    fragment_id: int
+    version: int
+    payload: StreamedInboundPayload
 
 
 @dataclass
@@ -305,6 +362,7 @@ class SyncerClient:
         connect_timeout: float = 900.0,
         max_reconnects: int | None = None,
         finalization_timeout: float = FINALIZATION_TIMEOUT,
+        session_contract_hash: bytes | None = None,
     ):
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
@@ -314,11 +372,16 @@ class SyncerClient:
             raise ValueError("layout must contain at least one fragment")
         if not 0 <= num_streams <= 256:
             raise ValueError(f"num_streams must be in [0, 256], got {num_streams}")
+        if session_contract_hash is None:
+            session_contract_hash = layout_fingerprint(layout)
+        if not isinstance(session_contract_hash, bytes) or len(session_contract_hash) != 32:
+            raise ValueError("session contract hash must be exactly 32 bytes")
         self.addr = addr
         self.learner_id = learner_id
         self.layout = layout
         self.dtype = dtype
         self.num_streams = num_streams
+        self.session_contract_hash = session_contract_hash
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
@@ -351,8 +414,13 @@ class SyncerClient:
         self.finalizing = threading.Event()
         self.finalized = threading.Event()
         self._final_cond = threading.Condition()
-        self._reasm: dict[int, tuple[bytearray, list[int], list[tuple[int, int]]]] = {}
+        self._reasm: dict[
+            int,
+            tuple[bytearray, list[int], list[tuple[int, int]]]
+            | _StreamedReassembly,
+        ] = {}
         self._reasm_lock = threading.Lock()
+        self._inbound_chunk_sink: object | None = None
         self._msg_id = itertools.count()
         self._rr = itertools.count()
         self._err: BaseException | None = None
@@ -417,6 +485,7 @@ class SyncerClient:
                     self.layout,
                     self.num_streams,
                     connection_generation,
+                    self.session_contract_hash,
                 ),
             )
             socks.append(control)
@@ -470,8 +539,7 @@ class SyncerClient:
                 pass
         for s in socks:
             _close_socket(s)
-        with self._reasm_lock:
-            self._reasm.clear()  # partial inbound messages died with the sockets
+        self._clear_partial_reassemblies()
         self._drain(self._pulls)  # stale pull requests; answering them is pointless
         with self._lock:
             reset_bcasts = self._reset_bcasts_on_reconnect
@@ -527,6 +595,7 @@ class SyncerClient:
             _close_socket(s)
         if self._supervisor is not None:
             self._supervisor.join(timeout=5.0)
+        self._clear_partial_reassemblies()
         with self._final_cond:
             self._final_cond.notify_all()
 
@@ -727,14 +796,40 @@ class SyncerClient:
     def drain_updates(self) -> list[BcastFragment]:
         return self._drain(self._bcasts)
 
+    def install_inbound_chunk_sink(self, sink: object | None) -> None:
+        """Select a transactional sink for future chunked fragment receives.
+
+        Switching is allowed only between complete logical messages, so a
+        reconnect or policy-boundary sink replacement cannot mix anchors.
+        """
+
+        if sink is not None:
+            required = (
+                "begin_message",
+                "bind_fragment",
+                "stage_chunk",
+                "consume_chunk",
+                "consume_staged_chunk",
+                "finish_message",
+                "abort_message",
+            )
+            if any(not callable(getattr(sink, name, None)) for name in required):
+                raise TypeError(
+                    "inbound chunk sink does not implement the transaction API"
+                )
+        with self._reasm_lock:
+            if self._reasm:
+                raise RuntimeError("cannot replace inbound chunk sink mid-message")
+            self._inbound_chunk_sink = sink
+
     def wait_for_final_fragments(
         self, timeout: float | None = None
     ) -> tuple[FinalManifest, list[FinalFragment]]:
-        """Wait for a manifest and its exact raw fragment versions.
+        """Wait for a manifest and its exact fragment versions.
 
         FINAL_MANIFEST travels on control while fragments may be striped over
-        data sockets, so either can arrive first. The retained raw cache makes
-        both orders equivalent and survives a connection-group redial.
+        data sockets, so either can arrive first. The retained payload cache
+        makes both orders equivalent and survives a connection-group redial.
         """
         timeout = self.finalization_timeout if timeout is None else timeout
         deadline = time.monotonic() + timeout
@@ -1085,7 +1180,10 @@ class SyncerClient:
                 if msg_type == MSG_CHUNK:
                     inner = self._reassemble(gen, payload)
                     if inner is not None:
-                        self._dispatch(gen, *inner)
+                        if isinstance(inner, _StreamedInboundFragment):
+                            self._dispatch_streamed(gen, inner)
+                        else:
+                            self._dispatch(gen, *inner)
                 else:
                     self._dispatch(gen, msg_type, payload)
         except (ValueError, ProtocolError) as e:
@@ -1111,7 +1209,7 @@ class SyncerClient:
 
     def _reassemble(
         self, gen: int, payload: bytes
-    ) -> tuple[int, memoryview] | None:
+    ) -> tuple[int, memoryview] | _StreamedInboundFragment | None:
         if len(payload) < _CHUNK_HEAD.size:
             raise ValueError("chunk header truncated")
         msg_id, total, offset = _CHUNK_HEAD.unpack_from(payload)
@@ -1134,8 +1232,36 @@ class SyncerClient:
             if msg_id not in self._reasm:
                 if len(self._reasm) >= MAX_PARTIAL_MESSAGES:
                     raise ValueError("too many partial chunked messages")
-                self._reasm[msg_id] = (bytearray(total), [0], [])
-            buf, filled, ranges = self._reasm[msg_id]
+                if self._inbound_chunk_sink is None:
+                    self._reasm[msg_id] = (bytearray(total), [0], [])
+                else:
+                    sink = self._inbound_chunk_sink
+                    self._reasm[msg_id] = _StreamedReassembly(
+                        total=total,
+                        sink=sink,
+                        transaction=sink.begin_message(msg_id, total),
+                    )
+            partial = self._reasm[msg_id]
+            if isinstance(partial, _StreamedReassembly):
+                if partial.total != total:
+                    self._reasm.pop(msg_id, None)
+                    self._abort_streamed_partial(partial)
+                    raise ValueError("chunk total changed within one message")
+                try:
+                    completed = self._stream_chunk_locked(
+                        msg_id,
+                        partial,
+                        offset,
+                        data,
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    self._reasm.pop(msg_id, None)
+                    self._abort_streamed_partial(partial)
+                    raise
+                if completed is not None:
+                    self._reasm.pop(msg_id, None)
+                return completed
+            buf, filled, ranges = partial
             if len(buf) != total:
                 raise ValueError("chunk total changed within one message")
             if any(offset < old_end and old_start < end for old_start, old_end in ranges):
@@ -1153,6 +1279,170 @@ class SyncerClient:
             raise ValueError("corrupt reassembled frame")
         return msg_type, memoryview(buf)[_HEADER.size :]
 
+    def _stream_chunk_locked(
+        self,
+        msg_id: int,
+        partial: _StreamedReassembly,
+        offset: int,
+        data: bytes,
+    ) -> _StreamedInboundFragment | None:
+        """Validate/reorder one bounded CHUNK and feed tensor bytes to its sink."""
+
+        del msg_id
+        total = partial.total
+        end = offset + len(data)
+        if any(
+            offset < old_end and old_start < end
+            for old_start, old_end in partial.ranges
+        ):
+            raise ValueError("overlapping chunk")
+        if offset == 0:
+            tensor_start = _HEADER.size + 12
+            if len(data) < tensor_start:
+                raise ValueError("first streamed fragment chunk is header-truncated")
+            magic, msg_type, length = _HEADER.unpack_from(data)
+            if magic != MAGIC or length != total - _HEADER.size:
+                raise ValueError("corrupt streamed inner frame")
+            if msg_type not in (MSG_BCAST_FRAGMENT, MSG_FINAL_FRAGMENT):
+                raise ValueError(
+                    f"transactional CHUNK has unsupported inner type {msg_type}"
+                )
+            fragment_id, version = struct.unpack_from("<IQ", data, _HEADER.size)
+            if fragment_id >= self.layout.num_fragments:
+                raise ValueError(
+                    f"streamed fragment has unknown fragment {fragment_id}"
+                )
+            dtype = (
+                bulk_dtype(self.dtype)
+                if msg_type == MSG_BCAST_FRAGMENT
+                else DTYPE_F32
+            )
+            expected_payload = _tensor_nbytes(
+                dtype,
+                self.layout.fragments[fragment_id].numel,
+            )
+            if length != 12 + expected_payload:
+                raise ValueError(
+                    f"streamed fragment {fragment_id} has {length - 12} tensor "
+                    f"bytes, expected {expected_payload}"
+                )
+            if partial.msg_type is not None and (
+                partial.msg_type,
+                partial.fragment_id,
+                partial.version,
+                partial.payload_bytes,
+            ) != (msg_type, fragment_id, version, expected_payload):
+                raise ValueError("streamed fragment header changed")
+            partial.msg_type = msg_type
+            partial.fragment_id = fragment_id
+            partial.version = version
+            partial.payload_bytes = expected_payload
+            partial.sink.bind_fragment(
+                partial.transaction,
+                msg_type,
+                fragment_id,
+                version,
+                expected_payload,
+            )
+
+        partial.ranges.append((offset, end))
+        partial.filled += len(data)
+        tensor_start = _HEADER.size + 12
+        data_start = max(offset, tensor_start)
+        if end > data_start:
+            relative_offset = data_start - tensor_start
+            view = memoryview(data)[data_start - offset :]
+            try:
+                if (
+                    partial.msg_type is not None
+                    and relative_offset == partial.next_payload_offset
+                ):
+                    partial.sink.consume_chunk(
+                        partial.transaction,
+                        relative_offset,
+                        view,
+                    )
+                    partial.next_payload_offset += view.nbytes
+                    self._drain_staged_chunks_locked(partial)
+                else:
+                    if relative_offset in partial.pending:
+                        raise ValueError("duplicate streamed tensor chunk offset")
+                    token = partial.sink.stage_chunk(partial.transaction, view)
+                    if token is None:
+                        raise RuntimeError(
+                            "inbound chunk sink returned no staged object"
+                        )
+                    partial.pending[relative_offset] = _StagedInboundChunk(
+                        relative_offset,
+                        view.nbytes,
+                        token,
+                    )
+            finally:
+                view.release()
+
+        if partial.filled < total:
+            return None
+        if partial.filled != total:
+            raise ValueError("chunk byte count exceeds frame length")
+        if (
+            partial.msg_type is None
+            or partial.fragment_id is None
+            or partial.version is None
+            or partial.payload_bytes is None
+        ):
+            raise ValueError("streamed fragment completed without its header")
+        self._drain_staged_chunks_locked(partial)
+        if partial.pending or partial.next_payload_offset != partial.payload_bytes:
+            raise ValueError("streamed fragment tensor coverage is incomplete")
+        committed = partial.sink.finish_message(partial.transaction)
+        if not isinstance(committed, StreamedInboundPayload):
+            raise TypeError("inbound chunk sink returned an invalid committed payload")
+        return _StreamedInboundFragment(
+            partial.msg_type,
+            partial.fragment_id,
+            partial.version,
+            committed,
+        )
+
+    @staticmethod
+    def _drain_staged_chunks_locked(partial: _StreamedReassembly) -> None:
+        while partial.next_payload_offset in partial.pending:
+            staged = partial.pending.pop(partial.next_payload_offset)
+            token = staged.token
+            if token is None:
+                raise RuntimeError("staged inbound chunk lost its object reference")
+            partial.sink.consume_staged_chunk(
+                partial.transaction,
+                staged.offset,
+                token,
+                staged.nbytes,
+            )
+            staged.token = None
+            partial.next_payload_offset += staged.nbytes
+
+    @staticmethod
+    def _abort_streamed_partial(partial: _StreamedReassembly) -> None:
+        tokens = [
+            staged.token
+            for staged in partial.pending.values()
+            if staged.token is not None
+        ]
+        partial.pending.clear()
+        partial.sink.abort_message(partial.transaction, tokens)
+
+    def _clear_partial_reassemblies(self) -> None:
+        with self._reasm_lock:
+            partials = list(self._reasm.values())
+            self._reasm.clear()
+        for partial in partials:
+            if isinstance(partial, _StreamedReassembly):
+                try:
+                    self._abort_streamed_partial(partial)
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    # Teardown must still close the entire connection group,
+                    # but retain a diagnostic if the typed sink misbehaved.
+                    self._last_err = exc
+
     def _dispatch(
         self, gen: int, msg_type: int, payload: bytes | memoryview
     ) -> None:
@@ -1164,6 +1454,97 @@ class SyncerClient:
             # receiver could pass the check, lose the race to a reconnect,
             # then publish a stale terminal manifest or shutdown afterward.
             self._dispatch_live(gen, msg_type, payload)
+
+    def _dispatch_streamed(
+        self,
+        gen: int,
+        inbound: _StreamedInboundFragment,
+    ) -> None:
+        with self._lock:
+            if gen != self._gen:
+                if inbound.payload.discard is not None:
+                    inbound.payload.discard()
+                return
+            self._dispatch_streamed_live(inbound)
+
+    def _dispatch_streamed_live(self, inbound: _StreamedInboundFragment) -> None:
+        fragment_id = inbound.fragment_id
+        version = inbound.version
+        committed = inbound.payload
+        digest = committed.payload_hash
+        if inbound.msg_type == MSG_BCAST_FRAGMENT:
+            with self._bcast_lock:
+                seen = self._bcast_seen[fragment_id]
+                if seen is not None:
+                    seen_version, seen_digest = seen
+                    if version < seen_version:
+                        if committed.discard is not None:
+                            committed.discard()
+                        return
+                    if version == seen_version:
+                        if digest != seen_digest:
+                            if committed.discard is not None:
+                                committed.discard()
+                            raise ProtocolError(
+                                "conflicting BCAST_FRAGMENT payloads for fragment "
+                                f"{fragment_id} version {version}"
+                            )
+                        if committed.discard is not None:
+                            committed.discard()
+                        return
+                self._bcast_seen[fragment_id] = (version, digest)
+                self._bcasts.put(
+                    BcastFragment(
+                        fragment_id,
+                        version,
+                        committed.data,
+                        payload_hash=digest,
+                        stored=True,
+                        discard=committed.discard,
+                    )
+                )
+            return
+        if inbound.msg_type == MSG_FINAL_FRAGMENT:
+            update = FinalFragment(
+                fragment_id,
+                version,
+                committed.data,
+                payload_hash=digest,
+                stored=True,
+                discard=committed.discard,
+            )
+            with self._final_cond:
+                current = self._final_fragments.get(fragment_id)
+                if current is not None:
+                    current_digest = current.payload_hash
+                    if current_digest is None:
+                        current_digest = hashlib.sha256(
+                            memoryview(current.data).cast("B")
+                        ).digest()
+                    if version < current.version:
+                        if committed.discard is not None:
+                            committed.discard()
+                        return
+                    if version == current.version:
+                        if digest != current_digest:
+                            if committed.discard is not None:
+                                committed.discard()
+                            self._set_protocol_error(
+                                "conflicting FINAL_FRAGMENT payloads for fragment "
+                                f"{fragment_id} version {version}"
+                            )
+                            return
+                        if committed.discard is not None:
+                            committed.discard()
+                        return
+                self._final_fragments[fragment_id] = update
+                self._final_cond.notify_all()
+            return
+        if committed.discard is not None:
+            committed.discard()
+        self._set_protocol_error(
+            f"unsupported streamed syncer message type {inbound.msg_type}"
+        )
 
     def _dispatch_live(
         self, gen: int, msg_type: int, payload: bytes | memoryview
@@ -1249,13 +1630,19 @@ class SyncerClient:
                 )
                 return
             update = FinalFragment(fid, version, payload[12:])
+            update_digest = hashlib.sha256(memoryview(update.data).cast("B")).digest()
             with self._final_cond:
                 current = self._final_fragments.get(fid)
                 if current is not None:
                     if version < current.version:
                         return
                     if version == current.version:
-                        if update.data != current.data:
+                        current_digest = current.payload_hash
+                        if current_digest is None:
+                            current_digest = hashlib.sha256(
+                                memoryview(current.data).cast("B")
+                            ).digest()
+                        if update_digest != current_digest:
                             self._set_protocol_error(
                                 "conflicting FINAL_FRAGMENT payloads for fragment "
                                 f"{fid} version {version}"

@@ -48,6 +48,29 @@ assert adapter.BACKEND_CHAT_TEMPLATE_KWARGS == {
     assert result.returncode == 0, result.stderr
 
 
+def test_stock_codex_qwen35_adapter_process_binds_exact_fixed_profile():
+    environment = dict(os.environ)
+    environment["YETO_CODEX_CHAT_TEMPLATE"] = "qwen35"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from yeto_miles_secrlenv import codex_harness_agent as adapter
+assert adapter.BACKEND_MODEL == "qwen35"
+assert adapter.BACKEND_REASONING_EFFORT == "xhigh"
+assert adapter.BACKEND_CHAT_TEMPLATE_KWARGS == {"clear_thinking": False}
+""",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def _completion(
     name: str,
     raw_arguments: str,
@@ -356,6 +379,43 @@ def test_miles_fake_stream_round_trips_usage_reasoning_and_tool_call():
             }
         ],
     }
+
+
+def test_completion_accepts_parser_whitespace_but_rejects_real_prose(monkeypatch):
+    _set_bridge_env(monkeypatch)
+    whitespace_completion = _completion(
+        "terminal.exec",
+        '{"command":"id"}',
+        "call-whitespace",
+        "inspect",
+        32,
+    )
+    whitespace_completion["choices"][0]["message"]["content"] = "\n\n"
+    bridge = harness._ResponsesBridge(
+        "http://127.0.0.1:1",
+        "task",
+        {"max_tokens": 64},
+        harness.legacy.AgentMetrics(),
+        max_seq_len=None,
+    )
+
+    output = bridge._translate_completion(whitespace_completion)
+
+    assert output[-1]["type"] == "function_call"
+    assert output[-1]["name"] == "terminal_exec"
+    assert bridge._messages[-1]["content"] == "\n\n"
+
+    prose_completion = copy.deepcopy(whitespace_completion)
+    prose_completion["choices"][0]["message"]["content"] = "I will describe it."
+    prose_bridge = harness._ResponsesBridge(
+        "http://127.0.0.1:1",
+        "task",
+        {"max_tokens": 64},
+        harness.legacy.AgentMetrics(),
+        max_seq_len=None,
+    )
+    with pytest.raises(harness.CodexModelFailure, match="mixed prose"):
+        prose_bridge._translate_completion(prose_completion)
 
 
 def test_miles_fake_stream_preserves_length_as_sequence_policy_boundary(monkeypatch):

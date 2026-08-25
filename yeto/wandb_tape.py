@@ -37,6 +37,11 @@ log = logging.getLogger("wandb-tape")
 
 # Poll interval while the tape has no new complete line.
 POLL_SECONDS = 1.0
+POLICY_SWEEP_LEDGER_EVENT = "policy_sweep_ledger"
+
+
+def _is_merge_record(record: dict) -> bool:
+    return "step" in record and record.get("event") != POLICY_SWEEP_LEDGER_EVENT
 
 
 def tape_metrics(rec: dict) -> dict:
@@ -47,6 +52,23 @@ def tape_metrics(rec: dict) -> dict:
     zero wait and "never waited" are different states, and conflating
     them makes the grace-window curve unreadable.
     """
+    if rec.get("event") == POLICY_SWEEP_LEDGER_EVENT:
+        metrics: dict[str, float | int] = {
+            "global_step": int(rec.get("global_step", 0)),
+            "sync/ledger_snapshot": 1,
+            "sync/policy_round": int(rec.get("policy_round", 0)),
+            "sync/sweep_fragments": int(rec.get("sweep_fragments", 0)),
+            "sync/sweep_complete": int(bool(rec.get("sweep_complete", False))),
+        }
+        for entry in rec.get("ledger") or []:
+            if not isinstance(entry, dict) or "id" not in entry:
+                continue
+            learner = f"learner/{int(entry['id'])}"
+            metrics[f"{learner}/merges"] = float(entry.get("merges", 0))
+            metrics[f"{learner}/c_steps"] = float(entry.get("steps", 0))
+            metrics[f"{learner}/c_tokens"] = float(entry.get("tokens", 0))
+        return metrics
+
     responders = rec.get("responders") or []
     expected = rec.get("expected") or []
     responded = rec.get("responded") or []
@@ -65,6 +87,17 @@ def tape_metrics(rec: dict) -> dict:
         "sync/missed": len(missed),
         "sync/launch_base_version": int(rec.get("launch_base_version", 0)),
     }
+    # These exist only for the opt-in dense policy-sweep profile. Keep legacy
+    # records byte-for-byte equivalent at the W&B boundary.
+    for source, metric in (
+        ("policy_round", "sync/policy_round"),
+        ("sweep_fragment", "sync/sweep_fragment"),
+        ("sweep_fragments", "sync/sweep_fragments"),
+    ):
+        if source in rec:
+            metrics[metric] = int(rec[source])
+    if "sweep_complete" in rec:
+        metrics["sync/sweep_complete"] = int(bool(rec["sweep_complete"]))
     if expected:
         metrics["sync/participation"] = len(responded) / len(expected)
     for optional in ("quorum_ms", "grace_ms"):
@@ -81,11 +114,17 @@ def tape_metrics(rec: dict) -> dict:
         if "id" not in responder:
             continue
         learner = f"learner/{int(responder['id'])}"
+        accounted_steps = responder.get(
+            "accounted_c_steps", responder.get("c_steps", 0)
+        )
+        accounted_tokens = responder.get(
+            "accounted_c_tokens", responder.get("c_tokens", 0)
+        )
         metrics[f"{learner}/staleness"] = float(responder.get("staleness", 0))
         metrics[f"{learner}/contribution"] = float(responder.get("contribution", 0.0))
         metrics[f"{learner}/weight"] = float(responder.get("weight", 0.0))
-        metrics[f"{learner}/c_steps"] = float(responder.get("c_steps", 0))
-        metrics[f"{learner}/c_tokens"] = float(responder.get("c_tokens", 0))
+        metrics[f"{learner}/c_steps"] = float(accounted_steps)
+        metrics[f"{learner}/c_tokens"] = float(accounted_tokens)
         metrics[f"{learner}/base_version"] = float(responder.get("base_version", 0))
     # A missing island logs an explicit 0 so its participation curve shows
     # the dropout instead of flatlining at its last contributed value.
@@ -237,7 +276,8 @@ class TapeForwarder:
                 stop=self._stop,
             ):
                 self.run.log(tape_metrics(rec))
-                self.records += 1
+                if _is_merge_record(rec):
+                    self.records += 1
         except Exception as e:  # noqa: BLE001 - telemetry never breaks the run
             log.warning("event-tape forwarding stopped: %s", e)
 
@@ -253,7 +293,7 @@ class TapeForwarder:
 def replay(
     tape_path: str | os.PathLike, run: NullRun | WandbRun
 ) -> int:
-    """Log every record of a finished tape; returns the record count."""
+    """Log every record of a finished tape; returns the merge-record count."""
     count = 0
     with open(os.path.expanduser(str(tape_path)), encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -266,7 +306,8 @@ def replay(
                 log.warning("skipping unparsable event-tape line: %s", e)
                 continue
             run.log(tape_metrics(rec))
-            count += 1
+            if _is_merge_record(rec):
+                count += 1
     run.summary({"sync/tape_records": count})
     return count
 

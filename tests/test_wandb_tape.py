@@ -84,6 +84,63 @@ def test_per_island_series_are_namespaced_by_learner_id():
     assert m["learner/1/contribution"] == 0.0
 
 
+def test_policy_sweep_metrics_prefer_accounted_progress():
+    rec = dict(REAL_RECORD)
+    rec["responders"] = [
+        dict(
+            REAL_RECORD["responders"][0],
+            accounted_c_steps=0,
+            accounted_c_tokens=0,
+        )
+    ]
+    m = tape_metrics(rec)
+    assert m["learner/0/c_steps"] == 0
+    assert m["learner/0/c_tokens"] == 0
+
+
+def test_policy_sweep_merge_fields_are_routed_without_changing_legacy():
+    rec = dict(
+        REAL_RECORD,
+        policy_round=3,
+        sweep_fragment=1,
+        sweep_fragments=2,
+        sweep_complete=True,
+    )
+    metrics = tape_metrics(rec)
+    assert metrics["sync/policy_round"] == 3
+    assert metrics["sync/sweep_fragment"] == 1
+    assert metrics["sync/sweep_fragments"] == 2
+    assert metrics["sync/sweep_complete"] == 1
+
+    legacy = tape_metrics(REAL_RECORD)
+    assert "sync/policy_round" not in legacy
+    assert "sync/sweep_fragment" not in legacy
+    assert "sync/sweep_fragments" not in legacy
+    assert "sync/sweep_complete" not in legacy
+
+
+def test_policy_sweep_ledger_snapshot_keeps_its_global_step_and_accounting():
+    snapshot = {
+        "event": "policy_sweep_ledger",
+        "event_id": "policy-sweep-ledger:hash:complete:6",
+        "phase": "complete",
+        "protocol_version": 4,
+        "sync/layout_hash": "a" * 64,
+        "global_step": 6,
+        "policy_round": 2,
+        "sweep_fragments": 3,
+        "sweep_complete": True,
+        "versions": [4, 5, 6],
+        "ledger": [{"id": 0, "merges": 6, "steps": 2, "tokens": 34}],
+    }
+    metrics = tape_metrics(snapshot)
+    assert metrics["global_step"] == 6
+    assert metrics["sync/ledger_snapshot"] == 1
+    assert metrics["learner/0/merges"] == 6
+    assert metrics["learner/0/c_steps"] == 2
+    assert metrics["learner/0/c_tokens"] == 34
+
+
 def test_staleness_aggregates_across_responders():
     rec = dict(REAL_RECORD)
     rec["responders"] = [
@@ -138,7 +195,7 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
 
     consumed_responder = {
         "id", "staleness", "contribution", "weight", "c_steps", "c_tokens",
-        "base_version",
+        "accounted_c_steps", "accounted_c_tokens", "base_version",
     }
     skipped_responder = {"generation"}
     unhandled = responder_keys - consumed_responder - skipped_responder
@@ -152,6 +209,23 @@ def test_replay_logs_every_record_and_summarizes(tmp_path):
     assert replay(tape, run) == 3
     assert len(run.logged) == 3
     assert run.summaries == [{"sync/tape_records": 3}]
+
+
+def test_replay_logs_snapshot_but_counts_only_merge_rounds(tmp_path):
+    snapshot = {
+        "event": "policy_sweep_ledger",
+        "global_step": 7,
+        "policy_round": 7,
+        "sweep_fragments": 1,
+        "sweep_complete": True,
+        "ledger": [],
+    }
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text(json.dumps(REAL_RECORD) + "\n" + json.dumps(snapshot) + "\n")
+    run = _RecordingRun()
+    assert replay(tape, run) == 1
+    assert [record["global_step"] for record in run.logged] == [7, 7]
+    assert run.summaries == [{"sync/tape_records": 1}]
 
 
 def test_replay_skips_corrupt_lines(tmp_path):

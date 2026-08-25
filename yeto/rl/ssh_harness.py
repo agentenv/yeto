@@ -4052,15 +4052,24 @@ def collect(plan_path: str | Path) -> Path:
     return artifacts
 
 
-def _json_lines(path: Path) -> list[dict[str, Any]]:
+def _json_lines(
+    path: Path, *, skip_invalid: bool = False
+) -> list[dict[str, Any]]:
     try:
-        values = [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line
-        ]
-    except (OSError, json.JSONDecodeError) as exc:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
         raise HarnessError(f"cannot parse JSON event tape {path}") from exc
+    values = []
+    for line in lines:
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if skip_invalid:
+                continue
+            raise HarnessError(f"cannot parse JSON event tape {path}") from exc
+        values.append(value)
     if any(not isinstance(value, dict) for value in values):
         raise HarnessError(f"event tape {path} contains a non-object")
     return values
@@ -4245,16 +4254,30 @@ def _verify_decoupled(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
     ):
         raise HarnessError("authoritative checkpoint is not a complete decoupled cut")
 
+    syncer_records = _json_lines(
+        artifacts / "syncer" / "events.jsonl", skip_invalid=True
+    )
+    ledger_snapshots = [
+        event
+        for event in syncer_records
+        if event.get("event") == "policy_sweep_ledger"
+    ]
+    latest_ledger_snapshot = ledger_snapshots[-1] if ledger_snapshots else None
     syncer_events = sorted(
         (
             event
-            for event in _json_lines(artifacts / "syncer" / "events.jsonl")
+            for event in syncer_records
             if "step" in event
+            and event.get("event") != "policy_sweep_ledger"
         ),
         key=lambda event: event.get("step", -1),
     )
-    if [event.get("step") for event in syncer_events] != list(
-        range(1, total_steps + 1)
+    event_steps = [event.get("step") for event in syncer_events]
+    expected_steps = list(range(1, total_steps + 1))
+    if (
+        len(event_steps) != len(set(event_steps))
+        or any(step not in expected_steps for step in event_steps)
+        or (latest_ledger_snapshot is None and event_steps != expected_steps)
     ):
         raise HarnessError("syncer tape is not one complete decoupled schedule")
 
@@ -4282,22 +4305,72 @@ def _verify_decoupled(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
             learner_id = responder["id"]
             c_steps = responder.get("c_steps")
             c_tokens = responder.get("c_tokens")
+            has_accounted_steps = "accounted_c_steps" in responder
+            has_accounted_tokens = "accounted_c_tokens" in responder
+            accounted_steps = responder.get("accounted_c_steps", c_steps)
+            accounted_tokens = responder.get("accounted_c_tokens", c_tokens)
             if (
                 responder.get("base_version") != base_version
                 or not isinstance(c_steps, int)
                 or c_steps < local_horizon
                 or not isinstance(c_tokens, int)
                 or c_tokens < 0
+                or has_accounted_steps != has_accounted_tokens
+                or not isinstance(accounted_steps, int)
+                or not 0 <= accounted_steps <= c_steps
+                or not isinstance(accounted_tokens, int)
+                or not 0 <= accounted_tokens <= c_tokens
             ):
                 raise HarnessError(
                     f"decoupled syncer commit {step} has invalid progress evidence"
                 )
             ledger[learner_id][0] += 1
-            ledger[learner_id][1] += c_steps
-            ledger[learner_id][2] += c_tokens
+            ledger[learner_id][1] += accounted_steps
+            ledger[learner_id][2] += accounted_tokens
     expected_ledger = {
         learner_id: tuple(progress) for learner_id, progress in ledger.items()
     }
+    if latest_ledger_snapshot is not None:
+        snapshot = latest_ledger_snapshot
+        snapshot_ledger = snapshot.get("ledger")
+        snapshot_versions = snapshot.get("versions")
+        expected_snapshot_id = (
+            "policy-sweep-ledger:"
+            f"{checkpoint.layout_hash}:complete:{total_steps}"
+        )
+        if (
+            snapshot.get("phase") != "complete"
+            or snapshot.get("protocol_version") != 4
+            or snapshot.get("sync/layout_hash") != checkpoint.layout_hash
+            or snapshot.get("global_step") != total_steps
+            or snapshot.get("policy_round") != total_steps // fragments
+            or snapshot.get("sweep_fragments") != fragments
+            or snapshot.get("sweep_complete") is not True
+            or snapshot_versions != list(terminal_versions)
+            or snapshot.get("event_id") != expected_snapshot_id
+            or not isinstance(snapshot_ledger, list)
+        ):
+            raise HarnessError("policy-sweep ledger snapshot is not a complete cut")
+        expected_ledger = {}
+        for entry in snapshot_ledger:
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("id"), int)
+                or entry["id"] in expected_ledger
+                or not all(
+                    isinstance(entry.get(name), int) and entry[name] >= 0
+                    for name in ("merges", "steps", "tokens")
+                )
+                or entry["merges"] != total_steps
+            ):
+                raise HarnessError("policy-sweep ledger snapshot is malformed")
+            expected_ledger[entry["id"]] = (
+                entry["merges"],
+                entry["steps"],
+                entry["tokens"],
+            )
+        if sorted(expected_ledger) != roster:
+            raise HarnessError("policy-sweep ledger snapshot has the wrong roster")
     if checkpoint.ledger != expected_ledger:
         raise HarnessError("authoritative checkpoint differs from decoupled tape")
 

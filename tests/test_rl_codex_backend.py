@@ -5,6 +5,8 @@ import copy
 import pytest
 
 from yeto.rl.codex_backend import (
+    QWEN35_MODEL,
+    QWEN35_REVISION,
     QWEN38_MODEL,
     QWEN38_REVISION,
     stock_codex_backend_contract,
@@ -18,6 +20,8 @@ QWEN38_KWARGS = {
     "reasoning_effort": "xhigh",
 }
 
+QWEN35_KWARGS = {"clear_thinking": False}
+
 
 def _validate_qwen38(**overrides):
     values = {
@@ -28,6 +32,24 @@ def _validate_qwen38(**overrides):
         "rollout_model": None,
         "rollout_model_revision": None,
         "apply_chat_template_kwargs": copy.deepcopy(QWEN38_KWARGS),
+        "tito_allowed_append_roles": ["tool", "user"],
+        "codex_reasoning_effort": "xhigh",
+        "lora_targets": "attention",
+        "expert_full_count": 0,
+    }
+    values.update(overrides)
+    return validate_stock_codex_fields(**values)
+
+
+def _validate_qwen35(**overrides):
+    values = {
+        "tito_model": "qwen35",
+        "rl_model_recipe": "generic",
+        "model": QWEN35_MODEL,
+        "model_revision": QWEN35_REVISION,
+        "rollout_model": None,
+        "rollout_model_revision": None,
+        "apply_chat_template_kwargs": copy.deepcopy(QWEN35_KWARGS),
         "tito_allowed_append_roles": ["tool", "user"],
         "codex_reasoning_effort": "xhigh",
         "lora_targets": "attention",
@@ -64,6 +86,21 @@ def test_qwen38_stock_codex_backend_contract_binds_xhigh_native_profile():
         "tito_allowed_append_roles": ["tool", "user"],
     }
     assert _validate_qwen38()["model_identifier"] == QWEN38_MODEL
+
+
+def test_qwen35_stock_codex_backend_contract_binds_fixed_tito_profile():
+    assert stock_codex_backend_contract("qwen35", 32768) == {
+        "model": "qwen35",
+        "max_tokens": 32768,
+        "reasoning_effort": "xhigh",
+        "thinking": {"type": "enabled"},
+        "chat_template": "qwen35",
+        "chat_template_kwargs": QWEN35_KWARGS,
+        "tito_allowed_append_roles": ["tool", "user"],
+    }
+    assert _validate_qwen35()["model_identifier"] == QWEN35_MODEL
+    with pytest.raises(ValueError, match="Qwen3.5 model identity"):
+        _validate_qwen35(model_revision="0" * 40)
 
 
 @pytest.mark.parametrize(

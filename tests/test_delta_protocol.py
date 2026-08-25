@@ -267,6 +267,7 @@ def test_versioned_hello_golden_bytes_and_reserved_ids():
         struct.pack("<HIQBI", PROTOCOL_VERSION, 7, generation, DTYPE_F32, 1)
         + struct.pack("<BIQ", MERGE_RDA, 1, 4)
         + layout_fingerprint(layout)
+        + layout_fingerprint(layout)
         + struct.pack("<H", 3)
     )
     assert encoded == expected
@@ -497,12 +498,28 @@ def test_version_layout_and_dtype_mismatches_fail_clearly(
         )
         assert "session mismatch" in receive_error(wrong_semantics)
 
+        wrong_contract = connect(proc.port)
+        sockets.append(wrong_contract)
+        write_frame(
+            wrong_contract,
+            MSG_HELLO,
+            encode_hello(
+                0,
+                DTYPE_F32,
+                one_value_layout(),
+                0,
+                106,
+                bytes([0xA5]) * 32,
+            ),
+        )
+        assert "session mismatch" in receive_error(wrong_contract)
+
         malformed = connect(proc.port)
         sockets.append(malformed)
         write_frame(
             malformed,
             MSG_HELLO,
-            struct.pack("<HIQBI", PROTOCOL_VERSION, 0, 106, DTYPE_F32, 0),
+            struct.pack("<HIQBI", PROTOCOL_VERSION, 0, 107, DTYPE_F32, 0),
         )
         assert "layout must contain at least one fragment" in receive_error(malformed)
     finally:
