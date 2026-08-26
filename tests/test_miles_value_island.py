@@ -18,6 +18,7 @@ from yeto.megatron.miles_value_island import (
     _install_bf16_static_unscale_compat,
     _pack_flat_fragment,
     _parse_syncer,
+    _required_positive_env_int,
     _unpack_flat_fragment,
     _validate_owned_ranges,
     grouped_tensor_fragment_layout,
@@ -640,6 +641,143 @@ def test_parse_syncer(value, expected):
 def test_parse_syncer_rejects_bad_addresses(value):
     with pytest.raises(ValueError):
         _parse_syncer(value)
+
+
+def test_min_local_steps_env_is_explicit_and_positive(monkeypatch):
+    monkeypatch.delenv("YETO_VALUE_MIN_LOCAL_STEPS", raising=False)
+    with pytest.raises(ValueError, match="YETO_VALUE_MIN_LOCAL_STEPS must be set"):
+        _required_positive_env_int("YETO_VALUE_MIN_LOCAL_STEPS")
+
+    for value in ("0", "-1"):
+        monkeypatch.setenv("YETO_VALUE_MIN_LOCAL_STEPS", value)
+        with pytest.raises(ValueError, match="must be positive"):
+            _required_positive_env_int("YETO_VALUE_MIN_LOCAL_STEPS")
+
+    for value in ("12.0", "not-an-integer"):
+        monkeypatch.setenv("YETO_VALUE_MIN_LOCAL_STEPS", value)
+        with pytest.raises(ValueError, match="must be an integer"):
+            _required_positive_env_int("YETO_VALUE_MIN_LOCAL_STEPS")
+
+    monkeypatch.setenv("YETO_VALUE_MIN_LOCAL_STEPS", "12")
+    assert _required_positive_env_int("YETO_VALUE_MIN_LOCAL_STEPS") == 12
+
+
+def test_ordinary_pulls_wait_for_h_steps_per_fragment_after_resume():
+    class Client:
+        def __init__(self):
+            self.pulls = [
+                SimpleNamespace(fragment_id=1, global_step=11, round_attempt=0),
+                SimpleNamespace(fragment_id=0, global_step=10, round_attempt=0),
+            ]
+
+        def drain_pulls(self):
+            pulls, self.pulls = self.pulls, []
+            return pulls
+
+    island = object.__new__(MilesValueIsland)
+    island.client = Client()
+    island.pending_pulls = []
+    island.min_local_steps = 12
+    island.steps_total = 1_011
+    island.steps_at_reset = [1_000, 1_005]
+    island.units_total = 50_000
+    island.units_at_reset = [10_000, 20_000]
+    island.anchors = [object(), object()]
+    island.fragment_versions = [7, 8]
+
+    # The absolute resume offset must not make either fragment prematurely
+    # ready: readiness is relative to each fragment's own reset point.
+    assert island._ready_pull_plan() == []
+    assert [pull.fragment_id for pull in island.pending_pulls] == [0, 1]
+
+    island.steps_total = 1_012
+    ready = island._ready_pull_plan()
+    assert ready == [(0, 10, 0, 7, 1_012, 12, 40_000)]
+    assert [pull.fragment_id for pull in island.pending_pulls] == [1]
+
+    island.steps_total = 1_017
+    ready = island._ready_pull_plan()
+    assert ready == [(1, 11, 0, 8, 1_017, 12, 30_000)]
+    assert island.pending_pulls == []
+
+
+def test_ordinary_pull_wait_deduplicates_retries_to_latest_attempt():
+    class Client:
+        def drain_pulls(self):
+            return []
+
+    island = object.__new__(MilesValueIsland)
+    island.client = Client()
+    island.pending_pulls = [
+        SimpleNamespace(fragment_id=0, global_step=17, round_attempt=1),
+        SimpleNamespace(fragment_id=0, global_step=17, round_attempt=3),
+        SimpleNamespace(fragment_id=0, global_step=17, round_attempt=2),
+    ]
+    island.min_local_steps = 12
+    island.steps_total = 112
+    island.steps_at_reset = [100]
+    island.units_total = 1_200
+    island.units_at_reset = [1_000]
+    island.anchors = [object()]
+    island.fragment_versions = [4]
+
+    assert island._ready_pull_plan() == [(0, 17, 3, 4, 112, 12, 200)]
+    assert island.pending_pulls == []
+
+
+@pytest.mark.parametrize(
+    ("steps_total", "steps_at_reset", "units_total", "units_at_reset"),
+    [(9, 10, 100, 100), (10, 10, 99, 100)],
+)
+def test_ordinary_pull_fails_closed_if_fragment_clock_moves_backwards(
+    steps_total, steps_at_reset, units_total, units_at_reset
+):
+    class Client:
+        def drain_pulls(self):
+            return []
+
+    island = object.__new__(MilesValueIsland)
+    island.client = Client()
+    island.pending_pulls = [
+        SimpleNamespace(fragment_id=0, global_step=1, round_attempt=0)
+    ]
+    island.min_local_steps = 12
+    island.steps_total = steps_total
+    island.steps_at_reset = [steps_at_reset]
+    island.units_total = units_total
+    island.units_at_reset = [units_at_reset]
+    island.anchors = [object()]
+    island.fragment_versions = [0]
+
+    with pytest.raises(RuntimeError, match="fragment 0 clock moved backwards"):
+        island._ready_pull_plan()
+
+
+def test_budget_cutoff_bypasses_ordinary_h_gate():
+    island = object.__new__(MilesValueIsland)
+    island.finalized = False
+    island.steps_total = 0
+    island.units_total = 100
+    island.budget_steps = 2
+    island.min_local_steps = 12
+    finalizations = []
+    ordinary_boundaries = []
+    island._finalize_budget = MethodType(
+        lambda instance: finalizations.append(
+            (instance.steps_total, instance.units_total)
+        ),
+        island,
+    )
+    island.normal_boundary = MethodType(
+        lambda instance: ordinary_boundaries.append(instance.steps_total),
+        island,
+    )
+
+    island.after_local_step(25)
+    island.after_local_step(30)
+
+    assert ordinary_boundaries == [1]
+    assert finalizations == [(2, 155)]
 
 
 def test_mixed_dtype_grad_norm_uses_fixed_collective_order_and_combines_groups():

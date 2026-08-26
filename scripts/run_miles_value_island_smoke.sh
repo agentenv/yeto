@@ -14,6 +14,7 @@ SYNCER_ADDR=${SYNCER_ADDR:?SYNCER_ADDR must be host:port}
 OUTPUT_DIR=${OUTPUT_DIR:-/data/local-runs/qwen38-value-island-smoke-20260826-v7}
 readonly SMOKE_BUDGET_STEPS=${SMOKE_BUDGET_STEPS:-2}
 readonly NUM_ROLLOUT=${SMOKE_BUDGET_STEPS}
+readonly SYNC_INTERVAL_STEPS=${SYNC_INTERVAL_STEPS:-12}
 # Do not put the ``{rollout_id}`` placeholder inside a ``${var:-default}``
 # expansion: bash treats its closing brace as the end of the parameter
 # expansion and appends the remainder (for example ``.pt}``) to overrides.
@@ -25,6 +26,8 @@ readonly LOCAL_GLOBAL_BATCH_SIZE=5
 
 [[ "${SMOKE_BUDGET_STEPS}" =~ ^[2-4]$ ]] || \
   die "SMOKE_BUDGET_STEPS must be in [2, 4]"
+[[ "${SYNC_INTERVAL_STEPS}" =~ ^[1-9][0-9]*$ ]] || \
+  die "SYNC_INTERVAL_STEPS must be a positive integer"
 [[ "${DATA_TEMPLATE}" == /* && "${DATA_TEMPLATE}" == *'{rollout_id}'* ]] || \
   die "DATA_TEMPLATE must be absolute and contain {rollout_id}"
 template_without_first_placeholder=${DATA_TEMPLATE/'{rollout_id}'/}
@@ -62,11 +65,12 @@ source scripts/models/qwen3.6-27B.sh
 mkdir -p "${OUTPUT_DIR}"
 
 TRAIN_ENV_VARS=$(
-  python3 - "${YETO_ROOT}" "${MILES_ROOT}" "${NUM_ROLLOUT}" "${SYNCER_ADDR}" <<'PY'
+  python3 - "${YETO_ROOT}" "${MILES_ROOT}" "${NUM_ROLLOUT}" \
+    "${SYNCER_ADDR}" "${SYNC_INTERVAL_STEPS}" <<'PY'
 import json
 import sys
 
-yeto_root, miles_root, budget_steps, syncer_addr = sys.argv[1:]
+yeto_root, miles_root, budget_steps, syncer_addr, min_local_steps = sys.argv[1:]
 print(
     json.dumps(
         {
@@ -87,6 +91,7 @@ print(
             "YETO_VALUE_CONNECT_TIMEOUT": "900",
             "YETO_VALUE_FINALIZATION_TIMEOUT": "3600",
             "YETO_VALUE_BUDGET_STEPS": budget_steps,
+            "YETO_VALUE_MIN_LOCAL_STEPS": min_local_steps,
             "YETO_VALUE_LOCAL_STEP_OFFSET": "0",
             "YETO_VALUE_UNIT_OFFSET": "0",
         },

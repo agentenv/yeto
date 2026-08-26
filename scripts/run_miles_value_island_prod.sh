@@ -9,6 +9,7 @@ readonly LOCAL_BUDGET_STEPS=364
 readonly CONTEXT_LENGTH=262144
 readonly REQUIRED_MILES_REVISION=277d151c00ef4f6727f01aca06e115b71bd7578c
 readonly SAVE_INTERVAL=${SAVE_INTERVAL:-15}
+readonly SYNC_INTERVAL_STEPS=${SYNC_INTERVAL_STEPS:-12}
 # Miles converts these iteration counts to sample counts by multiplying the
 # nominal GBS. Five islands use fixed nominal size 5 each (total 25), so five
 # warmup iterations remain 125 global samples and 105 decay iterations remain
@@ -38,6 +39,7 @@ export MILES_RAY_TARGET_NODE_IP
 [[ "${LEARNER_ID}" =~ ^[0-9]+$ ]] || die "LEARNER_ID must be an integer, got ${LEARNER_ID@Q}"
 ((LEARNER_ID >= 0 && LEARNER_ID < NUM_LEARNERS)) || die "LEARNER_ID must be in [0, 4], got ${LEARNER_ID}"
 [[ "${SAVE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || die "SAVE_INTERVAL must be a positive integer"
+[[ "${SYNC_INTERVAL_STEPS}" =~ ^[1-9][0-9]*$ ]] || die "SYNC_INTERVAL_STEPS must be a positive integer"
 readonly LOCAL_GLOBAL_BATCH_SIZE=5
 
 syncer_host=${SYNCER_ADDR%:*}
@@ -99,7 +101,7 @@ mkdir -p "${OUTPUT_DIR}"
 TRAIN_ENV_VARS=$(
   python3 - "${YETO_ROOT}" "${MILES_ROOT}" \
     "${SYNCER_ADDR}" "${LEARNER_ID}" "${NUM_LEARNERS}" \
-    "${LOCAL_BUDGET_STEPS}" <<'PY'
+    "${LOCAL_BUDGET_STEPS}" "${SYNC_INTERVAL_STEPS}" <<'PY'
 import json
 import sys
 
@@ -110,6 +112,7 @@ import sys
     learner_id,
     num_learners,
     budget_steps,
+    min_local_steps,
 ) = sys.argv[1:]
 
 print(
@@ -131,6 +134,7 @@ print(
             "YETO_VALUE_CONNECT_TIMEOUT": "3600",
             "YETO_VALUE_FINALIZATION_TIMEOUT": "3600",
             "YETO_VALUE_BUDGET_STEPS": budget_steps,
+            "YETO_VALUE_MIN_LOCAL_STEPS": min_local_steps,
             "YETO_VALUE_LOCAL_STEP_OFFSET": "0",
             "YETO_VALUE_UNIT_OFFSET": "0",
         },

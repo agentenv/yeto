@@ -3,7 +3,7 @@
 This module is loaded through Miles's model/step hooks.  Miles remains the
 training stack (value targets, loss masks, 256K packing, optimizer, scheduler,
 checkpointing, and validation); Yeto only synchronizes complete canonical
-parameter tensors between six independent TP4 x CP2, DP1 islands.
+parameter tensors between independent TP4 x CP2, DP1 islands.
 
 The implementation deliberately imports Miles and Megatron lazily so its
 layout/config helpers remain CPU-testable.  Every model rank enters every
@@ -585,6 +585,13 @@ def _env_int(name: str, default: int | None = None) -> int:
     return value
 
 
+def _required_positive_env_int(name: str) -> int:
+    value = _env_int(name)
+    if value < 1:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None:
@@ -815,6 +822,14 @@ class MilesValueIsland:
         )
         if self.budget_steps is not None and self.budget_steps <= 0:
             raise ValueError("YETO_VALUE_BUDGET_STEPS must be positive")
+        # The syncer can pipeline pull requests before it has measured the
+        # learner step rate.  Enforce H again at the learner, per fragment and
+        # relative to that fragment's last installed global anchor.  Requiring
+        # this explicit contract fails closed instead of silently reverting to
+        # the historical one-step readiness threshold.
+        self.min_local_steps = _required_positive_env_int(
+            "YETO_VALUE_MIN_LOCAL_STEPS"
+        )
         self.steps_total = _env_int("YETO_VALUE_LOCAL_STEP_OFFSET", 0)
         self.units_total = _env_int("YETO_VALUE_UNIT_OFFSET", 0)
         if self.steps_total < 0 or self.units_total < 0:
@@ -1513,16 +1528,31 @@ class MilesValueIsland:
     def _ready_pull_plan(self) -> list[tuple[int, int, int, int, int, int, int]]:
         assert self.client is not None
         self.pending_pulls.extend(self.client.drain_pulls())
+        # A pull can be retried while it waits for H local steps.  Retain only
+        # the newest attempt so reaching H cannot trigger duplicate gathers
+        # and quantization for one syncer round.
+        latest: dict[tuple[int, int], Any] = {}
+        for pull in self.pending_pulls:
+            key = (pull.fragment_id, pull.global_step)
+            previous = latest.get(key)
+            if previous is None or pull.round_attempt > previous.round_attempt:
+                latest[key] = pull
         ready = []
         waiting = []
         for pull in sorted(
-            self.pending_pulls,
+            latest.values(),
             key=lambda item: (item.global_step, item.fragment_id, item.round_attempt),
         ):
             fid = pull.fragment_id
             c_steps = self.steps_total - self.steps_at_reset[fid]
             c_units = self.units_total - self.units_at_reset[fid]
-            if c_steps < 1 or self.anchors[fid] is None:
+            if c_steps < 0 or c_units < 0:
+                raise RuntimeError(
+                    f"fragment {fid} clock moved backwards: "
+                    f"steps={self.steps_total}-{self.steps_at_reset[fid]}, "
+                    f"units={self.units_total}-{self.units_at_reset[fid]}"
+                )
+            if c_steps < self.min_local_steps or self.anchors[fid] is None:
                 waiting.append(pull)
                 continue
             ready.append(
