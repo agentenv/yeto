@@ -183,6 +183,7 @@ exec python3 train_async.py \
   --rollout-num-gpus 0 \
   --rollout-num-gpus-per-engine 1 \
   --use-dynamic-global-batch-size \
+  --start-rollout-id 0 \
   --num-rollout "${NUM_ROLLOUT}" \
   --rollout-batch-size "${LOCAL_GLOBAL_BATCH_SIZE}" \
   --global-batch-size "${LOCAL_GLOBAL_BATCH_SIZE}" \
