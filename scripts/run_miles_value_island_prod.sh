@@ -2,15 +2,15 @@
 set -euo pipefail
 
 # One production process launches one node-local TP4 x CP2 x DP1 Miles critic
-# island.  The six islands communicate only through the Yeto syncer.
-readonly NUM_LEARNERS=6
+# island. Five learner islands communicate through one dedicated 8-GPU syncer.
+readonly NUM_LEARNERS=5
 readonly NUM_ROLLOUT=364
 readonly LOCAL_BUDGET_STEPS=364
 readonly CONTEXT_LENGTH=262144
 readonly REQUIRED_MILES_REVISION=277d151c00ef4f6727f01aca06e115b71bd7578c
 readonly SAVE_INTERVAL=${SAVE_INTERVAL:-15}
 # Miles converts these iteration counts to sample counts by multiplying the
-# nominal GBS.  Six islands use fixed nominal sizes 5+4+4+4+4+4=25, so five
+# nominal GBS. Five islands use fixed nominal size 5 each (total 25), so five
 # warmup iterations remain 125 global samples and 105 decay iterations remain
 # the original 2,625-sample global cosine horizon.
 readonly LR_WARMUP_ITERS=5
@@ -21,7 +21,7 @@ die() {
   exit 2
 }
 
-LEARNER_ID=${LEARNER_ID:?set LEARNER_ID to an integer in [0, 5]}
+LEARNER_ID=${LEARNER_ID:?set LEARNER_ID to an integer in [0, 4]}
 SYNCER_ADDR=${SYNCER_ADDR:?set SYNCER_ADDR to the Yeto syncer host:port}
 ISLAND_DATA_TEMPLATE=${ISLAND_DATA_TEMPLATE:?set ISLAND_DATA_TEMPLATE to the node-local rollout template}
 OUTPUT_DIR=${OUTPUT_DIR:?set OUTPUT_DIR to a node-local output directory}
@@ -36,13 +36,9 @@ MILES_RAY_TARGET_NODE_IP=${MILES_RAY_TARGET_NODE_IP:-current}
 export MILES_RAY_TARGET_NODE_IP
 
 [[ "${LEARNER_ID}" =~ ^[0-9]+$ ]] || die "LEARNER_ID must be an integer, got ${LEARNER_ID@Q}"
-((LEARNER_ID >= 0 && LEARNER_ID < NUM_LEARNERS)) || die "LEARNER_ID must be in [0, 5], got ${LEARNER_ID}"
+((LEARNER_ID >= 0 && LEARNER_ID < NUM_LEARNERS)) || die "LEARNER_ID must be in [0, 4], got ${LEARNER_ID}"
 [[ "${SAVE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || die "SAVE_INTERVAL must be a positive integer"
-if ((LEARNER_ID == 0)); then
-  readonly LOCAL_GLOBAL_BATCH_SIZE=5
-else
-  readonly LOCAL_GLOBAL_BATCH_SIZE=4
-fi
+readonly LOCAL_GLOBAL_BATCH_SIZE=5
 
 syncer_host=${SYNCER_ADDR%:*}
 syncer_port=${SYNCER_ADDR##*:}
