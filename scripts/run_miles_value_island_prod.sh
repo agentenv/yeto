@@ -4,10 +4,10 @@ set -euo pipefail
 # One production process launches one node-local TP4 x CP2 x DP1 Miles critic
 # island.  The six islands communicate only through the Yeto syncer.
 readonly NUM_LEARNERS=6
-readonly NUM_ROLLOUT=395
-readonly VALIDATION_START_ROLLOUT=364
+readonly NUM_ROLLOUT=364
 readonly LOCAL_BUDGET_STEPS=364
 readonly CONTEXT_LENGTH=262144
+readonly SAVE_INTERVAL=${SAVE_INTERVAL:-15}
 # Miles converts these iteration counts to sample counts by multiplying the
 # nominal GBS.  Six islands use fixed nominal sizes 5+4+4+4+4+4=25, so five
 # warmup iterations remain 125 global samples and 105 decay iterations remain
@@ -36,6 +36,7 @@ export MILES_RAY_TARGET_NODE_IP
 
 [[ "${LEARNER_ID}" =~ ^[0-9]+$ ]] || die "LEARNER_ID must be an integer, got ${LEARNER_ID@Q}"
 ((LEARNER_ID >= 0 && LEARNER_ID < NUM_LEARNERS)) || die "LEARNER_ID must be in [0, 5], got ${LEARNER_ID}"
+[[ "${SAVE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || die "SAVE_INTERVAL must be a positive integer"
 if ((LEARNER_ID == 0)); then
   readonly LOCAL_GLOBAL_BATCH_SIZE=5
 else
@@ -63,7 +64,10 @@ template_without_first_placeholder=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER
 [[ -r "${PROMPT_DATA}" ]] || die "missing prompt-data shim ${PROMPT_DATA}"
 [[ -r "${CUSTOM_CONFIG_PATH}" ]] || die "missing Miles critic config ${CUSTOM_CONFIG_PATH}"
 
-# Refuse to reserve GPUs when any train or validation bucket is absent locally.
+# Refuse to reserve GPUs when any training bucket is absent locally.  Held-out
+# validation is a separate post-finalization job; mixing it into this process
+# previously let a skipped data_0 turn the first validation bucket into an
+# unintended 365th forward/backward attempt.
 for ((rollout_id = 0; rollout_id < NUM_ROLLOUT; rollout_id++)); do
   rollout_path=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER}"/${rollout_id}}
   [[ -r "${rollout_path}" ]] || die "missing island rollout ${rollout_id}: ${rollout_path}"
@@ -79,7 +83,7 @@ mkdir -p "${OUTPUT_DIR}"
 # the existing process/runtime environment and are never copied into argv or
 # --train-env-vars.
 TRAIN_ENV_VARS=$(
-  python3 - "${YETO_ROOT}" "${MILES_ROOT}" "${VALIDATION_START_ROLLOUT}" \
+  python3 - "${YETO_ROOT}" "${MILES_ROOT}" \
     "${SYNCER_ADDR}" "${LEARNER_ID}" "${NUM_LEARNERS}" \
     "${LOCAL_BUDGET_STEPS}" <<'PY'
 import json
@@ -88,7 +92,6 @@ import sys
 (
     yeto_root,
     miles_root,
-    validation_start,
     syncer_addr,
     learner_id,
     num_learners,
@@ -102,7 +105,6 @@ print(
             "PYTHONFAULTHANDLER": "1",
             "TORCH_SHOW_CPP_STACKTRACES": "1",
             "TORCH_DISABLE_ADDR2LINE": "1",
-            "MILES_OFFLINE_VALIDATION_START_ROLLOUT": validation_start,
             "NCCL_DEBUG": "WARN",
             "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512,garbage_collection_threshold:0.8",
             "YETO_VALUE_SYNCER": syncer_addr,
@@ -151,9 +153,9 @@ if [[ -n "${WANDB_PROJECT:-}" || -n "${WANDB_GROUP:-}" ]]; then
   [[ -z "${WANDB_DIR:-}" ]] || WANDB_ARGS+=(--wandb-dir "${WANDB_DIR}")
 fi
 
-printf 'Launching Miles value island %d/%d: train=%d validation=%d context=%d data=%s output=%s syncer=%s ray_node=%s\n' \
+printf 'Launching Miles value island %d/%d: train=%d context=%d data=%s output=%s syncer=%s ray_node=%s\n' \
   "${LEARNER_ID}" "${NUM_LEARNERS}" "${LOCAL_BUDGET_STEPS}" \
-  "$((NUM_ROLLOUT - VALIDATION_START_ROLLOUT))" "${CONTEXT_LENGTH}" \
+  "${CONTEXT_LENGTH}" \
   "${ISLAND_DATA_TEMPLATE}" "${OUTPUT_DIR}" "${SYNCER_ADDR}" \
   "${MILES_RAY_TARGET_NODE_IP}"
 
@@ -169,7 +171,9 @@ exec python3 train_async.py \
   --ref-load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
   --save "${OUTPUT_DIR}/checkpoints" \
   --critic-save "${OUTPUT_DIR}/critic_checkpoints" \
-  --save-interval 1000 \
+  --ckpt-format torch_dist \
+  --save-interval "${SAVE_INTERVAL}" \
+  --save-retain-interval 1000000 \
   --prompt-data "${PROMPT_DATA}" \
   --input-key prompt \
   --label-key label \
@@ -182,9 +186,11 @@ exec python3 train_async.py \
   --num-rollout "${NUM_ROLLOUT}" \
   --rollout-batch-size "${LOCAL_GLOBAL_BATCH_SIZE}" \
   --global-batch-size "${LOCAL_GLOBAL_BATCH_SIZE}" \
+  --micro-batch-size 1 \
   --n-samples-per-prompt 1 \
   --rollout-max-response-len "${CONTEXT_LENGTH}" \
   --seq-length "${CONTEXT_LENGTH}" \
+  --encoder-seq-length "${CONTEXT_LENGTH}" \
   --max-position-embeddings "${CONTEXT_LENGTH}" \
   --tensor-model-parallel-size 4 \
   --pipeline-model-parallel-size 1 \
@@ -195,9 +201,6 @@ exec python3 train_async.py \
   --recompute-granularity full \
   --recompute-method uniform \
   --recompute-num-layers 1 \
-  --use-dynamic-batch-size \
-  --balance-data \
-  --max-tokens-per-gpu 10240 \
   --advantage-estimator gae_adaptive \
   --custom-config-path "${CUSTOM_CONFIG_PATH}" \
   --critic-lambd 1.0 \
