@@ -11,6 +11,7 @@ import json
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -645,7 +646,8 @@ def test_min_round_interval_paces_rounds():
 
 
 @pytest.mark.timeout(180)
-def test_single_learner_roundtrip_iso():
+@pytest.mark.parametrize("iso_backend", ["scalar", "torch-svd"])
+def test_single_learner_roundtrip_iso(iso_backend):
     """Iso-C aggregation end to end: the learner HELLO carries (rows, cols)
     per tensor for the iso fragments and the Rust syncer merges through the
     spectrum-flattening path (matrix_merge="iso", arXiv 2607.03011)."""
@@ -662,13 +664,45 @@ def test_single_learner_roundtrip_iso():
         },
     )
     assert any(f.shapes for f in layout.fragments), "iso fragment missing shapes"
+    command = [
+        str(binary),
+        "--port",
+        str(port),
+        "--learners",
+        "1",
+        "--quorum",
+        "1",
+        "--grace-ms",
+        "50",
+        "--total-steps",
+        "9",
+        "--iso-backend",
+        iso_backend,
+    ]
+    if iso_backend == "torch-svd":
+        command.extend(
+            [
+                "--iso-worker-python",
+                sys.executable,
+                "--iso-worker-device",
+                "cpu",
+            ]
+        )
     proc = subprocess.Popen(
-        [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
-         "--grace-ms", "50", "--total-steps", "9"],
+        command,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     try:
-        target = torch.ones(DIM + DIM // 4)
+        # A constant 64x64 target makes every learner delta rank one.  In f32
+        # SVD its mathematically-zero trailing singular values live near
+        # machine epsilon, above Iso's specified 1e-10 relative cutoff, so
+        # flattening them is intentionally very different from the f64 scalar
+        # oracle.  Use a deterministic full-rank target to test transport and
+        # backend integration without changing the approved cutoff semantics.
+        target = torch.randn(
+            DIM + DIM // 4,
+            generator=torch.Generator().manual_seed(20260825),
+        )
         l = ToyLearner(0, port, target, layout)
         l.start()
         l.join(timeout=120)

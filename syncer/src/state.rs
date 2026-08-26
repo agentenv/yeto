@@ -3,6 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 
+use crate::iso_worker::{IsoBackend, IsoBackendConfig, IsoBackendKind};
 use crate::merge;
 use crate::protocol::Reader;
 
@@ -131,10 +132,28 @@ pub struct GlobalState {
     /// HeLoCo per-tensor directional correction of learner deltas against
     /// the outer momentum before merging (None disables).
     pub delta_correction: Option<merge::Heloco>,
+    /// Spectrum flattener. Torch mode owns one persistent child process.
+    iso_backend: IsoBackend,
 }
 
 impl GlobalState {
     pub fn new(layout: Layout, outer_lr: f32, outer_momentum: f32, wire_dtype: u8) -> Result<Self> {
+        Self::new_with_iso_backend(
+            layout,
+            outer_lr,
+            outer_momentum,
+            wire_dtype,
+            &IsoBackendConfig::default(),
+        )
+    }
+
+    pub fn new_with_iso_backend(
+        layout: Layout,
+        outer_lr: f32,
+        outer_momentum: f32,
+        wire_dtype: u8,
+        iso_backend_config: &IsoBackendConfig,
+    ) -> Result<Self> {
         // Validate declared sizes now, but do not allocate model-sized state
         // from an unauthenticated HELLO. Params arrive in INIT_PARAMS; the
         // matching momentum is allocated only after that exact-sized payload
@@ -175,7 +194,12 @@ impl GlobalState {
             outer_momentum,
             wire_dtype,
             delta_correction: None,
+            iso_backend: IsoBackend::start(iso_backend_config)?,
         })
+    }
+
+    pub fn iso_backend_kind(&self) -> IsoBackendKind {
+        self.iso_backend.kind()
     }
 
     pub fn all_initialized(&self) -> bool {
@@ -291,7 +315,17 @@ impl GlobalState {
                                 "fragment {fid}: iso merge missing shape for tensor {tensor_index}"
                             )
                         })?;
-                    merge::merge_iso(&slices, weights, rows as usize, cols as usize, out);
+                    // The syncer owns the deterministic weighted reduction;
+                    // the selected backend receives exactly one complete
+                    // canonical matrix, never learner or TP shards.
+                    merge::merge_avg(&slices, weights, out);
+                    self.iso_backend
+                        .flatten(out, rows as usize, cols as usize)
+                        .with_context(|| {
+                            format!(
+                                "fragment {fid}: iso backend failed for tensor {tensor_index} ({rows}x{cols})"
+                            )
+                        })?;
                 }
                 mode => bail!("fragment {fid}: unsupported merge mode {mode}"),
             }
@@ -321,7 +355,8 @@ impl GlobalState {
     }
 }
 
-const CKPT_MAGIC: u32 = 0xD170_5A7E;
+const CKPT_MAGIC_V1: u32 = 0xD170_5A7E;
+const CKPT_MAGIC_V2: u32 = 0xD170_5A7F;
 const FINAL_MARKER_MAGIC: &str = "YETO_FINAL_V1";
 
 pub fn final_marker_path(path: &std::path::Path) -> std::path::PathBuf {
@@ -366,7 +401,8 @@ impl GlobalState {
         let tmp = path.with_extension("tmp");
         {
             let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-            f.write_all(&CKPT_MAGIC.to_le_bytes())?;
+            f.write_all(&CKPT_MAGIC_V2.to_le_bytes())?;
+            f.write_all(&[self.iso_backend_kind() as u8])?;
             f.write_all(&self.global_step.to_le_bytes())?;
             f.write_all(&(self.params.len() as u32).to_le_bytes())?;
             for p in 0..self.params.len() {
@@ -400,8 +436,18 @@ impl GlobalState {
         let mut buf = Vec::new();
         std::fs::File::open(path)?.read_to_end(&mut buf)?;
         let mut r = Reader(&buf);
-        if r.u32()? != CKPT_MAGIC {
-            bail!("bad checkpoint magic");
+        let magic = r.u32()?;
+        let checkpoint_iso_backend = match magic {
+            CKPT_MAGIC_V1 => IsoBackendKind::Scalar,
+            CKPT_MAGIC_V2 => IsoBackendKind::from_checkpoint(r.u8()?)?,
+            _ => bail!("bad checkpoint magic"),
+        };
+        if checkpoint_iso_backend != self.iso_backend_kind() {
+            bail!(
+                "checkpoint iso backend {} does not match configured backend {}",
+                checkpoint_iso_backend,
+                self.iso_backend_kind()
+            );
         }
         self.global_step = r.u64()?;
         let np = r.u32()? as usize;

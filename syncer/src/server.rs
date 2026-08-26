@@ -68,6 +68,8 @@ pub struct Config {
     pub total_steps: u64,
     pub outer_lr: f32,
     pub outer_momentum: f32,
+    /// Spectrum-flattening backend for MERGE_ISO tensors.
+    pub iso_backend: crate::iso_worker::IsoBackendConfig,
     pub final_state: Option<std::path::PathBuf>,
     /// Consistent-snapshot file; written every `checkpoint_every` rounds at
     /// the quiescent cut between rounds, resumed from when `resume` is set.
@@ -1546,7 +1548,11 @@ async fn complete_round(
     } = round;
     debug_assert_eq!(st.versions[p], base_version);
     let (mut outer_gradients, mut weights, mut responders) = (Vec::new(), Vec::new(), Vec::new());
-    for (member, push) in &pushes {
+    // HashMap iteration is randomized.  Keep the f32 weighted reduction
+    // reproducible by fixing learner order before merge math.
+    let mut ordered_pushes: Vec<_> = pushes.iter().collect();
+    ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
+    for (member, push) in ordered_pushes {
         if push.base_version < base_version {
             // The base-relative update contains only local progress since
             // the learner's exact raw anchor, so stale pushes remain valid
@@ -1623,15 +1629,20 @@ async fn complete_round(
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
-    let mut st = GlobalState::new(
+    let mut st = GlobalState::new_with_iso_backend(
         group.layout.clone(),
         cfg.outer_lr,
         cfg.outer_momentum,
         group.dtype,
+        &cfg.iso_backend,
     )?;
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
+    info!(
+        iso_backend = %st.iso_backend_kind(),
+        "initialized global state"
+    );
     Ok(st)
 }
 
@@ -1649,8 +1660,22 @@ fn is_current_member(registry: &Registry, member: Member) -> bool {
 }
 
 async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
-    for g in current_groups(registry) {
-        send_all_fragments(st, &g).await;
+    let groups = current_groups(registry);
+    // Fan each fragment out to every learner before moving to the next one.
+    // Each learner has independent socket-writer queues, so this keeps all
+    // links busy concurrently.  Iterating learner-by-learner here serializes
+    // one full model transfer per learner (tens of GiB for large models).
+    // Encode once and clone Bytes cheaply; the backing allocation remains
+    // shared until every learner's writer has drained it.
+    for p in 0..st.layout.fragments.len() {
+        match encode_bcast(st, p) {
+            Ok(payload) => {
+                for group in &groups {
+                    let _ = group.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
+                }
+            }
+            Err(e) => warn!("encode fragment {p} failed: {e}"),
+        }
     }
 }
 

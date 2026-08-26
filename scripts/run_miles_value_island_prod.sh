@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# One production process launches one node-local TP4 x CP2 x DP1 Miles critic
+# island.  The six islands communicate only through the Yeto syncer.
+readonly NUM_LEARNERS=6
+readonly NUM_ROLLOUT=395
+readonly VALIDATION_START_ROLLOUT=364
+readonly LOCAL_BUDGET_STEPS=364
+readonly CONTEXT_LENGTH=262144
+# Miles converts these iteration counts to sample counts by multiplying the
+# nominal GBS.  Six islands use fixed nominal sizes 5+4+4+4+4+4=25, so five
+# warmup iterations remain 125 global samples and 105 decay iterations remain
+# the original 2,625-sample global cosine horizon.
+readonly LR_WARMUP_ITERS=5
+readonly LR_DECAY_ITERS=105
+
+die() {
+  printf 'run_miles_value_island_prod.sh: %s\n' "$*" >&2
+  exit 2
+}
+
+LEARNER_ID=${LEARNER_ID:?set LEARNER_ID to an integer in [0, 5]}
+SYNCER_ADDR=${SYNCER_ADDR:?set SYNCER_ADDR to the Yeto syncer host:port}
+ISLAND_DATA_TEMPLATE=${ISLAND_DATA_TEMPLATE:?set ISLAND_DATA_TEMPLATE to the node-local rollout template}
+OUTPUT_DIR=${OUTPUT_DIR:?set OUTPUT_DIR to a node-local output directory}
+
+MILES_ROOT=${MILES_ROOT:-/data/miles-values-isoloco-20260825}
+YETO_ROOT=${YETO_ROOT:-/data/yeto-isoloco-20260825}
+MODEL_DIR=${MODEL_DIR:-/data/models}
+PROMPT_DATA=${PROMPT_DATA:-/data/rl_data/smoke/all3_24.jsonl}
+CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-/data/configs/sao_gae.yaml}
+MILES_RAY_TARGET_NODE_IP=${MILES_RAY_TARGET_NODE_IP:-current}
+[[ -n "${MILES_RAY_TARGET_NODE_IP}" ]] || die "MILES_RAY_TARGET_NODE_IP cannot be empty"
+export MILES_RAY_TARGET_NODE_IP
+
+[[ "${LEARNER_ID}" =~ ^[0-9]+$ ]] || die "LEARNER_ID must be an integer, got ${LEARNER_ID@Q}"
+((LEARNER_ID >= 0 && LEARNER_ID < NUM_LEARNERS)) || die "LEARNER_ID must be in [0, 5], got ${LEARNER_ID}"
+if ((LEARNER_ID == 0)); then
+  readonly LOCAL_GLOBAL_BATCH_SIZE=5
+else
+  readonly LOCAL_GLOBAL_BATCH_SIZE=4
+fi
+
+syncer_host=${SYNCER_ADDR%:*}
+syncer_port=${SYNCER_ADDR##*:}
+[[ -n "${syncer_host}" && "${syncer_host}" != "${SYNCER_ADDR}" ]] || die "SYNCER_ADDR must be host:port"
+[[ "${syncer_port}" =~ ^[0-9]+$ ]] || die "SYNCER_ADDR port must be an integer"
+((syncer_port >= 1 && syncer_port <= 65535)) || die "SYNCER_ADDR port must be in [1, 65535]"
+
+readonly ROLLOUT_PLACEHOLDER='{rollout_id}'
+[[ "${ISLAND_DATA_TEMPLATE}" == /* ]] || die "ISLAND_DATA_TEMPLATE must be an absolute node-local path"
+[[ "${ISLAND_DATA_TEMPLATE}" == *"${ROLLOUT_PLACEHOLDER}"* ]] || die "ISLAND_DATA_TEMPLATE must contain ${ROLLOUT_PLACEHOLDER}"
+template_without_first_placeholder=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER}"/}
+[[ "${template_without_first_placeholder}" != *"${ROLLOUT_PLACEHOLDER}"* ]] || die "ISLAND_DATA_TEMPLATE must contain exactly one ${ROLLOUT_PLACEHOLDER}"
+[[ "${OUTPUT_DIR}" == /* && "${OUTPUT_DIR}" != / ]] || die "OUTPUT_DIR must be an absolute directory other than /"
+
+[[ -f "${MILES_ROOT}/train_async.py" ]] || die "missing ${MILES_ROOT}/train_async.py"
+[[ -f "${MILES_ROOT}/scripts/models/qwen3.6-27B.sh" ]] || die "missing Miles Qwen model argument script"
+[[ -f "${YETO_ROOT}/yeto/megatron/miles_value_island.py" ]] || die "missing Yeto Miles value-island adapter"
+[[ -d "${MODEL_DIR}/Qwen3.8-27B" ]] || die "missing Hugging Face checkpoint ${MODEL_DIR}/Qwen3.8-27B"
+[[ -d "${MODEL_DIR}/Qwen3.8-27B_torch_dist" ]] || die "missing distributed checkpoint ${MODEL_DIR}/Qwen3.8-27B_torch_dist"
+[[ -r "${PROMPT_DATA}" ]] || die "missing prompt-data shim ${PROMPT_DATA}"
+[[ -r "${CUSTOM_CONFIG_PATH}" ]] || die "missing Miles critic config ${CUSTOM_CONFIG_PATH}"
+
+# Refuse to reserve GPUs when any train or validation bucket is absent locally.
+for ((rollout_id = 0; rollout_id < NUM_ROLLOUT; rollout_id++)); do
+  rollout_path=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER}"/${rollout_id}}
+  [[ -r "${rollout_path}" ]] || die "missing island rollout ${rollout_id}: ${rollout_path}"
+done
+
+cd "${MILES_ROOT}"
+# shellcheck source=/dev/null
+source scripts/models/qwen3.6-27B.sh
+declare -p MODEL_ARGS >/dev/null 2>&1 || die "Miles model script did not define MODEL_ARGS"
+mkdir -p "${OUTPUT_DIR}"
+
+# Serialize only non-secret worker configuration.  W&B credentials remain in
+# the existing process/runtime environment and are never copied into argv or
+# --train-env-vars.
+TRAIN_ENV_VARS=$(
+  python3 - "${YETO_ROOT}" "${MILES_ROOT}" "${VALIDATION_START_ROLLOUT}" \
+    "${SYNCER_ADDR}" "${LEARNER_ID}" "${NUM_LEARNERS}" \
+    "${LOCAL_BUDGET_STEPS}" <<'PY'
+import json
+import sys
+
+(
+    yeto_root,
+    miles_root,
+    validation_start,
+    syncer_addr,
+    learner_id,
+    num_learners,
+    budget_steps,
+) = sys.argv[1:]
+
+print(
+    json.dumps(
+        {
+            "PYTHONPATH": f"{yeto_root}:{miles_root}",
+            "PYTHONFAULTHANDLER": "1",
+            "TORCH_SHOW_CPP_STACKTRACES": "1",
+            "TORCH_DISABLE_ADDR2LINE": "1",
+            "MILES_OFFLINE_VALIDATION_START_ROLLOUT": validation_start,
+            "NCCL_DEBUG": "WARN",
+            "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512,garbage_collection_threshold:0.8",
+            "YETO_VALUE_SYNCER": syncer_addr,
+            "YETO_VALUE_LEARNER_ID": learner_id,
+            "YETO_VALUE_NUM_LEARNERS": num_learners,
+            "YETO_VALUE_MERGE_ALPHA": "0.5",
+            "YETO_VALUE_STREAMS": "4",
+            "YETO_VALUE_CONNECT_TIMEOUT": "3600",
+            "YETO_VALUE_FINALIZATION_TIMEOUT": "7200",
+            "YETO_VALUE_BUDGET_STEPS": budget_steps,
+            "YETO_VALUE_LOCAL_STEP_OFFSET": "0",
+            "YETO_VALUE_UNIT_OFFSET": "0",
+        },
+        separators=(",", ":"),
+    )
+)
+PY
+) || die "failed to construct Miles worker environment"
+
+export PYTHONPATH="${YETO_ROOT}:${MILES_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+# Supplying both standard W&B naming variables enables logging.  Authentication
+# is deliberately left to WANDB_API_KEY/netrc already present in the runtime.
+WANDB_ARGS=()
+if [[ -n "${WANDB_PROJECT:-}" || -n "${WANDB_GROUP:-}" ]]; then
+  [[ -n "${WANDB_PROJECT:-}" && -n "${WANDB_GROUP:-}" ]] || die "set both WANDB_PROJECT and WANDB_GROUP, or neither"
+  WANDB_ARGS+=(
+    --use-wandb
+    --wandb-project "${WANDB_PROJECT}"
+    --wandb-group "${WANDB_GROUP}"
+  )
+
+  wandb_team=${WANDB_TEAM:-${WANDB_ENTITY:-}}
+  if [[ -n "${WANDB_TEAM:-}" && -n "${WANDB_ENTITY:-}" && "${WANDB_TEAM}" != "${WANDB_ENTITY}" ]]; then
+    die "WANDB_TEAM and WANDB_ENTITY disagree"
+  fi
+  [[ -z "${wandb_team}" ]] || WANDB_ARGS+=(--wandb-team "${wandb_team}")
+
+  if [[ -n "${WANDB_MODE:-}" ]]; then
+    case "${WANDB_MODE}" in
+      online | offline | disabled) ;;
+      *) die "WANDB_MODE must be online, offline, or disabled" ;;
+    esac
+    WANDB_ARGS+=(--wandb-mode "${WANDB_MODE}")
+  fi
+  [[ -z "${WANDB_DIR:-}" ]] || WANDB_ARGS+=(--wandb-dir "${WANDB_DIR}")
+fi
+
+printf 'Launching Miles value island %d/%d: train=%d validation=%d context=%d data=%s output=%s syncer=%s ray_node=%s\n' \
+  "${LEARNER_ID}" "${NUM_LEARNERS}" "${LOCAL_BUDGET_STEPS}" \
+  "$((NUM_ROLLOUT - VALIDATION_START_ROLLOUT))" "${CONTEXT_LENGTH}" \
+  "${ISLAND_DATA_TEMPLATE}" "${OUTPUT_DIR}" "${SYNCER_ADDR}" \
+  "${MILES_RAY_TARGET_NODE_IP}"
+
+exec python3 train_async.py \
+  --actor-num-nodes 1 \
+  --actor-num-gpus-per-node 8 \
+  --critic-num-nodes 1 \
+  --critic-num-gpus-per-node 8 \
+  "${MODEL_ARGS[@]}" \
+  --hf-checkpoint "${MODEL_DIR}/Qwen3.8-27B" \
+  --load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
+  --critic-load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
+  --ref-load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
+  --save "${OUTPUT_DIR}/checkpoints" \
+  --critic-save "${OUTPUT_DIR}/critic_checkpoints" \
+  --save-interval 1000 \
+  --prompt-data "${PROMPT_DATA}" \
+  --input-key prompt \
+  --label-key label \
+  --metadata-key metadata \
+  --load-debug-rollout-data "${ISLAND_DATA_TEMPLATE}" \
+  --disable-rollout-global-dataset \
+  --rollout-num-gpus 0 \
+  --rollout-num-gpus-per-engine 1 \
+  --use-dynamic-global-batch-size \
+  --num-rollout "${NUM_ROLLOUT}" \
+  --rollout-batch-size "${LOCAL_GLOBAL_BATCH_SIZE}" \
+  --global-batch-size "${LOCAL_GLOBAL_BATCH_SIZE}" \
+  --n-samples-per-prompt 1 \
+  --rollout-max-response-len "${CONTEXT_LENGTH}" \
+  --seq-length "${CONTEXT_LENGTH}" \
+  --max-position-embeddings "${CONTEXT_LENGTH}" \
+  --tensor-model-parallel-size 4 \
+  --pipeline-model-parallel-size 1 \
+  --context-parallel-size 2 \
+  --expert-model-parallel-size 1 \
+  --expert-tensor-parallel-size 1 \
+  --sequence-parallel \
+  --recompute-granularity full \
+  --recompute-method uniform \
+  --recompute-num-layers 1 \
+  --use-dynamic-batch-size \
+  --balance-data \
+  --max-tokens-per-gpu 10240 \
+  --advantage-estimator gae_adaptive \
+  --custom-config-path "${CUSTOM_CONFIG_PATH}" \
+  --critic-lambd 1.0 \
+  --critic-lr 1e-6 \
+  --critic-lr-warmup-iters "${LR_WARMUP_ITERS}" \
+  --num-critic-only-steps 1000000 \
+  --num-critic-epochs 1 \
+  --value-loss-type mse \
+  --gamma 1.0 \
+  --kl-loss-coef 0.0 \
+  --entropy-coef 0.0 \
+  --optimizer adam \
+  --lr 1e-6 \
+  --lr-decay-style cosine \
+  --lr-decay-iters "${LR_DECAY_ITERS}" \
+  --min-lr 1e-7 \
+  --weight-decay 0.1 \
+  --adam-beta1 0.9 \
+  --adam-beta2 0.98 \
+  --grad-reduce-in-bf16 \
+  --loss-scale 0.0009765625 \
+  --use-precision-aware-optimizer \
+  --offload-optimizer-states \
+  --attention-dropout 0.0 \
+  --hidden-dropout 0.0 \
+  --attention-softmax-in-fp32 \
+  --attention-backend flash \
+  --train-env-vars "${TRAIN_ENV_VARS}" \
+  --distributed-timeout-minutes 240 \
+  --empty-unused-memory-level 2 \
+  --colocate-critic \
+  --custom-megatron-after-model-init-hook-path yeto.megatron.miles_value_island.after_model_init \
+  --custom-megatron-before-train-step-hook-path yeto.megatron.miles_value_island.before_train_step \
+  --custom-megatron-after-train-step-hook-path yeto.megatron.miles_value_island.after_train_step \
+  "${WANDB_ARGS[@]}"
