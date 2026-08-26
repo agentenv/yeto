@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -10,14 +10,19 @@ from yeto.fragments import MERGE_AVG, MERGE_ISO
 from yeto.megatron.miles_value_island import (
     MilesValueIsland,
     TensorDescriptor,
+    _fragment_tensor_spans,
     _RuntimeTensor,
     _grouped_clip_grad,
     _grouped_grad_norm,
     _install_bf16_static_unscale_compat,
+    _pack_flat_fragment,
     _parse_syncer,
+    _unpack_flat_fragment,
     _validate_owned_ranges,
+    grouped_tensor_fragment_layout,
     one_tensor_fragment_layout,
 )
+from yeto.protocol import DTYPE_F32
 from yeto.megatron.miles_value_state import (
     reconstruct_fp32_from_bf16_remainder,
     split_fp32_to_bf16_remainder,
@@ -84,6 +89,281 @@ def test_layout_rejects_duplicate_names_and_invalid_iso_shapes():
         one_tensor_fragment_layout([_descriptor("x", (8,), MERGE_ISO)])
     with pytest.raises(ValueError, match="unsupported merge mode"):
         one_tensor_fragment_layout([_descriptor("x", (2, 2), 99)])
+
+
+def test_grouped_layout_is_deterministic_balanced_and_never_splits_tensors():
+    descriptors = [
+        _descriptor("decoder.layers.1.mlp.weight", (9, 4), MERGE_ISO),
+        _descriptor("decoder.layers.0.norm.weight", (4,), MERGE_AVG),
+        _descriptor("decoder.layers.0.mlp.weight", (8, 4), MERGE_ISO),
+        _descriptor("decoder.layers.2.mlp.weight", (7, 4), MERGE_ISO),
+        _descriptor("embedding.word_embeddings.weight", (11, 4), MERGE_AVG),
+        _descriptor("output_layer.weight", (1, 4), MERGE_ISO),
+    ]
+
+    first = grouped_tensor_fragment_layout(descriptors, 3, "binpack")
+    second = grouped_tensor_fragment_layout(list(reversed(descriptors)), 3, "binpack")
+
+    assert [fragment.tensors for fragment in first.fragments] == [
+        fragment.tensors for fragment in second.fragments
+    ]
+    assert first.num_fragments == 3
+    assert sorted(first.tensor_names()) == sorted(item.name for item in descriptors)
+    assert len(first.tensor_names()) == len(set(first.tensor_names()))
+    expected_numels = {item.name: item.numel for item in descriptors}
+    for fragment in first.fragments:
+        assert fragment.numel == sum(
+            expected_numels[name] for name, _ in fragment.tensors
+        )
+        assert all(
+            declared_numel == expected_numels[name]
+            for name, declared_numel in fragment.tensors
+        )
+        assert all(
+            next(item for item in descriptors if item.name == name).merge_mode
+            == fragment.merge_mode
+            for name, _ in fragment.tensors
+        )
+
+
+def test_grouped_layout_uses_requested_scale_and_complete_tensor_spans():
+    descriptors = [
+        _descriptor(f"decoder.layers.{index}.weight", (2, index + 1), MERGE_ISO)
+        for index in range(120)
+    ]
+    descriptors.extend(
+        _descriptor(f"decoder.layers.{index}.norm.weight", (8,), MERGE_AVG)
+        for index in range(8)
+    )
+
+    layout = grouped_tensor_fragment_layout(descriptors, 96, "binpack")
+
+    assert layout.num_fragments == 96
+    by_name = {item.name: item for item in descriptors}
+    for fragment in layout.fragments:
+        spans = _fragment_tensor_spans(fragment, by_name)
+        assert [span.name for span in spans] == [
+            name for name, _ in fragment.tensors
+        ]
+        assert spans[0].start == 0
+        assert spans[-1].end == fragment.numel
+        assert all(left.end == right.start for left, right in zip(spans, spans[1:]))
+        assert all(span.numel == by_name[span.name].numel for span in spans)
+
+
+def test_fragment_spans_reject_wrong_numel_shape_merge_and_duplicate():
+    descriptor = _descriptor("w", (2, 3), MERGE_ISO)
+    by_name = {descriptor.name: descriptor}
+    valid = island_module.Fragment(
+        MERGE_ISO,
+        [("w", 6)],
+        shapes={"w": (2, 3)},
+        identity_shapes={"w": (2, 3)},
+    )
+    assert _fragment_tensor_spans(valid, by_name)[0].end == 6
+
+    wrong_numel = island_module.Fragment(
+        MERGE_ISO,
+        [("w", 5)],
+        shapes={"w": (2, 3)},
+        identity_shapes={"w": (2, 3)},
+    )
+    with pytest.raises(ValueError, match="declares 5"):
+        _fragment_tensor_spans(wrong_numel, by_name)
+
+    wrong_shape = island_module.Fragment(
+        MERGE_ISO,
+        [("w", 6)],
+        shapes={"w": (3, 2)},
+        identity_shapes={"w": (2, 3)},
+    )
+    with pytest.raises(ValueError, match="Iso shape"):
+        _fragment_tensor_spans(wrong_shape, by_name)
+
+    wrong_merge = island_module.Fragment(
+        MERGE_AVG,
+        [("w", 6)],
+        identity_shapes={"w": (2, 3)},
+    )
+    with pytest.raises(ValueError, match="merge mode"):
+        _fragment_tensor_spans(wrong_merge, by_name)
+
+    duplicate = island_module.Fragment(
+        MERGE_ISO,
+        [("w", 6), ("w", 6)],
+        shapes={"w": (2, 3)},
+        identity_shapes={"w": (2, 3)},
+    )
+    with pytest.raises(ValueError, match="duplicate tensor"):
+        _fragment_tensor_spans(duplicate, by_name)
+
+
+def _mock_grouped_island(descriptors, *, is_leader=True):
+    island = object.__new__(MilesValueIsland)
+    island.is_leader = is_leader
+    island.layout = grouped_tensor_fragment_layout(
+        descriptors, num_fragments=1, pattern="binpack"
+    )
+    # This helper's tests use one merge mode, so one requested fragment is one
+    # actual fragment.
+    assert island.layout.num_fragments == 1
+    island.descriptors_by_name = {item.name: item for item in descriptors}
+    island.tensors_by_name = {
+        item.name: SimpleNamespace(descriptor=item) for item in descriptors
+    }
+    island.fragment_spans = [
+        _fragment_tensor_spans(fragment, island.descriptors_by_name)
+        for fragment in island.layout.fragments
+    ]
+    return island
+
+
+def test_grouped_pack_unpack_and_mocked_gather_use_exact_flat_offsets():
+    descriptors = [
+        _descriptor("z.weight", (2, 2), MERGE_ISO),
+        _descriptor("a.weight", (1, 3), MERGE_ISO),
+        _descriptor("m.weight", (2, 1), MERGE_ISO),
+    ]
+    island = _mock_grouped_island(descriptors)
+    calls = []
+    values = {
+        item.name: torch.arange(item.numel, dtype=torch.float32).view(item.full_shape)
+        + 100 * index
+        for index, item in enumerate(descriptors, start=1)
+    }
+
+    def gather_one(instance, runtime):
+        del instance
+        calls.append(runtime.descriptor.name)
+        return values[runtime.descriptor.name].clone()
+
+    island._gather_one_canonical = MethodType(gather_one, island)
+    flat = island._gather_canonical(0)
+    fragment = island.layout.fragments[0]
+    spans = island.fragment_spans[0]
+
+    assert calls == [span.name for span in spans]
+    assert flat is not None and flat.shape == (fragment.numel,)
+    for span in spans:
+        assert torch.equal(
+            flat[span.start : span.end].view(span.full_shape), values[span.name]
+        )
+    wire = _pack_flat_fragment(fragment, flat, DTYPE_F32)
+    decoded = _unpack_flat_fragment(fragment, wire, DTYPE_F32)
+    assert decoded.ndim == 1
+    assert torch.equal(decoded, flat)
+    with pytest.raises(ValueError, match="expected"):
+        _pack_flat_fragment(fragment, flat.view(1, -1), DTYPE_F32)
+
+
+def test_mocked_grouped_gather_uses_same_tensor_order_on_nonleader_rank():
+    descriptors = [
+        _descriptor("z.weight", (2, 2), MERGE_ISO),
+        _descriptor("a.weight", (1, 3), MERGE_ISO),
+        _descriptor("m.weight", (2, 1), MERGE_ISO),
+    ]
+    island = _mock_grouped_island(descriptors, is_leader=False)
+    calls = []
+
+    def gather_one(instance, runtime):
+        del instance
+        calls.append(runtime.descriptor.name)
+        return None
+
+    island._gather_one_canonical = MethodType(gather_one, island)
+
+    assert island._gather_canonical(0) is None
+    assert calls == [span.name for span in island.fragment_spans[0]]
+
+
+@pytest.mark.parametrize("is_leader", [True, False])
+def test_mocked_grouped_apply_uses_same_tensor_order_on_every_rank(is_leader):
+    descriptors = [
+        _descriptor("z.weight", (2, 2), MERGE_ISO),
+        _descriptor("a.weight", (1, 3), MERGE_ISO),
+        _descriptor("m.weight", (2, 1), MERGE_ISO),
+    ]
+    island = _mock_grouped_island(descriptors, is_leader=is_leader)
+    fragment = island.layout.fragments[0]
+    flat = torch.arange(fragment.numel, dtype=torch.float32) if is_leader else None
+    calls = []
+
+    def apply_one(instance, runtime, leader_tensor, *, merge_alpha):
+        del instance
+        calls.append(
+            (
+                runtime.descriptor.name,
+                None if leader_tensor is None else leader_tensor.clone(),
+                merge_alpha,
+            )
+        )
+
+    island._apply_one_canonical = MethodType(apply_one, island)
+    island._apply_canonical(0, flat, merge_alpha=0.25)
+
+    assert [name for name, _, _ in calls] == [
+        span.name for span in island.fragment_spans[0]
+    ]
+    assert all(alpha == 0.25 for _, _, alpha in calls)
+    for (_, tensor, _), span in zip(calls, island.fragment_spans[0]):
+        if is_leader:
+            assert tensor is not None
+            assert tuple(tensor.shape) == span.full_shape
+            assert torch.equal(tensor.reshape(-1), flat[span.start : span.end])
+        else:
+            assert tensor is None
+
+
+def test_initial_anchor_covers_the_full_flat_grouped_fragment(monkeypatch):
+    descriptors = [
+        _descriptor("z.weight", (2, 2), MERGE_ISO),
+        _descriptor("a.weight", (1, 3), MERGE_ISO),
+        _descriptor("m.weight", (2, 1), MERGE_ISO),
+    ]
+    island = _mock_grouped_island(descriptors)
+    fragment = island.layout.fragments[0]
+    flat = torch.arange(fragment.numel, dtype=torch.float32)
+    version = 7
+    island.client = SimpleNamespace(dtype=DTYPE_F32)
+    island._leader_payloads = {
+        (0, version): _pack_flat_fragment(fragment, flat, DTYPE_F32)
+    }
+    island.anchors = [None]
+    island.initial_ready = False
+    island.steps_total = 11
+    island.units_total = 101
+    island.steps_at_reset = [0]
+    island.units_at_reset = [0]
+    island.fragment_versions = [0]
+    applied = []
+
+    island._wait_initial_plan = MethodType(lambda instance: [(0, version)], island)
+    island._leader_value = MethodType(lambda instance, builder: builder(), island)
+    island._leader_local = MethodType(lambda instance, builder: builder(), island)
+    island._apply_canonical = MethodType(
+        lambda instance, fid, payload, *, merge_alpha: applied.append(
+            (fid, payload.clone(), merge_alpha)
+        ),
+        island,
+    )
+    island._mark_fresh_optimizer_states_initialized = MethodType(
+        lambda instance: None, island
+    )
+    monkeypatch.setattr(island_module.dist, "barrier", lambda: None)
+
+    island.ensure_initial_ready()
+
+    assert island.initial_ready is True
+    assert island.anchors[0] is not None
+    assert island.anchors[0].shape == (fragment.numel,)
+    assert torch.equal(island.anchors[0], flat.to(torch.bfloat16))
+    assert len(applied) == 1
+    assert applied[0][0] == 0
+    assert torch.equal(applied[0][1], flat)
+    assert applied[0][2] == 0.0
+    assert island.steps_at_reset == [11]
+    assert island.units_at_reset == [101]
+    assert island.fragment_versions == [version]
 
 
 @pytest.mark.parametrize(

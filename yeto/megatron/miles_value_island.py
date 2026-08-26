@@ -24,10 +24,12 @@ import torch
 import torch.distributed as dist
 
 from ..fragments import (
+    FRAGMENT_PATTERNS,
     MERGE_AVG,
     MERGE_ISO,
     Fragment,
     FragmentLayout,
+    build_layout,
     is_embedding_name,
 )
 from ..protocol import DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
@@ -325,6 +327,20 @@ class _RuntimeTensor:
     ownership_ranges: tuple[tuple[int, int] | None, ...]
 
 
+@dataclass(frozen=True)
+class _FragmentTensorSpan:
+    """One complete canonical tensor's exact interval in a flat fragment."""
+
+    name: str
+    start: int
+    end: int
+    full_shape: tuple[int, ...]
+
+    @property
+    def numel(self) -> int:
+        return self.end - self.start
+
+
 def _validate_owned_ranges(
     name: str,
     numel: int,
@@ -355,23 +371,31 @@ def _validate_owned_ranges(
         )
 
 
-def one_tensor_fragment_layout(
+def grouped_tensor_fragment_layout(
     descriptors: list[TensorDescriptor],
+    num_fragments: int = 96,
+    pattern: str = "binpack",
 ) -> FragmentLayout:
-    """Build a deterministic, one-canonical-tensor-per-fragment Iso layout.
+    """Group complete canonical tensors into a deterministic Iso layout.
 
-    Keeping large matrices in separate fragments bounds syncer and learner
-    peak memory.  Two-dimensional non-embedding tensors use Iso; vectors and
-    embedding-like tensors use direct averaging.  A 1xH value head is still
-    an Iso tensor, for which spectrum flattening is mathematically identity.
+    No tensor is split. Two-dimensional non-embedding tensors use Iso;
+    vectors and embedding-like tensors use direct averaging. A 1xH value
+    head is still an Iso tensor, for which spectrum flattening is
+    mathematically identity. ``build_layout`` gives both supported patterns
+    deterministic name-based tie breaking and keeps merge modes separate.
     """
 
     if not descriptors:
         raise ValueError("Miles value island has no trainable parameters")
+    if num_fragments < 1:
+        raise ValueError("num_fragments must be >= 1")
+    if pattern not in FRAGMENT_PATTERNS:
+        raise ValueError(
+            f"pattern must be one of {FRAGMENT_PATTERNS}, got {pattern!r}"
+        )
     ordered = sorted(descriptors, key=lambda item: item.name)
     if len({item.name for item in ordered}) != len(ordered):
         raise ValueError("Miles value island parameter names are not unique")
-    fragments: list[Fragment] = []
     for item in ordered:
         expected = 1
         for dim in item.full_shape:
@@ -383,20 +407,156 @@ def one_tensor_fragment_layout(
         if item.merge_mode == MERGE_ISO:
             if len(item.full_shape) != 2:
                 raise ValueError(f"{item.name}: Iso requires a two-dimensional tensor")
-            shapes = {item.name: (item.full_shape[0], item.full_shape[1])}
-        elif item.merge_mode == MERGE_AVG:
-            shapes = None
-        else:
+        elif item.merge_mode != MERGE_AVG:
             raise ValueError(f"{item.name}: unsupported merge mode {item.merge_mode}")
+
+    layout = build_layout(
+        [(item.name, item.numel) for item in ordered],
+        num_fragments,
+        pattern,
+        matrix_merge="iso",
+        named_shapes={item.name: item.full_shape for item in ordered},
+    )
+    by_name = {item.name: item for item in ordered}
+    for fragment in layout.fragments:
+        for name, numel in fragment.tensors:
+            item = by_name[name]
+            if numel != item.numel:
+                raise RuntimeError(
+                    f"{name}: layout has {numel} values, expected {item.numel}"
+                )
+            if fragment.merge_mode != item.merge_mode:
+                raise RuntimeError(
+                    f"{name}: layout merge mode {fragment.merge_mode} differs "
+                    f"from descriptor mode {item.merge_mode}"
+                )
+    if sorted(layout.tensor_names()) != [item.name for item in ordered]:
+        raise RuntimeError("grouped fragment layout lost or duplicated parameters")
+    return layout
+
+
+def one_tensor_fragment_layout(
+    descriptors: list[TensorDescriptor],
+) -> FragmentLayout:
+    """Compatibility layout with exactly one complete tensor per fragment."""
+
+    grouped_tensor_fragment_layout(
+        descriptors,
+        num_fragments=len(descriptors),
+        pattern="binpack",
+    )
+    fragments = []
+    for item in sorted(descriptors, key=lambda descriptor: descriptor.name):
         fragments.append(
             Fragment(
                 merge_mode=item.merge_mode,
                 tensors=[(item.name, item.numel)],
-                shapes=shapes,
+                shapes=(
+                    {item.name: (item.full_shape[0], item.full_shape[1])}
+                    if item.merge_mode == MERGE_ISO
+                    else None
+                ),
                 identity_shapes={item.name: item.full_shape},
             )
         )
     return FragmentLayout(fragments)
+
+
+def _fragment_tensor_spans(
+    fragment: Fragment,
+    descriptors_by_name: dict[str, TensorDescriptor],
+) -> tuple[_FragmentTensorSpan, ...]:
+    """Resolve and validate deterministic flat offsets for one fragment."""
+
+    spans: list[_FragmentTensorSpan] = []
+    seen: set[str] = set()
+    offset = 0
+    for name, declared_numel in fragment.tensors:
+        if name in seen:
+            raise ValueError(f"fragment contains duplicate tensor {name!r}")
+        seen.add(name)
+        try:
+            descriptor = descriptors_by_name[name]
+        except KeyError as exc:
+            raise ValueError(f"fragment references unknown tensor {name!r}") from exc
+        if declared_numel != descriptor.numel:
+            raise ValueError(
+                f"{name}: fragment declares {declared_numel} values, "
+                f"descriptor has {descriptor.numel}"
+            )
+        identity_shape = (
+            None
+            if fragment.identity_shapes is None
+            else fragment.identity_shapes.get(name)
+        )
+        if identity_shape != descriptor.full_shape:
+            raise ValueError(
+                f"{name}: fragment identity shape {identity_shape} differs from "
+                f"canonical shape {descriptor.full_shape}"
+            )
+        if fragment.merge_mode != descriptor.merge_mode:
+            raise ValueError(
+                f"{name}: fragment merge mode {fragment.merge_mode} differs from "
+                f"descriptor mode {descriptor.merge_mode}"
+            )
+        if descriptor.merge_mode == MERGE_ISO:
+            shape = None if fragment.shapes is None else fragment.shapes.get(name)
+            if shape != descriptor.full_shape:
+                raise ValueError(
+                    f"{name}: Iso shape {shape} differs from canonical shape "
+                    f"{descriptor.full_shape}"
+                )
+        spans.append(
+            _FragmentTensorSpan(
+                name=name,
+                start=offset,
+                end=offset + declared_numel,
+                full_shape=descriptor.full_shape,
+            )
+        )
+        offset += declared_numel
+    if offset != fragment.numel:
+        raise RuntimeError(
+            f"fragment spans cover {offset} values, expected {fragment.numel}"
+        )
+    return tuple(spans)
+
+
+def _validate_flat_fragment(
+    fragment: Fragment,
+    flat: torch.Tensor,
+    *,
+    context: str,
+) -> torch.Tensor:
+    """Require an exact one-dimensional payload for the whole fragment."""
+
+    if flat.ndim != 1 or flat.numel() != fragment.numel:
+        raise ValueError(
+            f"{context}: flat fragment has shape {tuple(flat.shape)}, "
+            f"expected ({fragment.numel},)"
+        )
+    return flat
+
+
+def _pack_flat_fragment(fragment: Fragment, flat: torch.Tensor, dtype: int) -> bytes:
+    return pack_tensor(
+        _validate_flat_fragment(fragment, flat, context="pack"),
+        dtype,
+    )
+
+
+def _unpack_flat_fragment(fragment: Fragment, data: bytes, dtype: int) -> torch.Tensor:
+    return _validate_flat_fragment(
+        fragment,
+        unpack_fragment(fragment, data, dtype),
+        context="unpack",
+    )
+
+
+def _quantize_flat_fragment(fragment: Fragment, flat: torch.Tensor) -> bytes:
+    return quantize_q4(
+        _validate_flat_fragment(fragment, flat, context="quantize")
+    )
 
 
 def _required_env(name: str) -> str:
@@ -605,10 +765,31 @@ class MilesValueIsland:
         runtimes.sort(key=lambda item: item.descriptor.name)
         self.tensors = runtimes
         self.descriptors = [item.descriptor for item in runtimes]
+        self.tensors_by_name = {
+            item.descriptor.name: item for item in self.tensors
+        }
+        self.descriptors_by_name = {
+            item.name: item for item in self.descriptors
+        }
         self._validate_catalog_across_ranks()
-        self.layout = one_tensor_fragment_layout(self.descriptors)
-        if len(self.layout.fragments) != len(self.tensors):
-            raise RuntimeError("one-tensor fragment layout lost parameters")
+        requested_fragments = _env_int("YETO_VALUE_NUM_FRAGMENTS", 96)
+        fragment_pattern = os.environ.get(
+            "YETO_VALUE_FRAGMENT_PATTERN", "binpack"
+        ).strip()
+        self.layout = grouped_tensor_fragment_layout(
+            self.descriptors,
+            num_fragments=requested_fragments,
+            pattern=fragment_pattern,
+        )
+        self.fragment_spans = [
+            _fragment_tensor_spans(fragment, self.descriptors_by_name)
+            for fragment in self.layout.fragments
+        ]
+        flattened_names = [
+            span.name for spans in self.fragment_spans for span in spans
+        ]
+        if sorted(flattened_names) != sorted(self.tensors_by_name):
+            raise RuntimeError("grouped fragment spans lost or duplicated parameters")
 
         self.learner_id = _env_int("YETO_VALUE_LEARNER_ID")
         self.num_learners = _env_int("YETO_VALUE_NUM_LEARNERS", 5)
@@ -664,9 +845,12 @@ class MilesValueIsland:
         self._send_initial_parameters()
         if self.is_leader:
             log.info(
-                "initialized Miles value island learner=%d tensors=%d TP=%d CP=%d",
+                "initialized Miles value island learner=%d tensors=%d fragments=%d "
+                "pattern=%s TP=%d CP=%d",
                 self.learner_id,
                 len(self.tensors),
+                self.layout.num_fragments,
+                fragment_pattern,
                 self.parallel.tp.size,
                 self.parallel.cp.size,
             )
@@ -998,8 +1182,9 @@ class MilesValueIsland:
                     f"{runtime.descriptor.name}: authoritative install mutated Adam {key}"
                 )
 
-    def _gather_canonical(self, fid: int) -> torch.Tensor | None:
-        runtime = self.tensors[fid]
+    def _gather_one_canonical(self, runtime: _RuntimeTensor) -> torch.Tensor | None:
+        """Gather one complete canonical tensor, preserving TP semantics."""
+
         descriptor = runtime.descriptor
         local = self._local_master(runtime)
         full = None
@@ -1027,14 +1212,39 @@ class MilesValueIsland:
             return full.cpu()
         return None
 
-    def _apply_canonical(
+    def _gather_canonical(self, fid: int) -> torch.Tensor | None:
+        """Gather one flat fragment while holding one canonical GPU tensor at a time."""
+
+        fragment = self.layout.fragments[fid]
+        spans = self.fragment_spans[fid]
+        leader_flat = (
+            torch.empty(fragment.numel, dtype=torch.float32, device="cpu")
+            if self.is_leader
+            else None
+        )
+        for span in spans:
+            full = self._gather_one_canonical(self.tensors_by_name[span.name])
+            if self.is_leader:
+                if full is None:
+                    raise RuntimeError(f"{span.name}: leader gather returned no tensor")
+                if tuple(full.shape) != span.full_shape or full.numel() != span.numel:
+                    raise RuntimeError(
+                        f"{span.name}: gathered shape {tuple(full.shape)} differs "
+                        f"from canonical shape {span.full_shape}"
+                    )
+                assert leader_flat is not None
+                leader_flat[span.start : span.end].copy_(full.reshape(-1))
+        return leader_flat
+
+    def _apply_one_canonical(
         self,
-        fid: int,
+        runtime: _RuntimeTensor,
         leader_full_cpu: torch.Tensor | None,
         *,
         merge_alpha: float,
     ) -> None:
-        runtime = self.tensors[fid]
+        """Apply one complete canonical tensor, preserving TP/CP ordering."""
+
         descriptor = runtime.descriptor
         local = torch.empty(
             descriptor.local_shape, dtype=torch.float32, device=self.device
@@ -1086,6 +1296,37 @@ class MilesValueIsland:
             local.mul_(1.0 - merge_alpha).add_(current, alpha=merge_alpha)
         self._install_local(runtime, local)
 
+    def _apply_canonical(
+        self,
+        fid: int,
+        leader_flat_cpu: torch.Tensor | None,
+        *,
+        merge_alpha: float,
+    ) -> None:
+        """Apply one flat fragment in layout order, one GPU tensor at a time."""
+
+        fragment = self.layout.fragments[fid]
+        if self.is_leader:
+            if leader_flat_cpu is None:
+                raise RuntimeError(f"fragment {fid}: leader has no canonical payload")
+            if leader_flat_cpu.ndim != 1 or leader_flat_cpu.numel() != fragment.numel:
+                raise ValueError(
+                    f"fragment {fid}: canonical payload has shape "
+                    f"{tuple(leader_flat_cpu.shape)}, expected ({fragment.numel},)"
+                )
+        for span in self.fragment_spans[fid]:
+            leader_tensor = None
+            if self.is_leader:
+                assert leader_flat_cpu is not None
+                leader_tensor = leader_flat_cpu[span.start : span.end].view(
+                    span.full_shape
+                )
+            self._apply_one_canonical(
+                self.tensors_by_name[span.name],
+                leader_tensor,
+                merge_alpha=merge_alpha,
+            )
+
     def _send_initial_parameters(self) -> None:
         # INIT_PARAMS is authoritative only from logical learner 0.  Other
         # islands still connect immediately and wait for that raw global cut.
@@ -1093,11 +1334,17 @@ class MilesValueIsland:
             for fid, fragment in enumerate(self.layout.fragments):
                 full = self._gather_canonical(fid)
 
-                def send_init(full: torch.Tensor | None = full, fid: int = fid) -> None:
+                def send_init(
+                    full: torch.Tensor | None = full,
+                    fid: int = fid,
+                    fragment: Fragment = fragment,
+                ) -> None:
                     assert self.client is not None and full is not None
                     self.client.send_init(
                         fid,
-                        pack_tensor(full, bulk_dtype(self.client.dtype)),
+                        _pack_flat_fragment(
+                            fragment, full, bulk_dtype(self.client.dtype)
+                        ),
                     )
 
                 self._leader_local(send_init)
@@ -1142,11 +1389,11 @@ class MilesValueIsland:
             def decode_initial(fid: int = fid, version: int = version) -> torch.Tensor:
                 assert self.client is not None
                 data = self._leader_payloads.pop((fid, version))
-                full = unpack_fragment(
+                flat = _unpack_flat_fragment(
                     self.layout.fragments[fid], data, bulk_dtype(self.client.dtype)
-                ).view(self.descriptors[fid].full_shape)
-                self.anchors[fid] = full.to(torch.bfloat16).contiguous()
-                return full
+                )
+                self.anchors[fid] = flat.to(torch.bfloat16).contiguous()
+                return flat
 
             full = self._leader_local(decode_initial)
             self._apply_canonical(fid, full, merge_alpha=0.0)
@@ -1214,11 +1461,11 @@ class MilesValueIsland:
             def decode_update(fid: int = fid, version: int = version) -> torch.Tensor:
                 assert self.client is not None
                 data = self._leader_payloads.pop((fid, version))
-                full = unpack_fragment(
+                flat = _unpack_flat_fragment(
                     self.layout.fragments[fid], data, bulk_dtype(self.client.dtype)
-                ).view(self.descriptors[fid].full_shape)
-                self.anchors[fid] = full.to(torch.bfloat16).contiguous()
-                return full
+                )
+                self.anchors[fid] = flat.to(torch.bfloat16).contiguous()
+                return flat
 
             full = self._leader_local(decode_update)
             self._apply_canonical(fid, full, merge_alpha=self.merge_alpha)
@@ -1261,7 +1508,7 @@ class MilesValueIsland:
                     local_step,
                     c_steps,
                     c_units,
-                    quantize_q4(delta),
+                    _quantize_flat_fragment(self.layout.fragments[fid], delta),
                 )
 
             self._leader_local(push_update)
@@ -1368,9 +1615,9 @@ class MilesValueIsland:
             ) -> None:
                 assert self.client is not None and frozen is not None
                 data = self._leader_payloads.pop((fid, base_version))
-                base = unpack_fragment(
+                base = _unpack_flat_fragment(
                     self.layout.fragments[fid], data, bulk_dtype(self.client.dtype)
-                ).view(self.descriptors[fid].full_shape)
+                )
                 self.client.push_fragment(
                     fid,
                     global_step,
@@ -1379,7 +1626,9 @@ class MilesValueIsland:
                     self.steps_total,
                     self.steps_total,
                     self.units_total,
-                    quantize_q4(frozen.float().sub(base.float())),
+                    _quantize_flat_fragment(
+                        self.layout.fragments[fid], frozen.float().sub(base.float())
+                    ),
                 )
 
             self._leader_local(push_frozen)
@@ -1407,9 +1656,9 @@ class MilesValueIsland:
 
             def decode_terminal(fid: int = fid, version: int = version) -> torch.Tensor:
                 data = self._leader_payloads.pop((fid, version))
-                return unpack_fragment(
+                return _unpack_flat_fragment(
                     self.layout.fragments[fid], data, DTYPE_F32
-                ).view(self.descriptors[fid].full_shape)
+                )
 
             full = self._leader_local(decode_terminal)
             self._apply_canonical(fid, full, merge_alpha=0.0)
@@ -1511,5 +1760,6 @@ __all__ = [
     "after_model_init",
     "after_train_step",
     "before_train_step",
+    "grouped_tensor_fragment_layout",
     "one_tensor_fragment_layout",
 ]
