@@ -7,6 +7,7 @@
 //! delays pulling the next.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -350,12 +351,92 @@ impl StepRates {
 type Registry = Arc<Mutex<RegistryState>>;
 type Session = Arc<Mutex<Option<SessionSpec>>>;
 
+/// Orders every cutoff-sensitive scheduler action against BUDGET_DONE.
+///
+/// `request` closes the gate before the decoded report is queued.  A
+/// successful `try_linearize_work` is the linearization point for exactly one
+/// subsequent commit, pull/retry, or compute submission.  Both operations use
+/// the same mutex, so work that linearizes after a queued report is impossible;
+/// work that won the mutex first is part of the authoritative pre-cutoff cut
+/// and is allowed to finish before the scheduler quiesces accepted compute.
+struct BudgetCutoff {
+    enabled: bool,
+    timeout: Duration,
+    deadline: Mutex<Option<tokio::time::Instant>>,
+    notify: tokio::sync::Notify,
+}
+
+impl BudgetCutoff {
+    fn new(enabled: bool, timeout: Duration) -> Self {
+        Self {
+            enabled,
+            timeout,
+            deadline: Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Close the gate exactly once and establish the one absolute deadline
+    /// shared by report enqueue, report collection, and compute draining.
+    fn request(&self) -> Option<tokio::time::Instant> {
+        if !self.enabled {
+            return None;
+        }
+        let (deadline, first) = {
+            let mut deadline = self.deadline.lock().unwrap();
+            let first = deadline.is_none();
+            if first {
+                *deadline = Some(tokio::time::Instant::now() + self.timeout);
+            }
+            (*deadline, first)
+        };
+        if first {
+            self.notify.notify_waiters();
+        }
+        deadline
+    }
+
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        *self.deadline.lock().unwrap()
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Claim one cutoff-sensitive action in the total order.  The scheduler
+    /// is the sole action executor, so it may release the mutex after this
+    /// decision; a report that closes the gate afterwards is ordered after
+    /// this already-claimed action and before every later action.
+    fn try_linearize_work(&self) -> bool {
+        !self.enabled || self.deadline.lock().unwrap().is_none()
+    }
+
+    async fn wait_requested(&self) {
+        if !self.enabled {
+            std::future::pending::<()>().await;
+        }
+        loop {
+            // Register before checking the state so a request between those
+            // operations cannot be missed by Notify's edge-triggered wakeup.
+            let notified = self.notify.notified();
+            if self.deadline().is_some() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     if cfg.learners == 0 {
         bail!("--learners must be positive");
     }
     if cfg.quorum == 0 {
         bail!("--quorum must be positive");
+    }
+    if cfg.quorum_timeout_s == 0 {
+        bail!("--quorum-timeout-s must be positive");
     }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
@@ -378,9 +459,14 @@ pub async fn run(cfg: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
     let session: Session = Arc::new(Mutex::new(None));
+    let budget_cutoff = Arc::new(BudgetCutoff::new(
+        cfg.learner_budget_steps.is_some(),
+        Duration::from_secs(cfg.quorum_timeout_s),
+    ));
 
     let accept_registry = registry.clone();
     let accept_session = session.clone();
+    let accept_budget_cutoff = budget_cutoff.clone();
     let expected_learners = cfg.learners;
     tokio::spawn(async move {
         loop {
@@ -388,10 +474,18 @@ pub async fn run(cfg: Config) -> Result<()> {
                 Ok((stream, peer)) => {
                     let reg = accept_registry.clone();
                     let session = accept_session.clone();
+                    let budget_cutoff = accept_budget_cutoff.clone();
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, reg, session, expected_learners, tx).await
+                        if let Err(e) = handle_connection(
+                            stream,
+                            reg,
+                            session,
+                            expected_learners,
+                            tx,
+                            budget_cutoff,
+                        )
+                        .await
                         {
                             warn!(%peer, "connection ended: {e:#}");
                         }
@@ -402,7 +496,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     });
 
-    scheduler(cfg, event_rx, registry).await
+    scheduler(cfg, event_rx, registry, budget_cutoff).await
 }
 
 fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
@@ -499,6 +593,7 @@ async fn handle_connection(
     session: Session,
     expected_learners: u32,
     event_tx: mpsc::Sender<Event>,
+    budget_cutoff: Arc<BudgetCutoff>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
@@ -620,7 +715,7 @@ async fn handle_connection(
                 })
                 .await
                 .ok();
-            let res = read_loop(&mut rd, &group, &event_tx).await;
+            let res = read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await;
             {
                 let mut registry = registry.lock().unwrap();
                 registry.groups.remove(&member);
@@ -681,7 +776,7 @@ async fn handle_connection(
                 bail!(message);
             }
             tokio::spawn(writer_task(wr, rx));
-            read_loop(&mut rd, &group, &event_tx).await
+            read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
         }
         t => bail!("first frame must be HELLO/DATA_HELLO, got {t}"),
     }
@@ -729,6 +824,7 @@ async fn read_loop(
     rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
     group: &Arc<Group>,
     event_tx: &mpsc::Sender<Event>,
+    budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
     loop {
         let frame = match read_frame_limited(rd, |msg_type| match msg_type {
@@ -757,12 +853,19 @@ async fn read_loop(
         let dispatched = match frame.msg_type {
             MSG_CHUNK => match reassemble(group, &frame.payload) {
                 Ok(Some(inner)) => {
-                    dispatch_inner(group, inner.msg_type, &inner.payload, event_tx).await
+                    dispatch_inner(
+                        group,
+                        inner.msg_type,
+                        &inner.payload,
+                        event_tx,
+                        budget_cutoff,
+                    )
+                    .await
                 }
                 Ok(None) => Ok(()),
                 Err(error) => Err(error),
             },
-            t => dispatch_inner(group, t, &frame.payload, event_tx).await,
+            t => dispatch_inner(group, t, &frame.payload, event_tx, budget_cutoff).await,
         };
         if let Err(error) = dispatched {
             report_protocol_error(group, &error).await;
@@ -868,6 +971,7 @@ async fn dispatch_inner(
     msg_type: u8,
     payload: &[u8],
     event_tx: &mpsc::Sender<Event>,
+    budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
     match msg_type {
         MSG_INIT_PARAMS => {
@@ -997,13 +1101,22 @@ async fn dispatch_inner(
         }
         MSG_BUDGET_DONE => {
             let local_steps = decode_budget_done(payload)?;
-            event_tx
-                .send(Event::BudgetDone {
+            // This is the cutoff linearization point.  It must precede event
+            // queueing so a report waiting behind ordinary traffic still
+            // closes the scheduler gate immediately.
+            let deadline = budget_cutoff
+                .request()
+                .unwrap_or_else(|| tokio::time::Instant::now() + budget_cutoff.timeout());
+            tokio::time::timeout_at(
+                deadline,
+                event_tx.send(Event::BudgetDone {
                     member: group.member,
                     local_steps,
-                })
-                .await
-                .ok();
+                }),
+            )
+            .await
+            .context("timed out queueing BUDGET_DONE")?
+            .context("event channel closed while queueing BUDGET_DONE")?;
         }
         t => bail!(
             "unexpected message type {t} from learner {} generation {}",
@@ -1024,10 +1137,78 @@ fn encode_pull(fragment_id: usize, global_step: u64, round_attempt: u32) -> byte
     bytes::Bytes::from(payload)
 }
 
+async fn send_small_until_cutoff(
+    group: &Arc<Group>,
+    msg_type: u8,
+    payload: bytes::Bytes,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    if !budget_cutoff.enabled {
+        let _ = group.send_small(msg_type, payload).await;
+        return true;
+    }
+    tokio::select! {
+        biased;
+        _ = budget_cutoff.wait_requested() => false,
+        _ = group.send_small(msg_type, payload) => true,
+    }
+}
+
+async fn send_large_until_cutoff(
+    group: &Arc<Group>,
+    msg_type: u8,
+    payload: bytes::Bytes,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    if !budget_cutoff.enabled {
+        let _ = group.send_large(msg_type, payload).await;
+        return true;
+    }
+    tokio::select! {
+        biased;
+        _ = budget_cutoff.wait_requested() => false,
+        _ = group.send_large(msg_type, payload) => true,
+    }
+}
+
+async fn send_pull_until_cutoff(
+    groups: &[Arc<Group>],
+    pull: &bytes::Bytes,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    for group in groups {
+        if !send_small_until_cutoff(group, MSG_PULL_REQ, pull.clone(), budget_cutoff).await {
+            return false;
+        }
+    }
+    true
+}
+
+async fn recv_init_event(
+    events: &mut mpsc::Receiver<Event>,
+    budget_cutoff: &BudgetCutoff,
+    reports_received: usize,
+    learners: u32,
+) -> Result<Event> {
+    let event = match budget_cutoff.deadline() {
+        Some(deadline) => tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "learner-budget cutoff timed out during initialization/report collection: \
+                     received {reports_received}/{learners} BUDGET_DONE reports"
+                )
+            })?,
+        None => events.recv().await,
+    };
+    event.context("event channel closed")
+}
+
 async fn scheduler(
     cfg: Config,
     mut events: mpsc::Receiver<Event>,
     registry: Registry,
+    budget_cutoff: Arc<BudgetCutoff>,
 ) -> Result<()> {
     let mut state: Option<GlobalState> = None;
     let mut budget_reports: HashSet<u32> = HashSet::new();
@@ -1048,7 +1229,14 @@ async fn scheduler(
                 break;
             }
         }
-        match events.recv().await.context("event channel closed")? {
+        match recv_init_event(
+            &mut events,
+            &budget_cutoff,
+            budget_reports.len(),
+            cfg.learners,
+        )
+        .await?
+        {
             Event::Hello { group } => {
                 if state.is_none() {
                     // Layout comes from the HELLO of the first learner.
@@ -1108,7 +1296,29 @@ async fn scheduler(
         }
     }
     let mut st = state.unwrap();
-    if !budget_reports.is_empty() {
+    if budget_cutoff.deadline().is_some() || !budget_reports.is_empty() {
+        let deadline = budget_cutoff
+            .deadline()
+            .context("learner-budget gate closed without a deadline")?;
+        let target = cfg
+            .learner_budget_steps
+            .context("learner-budget gate closed outside learner-budget mode")?;
+        let (drain_result, reports_result) = tokio::join!(
+            drain_iso_before(&st, deadline),
+            collect_budget_reports(
+                target,
+                cfg.learners,
+                &mut budget_reports,
+                &mut events,
+                &registry,
+                deadline,
+                None,
+            )
+        );
+        // Always finish the bounded backend drain even when a report is
+        // malformed; a fatal report must not abandon accepted worker state.
+        drain_result?;
+        reports_result?;
         save_budget_checkpoint(&cfg, &st)?;
         return Ok(());
     }
@@ -1124,7 +1334,7 @@ async fn scheduler(
 
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
-    broadcast_all_fragments(&st, &registry).await;
+    broadcast_all_fragments(&st, &registry, &budget_cutoff).await;
 
     // Phase 2: gather, compute, and commit are separate stages.  Torch SVD
     // matrices execute concurrently and may finish out of order, but only
@@ -1140,18 +1350,37 @@ async fn scheduler(
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
     let mut busy_fragments: HashSet<usize> = HashSet::new();
-    let mut budget_cutoff = false;
+    let mut cutoff_established = false;
+    let mut first_budget_report: Option<(Member, u64)> = None;
     'outer: while next_t <= cfg.total_steps
         || !inflight.is_empty()
         || !computing.is_empty()
         || !ready.is_empty()
     {
+        if budget_cutoff.deadline().is_some() {
+            cutoff_established = true;
+            break 'outer;
+        }
         // Commit only the contiguous prefix.  A faster cuda:N worker can put
         // t+1 in `ready` first, but it cannot update Nesterov/version/tape or
         // broadcast until t has committed.
-        while let Some(completed) = take_next_commit(&mut ready, next_commit_t) {
+        while ready.contains_key(&next_commit_t) {
+            if !budget_cutoff.try_linearize_work() {
+                cutoff_established = true;
+                break 'outer;
+            }
+            let completed = take_next_commit(&mut ready, next_commit_t)
+                .context("ready commit disappeared after linearization")?;
             let p = completed.round.p;
-            commit_round(&cfg, &mut st, &registry, &mut last_sync_secs, completed).await?;
+            commit_round(
+                &cfg,
+                &mut st,
+                &registry,
+                &mut last_sync_secs,
+                completed,
+                &budget_cutoff,
+            )
+            .await?;
             if !busy_fragments.remove(&p) {
                 bail!("fragment {p} lost its busy ownership at commit");
             }
@@ -1165,6 +1394,10 @@ async fn scheduler(
             && next_t <= cfg.total_steps
             && Instant::now() >= next_launch
         {
+            if !budget_cutoff.try_linearize_work() {
+                cutoff_established = true;
+                break 'outer;
+            }
             let p = ((next_t - 1) % num_fragments) as usize;
             if busy_fragments.contains(&p) {
                 break;
@@ -1188,8 +1421,9 @@ async fn scheduler(
                     step_rates.max_step_secs_for(&expected_members),
                 );
             let launch_quorum = (cfg.quorum as usize).min(expected_members.len());
-            for g in &groups {
-                let _ = g.send_small(MSG_PULL_REQ, pull.clone()).await;
+            if !send_pull_until_cutoff(&groups, &pull, &budget_cutoff).await {
+                cutoff_established = true;
+                break 'outer;
             }
             if !busy_fragments.insert(p) {
                 bail!("fragment {p} acquired twice");
@@ -1239,6 +1473,10 @@ async fn scheduler(
                 RoundAction::Complete => {
                     let round = inflight.remove(i);
                     let prepared = prepare_round_compute(&st, &round)?;
+                    if !budget_cutoff.try_linearize_work() {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
                     computing.spawn(async move {
                         let compute_start = Instant::now();
                         let merge = prepared.compute().await?;
@@ -1252,6 +1490,10 @@ async fn scheduler(
                     continue;
                 }
                 RoundAction::Restart => {
+                    if !budget_cutoff.try_linearize_work() {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
                     let r = &mut inflight[i];
                     let groups = current_groups(&registry);
                     warn!(
@@ -1274,8 +1516,9 @@ async fn scheduler(
                     r.grace_deadline = None;
                     r.quorum_ms = None;
                     r.grace_ms = None;
-                    for g in groups {
-                        let _ = g.send_small(MSG_PULL_REQ, r.pull.clone()).await;
+                    if !send_pull_until_cutoff(&groups, &r.pull, &budget_cutoff).await {
+                        cutoff_established = true;
+                        break 'outer;
                     }
                     r.quorum_deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
                 }
@@ -1302,18 +1545,18 @@ async fn scheduler(
         }
         let wake = match earliest {
             Some(deadline) if !computing.is_empty() => tokio::select! {
+                biased;
+                wake = prefer_event_over_compute(events.recv(), computing.join_next()) => wake,
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => SchedulerWake::Deadline,
-                result = computing.join_next() => SchedulerWake::Computed(result),
-                event = events.recv() => SchedulerWake::Event(event),
             },
             Some(deadline) => tokio::select! {
+                biased;
+                event = events.recv() => SchedulerWake::Event(event),
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => SchedulerWake::Deadline,
-                event = events.recv() => SchedulerWake::Event(event),
             },
-            None if !computing.is_empty() => tokio::select! {
-                result = computing.join_next() => SchedulerWake::Computed(result),
-                event = events.recv() => SchedulerWake::Event(event),
-            },
+            None if !computing.is_empty() => {
+                prefer_event_over_compute(events.recv(), computing.join_next()).await
+            }
             None => continue,
         };
         match wake {
@@ -1363,7 +1606,7 @@ async fn scheduler(
                 }
                 Event::Hello { group } => {
                     // Rejoining learner: catch it up to the current state.
-                    send_all_fragments(&st, &group).await;
+                    send_all_fragments(&st, &group, &budget_cutoff).await;
                 }
                 Event::Init { .. } => {} // already initialized; ignore
                 Event::FinalAck { member, .. } => {
@@ -1377,27 +1620,12 @@ async fn scheduler(
                     member,
                     local_steps,
                 } => {
-                    let target = cfg
-                        .learner_budget_steps
-                        .context("received BUDGET_DONE outside learner-budget mode")?;
-                    if !is_current_member(&registry, member) {
-                        bail!("BUDGET_DONE from a superseded learner");
-                    }
-                    record_budget_report(&mut budget_reports, target, member, local_steps)?;
-                    let cancelled = inflight.len();
-                    inflight.clear();
-                    ready.clear();
-                    computing.abort_all();
-                    while computing.join_next().await.is_some() {}
-                    st.drain_iso_backend().await?;
-                    busy_fragments.clear();
-                    budget_cutoff = true;
-                    info!(
-                        learner_id = member.learner_id,
-                        cancelled_rounds = cancelled,
-                        target_steps = target,
-                        "learner-budget cutoff established"
-                    );
+                    // Validation is deliberately deferred until after the
+                    // bounded quiesce has started.  Even a malformed or
+                    // superseded report closes the gate fail-closed and must
+                    // not strand already-accepted worker jobs.
+                    first_budget_report = Some((member, local_steps));
+                    cutoff_established = true;
                     break 'outer;
                 }
                 Event::Disconnected { member } => {
@@ -1416,12 +1644,46 @@ async fn scheduler(
     }
 
     if cfg.learner_budget_steps.is_some() {
-        if !budget_cutoff {
+        cutoff_established |= budget_cutoff.deadline().is_some();
+        if !cutoff_established {
             bail!("learner-budget scheduler exited without a cutoff report");
         }
-        collect_budget_reports(&cfg, &mut budget_reports, &mut events, &registry).await?;
-        st.drain_iso_backend().await?;
+        let deadline = budget_cutoff
+            .deadline()
+            .context("learner-budget scheduler exited without a cutoff deadline")?;
+        let cancelled_inflight = inflight.len();
+        let cancelled_ready = ready.len();
+        let cancelled_computing = computing.len();
+        let target = cfg.learner_budget_steps.unwrap();
+        inflight.clear();
+        ready.clear();
+        busy_fragments.clear();
+        let (drain_result, reports_result) = tokio::join!(
+            quiesce_accepted_compute(&mut computing, &st, deadline),
+            collect_budget_reports(
+                target,
+                cfg.learners,
+                &mut budget_reports,
+                &mut events,
+                &registry,
+                deadline,
+                first_budget_report,
+            )
+        );
+        // Do not short-circuit either bounded cleanup branch: malformed
+        // reports and poisoned workers both fail closed only after the other
+        // branch has had its bounded opportunity to quiesce.
+        drain_result?;
+        reports_result?;
         save_budget_checkpoint(&cfg, &st)?;
+        info!(
+            cancelled_inflight,
+            cancelled_computing,
+            cancelled_ready,
+            target_steps = target,
+            step = st.global_step,
+            "learner-budget cutoff established"
+        );
         return Ok(());
     }
 
@@ -1505,17 +1767,103 @@ fn save_budget_checkpoint(cfg: &Config, st: &GlobalState) -> Result<()> {
     Ok(())
 }
 
+async fn drain_iso_before(st: &GlobalState, deadline: tokio::time::Instant) -> Result<()> {
+    tokio::time::timeout_at(deadline, st.drain_iso_backend())
+        .await
+        .context("timed out draining the ISO backend at learner-budget cutoff")??;
+    Ok(())
+}
+
+/// Abort scheduler-owned compute futures and fence every job already accepted
+/// by the backend.  Failure and timeout are both fail-closed: no cutoff
+/// checkpoint is written unless this entire quiesce succeeds.
+async fn quiesce_accepted_compute(
+    computing: &mut tokio::task::JoinSet<Result<ComputedRound>>,
+    st: &GlobalState,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    computing.abort_all();
+    let mut task_error: Option<anyhow::Error> = None;
+    loop {
+        let joined = match tokio::time::timeout_at(deadline, computing.join_next()).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                task_error = Some(anyhow::anyhow!(
+                    "timed out cancelling scheduler compute tasks at learner-budget cutoff"
+                ));
+                break;
+            }
+        };
+        match joined {
+            None => break,
+            Some(Ok(Ok(_completed))) => {
+                // The result linearized before cutoff but had not committed;
+                // discard it as one whole round.
+            }
+            Some(Ok(Err(error))) => {
+                if task_error.is_none() {
+                    task_error =
+                        Some(error.context(
+                            "accepted compute failed while quiescing learner-budget cutoff",
+                        ));
+                }
+            }
+            Some(Err(error)) if error.is_cancelled() => {}
+            Some(Err(error)) => {
+                if task_error.is_none() {
+                    task_error = Some(anyhow::anyhow!(
+                        "scheduler compute task failed while quiescing cutoff: {error}"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Run the backend fence even if a scheduler task failed.  This gives
+    // accepted external jobs their bounded drain opportunity before failure.
+    let backend_result = drain_iso_before(st, deadline).await;
+    if let Some(error) = task_error {
+        return match backend_result {
+            Ok(()) => Err(error),
+            Err(backend_error) => Err(error.context(format!(
+                "ISO backend also failed while quiescing cutoff: {backend_error:#}"
+            ))),
+        };
+    }
+    backend_result
+}
+
 async fn collect_budget_reports(
-    cfg: &Config,
+    target: u64,
+    expected_learners: u32,
     reports: &mut HashSet<u32>,
     events: &mut mpsc::Receiver<Event>,
     registry: &Registry,
+    deadline: tokio::time::Instant,
+    first_report: Option<(Member, u64)>,
 ) -> Result<()> {
-    let target = cfg
-        .learner_budget_steps
-        .context("learner budget reports require --learner-budget-steps")?;
-    while reports.len() < cfg.learners as usize {
-        match events.recv().await.context("event channel closed")? {
+    let mut first_report = first_report;
+    while reports.len() < expected_learners as usize {
+        let event = match first_report.take() {
+            Some((member, local_steps)) => Event::BudgetDone {
+                member,
+                local_steps,
+            },
+            None => tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .map_err(|_| {
+                    let mut received: Vec<_> = reports.iter().copied().collect();
+                    received.sort_unstable();
+                    anyhow::anyhow!(
+                        "timed out collecting BUDGET_DONE reports: received {}/{} from {:?}",
+                        reports.len(),
+                        expected_learners,
+                        received
+                    )
+                })?
+                .context("event channel closed while collecting BUDGET_DONE reports")?,
+        };
+        match event {
             Event::BudgetDone {
                 member,
                 local_steps,
@@ -1567,6 +1915,27 @@ enum SchedulerWake {
     Deadline,
     Event(Option<Event>),
     Computed(Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>),
+}
+
+type ComputeJoin = Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>;
+
+/// Event delivery is intentionally biased over compute completion.  The
+/// cutoff gate is the correctness boundary even when an older ordinary event
+/// precedes BUDGET_DONE in the FIFO, while this preference makes the direct
+/// simultaneous-ready case deterministic and minimizes discarded work.
+async fn prefer_event_over_compute<EventFuture, ComputeFuture>(
+    event: EventFuture,
+    compute: ComputeFuture,
+) -> SchedulerWake
+where
+    EventFuture: Future<Output = Option<Event>>,
+    ComputeFuture: Future<Output = ComputeJoin>,
+{
+    tokio::select! {
+        biased;
+        event = event => SchedulerWake::Event(event),
+        result = compute => SchedulerWake::Computed(result),
+    }
 }
 
 fn take_next_commit<T>(ready: &mut BTreeMap<u64, T>, next_t: u64) -> Option<T> {
@@ -1673,6 +2042,7 @@ async fn commit_round(
     registry: &Registry,
     last_sync_secs: &mut f64,
     completed: ComputedRound,
+    budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
     let ComputedRound {
         round,
@@ -1719,7 +2089,9 @@ async fn commit_round(
     // Broadcast the updated fragment.
     let payload = encode_bcast(st, p)?;
     for g in current_groups(registry) {
-        let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
+        if !send_large_until_cutoff(&g, MSG_BCAST_FRAGMENT, payload.clone(), budget_cutoff).await {
+            break;
+        }
     }
     *last_sync_secs = compute_secs + sync_start.elapsed().as_secs_f64();
     let sync_ms = (*last_sync_secs * 1000.0).round() as u64;
@@ -1750,10 +2122,13 @@ async fn commit_round(
             ms,
         )?;
     }
-    // Consistent cut: this round is fully applied and broadcast, and every
-    // other in-flight round is still gathering (it has not touched state).
-    // A crash-resume loses those gathers; their fragments simply merge on
-    // a later cycle, which the quorum design already tolerates.
+    // Consistent cut: this round is fully applied and every other in-flight
+    // round is still gathering (it has not touched state).  An ordinary run
+    // also completed the broadcast above.  A budget report may interrupt that
+    // broadcast, because learners reconnect and discard cutoff-process frames;
+    // the event tape and checkpoint still describe this exact applied cut.
+    // A crash-resume loses other gathers; their fragments simply merge on a
+    // later cycle, which the quorum design already tolerates.
     if let Some(path) = &cfg.checkpoint_path {
         if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
             st.save_checkpoint(path)?;
@@ -1797,7 +2172,11 @@ fn is_current_member(registry: &Registry, member: Member) -> bool {
     registry.lock().unwrap().current.get(&member.learner_id) == Some(&member)
 }
 
-async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
+async fn broadcast_all_fragments(
+    st: &GlobalState,
+    registry: &Registry,
+    budget_cutoff: &BudgetCutoff,
+) {
     let groups = current_groups(registry);
     // Fan each fragment out to every learner before moving to the next one.
     // Each learner has independent socket-writer queues, so this keeps all
@@ -1809,7 +2188,16 @@ async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
         match encode_bcast(st, p) {
             Ok(payload) => {
                 for group in &groups {
-                    let _ = group.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
+                    if !send_large_until_cutoff(
+                        group,
+                        MSG_BCAST_FRAGMENT,
+                        payload.clone(),
+                        budget_cutoff,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                 }
             }
             Err(e) => warn!("encode fragment {p} failed: {e}"),
@@ -2032,11 +2420,14 @@ async fn finalize_learners(
     Ok(())
 }
 
-async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) {
+async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>, budget_cutoff: &BudgetCutoff) {
     for p in 0..st.layout.fragments.len() {
         match encode_bcast(st, p) {
             Ok(payload) => {
-                let _ = group.send_large(MSG_BCAST_FRAGMENT, payload).await;
+                if !send_large_until_cutoff(group, MSG_BCAST_FRAGMENT, payload, budget_cutoff).await
+                {
+                    return;
+                }
             }
             Err(e) => warn!("encode fragment {p} failed: {e}"),
         }
@@ -2202,8 +2593,7 @@ mod tests {
         }
     }
 
-    fn test_group(member: Member) -> Arc<Group> {
-        let (control, _receiver) = mpsc::channel(1);
+    fn test_group_with_control(member: Member, control: mpsc::Sender<OutFrame>) -> Arc<Group> {
         Arc::new(Group {
             member,
             dtype: DTYPE_F32,
@@ -2221,6 +2611,11 @@ mod tests {
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn test_group(member: Member) -> Arc<Group> {
+        let (control, _receiver) = mpsc::channel(1);
+        test_group_with_control(member, control)
     }
 
     #[test]
@@ -2255,6 +2650,103 @@ mod tests {
 
         let mut wrong = HashSet::new();
         assert!(record_budget_report(&mut wrong, 8, member(0, 10), 7).is_err());
+    }
+
+    #[test]
+    fn queued_budget_report_blocks_every_later_scheduler_action() {
+        let cutoff = BudgetCutoff::new(true, Duration::from_secs(30));
+        assert!(cutoff.try_linearize_work());
+
+        // request() runs before dispatch queues Event::BudgetDone.  Repeating
+        // it is idempotent and preserves the original absolute deadline.
+        let deadline = cutoff.request().unwrap();
+        assert_eq!(cutoff.request(), Some(deadline));
+
+        // These three claims represent commit, pull/retry, and compute submit.
+        // All use this same method in the scheduler and all must now fail.
+        assert!(!cutoff.try_linearize_work());
+        assert!(!cutoff.try_linearize_work());
+        assert!(!cutoff.try_linearize_work());
+    }
+
+    #[tokio::test]
+    async fn queued_budget_event_wins_simultaneous_compute_completion() {
+        let cutoff = BudgetCutoff::new(true, Duration::from_secs(30));
+        cutoff.request();
+        let event = Some(Event::BudgetDone {
+            member: member(0, 10),
+            local_steps: 8,
+        });
+        // Both futures are Ready on their first poll.  An inner error is still
+        // a completed scheduler compute task and avoids manufacturing private
+        // ComputedMerge state solely for this arbitration test.
+        let compute: ComputeJoin = Some(Ok(Err(anyhow::anyhow!(
+            "synthetic ready compute completion"
+        ))));
+
+        let wake =
+            prefer_event_over_compute(std::future::ready(event), std::future::ready(compute)).await;
+        assert!(matches!(
+            wake,
+            SchedulerWake::Event(Some(Event::BudgetDone {
+                member: Member {
+                    learner_id: 0,
+                    generation: 10
+                },
+                local_steps: 8
+            }))
+        ));
+        assert!(!cutoff.try_linearize_work());
+    }
+
+    #[tokio::test]
+    async fn cutoff_notification_interrupts_a_backpressured_pull_send() {
+        let (control, _receiver) = mpsc::channel(1);
+        assert!(control
+            .try_send(OutFrame {
+                msg_type: MSG_PULL_REQ,
+                parts: vec![bytes::Bytes::new()],
+            })
+            .is_ok());
+        let group = test_group_with_control(member(0, 10), control);
+        let cutoff = Arc::new(BudgetCutoff::new(true, Duration::from_secs(30)));
+        let task_group = group.clone();
+        let task_cutoff = cutoff.clone();
+        let send = tokio::spawn(async move {
+            send_small_until_cutoff(&task_group, MSG_PULL_REQ, bytes::Bytes::new(), &task_cutoff)
+                .await
+        });
+        tokio::task::yield_now().await;
+        cutoff.request();
+        let queued = tokio::time::timeout(Duration::from_secs(1), send)
+            .await
+            .expect("backpressured pull did not observe cutoff")
+            .expect("pull send task panicked");
+        assert!(!queued);
+    }
+
+    #[tokio::test]
+    async fn budget_report_collection_wait_has_an_absolute_deadline() {
+        let (_sender, mut events) = mpsc::channel(1);
+        let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
+        let mut reports = HashSet::new();
+        let result = collect_budget_reports(
+            8,
+            2,
+            &mut reports,
+            &mut events,
+            &registry,
+            tokio::time::Instant::now(),
+            None,
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("pending report collection unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("received 0/2 from []"), "{message}");
     }
 
     #[test]
