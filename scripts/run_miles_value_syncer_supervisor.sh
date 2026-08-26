@@ -16,7 +16,7 @@ readonly LOCAL_BUDGET_STEPS=364
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 YETO_ROOT=${YETO_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd -P)}
 SYNCER_BIN=${SYNCER_BIN:-${YETO_ROOT}/syncer/target/release/yeto-syncer}
-ISO_WORKER_PYTHON=${ISO_WORKER_PYTHON:-python3}
+ISO_WORKER_PYTHON=${ISO_WORKER_PYTHON:-${YETO_ROOT}/scripts/docker_python_iso_worker.sh}
 ISO_WORKER_DEVICES=${ISO_WORKER_DEVICES:-cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7}
 ISO_WORKER_QUEUE_CAPACITY=${ISO_WORKER_QUEUE_CAPACITY:-16}
 
@@ -77,6 +77,7 @@ for fresh_path in \
   [[ ! -e "${fresh_path}" ]] || die "refusing to mix with an existing run artifact: ${fresh_path}"
 done
 
+export YETO_ROOT
 export PYTHONPATH="${YETO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Fail before learners spend time connecting if this Python/device cannot run

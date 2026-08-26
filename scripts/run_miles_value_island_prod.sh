@@ -25,8 +25,8 @@ SYNCER_ADDR=${SYNCER_ADDR:?set SYNCER_ADDR to the Yeto syncer host:port}
 ISLAND_DATA_TEMPLATE=${ISLAND_DATA_TEMPLATE:?set ISLAND_DATA_TEMPLATE to the node-local rollout template}
 OUTPUT_DIR=${OUTPUT_DIR:?set OUTPUT_DIR to a node-local output directory}
 
-MILES_ROOT=${MILES_ROOT:-/data/miles-values-isoloco-20260825}
-YETO_ROOT=${YETO_ROOT:-/data/yeto-isoloco-20260825}
+MILES_ROOT=${MILES_ROOT:-/data/miles-values-isoloco-20260826-v7}
+YETO_ROOT=${YETO_ROOT:-/data/yeto-isoloco-20260826-v7}
 MODEL_DIR=${MODEL_DIR:-/data/models}
 PROMPT_DATA=${PROMPT_DATA:-/data/rl_data/smoke/all3_24.jsonl}
 CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-/data/configs/sao_gae.yaml}
@@ -112,6 +112,8 @@ print(
             "YETO_VALUE_NUM_LEARNERS": num_learners,
             "YETO_VALUE_MERGE_ALPHA": "0.5",
             "YETO_VALUE_STREAMS": "4",
+            "YETO_VALUE_NUM_FRAGMENTS": "96",
+            "YETO_VALUE_FRAGMENT_PATTERN": "binpack",
             "YETO_VALUE_CONNECT_TIMEOUT": "3600",
             "YETO_VALUE_FINALIZATION_TIMEOUT": "7200",
             "YETO_VALUE_BUDGET_STEPS": budget_steps,
