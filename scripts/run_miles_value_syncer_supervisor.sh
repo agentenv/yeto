@@ -137,8 +137,11 @@ show_failure_tail() {
   tail -n 80 -- "${log_path}" >&2 || true
 }
 
-# Print "global_step fragment_count" after validating the v2 checkpoint
-# framing, exact torch-svd backend id, every fragment extent, and EOF.
+# Print "global_step fragment_count" after validating the current V3
+# checkpoint framing, exact torch-svd backend id, semantic-layout digest,
+# every fragment extent, and EOF.  Keep this parser streaming: a full-model
+# checkpoint is far too large to materialize in the supervisor merely to read
+# its header and extents.
 inspect_checkpoint() {
   "${ISO_WORKER_PYTHON}" - "${1}" <<'PY'
 import os
@@ -156,11 +159,14 @@ def read_exact(handle, count, label):
 
 with open(path, "rb") as handle:
     magic = struct.unpack("<I", read_exact(handle, 4, "magic"))[0]
-    if magic != 0xD1705A7F:
-        raise ValueError(f"{path}: expected v2 magic 0xD1705A7F, got 0x{magic:08X}")
+    if magic != 0xD1705A80:
+        raise ValueError(f"{path}: expected v3 magic 0xD1705A80, got 0x{magic:08X}")
     backend = read_exact(handle, 1, "backend id")[0]
     if backend != 1:
         raise ValueError(f"{path}: expected torch-svd backend id 1, got {backend}")
+    layout_fingerprint = read_exact(handle, 32, "semantic layout fingerprint")
+    if layout_fingerprint == bytes(32):
+        raise ValueError(f"{path}: semantic layout fingerprint is all zero")
     global_step = struct.unpack("<Q", read_exact(handle, 8, "global step"))[0]
     fragments = struct.unpack("<I", read_exact(handle, 4, "fragment count"))[0]
     if fragments == 0:
