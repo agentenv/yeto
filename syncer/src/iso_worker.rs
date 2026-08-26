@@ -5,14 +5,16 @@
 //! Python/Torch workers: one process per configured device and one complete
 //! row-major f32 matrix per job.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::io::{BufReader, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::sync::{oneshot, Notify, OwnedSemaphorePermit, Semaphore};
@@ -26,6 +28,12 @@ const RESPONSE_OK: u32 = 0;
 const HEADER_LEN: usize = 48;
 const MAX_ERROR_BYTES: u64 = 64 * 1024;
 const LEGACY_QUEUE_CAPACITY: usize = 1;
+const DEFAULT_STARTUP_TIMEOUT_S: u64 = 300;
+const DEFAULT_REQUEST_TIMEOUT_S: u64 = 3600;
+const DEFAULT_DRAIN_TIMEOUT_S: u64 = 3660;
+const STARTUP_TIMEOUT_ENV: &str = "YETO_ISO_WORKER_STARTUP_TIMEOUT_S";
+const REQUEST_TIMEOUT_ENV: &str = "YETO_ISO_WORKER_REQUEST_TIMEOUT_S";
+const DRAIN_TIMEOUT_ENV: &str = "YETO_ISO_WORKER_DRAIN_TIMEOUT_S";
 // A shell argument cannot contain NUL, so this cannot collide with a legacy
 // `--iso-worker-device` value. It lets the typed pooled constructor traverse
 // the existing three-field config/GlobalState API without changing main.rs.
@@ -77,7 +85,7 @@ impl FromStr for IsoBackendKind {
 ///
 /// `device` remains as the source-compatible single-worker setting. New
 /// callers use [`IsoBackend::start_pool`] (or [`Self::start_pool`]) to pass
-/// an explicit ordered device vector and bounded queue capacity.
+/// an explicit ordered device vector and bounded admitted-resident capacity.
 #[derive(Clone, Debug)]
 pub struct IsoBackendConfig {
     pub kind: IsoBackendKind,
@@ -191,8 +199,9 @@ impl IsoBackend {
         validate_finite(matrix, self.kind())
     }
 
-    /// Queue one owned complete matrix. Queue capacity applies asynchronous
-    /// backpressure, while process protocol I/O stays on persistent OS threads.
+    /// Admit one owned complete matrix. Capacity applies asynchronous
+    /// backpressure across queued plus running work, while process protocol I/O
+    /// stays on persistent OS threads.
     pub async fn flatten_owned(
         &self,
         mut matrix: Vec<f32>,
@@ -304,6 +313,10 @@ fn validate_finite(matrix: &[f32], backend: IsoBackendKind) -> Result<()> {
 }
 
 trait MatrixWorker: Send + 'static {
+    fn startup(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     fn flatten(&mut self, matrix: &mut [f32], rows: usize, cols: usize) -> Result<()>;
 }
 
@@ -335,20 +348,36 @@ impl WorkerFactory for ProcessWorkerFactory {
     }
 }
 
-#[derive(Default)]
 struct AbortRegistry {
     handles: Mutex<Vec<Arc<dyn WorkerAbort>>>,
+    aborted: AtomicBool,
+}
+
+impl Default for AbortRegistry {
+    fn default() -> Self {
+        Self {
+            handles: Mutex::new(Vec::new()),
+            aborted: AtomicBool::new(false),
+        }
+    }
 }
 
 impl AbortRegistry {
     fn register(&self, handle: Arc<dyn WorkerAbort>) {
-        self.handles
+        let mut handles = self
+            .handles
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(handle);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.aborted.load(Ordering::SeqCst) {
+            drop(handles);
+            handle.abort();
+            return;
+        }
+        handles.push(handle);
     }
 
     fn abort_all(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
         let handles = self
             .handles
             .lock()
@@ -356,6 +385,124 @@ impl AbortRegistry {
             .clone();
         for handle in handles {
             handle.abort();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LifecycleLimits {
+    startup: Duration,
+    request: Duration,
+    drain: Duration,
+}
+
+impl LifecycleLimits {
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            startup: timeout_from_env(STARTUP_TIMEOUT_ENV, DEFAULT_STARTUP_TIMEOUT_S)?,
+            request: timeout_from_env(REQUEST_TIMEOUT_ENV, DEFAULT_REQUEST_TIMEOUT_S)?,
+            drain: timeout_from_env(DRAIN_TIMEOUT_ENV, DEFAULT_DRAIN_TIMEOUT_S)?,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_tests(startup: Duration, request: Duration, drain: Duration) -> Self {
+        Self {
+            startup,
+            request,
+            drain,
+        }
+    }
+}
+
+fn timeout_from_env(name: &str, default_seconds: u64) -> Result<Duration> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(Duration::from_secs(default_seconds)),
+        Err(error) => return Err(anyhow!("read {name}: {error}")),
+    };
+    let seconds = raw
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be a positive integer number of seconds"))?;
+    if seconds == 0 {
+        bail!("{name} must be greater than zero");
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn format_worker_identities(workers: &BTreeMap<usize, String>) -> String {
+    workers
+        .iter()
+        .map(|(index, device)| format!("worker {index} ({device})"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn startup_timeout_message(timeout: Duration, pending: &BTreeMap<usize, String>) -> String {
+    format!(
+        "Torch Iso pool startup timed out after {:.3}s waiting for {}",
+        timeout.as_secs_f64(),
+        format_worker_identities(pending)
+    )
+}
+
+struct DeadlineGuard {
+    state: Arc<std::sync::atomic::AtomicU8>,
+    wake: Option<mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DeadlineGuard {
+    fn arm(
+        timeout: Duration,
+        timeout_message: String,
+        state: Arc<PoolState>,
+        queue: Arc<WorkQueue>,
+        aborts: Arc<AbortRegistry>,
+        worker_abort: Arc<dyn WorkerAbort>,
+    ) -> Self {
+        const PENDING: u8 = 0;
+        const TIMED_OUT: u8 = 2;
+
+        let deadline_state = Arc::new(std::sync::atomic::AtomicU8::new(PENDING));
+        let watchdog_state = deadline_state.clone();
+        let (wake, receiver) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("yeto-iso-deadline".to_owned())
+            .spawn(move || {
+                if matches!(
+                    receiver.recv_timeout(timeout),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) && watchdog_state
+                    .compare_exchange(PENDING, TIMED_OUT, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    // Abort the timed-out direct child first, then poison and
+                    // abort the rest of the pool. This breaks its blocking
+                    // protocol read/write as early as possible.
+                    worker_abort.abort();
+                    fail_pool(&state, &queue, &aborts, &timeout_message);
+                }
+            })
+            .expect("spawn bounded Torch Iso deadline watchdog");
+        Self {
+            state: deadline_state,
+            wake: Some(wake),
+            thread: Some(thread),
+        }
+    }
+
+    fn finish(mut self) {
+        const PENDING: u8 = 0;
+        const COMPLETED: u8 = 1;
+        let _ = self
+            .state
+            .compare_exchange(PENDING, COMPLETED, Ordering::SeqCst, Ordering::SeqCst);
+        if let Some(wake) = self.wake.take() {
+            let _ = wake.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }
@@ -381,6 +528,22 @@ impl TorchIsoPool {
         queue_capacity: usize,
         factory: Arc<dyn WorkerFactory>,
     ) -> Result<Self> {
+        Self::start_with_factory_and_limits(
+            python,
+            devices,
+            queue_capacity,
+            factory,
+            LifecycleLimits::from_env()?,
+        )
+    }
+
+    fn start_with_factory_and_limits(
+        python: PathBuf,
+        devices: Vec<String>,
+        queue_capacity: usize,
+        factory: Arc<dyn WorkerFactory>,
+        limits: LifecycleLimits,
+    ) -> Result<Self> {
         if !cfg!(target_endian = "little") {
             bail!("torch-svd iso backend requires a little-endian host");
         }
@@ -389,8 +552,14 @@ impl TorchIsoPool {
         let state = Arc::new(PoolState::default());
         let queue = Arc::new(WorkQueue::new(queue_capacity));
         let aborts = Arc::new(AbortRegistry::default());
-        let (startup_tx, startup_rx) = std::sync::mpsc::channel();
+        let (startup_tx, startup_rx) = mpsc::channel();
         let mut threads: Vec<std::thread::JoinHandle<()>> = Vec::with_capacity(devices.len());
+        let worker_identities: Vec<_> = devices
+            .iter()
+            .enumerate()
+            .map(|(index, device)| (index, device.clone()))
+            .collect();
+        let startup_deadline = Instant::now() + limits.startup;
 
         for (worker_index, device) in devices.into_iter().enumerate() {
             let worker_python = python.clone();
@@ -412,19 +581,45 @@ impl TorchIsoPool {
                                     "Torch Iso worker {worker_index} ({device}) startup failed"
                                 )
                             })?;
-                        worker_aborts.register(started.abort);
-                        if worker_startup.send(Ok(())).is_err() {
+                        let worker_abort = started.abort;
+                        worker_aborts.register(worker_abort.clone());
+                        let mut worker = started.worker;
+                        let startup_guard = DeadlineGuard::arm(
+                            limits.startup,
+                            format!(
+                                "Torch Iso worker {worker_index} ({device}) startup timed out after {:.3}s",
+                                limits.startup.as_secs_f64()
+                            ),
+                            worker_state.clone(),
+                            worker_queue.clone(),
+                            worker_aborts.clone(),
+                            worker_abort.clone(),
+                        );
+                        let startup_result = worker.startup();
+                        startup_guard.finish();
+                        if let Some(error) = worker_state.poison_message() {
+                            bail!(error);
+                        }
+                        startup_result.with_context(|| {
+                            format!("Torch Iso worker {worker_index} ({device}) readiness probe failed")
+                        })?;
+                        if worker_startup
+                            .send((worker_index, device.clone(), Ok(())))
+                            .is_err()
+                        {
                             return Ok(());
                         }
                         startup_reported = true;
-                        let mut worker = started.worker;
                         run_worker(
-                            worker_index,
-                            &device,
                             worker.as_mut(),
-                            &worker_queue,
-                            &worker_state,
-                            &worker_aborts,
+                            WorkerRuntime {
+                                worker_index,
+                                device: device.clone(),
+                                worker_abort,
+                                queue: worker_queue.clone(),
+                                state: worker_state.clone(),
+                                aborts: worker_aborts.clone(),
+                            },
                         );
                         Ok(())
                     }));
@@ -437,16 +632,16 @@ impl TorchIsoPool {
                     };
                     fail_pool(&worker_state, &worker_queue, &worker_aborts, &message);
                     if !startup_reported {
-                        let _ = worker_startup.send(Err(message));
+                        let _ = worker_startup.send((worker_index, device, Err(message)));
                     }
                 }) {
                 Ok(handle) => handle,
                 Err(error) => {
                     let message = format!("spawn Torch Iso worker thread {worker_index}: {error}");
                     fail_pool(&state, &queue, &aborts, &message);
-                    for thread in threads {
-                        let _ = thread.join();
-                    }
+                    // Dropping JoinHandle detaches it. The registry is already
+                    // aborted, so any child registered late is killed at once.
+                    drop(threads);
                     bail!(message);
                 }
             };
@@ -454,26 +649,50 @@ impl TorchIsoPool {
         }
         drop(startup_tx);
 
-        let mut startup_error = None;
-        for _ in 0..threads.len() {
-            match startup_rx.recv() {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    startup_error.get_or_insert(error);
+        let mut pending: BTreeMap<usize, String> = worker_identities.into_iter().collect();
+        while !pending.is_empty() {
+            let remaining = startup_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let error = startup_timeout_message(limits.startup, &pending);
+                fail_pool(&state, &queue, &aborts, &error);
+                drop(threads);
+                bail!(error);
+            }
+            match startup_rx.recv_timeout(remaining) {
+                Ok((worker_index, device, Ok(()))) => {
+                    if pending.remove(&worker_index).as_deref() != Some(device.as_str()) {
+                        let error = format!(
+                            "Torch Iso worker startup returned an unexpected identity {worker_index} ({device})"
+                        );
+                        fail_pool(&state, &queue, &aborts, &error);
+                        drop(threads);
+                        bail!(error);
+                    }
                 }
-                Err(_) => {
-                    startup_error.get_or_insert_with(|| {
-                        "Torch Iso worker startup channel closed unexpectedly".to_owned()
-                    });
+                Ok((worker_index, device, Err(error))) => {
+                    let error = format!(
+                        "Torch Iso worker {worker_index} ({device}) could not start: {error}"
+                    );
+                    fail_pool(&state, &queue, &aborts, &error);
+                    drop(threads);
+                    bail!(error);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let error = startup_timeout_message(limits.startup, &pending);
+                    fail_pool(&state, &queue, &aborts, &error);
+                    drop(threads);
+                    bail!(error);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let error = format!(
+                        "Torch Iso worker startup channel closed with pending workers: {}",
+                        format_worker_identities(&pending)
+                    );
+                    fail_pool(&state, &queue, &aborts, &error);
+                    drop(threads);
+                    bail!(error);
                 }
             }
-        }
-        if let Some(error) = startup_error {
-            fail_pool(&state, &queue, &aborts, &error);
-            for thread in threads {
-                let _ = thread.join();
-            }
-            bail!(error);
         }
 
         Ok(Self {
@@ -482,6 +701,8 @@ impl TorchIsoPool {
                 state,
                 aborts,
                 threads: Mutex::new(Some(threads)),
+                next_request_id: AtomicU64::new(1),
+                limits,
             }),
         })
     }
@@ -515,30 +736,87 @@ impl TorchIsoPool {
         cols: usize,
     ) -> Result<oneshot::Receiver<std::result::Result<Vec<f32>, String>>> {
         self.inner.state.ensure_healthy()?;
-        let permit = self
+        let request_id = self
             .inner
-            .queue
-            .slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| anyhow!(self.closed_message()))?;
+            .next_request_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| anyhow!("Torch Iso pool request id overflow"))?;
+        let request_deadline = Instant::now()
+            .checked_add(self.inner.limits.request)
+            .context("Torch Iso request deadline exceeds platform Instant range")?;
+        let admission = self
+            .inner
+            .state
+            .begin_admission(request_id, rows, cols, matrix.len())?;
+        let permit = match tokio::time::timeout(
+            request_deadline.saturating_duration_since(Instant::now()),
+            self.inner.queue.slots.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => bail!(self.closed_message()),
+            Err(_) => {
+                let error = format!(
+                    "Torch Iso request {request_id} timed out after {:.3}s awaiting resident capacity for shape {rows}x{cols} ({} values)",
+                    self.inner.limits.request.as_secs_f64(),
+                    matrix.len()
+                );
+                fail_pool(
+                    &self.inner.state,
+                    &self.inner.queue,
+                    &self.inner.aborts,
+                    &error,
+                );
+                bail!(self.inner.state.poison_message().unwrap_or(error))
+            }
+        };
         self.inner.state.ensure_healthy()?;
-        let outstanding = self.inner.state.begin_job()?;
+        let outstanding = admission.promote()?;
         let (reply, receiver) = oneshot::channel();
-        self.inner.queue.enqueue(Job {
+        let enqueue_result = self.inner.queue.enqueue(Job {
             matrix,
+            request_id,
+            request_deadline,
+            request_timeout: self.inner.limits.request,
             rows,
             cols,
             reply: Some(reply),
             _outstanding: outstanding,
-            queue_permit: Some(permit),
-        })?;
+            _resident_permit: permit,
+        });
+        if let Err(error) = enqueue_result {
+            bail!(self
+                .inner
+                .state
+                .poison_message()
+                .unwrap_or_else(|| format!("{error:#}")));
+        }
         Ok(receiver)
     }
 
     pub async fn drain(&self) -> Result<()> {
-        self.inner.state.drain().await
+        self.inner.state.close_admissions();
+        match tokio::time::timeout(self.inner.limits.drain, self.inner.state.drain()).await {
+            Ok(result) => result,
+            Err(_) => {
+                let pending = self.inner.state.outstanding_summary();
+                let error = format!(
+                    "Torch Iso pool drain timed out after {:.3}s with {}",
+                    self.inner.limits.drain.as_secs_f64(),
+                    pending
+                );
+                fail_pool(
+                    &self.inner.state,
+                    &self.inner.queue,
+                    &self.inner.aborts,
+                    &error,
+                );
+                bail!(self.inner.state.poison_message().unwrap_or(error))
+            }
+        }
     }
 
     fn closed_message(&self) -> String {
@@ -559,6 +837,8 @@ struct PoolInner {
     state: Arc<PoolState>,
     aborts: Arc<AbortRegistry>,
     threads: Mutex<Option<Vec<std::thread::JoinHandle<()>>>>,
+    next_request_id: AtomicU64,
+    limits: LifecycleLimits,
 }
 
 impl Drop for PoolInner {
@@ -571,16 +851,38 @@ impl Drop for PoolInner {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .unwrap_or_default();
-        for thread in threads {
-            let _ = thread.join();
+        // Rust cannot time-bound JoinHandle::join. Direct-child abort breaks
+        // worker protocol I/O and each detached worker thread then reaps its
+        // own Python child. Detaching here keeps pool destruction bounded even
+        // if a custom/test factory violates that cancellation contract.
+        drop(threads);
+    }
+}
+
+struct PoolStatus {
+    admissions_closed: bool,
+    pending_admissions: BTreeMap<u64, OutstandingInfo>,
+    outstanding: BTreeMap<u64, OutstandingInfo>,
+    poison: Option<String>,
+}
+
+impl Default for PoolStatus {
+    fn default() -> Self {
+        Self {
+            admissions_closed: false,
+            pending_admissions: BTreeMap::new(),
+            outstanding: BTreeMap::new(),
+            poison: None,
         }
     }
 }
 
-#[derive(Default)]
-struct PoolStatus {
-    outstanding: usize,
-    poison: Option<String>,
+#[derive(Clone)]
+struct OutstandingInfo {
+    rows: usize,
+    cols: usize,
+    values: usize,
+    worker: Option<(usize, String)>,
 }
 
 #[derive(Default)]
@@ -590,24 +892,83 @@ struct PoolState {
 }
 
 impl PoolState {
-    fn begin_job(self: &Arc<Self>) -> Result<OutstandingJob> {
+    fn begin_admission(
+        self: &Arc<Self>,
+        request_id: u64,
+        rows: usize,
+        cols: usize,
+        values: usize,
+    ) -> Result<AdmissionIntent> {
         let mut status = self.lock_status();
         if let Some(error) = &status.poison {
             bail!(error.clone());
         }
-        status.outstanding = status
-            .outstanding
-            .checked_add(1)
-            .context("Torch Iso outstanding-job counter overflow")?;
-        Ok(OutstandingJob {
+        if status.admissions_closed {
+            bail!("Torch Iso worker pool admissions are closed for drain");
+        }
+        match status.pending_admissions.entry(request_id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(OutstandingInfo {
+                    rows,
+                    cols,
+                    values,
+                    worker: None,
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {
+                bail!("duplicate Torch Iso pool request id {request_id}");
+            }
+        }
+        Ok(AdmissionIntent {
             state: self.clone(),
+            request_id,
+            pending: true,
         })
     }
 
-    fn finish_job(&self) {
+    fn promote_admission(&self, request_id: u64) -> Result<()> {
         let mut status = self.lock_status();
-        debug_assert!(status.outstanding > 0);
-        status.outstanding = status.outstanding.saturating_sub(1);
+        if let Some(error) = &status.poison {
+            bail!(error.clone());
+        }
+        let info = status
+            .pending_admissions
+            .remove(&request_id)
+            .with_context(|| format!("unknown Torch Iso admission {request_id}"))?;
+        if status.outstanding.insert(request_id, info).is_some() {
+            bail!("duplicate Torch Iso outstanding request id {request_id}");
+        }
+        Ok(())
+    }
+
+    fn cancel_admission(&self, request_id: u64) {
+        let mut status = self.lock_status();
+        status.pending_admissions.remove(&request_id);
+        drop(status);
+        self.changed.notify_waiters();
+    }
+
+    fn close_admissions(&self) {
+        let mut status = self.lock_status();
+        status.admissions_closed = true;
+        drop(status);
+        self.changed.notify_waiters();
+    }
+
+    fn mark_active(&self, request_id: u64, worker_index: usize, device: &str) -> Result<()> {
+        let mut status = self.lock_status();
+        let info = status
+            .outstanding
+            .get_mut(&request_id)
+            .with_context(|| format!("unknown Torch Iso pool request {request_id}"))?;
+        info.worker = Some((worker_index, device.to_owned()));
+        Ok(())
+    }
+
+    fn finish_job(&self, request_id: u64) {
+        let mut status = self.lock_status();
+        debug_assert!(status.outstanding.contains_key(&request_id));
+        status.outstanding.remove(&request_id);
         drop(status);
         self.changed.notify_waiters();
     }
@@ -636,18 +997,57 @@ impl PoolState {
         loop {
             // Register before checking the count to avoid a lost final wakeup.
             let changed = self.changed.notified();
-            let (outstanding, poison) = {
+            let (pending, outstanding, poison) = {
                 let status = self.lock_status();
-                (status.outstanding, status.poison.clone())
+                (
+                    status.pending_admissions.len(),
+                    status.outstanding.len(),
+                    status.poison.clone(),
+                )
             };
-            if outstanding == 0 {
-                if let Some(error) = poison {
-                    bail!(error);
-                }
+            if let Some(error) = poison {
+                bail!(error);
+            }
+            if pending == 0 && outstanding == 0 {
                 return Ok(());
             }
             changed.await;
         }
+    }
+
+    fn outstanding_summary(&self) -> String {
+        let status = self.lock_status();
+        if status.pending_admissions.is_empty() && status.outstanding.is_empty() {
+            return "no outstanding requests".to_owned();
+        }
+        let mut details = status
+            .pending_admissions
+            .iter()
+            .map(|(request_id, info)| {
+                format!(
+                    "request {request_id} awaiting resident capacity, shape {}x{}, values {}",
+                    info.rows, info.cols, info.values
+                )
+            })
+            .collect::<Vec<_>>();
+        details.extend(status
+            .outstanding
+            .iter()
+            .map(|(request_id, info)| match &info.worker {
+                Some((worker_index, device)) => format!(
+                    "request {request_id} active on worker {worker_index} ({device}), shape {}x{}, values {}",
+                    info.rows, info.cols, info.values
+                ),
+                None => format!(
+                    "request {request_id} queued, shape {}x{}, values {}",
+                    info.rows, info.cols, info.values
+                ),
+            }));
+        let details = details.join("; ");
+        format!(
+            "{} outstanding request(s): {details}",
+            status.pending_admissions.len() + status.outstanding.len()
+        )
     }
 
     fn lock_status(&self) -> std::sync::MutexGuard<'_, PoolStatus> {
@@ -657,23 +1057,54 @@ impl PoolState {
     }
 }
 
+struct AdmissionIntent {
+    state: Arc<PoolState>,
+    request_id: u64,
+    pending: bool,
+}
+
+impl AdmissionIntent {
+    fn promote(mut self) -> Result<OutstandingJob> {
+        self.state.promote_admission(self.request_id)?;
+        self.pending = false;
+        Ok(OutstandingJob {
+            state: self.state.clone(),
+            request_id: self.request_id,
+        })
+    }
+}
+
+impl Drop for AdmissionIntent {
+    fn drop(&mut self) {
+        if self.pending {
+            self.state.cancel_admission(self.request_id);
+        }
+    }
+}
+
 struct OutstandingJob {
     state: Arc<PoolState>,
+    request_id: u64,
 }
 
 impl Drop for OutstandingJob {
     fn drop(&mut self) {
-        self.state.finish_job();
+        self.state.finish_job(self.request_id);
     }
 }
 
 struct Job {
     matrix: Vec<f32>,
+    request_id: u64,
+    request_deadline: Instant,
+    request_timeout: Duration,
     rows: usize,
     cols: usize,
     reply: Option<oneshot::Sender<std::result::Result<Vec<f32>, String>>>,
     _outstanding: OutstandingJob,
-    queue_permit: Option<OwnedSemaphorePermit>,
+    // This is intentionally retained for the full queued + running lifetime.
+    // Dropping the completed/discarded Job releases resident capacity.
+    _resident_permit: OwnedSemaphorePermit,
 }
 
 struct QueueStatus {
@@ -722,9 +1153,7 @@ impl WorkQueue {
             if status.closed {
                 return None;
             }
-            if let Some(mut job) = status.jobs.pop_front() {
-                // The capacity bounds queued matrices, not in-flight work.
-                drop(job.queue_permit.take());
+            if let Some(job) = status.jobs.pop_front() {
                 return Some(job);
             }
             status = self
@@ -756,22 +1185,69 @@ impl WorkQueue {
     }
 }
 
-fn run_worker(
+struct WorkerRuntime {
     worker_index: usize,
-    device: &str,
-    worker: &mut dyn MatrixWorker,
-    queue: &WorkQueue,
-    state: &PoolState,
-    aborts: &AbortRegistry,
-) {
+    device: String,
+    worker_abort: Arc<dyn WorkerAbort>,
+    queue: Arc<WorkQueue>,
+    state: Arc<PoolState>,
+    aborts: Arc<AbortRegistry>,
+}
+
+fn run_worker(worker: &mut dyn MatrixWorker, runtime: WorkerRuntime) {
+    let WorkerRuntime {
+        worker_index,
+        device,
+        worker_abort,
+        queue,
+        state,
+        aborts,
+    } = runtime;
     while let Some(mut job) = queue.pop() {
         if let Some(error) = state.poison_message() {
             send_job_result(&mut job, Err(error));
             break;
         }
+        if let Err(error) = state.mark_active(job.request_id, worker_index, &device) {
+            let error = format!(
+                "Torch Iso worker {worker_index} ({device}) could not activate request {}: {error:#}",
+                job.request_id
+            );
+            fail_pool(&state, &queue, &aborts, &error);
+            send_job_result(&mut job, Err(state.poison_message().unwrap_or(error)));
+            break;
+        }
+        let remaining = job
+            .request_deadline
+            .saturating_duration_since(Instant::now());
+        let timeout_message = format!(
+            "Torch Iso worker {worker_index} ({device}) request {} timed out after {:.3}s for shape {}x{} ({} values)",
+            job.request_id,
+            job.request_timeout.as_secs_f64(),
+            job.rows,
+            job.cols,
+            job.matrix.len()
+        );
+        if remaining.is_zero() {
+            fail_pool(&state, &queue, &aborts, &timeout_message);
+            send_job_result(
+                &mut job,
+                Err(state.poison_message().unwrap_or(timeout_message)),
+            );
+            break;
+        }
+        let deadline = DeadlineGuard::arm(
+            remaining,
+            timeout_message,
+            state.clone(),
+            queue.clone(),
+            aborts.clone(),
+            worker_abort.clone(),
+        );
         let result = catch_unwind(AssertUnwindSafe(|| {
             worker.flatten(&mut job.matrix, job.rows, job.cols)
         }));
+        deadline.finish();
         let result = match result {
             Ok(Ok(())) => {
                 if job.matrix.iter().any(|value| !value.is_finite()) {
@@ -785,17 +1261,25 @@ fn run_worker(
                 }
             }
             Ok(Err(error)) => Err(format!(
-                "Torch Iso worker {worker_index} ({device}) failed: {error:#}"
+                "Torch Iso worker {worker_index} ({device}) request {} failed: {error:#}",
+                job.request_id
             )),
             Err(_) => Err(format!(
-                "Torch Iso worker {worker_index} ({device}) panicked while processing a job"
+                "Torch Iso worker {worker_index} ({device}) request {} panicked",
+                job.request_id
             )),
         };
 
         match result {
-            Ok(matrix) => send_job_result(&mut job, Ok(matrix)),
+            Ok(matrix) => {
+                if let Err(error) = send_job_success_if_healthy(&mut job, &state, matrix) {
+                    fail_pool(&state, &queue, &aborts, &error);
+                    send_job_result(&mut job, Err(state.poison_message().unwrap_or(error)));
+                    break;
+                }
+            }
             Err(error) => {
-                fail_pool(state, queue, aborts, &error);
+                fail_pool(&state, &queue, &aborts, &error);
                 send_job_result(&mut job, Err(state.poison_message().unwrap_or(error)));
                 break;
             }
@@ -818,6 +1302,24 @@ fn send_job_result(job: &mut Job, result: std::result::Result<Vec<f32>, String>)
     }
 }
 
+fn send_job_success_if_healthy(
+    job: &mut Job,
+    state: &PoolState,
+    matrix: Vec<f32>,
+) -> std::result::Result<(), String> {
+    // Poison and success delivery share this lock. A success that linearizes
+    // first is complete; any request still pending when poison linearizes
+    // observes the persistent first error instead of a late success.
+    let status = state.lock_status();
+    if let Some(error) = &status.poison {
+        return Err(error.clone());
+    }
+    if let Some(reply) = job.reply.take() {
+        let _ = reply.send(Ok(matrix));
+    }
+    Ok(())
+}
+
 struct TorchIsoProcess {
     child: Arc<SharedChild>,
     stdin: ChildStdin,
@@ -830,6 +1332,12 @@ impl TorchIsoProcess {
     fn spawn(python: &Path, device: &str) -> Result<Self> {
         if device.is_empty() {
             bail!("--iso-worker-device cannot be empty");
+        }
+        if python.file_name().and_then(|name| name.to_str()) == Some("docker_python_iso_worker.sh")
+        {
+            bail!(
+                "docker_python_iso_worker.sh is not a cancellable direct Python child; run the syncer inside miles_node and pass its python3 executable"
+            );
         }
         let child = Command::new(python)
             .args(["-m", "yeto.iso_worker", "--device", device])
@@ -857,23 +1365,24 @@ impl TorchIsoProcess {
                 .context("torch Iso worker has no stdout")?;
             (stdin, stdout)
         };
-        let mut worker = Self {
+        Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
             next_request_id: 1,
             failed: false,
-        };
+        })
+    }
 
+    fn startup_probe(&mut self) -> Result<()> {
         // A real request is also the readiness/device/protocol handshake.
         let mut probe = [1.0f32];
-        worker
-            .flatten(&mut probe, 1, 1)
+        self.flatten(&mut probe, 1, 1)
             .context("torch Iso worker startup probe failed")?;
         if probe[0].to_bits() != 1.0f32.to_bits() {
             bail!("torch Iso worker startup probe returned {}", probe[0]);
         }
-        Ok(worker)
+        Ok(())
     }
 
     fn flatten_inner(&mut self, matrix: &mut [f32], rows: usize, cols: usize) -> Result<()> {
@@ -891,16 +1400,18 @@ impl TorchIsoProcess {
         let header = encode_header(REQUEST_FLATTEN, request_id, rows, cols, payload_len);
         self.stdin
             .write_all(&header)
-            .context("write torch Iso request header")?;
+            .with_context(|| format!("write torch Iso request {request_id} header"))?;
         self.stdin
             .write_all(f32_bytes(matrix))
-            .context("write torch Iso request payload")?;
-        self.stdin.flush().context("flush torch Iso request")?;
+            .with_context(|| format!("write torch Iso request {request_id} payload"))?;
+        self.stdin
+            .flush()
+            .with_context(|| format!("flush torch Iso request {request_id}"))?;
 
         let mut response = [0u8; HEADER_LEN];
         self.stdout
             .read_exact(&mut response)
-            .context("read torch Iso response header")?;
+            .with_context(|| format!("read torch Iso response {request_id} header"))?;
         let decoded = decode_header(&response)?;
         if decoded.request_id != request_id {
             bail!(
@@ -926,7 +1437,7 @@ impl TorchIsoProcess {
             let mut message = vec![0u8; decoded.payload_len as usize];
             self.stdout
                 .read_exact(&mut message)
-                .context("read torch Iso error payload")?;
+                .with_context(|| format!("read torch Iso response {request_id} error payload"))?;
             bail!(
                 "torch Iso worker error {}: {}",
                 decoded.code,
@@ -941,12 +1452,16 @@ impl TorchIsoProcess {
         }
         self.stdout
             .read_exact(f32_bytes_mut(matrix))
-            .context("read torch Iso response payload")?;
+            .with_context(|| format!("read torch Iso response {request_id} payload"))?;
         Ok(())
     }
 }
 
 impl MatrixWorker for TorchIsoProcess {
+    fn startup(&mut self) -> Result<()> {
+        self.startup_probe()
+    }
+
     fn flatten(&mut self, matrix: &mut [f32], rows: usize, cols: usize) -> Result<()> {
         if self.failed {
             bail!("torch Iso worker is poisoned after an earlier protocol failure");
@@ -1072,7 +1587,7 @@ fn f32_bytes_mut(values: &mut [f32]) -> &mut [u8] {
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1170,15 +1685,32 @@ mod tests {
         devices: Vec<&str>,
         queue_capacity: usize,
     ) -> (TorchIsoPool, Arc<TestControl>, mpsc::Receiver<u32>) {
+        test_pool_with_limits(
+            devices,
+            queue_capacity,
+            LifecycleLimits::for_tests(
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            ),
+        )
+    }
+
+    fn test_pool_with_limits(
+        devices: Vec<&str>,
+        queue_capacity: usize,
+        limits: LifecycleLimits,
+    ) -> (TorchIsoPool, Arc<TestControl>, mpsc::Receiver<u32>) {
         let (started, started_rx) = mpsc::channel();
         let control = Arc::new(TestControl::new(started));
-        let pool = TorchIsoPool::start_with_factory(
+        let pool = TorchIsoPool::start_with_factory_and_limits(
             PathBuf::from("unused-python"),
             devices.into_iter().map(str::to_owned).collect(),
             queue_capacity,
             Arc::new(TestFactory {
                 control: control.clone(),
             }),
+            limits,
         )
         .unwrap();
         (pool, control, started_rx)
@@ -1289,7 +1821,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn queue_capacity_applies_async_backpressure() {
+    async fn resident_capacity_covers_queued_and_running_jobs() {
         let (pool, control, started) = test_pool(vec!["cuda:0"], 1);
         let first_reply = {
             let pool = pool.clone();
@@ -1299,37 +1831,366 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(recv_started(&started), 1);
-        let second_reply = {
+        let second = {
             let pool = pool.clone();
             tokio::spawn(async move { pool.submit(vec![2.0], 1, 1).await })
-                .await
-                .unwrap()
-                .unwrap()
-        };
-        assert_eq!(pool.queued_jobs(), 1);
-
-        let third = {
-            let pool = pool.clone();
-            tokio::spawn(async move { pool.submit(vec![3.0], 1, 1).await })
         };
         tokio::task::yield_now().await;
-        assert!(!third.is_finished());
-        assert_eq!(pool.queued_jobs(), 1);
+        assert!(!second.is_finished());
+        assert_eq!(pool.queued_jobs(), 0);
+        assert_eq!(pool.inner.queue.slots.available_permits(), 0);
 
         control.release(1);
         assert_eq!(first_reply.await.unwrap().unwrap(), vec![1001.0]);
-        assert_eq!(recv_started(&started), 2);
-        let third_reply = tokio::time::timeout(Duration::from_secs(2), third)
+        let second_reply = tokio::time::timeout(Duration::from_secs(2), second)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        assert_eq!(recv_started(&started), 2);
         control.release(2);
         assert_eq!(second_reply.await.unwrap().unwrap(), vec![1002.0]);
-        assert_eq!(recv_started(&started), 3);
-        control.release(3);
-        assert_eq!(third_reply.await.unwrap().unwrap(), vec![1003.0]);
+        assert_eq!(pool.inner.queue.slots.available_permits(), 1);
         pool.drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_linearizes_after_existing_permit_waiter_and_closes_new_admissions() {
+        let (pool, control, started) = test_pool(vec!["cuda:0"], 1);
+        let first = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.flatten_owned(vec![11.0], 1, 1).await })
+        };
+        assert_eq!(recv_started(&started), 11);
+        let second = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.flatten_owned(vec![12.0], 1, 1).await })
+        };
+        loop {
+            if pool.inner.state.lock_status().pending_admissions.len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let drain = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.drain().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished());
+
+        control.release(11);
+        assert_eq!(first.await.unwrap().unwrap(), vec![1011.0]);
+        assert_eq!(recv_started(&started), 12);
+        assert!(!drain.is_finished());
+        control.release(12);
+        assert_eq!(second.await.unwrap().unwrap(), vec![1012.0]);
+        tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("drain ignored a pre-existing permit waiter")
+            .unwrap()
+            .unwrap();
+
+        let error = pool
+            .flatten_owned(vec![13.0], 1, 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("admissions are closed"), "{error}");
+    }
+
+    struct HungStartupControl {
+        entered: mpsc::Sender<()>,
+        aborted: AtomicBool,
+        abort_count: AtomicUsize,
+        changed: Condvar,
+        lock: Mutex<()>,
+    }
+
+    struct NoopWorker;
+
+    impl MatrixWorker for NoopWorker {
+        fn flatten(&mut self, _matrix: &mut [f32], _rows: usize, _cols: usize) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct LateFactoryControl {
+        entered: mpsc::Sender<()>,
+        aborted: mpsc::Sender<()>,
+        released: Mutex<bool>,
+        changed: Condvar,
+    }
+
+    struct LateFactory {
+        control: Arc<LateFactoryControl>,
+    }
+
+    struct LateAbort {
+        control: Arc<LateFactoryControl>,
+    }
+
+    impl WorkerFactory for LateFactory {
+        fn start(&self, _python: &Path, _device: &str) -> Result<StartedWorker> {
+            self.control.entered.send(()).unwrap();
+            let mut released = self.control.released.lock().unwrap();
+            while !*released {
+                released = self.control.changed.wait(released).unwrap();
+            }
+            Ok(StartedWorker {
+                worker: Box::new(NoopWorker),
+                abort: Arc::new(LateAbort {
+                    control: self.control.clone(),
+                }),
+            })
+        }
+    }
+
+    impl WorkerAbort for LateAbort {
+        fn abort(&self) {
+            let _ = self.control.aborted.send(());
+        }
+    }
+
+    #[test]
+    fn hung_factory_is_bounded_and_late_child_registration_is_aborted() {
+        let (entered, entered_rx) = mpsc::channel();
+        let (aborted, aborted_rx) = mpsc::channel();
+        let control = Arc::new(LateFactoryControl {
+            entered,
+            aborted,
+            released: Mutex::new(false),
+            changed: Condvar::new(),
+        });
+        let factory: Arc<dyn WorkerFactory> = Arc::new(LateFactory {
+            control: control.clone(),
+        });
+        let (result_tx, result_rx) = mpsc::channel();
+        let constructor = std::thread::spawn(move || {
+            let result = TorchIsoPool::start_with_factory_and_limits(
+                PathBuf::from("unused"),
+                vec!["cuda:6".to_owned()],
+                1,
+                factory,
+                LifecycleLimits::for_tests(
+                    Duration::from_millis(100),
+                    Duration::from_secs(2),
+                    Duration::from_secs(2),
+                ),
+            )
+            .err()
+            .map(|error| error.to_string());
+            let _ = result_tx.send(result);
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("hung factory constructor exceeded outer test bound")
+            .expect("hung factory unexpectedly succeeded");
+        constructor.join().unwrap();
+        assert!(error.contains("worker 0 (cuda:6)"), "{error}");
+        assert!(error.contains("startup timed out"), "{error}");
+
+        *control.released.lock().unwrap() = true;
+        control.changed.notify_all();
+        aborted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("late child handle was not aborted after registration");
+    }
+
+    struct HungStartupFactory {
+        control: Arc<HungStartupControl>,
+    }
+
+    struct HungStartupWorker {
+        control: Arc<HungStartupControl>,
+    }
+
+    struct HungStartupAbort {
+        control: Arc<HungStartupControl>,
+    }
+
+    impl WorkerFactory for HungStartupFactory {
+        fn start(&self, _python: &Path, _device: &str) -> Result<StartedWorker> {
+            Ok(StartedWorker {
+                worker: Box::new(HungStartupWorker {
+                    control: self.control.clone(),
+                }),
+                abort: Arc::new(HungStartupAbort {
+                    control: self.control.clone(),
+                }),
+            })
+        }
+    }
+
+    impl MatrixWorker for HungStartupWorker {
+        fn startup(&mut self) -> Result<()> {
+            self.control.entered.send(()).unwrap();
+            let mut guard = self.control.lock.lock().unwrap();
+            while !self.control.aborted.load(Ordering::SeqCst) {
+                guard = self.control.changed.wait(guard).unwrap();
+            }
+            bail!("startup probe interrupted")
+        }
+
+        fn flatten(&mut self, _matrix: &mut [f32], _rows: usize, _cols: usize) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    impl WorkerAbort for HungStartupAbort {
+        fn abort(&self) {
+            self.control.abort_count.fetch_add(1, Ordering::SeqCst);
+            self.control.aborted.store(true, Ordering::SeqCst);
+            self.control.changed.notify_all();
+        }
+    }
+
+    #[test]
+    fn hung_startup_is_bounded_and_aborts_registered_worker() {
+        let (entered, entered_rx) = mpsc::channel();
+        let control = Arc::new(HungStartupControl {
+            entered,
+            aborted: AtomicBool::new(false),
+            abort_count: AtomicUsize::new(0),
+            changed: Condvar::new(),
+            lock: Mutex::new(()),
+        });
+        let factory: Arc<dyn WorkerFactory> = Arc::new(HungStartupFactory {
+            control: control.clone(),
+        });
+        let started_at = Instant::now();
+        let (result_tx, result_rx) = mpsc::channel();
+        let constructor = std::thread::spawn(move || {
+            let result = TorchIsoPool::start_with_factory_and_limits(
+                PathBuf::from("unused"),
+                vec!["cuda:7".to_owned()],
+                1,
+                factory,
+                LifecycleLimits::for_tests(
+                    Duration::from_millis(100),
+                    Duration::from_secs(2),
+                    Duration::from_secs(2),
+                ),
+            )
+            .err()
+            .map(|error| error.to_string());
+            let _ = result_tx.send(result);
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("hung startup constructor exceeded outer test bound")
+            .expect("hung startup unexpectedly succeeded");
+        constructor.join().unwrap();
+        assert!(started_at.elapsed() < Duration::from_secs(1));
+        assert!(error.contains("worker 0 (cuda:7)"), "{error}");
+        assert!(error.contains("startup"), "{error}");
+        assert!(error.contains("timed out"), "{error}");
+        assert!(control.abort_count.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[test]
+    fn shared_child_kill_targets_and_reaps_direct_python_process() {
+        let child = Command::new("python3")
+            .args(["-c", "import time; time.sleep(60)"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("python3 is required for direct-child lifecycle test");
+        let child = SharedChild {
+            child: Mutex::new(child),
+        };
+        child.abort_and_wait();
+        let status = child
+            .child
+            .lock()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .expect("direct Python child was not reaped");
+        assert!(!status.success());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn hung_request_times_out_with_device_request_and_shape_then_poisons() {
+        let (pool, _control, started) = test_pool_with_limits(
+            vec!["cuda:3"],
+            1,
+            LifecycleLimits::for_tests(
+                Duration::from_secs(2),
+                Duration::from_millis(100),
+                Duration::from_secs(2),
+            ),
+        );
+        let work = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.flatten_owned(vec![42.0], 1, 1).await })
+        };
+        assert_eq!(recv_started(&started), 42);
+        let error = tokio::time::timeout(Duration::from_secs(1), work)
+            .await
+            .expect("request timeout did not bound the operation")
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("worker 0 (cuda:3)"), "{error}");
+        assert!(error.contains("request 1"), "{error}");
+        assert!(error.contains("shape 1x1"), "{error}");
+        assert!(error.contains("timed out"), "{error}");
+        let drain_error = pool.drain().await.unwrap_err().to_string();
+        assert_eq!(drain_error, error);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drain_timeout_aborts_active_request_and_returns_bounded_error() {
+        let (pool, _control, started) = test_pool_with_limits(
+            vec!["cuda:5"],
+            2,
+            LifecycleLimits::for_tests(
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+                Duration::from_millis(100),
+            ),
+        );
+        let work = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.flatten_owned(vec![55.0], 1, 1).await })
+        };
+        assert_eq!(recv_started(&started), 55);
+        let queued = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.flatten_owned(vec![56.0], 1, 1).await })
+        };
+        while pool.queued_jobs() != 1 {
+            tokio::task::yield_now().await;
+        }
+        let error = tokio::time::timeout(Duration::from_secs(1), pool.drain())
+            .await
+            .expect("drain exceeded its external bound")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("drain timed out"), "{error}");
+        assert!(
+            error.contains("request 1 active on worker 0 (cuda:5)"),
+            "{error}"
+        );
+        let work_error = tokio::time::timeout(Duration::from_secs(1), work)
+            .await
+            .expect("drain did not abort active worker")
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert_eq!(work_error, error);
+        let queued_error = tokio::time::timeout(Duration::from_secs(1), queued)
+            .await
+            .expect("drain did not discard queued work")
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert_eq!(queued_error, error);
+        assert_eq!(pool.inner.queue.slots.available_permits(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

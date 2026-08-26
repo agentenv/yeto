@@ -16,9 +16,14 @@ readonly LOCAL_BUDGET_STEPS=364
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 YETO_ROOT=${YETO_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd -P)}
 SYNCER_BIN=${SYNCER_BIN:-${YETO_ROOT}/syncer/target/release/yeto-syncer}
-ISO_WORKER_PYTHON=${ISO_WORKER_PYTHON:-${YETO_ROOT}/scripts/docker_python_iso_worker.sh}
+# Timeout cancellation must target the actual Python/CUDA worker PID. Run this
+# supervisor inside miles_node; Docker CLI wrappers are rejected below.
+ISO_WORKER_PYTHON=${ISO_WORKER_PYTHON:-python3}
 ISO_WORKER_DEVICES=${ISO_WORKER_DEVICES:-cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7}
 ISO_WORKER_QUEUE_CAPACITY=${ISO_WORKER_QUEUE_CAPACITY:-16}
+YETO_ISO_WORKER_STARTUP_TIMEOUT_S=${YETO_ISO_WORKER_STARTUP_TIMEOUT_S:-300}
+YETO_ISO_WORKER_REQUEST_TIMEOUT_S=${YETO_ISO_WORKER_REQUEST_TIMEOUT_S:-3600}
+YETO_ISO_WORKER_DRAIN_TIMEOUT_S=${YETO_ISO_WORKER_DRAIN_TIMEOUT_S:-3660}
 
 RUN_DIR=${RUN_DIR:?set RUN_DIR to a fresh local syncer output directory}
 PORT=${PORT:-29400}
@@ -60,6 +65,18 @@ fi
 if [[ ! "${ISO_WORKER_QUEUE_CAPACITY}" =~ ^[0-9]+$ ]] || ((ISO_WORKER_QUEUE_CAPACITY < 1)); then
   die "ISO_WORKER_QUEUE_CAPACITY must be positive"
 fi
+for timeout_name in \
+  YETO_ISO_WORKER_STARTUP_TIMEOUT_S \
+  YETO_ISO_WORKER_REQUEST_TIMEOUT_S \
+  YETO_ISO_WORKER_DRAIN_TIMEOUT_S; do
+  timeout_value=${!timeout_name}
+  if [[ ! "${timeout_value}" =~ ^[0-9]+$ ]] || ((timeout_value < 1)); then
+    die "${timeout_name} must be a positive integer number of seconds"
+  fi
+done
+if [[ "$(basename -- "${ISO_WORKER_PYTHON}")" == docker_python_iso_worker.sh ]]; then
+  die "ISO_WORKER_PYTHON must be the direct miles_node python3 executable, not docker_python_iso_worker.sh"
+fi
 [[ "${CHECKPOINT_EVERY}" =~ ^[0-9]+$ ]] || die "CHECKPOINT_EVERY must be a non-negative integer"
 [[ "${GRACE_MS}" =~ ^[0-9]+$ ]] || die "GRACE_MS must be a non-negative integer"
 if [[ ! "${QUORUM_TIMEOUT_S}" =~ ^[0-9]+$ ]] || ((QUORUM_TIMEOUT_S < 1)); then
@@ -79,25 +96,13 @@ done
 
 export YETO_ROOT
 export PYTHONPATH="${YETO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+export YETO_ISO_WORKER_STARTUP_TIMEOUT_S
+export YETO_ISO_WORKER_REQUEST_TIMEOUT_S
+export YETO_ISO_WORKER_DRAIN_TIMEOUT_S
 
-# Fail before learners spend time connecting if this Python/device cannot run
-# the exact production backend.  Rust performs its own framed 1x1 probe too.
-"${ISO_WORKER_PYTHON}" - "${ISO_WORKER_DEVICES}" <<'PY'
-import sys
-import torch
-import yeto.iso_worker  # noqa: F401
-
-devices = sys.argv[1].split(",")
-if not devices or any(not device for device in devices):
-    raise RuntimeError("ISO_WORKER_DEVICES must be a non-empty comma-separated list")
-if len(set(devices)) != len(devices):
-    raise RuntimeError(f"duplicate Torch SVD worker devices: {devices}")
-for raw_device in devices:
-    device = torch.device(raw_device)
-    probe = torch.ones(1, device=device)
-    if probe.item() != 1.0:
-        raise RuntimeError(f"bad Torch SVD worker device probe on {device}")
-PY
+# Rust owns the only CUDA readiness probe. It is framed through each direct
+# persistent child and covered by YETO_ISO_WORKER_STARTUP_TIMEOUT_S; a separate
+# shell/Python CUDA preflight would sit outside that deadline and could hang.
 
 active_pid=''
 current_phase=''

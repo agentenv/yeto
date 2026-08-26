@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Keep the large Rust syncer state in a host-systemd process while providing
-# its persistent Torch/CUDA Iso worker from the existing Miles image.  Rust
-# appends: -m yeto.iso_worker --device <device>.
+# Diagnostic helper only. Killing `docker run` does not prove that Docker
+# killed its daemon-owned CUDA container, so this wrapper refuses persistent
+# pool-worker launches. Production runs the syncer inside miles_node and uses
+# that environment's direct python3 executable.
 YETO_ROOT=${YETO_ROOT:?set YETO_ROOT to the versioned Yeto checkout mounted under /data}
 [[ "${YETO_ROOT}" == /data/* ]] || {
   printf 'docker_python_iso_worker.sh: YETO_ROOT must be under /data, got %q\n' "${YETO_ROOT}" >&2
@@ -13,6 +14,11 @@ YETO_ROOT=${YETO_ROOT:?set YETO_ROOT to the versioned Yeto checkout mounted unde
   printf 'docker_python_iso_worker.sh: missing %s/yeto/iso_worker.py\n' "${YETO_ROOT}" >&2
   exit 2
 }
+if [[ " $* " == *" -m yeto.iso_worker "* ]]; then
+  printf '%s\n' \
+    'docker_python_iso_worker.sh: refusing persistent worker launch; run the syncer inside miles_node with ISO_WORKER_PYTHON=python3 so timeout cancellation owns the actual Python PID' >&2
+  exit 2
+fi
 
 exec docker run --rm -i \
   --network host \

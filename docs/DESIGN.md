@@ -34,6 +34,19 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   checkpoints require an explicit drain. The Miles six-island supervisor
   defaults to `cuda:0,...,cuda:7` and a bounded pipeline window of 16 on a
   dedicated host, allowing AVG fragments and uneven SVD sizes to overlap.
+  Startup, request, and drain deadlines are bounded by
+  `YETO_ISO_WORKER_{STARTUP,REQUEST,DRAIN}_TIMEOUT_S`; timeout diagnostics
+  identify the worker/device/request where applicable, kill the direct Python
+  child, and permanently poison the pool. Queue capacity bounds admitted
+  queued-plus-running matrices because each resident permit is retained until
+  its job completes or is discarded. It does not account for input vectors
+  already allocated by callers waiting for admission.
+
+  Production runs the syncer inside `miles_node` with a direct Python
+  executable (`ISO_WORKER_PYTHON=python3`). Killing a `docker run` CLI does not
+  prove that Docker stopped the daemon-owned CUDA process, so the Docker helper
+  refuses persistent pool launches rather than claiming that cancellation is
+  safe.
 - **Frozen rendezvous**: a round attempt captures learner connection
   generations and quorum at launch. Joins/reconnects apply only to future
   attempts, disconnects do not erase accepted work, and a below-quorum

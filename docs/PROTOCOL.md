@@ -236,7 +236,11 @@ SVD, but their owned buffers cannot touch coordinator state. A checkpoint at
 that cut is therefore consistent. Snapshots contain global/per-fragment
 versions, f32 params, momentum, and the cumulative learner ledger. Cutoff and
 terminal checkpoints explicitly drain the SVD pool first; a poisoned worker
-prevents checkpoint publication.
+prevents checkpoint publication. The exact-SVD pool bounds startup, every
+full-matrix request, and drain. Any deadline expiry kills the directly owned
+Python child, installs a persistent pool poison, discards queued work, and
+makes drain/finalization fail. Pool capacity covers the complete admitted
+queued-plus-running job lifetime; it is not released at dequeue.
 
 New snapshots use checkpoint V3. Its fixed prefix is:
 
