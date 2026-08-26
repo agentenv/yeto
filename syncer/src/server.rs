@@ -107,6 +107,7 @@ struct Group {
     member: Member,
     dtype: u8,
     layout: Layout,
+    layout_fingerprint: [u8; 32],
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
@@ -578,6 +579,7 @@ async fn handle_connection(
                 member,
                 dtype,
                 layout,
+                layout_fingerprint,
                 num_streams,
                 max_init_payload,
                 max_push_payload,
@@ -1764,6 +1766,7 @@ async fn commit_round(
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     let mut st = GlobalState::new_with_iso_backend(
         group.layout.clone(),
+        group.layout_fingerprint,
         cfg.outer_lr,
         cfg.outer_momentum,
         group.dtype,
@@ -2207,6 +2210,7 @@ mod tests {
             layout: Layout {
                 fragments: Vec::new(),
             },
+            layout_fingerprint: [0; 32],
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,

@@ -19,10 +19,17 @@ from pathlib import Path
 import pytest
 import torch
 
+from yeto.export import ISO_BACKEND_SCALAR, parse_checkpoint
 from yeto.fragments import build_layout
-from yeto.export import parse_checkpoint
 from yeto.final_marker import read_checkpoint_global_step, validate_final_checkpoint
-from yeto.protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+from yeto.protocol import (
+    DTYPE_BF16,
+    DTYPE_F32,
+    DTYPE_Q4,
+    SyncerClient,
+    bulk_dtype,
+    layout_fingerprint,
+)
 from yeto.tensor_io import (
     apply_fragment,
     fragment_flat,
@@ -347,6 +354,9 @@ def test_learner_budget_restart_freezes_exactly_and_marks_complete_checkpoint(tm
         assert final_proc.returncode == 0, final_output
 
         parsed = parse_checkpoint(checkpoint)
+        assert parsed.revision == 3
+        assert parsed.backend_id == ISO_BACKEND_SCALAR
+        assert parsed.layout_fingerprint == layout_fingerprint(layout)
         assert validate_final_checkpoint(checkpoint) == parsed.global_step
         assert parsed.global_step == learners[0].final_manifest.global_step
         assert parsed.global_step == learners[1].final_manifest.global_step
@@ -506,6 +516,9 @@ def test_bf16_session_saves_lossless_authoritative_cut_and_checkpoint(tmp_path):
             assert torch.equal(saved, coordinator[fid]), f"fragment {fid} is not authoritative"
 
         ckpt = parse_checkpoint(checkpoint)
+        assert ckpt.revision == 3
+        assert ckpt.backend_id == ISO_BACKEND_SCALAR
+        assert ckpt.layout_fingerprint == layout_fingerprint(layout)
         assert ckpt.global_step == total_steps
         assert tuple(version for version, _params, _momentum in ckpt.fragments) == (
             learner.final_manifest.versions

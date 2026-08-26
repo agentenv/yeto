@@ -11,9 +11,13 @@ learner is gone. This module has two layers:
     trainable params, overwrites them with the checkpointed values, and saves
     the result with ``save_pretrained``.
 
-Binary layout (all little-endian):
+Binary layout (all little-endian). V1 has no backend/layout identity, V2 adds
+the ISO backend ID, and V3 additionally binds the state to the exact semantic
+HELLO layout fingerprint:
 
-    magic          u32  (0xD170_5A7E)
+    magic          u32  (V1=0xD170_5A7E, V2=...7F, V3=...80)
+    backend        u8   (V2/V3 only; 0=scalar, 1=torch-svd)
+    layout_sha256  32B  (V3 only)
     global_step    u64
     num_fragments  u32
     per fragment:  version u64, numel u64, numel x f32 params,
@@ -23,6 +27,12 @@ Binary layout (all little-endian):
 
 The outer momentum is parsed (and validated) but not needed for export; it
 only matters when the syncer itself resumes from the checkpoint.
+
+V1/V2 remain parseable for recovery/export tooling, but those files cannot
+cryptographically prove the historical semantic layout. Exporting them is
+safe only when the caller rebuilds the exact original model/tensor layout.
+V1's ISO backend is reported as unknown rather than guessed. V3 exports
+compare the rebuilt semantic fingerprint before applying any values.
 """
 
 from __future__ import annotations
@@ -36,9 +46,18 @@ from pathlib import Path
 import torch
 
 from .fragments import FragmentLayout, build_layout
+from .protocol import layout_fingerprint
 from .tensor_io import apply_fragment
 
-CKPT_MAGIC = 0xD170_5A7E
+CKPT_MAGIC_V1 = 0xD170_5A7E
+CKPT_MAGIC_V2 = 0xD170_5A7F
+CKPT_MAGIC_V3 = 0xD170_5A80
+# Source compatibility for legacy fixtures and external callers.
+CKPT_MAGIC = CKPT_MAGIC_V1
+CKPT_MAGIC_CURRENT = CKPT_MAGIC_V3
+ISO_BACKEND_SCALAR = 0
+ISO_BACKEND_TORCH_SVD = 1
+_KNOWN_BACKENDS = {ISO_BACKEND_SCALAR, ISO_BACKEND_TORCH_SVD}
 
 
 @dataclass
@@ -51,6 +70,12 @@ class Checkpoint:
     ledger: dict[int, tuple[int, int, int]]
     # Digest of the exact byte buffer decoded into this checkpoint.
     sha256: str
+    revision: int = 1
+    # None for V1: its backend is unknowable from the file and must never be
+    # silently inferred to be scalar.
+    backend_id: int | None = None
+    # Present exactly for V3.
+    layout_fingerprint: bytes | None = None
 
 
 def parse_checkpoint(path: str | Path) -> Checkpoint:
@@ -71,10 +96,25 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
         return chunk
 
     (magic,) = struct.unpack("<I", take(4, "magic"))
-    if magic != CKPT_MAGIC:
+    if magic == CKPT_MAGIC_V1:
+        revision = 1
+        backend_id = None
+        checkpoint_layout_fingerprint = None
+    elif magic in (CKPT_MAGIC_V2, CKPT_MAGIC_V3):
+        revision = 2 if magic == CKPT_MAGIC_V2 else 3
+        (backend_id,) = struct.unpack("<B", take(1, "ISO backend ID"))
+        if backend_id not in _KNOWN_BACKENDS:
+            raise ValueError(
+                f"{path}: checkpoint V{revision} has unknown ISO backend ID "
+                f"{backend_id}"
+            )
+        checkpoint_layout_fingerprint = (
+            take(32, "semantic layout fingerprint") if revision == 3 else None
+        )
+    else:
         raise ValueError(
             f"{path}: bad checkpoint magic 0x{magic:08X} "
-            f"(expected 0x{CKPT_MAGIC:08X}); not a syncer checkpoint?"
+            f"(expected V1/V2/V3 syncer checkpoint magic); not a syncer checkpoint?"
         )
     (global_step,) = struct.unpack("<Q", take(8, "global_step"))
     (num_fragments,) = struct.unpack("<I", take(4, "num_fragments"))
@@ -100,7 +140,15 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
             f"payload (parsed {off} of {len(data)}); file corrupt or from an "
             "incompatible syncer version"
         )
-    return Checkpoint(global_step, fragments, ledger, hashlib.sha256(data).hexdigest())
+    return Checkpoint(
+        global_step=global_step,
+        fragments=fragments,
+        ledger=ledger,
+        sha256=hashlib.sha256(data).hexdigest(),
+        revision=revision,
+        backend_id=backend_id,
+        layout_fingerprint=checkpoint_layout_fingerprint,
+    )
 
 
 def _read_f32(raw: bytes) -> torch.Tensor:
@@ -128,6 +176,13 @@ def validate_against_layout(ckpt: Checkpoint, layout: FragmentLayout) -> None:
             problems.append(
                 f"fragment {fid}: checkpoint numel {params.numel()} "
                 f"!= layout numel {frag.numel}"
+            )
+    if ckpt.layout_fingerprint is not None:
+        rebuilt_fingerprint = layout_fingerprint(layout)
+        if ckpt.layout_fingerprint != rebuilt_fingerprint:
+            problems.append(
+                "checkpoint semantic layout fingerprint does not match the "
+                "rebuilt layout (tensor names/order/shapes or merge modes differ)"
             )
     if problems:
         raise ValueError(
@@ -236,6 +291,13 @@ def main(argv=None) -> None:
         extra={
             "checkpoint": Path(args.checkpoint).name,
             "checkpoint_sha256": ckpt.sha256,
+            "checkpoint_revision": ckpt.revision,
+            "checkpoint_backend_id": ckpt.backend_id,
+            "checkpoint_layout_fingerprint": (
+                ckpt.layout_fingerprint.hex()
+                if ckpt.layout_fingerprint is not None
+                else None
+            ),
             "global_step": ckpt.global_step,
         },
     )

@@ -238,6 +238,41 @@ versions, f32 params, momentum, and the cumulative learner ledger. Cutoff and
 terminal checkpoints explicitly drain the SVD pool first; a poisoned worker
 prevents checkpoint publication.
 
+New snapshots use checkpoint V3. Its fixed prefix is:
+
+```text
+magic:u32 = 0xD1705A80
+iso_backend:u8                 # 0=scalar, 1=torch-svd
+semantic_layout_fingerprint:32 # exact accepted HELLO SHA-256
+global_step:u64
+```
+
+The fingerprint covers fragment order, merge modes, ordered tensor names,
+lengths, and shapes. Resume compares both backend and fingerprint before
+installing any checkpoint state. Fragment count and flat `numel` equality are
+not sufficient: two grouped layouts can have identical flat sizes while
+assigning those values and momentum slots to different tensors.
+
+Legacy behavior is deliberately conservative:
+
+- V1 (`0xD1705A7E`) has neither backend nor fingerprint. Python readers can
+  inspect/export it, but the syncer never resumes it because an old Torch-SVD
+  checkpoint cannot be distinguished from a scalar checkpoint.
+- V2 (`0xD1705A7F`) records the backend but not the fingerprint. Python readers
+  can inspect/export it. The syncer resumes it only when the backend matches
+  and every fragment contains exactly one tensor. Grouped V2 resume fails
+  closed.
+- V3 records both and is the only format written by current syncers. A
+  fingerprint mismatch is rejected even when fragment counts and every flat
+  fragment size match.
+
+Legacy V1/V2 export still depends on rebuilding the exact historical layout
+from the original model and fragmentation flags; the file cannot prove that
+identity. A grouped legacy checkpoint requires an externally audited
+migration that supplies its original semantic fingerprint. V1 additionally
+requires authoritative knowledge of its original ISO backend. Neither value
+is guessed automatically.
+
 Periodic checkpoints remain controlled by `--checkpoint-every`, but the
 coordinator always rewrites `--checkpoint-path` at the final quiescent cut
 before terminal delivery. Thus a total-step count not divisible by the

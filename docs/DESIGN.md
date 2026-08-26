@@ -67,7 +67,9 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   interleaving depth across fragments as in Streaming DiLoCo).
 - **Snapshots**: the single-actor syncer checkpoints after a contiguous
   committed prefix (params, momentum, per-fragment versions, merged-token
-  ledger); uncommitted gathers/SVD results never touch state. `--resume`
+  ledger); uncommitted gathers/SVD results never touch state. Checkpoint V3
+  also stores the ISO backend ID and exact 32-byte HELLO semantic-layout
+  fingerprint, both validated before any restore mutation. `--resume`
   restores; a JSONL event tape records every merge in strict step order.
 - **Fine-tuning**: `--tuning lora` (default) syncs only adapter weights —
   fragments are megabytes, so the syncer and WAN stay cheap even for large
