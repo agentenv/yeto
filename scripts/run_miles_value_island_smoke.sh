@@ -99,6 +99,8 @@ PY
 export PYTHONPATH="${YETO_ROOT}:${MILES_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export MILES_RAY_TARGET_NODE_IP=${MILES_RAY_TARGET_NODE_IP:-current}
 
+# Decoder-only Megatron derives encoder_seq_length from seq_length and rejects
+# specifying both flags on the command line.
 exec python3 train_async.py \
   --actor-num-nodes 1 \
   --actor-num-gpus-per-node 8 \
@@ -131,7 +133,6 @@ exec python3 train_async.py \
   --n-samples-per-prompt 1 \
   --rollout-max-response-len "${CONTEXT_LENGTH}" \
   --seq-length "${CONTEXT_LENGTH}" \
-  --encoder-seq-length "${CONTEXT_LENGTH}" \
   --max-position-embeddings "${CONTEXT_LENGTH}" \
   --tensor-model-parallel-size 4 \
   --pipeline-model-parallel-size 1 \
