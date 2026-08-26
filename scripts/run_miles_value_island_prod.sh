@@ -64,6 +64,19 @@ template_without_first_placeholder=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER
 [[ -r "${PROMPT_DATA}" ]] || die "missing prompt-data shim ${PROMPT_DATA}"
 [[ -r "${CUSTOM_CONFIG_PATH}" ]] || die "missing Miles critic config ${CUSTOM_CONFIG_PATH}"
 
+# This launcher is the fresh-run contract.  Never reinterpret an existing or
+# partial critic checkpoint as the base model while forcing rollout zero.
+readonly CRITIC_SAVE_DIR="${OUTPUT_DIR}/critic_checkpoints"
+if [[ -e "${CRITIC_SAVE_DIR}/latest_checkpointed_iteration.txt" ]]; then
+  die "existing critic checkpoint requires the separate resume contract: ${CRITIC_SAVE_DIR}"
+fi
+if [[ -d "${CRITIC_SAVE_DIR}" ]]; then
+  shopt -s nullglob dotglob
+  critic_artifacts=("${CRITIC_SAVE_DIR}"/*)
+  shopt -u nullglob dotglob
+  ((${#critic_artifacts[@]} == 0)) || die "refusing partial/non-fresh critic save directory: ${CRITIC_SAVE_DIR}"
+fi
+
 # Refuse to reserve GPUs when any training bucket is absent locally.  Held-out
 # validation is a separate post-finalization job; mixing it into this process
 # previously let a skipped data_0 turn the first validation bucket into an
@@ -172,7 +185,7 @@ exec python3 train_async.py \
   --critic-load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
   --ref-load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
   --save "${OUTPUT_DIR}/checkpoints" \
-  --critic-save "${OUTPUT_DIR}/critic_checkpoints" \
+  --critic-save "${CRITIC_SAVE_DIR}" \
   --ckpt-format torch_dist \
   --save-interval "${SAVE_INTERVAL}" \
   --save-retain-interval 1000000 \
