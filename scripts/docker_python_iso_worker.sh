@@ -7,7 +7,7 @@ set -euo pipefail
 exec docker run --rm -i \
   --network host \
   --ipc host \
-  --gpus device=0 \
+  --gpus all \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \
   -e PYTHONPATH=/data/yeto-isoloco-20260825 \

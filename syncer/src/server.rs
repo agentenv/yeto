@@ -6,7 +6,7 @@
 //! "two fragments in flight"), so a slow quorum on one fragment never
 //! delays pulling the next.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,7 +19,9 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::protocol::*;
-use crate::state::{remove_final_marker, write_final_marker, GlobalState, Layout};
+use crate::state::{
+    remove_final_marker, write_final_marker, ComputedMerge, GlobalState, Layout, PreparedMerge,
+};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const CHUNK_HEADER_SIZE: u64 = 24;
@@ -1122,28 +1124,47 @@ async fn scheduler(
     // learners start bit-identical (also serves recovery for late joiners).
     broadcast_all_fragments(&st, &registry).await;
 
-    // Phase 2: the outer loop. One fragment per global step, round-robin,
-    // with up to `pipeline` rounds in flight at once: while round t sits in
-    // its quorum/grace window, round t+1's pull is already out, so sync
-    // latency overlaps learner compute (the paper's τ=2 "two fragments in
-    // flight"). Depth is clamped to the fragment count, so concurrent
-    // rounds always target DISTINCT fragments and every merge touches
-    // disjoint params/momentum. Rounds may complete out of order; versions
-    // are per fragment and global_step advances monotonically.
+    // Phase 2: gather, compute, and commit are separate stages.  Torch SVD
+    // matrices execute concurrently and may finish out of order, but only
+    // this scheduler mutates coordinator state, strictly in fragment-step t
+    // order.  A fragment remains busy across all three stages, preventing a
+    // second round from observing an uncommitted version/momentum state.
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
     let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
     let mut next_t = st.global_step + 1;
+    let mut next_commit_t = st.global_step + 1;
     let mut inflight: Vec<Round> = Vec::new();
-    'outer: while next_t <= cfg.total_steps || !inflight.is_empty() {
+    let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
+    let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
+    let mut busy_fragments: HashSet<usize> = HashSet::new();
+    let mut budget_cutoff = false;
+    'outer: while next_t <= cfg.total_steps
+        || !inflight.is_empty()
+        || !computing.is_empty()
+        || !ready.is_empty()
+    {
+        // Commit only the contiguous prefix.  A faster cuda:N worker can put
+        // t+1 in `ready` first, but it cannot update Nesterov/version/tape or
+        // broadcast until t has committed.
+        while let Some(completed) = take_next_commit(&mut ready, next_commit_t) {
+            let p = completed.round.p;
+            commit_round(&cfg, &mut st, &registry, &mut last_sync_secs, completed).await?;
+            if !busy_fragments.remove(&p) {
+                bail!("fragment {p} lost its busy ownership at commit");
+            }
+            next_commit_t = next_commit_t
+                .checked_add(1)
+                .context("commit step overflow")?;
+        }
+
         // Keep the pipeline full (throttled by min_round_interval_ms).
-        while inflight.len() < depth && next_t <= cfg.total_steps && Instant::now() >= next_launch {
+        while inflight.len() + computing.len() + ready.len() < depth
+            && next_t <= cfg.total_steps
+            && Instant::now() >= next_launch
+        {
             let p = ((next_t - 1) % num_fragments) as usize;
-            // Out-of-order completion can leave an older round occupying the
-            // next round-robin fragment even when pipeline capacity is free.
-            // Never launch a second round for that fragment: base versions,
-            // momentum, and serialized completion all assume one owner.
-            if !fragment_available(&inflight, p) {
+            if busy_fragments.contains(&p) {
                 break;
             }
             let groups = current_groups(&registry);
@@ -1167,6 +1188,9 @@ async fn scheduler(
             let launch_quorum = (cfg.quorum as usize).min(expected_members.len());
             for g in &groups {
                 let _ = g.send_small(MSG_PULL_REQ, pull.clone()).await;
+            }
+            if !busy_fragments.insert(p) {
+                bail!("fragment {p} acquired twice");
             }
             inflight.push(Round {
                 t,
@@ -1202,18 +1226,27 @@ async fn scheduler(
             }
         }
 
-        // Complete every round that is ready: all captured learners
-        // answered, or its grace deadline expired after reaching quorum.
-        // A quorum timeout below K discards the partial attempt and re-pulls.
+        // A ready gather is reduced deterministically and its complete ISO
+        // matrices are submitted to the bounded worker pool.  The scheduler
+        // immediately continues serving learner traffic while they run.
         let now = Instant::now();
-        let mut completed_any = false;
+        let mut submitted_any = false;
         let mut i = 0;
         while i < inflight.len() {
             match round_action(&inflight[i], now) {
                 RoundAction::Complete => {
                     let round = inflight.remove(i);
-                    complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
-                    completed_any = true;
+                    let prepared = prepare_round_compute(&st, &round)?;
+                    computing.spawn(async move {
+                        let compute_start = Instant::now();
+                        let merge = prepared.compute().await?;
+                        Ok(ComputedRound {
+                            round,
+                            merge,
+                            compute_secs: compute_start.elapsed().as_secs_f64(),
+                        })
+                    });
+                    submitted_any = true;
                     continue;
                 }
                 RoundAction::Restart => {
@@ -1248,7 +1281,7 @@ async fn scheduler(
             }
             i += 1;
         }
-        if completed_any {
+        if submitted_any {
             continue; // refill the pipeline before waiting again
         }
         // Wait for the next event, the earliest in-flight deadline, or the
@@ -1259,20 +1292,53 @@ async fn scheduler(
             .iter()
             .map(|r| r.grace_deadline.unwrap_or(r.quorum_deadline))
             .min();
-        let next_fragment_available = inflight.len() < depth
+        let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
             && next_t <= cfg.total_steps
-            && fragment_available(&inflight, ((next_t - 1) % num_fragments) as usize);
+            && !busy_fragments.contains(&(((next_t - 1) % num_fragments) as usize));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
         }
-        let Some(earliest) = earliest else {
-            continue; // everything launched has completed; loop re-evaluates
+        let wake = match earliest {
+            Some(deadline) if !computing.is_empty() => tokio::select! {
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => SchedulerWake::Deadline,
+                result = computing.join_next() => SchedulerWake::Computed(result),
+                event = events.recv() => SchedulerWake::Event(event),
+            },
+            Some(deadline) => tokio::select! {
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => SchedulerWake::Deadline,
+                event = events.recv() => SchedulerWake::Event(event),
+            },
+            None if !computing.is_empty() => tokio::select! {
+                result = computing.join_next() => SchedulerWake::Computed(result),
+                event = events.recv() => SchedulerWake::Event(event),
+            },
+            None => continue,
         };
-        let timeout = earliest.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(timeout, events.recv()).await {
-            Err(_) => continue, // deadline hit; loop re-evaluates
-            Ok(None) => bail!("event channel closed"),
-            Ok(Some(ev)) => match ev {
+        match wake {
+            SchedulerWake::Deadline => continue,
+            SchedulerWake::Computed(Some(result)) => {
+                let completed = result.context("iso compute task panicked")??;
+                let t = completed.round.t;
+                if completed.merge.fid() != completed.round.p
+                    || completed.merge.base_version() != completed.round.base_version
+                {
+                    bail!("computed merge metadata does not match round t={t}");
+                }
+                if st.versions.get(completed.round.p).copied() != Some(completed.round.base_version)
+                {
+                    bail!(
+                        "computed result t={t} fragment {} base version {} no longer matches state",
+                        completed.round.p,
+                        completed.round.base_version
+                    );
+                }
+                if ready.insert(t, completed).is_some() {
+                    bail!("duplicate computed round t={t}");
+                }
+            }
+            SchedulerWake::Computed(None) => bail!("iso compute task set ended unexpectedly"),
+            SchedulerWake::Event(None) => bail!("event channel closed"),
+            SchedulerWake::Event(Some(ev)) => match ev {
                 Event::Push { member, push } => {
                     let learner_id = member.learner_id;
                     let generation = member.generation;
@@ -1318,6 +1384,12 @@ async fn scheduler(
                     record_budget_report(&mut budget_reports, target, member, local_steps)?;
                     let cancelled = inflight.len();
                     inflight.clear();
+                    ready.clear();
+                    computing.abort_all();
+                    while computing.join_next().await.is_some() {}
+                    st.drain_iso_backend().await?;
+                    busy_fragments.clear();
+                    budget_cutoff = true;
                     info!(
                         learner_id = member.learner_id,
                         cancelled_rounds = cancelled,
@@ -1342,12 +1414,31 @@ async fn scheduler(
     }
 
     if cfg.learner_budget_steps.is_some() {
+        if !budget_cutoff {
+            bail!("learner-budget scheduler exited without a cutoff report");
+        }
         collect_budget_reports(&cfg, &mut budget_reports, &mut events, &registry).await?;
+        st.drain_iso_backend().await?;
         save_budget_checkpoint(&cfg, &st)?;
         return Ok(());
     }
 
-    // The outer loop is now quiescent: every launched round has completed.
+    if next_commit_t != cfg.total_steps.saturating_add(1)
+        || st.global_step != cfg.total_steps
+        || !busy_fragments.is_empty()
+    {
+        bail!(
+            "non-quiescent terminal cut: next_commit_t={next_commit_t} global_step={} busy={:?}",
+            st.global_step,
+            busy_fragments
+        );
+    }
+    // Explicitly drain and health-check every SVD worker before a checkpoint
+    // or marker can publish the terminal cut.
+    st.drain_iso_backend().await?;
+
+    // The outer loop is now quiescent: every launched round has completed
+    // and every computed result has committed in strict t order.
     // Persist this authoritative cut regardless of the periodic checkpoint
     // interval so a non-divisible total_steps can never leave a stale final
     // checkpoint behind.
@@ -1464,6 +1555,22 @@ struct Round {
     pushes: HashMap<Member, Push>,
 }
 
+struct ComputedRound {
+    round: Round,
+    merge: ComputedMerge,
+    compute_secs: f64,
+}
+
+enum SchedulerWake {
+    Deadline,
+    Event(Option<Event>),
+    Computed(Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>),
+}
+
+fn take_next_commit<T>(ready: &mut BTreeMap<u64, T>, next_t: u64) -> Option<T> {
+    ready.remove(&next_t)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum PushDisposition {
     Accepted,
@@ -1522,17 +1629,54 @@ fn route_push(rounds: &mut [Round], member: Member, push: Push) -> PushDispositi
     PushDisposition::Accepted
 }
 
-/// Merge a gathered round, apply the outer step, broadcast, and record it.
-/// Called from the single scheduler task, so merges are serialized even
-/// with several rounds in flight; concurrent rounds target distinct
-/// fragments, so each merge touches disjoint params/momentum.
-async fn complete_round(
+/// Fix learner order and prepare owned matrix jobs without mutating global
+/// optimizer state. This exact order is the reduction order on every run.
+fn prepare_round_compute(st: &GlobalState, round: &Round) -> Result<PreparedMerge> {
+    if st.versions.get(round.p).copied() != Some(round.base_version) {
+        bail!(
+            "round t={} fragment {} base version {} != current {:?}",
+            round.t,
+            round.p,
+            round.base_version,
+            st.versions.get(round.p)
+        );
+    }
+    let mut ordered_pushes: Vec<_> = round.pushes.iter().collect();
+    ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
+    let mut outer_gradients = Vec::with_capacity(ordered_pushes.len());
+    let mut weights = Vec::with_capacity(ordered_pushes.len());
+    for (member, push) in ordered_pushes {
+        if push.base_version < round.base_version {
+            warn!(
+                learner_id = member.learner_id,
+                generation = member.generation,
+                step = round.t,
+                base = push.base_version,
+                expected = round.base_version,
+                "stale base-relative delta admitted"
+            );
+        }
+        outer_gradients.push(push.outer_gradient.as_slice());
+        weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
+    }
+    st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights)
+}
+
+/// Commit an already-computed round. Called only for the contiguous t prefix,
+/// so Nesterov, versions, ledger, event tape, checkpoint, and broadcast all
+/// share one deterministic order even when SVD completion is out of order.
+async fn commit_round(
     cfg: &Config,
     st: &mut GlobalState,
     registry: &Registry,
     last_sync_secs: &mut f64,
-    round: Round,
+    completed: ComputedRound,
 ) -> Result<()> {
+    let ComputedRound {
+        round,
+        merge,
+        compute_secs,
+    } = completed;
     let Round {
         t,
         p,
@@ -1546,37 +1690,27 @@ async fn complete_round(
         pushes,
         ..
     } = round;
-    debug_assert_eq!(st.versions[p], base_version);
-    let (mut outer_gradients, mut weights, mut responders) = (Vec::new(), Vec::new(), Vec::new());
-    // HashMap iteration is randomized.  Keep the f32 weighted reduction
-    // reproducible by fixing learner order before merge math.
-    let mut ordered_pushes: Vec<_> = pushes.iter().collect();
-    ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
-    for (member, push) in ordered_pushes {
-        if push.base_version < base_version {
-            // The base-relative update contains only local progress since
-            // the learner's exact raw anchor, so stale pushes remain valid
-            // for every wire dtype without reconstructing historical params.
-            warn!(
-                learner_id = member.learner_id,
-                generation = member.generation,
-                step = t,
-                base = push.base_version,
-                expected = base_version,
-                "stale base-relative delta admitted"
-            );
-        }
-        outer_gradients.push(push.outer_gradient.as_slice());
-        weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
-        responders.push(*member);
+    let expected_t = st
+        .global_step
+        .checked_add(1)
+        .context("global step overflow")?;
+    if t != expected_t {
+        bail!("attempted out-of-order commit t={t}, expected t={expected_t}");
+    }
+    if st.versions.get(p).copied() != Some(base_version) {
+        bail!(
+            "commit t={t} fragment {p} base version {base_version} != current {:?}",
+            st.versions.get(p)
+        );
     }
     let sync_start = Instant::now();
-    let gnorm = st.merge_and_step(p, &outer_gradients, &weights)?;
+    let gnorm = st.commit_merge(merge)?;
     st.versions[p] = t;
-    // Pipelined rounds can complete out of order; the global step only
-    // moves forward.
-    st.global_step = st.global_step.max(t);
-    for push in pushes.values() {
+    st.global_step = t;
+    let mut ordered_pushes: Vec<_> = pushes.iter().collect();
+    ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
+    let responders: Vec<Member> = ordered_pushes.iter().map(|(member, _)| **member).collect();
+    for (_, push) in ordered_pushes {
         st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
     }
 
@@ -1585,7 +1719,7 @@ async fn complete_round(
     for g in current_groups(registry) {
         let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
     }
-    *last_sync_secs = sync_start.elapsed().as_secs_f64();
+    *last_sync_secs = compute_secs + sync_start.elapsed().as_secs_f64();
     let sync_ms = (*last_sync_secs * 1000.0).round() as u64;
     let ms = started.elapsed().as_millis() as u64;
     info!(
@@ -1597,8 +1731,7 @@ async fn complete_round(
         "outer step"
     );
     if let Some(tape) = &cfg.event_tape {
-        // Records land in completion order, which under pipelining is not
-        // necessarily step order.
+        // Records land in strict t order, matching optimizer/version commits.
         append_tape(
             tape,
             t,
@@ -1613,7 +1746,7 @@ async fn complete_round(
             &pushes,
             gnorm,
             ms,
-        );
+        )?;
     }
     // Consistent cut: this round is fully applied and broadcast, and every
     // other in-flight round is still gathering (it has not touched state).
@@ -1648,11 +1781,13 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
 
 fn current_groups(registry: &Registry) -> Vec<Arc<Group>> {
     let registry = registry.lock().unwrap();
-    registry
+    let mut groups: Vec<_> = registry
         .current
         .values()
         .filter_map(|member| registry.groups.get(member).cloned())
-        .collect()
+        .collect();
+    groups.sort_unstable_by_key(|group| group.member);
+    groups
 }
 
 fn is_current_member(registry: &Registry, member: Member) -> bool {
@@ -1945,7 +2080,7 @@ fn append_tape(
     pushes: &HashMap<Member, Push>,
     gnorm: f64,
     ms: u64,
-) {
+) -> Result<()> {
     use std::io::Write;
     let mut responded_members: Vec<Member> = pushes.keys().copied().collect();
     responded_members.sort_unstable();
@@ -2002,14 +2137,13 @@ fn append_tape(
         json_members(&missed_members),
         responders.join(",")
     );
-    let res = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .and_then(|mut f| f.write_all(line.as_bytes()));
-    if let Err(e) = res {
-        warn!("event tape write failed: {e}");
-    }
+        .and_then(|mut f| f.write_all(line.as_bytes()))
+        .with_context(|| format!("append event tape {}", path.display()))?;
+    Ok(())
 }
 
 fn json_ids(ids: &[u32]) -> String {
@@ -2306,6 +2440,21 @@ mod tests {
     }
 
     #[test]
+    fn out_of_order_compute_results_wait_for_contiguous_t_commit() {
+        let mut ready = BTreeMap::new();
+        ready.insert(12, "twelve");
+
+        // cuda:N may finish t+1 first; the coordinator must not pop it.
+        assert_eq!(take_next_commit(&mut ready, 11), None);
+        assert_eq!(ready.get(&12), Some(&"twelve"));
+
+        ready.insert(11, "eleven");
+        assert_eq!(take_next_commit(&mut ready, 11), Some("eleven"));
+        assert_eq!(take_next_commit(&mut ready, 12), Some("twelve"));
+        assert!(ready.is_empty());
+    }
+
+    #[test]
     fn round_rejects_duplicate_future_base_and_out_of_round_pushes() {
         let captured = member(0, 10);
         let mut rounds = vec![test_round(vec![captured])];
@@ -2391,7 +2540,8 @@ mod tests {
             &pushes,
             0.5,
             44,
-        );
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();
         assert!(text.contains("\"expected\":[0,1]"));

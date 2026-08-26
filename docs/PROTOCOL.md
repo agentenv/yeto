@@ -209,7 +209,8 @@ The benchmark closes in two syncer processes on the same endpoint:
    recovery checkpoint and exits. It sends no final manifest or shutdown.
 2. The harness reads that checkpoint's global step `C`, restarts the syncer
    from it, and requests exactly `F` ordinary rounds, where `F` is the fragment
-   count. Pipeline depth is one and quorum is the full configured learner set.
+   count. Quorum is the full configured learner set. Gather/SVD work may be
+   pipelined, but coordinator commits remain strictly ordered by round `t`.
 
 Learners stop optimizer and data work before sending `BUDGET_DONE`, retain
 their frozen trainable parameters, and reconnect to the restarted syncer. The
@@ -229,10 +230,13 @@ learner in every one of these rounds.
 
 ## Snapshots and event tape
 
-The sequential coordinator mutates state only at serialized round completion,
-so a checkpoint at that cut is consistent while other pipelined rounds are
-still gathering. Snapshots contain global/per-fragment versions, f32 params,
-momentum, and the cumulative learner ledger.
+The sequential coordinator mutates state only when committing the next
+contiguous round `t`. Other rounds may still be gathering or running exact
+SVD, but their owned buffers cannot touch coordinator state. A checkpoint at
+that cut is therefore consistent. Snapshots contain global/per-fragment
+versions, f32 params, momentum, and the cumulative learner ledger. Cutoff and
+terminal checkpoints explicitly drain the SVD pool first; a poisoned worker
+prevents checkpoint publication.
 
 Periodic checkpoints remain controlled by `--checkpoint-every`, but the
 coordinator always rewrites `--checkpoint-path` at the final quiescent cut

@@ -1568,11 +1568,6 @@ class MilesValueIsland:
                         item.round_attempt,
                     )
                 )
-                if len(eligible) != 1:
-                    raise RuntimeError(
-                        "budget consolidation requires syncer --pipeline=1; "
-                        f"received {len(eligible)} eligible pulls"
-                    )
                 pull = eligible[0]
                 pulls.remove(pull)
                 base = bases.pop(pull.fragment_id)

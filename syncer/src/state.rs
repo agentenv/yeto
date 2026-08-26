@@ -136,6 +136,108 @@ pub struct GlobalState {
     iso_backend: IsoBackend,
 }
 
+/// A merge whose deterministic learner reduction has completed but whose
+/// exact Torch SVD matrices may still be executing.  It owns every input
+/// buffer used by the workers, so no matrix can alias coordinator state.
+pub struct PreparedMerge {
+    fid: usize,
+    base_version: u64,
+    delta: Vec<f32>,
+    iso_jobs: Vec<IsoJob>,
+    iso_backend: IsoBackend,
+}
+
+struct IsoJob {
+    tensor_index: usize,
+    offset: usize,
+    rows: usize,
+    cols: usize,
+    matrix: Vec<f32>,
+}
+
+/// Immutable worker output waiting for the single coordinator to commit it.
+/// Nesterov state, versions, the event tape, and broadcasts are deliberately
+/// absent: those are changed only by `GlobalState::commit_merge`, in t order.
+pub struct ComputedMerge {
+    fid: usize,
+    base_version: u64,
+    delta: Vec<f32>,
+}
+
+impl ComputedMerge {
+    pub fn fid(&self) -> usize {
+        self.fid
+    }
+
+    pub fn base_version(&self) -> u64 {
+        self.base_version
+    }
+}
+
+impl PreparedMerge {
+    pub fn fid(&self) -> usize {
+        self.fid
+    }
+
+    pub fn base_version(&self) -> u64 {
+        self.base_version
+    }
+
+    pub async fn compute(mut self) -> Result<ComputedMerge> {
+        let mut tasks = tokio::task::JoinSet::new();
+        let fid = self.fid;
+        for job in self.iso_jobs.drain(..) {
+            let backend = self.iso_backend.clone();
+            tasks.spawn(async move {
+                let matrix = backend
+                    .flatten_owned(job.matrix, job.rows, job.cols)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "fragment {}: iso backend failed for tensor {} ({}x{})",
+                            fid, job.tensor_index, job.rows, job.cols
+                        )
+                    })?;
+                Ok::<_, anyhow::Error>((job.offset, matrix))
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            let (offset, matrix) = result.context("iso matrix task panicked")??;
+            if self.delta.is_empty() && offset == 0 {
+                self.delta = matrix;
+                continue;
+            }
+            let end = offset
+                .checked_add(matrix.len())
+                .context("iso result offset overflow")?;
+            let out = self
+                .delta
+                .get_mut(offset..end)
+                .context("iso result lies outside prepared fragment")?;
+            out.copy_from_slice(&matrix);
+        }
+        if self.delta.iter().any(|value| !value.is_finite()) {
+            bail!("fragment {}: merged outer gradient is non-finite", self.fid);
+        }
+        Ok(ComputedMerge {
+            fid: self.fid,
+            base_version: self.base_version,
+            delta: self.delta,
+        })
+    }
+
+    fn finish_inline(self) -> Result<ComputedMerge> {
+        if !self.iso_jobs.is_empty() {
+            bail!("torch-svd prepared merge requires asynchronous compute");
+        }
+        Ok(ComputedMerge {
+            fid: self.fid,
+            base_version: self.base_version,
+            delta: self.delta,
+        })
+    }
+}
+
 impl GlobalState {
     pub fn new(layout: Layout, outer_lr: f32, outer_momentum: f32, wire_dtype: u8) -> Result<Self> {
         Self::new_with_iso_backend(
@@ -239,14 +341,23 @@ impl GlobalState {
         e.tokens += c_tokens;
     }
 
-    /// Merge learner outer gradients for fragment `fid` and apply the outer step.
-    /// Returns the l2 norm of the merged outer gradient (for logging).
-    pub fn merge_and_step(
-        &mut self,
+    /// Deterministically reduce learner gradients and enqueue no mutable
+    /// coordinator state.  Torch SVD work is represented as owned matrices
+    /// inside the returned value and may execute out of order.
+    pub fn prepare_merge(
+        &self,
         fid: usize,
+        base_version: u64,
         outer_gradients: &[&[f32]],
         weights: &[f64],
-    ) -> Result<f64> {
+    ) -> Result<PreparedMerge> {
+        let current_version = *self
+            .versions
+            .get(fid)
+            .with_context(|| format!("merge for unknown fragment {fid}"))?;
+        if current_version != base_version {
+            bail!("fragment {fid}: prepare version {base_version} != current {current_version}");
+        }
         let frag = self
             .layout
             .fragments
@@ -292,6 +403,7 @@ impl GlobalState {
         };
         let outer_gradients = outer_gradients.as_slice();
         let mut delta = vec![0.0f32; numel];
+        let mut iso_jobs = Vec::new();
         // Merge per tensor slice within the fragment.
         let mut off = 0usize;
         for (tensor_index, &tn) in frag.tensor_numels.iter().enumerate() {
@@ -319,17 +431,65 @@ impl GlobalState {
                     // the selected backend receives exactly one complete
                     // canonical matrix, never learner or TP shards.
                     merge::merge_avg(&slices, weights, out);
-                    self.iso_backend
-                        .flatten(out, rows as usize, cols as usize)
-                        .with_context(|| {
-                            format!(
-                                "fragment {fid}: iso backend failed for tensor {tensor_index} ({rows}x{cols})"
-                            )
-                        })?;
+                    match self.iso_backend.kind() {
+                        IsoBackendKind::Scalar => {
+                            merge::iso_flatten_spectrum(out, rows as usize, cols as usize)
+                        }
+                        IsoBackendKind::TorchSvd => iso_jobs.push(IsoJob {
+                            tensor_index,
+                            offset: off,
+                            rows: rows as usize,
+                            cols: cols as usize,
+                            matrix: out.to_vec(),
+                        }),
+                    }
                 }
                 mode => bail!("fragment {fid}: unsupported merge mode {mode}"),
             }
             off += tn;
+        }
+        // Miles uses one canonical tensor per fragment. Move that complete
+        // averaged matrix into its worker job instead of retaining a second
+        // model-sized host copy while SVD runs.
+        if iso_jobs.len() == 1 && iso_jobs[0].offset == 0 && iso_jobs[0].matrix.len() == delta.len()
+        {
+            iso_jobs[0].matrix = std::mem::take(&mut delta);
+        }
+        if delta.iter().any(|value| !value.is_finite()) {
+            bail!("fragment {fid}: merged outer gradient is non-finite");
+        }
+        Ok(PreparedMerge {
+            fid,
+            base_version,
+            delta,
+            iso_jobs,
+            iso_backend: self.iso_backend.clone(),
+        })
+    }
+
+    /// Commit one fully computed merge.  This is the only merge path that
+    /// mutates Nesterov state and it rejects stale/out-of-order fragment work.
+    pub fn commit_merge(&mut self, computed: ComputedMerge) -> Result<f64> {
+        let ComputedMerge {
+            fid,
+            base_version,
+            delta,
+        } = computed;
+        let current_version = *self
+            .versions
+            .get(fid)
+            .with_context(|| format!("commit for unknown fragment {fid}"))?;
+        if current_version != base_version {
+            bail!(
+                "fragment {fid}: computed base version {base_version} != current {current_version}"
+            );
+        }
+        let expected = self.layout.fragments[fid].numel()?;
+        if delta.len() != expected {
+            bail!(
+                "fragment {fid}: computed merge has {} values, expected {expected}",
+                delta.len()
+            );
         }
         let gnorm = delta
             .iter()
@@ -339,6 +499,19 @@ impl GlobalState {
         if !gnorm.is_finite() || delta.iter().any(|value| !value.is_finite()) {
             bail!("fragment {fid}: merged outer gradient is non-finite");
         }
+        // Validate the complete optimizer result before mutating either
+        // buffer. This keeps commit all-or-nothing without cloning a
+        // model-sized fragment.
+        for ((param, momentum), gradient) in
+            self.params[fid].iter().zip(&self.momentum[fid]).zip(&delta)
+        {
+            let next_momentum = self.outer_momentum * *momentum + *gradient;
+            let next_param =
+                *param - self.outer_lr * (*gradient + self.outer_momentum * next_momentum);
+            if !next_param.is_finite() || !next_momentum.is_finite() {
+                bail!("fragment {fid}: outer optimizer produced non-finite state");
+            }
+        }
         merge::nesterov_step(
             &mut self.params[fid],
             &mut self.momentum[fid],
@@ -346,12 +519,27 @@ impl GlobalState {
             self.outer_lr,
             self.outer_momentum,
         );
-        if self.params[fid].iter().any(|value| !value.is_finite())
-            || self.momentum[fid].iter().any(|value| !value.is_finite())
-        {
-            bail!("fragment {fid}: outer optimizer produced non-finite state");
-        }
+        debug_assert!(self.params[fid].iter().all(|value| value.is_finite()));
+        debug_assert!(self.momentum[fid].iter().all(|value| value.is_finite()));
         Ok(gnorm)
+    }
+
+    /// Compatibility helper for scalar unit tests and non-Torch callers.
+    pub fn merge_and_step(
+        &mut self,
+        fid: usize,
+        outer_gradients: &[&[f32]],
+        weights: &[f64],
+    ) -> Result<f64> {
+        let prepared = self.prepare_merge(fid, self.versions[fid], outer_gradients, weights)?;
+        self.commit_merge(prepared.finish_inline()?)
+    }
+
+    /// Explicit barrier used before any terminal checkpoint/marker is made
+    /// publishable.  The worker pool reports poison instead of silently
+    /// publishing a cut after partial SVD failure.
+    pub async fn drain_iso_backend(&self) -> Result<()> {
+        self.iso_backend.drain().await
     }
 }
 
@@ -488,6 +676,25 @@ impl GlobalState {
             };
             self.ledger.insert(id, l);
         }
+        // A strict-order checkpoint's global_step is the contiguous commit
+        // cursor, so round-robin fragment versions are fully determined by
+        // it. Reject legacy completion-order snapshots with holes rather than
+        // silently skipping an uncommitted low t on resume.
+        let fragments = self.versions.len() as u64;
+        for (fid, version) in self.versions.iter().copied().enumerate() {
+            let first = fid as u64 + 1;
+            let expected = if self.global_step < first {
+                0
+            } else {
+                first + ((self.global_step - first) / fragments) * fragments
+            };
+            if version != expected {
+                bail!(
+                    "checkpoint is not a contiguous strict-order cut: fragment {fid} version {version}, expected {expected} at global_step {}",
+                    self.global_step
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -548,6 +755,45 @@ mod tests {
         assert!(g > 0.0);
         // Θ − 1.0·(Θ − θ) = θ
         assert_eq!(st.params[0], vec![0.0; 4]);
+    }
+
+    #[test]
+    fn prepared_merge_checks_version_at_prepare_and_commit() {
+        let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let gradient = [1.0f32; 4];
+
+        assert!(st.prepare_merge(0, 9, &[&gradient], &[1.0]).is_err());
+        let computed = st
+            .prepare_merge(0, 0, &[&gradient], &[1.0])
+            .unwrap()
+            .finish_inline()
+            .unwrap();
+        st.versions = vec![7, 6];
+        assert!(st.commit_merge(computed).is_err());
+        assert_eq!(st.params[0], vec![1.0; 4]);
+    }
+
+    #[test]
+    fn nonfinite_nesterov_result_does_not_partially_mutate_state() {
+        let mut st =
+            GlobalState::new(layout2(), f32::MAX, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let before_params = st.params[0].clone();
+        let before_momentum = st.momentum[0].clone();
+        let gradient = [f32::MAX; 4];
+        let computed = st
+            .prepare_merge(0, 0, &[&gradient], &[1.0])
+            .unwrap()
+            .finish_inline()
+            .unwrap();
+
+        assert!(st.commit_merge(computed).is_err());
+        assert_eq!(st.params[0], before_params);
+        assert_eq!(st.momentum[0], before_momentum);
+        assert_eq!(st.versions[0], 0);
     }
 
     #[test]
@@ -621,14 +867,14 @@ mod tests {
         let outer_gradient = vec![1.5f32; 4];
         st.merge_and_step(0, &[&outer_gradient], &[1.0]).unwrap();
         st.global_step = 7;
-        st.versions[0] = 7;
+        st.versions = vec![7, 6];
         st.record_merge(3, 12, 4096);
         st.save_checkpoint(&path).unwrap();
 
         let mut st2 = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
         st2.load_checkpoint(&path).unwrap();
         assert_eq!(st2.global_step, 7);
-        assert_eq!(st2.versions, vec![7, 0]);
+        assert_eq!(st2.versions, vec![7, 6]);
         assert_eq!(st2.params, st.params);
         assert!(st2.all_initialized());
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
@@ -646,14 +892,14 @@ mod tests {
         st.init_fragment(0, vec![3.0; 4]).unwrap();
         st.init_fragment(1, vec![-4.0; 4]).unwrap();
         st.global_step = 13;
-        st.versions = vec![12, 13];
+        st.versions = vec![13, 12];
         st.save_checkpoint(&path).unwrap();
 
         let mut restored =
             GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
         restored.load_checkpoint(&path).unwrap();
         assert_eq!(restored.global_step, 13);
-        assert_eq!(restored.versions, vec![12, 13]);
+        assert_eq!(restored.versions, vec![13, 12]);
         assert!(!path.with_extension("tmp").exists());
         std::fs::remove_dir_all(&dir).ok();
     }

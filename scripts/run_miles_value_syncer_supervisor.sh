@@ -17,7 +17,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 YETO_ROOT=${YETO_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd -P)}
 SYNCER_BIN=${SYNCER_BIN:-${YETO_ROOT}/syncer/target/release/yeto-syncer}
 ISO_WORKER_PYTHON=${ISO_WORKER_PYTHON:-python3}
-ISO_WORKER_DEVICE=${ISO_WORKER_DEVICE:-cuda:0}
+ISO_WORKER_DEVICES=${ISO_WORKER_DEVICES:-cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7}
+ISO_WORKER_QUEUE_CAPACITY=${ISO_WORKER_QUEUE_CAPACITY:-16}
 
 RUN_DIR=${RUN_DIR:?set RUN_DIR to a fresh local syncer output directory}
 PORT=${PORT:-29400}
@@ -28,7 +29,8 @@ PHASE2_LOG=${PHASE2_LOG:-${RUN_DIR}/syncer-finalize.log}
 FINAL_MARKER=${CHECKPOINT_PATH}.final
 
 PHASE1_TOTAL_STEPS=${PHASE1_TOTAL_STEPS:-1000000000}
-PHASE1_PIPELINE=${PHASE1_PIPELINE:-2}
+PHASE1_PIPELINE=${PHASE1_PIPELINE:-16}
+PHASE2_PIPELINE=${PHASE2_PIPELINE:-16}
 CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-0}
 GRACE_MS=${GRACE_MS:-1000}
 GRACE_GAMMA=${GRACE_GAMMA:-0.8}
@@ -52,6 +54,12 @@ fi
 if [[ ! "${PHASE1_PIPELINE}" =~ ^[0-9]+$ ]] || ((PHASE1_PIPELINE < 1)); then
   die "PHASE1_PIPELINE must be positive"
 fi
+if [[ ! "${PHASE2_PIPELINE}" =~ ^[0-9]+$ ]] || ((PHASE2_PIPELINE < 1)); then
+  die "PHASE2_PIPELINE must be positive"
+fi
+if [[ ! "${ISO_WORKER_QUEUE_CAPACITY}" =~ ^[0-9]+$ ]] || ((ISO_WORKER_QUEUE_CAPACITY < 1)); then
+  die "ISO_WORKER_QUEUE_CAPACITY must be positive"
+fi
 [[ "${CHECKPOINT_EVERY}" =~ ^[0-9]+$ ]] || die "CHECKPOINT_EVERY must be a non-negative integer"
 [[ "${GRACE_MS}" =~ ^[0-9]+$ ]] || die "GRACE_MS must be a non-negative integer"
 if [[ ! "${QUORUM_TIMEOUT_S}" =~ ^[0-9]+$ ]] || ((QUORUM_TIMEOUT_S < 1)); then
@@ -73,15 +81,21 @@ export PYTHONPATH="${YETO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Fail before learners spend time connecting if this Python/device cannot run
 # the exact production backend.  Rust performs its own framed 1x1 probe too.
-"${ISO_WORKER_PYTHON}" - "${ISO_WORKER_DEVICE}" <<'PY'
+"${ISO_WORKER_PYTHON}" - "${ISO_WORKER_DEVICES}" <<'PY'
 import sys
 import torch
 import yeto.iso_worker  # noqa: F401
 
-device = torch.device(sys.argv[1])
-probe = torch.ones(1, device=device)
-if probe.item() != 1.0:
-    raise RuntimeError(f"bad Torch SVD worker device probe on {device}")
+devices = sys.argv[1].split(",")
+if not devices or any(not device for device in devices):
+    raise RuntimeError("ISO_WORKER_DEVICES must be a non-empty comma-separated list")
+if len(set(devices)) != len(devices):
+    raise RuntimeError(f"duplicate Torch SVD worker devices: {devices}")
+for raw_device in devices:
+    device = torch.device(raw_device)
+    probe = torch.ones(1, device=device)
+    if probe.item() != 1.0:
+        raise RuntimeError(f"bad Torch SVD worker device probe on {device}")
 PY
 
 active_pid=''
@@ -186,7 +200,8 @@ COMMON_ARGS=(
   --outer-momentum "${OUTER_MOMENTUM}"
   --iso-backend torch-svd
   --iso-worker-python "${ISO_WORKER_PYTHON}"
-  --iso-worker-device "${ISO_WORKER_DEVICE}"
+  --iso-worker-devices "${ISO_WORKER_DEVICES}"
+  --iso-worker-queue-capacity "${ISO_WORKER_QUEUE_CAPACITY}"
   --checkpoint-path "${CHECKPOINT_PATH}"
   --checkpoint-every "${CHECKPOINT_EVERY}"
   --event-tape "${EVENT_TAPE}"
@@ -229,7 +244,7 @@ printf 'Validated cutoff: local_budget=%d learners=%d global_step=%d fragments=%
 PHASE2_ARGS=(
   "${COMMON_ARGS[@]}"
   --quorum "${NUM_LEARNERS}"
-  --pipeline 1
+  --pipeline "${PHASE2_PIPELINE}"
   --sync-interval-steps 0
   --total-steps "${terminal_step}"
   --resume

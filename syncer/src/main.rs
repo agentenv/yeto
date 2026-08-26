@@ -71,6 +71,13 @@ struct Args {
     /// Torch device used by --iso-backend=torch-svd.
     #[arg(long, default_value = "cuda:0")]
     iso_worker_device: String,
+    /// Explicit comma-separated Torch devices, one persistent worker per
+    /// device. Overrides --iso-worker-device when non-empty.
+    #[arg(long, value_delimiter = ',')]
+    iso_worker_devices: Vec<String>,
+    /// Maximum complete matrices waiting to enter the SVD workers.
+    #[arg(long, default_value_t = 16)]
+    iso_worker_queue_capacity: usize,
     /// Optional path to dump the final global parameters (flat f32 binary).
     #[arg(long)]
     final_state: Option<std::path::PathBuf>,
@@ -110,11 +117,24 @@ fn main() -> anyhow::Result<()> {
         "none" => false,
         other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
     };
+    let devices = if args.iso_worker_devices.is_empty() {
+        vec![args.iso_worker_device.clone()]
+    } else {
+        args.iso_worker_devices
+    };
+    if devices.iter().any(String::is_empty) {
+        anyhow::bail!("--iso-worker-devices cannot contain an empty device");
+    }
+    let unique: std::collections::HashSet<_> = devices.iter().collect();
+    if unique.len() != devices.len() {
+        anyhow::bail!("--iso-worker-devices cannot contain duplicates");
+    }
     let iso_backend = iso_worker::IsoBackendConfig {
         kind: args.iso_backend.parse()?,
         python: args.iso_worker_python,
         device: args.iso_worker_device,
-    };
+    }
+    .with_pool(devices, args.iso_worker_queue_capacity)?;
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,

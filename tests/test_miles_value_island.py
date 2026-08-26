@@ -640,3 +640,41 @@ def test_fresh_te_state_marks_megatron_offloader_initialized():
 
     assert offloader._optimizer_states_initialized is True
     assert island._fresh_state_dist_optimizers == {}
+
+
+def test_budget_consolidation_buffers_pipelined_pulls_in_step_order():
+    class Client:
+        finalization_timeout = 1.0
+
+        def __init__(self):
+            self.updates = [
+                SimpleNamespace(fragment_id=1, version=20, data=b"one"),
+                SimpleNamespace(fragment_id=0, version=10, data=b"zero"),
+            ]
+            self.pulls = [
+                SimpleNamespace(
+                    fragment_id=1, global_step=12, round_attempt=1
+                ),
+                SimpleNamespace(
+                    fragment_id=0, global_step=11, round_attempt=1
+                ),
+            ]
+
+        def check_health(self):
+            return None
+
+        def drain_updates(self):
+            values, self.updates = self.updates, []
+            return values
+
+        def drain_pulls(self):
+            values, self.pulls = self.pulls, []
+            return values
+
+    island = object.__new__(MilesValueIsland)
+    island.client = Client()
+    island._leader_payloads = {}
+
+    assert island._next_budget_round(set()) == (0, 11, 1, 10)
+    assert island._next_budget_round({0}) == (1, 12, 1, 20)
+    assert island._leader_payloads == {(0, 10): b"zero", (1, 20): b"one"}
