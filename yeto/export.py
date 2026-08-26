@@ -21,6 +21,8 @@ Binary layout (all little-endian):
     ledger_count   u32
     per entry:     learner_id u32, merges u64, steps u64, tokens u64
     optional:      32-byte semantic layout hash (new checkpoints)
+    streaming:     marker u32 (0x5254_4353),
+                   session_contract_hash [u8; 32]
     sweep-only:    marker u32 (0x5053_5750), policy_sweep_fragments u32,
                    session_contract_hash [u8; 32]
 
@@ -43,6 +45,7 @@ from .tensor_io import apply_fragment
 
 CKPT_MAGIC = 0xD170_5A7E
 POLICY_SWEEP_CKPT_MAGIC = 0x5053_5750
+STREAMING_CONTRACT_CKPT_MAGIC = 0x5254_4353
 
 
 @dataclass
@@ -109,9 +112,20 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
     policy_sweep_fragments = None
     session_contract_hash = None
     trailing = len(data) - off
-    if trailing in (32, 40, 72):
+    if trailing in (32, 40, 68, 72):
         layout_hash = take(32, "layout_hash").hex()
-        if trailing in (40, 72):
+        if trailing == 68:
+            (streaming_magic,) = struct.unpack(
+                "<I", take(4, "streaming_contract_identity")
+            )
+            if streaming_magic != STREAMING_CONTRACT_CKPT_MAGIC:
+                raise ValueError(
+                    f"{path}: bad streaming checkpoint marker "
+                    f"0x{streaming_magic:08X} (expected "
+                    f"0x{STREAMING_CONTRACT_CKPT_MAGIC:08X})"
+                )
+            session_contract_hash = take(32, "session_contract_hash").hex()
+        elif trailing in (40, 72):
             sweep_magic, policy_sweep_fragments = struct.unpack(
                 "<II", take(8, "policy_sweep_identity")
             )

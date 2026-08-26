@@ -32,7 +32,7 @@ or allocation overflows are errors rather than panics.
 
 | type | name | direction | payload |
 |---:|---|---|---|
-| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], num_streams:u16 |
+| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16 |
 | 2 | INIT_PARAMS | learner → syncer | fragment_id:u32, full tensor bytes; only learner 0 may initialize |
 | 3 | PULL_REQ | syncer → learner | fragment_id:u32, global_step:u64, round_attempt:u32 |
 | 4 | PUSH_FRAGMENT | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64, round_attempt:u32, base_version:u64, local_step:u64, c_steps:u32, c_tokens:u64, base-relative learner-delta bytes |
@@ -57,10 +57,21 @@ shape. The numeric layout drives decoding; the fingerprint prevents two
 learners with equal-sized but semantically reordered tensors from entering
 the same session.
 
+`session_contract_hash` binds reconnects and checkpoint recovery to one
+client experiment. A fresh run must use a fresh contract; reusing a contract
+means that checkpoint continuation is intentional. Profile-bound clients
+additionally append
+`syncer_profile_hash`, the canonical identity of the server's parsed
+merge/schedule/recovery configuration. The server derives it from its actual
+configuration, excluding only the listener port and concrete output paths,
+and rejects a mismatch. `--require-profile-binding` also rejects an omitted
+profile hash; leaving it disabled preserves generic protocol-v4 clients.
+
 The version is checked before a connection can enter a session. A mismatch
 returns ERROR and closes the connection; an older payload is never guessed or
-silently decoded as v4. The first accepted HELLO fixes the session dtype and
-layout and semantic fingerprint. Every later HELLO must match them exactly,
+silently decoded as v4. The first accepted HELLO fixes the session dtype,
+layout, semantic fingerprint, session contract, and optional server profile
+binding. Every later HELLO must match them exactly,
 and learner IDs must lie in the configured `0..M` launch set. The learner ID
 repeated inside PUSH and HEARTBEAT must match the connected group.
 
@@ -233,6 +244,13 @@ The sequential coordinator mutates state only at serialized round completion,
 so a checkpoint at that cut is consistent while other pipelined rounds are
 still gathering. Snapshots contain global/per-fragment versions, f32 params,
 momentum, and the cumulative learner ledger.
+
+Pipelined rounds may finish gathering out of order, but the coordinator merges,
+checkpoints, and broadcasts them strictly in ascending global-step order. A
+checkpoint is therefore always a contiguous prefix, and resume begins at the
+first uncommitted step rather than skipping an older in-flight round. With
+`--checkpoint-every 1`, each checkpoint is durable before its matching
+non-terminal broadcast becomes externally visible.
 
 Periodic checkpoints remain controlled by `--checkpoint-every`, but the
 coordinator always rewrites `--checkpoint-path` at the final quiescent cut

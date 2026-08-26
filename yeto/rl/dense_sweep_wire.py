@@ -400,6 +400,11 @@ class _MilesRayInboundChunkSink:
             self._release_stored(fragment)
 
 
+# The full-parameter streaming role bridge uses the same transactional,
+# bounded Ray sink.  Keep the historical private name for existing callers.
+MilesRayInboundChunkSink = _MilesRayInboundChunkSink
+
+
 class DenseSweepClient(Protocol):
     finalizing: object
 

@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
@@ -96,6 +97,68 @@ pub struct Config {
     /// existing unbounded behavior.
     pub max_base_lag: Option<u64>,
     pub learner_weight: LearnerWeight,
+    /// Fail closed unless HELLO carries and matches this Config's canonical
+    /// semantic profile hash. Disabled by default for legacy/non-SAO clients.
+    pub require_profile_binding: bool,
+}
+
+const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v1\0";
+
+impl Config {
+    /// Canonical identity of every launch field that can affect merging,
+    /// scheduling, or recovery. Listener ports and concrete output paths are
+    /// deliberately excluded; checkpoint *enablement* remains included.
+    pub fn semantic_profile_hash(&self) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(160);
+        encoded.extend_from_slice(SEMANTIC_PROFILE_DOMAIN);
+        encoded.extend_from_slice(&self.learners.to_le_bytes());
+        encoded.extend_from_slice(&self.quorum.to_le_bytes());
+        encoded.extend_from_slice(&self.grace_ms.to_le_bytes());
+        encoded.extend_from_slice(&self.grace_gamma.to_bits().to_le_bytes());
+        encoded.extend_from_slice(&self.grace_tau.to_bits().to_le_bytes());
+        encoded.extend_from_slice(&self.pipeline.to_le_bytes());
+        encoded.extend_from_slice(&self.min_round_interval_ms.to_le_bytes());
+        encoded.extend_from_slice(&self.sync_interval_steps.to_bits().to_le_bytes());
+        encoded.push(u8::from(self.delta_correction));
+        encoded.extend_from_slice(&self.quorum_timeout_s.to_le_bytes());
+        encoded.extend_from_slice(&self.final_ack_timeout_s.to_le_bytes());
+        encoded.extend_from_slice(&self.total_steps.to_le_bytes());
+        encode_optional_u32(&mut encoded, self.policy_sweep_fragments);
+        encoded.extend_from_slice(&self.outer_lr.to_bits().to_le_bytes());
+        encoded.extend_from_slice(&self.outer_momentum.to_bits().to_le_bytes());
+        encoded.push(u8::from(self.checkpoint_path.is_some()));
+        encoded.extend_from_slice(&self.checkpoint_every.to_le_bytes());
+        encoded.push(u8::from(self.resume));
+        encoded.push(u8::from(self.mark_final_checkpoint));
+        encode_optional_u64(&mut encoded, self.learner_budget_steps);
+        encode_optional_u64(&mut encoded, self.max_base_lag);
+        encoded.push(match self.learner_weight {
+            LearnerWeight::Tokens2OverSteps => 0,
+            LearnerWeight::Equal => 1,
+        });
+        encoded.push(u8::from(self.require_profile_binding));
+        Sha256::digest(encoded).into()
+    }
+}
+
+fn encode_optional_u32(encoded: &mut Vec<u8>, value: Option<u32>) {
+    match value {
+        None => encoded.push(0),
+        Some(value) => {
+            encoded.push(1);
+            encoded.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+fn encode_optional_u64(encoded: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        None => encoded.push(0),
+        Some(value) => {
+            encoded.push(1);
+            encoded.extend_from_slice(&value.to_le_bytes());
+        }
+    }
 }
 
 struct OutFrame {
@@ -367,6 +430,7 @@ struct SessionSpec {
     layout: Layout,
     layout_fingerprint: [u8; 32],
     session_contract_hash: [u8; 32],
+    syncer_profile_hash: Option<[u8; 32]>,
 }
 
 struct ParsedHello {
@@ -376,6 +440,7 @@ struct ParsedHello {
     layout: Layout,
     layout_fingerprint: [u8; 32],
     session_contract_hash: [u8; 32],
+    syncer_profile_hash: Option<[u8; 32]>,
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
@@ -491,6 +556,9 @@ fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.quorum == 0 {
         bail!("--quorum must be positive");
     }
+    if cfg.quorum > cfg.learners {
+        bail!("--quorum must not exceed --learners");
+    }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
     }
@@ -530,6 +598,13 @@ fn validate_config(cfg: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A per-round checkpoint is the commit record for an externally visible
+/// fragment version. Persist it before BCAST regardless of the staleness
+/// profile; otherwise a process crash can expose version t and resume at t-1.
+fn checkpoint_before_broadcast(cfg: &Config) -> bool {
+    cfg.checkpoint_path.is_some() && cfg.checkpoint_every == 1
 }
 
 fn validate_policy_sweep_push(push: &Push, fragments: u32) -> Result<()> {
@@ -629,6 +704,7 @@ fn validate_resumed_policy_sweep(cfg: &Config, st: &GlobalState) -> Result<()> {
 
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
+    let semantic_profile_hash = cfg.semantic_profile_hash();
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
             bail!("--learner-budget-steps must fit a positive u32");
@@ -643,7 +719,16 @@ pub async fn run(cfg: Config) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))
         .await
         .with_context(|| format!("bind port {}", cfg.port))?;
-    info!(port = cfg.port, "syncer listening");
+    let semantic_profile_sha256: String = semantic_profile_hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    info!(
+        port = cfg.port,
+        semantic_profile_sha256,
+        require_profile_binding = cfg.require_profile_binding,
+        "syncer listening"
+    );
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
     let session: Session = Arc::new(Mutex::new(None));
@@ -652,6 +737,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_session = session.clone();
     let expected_learners = cfg.learners;
     let strict_layout = cfg.max_base_lag == Some(0);
+    let require_profile_binding = cfg.require_profile_binding;
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -666,6 +752,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                             session,
                             expected_learners,
                             strict_layout,
+                            semantic_profile_hash,
+                            require_profile_binding,
                             tx,
                         )
                         .await
@@ -734,6 +822,18 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         .take(32)?
         .try_into()
         .context("session contract hash must be 32 bytes")?;
+    let syncer_profile_hash = match r.remaining() {
+        // Legacy/non-SAO HELLO.
+        2 => None,
+        // Profile-bound HELLO. Keeping the extension before num_streams lets
+        // protocol-v4 generic clients retain their exact wire bytes.
+        34 => Some(
+            r.take(32)?
+                .try_into()
+                .context("syncer profile hash must be 32 bytes")?,
+        ),
+        remaining => bail!("invalid HELLO profile extension length {remaining}"),
+    };
     let num_streams = r.u16()?;
     if r.remaining() != 0 {
         bail!("trailing bytes in HELLO");
@@ -749,6 +849,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         layout,
         layout_fingerprint,
         session_contract_hash,
+        syncer_profile_hash,
         num_streams,
         max_init_payload,
         max_push_payload,
@@ -781,6 +882,8 @@ async fn handle_connection(
     session: Session,
     expected_learners: u32,
     strict_layout: bool,
+    semantic_profile_hash: [u8; 32],
+    require_profile_binding: bool,
     event_tx: mpsc::Sender<Event>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
@@ -821,16 +924,40 @@ async fn handle_connection(
                 layout,
                 layout_fingerprint,
                 session_contract_hash,
+                syncer_profile_hash,
                 num_streams,
                 max_init_payload,
                 max_push_payload,
             } = parsed;
+            let profile_error = match syncer_profile_hash {
+                Some(offered) if offered != semantic_profile_hash => {
+                    Some("HELLO syncer semantic profile does not match the running server")
+                }
+                None if require_profile_binding => {
+                    Some("HELLO is missing the required syncer semantic profile binding")
+                }
+                _ => None,
+            };
+            if let Some(message) = profile_error {
+                send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                if strict_layout || require_profile_binding {
+                    event_tx
+                        .send(Event::Fatal {
+                            metric: "syncer_profile_mismatch",
+                            message: message.to_string(),
+                        })
+                        .await
+                        .ok();
+                }
+                bail!(message);
+            }
             let num_fragments = layout.fragments.len();
             let offered = SessionSpec {
                 dtype,
                 layout: layout.clone(),
                 layout_fingerprint,
                 session_contract_hash,
+                syncer_profile_hash,
             };
             let mismatch = {
                 let mut guard = session.lock().unwrap();
@@ -1328,7 +1455,7 @@ async fn scheduler(
     let mut budget_reports: HashSet<u32> = HashSet::new();
     let strict_exact = cfg.max_base_lag == Some(0);
     let fixed_roster = strict_exact && cfg.quorum == cfg.learners && cfg.grace_ms == 0;
-    let checkpoint_each_round = strict_exact && cfg.checkpoint_every == 1;
+    let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
     // a resumed checkpoint) and all expected learners have connected (late
@@ -1465,7 +1592,7 @@ async fn scheduler(
     // already committed and only needs to be rebroadcast.
     if checkpoint_each_round {
         if let Some(path) = cfg.checkpoint_path.as_ref() {
-            if !path.exists() {
+            if !cfg.resume || !path.exists() {
                 st.save_checkpoint(path)?;
                 info!(step = st.global_step, path = %path.display(), "checkpoint committed");
             }
@@ -1485,8 +1612,10 @@ async fn scheduler(
     // latency overlaps learner compute (the paper's τ=2 "two fragments in
     // flight"). Depth is clamped to the fragment count, so concurrent
     // rounds always target DISTINCT fragments and every merge touches
-    // disjoint params/momentum. Rounds may complete out of order; versions
-    // are per fragment and global_step advances monotonically.
+    // disjoint params/momentum. PUSH gathering may complete out of order,
+    // but durable merge/checkpoint/BCAST commits stay in global-step order.
+    // That keeps every checkpoint a contiguous prefix that can resume from
+    // `global_step + 1` without losing a ready-but-uncommitted round.
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
     let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
@@ -1559,20 +1688,14 @@ async fn scheduler(
             }
         }
 
-        // Complete every round that is ready: all captured learners
-        // answered, or its grace deadline expired after reaching quorum.
+        // Restart any timed-out gather independently. A ready later round
+        // remains resident until every earlier global step commits; PULL and
+        // PUSH overlap stays pipelined, while durable commits stay contiguous.
         // A quorum timeout below K discards the partial attempt and re-pulls.
         let now = Instant::now();
-        let mut completed_any = false;
         let mut i = 0;
         while i < inflight.len() {
             match round_action(&inflight[i], now) {
-                RoundAction::Complete => {
-                    let round = inflight.remove(i);
-                    complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
-                    completed_any = true;
-                    continue;
-                }
                 RoundAction::Restart => {
                     let r = &mut inflight[i];
                     let groups = current_groups(&registry);
@@ -1628,20 +1751,26 @@ async fn scheduler(
                     }
                     r.quorum_deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
                 }
-                RoundAction::Wait => {}
+                RoundAction::Wait | RoundAction::Complete => {}
             }
             i += 1;
         }
-        if completed_any {
+        if let Some(index) = next_committable_round(&inflight, Instant::now()) {
+            let round = inflight.remove(index);
+            complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
             continue; // refill the pipeline before waiting again
         }
         // Wait for the next event, the earliest in-flight deadline, or the
         // launch throttle opening (whichever comes first). Without the
         // throttle term an empty pipeline would spin; without in-flight
         // deadlines a throttled launch would oversleep.
+        let deadline_now = Instant::now();
         let mut earliest = inflight
             .iter()
-            .map(|r| r.grace_deadline.unwrap_or(r.quorum_deadline))
+            .filter_map(|r| {
+                (round_action(r, deadline_now) != RoundAction::Complete)
+                    .then_some(r.grace_deadline.unwrap_or(r.quorum_deadline))
+            })
             .min();
         let next_fragment_available = inflight.len() < depth
             && next_t <= cfg.total_steps
@@ -1715,15 +1844,22 @@ async fn scheduler(
                 Event::Hello { group } => {
                     // Rejoining learner: catch it up to the current state.
                     if st.global_step < cfg.total_steps {
-                        send_all_fragments(&st, &group).await;
+                        if let Err(error) = send_all_fragments(&st, &group).await {
+                            warn!(
+                                learner_id = group.member.learner_id,
+                                generation = group.member.generation,
+                                %error,
+                                "recovery cut send failed"
+                            );
+                        }
                     }
                     if fixed_roster && is_current_member(&registry, group.member) {
                         for round in &inflight {
                             if should_replay_pull(round, group.member) {
-                                // If the terminal round completed out of order,
-                                // send only the older fragment needed by this
-                                // replay. The terminal fragment itself is held
-                                // for the single lossless FINAL cut.
+                                // Defensive recovery path: ordered commits
+                                // normally leave no in-flight round after the
+                                // terminal step. Keep the terminal fragment
+                                // reserved for the single lossless FINAL cut.
                                 if st.global_step >= cfg.total_steps {
                                     match send_fragment(
                                         &st,
@@ -1964,6 +2100,17 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
     }
 }
 
+/// Return a ready round only when it is the oldest in-flight global step.
+/// Later rounds may finish gathering first, but cannot become durable until
+/// every earlier step has committed.
+fn next_committable_round(rounds: &[Round], now: Instant) -> Option<usize> {
+    let (index, oldest) = rounds
+        .iter()
+        .enumerate()
+        .min_by_key(|(_index, round)| round.t)?;
+    (round_action(oldest, now) == RoundAction::Complete).then_some(index)
+}
+
 fn fragment_available(rounds: &[Round], fragment_id: usize) -> bool {
     !rounds.iter().any(|round| round.p == fragment_id)
 }
@@ -2051,6 +2198,13 @@ async fn complete_round(
         pushes,
         ..
     } = round;
+    let expected_step = st
+        .global_step
+        .checked_add(1)
+        .context("global step overflow before round commit")?;
+    if t != expected_step {
+        bail!("refusing non-contiguous round commit: got step {t}, expected {expected_step}");
+    }
     debug_assert_eq!(st.versions[p], base_version);
     let (mut outer_gradients, mut weights, mut responders) = (Vec::new(), Vec::new(), Vec::new());
     for (member, push) in &pushes {
@@ -2079,9 +2233,7 @@ async fn complete_round(
     let sync_start = Instant::now();
     let gnorm = st.merge_and_step(p, &outer_gradients, &weights)?;
     st.versions[p] = t;
-    // Pipelined rounds can complete out of order; the global step only
-    // moves forward.
-    st.global_step = st.global_step.max(t);
+    st.global_step = t;
     for push in pushes.values() {
         if let Some(fragments) = cfg.policy_sweep_fragments {
             st.record_fragment_merge(
@@ -2097,7 +2249,7 @@ async fn complete_round(
         }
     }
 
-    let checkpoint_each_round = cfg.max_base_lag == Some(0) && cfg.checkpoint_every == 1;
+    let checkpoint_each_round = checkpoint_before_broadcast(cfg);
     if checkpoint_each_round {
         if let Some(path) = cfg.checkpoint_path.as_ref() {
             st.save_checkpoint(path)?;
@@ -2125,8 +2277,7 @@ async fn complete_round(
         "outer step"
     );
     if let Some(tape) = &cfg.event_tape {
-        // Records land in completion order, which under pipelining is not
-        // necessarily step order.
+        // Durable completion is globally ordered even when gathering is not.
         append_tape(
             tape,
             t,
@@ -2181,9 +2332,7 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
         group.layout_fingerprint,
     )?;
     st.policy_sweep_fragments = cfg.policy_sweep_fragments;
-    if cfg.policy_sweep_fragments.is_some() {
-        st.session_contract_hash = Some(group.session_contract_hash);
-    }
+    st.session_contract_hash = Some(group.session_contract_hash);
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
@@ -2205,7 +2354,14 @@ fn is_current_member(registry: &Registry, member: Member) -> bool {
 
 async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
     for g in current_groups(registry) {
-        send_all_fragments(st, &g).await;
+        if let Err(error) = send_all_fragments(st, &g).await {
+            warn!(
+                learner_id = g.member.learner_id,
+                generation = g.member.generation,
+                %error,
+                "initial authoritative cut send failed"
+            );
+        }
     }
 }
 
@@ -2426,13 +2582,11 @@ async fn finalize_learners(
     Ok(())
 }
 
-async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) {
+async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
     for p in 0..st.layout.fragments.len() {
-        match send_fragment(st, group, p, MSG_BCAST_FRAGMENT, bulk_dtype(st.wire_dtype)).await {
-            Ok(()) => {}
-            Err(e) => warn!("send fragment {p} failed: {e}"),
-        }
+        send_fragment(st, group, p, MSG_BCAST_FRAGMENT, bulk_dtype(st.wire_dtype)).await?;
     }
+    Ok(())
 }
 
 async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: usize) -> Result<()> {
@@ -2756,13 +2910,22 @@ mod tests {
     }
 
     fn test_group_with_layout(member: Member, layout: Layout) -> Arc<Group> {
+        test_group_with_session(member, layout, [0; 32], [0; 32])
+    }
+
+    fn test_group_with_session(
+        member: Member,
+        layout: Layout,
+        layout_fingerprint: [u8; 32],
+        session_contract_hash: [u8; 32],
+    ) -> Arc<Group> {
         let (control, _receiver) = mpsc::channel(1);
         Arc::new(Group {
             member,
             dtype: DTYPE_F32,
             layout,
-            layout_fingerprint: [0; 32],
-            session_contract_hash: [0; 32],
+            layout_fingerprint,
+            session_contract_hash,
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
@@ -2931,7 +3094,46 @@ mod tests {
             event_tape: None,
             max_base_lag: Some(0),
             learner_weight: LearnerWeight::Equal,
+            require_profile_binding: false,
         }
+    }
+
+    #[test]
+    fn semantic_profile_hash_matches_the_python_canonical_vector() {
+        let mut config = round_test_config(8);
+        config.learners = 2;
+        config.quorum = 2;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        config.pipeline = 2;
+        config.sync_interval_steps = 24.0;
+        config.quorum_timeout_s = 900;
+        config.final_ack_timeout_s = 900;
+        config.outer_lr = 0.7;
+        config.outer_momentum = 0.9;
+        config.checkpoint_path = Some(std::path::PathBuf::from("/ignored/actor.ckpt"));
+        config.checkpoint_every = 1;
+        config.resume = true;
+        config.mark_final_checkpoint = true;
+        config.require_profile_binding = true;
+        let digest = config
+            .semantic_profile_hash()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest,
+            "b904a25c417a24deef77b8526c4e982a13a35c65d331a4cafb74e579b584d4b7"
+        );
+
+        let original = config.semantic_profile_hash();
+        config.port = 30123;
+        config.checkpoint_path = Some(std::path::PathBuf::from("/another/critic.ckpt"));
+        config.final_state = Some(std::path::PathBuf::from("/ignored/final.bin"));
+        config.event_tape = Some(std::path::PathBuf::from("/ignored/events.jsonl"));
+        assert_eq!(config.semantic_profile_hash(), original);
+        config.pipeline = 3;
+        assert_ne!(config.semantic_profile_hash(), original);
     }
 
     fn sweep_test_config(fragments: u32, total_steps: u64) -> Config {
@@ -3025,6 +3227,54 @@ mod tests {
             .err()
             .unwrap();
         assert!(format!("{error:#}").contains("decoded layout has 2 fragments"));
+    }
+
+    #[test]
+    fn generic_streaming_restart_requires_the_exact_session_contract() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-generic-stream-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: crate::state::MERGE_AVG,
+                tensor_numels: vec![2],
+                tensor_shapes: None,
+            }],
+        };
+        let config = round_test_config(3);
+
+        let first_group = test_group_with_session(member(0, 1), layout.clone(), [3; 32], [4; 32]);
+        let mut before_restart = new_state_for(&first_group, &config).unwrap();
+        assert_eq!(before_restart.policy_sweep_fragments, None);
+        assert_eq!(before_restart.session_contract_hash, Some([4; 32]));
+        before_restart.init_fragment(0, vec![1.0, -2.0]).unwrap();
+        before_restart.global_step = 2;
+        before_restart.versions[0] = 2;
+        before_restart.record_merge(0, 5, 1234);
+        before_restart.save_checkpoint(&checkpoint).unwrap();
+
+        let matching_group =
+            test_group_with_session(member(0, 2), layout.clone(), [3; 32], [4; 32]);
+        let mut recovered = new_state_for(&matching_group, &config).unwrap();
+        recovered.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(recovered.global_step, 2);
+        assert_eq!(recovered.versions, vec![2]);
+        assert_eq!(recovered.params, before_restart.params);
+        assert_eq!(recovered.ledger.get(&0).unwrap().tokens, 1234);
+
+        let mismatched_group = test_group_with_session(member(0, 2), layout, [3; 32], [5; 32]);
+        let mut mismatched = new_state_for(&mismatched_group, &config).unwrap();
+        let error = mismatched.load_checkpoint(&checkpoint).unwrap_err();
+        assert!(format!("{error:#}").contains("session contract hash does not match"));
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
@@ -3265,6 +3515,39 @@ mod tests {
         }
     }
 
+    fn two_fragment_streaming_state() -> GlobalState {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state = GlobalState::new(layout, 1.0, 0.0, DTYPE_F32).unwrap();
+        state.init_fragment(0, vec![0.0]).unwrap();
+        state.init_fragment(1, vec![0.0]).unwrap();
+        state
+    }
+
+    #[test]
+    fn pipelined_scheduler_commits_only_the_oldest_ready_round() {
+        let learner = member(0, 30);
+        let mut oldest = sweep_test_round(1, 0, 1, 1, learner);
+        oldest.pushes.clear();
+        oldest.quorum_deadline = Instant::now() + CAP;
+        let later = sweep_test_round(2, 1, 2, 1, learner);
+        let mut rounds = vec![later, oldest];
+
+        assert_eq!(next_committable_round(&rounds, Instant::now()), None);
+
+        rounds[1] = sweep_test_round(1, 0, 1, 1, learner);
+        assert_eq!(next_committable_round(&rounds, Instant::now()), Some(1));
+        rounds.remove(1);
+        assert_eq!(next_committable_round(&rounds, Instant::now()), Some(0));
+    }
+
     fn chunked_inner_type(frame: &OutFrame) -> u8 {
         assert_eq!(frame.msg_type, MSG_CHUNK);
         assert_eq!(frame.parts.len(), 2);
@@ -3323,6 +3606,143 @@ mod tests {
             terminal_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn generic_checkpoint_failure_happens_before_nonterminal_broadcast() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-generic-pre-broadcast-checkpoint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+        let checkpoint_tmp = checkpoint.with_extension("tmp");
+
+        let initial = broadcast_test_state(DTYPE_F32);
+        initial.save_checkpoint(&checkpoint).unwrap();
+        // Atomic checkpoint writes create this exact temporary path. Turning
+        // it into a directory makes the next save fail deterministically.
+        std::fs::create_dir(&checkpoint_tmp).unwrap();
+
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut config = round_test_config(2);
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.checkpoint_every = 1;
+        // This is the generic streaming profile that previously saved only
+        // after exposing the merged version.
+        config.max_base_lag = Some(2);
+        let mut state = broadcast_test_state(DTYPE_F32);
+        let mut sync_seconds = 0.0;
+
+        complete_round(
+            &config,
+            &mut state,
+            &registry,
+            &mut sync_seconds,
+            terminal_test_round(1, learner),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            frames.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let mut recovered = broadcast_test_state(DTYPE_F32);
+        recovered.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(recovered.global_step, 0);
+        assert_eq!(recovered.versions, vec![0]);
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn pipelined_checkpoint_refuses_holes_and_resumes_contiguously() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-pipelined-contiguous-checkpoint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut config = round_test_config(2);
+        config.pipeline = 2;
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.checkpoint_every = 1;
+        config.resume = true;
+        let mut sync_seconds = 0.0;
+
+        let mut before_crash = two_fragment_streaming_state();
+        before_crash.save_checkpoint(&checkpoint).unwrap();
+        let error = complete_round(
+            &config,
+            &mut before_crash,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(2, 1, 2, 1, learner),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("refusing non-contiguous round commit"));
+        assert_eq!(before_crash.global_step, 0);
+        assert_eq!(before_crash.versions, vec![0, 0]);
+        assert!(matches!(
+            frames.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let mut resumed = two_fragment_streaming_state();
+        resumed.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(resumed.global_step, 0);
+        assert_eq!(resumed.versions, vec![0, 0]);
+
+        complete_round(
+            &config,
+            &mut resumed,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(1, 0, 1, 1, learner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            chunked_inner_type(&frames.try_recv().unwrap()),
+            MSG_BCAST_FRAGMENT
+        );
+        let mut after_first_commit = two_fragment_streaming_state();
+        after_first_commit.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(after_first_commit.global_step, 1);
+        assert_eq!(after_first_commit.versions, vec![1, 0]);
+
+        complete_round(
+            &config,
+            &mut resumed,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(2, 1, 2, 1, learner),
+        )
+        .await
+        .unwrap();
+        let mut final_reload = two_fragment_streaming_state();
+        final_reload.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(final_reload.global_step, 2);
+        assert_eq!(final_reload.versions, vec![1, 2]);
+        assert_eq!(final_reload.ledger.get(&0).unwrap().merges, 2);
+        assert_eq!(final_reload.params, resumed.params);
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[tokio::test]

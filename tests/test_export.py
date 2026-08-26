@@ -12,6 +12,7 @@ from yeto import export as export_module
 from yeto.export import (
     CKPT_MAGIC,
     POLICY_SWEEP_CKPT_MAGIC,
+    STREAMING_CONTRACT_CKPT_MAGIC,
     parse_checkpoint,
     validate_against_layout,
 )
@@ -109,6 +110,36 @@ def test_layout_hash_and_policy_sweep_trailers_are_backward_compatible(tmp_path)
     assert sweep.layout_hash == layout_hash.hex()
     assert sweep.policy_sweep_fragments == layout.num_fragments
     assert sweep.session_contract_hash == bytes(reversed(range(32))).hex()
+
+
+def test_generic_streaming_contract_trailer_is_parsed(tmp_path):
+    path, _, _ = make_checkpoint(tmp_path, fake_params())
+    layout_hash = bytes(range(32))
+    contract_hash = bytes(reversed(range(32)))
+    path.write_bytes(
+        path.read_bytes()
+        + layout_hash
+        + struct.pack("<I", STREAMING_CONTRACT_CKPT_MAGIC)
+        + contract_hash
+    )
+
+    checkpoint = parse_checkpoint(path)
+
+    assert checkpoint.layout_hash == layout_hash.hex()
+    assert checkpoint.policy_sweep_fragments is None
+    assert checkpoint.session_contract_hash == contract_hash.hex()
+
+
+def test_bad_generic_streaming_contract_marker_is_rejected(tmp_path):
+    path, _, _ = make_checkpoint(tmp_path, fake_params())
+    path.write_bytes(
+        path.read_bytes()
+        + bytes(32)
+        + struct.pack("<I", 0xDEADBEEF)
+        + bytes(32)
+    )
+    with pytest.raises(ValueError, match="bad streaming checkpoint marker"):
+        parse_checkpoint(path)
 
 
 @pytest.mark.parametrize(

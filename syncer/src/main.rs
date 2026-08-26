@@ -97,6 +97,11 @@ struct Args {
     /// Learner contribution weighting used by AVG/RDA merges.
     #[arg(long, default_value = "tokens2-over-steps")]
     learner_weight: String,
+    /// Require every HELLO to carry the canonical hash of this server's
+    /// semantic launch profile. Generic clients remain compatible unless
+    /// this is explicitly enabled.
+    #[arg(long, default_value_t = false)]
+    require_profile_binding: bool,
 }
 
 impl Args {
@@ -154,6 +159,7 @@ fn main() -> anyhow::Result<()> {
         event_tape: args.event_tape,
         max_base_lag: args.max_base_lag,
         learner_weight,
+        require_profile_binding: args.require_profile_binding,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -270,7 +270,10 @@ def _validate_rollout_groups(data: object, groups: int, samples: int) -> None:
 
 
 def _policy_token_for_rollout(args, rollout_id: int) -> str:
-    if getattr(args, "yeto_rl_sync_preset", "strict-avg") != "decoupled":
+    if getattr(args, "yeto_rl_sync_preset", "strict-avg") not in {
+        "decoupled",
+        "sao-streaming-full",
+    }:
         return _policy_token(rollout_id)
     token = getattr(args, "yeto_rl_policy_token", None)
     if token is None:

@@ -157,6 +157,7 @@ def encode_hello(
     num_streams: int,
     connection_generation: int = 0,
     session_contract_hash: bytes | None = None,
+    syncer_profile_hash: bytes | None = None,
 ) -> bytes:
     if session_contract_hash is None:
         # Generic/legacy callers still bind the session to the semantic tensor
@@ -164,6 +165,11 @@ def encode_hello(
         session_contract_hash = layout_fingerprint(layout)
     if not isinstance(session_contract_hash, bytes) or len(session_contract_hash) != 32:
         raise ValueError("session contract hash must be exactly 32 bytes")
+    if syncer_profile_hash is not None and (
+        not isinstance(syncer_profile_hash, bytes)
+        or len(syncer_profile_hash) != 32
+    ):
+        raise ValueError("syncer profile hash must be exactly 32 bytes")
     parts = [
         _HELLO_HEAD.pack(
             PROTOCOL_VERSION,
@@ -183,6 +189,8 @@ def encode_hello(
             parts.append(struct.pack(f"<{len(dims)}Q", *dims))
     parts.append(layout_fingerprint(layout))
     parts.append(session_contract_hash)
+    if syncer_profile_hash is not None:
+        parts.append(syncer_profile_hash)
     parts.append(struct.pack("<H", num_streams))
     return b"".join(parts)
 
@@ -229,6 +237,34 @@ def _contiguous_bytes_view(
 
 class ProtocolError(RuntimeError):
     """The peer rejected this client as wire- or session-incompatible."""
+
+
+class PartialMessageGenerationLost(RuntimeError):
+    """A chunked outbound message was split by connection-generation loss.
+
+    This is a transient operation failure, not a payload-validation failure.
+    The partially queued logical message cannot be completed or reused on its
+    original connection generation.  A request/response caller must abandon
+    that attempt and answer only a request replayed after reconnect.
+    """
+
+    def __init__(
+        self,
+        *,
+        connection_generation: int,
+        connection_epoch: int,
+        queued_chunks: int,
+        operation: str,
+    ) -> None:
+        super().__init__(
+            f"connection generation {connection_generation} "
+            f"(client epoch {connection_epoch}) dropped after "
+            f"{queued_chunks} {operation} chunks were queued"
+        )
+        self.connection_generation = connection_generation
+        self.connection_epoch = connection_epoch
+        self.queued_chunks = queued_chunks
+        self.operation = operation
 
 
 def encode_final_manifest(global_step: int, versions: tuple[int, ...] | list[int]) -> bytes:
@@ -363,6 +399,7 @@ class SyncerClient:
         max_reconnects: int | None = None,
         finalization_timeout: float = FINALIZATION_TIMEOUT,
         session_contract_hash: bytes | None = None,
+        syncer_profile_hash: bytes | None = None,
     ):
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
@@ -376,12 +413,18 @@ class SyncerClient:
             session_contract_hash = layout_fingerprint(layout)
         if not isinstance(session_contract_hash, bytes) or len(session_contract_hash) != 32:
             raise ValueError("session contract hash must be exactly 32 bytes")
+        if syncer_profile_hash is not None and (
+            not isinstance(syncer_profile_hash, bytes)
+            or len(syncer_profile_hash) != 32
+        ):
+            raise ValueError("syncer profile hash must be exactly 32 bytes")
         self.addr = addr
         self.learner_id = learner_id
         self.layout = layout
         self.dtype = dtype
         self.num_streams = num_streams
         self.session_contract_hash = session_contract_hash
+        self.syncer_profile_hash = syncer_profile_hash
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
@@ -486,6 +529,7 @@ class SyncerClient:
                     self.num_streams,
                     connection_generation,
                     self.session_contract_hash,
+                    self.syncer_profile_hash,
                 ),
             )
             socks.append(control)
@@ -1005,6 +1049,7 @@ class SyncerClient:
             ):
                 return False  # outage: explicitly report a whole-message drop
             gen = self._gen
+            connection_generation = self.connection_generation
 
         part_iter = iter(parts)
         part_index = 0
@@ -1106,9 +1151,11 @@ class SyncerClient:
                 )
                 if not self._enqueue(stream, envelope, gen=gen):
                     if enqueued_chunks:
-                        raise RuntimeError(
-                            f"connection generation {gen} dropped after "
-                            f"{enqueued_chunks} {label} chunks were queued"
+                        raise PartialMessageGenerationLost(
+                            connection_generation=connection_generation,
+                            connection_epoch=gen,
+                            queued_chunks=enqueued_chunks,
+                            operation=label,
                         )
                     return False
                 enqueued_chunks += 1

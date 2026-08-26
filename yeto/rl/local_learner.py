@@ -22,7 +22,7 @@ _ROLES_BY_ALGORITHM = {
 }
 _PARAMETER_NAME = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,511}\Z")
 _SHARD_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
-_GIT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
+_GIT_REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -92,6 +92,7 @@ class ParameterLayout:
         repr=False,
         compare=False,
     )
+    stream_role: str | None = None
 
     @classmethod
     def create(
@@ -102,14 +103,23 @@ class ParameterLayout:
         specs: Sequence[ParameterSpec],
         num_fragments: int,
         fragment_strategy: str = "balanced",
+        stream_role: str | None = None,
     ) -> ParameterLayout:
         if algorithm not in _ROLES_BY_ALGORITHM:
             raise ValueError(f"unsupported local RL algorithm: {algorithm!r}")
+        if stream_role is not None and (
+            algorithm != "sao" or stream_role not in _ROLES_BY_ALGORITHM[algorithm]
+        ):
+            raise ValueError("role-scoped parameter streams require an SAO role")
         ordered_components = tuple(sorted(components))
         ordered_specs = tuple(sorted(specs))
         component_roles = {component.role for component in ordered_components}
         spec_roles = {spec.role for spec in ordered_specs}
-        expected_roles = _ROLES_BY_ALGORITHM[algorithm]
+        expected_roles = (
+            _ROLES_BY_ALGORITHM[algorithm]
+            if stream_role is None
+            else frozenset({stream_role})
+        )
         if (
             component_roles != expected_roles
             or spec_roles != expected_roles
@@ -155,17 +165,36 @@ class ParameterLayout:
         }
         if fragment_strategy != "balanced":
             payload["fragment_strategy"] = fragment_strategy
-        layout_hash = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        if stream_role is not None:
+            # A role lane must never collide with either the combined SAO layout
+            # or a structurally identical actor-only GRPO layout.
+            payload["schema"] = 3
+            payload["stream_role"] = stream_role
+            serialized = (
+                b"yeto-sao-role-parameter-stream-v1\0"
+                + json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
+        else:
+            # Preserve the established GRPO and combined-SAO layout identities.
+            serialized = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        layout_hash = hashlib.sha256(serialized).hexdigest()
         return cls(
-            algorithm,
-            ordered_components,
-            ordered_specs,
-            fragments,
-            layout_hash,
-            fragment_strategy,
-            {spec.wire_name: spec for spec in ordered_specs},
+            algorithm=algorithm,
+            components=ordered_components,
+            specs=ordered_specs,
+            fragments=fragments,
+            layout_hash=layout_hash,
+            fragment_strategy=fragment_strategy,
+            stream_role=stream_role,
+            _specs_by_wire_name={spec.wire_name: spec for spec in ordered_specs},
         )
 
     def fragment_specs(self, fragment_id: int) -> tuple[ParameterSpec, ...]:

@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ from miles.backends.megatron_utils.full_parameter_state import (
 )
 from miles.ray.full_parameter_transport import FullParameterChunkedCut
 from yeto.rl.local_learner import ComponentIdentity
+from yeto.rl.contracts import TrajectoryEnvelope
 from yeto.protocol import (
     _CHUNK_HEAD,
     _HEADER,
@@ -47,6 +49,7 @@ from yeto.rl.dense_sweep_wire import DenseSweepConfig, DenseSweepWire
 from yeto.rl.miles_chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
 )
+from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 
 class FakeRay:
@@ -80,12 +83,17 @@ def topology(rank: int) -> FullParameterTopology:
     )
 
 
-def manifest(rank: int, sizes: tuple[int, ...]) -> FullParameterShardManifest:
+def manifest(
+    rank: int,
+    sizes: tuple[int, ...],
+    *,
+    role: str = "actor",
+) -> FullParameterShardManifest:
     owner = topology(rank)
     specs = tuple(
         sorted(
             FullParameterShardSpec(
-                role="actor",
+                role=role,
                 shard_id=owner.shard_id,
                 name=f"p{index}",
                 shape=(size,),
@@ -97,14 +105,14 @@ def manifest(rank: int, sizes: tuple[int, ...]) -> FullParameterShardManifest:
     )
     return FullParameterShardManifest(
         owner,
-        "actor",
+        role,
         _layout_hash(owner, specs),
         specs,
     )
 
 
-def component() -> ComponentIdentity:
-    return ComponentIdentity("actor", "a" * 40, "b" * 64)
+def component(role: str = "actor") -> ComponentIdentity:
+    return ComponentIdentity(role, "a" * 40, "b" * 64)
 
 
 def test_production_layout_is_owner_affine_and_enforces_fragment_bound():
@@ -132,6 +140,36 @@ def test_production_layout_is_owner_affine_and_enforces_fragment_bound():
     assert all(
         fragment.numel * 4 <= 400 for fragment in adapter.layout.fragments.fragments
     )
+
+
+def test_sao_adapter_creates_independent_actor_and_critic_role_streams():
+    actor = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (8,)), manifest(1, (8,))),
+        algorithm="sao",
+        components=(component("actor"),),
+        minimum_fragments=2,
+        max_fragment_bytes=64,
+        max_chunk_bytes=32,
+        stream_role="actor",
+    )
+    critic = MilesChunkedFullParameterAdapter.create(
+        (
+            manifest(0, (8,), role="critic"),
+            manifest(1, (8,), role="critic"),
+        ),
+        algorithm="sao",
+        components=(component("critic"),),
+        minimum_fragments=2,
+        max_fragment_bytes=64,
+        max_chunk_bytes=32,
+        stream_role="critic",
+    )
+
+    assert actor.layout.stream_role == "actor"
+    assert critic.layout.stream_role == "critic"
+    assert {spec.role for spec in actor.layout.specs} == {"actor"}
+    assert {spec.role for spec in critic.layout.specs} == {"critic"}
+    assert actor.layout.layout_hash != critic.layout.layout_hash
 
 
 def test_initialize_rejects_probe_layout_drift_before_install_or_export():
@@ -232,6 +270,276 @@ def _cut(adapter, values, *, policy_version, generation, ray):
     )
 
 
+def _evidence(*, rollout_id: int, behavior_policy_hash: str):
+    trajectory = TrajectoryEnvelope(
+        trajectory_id=f"trajectory-{rollout_id}",
+        task_id="CVE-2026-0001",
+        prompt_group_id=f"r{rollout_id}:g0",
+        sample_index=0,
+        behavior_policy_version=rollout_id,
+        behavior_policy_hash=behavior_policy_hash,
+        token_ids=(1, 2, 3),
+        response_token_count=2,
+        behavior_logprobs_hash="c" * 64,
+        reward=1.0,
+        reward_contract_hash="d" * 64,
+        cleanup_evidence_hash="e" * 64,
+    )
+    return TrajectoryBatchEvidence(
+        rollout_id,
+        behavior_policy_hash,
+        "f" * 64,
+        2,
+        (trajectory,),
+    )
+
+
+class _ReceiptGroup:
+    def __init__(
+        self,
+        adapter,
+        *,
+        role: str,
+        local_step_generation: int,
+        optimizer_steps: int,
+    ) -> None:
+        self.adapter = adapter
+        self.role = role
+        self.local_step_generation = local_step_generation
+        self.optimizer_steps = optimizer_steps
+        self.calls = []
+
+    async def record_full_parameter_local_step(
+        self,
+        *,
+        base_policy_version,
+        rollout_id,
+    ):
+        self.calls.append((base_policy_version, rollout_id))
+        return tuple(
+            SimpleNamespace(
+                topology=manifest.topology,
+                role=self.role,
+                base_policy_version=base_policy_version,
+                local_step_generation=self.local_step_generation,
+                rollout_id=rollout_id,
+                optimizer_steps=self.optimizer_steps,
+                scheduler_start_steps=10,
+                scheduler_end_steps=20,
+            )
+            for manifest in self.adapter.manifests
+        )
+
+
+@pytest.mark.asyncio
+async def test_sao_local_round_receipts_are_role_generic_and_content_bound():
+    ray = FakeRay()
+    actor_adapter = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (3,)), manifest(1, (2,))),
+        algorithm="sao",
+        components=(component("actor"),),
+        minimum_fragments=2,
+        max_fragment_bytes=64,
+        max_chunk_bytes=16,
+        stream_role="actor",
+    )
+    actor_anchor = actor_adapter.validate_cut(
+        _cut(
+            actor_adapter,
+            {0: 0, 1: 0},
+            policy_version=4,
+            generation=0,
+            ray=ray,
+        ),
+        4,
+        0,
+    )
+    relabeled = actor_adapter.validate_cut(
+        _cut(
+            actor_adapter,
+            {0: 0, 1: 0},
+            policy_version=9,
+            generation=3,
+            ray=ray,
+        ),
+        9,
+        3,
+    )
+    assert actor_anchor.policy_hash != relabeled.policy_hash
+    assert actor_anchor.content_hash == relabeled.content_hash
+    actor_group = _ReceiptGroup(
+        actor_adapter,
+        role="actor",
+        local_step_generation=4,
+        optimizer_steps=3,
+    )
+    actor_receipt = await actor_adapter.record_local_round(
+        actor_group,
+        anchor=relabeled,
+        rollout_id=17,
+        learner_id=2,
+        learner_generation=5,
+        trajectories=_evidence(
+            rollout_id=17,
+            behavior_policy_hash=relabeled.content_hash,
+        ),
+        role="actor",
+        expected_local_step_generation=4,
+        expected_optimizer_steps=3,
+    )
+    assert actor_group.calls == [(9, 17)]
+    assert actor_receipt.algorithm == "sao"
+    assert actor_receipt.base_policy_hash == actor_anchor.content_hash
+    assert actor_receipt.optimizer_steps == 3
+
+    critic_adapter = MilesChunkedFullParameterAdapter.create(
+        (
+            manifest(0, (3,), role="critic"),
+            manifest(1, (2,), role="critic"),
+        ),
+        algorithm="sao",
+        components=(component("critic"),),
+        minimum_fragments=2,
+        max_fragment_bytes=64,
+        max_chunk_bytes=16,
+        stream_role="critic",
+    )
+    critic_anchor = critic_adapter.validate_cut(
+        _cut(
+            critic_adapter,
+            {0: 2, 1: 2},
+            policy_version=4,
+            generation=6,
+            ray=ray,
+        ),
+        4,
+        6,
+    )
+    critic_group = _ReceiptGroup(
+        critic_adapter,
+        role="critic",
+        local_step_generation=7,
+        optimizer_steps=2,
+    )
+    critic_receipt = await critic_adapter.record_local_round(
+        critic_group,
+        anchor=critic_anchor,
+        rollout_id=17,
+        learner_id=2,
+        learner_generation=5,
+        # A critic consumes the actor's batch; its behavior identity is not the
+        # critic parameter identity.
+        trajectories=_evidence(
+            rollout_id=17,
+            behavior_policy_hash=actor_anchor.content_hash,
+        ),
+        role="critic",
+        expected_local_step_generation=7,
+        expected_optimizer_steps=2,
+    )
+    assert critic_receipt.base_policy_hash == critic_anchor.content_hash
+    assert critic_receipt.input_batch_hash == actor_receipt.input_batch_hash
+    assert critic_receipt.trajectory_ids == actor_receipt.trajectory_ids
+
+
+@pytest.mark.asyncio
+async def test_sao_actor_local_round_rejects_wrong_behavior_or_rank_progress():
+    ray = FakeRay()
+    adapter = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (3,)), manifest(1, (2,))),
+        algorithm="sao",
+        components=(component("actor"),),
+        minimum_fragments=2,
+        max_fragment_bytes=64,
+        max_chunk_bytes=16,
+        stream_role="actor",
+    )
+    anchor = adapter.validate_cut(
+        _cut(adapter, {0: 0, 1: 0}, policy_version=2, generation=1, ray=ray),
+        2,
+        1,
+    )
+    group = _ReceiptGroup(
+        adapter,
+        role="actor",
+        local_step_generation=2,
+        optimizer_steps=1,
+    )
+    with pytest.raises(ValueError, match="does not bind"):
+        await adapter.record_local_round(
+            group,
+            anchor=anchor,
+            rollout_id=8,
+            learner_id=0,
+            learner_generation=0,
+            trajectories=_evidence(
+                rollout_id=8,
+                behavior_policy_hash="0" * 64,
+            ),
+            role="actor",
+            expected_local_step_generation=2,
+            expected_optimizer_steps=1,
+        )
+    assert group.calls == []
+
+    group.local_step_generation = 3
+    with pytest.raises(RuntimeError, match="receipt changed"):
+        await adapter.record_local_round(
+            group,
+            anchor=anchor,
+            rollout_id=8,
+            learner_id=0,
+            learner_generation=0,
+            trajectories=_evidence(
+                rollout_id=8,
+                behavior_policy_hash=anchor.content_hash,
+            ),
+            role="actor",
+            expected_local_step_generation=2,
+            expected_optimizer_steps=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_grpo_h1_wrapper_preserves_versioned_policy_binding():
+    ray = FakeRay()
+    adapter = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (3,)), manifest(1, (2,))),
+        algorithm="grpo",
+        components=(component(),),
+        minimum_fragments=2,
+        max_fragment_bytes=64,
+        max_chunk_bytes=16,
+    )
+    anchor = adapter.validate_cut(
+        _cut(adapter, {0: 0, 1: 0}, policy_version=4, generation=0, ray=ray),
+        4,
+        0,
+    )
+    group = _ReceiptGroup(
+        adapter,
+        role="actor",
+        local_step_generation=1,
+        optimizer_steps=1,
+    )
+
+    receipt = await adapter.record_grpo_local_step(
+        group,
+        anchor=anchor,
+        rollout_id=4,
+        learner_id=0,
+        learner_generation=0,
+        trajectories=_evidence(
+            rollout_id=4,
+            behavior_policy_hash=anchor.policy_hash,
+        ),
+    )
+
+    assert receipt.algorithm == "grpo"
+    assert receipt.base_policy_hash == anchor.policy_hash
+    assert receipt.optimizer_steps == 1
+
+
 def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
     ray = FakeRay()
     adapter = MilesChunkedFullParameterAdapter.create(
@@ -247,7 +555,21 @@ def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
         0,
         0,
     )
+    anchor_refs = {
+        reference
+        for shard in anchor.transport_cut.shards
+        for references in shard.chunk_refs
+        for reference in references
+    }
     sink = adapter.fragment_sink(anchor, ray_module=ray)
+    sink_refs = {
+        reference
+        for shard in sink.reference.transport_cut.shards
+        for references in shard.chunk_refs
+        for reference in references
+    }
+    assert sink_refs.isdisjoint(anchor_refs)
+    assert adapter.release(anchor) == len(anchor_refs)
     client = SyncerClient(
         ("unused", 0),
         0,
@@ -541,3 +863,93 @@ async def test_reference_delta_sink_assemble_apply_and_release():
     assert await adapter.apply(group, target) == 2
     assert sink.release_all() == 2
     assert sink.release_all() == 0
+
+
+def test_arbitrary_horizon_delta_and_mixed_target_stay_reference_backed():
+    ray = FakeRay()
+    adapter = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (3,)), manifest(1, (2,))),
+        algorithm="sao",
+        components=(component("actor"),),
+        minimum_fragments=2,
+        max_fragment_bytes=64,
+        max_chunk_bytes=16,
+        stream_role="actor",
+    )
+    anchor = adapter.validate_cut(
+        _cut(adapter, {0: 0, 1: 0}, policy_version=4, generation=0, ray=ray),
+        4,
+        0,
+    )
+    local = adapter.validate_cut(
+        _cut(adapter, {0: 5, 1: 5}, policy_version=4, generation=3, ray=ray),
+        4,
+        3,
+    )
+    sink = adapter.fragment_sink(anchor, ray_module=ray)
+    authoritative = sink(
+        0,
+        11,
+        _tensor_bytes(
+            torch.full(
+                (adapter.layout.fragments.fragments[0].numel,),
+                2.0,
+                dtype=torch.float32,
+            )
+        ),
+    )
+
+    payload = b"".join(
+        bytes(part)
+        for part in adapter.delta_parts_from_authoritative(
+            authoritative,
+            local,
+            0,
+            ray_module=ray,
+        )()
+    )
+    assert torch.equal(
+        torch.frombuffer(bytearray(payload), dtype=torch.float32),
+        torch.full(
+            (adapter.layout.fragments.fragments[0].numel,),
+            3.0,
+            dtype=torch.float32,
+        ),
+    )
+
+    target = adapter.assemble_mixed_target(
+        local,
+        target_policy_version=5,
+        authoritative_fragments=(authoritative,),
+    )
+    observed = []
+    for fragment_id in range(adapter.layout.fragments.num_fragments):
+        fragment = b"".join(
+            bytes(part)
+            for part in adapter.fragment_parts(
+                target,
+                fragment_id,
+                ray_module=ray,
+            )()
+        )
+        observed.append(torch.frombuffer(bytearray(fragment), dtype=torch.float32))
+    assert torch.equal(observed[0], torch.full_like(observed[0], 2.0))
+    assert torch.equal(observed[1], torch.full_like(observed[1], 5.0))
+    assert target.policy_version == 5
+    assert target.local_step_generation == 0
+
+    with pytest.raises(ValueError, match="provenance changed"):
+        adapter.assemble_mixed_target(
+            local,
+            target_policy_version=5,
+            authoritative_fragments=(
+                replace(authoritative, parameter_layout_hash="0" * 64),
+            ),
+        )
+    with pytest.raises(ValueError, match="provenance changed"):
+        adapter.delta_parts_from_authoritative(
+            replace(authoritative, fragment_id=1),
+            local,
+            0,
+            ray_module=ray,
+        )

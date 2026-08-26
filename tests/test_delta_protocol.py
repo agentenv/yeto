@@ -11,13 +11,15 @@ import torch
 
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
 from yeto.protocol import (
+    _CHUNK_HEAD,
+    _HEADER,
     DTYPE_BF16,
     DTYPE_F32,
     DTYPE_Q4,
     FINALIZATION_REVISION,
     MAGIC,
-    MSG_ERROR,
     MSG_CHUNK,
+    MSG_ERROR,
     MSG_FINAL_ACK,
     MSG_FINAL_FRAGMENT,
     MSG_FINAL_MANIFEST,
@@ -26,8 +28,6 @@ from yeto.protocol import (
     MSG_PULL_REQ,
     MSG_PUSH_FRAGMENT,
     PROTOCOL_VERSION,
-    _CHUNK_HEAD,
-    _HEADER,
     bulk_dtype,
     decode_final_manifest,
     encode_hello,
@@ -36,7 +36,6 @@ from yeto.protocol import (
     write_frame,
 )
 from yeto.tensor_io import pack_tensor, quantize_q4
-
 
 ROOT = Path(__file__).resolve().parent.parent
 PUSH_HEAD = struct.Struct("<IIQIQQIQ")
@@ -195,6 +194,7 @@ def launch_syncer(
     quorum: int = 1,
     total_steps: int = 1,
     quorum_timeout_s: int = 2,
+    extra_args: tuple[str, ...] = (),
 ) -> tuple[subprocess.Popen, Path]:
     port = free_port()
     final_state = tmp_path / f"state-{port}.bin"
@@ -225,6 +225,7 @@ def launch_syncer(
             "0",
             "--final-state",
             str(final_state),
+            *extra_args,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -271,12 +272,61 @@ def test_versioned_hello_golden_bytes_and_reserved_ids():
         + struct.pack("<H", 3)
     )
     assert encoded == expected
+    profile_hash = bytes(range(32))
+    assert encode_hello(
+        7,
+        DTYPE_F32,
+        layout,
+        3,
+        generation,
+        syncer_profile_hash=profile_hash,
+    ) == expected[:-2] + profile_hash + expected[-2:]
     assert (
         MSG_ERROR,
         MSG_FINAL_MANIFEST,
         MSG_FINAL_ACK,
         MSG_FINAL_FRAGMENT,
     ) == (10, 11, 12, 13)
+
+
+@pytest.mark.parametrize(
+    ("profile_hash", "message"),
+    (
+        (b"\0" * 32, "semantic profile does not match"),
+        (None, "missing the required syncer semantic profile binding"),
+    ),
+)
+@pytest.mark.timeout(20)
+def test_server_rejects_missing_or_mismatched_required_semantic_profile(
+    syncer_binary,
+    tmp_path,
+    profile_hash,
+    message,
+):
+    proc, _ = launch_syncer(
+        syncer_binary,
+        tmp_path,
+        extra_args=("--require-profile-binding",),
+    )
+    sock = connect(proc.port)
+    sock.settimeout(10)
+    try:
+        write_frame(
+            sock,
+            MSG_HELLO,
+            encode_hello(
+                0,
+                DTYPE_F32,
+                one_value_layout(),
+                0,
+                101,
+                syncer_profile_hash=profile_hash,
+            ),
+        )
+        assert message in receive_error(sock)
+    finally:
+        sock.close()
+        stop_process(proc)
 
 
 @pytest.mark.parametrize("dtype", [DTYPE_F32, DTYPE_BF16, DTYPE_Q4])

@@ -2,6 +2,7 @@
 
 import itertools
 import queue
+import struct
 
 import pytest
 
@@ -13,6 +14,8 @@ from yeto.protocol import (
     DTYPE_F32,
     MAGIC,
     MSG_CHUNK,
+    MSG_PULL_REQ,
+    PartialMessageGenerationLost,
     SyncerClient,
 )
 
@@ -285,18 +288,36 @@ def test_streaming_push_late_producer_failure_poisons_partial_generation():
         yield b"x" * CHUNK_SIZE
         raise ProducerFailure("late producer failure")
 
-    with pytest.raises(ProducerFailure, match="late producer failure"):
+    with pytest.raises(ProducerFailure, match="late producer failure") as caught:
         client.push_fragment_parts(**_push_kwargs(), tensor_parts=failing_parts())
 
+    assert not isinstance(caught.value, PartialMessageGenerationLost)
     assert queued == [(4, CHUNK_SIZE + _HEADER.size + _CHUNK_HEAD.size)]
     assert not client._connected.is_set()
     assert client._failure.is_set()
     assert isinstance(client._last_err, ProducerFailure)
 
 
+def test_streaming_push_late_size_validation_remains_non_transient():
+    tensor_bytes = 2 * CHUNK_SIZE
+    client = _client(tensor_bytes)
+    client._enqueue = lambda *_args, **_kwargs: True
+
+    with pytest.raises(ValueError, match="delta bytes, expected") as caught:
+        client.push_fragment_parts(
+            **_push_kwargs(),
+            tensor_parts=[b"x" * CHUNK_SIZE],
+        )
+
+    assert not isinstance(caught.value, PartialMessageGenerationLost)
+    assert not client._connected.is_set()
+    assert client._failure.is_set()
+
+
 def test_streaming_push_mid_message_enqueue_drop_poisons_and_raises():
     tensor_bytes = 2 * CHUNK_SIZE
     client = _client(tensor_bytes)
+    client.connection_generation = 4004
     calls = 0
 
     def enqueue(stream, data, gen=None, sent=None):
@@ -309,9 +330,68 @@ def test_streaming_push_mid_message_enqueue_drop_poisons_and_raises():
     part = b"x" * (CHUNK_SIZE // 4)
     parts = itertools.repeat(part, tensor_bytes // len(part))
 
-    with pytest.raises(RuntimeError, match="dropped after 1 .* chunks were queued"):
+    with pytest.raises(
+        PartialMessageGenerationLost,
+        match="dropped after 1 .* chunks were queued",
+    ) as caught:
         client.push_fragment_parts(**_push_kwargs(), tensor_parts=parts)
 
+    assert caught.value.connection_generation == 4004
+    assert caught.value.connection_epoch == 4
+    assert caught.value.queued_chunks == 1
+    assert caught.value.operation == "PUSH_FRAGMENT fragment 0"
     assert calls == 2
     assert not client._connected.is_set()
     assert client._failure.is_set()
+
+
+def test_streaming_push_generation_loss_can_retry_only_replayed_pull():
+    tensor_bytes = 2 * CHUNK_SIZE
+    client = _client(tensor_bytes)
+    client.connection_generation = 4004
+    calls = 0
+
+    def drop_second(_stream, _data, *, gen=None, sent=None):
+        nonlocal calls
+        del gen, sent
+        calls += 1
+        return calls == 1
+
+    client._enqueue = drop_second
+    part = b"x" * (CHUNK_SIZE // 4)
+    tensor_parts = lambda: itertools.repeat(part, tensor_bytes // len(part))
+
+    with pytest.raises(PartialMessageGenerationLost):
+        client.push_fragment_parts(**_push_kwargs(), tensor_parts=tensor_parts())
+
+    # Model the supervisor's successful reconnect.  The peer, not the caller,
+    # re-authorizes the operation by replaying its PULL on the new generation.
+    client._gen = 6
+    client.connection_generation = 6006
+    client._failure.clear()
+    client._connected.set()
+    client._dispatch(6, MSG_PULL_REQ, struct.pack("<IQI", 0, 11, 2))
+    replayed = client.drain_pulls()
+    assert len(replayed) == 1
+    permit = replayed[0]
+
+    retry_generations = []
+
+    def accept_retry(_stream, _data, *, gen=None, sent=None):
+        del sent
+        retry_generations.append(gen)
+        return True
+
+    client._enqueue = accept_retry
+    assert client.push_fragment_parts(
+        fragment_id=permit.fragment_id,
+        global_step=permit.global_step,
+        round_attempt=permit.round_attempt,
+        base_version=9,
+        local_step=17,
+        c_steps=3,
+        c_tokens=1234,
+        tensor_parts=tensor_parts(),
+    )
+    assert retry_generations
+    assert set(retry_generations) == {6}

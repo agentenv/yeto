@@ -21,6 +21,17 @@ from yeto.rl.local_learner import (
 
 REVISION = "a" * 40
 CONFIG_HASH = "b" * 64
+
+
+def test_component_identity_accepts_sha1_and_sha256_object_formats():
+    assert ComponentIdentity("actor", "a" * 40, CONFIG_HASH).model_revision == "a" * 40
+    assert ComponentIdentity("critic", "c" * 64, CONFIG_HASH).model_revision == "c" * 64
+    with pytest.raises(ValueError, match="immutable commit"):
+        ComponentIdentity("actor", "a" * 41, CONFIG_HASH)
+    with pytest.raises(ValueError, match="immutable commit"):
+        ComponentIdentity("actor", "a" * 63, CONFIG_HASH)
+
+
 BATCH_HASH = "c" * 64
 
 
@@ -167,6 +178,77 @@ def test_sao_layout_adds_critic_without_changing_the_connector_contract():
             components=(ComponentIdentity("actor", REVISION, CONFIG_HASH),),
             specs=actor_specs(),
             num_fragments=2,
+        )
+
+
+def test_sao_role_streams_are_deterministic_and_domain_separated():
+    actor_component = ComponentIdentity("actor", REVISION, CONFIG_HASH)
+    critic_component = ComponentIdentity("critic", "d" * 40, "e" * 64)
+    critic_spec = ParameterSpec(
+        "critic",
+        "value_head.weight",
+        (1, 2),
+        "float32",
+        2,
+    )
+    actor_stream = ParameterLayout.create(
+        algorithm="sao",
+        components=(actor_component,),
+        specs=actor_specs(),
+        num_fragments=2,
+        stream_role="actor",
+    )
+    actor_stream_reordered = ParameterLayout.create(
+        algorithm="sao",
+        components=(actor_component,),
+        specs=tuple(reversed(actor_specs())),
+        num_fragments=2,
+        stream_role="actor",
+    )
+    critic_stream = ParameterLayout.create(
+        algorithm="sao",
+        components=(critic_component,),
+        specs=(critic_spec,),
+        num_fragments=1,
+        stream_role="critic",
+    )
+    combined = ParameterLayout.create(
+        algorithm="sao",
+        components=(actor_component, critic_component),
+        specs=(*actor_specs(), critic_spec),
+        num_fragments=2,
+    )
+
+    assert actor_stream.stream_role == "actor"
+    assert critic_stream.stream_role == "critic"
+    assert combined.stream_role is None
+    assert actor_stream.layout_hash == actor_stream_reordered.layout_hash
+    assert (
+        len(
+            {
+                actor_stream.layout_hash,
+                critic_stream.layout_hash,
+                combined.layout_hash,
+                grpo_layout().layout_hash,
+            }
+        )
+        == 4
+    )
+    with pytest.raises(ValueError, match="require an SAO role"):
+        ParameterLayout.create(
+            algorithm="grpo",
+            components=(actor_component,),
+            specs=actor_specs(),
+            num_fragments=2,
+            stream_role="actor",
+        )
+    with pytest.raises(ValueError, match="requires exactly"):
+        ParameterLayout.create(
+            algorithm="sao",
+            components=(actor_component, critic_component),
+            specs=(*actor_specs(), critic_spec),
+            num_fragments=2,
+            stream_role="actor",
         )
 
 

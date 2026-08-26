@@ -238,6 +238,7 @@ def _cut(version: int, generation: int, digest: str) -> ReferencedPolicyCut:
         local_step_generation=generation,
         layout_hash="e" * 64,
         policy_hash=digest * 64,
+        content_hash=digest * 64,
         transport_cut=SimpleNamespace(name=f"v{version}g{generation}"),
     )
 

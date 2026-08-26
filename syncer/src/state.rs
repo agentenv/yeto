@@ -119,10 +119,12 @@ pub struct GlobalState {
     /// Whether a loaded checkpoint carried and matched the fingerprint.
     pub checkpoint_layout_verified: bool,
     /// Strict dense-policy sweep profile carried by the checkpoint trailer.
-    /// `None` is the byte-for-byte legacy checkpoint profile.
+    /// `None` means the generic streaming profile; its session contract is
+    /// persisted independently below.
     pub policy_sweep_fragments: Option<u32>,
     /// Opaque semantic/profile/roster identity supplied by every learner.
-    /// Required and checkpointed only for strict dense-policy sweeps.
+    /// Server-created states always carry and checkpoint this identity. Direct
+    /// callers may leave it unset only to read or write the legacy format.
     pub session_contract_hash: Option<[u8; 32]>,
     /// Θ_p, flat f32 per fragment (concatenated tensors in layout order).
     pub params: Vec<Vec<f32>>,
@@ -361,6 +363,8 @@ impl GlobalState {
 }
 
 const CKPT_MAGIC: u32 = 0xD170_5A7E;
+/// Generic streaming checkpoint marker, followed by the session contract hash.
+const SESSION_CONTRACT_CKPT_MAGIC: u32 = 0x5254_4353;
 /// Policy-sweep checkpoint marker, followed by the configured fragment count.
 const POLICY_SWEEP_CKPT_MAGIC: u32 = 0x5053_5750;
 const FINAL_MARKER_MAGIC: &str = "YETO_FINAL_V1";
@@ -436,6 +440,9 @@ impl GlobalState {
                         .session_contract_hash
                         .context("policy-sweep checkpoint requires a session contract hash")?,
                 )?;
+            } else if let Some(contract_hash) = self.session_contract_hash {
+                f.write_all(&SESSION_CONTRACT_CKPT_MAGIC.to_le_bytes())?;
+                f.write_all(&contract_hash)?;
             }
             f.flush()?;
             f.get_ref().sync_all()?;
@@ -522,6 +529,18 @@ impl GlobalState {
                     }
                     bail!("policy-sweep checkpoint is missing its session contract hash");
                 }
+                68 => {
+                    let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                    if checkpoint_fingerprint != self.layout_fingerprint {
+                        bail!("checkpoint layout fingerprint does not match HELLO");
+                    }
+                    if r.u32()? != SESSION_CONTRACT_CKPT_MAGIC {
+                        bail!("checkpoint has an invalid session-contract trailer");
+                    }
+                    let contract_hash = r.take(32)?.try_into()?;
+                    self.checkpoint_layout_verified = true;
+                    (None, Some(contract_hash))
+                }
                 72 => {
                     let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
                     if checkpoint_fingerprint != self.layout_fingerprint {
@@ -547,8 +566,19 @@ impl GlobalState {
                 expected_policy_sweep_fragments
             );
         }
-        if checkpoint_session_contract_hash != self.session_contract_hash {
-            bail!("checkpoint session contract hash does not match HELLO");
+        match (checkpoint_session_contract_hash, self.session_contract_hash) {
+            (actual, expected) if actual == expected => {}
+            // A layout-only generic checkpoint predates explicit contract
+            // persistence. Its only safe implied contract is exactly the
+            // verified layout fingerprint used by legacy clients.
+            (None, Some(expected))
+                if self.checkpoint_layout_verified
+                    && expected == self.layout_fingerprint
+                    && expected_policy_sweep_fragments.is_none() => {}
+            (None, Some(_)) => {
+                bail!("checkpoint is missing the session contract hash required by HELLO");
+            }
+            _ => bail!("checkpoint session contract hash does not match HELLO"),
         }
         Ok(())
     }
@@ -696,6 +726,80 @@ mod tests {
         assert!(st2.checkpoint_layout_verified);
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn generic_checkpoint_persists_and_verifies_the_session_contract() {
+        let dir = std::env::temp_dir().join(format!(
+            "yeto-generic-contract-ckpt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy_path = dir.join("legacy.ckpt");
+        let contract_path = dir.join("contract.ckpt");
+
+        let make_state = || {
+            let mut state = GlobalState::new_with_layout_fingerprint(
+                layout2(),
+                0.7,
+                0.9,
+                crate::protocol::DTYPE_F32,
+                [9; 32],
+            )
+            .unwrap();
+            state.init_fragment(0, vec![1.0; 4]).unwrap();
+            state.init_fragment(1, vec![2.0; 4]).unwrap();
+            state.global_step = 3;
+            state.versions = vec![3, 2];
+            state
+        };
+
+        let legacy = make_state();
+        legacy.save_checkpoint(&legacy_path).unwrap();
+        let legacy_bytes = std::fs::read(&legacy_path).unwrap();
+
+        let mut contract_bound = make_state();
+        contract_bound.session_contract_hash = Some([7; 32]);
+        contract_bound.save_checkpoint(&contract_path).unwrap();
+        let contract_bytes = std::fs::read(&contract_path).unwrap();
+        assert_eq!(
+            &contract_bytes[..legacy_bytes.len()],
+            legacy_bytes.as_slice()
+        );
+        assert_eq!(contract_bytes.len(), legacy_bytes.len() + 36);
+        assert_eq!(
+            &contract_bytes[legacy_bytes.len()..legacy_bytes.len() + 4],
+            &SESSION_CONTRACT_CKPT_MAGIC.to_le_bytes()
+        );
+        assert_eq!(&contract_bytes[legacy_bytes.len() + 4..], &[7; 32]);
+
+        let mut matching = make_state();
+        matching.session_contract_hash = Some([7; 32]);
+        matching.load_checkpoint(&contract_path).unwrap();
+        assert_eq!(matching.params, contract_bound.params);
+        assert_eq!(matching.versions, contract_bound.versions);
+
+        let mut mismatched = make_state();
+        mismatched.session_contract_hash = Some([8; 32]);
+        let error = mismatched.load_checkpoint(&contract_path).unwrap_err();
+        assert!(format!("{error:#}").contains("session contract hash does not match"));
+
+        // The old layout-only format has one safe implied contract: the
+        // layout fingerprint itself. A stronger SAO/profile contract must not
+        // silently inherit such a checkpoint.
+        let mut legacy_default = make_state();
+        legacy_default.session_contract_hash = Some([9; 32]);
+        legacy_default.load_checkpoint(&legacy_path).unwrap();
+        let mut legacy_custom = make_state();
+        legacy_custom.session_contract_hash = Some([7; 32]);
+        let error = legacy_custom.load_checkpoint(&legacy_path).unwrap_err();
+        assert!(format!("{error:#}").contains("missing the session contract hash"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
