@@ -32,7 +32,13 @@ from ..fragments import (
     build_layout,
     is_embedding_name,
 )
-from ..protocol import DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
+from ..protocol import (
+    DTYPE_F32,
+    DTYPE_Q4,
+    SyncerClient,
+    bulk_dtype,
+    layout_fingerprint,
+)
 from ..tensor_io import pack_tensor, quantize_q4, unpack_fragment
 from .miles_value_state import (
     inverse_tp_partition,
@@ -790,6 +796,7 @@ class MilesValueIsland:
         ]
         if sorted(flattened_names) != sorted(self.tensors_by_name):
             raise RuntimeError("grouped fragment spans lost or duplicated parameters")
+        self.layout_fingerprint = self._validate_layout_across_ranks()
 
         self.learner_id = _env_int("YETO_VALUE_LEARNER_ID")
         self.num_learners = _env_int("YETO_VALUE_NUM_LEARNERS", 5)
@@ -943,6 +950,45 @@ class MilesValueIsland:
                     f"Miles value parameter catalog differs on global rank {rank}"
                 )
 
+    def _validate_layout_across_ranks(self) -> bytes:
+        """Require one authoritative grouped layout on every model rank.
+
+        The digest is the same semantic fingerprint sent in the syncer HELLO:
+        it covers fragment order, merge modes, ordered tensor names, lengths,
+        and canonical shapes.  Use one fixed 32-byte tensor from every rank so
+        different rank-local fragment counts or tensor orders cannot alter the
+        collective shape.  Every rank sees the complete result and therefore
+        raises before any fragment gather/apply or client startup.
+        """
+
+        fingerprint = layout_fingerprint(self.layout)
+        if len(fingerprint) != 32:
+            raise RuntimeError(
+                "Miles value layout fingerprint must contain exactly 32 bytes"
+            )
+        local = torch.tensor(
+            list(fingerprint), dtype=torch.uint8, device=self.device
+        )
+        gathered = [torch.empty_like(local) for _ in range(self.world_size)]
+        dist.all_gather(gathered, local)
+        fingerprints = [bytes(item.cpu().tolist()) for item in gathered]
+        reference = fingerprints[0]
+        mismatched = [
+            rank
+            for rank, candidate in enumerate(fingerprints)
+            if candidate != reference
+        ]
+        if mismatched:
+            observed = ", ".join(
+                f"rank {rank}={candidate.hex()}"
+                for rank, candidate in enumerate(fingerprints)
+            )
+            raise RuntimeError(
+                "Miles value grouped layout fingerprint mismatch across model "
+                f"ranks (different ranks: {mismatched}): {observed}"
+            )
+        return fingerprint
+
     def _leader_value(self, builder: Callable[[], Any]) -> Any:
         box: list[Any] = [None]
         if self.is_leader:
@@ -962,21 +1008,30 @@ class MilesValueIsland:
         Unlike :meth:`_leader_value`, the result remains leader-local.  This
         is used for tensors, clients, and WAN sends that must not be pickled,
         while still ensuring a Python exception cannot make the other seven
-        ranks enter the next collective and hang forever.
+        ranks enter the next collective and hang forever.  The success path
+        broadcasts one fixed byte; only the exceptional path broadcasts the
+        diagnostic string as a Python object.
         """
 
         result = None
-        status: list[Any] = [None]
+        error = None
         if self.is_leader:
             try:
                 result = builder()
-                status[0] = (True, None)
             except BaseException as exc:
-                status[0] = (False, f"{type(exc).__name__}: {exc}")
-        dist.broadcast_object_list(status, src=self.leader_global_rank)
-        ok, error = status[0]
-        if not ok:
-            raise RuntimeError(f"Miles value island leader failed: {error}")
+                error = f"{type(exc).__name__}: {exc}"
+        status = torch.tensor(
+            [1 if self.is_leader and error is None else 0],
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        dist.broadcast(status, src=self.leader_global_rank)
+        if int(status.item()) == 0:
+            diagnostic = [error if self.is_leader else None]
+            dist.broadcast_object_list(diagnostic, src=self.leader_global_rank)
+            raise RuntimeError(
+                f"Miles value island leader failed: {diagnostic[0]}"
+            )
         return result
 
     def _assert_optimizer_state_resident(self, runtime: _RuntimeTensor) -> None:
@@ -1187,30 +1242,37 @@ class MilesValueIsland:
 
         descriptor = runtime.descriptor
         local = self._local_master(runtime)
-        full = None
+        partitions = None
         if descriptor.tp_sharded:
             if self.parallel.cp.rank == 0:
                 partitions = [
                     torch.empty_like(local) for _ in range(self.parallel.tp.size)
                 ]
                 dist.all_gather(partitions, local, group=self.parallel.tp.group)
-                if self.parallel.tp.rank == 0:
-                    assert descriptor.partition_dim is not None
-                    full = self._gather_with_stride(
-                        partitions,
-                        descriptor.partition_dim,
-                        descriptor.partition_stride,
-                    ).contiguous()
-        elif self.is_leader:
-            full = local
-        if self.is_leader:
+
+        def finish_gather() -> torch.Tensor:
+            if descriptor.tp_sharded:
+                if partitions is None:
+                    raise RuntimeError(
+                        f"{descriptor.name}: leader has no TP partitions"
+                    )
+                assert descriptor.partition_dim is not None
+                full = self._gather_with_stride(
+                    partitions,
+                    descriptor.partition_dim,
+                    descriptor.partition_stride,
+                ).contiguous()
+            else:
+                full = local
             if full is None or tuple(full.shape) != descriptor.full_shape:
                 raise RuntimeError(
                     f"{descriptor.name}: canonical gather produced "
                     f"{None if full is None else tuple(full.shape)}, expected {descriptor.full_shape}"
                 )
             return full.cpu()
-        return None
+
+        result = self._leader_local(finish_gather)
+        return result
 
     def _gather_canonical(self, fid: int) -> torch.Tensor | None:
         """Gather one flat fragment while holding one canonical GPU tensor at a time."""
@@ -1224,7 +1286,12 @@ class MilesValueIsland:
         )
         for span in spans:
             full = self._gather_one_canonical(self.tensors_by_name[span.name])
-            if self.is_leader:
+
+            def validate_and_copy(
+                full: torch.Tensor | None = full,
+                span: _FragmentTensorSpan = span,
+                leader_flat: torch.Tensor | None = leader_flat,
+            ) -> None:
                 if full is None:
                     raise RuntimeError(f"{span.name}: leader gather returned no tensor")
                 if tuple(full.shape) != span.full_shape or full.numel() != span.numel:
@@ -1234,6 +1301,9 @@ class MilesValueIsland:
                     )
                 assert leader_flat is not None
                 leader_flat[span.start : span.end].copy_(full.reshape(-1))
+
+            self._leader_local(validate_and_copy)
+            del full, validate_and_copy
         return leader_flat
 
     def _apply_one_canonical(
@@ -1250,45 +1320,51 @@ class MilesValueIsland:
             descriptor.local_shape, dtype=torch.float32, device=self.device
         )
         if descriptor.tp_sharded:
+            def prepare_scatter() -> list[torch.Tensor]:
+                if leader_full_cpu is None:
+                    raise RuntimeError(
+                        f"{descriptor.name}: leader has no canonical tensor"
+                    )
+                full = leader_full_cpu.to(
+                    self.device, non_blocking=False
+                ).contiguous()
+                assert descriptor.partition_dim is not None
+                return [
+                    inverse_tp_partition(
+                        full,
+                        tp_rank=rank,
+                        tp_size=self.parallel.tp.size,
+                        partition_dim=descriptor.partition_dim,
+                        partition_stride=descriptor.partition_stride,
+                    )
+                    for rank in range(self.parallel.tp.size)
+                ]
+
+            scatter_list = self._leader_local(prepare_scatter)
+            del prepare_scatter
             if self.parallel.cp.rank == 0:
-                scatter_list = None
-                if self.parallel.tp.rank == 0:
-                    if leader_full_cpu is None:
-                        raise RuntimeError(
-                            f"{descriptor.name}: leader has no canonical tensor"
-                        )
-                    full = leader_full_cpu.to(
-                        self.device, non_blocking=False
-                    ).contiguous()
-                    assert descriptor.partition_dim is not None
-                    scatter_list = [
-                        inverse_tp_partition(
-                            full,
-                            tp_rank=rank,
-                            tp_size=self.parallel.tp.size,
-                            partition_dim=descriptor.partition_dim,
-                            partition_stride=descriptor.partition_stride,
-                        )
-                        for rank in range(self.parallel.tp.size)
-                    ]
                 dist.scatter(
                     local,
                     scatter_list=scatter_list,
                     src=self.tp_source_global,
                     group=self.parallel.tp.group,
                 )
+            del scatter_list
             dist.broadcast(
                 local,
                 src=self.cp_source_global,
                 group=self.parallel.cp.group,
             )
         else:
-            if self.is_leader:
+            def prepare_replicated() -> None:
                 if leader_full_cpu is None:
                     raise RuntimeError(
                         f"{descriptor.name}: leader has no replicated tensor"
                     )
                 local.copy_(leader_full_cpu.to(self.device, non_blocking=False))
+
+            self._leader_local(prepare_replicated)
+            del prepare_replicated
             dist.broadcast(local, src=self.leader_global_rank)
 
         if merge_alpha:
@@ -1306,7 +1382,8 @@ class MilesValueIsland:
         """Apply one flat fragment in layout order, one GPU tensor at a time."""
 
         fragment = self.layout.fragments[fid]
-        if self.is_leader:
+
+        def validate_payload() -> None:
             if leader_flat_cpu is None:
                 raise RuntimeError(f"fragment {fid}: leader has no canonical payload")
             if leader_flat_cpu.ndim != 1 or leader_flat_cpu.numel() != fragment.numel:
@@ -1314,18 +1391,25 @@ class MilesValueIsland:
                     f"fragment {fid}: canonical payload has shape "
                     f"{tuple(leader_flat_cpu.shape)}, expected ({fragment.numel},)"
                 )
+
+        self._leader_local(validate_payload)
+        del validate_payload
         for span in self.fragment_spans[fid]:
-            leader_tensor = None
-            if self.is_leader:
+
+            def slice_payload() -> torch.Tensor:
                 assert leader_flat_cpu is not None
-                leader_tensor = leader_flat_cpu[span.start : span.end].view(
+                return leader_flat_cpu[span.start : span.end].view(
                     span.full_shape
                 )
+
+            leader_tensor = self._leader_local(slice_payload)
+            del slice_payload
             self._apply_one_canonical(
                 self.tensors_by_name[span.name],
                 leader_tensor,
                 merge_alpha=merge_alpha,
             )
+            del leader_tensor
 
     def _send_initial_parameters(self) -> None:
         # INIT_PARAMS is authoritative only from logical learner 0.  Other
@@ -1340,14 +1424,17 @@ class MilesValueIsland:
                     fragment: Fragment = fragment,
                 ) -> None:
                     assert self.client is not None and full is not None
+                    payload = _pack_flat_fragment(
+                        fragment, full, bulk_dtype(self.client.dtype)
+                    )
                     self.client.send_init(
                         fid,
-                        _pack_flat_fragment(
-                            fragment, full, bulk_dtype(self.client.dtype)
-                        ),
+                        payload,
                     )
+                    del payload
 
                 self._leader_local(send_init)
+                del full, send_init
         dist.barrier()
 
     def _wait_initial_plan(self) -> list[tuple[int, int]]:
@@ -1397,6 +1484,7 @@ class MilesValueIsland:
 
             full = self._leader_local(decode_initial)
             self._apply_canonical(fid, full, merge_alpha=0.0)
+            del full, decode_initial
             self.steps_at_reset[fid] = self.steps_total
             self.units_at_reset[fid] = self.units_total
             self.fragment_versions[fid] = version
@@ -1469,6 +1557,7 @@ class MilesValueIsland:
 
             full = self._leader_local(decode_update)
             self._apply_canonical(fid, full, merge_alpha=self.merge_alpha)
+            del full, decode_update
             self.steps_at_reset[fid] = self.steps_total
             self.units_at_reset[fid] = self.units_total
             self.fragment_versions[fid] = version
@@ -1500,6 +1589,10 @@ class MilesValueIsland:
                 if anchor is None:
                     raise RuntimeError(f"fragment {fid} has no raw global anchor")
                 delta = full.float().sub(anchor.float())
+                payload = _quantize_flat_fragment(
+                    self.layout.fragments[fid], delta
+                )
+                del delta
                 self.client.push_fragment(
                     fid,
                     global_step,
@@ -1508,10 +1601,12 @@ class MilesValueIsland:
                     local_step,
                     c_steps,
                     c_units,
-                    _quantize_flat_fragment(self.layout.fragments[fid], delta),
+                    payload,
                 )
+                del payload
 
             self._leader_local(push_update)
+            del full, push_update
 
         def heartbeat() -> None:
             assert self.client is not None
@@ -1613,6 +1708,12 @@ class MilesValueIsland:
                 base = _unpack_flat_fragment(
                     self.layout.fragments[fid], data, bulk_dtype(self.client.dtype)
                 )
+                delta = frozen.float().sub(base.float())
+                del base
+                payload = _quantize_flat_fragment(
+                    self.layout.fragments[fid], delta
+                )
+                del delta
                 self.client.push_fragment(
                     fid,
                     global_step,
@@ -1621,12 +1722,12 @@ class MilesValueIsland:
                     self.steps_total,
                     self.steps_total,
                     self.units_total,
-                    _quantize_flat_fragment(
-                        self.layout.fragments[fid], frozen.float().sub(base.float())
-                    ),
+                    payload,
                 )
+                del payload
 
             self._leader_local(push_frozen)
+            del frozen, push_frozen
             completed.add(fid)
         self._finalize_from_manifest()
 
@@ -1657,6 +1758,7 @@ class MilesValueIsland:
 
             full = self._leader_local(decode_terminal)
             self._apply_canonical(fid, full, merge_alpha=0.0)
+            del full, decode_terminal
             self.fragment_versions[fid] = version
         dist.barrier()
 

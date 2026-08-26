@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -22,7 +23,7 @@ from yeto.megatron.miles_value_island import (
     grouped_tensor_fragment_layout,
     one_tensor_fragment_layout,
 )
-from yeto.protocol import DTYPE_F32
+from yeto.protocol import DTYPE_F32, layout_fingerprint
 from yeto.megatron.miles_value_state import (
     reconstruct_fp32_from_bf16_remainder,
     split_fp32_to_bf16_remainder,
@@ -198,6 +199,132 @@ def test_fragment_spans_reject_wrong_numel_shape_merge_and_duplicate():
         _fragment_tensor_spans(duplicate, by_name)
 
 
+def test_layout_fingerprint_check_uses_one_fixed_32_byte_payload(monkeypatch):
+    descriptors = [
+        _descriptor("b.weight", (2, 3), MERGE_ISO),
+        _descriptor("a.weight", (3, 2), MERGE_ISO),
+    ]
+    island = object.__new__(MilesValueIsland)
+    island.layout = grouped_tensor_fragment_layout(descriptors, 1, "binpack")
+    island.device = torch.device("cpu")
+    island.world_size = 3
+    observed = []
+
+    def all_gather(outputs, local):
+        observed.append((local.dtype, local.shape, len(outputs)))
+        for output in outputs:
+            output.copy_(local)
+
+    monkeypatch.setattr(island_module.dist, "all_gather", all_gather)
+
+    assert island._validate_layout_across_ranks() == layout_fingerprint(island.layout)
+    assert observed == [(torch.uint8, torch.Size([32]), 3)]
+
+
+def test_layout_fingerprint_check_fails_with_rank_complete_diagnostics(monkeypatch):
+    descriptors = [
+        _descriptor("b.weight", (2, 3), MERGE_ISO),
+        _descriptor("a.weight", (3, 2), MERGE_ISO),
+    ]
+    island = object.__new__(MilesValueIsland)
+    island.layout = grouped_tensor_fragment_layout(descriptors, 1, "binpack")
+    island.device = torch.device("cpu")
+    island.world_size = 3
+
+    def all_gather(outputs, local):
+        for output in outputs:
+            output.copy_(local)
+        outputs[1][0] ^= 1
+
+    monkeypatch.setattr(island_module.dist, "all_gather", all_gather)
+
+    with pytest.raises(RuntimeError, match=r"different ranks: \[1\]") as error:
+        island._validate_layout_across_ranks()
+    assert "rank 0=" in str(error.value)
+    assert "rank 1=" in str(error.value)
+    assert "rank 2=" in str(error.value)
+
+
+def _gloo_layout_and_leader_status_worker(rank, init_method, result_queue):
+    torch.distributed.init_process_group(
+        "gloo", init_method=init_method, rank=rank, world_size=2
+    )
+    try:
+        descriptors = [
+            _descriptor("a.weight", (2, 3), MERGE_ISO),
+            _descriptor("b.weight", (3, 2), MERGE_ISO),
+            _descriptor("c.weight", (2, 2), MERGE_ISO),
+        ]
+        island = object.__new__(MilesValueIsland)
+        island.layout = grouped_tensor_fragment_layout(
+            descriptors,
+            num_fragments=1 if rank == 0 else 2,
+            pattern="binpack",
+        )
+        island.device = torch.device("cpu")
+        island.world_size = 2
+        island.is_leader = rank == 0
+        island.leader_global_rank = 0
+
+        try:
+            island._validate_layout_across_ranks()
+        except RuntimeError as exc:
+            layout_error = str(exc)
+        else:
+            layout_error = ""
+
+        torch.distributed.barrier()
+
+        def injected_failure():
+            raise ValueError("injected leader payload error")
+
+        try:
+            island._leader_local(injected_failure)
+        except RuntimeError as exc:
+            leader_error = str(exc)
+        else:
+            leader_error = ""
+        result_queue.put((rank, layout_error, leader_error))
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    not torch.distributed.is_gloo_available(), reason="Gloo is not available"
+)
+def test_two_rank_gloo_layout_mismatch_and_leader_error_fail_coherently(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    init_method = f"file://{tmp_path / 'layout-safety-gloo'}"
+    processes = [
+        context.Process(
+            target=_gloo_layout_and_leader_status_worker,
+            args=(rank, init_method, result_queue),
+        )
+        for rank in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=20)
+    try:
+        assert all(not process.is_alive() for process in processes)
+        assert [process.exitcode for process in processes] == [0, 0]
+        results = sorted(result_queue.get(timeout=5) for _ in range(2))
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        result_queue.close()
+
+    for rank, layout_error, leader_error in results:
+        assert rank in (0, 1)
+        assert "grouped layout fingerprint mismatch" in layout_error
+        assert "different ranks: [1]" in layout_error
+        assert "leader failed: ValueError: injected leader payload error" in leader_error
+
+
 def _mock_grouped_island(descriptors, *, is_leader=True):
     island = object.__new__(MilesValueIsland)
     island.is_leader = is_leader
@@ -215,6 +342,10 @@ def _mock_grouped_island(descriptors, *, is_leader=True):
         _fragment_tensor_spans(fragment, island.descriptors_by_name)
         for fragment in island.layout.fragments
     ]
+    island._leader_local = MethodType(
+        lambda instance, builder: builder() if instance.is_leader else None,
+        island,
+    )
     return island
 
 
@@ -276,6 +407,42 @@ def test_mocked_grouped_gather_uses_same_tensor_order_on_nonleader_rank():
     assert calls == [span.name for span in island.fragment_spans[0]]
 
 
+def test_grouped_gather_propagates_leader_shape_error_before_next_tensor():
+    descriptors = [
+        _descriptor("a.weight", (1, 2), MERGE_ISO),
+        _descriptor("b.weight", (1, 3), MERGE_ISO),
+        _descriptor("c.weight", (1, 4), MERGE_ISO),
+    ]
+    island = _mock_grouped_island(descriptors)
+    ordered_names = [span.name for span in island.fragment_spans[0]]
+    calls = []
+    status_checks = []
+
+    def gather_one(instance, runtime):
+        del instance
+        calls.append(runtime.descriptor.name)
+        shape = runtime.descriptor.full_shape
+        if runtime.descriptor.name == ordered_names[1]:
+            shape = (runtime.descriptor.numel, 1)
+        return torch.zeros(shape, dtype=torch.float32)
+
+    def coherent_leader_status(instance, builder):
+        del instance
+        status_checks.append(len(calls))
+        try:
+            return builder()
+        except BaseException as exc:
+            raise RuntimeError(f"coherent leader failure: {exc}") from exc
+
+    island._gather_one_canonical = MethodType(gather_one, island)
+    island._leader_local = MethodType(coherent_leader_status, island)
+
+    with pytest.raises(RuntimeError, match="coherent leader failure"):
+        island._gather_canonical(0)
+    assert calls == ordered_names[:2]
+    assert status_checks == [1, 2]
+
+
 @pytest.mark.parametrize("is_leader", [True, False])
 def test_mocked_grouped_apply_uses_same_tensor_order_on_every_rank(is_leader):
     descriptors = [
@@ -312,6 +479,96 @@ def test_mocked_grouped_apply_uses_same_tensor_order_on_every_rank(is_leader):
             assert torch.equal(tensor.reshape(-1), flat[span.start : span.end])
         else:
             assert tensor is None
+
+
+def test_grouped_apply_propagates_leader_slice_error_before_next_tensor():
+    descriptors = [
+        _descriptor("a.weight", (1, 2), MERGE_ISO),
+        _descriptor("b.weight", (1, 3), MERGE_ISO),
+        _descriptor("c.weight", (1, 4), MERGE_ISO),
+    ]
+    island = _mock_grouped_island(descriptors)
+    fragment = island.layout.fragments[0]
+    flat = torch.arange(fragment.numel, dtype=torch.float32)
+    spans = list(island.fragment_spans[0])
+    bad = spans[1]
+    spans[1] = island_module._FragmentTensorSpan(
+        name=bad.name,
+        start=bad.start,
+        end=bad.end,
+        full_shape=(bad.numel + 1,),
+    )
+    island.fragment_spans[0] = tuple(spans)
+    calls = []
+    status_checks = []
+
+    def apply_one(instance, runtime, leader_tensor, *, merge_alpha):
+        del instance, leader_tensor, merge_alpha
+        calls.append(runtime.descriptor.name)
+
+    def coherent_leader_status(instance, builder):
+        del instance
+        status_checks.append(len(calls))
+        try:
+            return builder()
+        except BaseException as exc:
+            raise RuntimeError(f"coherent leader failure: {exc}") from exc
+
+    island._apply_one_canonical = MethodType(apply_one, island)
+    island._leader_local = MethodType(coherent_leader_status, island)
+
+    with pytest.raises(RuntimeError, match="coherent leader failure"):
+        island._apply_canonical(0, flat, merge_alpha=0.0)
+    assert calls == [spans[0].name]
+    # One fragment payload validation, then one status rendezvous per slice.
+    assert status_checks == [0, 0, 1]
+
+
+def test_tp_scatter_preparation_failure_is_propagated_before_scatter(monkeypatch):
+    descriptor = TensorDescriptor(
+        name="tp.weight",
+        local_shape=(2, 2),
+        full_shape=(4, 2),
+        tp_sharded=True,
+        partition_dim=0,
+        partition_stride=1,
+        merge_mode=MERGE_ISO,
+    )
+    island = object.__new__(MilesValueIsland)
+    island.device = torch.device("cpu")
+    island.parallel = SimpleNamespace(
+        cp=SimpleNamespace(rank=0, group=None),
+        tp=SimpleNamespace(size=2, group=None),
+    )
+    island.tp_source_global = 0
+    island.cp_source_global = 0
+    island.is_leader = True
+
+    def coherent_leader_status(instance, builder):
+        del instance
+        try:
+            return builder()
+        except BaseException as exc:
+            raise RuntimeError(f"coherent leader failure: {exc}") from exc
+
+    island._leader_local = MethodType(coherent_leader_status, island)
+    monkeypatch.setattr(
+        island_module,
+        "inverse_tp_partition",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad TP shape")),
+    )
+    monkeypatch.setattr(
+        island_module.dist,
+        "scatter",
+        lambda *args, **kwargs: pytest.fail("scatter entered after leader failure"),
+    )
+
+    with pytest.raises(RuntimeError, match="coherent leader failure: bad TP shape"):
+        island._apply_one_canonical(
+            SimpleNamespace(descriptor=descriptor),
+            torch.zeros(descriptor.full_shape),
+            merge_alpha=0.0,
+        )
 
 
 def test_initial_anchor_covers_the_full_flat_grouped_fragment(monkeypatch):
