@@ -9,6 +9,7 @@ readonly NUM_ROLLOUT=${LOCAL_BUDGET_STEPS}
 readonly CONTEXT_LENGTH=262144
 readonly REQUIRED_MILES_REVISION=277d151c00ef4f6727f01aca06e115b71bd7578c
 readonly SAVE_INTERVAL=${SAVE_INTERVAL:-15}
+readonly SAVE_RETAIN_INTERVAL=${SAVE_RETAIN_INTERVAL:-999990}
 readonly SYNC_INTERVAL_STEPS=${SYNC_INTERVAL_STEPS:-12}
 # Miles converts these iteration counts to sample counts by multiplying the
 # nominal GBS. Five islands use fixed nominal size 5 each (total 25), so the
@@ -42,6 +43,9 @@ export MILES_RAY_TARGET_NODE_IP
 [[ "${NUM_ROLLOUT}" =~ ^[1-9][0-9]*$ ]] || die "NUM_ROLLOUT must be a positive integer"
 [[ "${LR_DECAY_ITERS}" =~ ^[1-9][0-9]*$ ]] || die "LR_DECAY_ITERS must be a positive integer"
 [[ "${SAVE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || die "SAVE_INTERVAL must be a positive integer"
+[[ "${SAVE_RETAIN_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || die "SAVE_RETAIN_INTERVAL must be a positive integer"
+((SAVE_RETAIN_INTERVAL % SAVE_INTERVAL == 0)) || \
+  die "SAVE_RETAIN_INTERVAL must be divisible by SAVE_INTERVAL"
 [[ "${SYNC_INTERVAL_STEPS}" =~ ^[1-9][0-9]*$ ]] || die "SYNC_INTERVAL_STEPS must be a positive integer"
 readonly LOCAL_GLOBAL_BATCH_SIZE=5
 
@@ -198,7 +202,7 @@ exec python3 train_async.py \
   --critic-save "${CRITIC_SAVE_DIR}" \
   --ckpt-format torch_dist \
   --save-interval "${SAVE_INTERVAL}" \
-  --save-retain-interval 1000000 \
+  --save-retain-interval "${SAVE_RETAIN_INTERVAL}" \
   --prompt-data "${PROMPT_DATA}" \
   --input-key prompt \
   --label-key label \
