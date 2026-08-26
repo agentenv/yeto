@@ -7,6 +7,7 @@ readonly NUM_LEARNERS=6
 readonly NUM_ROLLOUT=364
 readonly LOCAL_BUDGET_STEPS=364
 readonly CONTEXT_LENGTH=262144
+readonly REQUIRED_MILES_REVISION=277d151c00ef4f6727f01aca06e115b71bd7578c
 readonly SAVE_INTERVAL=${SAVE_INTERVAL:-15}
 # Miles converts these iteration counts to sample counts by multiplying the
 # nominal GBS.  Six islands use fixed nominal sizes 5+4+4+4+4+4=25, so five
@@ -57,6 +58,10 @@ template_without_first_placeholder=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER
 [[ "${OUTPUT_DIR}" == /* && "${OUTPUT_DIR}" != / ]] || die "OUTPUT_DIR must be an absolute directory other than /"
 
 [[ -f "${MILES_ROOT}/train_async.py" ]] || die "missing ${MILES_ROOT}/train_async.py"
+actual_miles_revision=$(git -C "${MILES_ROOT}" rev-parse HEAD 2>/dev/null) || \
+  die "MILES_ROOT must be a Git checkout pinned to ${REQUIRED_MILES_REVISION}"
+[[ "${actual_miles_revision}" == "${REQUIRED_MILES_REVISION}" ]] || \
+  die "MILES_ROOT revision ${actual_miles_revision} != required ${REQUIRED_MILES_REVISION}"
 [[ -f "${MILES_ROOT}/scripts/models/qwen3.6-27B.sh" ]] || die "missing Miles Qwen model argument script"
 [[ -f "${YETO_ROOT}/yeto/megatron/miles_value_island.py" ]] || die "missing Yeto Miles value-island adapter"
 [[ -d "${MODEL_DIR}/Qwen3.8-27B" ]] || die "missing Hugging Face checkpoint ${MODEL_DIR}/Qwen3.8-27B"
@@ -128,7 +133,7 @@ print(
             "YETO_VALUE_NUM_FRAGMENTS": "96",
             "YETO_VALUE_FRAGMENT_PATTERN": "binpack",
             "YETO_VALUE_CONNECT_TIMEOUT": "3600",
-            "YETO_VALUE_FINALIZATION_TIMEOUT": "7200",
+            "YETO_VALUE_FINALIZATION_TIMEOUT": "3600",
             "YETO_VALUE_BUDGET_STEPS": budget_steps,
             "YETO_VALUE_LOCAL_STEP_OFFSET": "0",
             "YETO_VALUE_UNIT_OFFSET": "0",
@@ -245,7 +250,7 @@ exec python3 train_async.py \
   --attention-softmax-in-fp32 \
   --attention-backend flash \
   --train-env-vars "${TRAIN_ENV_VARS}" \
-  --distributed-timeout-minutes 240 \
+  --distributed-timeout-minutes 60 \
   --empty-unused-memory-level 2 \
   --colocate-critic \
   --custom-megatron-after-model-init-hook-path yeto.megatron.miles_value_island.after_model_init \

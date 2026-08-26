@@ -10,8 +10,24 @@ die() {
   exit 2
 }
 
-readonly NUM_LEARNERS=6
-readonly LOCAL_BUDGET_STEPS=364
+if [[ "${YETO_MILES_VALUE_SMOKE:-0}" == 1 ]]; then
+  readonly NUM_LEARNERS=1
+  readonly LOCAL_BUDGET_STEPS=${SMOKE_BUDGET_STEPS:-2}
+  [[ "${LOCAL_BUDGET_STEPS}" =~ ^[2-4]$ ]] || {
+    printf '%s\n' 'run_miles_value_syncer_supervisor.sh: SMOKE_BUDGET_STEPS must be in [2, 4]' >&2
+    exit 2
+  }
+elif [[ "${YETO_MILES_VALUE_SMOKE:-0}" == 0 ]]; then
+  readonly NUM_LEARNERS=6
+  readonly LOCAL_BUDGET_STEPS=364
+  [[ -z "${SMOKE_BUDGET_STEPS:-}" ]] || {
+    printf '%s\n' 'run_miles_value_syncer_supervisor.sh: SMOKE_BUDGET_STEPS requires YETO_MILES_VALUE_SMOKE=1' >&2
+    exit 2
+  }
+else
+  printf '%s\n' 'run_miles_value_syncer_supervisor.sh: YETO_MILES_VALUE_SMOKE must be 0 or 1' >&2
+  exit 2
+fi
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 YETO_ROOT=${YETO_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd -P)}
@@ -22,8 +38,8 @@ ISO_WORKER_PYTHON=${ISO_WORKER_PYTHON:-python3}
 ISO_WORKER_DEVICES=${ISO_WORKER_DEVICES:-cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7}
 ISO_WORKER_QUEUE_CAPACITY=${ISO_WORKER_QUEUE_CAPACITY:-16}
 YETO_ISO_WORKER_STARTUP_TIMEOUT_S=${YETO_ISO_WORKER_STARTUP_TIMEOUT_S:-300}
-YETO_ISO_WORKER_REQUEST_TIMEOUT_S=${YETO_ISO_WORKER_REQUEST_TIMEOUT_S:-3600}
-YETO_ISO_WORKER_DRAIN_TIMEOUT_S=${YETO_ISO_WORKER_DRAIN_TIMEOUT_S:-3660}
+YETO_ISO_WORKER_REQUEST_TIMEOUT_S=${YETO_ISO_WORKER_REQUEST_TIMEOUT_S:-3540}
+YETO_ISO_WORKER_DRAIN_TIMEOUT_S=${YETO_ISO_WORKER_DRAIN_TIMEOUT_S:-3600}
 
 RUN_DIR=${RUN_DIR:?set RUN_DIR to a fresh local syncer output directory}
 PORT=${PORT:-29400}
@@ -40,7 +56,7 @@ CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-0}
 GRACE_MS=${GRACE_MS:-1000}
 GRACE_GAMMA=${GRACE_GAMMA:-0.8}
 GRACE_TAU=${GRACE_TAU:-2.0}
-QUORUM_TIMEOUT_S=${QUORUM_TIMEOUT_S:-7200}
+QUORUM_TIMEOUT_S=${QUORUM_TIMEOUT_S:-3600}
 SYNC_INTERVAL_STEPS=${SYNC_INTERVAL_STEPS:-24}
 DELTA_CORRECTION=${DELTA_CORRECTION:-heloco}
 OUTER_LR=${OUTER_LR:-0.7}
@@ -74,13 +90,22 @@ for timeout_name in \
     die "${timeout_name} must be a positive integer number of seconds"
   fi
 done
+((YETO_ISO_WORKER_STARTUP_TIMEOUT_S <= 300)) || \
+  die "YETO_ISO_WORKER_STARTUP_TIMEOUT_S cannot exceed 300"
+((YETO_ISO_WORKER_REQUEST_TIMEOUT_S <= 3540)) || \
+  die "YETO_ISO_WORKER_REQUEST_TIMEOUT_S cannot exceed 3540"
+((YETO_ISO_WORKER_DRAIN_TIMEOUT_S <= 3600)) || \
+  die "YETO_ISO_WORKER_DRAIN_TIMEOUT_S cannot exceed 3600"
+((YETO_ISO_WORKER_REQUEST_TIMEOUT_S + 60 <= YETO_ISO_WORKER_DRAIN_TIMEOUT_S)) || \
+  die "SVD request timeout must leave at least 60 seconds for bounded drain/reap"
 if [[ "$(basename -- "${ISO_WORKER_PYTHON}")" == docker_python_iso_worker.sh ]]; then
   die "ISO_WORKER_PYTHON must be the direct miles_node python3 executable, not docker_python_iso_worker.sh"
 fi
 [[ "${CHECKPOINT_EVERY}" =~ ^[0-9]+$ ]] || die "CHECKPOINT_EVERY must be a non-negative integer"
 [[ "${GRACE_MS}" =~ ^[0-9]+$ ]] || die "GRACE_MS must be a non-negative integer"
-if [[ ! "${QUORUM_TIMEOUT_S}" =~ ^[0-9]+$ ]] || ((QUORUM_TIMEOUT_S < 1)); then
-  die "QUORUM_TIMEOUT_S must be positive"
+if [[ ! "${QUORUM_TIMEOUT_S}" =~ ^[0-9]+$ ]] || \
+  ((QUORUM_TIMEOUT_S < 1 || QUORUM_TIMEOUT_S > 3600)); then
+  die "QUORUM_TIMEOUT_S must be in [1, 3600]"
 fi
 [[ "${DELTA_CORRECTION}" == heloco || "${DELTA_CORRECTION}" == none ]] || die "DELTA_CORRECTION must be heloco or none"
 

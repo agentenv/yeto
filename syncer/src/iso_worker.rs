@@ -29,8 +29,10 @@ const HEADER_LEN: usize = 48;
 const MAX_ERROR_BYTES: u64 = 64 * 1024;
 const LEGACY_QUEUE_CAPACITY: usize = 1;
 const DEFAULT_STARTUP_TIMEOUT_S: u64 = 300;
-const DEFAULT_REQUEST_TIMEOUT_S: u64 = 3600;
-const DEFAULT_DRAIN_TIMEOUT_S: u64 = 3660;
+// Leave one minute for drain failure propagation and child reaping while the
+// entire fail-closed drain remains bounded by one hour.
+const DEFAULT_REQUEST_TIMEOUT_S: u64 = 3540;
+const DEFAULT_DRAIN_TIMEOUT_S: u64 = 3600;
 const STARTUP_TIMEOUT_ENV: &str = "YETO_ISO_WORKER_STARTUP_TIMEOUT_S";
 const REQUEST_TIMEOUT_ENV: &str = "YETO_ISO_WORKER_REQUEST_TIMEOUT_S";
 const DRAIN_TIMEOUT_ENV: &str = "YETO_ISO_WORKER_DRAIN_TIMEOUT_S";

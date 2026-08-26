@@ -841,7 +841,7 @@ class MilesValueIsland:
                 connect_timeout=_env_float("YETO_VALUE_CONNECT_TIMEOUT", 3600.0),
                 max_reconnects=None,
                 finalization_timeout=_env_float(
-                    "YETO_VALUE_FINALIZATION_TIMEOUT", 7200.0
+                    "YETO_VALUE_FINALIZATION_TIMEOUT", 3600.0
                 ),
             )
             client.start()
