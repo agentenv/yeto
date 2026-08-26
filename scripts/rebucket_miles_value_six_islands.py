@@ -179,6 +179,141 @@ def load_split(
     return records, hashes
 
 
+def load_legacy_island_split(
+    source: Path,
+    split: str,
+    rollout_ids: Sequence[int],
+    *,
+    num_islands: int,
+    max_sequence_length: int,
+) -> tuple[list[Record], dict[str, str]]:
+    """Reconstruct immutable source coordinates from the schema-v1 six-island set."""
+
+    manifest_path = source / MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 1:
+        raise ValueError(f"unsupported legacy island manifest: {manifest_path}")
+    if manifest.get("strategy") != "opaque_global_sample_stride_6_then_step_stride":
+        raise ValueError(f"unexpected legacy island strategy in {manifest_path}")
+    if manifest.get("num_islands") != num_islands:
+        raise ValueError("legacy island count does not match v7 configuration")
+
+    mapping = manifest.get("mapping")
+    if not isinstance(mapping, list):
+        raise ValueError("legacy island manifest mapping must be a list")
+    expected_pairs = {
+        (island_id, rollout_id)
+        for island_id in range(num_islands)
+        for rollout_id in rollout_ids
+    }
+    selected: dict[tuple[int, int], dict[str, Any]] = {}
+    for item in mapping:
+        if not isinstance(item, dict) or item.get("split") != split:
+            continue
+        pair = (item.get("island_id"), item.get("rollout_id"))
+        if pair in selected:
+            raise ValueError(f"duplicate legacy island mapping pair: {pair}")
+        selected[pair] = item
+    if set(selected) != expected_pairs:
+        missing = sorted(expected_pairs - set(selected))
+        extra = sorted(set(selected) - expected_pairs)
+        raise ValueError(
+            f"legacy {split} mapping coverage mismatch: missing={missing[:8]} extra={extra[:8]}"
+        )
+
+    records: list[Record] = []
+    hashes: dict[str, str] = {f"legacy/{MANIFEST_NAME}": sha256(manifest_path)}
+    for island_id, rollout_id in sorted(expected_pairs):
+        path = source / f"island_{island_id}" / SOURCE_FILE_TEMPLATE.format(
+            rollout_id=rollout_id
+        )
+        if not path.is_file():
+            raise FileNotFoundError(f"missing legacy island rollout {path}")
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        if not isinstance(payload, dict) or payload.get("rollout_id") != rollout_id:
+            raise SplitValidationError(f"invalid legacy island payload {path}")
+        samples = payload.get("samples")
+        sources = selected[(island_id, rollout_id)].get("sources")
+        if (
+            not isinstance(samples, list)
+            or not samples
+            or not isinstance(sources, list)
+            or len(samples) != len(sources)
+        ):
+            raise SplitValidationError(
+                f"legacy sample/source count mismatch in {path}"
+            )
+        relative = path.relative_to(source).as_posix()
+        hashes[f"legacy/{relative}"] = sha256(path)
+        for sample, coordinate in zip(samples, sources, strict=True):
+            if (
+                not isinstance(coordinate, list)
+                or len(coordinate) != 2
+                or isinstance(coordinate[0], bool)
+                or not isinstance(coordinate[0], int)
+                or isinstance(coordinate[1], bool)
+                or not isinstance(coordinate[1], int)
+                or coordinate[0] not in rollout_ids
+                or coordinate[1] < 0
+            ):
+                raise SplitValidationError(
+                    f"invalid legacy source coordinate {coordinate!r} in {path}"
+                )
+            counts = _sample_counts(
+                sample,
+                rollout_id=coordinate[0],
+                position=coordinate[1],
+            )
+            token_length = counts.total_tokens
+            if not 0 < token_length <= max_sequence_length:
+                raise SplitValidationError(
+                    f"legacy source {coordinate!r} has invalid token length {token_length}"
+                )
+            records.append(
+                Record(
+                    source_rollout_id=coordinate[0],
+                    source_position=coordinate[1],
+                    sample=sample,
+                    token_length=token_length,
+                )
+            )
+    return records, hashes
+
+
+def load_source_splits(
+    source: Path,
+    config: dict[str, Any],
+) -> tuple[list[Record], dict[str, str], list[Record], dict[str, str]]:
+    train_ids = _rollout_range(config, "train_rollout_ids")
+    validation_ids = _rollout_range(config, "validation_rollout_ids")
+    kwargs = {"max_sequence_length": config["max_sequence_length"]}
+    if (source / SOURCE_FILE_TEMPLATE.format(rollout_id=train_ids[0])).is_file():
+        train, train_hashes = load_split(source, train_ids, **kwargs)
+        validation, validation_hashes = load_split(source, validation_ids, **kwargs)
+    elif (source / MANIFEST_NAME).is_file() and (source / "island_0").is_dir():
+        legacy_kwargs = {
+            **kwargs,
+            "num_islands": config["num_islands"],
+        }
+        train, train_hashes = load_legacy_island_split(
+            source,
+            "train",
+            train_ids,
+            **legacy_kwargs,
+        )
+        validation, validation_hashes = load_legacy_island_split(
+            source,
+            "validation",
+            validation_ids,
+            **legacy_kwargs,
+        )
+    else:
+        raise ValueError(
+            f"{source} is neither a flat replay set nor a schema-v1 six-island set"
+        )
+    return train, train_hashes, validation, validation_hashes
+
+
 def _capacities(total: int, bins: int) -> tuple[int, ...]:
     quotient, remainder = divmod(total, bins)
     return tuple(quotient + int(index < remainder) for index in range(bins))
@@ -404,11 +539,9 @@ def plan_dataset(source: Path, config: dict[str, Any]) -> tuple[dict[str, Any], 
     train_ids = _rollout_range(config, "train_rollout_ids")
     validation_ids = _rollout_range(config, "validation_rollout_ids")
 
-    train, train_hashes = load_split(
-        source, train_ids, max_sequence_length=max_sequence_length
-    )
-    validation, validation_hashes = load_split(
-        source, validation_ids, max_sequence_length=max_sequence_length
+    train, train_hashes, validation, validation_hashes = load_source_splits(
+        source,
+        config,
     )
     if len(train) != config["expected_train_samples"]:
         raise ValueError(
