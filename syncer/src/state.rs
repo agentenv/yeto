@@ -149,7 +149,7 @@ pub struct GlobalState {
 }
 
 /// A merge whose deterministic learner reduction has completed but whose
-/// exact Torch SVD matrices may still be executing.  It owns every input
+/// Torch Iso polar matrices may still be executing.  It owns every input
 /// buffer used by the workers, so no matrix can alias coordinator state.
 pub struct PreparedMerge {
     fid: usize,
@@ -403,7 +403,7 @@ impl GlobalState {
     }
 
     /// Deterministically reduce learner gradients and enqueue no mutable
-    /// coordinator state.  Torch SVD work is represented as owned matrices
+    /// coordinator state.  Torch Iso work is represented as owned matrices
     /// inside the returned value and may execute out of order.
     pub fn prepare_merge(
         &self,
@@ -511,7 +511,7 @@ impl GlobalState {
         }
         // Miles uses one canonical tensor per fragment. Move that complete
         // averaged matrix into its worker job instead of retaining a second
-        // model-sized host copy while SVD runs.
+        // model-sized host copy while the Iso worker runs.
         if iso_jobs.len() == 1 && iso_jobs[0].offset == 0 && iso_jobs[0].matrix.len() == delta.len()
         {
             iso_jobs[0].matrix = std::mem::take(&mut delta);
@@ -598,7 +598,7 @@ impl GlobalState {
 
     /// Explicit barrier used before any terminal checkpoint/marker is made
     /// publishable.  The worker pool reports poison instead of silently
-    /// publishing a cut after partial SVD failure.
+    /// publishing a cut after partial Iso worker failure.
     pub async fn drain_iso_backend(&self) -> Result<()> {
         self.iso_backend.drain().await
     }
