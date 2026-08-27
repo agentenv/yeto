@@ -1,7 +1,7 @@
 # Qwen3.5-0.8B Terminal-Bench 2.1 SAO + Streaming DiLoCo Validation
 
-Date: 2026-08-26  
-Release branch: `feat/sao-tbench21-e2e-validation`  
+Date: 2026-08-26
+Release branch: `feat/sao-tbench21-e2e-validation`
 Repositories: `agentenv/miles` and `agentenv/yeto`
 
 ## Status
