@@ -1852,8 +1852,8 @@ mod tests {
         assert_eq!(recv_started(&started), 2);
         control.release(2);
         assert_eq!(second_reply.await.unwrap().unwrap(), vec![1002.0]);
-        assert_eq!(pool.inner.queue.slots.available_permits(), 1);
         pool.drain().await.unwrap();
+        assert_eq!(pool.inner.queue.slots.available_permits(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
