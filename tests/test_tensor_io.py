@@ -66,6 +66,16 @@ def test_q4_roundtrip_error_bounds():
             assert block[~nonzero].abs().max() <= absmax * 2**-6.5 + 1e-7
 
 
+def test_q4_accepts_nonflat_tensor_in_row_major_order():
+    matrix = torch.arange(3 * Q4_BLOCK, dtype=torch.float32).reshape(3, Q4_BLOCK)
+
+    from_matrix = quantize_q4(matrix)
+    from_flat = quantize_q4(matrix.reshape(-1))
+
+    assert from_matrix == from_flat
+    assert dequantize_q4(from_matrix, matrix.numel()).shape == (matrix.numel(),)
+
+
 def test_q4_zero_and_constant_blocks():
     assert dequantize_q4(quantize_q4(torch.zeros(Q4_BLOCK)), Q4_BLOCK).eq(0).all()
     const = torch.full((Q4_BLOCK,), -3.0)

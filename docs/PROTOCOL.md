@@ -220,7 +220,8 @@ The benchmark closes in two syncer processes on the same endpoint:
    recovery checkpoint and exits. It sends no final manifest or shutdown.
 2. The harness reads that checkpoint's global step `C`, restarts the syncer
    from it, and requests exactly `F` ordinary rounds, where `F` is the fragment
-   count. Pipeline depth is one and quorum is the full configured learner set.
+   count. Quorum is the full configured learner set. Gather/SVD work may be
+   pipelined, but coordinator commits remain strictly ordered by round `t`.
 
 Learners stop optimizer and data work before sending `BUDGET_DONE`, retain
 their frozen trainable parameters, and reconnect to the restarted syncer. The
@@ -240,10 +241,52 @@ learner in every one of these rounds.
 
 ## Snapshots and event tape
 
-The sequential coordinator mutates state only at serialized round completion,
-so a checkpoint at that cut is consistent while other pipelined rounds are
-still gathering. Snapshots contain global/per-fragment versions, f32 params,
-momentum, and the cumulative learner ledger.
+The sequential coordinator mutates state only when committing the next
+contiguous round `t`. Other rounds may still be gathering or running exact
+SVD, but their owned buffers cannot touch coordinator state. A checkpoint at
+that cut is therefore consistent. Snapshots contain global/per-fragment
+versions, f32 params, momentum, and the cumulative learner ledger. Cutoff and
+terminal checkpoints explicitly drain the SVD pool first; a poisoned worker
+prevents checkpoint publication. The exact-SVD pool bounds startup, every
+full-matrix request, and drain. Any deadline expiry kills the directly owned
+Python child, installs a persistent pool poison, discards queued work, and
+makes drain/finalization fail. Pool capacity covers the complete admitted
+queued-plus-running job lifetime; it is not released at dequeue.
+
+New snapshots use checkpoint V3. Its fixed prefix is:
+
+```text
+magic:u32 = 0xD1705A80
+iso_backend:u8                 # 0=scalar, 1=torch-svd
+semantic_layout_fingerprint:32 # exact accepted HELLO SHA-256
+global_step:u64
+```
+
+The fingerprint covers fragment order, merge modes, ordered tensor names,
+lengths, and shapes. Resume compares both backend and fingerprint before
+installing any checkpoint state. Fragment count and flat `numel` equality are
+not sufficient: two grouped layouts can have identical flat sizes while
+assigning those values and momentum slots to different tensors.
+
+Legacy behavior is deliberately conservative:
+
+- V1 (`0xD1705A7E`) has neither backend nor fingerprint. Python readers can
+  inspect/export it, but the syncer never resumes it because an old Torch-SVD
+  checkpoint cannot be distinguished from a scalar checkpoint.
+- V2 (`0xD1705A7F`) records the backend but not the fingerprint. Python readers
+  can inspect/export it. The syncer resumes it only when the backend matches
+  and every fragment contains exactly one tensor. Grouped V2 resume fails
+  closed.
+- V3 records both and is the only format written by current syncers. A
+  fingerprint mismatch is rejected even when fragment counts and every flat
+  fragment size match.
+
+Legacy V1/V2 export still depends on rebuilding the exact historical layout
+from the original model and fragmentation flags; the file cannot prove that
+identity. A grouped legacy checkpoint requires an externally audited
+migration that supplies its original semantic fingerprint. V1 additionally
+requires authoritative knowledge of its original ISO backend. Neither value
+is guessed automatically.
 
 Pipelined rounds may finish gathering out of order, but the coordinator merges,
 checkpoints, and broadcasts them strictly in ascending global-step order. A

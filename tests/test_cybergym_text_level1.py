@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip(
+    "yeto_miles_cybergym",
+    reason="the Miles CyberGym adapter is an optional external integration",
+)
+
 from yeto_miles_cybergym.text_level1 import build_text_level1_rows, main
 
 

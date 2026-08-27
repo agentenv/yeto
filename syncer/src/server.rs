@@ -6,7 +6,8 @@
 //! "two fragments in flight"), so a slow quorum on one fragment never
 //! delays pulling the next.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -20,7 +21,9 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::protocol::*;
-use crate::state::{remove_final_marker, write_final_marker, GlobalState, Layout};
+use crate::state::{
+    remove_final_marker, write_final_marker, ComputedMerge, GlobalState, Layout, PreparedMerge,
+};
 
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const CHUNK_HEADER_SIZE: u64 = 24;
@@ -81,6 +84,8 @@ pub struct Config {
     pub policy_sweep_fragments: Option<u32>,
     pub outer_lr: f32,
     pub outer_momentum: f32,
+    /// Spectrum-flattening backend for MERGE_ISO tensors.
+    pub iso_backend: crate::iso_worker::IsoBackendConfig,
     pub final_state: Option<std::path::PathBuf>,
     /// Consistent-snapshot file; written every `checkpoint_every` rounds at
     /// the quiescent cut between rounds, resumed from when `resume` is set.
@@ -397,6 +402,10 @@ enum Event {
         member: Member,
         push: Push,
     },
+    Heartbeat {
+        member: Member,
+        local_step: u64,
+    },
     FinalAck {
         member: Member,
         global_step: u64,
@@ -549,6 +558,83 @@ impl StepRates {
 type Registry = Arc<Mutex<RegistryState>>;
 type Session = Arc<Mutex<Option<SessionSpec>>>;
 
+/// Orders every cutoff-sensitive scheduler action against BUDGET_DONE.
+///
+/// `request` closes the gate before the decoded report is queued.  A
+/// successful `try_linearize_work` is the linearization point for exactly one
+/// subsequent commit, pull/retry, or compute submission.  Both operations use
+/// the same mutex, so work that linearizes after a queued report is impossible;
+/// work that won the mutex first is part of the authoritative pre-cutoff cut
+/// and is allowed to finish before the scheduler quiesces accepted compute.
+struct BudgetCutoff {
+    enabled: bool,
+    timeout: Duration,
+    deadline: Mutex<Option<tokio::time::Instant>>,
+    notify: tokio::sync::Notify,
+}
+
+impl BudgetCutoff {
+    fn new(enabled: bool, timeout: Duration) -> Self {
+        Self {
+            enabled,
+            timeout,
+            deadline: Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Close the gate exactly once and establish the one absolute deadline
+    /// shared by report enqueue, report collection, and compute draining.
+    fn request(&self) -> Option<tokio::time::Instant> {
+        if !self.enabled {
+            return None;
+        }
+        let (deadline, first) = {
+            let mut deadline = self.deadline.lock().unwrap();
+            let first = deadline.is_none();
+            if first {
+                *deadline = Some(tokio::time::Instant::now() + self.timeout);
+            }
+            (*deadline, first)
+        };
+        if first {
+            self.notify.notify_waiters();
+        }
+        deadline
+    }
+
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        *self.deadline.lock().unwrap()
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Claim one cutoff-sensitive action in the total order.  The scheduler
+    /// is the sole action executor, so it may release the mutex after this
+    /// decision; a report that closes the gate afterwards is ordered after
+    /// this already-claimed action and before every later action.
+    fn try_linearize_work(&self) -> bool {
+        !self.enabled || self.deadline.lock().unwrap().is_none()
+    }
+
+    async fn wait_requested(&self) {
+        if !self.enabled {
+            std::future::pending::<()>().await;
+        }
+        loop {
+            // Register before checking the state so a request between those
+            // operations cannot be missed by Notify's edge-triggered wakeup.
+            let notified = self.notify.notified();
+            if self.deadline().is_some() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.learners == 0 {
         bail!("--learners must be positive");
@@ -558,6 +644,9 @@ fn validate_config(cfg: &Config) -> Result<()> {
     }
     if cfg.quorum > cfg.learners {
         bail!("--quorum must not exceed --learners");
+    }
+    if cfg.quorum_timeout_s == 0 {
+        bail!("--quorum-timeout-s must be positive");
     }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
@@ -704,6 +793,18 @@ fn validate_resumed_policy_sweep(cfg: &Config, st: &GlobalState) -> Result<()> {
 
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
+    if cfg.resume {
+        let path = cfg
+            .checkpoint_path
+            .as_ref()
+            .context("--resume requires --checkpoint-path")?;
+        if !path.is_file() {
+            bail!(
+                "--resume checkpoint does not exist or is not a file: {}",
+                path.display()
+            );
+        }
+    }
     let semantic_profile_hash = cfg.semantic_profile_hash();
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
@@ -732,9 +833,14 @@ pub async fn run(cfg: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
     let session: Session = Arc::new(Mutex::new(None));
+    let budget_cutoff = Arc::new(BudgetCutoff::new(
+        cfg.learner_budget_steps.is_some(),
+        Duration::from_secs(cfg.quorum_timeout_s),
+    ));
 
     let accept_registry = registry.clone();
     let accept_session = session.clone();
+    let accept_budget_cutoff = budget_cutoff.clone();
     let expected_learners = cfg.learners;
     let strict_layout = cfg.max_base_lag == Some(0);
     let require_profile_binding = cfg.require_profile_binding;
@@ -744,6 +850,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 Ok((stream, peer)) => {
                     let reg = accept_registry.clone();
                     let session = accept_session.clone();
+                    let budget_cutoff = accept_budget_cutoff.clone();
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -755,6 +862,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             semantic_profile_hash,
                             require_profile_binding,
                             tx,
+                            budget_cutoff,
                         )
                         .await
                         {
@@ -767,7 +875,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     });
 
-    scheduler(cfg, event_rx, registry).await
+    scheduler(cfg, event_rx, registry, budget_cutoff).await
 }
 
 fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
@@ -885,6 +993,7 @@ async fn handle_connection(
     semantic_profile_hash: [u8; 32],
     require_profile_binding: bool,
     event_tx: mpsc::Sender<Event>,
+    budget_cutoff: Arc<BudgetCutoff>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
@@ -1042,7 +1151,7 @@ async fn handle_connection(
                 })
                 .await
                 .ok();
-            let res = read_loop(&mut rd, &group, &event_tx).await;
+            let res = read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await;
             {
                 let mut registry = registry.lock().unwrap();
                 registry.groups.remove(&member);
@@ -1103,7 +1212,7 @@ async fn handle_connection(
                 bail!(message);
             }
             tokio::spawn(writer_task(wr, rx));
-            read_loop(&mut rd, &group, &event_tx).await
+            read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
         }
         t => bail!("first frame must be HELLO/DATA_HELLO, got {t}"),
     }
@@ -1151,6 +1260,7 @@ async fn read_loop(
     rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
     group: &Arc<Group>,
     event_tx: &mpsc::Sender<Event>,
+    budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
     loop {
         let frame = match read_frame_limited(rd, |msg_type| match msg_type {
@@ -1179,12 +1289,19 @@ async fn read_loop(
         let dispatched = match frame.msg_type {
             MSG_CHUNK => match reassemble(group, &frame.payload) {
                 Ok(Some(inner)) => {
-                    dispatch_inner(group, inner.msg_type, &inner.payload, event_tx).await
+                    dispatch_inner(
+                        group,
+                        inner.msg_type,
+                        &inner.payload,
+                        event_tx,
+                        budget_cutoff,
+                    )
+                    .await
                 }
                 Ok(None) => Ok(()),
                 Err(error) => Err(error),
             },
-            t => dispatch_inner(group, t, &frame.payload, event_tx).await,
+            t => dispatch_inner(group, t, &frame.payload, event_tx, budget_cutoff).await,
         };
         if let Err(error) = dispatched {
             report_protocol_error(group, &error).await;
@@ -1290,6 +1407,7 @@ async fn dispatch_inner(
     msg_type: u8,
     payload: &[u8],
     event_tx: &mpsc::Sender<Event>,
+    budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
     match msg_type {
         MSG_INIT_PARAMS => {
@@ -1396,7 +1514,7 @@ async fn dispatch_inner(
         MSG_HEARTBEAT => {
             let mut r = Reader(payload);
             let learner_id = r.u32()?;
-            let _local_step = r.u64()?;
+            let local_step = r.u64()?;
             if learner_id != group.member.learner_id {
                 bail!(
                     "HEARTBEAT learner id {learner_id} does not match connected group {}",
@@ -1406,6 +1524,13 @@ async fn dispatch_inner(
             if r.remaining() != 0 {
                 bail!("trailing bytes in HEARTBEAT");
             }
+            event_tx
+                .send(Event::Heartbeat {
+                    member: group.member,
+                    local_step,
+                })
+                .await
+                .ok();
         }
         MSG_FINAL_ACK => {
             let global_step = decode_final_ack(payload)?;
@@ -1419,13 +1544,24 @@ async fn dispatch_inner(
         }
         MSG_BUDGET_DONE => {
             let local_steps = decode_budget_done(payload)?;
-            event_tx
-                .send(Event::BudgetDone {
+            // This is the cutoff linearization point.  It must precede event
+            // queueing so a report waiting behind ordinary traffic still
+            // closes the scheduler gate immediately.
+            budget_cutoff.request();
+            // The first report closes the scheduler gate, but it must not
+            // make a later learner's otherwise-valid report unsendable. Each
+            // queue operation gets its own bounded timeout; report collection
+            // separately enforces a progress lease per logical learner.
+            tokio::time::timeout(
+                budget_cutoff.timeout(),
+                event_tx.send(Event::BudgetDone {
                     member: group.member,
                     local_steps,
-                })
-                .await
-                .ok();
+                }),
+            )
+            .await
+            .context("timed out queueing BUDGET_DONE")?
+            .context("event channel closed while queueing BUDGET_DONE")?;
         }
         t => bail!(
             "unexpected message type {t} from learner {} generation {}",
@@ -1446,10 +1582,104 @@ fn encode_pull(fragment_id: usize, global_step: u64, round_attempt: u32) -> byte
     bytes::Bytes::from(payload)
 }
 
+async fn send_small_until_cutoff(
+    group: &Arc<Group>,
+    msg_type: u8,
+    payload: bytes::Bytes,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    if !budget_cutoff.enabled {
+        let _ = group.send_small(msg_type, payload).await;
+        return true;
+    }
+    tokio::select! {
+        biased;
+        _ = budget_cutoff.wait_requested() => false,
+        _ = group.send_small(msg_type, payload) => true,
+    }
+}
+
+async fn send_tensor_until_cutoff(
+    group: &Arc<Group>,
+    msg_type: u8,
+    prefix: &[u8],
+    dtype: u8,
+    values: &[f32],
+    budget_cutoff: &BudgetCutoff,
+) -> Result<bool> {
+    if !budget_cutoff.enabled {
+        group
+            .send_tensor_large(msg_type, prefix, dtype, values)
+            .await?;
+        return Ok(true);
+    }
+    tokio::select! {
+        biased;
+        _ = budget_cutoff.wait_requested() => Ok(false),
+        result = group.send_tensor_large(msg_type, prefix, dtype, values) => result.map(|()| true),
+    }
+}
+
+async fn send_fragment_until_cutoff(
+    st: &GlobalState,
+    group: &Arc<Group>,
+    p: usize,
+    msg_type: u8,
+    dtype: u8,
+    budget_cutoff: &BudgetCutoff,
+) -> Result<bool> {
+    let mut prefix = [0u8; 12];
+    prefix[..4].copy_from_slice(&(p as u32).to_le_bytes());
+    prefix[4..].copy_from_slice(&st.versions[p].to_le_bytes());
+    send_tensor_until_cutoff(
+        group,
+        msg_type,
+        &prefix,
+        dtype,
+        &st.params[p],
+        budget_cutoff,
+    )
+    .await
+}
+
+async fn send_pull_until_cutoff(
+    groups: &[Arc<Group>],
+    pull: &bytes::Bytes,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    for group in groups {
+        if !send_small_until_cutoff(group, MSG_PULL_REQ, pull.clone(), budget_cutoff).await {
+            return false;
+        }
+    }
+    true
+}
+
+async fn recv_init_event(
+    events: &mut mpsc::Receiver<Event>,
+    budget_cutoff: &BudgetCutoff,
+    reports_received: usize,
+    learners: u32,
+) -> Result<Event> {
+    let event = match budget_cutoff.deadline() {
+        Some(deadline) => tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "learner-budget cutoff timed out during initialization/report collection: \
+                     received {reports_received}/{learners} BUDGET_DONE reports"
+                )
+            })?,
+        None => events.recv().await,
+    };
+    event.context("event channel closed")
+}
+
 async fn scheduler(
     cfg: Config,
     mut events: mpsc::Receiver<Event>,
     registry: Registry,
+    budget_cutoff: Arc<BudgetCutoff>,
 ) -> Result<()> {
     let mut state: Option<GlobalState> = None;
     let mut budget_reports: HashSet<u32> = HashSet::new();
@@ -1473,7 +1703,14 @@ async fn scheduler(
                 break;
             }
         }
-        match events.recv().await.context("event channel closed")? {
+        match recv_init_event(
+            &mut events,
+            &budget_cutoff,
+            budget_reports.len(),
+            cfg.learners,
+        )
+        .await?
+        {
             Event::Fatal { metric, message } => {
                 append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
                 bail!("RL strict failure {metric}: {message}");
@@ -1549,6 +1786,7 @@ async fn scheduler(
                 }
             }
             Event::Push { .. } => warn!("push before initialization; dropped"),
+            Event::Heartbeat { .. } => {}
             Event::FinalAck { member, .. } => warn!(
                 learner_id = member.learner_id,
                 generation = member.generation,
@@ -1574,7 +1812,30 @@ async fn scheduler(
         }
     }
     let mut st = state.unwrap();
-    if !budget_reports.is_empty() {
+    if budget_cutoff.deadline().is_some() || !budget_reports.is_empty() {
+        let deadline = budget_cutoff
+            .deadline()
+            .context("learner-budget gate closed without a deadline")?;
+        let target = cfg
+            .learner_budget_steps
+            .context("learner-budget gate closed outside learner-budget mode")?;
+        let (drain_result, reports_result) = tokio::join!(
+            drain_iso_before(&st, deadline),
+            collect_budget_reports(
+                target,
+                cfg.learners,
+                &mut budget_reports,
+                &mut events,
+                &registry,
+                budget_cutoff.timeout(),
+                cfg.event_tape.as_deref(),
+                None,
+            )
+        );
+        // Always finish the bounded backend drain even when a report is
+        // malformed; a fatal report must not abandon accepted worker state.
+        drain_result?;
+        reports_result?;
         save_budget_checkpoint(&cfg, &st)?;
         return Ok(());
     }
@@ -1603,33 +1864,74 @@ async fn scheduler(
     // A checkpoint already at the terminal cut goes straight to lossless
     // FINAL delivery; a redundant full BCAST would only inflate receiver RSS.
     if st.global_step < cfg.total_steps {
-        broadcast_all_fragments(&st, &registry).await;
+        broadcast_all_fragments(&st, &registry, &budget_cutoff).await;
     }
 
-    // Phase 2: the outer loop. One fragment per global step, round-robin,
-    // with up to `pipeline` rounds in flight at once: while round t sits in
-    // its quorum/grace window, round t+1's pull is already out, so sync
-    // latency overlaps learner compute (the paper's τ=2 "two fragments in
-    // flight"). Depth is clamped to the fragment count, so concurrent
-    // rounds always target DISTINCT fragments and every merge touches
-    // disjoint params/momentum. PUSH gathering may complete out of order,
-    // but durable merge/checkpoint/BCAST commits stay in global-step order.
-    // That keeps every checkpoint a contiguous prefix that can resume from
-    // `global_step + 1` without losing a ready-but-uncommitted round.
+    // Phase 2: gather, compute, and commit are separate stages.  Torch SVD
+    // matrices execute concurrently and may finish out of order, but only
+    // this scheduler mutates coordinator state, strictly in fragment-step t
+    // order.  A fragment remains busy across all three stages, preventing a
+    // second round from observing an uncommitted version/momentum state. The
+    // launch pipeline still overlaps learner compute and communication.
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
     let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
     let mut next_t = st.global_step + 1;
+    let mut next_commit_t = st.global_step + 1;
     let mut inflight: Vec<Round> = Vec::new();
-    'outer: while next_t <= cfg.total_steps || !inflight.is_empty() {
+    let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
+    let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
+    let mut busy_fragments: HashSet<usize> = HashSet::new();
+    let mut cutoff_established = false;
+    let mut first_budget_report: Option<(Member, u64)> = None;
+    'outer: while next_t <= cfg.total_steps
+        || !inflight.is_empty()
+        || !computing.is_empty()
+        || !ready.is_empty()
+    {
+        if budget_cutoff.deadline().is_some() {
+            cutoff_established = true;
+            break 'outer;
+        }
+        // Commit only the contiguous prefix.  A faster cuda:N worker can put
+        // t+1 in `ready` first, but it cannot update Nesterov/version/tape or
+        // broadcast until t has committed.
+        while ready.contains_key(&next_commit_t) {
+            if !budget_cutoff.try_linearize_work() {
+                cutoff_established = true;
+                break 'outer;
+            }
+            let completed = take_next_commit(&mut ready, next_commit_t)
+                .context("ready commit disappeared after linearization")?;
+            let p = completed.round.p;
+            commit_round(
+                &cfg,
+                &mut st,
+                &registry,
+                &mut last_sync_secs,
+                completed,
+                &budget_cutoff,
+            )
+            .await?;
+            if !busy_fragments.remove(&p) {
+                bail!("fragment {p} lost its busy ownership at commit");
+            }
+            next_commit_t = next_commit_t
+                .checked_add(1)
+                .context("commit step overflow")?;
+        }
+
         // Keep the pipeline full (throttled by min_round_interval_ms).
-        while inflight.len() < depth && next_t <= cfg.total_steps && Instant::now() >= next_launch {
+        while inflight.len() + computing.len() + ready.len() < depth
+            && next_t <= cfg.total_steps
+            && Instant::now() >= next_launch
+        {
+            if !budget_cutoff.try_linearize_work() {
+                cutoff_established = true;
+                break 'outer;
+            }
             let p = ((next_t - 1) % num_fragments) as usize;
-            // Out-of-order completion can leave an older round occupying the
-            // next round-robin fragment even when pipeline capacity is free.
-            // Never launch a second round for that fragment: base versions,
-            // momentum, and serialized completion all assume one owner.
-            if !fragment_available(&inflight, p) {
+            if busy_fragments.contains(&p) {
                 break;
             }
             let groups = current_groups(&registry);
@@ -1650,9 +1952,13 @@ async fn scheduler(
                     num_fragments as usize,
                     step_rates.max_step_secs_for(&expected_members),
                 );
-            let launch_quorum = (cfg.quorum as usize).min(expected_members.len());
-            for g in &groups {
-                let _ = g.send_small(MSG_PULL_REQ, pull.clone()).await;
+            let launch_quorum = cfg.quorum as usize;
+            if !send_pull_until_cutoff(&groups, &pull, &budget_cutoff).await {
+                cutoff_established = true;
+                break 'outer;
+            }
+            if !busy_fragments.insert(p) {
+                bail!("fragment {p} acquired twice");
             }
             inflight.push(Round {
                 t,
@@ -1688,15 +1994,38 @@ async fn scheduler(
             }
         }
 
-        // Restart any timed-out gather independently. A ready later round
-        // remains resident until every earlier global step commits; PULL and
-        // PUSH overlap stays pipelined, while durable commits stay contiguous.
-        // A quorum timeout below K discards the partial attempt and re-pulls.
+        // A ready gather is reduced deterministically and its complete ISO
+        // matrices are submitted to the bounded worker pool.  The scheduler
+        // immediately continues serving learner traffic while they run.
         let now = Instant::now();
+        let mut submitted_any = false;
         let mut i = 0;
         while i < inflight.len() {
             match round_action(&inflight[i], now) {
+                RoundAction::Complete => {
+                    let round = inflight.remove(i);
+                    let prepared = prepare_round_compute(&cfg, &st, &round)?;
+                    if !budget_cutoff.try_linearize_work() {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
+                    computing.spawn(async move {
+                        let compute_start = Instant::now();
+                        let merge = prepared.compute().await?;
+                        Ok(ComputedRound {
+                            round,
+                            merge,
+                            compute_secs: compute_start.elapsed().as_secs_f64(),
+                        })
+                    });
+                    submitted_any = true;
+                    continue;
+                }
                 RoundAction::Restart => {
+                    if !budget_cutoff.try_linearize_work() {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
                     let r = &mut inflight[i];
                     let groups = current_groups(&registry);
                     if fixed_roster {
@@ -1733,12 +2062,21 @@ async fn scheduler(
                         quorum = r.quorum_size,
                         "quorum timeout below K; launching a new frozen-membership attempt"
                     );
-                    if !groups.is_empty() {
-                        r.expected_members = groups.iter().map(|group| group.member).collect();
-                        r.expected_members.sort_unstable();
-                        r.quorum_size = (cfg.quorum as usize).min(r.expected_members.len());
-                        r.base_version = st.versions[r.p];
+                    if groups.len() < cfg.quorum as usize {
+                        warn!(
+                            step = r.t,
+                            connected = groups.len(),
+                            required = cfg.quorum,
+                            "fixed quorum unavailable; deferring retry"
+                        );
+                        r.quorum_deadline = Instant::now() + Duration::from_secs(1);
+                        i += 1;
+                        continue;
                     }
+                    r.expected_members = groups.iter().map(|group| group.member).collect();
+                    r.expected_members.sort_unstable();
+                    r.quorum_size = cfg.quorum as usize;
+                    r.base_version = st.versions[r.p];
                     r.attempt += 1;
                     r.pull = encode_pull(r.p, r.t, r.attempt);
                     r.pushes.clear();
@@ -1746,18 +2084,17 @@ async fn scheduler(
                     r.grace_deadline = None;
                     r.quorum_ms = None;
                     r.grace_ms = None;
-                    for g in groups {
-                        let _ = g.send_small(MSG_PULL_REQ, r.pull.clone()).await;
+                    if !send_pull_until_cutoff(&groups, &r.pull, &budget_cutoff).await {
+                        cutoff_established = true;
+                        break 'outer;
                     }
                     r.quorum_deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
                 }
-                RoundAction::Wait | RoundAction::Complete => {}
+                RoundAction::Wait => {}
             }
             i += 1;
         }
-        if let Some(index) = next_committable_round(&inflight, Instant::now()) {
-            let round = inflight.remove(index);
-            complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
+        if submitted_any {
             continue; // refill the pipeline before waiting again
         }
         // Wait for the next event, the earliest in-flight deadline, or the
@@ -1772,20 +2109,53 @@ async fn scheduler(
                     .then_some(r.grace_deadline.unwrap_or(r.quorum_deadline))
             })
             .min();
-        let next_fragment_available = inflight.len() < depth
+        let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
             && next_t <= cfg.total_steps
-            && fragment_available(&inflight, ((next_t - 1) % num_fragments) as usize);
+            && !busy_fragments.contains(&(((next_t - 1) % num_fragments) as usize));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
         }
-        let Some(earliest) = earliest else {
-            continue; // everything launched has completed; loop re-evaluates
+        let wake = match earliest {
+            Some(deadline) if !computing.is_empty() => tokio::select! {
+                biased;
+                wake = prefer_event_over_compute(events.recv(), computing.join_next()) => wake,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => SchedulerWake::Deadline,
+            },
+            Some(deadline) => tokio::select! {
+                biased;
+                event = events.recv() => SchedulerWake::Event(event),
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => SchedulerWake::Deadline,
+            },
+            None if !computing.is_empty() => {
+                prefer_event_over_compute(events.recv(), computing.join_next()).await
+            }
+            None => continue,
         };
-        let timeout = earliest.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(timeout, events.recv()).await {
-            Err(_) => continue, // deadline hit; loop re-evaluates
-            Ok(None) => bail!("event channel closed"),
-            Ok(Some(ev)) => match ev {
+        match wake {
+            SchedulerWake::Deadline => continue,
+            SchedulerWake::Computed(Some(result)) => {
+                let completed = result.context("iso compute task panicked")??;
+                let t = completed.round.t;
+                if completed.merge.fid() != completed.round.p
+                    || completed.merge.base_version() != completed.round.base_version
+                {
+                    bail!("computed merge metadata does not match round t={t}");
+                }
+                if st.versions.get(completed.round.p).copied() != Some(completed.round.base_version)
+                {
+                    bail!(
+                        "computed result t={t} fragment {} base version {} no longer matches state",
+                        completed.round.p,
+                        completed.round.base_version
+                    );
+                }
+                if ready.insert(t, completed).is_some() {
+                    bail!("duplicate computed round t={t}");
+                }
+            }
+            SchedulerWake::Computed(None) => bail!("iso compute task set ended unexpectedly"),
+            SchedulerWake::Event(None) => bail!("event channel closed"),
+            SchedulerWake::Event(Some(ev)) => match ev {
                 Event::Fatal { metric, message } => {
                     append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
                     bail!("RL strict failure {metric}: {message}");
@@ -1841,48 +2211,60 @@ async fn scheduler(
                         ),
                     }
                 }
-                Event::Hello { group } => {
-                    // Rejoining learner: catch it up to the current state.
-                    if st.global_step < cfg.total_steps {
-                        if let Err(error) = send_all_fragments(&st, &group).await {
-                            warn!(
-                                learner_id = group.member.learner_id,
-                                generation = group.member.generation,
-                                %error,
-                                "recovery cut send failed"
-                            );
-                        }
+                Event::Heartbeat { member, local_step } => {
+                    if is_current_member(&registry, member) {
+                        step_rates.note(member, local_step, Instant::now());
                     }
-                    if fixed_roster && is_current_member(&registry, group.member) {
-                        for round in &inflight {
-                            if should_replay_pull(round, group.member) {
-                                // Defensive recovery path: ordered commits
-                                // normally leave no in-flight round after the
-                                // terminal step. Keep the terminal fragment
-                                // reserved for the single lossless FINAL cut.
-                                if st.global_step >= cfg.total_steps {
-                                    match send_fragment(
-                                        &st,
-                                        &group,
-                                        round.p,
-                                        MSG_BCAST_FRAGMENT,
-                                        bulk_dtype(st.wire_dtype),
-                                    )
-                                    .await
-                                    {
-                                        Ok(()) => {}
-                                        Err(error) => warn!(
-                                            learner_id = group.member.learner_id,
-                                            generation = group.member.generation,
-                                            fragment = round.p,
-                                            %error,
-                                            "recovery fragment send failed"
-                                        ),
-                                    }
-                                }
-                                let _ = group.send_small(MSG_PULL_REQ, round.pull.clone()).await;
-                            }
+                }
+                Event::Hello { group } => {
+                    // A queued HELLO may already have been superseded by a
+                    // newer connection generation. Never catch up or rebind
+                    // rounds to anything except the registry's current
+                    // generation for this logical learner.
+                    if !is_current_member(&registry, group.member) {
+                        warn!(
+                            learner_id = group.member.learner_id,
+                            generation = group.member.generation,
+                            "superseded learner reconnect ignored"
+                        );
+                        continue;
+                    }
+
+                    // Rejoining learner: first catch it up to the current
+                    // parameters, then atomically rebind only its unanswered
+                    // slots in existing rounds. The helper revalidates the
+                    // generation because catch-up awaits socket writers and
+                    // a newer HELLO may supersede this one meanwhile.
+                    if st.global_step < cfg.total_steps {
+                        send_all_fragments(&st, &group, &budget_cutoff).await;
+                    }
+                    let repulls = if fixed_roster {
+                        fixed_roster_repulls(&inflight, group.member)
+                    } else {
+                        rebind_current_unanswered_rounds(&registry, &mut inflight, group.member)
+                    };
+                    for repull in repulls {
+                        if !send_small_until_cutoff(
+                            &group,
+                            MSG_PULL_REQ,
+                            repull.pull,
+                            &budget_cutoff,
+                        )
+                        .await
+                        {
+                            cutoff_established = true;
+                            break 'outer;
                         }
+                        info!(
+                            learner_id = group.member.learner_id,
+                            old_generation = repull.old_generation,
+                            generation = group.member.generation,
+                            step = repull.t,
+                            fragment = repull.p,
+                            attempt = repull.attempt,
+                            base_version = repull.base_version,
+                            "rebound outstanding pull to reconnected learner generation"
+                        );
                     }
                 }
                 Event::Init { .. } => {} // already initialized; ignore
@@ -1897,47 +2279,149 @@ async fn scheduler(
                     member,
                     local_steps,
                 } => {
-                    let target = cfg
-                        .learner_budget_steps
-                        .context("received BUDGET_DONE outside learner-budget mode")?;
-                    if !is_current_member(&registry, member) {
-                        bail!("BUDGET_DONE from a superseded learner");
-                    }
-                    record_budget_report(&mut budget_reports, target, member, local_steps)?;
-                    let cancelled = inflight.len();
-                    inflight.clear();
-                    info!(
-                        learner_id = member.learner_id,
-                        cancelled_rounds = cancelled,
-                        target_steps = target,
-                        "learner-budget cutoff established"
-                    );
+                    // Validation is deliberately deferred until after the
+                    // bounded quiesce has started.  Even a malformed or
+                    // superseded report closes the gate fail-closed and must
+                    // not strand already-accepted worker jobs.
+                    first_budget_report = Some((member, local_steps));
+                    cutoff_established = true;
                     break 'outer;
                 }
                 Event::Disconnected { member } => {
-                    // Membership and accepted responses are immutable for an
-                    // attempt. A disconnect never erases work, and a new
-                    // generation can join only a later launch/retry.
+                    // A disconnect never erases accepted work. An unanswered
+                    // slot may move to the already-current replacement only
+                    // after the captured generation is gone. This also covers
+                    // the ordering where the replacement's HELLO was processed
+                    // while the old generation was still alive and therefore
+                    // could not alter the frozen round.
                     warn!(
                         learner_id = member.learner_id,
                         generation = member.generation,
                         "learner connection generation disconnected"
                     );
                     step_rates.remove(member);
+
+                    let replacement = {
+                        let registry = registry.lock().unwrap();
+                        registry
+                            .current
+                            .get(&member.learner_id)
+                            .copied()
+                            .filter(|replacement| *replacement != member)
+                    };
+                    if !fixed_roster {
+                        if let Some(replacement) = replacement {
+                            let group = {
+                                let registry = registry.lock().unwrap();
+                                registry.groups.get(&replacement).cloned()
+                            };
+                            if let Some(group) = group {
+                                // Catch-up must precede a replay even when the
+                                // disconnect event wins the race with the queued
+                                // replacement HELLO.
+                                if st.global_step < cfg.total_steps {
+                                    send_all_fragments(&st, &group, &budget_cutoff).await;
+                                }
+                                let repulls = rebind_current_unanswered_rounds(
+                                    &registry,
+                                    &mut inflight,
+                                    replacement,
+                                );
+                                for repull in repulls {
+                                    if !send_small_until_cutoff(
+                                        &group,
+                                        MSG_PULL_REQ,
+                                        repull.pull,
+                                        &budget_cutoff,
+                                    )
+                                    .await
+                                    {
+                                        cutoff_established = true;
+                                        break 'outer;
+                                    }
+                                    info!(
+                                        learner_id = replacement.learner_id,
+                                        old_generation = repull.old_generation,
+                                        generation = replacement.generation,
+                                        step = repull.t,
+                                        fragment = repull.p,
+                                        attempt = repull.attempt,
+                                        base_version = repull.base_version,
+                                        "rebound outstanding pull after captured generation disconnected"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             },
         }
     }
 
     if cfg.learner_budget_steps.is_some() {
-        collect_budget_reports(&cfg, &mut budget_reports, &mut events, &registry).await?;
+        cutoff_established |= budget_cutoff.deadline().is_some();
+        if !cutoff_established {
+            bail!("learner-budget scheduler exited without a cutoff report");
+        }
+        let deadline = budget_cutoff
+            .deadline()
+            .context("learner-budget scheduler exited without a cutoff deadline")?;
+        let cancelled_inflight = inflight.len();
+        let cancelled_ready = ready.len();
+        let cancelled_computing = computing.len();
+        let target = cfg.learner_budget_steps.unwrap();
+        inflight.clear();
+        ready.clear();
+        busy_fragments.clear();
+        let (drain_result, reports_result) = tokio::join!(
+            quiesce_accepted_compute(&mut computing, &st, deadline),
+            collect_budget_reports(
+                target,
+                cfg.learners,
+                &mut budget_reports,
+                &mut events,
+                &registry,
+                budget_cutoff.timeout(),
+                cfg.event_tape.as_deref(),
+                first_budget_report,
+            )
+        );
+        // Do not short-circuit either bounded cleanup branch: malformed
+        // reports and poisoned workers both fail closed only after the other
+        // branch has had its bounded opportunity to quiesce.
+        drain_result?;
+        reports_result?;
         save_budget_checkpoint(&cfg, &st)?;
+        info!(
+            cancelled_inflight,
+            cancelled_computing,
+            cancelled_ready,
+            target_steps = target,
+            step = st.global_step,
+            "learner-budget cutoff established"
+        );
         return Ok(());
     }
 
-    // Exact-base runs persist every committed cut before BCAST. Other modes
-    // still need a final save when total_steps is not divisible by the
-    // periodic interval.
+    if next_commit_t != cfg.total_steps.saturating_add(1)
+        || st.global_step != cfg.total_steps
+        || !busy_fragments.is_empty()
+    {
+        bail!(
+            "non-quiescent terminal cut: next_commit_t={next_commit_t} global_step={} busy={:?}",
+            st.global_step,
+            busy_fragments
+        );
+    }
+    // Explicitly drain and health-check every SVD worker before a checkpoint
+    // or marker can publish the terminal cut.
+    st.drain_iso_backend().await?;
+
+    // The outer loop is now quiescent: every launched round has completed
+    // and every computed result has committed in strict t order.
+    // Persist this authoritative cut regardless of the periodic checkpoint
+    // interval so a non-divisible total_steps can never leave a stale final
+    // checkpoint behind.
     if let Some(path) = &cfg.checkpoint_path {
         if !checkpoint_each_round {
             if cfg.mark_final_checkpoint {
@@ -1990,9 +2474,9 @@ fn record_budget_report(
     if local_steps != target_steps {
         bail!("BUDGET_DONE reported {local_steps} steps, expected {target_steps}");
     }
-    if !reports.insert(member.learner_id) {
-        bail!("duplicate BUDGET_DONE");
-    }
+    // Logical completion is idempotent across retries/reconnections. A
+    // repeated report with the same required step cannot change the cut.
+    reports.insert(member.learner_id);
     Ok(())
 }
 
@@ -2010,19 +2494,123 @@ fn save_budget_checkpoint(cfg: &Config, st: &GlobalState) -> Result<()> {
     Ok(())
 }
 
+async fn drain_iso_before(st: &GlobalState, deadline: tokio::time::Instant) -> Result<()> {
+    tokio::time::timeout_at(deadline, st.drain_iso_backend())
+        .await
+        .context("timed out draining the ISO backend at learner-budget cutoff")??;
+    Ok(())
+}
+
+/// Abort scheduler-owned compute futures and fence every job already accepted
+/// by the backend.  Failure and timeout are both fail-closed: no cutoff
+/// checkpoint is written unless this entire quiesce succeeds.
+async fn quiesce_accepted_compute(
+    computing: &mut tokio::task::JoinSet<Result<ComputedRound>>,
+    st: &GlobalState,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    computing.abort_all();
+    let mut task_error: Option<anyhow::Error> = None;
+    loop {
+        let joined = match tokio::time::timeout_at(deadline, computing.join_next()).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                task_error = Some(anyhow::anyhow!(
+                    "timed out cancelling scheduler compute tasks at learner-budget cutoff"
+                ));
+                break;
+            }
+        };
+        match joined {
+            None => break,
+            Some(Ok(Ok(_completed))) => {
+                // The result linearized before cutoff but had not committed;
+                // discard it as one whole round.
+            }
+            Some(Ok(Err(error))) => {
+                if task_error.is_none() {
+                    task_error =
+                        Some(error.context(
+                            "accepted compute failed while quiescing learner-budget cutoff",
+                        ));
+                }
+            }
+            Some(Err(error)) if error.is_cancelled() => {}
+            Some(Err(error)) => {
+                if task_error.is_none() {
+                    task_error = Some(anyhow::anyhow!(
+                        "scheduler compute task failed while quiescing cutoff: {error}"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Run the backend fence even if a scheduler task failed.  This gives
+    // accepted external jobs their bounded drain opportunity before failure.
+    let backend_result = drain_iso_before(st, deadline).await;
+    if let Some(error) = task_error {
+        return match backend_result {
+            Ok(()) => Err(error),
+            Err(backend_error) => Err(error.context(format!(
+                "ISO backend also failed while quiescing cutoff: {backend_error:#}"
+            ))),
+        };
+    }
+    backend_result
+}
+
 async fn collect_budget_reports(
-    cfg: &Config,
+    target: u64,
+    expected_learners: u32,
     reports: &mut HashSet<u32>,
     events: &mut mpsc::Receiver<Event>,
     registry: &Registry,
+    progress_timeout: Duration,
+    event_tape: Option<&std::path::Path>,
+    first_report: Option<(Member, u64)>,
 ) -> Result<()> {
-    let target = cfg
-        .learner_budget_steps
-        .context("learner budget reports require --learner-budget-steps")?;
-    while reports.len() < cfg.learners as usize {
-        match events.recv().await.context("event channel closed")? {
+    let mut first_report = first_report;
+    let mut progress_deadlines: HashMap<u32, tokio::time::Instant> = (0..expected_learners)
+        .filter(|learner_id| !reports.contains(learner_id))
+        .map(|learner_id| (learner_id, tokio::time::Instant::now() + progress_timeout))
+        .collect();
+    while reports.len() < expected_learners as usize {
+        let event = match first_report.take() {
+            Some((member, local_steps)) => Event::BudgetDone {
+                member,
+                local_steps,
+            },
+            None => {
+                let deadline = progress_deadlines
+                    .values()
+                    .copied()
+                    .min()
+                    .context("no progress lease for an unfinished learner")?;
+                tokio::time::timeout_at(deadline, events.recv())
+                    .await
+                    .map_err(|_| {
+                        let now = tokio::time::Instant::now();
+                        let mut stalled: Vec<_> = progress_deadlines
+                            .iter()
+                            .filter_map(|(learner_id, deadline)| {
+                                (*deadline <= now).then_some(*learner_id)
+                            })
+                            .collect();
+                        stalled.sort_unstable();
+                        anyhow::anyhow!(
+                            "timed out collecting BUDGET_DONE after no progress for {:?}: received {}/{}",
+                            stalled,
+                            reports.len(),
+                            expected_learners
+                        )
+                    })?
+                    .context("event channel closed while collecting BUDGET_DONE reports")?
+            }
+        };
+        match event {
             Event::Fatal { metric, message } => {
-                append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                append_strict_failure(event_tape, metric, &message);
                 bail!("RL strict failure {metric}: {message}");
             }
             Event::BudgetDone {
@@ -2033,16 +2621,43 @@ async fn collect_budget_reports(
                     bail!("BUDGET_DONE from a superseded learner");
                 }
                 record_budget_report(reports, target, member, local_steps)?;
+                progress_deadlines.remove(&member.learner_id);
+            }
+            Event::Heartbeat { member, local_step } => {
+                if is_current_member(registry, member)
+                    && !reports.contains(&member.learner_id)
+                    && local_step <= target
+                {
+                    progress_deadlines.insert(
+                        member.learner_id,
+                        tokio::time::Instant::now() + progress_timeout,
+                    );
+                }
+            }
+            Event::Push { member, push } => {
+                if is_current_member(registry, member)
+                    && !reports.contains(&member.learner_id)
+                    && push.local_step <= target
+                {
+                    progress_deadlines.insert(
+                        member.learner_id,
+                        tokio::time::Instant::now() + progress_timeout,
+                    );
+                }
+            }
+            Event::Hello { group } => {
+                let learner_id = group.member.learner_id;
+                if is_current_member(registry, group.member) && !reports.contains(&learner_id) {
+                    progress_deadlines
+                        .insert(learner_id, tokio::time::Instant::now() + progress_timeout);
+                }
             }
             Event::Disconnected { member } => warn!(
                 learner_id = member.learner_id,
                 generation = member.generation,
                 "disconnected while waiting for learner-budget cutoff"
             ),
-            Event::Hello { .. }
-            | Event::Push { .. }
-            | Event::Init { .. }
-            | Event::FinalAck { .. } => {}
+            Event::Init { .. } | Event::FinalAck { .. } => {}
         }
     }
     Ok(())
@@ -2064,6 +2679,53 @@ struct Round {
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
     pushes: HashMap<Member, Push>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ReboundPull {
+    t: u64,
+    p: usize,
+    attempt: u32,
+    base_version: u64,
+    old_generation: u64,
+    pull: bytes::Bytes,
+}
+
+struct ComputedRound {
+    round: Round,
+    merge: ComputedMerge,
+    compute_secs: f64,
+}
+
+enum SchedulerWake {
+    Deadline,
+    Event(Option<Event>),
+    Computed(Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>),
+}
+
+type ComputeJoin = Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>;
+
+/// Event delivery is intentionally biased over compute completion.  The
+/// cutoff gate is the correctness boundary even when an older ordinary event
+/// precedes BUDGET_DONE in the FIFO, while this preference makes the direct
+/// simultaneous-ready case deterministic and minimizes discarded work.
+async fn prefer_event_over_compute<EventFuture, ComputeFuture>(
+    event: EventFuture,
+    compute: ComputeFuture,
+) -> SchedulerWake
+where
+    EventFuture: Future<Output = Option<Event>>,
+    ComputeFuture: Future<Output = ComputeJoin>,
+{
+    tokio::select! {
+        biased;
+        event = event => SchedulerWake::Event(event),
+        result = compute => SchedulerWake::Computed(result),
+    }
+}
+
+fn take_next_commit<T>(ready: &mut BTreeMap<u64, T>, next_t: u64) -> Option<T> {
+    ready.remove(&next_t)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2126,6 +2788,89 @@ fn should_replay_pull(round: &Round, member: Member) -> bool {
             .any(|accepted| accepted.learner_id == member.learner_id)
 }
 
+/// Fixed-roster strict runs freeze logical learner IDs rather than connection
+/// generations. Preserve that contract by replaying an unanswered pull to the
+/// current generation without rewriting the captured roster entry.
+fn fixed_roster_repulls(rounds: &[Round], replacement: Member) -> Vec<ReboundPull> {
+    rounds
+        .iter()
+        .filter(|round| should_replay_pull(round, replacement))
+        .map(|round| {
+            let old_generation = round
+                .expected_members
+                .iter()
+                .find(|expected| expected.learner_id == replacement.learner_id)
+                .expect("replay predicate requires a captured logical learner")
+                .generation;
+            ReboundPull {
+                t: round.t,
+                p: round.p,
+                attempt: round.attempt,
+                base_version: round.base_version,
+                old_generation,
+                pull: round.pull.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Rebind unanswered slots in existing rounds to a reconnect generation.
+///
+/// Accepted pushes are permanent: if any generation of this logical learner
+/// has already answered a round, that round remains frozen. A still-connected
+/// captured generation also remains frozen; a replacement can take over only
+/// after that exact connection is gone. The registry check prevents a delayed
+/// HELLO from rebinding rounds backwards after a still newer connection
+/// superseded it while catch-up was in progress.
+fn rebind_current_unanswered_rounds(
+    registry: &Registry,
+    rounds: &mut [Round],
+    replacement: Member,
+) -> Vec<ReboundPull> {
+    // Keep the registry lock through the membership rewrites.  Otherwise a
+    // newer HELLO could become current after the check but before this loop,
+    // letting a delayed HELLO rebind rounds backwards.
+    let registry = registry.lock().unwrap();
+    if registry.current.get(&replacement.learner_id) != Some(&replacement) {
+        return Vec::new();
+    }
+
+    let mut repulls = Vec::new();
+    for round in rounds {
+        if round
+            .pushes
+            .keys()
+            .any(|member| member.learner_id == replacement.learner_id)
+        {
+            continue;
+        }
+
+        let Some(expected_index) = round.expected_members.iter().position(|member| {
+            member.learner_id == replacement.learner_id && *member != replacement
+        }) else {
+            continue;
+        };
+
+        let expected = round.expected_members[expected_index];
+        if registry.groups.contains_key(&expected) {
+            continue;
+        }
+
+        let old_generation = expected.generation;
+        round.expected_members[expected_index] = replacement;
+        round.expected_members.sort_unstable();
+        repulls.push(ReboundPull {
+            t: round.t,
+            p: round.p,
+            attempt: round.attempt,
+            base_version: round.base_version,
+            old_generation,
+            pull: round.pull.clone(),
+        });
+    }
+    repulls
+}
+
 fn route_push(
     rounds: &mut [Round],
     member: Member,
@@ -2172,19 +2917,60 @@ fn route_push(
     PushDisposition::Accepted
 }
 
-/// Merge a gathered round, apply the outer step, broadcast a non-terminal
-/// update, and record it. The terminal cut is sent once by FINAL_FRAGMENT;
-/// emitting the same model-sized cut as BCAST first would double receiver RSS.
-/// Called from the single scheduler task, so merges are serialized even
-/// with several rounds in flight; concurrent rounds target distinct
-/// fragments, so each merge touches disjoint params/momentum.
-async fn complete_round(
+/// Fix learner order and prepare owned matrix jobs without mutating global
+/// optimizer state. This exact order is the reduction order on every run.
+fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Result<PreparedMerge> {
+    if st.versions.get(round.p).copied() != Some(round.base_version) {
+        bail!(
+            "round t={} fragment {} base version {} != current {:?}",
+            round.t,
+            round.p,
+            round.base_version,
+            st.versions.get(round.p)
+        );
+    }
+    let mut ordered_pushes: Vec<_> = round.pushes.iter().collect();
+    ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
+    let mut outer_gradients = Vec::with_capacity(ordered_pushes.len());
+    let mut weights = Vec::with_capacity(ordered_pushes.len());
+    for (member, push) in ordered_pushes {
+        if push.base_version < round.base_version {
+            warn!(
+                learner_id = member.learner_id,
+                generation = member.generation,
+                step = round.t,
+                base = push.base_version,
+                expected = round.base_version,
+                "stale base-relative delta admitted"
+            );
+        }
+        outer_gradients.push(push.outer_gradient.as_slice());
+        weights.push(match cfg.learner_weight {
+            LearnerWeight::Tokens2OverSteps => {
+                crate::merge::learner_weight(push.c_tokens, push.c_steps)
+            }
+            LearnerWeight::Equal => 1.0,
+        });
+    }
+    st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights)
+}
+
+/// Commit an already-computed round. Called only for the contiguous t prefix,
+/// so Nesterov, versions, ledger, event tape, checkpoint, and broadcast all
+/// share one deterministic order even when SVD completion is out of order.
+async fn commit_round(
     cfg: &Config,
     st: &mut GlobalState,
     registry: &Registry,
     last_sync_secs: &mut f64,
-    round: Round,
+    completed: ComputedRound,
+    budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
+    let ComputedRound {
+        round,
+        merge,
+        compute_secs,
+    } = completed;
     let Round {
         t,
         p,
@@ -2198,43 +2984,27 @@ async fn complete_round(
         pushes,
         ..
     } = round;
-    let expected_step = st
+    let expected_t = st
         .global_step
         .checked_add(1)
         .context("global step overflow before round commit")?;
-    if t != expected_step {
-        bail!("refusing non-contiguous round commit: got step {t}, expected {expected_step}");
+    if t != expected_t {
+        bail!("refusing non-contiguous round commit: got step {t}, expected {expected_t}");
     }
-    debug_assert_eq!(st.versions[p], base_version);
-    let (mut outer_gradients, mut weights, mut responders) = (Vec::new(), Vec::new(), Vec::new());
-    for (member, push) in &pushes {
-        if push.base_version < base_version {
-            // The base-relative update contains only local progress since
-            // the learner's exact raw anchor, so stale pushes remain valid
-            // for every wire dtype without reconstructing historical params.
-            warn!(
-                learner_id = member.learner_id,
-                generation = member.generation,
-                step = t,
-                base = push.base_version,
-                expected = base_version,
-                "stale base-relative delta admitted"
-            );
-        }
-        outer_gradients.push(push.outer_gradient.as_slice());
-        weights.push(match cfg.learner_weight {
-            LearnerWeight::Tokens2OverSteps => {
-                crate::merge::learner_weight(push.c_tokens, push.c_steps)
-            }
-            LearnerWeight::Equal => 1.0,
-        });
-        responders.push(*member);
+    if st.versions.get(p).copied() != Some(base_version) {
+        bail!(
+            "commit t={t} fragment {p} base version {base_version} != current {:?}",
+            st.versions.get(p)
+        );
     }
     let sync_start = Instant::now();
-    let gnorm = st.merge_and_step(p, &outer_gradients, &weights)?;
+    let gnorm = st.commit_merge(merge)?;
     st.versions[p] = t;
     st.global_step = t;
-    for push in pushes.values() {
+    let mut ordered_pushes: Vec<_> = pushes.iter().collect();
+    ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
+    let responders: Vec<Member> = ordered_pushes.iter().map(|(member, _)| **member).collect();
+    for (_, push) in ordered_pushes {
         if let Some(fragments) = cfg.policy_sweep_fragments {
             st.record_fragment_merge(
                 push.learner_id,
@@ -2263,9 +3033,34 @@ async fn complete_round(
     // The terminal round is the sole exception: finalize_learners publishes
     // its exact f32 cut immediately after the scheduler reaches quiescence.
     if t < cfg.total_steps {
-        broadcast_updated_fragment(st, registry, p).await?;
+        let dtype = bulk_dtype(st.wire_dtype);
+        for group in current_groups(registry) {
+            match send_fragment_until_cutoff(
+                st,
+                &group,
+                p,
+                MSG_BCAST_FRAGMENT,
+                dtype,
+                budget_cutoff,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) if error.downcast_ref::<OutboundStreamClosed>().is_some() => warn!(
+                    learner_id = group.member.learner_id,
+                    generation = group.member.generation,
+                    fragment = p,
+                    %error,
+                    "updated fragment broadcast skipped for closed learner stream"
+                ),
+                Err(error) => {
+                    return Err(error.context(format!("cannot broadcast updated fragment {p}")));
+                }
+            }
+        }
     }
-    *last_sync_secs = sync_start.elapsed().as_secs_f64();
+    *last_sync_secs = compute_secs + sync_start.elapsed().as_secs_f64();
     let sync_ms = (*last_sync_secs * 1000.0).round() as u64;
     let ms = started.elapsed().as_millis() as u64;
     info!(
@@ -2277,7 +3072,7 @@ async fn complete_round(
         "outer step"
     );
     if let Some(tape) = &cfg.event_tape {
-        // Durable completion is globally ordered even when gathering is not.
+        // Records land in strict t order, matching optimizer/version commits.
         append_tape(
             tape,
             t,
@@ -2294,7 +3089,7 @@ async fn complete_round(
             ms,
             &st.layout_fingerprint,
             cfg.policy_sweep_fragments,
-        );
+        )?;
     }
     // Consistent cut: this round is fully applied and every other in-flight
     // round is still gathering (it has not touched state). Non-terminal cuts
@@ -2312,6 +3107,26 @@ async fn complete_round(
     Ok(())
 }
 
+#[cfg(test)]
+async fn complete_round(
+    cfg: &Config,
+    st: &mut GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    round: Round,
+) -> Result<()> {
+    let prepared = prepare_round_compute(cfg, st, &round)?;
+    let compute_start = Instant::now();
+    let merge = prepared.compute().await?;
+    let completed = ComputedRound {
+        round,
+        merge,
+        compute_secs: compute_start.elapsed().as_secs_f64(),
+    };
+    let cutoff = BudgetCutoff::new(false, Duration::ZERO);
+    commit_round(cfg, st, registry, last_sync_secs, completed, &cutoff).await
+}
+
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     if let Some(fragments) = cfg.policy_sweep_fragments {
         if group.dtype != DTYPE_F32 {
@@ -2324,43 +3139,75 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
             );
         }
     }
-    let mut st = GlobalState::new_with_layout_fingerprint(
+    let mut st = GlobalState::new_with_iso_backend(
         group.layout.clone(),
         cfg.outer_lr,
         cfg.outer_momentum,
         group.dtype,
         group.layout_fingerprint,
+        &cfg.iso_backend,
     )?;
     st.policy_sweep_fragments = cfg.policy_sweep_fragments;
     st.session_contract_hash = Some(group.session_contract_hash);
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
+    info!(
+        iso_backend = %st.iso_backend_kind(),
+        "initialized global state"
+    );
     Ok(st)
 }
 
 fn current_groups(registry: &Registry) -> Vec<Arc<Group>> {
     let registry = registry.lock().unwrap();
-    registry
+    let mut groups: Vec<_> = registry
         .current
         .values()
         .filter_map(|member| registry.groups.get(member).cloned())
-        .collect()
+        .collect();
+    groups.sort_unstable_by_key(|group| group.member);
+    groups
 }
 
 fn is_current_member(registry: &Registry, member: Member) -> bool {
     registry.lock().unwrap().current.get(&member.learner_id) == Some(&member)
 }
 
-async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
-    for g in current_groups(registry) {
-        if let Err(error) = send_all_fragments(st, &g).await {
-            warn!(
-                learner_id = g.member.learner_id,
-                generation = g.member.generation,
-                %error,
-                "initial authoritative cut send failed"
-            );
+async fn broadcast_all_fragments(
+    st: &GlobalState,
+    registry: &Registry,
+    budget_cutoff: &BudgetCutoff,
+) {
+    let groups = current_groups(registry);
+    // Fan each fragment out to every learner before moving to the next one.
+    // Each learner has independent socket-writer queues, so this keeps all
+    // links busy concurrently.  Iterating learner-by-learner here serializes
+    // one full model transfer per learner (tens of GiB for large models).
+    // The current streaming encoder keeps peak host memory bounded while the
+    // per-learner socket queues provide link concurrency.
+    for p in 0..st.layout.fragments.len() {
+        for group in &groups {
+            match send_fragment_until_cutoff(
+                st,
+                group,
+                p,
+                MSG_BCAST_FRAGMENT,
+                bulk_dtype(st.wire_dtype),
+                budget_cutoff,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => warn!(
+                    learner_id = group.member.learner_id,
+                    generation = group.member.generation,
+                    fragment = p,
+                    %error,
+                    "initial authoritative cut send failed"
+                ),
+            }
         }
     }
 }
@@ -2558,7 +3405,10 @@ async fn finalize_learners(
                     "learner disconnected during finalization; waiting for reconnect"
                 );
             }
-            Event::Push { .. } | Event::Init { .. } | Event::BudgetDone { .. } => {
+            Event::Push { .. }
+            | Event::Heartbeat { .. }
+            | Event::Init { .. }
+            | Event::BudgetDone { .. } => {
                 // The authoritative cut is frozen; late training traffic is
                 // intentionally ignored while learners finalize.
             }
@@ -2582,11 +3432,32 @@ async fn finalize_learners(
     Ok(())
 }
 
-async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
+async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>, budget_cutoff: &BudgetCutoff) {
     for p in 0..st.layout.fragments.len() {
-        send_fragment(st, group, p, MSG_BCAST_FRAGMENT, bulk_dtype(st.wire_dtype)).await?;
+        match send_fragment_until_cutoff(
+            st,
+            group,
+            p,
+            MSG_BCAST_FRAGMENT,
+            bulk_dtype(st.wire_dtype),
+            budget_cutoff,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                warn!(
+                    learner_id = group.member.learner_id,
+                    generation = group.member.generation,
+                    fragment = p,
+                    %error,
+                    "recovery fragment encode failed"
+                );
+                return;
+            }
+        }
     }
-    Ok(())
 }
 
 async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: usize) -> Result<()> {
@@ -2756,7 +3627,7 @@ fn append_tape(
     ms: u64,
     layout_fingerprint: &[u8; 32],
     policy_sweep_fragments: Option<u32>,
-) {
+) -> Result<()> {
     use std::io::Write;
     let mut responded_members: Vec<Member> = pushes.keys().copied().collect();
     responded_members.sort_unstable();
@@ -2837,14 +3708,13 @@ fn append_tape(
         json_members(&missed_members),
         responders.join(",")
     );
-    let res = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .and_then(|mut f| f.write_all(line.as_bytes()));
-    if let Err(e) = res {
-        warn!("event tape write failed: {e}");
-    }
+        .and_then(|mut f| f.write_all(line.as_bytes()))
+        .with_context(|| format!("append event tape {}", path.display()))?;
+    Ok(())
 }
 
 fn json_ids(ids: &[u32]) -> String {
@@ -2900,6 +3770,16 @@ mod tests {
         }
     }
 
+    fn registry_with_current(current: Member) -> Registry {
+        let registry = Arc::new(Mutex::new(RegistryState::default()));
+        registry
+            .lock()
+            .unwrap()
+            .current
+            .insert(current.learner_id, current);
+        registry
+    }
+
     fn test_group(member: Member) -> Arc<Group> {
         test_group_with_layout(
             member,
@@ -2926,6 +3806,27 @@ mod tests {
             layout,
             layout_fingerprint,
             session_contract_hash,
+            num_streams: 0,
+            max_init_payload: 0,
+            max_push_payload: 0,
+            max_chunked_inner: 13,
+            control,
+            data: Mutex::new(HashMap::new()),
+            msg_id: AtomicU64::new(0),
+            rr: AtomicUsize::new(0),
+            reasm: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn test_group_with_control(member: Member, control: mpsc::Sender<OutFrame>) -> Arc<Group> {
+        Arc::new(Group {
+            member,
+            dtype: DTYPE_F32,
+            layout: Layout {
+                fragments: Vec::new(),
+            },
+            layout_fingerprint: [0; 32],
+            session_contract_hash: [0; 32],
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
@@ -3085,6 +3986,7 @@ mod tests {
             policy_sweep_fragments: None,
             outer_lr: 1.0,
             outer_momentum: 0.0,
+            iso_backend: crate::iso_worker::IsoBackendConfig::default(),
             final_state: None,
             checkpoint_path: None,
             checkpoint_every: 0,
@@ -3951,15 +4853,160 @@ mod tests {
     }
 
     #[test]
-    fn budget_reports_are_exact_unique_and_cover_logical_learners() {
+    fn budget_reports_are_exact_idempotent_and_cover_logical_learners() {
         let mut reports = HashSet::new();
         record_budget_report(&mut reports, 8, member(0, 10), 8).unwrap();
         record_budget_report(&mut reports, 8, member(1, 20), 8).unwrap();
         assert_eq!(reports.len(), 2);
-        assert!(record_budget_report(&mut reports, 8, member(1, 21), 8).is_err());
+        record_budget_report(&mut reports, 8, member(1, 21), 8).unwrap();
+        assert_eq!(reports.len(), 2);
 
         let mut wrong = HashSet::new();
         assert!(record_budget_report(&mut wrong, 8, member(0, 10), 7).is_err());
+    }
+
+    #[test]
+    fn queued_budget_report_blocks_every_later_scheduler_action() {
+        let cutoff = BudgetCutoff::new(true, Duration::from_secs(30));
+        assert!(cutoff.try_linearize_work());
+
+        // request() runs before dispatch queues Event::BudgetDone.  Repeating
+        // it is idempotent and preserves the original absolute deadline.
+        let deadline = cutoff.request().unwrap();
+        assert_eq!(cutoff.request(), Some(deadline));
+
+        // These three claims represent commit, pull/retry, and compute submit.
+        // All use this same method in the scheduler and all must now fail.
+        assert!(!cutoff.try_linearize_work());
+        assert!(!cutoff.try_linearize_work());
+        assert!(!cutoff.try_linearize_work());
+    }
+
+    #[tokio::test]
+    async fn queued_budget_event_wins_simultaneous_compute_completion() {
+        let cutoff = BudgetCutoff::new(true, Duration::from_secs(30));
+        cutoff.request();
+        let event = Some(Event::BudgetDone {
+            member: member(0, 10),
+            local_steps: 8,
+        });
+        // Both futures are Ready on their first poll.  An inner error is still
+        // a completed scheduler compute task and avoids manufacturing private
+        // ComputedMerge state solely for this arbitration test.
+        let compute: ComputeJoin = Some(Ok(Err(anyhow::anyhow!(
+            "synthetic ready compute completion"
+        ))));
+
+        let wake =
+            prefer_event_over_compute(std::future::ready(event), std::future::ready(compute)).await;
+        assert!(matches!(
+            wake,
+            SchedulerWake::Event(Some(Event::BudgetDone {
+                member: Member {
+                    learner_id: 0,
+                    generation: 10
+                },
+                local_steps: 8
+            }))
+        ));
+        assert!(!cutoff.try_linearize_work());
+    }
+
+    #[tokio::test]
+    async fn cutoff_notification_interrupts_a_backpressured_pull_send() {
+        let (control, _receiver) = mpsc::channel(1);
+        assert!(control
+            .try_send(OutFrame {
+                msg_type: MSG_PULL_REQ,
+                parts: vec![bytes::Bytes::new()],
+            })
+            .is_ok());
+        let group = test_group_with_control(member(0, 10), control);
+        let cutoff = Arc::new(BudgetCutoff::new(true, Duration::from_secs(30)));
+        let task_group = group.clone();
+        let task_cutoff = cutoff.clone();
+        let send = tokio::spawn(async move {
+            send_small_until_cutoff(&task_group, MSG_PULL_REQ, bytes::Bytes::new(), &task_cutoff)
+                .await
+        });
+        tokio::task::yield_now().await;
+        cutoff.request();
+        let queued = tokio::time::timeout(Duration::from_secs(1), send)
+            .await
+            .expect("backpressured pull did not observe cutoff")
+            .expect("pull send task panicked");
+        assert!(!queued);
+    }
+
+    #[tokio::test]
+    async fn budget_report_collection_times_out_on_missing_progress() {
+        let (_sender, mut events) = mpsc::channel(1);
+        let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
+        let mut reports = HashSet::new();
+        let result = collect_budget_reports(
+            8,
+            2,
+            &mut reports,
+            &mut events,
+            &registry,
+            Duration::from_millis(1),
+            None,
+            None,
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("pending report collection unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains("no progress for [0, 1]"), "{message}");
+        assert!(message.contains("received 0/2"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_renews_only_the_reporting_learners_progress_lease() {
+        let (sender, mut events) = mpsc::channel(4);
+        let completed = member(0, 10);
+        let current = member(1, 20);
+        let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.current.insert(0, completed);
+            registry.current.insert(1, current);
+        }
+        let mut reports = HashSet::new();
+        let collect = collect_budget_reports(
+            8,
+            2,
+            &mut reports,
+            &mut events,
+            &registry,
+            Duration::from_millis(40),
+            None,
+            Some((completed, 8)),
+        );
+        let produce = async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            sender
+                .send(Event::Heartbeat {
+                    member: current,
+                    local_step: 7,
+                })
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            sender
+                .send(Event::BudgetDone {
+                    member: current,
+                    local_steps: 8,
+                })
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(collect, produce);
+        result.unwrap();
+        assert_eq!(reports, HashSet::from([0, 1]));
     }
 
     #[test]
@@ -4172,6 +5219,223 @@ mod tests {
         }
     }
 
+    fn test_push_for(learner_id: u32, base_version: u64) -> Push {
+        let mut push = test_push(base_version);
+        push.learner_id = learner_id;
+        push
+    }
+
+    #[test]
+    fn unanswered_reconnect_rebinds_and_accepts_new_generation() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let other = member(1, 20);
+        let registry = registry_with_current(replacement);
+        let pull = bytes::Bytes::from_static(b"outstanding-pull");
+        let mut round = test_round(vec![old, other]);
+        round.pull = pull.clone();
+        round.pushes.insert(other, test_push_for(1, 5));
+        let mut rounds = vec![round];
+
+        assert_eq!(
+            rebind_current_unanswered_rounds(&registry, &mut rounds, replacement),
+            vec![ReboundPull {
+                t: 7,
+                p: 1,
+                attempt: 1,
+                base_version: 5,
+                old_generation: 10,
+                pull,
+            }]
+        );
+        assert_eq!(rounds[0].expected_members, vec![replacement, other]);
+        assert_eq!(rounds[0].pushes.get(&other).unwrap().learner_id, 1);
+        assert_eq!(
+            route_push(&mut rounds, replacement, test_push(5), None, false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(
+            route_push(&mut rounds, old, test_push(5), None, false),
+            PushDisposition::UnexpectedMember
+        );
+        assert_eq!(rounds[0].pushes.len(), 2);
+    }
+
+    #[test]
+    fn live_captured_generation_blocks_rebind_until_disconnect() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let registry = Arc::new(Mutex::new(RegistryState::default()));
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.register_group(test_group(old)).unwrap();
+            registry.register_group(test_group(replacement)).unwrap();
+        }
+        let mut rounds = vec![test_round(vec![old])];
+
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![old]);
+
+        registry.lock().unwrap().groups.remove(&old);
+        assert_eq!(
+            rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).len(),
+            1
+        );
+        assert_eq!(rounds[0].expected_members, vec![replacement]);
+    }
+
+    #[test]
+    fn answered_reconnect_does_not_rebind_or_repull() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let registry = registry_with_current(replacement);
+        let mut round = test_round(vec![old]);
+        round.pushes.insert(old, test_push(5));
+        let mut rounds = vec![round];
+
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![old]);
+        assert!(rounds[0].pushes.contains_key(&old));
+        assert_eq!(
+            route_push(&mut rounds, replacement, test_push(5), None, false),
+            PushDisposition::UnexpectedMember
+        );
+    }
+
+    #[test]
+    fn same_generation_rebind_is_idempotent_and_does_not_repull() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let registry = registry_with_current(replacement);
+        let mut rounds = vec![test_round(vec![old])];
+
+        assert_eq!(
+            rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).len(),
+            1
+        );
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![replacement]);
+    }
+
+    #[test]
+    fn superseded_hello_cannot_rebind_backwards() {
+        let superseded = member(0, 11);
+        let current = member(0, 12);
+        let registry = registry_with_current(current);
+        let mut rounds = vec![test_round(vec![current])];
+
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, superseded).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![current]);
+    }
+
+    #[test]
+    fn multiple_inflight_rounds_rebind_selectively() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let other = member(1, 20);
+        let unrelated = member(2, 30);
+        let registry = registry_with_current(replacement);
+
+        let mut first = test_round(vec![old, other]);
+        first.pull = bytes::Bytes::from_static(b"first");
+        first.pushes.insert(other, test_push_for(1, 5));
+
+        let mut second = test_round(vec![old]);
+        second.t = 8;
+        second.p = 2;
+        second.pull = bytes::Bytes::from_static(b"second");
+
+        let mut answered = test_round(vec![old]);
+        answered.t = 9;
+        answered.p = 3;
+        let mut answered_push = test_push(5);
+        answered_push.global_step = 9;
+        answered_push.fragment_id = 3;
+        answered.pushes.insert(old, answered_push);
+
+        let mut unrelated_round = test_round(vec![unrelated]);
+        unrelated_round.t = 10;
+        unrelated_round.p = 4;
+
+        let mut rounds = vec![first, second, answered, unrelated_round];
+        let repulls = rebind_current_unanswered_rounds(&registry, &mut rounds, replacement);
+
+        assert_eq!(
+            repulls
+                .iter()
+                .map(|repull| (repull.t, repull.p, repull.pull.as_ref()))
+                .collect::<Vec<_>>(),
+            vec![(7, 1, b"first".as_slice()), (8, 2, b"second".as_slice())]
+        );
+        assert_eq!(rounds[0].expected_members, vec![replacement, other]);
+        assert_eq!(rounds[1].expected_members, vec![replacement]);
+        assert_eq!(rounds[2].expected_members, vec![old]);
+        assert_eq!(rounds[3].expected_members, vec![unrelated]);
+        assert!(rounds[0].pushes.contains_key(&other));
+        assert!(rounds[2].pushes.contains_key(&old));
+    }
+
+    #[test]
+    fn rebind_preserves_round_metadata() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let other = member(1, 20);
+        let registry = registry_with_current(replacement);
+        let started = Instant::now() - Duration::from_secs(2);
+        let quorum_deadline = Instant::now() + Duration::from_secs(17);
+        let grace_deadline = Some(Instant::now() + Duration::from_secs(9));
+        let pull = bytes::Bytes::from_static(b"exact-wire-pull");
+        let mut round = test_round(vec![other, old]);
+        round.t = 41;
+        round.p = 3;
+        round.base_version = 17;
+        round.attempt = 9;
+        round.pull = pull.clone();
+        round.started = started;
+        round.quorum_deadline = quorum_deadline;
+        round.grace_deadline = grace_deadline;
+        round.quorum_size = 2;
+        round.quorum_ms = Some(123);
+        round.grace_ms = Some(456);
+        let mut other_push = test_push_for(1, 16);
+        other_push.global_step = 41;
+        other_push.fragment_id = 3;
+        other_push.round_attempt = 9;
+        other_push.local_step = 77;
+        round.pushes.insert(other, other_push);
+        let mut rounds = vec![round];
+
+        assert_eq!(
+            rebind_current_unanswered_rounds(&registry, &mut rounds, replacement),
+            vec![ReboundPull {
+                t: 41,
+                p: 3,
+                attempt: 9,
+                base_version: 17,
+                old_generation: 10,
+                pull: pull.clone(),
+            }]
+        );
+        let rebound = &rounds[0];
+        assert_eq!(rebound.t, 41);
+        assert_eq!(rebound.p, 3);
+        assert_eq!(rebound.base_version, 17);
+        assert_eq!(rebound.attempt, 9);
+        assert_eq!(rebound.pull, pull);
+        assert_eq!(rebound.started, started);
+        assert_eq!(rebound.quorum_deadline, quorum_deadline);
+        assert_eq!(rebound.grace_deadline, grace_deadline);
+        assert_eq!(rebound.quorum_size, 2);
+        assert_eq!(rebound.quorum_ms, Some(123));
+        assert_eq!(rebound.grace_ms, Some(456));
+        assert_eq!(rebound.expected_members, vec![replacement, other]);
+        assert_eq!(rebound.pushes.len(), 1);
+        let preserved_push = rebound.pushes.get(&other).unwrap();
+        assert_eq!(preserved_push.learner_id, 1);
+        assert_eq!(preserved_push.base_version, 16);
+        assert_eq!(preserved_push.local_step, 77);
+    }
+
     #[test]
     fn round_membership_rejects_mid_round_join_and_new_generation() {
         let captured = member(0, 10);
@@ -4215,6 +5479,21 @@ mod tests {
 
         assert!(!fragment_available(&inflight, 0));
         assert!(fragment_available(&inflight, 1));
+    }
+
+    #[test]
+    fn out_of_order_compute_results_wait_for_contiguous_t_commit() {
+        let mut ready = BTreeMap::new();
+        ready.insert(12, "twelve");
+
+        // cuda:N may finish t+1 first; the coordinator must not pop it.
+        assert_eq!(take_next_commit(&mut ready, 11), None);
+        assert_eq!(ready.get(&12), Some(&"twelve"));
+
+        ready.insert(11, "eleven");
+        assert_eq!(take_next_commit(&mut ready, 11), Some("eleven"));
+        assert_eq!(take_next_commit(&mut ready, 12), Some("twelve"));
+        assert!(ready.is_empty());
     }
 
     #[test]
@@ -4350,7 +5629,8 @@ mod tests {
             44,
             &[7; 32],
             None,
-        );
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"expected\":[0,1]"));
         assert!(text.contains("\"expected_members\":[{\"id\":0,\"generation\":10}"));
@@ -4388,7 +5668,8 @@ mod tests {
             3,
             &[7; 32],
             Some(3),
-        );
+        )
+        .unwrap();
         let partial = std::fs::read_to_string(&path).unwrap();
         assert!(partial.contains("\"policy_round\":2"));
         assert!(partial.contains("\"sweep_fragment\":1"));
@@ -4415,7 +5696,8 @@ mod tests {
             3,
             &[7; 32],
             Some(3),
-        );
+        )
+        .unwrap();
         let complete = std::fs::read_to_string(&path).unwrap();
         assert!(complete.contains("\"policy_round\":2"));
         assert!(complete.contains("\"sweep_fragment\":2"));
@@ -4519,7 +5801,8 @@ mod tests {
             3,
             &[7; 32],
             Some(3),
-        );
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.matches("\"weight\":1").count(), 2);
         assert_eq!(text.matches("\"contribution\":0.5").count(), 2);

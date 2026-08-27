@@ -571,29 +571,39 @@ def _preflight_codex_harness(args) -> None:
     )
     if contract.get("backend") != expected_backend:
         raise ValueError("stock Codex backend/TITO identity drifted")
-    try:
-        from yeto_miles_secrlenv import codex_harness_agent
-
-        live_identity = codex_harness_agent.codex_harness_identity()
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
-        raise ValueError("cannot attest the Yeto Codex harness adapter") from exc
-    identity_names = (
-        "base_instructions_sha256",
-        "terminal_exec_tool_schema_sha256",
-        "submit_tool_schema_sha256",
-        "dynamic_tools_schema_sha256",
-    )
-    if live_identity != {name: contract.get(name) for name in identity_names}:
-        raise ValueError("Yeto Codex adapter identity drifted")
-
     from ..provenance import file_sha256
 
-    adapter_path = Path(codex_harness_agent.__file__)
-    if adapter_path.is_symlink() or not adapter_path.is_file():
-        raise ValueError("Yeto Codex adapter source identity drifted")
-    adapter_path = adapter_path.resolve()
-    if file_sha256(adapter_path) != contract.get("agent_source_sha256"):
-        raise ValueError("Yeto Codex adapter source identity drifted")
+    # OpenEnv owns and attests its adapter inside the pinned Miles source.  The
+    # legacy SecRLEnv-backed Codex adapter remains an optional integration, but
+    # it must not be required for the independent Terminal-Bench path.
+    if args.custom_agent_function_path != CODEX_OPENENV_AGENT:
+        try:
+            from yeto_miles_secrlenv import codex_harness_agent
+
+            live_identity = codex_harness_agent.codex_harness_identity()
+        except (
+            ImportError,
+            AttributeError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+        ) as exc:
+            raise ValueError("cannot attest the Yeto Codex harness adapter") from exc
+        identity_names = (
+            "base_instructions_sha256",
+            "terminal_exec_tool_schema_sha256",
+            "submit_tool_schema_sha256",
+            "dynamic_tools_schema_sha256",
+        )
+        if live_identity != {name: contract.get(name) for name in identity_names}:
+            raise ValueError("Yeto Codex adapter identity drifted")
+
+        adapter_path = Path(codex_harness_agent.__file__)
+        if adapter_path.is_symlink() or not adapter_path.is_file():
+            raise ValueError("Yeto Codex adapter source identity drifted")
+        adapter_path = adapter_path.resolve()
+        if file_sha256(adapter_path) != contract.get("agent_source_sha256"):
+            raise ValueError("Yeto Codex adapter source identity drifted")
     binary = Path(CODEX_CONTAINER_BINARY_PATH)
     manifest = Path("/opt/yeto/codex/codex-package.json")
     schema = Path(CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH)

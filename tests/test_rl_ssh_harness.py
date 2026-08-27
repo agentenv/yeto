@@ -241,6 +241,7 @@ def test_secrlenv_plan_round_trip_requires_exact_replacement_contract():
 
 
 def _secrlenv_eval_plan(path: Path):
+    pytest.importorskip("yeto_miles_secrlenv")
     plan = _local_data_plan(path)
     _enable_secrlenv_agent(plan)
     plan["learner"]["reward_function"] = ssh_harness.SECRLENV_REWARD
@@ -918,6 +919,7 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
 
 
 def test_prepare_wires_final_secrlenv_eval_and_same_dataset_sha(tmp_path, monkeypatch):
+    pytest.importorskip("yeto_miles_secrlenv")
     prompts = tmp_path / "flaky100.jsonl"
     prompts.write_text('{"messages": []}\n', encoding="utf-8")
     learner = _plan()["learner"]
@@ -2336,30 +2338,19 @@ def test_codex_controller_artifacts_are_attested_before_plan_write(
     monkeypatch.setattr(ssh_harness, "CODEX_LINUX_BINARY_SHA256", digest(binary))
     monkeypatch.setattr(ssh_harness, "CODEX_PACKAGE_MANIFEST_SHA256", digest(manifest))
     monkeypatch.setattr(ssh_harness, "CODEX_APP_SERVER_SCHEMA_SHA256", digest(schema))
-    identity = {
-        "base_instructions_sha256": rl_config.CODEX_BASE_INSTRUCTIONS_SHA256,
-        "terminal_exec_tool_schema_sha256": (
-            rl_config.CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
-        ),
-        "submit_tool_schema_sha256": (rl_config.CODEX_SUBMIT_TOOL_SCHEMA_SHA256),
-        "dynamic_tools_schema_sha256": (rl_config.CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256),
-    }
-    monkeypatch.setattr(ssh_harness, "_codex_adapter_identity", lambda: identity)
     namespace = SimpleNamespace(
         codex_harness_binary=str(binary),
         codex_package_manifest=str(manifest),
         codex_app_server_schema=str(schema),
     )
     args = SimpleNamespace(
+        custom_agent_function_path=rl_config.CODEX_OPENENV_AGENT,
         codex_reasoning_effort="xhigh",
-        tito_model="deepseekv4",
+        codex_backend_profile="qwen35_08b",
+        tito_model="qwen35",
         rollout_max_response_len=4096,
         tito_allowed_append_roles=["tool", "user"],
-        apply_chat_template_kwargs={
-            "thinking_mode": "thinking",
-            "reasoning_effort": "max",
-            "drop_thinking": False,
-        },
+        apply_chat_template_kwargs={"clear_thinking": False},
     )
 
     contract = ssh_harness._codex_harness_contract(namespace, args)
@@ -2367,7 +2358,8 @@ def test_codex_controller_artifacts_are_attested_before_plan_write(
     assert contract["controller_binary_path"] == str(binary)
     assert contract["binary_sha256"] == digest(binary)
     assert contract["app_server_schema_sha256"] == digest(schema)
-    assert contract["backend"]["reasoning_effort"] == "max"
+    assert contract["backend"]["reasoning_effort"] == "xhigh"
+    assert contract["openenv_identity_env"] == rl_config.CODEX_OPENENV_IDENTITY_ENV
 
     binary.chmod(0o755)
     binary.write_bytes(b"drifted")

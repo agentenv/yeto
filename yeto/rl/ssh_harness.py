@@ -29,7 +29,6 @@ from . import (
     CODEX_CONTAINER_BINARY_PATH,
     CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
     CODEX_HARNESS_AGENT,
-    CODEX_HARNESS_AGENT_PATH,
     CODEX_HARNESS_AGENT_SHA256,
     CODEX_LINUX_BINARY_SHA256,
     CODEX_LINUX_BINARY_SIZE_BYTES,
@@ -473,8 +472,35 @@ def _syncer_source_sha256() -> str:
     return digest.hexdigest()
 
 
+def _pinned_codex_adapter_identity() -> dict[str, str]:
+    return {
+        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
+        "terminal_exec_tool_schema_sha256": (
+            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
+        ),
+        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
+        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
+    }
+
+
+def _codex_adapter_source_path() -> Path:
+    """Resolve the optional legacy adapter from its installed package."""
+
+    try:
+        from yeto_miles_secrlenv import codex_harness_agent
+    except ImportError as exc:
+        raise HarnessError("cannot attest the Yeto Codex harness adapter") from exc
+    value = getattr(codex_harness_agent, "__file__", None)
+    if not isinstance(value, str):
+        raise HarnessError("Yeto Codex harness adapter has no source identity")
+    source = Path(value)
+    if source.is_symlink() or not source.is_file():
+        raise HarnessError("Yeto Codex harness adapter source is unavailable")
+    return source.resolve()
+
+
 def _codex_adapter_identity() -> dict[str, str]:
-    """Read hashes derived by the live Yeto Codex adapter, never user input."""
+    """Read hashes derived by the live optional Codex adapter."""
 
     try:
         from yeto_miles_secrlenv import codex_harness_agent
@@ -493,14 +519,7 @@ def _codex_adapter_identity() -> dict[str, str]:
     normalized = {name: str(value).lower() for name, value in identity.items()}
     if any(not _SHA256.fullmatch(value) for value in normalized.values()):
         raise HarnessError("Yeto Codex adapter identity contains an invalid SHA256")
-    expected = {
-        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
-        "terminal_exec_tool_schema_sha256": (
-            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
-        ),
-        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
-        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
-    }
+    expected = _pinned_codex_adapter_identity()
     if normalized != expected:
         raise HarnessError("Yeto Codex adapter identity does not match its Yeto pins")
     return normalized
@@ -542,12 +561,20 @@ def _codex_harness_contract(namespace, args) -> dict[str, Any]:
         raise HarnessError("Codex package manifest SHA256 does not match its Yeto pin")
     if file_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256:
         raise HarnessError("Codex app-server schema SHA256 does not match its Yeto pin")
-    identity = _codex_adapter_identity()
-    adapter_path = REPO_ROOT / CODEX_HARNESS_AGENT_PATH
-    if adapter_path.is_symlink() or not adapter_path.is_file():
-        raise HarnessError("Yeto Codex harness adapter is missing")
-    if file_sha256(adapter_path) != CODEX_HARNESS_AGENT_SHA256:
-        raise HarnessError("Yeto Codex harness adapter source does not match its pin")
+    openenv = (
+        getattr(args, "custom_agent_function_path", None) == CODEX_OPENENV_AGENT
+    )
+    if openenv:
+        # The OpenEnv wrapper is shipped by the pinned Miles bundle and is
+        # attested inside the learner before model allocation.
+        identity = _pinned_codex_adapter_identity()
+    else:
+        identity = _codex_adapter_identity()
+        adapter_path = _codex_adapter_source_path()
+        if file_sha256(adapter_path) != CODEX_HARNESS_AGENT_SHA256:
+            raise HarnessError(
+                "Yeto Codex harness adapter source does not match its pin"
+            )
     from .codex_backend import stock_codex_backend_contract
 
     profile_name = getattr(args, "codex_backend_profile", None) or args.tito_model
@@ -581,7 +608,7 @@ def _codex_harness_contract(namespace, args) -> dict[str, Any]:
         "reasoning_effort": args.codex_reasoning_effort,
         "backend": backend,
     }
-    if getattr(args, "custom_agent_function_path", None) == CODEX_OPENENV_AGENT:
+    if openenv:
         contract["openenv_identity_env"] = dict(CODEX_OPENENV_IDENTITY_ENV)
     return contract
 
@@ -2280,23 +2307,29 @@ def _attest_local(plan: dict[str, Any]) -> None:
                 or file_sha256(path) != expected_sha256
             ):
                 raise HarnessError("Codex controller artifact changed after prepare")
-        adapter_path = REPO_ROOT / CODEX_HARNESS_AGENT_PATH
-        if (
-            adapter_path.is_symlink()
-            or not adapter_path.is_file()
-            or file_sha256(adapter_path) != codex_harness["agent_source_sha256"]
-            or _codex_adapter_identity()
-            != {
-                name: codex_harness[name]
-                for name in (
-                    "base_instructions_sha256",
-                    "terminal_exec_tool_schema_sha256",
-                    "submit_tool_schema_sha256",
-                    "dynamic_tools_schema_sha256",
-                )
-            }
-        ):
-            raise HarnessError("Yeto Codex adapter changed after prepare")
+        if learner.get("custom_agent_function_path") != CODEX_OPENENV_AGENT:
+            try:
+                adapter_path = _codex_adapter_source_path()
+                adapter_identity = _codex_adapter_identity()
+            except HarnessError:
+                raise HarnessError(
+                    "Yeto Codex adapter changed after prepare"
+                ) from None
+            if (
+                file_sha256(adapter_path)
+                != codex_harness["agent_source_sha256"]
+                or adapter_identity
+                != {
+                    name: codex_harness[name]
+                    for name in (
+                        "base_instructions_sha256",
+                        "terminal_exec_tool_schema_sha256",
+                        "submit_tool_schema_sha256",
+                        "dynamic_tools_schema_sha256",
+                    )
+                }
+            ):
+                raise HarnessError("Yeto Codex adapter changed after prepare")
     data_local_path = plan["learner"].get("data_local_path")
     if (
         data_local_path is not None

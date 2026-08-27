@@ -1,3 +1,4 @@
+mod iso_worker;
 mod merge;
 mod protocol;
 mod server;
@@ -69,6 +70,23 @@ struct Args {
     /// Outer Nesterov momentum.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
+    /// Iso spectrum-flattening implementation: the scalar reference kernel,
+    /// or a persistent exact f32 Torch SVD worker.
+    #[arg(long, default_value = "scalar")]
+    iso_backend: String,
+    /// Python executable used by --iso-backend=torch-svd.
+    #[arg(long, default_value = "python3")]
+    iso_worker_python: std::path::PathBuf,
+    /// Torch device used by --iso-backend=torch-svd.
+    #[arg(long, default_value = "cuda:0")]
+    iso_worker_device: String,
+    /// Explicit comma-separated Torch devices, one persistent worker per
+    /// device. Overrides --iso-worker-device when non-empty.
+    #[arg(long, value_delimiter = ',')]
+    iso_worker_devices: Vec<String>,
+    /// Maximum complete matrices waiting to enter the SVD workers.
+    #[arg(long, default_value_t = 16)]
+    iso_worker_queue_capacity: usize,
     /// Optional path to dump the final global parameters (flat f32 binary).
     #[arg(long)]
     final_state: Option<std::path::PathBuf>,
@@ -133,6 +151,25 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("--learner-weight must be 'tokens2-over-steps' or 'equal', got {other:?}")
         }
     };
+    let final_ack_timeout_s = args.resolved_final_ack_timeout_s();
+    let devices = if args.iso_worker_devices.is_empty() {
+        vec![args.iso_worker_device.clone()]
+    } else {
+        args.iso_worker_devices
+    };
+    if devices.iter().any(String::is_empty) {
+        anyhow::bail!("--iso-worker-devices cannot contain an empty device");
+    }
+    let unique: std::collections::HashSet<_> = devices.iter().collect();
+    if unique.len() != devices.len() {
+        anyhow::bail!("--iso-worker-devices cannot contain duplicates");
+    }
+    let iso_backend = iso_worker::IsoBackendConfig {
+        kind: args.iso_backend.parse()?,
+        python: args.iso_worker_python,
+        device: args.iso_worker_device,
+    }
+    .with_pool(devices, args.iso_worker_queue_capacity)?;
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
@@ -145,11 +182,12 @@ fn main() -> anyhow::Result<()> {
         sync_interval_steps: args.sync_interval_steps,
         delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
-        final_ack_timeout_s: args.resolved_final_ack_timeout_s(),
+        final_ack_timeout_s,
         total_steps: args.total_steps,
         policy_sweep_fragments: args.policy_sweep_fragments,
         outer_lr: args.outer_lr,
         outer_momentum: args.outer_momentum,
+        iso_backend,
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,

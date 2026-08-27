@@ -11,12 +11,17 @@ import torch
 from yeto import export as export_module
 from yeto.export import (
     CKPT_MAGIC,
+    CKPT_MAGIC_V2,
+    CKPT_MAGIC_V3,
+    ISO_BACKEND_SCALAR,
+    ISO_BACKEND_TORCH_SVD,
     POLICY_SWEEP_CKPT_MAGIC,
     STREAMING_CONTRACT_CKPT_MAGIC,
     parse_checkpoint,
     validate_against_layout,
 )
-from yeto.fragments import build_layout
+from yeto.fragments import Fragment, FragmentLayout, build_layout
+from yeto.protocol import layout_fingerprint
 from yeto.tensor_io import apply_fragment
 
 
@@ -39,10 +44,23 @@ def flat_fragment(frag, params):
     return torch.cat([params[n].reshape(-1).float() for n, _ in frag.tensors])
 
 
-def checkpoint_bytes(global_step, blobs, ledger, magic=CKPT_MAGIC):
+def checkpoint_bytes(
+    global_step,
+    blobs,
+    ledger,
+    magic=CKPT_MAGIC,
+    backend_id=ISO_BACKEND_SCALAR,
+    semantic_fingerprint=None,
+):
     """Encode (version, params, momentum) blobs in the syncer's binary format."""
     buf = bytearray()
     buf += struct.pack("<I", magic)
+    if magic in (CKPT_MAGIC_V2, CKPT_MAGIC_V3):
+        buf += struct.pack("<B", backend_id)
+    if magic == CKPT_MAGIC_V3:
+        assert semantic_fingerprint is not None
+        assert len(semantic_fingerprint) == 32
+        buf += semantic_fingerprint
     buf += struct.pack("<Q", global_step)
     buf += struct.pack("<I", len(blobs))
     for version, p, m in blobs:
@@ -55,14 +73,32 @@ def checkpoint_bytes(global_step, blobs, ledger, magic=CKPT_MAGIC):
     return bytes(buf)
 
 
-def make_checkpoint(tmp_path, params, num_fragments=4, global_step=42, magic=CKPT_MAGIC):
+def make_checkpoint(
+    tmp_path,
+    params,
+    num_fragments=4,
+    global_step=42,
+    magic=CKPT_MAGIC,
+    backend_id=ISO_BACKEND_SCALAR,
+):
     layout = build_layout([(n, p.numel()) for n, p in params.items()], num_fragments)
     blobs = [
         (100 + fid, flat_fragment(frag, params), torch.full((frag.numel,), 0.5 * fid))
         for fid, frag in enumerate(layout.fragments)
     ]
     path = tmp_path / "syncer.ckpt"
-    path.write_bytes(checkpoint_bytes(global_step, blobs, LEDGER, magic=magic))
+    path.write_bytes(
+        checkpoint_bytes(
+            global_step,
+            blobs,
+            LEDGER,
+            magic=magic,
+            backend_id=backend_id,
+            semantic_fingerprint=(
+                layout_fingerprint(layout) if magic == CKPT_MAGIC_V3 else None
+            ),
+        )
+    )
     return path, layout, blobs
 
 
@@ -72,6 +108,9 @@ def test_round_trip(tmp_path):
     ckpt = parse_checkpoint(path)
 
     assert ckpt.global_step == 42
+    assert ckpt.revision == 1
+    assert ckpt.backend_id is None
+    assert ckpt.layout_fingerprint is None
     assert ckpt.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     assert ckpt.ledger == LEDGER
     assert ckpt.layout_hash is None
@@ -160,6 +199,96 @@ def test_malformed_policy_sweep_trailer_is_rejected(
         + struct.pack("<II", marker, fragments)
     )
     with pytest.raises(ValueError, match=message):
+        parse_checkpoint(path)
+
+
+@pytest.mark.parametrize(
+    ("magic", "revision", "backend_id"),
+    [
+        (CKPT_MAGIC_V2, 2, ISO_BACKEND_SCALAR),
+        (CKPT_MAGIC_V3, 3, ISO_BACKEND_TORCH_SVD),
+    ],
+)
+def test_v2_v3_are_readable_and_preserve_backend(
+    tmp_path, magic, revision, backend_id
+):
+    path, layout, _ = make_checkpoint(
+        tmp_path,
+        fake_params(),
+        magic=magic,
+        backend_id=backend_id,
+    )
+    ckpt = parse_checkpoint(path)
+    assert ckpt.revision == revision
+    assert ckpt.backend_id == backend_id
+    if revision == 3:
+        assert ckpt.layout_fingerprint == layout_fingerprint(layout)
+    else:
+        assert ckpt.layout_fingerprint is None
+    validate_against_layout(ckpt, layout)
+
+
+def test_v3_preserves_current_policy_sweep_trailer(tmp_path):
+    path, layout, _ = make_checkpoint(
+        tmp_path,
+        fake_params(),
+        magic=CKPT_MAGIC_V3,
+        backend_id=ISO_BACKEND_TORCH_SVD,
+    )
+    semantic_fingerprint = layout_fingerprint(layout)
+    contract_hash = bytes(reversed(range(32)))
+    path.write_bytes(
+        path.read_bytes()
+        + semantic_fingerprint
+        + struct.pack("<II", POLICY_SWEEP_CKPT_MAGIC, layout.num_fragments)
+        + contract_hash
+    )
+
+    ckpt = parse_checkpoint(path)
+
+    assert ckpt.layout_fingerprint == semantic_fingerprint
+    assert ckpt.layout_hash == semantic_fingerprint.hex()
+    assert ckpt.policy_sweep_fragments == layout.num_fragments
+    assert ckpt.session_contract_hash == contract_hash.hex()
+    validate_against_layout(ckpt, layout)
+
+
+def test_v3_rejects_same_fragment_count_and_numel_with_different_semantics(tmp_path):
+    params = {
+        "a": torch.tensor([1.0, 2.0]),
+        "b": torch.tensor([3.0, 4.0]),
+    }
+    path, layout, _ = make_checkpoint(
+        tmp_path,
+        params,
+        num_fragments=1,
+        magic=CKPT_MAGIC_V3,
+    )
+    ckpt = parse_checkpoint(path)
+    original = layout.fragments[0]
+    reversed_layout = FragmentLayout(
+        [
+            Fragment(
+                merge_mode=original.merge_mode,
+                tensors=list(reversed(original.tensors)),
+                identity_shapes={"a": (2,), "b": (2,)},
+            )
+        ]
+    )
+    assert reversed_layout.num_fragments == layout.num_fragments
+    assert reversed_layout.fragments[0].numel == layout.fragments[0].numel
+    with pytest.raises(ValueError, match="semantic layout fingerprint"):
+        validate_against_layout(ckpt, reversed_layout)
+
+
+def test_unknown_v2_backend_is_not_silently_treated_as_scalar(tmp_path):
+    path, _, _ = make_checkpoint(
+        tmp_path,
+        fake_params(),
+        magic=CKPT_MAGIC_V2,
+        backend_id=99,
+    )
+    with pytest.raises(ValueError, match="unknown ISO backend ID 99"):
         parse_checkpoint(path)
 
 

@@ -23,10 +23,31 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   once (default 2 — Decoupled DiLoCo's "two fragments in flight" at τ=2), so
   one fragment's quorum/grace/WAN latency never delays pulling the next.
   Concurrent rounds always target distinct fragments (depth is clamped to
-  P). PUSH gathering may finish out of order, but merges, per-round
-  checkpoints, and broadcasts commit in ascending global-step order so every
-  recovery checkpoint is a contiguous prefix. `--pipeline 1` recovers serial
-  rounds.
+  P). Gather and exact-SVD compute may complete out of order, but the single
+  coordinator commits Nesterov state, fragment versions, ledger/event tape,
+  checkpoints, and broadcasts strictly in global fragment-step order, so
+  every recovery checkpoint is a contiguous prefix.
+  `--pipeline 1` recovers fully serial rounds.
+- **Exact-SVD worker pool**: `--iso-worker-devices` starts one persistent
+  Torch worker per listed device. Each bounded-queue job is one complete
+  canonical f32 matrix on exactly one GPU; learner/TP shards never enter the
+  pool. Worker failure poisons the pool, and both cutoff and terminal
+  checkpoints require an explicit drain. The Miles six-island supervisor
+  defaults to `cuda:0,...,cuda:7` and a bounded pipeline window of 16 on a
+  dedicated host, allowing AVG fragments and uneven SVD sizes to overlap.
+  Startup, request, and drain deadlines are bounded by
+  `YETO_ISO_WORKER_{STARTUP,REQUEST,DRAIN}_TIMEOUT_S`; timeout diagnostics
+  identify the worker/device/request where applicable, kill the direct Python
+  child, and permanently poison the pool. Queue capacity bounds admitted
+  queued-plus-running matrices because each resident permit is retained until
+  its job completes or is discarded. It does not account for input vectors
+  already allocated by callers waiting for admission.
+
+  Production runs the syncer inside `miles_node` with a direct Python
+  executable (`ISO_WORKER_PYTHON=python3`). Killing a `docker run` CLI does not
+  prove that Docker stopped the daemon-owned CUDA process, so the Docker helper
+  refuses persistent pool launches rather than claiming that cancellation is
+  safe.
 - **Frozen rendezvous**: a round attempt captures learner connection
   generations and quorum at launch. Joins/reconnects apply only to future
   attempts, disconnects do not erase accepted work, and a below-quorum
@@ -58,9 +79,12 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
 - **Fragment patterns**: `--fragment-pattern binpack` (default,
   size-balanced) or `strided` (transformer layer i → fragment i mod P,
   interleaving depth across fragments as in Streaming DiLoCo).
-- **Snapshots**: the single-actor syncer checkpoints at the quiescent cut
-  between rounds (params, momentum, per-fragment versions, merged-token
-  ledger). `--resume` restores; a JSONL event tape records every merge.
+- **Snapshots**: the single-actor syncer checkpoints after a contiguous
+  committed prefix (params, momentum, per-fragment versions, merged-token
+  ledger); uncommitted gathers/SVD results never touch state. Checkpoint V3
+  also stores the ISO backend ID and exact 32-byte HELLO semantic-layout
+  fingerprint, both validated before any restore mutation. `--resume`
+  restores; a JSONL event tape records every merge in strict step order.
 - **Fine-tuning**: `--tuning lora` (default) syncs only adapter weights —
   fragments are megabytes, so the syncer and WAN stay cheap even for large
   models. `--tuning full` syncs everything.

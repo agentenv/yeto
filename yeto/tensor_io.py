@@ -27,7 +27,9 @@ Q4_BLOCK = 256  # values per scale block; 4.125 bits/value on the wire
 def fragment_flat(frag: Fragment, params: dict[str, torch.Tensor]) -> torch.Tensor:
     """The fragment's tensors (layout order) as one flat f32 tensor,
     on the params' device."""
-    return torch.cat([params[name].detach().reshape(-1).float() for name, _ in frag.tensors])
+    return torch.cat(
+        [params[name].detach().reshape(-1).float() for name, _ in frag.tensors]
+    )
 
 
 def pack_fragment(frag: Fragment, params: dict[str, torch.Tensor], dtype: int) -> bytes:
@@ -50,11 +52,15 @@ def unpack_fragment(
     raw = torch.frombuffer(buffer, dtype=torch.uint8)
     flat = raw.view(_WIRE_TORCH[dtype]).float()
     if flat.numel() != frag.numel:
-        raise ValueError(f"fragment payload has {flat.numel()} values, expected {frag.numel}")
+        raise ValueError(
+            f"fragment payload has {flat.numel()} values, expected {frag.numel}"
+        )
     return flat
 
 
-def apply_fragment(frag: Fragment, flat: torch.Tensor, params: dict[str, torch.Tensor]) -> None:
+def apply_fragment(
+    frag: Fragment, flat: torch.Tensor, params: dict[str, torch.Tensor]
+) -> None:
     """Overwrite the fragment's tensors from a flat f32 tensor."""
     off = 0
     with torch.no_grad():
@@ -66,7 +72,9 @@ def apply_fragment(frag: Fragment, flat: torch.Tensor, params: dict[str, torch.T
 
 def quantize_q4(flat: torch.Tensor) -> bytes:
     """Encode a flat f32 tensor as blockwise E3M0 (see module docstring)."""
-    flat = flat.detach().float().cpu().contiguous()
+    # The wire format is always one row-major vector. Canonical one-tensor
+    # fragments may preserve their matrix shape while constructing a delta.
+    flat = flat.detach().float().reshape(-1).cpu().contiguous()
     numel = flat.numel()
     blocks = -(-numel // Q4_BLOCK)
     padded = torch.zeros(blocks * Q4_BLOCK, dtype=torch.float32)
@@ -87,7 +95,9 @@ def quantize_q4(flat: torch.Tensor) -> bytes:
     packed = (nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)).contiguous()
 
     out = bytearray()
-    scale_bytes = scale.numpy().tobytes()  # little-endian f32 on all supported platforms
+    scale_bytes = (
+        scale.numpy().tobytes()
+    )  # little-endian f32 on all supported platforms
     packed_bytes = packed.numpy().tobytes()
     row = Q4_BLOCK // 2
     for b in range(blocks):
@@ -96,7 +106,9 @@ def quantize_q4(flat: torch.Tensor) -> bytes:
     return bytes(out)
 
 
-_Q4_LUT = torch.tensor([0.0] + [2.0 ** (level - 7) for level in range(1, 8)], dtype=torch.float32)
+_Q4_LUT = torch.tensor(
+    [0.0] + [2.0 ** (level - 7) for level in range(1, 8)], dtype=torch.float32
+)
 
 
 def dequantize_q4(data: bytes, numel: int) -> torch.Tensor:
@@ -104,13 +116,22 @@ def dequantize_q4(data: bytes, numel: int) -> torch.Tensor:
     blocks = -(-numel // Q4_BLOCK)
     row = Q4_BLOCK // 2
     if len(data) != blocks * (4 + row):
-        raise ValueError(f"q4 payload has {len(data)} bytes, expected {blocks * (4 + row)}")
+        raise ValueError(
+            f"q4 payload has {len(data)} bytes, expected {blocks * (4 + row)}"
+        )
     scales = torch.tensor(
-        struct.unpack_from(f"<{blocks}f", b"".join(data[b * (4 + row) : b * (4 + row) + 4] for b in range(blocks))),
+        struct.unpack_from(
+            f"<{blocks}f",
+            b"".join(data[b * (4 + row) : b * (4 + row) + 4] for b in range(blocks)),
+        ),
         dtype=torch.float32,
     )
     packed = torch.frombuffer(
-        bytearray(b"".join(data[b * (4 + row) + 4 : (b + 1) * (4 + row)] for b in range(blocks))),
+        bytearray(
+            b"".join(
+                data[b * (4 + row) + 4 : (b + 1) * (4 + row)] for b in range(blocks)
+            )
+        ),
         dtype=torch.uint8,
     ).view(blocks, row)
     nibbles = torch.empty(blocks, Q4_BLOCK, dtype=torch.uint8)

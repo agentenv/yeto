@@ -3,12 +3,18 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip(
+    "yeto_miles_secrlenv",
+    reason="SecRLEnv trajectory v1 is an optional external integration",
+)
+
+from yeto_miles_secrlenv import reward
+
 from yeto.rl.trajectory_evidence import (
     build_trajectory_batch_evidence,
     read_trajectory_batch_evidence,
     write_trajectory_batch_evidence,
 )
-from yeto_miles_secrlenv import reward
 
 
 def _sample(*, group_index, index, value, status="completed"):

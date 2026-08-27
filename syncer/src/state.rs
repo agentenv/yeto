@@ -3,6 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 
+use crate::iso_worker::{IsoBackend, IsoBackendConfig, IsoBackendKind};
 use crate::merge;
 use crate::protocol::Reader;
 
@@ -143,6 +144,110 @@ pub struct GlobalState {
     /// HeLoCo per-tensor directional correction of learner deltas against
     /// the outer momentum before merging (None disables).
     pub delta_correction: Option<merge::Heloco>,
+    /// Spectrum flattener. Torch mode owns one persistent child process.
+    iso_backend: IsoBackend,
+}
+
+/// A merge whose deterministic learner reduction has completed but whose
+/// exact Torch SVD matrices may still be executing.  It owns every input
+/// buffer used by the workers, so no matrix can alias coordinator state.
+pub struct PreparedMerge {
+    fid: usize,
+    base_version: u64,
+    delta: Vec<f32>,
+    iso_jobs: Vec<IsoJob>,
+    iso_backend: IsoBackend,
+}
+
+struct IsoJob {
+    tensor_index: usize,
+    offset: usize,
+    rows: usize,
+    cols: usize,
+    matrix: Vec<f32>,
+}
+
+/// Immutable worker output waiting for the single coordinator to commit it.
+/// Nesterov state, versions, the event tape, and broadcasts are deliberately
+/// absent: those are changed only by `GlobalState::commit_merge`, in t order.
+pub struct ComputedMerge {
+    fid: usize,
+    base_version: u64,
+    delta: Vec<f32>,
+}
+
+impl ComputedMerge {
+    pub fn fid(&self) -> usize {
+        self.fid
+    }
+
+    pub fn base_version(&self) -> u64 {
+        self.base_version
+    }
+}
+
+impl PreparedMerge {
+    pub fn fid(&self) -> usize {
+        self.fid
+    }
+
+    pub fn base_version(&self) -> u64 {
+        self.base_version
+    }
+
+    pub async fn compute(mut self) -> Result<ComputedMerge> {
+        let mut tasks = tokio::task::JoinSet::new();
+        let fid = self.fid;
+        for job in self.iso_jobs.drain(..) {
+            let backend = self.iso_backend.clone();
+            tasks.spawn(async move {
+                let matrix = backend
+                    .flatten_owned(job.matrix, job.rows, job.cols)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "fragment {}: iso backend failed for tensor {} ({}x{})",
+                            fid, job.tensor_index, job.rows, job.cols
+                        )
+                    })?;
+                Ok::<_, anyhow::Error>((job.offset, matrix))
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            let (offset, matrix) = result.context("iso matrix task panicked")??;
+            if self.delta.is_empty() && offset == 0 {
+                self.delta = matrix;
+                continue;
+            }
+            let end = offset
+                .checked_add(matrix.len())
+                .context("iso result offset overflow")?;
+            let out = self
+                .delta
+                .get_mut(offset..end)
+                .context("iso result lies outside prepared fragment")?;
+            out.copy_from_slice(&matrix);
+        }
+        if self.delta.iter().any(|value| !value.is_finite()) {
+            bail!("fragment {}: merged outer gradient is non-finite", self.fid);
+        }
+        Ok(ComputedMerge {
+            fid: self.fid,
+            base_version: self.base_version,
+            delta: self.delta,
+        })
+    }
+
+    fn finish_inline(self) -> Result<ComputedMerge> {
+        if !self.iso_jobs.is_empty() {
+            bail!("torch-svd prepared merge requires asynchronous compute");
+        }
+        Ok(ComputedMerge {
+            fid: self.fid,
+            base_version: self.base_version,
+            delta: self.delta,
+        })
+    }
 }
 
 impl GlobalState {
@@ -157,6 +262,42 @@ impl GlobalState {
         outer_momentum: f32,
         wire_dtype: u8,
         layout_fingerprint: [u8; 32],
+    ) -> Result<Self> {
+        Self::new_inner(
+            layout,
+            outer_lr,
+            outer_momentum,
+            wire_dtype,
+            layout_fingerprint,
+            &IsoBackendConfig::default(),
+        )
+    }
+
+    pub fn new_with_iso_backend(
+        layout: Layout,
+        outer_lr: f32,
+        outer_momentum: f32,
+        wire_dtype: u8,
+        layout_fingerprint: [u8; 32],
+        iso_backend_config: &IsoBackendConfig,
+    ) -> Result<Self> {
+        Self::new_inner(
+            layout,
+            outer_lr,
+            outer_momentum,
+            wire_dtype,
+            layout_fingerprint,
+            iso_backend_config,
+        )
+    }
+
+    fn new_inner(
+        layout: Layout,
+        outer_lr: f32,
+        outer_momentum: f32,
+        wire_dtype: u8,
+        layout_fingerprint: [u8; 32],
+        iso_backend_config: &IsoBackendConfig,
     ) -> Result<Self> {
         // Validate declared sizes now, but do not allocate model-sized state
         // from an unauthenticated HELLO. Params arrive in INIT_PARAMS; the
@@ -202,7 +343,12 @@ impl GlobalState {
             outer_momentum,
             wire_dtype,
             delta_correction: None,
+            iso_backend: IsoBackend::start(iso_backend_config)?,
         })
+    }
+
+    pub fn iso_backend_kind(&self) -> IsoBackendKind {
+        self.iso_backend.kind()
     }
 
     pub fn all_initialized(&self) -> bool {
@@ -256,14 +402,23 @@ impl GlobalState {
         }
     }
 
-    /// Merge learner outer gradients for fragment `fid` and apply the outer step.
-    /// Returns the l2 norm of the merged outer gradient (for logging).
-    pub fn merge_and_step(
-        &mut self,
+    /// Deterministically reduce learner gradients and enqueue no mutable
+    /// coordinator state.  Torch SVD work is represented as owned matrices
+    /// inside the returned value and may execute out of order.
+    pub fn prepare_merge(
+        &self,
         fid: usize,
+        base_version: u64,
         outer_gradients: &[&[f32]],
         weights: &[f64],
-    ) -> Result<f64> {
+    ) -> Result<PreparedMerge> {
+        let current_version = *self
+            .versions
+            .get(fid)
+            .with_context(|| format!("merge for unknown fragment {fid}"))?;
+        if current_version != base_version {
+            bail!("fragment {fid}: prepare version {base_version} != current {current_version}");
+        }
         let frag = self
             .layout
             .fragments
@@ -309,6 +464,7 @@ impl GlobalState {
         };
         let outer_gradients = outer_gradients.as_slice();
         let mut delta = vec![0.0f32; numel];
+        let mut iso_jobs = Vec::new();
         // Merge per tensor slice within the fragment.
         let mut off = 0usize;
         for (tensor_index, &tn) in frag.tensor_numels.iter().enumerate() {
@@ -332,11 +488,69 @@ impl GlobalState {
                                 "fragment {fid}: iso merge missing shape for tensor {tensor_index}"
                             )
                         })?;
-                    merge::merge_iso(&slices, weights, rows as usize, cols as usize, out);
+                    // The syncer owns the deterministic weighted reduction;
+                    // the selected backend receives exactly one complete
+                    // canonical matrix, never learner or TP shards.
+                    merge::merge_avg(&slices, weights, out);
+                    match self.iso_backend.kind() {
+                        IsoBackendKind::Scalar => {
+                            merge::iso_flatten_spectrum(out, rows as usize, cols as usize)
+                        }
+                        IsoBackendKind::TorchSvd => iso_jobs.push(IsoJob {
+                            tensor_index,
+                            offset: off,
+                            rows: rows as usize,
+                            cols: cols as usize,
+                            matrix: out.to_vec(),
+                        }),
+                    }
                 }
                 mode => bail!("fragment {fid}: unsupported merge mode {mode}"),
             }
             off += tn;
+        }
+        // Miles uses one canonical tensor per fragment. Move that complete
+        // averaged matrix into its worker job instead of retaining a second
+        // model-sized host copy while SVD runs.
+        if iso_jobs.len() == 1 && iso_jobs[0].offset == 0 && iso_jobs[0].matrix.len() == delta.len()
+        {
+            iso_jobs[0].matrix = std::mem::take(&mut delta);
+        }
+        if delta.iter().any(|value| !value.is_finite()) {
+            bail!("fragment {fid}: merged outer gradient is non-finite");
+        }
+        Ok(PreparedMerge {
+            fid,
+            base_version,
+            delta,
+            iso_jobs,
+            iso_backend: self.iso_backend.clone(),
+        })
+    }
+
+    /// Commit one fully computed merge.  This is the only merge path that
+    /// mutates Nesterov state and it rejects stale/out-of-order fragment work.
+    pub fn commit_merge(&mut self, computed: ComputedMerge) -> Result<f64> {
+        let ComputedMerge {
+            fid,
+            base_version,
+            delta,
+        } = computed;
+        let current_version = *self
+            .versions
+            .get(fid)
+            .with_context(|| format!("commit for unknown fragment {fid}"))?;
+        if current_version != base_version {
+            bail!(
+                "fragment {fid}: computed base version {base_version} != current {current_version}"
+            );
+        }
+        let expected = self.layout.fragments[fid].numel()?;
+        if delta.len() != expected {
+            bail!(
+                "fragment {fid}: computed merge has {} values, expected {expected}",
+                delta.len()
+            );
         }
         let gnorm = delta
             .iter()
@@ -346,6 +560,19 @@ impl GlobalState {
         if !gnorm.is_finite() || delta.iter().any(|value| !value.is_finite()) {
             bail!("fragment {fid}: merged outer gradient is non-finite");
         }
+        // Validate the complete optimizer result before mutating either
+        // buffer. This keeps commit all-or-nothing without cloning a
+        // model-sized fragment.
+        for ((param, momentum), gradient) in
+            self.params[fid].iter().zip(&self.momentum[fid]).zip(&delta)
+        {
+            let next_momentum = self.outer_momentum * *momentum + *gradient;
+            let next_param =
+                *param - self.outer_lr * (*gradient + self.outer_momentum * next_momentum);
+            if !next_param.is_finite() || !next_momentum.is_finite() {
+                bail!("fragment {fid}: outer optimizer produced non-finite state");
+            }
+        }
         merge::nesterov_step(
             &mut self.params[fid],
             &mut self.momentum[fid],
@@ -353,16 +580,33 @@ impl GlobalState {
             self.outer_lr,
             self.outer_momentum,
         );
-        if self.params[fid].iter().any(|value| !value.is_finite())
-            || self.momentum[fid].iter().any(|value| !value.is_finite())
-        {
-            bail!("fragment {fid}: outer optimizer produced non-finite state");
-        }
+        debug_assert!(self.params[fid].iter().all(|value| value.is_finite()));
+        debug_assert!(self.momentum[fid].iter().all(|value| value.is_finite()));
         Ok(gnorm)
+    }
+
+    /// Compatibility helper for scalar unit tests and non-Torch callers.
+    pub fn merge_and_step(
+        &mut self,
+        fid: usize,
+        outer_gradients: &[&[f32]],
+        weights: &[f64],
+    ) -> Result<f64> {
+        let prepared = self.prepare_merge(fid, self.versions[fid], outer_gradients, weights)?;
+        self.commit_merge(prepared.finish_inline()?)
+    }
+
+    /// Explicit barrier used before any terminal checkpoint/marker is made
+    /// publishable.  The worker pool reports poison instead of silently
+    /// publishing a cut after partial SVD failure.
+    pub async fn drain_iso_backend(&self) -> Result<()> {
+        self.iso_backend.drain().await
     }
 }
 
-const CKPT_MAGIC: u32 = 0xD170_5A7E;
+const CKPT_MAGIC_V1: u32 = 0xD170_5A7E;
+const CKPT_MAGIC_V2: u32 = 0xD170_5A7F;
+const CKPT_MAGIC_V3: u32 = 0xD170_5A80;
 /// Generic streaming checkpoint marker, followed by the session contract hash.
 const SESSION_CONTRACT_CKPT_MAGIC: u32 = 0x5254_4353;
 /// Policy-sweep checkpoint marker, followed by the configured fragment count.
@@ -378,10 +622,18 @@ pub fn final_marker_path(path: &std::path::Path) -> std::path::PathBuf {
 pub fn remove_final_marker(path: &std::path::Path) -> Result<()> {
     let marker = final_marker_path(path);
     match std::fs::remove_file(&marker) {
-        Ok(()) => Ok(()),
+        Ok(()) => sync_parent_directory(&marker),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("remove {}", marker.display())),
     }
+}
+
+fn sync_parent_directory(path: &std::path::Path) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::File::open(parent)
+        .with_context(|| format!("open checkpoint directory {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("sync checkpoint directory {}", parent.display()))
 }
 
 pub fn write_final_marker(path: &std::path::Path, global_step: u64) -> Result<()> {
@@ -398,6 +650,7 @@ pub fn write_final_marker(path: &std::path::Path, global_step: u64) -> Result<()
         file.get_ref().sync_all()?;
     }
     std::fs::rename(&tmp, &marker)?;
+    sync_parent_directory(&marker)?;
     Ok(())
 }
 
@@ -408,10 +661,13 @@ impl GlobalState {
     /// corrupts the previous checkpoint.
     pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
         use std::io::Write;
+        let layout_fingerprint = self.layout_fingerprint;
         let tmp = path.with_extension("tmp");
         {
             let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-            f.write_all(&CKPT_MAGIC.to_le_bytes())?;
+            f.write_all(&CKPT_MAGIC_V3.to_le_bytes())?;
+            f.write_all(&[self.iso_backend_kind() as u8])?;
+            f.write_all(&layout_fingerprint)?;
             f.write_all(&self.global_step.to_le_bytes())?;
             f.write_all(&(self.params.len() as u32).to_le_bytes())?;
             for p in 0..self.params.len() {
@@ -448,20 +704,56 @@ impl GlobalState {
             f.get_ref().sync_all()?;
         }
         std::fs::rename(&tmp, path)?;
+        sync_parent_directory(path)?;
         Ok(())
     }
 
     /// Restore params/momentum/versions/step/ledger from a snapshot.
-    /// The layout (from HELLO) must match the checkpointed fragment shapes.
+    ///
+    /// V3 binds the snapshot to both the ISO backend and exact semantic HELLO
+    /// layout. V2 carries only the backend identity. V1 is rejected because
+    /// historical scalar and Torch checkpoints are indistinguishable. The
+    /// complete checkpoint is parsed and validated before any live state is
+    /// mutated.
     pub fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<()> {
         use std::io::Read;
         let mut buf = Vec::new();
         std::fs::File::open(path)?.read_to_end(&mut buf)?;
         let mut r = Reader(&buf);
-        if r.u32()? != CKPT_MAGIC {
-            bail!("bad checkpoint magic");
+        let magic = r.u32()?;
+        let (checkpoint_iso_backend, checkpoint_layout_fingerprint) = match magic {
+            CKPT_MAGIC_V1 => bail!(
+                "checkpoint V1 cannot be resumed safely: it records neither the ISO backend nor the semantic layout fingerprint"
+            ),
+            CKPT_MAGIC_V2 => (Some(IsoBackendKind::from_checkpoint(r.u8()?)?), None),
+            CKPT_MAGIC_V3 => {
+                let backend = IsoBackendKind::from_checkpoint(r.u8()?)?;
+                let fingerprint: [u8; 32] = r
+                    .take(32)?
+                    .try_into()
+                    .context("checkpoint V3 layout fingerprint must be 32 bytes")?;
+                (Some(backend), Some(fingerprint))
+            }
+            _ => bail!("bad checkpoint magic"),
+        };
+        if let Some(checkpoint_iso_backend) = checkpoint_iso_backend {
+            if checkpoint_iso_backend != self.iso_backend_kind() {
+                bail!(
+                    "checkpoint iso backend {} does not match configured backend {}",
+                    checkpoint_iso_backend,
+                    self.iso_backend_kind()
+                );
+            }
         }
-        self.global_step = r.u64()?;
+        if let Some(checkpoint_fingerprint) = checkpoint_layout_fingerprint {
+            if checkpoint_fingerprint != self.layout_fingerprint {
+                bail!(
+                    "checkpoint semantic layout fingerprint does not match the accepted HELLO layout"
+                );
+            }
+        }
+
+        let global_step = r.u64()?;
         let np = r.u32()? as usize;
         if np != self.params.len() {
             bail!(
@@ -469,28 +761,34 @@ impl GlobalState {
                 self.params.len()
             );
         }
+        let mut versions = Vec::with_capacity(np);
+        let mut params = Vec::with_capacity(np);
+        let mut momentum = Vec::with_capacity(np);
         for p in 0..np {
-            self.versions[p] = r.u64()?;
+            versions.push(r.u64()?);
             let numel = usize::try_from(r.u64()?)
                 .context("checkpoint fragment numel does not fit usize")?;
             let expected = self.layout.fragments[p].numel()?;
             if numel != expected {
                 bail!("checkpoint fragment {p} numel {numel} != layout {expected}");
             }
-            for slot in [&mut self.params[p], &mut self.momentum[p]] {
+            let mut restored_params = Vec::new();
+            let mut restored_momentum = Vec::new();
+            for slot in [&mut restored_params, &mut restored_momentum] {
                 slot.try_reserve_exact(numel)
                     .context("cannot allocate checkpoint fragment")?;
                 slot.resize(numel, 0.0);
             }
-            for slot in [&mut self.params[p], &mut self.momentum[p]] {
+            for slot in [&mut restored_params, &mut restored_momentum] {
                 for v in slot.iter_mut() {
                     *v = f32::from_le_bytes(r.take(4)?.try_into()?);
                 }
             }
-            self.initialized[p] = true;
+            params.push(restored_params);
+            momentum.push(restored_momentum);
         }
         let nl = r.u32()? as usize;
-        self.ledger.clear();
+        let mut ledger = std::collections::BTreeMap::new();
         for _ in 0..nl {
             let id = r.u32()?;
             let l = LearnerLedger {
@@ -498,13 +796,16 @@ impl GlobalState {
                 steps: r.u64()?,
                 tokens: r.u64()?,
             };
-            self.ledger.insert(id, l);
+            if ledger.insert(id, l).is_some() {
+                bail!("checkpoint contains duplicate ledger entry for learner {id}");
+            }
         }
         let expected_policy_sweep_fragments = self.policy_sweep_fragments;
+        let header_layout_verified = checkpoint_layout_fingerprint.is_some();
         let (checkpoint_policy_sweep_fragments, checkpoint_session_contract_hash) =
             match r.remaining() {
                 0 => {
-                    self.checkpoint_layout_verified = false;
+                    self.checkpoint_layout_verified = header_layout_verified;
                     (None, None)
                 }
                 32 => {
@@ -580,6 +881,44 @@ impl GlobalState {
             }
             _ => bail!("checkpoint session contract hash does not match HELLO"),
         }
+        if !self.checkpoint_layout_verified
+            && self
+                .layout
+                .fragments
+                .iter()
+                .any(|fragment| fragment.tensor_numels.len() != 1)
+        {
+            bail!(
+                "checkpoint has no semantic layout fingerprint and cannot resume a grouped multi-tensor layout"
+            );
+        }
+
+        // A strict-order checkpoint's global_step is the contiguous commit
+        // cursor, so round-robin fragment versions are fully determined by
+        // it. Reject legacy completion-order snapshots with holes rather than
+        // silently skipping an uncommitted low t on resume.
+        let fragments = versions.len() as u64;
+        for (fid, version) in versions.iter().copied().enumerate() {
+            let first = fid as u64 + 1;
+            let expected = if global_step < first {
+                0
+            } else {
+                first + ((global_step - first) / fragments) * fragments
+            };
+            if version != expected {
+                bail!(
+                    "checkpoint is not a contiguous strict-order cut: fragment {fid} version {version}, expected {expected} at global_step {}",
+                    global_step
+                );
+            }
+        }
+
+        self.global_step = global_step;
+        self.versions = versions;
+        self.params = params;
+        self.momentum = momentum;
+        self.initialized.fill(true);
+        self.ledger = ledger;
         Ok(())
     }
 }
@@ -587,6 +926,52 @@ impl GlobalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fingerprint(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    fn state_with_fingerprint(layout: Layout, byte: u8) -> GlobalState {
+        GlobalState::new_with_layout_fingerprint(
+            layout,
+            0.7,
+            0.9,
+            crate::protocol::DTYPE_F32,
+            fingerprint(byte),
+        )
+        .unwrap()
+    }
+
+    fn write_v2_checkpoint(path: &std::path::Path, st: &GlobalState) {
+        use std::io::Write;
+
+        let mut f = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        f.write_all(&CKPT_MAGIC_V2.to_le_bytes()).unwrap();
+        f.write_all(&[st.iso_backend_kind() as u8]).unwrap();
+        f.write_all(&st.global_step.to_le_bytes()).unwrap();
+        f.write_all(&(st.params.len() as u32).to_le_bytes())
+            .unwrap();
+        for p in 0..st.params.len() {
+            f.write_all(&st.versions[p].to_le_bytes()).unwrap();
+            f.write_all(&(st.params[p].len() as u64).to_le_bytes())
+                .unwrap();
+            for value in &st.params[p] {
+                f.write_all(&value.to_le_bytes()).unwrap();
+            }
+            for value in &st.momentum[p] {
+                f.write_all(&value.to_le_bytes()).unwrap();
+            }
+        }
+        f.write_all(&(st.ledger.len() as u32).to_le_bytes())
+            .unwrap();
+        for (id, ledger) in &st.ledger {
+            f.write_all(&id.to_le_bytes()).unwrap();
+            f.write_all(&ledger.merges.to_le_bytes()).unwrap();
+            f.write_all(&ledger.steps.to_le_bytes()).unwrap();
+            f.write_all(&ledger.tokens.to_le_bytes()).unwrap();
+        }
+        f.flush().unwrap();
+    }
 
     fn layout2() -> Layout {
         Layout {
@@ -640,6 +1025,45 @@ mod tests {
         assert!(g > 0.0);
         // Θ − 1.0·(Θ − θ) = θ
         assert_eq!(st.params[0], vec![0.0; 4]);
+    }
+
+    #[test]
+    fn prepared_merge_checks_version_at_prepare_and_commit() {
+        let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let gradient = [1.0f32; 4];
+
+        assert!(st.prepare_merge(0, 9, &[&gradient], &[1.0]).is_err());
+        let computed = st
+            .prepare_merge(0, 0, &[&gradient], &[1.0])
+            .unwrap()
+            .finish_inline()
+            .unwrap();
+        st.versions = vec![7, 6];
+        assert!(st.commit_merge(computed).is_err());
+        assert_eq!(st.params[0], vec![1.0; 4]);
+    }
+
+    #[test]
+    fn nonfinite_nesterov_result_does_not_partially_mutate_state() {
+        let mut st =
+            GlobalState::new(layout2(), f32::MAX, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![1.0; 4]).unwrap();
+        let before_params = st.params[0].clone();
+        let before_momentum = st.momentum[0].clone();
+        let gradient = [f32::MAX; 4];
+        let computed = st
+            .prepare_merge(0, 0, &[&gradient], &[1.0])
+            .unwrap()
+            .finish_inline()
+            .unwrap();
+
+        assert!(st.commit_merge(computed).is_err());
+        assert_eq!(st.params[0], before_params);
+        assert_eq!(st.momentum[0], before_momentum);
+        assert_eq!(st.versions[0], 0);
     }
 
     #[test]
@@ -707,20 +1131,24 @@ mod tests {
         let dir = std::env::temp_dir().join("yeto-ckpt-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.ckpt");
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = state_with_fingerprint(layout2(), 0x11);
         st.init_fragment(0, vec![1.5; 4]).unwrap();
         st.init_fragment(1, vec![-2.0; 4]).unwrap();
         let outer_gradient = vec![1.5f32; 4];
         st.merge_and_step(0, &[&outer_gradient], &[1.0]).unwrap();
         st.global_step = 7;
-        st.versions[0] = 7;
+        st.versions = vec![7, 6];
         st.record_merge(3, 12, 4096);
         st.save_checkpoint(&path).unwrap();
+        let encoded = std::fs::read(&path).unwrap();
+        assert_eq!(&encoded[0..4], &CKPT_MAGIC_V3.to_le_bytes());
+        assert_eq!(encoded[4], IsoBackendKind::Scalar as u8);
+        assert_eq!(&encoded[5..37], &fingerprint(0x11));
 
-        let mut st2 = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut st2 = state_with_fingerprint(layout2(), 0x11);
         st2.load_checkpoint(&path).unwrap();
         assert_eq!(st2.global_step, 7);
-        assert_eq!(st2.versions, vec![7, 0]);
+        assert_eq!(st2.versions, vec![7, 6]);
         assert_eq!(st2.params, st.params);
         assert!(st2.all_initialized());
         assert!(st2.checkpoint_layout_verified);
@@ -955,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_layout_fingerprint_is_verified_and_legacy_is_readable() {
+    fn checkpoint_layout_fingerprint_is_verified_even_without_redundant_trailer() {
         let dir = std::env::temp_dir().join(format!("yeto-layout-ckpt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.ckpt");
@@ -992,8 +1420,8 @@ mod tests {
             [2; 32],
         )
         .unwrap();
-        legacy.load_checkpoint(&path).unwrap();
-        assert!(!legacy.checkpoint_layout_verified);
+        let error = legacy.load_checkpoint(&path).unwrap_err();
+        assert!(format!("{error:#}").contains("semantic layout fingerprint does not match"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1004,19 +1432,133 @@ mod tests {
         let path = dir.join("state.ckpt");
         std::fs::write(&path, b"old checkpoint bytes").unwrap();
 
-        let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut st = state_with_fingerprint(layout2(), 0x22);
         st.init_fragment(0, vec![3.0; 4]).unwrap();
         st.init_fragment(1, vec![-4.0; 4]).unwrap();
         st.global_step = 13;
-        st.versions = vec![12, 13];
+        st.versions = vec![13, 12];
         st.save_checkpoint(&path).unwrap();
 
-        let mut restored =
-            GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        let mut restored = state_with_fingerprint(layout2(), 0x22);
         restored.load_checkpoint(&path).unwrap();
         assert_eq!(restored.global_step, 13);
-        assert_eq!(restored.versions, vec![12, 13]);
+        assert_eq!(restored.versions, vec![13, 12]);
         assert!(!path.with_extension("tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v3_rejects_same_sizes_with_different_semantic_layout_before_mutation() {
+        let dir =
+            std::env::temp_dir().join(format!("yeto-v3-layout-mismatch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+
+        let mut saved = state_with_fingerprint(layout2(), 0x31);
+        saved.init_fragment(0, vec![1.0; 4]).unwrap();
+        saved.init_fragment(1, vec![2.0; 4]).unwrap();
+        saved.global_step = 2;
+        saved.versions = vec![1, 2];
+        saved.save_checkpoint(&path).unwrap();
+
+        // Same numerical Layout, fragment count, and per-fragment numel. The
+        // different fingerprint represents changed tensor names/order/shapes.
+        let mut restored = state_with_fingerprint(layout2(), 0x32);
+        restored.init_fragment(0, vec![8.0; 4]).unwrap();
+        restored.init_fragment(1, vec![9.0; 4]).unwrap();
+        restored.global_step = 0;
+        let before_params = restored.params.clone();
+        let before_versions = restored.versions.clone();
+
+        let error = restored.load_checkpoint(&path).unwrap_err().to_string();
+        assert!(error.contains("semantic layout fingerprint"), "{error}");
+        assert_eq!(restored.global_step, 0);
+        assert_eq!(restored.versions, before_versions);
+        assert_eq!(restored.params, before_params);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v3_rejects_backend_mismatch_before_mutation() {
+        let dir =
+            std::env::temp_dir().join(format!("yeto-v3-backend-mismatch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+
+        let mut saved = state_with_fingerprint(layout2(), 0x35);
+        saved.init_fragment(0, vec![1.0; 4]).unwrap();
+        saved.init_fragment(1, vec![2.0; 4]).unwrap();
+        saved.global_step = 2;
+        saved.versions = vec![1, 2];
+        saved.save_checkpoint(&path).unwrap();
+        let mut encoded = std::fs::read(&path).unwrap();
+        encoded[4] = IsoBackendKind::TorchSvd as u8;
+        std::fs::write(&path, encoded).unwrap();
+
+        let mut restored = state_with_fingerprint(layout2(), 0x35);
+        restored.init_fragment(0, vec![8.0; 4]).unwrap();
+        restored.init_fragment(1, vec![9.0; 4]).unwrap();
+        let before_params = restored.params.clone();
+        let error = restored.load_checkpoint(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("does not match configured backend"),
+            "{error}"
+        );
+        assert_eq!(restored.global_step, 0);
+        assert_eq!(restored.params, before_params);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v2_resume_is_allowed_only_for_ungrouped_layouts() {
+        let dir = std::env::temp_dir().join(format!("yeto-v2-compat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+
+        let ungrouped = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: MERGE_AVG,
+                tensor_numels: vec![4],
+                tensor_shapes: None,
+            }],
+        };
+        let mut saved = state_with_fingerprint(ungrouped.clone(), 0x41);
+        saved.init_fragment(0, vec![3.0; 4]).unwrap();
+        saved.global_step = 1;
+        saved.versions = vec![1];
+        write_v2_checkpoint(&path, &saved);
+
+        let mut restored = state_with_fingerprint(ungrouped, 0x99);
+        restored.load_checkpoint(&path).unwrap();
+        assert_eq!(restored.global_step, 1);
+        assert_eq!(restored.params, saved.params);
+
+        let grouped_path = dir.join("grouped.ckpt");
+        let mut grouped_saved = state_with_fingerprint(layout2(), 0x41);
+        grouped_saved.init_fragment(0, vec![4.0; 4]).unwrap();
+        grouped_saved.init_fragment(1, vec![5.0; 4]).unwrap();
+        grouped_saved.global_step = 2;
+        grouped_saved.versions = vec![1, 2];
+        write_v2_checkpoint(&grouped_path, &grouped_saved);
+        let mut grouped = state_with_fingerprint(layout2(), 0x41);
+        let error = grouped
+            .load_checkpoint(&grouped_path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot resume a grouped"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v1_resume_never_guesses_the_missing_backend() {
+        let dir = std::env::temp_dir().join(format!("yeto-v1-reject-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        std::fs::write(&path, CKPT_MAGIC_V1.to_le_bytes()).unwrap();
+        let mut restored = state_with_fingerprint(layout2(), 0x51);
+        let error = restored.load_checkpoint(&path).unwrap_err().to_string();
+        assert!(error.contains("V1 cannot be resumed safely"), "{error}");
+        assert!(error.contains("neither the ISO backend"), "{error}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
