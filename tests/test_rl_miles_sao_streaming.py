@@ -8,7 +8,10 @@ import pytest
 
 from yeto.protocol import PartialMessageGenerationLost, PullRequest
 from yeto.rl.local_learner import ComponentIdentity
-from yeto.rl.miles import get_current_published_policy_identity
+from yeto.rl.miles import (
+    get_current_published_policy_identity,
+    set_current_published_policy_identity,
+)
 from yeto.rl.miles_sao_streaming import (
     MilesFullParameterRoleStream,
     MilesSaoRoleStreamConfig,
@@ -657,17 +660,23 @@ async def test_actor_and_critic_commit_together_but_only_actor_forms_rollout_ide
     critic_model = object()
     versions = []
     identities = []
+    rollout_args = SimpleNamespace(yeto_rl_sync_preset="sao-streaming-full")
     engine = SimpleNamespace(
         update_weight_version=_Remote(
             lambda token: versions.append(token) or events.append(("token", token))
         )
     )
+
+    def install_rollout_identity(version, policy_hash):
+        identities.append((version, policy_hash))
+        return set_current_published_policy_identity(
+            rollout_args,
+            policy_version=version,
+            policy_hash=policy_hash,
+        )
+
     rollout_manager = SimpleNamespace(
-        set_external_policy_identity=_Remote(
-            lambda version, policy_hash: (
-                identities.append((version, policy_hash)) or (version, policy_hash)
-            )
-        ),
+        set_external_policy_identity=_Remote(install_rollout_identity),
     )
 
     await sync.initialize(
@@ -685,6 +694,7 @@ async def test_actor_and_critic_commit_together_but_only_actor_forms_rollout_ide
         0,
         "1" * 64,
     )
+    assert rollout_args.yeto_rl_policy_token == f"yeto:0:{'1' * 64}"
 
     assert not await sync.after_local_train(
         rollout_id=0,
@@ -698,6 +708,7 @@ async def test_actor_and_critic_commit_together_but_only_actor_forms_rollout_ide
         publication_info=publication_info,
     )
     assert versions[-1] == f"yeto:1:{'2' * 64}"
+    assert rollout_args.yeto_rl_policy_token == versions[-1]
     assert "9" * 64 not in versions[-1]
 
     assert await sync.after_local_train(

@@ -36,6 +36,8 @@ from . import (
     CODEX_LINUX_TARGET,
     CODEX_NPM_PACKAGE,
     CODEX_NPM_TARBALL_SHA256,
+    CODEX_OPENENV_AGENT,
+    CODEX_OPENENV_IDENTITY_ENV,
     CODEX_PACKAGE_MANIFEST_SHA256,
     CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
     CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
@@ -53,6 +55,7 @@ from . import (
     SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
     SGLANG_COMMIT,
     SGLANG_REPOSITORY,
+    SIGNED_CODEX_AGENTS,
 )
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
@@ -547,11 +550,12 @@ def _codex_harness_contract(namespace, args) -> dict[str, Any]:
         raise HarnessError("Yeto Codex harness adapter source does not match its pin")
     from .codex_backend import stock_codex_backend_contract
 
+    profile_name = getattr(args, "codex_backend_profile", None) or args.tito_model
     backend = stock_codex_backend_contract(
-        args.tito_model,
+        profile_name,
         args.rollout_max_response_len,
     )
-    return {
+    contract = {
         "agent_function_path": CODEX_HARNESS_AGENT,
         "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
         "controller_binary_path": str(binary),
@@ -577,6 +581,9 @@ def _codex_harness_contract(namespace, args) -> dict[str, Any]:
         "reasoning_effort": args.codex_reasoning_effort,
         "backend": backend,
     }
+    if getattr(args, "custom_agent_function_path", None) == CODEX_OPENENV_AGENT:
+        contract["openenv_identity_env"] = dict(CODEX_OPENENV_IDENTITY_ENV)
+    return contract
 
 
 def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
@@ -607,6 +614,9 @@ def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
         "reasoning_effort",
         "backend",
     }
+    custom_agent = learner.get("custom_agent_function_path")
+    if custom_agent == CODEX_OPENENV_AGENT:
+        required.add("openenv_identity_env")
     if not isinstance(value, dict) or set(value) != required:
         raise HarnessError("plan has an invalid stock Codex harness contract")
     pinned = {
@@ -638,6 +648,11 @@ def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
     }
     if any(value.get(name) != expected for name, expected in pinned.items()):
         raise HarnessError("plan does not use the pinned stock Codex runtime")
+    if (
+        custom_agent == CODEX_OPENENV_AGENT
+        and value.get("openenv_identity_env") != CODEX_OPENENV_IDENTITY_ENV
+    ):
+        raise HarnessError("plan does not use the pinned Codex OpenEnv surface")
     for name in (
         "controller_binary_path",
         "controller_package_manifest_path",
@@ -652,17 +667,28 @@ def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
     )
 
     backend = value.get("backend")
+    profile_name = str(
+        learner.get("codex_backend_profile") or learner.get("tito_model", "")
+    )
     expected_backend = stock_codex_backend_contract(
-        str(learner.get("tito_model", "")),
+        profile_name,
         learner.get("rollout_max_response_len"),
     )
     if backend != expected_backend:
         raise HarnessError("stock Codex backend/TITO contract drifted")
-    if learner.get("custom_agent_function_path") != CODEX_HARNESS_AGENT:
-        raise HarnessError("stock Codex contract requires its signed agent path")
+    if custom_agent not in SIGNED_CODEX_AGENTS:
+        raise HarnessError("stock Codex contract requires a signed agent path")
+    if (
+        custom_agent == CODEX_OPENENV_AGENT
+        and profile_name != "qwen35_08b"
+    ):
+        raise HarnessError(
+            "the Codex OpenEnv adapter requires backend profile qwen35_08b"
+        )
     try:
         validate_stock_codex_fields(
             tito_model=str(learner.get("tito_model", "")),
+            codex_backend_profile=profile_name,
             rl_model_recipe=str(learner.get("rl_model_recipe", "generic")),
             model=str(learner.get("model", "")),
             model_revision=str(learner.get("model_revision", "")),
@@ -1453,7 +1479,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     ):
         raise HarnessError("plan has an incomplete agentic session contract")
     codex_harness = plan.get("codex_harness")
-    if custom_agent == CODEX_HARNESS_AGENT:
+    if custom_agent in SIGNED_CODEX_AGENTS:
         _validate_codex_harness(codex_harness, learner)
     elif codex_harness is not None:
         raise HarnessError("stock Codex contract requires the signed Codex agent")
@@ -1733,6 +1759,9 @@ def prepare(namespace) -> Path:
             "session_server_ip": args.session_server_ip,
             "session_server_port": args.session_server_port,
             "tito_model": args.tito_model,
+            "codex_backend_profile": getattr(
+                args, "codex_backend_profile", None
+            ),
             "tito_allowed_append_roles": getattr(
                 args, "tito_allowed_append_roles", None
             ),
@@ -1894,7 +1923,7 @@ def prepare(namespace) -> Path:
     codex_binary = getattr(namespace, "codex_harness_binary", None)
     codex_manifest = getattr(namespace, "codex_package_manifest", None)
     codex_schema = getattr(namespace, "codex_app_server_schema", None)
-    if args.custom_agent_function_path == CODEX_HARNESS_AGENT:
+    if args.custom_agent_function_path in SIGNED_CODEX_AGENTS:
         plan["codex_harness"] = _codex_harness_contract(namespace, args)
     elif any(value is not None for value in (codex_binary, codex_manifest, codex_schema)):
         raise HarnessError(
@@ -3204,6 +3233,10 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
             values.extend(str(port) for port in learner["session_server_port"])
         if learner.get("tito_model"):
             values.extend(("--tito-model", learner["tito_model"]))
+        if learner.get("codex_backend_profile"):
+            values.extend(
+                ("--codex-backend-profile", learner["codex_backend_profile"])
+            )
         if learner.get("tito_allowed_append_roles"):
             values.append("--tito-allowed-append-roles")
             values.extend(learner["tito_allowed_append_roles"])
@@ -3284,6 +3317,10 @@ printf '%s  %s\n' {shlex.quote(codex['package_manifest_sha256'])} "$CODEX_MANIFE
 test -f "$CODEX_SCHEMA_HOST" && test ! -L "$CODEX_SCHEMA_HOST"
 printf '%s  %s\n' {shlex.quote(codex['app_server_schema_sha256'])} "$CODEX_SCHEMA_HOST" | sha256sum --check -
 """
+        openenv_env = "".join(
+            f"--env {name}={shlex.quote(value)} "
+            for name, value in codex.get("openenv_identity_env", {}).items()
+        )
         codex_env = (
             "  --env YETO_CODEX_BINARY_PATH="
             f"{shlex.quote(codex['container_binary_path'])} "
@@ -3314,6 +3351,7 @@ printf '%s  %s\n' {shlex.quote(codex['app_server_schema_sha256'])} "$CODEX_SCHEM
             "--env YETO_CODEX_CHAT_TEMPLATE_KWARGS="
             f"{shlex.quote(_canonical_json(codex['backend']['chat_template_kwargs']))} "
             "--env YETO_CODEX_TITO_ALLOWED_APPEND_ROLES=tool,user "
+            f"{openenv_env}"
             f"--env YETO_CODEX_HARNESS_CONTRACT_SHA256={codex_contract_sha256} \\\n"
         )
         codex_volumes = (

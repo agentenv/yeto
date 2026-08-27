@@ -741,13 +741,13 @@ def _prepare_rl_args(
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")
     from .rl import (
-        CODEX_HARNESS_AGENT,
         SECRLENV_AGENTS,
         SECRLENV_GENERATE,
         SECRLENV_GROUP_FILTER,
         SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
         SECRLENV_REWARD,
         SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
+        SIGNED_CODEX_AGENTS,
     )
 
     if custom_agent is not None:
@@ -766,7 +766,7 @@ def _prepare_rl_args(
             )
         if (
             args.apply_chat_template_kwargs is not None
-            and custom_agent != CODEX_HARNESS_AGENT
+            and custom_agent not in SIGNED_CODEX_AGENTS
         ):
             raise ValueError(
                 "agentic session rollouts preserve raw messages and do not accept "
@@ -774,18 +774,22 @@ def _prepare_rl_args(
             )
 
     codex_reasoning_effort = getattr(args, "codex_reasoning_effort", None)
-    if custom_agent == CODEX_HARNESS_AGENT:
+    codex_backend_profile = getattr(args, "codex_backend_profile", None)
+    if custom_agent in SIGNED_CODEX_AGENTS:
         from .rl.codex_backend import (
             stock_codex_backend_profile,
             validate_stock_codex_fields,
         )
 
-        codex_profile = stock_codex_backend_profile(str(args.tito_model))
+        codex_backend_profile = codex_backend_profile or str(args.tito_model)
+        args.codex_backend_profile = codex_backend_profile
+        codex_profile = stock_codex_backend_profile(codex_backend_profile)
         codex_chat_template_kwargs = codex_profile["chat_template_kwargs"]
         if args.apply_chat_template_kwargs is None:
             args.apply_chat_template_kwargs = codex_chat_template_kwargs
         validate_stock_codex_fields(
             tito_model=str(args.tito_model),
+            codex_backend_profile=codex_backend_profile,
             rl_model_recipe=getattr(args, "rl_model_recipe", "generic"),
             model=str(args.model),
             model_revision=str(args.model_revision),
@@ -799,9 +803,9 @@ def _prepare_rl_args(
             lora_targets=str(args.lora_targets),
             expert_full_count=int(getattr(args, "expert_full_count", 0)),
         )
-    elif codex_reasoning_effort is not None:
+    elif codex_reasoning_effort is not None or codex_backend_profile is not None:
         raise ValueError(
-            "--codex-reasoning-effort requires the signed stock Codex agent"
+            "--codex-reasoning-effort/--codex-backend-profile requires a signed Codex agent"
         )
     secrlenv_infrastructure_replacements = getattr(
         args, "secrlenv_max_infrastructure_replacements", None
@@ -905,10 +909,12 @@ def _prepare_rl_args(
         args.session_server_ip is not None
         or args.session_server_port is not None
         or args.tito_model is not None
+        or getattr(args, "codex_backend_profile", None) is not None
         or getattr(args, "tito_allowed_append_roles", None) is not None
     ):
         raise ValueError(
             "--session-server-ip/--session-server-port/--tito-model/"
+            "--codex-backend-profile/"
             "--tito-allowed-append-roles requires --use-session-server"
         )
     roles = getattr(args, "tito_allowed_append_roles", None)
@@ -1352,7 +1358,6 @@ def make_miles_island_task(
     from .models import resolve
     from .provenance import is_local_reference
     from .rl import (
-        CODEX_HARNESS_AGENT,
         MILES_BASE_COMMIT,
         MILES_BUNDLE_PATH,
         MILES_BUNDLE_SHA256,
@@ -1361,15 +1366,16 @@ def make_miles_island_task(
         MILES_REPOSITORY,
         SGLANG_COMMIT,
         SGLANG_REPOSITORY,
+        SIGNED_CODEX_AGENTS,
     )
 
     if not getattr(args, "source_sha256", None) or not getattr(
         args, "reward_sha256", None
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
-    if getattr(args, "custom_agent_function_path", None) == CODEX_HARNESS_AGENT:
+    if getattr(args, "custom_agent_function_path", None) in SIGNED_CODEX_AGENTS:
         raise ValueError(
-            "the stock Codex harness requires the direct SSH harness so its "
+            "the signed Codex harness requires the direct SSH harness so its "
             "Linux binary can be attested and frozen into the run bundle"
         )
 
@@ -1490,6 +1496,11 @@ def make_miles_island_task(
             flags += f" --session-server-port {ports}"
         if args.tito_model:
             flags += f" --tito-model {shlex.quote(args.tito_model)}"
+        if getattr(args, "codex_backend_profile", None):
+            flags += (
+                " --codex-backend-profile "
+                f"{shlex.quote(args.codex_backend_profile)}"
+            )
         if getattr(args, "tito_allowed_append_roles", None):
             roles = " ".join(
                 shlex.quote(role) for role in args.tito_allowed_append_roles

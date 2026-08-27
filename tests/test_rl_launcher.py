@@ -21,6 +21,7 @@ from yeto.launcher import (
     syncer_command,
 )
 from yeto.rl import (
+    CODEX_OPENENV_AGENT,
     MILES_BASE_COMMIT,
     MILES_BUNDLE_PATH,
     MILES_BUNDLE_SHA256,
@@ -35,6 +36,8 @@ from yeto.rl import (
 )
 from yeto.rl import learner as rl_learner
 from yeto.rl.codex_backend import (
+    QWEN35_08B_MODEL,
+    QWEN35_08B_REVISION,
     QWEN35_MODEL,
     QWEN35_REVISION,
     QWEN38_MODEL,
@@ -454,7 +457,7 @@ def test_rl_maps_long_task_and_oversampling_options_to_miles():
 
 def test_stock_codex_harness_requires_explicit_signed_xhigh_dsv4_contract():
     args = _args(("--codex-reasoning-effort", "xhigh"))
-    with pytest.raises(ValueError, match="signed stock Codex agent"):
+    with pytest.raises(ValueError, match="signed Codex agent"):
         _prepare_rl_args(args)
 
     args = _args(
@@ -559,6 +562,45 @@ def test_stock_codex_harness_accepts_only_the_exact_qwen38_xhigh_profile():
 
     args.model_revision = "0" * 40
     with pytest.raises(ValueError, match="Qwen3.8 model identity"):
+        _prepare_rl_args(args)
+
+
+def test_codex_openenv_uses_exact_08b_profile_with_qwen35_tito_family():
+    args = _args(
+        (
+            "--model",
+            QWEN35_08B_MODEL,
+            "--model-revision",
+            QWEN35_08B_REVISION,
+            "--lora-targets",
+            "attention",
+            "--custom-generate-function-path",
+            "miles.rollout.generate_hub.agentic_tool_call.generate",
+            "--custom-agent-function-path",
+            CODEX_OPENENV_AGENT,
+            "--codex-reasoning-effort",
+            "xhigh",
+            "--codex-backend-profile",
+            "qwen35_08b",
+            "--use-session-server",
+            "--tito-model",
+            "qwen35",
+            "--tito-allowed-append-roles",
+            "tool",
+            "user",
+        )
+    )
+
+    _prepare_rl_args(args)
+
+    assert args.codex_backend_profile == "qwen35_08b"
+    assert args.tito_model == "qwen35"
+    assert args.model == QWEN35_08B_MODEL
+    assert args.model_revision == QWEN35_08B_REVISION
+    assert args.apply_chat_template_kwargs == {"clear_thinking": False}
+
+    args.tito_model = "qwen35_08b"
+    with pytest.raises(ValueError, match="Miles TITO family"):
         _prepare_rl_args(args)
 
 

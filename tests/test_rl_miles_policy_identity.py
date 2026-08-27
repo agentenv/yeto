@@ -23,6 +23,14 @@ def test_trajectory_evidence_requires_exact_current_published_policy_identity(
         policy_version=3,
         policy_hash=POLICY_HASH,
     )
+    assert args.yeto_rl_policy_token == f"yeto:3:{POLICY_HASH}"
+    assert miles._policy_token_for_rollout(
+        SimpleNamespace(
+            yeto_rl_sync_preset="sao-streaming-full",
+            yeto_rl_policy_token=args.yeto_rl_policy_token,
+        ),
+        3,
+    ) == f"yeto:3:{POLICY_HASH}"
     assert miles.get_current_published_policy_identity(
         args,
         expected_policy_version=3,
@@ -38,6 +46,7 @@ def test_published_policy_identity_cannot_change_at_a_version_or_regress():
         policy_version=3,
         policy_hash=POLICY_HASH,
     )
+    original_token = args.yeto_rl_policy_token
 
     with pytest.raises(RuntimeError, match="hash changed"):
         miles.set_current_published_policy_identity(
@@ -51,3 +60,4 @@ def test_published_policy_identity_cannot_change_at_a_version_or_regress():
             policy_version=2,
             policy_hash=POLICY_HASH,
         )
+    assert args.yeto_rl_policy_token == original_token

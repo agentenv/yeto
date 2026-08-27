@@ -22,13 +22,15 @@ from .miles_sao_streaming import (
     MilesSaoStreamingConfig,
 )
 
-_SCHEMA = "yeto.sao-streaming-runtime.v1"
-_LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v1"
+_LEGACY_SCHEMA = "yeto.sao-streaming-runtime.v1"
+_SCHEMA = "yeto.sao-streaming-runtime.v2"
+_LEGACY_LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v1"
+_LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v2"
 _SYNC_FACTORY = "yeto.rl.miles_sao_streaming.create_miles_sao_streaming_sync"
 _IDENTITY_SETTER = "yeto.rl.miles.set_current_published_policy_identity"
 _ROLLOUT_FUNCTION = "yeto.rl.miles.generate_rollout"
 _HEX = frozenset("0123456789abcdef")
-_TOP_LEVEL_FIELDS = {
+_LEGACY_TOP_LEVEL_FIELDS = {
     "schema",
     "sao_secrlenv_context_sha256",
     "trajectory_evidence_dir",
@@ -37,6 +39,17 @@ _TOP_LEVEL_FIELDS = {
     "actor",
     "critic",
 }
+_TOP_LEVEL_FIELDS = {
+    "schema",
+    "sao_context_sha256",
+    "trajectory_evidence",
+    "layout_attestation",
+    "syncer_profile",
+    "actor",
+    "critic",
+}
+_TRAJECTORY_EVIDENCE_FIELDS = {"directory", "kind", "schema_version"}
+_TRAJECTORY_EVIDENCE_KINDS = frozenset({"secrlenv", "terminal-bench-2.1"})
 _ROLE_FIELDS = {
     "role",
     "component",
@@ -64,6 +77,12 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def sao_streaming_sync_factory_path() -> str:
+    """Return the one callback path owned by the streaming SAO entrypoint."""
+
+    return _SYNC_FACTORY
 
 
 def _sha256(name: str, value: object) -> str:
@@ -216,8 +235,10 @@ def _parse_role(
 class SaoStreamingRuntime:
     """Validated runtime contract ready to bind into a Miles namespace."""
 
-    sao_secrlenv_context_sha256: str
+    sao_context_sha256: str
     trajectory_evidence_dir: Path
+    trajectory_evidence_kind: str
+    trajectory_evidence_schema_version: int
     layout_attestation_path: Path
     layout_attestation_sha256: str
     syncer_profile: SyncerSemanticProfile
@@ -228,6 +249,7 @@ def _load_layout_attestation(
     raw: object,
     *,
     expected_sao_context_sha256: str,
+    benchmark_neutral: bool,
     actor: MilesSaoRoleStreamConfig,
     critic: MilesSaoRoleStreamConfig,
     syncer_profile_sha256: str,
@@ -258,21 +280,31 @@ def _load_layout_attestation(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("SAO streaming layout attestation is malformed") from error
+    context_field = (
+        "sao_context_sha256"
+        if benchmark_neutral
+        else "sao_secrlenv_context_sha256"
+    )
+    expected_schema = (
+        _LAYOUT_ATTESTATION_SCHEMA
+        if benchmark_neutral
+        else _LEGACY_LAYOUT_ATTESTATION_SCHEMA
+    )
     payload = _mapping(
         "SAO streaming layout attestation",
         payload,
-        {"schema", "sao_secrlenv_context_sha256", "settings", "actor", "critic"},
+        {"schema", context_field, "settings", "actor", "critic"},
     )
-    if payload["schema"] != _LAYOUT_ATTESTATION_SCHEMA:
+    if payload["schema"] != expected_schema:
         raise ValueError("unsupported SAO streaming layout attestation schema")
     if (
         _sha256(
-            "layout-attested SAO SecRLEnv context",
-            payload["sao_secrlenv_context_sha256"],
+            "layout-attested SAO context",
+            payload[context_field],
         )
         != expected_sao_context_sha256
     ):
-        raise ValueError("SAO layout attestation binds a different SecRLEnv context")
+        raise ValueError("SAO layout attestation binds a different context")
     settings = _mapping(
         "SAO streaming layout settings",
         payload["settings"],
@@ -398,23 +430,52 @@ def load_sao_streaming_runtime(
         raise ValueError("SAO streaming context must not be a symlink")
     source = candidate.resolve()
     _sha256("SAO streaming context SHA256", expected_sha256)
-    _sha256("SAO SecRLEnv context SHA256", expected_sao_context_sha256)
+    _sha256("SAO context SHA256", expected_sao_context_sha256)
     if not source.is_file() or _sha256_file(source) != expected_sha256:
         raise ValueError("SAO streaming context SHA256 mismatch")
     try:
         payload = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("SAO streaming context is unreadable or malformed") from error
-    payload = _mapping("SAO streaming context", payload, _TOP_LEVEL_FIELDS)
-    if payload["schema"] != _SCHEMA:
-        raise ValueError(f"unsupported SAO streaming schema: {payload['schema']!r}")
+    if not isinstance(payload, dict):
+        raise TypeError("SAO streaming context must be an object")
+    schema = payload.get("schema")
+    if schema == _LEGACY_SCHEMA:
+        payload = _mapping(
+            "SAO streaming context", payload, _LEGACY_TOP_LEVEL_FIELDS
+        )
+        context_field = "sao_secrlenv_context_sha256"
+        evidence = payload["trajectory_evidence_dir"]
+        evidence_kind = "secrlenv"
+        evidence_schema_version = 1
+        benchmark_neutral = False
+    elif schema == _SCHEMA:
+        payload = _mapping("SAO streaming context", payload, _TOP_LEVEL_FIELDS)
+        context_field = "sao_context_sha256"
+        evidence_contract = _mapping(
+            "SAO trajectory evidence",
+            payload["trajectory_evidence"],
+            _TRAJECTORY_EVIDENCE_FIELDS,
+        )
+        evidence = evidence_contract["directory"]
+        evidence_kind = evidence_contract["kind"]
+        evidence_schema_version = evidence_contract["schema_version"]
+        if (
+            evidence_kind not in _TRAJECTORY_EVIDENCE_KINDS
+            or evidence_schema_version != 2
+        ):
+            raise ValueError(
+                "SAO trajectory evidence kind/schema is unsupported"
+            )
+        benchmark_neutral = True
+    else:
+        raise ValueError(f"unsupported SAO streaming schema: {schema!r}")
     bound_context = _sha256(
-        "bound SAO SecRLEnv context",
-        payload["sao_secrlenv_context_sha256"],
+        "bound SAO context",
+        payload[context_field],
     )
     if bound_context != expected_sao_context_sha256:
-        raise ValueError("SAO streaming context binds a different SecRLEnv context")
-    evidence = payload["trajectory_evidence_dir"]
+        raise ValueError("SAO streaming context binds a different SAO context")
     if type(evidence) is not str:
         raise ValueError("SAO trajectory evidence directory must be a string")
     evidence_path = Path(evidence)
@@ -450,6 +511,7 @@ def load_sao_streaming_runtime(
     attestation_path, attestation_sha256 = _load_layout_attestation(
         payload["layout_attestation"],
         expected_sao_context_sha256=bound_context,
+        benchmark_neutral=benchmark_neutral,
         actor=actor,
         critic=critic,
         syncer_profile_sha256=syncer_profile.sha256,
@@ -457,6 +519,8 @@ def load_sao_streaming_runtime(
     return SaoStreamingRuntime(
         bound_context,
         evidence_path,
+        evidence_kind,
+        evidence_schema_version,
         attestation_path,
         attestation_sha256,
         syncer_profile,
@@ -467,6 +531,10 @@ def load_sao_streaming_runtime(
 def _validate_miles_runtime(args: Any, runtime: SaoStreamingRuntime) -> None:
     actor = runtime.streams.actor
     critic = runtime.streams.critic
+    if runtime.trajectory_evidence_kind == "terminal-bench-2.1":
+        from .tbench_outcome import validate_hmac_key_source
+
+        validate_hmac_key_source()
     unsafe_debug_flags = (
         "debug_skip_weight_update",
         "debug_disable_optimizer",
@@ -502,8 +570,11 @@ def _validate_miles_runtime(args: Any, runtime: SaoStreamingRuntime) -> None:
         raise ValueError("SAO streaming currently requires a version-zero start")
     if int(getattr(args, "lora_rank", 0)) > 0:
         raise ValueError("SAO streaming requires full-parameter training")
-    if getattr(args, "external_policy_sync_path", None) is not None:
-        raise ValueError("the SAO streaming entrypoint owns the external sync callback")
+    if getattr(args, "external_policy_sync_path", None) != _SYNC_FACTORY:
+        raise ValueError(
+            "SAO streaming requires its trusted external sync callback before "
+            "Miles argument validation"
+        )
     if getattr(args, "rollout_function_path", None) != _ROLLOUT_FUNCTION:
         raise ValueError(
             "SAO streaming requires Yeto's evidence-producing rollout function"
@@ -559,6 +630,10 @@ def bind_sao_streaming_runtime(args: Any, runtime: SaoStreamingRuntime) -> Path:
     config = runtime.streams
     args.yeto_rl_sao_streaming_config = config
     args.yeto_rl_trajectory_evidence_dir = str(evidence)
+    args.yeto_rl_trajectory_evidence_kind = runtime.trajectory_evidence_kind
+    args.yeto_rl_trajectory_evidence_schema_version = (
+        runtime.trajectory_evidence_schema_version
+    )
     args.yeto_rl_sync_preset = "sao-streaming-full"
     args.yeto_rl_learner_generation = config.actor.learner_generation
     args.yeto_rl_learner_generations = config.actor.learner_generations

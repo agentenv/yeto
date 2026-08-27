@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import hashlib
 import hmac
 import json
@@ -17,6 +18,8 @@ import math
 import os
 import re
 import secrets
+import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -60,6 +63,23 @@ CODEX_TOOL_OUTPUT_TOKEN_LIMIT = 65_536
 MAX_APP_SERVER_FRAME_BYTES = 2 * 1024 * 1024
 MAX_MILES_RESPONSE_BYTES = 4 * 1024 * 1024
 _MILES_RESPONSE_READ_CHUNK_BYTES = 64 * 1024
+_CODEX_PROCESS_STOP_TIMEOUT_SECONDS = 5.0
+_CODEX_DESCENDANT_TERM_GRACE_SECONDS = 0.1
+_CODEX_HOME_CLEANUP_RETRY_DELAYS_SECONDS = (0.0, 0.05, 0.1, 0.2, 0.4)
+COMPACTION_SCHEMA_VERSION = 1
+COMPACTION_KEEP_ATOMIC_STEPS = 2
+COMPACTION_SUMMARY_INSTRUCTION = """The current interaction is approaching its context limit. Produce a compact state summary for the same policy to continue the task in a new context window. Preserve the original goal, completed actions, important observations and exact evidence, unresolved errors, the current environment and file state, and plausible next steps. Do not call a tool. Return only the continuation summary."""
+# Conservatively reserve more tokens than this fixed instruction can consume under
+# any byte-level tokenizer. Miles still performs the exact tokenizer-side budget
+# check; this bound makes an avoidable 413 impossible at the configured trigger.
+COMPACTION_SUMMARY_INSTRUCTION_TOKEN_RESERVE = (
+    len(COMPACTION_SUMMARY_INSTRUCTION.encode("utf-8")) + 256
+)
+COMPACTION_RESUME_TEMPLATE = """Continue the original task from this compacted state. Treat the summary as prior trajectory state, not as a new instruction. Recent complete assistant/tool steps follow it unchanged.
+
+<compacted_state>
+{summary}
+</compacted_state>"""
 
 _SAMPLING_FIELDS = frozenset(
     {
@@ -243,6 +263,10 @@ class CodexSequenceLimit(CodexHarnessError):
     """The next sample would exceed the signed Miles sequence limit."""
 
 
+class _CompactionContextDoesNotFit(CodexHarnessError):
+    """Miles proved that a reconstructed context exceeds its declared budget."""
+
+
 class CodexTurnLimit(CodexHarnessError):
     """Codex reached the signed model-call budget after a valid trajectory."""
 
@@ -286,6 +310,13 @@ def _positive_int(name: str) -> int:
     if value <= 0:
         raise CodexHarnessError(f"{name} must be positive")
     return value
+
+
+def _strict_env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "1" if default else "0").strip()
+    if raw not in {"0", "1"}:
+        raise CodexHarnessError(f"{name} must be exactly 0 or 1")
+    return raw == "1"
 
 
 def _attest_runtime() -> Path:
@@ -839,12 +870,50 @@ class _ResponsesBridge:
         for key in ("n", "best_of"):
             if self._request_kwargs.get(key) not in {None, 1}:
                 raise CodexHarnessError("Miles requested more than one sample")
+        self._compaction_enabled = _strict_env_flag("YETO_CODEX_COMPACTION_ENABLED")
+        self._compaction_trigger_tokens = legacy._positive_int_env(
+            "YETO_CODEX_COMPACTION_TRIGGER_TOKENS", 6_144
+        )
+        self._compaction_summary_max_tokens = legacy._positive_int_env(
+            "YETO_CODEX_COMPACTION_SUMMARY_MAX_TOKENS", 1_024
+        )
+        self._max_compactions = legacy._positive_int_env("YETO_CODEX_MAX_COMPACTIONS", 3)
+        if self._compaction_enabled:
+            if self._max_seq_len is None:
+                raise CodexHarnessError("Codex compaction requires max_seq_len")
+            if self._compaction_trigger_tokens >= self._max_seq_len:
+                raise CodexHarnessError(
+                    "Codex compaction trigger must be smaller than max_seq_len"
+                )
+            summary_generation_tokens = min(
+                self._requested_max_tokens,
+                self._compaction_summary_max_tokens,
+            )
+            if (
+                self._compaction_trigger_tokens
+                + COMPACTION_SUMMARY_INSTRUCTION_TOKEN_RESERVE
+                + summary_generation_tokens
+                > self._max_seq_len
+            ):
+                raise CodexHarnessError(
+                    "Codex compaction trigger leaves insufficient room for the "
+                    "summary instruction and generation"
+                )
         self._token = secrets.token_urlsafe(32)
         self._seen_bodies: set[str] = set()
         self._expected_input: list[dict[str, Any]] | None = None
         self._history_after_model: list[dict[str, Any]] | None = None
         self._pending: _PendingTool | None = None
         self._messages: list[dict[str, Any]] = []
+        self._atomic_steps: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        self._last_assistant_message: dict[str, Any] | None = None
+        self._context_window = 0
+        self._segment_index = 0
+        self._segment_type = "execution"
+        self._compaction_count = 0
+        self._current_context_tokens = 0
+        self._resume_summary: str | None = None
+        self._retained_step_count = COMPACTION_KEEP_ATOMIC_STEPS
         self._unobserved_tool_token_upper_bound = 0
         self._request_count = 0
         self._terminal = False
@@ -914,6 +983,15 @@ class _ResponsesBridge:
         self._messages.append(
             {"role": "tool", "tool_call_id": call_id, "content": output}
         )
+        if self._last_assistant_message is None:
+            raise CodexHarnessError("Codex lost the assistant half of an atomic tool step")
+        self._atomic_steps.append(
+            (
+                copy.deepcopy(self._last_assistant_message),
+                copy.deepcopy(self._messages[-1]),
+            )
+        )
+        self._last_assistant_message = None
         self._unobserved_tool_token_upper_bound += len(output.encode("utf-8")) + 256
         self._pending = None
 
@@ -959,15 +1037,17 @@ class _ResponsesBridge:
                     ]
                 elif history != self._expected_input:
                     raise CodexHarnessError("Codex truncated or mutated episode history")
-                if (
-                    self._max_seq_len is not None
-                    and self._metrics.max_model_total_tokens
+                estimated_context_tokens = (
+                    self._current_context_tokens
                     + self._unobserved_tool_token_upper_bound
-                    >= self._max_seq_len
-                ):
+                )
+                if self._should_compact(estimated_context_tokens):
+                    await self._compact_context()
+                    estimated_context_tokens = 0
+                if self._max_seq_len is not None and estimated_context_tokens >= self._max_seq_len:
                     self._metrics.max_seq_len_hit = 1
                     raise CodexSequenceLimit("Miles sequence limit reached")
-                completion = await self._sample_miles()
+                completion = await self._sample_execution_with_tail_fallback()
                 self._request_count += 1
                 self._metrics.turns = self._request_count
                 usage, total = _usage(completion)
@@ -979,6 +1059,7 @@ class _ResponsesBridge:
                     self._metrics.max_model_total_tokens = max(
                         self._metrics.max_model_total_tokens, total
                     )
+                    self._current_context_tokens = total
                     self._unobserved_tool_token_upper_bound = 0
                 output = self._translate_completion(completion)
                 self._history_after_model = history + [
@@ -1011,7 +1092,120 @@ class _ResponsesBridge:
                 self._fail(failure)
                 return web.json_response({"error": "protocol violation"}, status=400)
 
-    async def _sample_miles(self) -> dict[str, Any]:
+    def _compaction_headers(self) -> dict[str, str]:
+        if not self._compaction_enabled or self._max_seq_len is None:
+            return {}
+        return {
+            "X-Miles-Compaction-Schema-Version": str(COMPACTION_SCHEMA_VERSION),
+            "X-Miles-Compaction-Context-Window": str(self._context_window),
+            "X-Miles-Compaction-Segment-Index": str(self._segment_index),
+            "X-Miles-Compaction-Segment-Type": self._segment_type,
+            "X-Miles-Compaction-Context-Budget": str(self._max_seq_len),
+        }
+
+    def _should_compact(self, estimated_context_tokens: int) -> bool:
+        """Return whether consumed context reached the configured boundary."""
+        return (
+            self._compaction_enabled
+            and self._compaction_count < self._max_compactions
+            and self._max_seq_len is not None
+            and estimated_context_tokens >= self._compaction_trigger_tokens
+        )
+
+    def _rebuild_compacted_messages(self, retained_step_count: int) -> None:
+        if self._resume_summary is None:
+            raise CodexHarnessError("compaction resume summary is missing")
+        retained = self._atomic_steps[-retained_step_count:] if retained_step_count else []
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": BASE_INSTRUCTIONS},
+            {
+                "role": "user",
+                "content": COMPACTION_RESUME_TEMPLATE.format(summary=self._resume_summary),
+            },
+        ]
+        for assistant, tool in retained:
+            messages.extend((copy.deepcopy(assistant), copy.deepcopy(tool)))
+        self._messages = messages
+        self._atomic_steps = copy.deepcopy(retained)
+        self._retained_step_count = retained_step_count
+
+    async def _compact_context(self) -> None:
+        """Sample a trainable summary, then start one reconstructed window."""
+        if self._pending is not None or self._last_assistant_message is not None:
+            raise CodexHarnessError("compaction attempted inside an atomic tool step")
+        if not self._atomic_steps:
+            raise CodexHarnessError("compaction attempted without a complete tool step")
+        if self._max_seq_len is None:
+            raise CodexHarnessError("compaction requires a context budget")
+        summary_generation_tokens = min(
+            self._requested_max_tokens,
+            self._compaction_summary_max_tokens,
+        )
+        if (
+            self._current_context_tokens
+            + self._unobserved_tool_token_upper_bound
+            + COMPACTION_SUMMARY_INSTRUCTION_TOKEN_RESERVE
+            + summary_generation_tokens
+            > self._max_seq_len
+        ):
+            raise CodexSequenceLimit(
+                "compaction was triggered too late to reserve a complete summary"
+            )
+        self._segment_index += 1
+        self._segment_type = "summary"
+        summary_messages = copy.deepcopy(self._messages)
+        summary_messages.append(
+            {"role": "user", "content": COMPACTION_SUMMARY_INSTRUCTION}
+        )
+        try:
+            completion = await self._sample_miles(
+                messages=summary_messages,
+                summary=True,
+            )
+        except _CompactionContextDoesNotFit as exc:
+            raise CodexSequenceLimit(
+                "compaction summary instruction no longer fits the context budget"
+            ) from exc
+        usage, total = _usage(completion)
+        del usage
+        if total is None:
+            self._metrics.usage_missing += 1
+            raise CodexHarnessError("Miles omitted summary token usage")
+        self._metrics.max_model_total_tokens = max(
+            self._metrics.max_model_total_tokens, total
+        )
+        self._current_context_tokens = total
+        self._unobserved_tool_token_upper_bound = 0
+        summary = self._translate_summary(completion)
+
+        self._resume_summary = summary
+        self._context_window += 1
+        self._segment_index += 1
+        self._segment_type = "execution"
+        self._compaction_count += 1
+        self._current_context_tokens = 0
+        self._rebuild_compacted_messages(
+            min(COMPACTION_KEEP_ATOMIC_STEPS, len(self._atomic_steps))
+        )
+
+    async def _sample_execution_with_tail_fallback(self) -> dict[str, Any]:
+        """Reduce the exact recent-step tail only after Miles proves it cannot fit."""
+        while True:
+            try:
+                return await self._sample_miles()
+            except _CompactionContextDoesNotFit as exc:
+                if self._resume_summary is None or self._retained_step_count == 0:
+                    raise CodexSequenceLimit(
+                        "compacted resume context does not fit the context budget"
+                    ) from exc
+                self._rebuild_compacted_messages(self._retained_step_count - 1)
+
+    async def _sample_miles(
+        self,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+        summary: bool = False,
+    ) -> dict[str, Any]:
         if self._session is None:
             raise RuntimeError("bridge is not started")
         sampling = {
@@ -1023,18 +1217,20 @@ class _ResponsesBridge:
         if self._max_seq_len is not None:
             remaining = (
                 self._max_seq_len
-                - self._metrics.max_model_total_tokens
+                - self._current_context_tokens
                 - self._unobserved_tool_token_upper_bound
             )
+            if summary:
+                remaining -= COMPACTION_SUMMARY_INSTRUCTION_TOKEN_RESERVE
             if remaining <= 0:
                 raise CodexSequenceLimit("Miles sequence limit reached")
             max_tokens = min(max_tokens, remaining)
+        if summary:
+            max_tokens = min(max_tokens, self._compaction_summary_max_tokens)
         payload = {
             **sampling,
             "model": self._model,
-            "messages": copy.deepcopy(self._messages),
-            "tools": copy.deepcopy(_MILES_TOOLS),
-            "tool_choice": "auto",
+            "messages": copy.deepcopy(self._messages if messages is None else messages),
             "parallel_tool_calls": False,
             # Pinned Miles fake-streams one compact client event while retaining
             # the full token/logprob response in its session record for TITO.
@@ -1044,10 +1240,25 @@ class _ResponsesBridge:
             "thinking": {"type": "enabled"},
             "chat_template_kwargs": copy.deepcopy(BACKEND_CHAT_TEMPLATE_KWARGS),
         }
+        if summary:
+            payload["tools"] = []
+            payload["tool_choice"] = "none"
+        else:
+            payload["tools"] = copy.deepcopy(_MILES_TOOLS)
+            payload["tool_choice"] = "auto"
         started = time.monotonic()
         try:
-            async with self._session.post(self._miles_url, json=payload) as response:
+            async with self._session.post(
+                self._miles_url,
+                json=payload,
+                headers=self._compaction_headers(),
+            ) as response:
                 status = response.status
+                if status == 413:
+                    await _read_bounded_miles_response(response)
+                    raise _CompactionContextDoesNotFit(
+                        "Miles proved the compacted context exceeds its budget"
+                    )
                 if status != 200:
                     raise CodexHarnessError(f"Miles session returned HTTP {status}")
                 if response.content_type != "text/event-stream":
@@ -1059,7 +1270,32 @@ class _ResponsesBridge:
             raise CodexHarnessError("Miles session transport failed") from exc
         finally:
             self._metrics.total_generation_time += time.monotonic() - started
-        return _parse_miles_sse(raw)
+        completion = _parse_miles_sse(raw)
+        if not summary and self._resume_summary is not None:
+            # The session server tokenized this exact candidate before sampling.
+            # A 413 above is the only allowed reason to reduce k.
+            self._resume_summary = None
+        return completion
+
+    def _translate_summary(self, completion: dict[str, Any]) -> str:
+        choices = completion.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise CodexHarnessError("Miles returned extra or missing summary samples")
+        choice = choices[0]
+        if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+            raise CodexModelFailure("compaction summary did not finish cleanly")
+        message = choice.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            raise CodexModelFailure("compaction summary is not an assistant message")
+        content = message.get("content")
+        calls = message.get("tool_calls")
+        if (
+            not isinstance(content, str)
+            or not content.strip()
+            or (calls is not None and calls != [])
+        ):
+            raise CodexModelFailure("compaction summary must be non-empty and tool-free")
+        return content.strip()
 
     def _translate_completion(self, completion: dict[str, Any]) -> list[dict[str, Any]]:
         choices = completion.get("choices")
@@ -1103,6 +1339,7 @@ class _ResponsesBridge:
         self._pending = _PendingTool(call_id, codex_name, name, raw_arguments)
         self._metrics.tool_calls += 1
         self._messages.append(copy.deepcopy(message))
+        self._last_assistant_message = copy.deepcopy(message)
         index = self._request_count + 1
         return [
             {
@@ -1149,6 +1386,7 @@ def _codex_argv(binary: Path, bridge: _ResponsesBridge) -> list[str]:
         "features.multi_agent=false",
         "features.multi_agent_v2=false",
         "features.apps=false",
+        "features.plugins=false",
         "features.browser_use=false",
         "features.computer_use=false",
         "features.image_generation=false",
@@ -1193,6 +1431,7 @@ class _AppServerDriver:
         self._prompt = prompt
         self._metrics = metrics
         self._process: asyncio.subprocess.Process | None = None
+        self._process_group_id: int | None = None
         self._request_id = 0
         self._thread_id: str | None = None
         self._turn_id: str | None = None
@@ -1216,13 +1455,29 @@ class _AppServerDriver:
             stderr=asyncio.subprocess.PIPE,
             env=environment,
             limit=MAX_APP_SERVER_FRAME_BYTES + 1,
+            start_new_session=True,
         )
+        self._process_group_id = self._process.pid
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         return self
 
-    async def __aexit__(self, *_exc: object) -> None:
-        await self._stop()
-        self._isolated_home.cleanup()
+    async def __aexit__(
+        self,
+        exc_type: object,
+        _exc: object,
+        _traceback: object,
+    ) -> None:
+        try:
+            await self._stop()
+        except Exception:
+            if exc_type is None:
+                raise
+            LOGGER.warning(
+                "Codex app-server shutdown also failed while handling an episode error",
+                exc_info=True,
+            )
+        finally:
+            await self._cleanup_isolated_home()
 
     async def _drain_stderr(self) -> None:
         if self._process is None or self._process.stderr is None:
@@ -1234,15 +1489,89 @@ class _AppServerDriver:
         process = self._process
         if process is None:
             return
-        if process.returncode is None:
+
+        process_group_id = self._process_group_id
+        group_signalled = self._signal_process_group(signal.SIGTERM)
+        if process.returncode is None and not group_signalled:
             process.terminate()
+        if process.returncode is None:
             try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
+                await asyncio.wait_for(
+                    process.wait(), timeout=_CODEX_PROCESS_STOP_TIMEOUT_SECONDS
+                )
             except asyncio.TimeoutError:
-                process.kill()
+                if not self._signal_process_group(signal.SIGKILL):
+                    process.kill()
                 await process.wait()
+
+        # The app-server may have spawned plugin/helper processes which inherited
+        # CODEX_HOME.  Waiting for only the direct child does not reap them.  Give
+        # the isolated process group a short TERM grace period, then make sure no
+        # descendant remains able to recreate files while the home is removed.
+        if process_group_id is not None:
+            await asyncio.sleep(_CODEX_DESCENDANT_TERM_GRACE_SECONDS)
+            self._signal_process_group(signal.SIGKILL)
         if self._stderr_task is not None:
             await self._stderr_task
+        self._process_group_id = None
+
+    def _signal_process_group(self, sig: signal.Signals) -> bool:
+        process_group_id = self._process_group_id
+        if process_group_id is None:
+            return False
+        try:
+            os.killpg(process_group_id, sig)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            LOGGER.warning(
+                "failed to signal Codex app-server process group %s",
+                process_group_id,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    async def _cleanup_isolated_home(self) -> None:
+        isolated_home = getattr(self, "_isolated_home", None)
+        if isolated_home is None:
+            return
+
+        last_error: Exception | None = None
+        for delay_seconds in _CODEX_HOME_CLEANUP_RETRY_DELAYS_SECONDS:
+            if delay_seconds:
+                await asyncio.sleep(delay_seconds)
+            try:
+                isolated_home.cleanup()
+                return
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                last_error = exc
+                if exc.errno != errno.ENOTEMPTY:
+                    break
+            except Exception as exc:  # noqa: BLE001 - teardown must not mask outcome
+                last_error = exc
+                break
+
+        # Temp-home teardown is resource hygiene, not episode validity.  Once the
+        # app-server group has been reaped, make one non-throwing final removal so
+        # cleanup can neither invalidate a successful rollout nor mask its primary
+        # failure.  A warning retains evidence if the path somehow remains.
+        if last_error is not None:
+            LOGGER.warning(
+                "Codex isolated HOME cleanup did not complete normally: %s",
+                last_error,
+            )
+        try:
+            shutil.rmtree(isolated_home.name, ignore_errors=True)
+            if Path(isolated_home.name).exists():
+                LOGGER.warning("Codex isolated HOME remains at %s", isolated_home.name)
+        except Exception:
+            LOGGER.warning(
+                "Codex isolated HOME final best-effort cleanup failed",
+                exc_info=True,
+            )
 
     async def _send(self, value: dict[str, Any]) -> None:
         if self._process is None or self._process.stdin is None:

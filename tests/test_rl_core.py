@@ -1345,6 +1345,32 @@ def test_secrlenv_proxy_retries_same_task_without_advancing_signed_batch():
         )
 
 
+def test_rollout_group_validation_accepts_complete_compaction_trajectory():
+    segments = []
+    for segment_index, segment_type in enumerate(
+        ("execution", "summary", "execution")
+    ):
+        segments.append(
+            SimpleNamespace(
+                status=SimpleNamespace(value="completed"),
+                group_index=0,
+                index=0,
+                metadata={
+                    "compaction_schema_version": 1,
+                    "compaction_trajectory_id": "trajectory-0",
+                    "compaction_segment_index": segment_index,
+                    "compaction_segment_type": segment_type,
+                    "compaction_context_budget": 8192,
+                },
+            )
+        )
+
+    miles._validate_rollout_groups([[segments]], groups=1, samples=1)
+
+    with pytest.raises(RuntimeError, match="malformed compaction segments"):
+        miles._validate_rollout_groups([[segments[:2]]], groups=1, samples=1)
+
+
 def test_secrlenv_terminal_filter_error_drains_pinned_rollout(monkeypatch):
     cleanup = []
 

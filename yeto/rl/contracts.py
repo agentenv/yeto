@@ -49,6 +49,15 @@ class TrajectoryEnvelope:
     reward: float
     reward_contract_hash: str
     cleanup_evidence_hash: str
+    evidence_kind: str | None = None
+    active_token_count: int | None = None
+    loss_mask_hash: str | None = None
+    active_token_ids_hash: str | None = None
+    active_behavior_logprobs_hash: str | None = None
+    compaction_trajectory_id: str | None = None
+    compaction_segment_index: int | None = None
+    compaction_segment_type: str | None = None
+    compaction_context_budget: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("trajectory_id", "task_id", "prompt_group_id"):
@@ -77,6 +86,61 @@ class TrajectoryEnvelope:
             )
         if not math.isfinite(self.reward):
             raise ValueError("trajectory reward must be finite")
+        if self.evidence_kind is not None:
+            _require_identifier("evidence_kind", self.evidence_kind)
+        active_fields = (
+            self.active_token_count,
+            self.loss_mask_hash,
+            self.active_token_ids_hash,
+        )
+        if any(value is not None for value in active_fields):
+            if any(value is None for value in active_fields):
+                raise ValueError("trajectory active-token evidence is incomplete")
+            _require_nonnegative_int(
+                "active_token_count", self.active_token_count  # type: ignore[arg-type]
+            )
+            if self.active_token_count > self.response_token_count:  # type: ignore[operator]
+                raise ValueError(
+                    "trajectory active-token count exceeds its response length"
+                )
+            _require_sha256("loss_mask_hash", self.loss_mask_hash)  # type: ignore[arg-type]
+            _require_sha256(
+                "active_token_ids_hash", self.active_token_ids_hash  # type: ignore[arg-type]
+            )
+            if self.active_behavior_logprobs_hash is not None:
+                _require_sha256(
+                    "active_behavior_logprobs_hash",
+                    self.active_behavior_logprobs_hash,
+                )
+        elif self.active_behavior_logprobs_hash is not None:
+            raise ValueError(
+                "trajectory active log probabilities lack active-token evidence"
+            )
+
+        compaction_fields = (
+            self.compaction_trajectory_id,
+            self.compaction_segment_index,
+            self.compaction_segment_type,
+            self.compaction_context_budget,
+        )
+        if any(value is not None for value in compaction_fields):
+            if any(value is None for value in compaction_fields):
+                raise ValueError("trajectory compaction identity is incomplete")
+            _require_identifier(
+                "compaction_trajectory_id",
+                self.compaction_trajectory_id,  # type: ignore[arg-type]
+            )
+            _require_nonnegative_int(
+                "compaction_segment_index",
+                self.compaction_segment_index,  # type: ignore[arg-type]
+            )
+            if self.compaction_segment_type not in {"execution", "summary"}:
+                raise ValueError("trajectory compaction segment type is invalid")
+            if (
+                type(self.compaction_context_budget) is not int
+                or self.compaction_context_budget < 1
+            ):
+                raise ValueError("trajectory compaction context budget is invalid")
 
 
 @dataclass(frozen=True)

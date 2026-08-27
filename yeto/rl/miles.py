@@ -209,7 +209,9 @@ def set_current_published_policy_identity(
     setattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, identity)
     # The RolloutManager owns a serialized args namespace.  Installing the
     # identity through its remote setter is therefore also the only reliable
-    # way to tell evaluation which exact published policy it is sampling.
+    # way to tell rollout admission and evaluation which exact published
+    # policy they are sampling.
+    args.yeto_rl_policy_token = f"yeto:{policy_version}:{policy_hash}"
     args.yeto_rl_eval_policy_version = policy_version
     args.yeto_rl_eval_policy_hash = policy_hash
     return identity
@@ -264,9 +266,72 @@ def _validate_rollout_groups(data: object, groups: int, samples: int) -> None:
                 f"expected {samples}"
             )
         for sample in group:
-            status = getattr(getattr(sample, "status", None), "value", None)
-            if isinstance(sample, list) or status not in {"completed", "truncated"}:
-                raise RuntimeError("Miles returned an incomplete trajectory")
+            segments = sample if isinstance(sample, list) else [sample]
+            if not segments:
+                raise RuntimeError("Miles returned an empty segmented trajectory")
+            for segment in segments:
+                status = getattr(getattr(segment, "status", None), "value", None)
+                if isinstance(segment, list) or status not in {"completed", "truncated"}:
+                    raise RuntimeError("Miles returned an incomplete trajectory")
+            if isinstance(sample, list):
+                metadata = [getattr(segment, "metadata", None) for segment in segments]
+                trajectory_ids = {
+                    value.get("compaction_trajectory_id")
+                    for value in metadata
+                    if isinstance(value, Mapping)
+                }
+                indices = [
+                    value.get("compaction_segment_index")
+                    if isinstance(value, Mapping)
+                    else None
+                    for value in metadata
+                ]
+                types = [
+                    value.get("compaction_segment_type")
+                    if isinstance(value, Mapping)
+                    else None
+                    for value in metadata
+                ]
+                context_budgets = {
+                    value.get("compaction_context_budget")
+                    for value in metadata
+                    if isinstance(value, Mapping)
+                }
+                if (
+                    len(trajectory_ids) != 1
+                    or not all(
+                        isinstance(value, str) and value for value in trajectory_ids
+                    )
+                    or indices != list(range(len(segments)))
+                    or types != [
+                        "execution" if value % 2 == 0 else "summary"
+                        for value in range(len(segments))
+                    ]
+                    or types[-1] != "execution"
+                    or any(
+                        not isinstance(value, Mapping)
+                        or value.get("compaction_schema_version") != 1
+                        for value in metadata
+                    )
+                    or len(context_budgets) != 1
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value <= 0
+                        for value in context_budgets
+                    )
+                ):
+                    raise RuntimeError("Miles returned malformed compaction segments")
+                identities = {
+                    (getattr(segment, "group_index", None), getattr(segment, "index", None))
+                    for segment in segments
+                }
+                if len(identities) != 1 or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for identity in identities
+                    for value in identity
+                ):
+                    raise RuntimeError("Miles compaction segments changed trajectory identity")
 
 
 def _policy_token_for_rollout(args, rollout_id: int) -> str:
@@ -291,19 +356,20 @@ def _policy_token_for_rollout(args, rollout_id: int) -> str:
 def _validate_rollout_policy_versions(data: list[list[Any]], expected: str) -> None:
     for group in data:
         for sample in group:
-            versions = getattr(sample, "weight_versions", None)
-            if (
-                not isinstance(versions, list)
-                or not versions
-                or any(
-                    not isinstance(version, str) or version != expected
-                    for version in versions
-                )
-            ):
-                raise StrictRlInvariantError(
-                    "mixed_version_group_count",
-                    f"Miles rollout did not use only policy {expected}",
-                )
+            for segment in sample if isinstance(sample, list) else [sample]:
+                versions = getattr(segment, "weight_versions", None)
+                if (
+                    not isinstance(versions, list)
+                    or not versions
+                    or any(
+                        not isinstance(version, str) or version != expected
+                        for version in versions
+                    )
+                ):
+                    raise StrictRlInvariantError(
+                        "mixed_version_group_count",
+                        f"Miles rollout did not use only policy {expected}",
+                    )
 
 
 def _append_rl_event(args, event: dict[str, Any]) -> None:
@@ -390,6 +456,9 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "custom_generate_function_path": args.custom_generate_function_path,
         "use_session_server": args.use_session_server,
         "tito_model": args.tito_model,
+        "codex_backend_profile": getattr(
+            args, "yeto_rl_codex_backend_profile", None
+        ),
     }
     codex_harness_contract = getattr(
         args,
@@ -437,12 +506,16 @@ def _complete_group_for_policy(
     if not isinstance(group, list) or len(group) != size:
         return False
     for sample in group:
-        status = getattr(getattr(sample, "status", None), "value", None)
-        versions = getattr(sample, "weight_versions", None)
-        if status not in {"completed", "truncated"} or not versions:
+        segments = sample if isinstance(sample, list) else [sample]
+        if not segments:
             return False
-        if any(not isinstance(token, str) or token != expected for token in versions):
-            return False
+        for segment in segments:
+            status = getattr(getattr(segment, "status", None), "value", None)
+            versions = getattr(segment, "weight_versions", None)
+            if status not in {"completed", "truncated"} or not versions:
+                return False
+            if any(not isinstance(token, str) or token != expected for token in versions):
+                return False
     return True
 
 
@@ -450,7 +523,10 @@ def _group_indices(group: object) -> tuple[int, ...] | None:
     if not isinstance(group, list):
         return None
     try:
-        return tuple(int(sample.index) for sample in group)
+        return tuple(
+            int((sample[0] if isinstance(sample, list) and sample else sample).index)
+            for sample in group
+        )
     except (AttributeError, TypeError, ValueError):
         return None
 
@@ -881,10 +957,14 @@ def _serialize_completed_groups(groups: list[list[Any]]) -> list[list[dict[str, 
     for group in groups:
         serialized_group = []
         for sample in group:
-            to_dict = getattr(sample, "to_dict", None)
-            if not callable(to_dict):
-                raise RuntimeError("pinned Miles Sample lacks checkpoint serialization")
-            serialized_group.append(to_dict())
+            segments = sample if isinstance(sample, list) else [sample]
+            values = []
+            for segment in segments:
+                to_dict = getattr(segment, "to_dict", None)
+                if not callable(to_dict):
+                    raise TypeError("pinned Miles Sample lacks checkpoint serialization")
+                values.append(to_dict())
+            serialized_group.append(values if isinstance(sample, list) else values[0])
         serialized.append(serialized_group)
     return serialized
 
@@ -896,7 +976,12 @@ def _deserialize_completed_groups(groups: object) -> list[list[Any]]:
         return []
     try:
         return [
-            [Sample.from_dict(sample) for sample in group]
+            [
+                [Sample.from_dict(segment) for segment in sample]
+                if isinstance(sample, list)
+                else Sample.from_dict(sample)
+                for sample in group
+            ]
             for group in groups
             if isinstance(group, list)
         ]
@@ -1058,10 +1143,7 @@ def _run_rollout_with_metrics(generate, args, rollout_id, data_source, evaluatio
             except Exception:
                 state["cancelled"] += 1
                 return
-            statuses = [
-                getattr(getattr(sample, "status", None), "value", None)
-                for sample in group
-            ]
+            statuses = _sample_statuses(group)
             if any(status not in {"completed", "truncated"} for status in statuses):
                 state["cancelled"] += 1
 
@@ -1148,6 +1230,18 @@ def _persist_trajectory_evidence(args: Any, rollout_id: int, groups: Any) -> Non
         expected_policy_version=rollout_id,
     )
     reward_hash = getattr(args, "yeto_rl_reward_sha256", None)
+    evidence_kind = getattr(args, "yeto_rl_trajectory_evidence_kind", None)
+    if evidence_kind not in {"secrlenv", "terminal-bench-2.1"}:
+        raise RuntimeError(
+            "trajectory evidence kind is not bound by the launch context"
+        )
+    evidence_schema_version = getattr(
+        args, "yeto_rl_trajectory_evidence_schema_version", None
+    )
+    if evidence_schema_version not in {1, 2}:
+        raise RuntimeError(
+            "trajectory evidence schema is not bound by the launch context"
+        )
     from .trajectory_evidence import (
         build_trajectory_batch_evidence,
         write_trajectory_batch_evidence,
@@ -1158,6 +1252,8 @@ def _persist_trajectory_evidence(args: Any, rollout_id: int, groups: Any) -> Non
         rollout_id=rollout_id,
         behavior_policy_hash=policy_hash,
         reward_contract_hash=reward_hash,
+        evidence_kind=evidence_kind,
+        schema_version=evidence_schema_version,
     )
     write_trajectory_batch_evidence(directory, evidence)
 
@@ -1269,7 +1365,12 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
             for group in data_source.buffer
             if _group_indices(group) not in consumed
         ]
-        samples = [sample for group in output.samples for sample in group]
+        samples = [
+            segment
+            for group in output.samples
+            for sample in group
+            for segment in (sample if isinstance(sample, list) else [sample])
+        ]
         tool_wait_seconds = sum(
             float(getattr(sample, "non_generation_time", 0.0)) for sample in samples
         )

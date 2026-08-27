@@ -88,8 +88,12 @@ def _role(role: str, *, port: int) -> dict[str, object]:
 def _payload(evidence: Path) -> dict[str, object]:
     return {
         "schema": streaming_runtime_schema(),
-        "sao_secrlenv_context_sha256": SECRLENV_CONTEXT_SHA256,
-        "trajectory_evidence_dir": str(evidence),
+        "sao_context_sha256": SECRLENV_CONTEXT_SHA256,
+        "trajectory_evidence": {
+            "directory": str(evidence),
+            "kind": "secrlenv",
+            "schema_version": 2,
+        },
         "syncer_profile": _syncer_profile(),
         "actor": _role("actor", port=29400),
         "critic": _role("critic", port=29401),
@@ -123,7 +127,7 @@ def _attested_role(role: dict[str, object]) -> dict[str, object]:
 def _bind_attestation(tmp_path: Path, payload: dict[str, object]) -> None:
     attestation = {
         "schema": streaming_layout_attestation_schema(),
-        "sao_secrlenv_context_sha256": SECRLENV_CONTEXT_SHA256,
+        "sao_context_sha256": SECRLENV_CONTEXT_SHA256,
         "settings": {
             "algorithm": "sao",
             "fragment_strategy": "owner_affine",
@@ -173,7 +177,9 @@ def _args(**overrides):
         "num_critic_only_steps": 0,
         "start_rollout_id": 0,
         "lora_rank": 0,
-        "external_policy_sync_path": None,
+        "external_policy_sync_path": (
+            "yeto.rl.miles_sao_streaming.create_miles_sao_streaming_sync"
+        ),
         "rollout_function_path": "yeto.rl.miles.generate_rollout",
         "yeto_rl_learner_id": 0,
         "yeto_rl_base_model_revision": "a" * 40,
@@ -201,6 +207,37 @@ def test_load_constructs_two_role_scoped_streams(tmp_path):
     assert runtime.streams.actor.pipeline_depth == 2
     assert runtime.syncer_profile.sha256 == expected_profile
     assert runtime.layout_attestation_path == tmp_path / "streaming-layouts.json"
+
+
+def test_load_preserves_legacy_v1_secrlenv_runtime_compatibility(tmp_path):
+    payload = _payload(tmp_path / "legacy-evidence")
+    _bind_attestation(tmp_path, payload)
+    attestation_path = Path(payload["layout_attestation"]["path"])
+    attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+    attestation["schema"] = "miles.sao-streaming-layouts.v1"
+    attestation["sao_secrlenv_context_sha256"] = attestation.pop(
+        "sao_context_sha256"
+    )
+    payload["layout_attestation"]["sha256"] = _write_runtime(
+        attestation_path, attestation
+    )
+    payload["schema"] = "yeto.sao-streaming-runtime.v1"
+    payload["sao_secrlenv_context_sha256"] = payload.pop("sao_context_sha256")
+    payload["trajectory_evidence_dir"] = payload.pop("trajectory_evidence")[
+        "directory"
+    ]
+    source = tmp_path / "legacy-streaming.json"
+    digest = _write_runtime(source, payload)
+
+    runtime = load_sao_streaming_runtime(
+        source,
+        expected_sha256=digest,
+        expected_sao_context_sha256=SECRLENV_CONTEXT_SHA256,
+    )
+
+    assert runtime.trajectory_evidence_kind == "secrlenv"
+    assert runtime.trajectory_evidence_schema_version == 1
+    assert runtime.trajectory_evidence_dir == tmp_path / "legacy-evidence"
 
 
 @pytest.mark.parametrize(
@@ -269,7 +306,7 @@ def test_load_requires_both_file_and_secrlenv_hashes(tmp_path):
             expected_sha256="0" * 64,
             expected_sao_context_sha256=SECRLENV_CONTEXT_SHA256,
         )
-    with pytest.raises(ValueError, match="different SecRLEnv context"):
+    with pytest.raises(ValueError, match="different SAO context"):
         load_sao_streaming_runtime(
             source,
             expected_sha256=digest,
@@ -302,6 +339,8 @@ def test_bind_installs_streaming_callback_and_private_evidence(tmp_path):
     assert stat.S_IMODE(evidence.stat().st_mode) == 0o700
     assert args.yeto_rl_sao_streaming_config is runtime.streams
     assert args.yeto_rl_trajectory_evidence_dir == str(evidence)
+    assert args.yeto_rl_trajectory_evidence_kind == "secrlenv"
+    assert args.yeto_rl_trajectory_evidence_schema_version == 2
     assert args.yeto_rl_sync_preset == "sao-streaming-full"
     assert args.external_policy_sync_path == (
         "yeto.rl.miles_sao_streaming.create_miles_sao_streaming_sync"
@@ -317,11 +356,46 @@ def test_bind_installs_streaming_callback_and_private_evidence(tmp_path):
     )
 
 
+def test_terminal_bench_runtime_requires_private_key_source_and_binds_v2(
+    tmp_path, monkeypatch
+):
+    payload = _payload(tmp_path / "trajectory-evidence-0")
+    payload["trajectory_evidence"]["kind"] = "terminal-bench-2.1"
+    runtime, evidence = _load(tmp_path, payload)
+    monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY", raising=False)
+    monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY_FILE", raising=False)
+
+    with pytest.raises(RuntimeError, match="missing or outside"):
+        bind_sao_streaming_runtime(_args(), runtime)
+    assert not evidence.exists()
+
+    key_file = tmp_path / "tbench-hmac.key"
+    key_file.write_text("t" * 48)
+    key_file.chmod(0o400)
+    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY_FILE", str(key_file))
+    args = _args()
+    bind_sao_streaming_runtime(args, runtime)
+    assert args.yeto_rl_trajectory_evidence_kind == "terminal-bench-2.1"
+    assert args.yeto_rl_trajectory_evidence_schema_version == 2
+
+
 def test_bind_rejects_optimizer_drift_before_creating_evidence(tmp_path):
     runtime, evidence = _load(tmp_path)
 
     with pytest.raises(ValueError, match="optimizer accounting"):
         bind_sao_streaming_runtime(_args(num_critic_epochs=3), runtime)
+
+    assert not evidence.exists()
+
+
+@pytest.mark.parametrize("callback", (None, "untrusted.streaming.factory"))
+def test_bind_requires_preparsed_trusted_sync_callback(tmp_path, callback):
+    runtime, evidence = _load(tmp_path)
+
+    with pytest.raises(ValueError, match="trusted external sync callback"):
+        bind_sao_streaming_runtime(
+            _args(external_policy_sync_path=callback), runtime
+        )
 
     assert not evidence.exists()
 

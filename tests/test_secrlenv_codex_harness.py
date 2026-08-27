@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -607,9 +608,11 @@ def test_miles_non_200_response_is_closed_without_reading_body(monkeypatch):
         def __init__(self, response):
             self.response = response
             self.payload = None
+            self.headers = None
 
-        def post(self, _url, *, json):
+        def post(self, _url, *, json, headers):
             self.payload = json
+            self.headers = headers
             return self.response
 
     async def scenario() -> None:
@@ -626,6 +629,7 @@ def test_miles_non_200_response_is_closed_without_reading_body(monkeypatch):
         with pytest.raises(harness.CodexHarnessError, match="HTTP 503"):
             await bridge._sample_miles()
         assert session.payload["stream"] is True
+        assert session.headers == {}
         assert response.content.calls == 0
         assert response.closed is True
 
@@ -805,6 +809,151 @@ def test_fake_codex_bridge_preserves_history_and_filters_only_update_plan(monkey
         assert metrics.tool_calls == 2
 
     asyncio.run(scenario())
+
+
+def test_bridge_compaction_is_same_session_trainable_and_keeps_atomic_tail(monkeypatch):
+    _set_bridge_env(monkeypatch, max_tokens=128)
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_ENABLED", "1")
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_TRIGGER_TOKENS", "300")
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_SUMMARY_MAX_TOKENS", "128")
+    monkeypatch.setenv("YETO_CODEX_MAX_COMPACTIONS", "3")
+
+    summary = {
+        "id": "chatcmpl-summary",
+        "object": "chat.completion",
+        "created": 1,
+        "model": harness.BACKEND_MODEL,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "Goal: solve target. Evidence: uid=1000. Next: submit.",
+                    "reasoning_content": "compress state",
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60},
+    }
+
+    async def scenario() -> None:
+        requests: list[tuple[dict[str, Any], dict[str, str]]] = []
+        queue = [
+            _completion("terminal.exec", '{"command":"id"}', "call-1", "inspect", 25),
+            summary,
+            _completion("submit", '{"evidence":"uid=1000"}', "call-2", "finish", 40),
+        ]
+
+        async def chat(request: web.Request) -> web.Response:
+            requests.append((await request.json(), dict(request.headers)))
+            return web.Response(
+                body=_fake_miles_sse(queue.pop(0)),
+                content_type="text/event-stream",
+            )
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", chat)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        sockets = site._server.sockets if site._server is not None else []
+        miles_url = f"http://127.0.0.1:{sockets[0].getsockname()[1]}"
+        try:
+            async with harness._ResponsesBridge(
+                miles_url,
+                "solve target",
+                {"max_tokens": 128},
+                harness.legacy.AgentMetrics(),
+                max_seq_len=2048,
+            ) as bridge:
+                headers = {"Authorization": f"Bearer {bridge.token}"}
+                initial = [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "solve target"}],
+                    }
+                ]
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{bridge.url}/v1/responses",
+                        json=_codex_body(initial),
+                        headers=headers,
+                    ) as response:
+                        assert response.status == 200
+                    bridge.expect_tool_output("call-1", '{"output":"uid=1000"}')
+                    second_input = copy.deepcopy(bridge._expected_input)
+                    async with session.post(
+                        f"{bridge.url}/v1/responses",
+                        json=_codex_body(second_input),
+                        headers=headers,
+                    ) as response:
+                        assert response.status == 200
+        finally:
+            await runner.cleanup()
+
+        assert len(requests) == 3
+        _first, first_headers = requests[0]
+        summary_request, summary_headers = requests[1]
+        resumed, resumed_headers = requests[2]
+        assert first_headers["X-Miles-Compaction-Segment-Type"] == "execution"
+        assert summary_headers["X-Miles-Compaction-Segment-Type"] == "summary"
+        assert summary_headers["X-Miles-Compaction-Segment-Index"] == "1"
+        assert summary_headers["X-Miles-Compaction-Context-Budget"] == "2048"
+        assert summary_request["tools"] == []
+        assert summary_request["max_tokens"] == 128
+        assert summary_request["messages"][-1]["content"] == harness.COMPACTION_SUMMARY_INSTRUCTION
+        assert resumed_headers["X-Miles-Compaction-Context-Window"] == "1"
+        assert resumed_headers["X-Miles-Compaction-Segment-Index"] == "2"
+        assert resumed_headers["X-Miles-Compaction-Segment-Type"] == "execution"
+        assert resumed["messages"][0] == {"role": "system", "content": harness.BASE_INSTRUCTIONS}
+        assert "uid=1000" in resumed["messages"][1]["content"]
+        assert resumed["messages"][2:] == summary_request["messages"][2:-1]
+
+    asyncio.run(scenario())
+
+
+def test_bridge_compaction_trigger_is_consumed_context_boundary(monkeypatch):
+    _set_bridge_env(monkeypatch, max_tokens=1024)
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_ENABLED", "1")
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_TRIGGER_TOKENS", "6144")
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_SUMMARY_MAX_TOKENS", "1024")
+    monkeypatch.setenv("YETO_CODEX_MAX_COMPACTIONS", "3")
+
+    bridge = harness._ResponsesBridge(
+        "http://127.0.0.1:1",
+        "boundary",
+        {"max_tokens": 1024},
+        harness.legacy.AgentMetrics(),
+        max_seq_len=8192,
+    )
+
+    assert not bridge._should_compact(6143)
+    assert bridge._should_compact(6144)
+    assert (
+        6144
+        + harness.COMPACTION_SUMMARY_INSTRUCTION_TOKEN_RESERVE
+        + bridge._compaction_summary_max_tokens
+        <= 8192
+    )
+
+
+def test_bridge_compaction_rejects_trigger_without_summary_reserve(monkeypatch):
+    _set_bridge_env(monkeypatch, max_tokens=512)
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_ENABLED", "1")
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_TRIGGER_TOKENS", "500")
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_SUMMARY_MAX_TOKENS", "512")
+
+    with pytest.raises(harness.CodexHarnessError, match="insufficient room"):
+        harness._ResponsesBridge(
+            "http://127.0.0.1:1",
+            "reserve",
+            {"max_tokens": 512},
+            harness.legacy.AgentMetrics(),
+            max_seq_len=1024,
+        )
 
 
 def test_bridge_rejects_history_mutation_without_an_extra_sample(monkeypatch):
@@ -1114,6 +1263,180 @@ def test_run_close_failure_returns_terminal_cleanup_evidence(monkeypatch):
         assert harness.legacy._EPISODE_PHASES[episode_id] == "cleanup_pending"
     finally:
         harness.legacy._release_episode(episode_id)
+
+
+def test_driver_reaps_isolated_process_group_before_home_cleanup(monkeypatch):
+    events: list[object] = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        async def wait(self):
+            events.append("wait-parent")
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            raise AssertionError("process-group TERM should be used")
+
+        def kill(self):
+            raise AssertionError("process-group KILL should be used")
+
+    async def scenario() -> None:
+        driver = harness._AppServerDriver(
+            Path("/unused"),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            _FakeEpisodeClient(),
+            "episode",
+            "task",
+            harness.legacy.AgentMetrics(),
+        )
+        driver._process = FakeProcess()  # type: ignore[assignment]
+        driver._process_group_id = 4321
+        monkeypatch.setattr(harness, "_CODEX_DESCENDANT_TERM_GRACE_SECONDS", 0.0)
+        monkeypatch.setattr(
+            harness.os,
+            "killpg",
+            lambda process_group_id, sig: events.append((process_group_id, sig)),
+        )
+
+        await driver._stop()
+
+        assert events == [
+            (4321, harness.signal.SIGTERM),
+            "wait-parent",
+            (4321, harness.signal.SIGKILL),
+        ]
+        assert driver._process_group_id is None
+
+    asyncio.run(scenario())
+
+
+def test_codex_argv_disables_background_plugin_sync():
+    bridge = SimpleNamespace(url="http://127.0.0.1:1234")
+
+    argv = harness._codex_argv(Path("/codex"), bridge)  # type: ignore[arg-type]
+
+    assert argv.count("features.plugins=false") == 1
+
+
+def test_driver_retries_transient_nonempty_isolated_home_cleanup(monkeypatch, tmp_path):
+    home_path = tmp_path / "codex-home"
+    home_path.mkdir()
+
+    class RacingHome:
+        name = str(home_path)
+        attempts = 0
+
+        def cleanup(self):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise OSError(errno.ENOTEMPTY, "Directory not empty", "plugins")
+            home_path.rmdir()
+
+    async def scenario() -> None:
+        home = RacingHome()
+        driver = harness._AppServerDriver(
+            Path("/unused"),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            _FakeEpisodeClient(),
+            "episode",
+            "task",
+            harness.legacy.AgentMetrics(),
+        )
+        driver._isolated_home = home  # type: ignore[assignment]
+        monkeypatch.setattr(
+            harness,
+            "_CODEX_HOME_CLEANUP_RETRY_DELAYS_SECONDS",
+            (0.0, 0.0, 0.0),
+        )
+
+        await driver.__aexit__(None, None, None)
+
+        assert home.attempts == 3
+        assert not home_path.exists()
+
+    asyncio.run(scenario())
+
+
+def test_driver_home_cleanup_exhaustion_is_best_effort_and_nonfatal(
+    monkeypatch, tmp_path
+):
+    home_path = tmp_path / "codex-home"
+    (home_path / "plugins").mkdir(parents=True)
+
+    class PersistentlyRacingHome:
+        name = str(home_path)
+        attempts = 0
+
+        def cleanup(self):
+            self.attempts += 1
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", "plugins")
+
+    async def scenario() -> None:
+        home = PersistentlyRacingHome()
+        driver = harness._AppServerDriver(
+            Path("/unused"),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            _FakeEpisodeClient(),
+            "episode",
+            "task",
+            harness.legacy.AgentMetrics(),
+        )
+        driver._isolated_home = home  # type: ignore[assignment]
+        monkeypatch.setattr(
+            harness,
+            "_CODEX_HOME_CLEANUP_RETRY_DELAYS_SECONDS",
+            (0.0, 0.0),
+        )
+
+        # A resource-hygiene race must not change a successful episode result.
+        await driver.__aexit__(None, None, None)
+
+        assert home.attempts == 2
+        assert not home_path.exists()
+
+    asyncio.run(scenario())
+
+
+def test_driver_teardown_failures_do_not_mask_active_episode_error(
+    monkeypatch, tmp_path
+):
+    class NoLaunchDriver(harness._AppServerDriver):
+        async def __aenter__(self):
+            return self
+
+    home_path = tmp_path / "codex-home"
+    home_path.mkdir()
+
+    class FailedHome:
+        name = str(home_path)
+
+        def cleanup(self):
+            raise RuntimeError("secondary home cleanup failure")
+
+    async def scenario() -> None:
+        driver = NoLaunchDriver(
+            Path("/unused"),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            _FakeEpisodeClient(),
+            "episode",
+            "task",
+            harness.legacy.AgentMetrics(),
+        )
+        driver._isolated_home = FailedHome()  # type: ignore[assignment]
+
+        async def failed_stop():
+            raise RuntimeError("secondary shutdown failure")
+
+        monkeypatch.setattr(driver, "_stop", failed_stop)
+        with pytest.raises(ValueError, match="primary episode failure"):
+            async with driver:
+                raise ValueError("primary episode failure")
+        assert not home_path.exists()
+
+    asyncio.run(scenario())
 
 
 def test_driver_rejects_mutated_arguments_but_preserves_bounded_truncation(monkeypatch):

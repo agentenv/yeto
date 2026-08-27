@@ -230,6 +230,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--session-server-port", type=int, nargs="+", default=None)
     rl.add_argument("--tito-model", default=None)
     rl.add_argument(
+        "--codex-backend-profile",
+        default=None,
+        help=(
+            "exact signed Codex backend profile; independent from the "
+            "family-level Miles --tito-model tokenizer setting"
+        ),
+    )
+    rl.add_argument(
         "--tito-allowed-append-roles",
         nargs="+",
         choices=["tool", "user", "system"],

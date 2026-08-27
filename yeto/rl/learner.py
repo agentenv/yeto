@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -103,6 +104,7 @@ def parse_args(argv=None):
     parser.add_argument("--session-server-ip", default=None)
     parser.add_argument("--session-server-port", type=int, nargs="+", default=None)
     parser.add_argument("--tito-model", default=None)
+    parser.add_argument("--codex-backend-profile", default=None)
     parser.add_argument(
         "--tito-allowed-append-roles",
         nargs="+",
@@ -379,6 +381,66 @@ def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
         raise ValueError("live stock Codex app-server schema drifted")
 
 
+def _preflight_codex_openenv_adapter(args, profile_name: str) -> None:
+    """Attest the isolated OpenEnv wrapper inside the pinned Miles source."""
+
+    from . import CODEX_OPENENV_AGENT_MODULES, CODEX_OPENENV_IDENTITY_ENV
+
+    if profile_name != "qwen35_08b":
+        raise ValueError(
+            "the Codex OpenEnv adapter requires backend profile qwen35_08b"
+        )
+    adapter_dir = (
+        Path(args.miles_root).expanduser().resolve()
+        / "examples"
+        / "experimental"
+        / "openenv"
+    )
+    for name in CODEX_OPENENV_AGENT_MODULES:
+        source = adapter_dir / name
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("the Codex OpenEnv adapter source is incomplete")
+    adapter_root = str(adapter_dir)
+    if adapter_root not in sys.path:
+        sys.path.insert(0, adapter_root)
+    try:
+        openenv_adapter = importlib.import_module("codex_openenv_agent_function")
+        subprocess_adapter = importlib.import_module(
+            "codex_openenv_subprocess_agent_function"
+        )
+        openenv_identity = openenv_adapter.codex_openenv_harness_identity()
+    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
+        raise ValueError("cannot attest the Codex OpenEnv adapter") from exc
+    for module in (openenv_adapter, subprocess_adapter):
+        module_file = getattr(module, "__file__", None)
+        if not isinstance(module_file, str):
+            raise ValueError("the Codex OpenEnv adapter has no source identity")
+        source = Path(module_file)
+        if source.is_symlink() or source.resolve().parent != adapter_dir:
+            raise ValueError("the Codex OpenEnv adapter resolved outside pinned Miles")
+    if not callable(getattr(subprocess_adapter, "run", None)):
+        raise ValueError("the Codex OpenEnv subprocess entrypoint is missing")
+    if openenv_adapter._OPENENV_IDENTITY_ENV != CODEX_OPENENV_IDENTITY_ENV:
+        raise ValueError("the Codex OpenEnv launch identity drifted")
+    expected_openenv_identity = {
+        name.removeprefix("YETO_CODEX_OPENENV_").lower(): value
+        for name, value in CODEX_OPENENV_IDENTITY_ENV.items()
+        if name.endswith("_SHA256")
+    }
+    if openenv_identity != expected_openenv_identity:
+        raise ValueError("the Codex OpenEnv surface identity drifted")
+    openenv_env_mismatched = [
+        name
+        for name, expected in CODEX_OPENENV_IDENTITY_ENV.items()
+        if os.getenv(name) != expected
+    ]
+    if openenv_env_mismatched:
+        raise ValueError(
+            "Codex OpenEnv container environment drifted: "
+            + ", ".join(openenv_env_mismatched)
+        )
+
+
 def _preflight_codex_harness(args) -> None:
     """Fail before model allocation if the signed Codex surface has drifted."""
 
@@ -397,20 +459,23 @@ def _preflight_codex_harness(args) -> None:
         CODEX_LINUX_TARGET,
         CODEX_NPM_PACKAGE,
         CODEX_NPM_TARBALL_SHA256,
+        CODEX_OPENENV_AGENT,
+        CODEX_OPENENV_IDENTITY_ENV,
         CODEX_PACKAGE_MANIFEST_SHA256,
         CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
         CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
+        SIGNED_CODEX_AGENTS,
     )
 
     contract = getattr(args, "codex_harness_contract", None)
-    if args.custom_agent_function_path != CODEX_HARNESS_AGENT:
+    if args.custom_agent_function_path not in SIGNED_CODEX_AGENTS:
         if contract is not None:
             raise ValueError(
-                "--codex-harness-contract requires the signed stock Codex agent"
+                "--codex-harness-contract requires a signed Codex agent"
             )
         return
     if not isinstance(contract, dict):
-        raise ValueError("the signed stock Codex agent requires its harness contract")
+        raise ValueError("the signed Codex agent requires its harness contract")
     required = {
         "agent_function_path",
         "agent_source_sha256",
@@ -438,6 +503,8 @@ def _preflight_codex_harness(args) -> None:
         "reasoning_effort",
         "backend",
     }
+    if args.custom_agent_function_path == CODEX_OPENENV_AGENT:
+        required.add("openenv_identity_env")
     if set(contract) != required:
         raise ValueError("stock Codex harness contract shape drifted")
     pinned = {
@@ -466,17 +533,24 @@ def _preflight_codex_harness(args) -> None:
     }
     if any(contract.get(name) != expected for name, expected in pinned.items()):
         raise ValueError("stock Codex runtime identity drifted")
+    if (
+        args.custom_agent_function_path == CODEX_OPENENV_AGENT
+        and contract.get("openenv_identity_env") != CODEX_OPENENV_IDENTITY_ENV
+    ):
+        raise ValueError("stock Codex OpenEnv surface identity drifted")
     from .codex_backend import (
         stock_codex_backend_contract,
         validate_stock_codex_fields,
     )
 
+    profile_name = getattr(args, "codex_backend_profile", None) or args.tito_model
     expected_backend = stock_codex_backend_contract(
-        args.tito_model,
+        profile_name,
         args.rollout_max_response_len,
     )
     validate_stock_codex_fields(
         tito_model=args.tito_model,
+        codex_backend_profile=profile_name,
         rl_model_recipe=args.rl_model_recipe,
         model=args.model,
         model_revision=args.model_revision,
@@ -620,6 +694,8 @@ def _preflight_codex_harness(args) -> None:
         raise ValueError(
             "stock Codex container environment drifted: " + ", ".join(mismatched)
         )
+    if args.custom_agent_function_path == CODEX_OPENENV_AGENT:
+        _preflight_codex_openenv_adapter(args, profile_name)
 
 
 def _provider_value(provider, *names: str):
@@ -1727,6 +1803,11 @@ def run_miles(
             "codex_harness_contract",
             None,
         )
+        miles_args.yeto_rl_codex_backend_profile = getattr(
+            args,
+            "codex_backend_profile",
+            None,
+        )
         miles_args.yeto_rl_dynamic_sampling_max_replacements = getattr(
             args, "dynamic_sampling_max_replacements", None
         )
@@ -1800,6 +1881,10 @@ def run_miles(
                 "yeto.rl.miles.set_current_published_policy_identity"
             )
             miles_args.yeto_rl_trajectory_evidence_dir = str(evidence_directory)
+            miles_args.yeto_rl_trajectory_evidence_kind = "secrlenv"
+            miles_args.yeto_rl_trajectory_evidence_schema_version = (
+                2 if bool(getattr(miles_args, "sao_compaction", False)) else 1
+            )
             miles_args.yeto_rl_num_fragments = args.fragments
             miles_args.yeto_rl_total_sweeps = args.global_rounds
             miles_args.yeto_rl_total_fragment_steps = args.total_fragment_steps
@@ -1914,7 +1999,6 @@ def main(argv=None) -> None:
             f"reward source SHA256 mismatch: expected {args.reward_sha256.lower()}, "
             f"got {reward_sha256}"
         )
-    _preflight_codex_harness(args)
     miles_root = str(Path(args.miles_root).expanduser().resolve())
     if miles_root not in sys.path:
         sys.path.insert(0, miles_root)
@@ -1926,6 +2010,7 @@ def main(argv=None) -> None:
             else None
         ),
     )
+    _preflight_codex_harness(args)
 
     from miles.utils.misc import load_function
 

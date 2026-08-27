@@ -9,6 +9,8 @@ QWEN38_MODEL = "Qwen/Qwen3.8-27B"
 QWEN38_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 QWEN35_MODEL = "Qwen/Qwen3.5-4B"
 QWEN35_REVISION = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+QWEN35_08B_MODEL = "Qwen/Qwen3.5-0.8B"
+QWEN35_08B_REVISION = "2fc06364715b967f1860aea9cf38778875588b17"
 
 _PROFILES: dict[str, dict[str, Any]] = {
     "deepseekv4": {
@@ -54,25 +56,51 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "model_revision": QWEN35_REVISION,
         "identity_label": "Qwen3.5",
     },
+    # This is a distinct, closed model identity while deliberately reusing
+    # Miles' model-family-level Qwen3.5 TITO implementation.  The profile name
+    # is carried separately from ``--tito-model qwen35`` so selecting the 0.8B
+    # checkpoint never weakens the existing 4B allowlist entry.
+    "qwen35_08b": {
+        "model": "qwen35",
+        "rl_model_recipe": "generic",
+        "backend_reasoning_effort": "xhigh",
+        "thinking": {"type": "enabled"},
+        "chat_template": "qwen35_08b",
+        "chat_template_kwargs": {"clear_thinking": False},
+        "tito_allowed_append_roles": ["tool", "user"],
+        "model_identifier": QWEN35_08B_MODEL,
+        "model_revision": QWEN35_08B_REVISION,
+        "identity_label": "Qwen3.5-0.8B",
+        "tito_model": "qwen35",
+    },
 }
 
 
-def stock_codex_backend_profile(tito_model: str) -> dict[str, Any]:
+def stock_codex_backend_profile(profile_name: str) -> dict[str, Any]:
     """Return one immutable allowlisted profile as a defensive copy."""
 
     try:
-        profile = _PROFILES[tito_model]
+        profile = _PROFILES[profile_name]
     except KeyError as exc:
         raise ValueError("unsupported stock Codex backend profile") from exc
     return deepcopy(profile)
 
 
+def stock_codex_tito_model(profile_name: str) -> str:
+    """Return the Miles tokenizer family for one exact Codex backend profile."""
+
+    profile = stock_codex_backend_profile(profile_name)
+    return str(profile.get("tito_model", profile["model"]))
+
+
 def stock_codex_backend_contract(
-    tito_model: str,
+    profile_name: str,
     max_tokens: int,
 ) -> dict[str, Any]:
-    profile = stock_codex_backend_profile(tito_model)
+    profile = stock_codex_backend_profile(profile_name)
     return {
+        "profile": profile_name,
+        "tito_model": stock_codex_tito_model(profile_name),
         "model": profile["model"],
         "max_tokens": max_tokens,
         "reasoning_effort": profile["backend_reasoning_effort"],
@@ -86,6 +114,7 @@ def stock_codex_backend_contract(
 def validate_stock_codex_fields(
     *,
     tito_model: str,
+    codex_backend_profile: str | None = None,
     rl_model_recipe: str,
     model: str,
     model_revision: str,
@@ -101,7 +130,13 @@ def validate_stock_codex_fields(
 
     if codex_reasoning_effort != "xhigh":
         raise ValueError("the stock Codex harness requires xhigh reasoning")
-    profile = stock_codex_backend_profile(tito_model)
+    profile_name = codex_backend_profile or tito_model
+    profile = stock_codex_backend_profile(profile_name)
+    expected_tito_model = stock_codex_tito_model(profile_name)
+    if tito_model != expected_tito_model:
+        raise ValueError(
+            "stock Codex backend profile does not match the Miles TITO family"
+        )
     if rl_model_recipe != profile["rl_model_recipe"]:
         raise ValueError("stock Codex model recipe does not match its profile")
     if apply_chat_template_kwargs != profile["chat_template_kwargs"]:
