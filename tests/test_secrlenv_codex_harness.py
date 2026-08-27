@@ -18,6 +18,11 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+pytest.importorskip(
+    "yeto_miles_secrlenv",
+    reason="the SecRLEnv Codex harness is an optional external integration",
+)
+
 from yeto_miles_secrlenv import codex_harness_agent as harness
 from yeto_miles_secrlenv import reward as secrlenv_reward
 

@@ -1,0 +1,21 @@
+{
+  "balancing_cost": "len(tokens)^2",
+  "dataset_version": "qwen38-value-six-islands-fresh-v7",
+  "expected_train_rollouts": 364,
+  "expected_train_samples": 2610,
+  "expected_validation_rollouts": 31,
+  "expected_validation_samples": 295,
+  "long_sample_threshold": 131072,
+  "max_sequence_length": 262144,
+  "num_islands": 6,
+  "sample_storage": "independent-unpacked-records",
+  "schema_version": 1,
+  "train_rollout_ids": {
+    "end_exclusive": 364,
+    "start": 0
+  },
+  "validation_rollout_ids": {
+    "end_exclusive": 395,
+    "start": 364
+  }
+}

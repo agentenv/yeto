@@ -7,6 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip(
+    "yeto_miles_secrlenv",
+    reason="the Miles SecRLEnv adapter is an optional external integration",
+)
+
 from yeto_miles_secrlenv import agent
 
 

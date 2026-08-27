@@ -1372,6 +1372,7 @@ def test_rollout_group_validation_accepts_complete_compaction_trajectory():
 
 
 def test_secrlenv_terminal_filter_error_drains_pinned_rollout(monkeypatch):
+    pytest.importorskip("yeto_miles_secrlenv")
     cleanup = []
 
     async def generate_rollout_async(*_args, **_kwargs):
@@ -1410,6 +1411,7 @@ def test_secrlenv_terminal_filter_error_drains_pinned_rollout(monkeypatch):
 
 
 def test_secrlenv_untrusted_reward_error_is_sanitized_and_drained(monkeypatch):
+    pytest.importorskip("yeto_miles_secrlenv")
     from yeto_miles_secrlenv.reward import UntrustedOutcome
 
     cleanup = []
@@ -1456,6 +1458,7 @@ def test_secrlenv_untrusted_reward_error_is_sanitized_and_drained(monkeypatch):
 
 
 def test_secrlenv_terminal_cleanup_has_outer_deadline(monkeypatch):
+    pytest.importorskip("yeto_miles_secrlenv")
     cleanup_started = []
 
     async def generate_rollout_async(*_args, **_kwargs):
@@ -1507,6 +1510,7 @@ def test_secrlenv_terminal_cleanup_has_outer_deadline(monkeypatch):
 
 
 def test_secrlenv_terminal_cleanup_rejects_episode_residue(monkeypatch):
+    pytest.importorskip("yeto_miles_secrlenv")
     from yeto_miles_secrlenv import agent as secrlenv_agent
 
     cleanup = []
@@ -1555,6 +1559,7 @@ def test_secrlenv_terminal_cleanup_rejects_episode_residue(monkeypatch):
 
 
 def test_secrlenv_terminal_rollout_does_not_advance_checkpoint(monkeypatch):
+    pytest.importorskip("yeto_miles_secrlenv")
     upstream = types.ModuleType("miles.rollout.sglang_rollout")
     upstream.generate_rollout = object()
     rollout = types.ModuleType("miles.rollout")

@@ -9,9 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.learner import prepare_prompt_data
+pytest.importorskip(
+    "yeto_miles_cybergym",
+    reason="the Miles CyberGym adapter is an optional external integration",
+)
+
 from yeto_miles_cybergym import reward
 from yeto_miles_cybergym.prompts import prompt_rows
+
+from yeto.rl.learner import prepare_prompt_data
 
 
 class Response:
