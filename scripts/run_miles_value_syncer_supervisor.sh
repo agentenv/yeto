@@ -54,7 +54,10 @@ FINAL_MARKER=${CHECKPOINT_PATH}.final
 PHASE1_TOTAL_STEPS=${PHASE1_TOTAL_STEPS:-1000000000}
 PHASE1_PIPELINE=${PHASE1_PIPELINE:-16}
 PHASE2_PIPELINE=${PHASE2_PIPELINE:-16}
-CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-0}
+# The production model+outer-momentum snapshot is large, so checkpoint once
+# every four complete 96-fragment sweeps.  For the current 1152 ordinary
+# outer updates this publishes three durable cuts, including step 1152.
+CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-384}
 GRACE_MS=${GRACE_MS:-1000}
 GRACE_GAMMA=${GRACE_GAMMA:-0.8}
 GRACE_TAU=${GRACE_TAU:-2.0}
@@ -104,6 +107,9 @@ if [[ "$(basename -- "${ISO_WORKER_PYTHON}")" == docker_python_iso_worker.sh ]];
   die "ISO_WORKER_PYTHON must be the direct miles_node python3 executable, not docker_python_iso_worker.sh"
 fi
 [[ "${CHECKPOINT_EVERY}" =~ ^[0-9]+$ ]] || die "CHECKPOINT_EVERY must be a non-negative integer"
+if [[ "${YETO_MILES_VALUE_SMOKE:-0}" == 0 ]] && ((CHECKPOINT_EVERY == 0)); then
+  die "production requires periodic syncer checkpoints"
+fi
 [[ "${GRACE_MS}" =~ ^[0-9]+$ ]] || die "GRACE_MS must be a non-negative integer"
 if [[ ! "${QUORUM_TIMEOUT_S}" =~ ^[0-9]+$ ]] || \
   ((QUORUM_TIMEOUT_S < 1 || QUORUM_TIMEOUT_S > 3600)); then

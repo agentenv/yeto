@@ -203,6 +203,10 @@ enum Event {
         member: Member,
         push: Push,
     },
+    Heartbeat {
+        member: Member,
+        local_step: u64,
+    },
     FinalAck {
         member: Member,
         global_step: u64,
@@ -440,6 +444,18 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
+    }
+    if cfg.resume {
+        let path = cfg
+            .checkpoint_path
+            .as_ref()
+            .context("--resume requires --checkpoint-path")?;
+        if !path.is_file() {
+            bail!(
+                "--resume checkpoint does not exist or is not a file: {}",
+                path.display()
+            );
+        }
     }
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
@@ -1078,7 +1094,7 @@ async fn dispatch_inner(
         MSG_HEARTBEAT => {
             let mut r = Reader(payload);
             let learner_id = r.u32()?;
-            let _local_step = r.u64()?;
+            let local_step = r.u64()?;
             if learner_id != group.member.learner_id {
                 bail!(
                     "HEARTBEAT learner id {learner_id} does not match connected group {}",
@@ -1088,6 +1104,13 @@ async fn dispatch_inner(
             if r.remaining() != 0 {
                 bail!("trailing bytes in HEARTBEAT");
             }
+            event_tx
+                .send(Event::Heartbeat {
+                    member: group.member,
+                    local_step,
+                })
+                .await
+                .ok();
         }
         MSG_FINAL_ACK => {
             let global_step = decode_final_ack(payload)?;
@@ -1104,11 +1127,13 @@ async fn dispatch_inner(
             // This is the cutoff linearization point.  It must precede event
             // queueing so a report waiting behind ordinary traffic still
             // closes the scheduler gate immediately.
-            let deadline = budget_cutoff
-                .request()
-                .unwrap_or_else(|| tokio::time::Instant::now() + budget_cutoff.timeout());
-            tokio::time::timeout_at(
-                deadline,
+            budget_cutoff.request();
+            // The first report closes the scheduler gate, but it must not
+            // make a later learner's otherwise-valid report unsendable. Each
+            // queue operation gets its own bounded timeout; report collection
+            // separately enforces a progress lease per logical learner.
+            tokio::time::timeout(
+                budget_cutoff.timeout(),
                 event_tx.send(Event::BudgetDone {
                     member: group.member,
                     local_steps,
@@ -1271,6 +1296,7 @@ async fn scheduler(
                 }
             }
             Event::Push { .. } => warn!("push before initialization; dropped"),
+            Event::Heartbeat { .. } => {}
             Event::FinalAck { member, .. } => warn!(
                 learner_id = member.learner_id,
                 generation = member.generation,
@@ -1311,7 +1337,7 @@ async fn scheduler(
                 &mut budget_reports,
                 &mut events,
                 &registry,
-                deadline,
+                budget_cutoff.timeout(),
                 None,
             )
         );
@@ -1403,7 +1429,7 @@ async fn scheduler(
                 break;
             }
             let groups = current_groups(&registry);
-            if groups.is_empty() {
+            if groups.len() < cfg.quorum as usize {
                 next_launch = Instant::now() + Duration::from_millis(100);
                 break;
             }
@@ -1420,7 +1446,7 @@ async fn scheduler(
                     num_fragments as usize,
                     step_rates.max_step_secs_for(&expected_members),
                 );
-            let launch_quorum = (cfg.quorum as usize).min(expected_members.len());
+            let launch_quorum = cfg.quorum as usize;
             if !send_pull_until_cutoff(&groups, &pull, &budget_cutoff).await {
                 cutoff_established = true;
                 break 'outer;
@@ -1503,12 +1529,21 @@ async fn scheduler(
                         quorum = r.quorum_size,
                         "quorum timeout below K; launching a new frozen-membership attempt"
                     );
-                    if !groups.is_empty() {
-                        r.expected_members = groups.iter().map(|group| group.member).collect();
-                        r.expected_members.sort_unstable();
-                        r.quorum_size = (cfg.quorum as usize).min(r.expected_members.len());
-                        r.base_version = st.versions[r.p];
+                    if groups.len() < cfg.quorum as usize {
+                        warn!(
+                            step = r.t,
+                            connected = groups.len(),
+                            required = cfg.quorum,
+                            "fixed quorum unavailable; deferring retry"
+                        );
+                        r.quorum_deadline = Instant::now() + Duration::from_secs(1);
+                        i += 1;
+                        continue;
                     }
+                    r.expected_members = groups.iter().map(|group| group.member).collect();
+                    r.expected_members.sort_unstable();
+                    r.quorum_size = cfg.quorum as usize;
+                    r.base_version = st.versions[r.p];
                     r.attempt += 1;
                     r.pull = encode_pull(r.p, r.t, r.attempt);
                     r.pushes.clear();
@@ -1604,9 +1639,56 @@ async fn scheduler(
                         ),
                     }
                 }
+                Event::Heartbeat { member, local_step } => {
+                    if is_current_member(&registry, member) {
+                        step_rates.note(member, local_step, Instant::now());
+                    }
+                }
                 Event::Hello { group } => {
-                    // Rejoining learner: catch it up to the current state.
+                    // A queued HELLO may already have been superseded by a
+                    // newer connection generation. Never catch up or rebind
+                    // rounds to anything except the registry's current
+                    // generation for this logical learner.
+                    if !is_current_member(&registry, group.member) {
+                        warn!(
+                            learner_id = group.member.learner_id,
+                            generation = group.member.generation,
+                            "superseded learner reconnect ignored"
+                        );
+                        continue;
+                    }
+
+                    // Rejoining learner: first catch it up to the current
+                    // parameters, then atomically rebind only its unanswered
+                    // slots in existing rounds. The helper revalidates the
+                    // generation because catch-up awaits socket writers and
+                    // a newer HELLO may supersede this one meanwhile.
                     send_all_fragments(&st, &group, &budget_cutoff).await;
+                    let repulls =
+                        rebind_current_unanswered_rounds(&registry, &mut inflight, group.member);
+                    for repull in repulls {
+                        if !send_small_until_cutoff(
+                            &group,
+                            MSG_PULL_REQ,
+                            repull.pull,
+                            &budget_cutoff,
+                        )
+                        .await
+                        {
+                            cutoff_established = true;
+                            break 'outer;
+                        }
+                        info!(
+                            learner_id = group.member.learner_id,
+                            old_generation = repull.old_generation,
+                            generation = group.member.generation,
+                            step = repull.t,
+                            fragment = repull.p,
+                            attempt = repull.attempt,
+                            base_version = repull.base_version,
+                            "rebound outstanding pull to reconnected learner generation"
+                        );
+                    }
                 }
                 Event::Init { .. } => {} // already initialized; ignore
                 Event::FinalAck { member, .. } => {
@@ -1629,9 +1711,10 @@ async fn scheduler(
                     break 'outer;
                 }
                 Event::Disconnected { member } => {
-                    // Membership and accepted responses are immutable for an
-                    // attempt. A disconnect never erases work, and a new
-                    // generation can join only a later launch/retry.
+                    // A disconnect never erases accepted work. An unanswered
+                    // slot may be rebound only when the replacement's current
+                    // HELLO is processed; otherwise the frozen round retries
+                    // normally at its deadline.
                     warn!(
                         learner_id = member.learner_id,
                         generation = member.generation,
@@ -1666,7 +1749,7 @@ async fn scheduler(
                 &mut budget_reports,
                 &mut events,
                 &registry,
-                deadline,
+                budget_cutoff.timeout(),
                 first_budget_report,
             )
         );
@@ -1727,10 +1810,7 @@ async fn scheduler(
     // Freeze terminal membership to the live groups at the final cut.
     // Learners already abandoned by fleet recovery are not valid artifact
     // producers and must not prevent surviving learners from finalizing.
-    let final_members: HashSet<u32> = current_groups(&registry)
-        .into_iter()
-        .map(|group| group.member.learner_id)
-        .collect();
+    let final_members: HashSet<u32> = (0..cfg.learners).collect();
     finalize_learners(&cfg, &st, &mut events, &registry, &final_members).await?;
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the final control frames.
@@ -1747,9 +1827,9 @@ fn record_budget_report(
     if local_steps != target_steps {
         bail!("BUDGET_DONE reported {local_steps} steps, expected {target_steps}");
     }
-    if !reports.insert(member.learner_id) {
-        bail!("duplicate BUDGET_DONE");
-    }
+    // Logical completion is idempotent across retries/reconnections. A
+    // repeated report with the same required step cannot change the cut.
+    reports.insert(member.learner_id);
     Ok(())
 }
 
@@ -1839,29 +1919,46 @@ async fn collect_budget_reports(
     reports: &mut HashSet<u32>,
     events: &mut mpsc::Receiver<Event>,
     registry: &Registry,
-    deadline: tokio::time::Instant,
+    progress_timeout: Duration,
     first_report: Option<(Member, u64)>,
 ) -> Result<()> {
     let mut first_report = first_report;
+    let mut progress_deadlines: HashMap<u32, tokio::time::Instant> = (0..expected_learners)
+        .filter(|learner_id| !reports.contains(learner_id))
+        .map(|learner_id| (learner_id, tokio::time::Instant::now() + progress_timeout))
+        .collect();
     while reports.len() < expected_learners as usize {
         let event = match first_report.take() {
             Some((member, local_steps)) => Event::BudgetDone {
                 member,
                 local_steps,
             },
-            None => tokio::time::timeout_at(deadline, events.recv())
-                .await
-                .map_err(|_| {
-                    let mut received: Vec<_> = reports.iter().copied().collect();
-                    received.sort_unstable();
-                    anyhow::anyhow!(
-                        "timed out collecting BUDGET_DONE reports: received {}/{} from {:?}",
-                        reports.len(),
-                        expected_learners,
-                        received
-                    )
-                })?
-                .context("event channel closed while collecting BUDGET_DONE reports")?,
+            None => {
+                let deadline = progress_deadlines
+                    .values()
+                    .copied()
+                    .min()
+                    .context("no progress lease for an unfinished learner")?;
+                tokio::time::timeout_at(deadline, events.recv())
+                    .await
+                    .map_err(|_| {
+                        let now = tokio::time::Instant::now();
+                        let mut stalled: Vec<_> = progress_deadlines
+                            .iter()
+                            .filter_map(|(learner_id, deadline)| {
+                                (*deadline <= now).then_some(*learner_id)
+                            })
+                            .collect();
+                        stalled.sort_unstable();
+                        anyhow::anyhow!(
+                            "timed out collecting BUDGET_DONE after no progress for {:?}: received {}/{}",
+                            stalled,
+                            reports.len(),
+                            expected_learners
+                        )
+                    })?
+                    .context("event channel closed while collecting BUDGET_DONE reports")?
+            }
         };
         match event {
             Event::BudgetDone {
@@ -1872,16 +1969,43 @@ async fn collect_budget_reports(
                     bail!("BUDGET_DONE from a superseded learner");
                 }
                 record_budget_report(reports, target, member, local_steps)?;
+                progress_deadlines.remove(&member.learner_id);
+            }
+            Event::Heartbeat { member, local_step } => {
+                if is_current_member(registry, member)
+                    && !reports.contains(&member.learner_id)
+                    && local_step <= target
+                {
+                    progress_deadlines.insert(
+                        member.learner_id,
+                        tokio::time::Instant::now() + progress_timeout,
+                    );
+                }
+            }
+            Event::Push { member, push } => {
+                if is_current_member(registry, member)
+                    && !reports.contains(&member.learner_id)
+                    && push.local_step <= target
+                {
+                    progress_deadlines.insert(
+                        member.learner_id,
+                        tokio::time::Instant::now() + progress_timeout,
+                    );
+                }
+            }
+            Event::Hello { group } => {
+                let learner_id = group.member.learner_id;
+                if is_current_member(registry, group.member) && !reports.contains(&learner_id) {
+                    progress_deadlines
+                        .insert(learner_id, tokio::time::Instant::now() + progress_timeout);
+                }
             }
             Event::Disconnected { member } => warn!(
                 learner_id = member.learner_id,
                 generation = member.generation,
                 "disconnected while waiting for learner-budget cutoff"
             ),
-            Event::Hello { .. }
-            | Event::Push { .. }
-            | Event::Init { .. }
-            | Event::FinalAck { .. } => {}
+            Event::Init { .. } | Event::FinalAck { .. } => {}
         }
     }
     Ok(())
@@ -1903,6 +2027,16 @@ struct Round {
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
     pushes: HashMap<Member, Push>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ReboundPull {
+    t: u64,
+    p: usize,
+    attempt: u32,
+    base_version: u64,
+    old_generation: u64,
+    pull: bytes::Bytes,
 }
 
 struct ComputedRound {
@@ -1977,6 +2111,58 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
 
 fn fragment_available(rounds: &[Round], fragment_id: usize) -> bool {
     !rounds.iter().any(|round| round.p == fragment_id)
+}
+
+/// Rebind unanswered slots in existing rounds to a reconnect generation.
+///
+/// Accepted pushes are permanent: if any generation of this logical learner
+/// has already answered a round, that round remains frozen. The registry
+/// check prevents a delayed HELLO from rebinding rounds backwards after a
+/// still newer connection superseded it while catch-up was in progress.
+fn rebind_current_unanswered_rounds(
+    registry: &Registry,
+    rounds: &mut [Round],
+    replacement: Member,
+) -> Vec<ReboundPull> {
+    // Keep the registry lock through the membership rewrites.  Otherwise a
+    // newer HELLO could become current after the check but before this loop,
+    // letting a delayed HELLO rebind rounds backwards.
+    let registry = registry.lock().unwrap();
+    if registry.current.get(&replacement.learner_id) != Some(&replacement) {
+        return Vec::new();
+    }
+
+    let mut repulls = Vec::new();
+    for round in rounds {
+        if round
+            .pushes
+            .keys()
+            .any(|member| member.learner_id == replacement.learner_id)
+        {
+            continue;
+        }
+
+        let Some(expected) = round
+            .expected_members
+            .iter_mut()
+            .find(|member| member.learner_id == replacement.learner_id && **member != replacement)
+        else {
+            continue;
+        };
+
+        let old_generation = expected.generation;
+        *expected = replacement;
+        round.expected_members.sort_unstable();
+        repulls.push(ReboundPull {
+            t: round.t,
+            p: round.p,
+            attempt: round.attempt,
+            base_version: round.base_version,
+            old_generation,
+            pull: round.pull.clone(),
+        });
+    }
+    repulls
 }
 
 fn route_push(rounds: &mut [Round], member: Member, push: Push) -> PushDisposition {
@@ -2396,7 +2582,10 @@ async fn finalize_learners(
                     "learner disconnected during finalization; waiting for reconnect"
                 );
             }
-            Event::Push { .. } | Event::Init { .. } | Event::BudgetDone { .. } => {
+            Event::Push { .. }
+            | Event::Heartbeat { .. }
+            | Event::Init { .. }
+            | Event::BudgetDone { .. } => {
                 // The authoritative cut is frozen; late training traffic is
                 // intentionally ignored while learners finalize.
             }
@@ -2593,6 +2782,18 @@ mod tests {
         }
     }
 
+    fn registry_with_current(current: Member) -> Registry {
+        let registry = Arc::new(Mutex::new(RegistryState::default()));
+        {
+            registry
+                .lock()
+                .unwrap()
+                .current
+                .insert(current.learner_id, current);
+        }
+        registry
+    }
+
     fn test_group_with_control(member: Member, control: mpsc::Sender<OutFrame>) -> Arc<Group> {
         Arc::new(Group {
             member,
@@ -2641,12 +2842,13 @@ mod tests {
     }
 
     #[test]
-    fn budget_reports_are_exact_unique_and_cover_logical_learners() {
+    fn budget_reports_are_exact_idempotent_and_cover_logical_learners() {
         let mut reports = HashSet::new();
         record_budget_report(&mut reports, 8, member(0, 10), 8).unwrap();
         record_budget_report(&mut reports, 8, member(1, 20), 8).unwrap();
         assert_eq!(reports.len(), 2);
-        assert!(record_budget_report(&mut reports, 8, member(1, 21), 8).is_err());
+        record_budget_report(&mut reports, 8, member(1, 21), 8).unwrap();
+        assert_eq!(reports.len(), 2);
 
         let mut wrong = HashSet::new();
         assert!(record_budget_report(&mut wrong, 8, member(0, 10), 7).is_err());
@@ -2726,7 +2928,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn budget_report_collection_wait_has_an_absolute_deadline() {
+    async fn budget_report_collection_times_out_on_missing_progress() {
         let (_sender, mut events) = mpsc::channel(1);
         let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
         let mut reports = HashSet::new();
@@ -2736,7 +2938,7 @@ mod tests {
             &mut reports,
             &mut events,
             &registry,
-            tokio::time::Instant::now(),
+            Duration::from_millis(1),
             None,
         )
         .await;
@@ -2746,7 +2948,52 @@ mod tests {
         };
         let message = format!("{error:#}");
         assert!(message.contains("timed out"), "{message}");
-        assert!(message.contains("received 0/2 from []"), "{message}");
+        assert!(message.contains("no progress for [0, 1]"), "{message}");
+        assert!(message.contains("received 0/2"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_renews_only_the_reporting_learners_progress_lease() {
+        let (sender, mut events) = mpsc::channel(4);
+        let completed = member(0, 10);
+        let current = member(1, 20);
+        let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.current.insert(0, completed);
+            registry.current.insert(1, current);
+        }
+        let mut reports = HashSet::new();
+        let collect = collect_budget_reports(
+            8,
+            2,
+            &mut reports,
+            &mut events,
+            &registry,
+            Duration::from_millis(40),
+            Some((completed, 8)),
+        );
+        let produce = async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            sender
+                .send(Event::Heartbeat {
+                    member: current,
+                    local_step: 7,
+                })
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            sender
+                .send(Event::BudgetDone {
+                    member: current,
+                    local_steps: 8,
+                })
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(collect, produce);
+        result.unwrap();
+        assert_eq!(reports, HashSet::from([0, 1]));
     }
 
     #[test]
@@ -2898,6 +3145,200 @@ mod tests {
             c_tokens: 20,
             outer_gradient: vec![1.0],
         }
+    }
+
+    fn test_push_for(learner_id: u32, base_version: u64) -> Push {
+        let mut push = test_push(base_version);
+        push.learner_id = learner_id;
+        push
+    }
+
+    #[test]
+    fn unanswered_reconnect_rebinds_and_accepts_new_generation() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let other = member(1, 20);
+        let registry = registry_with_current(replacement);
+        let pull = bytes::Bytes::from_static(b"outstanding-pull");
+        let mut round = test_round(vec![old, other]);
+        round.pull = pull.clone();
+        round.pushes.insert(other, test_push_for(1, 5));
+        let mut rounds = vec![round];
+
+        assert_eq!(
+            rebind_current_unanswered_rounds(&registry, &mut rounds, replacement),
+            vec![ReboundPull {
+                t: 7,
+                p: 1,
+                attempt: 1,
+                base_version: 5,
+                old_generation: 10,
+                pull,
+            }]
+        );
+        assert_eq!(rounds[0].expected_members, vec![replacement, other]);
+        assert_eq!(rounds[0].pushes.get(&other).unwrap().learner_id, 1);
+        assert_eq!(
+            route_push(&mut rounds, replacement, test_push(5)),
+            PushDisposition::Accepted
+        );
+        assert_eq!(
+            route_push(&mut rounds, old, test_push(5)),
+            PushDisposition::UnexpectedMember
+        );
+        assert_eq!(rounds[0].pushes.len(), 2);
+    }
+
+    #[test]
+    fn answered_reconnect_does_not_rebind_or_repull() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let registry = registry_with_current(replacement);
+        let mut round = test_round(vec![old]);
+        round.pushes.insert(old, test_push(5));
+        let mut rounds = vec![round];
+
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![old]);
+        assert!(rounds[0].pushes.contains_key(&old));
+        assert_eq!(
+            route_push(&mut rounds, replacement, test_push(5)),
+            PushDisposition::UnexpectedMember
+        );
+    }
+
+    #[test]
+    fn same_generation_rebind_is_idempotent_and_does_not_repull() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let registry = registry_with_current(replacement);
+        let mut rounds = vec![test_round(vec![old])];
+
+        assert_eq!(
+            rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).len(),
+            1
+        );
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![replacement]);
+    }
+
+    #[test]
+    fn superseded_hello_cannot_rebind_backwards() {
+        let superseded = member(0, 11);
+        let current = member(0, 12);
+        let registry = registry_with_current(current);
+        let mut rounds = vec![test_round(vec![current])];
+
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, superseded).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![current]);
+    }
+
+    #[test]
+    fn multiple_inflight_rounds_rebind_selectively() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let other = member(1, 20);
+        let unrelated = member(2, 30);
+        let registry = registry_with_current(replacement);
+
+        let mut first = test_round(vec![old, other]);
+        first.pull = bytes::Bytes::from_static(b"first");
+        first.pushes.insert(other, test_push_for(1, 5));
+
+        let mut second = test_round(vec![old]);
+        second.t = 8;
+        second.p = 2;
+        second.pull = bytes::Bytes::from_static(b"second");
+
+        let mut answered = test_round(vec![old]);
+        answered.t = 9;
+        answered.p = 3;
+        let mut answered_push = test_push(5);
+        answered_push.global_step = 9;
+        answered_push.fragment_id = 3;
+        answered.pushes.insert(old, answered_push);
+
+        let mut unrelated_round = test_round(vec![unrelated]);
+        unrelated_round.t = 10;
+        unrelated_round.p = 4;
+
+        let mut rounds = vec![first, second, answered, unrelated_round];
+        let repulls = rebind_current_unanswered_rounds(&registry, &mut rounds, replacement);
+
+        assert_eq!(
+            repulls
+                .iter()
+                .map(|repull| (repull.t, repull.p, repull.pull.as_ref()))
+                .collect::<Vec<_>>(),
+            vec![(7, 1, b"first".as_slice()), (8, 2, b"second".as_slice())]
+        );
+        assert_eq!(rounds[0].expected_members, vec![replacement, other]);
+        assert_eq!(rounds[1].expected_members, vec![replacement]);
+        assert_eq!(rounds[2].expected_members, vec![old]);
+        assert_eq!(rounds[3].expected_members, vec![unrelated]);
+        assert!(rounds[0].pushes.contains_key(&other));
+        assert!(rounds[2].pushes.contains_key(&old));
+    }
+
+    #[test]
+    fn rebind_preserves_round_metadata() {
+        let old = member(0, 10);
+        let replacement = member(0, 11);
+        let other = member(1, 20);
+        let registry = registry_with_current(replacement);
+        let started = Instant::now() - Duration::from_secs(2);
+        let quorum_deadline = Instant::now() + Duration::from_secs(17);
+        let grace_deadline = Some(Instant::now() + Duration::from_secs(9));
+        let pull = bytes::Bytes::from_static(b"exact-wire-pull");
+        let mut round = test_round(vec![other, old]);
+        round.t = 41;
+        round.p = 3;
+        round.base_version = 17;
+        round.attempt = 9;
+        round.pull = pull.clone();
+        round.started = started;
+        round.quorum_deadline = quorum_deadline;
+        round.grace_deadline = grace_deadline;
+        round.quorum_size = 2;
+        round.quorum_ms = Some(123);
+        round.grace_ms = Some(456);
+        let mut other_push = test_push_for(1, 16);
+        other_push.global_step = 41;
+        other_push.fragment_id = 3;
+        other_push.round_attempt = 9;
+        other_push.local_step = 77;
+        round.pushes.insert(other, other_push);
+        let mut rounds = vec![round];
+
+        assert_eq!(
+            rebind_current_unanswered_rounds(&registry, &mut rounds, replacement),
+            vec![ReboundPull {
+                t: 41,
+                p: 3,
+                attempt: 9,
+                base_version: 17,
+                old_generation: 10,
+                pull: pull.clone(),
+            }]
+        );
+        let rebound = &rounds[0];
+        assert_eq!(rebound.t, 41);
+        assert_eq!(rebound.p, 3);
+        assert_eq!(rebound.base_version, 17);
+        assert_eq!(rebound.attempt, 9);
+        assert_eq!(rebound.pull, pull);
+        assert_eq!(rebound.started, started);
+        assert_eq!(rebound.quorum_deadline, quorum_deadline);
+        assert_eq!(rebound.grace_deadline, grace_deadline);
+        assert_eq!(rebound.quorum_size, 2);
+        assert_eq!(rebound.quorum_ms, Some(123));
+        assert_eq!(rebound.grace_ms, Some(456));
+        assert_eq!(rebound.expected_members, vec![replacement, other]);
+        assert_eq!(rebound.pushes.len(), 1);
+        let preserved_push = rebound.pushes.get(&other).unwrap();
+        assert_eq!(preserved_push.learner_id, 1);
+        assert_eq!(preserved_push.base_version, 16);
+        assert_eq!(preserved_push.local_step, 77);
     }
 
     #[test]

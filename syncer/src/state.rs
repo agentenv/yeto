@@ -599,10 +599,18 @@ pub fn final_marker_path(path: &std::path::Path) -> std::path::PathBuf {
 pub fn remove_final_marker(path: &std::path::Path) -> Result<()> {
     let marker = final_marker_path(path);
     match std::fs::remove_file(&marker) {
-        Ok(()) => Ok(()),
+        Ok(()) => sync_parent_directory(&marker),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("remove {}", marker.display())),
     }
+}
+
+fn sync_parent_directory(path: &std::path::Path) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::File::open(parent)
+        .with_context(|| format!("open checkpoint directory {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("sync checkpoint directory {}", parent.display()))
 }
 
 pub fn write_final_marker(path: &std::path::Path, global_step: u64) -> Result<()> {
@@ -619,6 +627,7 @@ pub fn write_final_marker(path: &std::path::Path, global_step: u64) -> Result<()
         file.get_ref().sync_all()?;
     }
     std::fs::rename(&tmp, &marker)?;
+    sync_parent_directory(&marker)?;
     Ok(())
 }
 
@@ -661,6 +670,7 @@ impl GlobalState {
             f.get_ref().sync_all()?;
         }
         std::fs::rename(&tmp, path)?;
+        sync_parent_directory(path)?;
         Ok(())
     }
 
