@@ -1,528 +1,308 @@
-# Qwen3.5-0.8B Terminal-Bench 2.1 SAO + Streaming DiLoCo Validation
+# Qwen3.5-0.8B Terminal-Bench 2.1 SAO + Streaming DiLoCo: End-to-End Validation and Matched Evaluation
 
-Date: 2026-08-26
-Release branch: `feat/sao-tbench21-e2e-validation`
+Initial run date: 2026-08-26
+Corrected evaluation date: 2026-08-27
+Feature branch: `feat/sao-tbench21-e2e-validation`
 Repositories: `agentenv/miles` and `agentenv/yeto`
 
-## Status
+## Executive conclusion
 
-The production-shape pipeline completed end to end on one 8×H200 node:
+The production-shape software path completed end to end on one 8×H200 node:
 
-1. an authenticated four-rollout baseline over all Terminal-Bench 2.1 tasks;
-2. critic value pretraining from a Qwen3.8-27B teacher trace for every task;
-3. learned trajectory compaction;
-4. full-parameter SAO actor and critic updates on eight one-GPU islands;
-5. separate full-quorum actor and critic streaming-DiLoCo synchronization;
-6. publication of one common actor policy; and
-7. four-rollout held-out evaluation on the 45-task evaluation split.
+1. Terminal-Bench 2.1 rollouts through the Codex harness;
+2. learned trajectory compaction;
+3. authenticated native-verifier rewards in managed DinD environments;
+4. offline SAO critic value pretraining;
+5. full-parameter SAO actor and critic updates on eight one-GPU islands;
+6. independent actor and critic streaming-DiLoCo synchronization;
+7. publication of one common trained actor policy; and
+8. checkpoint-backed held-out evaluation with four rollouts per task.
 
-Baseline collection accepted 356/356 rollouts, online training accepted 176/176
-trajectories, and held-out evaluation accepted 180/180 rollouts. All eight training
-islands exited successfully, produced finite actor/critic metrics, reached both
-DiLoCo fragment barriers, and published the same terminal actor policy hash.
+The architecture is validated. The trained actor did **not** outperform the
+matched base policy. Both policies solved 1 of 180 held-out rollouts, producing
+identical pass@1, pass@2, pass@3, and pass@4. The successful task changed, which
+shows a behavioral change but not an aggregate improvement.
 
-The evaluation found one success in 180 rollouts. This validates the system path,
-not learning quality: the baseline and online-training rewards were all zero, the
-training budget was one actor step per island, and 1/180 is not a statistically
-meaningful improvement over the all-zero baseline.
+The critic did learn measurable signal from the mixed-label Qwen3.8-27B teacher
+set. Corrected forward-only explained variance was approximately +0.136, with
+positive explained variance in seven of eight disjoint batches. This is critic
+evidence, not evidence that the actor improved.
 
-## Requested shape
+The previous revision of this document incorrectly treated a base-Hugging-Face
+evaluation as trained-checkpoint evidence. The corrected evaluation loaded the
+trained Megatron actor, published it to SGLang on every island, and proved the
+served language tensors differed from the base model before accepting the score.
 
-| Requirement | Validated result |
+## Architecture artifact
+
+![Terminal-Bench SAO training architecture](assets/images/tbench21-sao-architecture.svg)
+
+Editable source: [tbench21-sao-architecture.excalidraw](assets/images/tbench21-sao-architecture.excalidraw)
+
+Raster export: [tbench21-sao-architecture.png](assets/images/tbench21-sao-architecture.png)
+
+The diagram includes only implemented architecture. It excludes roadmap items,
+proposed recovery work, and superseded evaluation paths.
+
+## Questions answered
+
+This run answers two different questions:
+
+1. **Does the complete SAO + streaming-DiLoCo implementation work at the
+   requested production shape?** Yes.
+2. **Does this short Qwen3.5-0.8B run improve held-out Terminal-Bench
+   performance over the same base policy?** No measurable improvement was
+   observed.
+
+Successful systems validation must not be reported as successful policy
+learning.
+
+## Validated shape
+
+| Requirement | Validated configuration |
 | --- | --- |
-| Full Terminal-Bench 2.1 | 89/89 tasks represented |
-| Half training / half evaluation | deterministic 44-task train and 45-task held-out split |
-| Four rollouts per challenge | baseline 356, training 176, evaluation 180 |
-| Codex harness | Codex CLI 0.145.0, `xhigh` reasoning |
-| Approximately 0.7B model | `Qwen/Qwen3.5-0.8B` |
-| Learned compaction | enabled; model-generated summaries are part of the trajectory |
-| Value pretraining on all tasks | teacher dataset covers 89/89 tasks |
-| 30-minute maximum episode time | 1,800 seconds |
-| Concurrency of at least 300 when possible | server and baseline capacity 304; train/eval contain only 176/180 jobs |
-| DiLoCo | separate actor and critic streams, fixed 8/8 quorum, `H=1` |
-| One GPU per island | eight independent one-GPU islands |
+| Benchmark | Terminal-Bench 2.1, all 89 tasks represented |
+| Split | deterministic 44-task training / 45-task held-out split |
+| Rollouts per task | four |
+| Actor | `Qwen/Qwen3.5-0.8B` |
+| Harness | Codex CLI with `xhigh` reasoning |
+| Compaction | policy-generated learned summaries |
+| Episode limit | 1,800 seconds |
+| Baseline capacity | up to 304 simultaneous managed environments |
+| Training topology | eight one-GPU islands on one 8×H200 node |
+| Local training | full-parameter actor and critic optimization |
+| Synchronization | separate actor and critic streaming-DiLoCo, `H=1`, full quorum |
+| Evaluation | matched 45-task roster, four replicas per task |
 
-## Architecture
+This was a single-node, eight-island validation. It does not establish physical
+multi-node Ethernet performance.
 
-```mermaid
-flowchart TD
-    T[Terminal-Bench task] --> C[Codex harness<br/>Qwen3.5-0.8B tool-calling policy]
-    C --> E[Execution segments]
-    C --> S[Learned summary segments]
-    E --> R[Authenticated native verifier reward]
-    S --> R
-    R --> L[One-GPU SAO island]
-    L --> A[Full-parameter actor<br/>local Adam step]
-    L --> V[Full-parameter critic<br/>local Adam updates]
-    A --> AD[FP32 actor pseudo-gradient fragments]
-    V --> VD[FP32 trainable-critic pseudo-gradient fragments]
-    AD --> AS[Actor streaming-DiLoCo syncer<br/>8/8 quorum]
-    VD --> VS[Critic streaming-DiLoCo syncer<br/>8/8 quorum]
-    AS --> P[Common published actor policy]
-    VS --> N[Next critic anchor]
-    P --> H[Held-out Codex evaluation]
-```
+## Architecture and data flow
 
-Each of the eight sibling containers owns one H200 and an independent Ray runtime.
-The island colocates a TP1 SGLang engine, a full actor, and a full critic by
-offloading components when they are inactive. Actor-to-critic value/log-probability
-transfer uses a standalone Gloo process group and CPU wire tensors. This is
-intentional: actor and critic are independent singleton Megatron worlds on the
-same physical GPU, so a second NCCL communicator would report duplicate GPU use.
+### Baseline and evaluation
 
-The actor and critic do not share one synchronization transaction. They publish
-to distinct syncers, on ports 29400 and 29401, with identical fixed-roster and
-full-quorum rules. A policy is complete only after both actor fragments have been
-accepted and the terminal actor publication is available.
+Each rollout used the same semantic path:
+
+1. SGLang served the selected actor policy.
+2. Codex drove the Terminal-Bench task and tool calls.
+3. The actor generated learned summary segments after the compaction threshold.
+4. A managed DinD environment executed the challenge.
+5. The native Terminal-Bench verifier produced the outcome.
+6. Task identity, replica identity, native evidence, and HMAC were checked before
+   the outcome entered the ledger.
+
+Completed signed zero rewards are valid model outcomes. Unsigned,
+infrastructure-aborted, malformed, or roster-mismatched episodes are rejected.
+
+### Critic initialization
+
+One Qwen3.8-27B teacher trace for each of the 89 tasks was converted into the
+SAO value-pretraining format. A Qwen3.5-0.8B critic was trained for 89 steps with
+a 51-bin HL-Gauss objective over reward range `[0, 1]`. The resulting critic
+checkpoint initialized the critic on every online island.
+
+### Online SAO and streaming-DiLoCo
+
+Each island owned one H200 and an independent Ray runtime. It colocated a TP1
+SGLang engine, a full actor, a full critic, and the Codex/compaction/DinD rollout
+path. Each island performed one actor optimizer step and two critic optimizer
+updates.
+
+Actor and critic pseudo-gradients were emitted as separate FP32 streams and sent
+to independent streaming-DiLoCo syncers with fixed rosters and full quorum. The
+common actor state became the trained checkpoint. The synchronized critic
+remained training state.
+
+Actor-to-critic value and log-probability transfer used a standalone Gloo group
+with CPU wire tensors. The actor and critic are independent singleton Megatron
+worlds on the same GPU, so a second NCCL communicator would create a duplicate-
+GPU conflict.
 
 ## Immutable inputs and provenance
 
 | Item | Identity |
 | --- | --- |
-| Policy model | `Qwen/Qwen3.5-0.8B` |
 | Model revision | `2fc06364715b967f1860aea9cf38778875588b17` |
 | Terminal-Bench revision | `7131e4375048a0e408a8fb404b5f499d726b695b` |
 | Runtime image | `yeto-sao-tbench21-runtime:20260826` |
 | Runtime image ID | `sha256:69be75252eea4179ccae554f362351a7502f365a89c99eaca322df19f4e55572` |
 | Codex binary | `codex-cli 0.145.0` |
 | Codex binary SHA-256 | `a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14` |
-| Codex reasoning | `xhigh` |
 | Plan manifest SHA-256 | `cd951cd6365fbbf15d67d92add39187108905bc4bfbb8f399a069ae930813c5c` |
 | Split SHA-256 | `c3e5abde12dfae025f161dff927dfcc16b8f04e3aa77f7b95256ebbac20b85a8` |
 | Task inventory SHA-256 | `f3bbf6f7a5eae0505bcaf8b9587b7691dd7cfbd98e5b2c1cb60b83f1fc86f8df` |
-| Final runtime contract SHA-256 | `a07bbc21cd765e8b0f06370eb263337d29d2b9b021726305f694317f95aa007e` |
+| Runtime contract SHA-256 | `a07bbc21cd765e8b0f06370eb263337d29d2b9b021726305f694317f95aa007e` |
 | Training contract SHA-256 | `8ae08c7f99ecee4167beb843b88547f36d61ad5bc978945dfd4703191baed5ae` |
 | Semantic profile SHA-256 | `418a0be25db31c1d41cdee2fcbc55840e9aa8c24b74f502590898c236254c464` |
 
-The deterministic split uses `sha256-domain-ranked-first-44` with seed
-`tbench21-sao-20260826`. Per-island seeds are `82621` through `82628`.
+The split used `sha256-domain-ranked-first-44` with seed
+`tbench21-sao-20260826`. Island seeds were `82621` through `82628`.
 
-The node exposed eight NVIDIA H200 GPUs with 143,771 MiB each. The validation is
-a one-node eight-island test. It does **not** establish physical multi-node
-Ethernet throughput or operation without InfiniBand across separate hosts.
+The initial baseline conversion and teacher artifacts bind plan-v2 SHA-256
+`48f74ac79a9de776cfc36c370fcc04411e827c7837747192943771282ecd1ad7`;
+the final online and evaluation contracts bind plan-v4 SHA-256
+`cd951cd6365fbbf15d67d92add39187108905bc4bfbb8f399a069ae930813c5c`.
+They use the same task inventory, split, and selection. The version distinction
+is retained rather than treating every artifact as if it were generated from
+one plan revision.
 
-## Workload and resource shape
-
-| Phase | Tasks | Replicas/task | Logical jobs | Capacity used |
-| --- | ---: | ---: | ---: | ---: |
-| Baseline | 89 | 4 | 356 | up to 304 simultaneous environments |
-| Online training | 44 | 4 | 176 | at most 176 jobs exist |
-| Held-out evaluation | 45 | 4 | 180 | at most 180 jobs exist |
-
-Each SGLang engine was configured with:
-
-- TP/PP/CP/EP = 1;
-- per-island concurrency 38;
-- static memory fraction 0.15;
-- maximum total tokens 393,216;
-- Mamba cache size 256;
-- context length 8,192; and
-- response limit 2,048 tokens.
-
-The shared managed Terminal-Bench server was capped at 304 concurrent sandboxes.
-This meets the requested 300+ production capacity for the 356-rollout baseline.
-Training and evaluation cannot create 300 concurrent episodes because their
-complete worklists contain only 176 and 180 jobs.
-
-Forty-four task images were already present. The other 45 were rebuilt from the
-Terminal-Bench repository Dockerfiles, and all 45 builds succeeded. The image
-build manifest SHA-256 is
+Forty-four task images were already available. The remaining 45 were rebuilt
+from repository Dockerfiles, and all builds succeeded. The image-build manifest
+SHA-256 was
 `dfe107e71fe3b84172e6b6e1b3028ac75a668454c5762ae4e6c6e0dfe545b06d`.
 
-## Learned compaction contract
+## Workload and resources
 
-Compaction is part of the policy trajectory rather than an external truncation:
-
-- trigger after 6,144 consumed tokens in the 8,192-token context;
-- ask the same policy to generate a summary of at most 1,024 tokens;
-- allow at most three compactions per trajectory;
-- preserve two complete atomic tool steps around each boundary;
-- alternate execution and summary segments;
-- require a usable trajectory to end in an execution segment;
-- copy the final authenticated trajectory reward to every retained segment;
-- use per-token loss normalization and dynamic global batching so additional
-  compaction events do not give a trajectory extra optimization weight; and
-- drop a terminal orphan summary when no later execution segment can consume it.
-
-Observed shapes were:
-
-| Phase | Logical trajectories | Total segments | Compaction events |
+| Phase | Tasks | Replicas/task | Logical trajectories |
 | --- | ---: | ---: | ---: |
-| Baseline | 356 | 504 | 74 |
+| Full baseline collection | 89 | 4 | 356 |
+| Online training | 44 | 4 | 176 |
+| Matched base-policy held-out evaluation | 45 | 4 | 180 |
+| Trained-policy held-out evaluation | 45 | 4 | 180 |
+
+Each SGLang engine used TP/PP/CP/EP = 1, per-island concurrency 38, static
+memory fraction 0.15, maximum total tokens 393,216, Mamba cache size 256,
+context length 8,192, and response limit 2,048 tokens.
+
+The managed service allowed 304 concurrent sandboxes. Training and evaluation
+contained only 176 and 180 jobs, so they could not use 300 concurrent episodes.
+
+## Full-task baseline collection
+
+The initial all-task collection accepted all 356 signed rollouts (89 tasks ×
+four replicas), comprising 504 segments, 74 compactions, and 584,728 active
+tokens. It produced zero successes. Statuses were 232 `max_seq_len`, 120
+`max_turns`, and four `completed`.
+
+This collection proves the initial-rollout and data path over the complete task
+inventory. It is **not** the matched learning baseline used in the final actor
+comparison; that comparison uses the separate 45-task held-out base-policy
+evaluation below.
+
+Authoritative report:
+
+- `/data/sft/sao-qwen35-08b/runs/tbench21-sao-full/baseline-v6/postcheck-report.json`
+- SHA-256
+  `e178a291f0b2a7f065bbb1d8e2cbd03c935e6e3831ef935cf2547a725a96a86a`
+
+## Learned compaction
+
+Compaction was part of the policy trajectory, not external truncation:
+
+- trigger after 6,144 consumed tokens in an 8,192-token context;
+- generate at most 1,024 summary tokens with the same actor;
+- allow at most three compactions per trajectory;
+- preserve two complete atomic tool steps at each boundary;
+- alternate execution and summary segments;
+- require a reusable training trace to end in an execution segment;
+- copy the authenticated final reward to each retained segment;
+- normalize per token so more compactions do not increase trajectory weight; and
+- discard a terminal orphan summary if no later execution consumes it.
+
+| Phase | Trajectories | Segments | Compactions |
+| --- | ---: | ---: | ---: |
+| Full baseline | 356 | 504 | 74 |
 | Online training | 176 | 260 | 42 |
-| Held-out evaluation | 180 | 238 | 29 |
+| Original base-policy held-out evaluation | 180 | 238 | 29 |
+| Corrected trained-policy held-out evaluation | 180 | 256 | 38 |
 
-## Reward and sandbox integrity
+The corrected trained-policy evaluation contained 301,342 active tokens. Its
+postcheck records compaction and TITO validity per trajectory instead of
+reusing the original aggregate segment claim.
 
-The reward path uses Terminal-Bench's native verifier. A run accepts an outcome
-only when its task identity, replica identity, native evaluation evidence, and
-HMAC signature agree. The HMAC key is supplied as a read-only file and is never
-written to a manifest, log, command result, or repository.
+## Critic value pretraining
 
-The managed OpenEnv server labels task containers with both the exact run ID and
-`miles.tbench21.managed=true`. It refuses to create new work after a teardown
-failure, performs bounded exact-scope cleanup, and reports active sessions,
-managed containers, and orphans through `/miles/managed-status`. It never sweeps
-containers outside the two-label run scope.
+### Dataset and training
 
-The final baseline, training, and evaluation waves recorded no HMAC failures, no
-503 retries, no infrastructure replacements, and no managed-DinD cleanup debt.
-Completed signed rewards of zero are valid model outcomes; unsigned, malformed,
-or infrastructure-aborted episodes are not training data.
+The online critic used the Qwen3.8-27B teacher set, not the all-zero 0.8B
+baseline conversion.
 
-## Value pretraining
-
-Two value datasets were validated, but only the teacher dataset initialized the
-online critic.
-
-### Authenticated 0.8B baseline conversion
-
-- 356 logical trajectories and 504 segments;
-- 584,728 active tokens;
-- all 356 outcomes authenticated;
-- all rewards zero;
-- manifest SHA-256
-  `d2f084daa1b36713a9b2dea46548251f1498a4d22373efbde976f67f19eabc64`;
-- report SHA-256
-  `fec225a416c0f78e51e66cc2c5b5d8252fe8d93b91d54accc56187e8d1d12695`.
-
-This conversion proves that the new Codex/compaction format is consumable, but
-an all-zero dataset cannot teach useful reward discrimination and was not used as
-the online critic checkpoint.
-
-### Qwen3.8-27B teacher dataset used by the critic
-
-- one trace for every one of the 89 tasks;
+- 89 traces: one per benchmark task;
 - 35 positive and 54 zero-reward traces;
 - 314,902 active tokens and 4,083 tool calls;
-- source model `Qwen/Qwen3.8-27B`;
-- Codex 0.146.0 with `xhigh` reasoning;
-- 51-bin HL-Gauss classification over reward range `[0, 1]`;
 - one epoch, global batch size 1, 89 optimizer steps;
-- no repeated or dropped samples;
-- first logged loss/accuracy: 5.8320226669 / 0.0489078835;
-- last logged loss/accuracy: 1.0629353523 / 0.7692307830;
-- dataset SHA-256
+- first loss/accuracy: 5.8320226669 / 0.0489078835;
+- last loss/accuracy: 1.0629353523 / 0.7692307830;
+- dataset SHA-256:
   `202014ff125a2ba89d3dc3113948429b6d2d5a03624b54e1d62a0bb9ae8ca092`;
-- manifest SHA-256
+- manifest SHA-256:
   `8be9f2b06d65711bccb0a2c06466551126e460a0b4eb812a86df0ae0fddb669f`;
-- critic contract SHA-256
+- critic contract SHA-256:
   `129c298786c54c8b43d3f69d61f0f518e89ea3ae9ef38a943097e7cbfffff98d`.
 
-The resulting iteration-89 checkpoint contains five files totaling
-1,505,655,153 bytes. Raw checkpoint preflight counted 752,393,024 actor scalars,
-284 actor tensors, 286 critic tensors, 18 FP32 Qwen GDN `A_log` tensors, and 320
-Hugging Face text tensors.
+The teacher outcomes are legacy and unsigned, and the dataset contains one
+trace per task rather than four. Those are provenance limitations.
 
-Teacher caveats are important: these are legacy unsigned outcomes, tools were not
-present in the ATIF metadata even though tool-call structure was retained, and two
-tasks required native-session fallback. The teacher set meets 100% task coverage,
-but it has one trace per task, not four. Its decreasing training loss does not by
-itself measure held-out critic quality.
+### Why the original EV was degenerate
 
-## Online SAO recipe
+Global batch size was 1, and every active token in a trajectory shared one
+binary return. The within-batch target variance was therefore zero, so per-step
+explained variance was undefined. A logged zero did not mean the critic
+explained exactly zero variance; the batch could not support the statistic.
+
+Loss reduction alone was insufficient evidence because it does not show whether
+the critic ranks mixed outcomes usefully.
+
+### Corrected mixed-label EV gate
+
+The corrected evaluator loaded the contracted iteration-89 critic and performed
+no optimizer initialization or steps. It selected 64 distinct teacher rows as
+eight deterministic, disjoint batches of eight, forcing both labels into every
+batch. It evaluated two weightings:
+
+- trajectory-weighted: every trajectory contributes equal total weight;
+- token-weighted: every active target token contributes equal weight.
+
+| Metric | Trajectory-weighted | Token-weighted |
+| --- | ---: | ---: |
+| Aggregate explained variance | +0.1365258961 | +0.1352731576 |
+| Batches with EV > 0 | 7/8 | 7/8 |
+| Active targets | 64 trajectories | 242,242 tokens |
+| Gate | passed | passed |
+
+The gate requires aggregate EV > 0 and a strict majority of positive batch EVs
+under both weightings.
+
+These 64 rows come from the training manifest rather than held-out critic data.
+The gate proves non-degenerate fitted signal; it does not establish critic
+generalization. One of eight batches was negative (trajectory-weighted
+`-0.0398054731`, token-weighted `-0.0338625173`).
+
+Authoritative report:
+
+- `/data/sft/sao-qwen35-08b/runs/tbench21-sao-full/value-pretrain-teacher-v1/ev-gate-v2/report.json`
+- schema `miles.value-pretrain-eval.v2`
+- SHA-256
+  `51219d6680ebbcc4625c92048ec5dbe964856c91d2ab3117a7d3aaa2103308a8`
+
+This establishes useful critic signal. It does not establish actor improvement.
+
+## Online training result
 
 | Setting | Value |
 | --- | --- |
 | Objective | `sao_dis` |
 | Advantage estimator | observation-skipping, length-adaptive GAE |
 | SAO alpha | 1.5 |
-| Gamma | 1.0 |
-| Critic lambda | 1.0 |
-| Critic updates per batch | 2 |
-| Critic attention | frozen |
-| Coding DIS band | lower 0.8, upper 3.0 |
-| Actor learning rate | `1e-6` |
-| Critic learning rate | `5e-6` |
-| Critic warmup | 10 iterations |
+| Gamma / critic lambda | 1.0 / 1.0 |
+| Actor / critic updates per island | 1 / 2 |
+| Actor / critic learning rate | `1e-6` / `5e-6` |
 | Adam betas | 0.9, 0.98 |
-| Weight decay | 0 |
-| KL coefficient | 0 |
-| Entropy coefficient | 0 |
-| Episode timeout | 1,800 seconds |
-| Maximum turns | 40 |
+| Weight decay / KL / entropy coefficient | 0 / 0 / 0 |
+| Maximum turns / timeout | 40 / 1,800 seconds |
 
-Each island receives 22 immutable training trajectories. It performs one actor
-optimizer step and two critic optimizer updates. Local training is BF16 with FP32
-marked parameters and FP32 external update streams. Actor-to-critic bootstrap
-loads every compatible backbone tensor strictly and excludes only the freshly
-initialized critic output head.
+All 176 online trajectories were accepted: 260 segments, 42 compactions, and
+310,686 active tokens. Statuses were four `completed`, 123 `max_seq_len`, and 49
+`max_turns`. Every terminal reward was an authenticated zero. The
+teacher-pretrained critic supplied learned values, but the online wave contained
+no positive terminal reward. This limits what one actor step can learn.
 
-## Streaming-DiLoCo contract
+All eight learner containers exited 0 without OOM, saved actor and critic
+checkpoints, and reached full quorum for both actor and critic fragments. Every
+island attested terminal actor policy hash
+`c79f85ac812e5bc107682467b5bd266c7776b5aff13138f5a7faa0950135ca02`.
 
-| Setting | Actor | Critic |
-| --- | --- | --- |
-| Port | 29400 | 29401 |
-| Learners / quorum | 8 / 8 | 8 / 8 |
-| Local interval | `H=1` | `H=1` |
-| Fragments / pipeline stages | 2 / 2 | 2 / 2 |
-| Maximum base lag | 0 | 0 |
-| Delta semantics | local minus raw anchor | local minus raw anchor |
-| Outer learning rate | 0.7 | 0.7 |
-| Outer momentum | 0.9 | 0.9 |
-
-Every fragment is profile-bound and checkpointed. Both roles received 8/8
-responders for both fragments, with terminal versions `[1, 2]` and no stale
-updates. Because critic attention is frozen by the SAO recipe, the critic stream
-carries all trainable critic parameters rather than claiming that frozen tensors
-were optimized.
-
-Final synchronized states:
-
-| Role | Bytes | SHA-256 | Fragment-1 delta norm | Fragment-2 delta norm |
-| --- | ---: | --- | ---: | ---: |
-| Actor | 3,009,572,116 | `44a1e5dcd42851d8f6e81510009b4983334c696c817bd9e05e84f5d521586b80` | 0.00967226746 | 0.00620559459 |
-| Critic | 2,074,394,848 | `ad25c174037365d1fd8ab23bbacc4b61c044119cee0f4669f979256650371a06` | 0.00720269750 | 0.00100820191 |
-
-The syncer launch manifest SHA-256 is
-`abfae6eb113be0d927e2d17fbe16d4141351514a09766708ed718363e747f6f1`;
-the syncer binary SHA-256 is
-`144b5a4fbe07a0685b2c19557ba6b93b6407fb7a4182503f77285fa704374d16`.
-
-## How to run the pipeline
-
-The commands below show the intended orchestration. Use new output directories
-and run IDs on every launch. Do not reuse a prior manifest path, and do not put
-the reward key itself on the command line.
-
-### 1. Pin inputs and build the plan
-
-```bash
-export TB_MILES_ROOT=/root/miles
-export TB_YETO_ROOT=/root/yeto
-export TB_TASKS_DIR=/data/sft/terminal-bench-2
-export TB_MODEL_DIR=/data/models/Qwen3.5-0.8B
-export TB_PLAN_DIR=/data/sft/sao-qwen35-08b/data/tbench21-sao-full/plan-next
-export TB_RUN_ROOT=/data/sft/sao-qwen35-08b/runs/tbench21-sao-full
-export TB_CODEX_DIR=/data/sft/sao-qwen35-08b/codex-0.145.0
-export TB_REWARD_KEY_FILE=/data/sft/sao-qwen35-08b/secrets/reward-hmac.key
-
-python "$TB_YETO_ROOT/tools/probes/build_tbench21_sao_diloco_plan.py" \
-  --tasks-dir "$TB_TASKS_DIR" \
-  --output-dir "$TB_PLAN_DIR" \
-  --split-seed tbench21-sao-20260826 \
-  --run-root "$TB_RUN_ROOT"
-
-python "$TB_MILES_ROOT/tools/probes/build_tbench21_missing_images.py" \
-  --tasks-dir "$TB_TASKS_DIR" \
-  --output-dir /data/sft/sao-qwen35-08b/image-build-next \
-  --workers 8
-```
-
-Verify the emitted manifest hashes before proceeding. The plan owns the exact
-task/replica roster and deterministic split; later launchers fail closed when the
-roster, model identity, or paths drift.
-
-### 2. Start and preflight the managed environment service
-
-```bash
-ulimit -n 1048576
-export TB_SERVER_RUN_ID=tbench21-sao-next
-TB2_TASKS_DIR="$TB_TASKS_DIR" MAX_CONCURRENT_ENVS=304 \
-  python "$TB_MILES_ROOT/examples/experimental/openenv/managed_tbench21_server.py" \
-    --port 8003 --run-id "$TB_SERVER_RUN_ID"
-```
-
-From another shell:
-
-```bash
-python "$TB_MILES_ROOT/examples/experimental/openenv/preflight_tbench21_shared_server.py" \
-  --url http://127.0.0.1:8003 \
-  --run-id "$TB_SERVER_RUN_ID"
-```
-
-The preflight requires zero starting residue, creates and evaluates a real task,
-tears it down, and requires the exact run scope to return to zero.
-
-### 3. Collect the authenticated baseline
-
-Use the 8- and 64-episode gates when validating a new runtime. They can be omitted
-only when the exact image/model/contracts have already passed and the operator
-accepts the larger fail-fast wave.
-
-```bash
-python "$TB_MILES_ROOT/tools/probes/launch_tbench21_baseline_ramp.py" launch \
-  --gate-size 8 \
-  --run-id baseline-gate8-next \
-  --server-run-id "$TB_SERVER_RUN_ID" \
-  --miles-root "$TB_MILES_ROOT" \
-  --yeto-root "$TB_YETO_ROOT" \
-  --model "$TB_MODEL_DIR" \
-  --checkpoint "$TB_MODEL_DIR" \
-  --plan-dir "$TB_PLAN_DIR" \
-  --output-root "$TB_RUN_ROOT/baseline-gate8-next" \
-  --codex-dir "$TB_CODEX_DIR" \
-  --hmac-key "$TB_REWARD_KEY_FILE"
-```
-
-The full baseline uses the production launcher:
-
-```bash
-python "$TB_MILES_ROOT/tools/probes/launch_tbench21_rollout_wave.py" \
-  --phase baseline \
-  --miles-root "$TB_MILES_ROOT" \
-  --yeto-root "$TB_YETO_ROOT" \
-  --model "$TB_MODEL_DIR" \
-  --checkpoint "$TB_MODEL_DIR" \
-  --plan-dir "$TB_PLAN_DIR" \
-  --output-root "$TB_RUN_ROOT/baseline-next" \
-  --codex-dir "$TB_CODEX_DIR" \
-  --hmac-key "$TB_REWARD_KEY_FILE"
-```
-
-Run `postcheck_tbench21_baseline_wave.py` against the generated launch manifest
-before converting any trajectories. The postcheck verifies the exact 89×4 roster,
-HMACs, unique task/replica ownership, native evaluation evidence, compaction
-structure, and managed-server cleanup.
-
-### 4. Build the teacher value dataset and pretrain the critic
-
-```bash
-python "$TB_MILES_ROOT/tools/probes/build_tbench21_qwen38_teacher_value_dataset.py" \
-  --source-root /data/sft/qwen38-teacher-rollouts \
-  --expected-plan-manifest "$TB_PLAN_DIR/manifest.json" \
-  --target-tokenizer "$TB_MODEL_DIR" \
-  --target-chat-template "$TB_MODEL_DIR/chat_template.jinja" \
-  --output-dir /data/sft/sao-qwen35-08b/data/value-teacher-next
-
-bash "$TB_MILES_ROOT/tools/probes/run_sao_qwen35_08_value_pretrain.sh"
-```
-
-The value launcher is deliberately pinned to Qwen3.5-0.8B and validates the
-dataset, critic contract, actor bootstrap, iteration count, and output checkpoint.
-Run `check_sao_qwen35_raw_checkpoints.py` before online training.
-
-### 5. Build contracts and start both syncers
-
-`build_tbench21_sao_streaming_contracts.py` is a four-stage builder:
-`probe-context`, `profile`, `prepare`, and `finalize`. It binds the plan, reward
-source, value-checkpoint contract, container-visible paths, training semantics,
-syncer endpoints, and binary attestation. Each stage consumes the previous
-stage's immutable artifact; do not hand-edit the JSON between stages.
-
-After finalization:
-
-```bash
-python "$TB_YETO_ROOT/tools/probes/launch_tbench21_sao_syncers.py" \
-  --contracts /data/sft/sao-qwen35-08b/contracts/next \
-  --binary /root/yeto/target/release/yeto \
-  --run-dir "$TB_RUN_ROOT/syncers-next"
-```
-
-Wait for both ports and verify their health/profile identities before allocating
-the learner containers.
-
-### 6. Launch the eight-island online wave
-
-```bash
-python "$TB_MILES_ROOT/tools/probes/launch_tbench21_sao_online_wave.py" \
-  --miles-root "$TB_MILES_ROOT" \
-  --yeto-root "$TB_YETO_ROOT" \
-  --model "$TB_MODEL_DIR" \
-  --actor-checkpoint /data/sft/sao-qwen35-08b/checkpoints/actor-bootstrap \
-  --critic-checkpoint /data/sft/sao-qwen35-08b/checkpoints/value-teacher-next \
-  --plan-dir "$TB_PLAN_DIR" \
-  --contracts-dir /data/sft/sao-qwen35-08b/contracts/next \
-  --syncer-launch-manifest "$TB_RUN_ROOT/syncers-next/launch-manifest.json" \
-  --output-root "$TB_RUN_ROOT/online-next" \
-  --codex-dir "$TB_CODEX_DIR" \
-  --hmac-key "$TB_REWARD_KEY_FILE"
-```
-
-The launcher fails before work starts unless it can prove eight distinct GPU
-assignments, exact plan coverage, checkpoint compatibility, contract hashes,
-reward-key permissions, syncer identities, memory caps, and zero conflicting
-managed-server state. During the run, monitor container exit/OOM state, learner
-logs, syncer fragment/quorum state, and managed-server residue.
-
-### 7. Evaluate the published actor
-
-Use the terminal actor checkpoint read-only and a fresh output directory:
-
-```bash
-python "$TB_MILES_ROOT/tools/probes/launch_tbench21_rollout_wave.py" \
-  --phase eval \
-  --miles-root "$TB_MILES_ROOT" \
-  --yeto-root "$TB_YETO_ROOT" \
-  --model "$TB_MODEL_DIR" \
-  --checkpoint "$TB_RUN_ROOT/online-next/island-7/actor-checkpoint" \
-  --plan-dir "$TB_PLAN_DIR" \
-  --output-root "$TB_RUN_ROOT/heldout-eval-next" \
-  --codex-dir "$TB_CODEX_DIR" \
-  --hmac-key "$TB_REWARD_KEY_FILE"
-```
-
-Finally run `postcheck_tbench21_eval_wave.py`. It requires the expected plan SHA,
-terminal actor policy hash, checkpoint inventory SHA, training launch manifest,
-exact 45×4 evaluation roster, 180 valid signed native outcomes, valid compaction
-chains, and a clean managed environment service.
-
-## Validation ladder and saved-batch evidence
-
-The production launch followed this fail-closed sequence:
-
-1. deterministic task plan and split;
-2. 89/89 task images available;
-3. exact runtime, model, Codex, and source attestations;
-4. managed-server capacity and cleanup;
-5. authenticated baseline collection;
-6. compaction conversion and schema validation;
-7. teacher critic pretraining;
-8. raw actor/critic checkpoint compatibility;
-9. saved-batch critic update;
-10. actor/critic value transfer;
-11. actor optimizer step;
-12. bidirectional two-process Gloo transfer;
-13. actor/critic syncer quorum and publication;
-14. full 176-trajectory online wave; and
-15. strict 180-rollout held-out evaluation.
-
-Before relaunching the production wave, a saved completed rollout batch exercised
-the remaining training boundary without recollecting rollouts:
-
-| Metric | Observed value |
-| --- | ---: |
-| Critic loss | 3.9318247634 → 1.2144285313 |
-| Actor values | 0.1596418023 |
-| Advantages | -0.1203074455 |
-| Returns | 0.0393343568 |
-| Actor loss | -0.0314317429 |
-| Actor gradient norm | 0.7331610322 |
-| PPO KL | 0.003178218 |
-
-All values were finite and the input batch checksum remained unchanged.
-
-## Production results
-
-### Baseline
-
-- eight containers exited 0 with no OOM;
-- approximately 13 minutes wall time;
-- 356/356 logical trajectories and signed outcomes;
-- 89 tasks × four replicas;
-- 504 segments and 74 compactions;
-- status counts: 4 completed, 232 `max_seq_len`, 120 `max_turns`;
-- 0 HMAC failures, 0 503 retries, 0 replacements; and
-- 0/356 successful rollouts.
-
-Strict baseline report SHA-256:
-`e178a291f0b2a7f065bbb1d8e2cbd03c935e6e3831ef935cf2547a725a96a86a`.
-
-### Online training
-
-- eight containers exited 0 with no OOM;
-- approximately 38 minutes wall time;
-- 176/176 immutable logical trajectories across 44 tasks;
-- 260 segments, 42 compactions, and 310,686 active tokens;
-- status counts: 4 completed, 123 `max_seq_len`, 49 `max_turns`;
-- all 176 rewards were authenticated zeros;
-- one actor step and two critic updates per island;
-- all eight actor and critic checkpoints saved;
-- both syncers reached 8/8 quorum for both fragments; and
-- all islands published terminal actor policy hash
-  `c79f85ac812e5bc107682467b5bd266c7776b5aff13138f5a7faa0950135ca02`.
-
-| Metric | Across eight islands |
+| Metric | Range across islands |
 | --- | --- |
 | Actor loss | -0.0255213 to -0.0190217 |
 | Actor gradient norm | 0.609504 to 0.847301 |
@@ -532,91 +312,251 @@ Strict baseline report SHA-256:
 | Critic gradient norm | 38.0985 to 51.5822 |
 | Critic accuracy | 0.564855 to 0.646614 |
 
-The initial behavior-policy hash was
-`8f5faa519b97928df2cf143a3bbc6f25e3cd7fccfade61824359c12766a2f358`.
-The online launch manifest SHA-256 was
+The online launch-manifest SHA-256 was
 `957dc7792bc79c393216d4f11b02088cb6577317dca6b5ddf4e766e90a2f0f57`.
 
-### Held-out evaluation
+### Streaming-DiLoCo evidence
 
-- approximately 13 minutes wall time;
-- eight containers exited 0 with no OOM;
-- 180/180 expected rollouts across 45 tasks × four replicas;
-- 180/180 valid HMAC outcomes and native verifier evaluations;
-- 238 segments and 29 compactions;
-- status counts: 7 completed, 116 `max_seq_len`, 57 `max_turns`;
-- 0 503 errors, 0 replacements, and 0 cleanup debt;
-- 1/180 rollout success = 0.5556%; and
-- 1/45 task pass@4 = 2.2222%.
+| Setting | Actor | Critic |
+| --- | --- | --- |
+| Port | 29400 | 29401 |
+| Learners / quorum | 8 / 8 | 8 / 8 |
+| Local interval | `H=1` | `H=1` |
+| Fragments / stages | 2 / 2 | 2 / 2 |
+| Maximum base lag | 0 | 0 |
+| Outer learning rate / momentum | 0.7 / 0.9 | 0.7 / 0.9 |
 
-The one success was `password-recovery`, replica 3. The evaluation mounted
-`online/island-7/actor-checkpoint` read-only; its eight-file inventory totaled
-1,505,557,988 bytes and had SHA-256
+| Role | Synchronized bytes | SHA-256 | Fragment 1 norm | Fragment 2 norm |
+| --- | ---: | --- | ---: | ---: |
+| Actor | 3,009,572,116 | `44a1e5dcd42851d8f6e81510009b4983334c696c817bd9e05e84f5d521586b80` | 0.00967226746 | 0.00620559459 |
+| Critic | 2,074,394,848 | `ad25c174037365d1fd8ab23bbacc4b61c044119cee0f4669f979256650371a06` | 0.00720269750 | 0.00100820191 |
+
+Nonzero update norms and changed actor tensors show that training was not a
+no-op.
+
+## Corrected checkpoint-backed evaluation
+
+### Original evaluation classification
+
+The original held-out run mounted the trained-checkpoint path but used
+`--debug-rollout-only`, which intentionally skipped Megatron actor loading and
+publication. SGLang served the base Hugging Face model.
+
+The old run remains a valid matched **base-policy** evaluation because the
+45-task roster, four replicas, harness, HMACs, and native outcomes passed. All
+rollout weight versions were `default`. It is not trained-policy evidence.
+
+### Publication proof in the corrected run
+
+`--rollout-only-from-checkpoint` instantiates the Megatron actor, loads the
+trained checkpoint, publishes it to SGLang, and never trains or saves. Each
+island:
+
+1. checksummed the base SGLang language tensors;
+2. published the trained actor and required `default → 1`;
+3. required at least one tensor to change;
+4. snapshotted the trained served state;
+5. reset the selected tensors;
+6. republished and required `1 → 2`; and
+7. required exact equality with the original trained snapshot.
+
+All eight islands agreed on:
+
+- 309 checked language tensors;
+- 248 tensors changed from base;
+- base checksum
+  `a2a43b576573582e778d8617a79f7e99a6586dbe08c81daa2f95ef50669d9f93`;
+- trained checksum
+  `1f7830029984bb9ed99765c317e618e0a5745f8c444eec226cc4195fdfe9b781`;
+- exact reset/republication equality; and
+- weight versions `default → 1 → 2`.
+
+This proves the corrected evaluation served the trained actor.
+
+The checkpoint inventory SHA-256 was
 `99eefeb8a734e70e05c78617f987e9ac1e4bad6bbe83d2b1ccd83c01f048f208`.
-The strict evaluation report SHA-256 was
-`63290b0c4ab234e88a8c635e4870cb136d6152c7f7fde93cf26a8e8ba563af6d`.
 
-Raw distributed-checkpoint hashes can differ by island because optimizer, RNG,
-and island-local state are included. The common published policy hash is the
-relevant policy-identity proof.
+## Base versus trained performance
+
+For each task with `n=4` rollouts and `c` successes, pass@k is
+
+```text
+1 - C(n-c, k) / C(n, k)
+```
+
+The report averages the per-task values across 45 held-out tasks.
+
+| Metric | Base | Trained | Delta |
+| --- | ---: | ---: | ---: |
+| Signed rollouts | 180/180 | 180/180 | 0 |
+| Successful rollouts | 1/180 | 1/180 | 0 |
+| Tasks with success | 1/45 | 1/45 | 0 |
+| pass@1 | 0.5556% | 0.5556% | 0.0000 pp |
+| pass@2 | 1.1111% | 1.1111% | 0.0000 pp |
+| pass@3 | 1.6667% | 1.6667% | 0.0000 pp |
+| pass@4 | 2.2222% | 2.2222% | 0.0000 pp |
+| Successful sample | `password-recovery:r3` | `portfolio-optimization:r0` | changed |
+
+The trained policy lost the base success and gained a different one. This is a
+behavioral change, not a net improvement, and is far too small for a learning-
+quality claim.
+
+### Base-policy held-out evidence
+
+- 180/180 signed outcomes;
+- status: 7 `completed`, 116 `max_seq_len`, 57 `max_turns`;
+- one success: `password-recovery:r3`;
+- 23 narrowly approved terminal boundary mismatches;
+- no 503 retries, replacements, or cleanup debt;
+- launch-manifest SHA-256
+  `c31d4bb49984315d6f2981d5aeaeb413b0957ddfa208dd17615eecb325ddec0e`;
+- report:
+  `/data/sft/sao-qwen35-08b/runs/tbench21-sao-full/heldout-eval-v1/postcheck-report.json`;
+- SHA-256
+  `63290b0c4ab234e88a8c635e4870cb136d6152c7f7fde93cf26a8e8ba563af6d`.
+
+### Trained-policy held-out evidence
+
+- eight containers exited 0 without OOM;
+- 180/180 signed outcomes;
+- status: 3 `completed`, 118 `max_seq_len`, 58 `max_turns`, 1 `timeout`;
+- 179 native evaluations and one signed timeout outcome;
+- one success: `portfolio-optimization:r0`;
+- 23 score-valid but trace-ineligible terminal boundary mismatches;
+- one soft assistant-text TITO mismatch, 0.56%, below the 20% gate;
+- zero active sessions, managed containers, orphans, or cleanup debt;
+- launch-manifest SHA-256
+  `f119b503c827cd6fee00692704b7a891de51ac82ce9c151fc0e1e31f5b16d812`;
+- report:
+  `/data/sft/sao-qwen35-08b/runs/tbench21-sao-full/heldout-eval-trained-v2/postcheck-report-v2.json`;
+- schema `miles.tbench21-eval-postcheck.v2`;
+- SHA-256
+  `d898f3bd1432061a327ef7c14fdd3c2e749996f749fecb86ebc06245162c2103`.
+
+The timed-out `fix-ocaml-gc` verifier was stuck in a `git clone` inside its
+native test script. The 30-minute episode deadline fired, the verifier process
+group was terminated, and the episode closed as a signed zero-reward timeout.
+
+Twenty-three trained-evaluation outcomes had narrowly approved missing-terminal
+`<|im_end|>` boundary mismatches. Their signed native scores remain valid, but
+the traces are ineligible for training reuse. One
+`eval:pytorch-model-recovery:r2` trace had a soft assistant-text TITO mismatch;
+its ratio was 1/180 (0.56%), below the 20% gate. The score remained valid because
+the actual tokens inherit the pretokenized prefix.
+
+## Interpretation
+
+### Proven
+
+- The full requested software path runs at the eight-island shape.
+- Codex, learned compaction, native rewards, HMAC acceptance, and managed DinD
+  work together.
+- The critic learned positive mixed-label explained variance.
+- Actor and critic full-parameter optimizer steps completed with finite values.
+- Both streaming-DiLoCo roles reached full quorum.
+- The actor checkpoint materially changed from the base model.
+- The trained checkpoint was demonstrably served during evaluation.
+- Roster, reward, trace, and cleanup postchecks passed.
+
+### Not proven
+
+- The trained actor does not outperform the base actor on this run.
+- One success in 180 is not statistically meaningful.
+- The run does not isolate model capacity, zero online rewards, the one-step
+  budget, critic quality, or their interaction.
+- Physical multi-node scaling was not exercised.
+- Durable recovery of a dead learner's model and optimizer was not exercised.
+
+The defensible result is: **the implementation worked, model state changed, and
+the critic learned signal, but the short 0.8B actor experiment produced no
+measurable task-level improvement.**
 
 ## Failures found and permanent fixes
 
-| Failure | Root cause | Fix and evidence |
+| Failure | Root cause | Fix |
 | --- | --- | --- |
-| 45 tasks initially unrunnable | task images were absent locally | rebuilt from repository Dockerfiles; 45/45 succeeded |
-| unsigned/malformed outcomes and 503 leakage | unmanaged session failure and loose acceptance | exact-scope managed lifecycle, native-evidence/HMAC acceptance, capacity gates, and strict cleanup checks; final waves had none |
-| malformed compaction endings | summaries could become terminal or chains could merge inconsistently | alternating segment invariants, orphan-summary drop, reward consistency, and compaction-aware merge/training weights |
-| missing initial policy token | initial snapshot identity could be `None` | concrete version/hash propagation is required before rollout |
-| SGLang resume OOM | KV/cache reservation was too aggressive after trainer offload | memory fraction 0.15, max tokens 393,216, Mamba cache 256, and explicit offload sequencing |
-| allocator failure | TorchMemorySaver rejected expandable-segment mode | disabled the incompatible allocator mode in the colocated path |
-| incomplete FP32 master coverage | a Qwen marked parameter did not map to a complete optimizer master | fail-closed full-parameter coverage checks and the validated DP1 optimizer layout prevent launch with partial masters |
-| actor/critic NCCL duplicate GPU | two independent singleton worlds opened NCCL on one device | standalone Gloo group with CPU staging |
-| NaNs after first Gloo change | critic used default-world rank and broadcast an uninitialized buffer | use `group.rank()` for the custom group; saved-batch and production values remained finite |
-| critic bootstrap mismatch | actor checkpoint has no critic output head | strict backbone load while excluding exactly the fresh critic head |
-| late evaluation ambiguity | roster, identity, or cleanup drift could be missed | strict postcheck binds roster, HMAC, native evidence, checkpoint provenance, compaction, and managed cleanup |
+| 45 tasks unrunnable | missing task images | rebuilt all 45 from repository Dockerfiles |
+| unsigned outcomes / 503 leakage | unmanaged lifecycle and loose acceptance | exact managed scope, native evidence, HMAC, and cleanup gates |
+| malformed compaction endings | inconsistent summary termination/merge | segment alternation, orphan-summary drop, reward consistency |
+| SGLang resume OOM | excessive cache reservation after offload | bounded memory fraction, tokens, Mamba cache, and offload order |
+| incomplete FP32 master coverage | marked parameter lacked full optimizer-master mapping | fail-closed full-parameter preflight |
+| duplicate-GPU NCCL | actor and critic singleton worlds opened NCCL on one GPU | standalone Gloo group with CPU staging |
+| NaNs after initial Gloo work | wrong process-group rank initialized the buffer | use custom group rank; finite saved-batch and production metrics |
+| critic bootstrap mismatch | actor checkpoint has no critic output head | strict compatible-backbone load excluding only the new head |
+| EV logged as zero | batch size 1 had zero target variance | deterministic mixed-label forward-only EV gate |
+| old eval served base weights | debug rollout mode skipped actor publication | checkpoint-backed rollout mode and tensor/version proof |
+| cleanup exceeded deadline | purge waited behind a stuck verifier | bound purge to 10 seconds, then close the session |
+| trace ambiguity | terminal TITO evidence was conflated with scoring | strict terminal evidence and narrow score-safe exceptions |
+
+## Acceptance gates for future runs
+
+A new result should be accepted only if:
+
+1. plan, split, model, and task hashes match;
+2. the managed server starts and ends with zero residue;
+3. every outcome has exact roster identity, native evidence, and HMAC;
+4. compaction chains satisfy ordering and terminal invariants;
+5. the critic checkpoint contract and mixed-label EV gate pass;
+6. all actor and critic metrics are finite;
+7. both streaming-DiLoCo roles reach the expected quorum;
+8. all islands agree on the terminal actor policy;
+9. checkpoint-backed evaluation proves trained tensors are served; and
+10. the held-out postcheck verifies the entire roster and clean teardown.
+
+The relevant operational modes are:
+
+- `--value-pretrain-eval-only` with its batch, split, and report arguments;
+- `--rollout-only-from-checkpoint`; and
+- `--rollout-only-publication-evidence`.
+
+Evidence report paths are absolute, fresh, and fail closed rather than
+overwriting prior evidence. EV mode initializes no optimizer. Checkpoint-backed
+rollout mode loads and publishes the actor but never trains or saves it.
 
 ## Repository verification
 
-Before release, the Yeto changed-path matrix passed 351/351 tests. New Yeto files
-also passed Ruff, and every changed Python file parsed successfully.
+The local changed-file staging copy was hash-matched to the Linux runtime copy
+on the H200 node. The corrected-path production-container suite passed 35/35
+tests covering mixed-label EV, checkpoint publication, evaluation postchecks,
+pass@k, bounded purge, Codex lifecycle deadlines, TITO, and rollout launch
+arguments.
 
-The Miles changed-path selection is run inside the exact production image because
-the local development environment does not contain SGLang. Release notes should
-record its final pass count from the branch CI/test run rather than inferring it
-from collection. Independently captured production evidence includes the full
-356-rollout baseline, finite saved-batch training boundary, 176-trajectory online
-wave, both 8/8 syncers, and 180-rollout strict held-out postcheck.
+After upstream integration, the Yeto branch passed 65 focused Python tests and
+83 Rust synchronization tests. The companion Miles branch passed 192 focused
+tests across the managed Terminal-Bench/OpenEnv path, compaction dataset and
+launch planning, critic EV, external policy synchronization, session sample
+merging, SAO math, and shared actor/critic routing. The conflict-resolved paths
+also passed formatting, Python compilation, and `git diff --check`.
 
-## Limitations
+The merged tree has not been rerun end to end on GPUs. Tests that import the
+production Megatron/SGLang stack still require the production container, so a
+short GPU smoke remains the next runtime validation step.
 
-- The baseline and all online-training rewards were zero. SAO received no positive
-  online reward signal in this short run.
-- The one held-out success is not statistically significant evidence of learning.
-- The teacher critic outcomes are legacy and unsigned.
-- Teacher pretraining used one trace per task, while the baseline used four.
-- Twenty-three held-out traces had a narrowly allowed terminal token mismatch:
-  signed zero reward, `max_seq_len` or `max_turns`, and a missing final
-  `<|im_end|>`. Broader mismatches are rejected. One terminal orphan summary was
-  dropped under the compaction contract.
-- An exploratory training count found 26 analogous nonempty terminal mismatches;
-  unlike evaluation, no standalone formal training postcheck report was saved for
-  that count.
-- The policy hash is bound to the publication contract; evaluation did not
-  independently re-hash every model tensor.
-- This is an eight-island single-node validation, not a physical multi-node test.
-- Durable recovery of a dead trainer's model and optimizer state is outside this
-  release; the synchronization services themselves remain restart-idempotent.
+## Remaining limitations
 
-## Conclusion
+- All 176 online terminal rewards were zero.
+- Each island performed only one actor step.
+- Qwen3.5-0.8B has limited Terminal-Bench capability, but model size alone is
+  not proven to explain the flat result.
+- Teacher outcomes are legacy and unsigned.
+- Teacher pretraining used one trace per task rather than four.
+- “Held-out” refers to online actor training. The manager-required 100% critic
+  pretraining set includes all 89 tasks, including the 45 actor-evaluation
+  tasks. The critic is not served at evaluation, but this is not a strict
+  whole-system unseen-task split.
+- Twenty-three trained-evaluation traces were score-valid but not reusable as
+  training traces because of the terminal boundary exception.
+- One timeout had no native verifier result, by design.
+- This was not a physical multi-node run.
+- Durable learner model/optimizer recovery remains outside this validation.
 
-The requested production-shape software path works end to end: authenticated
-Terminal-Bench rollouts, Codex tool use, learned compaction, critic pretraining,
-SAO actor/critic optimization, one GPU per island, full-quorum streaming DiLoCo,
-common policy publication, and held-out evaluation all completed without OOM,
-runtime exception, reward-authentication failure, 503 leak, or sandbox residue.
+## Final conclusion
 
-This result is strong architecture validation. It is not yet a learning-quality
-claim. A meaningful efficacy experiment should use a stronger policy and/or more
-online rounds, preserve the same held-out split and signed evaluation ledger, and
-report confidence intervals against a matched baseline.
+The SAO + streaming-DiLoCo Terminal-Bench implementation is a successful
+architecture validation. It is not a successful policy-improvement result.
+
+The trained actor changed substantially and was proven to be served, but both
+policies achieved 1/180 rollouts and 1/45 tasks. Positive critic EV and changed
+actor tensors prove computation occurred; the unchanged pass@k curve proves it
+did not translate into measurable benchmark improvement under the tested 0.8B,
+all-zero-online-reward, one-step regime.
