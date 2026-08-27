@@ -59,19 +59,15 @@ def test_diagonal_flattens_retained_singular_values():
     torch.testing.assert_close(actual, torch.diag(torch.tensor([2.0, 2.0])))
 
 
-def test_svd_backend_receives_f32_without_promotion(monkeypatch: pytest.MonkeyPatch):
-    real_svd = torch.linalg.svd
-    observed: list[tuple[torch.dtype, bool]] = []
+def test_flatten_never_calls_svd(monkeypatch: pytest.MonkeyPatch):
+    def forbidden_svd(*args, **kwargs):
+        raise AssertionError("iso_flatten_spectrum must not decompose via SVD")
 
-    def capture_svd(matrix: torch.Tensor, *, full_matrices: bool):
-        observed.append((matrix.dtype, full_matrices))
-        return real_svd(matrix, full_matrices=full_matrices)
-
-    monkeypatch.setattr(torch.linalg, "svd", capture_svd)
+    monkeypatch.setattr(torch.linalg, "svd", forbidden_svd)
     result = iso_flatten_spectrum(torch.eye(2, dtype=torch.float32), device="cpu")
 
-    assert observed == [(torch.float32, False)]
     assert result.dtype == torch.float32
+    torch.testing.assert_close(result, torch.eye(2))
 
 
 @pytest.mark.parametrize(
@@ -90,6 +86,13 @@ def test_svd_backend_receives_f32_without_promotion(monkeypatch: pytest.MonkeyPa
 )
 def test_tall_and_wide_matrices_match_f64_oracle(matrix: torch.Tensor):
     _assert_matches_oracle(matrix)
+
+
+@pytest.mark.parametrize("shape", [(96, 160), (160, 96)], ids=["wide", "tall"])
+def test_random_matrices_match_f64_oracle(shape: tuple[int, int]):
+    generator = torch.Generator().manual_seed(20260827)
+    matrix = torch.randn(shape, generator=generator, dtype=torch.float32)
+    _assert_matches_oracle(matrix.contiguous())
 
 
 def test_rank_deficient_matrix_preserves_rank():

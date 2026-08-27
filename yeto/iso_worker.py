@@ -57,6 +57,14 @@ MAX_ERROR_BYTES = 4096
 # models.
 DEFAULT_MAX_FRAME_BYTES = 2 * 1024**3
 
+# Newton-Schulz polar iteration. 40 iterations bound the smallest relative
+# singular value that still flattens fully: sigma/||A||_F below ~1.5^-40
+# stays near zero instead of inflating to sigma_bar, so the numerical rank
+# cannot increase. The tolerance is the f32 roundoff floor for the early
+# exit once the retained spectrum has converged.
+ISO_NS_MAX_ITERS = 40
+ISO_NS_REL_TOL = 1.0e-7
+
 
 class Status(enum.IntEnum):
     """Response status codes used by the binary protocol."""
@@ -147,15 +155,18 @@ def iso_flatten_spectrum(
     *,
     device: str | torch.device,
 ) -> torch.Tensor:
-    """Apply exact full-matrix Iso spectrum flattening with Torch SVD.
+    """Flatten the matrix's singular-value spectrum to its mean.
 
-    The wire input and all spectral math are f32: this calls
-    ``torch.linalg.svd(..., full_matrices=False)`` on the configured device
-    without promoting the matrix.  If ``A = U diag(s) Vh`` and
-    ``k = min(rows, cols)``, retained singular values (strictly greater than
-    ``1e-10 * max(s)``) are replaced by ``mean(s)``.  Singular values at or
-    below the cutoff remain zero, so the numerical rank cannot increase.  The
-    returned tensor is contiguous, row-major CPU f32.
+    Equivalent to replacing every retained singular value of ``A = U diag(s)
+    Vh`` with ``mean(s)`` (``k = min(rows, cols)`` values), but computed
+    without an SVD: ``sigma_bar * U @ Vh`` is the polar factor of ``A``
+    scaled by ``sigma_bar = trace(Q^T A) / k``, and the polar factor comes
+    from the cubic Newton-Schulz iteration ``X <- 1.5 X - 0.5 (X X^T) X``
+    after Frobenius normalization.  Normalization puts every singular value
+    in (0, 1], where the iteration converges monotonically to 1 and maps
+    exact zeros to zeros, so the numerical rank cannot increase.  All math
+    is f32 on the configured device; the returned tensor is contiguous,
+    row-major CPU f32.
     """
 
     if matrix.dtype != torch.float32:
@@ -173,18 +184,32 @@ def iso_flatten_spectrum(
         if not bool(torch.isfinite(work).all().item()):
             raise WorkerRequestError(Status.NONFINITE_INPUT, "matrix contains NaN or Inf")
 
-        # Do not substitute a Gram approximation or blockwise decomposition:
-        # Iso semantics require one thin SVD of the complete canonical matrix.
-        u, singular_values, vh = torch.linalg.svd(work, full_matrices=False)
-        sigma_mean = singular_values.mean()
-        sigma_max = singular_values.max()
-        cutoff = sigma_max * 1.0e-10
-        flattened = torch.where(
-            singular_values > cutoff,
-            sigma_mean,
-            torch.zeros_like(singular_values),
-        )
-        result = (u * flattened.unsqueeze(0)) @ vh
+        # Iterate on the thin side so the Gram product is k x k.
+        transposed = work.shape[0] > work.shape[1]
+        x = work.t() if transposed else work
+        norm = torch.linalg.matrix_norm(x)
+        if norm == 0:
+            return torch.zeros_like(matrix, device="cpu").contiguous()
+        x = x / norm
+        for step in range(ISO_NS_MAX_ITERS):
+            nxt = 1.5 * x - 0.5 * ((x @ x.t()) @ x)
+            # The convergence check synchronizes the device; probing every
+            # fourth iteration keeps the loop free-running between probes.
+            converged = False
+            if step % 4 == 3 or step == ISO_NS_MAX_ITERS - 1:
+                delta = torch.linalg.matrix_norm(nxt - x)
+                converged = bool(
+                    (delta <= ISO_NS_REL_TOL * torch.linalg.matrix_norm(nxt)).item()
+                )
+            x = nxt
+            if converged:
+                break
+        q = x.t() if transposed else x
+
+        # trace(Q^T A) is the nuclear norm, so this is mean(s) over all k.
+        k = min(work.shape)
+        sigma_bar = (q * work).sum() / k
+        result = sigma_bar * q
 
         if not bool(torch.isfinite(result).all().item()):
             raise WorkerRequestError(Status.NONFINITE_OUTPUT, "Iso result contains NaN or Inf")
@@ -505,7 +530,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--device",
         default="cuda:0",
-        help="Torch device used for f32 SVD (default: cuda:0; use cpu for tests)",
+        help="Torch device used for the f32 polar iteration (default: cuda:0; use cpu for tests)",
     )
     parser.add_argument(
         "--max-frame-bytes",

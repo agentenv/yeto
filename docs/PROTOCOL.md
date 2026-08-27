@@ -220,7 +220,7 @@ The benchmark closes in two syncer processes on the same endpoint:
    recovery checkpoint and exits. It sends no final manifest or shutdown.
 2. The harness reads that checkpoint's global step `C`, restarts the syncer
    from it, and requests exactly `F` ordinary rounds, where `F` is the fragment
-   count. Quorum is the full configured learner set. Gather/SVD work may be
+   count. Quorum is the full configured learner set. Gather/Iso work may be
    pipelined, but coordinator commits remain strictly ordered by round `t`.
 
 Learners stop optimizer and data work before sending `BUDGET_DONE`, retain
@@ -242,12 +242,12 @@ learner in every one of these rounds.
 ## Snapshots and event tape
 
 The sequential coordinator mutates state only when committing the next
-contiguous round `t`. Other rounds may still be gathering or running exact
-SVD, but their owned buffers cannot touch coordinator state. A checkpoint at
+contiguous round `t`. Other rounds may still be gathering or running the Iso
+polar iteration, but their owned buffers cannot touch coordinator state. A checkpoint at
 that cut is therefore consistent. Snapshots contain global/per-fragment
 versions, f32 params, momentum, and the cumulative learner ledger. Cutoff and
-terminal checkpoints explicitly drain the SVD pool first; a poisoned worker
-prevents checkpoint publication. The exact-SVD pool bounds startup, every
+terminal checkpoints explicitly drain the Iso worker pool first; a poisoned worker
+prevents checkpoint publication. The Iso worker pool bounds startup, every
 full-matrix request, and drain. Any deadline expiry kills the directly owned
 Python child, installs a persistent pool poison, discards queued work, and
 makes drain/finalization fail. Pool capacity covers the complete admitted

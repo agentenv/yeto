@@ -94,8 +94,12 @@ pub fn merge_rda(deltas: &[&[f32]], weights: &[f64], out: &mut [f32]) {
     }
 }
 
-const ISO_SINGULAR_VALUE_RTOL: f64 = 1e-10;
-const ISO_JACOBI_MAX_SWEEPS: usize = 64;
+// Newton-Schulz polar iteration bounds. 40 iterations mean a singular value
+// below ~1.5^-40 of the Frobenius norm never flattens up to sigma_bar, so
+// the numerical rank cannot increase; the tolerance is the early-exit floor
+// once the retained spectrum has converged (internal math is f64).
+const ISO_NS_MAX_ITERS: usize = 40;
+const ISO_NS_REL_TOL: f64 = 1e-9;
 
 /// Iso-C-style isotropic aggregation over one tensor slice (IsoLoCo,
 /// arXiv 2607.03011, Alg. 2). Weighted direct average is applied first;
@@ -111,129 +115,75 @@ pub fn merge_iso(deltas: &[&[f32]], weights: &[f64], rows: usize, cols: usize, o
 }
 
 /// Replace the `rows` x `cols` row-major matrix `m` in place by sigma_bar*U*V^T.
+///
+/// sigma_bar*U*V^T is the polar factor of the matrix scaled by the mean
+/// singular value, computed without an SVD: after Frobenius normalization
+/// every singular value lies in (0, 1], where the cubic Newton-Schulz map
+/// X <- 1.5 X - 0.5 (X X^T) X converges monotonically to 1 and keeps exact
+/// zeros at zero. sigma_bar = trace(Q^T A) / k because trace(Q^T A) is the
+/// nuclear norm. This scalar path is the small-model/test fallback; the
+/// torch-svd backend runs the same iteration on a GPU.
 pub fn iso_flatten_spectrum(m: &mut [f32], rows: usize, cols: usize) {
     debug_assert_eq!(rows * cols, m.len());
     let k = rows.min(cols);
     if k == 0 {
         return;
     }
-    let values: Vec<f64> = m.iter().map(|value| *value as f64).collect();
-    let gram_on_rows = rows <= cols;
-    let mut gram = vec![0.0f64; k * k];
-    for i in 0..k {
-        for j in i..k {
-            let mut acc = 0.0f64;
-            if gram_on_rows {
-                for c in 0..cols {
-                    acc += values[i * cols + c] * values[j * cols + c];
-                }
-            } else {
-                for r in 0..rows {
-                    acc += values[r * cols + i] * values[r * cols + j];
-                }
+    // Iterate on the thin side so the Gram product is k x k: `a` holds the
+    // input as a k x n row-major matrix, transposed when rows > cols.
+    let n = rows.max(cols);
+    let a: Vec<f64> = if rows <= cols {
+        m.iter().map(|v| *v as f64).collect()
+    } else {
+        let mut t = vec![0.0f64; rows * cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                t[c * rows + r] = m[r * cols + c] as f64;
             }
-            gram[i * k + j] = acc;
-            gram[j * k + i] = acc;
         }
-    }
-    let mut basis = vec![0.0f64; k * k];
-    jacobi_eigh(&mut gram, &mut basis, k);
-    let sigmas: Vec<f64> = (0..k).map(|i| gram[i * k + i].max(0.0).sqrt()).collect();
-    let sigma_max = sigmas.iter().cloned().fold(0.0f64, f64::max);
-    if sigma_max <= 0.0 {
+        t
+    };
+    let norm = a.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if norm == 0.0 {
         return;
     }
-    let sigma_bar = sigmas.iter().sum::<f64>() / k as f64;
-    let cutoff = sigma_max * ISO_SINGULAR_VALUE_RTOL;
-    let mut whiten = vec![0.0f64; k * k];
-    for j in 0..k {
-        if sigmas[j] <= cutoff {
-            continue;
+    let mut x: Vec<f64> = a.iter().map(|v| v / norm).collect();
+    let mut gram = vec![0.0f64; k * k];
+    let mut nxt = vec![0.0f64; k * n];
+    for _ in 0..ISO_NS_MAX_ITERS {
+        for i in 0..k {
+            for j in i..k {
+                let acc: f64 = (0..n).map(|c| x[i * n + c] * x[j * n + c]).sum();
+                gram[i * k + j] = acc;
+                gram[j * k + i] = acc;
+            }
         }
-        let gain = sigma_bar / sigmas[j];
-        for a in 0..k {
-            let qa = basis[a * k + j] * gain;
-            if qa == 0.0 {
-                continue;
+        for r in 0..k {
+            for c in 0..n {
+                let acc: f64 = (0..k).map(|t| gram[r * k + t] * x[t * n + c]).sum();
+                nxt[r * n + c] = 1.5 * x[r * n + c] - 0.5 * acc;
             }
-            for b in 0..k {
-                whiten[a * k + b] += qa * basis[b * k + j];
-            }
+        }
+        let (mut diff_sq, mut next_sq) = (0.0f64, 0.0f64);
+        for (nx, xv) in nxt.iter().zip(x.iter_mut()) {
+            let d = nx - *xv;
+            diff_sq += d * d;
+            next_sq += nx * nx;
+            *xv = *nx;
+        }
+        if diff_sq.sqrt() <= ISO_NS_REL_TOL * next_sq.sqrt() {
+            break;
         }
     }
-    if gram_on_rows {
-        for c in 0..cols {
-            for r in 0..k {
-                let mut acc = 0.0f64;
-                for t in 0..k {
-                    acc += whiten[r * k + t] * values[t * cols + c];
-                }
-                m[r * cols + c] = acc as f32;
-            }
+    let sigma_bar = x.iter().zip(&a).map(|(q, v)| q * v).sum::<f64>() / k as f64;
+    if rows <= cols {
+        for (mv, q) in m.iter_mut().zip(&x) {
+            *mv = (sigma_bar * q) as f32;
         }
     } else {
         for r in 0..rows {
-            for c in 0..k {
-                let mut acc = 0.0f64;
-                for t in 0..k {
-                    acc += values[r * cols + t] * whiten[t * k + c];
-                }
-                m[r * cols + c] = acc as f32;
-            }
-        }
-    }
-}
-
-fn jacobi_eigh(g: &mut [f64], q: &mut [f64], k: usize) {
-    for i in 0..k {
-        for j in 0..k {
-            q[i * k + j] = if i == j { 1.0 } else { 0.0 };
-        }
-    }
-    for _ in 0..ISO_JACOBI_MAX_SWEEPS {
-        let mut off_sq = 0.0f64;
-        let mut diag_sq = 0.0f64;
-        for i in 0..k {
-            diag_sq += g[i * k + i] * g[i * k + i];
-            for j in i + 1..k {
-                off_sq += g[i * k + j] * g[i * k + j];
-            }
-        }
-        if off_sq <= diag_sq.max(f64::MIN_POSITIVE) * 1e-30 {
-            break;
-        }
-        for p in 0..k {
-            for r in p + 1..k {
-                let gpr = g[p * k + r];
-                if gpr == 0.0 {
-                    continue;
-                }
-                let tau = (g[r * k + r] - g[p * k + p]) / (2.0 * gpr);
-                let t = if tau >= 0.0 {
-                    1.0 / (tau + (1.0 + tau * tau).sqrt())
-                } else {
-                    1.0 / (tau - (1.0 + tau * tau).sqrt())
-                };
-                let c = 1.0 / (1.0 + t * t).sqrt();
-                let s = t * c;
-                for i in 0..k {
-                    let gip = g[i * k + p];
-                    let gir = g[i * k + r];
-                    g[i * k + p] = c * gip - s * gir;
-                    g[i * k + r] = s * gip + c * gir;
-                }
-                for i in 0..k {
-                    let gpi = g[p * k + i];
-                    let gri = g[r * k + i];
-                    g[p * k + i] = c * gpi - s * gri;
-                    g[r * k + i] = s * gpi + c * gri;
-                }
-                for i in 0..k {
-                    let qip = q[i * k + p];
-                    let qir = q[i * k + r];
-                    q[i * k + p] = c * qip - s * qir;
-                    q[i * k + r] = s * qip + c * qir;
-                }
+            for c in 0..cols {
+                m[r * cols + c] = (sigma_bar * x[c * rows + r]) as f32;
             }
         }
     }

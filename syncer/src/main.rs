@@ -71,7 +71,7 @@ struct Args {
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
     /// Iso spectrum-flattening implementation: the scalar reference kernel,
-    /// or a persistent exact f32 Torch SVD worker.
+    /// or a persistent f32 Torch Newton-Schulz polar worker.
     #[arg(long, default_value = "scalar")]
     iso_backend: String,
     /// Python executable used by --iso-backend=torch-svd.

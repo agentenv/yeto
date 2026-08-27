@@ -23,18 +23,18 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   once (default 2 — Decoupled DiLoCo's "two fragments in flight" at τ=2), so
   one fragment's quorum/grace/WAN latency never delays pulling the next.
   Concurrent rounds always target distinct fragments (depth is clamped to
-  P). Gather and exact-SVD compute may complete out of order, but the single
+  P). Gather and Iso polar compute may complete out of order, but the single
   coordinator commits Nesterov state, fragment versions, ledger/event tape,
   checkpoints, and broadcasts strictly in global fragment-step order, so
   every recovery checkpoint is a contiguous prefix.
   `--pipeline 1` recovers fully serial rounds.
-- **Exact-SVD worker pool**: `--iso-worker-devices` starts one persistent
+- **Iso worker pool**: `--iso-worker-devices` starts one persistent
   Torch worker per listed device. Each bounded-queue job is one complete
   canonical f32 matrix on exactly one GPU; learner/TP shards never enter the
   pool. Worker failure poisons the pool, and both cutoff and terminal
   checkpoints require an explicit drain. The Miles six-island supervisor
   defaults to `cuda:0,...,cuda:7` and a bounded pipeline window of 16 on a
-  dedicated host, allowing AVG fragments and uneven SVD sizes to overlap.
+  dedicated host, allowing AVG fragments and uneven Iso matrix sizes to overlap.
   Startup, request, and drain deadlines are bounded by
   `YETO_ISO_WORKER_{STARTUP,REQUEST,DRAIN}_TIMEOUT_S`; timeout diagnostics
   identify the worker/device/request where applicable, kill the direct Python
