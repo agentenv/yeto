@@ -80,6 +80,20 @@ def test_production_lr_decay_override_keeps_existing_default_and_cli_wiring():
     assert '--lr-decay-iters "${LR_DECAY_ITERS}"' in learner
 
 
+def test_production_phase2_rejoin_is_explicit_and_fail_closed():
+    learner = PROD_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "readonly PHASE2_REJOIN=${PHASE2_REJOIN:-0}" in learner
+    assert '((LOCAL_BUDGET_STEPS == 364)) || die "PHASE2_REJOIN requires LOCAL_BUDGET_STEPS=364"' in learner
+    assert '((checkpoint_iteration + 1 == START_ROLLOUT_ID))' in learner
+    assert '"YETO_VALUE_PHASE2_REJOIN": os.environ["PHASE2_REJOIN_VALUE"]' in learner
+    assert '--critic-load "${CRITIC_LOAD_DIR}"' in learner
+    assert '--start-rollout-id "${START_ROLLOUT_ID}"' in learner
+    assert '--train-memory-margin-bytes "${TRAIN_MEMORY_MARGIN_BYTES}"' in learner
+    assert 'RECOVERY_CLI_ARGS+=(--low-memory-resume)' in learner
+    assert '"${RECOVERY_CLI_ARGS[@]}"' in learner
+
+
 def _production_learner_env() -> dict[str, str]:
     env = dict(os.environ)
     env.update(

@@ -602,6 +602,17 @@ def _env_float(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a float, got {raw!r}") from exc
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if raw == "1":
+        return True
+    if raw == "0":
+        return False
+    raise ValueError(f"{name} must be 0 or 1, got {raw!r}")
+
+
 def _parse_syncer(value: str) -> tuple[str, int]:
     host, separator, port_text = value.rpartition(":")
     if not separator or not host:
@@ -834,6 +845,58 @@ class MilesValueIsland:
         self.units_total = _env_int("YETO_VALUE_UNIT_OFFSET", 0)
         if self.steps_total < 0 or self.units_total < 0:
             raise ValueError("Yeto resume offsets cannot be negative")
+        self.phase2_rejoin = _env_flag("YETO_VALUE_PHASE2_REJOIN")
+        if getattr(self, "phase2_rejoin", False):
+            if self.budget_steps is None:
+                raise ValueError(
+                    "YETO_VALUE_PHASE2_REJOIN requires YETO_VALUE_BUDGET_STEPS"
+                )
+            if not 0 < self.steps_total < self.budget_steps:
+                raise ValueError(
+                    "YETO_VALUE_PHASE2_REJOIN requires "
+                    "0 < YETO_VALUE_LOCAL_STEP_OFFSET < YETO_VALUE_BUDGET_STEPS"
+                )
+            if self.units_total <= 0:
+                raise ValueError(
+                    "YETO_VALUE_PHASE2_REJOIN requires a positive "
+                    "YETO_VALUE_UNIT_OFFSET"
+                )
+            start_rollout_id = getattr(args, "start_rollout_id", None)
+            if start_rollout_id != self.steps_total:
+                raise ValueError(
+                    "YETO_VALUE_PHASE2_REJOIN requires --start-rollout-id to "
+                    "equal YETO_VALUE_LOCAL_STEP_OFFSET; got "
+                    f"{start_rollout_id!r} != {self.steps_total}"
+                )
+            num_rollout = getattr(args, "num_rollout", None)
+            if num_rollout != self.budget_steps:
+                raise ValueError(
+                    "YETO_VALUE_PHASE2_REJOIN requires --num-rollout to equal "
+                    f"YETO_VALUE_BUDGET_STEPS; got {num_rollout!r} != "
+                    f"{self.budget_steps}"
+                )
+            load_path = os.path.realpath(str(getattr(args, "load", "")))
+            save_path = os.path.realpath(str(getattr(args, "save", "")))
+            if not load_path or load_path != save_path:
+                raise ValueError(
+                    "YETO_VALUE_PHASE2_REJOIN requires critic load/save to be "
+                    "the same resumable checkpoint directory"
+                )
+            tracker = os.path.join(load_path, "latest_checkpointed_iteration.txt")
+            try:
+                with open(tracker, encoding="utf-8") as handle:
+                    checkpoint_iteration = int(handle.read().strip())
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    "YETO_VALUE_PHASE2_REJOIN requires a readable integer "
+                    f"checkpoint tracker at {tracker}"
+                ) from exc
+            if checkpoint_iteration + 1 != self.steps_total:
+                raise ValueError(
+                    "YETO_VALUE_PHASE2_REJOIN checkpoint/start mismatch: "
+                    f"checkpoint iteration {checkpoint_iteration} requires local "
+                    f"step offset {checkpoint_iteration + 1}, got {self.steps_total}"
+                )
 
         count = self.layout.num_fragments
         self.steps_at_reset = [self.steps_total] * count
@@ -1528,6 +1591,12 @@ class MilesValueIsland:
     def _ready_pull_plan(self) -> list[tuple[int, int, int, int, int, int, int]]:
         assert self.client is not None
         self.pending_pulls.extend(self.client.drain_pulls())
+        # A phase-2 recovery process can receive the frozen-membership pulls
+        # while it is still replaying the post-checkpoint local steps.  Those
+        # are terminal-cut pulls, not ordinary H-gated DiLoCo pulls: retain
+        # them for _finalize_budget(), even if the replay happens to reach H.
+        if getattr(self, "phase2_rejoin", False):
+            return []
         # A pull can be retried while it waits for H local steps.  Retain only
         # the newest attempt so reaching H cannot trigger duplicate gathers
         # and quantization for one syncer round.
@@ -1672,6 +1741,9 @@ class MilesValueIsland:
         deadline = time.monotonic() + self.client.finalization_timeout
         bases: dict[int, Any] = getattr(self, "_budget_bases", {})
         pulls: list[Any] = getattr(self, "_budget_pulls", [])
+        if getattr(self, "phase2_rejoin", False) and self.pending_pulls:
+            pulls.extend(self.pending_pulls)
+            self.pending_pulls = []
         self._budget_bases = bases
         self._budget_pulls = pulls
         while True:
@@ -1680,11 +1752,23 @@ class MilesValueIsland:
                 if update.fragment_id not in completed:
                     bases[update.fragment_id] = update
             pulls.extend(self.client.drain_pulls())
-            eligible = [
-                pull
-                for pull in pulls
-                if pull.fragment_id not in completed and pull.fragment_id in bases
-            ]
+            eligible = []
+            for pull in pulls:
+                fid = pull.fragment_id
+                if fid in completed:
+                    continue
+                if fid in bases:
+                    eligible.append(pull)
+                    continue
+                # send_all_fragments() is consumed by ensure_initial_ready()
+                # before a recovery learner replays its final local steps.
+                # The installed anchor is the exact BF16 decoding of that
+                # payload, so it is also the exact phase-2 subtraction base.
+                if (
+                    getattr(self, "phase2_rejoin", False)
+                    and self.anchors[fid] is not None
+                ):
+                    eligible.append(pull)
             if eligible:
                 eligible.sort(
                     key=lambda item: (
@@ -1695,13 +1779,17 @@ class MilesValueIsland:
                 )
                 pull = eligible[0]
                 pulls.remove(pull)
-                base = bases.pop(pull.fragment_id)
-                self._leader_payloads[(base.fragment_id, base.version)] = base.data
+                base = bases.pop(pull.fragment_id, None)
+                if base is not None:
+                    base_version = base.version
+                    self._leader_payloads[(base.fragment_id, base_version)] = base.data
+                else:
+                    base_version = self.fragment_versions[pull.fragment_id]
                 return (
                     pull.fragment_id,
                     pull.global_step,
                     pull.round_attempt,
-                    base.version,
+                    base_version,
                 )
             if time.monotonic() >= deadline:
                 raise TimeoutError(
@@ -1718,7 +1806,14 @@ class MilesValueIsland:
             self.client.wait_for_budget_restart(generation)
             return True
 
-        self._leader_value(restart)
+        # A recovery process can join after the syncer has already persisted
+        # the learner-budget cut and restarted in phase 2.  Emitting a second
+        # BUDGET_DONE there would terminate phase 2 early and waiting for yet
+        # another restart would deadlock forever.  The explicit, fail-closed
+        # recovery contract above is the only path allowed to bypass this
+        # phase-1 transition.
+        if not self.phase2_rejoin:
+            self._leader_value(restart)
         completed: set[int] = set()
         for _ in range(self.layout.num_fragments):
             fid, global_step, attempt, base_version = self._leader_value(
@@ -1734,10 +1829,25 @@ class MilesValueIsland:
                 frozen: torch.Tensor | None = frozen,
             ) -> None:
                 assert self.client is not None and frozen is not None
-                data = self._leader_payloads.pop((fid, base_version))
-                base = _unpack_flat_fragment(
-                    self.layout.fragments[fid], data, bulk_dtype(self.client.dtype)
-                )
+                data = self._leader_payloads.pop((fid, base_version), None)
+                if data is not None:
+                    base = _unpack_flat_fragment(
+                        self.layout.fragments[fid],
+                        data,
+                        bulk_dtype(self.client.dtype),
+                    )
+                else:
+                    if not self.phase2_rejoin:
+                        raise RuntimeError(
+                            f"fragment {fid} has no phase-2 base payload"
+                        )
+                    anchor = self.anchors[fid]
+                    if anchor is None or self.fragment_versions[fid] != base_version:
+                        raise RuntimeError(
+                            f"fragment {fid} has no matching recovery anchor for "
+                            f"base version {base_version}"
+                        )
+                    base = anchor.float()
                 delta = frozen.float().sub(base.float())
                 del base
                 payload = _quantize_flat_fragment(

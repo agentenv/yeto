@@ -11,6 +11,10 @@ readonly REQUIRED_MILES_REVISION=277d151c00ef4f6727f01aca06e115b71bd7578c
 readonly SAVE_INTERVAL=${SAVE_INTERVAL:-15}
 readonly SAVE_RETAIN_INTERVAL=${SAVE_RETAIN_INTERVAL:-999990}
 readonly SYNC_INTERVAL_STEPS=${SYNC_INTERVAL_STEPS:-12}
+readonly PHASE2_REJOIN=${PHASE2_REJOIN:-0}
+readonly RECOVERY_LOCAL_STEP_OFFSET=${RECOVERY_LOCAL_STEP_OFFSET:-0}
+readonly RECOVERY_UNIT_OFFSET=${RECOVERY_UNIT_OFFSET:-0}
+readonly TRAIN_MEMORY_MARGIN_BYTES=${TRAIN_MEMORY_MARGIN_BYTES:-1073741824}
 # Miles converts these iteration counts to sample counts by multiplying the
 # nominal GBS. Five islands use fixed nominal size 5 each (total 25), so the
 # defaults preserve 125 warmup samples and the original 2,625-sample global
@@ -47,6 +51,8 @@ export MILES_RAY_TARGET_NODE_IP
 ((SAVE_RETAIN_INTERVAL % SAVE_INTERVAL == 0)) || \
   die "SAVE_RETAIN_INTERVAL must be divisible by SAVE_INTERVAL"
 [[ "${SYNC_INTERVAL_STEPS}" =~ ^[1-9][0-9]*$ ]] || die "SYNC_INTERVAL_STEPS must be a positive integer"
+[[ "${PHASE2_REJOIN}" =~ ^[01]$ ]] || die "PHASE2_REJOIN must be 0 or 1"
+[[ "${TRAIN_MEMORY_MARGIN_BYTES}" =~ ^[0-9]+$ ]] || die "TRAIN_MEMORY_MARGIN_BYTES must be a nonnegative integer"
 readonly LOCAL_GLOBAL_BATCH_SIZE=5
 
 syncer_host=${SYNCER_ADDR%:*}
@@ -74,24 +80,55 @@ actual_miles_revision=$(git -C "${MILES_ROOT}" rev-parse HEAD 2>/dev/null) || \
 [[ -r "${PROMPT_DATA}" ]] || die "missing prompt-data shim ${PROMPT_DATA}"
 [[ -r "${CUSTOM_CONFIG_PATH}" ]] || die "missing Miles critic config ${CUSTOM_CONFIG_PATH}"
 
-# This launcher is the fresh-run contract.  Never reinterpret an existing or
-# partial critic checkpoint as the base model while forcing rollout zero.
 readonly CRITIC_SAVE_DIR="${OUTPUT_DIR}/critic_checkpoints"
-if [[ -e "${CRITIC_SAVE_DIR}/latest_checkpointed_iteration.txt" ]]; then
-  die "existing critic checkpoint requires the separate resume contract: ${CRITIC_SAVE_DIR}"
-fi
-if [[ -d "${CRITIC_SAVE_DIR}" ]]; then
-  shopt -s nullglob dotglob
-  critic_artifacts=("${CRITIC_SAVE_DIR}"/*)
-  shopt -u nullglob dotglob
-  ((${#critic_artifacts[@]} == 0)) || die "refusing partial/non-fresh critic save directory: ${CRITIC_SAVE_DIR}"
+RECOVERY_CLI_ARGS=()
+if ((PHASE2_REJOIN)); then
+  # This is deliberately a narrow terminal-recovery contract. It resumes a
+  # full iter359 critic checkpoint, replays the remaining rollouts, joins an
+  # already-persisted phase-2 syncer cut, and must never emit BUDGET_DONE.
+  ((LOCAL_BUDGET_STEPS == 364)) || die "PHASE2_REJOIN requires LOCAL_BUDGET_STEPS=364"
+  [[ "${RECOVERY_LOCAL_STEP_OFFSET}" =~ ^[1-9][0-9]*$ ]] || \
+    die "PHASE2_REJOIN requires a positive RECOVERY_LOCAL_STEP_OFFSET"
+  ((RECOVERY_LOCAL_STEP_OFFSET < LOCAL_BUDGET_STEPS)) || \
+    die "RECOVERY_LOCAL_STEP_OFFSET must be below LOCAL_BUDGET_STEPS"
+  [[ "${RECOVERY_UNIT_OFFSET}" =~ ^[1-9][0-9]*$ ]] || \
+    die "PHASE2_REJOIN requires a positive RECOVERY_UNIT_OFFSET"
+  readonly START_ROLLOUT_ID=${RECOVERY_LOCAL_STEP_OFFSET}
+  readonly UNIT_OFFSET=${RECOVERY_UNIT_OFFSET}
+  readonly CRITIC_LOAD_DIR=${CRITIC_SAVE_DIR}
+  readonly critic_tracker="${CRITIC_LOAD_DIR}/latest_checkpointed_iteration.txt"
+  [[ -r "${critic_tracker}" ]] || die "missing resumable critic tracker: ${critic_tracker}"
+  checkpoint_iteration=$(<"${critic_tracker}")
+  [[ "${checkpoint_iteration}" =~ ^[0-9]+$ ]] || die "invalid critic checkpoint tracker: ${critic_tracker}"
+  ((checkpoint_iteration + 1 == START_ROLLOUT_ID)) || \
+    die "checkpoint iteration ${checkpoint_iteration} does not resume at rollout ${START_ROLLOUT_ID}"
+  # MCore's supported low-memory DCP path allocates TE FusedAdam's temporary
+  # sharded-state template on CPU, then moves the loaded states back to CUDA.
+  # Without it, resume briefly holds both the template and the real optimizer
+  # state on GPU and OOMs even though the steady-state training layout fits.
+  RECOVERY_CLI_ARGS+=(--low-memory-resume)
+else
+  # Fresh runs may not reinterpret an existing or partial critic checkpoint as
+  # the base model while forcing rollout zero.
+  readonly START_ROLLOUT_ID=0
+  readonly UNIT_OFFSET=0
+  readonly CRITIC_LOAD_DIR="${MODEL_DIR}/Qwen3.8-27B_torch_dist"
+  if [[ -e "${CRITIC_SAVE_DIR}/latest_checkpointed_iteration.txt" ]]; then
+    die "existing critic checkpoint requires PHASE2_REJOIN=1: ${CRITIC_SAVE_DIR}"
+  fi
+  if [[ -d "${CRITIC_SAVE_DIR}" ]]; then
+    shopt -s nullglob dotglob
+    critic_artifacts=("${CRITIC_SAVE_DIR}"/*)
+    shopt -u nullglob dotglob
+    ((${#critic_artifacts[@]} == 0)) || die "refusing partial/non-fresh critic save directory: ${CRITIC_SAVE_DIR}"
+  fi
 fi
 
 # Refuse to reserve GPUs when any training bucket is absent locally.  Held-out
 # validation is a separate post-finalization job; mixing it into this process
 # previously let a skipped data_0 turn the first validation bucket into an
 # unintended 365th forward/backward attempt.
-for ((rollout_id = 0; rollout_id < NUM_ROLLOUT; rollout_id++)); do
+for ((rollout_id = START_ROLLOUT_ID; rollout_id < NUM_ROLLOUT; rollout_id++)); do
   rollout_path=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER}"/${rollout_id}}
   [[ -r "${rollout_path}" ]] || die "missing island rollout ${rollout_id}: ${rollout_path}"
 done
@@ -106,10 +143,14 @@ mkdir -p "${OUTPUT_DIR}"
 # the existing process/runtime environment and are never copied into argv or
 # --train-env-vars.
 TRAIN_ENV_VARS=$(
+  PHASE2_REJOIN_VALUE="${PHASE2_REJOIN}" \
+  LOCAL_STEP_OFFSET_VALUE="${START_ROLLOUT_ID}" \
+  UNIT_OFFSET_VALUE="${UNIT_OFFSET}" \
   python3 - "${YETO_ROOT}" "${MILES_ROOT}" \
     "${SYNCER_ADDR}" "${LEARNER_ID}" "${NUM_LEARNERS}" \
     "${LOCAL_BUDGET_STEPS}" "${SYNC_INTERVAL_STEPS}" <<'PY'
 import json
+import os
 import sys
 
 (
@@ -138,12 +179,13 @@ print(
             "YETO_VALUE_STREAMS": "4",
             "YETO_VALUE_NUM_FRAGMENTS": "96",
             "YETO_VALUE_FRAGMENT_PATTERN": "binpack",
-            "YETO_VALUE_CONNECT_TIMEOUT": "3600",
-            "YETO_VALUE_FINALIZATION_TIMEOUT": "3600",
+            "YETO_VALUE_CONNECT_TIMEOUT": "900",
+            "YETO_VALUE_FINALIZATION_TIMEOUT": "900",
             "YETO_VALUE_BUDGET_STEPS": budget_steps,
             "YETO_VALUE_MIN_LOCAL_STEPS": min_local_steps,
-            "YETO_VALUE_LOCAL_STEP_OFFSET": "0",
-            "YETO_VALUE_UNIT_OFFSET": "0",
+            "YETO_VALUE_LOCAL_STEP_OFFSET": os.environ["LOCAL_STEP_OFFSET_VALUE"],
+            "YETO_VALUE_UNIT_OFFSET": os.environ["UNIT_OFFSET_VALUE"],
+            "YETO_VALUE_PHASE2_REJOIN": os.environ["PHASE2_REJOIN_VALUE"],
         },
         separators=(",", ":"),
     )
@@ -196,7 +238,7 @@ exec python3 train_async.py \
   "${MODEL_ARGS[@]}" \
   --hf-checkpoint "${MODEL_DIR}/Qwen3.8-27B" \
   --load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
-  --critic-load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
+  --critic-load "${CRITIC_LOAD_DIR}" \
   --ref-load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
   --save "${OUTPUT_DIR}/checkpoints" \
   --critic-save "${CRITIC_SAVE_DIR}" \
@@ -212,7 +254,7 @@ exec python3 train_async.py \
   --rollout-num-gpus 0 \
   --rollout-num-gpus-per-engine 1 \
   --use-dynamic-global-batch-size \
-  --start-rollout-id 0 \
+  --start-rollout-id "${START_ROLLOUT_ID}" \
   --num-rollout "${NUM_ROLLOUT}" \
   --rollout-batch-size "${LOCAL_GLOBAL_BATCH_SIZE}" \
   --global-batch-size "${LOCAL_GLOBAL_BATCH_SIZE}" \
@@ -260,6 +302,8 @@ exec python3 train_async.py \
   --train-env-vars "${TRAIN_ENV_VARS}" \
   --distributed-timeout-minutes 60 \
   --empty-unused-memory-level 2 \
+  --train-memory-margin-bytes "${TRAIN_MEMORY_MARGIN_BYTES}" \
+  "${RECOVERY_CLI_ARGS[@]}" \
   --colocate-critic \
   --custom-megatron-after-model-init-hook-path yeto.megatron.miles_value_island.after_model_init \
   --custom-megatron-before-train-step-hook-path yeto.megatron.miles_value_island.before_train_step \

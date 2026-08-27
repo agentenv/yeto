@@ -725,6 +725,58 @@ def test_ordinary_pull_wait_deduplicates_retries_to_latest_attempt():
     assert island.pending_pulls == []
 
 
+def test_phase2_rejoin_buffers_pulls_until_budget_finalization():
+    class Client:
+        def drain_pulls(self):
+            return [
+                SimpleNamespace(fragment_id=0, global_step=1415, round_attempt=1)
+            ]
+
+    island = object.__new__(MilesValueIsland)
+    island.client = Client()
+    island.pending_pulls = []
+    island.phase2_rejoin = True
+    island.min_local_steps = 1
+    island.steps_total = 363
+    island.steps_at_reset = [360]
+    island.units_total = 41_600_000
+    island.units_at_reset = [41_349_946]
+    island.anchors = [torch.zeros(4, dtype=torch.bfloat16)]
+    island.fragment_versions = [1414]
+
+    assert island._ready_pull_plan() == []
+    assert [(pull.fragment_id, pull.global_step) for pull in island.pending_pulls] == [
+        (0, 1415)
+    ]
+
+
+def test_phase2_rejoin_uses_buffered_pull_and_installed_anchor_as_base():
+    class Client:
+        finalization_timeout = 1.0
+
+        def check_health(self):
+            return None
+
+        def drain_updates(self):
+            return []
+
+        def drain_pulls(self):
+            return []
+
+    pull = SimpleNamespace(fragment_id=0, global_step=1415, round_attempt=2)
+    island = object.__new__(MilesValueIsland)
+    island.client = Client()
+    island.phase2_rejoin = True
+    island.pending_pulls = [pull]
+    island.anchors = [torch.tensor([1.0, -2.0], dtype=torch.bfloat16)]
+    island.fragment_versions = [1414]
+    island._leader_payloads = {}
+
+    assert island._next_budget_round(set()) == (0, 1415, 2, 1414)
+    assert island.pending_pulls == []
+    assert island._leader_payloads == {}
+
+
 @pytest.mark.parametrize(
     ("steps_total", "steps_at_reset", "units_total", "units_at_reset"),
     [(9, 10, 100, 100), (10, 10, 99, 100)],
@@ -778,6 +830,100 @@ def test_budget_cutoff_bypasses_ordinary_h_gate():
 
     assert ordinary_boundaries == [1]
     assert finalizations == [(2, 155)]
+
+
+@pytest.mark.parametrize("phase2_rejoin", [False, True])
+def test_budget_finalization_phase2_rejoin_skips_second_budget_transition(
+    monkeypatch, phase2_rejoin
+):
+    class Client:
+        dtype = DTYPE_F32
+
+        def __init__(self):
+            self.calls = []
+
+        def send_budget_done(self, steps):
+            self.calls.append(("budget_done", steps))
+            return 17
+
+        def wait_for_budget_restart(self, generation):
+            self.calls.append(("budget_restart", generation))
+
+        def push_fragment(
+            self,
+            fid,
+            global_step,
+            attempt,
+            base_version,
+            local_step,
+            c_steps,
+            c_units,
+            payload,
+        ):
+            del payload
+            self.calls.append(
+                (
+                    "push",
+                    fid,
+                    global_step,
+                    attempt,
+                    base_version,
+                    local_step,
+                    c_steps,
+                    c_units,
+                )
+            )
+
+    descriptor = _descriptor("w", (2, 2), MERGE_ISO)
+    island = _mock_grouped_island([descriptor])
+    fragment = island.layout.fragments[0]
+    island.client = Client()
+    island.phase2_rejoin = phase2_rejoin
+    island.steps_total = 364
+    island.units_total = 41_689_694
+    island.anchors = [torch.zeros(fragment.numel, dtype=torch.bfloat16)]
+    island.fragment_versions = [1414]
+    island._leader_payloads = (
+        {}
+        if phase2_rejoin
+        else {
+            (0, 1414): _pack_flat_fragment(
+                fragment, torch.zeros(fragment.numel), DTYPE_F32
+            )
+        }
+    )
+    island._leader_value = MethodType(lambda instance, builder: builder(), island)
+    island._leader_local = MethodType(lambda instance, builder: builder(), island)
+    island._next_budget_round = MethodType(
+        lambda instance, completed: (0, 1415, 1, 1414), island
+    )
+    island._gather_canonical = MethodType(
+        lambda instance, fid: torch.ones(fragment.numel), island
+    )
+    finalized = []
+    island._finalize_from_manifest = MethodType(
+        lambda instance: finalized.append(True), island
+    )
+    monkeypatch.setattr(island_module.dist, "barrier", lambda: None)
+
+    island._finalize_budget()
+
+    transitions = [call for call in island.client.calls if call[0] != "push"]
+    if phase2_rejoin:
+        assert transitions == []
+    else:
+        assert transitions == [("budget_done", 364), ("budget_restart", 17)]
+    assert island.client.calls[-1] == (
+        "push",
+        0,
+        1415,
+        1,
+        1414,
+        364,
+        364,
+        41_689_694,
+    )
+    assert finalized == [True]
 
 
 def test_mixed_dtype_grad_norm_uses_fixed_collective_order_and_combines_groups():
