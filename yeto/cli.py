@@ -31,12 +31,14 @@ import time
 
 from . import runs
 from .losses import LOSS_FUNCTIONS
+from .rl import MILES_IMAGE
 from .status_metrics import render_tape_summary
 
 SUBCOMMANDS = (
     "launch",
     "shape",
     "merge",
+    "rl",
     "sample-diffusion",
     "status",
     "logs",
@@ -79,6 +81,199 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="training loop selector; auto infers diffusion for diffusion aliases, "
         "otherwise uses the causal-LM learner",
     )
+    rl = p.add_argument_group("Miles RL")
+    rl.add_argument(
+        "--training-mode",
+        choices=["sft", "rl"],
+        default="sft",
+        help="training workflow (default: sft)",
+    )
+    rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
+    rl.add_argument("--rl-image", default=MILES_IMAGE)
+    rl.add_argument(
+        "--rl-model-recipe",
+        choices=["generic", "deepseek-v4-flash"],
+        default="generic",
+        help="model-specific Miles memory/kernel contract",
+    )
+    rl.add_argument(
+        "--expert-full-count",
+        type=int,
+        default=0,
+        help="DeepSeek V4 only: number of attested clone experts per layer to tune fully",
+    )
+    rl.add_argument("--expert-full-lr", type=float, default=1e-6)
+    rl.add_argument("--expert-selection-sha256", default=None)
+    rl.add_argument("--expert-selection-contract-sha256", default=None)
+    rl.add_argument(
+        "--rollout-model",
+        default=None,
+        help=(
+            "optional inference checkpoint for Miles/SGLang; defaults to --model. "
+            "Use this to pair an FP8 rollout checkpoint with a BF16 --model"
+        ),
+    )
+    rl.add_argument(
+        "--rollout-model-revision",
+        default=None,
+        help="immutable Hugging Face commit represented by --rollout-model",
+    )
+    rl.add_argument(
+        "--reward-function",
+        default=None,
+        help="RL reward callable as package.module:function",
+    )
+    rl.add_argument(
+        "--cybergym-url",
+        default=os.environ.get("CYBERGYM_URL", "http://127.0.0.1:8666"),
+    )
+    rl.add_argument(
+        "--cybergym-agent-id",
+        default=os.environ.get("CYBERGYM_AGENT_ID", "yeto_agent"),
+    )
+    rl.add_argument(
+        "--cybergym-timeout",
+        type=float,
+        default=float(os.environ.get("CYBERGYM_TIMEOUT", "60")),
+    )
+    rl.add_argument(
+        "--advantage-estimator", choices=["grpo"], default="grpo"
+    )
+    rl.add_argument("--n-samples-per-prompt", type=int, default=4)
+    rl.add_argument("--rollout-batch-size", type=int, default=32)
+    rl.add_argument("--over-sampling-batch-size", type=int, default=None)
+    rl.add_argument(
+        "--dynamic-sampling-filter-path",
+        default=None,
+        help="optional Miles group filter; use the nonzero-reward-variance "
+        "filter with oversampling for variance-aware GRPO",
+    )
+    rl.add_argument(
+        "--dynamic-sampling-max-replacements",
+        type=int,
+        default=None,
+        help=(
+            "bound zero-variance rollout replacements; with the stock "
+            "nonzero-variance filter, automatically use Yeto's bounded "
+            "fallback after this many rejected groups"
+        ),
+    )
+    rl.add_argument(
+        "--secrlenv-max-infrastructure-replacements",
+        type=int,
+        default=None,
+        help=(
+            "bound authenticated SecRLEnv infrastructure-group retries; "
+            "the signed SecRLEnv contract requires exactly one same-task retry"
+        ),
+    )
+    rl.add_argument(
+        "--rl-offload-train",
+        action="store_true",
+        help=(
+            "offload the trainer between colocated rollout steps; recommended "
+            "for large multi-GPU LoRA runs"
+        ),
+    )
+    rl.add_argument(
+        "--rl-distributed-timeout-minutes",
+        type=int,
+        default=10,
+        help="bounded Miles distributed/Gloo timeout (default: 10 minutes)",
+    )
+    rl.add_argument(
+        "--rollout-num-gpus-per-engine",
+        type=int,
+        default=1,
+        help="GPUs assigned to each colocated SGLang rollout engine",
+    )
+    rl.add_argument("--sglang-tp-size", type=int, default=None)
+    rl.add_argument("--sglang-dp-size", type=int, default=None)
+    rl.add_argument("--sglang-ep-size", type=int, default=None)
+    rl.add_argument("--sglang-mem-fraction-static", type=float, default=0.4)
+    rl.add_argument("--sglang-attention-backend", default=None)
+    rl.add_argument(
+        "--sglang-deterministic-inference",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "enable deterministic SGLang kernels when supported; disable for "
+            "DeepSeek V4 dsv4/compressed attention"
+        ),
+    )
+    rl.add_argument("--sglang-page-size", type=int, default=None)
+    rl.add_argument("--sglang-max-running-requests", type=int, default=None)
+    rl.add_argument("--sglang-chunked-prefill-size", type=int, default=None)
+    rl.add_argument("--use-rollout-routing-replay", action="store_true")
+    rl.add_argument("--rollout-max-response-len", type=int, default=32768)
+    rl.add_argument("--apply-chat-template-kwargs", type=json.loads, default=None)
+    rl.add_argument("--custom-generate-function-path", default=None)
+    rl.add_argument(
+        "--custom-agent-function-path",
+        default=None,
+        help=(
+            "Miles async agent callable used by an agentic custom generate "
+            "function (package.module.function)"
+        ),
+    )
+    rl.add_argument(
+        "--codex-reasoning-effort",
+        choices=["xhigh"],
+        default=None,
+        help=(
+            "stock Codex harness only: pin Codex reasoning effort to xhigh; "
+            "the attested binary is supplied by the direct SSH harness"
+        ),
+    )
+    rl.add_argument("--use-session-server", action="store_true")
+    rl.add_argument("--session-server-ip", default=None)
+    rl.add_argument("--session-server-port", type=int, nargs="+", default=None)
+    rl.add_argument("--tito-model", default=None)
+    rl.add_argument(
+        "--codex-backend-profile",
+        default=None,
+        help=(
+            "exact signed Codex backend profile; independent from the "
+            "family-level Miles --tito-model tokenizer setting"
+        ),
+    )
+    rl.add_argument(
+        "--tito-allowed-append-roles",
+        nargs="+",
+        choices=["tool", "user", "system"],
+        default=None,
+        help="message roles the Miles TITO session may append after generation",
+    )
+    rl.add_argument(
+        "--agent-max-seq-len",
+        type=int,
+        default=None,
+        help="hard total-token cap for one multi-turn agent trajectory",
+    )
+    rl.add_argument("--local-rl-rounds-per-sync", type=int, default=1)
+    rl.add_argument(
+        "--rl-sync-preset",
+        choices=["strict-avg", "decoupled"],
+        default="strict-avg",
+    )
+    rl.add_argument(
+        "--rl-initial-adapter",
+        default=None,
+        help="local final PEFT adapter for a fresh Decoupled RL phase",
+    )
+    rl.add_argument(
+        "--rl-initial-adapter-sha256",
+        default=None,
+        help="optional expected SHA256 for --rl-initial-adapter",
+    )
+    rl.add_argument(
+        "--rl-policy-version", choices=["strict"], default="strict"
+    )
+    rl.add_argument(
+        "--rl-completed-groups-path",
+        default="~/yeto-rl/island-checkpoint.pt",
+    )
+    rl.add_argument("--experimental-rl-sync", action="store_true")
     p.add_argument(
         "--output",
         default=None,
@@ -204,10 +399,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     tune.add_argument("--lora-alpha", type=int, default=32)
     tune.add_argument(
         "--lora-targets",
-        choices=["auto", "attention", "all-linear"],
+        choices=[
+            "auto",
+            "attention",
+            "attention-routed-experts",
+            "all-linear",
+        ],
         default="auto",
-        help="adapter placement: attention-only, every linear, or auto "
-        "(attention for MoE — router and routed experts stay frozen)",
+        help="adapter placement: attention-only, expanded-V4 "
+        "attention+routed-expert clones, every linear, or auto "
+        "(attention for ordinary MoE — router and routed experts stay frozen)",
     )
     parent = tune.add_mutually_exclusive_group()
     parent.add_argument(
@@ -493,6 +694,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="fleet-controller health poll interval (seconds)",
     )
 
+    # W&B telemetry. One group per fleet (this run's name), one run per
+    # island plus one for the syncer's event tape; see docs/WANDB.md.
+    from .wandb_logger import add_arguments as add_wandb_arguments
+
+    add_wandb_arguments(p)
+
 
 def parse_args(argv=None):
     """Parse launch flags only (kept for callers that predate subcommands)."""
@@ -578,6 +785,22 @@ def _add_diffusion_sample_args(p: argparse.ArgumentParser) -> None:
     infra.add_argument("--controller-poll", type=int, default=30, help="job status poll interval (seconds)")
 
 
+def _add_local_rl_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--env", default="cybergym", choices=["cybergym", "mock"])
+    p.add_argument("--task", default="vulnerability_analysis")
+    p.add_argument("--model", default="Qwen/Qwen2.5-0.5B")
+    p.add_argument("--budget", type=float, default=10.0)
+    p.add_argument("--output")
+    p.add_argument("--iterations", type=int, default=1)
+    p.add_argument("--steps", type=int, default=64)
+    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--epochs", type=int, default=2)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--server-host", default="127.0.0.1")
+    p.add_argument("--server-port", type=int, default=8666)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="yeto",
@@ -586,7 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(
         dest="command",
-        metavar="{launch,shape,merge,sample-diffusion,status,logs,down}",
+        metavar="{launch,shape,merge,rl,sample-diffusion,status,logs,down}",
     )
 
     launch = sub.add_parser(
@@ -703,6 +926,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum SafeTensors shard size, e.g. 2GB or 500MB",
     )
 
+    local_rl = sub.add_parser(
+        "rl",
+        help="run the experimental single-process CyberGym PPO path",
+    )
+    _add_local_rl_args(local_rl)
+
     sample = sub.add_parser(
         "sample-diffusion",
         help="run diffusion adapter sampling on a SkyPilot GPU task",
@@ -816,6 +1045,8 @@ def _fleet_args_error(args) -> str | None:
 
     _parent_mode, parent_source = selected_parent(args)
     if parent_source is not None:
+        if getattr(args, "training_mode", "sft") == "rl":
+            return "--resume-from/--branch-from are not supported with --training-mode rl"
         if model_kind != "causal-lm":
             return "--resume-from/--branch-from apply only to causal-LM models"
         if getattr(args, "island_backend", "torch") != "torch":
@@ -1037,12 +1268,16 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         # it onto learners from there).
         loss_path = pickled_loss_path(args.loss_function)
         file_mounts[f"~/sky_workdir/{loss_path.name}"] = str(loss_path)
+    head_pip = HEAD_SETUP_PIP
+    if getattr(args, "wandb", False):
+        # The head tails the syncer's event tape into W&B (yeto.wandb_tape).
+        head_pip += " && pip install -q wandb"
     task = sky.Task(
         name="yeto-head",
         setup=(
             "set -e\n"
             f"{WAN_TUNING}\n"
-            f"{HEAD_SETUP_PIP}\n"
+            f"{head_pip}\n"
             f"{SYNCER_REMOTE_BUILD}\n"
             f"touch {HEAD_READY_MARKER}"
         ),
@@ -1132,6 +1367,11 @@ def cmd_launch_head(args) -> int:
 
     args.data, data_mounts = head_stage(args.data)
     data_mounts.update(head_stage_parent(args))
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        data_mounts[launcher.RL_HEAD_INITIAL_ADAPTER_PATH] = os.path.expanduser(
+            args.rl_initial_adapter
+        )
+        args.rl_initial_adapter = launcher.RL_HEAD_INITIAL_ADAPTER_PATH
     args_dict = _serializable_args(args)
     runs.create_run(name, args_dict)
     learner_names = launcher.learner_cluster_names(name, specs)
@@ -1150,6 +1390,16 @@ def cmd_launch_head(args) -> int:
     envs = {"SYNCER_PUBLIC_IP": str(head_ip)}
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    if args.training_mode == "rl" and os.environ.get("CYBERGYM_API_KEY"):
+        envs["CYBERGYM_API_KEY"] = os.environ["CYBERGYM_API_KEY"]
+    if args.training_mode == "rl":
+        for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
+            if os.environ.get(name):
+                envs[name] = os.environ[name]
+    if getattr(args, "wandb", False) and os.environ.get("WANDB_API_KEY"):
+        # The head authenticates its own event-tape run and re-exports the
+        # key onto every learner cluster it launches.
+        envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
     job_task = sky.Task(
         name="yeto-head-job",
         run=(
@@ -1193,6 +1443,7 @@ def cmd_head(payload: str) -> int:
     syncer = launcher.LocalSyncer(args, num_learners)
     syncer.start()
     syncer.start_log_forwarder()
+    syncer.start_tape_forwarder(args)
     try:
         code = launcher.run(args, local_syncer=syncer)
     except BaseException:
@@ -1528,6 +1779,11 @@ def main(argv=None) -> int:
         except (ImportError, OSError, ValueError, RuntimeError) as exc:
             print(f"[yeto] merge failed: {exc}", file=sys.stderr)
             return 1
+        return 0
+    if args.command == "rl":
+        from .rl.run import run_rl
+
+        run_rl(args)
         return 0
     if args.command == "sample-diffusion":
         return cmd_sample_diffusion(args)

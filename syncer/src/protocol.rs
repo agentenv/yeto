@@ -213,6 +213,7 @@ pub fn decode_tensor(dtype: u8, bytes: &[u8], out: &mut Vec<f32>) -> Result<()> 
 }
 
 /// Encode f32s into the wire dtype.
+#[cfg(test)]
 pub fn encode_tensor(dtype: u8, vals: &[f32], out: &mut Vec<u8>) -> Result<()> {
     out.clear();
     match dtype {

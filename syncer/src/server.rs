@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
@@ -26,6 +27,12 @@ const CHUNK_HEADER_SIZE: u64 = 24;
 const MAX_PARTIAL_MESSAGES: usize = 64;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(180);
 const WRITER_QUEUE: usize = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LearnerWeight {
+    Tokens2OverSteps,
+    Equal,
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -65,7 +72,13 @@ pub struct Config {
     /// HeLoCo per-tensor delta correction before merging.
     pub delta_correction: bool,
     pub quorum_timeout_s: u64,
+    /// Bounded wait for learners to apply and acknowledge the terminal cut.
+    pub final_ack_timeout_s: u64,
     pub total_steps: u64,
+    /// Strict dense-policy mode: one logical local step contributes every
+    /// fragment in a serial sweep.  None preserves the legacy independent
+    /// fragment-round behavior.
+    pub policy_sweep_fragments: Option<u32>,
     pub outer_lr: f32,
     pub outer_momentum: f32,
     pub final_state: Option<std::path::PathBuf>,
@@ -78,14 +91,97 @@ pub struct Config {
     pub mark_final_checkpoint: bool,
     /// Benchmark-only exact local optimizer-step target for every learner.
     pub learner_budget_steps: Option<u64>,
-    /// JSONL event tape: one record per merge.
+    /// JSONL event tape: merge records plus sweep ledger reconciliation cuts.
     pub event_tape: Option<std::path::PathBuf>,
+    /// Maximum admitted learner base-version lag; None preserves the
+    /// existing unbounded behavior.
+    pub max_base_lag: Option<u64>,
+    pub learner_weight: LearnerWeight,
+    /// Fail closed unless HELLO carries and matches this Config's canonical
+    /// semantic profile hash. Disabled by default for legacy/non-SAO clients.
+    pub require_profile_binding: bool,
+}
+
+const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v1\0";
+
+impl Config {
+    /// Canonical identity of every launch field that can affect merging,
+    /// scheduling, or recovery. Listener ports and concrete output paths are
+    /// deliberately excluded; checkpoint *enablement* remains included.
+    pub fn semantic_profile_hash(&self) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(160);
+        encoded.extend_from_slice(SEMANTIC_PROFILE_DOMAIN);
+        encoded.extend_from_slice(&self.learners.to_le_bytes());
+        encoded.extend_from_slice(&self.quorum.to_le_bytes());
+        encoded.extend_from_slice(&self.grace_ms.to_le_bytes());
+        encoded.extend_from_slice(&self.grace_gamma.to_bits().to_le_bytes());
+        encoded.extend_from_slice(&self.grace_tau.to_bits().to_le_bytes());
+        encoded.extend_from_slice(&self.pipeline.to_le_bytes());
+        encoded.extend_from_slice(&self.min_round_interval_ms.to_le_bytes());
+        encoded.extend_from_slice(&self.sync_interval_steps.to_bits().to_le_bytes());
+        encoded.push(u8::from(self.delta_correction));
+        encoded.extend_from_slice(&self.quorum_timeout_s.to_le_bytes());
+        encoded.extend_from_slice(&self.final_ack_timeout_s.to_le_bytes());
+        encoded.extend_from_slice(&self.total_steps.to_le_bytes());
+        encode_optional_u32(&mut encoded, self.policy_sweep_fragments);
+        encoded.extend_from_slice(&self.outer_lr.to_bits().to_le_bytes());
+        encoded.extend_from_slice(&self.outer_momentum.to_bits().to_le_bytes());
+        encoded.push(u8::from(self.checkpoint_path.is_some()));
+        encoded.extend_from_slice(&self.checkpoint_every.to_le_bytes());
+        encoded.push(u8::from(self.resume));
+        encoded.push(u8::from(self.mark_final_checkpoint));
+        encode_optional_u64(&mut encoded, self.learner_budget_steps);
+        encode_optional_u64(&mut encoded, self.max_base_lag);
+        encoded.push(match self.learner_weight {
+            LearnerWeight::Tokens2OverSteps => 0,
+            LearnerWeight::Equal => 1,
+        });
+        encoded.push(u8::from(self.require_profile_binding));
+        Sha256::digest(encoded).into()
+    }
+}
+
+fn encode_optional_u32(encoded: &mut Vec<u8>, value: Option<u32>) {
+    match value {
+        None => encoded.push(0),
+        Some(value) => {
+            encoded.push(1);
+            encoded.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+fn encode_optional_u64(encoded: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        None => encoded.push(0),
+        Some(value) => {
+            encoded.push(1);
+            encoded.extend_from_slice(&value.to_le_bytes());
+        }
+    }
 }
 
 struct OutFrame {
     msg_type: u8,
     parts: Vec<bytes::Bytes>,
 }
+
+#[derive(Debug)]
+struct OutboundStreamClosed {
+    member: Member,
+}
+
+impl std::fmt::Display for OutboundStreamClosed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "learner {} generation {} outbound stream closed",
+            self.member.learner_id, self.member.generation
+        )
+    }
+}
+
+impl std::error::Error for OutboundStreamClosed {}
 
 struct PartialMsg {
     buf: Vec<u8>,
@@ -103,6 +199,8 @@ struct Group {
     member: Member,
     dtype: u8,
     layout: Layout,
+    layout_fingerprint: [u8; 32],
+    session_contract_hash: [u8; 32],
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
@@ -131,9 +229,7 @@ impl Group {
             })
     }
 
-    /// Send a large inner frame, striped as CHUNK envelopes across data
-    /// streams (or unchunked on the control stream when none exist).
-    async fn send_large(&self, msg_type: u8, payload: bytes::Bytes) -> Result<()> {
+    fn chunk_streams(&self) -> Vec<mpsc::Sender<OutFrame>> {
         let mut streams: Vec<(u16, mpsc::Sender<OutFrame>)> = self
             .data
             .lock()
@@ -142,41 +238,98 @@ impl Group {
             .map(|(index, sender)| (*index, sender.clone()))
             .collect();
         streams.sort_unstable_by_key(|(index, _)| *index);
-        let streams: Vec<mpsc::Sender<OutFrame>> =
+        let mut streams: Vec<mpsc::Sender<OutFrame>> =
             streams.into_iter().map(|(_, sender)| sender).collect();
         if streams.is_empty() {
-            return self.send_small(msg_type, payload).await;
+            streams.push(self.control.clone());
         }
-        // Inner frame = header + payload, chunked over its full byte length.
-        let mut inner = Vec::with_capacity(13 + payload.len());
-        inner.extend_from_slice(&MAGIC.to_le_bytes());
-        inner.push(msg_type);
-        inner.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        inner.extend_from_slice(&payload);
-        let inner = bytes::Bytes::from(inner);
+        streams
+    }
+
+    /// Stream one model-sized tensor as CHUNK envelopes without ever
+    /// materializing a complete encoded tensor or inner frame. The receiver
+    /// observes exactly the same inner frame as `header + prefix + tensor`.
+    async fn send_tensor_large(
+        &self,
+        msg_type: u8,
+        prefix: &[u8],
+        dtype: u8,
+        values: &[f32],
+    ) -> Result<()> {
+        self.send_tensor_large_chunked(msg_type, prefix, dtype, values, CHUNK_SIZE)
+            .await
+    }
+
+    async fn send_tensor_large_chunked(
+        &self,
+        msg_type: u8,
+        prefix: &[u8],
+        dtype: u8,
+        values: &[f32],
+        chunk_size: usize,
+    ) -> Result<()> {
+        if chunk_size == 0 {
+            bail!("tensor chunk size must be positive");
+        }
+        let tensor_len = tensor_nbytes(dtype, values.len())?;
+        let payload_len = prefix
+            .len()
+            .checked_add(tensor_len)
+            .context("tensor frame payload length overflow")?;
+        let total = 13usize
+            .checked_add(payload_len)
+            .context("tensor inner-frame length overflow")?;
+        let payload_len_u64 = u64::try_from(payload_len).context("tensor payload is too large")?;
+        let total_u64 = u64::try_from(total).context("tensor inner frame is too large")?;
+
+        let mut fixed = Vec::new();
+        fixed
+            .try_reserve_exact(13 + prefix.len())
+            .context("cannot allocate tensor frame prefix")?;
+        fixed.extend_from_slice(&MAGIC.to_le_bytes());
+        fixed.push(msg_type);
+        fixed.extend_from_slice(&payload_len_u64.to_le_bytes());
+        fixed.extend_from_slice(prefix);
+
+        let streams = self.chunk_streams();
 
         let msg_id = self.msg_id.fetch_add(1, Ordering::Relaxed);
-        let total = inner.len() as u64;
         let mut offset = 0usize;
-        while offset < inner.len() {
-            let end = (offset + CHUNK_SIZE).min(inner.len());
+        while offset < total {
+            let end = offset.saturating_add(chunk_size).min(total);
+            let mut chunk = Vec::new();
+            chunk
+                .try_reserve_exact(end - offset)
+                .context("cannot allocate tensor wire chunk")?;
+            if offset < fixed.len() {
+                chunk.extend_from_slice(&fixed[offset..end.min(fixed.len())]);
+            }
+            if end > fixed.len() {
+                let tensor_start = offset.saturating_sub(fixed.len());
+                let tensor_end = end - fixed.len();
+                append_tensor_bytes(
+                    dtype,
+                    values,
+                    tensor_start,
+                    tensor_end - tensor_start,
+                    &mut chunk,
+                )?;
+            }
+            debug_assert_eq!(chunk.len(), end - offset);
+
             let mut head = Vec::with_capacity(24);
             head.extend_from_slice(&msg_id.to_le_bytes());
-            head.extend_from_slice(&total.to_le_bytes());
+            head.extend_from_slice(&total_u64.to_le_bytes());
             head.extend_from_slice(&(offset as u64).to_le_bytes());
             let idx = self.rr.fetch_add(1, Ordering::Relaxed) % streams.len();
             streams[idx]
                 .send(OutFrame {
                     msg_type: MSG_CHUNK,
-                    parts: vec![bytes::Bytes::from(head), inner.slice(offset..end)],
+                    parts: vec![bytes::Bytes::from(head), bytes::Bytes::from(chunk)],
                 })
                 .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "learner {} generation {} data stream closed",
-                        self.member.learner_id,
-                        self.member.generation
-                    )
+                .map_err(|_| OutboundStreamClosed {
+                    member: self.member,
                 })?;
             offset = end;
         }
@@ -184,7 +337,54 @@ impl Group {
     }
 }
 
+fn append_tensor_bytes(
+    dtype: u8,
+    values: &[f32],
+    byte_offset: usize,
+    byte_len: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let width = match dtype {
+        DTYPE_F32 => 4,
+        DTYPE_BF16 => 2,
+        _ => bail!("unknown dtype {dtype}"),
+    };
+    let tensor_len = tensor_nbytes(dtype, values.len())?;
+    let byte_end = byte_offset
+        .checked_add(byte_len)
+        .context("tensor byte range overflow")?;
+    if byte_end > tensor_len {
+        bail!("tensor byte range exceeds encoded length");
+    }
+    out.try_reserve_exact(byte_len)
+        .context("cannot allocate encoded tensor chunk")?;
+    if byte_len == 0 {
+        return Ok(());
+    }
+    let first = byte_offset / width;
+    let last = byte_end.div_ceil(width);
+    for (index, value) in values[first..last].iter().enumerate() {
+        let value_index = first + index;
+        let value_start = value_index * width;
+        let start = byte_offset.saturating_sub(value_start);
+        let end = (byte_end - value_start).min(width);
+        match dtype {
+            DTYPE_F32 => out.extend_from_slice(&value.to_le_bytes()[start..end]),
+            DTYPE_BF16 => {
+                let bytes = half::bf16::from_f32(*value).to_bits().to_le_bytes();
+                out.extend_from_slice(&bytes[start..end]);
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
 enum Event {
+    Fatal {
+        metric: &'static str,
+        message: String,
+    },
     Hello {
         group: Arc<Group>,
     },
@@ -229,6 +429,8 @@ struct SessionSpec {
     dtype: u8,
     layout: Layout,
     layout_fingerprint: [u8; 32],
+    session_contract_hash: [u8; 32],
+    syncer_profile_hash: Option<[u8; 32]>,
 }
 
 struct ParsedHello {
@@ -237,6 +439,8 @@ struct ParsedHello {
     dtype: u8,
     layout: Layout,
     layout_fingerprint: [u8; 32],
+    session_contract_hash: [u8; 32],
+    syncer_profile_hash: Option<[u8; 32]>,
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
@@ -345,16 +549,162 @@ impl StepRates {
 type Registry = Arc<Mutex<RegistryState>>;
 type Session = Arc<Mutex<Option<SessionSpec>>>;
 
-pub async fn run(cfg: Config) -> Result<()> {
+fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.learners == 0 {
         bail!("--learners must be positive");
     }
     if cfg.quorum == 0 {
         bail!("--quorum must be positive");
     }
+    if cfg.quorum > cfg.learners {
+        bail!("--quorum must not exceed --learners");
+    }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
     }
+    if let Some(fragments) = cfg.policy_sweep_fragments {
+        if fragments == 0 {
+            bail!("--policy-sweep-fragments must be positive");
+        }
+        if cfg.total_steps == 0 {
+            bail!("--policy-sweep-fragments requires positive --total-steps");
+        }
+        if cfg.pipeline != 1 {
+            bail!("--policy-sweep-fragments requires --pipeline 1");
+        }
+        if !cfg.total_steps.is_multiple_of(u64::from(fragments)) {
+            bail!("--total-steps must be divisible by --policy-sweep-fragments");
+        }
+        if cfg.max_base_lag != Some(0) || cfg.quorum != cfg.learners || cfg.grace_ms != 0 {
+            bail!(
+                "--policy-sweep-fragments requires a strict fixed roster: \
+                 --max-base-lag 0, --quorum=--learners, and --grace-ms 0"
+            );
+        }
+        if cfg.delta_correction {
+            bail!("--policy-sweep-fragments requires --delta-correction none");
+        }
+        if cfg.outer_lr != 1.0 || cfg.outer_momentum != 0.0 {
+            bail!("--policy-sweep-fragments requires --outer-lr 1 and --outer-momentum 0");
+        }
+        if cfg.learner_weight != LearnerWeight::Equal {
+            bail!("--policy-sweep-fragments requires --learner-weight equal");
+        }
+        if cfg.checkpoint_path.is_none() || cfg.checkpoint_every != 1 || !cfg.resume {
+            bail!(
+                "--policy-sweep-fragments requires --checkpoint-path, \
+                 --checkpoint-every 1, and --resume for crash-safe sweeps"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A per-round checkpoint is the commit record for an externally visible
+/// fragment version. Persist it before BCAST regardless of the staleness
+/// profile; otherwise a process crash can expose version t and resume at t-1.
+fn checkpoint_before_broadcast(cfg: &Config) -> bool {
+    cfg.checkpoint_path.is_some() && cfg.checkpoint_every == 1
+}
+
+fn validate_policy_sweep_push(push: &Push, fragments: u32) -> Result<()> {
+    if fragments == 0 {
+        bail!("policy sweep fragment count must be positive");
+    }
+    if push.global_step == 0 {
+        bail!("policy-sweep push global_step must be positive");
+    }
+    let policy_round = push.global_step.div_ceil(u64::from(fragments));
+    if push.local_step != policy_round {
+        bail!(
+            "policy-sweep push at global step {} requires local_step {}, got {}",
+            push.global_step,
+            policy_round,
+            push.local_step
+        );
+    }
+    if push.c_steps != 1 {
+        bail!(
+            "policy-sweep push at global step {} requires c_steps=1, got {}",
+            push.global_step,
+            push.c_steps
+        );
+    }
+    Ok(())
+}
+
+fn expected_sweep_fragment_version(global_step: u64, fragment: u32, fragments: u32) -> u64 {
+    let first = u64::from(fragment) + 1;
+    if global_step < first {
+        0
+    } else {
+        first + ((global_step - first) / u64::from(fragments)) * u64::from(fragments)
+    }
+}
+
+fn validate_resumed_policy_sweep(cfg: &Config, st: &GlobalState) -> Result<()> {
+    let Some(fragments) = cfg.policy_sweep_fragments else {
+        return Ok(());
+    };
+    if st.policy_sweep_fragments != Some(fragments) {
+        bail!(
+            "policy-sweep checkpoint profile {:?} does not match configured profile {fragments}",
+            st.policy_sweep_fragments
+        );
+    }
+    if st.global_step > cfg.total_steps {
+        bail!(
+            "policy-sweep checkpoint step {} exceeds configured total {}",
+            st.global_step,
+            cfg.total_steps
+        );
+    }
+    for (fragment, actual) in st.versions.iter().copied().enumerate() {
+        let expected = expected_sweep_fragment_version(
+            st.global_step,
+            u32::try_from(fragment).context("fragment index does not fit u32")?,
+            fragments,
+        );
+        if actual != expected {
+            bail!(
+                "policy-sweep checkpoint fragment {fragment} has version {actual}, expected {expected}"
+            );
+        }
+    }
+    let expected_steps = st.global_step / u64::from(fragments);
+    if st.global_step == 0 {
+        if !st.ledger.is_empty() {
+            bail!("policy-sweep checkpoint at step zero has learner accounting");
+        }
+        return Ok(());
+    }
+    if st.ledger.len() != cfg.learners as usize {
+        bail!(
+            "policy-sweep checkpoint has accounting for {} learners, expected {}",
+            st.ledger.len(),
+            cfg.learners
+        );
+    }
+    for learner_id in 0..cfg.learners {
+        let ledger = st
+            .ledger
+            .get(&learner_id)
+            .with_context(|| format!("policy-sweep checkpoint is missing learner {learner_id}"))?;
+        if ledger.merges != st.global_step || ledger.steps != expected_steps {
+            bail!(
+                "policy-sweep checkpoint learner {learner_id} has merges={} steps={}, expected merges={} steps={expected_steps}",
+                ledger.merges,
+                ledger.steps,
+                st.global_step
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn run(cfg: Config) -> Result<()> {
+    validate_config(&cfg)?;
+    let semantic_profile_hash = cfg.semantic_profile_hash();
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
             bail!("--learner-budget-steps must fit a positive u32");
@@ -369,7 +719,16 @@ pub async fn run(cfg: Config) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))
         .await
         .with_context(|| format!("bind port {}", cfg.port))?;
-    info!(port = cfg.port, "syncer listening");
+    let semantic_profile_sha256: String = semantic_profile_hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    info!(
+        port = cfg.port,
+        semantic_profile_sha256,
+        require_profile_binding = cfg.require_profile_binding,
+        "syncer listening"
+    );
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
     let session: Session = Arc::new(Mutex::new(None));
@@ -377,6 +736,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_registry = registry.clone();
     let accept_session = session.clone();
     let expected_learners = cfg.learners;
+    let strict_layout = cfg.max_base_lag == Some(0);
+    let require_profile_binding = cfg.require_profile_binding;
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -385,8 +746,17 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let session = accept_session.clone();
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, reg, session, expected_learners, tx).await
+                        if let Err(e) = handle_connection(
+                            stream,
+                            reg,
+                            session,
+                            expected_learners,
+                            strict_layout,
+                            semantic_profile_hash,
+                            require_profile_binding,
+                            tx,
+                        )
+                        .await
                         {
                             warn!(%peer, "connection ended: {e:#}");
                         }
@@ -448,6 +818,22 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         .take(32)?
         .try_into()
         .context("layout fingerprint must be 32 bytes")?;
+    let session_contract_hash = r
+        .take(32)?
+        .try_into()
+        .context("session contract hash must be 32 bytes")?;
+    let syncer_profile_hash = match r.remaining() {
+        // Legacy/non-SAO HELLO.
+        2 => None,
+        // Profile-bound HELLO. Keeping the extension before num_streams lets
+        // protocol-v4 generic clients retain their exact wire bytes.
+        34 => Some(
+            r.take(32)?
+                .try_into()
+                .context("syncer profile hash must be 32 bytes")?,
+        ),
+        remaining => bail!("invalid HELLO profile extension length {remaining}"),
+    };
     let num_streams = r.u16()?;
     if r.remaining() != 0 {
         bail!("trailing bytes in HELLO");
@@ -462,6 +848,8 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         dtype,
         layout,
         layout_fingerprint,
+        session_contract_hash,
+        syncer_profile_hash,
         num_streams,
         max_init_payload,
         max_push_payload,
@@ -493,6 +881,9 @@ async fn handle_connection(
     registry: Registry,
     session: Session,
     expected_learners: u32,
+    strict_layout: bool,
+    semantic_profile_hash: [u8; 32],
+    require_profile_binding: bool,
     event_tx: mpsc::Sender<Event>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
@@ -532,15 +923,41 @@ async fn handle_connection(
                 dtype,
                 layout,
                 layout_fingerprint,
+                session_contract_hash,
+                syncer_profile_hash,
                 num_streams,
                 max_init_payload,
                 max_push_payload,
             } = parsed;
+            let profile_error = match syncer_profile_hash {
+                Some(offered) if offered != semantic_profile_hash => {
+                    Some("HELLO syncer semantic profile does not match the running server")
+                }
+                None if require_profile_binding => {
+                    Some("HELLO is missing the required syncer semantic profile binding")
+                }
+                _ => None,
+            };
+            if let Some(message) = profile_error {
+                send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                if strict_layout || require_profile_binding {
+                    event_tx
+                        .send(Event::Fatal {
+                            metric: "syncer_profile_mismatch",
+                            message: message.to_string(),
+                        })
+                        .await
+                        .ok();
+                }
+                bail!(message);
+            }
             let num_fragments = layout.fragments.len();
             let offered = SessionSpec {
                 dtype,
                 layout: layout.clone(),
                 layout_fingerprint,
+                session_contract_hash,
+                syncer_profile_hash,
             };
             let mismatch = {
                 let mut guard = session.lock().unwrap();
@@ -560,6 +977,15 @@ async fn handle_connection(
             };
             if let Some(message) = mismatch {
                 send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                if strict_layout {
+                    event_tx
+                        .send(Event::Fatal {
+                            metric: "layout_hash_mismatch",
+                            message: message.clone(),
+                        })
+                        .await
+                        .ok();
+                }
                 bail!(message);
             }
             let member = Member {
@@ -574,6 +1000,8 @@ async fn handle_connection(
                 member,
                 dtype,
                 layout,
+                layout_fingerprint,
+                session_contract_hash,
                 num_streams,
                 max_init_payload,
                 max_push_payload,
@@ -1025,6 +1453,9 @@ async fn scheduler(
 ) -> Result<()> {
     let mut state: Option<GlobalState> = None;
     let mut budget_reports: HashSet<u32> = HashSet::new();
+    let strict_exact = cfg.max_base_lag == Some(0);
+    let fixed_roster = strict_exact && cfg.quorum == cfg.learners && cfg.grace_ms == 0;
+    let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
     // a resumed checkpoint) and all expected learners have connected (late
@@ -1043,6 +1474,10 @@ async fn scheduler(
             }
         }
         match events.recv().await.context("event channel closed")? {
+            Event::Fatal { metric, message } => {
+                append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                bail!("RL strict failure {metric}: {message}");
+            }
             Event::Hello { group } => {
                 if state.is_none() {
                     // Layout comes from the HELLO of the first learner.
@@ -1050,7 +1485,44 @@ async fn scheduler(
                     let mut st = new_state_for(&group, &cfg)?;
                     if cfg.resume {
                         if let Some(path) = cfg.checkpoint_path.as_ref().filter(|p| p.exists()) {
-                            st.load_checkpoint(path)?;
+                            if let Err(error) = st.load_checkpoint(path) {
+                                if strict_exact {
+                                    let message = format!("cannot resume RL checkpoint: {error:#}");
+                                    append_strict_failure(
+                                        cfg.event_tape.as_deref(),
+                                        "layout_hash_mismatch",
+                                        &message,
+                                    );
+                                    bail!("RL strict failure layout_hash_mismatch: {message}");
+                                }
+                                return Err(error);
+                            }
+                            if strict_exact && !st.checkpoint_layout_verified {
+                                let message = "RL checkpoint is missing its canonical layout hash";
+                                append_strict_failure(
+                                    cfg.event_tape.as_deref(),
+                                    "layout_hash_mismatch",
+                                    message,
+                                );
+                                bail!("RL strict failure layout_hash_mismatch: {message}");
+                            }
+                            if let Err(error) = validate_resumed_policy_sweep(&cfg, &st) {
+                                let message =
+                                    format!("cannot resume policy-sweep checkpoint: {error:#}");
+                                append_strict_failure(
+                                    cfg.event_tape.as_deref(),
+                                    "policy_sweep_checkpoint_mismatch",
+                                    &message,
+                                );
+                                bail!(
+                                    "RL strict failure policy_sweep_checkpoint_mismatch: {message}"
+                                );
+                            }
+                            if cfg.policy_sweep_fragments.is_some() {
+                                if let Some(tape) = cfg.event_tape.as_deref() {
+                                    append_policy_sweep_ledger_snapshot(tape, &st, "resume")?;
+                                }
+                            }
                             info!(step = st.global_step, "resumed from checkpoint");
                         }
                     }
@@ -1116,9 +1588,23 @@ async fn scheduler(
         remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
     }
 
+    // Persist a fresh version zero before its first BCAST. A resumed cut is
+    // already committed and only needs to be rebroadcast.
+    if checkpoint_each_round {
+        if let Some(path) = cfg.checkpoint_path.as_ref() {
+            if !cfg.resume || !path.exists() {
+                st.save_checkpoint(path)?;
+                info!(step = st.global_step, path = %path.display(), "checkpoint committed");
+            }
+        }
+    }
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
-    broadcast_all_fragments(&st, &registry).await;
+    // A checkpoint already at the terminal cut goes straight to lossless
+    // FINAL delivery; a redundant full BCAST would only inflate receiver RSS.
+    if st.global_step < cfg.total_steps {
+        broadcast_all_fragments(&st, &registry).await;
+    }
 
     // Phase 2: the outer loop. One fragment per global step, round-robin,
     // with up to `pipeline` rounds in flight at once: while round t sits in
@@ -1126,8 +1612,10 @@ async fn scheduler(
     // latency overlaps learner compute (the paper's τ=2 "two fragments in
     // flight"). Depth is clamped to the fragment count, so concurrent
     // rounds always target DISTINCT fragments and every merge touches
-    // disjoint params/momentum. Rounds may complete out of order; versions
-    // are per fragment and global_step advances monotonically.
+    // disjoint params/momentum. PUSH gathering may complete out of order,
+    // but durable merge/checkpoint/BCAST commits stay in global-step order.
+    // That keeps every checkpoint a contiguous prefix that can resume from
+    // `global_step + 1` without losing a ready-but-uncommitted round.
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
     let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
@@ -1145,7 +1633,7 @@ async fn scheduler(
                 break;
             }
             let groups = current_groups(&registry);
-            if groups.is_empty() {
+            if groups.is_empty() || (fixed_roster && groups.len() < cfg.quorum as usize) {
                 next_launch = Instant::now() + Duration::from_millis(100);
                 break;
             }
@@ -1200,23 +1688,44 @@ async fn scheduler(
             }
         }
 
-        // Complete every round that is ready: all captured learners
-        // answered, or its grace deadline expired after reaching quorum.
+        // Restart any timed-out gather independently. A ready later round
+        // remains resident until every earlier global step commits; PULL and
+        // PUSH overlap stays pipelined, while durable commits stay contiguous.
         // A quorum timeout below K discards the partial attempt and re-pulls.
         let now = Instant::now();
-        let mut completed_any = false;
         let mut i = 0;
         while i < inflight.len() {
             match round_action(&inflight[i], now) {
-                RoundAction::Complete => {
-                    let round = inflight.remove(i);
-                    complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
-                    completed_any = true;
-                    continue;
-                }
                 RoundAction::Restart => {
                     let r = &mut inflight[i];
                     let groups = current_groups(&registry);
+                    if fixed_roster {
+                        if groups.len() < cfg.quorum as usize {
+                            r.quorum_deadline =
+                                Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+                            i += 1;
+                            continue;
+                        }
+                        warn!(
+                            step = r.t,
+                            responses = r.pushes.len(),
+                            roster = cfg.learners,
+                            "fixed roster incomplete; waiting for missing logical learners"
+                        );
+                        for g in groups {
+                            if !r
+                                .pushes
+                                .keys()
+                                .any(|member| member.learner_id == g.member.learner_id)
+                            {
+                                let _ = g.send_small(MSG_PULL_REQ, r.pull.clone()).await;
+                            }
+                        }
+                        r.quorum_deadline =
+                            Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+                        i += 1;
+                        continue;
+                    }
                     warn!(
                         step = r.t,
                         attempt = r.attempt,
@@ -1242,20 +1751,26 @@ async fn scheduler(
                     }
                     r.quorum_deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
                 }
-                RoundAction::Wait => {}
+                RoundAction::Wait | RoundAction::Complete => {}
             }
             i += 1;
         }
-        if completed_any {
+        if let Some(index) = next_committable_round(&inflight, Instant::now()) {
+            let round = inflight.remove(index);
+            complete_round(&cfg, &mut st, &registry, &mut last_sync_secs, round).await?;
             continue; // refill the pipeline before waiting again
         }
         // Wait for the next event, the earliest in-flight deadline, or the
         // launch throttle opening (whichever comes first). Without the
         // throttle term an empty pipeline would spin; without in-flight
         // deadlines a throttled launch would oversleep.
+        let deadline_now = Instant::now();
         let mut earliest = inflight
             .iter()
-            .map(|r| r.grace_deadline.unwrap_or(r.quorum_deadline))
+            .filter_map(|r| {
+                (round_action(r, deadline_now) != RoundAction::Complete)
+                    .then_some(r.grace_deadline.unwrap_or(r.quorum_deadline))
+            })
             .min();
         let next_fragment_available = inflight.len() < depth
             && next_t <= cfg.total_steps
@@ -1271,15 +1786,50 @@ async fn scheduler(
             Err(_) => continue, // deadline hit; loop re-evaluates
             Ok(None) => bail!("event channel closed"),
             Ok(Some(ev)) => match ev {
+                Event::Fatal { metric, message } => {
+                    append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                    bail!("RL strict failure {metric}: {message}");
+                }
                 Event::Push { member, push } => {
+                    if let Some(fragments) = cfg.policy_sweep_fragments {
+                        if let Err(error) = validate_policy_sweep_push(&push, fragments) {
+                            let message = format!(
+                                "learner {} generation {}: {error:#}",
+                                member.learner_id, member.generation
+                            );
+                            append_strict_failure(
+                                cfg.event_tape.as_deref(),
+                                "policy_sweep_push_mismatch",
+                                &message,
+                            );
+                            bail!("RL strict failure policy_sweep_push_mismatch: {message}");
+                        }
+                    }
                     let learner_id = member.learner_id;
                     let generation = member.generation;
                     let local_step = push.local_step;
                     let global_step = push.global_step;
                     let fragment_id = push.fragment_id;
-                    match route_push(&mut inflight, member, push) {
+                    let disposition =
+                        route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
+                    match disposition {
                         PushDisposition::Accepted => {
                             step_rates.note(member, local_step, Instant::now());
+                        }
+                        PushDisposition::Duplicate => warn!(
+                            learner_id,
+                            generation,
+                            step = global_step,
+                            fragment = fragment_id,
+                            "duplicate push rejected"
+                        ),
+                        PushDisposition::StaleBase if strict_exact => {
+                            let metric = "rejected_stale_updates";
+                            let message = format!(
+                                "learner {learner_id} generation {generation} step {global_step} fragment {fragment_id}: {disposition:?}"
+                            );
+                            append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                            bail!("RL strict failure {metric}: {message}");
                         }
                         disposition => warn!(
                             learner_id,
@@ -1293,7 +1843,47 @@ async fn scheduler(
                 }
                 Event::Hello { group } => {
                     // Rejoining learner: catch it up to the current state.
-                    send_all_fragments(&st, &group).await;
+                    if st.global_step < cfg.total_steps {
+                        if let Err(error) = send_all_fragments(&st, &group).await {
+                            warn!(
+                                learner_id = group.member.learner_id,
+                                generation = group.member.generation,
+                                %error,
+                                "recovery cut send failed"
+                            );
+                        }
+                    }
+                    if fixed_roster && is_current_member(&registry, group.member) {
+                        for round in &inflight {
+                            if should_replay_pull(round, group.member) {
+                                // Defensive recovery path: ordered commits
+                                // normally leave no in-flight round after the
+                                // terminal step. Keep the terminal fragment
+                                // reserved for the single lossless FINAL cut.
+                                if st.global_step >= cfg.total_steps {
+                                    match send_fragment(
+                                        &st,
+                                        &group,
+                                        round.p,
+                                        MSG_BCAST_FRAGMENT,
+                                        bulk_dtype(st.wire_dtype),
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {}
+                                        Err(error) => warn!(
+                                            learner_id = group.member.learner_id,
+                                            generation = group.member.generation,
+                                            fragment = round.p,
+                                            %error,
+                                            "recovery fragment send failed"
+                                        ),
+                                    }
+                                }
+                                let _ = group.send_small(MSG_PULL_REQ, round.pull.clone()).await;
+                            }
+                        }
+                    }
                 }
                 Event::Init { .. } => {} // already initialized; ignore
                 Event::FinalAck { member, .. } => {
@@ -1345,23 +1935,29 @@ async fn scheduler(
         return Ok(());
     }
 
-    // The outer loop is now quiescent: every launched round has completed.
-    // Persist this authoritative cut regardless of the periodic checkpoint
-    // interval so a non-divisible total_steps can never leave a stale final
-    // checkpoint behind.
+    // Exact-base runs persist every committed cut before BCAST. Other modes
+    // still need a final save when total_steps is not divisible by the
+    // periodic interval.
     if let Some(path) = &cfg.checkpoint_path {
-        if cfg.mark_final_checkpoint {
-            remove_final_marker(path)?;
+        if !checkpoint_each_round {
+            if cfg.mark_final_checkpoint {
+                remove_final_marker(path)?;
+            }
+            st.save_checkpoint(path)?;
+            info!(
+                step = st.global_step,
+                path = %path.display(),
+                "final checkpoint written"
+            );
         }
-        st.save_checkpoint(path)?;
-        info!(
-            step = st.global_step,
-            path = %path.display(),
-            "final checkpoint written"
-        );
-        if cfg.mark_final_checkpoint {
-            write_final_marker(path, st.global_step)?;
+    }
+    if cfg.policy_sweep_fragments.is_some() {
+        if let Some(tape) = cfg.event_tape.as_deref() {
+            append_policy_sweep_ledger_snapshot(tape, &st, "complete")?;
         }
+    }
+    if cfg.mark_final_checkpoint {
+        write_final_marker(cfg.checkpoint_path.as_ref().unwrap(), st.global_step)?;
     }
     if let Some(path) = &cfg.final_state {
         dump_state(&st, path)?;
@@ -1370,10 +1966,14 @@ async fn scheduler(
     // Freeze terminal membership to the live groups at the final cut.
     // Learners already abandoned by fleet recovery are not valid artifact
     // producers and must not prevent surviving learners from finalizing.
-    let final_members: HashSet<u32> = current_groups(&registry)
-        .into_iter()
-        .map(|group| group.member.learner_id)
-        .collect();
+    let final_members: HashSet<u32> = if fixed_roster {
+        (0..cfg.learners).collect()
+    } else {
+        current_groups(&registry)
+            .into_iter()
+            .map(|group| group.member.learner_id)
+            .collect()
+    };
     finalize_learners(&cfg, &st, &mut events, &registry, &final_members).await?;
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the final control frames.
@@ -1421,6 +2021,10 @@ async fn collect_budget_reports(
         .context("learner budget reports require --learner-budget-steps")?;
     while reports.len() < cfg.learners as usize {
         match events.recv().await.context("event channel closed")? {
+            Event::Fatal { metric, message } => {
+                append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                bail!("RL strict failure {metric}: {message}");
+            }
             Event::BudgetDone {
                 member,
                 local_steps,
@@ -1467,6 +2071,7 @@ enum PushDisposition {
     Accepted,
     Duplicate,
     UnexpectedMember,
+    StaleBase,
     FutureBase,
     OutOfRound,
 }
@@ -1495,11 +2100,39 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
     }
 }
 
+/// Return a ready round only when it is the oldest in-flight global step.
+/// Later rounds may finish gathering first, but cannot become durable until
+/// every earlier step has committed.
+fn next_committable_round(rounds: &[Round], now: Instant) -> Option<usize> {
+    let (index, oldest) = rounds
+        .iter()
+        .enumerate()
+        .min_by_key(|(_index, round)| round.t)?;
+    (round_action(oldest, now) == RoundAction::Complete).then_some(index)
+}
+
 fn fragment_available(rounds: &[Round], fragment_id: usize) -> bool {
     !rounds.iter().any(|round| round.p == fragment_id)
 }
 
-fn route_push(rounds: &mut [Round], member: Member, push: Push) -> PushDisposition {
+fn should_replay_pull(round: &Round, member: Member) -> bool {
+    round
+        .expected_members
+        .iter()
+        .any(|expected| expected.learner_id == member.learner_id && *expected != member)
+        && !round
+            .pushes
+            .keys()
+            .any(|accepted| accepted.learner_id == member.learner_id)
+}
+
+fn route_push(
+    rounds: &mut [Round],
+    member: Member,
+    push: Push,
+    max_base_lag: Option<u64>,
+    fixed_roster: bool,
+) -> PushDisposition {
     let Some(round) = rounds.iter_mut().find(|round| {
         round.t == push.global_step
             && round.p == push.fragment_id as usize
@@ -1507,20 +2140,41 @@ fn route_push(rounds: &mut [Round], member: Member, push: Push) -> PushDispositi
     }) else {
         return PushDisposition::OutOfRound;
     };
-    if !round.expected_members.contains(&member) {
+    let expected = if fixed_roster {
+        round
+            .expected_members
+            .iter()
+            .any(|expected| expected.learner_id == member.learner_id)
+    } else {
+        round.expected_members.contains(&member)
+    };
+    if !expected {
         return PushDisposition::UnexpectedMember;
     }
     if push.base_version > round.base_version {
         return PushDisposition::FutureBase;
     }
-    if round.pushes.contains_key(&member) {
+    if max_base_lag.is_some_and(|limit| round.base_version - push.base_version > limit) {
+        return PushDisposition::StaleBase;
+    }
+    let duplicate = if fixed_roster {
+        round
+            .pushes
+            .keys()
+            .any(|accepted| accepted.learner_id == member.learner_id)
+    } else {
+        round.pushes.contains_key(&member)
+    };
+    if duplicate {
         return PushDisposition::Duplicate;
     }
     round.pushes.insert(member, push);
     PushDisposition::Accepted
 }
 
-/// Merge a gathered round, apply the outer step, broadcast, and record it.
+/// Merge a gathered round, apply the outer step, broadcast a non-terminal
+/// update, and record it. The terminal cut is sent once by FINAL_FRAGMENT;
+/// emitting the same model-sized cut as BCAST first would double receiver RSS.
 /// Called from the single scheduler task, so merges are serialized even
 /// with several rounds in flight; concurrent rounds target distinct
 /// fragments, so each merge touches disjoint params/momentum.
@@ -1544,6 +2198,13 @@ async fn complete_round(
         pushes,
         ..
     } = round;
+    let expected_step = st
+        .global_step
+        .checked_add(1)
+        .context("global step overflow before round commit")?;
+    if t != expected_step {
+        bail!("refusing non-contiguous round commit: got step {t}, expected {expected_step}");
+    }
     debug_assert_eq!(st.versions[p], base_version);
     let (mut outer_gradients, mut weights, mut responders) = (Vec::new(), Vec::new(), Vec::new());
     for (member, push) in &pushes {
@@ -1561,23 +2222,48 @@ async fn complete_round(
             );
         }
         outer_gradients.push(push.outer_gradient.as_slice());
-        weights.push(crate::merge::learner_weight(push.c_tokens, push.c_steps));
+        weights.push(match cfg.learner_weight {
+            LearnerWeight::Tokens2OverSteps => {
+                crate::merge::learner_weight(push.c_tokens, push.c_steps)
+            }
+            LearnerWeight::Equal => 1.0,
+        });
         responders.push(*member);
     }
     let sync_start = Instant::now();
     let gnorm = st.merge_and_step(p, &outer_gradients, &weights)?;
     st.versions[p] = t;
-    // Pipelined rounds can complete out of order; the global step only
-    // moves forward.
-    st.global_step = st.global_step.max(t);
+    st.global_step = t;
     for push in pushes.values() {
-        st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
+        if let Some(fragments) = cfg.policy_sweep_fragments {
+            st.record_fragment_merge(
+                push.learner_id,
+                push.c_steps,
+                push.c_tokens,
+                t.is_multiple_of(u64::from(fragments)),
+            );
+        } else {
+            // Keep the legacy accounting path exactly as before opt-in sweep
+            // mode existed.
+            st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
+        }
     }
 
-    // Broadcast the updated fragment.
-    let payload = encode_bcast(st, p)?;
-    for g in current_groups(registry) {
-        let _ = g.send_large(MSG_BCAST_FRAGMENT, payload.clone()).await;
+    let checkpoint_each_round = checkpoint_before_broadcast(cfg);
+    if checkpoint_each_round {
+        if let Some(path) = cfg.checkpoint_path.as_ref() {
+            st.save_checkpoint(path)?;
+            info!(step = t, path = %path.display(), "checkpoint committed");
+        }
+    }
+
+    // A disconnected learner can catch up after reconnecting. Deterministic
+    // local encoding/allocation failures must terminate the coordinator
+    // instead of silently committing a cut that was never broadcastable.
+    // The terminal round is the sole exception: finalize_learners publishes
+    // its exact f32 cut immediately after the scheduler reaches quiescence.
+    if t < cfg.total_steps {
+        broadcast_updated_fragment(st, registry, p).await?;
     }
     *last_sync_secs = sync_start.elapsed().as_secs_f64();
     let sync_ms = (*last_sync_secs * 1000.0).round() as u64;
@@ -1591,8 +2277,7 @@ async fn complete_round(
         "outer step"
     );
     if let Some(tape) = &cfg.event_tape {
-        // Records land in completion order, which under pipelining is not
-        // necessarily step order.
+        // Durable completion is globally ordered even when gathering is not.
         append_tape(
             tape,
             t,
@@ -1607,28 +2292,47 @@ async fn complete_round(
             &pushes,
             gnorm,
             ms,
+            &st.layout_fingerprint,
+            cfg.policy_sweep_fragments,
         );
     }
-    // Consistent cut: this round is fully applied and broadcast, and every
-    // other in-flight round is still gathering (it has not touched state).
+    // Consistent cut: this round is fully applied and every other in-flight
+    // round is still gathering (it has not touched state). Non-terminal cuts
+    // have also been broadcast; the terminal cut is delivered by FINAL.
     // A crash-resume loses those gathers; their fragments simply merge on
     // a later cycle, which the quorum design already tolerates.
-    if let Some(path) = &cfg.checkpoint_path {
-        if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
-            st.save_checkpoint(path)?;
-            info!(step = t, path = %path.display(), "checkpoint written");
+    if !checkpoint_each_round {
+        if let Some(path) = &cfg.checkpoint_path {
+            if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
+                st.save_checkpoint(path)?;
+                info!(step = t, path = %path.display(), "checkpoint written");
+            }
         }
     }
     Ok(())
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
-    let mut st = GlobalState::new(
+    if let Some(fragments) = cfg.policy_sweep_fragments {
+        if group.dtype != DTYPE_F32 {
+            bail!("--policy-sweep-fragments requires an FP32 HELLO session");
+        }
+        if group.layout.fragments.len() != fragments as usize {
+            bail!(
+                "--policy-sweep-fragments declares {fragments}, but decoded layout has {} fragments",
+                group.layout.fragments.len()
+            );
+        }
+    }
+    let mut st = GlobalState::new_with_layout_fingerprint(
         group.layout.clone(),
         cfg.outer_lr,
         cfg.outer_momentum,
         group.dtype,
+        group.layout_fingerprint,
     )?;
+    st.policy_sweep_fragments = cfg.policy_sweep_fragments;
+    st.session_contract_hash = Some(group.session_contract_hash);
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
@@ -1650,7 +2354,14 @@ fn is_current_member(registry: &Registry, member: Member) -> bool {
 
 async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
     for g in current_groups(registry) {
-        send_all_fragments(st, &g).await;
+        if let Err(error) = send_all_fragments(st, &g).await {
+            warn!(
+                learner_id = g.member.learner_id,
+                generation = g.member.generation,
+                %error,
+                "initial authoritative cut send failed"
+            );
+        }
     }
 }
 
@@ -1660,9 +2371,7 @@ async fn broadcast_all_fragments(st: &GlobalState, registry: &Registry) {
 /// is locally available.
 async fn send_final_cut(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
     for p in 0..st.layout.fragments.len() {
-        group
-            .send_large(MSG_FINAL_FRAGMENT, encode_final_fragment(st, p)?)
-            .await?;
+        send_fragment(st, group, p, MSG_FINAL_FRAGMENT, DTYPE_F32).await?;
     }
     group
         .send_small(
@@ -1747,7 +2456,7 @@ async fn finalize_learners(
         }
     }
 
-    let deadline = Instant::now() + Duration::from_secs(cfg.quorum_timeout_s);
+    let deadline = Instant::now() + Duration::from_secs(cfg.final_ack_timeout_s);
     let mut acknowledged: HashMap<u32, Member> = HashMap::new();
     while acknowledged.len() < expected.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1762,12 +2471,16 @@ async fn finalize_learners(
                 missing.sort_unstable();
                 anyhow::anyhow!(
                     "finalization timed out after {}s waiting for learner acknowledgements: {:?}",
-                    cfg.quorum_timeout_s,
+                    cfg.final_ack_timeout_s,
                     missing
                 )
             })?
             .context("event channel closed during finalization")?;
         match event {
+            Event::Fatal { metric, message } => {
+                append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
+                bail!("RL strict failure {metric}: {message}");
+            }
             Event::FinalAck {
                 member,
                 global_step,
@@ -1869,43 +2582,164 @@ async fn finalize_learners(
     Ok(())
 }
 
-async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) {
+async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
     for p in 0..st.layout.fragments.len() {
-        match encode_bcast(st, p) {
-            Ok(payload) => {
-                let _ = group.send_large(MSG_BCAST_FRAGMENT, payload).await;
+        send_fragment(st, group, p, MSG_BCAST_FRAGMENT, bulk_dtype(st.wire_dtype)).await?;
+    }
+    Ok(())
+}
+
+async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: usize) -> Result<()> {
+    let dtype = bulk_dtype(st.wire_dtype);
+    for group in current_groups(registry) {
+        match send_fragment(st, &group, p, MSG_BCAST_FRAGMENT, dtype).await {
+            Ok(()) => {}
+            Err(error) if error.downcast_ref::<OutboundStreamClosed>().is_some() => warn!(
+                learner_id = group.member.learner_id,
+                generation = group.member.generation,
+                fragment = p,
+                %error,
+                "updated fragment broadcast skipped for closed learner stream"
+            ),
+            Err(error) => {
+                return Err(error.context(format!("cannot broadcast updated fragment {p}")));
             }
-            Err(e) => warn!("encode fragment {p} failed: {e}"),
         }
     }
+    Ok(())
 }
 
-fn encode_bcast(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
-    // All learners share one dtype (validated at HELLO); use the state dtype.
-    // Broadcasts are full parameters, so a q4 session still sends bf16.
-    let mut body = Vec::new();
-    encode_tensor(bulk_dtype(st.wire_dtype), &st.params[p], &mut body)?;
-    let mut payload = Vec::with_capacity(12 + body.len());
-    payload.extend_from_slice(&(p as u32).to_le_bytes());
-    payload.extend_from_slice(&st.versions[p].to_le_bytes());
-    payload.extend_from_slice(&body);
-    Ok(bytes::Bytes::from(payload))
-}
-
-fn encode_final_fragment(st: &GlobalState, p: usize) -> Result<bytes::Bytes> {
-    // The coordinator's authoritative params and checkpoint are f32. The
-    // terminal path is deliberately independent of the ordinary wire dtype
-    // so bf16/q4 sessions do not round the artifact a second time.
-    let mut body = Vec::new();
-    encode_tensor(DTYPE_F32, &st.params[p], &mut body)?;
-    let mut payload = Vec::with_capacity(12 + body.len());
-    payload.extend_from_slice(&(p as u32).to_le_bytes());
-    payload.extend_from_slice(&st.versions[p].to_le_bytes());
-    payload.extend_from_slice(&body);
-    Ok(bytes::Bytes::from(payload))
+async fn send_fragment(
+    st: &GlobalState,
+    group: &Arc<Group>,
+    p: usize,
+    msg_type: u8,
+    dtype: u8,
+) -> Result<()> {
+    let mut prefix = [0u8; 12];
+    prefix[..4].copy_from_slice(&(p as u32).to_le_bytes());
+    prefix[4..].copy_from_slice(&st.versions[p].to_le_bytes());
+    group
+        .send_tensor_large(msg_type, &prefix, dtype, &st.params[p])
+        .await
 }
 
 /// One JSONL record per merge: the event tape.
+fn append_strict_failure(path: Option<&std::path::Path>, metric: &str, message: &str) {
+    use std::io::Write;
+
+    let Some(path) = path else {
+        return;
+    };
+    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    let line = format!(
+        "{{\"event\":\"rl_strict_failure\",\"metric\":\"{metric}\",\"value\":1,\"error\":\"{escaped}\"}}\n"
+    );
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
+    }
+}
+
+/// Append an idempotent, fsynced accounting cut after a sweep checkpoint has
+/// become authoritative. A crash between the checkpoint rename and the
+/// ordinary per-merge tape append can lose that diagnostic merge record; the
+/// resume and terminal snapshots make the durable ledger reconcilable without
+/// charging local steps or tokens again.
+fn append_policy_sweep_ledger_snapshot(
+    path: &std::path::Path,
+    st: &GlobalState,
+    phase: &str,
+) -> Result<()> {
+    use std::io::Write;
+
+    let fragments = st
+        .policy_sweep_fragments
+        .context("policy-sweep ledger snapshot requires a sweep profile")?;
+    let layout_hash: String = st
+        .layout_fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let event_id = format!(
+        "policy-sweep-ledger:{layout_hash}:{phase}:{}",
+        st.global_step
+    );
+    let existing = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let needle = format!("\"event_id\":\"{event_id}\"");
+    let already_committed = existing.split_inclusive(|byte| *byte == b'\n').any(|line| {
+        line.ends_with(b"\n")
+            && line
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+    });
+    if already_committed {
+        return Ok(());
+    }
+
+    let versions = st
+        .versions
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let ledger = st
+        .ledger
+        .iter()
+        .map(|(learner_id, entry)| {
+            format!(
+                "{{\"id\":{learner_id},\"merges\":{},\"steps\":{},\"tokens\":{}}}",
+                entry.merges, entry.steps, entry.tokens
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let policy_round = if st.global_step == 0 {
+        0
+    } else {
+        st.global_step.div_ceil(u64::from(fragments))
+    };
+    let sweep_complete = st.global_step.is_multiple_of(u64::from(fragments));
+    let line = format!(
+        "{{\"event\":\"policy_sweep_ledger\",\"event_id\":\"{event_id}\",\"phase\":\"{phase}\",\"protocol_version\":{PROTOCOL_VERSION},\"sync/layout_hash\":\"{layout_hash}\",\"global_step\":{},\"policy_round\":{policy_round},\"sweep_fragments\":{fragments},\"sweep_complete\":{sweep_complete},\"versions\":[{versions}],\"ledger\":[{ledger}]}}\n",
+        st.global_step
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    if existing.last().is_some_and(|byte| *byte != b'\n') {
+        // Preserve a torn diagnostic tail as an independently skippable line.
+        file.write_all(b"\n")?;
+    }
+    file.write_all(line.as_bytes())?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn policy_sweep_event_fields(step: u64, fragments: Option<u32>) -> String {
+    let Some(fragments) = fragments else {
+        return String::new();
+    };
+    let fragments_u64 = u64::from(fragments);
+    let policy_round = step.div_ceil(fragments_u64);
+    let sweep_fragment = (step - 1) % fragments_u64;
+    let sweep_complete = step.is_multiple_of(fragments_u64);
+    format!(
+        ",\"policy_round\":{policy_round},\"sweep_fragment\":{sweep_fragment},\"sweep_fragments\":{fragments},\"sweep_complete\":{sweep_complete}"
+    )
+}
+
 fn append_tape(
     path: &std::path::Path,
     step: u64,
@@ -1920,6 +2754,8 @@ fn append_tape(
     pushes: &HashMap<Member, Push>,
     gnorm: f64,
     ms: u64,
+    layout_fingerprint: &[u8; 32],
+    policy_sweep_fragments: Option<u32>,
 ) {
     use std::io::Write;
     let mut responded_members: Vec<Member> = pushes.keys().copied().collect();
@@ -1941,24 +2777,41 @@ fn append_tape(
         .iter()
         .map(|member| member.learner_id)
         .collect();
-    let weight_sum: f64 = pushes
-        .values()
-        .map(|p| crate::merge::learner_weight(p.c_tokens, p.c_steps))
-        .sum();
+    let event_weight = |push: &Push| {
+        if policy_sweep_fragments.is_some() {
+            // The sweep profile is validated as equal-weighted; its event
+            // tape must describe the merge that actually happened.
+            1.0
+        } else {
+            crate::merge::learner_weight(push.c_tokens, push.c_steps)
+        }
+    };
+    let weight_sum: f64 = pushes.values().map(event_weight).sum();
     let mut responders: Vec<String> = pushes
         .iter()
         .map(|(member, p)| {
-            let weight = crate::merge::learner_weight(p.c_tokens, p.c_steps);
+            let weight = event_weight(p);
             let contribution = if weight_sum > 0.0 { weight / weight_sum } else { 0.0 };
             let staleness = launch_base_version.saturating_sub(p.base_version);
+            let accounting_fields = policy_sweep_fragments.map_or_else(String::new, |fragments| {
+                let (steps, tokens) = if step.is_multiple_of(u64::from(fragments)) {
+                    (p.c_steps, p.c_tokens)
+                } else {
+                    (0, 0)
+                };
+                format!(
+                    ",\"accounted_c_steps\":{steps},\"accounted_c_tokens\":{tokens}"
+                )
+            });
             format!(
-                "{{\"id\":{},\"generation\":{},\"base_version\":{},\"staleness\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{},\"contribution\":{}}}",
+                "{{\"id\":{},\"generation\":{},\"base_version\":{},\"staleness\":{},\"c_steps\":{},\"c_tokens\":{}{},\"weight\":{},\"contribution\":{}}}",
                 p.learner_id,
                 member.generation,
                 p.base_version,
                 staleness,
                 p.c_steps,
                 p.c_tokens,
+                accounting_fields,
                 weight,
                 contribution
             )
@@ -1967,8 +2820,15 @@ fn append_tape(
     responders.sort();
     let quorum_ms = json_opt_u64(quorum_ms);
     let grace_ms = json_opt_u64(grace_ms);
+    let layout_hash: String = layout_fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let merge_seconds = sync_ms as f64 / 1000.0;
+    let sweep_fields = policy_sweep_event_fields(step, policy_sweep_fragments);
     let line = format!(
-        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"step\":{step},\"fragment\":{fragment},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"responders\":[{}]}}\n",
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"responders\":[{}]}}\n",
+        responded.len(),
         json_ids(&expected_learners),
         json_members(expected_members),
         json_ids(&responded),
@@ -2041,13 +2901,31 @@ mod tests {
     }
 
     fn test_group(member: Member) -> Arc<Group> {
+        test_group_with_layout(
+            member,
+            Layout {
+                fragments: Vec::new(),
+            },
+        )
+    }
+
+    fn test_group_with_layout(member: Member, layout: Layout) -> Arc<Group> {
+        test_group_with_session(member, layout, [0; 32], [0; 32])
+    }
+
+    fn test_group_with_session(
+        member: Member,
+        layout: Layout,
+        layout_fingerprint: [u8; 32],
+        session_contract_hash: [u8; 32],
+    ) -> Arc<Group> {
         let (control, _receiver) = mpsc::channel(1);
         Arc::new(Group {
             member,
             dtype: DTYPE_F32,
-            layout: Layout {
-                fragments: Vec::new(),
-            },
+            layout,
+            layout_fingerprint,
+            session_contract_hash,
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
@@ -2058,6 +2936,996 @@ mod tests {
             rr: AtomicUsize::new(0),
             reasm: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn streaming_test_group(
+        dtype: u8,
+        data_stream: bool,
+    ) -> (Arc<Group>, mpsc::Receiver<OutFrame>) {
+        let (control, control_rx) = mpsc::channel(64);
+        let (data, data_rx) = mpsc::channel(64);
+        let mut streams = HashMap::new();
+        if data_stream {
+            streams.insert(0, data);
+        }
+        let group = Arc::new(Group {
+            member: member(0, 10),
+            dtype,
+            layout: Layout {
+                fragments: Vec::new(),
+            },
+            layout_fingerprint: [0; 32],
+            session_contract_hash: [0; 32],
+            num_streams: u16::from(data_stream),
+            max_init_payload: 0,
+            max_push_payload: 0,
+            max_chunked_inner: u64::MAX,
+            control,
+            data: Mutex::new(streams),
+            msg_id: AtomicU64::new(0),
+            rr: AtomicUsize::new(0),
+            reasm: Mutex::new(HashMap::new()),
+        });
+        (group, if data_stream { data_rx } else { control_rx })
+    }
+
+    fn buffered_tensor_inner(msg_type: u8, prefix: &[u8], dtype: u8, values: &[f32]) -> Vec<u8> {
+        let mut tensor = Vec::new();
+        encode_tensor(dtype, values, &mut tensor).unwrap();
+        let payload_len = prefix.len() + tensor.len();
+        let mut inner = Vec::with_capacity(13 + payload_len);
+        inner.extend_from_slice(&MAGIC.to_le_bytes());
+        inner.push(msg_type);
+        inner.extend_from_slice(&(payload_len as u64).to_le_bytes());
+        inner.extend_from_slice(prefix);
+        inner.extend_from_slice(&tensor);
+        inner
+    }
+
+    async fn streamed_tensor_inner(
+        msg_type: u8,
+        prefix: &[u8],
+        dtype: u8,
+        values: &[f32],
+        chunk_size: usize,
+        data_stream: bool,
+    ) -> Vec<u8> {
+        let (group, mut receiver) = streaming_test_group(dtype, data_stream);
+        group
+            .send_tensor_large_chunked(msg_type, prefix, dtype, values, chunk_size)
+            .await
+            .unwrap();
+
+        let total = 13 + prefix.len() + tensor_nbytes(dtype, values.len()).unwrap();
+        let frame_count = total.div_ceil(chunk_size);
+        let mut inner = Vec::with_capacity(total);
+        let mut msg_id = None;
+        for _ in 0..frame_count {
+            let frame = receiver.recv().await.unwrap();
+            assert_eq!(frame.msg_type, MSG_CHUNK);
+            assert_eq!(frame.parts.len(), 2);
+            assert_eq!(frame.parts[0].len(), CHUNK_HEADER_SIZE as usize);
+            assert!(frame.parts[1].len() <= chunk_size);
+            assert!(
+                frame.parts.iter().map(bytes::Bytes::len).sum::<usize>()
+                    <= CHUNK_HEADER_SIZE as usize + chunk_size
+            );
+
+            let head = &frame.parts[0];
+            let frame_msg_id = u64::from_le_bytes(head[0..8].try_into().unwrap());
+            let frame_total = u64::from_le_bytes(head[8..16].try_into().unwrap());
+            let frame_offset = u64::from_le_bytes(head[16..24].try_into().unwrap());
+            assert_eq!(*msg_id.get_or_insert(frame_msg_id), frame_msg_id);
+            assert_eq!(frame_total as usize, total);
+            assert_eq!(frame_offset as usize, inner.len());
+            inner.extend_from_slice(&frame.parts[1]);
+        }
+        assert_eq!(inner.len(), total);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        inner
+    }
+
+    #[tokio::test]
+    async fn streamed_tensor_frames_are_byte_identical_and_chunk_bounded() {
+        let values: Vec<f32> = (0..47).map(|value| value as f32 / 8.0 - 2.5).collect();
+        let mut prefix = [0u8; 12];
+        prefix[..4].copy_from_slice(&3u32.to_le_bytes());
+        prefix[4..].copy_from_slice(&9u64.to_le_bytes());
+        let chunk_size = 17;
+
+        for (msg_type, dtype, data_stream) in [
+            (MSG_BCAST_FRAGMENT, DTYPE_BF16, true),
+            (MSG_FINAL_FRAGMENT, DTYPE_F32, false),
+        ] {
+            let expected = buffered_tensor_inner(msg_type, &prefix, dtype, &values);
+            let actual =
+                streamed_tensor_inner(msg_type, &prefix, dtype, &values, chunk_size, data_stream)
+                    .await;
+            assert_eq!(actual, expected);
+        }
+    }
+
+    fn broadcast_test_state(dtype: u8) -> GlobalState {
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: crate::state::MERGE_AVG,
+                tensor_numels: vec![4],
+                tensor_shapes: None,
+            }],
+        };
+        let mut state = GlobalState::new(layout, 1.0, 0.0, dtype).unwrap();
+        state.init_fragment(0, vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        state
+    }
+
+    fn registry_with_group(group: Arc<Group>) -> Registry {
+        let registry = Arc::new(Mutex::new(RegistryState::default()));
+        registry.lock().unwrap().register_group(group).unwrap();
+        registry
+    }
+
+    fn round_test_config(total_steps: u64) -> Config {
+        Config {
+            port: 0,
+            learners: 1,
+            quorum: 1,
+            grace_ms: 0,
+            grace_gamma: 0.5,
+            grace_tau: 0.0,
+            pipeline: 1,
+            min_round_interval_ms: 0,
+            sync_interval_steps: 0.0,
+            delta_correction: false,
+            quorum_timeout_s: 1,
+            final_ack_timeout_s: 1,
+            total_steps,
+            policy_sweep_fragments: None,
+            outer_lr: 1.0,
+            outer_momentum: 0.0,
+            final_state: None,
+            checkpoint_path: None,
+            checkpoint_every: 0,
+            resume: false,
+            mark_final_checkpoint: false,
+            learner_budget_steps: None,
+            event_tape: None,
+            max_base_lag: Some(0),
+            learner_weight: LearnerWeight::Equal,
+            require_profile_binding: false,
+        }
+    }
+
+    #[test]
+    fn semantic_profile_hash_matches_the_python_canonical_vector() {
+        let mut config = round_test_config(8);
+        config.learners = 2;
+        config.quorum = 2;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        config.pipeline = 2;
+        config.sync_interval_steps = 24.0;
+        config.quorum_timeout_s = 900;
+        config.final_ack_timeout_s = 900;
+        config.outer_lr = 0.7;
+        config.outer_momentum = 0.9;
+        config.checkpoint_path = Some(std::path::PathBuf::from("/ignored/actor.ckpt"));
+        config.checkpoint_every = 1;
+        config.resume = true;
+        config.mark_final_checkpoint = true;
+        config.require_profile_binding = true;
+        let digest = config
+            .semantic_profile_hash()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest,
+            "b904a25c417a24deef77b8526c4e982a13a35c65d331a4cafb74e579b584d4b7"
+        );
+
+        let original = config.semantic_profile_hash();
+        config.port = 30123;
+        config.checkpoint_path = Some(std::path::PathBuf::from("/another/critic.ckpt"));
+        config.final_state = Some(std::path::PathBuf::from("/ignored/final.bin"));
+        config.event_tape = Some(std::path::PathBuf::from("/ignored/events.jsonl"));
+        assert_eq!(config.semantic_profile_hash(), original);
+        config.pipeline = 3;
+        assert_ne!(config.semantic_profile_hash(), original);
+    }
+
+    fn sweep_test_config(fragments: u32, total_steps: u64) -> Config {
+        let mut config = round_test_config(total_steps);
+        config.policy_sweep_fragments = Some(fragments);
+        config.checkpoint_path = Some(std::path::PathBuf::from("policy-sweep-test.ckpt"));
+        config.checkpoint_every = 1;
+        config.resume = true;
+        config
+    }
+
+    #[test]
+    fn policy_sweep_static_profile_is_strict_and_legacy_profile_is_unchanged() {
+        assert!(validate_config(&round_test_config(3)).is_ok());
+        assert!(validate_config(&sweep_test_config(2, 4)).is_ok());
+
+        let mut invalid = sweep_test_config(0, 4);
+        assert!(
+            format!("{:#}", validate_config(&invalid).unwrap_err()).contains("must be positive")
+        );
+
+        invalid = sweep_test_config(2, 0);
+        assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+            .contains("requires positive --total-steps"));
+
+        invalid = sweep_test_config(2, 4);
+        invalid.pipeline = 2;
+        assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+            .contains("requires --pipeline 1"));
+
+        invalid = sweep_test_config(3, 4);
+        assert!(
+            format!("{:#}", validate_config(&invalid).unwrap_err()).contains("must be divisible")
+        );
+
+        for mutate in [
+            |config: &mut Config| config.max_base_lag = None,
+            |config: &mut Config| {
+                config.learners = 2;
+                config.quorum = 1;
+            },
+            |config: &mut Config| config.grace_ms = 1,
+        ] {
+            invalid = sweep_test_config(2, 4);
+            mutate(&mut invalid);
+            assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+                .contains("strict fixed roster"));
+        }
+
+        invalid = sweep_test_config(2, 4);
+        invalid.delta_correction = true;
+        assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+            .contains("requires --delta-correction none"));
+
+        invalid = sweep_test_config(2, 4);
+        invalid.learner_weight = LearnerWeight::Tokens2OverSteps;
+        assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+            .contains("requires --learner-weight equal"));
+
+        for mutate in [
+            |config: &mut Config| config.checkpoint_path = None,
+            |config: &mut Config| config.checkpoint_every = 2,
+            |config: &mut Config| config.resume = false,
+        ] {
+            invalid = sweep_test_config(2, 4);
+            mutate(&mut invalid);
+            assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+                .contains("requires --checkpoint-path"));
+        }
+    }
+
+    #[test]
+    fn policy_sweep_must_equal_the_decoded_layout_fragment_count() {
+        let layout = Layout {
+            fragments: vec![
+                crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                },
+                crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                },
+            ],
+        };
+        let group = test_group_with_layout(member(0, 1), layout);
+        assert!(new_state_for(&group, &sweep_test_config(2, 4)).is_ok());
+        let error = new_state_for(&group, &sweep_test_config(1, 4))
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("decoded layout has 2 fragments"));
+    }
+
+    #[test]
+    fn generic_streaming_restart_requires_the_exact_session_contract() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-generic-stream-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: crate::state::MERGE_AVG,
+                tensor_numels: vec![2],
+                tensor_shapes: None,
+            }],
+        };
+        let config = round_test_config(3);
+
+        let first_group = test_group_with_session(member(0, 1), layout.clone(), [3; 32], [4; 32]);
+        let mut before_restart = new_state_for(&first_group, &config).unwrap();
+        assert_eq!(before_restart.policy_sweep_fragments, None);
+        assert_eq!(before_restart.session_contract_hash, Some([4; 32]));
+        before_restart.init_fragment(0, vec![1.0, -2.0]).unwrap();
+        before_restart.global_step = 2;
+        before_restart.versions[0] = 2;
+        before_restart.record_merge(0, 5, 1234);
+        before_restart.save_checkpoint(&checkpoint).unwrap();
+
+        let matching_group =
+            test_group_with_session(member(0, 2), layout.clone(), [3; 32], [4; 32]);
+        let mut recovered = new_state_for(&matching_group, &config).unwrap();
+        recovered.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(recovered.global_step, 2);
+        assert_eq!(recovered.versions, vec![2]);
+        assert_eq!(recovered.params, before_restart.params);
+        assert_eq!(recovered.ledger.get(&0).unwrap().tokens, 1234);
+
+        let mismatched_group = test_group_with_session(member(0, 2), layout, [3; 32], [5; 32]);
+        let mut mismatched = new_state_for(&mismatched_group, &config).unwrap();
+        let error = mismatched.load_checkpoint(&checkpoint).unwrap_err();
+        assert!(format!("{error:#}").contains("session contract hash does not match"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn policy_sweep_pushes_bind_fragment_steps_to_one_logical_local_step() {
+        for (global_step, local_step) in [(1, 1), (2, 1), (3, 1), (4, 2), (6, 2)] {
+            let push = Push {
+                learner_id: 0,
+                fragment_id: ((global_step - 1) % 3) as u32,
+                global_step,
+                round_attempt: 1,
+                base_version: 0,
+                local_step,
+                c_steps: 1,
+                c_tokens: 99,
+                outer_gradient: vec![1.0],
+            };
+            validate_policy_sweep_push(&push, 3).unwrap();
+        }
+
+        let mut bad_local_step = test_exact_push(0, 5);
+        bad_local_step.global_step = 4;
+        bad_local_step.local_step = 1;
+        assert!(format!(
+            "{:#}",
+            validate_policy_sweep_push(&bad_local_step, 3).unwrap_err()
+        )
+        .contains("requires local_step 2"));
+
+        let mut bad_c_steps = bad_local_step;
+        bad_c_steps.local_step = 2;
+        bad_c_steps.c_steps = 2;
+        assert!(format!(
+            "{:#}",
+            validate_policy_sweep_push(&bad_c_steps, 3).unwrap_err()
+        )
+        .contains("requires c_steps=1"));
+    }
+
+    #[test]
+    fn policy_sweep_resume_mapping_is_deterministic_mid_sweep() {
+        let expected = [
+            [0, 0, 0],
+            [1, 0, 0],
+            [1, 2, 0],
+            [1, 2, 3],
+            [4, 2, 3],
+            [4, 5, 3],
+            [4, 5, 6],
+        ];
+        for (global_step, versions) in expected.into_iter().enumerate() {
+            let actual = [
+                expected_sweep_fragment_version(global_step as u64, 0, 3),
+                expected_sweep_fragment_version(global_step as u64, 1, 3),
+                expected_sweep_fragment_version(global_step as u64, 2, 3),
+            ];
+            assert_eq!(actual, versions);
+        }
+
+        let layout = Layout {
+            fragments: (0..3)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state = GlobalState::new(layout, 1.0, 0.0, DTYPE_F32).unwrap();
+        state.policy_sweep_fragments = Some(3);
+        state.session_contract_hash = Some([2; 32]);
+        for fragment in 0..3 {
+            state.init_fragment(fragment, vec![0.0]).unwrap();
+        }
+        state.global_step = 2;
+        state.versions = vec![1, 2, 0];
+        for learner_id in 0..2 {
+            state.record_fragment_merge(learner_id, 1, 50, false);
+            state.record_fragment_merge(learner_id, 1, 50, false);
+        }
+        let mut config = sweep_test_config(3, 6);
+        config.learners = 2;
+        config.quorum = 2;
+        validate_resumed_policy_sweep(&config, &state).unwrap();
+
+        state.ledger.get_mut(&0).unwrap().steps = 1;
+        assert!(format!(
+            "{:#}",
+            validate_resumed_policy_sweep(&config, &state).unwrap_err()
+        )
+        .contains("expected merges=2 steps=0"));
+    }
+
+    fn terminal_test_round(step: u64, member: Member) -> Round {
+        Round {
+            t: step,
+            p: 0,
+            base_version: 0,
+            attempt: 1,
+            pull: bytes::Bytes::new(),
+            started: Instant::now(),
+            expected_members: vec![member],
+            quorum_deadline: Instant::now(),
+            grace_deadline: None,
+            quorum_size: 1,
+            quorum_ms: Some(0),
+            grace_ms: Some(0),
+            pushes: HashMap::from([(
+                member,
+                Push {
+                    learner_id: member.learner_id,
+                    fragment_id: 0,
+                    global_step: step,
+                    round_attempt: 1,
+                    base_version: 0,
+                    local_step: step,
+                    c_steps: 1,
+                    c_tokens: 1,
+                    outer_gradient: vec![0.25; 4],
+                },
+            )]),
+        }
+    }
+
+    fn two_fragment_sweep_state() -> GlobalState {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state =
+            GlobalState::new_with_layout_fingerprint(layout, 1.0, 0.0, DTYPE_F32, [3; 32]).unwrap();
+        state.policy_sweep_fragments = Some(2);
+        state.session_contract_hash = Some([3; 32]);
+        state.init_fragment(0, vec![0.0]).unwrap();
+        state.init_fragment(1, vec![0.0]).unwrap();
+        state
+    }
+
+    fn three_fragment_sweep_state() -> GlobalState {
+        let layout = Layout {
+            fragments: (0..3)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state =
+            GlobalState::new_with_layout_fingerprint(layout, 1.0, 0.0, DTYPE_F32, [4; 32]).unwrap();
+        state.policy_sweep_fragments = Some(3);
+        state.session_contract_hash = Some([4; 32]);
+        for fragment in 0..3 {
+            state.init_fragment(fragment, vec![0.0]).unwrap();
+        }
+        state
+    }
+
+    fn sweep_test_round(
+        step: u64,
+        fragment: usize,
+        policy_round: u64,
+        c_tokens: u64,
+        member: Member,
+    ) -> Round {
+        Round {
+            t: step,
+            p: fragment,
+            base_version: 0,
+            attempt: 1,
+            pull: bytes::Bytes::new(),
+            started: Instant::now(),
+            expected_members: vec![member],
+            quorum_deadline: Instant::now(),
+            grace_deadline: None,
+            quorum_size: 1,
+            quorum_ms: Some(0),
+            grace_ms: Some(0),
+            pushes: HashMap::from([(
+                member,
+                Push {
+                    learner_id: member.learner_id,
+                    fragment_id: fragment as u32,
+                    global_step: step,
+                    round_attempt: 1,
+                    base_version: 0,
+                    local_step: policy_round,
+                    c_steps: 1,
+                    c_tokens,
+                    outer_gradient: vec![0.25],
+                },
+            )]),
+        }
+    }
+
+    fn two_learner_sweep_round(step: u64) -> Round {
+        let policy_round = step.div_ceil(3);
+        let fragment = ((step - 1) % 3) as usize;
+        let base_version = step.saturating_sub(3);
+        let members = [member(0, 30), member(1, 31)];
+        let pushes = members
+            .into_iter()
+            .map(|member| {
+                (
+                    member,
+                    Push {
+                        learner_id: member.learner_id,
+                        fragment_id: fragment as u32,
+                        global_step: step,
+                        round_attempt: 1,
+                        base_version,
+                        local_step: policy_round,
+                        c_steps: 1,
+                        c_tokens: u64::from(member.learner_id + 1) * policy_round * 100,
+                        outer_gradient: vec![policy_round as f32 + 2.0 * member.learner_id as f32],
+                    },
+                )
+            })
+            .collect();
+        Round {
+            t: step,
+            p: fragment,
+            base_version,
+            attempt: 1,
+            pull: bytes::Bytes::new(),
+            started: Instant::now(),
+            expected_members: members.to_vec(),
+            quorum_deadline: Instant::now(),
+            grace_deadline: None,
+            quorum_size: 2,
+            quorum_ms: Some(0),
+            grace_ms: Some(0),
+            pushes,
+        }
+    }
+
+    fn two_fragment_streaming_state() -> GlobalState {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![1],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let mut state = GlobalState::new(layout, 1.0, 0.0, DTYPE_F32).unwrap();
+        state.init_fragment(0, vec![0.0]).unwrap();
+        state.init_fragment(1, vec![0.0]).unwrap();
+        state
+    }
+
+    #[test]
+    fn pipelined_scheduler_commits_only_the_oldest_ready_round() {
+        let learner = member(0, 30);
+        let mut oldest = sweep_test_round(1, 0, 1, 1, learner);
+        oldest.pushes.clear();
+        oldest.quorum_deadline = Instant::now() + CAP;
+        let later = sweep_test_round(2, 1, 2, 1, learner);
+        let mut rounds = vec![later, oldest];
+
+        assert_eq!(next_committable_round(&rounds, Instant::now()), None);
+
+        rounds[1] = sweep_test_round(1, 0, 1, 1, learner);
+        assert_eq!(next_committable_round(&rounds, Instant::now()), Some(1));
+        rounds.remove(1);
+        assert_eq!(next_committable_round(&rounds, Instant::now()), Some(0));
+    }
+
+    fn chunked_inner_type(frame: &OutFrame) -> u8 {
+        assert_eq!(frame.msg_type, MSG_CHUNK);
+        assert_eq!(frame.parts.len(), 2);
+        frame.parts[1][4]
+    }
+
+    #[tokio::test]
+    async fn terminal_round_skips_redundant_broadcast_and_uses_final_cut_once() {
+        let learner = member(0, 30);
+
+        let mut nonterminal_state = broadcast_test_state(DTYPE_F32);
+        let (nonterminal_group, mut nonterminal_rx) = streaming_test_group(DTYPE_F32, false);
+        let nonterminal_registry = registry_with_group(nonterminal_group);
+        let mut nonterminal_sync_secs = 0.0;
+        complete_round(
+            &round_test_config(2),
+            &mut nonterminal_state,
+            &nonterminal_registry,
+            &mut nonterminal_sync_secs,
+            terminal_test_round(1, learner),
+        )
+        .await
+        .unwrap();
+        let bcast = nonterminal_rx.try_recv().unwrap();
+        assert_eq!(chunked_inner_type(&bcast), MSG_BCAST_FRAGMENT);
+        assert!(matches!(
+            nonterminal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let mut terminal_state = broadcast_test_state(DTYPE_F32);
+        let (terminal_group, mut terminal_rx) = streaming_test_group(DTYPE_F32, false);
+        let terminal_registry = registry_with_group(terminal_group.clone());
+        let mut terminal_sync_secs = 0.0;
+        complete_round(
+            &round_test_config(1),
+            &mut terminal_state,
+            &terminal_registry,
+            &mut terminal_sync_secs,
+            terminal_test_round(1, learner),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            terminal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        send_final_cut(&terminal_state, &terminal_group)
+            .await
+            .unwrap();
+        let final_fragment = terminal_rx.try_recv().unwrap();
+        assert_eq!(chunked_inner_type(&final_fragment), MSG_FINAL_FRAGMENT);
+        assert_eq!(terminal_rx.try_recv().unwrap().msg_type, MSG_FINAL_MANIFEST);
+        assert!(matches!(
+            terminal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn generic_checkpoint_failure_happens_before_nonterminal_broadcast() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-generic-pre-broadcast-checkpoint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+        let checkpoint_tmp = checkpoint.with_extension("tmp");
+
+        let initial = broadcast_test_state(DTYPE_F32);
+        initial.save_checkpoint(&checkpoint).unwrap();
+        // Atomic checkpoint writes create this exact temporary path. Turning
+        // it into a directory makes the next save fail deterministically.
+        std::fs::create_dir(&checkpoint_tmp).unwrap();
+
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut config = round_test_config(2);
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.checkpoint_every = 1;
+        // This is the generic streaming profile that previously saved only
+        // after exposing the merged version.
+        config.max_base_lag = Some(2);
+        let mut state = broadcast_test_state(DTYPE_F32);
+        let mut sync_seconds = 0.0;
+
+        complete_round(
+            &config,
+            &mut state,
+            &registry,
+            &mut sync_seconds,
+            terminal_test_round(1, learner),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            frames.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let mut recovered = broadcast_test_state(DTYPE_F32);
+        recovered.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(recovered.global_step, 0);
+        assert_eq!(recovered.versions, vec![0]);
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn pipelined_checkpoint_refuses_holes_and_resumes_contiguously() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-pipelined-contiguous-checkpoint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut config = round_test_config(2);
+        config.pipeline = 2;
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.checkpoint_every = 1;
+        config.resume = true;
+        let mut sync_seconds = 0.0;
+
+        let mut before_crash = two_fragment_streaming_state();
+        before_crash.save_checkpoint(&checkpoint).unwrap();
+        let error = complete_round(
+            &config,
+            &mut before_crash,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(2, 1, 2, 1, learner),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("refusing non-contiguous round commit"));
+        assert_eq!(before_crash.global_step, 0);
+        assert_eq!(before_crash.versions, vec![0, 0]);
+        assert!(matches!(
+            frames.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let mut resumed = two_fragment_streaming_state();
+        resumed.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(resumed.global_step, 0);
+        assert_eq!(resumed.versions, vec![0, 0]);
+
+        complete_round(
+            &config,
+            &mut resumed,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(1, 0, 1, 1, learner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            chunked_inner_type(&frames.try_recv().unwrap()),
+            MSG_BCAST_FRAGMENT
+        );
+        let mut after_first_commit = two_fragment_streaming_state();
+        after_first_commit.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(after_first_commit.global_step, 1);
+        assert_eq!(after_first_commit.versions, vec![1, 0]);
+
+        complete_round(
+            &config,
+            &mut resumed,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(2, 1, 2, 1, learner),
+        )
+        .await
+        .unwrap();
+        let mut final_reload = two_fragment_streaming_state();
+        final_reload.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(final_reload.global_step, 2);
+        assert_eq!(final_reload.versions, vec![1, 2]);
+        assert_eq!(final_reload.ledger.get(&0).unwrap().merges, 2);
+        assert_eq!(final_reload.params, resumed.params);
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn policy_sweep_checkpoint_resume_mid_sweep_does_not_double_account() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut config = sweep_test_config(2, 2);
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.checkpoint_every = 1;
+        let mut sync_seconds = 0.0;
+
+        let mut before_crash = two_fragment_sweep_state();
+        complete_round(
+            &config,
+            &mut before_crash,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(1, 0, 1, 321, learner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(before_crash.global_step, 1);
+        assert_eq!(before_crash.versions, vec![1, 0]);
+        let partial = before_crash.ledger.get(&0).unwrap();
+        assert_eq!((partial.merges, partial.steps, partial.tokens), (1, 0, 0));
+        assert!(checkpoint.is_file());
+        assert_eq!(
+            chunked_inner_type(&frames.try_recv().unwrap()),
+            MSG_BCAST_FRAGMENT
+        );
+
+        // Simulate a process crash after the first fragment's durable commit.
+        let mut resumed = two_fragment_sweep_state();
+        resumed.load_checkpoint(&checkpoint).unwrap();
+        validate_resumed_policy_sweep(&config, &resumed).unwrap();
+        assert_eq!(resumed.global_step, 1);
+        assert_eq!(resumed.versions, vec![1, 0]);
+        let partial = resumed.ledger.get(&0).unwrap();
+        assert_eq!((partial.merges, partial.steps, partial.tokens), (1, 0, 0));
+
+        complete_round(
+            &config,
+            &mut resumed,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(2, 1, 1, 321, learner),
+        )
+        .await
+        .unwrap();
+        let complete = resumed.ledger.get(&0).unwrap();
+        assert_eq!(
+            (complete.merges, complete.steps, complete.tokens),
+            (2, 1, 321)
+        );
+        assert_eq!(resumed.global_step, 2);
+        assert_eq!(resumed.versions, vec![1, 2]);
+
+        let mut final_reload = two_fragment_sweep_state();
+        final_reload.load_checkpoint(&checkpoint).unwrap();
+        validate_resumed_policy_sweep(&config, &final_reload).unwrap();
+        let complete = final_reload.ledger.get(&0).unwrap();
+        assert_eq!(
+            (complete.merges, complete.steps, complete.tokens),
+            (2, 1, 321)
+        );
+        assert_eq!(final_reload.params, resumed.params);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn two_learner_three_fragment_sweeps_resume_at_every_mid_sweep_cut_exactly() {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-matrix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let registry = registry_with_group(test_group(member(0, 30)));
+        let mut config = sweep_test_config(3, 6);
+        config.learners = 2;
+        config.quorum = 2;
+        let mut sync_seconds = 0.0;
+
+        let uninterrupted_path = directory.join("uninterrupted.ckpt");
+        config.checkpoint_path = Some(uninterrupted_path.clone());
+        let mut uninterrupted = three_fragment_sweep_state();
+        for step in 1..=6 {
+            complete_round(
+                &config,
+                &mut uninterrupted,
+                &registry,
+                &mut sync_seconds,
+                two_learner_sweep_round(step),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(uninterrupted.versions, vec![4, 5, 6]);
+        assert_eq!(uninterrupted.params, vec![vec![-5.0]; 3]);
+        for learner_id in 0..2 {
+            let ledger = uninterrupted.ledger.get(&learner_id).unwrap();
+            assert_eq!(ledger.merges, 6);
+            assert_eq!(ledger.steps, 2);
+            assert_eq!(ledger.tokens, u64::from(learner_id + 1) * (100 + 200));
+        }
+        let uninterrupted_bytes = std::fs::read(&uninterrupted_path).unwrap();
+
+        for crash_step in [1, 2, 4, 5] {
+            let checkpoint = directory.join(format!("resume-{crash_step}.ckpt"));
+            config.checkpoint_path = Some(checkpoint.clone());
+            let mut before_crash = three_fragment_sweep_state();
+            for step in 1..=crash_step {
+                complete_round(
+                    &config,
+                    &mut before_crash,
+                    &registry,
+                    &mut sync_seconds,
+                    two_learner_sweep_round(step),
+                )
+                .await
+                .unwrap();
+            }
+            for learner_id in 0..2 {
+                let ledger = before_crash.ledger.get(&learner_id).unwrap();
+                let completed_sweeps = crash_step / 3;
+                let expected_tokens =
+                    u64::from(learner_id + 1) * 100 * (1..=completed_sweeps).sum::<u64>();
+                assert_eq!(ledger.merges, crash_step);
+                assert_eq!(ledger.steps, completed_sweeps);
+                assert_eq!(ledger.tokens, expected_tokens);
+            }
+
+            let mut resumed = three_fragment_sweep_state();
+            resumed.load_checkpoint(&checkpoint).unwrap();
+            validate_resumed_policy_sweep(&config, &resumed).unwrap();
+            for step in crash_step + 1..=6 {
+                complete_round(
+                    &config,
+                    &mut resumed,
+                    &registry,
+                    &mut sync_seconds,
+                    two_learner_sweep_round(step),
+                )
+                .await
+                .unwrap();
+            }
+            validate_resumed_policy_sweep(&config, &resumed).unwrap();
+            assert_eq!(std::fs::read(&checkpoint).unwrap(), uninterrupted_bytes);
+        }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn updated_broadcast_propagates_local_errors_but_tolerates_closed_streams() {
+        let invalid_state = broadcast_test_state(255);
+        let (connected, _receiver) = streaming_test_group(DTYPE_F32, false);
+        let error = broadcast_updated_fragment(&invalid_state, &registry_with_group(connected), 0)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unknown tensor dtype 255"),
+            "unexpected error: {error:#}"
+        );
+
+        let valid_state = broadcast_test_state(DTYPE_F32);
+        let disconnected = test_group(member(0, 20));
+        broadcast_updated_fragment(&valid_state, &registry_with_group(disconnected), 0)
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -2122,6 +3990,65 @@ mod tests {
             FinalAckDisposition::Accepted
         );
         assert_eq!(acknowledged, HashMap::from([(0, first), (1, reconnected)]));
+    }
+
+    #[tokio::test]
+    async fn final_ack_after_quorum_timeout_but_before_final_timeout_succeeds() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group.clone());
+        let expected = HashSet::from([group.member.learner_id]);
+        let (event_sender, mut events) = mpsc::channel(1);
+        let delayed_member = group.member;
+        let delayed_step = state.global_step;
+        let sender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+            event_sender
+                .send(Event::FinalAck {
+                    member: delayed_member,
+                    global_step: delayed_step,
+                })
+                .await
+                .unwrap();
+        });
+        let mut cfg = round_test_config(0);
+        cfg.quorum_timeout_s = 1;
+        cfg.final_ack_timeout_s = 3;
+        let started = Instant::now();
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected)
+            .await
+            .unwrap();
+        sender.await.unwrap();
+
+        assert!(started.elapsed() >= Duration::from_millis(1_000));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn missing_final_ack_fails_at_final_timeout() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group.clone());
+        let expected = HashSet::from([group.member.learner_id]);
+        let (_event_sender, mut events) = mpsc::channel(1);
+        let mut cfg = round_test_config(0);
+        cfg.quorum_timeout_s = 3;
+        cfg.final_ack_timeout_s = 1;
+        let started = Instant::now();
+
+        let error = finalize_learners(&cfg, &state, &mut events, &registry, &expected)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains(
+                "finalization timed out after 1s waiting for learner acknowledgements: [0]"
+            ),
+            "unexpected error: {error:#}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]
@@ -2250,18 +4177,28 @@ mod tests {
         let captured = member(0, 10);
         let mut rounds = vec![test_round(vec![captured])];
         assert_eq!(
-            route_push(&mut rounds, member(1, 20), test_push(5)),
+            route_push(&mut rounds, member(1, 20), test_push(5), None, false),
             PushDisposition::UnexpectedMember
         );
         assert_eq!(
-            route_push(&mut rounds, member(0, 11), test_push(5)),
+            route_push(&mut rounds, member(0, 11), test_push(5), None, false),
             PushDisposition::UnexpectedMember
         );
         assert!(rounds[0].pushes.is_empty());
         assert_eq!(
-            route_push(&mut rounds, captured, test_push(5)),
+            route_push(&mut rounds, captured, test_push(5), None, false),
             PushDisposition::Accepted
         );
+    }
+
+    #[test]
+    fn pull_replay_only_targets_a_reconnected_generation() {
+        let captured = member(0, 10);
+        let round = test_round(vec![captured]);
+
+        assert!(!should_replay_pull(&round, captured));
+        assert!(should_replay_pull(&round, member(0, 11)));
+        assert!(!should_replay_pull(&round, member(1, 20)));
     }
 
     #[test]
@@ -2285,22 +4222,67 @@ mod tests {
         let captured = member(0, 10);
         let mut rounds = vec![test_round(vec![captured])];
         assert_eq!(
-            route_push(&mut rounds, captured, test_push(6)),
+            route_push(&mut rounds, captured, test_push(6), None, false),
             PushDisposition::FutureBase
         );
         assert_eq!(
-            route_push(&mut rounds, captured, test_push(4)),
+            route_push(&mut rounds, captured, test_push(4), None, false),
             PushDisposition::Accepted
         );
         assert_eq!(
-            route_push(&mut rounds, captured, test_push(4)),
+            route_push(&mut rounds, captured, test_push(4), None, false),
             PushDisposition::Duplicate
         );
         let mut wrong_round = test_push(4);
         wrong_round.global_step = 99;
         assert_eq!(
-            route_push(&mut rounds, captured, wrong_round),
+            route_push(&mut rounds, captured, wrong_round, None, false),
             PushDisposition::OutOfRound
+        );
+        assert_eq!(rounds[0].pushes.len(), 1);
+    }
+
+    fn test_exact_push(learner_id: u32, base_version: u64) -> Push {
+        Push {
+            learner_id,
+            fragment_id: 1,
+            global_step: 7,
+            round_attempt: 1,
+            base_version,
+            local_step: 7,
+            c_steps: 1,
+            c_tokens: 1,
+            outer_gradient: vec![1.0],
+        }
+    }
+
+    #[test]
+    fn max_base_lag_zero_is_exact_and_unique_per_logical_learner() {
+        let original = member(0, 10);
+        let replacement = member(0, 11);
+        let second = member(1, 20);
+        let mut rounds = vec![test_round(vec![original, second])];
+        assert_eq!(
+            route_push(
+                &mut rounds,
+                replacement,
+                test_exact_push(0, 5),
+                Some(0),
+                true,
+            ),
+            PushDisposition::Accepted
+        );
+        assert_eq!(
+            route_push(&mut rounds, original, test_exact_push(0, 5), Some(0), true,),
+            PushDisposition::Duplicate
+        );
+        assert_eq!(
+            route_push(&mut rounds, second, test_exact_push(1, 4), Some(0), true,),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(
+            route_push(&mut rounds, second, test_exact_push(1, 6), Some(0), true,),
+            PushDisposition::FutureBase
         );
         assert_eq!(rounds[0].pushes.len(), 1);
     }
@@ -2321,7 +4303,7 @@ mod tests {
         round.pushes.clear();
         let mut rounds = vec![round];
         assert_eq!(
-            route_push(&mut rounds, second, test_push(5)),
+            route_push(&mut rounds, second, test_push(5), None, false),
             PushDisposition::OutOfRound
         );
         assert!(rounds[0].pushes.is_empty());
@@ -2366,9 +4348,10 @@ mod tests {
             &pushes,
             0.5,
             44,
+            &[7; 32],
+            None,
         );
         let text = std::fs::read_to_string(&path).unwrap();
-        std::fs::remove_file(&path).ok();
         assert!(text.contains("\"expected\":[0,1]"));
         assert!(text.contains("\"expected_members\":[{\"id\":0,\"generation\":10}"));
         assert!(text.contains("\"responded\":[0]"));
@@ -2379,5 +4362,168 @@ mod tests {
         assert!(text.contains("\"contribution\":1"));
         assert!(text.contains("\"protocol_version\":4"));
         assert!(text.contains("\"delta_semantics\":\"local_minus_raw_anchor\""));
+        assert!(text.contains(&format!("\"sync/layout_hash\":\"{}\"", "07".repeat(32))));
+        assert!(!text.contains("\"layout_hash\":"));
+        assert!(!text.contains("\"policy_round\":"));
+        assert!(!text.contains("\"accounted_c_steps\":"));
+
+        std::fs::remove_file(&path).unwrap();
+        let push = pushes.values_mut().next().unwrap();
+        push.global_step = 5;
+        push.local_step = 2;
+        push.c_steps = 1;
+        append_tape(
+            &path,
+            5,
+            1,
+            0,
+            1,
+            &[member(0, 10)],
+            1,
+            Some(1),
+            Some(0),
+            2,
+            &pushes,
+            0.5,
+            3,
+            &[7; 32],
+            Some(3),
+        );
+        let partial = std::fs::read_to_string(&path).unwrap();
+        assert!(partial.contains("\"policy_round\":2"));
+        assert!(partial.contains("\"sweep_fragment\":1"));
+        assert!(partial.contains("\"sweep_fragments\":3"));
+        assert!(partial.contains("\"sweep_complete\":false"));
+        assert!(partial.contains("\"accounted_c_steps\":0"));
+        assert!(partial.contains("\"accounted_c_tokens\":0"));
+
+        std::fs::remove_file(&path).unwrap();
+        pushes.values_mut().next().unwrap().global_step = 6;
+        append_tape(
+            &path,
+            6,
+            2,
+            0,
+            1,
+            &[member(0, 10)],
+            1,
+            Some(1),
+            Some(0),
+            2,
+            &pushes,
+            0.5,
+            3,
+            &[7; 32],
+            Some(3),
+        );
+        let complete = std::fs::read_to_string(&path).unwrap();
+        assert!(complete.contains("\"policy_round\":2"));
+        assert!(complete.contains("\"sweep_fragment\":2"));
+        assert!(complete.contains("\"sweep_complete\":true"));
+        assert!(complete.contains("\"accounted_c_steps\":1"));
+        assert!(complete.contains("\"accounted_c_tokens\":40"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn policy_sweep_ledger_snapshots_are_fsynced_idempotent_reconciliation_cuts() {
+        let path = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-ledger-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // A killed diagnostic append may leave an unterminated line. The
+        // authoritative snapshot must remain independently parseable.
+        std::fs::write(&path, b"{\"torn\":").unwrap();
+        let mut state = two_fragment_sweep_state();
+        state.global_step = 2;
+        state.versions = vec![1, 2];
+        state.record_fragment_merge(0, 1, 321, false);
+        state.record_fragment_merge(0, 1, 321, true);
+
+        append_policy_sweep_ledger_snapshot(&path, &state, "resume").unwrap();
+        append_policy_sweep_ledger_snapshot(&path, &state, "resume").unwrap();
+        append_policy_sweep_ledger_snapshot(&path, &state, "complete").unwrap();
+        append_policy_sweep_ledger_snapshot(&path, &state, "complete").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"event\":\"policy_sweep_ledger\"").count(), 2);
+        assert_eq!(text.matches(":resume:2\"").count(), 1);
+        assert_eq!(text.matches(":complete:2\"").count(), 1);
+        assert_eq!(
+            text.matches("\"ledger\":[{\"id\":0,\"merges\":2,\"steps\":1,\"tokens\":321}]")
+                .count(),
+            2
+        );
+        assert!(text.contains("\"versions\":[1,2]"));
+        assert!(text.contains("\"sweep_complete\":true"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn policy_sweep_event_tape_reports_the_enforced_equal_weights() {
+        let path = std::env::temp_dir().join(format!(
+            "yeto-policy-sweep-weights-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pushes = HashMap::from([
+            (
+                member(0, 10),
+                Push {
+                    learner_id: 0,
+                    fragment_id: 2,
+                    global_step: 3,
+                    round_attempt: 1,
+                    base_version: 0,
+                    local_step: 1,
+                    c_steps: 1,
+                    c_tokens: 10,
+                    outer_gradient: vec![1.0],
+                },
+            ),
+            (
+                member(1, 20),
+                Push {
+                    learner_id: 1,
+                    fragment_id: 2,
+                    global_step: 3,
+                    round_attempt: 1,
+                    base_version: 0,
+                    local_step: 1,
+                    c_steps: 1,
+                    c_tokens: 1_000,
+                    outer_gradient: vec![2.0],
+                },
+            ),
+        ]);
+        append_tape(
+            &path,
+            3,
+            2,
+            0,
+            1,
+            &[member(0, 10), member(1, 20)],
+            2,
+            Some(1),
+            Some(0),
+            2,
+            &pushes,
+            0.5,
+            3,
+            &[7; 32],
+            Some(3),
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"weight\":1").count(), 2);
+        assert_eq!(text.matches("\"contribution\":0.5").count(), 2);
+        assert_eq!(text.matches("\"accounted_c_steps\":1").count(), 2);
+        std::fs::remove_file(&path).ok();
     }
 }

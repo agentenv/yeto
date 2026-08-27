@@ -14,7 +14,15 @@ def load_tape(path: str | Path) -> list[dict]:
             line = line.strip()
             if not line:
                 continue
-            records.append(json.loads(line))
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                # The syncer deliberately places a durable ledger snapshot
+                # after a torn diagnostic tail. Ignore that damaged line so
+                # status can still consume the authoritative reconciliation.
+                continue
+            if isinstance(record, dict):
+                records.append(record)
     return records
 
 
@@ -32,8 +40,31 @@ def summarize_tape(records: list[dict]) -> dict:
     total_missed = 0
     rounds_with_misses = 0
     recent_misses: list[str] = []
+    merge_records = [
+        record
+        for record in records
+        if "step" in record and record.get("event") != "policy_sweep_ledger"
+    ]
+    latest_snapshot_index = next(
+        (
+            index
+            for index in range(len(records) - 1, -1, -1)
+            if records[index].get("event") == "policy_sweep_ledger"
+        ),
+        None,
+    )
+    latest_snapshot = (
+        records[latest_snapshot_index]
+        if latest_snapshot_index is not None
+        else None
+    )
+    snapshot_step = (
+        latest_snapshot.get("global_step")
+        if latest_snapshot is not None
+        else None
+    )
 
-    for rec in records:
+    for rec in merge_records:
         responders = rec.get("responders") or []
         responded = {int(r["id"]) for r in responders if "id" in r}
         expected = {int(x) for x in rec.get("expected", [])}
@@ -57,11 +88,65 @@ def summarize_tape(records: list[dict]) -> dict:
         for responder in responders:
             learner_id = int(responder["id"])
             weight = float(responder.get("weight", 0.0))
+            # Dense policy sweeps repeat the same raw local progress on every
+            # fragment for merge evidence, but charge it to the durable
+            # ledger only when the complete policy sweep closes. Legacy tape
+            # records do not carry the accounted fields and retain their
+            # original behavior through these fallbacks.
+            accounted_tokens = responder.get(
+                "accounted_c_tokens", responder.get("c_tokens", 0.0)
+            )
+            accounted_steps = responder.get(
+                "accounted_c_steps", responder.get("c_steps", 0.0)
+            )
             totals[learner_id]["responses"] += 1
-            totals[learner_id]["tokens"] += float(responder.get("c_tokens", 0.0))
-            totals[learner_id]["steps"] += float(responder.get("c_steps", 0.0))
+            totals[learner_id]["tokens"] += float(accounted_tokens)
+            totals[learner_id]["steps"] += float(accounted_steps)
             totals[learner_id]["weight"] += weight
             total_weight += weight
+
+    # A sweep snapshot is an fsynced view of the checkpoint ledger. It can
+    # cover one committed merge whose ordinary diagnostic record was lost in
+    # a crash, so it replaces accounting through its global step. Merge
+    # records appended after a resume snapshot still count while the resumed
+    # run is live and before its final snapshot lands.
+    if latest_snapshot is not None:
+        for row in totals.values():
+            row["responses"] = 0.0
+            row["steps"] = 0.0
+            row["tokens"] = 0.0
+        for entry in latest_snapshot.get("ledger") or []:
+            if not isinstance(entry, dict) or "id" not in entry:
+                continue
+            row = totals[int(entry["id"])]
+            row["responses"] = float(entry.get("merges", 0))
+            row["steps"] = float(entry.get("steps", 0))
+            row["tokens"] = float(entry.get("tokens", 0))
+        for record in records[latest_snapshot_index + 1 :]:
+            if not (
+                "step" in record
+                and record.get("event") != "policy_sweep_ledger"
+                and (
+                    not isinstance(snapshot_step, int)
+                    or record.get("step", 0) > snapshot_step
+                )
+            ):
+                continue
+            for responder in record.get("responders") or []:
+                if "id" not in responder:
+                    continue
+                row = totals[int(responder["id"])]
+                row["responses"] += 1
+                row["steps"] += float(
+                    responder.get(
+                        "accounted_c_steps", responder.get("c_steps", 0.0)
+                    )
+                )
+                row["tokens"] += float(
+                    responder.get(
+                        "accounted_c_tokens", responder.get("c_tokens", 0.0)
+                    )
+                )
 
     contributions = []
     for learner_id in sorted(totals):
@@ -79,11 +164,24 @@ def summarize_tape(records: list[dict]) -> dict:
             }
         )
 
-    last = records[-1] if records else {}
+    last_merge = merge_records[-1] if merge_records else {}
+    latest_step = last_merge.get("step")
+    latest_fragment = last_merge.get("fragment")
+    if latest_snapshot is not None:
+        if isinstance(snapshot_step, int) and (
+            not isinstance(latest_step, int) or snapshot_step >= latest_step
+        ):
+            latest_step = snapshot_step
+            fragments = latest_snapshot.get("sweep_fragments")
+            latest_fragment = (
+                (snapshot_step - 1) % fragments
+                if snapshot_step > 0 and isinstance(fragments, int) and fragments > 0
+                else None
+            )
     return {
-        "rounds": len(records),
-        "latest_step": last.get("step"),
-        "latest_fragment": last.get("fragment"),
+        "rounds": len(merge_records),
+        "latest_step": latest_step,
+        "latest_fragment": latest_fragment,
         "total_missed": total_missed,
         "rounds_with_misses": rounds_with_misses,
         "recent_misses": recent_misses[-5:],

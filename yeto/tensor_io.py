@@ -41,9 +41,13 @@ def pack_tensor(flat: torch.Tensor, dtype: int) -> bytes:
     return wire.view(torch.uint8).numpy().tobytes()
 
 
-def unpack_fragment(frag: Fragment, data: bytes, dtype: int) -> torch.Tensor:
+def unpack_fragment(
+    frag: Fragment, data: bytes | bytearray | memoryview, dtype: int
+) -> torch.Tensor:
     """Decode wire bytes into a flat f32 tensor of the fragment's numel."""
-    raw = torch.frombuffer(bytearray(data), dtype=torch.uint8)
+    view = memoryview(data)
+    buffer = view if not view.readonly and view.contiguous else bytearray(view)
+    raw = torch.frombuffer(buffer, dtype=torch.uint8)
     flat = raw.view(_WIRE_TORCH[dtype]).float()
     if flat.numel() != frag.numel:
         raise ValueError(f"fragment payload has {flat.numel()} values, expected {frag.numel}")

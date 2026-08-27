@@ -11,7 +11,6 @@ from typing import Any
 
 from .provenance import PROVENANCE_FILE
 
-
 ADAPTER_CONFIG_FILE = "adapter_config.json"
 ADAPTER_WEIGHTS_FILE = "adapter_model.safetensors"
 ADAPTER_MODES = ("resume", "branch")
@@ -53,6 +52,13 @@ RESUME_RECIPE_FIELDS = (
     "attention_backend",
     "kernel_backend",
 )
+
+_LEARNER_RECIPE_DEFAULTS = {
+    "gradient_checkpointing": "auto",
+    "weight_decay": 0.01,
+    "warmup_steps": 10,
+    "matrix_merge": "rda",
+}
 
 _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
 
@@ -142,7 +148,7 @@ def head_stage_parent(args) -> dict[str, str]:
 def training_recipe(args) -> dict[str, Any]:
     """Serializable training identity recorded in every causal artifact."""
     return {
-        field: getattr(args, field, None)
+        field: getattr(args, field, _LEARNER_RECIPE_DEFAULTS.get(field))
         for field in RESUME_RECIPE_FIELDS
     }
 

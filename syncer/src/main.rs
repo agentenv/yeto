@@ -48,12 +48,21 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
-    /// Give up waiting for quorum (or final learner ACKs) after this long.
+    /// Give up waiting for quorum after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
+    /// Give up waiting for final learner ACKs after this long. When omitted,
+    /// inherit --quorum-timeout-s for backward compatibility.
+    #[arg(long)]
+    final_ack_timeout_s: Option<u64>,
     /// Total number of outer steps T (each syncs one fragment).
     #[arg(long)]
     total_steps: u64,
+    /// Opt into strict dense-policy sweeps of exactly P fragments per logical
+    /// local optimizer step.  The decoded layout must contain exactly P
+    /// fragments; total_steps remains the number of fragment merges.
+    #[arg(long)]
+    policy_sweep_fragments: Option<u32>,
     /// Outer learning rate.
     #[arg(long, default_value_t = 0.7)]
     outer_lr: f32,
@@ -78,9 +87,27 @@ struct Args {
     /// Exact local optimizer-step budget per learner (benchmark-only).
     #[arg(long)]
     learner_budget_steps: Option<u64>,
-    /// JSONL event tape (one record per merge).
+    /// JSONL event tape (merge records plus sweep ledger reconciliation cuts).
     #[arg(long)]
     event_tape: Option<std::path::PathBuf>,
+    /// Maximum admitted lag between a round and a learner's base version.
+    /// Omitted means unbounded (the existing SFT behavior).
+    #[arg(long)]
+    max_base_lag: Option<u64>,
+    /// Learner contribution weighting used by AVG/RDA merges.
+    #[arg(long, default_value = "tokens2-over-steps")]
+    learner_weight: String,
+    /// Require every HELLO to carry the canonical hash of this server's
+    /// semantic launch profile. Generic clients remain compatible unless
+    /// this is explicitly enabled.
+    #[arg(long, default_value_t = false)]
+    require_profile_binding: bool,
+}
+
+impl Args {
+    fn resolved_final_ack_timeout_s(&self) -> u64 {
+        self.final_ack_timeout_s.unwrap_or(self.quorum_timeout_s)
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -99,6 +126,13 @@ fn main() -> anyhow::Result<()> {
         "none" => false,
         other => anyhow::bail!("--delta-correction must be 'heloco' or 'none', got {other:?}"),
     };
+    let learner_weight = match args.learner_weight.as_str() {
+        "tokens2-over-steps" => server::LearnerWeight::Tokens2OverSteps,
+        "equal" => server::LearnerWeight::Equal,
+        other => {
+            anyhow::bail!("--learner-weight must be 'tokens2-over-steps' or 'equal', got {other:?}")
+        }
+    };
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
@@ -111,7 +145,9 @@ fn main() -> anyhow::Result<()> {
         sync_interval_steps: args.sync_interval_steps,
         delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
+        final_ack_timeout_s: args.resolved_final_ack_timeout_s(),
         total_steps: args.total_steps,
+        policy_sweep_fragments: args.policy_sweep_fragments,
         outer_lr: args.outer_lr,
         outer_momentum: args.outer_momentum,
         final_state: args.final_state,
@@ -121,9 +157,67 @@ fn main() -> anyhow::Result<()> {
         mark_final_checkpoint: args.mark_final_checkpoint,
         learner_budget_steps: args.learner_budget_steps,
         event_tape: args.event_tape,
+        max_base_lag: args.max_base_lag,
+        learner_weight,
+        require_profile_binding: args.require_profile_binding,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_ack_timeout_is_compatible_when_omitted_and_distinct_when_set() {
+        let inherited = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--quorum-timeout-s",
+            "2",
+            "--total-steps",
+            "1",
+        ])
+        .unwrap();
+        assert_eq!(inherited.resolved_final_ack_timeout_s(), 2);
+
+        let explicit = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "1",
+            "--quorum-timeout-s",
+            "900",
+            "--final-ack-timeout-s",
+            "3600",
+            "--total-steps",
+            "1",
+        ])
+        .unwrap();
+        assert_eq!(explicit.resolved_final_ack_timeout_s(), 3600);
+    }
+
+    #[test]
+    fn policy_sweep_fragments_is_optional_and_parsed_without_changing_total_steps() {
+        let legacy =
+            Args::try_parse_from(["yeto-syncer", "--learners", "2", "--total-steps", "8"]).unwrap();
+        assert_eq!(legacy.policy_sweep_fragments, None);
+        assert_eq!(legacy.total_steps, 8);
+
+        let sweep = Args::try_parse_from([
+            "yeto-syncer",
+            "--learners",
+            "2",
+            "--total-steps",
+            "8",
+            "--policy-sweep-fragments",
+            "4",
+        ])
+        .unwrap();
+        assert_eq!(sweep.policy_sweep_fragments, Some(4));
+        assert_eq!(sweep.total_steps, 8);
+    }
 }

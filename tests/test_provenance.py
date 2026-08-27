@@ -102,6 +102,23 @@ def test_invalid_hub_sha_and_local_revision_fail_closed(tmp_path):
         )
 
 
+def test_ssh_remote_local_model_keeps_an_immutable_source_revision():
+    record = provenance.resolve_reference(
+        "/data/yeto-rl/models/deepseek-v4-flash-bf16",
+        "a" * 40,
+        repo_type="model",
+        allow_remote_local_revision=True,
+    )
+
+    assert record == {
+        "source": "remote-local",
+        "requested_identifier": "/data/yeto-rl/models/deepseek-v4-flash-bf16",
+        "resolved_identifier": "/data/yeto-rl/models/deepseek-v4-flash-bf16",
+        "requested_revision": "a" * 40,
+        "resolved_revision": "a" * 40,
+    }
+
+
 def test_local_and_external_data_remain_usable_without_fake_revisions(tmp_path):
     local = tmp_path / "rows.jsonl"
     local.write_text("{}\n", encoding="utf-8")

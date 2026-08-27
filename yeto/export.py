@@ -20,6 +20,11 @@ Binary layout (all little-endian):
                    numel x f32 momentum
     ledger_count   u32
     per entry:     learner_id u32, merges u64, steps u64, tokens u64
+    optional:      32-byte semantic layout hash (new checkpoints)
+    streaming:     marker u32 (0x5254_4353),
+                   session_contract_hash [u8; 32]
+    sweep-only:    marker u32 (0x5053_5750), policy_sweep_fragments u32,
+                   session_contract_hash [u8; 32]
 
 The outer momentum is parsed (and validated) but not needed for export; it
 only matters when the syncer itself resumes from the checkpoint.
@@ -39,6 +44,8 @@ from .fragments import FragmentLayout, build_layout
 from .tensor_io import apply_fragment
 
 CKPT_MAGIC = 0xD170_5A7E
+POLICY_SWEEP_CKPT_MAGIC = 0x5053_5750
+STREAMING_CONTRACT_CKPT_MAGIC = 0x5254_4353
 
 
 @dataclass
@@ -49,6 +56,13 @@ class Checkpoint:
     fragments: list[tuple[int, torch.Tensor, torch.Tensor]]
     # learner_id -> (merges, steps, tokens)
     ledger: dict[int, tuple[int, int, int]]
+    # HELLO's semantic layout fingerprint, persisted by current syncers.
+    layout_hash: str | None
+    # Dense-policy accounting identity. None preserves legacy per-fragment
+    # accounting; when present it must cover the complete fragment layout.
+    policy_sweep_fragments: int | None
+    # Dense sweep semantic/profile/fixed-roster identity.
+    session_contract_hash: str | None
     # Digest of the exact byte buffer decoded into this checkpoint.
     sha256: str
 
@@ -94,13 +108,60 @@ def parse_checkpoint(path: str | Path) -> Checkpoint:
         )
         ledger[learner_id] = (merges, steps, tokens)
 
+    layout_hash = None
+    policy_sweep_fragments = None
+    session_contract_hash = None
+    trailing = len(data) - off
+    if trailing in (32, 40, 68, 72):
+        layout_hash = take(32, "layout_hash").hex()
+        if trailing == 68:
+            (streaming_magic,) = struct.unpack(
+                "<I", take(4, "streaming_contract_identity")
+            )
+            if streaming_magic != STREAMING_CONTRACT_CKPT_MAGIC:
+                raise ValueError(
+                    f"{path}: bad streaming checkpoint marker "
+                    f"0x{streaming_magic:08X} (expected "
+                    f"0x{STREAMING_CONTRACT_CKPT_MAGIC:08X})"
+                )
+            session_contract_hash = take(32, "session_contract_hash").hex()
+        elif trailing in (40, 72):
+            sweep_magic, policy_sweep_fragments = struct.unpack(
+                "<II", take(8, "policy_sweep_identity")
+            )
+            if sweep_magic != POLICY_SWEEP_CKPT_MAGIC:
+                raise ValueError(
+                    f"{path}: bad policy-sweep checkpoint marker "
+                    f"0x{sweep_magic:08X} (expected "
+                    f"0x{POLICY_SWEEP_CKPT_MAGIC:08X})"
+                )
+            if policy_sweep_fragments == 0:
+                raise ValueError(
+                    f"{path}: policy-sweep fragment count must be positive"
+                )
+            if policy_sweep_fragments != num_fragments:
+                raise ValueError(
+                    f"{path}: policy-sweep checkpoint declares "
+                    f"{policy_sweep_fragments} fragments, but the checkpoint "
+                    f"contains {num_fragments}"
+                )
+            if trailing == 72:
+                session_contract_hash = take(32, "session_contract_hash").hex()
     if off != len(data):
         raise ValueError(
             f"{path}: {len(data) - off} trailing bytes after the checkpoint "
             f"payload (parsed {off} of {len(data)}); file corrupt or from an "
             "incompatible syncer version"
         )
-    return Checkpoint(global_step, fragments, ledger, hashlib.sha256(data).hexdigest())
+    return Checkpoint(
+        global_step,
+        fragments,
+        ledger,
+        layout_hash,
+        policy_sweep_fragments,
+        session_contract_hash,
+        hashlib.sha256(data).hexdigest(),
+    )
 
 
 def _read_f32(raw: bytes) -> torch.Tensor:
@@ -128,6 +189,14 @@ def validate_against_layout(ckpt: Checkpoint, layout: FragmentLayout) -> None:
             problems.append(
                 f"fragment {fid}: checkpoint numel {params.numel()} "
                 f"!= layout numel {frag.numel}"
+            )
+    if ckpt.layout_hash is not None:
+        from .protocol import layout_fingerprint
+
+        rebuilt = layout_fingerprint(layout).hex()
+        if ckpt.layout_hash != rebuilt:
+            problems.append(
+                f"checkpoint layout hash {ckpt.layout_hash} != rebuilt {rebuilt}"
             )
     if problems:
         raise ValueError(

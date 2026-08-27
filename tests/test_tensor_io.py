@@ -11,6 +11,7 @@ from yeto.tensor_io import (
     fragment_flat,
     pack_tensor,
     quantize_q4,
+    unpack_fragment,
 )
 
 
@@ -34,6 +35,16 @@ def test_unquantized_delta_golden_bytes_preserve_sign():
     delta = torch.tensor([-1.5, 2.0], dtype=torch.float32)
     assert pack_tensor(delta, DTYPE_F32) == struct.pack("<2f", -1.5, 2.0)
     assert pack_tensor(delta, DTYPE_BF16) == bytes.fromhex("c0bf0040")
+
+
+def test_unpack_fragment_reuses_writable_wire_buffer():
+    layout = build_layout([("model.weight", 2)], 1)
+    wire = bytearray(struct.pack("<2f", 1.0, 2.0))
+
+    flat = unpack_fragment(layout.fragments[0], memoryview(wire), DTYPE_F32)
+    wire[:] = struct.pack("<2f", 3.0, 4.0)
+
+    assert torch.equal(flat, torch.tensor([3.0, 4.0]))
 
 
 def test_q4_roundtrip_error_bounds():

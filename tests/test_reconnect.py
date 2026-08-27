@@ -20,8 +20,8 @@ from yeto.protocol import (
     _HEADER,
     DTYPE_F32,
     MAGIC,
-    MSG_CHUNK,
     MSG_BCAST_FRAGMENT,
+    MSG_CHUNK,
     MSG_DATA_HELLO,
     MSG_ERROR,
     MSG_HELLO,
@@ -31,6 +31,7 @@ from yeto.protocol import (
     ProtocolError,
     SyncerClient,
     encode_hello,
+    layout_fingerprint,
     read_frame,
     write_frame,
 )

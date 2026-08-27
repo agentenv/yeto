@@ -12,6 +12,7 @@ import pytest
 
 import yeto.cli as cli
 import yeto.runs as runs
+from yeto.status_metrics import load_tape, summarize_tape
 
 
 @pytest.fixture(autouse=True)
@@ -358,6 +359,153 @@ def test_status_summarizes_event_tape(tmp_path, capsys):
     assert "0     2" in out
     assert "1     1" in out
     assert "step=2/frag=1: [1]" in out
+
+
+def test_status_prefers_sweep_accounting_and_preserves_legacy_counters():
+    records = [
+        {
+            "step": 1,
+            "responders": [
+                {
+                    "id": 0,
+                    "c_steps": 1,
+                    "c_tokens": 17,
+                    "accounted_c_steps": 0,
+                    "accounted_c_tokens": 0,
+                }
+            ],
+        },
+        {
+            "step": 2,
+            "responders": [
+                {
+                    "id": 0,
+                    "c_steps": 1,
+                    "c_tokens": 17,
+                    "accounted_c_steps": 1,
+                    "accounted_c_tokens": 17,
+                },
+                {"id": 1, "c_steps": 2, "c_tokens": 23},
+            ],
+        },
+    ]
+    rows = {row["id"]: row for row in summarize_tape(records)["contributions"]}
+    assert (rows[0]["responses"], rows[0]["steps"], rows[0]["tokens"]) == (
+        2,
+        1,
+        17,
+    )
+    assert (rows[1]["responses"], rows[1]["steps"], rows[1]["tokens"]) == (
+        1,
+        2,
+        23,
+    )
+
+
+def test_status_uses_latest_ledger_snapshot_without_counting_it_as_a_round():
+    records = [
+        {
+            "step": 1,
+            "fragment": 0,
+            "responders": [
+                {
+                    "id": 0,
+                    "c_steps": 1,
+                    "c_tokens": 17,
+                    "accounted_c_steps": 0,
+                    "accounted_c_tokens": 0,
+                }
+            ],
+        },
+        {
+            "event": "policy_sweep_ledger",
+            "global_step": 2,
+            "policy_round": 1,
+            "sweep_fragments": 2,
+            "sweep_complete": True,
+            "ledger": [{"id": 0, "merges": 2, "steps": 1, "tokens": 17}],
+        },
+    ]
+    summary = summarize_tape(records)
+    assert (summary["rounds"], summary["latest_step"], summary["latest_fragment"]) == (
+        1,
+        2,
+        1,
+    )
+    assert summary["contributions"][0] == {
+        "id": 0,
+        "responses": 2,
+        "missed": 0,
+        "tokens": 17,
+        "steps": 1,
+        "weight": 0.0,
+        "contribution": 0.0,
+    }
+
+
+def test_status_loads_snapshot_after_a_torn_diagnostic_line(tmp_path):
+    tape = tmp_path / "events.jsonl"
+    snapshot = {
+        "event": "policy_sweep_ledger",
+        "global_step": 2,
+        "sweep_fragments": 2,
+        "ledger": [{"id": 0, "merges": 2, "steps": 1, "tokens": 17}],
+    }
+    tape.write_text('{"step":1,"responders":[]}\n{"step":2\n')
+    with tape.open("a") as stream:
+        stream.write(json.dumps(snapshot) + "\n")
+
+    records = load_tape(tape)
+    assert [record.get("event") for record in records] == [
+        None,
+        "policy_sweep_ledger",
+    ]
+    assert summarize_tape(records)["latest_step"] == 2
+
+
+def test_status_adds_merge_accounting_after_a_resume_ledger_snapshot():
+    records = [
+        {
+            "event": "policy_sweep_ledger",
+            "phase": "resume",
+            "global_step": 2,
+            "policy_round": 1,
+            "sweep_fragments": 2,
+            "sweep_complete": True,
+            "ledger": [{"id": 0, "merges": 2, "steps": 1, "tokens": 17}],
+        },
+        {
+            "step": 3,
+            "fragment": 0,
+            "responders": [
+                {
+                    "id": 0,
+                    "accounted_c_steps": 0,
+                    "accounted_c_tokens": 0,
+                }
+            ],
+        },
+        {
+            "step": 4,
+            "fragment": 1,
+            "responders": [
+                {
+                    "id": 0,
+                    "accounted_c_steps": 1,
+                    "accounted_c_tokens": 19,
+                }
+            ],
+        },
+    ]
+    summary = summarize_tape(records)
+    assert (summary["rounds"], summary["latest_step"], summary["latest_fragment"]) == (
+        2,
+        4,
+        1,
+    )
+    assert summary["contributions"][0]["responses"] == 4
+    assert summary["contributions"][0]["steps"] == 2
+    assert summary["contributions"][0]["tokens"] == 36
 
 
 def test_logs_no_follow_dumps_log(capsys):

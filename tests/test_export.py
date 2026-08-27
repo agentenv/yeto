@@ -9,7 +9,13 @@ import pytest
 import torch
 
 from yeto import export as export_module
-from yeto.export import CKPT_MAGIC, parse_checkpoint, validate_against_layout
+from yeto.export import (
+    CKPT_MAGIC,
+    POLICY_SWEEP_CKPT_MAGIC,
+    STREAMING_CONTRACT_CKPT_MAGIC,
+    parse_checkpoint,
+    validate_against_layout,
+)
 from yeto.fragments import build_layout
 from yeto.tensor_io import apply_fragment
 
@@ -68,6 +74,9 @@ def test_round_trip(tmp_path):
     assert ckpt.global_step == 42
     assert ckpt.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     assert ckpt.ledger == LEDGER
+    assert ckpt.layout_hash is None
+    assert ckpt.policy_sweep_fragments is None
+    assert ckpt.session_contract_hash is None
     assert len(ckpt.fragments) == layout.num_fragments
     for (version, p, m), (exp_version, exp_p, exp_m) in zip(ckpt.fragments, blobs):
         assert version == exp_version
@@ -75,6 +84,83 @@ def test_round_trip(tmp_path):
         assert torch.equal(m, exp_m)
 
     validate_against_layout(ckpt, layout)  # matching layout passes
+
+
+def test_layout_hash_and_policy_sweep_trailers_are_backward_compatible(tmp_path):
+    params = fake_params()
+    path, layout, _ = make_checkpoint(tmp_path, params)
+    legacy = path.read_bytes()
+    layout_hash = bytes(range(32))
+
+    path.write_bytes(legacy + layout_hash)
+    hashed = parse_checkpoint(path)
+    assert hashed.layout_hash == layout_hash.hex()
+    assert hashed.policy_sweep_fragments is None
+    assert hashed.session_contract_hash is None
+
+    path.write_bytes(
+        legacy
+        + layout_hash
+        + struct.pack(
+            "<II", POLICY_SWEEP_CKPT_MAGIC, layout.num_fragments
+        )
+        + bytes(reversed(range(32)))
+    )
+    sweep = parse_checkpoint(path)
+    assert sweep.layout_hash == layout_hash.hex()
+    assert sweep.policy_sweep_fragments == layout.num_fragments
+    assert sweep.session_contract_hash == bytes(reversed(range(32))).hex()
+
+
+def test_generic_streaming_contract_trailer_is_parsed(tmp_path):
+    path, _, _ = make_checkpoint(tmp_path, fake_params())
+    layout_hash = bytes(range(32))
+    contract_hash = bytes(reversed(range(32)))
+    path.write_bytes(
+        path.read_bytes()
+        + layout_hash
+        + struct.pack("<I", STREAMING_CONTRACT_CKPT_MAGIC)
+        + contract_hash
+    )
+
+    checkpoint = parse_checkpoint(path)
+
+    assert checkpoint.layout_hash == layout_hash.hex()
+    assert checkpoint.policy_sweep_fragments is None
+    assert checkpoint.session_contract_hash == contract_hash.hex()
+
+
+def test_bad_generic_streaming_contract_marker_is_rejected(tmp_path):
+    path, _, _ = make_checkpoint(tmp_path, fake_params())
+    path.write_bytes(
+        path.read_bytes()
+        + bytes(32)
+        + struct.pack("<I", 0xDEADBEEF)
+        + bytes(32)
+    )
+    with pytest.raises(ValueError, match="bad streaming checkpoint marker"):
+        parse_checkpoint(path)
+
+
+@pytest.mark.parametrize(
+    ("marker", "fragments", "message"),
+    [
+        (0xDEADBEEF, 4, "bad policy-sweep checkpoint marker"),
+        (POLICY_SWEEP_CKPT_MAGIC, 0, "fragment count must be positive"),
+        (POLICY_SWEEP_CKPT_MAGIC, 3, "declares 3 fragments"),
+    ],
+)
+def test_malformed_policy_sweep_trailer_is_rejected(
+    tmp_path, marker, fragments, message
+):
+    path, _, _ = make_checkpoint(tmp_path, fake_params(), num_fragments=4)
+    path.write_bytes(
+        path.read_bytes()
+        + bytes(32)
+        + struct.pack("<II", marker, fragments)
+    )
+    with pytest.raises(ValueError, match=message):
+        parse_checkpoint(path)
 
 
 def test_causal_export_records_digest_of_parsed_checkpoint_bytes(monkeypatch, tmp_path):

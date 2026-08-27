@@ -160,6 +160,25 @@ def test_lossless_final_cache_is_independent_monotonic_and_f32_bounded(dtype):
         client.check_health()
 
 
+def test_chunk_reassembly_keeps_broadcast_data_in_one_writable_buffer():
+    client = SyncerClient(("unused", 0), 0, _layout(1), dtype=DTYPE_F32)
+    client._gen = 1
+    payload = _bcast_payload(0, 7, [1.0] * 4)
+    inner = _HEADER.pack(MAGIC, MSG_BCAST_FRAGMENT, len(payload)) + payload
+    chunk = _CHUNK_HEAD.pack(99, len(inner), 0) + inner
+
+    reassembled = client._reassemble(1, chunk)
+
+    assert reassembled is not None
+    msg_type, reassembled_payload = reassembled
+    assert isinstance(reassembled_payload, memoryview)
+    assert not reassembled_payload.readonly
+    client._dispatch(1, msg_type, reassembled_payload)
+    update = client.drain_updates()[0]
+    assert isinstance(update.data, memoryview)
+    assert update.data.obj is reassembled_payload.obj
+
+
 def test_missing_manifest_version_fails_with_bounded_diagnostic():
     client = SyncerClient(("unused", 0), 0, _layout(), dtype=DTYPE_F32)
     client._gen = 1

@@ -1,0 +1,40 @@
+diff --git a/secrlenv_rl/runtime.py b/secrlenv_rl/runtime.py
+--- a/secrlenv_rl/runtime.py
++++ b/secrlenv_rl/runtime.py
+@@ -729,6 +729,10 @@ class EpisodeRuntime:
+             network = dict(network or {})
+             network.pop("name", None)
+             network.pop("external", None)
++            # A task-authored static subnet is safe for one stack but collides
++            # when RL samples the same task concurrently.  Let Docker allocate
++            # a distinct subnet atomically for each episode project instead.
++            network.pop("ipam", None)
+             network["internal"] = True
+             networks[name] = network
+         resolved["networks"] = networks
+diff --git a/secrlenv_rl/tests/test_runtime.py b/secrlenv_rl/tests/test_runtime.py
+--- a/secrlenv_rl/tests/test_runtime.py
++++ b/secrlenv_rl/tests/test_runtime.py
+@@ -208,7 +208,13 @@ class NoDindTests(unittest.TestCase):
+                     }
+                 },
+                 "networks": {
+-                    "default": {"name": "canonical_default", "external": False}
++                    "default": {
++                        "name": "canonical_default",
++                        "external": False,
++                        "ipam": {
++                            "config": [{"subnet": "10.255.254.0/28"}]
++                        },
++                    }
+                 },
+                 "volumes": {
+                     "data": {"name": "canonical_data", "external": False}
+@@ -226,6 +232,7 @@ class NoDindTests(unittest.TestCase):
+             self.assertNotIn("ports", target)
+             self.assertEqual(resolved["networks"]["default"]["internal"], True)
+             self.assertNotIn("name", resolved["networks"]["default"])
++            self.assertNotIn("ipam", resolved["networks"]["default"])
+             self.assertNotIn("name", resolved["volumes"]["data"])
+             compose = runtime._compose_base(episode)
+             self.assertEqual(

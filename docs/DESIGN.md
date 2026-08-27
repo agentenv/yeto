@@ -23,9 +23,10 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   once (default 2 — Decoupled DiLoCo's "two fragments in flight" at τ=2), so
   one fragment's quorum/grace/WAN latency never delays pulling the next.
   Concurrent rounds always target distinct fragments (depth is clamped to
-  P); merges stay serialized in one scheduler task; rounds may complete out
-  of order (per-fragment versions, monotonic global step). `--pipeline 1`
-  recovers serial rounds.
+  P). PUSH gathering may finish out of order, but merges, per-round
+  checkpoints, and broadcasts commit in ascending global-step order so every
+  recovery checkpoint is a contiguous prefix. `--pipeline 1` recovers serial
+  rounds.
 - **Frozen rendezvous**: a round attempt captures learner connection
   generations and quorum at launch. Joins/reconnects apply only to future
   attempts, disconnects do not erase accepted work, and a below-quorum

@@ -51,11 +51,15 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   frozen base in bitsandbytes NF4 with double quantization and bf16 compute;
   pass `--gpu` explicitly while the fleet planner's QLoRA memory model is being
   calibrated.
-- Existing causal LoRA artifacts can be continued with `--resume-from` when
-  the recorded model, data, and recipe match, or used as a new lineage with
-  `--branch-from`. `yeto merge --max-shard-size 2GB ...` safely folds an
+- Existing causal LoRA SFT artifacts can be continued with `--resume-from`
+  when the recorded model, data, and recipe match, or used as a new lineage
+  with `--branch-from`. `yeto merge --max-shard-size 2GB ...` safely folds an
   adapter into its base and writes deployment-ready SafeTensors shards. See
   [docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md).
+- `--wandb`: stream the fleet to Weights & Biases — one W&B group per run,
+  one run per learner island plus one fed by the syncer's event tape, so
+  per-island staleness, contribution, and quorum/grace timings are curves
+  instead of a log grep. Off by default; see [docs/WANDB.md](docs/WANDB.md).
 - `--output`: any sky-supported store URI or `hf://org/repo` — the head
   fetches the model from the winning learner, uploads it, and **terminates
   itself** (fully self-cleaning run). Local path or omitted: the artifact
@@ -178,8 +182,8 @@ delta correction, q4 wire format, snapshots, resilience.
 [docs/PROTOCOL.md](docs/PROTOCOL.md) — the learner↔syncer wire protocol.
 [docs/PROVENANCE.md](docs/PROVENANCE.md) — source pinning, attestation, and
 artifact provenance.
-[docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md) — strict adapter
-resume, intentional branching, safe base-model merge, and export sharding.
+[docs/ADAPTER_LIFECYCLE.md](docs/ADAPTER_LIFECYCLE.md) — strict causal LoRA
+SFT resume, intentional branching, safe base-model merge, and export sharding.
 [docs/DIFFUSION.md](docs/DIFFUSION.md) — the generic Diffusers image/video
 backend, data and conditioning contracts, external adapters, export, sampling,
 validation, and current limitations.
@@ -200,6 +204,16 @@ equal-hardware diffusion benchmark contract, media controls, complete arm and
 metric tables, and reproducibility rules.
 [docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md) — aggregate and
 per-seed results for the completed Qwen3.6, LTX-Video, and Wan2.2 benchmarks.
+[docs/MILES_RL.md](docs/MILES_RL.md) — fixed-roster Miles RL across causal-LM
+LoRA islands: rollout/training boundaries, recovery, export, and limitations.
+[docs/CYBERGYM_RL.md](docs/CYBERGYM_RL.md) — experimental local PPO and the
+CyberGym reward integration used for real environment evaluation.
+[docs/RL_BENCHMARK.md](docs/RL_BENCHMARK.md) — equal-hardware native Miles,
+single-island Yeto, and federated Yeto RL benchmark contract and runner.
+[docs/RL_SSH_ACCEPTANCE.md](docs/RL_SSH_ACCEPTANCE.md) — direct existing-host
+deployment, failure injection, artifact collection, and f32 AVG verification.
+[docs/WANDB.md](docs/WANDB.md) — opt-in W&B telemetry: the group/run topology
+for a fleet, the metric tables, the debugging map, and the failure policy.
 
 ## Testing and CI
 
@@ -212,7 +226,7 @@ Python suite on CPU, and a **GPU smoke test** on a self-hosted runner
 training SmolLM2-135M on CUDA, with event-tape assertions that every outer
 step merged pushed deltas from both learners.
 
-Three heavier harnesses (all support `--dry-run`):
+Four heavier harnesses (all support `--dry-run`):
 
     # smoke every supported model with the auto fleet planner, tiered by
     # size; sequential, self-cleaning, writes a pass/fail report
@@ -220,6 +234,9 @@ Three heavier harnesses (all support `--dry-run`):
 
     # causal-LM quality check against equal-hardware synchronous baselines
     python scripts/compare_diloco.py --data <chat.jsonl> --settings all --dry-run
+
+    # Miles RL quality check: native, one Yeto island, and federated Yeto
+    python scripts/benchmark_rl.py <model/data/reward arguments> --dry-run
 
     # diffusion quality check with an explicit, fixed media shape
     python scripts/benchmark_diffusion_diloco.py \

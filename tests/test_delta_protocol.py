@@ -11,11 +11,14 @@ import torch
 
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
 from yeto.protocol import (
+    _CHUNK_HEAD,
+    _HEADER,
     DTYPE_BF16,
     DTYPE_F32,
     DTYPE_Q4,
     FINALIZATION_REVISION,
     MAGIC,
+    MSG_CHUNK,
     MSG_ERROR,
     MSG_FINAL_ACK,
     MSG_FINAL_FRAGMENT,
@@ -25,7 +28,6 @@ from yeto.protocol import (
     MSG_PULL_REQ,
     MSG_PUSH_FRAGMENT,
     PROTOCOL_VERSION,
-    _HEADER,
     bulk_dtype,
     decode_final_manifest,
     encode_hello,
@@ -34,7 +36,6 @@ from yeto.protocol import (
     write_frame,
 )
 from yeto.tensor_io import pack_tensor, quantize_q4
-
 
 ROOT = Path(__file__).resolve().parent.parent
 PUSH_HEAD = struct.Struct("<IIQIQQIQ")
@@ -87,6 +88,7 @@ class RawLearner:
         self.generation = generation
         self.layout = layout
         self.dtype = dtype
+        self._partials: dict[int, bytearray] = {}
         write_frame(
             self.sock,
             MSG_HELLO,
@@ -97,7 +99,22 @@ class RawLearner:
         self.sock.close()
 
     def recv(self) -> tuple[int, bytes]:
-        return read_frame(self.sock)
+        while True:
+            msg_type, payload = read_frame(self.sock)
+            if msg_type != MSG_CHUNK:
+                return msg_type, payload
+            msg_id, total, offset = _CHUNK_HEAD.unpack_from(payload)
+            part = payload[_CHUNK_HEAD.size :]
+            partial = self._partials.setdefault(msg_id, bytearray())
+            if offset != len(partial):
+                raise AssertionError("raw learner received an out-of-order chunk")
+            partial.extend(part)
+            if len(partial) == total:
+                inner = bytes(self._partials.pop(msg_id))
+                magic, inner_type, length = _HEADER.unpack_from(inner)
+                if magic != MAGIC or length != len(inner) - _HEADER.size:
+                    raise AssertionError("raw learner received an invalid inner frame")
+                return inner_type, inner[_HEADER.size :]
 
     def recv_pull(self, step: int) -> tuple[int, int, int]:
         deadline = time.monotonic() + 10
@@ -177,6 +194,7 @@ def launch_syncer(
     quorum: int = 1,
     total_steps: int = 1,
     quorum_timeout_s: int = 2,
+    extra_args: tuple[str, ...] = (),
 ) -> tuple[subprocess.Popen, Path]:
     port = free_port()
     final_state = tmp_path / f"state-{port}.bin"
@@ -207,6 +225,7 @@ def launch_syncer(
             "0",
             "--final-state",
             str(final_state),
+            *extra_args,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -249,15 +268,65 @@ def test_versioned_hello_golden_bytes_and_reserved_ids():
         struct.pack("<HIQBI", PROTOCOL_VERSION, 7, generation, DTYPE_F32, 1)
         + struct.pack("<BIQ", MERGE_RDA, 1, 4)
         + layout_fingerprint(layout)
+        + layout_fingerprint(layout)
         + struct.pack("<H", 3)
     )
     assert encoded == expected
+    profile_hash = bytes(range(32))
+    assert encode_hello(
+        7,
+        DTYPE_F32,
+        layout,
+        3,
+        generation,
+        syncer_profile_hash=profile_hash,
+    ) == expected[:-2] + profile_hash + expected[-2:]
     assert (
         MSG_ERROR,
         MSG_FINAL_MANIFEST,
         MSG_FINAL_ACK,
         MSG_FINAL_FRAGMENT,
     ) == (10, 11, 12, 13)
+
+
+@pytest.mark.parametrize(
+    ("profile_hash", "message"),
+    (
+        (b"\0" * 32, "semantic profile does not match"),
+        (None, "missing the required syncer semantic profile binding"),
+    ),
+)
+@pytest.mark.timeout(20)
+def test_server_rejects_missing_or_mismatched_required_semantic_profile(
+    syncer_binary,
+    tmp_path,
+    profile_hash,
+    message,
+):
+    proc, _ = launch_syncer(
+        syncer_binary,
+        tmp_path,
+        extra_args=("--require-profile-binding",),
+    )
+    sock = connect(proc.port)
+    sock.settimeout(10)
+    try:
+        write_frame(
+            sock,
+            MSG_HELLO,
+            encode_hello(
+                0,
+                DTYPE_F32,
+                one_value_layout(),
+                0,
+                101,
+                syncer_profile_hash=profile_hash,
+            ),
+        )
+        assert message in receive_error(sock)
+    finally:
+        sock.close()
+        stop_process(proc)
 
 
 @pytest.mark.parametrize("dtype", [DTYPE_F32, DTYPE_BF16, DTYPE_Q4])
@@ -479,12 +548,28 @@ def test_version_layout_and_dtype_mismatches_fail_clearly(
         )
         assert "session mismatch" in receive_error(wrong_semantics)
 
+        wrong_contract = connect(proc.port)
+        sockets.append(wrong_contract)
+        write_frame(
+            wrong_contract,
+            MSG_HELLO,
+            encode_hello(
+                0,
+                DTYPE_F32,
+                one_value_layout(),
+                0,
+                106,
+                bytes([0xA5]) * 32,
+            ),
+        )
+        assert "session mismatch" in receive_error(wrong_contract)
+
         malformed = connect(proc.port)
         sockets.append(malformed)
         write_frame(
             malformed,
             MSG_HELLO,
-            struct.pack("<HIQBI", PROTOCOL_VERSION, 0, 106, DTYPE_F32, 0),
+            struct.pack("<HIQBI", PROTOCOL_VERSION, 0, 107, DTYPE_F32, 0),
         )
         assert "layout must contain at least one fragment" in receive_error(malformed)
     finally:

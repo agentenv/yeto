@@ -48,6 +48,7 @@ from .diloco_sync import DiLoCoSyncState, sync_diloco_boundary
 from .finalization import finalize_torch_island
 from .fragments import build_layout
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
+from .wandb_logger import TELEMETRY_EVERY
 from .models import MODEL_ALIASES as MODEL_ALIASES
 from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
 from .tensor_io import (
@@ -264,6 +265,9 @@ def parse_args(argv=None):
     )
     p.add_argument("--output-dir", default="checkpoints/out")
     p.add_argument("--device", default=None)
+    from .wandb_logger import add_arguments as add_wandb_arguments
+
+    add_wandb_arguments(p)
     return p.parse_args(argv)
 
 
@@ -521,6 +525,11 @@ _ATTENTION_TARGETS = (
     r".*\.(q_proj|k_proj|v_proj|o_proj|qkv_proj|out_proj"
     r"|q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj)$"
 )
+_ATTENTION_ROUTED_EXPERT_TARGETS = (
+    r"(?:.*\.(q_proj|k_proj|v_proj|o_proj|qkv_proj|out_proj"
+    r"|q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj)"
+    r"|.*\.mlp\.experts\.\d+\.(gate_proj|up_proj|down_proj))$"
+)
 # Config attributes that mark a mixture-of-experts architecture.
 _MOE_CONFIG_MARKERS = ("n_routed_experts", "num_experts", "num_local_experts")
 
@@ -543,6 +552,12 @@ def resolve_lora_targets(choice: str, config) -> str:
         return _ATTENTION_TARGETS if is_moe_config(config) else "all-linear"
     if choice == "attention":
         return _ATTENTION_TARGETS
+    if choice == "attention-routed-experts":
+        if not is_moe_config(config):
+            raise ValueError(
+                "attention-routed-experts requires a mixture-of-experts model"
+            )
+        return _ATTENTION_ROUTED_EXPERT_TARGETS
     if choice == "all-linear" and is_moe_config(config):
         log.warning(
             "--lora-targets all-linear on a MoE model adapts every routed "
@@ -1066,19 +1081,47 @@ def main(argv=None) -> None:
                 client.send_init(fid, pack_fragment(frag, params, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
-    run_inner_loop(
+    from . import wandb_logger
+
+    wb = wandb_logger.init(
         args,
-        model,
-        params,
-        layout,
-        opt,
-        sched,
-        loader,
-        client,
-        rank,
-        world,
-        device,
-        loss_payload=loss_payload,
+        job_type="learner",
+        name=f"learner-{args.learner_id}",
+        rank=rank,
+        config_extra={
+            "island_backend": "torch",
+            "world_size": world,
+            "device_type": device.type,
+            "num_fragments": layout.num_fragments,
+            "training_recipe": getattr(args, "_training_recipe", None),
+        },
+    )
+    try:
+        counters = run_inner_loop(
+            args,
+            model,
+            params,
+            layout,
+            opt,
+            sched,
+            loader,
+            client,
+            rank,
+            world,
+            device,
+            loss_payload=loss_payload,
+            wandb_run=wb,
+        )
+    except BaseException:
+        wb.finish(exit_code=1)
+        raise
+    wb.summary(
+        {
+            "final/local_steps": counters.local_steps,
+            "final/global_step": counters.global_step,
+            "final/raw_tokens": counters.raw_tokens,
+            "final/target_tokens": counters.target_tokens,
+        }
     )
 
     if rank == 0:
@@ -1118,6 +1161,9 @@ def main(argv=None) -> None:
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
+    # Finished only once the artifact is saved: a failed save leaves the run
+    # unfinished, which wandb's own atexit hook records as a crash.
+    wb.finish()
 
 
 def run_inner_loop(
@@ -1134,6 +1180,7 @@ def run_inner_loop(
     device,
     *,
     loss_payload: bytes | None = None,
+    wandb_run=None,
 ) -> TrainingCounters:
     # Counters (Alg. 1): incremented for all fragments each step, reset per
     # fragment on receipt. Tracked as global totals + per-fragment snapshots.
@@ -1186,8 +1233,28 @@ def run_inner_loop(
     else:
         compute_loss = lambda logits, ids, w: sft_loss(logits, ids, args.loss_function, w)  # noqa: E731
 
+    if wandb_run is None:
+        from .wandb_logger import NullRun
+
+        wandb_run = NullRun()
+    observer = wandb_run.log if wandb_run.enabled else None
+
+    def train_metrics(loss_sum, targets, window, seconds, tokens_since):
+        return {
+            "train/loss_per_token": loss_sum / targets,
+            "train/lr": sched.get_last_lr()[0],
+            "train/raw_tokens_total": tokens_total,
+            "train/target_tokens_total": target_tokens_total,
+            "train/sec_per_step": seconds / window,
+            "train/tokens_per_sec": tokens_since / seconds if seconds > 0 else 0.0,
+            "train/epoch": epoch,
+            "local_step": steps_total,
+            "global_step": sync_state.global_step,
+        }
+
     epoch = 0
     t_last = time.monotonic()
+    tokens_at_last_log = 0
     while not sync_state.shutdown and steps_total < args.max_local_steps:
         steps_at_epoch_start = steps_total
         sampler = getattr(loader, "sampler", None)
@@ -1271,7 +1338,7 @@ def run_inner_loop(
             tokens_total += global_raw
             target_tokens_total += global_targets
 
-            if steps_total % 10 == 0:
+            if steps_total % TELEMETRY_EVERY == 0:
                 loss_sum = _global_loss_sum(step_loss_local, world)
                 if rank == 0:
                     dt = time.monotonic() - t_last
@@ -1283,8 +1350,18 @@ def run_inner_loop(
                         sync_state.global_step,
                         loss_sum / global_targets,
                         target_tokens_total,
-                        dt / 10,
+                        dt / TELEMETRY_EVERY,
                     )
+                    wandb_run.log(
+                        train_metrics(
+                            loss_sum,
+                            global_targets,
+                            TELEMETRY_EVERY,
+                            dt,
+                            tokens_total - tokens_at_last_log,
+                        )
+                    )
+                    tokens_at_last_log = tokens_total
 
             # --- fragment sync at the step boundary (never blocks) ---
             if sync_diloco_boundary(
@@ -1300,6 +1377,7 @@ def run_inner_loop(
                 rank=rank,
                 world=world,
                 device=device,
+                observer=observer,
             ):
                 break
 
@@ -1316,6 +1394,28 @@ def run_inner_loop(
                 "reduce the number of data-parallel consumers"
             )
         epoch += 1
+    # An island that ran fewer steps than one logging window — a late joiner
+    # the fleet merged only a couple of times — would otherwise finish with
+    # sync curves but no training curve at all. The condition is identical on
+    # every rank, so the collective inside _global_loss_sum stays balanced.
+    if (
+        getattr(args, "wandb", False)
+        and steps_total > 0
+        and steps_total % TELEMETRY_EVERY != 0
+    ):
+        window = steps_total % TELEMETRY_EVERY
+        loss_sum = _global_loss_sum(step_loss_local, world)
+        if rank == 0:
+            wandb_run.log(
+                train_metrics(
+                    loss_sum,
+                    global_targets,
+                    window,
+                    time.monotonic() - t_last,
+                    tokens_total - tokens_at_last_log,
+                )
+            )
+
     learner_budget_steps = getattr(args, "learner_budget_steps", None)
     if (
         learner_budget_steps is not None
