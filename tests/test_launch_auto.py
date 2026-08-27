@@ -100,6 +100,10 @@ def test_merge_cli_parses_safe_shard_options():
             ["--branch-from", "/tmp/adapter", "--external-learners", "1"],
             "external MLX",
         ),
+        (
+            ["--branch-from", "/tmp/adapter", "--training-mode", "rl"],
+            "not supported with --training-mode rl",
+        ),
     ],
 )
 def test_parent_adapter_invalid_profiles_fail_before_launch(extra, message):

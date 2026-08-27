@@ -20,3 +20,8 @@ compare-report/
 smoke-report/
 lm-benchmark-probes/
 .claude/
+docs/superpowers/
+docs/MILES_RL_ZH.md
+docs/INIT_Decoupled_DiLoCo_RL_Support.md
+docs/DECOUPLED_DILOCO_MILES_RL_CONTINUATION_DESIGN.md
+docs/DECOUPLED_DILOCO_MILES_RL_DESIGN.md

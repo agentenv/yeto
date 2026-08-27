@@ -89,6 +89,9 @@ def parse_args(argv=None):
     p.add_argument("--shard", default="ddp", help="accepted for flag parity; a Mac island is single-process")
     p.add_argument("--max-local-steps", type=int, default=1_000_000)
     p.add_argument("--output-dir", default="checkpoints/out")
+    from ..wandb_logger import add_arguments as add_wandb_arguments
+
+    add_wandb_arguments(p)
     return p.parse_args(argv)
 
 
@@ -341,15 +344,34 @@ def main(argv=None) -> None:
                 client.send_init(fid, pack_fragment(frag, snap, bulk_dtype(wire_dtype)))
             log.info("sent INIT_PARAMS for %d fragments", layout.num_fragments)
 
-    run_inner_loop(args, model, registry, layout, tokenizer, client)
+    from .. import wandb_logger
+
+    wb = wandb_logger.init(
+        args,
+        job_type="learner",
+        name=f"learner-{args.learner_id}",
+        config_extra={
+            "island_backend": "mlx",
+            "world_size": 1,
+            "num_fragments": layout.num_fragments,
+        },
+    )
+    try:
+        run_inner_loop(args, model, registry, layout, tokenizer, client, wandb_run=wb)
+    except BaseException:
+        wb.finish(exit_code=1)
+        raise
 
     save_adapters(args, model, registry, tokenizer)
+    # Finished only once the adapter is saved: a failed save leaves the run
+    # unfinished, which wandb's own atexit hook records as a crash.
+    wb.finish()
     if client is not None:
         client.close()
 
 
 def run_inner_loop(
-    args, model, registry, layout, tokenizer, client,
+    args, model, registry, layout, tokenizer, client, *, wandb_run=None,
 ):
     """MLX inner AdamW steps + the torch learner's exact sync semantics:
     counters advance every step, pulls are answered once c_steps >= 1,
@@ -362,6 +384,11 @@ def run_inner_loop(
     from ..diloco_sync import DiLoCoSyncState, sync_diloco_boundary
     from ..protocol import DTYPE_F32
     from ..tensor_io import unpack_fragment
+    from ..wandb_logger import TELEMETRY_EVERY, NullRun
+
+    if wandb_run is None:
+        wandb_run = NullRun()
+    observer = wandb_run.log if wandb_run.enabled else None
 
     def loss_fn(mdl, ids, weights):
         # Same math as yeto.losses.sft_loss: next-token logprobs, weighted
@@ -433,7 +460,7 @@ def run_inner_loop(
         steps_total += 1
         tokens_total += tokens_per_inner_step
 
-        if steps_total % 10 == 0:
+        if steps_total % TELEMETRY_EVERY == 0:
             dt = time.monotonic() - t_last
             t_last = time.monotonic()
             log.info(
@@ -443,6 +470,17 @@ def run_inner_loop(
                 loss_val,  # loss_fn already normalizes per trained token
                 dt / 10,
                 10 * tokens_per_inner_step / max(dt, 1e-9),
+            )
+            wandb_run.log(
+                {
+                    "train/loss_per_token": loss_val,
+                    "train/lr": float(opt.learning_rate),
+                    "train/raw_tokens_total": tokens_total,
+                    "train/sec_per_step": dt / 10,
+                    "train/tokens_per_sec": 10 * tokens_per_inner_step / max(dt, 1e-9),
+                    "local_step": steps_total,
+                    "global_step": sync_state.global_step,
+                }
             )
 
         # --- fragment sync at the step boundary (never blocks) ---
@@ -457,8 +495,25 @@ def run_inner_loop(
             apply_flat=apply_sync_flat,
             finalize=finalize_sync,
             shutdown_after_pulls=True,
+            observer=observer,
         ):
             break
+    # A late-joining island can finish inside one logging window; without
+    # this it would report sync curves and no training curve at all.
+    if steps_total > 0 and steps_total % TELEMETRY_EVERY != 0:
+        window = steps_total % TELEMETRY_EVERY
+        dt = time.monotonic() - t_last
+        wandb_run.log(
+            {
+                "train/loss_per_token": loss_val,
+                "train/lr": float(opt.learning_rate),
+                "train/raw_tokens_total": tokens_total,
+                "train/sec_per_step": dt / window,
+                "train/tokens_per_sec": window * tokens_per_inner_step / max(dt, 1e-9),
+                "local_step": steps_total,
+                "global_step": sync_state.global_step,
+            }
+        )
     if client is not None and not client.finalized.is_set():
         raise RuntimeError(
             "MLX learner stopped before authoritative finalization; "

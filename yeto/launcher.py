@@ -20,14 +20,18 @@ Flow:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
 import shlex
 import signal
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 from . import delivery
 from .gpu_spec import ClusterSpec, parse_gpu_spec
@@ -221,10 +225,51 @@ def build_syncer_binary() -> Path:
     return binary
 
 
+# The syncer's JSONL merge log. Head-controller mode tails it into W&B
+# (yeto.wandb_tape), so the path has to be the same on both sides — and RL
+# runs put it under the output dir they collect, so it varies by mode.
+SYNCER_EVENT_TAPE = "~/yeto-tape.jsonl"
+RL_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-tape.jsonl"
+
+
+def syncer_event_tape(args) -> str:
+    """Where the syncer writes its merge record for this run's mode.
+
+    syncer_command, LocalSyncer's strict-failure reader, and the W&B tape
+    forwarder all resolve the path through here, so none of them can drift
+    onto a file the syncer is not writing.
+    """
+    if getattr(args, "training_mode", "sft") == "rl":
+        return RL_SYNCER_EVENT_TAPE
+    return SYNCER_EVENT_TAPE
+
+
 def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
     --resume makes any restart pick up from the on-disk checkpoint."""
+    if getattr(args, "training_mode", "sft") == "rl":
+        total_steps = getattr(args, "rl_total_fragment_steps", args.total_steps)
+        return (
+            "mkdir -p ~/yeto-output && "
+            f"{binary}"
+            f" --port {SYNCER_PORT}"
+            f" --learners {num_learners}"
+            f" --quorum {args.quorum}"
+            f" --grace-ms {args.grace_ms}"
+            f" --grace-gamma {args.grace_gamma}"
+            f" --grace-tau {args.grace_tau}"
+            f" --pipeline {args.pipeline}"
+            f" --sync-interval-steps {args.sync_interval_steps}"
+            f" --delta-correction {args.delta_correction}"
+            f" --total-steps {total_steps}"
+            f" --outer-lr {args.outer_lr}"
+            f" --outer-momentum {args.outer_momentum}"
+            " --max-base-lag 0 --learner-weight equal"
+            " --checkpoint-path ~/yeto-output/yeto-state.ckpt"
+            " --checkpoint-every 1 --resume"
+            f" --event-tape {RL_SYNCER_EVENT_TAPE}"
+        )
     return (
         f"{binary}"
         f" --port {SYNCER_PORT}"
@@ -241,7 +286,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --outer-momentum {args.outer_momentum}"
         f" --checkpoint-path ~/yeto-state.ckpt --resume"
         f" --mark-final-checkpoint"
-        f" --event-tape ~/yeto-tape.jsonl"
+        f" --event-tape {SYNCER_EVENT_TAPE}"
     )
 
 
@@ -260,6 +305,59 @@ SYNCER_REMOTE_BUILD = (
 )
 
 
+def syncer_tape_sidecar(args, num_learners: int, binary: str = "~/yeto-syncer") -> tuple[str, str, dict]:
+    """Setup step, run prefix, and envs that put a W&B tape forwarder on the
+    syncer VM. Returns empty strings when telemetry is off.
+
+    Local controller mode runs the syncer on its own cluster, so the event
+    tape is not reachable from the controller on the submitting machine.
+    Rather than shipping the tape back, the reader goes to the tape:
+    `yeto.wandb_tape --follow` runs beside the syncer.
+
+    It is backgrounded deliberately. The syncer must stay the job's
+    foreground process, because FleetController reads that job's exit code
+    as the syncer's health; and as a separate process the forwarder cannot
+    take the syncer down with it. The forwarder resumes from its stored
+    byte offset, so a restarted job continues the tape instead of logging
+    every past merge a second time.
+
+    Only yeto.wandb_tape and yeto.wandb_logger are imported over there, and
+    both are stdlib-only — the syncer VM never needs the training stack.
+    """
+    if not getattr(args, "wandb", False):
+        return "", "", {}
+    setup = (
+        "\npip install -q wandb || echo '[yeto-setup] wandb install failed; "
+        "the syncer will run without telemetry' >&2"
+    )
+    forwarder = (
+        f"python3 -m yeto.wandb_tape {syncer_event_tape(args)} --follow"
+        f" --wandb-group {shlex.quote(args.cluster_prefix)}"
+        f" --wandb-project {shlex.quote(args.wandb_project)}"
+        f" --wandb-mode {args.wandb_mode}"
+    )
+    if getattr(args, "wandb_entity", None):
+        forwarder += f" --wandb-entity {shlex.quote(args.wandb_entity)}"
+    # Head mode's forwarder is handed the launch namespace directly; the
+    # sidecar is a separate process, so the same config rides across as JSON
+    # (the head job itself is launched the same way, see cli.cmd_launch_head).
+    # build_config drops anything credential-shaped before it is serialized.
+    from .wandb_logger import build_config
+
+    config = build_config(
+        args, {"syncer_command": syncer_command(args, num_learners, binary=binary)}
+    )
+    forwarder += f" --config-json {shlex.quote(json.dumps(config, sort_keys=True))}"
+    run_prefix = (
+        "(cd ~/sky_workdir && PYTHONPATH=~/sky_workdir nohup "
+        f"{forwarder} >/tmp/yeto-tape-wandb.log 2>&1 &) || true\n"
+    )
+    envs = {"YETO_RUN_GROUP": args.cluster_prefix}
+    if os.environ.get("WANDB_API_KEY"):
+        envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
+    return setup, run_prefix, envs
+
+
 def make_syncer_task(args, num_learners: int):
     import platform
 
@@ -267,12 +365,14 @@ def make_syncer_task(args, num_learners: int):
 
     cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
     if cross:
+        tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
         print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
         task = sky.Task(
             name="yeto-syncer",
-            setup=WAN_TUNING + "\n" + SYNCER_REMOTE_BUILD,
-            run=syncer_command(args, num_learners),
+            setup=WAN_TUNING + "\n" + SYNCER_REMOTE_BUILD + tape_setup,
+            run=tape_run + syncer_command(args, num_learners),
             workdir=str(REPO_ROOT),
+            envs=tape_envs,
         )
         infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
         task.set_resources(
@@ -287,12 +387,18 @@ def make_syncer_task(args, num_learners: int):
         return task
 
     binary = build_syncer_binary()
-    cmd = "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
+    tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
+    cmd = tape_run + "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
     task = sky.Task(
         name="yeto-syncer",
-        setup=WAN_TUNING,
+        setup=WAN_TUNING + tape_setup,
         run=cmd,
         file_mounts={"~/yeto-syncer": str(binary)},
+        # The fast path normally ships only the binary; the forwarder needs
+        # the yeto package, so telemetry pulls in the same workdir the
+        # cross-build path already uses.
+        workdir=str(REPO_ROOT) if getattr(args, "wandb", False) else None,
+        envs=tape_envs,
     )
     # --syncer-region accepts "region" (AWS assumed) or "cloud/region".
     infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
@@ -407,7 +513,7 @@ def resolve_loss_function(
     return _stage_pickled_loss(cloudpickle.dumps(fn))
 
 
-def prepare_launch_args(args) -> None:
+def prepare_launch_args(args, *, allow_local_rl_data: bool = False) -> None:
     """Resolve immutable inputs and executable artifacts before cloud spend."""
 
     from .provenance import (
@@ -495,6 +601,281 @@ def prepare_launch_args(args) -> None:
                 f"{expected_adapter_sha256.lower()}, got {adapter_sha256}"
             )
         args.diffusion_adapter_sha256 = adapter_sha256
+    _prepare_rl_args(args, allow_local_data=allow_local_rl_data)
+
+
+def _rl_callable(value: str | None, flag: str, *, required: bool) -> None:
+    if value is None and not required:
+        return
+    module, separator, function = (value or "").partition(":")
+    if (
+        not separator
+        or not module
+        or module.endswith(".py")
+        or not function.isidentifier()
+    ):
+        raise ValueError(f"{flag} must be package.module:function")
+
+
+def _rl_miles_function(
+    value: str | None, flag: str = "--custom-generate-function-path"
+) -> None:
+    if value is None:
+        return
+    parts = value.split(".")
+    if len(parts) < 2 or any(not part.isidentifier() for part in parts):
+        raise ValueError(f"{flag} must be package.module.function")
+
+
+def _prepare_rl_args(args, *, allow_local_data: bool = False) -> None:
+    if getattr(args, "training_mode", "sft") != "rl":
+        if getattr(args, "rl_initial_adapter", None) is not None or getattr(
+            args, "rl_initial_adapter_sha256", None
+        ) is not None:
+            raise ValueError("--rl-initial-adapter requires --training-mode rl")
+        return
+
+    from .adapter_lifecycle import directory_sha256, selected_parent
+
+    if selected_parent(args)[1] is not None:
+        raise ValueError(
+            "--resume-from/--branch-from are not supported with --training-mode rl"
+        )
+    initial_adapter = getattr(args, "rl_initial_adapter", None)
+    expected_initial_sha256 = getattr(args, "rl_initial_adapter_sha256", None)
+    if initial_adapter is None and expected_initial_sha256 is not None:
+        raise ValueError(
+            "--rl-initial-adapter-sha256 requires --rl-initial-adapter"
+        )
+    if initial_adapter is not None:
+        if args.rl_sync_preset != "decoupled":
+            raise ValueError(
+                "--rl-initial-adapter is only supported with "
+                "--rl-sync-preset decoupled"
+            )
+        root = Path(initial_adapter).expanduser()
+        if not root.is_dir():
+            raise ValueError("--rl-initial-adapter must be a local directory")
+        actual_initial_sha256 = directory_sha256(root)
+        if (
+            expected_initial_sha256 is not None
+            and actual_initial_sha256 != expected_initial_sha256.lower()
+        ):
+            raise ValueError(
+                "RL initial adapter SHA256 mismatch: expected "
+                f"{expected_initial_sha256.lower()}, got {actual_initial_sha256}"
+            )
+        args.rl_initial_adapter = str(root.resolve())
+        args.rl_initial_adapter_sha256 = actual_initial_sha256
+
+    from .models import resolve_model_kind
+
+    if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
+        raise ValueError("RL v0 supports only causal language models")
+    if args.tuning != "lora":
+        raise ValueError("RL v0 requires --tuning lora")
+    if args.lora_r <= 0:
+        raise ValueError("RL v0 requires a positive LoRA rank")
+    if args.total_steps <= 0:
+        raise ValueError("RL v0 requires --total-steps > 0")
+    if args.rollout_batch_size <= 0 or args.n_samples_per_prompt <= 0:
+        raise ValueError("RL v0 requires positive rollout batch and sample counts")
+    if args.rollout_max_response_len <= 0:
+        raise ValueError("RL v0 requires --rollout-max-response-len > 0")
+    if args.cybergym_timeout <= 0:
+        raise ValueError("RL v0 requires a positive CyberGym timeout")
+    if args.rl_distributed_timeout_minutes <= 0:
+        raise ValueError(
+            "RL v0 requires --rl-distributed-timeout-minutes > 0"
+        )
+    if args.dynamic_sampling_max_replacements is not None and (
+        args.dynamic_sampling_max_replacements < 0
+    ):
+        raise ValueError(
+            "RL --dynamic-sampling-max-replacements must be non-negative"
+        )
+    if args.rl_sync_preset == "strict-avg":
+        if args.local_rl_rounds_per_sync != 1:
+            raise ValueError("RL v0 requires --local-rl-rounds-per-sync 1")
+    elif args.local_rl_rounds_per_sync < 2:
+        raise ValueError("decoupled RL requires at least 2 local RL rounds per sync")
+    if args.seq_len < 2:
+        raise ValueError("RL v0 requires --seq-len >= 2")
+    args.seq_len = max(args.seq_len, args.rollout_max_response_len)
+    if args.over_sampling_batch_size is None:
+        args.over_sampling_batch_size = args.rollout_batch_size
+    elif args.over_sampling_batch_size < args.rollout_batch_size:
+        raise ValueError(
+            "RL --over-sampling-batch-size must be at least --rollout-batch-size"
+        )
+    _rl_miles_function(args.custom_generate_function_path)
+    dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
+    _rl_miles_function(
+        dynamic_filter,
+        "--dynamic-sampling-filter-path",
+    )
+    if (
+        dynamic_filter is not None
+        and args.over_sampling_batch_size <= args.rollout_batch_size
+    ):
+        raise ValueError(
+            "variance-aware RL filtering requires --over-sampling-batch-size "
+            "greater than --rollout-batch-size"
+        )
+    if args.dynamic_sampling_max_replacements is not None:
+        if dynamic_filter is None:
+            raise ValueError(
+                "--dynamic-sampling-max-replacements requires "
+                "--dynamic-sampling-filter-path"
+            )
+        stock_filter = (
+            "miles.rollout.filter_hub.dynamic_sampling_filters."
+            "check_reward_nonzero_std"
+        )
+        bounded_filter = "yeto.rl.filters.bounded_nonzero_reward_std"
+        if dynamic_filter == stock_filter:
+            args.dynamic_sampling_filter_path = bounded_filter
+        elif dynamic_filter != bounded_filter:
+            raise ValueError(
+                "--dynamic-sampling-max-replacements is only supported with "
+                "the stock nonzero-variance filter or "
+                "yeto.rl.filters.bounded_nonzero_reward_std"
+            )
+    if not args.use_session_server and (
+        args.session_server_ip is not None
+        or args.session_server_port is not None
+        or args.tito_model is not None
+    ):
+        raise ValueError(
+            "--session-server-ip/--session-server-port/--tito-model requires "
+            "--use-session-server"
+        )
+    if args.session_server_port is not None and (
+        len(args.session_server_port) not in {1, 2}
+        or any(port <= 0 or port > 65535 for port in args.session_server_port)
+        or (
+            len(args.session_server_port) == 2
+            and args.session_server_port[1] <= args.session_server_port[0]
+        )
+    ):
+        raise ValueError(
+            "--session-server-port requires one positive port or an increasing range"
+        )
+
+    specs = parse_gpu_spec(args.gpu)
+    if getattr(args, "external_learners", 0):
+        raise ValueError("RL v0 does not support external learner slots")
+    if args.tensor_parallel != 1:
+        raise ValueError("RL v0 requires TP=1")
+    if args.pipeline_parallel <= 0:
+        raise ValueError("RL pipeline parallelism must be positive")
+    if any(spec.total_gpus % args.pipeline_parallel for spec in specs):
+        raise ValueError("RL pipeline parallelism must divide every island")
+    if args.expert_parallel is not None:
+        if args.expert_parallel <= 0:
+            raise ValueError("RL expert parallelism must be positive")
+        if any(
+            (spec.total_gpus // args.pipeline_parallel) % args.expert_parallel
+            for spec in specs
+        ):
+            raise ValueError(
+                "RL expert parallelism must divide every island data-parallel size"
+            )
+    for spec in specs:
+        dp = spec.total_gpus // args.pipeline_parallel
+        if args.rollout_batch_size * args.n_samples_per_prompt % dp:
+            raise ValueError(
+                "RL rollout_batch_size*n_samples_per_prompt must be divisible "
+                "by every island data-parallel size"
+            )
+
+    _rl_callable(args.reward_function, "--reward-function", required=True)
+    if not re.fullmatch(
+        r"docker:[^\s@]+@sha256:[0-9a-fA-F]{64}", args.rl_image or ""
+    ):
+        raise ValueError(
+            "--rl-image must be docker:<repository>@sha256:<64 hex digest>"
+        )
+    if getattr(args, "learner_image", None) is not None:
+        raise ValueError("RL uses digest-pinned --rl-image, not --learner-image")
+    args.rl_total_fragment_steps = args.total_steps
+    if args.rl_sync_preset == "decoupled":
+        if args.experimental_rl_sync:
+            raise ValueError("decoupled RL does not accept --experimental-rl-sync")
+        if args.fragments < 2:
+            raise ValueError("decoupled RL requires at least 2 fragments")
+        if not 1 <= args.pipeline <= args.fragments:
+            raise ValueError("decoupled RL pipeline must be between 1 and fragments")
+        if args.fragment_pattern != "binpack":
+            raise ValueError("decoupled RL requires --fragment-pattern binpack")
+        args.quorum = len(specs)
+        args.grace_ms = 0
+        args.sync_interval_steps = float(args.local_rl_rounds_per_sync)
+        args.delta_correction = "none"
+        args.outer_lr = 0.7
+        args.outer_momentum = 0.9
+        args.merge_alpha = 0.0
+        args.wire_dtype = "f32"
+        args.rl_total_fragment_steps = args.total_steps * args.fragments
+    elif not args.experimental_rl_sync:
+        args.fragments = 1
+        args.quorum = len(specs)
+        args.grace_ms = 0
+        args.pipeline = 1
+        args.sync_interval_steps = 0.0
+        args.delta_correction = "none"
+        args.outer_lr = 1.0
+        args.outer_momentum = 0.0
+        args.merge_alpha = 0.0
+        args.wire_dtype = "f32"
+    else:
+        for name, expected, flag in (
+            ("fragments", 1, "--fragments 1"),
+            ("pipeline", 1, "--pipeline 1"),
+            ("merge_alpha", 0.0, "--merge-alpha 0"),
+            ("wire_dtype", "f32", "--wire-dtype f32"),
+        ):
+            if getattr(args, name) != expected:
+                raise ValueError(
+                    f"RL's one-fragment f32 bridge still requires {flag}"
+                )
+    if args.spot:
+        _rl_checkpoint_mount(args.rl_completed_groups_path)
+
+    provenance = getattr(args, "_provenance", None)
+    if provenance:
+        for name in ("model", "dataset"):
+            source = provenance.get(name) or {}
+            if (
+                name == "dataset"
+                and allow_local_data
+                and source.get("source") == "local"
+                and source.get("resolved_revision") is None
+            ):
+                continue
+            if source.get("source") != "huggingface" or not source.get(
+                "resolved_revision"
+            ):
+                raise ValueError(
+                    f"RL v0 requires a revision-pinned Hugging Face {name}"
+                )
+        from .provenance import python_spec_path, python_spec_sha256
+
+        reward_path = python_spec_path(args.reward_function, base_dir=REPO_ROOT)
+        try:
+            reward_path.relative_to(REPO_ROOT.resolve())
+        except ValueError as exc:
+            raise ValueError(
+                "RL reward source must be inside the synced Yeto workdir"
+            ) from exc
+        args.reward_sha256 = python_spec_sha256(
+            args.reward_function, base_dir=REPO_ROOT
+        )
+    # The fixed Miles commit enables remote model code in its internal
+    # Megatron and SGLang loaders. Keep that trust decision explicit through
+    # Yeto's existing flag.
+    if not args.trust_remote_code:
+        raise ValueError("pinned Miles requires explicit --trust-remote-code")
 
 
 # AWS keeps this SSM parameter pointing at the CURRENT Deep Learning Base
@@ -674,6 +1055,259 @@ def causal_kernel_setup_steps(args) -> list[str]:
 
 DIFFUSION_SAMPLE_ADAPTER_DIR = "~/yeto-adapter"
 DIFFUSION_SAMPLE_OUTPUT_DIR = "~/yeto-output"
+RL_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter"
+RL_HEAD_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter-src"
+
+
+def _rl_checkpoint_mount(value: str) -> str:
+    path = PurePosixPath(value)
+    if (
+        not (value.startswith("~/") or value.startswith("/"))
+        or value.endswith("/")
+        or ".." in path.parts
+        or str(path.parent) in {".", "~", "/"}
+    ):
+        raise ValueError(
+            "Spot RL --rl-completed-groups-path must be a file in an "
+            "absolute or ~/ subdirectory"
+        )
+    return str(path.parent)
+
+
+def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
+    stem = re.sub(r"[^a-z0-9-]+", "-", cluster_prefix.lower()).strip("-") or "yeto"
+    suffix = f"-{hashlib.sha256(cluster_prefix.encode()).hexdigest()[:8]}-rl-{learner_id}"
+    return stem[: 63 - len(suffix)].rstrip("-") + suffix
+
+
+def make_miles_island_task(
+    args,
+    spec: ClusterSpec,
+    learner_id: int,
+    num_learners: int,
+    syncer_addr: str,
+):
+    """Create one Ray/Miles island from the pinned Miles checkout."""
+
+    import sky
+
+    from .datasource import learner_data_arg, learner_file_mounts
+    from .models import resolve
+    from .provenance import is_local_reference
+    from .rl import (
+        MILES_COMMIT,
+        MILES_PEFT_VERSION,
+        MILES_REPOSITORY,
+        SGLANG_COMMIT,
+        SGLANG_REPOSITORY,
+    )
+
+    if not getattr(args, "source_sha256", None) or not getattr(
+        args, "reward_sha256", None
+    ):
+        raise ValueError("RL task requires prepared source and reward provenance")
+
+    flags = (
+        f" --model {shlex.quote(args.model)}"
+        f" --data {shlex.quote(learner_data_arg(args.data))}"
+        " --syncer $SYNCER_ADDR"
+        " --learner-id $LEARNER_ID"
+        f" --reward-function {shlex.quote(args.reward_function)}"
+        f" --reward-sha256 {shlex.quote(args.reward_sha256)}"
+        f" --source-sha256 {shlex.quote(args.source_sha256)}"
+        f" --global-rounds {args.total_steps}"
+        f" --sync-preset {args.rl_sync_preset}"
+        f" --fragments {args.fragments}"
+        f" --pipeline {args.pipeline}"
+        f" --local-horizon {args.local_rl_rounds_per_sync}"
+        f" --total-fragment-steps {args.rl_total_fragment_steps}"
+        f" --groups-per-round {args.rollout_batch_size}"
+        f" --samples-per-group {args.n_samples_per_prompt}"
+        f" --over-sampling-batch-size {args.over_sampling_batch_size}"
+        f" --rl-distributed-timeout-minutes {args.rl_distributed_timeout_minutes}"
+        " --optimizer-steps 1"
+        f" --rollout-max-response-len {args.rollout_max_response_len}"
+        f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
+        f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
+        f" --actor-num-nodes {spec.num_nodes}"
+        f" --actor-num-gpus-per-node {spec.gpus_per_node}"
+        f" --pipeline-parallel {args.pipeline_parallel}"
+        f" --lora-r {args.lora_r}"
+        f" --lora-targets {args.lora_targets}"
+        f" --inner-lr {args.inner_lr}"
+        f" --seq-len {args.seq_len}"
+        f" --seed {args.seed}"
+        f" --wan-streams {args.wan_streams}"
+        " --miles-root ~/miles"
+    )
+    if getattr(args, "wandb", False):
+        flags += " --wandb"
+        flags += f" --wandb-project {shlex.quote(args.wandb_project)}"
+        flags += f" --wandb-mode {args.wandb_mode}"
+        if getattr(args, "wandb_entity", None):
+            flags += f" --wandb-entity {shlex.quote(args.wandb_entity)}"
+    dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
+    if dynamic_filter:
+        flags += (
+            " --dynamic-sampling-filter-path "
+            f"{shlex.quote(dynamic_filter)}"
+        )
+    if args.dynamic_sampling_max_replacements is not None:
+        flags += (
+            " --dynamic-sampling-max-replacements "
+            f"{args.dynamic_sampling_max_replacements}"
+        )
+    if args.rl_offload_train:
+        flags += " --rl-offload-train"
+    if args.expert_parallel is not None:
+        flags += f" --expert-parallel {args.expert_parallel}"
+    if args.custom_generate_function_path:
+        flags += (
+            " --custom-generate-function-path "
+            f"{shlex.quote(args.custom_generate_function_path)}"
+        )
+    if args.use_session_server:
+        flags += " --use-session-server"
+        if args.session_server_ip:
+            flags += f" --session-server-ip {shlex.quote(args.session_server_ip)}"
+        if args.session_server_port:
+            ports = " ".join(str(port) for port in args.session_server_port)
+            flags += f" --session-server-port {ports}"
+        if args.tito_model:
+            flags += f" --tito-model {shlex.quote(args.tito_model)}"
+    if args.model_revision:
+        flags += f" --model-revision {shlex.quote(args.model_revision)}"
+    if args.data_revision:
+        flags += f" --data-revision {shlex.quote(args.data_revision)}"
+    if args.trust_remote_code:
+        flags += " --trust-remote-code"
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        flags += (
+            f" --initial-adapter {RL_INITIAL_ADAPTER_PATH}"
+            " --initial-adapter-sha256 "
+            f"{shlex.quote(args.rl_initial_adapter_sha256)}"
+        )
+    miles_setup = (
+        "set -e\n"
+        f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
+        f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
+        f"git -C ~/miles fetch --depth 1 origin {MILES_COMMIT}\n"
+        f"git -C ~/miles checkout --detach {MILES_COMMIT}\n"
+        f"python3 -m pip install -q --no-deps -e ~/miles "
+        f"'peft=={MILES_PEFT_VERSION}'"
+    )
+    sglang_setup = (
+        f"if [ ! -d ~/sglang/.git ]; then git clone --no-checkout "
+        f"{shlex.quote(SGLANG_REPOSITORY)} ~/sglang; fi\n"
+        f"git -C ~/sglang fetch --depth 1 {shlex.quote(SGLANG_REPOSITORY)} "
+        f"{SGLANG_COMMIT}\n"
+        f"git -C ~/sglang checkout --detach {SGLANG_COMMIT}\n"
+        "python3 -m pip install -q --no-deps -e ~/sglang/python"
+    )
+    model = resolve(args.model)
+    if is_local_reference(model):
+        prefetch = ": # local model; no Hub prefetch"
+    else:
+        revision = (
+            f" --revision {shlex.quote(args.model_revision)}"
+            if args.model_revision
+            else ""
+        )
+        prefetch = (
+            f"(nohup huggingface-cli download {shlex.quote(model)}{revision} "
+            ">/tmp/hf-prefetch.log 2>&1 &) || true"
+        )
+    file_mounts = dict(learner_file_mounts(args.data))
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        file_mounts[RL_INITIAL_ADAPTER_PATH] = os.path.expanduser(
+            args.rl_initial_adapter
+        )
+    local_token = os.path.expanduser(HF_TOKEN_PATH)
+    if os.path.isfile(local_token):
+        file_mounts[HF_TOKEN_PATH] = local_token
+    envs = {
+        "SYNCER_ADDR": syncer_addr,
+        "LEARNER_ID": str(learner_id),
+        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        "NVTE_FLASH_ATTN": "0",
+        "NVTE_FUSED_ATTN": "0",
+        "NVTE_UNFUSED_ATTN": "1",
+        "CYBERGYM_URL": args.cybergym_url,
+        "CYBERGYM_AGENT_ID": args.cybergym_agent_id,
+        "CYBERGYM_TIMEOUT": str(args.cybergym_timeout),
+    }
+    if os.environ.get("HF_TOKEN"):
+        envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    if os.environ.get("CYBERGYM_API_KEY"):
+        envs["CYBERGYM_API_KEY"] = os.environ["CYBERGYM_API_KEY"]
+    for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
+        if os.environ.get(name):
+            envs[name] = os.environ[name]
+    if getattr(args, "wandb", False):
+        # RL islands join the same fleet group as the syncer's tape run.
+        envs["YETO_RUN_GROUP"] = args.cluster_prefix
+        if os.environ.get("WANDB_API_KEY"):
+            envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
+    setup_steps = [WAN_TUNING, HF_TOKEN_ENV, miles_setup, sglang_setup]
+    if getattr(args, "wandb", False):
+        setup_steps.append(
+            "pip install -q wandb || echo '[yeto-setup] wandb install failed; "
+            "the island will train without telemetry' >&2"
+        )
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
+    setup_steps.append(prefetch)
+    task = sky.Task(
+        name=f"yeto-rl-island-{learner_id}",
+        setup="\n".join(setup_steps),
+        run=(
+            f"{HF_TOKEN_ENV}\n"
+            "set -e\n"
+            "cd ~/sky_workdir\n"
+            'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
+            "ray stop --force >/dev/null 2>&1 || true\n"
+            'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
+            "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
+            "--port=6379 --include-dashboard=false\n"
+            "  trap 'ray stop --force >/dev/null 2>&1 || true' EXIT\n"
+            "  PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
+            f"python3 -m yeto.rl.learner{flags}\n"
+            "else\n"
+            "  until ray start --address=\"$MASTER_ADDR:6379\"; do sleep 2; done\n"
+            "  while ray status --address=\"$MASTER_ADDR:6379\" "
+            ">/dev/null 2>&1; do sleep 5; done\n"
+            "fi"
+        ),
+        envs=envs,
+        num_nodes=spec.num_nodes,
+        workdir=str(REPO_ROOT),
+        file_mounts=file_mounts or None,
+    )
+    resources = {
+        "infra": f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud,
+        "accelerators": spec.accelerators,
+        "cpus": args.learner_cpus,
+        "instance_type": args.learner_instance_type,
+        "use_spot": args.spot,
+        "disk_size": args.disk_size,
+    }
+    resources["image_id"] = args.rl_image
+    if spec.num_nodes > 1:
+        resources["network_tier"] = "best"
+    task.set_resources(sky.Resources(**resources))
+    if args.spot:
+        checkpoint_mount = _rl_checkpoint_mount(args.rl_completed_groups_path)
+        task.set_storage_mounts(
+            {
+                checkpoint_mount: sky.Storage(
+                    name=_rl_checkpoint_storage_name(args.cluster_prefix, learner_id),
+                    persistent=False,
+                    mode=sky.StorageMode.MOUNT,
+                    sync_on_reconstruction=True,
+                )
+            }
+        )
+    return task
 
 
 def _is_protenix_request(args) -> bool:
@@ -823,6 +1457,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         common_flags += f" --loss-sha256 {shlex.quote(args.loss_sha256)}"
     if getattr(args, "source_sha256", None):
         common_flags += f" --source-sha256 {shlex.quote(args.source_sha256)}"
+    if getattr(args, "wandb", False):
+        common_flags += " --wandb"
+        common_flags += f" --wandb-project {shlex.quote(args.wandb_project)}"
+        common_flags += f" --wandb-mode {args.wandb_mode}"
+        if getattr(args, "wandb_entity", None):
+            common_flags += f" --wandb-entity {shlex.quote(args.wandb_entity)}"
     for name in (
         "model_requested_identifier",
         "model_requested_revision",
@@ -949,6 +1589,15 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
                        "pip install -q -r requirements.txt"]
         setup_steps.extend(causal_kernel_setup_steps(args))
 
+    if getattr(args, "wandb", False):
+        # Telemetry is never worth losing an island over: a failed install
+        # is reported and the learner trains on (yeto.wandb_logger falls
+        # back to a no-op sink when the import fails).
+        setup_steps.append(
+            "pip install -q wandb || echo '[yeto-setup] wandb install failed; "
+            "the island will train without telemetry' >&2"
+        )
+
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
@@ -965,6 +1614,12 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     }
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    if getattr(args, "wandb", False):
+        # Every island joins the fleet's W&B group under the run's name, so
+        # the islands and the syncer's tape run land on one comparison view.
+        envs["YETO_RUN_GROUP"] = args.cluster_prefix
+        if os.environ.get("WANDB_API_KEY"):
+            envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
     if spec.num_nodes > 1:
         # Surface NCCL's chosen transport in the job logs so an EFA-less
         # fallback to TCP sockets is visible, not silent.
@@ -1379,6 +2034,27 @@ class SkySDKOps:
         )
         return status == sky.ClusterStatus.UP
 
+    def rl_strict_failure(self, cluster: str, job_id: int) -> str | None:
+        """Return a strict RL event from a failed job's existing log."""
+
+        import sky
+
+        try:
+            lines = sky.tail_logs(
+                cluster, job_id, follow=False, preload_content=False
+            )
+            for line in lines:
+                text = str(line).strip()
+                if (
+                    "[yeto-rl-strict-failure]" in text
+                    or "RL strict failure " in text
+                    or "StrictRlInvariantError:" in text
+                ):
+                    return text
+        except Exception:
+            return None
+        return None
+
     def relaunch(self, task, cluster: str):
         """Re-provision `cluster` (same spec) and submit `task` as a new job.
 
@@ -1428,10 +2104,16 @@ class LocalSyncer:
         self.command = syncer_command(args, num_learners, binary=binary)
         self.binary = os.path.expanduser(binary)
         self.log_file = os.path.expanduser(log_file)
+        self.event_tape = os.path.expanduser(syncer_event_tape(args))
         self.proc: subprocess.Popen | None = None
+        self.tape_forwarder = None
+        self.tape_run = None
         # The log file persists across controller jobs on a reused head;
         # forward only what this controller's syncer writes, not history.
         self._log_offset = os.path.getsize(self.log_file) if os.path.exists(self.log_file) else 0
+        self._event_offset = (
+            os.path.getsize(self.event_tape) if os.path.exists(self.event_tape) else 0
+        )
 
     def start(self) -> None:
         if os.path.exists(self.binary):
@@ -1455,7 +2137,7 @@ class LocalSyncer:
             log_f.close()  # Popen holds its own duplicate of the fd
         print(f"[launcher] syncer subprocess started (pid {self.proc.pid})", flush=True)
 
-    def probe(self) -> str | None:
+    def probe(self) -> str | _RlStrictFailure | None:
         """None if the subprocess is healthy, else a reason string.
 
         Exit code 0 means the syncer completed its total steps — terminal
@@ -1467,7 +2149,25 @@ class LocalSyncer:
         code = self.proc.poll()
         if code is None or code == 0:
             return None
+        strict_failure = self._strict_failure()
+        if strict_failure is not None:
+            return strict_failure
         return f"syncer subprocess exited with code {code}"
+
+    def _strict_failure(self) -> "_RlStrictFailure | None":
+        try:
+            with open(self.event_tape, encoding="utf-8") as handle:
+                handle.seek(self._event_offset)
+                for line in handle:
+                    event = json.loads(line)
+                    if event.get("event") == "rl_strict_failure":
+                        return _RlStrictFailure(
+                            f"{event.get('metric', 'strict_failure')}: "
+                            f"{event.get('error', 'syncer strict invariant failed')}"
+                        )
+        except (OSError, ValueError, TypeError):
+            return None
+        return None
 
     def restart(self) -> None:
         self.start()
@@ -1479,6 +2179,45 @@ class LocalSyncer:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._signal_tree(signal.SIGKILL)
+        if self.tape_forwarder is not None:
+            self.tape_forwarder.stop()
+            self.tape_forwarder = None
+        if self.tape_run is not None:
+            self.tape_run.finish()
+            self.tape_run = None
+
+    def start_tape_forwarder(self, args) -> None:
+        """Tail the syncer's event tape into a W&B run.
+
+        The syncer is Rust and stays that way: its merge records already
+        carry quorum/grace timings, per-island staleness, and per-island
+        contribution, so a reader on this host turns them into the fleet's
+        syncer-side curves with no change to the hot path. Survives a
+        syncer restart because the tape is appended to, not rewritten.
+        """
+        if not getattr(args, "wandb", False):
+            return
+        from . import wandb_logger
+        from .wandb_tape import OffsetStore, TapeForwarder, offset_path_for
+
+        run = wandb_logger.init(
+            args,
+            job_type="syncer",
+            name="syncer",
+            step_metrics={"sync/*": "global_step", "learner/*": "global_step"},
+            config_extra={"syncer_command": self.command},
+        )
+        if not run.enabled:
+            return
+        self.tape_run = run
+        self.tape_forwarder = TapeForwarder(
+            run,
+            self.event_tape,
+            # A reused head keeps the previous controller job's tape; the
+            # stored offset stops this one from re-logging its merges.
+            offsets=OffsetStore(offset_path_for(self.event_tape)),
+        )
+        self.tape_forwarder.start()
 
     def _signal_tree(self, sig: int) -> None:
         """Signal the syncer's whole process group (see start()), falling
@@ -1514,6 +2253,11 @@ RUNNING = "running"
 RECOVERING = "recovering"
 DONE = "done"
 ABANDONED = "abandoned"
+
+
+@dataclass(frozen=True)
+class _RlStrictFailure:
+    reason: str
 
 
 class _RelaunchAttempt:
@@ -1572,6 +2316,7 @@ class FleetController:
         thread_cls=threading.Thread,
         syncer_probe=None,
         syncer_restart=None,
+        fixed_roster: bool = False,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -1583,6 +2328,7 @@ class FleetController:
         self.recover_timeout = recover_timeout
         self.on_relaunch = on_relaunch
         self.thread_cls = thread_cls
+        self.fixed_roster = fixed_roster
         self.learners = {
             name: self._make_record(name, task, job_id)
             for name, (task, job_id) in learners.items()
@@ -1650,6 +2396,8 @@ class FleetController:
         reason = self.syncer_probe()
         if reason is None:
             return
+        if isinstance(reason, _RlStrictFailure):
+            raise RuntimeError(f"strict RL syncer failed: {reason.reason}")
         print(
             f"[launcher] syncer: {reason}; restarting the local syncer "
             "(resumes from its checkpoint)",
@@ -1673,6 +2421,11 @@ class FleetController:
                 rec["exit"] = str(status)
                 print(f"[launcher] {rec['name']} job finished: {status}")
             else:
+                strict_failure = self._strict_failure(rec)
+                if strict_failure is not None:
+                    raise RuntimeError(
+                        f"strict RL job {rec['name']} failed: {strict_failure}"
+                    )
                 self._enter_recovering(rec, verdict, is_syncer)
         elif rec["state"] == RECOVERING:
             self._drive_recovery(rec, is_syncer)
@@ -1696,6 +2449,17 @@ class FleetController:
         if not up:
             return "cluster is not UP (preempted or deleted)", status
         return None, status
+
+    def _strict_failure(self, rec) -> str | None:
+        if not self.fixed_roster:
+            return None
+        probe = getattr(self.ops, "rl_strict_failure", None)
+        if probe is None:
+            return None
+        try:
+            return probe(rec["name"], rec["job_id"])
+        except Exception:
+            return None
 
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
         rec["state"] = RECOVERING
@@ -1772,6 +2536,13 @@ class FleetController:
         rec["state"] = ABANDONED
         rec["exit"] = f"ABANDONED after {elapsed:.0f}s"
         self._down(rec["name"])
+        if self.fixed_roster:
+            message = (
+                f"fixed-roster learner {rec['name']} could not recover within "
+                f"{self.recover_timeout}s"
+            )
+            print(f"[launcher] ERROR: {message}", file=sys.stderr)
+            raise RuntimeError(message)
         remaining = sum(1 for r in self.learners.values() if r["state"] != ABANDONED)
         print(
             f"[launcher] LEARNER {rec['name']} ABANDONED after {elapsed:.0f}s "
@@ -1922,6 +2693,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             syncer_addr = f"{os.environ['SYNCER_PUBLIC_IP']}:{SYNCER_PORT}"
             print(f"[launcher] syncer runs on this head node at {syncer_addr}")
         else:
+            if getattr(args, "wandb", False):
+                print(
+                    "[launcher] --wandb: the syncer cluster carries its own "
+                    "event-tape forwarder (log: /tmp/yeto-tape-wandb.log)"
+                )
             print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
             syncer_task = make_syncer_task(args, num_learners)
             rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
@@ -1984,9 +2760,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         # 2. Learners, in parallel.
         tasks = {}
         rids = {}
+        task_factory = (
+            make_miles_island_task
+            if getattr(args, "training_mode", "sft") == "rl"
+            else make_learner_task
+        )
         for m, spec in enumerate(specs):
             name = learner_names[m]
-            task = make_learner_task(args, spec, m, num_learners, syncer_addr)
+            task = task_factory(args, spec, m, num_learners, syncer_addr)
             tasks[name] = task
             print(f"[launcher] launching learner {m} on {spec} as {name}")
             rids[name] = (
@@ -2040,6 +2821,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             on_relaunch=spawn_tail,
             syncer_probe=local_syncer.probe if head_mode else None,
             syncer_restart=local_syncer.restart if head_mode else None,
+            fixed_roster=getattr(args, "training_mode", "sft") == "rl",
         )
         exit_codes = controller.run()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
@@ -2052,7 +2834,12 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             print("[launcher] no learner succeeded; recover from the syncer "
                   "checkpoint with yeto-export", file=sys.stderr)
             return 1
-        source = next((n for n in done if "-l0-" in n), done[0])
+        rl_mode = getattr(args, "training_mode", "sft") == "rl"
+        source = (
+            syncer_cluster
+            if rl_mode and not head_mode
+            else next((n for n in done if "-l0-" in n), done[0])
+        )
         output = getattr(args, "output", None)
         local_dest = (
             os.path.expanduser(output)
@@ -2060,16 +2847,20 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             else os.path.expanduser("~/yeto-output")
         )
         os.makedirs(local_dest, exist_ok=True)
-        try:
-            subprocess.run(delivery.fetch_cmd(source, local_dest), check=True)
-            print(f"[launcher] fine-tuned model fetched to {local_dest}")
-        except subprocess.CalledProcessError as e:
-            print(
-                f"[launcher] fetching {source}:~/yeto-output failed ({e}); "
-                "recover from the syncer checkpoint with yeto-export",
-                file=sys.stderr,
-            )
-            return 2
+        if rl_mode and head_mode:
+            print(f"[launcher] committed RL checkpoint retained at {local_dest}")
+        else:
+            try:
+                subprocess.run(delivery.fetch_cmd(source, local_dest), check=True)
+                artifact = "committed RL checkpoint" if rl_mode else "fine-tuned model"
+                print(f"[launcher] {artifact} fetched to {local_dest}")
+            except subprocess.CalledProcessError as e:
+                print(
+                    f"[launcher] fetching {source}:~/yeto-output failed ({e}); "
+                    "recover from the syncer checkpoint with yeto-export",
+                    file=sys.stderr,
+                )
+                return 2
         if delivery.is_remote(output):
             try:
                 delivery.deliver(output, local_dest)

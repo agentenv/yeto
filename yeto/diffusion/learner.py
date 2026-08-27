@@ -368,6 +368,9 @@ def parse_args(argv=None):
     p.add_argument("--bucket-by-shape", action="store_true", default=False)
     p.add_argument("--output-dir", default="checkpoints/diffusion-out")
     p.add_argument("--device", default=None)
+    from ..wandb_logger import add_arguments as add_wandb_arguments
+
+    add_wandb_arguments(p)
     return p.parse_args(argv)
 
 
@@ -3367,8 +3370,29 @@ def main(argv=None) -> None:
             device=device,
         )
 
+    from .. import wandb_logger
+    from ..wandb_logger import TELEMETRY_EVERY
+
+    # The diffusion loop is inline in main() rather than a helper, so the
+    # run is finished at the natural exit below; a crash is marked by
+    # wandb's own atexit hook.
+    wb = wandb_logger.init(
+        args,
+        job_type="learner",
+        name=f"learner-{args.learner_id}",
+        rank=rank,
+        config_extra={
+            "island_backend": "diffusion",
+            "world_size": world,
+            "device_type": device.type,
+            "num_fragments": layout.num_fragments,
+        },
+    )
+    observer = wb.log if wb.enabled else None
+
     accum = 0
     t_last = time.monotonic()
+    units_at_last_log = 0
     opt.zero_grad(set_to_none=True)
     for rows in loader:
         loss, denom = compute_diffusion_loss(
@@ -3397,7 +3421,7 @@ def main(argv=None) -> None:
         steps_total += 1
         units_total += world * args.micro_batch_size * args.grad_accum
 
-        if steps_total % 10 == 0 and rank == 0:
+        if steps_total % TELEMETRY_EVERY == 0 and rank == 0:
             dt = time.monotonic() - t_last
             t_last = time.monotonic()
             log.info(
@@ -3405,8 +3429,22 @@ def main(argv=None) -> None:
                 steps_total,
                 sync_state.global_step,
                 loss.item() / max(1, denom.item()),
-                dt / 10,
+                dt / TELEMETRY_EVERY,
             )
+            wb.log(
+                {
+                    "train/loss_per_elem": loss.item() / max(1, denom.item()),
+                    "train/lr": sched.get_last_lr()[0],
+                    "train/units_total": units_total,
+                    "train/sec_per_step": dt / TELEMETRY_EVERY,
+                    "train/units_per_sec": (
+                        (units_total - units_at_last_log) / dt if dt > 0 else 0.0
+                    ),
+                    "local_step": steps_total,
+                    "global_step": sync_state.global_step,
+                }
+            )
+            units_at_last_log = units_total
 
         if sync_diloco_boundary(
             client,
@@ -3421,11 +3459,31 @@ def main(argv=None) -> None:
             rank=rank,
             world=world,
             device=device,
+            observer=observer,
         ):
             break
 
         if sync_state.shutdown or steps_total >= args.max_local_steps:
             break
+
+    # A late-joining island can finish inside one logging window; without
+    # this it would report sync curves and no training curve at all.
+    if rank == 0 and steps_total > 0 and steps_total % TELEMETRY_EVERY != 0:
+        window = steps_total % TELEMETRY_EVERY
+        dt = time.monotonic() - t_last
+        wb.log(
+            {
+                "train/loss_per_elem": loss.item() / max(1, denom.item()),
+                "train/lr": sched.get_last_lr()[0],
+                "train/units_total": units_total,
+                "train/sec_per_step": dt / window,
+                "train/units_per_sec": (
+                    (units_total - units_at_last_log) / dt if dt > 0 else 0.0
+                ),
+                "local_step": steps_total,
+                "global_step": sync_state.global_step,
+            }
+        )
 
     if (
         learner_budget_steps is not None
@@ -3462,6 +3520,14 @@ def main(argv=None) -> None:
         steps_total,
         sync_state.global_step,
     )
+    wb.summary(
+        {
+            "final/local_steps": steps_total,
+            "final/global_step": sync_state.global_step,
+            "final/units": units_total,
+        }
+    )
+    wb.finish()
 
 
 if __name__ == "__main__":

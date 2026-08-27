@@ -1,5 +1,6 @@
 import threading
 
+import pytest
 import torch
 
 from yeto.diloco_sync import DiLoCoSyncState, sync_diloco_boundary
@@ -204,3 +205,127 @@ def test_finalization_and_shutdown_poll_timing_are_parameterized():
         shutdown_after_pulls=True,
     )
     assert after_state.shutdown
+
+
+def test_observer_reports_merge_and_push_activity():
+    layout = _layout("weight")
+    client = _Client(
+        updates=[BcastFragment(0, 7, pack_tensor(torch.tensor([4.0, 6.0]), DTYPE_F32))],
+        pulls=[PullRequest(0, 5, 2)],
+    )
+    params = {"weight": torch.tensor([10.0, 14.0])}
+    state = DiLoCoSyncState.create(1, track_anchors=True)
+    seen = []
+
+    def boundary(**kwargs):
+        return sync_diloco_boundary(
+            client,
+            layout,
+            state,
+            merge_alpha=0.0,
+            snapshot_params=lambda: params,
+            apply_flat=lambda fragment, flat: apply_fragment(fragment, flat, params),
+            finalize=None,
+            device=torch.device("cpu"),
+            observer=seen.append,
+            **kwargs,
+        )
+
+    # A boundary that applies a broadcast reports the merge, no push yet
+    # (the pull arrived in the same drain and c_steps is still 0).
+    boundary(steps_total=3, units_total=96)
+    assert seen[0]["sync/merges_applied"] == 1
+    assert seen[0]["sync/pushes"] == 0
+    assert seen[0]["sync/pending_pulls"] == 1
+    assert seen[0]["global_step"] == 7
+    assert seen[0]["local_step"] == 3
+    assert seen[0]["sync/staleness_max"] == 0  # fragment is at the newest version
+
+    # The next boundary answers the pull: one push, its exact wire size, and
+    # the delta's norm.
+    params["weight"].copy_(torch.tensor([7.0, 10.0]))
+    boundary(steps_total=4, units_total=128)
+    assert seen[1]["sync/pushes"] == 1
+    assert seen[1]["sync/pending_pulls"] == 0
+    assert seen[1]["sync/push_bytes"] == len(client.pushes[0][7])
+    assert seen[1]["sync/push_delta_norm"] == pytest.approx(5.0)  # |(3, 4)|
+
+
+def test_observer_is_silent_on_a_boundary_where_nothing_moved():
+    layout = _layout("weight")
+    client = _Client()
+    params = {"weight": torch.tensor([1.0, 2.0])}
+    state = DiLoCoSyncState.create(1, track_anchors=True)
+    seen = []
+
+    sync_diloco_boundary(
+        client,
+        layout,
+        state,
+        steps_total=1,
+        units_total=32,
+        merge_alpha=0.0,
+        snapshot_params=lambda: params,
+        apply_flat=lambda fragment, flat: apply_fragment(fragment, flat, params),
+        finalize=None,
+        device=torch.device("cpu"),
+        observer=seen.append,
+    )
+    # Most step boundaries merge nothing; logging them would bury the ones
+    # that did under thousands of empty points.
+    assert seen == []
+
+
+def test_observer_reports_the_island_falling_behind():
+    layout = _layout("a", "b")
+    # Fragment 0 advances to global version 9, fragment 1 stays at 4: the
+    # island is 5 versions stale on half its parameters.
+    client = _Client(
+        updates=[
+            BcastFragment(1, 4, pack_tensor(torch.tensor([0.0, 0.0]), DTYPE_F32)),
+            BcastFragment(0, 9, pack_tensor(torch.tensor([0.0, 0.0]), DTYPE_F32)),
+        ]
+    )
+    params = {"a": torch.tensor([1.0, 1.0]), "b": torch.tensor([1.0, 1.0])}
+    state = DiLoCoSyncState.create(2, track_anchors=True)
+    seen = []
+
+    sync_diloco_boundary(
+        client,
+        layout,
+        state,
+        steps_total=10,
+        units_total=320,
+        merge_alpha=0.0,
+        snapshot_params=lambda: params,
+        apply_flat=lambda fragment, flat: apply_fragment(fragment, flat, params),
+        finalize=None,
+        device=torch.device("cpu"),
+        observer=seen.append,
+    )
+    assert seen[0]["sync/staleness_max"] == 5
+    assert seen[0]["sync/staleness_mean"] == 2.5
+
+
+def test_replicas_never_double_report():
+    layout = _layout("weight")
+    params = {"weight": torch.tensor([1.0, 2.0])}
+    state = DiLoCoSyncState.create(1, track_anchors=False)
+    seen = []
+
+    sync_diloco_boundary(
+        None,
+        layout,
+        state,
+        steps_total=1,
+        units_total=32,
+        merge_alpha=0.0,
+        snapshot_params=lambda: params,
+        apply_flat=lambda fragment, flat: apply_fragment(fragment, flat, params),
+        finalize=None,
+        rank=1,
+        world=1,
+        device=torch.device("cpu"),
+        observer=seen.append,
+    )
+    assert seen == []

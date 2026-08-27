@@ -141,6 +141,9 @@ def test_cmd_head_reconstructs_args_and_starts_syncer(monkeypatch):
         def start_log_forwarder(self):
             seen["forwarder"] = True
 
+        def start_tape_forwarder(self, args):
+            seen["tape_forwarder"] = getattr(args, "wandb", False)
+
         def stop(self):
             seen["stopped"] = True
 
@@ -158,6 +161,9 @@ def test_cmd_head_reconstructs_args_and_starts_syncer(monkeypatch):
     assert rc == 0
     assert seen["num_learners"] == 2
     assert seen["started"] and seen["forwarder"] and seen["stopped"]
+    # The tape forwarder is offered the run's args every time and decides
+    # for itself; without --wandb it does nothing.
+    assert seen["tape_forwarder"] is False
     assert isinstance(seen["local_syncer"], FakeLocalSyncer)
     args = seen["args"]
     assert args.gpu == ns.gpu
@@ -203,6 +209,76 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "yeto down h1" in out
+
+
+def test_rl_head_forwards_cybergym_secret_without_serializing_it(
+    fake_sky, monkeypatch
+):
+    monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
+    monkeypatch.setenv("CYBERGYM_REWARD_SCHEME", "shaped_v1")
+    monkeypatch.setenv("CYBERGYM_REWARD_VIEW", "train")
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    args = cli.parse_args(
+        LAUNCH_ARGS
+        + [
+            "--cluster-prefix",
+            "rlh",
+            "--training-mode",
+            "rl",
+            "--reward-function",
+            "yeto.tasks.cybergym.reward:score",
+        ]
+    )
+
+    assert cli.cmd_launch_head(args) == 0
+
+    (_, head_task), = fake_sky["launches"]
+    (_, job_task), = fake_sky["execs"]
+    assert head_task.envs is None
+    assert job_task.envs["CYBERGYM_API_KEY"] == "test-secret"
+    assert job_task.envs["CYBERGYM_REWARD_SCHEME"] == "shaped_v1"
+    assert job_task.envs["CYBERGYM_REWARD_VIEW"] == "train"
+    assert "test-secret" not in job_task.run
+    assert "test-secret" not in json.dumps(runs.load_run("rlh")["args"])
+
+
+def test_rl_head_stages_the_initial_adapter_for_learner_mounts(
+    fake_sky, monkeypatch, tmp_path
+):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+
+    def prepare(args):
+        args.rl_initial_adapter_sha256 = "a" * 64
+
+    monkeypatch.setattr(launcher, "prepare_launch_args", prepare)
+    args = cli.parse_args(
+        LAUNCH_ARGS
+        + [
+            "--cluster-prefix",
+            "rl-parent",
+            "--training-mode",
+            "rl",
+            "--reward-function",
+            "yeto.tasks.cybergym.reward:score",
+            "--rl-sync-preset",
+            "decoupled",
+            "--rl-initial-adapter",
+            str(adapter),
+        ]
+    )
+
+    assert cli.cmd_launch_head(args) == 0
+
+    (_, head_task), = fake_sky["launches"]
+    (_, job_task), = fake_sky["execs"]
+    assert (
+        head_task.file_mounts["~/yeto-rl-initial-adapter-src"]
+        == str(adapter)
+    )
+    assert '"rl_initial_adapter": "~/yeto-rl-initial-adapter-src"' in job_task.run
+    assert '"rl_initial_adapter_sha256": "' + "a" * 64 + '"' in job_task.run
 
 
 def test_launch_head_mounts_aws_credentials_when_present(
