@@ -221,11 +221,29 @@ with open(path, "rb") as handle:
         handle.seek(payload_bytes, os.SEEK_CUR)
     ledger_count = struct.unpack("<I", read_exact(handle, 4, "ledger count"))[0]
     ledger_bytes = ledger_count * 28
-    if handle.tell() + ledger_bytes != size:
+    if handle.tell() + ledger_bytes > size:
         raise ValueError(
             f"{path}: malformed ledger/trailing bytes at offset {handle.tell()} of {size}"
         )
     handle.seek(ledger_bytes, os.SEEK_CUR)
+    # V3 trailer: the 32-byte semantic-layout fingerprint echo, then an
+    # optional session-contract trailer (magic + 32-byte hash) or policy-sweep
+    # trailer (magic + u64 + 32-byte hash). Older validators rejected any
+    # trailing bytes and false-failed healthy cutoff checkpoints.
+    fingerprint_echo = read_exact(handle, 32, "fingerprint echo")
+    if fingerprint_echo != layout_fingerprint:
+        raise ValueError(f"{path}: trailing fingerprint does not match header")
+    remaining = size - handle.tell()
+    if remaining:
+        magic = struct.unpack("<I", read_exact(handle, 4, "trailer magic"))[0]
+        expected = {0x52544353: 32, 0x50535750: 40}.get(magic)
+        if expected is None:
+            raise ValueError(f"{path}: unknown checkpoint trailer magic 0x{magic:08X}")
+        if remaining != 4 + expected:
+            raise ValueError(
+                f"{path}: malformed trailer: {remaining} bytes after fingerprint echo"
+            )
+        handle.seek(expected, os.SEEK_CUR)
     if handle.tell() != size:
         raise ValueError(f"{path}: checkpoint length changed while inspecting")
 
