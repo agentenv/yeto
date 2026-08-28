@@ -19,7 +19,7 @@ if [[ "${YETO_MILES_VALUE_SMOKE:-0}" == 1 ]]; then
   }
 elif [[ "${YETO_MILES_VALUE_SMOKE:-0}" == 0 ]]; then
   readonly NUM_LEARNERS=5
-  readonly LOCAL_BUDGET_STEPS=${LOCAL_BUDGET_STEPS:-364}
+  readonly LOCAL_BUDGET_STEPS=${LOCAL_BUDGET_STEPS:-240}
   [[ "${LOCAL_BUDGET_STEPS}" =~ ^[1-9][0-9]*$ ]] || \
     die "LOCAL_BUDGET_STEPS must be a positive integer"
   [[ -z "${SMOKE_BUDGET_STEPS:-}" ]] || {

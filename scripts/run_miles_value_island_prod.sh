@@ -4,10 +4,13 @@ set -euo pipefail
 # One production process launches one node-local TP4 x CP2 x DP1 Miles critic
 # island. Five learner islands communicate through one dedicated 8-GPU syncer.
 readonly NUM_LEARNERS=5
-readonly LOCAL_BUDGET_STEPS=${LOCAL_BUDGET_STEPS:-364}
+readonly LOCAL_BUDGET_STEPS=${LOCAL_BUDGET_STEPS:-240}
 readonly NUM_ROLLOUT=${LOCAL_BUDGET_STEPS}
 readonly CONTEXT_LENGTH=262144
-readonly REQUIRED_MILES_REVISION=277d151c00ef4f6727f01aca06e115b71bd7578c
+readonly REQUIRED_DATASET_VERSION=${REQUIRED_DATASET_VERSION:-qwen38-value-five-islands-contrastive-20260827-v2}
+readonly REQUIRED_DATASET_STRATEGY=atomic-thread-reward-contrastive-window-balanced-v2
+readonly REQUIRED_MILES_REVISION=d82b13b4beff4e0e4df7f3a4f9f804bd381feea1
+readonly REQUIRED_MILES_CONTRACT_SHA256=94ba2e0d7543099a72c2959044dc9c3ebc8444b96bdf5548968e5d253f3e2528
 readonly SAVE_INTERVAL=${SAVE_INTERVAL:-15}
 readonly SAVE_RETAIN_INTERVAL=${SAVE_RETAIN_INTERVAL:-999990}
 readonly SYNC_INTERVAL_STEPS=${SYNC_INTERVAL_STEPS:-12}
@@ -15,12 +18,12 @@ readonly PHASE2_REJOIN=${PHASE2_REJOIN:-0}
 readonly RECOVERY_LOCAL_STEP_OFFSET=${RECOVERY_LOCAL_STEP_OFFSET:-0}
 readonly RECOVERY_UNIT_OFFSET=${RECOVERY_UNIT_OFFSET:-0}
 readonly TRAIN_MEMORY_MARGIN_BYTES=${TRAIN_MEMORY_MARGIN_BYTES:-1073741824}
-# Miles converts these iteration counts to sample counts by multiplying the
-# nominal GBS. Five islands use fixed nominal size 5 each (total 25), so the
-# defaults preserve 125 warmup samples and the original 2,625-sample global
-# cosine horizon.
-readonly LR_WARMUP_ITERS=5
-readonly LR_DECAY_ITERS=${LR_DECAY_ITERS:-105}
+# Miles converts these iteration counts to local-context units by multiplying
+# the nominal GBS of five.  The audited pack has exactly 687 train contexts per
+# island, so 138 iterations gives a 690-context cosine horizon instead of
+# reaching min LR before the final 162 contexts.
+readonly LR_WARMUP_ITERS=${LR_WARMUP_ITERS:-5}
+readonly LR_DECAY_ITERS=${LR_DECAY_ITERS:-138}
 
 die() {
   printf 'run_miles_value_island_prod.sh: %s\n' "$*" >&2
@@ -32,8 +35,8 @@ SYNCER_ADDR=${SYNCER_ADDR:?set SYNCER_ADDR to the Yeto syncer host:port}
 ISLAND_DATA_TEMPLATE=${ISLAND_DATA_TEMPLATE:?set ISLAND_DATA_TEMPLATE to the node-local rollout template}
 OUTPUT_DIR=${OUTPUT_DIR:?set OUTPUT_DIR to a node-local output directory}
 
-MILES_ROOT=${MILES_ROOT:-/data/miles-values-isoloco-20260826-v7}
-YETO_ROOT=${YETO_ROOT:-/data/yeto-isoloco-20260826-v7}
+MILES_ROOT=${MILES_ROOT:-/data/miles-values-contrastive-20260827-v2}
+YETO_ROOT=${YETO_ROOT:-/data/yeto-contrastive-20260827-v2}
 MODEL_DIR=${MODEL_DIR:-/data/models}
 PROMPT_DATA=${PROMPT_DATA:-/data/rl_data/smoke/all3_24.jsonl}
 CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-/data/configs/sao_gae.yaml}
@@ -45,6 +48,7 @@ export MILES_RAY_TARGET_NODE_IP
 ((LEARNER_ID >= 0 && LEARNER_ID < NUM_LEARNERS)) || die "LEARNER_ID must be in [0, 4], got ${LEARNER_ID}"
 [[ "${LOCAL_BUDGET_STEPS}" =~ ^[1-9][0-9]*$ ]] || die "LOCAL_BUDGET_STEPS must be a positive integer"
 [[ "${NUM_ROLLOUT}" =~ ^[1-9][0-9]*$ ]] || die "NUM_ROLLOUT must be a positive integer"
+[[ "${LR_WARMUP_ITERS}" =~ ^[0-9]+$ ]] || die "LR_WARMUP_ITERS must be a nonnegative integer"
 [[ "${LR_DECAY_ITERS}" =~ ^[1-9][0-9]*$ ]] || die "LR_DECAY_ITERS must be a positive integer"
 [[ "${SAVE_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || die "SAVE_INTERVAL must be a positive integer"
 [[ "${SAVE_RETAIN_INTERVAL}" =~ ^[1-9][0-9]*$ ]] || die "SAVE_RETAIN_INTERVAL must be a positive integer"
@@ -67,12 +71,103 @@ readonly ROLLOUT_PLACEHOLDER='{rollout_id}'
 template_without_first_placeholder=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER}"/}
 [[ "${template_without_first_placeholder}" != *"${ROLLOUT_PLACEHOLDER}"* ]] || die "ISLAND_DATA_TEMPLATE must contain exactly one ${ROLLOUT_PLACEHOLDER}"
 [[ "${OUTPUT_DIR}" == /* && "${OUTPUT_DIR}" != / ]] || die "OUTPUT_DIR must be an absolute directory other than /"
+readonly ISLAND_DATA_DIR=${ISLAND_DATA_TEMPLATE%/*}
+readonly DATASET_ROOT=${ISLAND_DATA_DIR%/*}
+readonly DATASET_MANIFEST=${DATASET_MANIFEST:-${DATASET_ROOT}/manifest.json}
+[[ "${ISLAND_DATA_DIR##*/}" == "island_${LEARNER_ID}" ]] || \
+  die "ISLAND_DATA_TEMPLATE must point at island_${LEARNER_ID}"
+[[ -r "${DATASET_MANIFEST}" ]] || die "missing dataset manifest ${DATASET_MANIFEST}"
+
+# Offline debug replay consumes rollout IDs in numerical order and bypasses
+# Miles's normal rollout shuffle.  Refuse any bundle that has not already been
+# reward-stratified and H-window-balanced by the audited packer.
+python3 - "${DATASET_MANIFEST}" "${REQUIRED_DATASET_VERSION}" \
+  "${REQUIRED_DATASET_STRATEGY}" "${LEARNER_ID}" "${LOCAL_BUDGET_STEPS}" \
+  "${SYNC_INTERVAL_STEPS}" <<'PY' || die "dataset manifest failed launch gates"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+required_version = sys.argv[2]
+required_strategy = sys.argv[3]
+island_id = int(sys.argv[4])
+budget_steps = int(sys.argv[5])
+sync_window = int(sys.argv[6])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+require(manifest.get("schema_version") == 3, "dataset schema must be 3")
+require(manifest.get("dataset_version") == required_version, "dataset version mismatch")
+require(manifest.get("strategy") == required_strategy, "dataset strategy mismatch")
+require(manifest.get("num_islands") == 5, "dataset must contain five islands")
+require(manifest.get("sync_window_size") == sync_window, "dataset/sync H mismatch")
+train_ids = manifest.get("train_rollout_ids")
+require(isinstance(train_ids, list), "missing train rollout IDs")
+require(train_ids == list(range(len(train_ids))), "train rollout IDs are not contiguous")
+require(budget_steps <= len(train_ids), "learner budget exceeds stratified train data")
+verification = manifest.get("verification") or {}
+require(verification.get("launch_ready") is True, "dataset launch_ready is not true")
+require(verification.get("duplicate_contexts") == 0, "dataset duplicates contexts")
+require(verification.get("omitted_contexts") == 0, "dataset omits contexts")
+require(verification.get("atomic_group_failures") == 0, "dataset splits atomic groups")
+require(verification.get("step_label_failures") == 0, "dataset has a single-label optimizer step")
+require(verification.get("window_label_failures") == 0, "dataset has single-label H windows")
+require(
+    float(verification.get("max_step_positive_rate_deviation", 1.0)) <= 0.10,
+    "dataset reward-window drift exceeds 0.10",
+)
+recipe = manifest.get("critic_recipe") or {}
+require(recipe.get("value_loss_type") == "classification", "critic must be bounded")
+require(recipe.get("value_num_bins") == 51, "critic must use 51 bins")
+require(recipe.get("value_reward_range") == [0.0, 1.0], "critic reward support mismatch")
+require(recipe.get("value_target_type") == "hl_gauss", "critic target must be HL-Gauss")
+require(float(recipe.get("hl_gauss_sigma_ratio", -1.0)) == 0.75, "HL-Gauss sigma mismatch")
+require(
+    recipe.get("sample_weighting") == "atomic-group-equal-within-step-v1",
+    "critic sample weighting mismatch",
+)
+islands = manifest.get("islands") or []
+island = next(
+    (item for item in islands if isinstance(item, dict) and item.get("island_id") == island_id),
+    None,
+)
+require(island is not None, "dataset manifest is missing this island")
+require((island.get("train") or {}).get("contexts") == 687, "unexpected train context count")
+require((island.get("train") or {}).get("all_steps_contrastive") is True, "island is not fully contrastive")
+PY
 
 [[ -f "${MILES_ROOT}/train_async.py" ]] || die "missing ${MILES_ROOT}/train_async.py"
 actual_miles_revision=$(git -C "${MILES_ROOT}" rev-parse HEAD 2>/dev/null) || \
   die "MILES_ROOT must be a Git checkout pinned to ${REQUIRED_MILES_REVISION}"
 [[ "${actual_miles_revision}" == "${REQUIRED_MILES_REVISION}" ]] || \
   die "MILES_ROOT revision ${actual_miles_revision} != required ${REQUIRED_MILES_REVISION}"
+actual_miles_contract=$(
+  python3 - "${MILES_ROOT}" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+files = (
+    "miles/ray/rollout/train_data_conversion.py",
+    "miles/backends/training_utils/cp_utils.py",
+    "miles/backends/training_utils/loss.py",
+    "miles/backends/megatron_utils/model.py",
+    "miles/backends/training_utils/loss_hub/losses.py",
+    "scripts/tools/aggregate_offline_validation_ev.py",
+)
+digest = hashlib.sha256()
+for name in files:
+    digest.update(name.encode() + b"\0" + (root / name).read_bytes())
+print(digest.hexdigest())
+PY
+) || die "failed to hash the Miles value-training contract"
+[[ "${actual_miles_contract}" == "${REQUIRED_MILES_CONTRACT_SHA256}" ]] || \
+  die "Miles value-training contract hash mismatch: ${actual_miles_contract}"
 [[ -f "${MILES_ROOT}/scripts/models/qwen3.6-27B.sh" ]] || die "missing Miles Qwen model argument script"
 [[ -f "${YETO_ROOT}/yeto/megatron/miles_value_island.py" ]] || die "missing Yeto Miles value-island adapter"
 [[ -d "${MODEL_DIR}/Qwen3.8-27B" ]] || die "missing Hugging Face checkpoint ${MODEL_DIR}/Qwen3.8-27B"
@@ -279,7 +374,11 @@ exec python3 train_async.py \
   --critic-lr-warmup-iters "${LR_WARMUP_ITERS}" \
   --num-critic-only-steps 1000000 \
   --num-critic-epochs 1 \
-  --value-loss-type mse \
+  --value-loss-type classification \
+  --value-num-bins 51 \
+  --value-reward-range 0.0 1.0 \
+  --value-target-type hl_gauss \
+  --hl-gauss-sigma-ratio 0.75 \
   --gamma 1.0 \
   --kl-loss-coef 0.0 \
   --entropy-coef 0.0 \

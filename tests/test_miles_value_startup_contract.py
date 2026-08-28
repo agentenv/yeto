@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
-
 
 ROOT = Path(__file__).resolve().parents[1]
 PROD_LAUNCHER = ROOT / "scripts" / "run_miles_value_island_prod.sh"
@@ -61,7 +61,7 @@ def test_launcher_rejects_nonpositive_learner_h_before_startup(launcher: Path):
 def test_production_budget_override_is_shared_and_rollout_cannot_diverge():
     learner = PROD_LAUNCHER.read_text(encoding="utf-8")
     syncer = SYNCER_SUPERVISOR.read_text(encoding="utf-8")
-    override = "readonly LOCAL_BUDGET_STEPS=${LOCAL_BUDGET_STEPS:-364}"
+    override = "readonly LOCAL_BUDGET_STEPS=${LOCAL_BUDGET_STEPS:-240}"
 
     assert override in learner
     assert override in syncer
@@ -72,12 +72,63 @@ def test_production_budget_override_is_shared_and_rollout_cannot_diverge():
     assert '--learner-budget-steps "${LOCAL_BUDGET_STEPS}"' in syncer
 
 
-def test_production_lr_decay_override_keeps_existing_default_and_cli_wiring():
+def test_production_lr_schedule_matches_the_full_contrastive_pack():
     learner = PROD_LAUNCHER.read_text(encoding="utf-8")
 
-    assert "readonly LR_DECAY_ITERS=${LR_DECAY_ITERS:-105}" in learner
+    assert "readonly LR_WARMUP_ITERS=${LR_WARMUP_ITERS:-5}" in learner
+    assert "readonly LR_DECAY_ITERS=${LR_DECAY_ITERS:-138}" in learner
+    assert '[[ "${LR_WARMUP_ITERS}" =~ ^[0-9]+$ ]]' in learner
     assert '[[ "${LR_DECAY_ITERS}" =~ ^[1-9][0-9]*$ ]]' in learner
+    assert '--critic-lr-warmup-iters "${LR_WARMUP_ITERS}"' in learner
     assert '--lr-decay-iters "${LR_DECAY_ITERS}"' in learner
+
+
+def test_production_critic_is_bounded_and_requires_stratified_replay():
+    learner = PROD_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "atomic-thread-reward-contrastive-window-balanced-v2" in learner
+    assert 'verification.get("launch_ready") is True' in learner
+    assert 'verification.get("step_label_failures") == 0' in learner
+    assert 'verification.get("window_label_failures") == 0' in learner
+    assert '"atomic-group-equal-within-step-v1"' in learner
+    assert "--value-loss-type classification" in learner
+    assert "--value-num-bins 51" in learner
+    assert "--value-target-type hl_gauss" in learner
+    assert "--hl-gauss-sigma-ratio 0.75" in learner
+    assert "--value-loss-type mse" not in learner
+
+
+def test_production_rejects_old_unstratified_bundle_before_gpu_preflight(
+    tmp_path: Path,
+):
+    bundle = tmp_path / "old-bundle"
+    island = bundle / "island_0"
+    island.mkdir(parents=True)
+    (bundle / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "dataset_version": "qwen38-value-five-islands-merged-20260826-v1",
+                "strategy": "atomic-thread-compaction-group-lpt-by-sum-true-token-length-squared",
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _production_learner_env()
+    env["ISLAND_DATA_TEMPLATE"] = str(island / "data_{rollout_id}.pt")
+    env["OUTPUT_DIR"] = str(tmp_path / "output")
+
+    result = subprocess.run(
+        ["bash", str(PROD_LAUNCHER)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "dataset manifest failed launch gates" in result.stderr
+    assert "missing Miles" not in result.stderr
 
 
 def test_production_phase2_rejoin_is_explicit_and_fail_closed():
@@ -102,8 +153,9 @@ def _production_learner_env() -> dict[str, str]:
             "SYNCER_ADDR": "127.0.0.1:29400",
             "ISLAND_DATA_TEMPLATE": "/definitely-not-used/data_{rollout_id}.pt",
             "OUTPUT_DIR": "/definitely-not-used/output",
-            "LOCAL_BUDGET_STEPS": "364",
-            "LR_DECAY_ITERS": "105",
+            "LOCAL_BUDGET_STEPS": "240",
+            "LR_WARMUP_ITERS": "5",
+            "LR_DECAY_ITERS": "138",
             "SAVE_INTERVAL": "15",
             "SYNC_INTERVAL_STEPS": "12",
         }
@@ -126,6 +178,8 @@ def _production_learner_env() -> dict[str, str]:
         ),
         ("LR_DECAY_ITERS", "-1", "LR_DECAY_ITERS must be a positive integer"),
         ("LR_DECAY_ITERS", "1.5", "LR_DECAY_ITERS must be a positive integer"),
+        ("LR_WARMUP_ITERS", "-1", "LR_WARMUP_ITERS must be a nonnegative integer"),
+        ("LR_WARMUP_ITERS", "1.5", "LR_WARMUP_ITERS must be a nonnegative integer"),
     ],
 )
 def test_production_learner_rejects_invalid_overrides_before_preflight(
