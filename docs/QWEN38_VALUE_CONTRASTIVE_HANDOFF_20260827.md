@@ -209,6 +209,88 @@ Do not treat the canary as a production green light until all of these hold:
 6. A separate 24-bucket held-out evaluation produces pooled EV above zero and
    acceptable MSE/calibration.
 
+## Held-out evaluation launchbook
+
+Gate #6 for run tag `qwen38-value-contrastive-hlgauss-b48-20260828-v5`. The
+launcher is `scripts/run_miles_value_offline_validation.sh` (this branch),
+deployed with the compat-only hook `yeto_value_validation_hook.py` at
+`/data/yeto-contrastive-20260827-v2/` on every learner node. It replays
+validation buckets 240..263 through the normal Miles critic train step with
+bit-frozen parameters (`--critic-lr 1e-30 --lr 1e-30 --min-lr 0.0
+--weight-decay 0.0`: every Adam/decay update is below one FP32 ulp, so all
+forwards run against the unchanged step-48 checkpoint), the 51-bin HL-Gauss
+recipe, no Yeto syncer hooks, no W&B, `--no-load-optim --no-load-rng`, and
+save intervals far beyond 24 steps. It fails closed before reserving GPUs
+unless the tracker reads exactly 47, `iter_0000047/.metadata` exists, all 24
+bucket files are readable, the manifest held-out range is exactly 240..263
+with the audited recipe, the Miles checkout is pinned at
+`1683344de810654c781f8c04cbd118f296918a88` with the audited contract hash, the
+output directory is fresh, and no GPU compute process is present.
+
+Prerequisites on every learner node (the launcher checks most of these, but
+check before firing):
+
+- `/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-learner<N>/critic_checkpoints/latest_checkpointed_iteration.txt`
+  reads `47` and `iter_0000047/.metadata` exists.
+- The canary learner has fully exited: training systemd unit inactive,
+  `nvidia-smi` compute PID count 0, Ray ALIVE actors 0, Ray CREATED placement
+  groups 0. Phase-2 consolidation on n6 must be complete. Do not start the
+  eval against a live learner; the launcher's GPU-occupancy gate would refuse
+  anyway.
+- Never use h200-n3.
+
+Step 1: start a Ray head on each learner node with its own public address in
+`MILES_NODE_ORDER` (only after the canary learner has exited):
+
+```bash
+rrun h200-n1 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.75;  ray stop --force; ray start --head --node-ip-address 208.64.254.75  --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265"'
+rrun h200-n2 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.76;  ray stop --force; ray start --head --node-ip-address 208.64.254.76  --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265"'
+rrun h200-n4 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.177; ray stop --force; ray start --head --node-ip-address 208.64.254.177 --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265"'
+rrun h200-n5 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.178; ray stop --force; ray start --head --node-ip-address 208.64.254.178 --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265"'
+rrun h200-n7 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.181; ray stop --force; ray start --head --node-ip-address 208.64.254.181 --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265"'
+```
+
+Step 2: launch one eval island per node. Each `OUTPUT_DIR` must be fresh; the
+launcher refuses anything that already exists.
+
+```bash
+rrun --detach yeto-eval-island0 h200-n1 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.75  ISLAND_ID=0 CRITIC_LOAD_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-learner0/critic_checkpoints OUTPUT_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-eval-island0; bash /data/yeto-contrastive-20260827-v2/scripts/run_miles_value_offline_validation.sh"'
+rrun --detach yeto-eval-island1 h200-n2 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.76  ISLAND_ID=1 CRITIC_LOAD_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-learner1/critic_checkpoints OUTPUT_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-eval-island1; bash /data/yeto-contrastive-20260827-v2/scripts/run_miles_value_offline_validation.sh"'
+rrun --detach yeto-eval-island2 h200-n4 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.177 ISLAND_ID=2 CRITIC_LOAD_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-learner2/critic_checkpoints OUTPUT_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-eval-island2; bash /data/yeto-contrastive-20260827-v2/scripts/run_miles_value_offline_validation.sh"'
+rrun --detach yeto-eval-island3 h200-n5 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.178 ISLAND_ID=3 CRITIC_LOAD_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-learner3/critic_checkpoints OUTPUT_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-eval-island3; bash /data/yeto-contrastive-20260827-v2/scripts/run_miles_value_offline_validation.sh"'
+rrun --detach yeto-eval-island4 h200-n7 -- 'docker exec -i miles_node bash -lc "export MILES_NODE_ORDER=208.64.254.181 ISLAND_ID=4 CRITIC_LOAD_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-learner4/critic_checkpoints OUTPUT_DIR=/data/local-runs/qwen38-value-contrastive-hlgauss-b48-20260828-v5-eval-island4; bash /data/yeto-contrastive-20260827-v2/scripts/run_miles_value_offline_validation.sh"'
+```
+
+Step 3: monitor. Each unit logs to `/root/yeto-eval-island<N>.log` on its
+host. systemd transient units vanish on failure, so judge by the log file,
+not `systemctl is-active`. Expect exactly 24 `critic-step` lines per island
+carrying `train/critic-value_{loss,ev_n,returns_sum,returns_sq_sum,
+residual_sum,residual_sq_sum}` for rollout ids 240..263.
+
+Step 4: collect the five logs and pool them for ONE global EV. Never average
+per-island EVs; the aggregator pools the exact sufficient statistics and
+rejects any log that does not cover the complete 240..263 range.
+
+```bash
+mkdir -p /tmp/qwen38-v5-eval && cd /tmp/qwen38-v5-eval
+rrun h200-n1 -- 'cat /root/yeto-eval-island0.log' > island0.log
+rrun h200-n2 -- 'cat /root/yeto-eval-island1.log' > island1.log
+rrun h200-n4 -- 'cat /root/yeto-eval-island2.log' > island2.log
+rrun h200-n5 -- 'cat /root/yeto-eval-island3.log' > island3.log
+rrun h200-n7 -- 'cat /root/yeto-eval-island4.log' > island4.log
+rrun h200-n1 -- 'docker exec miles_node cat /data/miles-values-contrastive-20260827-v2/scripts/tools/aggregate_offline_validation_ev.py' \
+  > aggregate_offline_validation_ev.py
+python3 aggregate_offline_validation_ev.py \
+  island0.log island1.log island2.log island3.log island4.log \
+  --validation-start-rollout 240 --num-rollout 264 \
+  --minimum-explained-variance 0.0
+```
+
+Gate #6 passes only if the pooled `held_out_explained_variance` is above zero
+(exit code 0; the aggregator exits 3 at or below the threshold) with
+acceptable pooled MSE, constant-baseline MSE, and absolute calibration error.
+The per-island breakdown in the aggregator output is diagnostic only.
+
 ## Production launch notes
 
 Once the canary passes, use the same topology and pack with
