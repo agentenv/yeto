@@ -9,8 +9,8 @@ readonly NUM_ROLLOUT=${LOCAL_BUDGET_STEPS}
 readonly CONTEXT_LENGTH=262144
 readonly REQUIRED_DATASET_VERSION=${REQUIRED_DATASET_VERSION:-qwen38-value-five-islands-contrastive-20260827-v2}
 readonly REQUIRED_DATASET_STRATEGY=atomic-thread-reward-contrastive-window-balanced-v2
-readonly REQUIRED_MILES_REVISION=d82b13b4beff4e0e4df7f3a4f9f804bd381feea1
-readonly REQUIRED_MILES_CONTRACT_SHA256=94ba2e0d7543099a72c2959044dc9c3ebc8444b96bdf5548968e5d253f3e2528
+readonly REQUIRED_MILES_REVISION=8eb93f23d2c16d315dc574b6b9ecfd18218bfac4
+readonly REQUIRED_MILES_CONTRACT_SHA256=57479fdd9992f7ef175aa358a78597c12271f952a0946aca4002277c456d51e3
 readonly SAVE_INTERVAL=${SAVE_INTERVAL:-15}
 readonly SAVE_RETAIN_INTERVAL=${SAVE_RETAIN_INTERVAL:-999990}
 readonly SYNC_INTERVAL_STEPS=${SYNC_INTERVAL_STEPS:-12}
@@ -18,6 +18,9 @@ readonly PHASE2_REJOIN=${PHASE2_REJOIN:-0}
 readonly RECOVERY_LOCAL_STEP_OFFSET=${RECOVERY_LOCAL_STEP_OFFSET:-0}
 readonly RECOVERY_UNIT_OFFSET=${RECOVERY_UNIT_OFFSET:-0}
 readonly TRAIN_MEMORY_MARGIN_BYTES=${TRAIN_MEMORY_MARGIN_BYTES:-1073741824}
+# Fresh 51-bin head over a pretrained backbone: the head weight group runs
+# at VALUE_HEAD_LR_MULT x the backbone LR (scheduler-scaled max/min lr).
+readonly VALUE_HEAD_LR_MULT=${VALUE_HEAD_LR_MULT:-30}
 # Miles converts these iteration counts to local-context units by multiplying
 # the nominal GBS of five.  The audited pack has exactly 687 train contexts per
 # island, so 138 iterations gives a 690-context cosine horizon instead of
@@ -379,6 +382,7 @@ exec python3 train_async.py \
   --value-reward-range 0.0 1.0 \
   --value-target-type hl_gauss \
   --hl-gauss-sigma-ratio 0.75 \
+  --value-head-lr-mult "${VALUE_HEAD_LR_MULT}" \
   --gamma 1.0 \
   --kl-loss-coef 0.0 \
   --entropy-coef 0.0 \
