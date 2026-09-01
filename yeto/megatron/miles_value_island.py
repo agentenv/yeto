@@ -3,7 +3,9 @@
 This module is loaded through Miles's model/step hooks.  Miles remains the
 training stack (value targets, loss masks, 256K packing, optimizer, scheduler,
 checkpointing, and validation); Yeto only synchronizes complete canonical
-parameter tensors between independent TP4 x CP2, DP1 islands.
+parameter tensors between independent TP4, DP1 islands.  The production
+profile uses CP2 while the explicit four-GPU diagnostic profile uses CP1 and
+Megatron's fully CPU-offloaded optimizer.
 
 The implementation deliberately imports Miles and Megatron lazily so its
 layout/config helpers remain CPU-testable.  Every model rank enters every
@@ -15,6 +17,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from types import MethodType
@@ -40,6 +43,7 @@ from ..protocol import (
     layout_fingerprint,
 )
 from ..tensor_io import pack_tensor, quantize_q4, unpack_fragment
+from .anchor_spill import BF16AnchorSpill
 from .miles_value_state import (
     inverse_tp_partition,
     normalize_miles_partition,
@@ -52,6 +56,18 @@ log = logging.getLogger("yeto.miles-value-island")
 
 
 _GRAD_DTYPES = (torch.bfloat16, torch.float32)
+_VALUE_HEAD_PARAMETER_PATTERN = r"(?:^|\.)output_layer\.(?:weight|bias)\Z"
+_VALUE_HEAD_PARAMETER_RE = re.compile(_VALUE_HEAD_PARAMETER_PATTERN)
+_TOPOLOGY_CONTRACTS = {
+    "tp4-cp2": ({"TP": 4, "CP": 2, "PP": 1, "DP": 1, "EP": 1, "ETP": 1}, 8, "te"),
+    "tp4-cp1": ({"TP": 4, "CP": 1, "PP": 1, "DP": 1, "EP": 1, "ETP": 1}, 4, "hdo"),
+}
+
+
+def _is_value_head_parameter(name: str) -> bool:
+    """Return whether ``name`` is an exact critic output-head parameter."""
+
+    return _VALUE_HEAD_PARAMETER_RE.search(name) is not None
 
 
 def _grouped_grad_norm(
@@ -301,6 +317,67 @@ def _install_bf16_static_unscale_compat(args: Any, optimizer: Any) -> None:
     )
 
 
+def _install_hdo_gradient_stream(args: Any, optimizer: Any) -> None:
+    """Install the bounded CPU-gradient path for the exact 128K diagnostic."""
+
+    if not _env_flag("YETO_VALUE_HDO_GRADIENT_STREAM", False):
+        return
+    required_environment = {
+        "YETO_VALUE_TOPOLOGY_PROFILE": "tp4-cp1",
+        "YETO_VALUE_NUM_LEARNERS": "2",
+        "YETO_VALUE_BUDGET_STEPS": "24",
+        "YETO_VALUE_PHASE2_REJOIN": "0",
+    }
+    mismatched = {
+        name: (os.environ.get(name), expected)
+        for name, expected in required_environment.items()
+        if os.environ.get(name) != expected
+    }
+    if mismatched:
+        raise RuntimeError(
+            "HDO CPU-gradient streaming is restricted to the fresh TP4/CP1 "
+            f"two-learner 24-step diagnostic; mismatched environment: {mismatched}"
+        )
+    if not getattr(args, "optimizer_cpu_offload", False):
+        raise RuntimeError("HDO CPU-gradient streaming requires optimizer_cpu_offload")
+    if float(getattr(args, "optimizer_offload_fraction", -1.0)) != 1.0:
+        raise RuntimeError(
+            "HDO CPU-gradient streaming requires optimizer_offload_fraction=1.0"
+        )
+    if getattr(args, "overlap_cpu_optimizer_d2h_h2d", False):
+        raise RuntimeError(
+            "HDO CPU-gradient streaming requires non-overlapped CPU optimization"
+        )
+
+    from megatron.core.optimizer import HybridDeviceOptimizer
+
+    from .hdo_gradient_stream import install_hdo_cpu_gradient_streaming
+
+    installed = 0
+    scratch_bytes = 0
+    full_gradient_bytes = 0
+    for chained_optimizer in optimizer.chained_optimizers:
+        hdo = getattr(chained_optimizer, "optimizer", None)
+        if not isinstance(hdo, HybridDeviceOptimizer):
+            raise RuntimeError(
+                "HDO CPU-gradient streaming requires every chained optimizer "
+                "to wrap HybridDeviceOptimizer"
+            )
+        scratch_bytes += install_hdo_cpu_gradient_streaming(hdo)
+        full_gradient_bytes += hdo._yeto_bulk_gradient_bytes
+        installed += 1
+    if installed == 0:
+        raise RuntimeError("HDO CPU-gradient streaming found no optimizer")
+    log.info(
+        "installed bounded HDO CPU-gradient streaming on %d optimizer(s): "
+        "full_gradient_bytes=%d scratch_bytes=%d net_bytes_avoided=%d",
+        installed,
+        full_gradient_bytes,
+        scratch_bytes,
+        full_gradient_bytes - scratch_bytes,
+    )
+
+
 @dataclass(frozen=True)
 class TensorDescriptor:
     """Canonical identity and TP partition metadata for one model parameter."""
@@ -331,6 +408,7 @@ class _RuntimeTensor:
     owned_start: int | None
     owned_end: int | None
     ownership_ranges: tuple[tuple[int, int] | None, ...]
+    optimizer_backend: str = "te"
 
 
 @dataclass(frozen=True)
@@ -385,9 +463,8 @@ def grouped_tensor_fragment_layout(
     """Group complete canonical tensors into a deterministic Iso layout.
 
     No tensor is split. Two-dimensional non-embedding tensors use Iso;
-    vectors and embedding-like tensors use direct averaging. A 1xH value
-    head is still an Iso tensor, for which spectrum flattening is
-    mathematically identity. ``build_layout`` gives both supported patterns
+    vectors, embedding-like tensors, and the critic output-head weight/bias
+    use direct averaging. ``build_layout`` gives both supported patterns
     deterministic name-based tie breaking and keeps merge modes separate.
     """
 
@@ -420,6 +497,7 @@ def grouped_tensor_fragment_layout(
         [(item.name, item.numel) for item in ordered],
         num_fragments,
         pattern,
+        avg_name_regex=_VALUE_HEAD_PARAMETER_PATTERN,
         matrix_merge="iso",
         named_shapes={item.name: item.full_shape for item in ordered},
     )
@@ -627,7 +705,7 @@ def _parse_syncer(value: str) -> tuple[str, int]:
 
 
 class MilesValueIsland:
-    """One TP4 x CP2 Miles learner and its single WAN Yeto client."""
+    """One topology-gated Miles learner and its single WAN Yeto client."""
 
     def __init__(self, args: Any, model: Any, optimizer: Any):
         if optimizer is None:
@@ -638,6 +716,7 @@ class MilesValueIsland:
             )
 
         # Runtime-only imports: keep module importable in CPU unit tests.
+        from megatron.core.optimizer import HybridDeviceOptimizer
         from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
         from miles.backends.megatron_utils.update_weight.common import (
             _gather_with_stride,
@@ -720,16 +799,63 @@ class MilesValueIsland:
             if not dist_optimizer.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
                 raise RuntimeError(f"{name}: precision-aware optimizer is not active")
             adam = dist_optimizer.optimizer
+            optimizer_backend = (
+                "hdo" if isinstance(adam, HybridDeviceOptimizer) else "te"
+            )
+            if optimizer_backend != self.optimizer_backend:
+                raise RuntimeError(
+                    f"{name}: topology profile {self.topology_profile!r} requires "
+                    f"optimizer backend {self.optimizer_backend!r}, got "
+                    f"{optimizer_backend!r}"
+                )
             if parameter.dtype not in (torch.bfloat16, torch.float32):
                 raise TypeError(f"{name}: unsupported model dtype {parameter.dtype}")
-            if not getattr(adam, "master_weights", False):
-                raise RuntimeError(f"{name}: TE FusedAdam master_weights is disabled")
-            if getattr(adam, "master_weight_dtype", None) != torch.float32:
-                raise RuntimeError(f"{name}: TE master_weight_dtype is not FP32")
-            if parameter.dtype == torch.bfloat16 and not getattr(
-                adam, "store_param_remainders", False
-            ):
-                raise RuntimeError(f"{name}: TE BF16 remainder storage is disabled")
+            if optimizer_backend == "hdo":
+                if not getattr(dist_optimizer.config, "optimizer_cpu_offload", False):
+                    raise RuntimeError(
+                        f"{name}: HybridDeviceOptimizer is active without "
+                        "optimizer_cpu_offload"
+                    )
+                if float(getattr(adam, "offload_fraction", -1.0)) != 1.0:
+                    raise RuntimeError(
+                        f"{name}: TP4/CP1 requires optimizer_offload_fraction=1.0"
+                    )
+                if not getattr(adam, "param_update_in_fp32", False):
+                    raise RuntimeError(
+                        f"{name}: HybridDeviceOptimizer FP32 parameter updates are disabled"
+                    )
+                if getattr(adam, "gpu_optimizer", None) is not None:
+                    raise RuntimeError(
+                        f"{name}: TP4/CP1 requires every optimizer shard on CPU"
+                    )
+                if getattr(
+                    dist_optimizer.config, "offload_optimizer_states", False
+                ) or getattr(
+                    dist_optimizer.config,
+                    "chunked_optimizer_state_offload",
+                    False,
+                ):
+                    raise RuntimeError(
+                        f"{name}: do not combine optimizer_cpu_offload with "
+                        "offload_optimizer_states"
+                    )
+                if getattr(dist_optimizer, "_state_offloader", None) is not None:
+                    raise RuntimeError(
+                        f"{name}: TP4/CP1 cannot use the TE optimizer-state offloader"
+                    )
+            else:
+                if not getattr(adam, "master_weights", False):
+                    raise RuntimeError(
+                        f"{name}: TE FusedAdam master_weights is disabled"
+                    )
+                if getattr(adam, "master_weight_dtype", None) != torch.float32:
+                    raise RuntimeError(f"{name}: TE master_weight_dtype is not FP32")
+                if parameter.dtype == torch.bfloat16 and not getattr(
+                    adam, "store_param_remainders", False
+                ):
+                    raise RuntimeError(
+                        f"{name}: TE BF16 remainder storage is disabled"
+                    )
 
             optimizer_param: torch.Tensor | None = None
             owned_start: int | None = None
@@ -754,6 +880,22 @@ class MilesValueIsland:
                         f"{name}: optimizer/model dtype mismatch "
                         f"{optimizer_param.dtype} != {parameter.dtype}"
                     )
+                if optimizer_backend == "hdo":
+                    inner_param = adam.param_to_inner_param.get(optimizer_param)
+                    if inner_param is None:
+                        raise RuntimeError(
+                            f"{name}: HybridDeviceOptimizer has no inner FP32 parameter"
+                        )
+                    if inner_param.dtype != torch.float32:
+                        raise TypeError(
+                            f"{name}: HybridDeviceOptimizer inner parameter must be "
+                            f"FP32, got {inner_param.dtype}"
+                        )
+                    if inner_param.device.type != "cpu":
+                        raise RuntimeError(
+                            f"{name}: TP4/CP1 optimizer master must reside on CPU, "
+                            f"got {inner_param.device}"
+                        )
             elif parameter in dist_optimizer.model_param_group_index_map:
                 raise RuntimeError(
                     f"{name}: optimizer group entry exists without a local gbuf range"
@@ -783,6 +925,7 @@ class MilesValueIsland:
                     owned_start=owned_start,
                     owned_end=owned_end,
                     ownership_ranges=tuple(ownership),
+                    optimizer_backend=optimizer_backend,
                 )
             )
 
@@ -903,6 +1046,30 @@ class MilesValueIsland:
         self.units_at_reset = [self.units_total] * count
         self.fragment_versions = [0] * count
         self.anchors: list[torch.Tensor | None] = [None] * count
+        spill_root = os.environ.get("YETO_VALUE_ANCHOR_SPILL_DIR", "").strip()
+        self.anchor_spill: BF16AnchorSpill | None = None
+        if spill_root:
+            if not os.path.isabs(spill_root) or os.path.realpath(spill_root) == "/":
+                raise ValueError(
+                    "YETO_VALUE_ANCHOR_SPILL_DIR must be an absolute path other than /"
+                )
+            if not (
+                self.topology_profile == "tp4-cp1"
+                and self.num_learners == 2
+                and self.budget_steps == 24
+                and not self.phase2_rejoin
+                and count == 96
+            ):
+                raise ValueError(
+                    "anchor spill is restricted to the fresh 128K TP4/CP1 "
+                    "two-learner 24-step diagnostic"
+                )
+            if self.is_leader:
+                self.anchor_spill = BF16AnchorSpill(
+                    spill_root,
+                    layout_fingerprint=self.layout_fingerprint,
+                    fragment_numels=[fragment.numel for fragment in self.layout.fragments],
+                )
         self.pending_pulls: list[Any] = []
         self._leader_payloads: dict[tuple[int, int], bytes] = {}
         self._fresh_state_dist_optimizers: dict[int, Any] = {}
@@ -931,37 +1098,86 @@ class MilesValueIsland:
         if self.is_leader:
             log.info(
                 "initialized Miles value island learner=%d tensors=%d fragments=%d "
-                "pattern=%s TP=%d CP=%d",
+                "pattern=%s TP=%d CP=%d anchor_residency=%s",
                 self.learner_id,
                 len(self.tensors),
                 self.layout.num_fragments,
                 fragment_pattern,
                 self.parallel.tp.size,
                 self.parallel.cp.size,
+                "nvme" if self.anchor_spill is not None else "ram",
             )
+            if self.anchor_spill is not None:
+                log.info(
+                    "anchor spill expected_payload_bytes=%d root=%s",
+                    self.anchor_spill.payload_bytes,
+                    self.anchor_spill.root,
+                )
+
+    def _has_anchor(self, fid: int) -> bool:
+        anchor_spill = getattr(self, "anchor_spill", None)
+        if anchor_spill is not None:
+            return anchor_spill.has(fid, self.fragment_versions[fid])
+        return self.anchors[fid] is not None
+
+    def _store_anchor(self, fid: int, version: int, flat: torch.Tensor) -> None:
+        anchor = flat.to(torch.bfloat16).contiguous()
+        anchor_spill = getattr(self, "anchor_spill", None)
+        if anchor_spill is not None:
+            anchor_spill.write(fid, version, anchor)
+            self.anchors[fid] = None
+        else:
+            self.anchors[fid] = anchor
+
+    def _subtract_anchor(
+        self, fid: int, version: int, full: torch.Tensor
+    ) -> torch.Tensor:
+        anchor_spill = getattr(self, "anchor_spill", None)
+        if anchor_spill is not None:
+            return anchor_spill.read(
+                fid,
+                version,
+                lambda anchor: full.float().sub(anchor.float()),
+            )
+        anchor = self.anchors[fid]
+        if anchor is None:
+            raise RuntimeError(f"fragment {fid} has no raw global anchor")
+        return full.float().sub(anchor.float())
 
     def _validate_topology(self) -> None:
-        checks = {
-            "TP": (self.parallel.tp.size, 4),
-            "CP": (self.parallel.cp.size, 2),
-            "PP": (self.parallel.pp.size, 1),
-            "DP": (self.parallel.intra_dp.size, 1),
-            "EP": (self.parallel.ep.size, 1),
-            "ETP": (self.parallel.etp.size, 1),
+        profile = os.environ.get("YETO_VALUE_TOPOLOGY_PROFILE", "tp4-cp2").strip()
+        contract = _TOPOLOGY_CONTRACTS.get(profile)
+        if contract is None:
+            raise ValueError(
+                "YETO_VALUE_TOPOLOGY_PROFILE must be one of "
+                f"{sorted(_TOPOLOGY_CONTRACTS)}, got {profile!r}"
+            )
+        expected_sizes, expected_world_size, optimizer_backend = contract
+        actual_sizes = {
+            "TP": self.parallel.tp.size,
+            "CP": self.parallel.cp.size,
+            "PP": self.parallel.pp.size,
+            "DP": self.parallel.intra_dp.size,
+            "EP": self.parallel.ep.size,
+            "ETP": self.parallel.etp.size,
         }
         wrong = [
             f"{name}={actual} (expected {expected})"
-            for name, (actual, expected) in checks.items()
-            if actual != expected
+            for name, expected in expected_sizes.items()
+            if (actual := actual_sizes[name]) != expected
         ]
         if wrong:
             raise RuntimeError(
-                "Miles value island topology mismatch: " + ", ".join(wrong)
+                f"Miles value island topology mismatch for {profile}: "
+                + ", ".join(wrong)
             )
-        if self.world_size != 8:
+        if self.world_size != expected_world_size:
             raise RuntimeError(
-                f"Miles value island world size must be 8, got {self.world_size}"
+                f"Miles value island world size must be {expected_world_size} for "
+                f"{profile}, got {self.world_size}"
             )
+        self.topology_profile = profile
+        self.optimizer_backend = optimizer_backend
 
     def _logical_group_source(
         self, group: Any, logical_rank: int, wanted: int, label: str
@@ -1005,7 +1221,11 @@ class MilesValueIsland:
         full_shape_tuple = tuple(full_shape)
         merge_mode = (
             MERGE_ISO
-            if len(full_shape_tuple) == 2 and not is_embedding_name(name)
+            if (
+                len(full_shape_tuple) == 2
+                and not is_embedding_name(name)
+                and not _is_value_head_parameter(name)
+            )
             else MERGE_AVG
         )
         return TensorDescriptor(
@@ -1085,7 +1305,7 @@ class MilesValueIsland:
 
         Unlike :meth:`_leader_value`, the result remains leader-local.  This
         is used for tensors, clients, and WAN sends that must not be pickled,
-        while still ensuring a Python exception cannot make the other seven
+        while still ensuring a Python exception cannot make the other model
         ranks enter the next collective and hang forever.  The success path
         broadcasts one fixed byte; only the exceptional path broadcasts the
         diagnostic string as a Python object.
@@ -1119,6 +1339,84 @@ class MilesValueIsland:
                 f"{runtime.descriptor.name}: optimizer state is offloaded at Yeto boundary"
             )
 
+    def _hdo_inner_master(self, runtime: _RuntimeTensor) -> torch.Tensor:
+        if runtime.optimizer_backend != "hdo":
+            raise RuntimeError(
+                f"{runtime.descriptor.name}: requested an HDO master from "
+                f"{runtime.optimizer_backend!r} backend"
+            )
+        parameter = runtime.optimizer_param
+        if parameter is None:
+            raise RuntimeError(
+                f"{runtime.descriptor.name}: rank with no optimizer slice has no "
+                "HDO master"
+            )
+        master = runtime.adam_optimizer.param_to_inner_param.get(parameter)
+        if master is None:
+            raise RuntimeError(
+                f"{runtime.descriptor.name}: HybridDeviceOptimizer lost its inner "
+                "FP32 parameter"
+            )
+        if master.dtype != torch.float32 or master.device.type != "cpu":
+            raise TypeError(
+                f"{runtime.descriptor.name}: HDO master must be FP32 on CPU, got "
+                f"{master.dtype} on {master.device}"
+            )
+        if master.numel() != parameter.numel():
+            raise RuntimeError(
+                f"{runtime.descriptor.name}: HDO master has {master.numel()} values, "
+                f"expected {parameter.numel()}"
+            )
+        return master
+
+    def _install_hdo_master(
+        self, runtime: _RuntimeTensor, authoritative: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Install one owned FP32 shard without changing HDO Adam state."""
+
+        master = self._hdo_inner_master(runtime)
+        if (
+            authoritative.dtype != torch.float32
+            or authoritative.numel() != master.numel()
+        ):
+            raise TypeError(
+                f"{runtime.descriptor.name}: HDO authoritative master must be FP32 "
+                f"with {master.numel()} values"
+            )
+        authoritative_cpu = authoritative.detach().to(
+            device="cpu", dtype=torch.float32, non_blocking=False
+        )
+        authoritative_cpu = authoritative_cpu.contiguous().view_as(master)
+        master.copy_(authoritative_cpu, non_blocking=False)
+
+        parameter = runtime.optimizer_param
+        assert parameter is not None
+        state = runtime.adam_optimizer.state.get(parameter)
+        if state and "master_param" in state:
+            state_master = state["master_param"]
+            if not isinstance(state_master, torch.Tensor):
+                raise TypeError(
+                    f"{runtime.descriptor.name}: HDO state master is not a tensor"
+                )
+            if (
+                state_master.dtype != torch.float32
+                or state_master.device.type != "cpu"
+                or state_master.numel() != master.numel()
+            ):
+                raise TypeError(
+                    f"{runtime.descriptor.name}: HDO state master has incompatible "
+                    "dtype, device, or shape"
+                )
+            if state_master is not master:
+                state_master.copy_(
+                    authoritative_cpu.view_as(state_master), non_blocking=False
+                )
+                # Checkpoint loading can leave a duplicate master tensor.  The
+                # optimizer updates ``inner``; make the checkpoint-facing state
+                # reference that same storage after validating and updating it.
+                state["master_param"] = master
+        return master, authoritative_cpu
+
     def _local_master(self, runtime: _RuntimeTensor) -> torch.Tensor:
         self._assert_optimizer_state_resident(runtime)
         # DistributedOptimizer shards its contiguous parameter buffers over
@@ -1127,35 +1425,40 @@ class MilesValueIsland:
         # value has exactly one owner (validated during construction).  Use
         # transport rather than arithmetic SUM so signed zero, subnormals,
         # NaN payloads, and every other FP32 bit pattern remain exact.  This
-        # exchange remains entirely within this H200 node.
+        # exchange remains entirely within this learner node.
         full_precision = torch.zeros(
             runtime.model_param.numel(), dtype=torch.float32, device=self.device
         )
         parameter = runtime.optimizer_param
         if parameter is not None:
             assert runtime.owned_start is not None and runtime.owned_end is not None
-            state = runtime.adam_optimizer.state.get(parameter)
-            if not state or "master_param" not in state:
-                # Fresh optimizer before FusedAdam's lazy state initialization.
-                owned = parameter.detach().float()
+            if runtime.optimizer_backend == "hdo":
+                owned = self._hdo_inner_master(runtime).detach()
             else:
-                master = runtime.adam_optimizer.get_unscaled_state(
-                    parameter, "master_param"
-                )
-                if parameter.dtype == torch.bfloat16:
-                    if master.dtype != torch.int16:
-                        raise TypeError(
-                            f"{runtime.descriptor.name}: expected TE int16 "
-                            f"remainder, got {master.dtype}"
-                        )
-                    owned = reconstruct_fp32_from_bf16_remainder(parameter, master)
+                state = runtime.adam_optimizer.state.get(parameter)
+                if not state or "master_param" not in state:
+                    # Fresh optimizer before FusedAdam's lazy state initialization.
+                    owned = parameter.detach().float()
                 else:
-                    if master.dtype != torch.float32:
-                        raise TypeError(
-                            f"{runtime.descriptor.name}: expected FP32 master, "
-                            f"got {master.dtype}"
+                    master = runtime.adam_optimizer.get_unscaled_state(
+                        parameter, "master_param"
+                    )
+                    if parameter.dtype == torch.bfloat16:
+                        if master.dtype != torch.int16:
+                            raise TypeError(
+                                f"{runtime.descriptor.name}: expected TE int16 "
+                                f"remainder, got {master.dtype}"
+                            )
+                        owned = reconstruct_fp32_from_bf16_remainder(
+                            parameter, master
                         )
-                    owned = master.detach()
+                    else:
+                        if master.dtype != torch.float32:
+                            raise TypeError(
+                                f"{runtime.descriptor.name}: expected FP32 master, "
+                                f"got {master.dtype}"
+                            )
+                        owned = master.detach()
             if owned.numel() != runtime.owned_end - runtime.owned_start:
                 raise RuntimeError(
                     f"{runtime.descriptor.name}: reconstructed optimizer slice has "
@@ -1189,6 +1492,22 @@ class MilesValueIsland:
                 "initialize Adam state"
             )
         state = runtime.adam_optimizer.state.get(parameter)
+        if runtime.optimizer_backend == "hdo":
+            # Torch AdamW initializes moments lazily on its first real step.
+            # Creating them here would duplicate optimizer initialization and
+            # risks changing its step semantics.  The CPU FP32 inner parameter
+            # already exists and is authoritative before that first step.
+            if not state:
+                return
+            required = {"master_param", "exp_avg", "exp_avg_sq", "step"}
+            missing = required.difference(state)
+            if missing:
+                raise RuntimeError(
+                    f"{runtime.descriptor.name}: initialized HDO state is missing "
+                    f"{sorted(missing)}"
+                )
+            self._hdo_inner_master(runtime)
+            return
         if state is None or len(state) == 0:
             runtime.adam_optimizer.state[parameter] = {}
             runtime.adam_optimizer.initialize_state(
@@ -1262,7 +1581,14 @@ class MilesValueIsland:
             )
         flat = authoritative.contiguous().view(-1)
         if runtime.model_param.dtype == torch.bfloat16:
-            rounded_high, remainder = split_fp32_to_bf16_remainder(flat)
+            if runtime.optimizer_backend == "hdo":
+                # HDO keeps the exact FP32 master independently and normally
+                # copies it to the BF16 model with a numerical cast.  Building
+                # TE's INT16 remainder here would waste scarce HBM at 262K.
+                rounded_high = flat.to(torch.bfloat16)
+                remainder = None
+            else:
+                rounded_high, remainder = split_fp32_to_bf16_remainder(flat)
             runtime.model_param.copy_(rounded_high.view(runtime.descriptor.local_shape))
         else:
             runtime.model_param.copy_(flat.view(runtime.descriptor.local_shape))
@@ -1272,6 +1598,8 @@ class MilesValueIsland:
             return
         assert runtime.owned_start is not None and runtime.owned_end is not None
         start, end = runtime.owned_start, runtime.owned_end
+        expected = flat[start:end]
+        expected_for_compare = expected
         existing_state = runtime.adam_optimizer.state.get(parameter)
         moment_versions = {
             key: value._version
@@ -1281,33 +1609,45 @@ class MilesValueIsland:
         if parameter.dtype == torch.bfloat16:
             parameter.copy_(rounded_high[start:end])
             self._ensure_adam_state(runtime)
-            runtime.adam_optimizer.set_scaled_state(
-                parameter, "master_param", remainder[start:end].contiguous()
-            )
-            installed_master = runtime.adam_optimizer.get_unscaled_state(
-                parameter, "master_param"
-            )
-            reconstructed = reconstruct_fp32_from_bf16_remainder(
-                parameter, installed_master
-            )
+            if runtime.optimizer_backend == "hdo":
+                reconstructed, expected_for_compare = self._install_hdo_master(
+                    runtime, expected
+                )
+            else:
+                assert remainder is not None
+                runtime.adam_optimizer.set_scaled_state(
+                    parameter, "master_param", remainder[start:end].contiguous()
+                )
+                installed_master = runtime.adam_optimizer.get_unscaled_state(
+                    parameter, "master_param"
+                )
+                reconstructed = reconstruct_fp32_from_bf16_remainder(
+                    parameter, installed_master
+                )
         else:
             owned = flat[start:end].contiguous()
             parameter.copy_(owned)
             self._ensure_adam_state(runtime)
-            runtime.adam_optimizer.set_scaled_state(parameter, "master_param", owned)
-            reconstructed = runtime.adam_optimizer.get_unscaled_state(
-                parameter, "master_param"
-            )
+            if runtime.optimizer_backend == "hdo":
+                reconstructed, expected_for_compare = self._install_hdo_master(
+                    runtime, owned
+                )
+            else:
+                runtime.adam_optimizer.set_scaled_state(
+                    parameter, "master_param", owned
+                )
+                reconstructed = runtime.adam_optimizer.get_unscaled_state(
+                    parameter, "master_param"
+                )
 
-        expected = flat[start:end]
         if not torch.equal(
             reconstructed.contiguous().view(torch.int32),
-            expected.contiguous().view(torch.int32),
+            expected_for_compare.contiguous().view(torch.int32),
         ):
             raise RuntimeError(
                 f"{runtime.descriptor.name}: installed FP32 optimizer master is not bit-exact"
             )
-        current_state = runtime.adam_optimizer.state[parameter]
+        current_state = runtime.adam_optimizer.state.get(parameter) or {}
         for key, version in moment_versions.items():
             value = current_state.get(key)
             if not isinstance(value, torch.Tensor) or value._version != version:
@@ -1557,7 +1897,7 @@ class MilesValueIsland:
                 flat = _unpack_flat_fragment(
                     self.layout.fragments[fid], data, bulk_dtype(self.client.dtype)
                 )
-                self.anchors[fid] = flat.to(torch.bfloat16).contiguous()
+                self._store_anchor(fid, version, flat)
                 return flat
 
             full = self._leader_local(decode_initial)
@@ -1621,7 +1961,7 @@ class MilesValueIsland:
                     f"steps={self.steps_total}-{self.steps_at_reset[fid]}, "
                     f"units={self.units_total}-{self.units_at_reset[fid]}"
                 )
-            if c_steps < self.min_local_steps or self.anchors[fid] is None:
+            if c_steps < self.min_local_steps or not self._has_anchor(fid):
                 waiting.append(pull)
                 continue
             ready.append(
@@ -1651,7 +1991,7 @@ class MilesValueIsland:
                 flat = _unpack_flat_fragment(
                     self.layout.fragments[fid], data, bulk_dtype(self.client.dtype)
                 )
-                self.anchors[fid] = flat.to(torch.bfloat16).contiguous()
+                self._store_anchor(fid, version, flat)
                 return flat
 
             full = self._leader_local(decode_update)
@@ -1684,10 +2024,7 @@ class MilesValueIsland:
                 full: torch.Tensor | None = full,
             ) -> None:
                 assert self.client is not None and full is not None
-                anchor = self.anchors[fid]
-                if anchor is None:
-                    raise RuntimeError(f"fragment {fid} has no raw global anchor")
-                delta = full.float().sub(anchor.float())
+                delta = self._subtract_anchor(fid, base_version, full)
                 payload = _quantize_flat_fragment(
                     self.layout.fragments[fid], delta
                 )
@@ -1766,7 +2103,7 @@ class MilesValueIsland:
                 # payload, so it is also the exact phase-2 subtraction base.
                 if (
                     getattr(self, "phase2_rejoin", False)
-                    and self.anchors[fid] is not None
+                    and self._has_anchor(fid)
                 ):
                     eligible.append(pull)
             if eligible:
@@ -1917,6 +2254,8 @@ class MilesValueIsland:
         if self.is_leader:
             assert self.client is not None
             self.client.close()
+            if self.anchor_spill is not None:
+                self.anchor_spill.close(successful=True)
             log.info(
                 "installed authoritative Yeto final cut global_step=%d local_steps=%d units=%d",
                 global_step,
@@ -1943,6 +2282,7 @@ def after_model_init(
         return
     if _ISLAND is not None:
         raise RuntimeError("Miles value island was initialized twice in one process")
+    _install_hdo_gradient_stream(args, optimizer)
     _install_bf16_static_unscale_compat(args, optimizer)
     _install_mixed_dtype_grad_compat(args)
     _ISLAND = MilesValueIsland(args, model, optimizer)

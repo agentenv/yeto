@@ -1,11 +1,10 @@
 """Validation-only Miles hook: numeric compatibility without the Yeto island.
 
-Offline held-out validation replays buckets through the critic with bit-frozen
-parameters and no syncer. The BF16 static-unscale and homogeneous mixed-dtype
-grad norm/clip compatibility still must be installed: without them the
-optimizer step (even at lr ~ 0) crashes on BF16 grads or logs corrupted
-grad norms. The MilesValueIsland itself (fragments, anchors, syncer client)
-is deliberately not constructed.
+Offline held-out validation replays buckets through the critic without an
+optimizer or syncer. Older Miles checkouts can still construct an optimizer
+for this path, so the BF16 static-unscale and homogeneous mixed-dtype grad
+compatibility hooks remain as a fallback. The MilesValueIsland itself
+(fragments, anchors, syncer client) is deliberately not constructed.
 """
 
 from typing import Any
@@ -25,6 +24,10 @@ def after_model_init(
 ) -> None:
     del model, opt_param_scheduler
     if role != "critic":
+        return
+    # Frozen held-out replay deliberately constructs no optimizer. The two
+    # compatibility patches below are needed only by a real optimizer step.
+    if optimizer is None:
         return
     _install_bf16_static_unscale_compat(args, optimizer)
     _install_mixed_dtype_grad_compat(args)

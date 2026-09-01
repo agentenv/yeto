@@ -2,10 +2,99 @@
 //! and outer-optimizer momentum, all in f32.
 
 use anyhow::{bail, Context, Result};
+use std::io::{BufReader, Read};
 
 use crate::iso_worker::{IsoBackend, IsoBackendConfig, IsoBackendKind};
 use crate::merge;
 use crate::protocol::Reader;
+
+// Checkpoints can be hundreds of gigabytes. Keep deserialization scratch
+// bounded instead of reading the complete file into a second model-sized
+// allocation before constructing the restored parameter and momentum state.
+const CHECKPOINT_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+struct CheckpointReader {
+    inner: BufReader<std::fs::File>,
+    remaining: u64,
+}
+
+impl CheckpointReader {
+    fn open(path: &std::path::Path) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let remaining = file.metadata()?.len();
+        Ok(Self {
+            inner: BufReader::new(file),
+            remaining,
+        })
+    }
+
+    fn read_exact(&mut self, bytes: &mut [u8]) -> Result<()> {
+        let count = u64::try_from(bytes.len()).context("checkpoint read size does not fit u64")?;
+        if count > self.remaining {
+            bail!("payload truncated");
+        }
+        self.inner.read_exact(bytes)?;
+        self.remaining -= count;
+        Ok(())
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let mut bytes = [0; N];
+        self.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+
+    fn remaining(&self) -> u64 {
+        self.remaining
+    }
+
+    fn require_bytes(&self, count: usize) -> Result<()> {
+        if u64::try_from(count).context("checkpoint payload size does not fit u64")?
+            > self.remaining
+        {
+            bail!("payload truncated");
+        }
+        Ok(())
+    }
+
+    fn f32s(&mut self, count: usize, scratch: &mut [u8]) -> Result<Vec<f32>> {
+        if scratch.len() < 4 || scratch.len() % 4 != 0 {
+            bail!("checkpoint f32 scratch must be a non-empty multiple of four bytes");
+        }
+        let byte_count = count
+            .checked_mul(4)
+            .context("checkpoint f32 payload size overflow")?;
+        self.require_bytes(byte_count)?;
+
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .context("cannot allocate checkpoint fragment")?;
+        while values.len() < count {
+            let chunk_values = (count - values.len()).min(scratch.len() / 4);
+            let chunk_bytes = chunk_values * 4;
+            self.read_exact(&mut scratch[..chunk_bytes])?;
+            values.extend(
+                scratch[..chunk_bytes]
+                    .chunks_exact(4)
+                    .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap())),
+            );
+        }
+        Ok(values)
+    }
+}
 
 pub const MERGE_AVG: u8 = 0;
 pub const MERGE_RDA: u8 = 1;
@@ -716,10 +805,8 @@ impl GlobalState {
     /// complete checkpoint is parsed and validated before any live state is
     /// mutated.
     pub fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<()> {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        std::fs::File::open(path)?.read_to_end(&mut buf)?;
-        let mut r = Reader(&buf);
+        let mut r = CheckpointReader::open(path)?;
+        let mut scratch = vec![0; CHECKPOINT_READ_CHUNK_BYTES];
         let magic = r.u32()?;
         let (checkpoint_iso_backend, checkpoint_layout_fingerprint) = match magic {
             CKPT_MAGIC_V1 => bail!(
@@ -728,10 +815,7 @@ impl GlobalState {
             CKPT_MAGIC_V2 => (Some(IsoBackendKind::from_checkpoint(r.u8()?)?), None),
             CKPT_MAGIC_V3 => {
                 let backend = IsoBackendKind::from_checkpoint(r.u8()?)?;
-                let fingerprint: [u8; 32] = r
-                    .take(32)?
-                    .try_into()
-                    .context("checkpoint V3 layout fingerprint must be 32 bytes")?;
+                let fingerprint = r.array::<32>()?;
                 (Some(backend), Some(fingerprint))
             }
             _ => bail!("bad checkpoint magic"),
@@ -772,18 +856,16 @@ impl GlobalState {
             if numel != expected {
                 bail!("checkpoint fragment {p} numel {numel} != layout {expected}");
             }
-            let mut restored_params = Vec::new();
-            let mut restored_momentum = Vec::new();
-            for slot in [&mut restored_params, &mut restored_momentum] {
-                slot.try_reserve_exact(numel)
-                    .context("cannot allocate checkpoint fragment")?;
-                slot.resize(numel, 0.0);
-            }
-            for slot in [&mut restored_params, &mut restored_momentum] {
-                for v in slot.iter_mut() {
-                    *v = f32::from_le_bytes(r.take(4)?.try_into()?);
-                }
-            }
+            // Preflight both model-sized arrays before allocating either one.
+            // A truncated/corrupt checkpoint therefore cannot strand a full
+            // parameter fragment allocation while discovering that its
+            // matching momentum payload is absent.
+            let fragment_state_bytes = numel
+                .checked_mul(8)
+                .context("checkpoint fragment state size overflow")?;
+            r.require_bytes(fragment_state_bytes)?;
+            let restored_params = r.f32s(numel, &mut scratch)?;
+            let restored_momentum = r.f32s(numel, &mut scratch)?;
             params.push(restored_params);
             momentum.push(restored_momentum);
         }
@@ -802,22 +884,23 @@ impl GlobalState {
         }
         let expected_policy_sweep_fragments = self.policy_sweep_fragments;
         let header_layout_verified = checkpoint_layout_fingerprint.is_some();
+        let restored_layout_verified;
         let (checkpoint_policy_sweep_fragments, checkpoint_session_contract_hash) =
             match r.remaining() {
                 0 => {
-                    self.checkpoint_layout_verified = header_layout_verified;
+                    restored_layout_verified = header_layout_verified;
                     (None, None)
                 }
                 32 => {
-                    let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                    let checkpoint_fingerprint = r.array::<32>()?;
                     if checkpoint_fingerprint != self.layout_fingerprint {
                         bail!("checkpoint layout fingerprint does not match HELLO");
                     }
-                    self.checkpoint_layout_verified = true;
+                    restored_layout_verified = true;
                     (None, None)
                 }
                 40 => {
-                    let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                    let checkpoint_fingerprint = r.array::<32>()?;
                     if checkpoint_fingerprint != self.layout_fingerprint {
                         bail!("checkpoint layout fingerprint does not match HELLO");
                     }
@@ -831,19 +914,19 @@ impl GlobalState {
                     bail!("policy-sweep checkpoint is missing its session contract hash");
                 }
                 68 => {
-                    let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                    let checkpoint_fingerprint = r.array::<32>()?;
                     if checkpoint_fingerprint != self.layout_fingerprint {
                         bail!("checkpoint layout fingerprint does not match HELLO");
                     }
                     if r.u32()? != SESSION_CONTRACT_CKPT_MAGIC {
                         bail!("checkpoint has an invalid session-contract trailer");
                     }
-                    let contract_hash = r.take(32)?.try_into()?;
-                    self.checkpoint_layout_verified = true;
+                    let contract_hash = r.array::<32>()?;
+                    restored_layout_verified = true;
                     (None, Some(contract_hash))
                 }
                 72 => {
-                    let checkpoint_fingerprint: [u8; 32] = r.take(32)?.try_into()?;
+                    let checkpoint_fingerprint = r.array::<32>()?;
                     if checkpoint_fingerprint != self.layout_fingerprint {
                         bail!("checkpoint layout fingerprint does not match HELLO");
                     }
@@ -854,8 +937,8 @@ impl GlobalState {
                     if fragments == 0 {
                         bail!("checkpoint policy-sweep fragment count must be positive");
                     }
-                    let contract_hash = r.take(32)?.try_into()?;
-                    self.checkpoint_layout_verified = true;
+                    let contract_hash = r.array::<32>()?;
+                    restored_layout_verified = true;
                     (Some(fragments), Some(contract_hash))
                 }
                 remaining => bail!("checkpoint has {remaining} trailing bytes"),
@@ -873,7 +956,7 @@ impl GlobalState {
             // persistence. Its only safe implied contract is exactly the
             // verified layout fingerprint used by legacy clients.
             (None, Some(expected))
-                if self.checkpoint_layout_verified
+                if restored_layout_verified
                     && expected == self.layout_fingerprint
                     && expected_policy_sweep_fragments.is_none() => {}
             (None, Some(_)) => {
@@ -881,7 +964,7 @@ impl GlobalState {
             }
             _ => bail!("checkpoint session contract hash does not match HELLO"),
         }
-        if !self.checkpoint_layout_verified
+        if !restored_layout_verified
             && self
                 .layout
                 .fragments
@@ -919,6 +1002,7 @@ impl GlobalState {
         self.momentum = momentum;
         self.initialized.fill(true);
         self.ledger = ledger;
+        self.checkpoint_layout_verified = restored_layout_verified;
         Ok(())
     }
 }
@@ -1157,6 +1241,122 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_reader_streams_f32_payloads_across_bounded_chunks() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!(
+            "yeto-streaming-ckpt-reader-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("values.bin");
+        let count = CHECKPOINT_READ_CHUNK_BYTES / 4 + 17;
+        {
+            let mut writer = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+            for index in 0..count {
+                writer
+                    .write_all(&(index as f32 * 0.25).to_le_bytes())
+                    .unwrap();
+            }
+            writer.flush().unwrap();
+        }
+
+        let mut reader = CheckpointReader::open(&path).unwrap();
+        // Deliberately use a tiny scratch buffer so the test exercises many
+        // chunk boundaries without changing the production 8 MiB bound.
+        let mut scratch = [0u8; 12];
+        let values = reader.f32s(count, &mut scratch).unwrap();
+        assert_eq!(reader.remaining(), 0);
+        assert_eq!(values.len(), count);
+        for index in [0, 1, 2, count / 2, count - 2, count - 1] {
+            assert_eq!(values[index], index as f32 * 0.25);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn truncated_streaming_checkpoint_does_not_mutate_live_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "yeto-truncated-streaming-ckpt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+
+        let mut saved = state_with_fingerprint(layout2(), 0x19);
+        saved.session_contract_hash = Some([0x19; 32]);
+        saved.init_fragment(0, vec![1.0; 4]).unwrap();
+        saved.init_fragment(1, vec![2.0; 4]).unwrap();
+        saved.global_step = 2;
+        saved.versions = vec![1, 2];
+        saved.save_checkpoint(&path).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(file.metadata().unwrap().len() - 1).unwrap();
+
+        let mut restored = state_with_fingerprint(layout2(), 0x19);
+        restored.session_contract_hash = Some([0x19; 32]);
+        restored.init_fragment(0, vec![8.0; 4]).unwrap();
+        restored.init_fragment(1, vec![9.0; 4]).unwrap();
+        let before_params = restored.params.clone();
+        let before_momentum = restored.momentum.clone();
+        let before_versions = restored.versions.clone();
+        assert!(restored.load_checkpoint(&path).is_err());
+        assert!(!restored.checkpoint_layout_verified);
+        assert_eq!(restored.global_step, 0);
+        assert_eq!(restored.params, before_params);
+        assert_eq!(restored.momentum, before_momentum);
+        assert_eq!(restored.versions, before_versions);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fragment_payload_preflight_rejects_missing_momentum_before_restore() {
+        let dir = std::env::temp_dir().join(format!(
+            "yeto-truncated-fragment-state-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+
+        let mut saved = state_with_fingerprint(layout2(), 0x29);
+        saved.init_fragment(0, vec![1.0; 4]).unwrap();
+        saved.init_fragment(1, vec![2.0; 4]).unwrap();
+        saved.save_checkpoint(&path).unwrap();
+        // V3 header + fragment-0 header + its complete parameter array, but
+        // only two bytes of the required momentum array.
+        let fragment_zero_payload = 4 + 1 + 32 + 8 + 4 + 8 + 8;
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len((fragment_zero_payload + 4 * 4 + 2) as u64)
+            .unwrap();
+
+        let mut restored = state_with_fingerprint(layout2(), 0x29);
+        restored.init_fragment(0, vec![8.0; 4]).unwrap();
+        restored.init_fragment(1, vec![9.0; 4]).unwrap();
+        let before_params = restored.params.clone();
+        let before_momentum = restored.momentum.clone();
+        assert!(restored.load_checkpoint(&path).is_err());
+        assert_eq!(restored.params, before_params);
+        assert_eq!(restored.momentum, before_momentum);
+        assert!(!restored.checkpoint_layout_verified);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn generic_checkpoint_persists_and_verifies_the_session_contract() {
         let dir = std::env::temp_dir().join(format!(
             "yeto-generic-contract-ckpt-{}-{}",
@@ -1354,8 +1554,17 @@ mod tests {
         let mut wrong_semantics = make_state();
         wrong_semantics.policy_sweep_fragments = Some(2);
         wrong_semantics.session_contract_hash = Some([6; 32]);
+        let before_params = wrong_semantics.params.clone();
+        let before_momentum = wrong_semantics.momentum.clone();
+        let before_versions = wrong_semantics.versions.clone();
+        let before_ledger = wrong_semantics.ledger.clone();
         let error = wrong_semantics.load_checkpoint(&sweep_path).unwrap_err();
         assert!(format!("{error:#}").contains("session contract hash"));
+        assert!(!wrong_semantics.checkpoint_layout_verified);
+        assert_eq!(wrong_semantics.params, before_params);
+        assert_eq!(wrong_semantics.momentum, before_momentum);
+        assert_eq!(wrong_semantics.versions, before_versions);
+        assert_eq!(wrong_semantics.ledger.len(), before_ledger.len());
         std::fs::remove_dir_all(&dir).ok();
     }
 

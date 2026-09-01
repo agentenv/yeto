@@ -3,20 +3,18 @@ set -euo pipefail
 
 # Offline held-out validation for the contrastive five-island Qwen3.8 critic
 # (canary gate #6). Replays validation buckets 240..263 through the normal
-# Miles critic train step with bit-frozen parameters: critic LR 1e-30, actor
-# LR 1e-30, min LR 0 and weight decay 0 make every Adam/decay update smaller
-# than one FP32 ulp of any parameter, so the forward statistics of every
-# bucket are computed against the unchanged step-48 checkpoint. No Yeto
-# syncer hooks, no W&B, no checkpoint writes (save intervals far beyond 24
-# steps), no optimizer/RNG load. Per-bucket critic-step sufficient statistics
+# Miles critic forward/backward path with optimizer construction disabled, so
+# every bucket is computed against the unchanged step-48 checkpoint. No Yeto
+# syncer hooks, no W&B, no checkpoint writes, and no optimizer/RNG load.
+# Per-bucket critic-step sufficient statistics
 # (train/critic-value_{loss,ev_n,returns_sum,returns_sq_sum,residual_sum,
 # residual_sq_sum}) land in the log for exact pooled aggregation with
 # scripts/tools/aggregate_offline_validation_ev.py --validation-start-rollout
 # 240 --num-rollout 264 over all five island logs.
 
 readonly CONTEXT_LENGTH=262144
-readonly REQUIRED_MILES_REVISION=1683344de810654c781f8c04cbd118f296918a88
-readonly REQUIRED_MILES_CONTRACT_SHA256=96744d0bdf8ee4d3c5651f4e57d525686f48f0f2b3f87c1ca55258098c1acd34
+readonly REQUIRED_MILES_REVISION=6438fe22d5915c5b60aa81686e854b66ebe6506c
+readonly REQUIRED_MILES_CONTRACT_SHA256=d6dad9bb9d41908da0f7d05a09317574892beff8744c0ef8510ffe0970dcfe2c
 readonly REQUIRED_DATASET_VERSION=qwen38-value-five-islands-contrastive-20260827-v2
 readonly REQUIRED_DATASET_STRATEGY=atomic-thread-reward-contrastive-window-balanced-v2
 readonly VALIDATION_START=240
@@ -123,6 +121,15 @@ tracker="${CRITIC_LOAD_DIR}/latest_checkpointed_iteration.txt"
   die "tracker $(<"${tracker}") != ${EXPECTED_CHECKPOINT_ITER}: ${tracker}"
 [[ -f "${CRITIC_LOAD_DIR}/${EXPECTED_CHECKPOINT_DIR}/.metadata" ]] || \
   die "missing ${EXPECTED_CHECKPOINT_DIR}/.metadata"
+PYTHONPATH="${MILES_ROOT}" python3 - "${CRITIC_LOAD_DIR}" <<'PY' || \
+  die "critic checkpoint is not a complete trained model-only artifact"
+import sys
+
+from miles.utils.critic_checkpoint import is_trained_model_only_critic
+
+if not is_trained_model_only_critic(sys.argv[1]):
+    raise RuntimeError("trained model-only checkpoint marker is absent")
+PY
 
 for ((rollout_id = VALIDATION_START; rollout_id < NUM_ROLLOUT; rollout_id++)); do
   rollout_path=${ISLAND_DATA_TEMPLATE/"${ROLLOUT_PLACEHOLDER}"/${rollout_id}}
@@ -142,6 +149,9 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 files = (
+    "train_async.py",
+    "miles/backends/megatron_utils/actor.py",
+    "miles/utils/critic_checkpoint.py",
     "miles/ray/rollout/train_data_conversion.py",
     "miles/backends/training_utils/cp_utils.py",
     "miles/backends/training_utils/loss.py",
@@ -197,11 +207,8 @@ exec python3 train_async.py \
   --load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
   --critic-load "${CRITIC_LOAD_DIR}" \
   --ref-load "${MODEL_DIR}/Qwen3.8-27B_torch_dist" \
-  --save "${OUTPUT_DIR}/checkpoints" \
-  --critic-save "${OUTPUT_DIR}/critic_checkpoints" \
   --ckpt-format torch_dist \
-  --save-interval 1000000 \
-  --save-retain-interval 1000000 \
+  --debug-disable-optimizer \
   --no-load-optim \
   --no-load-rng \
   --prompt-data "${PROMPT_DATA}" \
@@ -265,5 +272,4 @@ exec python3 train_async.py \
   --distributed-timeout-minutes 60 \
   --empty-unused-memory-level 2 \
   --train-memory-margin-bytes 1073741824 \
-  --colocate-critic \
   --custom-megatron-after-model-init-hook-path yeto_value_validation_hook.after_model_init

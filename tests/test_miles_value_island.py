@@ -6,6 +6,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 import yeto.megatron.miles_value_island as island_module
+import yeto_value_validation_hook as validation_hook
 
 from yeto.fragments import MERGE_AVG, MERGE_ISO
 from yeto.megatron.miles_value_island import (
@@ -43,9 +44,62 @@ def _descriptor(name: str, shape: tuple[int, ...], merge_mode: int):
     )
 
 
+def _fake_parallel(*, cp: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        tp=SimpleNamespace(size=4),
+        cp=SimpleNamespace(size=cp),
+        pp=SimpleNamespace(size=1),
+        intra_dp=SimpleNamespace(size=1),
+        ep=SimpleNamespace(size=1),
+        etp=SimpleNamespace(size=1),
+    )
+
+
+@pytest.mark.parametrize(
+    ("profile", "cp", "world_size", "optimizer_backend"),
+    [
+        ("tp4-cp2", 2, 8, "te"),
+        ("tp4-cp1", 1, 4, "hdo"),
+    ],
+)
+def test_topology_profiles_bind_shape_and_optimizer_backend(
+    monkeypatch, profile: str, cp: int, world_size: int, optimizer_backend: str
+):
+    monkeypatch.setenv("YETO_VALUE_TOPOLOGY_PROFILE", profile)
+    island = object.__new__(MilesValueIsland)
+    island.parallel = _fake_parallel(cp=cp)
+    island.world_size = world_size
+
+    island._validate_topology()
+
+    assert island.topology_profile == profile
+    assert island.optimizer_backend == optimizer_backend
+
+
+def test_tp4_cp1_profile_rejects_cp2_even_when_world_size_is_four(monkeypatch):
+    monkeypatch.setenv("YETO_VALUE_TOPOLOGY_PROFILE", "tp4-cp1")
+    island = object.__new__(MilesValueIsland)
+    island.parallel = _fake_parallel(cp=2)
+    island.world_size = 4
+
+    with pytest.raises(RuntimeError, match="CP=2 \\(expected 1\\)"):
+        island._validate_topology()
+
+
+def test_topology_profile_rejects_unknown_value(monkeypatch):
+    monkeypatch.setenv("YETO_VALUE_TOPOLOGY_PROFILE", "tp2-cp2")
+    island = object.__new__(MilesValueIsland)
+    island.parallel = _fake_parallel(cp=2)
+    island.world_size = 8
+
+    with pytest.raises(ValueError, match="YETO_VALUE_TOPOLOGY_PROFILE"):
+        island._validate_topology()
+
+
 def test_layout_keeps_every_canonical_tensor_in_its_own_fragment():
     descriptors = [
-        _descriptor("module.module.output_layer.weight", (1, 8), MERGE_ISO),
+        _descriptor("module.module.output_layer.weight", (51, 8), MERGE_AVG),
+        _descriptor("module.module.output_layer.bias", (51,), MERGE_AVG),
         _descriptor(
             "module.module.decoder.layers.0.input_layernorm.weight", (8,), MERGE_AVG
         ),
@@ -78,9 +132,8 @@ def test_layout_keeps_every_canonical_tensor_in_its_own_fragment():
         by_name["module.module.embedding.word_embeddings.weight"].merge_mode
         == MERGE_AVG
     )
-    # The scalar value head is 1xH; Iso is identity because k=min(shape)=1,
-    # but keeping it in the canonical layout ensures it is synchronized.
-    assert by_name["module.module.output_layer.weight"].merge_mode == MERGE_ISO
+    assert by_name["module.module.output_layer.weight"].merge_mode == MERGE_AVG
+    assert by_name["module.module.output_layer.bias"].merge_mode == MERGE_AVG
 
 
 def test_layout_rejects_duplicate_names_and_invalid_iso_shapes():
@@ -100,7 +153,8 @@ def test_grouped_layout_is_deterministic_balanced_and_never_splits_tensors():
         _descriptor("decoder.layers.0.mlp.weight", (8, 4), MERGE_ISO),
         _descriptor("decoder.layers.2.mlp.weight", (7, 4), MERGE_ISO),
         _descriptor("embedding.word_embeddings.weight", (11, 4), MERGE_AVG),
-        _descriptor("output_layer.weight", (1, 4), MERGE_ISO),
+        _descriptor("output_layer.weight", (51, 4), MERGE_AVG),
+        _descriptor("output_layer.bias", (51,), MERGE_AVG),
     ]
 
     first = grouped_tensor_fragment_layout(descriptors, 3, "binpack")
@@ -112,6 +166,14 @@ def test_grouped_layout_is_deterministic_balanced_and_never_splits_tensors():
     assert first.num_fragments == 3
     assert sorted(first.tensor_names()) == sorted(item.name for item in descriptors)
     assert len(first.tensor_names()) == len(set(first.tensor_names()))
+    fragment_by_name = {
+        name: fragment for fragment in first.fragments for name, _ in fragment.tensors
+    }
+    assert fragment_by_name["output_layer.weight"] is fragment_by_name[
+        "output_layer.bias"
+    ]
+    assert fragment_by_name["output_layer.weight"].merge_mode == MERGE_AVG
+    assert fragment_by_name["decoder.layers.0.mlp.weight"].merge_mode == MERGE_ISO
     expected_numels = {item.name: item.numel for item in descriptors}
     for fragment in first.fragments:
         assert fragment.numel == sum(
@@ -126,6 +188,74 @@ def test_grouped_layout_is_deterministic_balanced_and_never_splits_tensors():
             == fragment.merge_mode
             for name, _ in fragment.tensors
         )
+
+
+def test_parameter_description_routes_multibin_value_head_to_avg_only():
+    island = object.__new__(MilesValueIsland)
+
+    def describe(name: str, shape: tuple[int, ...]) -> TensorDescriptor:
+        parameter = torch.nn.Parameter(torch.empty(shape))
+        return island._describe_parameter(name, parameter)
+
+    assert (
+        describe("module.module.output_layer.weight", (51, 8)).merge_mode
+        == MERGE_AVG
+    )
+    assert describe("module.module.output_layer.bias", (51,)).merge_mode == MERGE_AVG
+    assert (
+        describe(
+            "module.module.decoder.layers.0.mlp.linear_fc1.weight", (16, 8)
+        ).merge_mode
+        == MERGE_ISO
+    )
+    assert (
+        describe(
+            "module.module.decoder.layers.0.not_output_layer.weight", (16, 8)
+        ).merge_mode
+        == MERGE_ISO
+    )
+
+
+def test_validation_after_model_init_is_compat_only(monkeypatch):
+    calls = []
+    args = object()
+    optimizer = object()
+
+    monkeypatch.setattr(
+        validation_hook,
+        "_install_bf16_static_unscale_compat",
+        lambda actual_args, actual_optimizer: calls.append(
+            ("unscale", actual_args, actual_optimizer)
+        ),
+    )
+    monkeypatch.setattr(
+        validation_hook,
+        "_install_mixed_dtype_grad_compat",
+        lambda actual_args: calls.append(("mixed", actual_args)),
+    )
+
+    validation_hook.after_model_init(args, "actor", object(), optimizer, object())
+    assert calls == []
+
+    validation_hook.after_model_init(args, "critic", object(), optimizer, object())
+    assert calls == [("unscale", args, optimizer), ("mixed", args)]
+    assert not hasattr(validation_hook, "before_train_step")
+    assert not hasattr(validation_hook, "after_train_step")
+
+
+def test_validation_after_model_init_accepts_optimizer_free_replay(monkeypatch):
+    monkeypatch.setattr(
+        validation_hook,
+        "_install_bf16_static_unscale_compat",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not install")),
+    )
+    monkeypatch.setattr(
+        validation_hook,
+        "_install_mixed_dtype_grad_compat",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not install")),
+    )
+
+    validation_hook.after_model_init(object(), "critic", object(), None, None)
 
 
 def test_grouped_layout_uses_requested_scale_and_complete_tensor_spans():
@@ -624,6 +754,49 @@ def test_initial_anchor_covers_the_full_flat_grouped_fragment(monkeypatch):
     assert island.fragment_versions == [version]
 
 
+def test_nvme_anchor_path_preserves_bf16_base_and_binds_fragment_version():
+    class Spill:
+        def __init__(self):
+            self.value = None
+            self.version = None
+            self.calls = []
+
+        def write(self, fid, version, value):
+            self.calls.append(("write", fid, version, value.dtype, value.numel()))
+            self.value = value.clone()
+            self.version = version
+
+        def has(self, fid, version):
+            self.calls.append(("has", fid, version))
+            return self.value is not None and version == self.version
+
+        def read(self, fid, version, consumer):
+            self.calls.append(("read", fid, version))
+            if version != self.version:
+                raise RuntimeError("version mismatch")
+            return consumer(self.value)
+
+    island = object.__new__(MilesValueIsland)
+    island.anchor_spill = Spill()
+    island.anchors = [None]
+    island.fragment_versions = [7]
+    raw = torch.tensor([1.125, -2.25, 3.5], dtype=torch.float32)
+
+    island._store_anchor(0, 7, raw)
+
+    assert island._has_anchor(0) is True
+    assert island.anchors == [None]
+    full = torch.tensor([2.0, -1.0, 7.0], dtype=torch.float32)
+    delta = island._subtract_anchor(0, 7, full)
+    expected = full.sub(raw.to(torch.bfloat16).float())
+    assert torch.equal(delta, expected)
+    assert island.anchor_spill.calls == [
+        ("write", 0, 7, torch.bfloat16, 3),
+        ("has", 0, 7),
+        ("read", 0, 7),
+    ]
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -1061,12 +1234,24 @@ class _FakeDistOptimizer:
     data_parallel_group = object()
 
 
+class _FakeHDO:
+    offload_fraction = 1.0
+    param_update_in_fp32 = True
+    gpu_optimizer = None
+
+    def __init__(self, parameter: torch.Tensor, master: torch.Tensor):
+        self.state = {}
+        self.param_to_inner_param = {parameter: master}
+
+
 def _runtime(
     model_param: torch.nn.Parameter,
     optimizer_param: torch.Tensor | None,
-    adam: _FakeAdam,
+    adam,
     start: int | None,
     end: int | None,
+    *,
+    optimizer_backend: str = "te",
 ) -> _RuntimeTensor:
     return _RuntimeTensor(
         descriptor=_descriptor("w", tuple(model_param.shape), MERGE_AVG),
@@ -1079,6 +1264,7 @@ def _runtime(
         ownership_ranges=((start, end),)
         if start is not None and end is not None
         else (None,),
+        optimizer_backend=optimizer_backend,
     )
 
 
@@ -1161,6 +1347,152 @@ def test_master_reconstruction_transports_exact_fp32_bits_across_owners(monkeypa
     reconstructed = island._local_master(runtime)
 
     assert torch.equal(reconstructed.view(torch.int32), expected_bits)
+
+
+def test_fresh_hdo_install_preserves_lazy_state_and_exact_cpu_master():
+    island = object.__new__(MilesValueIsland)
+    island.device = torch.device("cpu")
+    model = torch.nn.Parameter(torch.zeros(6, dtype=torch.bfloat16))
+    shard = model.detach().view(-1)
+    master = torch.zeros(6, dtype=torch.float32)
+    hdo = _FakeHDO(shard, master)
+    runtime = _runtime(
+        model,
+        shard,
+        hdo,
+        0,
+        6,
+        optimizer_backend="hdo",
+    )
+    authoritative = torch.tensor(
+        [0.25, -3.5, 1.00001, -0.00003, 19.1257, -8.75],
+        dtype=torch.float32,
+    )
+
+    island._install_local(runtime, authoritative)
+
+    assert torch.equal(master.view(torch.int32), authoritative.view(torch.int32))
+    assert torch.equal(model.detach(), authoritative.to(torch.bfloat16))
+    assert hdo.state == {}
+
+
+def test_resumed_hdo_install_rebinds_duplicate_master_and_preserves_adam_state():
+    island = object.__new__(MilesValueIsland)
+    island.device = torch.device("cpu")
+    model = torch.nn.Parameter(torch.zeros(5, dtype=torch.bfloat16))
+    shard = model.detach().view(-1)[1:4]
+    inner = torch.zeros(3, dtype=torch.float32)
+    loaded_master = torch.full((3,), -7.0, dtype=torch.float32)
+    exp_avg = torch.arange(3, dtype=torch.float32)
+    exp_avg_sq = torch.arange(3, dtype=torch.float32) + 10
+    step = torch.tensor(11.0)
+    hdo = _FakeHDO(shard, inner)
+    hdo.state[shard] = {
+        "master_param": loaded_master,
+        "exp_avg": exp_avg,
+        "exp_avg_sq": exp_avg_sq,
+        "step": step,
+    }
+    runtime = _runtime(
+        model,
+        shard,
+        hdo,
+        1,
+        4,
+        optimizer_backend="hdo",
+    )
+    authoritative = torch.tensor(
+        [100.0, 1.00001, -0.00003, 19.1257, -100.0], dtype=torch.float32
+    )
+    before_avg = exp_avg.clone()
+    before_sq = exp_avg_sq.clone()
+
+    island._install_local(runtime, authoritative)
+
+    expected = authoritative[1:4]
+    assert torch.equal(inner.view(torch.int32), expected.view(torch.int32))
+    assert hdo.state[shard]["master_param"] is inner
+    assert torch.equal(loaded_master.view(torch.int32), expected.view(torch.int32))
+    assert hdo.state[shard]["exp_avg"] is exp_avg
+    assert hdo.state[shard]["exp_avg_sq"] is exp_avg_sq
+    assert hdo.state[shard]["step"] is step
+    assert torch.equal(exp_avg, before_avg)
+    assert torch.equal(exp_avg_sq, before_sq)
+    assert step.item() == 11.0
+
+
+def test_hdo_local_master_reads_fp32_inner_before_first_optimizer_step(monkeypatch):
+    island = object.__new__(MilesValueIsland)
+    island.device = torch.device("cpu")
+    bits = torch.tensor(
+        [0x3F800001, -2147483648, 0x00000001, 0x7FC01234], dtype=torch.int32
+    )
+    expected = bits.view(torch.float32)
+    model = torch.nn.Parameter(expected.to(torch.bfloat16))
+    shard = model.detach().view(-1)
+    hdo = _FakeHDO(shard, expected.clone())
+    runtime = _runtime(
+        model,
+        shard,
+        hdo,
+        0,
+        4,
+        optimizer_backend="hdo",
+    )
+
+    def fake_all_gather(outputs, local, group):
+        assert group is runtime.dist_optimizer.data_parallel_group
+        outputs[0].copy_(local)
+
+    monkeypatch.setattr(island_module.dist, "all_gather", fake_all_gather)
+
+    reconstructed = island._local_master(runtime)
+
+    assert torch.equal(reconstructed.view(torch.int32), bits)
+
+
+def test_hdo_master_rejects_missing_or_non_fp32_inner_parameter():
+    island = object.__new__(MilesValueIsland)
+    island.device = torch.device("cpu")
+    model = torch.nn.Parameter(torch.zeros(3, dtype=torch.bfloat16))
+    shard = model.detach().view(-1)
+    missing = _FakeHDO(shard, torch.zeros(3, dtype=torch.float32))
+    missing.param_to_inner_param.clear()
+    runtime = _runtime(
+        model,
+        shard,
+        missing,
+        0,
+        3,
+        optimizer_backend="hdo",
+    )
+    with pytest.raises(RuntimeError, match="lost its inner FP32 parameter"):
+        island._hdo_inner_master(runtime)
+
+    wrong_dtype = _FakeHDO(shard, torch.zeros(3, dtype=torch.bfloat16))
+    runtime.adam_optimizer = wrong_dtype
+    with pytest.raises(TypeError, match="HDO master must be FP32 on CPU"):
+        island._hdo_inner_master(runtime)
+
+
+def test_hdo_nonempty_state_must_have_all_adam_fields():
+    island = object.__new__(MilesValueIsland)
+    island.device = torch.device("cpu")
+    model = torch.nn.Parameter(torch.zeros(2, dtype=torch.bfloat16))
+    shard = model.detach().view(-1)
+    hdo = _FakeHDO(shard, torch.zeros(2, dtype=torch.float32))
+    hdo.state[shard] = {"exp_avg": torch.zeros(2)}
+    runtime = _runtime(
+        model,
+        shard,
+        hdo,
+        0,
+        2,
+        optimizer_backend="hdo",
+    )
+
+    with pytest.raises(RuntimeError, match="initialized HDO state is missing"):
+        island._ensure_adam_state(runtime)
 
 
 def test_fresh_te_state_marks_megatron_offloader_initialized():

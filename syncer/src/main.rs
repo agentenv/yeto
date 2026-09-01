@@ -258,4 +258,11 @@ mod tests {
         assert_eq!(sweep.policy_sweep_fragments, Some(4));
         assert_eq!(sweep.total_steps, 8);
     }
+
+    #[test]
+    fn generic_learner_weight_default_remains_tokens_squared_over_steps() {
+        let args =
+            Args::try_parse_from(["yeto-syncer", "--learners", "1", "--total-steps", "1"]).unwrap();
+        assert_eq!(args.learner_weight, "tokens2-over-steps");
+    }
 }

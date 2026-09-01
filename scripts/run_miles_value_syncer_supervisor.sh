@@ -10,7 +10,20 @@ die() {
   exit 2
 }
 
+readonly TWO_LEARNER_DIAGNOSTIC=${YETO_MILES_VALUE_TWO_LEARNER_DIAGNOSTIC:-0}
+readonly TP4_CP1_DIAGNOSTIC=${YETO_MILES_VALUE_TP4_CP1:-0}
+[[ "${TWO_LEARNER_DIAGNOSTIC}" =~ ^[01]$ ]] || \
+  die "YETO_MILES_VALUE_TWO_LEARNER_DIAGNOSTIC must be 0 or 1"
+[[ "${TP4_CP1_DIAGNOSTIC}" =~ ^[01]$ ]] || \
+  die "YETO_MILES_VALUE_TP4_CP1 must be 0 or 1"
+((TP4_CP1_DIAGNOSTIC == 0 || TWO_LEARNER_DIAGNOSTIC == 1)) || \
+  die "YETO_MILES_VALUE_TP4_CP1 requires the two-learner diagnostic"
+
 if [[ "${YETO_MILES_VALUE_SMOKE:-0}" == 1 ]]; then
+  ((TWO_LEARNER_DIAGNOSTIC == 0)) || \
+    die "two-learner diagnostic is unavailable in smoke mode"
+  ((TP4_CP1_DIAGNOSTIC == 0)) || \
+    die "TP4/CP1 diagnostic is unavailable in smoke mode"
   readonly NUM_LEARNERS=1
   readonly LOCAL_BUDGET_STEPS=${SMOKE_BUDGET_STEPS:-2}
   [[ "${LOCAL_BUDGET_STEPS}" =~ ^[2-4]$ ]] || {
@@ -18,10 +31,26 @@ if [[ "${YETO_MILES_VALUE_SMOKE:-0}" == 1 ]]; then
     exit 2
   }
 elif [[ "${YETO_MILES_VALUE_SMOKE:-0}" == 0 ]]; then
-  readonly NUM_LEARNERS=5
-  readonly LOCAL_BUDGET_STEPS=${LOCAL_BUDGET_STEPS:-240}
+  if ((TWO_LEARNER_DIAGNOSTIC)); then
+    readonly NUM_LEARNERS=2
+    if ((TP4_CP1_DIAGNOSTIC)); then
+      readonly DEFAULT_LOCAL_BUDGET_STEPS=24
+    else
+      readonly DEFAULT_LOCAL_BUDGET_STEPS=48
+    fi
+  else
+    readonly NUM_LEARNERS=5
+    readonly DEFAULT_LOCAL_BUDGET_STEPS=240
+  fi
+  readonly LOCAL_BUDGET_STEPS=${LOCAL_BUDGET_STEPS:-${DEFAULT_LOCAL_BUDGET_STEPS}}
   [[ "${LOCAL_BUDGET_STEPS}" =~ ^[1-9][0-9]*$ ]] || \
     die "LOCAL_BUDGET_STEPS must be a positive integer"
+  if ((TP4_CP1_DIAGNOSTIC && LOCAL_BUDGET_STEPS != 24)); then
+    die "TP4/CP1 diagnostic requires LOCAL_BUDGET_STEPS=24"
+  fi
+  if ((TWO_LEARNER_DIAGNOSTIC && !TP4_CP1_DIAGNOSTIC && LOCAL_BUDGET_STEPS != 48)); then
+    die "two-learner diagnostic requires LOCAL_BUDGET_STEPS=48"
+  fi
   [[ -z "${SMOKE_BUDGET_STEPS:-}" ]] || {
     printf '%s\n' 'run_miles_value_syncer_supervisor.sh: SMOKE_BUDGET_STEPS requires YETO_MILES_VALUE_SMOKE=1' >&2
     exit 2
@@ -54,9 +83,9 @@ FINAL_MARKER=${CHECKPOINT_PATH}.final
 PHASE1_TOTAL_STEPS=${PHASE1_TOTAL_STEPS:-1000000000}
 PHASE1_PIPELINE=${PHASE1_PIPELINE:-16}
 PHASE2_PIPELINE=${PHASE2_PIPELINE:-16}
-# The production model+outer-momentum snapshot is large, so checkpoint once
-# every four complete 96-fragment sweeps.  For the current 1152 ordinary
-# outer updates this publishes three durable cuts, including step 1152.
+# The model+outer-momentum snapshot is large, so checkpoint once every four
+# complete 96-fragment sweeps.  The two-learner 48-step diagnostic therefore
+# publishes its ordinary cutoff at outer step 384.
 CHECKPOINT_EVERY=${CHECKPOINT_EVERY:-384}
 GRACE_MS=${GRACE_MS:-1000}
 GRACE_GAMMA=${GRACE_GAMMA:-0.8}
@@ -66,6 +95,10 @@ SYNC_INTERVAL_STEPS=${SYNC_INTERVAL_STEPS:-12}
 DELTA_CORRECTION=${DELTA_CORRECTION:-heloco}
 OUTER_LR=${OUTER_LR:-0.7}
 OUTER_MOMENTUM=${OUTER_MOMENTUM:-0.9}
+# Value replay already balances independent trajectories within each island.
+# Keep outer island contributions equal by default; the historical
+# token-squared weighting remains available only as an explicit override.
+LEARNER_WEIGHT=${LEARNER_WEIGHT:-equal}
 
 [[ "${RUN_DIR}" == /* && "${RUN_DIR}" != / ]] || die "RUN_DIR must be an absolute directory other than /"
 [[ "${CHECKPOINT_PATH}" == /* ]] || die "CHECKPOINT_PATH must be absolute"
@@ -116,6 +149,8 @@ if [[ ! "${QUORUM_TIMEOUT_S}" =~ ^[0-9]+$ ]] || \
   die "QUORUM_TIMEOUT_S must be in [1, 3600]"
 fi
 [[ "${DELTA_CORRECTION}" == heloco || "${DELTA_CORRECTION}" == none ]] || die "DELTA_CORRECTION must be heloco or none"
+[[ "${LEARNER_WEIGHT}" == equal || "${LEARNER_WEIGHT}" == tokens2-over-steps ]] || \
+  die "LEARNER_WEIGHT must be equal or tokens2-over-steps"
 
 [[ -x "${SYNCER_BIN}" ]] || die "syncer binary is not executable: ${SYNCER_BIN}"
 [[ -f "${YETO_ROOT}/yeto/iso_worker.py" ]] || die "missing exact Torch SVD worker under ${YETO_ROOT}"
@@ -261,6 +296,7 @@ COMMON_ARGS=(
   --delta-correction "${DELTA_CORRECTION}"
   --outer-lr "${OUTER_LR}"
   --outer-momentum "${OUTER_MOMENTUM}"
+  --learner-weight "${LEARNER_WEIGHT}"
   --iso-backend torch-svd
   --iso-worker-python "${ISO_WORKER_PYTHON}"
   --iso-worker-devices "${ISO_WORKER_DEVICES}"
