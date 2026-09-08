@@ -1,0 +1,21 @@
+{
+  "schema": "cot.trace.v1",
+  "trace_id": "public-demo-fix-total",
+  "source_format": "handwritten-demo/v1",
+  "metadata": {"fixture": true, "description": "Invented software task; no private trace or real model output"},
+  "events": [
+    {"event_id":"u1","role":"user","kind":"message","content":"Fix total([2, 3]) returning 6 instead of 5. Inspect the function before editing."},
+    {"event_id":"a1","role":"assistant","kind":"tool_call","content":"","tool_calls":[{"id":"read-1","type":"function","function":{"name":"read_file","arguments":{"path":"total.py","thinking":false,"reasoning":"ordinary task payload, preserve this key"}}}]},
+    {"event_id":"t1","role":"tool","kind":"tool_result","tool_call_id":"read-1","content":"def total(values):\n    result = 1\n    for value in values:\n        result += value\n    return result\n"},
+    {"event_id":"a2","role":"assistant","kind":"tool_call","content":"","tool_calls":[{"id":"edit-1","type":"function","function":{"name":"replace_text","arguments":{"path":"total.py","old":"result = 1","new":"result = 0"}}}]},
+    {"event_id":"t2","role":"tool","kind":"tool_result","tool_call_id":"edit-1","content":"Replaced one occurrence."},
+    {"event_id":"a3","role":"assistant","kind":"tool_call","content":"","tool_calls":[{"id":"test-1","type":"function","function":{"name":"run_tests","arguments":{"target":"test_total.py"}}}]},
+    {"event_id":"t3","role":"tool","kind":"tool_result","tool_call_id":"test-1","content":"3 passed."},
+    {"event_id":"a4","role":"assistant","kind":"message","content":"Changed the initial total from 1 to 0. All three tests passed."}
+  ],
+  "gap_targets": [
+    {"event_id":"a1","reason":"encrypted_marker","source_marker_ids":["demo-marker-1"]},
+    {"event_id":"a2","reason":"encrypted_marker","source_marker_ids":["demo-marker-2"]},
+    {"event_id":"a3","reason":"encrypted_marker","source_marker_ids":["demo-marker-3"]}
+  ]
+}
