@@ -29,7 +29,7 @@ import uuid
 from .core import BLOCKING_FLAGS, PROMPT_VERSION, canonical, digest, prompt_messages, validate_candidate, validate_trace
 from .corpus_source import file_sha256
 from .grounding_review_v3 import REVIEW_VERSION, review_messages, validate_review
-from . import grounding_review_v3, grounding_review_v4
+from . import grounding_review_v3, grounding_review_v4, grounding_review_fast
 from .provider import ContextOverflow, NoRedirect, OpenAICompatibleProvider, check_budget
 
 
@@ -39,7 +39,8 @@ WORKER_VERSION = "cot.compact-corpus-worker/v5-generation-staging"
 def review_policy(config):
     version = config.get("review_version", REVIEW_VERSION)
     policies = {grounding_review_v3.REVIEW_VERSION: grounding_review_v3,
-                grounding_review_v4.REVIEW_VERSION: grounding_review_v4}
+                grounding_review_v4.REVIEW_VERSION: grounding_review_v4,
+                grounding_review_fast.REVIEW_VERSION: grounding_review_fast}
     if version not in policies:
         raise ValueError("Unknown configured prefix-review version")
     return policies[version]
@@ -47,6 +48,8 @@ def review_policy(config):
 
 def validate_review_controls(config):
     """Allow only explicit budget/schema controls, never arbitrary API overrides."""
+    if config.get("review_version") == grounding_review_fast.REVIEW_VERSION:
+        grounding_review_fast.validate_config(config)
     if "custom_params" in config:
         params = config["custom_params"]
         if not isinstance(params, dict) or set(params) != {"thinking_budget"}:
@@ -147,6 +150,10 @@ class PrefixReviewProvider(OpenAICompatibleProvider):
         self.policy = review_policy(config)
         validate_review_controls(config)
 
+    def response_received(self, gap, raw, status):
+        """Optional audit sink before envelope parsing; ordinary runs keep no copy."""
+        return None
+
     def review(self, gap, candidate):
         messages = self.policy.review_messages(gap, candidate)
         config = self.config
@@ -167,10 +174,12 @@ class PrefixReviewProvider(OpenAICompatibleProvider):
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
             with opener.open(request, timeout=int(config.get("timeout_seconds", 600))) as response:
                 raw = response.read(4 * 1024 * 1024 + 1)
+                self.response_received(gap, raw, getattr(response, "status", 200))
                 if len(raw) > 4 * 1024 * 1024:
                     raise ValueError("Review response exceeds size bound")
                 result = json.loads(raw)
         except urllib.error.HTTPError as exc:
+            self.response_received(gap, exc.read(4 * 1024 * 1024 + 1), exc.code)
             raise ValueError(f"Teacher returned HTTP {exc.code}") from None
         except urllib.error.URLError:
             raise ValueError("Teacher connection failed; inspect endpoint access separately") from None
@@ -392,6 +401,8 @@ class Journal:
         for key in ("custom_params", "response_format"):
             if canonical(parameters.get(key)) != canonical(config.get(key)):
                 raise ValueError("Review decoding controls differ from the immutable configured reviewer")
+        if config.get("review_version") == grounding_review_fast.REVIEW_VERSION:
+            grounding_review_fast.validate_receipt(reviewer, config)
         record = review_policy(config).validate_review(gap, text, result, reviewer=reviewer)
         state = {"pass": "approved", "reject": "rejected", "uncertain": "uncertain"}[record["decision"]]
         record["automatic_approval"] = state == "approved"
@@ -523,7 +534,7 @@ def run_corpus(journal, generator, reviewer, *, max_gaps, workers=8, token_budge
 
 
 def _code_identity():
-    names = ("corpus_worker.py", "core.py", "provider.py", "grounding_review.py", "grounding_review_ids.py", "grounding_review_v3.py", "grounding_review_v4.py")
+    names = ("corpus_worker.py", "core.py", "provider.py", "grounding_review.py", "grounding_review_ids.py", "grounding_review_v3.py", "grounding_review_v4.py", "grounding_review_fast.py")
     return {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in names}
 
 

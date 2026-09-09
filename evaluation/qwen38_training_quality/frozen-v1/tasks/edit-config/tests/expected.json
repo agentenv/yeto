@@ -1,0 +1,1 @@
+{"expected": {"enabled": true, "labels": ["red", "blue"], "port": 8123}, "id": "edit-config", "output": "result.json", "verifier_kind": "json"}

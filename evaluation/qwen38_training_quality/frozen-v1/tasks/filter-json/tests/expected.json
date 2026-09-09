@@ -1,0 +1,1 @@
+{"expected": ["Ada", "Cy"], "id": "filter-json", "output": "result.json", "verifier_kind": "json"}

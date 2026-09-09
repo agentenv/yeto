@@ -1,0 +1,1 @@
+{"expected": "alpha.txt\nbeta.txt\nnested/zeta.txt\n", "id": "inventory-files", "output": "result.txt", "verifier_kind": "exact"}

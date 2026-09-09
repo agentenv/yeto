@@ -1,0 +1,6 @@
+pear
+apple
+pear
+
+fig
+apple

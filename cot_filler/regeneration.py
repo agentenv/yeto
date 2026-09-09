@@ -16,7 +16,7 @@ import sqlite3
 import urllib.error
 import urllib.request
 
-from . import grounding_review_v3, grounding_review_v4
+from . import grounding_review_v3, grounding_review_v4, grounding_review_fast
 from .core import BLOCKING_FLAGS, canonical, digest, validate_candidate
 from .grounding_review import _prefix
 from .provider import NoRedirect, OpenAICompatibleProvider, check_budget
@@ -42,7 +42,7 @@ of the reviewer, JSON, tags, role labels, or replacement transcript events."""
 
 def _policy(config):
     version = config.get("review_version", grounding_review_v3.REVIEW_VERSION)
-    policies = {p.REVIEW_VERSION: p for p in (grounding_review_v3, grounding_review_v4)}
+    policies = {p.REVIEW_VERSION: p for p in (grounding_review_v3, grounding_review_v4, grounding_review_fast)}
     if version not in policies:
         raise ValueError("Unsupported regeneration review policy")
     return policies[version]
@@ -58,6 +58,8 @@ def implementation_identity(reviewer_config):
 
 
 def _receipt_matches(reviewer, config):
+    if config.get("review_version") == grounding_review_fast.REVIEW_VERSION:
+        grounding_review_fast.validate_receipt(reviewer, config)
     if not isinstance(reviewer, dict) or not isinstance(reviewer.get("usage"), dict):
         raise ValueError("Review receipt is malformed")
     if (reviewer.get("provider") != "openai-compatible"
@@ -97,9 +99,11 @@ def revalidate_review(gap, candidate, record, reviewer_config):
     reviewer = record.get("reviewer", {})
     _receipt_matches(reviewer, reviewer_config)
     raw = {"schema": policy.REVIEW_VERSION, "decision": record.get("decision"),
-           "checks": record.get("checks"), "note": record.get("note"),
+           "checks": record.get("checks"),
            "statements": [{key: statement[key] for key in ("id", "kind", "assessment", "evidence_ids")}
                           for statement in record.get("statements", [])]}
+    if policy.REVIEW_VERSION != grounding_review_fast.REVIEW_VERSION:
+        raw["note"] = record.get("note")
     return policy.validate_review(gap, candidate, raw, reviewer=reviewer)
 
 
@@ -108,6 +112,8 @@ def reason_codes(record):
     if record.get("decision") != "reject":
         return []
     checks = record.get("checks", {})
+    if record.get("schema") == grounding_review_fast.REVIEW_VERSION:
+        return ["future_observation_claim"] if checks.get("no_future_information") is False else []
     codes = []
     if checks.get("no_future_observation_claims") is False:
         codes.append("future_observation_claim")

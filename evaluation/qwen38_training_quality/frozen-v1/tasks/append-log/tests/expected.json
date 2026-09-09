@@ -1,0 +1,1 @@
+{"expected": "first event\nsecond event\nthird event\n", "id": "append-log", "output": "result.txt", "verifier_kind": "exact"}

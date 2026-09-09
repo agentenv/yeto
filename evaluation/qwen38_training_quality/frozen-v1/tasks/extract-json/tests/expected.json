@@ -1,0 +1,1 @@
+{"expected": "west-3\n", "id": "extract-json", "output": "result.txt", "verifier_kind": "exact"}

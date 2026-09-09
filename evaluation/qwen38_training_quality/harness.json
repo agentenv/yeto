@@ -1,0 +1,382 @@
+{
+  "compose": "services:\n  main:\n    extra_hosts:\n      - host.docker.internal:host-gateway\n    volumes:\n      - $REMOTE_ROOT/runtime/qwen38-codex-models.json:/etc/dressage/qwen38-codex-models.json:ro\n",
+  "contains_model_responses": false,
+  "contains_original_benchmark_tasks": false,
+  "integration": {
+    "agent_protocol_overrides": {
+      "codex": "openai"
+    },
+    "artifacts": {
+      "dir_mode": 448,
+      "file_mode": 384,
+      "fsync": true,
+      "mode": "both",
+      "root": "$REMOTE_ROOT/gateway-artifacts"
+    },
+    "backend": {
+      "dressage_proxy_url": "http://127.0.0.1:35810",
+      "router_api_path": "/v1",
+      "service_api_key_env": "TB2_PROXY_API_KEY",
+      "service_api_key_header": "Authorization",
+      "service_api_key_scheme": "Bearer",
+      "sticky_header_name": "X-SMG-Routing-Key",
+      "verify_tls": false
+    },
+    "environment": {
+      "mode": "native"
+    },
+    "execution_mode": "training",
+    "gateway": {
+      "advertise_url": "http://host.docker.internal:35101",
+      "limits": {
+        "drain_timeout_sec": 180.0,
+        "max_active_routes": 36,
+        "max_inflight_global": 18,
+        "max_inflight_per_route": 1,
+        "max_tombstones": 4096,
+        "queue_timeout_sec": 3900.0,
+        "request_body_max_bytes": 33554432,
+        "request_header_max_bytes": 65536,
+        "route_ttl_sec": 14400.0,
+        "sse_idle_timeout_sec": 3900.0,
+        "tombstone_ttl_sec": 600.0
+      },
+      "listen_host": "0.0.0.0",
+      "listen_port": 35101,
+      "log_level": "warning"
+    },
+    "schema_version": "dressage.harbor/v1",
+    "security": {
+      "additional_agent_egress_hosts": [],
+      "allow_model_listing": false,
+      "require_tls_for_non_loopback": false,
+      "routing_guarantee": "configure_only"
+    },
+    "training": {
+      "failed_group_policy": "zero_grad",
+      "group_max_retries": 0,
+      "max_replacement_groups": 0,
+      "min_live_group_ratio": 0.0,
+      "model_override": "$MODEL",
+      "replacement_exhausted_policy": "abort_batch",
+      "require_single_weight_version": false,
+      "reward_key": "reward",
+      "sampling": {
+        "mode": "force",
+        "seed_policy": "per_attempt_request",
+        "temperature": 1.0,
+        "top_p": 1.0
+      }
+    },
+    "trajectory": {
+      "default_temperature": 1.0,
+      "max_steps": 1024,
+      "require_trainable_tokens": true
+    }
+  },
+  "job": {
+    "agents": [
+      {
+        "kwargs": {
+          "model_auto_compact_token_limit": 196608,
+          "model_catalog_json": "/etc/dressage/qwen38-codex-models.json",
+          "model_context_window": 262144,
+          "reasoning_effort": "xhigh",
+          "reasoning_summary": "detailed",
+          "version": "0.142.5",
+          "web_search": "disabled"
+        },
+        "model_name": "$MODEL",
+        "n_concurrent": 18,
+        "name": "codex"
+      }
+    ],
+    "environment": {
+      "delete": true,
+      "extra_docker_compose": [
+        "$REMOTE_ROOT/runtime/host-gateway.compose.yaml"
+      ],
+      "force_build": false,
+      "type": "docker"
+    },
+    "job_name": "quality-checkpoint",
+    "jobs_dir": "$REMOTE_ROOT/jobs",
+    "n_attempts": 1,
+    "n_concurrent_trials": 18,
+    "quiet": true,
+    "retry": {
+      "max_retries": 0
+    },
+    "tasks": [],
+    "timeout_multiplier": 1.0
+  },
+  "reference_files_sha256": {
+    "h200-n1.json": "9b6d06c868dd73f5ae46771d44153730216ac59ba27e409cf2675522b032b35e",
+    "runtime/h200-n1.integration.json": "4dc381c96999caee16b9dd2eaaae962687057fcd3fc018d18bb0467d8eccbecd",
+    "runtime/host-gateway.compose.yaml": "151f00ce86c04e4ca19afe47cce0fb74984dbdd6888477e4b0f2f2d3202459c0",
+    "runtime/services.json": "5941faec9a9295652e9f3f045d0e199707b91287bf748d45d86ae003a891e12b"
+  },
+  "schema": "yeta.qwen38-training-quality-harness-reference/v1",
+  "services": {
+    "container_flags": [
+      "--runtime=nvidia",
+      "--gpus=all",
+      "--network=host",
+      "--ipc=host",
+      "--ulimit=memlock=-1"
+    ],
+    "container_mounts": [
+      "/data:/data",
+      "/var/run/docker.sock:/var/run/docker.sock",
+      "/data/grpo-cve/runtime-code/glm53-prod/dressage:/opt/dressage/dressage:ro",
+      "/data/grpo-cve/runtime-code/glm53-prod/harbor:/opt/harbor/src/harbor:ro",
+      "/data/grpo-cve/runtime-code/glm53-prod/blackbox_server:/opt/dressage/blackbox_server:ro"
+    ],
+    "engine_layout": "four-independent-tp2-engines",
+    "model_name": "$MODEL",
+    "model_path": "$REMOTE_ROOT/hf",
+    "native_template_preserved": true,
+    "runtime_image_verified_on_n5": "dressage-cve-grpo:qwen38-27b-nccl2307-fla052",
+    "runtime_source": "/data/grpo-cve/runtime-code/glm53-prod",
+    "schema": "yeta.qwen38-training-quality-services-reference/v1",
+    "services_in_dependency_order": [
+      {
+        "argv": [
+          "python",
+          "-m",
+          "sglang.launch_server",
+          "--model-path",
+          "$REMOTE_ROOT/hf",
+          "--served-model-name",
+          "$MODEL",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "35001",
+          "--tp-size",
+          "2",
+          "--context-length",
+          "262144",
+          "--mem-fraction-static",
+          "0.82",
+          "--max-running-requests",
+          "18",
+          "--cuda-graph-max-bs-decode",
+          "16",
+          "--cuda-graph-max-bs-prefill",
+          "1",
+          "--tool-call-parser",
+          "qwen3_coder",
+          "--reasoning-parser",
+          "qwen3",
+          "--trust-remote-code",
+          "--watchdog-timeout",
+          "4000"
+        ],
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "0,1"
+        },
+        "name": "engine-0",
+        "ready_url": "http://127.0.0.1:35001/health"
+      },
+      {
+        "argv": [
+          "python",
+          "-m",
+          "sglang.launch_server",
+          "--model-path",
+          "$REMOTE_ROOT/hf",
+          "--served-model-name",
+          "$MODEL",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "35002",
+          "--tp-size",
+          "2",
+          "--context-length",
+          "262144",
+          "--mem-fraction-static",
+          "0.82",
+          "--max-running-requests",
+          "18",
+          "--cuda-graph-max-bs-decode",
+          "16",
+          "--cuda-graph-max-bs-prefill",
+          "1",
+          "--tool-call-parser",
+          "qwen3_coder",
+          "--reasoning-parser",
+          "qwen3",
+          "--trust-remote-code",
+          "--watchdog-timeout",
+          "4000"
+        ],
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "2,3"
+        },
+        "name": "engine-1",
+        "ready_url": "http://127.0.0.1:35002/health"
+      },
+      {
+        "argv": [
+          "python",
+          "-m",
+          "sglang.launch_server",
+          "--model-path",
+          "$REMOTE_ROOT/hf",
+          "--served-model-name",
+          "$MODEL",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "35003",
+          "--tp-size",
+          "2",
+          "--context-length",
+          "262144",
+          "--mem-fraction-static",
+          "0.82",
+          "--max-running-requests",
+          "18",
+          "--cuda-graph-max-bs-decode",
+          "16",
+          "--cuda-graph-max-bs-prefill",
+          "1",
+          "--tool-call-parser",
+          "qwen3_coder",
+          "--reasoning-parser",
+          "qwen3",
+          "--trust-remote-code",
+          "--watchdog-timeout",
+          "4000"
+        ],
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "4,5"
+        },
+        "name": "engine-2",
+        "ready_url": "http://127.0.0.1:35003/health"
+      },
+      {
+        "argv": [
+          "python",
+          "-m",
+          "sglang.launch_server",
+          "--model-path",
+          "$REMOTE_ROOT/hf",
+          "--served-model-name",
+          "$MODEL",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "35004",
+          "--tp-size",
+          "2",
+          "--context-length",
+          "262144",
+          "--mem-fraction-static",
+          "0.82",
+          "--max-running-requests",
+          "18",
+          "--cuda-graph-max-bs-decode",
+          "16",
+          "--cuda-graph-max-bs-prefill",
+          "1",
+          "--tool-call-parser",
+          "qwen3_coder",
+          "--reasoning-parser",
+          "qwen3",
+          "--trust-remote-code",
+          "--watchdog-timeout",
+          "4000"
+        ],
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "6,7"
+        },
+        "name": "engine-3",
+        "ready_url": "http://127.0.0.1:35004/health"
+      },
+      {
+        "argv": [
+          "python",
+          "-m",
+          "sglang_router.launch_router",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "35000",
+          "--prometheus-host",
+          "127.0.0.1",
+          "--prometheus-port",
+          "35080",
+          "--worker-urls",
+          "http://127.0.0.1:35001",
+          "http://127.0.0.1:35002",
+          "http://127.0.0.1:35003",
+          "http://127.0.0.1:35004",
+          "--policy",
+          "cache_aware",
+          "--queue-size",
+          "512",
+          "--queue-timeout-secs",
+          "3900",
+          "--disable-retries",
+          "--log-level",
+          "warn"
+        ],
+        "environment": {},
+        "name": "router",
+        "ready_url": "http://127.0.0.1:35000/workers"
+      },
+      {
+        "argv": [
+          "python",
+          "-m",
+          "dressage.proxy.server",
+          "--sglang-router-url",
+          "http://127.0.0.1:35000",
+          "--tokenizer-path",
+          "$REMOTE_ROOT/hf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "35810",
+          "--token-build-mode",
+          "tito",
+          "--token-build-model",
+          "qwen3_6",
+          "--tito-model",
+          "qwen3_6",
+          "--model-mask-type",
+          "qwen3_5",
+          "--model-tool-call-type",
+          "qwen3_5",
+          "--model-reasoning-type",
+          "qwen3",
+          "--record-token-versions",
+          "--context-window",
+          "262144",
+          "--max-output-tokens",
+          "32768",
+          "--rollout-temperature",
+          "1.0",
+          "--session-timeout",
+          "4000",
+          "--group-timeout",
+          "4000",
+          "--stream-heartbeat-interval-seconds",
+          "15"
+        ],
+        "environment": {},
+        "name": "proxy",
+        "ready_url": "http://127.0.0.1:35810/health",
+        "secret_argument": {
+          "environment": "TB2_PROXY_API_KEY",
+          "flag": "--api-key"
+        }
+      }
+    ],
+    "speculative_decoding": false,
+    "status": "prepared_not_launched"
+  }
+}

@@ -1,0 +1,1 @@
+{"expected": "20\n", "id": "sum-json", "output": "result.txt", "verifier_kind": "exact"}

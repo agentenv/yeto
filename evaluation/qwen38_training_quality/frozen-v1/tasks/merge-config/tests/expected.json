@@ -1,0 +1,1 @@
+{"expected": {"color": "blue", "debug": true, "width": 11}, "id": "merge-config", "output": "result.json", "verifier_kind": "json"}

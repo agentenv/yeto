@@ -1,0 +1,3 @@
+# test settings
+mode=old
+timeout=17

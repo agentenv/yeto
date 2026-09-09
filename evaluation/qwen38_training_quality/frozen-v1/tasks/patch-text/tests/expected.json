@@ -1,0 +1,1 @@
+{"expected": "# test settings\nmode=new\ntimeout=17\n", "id": "patch-text", "output": "result.txt", "verifier_kind": "exact"}
