@@ -2,7 +2,9 @@
 
 This is a local pilot implementation of the agreed replacement filler. It builds each request from **all original visible events before an assistant action, a `<cot>` insertion slot, and the next five original visible events including that action**. It never consumes a previous generated candidate as context. Outputs are synthetic, lookahead-conditioned explanations—not recovered original reasoning.
 
-No real model has been called, no private corpus imported, and no production service changed by this implementation. The included demo is handwritten fixture data; its placeholder candidates cannot establish quality. Real quality still needs the proposed 30–50-gap manual pilot and the manager's bad examples.
+The current corpus worker supports resumable bulk generation, separate prefix-only review, and bounded prefix-only regeneration after a grounding rejection. See [the bulk handoff](BULK_HANDOFF_20260909.md) for the dated live run, [corpus operations](CORPUS_RUN.md) for the worker, and [regeneration](REGENERATION.md) for the later review/retry stage. The running generation job uses an immutable deployed snapshot; adding these local review tools does not activate them or change that job.
+
+The sections below retain the original local pilot interface and its implementation history. Their original “not yet run” statements are historical; current execution and validation status is in the handoff. The included demo remains handwritten fixture data and cannot establish model quality.
 
 ## Run the local demo
 
