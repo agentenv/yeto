@@ -28,6 +28,8 @@ def verify_code(expected):
 
 
 def prepare(dataset,run,code_manifest_sha256):
+    raise RuntimeError('Retired invalid v3 preflight; use prepare_cot_masked_native_gap_v4_n3_20260910.py')
+    # Kept below only as historical evidence; it is deliberately unreachable.
     code=verify_code(code_manifest_sha256)
     dataset,run=Path(dataset).resolve(strict=True),Path(run)
     assert run.resolve()==run

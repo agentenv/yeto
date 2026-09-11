@@ -14,12 +14,65 @@ from pathlib import Path
 from training.qwen38_no_cot.nemo_recipe import make_recipe as baseline_recipe
 from training.qwen38_no_cot.nemo_train import require_recipe as require_baseline_runtime
 from .masked_data import (
-    TRAINING_CONTRACT, GeneratedMaskedTokenDataset, digest_file, read_manifest,
-    validator_identity,
+    BASE_ASSET_RECEIPT, TRAINING_CONTRACT, GeneratedMaskedTokenDataset, digest_file,
+    _strict_json, read_complete, read_manifest, validator_identity,
 )
 
 DATASET_TARGET = "training.qwen38_native_gap_v3.masked_data.GeneratedMaskedTokenDataset"
 COLLATOR_TARGET = "training.qwen38_native_gap_v3.masked_data.collate_exact"
+WANDB_NAME_PREFIX = "qwen38-27b-generated-cot-masked-native-gap-v4-"
+WANDB_PROJECT = "yeto-h200"
+WANDB_ENTITY = "yeta"
+RUNTIME_COMPATIBILITY_SCHEMA = "qwen38-native-gap-v4-dataset-runtime-compatibility/v1"
+
+
+def _require_runtime_compatibility(contract):
+    value = contract.get("runtime_compatibility")
+    if value is None:
+        return None
+    keys = {
+        "schema", "receipt_path", "receipt_sha256", "dataset_tree_sha256",
+        "dataset_build_receipt_sha256", "build_code_manifest_sha256",
+        "runtime_code_manifest_sha256", "conversion_dependency_map_sha256",
+        "cp_guard_probe_path", "cp_guard_probe_sha256",
+        "cp_guard_nested_receipt_sha256",
+    }
+    def sha256(value):
+        return (isinstance(value, str) and len(value) == 64
+                and all(character in "0123456789abcdef" for character in value))
+    if (not isinstance(value, dict) or set(value) != keys
+            or value.get("schema") != RUNTIME_COMPATIBILITY_SCHEMA
+            or not isinstance(value.get("receipt_path"), str)
+            or not isinstance(value.get("cp_guard_probe_path"), str)
+            or any(not sha256(value.get(key))
+                   for key in keys - {"schema", "receipt_path", "cp_guard_probe_path"})
+            or value.get("build_code_manifest_sha256") ==
+               value.get("runtime_code_manifest_sha256")):
+        raise ValueError("Dataset/runtime compatibility contract is malformed")
+    path = Path(value.get("receipt_path", ""))
+    if (not path.is_absolute() or path.is_symlink() or not path.is_file()
+            or path.stat().st_mode & 0o222 or digest_file(path) != value["receipt_sha256"]):
+        raise ValueError("Dataset/runtime compatibility receipt changed")
+    receipt = _strict_json(path.read_bytes())
+    if (receipt.get("schema") != RUNTIME_COMPATIBILITY_SCHEMA
+            or receipt.get("status") != "passed"
+            or receipt.get("dataset_tree_sha256") != value["dataset_tree_sha256"]
+            or receipt.get("dataset_build_receipt_sha256") !=
+               value["dataset_build_receipt_sha256"]
+            or receipt.get("old_code_manifest_sha256") !=
+               value["build_code_manifest_sha256"]
+            or receipt.get("new_code_manifest_sha256") !=
+               value["runtime_code_manifest_sha256"]
+            or receipt.get("conversion_dependency_map_sha256") !=
+               value["conversion_dependency_map_sha256"]
+            or receipt.get("cp_guard_probe_path") != value["cp_guard_probe_path"]
+            or receipt.get("cp_guard_probe_sha256") != value["cp_guard_probe_sha256"]
+            or receipt.get("cp_guard_nested_receipt_sha256") !=
+               value["cp_guard_nested_receipt_sha256"]
+            or receipt.get("exact_runtime_only_delta") is not True
+            or receipt.get("full_dataset_tree_rehashed") is not True):
+        raise ValueError("Dataset/runtime compatibility receipt has the wrong claims")
+    return value
 
 
 def require_recipe(config):
@@ -77,6 +130,12 @@ def require_recipe(config):
         raise ValueError("The recipe consumes one shuffled pass")
     if config.get("experiment_phase") != "train":
         raise ValueError("The experimental full run cannot be shortened into a smoke phase")
+    manifest_sha256 = digest_file(config.get("dataset", {}).get("path_or_dataset", ""))
+    expected_wandb_name = WANDB_NAME_PREFIX + manifest_sha256[:12] + "-train"
+    if (config.get("wandb", {}).get("name") != expected_wandb_name
+            or config.get("wandb", {}).get("project") != WANDB_PROJECT
+            or config.get("wandb", {}).get("entity") != WANDB_ENTITY):
+        raise ValueError("W&B run name must bind the corrected native-gap manifest identity")
     if config.get("dataset", {}).get("_target_") != DATASET_TARGET:
         raise ValueError("A no-CoT dataset must not enter the generated-CoT recipe")
     if config.get("dataloader", {}).get("collate_fn") != COLLATOR_TARGET:
@@ -87,12 +146,14 @@ def require_recipe(config):
             continue
         if (dataset.get("_target_") != DATASET_TARGET or dataset.get("seq_len") != 262144
                 or dataset.get("require_provenance") is not True
-                or not dataset.get("index_path") or not dataset.get("index_sha256")):
-            raise ValueError("Every dataset requires the distinct audited generated-CoT index")
+                or not dataset.get("index_path") or not dataset.get("index_sha256")
+                or not dataset.get("complete_path") or not dataset.get("complete_sha256")):
+            raise ValueError("Every dataset requires the audited index and atomic COMPLETE identity")
     if config.get("validation_dataset") is not None:
         validation = config["validation_dataset"]
         if any(validation.get(key) != config['dataset'].get(key) for key in (
-                'path_or_dataset','index_path','index_sha256','seq_len','require_provenance')):
+                'path_or_dataset','index_path','index_sha256','complete_path','complete_sha256',
+                'seq_len','require_provenance')):
             raise ValueError('Training and heldout validation require the same immutable manifest/index')
         if (validation.get("split") != "validation" or validation.get("max_samples") != 32
                 or validation.get("max_input_tokens") != 32768
@@ -115,24 +176,55 @@ def require_recipe(config):
             "enabled": True, "is_async": False, "cpu_offload": True, "max_recent_checkpoints": 3,
             "model_save_format": "torch_save", "save_consolidated": False}.items()):
         raise ValueError("Preserve the existing full checkpoint policy")
+    contract = config.get("dataset_contract", {})
+    if contract.get("base_asset_receipt") != BASE_ASSET_RECEIPT:
+        raise ValueError("The recipe must bind the durable full-byte base-model receipt")
+    _require_runtime_compatibility(contract)
+    manifest = read_manifest(config["dataset"]["path_or_dataset"])
+    if (manifest.get("full_export") is not True
+            or manifest.get("unexpected_trace_failures") != 0
+            or manifest.get("trace_source_membership", {}).get("full_frozen_coverage_required") is not True
+            or manifest.get("all_train") is not True
+            or manifest.get("internal_validation") is not False
+            or set(manifest.get("splits", {})) != {"train"}):
+        raise ValueError("Production training requires the complete frozen source export")
+    read_complete(config["dataset"]["complete_path"], config["dataset"]["complete_sha256"],
+                  manifest_path=config["dataset"]["path_or_dataset"],
+                  index_path=config["dataset"]["index_path"],
+                  index_sha256=config["dataset"]["index_sha256"])
     return config
 
 
 def make_recipe(*, model_dir, manifest, index_path, index_sha256, output_dir,
-                phase="train", wandb_project="yeto-qwen38-generated-cot-masked-sft",
-                wandb_entity=None, seed=20260908, global_batch_size=8):
+                phase="train", wandb_project=WANDB_PROJECT,
+                wandb_entity=WANDB_ENTITY, seed=20260908, global_batch_size=8):
     """Audit CPU data identities and return configuration for a fresh run only."""
     if phase != "train":
         raise ValueError("This user-authorized experiment consumes the full manifest, without another smoke gate")
     output = Path(output_dir)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("Use a fresh generated-CoT output; existing baseline/checkpoints are forbidden")
-    manifest = Path(manifest).resolve()
+    supplied_manifest, supplied_index = Path(manifest), Path(index_path)
+    if supplied_manifest.is_symlink() or supplied_index.is_symlink():
+        raise ValueError("Manifest and index cannot be symlinks")
+    manifest = supplied_manifest.resolve(strict=True)
+    index_path = supplied_index.resolve(strict=True)
+    complete_path = manifest.parent / "COMPLETE.json"
+    complete_sha256 = digest_file(complete_path)
     contents = read_manifest(manifest)
+    if (contents.get("full_export") is not True
+            or contents.get("unexpected_trace_failures") != 0
+            or contents.get("trace_source_membership", {}).get("full_frozen_coverage_required") is not True
+            or contents.get("all_train") is not True
+            or contents.get("internal_validation") is not False
+            or set(contents.get("splits", {})) != {"train"}):
+        raise ValueError("Production training requires the complete frozen source export")
     # Opening verifies the full immutable shard hashes and index provenance;
     # no model/tokenizer object is constructed and no row is retokenized.
     for split in contents["splits"]:
-        GeneratedMaskedTokenDataset(manifest, index_path=index_path, index_sha256=index_sha256, split=split)
+        GeneratedMaskedTokenDataset(manifest, index_path=index_path, index_sha256=index_sha256,
+                                    complete_path=complete_path, complete_sha256=complete_sha256,
+                                    split=split)
     config = baseline_recipe(model_dir=model_dir, manifest=manifest, output_dir=output,
                              phase=phase, wandb_project=wandb_project,
                              wandb_entity=wandb_entity, seed=seed,
@@ -141,8 +233,9 @@ def make_recipe(*, model_dir, manifest, index_path, index_sha256, output_dir,
     config["runtime_patches"]["dataset_contract"] = TRAINING_CONTRACT
     config["experiment_phase"] = phase
     for key in ("dataset", "validation_dataset"):
-        config[key].update(_target_=DATASET_TARGET, index_path=str(Path(index_path).resolve()),
-                           index_sha256=index_sha256)
+        config[key].update(_target_=DATASET_TARGET, index_path=str(index_path),
+                           index_sha256=index_sha256, complete_path=str(complete_path),
+                           complete_sha256=complete_sha256)
     # Keep the same fixed bounded validation budget as the baseline: first
     # 32 eligible known-session heldout rows, each at most 32768 tokens.
     for key in ("dataloader", "validation_dataloader"):
@@ -150,12 +243,14 @@ def make_recipe(*, model_dir, manifest, index_path, index_sha256, output_dir,
     if "validation" not in contents["splits"]:
         config.pop("validation_dataset")
         config.pop("validation_dataloader")
-    config["wandb"]["name"] = "qwen38-27b-generated-cot-masked-turns-v2-" + phase
+    config["wandb"]["name"] = WANDB_NAME_PREFIX + digest_file(manifest)[:12] + "-" + phase
     # A marker is useful to orchestration, but never a GPU qualification claim.
     config["dataset_contract"] = {
         "manifest_sha256": digest_file(manifest),
         "renderer_identity": deepcopy(contents["renderer_identity"]),
         "index_sha256": index_sha256,
+        "complete_sha256": complete_sha256,
+        "base_asset_receipt": deepcopy(BASE_ASSET_RECEIPT),
         "gpu_runtime_qualified": False,
     }
     return require_recipe(config)
@@ -168,12 +263,17 @@ def contract_identity(config):
     expected = config.get("dataset_contract", {})
     if (expected.get("manifest_sha256") != digest_file(config["dataset"]["path_or_dataset"])
             or expected.get("renderer_identity") != manifest["renderer_identity"]
-            or expected.get("index_sha256") != config["dataset"]["index_sha256"]):
+            or expected.get("index_sha256") != config["dataset"]["index_sha256"]
+            or expected.get("complete_sha256") != config["dataset"]["complete_sha256"]
+            or expected.get("base_asset_receipt") != BASE_ASSET_RECEIPT):
         raise ValueError("The recipe dataset contract changed")
     return {
         "training_contract": TRAINING_CONTRACT,
         "manifest_sha256": expected["manifest_sha256"],
         "index_sha256": expected["index_sha256"],
+        "complete_sha256": expected["complete_sha256"],
+        "base_asset_receipt": deepcopy(expected["base_asset_receipt"]),
+        "runtime_compatibility": deepcopy(expected.get("runtime_compatibility")),
         "renderer_identity": deepcopy(expected["renderer_identity"]),
         "model_settings": deepcopy(config["model"]),
         "runtime_patches": deepcopy(config["runtime_patches"]),
@@ -198,8 +298,8 @@ def main():
     parser.add_argument("--index-sha256", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--phase", choices=("train",), default="train")
-    parser.add_argument("--wandb-project", default="yeto-qwen38-generated-cot-masked-sft")
-    parser.add_argument("--wandb-entity")
+    parser.add_argument("--wandb-project", default=WANDB_PROJECT)
+    parser.add_argument("--wandb-entity", default=WANDB_ENTITY)
     parser.add_argument("--write", required=True)
     args = vars(parser.parse_args())
     path = Path(args.pop("write"))

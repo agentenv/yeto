@@ -121,7 +121,13 @@ class Qwen38TurnBoundaryMaskedRenderer(generated_render.Qwen38ExperimentalCotRen
                 removed_private += 1
             else:
                 visible_events.append(event)
-        messages, mapping, counts = original_masked_render._canonical_messages(visible_events, reasoning)
+        try:
+            event_boundaries = [_event_metadata(event) for event in visible_events]
+        except ValueError as error:
+            raise MaskedBoundaryExclusion('contradictory_source_boundary_metadata',
+                provenance=provenance, filled_gaps=len(refs)) from error
+        messages, mapping, counts = original_masked_render._canonical_messages(
+            visible_events, reasoning, event_boundaries=event_boundaries)
         counts['original_private_events_removed_before_turn_mapping'] = removed_private
         provenance['event_message_mapping'] = mapping
         try:

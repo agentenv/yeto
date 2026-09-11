@@ -72,7 +72,8 @@ def convert_job(job, *, renderer=None):
             raise ValueError('Original replay session grouping changed')
         rendered = renderer.render_replay_messages(
             messages, source_digest=job["sha256"], trace_id=job["identity"],
-            boundaries=[{"barrier_before": True} for _ in messages])
+            boundaries=[{"barrier_before": True} for _ in messages],
+            source_tool_audit=counts["turn_boundary_audit"]["raw_tool_cardinality"])
         provenance = {**job, "replay_adapter_version": VERSION,
             "replay_adapter_sha256": baseline.sha_file(__file__),
             "normalization_version": source_adapters.VERSION,
@@ -87,5 +88,8 @@ def convert_job(job, *, renderer=None):
                 "messages_sha256": baseline.digest(messages)}
     except Exception as exc:
         # Never put original replay text or arbitrary exception content in logs.
+        parity=getattr(exc,'audit',None)
         return {"ok": False, "identity": job["identity"], "source": "replay",
-                "reason": str(exc) if isinstance(exc, baseline.UnsupportedTrace) else type(exc).__name__}
+                "reason": "cross_arm_no_cot_parity_failed" if parity is not None else
+                    str(exc) if isinstance(exc, baseline.UnsupportedTrace) else type(exc).__name__,
+                **({"cross_arm_parity_failure":True,"cross_arm_parity_audit":parity} if parity is not None else {})}

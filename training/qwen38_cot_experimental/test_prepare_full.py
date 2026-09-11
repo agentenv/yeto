@@ -57,7 +57,9 @@ def freeze_fixture(tmp_path, *, missing_group=False, low_quality=False, invalid_
     receipt = {"schema": "qwen38-frozen-generation-journal/v1", "snapshot_path": str(dbpath),
         "snapshot_sha256": sha(dbpath), "original_journal": str(tmp_path / "original.sqlite3"),
         "original_identity_sha256": digest(identity), "counts": {"sources": 2, "valid_candidates": 1},
+        "gap_states": {"review_pending": 1}, "invalid_candidate_count_preserved": 0,
         "source_path": str(source_path), "source_sha256": identity["source_sha256"],
+        "source_bytes": source_path.stat().st_size,
         "replay_manifests": [{"path": str(manifest), "sha256": sha(manifest)}]}
     path = tmp_path / "receipt.json";path.write_text(canonical(receipt))
     return path

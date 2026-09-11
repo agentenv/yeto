@@ -124,6 +124,11 @@ def coalesce_assistant_continuations(messages, *, boundaries=None, reasoning_pol
         if final: reasons.append('final_channel')
         if turn is not None and segment_turn is not None and turn != segment_turn:
             reasons.append('different_source_turn')
+        # A newly explicit source turn cannot be merged backward into an
+        # already-active assistant segment whose turn is unknown. This also
+        # applies when the known-turn carrier is an otherwise empty message.
+        if turn is not None and segment_turn is None and active is not None:
+            reasons.append('unknown_to_known_source_turn')
         if reasons:
             active = None; segment_turn = None
             barriers.update(reasons)
@@ -171,4 +176,75 @@ def coalesce_assistant_continuations(messages, *, boundaries=None, reasoning_pol
         if known_before is None or turn is None:
             counts['fallback_merges'] += 1
     result_audit = finish()
+
+    # Independently audit the semantic boundary that previously caused an
+    # assistant announcement and its tool call to receive separate end tokens.
+    # This check does not rely on cross-arm parity, so a bug shared by both
+    # adapters still blocks conversion.
+    illegal_merges = 0
+    for group in reverse:
+        if len(group) < 2:
+            continue
+        first, last = min(group), max(group)
+        window = metadata[first:last + 1]
+        turns = {item.get('source_turn_id') for item in window
+                 if item.get('source_turn_id') is not None}
+        turn_values = [item.get('source_turn_id') for item in window]
+        crossed = (len(turns) > 1
+                   or any(turn_values[index] is None and turn_values[index + 1] is not None
+                          for index in range(len(turn_values) - 1))
+                   or any(item.get('channel') == 'final' for item in window)
+                   or any(metadata[index].get('barrier_after') for index in range(first, last))
+                   or any(metadata[index].get('barrier_before') for index in range(first + 1, last + 1)))
+        illegal_merges += int(crossed)
+
+    combined_actions = sum(
+        message.get('role') == 'assistant'
+        and bool((message.get('content') or '').strip())
+        and bool(message.get('tool_calls')) for message in out)
+    explicit_splits = 0
+    unbarriered_splits = 0
+    for output_index in range(len(out) - 1):
+        left, right = out[output_index], out[output_index + 1]
+        candidate = (left.get('role') == right.get('role') == 'assistant'
+                     and bool((left.get('content') or '').strip())
+                     and not bool(left.get('tool_calls'))
+                     and bool(right.get('tool_calls'))
+                     and not bool((right.get('content') or '').strip()))
+        if not candidate:
+            continue
+        left_last = max(reverse[output_index])
+        right_first = min(reverse[output_index + 1])
+        window = metadata[left_last:right_first + 1]
+        turns = {item.get('source_turn_id') for item in window
+                 if item.get('source_turn_id') is not None}
+        turn_values = [item.get('source_turn_id') for item in window]
+        evidence = (len(turns) > 1
+                    or any(turn_values[index] is None and turn_values[index + 1] is not None
+                           for index in range(len(turn_values) - 1))
+                    or any(item.get('channel') == 'final' for item in window)
+                    or metadata[left_last].get('barrier_after') is True
+                    or metadata[right_first].get('barrier_before') is True
+                    or any(item.get('barrier_before') or item.get('barrier_after')
+                           for item in metadata[left_last + 1:right_first]))
+        explicit_splits += int(evidence)
+        unbarriered_splits += int(not evidence)
+    semantic = {
+        'schema': 'qwen38-assistant-action-boundary-audit/v1',
+        'verified': illegal_merges == 0 and unbarriered_splits == 0,
+        'combined_visible_action_messages': combined_actions,
+        'explicitly_split_announcement_call_pairs': explicit_splits,
+        'unbarriered_announcement_call_splits': unbarriered_splits,
+        'explicit_boundary_merges': illegal_merges,
+        'output_messages_checked': len(out),
+    }
+    result_audit['semantic_action_boundary'] = semantic
+    if not semantic['verified']:
+        result_audit['exclusions'].append({
+            'code': 'assistant_action_boundary_semantics_failed',
+            'unbarriered_splits': unbarriered_splits,
+            'explicit_boundary_merges': illegal_merges,
+        })
+        result_audit['excluded'] = True
+        raise ContinuationMappingError('assistant_action_boundary_semantics_failed', result_audit)
     return deepcopy(out), result_audit

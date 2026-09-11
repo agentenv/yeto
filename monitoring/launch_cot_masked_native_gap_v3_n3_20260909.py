@@ -20,6 +20,8 @@ def digest(path):
 
 
 def launch(plan):
+    raise RuntimeError('Retired invalid v3 launcher; use launch_cot_masked_native_gap_v4_n3_20260910.py')
+    # Kept below only as historical evidence; it is deliberately unreachable.
     assert plan['schema'] == 'qwen38-native-gap-masked-launch-plan/v3'
     run, code = Path(plan['run']), Path(plan['code'])
     assert run.parent == ROOT/'runs' and code.parent == ROOT/'code'

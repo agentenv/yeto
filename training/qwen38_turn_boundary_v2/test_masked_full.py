@@ -33,7 +33,8 @@ def unsafe_fixture(tmp_path):
     db.execute('UPDATE candidates SET prefix_hash=?,lookahead_hash=?,prompt_hash=?',tuple(gap[k] for k in ('prefix_hash','lookahead_hash','prompt_hash')))
     identity=json.loads(db.execute("SELECT value FROM meta WHERE key='identity'").fetchone()[0]);identity['source_sha256']=sha(source_path)
     db.execute("UPDATE meta SET value=? WHERE key='identity'",(canonical(identity),));db.commit();db.close()
-    receipt.update(source_sha256=sha(source_path),snapshot_sha256=sha(receipt['snapshot_path']),original_identity_sha256=digest(identity));path.write_text(canonical(receipt))
+    receipt.update(source_sha256=sha(source_path),source_bytes=source_path.stat().st_size,
+        snapshot_sha256=sha(receipt['snapshot_path']),original_identity_sha256=digest(identity));path.write_text(canonical(receipt))
     return path
 
 

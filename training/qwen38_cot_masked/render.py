@@ -33,6 +33,18 @@ MASK_POLICY = "assistant_content_and_eos_only_reviewed_cot_masked_xhigh_v1"
 ADAPTER_VERSION = "reviewed-events-to-native-qwen-reasoning-content/v1"
 TEMPLATE_OPTIONS = {"enable_thinking": True, "preserve_thinking": True,
                     "reasoning_effort": "xhigh", "add_vision_id": False}
+_SOURCE_LEADING_REASONING = re.compile(
+    r"\A\s*<(think|thinking|analysis|reasoning)\b[^>]*>.*?(?:</\1\s*>|\Z)", re.I | re.S)
+
+
+def _source_text(value, role, counts):
+    """Match the no-CoT adapter's per-event visible-text projection."""
+    text = visible_text(value)
+    if role == "assistant":
+        while (cleaned := _SOURCE_LEADING_REASONING.sub("", text, count=1)) != text:
+            text = cleaned
+            counts["leading_reasoning_blocks_removed_before_turn_mapping"] += 1
+    return text
 
 
 def _approved_reasoning(row, original_trace, approved_reviews, reviewer_config):
@@ -101,15 +113,22 @@ def _approved_reasoning(row, original_trace, approved_reviews, reviewer_config):
     return source, reasoning, provenance
 
 
-def _canonical_messages(events, reasoning):
+def _canonical_messages(events, reasoning, *, event_boundaries=None):
     """Keep baseline source adaptations, retaining exact filled action boundaries."""
     messages, mappings, counts = [], [], Counter()
     previous_key = None
+    message_boundaries = []
+    if event_boundaries is not None and (
+            not isinstance(event_boundaries, (list, tuple)) or len(event_boundaries) != len(events)
+            or any(not isinstance(item, dict) for item in event_boundaries)):
+        raise ValueError("Event boundaries must align with source events")
     for event_index, event in enumerate(events):
         kind, role = event.get("kind"), event.get("role")
         data = event.get("data", {})
         block = data.get("block", data) if isinstance(data, dict) else data
-        pointer = event.get("source", {}).get("pointer", event.get("event_id"))
+        source = event.get("source", {})
+        pointer = source.get("pointer", event.get("event_id")) if isinstance(source, dict) else event.get("event_id")
+        boundary = event_boundaries[event_index] if event_boundaries is not None else None
         event_id = event["event_id"]
         filled = reasoning.get(event_id)
         if kind == "tool_definition":
@@ -136,6 +155,8 @@ def _canonical_messages(events, reasoning):
         if role == "developer":
             role = "system"
             counts["developer_as_chronological_system"] += 1
+        if role == "agent":
+            role = "assistant"
         key = re.sub(r"/content/\d+$", "", pointer) if isinstance(pointer, str) else None
         if filled is not None and role != "assistant":
             raise UnsupportedTrace("filled_gap_did_not_map_to_assistant")
@@ -144,41 +165,36 @@ def _canonical_messages(events, reasoning):
                 raise UnsupportedTrace("unsupported_message_role")
             if isinstance(block, dict) and block.get("type") not in {None, "message", "agent_message", "text", "input_text", "output_text", "refusal"}:
                 raise UnsupportedTrace("unsupported_message_block")
-            text = visible_text(event.get("content"))
-            raw_calls = event.get("tool_calls", [])
-            calls = [tool_call(call, counts=counts) for call in raw_calls]
-            if calls and role != "assistant":
-                raise UnsupportedTrace("nonassistant_tool_calls")
-            if not text and not calls and filled is None:
-                continue
-            if (filled is None and not calls and previous_key == (key, role) and messages
-                    and messages[-1]["role"] == role and "tool_calls" not in messages[-1]):
+            text = _source_text(event.get("content"), role, counts)
+            if (filled is None and key is not None and previous_key == (key, role) and messages
+                    and messages[-1]["role"] == role and "tool_calls" not in messages[-1]
+                    and (event_boundaries is None or message_boundaries[-1] == boundary)):
                 messages[-1]["content"] += text
                 mappings[-1].append(event_id)
                 counts["same_source_message_blocks_joined"] += 1
                 continue
             message = {"role": role, "content": text}
-            if calls:
-                message["tool_calls"] = calls
-            previous_key = (key, role) if not calls else None
+            previous_key = (key, role)
         elif kind == "tool_call":
             if role != "assistant" or not isinstance(block, dict):
                 raise UnsupportedTrace("invalid_canonical_tool_call")
             if (event_index == len(events) - 1 and isinstance(pointer, str) and pointer.startswith("/response/output/")
                     and block.get("type") == "function_call" and "arguments" not in block
-                    and "input" not in block and "function" not in block and not event.get("tool_calls")):
+                    and "input" not in block and "function" not in block):
                 if filled is not None:
                     raise UnsupportedTrace("filled_gap_targets_incomplete_terminal_call")
                 counts["incomplete_terminal_call_omitted"] += 1
                 continue
-            calls = ([tool_call(c, counts=counts) for c in event["tool_calls"]] if event.get("tool_calls") else
-                     [tool_call(block, name=event.get("name"), call_id=event.get("call_id"), counts=counts)])
-            message = {"role": "assistant", "content": visible_text(event.get("content")), "tool_calls": calls}
+            calls = [tool_call(block, name=event.get("name"), call_id=event.get("call_id"), counts=counts)]
+            # Standalone tool-call events often repeat the raw call payload in
+            # ``event.content``.  The no-CoT source adapter deliberately ignores
+            # that projection and trains only the canonical structured call.
+            message = {"role": "assistant", "content": "", "tool_calls": calls}
             previous_key = None
         elif kind == "tool_result":
             if not isinstance(block, dict):
                 raise UnsupportedTrace("invalid_canonical_tool_result")
-            identity = (event.get("call_id") or event.get("tool_call_id") or block.get("call_id")
+            identity = (event.get("call_id") or block.get("call_id")
                         or block.get("tool_call_id") or block.get("tool_use_id"))
             if not isinstance(identity, str) or not identity:
                 raise UnsupportedTrace("tool_result_missing_identity")
@@ -190,6 +206,7 @@ def _canonical_messages(events, reasoning):
             message["reasoning_content"] = filled
         messages.append(message)
         mappings.append([event_id])
+        message_boundaries.append(boundary)
     validate_messages(messages)
     return messages, mappings, dict(counts)
 

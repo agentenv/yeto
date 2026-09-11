@@ -86,6 +86,20 @@ def test_drop_empty_reasoning_retains_explicit_changed_turn_for_missing_next_tur
     assert audit['barrier_counts']['different_source_turn'] == 1
 
 
+def test_empty_known_turn_cannot_merge_prior_unknown_announcement_into_its_call():
+    source = [assistant('Prior unknown announcement'), assistant(),
+              assistant(tool_calls=[call('new-turn-call')])]
+    boundaries = [{}, {'source_turn_id': 'new-turn'}, {'source_turn_id': 'new-turn'}]
+    result, audit = coalesce_assistant_continuations(source, boundaries=boundaries)
+    assert len(result) == 2
+    assert result[0]['content'] == 'Prior unknown announcement'
+    assert result[1]['tool_calls'][0]['id'] == 'new-turn-call'
+    assert audit['input_to_output'] == [0, None, 1]
+    assert audit['barrier_counts']['unknown_to_known_source_turn'] == 1
+    assert audit['semantic_action_boundary']['verified'] is True
+    assert audit['semantic_action_boundary']['explicitly_split_announcement_call_pairs'] == 1
+
+
 @pytest.mark.parametrize('boundary', [{'barrier_before': True}, {'barrier_after': True}, {'channel': 'final'}])
 def test_dropped_empty_keeps_other_boundary_effects(boundary):
     result, audit = coalesce_assistant_continuations(
