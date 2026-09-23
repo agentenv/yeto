@@ -2743,3 +2743,24 @@ def test_confirmed_remote_strict_failure_is_not_relaunched():
     with pytest.raises(RuntimeError, match="strict RL job learner-0 failed"):
         controller._poll(controller.learners["learner-0"], is_syncer=False)
     assert ops.relaunched == []
+def test_miles_island_forwards_chat_template_kwargs(monkeypatch):
+    """`--apply-chat-template-kwargs` was accepted but never reached the
+    island (e.g. Qwen3 `enable_thinking: false` for short math rollouts)."""
+    monkeypatch.setitem(
+        sys.modules,
+        "sky",
+        types.SimpleNamespace(
+            Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode
+        ),
+    )
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _args(("--apply-chat-template-kwargs", '{"enable_thinking": false}'))
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
+    assert """--apply-chat-template-kwargs '{"enable_thinking":false}'""" in task.run
+

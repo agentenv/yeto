@@ -1473,6 +1473,11 @@ def make_miles_island_task(
             flags += f" {flag} {shlex.quote(str(value))}"
     if args.use_rollout_routing_replay:
         flags += " --use-rollout-routing-replay"
+    if getattr(args, "apply_chat_template_kwargs", None):
+        chat_kwargs = json.dumps(
+            args.apply_chat_template_kwargs, sort_keys=True, separators=(",", ":")
+        )
+        flags += f" --apply-chat-template-kwargs {shlex.quote(chat_kwargs)}"
     if not getattr(args, "sglang_deterministic_inference", True):
         flags += " --no-sglang-deterministic-inference"
     if args.custom_generate_function_path:
