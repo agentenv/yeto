@@ -506,9 +506,10 @@ def _load_snapshot():
     return json.loads(path.read_text())
 
 
-# The one advisory this change adds on purpose: a GPU the signal knows how
-# to check stock for that the catalog never lists.
-_ADVISORIES_ADDED_BY_THIS_CHANGE = ("catalog has no rows",)
+# Advisories added on purpose by this series: a GPU the signal knows how to
+# check stock for that the catalog never lists, and a user-named region
+# with no offerings for the requested GPUs.
+_ADVISORIES_ADDED_BY_THIS_CHANGE = ("catalog has no rows", "no offerings in region(s)")
 
 
 def _without_gap_notes(d):
@@ -668,3 +669,58 @@ def test_cloud_without_credentials_makes_no_requests(multi_cloud_env, monkeypatc
 NEBIUS_TWO_REGIONS = NEBIUS_OFFERINGS + [
     Offering("H100", "gpu-h100-sxm_8gpu-128vcpu-1600gb", 8, 128, "us-central1", 17.2, 30.8, 80, cloud="nebius"),
 ]
+
+
+def test_cloud_prefixed_region_keeps_only_that_region(multi_cloud_env):
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_TWO_REGIONS)
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "nebius"), signals={"nebius": neb},
+        regions=["us-east-2", "nebius:eu-north1"], gpus=["H100"],
+    )
+    by_cloud = {}
+    for c in result.candidates:
+        by_cloud.setdefault(c.cloud, set()).add(c.region)
+    assert by_cloud == {"aws": {"us-east-2"}, "nebius": {"eu-north1"}}
+    # The signal was handed its own allowlist and only asked about it.
+    assert neb.asks == [("H100", 8)]
+
+
+def test_unnamed_cloud_is_unrestricted_and_legacy_spelling_unchanged(multi_cloud_env):
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_TWO_REGIONS)
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "nebius"), signals={"nebius": neb},
+        regions=["us-east-2"], gpus=["H100"],
+    )
+    assert {c.region for c in result.candidates if c.cloud == "nebius"} == {"eu-north1", "us-central1"}
+    assert {c.region for c in result.candidates if c.cloud == "aws"} == {"us-east-2"}
+
+
+def test_unknown_region_error_lists_the_regions_that_exist(multi_cloud_env):
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_TWO_REGIONS)
+    with pytest.raises(ValueError, match=r"no nebius offerings in region\(s\) eu-central9.*eu-north1, us-central1"):
+        _shape(
+            multi_cloud_env, budget=500.0, clouds=("aws", "nebius"), signals={"nebius": neb},
+            regions=["nebius:eu-central9"],
+        )
+    # One bad region among good ones is a warning, not an error.
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "nebius"), signals={"nebius": neb},
+        regions=["nebius:eu-central9", "nebius:eu-north1"],
+    )
+    assert any("no offerings in region(s) eu-central9" in w for w in result.warnings)
+    assert {c.region for c in result.candidates if c.cloud == "nebius"} == {"eu-north1"}
+
+
+def test_launch_key_keeps_native_region_and_parses(multi_cloud_env):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    verda_rows = [Offering("H100", "8H100.80S.176V", 8, 176, "FIN-03", 13.53, 27.06, 80, cloud="verda")]
+    verda = FakeSignal("verda", {("H100", 8): 9}, rows=verda_rows)
+    result = _shape(multi_cloud_env, budget=20.0, clouds=("verda",), signals={"verda": verda})
+    argv = plan_mod.launch_argv(result, "gemma4", "lora", "org/data")
+    assert argv[:3] == ["launch", "--gpu", "verda:8xh100@FIN-03"]
+    (spec,) = parse_gpu_spec(argv[2])
+    assert (spec.cloud, spec.region, spec.gpus_per_node, spec.gpu) == ("verda", "FIN-03", 8, "H100")
+
+
+# --- live prices and multi-node clouds ---------------------------------------
