@@ -1635,7 +1635,9 @@ def make_miles_island_task(
             "ray stop --force >/dev/null 2>&1 || true\n"
             'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
             "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
-            "--port=6379 --include-dashboard=false\n"
+            # Dashboard on: Miles' --pin-rollout-manager-to-head lists
+            # nodes through Ray's state API, which the dashboard serves.
+            "--port=6379 --include-dashboard=true\n"
             "  trap 'ray stop --force >/dev/null 2>&1 || true' EXIT\n"
             "  PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
             f"python3 -m yeto.rl.learner{flags}\n"
