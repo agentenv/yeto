@@ -1526,6 +1526,10 @@ def make_miles_island_task(
         "| sha256sum --check -\n"
         f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
         f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
+        # An image may ship its own Miles clone from another remote (the
+        # public radixark/miles images do); the runtime verifier requires
+        # the pinned repository as origin.
+        f"git -C ~/miles remote set-url origin {shlex.quote(MILES_REPOSITORY)}\n"
         f"git -C ~/miles fetch --depth 1 origin {MILES_BASE_COMMIT}\n"
         f"git -C ~/miles checkout --detach {MILES_BASE_COMMIT}\n"
         'git -C ~/miles bundle verify "$MILES_BUNDLE" >/dev/null\n'

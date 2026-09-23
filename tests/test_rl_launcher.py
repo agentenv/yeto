@@ -1244,6 +1244,11 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
         in task.setup
     )
     assert f"MILES_BUNDLE=~/sky_workdir/{MILES_BUNDLE_PATH}" in task.setup
+    # An image's own Miles clone (other remote) is re-pointed at the pin
+    # before fetching; the verifier rejects any other origin.
+    set_url = f"git -C ~/miles remote set-url origin {MILES_REPOSITORY}"
+    assert set_url in task.setup
+    assert task.setup.index(set_url) < task.setup.index("fetch --depth 1 origin")
     assert MILES_BUNDLE_SHA256 in task.setup
     assert f'git -C ~/miles fetch "$MILES_BUNDLE" {MILES_COMMIT}' in task.setup
     assert SGLANG_REPOSITORY in task.setup
