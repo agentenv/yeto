@@ -1,0 +1,182 @@
+{
+ "high_stock_budget_500": {
+  "binding": [
+   "budget"
+  ],
+  "budget_cost_with_margin": 496.96000000000004,
+  "budget_per_hour": 500.0,
+  "est_cost_per_hour": 496.96000000000004,
+  "head_cost_per_hour": 0.4,
+  "islands": [
+   {
+    "cloud": "runpod",
+    "count": 10,
+    "eff_tflops": 5985.0,
+    "est_price_per_hour": 43.92,
+    "instance_type": "8x_B200_SECURE",
+    "key": "runpod:8xb200@CA",
+    "nodes": 1,
+    "region": "CA",
+    "score": 9,
+    "score_assumed": false
+   },
+   {
+    "cloud": "runpod",
+    "count": 3,
+    "eff_tflops": 2630.74,
+    "est_price_per_hour": 19.12,
+    "instance_type": "8x_H100_SECURE",
+    "key": "runpod:8xh100@CA",
+    "nodes": 1,
+    "region": "CA",
+    "score": 9,
+    "score_assumed": false
+   }
+  ],
+  "launch_argv": [
+   "yeto",
+   "launch",
+   "--gpu",
+   "runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xh100@CA,runpod:8xh100@CA,runpod:8xh100@CA",
+   "--model",
+   "gemma4",
+   "--tuning",
+   "lora",
+   "--shard",
+   "fsdp",
+   "--disk-size",
+   "512",
+   "--data",
+   "org/data"
+  ],
+  "model": "gemma4",
+  "price_margin": 0.0,
+  "rejections": [
+   "aws:8xa100@us-east-2: placement score 1 \u2264 7"
+  ],
+  "shard": "fsdp",
+  "total_eff_tflops": 67742.22,
+  "warnings": [],
+  "weights_gb_bf16": 66.0
+ },
+ "medium_stock_min_score_5": {
+  "binding": [
+   "quota:us-east-2:L-417A185B"
+  ],
+  "budget_cost_with_margin": 144.88000000000002,
+  "budget_per_hour": 5000.0,
+  "est_cost_per_hour": 144.88000000000002,
+  "head_cost_per_hour": 0.4,
+  "islands": [
+   {
+    "cloud": "aws",
+    "count": 2,
+    "eff_tflops": 2630.74,
+    "est_price_per_hour": 34.0,
+    "instance_type": "p5.48xlarge",
+    "key": "aws:8xh100@us-east-2",
+    "nodes": 1,
+    "region": "us-east-2",
+    "score": 9,
+    "score_assumed": false
+   },
+   {
+    "cloud": "runpod",
+    "count": 4,
+    "eff_tflops": 2215.36,
+    "est_price_per_hour": 19.12,
+    "instance_type": "8x_H100_SECURE",
+    "key": "runpod:8xh100@CA",
+    "nodes": 1,
+    "region": "CA",
+    "score": 6,
+    "score_assumed": false
+   }
+  ],
+  "launch_argv": [
+   "yeto",
+   "launch",
+   "--gpu",
+   "aws:8xh100@us-east-2,aws:8xh100@us-east-2,runpod:8xh100@CA,runpod:8xh100@CA,runpod:8xh100@CA,runpod:8xh100@CA",
+   "--model",
+   "gemma4",
+   "--tuning",
+   "lora",
+   "--shard",
+   "fsdp",
+   "--disk-size",
+   "512",
+   "--data",
+   "org/data"
+  ],
+  "model": "gemma4",
+  "price_margin": 0.0,
+  "rejections": [],
+  "shard": "fsdp",
+  "total_eff_tflops": 14122.92,
+  "warnings": [],
+  "weights_gb_bf16": 66.0
+ },
+ "unfetchable_stock": {
+  "binding": [
+   "budget"
+  ],
+  "budget_cost_with_margin": 496.96000000000004,
+  "budget_per_hour": 500.0,
+  "est_cost_per_hour": 496.96000000000004,
+  "head_cost_per_hour": 0.4,
+  "islands": [
+   {
+    "cloud": "runpod",
+    "count": 10,
+    "eff_tflops": 6174.0,
+    "est_price_per_hour": 43.92,
+    "instance_type": "8x_B200_SECURE",
+    "key": "runpod:8xb200@CA",
+    "nodes": 1,
+    "region": "CA",
+    "score": null,
+    "score_assumed": true
+   },
+   {
+    "cloud": "runpod",
+    "count": 3,
+    "eff_tflops": 2713.816,
+    "est_price_per_hour": 19.12,
+    "instance_type": "8x_H100_SECURE",
+    "key": "runpod:8xh100@CA",
+    "nodes": 1,
+    "region": "CA",
+    "score": null,
+    "score_assumed": true
+   }
+  ],
+  "launch_argv": [
+   "yeto",
+   "launch",
+   "--gpu",
+   "runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xb200@CA,runpod:8xh100@CA,runpod:8xh100@CA,runpod:8xh100@CA",
+   "--model",
+   "gemma4",
+   "--tuning",
+   "lora",
+   "--shard",
+   "fsdp",
+   "--disk-size",
+   "512",
+   "--data",
+   "org/data"
+  ],
+  "model": "gemma4",
+  "price_margin": 0.0,
+  "rejections": [
+   "aws:8xa100@us-east-2: placement score 1 \u2264 7"
+  ],
+  "shard": "fsdp",
+  "total_eff_tflops": 69881.448,
+  "warnings": [
+   "placement score unavailable for 2 shape(s) (e.g. runpod:8xb200@CA); assumed 10 \u2014 pass --strict-capacity-check to reject them instead"
+  ],
+  "weights_gb_bf16": 66.0
+ }
+}

@@ -894,7 +894,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--clouds",
         default=None,
         help="comma-separated clouds to plan across (default: aws, plus "
-        "runpod when its credentials are present)",
+        "every registered cloud whose credentials are present; AWS "
+        "credentials are only needed when aws is in the list)",
     )
     shape.add_argument("--max-islands", type=int, default=16, help="cap on learner islands (syncer fan-out)")
     shape.add_argument(

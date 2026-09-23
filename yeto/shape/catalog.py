@@ -60,6 +60,21 @@ def efa_capable(instance_type: str) -> bool:
     return instance_type.startswith(("p4", "p5"))
 
 
+# Clouds where a multi-node island can be provisioned at all: RunPod pods
+# are single machines to sky. The set grows as clouds pass the multi-node
+# verification in docs/CLOUDS.md.
+MULTI_NODE_CLOUDS = frozenset({"aws"})
+
+
+def multi_node_rejection(cloud: str, gpu: str, gpus_per_node: int) -> str | None:
+    """Why a multi-node island of this per-node shape cannot be planned on
+    `cloud`, or None when it can. Single-machine clouds reject every
+    multi-node shape."""
+    if cloud not in MULTI_NODE_CLOUDS:
+        return f"multi-node islands unsupported on {cloud}"
+    return None
+
+
 def mfu(nodes: int, efa: bool) -> float:
     """Model FLOPs utilization heuristic. 0.35 single-node (NVLink only,
     typical for tuned fine-tuning stacks); 0.30 multi-node over EFA (fabric
