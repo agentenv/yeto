@@ -2764,3 +2764,29 @@ def test_miles_island_forwards_chat_template_kwargs(monkeypatch):
     task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
     assert """--apply-chat-template-kwargs '{"enable_thinking":false}'""" in task.run
 
+def test_prompt_data_uses_the_only_split_when_there_is_no_train(tmp_path, monkeypatch):
+    """A Hub dataset without a `train` split (HuggingFaceH4/MATH-500 ships
+    only `test`) must still load; a dataset that has `train` keeps it."""
+    import datasets
+
+    from yeto import data as yeto_data
+    from yeto.rl.learner import prepare_prompt_data
+
+    seen = {}
+
+    def load_rows(source, split="train", revision=None):
+        seen["split"] = split
+        return [{"messages": [{"role": "user", "content": "1+1?"}], "label": "2"}]
+
+    monkeypatch.setattr(yeto_data, "load_rows", load_rows)
+    monkeypatch.setattr(
+        datasets, "get_dataset_split_names", lambda source, revision=None: ["test"]
+    )
+    prepare_prompt_data("org/only-test", "a" * 40, tmp_path / "p.jsonl")
+    assert seen["split"] == "test"
+
+    monkeypatch.setattr(
+        datasets, "get_dataset_split_names", lambda source, revision=None: ["train", "test"]
+    )
+    prepare_prompt_data("org/other", "a" * 40, tmp_path / "q.jsonl")
+    assert seen["split"] == "train"
