@@ -323,13 +323,75 @@ def make_head_meta(name):
 
 
 def test_down_head_run_downs_all_recorded_clusters(monkeypatch):
+    """Learners are torn down FROM the head (its sky launched them; a local
+    `sky down` says "does not exist" and the learner outlives the head —
+    H100s leaked that way on 2026-09-23), then the head itself."""
     make_head_meta("hd")
-    downed = []
+    downed, on_head = [], []
     monkeypatch.setattr(cli, "_sky_down_cluster", downed.append)
 
+    def fake(head, job, cs):
+        on_head.append((head, job, sorted(cs)))
+        return []
+
+    monkeypatch.setattr(cli, "_head_down_learners", fake)
     assert cli.main(["down", "hd"]) == 0
-    assert sorted(downed) == ["hd-head", "hd-l0-us-east-2", "hd-l1-us-west-2"]
+    assert on_head == [("hd-head", 9, ["hd-l0-us-east-2", "hd-l1-us-west-2"])]
+    assert downed == ["hd-head"]
     assert runs.load_run("hd")["state"] == runs.DOWN
+
+
+def test_down_head_run_retries_then_keeps_the_head_when_unconfirmed(monkeypatch, capsys):
+    """sky on the head answered 500 while its own teardown was in flight;
+    deleting the head anyway orphaned the learner. Retry, and if a learner is
+    still unconfirmed keep the head, say so, and exit non-zero."""
+    make_head_meta("hk")
+    downed, calls = [], []
+    monkeypatch.setattr(cli, "_sky_down_cluster", downed.append)
+    monkeypatch.setattr(cli, "HEAD_DOWN_RETRY_S", 0.0)
+
+    def flaky(head, job, cs):
+        calls.append((job, sorted(cs)))
+        return ["hk-l1-us-west-2"] if len(calls) < 5 else []
+
+    monkeypatch.setattr(cli, "_head_down_learners", flaky)
+    assert cli.main(["down", "hk"]) == 1
+    assert len(calls) == cli.HEAD_DOWN_ATTEMPTS
+    assert calls[0][0] == 9 and all(job is None for job, _ in calls[1:])  # cancel once
+    assert calls[1][1] == ["hk-l1-us-west-2"]  # only the unconfirmed one is retried
+    assert downed == []  # head kept
+    assert "NOT tearing down hk-head" in capsys.readouterr().err
+    assert runs.load_run("hk")["state"] != runs.DOWN
+
+
+def test_down_head_run_succeeds_after_a_retry(monkeypatch):
+    make_head_meta("hr")
+    downed, calls = [], []
+    monkeypatch.setattr(cli, "_sky_down_cluster", downed.append)
+    monkeypatch.setattr(cli, "HEAD_DOWN_RETRY_S", 0.0)
+    monkeypatch.setattr(
+        cli, "_head_down_learners",
+        lambda head, job, cs: (calls.append(1), ["hr-l0-us-east-2"] if len(calls) == 1 else [])[1],
+    )
+    assert cli.main(["down", "hr"]) == 0
+    assert len(calls) == 2 and downed == ["hr-head"]
+
+
+def test_head_down_requires_a_confirmation_per_learner():
+    """A head-side teardown once printed success while the learner kept
+    running (no output came back). Only confirmed clusters count."""
+    out = "[head] a-l0: down\n[head] a-l1: Cluster 'a-l1' does not exist.\n"
+    assert cli._unconfirmed_head_downs(out, ["a-l0", "a-l1", "a-l2"]) == ["a-l2"]
+    assert cli._unconfirmed_head_downs("", ["a-l0"]) == ["a-l0"]
+    assert cli._unconfirmed_head_downs("[head] a-l0: boom\n", ["a-l0"]) == ["a-l0"]
+
+
+def test_head_down_script_downs_each_learner():
+    script = cli.HEAD_DOWN_SCRIPT.format(clusters=["a-l0", "a-l1"])
+    assert "for c in ['a-l0', 'a-l1']:" in script
+    assert 'print(f"[head] {c}: down", flush=True)' in script
+    # Non-interactive ssh has no conda hook; the system python3 has no sky.
+    assert script.index("~/miniconda3/bin/python3") < script.index("import sky")
 
 
 def test_logs_head_run_streams_from_head(fake_sky, capsys):
