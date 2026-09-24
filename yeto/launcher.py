@@ -1648,17 +1648,30 @@ def make_miles_island_task(
             "set -e\n"
             "cd ~/sky_workdir\n"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
-            "ray stop --force >/dev/null 2>&1 || true\n"
+            # The island's Ray lives in its own temp dir so that cleanup can
+            # target it by path.  A whole-machine `ray stop` would also kill
+            # SkyPilot's runtime Ray (port 6380, /tmp/ray), after which every
+            # status refresh marks the cluster INIT and the head relaunches
+            # it forever.  Ray processes carry their session dir on the
+            # command line, so pkill by that path never touches sky's.
+            'MILES_RAY_DIR="$HOME/miles-ray"\n'
+            'stop_miles_ray() { pkill -f "$MILES_RAY_DIR/" >/dev/null 2>&1 || true; }\n'
+            "stop_miles_ray\n"
             'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
             "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
             # Dashboard on: Miles' --pin-rollout-manager-to-head lists
             # nodes through Ray's state API, which the dashboard serves.
-            "--port=6379 --include-dashboard=true\n"
-            "  trap 'ray stop --force >/dev/null 2>&1 || true' EXIT\n"
-            "  PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
+            '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"\n'
+            "  trap stop_miles_ray EXIT\n"
+            # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
+            # first and otherwise sky's /tmp/ray/ray_current_cluster file.
+            '  RAY_ADDRESS="$MASTER_ADDR:6379" '
+            "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
             f"python3 -m yeto.rl.learner{flags}\n"
             "else\n"
-            "  until ray start --address=\"$MASTER_ADDR:6379\"; do sleep 2; done\n"
+            '  until ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"; '
+            "do sleep 2; done\n"
+            "  trap stop_miles_ray EXIT\n"
             "  while ray status --address=\"$MASTER_ADDR:6379\" "
             ">/dev/null 2>&1; do sleep 5; done\n"
             "fi"
@@ -2405,6 +2418,31 @@ class SkySDKOps:
 
         return sky.get(sky.job_status(cluster, [job_id])).get(job_id)
 
+    def job_alive(self, cluster: str, job_id: int) -> bool:
+        """Whether `job_id` is still queued, setting up or running on `cluster`.
+
+        `sky.queue` reads the cluster's job table without the UP gate that
+        `sky.job_status` applies, so it still answers while the cluster's
+        health reads INIT.  Any failure to read the queue counts as "not
+        alive": the caller then falls back to its usual failure handling.
+        """
+        import sky
+
+        try:
+            records = sky.get(sky.queue(cluster))
+        except Exception:
+            return False
+        for record in records:
+            if isinstance(record, dict):
+                rid, status = record.get("job_id"), record.get("status")
+            else:
+                rid = getattr(record, "job_id", None)
+                status = getattr(record, "status", None)
+            if rid != job_id:
+                continue
+            return status is not None and not status.is_terminal()
+        return False
+
     def cluster_up(self, cluster: str) -> bool:
         import sky
 
@@ -2822,6 +2860,11 @@ class FleetController:
         try:
             status = self.ops.job_status(name, job_id)
         except Exception as e:
+            # sky refuses job_status while the cluster's health reads INIT
+            # (e.g. its runtime Ray is unreachable).  That is not evidence
+            # the job is gone: ask the job table before treating it as lost.
+            if self._job_alive(name, job_id):
+                return None, None
             return f"job status unavailable ({e})", None
         if status is not None and status.is_terminal():
             if "SUCCEEDED" in str(status):
@@ -2831,9 +2874,18 @@ class FleetController:
             up = self.ops.cluster_up(name)
         except Exception as e:
             return f"cluster status unavailable ({e})", status
-        if not up:
+        if not up and not self._job_alive(name, job_id):
             return "cluster is not UP (preempted or deleted)", status
         return None, status
+
+    def _job_alive(self, name: str, job_id) -> bool:
+        probe = getattr(self.ops, "job_alive", None)
+        if probe is None:
+            return False
+        try:
+            return bool(probe(name, job_id))
+        except Exception:
+            return False
 
     def _strict_failure(self, rec) -> str | None:
         if not self.fixed_roster:

@@ -1170,6 +1170,30 @@ def test_miles_tasks_mount_the_same_attested_initial_adapter(
         )
 
 
+def _assert_island_ray_is_private(run: str) -> None:
+    """The island's Ray must coexist with SkyPilot's runtime Ray on the node.
+
+    A whole-machine ``ray stop`` kills SkyPilot's own Ray (port 6380), after
+    which every status refresh marks the cluster INIT and the head launcher
+    relaunches it forever (live-run-failures #37).  The island therefore runs
+    its Ray from a private temp dir, cleans up only processes under that dir,
+    and tells the learner which cluster to join explicitly instead of letting
+    ``ray.init(address="auto")`` pick up SkyPilot's address file.
+    """
+
+    assert re.search(r"(^|[;\s])ray stop\b", run, re.MULTILINE) is None
+    assert 'MILES_RAY_DIR="$HOME/miles-ray"' in run
+    assert run.count('--temp-dir="$MILES_RAY_DIR"') == 2
+    assert 'ray start --head --node-ip-address="$MASTER_ADDR"' in run
+    assert 'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"' in run
+    assert 'RAY_ADDRESS="$MASTER_ADDR:6379"' in run
+    assert 'pkill -f "$MILES_RAY_DIR/"' in run
+    assert "trap stop_miles_ray EXIT" in run
+    # Cleanup runs before the head starts, so a stale island Ray from an
+    # earlier attempt on the same node cannot block ``ray start --head``.
+    assert run.index("stop_miles_ray\n") < run.index("ray start --head")
+
+
 def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch):
     monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
     monkeypatch.setenv("CYBERGYM_REWARD_SCHEME", "shaped_v1")
@@ -1282,6 +1306,7 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert "--num-learners" not in task.run
     assert "ray start --head" in task.run
     assert 'ray start --address="$MASTER_ADDR:6379"' in task.run
+    _assert_island_ray_is_private(task.run)
     assert "--actor-num-nodes 2" in task.run
     assert "--actor-num-gpus-per-node 4" in task.run
     assert "--over-sampling-batch-size 6" in task.run
