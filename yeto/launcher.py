@@ -1655,7 +1655,17 @@ def make_miles_island_task(
             # it forever.  Ray processes carry their session dir on the
             # command line, so pkill by that path never touches sky's.
             'MILES_RAY_DIR="$HOME/miles-ray"\n'
-            'stop_miles_ray() { pkill -f "$MILES_RAY_DIR/" >/dev/null 2>&1 || true; }\n'
+            # Same escalation as `ray stop --force` (TERM, short grace, KILL)
+            # but scoped to this dir: gcs_server, raylet and the autoscaler
+            # monitor ignore a bare SIGTERM for 30 s or more.
+            "stop_miles_ray() {\n"
+            '  pkill -f "$MILES_RAY_DIR/" >/dev/null 2>&1 || true\n'
+            "  for _ in 1 2 3 4 5 6 7 8 9 10; do\n"
+            '    pgrep -f "$MILES_RAY_DIR/" >/dev/null 2>&1 || return 0\n'
+            "    sleep 1\n"
+            "  done\n"
+            '  pkill -KILL -f "$MILES_RAY_DIR/" >/dev/null 2>&1 || true\n'
+            "}\n"
             "stop_miles_ray\n"
             'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
             "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "

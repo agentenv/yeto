@@ -1188,6 +1188,9 @@ def _assert_island_ray_is_private(run: str) -> None:
     assert 'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"' in run
     assert 'RAY_ADDRESS="$MASTER_ADDR:6379"' in run
     assert 'pkill -f "$MILES_RAY_DIR/"' in run
+    # gcs_server/raylet sit on SIGTERM for 30 s+; the trap must escalate.
+    assert 'pkill -KILL -f "$MILES_RAY_DIR/"' in run
+    assert run.index('pkill -f "$MILES_RAY_DIR/"') < run.index('pkill -KILL -f "$MILES_RAY_DIR/"')
     assert "trap stop_miles_ray EXIT" in run
     # Cleanup runs before the head starts, so a stale island Ray from an
     # earlier attempt on the same node cannot block ``ray start --head``.
