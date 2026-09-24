@@ -22,6 +22,93 @@ def test_launch_cli_has_deterministic_lm_seed_by_default():
     assert _args(["--seed", "29"]).seed == 29
 
 
+# --- Modal islands: routing decided before any resource is touched ------------
+
+
+def _specs(gpu: str):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    return parse_gpu_spec(gpu)
+
+
+def test_modal_entries_get_modal_names_and_mix_with_sky_entries():
+    from yeto.launcher import learner_cluster_names
+
+    names = learner_cluster_names("run", _specs("aws:8xh100@us-east-1,modal:8xh100,modal:8xh100@us"))
+    assert names == ["run-l0-us-east-1", "run-l1-modal", "run-l2-modal"]
+
+
+def test_modal_prerequisites_fail_before_launch():
+    from yeto.launcher import check_cloud_prerequisites
+
+    args = _args(["--gpu", "modal:2x4xh100"])
+    with pytest.raises(ValueError, match="whole nodes: H100:8 per container, not H100:4"):
+        check_cloud_prerequisites(_specs(args.gpu), args=args, modal_ok=True)
+    args = _args(["--gpu", "modal:8xh100"])
+    with pytest.raises(ValueError, match="need a Modal token"):
+        check_cloud_prerequisites(_specs(args.gpu), args=args, modal_ok=False)
+    args = _args(["--gpu", "modal:8xh100", "--syncer-public-addr", "no-port"])
+    with pytest.raises(ValueError, match="HOST:PORT"):
+        check_cloud_prerequisites(_specs(args.gpu), args=args, modal_ok=True)
+    args = cli.build_parser().parse_args(["launch", "--model", "gemma4", "--data", "s3://bucket/data", "--gpu", "modal:8xh100"])
+    with pytest.raises(ValueError, match="cannot mount object-store data"):
+        check_cloud_prerequisites(_specs(args.gpu), args=args, modal_ok=True)
+    # A valid mixed fleet passes without touching Modal or sky.
+    args = _args(["--gpu", "aws:8xh100@us-east-1,modal:8xh100@us", "--syncer-public-addr", "1.2.3.4:5000"])
+    check_cloud_prerequisites(_specs(args.gpu), args=args, modal_ok=True)
+
+
+def test_modal_rl_island_needs_a_digest_pinned_image():
+    from yeto.launcher import check_cloud_prerequisites
+
+    args = _args(["--gpu", "modal:8xh100", "--training-mode", "rl", "--rl-image", "docker:ghcr.io/x/miles:latest"])
+    with pytest.raises(ValueError, match="must pin a digest"):
+        check_cloud_prerequisites(_specs(args.gpu), args=args, modal_ok=True)
+
+
+def test_modal_island_config_reuses_the_sky_task_script(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from yeto.launcher import _rl_checkpoint_storage_name, build_modal_island_config
+
+    monkeypatch.setenv("HOME", str(tmp_path))  # no real HF token leaks in
+    (tmp_path / ".cache" / "huggingface").mkdir(parents=True)
+    (tmp_path / ".cache" / "huggingface" / "token").write_text("hf_local\n")
+    task = SimpleNamespace(
+        run="MASTER_ADDR=$(echo \"$SKYPILOT_NODE_IPS\" | head -n1)\ntorchrun -m yeto.learner",
+        envs={"SYNCER_ADDR": "10.0.0.5:5000", "LEARNER_ID": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1"},
+        setup="pip install -q -r requirements.txt",
+    )
+    args = _args(["--gpu", "aws:8xh100@us-east-1,modal:8xh100@us", "--cluster-prefix", "run"])
+    (_, spec) = _specs(args.gpu)
+    cfg = build_modal_island_config(args, spec, 1, task, "1.2.3.4:5000")
+    assert cfg.app_name == "yeto-run" and cfg.learner_id == 1 and cfg.training_mode == "sft"
+    assert cfg.run_script == task.run and cfg.setup_script is None
+    assert cfg.envs["SYNCER_ADDR"] == "1.2.3.4:5000"  # the Modal-reachable address wins
+    assert cfg.envs["LEARNER_ID"] == "1" and cfg.envs["HF_TOKEN"] == "hf_local"
+    assert cfg.region == "us" and cfg.gpu_request == "H100:8"
+    assert "torch" in cfg.pip_requirements and any(r.startswith("transformers") for r in cfg.pip_requirements)
+    assert cfg.volume_name is None
+    assert "YETO_RL_EXTERNAL_ROUTER" not in cfg.envs
+    # RL + spot: the digest image, the sky setup baked into it, and a
+    # checkpoint volume at the sky island's mount path.
+    digest = "docker:ghcr.io/x/miles@sha256:" + "d" * 64
+    args = _args([
+        "--gpu", "modal:8xh100", "--cluster-prefix", "run", "--training-mode", "rl",
+        "--rl-image", digest, "--rl-completed-groups-path", "~/yeto-rl/groups.jsonl",
+    ])
+    (spec,) = _specs(args.gpu)
+    cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:5000")
+    assert cfg.training_mode == "rl" and cfg.image_ref == digest[len("docker:"):]
+    assert cfg.setup_script == task.setup and cfg.pip_requirements == ()
+    assert cfg.volume_name == _rl_checkpoint_storage_name("run", 0)
+    assert cfg.volume_mount == "/root/yeto-rl"
+    # Modal RL islands start the SGLang router themselves (Miles' 30 s
+    # router deadline is missed on Modal); SFT islands do not.
+    assert cfg.envs["YETO_RL_EXTERNAL_ROUTER"] == "1"
+    cfg.validate()
+
+
 def _result(counts):
     cands = [
         Candidate(

@@ -608,11 +608,55 @@ def prepare_launch_args(
                 f"{expected_adapter_sha256.lower()}, got {adapter_sha256}"
             )
         args.diffusion_adapter_sha256 = adapter_sha256
+    if getattr(args, "gpu", None):
+        check_cloud_prerequisites(parse_gpu_spec(args.gpu), args=args)
     _prepare_rl_args(
         args,
         allow_local_data=allow_local_rl_data,
         allow_remote_model=allow_remote_rl_model,
     )
+
+
+def check_cloud_prerequisites(
+    specs: list[ClusterSpec],
+    args=None,
+    modal_ok: bool | None = None,
+) -> None:
+    """Per-cloud facts that must hold before any cloud spend.
+
+    Modal islands have scheduling rules Modal only enforces at launch
+    (whole nodes for multi-container groups), need a token on this
+    machine, cannot mount object-store data, and (for RL) need the Miles
+    image pinned by digest. `modal_ok` overrides the token check in tests.
+    """
+    modal_specs = [s for s in specs if s.cloud == "modal"]
+    if modal_specs:
+        from .modal_runner import (
+            image_ref_from_rl_image,
+            modal_available,
+            modal_credential_hint,
+            validate_modal_shape,
+        )
+
+        for spec in modal_specs:
+            validate_modal_shape(spec.gpu, spec.gpus_per_node, spec.num_nodes)
+        if not (modal_ok if modal_ok is not None else modal_available()):
+            raise ValueError(f"modal islands need a Modal token: {modal_credential_hint()}")
+        if args is not None:
+            if getattr(args, "training_mode", "sft") == "rl":
+                image_ref_from_rl_image(getattr(args, "rl_image", "") or "")
+            data = getattr(args, "data", None)
+            if data:
+                from .datasource import kind as data_kind
+
+                if data_kind(data) == "cloud":
+                    raise ValueError(
+                        f"modal islands cannot mount object-store data ({data}); "
+                        "pass an HF dataset id or a local path"
+                    )
+            override = getattr(args, "syncer_public_addr", None)
+            if override and ":" not in override:
+                raise ValueError("--syncer-public-addr must be HOST:PORT")
 
 
 def _rl_callable(value: str | None, flag: str, *, required: bool) -> None:
@@ -1657,7 +1701,8 @@ def make_miles_island_task(
     resources["image_id"] = args.rl_image
     if spec.num_nodes > 1:
         resources["network_tier"] = "best"
-    task.set_resources(sky.Resources(**resources))
+    if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
+        task.set_resources(sky.Resources(**resources))
     if args.spot:
         checkpoint_mount = _rl_checkpoint_mount(args.rl_completed_groups_path)
         task.set_storage_mounts(
@@ -2065,6 +2110,10 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # chosen transport visible in the job logs (look for
         # "NET/OFI Selected Provider is efa").
         resources_kwargs["network_tier"] = "best"
+    if spec.cloud == "modal":
+        # Not a sky cloud: build_modal_island_config reads only this task's
+        # run script and envs; the Modal runner sizes the container itself.
+        return task
     task.set_resources(
         sky.Resources(
             infra=infra,
@@ -2336,8 +2385,68 @@ def run_diffusion_sample(args) -> int:
 
 def learner_cluster_names(prefix: str, specs: list[ClusterSpec]) -> list[str]:
     """Deterministic learner cluster names for a run: computable from the
-    launch args alone, so the CLI can record them before provisioning."""
-    return [f"{prefix}-l{m}-{spec.region or spec.cloud}" for m, spec in enumerate(specs)]
+    launch args alone, so the CLI can record them before provisioning.
+    Modal islands always end in `-modal` (whatever their region hint) so
+    every consumer — controller, registry, `yeto down` — can route them
+    by name."""
+    from .modal_runner import modal_island_name
+
+    return [
+        modal_island_name(prefix, m) if spec.cloud == "modal" else f"{prefix}-l{m}-{spec.region or spec.cloud}"
+        for m, spec in enumerate(specs)
+    ]
+
+
+def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, syncer_addr: str):
+    """Turn the sky task the factory built for this island into the Modal
+    island config: same run script, same envs (syncer address swapped for
+    the Modal-reachable one), image/volume per training mode."""
+    from .modal_runner import (
+        ModalIslandConfig,
+        image_ref_from_rl_image,
+        modal_app_name,
+    )
+
+    rl = getattr(args, "training_mode", "sft") == "rl"
+    envs = dict(getattr(task, "envs", None) or {})
+    envs["SYNCER_ADDR"] = syncer_addr
+    if rl:
+        # Miles' own router launch misses its 30 s deadline on Modal's
+        # CPUs (see yeto.rl.learner.start_external_sglang_router).
+        envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
+    token_path = os.path.expanduser(HF_TOKEN_PATH)
+    if "HF_TOKEN" not in envs and os.path.isfile(token_path):
+        with open(token_path, encoding="utf-8") as f:
+            envs["HF_TOKEN"] = f.read().strip()
+    volume_name = volume_mount = None
+    if rl and getattr(args, "spot", False):
+        volume_name = _rl_checkpoint_storage_name(args.cluster_prefix, learner_id)
+        volume_mount = _rl_checkpoint_mount(args.rl_completed_groups_path).replace("~", "/root", 1)
+    requirements: tuple[str, ...] = ()
+    if not rl:
+        req_file = REPO_ROOT / "requirements.txt"
+        requirements = ("torch",) + tuple(
+            line.strip()
+            for line in req_file.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        )
+    return ModalIslandConfig(
+        app_name=modal_app_name(args.cluster_prefix),
+        learner_id=learner_id,
+        training_mode="rl" if rl else "sft",
+        gpu=spec.gpu,
+        gpus_per_node=spec.gpus_per_node,
+        num_nodes=spec.num_nodes,
+        run_script=str(getattr(task, "run", "") or ""),
+        envs={k: str(v) for k, v in envs.items() if v is not None},
+        region=spec.region,
+        image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
+        setup_script=str(getattr(task, "setup", "") or "") if rl else None,
+        pip_requirements=requirements,
+        volume_name=volume_name,
+        volume_mount=volume_mount,
+        workdir=str(REPO_ROOT),
+    )
 
 
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
@@ -2352,6 +2461,18 @@ def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
                 f"needs ~{weight_gb} GB for frozen bf16 weights alone — expect OOM.",
                 file=sys.stderr,
             )
+
+
+def _tail_modal(modal_ops, call_id: str, prefix: str) -> int:
+    """Stream a Modal island's container logs (the Modal twin of _tail)."""
+    while True:
+        try:
+            for line in modal_ops.stream_logs(call_id):
+                print(f"[{prefix}] {str(line).rstrip()}", flush=True)
+            return 0
+        except Exception as e:  # transient stream drops: reconnect
+            print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
+            time.sleep(5)
 
 
 def _tail(cluster: str, job_id: int, prefix: str) -> int:
@@ -3120,17 +3241,38 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                 f"({len(specs)} cloud + {external} external) before training starts"
             )
 
-        # 2. Learners, in parallel.
+        # 2. Learners, in parallel. Modal entries are not sky clusters: the
+        #    factory still builds their task (run script, envs) and the
+        #    Modal runner executes it in a GPU container.
         tasks = {}
         rids = {}
+        # Bound before any island is built: the failure path below stops the
+        # Modal app when modal_ops is set, and must not NameError otherwise.
+        modal_island_ops = None
+        modal_ops = None
         task_factory = (
             make_miles_island_task
             if getattr(args, "training_mode", "sft") == "rl"
             else make_learner_task
         )
+        modal_cfgs: dict[str, object] = {}
+        modal_addr = None
+        if any(spec.cloud == "modal" for spec in specs):
+            from .modal_runner import resolve_syncer_for_modal
+
+            # Fails BEFORE any Modal container starts when the syncer is
+            # not reachable from Modal's network.
+            modal_addr = resolve_syncer_for_modal(
+                syncer_addr, getattr(args, "syncer_public_addr", None)
+            )
         for m, spec in enumerate(specs):
             name = learner_names[m]
             task = task_factory(args, spec, m, num_learners, syncer_addr)
+            if spec.cloud == "modal":
+                cfg = build_modal_island_config(args, spec, m, task, modal_addr)
+                tasks[name] = cfg
+                modal_cfgs[name] = cfg
+                continue
             tasks[name] = task
             print(f"[launcher] launching learner {m} on {spec} as {name}")
             rids[name] = (
@@ -3153,9 +3295,25 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         ]
         for t in threads:
             t.start()
+        if modal_cfgs:
+            from .modal_runner import ModalIslandOps, ModalOps, modal_app_name
+
+            modal_ops = ModalOps(modal_app_name(prefix))
+            for cfg in modal_cfgs.values():
+                modal_ops.define(cfg)
+            print(f"[launcher] deploying Modal app {modal_ops.app_name} ({len(modal_cfgs)} island(s))")
+            modal_ops.deploy()
+            modal_island_ops = ModalIslandOps(modal_ops)
+            for name, cfg in modal_cfgs.items():
+                print(f"[launcher] launching learner {cfg.learner_id} on Modal as {name}")
+                call_id = modal_island_ops.relaunch(cfg, name)
+                if call_id is None:
+                    errors[name] = RuntimeError("Modal refused to start the island")
+                else:
+                    results[name] = (call_id, None)
         for t in threads:
             t.join()
-        for name in rids:
+        for name in list(rids) + list(modal_cfgs):
             if name not in errors:
                 clusters.append(name)
         if errors:
@@ -3166,8 +3324,13 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         # 3. Stream logs while the fleet controller polls health, recovers
         #    failed/preempted clusters, and abandons learners that stay down
         #    past --recover-timeout.
-        def spawn_tail(name: str, job_id: int) -> None:
+        def spawn_tail(name: str, job_id) -> None:
             label = "syncer" if name == syncer_cluster else name
+            if modal_ops is not None and name in modal_cfgs:
+                threading.Thread(
+                    target=_tail_modal, args=(modal_ops, job_id, label), daemon=True
+                ).start()
+                return
             threading.Thread(target=_tail, args=(name, job_id, label), daemon=True).start()
 
         if not head_mode:
@@ -3175,10 +3338,12 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
 
+        from .modal_runner import RoutingOps
+
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
             syncer=None if head_mode else (syncer_cluster, syncer_task, syncer_job),
-            sky_ops=SkySDKOps(),
+            sky_ops=RoutingOps(SkySDKOps(), modal_island_ops),
             poll_interval=args.controller_poll,
             recover_timeout=args.recover_timeout,
             on_relaunch=spawn_tail,
@@ -3198,10 +3363,13 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                   "checkpoint with yeto-export", file=sys.stderr)
             return 1
         rl_mode = getattr(args, "training_mode", "sft") == "rl"
+        # Prefer a sky learner as the artifact source (rsync); a Modal
+        # island's ~/yeto-output is not reachable that way.
+        sky_done = [n for n in done if n not in modal_cfgs]
         source = (
             syncer_cluster
             if rl_mode and not head_mode
-            else next((n for n in done if "-l0-" in n), done[0])
+            else next((n for n in sky_done if "-l0-" in n), (sky_done or done)[0])
         )
         output = getattr(args, "output", None)
         local_dest = (
@@ -3212,6 +3380,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         os.makedirs(local_dest, exist_ok=True)
         if rl_mode and head_mode:
             print(f"[launcher] committed RL checkpoint retained at {local_dest}")
+        elif source in modal_cfgs:
+            print(
+                f"[launcher] every successful learner ran on Modal ({source}); its "
+                "~/yeto-output is not fetchable over ssh — recover the model from "
+                "the syncer checkpoint with yeto-export",
+                file=sys.stderr,
+            )
+            return 2
         else:
             try:
                 subprocess.run(delivery.fetch_cmd(source, local_dest), check=True)
@@ -3244,8 +3420,22 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             unverified = []
             for name in remaining:
                 print(f"[launcher] tearing down {name}")
+                if name in modal_cfgs:
+                    try:
+                        if modal_island_ops is not None:
+                            modal_island_ops.down(name)
+                    except Exception as e:  # noqa: BLE001 - app stop below is the backstop
+                        print(f"[launcher] cancel of {name} failed: {e}", file=sys.stderr)
+                    continue
                 if not terminate_and_verify(sky, name):
                     unverified.append(name)
+            if modal_ops is not None:
+                # Belt and braces: stop the whole per-run Modal app so no
+                # function call of this run outlives the launcher.
+                try:
+                    modal_ops.stop_app()
+                except Exception as e:  # noqa: BLE001
+                    print(f"[launcher] Modal app stop failed: {e}", file=sys.stderr)
             if unverified:
                 # The head must NOT self-terminate: it is the only thing that
                 # can still reach these orphaned learner clusters via sky.

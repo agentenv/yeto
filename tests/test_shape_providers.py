@@ -299,3 +299,140 @@ def test_family_quota_code_fallback_covers_sky_gaps():
     # On-demand mappings for the families we can name.
     assert _family_quota_code("p5.48xlarge", False) == "L-417A185B"
     assert _family_quota_code("m7i.large", False) is None
+
+
+# --- CloudSignals protocol / registry ---------------------------------------
+
+
+def test_registry_lists_runpod_and_instances_satisfy_the_protocol(tmp_path):
+    from yeto.shape.providers import CLOUD_SIGNALS, CloudSignals
+
+    assert "runpod" in CLOUD_SIGNALS
+    sig = CLOUD_SIGNALS["runpod"](TTLCache(path=tmp_path / "c.json"))
+    assert isinstance(sig, CloudSignals) and sig.name == "runpod"
+    assert sig.offerings(None, None, None) is None  # rides sky's catalog
+    assert "H200" in sig.known_gpus()
+    assert "RUNPOD_API_KEY" in sig.credential_hint()
+
+
+def test_runpod_available_from_env_or_config(monkeypatch, tmp_path):
+    from yeto.shape.providers import RunPodProviders
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    sig = RunPodProviders(TTLCache(path=tmp_path / "c.json"))
+    assert not sig.available()
+    monkeypatch.setenv("RUNPOD_API_KEY", "k")
+    assert sig.available()
+    monkeypatch.delenv("RUNPOD_API_KEY")
+    (tmp_path / ".runpod").mkdir()
+    (tmp_path / ".runpod" / "config.toml").write_text('api_key = "k"\n')
+    assert sig.available()
+
+
+def test_runpod_scores_fan_out_regions_and_dedupe_shapes(monkeypatch, tmp_path):
+    from yeto.shape.providers import RunPodProviders
+
+    sig = RunPodProviders(TTLCache(path=tmp_path / "c.json"))
+    calls = []
+
+    def fake_fetch(gpu_id, count):
+        calls.append((gpu_id, count))
+        return {"NVIDIA H100 80GB HBM3": "High", "NVIDIA B200": None}[gpu_id]
+
+    monkeypatch.setattr(sig, "_fetch_stock", fake_fetch)
+    asks = [("H100", 8, "CA"), ("H100", 8, "US"), ("B200", 8, "CA"), ("T4", 1, "CA")]
+    out = sig.scores(asks)
+    # Same (gpu, count) -> one fetch, every region gets that score; null
+    # stock is a measured 0; an unmapped GPU is None plus a warning.
+    assert out == {
+        ("H100", 8, "CA"): 9,
+        ("H100", 8, "US"): 9,
+        ("B200", 8, "CA"): 0,
+        ("T4", 1, "CA"): None,
+    }
+    assert sorted(calls) == [("NVIDIA B200", 8), ("NVIDIA H100 80GB HBM3", 8)]
+    assert any("no RunPod GPU id mapping for T4" in w for w in sig.warnings)
+
+
+def test_island_cap_table():
+    from yeto.shape.providers import RunPodProviders
+
+    sig = RunPodProviders(cache=None)
+    assert sig.island_cap(9) is None
+    assert sig.island_cap(6) == 4
+    assert sig.island_cap(3) == 1
+    assert sig.island_cap(8) == 1  # unknown levels are treated conservatively
+
+
+# --- Modal -------------------------------------------------------------------
+
+
+def test_modal_registered_and_credentials(monkeypatch, tmp_path):
+    from yeto.shape.providers import CLOUD_SIGNALS, ModalSignals
+
+    assert CLOUD_SIGNALS["modal"] is ModalSignals
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for var in ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    sig = ModalSignals(cache=None)
+    assert not sig.available() and "modal token new" in sig.credential_hint()
+    (tmp_path / ".modal.toml").write_text("[default]\ntoken_id='x'\n")
+    assert sig.available()
+
+
+def test_modal_price_composes_gpu_cpu_memory_and_region(monkeypatch):
+    from yeto.shape import providers as p
+
+    base = p.modal_node_price_per_hour("H100", 8)
+    gpu_only = 8 * p.MODAL_GPU_USD_PER_SECOND["H100"] * 3600
+    cpu = 8 * 4 * p.MODAL_CPU_USD_PER_CORE_SECOND * 3600
+    mem = 8 * 32 * p.MODAL_MEMORY_USD_PER_GIB_SECOND * 3600
+    assert base == pytest.approx(gpu_only + cpu + mem, abs=1e-3)
+    assert base > gpu_only  # CPU and memory are in the price
+    assert p.modal_node_price_per_hour("H100", 8, "us") == pytest.approx(base * 1.15, abs=1e-3)
+    assert p.modal_node_price_per_hour("H100", 8, "us-west") == pytest.approx(base * 1.75, abs=1e-3)
+    with pytest.raises(ValueError, match="unknown Modal region 'mars'"):
+        p.modal_region_multiplier("mars")
+
+
+def test_modal_offerings_unpinned_pinned_and_shape_rules(monkeypatch):
+    from yeto.shape.providers import ModalSignals
+
+    sig = ModalSignals(cache=None)
+    rows = sig.offerings(None, None, None)
+    assert {o.region for o in rows} == {""}  # unpinned: no region, no surcharge
+    h100 = [o for o in rows if o.gpu == "H100"]
+    assert sorted(o.gpus_per_node for o in h100) == [1, 2, 4, 8]
+    assert all(o.spot_price == o.on_demand_price for o in rows)  # no spot on Modal
+    eight = next(o for o in h100 if o.gpus_per_node == 8)
+    assert eight.instance_type == "H100:8" and eight.vcpus == 32 and eight.gpu_mem_gb == 80
+    l4 = [o for o in rows if o.gpu == "L4"]
+    assert sorted(o.gpus_per_node for o in l4) == [1, 2, 4]  # not a whole-node GPU
+    assert not sig.warnings  # unpinned: nothing to disclose
+    pinned = sig.offerings({"us", "eu-north"}, ["H100"], None)
+    assert {o.region for o in pinned} == {"us", "eu-north"}
+    by_region = {o.region: o.spot_price for o in pinned if o.gpus_per_node == 8}
+    assert by_region["eu-north"] == pytest.approx(eight.spot_price * 1.75, abs=1e-3)
+    assert by_region["us"] == pytest.approx(eight.spot_price * 1.15, abs=1e-3)
+    # Pinning is disclosed with the multiplier and its source.
+    assert sorted(sig.warnings) == [
+        "modal: region eu-north pinned at 1.75x (narrow region surcharge, modal.com/pricing as of 2026-09-23)",
+        "modal: region us pinned at 1.15x (broad region surcharge, modal.com/pricing as of 2026-09-23)",
+    ]
+    with pytest.raises(ValueError, match="unknown Modal region"):
+        sig.offerings({"mars"}, None, None)
+    assert sig.scores([("H100", 8, "")]) == {("H100", 8, ""): 8}
+    assert sig.island_cap(8) is None
+
+
+def test_modal_price_table_staleness_warning(monkeypatch):
+    import datetime as dt
+
+    from yeto.shape import providers as p
+
+    assert p.modal_price_table_age_days(dt.date(2026, 9, 23)) == 0
+    monkeypatch.setattr(p, "modal_price_table_age_days", lambda today=None: 120)
+    sig = p.ModalSignals(cache=None)
+    sig.offerings(None, ["H100"], None)
+    assert any("recorded 2026-09-23 (120 days ago)" in w for w in sig.warnings)

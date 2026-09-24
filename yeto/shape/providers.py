@@ -525,6 +525,150 @@ class AwsProviders:
         return usage
 
 
+# --- Modal -------------------------------------------------------------------
+#
+# Modal is serverless: no catalog API, no stock API, no spot. Prices are a
+# table copied from modal.com/pricing (dated; the planner warns when it is
+# older than 90 days), a container is priced as GPU + the CPU and memory
+# the runner reserves for it, and a region hint multiplies the whole
+# thing. Availability is a constant "will run, may queue" pseudo-score.
+
+MODAL_PRICES_RECORDED = "2026-09-23"
+# $/second, as printed on the pricing page (per GPU; per physical core;
+# per GiB). Multiply by 3600 for $/hr.
+MODAL_GPU_USD_PER_SECOND: dict[str, float] = {
+    "B200": 0.001736,
+    "H200": 0.001261,
+    "H100": 0.001097,
+    "A100-80GB": 0.000694,
+    "L40S": 0.000542,
+    "A10G": 0.000306,
+    "L4": 0.000222,
+    "T4": 0.000164,
+}
+MODAL_CPU_USD_PER_CORE_SECOND = 0.0000131
+MODAL_MEMORY_USD_PER_GIB_SECOND = 0.00000222
+MODAL_BROAD_REGIONS = frozenset({"us", "eu", "ap"})
+MODAL_NARROW_REGIONS = frozenset({
+    "us-east", "us-central", "us-south", "us-west",
+    "eu-west", "eu-north", "eu-south",
+    "ap-northeast", "ap-southeast", "ap-south", "ap-melbourne", "jp", "au",
+    "uk", "ca", "me", "sa", "af", "mx",
+})
+MODAL_REGION_MULTIPLIER = {"broad": 1.15, "narrow": 1.75}
+# Modal has no stock signal; it autoscales and may queue. Above the
+# default --min-score gate (7) so it competes on price, never "sold out".
+MODAL_ASSUMED_SCORE = 8
+MODAL_PRICE_TABLE_MAX_AGE_DAYS = 90
+
+
+def modal_region_multiplier(region: str | None) -> float:
+    if not region:
+        return 1.0
+    if region in MODAL_BROAD_REGIONS:
+        return MODAL_REGION_MULTIPLIER["broad"]
+    if region in MODAL_NARROW_REGIONS:
+        return MODAL_REGION_MULTIPLIER["narrow"]
+    raise ValueError(
+        f"unknown Modal region {region!r}; broad: {', '.join(sorted(MODAL_BROAD_REGIONS))}; "
+        f"narrow: {', '.join(sorted(MODAL_NARROW_REGIONS))}"
+    )
+
+
+def modal_node_price_per_hour(gpu: str, gpus_per_node: int, region: str | None = None) -> float:
+    """GPU + reserved CPU + reserved memory for one container, per hour,
+    times the region multiplier."""
+    from yeto.modal_runner import MODAL_CPU_CORES_PER_GPU, MODAL_MEMORY_GIB_PER_GPU
+
+    per_second = (
+        gpus_per_node * MODAL_GPU_USD_PER_SECOND[gpu]
+        + gpus_per_node * MODAL_CPU_CORES_PER_GPU * MODAL_CPU_USD_PER_CORE_SECOND
+        + gpus_per_node * MODAL_MEMORY_GIB_PER_GPU * MODAL_MEMORY_USD_PER_GIB_SECOND
+    )
+    return round(per_second * 3600 * modal_region_multiplier(region), 4)
+
+
+def modal_price_table_age_days(today: Any = None) -> int:
+    import datetime as dt
+
+    recorded = dt.date.fromisoformat(MODAL_PRICES_RECORDED)
+    today = today or dt.date.today()
+    return (today - recorded).days
+
+
+class ModalSignals(BaseCloudSignals):
+    """Modal: static priced catalog, constant availability, no network."""
+
+    name = "modal"
+
+    def available(self) -> bool:
+        from yeto.modal_runner import modal_available
+
+        return modal_available()
+
+    def credential_hint(self) -> str:
+        from yeto.modal_runner import modal_credential_hint
+
+        return modal_credential_hint()
+
+    def known_gpus(self) -> frozenset[str]:
+        return frozenset(MODAL_GPU_USD_PER_SECOND)
+
+    def offerings(
+        self, regions: set[str] | None, gpus: list[str] | None, cache: Any
+    ) -> list[Offering] | None:
+        from yeto import launcher
+        from yeto.modal_runner import MODAL_CPU_CORES_PER_GPU, MODAL_FULL_NODE, MODAL_GPUS
+        from yeto.shape.catalog import PEAK_TFLOPS_BF16, Offering
+
+        age = modal_price_table_age_days()
+        if age > MODAL_PRICE_TABLE_MAX_AGE_DAYS:
+            self._warn(
+                f"modal: the static price table was recorded {MODAL_PRICES_RECORDED} "
+                f"({age} days ago); check modal.com/pricing before trusting Modal costs"
+            )
+        # An unpinned island has region "" (no surcharge, no `@region` in
+        # the launch key); a pinned one carries its hint and multiplier.
+        region_list: list[str] = sorted(regions) if regions else [""]
+        for region in region_list:
+            mult = modal_region_multiplier(region)  # unknown region -> ValueError before planning
+            if region:
+                kind = "broad" if region in MODAL_BROAD_REGIONS else "narrow"
+                self._warn(
+                    f"modal: region {region} pinned at {mult}x ({kind} region surcharge, "
+                    f"modal.com/pricing as of {MODAL_PRICES_RECORDED})"
+                )
+        want = set(gpus) if gpus else None
+        rows: list[Offering] = []
+        for gpu in sorted(MODAL_GPU_USD_PER_SECOND):
+            if gpu not in MODAL_GPUS or gpu not in PEAK_TFLOPS_BF16 or (want and gpu not in want):
+                continue
+            counts = (1, 2, 4, 8) if gpu in MODAL_FULL_NODE else (1, 2, 4)
+            for count in counts:
+                for region in region_list:
+                    price = modal_node_price_per_hour(gpu, count, region or None)
+                    rows.append(
+                        Offering(
+                            gpu=gpu,
+                            instance_type=f"{MODAL_GPUS[gpu]}:{count}",
+                            gpus_per_node=count,
+                            vcpus=MODAL_CPU_CORES_PER_GPU * count,
+                            region=region,
+                            spot_price=price,  # no spot on Modal: one price
+                            on_demand_price=price,
+                            gpu_mem_gb=launcher.GPU_MEM_GB[gpu],
+                            cloud="modal",
+                        )
+                    )
+        return rows
+
+    def scores(self, asks: list[SignalAsk]) -> dict[SignalAsk, int | None]:
+        return {ask: MODAL_ASSUMED_SCORE for ask in asks}
+
+    def island_cap(self, score: int) -> int | None:
+        return None  # autoscaling: no per-shape stock ceiling
+
+
 # Cloud name -> factory taking the shared TTLCache. `yeto shape` consults
 # this for `--clouds` (unknown names are an error) and for the default
 # fleet (every cloud whose `available()` is true). Adding a cloud means
@@ -532,4 +676,5 @@ class AwsProviders:
 # should need to know the cloud's name.
 CLOUD_SIGNALS: dict[str, Callable[[TTLCache], CloudSignals]] = {
     "runpod": RunPodProviders,
+    "modal": ModalSignals,
 }
