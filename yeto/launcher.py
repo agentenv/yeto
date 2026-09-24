@@ -3189,7 +3189,11 @@ def _cloud_live_instances_probe(cluster: str):
             return None
         handle = record["handle"]
         cloud = handle.launched_resources.cloud
-        if cloud is None or cloud.STATUS_VERSION < clouds.StatusVersion.SKYPILOT:
+        # sky's StatusVersion enum defines only ``>=``; ``<`` raises, which
+        # used to trip the except below and silently disable verification
+        # for every cloud ("cannot set up cloud verification ... '<' not
+        # supported").
+        if cloud is None or not (cloud.STATUS_VERSION >= clouds.StatusVersion.SKYPILOT):
             return None
         cloud_name = repr(cloud)
         name = handle.cluster_name
