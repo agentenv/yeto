@@ -518,6 +518,21 @@ def test_local_syncer_probe_and_restart(tmp_path):
     assert syncer.probe() is not None  # stopped
 
 
+def test_syncer_resumes_only_when_a_checkpoint_exists(tmp_path):
+    """A fresh run has no checkpoint and the syncer rejects --resume
+    without one; a restart after the first checkpoint must still resume."""
+    import subprocess
+
+    args = cli.parse_args(LAUNCH_ARGS)
+    cmd = launcher.syncer_command(args, 1, binary="echo")
+    env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+    fresh = subprocess.run(["bash", "-c", cmd], env=env, capture_output=True, text=True, check=True).stdout
+    assert "--resume" not in fresh.split()
+    (tmp_path / "yeto-state.ckpt").write_bytes(b"x")
+    again = subprocess.run(["bash", "-c", cmd], env=env, capture_output=True, text=True, check=True).stdout
+    assert "--resume" in again.split()
+
+
 def test_local_syncer_command_matches_cluster_syncer_flags():
     args = cli.parse_args(LAUNCH_ARGS + ["--quorum", "2", "--total-steps", "17"])
     cmd = launcher.syncer_command(args, 3)
