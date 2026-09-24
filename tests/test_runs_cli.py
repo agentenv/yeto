@@ -642,3 +642,27 @@ def test_logs_follow_ends_when_worker_dead(capsys):
 def test_logs_unknown_run(capsys):
     assert cli.main(["logs", "ghost"]) == 1
     assert "unknown run" in capsys.readouterr().err
+
+
+def test_modal_ops_app_status_parses_modal_app_list_json(monkeypatch):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    from yeto import modal_runner
+
+    rows = [
+        {"app_id": "ap-1", "description": "yeto-other", "state": "running", "tasks": "2"},
+        {"app_id": "ap-2", "description": "yeto-td2", "state": "stopped", "tasks": "0"},
+    ]
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=json.dumps(rows), stderr="")
+    )
+    assert modal_runner.ModalOps("yeto-td2").app_status() == ("stopped", 0)
+    assert modal_runner.ModalOps("yeto-other").app_status() == ("running", 2)
+    assert modal_runner.ModalOps("yeto-none").app_status() is None
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="token expired")
+    )
+    with pytest.raises(RuntimeError, match="modal app list failed"):
+        modal_runner.ModalOps("yeto-td2").app_status()

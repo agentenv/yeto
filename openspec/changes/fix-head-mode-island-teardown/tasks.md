@@ -20,5 +20,5 @@
 ## 4. 文档与真机确认
 
 - [x] 4.1 更新 `docs/CLOUDS.md`：把"`yeto down` 后手工看 `nebius compute instance list`"改为说明新行为与非零退出的含义；在 live-run-failures 第 36 条下记录处理。验证：文档改动与实现一致
-- [ ] 4.2 真机：在 Nebius 开一个 head + Nebius 1 卡 SFT 岛（8.1 的配置，避开第 37 条的 docker 岛问题），岛运行中执行 `yeto down`，确认输出含每个 learner 的确认行、head 最后删除，`nebius compute instance list` 与 `sky status` 无该前缀残留。验证：结果记入 `docs/CLOUDS.md`；**不要动不属于本次运行的实例**
-- [ ] 4.3 真机反例：先手工删掉 head 再执行 `yeto down`，确认命令非零退出并列出未确认的 learner，随后手工删除该岛。验证：记录输出；同样只动本次运行的实例
+- [ ] 4.2 （2026-09-24 部分完成，见 CLOUDS.md：`yeto-td2` 用 Modal 岛做了运行中 `yeto down`，Modal app 确认 + head 云端核验通过；`yeto-td1` 的 Nebius 岛因租户公网 IPv4 配额（上限 3，被另一 run 占用）没开出来，只验证了经 head 的“learner 不存在”确认路径。Nebius learner 的经 head 拆除待配额空出后补做）真机：在 Nebius 开一个 head + Nebius 1 卡 SFT 岛（8.1 的配置，避开第 37 条的 docker 岛问题），岛运行中执行 `yeto down`，确认输出含每个 learner 的确认行、head 最后删除，`nebius compute instance list` 与 `sky status` 无该前缀残留。验证：结果记入 `docs/CLOUDS.md`；**不要动不属于本次运行的实例**
+- [ ] 4.3 （同上，待 IPv4 配额空出）真机反例：先手工删掉 head 再执行 `yeto down`，确认命令非零退出并列出未确认的 learner，随后手工删除该岛。验证：记录输出；同样只动本次运行的实例

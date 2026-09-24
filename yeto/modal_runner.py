@@ -376,11 +376,13 @@ class ModalOps:
             )
         import json as _json
 
+        # `modal app list --json` rows: app_id, description, state, tasks,
+        # created_at, stopped_at (tasks is a string).
         for app in _json.loads(proc.stdout or "[]"):
-            if app.get("Description") == self.app_name or app.get("Name") == self.app_name:
-                state = str(app.get("State", "")).lower()
+            if app.get("description") == self.app_name:
+                state = str(app.get("state", "")).lower()
                 try:
-                    tasks = int(app.get("Tasks") or 0)
+                    tasks = int(app.get("tasks") or 0)
                 except (TypeError, ValueError):
                     tasks = 0
                 return state, tasks

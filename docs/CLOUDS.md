@@ -438,6 +438,16 @@ a rerun of `yeto down` continues from there. The order matters:
    cloud that cannot be queried is reported as "not cloud-verifiable;
    trusting sky", and then only a clean down or "does not exist" counts.
 
+Verified 2026-09-24 on `yeto-td2` (Nebius head, one Modal `1xh100` SFT
+island, torn down while training at outer step 3): the app stopped and
+listed as `stopped, 0 tasks`, the head was downed and confirmed at the
+cloud, exit 0, nothing left on Nebius or Modal. `yeto-td1` (whose Nebius
+learner never provisioned: the tenant's public-IPv4 quota of 3 was full)
+exercised the head-side path: the head reported the learner as never
+existing, then the head itself was downed. The head-side teardown of a
+provisioned Nebius learner, and the "head already gone" failure path, are
+still to be run once the IPv4 quota has room for head + learner.
+
 If the head is already gone (deleted by hand, or by an older `yeto down`),
 step 1 cannot run: the command exits 1 listing the learners, and the only
 way to find them is the cloud's own listing, e.g.
