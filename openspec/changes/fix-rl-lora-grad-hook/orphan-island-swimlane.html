@@ -1,0 +1,152 @@
+<title>yeto down 孤儿岛</title>
+<style>
+:root{
+  --bg:#f7f5f0; --ink:#1f2328; --muted:#5d6570; --rule:#cfd3d8; --panel:#ffffff;
+  --lane:#eeeae2; --alert:#e5322d; --alert-ink:#ffffff; --fix:#1f7a3d; --fix-soft:#e3f2e8;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15181c; --ink:#e6e8eb; --muted:#9aa3ad; --rule:#3a4148; --panel:#1d2126;
+    --lane:#22272d; --alert:#ff5a4f; --alert-ink:#15181c; --fix:#5ccb7e; --fix-soft:#1d3326;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15181c; --ink:#e6e8eb; --muted:#9aa3ad; --rule:#3a4148; --panel:#1d2126;
+  --lane:#22272d; --alert:#ff5a4f; --alert-ink:#15181c; --fix:#5ccb7e; --fix-soft:#1d3326;
+}
+body{background:var(--bg);color:var(--ink);font:15px/1.6 "IBM Plex Sans","Noto Sans SC","PingFang SC","Segoe UI",system-ui,sans-serif;padding-block:32px;padding-inline:20px;}
+main{max-width:1080px;margin:0 auto;}
+h1{font-size:26px;line-height:1.25;margin:0 0 6px;text-wrap:balance;font-weight:600;}
+.sub{color:var(--muted);margin:0 0 24px;max-width:70ch;}
+figure{margin:0 0 20px;background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:14px;overflow-x:auto;}
+figure svg{display:block;min-width:900px;max-width:100%;height:auto;color:var(--ink);font-family:inherit;}
+figcaption{color:var(--muted);font-size:13.5px;margin-top:10px;max-width:80ch;}
+.key{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:13px;color:var(--muted);margin:0 0 22px;}
+.key span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:6px;vertical-align:-1px;}
+.key .a::before{background:var(--alert);}
+.key .f::before{background:var(--fix);}
+.key .n::before{border:1.5px solid currentColor;}
+h2{font-size:17px;margin:28px 0 8px;font-weight:600;}
+ol{padding-left:22px;max-width:75ch;}
+li{margin-bottom:6px;}
+code{font:13px "IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--lane);padding:1px 5px;border-radius:3px;}
+.alert{color:var(--alert);font-weight:600;}
+.fix{background:var(--fix-soft);border-left:3px solid var(--fix);padding:10px 14px;max-width:75ch;border-radius:0 4px 4px 0;}
+</style>
+<main>
+<h1>为什么 <code>yeto down</code> 之后 Nebius 上会剩一台孤儿 H100</h1>
+<p class="sub">2026-09-24 回收 <code>yeto-gh1</code> 与 <code>yeto-gh2</code> 时各发生一次。岛是 head 上的 sky 开的，本机 sky 不认识它；本机先把 head 删了，岛的唯一回收入口随之消失。</p>
+<div class="key"><span class="n">正常步骤</span><span class="a">问题关键（红）</span><span class="f">prB 的修法（绿）</span></div>
+
+<figure>
+<svg viewBox="0 0 1000 620" role="img" aria-label="四条泳道：本机、Nebius head、Nebius 岛 VM、Nebius API。本机 sky 只记录 head；岛由 head 的 sky 创建。yeto down 时本机 sky 找不到岛、错误被吞掉，随后删除 head，岛 VM 继续运行成为孤儿。">
+<defs>
+  <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+  <marker id="arwA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#e5322d"/></marker>
+  <marker id="arwF" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1f7a3d"/></marker>
+</defs>
+
+<!-- lanes -->
+<g font-size="13" font-weight="600">
+  <rect x="0" y="0" width="230" height="620" fill="var(--lane)" rx="4"/>
+  <rect x="250" y="0" width="230" height="620" fill="var(--lane)" rx="4"/>
+  <rect x="500" y="0" width="230" height="620" fill="var(--lane)" rx="4"/>
+  <rect x="750" y="0" width="250" height="620" fill="var(--lane)" rx="4"/>
+  <text x="115" y="24" text-anchor="middle" fill="currentColor">本机 · yeto CLI + 本机 sky</text>
+  <text x="365" y="24" text-anchor="middle" fill="currentColor">Nebius head · head job + head 的 sky</text>
+  <text x="615" y="24" text-anchor="middle" fill="currentColor">Nebius 岛 VM（1×H100）</text>
+  <text x="875" y="24" text-anchor="middle" fill="currentColor">Nebius API（真实资源）</text>
+</g>
+<line x1="0" y1="36" x2="1000" y2="36" stroke="var(--rule)" stroke-width="1"/>
+
+<!-- step 1: launch head -->
+<g font-size="12.5" fill="currentColor">
+  <rect x="20" y="56" width="190" height="44" rx="4" fill="var(--panel)" stroke="currentColor" stroke-width="1.2"/>
+  <text x="115" y="74" text-anchor="middle">① yeto launch</text>
+  <text x="115" y="91" text-anchor="middle" fill="var(--muted)">本机 sky 创建 head，记入本机 DB</text>
+  <line x1="210" y1="78" x2="850" y2="78" stroke="currentColor" stroke-width="1.2" marker-end="url(#arw)"/>
+  <text x="530" y="72" text-anchor="middle" fill="var(--muted)">create yeto-gh1-head</text>
+  <rect x="770" y="60" width="210" height="36" rx="4" fill="var(--panel)" stroke="currentColor" stroke-width="1.2"/>
+  <text x="875" y="83" text-anchor="middle">head VM RUNNING</text>
+</g>
+
+<!-- step 2: head launches island -->
+<g font-size="12.5" fill="currentColor">
+  <rect x="270" y="130" width="190" height="58" rx="4" fill="var(--panel)" stroke="currentColor" stroke-width="1.2"/>
+  <text x="365" y="149" text-anchor="middle">② head job：sky launch 岛</text>
+  <text x="365" y="166" text-anchor="middle" fill="var(--muted)">岛只记在 head 的 sky DB</text>
+  <text x="365" y="181" text-anchor="middle" fill="#e5322d" font-weight="600">本机 sky DB 里没有它</text>
+  <line x1="460" y1="152" x2="850" y2="152" stroke="currentColor" stroke-width="1.2" marker-end="url(#arw)"/>
+  <text x="640" y="146" text-anchor="middle" fill="var(--muted)">create yeto-gh1-l0-eu-north1</text>
+  <rect x="770" y="134" width="210" height="36" rx="4" fill="var(--panel)" stroke="currentColor" stroke-width="1.2"/>
+  <text x="875" y="157" text-anchor="middle">岛 VM RUNNING</text>
+  <rect x="520" y="200" width="190" height="36" rx="4" fill="var(--panel)" stroke="currentColor" stroke-width="1.2"/>
+  <text x="615" y="223" text-anchor="middle">setup / 训练中（或卡在 INIT）</text>
+</g>
+
+<!-- step 3: yeto down -->
+<g font-size="12.5" fill="currentColor">
+  <rect x="20" y="270" width="190" height="58" rx="4" fill="var(--panel)" stroke="currentColor" stroke-width="1.2"/>
+  <text x="115" y="289" text-anchor="middle">③ yeto down yeto-gh1</text>
+  <text x="115" y="306" text-anchor="middle" fill="var(--muted)">按 run 记录的 2 个名字</text>
+  <text x="115" y="321" text-anchor="middle" fill="var(--muted)">并行 sky down（本机 sky）</text>
+
+  <!-- 3a island -->
+  <line x1="115" y1="328" x2="115" y2="372" stroke="currentColor" stroke-width="1.2"/>
+  <rect x="20" y="372" width="190" height="66" rx="4" fill="#e5322d" stroke="#e5322d"/>
+  <text x="115" y="392" text-anchor="middle" fill="#ffffff" font-weight="600">③a sky down 岛</text>
+  <text x="115" y="409" text-anchor="middle" fill="#ffffff">"Cluster … does not exist"</text>
+  <text x="115" y="426" text-anchor="middle" fill="#ffffff">except: 当作"可能已没了"，继续</text>
+  <line x1="210" y1="405" x2="500" y2="405" stroke="#e5322d" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#arwA)"/>
+  <text x="355" y="398" text-anchor="middle" fill="#e5322d" font-weight="600">没有任何调用到达岛</text>
+
+  <!-- 3b head -->
+  <line x1="115" y1="438" x2="115" y2="470" stroke="currentColor" stroke-width="1.2"/>
+  <rect x="20" y="470" width="190" height="44" rx="4" fill="var(--panel)" stroke="currentColor" stroke-width="1.2"/>
+  <text x="115" y="488" text-anchor="middle">③b sky down head → 成功</text>
+  <text x="115" y="505" text-anchor="middle" fill="var(--muted)">退出码 0，"run is down"</text>
+  <line x1="210" y1="492" x2="850" y2="492" stroke="currentColor" stroke-width="1.2" marker-end="url(#arw)"/>
+  <text x="530" y="486" text-anchor="middle" fill="var(--muted)">delete yeto-gh1-head</text>
+  <rect x="770" y="474" width="210" height="36" rx="4" fill="var(--panel)" stroke="currentColor" stroke-width="1.2"/>
+  <text x="875" y="497" text-anchor="middle">head VM DELETED</text>
+
+  <!-- head sky DB gone -->
+  <rect x="270" y="470" width="190" height="44" rx="4" fill="#e5322d" stroke="#e5322d"/>
+  <text x="365" y="488" text-anchor="middle" fill="#ffffff" font-weight="600">head 的 sky DB 随 VM 消失</text>
+  <text x="365" y="505" text-anchor="middle" fill="#ffffff">岛唯一的回收入口没了</text>
+</g>
+
+<!-- step 4: orphan -->
+<g font-size="12.5">
+  <rect x="520" y="540" width="190" height="58" rx="4" fill="#e5322d" stroke="#e5322d"/>
+  <text x="615" y="559" text-anchor="middle" fill="#ffffff" font-weight="600">④ 岛 VM 仍 RUNNING</text>
+  <text x="615" y="576" text-anchor="middle" fill="#ffffff">无 sky 记录、无 head，H100 持续计费</text>
+  <text x="615" y="591" text-anchor="middle" fill="#ffffff">只能 nebius compute instance delete</text>
+  <line x1="875" y1="170" x2="875" y2="540" stroke="#e5322d" stroke-width="1.6" stroke-dasharray="6 5"/>
+  <line x1="875" y1="540" x2="712" y2="569" stroke="#e5322d" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#arwA)"/>
+  <text x="893" y="360" fill="#e5322d" font-weight="600">岛 VM 一直在</text>
+</g>
+
+<!-- fix -->
+<g font-size="12.5">
+  <rect x="270" y="270" width="190" height="58" rx="4" fill="var(--fix-soft)" stroke="#1f7a3d" stroke-width="1.6"/>
+  <text x="365" y="289" text-anchor="middle" fill="#1f7a3d" font-weight="600">修法（prB）：先在 head 上拆岛</text>
+  <text x="365" y="306" text-anchor="middle" fill="#1f7a3d">ssh head → sky down 岛</text>
+  <text x="365" y="321" text-anchor="middle" fill="#1f7a3d">确认后才 down head</text>
+  <line x1="210" y1="299" x2="268" y2="299" stroke="#1f7a3d" stroke-width="1.6" marker-end="url(#arwF)"/>
+  <line x1="460" y1="299" x2="850" y2="299" stroke="#1f7a3d" stroke-width="1.6" marker-end="url(#arwF)"/>
+  <text x="640" y="292" text-anchor="middle" fill="#1f7a3d">delete 岛（head 的 sky 认识它）</text>
+</g>
+</svg>
+<figcaption>四条泳道按时间从上到下。岛在②由 head 的 sky 创建，所以③a 本机的 <code>sky down</code> 只能得到 "does not exist"，代码把它当成"可能已经拆过"吞掉并继续；③b 删除 head 的同时删掉了唯一知道岛存在的 sky DB，岛 VM 在④成为孤儿。绿色是 prB 分支的顺序：先经 head 拆岛、确认后再拆 head。</figcaption>
+</figure>
+
+<h2>关键点逐条</h2>
+<ol>
+  <li><span class="alert">记录在两个不同的 sky 里。</span>head 是本机 sky 开的，岛是 head 上的 sky 开的。<code>yeto down</code> 只用本机 sky，按 run 元数据里预先算好的名字（<code>yeto-gh1-l0-eu-north1</code>）去 down，本机 DB 根本没有这一条。</li>
+  <li><span class="alert">失败被当成"已经没了"。</span><code>yeto/cli.py</code> 的 <code>_down_one</code> 用 <code>try/except</code> 包住 <code>sky down</code>，注释写着 "best-effort; the cluster may be gone"，于是 "does not exist" 只打印一行、退出码仍是 0。</li>
+  <li><span class="alert">顺序反了：head 先没。</span>两个 down 并行跑，head 很快删掉，岛的元数据随 head 消失，之后任何 sky 都不再认识这台 VM。</li>
+  <li>结果就是 <code>nebius compute instance list</code> 里一台 RUNNING 的 H100 没人管。这次两次各手工删除，约 5 分钟计费；2026-09-23 prB 的提交注释里写过同样的泄漏。</li>
+</ol>
+<div class="fix"><strong>已有修法，只是这次没合并：</strong>prB <code>head-side-teardown</code> 让 <code>yeto down</code> 先 ssh 到 head，用 head 的 sky 拆掉所有 learner，拆不干净就保留 head 并以非零退出；确认后才删 head。它和 pr8 在 <code>yeto/cli.py</code> 冲突，这次为省时间跳过了。在合进去之前，每次 <code>yeto down</code> 后都要看一眼 <code>nebius compute instance list</code>。</div>
+</main>

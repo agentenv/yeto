@@ -1,0 +1,311 @@
+<title>Yeto RL 岛调用流</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f4f6f7; --panel:#ffffff; --ink:#1d2430; --muted:#5d6878; --line:#c9d1d9;
+  --accent:#0f766e; --accent-soft:#d7efe9; --warn:#b45309; --warn-soft:#fdecd2;
+  --lane1:#e9eef3; --lane2:#e6f0f5; --lane3:#e5f3ef; --code:#eef1f4;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#151a21; --panel:#1d232c; --ink:#e6eaf0; --muted:#9aa6b5; --line:#3a4451;
+    --accent:#3fc1b0; --accent-soft:#183f3a; --warn:#f2a950; --warn-soft:#46301a;
+    --lane1:#222a34; --lane2:#1f2c36; --lane3:#1e3029; --code:#262e38;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#151a21; --panel:#1d232c; --ink:#e6eaf0; --muted:#9aa6b5; --line:#3a4451;
+  --accent:#3fc1b0; --accent-soft:#183f3a; --warn:#f2a950; --warn-soft:#46301a;
+  --lane1:#222a34; --lane2:#1f2c36; --lane3:#1e3029; --code:#262e38;
+}
+body{background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;font-size:15px;line-height:1.6;padding-block:32px 64px;padding-inline:16px;margin:0}
+main{max-width:980px;margin:0 auto;display:grid;gap:40px}
+h1{font-size:1.9rem;font-weight:600;letter-spacing:-0.01em;margin:0 0 6px;text-wrap:balance}
+h2{font-size:1.25rem;font-weight:600;margin:0 0 12px;text-wrap:balance}
+p{margin:0 0 10px;max-width:70ch}
+.lead{color:var(--muted);max-width:70ch}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.86em;background:var(--code);padding:1px 5px;border-radius:4px}
+figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+figure .scroll{overflow-x:auto}
+figure svg{display:block;max-width:100%;height:auto;min-width:640px}
+figcaption{color:var(--muted);font-size:0.9rem;margin-top:10px;max-width:80ch}
+.legend{display:flex;flex-wrap:wrap;gap:14px 22px;font-size:0.85rem;color:var(--muted);margin-top:10px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:14px;height:14px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+table{border-collapse:collapse;width:100%;font-size:0.92rem}
+th,td{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:500;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.06em}
+td:first-child{white-space:nowrap;color:var(--muted);font-variant-numeric:tabular-nums}
+.phase{display:grid;gap:10px}
+.phase h3{font-size:1rem;font-weight:600;margin:14px 0 4px}
+.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 10px}
+.note{border-left:3px solid var(--warn);background:var(--warn-soft);padding:10px 14px;border-radius:6px;max-width:80ch}
+.fix{border-left:3px solid var(--accent);background:var(--accent-soft);padding:10px 14px;border-radius:6px;max-width:80ch}
+ul{margin:0;padding-left:1.2em}
+li{margin:4px 0}
+@media (max-width:600px){h1{font-size:1.5rem}}
+</style>
+
+<main>
+<header>
+  <h1>Yeto RL 岛调用流</h1>
+  <p class="lead">从本机敲下 <code>yeto launch --training-mode rl</code> 开始，到 head 上的 syncer、岛上的 Miles 训练循环、每轮的 policy sync、最后回收，每一步经过哪个函数。以 2026-09-24 的 <code>yeto-gh4</code>（head 在 Nebius，岛在 Modal 1×H100）为准。</p>
+</header>
+
+<section>
+  <h2>一、三方时序：本机 → head VM → 岛</h2>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 960 1010" role="img" aria-label="本机、head VM 和岛三条泳道之间的时序：本机开 head 并提交控制器 job；head 启动 syncer、开岛；岛跑 setup 和 learner，与 syncer 按轮交换 LoRA 状态；结束后 head 拆岛，本机 yeto down 拆 head。">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+        </marker>
+        <marker id="arr-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/>
+        </marker>
+      </defs>
+      <!-- lanes -->
+      <rect x="20" y="10" width="280" height="990" rx="8" fill="var(--lane1)"/>
+      <rect x="340" y="10" width="280" height="990" rx="8" fill="var(--lane2)"/>
+      <rect x="660" y="10" width="280" height="990" rx="8" fill="var(--lane3)"/>
+      <g fill="currentColor" font-size="14" font-weight="600" text-anchor="middle">
+        <text x="160" y="36">本机（h200-n7）</text>
+        <text x="480" y="36">head VM（Nebius cpu-d3）</text>
+        <text x="800" y="36">岛（Modal 1×H100 容器）</text>
+      </g>
+      <g fill="var(--muted)" font-size="11" text-anchor="middle">
+        <text x="160" y="54">yeto CLI + sky client</text>
+        <text x="480" y="54">yeto.cli head → launcher + yeto-syncer(Rust)</text>
+        <text x="800" y="54">yeto.rl.learner → Miles train.py</text>
+      </g>
+      <!-- lifelines -->
+      <g stroke="currentColor" stroke-dasharray="3 5" stroke-opacity="0.45">
+        <line x1="160" y1="66" x2="160" y2="990"/>
+        <line x1="480" y1="66" x2="480" y2="990"/>
+        <line x1="800" y1="66" x2="800" y2="990"/>
+      </g>
+      <g font-size="12" fill="currentColor">
+        <!-- 1 local self -->
+        <rect x="40" y="84" width="240" height="44" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="160" y="102" text-anchor="middle">cmd_launch → _prepare_rl_args</text>
+        <text x="160" y="119" text-anchor="middle" fill="var(--muted)">校验 reward/bundle SHA、model/data revision</text>
+        <!-- 2 local -> head -->
+        <line x1="160" y1="150" x2="474" y2="150" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="317" y="144" text-anchor="middle">sky.launch(head task)：开 VM，setup 里 cargo 编译 syncer</text>
+        <!-- 3 local -> head -->
+        <line x1="160" y1="190" x2="474" y2="190" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="317" y="184" text-anchor="middle">sky.exec：job 2 = yeto.cli head &lt;payload&gt;（cmd_head）</text>
+        <text x="160" y="214" text-anchor="middle" fill="var(--muted)">之后只流式看日志，Ctrl-C 即脱离</text>
+        <!-- 4 head self -->
+        <rect x="360" y="232" width="240" height="44" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="480" y="250" text-anchor="middle">LocalSyncer.start → ~/yeto-syncer :29400</text>
+        <text x="480" y="267" text-anchor="middle" fill="var(--muted)">tape → ~/yeto-output/yeto-tape.jsonl</text>
+        <!-- 5 head -> island -->
+        <line x1="480" y1="300" x2="794" y2="300" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="637" y="294" text-anchor="middle">launcher.run → FleetController → make_miles_island_task</text>
+        <text x="637" y="318" text-anchor="middle" fill="var(--muted)">Modal: build_modal_island_config；sky 云: sky.launch</text>
+        <!-- 6 island setup -->
+        <rect x="680" y="336" width="240" height="60" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="800" y="354" text-anchor="middle">setup：校验 bundle SHA256</text>
+        <text x="800" y="370" text-anchor="middle" fill="var(--muted)">clone Miles@BASE → fetch bundle → MILES_COMMIT</text>
+        <text x="800" y="386" text-anchor="middle" fill="var(--muted)">pip -e ~/miles、~/sglang</text>
+        <!-- 7 island run -->
+        <rect x="680" y="410" width="240" height="60" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="800" y="428" text-anchor="middle">run：ray start → yeto.rl.learner.main</text>
+        <text x="800" y="444" text-anchor="middle" fill="var(--muted)">verify_miles_checkout（commit/origin/clean）</text>
+        <text x="800" y="460" text-anchor="middle" fill="var(--muted)">run_miles → miles.train(args)</text>
+        <!-- 8 island -> head INIT -->
+        <line x1="800" y1="498" x2="486" y2="498" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="643" y="492" text-anchor="middle">MilesPolicySync.initialize → StrictRlBridge.start：INIT_PARAMS（初始 adapter）</text>
+        <!-- 9 head -> island v0 -->
+        <line x1="480" y1="536" x2="794" y2="536" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="637" y="530" text-anchor="middle">全局策略 v0 + 轮许可（wait_for_initial_policy / wait_for_round）</text>
+        <!-- loop box -->
+        <rect x="350" y="560" width="580" height="250" rx="6" fill="none" stroke="var(--accent)" stroke-dasharray="6 4"/>
+        <text x="362" y="578" fill="var(--accent)" font-weight="600">每轮 rollout_id = 0…5（--total-steps 6）</text>
+        <!-- 10 island self -->
+        <rect x="680" y="590" width="240" height="60" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="800" y="608" text-anchor="middle">generate（SGLang 采样 + reward_func）</text>
+        <text x="800" y="624" text-anchor="middle" fill="var(--muted)">actor.train（Megatron：优势 → 反向 → step）</text>
+        <text x="800" y="640" text-anchor="middle" fill="var(--muted)">→ train/grad_norm</text>
+        <!-- 11 island -> head PUSH -->
+        <line x1="800" y1="676" x2="486" y2="676" stroke="var(--accent)" marker-end="url(#arr-acc)"/>
+        <text x="643" y="670" text-anchor="middle">after_local_train：export → round stats → 不变量 → PUSH 本地 LoRA</text>
+        <!-- 12 head self merge -->
+        <rect x="360" y="692" width="240" height="40" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="480" y="709" text-anchor="middle">syncer 合并（quorum 1/1）</text>
+        <text x="480" y="724" text-anchor="middle" fill="var(--muted)">tape: outer step, gnorm = 全局 delta 范数</text>
+        <!-- 13 head -> island v+1 -->
+        <line x1="480" y1="758" x2="794" y2="758" stroke="var(--accent)" marker-end="url(#arr-acc)"/>
+        <text x="637" y="752" text-anchor="middle">全局策略 v+1（wait_for_global_policy → apply_trainable_state）</text>
+        <text x="800" y="790" text-anchor="middle" fill="var(--muted)">save → update_weights（发布到 SGLang）→ 下一轮</text>
+        <!-- 14 finalize -->
+        <line x1="800" y1="836" x2="486" y2="836" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="643" y="830" text-anchor="middle">finalize：final cut；syncer “training complete”；job SUCCEEDED</text>
+        <!-- 15 head tears island -->
+        <line x1="480" y1="876" x2="794" y2="876" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="637" y="870" text-anchor="middle">FleetController：拆岛（Modal app stop / sky down）</text>
+        <text x="480" y="904" text-anchor="middle" fill="var(--muted)">“run finished; model + checkpoint live on the head”</text>
+        <!-- 16 local down -->
+        <line x1="160" y1="944" x2="474" y2="944" stroke="currentColor" marker-end="url(#arr)"/>
+        <text x="317" y="938" text-anchor="middle">yeto down &lt;prefix&gt;：sky down head（+ 再次 stop Modal app）</text>
+        <text x="317" y="966" text-anchor="middle" fill="var(--warn)">注意：head 用 sky 开的岛，本机 yeto down 看不见（第 36 条）</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>三条泳道按时间向下。本机只负责开 head 和提交控制器 job；此后 syncer 在 head 上跑，岛只和 head 说话。绿色的一来一回是每轮的 policy sync，也是这次修的 bug 所在的路径。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>二、岛内一轮：Miles 循环与 MilesPolicySync 钩子</h2>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 960 330" role="img" aria-label="Miles train.py 的一轮：generate、train、after_local_train 钩子（其中 export、round stats、不变量、submit、wait、apply 六步）、save、update_weights，然后回到 generate。export 和 apply 两步经过 _optimizer_masters_as_model_parameters，是修复点；不变量是新增。">
+      <defs>
+        <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-size="12" fill="currentColor">
+        <!-- top row: miles loop -->
+        <rect x="20" y="40" width="150" height="54" rx="6" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="95" y="62" text-anchor="middle" font-weight="600">generate</text>
+        <text x="95" y="80" text-anchor="middle" fill="var(--muted)">SGLang rollout, reward</text>
+        <line x1="170" y1="67" x2="204" y2="67" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="210" y="40" width="150" height="54" rx="6" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="285" y="62" text-anchor="middle" font-weight="600">actor.train</text>
+        <text x="285" y="80" text-anchor="middle" fill="var(--muted)">backward → main_grad → step</text>
+        <line x1="360" y1="67" x2="394" y2="67" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="400" y="40" width="200" height="54" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="500" y="62" text-anchor="middle" font-weight="600">after_local_train</text>
+        <text x="500" y="80" text-anchor="middle" fill="var(--muted)">yeto.rl.miles.MilesPolicySync</text>
+        <line x1="600" y1="67" x2="634" y2="67" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="640" y="40" width="130" height="54" rx="6" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="705" y="62" text-anchor="middle" font-weight="600">save</text>
+        <text x="705" y="80" text-anchor="middle" fill="var(--muted)">island checkpoint</text>
+        <line x1="770" y1="67" x2="804" y2="67" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="810" y="40" width="130" height="54" rx="6" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="875" y="62" text-anchor="middle" font-weight="600">update_weights</text>
+        <text x="875" y="80" text-anchor="middle" fill="var(--muted)">发布到 SGLang</text>
+        <!-- loop back -->
+        <path d="M875,94 L875,116 L95,116 L95,100" fill="none" stroke="currentColor" marker-end="url(#arr2)"/>
+        <text x="485" y="112" text-anchor="middle" fill="var(--muted)">rollout_id + 1</text>
+        <!-- hook expansion -->
+        <line x1="500" y1="94" x2="500" y2="150" stroke="var(--accent)" stroke-dasharray="4 3"/>
+        <rect x="20" y="150" width="920" height="160" rx="8" fill="none" stroke="var(--accent)" stroke-dasharray="6 4"/>
+        <text x="32" y="170" fill="var(--accent)" font-weight="600">after_local_train 内部（严格模式 strict-avg）</text>
+        <!-- 6 steps -->
+        <rect x="32" y="190" width="140" height="62" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="102" y="210" text-anchor="middle" font-weight="600">1 export</text>
+        <text x="102" y="226" text-anchor="middle" fill="var(--muted)">export_trainable_state</text>
+        <text x="102" y="241" text-anchor="middle" fill="var(--muted)">→ _collective_adapter_tensors</text>
+        <line x1="172" y1="221" x2="188" y2="221" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="192" y="190" width="140" height="62" rx="6" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="262" y="210" text-anchor="middle" font-weight="600">2 round stats</text>
+        <text x="262" y="226" text-anchor="middle" fill="var(--muted)">_round_stats：reward、</text>
+        <text x="262" y="241" text-anchor="middle" fill="var(--muted)">grad_norm、nonzero_adv_count</text>
+        <line x1="332" y1="221" x2="348" y2="221" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="352" y="190" width="140" height="62" rx="6" fill="var(--warn-soft)" stroke="var(--warn)"/>
+        <text x="422" y="210" text-anchor="middle" font-weight="600">3 不变量（新增）</text>
+        <text x="422" y="226" text-anchor="middle" fill="var(--muted)">优势非零 ∧ grad_norm==0</text>
+        <text x="422" y="241" text-anchor="middle" fill="var(--muted)">→ StrictRlInvariantError</text>
+        <line x1="492" y1="221" x2="508" y2="221" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="512" y="190" width="140" height="62" rx="6" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="582" y="210" text-anchor="middle" font-weight="600">4 submit</text>
+        <text x="582" y="226" text-anchor="middle" fill="var(--muted)">bridge.submit_local_state</text>
+        <text x="582" y="241" text-anchor="middle" fill="var(--muted)">PUSH → syncer；release_current</text>
+        <line x1="652" y1="221" x2="668" y2="221" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="672" y="190" width="120" height="62" rx="6" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="732" y="210" text-anchor="middle" font-weight="600">5 wait</text>
+        <text x="732" y="226" text-anchor="middle" fill="var(--muted)">wait_for_global_policy</text>
+        <text x="732" y="241" text-anchor="middle" fill="var(--muted)">(v+1)</text>
+        <line x1="792" y1="221" x2="808" y2="221" stroke="currentColor" marker-end="url(#arr2)"/>
+        <rect x="812" y="190" width="120" height="62" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="872" y="210" text-anchor="middle" font-weight="600">6 apply</text>
+        <text x="872" y="226" text-anchor="middle" fill="var(--muted)">apply_trainable_state</text>
+        <text x="872" y="241" text-anchor="middle" fill="var(--muted)">→ main_param.copy_</text>
+        <text x="32" y="286" fill="var(--muted)">1 和 6 都进入 _optimizer_masters_as_model_parameters：让 Megatron-Bridge 看到 fp32 master。原实现改 Parameter.data 的 dtype，把 DDP 的梯度累加 hook 打掉；</text>
+        <text x="32" y="302" fill="var(--muted)">修复后改为临时替换模块的参数条目，Parameter 本身不动。第 6 步之后 wait_for_round 拿下一轮许可，回到 Miles 循环的 save。</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>上排是 Miles <code>train.py</code> 的一轮；下框是 Yeto 的 <code>after_local_train</code> 钩子展开。绿色框是 bug 与修复所在（导出、应用两处都走同一个 context manager），橙色框是本次新增的运行时不变量，它在 PUSH 之前拦截。</figcaption>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--accent-soft);border-color:var(--accent)"></i>修复点</span>
+      <span><i class="sw" style="background:var(--warn-soft);border-color:var(--warn)"></i>新增不变量</span>
+      <span><i class="sw" style="background:var(--panel)"></i>原有步骤</span>
+    </div>
+  </figure>
+</section>
+
+<section class="phase">
+  <h2>三、每一步对应的代码</h2>
+
+  <h3>A. 本机：<code>yeto launch</code></h3>
+  <div class="tablewrap"><table>
+    <tr><th>步骤</th><th>做什么</th><th>代码</th></tr>
+    <tr><td>A1</td><td>解析参数，`--controller head`（默认）走 head 模式</td><td><code>yeto/cli.py</code> <code>cmd_launch</code> → <code>cmd_launch_head</code></td></tr>
+    <tr><td>A2</td><td>RL provenance：reward 函数必须是 <code>package.module:func</code> 且能定位；算它的 SHA256；model/data revision 必须是不可变 commit；bundle SHA、Miles/SGLang pin 装进 payload</td><td><code>yeto/launcher.py</code> <code>_prepare_rl_args</code>、<code>_rl_callable</code>；<code>yeto/provenance.py</code></td></tr>
+    <tr><td>A3</td><td>拼 head task：workdir = 整个仓库；setup 用 cargo 编译 <code>syncer/</code> 成 <code>~/yeto-syncer</code>；只挂载 fleet 用到的云凭据</td><td><code>_make_head_task</code>、<code>launcher.build_syncer_binary</code>、<code>head_cloud_credentials</code></td></tr>
+    <tr><td>A4</td><td><code>sky.launch</code> 开 head（cpu-d3，eu-north1），再 <code>sky.exec</code> 提交 job：<code>python -m yeto.cli head &lt;payload json&gt;</code></td><td><code>_sky_launch_head</code>、<code>_sky_exec_head</code></td></tr>
+    <tr><td>A5</td><td>写本机 run registry，流式打印 head job 日志；Ctrl-C 只是脱离</td><td><code>_record_head_result</code>、<code>_stream_head_logs</code>；之后 <code>yeto logs/status/down</code></td></tr>
+  </table></div>
+
+  <h3>B. head VM：<code>yeto.cli head</code></h3>
+  <div class="tablewrap"><table>
+    <tr><th>步骤</th><th>做什么</th><th>代码</th></tr>
+    <tr><td>B1</td><td>起 syncer 子进程：<code>~/yeto-syncer --port 29400 --learners N --quorum … --pipeline 1</code>（strict-avg 预设）；只有 checkpoint 存在时才加 <code>--resume</code>（pr10）</td><td><code>cmd_head</code> → <code>launcher.LocalSyncer.start</code>、<code>syncer_command</code>、<code>_resume_if_exists</code></td></tr>
+    <tr><td>B2</td><td>syncer 日志转发进 job 日志；tape 写到 <code>~/yeto-output/yeto-tape.jsonl</code>（可选 W&amp;B）</td><td><code>start_log_forwarder</code>、<code>start_tape_forwarder</code>、<code>yeto/wandb_tape.py</code></td></tr>
+    <tr><td>B3</td><td>为每个岛拼 sky task：setup 脚本 = 校验 bundle SHA → clone Miles@<code>MILES_BASE_COMMIT</code> → <code>git fetch bundle MILES_COMMIT</code> → checkout、工作树必须干净 → <code>pip -e ~/miles</code>、SGLang；run 脚本 = <code>ray start</code> → <code>python -m yeto.rl.learner …</code></td><td><code>launcher.run</code> → <code>make_miles_island_task</code></td></tr>
+    <tr><td>B4</td><td>开岛：Modal 走 <code>modal_runner</code>（容器里执行同一份 setup/run）；sky 云走 <code>sky.launch</code></td><td><code>build_modal_island_config</code>、<code>modal_runner.py</code>；<code>FleetController</code></td></tr>
+    <tr><td>B5</td><td>监督循环：每 tick <code>_probe</code> = 查 job 状态 + cluster 是否 UP；job SUCCEEDED → DONE；否则进 recovery 重新 launch；strict 失败直接 raise</td><td><code>FleetController.run</code>、<code>_probe</code>、<code>_enter_recovering</code>、<code>_drive_recovery</code>、<code>rl_strict_failure</code></td></tr>
+    <tr><td>B6</td><td>全部 learner 完成 → 拆岛，打印 “run finished; model + checkpoint live on the head”</td><td><code>FleetController</code> 收尾 → Modal app stop / <code>sky down</code></td></tr>
+  </table></div>
+
+  <h3>C. 岛：<code>yeto.rl.learner</code></h3>
+  <div class="tablewrap"><table>
+    <tr><th>步骤</th><th>做什么</th><th>代码</th></tr>
+    <tr><td>C1</td><td>再验一遍：源码树 SHA、model/data revision 不可变、reward SHA 与 head 给的一致</td><td><code>learner.main</code>；<code>verify_source_tree_sha256</code>、<code>python_spec_sha256</code></td></tr>
+    <tr><td>C2</td><td>校验 <code>~/miles</code>：HEAD == <code>MILES_COMMIT</code>、origin == <code>MILES_REPOSITORY</code>、detached、干净</td><td><code>yeto/rl/miles.py</code> 的 Miles 检出校验（<code>MILES_COMMIT</code> 处）</td></tr>
+    <tr><td>C3</td><td>把 CLI 参数翻成 Miles 的 <code>args</code>：LoRA、GRPO、rollout 规模、<code>external_policy_sync_path = yeto.rl.miles:…</code>、<code>yeto_rl_*</code> 一族、事件 tape 路径 <code>~/yeto-output/rl-island-&lt;id&gt;.jsonl</code></td><td><code>learner.run_miles</code></td></tr>
+    <tr><td>C4</td><td>进入 Miles：<code>asyncio.run(miles_train(args))</code></td><td><code>~/miles/train.py</code> <code>train</code></td></tr>
+  </table></div>
+
+  <h3>D. Miles 训练循环里的 Yeto 钩子</h3>
+  <div class="tablewrap"><table>
+    <tr><th>步骤</th><th>做什么</th><th>代码</th></tr>
+    <tr><td>D1</td><td><code>_load_external_policy_sync</code> 按路径实例化 <code>MilesPolicySync(args)</code>（decoupled 预设则是 <code>DecoupledMilesPolicySync</code>）</td><td><code>train.py:253</code>；<code>yeto/rl/miles.py</code> <code>MilesPolicySync</code></td></tr>
+    <tr><td>D2</td><td><code>initialize</code>：导出初始 adapter → <code>_BridgeRuntime</code> → <code>StrictRlBridge.start</code> 向 syncer 发 INIT_PARAMS → 等全局 v0 → <code>_apply_global_policy</code> → <code>wait_for_round</code> 拿许可；<code>start_rollout_id</code> 设为全局版本</td><td><code>MilesPolicySync._initialize</code>；<code>yeto/rl/bridge.py</code> <code>StrictRlBridge</code></td></tr>
+    <tr><td>D3</td><td>每轮：<code>rollout_manager.generate</code>（SGLang 采样，调用 reward 函数，按组归一化 reward = 优势）→ <code>actor_model.train</code>（Megatron：反向、DDP hook 把梯度写进 <code>main_grad</code>、<code>optimizer.step</code> 返回 <code>grad_norm</code>）</td><td><code>train.py</code> 循环；<code>miles/backends/megatron_utils/actor.py</code></td></tr>
+    <tr><td>D4</td><td><code>after_local_train</code>：见图二的 6 步；期间 <code>_collective_adapter_tensors</code> 和 <code>apply_trainable_state</code> 都用 <code>_optimizer_masters_as_model_parameters</code> 暴露 fp32 master</td><td><code>MilesPolicySync._after_local_train</code>；<code>miles/backends/megatron_utils/trainable_state.py</code></td></tr>
+    <tr><td>D5</td><td>syncer 侧：收齐 quorum → 合并（strict-avg 等权平均）→ 写 tape：<code>outer step</code>、<code>gnorm</code>（全局 delta 范数）、<code>quorum_ms</code>、<code>sync_ms</code>（只是 merge 耗时）</td><td><code>syncer/src/server.rs</code></td></tr>
+    <tr><td>D6</td><td><code>save</code>（岛 checkpoint 含 rollout metrics）→ <code>update_weights</code> 把新 adapter 发布给 SGLang → 下一轮</td><td><code>train.py</code>；<code>MilesPolicySync._rollout_metrics</code> 读回这个 checkpoint</td></tr>
+    <tr><td>D7</td><td>最后一轮：<code>finalize</code> → final cut → syncer “training complete after N outer steps” → learner 进程退出 0</td><td><code>MilesPolicySync.finalize</code>、<code>StrictRlBridge.finalize</code></td></tr>
+  </table></div>
+
+  <h3>E. 回收</h3>
+  <div class="tablewrap"><table>
+    <tr><th>步骤</th><th>做什么</th><th>代码</th></tr>
+    <tr><td>E1</td><td>head 自己拆岛（Modal app stop；sky 岛 <code>sky down</code>），head job 结束但 head VM 留着（模型和 checkpoint 在上面）</td><td><code>FleetController</code> 收尾</td></tr>
+    <tr><td>E2</td><td>本机 <code>yeto down &lt;prefix&gt;</code>：按 registry 里记的集群名 <code>sky down</code> head、再 stop 一次 Modal app</td><td><code>yeto/cli.py</code> <code>cmd_down</code>、<code>_sky_down_cluster</code></td></tr>
+    <tr><td>E3</td><td>核验：<code>modal app list</code> 为 stopped/0 tasks；<code>nebius compute instance list</code> 无自己前缀</td><td>手工</td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2>四、这次踩到的三处，各在哪一步</h2>
+  <div class="note">
+    <ul>
+      <li><strong>B1</strong> 没合 pr10 时，syncer 一启动就因 <code>--resume</code> 找不到 checkpoint 退出，岛开出来也连不上（gh1）。</li>
+      <li><strong>B4/B5</strong> sky 云上的 RL 岛：run 脚本先 <code>ray stop --force</code>，把 SkyPilot 自带的 Ray（6380）也杀了，sky 把集群标成 INIT，<code>_probe</code> 当失联，无限 relaunch（gh2，第 37 条）。Modal 岛没有 sky 在旁边，所以没事。</li>
+      <li><strong>E2</strong> head 用 sky 开的岛不在本机 registry 里，先拆 head 就留下孤儿 VM（第 36 条）。</li>
+    </ul>
+  </div>
+  <p></p>
+  <div class="fix">
+    <strong>D4 的修复</strong>：<code>_optimizer_masters_as_model_parameters</code> 不再把 fp32 master 赋给 bf16 <code>Parameter.data</code>（那会重置梯度累加器、丢掉 DDP hook），而是临时替换模块 <code>_parameters</code> 里的条目。gh4 上 <code>train/grad_norm</code> 从恒为 0.0 变成 0.028/0.022/0.022/0.015/0.025/0.027，tape 的 <code>gnorm</code> 从 4e-6 变成 0.0117 起、随 lr 衰减。
+  </div>
+</section>
+</main>
