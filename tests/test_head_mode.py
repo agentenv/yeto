@@ -392,6 +392,22 @@ def test_head_down_script_downs_each_learner():
     assert 'print(f"[head] {c}: down", flush=True)' in script
     # Non-interactive ssh has no conda hook; the system python3 has no sky.
     assert script.index("~/miniconda3/bin/python3") < script.index("import sky")
+def test_head_syncer_counts_external_learner_seats(monkeypatch):
+    """--external-learners seats must be in the head syncer's --learners, or
+    it rejects the manual joiner ("learner id 1 is outside 0..1")."""
+    seen = {}
+
+    class FakeSyncer:
+        def __init__(self, args, n):
+            seen["n"] = n
+            raise SystemExit(0)  # stop cmd_head right after sizing the syncer
+
+    monkeypatch.setattr(launcher, "LocalSyncer", FakeSyncer)
+    ns = cli.parse_args(LAUNCH_ARGS + ["--external-learners", "1", "--cluster-prefix", "hx"])
+    payload = json.dumps(cli._serializable_args(ns))
+    with pytest.raises(SystemExit):
+        cli.cmd_head(payload)
+    assert seen["n"] == 3  # two --gpu islands + one external seat
 
 
 def test_logs_head_run_streams_from_head(fake_sky, capsys):
@@ -604,3 +620,22 @@ def test_local_syncer_command_matches_cluster_syncer_flags():
     assert "--resume" in cmd
     assert "--mark-final-checkpoint" in cmd
     assert f"--port {launcher.SYNCER_PORT}" in cmd
+
+
+def test_rl_launch_records_the_run_under_its_own_name(fake_sky, monkeypatch, tmp_path):
+    """The RL env pass-through loop reused `name`, so the run was recorded
+    (and printed) as 'CYBERGYM_REWARD_VIEW' instead of the cluster prefix."""
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)  # the head needs fleet credentials
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(cli, "_spawn_worker", lambda name: pytest.fail("no local worker"))
+    monkeypatch.setenv("CYBERGYM_REWARD_VIEW", "x")
+    fake_sky["next_job_id"] = 7
+    ns = cli.parse_args(LAUNCH_ARGS + ["--cluster-prefix", "rl1"])
+    ns.training_mode = "rl"
+    from yeto import launcher
+
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    assert cli.cmd_launch_head(ns) == 0
+    meta = runs.load_run("rl1")
+    assert meta["head_job_id"] == 7 and meta["state"] == runs.SUBMITTED

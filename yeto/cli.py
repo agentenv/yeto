@@ -1394,9 +1394,10 @@ def cmd_launch_head(args) -> int:
     if args.training_mode == "rl" and os.environ.get("CYBERGYM_API_KEY"):
         envs["CYBERGYM_API_KEY"] = os.environ["CYBERGYM_API_KEY"]
     if args.training_mode == "rl":
-        for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
-            if os.environ.get(name):
-                envs[name] = os.environ[name]
+        # Not `name`: that is the run's name, used below to record it.
+        for env_name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
+            if os.environ.get(env_name):
+                envs[env_name] = os.environ[env_name]
     if getattr(args, "wandb", False) and os.environ.get("WANDB_API_KEY"):
         # The head authenticates its own event-tape run and re-exports the
         # key onto every learner cluster it launches.
@@ -1440,7 +1441,9 @@ def cmd_head(payload: str) -> int:
     from .gpu_spec import parse_gpu_spec
 
     args = argparse.Namespace(**json.loads(payload))
-    num_learners = len(parse_gpu_spec(args.gpu))
+    # Same count launcher.run uses: --gpu islands plus --external-learners
+    # seats; without the seats the syncer rejects every manual joiner.
+    num_learners = len(parse_gpu_spec(args.gpu)) + (getattr(args, "external_learners", 0) or 0)
     syncer = launcher.LocalSyncer(args, num_learners)
     syncer.start()
     syncer.start_log_forwarder()
