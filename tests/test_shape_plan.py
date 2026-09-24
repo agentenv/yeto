@@ -519,10 +519,12 @@ def _without_gap_notes(d):
     d["warnings"] = [
         w for w in d["warnings"] if not any(a in w for a in _ADVISORIES_ADDED_BY_THIS_CHANGE)
     ]
-    # `price_source` (per island) is a new field; the snapshot predates it
-    # and every snapshot price is a catalog price.
+    # `price_source` (per island) and `island_shape` (top level) are new
+    # fields; the snapshot predates them, every snapshot price is a catalog
+    # price and every snapshot plan is an SFT (memory-sized) plan.
     assert all(i.get("price_source", "catalog") == "catalog" for i in d["islands"])
     d["islands"] = [{k: v for k, v in i.items() if k != "price_source"} for i in d["islands"]]
+    assert d.pop("island_shape", None) is None
     return d
 
 
@@ -835,6 +837,87 @@ def test_modal_multi_container_requires_whole_nodes(multi_cloud_env):
     # whole-node wording in test_shape_catalog).
     reasons = {r.key: r.reason for r in result.rejections}
     assert "modal:3x4xh100" in reasons and "modal:3x4xh100" not in result.plan.counts
+
+
+# --- RL island shapes -----------------------------------------------------------
+
+
+def _rl_shape(**kw):
+    from yeto.shape.plan import IslandShape
+
+    base = dict(
+        gpus_per_node=8, num_nodes=1, single_node_only=True, needs_container_image=True,
+        spot_needs_storage=True, label="rl", note="actor 4 + rollout 4, disjoint",
+    )
+    base.update(kw)
+    return IslandShape(**base)
+
+
+def test_rl_split_mode_prices_fixed_single_node_islands(multi_cloud_env, monkeypatch):
+    import json
+
+    from yeto.shape import catalog as catalog_mod
+
+    # Clouds: aws (image + storage verified), runpod (image verified,
+    # storage not), nebius (image not verified). Plus a 1xH100 shape that
+    # does not match the 8-per-node island.
+    extra = [Offering("H100", "p5.4xlarge", 1, 16, "us-east-2", 6.0, 12.0, 80)]
+
+    def offerings(regions, gpus, cache, clouds=("aws",)):
+        out = [o for o in OFFERINGS + RUNPOD_OFFERINGS + extra if not gpus or o.gpu in gpus]
+        return [o for o in out if o.cloud in clouds]
+
+    monkeypatch.setattr(plan_mod, "list_offerings", offerings)
+    monkeypatch.setattr(plan_mod, "VERIFIED_DOCKER_IMAGE_CLOUDS", frozenset({"aws", "runpod"}))
+    monkeypatch.setattr(plan_mod, "VERIFIED_SPOT_STORAGE_CLOUDS", frozenset({"aws"}))
+    rp = FakeRunPod({("H100", 8): 9})
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_OFFERINGS)
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "runpod", "nebius"),
+        signals={"runpod": rp, "nebius": neb}, gpus=["H100"], island_shape=_rl_shape(),
+    )
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "rl island needs 8 GPUs per node" in reasons["aws:1xh100@us-east-2"]
+    assert "nebius not verified for container-image launch" in reasons["nebius:8xh100@eu-north1"]
+    aws_cand = next(c for c in result.candidates if c.cloud == "aws")
+    assert (aws_cand.price_per_hour, aws_cand.price_source, aws_cand.nodes) == (34.0, "catalog", 1)
+    rp_cand = next(c for c in result.candidates if c.cloud == "runpod")
+    assert (rp_cand.price_per_hour, rp_cand.price_source) == (23.12, "on-demand")  # not the 19.12 spot
+    assert not any(c.cloud == "nebius" for c in result.candidates)
+    assert any("nebius: not verified for container-image launch; 1 rl island shape(s) skipped" in w for w in result.warnings)
+    assert any("runpod: spot checkpoint storage not verified; rl islands priced on-demand" in w for w in result.warnings)
+    text = plan_mod.render(result, "gemma4", 500.0, "lora", data="org/data")
+    assert "RL island shape: 8 GPUs/node x 1 node(s) (actor 4 + rollout 4, disjoint); container image required: yes" in text
+    assert "on-demand $23.12/hr/island" in text
+    argv = plan_mod.launch_argv(result, "gemma4", "lora", "org/data")
+    assert argv[-2:] == ["--training-mode", "rl"]
+    d = plan_mod.to_json_dict(result, "gemma4", 500.0, "lora", "org/data")
+    assert d["island_shape"] == {
+        "label": "rl", "gpus_per_node": 8, "num_nodes": 1, "single_node_only": True,
+        "needs_container_image": True, "spot_needs_storage": True, "note": "actor 4 + rollout 4, disjoint",
+    }
+    json.dumps(d)
+    # The verified sets are plain constants in catalog (verification tasks fill them).
+    assert catalog_mod.VERIFIED_SPOT_STORAGE_CLOUDS <= catalog_mod.VERIFIED_DOCKER_IMAGE_CLOUDS
+
+
+def test_rl_colocated_mode_allows_multi_node_islands(multi_cloud_env):
+    # 66 GB would be a 1-node island by the memory model; the RL shape pins
+    # 2 nodes of 8 (actor spans nodes, rollout colocated).
+    shape = _rl_shape(num_nodes=2, single_node_only=False, note="actor 8, rollout colocated")
+    result = _shape(multi_cloud_env, budget=500.0, gpus=["H100"], island_shape=shape)
+    assert result.plan.counts == {"aws:2x8xh100@us-east-2": 1}
+    assert plan_mod.to_json_dict(result, "gemma4", 500.0, "lora", None)["island_shape"]["num_nodes"] == 2
+
+
+def test_island_shape_validation():
+    from yeto.shape.plan import IslandShape
+
+    with pytest.raises(ValueError, match="single-node only"):
+        IslandShape(gpus_per_node=8, num_nodes=2, single_node_only=True)
+    with pytest.raises(ValueError, match="at least one GPU"):
+        IslandShape(gpus_per_node=0)
+    assert plan_mod.island_shape_dict(None) is None
 
 
 def test_single_node_cloud_warns_when_model_needs_multi_node(multi_cloud_env):
