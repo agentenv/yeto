@@ -52,6 +52,7 @@ class Candidate:
     # instead of being dropped outright.
     max_count: int | None = None
     cloud: str = "aws"  # lowercase sky cloud name
+    price_source: str = "catalog"  # "catalog" or "live" (see catalog.Offering)
 
 
 @dataclass

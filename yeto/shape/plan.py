@@ -225,7 +225,31 @@ def build_shape(
             )
     offerings = [o for o in unfiltered if region_filter.allows(o.cloud, o.region)]
 
+    # Live prices: a cloud that can quote its current spot rate overrides
+    # the catalog (sky's dump lags dynamic pricing); the override is what
+    # the budget is enforced against, and rendering marks it.
     signal_notes: list[str] = []
+    price_notes: list[str] = []
+    for name, sig in signals.items():
+        mine = [o for o in offerings if o.cloud == name]
+        live_fn = getattr(sig, "live_spot_prices", None)
+        if not mine or live_fn is None:
+            continue
+        try:
+            live = live_fn(mine) or {}
+        except Exception as exc:  # noqa: BLE001 - keep planning on catalog prices
+            signal_notes.append(f"{name} live pricing failed ({exc}); catalog prices used")
+            continue
+        if live:
+            offerings = [
+                replace(o, spot_price=float(live[(o.instance_type, o.region)]), price_source="live")
+                if (o.instance_type, o.region) in live
+                else o
+                for o in offerings
+            ]
+            price_notes.append(
+                f"{name}: {len(live)} spot price(s) from the live pricing API override the catalog"
+            )
     # AWS placement-score asks take a stable region list: the user's
     # allowlist, or every catalog region when unrestricted.
     aws_wanted = region_filter.for_cloud("aws")
@@ -484,6 +508,7 @@ def build_shape(
                 score=score,
                 assumed=assumed,
                 cloud=off.cloud,
+                price_source=off.price_source,
             )
         )
 
@@ -597,6 +622,7 @@ def build_shape(
         + [w for name in sorted(signals) for w in getattr(signals[name], "warnings", [])]
         + region_notes
         + gap_notes
+        + price_notes
         + shape_notes
         + signal_notes
         + [
@@ -668,6 +694,7 @@ def to_json_dict(result: ShapeResult, model: str, budget: float, tuning: str, da
                 "score": by_key[key].score,
                 "score_assumed": by_key[key].assumed,
                 "est_price_per_hour": by_key[key].price_per_hour,
+                "price_source": by_key[key].price_source,
                 "eff_tflops": by_key[key].eff_tflops,
             }
             for key, n in sorted(result.plan.counts.items())
@@ -721,8 +748,9 @@ def render(
                 shown = f"stock≈{c.score}"
             else:
                 shown = str(c.score)
+            live = " (live)" if c.price_source == "live" else ""
             out.append(
-                f"  {n}x {key}  spot est ${c.price_per_hour:.2f}/hr/island  "
+                f"  {n}x {key}  spot est ${c.price_per_hour:.2f}/hr/island{live}  "
                 f"score {shown}  {c.eff_tflops:.1f} TFLOPs/island"
             )
         out.append(f"  head: on-demand CPU VM  ${result.head_cost:.2f}/hr")

@@ -66,6 +66,12 @@ def test_rdma_capable_per_cloud():
 
     # AWS keeps the EFA-family rule.
     assert rdma_capable("aws", "p5.48xlarge") and not rdma_capable("aws", "g5.48xlarge")
+    # Nebius: 8-GPU SXM presets sit in an InfiniBand GPU cluster; PCIe
+    # (l40s) and partial-node presets do not.
+    assert rdma_capable("nebius", "gpu-h100-sxm_8gpu-128vcpu-1600gb")
+    assert rdma_capable("nebius", "gpu-b200-sxm-a_8gpu-160vcpu-1792gb")
+    assert not rdma_capable("nebius", "gpu-h100-sxm_1gpu-16vcpu-200gb")
+    assert not rdma_capable("nebius", "gpu-l40s-d_4gpu-128vcpu-768gb")
     # Clouds sky provisions as single machines never get a fabric.
     assert not rdma_capable("runpod", "8x_H100_SECURE")
     assert RDMA_CLOUDS <= MULTI_NODE_CLOUDS
@@ -78,12 +84,16 @@ def test_multi_node_rejection_reasons():
     from yeto.shape.catalog import multi_node_rejection
 
     assert multi_node_rejection("aws", "H100", 8) is None
+    assert multi_node_rejection("nebius", "H100", 8) is None
     assert multi_node_rejection("modal", "H100", 8) is None
     assert multi_node_rejection("runpod", "H100", 8) == "multi-node islands unsupported on runpod"
     assert multi_node_rejection("modal", "H100", 4) == (
         "Modal multi-container islands must use whole nodes (H100:8 per container)"
     )
     assert "whole-node GPU, not L4" in multi_node_rejection("modal", "L4", 4)
+    # And effective_tflops routes through it.
+    neb = _offering(gpu="H100", instance_type="gpu-h100-sxm_8gpu-128vcpu-1600gb", region="eu-north1", cloud="nebius")
+    assert effective_tflops(neb, nodes=2, score=None) == 2 * 8 * 989.0 * 0.30 * 0.85
 
 
 def _fake_raw():
