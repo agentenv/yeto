@@ -1592,16 +1592,16 @@ def make_miles_island_task(
         # Megatron refuses TP>1 or CP>1 without this; it is exported before
         # `ray start` so every Ray worker inherits it.  Harmless at TP1.
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-        "NVTE_FLASH_ATTN": "0",
-        "NVTE_FUSED_ATTN": "0",
-        "NVTE_UNFUSED_ATTN": "1",
+        # No NVTE_*_ATTN pins here: the learner passes --attention-backend
+        # per recipe (unfused for the generic provider, flash for
+        # gated-delta-net hybrids and DeepSeek V4) and Megatron sets the
+        # three NVTE variables itself from that choice; a pin that
+        # disagrees makes it assert at model construction.
         "CYBERGYM_URL": args.cybergym_url,
         "CYBERGYM_AGENT_ID": args.cybergym_agent_id,
         "CYBERGYM_TIMEOUT": str(args.cybergym_timeout),
     }
     if args.rl_model_recipe == "deepseek-v4-flash":
-        for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
-            envs.pop(name, None)
         envs.update(
             {
                 "SGLANG_SKIP_CHECKPOINT_LOAD_CHECK": "1",

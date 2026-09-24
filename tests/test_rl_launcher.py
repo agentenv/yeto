@@ -1294,9 +1294,10 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
         assert duplicate_check not in task.setup
     assert f"pip install -q --no-deps -e ~/miles 'peft=={MILES_PEFT_VERSION}'" in task.setup
     assert "pip install -q --no-deps -e ~/sglang/python" in task.setup
-    assert task.envs["NVTE_FLASH_ATTN"] == "0"
-    assert task.envs["NVTE_FUSED_ATTN"] == "0"
-    assert task.envs["NVTE_UNFUSED_ATTN"] == "1"
+    # The attention backend is the learner's per-recipe choice; a pinned
+    # NVTE_*_ATTN would make Megatron assert for the flash recipes.
+    for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        assert name not in task.envs
     # Megatron asserts this for TP>1; the island exports it for every run.
     assert task.envs["CUDA_DEVICE_MAX_CONNECTIONS"] == "1"
     assert task.envs["CYBERGYM_URL"] == "http://10.0.0.8:8666"
