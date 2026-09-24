@@ -104,6 +104,18 @@ def fake_sky(monkeypatch):
     return record
 
 
+@pytest.fixture
+def fake_aws_env(monkeypatch, tmp_path):
+    """Head mode requires the fleet's cloud credentials before submitting;
+    give these tests a fake home with ~/.aws so they never depend on the
+    host's real credentials (and add no head envs)."""
+    home = tmp_path / "aws-home"
+    (home / ".aws").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # args JSON round-trip through the `_head` serialization
 
@@ -176,7 +188,7 @@ def test_cmd_head_reconstructs_args_and_starts_syncer(monkeypatch):
 # cmd_launch in head mode: registry recording with sky stubbed
 
 
-def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
+def test_launch_head_records_registry(fake_sky, fake_aws_env, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_spawn_worker", lambda name: pytest.fail("head mode must not spawn a local worker"))
     fake_sky["next_job_id"] = 42
 
@@ -198,7 +210,7 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
     assert "~/yeto-syncer" not in head_task.file_mounts
     assert head_task.resources.kwargs["use_spot"] is False
     assert head_task.resources.kwargs["infra"] == "aws/us-west-2"
-    assert 'pip install -q "skypilot[aws,gcp]>=0.12"' in head_task.setup
+    assert 'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]>=0.12"' in head_task.setup
     assert "cargo build --release --quiet" in head_task.setup
     assert "touch ~/.yeto_head_ready" in head_task.setup
     (exec_cluster, job_task), = fake_sky["execs"]
@@ -212,7 +224,7 @@ def test_launch_head_records_registry(fake_sky, monkeypatch, capsys):
 
 
 def test_rl_head_forwards_cybergym_secret_without_serializing_it(
-    fake_sky, monkeypatch
+    fake_sky, fake_aws_env, monkeypatch
 ):
     monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
     monkeypatch.setenv("CYBERGYM_REWARD_SCHEME", "shaped_v1")
@@ -243,7 +255,7 @@ def test_rl_head_forwards_cybergym_secret_without_serializing_it(
 
 
 def test_rl_head_stages_the_initial_adapter_for_learner_mounts(
-    fake_sky, monkeypatch, tmp_path
+    fake_sky, fake_aws_env, monkeypatch, tmp_path
 ):
     adapter = tmp_path / "adapter"
     adapter.mkdir()
@@ -293,15 +305,98 @@ def test_launch_head_mounts_aws_credentials_when_present(
     assert head_task.file_mounts["~/.aws"] == str(fake_home / ".aws")
 
 
-def test_launch_head_warns_when_aws_credentials_missing(
+def test_launch_head_fails_before_submit_when_aws_credentials_missing(
     fake_sky, monkeypatch, tmp_path, capsys
 ):
+    # The fleet (and the head itself) live on AWS: no ~/.aws means the head
+    # could never launch or tear down islands, so nothing is submitted.
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.delenv(var, raising=False)
 
-    assert cli.main(["launch", *LAUNCH_ARGS, "--cluster-prefix", "h3"]) == 0
+    assert cli.main(["launch", *LAUNCH_ARGS, "--cluster-prefix", "h3"]) == 1
+    assert not fake_sky.get("launches")
+    assert "aws credentials not found at ~/.aws" in capsys.readouterr().err
+
+
+def test_launch_head_mounts_only_the_clouds_the_fleet_uses(fake_sky, monkeypatch, tmp_path):
+    fake_home = tmp_path / "home"
+    for d in (".aws", ".verda", ".runpod", ".nebius"):
+        (fake_home / d).mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    rc = cli.main([
+        "launch", "--gpu", "aws:8xa100@us-east-2,verda:8xh100@FIN-03", "--model", "gemma4",
+        "--model-revision", "a" * 40, "--data", "org/ds", "--data-revision", "b" * 40,
+        "--cluster-prefix", "h4",
+    ])
+    assert rc == 0
     (_, head_task), = fake_sky["launches"]
-    assert "~/.aws" not in head_task.file_mounts
-    assert "~/.aws not found" in capsys.readouterr().err
+    assert head_task.file_mounts["~/.aws"] == str(fake_home / ".aws")
+    assert head_task.file_mounts["~/.verda"] == str(fake_home / ".verda")
+    assert "~/.runpod" not in head_task.file_mounts and "~/.nebius" not in head_task.file_mounts
+    assert "modal" not in head_task.setup  # no modal: island, no Modal SDK on the head
+
+
+def test_head_installs_the_modal_sdk_when_the_fleet_has_a_modal_island(fake_sky, monkeypatch, tmp_path):
+    fake_home = tmp_path / "home"
+    (fake_home / ".nebius").mkdir(parents=True)
+    (fake_home / ".modal.toml").write_text("[default]\n")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    args = cli.parse_args([
+        "--gpu", "modal:1xh100", "--syncer-region", "nebius/eu-north1", "--model", "gemma4",
+        "--model-revision", "a" * 40, "--data", "org/ds", "--data-revision", "b" * 40,
+        "--cluster-prefix", "hm",
+    ])
+    assert cli.cmd_launch_head(args) == 0
+    (_, head_task), = fake_sky["launches"]
+    assert 'pip install -q "modal>=1.0"' in head_task.setup
+    assert head_task.file_mounts["~/.modal.toml"] == str(fake_home / ".modal.toml")
+
+
+def test_launch_head_fails_before_submit_when_nebius_credentials_missing(
+    fake_sky, monkeypatch, tmp_path, capsys
+):
+    fake_home = tmp_path / "home"
+    (fake_home / ".aws").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    for var in ("NEBIUS_IAM_TOKEN", "NEBIUS_TENANT_ID"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = tmp_path / "sky.yaml"
+    cfg.write_text("nebius:\n  region_configs:\n    eu-north1:\n      project_id: project-1\n")
+    monkeypatch.setenv("SKYPILOT_CONFIG", str(cfg))
+
+    rc = cli.main([
+        "launch", "--gpu", "nebius:8xh100@eu-north1", "--model", "gemma4",
+        "--model-revision", "a" * 40, "--data", "org/ds", "--data-revision", "b" * 40,
+        "--cluster-prefix", "h5",
+    ])
+    assert rc == 1
+    assert not fake_sky.get("launches")
+    assert "nebius credentials not found at ~/.nebius" in capsys.readouterr().err
+
+
+def test_learner_islands_never_receive_cloud_credentials(fake_sky, monkeypatch, tmp_path):
+    from yeto import launcher
+    from yeto.gpu_spec import parse_gpu_spec
+
+    fake_home = tmp_path / "home"
+    (fake_home / ".aws").mkdir(parents=True)
+    (fake_home / ".modal.toml").write_text("[default]\n")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s3cr3t")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "ak-1")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-1")
+    args = cli.parse_args(LAUNCH_ARGS + ["--gpu", "aws:8xa100@us-east-2,modal:8xh100", "--cluster-prefix", "h6"])
+    (aws_spec, modal_spec) = parse_gpu_spec(args.gpu)
+    task = launcher.make_learner_task(args, aws_spec, 0, 2, "1.2.3.4:5000")
+    cred_paths = [p.lstrip("~/") for ps in launcher.CLOUD_CREDENTIAL_PATHS.values() for p in ps]
+    assert not set(task.envs) & launcher.CLOUD_CREDENTIAL_ENV_NAMES
+    assert not any(any(cp in m for cp in cred_paths) for m in (task.file_mounts or {}))
+    cfg = launcher.build_modal_island_config(args, modal_spec, 1, task, "1.2.3.4:5000")
+    assert not set(cfg.envs) & launcher.CLOUD_CREDENTIAL_ENV_NAMES
 
 
 def test_modal_island_task_never_asks_sky_for_modal_resources(fake_sky, monkeypatch):

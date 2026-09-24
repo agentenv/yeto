@@ -628,6 +628,90 @@ def prepare_launch_args(
     )
 
 
+# Where each cloud's own tooling stores credentials on the submitting
+# machine, and the env vars that stand in for the file. The head VM gets
+# the files mounted (or the vars forwarded) for every cloud its fleet
+# touches — and nothing for clouds it does not.
+CLOUD_CREDENTIAL_PATHS: dict[str, tuple[str, ...]] = {
+    "aws": ("~/.aws",),
+    "gcp": ("~/.config/gcloud",),
+    "runpod": ("~/.runpod",),
+    "nebius": ("~/.nebius",),
+    "verda": ("~/.verda",),
+    "modal": ("~/.modal.toml",),
+}
+CLOUD_CREDENTIAL_ENV: dict[str, tuple[str, ...]] = {
+    "aws": ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+    "runpod": ("RUNPOD_API_KEY",),
+    "nebius": ("NEBIUS_IAM_TOKEN", "NEBIUS_TENANT_ID"),
+    "verda": ("VERDA_CLIENT_ID", "VERDA_CLIENT_SECRET"),
+    "modal": ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"),
+}
+# Everything a learner island may legitimately receive; anything in
+# CLOUD_CREDENTIAL_ENV or CLOUD_CREDENTIAL_PATHS must never reach one.
+CLOUD_CREDENTIAL_ENV_NAMES = frozenset(v for vals in CLOUD_CREDENTIAL_ENV.values() for v in vals)
+
+
+def head_cloud(args) -> str:
+    """The cloud the head/syncer VM is placed on (`--syncer-region` is
+    'region' for AWS or 'cloud/region')."""
+    region = getattr(args, "syncer_region", None) or ""
+    return region.split("/", 1)[0].lower() if "/" in region else "aws"
+
+
+def fleet_clouds(args) -> list[str]:
+    """Every cloud this launch touches: the learner islands' plus the head's."""
+    clouds = [head_cloud(args)] if getattr(args, "controller", "local") == "head" else []
+    if getattr(args, "gpu", None):
+        clouds += [s.cloud for s in parse_gpu_spec(args.gpu)]
+    return list(dict.fromkeys(clouds))
+
+
+def head_cloud_credentials(clouds: list[str], environ=None) -> tuple[dict[str, str], dict[str, str]]:
+    """(file_mounts, envs) that carry each cloud's credentials onto the
+    head. A cloud with neither its file(s) nor its env vars present is a
+    ValueError naming the expected path — before the head is submitted.
+    GCP is only ever optional (gs:// output uploads)."""
+    environ = os.environ if environ is None else environ
+    mounts: dict[str, str] = {}
+    envs: dict[str, str] = {}
+    for cloud in clouds:
+        paths = CLOUD_CREDENTIAL_PATHS.get(cloud)
+        if paths is None:
+            continue  # a cloud sky handles with no local files we know of
+        present = [p for p in paths if os.path.exists(os.path.expanduser(p))]
+        for p in present:
+            mounts[p] = os.path.expanduser(p)
+        if present:
+            continue
+        env_names = CLOUD_CREDENTIAL_ENV.get(cloud, ())
+        if env_names and all(environ.get(v) for v in env_names):
+            for v in env_names:
+                envs[v] = environ[v]
+            continue
+        if cloud == "gcp":
+            continue
+        hint = f" or env {' + '.join(env_names)}" if env_names else ""
+        raise ValueError(
+            f"{cloud} credentials not found at {', '.join(paths)}{hint}; the head VM "
+            f"needs them to launch and tear down {cloud} islands (see docs/CLOUDS.md)"
+        )
+    gcloud = os.path.expanduser("~/.config/gcloud")
+    if os.path.isdir(gcloud):
+        mounts.setdefault("~/.config/gcloud", gcloud)  # enables gs:// --output
+    if "nebius" in clouds:
+        # Nebius binds one project to one region and sky reads the project
+        # per region from its config; the head re-runs the project check and
+        # provisions Nebius islands itself, so it needs the same file.
+        # (Presence is checked before submission by check_cloud_prerequisites.)
+        from .shape.providers import SKY_CONFIG_PATH
+
+        sky_config = os.path.expanduser(SKY_CONFIG_PATH)
+        if os.path.isfile(sky_config):
+            mounts[SKY_CONFIG_PATH] = sky_config
+    return mounts, envs
+
+
 def check_cloud_prerequisites(
     specs: list[ClusterSpec],
     project_ids: dict[str, str] | None = None,

@@ -1,0 +1,26 @@
+=== verified at 2026-09-23T14:35:41Z ===
+
+=== sky status ===
+Enabled Infra: aws, nebius, verda
+
+Clusters
+NAME             INFRA               RESOURCES                                    STATUS  AUTOSTOP  LAUNCHED     
+yeto-rl84f-head  Nebius (eu-north1)  1x(cpus=8, mem=32, cpu-d3_8vcpu-32..., ...)  UP      -         26 mins ago  
+
+Managed jobs
+No in-progress managed jobs. (See: sky jobs -h)
+
+Services
+No live services. (See: sky serve -h)
+
+=== modal app list ===
+yeto-yeto-mix87b | stopped | tasks 0 | stopped_at 2026-09-23 14:34:19+00:00
+yeto-yeto-rl84f | stopped | tasks 0 | stopped_at 2026-09-23 14:32:28+00:00
+yeto-yeto-mix87 | stopped | tasks 0 | stopped_at 2026-09-23 14:22:02+00:00
+
+=== nebius instances (eu-north1 project) ===
+instances: 2
+ - yeto-rl84f-head-2aebdd34-8456-head RUNNING
+ - cyberrl-verl-smoke-20260923 STOPPED
+
+=== aws us-east-1 running/pending instances ===
