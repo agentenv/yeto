@@ -436,3 +436,218 @@ def test_modal_price_table_staleness_warning(monkeypatch):
     sig = p.ModalSignals(cache=None)
     sig.offerings(None, ["H100"], None)
     assert any("recorded 2026-09-23 (120 days ago)" in w for w in sig.warnings)
+
+
+# --- Nebius ------------------------------------------------------------------
+
+
+def test_nebius_registered_and_gpu_table_is_plannable():
+    from yeto.shape.catalog import PEAK_TFLOPS_BF16
+    from yeto.shape.providers import _NEBIUS_PLATFORMS, CLOUD_SIGNALS, NebiusSignals
+
+    assert CLOUD_SIGNALS["nebius"] is NebiusSignals
+    assert set(_NEBIUS_PLATFORMS) <= set(PEAK_TFLOPS_BF16)
+    assert NebiusSignals(cache=None).known_gpus() == frozenset(_NEBIUS_PLATFORMS)
+
+
+def test_nebius_available_needs_token_and_tenant(monkeypatch, tmp_path):
+    from yeto.shape.providers import NebiusSignals
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for var in ("NEBIUS_IAM_TOKEN", "NEBIUS_TENANT_ID"):
+        monkeypatch.delenv(var, raising=False)
+    sig = NebiusSignals(cache=None)
+    assert not sig.available()
+    assert "NEBIUS_IAM_TOKEN.txt" in sig.credential_hint() and "NEBIUS_TENANT_ID.txt" in sig.credential_hint()
+    (tmp_path / ".nebius").mkdir()
+    (tmp_path / ".nebius" / "NEBIUS_IAM_TOKEN.txt").write_text("tok\n")
+    assert not sig.available()  # token alone is not enough
+    (tmp_path / ".nebius" / "NEBIUS_TENANT_ID.txt").write_text("tenant-1\n")
+    assert sig.available()
+    # Env vars work without the files.
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    assert not sig.available()
+    monkeypatch.setenv("NEBIUS_IAM_TOKEN", "t")
+    monkeypatch.setenv("NEBIUS_TENANT_ID", "x")
+    assert sig.available()
+
+
+def test_nebius_project_ids_from_sky_config(tmp_path):
+    from yeto.shape.providers import nebius_project_ids
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "nebius:\n  region_configs:\n    eu-north1:\n      project_id: project-e00aaa\n"
+        "      fabric: fabric-3\n    us-central1:\n      subnet_id: only-a-subnet\n"
+    )
+    assert nebius_project_ids(str(cfg)) == {"eu-north1": "project-e00aaa"}
+    assert nebius_project_ids(str(tmp_path / "missing.yaml")) == {}
+
+
+def _advice(region, platform, preset, gpus, level, available, kind="preemptible"):
+    return {
+        "spec": {
+            "region": region,
+            "computeInstance": {
+                "platform": platform,
+                "preset": {"name": preset, "resources": {"gpuCount": gpus}},
+            },
+        },
+        "status": {kind: {"availabilityLevel": f"AVAILABILITY_LEVEL_{level}", "available": available}},
+    }
+
+
+def test_nebius_scores_from_capacity_advice(monkeypatch, tmp_path):
+    from yeto.shape.catalog import Offering
+    from yeto.shape.providers import NebiusSignals
+
+    sig = NebiusSignals(TTLCache(path=tmp_path / "c.json"))
+    monkeypatch.setenv("NEBIUS_TENANT_ID", "tenant-1")
+    rows = [
+        Offering("H100", "gpu-h100-sxm_8gpu-128vcpu-1600gb", 8, 128, "eu-north1", 17.2, 30.8, 80, cloud="nebius"),
+        Offering("H200", "gpu-h200-sxm_8gpu-128vcpu-1600gb", 8, 128, "eu-north1", 19.6, 36.0, 141, cloud="nebius"),
+        Offering("H200", "gpu-h200-sxm_8gpu-128vcpu-1600gb", 8, 128, "us-central1", 19.6, 36.0, 141, cloud="nebius"),
+        Offering("B200", "gpu-b200-sxm_8gpu-160vcpu-1792gb", 8, 160, "us-central1", 31.6, 57.2, 180, cloud="nebius"),
+        Offering("L40S", "gpu-l40s-a_1gpu-8vcpu-32gb", 1, 8, "eu-north1", 0.75, 1.55, 48, cloud="nebius"),
+    ]
+    monkeypatch.setattr("yeto.shape.catalog.list_offerings", lambda regions, gpus, cache, clouds: rows)
+    got = sig.offerings({"eu-north1", "us-central1"}, None, None)
+    assert got == rows
+    calls = {"n": 0}
+
+    def fake_fetch():
+        calls["n"] += 1
+        return [
+            _advice("eu-north1-a", "gpu-h100-sxm", "8gpu-128vcpu-1600gb", 8, "HIGH", 12),  # zone suffix
+            _advice("eu-north1-a", "gpu-h200-sxm", "8gpu-128vcpu-1600gb", 8, "MEDIUM", 2),
+            _advice("us-central1-b", "gpu-h200-sxm", "8gpu-128vcpu-1600gb", 8, "HIGH", 0),  # 0 units wins
+            _advice("us-central1-b", "gpu-b200-sxm", "other-preset-name", 8, "UNKNOWN", 5),  # matched by gpuCount
+        ]
+
+    monkeypatch.setattr(sig, "_fetch_advice", fake_fetch)
+    asks = [
+        ("H100", 8, "eu-north1"),
+        ("H200", 8, "eu-north1"),
+        ("H200", 8, "us-central1"),
+        ("B200", 8, "us-central1"),
+        ("L40S", 1, "eu-north1"),  # no advice entry -> unknown, not sold out
+        ("H100", 8, "eu-west1"),  # no catalog row -> unknown
+    ]
+    assert sig.scores(asks) == {
+        ("H100", 8, "eu-north1"): 9,
+        ("H200", 8, "eu-north1"): 6,
+        ("H200", 8, "us-central1"): 0,
+        ("B200", 8, "us-central1"): 9,
+        ("L40S", 1, "eu-north1"): None,
+        ("H100", 8, "eu-west1"): None,
+    }
+    assert calls["n"] == 1  # one advice fetch serves every ask...
+    sig.scores(asks[:1])
+    assert calls["n"] == 1  # ...and the cache serves the next call
+    assert any("no catalog row" in w for w in sig.warnings)
+    assert any("lists no preemptible entry" in w for w in sig.warnings)
+
+
+def test_nebius_advice_request_respects_the_page_size_limit_and_pages(monkeypatch):
+    """The live API rejects pageSize > 200 with HTTP 400 (2026-09-23: every
+    Nebius shape fell back to the assumed score). Ask for 200 and follow
+    nextPageToken."""
+    import yeto.shape.providers as prov
+
+    monkeypatch.setattr(prov, "nebius_iam_token", lambda: "tok")
+    monkeypatch.setattr(prov, "nebius_tenant_id", lambda: "tenant-x")
+    seen = []
+
+    def fake_request(method, path, token, body=None, params=None):
+        seen.append(dict(params))
+        if int(params["pageSize"]) > 200:
+            raise RuntimeError("HTTP 400: page_size must be <= 200")
+        if "pageToken" not in params:
+            return {"items": [{"n": 1}], "nextPageToken": "p2"}
+        return {"items": [{"n": 2}]}
+
+    monkeypatch.setattr(prov, "_nebius_request", fake_request)
+    items = prov.NebiusSignals(cache=None)._fetch_advice()
+    assert items == [{"n": 1}, {"n": 2}]
+    assert [p.get("pageToken") for p in seen] == [None, "p2"]
+    assert all(p["parentId"] == "tenant-x" and int(p["pageSize"]) <= 200 for p in seen)
+
+
+def test_nebius_capacity_api_failure_degrades_to_none(monkeypatch, tmp_path):
+    from yeto.shape.providers import NebiusSignals
+
+    sig = NebiusSignals(TTLCache(path=tmp_path / "c.json"))
+    monkeypatch.setenv("NEBIUS_TENANT_ID", "tenant-1")
+    monkeypatch.setattr(sig, "_fetch_advice", lambda: (_ for _ in ()).throw(RuntimeError("HTTP 503")))
+    assert sig.scores([("H100", 8, "eu-north1")]) == {("H100", 8, "eu-north1"): None}
+    assert any("capacity check failed" in w and "503" in w for w in sig.warnings)
+
+
+def test_nebius_live_prices_need_a_project_per_region(monkeypatch, tmp_path):
+    from yeto.shape.catalog import Offering
+    from yeto.shape.providers import NebiusSignals
+
+    sig = NebiusSignals(TTLCache(path=tmp_path / "c.json"))
+    monkeypatch.setattr(
+        "yeto.shape.providers.nebius_project_ids", lambda config_path=None: {"eu-north1": "project-1"}
+    )
+    calls = []
+
+    def fake_estimate(project_id, instance_type):
+        calls.append((project_id, instance_type))
+        return 15.5
+
+    monkeypatch.setattr(sig, "_fetch_estimate", fake_estimate)
+    rows = [
+        Offering("H100", "gpu-h100-sxm_8gpu-128vcpu-1600gb", 8, 128, "eu-north1", 17.2, 30.8, 80, cloud="nebius"),
+        Offering("H100", "gpu-h100-sxm_1gpu-16vcpu-200gb", 1, 16, "eu-north1", 2.15, 3.85, 80, cloud="nebius"),
+        Offering("H200", "gpu-h200-sxm_8gpu-128vcpu-1600gb", 8, 128, "us-central1", 19.6, 36.0, 141, cloud="nebius"),
+    ]
+    out = sig.live_spot_prices(rows)
+    assert out == {
+        ("gpu-h100-sxm_8gpu-128vcpu-1600gb", "eu-north1"): 15.5,
+        ("gpu-h100-sxm_1gpu-16vcpu-200gb", "eu-north1"): 15.5,
+    }
+    assert [c[0] for c in calls] == ["project-1", "project-1"]
+    assert any("no project_id for region us-central1" in w for w in sig.warnings)
+    # On-demand planning never overrides (the catalog on-demand price holds).
+    sig.use_spot = False
+    assert sig.live_spot_prices(rows) == {}
+
+
+def test_nebius_estimate_parses_hourly_total(monkeypatch, tmp_path):
+    from yeto.shape.providers import NebiusSignals
+
+    sig = NebiusSignals(TTLCache(path=tmp_path / "c.json"))
+    seen = {}
+
+    def fake_request(method, path, token, body=None, params=None):
+        seen.update(method=method, path=path, body=body)
+        return {
+            "currency": "usd",
+            "resourceCosts": [
+                {"aggregationUnit": {"unit": "hour"}, "general": {"total": {"cost": "18.250000", "costRounded": "18.25"}}}
+            ],
+        }
+
+    monkeypatch.setenv("NEBIUS_IAM_TOKEN", "tok")
+    monkeypatch.setattr("yeto.shape.providers._nebius_request", fake_request)
+    assert sig._fetch_estimate("project-1", "gpu-h100-sxm_8gpu-128vcpu-1600gb") == 18.25
+    assert seen["method"] == "POST" and seen["path"].endswith("/calculator/estimate-batch")
+    spec = seen["body"]["resourceSpecs"][0]["spec"]
+    assert spec["metadata"]["parentId"] == "project-1"
+    assert spec["spec"]["resources"] == {"platform": "gpu-h100-sxm", "preset": "8gpu-128vcpu-1600gb"}
+    assert "followsSpotPrice" in spec["spec"]
+
+
+def test_availability_score_mapping():
+    from yeto.shape.providers import _availability_score as s
+
+    assert s(None) == 0
+    assert s({"availabilityLevel": "AVAILABILITY_LEVEL_HIGH", "available": 3}) == 9
+    assert s({"availabilityLevel": "AVAILABILITY_LEVEL_MEDIUM", "available": 3}) == 6
+    assert s({"availabilityLevel": "AVAILABILITY_LEVEL_LOW", "available": 1}) == 3
+    assert s({"availabilityLevel": "AVAILABILITY_LEVEL_HIGH", "available": 0}) == 0
+    assert s({"availabilityLevel": "AVAILABILITY_LEVEL_LIMIT_REACHED", "available": 9}) == 0
+    assert s({"availabilityLevel": "AVAILABILITY_LEVEL_UNKNOWN", "available": 4}) == 9
+    assert s({"availabilityLevel": "AVAILABILITY_LEVEL_UNKNOWN", "available": 1}) == 6
