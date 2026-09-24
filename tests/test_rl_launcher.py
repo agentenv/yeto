@@ -1297,6 +1297,8 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert task.envs["NVTE_FLASH_ATTN"] == "0"
     assert task.envs["NVTE_FUSED_ATTN"] == "0"
     assert task.envs["NVTE_UNFUSED_ATTN"] == "1"
+    # Megatron asserts this for TP>1; the island exports it for every run.
+    assert task.envs["CUDA_DEVICE_MAX_CONNECTIONS"] == "1"
     assert task.envs["CYBERGYM_URL"] == "http://10.0.0.8:8666"
     assert task.envs["CYBERGYM_AGENT_ID"] == "benchmark-agent"
     assert task.envs["CYBERGYM_TIMEOUT"] == "90.0"

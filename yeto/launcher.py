@@ -1589,6 +1589,9 @@ def make_miles_island_task(
         "SYNCER_ADDR": syncer_addr,
         "LEARNER_ID": str(learner_id),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        # Megatron refuses TP>1 or CP>1 without this; it is exported before
+        # `ray start` so every Ray worker inherits it.  Harmless at TP1.
+        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NVTE_FLASH_ATTN": "0",
         "NVTE_FUSED_ATTN": "0",
         "NVTE_UNFUSED_ATTN": "1",
