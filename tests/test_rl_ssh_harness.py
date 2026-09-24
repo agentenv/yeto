@@ -750,11 +750,11 @@ def test_prepare_cli_exposes_final_secrlenv_eval_controls():
 
 def test_miles_and_sglang_pins_include_the_compatible_builds():
     assert MILES_BASE_COMMIT == "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
-    assert MILES_COMMIT == "e2ad83d84a6b32a0f7d79ff196ad8c64fc67586a"
+    assert MILES_COMMIT == "ae475060fa670145aef75d678809039ae999cb97"
     assert not hasattr(rl_config, "MILES_UPSTREAM_COMMIT")
     assert MILES_BUNDLE_PATH == "yeto/rl/vendor/miles-qwen38.bundle"
     assert MILES_BUNDLE_SHA256 == (
-        "ff0e2ed7de75e06926c4637545a8a918c2e3ae1d5ceeb2b49d6b87511c0598b2"
+        "da3464d3c389f7e2cb3e390119b3c42c2f130d94a0711f9c95608f3243826cc6"
     )
     assert SGLANG_COMMIT == "e1b57eb8e7749235c987cc6b1b2824ce3265369b"
     assert not hasattr(rl_config, "SGLANG_UPSTREAM_COMMIT")
