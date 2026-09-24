@@ -58,6 +58,8 @@ def parse_args(argv=None):
     parser.add_argument("--num-learners", type=int, default=1)
     parser.add_argument("--learner-generation", type=int, default=0)
     parser.add_argument("--reward-function", required=True)
+    parser.add_argument("--rl-prompt-column", default=None)
+    parser.add_argument("--rl-label-column", default=None)
     parser.add_argument("--reward-sha256", required=True)
     parser.add_argument("--source-sha256", required=True)
     parser.add_argument("--global-rounds", type=int, required=True)
@@ -1448,8 +1450,19 @@ def build_miles_argv(
     return values
 
 
-def _messages(row: dict[str, Any]) -> list[dict[str, Any]]:
-    value = row.get("messages", row.get("prompt", row.get("input")))
+def _column(row: dict[str, Any], column: str, flag: str) -> Any:
+    """A user-named column; a row without it is an error naming the flag,
+    never a silent fallback to another column."""
+    if column not in row:
+        raise ValueError(f"RL rows have no column {column!r} ({flag})")
+    return row[column]
+
+
+def _messages(row: dict[str, Any], prompt_column: str | None = None) -> list[dict[str, Any]]:
+    if prompt_column is not None:
+        value = _column(row, prompt_column, "--rl-prompt-column")
+    else:
+        value = row.get("messages", row.get("prompt", row.get("input")))
     if isinstance(value, str):
         value = [{"role": "user", "content": value}]
     if (
@@ -1481,6 +1494,8 @@ def prepare_prompt_data(
     source: str,
     revision: str | None,
     output_path: str | Path,
+    prompt_column: str | None = None,
+    label_column: str | None = None,
 ) -> Path:
     from ..data import load_rows
 
@@ -1505,8 +1520,12 @@ def prepare_prompt_data(
                 }
             )
             normalized = {
-                "messages": _messages(row),
-                "label": row.get("label"),
+                "messages": _messages(row, prompt_column),
+                "label": (
+                    _column(row, label_column, "--rl-label-column")
+                    if label_column is not None
+                    else row.get("label")
+                ),
                 "metadata": metadata,
             }
             if "tools" in row:
@@ -2080,10 +2099,15 @@ def main(argv=None) -> None:
             revision=args.rollout_model_revision,
         )
     eval_source = _verify_eval_dataset_identity(args)
+    columns = dict(
+        prompt_column=getattr(args, "rl_prompt_column", None),
+        label_column=getattr(args, "rl_label_column", None),
+    )
     prompt_path = prepare_prompt_data(
         args.data,
         args.data_revision,
         "~/yeto-rl/prompts.jsonl",
+        **columns,
     )
     eval_prompt_path = None
     if eval_source is not None:
@@ -2094,6 +2118,7 @@ def main(argv=None) -> None:
                 str(eval_source),
                 None,
                 "~/yeto-rl/eval-prompts.jsonl",
+                **columns,
             )
         )
     run_miles(
