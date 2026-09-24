@@ -279,6 +279,7 @@ def test_down_stops_the_modal_app_and_skips_sky_for_modal_islands(monkeypatch, c
     downed, stopped = [], []
     monkeypatch.setattr(cli, "_sky_down_cluster", downed.append)
     monkeypatch.setattr(cli, "_modal_stop_app", stopped.append)
+    monkeypatch.setattr(cli, "_modal_app_stopped", lambda run: (True, "stopped, 0 tasks"))
     assert cli.main(["down", "m1"]) == 0
     assert sorted(downed) == ["m1-l0-us-east-1", "m1-syncer"]  # never sky.down a Modal island
     assert stopped == ["m1"]  # one app stop covers every Modal island of the run
@@ -286,18 +287,115 @@ def test_down_stops_the_modal_app_and_skips_sky_for_modal_islands(monkeypatch, c
     assert "m1-l1-modal: stopped with the Modal app" in capsys.readouterr().out
 
 
-def test_down_survives_sky_errors(monkeypatch, capsys):
+def test_down_treats_a_cluster_sky_never_had_as_gone(monkeypatch, capsys):
+    """Local mode, no cloud probe: sky saying it never had the cluster is
+    the one down error that still counts as gone (a rerun after a clean
+    down must stay green)."""
     runs.create_run("d2", make_args_dict("d2"))
     runs.update_run("d2", pid=None, clusters=["d2-syncer"])
 
+    def vanished(cluster):
+        raise ValueError(f"Cluster '{cluster}' does not exist.")
+
+    monkeypatch.setattr(cli, "_sky_down_cluster", vanished)
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: None)
+    assert cli.main(["down", "d2"]) == 0
+    assert runs.load_run("d2")["state"] == "DOWN"
+    assert "not cloud-verifiable here; trusting sky" in capsys.readouterr().err
+
+
+def test_down_no_longer_claims_success_on_other_sky_errors(monkeypatch, capsys):
+    """Any other down error used to print "teardown failed" and then
+    "run is down" with exit 0; now it is unconfirmed and the run is left
+    for a rerun."""
+    runs.create_run("d3", make_args_dict("d3"))
+    runs.update_run("d3", pid=None, clusters=["d3-syncer"])
+
     def explode(cluster):
-        raise RuntimeError("cluster already gone")
+        raise RuntimeError("sky API server unreachable")
 
     monkeypatch.setattr(cli, "_sky_down_cluster", explode)
-    rc = cli.main(["down", "d2"])
-    assert rc == 0
-    assert runs.load_run("d2")["state"] == "DOWN"
-    assert "teardown failed" in capsys.readouterr().err
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: None)
+    assert cli.main(["down", "d3"]) == 1
+    meta = runs.load_run("d3")
+    assert meta["state"] == runs.TEARDOWN_INCOMPLETE
+    assert meta["teardown_unconfirmed"] == ["d3-syncer"]
+    out, err = capsys.readouterr()
+    assert "run 'd3' is down" not in out
+    assert "d3-syncer: not confirmed down" in err
+    assert "NOT fully down; unconfirmed: d3-syncer" in err
+
+
+def test_down_cloud_verifies_and_retries_until_the_cloud_is_empty(monkeypatch, capsys):
+    runs.create_run("d4", make_args_dict("d4"))
+    runs.update_run("d4", pid=None, clusters=["d4-syncer"])
+    downed = []
+    monkeypatch.setattr(cli, "_sky_down_cluster", downed.append)
+    seen = {"n": 0}
+
+    def probe():
+        seen["n"] += 1
+        return ["i-zombie"] if seen["n"] < 3 else []
+
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: probe)
+    monkeypatch.setattr("yeto.launcher.time.sleep", lambda s: None)
+    assert cli.main(["down", "d4"]) == 0
+    assert len(downed) == 3  # initial + one retry per live report
+    assert runs.load_run("d4")["state"] == "DOWN"
+    assert "d4-syncer: down" in capsys.readouterr().out
+
+
+def test_down_fails_when_the_cloud_still_has_an_instance(monkeypatch, capsys):
+    runs.create_run("d5", make_args_dict("d5"))
+    runs.update_run("d5", pid=None, clusters=["d5-syncer"])
+    monkeypatch.setattr(cli, "_sky_down_cluster", lambda c: None)
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: (lambda: ["i-zombie"]))
+    monkeypatch.setattr("yeto.launcher.time.sleep", lambda s: None)
+    assert cli.main(["down", "d5"]) == 1
+    assert runs.load_run("d5")["state"] == runs.TEARDOWN_INCOMPLETE
+    out, err = capsys.readouterr()
+    assert "i-zombie" in err  # the surviving instance is named so it can be deleted
+    assert "run 'd5' is down" not in out
+
+
+def test_down_fails_when_the_modal_app_is_still_running(monkeypatch, capsys):
+    runs.create_run("m2", make_args_dict("m2"))
+    runs.update_run("m2", pid=None, clusters=["m2-syncer", "m2-l0-modal"])
+    monkeypatch.setattr(cli, "_sky_down_cluster", lambda c: None)
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: (lambda: []))
+    monkeypatch.setattr(cli, "_modal_stop_app", lambda run: None)
+    monkeypatch.setattr(
+        cli, "_modal_app_stopped", lambda run: (False, "Modal app yeto-m2: still running with 1 task(s)")
+    )
+    assert cli.main(["down", "m2"]) == 1
+    assert runs.load_run("m2")["teardown_unconfirmed"] == ["m2-l0-modal"]
+    assert "m2-l0-modal: not confirmed stopped" in capsys.readouterr().err
+
+
+def test_modal_app_stopped_reads_state_and_tasks(monkeypatch):
+    from yeto import modal_runner
+
+    class Ops:
+        def __init__(self, app):
+            self.app = app
+
+        def app_status(self):
+            return {"yeto-ok": ("stopped", 0), "yeto-busy": ("running", 2)}.get(self.app)
+
+    monkeypatch.setattr(modal_runner, "ModalOps", Ops)
+    assert cli._modal_app_stopped("ok") == (True, "Modal app yeto-ok: stopped, 0 tasks")
+    ok, detail = cli._modal_app_stopped("busy")
+    assert not ok and "still running with 2 task(s)" in detail
+    ok, detail = cli._modal_app_stopped("gone")
+    assert ok and "not listed by Modal" in detail
+
+    class Broken(Ops):
+        def app_status(self):
+            raise RuntimeError("modal app list failed")
+
+    monkeypatch.setattr(modal_runner, "ModalOps", Broken)
+    ok, detail = cli._modal_app_stopped("x")
+    assert not ok and "status unverified" in detail
 
 
 def test_down_unknown_run(capsys):

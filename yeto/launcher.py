@@ -3211,7 +3211,9 @@ def _cloud_live_instances_probe(cluster: str):
         return None
 
 
-def terminate_and_verify(sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep) -> bool:
+def terminate_and_verify(
+    sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep, down=None
+) -> bool:
     """sky.down a cluster and CONFIRM at the cloud level that no instance
     survives, retrying the down while the cloud still reports live ones.
 
@@ -3220,20 +3222,30 @@ def terminate_and_verify(sky, cluster, *, probe="auto", attempts=4, sleep_fn=tim
     sky is the ONLY thing that can reach the learner clusters, so a silent
     orphan is unrecoverable once the head is gone — hence verify here, before
     the head relinquishes control. Returns True iff the cluster is confirmed
-    gone, or can't be cloud-verified (then we trust sky.down).
+    gone. When the cloud can't be queried we fall back to sky.down's own
+    result: a clean down, or "does not exist" (sky never had it), counts;
+    any other down error does not — that is exactly the case that used to
+    print "teardown failed" and then claim the run was down.
+
+    `down` overrides the sky.down call (the CLI routes it through its own
+    patchable hook); `probe` is captured before the first down because
+    sky.down deletes the record the probe is built from.
     """
     if probe == "auto":
         probe = _cloud_live_instances_probe(cluster)
+    down = down or (lambda: sky.get(sky.down(cluster)))
 
     def _down():
         try:
-            sky.get(sky.down(cluster))
+            down()
+            return None
         except Exception as e:
             print(f"[launcher] sky.down({cluster}) error: {e}", file=sys.stderr)
+            return e
 
-    _down()
+    err = _down()
     if probe is None:
-        return True
+        return err is None or "does not exist" in str(err)
     for i in range(attempts):
         try:
             live = probe()

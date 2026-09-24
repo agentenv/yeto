@@ -28,6 +28,30 @@ def test_trusts_down_when_no_probe():
     assert sky.downs == 1
 
 
+def test_without_probe_only_a_clean_or_never_existed_down_counts():
+    class Down:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def __call__(self):
+            raise self.exc
+
+    assert terminate_and_verify(
+        None, "c", probe=None, down=Down(ValueError("Cluster 'c' does not exist.")), sleep_fn=_no_sleep
+    ) is True
+    assert terminate_and_verify(
+        None, "c", probe=None, down=Down(RuntimeError("API server unreachable")), sleep_fn=_no_sleep
+    ) is False
+
+
+def test_down_hook_replaces_sky_down():
+    calls = []
+    assert terminate_and_verify(
+        None, "c", probe=lambda: [], down=lambda: calls.append(1), sleep_fn=_no_sleep
+    ) is True
+    assert calls == [1]
+
+
 def test_confirmed_gone_on_first_check():
     sky = FakeSky()
     assert terminate_and_verify(sky, "c", probe=lambda: [], sleep_fn=_no_sleep) is True

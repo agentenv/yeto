@@ -1690,10 +1690,13 @@ HEAD_DOWN_ATTEMPTS = 3
 HEAD_DOWN_RETRY_S = 20.0
 HEAD_DOWN_SCRIPT = """cd ~/sky_workdir && PY=$([ -x ~/miniconda3/bin/python3 ] && echo ~/miniconda3/bin/python3 || echo python3) && "$PY" - <<'PY'
 import sky
+from yeto.launcher import terminate_and_verify
 for c in {clusters!r}:
     try:
-        sky.get(sky.down(c))
-        print(f"[head] {{c}}: down", flush=True)
+        if terminate_and_verify(sky, c):
+            print(f"[head] {{c}}: down", flush=True)
+        else:
+            print(f"[head] {{c}}: still live at the cloud after down", flush=True)
     except Exception as e:  # already gone, or never launched
         print(f"[head] {{c}}: {{e}}", flush=True)
 PY"""
@@ -1746,6 +1749,48 @@ def _sky_down_cluster(cluster: str) -> None:
     sky.get(sky.down(cluster))
 
 
+def _cloud_probe(cluster: str):
+    """Cloud-level live-instance probe for a cluster this machine's sky
+    launched, or None when it cannot be built (patched out in tests)."""
+    from .launcher import _cloud_live_instances_probe
+
+    return _cloud_live_instances_probe(cluster)
+
+
+def _down_and_verify(cluster: str) -> bool:
+    """Down a cluster this machine's sky knows and confirm it at the cloud.
+
+    The probe is captured before the down (down deletes the record it needs).
+    Without a probe we fall back to sky's own answer: a clean down or "does
+    not exist" counts, any other error does not."""
+    from .launcher import terminate_and_verify
+
+    probe = _cloud_probe(cluster)
+    if probe is None:
+        print(f"[yeto] {cluster}: not cloud-verifiable here; trusting sky", file=sys.stderr)
+    return terminate_and_verify(
+        None, cluster, probe=probe, down=lambda: _sky_down_cluster(cluster)
+    )
+
+
+def _modal_app_stopped(run_name: str) -> tuple[bool, str]:
+    """Confirm the run's Modal app is stopped with no running task (patched
+    out in tests). Returns (confirmed, detail)."""
+    from .modal_runner import ModalOps, modal_app_name
+
+    app = modal_app_name(run_name)
+    try:
+        status = ModalOps(app).app_status()
+    except Exception as e:  # noqa: BLE001 - listing failed, not the app
+        return False, f"Modal app {app}: status unverified ({e})"
+    if status is None:
+        return True, f"Modal app {app}: not listed by Modal (never deployed or already gone)"
+    state, tasks = status
+    if state == "stopped" and tasks == 0:
+        return True, f"Modal app {app}: stopped, 0 tasks"
+    return False, f"Modal app {app}: still {state} with {tasks} task(s)"
+
+
 def _modal_stop_app(run_name: str) -> None:
     """Stop the run's Modal app (patched out in tests)."""
     from .modal_runner import ModalOps, modal_app_name
@@ -1753,8 +1798,11 @@ def _modal_stop_app(run_name: str) -> None:
     try:
         ModalOps(modal_app_name(run_name)).stop_app()
         print(f"[yeto] Modal app {modal_app_name(run_name)}: stopped")
-    except Exception as e:  # best-effort
-        print(f"[yeto] Modal app stop failed: {e}", file=sys.stderr)
+    except Exception as e:  # the status check below decides; this is advisory
+        if "already stopped" in str(e):
+            print(f"[yeto] Modal app {modal_app_name(run_name)}: already stopped")
+        else:
+            print(f"[yeto] Modal app stop failed: {e}", file=sys.stderr)
 
 
 def _signal_worker(pid: int, sig: int) -> None:
@@ -1791,64 +1839,81 @@ def cmd_down(args) -> int:
         print("[yeto] worker is not running")
 
     clusters = meta.get("clusters") or []
-    if clusters:
-        print(f"[yeto] tearing down {len(clusters)} cluster(s): {', '.join(clusters)}")
-        from .modal_runner import is_modal_island
-
-        modal_names = [c for c in clusters if is_modal_island(c)]
-        if modal_names:
-            # Modal islands are function calls in the run's app, not sky
-            # clusters: stopping the app ends every one of them at once.
-            _modal_stop_app(name)
-
-        head_cluster = meta.get("head_cluster") if meta.get("controller") == "head" else None
-        on_head = [c for c in clusters if c != head_cluster and c not in modal_names]
-        if head_cluster and on_head:
-            # Only the head's sky knows these clusters, and the head may itself
-            # be mid-teardown (sky then answers 500), so retry; and never delete
-            # the head while a learner is unconfirmed — that orphans it.
-            pending, job = list(on_head), meta.get("head_job_id")
-            for attempt in range(HEAD_DOWN_ATTEMPTS):
-                try:
-                    pending = _head_down_learners(head_cluster, job, pending)
-                except Exception as e:  # noqa: BLE001 - e.g. head unreachable
-                    print(f"[yeto] {head_cluster}: head-side teardown failed: {e}", file=sys.stderr)
-                job = None  # the controller is cancelled after the first attempt
-                if not pending:
-                    break
-                if attempt + 1 < HEAD_DOWN_ATTEMPTS:
-                    time.sleep(HEAD_DOWN_RETRY_S)
-            if pending:
-                print(
-                    f"[yeto] NOT tearing down {head_cluster}: learner cluster(s) not confirmed down "
-                    f"from it: {', '.join(pending)}. The head is the only machine whose sky knows "
-                    f"them; rerun `yeto down {name}`, or delete them in the cloud console.",
-                    file=sys.stderr,
-                )
-                return 1
-            print(f"[yeto] learner clusters torn down from {head_cluster}: {', '.join(on_head)}")
-            clusters = [c for c in clusters if c not in on_head]
-
-        def _down_one(cluster: str) -> None:
-            if cluster in modal_names:
-                print(f"[yeto] {cluster}: stopped with the Modal app")
-                return
-            try:
-                _sky_down_cluster(cluster)
-                print(f"[yeto] {cluster}: down")
-            except Exception as e:  # best-effort; the cluster may be gone
-                print(f"[yeto] {cluster}: teardown failed: {e}", file=sys.stderr)
-
-        threads = [
-            threading.Thread(target=_down_one, args=(c,), daemon=True) for c in clusters
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-    else:
+    if not clusters:
         print("[yeto] no clusters recorded for this run")
+        runs.update_run(name, state=runs.DOWN, finished_at=meta.get("finished_at") or time.time())
+        print(f"[yeto] run '{name}' is down")
+        return 0
 
+    print(f"[yeto] tearing down {len(clusters)} cluster(s): {', '.join(clusters)}")
+    from .modal_runner import is_modal_island
+
+    # Three kinds of cluster, three routes: Modal islands are function calls
+    # in the run's app (stop the app, then check it); learners of a head run
+    # exist only in the head's sky (tear them down FROM the head, before the
+    # head); everything else this machine's sky launched itself.
+    head_cluster = meta.get("head_cluster") if meta.get("controller") == "head" else None
+    modal_names = [c for c in clusters if is_modal_island(c)]
+    on_head = [c for c in clusters if head_cluster and c != head_cluster and c not in modal_names]
+    local_names = [c for c in clusters if c not in modal_names and c not in on_head]
+    unconfirmed: list[str] = []
+
+    if modal_names:
+        _modal_stop_app(name)
+        ok, detail = _modal_app_stopped(name)
+        for c in modal_names:
+            if ok:
+                print(f"[yeto] {c}: stopped with the Modal app ({detail})")
+            else:
+                print(f"[yeto] {c}: not confirmed stopped ({detail})", file=sys.stderr)
+        if not ok:
+            unconfirmed.extend(modal_names)
+
+    if on_head:
+        # Only the head's sky knows these clusters, and the head may itself
+        # be mid-teardown (sky then answers 500), so retry; and never delete
+        # the head while a learner is unconfirmed — that orphans it.
+        pending, job = list(on_head), meta.get("head_job_id")
+        for attempt in range(HEAD_DOWN_ATTEMPTS):
+            try:
+                pending = _head_down_learners(head_cluster, job, pending)
+            except Exception as e:  # noqa: BLE001 - e.g. head unreachable
+                print(f"[yeto] {head_cluster}: head-side teardown failed: {e}", file=sys.stderr)
+            job = None  # the controller is cancelled after the first attempt
+            if not pending:
+                break
+            if attempt + 1 < HEAD_DOWN_ATTEMPTS:
+                time.sleep(HEAD_DOWN_RETRY_S)
+        if pending:
+            print(
+                f"[yeto] NOT tearing down {head_cluster}: learner cluster(s) not confirmed down "
+                f"from it: {', '.join(pending)}. The head is the only machine whose sky knows "
+                f"them; rerun `yeto down {name}`, or delete them in the cloud console.",
+                file=sys.stderr,
+            )
+            return _teardown_incomplete(name, meta, pending + unconfirmed)
+        print(f"[yeto] learner clusters torn down from {head_cluster}: {', '.join(on_head)}")
+
+    results: dict[str, bool] = {}
+
+    def _down_one(cluster: str) -> None:
+        results[cluster] = _down_and_verify(cluster)
+        if results[cluster]:
+            print(f"[yeto] {cluster}: down")
+        else:
+            print(f"[yeto] {cluster}: not confirmed down", file=sys.stderr)
+
+    threads = [
+        threading.Thread(target=_down_one, args=(c,), daemon=True) for c in local_names
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    unconfirmed.extend(c for c in local_names if not results.get(c))
+
+    if unconfirmed:
+        return _teardown_incomplete(name, meta, unconfirmed)
     runs.update_run(
         name,
         state=runs.DOWN,
@@ -1856,6 +1921,24 @@ def cmd_down(args) -> int:
     )
     print(f"[yeto] run '{name}' is down")
     return 0
+
+
+def _teardown_incomplete(name: str, meta: dict, unconfirmed: list[str]) -> int:
+    """Record and report a `yeto down` that could not confirm every cluster
+    gone. The run is NOT marked down, so `yeto status` shows it and a rerun
+    of `yeto down` picks up where this one stopped."""
+    runs.update_run(
+        name,
+        state=runs.TEARDOWN_INCOMPLETE,
+        teardown_unconfirmed=sorted(set(unconfirmed)),
+        finished_at=meta.get("finished_at") or time.time(),
+    )
+    print(
+        f"[yeto] run '{name}' is NOT fully down; unconfirmed: {', '.join(sorted(set(unconfirmed)))}. "
+        f"Rerun `yeto down {name}`, or check the cloud console for instances named after them.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 # ---------------------------------------------------------------------------

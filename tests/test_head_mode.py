@@ -494,6 +494,72 @@ def test_down_head_run_succeeds_after_a_retry(monkeypatch):
     assert len(calls) == 2 and downed == ["hr-head"]
 
 
+def test_down_head_run_routes_modal_islands_to_the_app_and_sky_islands_via_head(monkeypatch):
+    """A head run with one Modal island and one sky island: the Modal one is
+    ended by stopping the app, the sky one is torn down FROM the head, and
+    neither ever hits this machine's sky.down (which would say "does not
+    exist" and orphan it)."""
+    make_head_meta("hm")
+    runs.update_run("hm", clusters=["hm-head", "hm-l0-us-east-2", "hm-l1-modal"])
+    downed, on_head, stopped = [], [], []
+    monkeypatch.setattr(cli, "_sky_down_cluster", downed.append)
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: None)
+    monkeypatch.setattr(cli, "_modal_stop_app", stopped.append)
+    monkeypatch.setattr(cli, "_modal_app_stopped", lambda run: (True, "stopped, 0 tasks"))
+
+    def fake(head, job, cs):
+        on_head.append(sorted(cs))
+        return []
+
+    monkeypatch.setattr(cli, "_head_down_learners", fake)
+    assert cli.main(["down", "hm"]) == 0
+    assert stopped == ["hm"]
+    assert on_head == [["hm-l0-us-east-2"]]
+    assert downed == ["hm-head"]
+
+
+def test_down_head_run_never_trusts_a_local_does_not_exist_for_a_learner(monkeypatch, capsys):
+    """The head could not confirm the learner; a local sky.down of it
+    answering "does not exist" must not be read as "already gone"."""
+    make_head_meta("hn")
+    downed = []
+
+    def local_down(cluster):
+        downed.append(cluster)
+        raise ValueError(f"Cluster '{cluster}' does not exist.")
+
+    monkeypatch.setattr(cli, "_sky_down_cluster", local_down)
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: None)
+    monkeypatch.setattr(cli, "HEAD_DOWN_RETRY_S", 0.0)
+    monkeypatch.setattr(cli, "_head_down_learners", lambda head, job, cs: list(cs))
+    assert cli.main(["down", "hn"]) == 1
+    assert downed == []  # learners never go through the local sky; head kept
+    meta = runs.load_run("hn")
+    assert meta["state"] == runs.TEARDOWN_INCOMPLETE
+    assert meta["teardown_unconfirmed"] == ["hn-l0-us-east-2", "hn-l1-us-west-2"]
+    err = capsys.readouterr().err
+    assert "NOT tearing down hn-head" in err and "hn-l0-us-east-2" in err
+
+
+def test_down_head_run_keeps_the_head_when_the_cloud_still_has_it(monkeypatch, capsys):
+    make_head_meta("hc")
+    monkeypatch.setattr(cli, "_sky_down_cluster", lambda c: None)
+    monkeypatch.setattr(cli, "_head_down_learners", lambda head, job, cs: [])
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: (lambda: ["i-head-zombie"]))
+    monkeypatch.setattr("yeto.launcher.time.sleep", lambda s: None)
+    assert cli.main(["down", "hc"]) == 1
+    assert runs.load_run("hc")["state"] == runs.TEARDOWN_INCOMPLETE
+    assert "i-head-zombie" in capsys.readouterr().err
+
+
+def test_head_down_script_verifies_at_the_cloud_and_reports_survivors():
+    script = cli.HEAD_DOWN_SCRIPT.format(clusters=["a-l0"])
+    assert "from yeto.launcher import terminate_and_verify" in script
+    assert "still live at the cloud after down" in script
+    out = "[head] a-l0: still live at the cloud after down\n"
+    assert cli._unconfirmed_head_downs(out, ["a-l0"]) == ["a-l0"]
+
+
 def test_head_down_requires_a_confirmation_per_learner():
     """A head-side teardown once printed success while the learner kept
     running (no output came back). Only confirmed clusters count."""
