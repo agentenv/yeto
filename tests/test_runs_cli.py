@@ -338,7 +338,7 @@ def test_down_cloud_verifies_and_retries_until_the_cloud_is_empty(monkeypatch, c
         return ["i-zombie"] if seen["n"] < 3 else []
 
     monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: probe)
-    monkeypatch.setattr("yeto.launcher.time.sleep", lambda s: None)
+    monkeypatch.setattr(cli, "DOWN_VERIFY_SLEEP", lambda s: None)
     assert cli.main(["down", "d4"]) == 0
     assert len(downed) == 3  # initial + one retry per live report
     assert runs.load_run("d4")["state"] == "DOWN"
@@ -350,7 +350,7 @@ def test_down_fails_when_the_cloud_still_has_an_instance(monkeypatch, capsys):
     runs.update_run("d5", pid=None, clusters=["d5-syncer"])
     monkeypatch.setattr(cli, "_sky_down_cluster", lambda c: None)
     monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: (lambda: ["i-zombie"]))
-    monkeypatch.setattr("yeto.launcher.time.sleep", lambda s: None)
+    monkeypatch.setattr(cli, "DOWN_VERIFY_SLEEP", lambda s: None)
     assert cli.main(["down", "d5"]) == 1
     assert runs.load_run("d5")["state"] == runs.TEARDOWN_INCOMPLETE
     out, err = capsys.readouterr()

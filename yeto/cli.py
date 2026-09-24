@@ -1757,6 +1757,9 @@ def _cloud_probe(cluster: str):
     return _cloud_live_instances_probe(cluster)
 
 
+DOWN_VERIFY_SLEEP = time.sleep  # patched out in tests
+
+
 def _down_and_verify(cluster: str) -> bool:
     """Down a cluster this machine's sky knows and confirm it at the cloud.
 
@@ -1769,7 +1772,11 @@ def _down_and_verify(cluster: str) -> bool:
     if probe is None:
         print(f"[yeto] {cluster}: not cloud-verifiable here; trusting sky", file=sys.stderr)
     return terminate_and_verify(
-        None, cluster, probe=probe, down=lambda: _sky_down_cluster(cluster)
+        None,
+        cluster,
+        probe=probe,
+        down=lambda: _sky_down_cluster(cluster),
+        sleep_fn=DOWN_VERIFY_SLEEP,
     )
 
 

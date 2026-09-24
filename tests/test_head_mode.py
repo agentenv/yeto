@@ -546,7 +546,7 @@ def test_down_head_run_keeps_the_head_when_the_cloud_still_has_it(monkeypatch, c
     monkeypatch.setattr(cli, "_sky_down_cluster", lambda c: None)
     monkeypatch.setattr(cli, "_head_down_learners", lambda head, job, cs: [])
     monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: (lambda: ["i-head-zombie"]))
-    monkeypatch.setattr("yeto.launcher.time.sleep", lambda s: None)
+    monkeypatch.setattr(cli, "DOWN_VERIFY_SLEEP", lambda s: None)
     assert cli.main(["down", "hc"]) == 1
     assert runs.load_run("hc")["state"] == runs.TEARDOWN_INCOMPLETE
     assert "i-head-zombie" in capsys.readouterr().err
