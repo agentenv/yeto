@@ -846,6 +846,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     shape.add_argument("--tuning", choices=["lora", "full"], default="lora")
     shape.add_argument("--seq-len", type=int, default=2048)
+    shape.add_argument(
+        "--training-mode",
+        choices=["sft", "rl"],
+        default="sft",
+        help="rl prices fixed RL islands (actor + rollout GPUs, container "
+        "image, spot only where checkpoint storage is verified) instead of "
+        "sizing islands from the memory model",
+    )
+    shape.add_argument(
+        "--parameter-mode",
+        choices=["lora", "full"],
+        default="lora",
+        help="RL only: lora colocates rollout with the actor; full gives "
+        "rollout its own GPUs on the same single node",
+    )
+    shape.add_argument("--actor-gpus", type=int, default=8, help="RL only: actor GPUs per node")
+    shape.add_argument("--actor-nodes", type=int, default=1, help="RL only: nodes per island (lora mode)")
+    shape.add_argument("--rollout-num-gpus", type=int, default=0, help="RL only: dedicated rollout GPUs (full mode)")
     shape.add_argument("--data", default=None, help="HF dataset id (fills the launch line; required with --apply)")
     shape.add_argument(
         "--apply",
@@ -1833,6 +1851,41 @@ def cmd_down(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+def rl_island_shape(args):
+    """The fixed island the RL launcher will build from these flags, for
+    the planner to price: actor GPUs plus dedicated rollout GPUs in the
+    disjoint (full-parameter) mode, on one node; colocated (lora) mode
+    may span nodes. Mirrors the placement branch in yeto/rl/learner.py."""
+    from .shape.plan import IslandShape
+
+    if getattr(args, "training_mode", "sft") != "rl":
+        return None
+    actor = int(getattr(args, "actor_gpus", 8) or 0)
+    nodes = int(getattr(args, "actor_nodes", 1) or 1)
+    rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
+    full = getattr(args, "parameter_mode", "lora") == "full"
+    if actor < 1:
+        raise ValueError("--actor-gpus must be positive")
+    if full:
+        if rollout < 1:
+            raise ValueError("--parameter-mode full needs --rollout-num-gpus >= 1 (dedicated rollout GPUs)")
+        if nodes != 1:
+            raise ValueError("--parameter-mode full is single-node: --actor-nodes must be 1")
+        note = f"actor {actor} + rollout {rollout}, disjoint"
+    else:
+        rollout = 0
+        note = f"actor {actor}, rollout colocated"
+    return IslandShape(
+        gpus_per_node=actor + rollout,
+        num_nodes=nodes,
+        single_node_only=full,
+        needs_container_image=True,
+        spot_needs_storage=True,
+        label="rl",
+        note=note,
+    )
+
+
 def cmd_shape(args) -> int:
     from .shape.plan import build_shape, launch_argv, render, to_json_dict
 
@@ -1843,6 +1896,7 @@ def cmd_shape(args) -> int:
         print("[yeto] pass --budget and/or --flops", file=sys.stderr)
         return 1
     try:
+        island_shape = rl_island_shape(args)
         result = build_shape(
             model=args.model,
             budget=args.budget,
@@ -1860,6 +1914,7 @@ def cmd_shape(args) -> int:
             strict_capacity_check=args.strict_capacity_check,
             clouds=args.clouds.split(",") if args.clouds else None,
             target_tflops=args.flops,
+            island_shape=island_shape,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[yeto] shape failed: {e}", file=sys.stderr)

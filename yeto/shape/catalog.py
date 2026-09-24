@@ -71,6 +71,13 @@ def efa_capable(instance_type: str) -> bool:
 # multi-node verification in docs/CLOUDS.md.
 MULTI_NODE_CLOUDS = frozenset({"aws", "nebius", "modal"})
 RDMA_CLOUDS = frozenset({"aws", "nebius", "modal"})
+# RL islands run inside a digest-pinned container image and, on spot,
+# persist finished rollout groups to an object store the launcher mounts.
+# Neither is verified on every cloud; a cloud enters these sets only after
+# the live checks in docs/CLOUDS.md pass (Modal: image via its registry
+# support, checkpoints via a Modal Volume — both pending verification).
+VERIFIED_DOCKER_IMAGE_CLOUDS = frozenset({"aws", "runpod"})
+VERIFIED_SPOT_STORAGE_CLOUDS = frozenset({"aws"})
 
 
 def _modal_gpu_count(instance_type: str) -> tuple[str, int]:
