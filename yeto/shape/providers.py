@@ -843,6 +843,223 @@ class NebiusSignals(BaseCloudSignals):
         return None
 
 
+# --- Verda (formerly DataCrunch) ---------------------------------------------
+#
+# sky's Verda catalog only lists what was in stock when it was scraped (a
+# handful of rows, no 8-GPU machines), so the catalog comes straight from
+# Verda's public /instance-types (no auth) crossed with /locations. Stock
+# is one bulk call: /instance-availability returns, per location, the
+# instance types that can be started right now. Spot is a flat 50% of
+# on-demand and is quoted by /instance-types itself, so there is no live
+# price override. Verda machines are single VMs to sky: one node per
+# island (catalog.MULTI_NODE_CLOUDS).
+
+VERDA_API = "https://api.verda.com/v1"
+VERDA_CONFIG_PATH = "~/.verda/config.json"
+# Used when /locations cannot be read (it needs auth); verified 2026-09.
+VERDA_LOCATIONS_FALLBACK = ("FIN-01", "FIN-02", "FIN-03", "ICL-01")
+# Verda `model` string -> sky accelerator name. Confidential-computing
+# ("... CC") and pre-bf16 models are deliberately absent.
+_VERDA_MODELS: dict[str, str] = {
+    "H100": "H100",
+    "H200": "H200",
+    "B200": "B200",
+    "A100 80GB": "A100-80GB",
+    "L40S": "L40S",
+}
+
+
+def verda_credentials() -> tuple[str, str] | None:
+    """(client_id, client_secret) from the env or ~/.verda/config.json."""
+    import json
+    import os
+
+    cid, secret = os.environ.get("VERDA_CLIENT_ID"), os.environ.get("VERDA_CLIENT_SECRET")
+    if cid and secret:
+        return cid, secret
+    try:
+        with open(os.path.expanduser(VERDA_CONFIG_PATH), encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return None
+    cid, secret = cfg.get("client_id"), cfg.get("client_secret")
+    return (str(cid), str(secret)) if cid and secret else None
+
+
+def verda_available() -> bool:
+    return verda_credentials() is not None
+
+
+def _verda_request(method: str, path: str, token: str | None = None, body: dict | None = None, params: dict | None = None):
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    url = VERDA_API + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    headers = {"Content-Type": "application/json", "User-Agent": "yeto-shape/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode() if body is not None else None, method=method, headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Verda API {path} -> HTTP {exc.code}") from exc
+
+
+class VerdaSignals(BaseCloudSignals):
+    """Verda: own catalog (public instance types x locations), bulk stock
+    check, single-node islands."""
+
+    name = "verda"
+
+    def __init__(self, cache: Any, max_workers: int = 8, use_spot: bool = True) -> None:
+        super().__init__(cache, max_workers)
+        self.use_spot = use_spot
+        self._token: str | None = None
+        self._rows: dict[SignalAsk, list[Offering]] = {}
+
+    def available(self) -> bool:
+        return verda_available()
+
+    def credential_hint(self) -> str:
+        return (
+            f"{VERDA_CONFIG_PATH} with client_id/client_secret (console: "
+            "Credentials -> Cloud API Credentials), or VERDA_CLIENT_ID / VERDA_CLIENT_SECRET"
+        )
+
+    def known_gpus(self) -> frozenset[str]:
+        return frozenset(_VERDA_MODELS.values())
+
+    # -- catalog ------------------------------------------------------------
+
+    def offerings(
+        self, regions: set[str] | None, gpus: list[str] | None, cache: Any
+    ) -> list[Offering] | None:
+        from yeto import launcher
+        from yeto.shape.catalog import Offering
+
+        types = self._cache_get("verda-instance-types", self._fetch_types, ttl=3600)
+        locations = self._locations()
+        if regions is not None:
+            locations = [loc for loc in locations if loc in regions]
+        want = set(gpus) if gpus else None
+        rows: list[Offering] = []
+        for t in types:
+            gpu = _VERDA_MODELS.get(str(t.get("model") or ""))
+            count = int(((t.get("gpu") or {}).get("number_of_gpus")) or 0)
+            if gpu is None or count < 1 or (want is not None and gpu not in want):
+                continue
+            price = _float_or_none(t.get("price_per_hour"))
+            spot = _float_or_none(t.get("spot_price"))
+            for loc in locations:
+                rows.append(
+                    Offering(
+                        gpu=gpu,
+                        instance_type=str(t["instance_type"]),
+                        gpus_per_node=count,
+                        vcpus=int(((t.get("cpu") or {}).get("number_of_cores")) or 0),
+                        region=loc,
+                        spot_price=spot,
+                        on_demand_price=price,
+                        gpu_mem_gb=launcher.GPU_MEM_GB[gpu],
+                        cloud="verda",
+                    )
+                )
+        rows.sort(key=lambda o: (o.gpu, o.region, -o.gpus_per_node, o.instance_type))
+        self._rows = {}
+        for row in rows:
+            self._rows.setdefault((row.gpu, row.gpus_per_node, row.region), []).append(row)
+        return rows
+
+    def _locations(self) -> list[str]:
+        try:
+            locs = self._cache_get("verda-locations", self._fetch_locations, ttl=86400)
+            codes = [str(l["code"]) for l in locs if l.get("code")]
+            if codes:
+                return codes
+            raise RuntimeError("empty location list")
+        except Exception as exc:  # noqa: BLE001 - fall back to the known list
+            self._warn(
+                f"verda: could not read /locations ({exc}); using the known list "
+                f"{', '.join(VERDA_LOCATIONS_FALLBACK)} — verify against the console"
+            )
+            return list(VERDA_LOCATIONS_FALLBACK)
+
+    def _fetch_types(self) -> list[dict]:
+        return _verda_request("GET", "/instance-types")
+
+    def _fetch_locations(self) -> list[dict]:
+        return _verda_request("GET", "/locations", token=self._access_token())
+
+    # -- stock ---------------------------------------------------------------
+
+    def scores(self, asks: list[SignalAsk]) -> dict[SignalAsk, int | None]:
+        kind = "spot" if self.use_spot else "ondemand"
+        try:
+            by_location = self._cache_get(f"verda-availability:{kind}", self._fetch_availability, ttl=900)
+        except Exception as exc:  # noqa: BLE001 - degrade, don't crash planning
+            self._warn(f"verda availability check failed: {exc}")
+            return {ask: None for ask in asks}
+        out: dict[SignalAsk, int | None] = {}
+        for ask in asks:
+            rows = self._rows.get(ask) or []
+            available = by_location.get(ask[2])
+            if not rows or available is None:
+                if rows:
+                    self._warn(f"verda: availability response has no entry for location {ask[2]}")
+                out[ask] = None
+                continue
+            out[ask] = 9 if any(r.instance_type in available for r in rows) else 0
+        return out
+
+    def _fetch_availability(self) -> dict[str, list[str]]:
+        """One bulk call: location code -> instance types startable now."""
+        payload = _verda_request(
+            "GET",
+            "/instance-availability",
+            token=self._access_token(),
+            params={"is_spot": "true" if self.use_spot else "false"},
+        )
+        return {str(e["location_code"]): list(e.get("availabilities") or []) for e in payload}
+
+    # -- auth / cache helpers ---------------------------------------------------
+
+    def _access_token(self) -> str:
+        if self._token:
+            return self._token
+        creds = verda_credentials()
+        if creds is None:
+            raise RuntimeError(f"no Verda credentials ({self.credential_hint()})")
+        resp = _verda_request(
+            "POST",
+            "/oauth2/token",
+            body={"grant_type": "client_credentials", "client_id": creds[0], "client_secret": creds[1]},
+        )
+        token = resp.get("access_token") or resp.get("accessToken")
+        if not token:
+            raise RuntimeError("Verda token response carried no access_token")
+        self._token = str(token)
+        return self._token
+
+    def _cache_get(self, key: str, fetch: Callable[[], Any], ttl: float) -> Any:
+        if self._cache is None:
+            return fetch()
+        return self._cache.get_or(key, fetch, ttl=ttl)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # --- Modal -------------------------------------------------------------------
 #
 # Modal is serverless: no catalog API, no stock API, no spot. Prices are a
@@ -995,5 +1212,6 @@ class ModalSignals(BaseCloudSignals):
 CLOUD_SIGNALS: dict[str, Callable[[TTLCache], CloudSignals]] = {
     "runpod": RunPodProviders,
     "nebius": NebiusSignals,
+    "verda": VerdaSignals,
     "modal": ModalSignals,
 }

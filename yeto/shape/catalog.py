@@ -64,7 +64,8 @@ def efa_capable(instance_type: str) -> bool:
 
 
 # Clouds where a multi-node island can be provisioned at all (RunPod pods
-# are single machines to sky), and the subset whose multi-node islands get
+# and Verda VMs are single machines to sky), and the subset whose
+# multi-node islands get
 # an RDMA-class fabric (EFA on AWS, InfiniBand on Nebius GPU clusters,
 # RoCE on Modal clustered functions). Both grow as clouds pass the
 # multi-node verification in docs/CLOUDS.md.
