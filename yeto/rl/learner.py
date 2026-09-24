@@ -1602,6 +1602,70 @@ def _syncer_address(value: str) -> tuple[str, int]:
     return host, int(port)
 
 
+EXTERNAL_ROUTER_ENV = "YETO_RL_EXTERNAL_ROUTER"
+
+
+def start_external_sglang_router(
+    miles_args,
+    *,
+    timeout_s: float = 300.0,
+    popen=subprocess.Popen,
+    connect=None,
+    sleep=None,
+):
+    """Start the SGLang router ourselves and hand Miles its address.
+
+    Miles launches the router in a `spawn` child that must re-import
+    `miles.utils.http_utils` (which pulls in Megatron-Bridge, ~27 s on a
+    Modal H100 container) and then gives it a hard-coded 30 s to listen,
+    so on slower CPUs the island dies before the first rollout. Miles
+    skips its own launch when `sglang_router_ip` is set; the standalone
+    router CLI starts in ~2 s and gets a generous deadline here."""
+    import atexit
+    import random
+    import socket
+    import time
+
+    from miles.utils.http_utils import find_available_port, get_host_info
+
+    connect = connect or (lambda host, port: socket.create_connection((host, port), timeout=1).close())
+    sleep = sleep or time.sleep
+    host = get_host_info()[1]
+    port = getattr(miles_args, "sglang_router_port", None) or find_available_port(
+        random.randint(3000, 4000)
+    )
+    command = [
+        sys.executable, "-m", "sglang_router.launch_router",
+        "--host", host,
+        "--port", str(port),
+        "--prometheus-port", str(find_available_port(random.randint(4000, 5000))),
+        "--log-level", "warn",
+        "--request-timeout-secs",
+        str(getattr(miles_args, "sglang_router_request_timeout_secs", 14400)),
+    ]
+    policy = getattr(miles_args, "sglang_router_policy", None)
+    if policy:
+        command.extend(("--policy", str(policy)))
+    process = popen(command)
+    atexit.register(process.terminate)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if process.poll() is not None:
+            raise RuntimeError(f"SGLang router exited with {process.returncode} before listening")
+        try:
+            connect(host, port)
+            break
+        except OSError:
+            if time.monotonic() > deadline:
+                process.terminate()
+                raise RuntimeError(f"SGLang router at {host}:{port} not ready after {timeout_s}s")
+            sleep(0.5)
+    miles_args.sglang_router_ip = host
+    miles_args.sglang_router_port = port
+    print(f"[rl] external SGLang router listening at {host}:{port}", flush=True)
+    return process
+
+
 def run_miles(
     args,
     *,
@@ -2000,6 +2064,9 @@ def run_miles(
                 audit_dir=args.audit_dir,
                 send_initial_params=not getattr(args, "eval_only", False),
             )
+
+    if os.environ.get(EXTERNAL_ROUTER_ENV) == "1":
+        start_external_sglang_router(miles_args)
 
     from train import train as miles_train
 

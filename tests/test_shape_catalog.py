@@ -61,6 +61,31 @@ def test_mfu_and_efa():
     assert mfu(2, efa_capable("g5.48xlarge")) == 0.20
 
 
+def test_rdma_capable_per_cloud():
+    from yeto.shape.catalog import MULTI_NODE_CLOUDS, RDMA_CLOUDS, rdma_capable
+
+    # AWS keeps the EFA-family rule.
+    assert rdma_capable("aws", "p5.48xlarge") and not rdma_capable("aws", "g5.48xlarge")
+    # Clouds sky provisions as single machines never get a fabric.
+    assert not rdma_capable("runpod", "8x_H100_SECURE")
+    assert RDMA_CLOUDS <= MULTI_NODE_CLOUDS
+    # Modal: whole-node containers in a clustered group get RoCE.
+    assert rdma_capable("modal", "H100:8") and not rdma_capable("modal", "H100:4")
+    assert not rdma_capable("modal", "L4:4")
+
+
+def test_multi_node_rejection_reasons():
+    from yeto.shape.catalog import multi_node_rejection
+
+    assert multi_node_rejection("aws", "H100", 8) is None
+    assert multi_node_rejection("modal", "H100", 8) is None
+    assert multi_node_rejection("runpod", "H100", 8) == "multi-node islands unsupported on runpod"
+    assert multi_node_rejection("modal", "H100", 4) == (
+        "Modal multi-container islands must use whole nodes (H100:8 per container)"
+    )
+    assert "whole-node GPU, not L4" in multi_node_rejection("modal", "L4", 4)
+
+
 def _fake_raw():
     def info(instance_type, count, cpus, price, spot, region):
         return SimpleNamespace(

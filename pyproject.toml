@@ -25,6 +25,8 @@ dependencies = [
 
 [project.optional-dependencies]
 launcher = ["skypilot[aws]>=0.12"]
+# Modal is not a sky cloud: its islands run through yeto.modal_runner.
+modal = ["modal>=1.0"]
 # Apple-silicon island backend (yeto.mlx.learner); torch stays required —
 # the wire/data path is shared with the CUDA learners.
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]

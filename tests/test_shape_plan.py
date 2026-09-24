@@ -724,3 +724,62 @@ def test_launch_key_keeps_native_region_and_parses(multi_cloud_env):
 
 
 # --- live prices and multi-node clouds ---------------------------------------
+
+
+# --- Modal ---------------------------------------------------------------------
+
+
+def test_modal_unpinned_has_no_region_and_pinned_carries_surcharge(multi_cloud_env):
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.shape.providers import ModalSignals
+
+    # Unpinned (no modal: entry in --regions): key without @, base price,
+    # "autoscale" instead of a stock score, no surcharge note.
+    result = _shape(multi_cloud_env, budget=60.0, clouds=("modal",), signals={"modal": ModalSignals(None)}, gpus=["H100"])
+    (key,) = result.plan.counts
+    assert key == "modal:8xh100" and "@" not in key
+    (spec,) = parse_gpu_spec(key)
+    assert spec.cloud == "modal" and spec.region is None
+    base = next(c for c in result.candidates if c.key == key).price_per_hour
+    assert not any("surcharge" in w for w in result.warnings)
+    assert "score autoscale" in plan_mod.render(result, "gemma4", 60.0, "lora")
+    # Pinned: key carries the region, price is multiplied, note says so.
+    pinned = _shape(
+        multi_cloud_env, budget=60.0, clouds=("modal",), signals={"modal": ModalSignals(None)},
+        gpus=["H100"], regions=["modal:us"],
+    )
+    (key,) = pinned.plan.counts
+    assert key == "modal:8xh100@us"
+    assert next(c for c in pinned.candidates if c.key == key).price_per_hour == pytest.approx(base * 1.15, abs=1e-3)
+    assert any("region us pinned at 1.15x (broad" in w for w in pinned.warnings)
+    # Modal never caps a shape on stock and is never "sold out".
+    assert all(c.max_count is None for c in pinned.candidates)
+
+
+def test_modal_multi_container_requires_whole_nodes(multi_cloud_env):
+    from yeto.shape.providers import ModalSignals
+
+    # 568 GB LoRA needs 2 nodes: H100:8 x2 is allowed (RoCE MFU 0.30);
+    # the 4-GPU-per-container variant is explicitly rejected.
+    result = _shape(
+        multi_cloud_env, budget=200.0, clouds=("modal",), signals={"modal": ModalSignals(None)},
+        gpus=["H100"], weights_gb_override=568.0,
+    )
+    assert "modal:2x8xh100" in result.plan.counts
+    cand = next(c for c in result.candidates if c.key == "modal:2x8xh100")
+    assert cand.eff_tflops == pytest.approx(2 * 8 * 989.0 * 0.30 * (0.5 + 0.05 * 8))
+    # The 4-per-container variant never reaches the plan (here it already
+    # loses to the fatter-node island; multi_node_rejection covers the
+    # whole-node wording in test_shape_catalog).
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "modal:3x4xh100" in reasons and "modal:3x4xh100" not in result.plan.counts
+
+
+def test_single_node_cloud_warns_when_model_needs_multi_node(multi_cloud_env):
+    rp = FakeRunPod({("H100", 8): 9})
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("runpod",), signals={"runpod": rp},
+        weights_gb_override=568.0, gpus=["H100"],
+    )
+    assert result.plan.counts == {}
+    assert any(w.startswith("runpod: single-node islands only") and "1 shape(s)" in w for w in result.warnings)
