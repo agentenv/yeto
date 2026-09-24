@@ -74,6 +74,7 @@ def test_rdma_capable_per_cloud():
     assert not rdma_capable("nebius", "gpu-l40s-d_4gpu-128vcpu-768gb")
     # Clouds sky provisions as single machines never get a fabric.
     assert not rdma_capable("runpod", "8x_H100_SECURE")
+    assert not rdma_capable("verda", "8H100.80S.176V")
     assert RDMA_CLOUDS <= MULTI_NODE_CLOUDS
     # Modal: whole-node containers in a clustered group get RoCE.
     assert rdma_capable("modal", "H100:8") and not rdma_capable("modal", "H100:4")
@@ -87,6 +88,7 @@ def test_multi_node_rejection_reasons():
     assert multi_node_rejection("nebius", "H100", 8) is None
     assert multi_node_rejection("modal", "H100", 8) is None
     assert multi_node_rejection("runpod", "H100", 8) == "multi-node islands unsupported on runpod"
+    assert multi_node_rejection("verda", "H100", 8) == "multi-node islands unsupported on verda"
     assert multi_node_rejection("modal", "H100", 4) == (
         "Modal multi-container islands must use whole nodes (H100:8 per container)"
     )

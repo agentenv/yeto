@@ -651,3 +651,123 @@ def test_availability_score_mapping():
     assert s({"availabilityLevel": "AVAILABILITY_LEVEL_LIMIT_REACHED", "available": 9}) == 0
     assert s({"availabilityLevel": "AVAILABILITY_LEVEL_UNKNOWN", "available": 4}) == 9
     assert s({"availabilityLevel": "AVAILABILITY_LEVEL_UNKNOWN", "available": 1}) == 6
+
+
+# --- Verda -------------------------------------------------------------------
+
+
+def _verda_fixture():
+    import json
+    from pathlib import Path
+
+    return json.loads((Path(__file__).parent / "fixtures" / "verda_instance_types.json").read_text())
+
+
+def test_verda_registered_and_credentials(monkeypatch, tmp_path):
+    from yeto.shape.providers import CLOUD_SIGNALS, VerdaSignals
+
+    assert CLOUD_SIGNALS["verda"] is VerdaSignals
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for var in ("VERDA_CLIENT_ID", "VERDA_CLIENT_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    sig = VerdaSignals(cache=None)
+    assert not sig.available() and "~/.verda/config.json" in sig.credential_hint()
+    (tmp_path / ".verda").mkdir()
+    (tmp_path / ".verda" / "config.json").write_text('{"client_id": "id", "client_secret": "s"}')
+    assert sig.available()
+    monkeypatch.setenv("HOME", str(tmp_path / "nowhere"))
+    monkeypatch.setenv("VERDA_CLIENT_ID", "id")
+    monkeypatch.setenv("VERDA_CLIENT_SECRET", "s")
+    assert sig.available()
+
+
+def test_verda_offerings_from_live_fixture(monkeypatch, tmp_path):
+    # The fixture is Verda's real /instance-types response (2026-09-23,
+    # 70 types). sky's catalog had 4 GPU rows and no 8-GPU machine.
+    from yeto.shape.providers import VerdaSignals
+
+    sig = VerdaSignals(TTLCache(path=tmp_path / "c.json"))
+    monkeypatch.setattr(sig, "_fetch_types", _verda_fixture)
+    monkeypatch.setattr(sig, "_fetch_locations", lambda: [{"code": "FIN-01"}, {"code": "FIN-03"}])
+    rows = sig.offerings(None, None, None)
+    by_type = {(o.instance_type, o.region): o for o in rows}
+    h100 = by_type[("8H100.80S.176V", "FIN-03")]
+    assert (h100.gpu, h100.gpus_per_node, h100.vcpus, h100.gpu_mem_gb, h100.cloud) == ("H100", 8, 176, 80, "verda")
+    assert (h100.on_demand_price, h100.spot_price) == (27.06, 13.53)
+    assert by_type[("8H200.141S.176V", "FIN-01")].gpu == "H200"
+    assert by_type[("8B200.240V", "FIN-01")].gpu == "B200"
+    assert {o.region for o in rows} == {"FIN-01", "FIN-03"}
+    # Confidential-computing, pre-bf16 and CPU types are not training targets.
+    assert not any(t.endswith(".CC") or t.startswith(("1V100", "CPU")) for t, _ in by_type)
+    assert not sig.warnings
+    # Allowlists narrow it; the region set passed in narrows locations.
+    only = sig.offerings({"FIN-03"}, ["B200"], None)
+    assert {(o.gpu, o.region) for o in only} == {("B200", "FIN-03")}
+
+
+def test_verda_locations_fall_back_to_the_known_list(monkeypatch, tmp_path):
+    from yeto.shape.providers import VERDA_LOCATIONS_FALLBACK, VerdaSignals
+
+    sig = VerdaSignals(TTLCache(path=tmp_path / "c.json"))
+    monkeypatch.setattr(sig, "_fetch_types", _verda_fixture)
+    monkeypatch.setattr(sig, "_fetch_locations", lambda: (_ for _ in ()).throw(RuntimeError("HTTP 401")))
+    rows = sig.offerings(None, ["H100"], None)
+    assert {o.region for o in rows} == set(VERDA_LOCATIONS_FALLBACK)
+    assert any("could not read /locations" in w and "401" in w for w in sig.warnings)
+
+
+def test_verda_scores_from_bulk_availability(monkeypatch, tmp_path):
+    from yeto.shape.providers import VerdaSignals
+
+    sig = VerdaSignals(TTLCache(path=tmp_path / "c.json"))
+    monkeypatch.setattr(sig, "_fetch_types", _verda_fixture)
+    monkeypatch.setattr(sig, "_fetch_locations", lambda: [{"code": "FIN-01"}, {"code": "FIN-03"}, {"code": "ICL-01"}])
+    sig.offerings(None, None, None)
+    calls = {"n": 0}
+
+    def fake_availability():
+        calls["n"] += 1
+        return {"FIN-01": ["8H100.80S.176V", "1H100.80S.30V"], "FIN-03": []}
+
+    monkeypatch.setattr(sig, "_fetch_availability", fake_availability)
+    asks = [("H100", 8, "FIN-01"), ("H100", 8, "FIN-03"), ("H100", 8, "ICL-01"), ("H200", 8, "FIN-01")]
+    assert sig.scores(asks) == {
+        ("H100", 8, "FIN-01"): 9,  # in stock
+        ("H100", 8, "FIN-03"): 0,  # location answered, type absent -> measured sold out
+        ("H100", 8, "ICL-01"): None,  # location missing from the answer -> unknown
+        ("H200", 8, "FIN-01"): 0,
+    }
+    assert calls["n"] == 1  # one bulk call serves every ask
+    sig.scores(asks[:1])
+    assert calls["n"] == 1  # cached
+    assert any("no entry for location ICL-01" in w for w in sig.warnings)
+    # API down -> every ask None with a warning.
+    broken = VerdaSignals(TTLCache(path=tmp_path / "d.json"))
+    monkeypatch.setattr(broken, "_fetch_availability", lambda: (_ for _ in ()).throw(RuntimeError("HTTP 503")))
+    assert broken.scores(asks[:1]) == {asks[0]: None}
+    assert any("availability check failed" in w for w in broken.warnings)
+
+
+def test_verda_token_and_availability_requests(monkeypatch, tmp_path):
+    from yeto.shape.providers import VerdaSignals
+
+    sig = VerdaSignals(TTLCache(path=tmp_path / "c.json"))
+    monkeypatch.setenv("VERDA_CLIENT_ID", "cid")
+    monkeypatch.setenv("VERDA_CLIENT_SECRET", "sec")
+    seen = []
+
+    def fake_request(method, path, token=None, body=None, params=None):
+        seen.append((method, path, token, body, params))
+        if path == "/oauth2/token":
+            assert body == {"grant_type": "client_credentials", "client_id": "cid", "client_secret": "sec"}
+            return {"access_token": "T"}
+        if path == "/instance-availability":
+            return [{"location_code": "FIN-01", "availabilities": ["8H100.80S.176V"]}]
+        raise AssertionError(path)
+
+    monkeypatch.setattr("yeto.shape.providers._verda_request", fake_request)
+    assert sig._fetch_availability() == {"FIN-01": ["8H100.80S.176V"]}
+    assert sig._fetch_availability() == {"FIN-01": ["8H100.80S.176V"]}
+    # One token exchange, then bearer-authenticated spot availability calls.
+    assert [s[1] for s in seen] == ["/oauth2/token", "/instance-availability", "/instance-availability"]
+    assert seen[1][2] == "T" and seen[1][4] == {"is_spot": "true"}
