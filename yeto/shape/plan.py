@@ -23,6 +23,8 @@ from ..gpu_spec import _GPU_CANONICAL
 from .cache import TTLCache
 from .catalog import (
     PEAK_TFLOPS_BF16,
+    VERIFIED_DOCKER_IMAGE_CLOUDS,
+    VERIFIED_SPOT_STORAGE_CLOUDS,
     Offering,
     effective_tflops,
     list_offerings,
@@ -61,6 +63,29 @@ class Rejection:
     reason: str
 
 
+@dataclass(frozen=True)
+class IslandShape:
+    """A fixed island shape the planner must price as-is instead of sizing
+    islands from the memory model — what RL training needs: every island
+    is actor GPUs plus (in the disjoint-rollout mode) the rollout GPUs,
+    on a fixed number of nodes, inside a container image, and on spot
+    only where checkpoint storage exists."""
+
+    gpus_per_node: int
+    num_nodes: int = 1
+    single_node_only: bool = False
+    needs_container_image: bool = False
+    spot_needs_storage: bool = False
+    label: str = "rl"
+    note: str = ""  # human-readable composition, e.g. "actor 4 + rollout 4"
+
+    def __post_init__(self) -> None:
+        if self.gpus_per_node < 1 or self.num_nodes < 1:
+            raise ValueError("an island needs at least one GPU on at least one node")
+        if self.single_node_only and self.num_nodes != 1:
+            raise ValueError("this island shape is single-node only")
+
+
 @dataclass
 class ShapeResult:
     plan: Plan  # solved against margin-inflated prices
@@ -73,6 +98,7 @@ class ShapeResult:
     price_margin: float
     head_cost: float
     fetch_seconds: float
+    island_shape: IslandShape | None = None
 
 
 def _candidate_key(off: Offering, nodes: int) -> str:
@@ -104,6 +130,7 @@ def build_shape(
     clouds: list[str] | None = None,
     signals: dict[str, CloudSignals] | None = None,
     target_tflops: float | None = None,
+    island_shape: IslandShape | None = None,
 ) -> ShapeResult:
     """Compute the fleet plan. `providers` (AWS) and `signals` (every other
     cloud, keyed by name) are injectable for tests.
@@ -288,23 +315,68 @@ def build_shape(
 
     # Island shapes: exactly min_nodes per offering — larger islands only
     # lose (worse placement odds, bigger failure blast radius, multi-node
-    # MFU discount), so they are dominated by more min-sized islands.
+    # MFU discount), so they are dominated by more min-sized islands. A
+    # fixed IslandShape (RL) skips the memory sizing: the shape IS the
+    # island, and only offerings with exactly that per-node GPU count
+    # qualify.
     rejections: list[Rejection] = []
     shape_notes: list[str] = []
     sized_all: list[tuple[Offering, int]] = []
+    unverified_image: dict[str, int] = {}
+    ondemand_clouds: set[str] = set()
     for off in offerings:
         if not supports_bf16(off.gpu):
             rejections.append(
                 Rejection(_candidate_key(off, 1), f"{off.gpu} predates bf16 training")
             )
             continue
-        nodes = min_nodes(weights, tuning, off.gpu_mem_gb, off.gpus_per_node, seq_len)
-        if nodes is None:
-            rejections.append(
-                Rejection(_candidate_key(off, 1), f"model does not fit (≤8 nodes of {off.gpus_per_node}x{off.gpu})")
+        if island_shape is not None:
+            if off.gpus_per_node != island_shape.gpus_per_node:
+                rejections.append(
+                    Rejection(
+                        _candidate_key(off, 1),
+                        f"{island_shape.label} island needs {island_shape.gpus_per_node} GPUs per node",
+                    )
+                )
+                continue
+            nodes = island_shape.num_nodes
+            if island_shape.needs_container_image and off.cloud not in VERIFIED_DOCKER_IMAGE_CLOUDS:
+                rejections.append(
+                    Rejection(
+                        _candidate_key(off, nodes),
+                        f"{off.cloud} not verified for container-image launch ({island_shape.label} islands)",
+                    )
+                )
+                unverified_image[off.cloud] = unverified_image.get(off.cloud, 0) + 1
+                continue
+            if (
+                island_shape.spot_needs_storage
+                and off.cloud not in VERIFIED_SPOT_STORAGE_CLOUDS
+                and off.on_demand_price is not None
+            ):
+                # No verified checkpoint store: spot preemption would lose
+                # rollout groups, so price this island on-demand.
+                off = replace(off, spot_price=off.on_demand_price, price_source="on-demand")
+                ondemand_clouds.add(off.cloud)
+        else:
+            nodes = min_nodes(
+                weights, tuning, off.gpu_mem_gb, off.gpus_per_node, seq_len
             )
-            continue
+            if nodes is None:
+                rejections.append(
+                    Rejection(_candidate_key(off, 1), f"model does not fit (≤8 nodes of {off.gpus_per_node}x{off.gpu})")
+                )
+                continue
         sized_all.append((off, nodes))
+    for cloud, n in sorted(unverified_image.items()):
+        shape_notes.append(
+            f"{cloud}: not verified for container-image launch; {n} {island_shape.label} "
+            "island shape(s) skipped (see docs/CLOUDS.md)"
+        )
+    for cloud in sorted(ondemand_clouds):
+        shape_notes.append(
+            f"{cloud}: spot checkpoint storage not verified; {island_shape.label} islands priced on-demand there"
+        )
 
     # Placement-score asks are a scarce resource (AWS caps *distinct*
     # configurations per day), so shed shapes that cannot win before asking:
@@ -651,6 +723,7 @@ def build_shape(
         price_margin=price_margin,
         head_cost=head_cost,
         fetch_seconds=time.monotonic() - t0,
+        island_shape=island_shape,
     )
 
 
@@ -672,7 +745,25 @@ def launch_argv(result: ShapeResult, model: str, tuning: str, data: str) -> list
         "--disk-size", str(disk_gb),
         "--data", data,
     ]
+    if result.island_shape is not None and result.island_shape.label == "rl":
+        # The RL recipe flags (env, rollout sizes, ...) are the user's; the
+        # plan only pins the mode so the islands are RL islands.
+        argv += ["--training-mode", "rl"]
     return argv
+
+
+def island_shape_dict(shape: IslandShape | None) -> dict | None:
+    if shape is None:
+        return None
+    return {
+        "label": shape.label,
+        "gpus_per_node": shape.gpus_per_node,
+        "num_nodes": shape.num_nodes,
+        "single_node_only": shape.single_node_only,
+        "needs_container_image": shape.needs_container_image,
+        "spot_needs_storage": shape.spot_needs_storage,
+        "note": shape.note,
+    }
 
 
 def to_json_dict(result: ShapeResult, model: str, budget: float, tuning: str, data: str | None) -> dict:
@@ -705,6 +796,7 @@ def to_json_dict(result: ShapeResult, model: str, budget: float, tuning: str, da
         "price_margin": result.price_margin,
         "head_cost_per_hour": result.head_cost,
         "binding": result.plan.binding,
+        "island_shape": island_shape_dict(result.island_shape),
         "rejections": sorted({f"{r.key}: {r.reason}" for r in result.rejections}),
         "warnings": result.warnings,
         "launch_argv": (["yeto"] + launch_argv(result, model, tuning, data or "<hf-dataset>"))
@@ -729,6 +821,14 @@ def render(
     )
     if budget is not None and target_tflops is not None:
         objective = f"target ≥ {target_tflops:.0f} TFLOPs within ${budget:.2f}/hr"
+    if result.island_shape is not None:
+        s = result.island_shape
+        composition = f" ({s.note})" if s.note else ""
+        out.append(
+            f"{s.label.upper()} island shape: {s.gpus_per_node} GPUs/node x {s.num_nodes} node(s)"
+            f"{composition}; container image required: {'yes' if s.needs_container_image else 'no'}; "
+            f"spot needs checkpoint storage: {'yes' if s.spot_needs_storage else 'no'}"
+        )
     if not plan.counts:
         out.append(f"no feasible plan for {objective} (weights ~{result.weights_gb:.0f} GB bf16, {tuning})")
     else:
@@ -749,8 +849,9 @@ def render(
             else:
                 shown = str(c.score)
             live = " (live)" if c.price_source == "live" else ""
+            basis = "on-demand" if c.price_source == "on-demand" else "spot est"
             out.append(
-                f"  {n}x {key}  spot est ${c.price_per_hour:.2f}/hr/island{live}  "
+                f"  {n}x {key}  {basis} ${c.price_per_hour:.2f}/hr/island{live}  "
                 f"score {shown}  {c.eff_tflops:.1f} TFLOPs/island"
             )
         out.append(f"  head: on-demand CPU VM  ${result.head_cost:.2f}/hr")

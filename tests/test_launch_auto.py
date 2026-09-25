@@ -22,6 +22,31 @@ def test_launch_cli_has_deterministic_lm_seed_by_default():
     assert _args(["--seed", "29"]).seed == 29
 
 
+# --- yeto shape --training-mode rl: the island the RL launcher will build -----
+
+
+def _shape_args(extra):
+    return cli.build_parser().parse_args(["shape", "--model", "gemma4", "--budget", "60"] + extra)
+
+
+def test_rl_island_shape_from_shape_flags():
+    assert cli.rl_island_shape(_shape_args([])) is None  # sft: memory-model sizing
+    split = cli.rl_island_shape(_shape_args([
+        "--training-mode", "rl", "--parameter-mode", "full", "--rollout-num-gpus", "4", "--actor-gpus", "4",
+    ]))
+    assert (split.gpus_per_node, split.num_nodes, split.single_node_only) == (8, 1, True)
+    assert split.needs_container_image and split.spot_needs_storage and split.label == "rl"
+    assert split.note == "actor 4 + rollout 4, disjoint"
+    colocated = cli.rl_island_shape(_shape_args(["--training-mode", "rl", "--actor-gpus", "8", "--actor-nodes", "2"]))
+    assert (colocated.gpus_per_node, colocated.num_nodes, colocated.single_node_only) == (8, 2, False)
+    with pytest.raises(ValueError, match="single-node"):
+        cli.rl_island_shape(_shape_args([
+            "--training-mode", "rl", "--parameter-mode", "full", "--rollout-num-gpus", "4", "--actor-nodes", "2",
+        ]))
+    with pytest.raises(ValueError, match="--rollout-num-gpus >= 1"):
+        cli.rl_island_shape(_shape_args(["--training-mode", "rl", "--parameter-mode", "full"]))
+
+
 # --- Modal islands: routing decided before any resource is touched ------------
 
 
