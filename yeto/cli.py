@@ -849,8 +849,11 @@ def build_parser() -> argparse.ArgumentParser:
     shape.add_argument(
         "--regions",
         default=None,
-        help="comma-separated AWS regions, or 'all' for every catalog region "
-        "(default: us-east-1,us-east-2,us-west-1,us-west-2)",
+        help="comma-separated cloud:region entries, e.g. "
+        "aws:us-east-1,runpod:CA; a bare region means aws; 'cloud:all' "
+        "lifts the limit for one cloud and 'all' for every cloud "
+        "(default: aws limited to us-east-1,us-east-2,us-west-1,us-west-2, "
+        "other clouds unlimited)",
     )
     shape.add_argument(
         "--price-margin",

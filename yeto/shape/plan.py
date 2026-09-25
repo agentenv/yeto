@@ -38,6 +38,7 @@ from .providers import (
     QuotaKey,
     credentials_available,
 )
+from .regions import parse_regions
 
 DEFAULT_REGIONS = ["us-east-1", "us-east-2", "us-west-1", "us-west-2"]
 HEAD_COST_PER_HOUR = 0.40  # small on-demand CPU VM hosting syncer + controller
@@ -173,21 +174,22 @@ def build_shape(
             "out of --clouds)"
         )
     aws = providers if providers is not None else (AwsProviders(cache) if "aws" in clouds else None)
-    if regions is None:
-        regions = DEFAULT_REGIONS
-    catalog_regions = None if regions == ["all"] else regions
-    wanted_regions = None if catalog_regions is None else set(catalog_regions)
+    region_filter = parse_regions(
+        regions, DEFAULT_REGIONS, ["aws", *CLOUD_SIGNALS, *signals]
+    )
 
     def fetch_offerings() -> list[Offering]:
         # Clouds that maintain their own catalog (sky's dump is incomplete
-        # for them) hand back rows; everyone else rides one sky call.
+        # for them) hand back rows; everyone else rides one sky call. The
+        # catalog comes back unfiltered by region so an unknown region can
+        # be reported against the regions that DO exist.
         own: dict[str, list[Offering]] = {}
         for name, sig in signals.items():
-            rows = sig.offerings(wanted_regions, gpus, cache)
+            rows = sig.offerings(region_filter.for_cloud(name), gpus, cache)
             if rows is not None:
                 own[name] = rows
         sky_clouds = tuple(sorted(c for c in clouds if c not in own))
-        rows = list_offerings(catalog_regions, gpus, cache, sky_clouds) if sky_clouds else []
+        rows = list_offerings(None, gpus, cache, sky_clouds) if sky_clouds else []
         return rows + [o for name in sorted(own) for o in own[name]]
 
     # Static-ish facts: weight size (hub, cached) + catalog (sky, cached).
@@ -197,14 +199,38 @@ def build_shape(
         weights = weights_f.result()
         unfiltered = offerings_f.result()
 
-    offerings = unfiltered
+    # Apply the region filter, and be honest about user-named regions with
+    # nothing in them (for the requested GPUs).
+    region_notes: list[str] = []
+    for cloud in clouds:
+        wanted = region_filter.for_cloud(cloud)
+        if not wanted or not region_filter.is_explicit(cloud):
+            continue
+        have = {o.region for o in unfiltered if o.cloud == cloud}
+        missing = wanted - have
+        if not missing:
+            continue
+        gpu_note = f" for GPUs {', '.join(gpus)}" if gpus else ""
+        listing = ", ".join(sorted(have)) or "none"
+        if wanted - missing:
+            region_notes.append(
+                f"{cloud}: no offerings in region(s) {', '.join(sorted(missing))}{gpu_note}; "
+                f"planning the rest ({cloud} regions with offerings: {listing})"
+            )
+        else:
+            raise ValueError(
+                f"no {cloud} offerings in region(s) {', '.join(sorted(missing))}{gpu_note}; "
+                f"{cloud} regions with offerings: {listing}"
+            )
+    offerings = [o for o in unfiltered if region_filter.allows(o.cloud, o.region)]
 
     signal_notes: list[str] = []
     # AWS placement-score asks take a stable region list: the user's
     # allowlist, or every catalog region when unrestricted.
+    aws_wanted = region_filter.for_cloud("aws")
     regions = (
-        sorted(wanted_regions)
-        if wanted_regions is not None
+        sorted(aws_wanted)
+        if aws_wanted is not None
         else sorted({o.region for o in offerings if o.cloud == "aws"})
     )
 
@@ -568,6 +594,7 @@ def build_shape(
         rejections=rejections,
         warnings=list(getattr(aws, "warnings", []))
         + [w for name in sorted(signals) for w in getattr(signals[name], "warnings", [])]
+        + region_notes
         + gap_notes
         + shape_notes
         + signal_notes
