@@ -1644,6 +1644,62 @@ def cmd_logs(args) -> int:
 # down
 
 
+# The head's sky lives in the Python its setup pip-installed into (sky's
+# ~/miniconda3 on its images); a non-interactive ssh shell does not run
+# conda's .bashrc hook, so plain `python3` is the system one without sky.
+HEAD_DOWN_ATTEMPTS = 3
+HEAD_DOWN_RETRY_S = 20.0
+HEAD_DOWN_SCRIPT = """cd ~/sky_workdir && PY=$([ -x ~/miniconda3/bin/python3 ] && echo ~/miniconda3/bin/python3 || echo python3) && "$PY" - <<'PY'
+import sky
+for c in {clusters!r}:
+    try:
+        sky.get(sky.down(c))
+        print(f"[head] {{c}}: down", flush=True)
+    except Exception as e:  # already gone, or never launched
+        print(f"[head] {{c}}: {{e}}", flush=True)
+PY"""
+
+
+def _head_down_learners(head_cluster: str, head_job_id, clusters: list[str]) -> list[str]:
+    """Tear down a head run's learner clusters FROM the head.
+
+    The head's sky launched them, so only it knows them: a local `sky down`
+    reports "does not exist" and the learner outlives its head. Cancel the
+    controller job first so it cannot relaunch what is being torn down, then
+    run the downs over ssh (synchronous, output captured — a queued sky job
+    gave no output and no guarantee) and require a confirmation line per
+    cluster. Returns the clusters NOT confirmed down (patched out in tests)."""
+    import subprocess
+
+    import sky
+
+    if head_job_id is not None:
+        try:
+            sky.get(sky.cancel(head_cluster, job_ids=[int(head_job_id)]))
+        except Exception as e:  # noqa: BLE001 - the job may already be over
+            print(f"[yeto] {head_cluster}: controller job cancel: {e}", file=sys.stderr)
+    script = HEAD_DOWN_SCRIPT.format(clusters=list(clusters))
+    proc = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", head_cluster,
+         f"bash -lc {shlex.quote(script)}"],
+        capture_output=True, text=True, timeout=900,
+    )
+    print(proc.stdout, end="")
+    if proc.returncode != 0 and not proc.stdout.strip():
+        raise RuntimeError(f"ssh to {head_cluster} failed (exit {proc.returncode}): {proc.stderr.strip()[-300:]}")
+    return _unconfirmed_head_downs(proc.stdout, clusters)
+
+
+def _unconfirmed_head_downs(output: str, clusters: list[str]) -> list[str]:
+    """Clusters without a "[head] <name>: down" or "does not exist" line."""
+    done = set()
+    for line in output.splitlines():
+        for c in clusters:
+            if line.startswith(f"[head] {c}: ") and (line.endswith(": down") or "does not exist" in line):
+                done.add(c)
+    return [c for c in clusters if c not in done]
+
+
 def _sky_down_cluster(cluster: str) -> None:
     """Tear one cluster down via the sky SDK (patched out in tests)."""
     import sky
@@ -1687,6 +1743,33 @@ def cmd_down(args) -> int:
     clusters = meta.get("clusters") or []
     if clusters:
         print(f"[yeto] tearing down {len(clusters)} cluster(s): {', '.join(clusters)}")
+        head_cluster = meta.get("head_cluster") if meta.get("controller") == "head" else None
+        on_head = [c for c in clusters if c != head_cluster]
+        if head_cluster and on_head:
+            # Only the head's sky knows these clusters, and the head may itself
+            # be mid-teardown (sky then answers 500), so retry; and never delete
+            # the head while a learner is unconfirmed — that orphans it.
+            pending, job = list(on_head), meta.get("head_job_id")
+            for attempt in range(HEAD_DOWN_ATTEMPTS):
+                try:
+                    pending = _head_down_learners(head_cluster, job, pending)
+                except Exception as e:  # noqa: BLE001 - e.g. head unreachable
+                    print(f"[yeto] {head_cluster}: head-side teardown failed: {e}", file=sys.stderr)
+                job = None  # the controller is cancelled after the first attempt
+                if not pending:
+                    break
+                if attempt + 1 < HEAD_DOWN_ATTEMPTS:
+                    time.sleep(HEAD_DOWN_RETRY_S)
+            if pending:
+                print(
+                    f"[yeto] NOT tearing down {head_cluster}: learner cluster(s) not confirmed down "
+                    f"from it: {', '.join(pending)}. The head is the only machine whose sky knows "
+                    f"them; rerun `yeto down {name}`, or delete them in the cloud console.",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"[yeto] learner clusters torn down from {head_cluster}: {', '.join(on_head)}")
+            clusters = [c for c in clusters if c not in on_head]
 
         def _down_one(cluster: str) -> None:
             try:
