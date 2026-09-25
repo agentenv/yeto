@@ -619,16 +619,35 @@ def prepare_launch_args(
 
 def check_cloud_prerequisites(
     specs: list[ClusterSpec],
+    project_ids: dict[str, str] | None = None,
     args=None,
     modal_ok: bool | None = None,
 ) -> None:
     """Per-cloud facts that must hold before any cloud spend.
+
+    Nebius binds one project to one region, and sky reads the project for
+    a region from `nebius.region_configs.<region>.project_id` in its
+    config; a fleet naming a Nebius region without one fails at provision
+    time, after the head VM is up. Fail here instead, naming every region
+    that lacks a project. `project_ids` is injectable for tests.
 
     Modal islands have scheduling rules Modal only enforces at launch
     (whole nodes for multi-container groups), need a token on this
     machine, cannot mount object-store data, and (for RL) need the Miles
     image pinned by digest. `modal_ok` overrides the token check in tests.
     """
+    nebius_regions = sorted({s.region for s in specs if s.cloud == "nebius" and s.region})
+    if nebius_regions:
+        from .shape.providers import SKY_CONFIG_PATH, nebius_project_ids
+
+        have = project_ids if project_ids is not None else nebius_project_ids()
+        missing = [r for r in nebius_regions if r not in have]
+        if missing:
+            raise ValueError(
+                "Nebius needs a project per region: no project_id for "
+                f"{', '.join(missing)} under nebius.region_configs in "
+                f"{SKY_CONFIG_PATH} (one Nebius project is bound to one region)"
+            )
     modal_specs = [s for s in specs if s.cloud == "modal"]
     if modal_specs:
         from .modal_runner import (

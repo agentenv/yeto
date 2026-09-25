@@ -362,12 +362,17 @@ class FakeSignal(FakeRunPod):
     """A generic registry cloud for the contract tests: optional own
     catalog rows, optional scores failure, call counters."""
 
-    def __init__(self, name, stock, available=True, rows=None, raise_on_scores=False):
+    def __init__(self, name, stock, available=True, rows=None, raise_on_scores=False, live=None):
         super().__init__(stock, available)
         self.name = name
         self._rows = rows
         self._raise = raise_on_scores
+        self._live = live or {}  # {(instance_type, region): live spot $/hr}
         self.calls = {"offerings": 0, "scores": 0}
+
+    def live_spot_prices(self, rows):
+        keys = {(r.instance_type, r.region) for r in rows}
+        return {k: p for k, p in self._live.items() if k in keys}
 
     def credential_hint(self):
         return f"~/.{self.name}/credentials"
@@ -506,9 +511,6 @@ def _load_snapshot():
     return json.loads(path.read_text())
 
 
-# Advisories added on purpose by this series: a GPU the signal knows how to
-# check stock for that the catalog never lists, and a user-named region
-# with no offerings for the requested GPUs.
 _ADVISORIES_ADDED_BY_THIS_CHANGE = ("catalog has no rows", "no offerings in region(s)")
 
 
@@ -517,15 +519,20 @@ def _without_gap_notes(d):
     d["warnings"] = [
         w for w in d["warnings"] if not any(a in w for a in _ADVISORIES_ADDED_BY_THIS_CHANGE)
     ]
+    # `price_source` (per island) is a new field; the snapshot predates it
+    # and every snapshot price is a catalog price.
+    assert all(i.get("price_source", "catalog") == "catalog" for i in d["islands"])
+    d["islands"] = [{k: v for k, v in i.items() if k != "price_source"} for i in d["islands"]]
     return d
 
 
 def test_aws_runpod_plan_matches_pre_registry_snapshot(multi_cloud_env):
     # The registry refactor must not move a single planned field. The
     # snapshot was produced by tests/fixtures/gen_shape_snapshot.py against
-    # the pre-refactor code; the only tolerated difference is the advisory
-    # warning this change adds on purpose (a GPU the signal knows but the
-    # catalog lacks), stripped before comparing.
+    # the pre-refactor code; the only tolerated differences are the two new
+    # advisory warnings this change added on purpose (a GPU the signal
+    # knows but the catalog lacks; a user-named region with no offerings
+    # for the requested GPUs), stripped before comparing.
     snap = _load_snapshot()
     cases = {
         "high_stock_budget_500": dict(budget=500.0, stock={("H100", 8): 9, ("B200", 8): 9}),
@@ -724,6 +731,46 @@ def test_launch_key_keeps_native_region_and_parses(multi_cloud_env):
 
 
 # --- live prices and multi-node clouds ---------------------------------------
+
+
+def test_live_price_overrides_catalog_for_budget_and_is_marked(multi_cloud_env):
+    # Catalog says $17.20; the cloud quotes $10 live. Budget 12 only fits
+    # the live price — so the plan exists only if the override is what the
+    # budget is enforced against; render/JSON mark the source.
+    key = ("gpu-h100-sxm_8gpu-128vcpu-1600gb", "eu-north1")
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_OFFERINGS, live={key: 10.0})
+    result = _shape(multi_cloud_env, budget=12.0, clouds=("nebius",), signals={"nebius": neb})
+    assert result.plan.counts == {"nebius:8xh100@eu-north1": 1}
+    (cand,) = result.candidates
+    assert cand.price_per_hour == 10.0 and cand.price_source == "live"
+    assert any("1 spot price(s) from the live pricing API" in w for w in result.warnings)
+    text = plan_mod.render(result, "gemma4", 12.0, "lora")
+    assert "$10.00/hr/island (live)" in text
+    d = plan_mod.to_json_dict(result, "gemma4", 12.0, "lora", "org/data")
+    assert d["islands"][0]["price_source"] == "live"
+    # A failing price API keeps the catalog price and says so.
+    broken = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_OFFERINGS)
+    broken.live_spot_prices = lambda rows: (_ for _ in ()).throw(RuntimeError("pricing down"))
+    result = _shape(multi_cloud_env, budget=20.0, clouds=("nebius",), signals={"nebius": broken})
+    (cand,) = result.candidates
+    assert cand.price_per_hour == 17.2 and cand.price_source == "catalog"
+    assert any("live pricing failed" in w for w in result.warnings)
+
+
+def test_nebius_multi_node_island_allowed_with_rdma_mfu(multi_cloud_env):
+    # 568 GB needs 2 nodes of 8x80GB. Nebius is a multi-node cloud with an
+    # InfiniBand fabric on 8-GPU SXM presets -> the island is planned at
+    # the 0.30 multi-node MFU (not TCP's 0.20, not rejected like RunPod).
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_OFFERINGS)
+    result = _shape(
+        multi_cloud_env, budget=80.0, clouds=("nebius",), signals={"nebius": neb},
+        weights_gb_override=568.0,
+    )
+    (key,) = result.plan.counts
+    assert key == "nebius:2x8xh100@eu-north1"
+    (cand,) = result.candidates
+    assert cand.eff_tflops == pytest.approx(2 * 8 * 989.0 * 0.30 * 0.95)
+    assert not any("single-node islands only" in w for w in result.warnings)
 
 
 # --- Modal ---------------------------------------------------------------------

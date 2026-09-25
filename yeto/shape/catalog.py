@@ -42,6 +42,9 @@ class Offering:
     on_demand_price: float | None
     gpu_mem_gb: int  # from launcher.GPU_MEM_GB
     cloud: str = "aws"  # lowercase sky cloud name
+    # "catalog" (sky's periodic dump) or "live" (the cloud's own pricing
+    # API, fetched during this shape); rendering marks live prices.
+    price_source: str = "catalog"
 
 
 # GPUs that predate bf16 (SM80/Ampere): the base is always trained in bf16,
@@ -62,10 +65,11 @@ def efa_capable(instance_type: str) -> bool:
 
 # Clouds where a multi-node island can be provisioned at all (RunPod pods
 # are single machines to sky), and the subset whose multi-node islands get
-# an RDMA-class fabric (EFA on AWS, RoCE on Modal clustered functions).
-# Both grow as clouds pass the multi-node verification in docs/CLOUDS.md.
-MULTI_NODE_CLOUDS = frozenset({"aws", "modal"})
-RDMA_CLOUDS = frozenset({"aws", "modal"})
+# an RDMA-class fabric (EFA on AWS, InfiniBand on Nebius GPU clusters,
+# RoCE on Modal clustered functions). Both grow as clouds pass the
+# multi-node verification in docs/CLOUDS.md.
+MULTI_NODE_CLOUDS = frozenset({"aws", "nebius", "modal"})
+RDMA_CLOUDS = frozenset({"aws", "nebius", "modal"})
 
 
 def _modal_gpu_count(instance_type: str) -> tuple[str, int]:
@@ -76,13 +80,18 @@ def _modal_gpu_count(instance_type: str) -> tuple[str, int]:
 
 def rdma_capable(cloud: str, instance_type: str) -> bool:
     """Whether a multi-node island of this shape gets an RDMA fabric
-    (decides the multi-node MFU tier). AWS: EFA families. Modal:
-    whole-node containers in a clustered function (the only
-    multi-container shape Modal schedules) get RoCE."""
+    (decides the multi-node MFU tier). AWS: EFA families. Nebius: the 8-GPU
+    SXM presets, which sky places in an InfiniBand GPU cluster; PCIe and
+    partial-node presets do not get the fabric. Modal: whole-node
+    containers in a clustered function (the only multi-container shape
+    Modal schedules) get RoCE."""
     if cloud not in RDMA_CLOUDS:
         return False
     if cloud == "aws":
         return efa_capable(instance_type)
+    if cloud == "nebius":
+        platform, _, preset = instance_type.partition("_")
+        return "sxm" in platform and preset.startswith("8gpu")
     if cloud == "modal":
         from yeto.modal_runner import MODAL_FULL_NODE
 

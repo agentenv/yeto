@@ -62,6 +62,8 @@ class CloudSignals(Protocol):
 
     def island_cap(self, score: int) -> int | None: ...
 
+    def live_spot_prices(self, rows: list[Offering]) -> dict[tuple[str, str], float]: ...
+
 
 # Pseudo-score -> max islands of one shape. Stock-style signals are coarse,
 # so the caps are deliberately blunt: plenty (9) is uncapped, medium (6)
@@ -107,6 +109,12 @@ class BaseCloudSignals:
 
     def island_cap(self, score: int) -> int | None:
         return _STOCK_CAPS.get(score, 1)
+
+    def live_spot_prices(self, rows: list[Offering]) -> dict[tuple[str, str], float]:
+        """(instance_type, region) -> current $/hr for the rows whose price
+        the cloud can quote right now; the planner overrides the catalog
+        with these and marks them. Default: nothing to override."""
+        return {}
 
 # ClientError codes AWS uses for rate limiting; these mean "back off and
 # retry", not "misconfigured", so they get a friendlier warning.
@@ -525,6 +533,316 @@ class AwsProviders:
         return usage
 
 
+# --- Nebius -----------------------------------------------------------------
+#
+# Catalog: sky's nebius dump (complete, region-aware, carries SpotPrice).
+# Capacity: the Capacity API's resource-advice list, which reports per
+# (region, platform, preset) how many units can be allocated right now for
+# reserved / on-demand / preemptible, clipped by the tenant's quota. Price:
+# the billing calculator (estimate-batch) quotes a preemptible instance at
+# the current spot rate — needed because preemptible pricing turns dynamic
+# on 2026-10-08 and sky's static SpotPrice column will lag. Both calls are
+# authenticated with the IAM token the Nebius CLI writes for sky.
+
+NEBIUS_API = "https://api.nebius.cloud"
+NEBIUS_TOKEN_PATH = "~/.nebius/NEBIUS_IAM_TOKEN.txt"
+NEBIUS_TENANT_PATH = "~/.nebius/NEBIUS_TENANT_ID.txt"
+SKY_CONFIG_PATH = "~/.sky/config.yaml"
+NEBIUS_ADVICE_PAGE_SIZE = 200  # the Capacity API's maximum page size
+
+# sky accelerator name -> Nebius platform ids that carry it. sky's catalog
+# InstanceType is "<platform>_<preset>", e.g. gpu-h100-sxm_8gpu-128vcpu-1600gb;
+# regional variants carry a suffix (gpu-b200-sxm-a in me-west1).
+_NEBIUS_PLATFORMS: dict[str, tuple[str, ...]] = {
+    "H100": ("gpu-h100-sxm",),
+    "H200": ("gpu-h200-sxm",),
+    "B200": ("gpu-b200-sxm", "gpu-b200-sxm-a"),
+    "L40S": ("gpu-l40s-a", "gpu-l40s-d"),
+}
+
+
+def _read_stripped(path: str) -> str | None:
+    import os
+
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def nebius_iam_token() -> str | None:
+    import os
+
+    return os.environ.get("NEBIUS_IAM_TOKEN") or _read_stripped(NEBIUS_TOKEN_PATH)
+
+
+def nebius_tenant_id() -> str | None:
+    import os
+
+    return os.environ.get("NEBIUS_TENANT_ID") or _read_stripped(NEBIUS_TENANT_PATH)
+
+
+def nebius_available() -> bool:
+    """True when both the IAM token and the tenant id sky needs are present
+    (env vars or the files `nebius iam ...` writes)."""
+    return bool(nebius_iam_token()) and bool(nebius_tenant_id())
+
+
+def nebius_project_ids(config_path: str | None = None) -> dict[str, str]:
+    """region -> project id from sky's config (`nebius.region_configs`).
+
+    Nebius binds one project to one region, so sky needs a project per
+    region a fleet touches; this is the one place Yeto reads that mapping
+    (the pricing API needs a project too). Missing file / no yaml -> {}.
+    """
+    import os
+
+    path = config_path or os.environ.get("SKYPILOT_CONFIG") or SKY_CONFIG_PATH
+    try:
+        import yaml
+
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except (OSError, ImportError, ValueError):
+        return {}
+    regions = ((cfg.get("nebius") or {}).get("region_configs")) or {}
+    out: dict[str, str] = {}
+    for region, entry in regions.items():
+        pid = (entry or {}).get("project_id") if isinstance(entry, dict) else None
+        if pid:
+            out[str(region)] = str(pid)
+    return out
+
+
+def split_nebius_instance_type(instance_type: str) -> tuple[str, str]:
+    """'gpu-h100-sxm_8gpu-128vcpu-1600gb' -> ('gpu-h100-sxm', '8gpu-128vcpu-1600gb')."""
+    platform, _, preset = instance_type.partition("_")
+    return platform, preset
+
+
+def _nebius_region_matches(advice_region: str, region: str) -> bool:
+    """Advice rows are per zone-ish region ('us-central1-b'); the catalog
+    speaks in regions ('us-central1')."""
+    return advice_region == region or advice_region.startswith(region + "-")
+
+
+def _availability_score(av: dict | None) -> int:
+    """Map one Capacity-API Availability block onto the 1-10 pseudo-score.
+    The level enum is Nebius's own judgement and wins; when it is UNKNOWN
+    the unit count decides. No allocatable units is a measured 0."""
+    if not av:
+        return 0
+    level = str(av.get("availabilityLevel") or "")
+    try:
+        units = int(av.get("available") or 0)
+    except (TypeError, ValueError):
+        units = 0
+    if units <= 0 or level.endswith("LIMIT_REACHED"):
+        return 0
+    if level.endswith("HIGH"):
+        return 9
+    if level.endswith("MEDIUM"):
+        return 6
+    if level.endswith("LOW"):
+        return 3
+    return 9 if units >= 4 else 6
+
+
+def _nebius_request(method: str, path: str, token: str, body: dict | None = None, params: dict | None = None) -> dict:
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    url = NEBIUS_API + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "yeto-shape/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise RuntimeError(
+                "Nebius rejected the IAM token (expired?); refresh it with "
+                f"`nebius iam get-access-token > {NEBIUS_TOKEN_PATH}`"
+            ) from exc
+        raise RuntimeError(f"Nebius API {path} -> HTTP {exc.code}") from exc
+
+
+class NebiusSignals(BaseCloudSignals):
+    """Nebius: sky catalog rows (kept, with SpotPrice), Capacity-API
+    pseudo-scores per region, live preemptible prices via the billing
+    calculator. `use_spot=False` scores on-demand capacity instead."""
+
+    name = "nebius"
+
+    def __init__(self, cache: Any, max_workers: int = 8, use_spot: bool = True) -> None:
+        super().__init__(cache, max_workers)
+        self.use_spot = use_spot
+        self._rows: dict[SignalAsk, list[Offering]] = {}
+
+    def available(self) -> bool:
+        return nebius_available()
+
+    def credential_hint(self) -> str:
+        return (
+            f"{NEBIUS_TOKEN_PATH} and {NEBIUS_TENANT_PATH} (Nebius CLI: "
+            "`nebius iam get-access-token` / `nebius iam whoami`), or "
+            "NEBIUS_IAM_TOKEN / NEBIUS_TENANT_ID"
+        )
+
+    def known_gpus(self) -> frozenset[str]:
+        return frozenset(_NEBIUS_PLATFORMS)
+
+    def offerings(
+        self, regions: set[str] | None, gpus: list[str] | None, cache: Any
+    ) -> list[Offering] | None:
+        from yeto.shape.catalog import list_offerings
+
+        rows = list_offerings(None, gpus, cache, ("nebius",))
+        if regions is not None:
+            rows = [r for r in rows if r.region in regions]
+        self._rows = {}
+        for row in rows:
+            self._rows.setdefault((row.gpu, row.gpus_per_node, row.region), []).append(row)
+        return rows
+
+    def scores(self, asks: list[SignalAsk]) -> dict[SignalAsk, int | None]:
+        try:
+            advice = self._advice()
+        except Exception as exc:  # noqa: BLE001 - degrade, don't crash planning
+            self._warn(f"nebius capacity check failed: {exc}")
+            return {ask: None for ask in asks}
+        kind = "preemptible" if self.use_spot else "onDemand"
+        out: dict[SignalAsk, int | None] = {}
+        for ask in asks:
+            rows = self._rows.get(ask) or []
+            if not rows:
+                self._warn(f"nebius: no catalog row for {ask[1]}x{ask[0]} in {ask[2]}; capacity unknown")
+                out[ask] = None
+                continue
+            best: int | None = None
+            for row in rows:
+                platform, preset = split_nebius_instance_type(row.instance_type)
+                for item in advice:
+                    spec = item.get("spec") or {}
+                    ci = spec.get("computeInstance") or {}
+                    if ci.get("platform") != platform:
+                        continue
+                    if not _nebius_region_matches(str(spec.get("region") or ""), row.region):
+                        continue
+                    preset_obj = ci.get("preset") or {}
+                    same_preset = preset_obj.get("name") == preset
+                    same_count = (preset_obj.get("resources") or {}).get("gpuCount") == row.gpus_per_node
+                    if not (same_preset or same_count):
+                        continue
+                    s = _availability_score((item.get("status") or {}).get(kind))
+                    best = s if best is None else max(best, s)
+            if best is None:
+                self._warn(
+                    f"nebius: Capacity API lists no {kind} entry for "
+                    f"{rows[0].instance_type} in {ask[2]}; capacity unknown"
+                )
+            out[ask] = best
+        return out
+
+    def _advice(self) -> list[dict]:
+        tenant = nebius_tenant_id()
+        if not tenant:
+            raise RuntimeError(f"tenant id missing ({NEBIUS_TENANT_PATH})")
+        return self._cache.get_or(f"nebius-advice:{tenant}", self._fetch_advice, ttl=900)
+
+    def _fetch_advice(self) -> list[dict]:
+        """GET /capacity/v1/resource-advice for the tenant, all pages."""
+        token, tenant = nebius_iam_token(), nebius_tenant_id()
+        items: list[dict] = []
+        # The API rejects pageSize > 200 (HTTP 400, found live 2026-09-23).
+        params: dict = {"parentId": tenant, "pageSize": str(NEBIUS_ADVICE_PAGE_SIZE)}
+        while True:
+            page = _nebius_request("GET", "/capacity/v1/resource-advice", token, params=params)
+            items.extend(page.get("items") or [])
+            nxt = page.get("nextPageToken")
+            if not nxt:
+                return items
+            params = {**params, "pageToken": nxt}
+
+    def live_spot_prices(self, rows: list[Offering]) -> dict[tuple[str, str], float]:
+        if not self.use_spot:
+            return {}
+        projects = nebius_project_ids()
+        out: dict[tuple[str, str], float] = {}
+        for row in rows:
+            project = projects.get(row.region)
+            if project is None:
+                self._warn(
+                    f"nebius: no project_id for region {row.region} in {SKY_CONFIG_PATH} "
+                    "(nebius.region_configs); catalog spot price used there"
+                )
+                continue
+            key = (row.instance_type, row.region)
+            if key in out:
+                continue
+            try:
+                price = self._cache.get_or(
+                    f"nebius-price:spot:{row.instance_type}:{row.region}",
+                    lambda: self._fetch_estimate(project, row.instance_type),
+                    ttl=900,
+                )
+            except Exception as exc:  # noqa: BLE001 - degrade to the catalog price
+                self._warn(f"nebius: live price for {row.instance_type} in {row.region} failed ({exc}); catalog price used")
+                continue
+            if price is not None:
+                out[key] = float(price)
+        return out
+
+    def _fetch_estimate(self, project_id: str, instance_type: str) -> float | None:
+        """One billing-calculator call for a preemptible instance following
+        the spot price; returns the hourly total, or None when the response
+        carries no hourly figure. The payload wraps a CreateInstanceRequest
+        the way the calculator documents; sky-independent, so it works
+        without the Nebius SDK."""
+        platform, preset = split_nebius_instance_type(instance_type)
+        body = {
+            "currency": "usd",
+            "filterAggregationUnit": {"filterAggregationUnitValues": ["FILTER_AGGREGATION_UNIT_HOUR"]},
+            "resourceSpecs": [
+                {
+                    "spec": {
+                        "@type": "type.googleapis.com/nebius.compute.v1.CreateInstanceRequest",
+                        "metadata": {"parentId": project_id, "name": "yeto-shape-estimate"},
+                        "spec": {
+                            "resources": {"platform": platform, "preset": preset},
+                            "preemptible": {"onPreemption": "STOP"},
+                            "followsSpotPrice": {},
+                        },
+                    }
+                }
+            ],
+        }
+        resp = _nebius_request("POST", "/billing/v1/calculator/estimate-batch", nebius_iam_token(), body=body)
+        for cost in resp.get("resourceCosts") or []:
+            unit = (cost.get("aggregationUnit") or {}).get("unit")
+            if unit and unit != "hour":
+                continue
+            total = ((cost.get("general") or {}).get("total")) or ((cost.get("fixedInstance") or {}).get("perInstance")) or {}
+            value = total.get("cost") or total.get("costRounded")
+            if value is not None:
+                return float(value)
+        return None
+
+
 # --- Modal -------------------------------------------------------------------
 #
 # Modal is serverless: no catalog API, no stock API, no spot. Prices are a
@@ -676,5 +994,6 @@ class ModalSignals(BaseCloudSignals):
 # should need to know the cloud's name.
 CLOUD_SIGNALS: dict[str, Callable[[TTLCache], CloudSignals]] = {
     "runpod": RunPodProviders,
+    "nebius": NebiusSignals,
     "modal": ModalSignals,
 }
