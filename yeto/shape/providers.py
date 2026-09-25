@@ -18,8 +18,95 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 from yeto.shape.cache import TTLCache
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard (catalog is light)
+    from yeto.shape.catalog import Offering
+
+# One capacity question: (sky GPU name, GPUs per node, region/location).
+SignalAsk = tuple[str, int, str]
+
+
+@runtime_checkable
+class CloudSignals(Protocol):
+    """What the shaper needs from every non-AWS cloud.
+
+    AWS is deliberately NOT behind this protocol: its signals are
+    three-dimensional (quota limit, quota usage, placement score) and the
+    planner treats quota as a hard cap while treating the pseudo-score as a
+    probability. Everything else — RunPod, Nebius, Verda, Modal — fits one
+    shape: "do I have credentials", "what can I buy", "can I get it now".
+
+    `scores` returns, per ask, an integer 0-10 on the same scale as AWS
+    placement scores, or None. The two MUST NOT be conflated: 0 is a
+    *measurement* (sold out) and rejects the shape without a warning; None
+    means "could not find out" and follows the assumed/strict policy.
+    """
+
+    name: str
+    warnings: list[str]
+
+    def available(self) -> bool: ...
+
+    def credential_hint(self) -> str: ...
+
+    def known_gpus(self) -> frozenset[str]: ...
+
+    def offerings(
+        self, regions: set[str] | None, gpus: list[str] | None, cache: Any
+    ) -> list[Offering] | None: ...
+
+    def scores(self, asks: list[SignalAsk]) -> dict[SignalAsk, int | None]: ...
+
+    def island_cap(self, score: int) -> int | None: ...
+
+
+# Pseudo-score -> max islands of one shape. Stock-style signals are coarse,
+# so the caps are deliberately blunt: plenty (9) is uncapped, medium (6)
+# supports a few, low (3) means grab one if it wins.
+_STOCK_CAPS: dict[int, int | None] = {9: None, 6: 4, 3: 1}
+
+
+class BaseCloudSignals:
+    """Shared plumbing for CloudSignals implementations: a cache handle, a
+    thread-safe warning list, and the default answers (no own catalog, the
+    blunt stock-cap table). Subclasses set `name` and implement
+    `available`, `credential_hint`, and `scores`."""
+
+    name = ""
+
+    def __init__(self, cache: Any, max_workers: int = 8) -> None:
+        self._cache = cache
+        self._max_workers = max_workers
+        self.warnings: list[str] = []
+        self._warn_lock = threading.Lock()
+
+    def _warn(self, msg: str) -> None:
+        with self._warn_lock:
+            if msg not in self.warnings:
+                self.warnings.append(msg)
+
+    def available(self) -> bool:
+        raise NotImplementedError
+
+    def credential_hint(self) -> str:
+        raise NotImplementedError
+
+    def known_gpus(self) -> frozenset[str]:
+        return frozenset()
+
+    def offerings(
+        self, regions: set[str] | None, gpus: list[str] | None, cache: Any
+    ) -> list[Offering] | None:
+        return None  # ride SkyPilot's catalog
+
+    def scores(self, asks: list[SignalAsk]) -> dict[SignalAsk, int | None]:
+        raise NotImplementedError
+
+    def island_cap(self, score: int) -> int | None:
+        return _STOCK_CAPS.get(score, 1)
 
 # ClientError codes AWS uses for rate limiting; these mean "back off and
 # retry", not "misconfigured", so they get a friendlier warning.
@@ -113,23 +200,29 @@ def runpod_available() -> bool:
     )
 
 
-class RunPodProviders:
+class RunPodProviders(BaseCloudSignals):
     """Stock signals for RunPod secure-cloud pods (parallel + cached).
 
     Stock moves faster than quota ceilings, so entries cache for 15 minutes
-    rather than the default hour.
+    rather than the default hour. RunPod is one global pool: the region in
+    an ask is ignored and every region of a (GPU, count) gets the same
+    score. The catalog still comes from sky (`offerings` -> None).
     """
 
-    def __init__(self, cache, max_workers: int = 8):
-        self._cache = cache
-        self._max_workers = max_workers
-        self.warnings: list[str] = []
-        self._warn_lock = threading.Lock()
+    name = "runpod"
 
-    def _warn(self, msg: str) -> None:
-        with self._warn_lock:
-            if msg not in self.warnings:
-                self.warnings.append(msg)
+    def available(self) -> bool:
+        return runpod_available()
+
+    def credential_hint(self) -> str:
+        return "RUNPOD_API_KEY or ~/.runpod/config.toml (run `runpod config`)"
+
+    def known_gpus(self) -> frozenset[str]:
+        return frozenset(_RUNPOD_GPU_IDS)
+
+    def scores(self, asks: list[SignalAsk]) -> dict[SignalAsk, int | None]:
+        by_shape = self.stock_scores(sorted({(gpu, count) for gpu, count, _ in asks}))
+        return {ask: by_shape.get((ask[0], ask[1])) for ask in asks}
 
     def stock_scores(self, asks: list[tuple[str, int]]) -> dict[tuple[str, int], int | None]:
         """(sky gpu name, gpus per pod) -> pseudo-score.
@@ -430,3 +523,13 @@ class AwsProviders:
                     if code is not None:
                         usage[code] = usage.get(code, 0.0) + vcpus
         return usage
+
+
+# Cloud name -> factory taking the shared TTLCache. `yeto shape` consults
+# this for `--clouds` (unknown names are an error) and for the default
+# fleet (every cloud whose `available()` is true). Adding a cloud means
+# adding one CloudSignals implementation here — nothing in plan.py
+# should need to know the cloud's name.
+CLOUD_SIGNALS: dict[str, Callable[[TTLCache], CloudSignals]] = {
+    "runpod": RunPodProviders,
+}
