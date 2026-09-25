@@ -7,33 +7,14 @@ all. Launch with
     --data HuggingFaceH4/MATH-500 --rl-prompt-column problem --rl-label-column answer
     --reward-function examples/math_reward.py:reward_func
 
-(see examples/README.md for the full line). The response's last
-`\\boxed{...}` answer, after any `</think>` block, is graded against the
-label with Miles' own math graders (mathd normalisation, then sympy
-equivalence). Reward is 1.0 for a correct answer and 0.0 otherwise.
+(see examples/README.md for the full line). The grader itself lives in
+`yeto.rl.math_reward`, so an island that runs from the installed package
+rather than the repo — a Modal island never gets `examples/` mounted —
+can name it as `yeto.rl.math_reward:reward_func` instead.
 """
 
 from __future__ import annotations
 
+from yeto.rl.math_reward import reward_func, score
 
-def score(response: str, label) -> float:
-    from miles.rollout.rm_hub.math_utils import (
-        extract_answer,
-        grade_answer_mathd,
-        grade_answer_sympy,
-    )
-
-    if label is None or str(label).strip() == "":
-        return 0.0
-    solution = response.split("</think>")[-1]
-    answer = extract_answer(solution)
-    if answer is None:
-        return 0.0
-    truth = str(label)
-    if "\\boxed" in truth:
-        truth = extract_answer(truth) or truth
-    return 1.0 if grade_answer_mathd(answer, truth) or grade_answer_sympy(answer, truth) else 0.0
-
-
-async def reward_func(args, sample, **kwargs) -> float:
-    return score(sample.response or "", sample.label)
+__all__ = ["reward_func", "score"]
