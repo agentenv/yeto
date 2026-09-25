@@ -60,18 +60,54 @@ def efa_capable(instance_type: str) -> bool:
     return instance_type.startswith(("p4", "p5"))
 
 
-# Clouds where a multi-node island can be provisioned at all: RunPod pods
-# are single machines to sky. The set grows as clouds pass the multi-node
-# verification in docs/CLOUDS.md.
-MULTI_NODE_CLOUDS = frozenset({"aws"})
+# Clouds where a multi-node island can be provisioned at all (RunPod pods
+# are single machines to sky), and the subset whose multi-node islands get
+# an RDMA-class fabric (EFA on AWS, RoCE on Modal clustered functions).
+# Both grow as clouds pass the multi-node verification in docs/CLOUDS.md.
+MULTI_NODE_CLOUDS = frozenset({"aws", "modal"})
+RDMA_CLOUDS = frozenset({"aws", "modal"})
+
+
+def _modal_gpu_count(instance_type: str) -> tuple[str, int]:
+    """Modal 'instance types' are the GPU request string, e.g. 'H100:8'."""
+    gpu, _, count = instance_type.partition(":")
+    return gpu, int(count or 1)
+
+
+def rdma_capable(cloud: str, instance_type: str) -> bool:
+    """Whether a multi-node island of this shape gets an RDMA fabric
+    (decides the multi-node MFU tier). AWS: EFA families. Modal:
+    whole-node containers in a clustered function (the only
+    multi-container shape Modal schedules) get RoCE."""
+    if cloud not in RDMA_CLOUDS:
+        return False
+    if cloud == "aws":
+        return efa_capable(instance_type)
+    if cloud == "modal":
+        from yeto.modal_runner import MODAL_FULL_NODE
+
+        gpu, count = _modal_gpu_count(instance_type)
+        return MODAL_FULL_NODE.get(gpu) == count
+    return False
 
 
 def multi_node_rejection(cloud: str, gpu: str, gpus_per_node: int) -> str | None:
     """Why a multi-node island of this per-node shape cannot be planned on
     `cloud`, or None when it can. Single-machine clouds reject every
-    multi-node shape."""
+    multi-node shape; Modal only schedules multi-container groups made of
+    whole nodes."""
     if cloud not in MULTI_NODE_CLOUDS:
         return f"multi-node islands unsupported on {cloud}"
+    if cloud == "modal":
+        from yeto.modal_runner import MODAL_FULL_NODE
+
+        full = MODAL_FULL_NODE.get(gpu)
+        if full is None or gpus_per_node != full:
+            return (
+                "Modal multi-container islands must use whole nodes "
+                f"({gpu}:{full} per container)" if full else
+                f"Modal multi-container islands need a whole-node GPU, not {gpu}"
+            )
     return None
 
 
@@ -105,7 +141,7 @@ def effective_tflops(off: Offering, nodes: int, score: int | None) -> float:
         nodes
         * off.gpus_per_node
         * PEAK_TFLOPS_BF16[off.gpu]
-        * mfu(nodes, efa_capable(off.instance_type))
+        * mfu(nodes, rdma_capable(off.cloud, off.instance_type))
         * goodput(score)
     )
 

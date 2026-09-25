@@ -663,6 +663,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
     infra.add_argument(
+        "--syncer-public-addr",
+        default=None,
+        help="HOST:PORT at which Modal islands can reach the syncer when its "
+        "own address is private (e.g. a tunnel); only needed with modal: "
+        "entries in --gpu under --controller local",
+    )
+    infra.add_argument(
         "--controller",
         choices=["head", "local"],
         default="head",
@@ -1655,6 +1662,17 @@ def _sky_down_cluster(cluster: str) -> None:
     sky.get(sky.down(cluster))
 
 
+def _modal_stop_app(run_name: str) -> None:
+    """Stop the run's Modal app (patched out in tests)."""
+    from .modal_runner import ModalOps, modal_app_name
+
+    try:
+        ModalOps(modal_app_name(run_name)).stop_app()
+        print(f"[yeto] Modal app {modal_app_name(run_name)}: stopped")
+    except Exception as e:  # best-effort
+        print(f"[yeto] Modal app stop failed: {e}", file=sys.stderr)
+
+
 def _signal_worker(pid: int, sig: int) -> None:
     """Signal the worker's whole process group (it is a session leader),
     falling back to the single pid."""
@@ -1691,8 +1709,18 @@ def cmd_down(args) -> int:
     clusters = meta.get("clusters") or []
     if clusters:
         print(f"[yeto] tearing down {len(clusters)} cluster(s): {', '.join(clusters)}")
+        from .modal_runner import is_modal_island
+
+        modal_names = [c for c in clusters if is_modal_island(c)]
+        if modal_names:
+            # Modal islands are function calls in the run's app, not sky
+            # clusters: stopping the app ends every one of them at once.
+            _modal_stop_app(name)
 
         def _down_one(cluster: str) -> None:
+            if cluster in modal_names:
+                print(f"[yeto] {cluster}: stopped with the Modal app")
+                return
             try:
                 _sky_down_cluster(cluster)
                 print(f"[yeto] {cluster}: down")

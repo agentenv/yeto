@@ -273,6 +273,19 @@ def test_down_dead_worker_tears_down_clusters(monkeypatch, capsys):
     assert "worker is not running" in capsys.readouterr().out
 
 
+def test_down_stops_the_modal_app_and_skips_sky_for_modal_islands(monkeypatch, capsys):
+    runs.create_run("m1", make_args_dict("m1"))
+    runs.update_run("m1", pid=None, clusters=["m1-syncer", "m1-l0-us-east-1", "m1-l1-modal"])
+    downed, stopped = [], []
+    monkeypatch.setattr(cli, "_sky_down_cluster", downed.append)
+    monkeypatch.setattr(cli, "_modal_stop_app", stopped.append)
+    assert cli.main(["down", "m1"]) == 0
+    assert sorted(downed) == ["m1-l0-us-east-1", "m1-syncer"]  # never sky.down a Modal island
+    assert stopped == ["m1"]  # one app stop covers every Modal island of the run
+    assert runs.load_run("m1")["state"] == "DOWN"
+    assert "m1-l1-modal: stopped with the Modal app" in capsys.readouterr().out
+
+
 def test_down_survives_sky_errors(monkeypatch, capsys):
     runs.create_run("d2", make_args_dict("d2"))
     runs.update_run("d2", pid=None, clusters=["d2-syncer"])

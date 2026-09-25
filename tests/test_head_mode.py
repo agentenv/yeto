@@ -304,6 +304,28 @@ def test_launch_head_warns_when_aws_credentials_missing(
     assert "~/.aws not found" in capsys.readouterr().err
 
 
+def test_modal_island_task_never_asks_sky_for_modal_resources(fake_sky, monkeypatch):
+    """Modal is not a sky cloud: real sky raises on infra='modal', which
+    killed the first live Modal run. The factory must hand the Modal runner
+    a task with run + envs and no sky resources."""
+    from yeto import launcher
+    from yeto.gpu_spec import parse_gpu_spec
+
+    class StrictResources(FakeResources):
+        def __init__(self, **kwargs):
+            if str(kwargs.get("infra", "")).split("/")[0] == "modal":
+                raise ValueError("Cloud 'modal' is not a valid cloud")
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(sys.modules["sky"], "Resources", StrictResources)
+    args = cli.parse_args(LAUNCH_ARGS + ["--gpu", "modal:1xh100", "--cluster-prefix", "hm2"])
+    (modal_spec,) = parse_gpu_spec(args.gpu)
+    task = launcher.make_learner_task(args, modal_spec, 0, 1, "1.2.3.4:5000")
+    assert getattr(task, "resources", None) is None
+    cfg = launcher.build_modal_island_config(args, modal_spec, 0, task, "1.2.3.4:5000")
+    assert "yeto.learner" in cfg.run_script
+
+
 # ---------------------------------------------------------------------------
 # yeto down / logs on a head-mode registry entry
 

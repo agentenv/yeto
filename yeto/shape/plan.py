@@ -76,8 +76,9 @@ class ShapeResult:
 
 
 def _candidate_key(off: Offering, nodes: int) -> str:
-    """The `--gpu` entry for this shape. A cloud that does not pin
-    placement leaves the region empty, and the key carries no `@`."""
+    """The `--gpu` entry for this shape. An empty region (Modal unpinned)
+    yields `modal:8xh100` — no `@`, so the launcher leaves placement to
+    Modal at the base price."""
     gpu = _GPU_FLAG_NAME.get(off.gpu, off.gpu.lower())
     prefix = f"{nodes}x" if nodes > 1 else ""
     loc = f"@{off.region}" if off.region else ""
@@ -714,6 +715,8 @@ def render(
             c = by_key[key]
             if c.assumed:
                 shown = f"~{ASSUMED_PLACEMENT_SCORE} (assumed)"
+            elif c.cloud == "modal":
+                shown = "autoscale"  # no stock signal: Modal queues, never says no
             elif c.cloud != "aws":
                 shown = f"stock≈{c.score}"
             else:
