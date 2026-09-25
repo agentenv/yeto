@@ -875,10 +875,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--regions",
         default=None,
         help="comma-separated cloud:region entries, e.g. "
-        "aws:us-east-1,runpod:CA; a bare region means aws; 'cloud:all' "
-        "lifts the limit for one cloud and 'all' for every cloud "
-        "(default: aws limited to us-east-1,us-east-2,us-west-1,us-west-2, "
-        "other clouds unlimited)",
+        "aws:us-east-1,nebius:eu-north1,verda:FIN-03; a bare region means "
+        "aws; 'cloud:all' lifts the limit for one cloud and 'all' for every "
+        "cloud (default: aws limited to us-east-1,us-east-2,us-west-1,"
+        "us-west-2, other clouds unlimited; a modal:<region> entry pins "
+        "Modal containers to that area at Modal's region surcharge)",
     )
     shape.add_argument(
         "--price-margin",
@@ -922,8 +923,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--clouds",
         default=None,
         help="comma-separated clouds to plan across (default: aws, plus "
-        "every registered cloud whose credentials are present; AWS "
-        "credentials are only needed when aws is in the list)",
+        "every registered cloud whose credentials are present — runpod, "
+        "nebius, verda, modal; AWS credentials are only needed when aws "
+        "is in the list)",
     )
     shape.add_argument("--max-islands", type=int, default=16, help="cap on learner islands (syncer fan-out)")
     shape.add_argument(
@@ -1227,7 +1229,9 @@ def cmd_sample_diffusion(args) -> int:
 # head job waits for it (bounded) before importing anything.
 HEAD_READY_MARKER = "~/.yeto_head_ready"
 HEAD_SETUP_PIP = (
-    'pip install -q "skypilot[aws,gcp]>=0.12" && '
+    # Every cloud a fleet can name (pyproject launcher extra) plus gcp for gs:// outputs;
+    # without a cloud's extra, the head's sky reports that cloud as not enabled.
+    'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]>=0.12" && '
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
     "pip install -q cloudpickle transformers==5.13.0"
 )
@@ -1271,21 +1275,14 @@ def _make_head_task(args, extra_mounts: dict | None = None):
     )
 
     file_mounts = dict(extra_mounts or {})
-    aws_creds = os.path.expanduser("~/.aws")
-    if os.path.isdir(aws_creds):
-        # Same pattern as sky's jobs controller: ship the local credentials
-        # so the head can launch, recover, and tear down learner clusters.
-        file_mounts["~/.aws"] = aws_creds
-    else:
-        print(
-            "[yeto] WARNING: ~/.aws not found; the head will have no cloud "
-            "credentials and cannot launch or tear down learner clusters.",
-            file=sys.stderr,
-        )
-    gcloud_creds = os.path.expanduser("~/.config/gcloud")
-    if os.path.isdir(gcloud_creds):
-        # Enables gs:// --output uploads from the head (ADC).
-        file_mounts["~/.config/gcloud"] = gcloud_creds
+    # Same pattern as sky's jobs controller: ship the local credentials of
+    # every cloud this fleet touches (and only those) so the head can
+    # launch, recover, and tear down its islands. Missing credentials are
+    # an error here, before the head is submitted.
+    from .launcher import fleet_clouds, head_cloud_credentials
+
+    cred_mounts, head_envs = head_cloud_credentials(fleet_clouds(args))
+    file_mounts.update(cred_mounts)
     hf_token = os.path.expanduser(HF_TOKEN_PATH)
     if os.path.isfile(hf_token):
         # The head re-mounts the token onto learners (authenticated Hub
@@ -1298,6 +1295,10 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         loss_path = pickled_loss_path(args.loss_function)
         file_mounts[f"~/sky_workdir/{loss_path.name}"] = str(loss_path)
     head_pip = HEAD_SETUP_PIP
+    if "modal" in fleet_clouds(args):
+        # The head's controller defines, deploys and spawns modal: islands
+        # through the Modal SDK (yeto.modal_runner), so it needs the package.
+        head_pip += ' && pip install -q "modal>=1.0"'
     if getattr(args, "wandb", False):
         # The head tails the syncer's event tape into W&B (yeto.wandb_tape).
         head_pip += " && pip install -q wandb"
@@ -1310,6 +1311,7 @@ def _make_head_task(args, extra_mounts: dict | None = None):
             f"{SYNCER_REMOTE_BUILD}\n"
             f"touch {HEAD_READY_MARKER}"
         ),
+        envs=head_envs or None,
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts,
     )
@@ -1389,6 +1391,14 @@ def cmd_launch_head(args) -> int:
     # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
     # pickle:<file> here, and the pickle is file-mounted onto the head.
     launcher.prepare_launch_args(args)
+    # Every cloud the fleet (and the head) touches must have credentials on
+    # this machine, or the head could never launch or tear islands down:
+    # refuse before anything is recorded or provisioned.
+    try:
+        launcher.head_cloud_credentials(launcher.fleet_clouds(args))
+    except ValueError as exc:
+        print(f"[yeto] {exc}", file=sys.stderr)
+        return 1
     # Likewise stage a local --data path: it is rsynced onto the head, and
     # the rewritten path makes the head's launcher mount it onto learners.
     from .adapter_lifecycle import head_stage_parent
