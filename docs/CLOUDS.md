@@ -444,9 +444,23 @@ listed as `stopped, 0 tasks`, the head was downed and confirmed at the
 cloud, exit 0, nothing left on Nebius or Modal. `yeto-td1` (whose Nebius
 learner never provisioned: the tenant's public-IPv4 quota of 3 was full)
 exercised the head-side path: the head reported the learner as never
-existing, then the head itself was downed. The head-side teardown of a
-provisioned Nebius learner, and the "head already gone" failure path, are
-still to be run once the IPv4 quota has room for head + learner.
+existing, then the head itself was downed.
+
+Verified 2026-09-25 with real Nebius learners once the IPv4 quota had room:
+
+- `yeto-td3` (Nebius head, Nebius `1xh100` SFT island, torn down at outer
+  step 3): the head confirmed `[head] yeto-td3-l0-eu-north1: down`, then
+  the head was downed; the cloud probe saw the head instance still live
+  three times while Nebius was deleting it and retried until it was gone,
+  exit 0, `nebius compute instance list` empty for the prefix. Before the
+  StatusVersion fix this probe had never run.
+- `yeto-td4`, the failure case: the head was deleted by hand while the
+  island trained. `yeto down` cancelled nothing (head STOPPED), the ssh to
+  the head failed three times, and the command exited 1 with
+  `NOT tearing down yeto-td4-head: learner cluster(s) not confirmed down
+  from it: yeto-td4-l0-eu-north1`, run state `TEARDOWN_INCOMPLETE`. The
+  island was then deleted from the cloud by hand, which is the documented
+  recovery.
 
 If the head is already gone (deleted by hand, or by an older `yeto down`),
 step 1 cannot run: the command exits 1 listing the learners, and the only
