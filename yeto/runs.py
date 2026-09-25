@@ -32,6 +32,8 @@ RUNNING = "RUNNING"
 SUCCEEDED = "SUCCEEDED"
 FAILED = "FAILED"
 DOWN = "DOWN"
+# `yeto down` ran but could not confirm every cluster gone; rerun it.
+TEARDOWN_INCOMPLETE = "TEARDOWN_INCOMPLETE"
 
 # Head-controller-mode runs additionally record `controller` ("head"),
 # `head_cluster` and `head_job_id` via update_run. Local-mode entries

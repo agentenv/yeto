@@ -360,6 +360,34 @@ class ModalOps:
         modal = self._modal()
         modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)
 
+    def app_status(self) -> tuple[str, int] | None:
+        """(state, running tasks) of this run's app from `modal app list`,
+        or None when Modal lists no app by that name. Raises when the
+        listing itself fails, so callers can say "unverified" rather than
+        "stopped"."""
+        proc = subprocess.run(
+            [sys.executable, "-m", "modal", "app", "list", "--json"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"modal app list failed: {(proc.stdout + proc.stderr).strip() or proc.returncode}"
+            )
+        import json as _json
+
+        # `modal app list --json` rows: app_id, description, state, tasks,
+        # created_at, stopped_at (tasks is a string).
+        for app in _json.loads(proc.stdout or "[]"):
+            if app.get("description") == self.app_name:
+                state = str(app.get("state", "")).lower()
+                try:
+                    tasks = int(app.get("tasks") or 0)
+                except (TypeError, ValueError):
+                    tasks = 0
+                return state, tasks
+        return None
+
     def stop_app(self) -> None:
         """Stop every function of this run's app (used by `yeto down`).
 
