@@ -244,6 +244,15 @@ def syncer_event_tape(args) -> str:
     return SYNCER_EVENT_TAPE
 
 
+def _resume_if_exists(checkpoint: str) -> str:
+    """Shell fragment adding --resume only when the checkpoint file exists.
+
+    The syncer refuses --resume without a checkpoint, so an unconditional
+    flag kills every fresh run; evaluated by the shell at each (re)start,
+    a restart after the first checkpoint still resumes from it."""
+    return f"$(test -f {checkpoint} && echo --resume)"
+
+
 def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
@@ -267,7 +276,8 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
             f" --outer-momentum {args.outer_momentum}"
             " --max-base-lag 0 --learner-weight equal"
             " --checkpoint-path ~/yeto-output/yeto-state.ckpt"
-            " --checkpoint-every 1 --resume"
+            " --checkpoint-every 1"
+            f" {_resume_if_exists('~/yeto-output/yeto-state.ckpt')}"
             f" --event-tape {RL_SYNCER_EVENT_TAPE}"
         )
     return (
@@ -284,7 +294,8 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --total-steps {args.total_steps}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
-        f" --checkpoint-path ~/yeto-state.ckpt --resume"
+        " --checkpoint-path ~/yeto-state.ckpt"
+        f" {_resume_if_exists('~/yeto-state.ckpt')}"
         f" --mark-final-checkpoint"
         f" --event-tape {SYNCER_EVENT_TAPE}"
     )
