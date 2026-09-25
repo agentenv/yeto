@@ -1471,6 +1471,8 @@ def make_miles_island_task(
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
     for flag, name in (
+        ("--rl-prompt-column", "rl_prompt_column"),
+        ("--rl-label-column", "rl_label_column"),
         ("--sglang-tp-size", "sglang_tp_size"),
         ("--sglang-dp-size", "sglang_dp_size"),
         ("--sglang-ep-size", "sglang_ep_size"),

@@ -2790,3 +2790,29 @@ def test_prompt_data_uses_the_only_split_when_there_is_no_train(tmp_path, monkey
     )
     prepare_prompt_data("org/other", "a" * 40, tmp_path / "q.jsonl")
     assert seen["split"] == "train"
+
+
+def test_miles_island_forwards_dataset_column_flags(monkeypatch):
+    """--rl-prompt-column / --rl-label-column reach the island; absent
+    flags add nothing (the learner's defaults apply)."""
+    monkeypatch.setitem(
+        sys.modules,
+        "sky",
+        types.SimpleNamespace(
+            Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode
+        ),
+    )
+    from yeto.gpu_spec import parse_gpu_spec
+
+    def island(extra):
+        args = _args(extra)
+        args.model_revision = "a" * 40
+        args.data_revision = "b" * 40
+        args.source_sha256 = "c" * 64
+        args.reward_sha256 = "d" * 64
+        _prepare_rl_args(args)
+        return make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
+
+    task = island(("--rl-prompt-column", "problem", "--rl-label-column", "answer"))
+    assert " --rl-prompt-column problem" in task.run and " --rl-label-column answer" in task.run
+    assert "--rl-prompt-column" not in island(()).run
