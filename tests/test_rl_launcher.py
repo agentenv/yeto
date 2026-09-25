@@ -1833,6 +1833,20 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
         target_modules=["qkv_proj", "out_proj"],
     )
     assert gdn_argv[gdn_argv.index("--qkv-format") + 1] == "bshd"
+    # A gated-delta-net hybrid takes Miles' Qwen3.5 layer spec, exactly as
+    # the pinned Codex profile does; the generic GPT path would build the
+    # wrong model for it.
+    assert gdn_argv[gdn_argv.index("--model-name") + 1] == "qwen3_5"
+    spec = gdn_argv.index("--spec")
+    assert gdn_argv[spec + 1 : spec + 3] == [
+        "miles_plugins.models.qwen3_5",
+        "get_qwen3_5_spec",
+    ]
+    assert "--apply-layernorm-1p" in gdn_argv
+    assert "--attention-output-gate" in gdn_argv
+    assert gdn_argv[gdn_argv.index("--attention-backend") + 1] == "flash"
+    assert dense_argv[dense_argv.index("--model-name") + 1] != "qwen3_5"
+    assert "--spec" not in dense_argv
 
     dense_args.expert_parallel = 2
     with pytest.raises(ValueError, match="EP>1 requires a MoE"):

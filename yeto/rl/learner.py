@@ -849,7 +849,15 @@ def build_miles_argv(
 
     from .codex_backend import QWEN35_MODEL, QWEN35_REVISION
 
-    qwen35_recipe = (
+    # Miles runs gated-delta-net hybrids (Qwen3.5 / Qwen3.6 dense) through
+    # its own layer spec, not through the generic GPT provider path; the
+    # pinned Codex profile is one such model, and Bridge reports the
+    # capability on the provider for every other checkpoint of the family.
+    gdn_hybrid = (
+        _text(getattr(provider, "experimental_attention_variant", None))
+        == "gated_delta_net"
+    )
+    qwen35_recipe = gdn_hybrid or (
         getattr(args, "model", None) == QWEN35_MODEL
         and getattr(args, "model_revision", None) == QWEN35_REVISION
     )
