@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import gc
 import json
 import logging
@@ -1937,11 +1938,13 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
         {
             "response_lengths": [1, 2],
             "sample_indices": [0, 1],
+            "rewards": [-0.5, 0.5],
             "raw_reward": [0.0, 1.0, 2.0, 2.0],
         },
         {
             "response_lengths": [3, 4],
             "sample_indices": [2, 3],
+            "rewards": [0.0, 0.0],
             "raw_reward": [0.0, 1.0, 2.0, 2.0],
         },
     ]
@@ -1975,6 +1978,7 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
     assert stats.action_tokens == 10
     assert stats.reward_mean == 1.25
     assert stats.zero_variance_group_ratio == 0.5
+    assert stats.nonzero_advantage_count == 2
     assert stats.rollout_seconds == 5
     assert stats.mean_kl == 0.11
     assert stats.ess_ratio == 0.81
@@ -1990,6 +1994,233 @@ def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
     train_state.telemetry = SimpleNamespace(step=17, loss=-0.4)
     with pytest.raises(RuntimeError, match="invalid typed training telemetry"):
         hook._round_stats(3, data_pack, train_state)
+
+
+def _round_stats_hook(tmp_path, monkeypatch, *, advantage_estimator="grpo"):
+    checkpoint = tmp_path / "island.pt"
+    args = SimpleNamespace(
+        actor_num_gpus_per_node=1,
+        actor_num_nodes=1,
+        advantage_estimator=advantage_estimator,
+        yeto_rl_model="org/model",
+        yeto_rl_data="org/data",
+        yeto_rl_base_model_revision=MODEL_REVISION,
+        yeto_rl_data_revision="d" * 40,
+        expert_model_parallel_size=1,
+        yeto_rl_layout_hash="c" * 64,
+        lr=1e-4,
+        yeto_rl_lora_config_hash=LORA_CONFIG_HASH,
+        n_samples_per_prompt=2,
+        num_steps_per_rollout=1,
+        pipeline_model_parallel_size=1,
+        over_sampling_batch_size=2,
+        yeto_rl_reward_sha256="e" * 64,
+        rollout_batch_size=2,
+        seq_length=128,
+        seed=7,
+        rollout_max_response_len=16,
+        custom_generate_function_path=None,
+        use_session_server=False,
+        tito_model="default",
+        yeto_rl_codex_harness_contract=None,
+        yeto_rl_completed_groups_path=str(checkpoint),
+        yeto_rl_learner_id=0,
+    )
+    torch.save(
+        {
+            "schema_version": miles._ISLAND_CHECKPOINT_SCHEMA,
+            "config": miles._island_checkpoint_config(args),
+            "policy_version": 3,
+            "rollout_metrics": {
+                "active_groups": 2,
+                "cancelled_groups": 0,
+                "tool_wait_seconds": 1,
+                "group_p50_seconds": 2,
+                "group_p95_seconds": 3,
+                "group_p99_seconds": 4,
+                "rollout_seconds": 5,
+            },
+        },
+        checkpoint,
+    )
+    monkeypatch.setitem(
+        sys.modules, "ray", SimpleNamespace(get=lambda reference: reference)
+    )
+    return MilesPolicySync(args)
+
+
+def _round_stats_data_pack(rewards, raw_reward):
+    batch = {
+        "response_lengths": [1, 2, 3, 4],
+        "sample_indices": [0, 1, 2, 3],
+        "rewards": rewards,
+        "raw_reward": raw_reward,
+    }
+    return {"data_ref": [SimpleNamespace(inner=batch)]}
+
+
+_ROUND_TRAIN_STATE = SimpleNamespace(
+    train_rollout_kl=0.1, ess_ratio=0.8, pg_clipfrac=0.25, train_seconds=1.5
+)
+
+
+def test_round_stats_count_nonzero_advantages(tmp_path, monkeypatch):
+    hook = _round_stats_hook(tmp_path, monkeypatch)
+
+    degenerate = hook._round_stats(
+        3,
+        _round_stats_data_pack([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 0.0, 0.0]),
+        _ROUND_TRAIN_STATE,
+    )
+    assert degenerate.nonzero_advantage_count == 0
+    assert degenerate.zero_variance_group_ratio == 1.0
+
+    real = hook._round_stats(
+        3,
+        _round_stats_data_pack([0.0, 0.0, -1.0, 1.0], [1.0, 1.0, 0.0, 1.0]),
+        _ROUND_TRAIN_STATE,
+    )
+    assert real.nonzero_advantage_count == 2
+    assert real.zero_variance_group_ratio == 0.5
+
+
+def test_round_stats_require_per_sample_advantages_for_grpo(tmp_path, monkeypatch):
+    hook = _round_stats_hook(tmp_path, monkeypatch)
+    data_pack = _round_stats_data_pack([0.0, 0.0], [1.0, 1.0, 0.0, 0.0])
+    with pytest.raises(RuntimeError, match="lack per-sample advantages"):
+        hook._round_stats(3, data_pack, _ROUND_TRAIN_STATE)
+
+
+def test_round_stats_leave_advantage_count_unknown_for_other_estimators(
+    tmp_path, monkeypatch
+):
+    hook = _round_stats_hook(tmp_path, monkeypatch, advantage_estimator="ppo")
+    stats = hook._round_stats(
+        3,
+        _round_stats_data_pack([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 0.0, 0.0]),
+        _ROUND_TRAIN_STATE,
+    )
+    assert stats.nonzero_advantage_count is None
+
+
+def _training_progress_stats(*, grad_norm, nonzero_advantage_count):
+    return replace(
+        _VersionedRuntime().run_local_round(),
+        completed_trajectories=4,
+        train_step=1,
+        grad_norm=grad_norm,
+        nonzero_advantage_count=nonzero_advantage_count,
+    )
+
+
+def _submitting_hook(tmp_path, stats):
+    """A strict hook whose bridge records whether the local state was submitted."""
+
+    base = state(0, tensors())
+    final = state(1, tensors())
+    events: list[str] = []
+
+    class Actor:
+        async def export_trainable_state(self):
+            events.append("export")
+            return SimpleNamespace(tensors=tensors())
+
+    class Bridge:
+        specs = base.specs
+        client = SimpleNamespace(close=lambda: events.append("close"))
+
+        def submit_local_state(self, permit, submitted_base, value, stats):
+            events.append("submit")
+
+        def release_current(self, expected_version):
+            events.append("release")
+
+        def wait_for_global_policy(self, expected_version):
+            events.append("wait")
+            return final
+
+        def wait_for_round(self):
+            raise AssertionError("terminal round must not request another permit")
+
+    actor = Actor()
+    hook = MilesPolicySync(
+        SimpleNamespace(
+            num_rollout=1,
+            yeto_rl_event_tape=str(tmp_path / "events.jsonl"),
+            yeto_rl_learner_id=0,
+            wandb=False,
+        )
+    )
+    hook.actor_model = actor
+    hook.bridge = Bridge()
+    hook.current = base
+    hook.permit = PullRequest(0, 1, 1)
+    hook._round_stats = lambda *_args: stats
+    hook._canonical_state = lambda exported: state(0, exported.tensors)
+
+    async def apply_global_policy(value):
+        events.append("apply")
+
+    hook._apply_global_policy = apply_global_policy
+    return hook, actor, events
+
+
+def _tape_events(tmp_path):
+    path = tmp_path / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_zero_grad_norm_with_nonzero_advantages_fails_before_submission(tmp_path):
+    stats = _training_progress_stats(grad_norm=0.0, nonzero_advantage_count=3)
+    hook, actor, events = _submitting_hook(tmp_path, stats)
+
+    with pytest.raises(StrictRlInvariantError) as excinfo:
+        asyncio.run(
+            hook.after_local_train(rollout_id=0, actor_model=actor, rollout_data={})
+        )
+
+    assert excinfo.value.metric == "zero_grad_norm_with_nonzero_advantages"
+    assert "local round 1" in str(excinfo.value)
+    assert "grad_norm=0.0" in str(excinfo.value)
+    assert "submit" not in events
+    assert "release" not in events
+    tape = _tape_events(tmp_path)
+    assert [event["event"] for event in tape] == ["rl_strict_failure"]
+    assert tape[0]["metric"] == "zero_grad_norm_with_nonzero_advantages"
+    assert tape[0]["island_id"] == 0
+    assert "grad_norm=0.0" in tape[0]["error"]
+    assert events[-1] == "close"
+
+
+def test_zero_grad_norm_with_all_zero_advantages_is_allowed(tmp_path):
+    stats = _training_progress_stats(grad_norm=0.0, nonzero_advantage_count=0)
+    hook, actor, events = _submitting_hook(tmp_path, stats)
+
+    asyncio.run(hook.after_local_train(rollout_id=0, actor_model=actor, rollout_data={}))
+
+    assert events == ["export", "submit", "release", "wait", "apply"]
+    assert _tape_events(tmp_path) == []
+
+
+def test_nonzero_grad_norm_submits_as_usual(tmp_path):
+    stats = _training_progress_stats(grad_norm=2.5e-2, nonzero_advantage_count=3)
+    hook, actor, events = _submitting_hook(tmp_path, stats)
+
+    asyncio.run(hook.after_local_train(rollout_id=0, actor_model=actor, rollout_data={}))
+
+    assert events == ["export", "submit", "release", "wait", "apply"]
+    assert _tape_events(tmp_path) == []
+
+
+def test_training_progress_invariant_ignores_unknown_advantages():
+    miles._require_training_progress(
+        _training_progress_stats(grad_norm=0.0, nonzero_advantage_count=None)
+    )
+    miles._require_training_progress(
+        _training_progress_stats(grad_norm=None, nonzero_advantage_count=3)
+    )
 
 
 def test_miles_policy_hook_counts_data_parallel_shards_after_model_parallelism(
