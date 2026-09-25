@@ -773,6 +773,21 @@ def test_nebius_multi_node_island_allowed_with_rdma_mfu(multi_cloud_env):
     assert not any("single-node islands only" in w for w in result.warnings)
 
 
+def test_verda_never_plans_multi_node_and_says_so(multi_cloud_env):
+    # The Verda variant of test_multi_node_island_when_model_demands: 568 GB
+    # needs 2 nodes, Verda islands are single VMs -> no plan, explicit
+    # rejection, and a warning naming the cloud.
+    verda_rows = [Offering("H100", "8H100.80S.176V", 8, 176, "FIN-03", 13.53, 27.06, 80, cloud="verda")]
+    verda = FakeSignal("verda", {("H100", 8): 9}, rows=verda_rows)
+    result = _shape(
+        multi_cloud_env, budget=80.0, clouds=("verda",), signals={"verda": verda}, weights_gb_override=568.0
+    )
+    assert result.plan.counts == {}
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "multi-node islands unsupported on verda" in reasons["verda:2x8xh100@FIN-03"]
+    assert any(w.startswith("verda: single-node islands only") for w in result.warnings)
+
+
 # --- Modal ---------------------------------------------------------------------
 
 
