@@ -1461,6 +1461,22 @@ def _messages(row: dict[str, Any]) -> list[dict[str, Any]]:
     return value
 
 
+def _prompt_split(source, revision: str | None) -> str:
+    """`train`, or a Hub dataset's only split when it has no `train`
+    (e.g. HuggingFaceH4/MATH-500 ships just `test`)."""
+    if not isinstance(source, str) or os.path.exists(os.path.expanduser(source)):
+        return "train"
+    try:
+        from datasets import get_dataset_split_names
+
+        names = list(get_dataset_split_names(source, revision=revision))
+    except Exception:  # noqa: BLE001 - load_rows reports the real error
+        return "train"
+    if "train" not in names and len(names) == 1:
+        return names[0]
+    return "train"
+
+
 def prepare_prompt_data(
     source: str,
     revision: str | None,
@@ -1468,7 +1484,11 @@ def prepare_prompt_data(
 ) -> Path:
     from ..data import load_rows
 
-    rows = load_rows(source, revision=revision)
+    split = _prompt_split(source, revision)
+    if split == "train":
+        rows = load_rows(source, revision=revision)
+    else:
+        rows = load_rows(source, split=split, revision=revision)
     output = Path(output_path).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")

@@ -1244,6 +1244,15 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
         in task.setup
     )
     assert f"MILES_BUNDLE=~/sky_workdir/{MILES_BUNDLE_PATH}" in task.setup
+    # An image's own Miles clone (other remote) is re-pointed at the pin
+    # before fetching; the verifier rejects any other origin.
+    set_url = f"git -C ~/miles remote set-url origin {MILES_REPOSITORY}"
+    assert set_url in task.setup
+    assert task.setup.index(set_url) < task.setup.index("fetch --depth 1 origin")
+    # Miles pins its rollout manager via Ray's state API (dashboard-served);
+    # a head started with --include-dashboard=false fails at start-up.
+    assert "ray start --head" in task.run and "--include-dashboard=true" in task.run
+    assert "--include-dashboard=false" not in task.run
     assert MILES_BUNDLE_SHA256 in task.setup
     assert f'git -C ~/miles fetch "$MILES_BUNDLE" {MILES_COMMIT}' in task.setup
     assert SGLANG_REPOSITORY in task.setup
@@ -2734,3 +2743,50 @@ def test_confirmed_remote_strict_failure_is_not_relaunched():
     with pytest.raises(RuntimeError, match="strict RL job learner-0 failed"):
         controller._poll(controller.learners["learner-0"], is_syncer=False)
     assert ops.relaunched == []
+def test_miles_island_forwards_chat_template_kwargs(monkeypatch):
+    """`--apply-chat-template-kwargs` was accepted but never reached the
+    island (e.g. Qwen3 `enable_thinking: false` for short math rollouts)."""
+    monkeypatch.setitem(
+        sys.modules,
+        "sky",
+        types.SimpleNamespace(
+            Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode
+        ),
+    )
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _args(("--apply-chat-template-kwargs", '{"enable_thinking": false}'))
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
+    assert """--apply-chat-template-kwargs '{"enable_thinking":false}'""" in task.run
+
+def test_prompt_data_uses_the_only_split_when_there_is_no_train(tmp_path, monkeypatch):
+    """A Hub dataset without a `train` split (HuggingFaceH4/MATH-500 ships
+    only `test`) must still load; a dataset that has `train` keeps it."""
+    import datasets
+
+    from yeto import data as yeto_data
+    from yeto.rl.learner import prepare_prompt_data
+
+    seen = {}
+
+    def load_rows(source, split="train", revision=None):
+        seen["split"] = split
+        return [{"messages": [{"role": "user", "content": "1+1?"}], "label": "2"}]
+
+    monkeypatch.setattr(yeto_data, "load_rows", load_rows)
+    monkeypatch.setattr(
+        datasets, "get_dataset_split_names", lambda source, revision=None: ["test"]
+    )
+    prepare_prompt_data("org/only-test", "a" * 40, tmp_path / "p.jsonl")
+    assert seen["split"] == "test"
+
+    monkeypatch.setattr(
+        datasets, "get_dataset_split_names", lambda source, revision=None: ["train", "test"]
+    )
+    prepare_prompt_data("org/other", "a" * 40, tmp_path / "q.jsonl")
+    assert seen["split"] == "train"

@@ -1473,6 +1473,11 @@ def make_miles_island_task(
             flags += f" {flag} {shlex.quote(str(value))}"
     if args.use_rollout_routing_replay:
         flags += " --use-rollout-routing-replay"
+    if getattr(args, "apply_chat_template_kwargs", None):
+        chat_kwargs = json.dumps(
+            args.apply_chat_template_kwargs, sort_keys=True, separators=(",", ":")
+        )
+        flags += f" --apply-chat-template-kwargs {shlex.quote(chat_kwargs)}"
     if not getattr(args, "sglang_deterministic_inference", True):
         flags += " --no-sglang-deterministic-inference"
     if args.custom_generate_function_path:
@@ -1526,6 +1531,10 @@ def make_miles_island_task(
         "| sha256sum --check -\n"
         f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
         f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
+        # An image may ship its own Miles clone from another remote (the
+        # public radixark/miles images do); the runtime verifier requires
+        # the pinned repository as origin.
+        f"git -C ~/miles remote set-url origin {shlex.quote(MILES_REPOSITORY)}\n"
         f"git -C ~/miles fetch --depth 1 origin {MILES_BASE_COMMIT}\n"
         f"git -C ~/miles checkout --detach {MILES_BASE_COMMIT}\n"
         'git -C ~/miles bundle verify "$MILES_BUNDLE" >/dev/null\n'
@@ -1631,7 +1640,9 @@ def make_miles_island_task(
             "ray stop --force >/dev/null 2>&1 || true\n"
             'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
             "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
-            "--port=6379 --include-dashboard=false\n"
+            # Dashboard on: Miles' --pin-rollout-manager-to-head lists
+            # nodes through Ray's state API, which the dashboard serves.
+            "--port=6379 --include-dashboard=true\n"
             "  trap 'ray stop --force >/dev/null 2>&1 || true' EXIT\n"
             "  PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
             f"python3 -m yeto.rl.learner{flags}\n"
