@@ -1,0 +1,97 @@
+<title>q27j 第 3 步引擎崩溃</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{--bg:#f4f6f7;--panel:#fff;--ink:#1d2430;--muted:#5d6878;--line:#c9d1d9;--ok:#0f766e;--ok-soft:#d7efe9;--bad:#c62828;--bad-soft:#fde2e2;--warn:#b45309;--warn-soft:#fdecd2;--lane1:#e9eef3;--lane2:#e6f0f5;--lane3:#e5f3ef;--lane4:#f1ecf7;--code:#eef1f4}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#151a21;--panel:#1d232c;--ink:#e6eaf0;--muted:#9aa6b5;--line:#3a4451;--ok:#3fc1b0;--ok-soft:#183f3a;--bad:#ff6b6b;--bad-soft:#4a1f1f;--warn:#f2a950;--warn-soft:#46301a;--lane1:#222a34;--lane2:#1f2c36;--lane3:#1e3029;--lane4:#2a2434;--code:#262e38}}
+:root[data-theme="dark"]{--bg:#151a21;--panel:#1d232c;--ink:#e6eaf0;--muted:#9aa6b5;--line:#3a4451;--ok:#3fc1b0;--ok-soft:#183f3a;--bad:#ff6b6b;--bad-soft:#4a1f1f;--warn:#f2a950;--warn-soft:#46301a;--lane1:#222a34;--lane2:#1f2c36;--lane3:#1e3029;--lane4:#2a2434;--code:#262e38}
+body{background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans","PingFang SC","Noto Sans SC",system-ui,sans-serif;font-size:15px;line-height:1.6;padding-block:32px 64px;padding-inline:16px;margin:0}
+main{max-width:1000px;margin:0 auto;display:grid;gap:28px}
+h1{font-size:1.9rem;font-weight:600;margin:0 0 6px;text-wrap:balance}h2{font-size:1.15rem;font-weight:600;margin:0 0 10px}
+p{margin:0 0 10px;max-width:72ch}.lead{color:var(--muted)}
+code{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:.86em;background:var(--code);padding:1px 5px;border-radius:4px}
+figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+figure .scroll{overflow-x:auto}figure svg{display:block;max-width:100%;height:auto;min-width:720px}
+figcaption{color:var(--muted);font-size:.9rem;margin-top:10px;max-width:80ch}
+.legend{display:flex;flex-wrap:wrap;gap:14px 22px;font-size:.85rem;color:var(--muted);margin-top:10px}.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:14px;height:14px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 18px}
+.box table{border-collapse:collapse;width:100%;font-size:.92rem}.box th,.box td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+.box th{color:var(--muted);font-weight:500;font-size:.8rem;text-transform:uppercase;letter-spacing:.06em}.box td:first-child{white-space:nowrap;color:var(--muted);font-variant-numeric:tabular-nums}
+ul{margin:0;padding-left:1.2em}li{margin:4px 0}
+</style>
+<main>
+<header>
+<h1>q27j 第 3 步引擎崩溃</h1>
+<p class="lead">2026-09-24 <code>yeto-q27j</code>（Qwen3.6-27B，Nebius 8×H100，SGLang 4 个 TP2 引擎）。第 3 轮同步刚提交完，岛把新策略写回 SGLang 时，引擎 0 的一个 TP rank 崩了，整个 job 退出，launcher 恢复后重跑 setup 才完成第 4 步。时间全部取自岛上的 run.log 和 tape。</p>
+</header>
+
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 1000 760" role="img" aria-label="四条泳道：head syncer、岛的 learner（Miles train loop + Yeto policy sync）、SGLang 引擎 0（端口 15000，TP0/TP1 两个 rank）、以及我从外部发的探测请求。第 3 步 rollout 结束后引擎权重被 offload 到 CPU；探测请求在 15:05–15:06 打到引擎 0；15:06:41 TP1 scheduler 抛出 Pointer argument cannot be accessed from Triton (cpu tensor?)，torch_memory_saver free 报错，引擎自杀；15:07:07 learner 应用完全局策略 v3 后调用 update_weight_version，引擎 0 端口拒绝连接，learner 抛 ConnectionError 退出；head 的 launcher 进入 recovery。">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+<marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+<marker id="aw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--warn)"/></marker></defs>
+<rect x="10" y="10" width="200" height="740" rx="8" fill="var(--lane2)"/>
+<rect x="230" y="10" width="260" height="740" rx="8" fill="var(--lane1)"/>
+<rect x="510" y="10" width="270" height="740" rx="8" fill="var(--lane3)"/>
+<rect x="800" y="10" width="190" height="740" rx="8" fill="var(--lane4)"/>
+<g fill="currentColor" font-size="13" font-weight="600" text-anchor="middle">
+<text x="110" y="34">head · syncer</text><text x="360" y="34">岛 · learner</text><text x="645" y="34">岛 · SGLang 引擎 0</text><text x="895" y="34">外部探测（我）</text></g>
+<g fill="var(--muted)" font-size="11" text-anchor="middle">
+<text x="110" y="50">strict-avg，1 learner</text><text x="360" y="50">Miles train.py + MilesPolicySync</text><text x="645" y="50">:15000，TP0 + TP1，offload_rollout=True</text><text x="895" y="50">ssh 进岛 → /generate</text></g>
+<g stroke="currentColor" stroke-dasharray="3 5" stroke-opacity=".45"><line x1="110" y1="60" x2="110" y2="740"/><line x1="360" y1="60" x2="360" y2="740"/><line x1="645" y1="60" x2="645" y2="740"/><line x1="895" y1="60" x2="895" y2="740"/></g>
+<g font-size="11.5" fill="currentColor">
+<text x="20" y="90" fill="var(--muted)">15:04:39</text>
+<line x1="360" y1="96" x2="639" y2="96" stroke="currentColor" marker-end="url(#a)"/><text x="500" y="90" text-anchor="middle">第 3 轮 rollout 结束：abort_request</text>
+<rect x="520" y="108" width="250" height="40" rx="5" fill="var(--panel)" stroke="var(--line)"/><text x="645" y="125" text-anchor="middle">offload：引擎权重/KV 释放到 CPU</text><text x="645" y="141" text-anchor="middle" fill="var(--muted)">torch_memory_saver pause</text>
+<rect x="240" y="160" width="240" height="40" rx="5" fill="var(--panel)" stroke="var(--line)"/><text x="360" y="177" text-anchor="middle">actor.train 第 3 步（Megatron，8 卡）</text><text x="360" y="193" text-anchor="middle" fill="var(--muted)">优势全零，grad_norm 0</text>
+<text x="20" y="232" fill="var(--muted)">15:05:32</text>
+<line x1="360" y1="238" x2="639" y2="238" stroke="currentColor" marker-end="url(#a)"/><text x="500" y="232" text-anchor="middle">update_weight_version（步 2 的策略）200 OK</text>
+<line x1="360" y1="262" x2="639" y2="262" stroke="currentColor" marker-end="url(#a)"/><text x="500" y="256" text-anchor="middle">GET /health 200 OK</text>
+<!-- probe -->
+<text x="20" y="300" fill="var(--muted)">15:05–15:06</text>
+<line x1="895" y1="306" x2="651" y2="306" stroke="var(--warn)" stroke-width="2" marker-end="url(#aw)"/><text x="773" y="300" text-anchor="middle" fill="var(--warn)" font-weight="600">POST /generate（引擎正处于 offload 状态）</text>
+<line x1="651" y1="330" x2="889" y2="330" stroke="var(--warn)" marker-end="url(#aw)"/><text x="773" y="324" text-anchor="middle" fill="var(--warn)">第 1 次：返回半句就断（"To convert the point…$("）</text>
+<line x1="895" y1="354" x2="651" y2="354" stroke="var(--warn)" stroke-width="2" marker-end="url(#aw)"/><text x="773" y="348" text-anchor="middle" fill="var(--warn)">第 2 次 POST /generate</text>
+<line x1="651" y1="378" x2="889" y2="378" stroke="var(--warn)" marker-end="url(#aw)"/><text x="773" y="372" text-anchor="middle" fill="var(--warn)">Remote end closed connection</text>
+<!-- crash -->
+<text x="20" y="420" fill="var(--muted)">15:06:41</text>
+<rect x="520" y="404" width="250" height="70" rx="5" fill="var(--bad-soft)" stroke="var(--bad)" stroke-width="2"/>
+<text x="645" y="422" text-anchor="middle" fill="var(--bad)" font-weight="600">TP1 scheduler 抛异常</text>
+<text x="645" y="438" text-anchor="middle" fill="var(--bad)">ValueError: Pointer argument (at 0) cannot be</text>
+<text x="645" y="453" text-anchor="middle" fill="var(--bad)">accessed from Triton (cpu tensor?)</text>
+<text x="645" y="468" text-anchor="middle" fill="var(--muted)">→ 一个 Triton kernel 拿到了还在 CPU 上的张量</text>
+<text x="20" y="500" fill="var(--muted)">15:06:46</text>
+<rect x="520" y="486" width="250" height="52" rx="5" fill="var(--bad-soft)" stroke="var(--bad)" stroke-width="2"/>
+<text x="645" y="504" text-anchor="middle" fill="var(--bad)" font-weight="600">torch_memory_saver free: CUresult 1</text>
+<text x="645" y="519" text-anchor="middle" fill="var(--bad)">kill_process_tree → 引擎 0 整个退出</text>
+<text x="645" y="532" text-anchor="middle" fill="var(--muted)">引擎 1/2/3 仍健康</text>
+<!-- step 3 sync -->
+<text x="20" y="570" fill="var(--muted)">15:07:04</text>
+<line x1="360" y1="576" x2="116" y2="576" stroke="currentColor" marker-end="url(#a)"/><text x="238" y="570" text-anchor="middle">PUSH 第 3 轮本地 LoRA</text>
+<line x1="116" y1="600" x2="354" y2="600" stroke="currentColor" marker-end="url(#a)"/><text x="238" y="594" text-anchor="middle">全局策略 v3（outer step 3, gnorm 6.7e-6）</text>
+<rect x="240" y="612" width="240" height="40" rx="5" fill="var(--panel)" stroke="var(--line)"/><text x="360" y="629" text-anchor="middle">apply_trainable_state v3 → hash 校验通过</text><text x="360" y="645" text-anchor="middle" fill="var(--muted)">15:07:05 – 15:07:07（tape）</text>
+<!-- fatal call -->
+<text x="20" y="680" fill="var(--muted)">15:07:07</text>
+<line x1="360" y1="686" x2="639" y2="686" stroke="var(--bad)" stroke-width="2" marker-end="url(#ab)"/><text x="500" y="680" text-anchor="middle" fill="var(--bad)" font-weight="600">update_weights → update_weight_version :15000</text>
+<line x1="639" y1="710" x2="366" y2="710" stroke="var(--bad)" stroke-width="2" marker-end="url(#ab)"/><text x="500" y="704" text-anchor="middle" fill="var(--bad)">Connection refused（引擎已死）</text>
+<rect x="240" y="720" width="240" height="26" rx="5" fill="var(--bad-soft)" stroke="var(--bad)" stroke-width="2"/><text x="360" y="737" text-anchor="middle" fill="var(--bad)" font-weight="600">RayTaskError → learner 退出 1 → job FAILED</text>
+</g></svg></div>
+<figcaption>第 3 轮训练期间引擎处于 offload 状态（权重在 CPU），我的外部 <code>/generate</code> 探测正好打在这个窗口里；一分钟后 TP1 rank 在某个 Triton kernel 上拿到了 CPU 张量而崩溃，引擎自杀。learner 对此毫不知情，直到第 3 步同步完成、要把新策略广播给引擎时才撞上 Connection refused。之后 head 的 launcher 走 recovery（重跑 setup、job 2）完成了第 4 步。</figcaption>
+<div class="legend"><span><i class="sw" style="background:var(--bad-soft);border-color:var(--bad)"></i>失败链</span><span><i class="sw" style="background:var(--warn-soft);border-color:var(--warn)"></i>可疑诱因（我的探测）</span><span><i class="sw" style="background:var(--panel)"></i>正常步骤</span></div>
+</figure>
+
+<section class="box">
+<h2>能确定的和不能确定的</h2>
+<table>
+<tr><th>问题</th><th>结论</th><th>依据</th></tr>
+<tr><td>崩的是什么</td><td>引擎 0（:15000）的 TP1 scheduler，随后整个引擎进程树被杀；另外 3 个引擎没事</td><td>run.log 4013–4099 行；15:07 其它引擎仍在答 /health</td></tr>
+<tr><td>learner 为什么退出</td><td>第 3 轮同步后 <code>update_weights</code> 对引擎 0 发 <code>update_weight_version</code>，连接被拒，Miles 把它当致命错误</td><td>traceback 结尾 <code>ray::SGLangEngine.update_weight_version()</code> ConnectionRefusedError</td></tr>
+<tr><td>崩溃的直接原因</td><td>某个 Triton kernel 收到 CPU 张量——权重当时被 offload 到 CPU，但仍有请求触发了前向</td><td><code>Pointer argument … cannot be accessed from Triton (cpu tensor?)</code>，随后 torch_memory_saver free 失败</td></tr>
+<tr><td>是不是我的探测触发的</td><td><strong>很可能但未证实</strong>。探测在 15:05–15:06 打到引擎 0，正是训练/offload 窗口；Miles 自己在这个窗口不会发生成请求。第 1 次探测返回半句即断、第 2 次 "Remote end closed"，和引擎在 offload 态被迫计算的症状一致。但没有第二次独立复现</td><td>时间重叠 + 症状；反证：q27j 前两轮没探测也没崩（说明不探测就正常）</td></tr>
+<tr><td>是不是 Yeto 的 bug</td><td>不是。Yeto 的 policy-sync 在 15:07:04–07 正常完成，是 Miles 的 <code>update_weights</code> 撞上已死的引擎。硬要说缺陷：SGLang 在 offload 态不拒绝外部 /generate（Miles/SGLang 层），以及 Miles 遇到单引擎死亡直接崩而不是重启该引擎</td><td>tape 与 traceback 位置</td></tr>
+<tr><td>恢复代价</td><td>launcher recovery 重跑 setup + 重下 54 GB 模型（缓存在容器里，实际未重下），约 7.5 分钟后第 4 步完成</td><td>第 4 步 <code>ms=452211</code></td></tr>
+</table>
+<p style="margin-top:12px"><strong>教训</strong>：训练中的岛上，rollout 引擎在非 rollout 阶段是 offload 的，外部请求不能打。要看模型输出，用独立的 Modal 引擎（后来的 <code>yeto-q27-probe</code> 就是这么做的）。这条记入 live-run-failures。</p>
+</section>
+</main>
