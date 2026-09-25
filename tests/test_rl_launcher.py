@@ -2790,3 +2790,55 @@ def test_prompt_data_uses_the_only_split_when_there_is_no_train(tmp_path, monkey
     )
     prepare_prompt_data("org/other", "a" * 40, tmp_path / "q.jsonl")
     assert seen["split"] == "train"
+
+
+def test_external_router_starts_and_hands_miles_its_address(monkeypatch):
+    """Modal RL islands: Miles' router spawn missed its 30 s deadline, so
+    the learner starts the standalone router and passes its address."""
+    from yeto.rl import learner
+
+    http_utils = types.ModuleType("miles.utils.http_utils")
+    http_utils.find_available_port = lambda start: start
+    http_utils.get_host_info = lambda: ("modal", "172.20.0.5")
+    for name in ("miles", "miles.utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "miles.utils.http_utils", http_utils)
+    monkeypatch.setattr("atexit.register", lambda fn: None)
+
+    class Proc:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+    started = []
+    attempts = []
+
+    def connect(host, port):
+        attempts.append((host, port))
+        if len(attempts) < 3:
+            raise OSError("not yet")
+
+    args = types.SimpleNamespace(
+        sglang_router_ip=None, sglang_router_port=3500,
+        sglang_router_request_timeout_secs=14400, sglang_router_policy=None,
+    )
+    learner.start_external_sglang_router(
+        args, popen=lambda cmd: started.append(cmd) or Proc(), connect=connect, sleep=lambda s: None
+    )
+    assert args.sglang_router_ip == "172.20.0.5" and args.sglang_router_port == 3500
+    cmd = started[0]
+    assert cmd[1:3] == ["-m", "sglang_router.launch_router"]
+    assert cmd[cmd.index("--host") + 1] == "172.20.0.5" and cmd[cmd.index("--port") + 1] == "3500"
+    assert attempts[-1] == ("172.20.0.5", 3500)
+
+    dead = Proc()
+    dead.returncode = 2
+    with pytest.raises(RuntimeError, match="exited with 2"):
+        learner.start_external_sglang_router(
+            types.SimpleNamespace(sglang_router_port=3500), popen=lambda cmd: dead,
+            connect=connect, sleep=lambda s: None,
+        )

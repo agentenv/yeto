@@ -362,12 +362,17 @@ class FakeSignal(FakeRunPod):
     """A generic registry cloud for the contract tests: optional own
     catalog rows, optional scores failure, call counters."""
 
-    def __init__(self, name, stock, available=True, rows=None, raise_on_scores=False):
+    def __init__(self, name, stock, available=True, rows=None, raise_on_scores=False, live=None):
         super().__init__(stock, available)
         self.name = name
         self._rows = rows
         self._raise = raise_on_scores
+        self._live = live or {}  # {(instance_type, region): live spot $/hr}
         self.calls = {"offerings": 0, "scores": 0}
+
+    def live_spot_prices(self, rows):
+        keys = {(r.instance_type, r.region) for r in rows}
+        return {k: p for k, p in self._live.items() if k in keys}
 
     def credential_hint(self):
         return f"~/.{self.name}/credentials"
@@ -506,9 +511,7 @@ def _load_snapshot():
     return json.loads(path.read_text())
 
 
-# The one advisory this change adds on purpose: a GPU the signal knows how
-# to check stock for that the catalog never lists.
-_ADVISORIES_ADDED_BY_THIS_CHANGE = ("catalog has no rows",)
+_ADVISORIES_ADDED_BY_THIS_CHANGE = ("catalog has no rows", "no offerings in region(s)")
 
 
 def _without_gap_notes(d):
@@ -516,15 +519,22 @@ def _without_gap_notes(d):
     d["warnings"] = [
         w for w in d["warnings"] if not any(a in w for a in _ADVISORIES_ADDED_BY_THIS_CHANGE)
     ]
+    # `price_source` (per island) and `island_shape` (top level) are new
+    # fields; the snapshot predates them, every snapshot price is a catalog
+    # price and every snapshot plan is an SFT (memory-sized) plan.
+    assert all(i.get("price_source", "catalog") == "catalog" for i in d["islands"])
+    d["islands"] = [{k: v for k, v in i.items() if k != "price_source"} for i in d["islands"]]
+    assert d.pop("island_shape", None) is None
     return d
 
 
 def test_aws_runpod_plan_matches_pre_registry_snapshot(multi_cloud_env):
     # The registry refactor must not move a single planned field. The
     # snapshot was produced by tests/fixtures/gen_shape_snapshot.py against
-    # the pre-refactor code; the only tolerated difference is the advisory
-    # warning this change adds on purpose (a GPU the signal knows but the
-    # catalog lacks), stripped before comparing.
+    # the pre-refactor code; the only tolerated differences are the two new
+    # advisory warnings this change added on purpose (a GPU the signal
+    # knows but the catalog lacks; a user-named region with no offerings
+    # for the requested GPUs), stripped before comparing.
     snap = _load_snapshot()
     cases = {
         "high_stock_budget_500": dict(budget=500.0, stock={("H100", 8): 9, ("B200", 8): 9}),
@@ -668,3 +678,253 @@ def test_cloud_without_credentials_makes_no_requests(multi_cloud_env, monkeypatc
 NEBIUS_TWO_REGIONS = NEBIUS_OFFERINGS + [
     Offering("H100", "gpu-h100-sxm_8gpu-128vcpu-1600gb", 8, 128, "us-central1", 17.2, 30.8, 80, cloud="nebius"),
 ]
+
+
+def test_cloud_prefixed_region_keeps_only_that_region(multi_cloud_env):
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_TWO_REGIONS)
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "nebius"), signals={"nebius": neb},
+        regions=["us-east-2", "nebius:eu-north1"], gpus=["H100"],
+    )
+    by_cloud = {}
+    for c in result.candidates:
+        by_cloud.setdefault(c.cloud, set()).add(c.region)
+    assert by_cloud == {"aws": {"us-east-2"}, "nebius": {"eu-north1"}}
+    # The signal was handed its own allowlist and only asked about it.
+    assert neb.asks == [("H100", 8)]
+
+
+def test_unnamed_cloud_is_unrestricted_and_legacy_spelling_unchanged(multi_cloud_env):
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_TWO_REGIONS)
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "nebius"), signals={"nebius": neb},
+        regions=["us-east-2"], gpus=["H100"],
+    )
+    assert {c.region for c in result.candidates if c.cloud == "nebius"} == {"eu-north1", "us-central1"}
+    assert {c.region for c in result.candidates if c.cloud == "aws"} == {"us-east-2"}
+
+
+def test_unknown_region_error_lists_the_regions_that_exist(multi_cloud_env):
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_TWO_REGIONS)
+    with pytest.raises(ValueError, match=r"no nebius offerings in region\(s\) eu-central9.*eu-north1, us-central1"):
+        _shape(
+            multi_cloud_env, budget=500.0, clouds=("aws", "nebius"), signals={"nebius": neb},
+            regions=["nebius:eu-central9"],
+        )
+    # One bad region among good ones is a warning, not an error.
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "nebius"), signals={"nebius": neb},
+        regions=["nebius:eu-central9", "nebius:eu-north1"],
+    )
+    assert any("no offerings in region(s) eu-central9" in w for w in result.warnings)
+    assert {c.region for c in result.candidates if c.cloud == "nebius"} == {"eu-north1"}
+
+
+def test_launch_key_keeps_native_region_and_parses(multi_cloud_env):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    verda_rows = [Offering("H100", "8H100.80S.176V", 8, 176, "FIN-03", 13.53, 27.06, 80, cloud="verda")]
+    verda = FakeSignal("verda", {("H100", 8): 9}, rows=verda_rows)
+    result = _shape(multi_cloud_env, budget=20.0, clouds=("verda",), signals={"verda": verda})
+    argv = plan_mod.launch_argv(result, "gemma4", "lora", "org/data")
+    assert argv[:3] == ["launch", "--gpu", "verda:8xh100@FIN-03"]
+    (spec,) = parse_gpu_spec(argv[2])
+    assert (spec.cloud, spec.region, spec.gpus_per_node, spec.gpu) == ("verda", "FIN-03", 8, "H100")
+
+
+# --- live prices and multi-node clouds ---------------------------------------
+
+
+def test_live_price_overrides_catalog_for_budget_and_is_marked(multi_cloud_env):
+    # Catalog says $17.20; the cloud quotes $10 live. Budget 12 only fits
+    # the live price — so the plan exists only if the override is what the
+    # budget is enforced against; render/JSON mark the source.
+    key = ("gpu-h100-sxm_8gpu-128vcpu-1600gb", "eu-north1")
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_OFFERINGS, live={key: 10.0})
+    result = _shape(multi_cloud_env, budget=12.0, clouds=("nebius",), signals={"nebius": neb})
+    assert result.plan.counts == {"nebius:8xh100@eu-north1": 1}
+    (cand,) = result.candidates
+    assert cand.price_per_hour == 10.0 and cand.price_source == "live"
+    assert any("1 spot price(s) from the live pricing API" in w for w in result.warnings)
+    text = plan_mod.render(result, "gemma4", 12.0, "lora")
+    assert "$10.00/hr/island (live)" in text
+    d = plan_mod.to_json_dict(result, "gemma4", 12.0, "lora", "org/data")
+    assert d["islands"][0]["price_source"] == "live"
+    # A failing price API keeps the catalog price and says so.
+    broken = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_OFFERINGS)
+    broken.live_spot_prices = lambda rows: (_ for _ in ()).throw(RuntimeError("pricing down"))
+    result = _shape(multi_cloud_env, budget=20.0, clouds=("nebius",), signals={"nebius": broken})
+    (cand,) = result.candidates
+    assert cand.price_per_hour == 17.2 and cand.price_source == "catalog"
+    assert any("live pricing failed" in w for w in result.warnings)
+
+
+def test_nebius_multi_node_island_allowed_with_rdma_mfu(multi_cloud_env):
+    # 568 GB needs 2 nodes of 8x80GB. Nebius is a multi-node cloud with an
+    # InfiniBand fabric on 8-GPU SXM presets -> the island is planned at
+    # the 0.30 multi-node MFU (not TCP's 0.20, not rejected like RunPod).
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_OFFERINGS)
+    result = _shape(
+        multi_cloud_env, budget=80.0, clouds=("nebius",), signals={"nebius": neb},
+        weights_gb_override=568.0,
+    )
+    (key,) = result.plan.counts
+    assert key == "nebius:2x8xh100@eu-north1"
+    (cand,) = result.candidates
+    assert cand.eff_tflops == pytest.approx(2 * 8 * 989.0 * 0.30 * 0.95)
+    assert not any("single-node islands only" in w for w in result.warnings)
+
+
+def test_verda_never_plans_multi_node_and_says_so(multi_cloud_env):
+    # The Verda variant of test_multi_node_island_when_model_demands: 568 GB
+    # needs 2 nodes, Verda islands are single VMs -> no plan, explicit
+    # rejection, and a warning naming the cloud.
+    verda_rows = [Offering("H100", "8H100.80S.176V", 8, 176, "FIN-03", 13.53, 27.06, 80, cloud="verda")]
+    verda = FakeSignal("verda", {("H100", 8): 9}, rows=verda_rows)
+    result = _shape(
+        multi_cloud_env, budget=80.0, clouds=("verda",), signals={"verda": verda}, weights_gb_override=568.0
+    )
+    assert result.plan.counts == {}
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "multi-node islands unsupported on verda" in reasons["verda:2x8xh100@FIN-03"]
+    assert any(w.startswith("verda: single-node islands only") for w in result.warnings)
+
+
+# --- Modal ---------------------------------------------------------------------
+
+
+def test_modal_unpinned_has_no_region_and_pinned_carries_surcharge(multi_cloud_env):
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.shape.providers import ModalSignals
+
+    # Unpinned (no modal: entry in --regions): key without @, base price,
+    # "autoscale" instead of a stock score, no surcharge note.
+    result = _shape(multi_cloud_env, budget=60.0, clouds=("modal",), signals={"modal": ModalSignals(None)}, gpus=["H100"])
+    (key,) = result.plan.counts
+    assert key == "modal:8xh100" and "@" not in key
+    (spec,) = parse_gpu_spec(key)
+    assert spec.cloud == "modal" and spec.region is None
+    base = next(c for c in result.candidates if c.key == key).price_per_hour
+    assert not any("surcharge" in w for w in result.warnings)
+    assert "score autoscale" in plan_mod.render(result, "gemma4", 60.0, "lora")
+    # Pinned: key carries the region, price is multiplied, note says so.
+    pinned = _shape(
+        multi_cloud_env, budget=60.0, clouds=("modal",), signals={"modal": ModalSignals(None)},
+        gpus=["H100"], regions=["modal:us"],
+    )
+    (key,) = pinned.plan.counts
+    assert key == "modal:8xh100@us"
+    assert next(c for c in pinned.candidates if c.key == key).price_per_hour == pytest.approx(base * 1.15, abs=1e-3)
+    assert any("region us pinned at 1.15x (broad" in w for w in pinned.warnings)
+    # Modal never caps a shape on stock and is never "sold out".
+    assert all(c.max_count is None for c in pinned.candidates)
+
+
+def test_modal_multi_container_requires_whole_nodes(multi_cloud_env):
+    from yeto.shape.providers import ModalSignals
+
+    # 568 GB LoRA needs 2 nodes: H100:8 x2 is allowed (RoCE MFU 0.30);
+    # the 4-GPU-per-container variant is explicitly rejected.
+    result = _shape(
+        multi_cloud_env, budget=200.0, clouds=("modal",), signals={"modal": ModalSignals(None)},
+        gpus=["H100"], weights_gb_override=568.0,
+    )
+    assert "modal:2x8xh100" in result.plan.counts
+    cand = next(c for c in result.candidates if c.key == "modal:2x8xh100")
+    assert cand.eff_tflops == pytest.approx(2 * 8 * 989.0 * 0.30 * (0.5 + 0.05 * 8))
+    # The 4-per-container variant never reaches the plan (here it already
+    # loses to the fatter-node island; multi_node_rejection covers the
+    # whole-node wording in test_shape_catalog).
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "modal:3x4xh100" in reasons and "modal:3x4xh100" not in result.plan.counts
+
+
+# --- RL island shapes -----------------------------------------------------------
+
+
+def _rl_shape(**kw):
+    from yeto.shape.plan import IslandShape
+
+    base = dict(
+        gpus_per_node=8, num_nodes=1, single_node_only=True, needs_container_image=True,
+        spot_needs_storage=True, label="rl", note="actor 4 + rollout 4, disjoint",
+    )
+    base.update(kw)
+    return IslandShape(**base)
+
+
+def test_rl_split_mode_prices_fixed_single_node_islands(multi_cloud_env, monkeypatch):
+    import json
+
+    from yeto.shape import catalog as catalog_mod
+
+    # Clouds: aws (image + storage verified), runpod (image verified,
+    # storage not), nebius (image not verified). Plus a 1xH100 shape that
+    # does not match the 8-per-node island.
+    extra = [Offering("H100", "p5.4xlarge", 1, 16, "us-east-2", 6.0, 12.0, 80)]
+
+    def offerings(regions, gpus, cache, clouds=("aws",)):
+        out = [o for o in OFFERINGS + RUNPOD_OFFERINGS + extra if not gpus or o.gpu in gpus]
+        return [o for o in out if o.cloud in clouds]
+
+    monkeypatch.setattr(plan_mod, "list_offerings", offerings)
+    monkeypatch.setattr(plan_mod, "VERIFIED_DOCKER_IMAGE_CLOUDS", frozenset({"aws", "runpod"}))
+    monkeypatch.setattr(plan_mod, "VERIFIED_SPOT_STORAGE_CLOUDS", frozenset({"aws"}))
+    rp = FakeRunPod({("H100", 8): 9})
+    neb = FakeSignal("nebius", {("H100", 8): 9}, rows=NEBIUS_OFFERINGS)
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("aws", "runpod", "nebius"),
+        signals={"runpod": rp, "nebius": neb}, gpus=["H100"], island_shape=_rl_shape(),
+    )
+    reasons = {r.key: r.reason for r in result.rejections}
+    assert "rl island needs 8 GPUs per node" in reasons["aws:1xh100@us-east-2"]
+    assert "nebius not verified for container-image launch" in reasons["nebius:8xh100@eu-north1"]
+    aws_cand = next(c for c in result.candidates if c.cloud == "aws")
+    assert (aws_cand.price_per_hour, aws_cand.price_source, aws_cand.nodes) == (34.0, "catalog", 1)
+    rp_cand = next(c for c in result.candidates if c.cloud == "runpod")
+    assert (rp_cand.price_per_hour, rp_cand.price_source) == (23.12, "on-demand")  # not the 19.12 spot
+    assert not any(c.cloud == "nebius" for c in result.candidates)
+    assert any("nebius: not verified for container-image launch; 1 rl island shape(s) skipped" in w for w in result.warnings)
+    assert any("runpod: spot checkpoint storage not verified; rl islands priced on-demand" in w for w in result.warnings)
+    text = plan_mod.render(result, "gemma4", 500.0, "lora", data="org/data")
+    assert "RL island shape: 8 GPUs/node x 1 node(s) (actor 4 + rollout 4, disjoint); container image required: yes" in text
+    assert "on-demand $23.12/hr/island" in text
+    argv = plan_mod.launch_argv(result, "gemma4", "lora", "org/data")
+    assert argv[-2:] == ["--training-mode", "rl"]
+    d = plan_mod.to_json_dict(result, "gemma4", 500.0, "lora", "org/data")
+    assert d["island_shape"] == {
+        "label": "rl", "gpus_per_node": 8, "num_nodes": 1, "single_node_only": True,
+        "needs_container_image": True, "spot_needs_storage": True, "note": "actor 4 + rollout 4, disjoint",
+    }
+    json.dumps(d)
+    # The verified sets are plain constants in catalog (verification tasks fill them).
+    assert catalog_mod.VERIFIED_SPOT_STORAGE_CLOUDS <= catalog_mod.VERIFIED_DOCKER_IMAGE_CLOUDS
+
+
+def test_rl_colocated_mode_allows_multi_node_islands(multi_cloud_env):
+    # 66 GB would be a 1-node island by the memory model; the RL shape pins
+    # 2 nodes of 8 (actor spans nodes, rollout colocated).
+    shape = _rl_shape(num_nodes=2, single_node_only=False, note="actor 8, rollout colocated")
+    result = _shape(multi_cloud_env, budget=500.0, gpus=["H100"], island_shape=shape)
+    assert result.plan.counts == {"aws:2x8xh100@us-east-2": 1}
+    assert plan_mod.to_json_dict(result, "gemma4", 500.0, "lora", None)["island_shape"]["num_nodes"] == 2
+
+
+def test_island_shape_validation():
+    from yeto.shape.plan import IslandShape
+
+    with pytest.raises(ValueError, match="single-node only"):
+        IslandShape(gpus_per_node=8, num_nodes=2, single_node_only=True)
+    with pytest.raises(ValueError, match="at least one GPU"):
+        IslandShape(gpus_per_node=0)
+    assert plan_mod.island_shape_dict(None) is None
+
+
+def test_single_node_cloud_warns_when_model_needs_multi_node(multi_cloud_env):
+    rp = FakeRunPod({("H100", 8): 9})
+    result = _shape(
+        multi_cloud_env, budget=500.0, clouds=("runpod",), signals={"runpod": rp},
+        weights_gb_override=568.0, gpus=["H100"],
+    )
+    assert result.plan.counts == {}
+    assert any(w.startswith("runpod: single-node islands only") and "1 shape(s)" in w for w in result.warnings)

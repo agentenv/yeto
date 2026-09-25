@@ -42,6 +42,9 @@ class Offering:
     on_demand_price: float | None
     gpu_mem_gb: int  # from launcher.GPU_MEM_GB
     cloud: str = "aws"  # lowercase sky cloud name
+    # "catalog" (sky's periodic dump) or "live" (the cloud's own pricing
+    # API, fetched during this shape); rendering marks live prices.
+    price_source: str = "catalog"
 
 
 # GPUs that predate bf16 (SM80/Ampere): the base is always trained in bf16,
@@ -60,18 +63,68 @@ def efa_capable(instance_type: str) -> bool:
     return instance_type.startswith(("p4", "p5"))
 
 
-# Clouds where a multi-node island can be provisioned at all: RunPod pods
-# are single machines to sky. The set grows as clouds pass the multi-node
-# verification in docs/CLOUDS.md.
-MULTI_NODE_CLOUDS = frozenset({"aws"})
+# Clouds where a multi-node island can be provisioned at all (RunPod pods
+# and Verda VMs are single machines to sky), and the subset whose
+# multi-node islands get
+# an RDMA-class fabric (EFA on AWS, InfiniBand on Nebius GPU clusters,
+# RoCE on Modal clustered functions). Both grow as clouds pass the
+# multi-node verification in docs/CLOUDS.md.
+MULTI_NODE_CLOUDS = frozenset({"aws", "nebius", "modal"})
+RDMA_CLOUDS = frozenset({"aws", "nebius", "modal"})
+# RL islands run inside a digest-pinned container image and, on spot,
+# persist finished rollout groups to an object store the launcher mounts.
+# Neither is verified on every cloud; a cloud enters these sets only after
+# the live checks in docs/CLOUDS.md pass (Modal: image via its registry
+# support, checkpoints via a Modal Volume — both pending verification).
+VERIFIED_DOCKER_IMAGE_CLOUDS = frozenset({"aws", "runpod"})
+VERIFIED_SPOT_STORAGE_CLOUDS = frozenset({"aws"})
+
+
+def _modal_gpu_count(instance_type: str) -> tuple[str, int]:
+    """Modal 'instance types' are the GPU request string, e.g. 'H100:8'."""
+    gpu, _, count = instance_type.partition(":")
+    return gpu, int(count or 1)
+
+
+def rdma_capable(cloud: str, instance_type: str) -> bool:
+    """Whether a multi-node island of this shape gets an RDMA fabric
+    (decides the multi-node MFU tier). AWS: EFA families. Nebius: the 8-GPU
+    SXM presets, which sky places in an InfiniBand GPU cluster; PCIe and
+    partial-node presets do not get the fabric. Modal: whole-node
+    containers in a clustered function (the only multi-container shape
+    Modal schedules) get RoCE."""
+    if cloud not in RDMA_CLOUDS:
+        return False
+    if cloud == "aws":
+        return efa_capable(instance_type)
+    if cloud == "nebius":
+        platform, _, preset = instance_type.partition("_")
+        return "sxm" in platform and preset.startswith("8gpu")
+    if cloud == "modal":
+        from yeto.modal_runner import MODAL_FULL_NODE
+
+        gpu, count = _modal_gpu_count(instance_type)
+        return MODAL_FULL_NODE.get(gpu) == count
+    return False
 
 
 def multi_node_rejection(cloud: str, gpu: str, gpus_per_node: int) -> str | None:
     """Why a multi-node island of this per-node shape cannot be planned on
     `cloud`, or None when it can. Single-machine clouds reject every
-    multi-node shape."""
+    multi-node shape; Modal only schedules multi-container groups made of
+    whole nodes."""
     if cloud not in MULTI_NODE_CLOUDS:
         return f"multi-node islands unsupported on {cloud}"
+    if cloud == "modal":
+        from yeto.modal_runner import MODAL_FULL_NODE
+
+        full = MODAL_FULL_NODE.get(gpu)
+        if full is None or gpus_per_node != full:
+            return (
+                "Modal multi-container islands must use whole nodes "
+                f"({gpu}:{full} per container)" if full else
+                f"Modal multi-container islands need a whole-node GPU, not {gpu}"
+            )
     return None
 
 
@@ -105,7 +158,7 @@ def effective_tflops(off: Offering, nodes: int, score: int | None) -> float:
         nodes
         * off.gpus_per_node
         * PEAK_TFLOPS_BF16[off.gpu]
-        * mfu(nodes, efa_capable(off.instance_type))
+        * mfu(nodes, rdma_capable(off.cloud, off.instance_type))
         * goodput(score)
     )
 
