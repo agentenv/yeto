@@ -80,30 +80,68 @@ def outer_protocol(miles_args: Any, *, yeto_policy_sync: bool) -> str:
     )
 
 
+EXPECTED_ALGORITHM_ENV = "YETO_RL_EXPECTED_ALGORITHM_SHA256"
+
+
+def expected_algorithm_sha256(miles_args: Any, environ: Any = None) -> str | None:
+    """The AlgorithmSpec hash the LAUNCHER intended (external to this process).
+
+    Sources: ``miles_args.yeto_rl_expected_algorithm_sha256`` (learner flag
+    ``--rl-expected-algorithm-sha256``) or the ``YETO_RL_EXPECTED_ALGORITHM_SHA256``
+    environment variable. Comparing it with the runtime spec is what makes the
+    A1 check non-circular (review F2).
+    """
+    environ = os.environ if environ is None else environ
+    value = getattr(miles_args, "yeto_rl_expected_algorithm_sha256", None) or environ.get(
+        EXPECTED_ALGORITHM_ENV
+    )
+    return str(value) if value else None
+
+
 def execution_profile_for(
-    miles_args: Any, launch: Any, algorithm: AlgorithmSpec, *, yeto_policy_sync: bool
+    miles_args: Any,
+    launch: Any,
+    algorithm: AlgorithmSpec,
+    *,
+    yeto_policy_sync: bool,
+    expected_sha256: str | None = None,
 ):
-    """The run's :class:`ExecutionProfile`, bound to ``algorithm`` (alignment A1).
+    """The run's :class:`ExecutionProfile`, bound to the EXTERNAL algorithm hash.
 
     colocated placement -> ``colocated-serial``; fixed partition ->
-    ``partitioned-serial`` (no overlap is certified, task 2.3).
+    ``partitioned-serial`` (no overlap is certified, task 2.3). The profile is
+    bound to ``expected_sha256`` (launcher-provided); :func:`preflight` then
+    compares it with the runtime ``AlgorithmSpec``. Without an external hash a
+    partitioned run is refused; a colocated (R0) run binds to the runtime spec
+    and records that the hash source was the runtime.
     """
-    from ..execution_profile import ExecutionProfile
+    from ..execution_profile import ExecutionProfile, ProfileError
 
     mode = "colocated-serial" if launch.placement.kind == "colocated" else "partitioned-serial"
-    profile = ExecutionProfile(
+    if expected_sha256 is None:
+        if mode != "colocated-serial":
+            raise ProfileError(
+                f"{mode} needs the launcher's expected AlgorithmSpec hash "
+                f"(--rl-expected-algorithm-sha256 or {EXPECTED_ALGORITHM_ENV}); refusing"
+            )
+        expected_sha256, source = algorithm.sha256(), "runtime"
+    else:
+        source = "launcher"
+    return ExecutionProfile(
         name=f"miles-lora-{mode}",
         execution_mode=mode,
         outer_protocol=outer_protocol(miles_args, yeto_policy_sync=yeto_policy_sync),
         groups_per_batch=int(miles_args.rollout_batch_size),
         samples_per_group=int(miles_args.n_samples_per_prompt),
         optimizer_steps_per_round=int(getattr(miles_args, "num_steps_per_rollout", 1) or 1),
+        algorithm_spec_sha256=expected_sha256,
+        extra={"algorithm_hash_source": source},
     )
-    return profile.bind_algorithm(algorithm)
 
 
 def preflight(profile: Any, algorithm: AlgorithmSpec, capabilities: EngineCapabilities) -> None:
-    """A1: profile/algorithm/capability agreement, before any GPU process exists."""
+    """A1: the launcher-bound profile agrees with the runtime AlgorithmSpec and the
+    declared capabilities, before any GPU process exists (before connect_island_ray)."""
     from ..execution_profile import check_algorithm_contract
 
     check_algorithm_contract(profile, algorithm)
@@ -305,7 +343,11 @@ def run_ports_island(
         miles_capabilities(runtime_fingerprint(launch, MILES_NEXT_COMMIT))
     )
     profile = execution_profile_for(
-        miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync
+        miles_args,
+        launch,
+        algorithm,
+        yeto_policy_sync=yeto_policy_sync,
+        expected_sha256=expected_algorithm_sha256(miles_args),
     )
     preflight(profile, algorithm, capabilities)  # A1: before any GPU process
     connect_island_ray()

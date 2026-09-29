@@ -425,6 +425,9 @@ def resolve_rl_run_config(
     """
 
     parameter_mode = getattr(args, "parameter_mode", "lora")
+    if parameter_mode == "full" and int(getattr(args, "rl_standby_gpus", 0) or 0):
+        # review F7: never drop a standby request silently
+        raise ValueError("--rl-standby-gpus is not supported for full-parameter mode")
     if parameter_mode not in PARAMETER_MODES:
         raise ValueError("unsupported RL parameter mode")
     if parameter_mode == "full":
@@ -554,7 +557,12 @@ def resolve_rl_run_config(
         visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus + standby_gpus
     else:
         visible_gpus_per_node = args.actor_num_gpus_per_node
-    if dedicated_rollout_gpus is None or parameter_mode == "full":
+    requested_standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
+    if dedicated_rollout_gpus is None:
+        if requested_standby:
+            raise ValueError("--rl-standby-gpus needs --rl-placement fixed-partition")
+        standby_gpus = 0
+    elif parameter_mode == "full":
         standby_gpus = 0
 
     ref_load = _resolve_ref_load(args, model_path)

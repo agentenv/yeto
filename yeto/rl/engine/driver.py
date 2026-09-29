@@ -290,6 +290,18 @@ class IslandDriver:
             self._open_span = (name, self.clock(), fields.get("rollout_id"))
         self.emit("rl_driver_phase", phase=name, **fields)
 
+    @property
+    def _gated(self) -> bool:
+        """Readiness gating runs only in partitioned modes.
+
+        colocated-serial keeps the R0 behaviour exactly (review F3: the train
+        gate would require a full rollout_batch_size of groups, which R0 does
+        not). In partitioned-serial the gate largely duplicates the R0 checks
+        (publication manifest, per-group token); it is kept as the hook that
+        partitioned-overlap will need, not as independent evidence (F4).
+        """
+        return self.profile is not None and self.execution_mode != "colocated-serial"
+
     # -- observation (task 1.7; opt-in) ------------------------------------
     @property
     def profile_hash(self) -> str | None:
@@ -386,7 +398,8 @@ class IslandDriver:
             or _DEFAULT_TRANSPORT.get(description.kind, "unknown")
         )
         extra_start: dict[str, Any] = {}
-        if self.profile is not None:
+        if self.profile is not None and self.observe:
+            # observe=False keeps rl_driver_start byte-identical to R0 (1.7).
             extra_start = {"profile_hash": self.profile_hash, "config_epoch": self.config_epoch}
         self.emit(
             "rl_driver_start",
@@ -478,7 +491,7 @@ class IslandDriver:
         if self.colocated:
             self.phase("offload", rollout_id=rollout_id)
             self.trainer.offload()
-        if self.profile is not None:
+        if self._gated:
             require(
                 generate_blockers(self.profile, self._snapshot(rollout_id)),
                 f"generation of rollout {rollout_id}",
@@ -572,7 +585,11 @@ class IslandDriver:
             "rl/mean_kl": metrics.mean_kl,
             "rl/ess_ratio": metrics.ess_ratio,
             "rl/groups": len(batch.groups),
-            "rl/filtered_groups": int(batch.aborted),
+            "rl/aborted_groups": int(batch.aborted),
+            # A2/F5: terminal filtered vs non-terminal carried_over; None when
+            # the engine does not report it (never inferred from aborted).
+            "rl/filtered_groups": batch.filtered,
+            "rl/carried_over_groups": batch.carried_over,
         }
         extra = getattr(self.trainer, "algorithm_metrics", None)
         if callable(extra):
@@ -610,7 +627,7 @@ class IslandDriver:
         if self.colocated:
             self.phase("onload", rollout_id=rollout_id)
             self.trainer.onload()
-        if self.profile is not None:
+        if self._gated:
             # Every group carries the published token (checked in _generate);
             # the batch is one complete, single-policy batch.
             snap = self._snapshot(
@@ -619,7 +636,12 @@ class IslandDriver:
                 group_policy_versions={g.group_id: batch.policy_version for g in batch.groups},
                 inflight_batches=1,
             )
-            require(train_blockers(self.profile, snap), f"train step of rollout {rollout_id}")
+            # The batch size is the engine's (partial rollouts / filtering may
+            # yield fewer groups, as in R0); only policy identity is gated here.
+            blockers = [
+                b for b in train_blockers(self.profile, snap) if "complete groups ready" not in b
+            ]
+            require(blockers, f"train step of rollout {rollout_id}")
         self.phase("train", rollout_id=rollout_id)
         started = time.monotonic()
         receipt = self.trainer.train_step(batch)

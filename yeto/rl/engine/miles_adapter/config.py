@@ -457,6 +457,10 @@ def translate_run_config(
         placement_values = ["--rollout-num-gpus", str(request.rollout_gpus)]
         if trainable.parameter_mode == "lora":
             if serving.offload_train:
+                # Conservative choice of this change, NOT an upstream
+                # constraint: upstream train.py:139-151 also offloads outside
+                # colocate. Refused until a partitioned GPU run shows that a
+                # per-round onload + NCCL broadcast publish is safe/cheap.
                 raise MilesConfigError(
                     "a LoRA fixed partition publishes over NCCL broadcast every round; "
                     "the trainer must stay resident (no offload_train)"

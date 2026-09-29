@@ -45,6 +45,7 @@ def ports_rejections(
     use_critic: bool = False,
     advantage_estimator: str = "grpo",
     extra_argv: Sequence[str] = (),
+    placement: str = "colocated",
 ) -> list[str]:
     """Reasons the combination is outside the R0 ports matrix (empty = OK)."""
 
@@ -66,8 +67,18 @@ def ports_rejections(
     estimator = _flag_value(extra_argv, "--advantage-estimator") or advantage_estimator
     if use_critic or "--use-critic" in extra_argv or estimator != "grpo":
         reasons.append(f"critic / non-GRPO advantage estimator ({estimator})")
-    if rollout_num_gpus is not None or _flag_value(extra_argv, "--rollout-num-gpus"):
-        reasons.append("fixed partition (dedicated rollout GPUs)")
+    if placement not in ("colocated", "fixed-partition"):
+        reasons.append(f"placement {placement!r}")
+    if _flag_value(extra_argv, "--rollout-num-gpus"):
+        reasons.append("fixed partition via --rollout-num-gpus in extra argv (use --rl-placement fixed-partition)")
+    if placement == "fixed-partition":
+        # rl-infra-spec 2.1: LoRA fixed partition (partitioned-serial driver).
+        if rollout_num_gpus is None or int(rollout_num_gpus) < 1:
+            reasons.append("fixed partition needs --rollout-num-gpus >= 1")
+    elif rollout_num_gpus is not None:
+        reasons.append(
+            "fixed partition (dedicated rollout GPUs) without --rl-placement fixed-partition"
+        )
     return reasons
 
 

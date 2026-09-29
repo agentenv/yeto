@@ -64,18 +64,35 @@ def _strip(events):
 NEW_EVENTS = {"rl_timeline_span", "rl_readiness", "rl_round_labels"}
 
 
-def test_observation_off_keeps_the_r0_event_tape(tmp_path):
-    legacy, _ = _driver(_engine(), tmp_path, "legacy.jsonl")
-    legacy.run()
-    off, _ = _driver(_engine(), tmp_path, "off.jsonl", observe=False)
-    off.run()
-    on, _ = _driver(_engine(), tmp_path, "on.jsonl", observe=True)
-    on.run()
-    base = _strip(_events(tmp_path / "legacy.jsonl"))
-    assert _strip(_events(tmp_path / "off.jsonl")) == base
-    observed = _events(tmp_path / "on.jsonl")
-    assert _strip([e for e in observed if e["event"] not in NEW_EVENTS]) == base
-    assert {e["event"] for e in observed} >= {"rl_timeline_span", "rl_round_labels"}
+R0_TAPE = json.loads(
+    (__import__("pathlib").Path(__file__).parent / "data" / "r0_driver_tape_a50e9d2.json").read_text()
+)["tapes"]
+
+
+@pytest.mark.parametrize("observe", [False, True])
+def test_bound_profile_matches_the_recorded_r0_tape(tmp_path, observe):
+    """1.7: the production path always builds a profile; with observe=False the
+    tape equals the one recorded from the R0 driver at a50e9d2; with observe=True
+    it equals it after removing the added events and start-event labels."""
+    driver, _ = _driver(_engine(), tmp_path, profile=_profile("colocated-serial"),
+                        observe=observe)
+    driver.run()
+    events = _events(tmp_path / "events.jsonl")
+    if observe:
+        assert {e["event"] for e in events} >= {"rl_timeline_span", "rl_round_labels"}
+        events = [e for e in events if e["event"] not in NEW_EVENTS]
+        for e in events:
+            if e["event"] == "rl_driver_start":
+                e.pop("profile_hash"), e.pop("config_epoch")
+    assert _strip(events) == R0_TAPE["colocated"]
+
+
+def test_profile_none_matches_the_recorded_r0_tape(tmp_path):
+    for kind in ("colocated", "fixed-partition"):
+        driver, _ = _driver(_engine(placement_kind=kind), tmp_path, f"{kind}.jsonl",
+                            capabilities=fake_capabilities())
+        driver.run()
+        assert _strip(_events(tmp_path / f"{kind}.jsonl")) == R0_TAPE[kind]
 
 
 def test_partitioned_serial_keeps_sample_ids_and_optimizer_order(tmp_path):
@@ -98,6 +115,8 @@ def test_partitioned_serial_keeps_sample_ids_and_optimizer_order(tmp_path):
     assert start["profile_hash"] == part.profile.contract_hash
     labels = [e for e in events if e["event"] == "rl_round_labels"]
     assert {e["weight_transport"] for e in labels} == {"nccl-broadcast"}
+    # F5: the fake engine reports no filtered/carried_over counts -> None, not aborted
+    assert {(e["rl/filtered_groups"], e["rl/carried_over_groups"]) for e in labels} == {(None, None)}
     assert {e["profile_hash"] for e in labels} == {part.profile.contract_hash}
     spans = [
         Span(e["task"], e["role"], e["kind"], e["start"], e["end"], e["profile_hash"],
@@ -164,7 +183,10 @@ def test_ports_entry_builds_a_bound_profile_and_preflights_before_gpu():
                            yeto_rl_sync_preset="strict-avg")
     part = SimpleNamespace(placement=PlacementRequest("fixed-partition", 2, 2, 1), argv=("x",))
     spec = AlgorithmSpec()
-    profile = entry.execution_profile_for(args, part, spec, yeto_policy_sync=True)
+    with pytest.raises(ProfileError, match="expected AlgorithmSpec hash"):
+        entry.execution_profile_for(args, part, spec, yeto_policy_sync=True)
+    profile = entry.execution_profile_for(args, part, spec, yeto_policy_sync=True,
+                                          expected_sha256=spec.sha256())
     assert profile.execution_mode == "partitioned-serial"
     assert profile.outer_protocol == "strict-avg"
     assert profile.algorithm_spec_sha256 == spec.sha256()
@@ -174,9 +196,29 @@ def test_ports_entry_builds_a_bound_profile_and_preflights_before_gpu():
     caps = entry.with_partitioned_serial(r0)
     entry.preflight(profile, spec, caps)
     assert caps.partitioned_driver and r0.advantage_estimators == caps.advantage_estimators
-    with pytest.raises(ProfileError):
-        entry.preflight(profile, AlgorithmSpec(kl_coef=0.1), caps)
+    # F2: the launcher intended another algorithm than the runtime built
+    launcher_hash = AlgorithmSpec(kl_coef=0.1).sha256()
+    mismatched = entry.execution_profile_for(args, part, spec, yeto_policy_sync=True,
+                                             expected_sha256=launcher_hash)
+    with pytest.raises(ProfileError, match="bound to algorithm"):
+        entry.preflight(mismatched, spec, caps)
+    args.yeto_rl_expected_algorithm_sha256 = launcher_hash
+    assert entry.expected_algorithm_sha256(args, environ={}) == launcher_hash
+    del args.yeto_rl_expected_algorithm_sha256
+    assert entry.expected_algorithm_sha256(args, environ={entry.EXPECTED_ALGORITHM_ENV: "ab"}) == "ab"
+    assert entry.expected_algorithm_sha256(args, environ={}) is None
     colo = SimpleNamespace(placement=PlacementRequest("colocated", 2, 2, 1), argv=("x",))
     p = entry.execution_profile_for(args, colo, spec, yeto_policy_sync=False)
     assert (p.execution_mode, p.outer_protocol) == ("colocated-serial", "none")
     entry.preflight(p, spec, r0)
+
+
+@pytest.mark.parametrize("mode,kind", [("colocated-serial", "colocated"),
+                                       ("partitioned-serial", "fixed-partition")])
+def test_fewer_groups_than_rollout_batch_size_still_trains(tmp_path, mode, kind):
+    """Review F3: partial rollouts / filtering may return fewer groups than
+    rollout_batch_size; like R0, the round trains instead of ReadinessError."""
+    engine = _engine(placement_kind=kind)
+    driver, trained = _driver(engine, tmp_path, profile=_profile(mode, groups_per_batch=100))
+    driver.run()
+    assert len(trained) == 3

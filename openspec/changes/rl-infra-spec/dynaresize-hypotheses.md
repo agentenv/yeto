@@ -11,7 +11,7 @@
 
 | 论文前提 | 页码 | 本 change | 结论 |
 |---|---|---|---|
-| 以 one-step-off-policy 异步为基线（Fig. 1(a)），“Modern LLM post-training relies on asynchronous pipelines” | p.2 §2，p.3 Fig. 1 | 所有执行模式 policy age = 0（design D0、alignment A1/F6）；2.3 不开放 one-step-off-policy | 论文的收益来自在**训推已经重叠**的流水线里平衡两个阶段的耗时。本 change 的 `partitioned-serial` 没有训推重叠，一轮时间是 R+T 而不是 max(R,T)。在串行模式下移动 GPU 只能改变 R 与 T 各自的长短，收益形态不同，**不能外推论文的结果**（design D9 已禁止统一套 max(R,T)）。 |
+| 收益建立在训推解耦且重叠的异步流水线上；Fig. 1(a) 的基线为 one-step-off-policy，实验（§5）使用的 staleness 未明示 | p.2 §2，p.3 Fig. 1，p.6 §5 | 所有执行模式 policy age = 0（design D0、alignment A1/F6）；2.3 不开放 one-step-off-policy | 论文的收益来自在训推重叠的流水线里平衡两阶段耗时；本 change 的 `partitioned-serial` 没有训推重叠，一轮时间是 R+T 而不是 max(R,T)，在串行模式下移动 GPU 只改变 R 与 T 各自长短，收益形态不同，**不能外推论文结果**（design D9 禁止统一套 max(R,T)）。 |
 | 基于 veRL，Ray 静态 actor group | p.6 §4 | yeto + miles/Ray/Megatron/SGLang，不引入 veRL | 机制可以借鉴，实现不能照搬。 |
 | 在已有进程内迁移角色、保留 placement group | p.6 §4 | E3 默认走进程重建（fork-M6 `rebuild_training_models`），进程复用是 5.4 的可选项 | 见 H2。 |
 
@@ -28,11 +28,11 @@
 
 ## 2. 对 E0 的直接影响
 
-- **2.3**：论文的收益前提是训推重叠（p.2–3）。本 change 在 age 0 下，下一轮生成必须等待本轮发布，`generate` 不能与 `train`/`outer_sync` 重叠（`execution_profile.overlap_violation`）。因此论文不构成开放 overlap 的依据；2.3 的结论只能来自 X9 实验，不能来自论文。
+- **2.3**：论文的收益建立在训推重叠的异步流水线上（p.2–3）。本 change 在 age 0 下，下一轮生成必须等待本轮发布，`generate` 不能与 `train`/`outer_sync` 重叠（`execution_profile.overlap_violation`）。因此论文不构成开放 overlap 的依据；2.3 的结论只能来自 X9 实验，不能来自论文。
 - **2.4**：扫描比较的是**同 profile**（partitioned-serial）下的固定配置。论文的 6:2→4:4 只是候选（tasks 2.4 已写明“P62/P44 仅候选，不预设合法或更快”）。
 
 ## 3. 没有采用的内容
 
 - 论文的全部性能常量（见“使用规则”）。
 - veRL 实现，以及 one-step-off-policy 执行模式（需要另立算法契约 change，alignment A6）。
-- “mixed step”（resize 当步执行 2 次 rollout、1 次训练，p.7–8）：它依赖异步流水线，在 age 0 串行模式下没有对应物，不作为假设。
+- “mixed step”（resize 当步执行 2 次 rollout、1 次训练，p.7）：它依赖异步流水线，在 age 0 串行模式下没有对应物，不作为假设。

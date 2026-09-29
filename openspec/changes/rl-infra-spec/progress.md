@@ -95,3 +95,15 @@
 1. 主 agent 合入 ALGO-CAP 的 `_check_gradient` 补丁后，在其上继续开发；ALGO-CAP 的 v2 `ExecutionSpec` 冻结后，复核 `execution_profile.algorithm_max_policy_staleness`。
 2. 镜像 digest 到位后，在镜像内运行 `python -m yeto.rl.engine.runtime_manifest --image <digest> --out manifest.json --capability ports-partitioned-serial --capability fixed-partition-standby`。
 3. 先写 A1/A2 的实验计划（容差、seed、硬超时、前缀 `infra-a-`）并提交，然后再租用。
+
+### 审查修订 F1–F7（2026-09-29 INFRA）
+
+- F1：1.7 的兼容性证据改为对照 a50e9d2 录制磁带（`tests/data/r0_driver_tape_a50e9d2.json`，在 a50e9d2 的临时 worktree 中以 `PYTHONPATH` 指向该 worktree 录制）。生产路径 profile 存在、observe=False 时 `rl_driver_start` 不再多出字段，事件逐条相同。
+- F2：A1 比对改为外部哈希（launcher 下发的 `--rl-expected-algorithm-sha256`/环境变量）对运行时 AlgorithmSpec，在 `connect_island_ray` 前 fail-closed；partitioned 缺外部哈希即拒绝。colocated（R0）缺失时退回运行时哈希并记录来源，这是有意保留的 R0 兼容，不算独立验证。learner 需把 `--rl-expected-algorithm-sha256` 写入 `miles_args.yeto_rl_expected_algorithm_sha256`（ALGO-CAP/主 agent）。
+- F3：colocated-serial 不执行 readiness 门，行为与 R0 相同；partitioned 模式的训练门不再按 rollout_batch_size 计组数（部分 rollout/过滤后组数不足时照常训练）。测试：`test_fewer_groups_than_rollout_batch_size_still_trains`。
+- F4：readiness 放行与 R0 发布清单、每组 token 检查基本重复，不作为独立证据；它是 overlap 模式将来需要的挂点。
+- F5：`rl/filtered_groups` 取 hook 元数据 `filtered`，`rl/aborted_groups` 单列，`rl/carried_over_groups` 未跟踪记 None（3.6/4.1）。
+- F6：拒绝 offload_train 注明为本方保守决定，非上游约束（上游 train.py:139-151 非 colocate 也会 offload）。
+- F7：full 模式或未请求 fixed-partition 时给 `--rl-standby-gpus` 显式报错，有测试。
+- selection：`ports_rejections(placement=...)` 在显式 `fixed-partition` 且 `rollout_num_gpus≥1` 时放行；learner/launcher/harness 的调用需传 `placement=args.rl_placement`（不在 INFRA 写入范围）。
+- 1.8 措辞按审查修正；2.3 将来若交否定结论须补流式 reward/多 minibatch 流水的细粒度论证。
