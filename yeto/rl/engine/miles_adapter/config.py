@@ -33,6 +33,7 @@ from ..algorithm import (
     STOCK_NONZERO_STD_FILTER,
     AlgorithmSpec,
 )
+from ..run_config import LR_SCHEDULE_FLAGS
 from .placement import PlacementRequest, check_placement_not_rewritten
 
 ROLLOUT_META_HOOK_PATH = (
@@ -92,11 +93,9 @@ ADAPTER_OWNED_FLAGS = frozenset(
         "--trainer-controller-addrs",
         "--eval-num-gpus",
         "--external-policy-sync-path",  # legacy fork only; the driver owns sync
-        # LR schedule is decided by RLRunConfig.algorithm.lr_schedule.
-        "--lr-decay-style",
-        "--lr-decay-iters",
-        "--lr-warmup-iters",
-        "--min-lr",
+        # LR schedule is decided by RLRunConfig.algorithm.lr_schedule
+        # (legacy rejects the same LR_SCHEDULE_FLAGS in learner.py).
+        *LR_SCHEDULE_FLAGS,
     }
 )
 # Parsed-namespace attributes that must stay off (post-normalization check).

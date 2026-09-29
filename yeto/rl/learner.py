@@ -172,6 +172,9 @@ def parse_args(argv=None):
         parser.error("LoRA mode requires --lora-r and --lora-targets")
     if (args.parameter_mode == "full") != (args.sync_preset == "dense-full"):
         parser.error("--parameter-mode full requires --sync-preset dense-full")
+    if not args.eval_only and not args.inner_lr > 0:
+        # A zero LR would only surface as the zero-LR invariant failing round 1.
+        parser.error(f"--inner-lr must be > 0 for a training run (got {args.inner_lr})")
     if args.rl_engine == "ports":
         try:
             _require_ports_supported(args)
@@ -1702,6 +1705,7 @@ def run_miles(
             target_modules=miles_targets,
             yeto_policy_sync=yeto_policy_sync,
         )
+        _reject_lr_schedule_overrides(extra_argv)
         miles_argv.extend(extra_argv)
         miles_args = _parse_miles_args(miles_argv)
 
@@ -1960,6 +1964,24 @@ def run_miles(
 
     asyncio.run(miles_train(miles_args))
     print(f"[rl] learner {args.learner_id} finalized")
+
+
+def _reject_lr_schedule_overrides(extra_argv: Sequence[str]) -> None:
+    """Legacy twin of the ports ``check_extra_argv`` LR-schedule check.
+
+    The schedule is decided by ``resolve_lr_schedule``; an extra-argv override
+    (e.g. warmup, or a decay style for decoupled) would silently diverge from
+    ports and could trip or defeat the zero-LR invariant.
+    """
+
+    from .engine.run_config import LR_SCHEDULE_FLAGS
+
+    for token in extra_argv:
+        flag = str(token).split("=", 1)[0]
+        if flag in LR_SCHEDULE_FLAGS:
+            raise ValueError(
+                f"{flag} is owned by yeto's LR schedule and cannot be overridden"
+            )
 
 
 def _configure_applied_lr(args, miles_args, rl_engine: str, *, dense_full: bool) -> bool:
