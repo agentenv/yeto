@@ -459,6 +459,7 @@ G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
     # mechanisms shown to take effect on the GPU are declared (coordinator
     # decision): clip_higher / dual_clip (clipfrac 0) and over_sampling (no
     # replacement) wait for a G1 that triggers them.
+    "token": {"loss_aggregations": frozenset({"token"})},
 }
 
 
