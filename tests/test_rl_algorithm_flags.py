@@ -81,7 +81,8 @@ def test_design_d3_flags_are_all_mapped():
         "--custom-reward-post-process-path", "--loss-type", "--custom-loss-function-path",
         "--dynamic-sampling-filter-path", "--over-sampling-batch-size",
     }
-    assert af.mapped_flags() == d3
+    # Follow-up changes add rows (rl-algo-seq-and-adv: --gamma), so a subset.
+    assert d3 <= af.mapped_flags()
 
 
 def test_objective_flags_are_adapter_owned():
@@ -123,7 +124,7 @@ def test_conflict_names_flag_and_both_values():
         mc.translate_run_config(make_config(), base, extra_argv=("--eps-clip-high", "0.3"))
 
 
-@pytest.mark.parametrize("flag", ["--gamma", "--lambd", "--use-routing-replay",
+@pytest.mark.parametrize("flag", ["--value-clip", "--lambd", "--use-routing-replay",
                                   "--rollout-temperature", "--partial-rollout"])
 def test_unmapped_objective_flag_rejected(flag):
     argv = [flag] if flag in ("--use-routing-replay", "--partial-rollout") else [flag, "0.9"]
