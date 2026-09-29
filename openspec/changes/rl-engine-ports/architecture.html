@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>yeto RL 最终架构：rl-engine-ports + rl-infra-spec</title>
+<style>
+  :root{--bg:#0f1115;--card:#171a21;--line:#2a2f3a;--fg:#e6e8ee;--mute:#9aa3b2;
+    --new:#3fb68b;--mod:#f0a030;--del:#e5534b;--same:#5b6372;--plan:#a78bfa}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif}
+  main{max-width:1240px;margin:0 auto;padding:28px 24px 80px}
+  h1{font-size:23px;margin:0 0 4px} h2{font-size:18px;margin:40px 0 12px;border-left:4px solid var(--new);padding-left:10px}
+  h3{font-size:14px;margin:0 0 6px}
+  .sub,.mute{color:var(--mute);font-size:12.5px}
+  code{font:12px ui-monospace,Menlo,monospace;background:#232834;padding:1px 5px;border-radius:4px}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;margin:12px 0;font-size:12.5px;color:var(--mute)}
+  .sw{display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+  /* boxes */
+  .b{border:1.5px solid var(--same);border-radius:8px;padding:8px 10px;background:#1b1f27;position:relative}
+  .b.new{border-color:var(--new);background:#132a22}
+  .b.mod{border-color:var(--mod);background:#2b2214}
+  .b.del{border-color:var(--del);background:#2a1616;opacity:.85}
+  .b.del h3,.b.del .strike{text-decoration:line-through}
+  .b.plan{border:1.5px dashed var(--plan);background:#1e1a2e}
+  .tag{position:absolute;top:-9px;right:8px;font-size:10.5px;font-weight:700;padding:0 6px;border-radius:8px;color:#111}
+  .tag.new{background:var(--new)} .tag.mod{background:var(--mod)} .tag.del{background:var(--del);color:#fff} .tag.plan{background:var(--plan)} .tag.same{background:var(--same);color:#eee}
+  .row{display:flex;gap:12px;align-items:stretch} .row>*{flex:1}
+  .col{display:flex;flex-direction:column;gap:10px}
+  .arrow{text-align:center;color:var(--mute);font-size:12px;line-height:1.2;margin:4px 0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .verbs{font:11.5px ui-monospace,Menlo,monospace;margin-top:4px}
+  .v-r0{color:#7ee0b5} .v-e{color:var(--plan)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mute);font-weight:500}
+  .pill{display:inline-block;font-size:11px;font-weight:700;padding:0 7px;border-radius:9px;color:#111}
+  .p-new{background:var(--new)} .p-mod{background:var(--mod)} .p-del{background:var(--del);color:#fff} .p-plan{background:var(--plan)} .p-same{background:var(--same);color:#eee}
+  .timeline{display:flex;gap:0;overflow-x:auto}
+  .tl{flex:1;min-width:150px;padding:10px;border-top:3px solid var(--line);position:relative;font-size:12.5px}
+  .tl::before{content:"";position:absolute;top:-8px;left:10px;width:13px;height:13px;border-radius:50%;background:var(--line)}
+  .tl.new{border-color:var(--new)} .tl.new::before{background:var(--new)}
+  .tl.plan{border-color:var(--plan)} .tl.plan::before{background:var(--plan)}
+  .tl.mod{border-color:var(--mod)} .tl.mod::before{background:var(--mod)}
+  .warn{border-left:3px solid var(--mod);padding:6px 10px;background:#2b2214;border-radius:4px;font-size:12.5px}
+  pre{font:12px ui-monospace,Menlo,monospace;background:#12151b;border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;line-height:1.45}
+  .hl-n{color:#7ee0b5;font-weight:700} .hl-m{color:#f6c36b;font-weight:700} .hl-d{color:#ff8a82;text-decoration:line-through} .hl-p{color:#c4b5fd;font-weight:700}
+</style>
+</head>
+<body><main>
+
+<h1>yeto RL 最终架构（两份 spec 完成后）</h1>
+<div class="sub">
+  <code>rl-engine-ports</code>（R0：换底座，已写入）＋ <code>rl-infra-spec</code>（E0–E3：岛内弹性，<b style="color:var(--mod)">修订待确认</b>）。
+  所有对比都以当前 main 为基线：<code>agentenv/miles@e2ad83d8</code> 加 bundle，<code>agentenv/sglang@e1b57eb</code>，Miles 的 <code>train.py</code> 持有训练循环。
+</div>
+<div class="legend">
+  <span><span class="sw" style="background:var(--new)"></span>新增（R0）</span>
+  <span><span class="sw" style="background:var(--mod)"></span>修改</span>
+  <span><span class="sw" style="background:var(--del)"></span>R0 结束时退役、删除</span>
+  <span><span class="sw" style="background:var(--same)"></span>不变</span>
+  <span><span class="sw" style="border:1.5px dashed var(--plan)"></span>rl-infra-spec 规划（E0–E3，R0 只预留）</span>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. 前后对比：一个 learner island 的内部结构</h2>
+<div class="two">
+  <div class="card">
+    <h3>现在（legacy）</h3>
+    <div class="col">
+      <div class="b"><span class="tag same">不变</span><h3>Rust syncer</h3><div class="mute">DiLoCo 外层同步，协议 v4</div></div>
+      <div class="arrow">TCP ⇅</div>
+      <div class="b del"><span class="tag del">退役</span><h3>yeto/rl/learner.py → run_miles</h3>
+        <div class="strike mute">build_miles_argv 约 600 行 → asyncio.run(miles train.py)</div></div>
+      <div class="arrow">钩子 ↓</div>
+      <div class="b del"><span class="tag del">退役</span><h3>MilesPolicySync（--external-policy-sync-path）</h3>
+        <div class="strike mute">initialize / after_local_train / after_inference_publication / finalize</div></div>
+      <div class="arrow">↓ 循环在 Miles 手里</div>
+      <div class="b del"><span class="tag del">退役</span><h3>agentenv/miles@e2ad83d8 + bundle</h3>
+        <div class="strike mute">fork 点 07-26，落后 upstream 1070 个提交；31 个 yeto 专属提交；train.py 约 450 行差异；fork 独有的 trainable_state.py</div></div>
+      <div class="b del"><span class="tag del">退役</span><h3>agentenv/sglang@e1b57eb</h3><div class="strike mute">v0.5.16 + 5 个补丁</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>R0 + E 之后（ports）</h3>
+    <div class="col">
+      <div class="b"><span class="tag same">不变</span><h3>Rust syncer</h3><div class="mute">协议和合并逻辑都不改</div></div>
+      <div class="arrow">TCP ⇅</div>
+      <div class="b"><span class="tag same">不变</span><h3>同步 bridge：strict-avg / decoupled</h3><div class="mute">core.py、bridge.py、decoupled.py 的语义保持不变，只把调用方从 Miles 钩子换成 yeto driver</div></div>
+      <div class="arrow">安全边界调用 ↓</div>
+      <div class="row">
+        <div class="b plan"><span class="tag plan">E 规划</span><h3>IslandController</h3><div class="mute">决策、收益与成本、护栏（问 bridge 能否暂停）、journal。<b>位于 yeto 侧，每个 island 一份</b></div></div>
+        <div class="b new"><span class="tag new">新增</span><h3>IslandDriver</h3><div class="mute">yeto 持有循环。R0 只有 colocated-serial；E0 起增加 partitioned-serial</div></div>
+      </div>
+      <div class="arrow">只通过端口 ↓（K1–K5）</div>
+      <div class="b new"><span class="tag new">新增</span><h3>端口层 yeto/rl/engine/ports.py</h3><div class="mute">RolloutPool · TrainerGroup · PolicyState · Publisher · Placement · AlgorithmSpec · EngineCapabilities</div></div>
+      <div class="arrow">↓</div>
+      <div class="b new"><span class="tag new">新增</span><h3>MilesAdapter（yeto/rl/engine/miles_adapter/）</h3><div class="mute">把 Miles 当库调用：create_rollout_components / create_training_models / update_weights。<b>cell 只在这一层内部</b>，强制单 cell，不启用 FT</div></div>
+      <div class="arrow">↓</div>
+      <div class="row">
+        <div class="b new"><span class="tag new">新增</span><h3>michaellchung/miles<br><small>yeto/ports</small></h3><div class="mute">基于 9e4260d，加 run_plugin 等少量提交，不用 bundle</div></div>
+        <div class="b new"><span class="tag new">新增</span><h3>michaellchung/sglang<br><small>yeto/ports</small></h3><div class="mute">基于 sglang-miles（v0.5.20），加 5 个移植补丁</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. 端口与动词：R0 实现的部分与 E 阶段新增的部分</h2>
+<div class="card">
+<table>
+<tr><th>端口</th><th>R0 实现的动词（<span class="v-r0">绿</span>）／ E 阶段新增的动词（<span class="v-e">紫</span>）</th><th>返回类型</th><th>MilesAdapter 内部实现</th></tr>
+<tr><td><b>RolloutPool</b></td><td class="verbs"><span class="v-r0">generate(spec, policy) → RolloutBatchHandle · abort()</span><br><span class="v-e">E1: add_engines / remove_engines / drain</span></td><td>句柄（K1：数据面不经过 yeto）</td><td>inference_controller + rollout_executor；元数据由 --rollout-all-samples-process-path 在 rollout 进程内提取</td></tr>
+<tr><td><b>TrainerGroup</b></td><td class="verbs"><span class="v-r0">train_step(handle, algo) · onload · offload</span><br><span class="v-e">E2: save_cut / restore_cut · E3: rebuild(plan)</span></td><td><code>LocalStepReceipt</code>（K3）</td><td>actor_model（单 cell 的 TrainGroup）</td></tr>
+<tr><td><b>PolicyState</b></td><td class="verbs"><span class="v-r0">export() · apply(state, reset_optimizer)</span></td><td><code>TrainableState</code>（K2：LoRA / 全参 / 分片布局）</td><td>通过 <b>run_plugin</b> 在每个 rank 的 actor 内执行 yeto 的 state_plugin；带 #64 梯度流不变量</td></tr>
+<tr><td><b>Publisher</b></td><td class="verbs"><span class="v-r0">publish(policy) → manifest</span><br><span class="v-e">E1: publish(policy, members)</span></td><td><code>InferencePublicationManifest</code> + 成员集合（K3）</td><td>miles update_weights + engine 权重 checksum；policy token 也在这里写入</td></tr>
+<tr><td><b>Placement</b></td><td class="verbs"><span class="v-r0">describe()：共置 / 启动时固定分区</span><br><span class="v-e">E1–E3: reconfigure(plan, epoch)</span></td><td>角色 → GPU 映射（K4）</td><td>create_placement_groups 结果的只读描述，并检测参数规范化是否改写了放置</td></tr>
+<tr><td><b>AlgorithmSpec</b></td><td class="verbs"><span class="v-r0">GRPO + 有界非零方差过滤，规范化后取 SHA256</span><br><span class="v-e">后续：自定义 loss / advantage / off-policy 修正</span></td><td>冻结数据类 + hash</td><td>翻译成 --advantage-estimator / --custom-loss-function-path / --dynamic-sampling-filter-path</td></tr>
+<tr><td><b>EngineCapabilities</b></td><td class="verbs"><span class="v-r0">describe_capabilities()，不支持即拒绝启动</span></td><td>与 <b>#66</b> 的 capability 格式一致（K5）</td><td>布局、放置、算法、执行模式、源码指纹</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. 一轮 colocated-serial 循环（R0）</h2>
+<pre>
+ <span class="hl-n">IslandDriver</span>                               旧路径对应位置（<span class="hl-d">删除</span>）
+ ------------------------------------------------------------------------------
+ 1 <span class="hl-n">RolloutPool.generate(policy v)</span> -> handle      <span class="hl-d">miles train.py: rollout_executor.get</span>
+   校验每个 group 的 policy token == v (元数据)
+ 2 offload rollout / onload trainer            (时序照抄 upstream train.py 的串行分支)
+ 3 <span class="hl-n">TrainerGroup.train_step(handle, algo)</span>        <span class="hl-d">miles train.py: actor_model.train</span>
+   -> LocalStepReceipt ; <span class="hl-n">检查 grad_norm 不变量 (#64)</span>
+ 4 安全边界: bridge (strict / decoupled)        <span class="hl-d">MilesPolicySync.after_local_train</span>
+     <span class="hl-n">PolicyState.export()</span> -> PUSH / 等 BCAST
+     <span class="hl-n">PolicyState.apply(state, reset?)</span>             <span class="hl-d">actor_model.apply_trainable_state (fork 独有)</span>
+ 5 offload trainer / onload rollout
+ 6 <span class="hl-n">Publisher.publish(policy v+1)</span> -> manifest    <span class="hl-d">miles update_weights + engine.update_weight_version</span>
+   拿到完整清单后才进入下一轮
+ <span class="hl-p">[E 阶段] 此处是 IslandController 的安全点: 若有已批准的重配置 -> journal -> 端口动词 -> 校验 -> commit epoch</span>
+</pre>
+
+<!-- ============================================================ -->
+<h2>4. 版本与源码来源</h2>
+<div class="two">
+<div class="card">
+<pre>
+ radixark/miles@9e4260d (upstream)
+   |
+   +-- <span class="hl-n">michaellchung/miles</span>
+         main       = 上游镜像
+         <span class="hl-n">yeto/ports</span> = 9e4260d
+                      + <span class="hl-n">run_plugin</span> (约 20 行, 同时 PR 给 upstream)
+                      + 按需移植: 端口隔离 / TITO Qwen3.8
+                      + 等价性实验中复现到问题才移植的 LoRA 修补
+                      -> <span class="hl-n">MILES_NEXT_COMMIT</span>
+
+ sgl-project/sglang : sglang-miles (v0.5.20)
+   |
+   +-- <span class="hl-n">michaellchung/sglang</span> (待创建, 任务 0.3)
+         <span class="hl-n">yeto/ports</span> = 基底
+                      + b34df47 abort 时释放 LoRA
+                      + <span class="hl-m">95d4d69 tensor LoRA 请求 (按新 miles 格式重新对齐)</span>
+                      + 8db3711 / c2cb40a 多 bucket payload
+                      + e1b57eb TMS 落盘
+                      -> <span class="hl-n">SGLANG_NEXT_COMMIT</span>
+</pre>
+</div>
+<div class="card">
+<h3>yeto/rl/__init__.py</h3>
+<pre>
+ <span class="hl-d">MILES_REPOSITORY  = agentenv/miles</span>       (legacy, R0 结束时删除)
+ <span class="hl-d">MILES_BASE_COMMIT / MILES_COMMIT</span>
+ <span class="hl-d">MILES_BUNDLE_PATH / _SHA256</span>
+ <span class="hl-d">SGLANG_REPOSITORY = agentenv/sglang</span>
+ <span class="hl-n">MILES_NEXT_REPOSITORY  = michaellchung/miles</span>
+ <span class="hl-n">MILES_NEXT_COMMIT / MILES_NEXT_IMAGE</span>
+ <span class="hl-n">SGLANG_NEXT_REPOSITORY = michaellchung/sglang</span>
+ <span class="hl-n">SGLANG_NEXT_COMMIT</span>
+</pre>
+<h3>远端准备（launcher.py / ssh_harness.py）</h3>
+<pre>
+ --rl-engine legacy : clone agentenv -> fetch base -> <span class="hl-d">bundle</span> -> checkout
+ <span class="hl-n">--rl-engine ports  : fetch michaellchung/* 固定 commit -> 校验 origin/commit/干净</span>
+ <span class="hl-m">verify_miles_revision(expected=常量组)</span>  两条路径共用
+</pre>
+<div class="mute">SGLang 的调用关系：yeto 固定并安装源码，Miles 负责启动 engine 和发请求。原来 yeto 直接调 <code>engine.update_weight_version</code>，在 ports 路径下<b style="color:var(--mod)">改由 Publisher 负责</b>。DSV4 的 sitecustomize patch 只保留在 legacy 路径。</div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. 路线与在途 PR</h2>
+<div class="timeline">
+  <div class="tl mod"><b>0. PR</b><br>合入 #64 #65 #59<br>关闭 #43<br>建立迁移清单</div>
+  <div class="tl new"><b>1. 固定版本</b><br>两个 fork 的 yeto/ports 分支<br>SGLang 5 个补丁<br>run_plugin</div>
+  <div class="tl new"><b>2–3. 端口与适配层</b><br>ports.py · TrainableState<br>配置拆分（#59 #65）<br>MilesAdapter</div>
+  <div class="tl new"><b>4–5. driver 与开关</b><br>strict / decoupled 接入<br>--rl-engine（默认 legacy）</div>
+  <div class="tl new"><b>6. 等价性</b><br>strict、decoupled 分别对照<br>容差在实验前声明</div>
+  <div class="tl mod"><b>7. 切换与退役</b><br>检查清单 → 默认 ports<br>删除 legacy、bundle、旧 pin</div>
+  <div class="tl plan"><b>E0</b><br>固定分区基线<br>partitioned-serial</div>
+  <div class="tl plan"><b>E1</b><br>rollout 增减<br>不需要 Cut</div>
+  <div class="tl plan"><b>E2</b><br>同形恢复<br>Cut + journal<br>修改 MILES_RL.md</div>
+  <div class="tl plan"><b>E3</b><br>trainer 改 DP<br>GPU 在训推角色间转移</div>
+</div>
+<div class="card" style="margin-top:12px">
+<table>
+<tr><th>PR</th><th>处理</th><th>在 ports 路径的落点</th></tr>
+<tr><td>#64 梯度 hook</td><td><span class="pill p-mod">先合</span></td><td>PolicyState 实现约束（不能跨 dtype 替换 Parameter.data）+ CPU 测试 + driver 的 grad_norm 检查</td></tr>
+<tr><td>#65 GDN recipe</td><td><span class="pill p-mod">先合</span></td><td>引擎无关配置层</td></tr>
+<tr><td>#59 数据列名</td><td><span class="pill p-mod">先合</span></td><td>引擎无关配置层</td></tr>
+<tr><td>#66 弹性基准</td><td><span class="pill p-same">随时</span></td><td>EngineCapabilities 的格式基准；E 阶段的测量工具</td></tr>
+<tr><td>#62 #63 sky/ray 环境</td><td><span class="pill p-same">随时</span></td><td>与任务 1.5 的准备脚本相邻，合入后复核快照测试</td></tr>
+<tr><td>#43（他人，已失效）</td><td><span class="pill p-del">关闭</span></td><td>—</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. rl-infra-spec 待确认的修订（尚未写入）</h2>
+<div class="warn">以下是上一轮列出的修订方案，你确认后才会写入 rl-infra-spec。</div>
+<div class="card" style="margin-top:10px">
+<table>
+<tr><th>位置</th><th>原文</th><th>改为</th></tr>
+<tr><td>全文</td><td><span class="hl-d">B0 / B1 / B2 / B3</span></td><td><span class="hl-m">E0 / E1 / E2 / E3</span>（避免与 B-2 接口粒度混淆）</td></tr>
+<tr><td>design D1</td><td><span class="hl-d">Miles: mode-aware driver + safe-point executor；miles/ray/reconfiguration.py 的 IslandReconfigurationExecutor；rebind</span></td><td><span class="hl-m">yeto 侧的 IslandController（决策、护栏、journal）+ IslandDriver（执行）；Miles 只通过端口新增动词提供机制；不再需要 rebind</span></td></tr>
+<tr><td>design（新增）</td><td>—</td><td><span class="hl-m">D1b cell 规则（只在适配层内部、不用 FT）；D1c 能力声明与 #66 一致</span></td></tr>
+<tr><td>proposal / design Risks</td><td><span class="hl-d">pin e2ad83d8；更新 fork/bundle/hash；"不全量替换 fork"</span></td><td><span class="hl-m">以 rl-engine-ports 为前提，版本固定见其 D6/D11</span></td></tr>
+<tr><td>tasks 2.2 等</td><td><span class="hl-d">[M] 建立 mode-aware driver</span></td><td><span class="hl-m">[Y] 在 IslandDriver 上增加 partitioned-serial；机制类任务改为"端口动词 + MilesAdapter"</span></td></tr>
+<tr><td>引用</td><td><span class="hl-d">source-investigation.md（文件不存在，5 处）</span></td><td><span class="hl-m">改为引用 rl-engine-ports design 的 Context</span></td></tr>
+<tr><td>tasks（新增）</td><td>—</td><td><span class="hl-m">E2 开工时修改 MILES_RL.md："允许岛内 yeto 侧控制器，不做跨岛控制器，也不做通用恢复框架"</span></td></tr>
+<tr><td>stage-topologies</td><td><span class="hl-d">[Miles mode-aware driver]</span></td><td><span class="hl-m">[Yeto IslandDriver] → [Engine ports] → [MilesAdapter]</span></td></tr>
+<tr><td>specs</td><td>空</td><td><span class="hl-p">单独创建 island-elastic-reconfiguration/spec.md（创建前再确认）</span></td></tr>
+</table>
+</div>
+
+</main></body></html>

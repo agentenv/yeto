@@ -1,0 +1,42 @@
+[
+  {
+    "action_tokens_per_s": 133.6704762233022,
+    "arm": "yeto-federated-m2",
+    "artifact_ready_s": 359.3736997679998,
+    "artifact_s": 8.787681642999814,
+    "delta_vs_native": null,
+    "delta_vs_single": null,
+    "delta_vs_strict": null,
+    "dynamic_filter_dropped_groups": 0.0,
+    "dynamic_filter_generated_groups": 24.0,
+    "dynamic_filter_replacement_attempts": 0.0,
+    "estimated_cost": null,
+    "eval_wall_s": 105.029172002,
+    "finalization_s": 0.0,
+    "fragment_payload_bytes_received": null,
+    "fragment_payload_bytes_sent": null,
+    "fragment_payload_traffic_bytes": null,
+    "gpu_active_fraction": 0.23189861697939296,
+    "gpu_active_seconds": 162.60082547099978,
+    "gpu_hours": 0.22394478007000002,
+    "hook_s": 0.0,
+    "m": 2,
+    "mean_bcast_queue_s": null,
+    "mean_gpu_utilization": 10.275884223506095,
+    "mean_kl": 0.0006051830908594032,
+    "mean_pull_to_push_s": null,
+    "mean_realized_h": null,
+    "mean_sync_ms": 29486.333333333332,
+    "min_gpu_utilization": 9.68989494609788,
+    "pass_at_k": {
+      "1": 0.75
+    },
+    "reward_mean": 0.75,
+    "reward_std": 0.0,
+    "runs": 1,
+    "sync_bytes_sent": 242221344.0,
+    "total_gpus": 2,
+    "train_wall_s": 350.586018125,
+    "trajectories_per_s": 0.5476544701550053
+  }
+]

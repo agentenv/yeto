@@ -1,0 +1,37 @@
+{
+  "adapter_path": "/work/out/decoupled2/work/seed-17/yeto-decoupled-m2/adapter",
+  "apply_chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "device": "cuda",
+  "eval_path": "/work/out/decoupled2/work/data/m2/eval.jsonl",
+  "eval_sha256": "e92c2c5067ab7064dccc3f7401326c24c4e845c97245d1f50168f2c164034c1d",
+  "max_response_len": 384,
+  "miles_root": "/opt/miles-next",
+  "model_path": "/work/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+  "pass_ks": [
+    1
+  ],
+  "pass_threshold": 0.0,
+  "result_path": "/work/out/decoupled2/work/seed-17/yeto-decoupled-m2/eval.json",
+  "reward_arguments": {
+    "eval_reward_key": null,
+    "group_rm": false,
+    "n_samples_per_prompt": 8,
+    "reward_function": "gsm8k_reward:score",
+    "reward_key": null,
+    "rm_type": null,
+    "rollout_batch_size": 4,
+    "rollout_max_response_len": 384,
+    "seed": 17
+  },
+  "reward_function": "gsm8k_reward:score",
+  "reward_sha256": "743d433cc9dcacc518bf023bcef28b2e0ef46665b5363027e2150bee2d0ec375",
+  "samples_path": "/work/out/decoupled2/work/seed-17/yeto-decoupled-m2/eval-samples.jsonl",
+  "samples_per_prompt": 1,
+  "seed": 100017,
+  "seq_len": 1024,
+  "temperature": 1.0,
+  "top_p": 1.0,
+  "trust_remote_code": true
+}
