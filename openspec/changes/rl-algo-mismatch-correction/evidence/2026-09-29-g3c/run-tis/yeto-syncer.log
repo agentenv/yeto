@@ -1,0 +1,28 @@
+2026-09-29T19:54:45.200667Z  INFO yeto_syncer::server: syncer listening port=29410 semantic_profile_sha256="1e3a092fbeb8c06c79dcc3d771088ab76debcdc692d0507904484411c0864cd6" require_profile_binding=false
+2026-09-29T19:54:45.200743Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2
+2026-09-29T19:58:28.393178Z  INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=1 generation=2072009425030167468 num_streams=4
+2026-09-29T19:58:28.393265Z  INFO yeto_syncer::server: initialized global state iso_backend=scalar
+2026-09-29T19:59:45.288452Z  INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=0 generation=15620651954206707447 num_streams=4
+2026-09-29T19:59:46.025293Z  INFO yeto_syncer::server: global parameters initialized
+2026-09-29T19:59:46.179864Z  INFO yeto_syncer::server: checkpoint committed step=0 path=/tmp/algo1a/g3home/yeto-output/yeto-state.ckpt
+2026-09-29T20:04:41.479499Z  INFO yeto_syncer::server: checkpoint committed step=1 path=/tmp/algo1a/g3home/yeto-output/yeto-state.ckpt
+2026-09-29T20:04:41.674295Z  INFO yeto_syncer::server: outer step step=1 fragment=0 responders=[Member { learner_id: 0, generation: 15620651954206707447 }, Member { learner_id: 1, generation: 2072009425030167468 }] gnorm="0.0230" ms=295308
+2026-09-29T20:06:11.879061Z  INFO yeto_syncer::server: checkpoint committed step=2 path=/tmp/algo1a/g3home/yeto-output/yeto-state.ckpt
+2026-09-29T20:06:11.991425Z  INFO yeto_syncer::server: outer step step=2 fragment=0 responders=[Member { learner_id: 0, generation: 15620651954206707447 }, Member { learner_id: 1, generation: 2072009425030167468 }] gnorm="0.0176" ms=90300
+2026-09-29T20:07:34.070605Z  INFO yeto_syncer::server: checkpoint committed step=3 path=/tmp/algo1a/g3home/yeto-output/yeto-state.ckpt
+2026-09-29T20:07:34.070646Z  INFO yeto_syncer::server: outer step step=3 fragment=0 responders=[Member { learner_id: 0, generation: 15620651954206707447 }, Member { learner_id: 1, generation: 2072009425030167468 }] gnorm="0.0089" ms=82067
+2026-09-29T20:08:19.063709Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=0 generation=15620651954206707447 step=3 remaining=1
+2026-09-29T20:08:19.218553Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=13.53.217.83:22087
+2026-09-29T20:08:19.218583Z  WARN yeto_syncer::server: learner disconnected during finalization; waiting for reconnect learner_id=0 generation=15620651954206707447
+2026-09-29T20:08:19.222134Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=13.53.217.83:19479
+2026-09-29T20:08:19.222519Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=13.53.217.83:49490
+2026-09-29T20:08:19.222638Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=13.53.217.83:50241
+2026-09-29T20:08:19.222762Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=13.53.217.83:18341
+2026-09-29T20:08:22.898286Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=1 generation=2072009425030167468 step=3 remaining=0
+2026-09-29T20:08:22.898334Z  INFO yeto_syncer::server: all learners acknowledged final cut learners=2
+2026-09-29T20:08:22.898345Z  INFO yeto_syncer::server: training complete after 3 outer steps
+2026-09-29T20:08:23.018240Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=192.151.121.59:27594
+2026-09-29T20:08:23.019373Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=192.151.121.59:26215
+2026-09-29T20:08:23.019396Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=192.151.121.59:60788
+2026-09-29T20:08:23.019608Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=192.151.121.59:52432
+2026-09-29T20:08:23.019862Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=192.151.121.59:32737

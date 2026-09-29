@@ -1154,10 +1154,12 @@ Validation levels: "CPU" means numeric tests against the Miles sources at
 `MILES_NEXT_COMMIT` (`tests/test_rl_mismatch_observe.py`, run in miles-next-venv)
 plus spec, translation and rejection tests (`tests/test_rl_mismatch_correction.py`).
 Single-GPU smoke (G1, Modal H100, 3 rounds, Qwen3-0.6B LoRA) passed for all
-mechanisms except `opsm_rollout`. The Miles adapter declares `tis`, `opsm` and
-`opsm_trainer` (`corrections: ["none", "opsm", "opsm_trainer", "tis"]`); the
-declaration is pending re-verification through the `yeto launch
---rl-single-island-no-sync` entry. Any other mechanism fails at startup with a
+mechanisms except `opsm_rollout`. On the integration branch the Miles adapter declares
+`none`, `tis`, `opsm`, `opsm_trainer`, `mismatch_observe`, `icepop` and
+`mis_mask`. Each was verified through `yeto launch --rl-single-island-no-sync`
+and, for the correcting mechanisms, by a run that made the branch fire (tasks
+7.2). `opsm` is the OPSM dimension and admits no source by itself;
+`opsm_rollout` and `mis` (truncate/clip) are not declared. Any other mechanism fails at startup with a
 list of the supported ones. For a single-island smoke only,
 `--rl-single-island-no-sync --rl-allow-unverified-mechanism corrections:<name>`
 (and `features:<name>` where needed) admits them. The two-island run (G3) has not
