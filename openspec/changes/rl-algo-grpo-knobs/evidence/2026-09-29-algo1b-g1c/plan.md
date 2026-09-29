@@ -36,3 +36,4 @@
 - **token：第 1 步 grad_norm 与 baseline 逐位相同**（0.6349465847015381，其后几步也都相同）。按预登记判据，结论为"未能证明生效"，不声明。这被报告为**疑似缺陷**，排查线索：`--calculate-per-token-loss` 已送到 Miles（参数表为 True）；响应长度不等时，从数学上看两种聚合的梯度应该不同。因此怀疑 per-token 归一化没有作用到 LoRA/bridge 路径的反向。需要确认两处：训练 actor 中 Megatron 的模型 config 里 `calculate_per_token_loss` 是否为 True（`model_provider.py:49` 是否作用到了 bridge 构建的模型）；以及 `loss.py:203-220` 返回的 (loss, num_tokens) 在 schedule 中实际怎样缩放。
 - **no_grpo_std_normalization：生效。** 第 1 步 grad_norm 为 0.2428，baseline 为 0.6349，两者不相等。奖励是 0/1 二值，每组 8 个样本，所以组内 std 不可能为 1。第 1 批中 75% 的组不是全 1（all_one 占 25%，all_zero 占 0%），也就是说存在 std 在 0 和 1 之间的组，除以 std 与不除以 std 会得到不同结果。判据满足，可以声明。
 - 峰值显存：baseline 38142、token 36814、no_std 38174 MiB。
+- **补充（单独提交）**：analyze.py 加入了 no_std 并实现第 1 步配对判据，只是把脚本补全，判据没有改。重新生成的 g1c_report.json 显示：no_std 的 pass=True、paired_valid=True、effective=True；token 的 effective=False。no_std 的声明据此确认。

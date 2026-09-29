@@ -73,7 +73,10 @@
   },
   "metrics_ok": true,
   "extra": {},
-  "pass": true
+  "pass": true,
+  "paired_valid": true,
+  "step1_grad_norm": 0.6349465847015381,
+  "effective": false
  },
  "drgrpo": {
   "present": false
@@ -89,5 +92,38 @@
  },
  "overlong_penalty": {
   "present": false
+ },
+ "no_std": {
+  "present": true,
+  "mechanism": "no_std",
+  "rc": 0,
+  "seconds": 367.4,
+  "peak_gpu_mib": 38174,
+  "rounds": 3,
+  "round_train_seconds": [
+   21.02262659500002,
+   15.005592696999884,
+   15.798964591000185
+  ],
+  "round_rollout_seconds": [
+   13.290794174999974,
+   8.424743937999892,
+   8.724454593000019
+  ],
+  "bad_lines": [],
+  "train_steps": 3,
+  "metrics": {
+   "grad_norm": [
+    0.24280406534671783,
+    0.16263224184513092,
+    0.12409628182649612
+   ]
+  },
+  "metrics_ok": true,
+  "extra": {},
+  "pass": true,
+  "paired_valid": true,
+  "step1_grad_norm": 0.24280406534671783,
+  "effective": true
  }
 }
