@@ -59,7 +59,7 @@
    - 实际存在的"离策略"来源只有两个：
      - (a) SGLang 和 Megatron 在同一权重下的数值差异，即训推不一致；
      - (b) 同一轮内多个 mini-batch 带来的 PPO 常规偏移。
-   - 我在第一轮 explore 说过"decoupled 下 TIS 是正确性问题"，**这个判断不成立，已撤回**。陈旧度要等到 rl-infra-spec 引入重叠或异步执行模式才会出现。
+   - 我在第一轮 explore 说过"decoupled 下 TIS 是正确性问题"，**这个判断不成立，已撤回**。当前所有执行模式的策略陈旧度都是 0；rl-infra-spec 不会通过资源调度开放陈旧度 >0，陈旧度 >0 的算法需要另立独立的算法契约 change（alignment.md A6）。
 
 6. **零梯度不变量是按 GRPO 写死的** [源码]：
    - `driver.py:355-370` 用 `any(g.reward_std > 0)` 判定"advantage 非零"，一旦 grad_norm 为 0 就让本轮失败。
@@ -167,7 +167,7 @@
 - **Asynchronous RLHF**（2410.18252）。
 - **SAPO-Gensyn**（2509.08721）：只共享 rollout 文本，0.5B 模型上累计奖励提升 94%，证据弱。
 
-这些工作对**当前串行 ports** 的直接适用性都很低，因为当前没有陈旧度。它们对 rl-infra-spec 以后的异步执行模式有参考价值。
+这些工作对**当前串行 ports** 的直接适用性都很低，因为当前没有陈旧度。它们对以后另立的陈旧度 >0 算法契约 change 有参考价值（rl-infra-spec 本身不开放陈旧度，alignment.md A6）。
 
 ---
 
@@ -219,7 +219,7 @@
 | `AlgorithmSpec` | 5 个字段、schema v1、规范化 JSON 的 SHA256（`algorithm.py`） | 缺 clip、聚合、KL 放置位置、修正方式、reward 后处理、loss 变体 |
 | 翻译 | 只输出 `--advantage-estimator`、`--kl-coef`、`--dynamic-sampling-filter-path`（`config.py:535, 550-553`） | 新字段需要映射，并把对应参数加入 `ADAPTER_OWNED_FLAGS` |
 | 能力 | `advantage_estimators`、`dynamic_sampling_filters`（`capabilities.py`） | 缺 loss、修正、reward 后处理、KL 模式等维度；`check()` 只比较 estimator 和 filter |
-| extra argv | 算法参数可以透传（§1.3） | 需要拒绝 |
+| extra argv | 算法参数可以透传（§1.3） | 已映射的吸收进 spec，冲突报错，未映射的影响目标参数拒绝（§8 第 3 条） |
 | 不变量 | 按 GRPO 判定（§1.6） | 需要由算法声明"期望有梯度"的判定条件 |
 | provenance | 事件里有哈希，导出文件里没有；外层身份不含算法（§1.7） | 导出时写入；岛之间做一致性校验 |
 | legacy | 不改（约束） | 新算法只走 ports |
@@ -296,7 +296,7 @@
 | 优化器状态 | 每轮 apply 时 **reset**（`bridges.py:185`），Adam 的一阶和二阶矩每轮重新开始 [源码] | 应用 fragment 时 **preserve**（`bridges.py:421, 498`），本地 Adam 矩继续作用在被外层改写过的权重上 [源码] |
 | 对算法的影响 | 依赖长时间优化器记忆的算法不适用，所列算法都不依赖。clip 系列的有效步长受每轮 warmup 或 bias correction 影响 [推断] | Adam 矩与权重错位，对所有算法的影响相同，不是某个算法特有的问题 [推断] |
 | 学习率 | 调度按 `policy_version × local_optimizer_steps` 计算，正常 | **已知问题：LR 衰减到 0**。修复在 `fix-decoupled-lr-schedule`，本分支不重复修。**在修复合入前，任何 decoupled 下的算法 A/B 实验都没有意义**，因为后半程没有更新 |
-| rollout 陈旧度 | 0，串行 | 0，串行。rl-infra-spec 以后若引入重叠，需要重新评估 |
+| rollout 陈旧度 | 0，串行 | 0，串行。`execution.max_policy_staleness` 固定为 0；rl-infra-spec 的重叠只在陈旧度 0 的契约内进行（alignment.md A1/A6） |
 | 组统计 | 组在单岛内生成（`--n-samples-per-prompt`），组内统计由本岛完成 | 同左 |
 | "全局"统计（REINFORCE++、GDPO 的 batch 白化、`--normalize-advantages`） | 只在岛内 DP 组；跨岛 all-reduce 会破坏"一个协议多个后端"，**建议 spec 明确规定为岛内语义** | 同左 |
 | 各岛有效样本数（动态采样、mask 类修正） | 外层对 delta 做等权平均，不按 token 数加权；样本少的岛权重偏大 [推断，需确认 syncer 的加权规则] | 同左 |
@@ -306,7 +306,7 @@
 ### 7.3 对异步和离策略修正的价值判断
 
 - **现在（串行 ports）**：TIS、IcePop 的价值取决于训推不一致有多大，**yeto 还没有这个数据**。应该先用只观测的方式量化（mismatch 指标：`train_rollout_kl`、`tis_abs`、`ess_ratio`），再决定是否默认开启修正。LoRA 路径与全参 MoE 的不一致程度可能差别很大 [推断]。
-- **以后（rl-infra-spec 的重叠或异步模式）**：Miles TIS 等价于截断版解耦 PPO（§2），AReaL 证明在陈旧度 η≤8 时基本无损 [论文]。所以现在把修正机制接进 spec，就是在为以后提前准备算法契约。
+- **以后（另立的陈旧度 >0 算法契约 change，不由 rl-infra-spec 开放）**：Miles TIS 等价于截断版解耦 PPO（§2），AReaL 证明在陈旧度 η≤8 时基本无损 [论文]。所以现在把修正机制接进 spec，就是在为以后提前准备算法契约。
 
 ---
 
@@ -318,26 +318,20 @@
    |-- rl-algo-grpo-knobs (P1)            clip-higher, dual-clip, token-agg, Dr.GRPO, KL-loss, entropy, overlong, over-sampling
    |-- rl-algo-seq-and-adv (P2)           GSPO, REINFORCE++(-baseline), MaxRL/MAPO/GDPO via yeto reward pipeline
    |-- rl-algo-loss-variants (P2, needs fork decision)  CISPO / SAPO-Qwen / GMPO
-   '-- deferred: critic family (PPO/VAPO/SAO/CompactionRL), OTB, GiGPO, ARPO, SAPO-Gensyn, async objective (with rl-infra-spec)
+   '-- deferred: critic family (PPO/VAPO/SAO/CompactionRL), OTB, GiGPO, ARPO, SAPO-Gensyn, async objective (own algorithm-contract change; not opened by rl-infra-spec)
 ```
 
-框架 change（`rl-algorithm-capabilities`）要回答的设计问题：
+框架 change（`rl-algorithm-capabilities`）的**已确认方案**（实现见 `yeto/rl/engine/algorithm.py`、`miles_adapter/algorithm_flags.py`，用法见 `docs/MILES_RL.md` 的 "Algorithm specs"）：
 
-1. **AlgorithmSpec v2 的结构**：用结构化字段，建议按 advantage、loss、kl、correction、sampling、plugins 分组。每个插件记录 dotted path 和源码 SHA256。默认值必须精确还原当前 GRPO 的 argv。
-2. **哈希兼容**：v1 规范化 JSON 的哈希保持不变，还是 schema 升级后换新哈希。见 §10 问题 1。
-3. **参数归属**：所有算法类 Miles 参数都归 adapter 所有，extra argv 一律拒绝。
-4. **能力声明**：在 `EngineCapabilities` 里按机制维度扩展，并与 #66 的 attestation 格式保持兼容（新增顶层字段，老的读取方会忽略）。
-5. **拒绝矩阵**：
-   - critic 类；
-   - `kl_coef>0` 加 grpo/gspo（见 §10 问题 2）；
-   - TIS 与 `use_rollout_logprobs` 同时开；
-   - `kl_coef` 与 `kl_loss_coef` 同时开；
-   - GSPO 没有显式 clip；
-   - MaxRL/MAPO 用于非二值奖励（奖励类型要声明）；
-   - 等等。
-6. **不变量**：由算法声明"是否期望非零梯度"，例如带 mask 的修正要结合 clipfrac 判断。
-7. **provenance**：算法哈希写进 `yeto_rl_provenance.json`；在岛握手时，或者作为外层 session 的契约身份，拒绝算法不一致的成员。这一点要与 syncer 协议协调，只动 ports 路径。
-8. **插件的运行位置**：yeto 插件跑在 Miles 进程里，要求镜像里能 import yeto（R0 的 run_plugin 机制已经这么做）。reward 后处理由 yeto 统一持有一个 `--custom-reward-post-process-path` 分派器，组合 overlong 塑形和 advantage 变换，并保持内置的多段 rollout_key 语义。
+1. **AlgorithmSpec v2 的结构**：按 advantage、loss、kl、correction、sampling、execution 分组的冻结数据类，外加 `entropy_coef` 与 `plugins`。每个插件记录 dotted path 和模块源码 SHA256，只允许 `yeto.`/`miles.` 命名空间。默认值精确还原当前 GRPO 的 argv（逐字节）。
+2. **哈希兼容（§10 问题 1 已定）**：v1 可表达时输出与 R0 逐字节相同的 v1 规范化 JSON，哈希不变；只有用到新字段才写 `yeto-rl-algorithm-spec-v2`。
+3. **参数归属：吸收取代一律拒绝**。映射表内的 Miles 算法参数出现在 extra argv 时被**吸收**进 spec（进入校验、能力检查和哈希，事件记录 `rl/algorithm_absorbed_flags`）；与 spec 取值不同时报冲突；影响训练目标但未映射的参数（清单由 upstream parser 测试锁定）拒绝。所有映射参数归 adapter 所有。
+4. **能力声明**：`EngineCapabilities` 按机制维度扩展（新增顶层字段，#66 的读取方忽略），另有 `execution`（critic、`max_policy_staleness`、rollout logprob）。**execution 与陈旧度**：算法的 `execution.max_policy_staleness` 固定为 0，>0 启动前拒绝；执行能力中的陈旧度由已认证的执行模式给出（serial-colocated、partitioned-serial 都是 0），`ExecutionProfile.max_policy_age ≤ spec.execution.max_policy_staleness`，算法契约身份即 spec 的规范化哈希（alignment.md A1/A6）。
+5. **KL 放置（§10 问题 2 已定为方案 a）**：`kl.placement ∈ {none, reward, loss}`。grpo/gspo 配 `reward` 且系数 >0 启动前拒绝并提示改用 `placement=loss`（`--use-kl-loss --kl-loss-coef --kl-loss-type`）；v1 `kl_coef` 解释为 `reward`（`0.0` 保持 R0 行为与哈希）；`none` 不输出 KL 参数、不加载 ref 模型；reward 与 loss 两种 KL 在结构上互斥。
+6. **拒绝矩阵**（启动前，报错给出替代配置）：critic 类（提示 legacy）；grpo/gspo 的 reward KL；TIS 与 `use_rollout_logprobs` 同时开；reward KL 与 loss KL 同时给出；GSPO 未显式给 clip；要求二值奖励的机制配非二值奖励（`advantage.reward_binary` 声明）；REINFORCE++ 系未开 `whiten`（upstream 断言）；陈旧度 >0。
+7. **不变量**：`AlgorithmSpec.expects_gradient()`，默认 GRPO 与 R0 相同；声明会屏蔽 token 的机制在 `masked_fraction == 1.0` 时不期望梯度，读不到屏蔽比例时沿用 R0。
+8. **provenance 与岛间一致**：launcher 下发预期哈希，每个岛在连接 bridge 之前核对，不一致写 `rl_algorithm_mismatch` 并退出；ports 导出记录 `algorithm_spec` 与 `algorithm_spec_sha256`。syncer 协议层校验留作后续加固。未验证机制放行（`--rl-allow-unverified-mechanism`）只限单岛，写入事件与来源记录，不进哈希。
+9. **插件的运行位置**：yeto 插件跑在 Miles 进程里，要求镜像里能 import yeto（R0 的 run_plugin 机制已经这么做）。reward 后处理由 yeto 统一持有一个 `--custom-reward-post-process-path` 分派器，组合 overlong 塑形和 advantage 变换，并保持内置的多段 rollout_key 语义。
 
 ---
 
@@ -346,7 +340,7 @@
 | 层级 | 证明什么 | 方法 | 需要 GPU |
 |---|---|---|---|
 | C1 规范化和哈希 | 默认 GRPO 的哈希和 argv 不变；新字段规范化稳定 | golden 哈希；`tests/test_rl_argv_snapshot.py` 逐字节比对 | 否 |
-| C2 翻译和归属 | 每个字段都映射到明确的 Miles 参数；extra argv 里的算法参数被拒绝 | 单测；在 `/home/michael/work/miles-next-venv` 里用 upstream `parse_args` 解析生成的 argv（R0 用过这个做法） | 否 |
+| C2 翻译和归属 | 每个字段都映射到明确的 Miles 参数；extra argv 里的已映射算法参数被吸收、冲突报错、未映射参数被拒绝 | 单测；在 `/home/michael/work/miles-next-venv` 里用 upstream `parse_args` 解析生成的 argv（R0 用过这个做法） | 否 |
 | C3 拒绝矩阵 | 不支持的组合在启动前被拒绝，并列出可选项 | 参数化单测，走 fake engine | 否 |
 | C4 插件数值 | reward 后处理和修正函数在 CPU 张量上的数值与论文公式一致；保持多段语义 | 纯 torch 的 CPU 单测，直接调用 Miles 的 `corrections.py` 和 `math_utils.py`（这两个不依赖 GPU，在 miles venv 里运行） | 否 |
 | C5 provenance 和成员一致性 | 导出文件含算法哈希；算法不同的岛被拒绝 | fake bridge 测试 | 否 |
@@ -361,13 +355,13 @@ mock 或 fake 测试只能证明 C1 到 C5，不能替代 G1 到 G4。
 
 ## 10. 未解决的问题及其影响
 
-1. **v1 哈希是否保持**：影响历史事件里的哈希能否继续对比。建议 v2 默认值序列化为 v1 的规范化 JSON，这样哈希不变；只有使用了新字段才写 v2。
+1. **v1 哈希是否保持**：**已定**（rl-algorithm-capabilities D2）：v1 可表达时序列化为 v1 的规范化 JSON，哈希不变；只有使用了新字段才写 v2。
 2. **`kl_coef` 加 GRPO 怎么处理**：
    - (a) 拒绝，并提示改用 KL loss；
    - (b) 保持现状，只输出警告；
    - (c) 自动映射到 KL loss。
 
-   (c) 会改变已有配置的行为，不建议。R0 的约束是 legacy 不变，但 ports 可以拒绝。需要你决定。
+   (c) 会改变已有配置的行为，不建议。**已定为 (a)**（rl-algorithm-capabilities D5）：ports 上拒绝并提示改用 `kl.placement=loss`；legacy 不变。
 3. **CISPO、SAPO-Qwen、GMPO 走 custom loss 还是改 fork**：
    - custom loss 要在 yeto 里重写 TIS、OPSM、CP、KL、entropy，维护成本高；
    - 改 fork 是在 `compute_policy_loss` 里加一个 variant 分支，大约几十行，但需要你同意，而且只能在 `yeto/ports` 分支上改。
