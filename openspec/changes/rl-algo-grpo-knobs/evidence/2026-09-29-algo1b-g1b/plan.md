@@ -87,3 +87,8 @@ run A 第 5 次：生效判据满足（第 2 步 pg_clipfrac 0.105/0.105/0.111�
 - **生效判据（事件中 dynamic_filter_dropped_groups 或 dynamic_filter_replacement_attempts 至少一轮 > 0）：不满足**，5 轮都是 0/0，generated 也是 0。另外，判据"rc=0"字面上也不满足。结论：**未能证明 over_sampling 生效，不声明。**
 - 补充观察（不作为判定依据，未预登记）：Miles 的 rollout 指标中，`raw_reward_unfiltered`（0.6125/0.7125/0.875/0.675/0.8125）与训练所用的 `raw_reward`（0.64/0.77/0.84/0.72/0.77）每轮都不相同，说明生成的样本比训练用的多，超采样或过滤在 Miles 侧可能起了作用。与此同时 yeto 的 `rl_local_round.dynamic_filter_*` 在 ports 路径上可能根本没有接线（generated 恒为 0）。这属于接口缺口（INFRA/P0），不能据此补判。
 - 按 R1 规定，run C 本可以再跑一次；但预登记的生效判据依赖的字段在 ports 路径上始终为 0，重跑不会改变结论，所以**不重跑**。需要先由 INFRA/P0 在 ports 路径接好 `dynamic_filter_*`（或另立判据的新计划）。
+
+## run A-r1 结论（按 R1 只重跑这一次；prefix algo1b-g1b-a-r1，19:56:12–20:06:00Z，app 已 stopped）
+- 运行成功（按 R1 判据）：launcher 退出码 2，日志中有"not fetchable over ssh"那行提示，事件磁带中有 `rl_learner_finalized`，job 状态为 SUCCEEDED。没有 invariant 错误。
+- **生效判据满足**：3 轮 × 2 步，每轮第 2 步的 pg_clipfrac 为 0.1046/0.1107/0.1046，都大于 0 且有限（第 1 步 on-policy，为 0）。
+- 结论：clip_higher（`features:clip_higher` 与 `features:eps_clip`）在 GPU 上证明生效，可以声明。说明：本次为了触发 clip 分支，把窗口设为 eps 0.001/0.002，这验证的是机制确实起作用，不代表推荐这个取值。

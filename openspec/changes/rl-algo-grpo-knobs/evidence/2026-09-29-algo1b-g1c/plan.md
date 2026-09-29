@@ -25,3 +25,7 @@
 - 硬超时：sandbox timeout 10800 秒；独立 watchdog 在 11100 秒时 kill；每个 exec 1800 秒；本地 `timeout 11400`；EXIT trap 按 id 终止 sandbox。
 - 预计约 40 分钟，费用 ≤ $4。结束后核实 sandbox 列表为空、app 为 stopped（`sbx.py list` 会建出空 app，结束后需 `modal app stop algo1b-g1c`）。
 - 在 algo1b-g1b 的 run A-r1 结束之后才开始（GPU 串行使用）。
+
+## 第 1 次尝试结论
+- setup 阶段就失败了（`set -eo pipefail` 生效后才暴露）：`cargo build` 是在 `/work/yeto` 里执行的，而 Cargo.toml 实际在 `syncer/` 下。R0 harness 中这一行一直在失败，只是以前被管道掩盖了。本 run 是单岛 no-sync，根本不需要 syncer 二进制，所以删掉这一行。没有训练，sandbox 已终止，watchdog 已结束。
+- 修复提交先于重跑；判据、配置、seed 都不变。
