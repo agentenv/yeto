@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from yeto.rl.engine.algorithm import AlgorithmSpec
+
 import pytest
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
@@ -333,7 +335,9 @@ def test_gspo_clip_fraction_reaches_step_metrics_from_miles_train_one_step_resul
         args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
         actor_model=actor, learner_id=0, learner_generation=0,
         parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
-        algorithm="grpo", spec=SimpleNamespace(advantage_estimator="gspo"),
+        # integ-decl: with 1a merged, the trainer asks the spec for its correction
+        algorithm="grpo", spec=SimpleNamespace(advantage_estimator="gspo",
+                                               correction=AlgorithmSpec().correction),
     )
     receipt = t.train_step(handle())
     assert receipt.algorithm == "grpo"
