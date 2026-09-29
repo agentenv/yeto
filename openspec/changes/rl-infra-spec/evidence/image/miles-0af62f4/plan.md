@@ -12,7 +12,7 @@
 
 ## Result (sb-LQKdyfLtaGjsJJJ4YBHtvS, L40S, 536 s)
 All image checks PASS, including lora_bridge_per_token_loss.  parse_args: 46 passed, 1 skipped,
-1 failed = the pre-declared test_upstream_parse_args_accepts_translation[False] (yeto
+1 failed = the pre-declared test_upstream_parse_args_accepts_translation[False]; its traceback fell outside the 40 kept lines, so the cause is inferred, not re-observed: same test id, and yeto config.py and the test are unchanged since the d002615 run where the traceback showed the (yeto
 config.py:527 guard, image-independent, owner INFRA).  No other failure.
 Cost ~ $0.35 (L40S 536 s + CPU/mem, estimate).  Sandbox terminated in finally, app stopped
 (modal_app_list_after_stop.txt: all stopped), watchdog killed; no volumes/secrets.
