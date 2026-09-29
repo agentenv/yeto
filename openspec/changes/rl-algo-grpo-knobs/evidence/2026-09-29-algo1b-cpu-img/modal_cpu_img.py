@@ -10,6 +10,9 @@ image = (
     .add_local_dir("/home/michael/work/miles-next", "/miles-next", copy=False,
                    ignore=[".git", "**/__pycache__"])
 )
+import os
+GPU = os.environ.get("ALGO1B_GPU") or None  # run 2: T4 (libcuda for the import chain)
+RUN2 = bool(GPU)
 app = modal.App("algo1b-cpu-img", image=image)
 
 SCRIPT = r"""
@@ -37,11 +40,17 @@ PYTHONPATH=/yeto:/miles-next python -m pytest -q -p no:cacheprovider -rs \
 """
 
 
-@app.function(cpu=2.0, memory=8192, timeout=1200)
+@app.function(cpu=2.0, memory=8192, timeout=1200, gpu=GPU)
 def run() -> str:
     import subprocess
 
-    out = subprocess.run(["bash", "-c", SCRIPT], capture_output=True, text=True)
+    script = SCRIPT
+    if RUN2:
+        script = script.split("echo '--- full parse_args")[0].split("echo '--- 4.1")[0] + \
+            "nvidia-smi --query-gpu=name --format=csv\necho '--- full parse_args" + \
+            SCRIPT.split("echo '--- full parse_args")[1]
+        script = script.replace("-rs", "-rfEs").replace("tail -40", "tail -80")
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     return out.stdout + "\n--- stderr ---\n" + out.stderr[-8000:]
 
 

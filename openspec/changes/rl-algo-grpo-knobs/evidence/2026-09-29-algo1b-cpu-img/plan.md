@@ -10,3 +10,17 @@
 - 成功条件：4.1 记录 import 结果（成功或失败均为有效结论）；`tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args` 全部参数化用例通过（不 skip）。
 - 失败条件：full parse 任一用例失败或被 skip（megatron.training 不可 import）→ 2.3/3.3/4.3 仍按 Miles 参数提供器结论记录，不勾选"upstream parse_args"部分；不重跑同一实验，除非给出原因并修复。
 - 容差：不涉及数值比较（解析值精确相等）。seed：不涉及。
+
+## 第 1 次运行结论（2026-09-29，app ap-NwnNkUKRNgnMPlraQLkxhp，CPU，exit=0，已自动停止）
+
+- 4.1：`IMPORT_FAILED`（`ModuleNotFoundError: No module named 'examples'`；镜像内 Miles 以包安装，`examples` 不在 sys.path）。按原文，结论只用于文档，照样 vendor。
+- full parse_args：失败。原因是 `OSError: libcuda.so.1: cannot open shared object file`：CPU 容器里没有 CUDA 驱动库，而 Miles/Megatron 导入链会 dlopen 它。P0 自己的 `test_upstream_parse_args_accepts_translation` 在同一容器里同样失败（2 failed），所以这与本 change 的代码无关。
+
+## 第 2 次运行计划（修复：换有驱动的容器，其余不变）
+
+- 原因与修复：在带 GPU 驱动的容器里运行，libcuda 可以 dlopen；测试本身不在 GPU 上计算。
+- 资源：Modal `gpu="T4"`（最便宜的卡），1 张；app `algo1b-cpu-img`（同名，临时 app）；函数 `timeout=1200`；本地 `timeout 1800`。
+- 预计 ≤ 15 分钟，费用 < $0.30。
+- 只运行 full parse 部分（4.1 已有结论，不重复）；pytest 加 `-rfEs` 输出失败与跳过的原因。
+- 成功条件：`test_full_parse_args` 12 个参数化用例全部 passed（不 skip），P0 的 `upstream_parse` 2 个用例 passed。
+- 失败条件：任一用例 failed 或 skipped，按实际结论记录；除非查明原因并修复，否则不再重跑。
