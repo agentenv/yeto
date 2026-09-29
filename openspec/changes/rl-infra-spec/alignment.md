@@ -163,6 +163,8 @@
 5. **E3 认证范围**：首轮只认证默认 GRPO 属于缩窄认证范围，仍保留为待批准（§8 第 3 项）；在批准前，E3 先按默认 GRPO 执行。
 6. **infra 代码工作的基底**：集成分支 `rl-integ` = `rl-infra-spec` 6fca4a8 + `fix-decoupled-lr-schedule` 63ea45a（merge `c5e05f4`，已推送；CPU 失败集合按测试 id 与基线相同）。WP-INFRA2 与 WP-CAP 的代码改动基于 `rl-integ`；规划文档仍在 `rl-infra-spec`。
 
+7. **rl-algo-grpo-knobs 的解析口径**（ALGO-1b 追加）：2.3、4.3、7.1 在钉住镜像中运行完整 `parse_args` + `validate_parsed_args`，miles 解析器用 0394715，megatron 用镜像自带的。这比原文要求的 "miles-next-venv"（该环境缺 `megatron.training`）更严格，视为满足原文意图，完成记录中注明环境差异。5.2 另在钉住镜像内用镜像自带的 Miles 补跑一次 equivalence，作为同源证据。
+
 ## 8. 待批准事项
 
 1. （已删除：GPU 预算，见 §7b 第 1 条。）
