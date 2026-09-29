@@ -17,4 +17,5 @@ EXTENSION_MODULES: tuple[str, ...] = (
     # "yeto.rl.algos.mismatch_observe",  # rl-algo-mismatch-correction (example)
     "yeto.rl.algos.grpo_knobs",  # rl-algo-grpo-knobs
     "yeto.rl.algos.seq_adv",  # rl-algo-seq-and-adv
+    "yeto.rl.algos.mismatch_correction",  # rl-algo-mismatch-correction
 )
