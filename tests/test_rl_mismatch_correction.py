@@ -405,8 +405,8 @@ def test_fake_declaration_admits_every_mechanism():
         caps.check(**CHECK, algorithm=build())
 
 
-MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer", "mismatch_observe", "icepop"}  # G1 + effect evidence (7.3, integ-decl)
-ACCEPTED_BY_MILES = {"tis", "opsm_trainer", "mismatch_observe", "icepop"}
+MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer", "mismatch_observe", "icepop", "mis_mask"}  # G1 + effect evidence (7.3, integ-decl)
+ACCEPTED_BY_MILES = {"tis", "opsm_trainer", "mismatch_observe", "icepop", "mis_mask"}
 
 
 def test_miles_adapter_declares_exactly_g1_passed_corrections():

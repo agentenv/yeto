@@ -68,6 +68,7 @@ MILES_DECLARED: dict[str, str] = {
     "features:mismatch_metrics": f"{_E1A}/2026-09-29-trigger icepop + 2026-09-29-g1b observe (mismatch metrics reported; observation only, loss unchanged)",
     "corrections:mismatch_observe": f"{_E1A}/2026-09-29-g1b observe + g2-observe (observation only; weights constant 1)",
     "corrections:icepop": f"{_E1A}/2026-09-29-trigger icepop [0.99,1.01] (masked tis_clipfrac 0.192/0.225/0.267)",
+    "corrections:mis_mask": f"{_E1A}/2026-09-29-trigger mis-mask token [0.99,1.01] (mask fraction 0.192/0.225/0.267)",
 }
 
 
