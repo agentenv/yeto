@@ -802,7 +802,7 @@ def test_declared_after_g1_and_overlong_filter_still_refused():
     if not gk.declared_mechanisms()["features"] <= caps.features:
         pytest.skip("needs infra-drafts/1b-declare.patch")
     ok = [pipeline_spec(reward_shapers=[OVERLONG]),
-          AlgorithmSpec(loss={"eps_clip": 0.2, "eps_clip_high": 0.28, "aggregation": "token"}),
+          AlgorithmSpec(loss={"aggregation": "token"}),
           kl_spec(), AlgorithmSpec(entropy_coef=0.001)]
     for spec in ok:
         missing = [f"{d}:{n}" for d, n in spec.required_mechanisms() if n not in getattr(caps, d)]
@@ -810,3 +810,5 @@ def test_declared_after_g1_and_overlong_filter_still_refused():
     flt = gk.with_pipeline_plugins(AlgorithmSpec(sampling={"overlong_filter": True}))
     assert ("features", "overlong_filter") in flt.required_mechanisms()
     assert "overlong_filter" not in caps.features
+    for name in ("clip_higher", "dual_clip", "over_sampling"):  # no GPU evidence of effect yet
+        assert name not in caps.features
