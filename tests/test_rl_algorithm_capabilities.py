@@ -85,20 +85,70 @@ def test_old_declaration_reads_as_r0_mechanisms():
 
 # -- 3.2 ------------------------------------------------------------------------
 
-# One spec per mechanism the P0 framework can express beyond R0, each touching
-# a single field. Tests pick the ones an engine has NOT declared, so a later
-# declaration (a follow-up change's G1) never turns them into no-ops.
+# One spec per P0 mechanism beyond R0 (each produces that mechanism; some
+# produce companions too). Tests pick the ones an engine has NOT declared, so
+# a later declaration (a follow-up change's G1) never turns them into no-ops.
+_REF = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
 CANDIDATES = {
+    "advantage_estimators:gspo": dict(advantage=dict(estimator="gspo"),
+                                      loss=dict(eps_clip=3e-4, eps_clip_high=4e-4)),
+    "advantage_estimators:reinforce_plus_plus": dict(
+        advantage=dict(estimator="reinforce_plus_plus", whiten=True)),
+    "advantage_estimators:reinforce_plus_plus_baseline": dict(
+        advantage=dict(estimator="reinforce_plus_plus_baseline", whiten=True)),
+    "corrections:tis": dict(correction=dict(method="tis", tis_clip=2.0, tis_clip_low=0.0)),
+    "corrections:opsm": dict(correction=dict(method="opsm", opsm_delta=1e-4)),
+    "corrections:custom": dict(correction=dict(method="custom", function=_REF,
+                                               tis_clip=5.0, tis_clip_low=0.5)),
     "features:clip_higher": dict(loss=dict(eps_clip_high=0.28)),
     "features:dual_clip": dict(loss=dict(eps_clip_c=3.0)),
     "features:eps_clip": dict(loss=dict(eps_clip=0.25)),
-    "loss_aggregations:token": dict(loss=dict(aggregation="token")),
+    "features:custom_pg_loss_reducer": dict(loss=dict(reducer=_REF)),
+    "features:entropy_bonus": dict(entropy_coef=0.001),
+    "features:kl_unbiased": dict(kl=dict(placement="loss", coef=0.01, estimator="k3",
+                                         unbiased=True)),
+    "features:mismatch_metrics": dict(correction=dict(method="tis", tis_clip=2.0,
+                                                      tis_clip_low=0.0, mismatch_metrics=True)),
     "features:no_grpo_std_normalization": dict(advantage=dict(std_normalization=False)),
     "features:no_rewards_normalization": dict(advantage=dict(rewards_normalization=False)),
-    "features:entropy_bonus": dict(entropy_coef=0.001),
+    "features:over_sampling": dict(sampling=dict(filter=alg.BOUNDED_NONZERO_STD_FILTER,
+                                                 over_sampling_batch_size=8)),
     "features:overlong_filter": dict(sampling=dict(overlong_filter=True)),
+    "features:plugins": dict(plugins=(_REF,)),
+    "features:rollout_logprobs_as_old": dict(correction=dict(use_rollout_logprobs=True)),
+    "features:whiten_advantages": dict(advantage=dict(whiten=True)),
     "kl_placements:loss": dict(kl=dict(placement="loss", coef=0.01, estimator="k3")),
+    "loss_aggregations:token": dict(loss=dict(aggregation="token")),
+    "loss_aggregations:constant": dict(loss=dict(aggregation="constant", reducer=_REF)),
+    "losses:custom_loss": dict(loss=dict(variant="custom_loss", custom_loss=_REF)),
+    "reward_postprocessors:custom_reward_postprocess": dict(
+        advantage=dict(reward_postprocess=_REF)),
 }
+R0_MECHANISMS_P0 = {
+    "advantage_estimators:grpo", "losses:policy_loss", "loss_aggregations:default",
+    "kl_placements:none", "kl_placements:reward", "corrections:none",
+    f"dynamic_sampling_filters:{alg.BOUNDED_NONZERO_STD_FILTER}",
+    f"dynamic_sampling_filters:{alg.STOCK_NONZERO_STD_FILTER}",
+}
+# P0 built-ins without a candidate, with the reason.
+EXEMPT = {"advantage_estimators:ppo": "critic: refused by the rejection matrix"}
+
+
+def test_candidates_cover_the_p0_mechanism_registry():
+    registered = alg.mechanism_names()
+    assert set(CANDIDATES) <= registered
+    p0_builtin = set(CANDIDATES) | set(EXEMPT) | R0_MECHANISMS_P0
+    # every P0 built-in beyond R0 has a candidate (extension mechanisms may add more)
+    builtin = {
+        f"{m.dimension}:{m.name}" for m in alg.registered_mechanisms()
+        if m.detect.__module__ == alg.__name__  # registered by P0 itself
+    }
+    missing = sorted(builtin - p0_builtin)
+    assert not missing, f"P0 mechanisms without a candidate: {missing}"
+    assert not (set(CANDIDATES) - builtin), "a candidate names a non-P0 mechanism"
+    for mechanism, kwargs in CANDIDATES.items():
+        dimension, name = mechanism.split(":")
+        assert (dimension, name) in _combine(kwargs).required_mechanisms(), mechanism
 
 
 def undeclared(caps):
@@ -121,15 +171,22 @@ def _combine(*kwargs_list):
     return AlgorithmSpec(**merged)
 
 
+def _touches(kw):
+    return {(g, f) for g, v in kw.items() for f in (v if isinstance(v, dict) else (None,))}
+
+
 def _disjoint_pair(items):
     for i, (m1, k1) in enumerate(items):
         for m2, k2 in items[i + 1:]:
-            if not (set(k1) & set(k2)) or all(
-                not (set(k1[g]) & set(k2[g])) for g in set(k1) & set(k2)
-                if isinstance(k1[g], dict)
-            ):
+            if _touches(k1) & _touches(k2) or m1.split(":")[0] == m2.split(":")[0] == "corrections":
+                continue
+            try:
+                spec = _combine(k1, k2)
+            except alg.AlgorithmSpecError:
+                continue
+            if not spec.rejections():
                 return (m1, k1), (m2, k2)
-    pytest.skip("fewer than two combinable undeclared candidates")
+    pytest.fail("fewer than two combinable undeclared candidates; extend CANDIDATES")
 
 
 def test_expressible_but_not_enabled_is_rejected_with_options():
@@ -139,19 +196,32 @@ def test_expressible_but_not_enabled_is_rejected_with_options():
         _check(caps, _combine(k1, k2))
     text = str(info.value)
     # every problem at once, each with the supported options
+    labels = {"advantage_estimators": "advantage estimator",
+              "dynamic_sampling_filters": "dynamic sampling filter"}
     for mechanism in (m1, m2):
         dimension, name = mechanism.split(":")
         supported = sorted(caps.mechanisms(dimension))
-        assert f"{dimension} mechanism {name!r} not supported (supported: {supported}" in text
+        label = labels.get(dimension, f"{dimension} mechanism")
+        assert f"{label} {name!r} not supported (supported: {supported}" in text
     assert "expressible but not enabled" in text
 
 
 def test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter():
     caps = miles_capabilities(FP)
     declared = caps.declared_mechanisms()
-    for mechanism, kwargs in CANDIDATES.items():
-        if mechanism in declared:
-            _check(caps, _combine(kwargs))  # accepted
+    covered = []
+    for mechanism in sorted(declared):
+        kwargs = CANDIDATES.get(mechanism)
+        if kwargs is None:
+            continue  # R0 (default spec) or an extension mechanism not registered here
+        spec = _combine(kwargs)
+        needs = {f"{d}:{n}" for d, n in spec.required_mechanisms()}
+        if needs <= declared:
+            _check(caps, spec)  # accepted
+            covered.append(mechanism)
+    _check(caps, AlgorithmSpec())  # the R0 declarations
+    assert covered, "no declared non-R0 mechanism was exercised"
+    assert {"corrections:tis", "corrections:opsm"} <= set(covered)
     assert "features:overlong_filter" not in declared
     with pytest.raises(CapabilityMismatch, match="'overlong_filter' not supported"):
         _check(caps, _combine(CANDIDATES["features:overlong_filter"]))
@@ -298,11 +368,14 @@ def test_fake_root_default_grpo_starts_other_mechanisms_rejected(tmp_path):
 def test_unverified_allowance_single_island_without_outer_sync(tmp_path):
     mechanism, kwargs = undeclared(fake_capabilities())[0]
     spec = _combine(kwargs)
-    names = check_unverified_allowance([mechanism], islands=1, outer_sync=False)
+    declared = fake_capabilities().declared_mechanisms()
+    needed = sorted({f"{d}:{n}" for d, n in spec.required_mechanisms()} - declared)
+    assert mechanism in needed
+    names = check_unverified_allowance(needed, islands=1, outer_sync=False)
     caps = fake_capabilities().with_unverified(names)
     engine, driver = _driver(tmp_path, spec, caps)  # LocalOnlySync: no outer sync
     assert driver.run().policy_version == 1
-    assert json.loads(caps.to_json())["unverified_mechanisms"] == [mechanism]
+    assert json.loads(caps.to_json())["unverified_mechanisms"] == needed
     # the allowance does not enter the algorithm hash
     assert spec.sha256() == _combine(kwargs).sha256()
 
@@ -410,3 +483,9 @@ def test_always_emit_field_only_when_its_mechanism_applies():
         assert '"t_src":"trainer"' in opsm.canonical_json()
     finally:
         alg.unregister(field=("correction", "t_src"))
+
+
+def test_reward_dispatcher_rejection_explains_the_pending_declaration():
+    caps = miles_capabilities(FP)
+    with pytest.raises(CapabilityMismatch, match="maxrl/mapo is not declared yet"):
+        _check(caps, _combine(CANDIDATES["reward_postprocessors:custom_reward_postprocess"]))

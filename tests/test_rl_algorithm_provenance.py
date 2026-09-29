@@ -451,6 +451,18 @@ def test_no_sync_run_export_is_marked_from_its_event_tape(tmp_path, monkeypatch)
     tape = tmp_path / "rl-island-0.jsonl"
     tape.write_text(json.dumps({"island_id": 0, **event}) + "\n"
                     + json.dumps({"event": "rl_local_round"}) + "\n")
+    with pytest.raises(ValueError, match="incomplete"):  # no rl_learner_finalized yet
+        rl_export.algorithm_from_event_tape(tape)
+    seen = {}
+    monkeypatch.setattr(rl_export, "export_rl_checkpoint",
+                        lambda *a, **kw: seen.update(kw) or SimpleNamespace(policy_version=1))
+    rl_export.main(["--checkpoint", "c", "--model", "m", "--model-revision", "a" * 40,
+                    "--lora-r", "2", "--output-dir", "o", "--rl-event-tape", str(tape),
+                    "--allow-incomplete"])
+    assert seen["event_tape_incomplete"] is True
+    with tape.open("a") as handle:
+        handle.write(json.dumps({"island_id": 0, "time_unix": 2.0,
+                                 "event": "rl_learner_finalized"}) + "\n")
     seen = {}
     monkeypatch.setattr(rl_export, "export_rl_checkpoint",
                         lambda *a, **kw: seen.update(kw) or SimpleNamespace(policy_version=1))
@@ -553,7 +565,7 @@ def test_cli_dry_run_creates_nothing(monkeypatch, capsys):
     assert calls == []
 
 
-def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, capsys):
+def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, capsys, tmp_path):
     """run() -> Modal island -> FleetController(syncer=None) -> teardown (1a crash)."""
     import yeto.launcher as launcher
     import yeto.modal_runner as modal_runner
@@ -586,6 +598,9 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
         def tail_logs(self, call_id, entries=100):
             return []
 
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
     monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
     monkeypatch.setattr(launcher, "_tail_modal", lambda *a, **k: None)
@@ -611,9 +626,12 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
     assert not any(c.endswith("-syncer") for c in clusters)
     assert ("spawn", 0) in events and ("stop_app",) in events
     assert [e for e in events if e[0] == "define"][0][2] == "none"
-    assert code == 2  # Modal island output is not fetchable; says so honestly
+    # the stream produced no events: fail closed (3), tape marked incomplete
+    assert code == launcher.NO_SYNC_INCOMPLETE_EXIT == 3
     err = capsys.readouterr().err
-    assert "--rl-single-island-no-sync" in err and "recover the model from" not in err
+    assert "no-sync event tape incomplete" in err
+    [marker] = (tmp_path / "runs" / args.cluster_prefix / "events").glob("*.incomplete")
+    assert marker.read_text().startswith("no rl_learner_finalized")
 
 
 def test_no_sync_event_echo_matches_tape(tmp_path, monkeypatch, capsys):
@@ -711,3 +729,55 @@ def test_event_echo_format_and_extract(tmp_path):
     out = tmp_path / "tape.jsonl"
     assert event_echo.main([str(log), str(out)]) == 0
     assert out.read_text() == line[len("YETO_RL_EVENT "):] + "\n"
+
+
+def test_event_collector_validation_discards_and_close(tmp_path):
+    from yeto.rl import event_echo
+
+    c = event_echo.TapeCollector(tmp_path / "t.jsonl")
+    good = event_echo.format_record({"island_id": 0, "time_unix": 1.0, "event": "a"})
+    for line in (good, "YETO_RL_EVENT [1,2]", 'YETO_RL_EVENT {"event":"x"}',
+                 'x YETO_RL_EVENT {"island_id":0,"time_u', "plain"):
+        c.feed(line)
+    assert c.count == 1 and c.discarded == 3
+    assert c.close() is False and c.incomplete_marker.exists()
+    c.feed(event_echo.format_record({"island_id": 0, "time_unix": 2.0, "event": "b"}))
+    assert c.count == 1  # nothing written after close
+    with pytest.raises(FileExistsError):
+        event_echo.TapeCollector(tmp_path / "t.jsonl")
+    done = event_echo.TapeCollector(tmp_path / "u.jsonl")
+    done.feed(event_echo.format_record(
+        {"island_id": 0, "time_unix": 1.0, "event": "rl_learner_finalized"}))
+    assert done.close() is True and not done.incomplete_marker.exists()
+    assert event_echo.tape_is_complete(tmp_path / "u.jsonl")
+    assert not event_echo.tape_is_complete(tmp_path / "t.jsonl")
+
+
+def test_no_sync_run_refuses_existing_tapes(monkeypatch, tmp_path):
+    import yeto.launcher as launcher
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local"),
+                          gpu="modal:1xa100")
+    events = tmp_path / "runs" / args.cluster_prefix / "events"
+    events.mkdir(parents=True)
+    (events / "old.jsonl").write_text("{}\n")
+    with pytest.raises(ValueError, match="event tapes already exist"):
+        launcher.run(args)
+
+
+def test_echo_never_emits_half_lines(tmp_path, monkeypatch, capsys):
+    from yeto.rl import miles
+
+    def partial_writer(args, event):  # a writer that leaves a partial last line
+        with open(args.yeto_rl_event_tape, "a") as handle:
+            handle.write(json.dumps({"island_id": 0, "time_unix": 1, **event}) + "\n{partial")
+
+    monkeypatch.setattr(miles, "_append_rl_event", partial_writer)
+    rl_learner.install_event_echo()
+    miles._append_rl_event(SimpleNamespace(yeto_rl_event_tape=str(tmp_path / "t"),
+                                           yeto_rl_learner_id=0), {"event": "a"})
+    out = [l for l in capsys.readouterr().out.splitlines() if l.startswith("YETO_RL_EVENT")]
+    assert len(out) == 1 and "partial" not in out[0]

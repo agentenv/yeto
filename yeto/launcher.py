@@ -3664,6 +3664,16 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     if no_sync and head_mode:
         raise ValueError("--rl-single-island-no-sync has no syncer; do not run it as a head")
     specs = parse_gpu_spec(args.gpu)
+    no_sync_incomplete: list[str] = []
+    events_dir = _no_sync_events_dir(args) if no_sync else None
+    if no_sync:
+        # Refuse to mix runs in one tape, before anything is provisioned.
+        existing = sorted(str(p) for p in events_dir.glob("*.jsonl*")) if events_dir.exists() else []
+        if existing:
+            raise ValueError(
+                f"event tapes already exist for run {args.cluster_prefix!r}: {existing}; "
+                "use another --cluster-prefix or remove them"
+            )
     # External learners (machines sky cannot provision — e.g. Macs running
     # yeto.mlx.learner) get the ids AFTER the cloud learners; the syncer
     # counts them in --learners and its port is already public, so they
@@ -3849,9 +3859,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             if no_sync and name != syncer_cluster:
                 # No syncer tape and (on Modal) no fetchable ~/yeto-output: the
                 # island echoes its tape into the log; rebuild it locally.
-                collector = event_collectors.setdefault(
-                    name, EventCollector(events_dir / f"{name}.jsonl")
-                )
+                collector = event_collectors.get(name)
+                if collector is None:  # a relaunch keeps appending to the same tape
+                    collector = event_collectors[name] = EventCollector(
+                        events_dir / f"{name}.jsonl", fresh=False
+                    )
             if modal_ops is not None and name in modal_cfgs:
                 thread = threading.Thread(
                     target=_tail_modal, args=(modal_ops, job_id, label, collector), daemon=True
@@ -3865,7 +3877,6 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
         tail_threads: list[threading.Thread] = []
         event_collectors: dict[str, EventCollector] = {}
-        events_dir = _no_sync_events_dir(args)
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
@@ -3892,9 +3903,33 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             deadline = time.monotonic() + NO_SYNC_EVENT_DRAIN_S
             for thread in tail_threads:
                 thread.join(max(0.0, deadline - time.monotonic()))
+            # Fail closed: stop writing (a stream still alive after the bounded
+            # wait can no longer touch the tape) and mark unfinalized tapes.
             for name, collector in event_collectors.items():
-                print(f"[launcher] {name}: {collector.count} event(s) -> {collector.path}")
+                complete = collector.close()
+                print(
+                    f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
+                    f"{collector.discarded} malformed prefixed line(s) discarded"
+                )
+                if not complete:
+                    no_sync_incomplete.append(name)
+                    print(
+                        f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
+                        f"record; marked {collector.incomplete_marker}",
+                        file=sys.stderr,
+                    )
+            for name in learner_names:
+                if name not in event_collectors:  # never streamed: nothing received
+                    no_sync_incomplete.append(name)
+                    EventCollector(events_dir / f"{name}.jsonl", fresh=False).close()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
+        if no_sync_incomplete:
+            print(
+                f"[launcher] no-sync event tape incomplete for {no_sync_incomplete}; "
+                f"exit {NO_SYNC_INCOMPLETE_EXIT}",
+                file=sys.stderr,
+            )
+            return NO_SYNC_INCOMPLETE_EXIT
 
         # Secure the artifact BEFORE the finally block tears learners down:
         # fetch ~/yeto-output from the winning learner onto this machine
@@ -4022,6 +4057,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
 
 NO_SYNC_EVENT_DRAIN_S = 120.0
+# no-sync run whose island tape lacks rl_learner_finalized (differs from 2:
+# "artifact not fetchable").
+NO_SYNC_INCOMPLETE_EXIT = 3
 
 
 def _no_sync_events_dir(args) -> Path:
