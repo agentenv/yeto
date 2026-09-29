@@ -746,6 +746,122 @@ rollout and reward groups):
 3. Re-check the estimator and KL rules in `algorithm.py` against
    `loss_hub/advantages.py` and `miles/ray/specs/train.py`.
 
+### GRPO-family knobs (`rl-algo-grpo-knobs`)
+
+Registered by `yeto/rl/algos/grpo_knobs.py`. Every mechanism below can be
+expressed and translated, but none is declared in `miles_capabilities` until
+its single-GPU smoke (G1) passes. A declared mechanism means only that G1
+(and G3 where it applies) passed. It says nothing about training gains.
+
+| Mechanism | Spec | Miles argv | Constraint (checked before any GPU process) |
+|---|---|---|---|
+| clip-higher | `loss.eps_clip_high` (and `eps_clip`) | `--eps-clip-high` | finite, > 0 |
+| dual-clip | `loss.eps_clip_c` | `--eps-clip-c` | > 1 (Miles asserts the same, later) |
+| token aggregation | `loss.aggregation="token"` | `--calculate-per-token-loss` | |
+| Dr.GRPO, no std | `advantage.std_normalization=false` | `--disable-grpo-std-normalization` | |
+| Dr.GRPO, constant denominator | `loss.aggregation="constant"`, `loss.constant_denominator=D`, `loss.reducer=yeto.rl.algos.reducers.constant_denominator_reducer` | `--custom-pg-loss-reducer-function-path` | D finite > 0; not with token aggregation (one enum; `--calculate-per-token-loss` in extra argv conflicts); CP = 1 |
+| KL loss | `kl.placement="loss"`, `coef`, `estimator` ∈ k1/k2/k3/low_var_kl, `kl.ref_model={source, revision}` | `--use-kl-loss --kl-loss-coef --kl-loss-type` | `ref_model` required; its revision must equal the island's `--model-revision` |
+| entropy | `entropy_coef` | `--entropy-coef` | finite |
+| over-sampling | `sampling.over_sampling_batch_size` | `--over-sampling-batch-size` (R0 slot, from the run config) | needs `sampling.filter`; ≥ rollout batch size |
+| overlong penalty | `advantage.reward_shapers=[{name: overlong_penalty, max_length, cache_length}]` + the dispatcher | `--custom-reward-post-process-path yeto.rl.algos.reward_pipeline.post_process` | 0 < cache_length ≤ max_length ≤ `rollout_max_response_len` |
+| overlong filter | `sampling.overlong_filter=true` | none (the shared `--rollout-sample-filter-path` hook) | |
+
+**Dr.GRPO and RLOO.** The constant-denominator reducer is vendored from Miles
+`9e4260d` `examples/experimental/DrGRPO/custom_reducer.py` (blob `96390ac3`).
+The only change is that D comes from the spec instead of the constant 1000.
+It applies to pg_loss only; clipfrac, KL and entropy keep the default reducer.
+RLOO is not implemented separately: with std normalization off its advantage
+is G/(G−1) times the Dr.GRPO advantage, and Adam is nearly invariant to a
+constant gradient scale.
+
+**KL loss.** Miles loads the `--ref-load` model only when `kl_coef != 0` or
+`use_kl_loss` (`miles/ray/specs/train.py:58`), so KL loss adds a reference
+model and one extra reference forward pass. G1 records the effect on peak
+memory and round time. `kl.ref_model` is part of the algorithm hash, so two
+islands with different references disagree before outer sync. The learner
+also refuses a reference revision that differs from `--model-revision`
+(`rl_algorithm_island_rejected`).
+
+**Reward dispatcher.** `yeto.rl.algos.reward_pipeline.post_process` is the
+only reward post-processing hook on `ports`. It is emitted only when the spec
+selects a reward shaper or a non-default `advantage.transform`; default GRPO
+keeps Miles' built-in path, and its argv is unchanged. The dispatcher runs
+`raw → shapers → advantage transform`. `grpo_default` is element-wise equal
+(`torch.equal`) to Miles `_post_process_rewards`: prompt groups, one reward
+per multi-segment rollout, the error on inconsistent siblings, G=1, std=0,
+`+1e-6`, and the estimator and `rewards_normalization` gates. The comparison
+is `tests/test_rl_reward_pipeline_equivalence.py`; it pins the SHA256 of
+`train_data_conversion.py`. Details:
+
+- Multi-LoRA is refused, because a custom post-process cannot see
+  `prompt_group_sizes`.
+- A batch with no `group_index` and no fixed fan-out falls back to one
+  whole-batch group, as Miles does, and emits `rl_reward_group_fallback`.
+- The configuration reaches Miles as `args.yeto_algo_plugins = {config,
+  sha256}`, set through the spec's runtime attrs. The dispatcher and reducer
+  re-hash it and refuse a mismatch.
+
+**Adding an advantage transform (P2).**
+
+1. Register it in `reward_pipeline.py` with `register_advantage_transform(name,
+   fn(args, samples, rewards, groups, params), validate=...)`. This keeps it
+   under the dispatcher's PluginRef hash.
+2. Select it with `advantage.transform=name` plus `transform_params`.
+3. Register its mechanism and leave it undeclared until G1 passes.
+4. Add a CPU test that compares it with a hand computation, and with
+   `grpo_default` in its degenerate case.
+
+Any edit to `reward_pipeline.py` changes the dispatcher's source hash:
+regenerate specs that pin it (for example `examples/rl_algorithms/*.json`).
+
+**Overlong penalty (DAPO).** For a response of length L:
+
+- L ≤ Lmax − Lcache: penalty 0;
+- Lmax − Lcache < L ≤ Lmax: penalty (Lmax − Lcache − L)/Lcache;
+- L > Lmax: penalty −1.
+
+The penalty is added to the raw reward before group normalization. L is the
+summed length of a rollout's segments, so siblings stay consistent. The
+shaped reward is what Miles logs as raw reward. The original reward is kept
+in `sample.metadata["yeto_raw_reward"]`, and an `rl_reward_shaping` event
+summarizes raw against shaped rewards.
+
+**Overlong filter vs DAPO.** Truncated samples get `remove_sample=True` in
+`record_trained_groups`. Checked on CPU against Miles:
+
+- Their loss mask becomes all zero, but their reward still enters the group
+  mean and std, so the other samples' advantages are unchanged.
+- Under the default sample-mean aggregation a removed sample contributes 0 to
+  the numerator. It still counts in the `global_batch_size` divisor
+  (`loss.py:197-210`), which dilutes the others.
+- Under token aggregation it adds 1 to the reported token count
+  (`clamp_min`).
+
+DAPO's paper masks truncated samples in the loss but does not say whether
+their reward enters the group statistics. The rollout metadata carries
+`filtered_samples`, which the ledger records in the terminal state `filtered`;
+over-sampling leftovers are `carried_over`. A round in which every
+non-zero-variance group was filtered completely does not trip the zero-gradient
+invariant.
+
+**Over-sampling and outer averaging.** strict-avg and decoupled average the
+islands' deltas with equal weights, not weighted by sample count (inferred;
+not verified). Islands that train on different numbers of samples therefore
+count equally. The weighting rule is unchanged. Recording each island's
+trained samples and groups in the per-round event is task 7.2; it needs a
+driver-side event field and is still open.
+
+```bash
+M="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags"
+$M --dry-run --rl-algorithm-spec examples/rl_algorithms/dr-grpo.json
+    # rejected: custom_pg_loss_reducer / no_grpo_std_normalization not declared (pre-G1)
+$M --dry-run --rl-algorithm-spec examples/rl_algorithms/dr-grpo.json \
+   --rl-allow-unverified-mechanism constant --rl-allow-unverified-mechanism custom_pg_loss_reducer \
+   --rl-allow-unverified-mechanism no_grpo_std_normalization   # accepted, hash 725e4216...
+```
+
+Recorded outputs: `openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-dry-run/`.
+
 ### Port responsibilities
 
 | port | responsibility | Miles adapter (`yeto/rl/engine/miles_adapter/`) |
