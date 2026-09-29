@@ -2,6 +2,43 @@
 
 对齐结论、依赖矩阵、工作包与待批准事项见 [`../rl-infra-spec/alignment.md`](../rl-infra-spec/alignment.md)（以 `rl-infra-spec` 分支为准）。
 
+## 2026-09-29 第三轮（G1 与声明，Agent ALGO-1b）——以本节为准
+
+### G1 第 2 次尝试逐项结果
+证据：`evidence/2026-09-29-algo1b-g1/`，包括 plan.md、`g1_report.json`（原始判定）和 `g1_report_v2.json`（按审查决定把 SGLang freeze_gc 良性链式异常列入白名单后的判定）。所有 run 都用 Modal sandbox，1 张 H100，单岛、no-sync，每个 3 轮。
+
+| 机制 | rc | 轮数 | 秒 | 峰值 MiB | 关键指标 | 是否证明生效 |
+|---|---|---|---|---|---|---|
+| baseline | 0 | 3 | 418.8 | 38142 | grad_norm 0.63/0.41/0.27 | — |
+| clip_higher | 0 | 3 | 330.7 | 38178 | pg_clipfrac 0/0/0；pg_loss 与 baseline 逐位相同 | 否 |
+| dual_clip | 0 | 3 | 349.6 | 36784 | pg_clipfrac 0/0/0；pg_loss 与 baseline 逐位相同 | 否 |
+| token | 0 | 3 | 363.2 | 38178 | pg_loss 0.035/0.0068/0.0026（与 baseline 不同） | 是 |
+| drgrpo | 0 | 3 | 333.2 | 38178 | pg_loss 0.0079/0.0072/0.019（常数分母，与 baseline 不同） | 是 |
+| kl_k3 | 0 | 3 | 345.8 | 38184（baseline 38142） | kl_loss 0/0.00079/0.00082 | 是 |
+| entropy | 0 | 3 | 327.4 | 38178 | entropy_loss 0.30/0.38/0.45 | 是 |
+| over_sampling | 0 | 3 | 316.7 | 36924 | 丢组与补采均为 0 | 否 |
+| overlong_penalty | 0 | 3 | 362.8 | 38174 | 3 条 rl_reward_shaping，塑形后奖励均值低于原始 | 是 |
+
+### 8.3 声明（按主 agent 的决定）
+- `grpo_knobs.G1_DECLARED` 按机制逐项提交，每项一个提交：token、drgrpo、kl_k3、entropy、overlong_penalty（连同 reward_postprocessors:custom_reward_postprocess）。
+- entry.py/fake.py 的接线是共享文件，不在本分支提交，交付物为：
+  - `infra-drafts/1b-declare-wiring.patch`：接线本身；
+  - `infra-drafts/1b-declare-series/`：git format-patch 序列，第 0001 个是接线，0002–0006 是逐项声明（这些已在本分支），0007 是测试。
+- 打上接线后，P0 测试 `test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter`（KL loss 用例缺 ref_model）和 `test_miles_and_fake_declarations`（断言精确的 R0 集合）失败，2a 的 `test_miles_adapter_declares_none_of_them` 也失败。需要 ALGO-CAP 和 2a 更新各自的测试。
+- clip_higher、dual_clip、over_sampling、overlong_filter 不声明。
+
+### 8.1 与 8.2
+- 8.1：`yeto launch --dry-run`（P0 319d974）的输出见 `evidence/2026-09-29-algo1b-dryrun/dry-run.txt`：一个岛，modal H100×1，total_gpus 1，no-sync，放行开关与 spec 哈希都出现在输出中。凭据扫描 `cred_scan.txt` 结果为 0 hits。dry-run 里 gpu 字段写的是 "H100"，不是 "H100!"；本 change 不做逐位实验，影响不大，但照实记录。
+- 8.2：保持未完成：overlong_filter 没有跑，要等 1b-hook.patch 合入。
+
+### 进行中
+- `evidence/2026-09-29-algo1b-g1b/`：按审查要求补做"是否生效"的 G1（clip_higher 用更小的 clip 窗口、跑 2 个 optimizer step；over_sampling 用更大的批次和更多轮）。dual_clip 事先判为"未能证明生效"，原因写在 plan.md。
+
+### 其他
+- setup.sh 改为 `set -eo pipefail`；attempt 1/2 当时用的是普通 `set -e`，这一点记录在 setup.sh 的注释里。
+- teardown_proof.txt 保存了 modal app list 与 sandbox 列表的实际输出：algo1b 的 app 全部 stopped，sandbox 列表为空。
+- 对其他分支的观察：algo-cap 声明了 maxrl 和 mapo，而 2a 的 `test_miles_adapter_declares_none_of_them` 断言一个都不声明。这两个分支合在一起就会失败，与本 change 无关。
+
 ## 2026-09-29 第二轮（审查修复，Agent ALGO-1b）——以本节为准，覆盖下一节中与之冲突的状态
 
 ### 合入与提交
@@ -103,7 +140,7 @@
 | 9.2 | CPU 通过 ✔ | `openspec validate rl-algo-grpo-knobs --strict`：valid |
 | 9.3 | 已实现 ✔ | 本文件 |
 
-"可表达未开放"（没有做 G1，未在 `miles_capabilities` 中声明）：clip_higher、eps_clip、dual_clip、token 聚合、no_grpo_std_normalization、constant 聚合与 custom_pg_loss_reducer、KL loss（kl_placements:loss，kl_loss_ref_model）、entropy_bonus、over_sampling、overlong_penalty（reward_postprocessors:custom_reward_postprocess）、overlong_filter。
+（原"可表达未开放"清单已过时，删除；当前声明状态见本文件第三轮一节。）
 
 ### 1.2 接口位置
 

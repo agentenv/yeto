@@ -165,6 +165,8 @@
 
 7. **rl-algo-grpo-knobs 的解析口径**（ALGO-1b 追加）：2.3、4.3、7.1 在钉住镜像中运行完整 `parse_args` + `validate_parsed_args`，miles 解析器用 0394715，megatron 用镜像自带的。这比原文要求的 "miles-next-venv"（该环境缺 `megatron.training`）更严格，视为满足原文意图，完成记录中注明环境差异。5.2 另在钉住镜像内用镜像自带的 Miles 补跑一次 equivalence，作为同源证据。
 
+8. **rl-algo-grpo-knobs 的能力声明标准**（主 agent 决定，ALGO-1b 追加）：只有 GPU 上确实生效的机制才声明。首批声明 token、drgrpo（constant 聚合、custom_pg_loss_reducer、no_grpo_std_normalization）、kl_k3（kl_placements:loss、kl_loss_ref_model）、entropy_bonus、overlong_penalty 与 reward_postprocessors:custom_reward_postprocess。clip_higher、dual_clip（clipfrac 为 0）和 over_sampling（没有补采）暂不声明，等拿到"clipfrac>0 / 补采次数>0"的证据后再声明。
+
 ## 8. 待批准事项
 
 1. （已删除：GPU 预算，见 §7b 第 1 条。）
