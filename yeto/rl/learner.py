@@ -56,6 +56,14 @@ def parse_args(argv=None):
     # Required unless --rl-single-island-no-sync (checked after parsing).
     parser.add_argument("--syncer", default=None)
     parser.add_argument(
+        "--rl-echo-events",
+        action="store_true",
+        help=(
+            "ports: echo every event-tape record to stdout as 'YETO_RL_EVENT <json>' "
+            "(the launcher sets it for Modal islands, whose ~/yeto-output is not fetchable)"
+        ),
+    )
+    parser.add_argument(
         "--rl-single-island-no-sync",
         action="store_true",
         help=(
@@ -303,30 +311,39 @@ def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
 
 
 def install_event_echo() -> bool:
-    """--rl-single-island-no-sync: echo every tape record to stdout.
+    """Echo every tape record of this island to stdout (``YETO_RL_EVENT``).
 
-    Such an island has no syncer tape and (on Modal) no fetchable
-    ~/yeto-output, so each record written by ``yeto.rl.miles._append_rl_event``
-    (driver, learner and adapter events) is printed as
-    ``YETO_RL_EVENT <the exact tape line>``; the launcher rebuilds the tape
-    from the log stream. Idempotent; returns True when installed now.
+    For islands whose ~/yeto-output cannot be fetched (Modal, no-sync): sets
+    ``YETO_RL_ECHO_EVENTS=1`` so the single low-level tape writer
+    (``yeto.rl.event_echo.append_record``, used by the driver, bridge, learner
+    and adapter events) prints each line it writes; Ray workers inherit it
+    (``entry.connect_island_ray``). Idempotent; True when enabled now.
     """
+
+    from .engine import driver
+    from .event_echo import echo_enabled, enable_echo
+
+    if getattr(driver, "_ECHO_EVENTS", False):
+        driver._ECHO_EVENTS = False  # would print driver records a second time
+    if echo_enabled():
+        return False
+    enable_echo()
+    from . import miles
+
+    if "append_record" not in miles._append_rl_event.__code__.co_names:
+        _wrap_legacy_tape_writer(miles)  # a writer not yet on append_record
+    return True
+
+
+def _wrap_legacy_tape_writer(miles) -> None:
+    """Echo for a ``_append_rl_event`` that writes the file itself (pre
+    echo-writers patch): read back exactly the whole lines it appended."""
 
     import threading
 
-    from . import miles
-    from .engine import driver
     from .event_echo import PREFIX
 
-    # This echo covers every record (driver ones included), in the same
-    # format; the driver's own experiment echo would print driver records a
-    # second time with another time_unix, so it is switched off here.
-    if getattr(driver, "_ECHO_EVENTS", False):
-        driver._ECHO_EVENTS = False
-
     original = miles._append_rl_event
-    if getattr(original, "_yeto_echo", False):
-        return False
     lock = threading.Lock()
 
     def echo(args, event):
@@ -337,15 +354,12 @@ def install_event_echo() -> bool:
             with path.open("rb") as handle:
                 handle.seek(before)
                 data = handle.read()
-            # only whole lines (up to the last newline): never a half record
-            written = data[: data.rfind(b"\n") + 1].decode("utf-8")
+        written = data[: data.rfind(b"\n") + 1].decode("utf-8")
         for line in written.splitlines():
             if line.strip():
                 print(PREFIX + line, flush=True)
 
-    echo._yeto_echo = True
     miles._append_rl_event = echo
-    return True
 
 
 def _append_ports_event(args, miles_args, event: dict) -> None:
@@ -1753,7 +1767,9 @@ def run_miles(
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
     _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
-    if rl_engine == "ports" and getattr(args, "rl_single_island_no_sync", False):
+    if rl_engine == "ports" and (
+        getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_echo_events", False)
+    ):
         install_event_echo()
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
