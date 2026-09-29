@@ -356,6 +356,7 @@ EXPECTED_MILES_DECLARED = {
     "features:gdpo",
     "features:mismatch_metrics",
     "corrections:mismatch_observe",
+    "corrections:icepop",
 }
 
 
