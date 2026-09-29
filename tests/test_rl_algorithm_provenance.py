@@ -929,10 +929,12 @@ def sys_modules_sky(monkeypatch):
     return sys.modules["sky"]
 
 
-def test_modal_islands_get_echo_flag_sky_islands_do_not():
+def test_every_ports_island_gets_the_echo_flag_legacy_does_not():
+    # every ports RL island echoes its tape: rl_learner_finalized is how the
+    # launcher tells a shutdown-phase error from an island failure
     modal_run = _island_run(_launcher_args("ports", gpu="modal:1xa100"))
     assert "--rl-echo-events" in modal_run and "--syncer $SYNCER_ADDR" in modal_run
-    assert "--rl-echo-events" not in _island_run(_launcher_args("ports"))
+    assert "--rl-echo-events" in _island_run(_launcher_args("ports"))
     assert "--rl-echo-events" not in _island_run(_launcher_args("legacy", gpu="modal:1xa100"))
     args = rl_learner.parse_args(_learner_argv(("--rl-echo-events",)))
     assert args.rl_echo_events
