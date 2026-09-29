@@ -67,7 +67,7 @@ def group(gi, rewards, token=TOKEN, status=Status.COMPLETED):
 def run_hooks(args, kept, filtered, sink):
     hook.record_trained_groups(args, kept)
     all_samples = sorted(kept + filtered, key=lambda g: g[0].index)
-    hook.put_to_sink(hook.build_metadata(args, all_samples), sink)
+    hook.put_to_sink(hook.build_metadata(args, all_samples, sink), sink)
     for attr in ("_yeto_trained_group_keys", "_yeto_bounded_filter_state"):
         setattr(args, attr, None)
 
