@@ -101,3 +101,10 @@
 - 1b 将让分派器 PluginRef 覆盖所有注册 shaper/transform 的模块，并在 post_process 前 `load_extensions()`、未知 transform 启动前拒绝。2a-shared.patch hunk 1 届时作废。
 - 本 change 保持注册写在 `seq_adv.py`；已确认它在 `EXTENSION_MODULES` 中，单独导入不引入 torch/miles（`python -c "import yeto.rl.algos.seq_adv"` 通过）。
 - 1b 推送后：merge `origin/algo-1b`；删除 `seq_adv_transform_identity` 拒绝规则与 `plugins` 要求（改由分派器哈希覆盖，G1 放行清单去掉 `features:plugins`）；用 `make_examples.py` 重新生成全部示例 spec，重跑 dry-run 证据与全量测试。
+
+## 2026-09-29 主 agent 决定（G1 前提）
+- G1 证据必须对应已提交并推送的 SHA：**不再在上传代码上临时打补丁**（evidence/g1/plan.md 中"plus 2a-shared.patch applied"一条作废，attempt 2 前单独提交修订后的计划）。
+- 等待合入：load_extensions 与哈希覆盖（1b）；梯度收紧、flags 测试、dry-run `__main__` bug、docs（ALGO-CAP，来自 2a-shared.patch / 2a-docs.patch）；R1/R2（INFRA）。另需 P0 无 syncer 单岛入口 SHA 与 1b 修复 grpo_knobs。
+- 1b 推送后撤掉 `plugins` 列 seq_adv 源码哈希与额外放行 `features:plugins` 的做法。
+- 预算上限 $20 获准。7.6 G3 放置：参考 R0 7.1（Modal 2 岛 + 本机 syncer，非 head 模式）。
+- 8.1：基线中 5 条合并引入的失败待 1b/ALGO-CAP 修复后复核。
