@@ -1,0 +1,6 @@
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --extra --gamma 0.9
+{
+  "error": "--gamma changes the training objective but is not part of the algorithm spec yet; it cannot be passed through extra argv",
+  "verdict": "rejected"
+}
+exit=1

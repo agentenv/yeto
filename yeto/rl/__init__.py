@@ -48,7 +48,8 @@ MILES_NEXT_BASE_IMAGE = (
 # installs (pure-Python overlay, scripts/build_miles_ports_image.sh;
 # docker/miles-ports/Dockerfile).  /opt/yeto/image-manifest.json records
 # every SHA.  PRIVATE (ghcr.io/michaellchung): launches pass registry
-# credentials via SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER}.
+# credentials via SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} (ports only; use
+# a read:packages-only token).
 # Tag 0394715-9f29303; linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"

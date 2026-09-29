@@ -188,6 +188,9 @@ class ModalIslandConfig:
     # Request exactly `gpu` ("H100!" -- no H200 upgrade) and fail the
     # container at start-up unless nvidia-smi reports that type.
     gpu_exact: bool = False
+    # Pull image_ref with the SKYPILOT_DOCKER_* login from the launching
+    # process's environment (ports engine; legacy pulls unchanged).
+    registry_login: bool = False
     timeout_s: int = DEFAULT_TIMEOUT_S
     retries: int = DEFAULT_RETRIES
     workdir: str = str(REPO_ROOT)
@@ -239,10 +242,11 @@ def image_ref_from_rl_image(rl_image: str) -> str:
     return ref
 
 
-# SkyPilot's own private-registry login variables (sky.Task envs/secrets;
-# see sky.task._check_docker_login_config).  The launcher reads them from its
-# environment and hands them to SkyPilot as task *secrets* and to Modal as the
-# ``from_registry`` pull secret -- never into the container environment.
+# SkyPilot's private-registry login variables.  The launcher reads them from
+# its environment (ports engine only) and hands them to SkyPilot as the
+# resources' docker_login_config (used for `docker login` at provisioning)
+# and to Modal as the ``from_registry`` pull secret -- not into task envs or
+# the container environment.  Use a token scoped to read:packages only.
 DOCKER_LOGIN_ENV_VARS = (
     "SKYPILOT_DOCKER_USERNAME",
     "SKYPILOT_DOCKER_PASSWORD",
@@ -262,16 +266,17 @@ def registry_host(image_ref: str) -> str:
 def registry_credentials(image_ref: str | None, environ) -> dict[str, str] | None:
     """The SKYPILOT_DOCKER_* login from ``environ`` if it is for the
     registry ``image_ref`` lives on, else None (public image, or a login
-    for some other registry).  A partial login is an error, as in SkyPilot."""
+    for some other registry).  A partial login is an error only when its
+    server is this image's registry (as in SkyPilot)."""
     present = {k: environ[k] for k in DOCKER_LOGIN_ENV_VARS if environ.get(k)}
     if not present or not image_ref:
+        return None
+    server = re.sub(r"^https?://", "", present.get("SKYPILOT_DOCKER_SERVER", "")).rstrip("/")
+    if server.split("/", 1)[0] != registry_host(image_ref):
         return None
     if len(present) != len(DOCKER_LOGIN_ENV_VARS):
         missing = sorted(set(DOCKER_LOGIN_ENV_VARS) - set(present))
         raise ValueError(f"registry login needs all of {DOCKER_LOGIN_ENV_VARS}; missing {missing}")
-    server = re.sub(r"^https?://", "", present["SKYPILOT_DOCKER_SERVER"]).rstrip("/")
-    if server.split("/", 1)[0] != registry_host(image_ref):
-        return None
     return present
 
 
@@ -298,7 +303,7 @@ def check_gpu_names(gpu: str, names: list[str], count: int) -> None:
 def visible_gpu_names() -> list[str]:
     out = subprocess.run(
         ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, timeout=60,
     ).stdout
     return [line.strip() for line in out.splitlines() if line.strip()]
 
@@ -323,7 +328,7 @@ def island_main(cfg_json: str) -> int:
     print(f"[modal-island {cfg.learner_id}] rank {rank}/{len(ips)} starting", flush=True)
     try:
         names = visible_gpu_names()
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         if cfg.gpu_exact:
             raise RuntimeError(f"island {cfg.learner_id}: cannot read GPU names: {exc}") from exc
         names = []
@@ -359,7 +364,7 @@ class ModalOps:
     def build_image(self, cfg: ModalIslandConfig):
         modal = self._modal()
         if cfg.training_mode == "rl":
-            creds = registry_credentials(cfg.image_ref, os.environ)
+            creds = registry_credentials(cfg.image_ref, os.environ) if cfg.registry_login else None
             if creds:  # private registry (e.g. MILES_NEXT_IMAGE on ghcr.io)
                 image = modal.Image.from_registry(
                     cfg.image_ref,
@@ -655,6 +660,7 @@ def config_from_cli(ns: argparse.Namespace) -> ModalIslandConfig:
         envs=envs,
         region=ns.region,
         gpu_exact=ns.gpu_exact,
+        registry_login=bool(ns.rl_image),
         image_ref=image_ref_from_rl_image(ns.rl_image) if ns.rl_image else None,
         pip_requirements=reqs,
     )

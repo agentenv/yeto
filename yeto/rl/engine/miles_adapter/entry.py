@@ -24,7 +24,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
-from ..capabilities import EngineCapabilities
+from ..capabilities import EngineCapabilities, ExecutionCapabilities
 from . import LoopRunner
 
 ENGINE_NAME = "miles-upstream"
@@ -38,10 +38,22 @@ def runtime_fingerprint(launch: Any, miles_commit: str) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def miles_capabilities(fingerprint: str) -> EngineCapabilities:
-    """R0 ports capabilities (spec rl-engine-selection support matrix)."""
+def miles_capabilities(
+    fingerprint: str, *, unverified_mechanisms=()
+) -> EngineCapabilities:
+    """R0 ports capabilities (spec rl-engine-selection support matrix).
 
-    return EngineCapabilities(
+    Mechanism dimensions are the R0 set (``EngineCapabilities`` defaults:
+    grpo, policy_loss, default aggregation, KL none/reward, no correction,
+    the nonzero-std filters); a follow-up algorithm change adds a mechanism
+    here only after its single-GPU smoke (G1) passed. ``execution``
+    (rl-algorithm-capabilities D4, alignment A1): no critic, serial
+    colocated produces policy age 0, and upstream SGLang rollouts return
+    logprobs (``sglang_rollout.py`` ``return_logprob=True``).
+    ``unverified_mechanisms`` is the single-island D11 allowance.
+    """
+
+    capabilities = EngineCapabilities(
         engine=ENGINE_NAME,
         runtime_fingerprint=fingerprint,
         parameter_layouts={"lora"},
@@ -49,7 +61,13 @@ def miles_capabilities(fingerprint: str) -> EngineCapabilities:
         advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
+        execution=ExecutionCapabilities(
+            critic=False, max_policy_staleness=0, rollout_logprobs=True
+        ),
     )
+    if unverified_mechanisms:
+        capabilities = capabilities.with_unverified(unverified_mechanisms)
+    return capabilities
 
 
 def build_sync(miles_args: Any, *, yeto_policy_sync: bool) -> tuple[Any, Any]:
@@ -170,14 +188,32 @@ def compose_island(
     return driver
 
 
-def selection_event(*, launch: Any, algorithm: AlgorithmSpec, miles_commit: str) -> dict[str, Any]:
-    return {
+def selection_event(
+    *,
+    launch: Any,
+    algorithm: AlgorithmSpec,
+    miles_commit: str,
+    unverified_mechanisms: Any = (),
+) -> dict[str, Any]:
+    """Run event carrying the algorithm identity (D9) and its provenance.
+
+    ``rl/algorithm_absorbed_flags`` lists flags absorbed from extra argv
+    (D3); ``rl/unverified_mechanisms`` the D11 allowances (an artifact of
+    such a run contains unverified mechanisms).
+    """
+
+    event = {
         "event": "rl_engine_selected",
         "rl_engine": "ports",
         "miles_commit": miles_commit,
         "rl/algorithm_spec_sha256": algorithm.sha256(),
+        "rl/algorithm_spec": algorithm.canonical_json(),
+        "rl/algorithm_absorbed_flags": dict(getattr(launch, "absorbed_flags", None) or {}),
         "placement": launch.placement.kind,
     }
+    if unverified_mechanisms:
+        event["rl/unverified_mechanisms"] = sorted(unverified_mechanisms)
+    return event
 
 
 def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
@@ -244,7 +280,12 @@ def run_ports_island(
 
     _append_rl_event(
         miles_args,
-        selection_event(launch=launch, algorithm=algorithm, miles_commit=MILES_NEXT_COMMIT),
+        selection_event(
+            launch=launch,
+            algorithm=algorithm,
+            miles_commit=MILES_NEXT_COMMIT,
+            unverified_mechanisms=getattr(miles_args, "yeto_rl_unverified_mechanisms", ()),
+        ),
     )
     runner = LoopRunner()
     disposer = Disposer()
@@ -288,7 +329,12 @@ def run_ports_island(
             sync=sync,
             progress=progress,
             metadata=RayMetadataSink(),
-            capabilities=miles_capabilities(runtime_fingerprint(launch, MILES_NEXT_COMMIT)),
+            capabilities=miles_capabilities(
+                runtime_fingerprint(launch, MILES_NEXT_COMMIT),
+                unverified_mechanisms=getattr(
+                    miles_args, "yeto_rl_unverified_mechanisms", ()
+                ),
+            ),
             runner=runner,
             evaluate=lambda rollout_id: runner.run(evaluate(rollout_id)),
             eval_interval=getattr(miles_args, "eval_interval", None),

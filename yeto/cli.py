@@ -198,6 +198,37 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-algorithm-spec",
+        default=None,
+        metavar="PATH",
+        help=(
+            "AlgorithmSpec JSON (v1 or v2) for --rl-engine ports; the launcher "
+            "sends each island its canonical form and expected hash"
+        ),
+    )
+    rl.add_argument(
+        "--rl-placement",
+        choices=["colocated", "fixed-partition"],
+        default="colocated",
+        help="ports: colocated (default) or a LoRA fixed partition (rl-infra-spec 2.1)",
+    )
+    rl.add_argument(
+        "--rl-standby-gpus",
+        type=int,
+        default=0,
+        help="ports fixed partition: reserved standby GPUs never started by any role",
+    )
+    rl.add_argument(
+        "--rl-allow-unverified-mechanism",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "ports single-island smoke only: admit an expressible but "
+            "undeclared mechanism (recorded in events and provenance)"
+        ),
+    )
+    rl.add_argument(
         "--rl-offload-train",
         action="store_true",
         help=(
