@@ -46,6 +46,9 @@ _E1B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
 _E1B_B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1b"
 _E1B_C = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1c"
 _E1B_G1F = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1f"
+_E1B_G1H = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1h"
+_E1B_G1I = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1i"
+_E1B_G1J = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1j"
 _E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
 MILES_DECLARED: dict[str, str] = {
     "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
@@ -86,6 +89,37 @@ MILES_DECLARED: dict[str, str] = {
         "sha256:c6f5455c... inferred from the pin and verified from source by the main "
         "agent (launch.log printed no digest)"
     ),
+    "features:over_sampling": (
+        f"{_E1B_G1H} (branch algo-1b-os d53397d, conclusion rewritten 3fec259): the "
+        "pre-registered criteria (a)(b) are literally met but discriminate weakly; the "
+        "decisive evidence is the over_sampling arm's rollout 1 (submitted 8, aborted 4, "
+        "filtered 0 -- inferred afterwards from the rollout_meta_hook formula, one round "
+        "only) and the two arms' parameter tables differing only in "
+        "over_sampling_batch_size; strong evidence awaits a rerun once Miles records the "
+        "batch size of every submission. Miles 0af62f4d only"
+    ),
+    "features:overlong_filter": (
+        f"{_E1B_G1I} (branch algo-1b-os bf9f914): paired (step-1 raw_reward 0.65625 both "
+        "arms, truncation rate 0.5); (a) of_on filtered_samples 16/16/31, (b) of_off None, "
+        "(c) step-1 grad_norm 0.5647 vs 0.6329; round 3 (31/32 filtered) raised no "
+        "zero-gradient false alarm. Requires the 1b hook (integ-decl 21912fe or later: "
+        "rollout_meta_hook applies the sample filter before recording trained groups). "
+        "Miles 0af62f4d only"
+    ),
+    "features:clip_higher": (
+        f"{_E1B_G1J} (branch algo-1b 53cb477): 6 groups x 3 steps, seed 17; step-1 "
+        "grad_norm bit-identical in both arms (1.1293506622314453), round-1 step-3 "
+        "grad_norm A 0.5642 vs B 0.6572 -- pre-registered criterion met. Nature of the "
+        "evidence: a deterministic same-seed reproduction of the post-hoc g1e observation "
+        "(step-2 grad_norm differs; g1j's first two steps are bit-identical to g1e), not "
+        "an independent confirmation; the attribution holds (the arms differ only in "
+        "eps_clip_high, step 1 bit-identical). RAN ON Miles "
+        "0394715, not the pinned 0af62f4d: transferred because `git diff 0394715..0af62f4d "
+        "-- miles` (13 files, checked by the main agent and ALGO-CAP) touches no "
+        "loss/policy file and leaves the clip path unchanged -- a code-diff argument, not "
+        "a run on 0af62f4d. Open: suspected pg_clipfrac vs loss inconsistency "
+        "(2026-09-29-clipfrac-offline/report.md). Miles 0af62f4d only"
+    ),
 }
 
 
@@ -95,6 +129,9 @@ MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
     # grad_norm bit-identical to the baseline)
     "loss_aggregations:token": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+    "features:over_sampling": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+    "features:overlong_filter": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+    "features:clip_higher": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
 }
 
 

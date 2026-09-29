@@ -657,7 +657,10 @@ each with its evidence, are the `MILES_DECLARED` table in
   (rl-algo-mismatch-correction);
 - loss_aggregations: constant, token (token only on Miles 0af62f4d+, where
   the LoRA bridge honours calculate_per_token_loss; entry.MILES_DECLARED_PINS
-  withholds it under other pins); features: kl_loss_ref_model, entropy_bonus,
+  withholds it under other pins); features: over_sampling (Miles 0af62f4d only;
+  weak evidence, see MILES_DECLARED), overlong_filter (Miles 0af62f4d; needs
+  the rollout hook of integ-decl 21912fe+), clip_higher (Miles 0af62f4d; run on
+  0394715 and transferred by a code diff, see MILES_DECLARED), kl_loss_ref_model, entropy_bonus,
   overlong_penalty, no_grpo_std_normalization (g1c isolated control), eps_clip
   (g1b run A-r1; eps 0.001/0.002 are trigger test values, not
   recommendations); kl_placements: loss; reward_postprocessors:
@@ -683,9 +686,8 @@ undeclared mechanism.
 
 Not declared, pending evidence or approval:
 
-- clip_higher: withdrawn because pg_clipfrac sums both bounds; an
-  isolating probe is planned. dual_clip, over_sampling;
-- overlong_filter, mis, opsm_rollout, generic corrections:custom;
+- dual_clip;
+- mis, opsm_rollout, generic corrections:custom;
 - features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
   reducer, and that reducer is claimed by `loss_aggregations:constant`
   (`register_named_reducer`).
@@ -699,7 +701,7 @@ undeclared mechanisms.
 Measured on integ-decl with the committed example specs:
 
 - accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
-- refused: dapo-like (clip_higher, over_sampling);
+- accepted: dapo-like;
 - dr-grpo is accepted after the no_grpo_std_normalization re-declaration. Its
   reducer is claimed by `constant` only at the evidenced source hash.
 
@@ -772,6 +774,7 @@ the run exit 3. A synced run still fetches its checkpoint first.
 | 3 | incomplete island event tape |
 | 4 | a fixed-roster RL island could not be recovered |
 | 5 | the Modal app was not confirmed stopped after teardown |
+| 6 | the run stalled: no island event for `--rl-stall-timeout` seconds (default 900, 0 disables) and not every island finalized |
 
 For exit 5, every row of `modal app list` with the run's app name must be
 `stopped` with 0 tasks; an earlier run's row with the same name counts too.
@@ -781,6 +784,12 @@ The launcher checks at most 5 times. It prints a WARN
 naming the `modal app stop` command to run by hand. The result is written to
 `<run dir>/teardown.json`. Exit 5 takes precedence over 0/2/3/4, because a
 possibly still-running app matters more than the run's own outcome.
+
+The stall check needs the event echo, so it applies to every ports RL
+island. Its clock starts at the first received event, so islands still pulling
+their image or loading the model do not count as stalled. On a stall the
+launcher drains the tapes (bounded), tears everything down and does not
+relaunch. A typical cause is a dead island-syncer connection.
 
 Strict syncer failures, strict RL job failures, "all learners abandoned" and
 internal errors propagate as exceptions (exit 1 from the CLI worker).
