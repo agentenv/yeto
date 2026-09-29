@@ -50,6 +50,10 @@ class GroupMetadata:
     reward_mean: float
     reward_std: float
     token_count: int
+    # Samples of this kept group masked out of the loss by a spec-selected
+    # sample filter (rl-algo-grpo-knobs D7; ledger terminal state
+    # ``filtered``, alignment A2/F5). None: no sample filter configured.
+    filtered_samples: int | None = None
 
 
 @dataclass(frozen=True)

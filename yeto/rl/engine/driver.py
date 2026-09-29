@@ -261,6 +261,13 @@ def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
     }
 
 
+def _filtered_samples(batch: RolloutBatchHandle) -> int | None:
+    counts = [getattr(g, "filtered_samples", None) for g in batch.groups]
+    if all(c is None for c in counts):
+        return None
+    return sum(int(c or 0) for c in counts)
+
+
 def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
     import hashlib
 
@@ -757,6 +764,10 @@ class IslandDriver:
             clip_fraction=metrics.clip_fraction,
             applied_lrs=list(metrics.applied_lrs) if metrics.applied_lrs else None,
             nonzero_advantages=getattr(batch, "nonzero_advantages", None),
+            # A2/F5 terminal ``filtered`` at sample level: samples of trained
+            # groups masked by a spec-selected sample filter (1b D7); None when
+            # no sample filter is configured.
+            filtered_samples=_filtered_samples(batch),
             **self._mismatch_fields(),
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
