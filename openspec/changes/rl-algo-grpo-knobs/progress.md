@@ -208,3 +208,11 @@
 2. 1b-docs.patch 合入后勾选 5.5、6.4、7.3。
 3. P0 4.2 与 1b-hook.patch 都合入后，补 6.5 的 fake driver 测试。
 4. harness 确定后执行 8.x。
+
+## SHA 核对（主 agent 要求，2026-09-29）
+- 本轮向主 agent 报错过 4 次 SHA：9b7c6c8→604078e、8ab4d2e→ac0d382、675a2be→d53397d、f26d5e3→3fec259，均已更正。
+- 核对方法：对 algo-1b、algo-1b-os、algo-1b-token 三个分支中本 change 的全部 .md 文件，提取其中的十六进制串，逐个做 `git cat-file -e <sha>^{commit}`，yeto 中不存在的再到 miles-next/sglang-next 中查。
+- 结果：没有无效引用。在 yeto 中查不到的只有两类：
+  - Miles 仓库的提交或 blob（9e4260d、0394715、96390ac3，已在 miles-next 中确认）；
+  - 文件 sha256 前缀（ff7448c0、2fe93181），它们不是提交号。
+- 今后报告 SHA 前先 `git fetch`，再用 `git log -1 --format=%h` 或 `git rev-parse --short origin/<branch>` 取值，直接粘贴命令输出。
