@@ -485,6 +485,8 @@ class _Actor:
             return [{"ok": True}, {"ok": True}]
         if fn_path == state_plugin.GRAD_NORM:
             return [self.norm]
+        if fn_path == state_plugin.APPLIED_LRS:
+            return [[1e-5]]
         raise AssertionError(fn_path)
 
     async def train(self, rollout_id, pack):

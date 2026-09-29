@@ -172,6 +172,9 @@ def parse_args(argv=None):
         parser.error("LoRA mode requires --lora-r and --lora-targets")
     if (args.parameter_mode == "full") != (args.sync_preset == "dense-full"):
         parser.error("--parameter-mode full requires --sync-preset dense-full")
+    if not args.eval_only and not args.inner_lr > 0:
+        # A zero LR would only surface as the zero-LR invariant failing round 1.
+        parser.error(f"--inner-lr must be > 0 for a training run (got {args.inner_lr})")
     if args.rl_engine == "ports":
         try:
             _require_ports_supported(args)
@@ -893,6 +896,7 @@ def _legacy_miles_argv(config) -> list[str]:
     from .engine.run_config import (
         RECIPE_DEEPSEEK_V4_FLASH,
         RECIPE_QWEN3_5,
+        lr_schedule_argv,
     )
 
     geometry = config.geometry
@@ -1003,6 +1007,7 @@ def _legacy_miles_argv(config) -> list[str]:
         "--over-sampling-batch-size", str(batch.over_sampling_batch_size),
         "--num-steps-per-rollout", str(batch.optimizer_steps),
         "--global-batch-size", str(batch.global_batch),
+        *lr_schedule_argv(config.algorithm.lr_schedule),
         "--balance-data",
         "--rollout-max-context-len", str(batch.seq_len),
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
@@ -1700,6 +1705,7 @@ def run_miles(
             target_modules=miles_targets,
             yeto_policy_sync=yeto_policy_sync,
         )
+        _reject_lr_schedule_overrides(extra_argv)
         miles_argv.extend(extra_argv)
         miles_args = _parse_miles_args(miles_argv)
 
@@ -1930,6 +1936,10 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
             )
 
+    if yeto_policy_sync:
+        _configure_applied_lr(
+            args, miles_args, rl_engine, dense_full=dense_full
+        )
     _configure_grad_audit(args, miles_args, rl_engine)
 
     if rl_engine == "ports":
@@ -1956,6 +1966,50 @@ def run_miles(
     print(f"[rl] learner {args.learner_id} finalized")
 
 
+def _reject_lr_schedule_overrides(extra_argv: Sequence[str]) -> None:
+    """Legacy twin of the ports ``check_extra_argv`` LR-schedule check.
+
+    The schedule is decided by ``resolve_lr_schedule``; an extra-argv override
+    (e.g. warmup, or a decay style for decoupled) would silently diverge from
+    ports and could trip or defeat the zero-LR invariant.
+    """
+
+    from .engine.run_config import LR_SCHEDULE_FLAGS
+
+    for token in extra_argv:
+        flag = str(token).split("=", 1)[0]
+        if flag in LR_SCHEDULE_FLAGS:
+            raise ValueError(
+                f"{flag} is owned by yeto's LR schedule and cannot be overridden"
+            )
+
+
+def _configure_applied_lr(args, miles_args, rl_engine: str, *, dense_full: bool) -> bool:
+    """Legacy: record each optimizer step's applied LR (zero-LR invariant, D4).
+
+    Ports reads it in the state plugin's ``train_one_step`` recorder. Legacy
+    uses the fork's before-train-step hook with the combined
+    :data:`yeto.rl.applied_lr.HOOK_PATH`, which also runs the grad audit hook
+    when that is configured (``_configure_grad_audit`` keeps it).
+    """
+
+    from . import applied_lr
+
+    if rl_engine == "ports" or dense_full or getattr(args, "eval_only", False):
+        return False
+    existing = getattr(miles_args, "custom_megatron_before_train_step_hook_path", None)
+    if existing and existing != applied_lr.HOOK_PATH:
+        raise ValueError(
+            f"applied-LR recording conflicts with before-train-step hook {existing!r}"
+        )
+    parent = Path(args.event_tape).expanduser().parent
+    parent.mkdir(parents=True, exist_ok=True)
+    directory = tempfile.mkdtemp(prefix=f"applied-lr-{args.learner_id}-", dir=parent)
+    setattr(miles_args, applied_lr.APPLIED_LR_DIR_ATTR, directory)
+    miles_args.custom_megatron_before_train_step_hook_path = applied_lr.HOOK_PATH
+    return True
+
+
 def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
     """``YETO_RL_AUDIT_GRADS=1`` (teacher forcing, design D12): export pre-clip LoRA grads.
 
@@ -1973,7 +2027,13 @@ def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
         raise ValueError(f"{grad_audit.GRAD_AUDIT_ENV}=1 requires an audit_dir")
     setattr(miles_args, grad_audit.GRAD_AUDIT_DIR_ATTR, str(Path(directory).expanduser()))
     if rl_engine != "ports":
+        from . import applied_lr
+
         existing = getattr(miles_args, "custom_megatron_before_train_step_hook_path", None)
+        if existing == applied_lr.HOOK_PATH:
+            # Combined hook: records the applied LR, then runs the grad audit
+            # (it reads the audit directory set above).
+            return True
         if existing and existing != grad_audit.HOOK_PATH:
             raise ValueError(
                 f"{grad_audit.GRAD_AUDIT_ENV}=1 conflicts with before-train-step hook {existing!r}"
