@@ -257,3 +257,67 @@ def test_legacy_decoupled_round_exhausting_the_budget_is_final(tmp_path):
             hook._after_local_train(rollout_id=0, actor_model=hook.actor_model, rollout_data=object())
         )
     assert calls == ["consolidate"]
+
+
+# ---------------------------------------------------------------------------
+# Review F2/F3: legacy rejects LR-schedule overrides; zero inner LR fails at startup.
+
+
+@pytest.mark.parametrize("flag", ["--lr-decay-style", "--lr-decay-iters", "--lr-warmup-iters", "--min-lr"])
+@pytest.mark.parametrize("form", ["split", "equals"])
+def test_legacy_rejects_lr_schedule_overrides_like_ports(flag, form):
+    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.engine.run_config import LR_SCHEDULE_FLAGS
+    from yeto.rl.learner import _reject_lr_schedule_overrides
+
+    extra = [flag, "5"] if form == "split" else [f"{flag}=5"]
+    assert flag in LR_SCHEDULE_FLAGS and flag in mc.ADAPTER_OWNED_FLAGS
+    with pytest.raises(ValueError, match=f"{flag} is owned by yeto's LR schedule"):
+        _reject_lr_schedule_overrides(extra)
+    with pytest.raises(mc.MilesConfigError, match=flag):
+        mc.check_extra_argv(extra)
+
+
+def test_legacy_allows_unrelated_extra_argv():
+    from yeto.rl.learner import _reject_lr_schedule_overrides
+
+    _reject_lr_schedule_overrides(["--lr", "1e-5", "--clip-grad", "1.0", "--lr-decay-foo", "x"])
+
+
+def test_legacy_build_path_calls_the_lr_override_check():
+    import inspect
+
+    from yeto.rl import learner
+
+    source = inspect.getsource(learner)
+    check = source.index("_reject_lr_schedule_overrides(extra_argv)")
+    assert check < source.index("miles_argv.extend(extra_argv)")
+
+
+@pytest.mark.parametrize("lr", ["0", "0.0", "-0.00001"])
+def test_learner_rejects_non_positive_inner_lr_before_start(lr, capsys):
+    from test_rl_engine_selection import _learner_argv
+
+    from yeto.rl import learner
+
+    argv = _learner_argv()
+    argv[argv.index("--inner-lr") + 1] = lr
+    with pytest.raises(SystemExit):
+        learner.parse_args(argv)
+    assert "--inner-lr must be > 0" in capsys.readouterr().err
+    argv += ["--eval-only"]  # eval-only never steps the optimizer
+    try:
+        learner.parse_args(argv)
+    except SystemExit:
+        assert "--inner-lr must be > 0" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("lr", ["0", "-0.00001"])
+def test_launcher_rejects_non_positive_inner_lr_before_launch(lr):
+    from test_rl_engine_selection import _cli
+
+    from yeto.launcher import _prepare_rl_args
+
+    args = _cli(("--inner-lr", lr))
+    with pytest.raises(ValueError, match=r"--inner-lr > 0"):
+        _prepare_rl_args(args)

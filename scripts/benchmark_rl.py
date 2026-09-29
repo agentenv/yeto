@@ -197,6 +197,18 @@ def workload(
     }
 
 
+def local_rounds(args) -> int:
+    """Local RL rounds each island runs (its learner budget).
+
+    Equals ``--global-rounds`` unless a decoupled-only run sets
+    ``--learner-budget-steps`` to let islands run past the LR/num-rollout
+    horizon (``global_rounds * optimizer_steps``), like head-mode run-until-stop.
+    """
+
+    budget = getattr(args, "learner_budget_steps", None)
+    return args.global_rounds if budget is None else budget
+
+
 def validate_workload(args) -> None:
     for name in (
         "global_rounds",
@@ -210,6 +222,12 @@ def validate_workload(args) -> None:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if args.optimizer_steps != 1:
         raise ValueError("Miles RL benchmark requires one optimizer step per rollout")
+    budget = getattr(args, "learner_budget_steps", None)
+    if budget is not None:
+        if budget < args.global_rounds:
+            raise ValueError("--learner-budget-steps must be >= --global-rounds")
+        if not getattr(args, "arms", None) or set(parse_arm_kinds(args.arms)) != {"decoupled"}:
+            raise ValueError("--learner-budget-steps requires --arms decoupled")
     if args.gpus_per_island % args.pipeline_parallel:
         raise ValueError("--pipeline-parallel must divide --gpus-per-island")
     samples = args.groups_per_island * args.samples_per_group
@@ -382,6 +400,7 @@ def syncer_command(
     *,
     rounds: int,
     resume_from_step: int | None = None,
+    budget_steps: int | None = None,
 ) -> list[str]:
     if resume_from_step is not None and arm.kind != "decoupled":
         raise ValueError("only decoupled benchmark consolidation can resume")
@@ -432,7 +451,7 @@ def syncer_command(
         if consolidation:
             command.extend(("--resume", "--mark-final-checkpoint"))
         else:
-            command.extend(("--learner-budget-steps", str(rounds)))
+            command.extend(("--learner-budget-steps", str(budget_steps or rounds)))
     elif (run_dir / "state.ckpt").is_file():
         # Strict arms resume an existing authoritative checkpoint; a fresh run
         # has none, and the syncer refuses --resume without the file.
@@ -621,7 +640,7 @@ def worker_payload(
             pipeline=arm.pipeline,
             local_horizon=arm.local_horizon,
             total_fragment_steps=args.global_rounds * arm.fragments,
-            learner_budget_steps=args.global_rounds,
+            learner_budget_steps=local_rounds(args),
         )
     return {
         "arguments": values,
@@ -1343,6 +1362,7 @@ def _run_training_processes(
                         port,
                         run_dir,
                         rounds=args.global_rounds,
+                        budget_steps=local_rounds(args),
                     ),
                     cwd=REPO_ROOT,
                     stdout=syncer_handle,
@@ -1412,7 +1432,7 @@ def _run_training_processes(
                     cutoff_step=cutoff_step,
                     fragments=arm.fragments,
                     learners=arm.islands,
-                    budget_steps=args.global_rounds,
+                    budget_steps=local_rounds(args),
                 )
             else:
                 _wait_for_training(
@@ -1753,7 +1773,7 @@ def run_arm(
             pipeline=arm.pipeline,
             local_horizon=arm.local_horizon,
             benchmark_learner_budget_steps=(
-                args.global_rounds if arm.kind == "decoupled" else None
+                local_rounds(args) if arm.kind == "decoupled" else None
             ),
             rl_engine=getattr(args, "rl_engine", "ports"),
         )
@@ -1773,7 +1793,7 @@ def run_arm(
         tuple(
             rollout_dump_dir(run_dir, worker.learner_id, getattr(args, "rl_engine", "ports"))
             / f"{round_id}.pt"
-            for round_id in range(args.global_rounds)
+            for round_id in range(local_rounds(args))
         )
         for worker in workers
     )
@@ -1789,7 +1809,7 @@ def run_arm(
     )
     expected_work = workload(
         arm,
-        rounds=args.global_rounds,
+        rounds=local_rounds(args),
         samples_per_group=args.samples_per_group,
     )
     if (
@@ -1798,7 +1818,7 @@ def run_arm(
     ):
         raise RuntimeError("Miles completed work does not match the paired budget")
     sync = None if arm.kind == "native" else summarize_yeto_events(run_dir, arm.islands)
-    if sync is not None and sync["local_rounds"] != arm.islands * args.global_rounds:
+    if sync is not None and sync["local_rounds"] != arm.islands * local_rounds(args):
         raise RuntimeError("Yeto event tape is missing a local RL round")
 
     wait_for_free_gpus()
@@ -2035,7 +2055,7 @@ def materialize_prompt_matrix(
             f"prompt dataset has {total_rows} rows; need more than {args.eval_prompts}"
         )
     train_rows = total_rows - args.eval_prompts
-    required = max(islands) * args.groups_per_island * args.global_rounds
+    required = max(islands) * args.groups_per_island * local_rounds(args)
     source_train = [dict(dataset[index]) for index in range(min(train_rows, required))]
     evaluation = [dict(dataset[index]) for index in range(train_rows, total_rows)]
     output = {}
@@ -2044,7 +2064,7 @@ def materialize_prompt_matrix(
             source_train,
             islands=m,
             groups=args.groups_per_island,
-            rounds=args.global_rounds,
+            rounds=local_rounds(args),
         )
         paths = write_prompt_files(
             streams,
@@ -2474,6 +2494,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--islands", default="2")
     parser.add_argument("--seeds", default="17,29,43")
     parser.add_argument("--global-rounds", type=int, default=8)
+    parser.add_argument(
+        "--learner-budget-steps",
+        type=int,
+        default=None,
+        help=(
+            "decoupled only: local RL rounds per island (default --global-rounds); "
+            "set above --global-rounds to run past the LR horizon"
+        ),
+    )
     parser.add_argument("--groups-per-island", type=int, default=4)
     parser.add_argument("--samples-per-group", type=int, default=4)
     parser.add_argument("--over-sampling-batch-size", type=int, default=None)
