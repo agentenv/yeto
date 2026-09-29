@@ -614,3 +614,100 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
     assert code == 2  # Modal island output is not fetchable; says so honestly
     err = capsys.readouterr().err
     assert "--rl-single-island-no-sync" in err and "recover the model from" not in err
+
+
+def test_no_sync_event_echo_matches_tape(tmp_path, monkeypatch, capsys):
+    from yeto.rl import miles
+
+    monkeypatch.setattr(miles, "_append_rl_event", miles._append_rl_event)
+    assert rl_learner.install_event_echo() is True
+    assert rl_learner.install_event_echo() is False  # idempotent
+    tape = tmp_path / "tape.jsonl"
+    ns = SimpleNamespace(yeto_rl_event_tape=str(tape), yeto_rl_learner_id=0)
+    miles._append_rl_event(ns, {"event": "rl_engine_selected", "x": 1})
+    miles._append_rl_event(ns, {"event": "rl_round_trained", "masked_fraction": 0.5})
+    echoed = [l[len("YETO_RL_EVENT "):] for l in capsys.readouterr().out.splitlines()
+              if l.startswith("YETO_RL_EVENT ")]
+    assert echoed == tape.read_text().splitlines()
+
+
+def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
+    """Island echo -> Modal log stream -> launcher collector == island tape."""
+    import yeto.launcher as launcher
+    import yeto.modal_runner as modal_runner
+    from yeto import runs
+    from yeto.rl import miles
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    # the island side: produce the echoed log with the real echo
+    monkeypatch.setattr(miles, "_append_rl_event", miles._append_rl_event)
+    rl_learner.install_event_echo()
+    island_tape = tmp_path / "island.jsonl"
+    ns = SimpleNamespace(yeto_rl_event_tape=str(island_tape), yeto_rl_learner_id=0)
+    launch = _launch()
+    miles._append_rl_event(ns, selection_event(
+        launch=launch, algorithm=launch.algorithm, miles_commit="x",
+        unverified_mechanisms=("features:clip_higher",), outer_sync=False))
+    for r in range(3):
+        miles._append_rl_event(ns, {"event": "rl_round_trained", "rollout_id": r})
+    miles._append_rl_event(ns, {"event": "rl_learner_finalized"})
+    log = ["noise line"] + capsys.readouterr().out.splitlines()
+    log = log + log[:3]  # a reconnecting stream replays lines
+
+    class FakeModalOps:
+        def __init__(self, app_name):
+            self.app_name = app_name
+
+        def define(self, cfg):
+            pass
+
+        def deploy(self):
+            pass
+
+        def spawn(self, cfg):
+            return "fc-1"
+
+        def status(self, call_id):
+            return "SUCCEEDED"
+
+        def cancel(self, call_id):
+            pass
+
+        def stop_app(self):
+            pass
+
+        def tail_logs(self, call_id, entries=100):
+            return []
+
+        def stream_logs(self, call_id):
+            yield from log
+
+    monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    monkeypatch.setattr(launcher, "warn_if_model_wont_fit", lambda *a, **k: None)
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local",
+                                    "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100")
+    args.keep = False
+    assert launcher.run(args) == 2
+    [local] = list((tmp_path / "runs" / args.cluster_prefix / "events").glob("*.jsonl"))
+    assert local.read_text() == island_tape.read_text()  # line for line
+    # and --rl-event-tape export reads it
+    from yeto.rl.export import algorithm_from_event_tape
+
+    spec, mechanisms = algorithm_from_event_tape(local)
+    assert spec == launch.algorithm.canonical_json()
+    assert mechanisms == ("features:clip_higher",)
+
+
+def test_event_echo_format_and_extract(tmp_path):
+    from yeto.rl import event_echo
+
+    record = {"island_id": 0, "time_unix": 1.5, "event": "x", "b": [1]}
+    line = event_echo.format_record(record)
+    assert line == 'YETO_RL_EVENT {"b":[1],"event":"x","island_id":0,"time_unix":1.5}'
+    log = tmp_path / "head.log"
+    log.write_text(f"[yeto-l0] {line}\nnoise\n[yeto-l0] {line}\nYETO_RL_EVENT {{bad\n")
+    out = tmp_path / "tape.jsonl"
+    assert event_echo.main([str(log), str(out)]) == 0
+    assert out.read_text() == line[len("YETO_RL_EVENT "):] + "\n"

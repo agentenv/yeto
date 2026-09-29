@@ -302,6 +302,50 @@ def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
     )
 
 
+def install_event_echo() -> bool:
+    """--rl-single-island-no-sync: echo every tape record to stdout.
+
+    Such an island has no syncer tape and (on Modal) no fetchable
+    ~/yeto-output, so each record written by ``yeto.rl.miles._append_rl_event``
+    (driver, learner and adapter events) is printed as
+    ``YETO_RL_EVENT <the exact tape line>``; the launcher rebuilds the tape
+    from the log stream. Idempotent; returns True when installed now.
+    """
+
+    import threading
+
+    from . import miles
+    from .engine import driver
+    from .event_echo import PREFIX
+
+    # This echo covers every record (driver ones included), in the same
+    # format; the driver's own experiment echo would print driver records a
+    # second time with another time_unix, so it is switched off here.
+    if getattr(driver, "_ECHO_EVENTS", False):
+        driver._ECHO_EVENTS = False
+
+    original = miles._append_rl_event
+    if getattr(original, "_yeto_echo", False):
+        return False
+    lock = threading.Lock()
+
+    def echo(args, event):
+        with lock:
+            path = Path(args.yeto_rl_event_tape).expanduser()
+            before = path.stat().st_size if path.exists() else 0
+            original(args, event)
+            with path.open("rb") as handle:
+                handle.seek(before)
+                written = handle.read().decode("utf-8")
+        for line in written.splitlines():
+            if line.strip():
+                print(PREFIX + line, flush=True)
+
+    echo._yeto_echo = True
+    miles._append_rl_event = echo
+    return True
+
+
 def _append_ports_event(args, miles_args, event: dict) -> None:
     from .miles import _append_rl_event
 
@@ -1707,6 +1751,8 @@ def run_miles(
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
     _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
+    if rl_engine == "ports" and getattr(args, "rl_single_island_no_sync", False):
+        install_event_echo()
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
         from .engine.miles_adapter.state import require_run_plugin
