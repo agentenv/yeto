@@ -668,11 +668,13 @@ Not declared, pending evidence or approval:
 - overlong_filter, mis, opsm_rollout, generic corrections:custom.
 - features:custom_pg_loss_reducer: it would admit any reducer plugin, and only
   the Dr.GRPO reducer has evidence.
-- eps_clip / clip_higher as GSPO's mandatory clip, and whiten_advantages as
-  REINFORCE++'s mandatory normalization.
 
-Because of the last two items, dr-grpo, gspo and rpp specs are still refused,
-each on its supporting feature.
+Settings an estimator mandates are claimed by that estimator's mechanism in
+that combination only (`ESTIMATOR_COMPANIONS`; main-agent decision, may be
+overridden by the user): GSPO's explicit clip range and the rpp family's
+advantage whitening. The same settings under grpo are still separate,
+undeclared mechanisms. dr-grpo stays refused until 1b restricts the reducer to
+its own reducer.
 
 "Expressible, not enabled" means the spec can describe and translate a
 mechanism, but `miles_capabilities` does not declare it yet. A follow-up

@@ -130,3 +130,4 @@ GPU 验证：本 change 不需要，也没有做。没有使用任何云资源�
 - 保留 `corrections:opsm`：它是所有来源特定 OPSM 机制都需要的维度，证据是 trigger 中 opsm_clipfrac > 0；它不会放行 opsm_rollout，后者需要自己的机制名。
 - IcePop：命名修正函数现在也接受 `miles.` 内置函数（源码哈希照样固定），所以 icepop 由 corrections:icepop 认领，不再要求通用 custom。
 - 全量失败集合与 /tmp/integ-fail.ids（94 个）逐 id 相同；六个 change 的 validate --strict 都通过；2a/1b 的示例 spec 插件哈希都是最新的（make_examples 重跑后无差异）。
+- （主 agent 决定，alignment §7b，用户可推翻）实现 `ESTIMATOR_COMPANIONS`：估计器强制要求的配套设置（gspo 的 eps_clip/clip_higher，rpp 家族的 whiten_advantages）只在“该估计器加该配套设置”的组合下由估计器机制认领。加了测试：gspo 与 rpp 的 spec 被接受；grpo 加 clip_higher 仍被拒；grpo 加 whiten 仍被拒；gspo 加 dual_clip 仍被拒。

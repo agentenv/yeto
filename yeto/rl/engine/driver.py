@@ -230,7 +230,9 @@ class EventTape:
         self.args = args
 
     def append(self, event: Mapping[str, Any]) -> None:
-        if _ECHO_EVENTS:
+        from yeto.rl.event_echo import append_record, echo_enabled
+
+        if _ECHO_EVENTS and not echo_enabled():  # the tape writer echoes otherwise
             # Experiment-only: container stdout reaches the head's launch log,
             # so the tape survives container teardown (off by default).
             print(
@@ -244,10 +246,8 @@ class EventTape:
 
             _append_rl_event(self.args, dict(event))
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         record = {"island_id": self.island_id, "time_unix": time.time(), **event}
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+        append_record(self.path, record)
 
 
 def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:

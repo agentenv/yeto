@@ -235,15 +235,16 @@ def test_rpp_family_whiten_rules(estimator):
     assert rpp(estimator).rejections() == []  # reward KL is allowed for the rpp family
     unwhitened = AlgorithmSpec(advantage={"estimator": estimator})
     assert any("[rpp_requires_whiten]" in p for p in unwhitened.rejections())
-    # the Miles adapter: the estimator is refused until declared (7.5); once
-    # declared, the spec is still refused while features:whiten_advantages
-    # (required by the rpp_requires_whiten rule) has no declaration
-    expected = ("'whiten_advantages' not supported" if estimator in MILES_2A_DECLARED
-                else f"'{estimator}' not supported")
-    with pytest.raises(CapabilityMismatch, match=expected):
-        miles_capabilities("sha256:" + "0" * 64).check(
-            layout="lora", placement="colocated", execution_mode="colocated-serial",
-            algorithm=rpp(estimator))
+    # the Miles adapter: refused until the estimator is declared (7.5); once
+    # declared, the mandated whiten is claimed by the estimator (P0
+    # ESTIMATOR_COMPANIONS, alignment §7b) and the spec is accepted
+    caps = miles_capabilities("sha256:" + "0" * 64)
+    check = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
+    if estimator in MILES_2A_DECLARED:
+        caps.check(**check, algorithm=rpp(estimator))
+    else:
+        with pytest.raises(CapabilityMismatch, match=f"'{estimator}' not supported"):
+            caps.check(**check, algorithm=rpp(estimator))
 
 
 # -- 3.6 REINFORCE++ / baseline expects_gradient ----------------------------------------
