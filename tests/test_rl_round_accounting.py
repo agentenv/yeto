@@ -200,3 +200,52 @@ def test_round_id_comes_from_the_policy_token_not_trajectory_keys(tmp_path):
     assert source.take(3)["nonzero_advantages"] == 5
     # no token (fixtures/legacy): sample fallback
     assert hook.current_round_id([SimpleNamespace(rollout_id=7)], f"dir:{tmp_path}/none") == 7
+
+
+def test_router_inflight_probe_and_driver_sampler(tmp_path):
+    import json
+    import time as _time
+
+    import torch
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+
+    pool = MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
+                            expected_policy=lambda: (0, H),
+                            args=SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=3000))
+    seen = []
+    body = {"inflight": {"http://a": 3, "http://b": 1}, "cordoned": ["http://b"]}
+    assert pool.load_sample(http_get=lambda url: seen.append(url) or body) == {
+        "active_requests": 4, "workers": 2, "cordoned": 1}
+    assert seen == ["http://10.0.0.1:3000/worker_inflight"]
+
+    def missing(url):
+        raise OSError("404")
+
+    assert pool.load_sample(http_get=missing) is None  # stock router: unknown, not 0
+    assert MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
+                            expected_policy=lambda: (0, H)).load_sample() is None
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0, placement_kind="fixed-partition")
+    original = engine.rollout.generate
+    engine.rollout.generate = lambda r: (_time.sleep(0.12), original(r))[1]
+    engine.rollout.load_sample = lambda: {"active_requests": 2, "workers": 1, "cordoned": 0}
+    profile = ExecutionProfile(name="p", execution_mode="partitioned-serial",
+                               outer_protocol="none").bind_algorithm(AlgorithmSpec())
+    driver = IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+                          policy_state=engine.policy_state, publisher=engine.publisher,
+                          placement=engine.placement,
+                          capabilities=fake_capabilities(execution_modes={"partitioned-serial"}),
+                          algorithm=AlgorithmSpec(), sync=LocalOnlySync(1),
+                          events=EventTape(tmp_path / "e.jsonl", 0), profile=profile, observe=True)
+    driver.load_sample_interval_s = 0.02
+    driver.run()
+    samples = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()
+               if '"rl_load_sample"' in l]
+    assert samples and all(s["active_requests"] == 2 and s["profile_hash"] for s in samples)
