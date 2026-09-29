@@ -351,6 +351,7 @@ EXPECTED_MILES_DECLARED = {
     "reward_postprocessors:custom_reward_postprocess",
     "features:overlong_penalty",
     "advantage_estimators:gspo",
+    "advantage_estimators:reinforce_plus_plus",
 }
 
 

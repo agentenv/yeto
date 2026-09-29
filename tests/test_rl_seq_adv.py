@@ -442,7 +442,7 @@ def test_fake_declaration_launches_each_mechanism(tmp_path, name):
 
 
 # Mechanisms of this change the Miles adapter declares (7.5; one per commit).
-MILES_2A_DECLARED = {"maxrl", "mapo", "gspo"}
+MILES_2A_DECLARED = {"maxrl", "mapo", "gspo", "reinforce_plus_plus"}
 
 
 def test_miles_adapter_declarations_follow_g1():
