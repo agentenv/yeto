@@ -3977,3 +3977,59 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"head — tear it down with: yeto down {prefix}",
                     flush=True,
                 )
+
+
+def dry_run_plan(args) -> dict:
+    """``yeto launch --dry-run``: what a launch would request, creating nothing.
+
+    Runs on prepared args (``prepare_launch_args`` already validated the
+    request, including the ports algorithm/capability checks) and builds the
+    island tasks in memory only to read the learner command; no sky/Modal
+    call is made.
+    """
+
+    no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
+    rl = getattr(args, "training_mode", "sft") == "rl"
+    if no_sync and not rl:
+        raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
+    head = getattr(args, "controller", "local") == "head"
+    if no_sync and head:
+        raise ValueError("--rl-single-island-no-sync has no syncer; use --controller local")
+    specs = parse_gpu_spec(args.gpu)
+    external = max(0, getattr(args, "external_learners", 0) or 0)
+    islands = []
+    for learner_id, spec in enumerate(specs):
+        entry = {
+            "learner_id": learner_id,
+            "cloud": spec.cloud,
+            "region": spec.region,
+            "gpu": spec.gpu,
+            "num_nodes": spec.num_nodes,
+            "gpus_per_node": spec.gpus_per_node,
+            "total_gpus": spec.total_gpus,
+        }
+        if rl:
+            task = make_miles_island_task(
+                args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
+            )
+            entry["learner_command"] = next(
+                (line.strip() for line in task.run.splitlines() if "yeto.rl.learner" in line),
+                None,
+            )
+        islands.append(entry)
+    return {
+        "dry_run": True,
+        "training_mode": getattr(args, "training_mode", "sft"),
+        "rl_engine": getattr(args, "rl_engine", None) if rl else None,
+        "controller": "head" if head else "local",
+        "islands": len(specs) + external,
+        "external_learners": external,
+        "total_gpus": sum(s.total_gpus for s in specs),
+        "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
+        "outer_sync": not no_sync,
+        "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
+        "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),
+        "unverified_mechanisms": list(getattr(args, "rl_allow_unverified_mechanism", None) or ()),
+        "clusters": [] if not islands else learner_cluster_names(args.cluster_prefix, specs),
+        "island_requests": islands,
+    }
