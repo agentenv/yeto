@@ -143,6 +143,10 @@ class TrainStepMetrics:
     # LR each optimizer step of the round applied (read inside the step, before
     # the scheduler advances; ``lr`` is the engine's logged post-step value).
     applied_lrs: tuple[float, ...] | None = None
+    # Fraction of loss tokens a masking mechanism removed this round
+    # (rl-algorithm-capabilities D6); None when the engine does not report it,
+    # which keeps the stricter R0 gradient rule.
+    masked_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -534,18 +538,26 @@ class IslandDriver:
     def _check_gradient(self, rollout_id: int, batch, receipt, metrics) -> None:
         if not receipt.optimizer_step_succeeded:
             raise RoundFailedError(f"rollout {rollout_id}: optimizer step failed")
-        # GRPO advantages are all zero iff every group has zero reward variance.
-        advantages_nonzero = any(g.reward_std > 0 for g in batch.groups)
         grad_norm = float(metrics.grad_norm)
         if not math.isfinite(grad_norm):
             raise StrictRlInvariantError(
                 "nonfinite_grad_norm", f"rollout {rollout_id}: grad_norm={grad_norm}"
             )
-        if advantages_nonzero and grad_norm == 0.0:
+        # Per-algorithm rule (rl-algorithm-capabilities D6); default GRPO:
+        # some group has non-zero reward variance, exactly as in R0.
+        expects_gradient = self.algorithm.expects_gradient(batch, metrics)
+        if expects_gradient and grad_norm == 0.0:
             raise StrictRlInvariantError(
                 "zero_grad_norm_with_nonzero_advantages",
                 f"rollout {rollout_id}: non-zero advantages produced grad_norm 0; "
                 "adapter gradients are not flowing",
+            )
+        if grad_norm == 0.0 and any(g.reward_std > 0 for g in batch.groups):
+            # A declared masking mechanism legitimately removed every token.
+            self.emit(
+                "rl_zero_gradient_masked",
+                rollout_id=rollout_id,
+                masked_fraction=metrics.masked_fraction,
             )
 
     def _stats(self, rollout_id, batch, metrics, rollout_seconds, train_seconds):
