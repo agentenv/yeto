@@ -49,6 +49,6 @@ check setup_skipped_miles_fetch '! grep -q "git -C /root/miles fetch" /tmp/setup
 check after_setup_still_fork '(cd /tmp && PYTHONPATH=/root/miles:/root/sglang/python python3 -c "import miles, sglang, os; assert os.path.realpath(miles.__file__).startswith(\"/root/miles/\"); assert os.path.realpath(sglang.__file__).startswith(\"/sgl-workspace/sglang/python/\"); print(miles.__file__, sglang.__file__)")'
 echo "== upstream parse_args tests (lr-fix set)"
 (python3 -c 'import pytest' 2>/dev/null || pip install -q pytest)
-check parse_args_tests 'PYTHONPATH=/root/miles:/work/yeto python3 -c "import miles.utils.arguments, megatron.training; print(\"imports ok\")" && PYTHONPATH=/root/miles:/work/yeto python3 -m pytest -q -rs -p no:cacheprovider tests/test_rl_miles_adapter_config.py tests/test_rl_argv_snapshot.py 2>&1 | tail -15 | tee /tmp/pytest.txt; grep -qE "passed" /tmp/pytest.txt && ! grep -qE "[0-9]+ (failed|error)" /tmp/pytest.txt'
+check parse_args_tests 'PYTHONPATH=/root/miles:/work/yeto python3 -c "import miles.utils.arguments, megatron.training; print(\"imports ok\")" && PYTHONPATH=/root/miles:/work/yeto python3 -m pytest -q -rfs --tb=short -p no:cacheprovider tests/test_rl_miles_adapter_config.py tests/test_rl_argv_snapshot.py 2>&1 | tail -40 | tee /tmp/pytest.txt; grep -qE "passed" /tmp/pytest.txt && ! grep -qE "[0-9]+ (failed|error)" /tmp/pytest.txt'
 echo "fails=$fails"
 exit $fails
