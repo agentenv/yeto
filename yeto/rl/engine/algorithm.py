@@ -1037,30 +1037,36 @@ class AlgorithmSpec:
     def gradient_expectation(
         self, batch_summary: Any, step_metrics: Any = None
     ) -> tuple[bool, str | None]:
-        """``(expects_gradient, source)``; ``source`` names what relaxed it.
+        """``(expects_gradient, source)``; ``source`` names the deciding rule.
 
         ``source`` is None when the R0 rule decides; otherwise
         ``"gradient_rule:<name> (<mechanism>)"`` or ``"masked:<mechanism>"``,
         for the driver's event.
+
+        Precedence (fixed): a tightening rule wins. If any rule of a required
+        mechanism returns a truthy verdict the round expects a gradient
+        (source ``"tightened:gradient_rule:..."``); only otherwise can a
+        falsy verdict (``False``, ``np.bool_(False)``; ``None`` abstains) or
+        a full mask relax the R0 rule.
         """
 
         groups = getattr(batch_summary, "groups", batch_summary)
         required = {f"{d}:{n}" for d, n in self.required_mechanisms()}
-        verdicts = [
-            (name, mechanism, rule(self, batch_summary, step_metrics))
-            for name, (mechanism, rule) in _GRADIENT_RULES.items()
-            if mechanism in required
-        ]
+        verdicts = []
+        for name, (mechanism, rule) in _GRADIENT_RULES.items():
+            if mechanism in required:
+                verdict = rule(self, batch_summary, step_metrics)
+                if verdict is not None:
+                    verdicts.append((name, mechanism, bool(verdict)))
+        for name, mechanism, verdict in verdicts:
+            if verdict:
+                # e.g. GDPO reward vectors / REINFORCE++ group means: a gradient
+                # the scalar reward-variance rule cannot see.
+                return True, f"tightened:gradient_rule:{name} ({mechanism})"
         if not any(g.reward_std > 0 for g in groups):
-            # A mechanism whose advantages do not come from the scalar reward
-            # variance (GDPO reward vectors; REINFORCE++ group means / reward KL)
-            # may require a gradient the R0 rule cannot see.
-            for name, mechanism, verdict in verdicts:
-                if verdict is True:
-                    return True, f"gradient_rule:{name} ({mechanism})"
             return False, None
         for name, mechanism, verdict in verdicts:
-            if verdict is False:
+            if not verdict:
                 return False, f"gradient_rule:{name} ({mechanism})"
         masked = valid_masked_fraction(getattr(step_metrics, "masked_fraction", None))
         if masked is not None and masked >= 1.0:

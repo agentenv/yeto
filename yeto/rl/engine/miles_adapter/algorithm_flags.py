@@ -229,6 +229,10 @@ _UNMAPPED = [
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}
+# Reviewed P0 rows (design D3) and rows added by extension modules; the
+# table must always equal their union (tests/test_rl_algorithm_flags.py).
+BUILTIN_FLAGS: frozenset[str] = frozenset(MAPPINGS)
+EXTENSION_FLAGS: set[str] = set()
 UNMAPPED_OBJECTIVE_FLAGS: set[str] = set(_UNMAPPED)
 
 
@@ -254,6 +258,7 @@ def register_flag(row: FlagMapping) -> None:
     if row.flag in MAPPINGS:
         raise ValueError(f"{row.flag} is already mapped")
     MAPPINGS[row.flag] = row
+    EXTENSION_FLAGS.add(row.flag)
     UNMAPPED_OBJECTIVE_FLAGS.discard(row.flag)
 
 

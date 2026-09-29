@@ -224,6 +224,31 @@ def parse_args(argv=None):
     return args
 
 
+def build_ports_launch(args, run_config, extra_argv=()):
+    """The ports learner's spec -> Miles argv step (design D8).
+
+    ``--rl-algorithm-spec`` (else the legacy CLI, as in R0), then the mapped
+    extra-argv flags are absorbed by the translation; the run config's
+    estimator follows the absorbed spec.
+    """
+
+    import dataclasses
+
+    from .engine.algorithm import resolve_ports_algorithm
+    from .engine.miles_adapter.algorithm_flags import absorb_extra_argv
+    from .engine.miles_adapter.config import translate_run_config
+
+    base_algorithm = resolve_ports_algorithm(args, rl_engine="ports")
+    absorbed, _, _ = absorb_extra_argv(base_algorithm, tuple(extra_argv))
+    run_config = dataclasses.replace(
+        run_config,
+        algorithm=dataclasses.replace(
+            run_config.algorithm, advantage_estimator=absorbed.advantage_estimator
+        ),
+    )
+    return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv))
+
+
 def _check_single_island_no_sync(args) -> None:
     """``--rl-single-island-no-sync``: explicit, ports-only, one island, no syncer."""
 
@@ -1838,11 +1863,7 @@ def run_miles(
     if rl_engine == "ports":
         # Same engine-agnostic RLRunConfig as legacy; only the translation
         # differs (design D8).
-        import dataclasses
-
-        from .engine.algorithm import resolve_ports_algorithm
-        from .engine.miles_adapter.algorithm_flags import absorb_extra_argv
-        from .engine.miles_adapter.config import parse_miles_args, translate_run_config
+        from .engine.miles_adapter.config import parse_miles_args
         from .engine.run_config import resolve_rl_run_config
 
         run_config = resolve_rl_run_config(
@@ -1858,19 +1879,7 @@ def run_miles(
             target_modules=canonical_targets,
             yeto_policy_sync=yeto_policy_sync,
         )
-        # D8: --rl-algorithm-spec (else the legacy CLI, as in R0), then the
-        # mapped extra-argv flags are absorbed by the translation.
-        base_algorithm = resolve_ports_algorithm(args, rl_engine="ports")
-        absorbed, _, _ = absorb_extra_argv(base_algorithm, tuple(extra_argv))
-        run_config = dataclasses.replace(
-            run_config,
-            algorithm=dataclasses.replace(
-                run_config.algorithm, advantage_estimator=absorbed.advantage_estimator
-            ),
-        )
-        ports_launch = translate_run_config(
-            run_config, base_algorithm, extra_argv=tuple(extra_argv)
-        )
+        ports_launch = build_ports_launch(args, run_config, extra_argv)
         ports_algorithm = ports_launch.algorithm
         miles_argv = list(ports_launch.argv)
         miles_args = parse_miles_args(ports_launch)
