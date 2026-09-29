@@ -10,16 +10,16 @@ from types import SimpleNamespace
 sys.path[:0] = ["/work/yeto", "/work/g1", "/root/miles"]
 name, out = sys.argv[1], Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
 EX = "/work/yeto/openspec/changes/rl-algo-seq-and-adv/examples"
-A = "gspo eps_clip clip_higher".split()
+A = ["advantage_estimators:gspo", "features:eps_clip", "features:clip_higher"]
 RUNS = {  # spec, allowance, reward function, optimizer steps
     "gspo_s2": (f"{EX}/gspo.json", A, "gsm8k_reward:score", 2),
     "gspo_s1": (f"{EX}/gspo.json", A, "gsm8k_reward:score", 1),
-    "rpp": (f"{EX}/rpp.json", ["reinforce_plus_plus", "whiten_advantages"], "gsm8k_reward:score", 1),
-    "rpp_baseline": (f"{EX}/rpp_baseline.json", ["reinforce_plus_plus_baseline", "whiten_advantages"],
+    "rpp": (f"{EX}/rpp.json", ["advantage_estimators:reinforce_plus_plus", "features:whiten_advantages"], "gsm8k_reward:score", 1),
+    "rpp_baseline": (f"{EX}/rpp_baseline.json", ["advantage_estimators:reinforce_plus_plus_baseline", "features:whiten_advantages"],
                      "gsm8k_reward:score", 1),
-    "maxrl": (f"{EX}/maxrl.json", ["maxrl", "custom_reward_postprocess", "plugins"], "gsm8k_reward:score", 1),
-    "mapo": (f"{EX}/mapo.json", ["mapo", "custom_reward_postprocess", "plugins"], "gsm8k_reward:score", 1),
-    "gdpo": (f"{EX}/gdpo.json", ["gdpo", "custom_reward_postprocess", "plugins"],
+    "maxrl": (f"{EX}/maxrl.json", ["features:maxrl", "reward_postprocessors:custom_reward_postprocess", "features:plugins"], "gsm8k_reward:score", 1),
+    "mapo": (f"{EX}/mapo.json", ["features:mapo", "reward_postprocessors:custom_reward_postprocess", "features:plugins"], "gsm8k_reward:score", 1),
+    "gdpo": (f"{EX}/gdpo.json", ["features:gdpo", "reward_postprocessors:custom_reward_postprocess", "features:plugins"],
              "yeto.rl.algos.gdpo_reward:reward_func", 1),
 }
 spec_path, allow, reward_fn, opt_steps = RUNS[name]

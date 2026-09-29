@@ -161,8 +161,8 @@ register_mechanism("features", "mapo", lambda s: _transform(s) == "mapo",
                    requires_binary_reward=True)
 register_mechanism("features", "gdpo", lambda s: _transform(s) == "gdpo")
 
-# Mechanism names of this change, as ``--rl-allow-unverified-mechanism`` takes
-# them (task 6.1). A transform additionally needs the dispatcher
+# Mechanisms of this change as (dimension, name); ``--rl-allow-unverified-mechanism``
+# takes them qualified, ``"dimension:name"`` (task 6.1). A transform additionally needs the dispatcher
 # (``custom_reward_postprocess``) and its module identity (``plugins``).
 MECHANISMS = {
     "gspo": ("advantage_estimators", "gspo"),
@@ -690,5 +690,8 @@ def expects_gradient(spec, batch_summary, step_metrics=None) -> bool:
     return expected
 
 
-register_gradient_rule("seq_adv_gspo_full_clip", gspo_gradient_rule)
-register_gradient_rule("seq_adv_advantage_nonzero", advantage_gradient_rule)
+register_gradient_rule("seq_adv_gspo_full_clip", gspo_gradient_rule,
+                       mechanism="advantage_estimators:gspo")
+register_gradient_rule("seq_adv_gdpo_nonzero", advantage_gradient_rule, mechanism="features:gdpo")
+register_gradient_rule("seq_adv_rpp_not_all_equal", advantage_gradient_rule,
+                       mechanism="advantage_estimators:reinforce_plus_plus")

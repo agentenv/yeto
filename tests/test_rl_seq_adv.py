@@ -267,7 +267,9 @@ def test_rpp_baseline_expects_gradient_is_default():
 def test_fake_driver_rpp_rounds(tmp_path, estimator):
     caps = fake_capabilities(advantage_estimators={"grpo", estimator},
                              features={"whiten_advantages"})
-    _, driver = _driver(tmp_path, rpp(estimator), caps, zero_grad_rounds={1},
+    # no reward KL: a round with identical rewards everywhere has all-equal advantages
+    no_kl = AlgorithmSpec(advantage={"estimator": estimator, "whiten": True})
+    _, driver = _driver(tmp_path, no_kl, caps, zero_grad_rounds={1},
                         constant_reward_rounds={1})
     assert driver.run().policy_version == 2  # not expected -> zero grad is fine
     _, driver = _driver(tmp_path, rpp(estimator), caps, zero_grad_rounds={1})
@@ -416,13 +418,15 @@ def test_allowance_launches_single_island_and_refuses_otherwise(tmp_path, name):
     with pytest.raises(CapabilityMismatch, match=f"'{name}' not supported"):
         driver.run()
     assert engine.calls == []
-    # allowed on a single island (plus the supporting mechanisms of the spec)
-    needed = sorted({n for _, n in spec.required_mechanisms()} & ({name, *SUPPORTING}))
-    names = check_unverified_allowance(needed, islands=1)
+    # allowed on a single island without outer sync (plus the supporting mechanisms)
+    needed = sorted(f"{d}:{n}" for d, n in spec.required_mechanisms() if n in {name, *SUPPORTING})
+    assert f"{sa.MECHANISMS[name][0]}:{name}" in needed
+    names = check_unverified_allowance(needed, islands=1, outer_sync=False)
     engine, driver = _driver(tmp_path, spec, fake_capabilities().with_unverified(names))
     assert driver.run().policy_version == 2
-    with pytest.raises(AlgorithmSpecError, match="single-island"):
-        check_unverified_allowance(needed, islands=2)
+    for islands, outer in ((2, True), (1, True)):
+        with pytest.raises(AlgorithmSpecError, match="single-island run without outer sync"):
+            check_unverified_allowance(needed, islands=islands, outer_sync=outer)
 
 
 @pytest.mark.parametrize("name", sorted(sa.MECHANISMS))
