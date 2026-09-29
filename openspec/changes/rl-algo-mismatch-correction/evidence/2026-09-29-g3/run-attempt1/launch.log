@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/tmp/algo1a/tree-g3/yeto/launcher.py", line 1448, in _prepare_rl_args
+    reward_path.relative_to(REPO_ROOT.resolve())
+  File "/usr/lib/python3.12/pathlib.py", line 682, in relative_to
+    raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
+ValueError: '/home/michael/work/algo-1a/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g3/harness/gsm8k_reward.py' is not in the subpath of '/tmp/algo1a/tree-g3'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/michael/work/algo-1a/openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g3/harness/run_local_head.py", line 8, in <module>
+    launcher.prepare_launch_args(args)
+  File "/tmp/algo1a/tree-g3/yeto/launcher.py", line 636, in prepare_launch_args
+    _prepare_rl_args(
+  File "/tmp/algo1a/tree-g3/yeto/launcher.py", line 1450, in _prepare_rl_args
+    raise ValueError(
+ValueError: RL reward source must be inside the synced Yeto workdir
