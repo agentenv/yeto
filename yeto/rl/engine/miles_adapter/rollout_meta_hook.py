@@ -64,7 +64,10 @@ def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> in
     key (Miles ``agentic_tool_call.py``), not the round. Without a token (unit
     fixtures, legacy) the first sample's ``rollout_id`` is the fallback.
     """
-    token = current_policy_token(sink)
+    try:
+        token = current_policy_token(sink)
+    except ImportError:  # no Ray in this process (unit fixtures): no published token
+        token = None
     if token:
         from yeto.rl.core import parse_policy_snapshot_token
 
