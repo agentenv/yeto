@@ -224,6 +224,12 @@
   - clip_higher：g1e、g1g 未能证明，g1j 为最终实验；
   - dual_clip：未能证明。
 
+## 7.2 完成记录
+- 实现：由 INFRA 在 d235e0b 完成（已包含在 integ-decl 与本分支中）。每轮 `rl_round_trained` 事件都带有 `trained_groups` 与 `trained_samples`。
+- 原文验证（fake 两岛）：`tests/test_rl_grpo_knobs.py::test_two_islands_record_their_own_trained_counts` 通过。两个 fake 岛走 strict-avg，岛 1 每轮被过滤掉 1 组（`filtered=1`）；两岛各自记录的 trained_groups/trained_samples 与各自的过滤结果一致，并且两岛数值不同。
+- GPU 旁证：g1h 与 g1i 的磁带基于 28724bc，已包含 d235e0b。over_sampling、os_off、of_on 各轮的 trained_groups/trained_samples 都是 4/32，与 Miles 日志中 `rollout/num_training_samples` 为 32 的轮数一致（g1h 各 6 轮，g1i 3 轮）。g1f 基于 501d71d，其 launcher 磁带未参与本次核对。
+- 状态：CPU 通过 ✔，已勾选。
+
 ## SHA 核对（主 agent 要求，2026-09-29）
 - 本轮向主 agent 报错过 4 次 SHA：9b7c6c8→604078e、8ab4d2e→ac0d382、675a2be→d53397d、f26d5e3→3fec259，均已更正。
 - 核对方法：对 algo-1b、algo-1b-os、algo-1b-token 三个分支中本 change 的全部 .md 文件，提取其中的十六进制串，逐个做 `git cat-file -e <sha>^{commit}`，yeto 中不存在的再到 miles-next/sglang-next 中查。

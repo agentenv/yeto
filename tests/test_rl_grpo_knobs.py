@@ -850,3 +850,47 @@ def test_emit_event_echoes_to_stdout(capsys):
     assert raw not in (None, event_echo.INVALID)
     record = json.loads(raw) if isinstance(raw, str) else raw
     assert record["event"] == "rl_reward_shaping" and record["island_id"] == 0 and record["samples"] == 2
+
+
+# ---------------------------------------------------------------- 7.2 per-island trained counts (two fake islands)
+
+
+def test_two_islands_record_their_own_trained_counts(tmp_path):
+    import test_rl_engine_driver as td
+    from yeto.rl.engine.bridges import StrictAvgSync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import fake_capabilities
+
+    syncer = td._strict_syncer(td._engine(), learners=2, rounds=2)
+    drivers, kept = [], {}
+    for island in (0, 1):
+        engine = td._engine(torch.tensor([1.0 + island, 3.0]))
+        original = engine.rollout.generate
+
+        def generate(rollout_id, _orig=original, _island=island):
+            batch = _orig(rollout_id)
+            # island 1: the dynamic filter dropped one group this round
+            groups = batch.groups[:-1] if _island == 1 else batch.groups
+            kept[(_island, rollout_id)] = (len(groups), sum(len(g.sample_ids) for g in groups))
+            return _dc.replace(batch, groups=groups, filtered=len(batch.groups) - len(groups))
+
+        engine.rollout.generate = generate
+        sync = StrictAvgSync(td._strict_config(tmp_path, engine, learner_id=island, rounds=2,
+                                               tape=f"b{island}.jsonl"),
+                             client_factory=lambda _b, i=island: syncer.client(i))
+        drivers.append(IslandDriver(
+            learner_id=island, rollout=engine.rollout, trainer=engine.trainer,
+            policy_state=engine.policy_state, publisher=engine.publisher,
+            placement=engine.placement, algorithm=AlgorithmSpec(), sync=sync,
+            events=EventTape(tmp_path / f"i{island}.jsonl", island), capabilities=fake_capabilities()))
+    _, errors = td._run_threads(drivers)
+    assert errors == {}
+    for island in (0, 1):
+        rounds = [json.loads(x) for x in (tmp_path / f"i{island}.jsonl").read_text().splitlines()
+                  if json.loads(x)["event"] == "rl_round_trained"]
+        assert rounds, "rl_round_trained missing"
+        for e in rounds:
+            assert (e["trained_groups"], e["trained_samples"]) == kept[(island, e["rollout_id"])]
+    g0 = {kept[(0, r)] for r in (0, 1) if (0, r) in kept}
+    g1 = {kept[(1, r)] for r in (0, 1) if (1, r) in kept}
+    assert g0 != g1  # the islands differ and each records its own

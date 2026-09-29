@@ -49,7 +49,7 @@
 ## 7. 示例与文档（design D8/D9）
 
 - [x] 7.1 （可选）新增 `examples/rl_algorithms/dapo-like.json` 与 `dr-grpo.json`。验证：CPU 测试加载每个示例，能构建 spec、argv 能被 upstream `parse_args` 解析；默认配置的 argv 快照不变。
-- [ ] 7.2 超采样：每轮事件记录本岛进入训练的样本数与组数。验证：fake 两岛测试中两岛各自记录，数值与过滤结果一致。
+- [x] 7.2 超采样：每轮事件记录本岛进入训练的样本数与组数。验证：fake 两岛测试中两岛各自记录，数值与过滤结果一致。
 - [x] 7.3 更新 `docs/MILES_RL.md`：各机制的 spec 字段与翻译、dual-clip 约束、Dr.GRPO 与 RLOO 的关系、KL loss 的 ref 身份规则与显存影响、分派器与内置归一化的等价性及多 LoRA 限制、overlong 塑形公式、overlong 过滤与 DAPO 的差异、超采样下外层等权平均的影响、"声明支持 ≠ 效果收益"。验证：文档中的示例命令用 `--dry-run` 执行，输出与描述一致。
 
 ## 8. GPU 验证（需用户批准卡数与预算后执行）
