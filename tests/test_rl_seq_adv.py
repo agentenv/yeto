@@ -446,7 +446,21 @@ def test_miles_adapter_declarations_follow_g1():
 
     caps = miles_capabilities("sha256:" + "0" * 64)
     assert caps.advantage_estimators == frozenset({"grpo"})
-    assert {"maxrl", "mapo"} <= set(caps.features) and "gdpo" not in caps.features
+    assert {"maxrl", "mapo"} <= set(caps.features)
+    assert not ({"gdpo"} & set(caps.features))
+    check = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
+    # undeclared mechanisms of this change are still refused (expressible, not opened)
+    with pytest.raises(CapabilityMismatch, match="'gdpo' not supported"):
+        caps.check(**check, algorithm=transform_spec("gdpo", gdpo=GDPO))
+    for name in ("gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline"):
+        with pytest.raises(CapabilityMismatch, match=f"'{name}' not supported"):
+            caps.check(**check, algorithm=_mechanism_spec(name))
+    # declared transforms pass the mechanism check for maxrl/mapo themselves
+    for name in ("maxrl", "mapo"):
+        try:
+            caps.check(**check, algorithm=transform_spec(name))
+        except CapabilityMismatch as exc:
+            assert f"'{name}' not supported" not in str(exc)
 
 
 def test_default_spec_unchanged():
