@@ -471,24 +471,24 @@ register_named_reducer(REDUCER_PATH, mechanisms=("loss_aggregations:constant",),
                        sha256=REDUCER_SOURCE_SHA256)
 
 G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
-    # G1 run name -> mechanisms declared from it (dimension -> names). Only
-    # mechanisms shown to take effect on the GPU are declared (coordinator
-    # decision): clip_higher / dual_clip (clipfrac 0) and over_sampling (no
-    # replacement) wait for a G1 that triggers them.
-    # custom_pg_loss_reducer is declared by ALGO-CAP as "only the Dr.GRPO reducer"
-    # (grpo_knobs_constant_aggregation refuses any other loss.reducer).
-    # drgrpo: only the constant aggregation (token and no_grpo_std_normalization
-    # were withdrawn after review: no isolated evidence; see evidence/2026-09-29-algo1b-g1c).
-    "drgrpo": {"loss_aggregations": frozenset({"constant"})},
+    # G1 run -> mechanisms declared from it (dimension -> names); mirrors the 1b
+    # part of integ-decl MILES_DECLARED (5f56ff9). Only mechanisms shown to take
+    # effect on the GPU. dual_clip is NOT declared (no dual-branch metric).
+    # custom_pg_loss_reducer: P0 register_named_reducer (only the Dr.GRPO reducer).
+    "drgrpo": {"loss_aggregations": frozenset({"constant"})},  # g1 attempt2
     "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
     "entropy": {"features": frozenset({"entropy_bonus"})},
     "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
                          "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
-    # g1b run A-r1: clipfrac > 0 proves the clip window (eps_clip) only; clip_higher
-    # (upper bound) withdrawn after review -- needs an isolated upper-bound control.
-    "clip_higher": {"features": frozenset({"eps_clip"})},
-    "no_std": {"features": frozenset({"no_grpo_std_normalization"})},  # g1c paired step-1 grad_norm differs
+    "g1b_a_r1": {"features": frozenset({"eps_clip"})},  # clipfrac > 0 (window only)
+    "g1c_no_std": {"features": frozenset({"no_grpo_std_normalization"})},
+    # The next four are pinned to Miles 0af62f4d (integ-decl images):
+    "g1f_token": {"loss_aggregations": frozenset({"token"})},  # needs the LoRA-bridge fix
+    "g1h_over_sampling": {"features": frozenset({"over_sampling"})},
+    "g1i_overlong_filter": {"features": frozenset({"overlong_filter"})},
+    "g1j_clip_higher": {"features": frozenset({"clip_higher"})},  # run on 0394715, clip path unchanged
 }
+
 
 
 def declared_mechanisms() -> dict[str, frozenset[str]]:

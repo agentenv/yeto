@@ -796,12 +796,15 @@ def test_learner_binds_ref_source_and_override(tmp_path):
 # ---------------------------------------------------------------- 8.3 declarations (1b-declare.patch)
 
 EXPECTED_1B_DECLARED = {
-    "loss_aggregations": {"constant"},
-    "features": {"kl_loss_ref_model", "no_grpo_std_normalization", "entropy_bonus", "overlong_penalty",
-                 "eps_clip"},
+    "loss_aggregations": {"constant", "token"},
+    "features": {"kl_loss_ref_model", "entropy_bonus", "overlong_penalty", "eps_clip",
+                 "no_grpo_std_normalization", "over_sampling", "overlong_filter", "clip_higher"},
     "kl_placements": {"loss"},
     "reward_postprocessors": {"custom_reward_postprocess"},
 }
+# 1b entries of integ-decl MILES_DECLARED (5f56ff9), checked for equality when present.
+FINAL_1B = {f"{d}:{n}" for d, names in EXPECTED_1B_DECLARED.items() for n in names}
+
 
 
 def test_declared_table_matches_final_declaration():
@@ -812,9 +815,9 @@ def test_declared_table_matches_final_declaration():
     from yeto.rl.engine.miles_adapter import entry
 
     final = getattr(entry, "MILES_DECLARED", None)
-    if final is not None:  # integrated branches: the 1b entries must be exactly there
-        ours = {f"{d}:{n}" for d, names in EXPECTED_1B_DECLARED.items() for n in names}
-        assert ours <= set(final)
+    if final is not None:  # integrated branches: the 1b entries are exactly the declared ones
+        mine = {k for k in final if k.split(":", 1)[1] in {n for v in EXPECTED_1B_DECLARED.values() for n in v}}
+        assert mine == FINAL_1B
 
 
 def test_declared_caps_accept_1b_and_refuse_undeclared():
@@ -825,11 +828,9 @@ def test_declared_caps_accept_1b_and_refuse_undeclared():
                  kl_spec(), AlgorithmSpec(entropy_coef=0.001)):
         missing = [f"{d}:{n}" for d, n in spec.required_mechanisms() if n not in getattr(caps, d)]
         assert missing == [], missing
-    assert "token" not in gk.declared_mechanisms().get("loss_aggregations", frozenset())
-    for name in ("clip_higher", "dual_clip", "over_sampling", "overlong_filter"):
+    for name in ("dual_clip",):
         assert name not in gk.declared_mechanisms().get("features", frozenset())
     # token withdrawn after review (grad_norm identical to the baseline)
-    assert "token" not in gk.declared_mechanisms().get("loss_aggregations", frozenset())
 
 
 def test_only_the_drgrpo_reducer_is_accepted():
