@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u; RUN=$1; G=$(pwd); E=$G/run-$RUN; mkdir -p $E; T=/tmp/algo1a/tree-g3; H=/tmp/algo1a/g3home; APP=yeto-algo1a-g3c-$RUN
 rm -rf $T $H; mkdir -p $T $H/yeto-output
-git -C /home/michael/work/algo-1a archive $(cat YETO_SHA) | tar x -C $T; rm -rf $T/openspec $T/tests $T/docs; cp harness/gsm8k_reward.py harness/run_local_head.py $T/
+git -C /home/michael/work/algo-1a archive $(cat ${SHAFILE:-YETO_SHA}) | tar x -C $T; rm -rf $T/openspec $T/tests $T/docs; cp harness/gsm8k_reward.py harness/run_local_head.py $T/
 cp /home/michael/work/gpu-default-modal/home/yeto-syncer $H/; ln -s /home/michael/.modal.toml $H/.modal.toml; ln -s /home/michael/.sky $H/.sky
 ss -ltn | grep -q ":29410 " && { echo "port 29410 busy" | tee $E/port_check.txt; exit 5; }; echo "29410 free $(date -u +%FT%TZ)" > $E/port_check.txt
 eval "$(/tmp/yeto-venv/bin/python - <<'PY'
