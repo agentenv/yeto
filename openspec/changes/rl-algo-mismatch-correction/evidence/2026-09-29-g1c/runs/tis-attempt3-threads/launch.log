@@ -1,0 +1,66 @@
+[yeto] run 'algo1a-g1c-tis' submitted; worker pid 2570959.
+[yeto] log: /home/michael/.yeto/runs/algo1a-g1c-tis/launcher.log
+[yeto] streaming logs — Ctrl-C detaches, the run keeps going.
+
+[launcher] --rl-single-island-no-sync: no syncer, no outer sync
+[launcher] deploying Modal app yeto-algo1a-g1c-tis (1 island(s))
+[launcher] Modal app stop failed: modal app stop yeto-algo1a-g1c-tis failed: ╭─ Error ──────────────────────────────────────────────────────────────────────╮
+│ No App with name 'yeto-algo1a-g1c-tis' found in the 'main' environment.      │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Traceback (most recent call last):
+  File "/tmp/algo1a/tree-tis/yeto/cli.py", line 1614, in cmd_worker
+    code = launcher_run(args, on_clusters=record_clusters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/algo1a/tree-tis/yeto/launcher.py", line 3798, in run
+    modal_ops.deploy()
+  File "/tmp/algo1a/tree-tis/yeto/modal_runner.py", line 433, in deploy
+    self._app.deploy(name=self.app_name)
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/app.py", line 581, in deploy
+    result = await _deploy_app(
+             ^^^^^^^^^^^^^^^^^^
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/runner.py", line 689, in _deploy_app
+    raise e
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/runner.py", line 666, in _deploy_app
+    await _create_all_objects(running_app, local_app_state, root_load_context)
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/runner.py", line 203, in _create_all_objects
+    await asyncio.gather(*[tc.create_task(_load(tag, obj)) for tag, obj in indexed_objects.items()])
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/runner.py", line 194, in _load
+    await resolver.load(obj, load_context, existing_object_id=existing_object_id)
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/mount.py", line 644, in _load_mount
+    async for file in stream:
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1213, in async_map
+    async for item in stream:
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1108, in async_merge
+    raise item.value
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1087, in producer
+    async for item in stream:
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1187, in producer
+    async for item in stream:
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/mount.py", line 520, in _batched_get_missing_files
+    async for spec in stream:
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1213, in async_map
+    async for item in stream:
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1108, in async_merge
+    raise item.value
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1087, in producer
+    async for item in stream:
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1202, in worker
+    res = await prevent_cancellation_abortion(async_mapper_func(item.value))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/_utils/async_utils.py", line 1167, in prevent_cancellation_abortion
+    return await asyncio.shield(t)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/modal/mount.py", line 491, in get_spec
+    return await loop.run_in_executor(
+                 ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 863, in run_in_executor
+    executor.submit(func, *args), loop=self)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 179, in submit
+    self._adjust_thread_count()
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 202, in _adjust_thread_count
+    t.start()
+  File "/usr/lib/python3.12/threading.py", line 992, in start
+    _start_new_thread(self._bootstrap, ())
+RuntimeError: can't start new thread
+[yeto] run 'algo1a-g1c-tis' finished: FAILED (exit code 1)

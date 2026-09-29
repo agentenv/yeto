@@ -72,3 +72,14 @@ committed diagnosis.
   that wants OPSM or ess_ratio to be able to trigger (N >= 2) needs its own plan.
 - Still blocked: the host thread count was ~9.9k right after the merge, the same level at which
   attempts 2/3 failed. No attempt was made.
+- 2026-09-29T17:56:11Z: per-user threads 2464 / 4096 before attempt 4 (coordinator: environment block lifted)
+
+## tis attempt 4: launcher bug in the no-sync entry (first real use) -> BLOCKED, not bypassed
+- With enough threads, the deploy succeeded and learner 0 was launched on Modal. Right after that
+  the launcher crashed: `launcher.py:3836 FleetController(...)` -> `launcher.py:3273
+  syncer_name, syncer_task, syncer_job = syncer` -> `TypeError: cannot unpack non-iterable NoneType
+  object`. The no-sync path passes syncer=None and FleetController does not accept it. The launcher
+  tore the island down; `modal app list` / `container list` show nothing left for g1c
+  (runs/tis/app_list_check.txt). GPU time: seconds at most (container start only).
+- Not bypassed and not retried: the fix belongs to P0 (ALGO-CAP, launcher `--rl-single-island-no-sync`
+  + FleetController). icepop and opsm-trainer not started. After the fix, run this plan unchanged.
