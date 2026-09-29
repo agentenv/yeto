@@ -1,7 +1,7 @@
 #!/bin/bash
 # usage: run.sh a|c
 set -u
-X=$1; P=algo1b-g1f-$X${ATTEMPT:+-$ATTEMPT}; APP=yeto-$P; D=/tmp/algo1b-g1f; mkdir -p $D; SRC=$(pwd); Y=/home/michael/work/algo-1b-tok
+X=$1; P=algo1b-g1f-$X${ATTEMPT:+-$ATTEMPT}; APP=yeto-$P; D=/tmp/algo1b-g1f; mkdir -p $D; SRC=$(pwd); cd $D; Y=/home/michael/work/algo-1b-tok
 M=/tmp/modal-venv/bin/modal
 mkdir -p out-$X; date -u +%FT%TZ > out-$X/t_start; git -C $Y rev-parse HEAD > out-$X/YETO_SHA
 setsid nohup bash -c "sleep 3900; $M app stop -y $APP > $D/out-$X/watchdog.log 2>&1" >/dev/null 2>&1 & echo $! > out-$X/watchdog_pid

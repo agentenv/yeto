@@ -28,3 +28,4 @@
 ## 第 1 次尝试结论（21:1x Z，没有使用 GPU）
 - 两个 run 都在 Modal 镜像构建阶段失败（launcher rc=1）：`launch.log was modified during build process`。原因是日志写在 yeto 工作树里，而 launcher 构建镜像时会同步这个工作树，日志在构建过程中被改写。app 为 stopped，没有产生训练。
 - 修复：运行输出改写到 `/tmp/algo1b-g1f/out-<x>`（工作树之外），结束后再拷回证据目录。判据与配置不变。日志在 `attempt1/`。
+- 修复（第 1 次修复后的立即补正，不涉及 GPU）：run.sh 中 out-$X 用的是相对路径，需要先 cd 到 /tmp/algo1b-g1f。补正后的第一次执行在 GPU 启动前就失败了（找不到目录），没有建 app。
