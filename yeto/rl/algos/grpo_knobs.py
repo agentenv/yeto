@@ -464,11 +464,11 @@ G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
     # mechanisms shown to take effect on the GPU are declared (coordinator
     # decision): clip_higher / dual_clip (clipfrac 0) and over_sampling (no
     # replacement) wait for a G1 that triggers them.
-    "token": {"loss_aggregations": frozenset({"token"})},
+    # integ-decl review: token (grad_norm bit-identical to baseline) and
+    # no_grpo_std_normalization (not isolated from 'constant') withdrawn.
     # custom_pg_loss_reducer is declared by ALGO-CAP as "only the Dr.GRPO reducer"
     # (grpo_knobs_constant_aggregation refuses any other loss.reducer).
-    "drgrpo": {"features": frozenset({"no_grpo_std_normalization"}),
-               "loss_aggregations": frozenset({"constant"})},
+    "drgrpo": {"loss_aggregations": frozenset({"constant"})},
     "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
     "entropy": {"features": frozenset({"entropy_bonus"})},
     "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
