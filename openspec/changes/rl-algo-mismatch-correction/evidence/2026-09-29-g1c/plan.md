@@ -64,3 +64,11 @@ committed diagnosis.
   count 0: no_app_created.txt); no GPU time used. Per this plan no further attempt: icepop and
   opsm-trainer were not started. Unblock: run the launcher on a host with thread headroom (or
   raise the per-user limit), then execute this plan unchanged.
+
+## Update after merging origin/algo-cap fdcde16 (`--rl-optimizer-steps`)
+- The entry for the re-verification and G3 stays `yeto launch --rl-single-island-no-sync
+  --rl-allow-unverified-mechanism <dimension:name>`. `--rl-optimizer-steps` is not passed: the
+  default of 1 step keeps parity with rounds 1/2 and with the pre-declared criteria. A later run
+  that wants OPSM or ess_ratio to be able to trigger (N >= 2) needs its own plan.
+- Still blocked: the host thread count was ~9.9k right after the merge, the same level at which
+  attempts 2/3 failed. No attempt was made.
