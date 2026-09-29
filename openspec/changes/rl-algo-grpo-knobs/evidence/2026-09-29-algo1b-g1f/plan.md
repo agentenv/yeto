@@ -29,3 +29,9 @@
 - 两个 run 都在 Modal 镜像构建阶段失败（launcher rc=1）：`launch.log was modified during build process`。原因是日志写在 yeto 工作树里，而 launcher 构建镜像时会同步这个工作树，日志在构建过程中被改写。app 为 stopped，没有产生训练。
 - 修复：运行输出改写到 `/tmp/algo1b-g1f/out-<x>`（工作树之外），结束后再拷回证据目录。判据与配置不变。日志在 `attempt1/`。
 - 修复（第 1 次修复后的立即补正，不涉及 GPU）：run.sh 中 out-$X 用的是相对路径，需要先 cd 到 /tmp/algo1b-g1f。补正后的第一次执行在 GPU 启动前就失败了（找不到目录），没有建 app。
+
+## 结论（第 2 次尝试；两个 app 均已 stopped）
+- 运行成功（按预登记判据）：两个 run 都是 launcher 退出码 2，日志中有"not fetchable over ssh"，事件磁带中有 `rl_learner_finalized`，job 为 SUCCEEDED，3 轮共 6 个训练日志行，没有 invariant 错误。
+- 版本：YETO_SHA 为 8d30ad2（分支 algo-1b-token，基于 501d71d），token run 中 `calculate_per_token_loss = True`。launch.log 里没有打印镜像 digest，所以镜像是按这个 SHA 的 ports 默认值 `MILES_NEXT_IMAGE`（`…@sha256:c6f5455c…`）推定的，并非从日志中直接核实。
+- 配对有效：两者第 1 步的 rollout/raw_reward 都是 0.90625。
+- **token 生效**：第 1 步 grad_norm 为 0.4310283064842224，baseline 为 0.48665371537208557，两者不相等，判据满足。**loss_aggregations:token 可以声明**（仅限修复后的镜像，即 Miles 0af62f4d 及以后）。
