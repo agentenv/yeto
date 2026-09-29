@@ -1,0 +1,8 @@
+{
+ "mechanism": "entropy",
+ "algorithm_spec_sha256": "8ae4308f214095e2c0496937d9108bd6f2a2f9a4a49928f4d3d81f42e2c7632d",
+ "allow_unverified": [
+  "features:entropy_bonus"
+ ],
+ "rounds": 3
+}

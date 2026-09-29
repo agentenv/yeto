@@ -791,3 +791,22 @@ def test_learner_binds_ref_source_and_override(tmp_path):
         verify(model="Qwen/Other", megatron_ref_load=None)
     with pytest.raises(rl_learner.AlgorithmMismatchError, match="--megatron-ref-load"):
         verify(model=REF["source"], megatron_ref_load="/ckpt/megatron")
+
+
+# ---------------------------------------------------------------- 8.3 declarations (1b-declare.patch)
+
+def test_declared_after_g1_and_overlong_filter_still_refused():
+    from yeto.rl.engine.miles_adapter.entry import miles_capabilities
+
+    caps = miles_capabilities("sha256:" + "0" * 64)
+    if not gk.declared_mechanisms()["features"] <= caps.features:
+        pytest.skip("needs infra-drafts/1b-declare.patch")
+    ok = [pipeline_spec(reward_shapers=[OVERLONG]),
+          AlgorithmSpec(loss={"eps_clip": 0.2, "eps_clip_high": 0.28, "aggregation": "token"}),
+          kl_spec(), AlgorithmSpec(entropy_coef=0.001)]
+    for spec in ok:
+        missing = [f"{d}:{n}" for d, n in spec.required_mechanisms() if n not in getattr(caps, d)]
+        assert missing == [], missing
+    flt = gk.with_pipeline_plugins(AlgorithmSpec(sampling={"overlong_filter": True}))
+    assert ("features", "overlong_filter") in flt.required_mechanisms()
+    assert "overlong_filter" not in caps.features
