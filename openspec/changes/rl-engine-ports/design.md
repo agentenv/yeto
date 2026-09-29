@@ -254,6 +254,28 @@ yeto 与 SGLang 的关系：
 
 `95d4d69` 的"与 Miles 对齐"部分需要按 upstream Miles 当前的 LoRA 请求格式重新对齐，不能照搬。
 
+### D12. 等价性验收采用分层口径
+
+原口径（"容差 = legacy 重复 3 次的噪声 × 2"）不可用：legacy-baseline-v2 显示 legacy 3 次运行逐位一致，噪声为 0，容差退化为 1e-6 下限，与两条路径真实的数值差无关。同一证据还显示：第 1 轮两条路径的 reward、token、group 计数与 loss 完全一致，grad_norm 相对差 0.6%（岛 0）与 1.0%（岛 1），属于 bf16 与不同 kernel 路径的数值差；第 2 轮起策略已有微小差别，采样分叉并被放大（legacy 岛 0 第 2 轮 reward 全为 0，ports 不是），逐点容差没有意义。因此改为四层（阈值为 `scripts/rl_engine_equivalence.py` 的常量，写入报告头，不随 ports 结果调整）：
+
+| 层 | 比较对象 | 判定 | 阈值依据 |
+|---|---|---|---|
+| 1 第 1 轮严格 | 主 seed 第 1 轮 | group/token/reward 相等；grad_norm 相对差 ≤ 3% | 相同权重、相同 prompt 下计数已观测到完全相等；3% 为观测最大值 1.0% 的 3 倍 |
+| 2 teacher forcing | legacy 第 1 轮 rollout 回放到两条路径各训一步 | loss 绝对差 ≤ max(1e-6, 1e-3×\|legacy\|)；grad_norm 相对差 ≤ 3%；LoRA 更新量相对 L2 ≤ 5% | 见下 |
+| 3 分布 | 第 2 轮起，每 seed 每指标取各（岛, 轮）平均；legacy/ports 各 5 个 seed（17–21） | 精确双侧置换检验（252 种划分，均值差），任一指标 p < 0.05/4 = 0.0125 失败 | 用户选定；Bonferroni 控制 4 个指标的全体误判率 ≤ 5% |
+| 4 hash | 每条路径每个 seed 内 | 同一版本各岛 hash 一致；不跨路径比较 | 两条路径数值不同，跨路径 hash 必然不同 |
+
+第 2 层阈值的依据与限制：
+
+- loss：on-policy GRPO 第一步的 loss 由组内零均值 advantage 相消，量级约 1e-8（两条路径观测值都是 1.2107e-08），相对差没有信息量。绝对下限 1e-6 高出该量级两个数量级，能拦住 KL/entropy 项或 loss 聚合方式配置错误这类会让 loss 离开零点的错误；loss 不是这一层的主要信号。
+- grad_norm：与第 1 层相同的 3%。输入逐 token 相同，差异只来自 trainer 数值，不应大于第 1 轮自由采样时的观测值。
+- LoRA 更新量：`‖Δ_ports − Δ_legacy‖₂ / ‖Δ_legacy‖₂`，Δ 取自两条路径共用的每轮审计文件 `audit/round-00000001.delta.f32`（canonical 布局，同一 `layout_hash`）。前提是 `base.f32` 一致（相对 L2 ≤ 1e-6），否则比较无效。5% 目前**没有直接数据支撑**：现有证据未保留 f32 审计文件。需要注意，Adam 第一步的更新近似 `lr·sign(g)`，梯度接近 0 的元素的符号会被 bf16 噪声翻转，更新量的相对 L2 可能明显大于 grad_norm 的相对差。若 grad_norm 与 loss 通过而更新量超出 5%，按失败处理，并以报告中的余弦相似度和逐元素差分分析原因；修改该阈值必须先修改 spec 并附数据，不在实验后放宽。
+- 回放入口 `yeto.rl.teacher_forcing.replay_generate` 作为 Miles 的 custom generate 函数，在两条路径的正常流程中用记录的 token、logprob 和 reward 替换采样，并按各自路径重打策略 token；记录中没有的 prompt 直接报错，不回退为真实采样。回放运行本身的 reward/token/group 计数必须与原运行相等，作为回放复现的前提检查。
+
+第 3 层的统计局限：每个 seed 先汇总成一个值，避免逐（岛, 轮）检验的多重比较和轮间相关；两条路径同分布时，全体误判率由 Bonferroni 控制在 5% 以内。代价是检出力很低：5 对 5 时共 252 种划分，最小可达 p = 2/252 ≈ 0.0079，只有当两组值完全分离（一方全部大于另一方）时才可能低于 0.0125；按高斯近似，要有 80% 的检出力，均值差需约 3 个合并标准差。因此该层通过只说明没有发现大的分布偏移，不能证明差异小。报告给出各 seed 原始值、p 值、效应量与上述局限，效应量较大但未达显著时应人工复核；若要提高检出力，只能增加 seed，并先改 spec。
+
+decoupled：部分 fragment 应用会把全局 fragment 混入本岛进度，各岛 hash 本来就不同，所以第 4 层只比较非部分应用的版本与最终 cut；decoupled 不写每轮审计文件，第 2 层的更新量判定取自 strict-avg 的 teacher forcing（trainer 与 optimizer 配置相同）；最终 LoRA 的跨路径相对 L2 距离只报告，并附 legacy 跨 seed 的同一距离作为参照，不设硬阈值，因为第 2 轮起采样分叉，该距离主要反映轨迹差异，而非 trainer 误差。
+
 ## Risks / Trade-offs
 
 - [upstream 库函数不是稳定 API，版本升级时签名可能变化] → 只在固定版本上开发，所有调用都集中在 `miles_adapter/` 中；升级 pin 时只需要改适配层，并用端口契约测试兜底。

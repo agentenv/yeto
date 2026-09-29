@@ -559,7 +559,9 @@ def worker_payload(
         "optimizer_steps": args.optimizer_steps,
         "rollout_max_response_len": args.rollout_max_response_len,
         "apply_chat_template_kwargs": args.apply_chat_template_kwargs,
-        "custom_generate_function_path": None,
+        "custom_generate_function_path": getattr(
+            args, "custom_generate_function_path", None
+        ),
         "use_session_server": False,
         "session_server_ip": None,
         "session_server_port": None,
@@ -2456,6 +2458,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples-per-group", type=int, default=4)
     parser.add_argument("--over-sampling-batch-size", type=int, default=None)
     parser.add_argument("--dynamic-sampling-filter-path", default=None)
+    parser.add_argument(
+        "--custom-generate-function-path",
+        default=None,
+        help="Miles custom generate callable for every island (e.g. "
+        "yeto.rl.teacher_forcing.replay_generate for equivalence teacher forcing)",
+    )
     parser.add_argument("--optimizer-steps", type=int, default=1)
     parser.add_argument("--gpus-per-island", type=int, default=1)
     parser.add_argument("--pipeline-parallel", type=int, default=1)
