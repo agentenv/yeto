@@ -48,6 +48,7 @@ _E1B_C = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1c"
 _E1B_G1F = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1f"
 _E1B_G1H = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1h"
 _E1B_G1I = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1i"
+_E1B_G1J = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1j"
 _E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
 MILES_DECLARED: dict[str, str] = {
     "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
@@ -105,6 +106,16 @@ MILES_DECLARED: dict[str, str] = {
         "rollout_meta_hook applies the sample filter before recording trained groups). "
         "Miles 0af62f4d only"
     ),
+    "features:clip_higher": (
+        f"{_E1B_G1J} (branch algo-1b 53cb477): 6 groups x 3 steps, seed 17; step-1 "
+        "grad_norm bit-identical in both arms (1.1293506622314453), round-1 step-3 "
+        "grad_norm A 0.5642 vs B 0.6572 -- pre-registered criterion met. RAN ON Miles "
+        "0394715, not the pinned 0af62f4d: transferred because `git diff 0394715..0af62f4d "
+        "-- miles` (13 files, checked by the main agent and ALGO-CAP) touches no "
+        "loss/policy file and leaves the clip path unchanged -- a code-diff argument, not "
+        "a run on 0af62f4d. Open: suspected pg_clipfrac vs loss inconsistency "
+        "(2026-09-29-clipfrac-offline/report.md). Miles 0af62f4d only"
+    ),
 }
 
 
@@ -116,6 +127,7 @@ MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     "loss_aggregations:token": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
     "features:over_sampling": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
     "features:overlong_filter": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+    "features:clip_higher": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
 }
 
 

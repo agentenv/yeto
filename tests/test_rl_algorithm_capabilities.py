@@ -362,6 +362,7 @@ EXPECTED_MILES_DECLARED = {
     "loss_aggregations:token",
     "features:over_sampling",
     "features:overlong_filter",
+    "features:clip_higher",
 }
 
 
