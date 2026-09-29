@@ -215,11 +215,9 @@ def test_icepop_bounds_rejected(build, needle):
 @pytest.mark.parametrize(
     "argv, flags",
     [
-        (["--use-tis", "--tis-clip", "2", "--tis-clip-low", "0",
-          "--custom-tis-function-path", mc.OBSERVE_PATH], ("--custom-tis-function-path", "--use-tis")),
         (["--use-opsm", "--opsm-delta", "1e-4", "--use-tis"], ("--use-tis", "--use-opsm")),
-        (["--use-opsm", "--opsm-delta", "1e-4", "--custom-tis-function-path", mc.OBSERVE_PATH],
-         ("--custom-tis-function-path", "--use-opsm")),
+        (["--use-opsm", "--opsm-delta", "1e-4", "--use-tis", "--custom-tis-function-path",
+          mc.OBSERVE_PATH], ("--custom-tis-function-path", "--use-opsm")),
     ],
 )
 def test_two_corrections_in_extra_argv_conflict(argv, flags):
@@ -229,10 +227,19 @@ def test_two_corrections_in_extra_argv_conflict(argv, flags):
         assert flag in str(info.value)
 
 
+def test_tis_plus_custom_function_in_argv_is_one_custom_correction():
+    # P0 absorption: --use-tis + --custom-tis-function-path = method custom;
+    # observe-only then refuses the TIS clip values.
+    spec, _, _ = absorb_extra_argv(AlgorithmSpec(), [
+        "--use-tis", "--tis-clip", "2", "--tis-clip-low", "0", "--get-mismatch-metrics",
+        "--custom-tis-function-path", mc.OBSERVE_PATH])
+    assert "observe-only" in " ".join(spec.rejections())
+
+
 @pytest.mark.parametrize("base, argv", [
-    (tis, ["--custom-tis-function-path", mc.OBSERVE_PATH]),
+    (tis, ["--use-tis", "--custom-tis-function-path", mc.OBSERVE_PATH]),
     (icepop, ["--use-opsm", "--opsm-delta", "0.1"]),
-    (mc.observe_spec, ["--use-tis"]),
+    (mc.observe_spec, ["--use-opsm", "--opsm-delta", "0.1"]),
 ])
 def test_spec_correction_plus_argv_correction_conflict(base, argv):
     with pytest.raises(AlgorithmFlagConflict, match="correction.method"):
@@ -244,13 +251,6 @@ def test_conflict_fails_before_gpu_process():
 
     with pytest.raises(MilesConfigError, match="--use-tis"):
         check_extra_argv(["--use-opsm", "--opsm-delta", "1e-4", "--use-tis"], AlgorithmSpec())
-
-
-def test_custom_config_path_refused_on_ports():
-    from yeto.rl.engine.miles_adapter.config import MilesConfigError, check_extra_argv
-
-    with pytest.raises(MilesConfigError, match="custom-config-path"):
-        check_extra_argv(["--custom-config-path", "x.yaml"], AlgorithmSpec())
 
 
 @pytest.mark.skipif(not HAS_OPSM_COMBINATION, reason="needs 1a-shared.patch (OPSM + tis/custom)")
@@ -341,19 +341,20 @@ def test_opsm_rollout_with_tis_rejected_with_pi_old_note():
 
 def test_mis_translation():
     s = mis(level="geometric", mode="mask", low=0.999, high=1.001)
-    argv = algorithm_argv(s)
-    assert argv[:3] == ["--use-tis", "--custom-tis-function-path", mc.MIS_PATH]
-    assert argv[3] == "--custom-config-path" and argv[4].startswith("base64:")
-    import base64
-
-    config = json.loads(base64.b64decode(argv[4][len("base64:"):]))
-    assert config == {
+    assert algorithm_argv(s) == ["--use-tis", "--custom-tis-function-path", mc.MIS_PATH]
+    attrs = s.to_legacy_runtime_attrs()
+    assert {k: v for k, v in attrs.items() if not k.startswith("yeto_rl_")} == {
         "rs_level": "geometric", "rs_lower_bound": None, "rs_upper_bound": None,
         "rs_veto_threshold": None, "tis_batch_normalize": False, "tis_level": "geometric",
         "tis_lower_bound": 0.999, "tis_mode": "mask", "tis_upper_bound": 1.001, "use_rs": False,
     }
     assert s.correction.function.sha256 == PluginRef.from_path(mc.MIS_PATH).sha256
     assert mis(mode="clip", low=0.5).sha256() != mis(mode="mask", low=0.5).sha256()
+
+
+def test_runtime_attrs_unchanged_without_mis():
+    for build in (AlgorithmSpec, tis, icepop, mc.observe_spec, opsm):
+        assert build().to_legacy_runtime_attrs() == AlgorithmSpec().to_legacy_runtime_attrs()
 
 
 @pytest.mark.parametrize(

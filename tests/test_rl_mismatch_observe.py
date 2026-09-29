@@ -344,11 +344,9 @@ def test_upstream_parser_accepts_fragment(name):
     assert not (namespace.use_rollout_logprobs and namespace.use_tis)
     assert not namespace.get_mismatch_metrics or namespace.custom_tis_function_path
     if name == "mis":
-        from miles.utils.file_arg_utils import resolve_file_arg
-        import yaml
-
-        loaded = yaml.safe_load(resolve_file_arg(namespace.custom_config_path))
-        assert loaded == mc.mis_config(spec)
+        # MIS parameters are namespace attributes without CLI flags (runtime attrs).
+        attrs = mc.mis_config(spec)
+        assert attrs and not any(hasattr(namespace, key) for key in attrs if key != "use_tis")
         assert importlib.util.find_spec(mc.MIS_PATH.rpartition(".")[0]) is not None
 
 

@@ -26,8 +26,8 @@ adds, on top of the P0 ``CorrectionSpec`` (``method`` none/tis/opsm/custom):
 * rejection rules (explicit thresholds, bound order, OPSM logprob source,
   observe-only purity, MIS field consistency) that fail before any GPU
   process exists;
-* the MIS argv row (``--custom-config-path base64:<json>``: MIS reads its
-  parameters from Miles' custom-config namespace attributes).
+* MIS parameters as Miles namespace attributes (``register_runtime_attrs``;
+  ``mis.py`` reads ``args.tis_mode`` etc., which have no CLI flag).
 
 Every threshold is explicit (design D3): nothing inherits a Miles default.
 ``execution.max_policy_staleness`` stays 0 (P0 rejection matrix): these
@@ -38,8 +38,6 @@ pi_behav = pi_old weights, design D1); they are not an off-policy license.
 
 from __future__ import annotations
 
-import base64
-import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -53,8 +51,8 @@ from yeto.rl.engine.algorithm import (
     register_field,
     register_mechanism,
     register_rejection,
+    register_runtime_attrs,
 )
-from yeto.rl.engine.miles_adapter.algorithm_flags import FlagMapping, register_flag
 
 OBSERVE_PATH = "yeto.rl.algos.mismatch_observe.observe_mismatch"
 ICEPOP_PATH = "miles.backends.training_utils.loss_hub.corrections.icepop_function"
@@ -293,13 +291,21 @@ register_rejection("mis_fields", _reject_mis)
 
 
 # --------------------------------------------------------------------------
-# argv (MIS parameters travel as Miles custom-config namespace attributes)
+# MIS parameters: Miles namespace attributes (register_runtime_attrs)
 # --------------------------------------------------------------------------
 
 
 def mis_config(spec: AlgorithmSpec) -> dict[str, Any]:
-    """Namespace attributes ``mis.compute_mis_weights`` reads (RS/veto off)."""
+    """Namespace attributes ``mis.compute_mis_weights`` reads (RS/veto off).
 
+    Set by the adapter on the parsed Miles namespace
+    (``MilesLaunchArgs.runtime_attrs``), i.e. after Miles' own
+    ``--custom-config-path`` handling, so they cannot be overridden there.
+    Empty unless the MIS function is selected.
+    """
+
+    if _function(spec) != MIS_PATH:
+        return {}
     c = spec.correction
     return {
         "rs_level": c.mis_level,
@@ -315,25 +321,7 @@ def mis_config(spec: AlgorithmSpec) -> dict[str, Any]:
     }
 
 
-def _translate_custom_config(spec: AlgorithmSpec) -> list[str]:
-    if _function(spec) != MIS_PATH:
-        return []
-    payload = json.dumps(mis_config(spec), sort_keys=True, separators=(",", ":"))
-    return ["--custom-config-path", "base64:" + base64.b64encode(payload.encode()).decode()]
-
-
-def _refuse_custom_config(_value: Any) -> list:
-    raise AlgorithmSpecError(
-        "--custom-config-path sets arbitrary Miles namespace attributes (it can override "
-        "objective flags such as use_tis) and is refused on --rl-engine ports; MIS "
-        "parameters are the correction.mis_* spec fields"
-    )
-
-
-register_flag(FlagMapping(
-    "--custom-config-path", "correction.mis_mode", False, lambda raw: raw,
-    _refuse_custom_config, _translate_custom_config,
-))
+register_runtime_attrs("mismatch_mis", mis_config)
 
 
 # --------------------------------------------------------------------------
