@@ -451,6 +451,18 @@ def test_no_sync_run_export_is_marked_from_its_event_tape(tmp_path, monkeypatch)
     tape = tmp_path / "rl-island-0.jsonl"
     tape.write_text(json.dumps({"island_id": 0, **event}) + "\n"
                     + json.dumps({"event": "rl_local_round"}) + "\n")
+    with pytest.raises(ValueError, match="incomplete"):  # no rl_learner_finalized yet
+        rl_export.algorithm_from_event_tape(tape)
+    seen = {}
+    monkeypatch.setattr(rl_export, "export_rl_checkpoint",
+                        lambda *a, **kw: seen.update(kw) or SimpleNamespace(policy_version=1))
+    rl_export.main(["--checkpoint", "c", "--model", "m", "--model-revision", "a" * 40,
+                    "--lora-r", "2", "--output-dir", "o", "--rl-event-tape", str(tape),
+                    "--allow-incomplete"])
+    assert seen["event_tape_incomplete"] is True
+    with tape.open("a") as handle:
+        handle.write(json.dumps({"island_id": 0, "time_unix": 2.0,
+                                 "event": "rl_learner_finalized"}) + "\n")
     seen = {}
     monkeypatch.setattr(rl_export, "export_rl_checkpoint",
                         lambda *a, **kw: seen.update(kw) or SimpleNamespace(policy_version=1))
@@ -477,3 +489,407 @@ def test_outer_sync_always_in_event():
     plain = selection_event(launch=_launch(AlgorithmSpec()), algorithm=AlgorithmSpec(),
                             miles_commit="x")
     assert plain["rl/outer_sync"] is True
+
+
+def test_launcher_forwards_optimizer_steps():
+    from yeto.launcher import _prepare_rl_args
+
+    assert "--optimizer-steps 1 " in _island_run(_launcher_args("ports"))
+    run = _island_run(_launcher_args("ports", ("--rl-single-island-no-sync",
+                                               "--rl-optimizer-steps", "2")))
+    assert "--optimizer-steps 2 " in run  # rollout 4 x 2 samples = 8, divisible
+    for extra, match in ((("--rl-optimizer-steps", "3"), "must divide"),
+                         (("--rl-optimizer-steps", "0"), "positive int")):
+        with pytest.raises(ValueError, match=match):
+            _prepare_rl_args(_launcher_args("ports", extra))
+    with pytest.raises(ValueError, match="only applies to --rl-engine ports"):
+        _prepare_rl_args(_launcher_args("legacy", ("--rl-optimizer-steps", "2")))
+
+
+# -- yeto launch --dry-run ----------------------------------------------------------
+
+
+def _plan(engine, extra=(), gpu="aws:1xa100@us-east-1"):
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    args = _launcher_args(engine, extra, gpu=gpu)
+    args.controller = "local" if "--controller" not in extra else args.controller
+    _prepare_rl_args(args)
+    return dry_run_plan(args)
+
+
+def test_dry_run_no_sync_single_gpu_no_syncer():
+    plan = _plan("ports", ("--rl-single-island-no-sync", "--rl-allow-unverified-mechanism",
+                           "features:clip_higher"))
+    assert plan["islands"] == 1 and plan["total_gpus"] == 1
+    assert plan["syncer"] is None and plan["outer_sync"] is False
+    assert plan["algorithm_spec_sha256"] == AlgorithmSpec().sha256()
+    assert plan["unverified_mechanisms"] == ["features:clip_higher"]
+    [island] = plan["island_requests"]
+    assert island["gpu"] == "A100" and island["total_gpus"] == 1
+    assert "--rl-single-island-no-sync" in island["learner_command"]
+    assert "--syncer" not in island["learner_command"]
+
+
+def test_dry_run_default_two_islands_with_syncer():
+    plan = _plan("ports", gpu="aws:1xa100@us-east-1,aws:1xa100@us-west-2")
+    assert plan["islands"] == 2 and plan["total_gpus"] == 2 and plan["outer_sync"]
+    assert plan["syncer"].endswith("-syncer")
+    assert all("--syncer $SYNCER_ADDR" in i["learner_command"] for i in plan["island_requests"])
+
+
+def test_dry_run_refusals():
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    args = _launcher_args("ports", ("--rl-single-island-no-sync",))
+    _prepare_rl_args(args)
+    args.controller = "head"
+    with pytest.raises(ValueError, match="--controller local"):
+        dry_run_plan(args)
+
+
+def test_cli_dry_run_creates_nothing(monkeypatch, capsys):
+    import yeto.cli as cli
+    import yeto.launcher as launcher
+
+    calls = []
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    monkeypatch.setattr(launcher, "run", lambda *a, **k: calls.append("run"))
+    monkeypatch.setattr(cli, "_spawn_worker", lambda *a, **k: calls.append("spawn"))
+    monkeypatch.setattr(cli.runs, "create_run", lambda *a, **k: calls.append("create"))
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--dry-run",
+                                    "--controller", "local"))
+    assert cli.cmd_launch(args) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["dry_run"] and plan["total_gpus"] == 1 and plan["syncer"] is None
+    assert calls == []
+
+
+def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, capsys, tmp_path):
+    """run() -> Modal island -> FleetController(syncer=None) -> teardown (1a crash)."""
+    import yeto.launcher as launcher
+    import yeto.modal_runner as modal_runner
+
+    events = []
+
+    class FakeModalOps:
+        def __init__(self, app_name):
+            self.app_name = app_name
+
+        def define(self, cfg):
+            events.append(("define", cfg.learner_id, cfg.envs.get("SYNCER_ADDR")))
+
+        def deploy(self):
+            events.append(("deploy",))
+
+        def spawn(self, cfg):
+            events.append(("spawn", cfg.learner_id))
+            return "fc-1"
+
+        def status(self, call_id):
+            return "SUCCEEDED"
+
+        def cancel(self, call_id):
+            events.append(("cancel", call_id))
+
+        def stop_app(self):
+            events.append(("stop_app",))
+
+        def tail_logs(self, call_id, entries=100):
+            return []
+
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    monkeypatch.setattr(launcher, "_tail_modal", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "warn_if_model_wont_fit", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "make_syncer_task",
+                        lambda *a, **k: pytest.fail("no-sync must not build a syncer"))
+    seen = {}
+    real_controller = launcher.FleetController
+
+    def controller(**kwargs):
+        seen.update(kwargs)
+        return real_controller(**kwargs)
+
+    monkeypatch.setattr(launcher, "FleetController", controller)
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local",
+                                    "--rl-image",
+                                    "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100")
+    args.keep = False
+    clusters = []
+    code = launcher.run(args, on_clusters=clusters.extend)
+    assert seen["syncer"] is None and seen["syncer_probe"] is None
+    assert not any(c.endswith("-syncer") for c in clusters)
+    assert ("spawn", 0) in events and ("stop_app",) in events
+    assert [e for e in events if e[0] == "define"][0][2] == "none"
+    # the stream produced no events: fail closed (3), tape marked incomplete
+    assert code == launcher.NO_SYNC_INCOMPLETE_EXIT == 3
+    err = capsys.readouterr().err
+    assert "event tape incomplete" in err
+    [marker] = (tmp_path / "runs" / args.cluster_prefix / "events").glob("*.incomplete")
+    assert marker.read_text().startswith("no rl_learner_finalized")
+
+
+def test_no_sync_event_echo_matches_tape(tmp_path, monkeypatch, capsys):
+    from yeto.rl import miles
+
+    monkeypatch.setattr(miles, "_append_rl_event", miles._append_rl_event)
+    assert rl_learner.install_event_echo() is True
+    assert rl_learner.install_event_echo() is False  # idempotent
+    tape = tmp_path / "tape.jsonl"
+    ns = SimpleNamespace(yeto_rl_event_tape=str(tape), yeto_rl_learner_id=0)
+    miles._append_rl_event(ns, {"event": "rl_engine_selected", "x": 1})
+    miles._append_rl_event(ns, {"event": "rl_round_trained", "masked_fraction": 0.5})
+    echoed = [l[len("YETO_RL_EVENT "):] for l in capsys.readouterr().out.splitlines()
+              if l.startswith("YETO_RL_EVENT ")]
+    assert echoed == tape.read_text().splitlines()
+
+
+def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
+    """Island echo -> Modal log stream -> launcher collector == island tape."""
+    import yeto.launcher as launcher
+    import yeto.modal_runner as modal_runner
+    from yeto import runs
+    from yeto.rl import miles
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    # the island side: produce the echoed log with the real echo
+    monkeypatch.setattr(miles, "_append_rl_event", miles._append_rl_event)
+    rl_learner.install_event_echo()
+    island_tape = tmp_path / "island.jsonl"
+    ns = SimpleNamespace(yeto_rl_event_tape=str(island_tape), yeto_rl_learner_id=0)
+    launch = _launch()
+    miles._append_rl_event(ns, selection_event(
+        launch=launch, algorithm=launch.algorithm, miles_commit="x",
+        unverified_mechanisms=("features:clip_higher",), outer_sync=False))
+    for r in range(3):
+        miles._append_rl_event(ns, {"event": "rl_round_trained", "rollout_id": r})
+    miles._append_rl_event(ns, {"event": "rl_learner_finalized"})
+    log = ["noise line"] + capsys.readouterr().out.splitlines()
+    log = log + log[:3]  # a reconnecting stream replays lines
+
+    class FakeModalOps:
+        def __init__(self, app_name):
+            self.app_name = app_name
+
+        def define(self, cfg):
+            pass
+
+        def deploy(self):
+            pass
+
+        def spawn(self, cfg):
+            return "fc-1"
+
+        def status(self, call_id):
+            return "SUCCEEDED"
+
+        def cancel(self, call_id):
+            pass
+
+        def stop_app(self):
+            pass
+
+        def tail_logs(self, call_id, entries=100):
+            return []
+
+        def stream_logs(self, call_id):
+            yield from log
+
+    monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    monkeypatch.setattr(launcher, "warn_if_model_wont_fit", lambda *a, **k: None)
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local",
+                                    "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100")
+    args.keep = False
+    assert launcher.run(args) == 2
+    [local] = list((tmp_path / "runs" / args.cluster_prefix / "events").glob("*.jsonl"))
+    assert local.read_text() == island_tape.read_text()  # line for line
+    # and --rl-event-tape export reads it
+    from yeto.rl.export import algorithm_from_event_tape
+
+    spec, mechanisms = algorithm_from_event_tape(local)
+    assert spec == launch.algorithm.canonical_json()
+    assert mechanisms == ("features:clip_higher",)
+
+
+def test_event_echo_format_and_extract(tmp_path):
+    from yeto.rl import event_echo
+
+    record = {"island_id": 0, "time_unix": 1.5, "event": "x", "b": [1]}
+    line = event_echo.format_record(record)
+    assert line == 'YETO_RL_EVENT {"b":[1],"event":"x","island_id":0,"time_unix":1.5}'
+    log = tmp_path / "head.log"
+    log.write_text(f"[yeto-l0] {line}\nnoise\n[yeto-l0] {line}\nYETO_RL_EVENT {{bad\n")
+    out = tmp_path / "tape.jsonl"
+    assert event_echo.main([str(log), str(out)]) == 0
+    assert out.read_text() == line[len("YETO_RL_EVENT "):] + "\n"
+
+
+def test_event_collector_validation_discards_and_close(tmp_path):
+    from yeto.rl import event_echo
+
+    c = event_echo.TapeCollector(tmp_path / "t.jsonl")
+    good = event_echo.format_record({"island_id": 0, "time_unix": 1.0, "event": "a"})
+    for line in (good, "YETO_RL_EVENT [1,2]", 'YETO_RL_EVENT {"event":"x"}',
+                 'x YETO_RL_EVENT {"island_id":0,"time_u', "plain"):
+        c.feed(line)
+    assert c.count == 1 and c.discarded == 3
+    assert c.close() is False and c.incomplete_marker.exists()
+    c.feed(event_echo.format_record({"island_id": 0, "time_unix": 2.0, "event": "b"}))
+    assert c.count == 1  # nothing written after close
+    with pytest.raises(FileExistsError):
+        event_echo.TapeCollector(tmp_path / "t.jsonl")
+    done = event_echo.TapeCollector(tmp_path / "u.jsonl")
+    done.feed(event_echo.format_record(
+        {"island_id": 0, "time_unix": 1.0, "event": "rl_learner_finalized"}))
+    assert done.close() is True and not done.incomplete_marker.exists()
+    assert event_echo.tape_is_complete(tmp_path / "u.jsonl")
+    assert not event_echo.tape_is_complete(tmp_path / "t.jsonl")
+
+
+def test_no_sync_run_refuses_existing_tapes(monkeypatch, tmp_path):
+    import yeto.launcher as launcher
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local"),
+                          gpu="modal:1xa100")
+    events = tmp_path / "runs" / args.cluster_prefix / "events"
+    events.mkdir(parents=True)
+    (events / "old.jsonl").write_text("{}\n")
+    with pytest.raises(ValueError, match="event tapes already exist"):
+        launcher.run(args)
+
+
+def test_echo_never_emits_half_lines(tmp_path, monkeypatch, capsys):
+    from yeto.rl import miles
+
+    def partial_writer(args, event):  # a writer that leaves a partial last line
+        with open(args.yeto_rl_event_tape, "a") as handle:
+            handle.write(json.dumps({"island_id": 0, "time_unix": 1, **event}) + "\n{partial")
+
+    monkeypatch.setattr(miles, "_append_rl_event", partial_writer)
+    rl_learner.install_event_echo()
+    miles._append_rl_event(SimpleNamespace(yeto_rl_event_tape=str(tmp_path / "t"),
+                                           yeto_rl_learner_id=0), {"event": "a"})
+    out = [l for l in capsys.readouterr().out.splitlines() if l.startswith("YETO_RL_EVENT")]
+    assert len(out) == 1 and "partial" not in out[0]
+
+
+def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch, tmp_path, capsys):
+    """G3 shape: two Modal islands + a syncer; island 1's stream is cut mid-line."""
+    import types
+
+    import yeto.launcher as launcher
+    import yeto.modal_runner as modal_runner
+    from yeto import runs
+    from yeto.rl import event_echo
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+
+    def island_log(island, finalized):
+        lines = ["[x] startup noise"]
+        for rec in ({"event": "rl_engine_selected"}, {"event": "rl_publication", "v": 1},
+                    {"event": "rl_publication", "v": 2}):
+            lines.append(event_echo.format_record({"island_id": island, "time_unix": 1.0, **rec}))
+        if finalized:
+            lines.append(event_echo.format_record(
+                {"island_id": island, "time_unix": 2.0, "event": "rl_learner_finalized"}))
+        else:
+            lines[-1] = lines[-1][:30]  # container exited mid-line
+        return lines
+
+    logs = {0: island_log(0, True), 1: island_log(1, False)}
+
+    class FakeModalOps:
+        def __init__(self, app_name):
+            self.app_name = app_name
+            self.calls = {}
+
+        def define(self, cfg):
+            pass
+
+        def deploy(self):
+            pass
+
+        def spawn(self, cfg):
+            self.calls[f"fc-{cfg.learner_id}"] = cfg.learner_id
+            return f"fc-{cfg.learner_id}"
+
+        def status(self, call_id):
+            return "SUCCEEDED"
+
+        def cancel(self, call_id):
+            pass
+
+        def stop_app(self):
+            pass
+
+        def tail_logs(self, call_id, entries=100):
+            return []
+
+        def stream_logs(self, call_id):
+            yield from logs[self.calls[call_id]]
+
+    fake_sky = sys_modules_sky(monkeypatch)
+    fake_sky.launch = lambda task, **kw: "rid-syncer"
+    fake_sky.stream_and_get = lambda rid: (1, types.SimpleNamespace(head_ip="10.0.0.1"))
+    monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
+    monkeypatch.setattr(modal_runner, "resolve_syncer_for_modal", lambda addr, public: addr)
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    monkeypatch.setattr(launcher, "warn_if_model_wont_fit", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "make_syncer_task", lambda *a, **k: object())
+    monkeypatch.setattr(launcher, "_tail", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "terminate_and_verify", lambda *a, **k: True)
+    monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: None)
+
+    class Controller:
+        def __init__(self, **kw):
+            self.learners = kw["learners"]
+            self.downed_clusters = set()
+
+        def run(self):
+            return {name: "JobStatus.SUCCEEDED" for name in self.learners}
+
+    monkeypatch.setattr(launcher, "FleetController", Controller)
+    args = _launcher_args("ports", ("--controller", "local", "--rl-image",
+                                    "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100,modal:1xa100")
+    args.keep = False
+    args.output = str(tmp_path / "out")
+    code = launcher.run(args)
+    assert code == launcher.NO_SYNC_INCOMPLETE_EXIT == 3
+    events = tmp_path / "runs" / args.cluster_prefix / "events"
+    tapes = sorted(events.glob("*.jsonl"))
+    assert len(tapes) == 2
+    complete = [t for t in tapes if event_echo.tape_is_complete(t)]
+    incomplete = [t for t in tapes if not event_echo.tape_is_complete(t)]
+    assert len(complete) == 1 and len(incomplete) == 1
+    assert incomplete[0].with_name(incomplete[0].name + ".incomplete").exists()
+    assert [l for l in complete[0].read_text().splitlines()] == [
+        l[len("YETO_RL_EVENT "):] for l in logs[0] if l.startswith("YETO_RL_EVENT ")]
+    captured = capsys.readouterr()
+    assert "event tape incomplete" in captured.err
+    assert "1 malformed prefixed line(s) discarded" in captured.out  # the cut line
+
+
+def sys_modules_sky(monkeypatch):
+    import sys
+
+    return sys.modules["sky"]
+
+
+def test_modal_islands_get_echo_flag_sky_islands_do_not():
+    modal_run = _island_run(_launcher_args("ports", gpu="modal:1xa100"))
+    assert "--rl-echo-events" in modal_run and "--syncer $SYNCER_ADDR" in modal_run
+    assert "--rl-echo-events" not in _island_run(_launcher_args("ports"))
+    assert "--rl-echo-events" not in _island_run(_launcher_args("legacy", gpu="modal:1xa100"))
+    args = rl_learner.parse_args(_learner_argv(("--rl-echo-events",)))
+    assert args.rl_echo_events

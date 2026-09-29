@@ -147,7 +147,7 @@ def _correction_rows() -> list[FlagMapping]:
 
     def use_opsm(spec):
         c = spec.correction
-        if c.method != "opsm":
+        if c.opsm_delta is None:
             return []
         return ["--use-opsm", "--opsm-delta", _num(c.opsm_delta)]
 
@@ -226,6 +226,10 @@ _UNMAPPED = [
     "--rollout-data-postprocess-path",
     "--reward-key",
     "--group-rm",
+    # A YAML whose keys miles_validate_args setattr()s onto the namespace
+    # (arguments.py:3194-3199), i.e. arbitrary overrides incl. use_tis/eps_clip:
+    # it would bypass the spec entirely, so it is refused like any unmapped flag.
+    "--custom-config-path",
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}

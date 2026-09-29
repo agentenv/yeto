@@ -848,6 +848,21 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
     ):
         raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
+    steps = getattr(args, "rl_optimizer_steps", 1)
+    if steps is None:
+        steps = 1
+    if type(steps) is not int or steps < 1:
+        raise ValueError(f"--rl-optimizer-steps must be a positive int (got {steps!r})")
+    if steps != 1:
+        if rl_engine != "ports":
+            raise ValueError("--rl-optimizer-steps > 1 only applies to --rl-engine ports")
+        samples = int(args.rollout_batch_size) * int(args.n_samples_per_prompt)
+        if samples % steps:
+            # run_config: rollout_batch_size * n_samples == global_batch * optimizer_steps
+            raise ValueError(
+                f"--rl-optimizer-steps {steps} must divide --rollout-batch-size * "
+                f"--n-samples-per-prompt ({samples}) into equal optimizer batches"
+            )
     if rl_engine != "ports" and getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-single-island-no-sync only applies to --rl-engine ports")
     try:
@@ -1824,6 +1839,7 @@ def make_miles_island_task(
             if getattr(args, "rl_single_island_no_sync", False)
             else " --syncer $SYNCER_ADDR"
         )
+        + (" --rl-echo-events" if _echoes_events(args, spec) else "")
         + " --learner-id $LEARNER_ID"
         f" --reward-function {shlex.quote(args.reward_function)}"
         f" --reward-sha256 {shlex.quote(args.reward_sha256)}"
@@ -1838,7 +1854,7 @@ def make_miles_island_task(
         f" --samples-per-group {args.n_samples_per_prompt}"
         f" --over-sampling-batch-size {args.over_sampling_batch_size}"
         f" --rl-distributed-timeout-minutes {args.rl_distributed_timeout_minutes}"
-        " --optimizer-steps 1"
+        f" --optimizer-steps {int(getattr(args, 'rl_optimizer_steps', 1) or 1)}"
         f" --rollout-max-response-len {args.rollout_max_response_len}"
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
@@ -2911,19 +2927,24 @@ def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
             )
 
 
-def _tail_modal(modal_ops, call_id: str, prefix: str) -> int:
+from .rl.event_echo import TapeCollector as EventCollector  # noqa: E402  (no-sync tapes)
+
+
+def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
     """Stream a Modal island's container logs (the Modal twin of _tail)."""
     while True:
         try:
             for line in modal_ops.stream_logs(call_id):
                 print(f"[{prefix}] {str(line).rstrip()}", flush=True)
+                if collector is not None:
+                    collector.feed(line)
             return 0
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
             time.sleep(5)
 
 
-def _tail(cluster: str, job_id: int, prefix: str) -> int:
+def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
     import sky
 
     while True:
@@ -2933,6 +2954,8 @@ def _tail(cluster: str, job_id: int, prefix: str) -> int:
                 if line is None:
                     break
                 print(f"[{prefix}] {line.rstrip()}", flush=True)
+                if collector is not None:
+                    collector.feed(line)
             return 0
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
@@ -3296,6 +3319,10 @@ class FleetController:
             self.syncer = None
             self.syncer_probe = syncer_probe
             self.syncer_restart = syncer_restart
+        elif syncer is None:
+            # --rl-single-island-no-sync: no syncer of any kind to supervise.
+            self.syncer = None
+            self.syncer_probe = self.syncer_restart = None
         else:
             syncer_name, syncer_task, syncer_job = syncer
             self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
@@ -3323,7 +3350,7 @@ class FleetController:
         while True:
             if self.syncer is not None:
                 self._poll(self.syncer, is_syncer=True)
-            else:
+            elif self.syncer_probe is not None:
                 self._poll_local_syncer()
             for rec in self.learners.values():
                 self._poll(rec, is_syncer=False)
@@ -3665,6 +3692,22 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     if no_sync and head_mode:
         raise ValueError("--rl-single-island-no-sync has no syncer; do not run it as a head")
     specs = parse_gpu_spec(args.gpu)
+    no_sync_incomplete: list[str] = []
+    # Islands whose tape travels over the log stream (no fetchable
+    # ~/yeto-output): every Modal RL ports island, and a no-sync island.
+    echo_names = {
+        name for name, spec in zip(learner_cluster_names(args.cluster_prefix, specs), specs)
+        if _echoes_events(args, spec)
+    }
+    events_dir = _no_sync_events_dir(args) if echo_names else None
+    if echo_names:
+        # Refuse to mix runs in one tape, before anything is provisioned.
+        existing = sorted(str(p) for p in events_dir.glob("*.jsonl*")) if events_dir.exists() else []
+        if existing:
+            raise ValueError(
+                f"event tapes already exist for run {args.cluster_prefix!r}: {existing}; "
+                "use another --cluster-prefix or remove them"
+            )
     # External learners (machines sky cannot provision — e.g. Macs running
     # yeto.mlx.learner) get the ids AFTER the cloud learners; the syncer
     # counts them in --learners and its port is already public, so they
@@ -3846,12 +3889,28 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         #    past --recover-timeout.
         def spawn_tail(name: str, job_id) -> None:
             label = "syncer" if name == syncer_cluster else name
+            collector = None
+            if name in echo_names:
+                # No syncer tape and (on Modal) no fetchable ~/yeto-output: the
+                # island echoes its tape into the log; rebuild it locally.
+                collector = event_collectors.get(name)
+                if collector is None:  # a relaunch keeps appending to the same tape
+                    collector = event_collectors[name] = EventCollector(
+                        events_dir / f"{name}.jsonl", fresh=False
+                    )
             if modal_ops is not None and name in modal_cfgs:
-                threading.Thread(
-                    target=_tail_modal, args=(modal_ops, job_id, label), daemon=True
-                ).start()
-                return
-            threading.Thread(target=_tail, args=(name, job_id, label), daemon=True).start()
+                thread = threading.Thread(
+                    target=_tail_modal, args=(modal_ops, job_id, label, collector), daemon=True
+                )
+            else:
+                thread = threading.Thread(
+                    target=_tail, args=(name, job_id, label, collector), daemon=True
+                )
+            thread.start()
+            tail_threads.append(thread)
+
+        tail_threads: list[threading.Thread] = []
+        event_collectors: dict[str, EventCollector] = {}
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
@@ -3872,7 +3931,40 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             fixed_roster=getattr(args, "training_mode", "sft") == "rl",
         )
         exit_codes = controller.run()
+        if echo_names:
+            # The island's last events (finalization) must be on disk before
+            # teardown: the log streams end when the island exits; bounded wait.
+            deadline = time.monotonic() + NO_SYNC_EVENT_DRAIN_S
+            for thread in tail_threads:
+                thread.join(max(0.0, deadline - time.monotonic()))
+            # Fail closed: stop writing (a stream still alive after the bounded
+            # wait can no longer touch the tape) and mark unfinalized tapes.
+            for name, collector in event_collectors.items():
+                complete = collector.close()
+                print(
+                    f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
+                    f"{collector.discarded} malformed prefixed line(s) discarded"
+                )
+                if not complete:
+                    no_sync_incomplete.append(name)
+                    print(
+                        f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
+                        f"record; marked {collector.incomplete_marker}",
+                        file=sys.stderr,
+                    )
+            for name in sorted(echo_names):
+                if name not in event_collectors:  # never streamed: nothing received
+                    no_sync_incomplete.append(name)
+                    EventCollector(events_dir / f"{name}.jsonl", fresh=False).close()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
+        if no_sync_incomplete:
+            print(
+                f"[launcher] event tape incomplete for {no_sync_incomplete}; "
+                f"exit {NO_SYNC_INCOMPLETE_EXIT}",
+                file=sys.stderr,
+            )
+            if no_sync:  # nothing else to secure: no syncer checkpoint
+                return NO_SYNC_INCOMPLETE_EXIT
 
         # Secure the artifact BEFORE the finally block tears learners down:
         # fetch ~/yeto-output from the winning learner onto this machine
@@ -3900,6 +3992,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         os.makedirs(local_dest, exist_ok=True)
         if rl_mode and head_mode:
             print(f"[launcher] committed RL checkpoint retained at {local_dest}")
+        elif source in modal_cfgs and no_sync:
+            print(
+                f"[launcher] --rl-single-island-no-sync island ran on Modal ({source}); "
+                "its ~/yeto-output is not fetchable over ssh and there is no syncer "
+                "checkpoint -- use the streamed island log / event tape as the evidence",
+                file=sys.stderr,
+            )
+            return 2
         elif source in modal_cfgs:
             print(
                 f"[launcher] every successful learner ran on Modal ({source}); its "
@@ -3928,7 +4028,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                 print(f"[launcher] upload to {output} failed: {e}; the model "
                       f"remains at {local_dest}", file=sys.stderr)
                 return 2
-        return 1 if failed else 0
+        if failed:
+            return 1
+        # A synced run still fetches/delivers its checkpoint first, then
+        # fails closed on an incomplete island tape.
+        return NO_SYNC_INCOMPLETE_EXIT if no_sync_incomplete else 0
     finally:
         # Clusters the controller already tore down (abandoned learners, or
         # the syncer after a total loss) are skipped — even with --keep.
@@ -3989,3 +4093,83 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"head — tear it down with: yeto down {prefix}",
                     flush=True,
                 )
+
+
+NO_SYNC_EVENT_DRAIN_S = 120.0
+# no-sync run whose island tape lacks rl_learner_finalized (differs from 2:
+# "artifact not fetchable").
+NO_SYNC_INCOMPLETE_EXIT = 3
+
+
+def _echoes_events(args, spec) -> bool:
+    """Whether this island's tape is echoed to its log and rebuilt locally."""
+
+    return (
+        getattr(args, "training_mode", "sft") == "rl"
+        and getattr(args, "rl_engine", "ports") == "ports"
+        and (bool(getattr(args, "rl_single_island_no_sync", False)) or spec.cloud == "modal")
+    )
+
+
+def _no_sync_events_dir(args) -> Path:
+    """``<run dir>/events`` (yeto run registry), for --rl-single-island-no-sync."""
+
+    from . import runs
+
+    return runs.run_dir(args.cluster_prefix) / "events"
+
+
+def dry_run_plan(args) -> dict:
+    """``yeto launch --dry-run``: what a launch would request, creating nothing.
+
+    Runs on prepared args (``prepare_launch_args`` already validated the
+    request, including the ports algorithm/capability checks) and builds the
+    island tasks in memory only to read the learner command; no sky/Modal
+    call is made.
+    """
+
+    no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
+    rl = getattr(args, "training_mode", "sft") == "rl"
+    if no_sync and not rl:
+        raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
+    head = getattr(args, "controller", "local") == "head"
+    if no_sync and head:
+        raise ValueError("--rl-single-island-no-sync has no syncer; use --controller local")
+    specs = parse_gpu_spec(args.gpu)
+    external = max(0, getattr(args, "external_learners", 0) or 0)
+    islands = []
+    for learner_id, spec in enumerate(specs):
+        entry = {
+            "learner_id": learner_id,
+            "cloud": spec.cloud,
+            "region": spec.region,
+            "gpu": spec.gpu,
+            "num_nodes": spec.num_nodes,
+            "gpus_per_node": spec.gpus_per_node,
+            "total_gpus": spec.total_gpus,
+        }
+        if rl:
+            task = make_miles_island_task(
+                args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
+            )
+            entry["learner_command"] = next(
+                (line.strip() for line in task.run.splitlines() if "yeto.rl.learner" in line),
+                None,
+            )
+        islands.append(entry)
+    return {
+        "dry_run": True,
+        "training_mode": getattr(args, "training_mode", "sft"),
+        "rl_engine": getattr(args, "rl_engine", None) if rl else None,
+        "controller": "head" if head else "local",
+        "islands": len(specs) + external,
+        "external_learners": external,
+        "total_gpus": sum(s.total_gpus for s in specs),
+        "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
+        "outer_sync": not no_sync,
+        "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
+        "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),
+        "unverified_mechanisms": list(getattr(args, "rl_allow_unverified_mechanism", None) or ()),
+        "clusters": [] if not islands else learner_cluster_names(args.cluster_prefix, specs),
+        "island_requests": islands,
+    }

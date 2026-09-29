@@ -647,6 +647,19 @@ Before any GPU process exists, the driver handshake refuses:
     binary;
   - `reinforce_plus_plus*` without `whiten`.
 
+**Declaration policy** (main-agent decision, may be overridden by the user;
+alignment §7b): a mechanism is declared in `miles_capabilities` only on
+evidence that it actually takes effect on GPU. Current Miles adapter
+declarations beyond R0:
+
+- `corrections`: `tis`, `opsm`, `opsm_trainer` (rl-algo-mismatch-correction).
+  **G1 only proved they run; that their truncation/masking branches take
+  effect is pending a triggering run.** They are withdrawn if that run does
+  not show the effect.
+- `features`: `maxrl`, `mapo` (rl-algo-seq-and-adv G1). A real run also needs
+  `reward_postprocessors:custom_reward_postprocess`, which waits for the
+  rl-algo-grpo-knobs G1. `gdpo` is held back.
+
 "Expressible, not enabled" means the spec can describe and translate a
 mechanism, but `miles_capabilities` does not declare it yet. A follow-up
 algorithm change declares it after its single-GPU smoke passes.
@@ -679,6 +692,7 @@ Visible default-path changes on `ports` (no algorithm option given):
 
 - the island learner command always carries
   `--rl-expected-algorithm-sha256 <hash>`;
+- the tape ends with an `rl_learner_finalized` record;
 - the `rl_engine_selected` event additionally carries `rl/algorithm_spec`
   (canonical JSON) and `rl/algorithm_absorbed_flags` (`{}` by default).
 
@@ -687,6 +701,26 @@ The Miles argv of default GRPO is byte-identical to R0.
 `yeto-rl-export --rl-algorithm-spec PATH` writes `algorithm_spec`, the
 canonical JSON, and `algorithm_spec_sha256` to the ports provenance. The
 legacy provenance is unchanged.
+
+**Event tapes of Modal islands.** A Modal island's `~/yeto-output` cannot be
+fetched. So every ports Modal island, and every `--rl-single-island-no-sync`
+island, runs with `--rl-echo-events`: the learner prints each tape record as
+`YETO_RL_EVENT <json>` (`yeto/rl/event_echo.py`), and the launcher rebuilds
+`<run dir>/events/<island>.jsonl` from the log stream.
+
+The check fails closed. A tape without `rl_learner_finalized`, for example a
+stream cut when the container exited, gets a `.incomplete` marker and makes
+the run exit 3. A synced run still fetches its checkpoint first.
+
+`--rl-event-tape` export refuses incomplete tapes unless
+`--allow-incomplete` is given.
+
+**Launch dry run.** `yeto launch ... --dry-run` validates the whole launch
+(arguments, provenance, the ports algorithm and capability checks) and prints
+JSON with the resource request (GPU type and count per island, island count,
+whether a syncer is started), the algorithm hash and each learner command. It
+creates no cloud resource. With `--rl-single-island-no-sync` (which needs
+`--controller local`) it shows one island, no syncer and `outer_sync: false`.
 
 **Dry run.** `python3 -m yeto.rl.engine.miles_adapter.algorithm_flags
 --dry-run [--rl-algorithm-spec PATH] [--extra "<miles argv>"]
