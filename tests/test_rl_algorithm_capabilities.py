@@ -353,6 +353,7 @@ EXPECTED_MILES_DECLARED = {
     "advantage_estimators:gspo",
     "advantage_estimators:reinforce_plus_plus",
     "advantage_estimators:reinforce_plus_plus_baseline",
+    "features:gdpo",
 }
 
 
