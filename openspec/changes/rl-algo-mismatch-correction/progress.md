@@ -146,3 +146,13 @@
 - 已核对 P0 对 `mismatch_correction.py` 的改动：IcePop 的 `miles.` 路径也注册为已命名 correction 函数，由 `corrections:icepop` 单独认领。对应测试改为断言 icepop 不再要求 `corrections:custom`。核对后无异议，93 passed。
 - 集成分支上的 Miles adapter 声明：none、tis、opsm、opsm_trainer、mismatch_observe、icepop、mis_mask。未声明：opsm_rollout、mis（truncate/clip）。docs 已同步。
 - G3：等 P0 修复 rl_local_round 回传后，基于集成分支先提交新计划（判据不变），再重跑 TIS 两岛并加跑 IcePop 两岛。
+
+## 2026-09-29 features:mismatch_metrics 撤回（integ-decl 审查）
+
+- 审查结论正确：Miles 的条件是 `get_mismatch_metrics or use_tis`（losses.py:233/386）。我的所有证据运行都带 use_tis=True，这个标志在这些运行里对执行路径没有作用，因此不构成生效证据。**保持未声明。**
+- 目前也无法补做审查要求的“use_tis=False、只开 mismatch_metrics”运行：P0 的翻译对 `method=custom` 总是输出 `--use-tis`，吸收规则也要求 custom 函数必须带 `--use-tis`，所以这样的规格在 AlgorithmSpec 里表达不出来。要补做，需要 P0 先允许“custom 函数不带 --use-tis”（只在 get_mismatch_metrics 下调用）。
+- 连带影响：本 change 规定 mismatch_observe 必须 `mismatch_metrics=true`（rejection `mismatch_observe_only`）。icepop 的证据规格也带了这个标志。撤回后，这两类规格会因为 `features:mismatch_metrics` 未声明而在 Miles adapter 上被拒。需要由用户或主 agent 选定处理方式：
+  1. 由 P0 放开上面那条限制后补做运行，再声明；
+  2. 去掉 observe 对该标志的强制要求。这会改变 observe 规格的哈希，G1/G2 需要重新验证。
+  
+  未决定前不改代码。
