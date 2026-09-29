@@ -208,20 +208,23 @@ def build_metadata(
             f"trained groups ({len(trained)}) not all present in all_samples ({len(groups)} matched)"
         )
     groups.sort(key=lambda g: g["group_id"])
-    return {
+    payload = {
         "schema": METADATA_SCHEMA,
         "rollout_id": rollout_id,
         "groups": groups,
         "completed": len(groups),
         "filtered": filtered,
         "aborted": aborted,
-        # 1.7: time trajectories spent outside generation (tool calls), summed
-        # over every generated sample (Miles Sample.non_generation_time).
-        "tool_wait_seconds": tool_wait,
         "trained_sample_indices": sorted(
             int(i[1:]) for g in groups for i in g["sample_ids"] if i[1:].lstrip("-").isdigit()
         ),
     }
+    if tool_wait > 0:
+        # 1.7: time trajectories spent outside generation (tool calls), summed
+        # over every generated sample (Miles Sample.non_generation_time).
+        # Absent when no sample reported any: the default key set is unchanged.
+        payload["tool_wait_seconds"] = tool_wait
+    return payload
 
 
 # --------------------------------------------------------------------------
