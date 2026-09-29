@@ -17,13 +17,22 @@ Field contract (alignment A2/F5):
   ``build_metadata`` and shipped as rollout metadata
   ``filtered_samples = {"overlong_filter": n}`` plus per-group
   ``filtered_samples`` (int). The infra ledger records these samples with
-  the *terminal* state ``filtered`` (reason = the key). Over-sampling leftovers
-  that Miles keeps in its buffer are *not* filtered here; the ledger records
-  them as the non-terminal ``carried_over``.
+  the *terminal* state ``filtered`` (reason = the key). This module never
+  touches over-sampling: Miles does not return surplus completed groups to its
+  buffer (``sglang_rollout.py:505-510``: once ``data`` is full, further kept
+  groups are simply not added; only samples aborted under ``--partial-rollout``
+  go back), so over-sampling leaves no non-terminal remainder here.
 
-Default configuration (no ``args.yeto_algo_plugins`` or no
-``overlong_filter``): no sample is touched and the counts attribute is not set
-(the hook behaves exactly as before).
+Default configuration (no ``overlong_filter``): no sample is touched and the
+counts attribute is not set (the hook behaves exactly as before).
+
+Fail-closed (review F3): on a ports run (``yeto_rl_expected_algorithm_sha256``
+set on the Miles namespace) whose runtime attrs did not reach this process
+(neither ``yeto_algo_plugins`` nor the always-present
+``yeto_rl_dynamic_sampling_max_replacements``), the hook raises instead of
+silently skipping a filter the spec may enable. The plugins payload is also
+checked against the expected algorithm hash (``read_plugins``) and against
+this module's source hash.
 """
 
 from __future__ import annotations
@@ -31,7 +40,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from .reward_pipeline import read_plugins
+from .reward_pipeline import (
+    SAMPLE_FILTERS_PATH,
+    RewardPipelineError,
+    expected_algorithm_sha256,
+    plugin_sha,
+    read_plugins,
+    runtime_attrs_delivered,
+)
 
 FILTER_COUNTS_ATTR = "_yeto_sample_filter_counts"
 FILTERED_BY_KEY = "yeto_filtered_by"
@@ -71,9 +87,20 @@ def overlong_filter(data: Sequence[Sequence[Any]]) -> int:
 def apply_sample_filters(args: Any, data: Sequence[Sequence[Any]]) -> dict[str, int] | None:
     """Run the spec-selected sample filters on the kept groups (in place)."""
 
+    if expected_algorithm_sha256(args) is not None and not runtime_attrs_delivered(args):
+        raise RewardPipelineError(
+            "sample filters: this ports run's runtime attrs (yeto_algo_plugins) did not reach "
+            "the Miles rollout process; refusing to skip a filter the spec may enable"
+        )
     config = read_plugins(args, required=False)
     if not config or not config.get("overlong_filter"):
         return None
+    actual = plugin_sha(SAMPLE_FILTERS_PATH)
+    if config.get("sample_filters_sha256") != actual:
+        raise RewardPipelineError(
+            f"sample filters source {actual} differs from the spec's "
+            f"{config.get('sample_filters_sha256')}"
+        )
     counts = {OVERLONG_FILTER: overlong_filter(data)}
     setattr(args, FILTER_COUNTS_ATTR, counts)
     return counts

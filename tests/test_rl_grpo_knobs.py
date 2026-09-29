@@ -32,7 +32,7 @@ def reducer():
 
 
 def pipeline_spec(**adv):
-    return AlgorithmSpec(advantage={"reward_postprocess": dispatcher(), **adv})
+    return gk.with_pipeline_plugins(AlgorithmSpec(advantage={"reward_postprocess": dispatcher(), **adv}))
 
 
 # ---------------------------------------------------------------- 5.1 / hashes
@@ -199,7 +199,7 @@ def test_dispatcher_argv_only_when_needed():
     assert algorithm_argv(AlgorithmSpec()) == []
     lone = pipeline_spec()
     assert any("no reward shaper or non-default advantage.transform" in p for p in lone.rejections())
-    missing = AlgorithmSpec(advantage={"reward_shapers": [OVERLONG]})
+    missing = gk.with_pipeline_plugins(AlgorithmSpec(advantage={"reward_shapers": [OVERLONG]}))
     assert any("need the dispatcher" in p for p in missing.rejections())
     other = AlgorithmSpec(advantage={"reward_postprocess": PluginRef.from_path(
         "yeto.rl.algos.reducers.constant_denominator_reducer").to_dict()})
@@ -265,6 +265,10 @@ def test_extension_point_identity_transform():
     def identity(args, samples, rewards, groups, params):
         seen["groups"], seen["params"] = groups, params
         return list(rewards)
+
+    # A real extension registers a module-level function of a yeto module;
+    # this test function stands in as part of reward_pipeline.
+    identity.__module__, identity.__qualname__ = rp.__name__, "test_identity"
 
     rp.register_advantage_transform("test_identity", identity,
                                     validate=lambda params, spec: [] if params.get("k") == 1 else ["k must be 1"])
@@ -349,7 +353,7 @@ def _group(statuses):
 
 
 def test_overlong_filter_marks_truncated_only():
-    spec = AlgorithmSpec(sampling={"overlong_filter": True})
+    spec = gk.with_pipeline_plugins(AlgorithmSpec(sampling={"overlong_filter": True}))
     args = SimpleNamespace(**gk.runtime_attrs(spec))
     data = [_group(["completed", "truncated", "completed", "truncated"])]
     assert sf.apply_sample_filters(args, data) == {"overlong_filter": 2}
@@ -422,7 +426,7 @@ def test_overlong_gradient_rule():
 
 
 def test_expects_gradient_with_overlong_filter():
-    spec = AlgorithmSpec(sampling={"overlong_filter": True})
+    spec = gk.with_pipeline_plugins(AlgorithmSpec(sampling={"overlong_filter": True}))
     assert spec.expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 4),))) is False
     assert spec.expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 3),))) is True
     assert AlgorithmSpec().expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 4),))) is True
@@ -528,3 +532,239 @@ def test_examples_build_and_translate(name):
     assert set(algorithm_argv(spec)) <= set(launch.argv)
     # default GRPO argv unchanged by the examples' existence
     assert "--custom-reward-post-process-path" not in mc.translate_run_config(make_config(), AlgorithmSpec()).argv
+
+
+# ---------------------------------------------------------------- review F1-F4
+
+
+def _foreign(args, samples, rewards, groups, params):
+    return list(rewards)
+
+
+def test_other_module_stages_enter_identity():
+    """A transform registered by another yeto module is covered (F1)."""
+
+    before = rp.stage_plugin_paths()
+    base = pipeline_spec(reward_shapers=[OVERLONG])
+    _foreign.__module__ = "yeto.rl.algos.reducers"  # stands in for e.g. yeto.rl.algos.seq_adv
+    rp.register_advantage_transform("test_foreign", _foreign)
+    try:
+        paths = rp.stage_plugin_paths()
+        assert "yeto.rl.algos.reducers._foreign" in paths and set(before) < set(paths)
+        assert paths == tuple(sorted(paths, key=lambda p: p.rpartition(".")[0]))
+        # a spec pinned before the new module registered is now incomplete
+        assert any("plugins must list" in p for p in base.rejections())
+        spec = pipeline_spec(transform="test_foreign")
+        assert spec.rejections() == []
+        assert "yeto.rl.algos.reducers._foreign" in {p.path for p in spec.plugins}
+        cfg = gk.plugins_config(spec)["reward_pipeline"]
+        assert cfg["pipeline_sha256"] == rp.combined_sha256(rp.stage_plugin_refs())
+    finally:
+        rp.ADV_TRANSFORMS.pop("test_foreign")
+
+
+def test_post_process_rechecks_pipeline_identity():
+    spec = pipeline_spec(reward_shapers=[OVERLONG])
+    payload = gk.runtime_attrs(spec)[rp.PIPELINE_ATTR]
+    cfg = json.loads(json.dumps(payload["config"]))
+    cfg["reward_pipeline"]["pipeline_sha256"] = "0" * 64
+    args = _args(AlgorithmSpec())
+    setattr(args, rp.PIPELINE_ATTR, {"config": cfg, "sha256": rp.canonical_sha256(cfg)})
+    with pytest.raises(rp.RewardPipelineError, match="code identity"):
+        rp.post_process(args, [])
+
+
+def test_stale_plugin_hash_rejected():
+    spec = pipeline_spec(reward_shapers=[OVERLONG])
+    stale = spec.replace(plugins=[{"path": p.path, "sha256": "1" * 64} for p in spec.plugins])
+    assert any("source hash differs" in p for p in stale.rejections())
+
+
+def test_unknown_transform_refused_at_launch():
+    spec = pipeline_spec(reward_shapers=[OVERLONG])
+    rp.register_advantage_transform("test_gone", _foreign)
+    try:
+        gone = pipeline_spec(transform="test_gone")
+    finally:
+        rp.ADV_TRANSFORMS.pop("test_gone")
+    assert gk.launch_problems(gone, rollout_batch_size=1, rollout_max_response_len=1024) == [
+        "advantage transform 'test_gone' is not registered"
+    ]
+    assert gk.launch_problems(spec, rollout_batch_size=1, rollout_max_response_len=1024) == []
+
+
+def test_plugins_bound_to_expected_algorithm_hash():
+    spec = pipeline_spec(reward_shapers=[OVERLONG])
+    attrs = gk.runtime_attrs(spec)
+    ok = SimpleNamespace(yeto_rl_expected_algorithm_sha256=spec.sha256().upper(), **attrs)
+    assert rp.read_plugins(ok)["algorithm_spec_sha256"] == spec.sha256()
+    bad = SimpleNamespace(yeto_rl_expected_algorithm_sha256="f" * 64, **attrs)
+    with pytest.raises(rp.RewardPipelineError, match="expects ffff"):
+        rp.read_plugins(bad)
+
+
+def test_sample_filters_fail_closed_and_hash_checked():
+    data = [_group(["truncated"])]
+    lost = SimpleNamespace(yeto_rl_expected_algorithm_sha256="a" * 64)
+    with pytest.raises(rp.RewardPipelineError, match="did not reach"):
+        sf.apply_sample_filters(lost, data)
+    # runtime attrs delivered, no plugins payload: the spec selects no filter
+    plain = SimpleNamespace(yeto_rl_expected_algorithm_sha256="a" * 64,
+                            yeto_rl_dynamic_sampling_max_replacements=None)
+    assert sf.apply_sample_filters(plain, data) is None
+    spec = gk.with_pipeline_plugins(AlgorithmSpec(sampling={"overlong_filter": True}))
+    assert spec.rejections() == []
+    assert rp.SAMPLE_FILTERS_PATH in {p.path for p in spec.plugins}
+    cfg = json.loads(json.dumps(gk.runtime_attrs(spec)[rp.PIPELINE_ATTR]["config"]))
+    cfg["sample_filters_sha256"] = "0" * 64
+    tampered = SimpleNamespace(**{rp.PIPELINE_ATTR: {"config": cfg, "sha256": rp.canonical_sha256(cfg)}})
+    with pytest.raises(rp.RewardPipelineError, match="sample filters source"):
+        sf.apply_sample_filters(tampered, data)
+    unpinned = AlgorithmSpec(sampling={"overlong_filter": True})
+    assert any("plugins must list" in p for p in unpinned.rejections())
+
+
+# ---------------------------------------------------------------- 3.3 --ref-load binding
+
+
+def test_ref_source_bound_to_base_model():
+    spec = kl_spec()
+    assert _alg.island_problems(spec, {"base_model_revision": "REV-A", "base_model": REF["source"]}) == []
+    wrong = _alg.island_problems(spec, {"base_model_revision": "rev-a", "base_model": "Qwen/Other"})
+    assert wrong and "kl.ref_model.source 'Qwen/Qwen3-0.6B' does not match" in wrong[0]
+    override = _alg.island_problems(spec, {"base_model_revision": "rev-a", "base_model": REF["source"],
+                                           "ref_load_override": "/ckpt/megatron"})
+    assert override and "--megatron-ref-load" in override[0]
+    # no KL loss: nothing to bind
+    assert _alg.island_problems(AlgorithmSpec(), {"base_model_revision": "x", "base_model": "y",
+                                                  "ref_load_override": "/z"}) == []
+
+
+# ---------------------------------------------------------------- 3.2 fake composition root, outer sync
+
+import torch  # noqa: E402
+
+
+def _kl_island(tmp_path, spec, syncer, joins, *, learner_id, model_revision):
+    """Ports island start order (learner.run_miles): verify_ports_algorithm, then
+    the driver with strict-avg outer sync (the bridge joins in sync.start)."""
+
+    import test_rl_engine_driver as td
+    from yeto.rl import learner as rl_learner
+    from yeto.rl.engine.bridges import StrictAvgSync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import fake_capabilities
+    from yeto.rl.engine.miles_adapter import config as mc
+    from test_rl_miles_adapter_config import make_config
+
+    args = SimpleNamespace(rl_expected_algorithm_sha256=spec.sha256(), learner_id=learner_id,
+                           event_tape=str(tmp_path / f"learner-{learner_id}.jsonl"),
+                           rl_allow_unverified_mechanism=None, model_revision=model_revision,
+                           model=REF["source"])
+    rl_learner.verify_ports_algorithm(args, SimpleNamespace(), mc.translate_run_config(make_config(), spec))
+    engine = td._engine(torch.tensor([1.0 + learner_id, 3.0]))
+
+    def join(_bridge):
+        joins.append(learner_id)
+        return syncer.client(learner_id)
+
+    sync = StrictAvgSync(td._strict_config(tmp_path, engine, learner_id=learner_id, rounds=1,
+                                           tape=f"island-{learner_id}.jsonl"),
+                         client_factory=join)
+    caps = fake_capabilities(kl_placements={"none", "reward", "loss"},
+                             features={"kl_loss_ref_model"})
+    return IslandDriver(learner_id=learner_id, rollout=engine.rollout, trainer=engine.trainer,
+                        policy_state=engine.policy_state, publisher=engine.publisher,
+                        placement=engine.placement, algorithm=spec, sync=sync,
+                        events=EventTape(tmp_path / f"island-{learner_id}.jsonl", learner_id),
+                        capabilities=caps)
+
+
+def test_fake_two_islands_ref_mismatch_fails_before_outer_sync(tmp_path):
+    import test_rl_engine_driver as td
+    from yeto.rl import learner as rl_learner
+
+    spec = kl_spec(revision=td.MODEL_REVISION)
+    engine = td._engine()
+    syncer = td._strict_syncer(engine, learners=2, rounds=1)
+    joins: list[int] = []
+    # same reference on both islands: both join and finish one strict-avg round
+    ok = [_kl_island(tmp_path, spec, syncer, joins, learner_id=i, model_revision=td.MODEL_REVISION)
+          for i in (0, 1)]
+    results, errors = td._run_threads(ok)
+    assert errors == {} and sorted(joins) == [0, 1]
+    assert torch.equal(results[0].tensors[td.NAME], results[1].tensors[td.NAME])
+    # island 1's base differs from the spec's reference: refused before its bridge joins
+    joins.clear()
+    syncer = td._strict_syncer(engine, learners=2, rounds=1)
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    with pytest.raises(rl_learner.AlgorithmMismatchError, match="base_model_revision"):
+        _kl_island(bad, spec, syncer, joins, learner_id=1, model_revision="0" * 40)
+    assert joins == []
+    [event] = [json.loads(x) for x in (bad / "learner-1.jsonl").read_text().splitlines()]
+    assert event["event"] == "rl_algorithm_island_rejected"
+
+
+# ---------------------------------------------------------------- 6.5 fake driver, zero-gradient invariant
+
+import dataclasses as _dc  # noqa: E402
+
+from yeto.rl.engine.ports import GroupMetadata  # noqa: E402
+
+
+@_dc.dataclass(frozen=True)
+class _FilteredGroup(GroupMetadata):
+    # GroupMetadata.filtered_samples arrives with 1b-hook.patch; until then the
+    # fake rollout supplies it through this subclass (same field name/type).
+    filtered_samples: int | None = None
+
+
+def _overlong_driver(tmp_path, filtered_per_group, *, grad_nan=False):
+    import test_rl_engine_driver as td
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import fake_capabilities
+
+    engine = td._engine(zero_grad_rounds={0})
+    original = engine.rollout.generate
+
+    def generate(rollout_id):
+        batch = original(rollout_id)
+        cls = GroupMetadata if "filtered_samples" in {f.name for f in _dc.fields(GroupMetadata)} \
+            else _FilteredGroup
+        groups = tuple(cls(**{f.name: getattr(g, f.name) for f in _dc.fields(g)
+                              if f.name != "filtered_samples"},
+                                      filtered_samples=(len(g.sample_ids) if filtered_per_group == "all"
+                                                        else filtered_per_group))
+                       for g in batch.groups)
+        return _dc.replace(batch, groups=groups)
+
+    engine.rollout.generate = generate
+    if grad_nan:
+        metrics = engine.trainer.step_metrics
+        engine.trainer.step_metrics = lambda: _dc.replace(metrics(), grad_norm=float("nan"))
+    spec = gk.with_pipeline_plugins(AlgorithmSpec(sampling={"overlong_filter": True}))
+    caps = fake_capabilities(features={"overlong_filter", "plugins"})
+    return IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+                        policy_state=engine.policy_state, publisher=engine.publisher,
+                        placement=engine.placement, algorithm=spec, sync=LocalOnlySync(1),
+                        events=EventTape(tmp_path / "events.jsonl", 0), capabilities=caps)
+
+
+def test_overlong_all_truncated_zero_grad_does_not_fail(tmp_path):
+    _overlong_driver(tmp_path, "all").run()
+
+
+def test_overlong_partial_truncated_zero_grad_still_fails(tmp_path):
+    from yeto.rl.engine.driver import StrictRlInvariantError
+
+    with pytest.raises(StrictRlInvariantError, match="adapter gradients are not flowing"):
+        _overlong_driver(tmp_path, 1).run()
+
+
+def test_overlong_nonfinite_grad_still_fails(tmp_path):
+    from yeto.rl.engine.driver import StrictRlInvariantError
+
+    with pytest.raises(StrictRlInvariantError, match="grad_norm=nan"):
+        _overlong_driver(tmp_path, "all", grad_nan=True).run()
