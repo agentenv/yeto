@@ -19,7 +19,7 @@ if cmd == "run":
                     filter=lambda t: None if "__pycache__" in t.name else t)
     image = modal.Image.from_registry(IMG, secret=registry_secret()).entrypoint([])
     sb = modal.Sandbox.create("sleep", "infinity", app=app, image=image, timeout=1800,
-                              cpu=4, memory=16384)
+                              cpu=4, memory=16384, gpu=os.environ.get("ALGOCAP_GPU") or None)
     print("SANDBOX", sb.object_id, flush=True)
     open(sys.argv[3], "w").write(sb.object_id)
     try:
