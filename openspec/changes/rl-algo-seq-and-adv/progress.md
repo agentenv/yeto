@@ -219,3 +219,9 @@
 - 观察：第 2 轮两岛 nonzero_advantages=0、grad_norm=0.0 且无不变量失败——"不期望梯度"分支在 GPU 上被触发。
 - 重跑需在 ≥ c098b5b 的 SHA 上单独提交计划（退出码 4 = 失败）。
 - **7.7 汇总（全部为估算，未核账单）**：G1 attempts 1–4 ≈ $3.1；attempt 5 ≈ $0.9；attempt 6 ≈ $3.9；G3 ≈ $3 → 合计 ≈ $11，上限 $20。所有本 change 的 Modal app（algo2a-g1 ×2、yeto-algo2a-g1-* ×8、yeto-algo2a-g3）均为 stopped / 0 tasks；本 change 的 watchdog 与本机 syncer（:29420）已停；无卷、无命名 secret。7.7 勾选。
+
+## 2026-09-29 7.6 判定口径修正（主 agent）与补充证据
+- 7.6 正式结果：未通过——退出码 143，且判据 4 按事先提交的检查脚本判定"不成立"（`run/check-as-declared.json`）；运行后按事件计数的"成立"只作观察（`results.md` 已改）。
+- 根因在 launcher（两岛 finalized 后先停 syncer，岛 1 关闭期异常被判 FAILED 并进入恢复循环；c098b5b 后会返回 4，仍属误判），已由主 agent 交 P0 修复。修复推送后允许在新 SHA 上按单独提交的新计划只重跑一次：判据不变；检查脚本运行前改为按 rl_local_round/rl_round_trained 事件计数（已在 harness 中改好，随新计划提交）；退出码 0/2 由磁带判定，3/4/其他非零为失败。
+- watchdog 中途消失：原因未查明（疑似他人按模式批量 kill 同形 `sleep 3300` watchdog）；harness 已加固（独立命名脚本、setsid+nohup、忽略 HUP/INT/TERM、60 s 心跳日志、每分钟自检并按原截止时间重启），见 `evidence/g3/results.md`。
+- **5.5 补充证据（GPU）**：7.6 运行中 MaxRL 第 2 轮两岛 `rl_round_trained.nonzero_advantages = 0`、`rl_local_round.grad_norm = 0.0`、无不变量失败事件——"非零 advantage 为 0 → 不期望梯度"分支在 GPU 上真实走到（此前仅 fake driver 覆盖）。
