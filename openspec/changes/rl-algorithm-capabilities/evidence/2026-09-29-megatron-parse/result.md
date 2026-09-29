@@ -14,3 +14,11 @@
 - **结论**：第 2 次运行不满足原计划的全部成功条件，2.6 改回未勾选。20/20 解析通过这一事实仍然保留，但不能作为 2.6 的验收依据。新计划见 `attempt3-plan.md`。
 - **yeto 版本（E3）**：第 1、2 次上传的是 algo-cap 工作树。运行时没有记录 SHA；按提交时间和当时工作区干净推断，yeto/ 和 tests/ 与 `b76a91f` 相同（`7fd5bdd` 只改了证据文件）。这是推断，未在运行时核实。
 - **日志入库（E1）**：`attempt1/run.log` 和 `attempt2/run2.log` 已用 `git add -f` 入库；入库前扫描过 GitHub/HF/Modal/W&B 凭据模式，没有命中。
+
+## 第 3 次运行（按 attempt3-plan.md）
+
+- yeto `5d8ba404dbebf393abe8cc847024380c6ff0dcac`（运行前工作区干净，SHA 记在 `attempt3/run.log` 首行）；`/root/miles` HEAD 为 0394715083c9…；Modal T4 ×1；sandbox sb-vR86Hf0hxHOIwMMAcvfp5H。
+- 远端 28/28 例全部通过：upstream `parse_miles_args`（megatron 后端，含 Megatron 校验）解析通过，expected 字段全部相等。
+- 本地 28/28 生成成功；`compare3.py` 显示 28/28 例的本地与远端 argv JSON 逐字节相同，退出码 0，输出见 `attempt3/compare3.json`。
+- 成功条件全部满足。
+- 资源：sandbox 在 finally 中 terminate；两个 `algocap-parse` app 都 stopped、0 tasks；看门狗进程已结束。费用估计 < $0.1，未经账单核实。
