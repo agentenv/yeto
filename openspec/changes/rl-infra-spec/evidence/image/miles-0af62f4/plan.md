@@ -9,3 +9,10 @@
   test_upstream_parse_args_accepts_translation[False] fails in yeto's translate_run_config guard
   (config.py:527) before Miles is called -- image-independent; expected to recur; [True] must pass
   and nothing else may fail.
+
+## Result (sb-LQKdyfLtaGjsJJJ4YBHtvS, L40S, 536 s)
+All image checks PASS, including lora_bridge_per_token_loss.  parse_args: 46 passed, 1 skipped,
+1 failed = the pre-declared test_upstream_parse_args_accepts_translation[False] (yeto
+config.py:527 guard, image-independent, owner INFRA).  No other failure.
+Cost ~ $0.35 (L40S 536 s + CPU/mem, estimate).  Sandbox terminated in finally, app stopped
+(modal_app_list_after_stop.txt: all stopped), watchdog killed; no volumes/secrets.
