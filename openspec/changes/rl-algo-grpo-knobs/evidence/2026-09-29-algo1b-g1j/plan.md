@@ -16,3 +16,6 @@
 
 ## 资源与回收
 Modal Sandbox `H100!`×1（运行前断言型号），app `algo1b-g1j`；sandbox timeout 10800 秒，独立 watchdog 11100 秒，每个 exec 1800 秒，本地 `timeout 11400`，EXIT trap；结束后执行 `modal app stop algo1b-g1j`。预计约 30 分钟，≤ $3。在 g1h、g1i 结束后再运行。
+
+## 运行前修订（单独提交，发生在任何运行之前）
+- 每轮 4 组 × 8 条 = 32 条样本，不能被 3 个 optimizer step 整除（run_config 算出的 global_batch 为 32//3=10，Miles 要求整除）。因此改为**每轮 6 组 × 8 条 = 48 条，每个 step 16 条**。这是唯一的偏离，其余不变：seed 17、lr 1e-4、eps 设定、3 轮、判据。之所以不用 3 组，是为了让每个 step 有足够的非零方差组，减少"第 1、2 步梯度为 0"的风险；这是在运行前做出的配置选择，没有看过任何结果。

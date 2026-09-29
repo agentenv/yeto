@@ -15,7 +15,7 @@ $P sbx.py put $SID $W/yeto.tgz /work/yeto && $P sbx.py put $SID $W/harness.tgz /
 T=2400 $P sbx.py exec $SID "bash /work/harness/setup.sh" > out/setup.log 2>&1
 grep -q SETUP_OK out/setup.log || { echo "setup failed (see out/setup.log)"; exit 2; }
 for m in ${MECHS:-clip_sym clip_hi}; do
-  T=1800 $P sbx.py exec $SID "export PATH=\$HOME/.cargo/bin:\$PATH; mkdir -p /work/out && cd /work/yeto && export PYTHONPATH=/opt/miles-next:/work/yeto:/work/harness:\$PYTHONPATH HF_HUB_DISABLE_TELEMETRY=1; SEED=17 OPT_STEPS=3 INNER_LR=1e-4 python /work/harness/g1.py $m /work/out/$m > /work/out/$m.log 2>&1; echo rc=\$?; tail -3 /work/out/$m.log; tar czf /tmp/$m.tgz --exclude='*.pt' --exclude='*.safetensors' --exclude='*.ckpt*' -C /work/out $m $m.log" > out/$m.exec.log 2>&1
+  T=1800 $P sbx.py exec $SID "export PATH=\$HOME/.cargo/bin:\$PATH; mkdir -p /work/out && cd /work/yeto && export PYTHONPATH=/opt/miles-next:/work/yeto:/work/harness:\$PYTHONPATH HF_HUB_DISABLE_TELEMETRY=1; GROUPS=6 SEED=17 OPT_STEPS=3 INNER_LR=1e-4 python /work/harness/g1.py $m /work/out/$m > /work/out/$m.log 2>&1; echo rc=\$?; tail -3 /work/out/$m.log; tar czf /tmp/$m.tgz --exclude='*.pt' --exclude='*.safetensors' --exclude='*.ckpt*' -C /work/out $m $m.log" > out/$m.exec.log 2>&1
   $P sbx.py get $SID /tmp/$m.tgz $W/$m.tgz >/dev/null 2>&1 && mkdir -p out/$m && tar xzf $W/$m.tgz -C out/ || echo "fetch failed $m" >> out/errors.txt
   tail -2 out/$m.exec.log
 done
