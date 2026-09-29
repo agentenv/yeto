@@ -52,3 +52,15 @@
   - (c) 的 equivalence 全部 passed。若只有源码哈希锁定一项失败，说明镜像内的 Miles 与 0394715 不同源；该结论照实记录，不改锁定值；
   - (a) 只记录事实。
 - 失败条件：(b) 或 (c) 中任一项 failed，照实记录，除非查明原因并修复，否则不重跑。
+
+## 第 4 次运行结论（app ap-DDeeL3wMFMu6QGwlotOr0y，T4，exit=0，已停止；yeto 版本见 YETO_SHA.txt run4）
+
+- (a) 4.1 的实际环境：
+  - 镜像环境变量 `PYTHONPATH=/pkg/:/root/`；
+  - Miles 是 editable 安装（`pip show`：Location `/opt/sglang/lib/python3.12/site-packages`，Editable project location `/root/miles`）；
+  - 因为 `/root/` 在 PYTHONPATH 上，`import miles` 解析成命名空间包 `['/root/miles']`，`__file__` 为 None。
+  - 在 run1 的条件下（cwd=/tmp，镜像默认 PYTHONPATH），`import examples.experimental.DrGRPO.custom_reducer` 报 `ModuleNotFoundError: No module named 'examples'`；`/root/examples` 不存在。
+  - 更正：先前写的"以包安装、examples 不在 sys.path"不准确，应为：Miles 仓库是 editable 安装在 /root/miles，`examples` 不是可导入的顶层包（`/root/miles` 本身不在 sys.path 上）。`/root/miles/examples` 目录是否存在，本次没有核实。
+- (b) 7.1 与各机制的完整 `parse_args`：`14 passed`（12 项机制 + dapo-like + dr-grpo）。
+- (c) 5.2 补充：镜像内 `train_data_conversion.py` 的 sha256 为 `ff7448c0…`，与 0394715 相同，同源；只用镜像自带的 Miles 跑 equivalence，`69 passed`。
+- 无残留：`teardown_proof.txt`（四个 app 均为 stopped）。

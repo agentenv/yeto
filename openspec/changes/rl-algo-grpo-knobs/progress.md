@@ -2,6 +2,74 @@
 
 对齐结论、依赖矩阵、工作包与待批准事项见 [`../rl-infra-spec/alignment.md`](../rl-infra-spec/alignment.md)（以 `rl-infra-spec` 分支为准）。
 
+## 2026-09-29 第三轮（G1 与声明，Agent ALGO-1b）——以本节为准
+
+### G1 第 2 次尝试逐项结果
+证据：`evidence/2026-09-29-algo1b-g1/`，包括 plan.md、`g1_report.json`（原始判定）和 `g1_report_v2.json`（按审查决定把 SGLang freeze_gc 良性链式异常列入白名单后的判定）。所有 run 都用 Modal sandbox，1 张 H100，单岛、no-sync，每个 3 轮。
+
+| 机制 | rc | 轮数 | 秒 | 峰值 MiB | 关键指标 | 是否证明生效 |
+|---|---|---|---|---|---|---|
+| baseline | 0 | 3 | 418.8 | 38142 | grad_norm 0.63/0.41/0.27 | — |
+| clip_higher | 0 | 3 | 330.7 | 38178 | pg_clipfrac 0/0/0；pg_loss 与 baseline 逐位相同 | 否 |
+| dual_clip | 0 | 3 | 349.6 | 36784 | pg_clipfrac 0/0/0；pg_loss 与 baseline 逐位相同 | 否 |
+| token | 0 | 3 | 363.2 | 38178 | pg_loss 0.035/0.0068/0.0026（与 baseline 不同） | 是 |
+| drgrpo | 0 | 3 | 333.2 | 38178 | pg_loss 0.0079/0.0072/0.019（常数分母，与 baseline 不同） | 是 |
+| kl_k3 | 0 | 3 | 345.8 | 38184（baseline 38142） | kl_loss 0/0.00079/0.00082 | 是 |
+| entropy | 0 | 3 | 327.4 | 38178 | entropy_loss 0.30/0.38/0.45 | 是 |
+| over_sampling | 0 | 3 | 316.7 | 36924 | 丢组与补采均为 0 | 否 |
+| overlong_penalty | 0 | 3 | 362.8 | 38174 | 3 条 rl_reward_shaping，塑形后奖励均值低于原始 | 是 |
+
+### 8.3 声明（按主 agent 的决定）
+- `grpo_knobs.G1_DECLARED` 按机制逐项提交，每项一个提交：token、drgrpo、kl_k3、entropy、overlong_penalty（连同 reward_postprocessors:custom_reward_postprocess）。
+- entry.py/fake.py 的接线是共享文件，不在本分支提交，交付物为：
+  - `infra-drafts/1b-declare-wiring.patch`：接线本身；
+  - `infra-drafts/1b-declare-series/`：git format-patch 序列，第 0001 个是接线，0002–0006 是逐项声明（这些已在本分支），0007 是测试。
+- 打上接线后，P0 测试 `test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter`（KL loss 用例缺 ref_model）和 `test_miles_and_fake_declarations`（断言精确的 R0 集合）失败，2a 的 `test_miles_adapter_declares_none_of_them` 也失败。需要 ALGO-CAP 和 2a 更新各自的测试。
+- clip_higher、dual_clip、over_sampling、overlong_filter 不声明。
+
+### 8.1 与 8.2
+- 8.1：`yeto launch --dry-run`（P0 319d974）的输出见 `evidence/2026-09-29-algo1b-dryrun/dry-run.txt`：一个岛，modal H100×1，total_gpus 1，no-sync，放行开关与 spec 哈希都出现在输出中。凭据扫描 `cred_scan.txt` 结果为 0 hits。dry-run 里的 gpu 字段写的是 "H100"：这是请求的规格；是否锁定型号（不升级到 H200）由 `--modal-gpu-exact` 控制，它不体现在这个字段里。本 change 不做逐位实验，没有使用该开关。建议 P0 在 dry-run 输出中加一个显示 gpu_exact 的字段，已报告主 agent。
+- 8.2：保持未完成：overlong_filter 没有跑，要等 1b-hook.patch 合入。
+
+### 进行中
+- `evidence/2026-09-29-algo1b-g1b/`：按审查要求补做"是否生效"的 G1（clip_higher 用更小的 clip 窗口、跑 2 个 optimizer step；over_sampling 用更大的批次和更多轮）。dual_clip 事先判为"未能证明生效"，原因写在 plan.md。
+
+### 其他
+- setup.sh 改为 `set -eo pipefail`；attempt 1/2 当时用的是普通 `set -e`，这一点记录在 setup.sh 的注释里。
+- teardown_proof.txt 保存了 modal app list 与 sandbox 列表的实际输出：algo1b 的 app 全部 stopped，sandbox 列表为空。
+- 对其他分支的观察：algo-cap 声明了 maxrl 和 mapo，而 2a 的 `test_miles_adapter_declares_none_of_them` 断言一个都不声明。这两个分支合在一起就会失败，与本 change 无关。
+
+## 2026-09-29 第二轮（审查修复，Agent ALGO-1b）——以本节为准，覆盖下一节中与之冲突的状态
+
+### 合入与提交
+- 已普通 merge：algo-cap 099756c、63a78bd、6149a90（以及其后的 HEAD）和 infra-a（driver 的 `expects_gradient`）。关键提交：
+  - `a978b3c`：register_gradient_rule 增加 mechanism=，2a 在等这个修复；
+  - `063bc3e`：F1–F5、3.2、3.3、6.5；
+  - `2722cad`：register_pipeline_plugin_module；
+  - `6dee803`：run4 证据与 G1 计划；
+  - `6dcca57`：勾选状态。
+- c1a9a5a（及后续）修改了本 change 的 `design.md`。阶段 0 之后允许各 change 负责人维护本 change 的文档，两处改动都没有放宽验收：一处同步 F5 的 carried_over 说法，一处从 rl-infra-spec 取回的 A2 措辞。
+
+### 审查项
+- F1：用了分派器的 spec，必须在 `plugins` 里列出每个注册了 shaper/transform 的模块，按模块名排序，由 `grpo_knobs.with_pipeline_plugins` 补齐。这些模块的源码哈希因此进入算法哈希，learner 启动时会重新核验。合并哈希 `pipeline_sha256` 随 `yeto_algo_plugins` 下发；Miles 进程里 `post_process` 先调用 `load_extensions()`，再核对这个值。未注册的阶段在 launch check 阶段就被拒绝。注册函数时会自动调用 `register_pipeline_plugin_module`。
+- F2/F3：`sample_filters` 纳入覆盖：spec.plugins 要列出它，另下发 `sample_filters_sha256`。ports 运行中如果 runtime attrs 没送到 Miles 进程（`yeto_algo_plugins` 与 `yeto_rl_dynamic_sampling_max_replacements` 都不存在），`apply_sample_filters` 直接报错，不静默跳过。
+- F4：`read_plugins` 比对 payload 中的 `algorithm_spec_sha256` 与 `yeto_rl_expected_algorithm_sha256`。
+- F5：Miles 不会把超额完成的组放回 buffer（`sglang_rollout.py:505-510`），只有 `--partial-rollout` 下被 abort 的样本回 buffer，所以超采样不产生 `carried_over` 余量。已更正 sample_filters、design.md、1b-hook.patch 的 docstring，MILES_RL.md 的改法写成 1b-docs-f5.patch（已由 ALGO-CAP 在 6149a90 合入）。
+- F6：run1–4 的日志用 `git add -f` 入库，入库前扫描过密钥，无命中；删除了 `__pycache__`；各次运行的 yeto 版本见 `YETO_SHA.txt`；run3、run4 的结论已补进 plan.md。
+
+### 任务状态更新
+| task | 状态 | 证据 |
+|---|---|---|
+| 2.3 / 4.3 / 7.1 | CPU 通过 ✔（按主 agent 的口径决定，alignment §7b 第 7 条） | 钉住镜像中完整 `parse_args` + `validate_parsed_args`：run3 12 项，run4 14 项（含两个示例）。环境差异：用镜像自带的 megatron，miles 解析器为 0394715，而不是原文的 miles-next-venv |
+| 3.2 | CPU 通过 ✔ | `test_fake_two_islands_ref_mismatch_fails_before_outer_sync`：fake 组合根两岛走 strict-avg。ref 相同时两岛都加入外层同步并完成一轮；ref revision 不同的岛在 `verify_ports_algorithm` 处失败，client_factory 从未被调用（未加入外层同步），并写出 `rl_algorithm_island_rejected`。revision 比较不区分大小写，与 learner 的 `.lower()` 一致 |
+| 3.3 | CPU 通过 ✔ | `kl.ref_model.source` 必须等于 `--model`，`--ref-load` 由它解析得出；KL loss 下拒绝 `--megatron-ref-load`，因为无法把它绑定到 ref 身份。learner 的传参（1b-refload.patch）已由 ALGO-CAP 在 6149a90 合入。测试：`test_ref_source_bound_to_base_model`、`test_learner_binds_ref_source_and_override` |
+| 4.1 | CPU 通过 ✔（表述已更正） | run4：镜像 `PYTHONPATH=/pkg/:/root/`，Miles 以 editable 方式装在 /root/miles；在 cwd=/tmp 时 `import examples…` 报 ModuleNotFoundError |
+| 5.2 | CPU 通过 ✔（补充） | 在钉住镜像内用镜像自带的 Miles 跑 equivalence，69 passed；源码 sha256 相同（同源） |
+| 5.5 / 6.4 / 7.3 | CPU 通过 ✔ | 文档已由 1b-docs.patch 合入 algo-cap 099756c，F5 的更正在 6149a90 |
+| 6.5 | CPU 通过 ✔ | driver 调用 `expects_gradient`（来自 infra-a），规则通过 `register_gradient_rule(mechanism="features:overlong_filter")` 注册。fake driver 结果：全部截断且 grad 为 0 时不失败；部分截断且 grad 为 0 时仍失败；grad 为 nan 时仍失败。1b-hook.patch 合入前，`GroupMetadata.filtered_samples` 由测试里的同名子类提供；打上补丁后同一组测试也通过 |
+| 6.3 | 已实现（未勾选） | 等 INFRA 合入 1b-hook.patch（已按 F5 更新，在当前 HEAD 上可以 apply，打上后 79 passed） |
+| 7.2 | 未完成 | 需要 driver 事件字段（INFRA） |
+
 ## 2026-09-29（Agent ALGO-1b）
 
 ### 分支与提交
@@ -72,7 +140,7 @@
 | 9.2 | CPU 通过 ✔ | `openspec validate rl-algo-grpo-knobs --strict`：valid |
 | 9.3 | 已实现 ✔ | 本文件 |
 
-"可表达未开放"（没有做 G1，未在 `miles_capabilities` 中声明）：clip_higher、eps_clip、dual_clip、token 聚合、no_grpo_std_normalization、constant 聚合与 custom_pg_loss_reducer、KL loss（kl_placements:loss，kl_loss_ref_model）、entropy_bonus、over_sampling、overlong_penalty（reward_postprocessors:custom_reward_postprocess）、overlong_filter。
+（原"可表达未开放"清单已过时，删除；当前声明状态见本文件第三轮一节。）
 
 ### 1.2 接口位置
 

@@ -768,3 +768,59 @@ def test_overlong_nonfinite_grad_still_fails(tmp_path):
 
     with pytest.raises(StrictRlInvariantError, match="grad_norm=nan"):
         _overlong_driver(tmp_path, "all", grad_nan=True).run()
+
+
+def test_learner_binds_ref_source_and_override(tmp_path):
+    """3.3: the learner passes --model / --megatron-ref-load to the island check."""
+
+    from test_rl_miles_adapter_config import make_config
+    from yeto.rl import learner as rl_learner
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    spec = kl_spec()
+    launch = mc.translate_run_config(make_config(), spec)
+
+    def verify(**kw):
+        args = SimpleNamespace(rl_expected_algorithm_sha256=spec.sha256(), learner_id=0,
+                               event_tape=str(tmp_path / "t.jsonl"), rl_allow_unverified_mechanism=None,
+                               model_revision="REV-A", **kw)
+        rl_learner.verify_ports_algorithm(args, SimpleNamespace(), launch)
+
+    verify(model=REF["source"], megatron_ref_load=None)
+    with pytest.raises(rl_learner.AlgorithmMismatchError, match="kl.ref_model.source"):
+        verify(model="Qwen/Other", megatron_ref_load=None)
+    with pytest.raises(rl_learner.AlgorithmMismatchError, match="--megatron-ref-load"):
+        verify(model=REF["source"], megatron_ref_load="/ckpt/megatron")
+
+
+# ---------------------------------------------------------------- 8.3 declarations (1b-declare.patch)
+
+def test_declared_after_g1_and_overlong_filter_still_refused():
+    from yeto.rl.engine.miles_adapter.entry import miles_capabilities
+
+    caps = miles_capabilities("sha256:" + "0" * 64)
+    if not gk.declared_mechanisms()["features"] <= caps.features:
+        pytest.skip("needs infra-drafts/1b-declare.patch")
+    ok = [pipeline_spec(reward_shapers=[OVERLONG]),
+          AlgorithmSpec(loss={"aggregation": "token"}),
+          kl_spec(), AlgorithmSpec(entropy_coef=0.001)]
+    for spec in ok:
+        missing = [f"{d}:{n}" for d, n in spec.required_mechanisms() if n not in getattr(caps, d)]
+        assert missing == [], missing
+    flt = gk.with_pipeline_plugins(AlgorithmSpec(sampling={"overlong_filter": True}))
+    assert ("features", "overlong_filter") in flt.required_mechanisms()
+    assert "overlong_filter" not in caps.features
+    for name in ("clip_higher", "dual_clip", "over_sampling"):  # no GPU evidence of effect yet
+        assert name not in caps.features
+
+
+def test_emit_event_echoes_to_stdout(capsys):
+    from yeto.rl import event_echo
+
+    rp.emit_event(SimpleNamespace(yeto_rl_learner_id=0), {"event": "rl_reward_shaping", "samples": 2})
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out and out[-1].startswith(event_echo.PREFIX)
+    raw = event_echo.parse_line(out[-1])
+    assert raw not in (None, event_echo.INVALID)
+    record = json.loads(raw) if isinstance(raw, str) else raw
+    assert record["event"] == "rl_reward_shaping" and record["island_id"] == 0 and record["samples"] == 2

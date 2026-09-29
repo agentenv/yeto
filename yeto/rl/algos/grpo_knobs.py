@@ -444,3 +444,48 @@ register_launch_check("grpo_knobs", _launch_check)
 register_island_check("grpo_knobs_ref_model", island_problems)
 register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule,
                        mechanism="features:overlong_filter")
+
+
+# --------------------------------------------------------------------------
+# task 8.3: mechanisms whose single-GPU smoke (G1) passed
+# (openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1/g1_report.json).
+# overlong_filter is NOT declared (its hook wiring, 1b-hook.patch, is not merged
+# and it has no G1). Declaring means only "G1 passed", never "improves training".
+# --------------------------------------------------------------------------
+
+G1_EVIDENCE = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
+G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
+    # G1 run name -> mechanisms declared from it (dimension -> names). Only
+    # mechanisms shown to take effect on the GPU are declared (coordinator
+    # decision): clip_higher / dual_clip (clipfrac 0) and over_sampling (no
+    # replacement) wait for a G1 that triggers them.
+    "token": {"loss_aggregations": frozenset({"token"})},
+    "drgrpo": {"features": frozenset({"custom_pg_loss_reducer", "no_grpo_std_normalization"}),
+               "loss_aggregations": frozenset({"constant"})},
+    "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
+    "entropy": {"features": frozenset({"entropy_bonus"})},
+    "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
+                         "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
+}
+
+
+def declared_mechanisms() -> dict[str, frozenset[str]]:
+    """Union of G1_DECLARED per dimension (to merge into the engine declaration)."""
+
+    out: dict[str, set[str]] = {}
+    for dims in G1_DECLARED.values():
+        for dim, names in dims.items():
+            out.setdefault(dim, set()).update(names)
+    return {d: frozenset(n) for d, n in out.items()}
+
+
+def merge_declared(capabilities):
+    """``capabilities`` with the G1-declared mechanisms added (union per dimension)."""
+
+    import dataclasses
+
+    extra = declared_mechanisms()
+    if not extra:
+        return capabilities
+    return dataclasses.replace(capabilities, **{
+        dim: frozenset(getattr(capabilities, dim)) | names for dim, names in extra.items()})
