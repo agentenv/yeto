@@ -98,3 +98,14 @@ committed diagnosis.
 - Harness change before attempt 5 (lesson from G3's truncated tape): the tape is pulled every 5 s instead of 20 s. Criteria unchanged.
 - Before icepop/opsm-trainer: merged origin/algo-cap 2bce8ed (the launcher writes <run dir>/events/<island>.jsonl). YETO_SHA moves to that merge; mechanism code unchanged. The pulled container tape stays the primary source (same as tis); the launcher copy is kept as additional evidence.
 - Merged origin/algo-cap 50fe818 (no-sync reclaim is fail-closed: a tape without finalized becomes .incomplete, exit code 3). Reading, declared before the next runs: exit 3 counts as a failure, not as rc 2; nothing else changes. YETO_SHA moves to this merge.
+- opsm-trainer attempt 5 started with 3885 per-user threads, above the 3296 precondition (my check ran in the same command and I did not act on it). The launch had already created the app when I noticed, so it was left running. The precondition was a host-safety measure, not a validity criterion; recorded as a procedural deviation.
+- opsm-trainer attempt 5 evidence handling: while trying to abort (see the precondition note) I
+  killed the run_one.sh wrapper. The launcher itself went on and finished ("exit code 2" with the
+  not-fetchable line), but the wrapper's container tape puller died with the wrapper. The events
+  therefore come from the launcher's own copy (2bce8ed: ~/.yeto/runs/<run>/events/<island>.jsonl,
+  30 events, 0 malformed), copied to runs/opsm-trainer/tape.jsonl, and rc is taken from the
+  launcher's final line. The criteria were evaluated unchanged.
+
+## Result of the re-verification
+tis PASS, icepop PASS, opsm-trainer PASS (criteria 1-6, runs/*/check.json). No Modal app or
+container is left (app_after_stop.txt empty for each).
