@@ -755,6 +755,7 @@ class IslandDriver:
             trained_sample_ids_sha256=_sample_ids_sha256(batch),
             masked_fraction=metrics.masked_fraction,
             clip_fraction=metrics.clip_fraction,
+            applied_lrs=list(metrics.applied_lrs) if metrics.applied_lrs else None,
             nonzero_advantages=getattr(batch, "nonzero_advantages", None),
             **self._mismatch_fields(),
         )

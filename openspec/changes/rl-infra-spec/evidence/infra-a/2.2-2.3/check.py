@@ -35,9 +35,13 @@ tA, tB = trained(A), trained(B)
 res["rounds_A_B"] = [len(tA), len(tB)]
 key = lambda e: (e["rollout_id"], e["trained_sample_ids_sha256"], e["trained_groups"], e["trained_samples"])
 res["c2_sample_ids_equal"] = len(tA) == len(tB) > 0 and [key(e) for e in tA] == [key(e) for e in tB]
-lr = lambda t: [len(r.get("applied_lrs") or []) for r in rounds(t)]
+def lr(t):
+    # applied_lrs per round: rl_round_trained (driver) if present, else rl_local_round (bridge)
+    src = [e for e in t if e.get("event") == "rl_round_trained" and "applied_lrs" in e] or rounds(t)
+    return [len(r.get("applied_lrs") or []) for r in src]
 res["applied_lrs_len_A_B"] = [lr(A), lr(B)]
-res["c3_optimizer_timing"] = phases(A) == phases(B) and lr(A) == lr(B) and phases(A).count("train") == len(tA)
+res["c3_optimizer_timing"] = (phases(A) == phases(B) and lr(A) == lr(B) == [1] * len(tA)
+                              and phases(A).count("train") == len(tA))
 res["c4_publication"] = pub_ok(A) and pub_ok(B)
 res["c5_injected"] = sum(e.get("event") == "rl_fault_injected" for e in C) == sum(e.get("event") == "rl_publication" for e in C) > 0
 # c6: generation after publication; no generate between publish start and rl_publication

@@ -41,3 +41,11 @@ A-attempt2（a37403a，1×H100!，SUCCEEDED）的 island 磁带靠轮询拉取�
 - 修复提交中还包含与本实验无关的代码变更（receipt 标签、1a/2a 通道）。为保证 A/B/C 使用同一份代码，第三轮三个 arm 全部使用同一个新 SHA 重跑；A 的前两次尝试（a37403a、d2018b5）作为记录保留，如与第三轮 A 的可比数据（逐轮 sample-id 哈希、轮数、applied_lrs 长度）有差异，在完成记录中如实报告。
 
 - 第三轮 prefix 改为 `infra-a-r3a` / `infra-a-r3b` / `infra-a-r3c`（避免与上一轮残留 watchdog 同名；那些 watchdog 已结束），代码为 95203615。
+
+## 追加（事后，判定条件未改）：第三轮结果与第四轮（只重跑 A、B）
+- 第三轮（95203615）：r3a、r3b、r3c 均 SUCCEEDED，均断言为 H100。结果见 `round3-check.json`。
+  - X9 的条件 5–7 全部满足：每次发布前都注入了 30 s 延迟，共 4 次；所有 generate 都在对应的 publication 之后；无失败。
+  - 条件 1、2、4 满足：三轮的 sample-id 哈希 A=B，并与第二轮 A 一致。
+  - 条件 3 的"每轮 applied_lrs 长度=1"**证据不足**：`rl_local_round` 由 bridge 直接写入文件，不经过 echo；轮询拉取的磁带被 `modal container exec` 截断在 8 KiB，A 只拿到第 1、2 轮（均为 1），B 三轮齐全（均为 1）。按事先登记的判定，2.2 在第三轮**不能判为通过**。
+- 修正：driver 把 `applied_lrs` 写进每轮的 `rl_round_trained`（经 echo 完整收集）；check.py 优先读取该字段，并按计划原文要求长度=1。
+- 第四轮只重跑 A、B（同一新 SHA），因为 X9 的判定不涉及 A/B 的比较，C 的 X9 结论取第三轮。

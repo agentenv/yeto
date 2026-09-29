@@ -220,7 +220,13 @@ class MilesTrainerGroup:
                 self.last_grad_norm = max(norms)
                 self.last_applied_lrs = self._applied_lrs()
                 corrections = _has_corrections(self._spec)
-                if self._algorithm in CLIPFRAC_MASKED_ESTIMATORS or corrections:
+                # The receipt label is the role family ("grpo"); the estimator
+                # comes from the spec (review R1: gating on the label never
+                # collected GSPO clip fractions).
+                estimator = getattr(self._spec, "advantage_estimator", self._algorithm)
+                # Clip fraction / mismatch diagnostics are collected when a
+                # mechanism needs them (R0 GRPO keeps its RPC set unchanged).
+                if estimator in CLIPFRAC_MASKED_ESTIMATORS or corrections:
                     self.last_step_losses = self._step_losses()
                     round_metrics = mean_step_metrics(self.last_step_losses)
                     if self.last_masked_fraction is None and corrections:
@@ -229,7 +235,7 @@ class MilesTrainerGroup:
                         )
                     if (
                         self.last_masked_fraction is None
-                        and self._algorithm in CLIPFRAC_MASKED_ESTIMATORS
+                        and estimator in CLIPFRAC_MASKED_ESTIMATORS
                     ):
                         self.last_masked_fraction = clipfrac_masked_fraction(
                             self.last_step_losses
