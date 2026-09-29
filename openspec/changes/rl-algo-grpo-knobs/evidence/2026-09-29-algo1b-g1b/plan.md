@@ -23,3 +23,7 @@
   - 独立 watchdog（setsid nohup）在 3900 秒时执行 `modal app stop -y yeto-algo1b-g1b-<x>`；
   - 结束后 `modal app list` 核实 stopped，写入 teardown_proof.txt。
 - 串行执行：A 完成并核实回收后，再跑 C。
+
+## run A 第 1 次尝试结论
+- launcher 拉取私有 ports 镜像 `ghcr.io/michaellchung/yeto-miles-ports@sha256:5da40a07…` 时，skopeo copy 失败，Modal 镜像构建失败。原因是没有导出 registry 凭据。本次没有启动 GPU，Modal 上也不存在对应的 app。
+- 修复：run.sh 在进程内从 `~/.docker/config.json` 的 ghcr.io auth 解码出 `SKYPILOT_DOCKER_USERNAME/PASSWORD/SERVER` 并导出，凭据不打印、不写日志。其余不变，重跑 A。日志在 `attempt1-out-a/`。

@@ -12,6 +12,15 @@ else
   ARGS="$COMMON --rollout-batch-size 8 --over-sampling-batch-size 16 --dynamic-sampling-filter-path yeto.rl.filters.bounded_nonzero_reward_std --dynamic-sampling-max-replacements 2 --inner-lr 1e-5 --total-steps 5 --rl-algorithm-spec $D/over_sampling.json --rl-allow-unverified-mechanism features:over_sampling"
 fi
 echo "yeto $ARGS" > out-$X/cmd.txt
+# Private ports image: registry credentials decoded in-process from
+# ~/.docker/config.json (ghcr.io auth); never printed or logged.
+eval "$(python3 - <<'PY'
+import base64, json, shlex
+a = json.load(open("/home/michael/.docker/config.json"))["auths"]["ghcr.io"]["auth"]
+u, p = base64.b64decode(a).decode().split(":", 1)
+print(f"export SKYPILOT_DOCKER_USERNAME={shlex.quote(u)} SKYPILOT_DOCKER_PASSWORD={shlex.quote(p)} SKYPILOT_DOCKER_SERVER=ghcr.io")
+PY
+)"
 cd $Y && PYTHONPATH=$Y timeout 3600 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli $ARGS > $D/out-$X/launch.log 2>&1; echo "rc=$?" >> $D/out-$X/launch.log
 $M app stop -y $APP >> $D/out-$X/teardown.log 2>&1
 kill $(cat $D/out-$X/watchdog_pid) 2>/dev/null; pkill -f "sleep 3900; $M app stop -y $APP" 2>/dev/null
