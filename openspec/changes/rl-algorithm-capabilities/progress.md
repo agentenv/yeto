@@ -66,3 +66,14 @@ GPU 验证：本 change 不需要，也没有做。没有使用任何云资源�
 ## 下一步
 - 主 agent 合入 `p0-driver.patch`，之后勾选 4.1/4.2。
 - 子 change 基于 `algo-cap` 最新提交 rebase，按 `EXTENSION_MODULES` 接入。
+
+## 2026-09-29（ALGO-CAP，合并 infra-a 并按独立审查修订）
+
+- 已合并 infra-a；调用 selection 时传入 `placement=args.rl_placement`（learner、launcher）；`miles_args.yeto_rl_expected_algorithm_sha256` 写入 learner。
+- 处理的审查意见：F2（research §1/§5 标为历史基线）、F4（注册字段必须可哈希）、F5（`load_extensions` 只在导入成功后置位）、F6（梯度规则绑定到机制，默认 GRPO 的判定不变）、F7（launcher 在起云资源前运行 launch_problems 与 capability check）、F8（`dimension:name`）、F9/F10（存在任何外层同步即拒绝放行）、F11（夹具按字段注册情况分支；1b 字段存在时真实测试往返）、F12（见下）、F14（launcher 与 learner 哈希口径一致；learner 吸收参数后哈希变化会被拒绝，已加测试）。F15/F16/F17 在 driver.py/trainer.py 中，改动放在 `p0-driver-2.patch`，algorithm.py 侧（`gradient_expectation`、`valid_masked_fraction`）已直接实现。
+- F12（ports 默认路径上可见的变化）：island learner 命令多了 `--rl-expected-algorithm-sha256`；`rl_engine_selected` 事件多了 `rl/algorithm_spec` 与 `rl/algorithm_absorbed_flags`；默认 GRPO 的 Miles argv 仍与 R0 逐字节相同。
+- 任务状态有变化：2.6、5.3、5.5 改回未勾选，4.1、4.2 勾选（详见 tasks.md 的修订记录）。
+
+### 待批准（新增）
+- **G1 与放行开关**：D11 按原文执行后，learner（`--syncer` 必填）和 launcher 两个入口都带外层同步，`--rl-allow-unverified-mechanism` 在所有真实入口上都会被拒绝。需另批：要么放宽口径（允许单岛带 1 成员 syncer），要么新增一个无 syncer 的单岛入口。在批准之前，各子 change 的 G1 无法通过放行开关运行。
+- 2.6 补救需要一次 Modal CPU 运行，按计划执行，费用 < $1。

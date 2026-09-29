@@ -211,7 +211,7 @@ def parse_args(argv=None):
     return args
 
 
-def _check_ports_algorithm_options(args) -> None:
+def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
     """Startup refusal of the ports algorithm options (D8/D11), before any work."""
 
     from .engine.algorithm import check_unverified_allowance
@@ -227,9 +227,13 @@ def _check_ports_algorithm_options(args) -> None:
 
         resolve_ports_algorithm(args, rl_engine=rl_engine)  # raises if any is used
         return
+    # D11 as written: any outer sync refuses the allowance. The learner CLI
+    # always joins a syncer (--syncer is required), so the island count it
+    # receives (--num-learners is not sent to Miles islands) is not relied on.
     check_unverified_allowance(
         getattr(args, "rl_allow_unverified_mechanism", None) or (),
         islands=int(getattr(args, "num_learners", 1) or 1),
+        outer_sync=outer_sync,
     )
 
 
@@ -1632,7 +1636,7 @@ def run_miles(
     rl_engine = getattr(args, "rl_engine", "ports")
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
-    _check_ports_algorithm_options(args)
+    _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
         from .engine.miles_adapter.state import require_run_plugin

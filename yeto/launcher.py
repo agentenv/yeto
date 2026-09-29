@@ -813,16 +813,22 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
     """rl-algorithm-capabilities D8/D9/D11, before any cloud or GPU work.
 
     ports: build the run's AlgorithmSpec once (``--rl-algorithm-spec`` or the
-    legacy CLI), refuse the rejection matrix and multi-island unverified
-    allowances, and keep the canonical JSON + expected hash that every island
-    receives. legacy: the ports-only options are refused.
+    legacy CLI; the launcher has no extra Miles argv, so nothing is absorbed
+    here), refuse the rejection matrix, the registered launch checks, anything
+    the Miles adapter does not declare, and every unverified-mechanism
+    allowance (a launched run always has outer sync, design D11); keep the
+    canonical JSON + expected hash every island receives. An island whose
+    learner absorbs extra argv into a different hash is refused there
+    (``rl_algorithm_mismatch``). legacy: the ports-only options are refused.
     """
 
     from .rl.engine.algorithm import (
         AlgorithmSpecError,
         check_unverified_allowance,
+        launch_problems,
         resolve_ports_algorithm,
     )
+    from .rl.engine.capabilities import CapabilityMismatch
 
     if rl_engine != "ports" and (
         getattr(args, "rl_placement", "colocated") != "colocated"
@@ -834,6 +840,15 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         if spec is None:
             return
         problems = spec.rejections()
+        # Run-configuration checks of the follow-up changes and the Miles
+        # adapter's declaration, before any cloud resource exists (the learner
+        # repeats both on the island).
+        problems += launch_problems(spec, {
+            "rollout_batch_size": getattr(args, "rollout_batch_size", None),
+            "rollout_max_response_len": getattr(args, "rollout_max_response_len", None),
+            "context_parallel_size": 1,  # ports emits --context-parallel-size 1
+            "multi_lora": False,
+        })
         if problems:
             raise AlgorithmSpecError("algorithm spec rejected: " + "; ".join(problems))
         islands = (
@@ -841,10 +856,26 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         ) + max(0, getattr(args, "external_learners", 0) or 0)
         args.rl_allow_unverified_mechanism = list(
             check_unverified_allowance(
-                getattr(args, "rl_allow_unverified_mechanism", None) or (), islands=islands
+                getattr(args, "rl_allow_unverified_mechanism", None) or (),
+                islands=islands,
+                outer_sync=True,  # every launched RL run has a syncer
             )
         )
-    except AlgorithmSpecError as error:
+        from .rl.engine.miles_adapter.entry import miles_capabilities, with_partitioned_serial
+
+        partitioned = getattr(args, "rl_placement", "colocated") == "fixed-partition"
+        capabilities = miles_capabilities(
+            "sha256:" + "0" * 64, unverified_mechanisms=args.rl_allow_unverified_mechanism
+        )
+        if partitioned:
+            capabilities = with_partitioned_serial(capabilities)
+        capabilities.check(
+            layout="lora",
+            placement="fixed-partition" if partitioned else "colocated",
+            execution_mode="partitioned-serial" if partitioned else "colocated-serial",
+            algorithm=spec,
+        )
+    except (AlgorithmSpecError, CapabilityMismatch) as error:
         raise ValueError(str(error)) from error
     args.rl_algorithm_spec_json = spec.canonical_json()
     args.rl_expected_algorithm_sha256 = spec.sha256()

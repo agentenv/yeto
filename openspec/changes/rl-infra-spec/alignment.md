@@ -191,3 +191,7 @@
 - **A5**：driver 在 `observe=True` 时给每轮算法指标打 profile/epoch/权重传输标签（colocated 为 `cuda-ipc`，fixed-partition 为 `nccl-broadcast`）；2.2 保留每组 policy token 校验。
 - **§8 第 6 项（1.8 缺原文）已解除**：原文为 arXiv:2607.22614，假设见 `dynaresize-hypotheses.md`。关键发现：论文以 one-step-off-policy 异步流水线为前提（p.2–3），与本 change 的 age 0 不同，因此论文结论不能外推，也不能作为开放 overlap 的依据。
 - **entry.py 的能力声明**：infra 的 placement/mode 声明放在单独的 `with_partitioned_serial()` 中，没有修改 ALGO-CAP 负责的 `miles_capabilities()`。
+
+## 追加待批准（Agent ALGO-CAP，2026-09-29）
+
+- **P0 D11 放行开关与 G1**：按 spec 原文，“多岛或外层同步”即拒绝。当前 learner 与 launcher 两个入口都带外层同步，所以放行开关在真实运行中无法使用，各算法 change 的 G1 也就无法借助它运行。需另批二选一：(a) 允许单岛带 1 成员 syncer 时放行；(b) 新增无 syncer 的单岛 learner 入口。ALGO-CAP 没有自行放宽。

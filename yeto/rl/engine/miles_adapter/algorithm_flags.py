@@ -433,7 +433,10 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     try:
         base = resolve_ports_algorithm(args, rl_engine="ports")
         spec, remaining, absorbed = absorb_extra_argv(base, shlex.split(args.extra))
-        allow = check_unverified_allowance(args.rl_allow_unverified_mechanism or (), islands=1)
+        # models a single-island G1 smoke without outer sync (D11)
+        allow = check_unverified_allowance(
+            args.rl_allow_unverified_mechanism or (), islands=1, outer_sync=False
+        )
         result.update(
             schema=spec.schema,
             algorithm_spec=json.loads(spec.canonical_json()),

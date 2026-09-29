@@ -651,8 +651,12 @@ Before any GPU process exists, the driver handshake refuses:
 mechanism, but `miles_capabilities` does not declare it yet. A follow-up
 algorithm change declares it after its single-GPU smoke passes.
 
-`--rl-allow-unverified-mechanism NAME` (repeatable) exempts only the named
-mechanisms from the "not declared" check, and only on a single-island run.
+`--rl-allow-unverified-mechanism DIMENSION:NAME` (repeatable, for example
+`features:clip_higher`) exempts only the named mechanisms from the "not
+declared" check, and only on a single-island run **without outer sync**.
+Every launched run and every `yeto.rl.learner` run joins a syncer, so today
+the allowance is refused on those entry points; only the fake engine and the
+dry run (which models a sync-less single island) accept it.
 Every other check still applies. The allowance does not change the hash. It is
 recorded as `rl/unverified_mechanisms` in the event and in
 `yeto_rl_provenance.json`, which is also marked
@@ -670,6 +674,15 @@ sync:
 - on a mismatch it writes an `rl_algorithm_mismatch` event and exits;
 - when the expected hash is missing (a learner started by hand) it writes a
   warning event.
+
+Visible default-path changes on `ports` (no algorithm option given):
+
+- the island learner command always carries
+  `--rl-expected-algorithm-sha256 <hash>`;
+- the `rl_engine_selected` event additionally carries `rl/algorithm_spec`
+  (canonical JSON) and `rl/algorithm_absorbed_flags` (`{}` by default).
+
+The Miles argv of default GRPO is byte-identical to R0.
 
 `yeto-rl-export --rl-algorithm-spec PATH` writes `algorithm_spec`, the
 canonical JSON, and `algorithm_spec_sha256` to the ports provenance. The
@@ -689,9 +702,9 @@ $M --dry-run          # default GRPO: v1 schema, hash 27df1133..., accepted
 echo '{"schema":"yeto-rl-algorithm-spec-v2","loss":{"eps_clip_high":0.28}}' > clip_higher.json
 $M --dry-run --rl-algorithm-spec clip_higher.json
     # rejected: features mechanism 'clip_higher' not supported (expressible but not enabled)
-$M --dry-run --rl-algorithm-spec clip_higher.json --rl-allow-unverified-mechanism clip_higher
+$M --dry-run --rl-algorithm-spec clip_higher.json --rl-allow-unverified-mechanism features:clip_higher
     # accepted; hash 1b49346c...
-$M --dry-run --extra "--eps-clip-high 0.28" --rl-allow-unverified-mechanism clip_higher
+$M --dry-run --extra "--eps-clip-high 0.28" --rl-allow-unverified-mechanism features:clip_higher
     # accepted; absorbed {"--eps-clip-high": "0.28"}; same hash 1b49346c...
 $M --dry-run --rl-algorithm-spec clip_higher.json --extra "--eps-clip-high 0.3"
     # rejected: ... sets loss.eps_clip_high=0.3 but the algorithm spec has ...=0.28

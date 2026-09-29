@@ -23,12 +23,6 @@ from test_rl_miles_adapter_config import make_config, sub
 REF = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
 # rl-algo-grpo-knobs: the only reward post-process of the ports path is the
 # yeto dispatcher, and a loss-placed KL must name its reference model.
-# Before rl-algo-grpo-knobs lands (no dispatcher module, no extension fields)
-# the fixture falls back to the P0-only form; the translated argv is the same.
-try:
-    DISPATCHER = PluginRef.from_path("yeto.rl.algos.reward_pipeline.post_process")
-except AlgorithmSpecError:
-    DISPATCHER = REF
 KL_REF = {"source": "Qwen/Qwen3-0.6B", "revision": "rev-a"}
 
 
@@ -37,6 +31,13 @@ def _registered(group, name):
 
     alg.load_extensions()
     return name in alg._FIELDS.get(group, {})
+
+
+# Branch on whether rl-algo-grpo-knobs has registered its fields (not on an
+# exception): with them, the dispatcher is the only reward post-process.
+KNOBS = _registered("advantage", "reward_shapers")
+DISPATCHER = (PluginRef.from_path("yeto.rl.algos.reward_pipeline.post_process")
+              if KNOBS else REF)
 
 
 def complete(spec):
@@ -197,7 +198,9 @@ def test_each_mapped_field_translates(change, fragment):
     # absorption of the translation reproduces the spec (round trip)
     absorbed, rest, _ = af.absorb_extra_argv(AlgorithmSpec(), fragment)
     assert absorbed == spec and rest == ()
-    argv = list(mc.translate_run_config(make_config(), complete(spec)).argv)
+    # absorbed -> completed (1b: ref_model / reward_shapers) -> translated
+    assert complete(absorbed) == complete(spec)
+    argv = list(mc.translate_run_config(make_config(), complete(absorbed)).argv)
     i = argv.index(fragment[0])
     assert argv[i:i + len(fragment)] == fragment
     # the rest of the argv is the default GRPO argv, byte for byte

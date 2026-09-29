@@ -92,6 +92,15 @@ MECHANISM_DIMENSIONS = (
 )
 
 
+def valid_masked_fraction(value: Any) -> float | None:
+    """A reported masked fraction, or None unless a real number in [0, 1]."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
+
+
 class AlgorithmSpecError(ValueError):
     """An algorithm description is malformed or unsupported."""
 
@@ -283,6 +292,10 @@ def register_field(group: str, name: str, *, default: Any,
     core = {f.name for f in fields(_GROUPS[group])}
     if name in core or name in _FIELDS.get(group, {}):
         raise ValueError(f"field {group}.{name} already exists")
+    try:
+        hash(default)
+    except TypeError as exc:
+        raise ValueError(f"field {group}.{name}: default must be hashable") from exc
     definition = FieldDef(group, name, default, parse, to_json or (lambda value: value))
     _FIELDS.setdefault(group, {})[name] = definition
     return definition
@@ -312,7 +325,8 @@ def register_rejection(name: str, check: Callable[["AlgorithmSpec"], str | None]
 _RUNTIME_ATTRS: dict[str, Callable[["AlgorithmSpec"], Mapping[str, Any]]] = {}
 _LAUNCH_CHECKS: dict[str, Callable[["AlgorithmSpec", Mapping[str, Any]], Iterable[str]]] = {}
 _ISLAND_CHECKS: dict[str, Callable[["AlgorithmSpec", Mapping[str, Any]], Iterable[str]]] = {}
-_GRADIENT_RULES: dict[str, Callable[["AlgorithmSpec", Any, Any], "bool | None"]] = {}
+# name -> (mechanism "dimension:name", rule)
+_GRADIENT_RULES: dict[str, tuple[str, Callable[["AlgorithmSpec", Any, Any], "bool | None"]]] = {}
 
 
 def register_runtime_attrs(name: str, derive: Callable[["AlgorithmSpec"], Mapping[str, Any]]) -> None:
@@ -355,15 +369,25 @@ def register_island_check(
 
 
 def register_gradient_rule(
-    name: str, rule: Callable[["AlgorithmSpec", Any, Any], "bool | None"]
+    name: str,
+    rule: Callable[["AlgorithmSpec", Any, Any], "bool | None"],
+    *,
+    mechanism: str,
 ) -> None:
     """``rule(spec, batch_summary, step_metrics)``: ``False`` lifts the gradient
-    expectation for this round, ``None`` abstains. Rules only ever relax the
-    default rule; a non-finite grad norm is checked by the driver regardless."""
+    expectation for this round, ``None`` abstains.
+
+    The rule is bound to ``mechanism`` (``"dimension:name"``) and is consulted
+    only when the spec requires that mechanism, so a registered rule can never
+    change the default GRPO judgement. Rules only ever relax the default rule;
+    a non-finite grad norm is checked by the driver regardless."""
 
     if name in _GRADIENT_RULES:
         raise ValueError(f"gradient rule {name!r} already registered")
-    _GRADIENT_RULES[name] = rule
+    dimension, sep, mech = mechanism.partition(":")
+    if not sep or dimension not in MECHANISM_DIMENSIONS or not mech:
+        raise ValueError(f"gradient rule {name!r}: mechanism must be 'dimension:name'")
+    _GRADIENT_RULES[name] = (mechanism, rule)
 
 
 def launch_problems(spec: "AlgorithmSpec", run_values: Mapping[str, Any]) -> list[str]:
@@ -404,7 +428,9 @@ def registered_mechanisms() -> tuple[MechanismDef, ...]:
 
 
 def mechanism_names() -> frozenset[str]:
-    return frozenset(m.name for m in registered_mechanisms())
+    """Qualified ``dimension:name`` of every registered mechanism."""
+
+    return frozenset(f"{m.dimension}:{m.name}" for m in registered_mechanisms())
 
 
 _EXTENSIONS_LOADED = False
@@ -416,11 +442,11 @@ def load_extensions() -> None:
     global _EXTENSIONS_LOADED
     if _EXTENSIONS_LOADED:
         return
-    _EXTENSIONS_LOADED = True
     from yeto.rl.algos import EXTENSION_MODULES
 
     for module in EXTENSION_MODULES:
-        importlib.import_module(module)
+        importlib.import_module(module)  # a failure leaves the flag unset
+    _EXTENSIONS_LOADED = True
 
 
 # --------------------------------------------------------------------------
@@ -460,6 +486,13 @@ class _Group:
         normalized = []
         for name in sorted(raw):
             value = definitions[name].parse(f"{self.GROUP}.{name}", raw[name])
+            try:
+                hash(value)
+            except TypeError:
+                raise AlgorithmSpecError(
+                    f"{self.GROUP}.{name}: the registered parser returned an unhashable "
+                    f"{type(value).__name__} (return tuples / frozen values)"
+                ) from None
             if value != definitions[name].default:
                 normalized.append((name, value))
         object.__setattr__(self, "ext", tuple(normalized))
@@ -972,20 +1005,33 @@ class AlgorithmSpec:
         stricter R0 rule.
         """
 
+        return self.gradient_expectation(batch_summary, step_metrics)[0]
+
+    def gradient_expectation(
+        self, batch_summary: Any, step_metrics: Any = None
+    ) -> tuple[bool, str | None]:
+        """``(expects_gradient, source)``; ``source`` names what relaxed it.
+
+        ``source`` is None when the R0 rule decides; otherwise
+        ``"gradient_rule:<name> (<mechanism>)"`` or ``"masked:<mechanism>"``,
+        for the driver's event.
+        """
+
         groups = getattr(batch_summary, "groups", batch_summary)
-        expected = any(g.reward_std > 0 for g in groups)
-        if not expected:
-            return False
-        load_extensions()
-        for rule in _GRADIENT_RULES.values():
-            if rule(self, batch_summary, step_metrics) is False:
-                return False
-        masked = getattr(step_metrics, "masked_fraction", None)
-        if masked is not None and float(masked) >= 1.0 and any(
-            m.masks_tokens for m in self._mechanism_defs()
-        ):
-            return False
-        return True
+        if not any(g.reward_std > 0 for g in groups):
+            return False, None
+        required = {f"{d}:{n}" for d, n in self.required_mechanisms()}
+        for name, (mechanism, rule) in _GRADIENT_RULES.items():
+            if mechanism in required and rule(self, batch_summary, step_metrics) is False:
+                return False, f"gradient_rule:{name} ({mechanism})"
+        masked = valid_masked_fraction(getattr(step_metrics, "masked_fraction", None))
+        if masked is not None and masked >= 1.0:
+            maskers = sorted(
+                f"{m.dimension}:{m.name}" for m in self._mechanism_defs() if m.masks_tokens
+            )
+            if maskers:
+                return False, "masked:" + ",".join(maskers)
+        return True, None
 
     # -- legacy mapping ---------------------------------------------------
     @classmethod
@@ -1240,8 +1286,13 @@ def resolve_ports_algorithm(args: Any, *, rl_engine: str) -> "AlgorithmSpec | No
     return spec
 
 
-def check_unverified_allowance(names: Iterable[str], *, islands: int) -> tuple[str, ...]:
-    """D11: single-island only; names must be known mechanisms."""
+def check_unverified_allowance(
+    names: Iterable[str], *, islands: int, outer_sync: bool
+) -> tuple[str, ...]:
+    """D11 as written: refused with multiple islands *or* any outer sync.
+
+    Names are qualified ``dimension:name`` mechanisms.
+    """
 
     names = tuple(sorted(set(names)))
     if not names:
@@ -1252,10 +1303,11 @@ def check_unverified_allowance(names: Iterable[str], *, islands: int) -> tuple[s
             f"--rl-allow-unverified-mechanism: unknown mechanism(s) {unknown} "
             f"(known: {sorted(mechanism_names())})"
         )
-    if islands != 1:
+    if islands != 1 or outer_sync:
         raise AlgorithmSpecError(
             f"--rl-allow-unverified-mechanism {list(names)} is only allowed on a "
-            f"single-island run (this run has {islands} islands in outer sync); "
-            "multi-island runs use declared mechanisms only"
+            f"single-island run without outer sync (this run: {islands} island(s), "
+            f"outer sync {'on' if outer_sync else 'off'}); runs with outer sync use "
+            "declared mechanisms only"
         )
     return names
