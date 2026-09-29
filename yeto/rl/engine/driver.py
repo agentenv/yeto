@@ -594,15 +594,24 @@ class IslandDriver:
         else:
             expects_gradient, relaxed_by = r0_expects, None
         if expects_gradient and grad_norm == 0.0:
+            if relaxed_by and relaxed_by.startswith("tightened:"):
+                # A mechanism rule requires a gradient the R0 rule cannot see.
+                raise StrictRlInvariantError(
+                    "zero_grad_norm_with_required_gradient",
+                    f"rollout {rollout_id}: {relaxed_by[len('tightened:'):]} requires a "
+                    "gradient but grad_norm is 0; adapter gradients are not flowing",
+                )
             raise StrictRlInvariantError(
                 "zero_grad_norm_with_nonzero_advantages",
                 f"rollout {rollout_id}: non-zero advantages produced grad_norm 0; "
                 "adapter gradients are not flowing",
             )
         if grad_norm == 0.0 and r0_expects:
-            # A declared mechanism legitimately lifted the expectation.
+            # A declared mechanism legitimately lifted the expectation; the
+            # event names how (full mask vs a mechanism's gradient rule).
+            masked = bool(relaxed_by) and relaxed_by.startswith("masked:")
             self.emit(
-                "rl_zero_gradient_masked",
+                "rl_zero_gradient_masked" if masked else "rl_zero_gradient_rule_relaxed",
                 rollout_id=rollout_id,
                 masked_fraction=metrics.masked_fraction,
                 relaxed_by=relaxed_by,

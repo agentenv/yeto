@@ -150,7 +150,22 @@ def test_gradient_rule_relaxation_is_recorded(tmp_path):
     try:
         _, driver = _run(tmp_path, MASKING, features={"eps_clip"}, zero_grad_rounds={1})
         driver.run()
-        [event] = [e for e in _events(tmp_path) if e["event"] == "rl_zero_gradient_masked"]
+        events = _events(tmp_path)
+        assert not [e for e in events if e["event"] == "rl_zero_gradient_masked"]
+        [event] = [e for e in events if e["event"] == "rl_zero_gradient_rule_relaxed"]
         assert event["relaxed_by"] == "gradient_rule:t_rule_evt (features:eps_clip)"
     finally:
         alg.unregister(gradient_rule="t_rule_evt")
+
+
+def test_tightening_rule_failure_names_the_rule(tmp_path):
+    alg.register_gradient_rule("t_rule_req", lambda s, b, m: True,
+                               mechanism="features:eps_clip")
+    try:
+        _, driver = _run(tmp_path, MASKING, features={"eps_clip"}, zero_grad_rounds={1},
+                         constant_reward_rounds={1})
+        with pytest.raises(StrictRlInvariantError, match="t_rule_req") as info:
+            driver.run()
+        assert info.value.metric == "zero_grad_norm_with_required_gradient"
+    finally:
+        alg.unregister(gradient_rule="t_rule_req")
