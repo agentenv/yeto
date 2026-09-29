@@ -24,7 +24,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
-from ..capabilities import EngineCapabilities, ExecutionCapabilities
+from ..capabilities import R0_MECHANISMS, EngineCapabilities, ExecutionCapabilities
 from . import LoopRunner
 
 ENGINE_NAME = "miles-upstream"
@@ -70,6 +70,10 @@ def miles_capabilities(
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),
+        # rl-algo-seq-and-adv 7.5: G1 passed on 1xH100 (evidence/g1/attempt4, e54d2f7).
+        # gdpo held back (main agent); maxrl/mapo formally usable only once
+        # reward_postprocessors:custom_reward_postprocess is declared (1b G1).
+        features=set(R0_MECHANISMS["features"]) | {"maxrl", "mapo"},
     )
     if unverified_mechanisms:
         capabilities = capabilities.with_unverified(unverified_mechanisms)
