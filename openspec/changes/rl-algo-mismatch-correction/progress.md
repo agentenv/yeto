@@ -117,3 +117,18 @@
 1. 等 ALGO-CAP 合入两个补丁后 `git merge origin/algo-cap`，重跑 `tests/test_rl_mismatch_correction.py`，确认 skip 项转为通过，然后勾选 3.3、4.1、4.2、6.1、7.3。
 2. G3：写计划，在 Nebius（或 AWS head）上跑两岛 strict-avg，TIS 与 IcePop 各约 3 轮。
 3. 可选：OPSM(rollout) 的 G1。
+
+## 2026-09-29 复审处理（ALGO-1a）
+
+- 已合入 origin/algo-cap fefcbe0，其中包含 1a-shared/1a-declare，并经 P0 收紧：已命名的 custom 函数只能用 `yeto.` 路径。因此 IcePop（`miles.` 路径）仍需要 `corrections:custom`，我这边的注册已相应调整。`--custom-config-path` 现在由 P0 的拒绝表拒绝。
+- 测试：恢复了 `test_custom_config_path_refused_on_ports`。adapter 测试改为对具体集合断言：恰好声明 {none, tis, opsm, opsm_trainer}，只有 tis 和 opsm_trainer 能通过，其余项被拒并列出支持集合。文档 dry-run 测试在“已声明”时断言 accepted 且 argv 一致，未声明时断言被拒。
+- tasks 状态：3.3、4.1、4.2、6.1 在补丁合入后转为 CPU 通过；5.2、7.1 撤销勾选。7.1 撤销的原因是 `yeto launch` 没有 `--dry-run`，这一点列为接口需求。
+- 4.1 合入说明：**所有已有 OPSM 规格的哈希都因 `opsm_old_logprob_source` 字段而改变**，这是预期结果，为 4.1 所要求。
+- 7.2 完成记录补充了 receipt 的说明（没有显式判据，由 driver 失败即报事件间接覆盖）、GPU 证据的局限（截断/屏蔽分支都没有触发；每轮一步时 OPSM 结构上不可能触发；`ess_ratio`/`ois` 恒为 1，不反映训推差异），以及上传时刻与 YETO_SHA 的对应（精确上传时刻没有记录）。
+- 7.4：design 把 `ess_ratio` 当作训推差异指标，这一意图**未达成**。
+- proposal.md 按 A6 改写为“需另立独立算法契约 change”。
+- **重新验证（G-2）受阻**：计划为 `evidence/2026-09-29-g1c/plan.md`（先提交后运行）。前两次尝试是 harness 问题：第一次 venv 里没有 sky；之后两次（第 2、3 次）都在 Modal 部署上传工作树时报 `RuntimeError: can't start new thread`。原因是本机接近每用户线程上限（系统约 1.08 万线程，`ulimit -u` 4096），不是机制本身的结论。三次都没有创建 Modal app，没有花 GPU。按计划停止，icepop 和 opsm-trainer 未启动。所以 tis/opsm/opsm_trainer 的声明**尚未经新入口复验**；是撤回还是保留等复验，请主 agent 决定并转告 ALGO-CAP。
+- G3：计划草案见 `evidence/2026-09-29-g3-plan.md`，未启动。它同样受上面的线程上限阻塞；IcePop 的声明也还没做。
+- 待批准（新增）：5.2 偏离原文（能 import 却仍使用副本），需用户批准；主 agent 倾向保留副本。
+- 全量测试：68 failed + 26 errors，按 id 与基线 3d1b466 相同。
+- 云资源：本轮没有新建任何资源（g1c 的 3 次尝试都在 app 创建前失败）。之前的 algo1a-g1 和 algo1a-g1b 仍为 stopped、0 tasks。g1c 留下 3 个孤儿 `sleep 3000` 进程，它们原本是 watchdog 的子进程，父进程已结束，醒来后不会执行任何操作。
