@@ -1,0 +1,42 @@
+{"event": "rl_driver_start", "execution_mode": "colocated-serial", "island_id": 0, "placement": "colocated", "rl/algorithm_spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea", "runtime_fingerprint": "sha256:2293c72aa23a368cf66d263f53f4f23259a076f3c628fb4b24a66008fc83610e", "time_unix": 1790708269.387143}
+{"event": "rl_driver_phase", "island_id": 0, "optimizer": "reset", "phase": "apply", "policy_version": 0, "time_unix": 1790708278.7747443}
+{"event": "rl_policy_apply", "island_id": 0, "local_step": 0, "optimizer": "reset", "partial_fragment_apply": false, "policy_version": 0, "sync/apply_seconds": 105.04455419200002, "sync/global_policy_hash": "a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4", "time_unix": 1790708383.8202598}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 0, "time_unix": 1790708383.8911133}
+{"event": "rl_publication", "island_id": 0, "policy_version": 0, "rl/policy_token": "yeto:0:a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4", "sync/publication_members": ["engine:inference-engine-all-0-0-00000"], "sync/publication_payload_bytes": 40370176, "sync/publication_payload_hash": "373abf70cb687c7dfe3b8391c678d27be175a19d0e847349c362ed042f7ba43f", "time_unix": 1790708486.598287}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "offload", "rollout_id": 0, "time_unix": 1790708486.5988123}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 0, "rollout_id": 0, "time_unix": 1790708486.6056688}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "onload", "rollout_id": 0, "time_unix": 1790708500.140309}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 0, "time_unix": 1790708500.9261096}
+{"applied_lrs": [1e-05], "clip_fraction": null, "event": "rl_round_trained", "island_id": 0, "masked_fraction": null, "nonzero_advantages": null, "rollout_id": 0, "time_unix": 1790708536.8372643, "trained_groups": 4, "trained_sample_ids_sha256": "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d", "trained_samples": 32}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 0, "time_unix": 1790708536.8376825}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "export_push", "rollout_id": 0, "time_unix": 1790708536.838121}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "wait_global", "policy_version": 1, "time_unix": 1790708537.6893198}
+{"event": "rl_driver_phase", "island_id": 0, "optimizer": "reset", "phase": "apply", "policy_version": 1, "time_unix": 1790708545.2628489}
+{"event": "rl_policy_apply", "island_id": 0, "local_step": 1, "optimizer": "reset", "partial_fragment_apply": false, "policy_version": 1, "sync/apply_seconds": 65.59933860000001, "sync/global_policy_hash": "3660f9f99dfafaf1f63ff494b54c3edb5e4bc73d5bd8359163f0e60248fbea42", "time_unix": 1790708610.8631735}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 1, "time_unix": 1790708610.9346313}
+{"event": "rl_publication", "island_id": 0, "policy_version": 1, "rl/policy_token": "yeto:1:3660f9f99dfafaf1f63ff494b54c3edb5e4bc73d5bd8359163f0e60248fbea42", "sync/publication_members": ["engine:inference-engine-all-0-0-00000"], "sync/publication_payload_bytes": 40370176, "sync/publication_payload_hash": "5024bb7ae491408587e157ac502dd118c6b34362203e904a7b2471e79e78c6f9", "time_unix": 1790708612.030902}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "offload", "rollout_id": 1, "time_unix": 1790708612.0313492}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 1, "rollout_id": 1, "time_unix": 1790708613.3828473}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "onload", "rollout_id": 1, "time_unix": 1790708620.7872627}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 1, "time_unix": 1790708622.1500554}
+{"applied_lrs": [6.666666666666668e-06], "clip_fraction": null, "event": "rl_round_trained", "island_id": 0, "masked_fraction": null, "nonzero_advantages": null, "rollout_id": 1, "time_unix": 1790708637.9312515, "trained_groups": 4, "trained_sample_ids_sha256": "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04", "trained_samples": 32}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 1, "time_unix": 1790708637.9318483}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "export_push", "rollout_id": 1, "time_unix": 1790708637.9323308}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "wait_global", "policy_version": 2, "time_unix": 1790708638.7301}
+{"event": "rl_driver_phase", "island_id": 0, "optimizer": "reset", "phase": "apply", "policy_version": 2, "time_unix": 1790708645.188018}
+{"event": "rl_policy_apply", "island_id": 0, "local_step": 2, "optimizer": "reset", "partial_fragment_apply": false, "policy_version": 2, "sync/apply_seconds": 49.417110240000056, "sync/global_policy_hash": "fdbd6e1642916e544678a43ba58abc29034e50c96e8534f00301e9e86ac28c69", "time_unix": 1790708694.6058087}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 2, "time_unix": 1790708694.6801927}
+{"event": "rl_publication", "island_id": 0, "policy_version": 2, "rl/policy_token": "yeto:2:fdbd6e1642916e544678a43ba58abc29034e50c96e8534f00301e9e86ac28c69", "sync/publication_members": ["engine:inference-engine-all-0-0-00000"], "sync/publication_payload_bytes": 40370176, "sync/publication_payload_hash": "f8b038b3af34ab949ae9845aab971b5adf5e74f6d70f1a8347359a67c7c49a1a", "time_unix": 1790708695.8150973}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "offload", "rollout_id": 2, "time_unix": 1790708695.8158128}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 2, "rollout_id": 2, "time_unix": 1790708697.2506802}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "onload", "rollout_id": 2, "time_unix": 1790708710.0237787}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 2, "time_unix": 1790708710.9074278}
+{"applied_lrs": [3.333333333333334e-06], "clip_fraction": null, "event": "rl_round_trained", "island_id": 0, "masked_fraction": null, "nonzero_advantages": null, "rollout_id": 2, "time_unix": 1790708727.4487011, "trained_groups": 4, "trained_sample_ids_sha256": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef", "trained_samples": 32}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 2, "time_unix": 1790708727.4492486}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "export_push", "rollout_id": 2, "time_unix": 1790708727.4494886}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "wait_global", "policy_version": 3, "time_unix": 1790708728.2393367}
+{"event": "rl_driver_phase", "island_id": 0, "optimizer": "reset", "phase": "apply", "policy_version": 3, "time_unix": 1790708735.7807934}
+{"event": "rl_policy_apply", "island_id": 0, "local_step": 3, "optimizer": "reset", "partial_fragment_apply": false, "policy_version": 3, "sync/apply_seconds": 55.51100227199993, "sync/global_policy_hash": "aa83be67e10e5146d3ca51ec00821aa232893eda3ed588101a19e24396fbcb95", "time_unix": 1790708791.2923062}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 3, "time_unix": 1790708791.3673844}
+{"event": "rl_publication", "island_id": 0, "policy_version": 3, "rl/policy_token": "yeto:3:aa83be67e10e5146d3ca51ec00821aa232893eda3ed588101a19e24396fbcb95", "sync/publication_members": ["engine:inference-engine-all-0-0-00000"], "sync/publication_payload_bytes": 40370176, "sync/publication_payload_hash": "0869a9ed55a43ed0efd241134d50d142ef704b5689609cf90abe7f7441307120", "time_unix": 1790708792.7992873}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "finish", "rollout_id": 3, "time_unix": 1790708792.8001668}

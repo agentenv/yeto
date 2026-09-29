@@ -218,7 +218,13 @@ class ProgressStore(Protocol):
 
 
 ECHO_EVENTS_FILE = "yeto-rl-echo-events"  # at the repo root (experiment snapshots only)
-_ECHO_EVENTS = (Path(__file__).resolve().parents[3] / ECHO_EVENTS_FILE).is_file()
+# One echo mechanism: yeto.rl.event_echo (YETO_RL_ECHO_EVENTS=1, echoed by the
+# single tape writer ``append_record``). The snapshot marker file used by the
+# rl-infra-spec E0 experiments just turns that switch on.
+if (Path(__file__).resolve().parents[3] / ECHO_EVENTS_FILE).is_file():
+    from yeto.rl.event_echo import enable_echo as _enable_echo
+
+    _enable_echo()
 
 
 class EventTape:
@@ -230,17 +236,8 @@ class EventTape:
         self.args = args
 
     def append(self, event: Mapping[str, Any]) -> None:
-        from yeto.rl.event_echo import append_record, echo_enabled
+        from yeto.rl.event_echo import append_record
 
-        if _ECHO_EVENTS and not echo_enabled():  # the tape writer echoes otherwise
-            # Experiment-only: container stdout reaches the head's launch log,
-            # so the tape survives container teardown (off by default).
-            print(
-                "YETO_RL_EVENT "
-                + json.dumps({"island_id": self.island_id, "time_unix": time.time(), **event},
-                             sort_keys=True, separators=(",", ":"), default=str),
-                flush=True,
-            )
         if self.args is not None:
             from yeto.rl.miles import _append_rl_event
 
@@ -266,6 +263,27 @@ def _filtered_samples(batch: RolloutBatchHandle) -> int | None:
     if all(c is None for c in counts):
         return None
     return sum(int(c or 0) for c in counts)
+
+
+def _dynamic_filter_counts(batch: RolloutBatchHandle) -> dict[str, int]:
+    """Legacy ``rl/dynamic_filter/*`` round stats from the rollout metadata.
+
+    The all-samples hook sees every generated group; ``filtered`` counts the
+    generated groups that were not trained this round (dynamic-filter drops
+    and over-sampling leftovers; whether leftovers are reused -- A2/F5
+    ``carried_over`` -- is audited in 4.1). ``replacement_attempts`` is a PROXY
+    (Miles does not report its resample count); ``rl_round_trained`` records
+    the source of each value. Unknown (None) keeps the defaults.
+    """
+    filtered = getattr(batch, "filtered", None)
+    if filtered is None:
+        return {}
+    trained = len(batch.groups)
+    return {
+        "dynamic_filter_generated_groups": trained + int(filtered),
+        "dynamic_filter_dropped_groups": int(filtered),
+        "dynamic_filter_replacement_attempts": int(filtered),
+    }
 
 
 def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
@@ -669,6 +687,7 @@ class IslandDriver:
             lr=metrics.lr,
             applied_lr=None if not metrics.applied_lrs else min(metrics.applied_lrs),
             applied_lrs=metrics.applied_lrs or None,
+            **_dynamic_filter_counts(batch),
         )
 
     def _mismatch_fields(self) -> dict[str, Any]:
@@ -763,6 +782,18 @@ class IslandDriver:
             masked_fraction=metrics.masked_fraction,
             clip_fraction=metrics.clip_fraction,
             applied_lrs=list(metrics.applied_lrs) if metrics.applied_lrs else None,
+            # rl_local_round dynamic_filter_* provenance: generated/dropped are
+            # counted from the all-samples hook; replacement_attempts is a proxy
+            # (= groups not trained), not Miles' actual resample count.
+            **(
+                {"dynamic_filter_source": {
+                    "generated_groups": "all_samples_hook",
+                    "dropped_groups": "all_samples_hook_not_trained",
+                    "replacement_attempts": "proxy_filtered",
+                }}
+                if getattr(batch, "filtered", None) is not None
+                else {}
+            ),
             nonzero_advantages=getattr(batch, "nonzero_advantages", None),
             # A2/F5 terminal ``filtered`` at sample level: samples of trained
             # groups masked by a spec-selected sample filter (1b D7); None when

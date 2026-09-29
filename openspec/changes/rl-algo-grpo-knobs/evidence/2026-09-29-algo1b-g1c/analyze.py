@@ -5,7 +5,7 @@ OUT = Path(__file__).parent / "out"
 KEYS = {"baseline": ["pg_loss", "grad_norm"], "clip_higher": ["pg_clipfrac", "pg_loss"],
         "dual_clip": ["pg_clipfrac", "pg_loss"], "token": ["pg_clipfrac", "pg_loss"],
         "drgrpo": ["pg_clipfrac", "pg_loss"], "kl_k3": ["kl_loss"], "entropy": ["entropy_loss"],
-        "over_sampling": [], "overlong_penalty": []}
+        "over_sampling": [], "overlong_penalty": [], "no_std": ["grad_norm"]}
 BAD = re.compile(r"zero_grad_norm_with_nonzero_advantages|nonfinite_grad_norm|StrictRlInvariantError|"
                  r"policy token mismatch|PolicyTokenMismatch|RoundFailedError|Traceback")
 # Benign chained exception (review decision, added after attempt 2; the
@@ -77,6 +77,23 @@ for mech, keys in KEYS.items():
     r["extra"] = extra
     r["pass"] = (res.get("rc") == 0 and r["rounds"] == 3 and not r["bad_lines"] and r["metrics_ok"])
     report[mech] = r
+# g1c paired step-1 criterion (plan.md, fixed before the run): step-1 raw_reward
+# equals baseline's (valid pair) and step-1 train/grad_norm differs from baseline's.
+import re as _re
+def _first(mech, key):
+    p = OUT / mech / "miles.log"
+    if not p.exists():
+        return None
+    m = _re.search(r"'" + _re.escape(key) + r"': ([-0-9.e]+)", p.read_text(errors="replace"))
+    return float(m.group(1)) if m else None
+if "baseline" in report:
+    for mech in ("token", "no_std"):
+        if mech in report and report[mech].get("present"):
+            same_input = _first(mech, "rollout/raw_reward") == _first("baseline", "rollout/raw_reward")
+            differs = _first(mech, "train/grad_norm") != _first("baseline", "train/grad_norm")
+            report[mech]["paired_valid"] = same_input
+            report[mech]["step1_grad_norm"] = _first(mech, "train/grad_norm")
+            report[mech]["effective"] = bool(report[mech].get("pass") and same_input and differs)
 (OUT.parent / (sys.argv[1] if len(sys.argv) > 1 else "g1_report_v2.json")).write_text(json.dumps(report, indent=1, default=str))
 for m, r in report.items():
     print(m, "PASS" if r.get("pass") else "FAIL", {k: r.get(k) for k in ("rc", "rounds", "train_steps", "seconds", "peak_gpu_mib", "bad_lines")})

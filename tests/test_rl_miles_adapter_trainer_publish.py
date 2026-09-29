@@ -306,6 +306,7 @@ def test_gspo_clip_fraction_reaches_step_metrics_from_miles_train_one_step_resul
     import sys
     import types
 
+    from yeto.rl.engine.algorithm import AdvantageSpec, AlgorithmSpec
     from yeto.rl.engine.miles_adapter import state_plugin
     from yeto.rl.engine.miles_adapter.state_plugin import STEP_LOSSES
 
@@ -335,12 +336,30 @@ def test_gspo_clip_fraction_reaches_step_metrics_from_miles_train_one_step_resul
         args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
         actor_model=actor, learner_id=0, learner_generation=0,
         parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
-        # integ-decl: with 1a merged, the trainer asks the spec for its correction
-        algorithm="grpo", spec=SimpleNamespace(advantage_estimator="gspo",
-                                               correction=AlgorithmSpec().correction),
+        algorithm="grpo", spec=AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo")),
     )
     receipt = t.train_step(handle())
     assert receipt.algorithm == "grpo"
     m = t.step_metrics()
     assert m.clip_fraction == 0.5 and m.masked_fraction == 0.5
     assert ("plugin", STEP_LOSSES) in actor.calls
+
+
+def test_one_output_per_worker_of_the_single_cell_at_dp2():
+    """2.4 smoke finding: TrainerController.train returns one output per worker;
+    trainer DP=2 in one cell gives two outputs, which is not a multi-cell group."""
+    t = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=False,
+                             actor_num_nodes=1, actor_num_gpus_per_node=2),
+        actor_model=FakeActorGroup(outputs=2), learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
+    )
+    assert t.train_step(handle()).optimizer_step_succeeded
+    t3 = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=False,
+                             actor_num_nodes=1, actor_num_gpus_per_node=2),
+        actor_model=FakeActorGroup(outputs=3), learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
+    )
+    with pytest.raises(TrainStepError, match="expected 2 train outputs"):
+        t3.train_step(handle())

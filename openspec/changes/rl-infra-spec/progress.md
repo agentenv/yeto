@@ -126,3 +126,20 @@
 - 1.4：依赖 1.2 已满足，但验收是 X9（design 表：在固定分区对严格 policy 依赖注入延迟，是 GPU 实验），要等 2.3 的 GPU 运行 → 仍不勾选。
 - 1.5 依赖 1.4，1.6 依赖 1.3–1.5，1.8 依赖 1.4/1.7 → 随 1.4 一起不勾选。
 - launcher partition 补丁已按授权合入 infra-a（launcher.py 中 fixed-partition 的 GPU 划分部分归 INFRA）。
+
+### E0 GPU（2026-09-29 INFRA，续 4）
+- 2.2：第四轮满足预登记条件 1–4；第三轮按预登记判为不通过（A 第 3 轮 applied_lrs 缺证据），两轮都如实记录在 tasks 2.2。因依赖未满足，不勾选。
+- 2.3：X9 guard（第三轮 C）通过；2.3 整体未完成。
+- 云资源（全部为 Modal，均 stopped、0 tasks，列表见 `evidence/infra-a/2.2-2.3/modal_apps_round*.txt`）：
+  - A-attempt2 约 15 分钟 × 1 卡；
+  - 第二轮 A 约 15 分钟 × 1 卡；
+  - 第三轮 A 12.5 分钟 × 1 卡、B 12.5 分钟 × 2 卡、C 14.5 分钟 × 2 卡；
+  - 第四轮 A 13.5 分钟 × 1 卡、B 18.5 分钟 × 2 卡；
+  - 合计约 2.5 H100·h，约 $10。
+- 所有 watchdog 均已结束（`sleep 3900` 中没有 infra-a 残留）。
+- 2.4 计划已单独提交（3b26fde），尚未启动。
+
+### 2.4 与剩余事项（2026-09-29 INFRA，续 5）
+- 2.4 阻塞：trainer DP>1 在 ports 路径上失败（DistOpt 分片主参数，详见 tasks 2.4）。sweep 已停止；app ap-4UQFe8lS3YdXdC9sISEu32 已 stopped、0 tasks；本机 syncer 与 watchdog 已清理。
+- echo 统一补丁（echo-writers-infra.patch）依赖 `event_echo.append_record`，该函数目前只在 origin/integ-decl 与 algo-1a 上，origin/algo-cap 4373cd9 尚没有。已先 merge algo-cap（af83975），补丁等 append_record 进入 algo-cap 后再合入。
+- 未开始（依赖 elastic 镜像 9f0977）：2.1a GPU 验收、1.7 M3 in-flight 计数（router `/worker_inflight`）、第二批接线（restore_membership_state、admit_cordoned→check_weights→admit_cells、commit_weight_version）。

@@ -108,8 +108,10 @@ def test_mismatch_metrics_and_correction_masked_fraction(monkeypatch):
     fake.selected_corrections = lambda spec: ("icepop",)
     fake.masked_fraction_from_metrics = lambda spec, m: m["train/tis_clipfrac"]
     monkeypatch.setitem(sys.modules, "yeto.rl.algos.mismatch_correction", fake)
-    assert tr._has_corrections(object()) is True
-    assert tr.correction_masked_fraction(object(), round_metrics) == pytest.approx(0.4)
+    spec = SimpleNamespace(correction=object())
+    assert tr._has_corrections(spec) is True
+    assert tr._has_corrections(object()) is False  # no correction field: robust default
+    assert tr.correction_masked_fraction(spec, round_metrics) == pytest.approx(0.4)
 
 
 def test_driver_round_event_carries_labelled_mismatch(tmp_path):

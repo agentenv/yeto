@@ -2,6 +2,23 @@
 
 对齐结论、依赖矩阵、工作包与待批准事项见 [`../rl-infra-spec/alignment.md`](../rl-infra-spec/alignment.md)（以 `rl-infra-spec` 分支为准）。
 
+## 2026-09-29 第四轮（触发实验与隔离对照）——以本节为准
+
+| 机制 | 结论 | 证据 |
+|---|---|---|
+| clip_higher + eps_clip | GPU 上生效，已声明 | g1b run A-r1：每轮第 2 步 pg_clipfrac 0.105/0.111/0.105；按修订计划 R1，退出码 2 加 finalized 加 SUCCEEDED 视为成功。第 5 次尝试照 rc=0 字面不满足，不作为依据 |
+| dual_clip | 未能证明生效，不声明 | Miles 没有 dual 分支的指标，事先已判定（g1b plan.md） |
+| over_sampling | 未能证明生效，不声明 | g1b run C：预登记字段 5 轮全为 0，而 ports 上这些字段当时并未接线。INFRA 修好（replacement 改为真实值）后另写配对对照计划 |
+| token 聚合 | 未能证明生效，不声明；**疑似缺陷** | g1c：配对第 1 步 grad_norm 与 baseline 逐位相同。离线排查见 `evidence/2026-09-29-token-offline/report.md`：Miles 的 LoRA bridge 路径漏设 `calculate_per_token_loss`（已确认，属 Miles，计入 fork 待办）；CPU 复现表明长度不等时梯度本应不同，所以 GPU 上逐位相同的原因仍未解释，需要 GPU 探针 |
+| no_grpo_std_normalization | GPU 上生效，已声明（analyze 补齐后 g1c_report：effective=True） | g1c：配对第 1 步 grad_norm 0.2428，baseline 为 0.6349 |
+| constant 聚合（Dr.GRPO reducer） | 已声明（仅此 reducer；P0 通过 register_named_reducer 登记） | g1 drgrpo |
+| kl_k3、entropy_bonus、overlong_penalty、custom_reward_postprocess | 已声明 | g1 attempt2 |
+| overlong_filter | 未做 G1 | 等 1b-hook.patch 合入 |
+
+- `G1_DECLARED` 与测试已同步到上表。reward_pipeline 应用了 echo-writers-1b.patch，由单一写入点负责回显。
+- 全量测试相对基线多出 4 个失败 id，都属于 2a 的 test_rl_seq_adv：3 个是示例 spec 的哈希因 reward_pipeline 改动而过期（需 2a 重新生成），另 1 个 declares_none 是跨分支冲突。
+- 费用（估算，未核账单）：g1b 共约 1.3 小时 H100，其中 A 第 2 次约 1 小时，A-5、A-r1、C 各约 10 分钟；g1c 约 25 分钟。所有 app 与 sandbox 都已停止。
+
 ## 2026-09-29 第三轮（G1 与声明，Agent ALGO-1b）——以本节为准
 
 ### G1 第 2 次尝试逐项结果
