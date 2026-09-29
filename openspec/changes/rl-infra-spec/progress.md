@@ -41,3 +41,10 @@
 - lr-fix 实际 9/10（3.2 未完成），fix-verda-provider 实际 11/19（4.x 等 PR #69，6.x 未做）；如实记录，未重复实现。
 - `openspec validate --strict`：rl-infra-spec、rl-algorithm-capabilities、rl-algo-grpo-knobs、rl-algo-loss-variants、rl-algo-mismatch-correction、rl-algo-seq-and-adv 全部 valid。
 - 待批准：见 alignment.md §8。下一步：主 agent 按 alignment.md §7 派发工作包。
+
+## 2026-09-29（Agent ALIGN，审查修订 F1–F9）
+
+- 按独立审查逐条修订，每条一个提交，SHA 见 alignment.md §3（F1–F9、GP、DEC）；只改了 openspec/，没有改代码。
+- GPU 计划纳入本目录的 `gpu-plan.md`，其中 E3 的 gather 阶段改名为 DEV-GATHER。
+- 主 agent 的决定见 alignment.md §7b。infra 代码工作的基底为 `rl-integ`（merge c5e05f4）。
+- 六个 change 的 `openspec validate --strict` 在推送前重新运行，全部 valid。

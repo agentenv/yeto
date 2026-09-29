@@ -74,6 +74,17 @@
 | A8 | `ffe1141` | 4 个算法 tasks.md 的执行约定 | 在 `/home/michael/work/rl-algos` 工作 → 以本分支副本为准、按工作包派发；P0 增加 `driver.py` 单写说明 | 规划来源唯一；避免与 lr-fix、infra 在同一文件冲突 | 无 | `driver.py` |
 | A9 | `a7ac491` | infra tasks 依赖 | 2.1/3.3/3.4/3.5/4.2/4.6/4.7 的依赖中没有 fork 任务 → 加上 2.1a/3.3a/3.3b/3.4a/3.5a/4.2a（LoRA）/4.6a；3.4a 从“同步”改为“前置” | 让派发顺序可以机械推导 | 无验收变化 | — |
 | A10 | `95f4cd6` | infra tasks 第 5/6/7 组标题 | 未标注边界 → C 只做 5.1 选中的路径；D1=6.1–6.3，D2=6.4–6.7；F 本轮只交付 7.1/7.2 设计文档，7.3 只写占位 | 用户指示与派发需要 | 不放宽：未选中的 5.x 与 7.3 保持未勾选 | — |
+| F1 | `53b5bc4` | tasks 3.5a；alignment 矩阵 | 3.5a 只写读回校验 → 如实写明现实现在读回前已进 router，给出 cordoned 加入后 uncordon 或 M4b 延迟准入两种机制；矩阵新增 ✖ 行 | 审查 F1 | 3.5 验收不变 | fork M3/M4 |
+| F2 | `2ccfb78` | tasks 4.2a | 列出 M5 的全部拒绝条件，写明对 E2/E3 profile 的影响，以及 `keep_on_dp_change` 的种子映射 | 审查 F2 | 4.2/4.6 增加拒绝条件 | 1.2 profile 选择、4.1 |
+| F3 | `a89290c` | tasks 3.3a/3.3b/3.7 | 按 M2/M3 实际语义写入 stop 半失败 `incomplete`、`wait_cells_tracked`、registration generation；3.7 覆盖该状态 | 审查 F3 | 3.7 增加失败项 | fork M2/M3 |
+| F4 | `85adf81` | alignment §3 | “可单独回退” → 如实给出回退顺序 | 审查 F4 | — | — |
+| F5 | `e6c10c7` | tasks 3.6/4.1、design D3、1b design D7 | `filtered`（终态）与 `carried_over`（非终态余量）分开；4.1 核实 Miles buffer 回收行为 | 审查 F5 | 3.6 更严格 | `rollout_meta_hook.py` |
+| F6 | `44c3749` | design D0、tasks 1.4、P0 design D4 | 本 change 所有模式（含 overlap）年龄均为 0；大于 0 只能来自另立 change | 审查 F6 | — | — |
+| F7 | `c274306`、`0b0d202` | 1a design G2；alignment | broadcast 论断补 file:line；logprob 影响标为推断 | 审查 F7 | — | — |
+| F8 | `5a2e42f` | progress.md | 删除“M1–M6 未写入”这一过时陈述 | 审查 F8 | — | — |
+| F9 | `680edf0` | tasks 第 7 组、design D12、alignment §5 | 7.3 注明出处，改为占位段并覆盖原三个要点；范围延后，待用户审阅 | 审查 F9 | 7.3 保持未勾选 | — |
+| GP | `b3b975d` | gpu-plan.md（新增）、progress、alignment | 纳入版本管理；“D1” → “DEV-GATHER” | 避免与阶段 D1 撞名 | — | — |
+| DEC | `697e38a` | alignment §7b/§8 | 记录主 agent 决定 | 主 agent 指示 | — | — |
 
 ## 4. D1 / D2 划分
 
