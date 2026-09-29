@@ -140,3 +140,9 @@
 - 生效验证（`evidence/2026-09-29-trigger/`）：tis、icepop、mis_mask 的截断/屏蔽比例 >0；OPSM 在 `--rl-optimizer-steps 2` 下 opsm_clipfrac >0。因此“声明需 GPU 上确实生效”的条件对 tis 和 opsm_trainer 已满足。
 - G3（TIS，两个 Modal 岛 + 本机 syncer 在 29410 端口）**未通过**：判据 3、4 无法成立，原因是 island-1 的磁带拉取截断；syncer 显示 3 步 strict 同步、两个 responder 都在，v0/v1 的权重 hash 一致。重跑需先提交 harness 修复（改用 launcher 回传磁带，前提是两岛路径也支持回传）。
 - 本节云资源：g1c 3 次（约 32 min）+ trigger 4 次（约 33 min）+ G3 2×H100 约 17 min，合计约 1.65 H100·h、约 $6.5（估算，未经账单确认）；连同此前两轮，总计约 $10.5。所有 algo1a 应用均无容器残留（`modal container list` 为 0），29410 端口已关闭，watchdog 已结束。
+
+## 2026-09-29 合入 integ-decl（d6be0f1）
+
+- 已核对 P0 对 `mismatch_correction.py` 的改动：IcePop 的 `miles.` 路径也注册为已命名 correction 函数，由 `corrections:icepop` 单独认领。对应测试改为断言 icepop 不再要求 `corrections:custom`。核对后无异议，93 passed。
+- 集成分支上的 Miles adapter 声明：none、tis、opsm、opsm_trainer、mismatch_observe、icepop、mis_mask。未声明：opsm_rollout、mis（truncate/clip）。docs 已同步。
+- G3：等 P0 修复 rl_local_round 回传后，基于集成分支先提交新计划（判据不变），再重跑 TIS 两岛并加跑 IcePop 两岛。
