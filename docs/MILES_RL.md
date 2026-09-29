@@ -656,8 +656,9 @@ each with its evidence, are the `MILES_DECLARED` table in
 - corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe
   (rl-algo-mismatch-correction);
 - loss_aggregations: constant; features: kl_loss_ref_model, entropy_bonus,
-  overlong_penalty, clip_higher, eps_clip (g1b run A-r1; eps 0.001/0.002 are
-  trigger test values, not recommendations); kl_placements: loss; reward_postprocessors:
+  overlong_penalty, no_grpo_std_normalization (g1c isolated control), eps_clip
+  (g1b run A-r1; eps 0.001/0.002 are trigger test values, not
+  recommendations); kl_placements: loss; reward_postprocessors:
   custom_reward_postprocess (rl-algo-grpo-knobs);
 - advantage estimators: gspo, reinforce_plus_plus,
   reinforce_plus_plus_baseline; features: maxrl, mapo, gdpo
@@ -680,7 +681,8 @@ undeclared mechanism.
 
 Not declared, pending evidence or approval:
 
-- dual_clip, over_sampling;
+- clip_higher: withdrawn because pg_clipfrac sums both bounds; an
+  isolating probe is planned. dual_clip, over_sampling;
 - overlong_filter, mis, opsm_rollout, generic corrections:custom;
 - features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
   reducer, and that reducer is claimed by `loss_aggregations:constant`
@@ -695,9 +697,9 @@ undeclared mechanisms.
 Measured on integ-decl with the committed example specs:
 
 - accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
-- refused: dapo-like (over_sampling, token) and
-  dr-grpo, which is now refused only on no_grpo_std_normalization (the
-  reducer is claimed by `constant`).
+- refused: dapo-like (clip_higher, over_sampling, token);
+- dr-grpo is accepted after the no_grpo_std_normalization re-declaration. Its
+  reducer is claimed by `constant` only at the evidenced source hash.
 
 **Combinations are not GPU-verified.** Each declared mechanism has its own
 GPU evidence. Combinations such as tis+opsm_trainer or icepop+opsm_trainer
@@ -757,6 +759,24 @@ the run exit 3. A synced run still fetches its checkpoint first.
 
 `--rl-event-tape` export refuses incomplete tapes unless
 `--allow-incomplete` is given.
+
+**Launcher exit codes.**
+
+| code | meaning |
+| --- | --- |
+| 0 | success |
+| 1 | a learner failed (non-RL), or no learner succeeded |
+| 2 | artifact not fetchable (Modal island) |
+| 3 | incomplete island event tape |
+| 4 | a fixed-roster RL island could not be recovered |
+
+Strict syncer failures, strict RL job failures, "all learners abandoned" and
+internal errors propagate as exceptions (exit 1 from the CLI worker).
+
+An island whose tape already holds `rl_learner_finalized` is counted as
+succeeded even if its job then ends non-zero, for example an interrupt during
+Ray shutdown after the syncer stopped. It is not relaunched, and the syncer is
+not restarted once every learner has finalized.
 
 **Launch dry run.** `yeto launch ... --dry-run` validates the whole launch
 (arguments, provenance, the ports algorithm and capability checks) and prints
