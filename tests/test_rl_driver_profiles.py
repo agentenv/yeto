@@ -62,6 +62,9 @@ def _strip(events):
 
 
 NEW_EVENTS = {"rl_timeline_span", "rl_readiness", "rl_round_labels"}
+# Always emitted since the 1b/2a request (not an observation event); the R0
+# comparison removes exactly this event and nothing else.
+ACCOUNTING_EVENTS = {"rl_round_trained"}
 
 
 R0_TAPE = json.loads(
@@ -77,7 +80,7 @@ def test_bound_profile_matches_the_recorded_r0_tape(tmp_path, observe):
     driver, _ = _driver(_engine(), tmp_path, profile=_profile("colocated-serial"),
                         observe=observe)
     driver.run()
-    events = _events(tmp_path / "events.jsonl")
+    events = [e for e in _events(tmp_path / "events.jsonl") if e["event"] not in ACCOUNTING_EVENTS]
     if observe:
         assert {e["event"] for e in events} >= {"rl_timeline_span", "rl_round_labels"}
         events = [e for e in events if e["event"] not in NEW_EVENTS]
@@ -88,11 +91,19 @@ def test_bound_profile_matches_the_recorded_r0_tape(tmp_path, observe):
 
 
 def test_profile_none_matches_the_recorded_r0_tape(tmp_path):
+    probe = _engine()
+    engine_groups, engine_samples = probe.groups, probe.samples_per_group
     for kind in ("colocated", "fixed-partition"):
         driver, _ = _driver(_engine(placement_kind=kind), tmp_path, f"{kind}.jsonl",
                             capabilities=fake_capabilities())
         driver.run()
-        assert _strip(_events(tmp_path / f"{kind}.jsonl")) == R0_TAPE[kind]
+        events = _events(tmp_path / f"{kind}.jsonl")
+        trained = [e for e in events if e["event"] in ACCOUNTING_EVENTS]
+        assert [(e["trained_groups"], e["trained_samples"]) for e in trained] == [
+            (engine_groups, engine_groups * engine_samples) for _ in range(3)
+        ]
+        events = [e for e in events if e["event"] not in ACCOUNTING_EVENTS]
+        assert _strip(events) == R0_TAPE[kind]
 
 
 def test_partitioned_serial_keeps_sample_ids_and_optimizer_order(tmp_path):

@@ -38,6 +38,7 @@ EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
 APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
 GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
 APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
+STEP_LOSSES = f"{_PLUGIN_MODULE}.step_losses"
 
 
 class StatePluginError(RuntimeError):
@@ -454,6 +455,11 @@ _STEP_GRAD_NORMS: list[float] = []
 # ``optimizer.step()`` and the scheduler step that follows it); upstream logs
 # only the post-step LR (fix-decoupled-lr-schedule D4).
 _STEP_APPLIED_LRS: list[float] = []
+# Per optimizer step: ``pg_clipfrac`` from the loss dict ``train_one_step``
+# returns (last pipeline stage only) and the step's loss token count. Upstream
+# returns only micro-batch-averaged metrics, so the token count is None.
+_STEP_LOSSES: list[dict[str, float | None]] = []
+_CLIPFRAC_KEYS = ("pg_clipfrac", "train/pg_clipfrac")
 _RECORDER_INSTALLED = False
 
 
@@ -484,6 +490,7 @@ def install_grad_norm_recorder() -> bool:
             _STEP_GRAD_NORMS.append(float(norm.item() if hasattr(norm, "item") else norm))
         except (TypeError, IndexError, ValueError):
             pass
+        _record_step_losses(result)
         return result
 
     megatron_model.train_one_step = train_one_step
@@ -502,6 +509,31 @@ def _record_applied_lr(original: Any, args: tuple, kwargs: dict) -> float | None
     lr = optimizer_lr(optimizer)
     _STEP_APPLIED_LRS.append(lr)
     return lr
+
+
+def _record_step_losses(result: Any) -> None:
+    try:
+        losses = result[0]
+    except (TypeError, IndexError):
+        return
+    if not isinstance(losses, dict) or not losses:
+        return  # not the last pipeline stage
+    clipfrac = None
+    for key in _CLIPFRAC_KEYS:
+        if losses.get(key) is not None:
+            raw = losses[key]
+            clipfrac = float(raw.item() if hasattr(raw, "item") else raw)
+            break
+    _STEP_LOSSES.append({"pg_clipfrac": clipfrac, "loss_tokens": None})
+
+
+def step_losses(actor: Any) -> list[dict[str, float | None]]:
+    """Per-step ``pg_clipfrac`` / loss token records since the last call (then cleared)."""
+
+    del actor
+    values = list(_STEP_LOSSES)
+    _STEP_LOSSES.clear()
+    return values
 
 
 def applied_lrs(actor: Any) -> list[float]:
