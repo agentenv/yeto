@@ -795,23 +795,45 @@ def test_learner_binds_ref_source_and_override(tmp_path):
 
 # ---------------------------------------------------------------- 8.3 declarations (1b-declare.patch)
 
-def test_declared_after_g1_and_overlong_filter_still_refused():
+EXPECTED_1B_DECLARED = {
+    "loss_aggregations": {"token", "constant"},
+    "features": {"no_grpo_std_normalization", "kl_loss_ref_model", "entropy_bonus", "overlong_penalty"},
+    "kl_placements": {"loss"},
+    "reward_postprocessors": {"custom_reward_postprocess"},
+}
+
+
+def test_declared_table_matches_final_declaration():
+    """G1_DECLARED == the 1b part of ALGO-CAP's final MILES_DECLARED (integ-decl d6be0f1);
+    custom_pg_loss_reducer is declared there separately, limited to the Dr.GRPO reducer."""
+
+    assert {d: set(n) for d, n in gk.declared_mechanisms().items()} == EXPECTED_1B_DECLARED
+    from yeto.rl.engine.miles_adapter import entry
+
+    final = getattr(entry, "MILES_DECLARED", None)
+    if final is not None:  # integrated branches: the 1b entries must be exactly there
+        ours = {f"{d}:{n}" for d, names in EXPECTED_1B_DECLARED.items() for n in names}
+        assert ours <= set(final)
+
+
+def test_declared_caps_accept_1b_and_refuse_undeclared():
     from yeto.rl.engine.miles_adapter.entry import miles_capabilities
 
-    caps = miles_capabilities("sha256:" + "0" * 64)
-    if not gk.declared_mechanisms()["features"] <= caps.features:
-        pytest.skip("needs infra-drafts/1b-declare.patch")
-    ok = [pipeline_spec(reward_shapers=[OVERLONG]),
-          AlgorithmSpec(loss={"aggregation": "token"}),
-          kl_spec(), AlgorithmSpec(entropy_coef=0.001)]
-    for spec in ok:
+    caps = gk.merge_declared(miles_capabilities("sha256:" + "0" * 64))
+    for spec in (pipeline_spec(reward_shapers=[OVERLONG]), AlgorithmSpec(loss={"aggregation": "token"}),
+                 kl_spec(), AlgorithmSpec(entropy_coef=0.001)):
         missing = [f"{d}:{n}" for d, n in spec.required_mechanisms() if n not in getattr(caps, d)]
         assert missing == [], missing
-    flt = gk.with_pipeline_plugins(AlgorithmSpec(sampling={"overlong_filter": True}))
-    assert ("features", "overlong_filter") in flt.required_mechanisms()
-    assert "overlong_filter" not in caps.features
-    for name in ("clip_higher", "dual_clip", "over_sampling"):  # no GPU evidence of effect yet
-        assert name not in caps.features
+    for name in ("clip_higher", "dual_clip", "over_sampling", "overlong_filter"):
+        assert name not in gk.declared_mechanisms().get("features", frozenset())
+
+
+def test_only_the_drgrpo_reducer_is_accepted():
+    other = PluginRef.from_path("yeto.rl.algos.reducers.configured_denominator").to_dict()
+    for loss in ({"reducer": other}, {"aggregation": "constant", "constant_denominator": 10, "reducer": other}):
+        assert any("the only pg_loss reducer on the ports path" in p
+                   for p in AlgorithmSpec(loss=loss).rejections())
+    assert constant_spec().rejections() == []
 
 
 def test_emit_event_echoes_to_stdout(capsys):

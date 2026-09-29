@@ -39,3 +39,51 @@
 - 修复：改用 `yeto.rl.math_reward:reward_func`（Miles 签名）。其余不变，重跑 A。
 - 回收：app 已 stopped。两个残留的 watchdog sleep 进程已按 pid 结束（run.sh 的 pkill 匹配式没有匹配到它们，需要修）。另外发现 `sbx.py list` 通过 App.lookup(create_if_missing) 建出了一个空的 `algo1b-g1` app，处于 deployed 状态，已 `modal app stop`。
 - 费用：约 1 小时 H100，估算约 $4，未按账单核实。日志：`attempt2-out-a/`。
+
+## run A 第 3 次尝试结论（19:29:02–19:29:06Z）
+- launcher 启动时就拒绝了："run 'algo1b-g1b-a' already has a live worker (pid 1915592)"。第 2 次尝试的本地 `timeout` 只结束了前台的 `yeto launch`，launcher 分离出的 `yeto _worker` 进程仍在运行。这次没有建 app，也没有用 GPU。
+- 处理：先 `yeto down algo1b-g1b-a` 并结束 pid 1915592（已核实进程不存在，Modal app 为 stopped），再修改 run.sh：结束时先 `yeto down <prefix>`，然后再 `modal app stop`。
+
+## 三次失败汇总与重跑依据（按主 agent 要求）
+| 尝试 | 失败阶段 | 原因 | 修复与提交 | 是否用 GPU |
+|---|---|---|---|---|
+| 1 | Modal 镜像构建 | 私有 ghcr 镜像缺拉取凭据 | 在进程内导出凭据，提交 `algo1b-g1b: run A attempt 1 … + fix`（先于第 2 次尝试） | 否 |
+| 2 | rollout 阶段，一轮也没完成 | reward 入口写错：`score` 被当作 Miles 的 `custom_rm`，签名不符，每个任务都抛 TypeError | 改为 `reward_func`，提交 `… attempt 2 (wrong reward entry, timeout) + fix`（先于第 3 次尝试） | 是，约 1 小时 H100 |
+| 3 | launcher 启动 | 第 2 次尝试残留的 detached worker 还在 | 结束残留 worker；run.sh 增加 `yeto down`，本条提交先于第 4 次尝试 | 否 |
+
+- 三次都是环境或 harness 问题，都发生在第一个训练 step 之前，没有产生任何判据数据。没有因为结果不理想而重跑；判据、spec、配置、seed 都没有改动（`clip_higher.json`、`over_sampling.json` 与预登记时一致）。
+- 第 4 次尝试如果能完成训练，无论 pg_clipfrac 是否大于 0，都按预登记判据如实交付，不再加跑。
+
+## 无进展超时（主 agent 要求；在 run A 第 4 次尝试运行期间加入，不改变任何判据）
+- `noprogress.sh`（setsid 后台运行，与终端无关）满足任一条件即执行 `yeto down` 加 `modal app stop` 并回收：
+  - `t_start` 后 **25 分钟**内日志中没有出现任何 `'train/pg_loss'` 训练 step 行（第一次 G1 的单个 run 全程 5–7 分钟，镜像拉取也包含在这 25 分钟里）；
+  - 出现第一个训练 step 之前，`Task raised exception` 与 `Traceback` 累计达到 **20 次**。SGLang 那条良性的 freeze_gc 链每次运行只有 4 行，不会触发。
+- 第 4 次尝试是在它启动约数分钟后才挂上这个监控的；run C 从启动起就用它（run.sh 会自动拉起）。
+- 如果第 4 次尝试仍然在第一个训练 step 之前失败：保存证据，报告阻塞，转做其他项，不再无限重试。
+
+## run A 第 4 次尝试结论（19:30:07–19:30:21Z）
+- 还是在 launcher 启动阶段就失败："event tapes already exist for run 'algo1b-g1b-a'"。第 2 次尝试的事件磁带仍留在 `~/.yeto/runs/algo1b-g1b-a/`。这次没有建 app，也没有用 GPU。
+- 修复：把第 2 次尝试的 run 目录（events、meta.json）存进 `attempt2-out-a/yeto-run/` 作为证据，原目录不删；之后每次尝试用新的 cluster-prefix，`ATTEMPT=5` 时为 `algo1b-g1b-a-5`（app 为 `yeto-algo1b-g1b-a-5`）。判据与配置都不变。
+- 按主 agent 的规定：如果第 5 次尝试仍然在第一个训练 step 之前失败，就保存证据、报告阻塞，不再重试。
+
+## run A 第 5 次尝试结论（prefix algo1b-g1b-a-5，19:31:15–19:40:35Z，app 已 stopped）
+- 训练：3 轮全部完成，每轮 2 个 optimizer step，共 6 个 step。事件磁带回传 33 条（`out-a/algo1b-g1b-a-5-l0-modal.jsonl`），其中有 `rl_round_trained`×3、`rl_local_round`×3 和 `rl_learner_finalized`。island job 为 SUCCEEDED。
+- **生效判据（pg_clipfrac > 0）：满足。** 每轮第 1 步（on-policy）为 0.0；第 2 步分别为 0.1046、0.1046、0.1107，都有限。
+- 没有 zero_grad、nonfinite、StrictRlInvariant、RoundFailed。4 行 Traceback 都属于那条良性的 SGLang freeze_gc 链。grad_norm 为 0.90/0.44/0.46。
+- **退出码的偏差（如实记录）**：launcher 最后以 exit code 2 结束，原因是 launcher.py:3994 "--rl-single-island-no-sync island ran on Modal … its ~/yeto-output is not fetchable over ssh and there is no syncer checkpoint"。这是 P0 no-sync Modal 路径的固定行为：learner 已经 finalized，launcher 仍然返回 2。预登记写的是"rc=0"，照字面这一条不满足；按"learner job SUCCEEDED 且有 finalized 事件"理解则满足。这里不自行放宽，交主 agent 判定。
+- 峰值显存在这个入口下没有采集（计划里也没有要求）。
+
+### run A 第 5 次尝试的完成记录（按主 agent 判定）
+run A 第 5 次：生效判据满足（第 2 步 pg_clipfrac 0.105/0.105/0.111）；判据"rc=0"字面上不满足（launcher 的 no-sync Modal 路径固定返回 2），因此本次不作为声明依据。
+
+## 修订计划 R1（单独提交，在任何修订重跑之前）
+- 只修改"运行成功"这一条的措辞；其余判据、spec、配置、seed、资源、回收、无进展超时全部不变：
+  - 以下三条**同时**满足时视为运行成功：launcher 退出码为 0，或者退出码为 2 且 launcher 日志含 launcher.py 的那行提示 "--rl-single-island-no-sync island ran on Modal (...); its ~/yeto-output is not fetchable over ssh and there is no syncer checkpoint"；回传的事件磁带中有 `rl_learner_finalized`；launcher 日志中有 "job finished: SUCCEEDED"。
+  - 退出码 3（缺 finalized，run 标记为 .incomplete）或其他退出码均为失败。
+- 这次重跑是因为判据措辞，不是因为结果：run A 按 R1 **只重跑一次**（prefix `algo1b-g1b-a-r1`），run C 若同样出现退出码 2，也只重跑一次（prefix `algo1b-g1b-c-r1`）。结果按预登记判据如实交付，不再加跑。
+
+## run C 结论（prefix algo1b-g1b-c，19:42:12–19:54:34Z，app 已 stopped）
+- 5 轮全部完成，每轮 8 组 64 条样本；有 finalized，job 为 SUCCEEDED；没有 invariant 错误，4 行 Traceback 都是 freeze_gc 良性链。launcher 退出码为 2，原因与 run A 相同（no-sync Modal 路径无法回传产物）。
+- **生效判据（事件中 dynamic_filter_dropped_groups 或 dynamic_filter_replacement_attempts 至少一轮 > 0）：不满足**，5 轮都是 0/0，generated 也是 0。另外，判据"rc=0"字面上也不满足。结论：**未能证明 over_sampling 生效，不声明。**
+- 补充观察（不作为判定依据，未预登记）：Miles 的 rollout 指标中，`raw_reward_unfiltered`（0.6125/0.7125/0.875/0.675/0.8125）与训练所用的 `raw_reward`（0.64/0.77/0.84/0.72/0.77）每轮都不相同，说明生成的样本比训练用的多，超采样或过滤在 Miles 侧可能起了作用。与此同时 yeto 的 `rl_local_round.dynamic_filter_*` 在 ports 路径上可能根本没有接线（generated 恒为 0）。这属于接口缺口（INFRA/P0），不能据此补判。
+- 按 R1 规定，run C 本可以再跑一次；但预登记的生效判据依赖的字段在 ports 路径上始终为 0，重跑不会改变结论，所以**不重跑**。需要先由 INFRA/P0 在 ports 路径接好 `dynamic_filter_*`（或另立判据的新计划）。
