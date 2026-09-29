@@ -978,6 +978,26 @@ def test_worker_miles_extras_capture_real_rollouts_and_only_native_saves(tmp_pat
     assert "--save-hf" not in single_extra
 
 
+def test_ports_islands_do_not_share_the_dashboard_column_directory(tmp_path):
+    # Upstream Miles writes dashboard columns to <dump dir>/../dashboard_columns
+    # through a fixed .tmp name; two islands sharing that grandparent race on
+    # the rename (teacher-forcing replay finished both islands together).
+    _, single, _, _ = benchmark.select_arms("2", 2, 4)
+    workers = benchmark.worker_specs(single, tmp_path / "all", ())
+    run_dir = tmp_path / "run"
+
+    def dump(worker, engine):
+        extra = benchmark.miles_extra_argv(worker, run_dir, 3, engine)
+        return Path(extra[extra.index("--save-debug-rollout-data") + 1])
+
+    legacy = [dump(w, "legacy") for w in workers]
+    ports = [dump(w, "ports") for w in workers]
+    assert legacy[0] == run_dir / "rollouts" / "island-0" / "{rollout_id}.pt"
+    assert len({p.parent.parent for p in ports}) == len(workers)
+    for worker, path in zip(workers, ports):
+        assert path.parent == benchmark.rollout_dump_dir(run_dir, worker.learner_id, "ports")
+
+
 def test_native_miles_adapter_names_are_mapped_to_the_exact_peft_contract():
     specs = (
         SimpleNamespace(

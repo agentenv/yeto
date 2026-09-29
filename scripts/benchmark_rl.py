@@ -440,10 +440,24 @@ def syncer_command(
     return command
 
 
-def miles_extra_argv(worker: WorkerSpec, run_dir: Path, rounds: int) -> list[str]:
+def rollout_dump_dir(run_dir: Path, learner_id: int, rl_engine: str = "legacy") -> Path:
+    """Where an island's ``--save-debug-rollout-data`` dumps land.
+
+    Upstream Miles (the ports engine) also writes dashboard columns to
+    ``<dump dir>/../dashboard_columns/rollout_<id>.parquet`` through a fixed
+    ``.tmp`` name, so co-resident islands must not share the dump's
+    grandparent; ports nests one level deeper. Legacy keeps its layout.
+    """
+    island = run_dir / "rollouts" / f"island-{learner_id}"
+    return island / "dumps" if rl_engine == "ports" else island
+
+
+def miles_extra_argv(
+    worker: WorkerSpec, run_dir: Path, rounds: int, rl_engine: str = "legacy"
+) -> list[str]:
     values = [
         "--save-debug-rollout-data",
-        str(run_dir / "rollouts" / f"island-{worker.learner_id}" / "{rollout_id}.pt"),
+        str(rollout_dump_dir(run_dir, worker.learner_id, rl_engine) / "{rollout_id}.pt"),
     ]
     if not worker.policy_sync:
         values.extend(
@@ -611,7 +625,9 @@ def worker_payload(
         "model_path": str(model_path),
         "prompt_path": str(worker.prompt_path),
         "policy_sync": worker.policy_sync,
-        "extra_argv": miles_extra_argv(worker, run_dir, args.global_rounds),
+        "extra_argv": miles_extra_argv(
+            worker, run_dir, args.global_rounds, getattr(args, "rl_engine", "legacy")
+        ),
     }
 
 
@@ -1756,7 +1772,8 @@ def run_arm(
 
     rollout_paths = tuple(
         tuple(
-            run_dir / "rollouts" / f"island-{worker.learner_id}" / f"{round_id}.pt"
+            rollout_dump_dir(run_dir, worker.learner_id, getattr(args, "rl_engine", "legacy"))
+            / f"{round_id}.pt"
             for round_id in range(args.global_rounds)
         )
         for worker in workers
