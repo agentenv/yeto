@@ -27,3 +27,8 @@
 ## run A 第 1 次尝试结论
 - launcher 拉取私有 ports 镜像 `ghcr.io/michaellchung/yeto-miles-ports@sha256:5da40a07…` 时，skopeo copy 失败，Modal 镜像构建失败。原因是没有导出 registry 凭据。本次没有启动 GPU，Modal 上也不存在对应的 app。
 - 修复：run.sh 在进程内从 `~/.docker/config.json` 的 ghcr.io auth 解码出 `SKYPILOT_DOCKER_USERNAME/PASSWORD/SERVER` 并导出，凭据不打印、不写日志。其余不变，重跑 A。日志在 `attempt1-out-a/`。
+
+## 补充说明（run A 第 2 次尝试开始后加入，不改变任何判据）
+- 本计划的判据只依赖 learner 进程写出的事件（rl_local_round 的 clip_fraction/dynamic_filter_*）和训练日志里的 train/pg_clipfrac，不依赖 reward_pipeline 在 rollout 子进程中写的事件，因此不受 P0 50fe818 回传范围的限制。
+- 从 run C 起，yeto 代码包含 `emit_event` 的 stdout 回显（`YETO_RL_EVENT `）。
+- no-sync 运行如果缺少 rl_learner_finalized，launcher 会以退出码 3 结束并标记 .incomplete。这种情况视为 rc≠0，按失败处理。

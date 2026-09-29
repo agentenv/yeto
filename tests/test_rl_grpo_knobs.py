@@ -812,3 +812,15 @@ def test_declared_after_g1_and_overlong_filter_still_refused():
     assert "overlong_filter" not in caps.features
     for name in ("clip_higher", "dual_clip", "over_sampling"):  # no GPU evidence of effect yet
         assert name not in caps.features
+
+
+def test_emit_event_echoes_to_stdout(capsys):
+    from yeto.rl import event_echo
+
+    rp.emit_event(SimpleNamespace(yeto_rl_learner_id=0), {"event": "rl_reward_shaping", "samples": 2})
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out and out[-1].startswith(event_echo.PREFIX)
+    raw = event_echo.parse_line(out[-1])
+    assert raw not in (None, event_echo.INVALID)
+    record = json.loads(raw) if isinstance(raw, str) else raw
+    assert record["event"] == "rl_reward_shaping" and record["island_id"] == 0 and record["samples"] == 2
