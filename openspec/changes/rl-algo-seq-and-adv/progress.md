@@ -96,3 +96,8 @@
 1. 1b 修复 `grpo_knobs.py` 后：`git -C /home/michael/work/algo-2a fetch -q origin && git merge origin/algo-1b`，还原本地一行修复（`git checkout -- yeto/rl/algos/grpo_knobs.py`），重跑全量与 miles 对照、按新放行名重生成 `evidence/dry-run/`。
 2. 主 agent 通知 P0 无 syncer 单岛入口 SHA 后：merge algo-cap，按 `evidence/g1/plan.md` 用新入口重做 attempt 2（`g1_sbx.py`，先 watchdog，后 `timeout 5700`），7 个 run；通过的机制在 `entry.py` 声明（补丁交 ALGO-CAP）。
 3. 7.6 G3 需两岛 head 放置（本机或 Nebius head），在 7.5 合入后计划。
+
+## 2026-09-29 主 agent 决定（分派器哈希覆盖）
+- 1b 将让分派器 PluginRef 覆盖所有注册 shaper/transform 的模块，并在 post_process 前 `load_extensions()`、未知 transform 启动前拒绝。2a-shared.patch hunk 1 届时作废。
+- 本 change 保持注册写在 `seq_adv.py`；已确认它在 `EXTENSION_MODULES` 中，单独导入不引入 torch/miles（`python -c "import yeto.rl.algos.seq_adv"` 通过）。
+- 1b 推送后：merge `origin/algo-1b`；删除 `seq_adv_transform_identity` 拒绝规则与 `plugins` 要求（改由分派器哈希覆盖，G1 放行清单去掉 `features:plugins`）；用 `make_examples.py` 重新生成全部示例 spec，重跑 dry-run 证据与全量测试。
