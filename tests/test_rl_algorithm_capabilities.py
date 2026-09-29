@@ -358,6 +358,7 @@ EXPECTED_MILES_DECLARED = {
     "corrections:icepop",
     "corrections:mis_mask",
     "features:eps_clip",
+    "features:clip_higher",
 }
 
 
@@ -527,9 +528,15 @@ def test_estimator_mandated_settings_are_claimed_by_the_estimator():
     _check(caps, gspo)  # accepted with gspo declared (clip claimed by gspo)
     rpp = AlgorithmSpec(advantage=AdvantageSpec(estimator="reinforce_plus_plus", whiten=True))
     _check(caps, rpp)
-    # the same settings under grpo stay independent mechanisms
-    with pytest.raises(CapabilityMismatch, match="'clip_higher' not supported"):
-        _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28)))
+    # the same settings under grpo stay independent mechanisms: required, and
+    # accepted only through their own declaration
+    grpo_clip = AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28))
+    assert ("features", "clip_higher") in grpo_clip.required_mechanisms()
+    if "features:clip_higher" in caps.declared_mechanisms():
+        _check(caps, grpo_clip)  # declared on its own evidence (1b g1b run A-r1)
+    else:
+        with pytest.raises(CapabilityMismatch, match="'clip_higher' not supported"):
+            _check(caps, grpo_clip)
     with pytest.raises(CapabilityMismatch, match="'whiten_advantages' not supported"):
         _check(caps, AlgorithmSpec(advantage=AdvantageSpec(whiten=True)))
     # a companion beyond the mandated set is still checked (dual-clip under gspo)
