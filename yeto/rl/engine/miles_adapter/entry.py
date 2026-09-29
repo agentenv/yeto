@@ -46,6 +46,7 @@ _E1B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
 _E1B_B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1b"
 _E1B_C = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1c"
 _E1B_G1F = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1f"
+_E1B_G1H = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1h"
 _E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
 MILES_DECLARED: dict[str, str] = {
     "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
@@ -86,6 +87,15 @@ MILES_DECLARED: dict[str, str] = {
         "sha256:c6f5455c... inferred from the pin and verified from source by the main "
         "agent (launch.log printed no digest)"
     ),
+    "features:over_sampling": (
+        f"{_E1B_G1H} (branch algo-1b-os d53397d, conclusion rewritten 3fec259): the "
+        "pre-registered criteria (a)(b) are literally met but discriminate weakly; the "
+        "decisive evidence is the over_sampling arm's rollout 1 (submitted 8, aborted 4, "
+        "filtered 0 -- inferred afterwards from the rollout_meta_hook formula, one round "
+        "only) and the two arms' parameter tables differing only in "
+        "over_sampling_batch_size; strong evidence awaits a rerun once Miles records the "
+        "batch size of every submission. Miles 0af62f4d only"
+    ),
 }
 
 
@@ -95,6 +105,7 @@ MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
     # grad_norm bit-identical to the baseline)
     "loss_aggregations:token": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+    "features:over_sampling": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
 }
 
 

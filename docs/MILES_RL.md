@@ -657,7 +657,8 @@ each with its evidence, are the `MILES_DECLARED` table in
   (rl-algo-mismatch-correction);
 - loss_aggregations: constant, token (token only on Miles 0af62f4d+, where
   the LoRA bridge honours calculate_per_token_loss; entry.MILES_DECLARED_PINS
-  withholds it under other pins); features: kl_loss_ref_model, entropy_bonus,
+  withholds it under other pins); features: over_sampling (Miles 0af62f4d only;
+  weak evidence, see MILES_DECLARED), kl_loss_ref_model, entropy_bonus,
   overlong_penalty, no_grpo_std_normalization (g1c isolated control), eps_clip
   (g1b run A-r1; eps 0.001/0.002 are trigger test values, not
   recommendations); kl_placements: loss; reward_postprocessors:
@@ -684,7 +685,7 @@ undeclared mechanism.
 Not declared, pending evidence or approval:
 
 - clip_higher: withdrawn because pg_clipfrac sums both bounds; an
-  isolating probe is planned. dual_clip, over_sampling;
+  isolating probe is planned. dual_clip;
 - overlong_filter, mis, opsm_rollout, generic corrections:custom;
 - features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
   reducer, and that reducer is claimed by `loss_aggregations:constant`
@@ -699,7 +700,7 @@ undeclared mechanisms.
 Measured on integ-decl with the committed example specs:
 
 - accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
-- refused: dapo-like (clip_higher, over_sampling);
+- refused: dapo-like (clip_higher);
 - dr-grpo is accepted after the no_grpo_std_normalization re-declaration. Its
   reducer is claimed by `constant` only at the evidenced source hash.
 

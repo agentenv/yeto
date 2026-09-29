@@ -360,6 +360,7 @@ EXPECTED_MILES_DECLARED = {
     "features:eps_clip",
     "features:no_grpo_std_normalization",
     "loss_aggregations:token",
+    "features:over_sampling",
 }
 
 
