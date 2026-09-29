@@ -399,12 +399,19 @@ def test_fake_declaration_admits_every_mechanism():
 
 
 @pytest.mark.parametrize("name", sorted(ALL))
-def test_miles_adapter_rejects_undeclared_mechanisms(name):
+def test_miles_adapter_admits_exactly_declared_mechanisms(name):
     caps = miles_capabilities(FINGERPRINT)
+    spec = ALL[name]()
+    needed = {n for d, n in spec.required_mechanisms() if d == "corrections"}
+    if needed <= caps.corrections and not (
+        {n for d, n in spec.required_mechanisms() if d == "features"} - caps.features
+    ):
+        caps.check(**CHECK, algorithm=spec)
+        return
     with pytest.raises(CapabilityMismatch) as info:
-        caps.check(**CHECK, algorithm=ALL[name]())
+        caps.check(**CHECK, algorithm=spec)
     text = str(info.value)
-    assert "not supported" in text and "supported: ['none']" in text
+    assert "not supported" in text and f"supported: {sorted(caps.corrections)}" in text
 
 
 def test_unverified_allowance_admits_single_island_smoke():
@@ -488,7 +495,9 @@ def test_doc_example_dry_run(tmp_path, index):
     spec = AlgorithmSpec.from_json_file(str(path))
     assert spec.rejections() == []
     rejected = dry_run(["--dry-run", "--rl-algorithm-spec", str(path)])
-    assert rejected["verdict"] == "rejected" and "supported: ['none']" in rejected["error"]
+    declared = miles_capabilities(FINGERPRINT).corrections
+    if not {n.split(":", 1)[1] for n in allow if n.startswith("corrections:")} <= declared:
+        assert rejected["verdict"] == "rejected" and "not supported" in rejected["error"]
     argv = ["--dry-run", "--rl-algorithm-spec", str(path)]
     for name in allow:
         argv += ["--rl-allow-unverified-mechanism", name]
