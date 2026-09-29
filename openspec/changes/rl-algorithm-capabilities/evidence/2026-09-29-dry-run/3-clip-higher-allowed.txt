@@ -1,4 +1,4 @@
-$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algorithm-capabilities/evidence/2026-09-29-dry-run/clip_higher.json --rl-allow-unverified-mechanism clip_higher
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algorithm-capabilities/evidence/2026-09-29-dry-run/clip_higher.json --rl-allow-unverified-mechanism features:clip_higher
 {
   "absorbed_flags": {},
   "algorithm_spec": {

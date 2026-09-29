@@ -38,15 +38,15 @@
 
 ## 4. 零梯度不变量按算法判定（design D6）
 
-- [ ] 4.1 `TrainStepMetrics` 增加可选字段 `masked_fraction`；adapter 从 Miles 训练指标中读取，读不到时为 None。验证：单测覆盖有、无两种情况。
-- [ ] 4.2 把 `driver.py` 的判定改为调用 `spec.expects_gradient()`。验证：R0 已有的零梯度注入测试不改就能通过；新增 fake 测试：声明合法全屏蔽的机制在 `masked_fraction=1.0` 时不判失败；grad_norm 非有限时仍判失败。
+- [x] 4.1 `TrainStepMetrics` 增加可选字段 `masked_fraction`；adapter 从 Miles 训练指标中读取，读不到时为 None。验证：单测覆盖有、无两种情况。
+- [x] 4.2 把 `driver.py` 的判定改为调用 `spec.expects_gradient()`。验证：R0 已有的零梯度注入测试不改就能通过；新增 fake 测试：声明合法全屏蔽的机制在 `masked_fraction=1.0` 时不判失败；grad_norm 非有限时仍判失败。
 
 ## 5. 用户输入、岛间一致与来源记录（design D8/D9）
 
 - [x] 5.1 learner 和 launcher 新增 `--rl-algorithm-spec PATH`，只在 ports 下生效，与 legacy 组合时启动前拒绝，并按 D8 的优先级构建 spec。验证：单测覆盖以下情况：文件给出 v1、给出 v2、不给（与 R0 相同）、与 legacy 组合被拒。legacy 的 argv 快照测试不改就能通过。
 - [x] 5.2 launcher 在 ports 模式下计算 `expected_algorithm_sha256`，经 `--rl-expected-algorithm-sha256` 下发；learner 在连接 bridge 之前核对，不一致时写入 `rl_algorithm_mismatch` 事件并退出，缺参数时写警告事件。验证：launcher 的 argv 测试确认该参数只在 ports 模式出现；learner 的单测覆盖一致、不一致、缺失三种情况。
-- [x] 5.3 `export.py` 的 ports 分支写入 `algorithm_spec` 与 `algorithm_spec_sha256`。验证：导出测试确认 ports 的来源记录包含这两项且与事件一致；legacy 导出测试不改就能通过（逐字节一致）。
-- [x] 5.5 实现 `--rl-allow-unverified-mechanism NAME`（design D11）：只在 ports 单岛运行中生效；多岛、外层同步或 legacy 下启动前拒绝；事件和来源记录写入 `rl/unverified_mechanisms`；不影响算法哈希；不绕过拒绝矩阵。验证：fake 组合根单测覆盖单岛放行成功、两岛被拒、legacy 被拒、放行时仍触发拒绝矩阵、哈希不变。
+- [ ] 5.3 `export.py` 的 ports 分支写入 `algorithm_spec` 与 `algorithm_spec_sha256`。验证：导出测试确认 ports 的来源记录包含这两项且与事件一致；legacy 导出测试不改就能通过（逐字节一致）。
+- [ ] 5.5 实现 `--rl-allow-unverified-mechanism NAME`（design D11）：只在 ports 单岛运行中生效；多岛、外层同步或 legacy 下启动前拒绝；事件和来源记录写入 `rl/unverified_mechanisms`；不影响算法哈希；不绕过拒绝矩阵。验证：fake 组合根单测覆盖单岛放行成功、两岛被拒、legacy 被拒、放行时仍触发拒绝矩阵、哈希不变。
 - [x] 5.4 运行事件中记录吸收来的参数（`rl/algorithm_absorbed_flags`）。验证：单测确认事件字段内容正确。
 
 ## 6. 文档
@@ -76,3 +76,11 @@
 - 6.1 CPU 通过：`docs/MILES_RL.md` 新增 “Algorithm specs (`--rl-algorithm-spec`)” 一节。示例命令用 `python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run` 执行，输出见 `evidence/2026-09-29-dry-run/`，与文档描述一致（包括默认哈希 27df1133…、clip_higher 哈希 1b49346c…）。
 - 6.2 已实现：research.md 的 §8 改为已确认方案，§10 问题 1/2 标注已定，§1/§5/§7/§9 中与本 change 矛盾的“一律拒绝”和“由 rl-infra-spec 开放异步”表述已改。§11 是参考文献列表，没有与本 change 矛盾的内容，未改。
 - 7.1–7.3 见 progress.md。
+
+### 独立审查后的修订（2026-09-29，algo-cap 合并 infra-a 之后）
+
+- 2.6 **改回未勾选，状态为“CPU 部分通过（fsdp）”**。原记录中“Megatron 那一半由 `test_upstream_parse_args_accepts_translation` 覆盖”这句不成立：该测试在两个 venv 里都会 skip，而且只测默认 GRPO，因此撤回这句。补救办法：在私有镜像（含 Megatron）里，对 ports 实际生成的完整 argv 运行 upstream `parse_args`（含 Megatron 校验），计划见 `evidence/2.6-plan.md`。全部通过后才重新勾选。
+- 4.1、4.2 **CPU 通过，已勾选**：`p0-driver.patch` 已在 infra-a 378b7b1 生效，algo-cap 已合并 infra-a。`tests/test_rl_engine_driver.py` 与 rl-integ 相比 diff 为 0 行，全部通过；`tests/test_rl_algorithm_gradient.py` 通过；全量失败集合与基线相同。审查意见 F15/F16/F17（事件记录放宽来源、masked_fraction 只接受 [0,1] 内的非 bool 实数、缺少逐算法接口时退回 R0 判定）写成增量补丁 `/home/michael/work/infra-drafts/p0-driver-2.patch`（在 infra-a 上 `git apply --check` 通过；打上后全量失败集合不变），由 INFRA 合入。
+- 5.3 **改回未勾选**：真实的导出调用点 `ssh_harness.py` 还没有传入 algorithm_spec（IMG 正在补），接线合入后再勾选。
+- 5.5 **改回未勾选**：已按 spec 原文改为“存在任何外层同步就拒绝”（之前的实现只在“岛数 > 1”时拒绝），放行名称改用 `dimension:name` 形式。现在 learner 和 launcher 两个入口都会接 syncer，所以 G1 用不了放行开关，这一点记为“需另批”（见 progress 与 alignment 的待批准）。另外，导出接线尚未合入。
+- 2.6 **重新勾选：CPU 通过（完整 argv + Megatron parse_args）**。按事先提交的计划（`evidence/2.6-plan.md`、`evidence/2026-09-29-megatron-parse/attempt2-plan.md`），在私有 ports 镜像（Modal T4）中对 ports 完整 argv 跑 upstream `parse_miles_args`，20/20 通过，结果见 `evidence/2026-09-29-megatron-parse/result.md`。费用 < $0.2，资源已回收。

@@ -1,4 +1,4 @@
-$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --extra --eps-clip-high 0.28 --rl-allow-unverified-mechanism clip_higher
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --extra --eps-clip-high 0.28 --rl-allow-unverified-mechanism features:clip_higher
 {
   "absorbed_flags": {
     "--eps-clip-high": "0.28"

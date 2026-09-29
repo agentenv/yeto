@@ -21,6 +21,9 @@ from test_rl_engine_selection import _learner_argv
 from test_rl_miles_adapter_config import make_config
 
 V2 = AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28))
+# a non-default spec the Miles adapter declares (the launcher checks capabilities)
+DECLARED = AlgorithmSpec(dynamic_sampling_filter=BOUNDED_NONZERO_STD_FILTER,
+                         dynamic_sampling_max_replacements=2)
 
 
 def _spec_file(tmp_path, payload, name="spec.json"):
@@ -66,14 +69,24 @@ def test_legacy_cli_disagreeing_with_spec_file(tmp_path):
         resolve_ports_algorithm(args, rl_engine="ports")
 
 
-def test_learner_unverified_allowance_multi_island_refused(capsys):
-    with pytest.raises(SystemExit):
-        rl_learner.parse_args(_learner_argv(("--rl-allow-unverified-mechanism", "clip_higher",
-                                             "--num-learners", "2")))
-    assert "single-island" in capsys.readouterr().err
-    args = rl_learner.parse_args(_learner_argv(("--rl-allow-unverified-mechanism",
-                                                "clip_higher")))
-    assert args.rl_allow_unverified_mechanism == ["clip_higher"]
+def test_learner_unverified_allowance_refused_with_outer_sync(capsys):
+    # design D11 as written: the learner CLI always joins a syncer (outer
+    # sync), so the allowance is refused even for one island (F9/F10).
+    for extra in ((), ("--num-learners", "2")):
+        with pytest.raises(SystemExit):
+            rl_learner.parse_args(_learner_argv(
+                ("--rl-allow-unverified-mechanism", "features:clip_higher", *extra)))
+        assert "without outer sync" in capsys.readouterr().err
+    args = rl_learner.parse_args(_learner_argv())
+    rl_learner._check_ports_algorithm_options(
+        argparse_ns(args, rl_allow_unverified_mechanism=["features:clip_higher"]),
+        outer_sync=False)  # a no-outer-sync single island would be admitted
+
+
+def argparse_ns(args, **changes):
+    values = dict(vars(args))
+    values.update(changes)
+    return SimpleNamespace(**values)
 
 
 # -- 5.2 learner check ----------------------------------------------------------------
@@ -176,28 +189,56 @@ def test_launcher_sends_expected_hash_only_on_ports(tmp_path):
 
 
 def test_launcher_ships_spec_file_and_hash(tmp_path):
-    path = _spec_file(tmp_path, json.loads(V2.canonical_json()))
+    path = _spec_file(tmp_path, json.loads(DECLARED.canonical_json()))
     run = _island_run(_launcher_args("ports", ("--rl-algorithm-spec", path)))
-    assert f"--rl-expected-algorithm-sha256 {V2.sha256()}" in run
+    assert f"--rl-expected-algorithm-sha256 {DECLARED.sha256()}" in run
     assert "--rl-algorithm-spec ~/yeto-rl/algorithm_spec.json" in run
-    assert V2.canonical_json() in run
+    assert DECLARED.canonical_json() in run
 
 
 def test_launcher_refusals(tmp_path):
     from yeto.launcher import _prepare_rl_args
 
-    two = _launcher_args("ports", ("--rl-allow-unverified-mechanism", "clip_higher"),
-                         gpu="aws:1xa100@us-east-1,aws:1xa100@us-west-2")
-    with pytest.raises(ValueError, match="single-island"):
-        _prepare_rl_args(two)
+    for gpu in ("aws:1xa100@us-east-1,aws:1xa100@us-west-2", "aws:1xa100@us-east-1"):
+        allowed = _launcher_args("ports", ("--rl-allow-unverified-mechanism",
+                                           "features:clip_higher"), gpu=gpu)
+        with pytest.raises(ValueError, match="without outer sync"):
+            _prepare_rl_args(allowed)
     rejected = _spec_file(tmp_path, {"advantage_estimator": "grpo", "kl_coef": 0.1})
     with pytest.raises(ValueError, match="placement='loss'"):
         _prepare_rl_args(_launcher_args("ports", ("--rl-algorithm-spec", rejected)))
     with pytest.raises(ValueError, match="only apply to --rl-engine ports"):
         _prepare_rl_args(_launcher_args("legacy", ("--rl-algorithm-spec", rejected)))
-    single = _island_run(_launcher_args("ports", ("--rl-allow-unverified-mechanism",
-                                                  "clip_higher")))
-    assert "--rl-allow-unverified-mechanism clip_higher --num-learners 1" in single
+    # F7: undeclared mechanisms and registered launch checks fail before any cloud work
+    undeclared = _spec_file(tmp_path, json.loads(V2.canonical_json()), "v2.json")
+    with pytest.raises(ValueError, match="'clip_higher' not supported"):
+        _prepare_rl_args(_launcher_args("ports", ("--rl-algorithm-spec", undeclared)))
+    from yeto.rl.engine import algorithm as alg
+
+    alg.register_launch_check("t_launcher", lambda s, run: [f"batch {run['rollout_batch_size']}"])
+    try:
+        with pytest.raises(ValueError, match=r"\[t_launcher\] batch 4"):
+            _prepare_rl_args(_launcher_args("ports"))
+    finally:
+        alg.unregister(launch_check="t_launcher")
+
+
+def test_launcher_hash_equals_learner_hash_without_absorption(tmp_path):
+    # F14: same spec source -> same hash; absorption on the island -> refused.
+    path = _spec_file(tmp_path, json.loads(DECLARED.canonical_json()))
+    args = _launcher_args("ports", ("--rl-algorithm-spec", path))
+    from yeto.launcher import _prepare_rl_args
+
+    _prepare_rl_args(args)
+    learner_args = rl_learner.parse_args(_learner_argv(("--rl-algorithm-spec", path)))
+    base = resolve_ports_algorithm(learner_args, rl_engine="ports")
+    launch = mc.translate_run_config(make_config(), base)
+    assert launch.algorithm_sha256 == args.rl_expected_algorithm_sha256
+    _check(tmp_path, args.rl_expected_algorithm_sha256, launch=launch)
+    absorbed = mc.translate_run_config(make_config(), base, extra_argv=("--eps-clip", "0.2"))
+    assert absorbed.algorithm_sha256 != args.rl_expected_algorithm_sha256
+    with pytest.raises(rl_learner.AlgorithmMismatchError):
+        _check(tmp_path, args.rl_expected_algorithm_sha256, launch=absorbed)
 
 
 # -- 5.3 export ------------------------------------------------------------------------
@@ -217,7 +258,7 @@ def test_export_records_algorithm_like_the_event(tmp_path):
                       canonical_layout_hash(specs), ledger_size=0)
     launch = _launch()
     event = selection_event(launch=launch, algorithm=launch.algorithm, miles_commit="x",
-                            unverified_mechanisms=("clip_higher",))
+                            unverified_mechanisms=("features:clip_higher",))
     export_rl_checkpoint(checkpoint, tmp_path / "ports", model=str(model_path),
                          model_revision=MODEL_REVISION, rank=2, lora_targets="all-linear",
                          algorithm_spec=event["rl/algorithm_spec"],
@@ -225,7 +266,7 @@ def test_export_records_algorithm_like_the_event(tmp_path):
     prov = json.loads((tmp_path / "ports" / "yeto_rl_provenance.json").read_text())
     assert prov["algorithm_spec"] == event["rl/algorithm_spec"] == V2.canonical_json()
     assert prov["algorithm_spec_sha256"] == event["rl/algorithm_spec_sha256"] == V2.sha256()
-    assert prov["rl/unverified_mechanisms"] == ["clip_higher"]
+    assert prov["rl/unverified_mechanisms"] == ["features:clip_higher"]
     assert prov["contains_unverified_mechanisms"] is True
     with pytest.raises(ValueError, match="only for rl_engine='ports'"):
         export_rl_checkpoint(checkpoint, tmp_path / "legacy", model=str(model_path),
@@ -254,10 +295,10 @@ def test_export_cli_reads_spec_file(tmp_path, monkeypatch):
 def test_selection_event_records_absorbed_flags_and_allowance():
     launch = _launch(AlgorithmSpec(), ("--eps-clip-high", "0.28", "--use-rollout-logprobs"))
     event = selection_event(launch=launch, algorithm=launch.algorithm, miles_commit="x",
-                            unverified_mechanisms=("clip_higher",))
+                            unverified_mechanisms=("features:clip_higher",))
     assert event["rl/algorithm_absorbed_flags"] == {"--eps-clip-high": "0.28",
                                                     "--use-rollout-logprobs": True}
-    assert event["rl/unverified_mechanisms"] == ["clip_higher"]
+    assert event["rl/unverified_mechanisms"] == ["features:clip_higher"]
     assert event["rl/algorithm_spec_sha256"] == launch.algorithm.sha256()
     plain = selection_event(launch=_launch(AlgorithmSpec()), algorithm=AlgorithmSpec(),
                             miles_commit="x")
@@ -299,3 +340,24 @@ def test_island_check_refuses_before_outer_sync(tmp_path):
         assert event["event"] == "rl_algorithm_island_rejected"
     finally:
         alg.unregister(island_check="t_rev")
+
+
+def test_expected_hash_on_miles_args(tmp_path):
+    miles_args, _ = _check(tmp_path, V2.sha256().upper())
+    assert miles_args.yeto_rl_expected_algorithm_sha256 == V2.sha256()
+    miles_args, _ = _check(tmp_path, None)
+    assert miles_args.yeto_rl_expected_algorithm_sha256 is None
+
+
+def test_fixed_partition_passes_selection_on_learner_and_launcher(capsys):
+    import inspect
+
+    from yeto import launcher
+
+    args = rl_learner.parse_args(_learner_argv(("--rl-placement", "fixed-partition",
+                                                "--rollout-num-gpus", "1")))
+    assert args.rl_placement == "fixed-partition"
+    with pytest.raises(SystemExit):  # without --rl-placement it is still refused
+        rl_learner.parse_args(_learner_argv(("--rollout-num-gpus", "1")))
+    assert 'placement=getattr(args, "rl_placement", "colocated")' in inspect.getsource(
+        launcher._prepare_rl_args)

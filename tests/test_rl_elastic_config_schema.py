@@ -160,3 +160,53 @@ def test_spec_mode_name_serial_colocated_is_an_alias():
     with pytest.raises(ManifestError):
         m["profile"]["execution_mode"] = "serial-overlap"
         validate_manifest(m)
+
+
+# -- alignment A1/A4: algorithm hash in the execution contract ----------------
+
+
+def test_trainer_edges_are_certified_per_algorithm_hash():
+    from yeto.rl.elastic_benchmark import capabilities as caps
+    from yeto.rl.elastic_benchmark.manifest import ManifestError, example_manifest, validate_manifest
+    from yeto.rl.elastic_benchmark.plan import build_plan
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    grpo = AlgorithmSpec().sha256()
+    other = AlgorithmSpec(kl_coef=0.1).sha256()
+    manifest = example_manifest()
+    manifest["identity"]["fingerprints"]["runtime"] = "sha256:runtime"
+    bad = __import__("copy").deepcopy(manifest)
+    bad["profile"]["algorithm_spec_sha256"] = "GRPO"
+    with pytest.raises(ManifestError, match="algorithm_spec_sha256"):
+        validate_manifest(bad)
+
+    def attested(hashes):
+        edges = [
+            {"source": "P62", "target": "P44", "kind": "role-transfer", "algorithm_spec_sha256": hashes},
+            {"source": "P44", "target": "P62", "kind": "role-transfer", "algorithm_spec_sha256": hashes},
+        ]
+        return caps.attestation_from_dict(
+            {
+                "runtime_fingerprint": "sha256:runtime",
+                "execution_modes": ["partitioned-serial"],
+                "partitioned_driver": True,
+                "certified_edges": edges,
+            }
+        )
+
+    def rebuild_status(profile_hash, attestation):
+        m = __import__("copy").deepcopy(manifest)
+        if profile_hash is not None:
+            m["profile"]["algorithm_spec_sha256"] = profile_hash
+        plan = build_plan(m, attestation, study_hash="h")
+        return {i.key.arm: (i.status, i.reason) for i in plan.items}["rebuild"]
+
+    assert rebuild_status(grpo, attested([grpo])) == ("supported", None)
+    status, reason = rebuild_status(other, attested([grpo]))
+    assert status == "blocked_dependency" and "not certified for algorithm" in reason
+    status, reason = rebuild_status(None, attested([grpo]))
+    assert status == "blocked_dependency" and "algorithm_spec_sha256" in reason
+    status, _ = rebuild_status(grpo, attested([]))
+    assert status == "blocked_dependency"
+    with pytest.raises(ManifestError):
+        attested(["nothex"])

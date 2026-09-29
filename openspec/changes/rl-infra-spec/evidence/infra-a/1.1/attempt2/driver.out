@@ -1,0 +1,84 @@
+sandbox sb-wDDWlVWRBMLeiA3WYjMr7d ready after 1 s
+GPU 0: NVIDIA L40S (UUID: GPU-85f566fc-5220-37e2-37ce-dbf1f7b59be2)
+{"certified": ["ports-colocated-serial", "ports-partitioned-serial"], "commits": {"miles": "0394715083c91182b5eb0c526eeee4196ac694b9", "sglang": "9f29303bef1eea38eb613e5f454a52db1326422d"}, "image": "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:5da40a07dabb3ea3fcf921efb4b2a21ca1178220bde40dc178c79b734fdaa540"}
+RC_BASE=0
+RC_STANDBY=2
+RC_ADD=2
+===MANIFEST
+{
+  "commit_source": {
+    "miles": "git",
+    "sglang": "git"
+  },
+  "commits": {
+    "miles": "0394715083c91182b5eb0c526eeee4196ac694b9",
+    "sglang": "9f29303bef1eea38eb613e5f454a52db1326422d"
+  },
+  "image": "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:5da40a07dabb3ea3fcf921efb4b2a21ca1178220bde40dc178c79b734fdaa540",
+  "image_build_manifest": {
+    "base": {
+      "index_digest": "sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d",
+      "manifest_digest": "sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c",
+      "miles_commit": "9e4260de047a704208535c0e90c531929879ab40",
+      "platform": "linux/amd64",
+      "repository": "docker.io/radixark/miles",
+      "sglang_commit": "e5bba1f9c433da5352e521a8bb826bab960e7836"
+    },
+    "builder": "scripts/build_miles_ports_image.sh (crane append); docker/miles-ports/Dockerfile equivalent",
+    "image": "ghcr.io/michaellchung/yeto-miles-ports",
+    "miles": {
+      "commit": "0394715083c91182b5eb0c526eeee4196ac694b9",
+      "install": "pip install -e /root/miles --no-deps (base's editable install, same path)",
+      "path": "/root/miles",
+      "repository": "https://github.com/michaellchung/miles",
+      "upstream_commit": "9e4260de047a704208535c0e90c531929879ab40"
+    },
+    "pure_python_overlay": true,
+    "schema": 1,
+    "sglang": {
+      "commit": "9f29303bef1eea38eb613e5f454a52db1326422d",
+      "install": "pip install -e /sgl-workspace/sglang/python[all] --no-deps (base's editable install, same path)",
+      "path": "/sgl-workspace/sglang",
+      "repository": "https://github.com/michaellchung/sglang",
+      "upstream_commit": "571212b636baca45e10fa3b4da11a289123f3235",
+      "version": "0.5.21.dev67+g9f29303"
+    },
+    "tag": "0394715-9f29303"
+  },
+  "import_paths": {
+    "miles": "/root/miles",
+    "sglang": "/sgl-workspace/sglang/python"
+  },
+  "interfaces": {
+    "fork_m1_placement_map": false,
+    "fork_m2_start_stop_cells": false,
+    "fork_m3_router_cordon": false,
+    "fork_m4_member_publish": false,
+    "fork_m6_rebuild_trainer": false,
+    "run_plugin": true
+  },
+  "python": "3.12.3",
+  "schema": "yeto-rl-runtime-manifest-v1",
+  "versions": {
+    "cuda": "13.0",
+    "megatron.core": "0.19.0+a84b10547",
+    "nccl": "2.29.7",
+    "peft": "0.18.1",
+    "ray": "2.58.0",
+    "sglang": "0.5.21.dev67+g9f29303",
+    "torch": "2.13.0+cu130",
+    "torch_memory_saver": "0.0.9.post1"
+  }
+}
+ 
+STDERR: /opt/sglang/lib/python3.12/site-packages/transformer_engine/__init__.py:103: RuntimeWarning: Detected a Jax installation but could not find the shared object file for the Transformer Engine Jax extension library. If this is not intentional, please reinstall Transformer Engine with `pip install transformer_engine[jax]` or build from source with `NVTE_FRAMEWORK=jax`.
+  warnings.warn(
+Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+WARNING:megatron.bridge.models.muse_glimmer:Muse Glimmer Hugging Face classes are unavailable with transformers 5.12.1. Upgrade transformers to a version that supports Muse Glimmer.
+WARNING:miles_plugins.models.qwen3_vl:megatron-bridge Qwen3VLModel lacks native CP-local vision-embed selection; CP runs with vision tokens will mis-place vision embeddings. Apply the matching Megatron-Bridge patch (radixark/Megatron-Bridge PR #9).
+REFUSED: capability 'fixed-partition-standby' lacks ['fork_m1_placement_map']
+REFUSED: capability 'RolloutPool.add_engines' lacks ['fork_m2_start_stop_cells', 'fork_m3_router_cordon']
+ 
+rc 0
+terminated sb-wDDWlVWRBMLeiA3WYjMr7d total 78 s
