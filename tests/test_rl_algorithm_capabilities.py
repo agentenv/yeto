@@ -345,6 +345,7 @@ EXPECTED_MILES_DECLARED = {
     "loss_aggregations:token",
     "features:no_grpo_std_normalization",
     "loss_aggregations:constant",
+    "kl_placements:loss",
 }
 
 

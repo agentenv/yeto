@@ -56,6 +56,7 @@ MILES_DECLARED: dict[str, str] = {
     "loss_aggregations:token": f"{_E1B}/g1_report_v2.json token (pg_loss 0.035/0.0068/0.0026 vs baseline ~1e-8)",
     "features:no_grpo_std_normalization": f"{_E1B}/g1_report_v2.json drgrpo (pg_loss 0.0079/0.0072/0.019 vs baseline ~1e-8)",
     "loss_aggregations:constant": f"{_E1B}/g1_report_v2.json drgrpo (constant-denominator aggregation)",
+    "kl_placements:loss": f"{_E1B}/g1_report_v2.json kl_k3 (kl_loss 0 / 0.00079 / 0.00082)",
 }
 
 
