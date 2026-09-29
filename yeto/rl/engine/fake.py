@@ -56,6 +56,11 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
+        # rl-algo-mismatch-correction 6.1: the fake declares every correction
+        # mechanism (OPSM per logprob source) for CPU tests.
+        corrections={"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
+                     "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
+        features={"mismatch_metrics", "rollout_logprobs_as_old"},
         # Mechanism dimensions: the R0 defaults (EngineCapabilities); execution
         # as the Miles adapter declares it (rl-algorithm-capabilities 3.4).
         execution=ExecutionCapabilities(

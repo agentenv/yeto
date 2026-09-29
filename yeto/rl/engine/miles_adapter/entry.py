@@ -61,6 +61,12 @@ def miles_capabilities(
         advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
+        # rl-algo-mismatch-correction 7.3: declared only after the single-GPU
+        # smoke (G1) passed -- evidence/2026-09-29-g1/runs/{tis,opsm-trainer}.
+        # opsm_rollout, mismatch_observe, icepop and mis* stay undeclared
+        # (observe/icepop/mis additionally need 1a-shared.patch so that a
+        # named custom function does not require the generic 'custom').
+        corrections={"none", "tis", "opsm", "opsm_trainer"},
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),

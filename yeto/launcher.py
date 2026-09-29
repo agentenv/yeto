@@ -848,6 +848,21 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
     ):
         raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
+    steps = getattr(args, "rl_optimizer_steps", 1)
+    if steps is None:
+        steps = 1
+    if type(steps) is not int or steps < 1:
+        raise ValueError(f"--rl-optimizer-steps must be a positive int (got {steps!r})")
+    if steps != 1:
+        if rl_engine != "ports":
+            raise ValueError("--rl-optimizer-steps > 1 only applies to --rl-engine ports")
+        samples = int(args.rollout_batch_size) * int(args.n_samples_per_prompt)
+        if samples % steps:
+            # run_config: rollout_batch_size * n_samples == global_batch * optimizer_steps
+            raise ValueError(
+                f"--rl-optimizer-steps {steps} must divide --rollout-batch-size * "
+                f"--n-samples-per-prompt ({samples}) into equal optimizer batches"
+            )
     if rl_engine != "ports" and getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-single-island-no-sync only applies to --rl-engine ports")
     try:
@@ -1838,7 +1853,7 @@ def make_miles_island_task(
         f" --samples-per-group {args.n_samples_per_prompt}"
         f" --over-sampling-batch-size {args.over_sampling_batch_size}"
         f" --rl-distributed-timeout-minutes {args.rl_distributed_timeout_minutes}"
-        " --optimizer-steps 1"
+        f" --optimizer-steps {int(getattr(args, 'rl_optimizer_steps', 1) or 1)}"
         f" --rollout-max-response-len {args.rollout_max_response_len}"
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
@@ -3296,6 +3311,10 @@ class FleetController:
             self.syncer = None
             self.syncer_probe = syncer_probe
             self.syncer_restart = syncer_restart
+        elif syncer is None:
+            # --rl-single-island-no-sync: no syncer of any kind to supervise.
+            self.syncer = None
+            self.syncer_probe = self.syncer_restart = None
         else:
             syncer_name, syncer_task, syncer_job = syncer
             self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
@@ -3323,7 +3342,7 @@ class FleetController:
         while True:
             if self.syncer is not None:
                 self._poll(self.syncer, is_syncer=True)
-            else:
+            elif self.syncer_probe is not None:
                 self._poll_local_syncer()
             for rec in self.learners.values():
                 self._poll(rec, is_syncer=False)
@@ -3900,6 +3919,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         os.makedirs(local_dest, exist_ok=True)
         if rl_mode and head_mode:
             print(f"[launcher] committed RL checkpoint retained at {local_dest}")
+        elif source in modal_cfgs and no_sync:
+            print(
+                f"[launcher] --rl-single-island-no-sync island ran on Modal ({source}); "
+                "its ~/yeto-output is not fetchable over ssh and there is no syncer "
+                "checkpoint -- use the streamed island log / event tape as the evidence",
+                file=sys.stderr,
+            )
+            return 2
         elif source in modal_cfgs:
             print(
                 f"[launcher] every successful learner ran on Modal ({source}); its "
@@ -3989,3 +4016,59 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"head — tear it down with: yeto down {prefix}",
                     flush=True,
                 )
+
+
+def dry_run_plan(args) -> dict:
+    """``yeto launch --dry-run``: what a launch would request, creating nothing.
+
+    Runs on prepared args (``prepare_launch_args`` already validated the
+    request, including the ports algorithm/capability checks) and builds the
+    island tasks in memory only to read the learner command; no sky/Modal
+    call is made.
+    """
+
+    no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
+    rl = getattr(args, "training_mode", "sft") == "rl"
+    if no_sync and not rl:
+        raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
+    head = getattr(args, "controller", "local") == "head"
+    if no_sync and head:
+        raise ValueError("--rl-single-island-no-sync has no syncer; use --controller local")
+    specs = parse_gpu_spec(args.gpu)
+    external = max(0, getattr(args, "external_learners", 0) or 0)
+    islands = []
+    for learner_id, spec in enumerate(specs):
+        entry = {
+            "learner_id": learner_id,
+            "cloud": spec.cloud,
+            "region": spec.region,
+            "gpu": spec.gpu,
+            "num_nodes": spec.num_nodes,
+            "gpus_per_node": spec.gpus_per_node,
+            "total_gpus": spec.total_gpus,
+        }
+        if rl:
+            task = make_miles_island_task(
+                args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
+            )
+            entry["learner_command"] = next(
+                (line.strip() for line in task.run.splitlines() if "yeto.rl.learner" in line),
+                None,
+            )
+        islands.append(entry)
+    return {
+        "dry_run": True,
+        "training_mode": getattr(args, "training_mode", "sft"),
+        "rl_engine": getattr(args, "rl_engine", None) if rl else None,
+        "controller": "head" if head else "local",
+        "islands": len(specs) + external,
+        "external_learners": external,
+        "total_gpus": sum(s.total_gpus for s in specs),
+        "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
+        "outer_sync": not no_sync,
+        "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
+        "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),
+        "unverified_mechanisms": list(getattr(args, "rl_allow_unverified_mechanism", None) or ()),
+        "clusters": [] if not islands else learner_cluster_names(args.cluster_prefix, specs),
+        "island_requests": islands,
+    }
