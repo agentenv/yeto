@@ -113,7 +113,7 @@ E1先固定trainer，例如`T4R2S2 -> T4R4S0`（S为池内备用卡），验证r
 
 `generate_rollout`/reward/group 校验与现有 bridge 决定 `ready_for_train`；调度只在就绪任务中分配资源，不能用队列阈值提前截断 GRPO 组或改样本利用。配置 epoch 与权重版本不同：一次纯资源切换增加 epoch，但不制造新策略版本或 optimizer step。
 
-轨迹标识至少 `(run_id, learner_id, rollout_id, group_id, sample_id, attempt_id)`；每个 segment/token 请求绑定 policy token/hash 和 worker/config epoch。数据提交按 group_id 和既有 retry 语义去重；batch 消费清单持久记录 `prepared -> optimizer_applied -> outer_recorded`，与完整 checkpoint 的切点关联。内存里“曾经提交”不能作为 crash 后去重凭据。
+轨迹标识至少 `(run_id, learner_id, rollout_id, group_id, sample_id, attempt_id)`；每个 segment/token 请求绑定 policy token/hash 和 worker/config epoch。数据提交按 group_id 和既有 retry 语义去重；batch 消费清单持久记录 `prepared -> optimizer_applied -> outer_recorded`，与完整 checkpoint 的切点关联。内存里“曾经提交”不能作为 crash 后去重凭据。算法层按描述有意丢弃的样本/组（动态过滤、超采样多余组、overlong 过滤）记为显式终态 `filtered`，与“丢失”区分。
 
 ### D4. 安全点与显式协议
 

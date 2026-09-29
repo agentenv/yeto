@@ -116,6 +116,8 @@ post_process(args, samples)
 
 overlong 过滤与软惩罚可以同时启用，二者不冲突。
 
+与 `rl-infra-spec` 3.6 账本的对齐（alignment.md A2）：`record_trained_groups` 是两边共用的唯一 hook。本 change 先设置 `remove_sample` 并写被过滤样本数，infra 账本在同一 hook 之后把这些样本记为终态 `filtered`；两边都不得另开 `--rollout-sample-filter-path`。
+
 ### D8. 超采样与外层等权平均
 
 `sampling.over_sampling_batch_size` → `--over-sampling-batch-size`，要求同时启用 bounded 动态过滤。各岛每轮最终训练样本数可能不同（过滤掉的组数不同、替换次数上限不同）。strict-avg 与 decoupled 的外层对 delta 做等权平均，不按样本数加权 [推断，research §10 问题 4 未核实]。影响：样本少的岛在外层权重偏大。本 change 的处理：

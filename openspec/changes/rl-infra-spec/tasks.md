@@ -39,7 +39,7 @@
 - [ ] 3.4a [Y；3.4同步] 更新 `yeto/rl/engine/ports.py` 预留注释：`Placement.reconfigure` 由 E3 提前到 E1，新增 `RolloutPool.drain(members, deadline)` 与成员限定的 `Publisher.publish(policy, members)`，并加入 `RESERVED_PORT_VERBS`；验收：能力声明只在实现后列出这些动词。
 - [ ] 3.5 [M+Y；依赖3.4] 新增 `Publisher.publish(policy, members)`；新engine隔离加载、payload/版本ACK后原子提交epoch和路由；验收：旧generation ACK、错误payload、迟到请求都不能污染新配置。
 - [ ] 3.5a [M-fork；3.5前置] fork-M4：`start_update_weights` 接受显式成员集合与 epoch，`UpdatableEngines` 只含这些成员，`end_update_weights` 只标记这些成员 ready、不更新非成员 weight version；缺省为全体成员。ACK 现状：upstream 仅有 `end_update_weights` 的 cell hash 快照比对与 `update_weight_version` 元数据，**没有 payload 级 ACK**；“payload/版本 ACK 后才进 router”须由 yeto `Publisher` 读回校验补齐（本地分支完成度见其提交说明）。验收：CPU 单测证明非成员状态不变；3.5 GPU 实验中新 engine 仅在其 payload ACK 后进 router。
-- [ ] 3.6 [Y；依赖3.5] 接入group/batch/update账本和既有completed-groups/retry进度；验收：重试/部分组/publish失败无重复消费、无静默丢样本。
+- [ ] 3.6 [Y；依赖3.5] 接入group/batch/update账本和既有completed-groups/retry进度；验收：重试/部分组/publish失败无重复消费、无静默丢样本。算法层有意丢弃的样本/组（bounded 动态过滤替换、超采样多余组、overlong 过滤的 `remove_sample`）在账本中记为显式终态 `filtered`（附原因与机制名），不计为丢失也不计为已消费；账本记录接在 `miles_adapter/rollout_meta_hook.py::record_trained_groups` 之后，与 `rl-algo-grpo-knobs` 6.3 的过滤标记共用该 hook（alignment.md A2）。
 - [ ] 3.7 [M+Y；依赖3.2-3.6] 增加绝对deadline/watchdog和release前取消、release后重建旧rollout、commit后恢复；验收：启动/通信/发布失败有界处理，learner/bridge/trainer身份与状态正确。
 - [ ] 3.8 [X；依赖3.7,2.4] 验收手动双向rollout切换与两小岛strict暂停兼容；验收X6：样本/step/policy/roster不变，quorum超时/PULL重发正确，finalization拒绝切换。报告明确仅完成rollout能力。
 
