@@ -314,6 +314,31 @@ def register_mechanism(dimension: str, name: str, detect: Callable[["AlgorithmSp
     return definition
 
 
+_PIPELINE_PLUGIN_MODULES: set[str] = set()
+
+
+def register_pipeline_plugin_module(module: str) -> None:
+    """Declare ``module`` an extension-owned plugin module.
+
+    A ``spec.plugins`` entry whose callable lives in such a module (or in a
+    module listed in ``yeto.rl.algos.EXTENSION_MODULES``) still enters the
+    hash and is re-hashed at startup, but does not require the
+    ``features:plugins`` mechanism.
+    """
+
+    if not module.startswith("yeto."):
+        raise ValueError(f"pipeline plugin module {module!r} must be in the yeto namespace")
+    _PIPELINE_PLUGIN_MODULES.add(module)
+
+
+def _owned_plugin(path: str) -> bool:
+    load_extensions()
+    from yeto.rl.algos import EXTENSION_MODULES
+
+    module = path.rpartition(".")[0]
+    return module in _PIPELINE_PLUGIN_MODULES or module in EXTENSION_MODULES
+
+
 def register_rejection(name: str, check: Callable[["AlgorithmSpec"], str | None]) -> None:
     """``check(spec)`` returns a problem (with the viable alternative) or None."""
 
@@ -1140,7 +1165,11 @@ def _builtin_mechanisms() -> None:
         "mismatch_metrics": lambda s: s.correction.mismatch_metrics,
         "over_sampling": lambda s: s.sampling.over_sampling_batch_size is not None,
         "overlong_filter": lambda s: s.sampling.overlong_filter,
-        "plugins": lambda s: bool(s.plugins),
+        # Only plugins that no registered extension owns: the PluginRefs a
+        # registered pipeline (reward shapers / advantage transforms) writes
+        # into spec.plugins are identity records of mechanisms that are
+        # capability-checked under their own names.
+        "plugins": lambda s: any(not _owned_plugin(p.path) for p in s.plugins),
     }
     for name, detect in features.items():
         register_mechanism("features", name, detect)

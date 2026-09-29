@@ -439,3 +439,26 @@ def test_launcher_run_skips_syncer_in_no_sync_mode():
     source = inspect.getsource(launcher.run)
     assert 'syncer_cluster = None if head_mode or no_sync else f"{prefix}-syncer"' in source
     assert "if no_sync:\n            syncer_task = syncer_job = None" in source
+
+
+def test_no_sync_run_export_is_marked_from_its_event_tape(tmp_path, monkeypatch):
+    # The event a --rl-single-island-no-sync island writes, carried into export.
+    from yeto.rl import export as rl_export
+
+    launch = _launch()
+    event = selection_event(launch=launch, algorithm=launch.algorithm, miles_commit="x",
+                            unverified_mechanisms=("features:clip_higher",), outer_sync=False)
+    tape = tmp_path / "rl-island-0.jsonl"
+    tape.write_text(json.dumps({"island_id": 0, **event}) + "\n"
+                    + json.dumps({"event": "rl_local_round"}) + "\n")
+    seen = {}
+    monkeypatch.setattr(rl_export, "export_rl_checkpoint",
+                        lambda *a, **kw: seen.update(kw) or SimpleNamespace(policy_version=1))
+    rl_export.main(["--checkpoint", "c", "--model", "m", "--model-revision", "a" * 40,
+                    "--lora-r", "2", "--output-dir", "o", "--rl-event-tape", str(tape)])
+    assert seen["algorithm_spec"] == event["rl/algorithm_spec"]
+    assert list(seen["unverified_mechanisms"]) == ["features:clip_higher"]
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text(json.dumps({**event, "rl/algorithm_spec_sha256": "0" * 64}) + "\n")
+    with pytest.raises(ValueError):
+        rl_export.algorithm_from_event_tape(bad)
