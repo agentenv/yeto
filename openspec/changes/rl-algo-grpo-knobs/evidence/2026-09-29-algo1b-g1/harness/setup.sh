@@ -1,4 +1,4 @@
-set -e
+set -eo pipefail  # review: a failing cargo build was masked by the pipe (attempt 1/2 ran with plain set -e)
 export PATH=$HOME/.cargo/bin:$PATH
 cd /work/yeto && cargo build --release --locked --quiet 2>&1 | grep -v warning | tail -3; ls target/release | head
 python - <<'PY'
