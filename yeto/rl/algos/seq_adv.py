@@ -406,6 +406,19 @@ def _summary(name, per_group_rewards, advantages) -> dict[str, Any]:
     }
 
 
+ROUND_METADATA_ATTR = "yeto_rl_round_metadata"  # rollout_meta_hook.ROUND_METADATA_ATTR (INFRA R2)
+
+
+def _report_round(args, name, per_group_rewards, advantages) -> None:
+    """Event + per-round counter read by the rollout metadata hook (-> batch_summary)."""
+
+    summary = _summary(name, per_group_rewards, advantages)
+    metadata = dict(getattr(args, ROUND_METADATA_ATTR, None) or {})
+    metadata["nonzero_advantages"] = int(summary["nonzero_advantages"])
+    setattr(args, ROUND_METADATA_ATTR, metadata)
+    rp.emit_event(args, summary)
+
+
 def _group_transform(name, fn, args, samples, rewards, groups) -> list[float]:
     _require_binary(name, samples, rewards)
     per_group, per_group_rewards = [], []
@@ -416,7 +429,7 @@ def _group_transform(name, fn, args, samples, rewards, groups) -> list[float]:
         per_group_rewards.append(shared)
     out = _broadcast(len(samples), per_group)
     _check_finite(name, out)
-    rp.emit_event(args, _summary(name, per_group_rewards, out))
+    _report_round(args, name, per_group_rewards, out)
     return out
 
 
@@ -502,7 +515,7 @@ def gdpo(args, samples, rewards, groups, params) -> list[float]:
         start += len(segments)
     out = _broadcast(len(samples), values)
     _check_finite("gdpo", out)
-    rp.emit_event(args, _summary("gdpo", per_group_rewards, out))
+    _report_round(args, "gdpo", per_group_rewards, out)
     return out
 
 

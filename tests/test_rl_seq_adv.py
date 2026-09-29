@@ -475,3 +475,71 @@ def test_fake_driver_rpp_reward_kl_constant_round_expects_gradient(tmp_path, est
                         constant_reward_rounds={1})
     with pytest.raises(StrictRlInvariantError, match="grad_norm 0"):
         driver.run()
+
+
+# -- 5.5 GDPO through the fake driver (INFRA R2: RolloutBatchHandle.nonzero_advantages) --------
+
+
+def _gdpo_driver(tmp_path, nonzero, **engine_kwargs):
+    import dataclasses
+
+    caps = fake_capabilities(features={"gdpo"},
+                             reward_postprocessors={"custom_reward_postprocess"})
+    engine, driver = _driver(tmp_path, transform_spec("gdpo", gdpo=GDPO), caps, **engine_kwargs)
+    generate = engine.rollout.generate
+
+    def with_count(*args, **kwargs):
+        batch = generate(*args, **kwargs)
+        return dataclasses.replace(batch, nonzero_advantages=nonzero(batch.rollout_id))
+
+    engine.rollout.generate = with_count
+    return driver
+
+
+def test_fake_driver_gdpo_no_nonzero_advantage_zero_grad_passes(tmp_path):
+    driver = _gdpo_driver(tmp_path, lambda r: 0 if r == 1 else 5, zero_grad_rounds={1})
+    assert driver.run().policy_version == 2
+
+
+@pytest.mark.parametrize("count", [3, None])  # reported non-zero, or unreadable
+def test_fake_driver_gdpo_expected_zero_grad_fails(tmp_path, count):
+    # scalar reward constant (R0 rule: no gradient) but the reward vector is not
+    driver = _gdpo_driver(tmp_path, lambda r: count, zero_grad_rounds={1},
+                          constant_reward_rounds={1})
+    with pytest.raises(StrictRlInvariantError, match="grad_norm 0"):
+        driver.run()
+
+
+def test_transforms_report_round_counter_for_the_metadata_hook():
+    from yeto.rl.engine.miles_adapter.rollout_meta_hook import ROUND_METADATA_ATTR, _round_metadata
+
+    assert sa.ROUND_METADATA_ATTR == ROUND_METADATA_ATTR
+    spec = transform_spec("maxrl")
+    from yeto.rl.algos import grpo_knobs as gk
+
+    class S(SimpleNamespace):
+        def get_reward_value(self, args):
+            return self.reward
+
+    args = SimpleNamespace(advantage_estimator="grpo", rewards_normalization=True,
+                           grpo_std_normalization=True, n_samples_per_prompt=4,
+                           rollout_batch_size=2, multi_lora=False)
+    for key, value in spec.to_legacy_runtime_attrs().items():
+        setattr(args, key, value)
+    samples = [S(reward=r, group_index=g, index=i, rollout_id=None, metadata={}, response_length=4)
+               for i, (g, r) in enumerate([(0, 1.0), (0, 0.0), (1, 0.0), (1, 0.0)])]
+    rp.post_process(args, samples)
+    assert _round_metadata(args) == {"nonzero_advantages": 2}
+
+
+def test_trainer_reads_gspo_clipfrac_through_seq_adv():
+    """2.2: the adapter (INFRA R1) fills masked_fraction from per-step pg_clipfrac."""
+
+    from yeto.rl.engine.miles_adapter import trainer
+
+    assert "gspo" in trainer.CLIPFRAC_MASKED_ESTIMATORS
+    assert trainer.clipfrac_masked_fraction([{"pg_clipfrac": 1.0}, {"pg_clipfrac": 1.0}]) == 1.0
+    assert trainer.clipfrac_masked_fraction([{"pg_clipfrac": 1.0}, {"pg_clipfrac": 0.0}]) == 0.5
+    assert trainer.clipfrac_masked_fraction([{"pg_clipfrac": 1.0}, {}]) is None
+    tokens = [{"pg_clipfrac": 1.0, "loss_tokens": 30}, {"pg_clipfrac": 0.0, "loss_tokens": 10}]
+    assert trainer.clipfrac_masked_fraction(tokens) == pytest.approx(0.75)
