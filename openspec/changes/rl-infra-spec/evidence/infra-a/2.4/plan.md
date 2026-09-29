@@ -25,3 +25,7 @@
 - 每次运行预计 20 分钟：6 次 × 4 GPU × 0.33 h × $3.95 ≈ $32；硬超时每次 60 分钟，上限 24 GPU·h ≈ $95。
 - 回收：同 2.2/2.3 的 arm.sh（`timeout 3600`、独立 watchdog 3900 s、结束后用 `modal app list --json` 核实），串行执行，本机用户线程数 < 3200 才启动。
 - 原始 trace：每次运行的 launch.log（已脱敏）、echo 磁带、`modal app list` 记录全部入库。
+
+## 追加（事后，配置、seed、判据均未改）：恢复扫描
+- 第一次运行（T2R2 s17）失败的原因是运行时能力缺失（DistOpt 分片主参数、trainer 按单输出校验），并非实验结果本身。两处修复（66afb1e、8f2c801）已由 DistOpt 冒烟验证（`distopt-smoke/`）。按主 agent 决定 (a)，用修复后的同一 SHA 重跑全部 6 次运行，第一次运行的证据保留在 `t2r2-s17-attempt1/`。
+- 已合入 launcher 修复（algo-cap）：island 最终失败时 launcher 退出码为 4，**判为失败**；每次运行仍保留独立 watchdog 与 `stop_arm.sh` 兜底。
