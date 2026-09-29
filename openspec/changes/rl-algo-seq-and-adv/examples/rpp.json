@@ -1,0 +1,11 @@
+{
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "advantage": {
+    "estimator": "reinforce_plus_plus",
+    "whiten": true
+  },
+  "kl": {
+    "placement": "reward",
+    "coef": 0.01
+  }
+}

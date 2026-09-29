@@ -1,0 +1,10 @@
+{
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "advantage": {
+    "estimator": "gspo"
+  },
+  "loss": {
+    "eps_clip": 0.0003,
+    "eps_clip_high": 0.0004
+  }
+}

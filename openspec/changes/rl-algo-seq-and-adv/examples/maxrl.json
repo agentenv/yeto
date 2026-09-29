@@ -1,0 +1,18 @@
+{
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "advantage": {
+    "estimator": "grpo",
+    "transform": "maxrl",
+    "reward_binary": true,
+    "reward_postprocess": {
+      "path": "yeto.rl.algos.reward_pipeline.post_process",
+      "sha256": "d0fa606b57ea84e1441c8077aa731a0c11e89da8bd2106d41c8501a1dfa337cb"
+    }
+  },
+  "plugins": [
+    {
+      "path": "yeto.rl.algos.seq_adv.registered_transforms",
+      "sha256": "ca17085fbfa55d200a04efa425f7fedff193bc7336c4a7b8161e4d4da54f9950"
+    }
+  ]
+}

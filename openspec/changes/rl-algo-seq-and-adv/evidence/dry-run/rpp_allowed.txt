@@ -1,0 +1,73 @@
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/rpp.json --rl-allow-unverified-mechanism reinforce_plus_plus --rl-allow-unverified-mechanism whiten_advantages
+{
+  "absorbed_flags": {},
+  "algorithm_spec": {
+    "advantage": {
+      "estimator": "reinforce_plus_plus",
+      "reward_binary": false,
+      "reward_postprocess": null,
+      "rewards_normalization": true,
+      "std_normalization": true,
+      "whiten": true
+    },
+    "correction": {
+      "function": null,
+      "method": "none",
+      "mismatch_metrics": false,
+      "opsm_delta": null,
+      "tis_clip": null,
+      "tis_clip_low": null,
+      "use_rollout_logprobs": false
+    },
+    "entropy_coef": 0.0,
+    "execution": {
+      "group_required": true,
+      "max_policy_staleness": 0,
+      "needs_critic": false,
+      "needs_rollout_logprobs": false
+    },
+    "kl": {
+      "coef": 0.01,
+      "estimator": null,
+      "placement": "reward",
+      "unbiased": false
+    },
+    "loss": {
+      "aggregation": "default",
+      "custom_loss": null,
+      "eps_clip": null,
+      "eps_clip_c": null,
+      "eps_clip_high": null,
+      "reducer": null,
+      "variant": "policy_loss"
+    },
+    "plugins": [],
+    "sampling": {
+      "filter": null,
+      "max_replacements": null,
+      "over_sampling_batch_size": null,
+      "overlong_filter": false
+    },
+    "schema": "yeto-rl-algorithm-spec-v2"
+  },
+  "algorithm_spec_sha256": "550cbe39657121116974f43f9c39adc8f7b6b05b8366e2bd56d690e88672922d",
+  "miles_argv": [
+    "--advantage-estimator",
+    "reinforce_plus_plus",
+    "--kl-coef",
+    "0.01",
+    "--normalize-advantages"
+  ],
+  "remaining_extra_argv": [],
+  "required_mechanisms": [
+    "advantage_estimators:reinforce_plus_plus",
+    "corrections:none",
+    "features:whiten_advantages",
+    "kl_placements:reward",
+    "loss_aggregations:default",
+    "losses:policy_loss"
+  ],
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "verdict": "accepted"
+}
+exit=0
