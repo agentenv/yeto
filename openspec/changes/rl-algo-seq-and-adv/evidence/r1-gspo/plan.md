@@ -22,3 +22,13 @@
   ignores HUP/INT/TERM, heartbeat log) stops app yeto-algo2a-r1-gspo at launch+2700 s; after the
   run `yeto down` + `modal app stop` + app list proof.
 - Cost ~ 10 min 1x H100 ~ $0.9; change total so far ~ $14, cap $20.
+
+## Rerun (the one approved rerun; committed before launch)
+- First run: official result not passed (checker defect: rounds delimited by Miles "step 0", but
+  Miles step ids are cumulative). Evidence moved to first/.
+- Fixed checker (committed with this section): Miles per-step `train/pg_clipfrac` values in log
+  order, step ids asserted to be 0..n-1; rounds = consecutive groups of `--rl-optimizer-steps`
+  (2) steps, matched to `rl_round_trained` sorted by rollout_id. All other criteria unchanged
+  (exit 0/2 -> tape decides, 3/4/5/other FAIL; 3 rounds + finalized; per round clip_fraction and
+  masked_fraction non-null and equal to the round's step mean within 1e-6).
+- Same SHA 501d71d, same run.sh/config. No further runs after this one. Cost ~ $0.9.

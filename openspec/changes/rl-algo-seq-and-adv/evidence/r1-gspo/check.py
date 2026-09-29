@@ -1,22 +1,18 @@
-"""Pre-declared R1 criteria (plan.md). usage: check.py <run dir>"""
+"""Pre-declared R1 criteria (plan.md; rerun version). usage: check.py <run dir>"""
 import glob, json, math, re, sys
 d = sys.argv[1]
 rc = open(f"{d}/rc").read().strip()
 log = open(f"{d}/launch.log", errors="replace").read()
 ev = [json.loads(l) for f in glob.glob(f"{d}/events/*.jsonl") for l in open(f) if l.strip()]
 rounds = sorted((e for e in ev if e.get("event") == "rl_round_trained"), key=lambda e: e["rollout_id"])
-# Miles per-step metrics, deduplicated (log_utils and model.py print the same dict)
-steps, seen = [], set()
-for m in re.finditer(r"log_utils\.py:\d+ - step (\d+): \{[^}]*'train/pg_clipfrac': ([^,}]+)", log):
-    key = m.start()
-    steps.append((int(m.group(1)), float(m.group(2))))
-per_round, cur = [], []
-for step, v in steps:
-    if step == 0 and cur:
-        per_round.append(cur); cur = []
-    cur.append(v)
-if cur:
-    per_round.append(cur)
+# Miles per-step metrics in log order (log_utils line only; model.py prints the same dict).
+# Miles numbers steps cumulatively over the run, so rounds are consecutive groups of
+# OPT_STEPS steps (--rl-optimizer-steps 2), matched to rl_round_trained by rollout_id order.
+OPT_STEPS = 2
+steps = [(int(m.group(1)), float(m.group(2))) for m in re.finditer(
+    r"log_utils\.py:\d+ - step (\d+): \{[^}]*'train/pg_clipfrac': ([^,}]+)", log)]
+assert [s for s, _ in steps] == list(range(len(steps))), "Miles step ids not 0..n-1 in order"
+per_round = [[v for _, v in steps[i:i + OPT_STEPS]] for i in range(0, len(steps), OPT_STEPS)]
 checks = {"exit_code": rc, "three_rounds": len(rounds) == 3 and len(per_round) == 3,
           "finalized": any(e.get("event") == "rl_learner_finalized" for e in ev)}
 rows = []
