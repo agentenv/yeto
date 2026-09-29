@@ -14,6 +14,9 @@ if not (d / "miles.log").exists():
 p = subprocess.run([sys.executable, str(Path(__file__).parent / "check_g1.py"), run, str(d), "3", "no-sync"],
                    capture_output=True, text=True)
 res = json.loads(p.stdout)
+rc = (d / "rc").read_text().strip()
+log = (d / "launch.log").read_text(errors="replace")
+res["checks"]["rc0"] = rc == "0" or (rc == "2" and "is not fetchable over ssh" in log)
 ev = [json.loads(x) for x in (d / "island-0" / "events.jsonl").read_text().splitlines()] \
     if (d / "island-0" / "events.jsonl").exists() else []
 rounds = [e for e in ev if e.get("event") == "rl_local_round"]
