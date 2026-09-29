@@ -24,3 +24,11 @@ g1b run C 判为"未能证明生效"，原因是当时 ports 路径没有接上 
 - Modal Sandbox，`H100!`×1（运行前断言型号），app `algo1b-g1d`。
 - 硬超时：sandbox timeout 10800 秒，独立 watchdog 11100 秒，每个 exec 1800 秒，本地 `timeout 11400`，EXIT trap 按 id 终止 sandbox；结束后执行 `modal app stop algo1b-g1d`。
 - 预计约 35 分钟，费用 ≤ $4。
+
+## 结论（sandbox 已终止，app 已 stopped）
+- 两个 run 均 rc=0、5 轮完成、无 invariant 错误。
+- 各轮 `dynamic_filter_generated_groups`：
+  - os_off：6/6/6/6/6（dropped 2/2/2/2/2）；
+  - over_sampling：6/4/6/7/7（dropped 2/0/2/3/3）。
+- **判据 (a) 不满足**：over_sampling 每一轮的 generated_groups 都小于 8。按预登记，结论为**未能证明 over_sampling 生效，不声明**。
+- 如实补充（未预登记，不作判定依据）：两个 run 的生成组数处在同一量级。可能原因有两种，一是 Miles 在 over_sampling_batch_size=8 时并没有一次多提交 8 组，二是 all-samples hook 看到的组只包含已完成的组。两者无法区分；需要 INFRA 在 Miles 侧确认"每轮实际提交的组数"，然后另立计划。

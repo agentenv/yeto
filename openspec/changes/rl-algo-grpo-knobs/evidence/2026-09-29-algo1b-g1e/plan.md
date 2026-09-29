@@ -16,3 +16,9 @@
 ## 资源与回收
 - 与 algo1b-g1c 相同：Modal Sandbox `H100!`×1（运行前断言型号），app `algo1b-g1e`；sandbox timeout 10800 秒，watchdog 11100 秒，每个 exec 1800 秒，本地 `timeout 11400`，EXIT trap 按 id 终止；结束后执行 `modal app stop algo1b-g1e`。
 - 预计约 25 分钟，费用 ≤ $3。在 algo1b-g1d 结束之后再运行。
+
+## 结论（sandbox 已终止，app 已 stopped）
+- 两个 run 均 rc=0、3 轮完成、无 invariant 错误。
+- 配对有效：第 1 步 grad_norm 都是 1.1293506622314453，逐位相等；第 1 步 raw_reward 都是 0.8125。
+- 第 1 轮第 2 步的 pg_clipfrac：A 与 B 都是 0.23509125411510468。**B 没有严格小于 A，按预登记判为未能证明 clip_higher 生效，不声明。**
+- 如实补充（未预登记，不作判定依据）：同一步的 grad_norm 却不同，A 为 0.5746，B 为 0.4456，说明 eps_clip_high 确实改变了 loss 的梯度，而 pg_clipfrac 这个指标没有反映出差异。按 `math_utils.compute_policy_loss` 的定义（clipfrac = pg_losses2 > pg_losses1），只要存在 A>0 且 ratio>1.001 的 token，两者的 clipfrac 就应该不同。这个矛盾目前没有解释，可能是 clipfrac 的统计口径或记录位置与我的理解不一致。要声明 clip_higher，需要改用"第 2 步 grad_norm 不同"作为判据，另立计划再验证，不能对本次结果事后改换判据。

@@ -1,0 +1,8 @@
+{
+ "mechanism": "clip_sym",
+ "algorithm_spec_sha256": "4a1a13fc0b72f07fae03b089b0b168cdd7889105954b1816871cc4b48de590be",
+ "allow_unverified": [
+  "features:eps_clip"
+ ],
+ "rounds": 3
+}
