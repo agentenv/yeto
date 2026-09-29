@@ -72,3 +72,12 @@
 - 没有 zero_grad、nonfinite、StrictRlInvariant、RoundFailed。4 行 Traceback 都属于那条良性的 SGLang freeze_gc 链。grad_norm 为 0.90/0.44/0.46。
 - **退出码的偏差（如实记录）**：launcher 最后以 exit code 2 结束，原因是 launcher.py:3994 "--rl-single-island-no-sync island ran on Modal … its ~/yeto-output is not fetchable over ssh and there is no syncer checkpoint"。这是 P0 no-sync Modal 路径的固定行为：learner 已经 finalized，launcher 仍然返回 2。预登记写的是"rc=0"，照字面这一条不满足；按"learner job SUCCEEDED 且有 finalized 事件"理解则满足。这里不自行放宽，交主 agent 判定。
 - 峰值显存在这个入口下没有采集（计划里也没有要求）。
+
+### run A 第 5 次尝试的完成记录（按主 agent 判定）
+run A 第 5 次：生效判据满足（第 2 步 pg_clipfrac 0.105/0.105/0.111）；判据"rc=0"字面上不满足（launcher 的 no-sync Modal 路径固定返回 2），因此本次不作为声明依据。
+
+## 修订计划 R1（单独提交，在任何修订重跑之前）
+- 只修改"运行成功"这一条的措辞；其余判据、spec、配置、seed、资源、回收、无进展超时全部不变：
+  - 以下三条**同时**满足时视为运行成功：launcher 退出码为 0，或者退出码为 2 且 launcher 日志含 launcher.py 的那行提示 "--rl-single-island-no-sync island ran on Modal (...); its ~/yeto-output is not fetchable over ssh and there is no syncer checkpoint"；回传的事件磁带中有 `rl_learner_finalized`；launcher 日志中有 "job finished: SUCCEEDED"。
+  - 退出码 3（缺 finalized，run 标记为 .incomplete）或其他退出码均为失败。
+- 这次重跑是因为判据措辞，不是因为结果：run A 按 R1 **只重跑一次**（prefix `algo1b-g1b-a-r1`），run C 若同样出现退出码 2，也只重跑一次（prefix `algo1b-g1b-c-r1`）。结果按预登记判据如实交付，不再加跑。
