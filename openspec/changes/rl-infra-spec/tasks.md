@@ -51,6 +51,7 @@
   - X9 guard GPU 结果（2026-09-29 INFRA；2.3 整体仍未完成）：第三轮 C（95203615，T1R1 2×H100!，快照内注入 publish_delay_s=30）SUCCEEDED。条件 5–7 满足（`round3-check.json`）：4 次发布前均有 30 s 延迟事件；每轮 generate 都晚于该版本的 publication，publish 与 publication 之间没有 generate（在途 ≤1）；无失败。结论只覆盖 partitioned-serial 下的 guard。age 0 下的合法重叠对（train‖eval 等）尚未实现和实验，因此 2.3 不勾选，也不交付否定结论。
 - [ ] 2.4 [X；依赖2.2,1.3,1.7；overlap另依赖2.3] 在云实验池扫描少量固定配置，记录默认兼容配置、目标profile最佳固定和收益面；验收：同profile公平比较、全池/备用GPU-hours和原始trace齐全，可得“尚无净收益边”的结论。P62/P44仅候选，不预设合法或更快。
   - 进展（2026-09-29 INFRA，未完成）：依赖 2.2 GPU、1.3、1.7；按 gpu-plan A3 执行，未启动。
+  - GPU 结果（2026-09-29 INFRA，未完成，阻塞）：计划单独提交于 3b26fde。第一次运行 T2R2 seed17（4×H100!）在首轮训练后失败：`StatePluginError: low-precision adapter parameter has no FP32 optimizer master`。原因是 miles 在 adam 下默认启用 DistributedOptimizer，trainer DP>1 时 fp32 主参数按 DP 分片，而 ports 的 `state_plugin.master_of` 只支持完整主参数。因此当前运行时下 trainer DP>1 的配置（T2R2、C4 共置 4 卡）都跑不起来，唯一可跑的 T1R3 没有同 profile 的比较对象。按计划：失败配置已记录原因，未重复启动，其余 5 次运行没有启动。解除条件：state plugin 支持分片主参数的导出/应用（可复用 fork-M5 v2 的按参数名 gather），或者另行登记一个关闭 DistOpt 的 profile。证据：`evidence/infra-a/2.4/t2r2-s17-attempt1/`，约 1.4 GPU·h（≈$5.5）。
 
 ## 3. 阶段 E1：单岛手动 rollout 重配置
 

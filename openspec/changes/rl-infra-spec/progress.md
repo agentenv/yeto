@@ -138,3 +138,8 @@
   - 合计约 2.5 H100·h，约 $10。
 - 所有 watchdog 均已结束（`sleep 3900` 中没有 infra-a 残留）。
 - 2.4 计划已单独提交（3b26fde），尚未启动。
+
+### 2.4 与剩余事项（2026-09-29 INFRA，续 5）
+- 2.4 阻塞：trainer DP>1 在 ports 路径上失败（DistOpt 分片主参数，详见 tasks 2.4）。sweep 已停止；app ap-4UQFe8lS3YdXdC9sISEu32 已 stopped、0 tasks；本机 syncer 与 watchdog 已清理。
+- echo 统一补丁（echo-writers-infra.patch）依赖 `event_echo.append_record`，该函数目前只在 origin/integ-decl 与 algo-1a 上，origin/algo-cap 4373cd9 尚没有。已先 merge algo-cap（af83975），补丁等 append_record 进入 algo-cap 后再合入。
+- 未开始（依赖 elastic 镜像 9f0977）：2.1a GPU 验收、1.7 M3 in-flight 计数（router `/worker_inflight`）、第二批接线（restore_membership_state、admit_cordoned→check_weights→admit_cells、commit_weight_version）。
