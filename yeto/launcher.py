@@ -3284,6 +3284,10 @@ class FleetController:
             self.syncer = None
             self.syncer_probe = syncer_probe
             self.syncer_restart = syncer_restart
+        elif syncer is None:
+            # --rl-single-island-no-sync: no syncer of any kind to supervise.
+            self.syncer = None
+            self.syncer_probe = self.syncer_restart = None
         else:
             syncer_name, syncer_task, syncer_job = syncer
             self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
@@ -3311,7 +3315,7 @@ class FleetController:
         while True:
             if self.syncer is not None:
                 self._poll(self.syncer, is_syncer=True)
-            else:
+            elif self.syncer_probe is not None:
                 self._poll_local_syncer()
             for rec in self.learners.values():
                 self._poll(rec, is_syncer=False)
@@ -3888,6 +3892,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         os.makedirs(local_dest, exist_ok=True)
         if rl_mode and head_mode:
             print(f"[launcher] committed RL checkpoint retained at {local_dest}")
+        elif source in modal_cfgs and no_sync:
+            print(
+                f"[launcher] --rl-single-island-no-sync island ran on Modal ({source}); "
+                "its ~/yeto-output is not fetchable over ssh and there is no syncer "
+                "checkpoint -- use the streamed island log / event tape as the evidence",
+                file=sys.stderr,
+            )
+            return 2
         elif source in modal_cfgs:
             print(
                 f"[launcher] every successful learner ran on Modal ({source}); its "

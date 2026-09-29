@@ -551,3 +551,66 @@ def test_cli_dry_run_creates_nothing(monkeypatch, capsys):
     plan = json.loads(capsys.readouterr().out)
     assert plan["dry_run"] and plan["total_gpus"] == 1 and plan["syncer"] is None
     assert calls == []
+
+
+def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, capsys):
+    """run() -> Modal island -> FleetController(syncer=None) -> teardown (1a crash)."""
+    import yeto.launcher as launcher
+    import yeto.modal_runner as modal_runner
+
+    events = []
+
+    class FakeModalOps:
+        def __init__(self, app_name):
+            self.app_name = app_name
+
+        def define(self, cfg):
+            events.append(("define", cfg.learner_id, cfg.envs.get("SYNCER_ADDR")))
+
+        def deploy(self):
+            events.append(("deploy",))
+
+        def spawn(self, cfg):
+            events.append(("spawn", cfg.learner_id))
+            return "fc-1"
+
+        def status(self, call_id):
+            return "SUCCEEDED"
+
+        def cancel(self, call_id):
+            events.append(("cancel", call_id))
+
+        def stop_app(self):
+            events.append(("stop_app",))
+
+        def tail_logs(self, call_id, entries=100):
+            return []
+
+    monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    monkeypatch.setattr(launcher, "_tail_modal", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "warn_if_model_wont_fit", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "make_syncer_task",
+                        lambda *a, **k: pytest.fail("no-sync must not build a syncer"))
+    seen = {}
+    real_controller = launcher.FleetController
+
+    def controller(**kwargs):
+        seen.update(kwargs)
+        return real_controller(**kwargs)
+
+    monkeypatch.setattr(launcher, "FleetController", controller)
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local",
+                                    "--rl-image",
+                                    "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100")
+    args.keep = False
+    clusters = []
+    code = launcher.run(args, on_clusters=clusters.extend)
+    assert seen["syncer"] is None and seen["syncer_probe"] is None
+    assert not any(c.endswith("-syncer") for c in clusters)
+    assert ("spawn", 0) in events and ("stop_app",) in events
+    assert [e for e in events if e[0] == "define"][0][2] == "none"
+    assert code == 2  # Modal island output is not fetchable; says so honestly
+    err = capsys.readouterr().err
+    assert "--rl-single-island-no-sync" in err and "recover the model from" not in err
