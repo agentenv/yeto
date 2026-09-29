@@ -22,8 +22,8 @@ from typing import Any
 import torch
 
 from . import (
-    MILES_COMMIT,
-    MILES_REPOSITORY,
+    MILES_LEGACY_PINS,
+    MilesRevisionPins,
     SECRLENV_AGENTS,
     SECRLENV_GROUP_FILTER,
 )
@@ -98,8 +98,13 @@ def verify_miles_revision(
     root: str | Path,
     *,
     expected_source_sha256: str | None = None,
+    expected: MilesRevisionPins = MILES_LEGACY_PINS,
 ) -> Path:
-    """Verify either the pinned clean commit or an exact staged source tree."""
+    """Verify either the pinned clean commit or an exact staged source tree.
+
+    ``expected`` selects the constant group (legacy ``MILES_*`` or ports
+    ``MILES_NEXT_*``); both engines share the same checks.
+    """
 
     root = Path(root).expanduser().resolve()
 
@@ -134,13 +139,13 @@ def verify_miles_revision(
     commit = git("rev-parse", "HEAD")
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
     origin = git("config", "--get", "remote.origin.url")
-    if commit != MILES_COMMIT:
+    if commit != expected.commit:
         raise RuntimeError(
-            f"Miles revision mismatch: expected {MILES_COMMIT}, got {commit}"
+            f"Miles revision mismatch: expected {expected.commit}, got {commit}"
         )
-    if origin.removesuffix(".git").rstrip("/") != MILES_REPOSITORY:
+    if origin.removesuffix(".git").rstrip("/") != expected.repository:
         raise RuntimeError(
-            f"Miles origin mismatch: expected {MILES_REPOSITORY}, got {origin}"
+            f"Miles origin mismatch: expected {expected.repository}, got {origin}"
         )
     if branch != "HEAD":
         raise RuntimeError("Miles checkout is not detached")
