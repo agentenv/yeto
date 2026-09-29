@@ -173,3 +173,12 @@ No volumes, no named secrets.
   - gspo_s1 was stopped by hand ~1 min after start (app ap-wfkKkSassVbNcGoJIqdIyA) because the
     receipt code changed (infra-a 8cf1dec); rpp / rpp_baseline / gdpo not started.
   - All apps stopped, 0 tasks; watchdogs killed.
+
+## Attempt 6 (committed before launch) -- same plan as attempt 5, event tape now returned
+- Code: pushed commit containing this section (merges algo-cap 2bce8ed event echo, infra-a
+  080bcbf round ids / 8cf1dec receipt family "grpo" for gspo/rpp). Entry unchanged
+  (launcher no-sync, `--controller local`, `--rl-optimizer-steps`); the only harness change is
+  copying `<run dir>/events/*.jsonl` into the evidence (launch_run.sh).
+- Criteria unchanged (attempt 5 section); criterion 1 counts `rl_round_trained` and
+  criterion 5 reads `rl_engine_selected` from the returned tape; 5.5 check as declared.
+- Runs: gspo_s2, gspo_s1, rpp, rpp_baseline, gdpo. Spent so far ~$4 of $20.
