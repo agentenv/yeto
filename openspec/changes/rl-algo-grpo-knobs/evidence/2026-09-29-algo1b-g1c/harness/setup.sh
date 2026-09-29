@@ -1,6 +1,6 @@
 set -eo pipefail  # review: a failing cargo build was masked by the pipe (attempt 1/2 ran with plain set -e)
 export PATH=$HOME/.cargo/bin:$PATH
-cd /work/yeto && cargo build --release --locked --quiet 2>&1 | grep -v warning | tail -3; ls target/release | head
+# (no-sync single island: no syncer binary needed; the R0 cargo build line ran in the wrong directory and was masked by the pipe before pipefail)
 python - <<'PY'
 import json
 from datasets import load_dataset
