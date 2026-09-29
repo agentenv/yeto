@@ -410,7 +410,8 @@ def test_miles_adapter_rejects_undeclared_mechanisms(name):
 def test_unverified_allowance_admits_single_island_smoke():
     caps = miles_capabilities(
         FINGERPRINT,
-        unverified_mechanisms=("custom", "icepop", "mismatch_metrics"),
+        unverified_mechanisms=("corrections:custom", "corrections:icepop",
+                               "features:mismatch_metrics"),
     )
     caps.check(**CHECK, algorithm=icepop())
 
@@ -469,7 +470,7 @@ def _doc_examples():
     import re
 
     text = (pathlib.Path(__file__).resolve().parents[1] / "docs/MILES_RL.md").read_text()
-    pattern = re.compile(r"<!-- mismatch-example allow=([\w,]+) -->\n```json\n(.*?)```", re.S)
+    pattern = re.compile(r"<!-- mismatch-example allow=([\w:,]+) -->\n```json\n(.*?)```", re.S)
     return [(allow.split(","), body) for allow, body in pattern.findall(text)]
 
 

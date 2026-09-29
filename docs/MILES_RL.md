@@ -1026,7 +1026,8 @@ plus spec, translation and rejection tests (`tests/test_rl_mismatch_correction.p
 strict-avg run (G3) yet.** The Miles adapter therefore declares none of them
 (`corrections: ["none"]`), and a ports run that selects one fails at startup
 with a list of the supported mechanisms. For a single-island G1 smoke only,
-`--rl-allow-unverified-mechanism` admits them. Nothing here claims a training
+`--rl-single-island-no-sync --rl-allow-unverified-mechanism corrections:<name>` (and
+`features:<name>` where needed) admits them. Nothing here claims a training
 benefit.
 
 Threshold meaning. The literature values below have not been verified in this
@@ -1080,10 +1081,10 @@ does not carry over to the other.
 
 Examples. Each block is checked by `tests/test_rl_mismatch_correction.py`
 through the P0 dry run (`python3 -m yeto.rl.engine.miles_adapter.algorithm_flags
---dry-run --rl-algorithm-spec FILE [--rl-allow-unverified-mechanism NAME ...]`):
+--dry-run --rl-algorithm-spec FILE [--rl-allow-unverified-mechanism DIMENSION:NAME ...]`):
 it is rejected as undeclared without the allowances and accepted with them.
 
-<!-- mismatch-example allow=custom,mismatch_observe,mismatch_metrics -->
+<!-- mismatch-example allow=corrections:custom,corrections:mismatch_observe,features:mismatch_metrics -->
 ```json
 {"schema": "yeto-rl-algorithm-spec-v2",
  "correction": {"method": "custom", "mismatch_metrics": true,
@@ -1091,13 +1092,13 @@ it is rejected as undeclared without the allowances and accepted with them.
                 "sha256": "9d5209db978e940d9b246d6e08dcb56c23e114594da08bb8ac1c88c79b8d6255"}}}
 ```
 
-<!-- mismatch-example allow=tis -->
+<!-- mismatch-example allow=corrections:tis -->
 ```json
 {"schema": "yeto-rl-algorithm-spec-v2",
  "correction": {"method": "tis", "tis_clip": 2.0, "tis_clip_low": 0.0}}
 ```
 
-<!-- mismatch-example allow=custom,icepop,mismatch_metrics -->
+<!-- mismatch-example allow=corrections:custom,corrections:icepop,features:mismatch_metrics -->
 ```json
 {"schema": "yeto-rl-algorithm-spec-v2",
  "correction": {"method": "custom", "tis_clip_low": 0.5, "tis_clip": 5.0,
@@ -1106,20 +1107,20 @@ it is rejected as undeclared without the allowances and accepted with them.
                 "sha256": "971ccb0bf00b43b0582839c5b8dc05e91162c878ab7ec0ca878e3b1e668f5318"}}}
 ```
 
-<!-- mismatch-example allow=opsm,opsm_trainer -->
+<!-- mismatch-example allow=corrections:opsm,corrections:opsm_trainer -->
 ```json
 {"schema": "yeto-rl-algorithm-spec-v2",
  "correction": {"method": "opsm", "opsm_delta": 0.0001, "opsm_old_logprob_source": "trainer"}}
 ```
 
-<!-- mismatch-example allow=opsm,opsm_rollout,rollout_logprobs_as_old -->
+<!-- mismatch-example allow=corrections:opsm,corrections:opsm_rollout,features:rollout_logprobs_as_old -->
 ```json
 {"schema": "yeto-rl-algorithm-spec-v2",
  "correction": {"method": "opsm", "opsm_delta": 0.0001, "opsm_old_logprob_source": "rollout",
    "use_rollout_logprobs": true}}
 ```
 
-<!-- mismatch-example allow=custom,mis_mask -->
+<!-- mismatch-example allow=corrections:custom,corrections:mis_mask -->
 ```json
 {"schema": "yeto-rl-algorithm-spec-v2",
  "correction": {"method": "custom", "mis_level": "geometric", "mis_mode": "mask",
