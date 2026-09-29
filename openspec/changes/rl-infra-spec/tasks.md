@@ -22,7 +22,7 @@
 
 ## 2. 阶段 E0：目标执行模式的固定训推分区基线
 
-- [ ] 2.1 [Y+M；依赖1.6] 经 `Placement` 端口表达trainer/rollout/standby物理映射并在启动时显式给出，适配LoRA启动参数避免colocate规范化覆盖分区；验收：小模型固定分区正常启动，旧共置配置保持原行为。
+- [ ] 2.1 [Y+M；依赖1.6,2.1a] 经 `Placement` 端口表达trainer/rollout/standby物理映射并在启动时显式给出，适配LoRA启动参数避免colocate规范化覆盖分区；验收：小模型固定分区正常启动，旧共置配置保持原行为。
 - [ ] 2.1a [M-fork；2.1前置] fork-M1：`miles/ray/placement_group.py` 接受显式 role→bundle 映射（trainer/rollout/standby），替代单一 offset；缺省行为不变，colocate 下拒绝；验收：CPU 单测覆盖重复/越界/重叠拒绝与缺省等价，打入镜像后 2.1 以显式映射启动并记录 bundle↔GPU UUID。依据 upstream-mechanisms.md E0“Missing for 2.1”。
 - [ ] 2.2 [Y；依赖2.1,1.4] 在yeto `IslandDriver` 上新增 `partitioned-serial` 执行模式，在目标分区管理就绪任务、权重身份、有限缓冲与反压；验收：partitioned-serial完成固定算法步数，不因分卡改变sample IDs/optimizer时序；保留 R0 每组 policy token 校验（`driver.py` generate 后的 `mismatched_groups` 检查），`rl-algo-mismatch-correction` 依赖的“π_behav 与 π_old 同一权重”前提在分区模式下仍成立（alignment.md A5）。
 - [ ] 2.3 [X；依赖2.2,1.7] 对同一算法契约允许的独立任务做重叠实验，并实现对应guard；验收X9：延迟发布不能触发旧版本生成，队列有界；若不存在合法训推重叠，记录partitioned-serial结论与独立算法后续项，不擅自开放one-step-off-policy。
@@ -32,12 +32,12 @@
 
 - [ ] 3.1 [Y；依赖2.2,1.5] 在 `IslandDriver` 中实现模式对应安全点与全岛quiescent cut：兼容模式轮次边界，重叠模式先停准入并排空；验收：梯度累积中不切换，ready未消费组与策略身份可恢复。
 - [ ] 3.2 [Y；依赖3.1,1.6] 实现单事务controller、request ID/expected epoch、journal和plan/status/cancel入口；验收：重复请求幂等、并发/旧epoch拒绝，提交应答丢失可查询，不重复训练。
-- [ ] 3.3 [Y+M；依赖3.2,1.7] 实现轨迹级admission fence与工具drain；验收X5：active请求为0但tool-wait>0时保留旧路由，超时取消切换而不重放外部副作用。
+- [ ] 3.3 [Y+M；依赖3.2,1.7,3.3b] 实现轨迹级admission fence与工具drain；验收X5：active请求为0但tool-wait>0时保留旧路由，超时取消切换而不重放外部副作用。
 - [ ] 3.3a [M-fork；3.4前置] fork-M2：公开 `InferenceController.start_cells/stop_cells(cell_ids, expected_epoch)` 与 `RayWorkerProvider.start_cells`，替代 TEMPORARY 的 `stop_cell_between_weight_updates`；仅作用于启动时预声明的 cell，epoch 不符拒绝、重复调用幂等。fork 内 membership epoch 只是 yeto 事务 epoch 的镜像：yeto `pool_epoch`/配置 epoch 为唯一权威（journal 中 durable CAS），每次调用传入 yeto 的 expected epoch；learner/controller 重启后先读 journal，再以 `describe` 得到的 fork epoch 对账，不一致则 RECOVERY_REQUIRED，不以 fork 状态覆盖 journal；stop 失败时路由与 epoch 不前进。验收：CPU 单测 + 3.4 X2 GPU 实验。
 - [ ] 3.3b [M-fork；3.3/3.4前置] fork-M3：router 按 worker cordon/uncordon（不删计数、不 dispose）并暴露 in-flight 数，提供 cordon 后等待 in-flight=0 的 drain（超时返回失败、不 abort）；验收：CPU 单测；3.3 X5 中 active=0 判定取自该计数，tool-wait 仍由 yeto 计。
-- [ ] 3.4 [M；依赖3.3,2.1] 新增端口动词 `RolloutPool.add_engines/remove_engines/drain` 与 `Placement.reconfigure(plan, epoch)` 并在MilesAdapter中基于InferenceController实现，调整active engines、router、health monitor与权重更新成员，先测T4R2S2↔T4R4S0；验收X2：trainer不动、未占用池外资源，不等待故意停用engine，备用卡计入成本。
-- [ ] 3.4a [Y；3.4同步] 更新 `yeto/rl/engine/ports.py` 预留注释：`Placement.reconfigure` 由 E3 提前到 E1，新增 `RolloutPool.drain(members, deadline)` 与成员限定的 `Publisher.publish(policy, members)`，并加入 `RESERVED_PORT_VERBS`；验收：能力声明只在实现后列出这些动词。
-- [ ] 3.5 [M+Y；依赖3.4] 新增 `Publisher.publish(policy, members)`；新engine隔离加载、payload/版本ACK后原子提交epoch和路由；验收：旧generation ACK、错误payload、迟到请求都不能污染新配置。
+- [ ] 3.4 [M；依赖3.3,2.1,3.3a,3.3b,3.4a] 新增端口动词 `RolloutPool.add_engines/remove_engines/drain` 与 `Placement.reconfigure(plan, epoch)` 并在MilesAdapter中基于InferenceController实现，调整active engines、router、health monitor与权重更新成员，先测T4R2S2↔T4R4S0；验收X2：trainer不动、未占用池外资源，不等待故意停用engine，备用卡计入成本。
+- [ ] 3.4a [Y；3.4前置] 更新 `yeto/rl/engine/ports.py` 预留注释：`Placement.reconfigure` 由 E3 提前到 E1，新增 `RolloutPool.drain(members, deadline)` 与成员限定的 `Publisher.publish(policy, members)`，并加入 `RESERVED_PORT_VERBS`；验收：能力声明只在实现后列出这些动词。
+- [ ] 3.5 [M+Y；依赖3.4,3.5a] 新增 `Publisher.publish(policy, members)`；新engine隔离加载、payload/版本ACK后原子提交epoch和路由；验收：旧generation ACK、错误payload、迟到请求都不能污染新配置。
 - [ ] 3.5a [M-fork；3.5前置] fork-M4：`start_update_weights` 接受显式成员集合与 epoch，`UpdatableEngines` 只含这些成员，`end_update_weights` 只标记这些成员 ready、不更新非成员 weight version；缺省为全体成员。ACK 现状：upstream 仅有 `end_update_weights` 的 cell hash 快照比对与 `update_weight_version` 元数据，**没有 payload 级 ACK**；“payload/版本 ACK 后才进 router”须由 yeto `Publisher` 读回校验补齐（本地分支完成度见其提交说明）。验收：CPU 单测证明非成员状态不变；3.5 GPU 实验中新 engine 仅在其 payload ACK 后进 router。
 - [ ] 3.6 [Y；依赖3.5] 接入group/batch/update账本和既有completed-groups/retry进度；验收：重试/部分组/publish失败无重复消费、无静默丢样本。算法层有意丢弃的样本/组（bounded 动态过滤替换、超采样多余组、overlong 过滤的 `remove_sample`）在账本中记为显式终态 `filtered`（附原因与机制名），不计为丢失也不计为已消费；账本记录接在 `miles_adapter/rollout_meta_hook.py::record_trained_groups` 之后，与 `rl-algo-grpo-knobs` 6.3 的过滤标记共用该 hook（alignment.md A2）。
 - [ ] 3.7 [M+Y；依赖3.2-3.6] 增加绝对deadline/watchdog和release前取消、release后重建旧rollout、commit后恢复；验收：启动/通信/发布失败有界处理，learner/bridge/trainer身份与状态正确。
@@ -47,14 +47,14 @@
 
 - [ ] 4.1 [M；依赖1.2,3.1；可与E1并行] 审计完整ReconfigurationCut所需master/moments/scheduler/RNG/data/ref状态及LoRA保存分支；验收：逐项来源明确，与默认no-save/load-optim/rng路径隔离，缺状态拒绝。审计同时覆盖算法相关状态（alignment.md A3）：`algorithm_spec_sha256`、插件 PluginRef 哈希与 `yeto_algo_plugins` runtime attrs 哈希、KL loss/reward KL 时的 ref 模型身份（`ref_model.revision`）与 ref 权重来源、动态过滤/超采样的 rollout 侧状态。
 - [ ] 4.1b [Y；依赖4.1，E2开工时] 修改 `docs/MILES_RL.md` 的“不做 controller”一条为：允许岛内yeto侧重配置控制器，仍不做跨岛控制器与通用恢复框架；验收：文档与本change design D1一致，评审通过。
-- [ ] 4.2 [M+Y；依赖4.1,3.6] 新增端口动词 `TrainerGroup.save_cut/restore_cut`，实现完整cut导出/加载、manifest/fsync和算法账本对账；验收：坏checksum、截断、step不一致拒绝，源释放前恢复依据完整；cut manifest 记录 `algorithm_spec_sha256` 与插件哈希，恢复时与当前运行不一致即拒绝。
+- [ ] 4.2 [M+Y；依赖4.1,3.6；LoRA profile另依赖4.2a] 新增端口动词 `TrainerGroup.save_cut/restore_cut`，实现完整cut导出/加载、manifest/fsync和算法账本对账；验收：坏checksum、截断、step不一致拒绝，源释放前恢复依据完整；cut manifest 记录 `algorithm_spec_sha256` 与插件哈希，恢复时与当前运行不一致即拒绝。
 - [ ] 4.2a [M-fork；LoRA profile 的 4.2/4.6前置] fork-M5：LoRA `save/load_lora_checkpoint` 增加可选格式：optimizer state 以参数名为键（DP 不变）并保存/恢复 RNG（DP 变化时的 RNG 策略为显式选项）；缺省格式不变；对 DistributedOptimizer 等不支持配置在参数解析阶段 fail-fast。**需新增 DistributedOptimizer 分片状态的 gather/reshard 实现**（本地分支未实现），完成前 LoRA+DistOpt 的 E3 为 no-go。验收：CPU roundtrip 单测；DistOpt gather 实现后由 4.3 X3 与 4.6 X4 GPU 实验验证。
 - [ ] 4.3 [M；依赖4.2] 新增 `TrainerGroup.rebuild(plan)`；同形trainer子进程重建、fresh groups和完整restore；验收X3：训练2步后重建，对冻结下一batch比较RNG/计数/moments/参数更新，无额外reset。
 - [ ] 4.4 [Y；依赖4.3] `IslandDriver` 替换端口背后的实现（无需rebind）、保留bridge状态并重发正确权重；验收：不重复initialize/after_local_train，外层进度不因重建重放。
 - [ ] 4.5 [X；依赖4.4,3.8] 同形恢复故障矩阵；验收：rank失败、collective超时、迁移中断、controller crash提交不确定均有界恢复或RECOVERY_REQUIRED，不继续不确定的消费。
-- [ ] 4.6 [M；依赖4.5,1.6] DP1↔2重分片spike，固定TP/PP/CP/EP、GBS及算法；验收X4：master/optimizer/RNG/样本映射和下一步数值比较给出go/no-go，不直接加入白名单。go 结论只对实验所用 `algorithm_spec_sha256` 成立；改变 loss 归一化的机制（token 级聚合、Dr.GRPO 常数分母、`--normalize-advantages` 的 DP 组内白化、GSPO/GMPO 序列级量在 CP 下的收集）须在各自 spec 上单独认证，未认证的算法描述请求该边时拒绝（alignment.md A4）。
+- [ ] 4.6 [M；依赖4.5,1.6；LoRA profile另依赖4.2a] DP1↔2重分片spike，固定TP/PP/CP/EP、GBS及算法；验收X4：master/optimizer/RNG/样本映射和下一步数值比较给出go/no-go，不直接加入白名单。go 结论只对实验所用 `algorithm_spec_sha256` 成立；改变 loss 归一化的机制（token 级聚合、Dr.GRPO 常数分母、`--normalize-advantages` 的 DP 组内白化、GSPO/GMPO 序列级量在 CP 下的收集）须在各自 spec 上单独认证，未认证的算法描述请求该边时拒绝（alignment.md A4）。
 - [ ] 4.6a [M-fork；4.7前置，依赖2.1a] fork-M6：`RayWorkerManager` 允许把已停止 cell 重绑到 M1 映射内的另一 bundle；trainer 侧基于 `create_training_models` 在新 bundle 集以新 `actor_num_gpus` 重建 handle 并 dispose 旧 handle，不走 `_refresh_cells`/indep-DP；验收：CPU 单测 + 4.7 角色转移 GPU 实验。
-- [ ] 4.7 [M+Y；依赖4.6通过,2.4] 实现经认证的trainer DP转换及池内角色转移，按资源规模验证P62↔P44或更小等价边；验收：实际GPU从trainer转给rollout及反向，复杂并行维度固定，双向成功/失败恢复、batch语义和epoch都正确。
+- [ ] 4.7 [M+Y；依赖4.6通过,2.4,2.1a,4.6a] 实现经认证的trainer DP转换及池内角色转移，按资源规模验证P62↔P44或更小等价边；验收：实际GPU从trainer转给rollout及反向，复杂并行维度固定，双向成功/失败恢复、batch语义和epoch都正确。
 - [ ] 4.8 [X；依赖4.7] 匹配数据预算、多seed的连续固定/同形恢复/变DP学习验证；验收：预声明数值/学习容差、heldout/reward与NaN/发散检查。未通过不开放trainer边；E1仍可独立交付但不得计为trainer完成。
 
 ## 5. 阶段 C：论文机制迁移与实测成本优化
