@@ -30,3 +30,4 @@ recommendations.
 - Reclaim/cost: as g1c (timeout 2700 s per launch, trap app stop, setsid watchdog 3000 s, app list
   proof). ~4 x 12 min H100 = ~0.8 H100 h, ~ $3.5; cap $8. Single attempt per run; harness failures
   before an app exists may be fixed once after a committed note.
+- Merged origin/algo-cap 50fe818 (no-sync reclaim is fail-closed: a tape without finalized becomes .incomplete, exit code 3). Reading, declared before the next runs: exit 3 counts as a failure, not as rc 2; nothing else changes. YETO_SHA moves to this merge.

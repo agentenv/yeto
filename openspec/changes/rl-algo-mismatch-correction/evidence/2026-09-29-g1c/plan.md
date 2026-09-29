@@ -97,3 +97,4 @@ committed diagnosis.
   with the per-user thread count at most 3296 (>= 800 free of 4096).
 - Harness change before attempt 5 (lesson from G3's truncated tape): the tape is pulled every 5 s instead of 20 s. Criteria unchanged.
 - Before icepop/opsm-trainer: merged origin/algo-cap 2bce8ed (the launcher writes <run dir>/events/<island>.jsonl). YETO_SHA moves to that merge; mechanism code unchanged. The pulled container tape stays the primary source (same as tis); the launcher copy is kept as additional evidence.
+- Merged origin/algo-cap 50fe818 (no-sync reclaim is fail-closed: a tape without finalized becomes .incomplete, exit code 3). Reading, declared before the next runs: exit 3 counts as a failure, not as rc 2; nothing else changes. YETO_SHA moves to this merge.
