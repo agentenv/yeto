@@ -39,3 +39,5 @@ A-attempt2（a37403a，1×H100!，SUCCEEDED）的 island 磁带靠轮询拉取�
 - round2-e0a（d2018b5，1×H100!）SUCCEEDED，事件 echo 完整（见 `round2-e0a/tape.jsonl`）。
 - round2-e0b / round2-e0c 在 deploy 之前失败，没有占用 GPU。原因：`launch` 没有 `--rollout-num-gpus` 选项，argparse 把它当作 `--rollout-num-gpus-per-engine` 的缩写接受了，结果 rollout GPU 数为空，被 selection 拒绝。修复：launch 新增 `--rl-rollout-gpus`（8cf1dec）。
 - 修复提交中还包含与本实验无关的代码变更（receipt 标签、1a/2a 通道）。为保证 A/B/C 使用同一份代码，第三轮三个 arm 全部使用同一个新 SHA 重跑；A 的前两次尝试（a37403a、d2018b5）作为记录保留，如与第三轮 A 的可比数据（逐轮 sample-id 哈希、轮数、applied_lrs 长度）有差异，在完成记录中如实报告。
+
+- 第三轮 prefix 改为 `infra-a-r3a` / `infra-a-r3b` / `infra-a-r3c`（避免与上一轮残留 watchdog 同名；那些 watchdog 已结束），代码为 95203615。
