@@ -2,7 +2,7 @@
 # Build + push the private yeto miles-ports image (MILES_NEXT_IMAGE) without a
 # docker daemon: crane appends one overlay layer (docker/miles-ports/
 # make_layer.py) to the pinned radixark/miles base.  docker/miles-ports/
-# Dockerfile describes the same result for a docker build.
+# Dockerfile approximates the same result for docker (unverified).
 #
 #   scripts/build_miles_ports_image.sh [--push]
 #
@@ -84,7 +84,7 @@ json.dump({
            "miles_commit": "$BASE_MILES_COMMIT", "sglang_commit": "$BASE_SGLANG_COMMIT"},
   "miles": {"repository": "$MILES_NEXT_REPOSITORY", "commit": "$MILES_NEXT_COMMIT",
             "upstream_commit": "$MILES_NEXT_UPSTREAM_COMMIT", "path": "/root/miles",
-            "install": "pip install -e /root/miles --no-deps (base's editable install, same path)"},
+            "install": "base's editable install (pip install -e /root/miles --no-deps) kept (same path); /root is on the base's sys.path, so without PYTHONPATH import miles is a namespace package over the /root/miles checkout -- yeto runs with PYTHONPATH=\$HOME/miles (regular package)"},
   "sglang": {"repository": "$SGLANG_NEXT_REPOSITORY", "commit": "$SGLANG_NEXT_COMMIT",
              "upstream_commit": "$SGLANG_NEXT_UPSTREAM_COMMIT", "path": "/sgl-workspace/sglang",
              "version": "$SGLANG_VERSION",

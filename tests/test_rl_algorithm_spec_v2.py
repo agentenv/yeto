@@ -387,3 +387,34 @@ def test_load_extensions_retries_after_a_failed_import(monkeypatch):
     monkeypatch.setattr(algos, "EXTENSION_MODULES", ())
     alg.load_extensions()
     assert alg._EXTENSIONS_LOADED is True
+
+
+def test_gradient_rule_may_tighten_only_for_its_mechanism():
+    alg.register_gradient_rule("t_tight", lambda s, b, m: True,
+                               mechanism="features:entropy_bonus")
+    try:
+        zero = _groups(0.0, 0.0)
+        assert AlgorithmSpec(entropy_coef=0.25).gradient_expectation(zero) == (
+            True, "gradient_rule:t_tight (features:entropy_bonus)")
+        for spec in (AlgorithmSpec(), BOUNDED):  # default GRPO unchanged
+            for stds in ((0.5,), (0.0,), (0.0, 0.2)):
+                b = _groups(*stds)
+                assert spec.expects_gradient(b) == _r0_driver_rule(b)
+    finally:
+        alg.unregister(gradient_rule="t_tight")
+
+
+def test_extension_owned_pipeline_plugins_do_not_require_features_plugins(monkeypatch):
+    import yeto.rl.algos as algos
+
+    ref = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+    spec = AlgorithmSpec(plugins=(ref,))
+    assert ("features", "plugins") in spec.required_mechanisms()  # foreign plugin
+    monkeypatch.setattr(alg, "_PIPELINE_PLUGIN_MODULES", {"yeto.rl.engine.algorithm"})
+    assert ("features", "plugins") not in spec.required_mechanisms()
+    assert spec.sha256() != AlgorithmSpec().sha256()  # identity still hashed
+    monkeypatch.setattr(alg, "_PIPELINE_PLUGIN_MODULES", set())
+    monkeypatch.setattr(algos, "EXTENSION_MODULES", ("yeto.rl.engine.algorithm",))
+    assert ("features", "plugins") not in spec.required_mechanisms()
+    with pytest.raises(ValueError, match="yeto namespace"):
+        alg.register_pipeline_plugin_module("miles.x")

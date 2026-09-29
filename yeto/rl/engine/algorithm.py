@@ -314,6 +314,31 @@ def register_mechanism(dimension: str, name: str, detect: Callable[["AlgorithmSp
     return definition
 
 
+_PIPELINE_PLUGIN_MODULES: set[str] = set()
+
+
+def register_pipeline_plugin_module(module: str) -> None:
+    """Declare ``module`` an extension-owned plugin module.
+
+    A ``spec.plugins`` entry whose callable lives in such a module (or in a
+    module listed in ``yeto.rl.algos.EXTENSION_MODULES``) still enters the
+    hash and is re-hashed at startup, but does not require the
+    ``features:plugins`` mechanism.
+    """
+
+    if not module.startswith("yeto."):
+        raise ValueError(f"pipeline plugin module {module!r} must be in the yeto namespace")
+    _PIPELINE_PLUGIN_MODULES.add(module)
+
+
+def _owned_plugin(path: str) -> bool:
+    load_extensions()
+    from yeto.rl.algos import EXTENSION_MODULES
+
+    module = path.rpartition(".")[0]
+    return module in _PIPELINE_PLUGIN_MODULES or module in EXTENSION_MODULES
+
+
 def register_rejection(name: str, check: Callable[["AlgorithmSpec"], str | None]) -> None:
     """``check(spec)`` returns a problem (with the viable alternative) or None."""
 
@@ -375,12 +400,14 @@ def register_gradient_rule(
     mechanism: str,
 ) -> None:
     """``rule(spec, batch_summary, step_metrics)``: ``False`` lifts the gradient
-    expectation for this round, ``None`` abstains.
+    expectation for this round, ``True`` requires one where the R0 rule (some
+    group with non-zero reward std) expects none, ``None`` abstains.
 
     The rule is bound to ``mechanism`` (``"dimension:name"``) and is consulted
     only when the spec requires that mechanism, so a registered rule can never
-    change the default GRPO judgement. Rules only ever relax the default rule;
-    a non-finite grad norm is checked by the driver regardless."""
+    change the default GRPO judgement. Tightening (``True``) is allowed by
+    design D6 (each mechanism's change supplies its rule) and is the safer
+    direction; a non-finite grad norm is checked by the driver regardless."""
 
     if name in _GRADIENT_RULES:
         raise ValueError(f"gradient rule {name!r} already registered")
@@ -1018,11 +1045,22 @@ class AlgorithmSpec:
         """
 
         groups = getattr(batch_summary, "groups", batch_summary)
-        if not any(g.reward_std > 0 for g in groups):
-            return False, None
         required = {f"{d}:{n}" for d, n in self.required_mechanisms()}
-        for name, (mechanism, rule) in _GRADIENT_RULES.items():
-            if mechanism in required and rule(self, batch_summary, step_metrics) is False:
+        verdicts = [
+            (name, mechanism, rule(self, batch_summary, step_metrics))
+            for name, (mechanism, rule) in _GRADIENT_RULES.items()
+            if mechanism in required
+        ]
+        if not any(g.reward_std > 0 for g in groups):
+            # A mechanism whose advantages do not come from the scalar reward
+            # variance (GDPO reward vectors; REINFORCE++ group means / reward KL)
+            # may require a gradient the R0 rule cannot see.
+            for name, mechanism, verdict in verdicts:
+                if verdict is True:
+                    return True, f"gradient_rule:{name} ({mechanism})"
+            return False, None
+        for name, mechanism, verdict in verdicts:
+            if verdict is False:
                 return False, f"gradient_rule:{name} ({mechanism})"
         masked = valid_masked_fraction(getattr(step_metrics, "masked_fraction", None))
         if masked is not None and masked >= 1.0:
@@ -1127,7 +1165,11 @@ def _builtin_mechanisms() -> None:
         "mismatch_metrics": lambda s: s.correction.mismatch_metrics,
         "over_sampling": lambda s: s.sampling.over_sampling_batch_size is not None,
         "overlong_filter": lambda s: s.sampling.overlong_filter,
-        "plugins": lambda s: bool(s.plugins),
+        # Only plugins that no registered extension owns: the PluginRefs a
+        # registered pipeline (reward shapers / advantage transforms) writes
+        # into spec.plugins are identity records of mechanisms that are
+        # capability-checked under their own names.
+        "plugins": lambda s: any(not _owned_plugin(p.path) for p in s.plugins),
     }
     for name, detect in features.items():
         register_mechanism("features", name, detect)

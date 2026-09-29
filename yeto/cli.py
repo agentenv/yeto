@@ -219,6 +219,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports fixed partition: reserved standby GPUs never started by any role",
     )
     rl.add_argument(
+        "--rl-single-island-no-sync",
+        action="store_true",
+        help=(
+            "ports only: launch exactly one island with no syncer and no outer "
+            "sync (the G1 smoke entry for --rl-allow-unverified-mechanism)"
+        ),
+    )
+    rl.add_argument(
         "--rl-allow-unverified-mechanism",
         action="append",
         default=None,
