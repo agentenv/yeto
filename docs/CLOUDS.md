@@ -74,7 +74,8 @@ from Modal's cluster info. Facts to keep in mind:
 - Object-store data (`s3://`, `gs://`) cannot be mounted; use an HF dataset
   id or a local path.
 - `yeto down <run>` stops the run's Modal app (`yeto-<prefix>`); every
-  island's containers end with it.
+  island's containers end with it, and the app must then list as
+  `stopped` with 0 tasks or the run is reported not fully down.
 - An all-Modal SFT fleet's model is not fetchable over ssh; recover it
   from the syncer checkpoint with `yeto-export`, or keep at least one sky
   island in the fleet.
@@ -229,9 +230,9 @@ Three things found while running this, none fixed in this change:
   stopped.** After a clean run the head has already stopped the Modal
   app, so `yeto down` prints
   `Modal app stop failed: ... App is already stopped.` and then proceeds
-  normally (exit code 0). The `--yes` fix for `stop_app` surfaces
-  failures but does not treat an already-stopped app as success, so the
-  message is misleading noise on every successful mixed or Modal run.
+  normally (exit code 0). Fixed with the head-run teardown change: an
+  already-stopped app now prints as such, and the app's state is checked
+  afterwards either way.
 
 **Modal RL island, 8xH100, 2026-09-23 (task 8.4).** Head controller
 (syncer) on Nebius eu-north1; one Miles RL island as a Modal function on
@@ -408,3 +409,61 @@ the learner refuses to start when its source SHA256 differs from the
 fleet's. The launch log still prints only an MLX join command, not a Modal
 one; building the run script by hand is the gap left for manual Modal joins.
 
+## Tearing a run down
+
+`yeto down <prefix>` only says `run '<prefix>' is down` (exit 0) once every
+cluster of the run is confirmed gone; anything less exits 1, leaves the run
+in state `TEARDOWN_INCOMPLETE` with the unconfirmed clusters recorded, and
+a rerun of `yeto down` continues from there. The order matters:
+
+1. **Learners of a head run are torn down from the head.** Only the head's
+   sky knows them: this machine's sky launched the head, the head's sky
+   launched the learners, and a local `sky down <learner>` just answers
+   "does not exist". `yeto down` cancels the controller job on the head
+   (so it cannot relaunch what is being removed), then runs the downs over
+   ssh on the head, where each learner is also checked at the cloud before
+   it counts as down. Three attempts, 20 s apart, because the head's own
+   sky answers 500 while it is busy.
+2. **The head is deleted only after every learner is confirmed.** If any
+   learner is still unconfirmed the head is kept, the command exits 1 and
+   names the learners: rerun `yeto down`, or delete them in the cloud
+   console. Deleting the head first is exactly how H100s were orphaned on
+   2026-09-23 and twice on 2026-09-24 (`yeto-gh1`, `yeto-gh2`).
+3. **Modal islands end with the run's app**, then the app must list as
+   `stopped` with 0 tasks.
+4. **Everything this machine's sky launched (the head, local-mode
+   learners) is checked at the cloud after the down**, using sky's own
+   per-cloud instance query; a surviving instance is retried and, if it
+   outlives the retries, printed by id so it can be deleted by hand. A
+   cloud that cannot be queried is reported as "not cloud-verifiable;
+   trusting sky", and then only a clean down or "does not exist" counts.
+
+Verified 2026-09-24 on `yeto-td2` (Nebius head, one Modal `1xh100` SFT
+island, torn down while training at outer step 3): the app stopped and
+listed as `stopped, 0 tasks`, the head was downed and confirmed at the
+cloud, exit 0, nothing left on Nebius or Modal. `yeto-td1` (whose Nebius
+learner never provisioned: the tenant's public-IPv4 quota of 3 was full)
+exercised the head-side path: the head reported the learner as never
+existing, then the head itself was downed.
+
+Verified 2026-09-25 with real Nebius learners once the IPv4 quota had room:
+
+- `yeto-td3` (Nebius head, Nebius `1xh100` SFT island, torn down at outer
+  step 3): the head confirmed `[head] yeto-td3-l0-eu-north1: down`, then
+  the head was downed; the cloud probe saw the head instance still live
+  three times while Nebius was deleting it and retried until it was gone,
+  exit 0, `nebius compute instance list` empty for the prefix. Before the
+  StatusVersion fix this probe had never run.
+- `yeto-td4`, the failure case: the head was deleted by hand while the
+  island trained. `yeto down` cancelled nothing (head STOPPED), the ssh to
+  the head failed three times, and the command exited 1 with
+  `NOT tearing down yeto-td4-head: learner cluster(s) not confirmed down
+  from it: yeto-td4-l0-eu-north1`, run state `TEARDOWN_INCOMPLETE`. The
+  island was then deleted from the cloud by hand, which is the documented
+  recovery.
+
+If the head is already gone (deleted by hand, or by an older `yeto down`),
+step 1 cannot run: the command exits 1 listing the learners, and the only
+way to find them is the cloud's own listing, e.g.
+`nebius compute instance list` — look for instances named after the
+learner cluster.
