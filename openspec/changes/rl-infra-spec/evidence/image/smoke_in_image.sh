@@ -21,14 +21,14 @@ echo "== imports / metadata"
 check imports_point_at_forks 'python3 - <<PY
 import importlib.metadata as md, inspect, os
 import miles, sglang
-from miles.ray.train.group import RayTrainGroup
+from miles.ray.train.group import TrainerController
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 print("miles", miles.__file__, md.version("miles"))
 print("sglang", sglang.__file__, md.version("sglang"), sglang.__version__)
 assert os.path.realpath(miles.__file__).startswith("/root/miles/miles/")
 assert os.path.realpath(sglang.__file__).startswith("/sgl-workspace/sglang/python/sglang/")
 assert md.version("sglang") == sglang.__version__ == "0.5.21.dev67+g9f29303"
-assert hasattr(RayTrainGroup, "run_plugin")
+assert hasattr(TrainerController, "run_plugin")
 assert "enable_disk_backup" in inspect.signature(TorchMemorySaverAdapter.region).parameters
 print("sglang dists:", sorted(d.metadata["Version"] for d in md.distributions() if d.metadata["Name"] == "sglang"))
 assert len([d for d in md.distributions() if d.metadata["Name"] == "sglang"]) == 1
@@ -45,7 +45,7 @@ check launcher_ports_setup 'HOME=/root GIT_TRACE=0 bash -x /tmp/setup.sh > /tmp/
 tail -20 /tmp/setup.log
 check setup_used_image_sglang 'grep -q "image provides sglang 9f29303bef1eea38eb613e5f454a52db1326422d" /tmp/setup.log && [ "$(readlink /root/sglang)" = /sgl-workspace/sglang ]'
 check setup_skipped_miles_fetch '! grep -q "git -C /root/miles fetch" /tmp/setup.log'
-check after_setup_still_fork 'cd /tmp && PYTHONPATH=/root/miles:/root/sglang/python python3 -c "import miles, sglang, os; assert os.path.realpath(miles.__file__).startswith(\"/root/miles/\"); assert os.path.realpath(sglang.__file__).startswith(\"/sgl-workspace/sglang/python/\"); print(miles.__file__, sglang.__file__)"'
+check after_setup_still_fork '(cd /tmp && PYTHONPATH=/root/miles:/root/sglang/python python3 -c "import miles, sglang, os; assert os.path.realpath(miles.__file__).startswith(\"/root/miles/\"); assert os.path.realpath(sglang.__file__).startswith(\"/sgl-workspace/sglang/python/\"); print(miles.__file__, sglang.__file__)")'
 echo "== upstream parse_args tests (lr-fix set)"
 (python3 -c 'import pytest' 2>/dev/null || pip install -q pytest)
 check parse_args_tests 'PYTHONPATH=/root/miles:/work/yeto python3 -c "import miles.utils.arguments, megatron.training; print(\"imports ok\")" && PYTHONPATH=/root/miles:/work/yeto python3 -m pytest -q -rs -p no:cacheprovider tests/test_rl_miles_adapter_config.py tests/test_rl_argv_snapshot.py 2>&1 | tail -15 | tee /tmp/pytest.txt; grep -qE "passed" /tmp/pytest.txt && ! grep -qE "[0-9]+ (failed|error)" /tmp/pytest.txt'
