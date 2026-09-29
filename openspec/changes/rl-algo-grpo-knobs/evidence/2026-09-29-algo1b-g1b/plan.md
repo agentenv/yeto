@@ -65,3 +65,10 @@
 - 还是在 launcher 启动阶段就失败："event tapes already exist for run 'algo1b-g1b-a'"。第 2 次尝试的事件磁带仍留在 `~/.yeto/runs/algo1b-g1b-a/`。这次没有建 app，也没有用 GPU。
 - 修复：把第 2 次尝试的 run 目录（events、meta.json）存进 `attempt2-out-a/yeto-run/` 作为证据，原目录不删；之后每次尝试用新的 cluster-prefix，`ATTEMPT=5` 时为 `algo1b-g1b-a-5`（app 为 `yeto-algo1b-g1b-a-5`）。判据与配置都不变。
 - 按主 agent 的规定：如果第 5 次尝试仍然在第一个训练 step 之前失败，就保存证据、报告阻塞，不再重试。
+
+## run A 第 5 次尝试结论（prefix algo1b-g1b-a-5，19:31:15–19:40:35Z，app 已 stopped）
+- 训练：3 轮全部完成，每轮 2 个 optimizer step，共 6 个 step。事件磁带回传 33 条（`out-a/algo1b-g1b-a-5-l0-modal.jsonl`），其中有 `rl_round_trained`×3、`rl_local_round`×3 和 `rl_learner_finalized`。island job 为 SUCCEEDED。
+- **生效判据（pg_clipfrac > 0）：满足。** 每轮第 1 步（on-policy）为 0.0；第 2 步分别为 0.1046、0.1046、0.1107，都有限。
+- 没有 zero_grad、nonfinite、StrictRlInvariant、RoundFailed。4 行 Traceback 都属于那条良性的 SGLang freeze_gc 链。grad_norm 为 0.90/0.44/0.46。
+- **退出码的偏差（如实记录）**：launcher 最后以 exit code 2 结束，原因是 launcher.py:3994 "--rl-single-island-no-sync island ran on Modal … its ~/yeto-output is not fetchable over ssh and there is no syncer checkpoint"。这是 P0 no-sync Modal 路径的固定行为：learner 已经 finalized，launcher 仍然返回 2。预登记写的是"rc=0"，照字面这一条不满足；按"learner job SUCCEEDED 且有 finalized 事件"理解则满足。这里不自行放宽，交主 agent 判定。
+- 峰值显存在这个入口下没有采集（计划里也没有要求）。
