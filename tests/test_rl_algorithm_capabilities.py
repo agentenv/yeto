@@ -228,29 +228,39 @@ def test_fake_root_default_grpo_starts_other_mechanisms_rejected(tmp_path):
 # -- 5.5 allowance (capability side) -------------------------------------------------
 
 
-def test_unverified_allowance_single_island(tmp_path):
+def test_unverified_allowance_single_island_without_outer_sync(tmp_path):
     spec = AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28))
-    names = check_unverified_allowance(["clip_higher"], islands=1)
+    names = check_unverified_allowance(["features:clip_higher"], islands=1, outer_sync=False)
     caps = fake_capabilities().with_unverified(names)
-    engine, driver = _driver(tmp_path, spec, caps)
+    engine, driver = _driver(tmp_path, spec, caps)  # LocalOnlySync: no outer sync
     assert driver.run().policy_version == 1
-    assert json.loads(caps.to_json())["unverified_mechanisms"] == ["clip_higher"]
+    assert json.loads(caps.to_json())["unverified_mechanisms"] == ["features:clip_higher"]
     # the allowance does not enter the algorithm hash
     assert spec.sha256() == AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28)).sha256()
 
 
-def test_unverified_allowance_refused_multi_island_and_unknown():
-    with pytest.raises(AlgorithmSpecError, match="single-island.*2 islands"):
-        check_unverified_allowance(["clip_higher"], islands=2)
+def test_unverified_allowance_refused_with_outer_sync_multi_island_unknown():
+    with pytest.raises(AlgorithmSpecError, match="without outer sync.*2 island"):
+        check_unverified_allowance(["features:clip_higher"], islands=2, outer_sync=False)
+    with pytest.raises(AlgorithmSpecError, match="outer sync on"):
+        check_unverified_allowance(["features:clip_higher"], islands=1, outer_sync=True)
     with pytest.raises(AlgorithmSpecError, match="unknown mechanism"):
-        check_unverified_allowance(["no_such_mechanism"], islands=1)
+        check_unverified_allowance(["clip_higher"], islands=1, outer_sync=False)  # bare name
     with pytest.raises(CapabilityMismatch, match="unknown mechanism"):
-        fake_capabilities().with_unverified(["no_such_mechanism"])
+        fake_capabilities().with_unverified(["features:no_such_mechanism"])
+
+
+def test_unverified_allowance_is_dimension_qualified(tmp_path):
+    # "none" exists in two dimensions; allowing kl_placements:none must not
+    # admit corrections:none-like names elsewhere.
+    caps = fake_capabilities(corrections=set()).with_unverified(["kl_placements:none"])
+    with pytest.raises(CapabilityMismatch, match="corrections mechanism 'none'"):
+        _check(caps, AlgorithmSpec())
 
 
 def test_unverified_allowance_does_not_bypass_rejection_matrix(tmp_path):
     spec = AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"))  # no explicit clip
-    caps = fake_capabilities().with_unverified(["gspo"])
+    caps = fake_capabilities().with_unverified(["advantage_estimators:gspo"])
     engine, driver = _driver(tmp_path, spec, caps)
     with pytest.raises(CapabilityMismatch, match="sequence-level ratio") as info:
         driver.run()
@@ -260,7 +270,7 @@ def test_unverified_allowance_does_not_bypass_rejection_matrix(tmp_path):
 
 def test_unverified_allowance_exempts_only_named(tmp_path):
     spec = AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28, eps_clip_c=3.0))
-    caps = fake_capabilities().with_unverified(["clip_higher"])
+    caps = fake_capabilities().with_unverified(["features:clip_higher"])
     engine, driver = _driver(tmp_path, spec, caps)
     with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported") as info:
         driver.run()

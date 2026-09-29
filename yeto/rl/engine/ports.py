@@ -67,6 +67,11 @@ class RolloutBatchHandle:
     completed: int
     aborted: int
     payload: Any = field(default=None, repr=False, compare=False)
+    # alignment A2/F5: groups the algorithm intentionally dropped this round
+    # (terminal ``filtered``) and reusable leftovers (non-terminal
+    # ``carried_over``). None = the engine does not report it (3.6/4.1).
+    filtered: int | None = None
+    carried_over: int | None = None
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)

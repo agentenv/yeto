@@ -23,12 +23,6 @@ from test_rl_miles_adapter_config import make_config, sub
 REF = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
 # rl-algo-grpo-knobs: the only reward post-process of the ports path is the
 # yeto dispatcher, and a loss-placed KL must name its reference model.
-# Before rl-algo-grpo-knobs lands (no dispatcher module, no extension fields)
-# the fixture falls back to the P0-only form; the translated argv is the same.
-try:
-    DISPATCHER = PluginRef.from_path("yeto.rl.algos.reward_pipeline.post_process")
-except AlgorithmSpecError:
-    DISPATCHER = REF
 KL_REF = {"source": "Qwen/Qwen3-0.6B", "revision": "rev-a"}
 
 
@@ -37,6 +31,13 @@ def _registered(group, name):
 
     alg.load_extensions()
     return name in alg._FIELDS.get(group, {})
+
+
+# Branch on whether rl-algo-grpo-knobs has registered its fields (not on an
+# exception): with them, the dispatcher is the only reward post-process.
+KNOBS = _registered("advantage", "reward_shapers")
+DISPATCHER = (PluginRef.from_path("yeto.rl.algos.reward_pipeline.post_process")
+              if KNOBS else REF)
 
 
 def complete(spec):
@@ -50,7 +51,20 @@ def complete(spec):
     if (spec.kl.placement == "loss" and _registered("kl", "ref_model")
             and spec.kl.ref_model is None):
         spec = spec.replace(kl=spec.kl.with_ext(ref_model=KL_REF))
+    if "yeto.rl.algos.grpo_knobs" in _extension_modules():
+        # rl-algo-grpo-knobs F1: pipeline code modules pinned in spec.plugins
+        from yeto.rl.algos.grpo_knobs import with_pipeline_plugins
+
+        spec = with_pipeline_plugins(spec)
     return spec
+
+
+def _extension_modules():
+    import yeto.rl.algos as algos
+
+    return algos.EXTENSION_MODULES
+
+
 R0_ARGV = mc.translate_run_config(make_config(), AlgorithmSpec()).argv
 
 
@@ -80,7 +94,11 @@ def test_design_d3_flags_are_all_mapped():
         "--custom-reward-post-process-path", "--loss-type", "--custom-loss-function-path",
         "--dynamic-sampling-filter-path", "--over-sampling-batch-size",
     }
-    assert af.mapped_flags() == d3
+    # The reviewed P0 rows are exactly D3; the table is D3 plus the rows that
+    # registered extension modules declared (register_flag) -- nothing else.
+    assert af.BUILTIN_FLAGS == d3
+    assert af.mapped_flags() == d3 | af.EXTENSION_FLAGS
+    assert not (af.EXTENSION_FLAGS & d3)
 
 
 def test_objective_flags_are_adapter_owned():
@@ -122,9 +140,11 @@ def test_conflict_names_flag_and_both_values():
         mc.translate_run_config(make_config(), base, extra_argv=("--eps-clip-high", "0.3"))
 
 
-@pytest.mark.parametrize("flag", ["--gamma", "--lambd", "--use-routing-replay",
+@pytest.mark.parametrize("flag", ["--gamma", "--value-clip", "--lambd", "--use-routing-replay",
                                   "--rollout-temperature", "--partial-rollout"])
 def test_unmapped_objective_flag_rejected(flag):
+    if flag in af.mapped_flags():
+        pytest.skip(f"{flag} is mapped by a registered extension (EXTENSION_FLAGS)")
     argv = [flag] if flag in ("--use-routing-replay", "--partial-rollout") else [flag, "0.9"]
     with pytest.raises(mc.MilesConfigError, match=flag):
         mc.check_extra_argv(argv)
@@ -197,7 +217,9 @@ def test_each_mapped_field_translates(change, fragment):
     # absorption of the translation reproduces the spec (round trip)
     absorbed, rest, _ = af.absorb_extra_argv(AlgorithmSpec(), fragment)
     assert absorbed == spec and rest == ()
-    argv = list(mc.translate_run_config(make_config(), complete(spec)).argv)
+    # absorbed -> completed (1b: ref_model / reward_shapers) -> translated
+    assert complete(absorbed) == complete(spec)
+    argv = list(mc.translate_run_config(make_config(), complete(absorbed)).argv)
     i = argv.index(fragment[0])
     assert argv[i:i + len(fragment)] == fragment
     # the rest of the argv is the default GRPO argv, byte for byte

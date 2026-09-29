@@ -209,3 +209,37 @@ def test_legacy_and_ports_emit_identical_lr_schedule(overrides, expected):
         assert _lr_schedule_values(legacy) == {}
     else:
         assert [_lr_schedule_values(legacy)[f] for f in rc.LR_SCHEDULE_FLAGS] == expected
+
+
+def _captured_args():
+    captured = []
+    real = rl_learner.build_miles_argv
+
+    def capture(*args, **kwargs):
+        captured.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(launcher_tests, "build_miles_argv", capture)
+        launcher_tests.test_miles_argv_preserves_mrope_provider_configuration()
+    return captured[0]
+
+
+def test_standby_gpus_need_a_lora_fixed_partition():
+    """rl-infra-spec 2.1 / review F7: standby is never silently dropped."""
+
+    import argparse
+
+    (args,), kwargs = _captured_args()
+    base = vars(args)
+    part = argparse.Namespace(**{**base, "rl_placement": "fixed-partition",
+                                 "rollout_num_gpus": 2, "rl_standby_gpus": 2})
+    config = rc.resolve_rl_run_config(part, **kwargs)
+    assert config.parallel.standby_gpus == 2
+    assert config.parallel.dedicated_rollout_gpus == 2
+    colo = argparse.Namespace(**{**base, "rl_standby_gpus": 1})
+    with pytest.raises(ValueError, match="rl-placement fixed-partition"):
+        rc.resolve_rl_run_config(colo, **kwargs)
+    full = argparse.Namespace(**{**base, "parameter_mode": "full", "rl_standby_gpus": 1})
+    with pytest.raises(ValueError, match="not supported for full-parameter"):
+        rc.resolve_rl_run_config(full, **kwargs)

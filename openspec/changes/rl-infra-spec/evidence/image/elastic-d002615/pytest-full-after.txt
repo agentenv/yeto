@@ -1,0 +1,400 @@
+
+    def test_flags_reach_the_learner_command(monkeypatch):
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+>       task = _task(wandb=True, wandb_project="fleet-lab", wandb_entity="acme", wandb_mode="offline")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_wandb_plumbing.py:86: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_wandb_plumbing.py:70: in _task
+    return make_learner_task(_args(**over), _SPEC, 0, 1, "1.2.3.4:29400")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = Namespace(model='gemma4', data='org/data', loss_function='cross_entropy', train_on='assistant', shard='fsdp', tuning='...l_up=True, cluster_prefix='my-fleet', wandb=True, wandb_project='fleet-lab', wandb_entity='acme', wandb_mode='offline')
+spec = ClusterSpec(cloud='aws', region='us-east-2', num_nodes=1, gpus_per_node=8, gpu='B200')
+learner_id = 0, num_learners = 1, syncer_addr = '1.2.3.4:29400'
+
+    def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+>       import sky
+E       ModuleNotFoundError: No module named 'sky'
+
+yeto/launcher.py:2146: ModuleNotFoundError
+_______________ test_islands_are_told_which_fleet_they_belong_to _______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbb39d8b0>
+
+    def test_islands_are_told_which_fleet_they_belong_to(monkeypatch):
+        monkeypatch.setenv("WANDB_API_KEY", "secret")
+>       task = _task(wandb=True)
+               ^^^^^^^^^^^^^^^^^
+
+tests/test_wandb_plumbing.py:96: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_wandb_plumbing.py:70: in _task
+    return make_learner_task(_args(**over), _SPEC, 0, 1, "1.2.3.4:29400")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = Namespace(model='gemma4', data='org/data', loss_function='cross_entropy', train_on='assistant', shard='fsdp', tuning='...try_until_up=True, cluster_prefix='my-fleet', wandb=True, wandb_project='yeto', wandb_entity=None, wandb_mode='online')
+spec = ClusterSpec(cloud='aws', region='us-east-2', num_nodes=1, gpus_per_node=8, gpu='B200')
+learner_id = 0, num_learners = 1, syncer_addr = '1.2.3.4:29400'
+
+    def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+>       import sky
+E       ModuleNotFoundError: No module named 'sky'
+
+yeto/launcher.py:2146: ModuleNotFoundError
+______________________ test_a_missing_key_still_launches _______________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbb376270>
+
+    def test_a_missing_key_still_launches(monkeypatch):
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+>       task = _task(wandb=True)
+               ^^^^^^^^^^^^^^^^^
+
+tests/test_wandb_plumbing.py:105: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_wandb_plumbing.py:70: in _task
+    return make_learner_task(_args(**over), _SPEC, 0, 1, "1.2.3.4:29400")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = Namespace(model='gemma4', data='org/data', loss_function='cross_entropy', train_on='assistant', shard='fsdp', tuning='...try_until_up=True, cluster_prefix='my-fleet', wandb=True, wandb_project='yeto', wandb_entity=None, wandb_mode='online')
+spec = ClusterSpec(cloud='aws', region='us-east-2', num_nodes=1, gpus_per_node=8, gpu='B200')
+learner_id = 0, num_learners = 1, syncer_addr = '1.2.3.4:29400'
+
+    def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+>       import sky
+E       ModuleNotFoundError: No module named 'sky'
+
+yeto/launcher.py:2146: ModuleNotFoundError
+_______________ test_an_omitted_entity_is_not_forwarded_as_none ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbaaf3980>
+
+    def test_an_omitted_entity_is_not_forwarded_as_none(monkeypatch):
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+>       task = _task(wandb=True, wandb_entity=None)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_wandb_plumbing.py:112: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_wandb_plumbing.py:70: in _task
+    return make_learner_task(_args(**over), _SPEC, 0, 1, "1.2.3.4:29400")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = Namespace(model='gemma4', data='org/data', loss_function='cross_entropy', train_on='assistant', shard='fsdp', tuning='...try_until_up=True, cluster_prefix='my-fleet', wandb=True, wandb_project='yeto', wandb_entity=None, wandb_mode='online')
+spec = ClusterSpec(cloud='aws', region='us-east-2', num_nodes=1, gpus_per_node=8, gpu='B200')
+learner_id = 0, num_learners = 1, syncer_addr = '1.2.3.4:29400'
+
+    def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+>       import sky
+E       ModuleNotFoundError: No module named 'sky'
+
+yeto/launcher.py:2146: ModuleNotFoundError
+________________ test_a_failed_install_does_not_fail_the_island ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbaaf3170>
+
+    def test_a_failed_install_does_not_fail_the_island(monkeypatch):
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+>       setup = _task(wandb=True).setup
+                ^^^^^^^^^^^^^^^^^
+
+tests/test_wandb_plumbing.py:118: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_wandb_plumbing.py:70: in _task
+    return make_learner_task(_args(**over), _SPEC, 0, 1, "1.2.3.4:29400")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = Namespace(model='gemma4', data='org/data', loss_function='cross_entropy', train_on='assistant', shard='fsdp', tuning='...try_until_up=True, cluster_prefix='my-fleet', wandb=True, wandb_project='yeto', wandb_entity=None, wandb_mode='online')
+spec = ClusterSpec(cloud='aws', region='us-east-2', num_nodes=1, gpus_per_node=8, gpu='B200')
+learner_id = 0, num_learners = 1, syncer_addr = '1.2.3.4:29400'
+
+    def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+>       import sky
+E       ModuleNotFoundError: No module named 'sky'
+
+yeto/launcher.py:2146: ModuleNotFoundError
+__________ test_every_backend_forwards_the_flags[torch-yeto.learner] ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbb39ff20>
+backend = 'torch', entrypoint = 'yeto.learner'
+
+    @pytest.mark.parametrize(
+        "backend,entrypoint",
+        [("torch", "yeto.learner"), ("megatron", "yeto.megatron.learner")],
+    )
+    def test_every_backend_forwards_the_flags(monkeypatch, backend, entrypoint):
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+>       task = _task(wandb=True, island_backend=backend)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_wandb_plumbing.py:129: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_wandb_plumbing.py:70: in _task
+    return make_learner_task(_args(**over), _SPEC, 0, 1, "1.2.3.4:29400")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = Namespace(model='gemma4', data='org/data', loss_function='cross_entropy', train_on='assistant', shard='fsdp', tuning='...try_until_up=True, cluster_prefix='my-fleet', wandb=True, wandb_project='yeto', wandb_entity=None, wandb_mode='online')
+spec = ClusterSpec(cloud='aws', region='us-east-2', num_nodes=1, gpus_per_node=8, gpu='B200')
+learner_id = 0, num_learners = 1, syncer_addr = '1.2.3.4:29400'
+
+    def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+>       import sky
+E       ModuleNotFoundError: No module named 'sky'
+
+yeto/launcher.py:2146: ModuleNotFoundError
+____ test_every_backend_forwards_the_flags[megatron-yeto.megatron.learner] _____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbaa35dc0>
+backend = 'megatron', entrypoint = 'yeto.megatron.learner'
+
+    @pytest.mark.parametrize(
+        "backend,entrypoint",
+        [("torch", "yeto.learner"), ("megatron", "yeto.megatron.learner")],
+    )
+    def test_every_backend_forwards_the_flags(monkeypatch, backend, entrypoint):
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+>       task = _task(wandb=True, island_backend=backend)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_wandb_plumbing.py:129: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_wandb_plumbing.py:70: in _task
+    return make_learner_task(_args(**over), _SPEC, 0, 1, "1.2.3.4:29400")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = Namespace(model='gemma4', data='org/data', loss_function='cross_entropy', train_on='assistant', shard='fsdp', tuning='...try_until_up=True, cluster_prefix='my-fleet', wandb=True, wandb_project='yeto', wandb_entity=None, wandb_mode='online')
+spec = ClusterSpec(cloud='aws', region='us-east-2', num_nodes=1, gpus_per_node=8, gpu='B200')
+learner_id = 0, num_learners = 1, syncer_addr = '1.2.3.4:29400'
+
+    def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+>       import sky
+E       ModuleNotFoundError: No module named 'sky'
+
+yeto/launcher.py:2146: ModuleNotFoundError
+=============================== warnings summary ===============================
+tests/test_delta_protocol.py:299
+  /home/michael/work/img/tests/test_delta_protocol.py:299: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(20)
+
+tests/test_delta_protocol.py:333
+  /home/michael/work/img/tests/test_delta_protocol.py:333: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(30)
+
+tests/test_delta_protocol.py:368
+  /home/michael/work/img/tests/test_delta_protocol.py:368: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(30)
+
+tests/test_delta_protocol.py:418
+  /home/michael/work/img/tests/test_delta_protocol.py:418: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(30)
+
+tests/test_delta_protocol.py:455
+  /home/michael/work/img/tests/test_delta_protocol.py:455: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(30)
+
+tests/test_delta_protocol.py:502
+  /home/michael/work/img/tests/test_delta_protocol.py:502: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(30)
+
+tests/test_delta_protocol.py:583
+  /home/michael/work/img/tests/test_delta_protocol.py:583: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(30)
+
+tests/test_delta_protocol.py:628
+  /home/michael/work/img/tests/test_delta_protocol.py:628: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(30)
+
+tests/test_delta_protocol.py:661
+  /home/michael/work/img/tests/test_delta_protocol.py:661: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(30)
+
+tests/test_gpu_smollm.py:106
+  /home/michael/work/img/tests/test_gpu_smollm.py:106: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(1800)
+
+tests/test_integration.py:250
+  /home/michael/work/img/tests/test_integration.py:250: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(180)
+
+tests/test_integration.py:389
+  /home/michael/work/img/tests/test_integration.py:389: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(180)
+
+tests/test_integration.py:451
+  /home/michael/work/img/tests/test_integration.py:451: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(180)
+
+tests/test_integration.py:535
+  /home/michael/work/img/tests/test_integration.py:535: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(180)
+
+tests/test_integration.py:598
+  /home/michael/work/img/tests/test_integration.py:598: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(180)
+
+tests/test_integration.py:630
+  /home/michael/work/img/tests/test_integration.py:630: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(180)
+
+tests/test_integration.py:661
+  /home/michael/work/img/tests/test_integration.py:661: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(180)
+
+tests/test_integration.py:735
+  /home/michael/work/img/tests/test_integration.py:735: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(180)
+
+tests/test_reconnect.py:237
+  /home/michael/work/img/tests/test_reconnect.py:237: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(10)
+
+tests/test_reconnect.py:282
+  /home/michael/work/img/tests/test_reconnect.py:282: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(25)
+
+tests/test_reconnect.py:349
+  /home/michael/work/img/tests/test_reconnect.py:349: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(25)
+
+tests/test_rl_miles_full_parameter_dense.py:354
+  /home/michael/work/img/tests/test_rl_miles_full_parameter_dense.py:354: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+tests/test_rl_miles_full_parameter_dense.py:412
+  /home/michael/work/img/tests/test_rl_miles_full_parameter_dense.py:412: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+tests/test_rl_miles_sao_streaming.py:344
+  /home/michael/work/img/tests/test_rl_miles_sao_streaming.py:344: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+tests/test_rl_miles_sao_streaming.py:373
+  /home/michael/work/img/tests/test_rl_miles_sao_streaming.py:373: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+tests/test_rl_miles_sao_streaming.py:413
+  /home/michael/work/img/tests/test_rl_miles_sao_streaming.py:413: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+tests/test_rl_miles_sao_streaming.py:448
+  /home/michael/work/img/tests/test_rl_miles_sao_streaming.py:448: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+tests/test_rl_miles_sao_streaming.py:481
+  /home/michael/work/img/tests/test_rl_miles_sao_streaming.py:481: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+tests/test_rl_miles_sao_streaming.py:519
+  /home/michael/work/img/tests/test_rl_miles_sao_streaming.py:519: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+tests/test_rl_miles_sao_streaming.py:632
+  /home/michael/work/img/tests/test_rl_miles_sao_streaming.py:632: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_delivery.py::test_upload_sky_resolves_store_type_from_uri
+FAILED tests/test_diffusion.py::test_launcher_routes_diffusion_to_diffusion_learner_and_opt_in_caches
+FAILED tests/test_diffusion.py::test_launcher_passes_diffusion_resize_mode - ...
+FAILED tests/test_diffusion.py::test_launcher_passes_diffusion_loss_weighting_only_for_diffusion
+FAILED tests/test_diffusion.py::test_launcher_passes_the_model_kind_specific_seed
+FAILED tests/test_diffusion.py::test_launcher_routes_video_aliases_without_model_family_flags
+FAILED tests/test_diffusion.py::test_launcher_passes_diffusion_adapter_hook
+FAILED tests/test_diffusion.py::test_launcher_defaults_protenix_adapter_and_setup
+FAILED tests/test_diffusion.py::test_launcher_defaults_hunyuan3d_adapter_and_setup
+FAILED tests/test_diffusion.py::test_launcher_defaults_alphafold3_adapter_without_prefetch
+FAILED tests/test_diffusion.py::test_diffusion_sample_task_uses_yeto_sample_and_mounts_data
+FAILED tests/test_integration.py::test_learner_budget_restart_freezes_exactly_and_marks_complete_checkpoint
+FAILED tests/test_integration.py::test_two_learners_converge_to_mean - FileNo...
+FAILED tests/test_integration.py::test_bf16_session_saves_lossless_authoritative_cut_and_checkpoint
+FAILED tests/test_integration.py::test_final_ack_membership_excludes_previously_abandoned_learner
+FAILED tests/test_integration.py::test_single_learner_roundtrip_q4 - FileNotF...
+FAILED tests/test_integration.py::test_min_round_interval_paces_rounds - File...
+FAILED tests/test_integration.py::test_single_learner_roundtrip_iso[scalar]
+FAILED tests/test_integration.py::test_single_learner_roundtrip_iso[torch-svd]
+FAILED tests/test_integration.py::test_single_learner_roundtrip - FileNotFoun...
+FAILED tests/test_island_backend.py::test_torch_backend_uses_shard_and_torch_learner
+FAILED tests/test_island_backend.py::test_torch_backend_installs_only_explicit_kernel_dependencies
+FAILED tests/test_island_backend.py::test_liger_launcher_rejects_non_builtin_loss
+FAILED tests/test_island_backend.py::test_liger_launcher_rejects_unvalidated_tuning_and_sharding
+FAILED tests/test_island_backend.py::test_megatron_rejects_torch_kernel_flags
+FAILED tests/test_island_backend.py::test_launcher_forwards_explicit_legacy_mask_mode
+FAILED tests/test_island_backend.py::test_launcher_forwards_data_format - Mod...
+FAILED tests/test_island_backend.py::test_qlora_installs_and_forwards_nf4 - M...
+FAILED tests/test_island_backend.py::test_launcher_mounts_and_forwards_parent_adapter
+FAILED tests/test_island_backend.py::test_launcher_rejects_invalid_parent_adapter_profiles[overrides0-only to causal-LM]
+FAILED tests/test_island_backend.py::test_launcher_rejects_invalid_parent_adapter_profiles[overrides1-require --island-backend torch]
+FAILED tests/test_island_backend.py::test_launcher_rejects_invalid_parent_adapter_profiles[overrides2-require --tuning lora]
+FAILED tests/test_island_backend.py::test_launcher_rejects_invalid_parent_adapter_profiles[overrides3-must be attested]
+FAILED tests/test_island_backend.py::test_qlora_rejects_unsupported_launch_profiles[overrides0-requires --tuning lora]
+FAILED tests/test_island_backend.py::test_qlora_rejects_unsupported_launch_profiles[overrides1-requires --shard ddp]
+FAILED tests/test_island_backend.py::test_qlora_rejects_unsupported_launch_profiles[overrides2-requires --kernel-backend native]
+FAILED tests/test_island_backend.py::test_qlora_rejects_unsupported_launch_profiles[overrides3-torch causal-LM]
+FAILED tests/test_island_backend.py::test_megatron_backend_swaps_entrypoint_and_runs_in_the_ngc_container
+FAILED tests/test_island_backend.py::test_expert_parallel_defaults_to_filling_the_island
+FAILED tests/test_island_backend.py::test_expert_parallel_respects_tp_pp_and_override
+FAILED tests/test_rl_benchmark.py::test_resume_identity_survives_json_round_trip
+FAILED tests/test_rl_dense_full_parameter_sweep.py::test_two_real_clients_match_central_grpo_for_identical_frozen_batch
+FAILED tests/test_rl_dense_full_parameter_sweep.py::test_two_real_clients_resume_mid_sweep_without_double_accounting
+FAILED tests/test_rl_m1_dense_full_direct_launch.py::test_terminal_reconciler_requires_complete_cross_island_policy_and_accounting
+FAILED tests/test_rl_miles_full_parameter_dense.py::test_terminal_h1_lifecycle_commits_only_after_inference_publication
+FAILED tests/test_rl_miles_full_parameter_dense.py::test_failed_inference_publication_keeps_wire_pending_and_blocks_finalize
+FAILED tests/test_rl_miles_sao_streaming.py::test_paired_coordinator_nonblockingly_retains_asymmetric_pull
+FAILED tests/test_rl_miles_sao_streaming.py::test_pipeline_depth_two_queues_later_pair_without_wan_commit
+FAILED tests/test_rl_miles_sao_streaming.py::test_pair_replays_a_true_enqueue_that_never_reaches_server_commit
+FAILED tests/test_rl_miles_sao_streaming.py::test_partial_push_replays_exact_cut_with_incremented_round_attempt
+FAILED tests/test_rl_miles_sao_streaming.py::test_one_sided_timeout_fail_stops_without_releasing_later_step
+FAILED tests/test_rl_miles_sao_streaming.py::test_terminal_final_manifest_drains_all_retained_pipeline_pairs
+FAILED tests/test_rl_miles_sao_streaming.py::test_actor_and_critic_commit_together_but_only_actor_forms_rollout_identity
+FAILED tests/test_shape_providers.py::test_quota_usage_failed_region_zero_and_warning
+FAILED tests/test_shape_providers.py::test_throttled_scores_warn_and_yield_none
+FAILED tests/test_shape_providers.py::test_throttled_quota_warns - AssertionE...
+FAILED tests/test_shape_providers.py::test_non_throttle_client_error_warns_with_code
+FAILED tests/test_shape_providers.py::test_credentials_available_true - Modul...
+FAILED tests/test_shape_providers.py::test_credentials_available_false_without_credentials
+FAILED tests/test_shape_providers.py::test_credentials_available_false_on_error
+FAILED tests/test_wandb_plumbing.py::test_telemetry_is_absent_when_the_flag_is_off
+FAILED tests/test_wandb_plumbing.py::test_flags_reach_the_learner_command - M...
+FAILED tests/test_wandb_plumbing.py::test_islands_are_told_which_fleet_they_belong_to
+FAILED tests/test_wandb_plumbing.py::test_a_missing_key_still_launches - Modu...
+FAILED tests/test_wandb_plumbing.py::test_an_omitted_entity_is_not_forwarded_as_none
+FAILED tests/test_wandb_plumbing.py::test_a_failed_install_does_not_fail_the_island
+FAILED tests/test_wandb_plumbing.py::test_every_backend_forwards_the_flags[torch-yeto.learner]
+FAILED tests/test_wandb_plumbing.py::test_every_backend_forwards_the_flags[megatron-yeto.megatron.learner]
+ERROR tests/test_rl_miles_chunked_full_parameter.py
+ERROR tests/test_rl_miles_full_parameter_manifest_probe.py
+ERROR tests/test_delta_protocol.py::test_server_rejects_missing_or_mismatched_required_semantic_profile[\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00-semantic profile does not match]
+ERROR tests/test_delta_protocol.py::test_server_rejects_missing_or_mismatched_required_semantic_profile[None-missing the required syncer semantic profile binding]
+ERROR tests/test_delta_protocol.py::test_fresh_and_one_version_stale_deltas_ignore_global_drift[1]
+ERROR tests/test_delta_protocol.py::test_fresh_and_one_version_stale_deltas_ignore_global_drift[2]
+ERROR tests/test_delta_protocol.py::test_fresh_and_one_version_stale_deltas_ignore_global_drift[3]
+ERROR tests/test_delta_protocol.py::test_mid_round_join_cannot_count_toward_frozen_membership
+ERROR tests/test_delta_protocol.py::test_reconnect_generation_cannot_inject_or_be_erased_by_old_disconnect
+ERROR tests/test_delta_protocol.py::test_below_quorum_timeout_discards_partial_attempt
+ERROR tests/test_delta_protocol.py::test_version_layout_and_dtype_mismatches_fail_clearly
+ERROR tests/test_delta_protocol.py::test_out_of_range_learner_ids_are_rejected_at_startup_and_after_init
+ERROR tests/test_delta_protocol.py::test_malicious_payload_ids_fragments_and_lengths_are_rejected
+ERROR tests/test_delta_protocol.py::test_huge_first_frame_header_is_rejected_without_payload
+ERROR tests/test_rl_integration.py::test_two_fake_miles_islands_run_the_bridge_against_real_syncer
+ERROR tests/test_rl_integration.py::test_single_island_runs_the_real_syncer_parity_path
+ERROR tests/test_rl_integration.py::test_decoupled_bridge_matches_two_fragment_nesterov_oracle
+ERROR tests/test_rl_integration.py::test_decoupled_budget_freezes_then_consolidates_every_fragment
+ERROR tests/test_rl_integration.py::test_terminal_replacement_receives_final_policy
+ERROR tests/test_rl_integration.py::test_terminal_checkpoint_eval_resume_skips_init_and_finalizes
+ERROR tests/test_rl_integration.py::test_miles_public_hook_runs_against_real_syncer
+ERROR tests/test_rl_integration.py::test_fixed_roster_exact_base_duplicate_disconnect_and_manual_average
+ERROR tests/test_rl_integration.py::test_checkpoint_failure_happens_before_any_broadcast
+ERROR tests/test_rl_integration.py::test_stale_update_fails_strict_run_and_records_metric
+ERROR tests/test_rl_integration.py::test_rl_resume_layout_mismatch_is_a_strict_failure
+ERROR tests/test_rl_integration.py::test_restart_before_and_after_commit_recovers_old_and_new_cut
+68 failed, 2304 passed, 43 skipped, 30 warnings, 26 errors in 43.97s

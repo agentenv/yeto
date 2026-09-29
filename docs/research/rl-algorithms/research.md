@@ -24,7 +24,7 @@
 
 ## 1. 关键发现（决策前必读）
 
-1. **ports 当前只允许 GRPO**，另外可选有界非零方差过滤和 `kl_coef`。见 [源码] `yeto/rl/engine/algorithm.py:22-24`；能力声明在 `miles_adapter/entry.py:49-50`，只有 `{"grpo"}`。
+1. **[历史基线 yeto `18695ae`，已由 rl-algorithm-capabilities 改变，现状见 §8]** **ports 当时只允许 GRPO**，另外可选有界非零方差过滤和 `kl_coef`。见 [源码] `yeto/rl/engine/algorithm.py:22-24`；能力声明在 `miles_adapter/entry.py:49-50`，只有 `{"grpo"}`。
 
 2. **Miles 基线已原生实现大部分无 critic 机制**，都是 [源码]：
    - GSPO：`--advantage-estimator gspo`
@@ -214,14 +214,16 @@
 
 ## 5. yeto ports 现状与缺口
 
-| 项 | 现状 [源码] | 缺口 |
+本节“现状”一列是**历史基线**（yeto `18695ae`，rl-algorithm-capabilities 之前）；“缺口”一列的处理结果以 §8 的已确认方案为准，其中 extra argv 与 provenance 两行已由该 change 实现。
+
+| 项 | 历史基线 [源码] | 缺口（处理见 §8） |
 |---|---|---|
 | `AlgorithmSpec` | 5 个字段、schema v1、规范化 JSON 的 SHA256（`algorithm.py`） | 缺 clip、聚合、KL 放置位置、修正方式、reward 后处理、loss 变体 |
 | 翻译 | 只输出 `--advantage-estimator`、`--kl-coef`、`--dynamic-sampling-filter-path`（`config.py:535, 550-553`） | 新字段需要映射，并把对应参数加入 `ADAPTER_OWNED_FLAGS` |
 | 能力 | `advantage_estimators`、`dynamic_sampling_filters`（`capabilities.py`） | 缺 loss、修正、reward 后处理、KL 模式等维度；`check()` 只比较 estimator 和 filter |
-| extra argv | 算法参数可以透传（§1.3） | 已映射的吸收进 spec，冲突报错，未映射的影响目标参数拒绝（§8 第 3 条） |
+| extra argv | （历史基线）算法参数可以透传（§1.3） | 已映射的吸收进 spec，冲突报错，未映射的影响目标参数拒绝（§8 第 3 条） |
 | 不变量 | 按 GRPO 判定（§1.6） | 需要由算法声明"期望有梯度"的判定条件 |
-| provenance | 事件里有哈希，导出文件里没有；外层身份不含算法（§1.7） | 导出时写入；岛之间做一致性校验 |
+| provenance | （历史基线）事件里有哈希，导出文件里没有；外层身份不含算法（§1.7） | 导出时写入；岛之间做一致性校验 |
 | legacy | 不改（约束） | 新算法只走 ports |
 | runtime attrs | 已有机制把 yeto 参数挂到 Miles namespace 上（`to_legacy_runtime_attrs`，`config.py:691`） | 插件的配置可以复用这个机制下发，不必新开参数 |
 

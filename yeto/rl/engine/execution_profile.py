@@ -74,6 +74,14 @@ class ProfileError(ValueError):
     """The execution profile is malformed or asks for an uncertified contract."""
 
 
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
 def _pair(a: str, b: str) -> tuple[str, str]:
     if a not in TASKS or b not in TASKS:
         raise ProfileError(f"unknown task in overlap pair {(a, b)}; tasks are {TASKS}")
@@ -128,11 +136,18 @@ class ExecutionProfile:
     ready_buffer_groups: int = 0  # extra complete groups buffered beyond one batch
     allowed_overlap: frozenset[tuple[str, str]] = frozenset()
     publish_rule: str = "after-every-update"
+    # alignment.md A1: the algorithm contract identity is the canonical hash of
+    # the run's ``AlgorithmSpec`` (``AlgorithmSpec.sha256()``, 64 hex). None =
+    # unbound profile (planning only); the driver refuses to run one.
+    algorithm_spec_sha256: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:
         if not self.name:
             raise ProfileError("profile name is required")
+        digest = self.algorithm_spec_sha256
+        if digest is not None and not _is_sha256_hex(digest):
+            raise ProfileError("algorithm_spec_sha256 must be 64 lowercase hex characters")
         object.__setattr__(self, "execution_mode", canonical_execution_mode(self.execution_mode))
         if self.execution_mode not in EXECUTION_MODES:
             raise ProfileError(f"execution_mode must be one of {EXECUTION_MODES}")
@@ -215,6 +230,91 @@ class ExecutionProfile:
             ready_buffer_groups=max(0, max_groups - work["groups_per_update"]),
             allowed_overlap=frozenset(tuple(p) for p in overlap),
             publish_rule=profile.get("publish_rule", "after-every-update"),
+            algorithm_spec_sha256=profile.get("algorithm_spec_sha256"),
+        )
+
+    def bind_algorithm(self, algorithm: Any) -> "ExecutionProfile":
+        """This profile bound to ``algorithm`` (checked by :func:`check_algorithm_contract`)."""
+        from dataclasses import replace
+
+        bound = replace(self, algorithm_spec_sha256=algorithm.sha256())
+        check_algorithm_contract(bound, algorithm)
+        return bound
+
+
+# Largest policy age any execution mode certified by THIS change can produce
+# (design D0 / alignment A1, F6): every mode, partitioned-overlap included, is
+# 0. A larger value can only come from a separately certified algorithm contract.
+CERTIFIED_MODE_MAX_POLICY_AGE: Mapping[str, int] = {m: 0 for m in EXECUTION_MODES}
+
+
+def execution_max_policy_staleness(modes: Iterable[str]) -> int:
+    """Value for ``EngineCapabilities.execution.max_policy_staleness`` (A1).
+
+    The maximum policy age the declared execution modes can produce. Unknown
+    modes are refused rather than assumed stale-free.
+    """
+    ages = []
+    for mode in modes:
+        mode = canonical_execution_mode(mode)
+        if mode not in CERTIFIED_MODE_MAX_POLICY_AGE:
+            raise ProfileError(f"execution mode {mode!r} has no certified policy age")
+        ages.append(CERTIFIED_MODE_MAX_POLICY_AGE[mode])
+    return max(ages, default=0)
+
+
+def algorithm_max_policy_staleness(algorithm: Any) -> int:
+    """``AlgorithmSpec.execution.max_policy_staleness`` (rl-algorithm-capabilities D1/D4).
+
+    The v1 spec (5 flat fields, R0) has no ``execution`` group; every v1
+    algorithm is on-policy GRPO, so it reads as 0. INTERFACE NOTE: written
+    against the P0 design (``spec.execution.max_policy_staleness``) before the
+    ALGO-CAP v2 dataclass was frozen; re-check when it lands.
+    """
+    execution = getattr(algorithm, "execution", None)
+    if execution is None:
+        return 0
+    value = getattr(execution, "max_policy_staleness", None)
+    if value is None and isinstance(execution, Mapping):
+        value = execution.get("max_policy_staleness")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProfileError(
+            f"AlgorithmSpec.execution.max_policy_staleness must be a non-negative int, got {value!r}"
+        )
+    return value
+
+
+def check_algorithm_contract(profile: ExecutionProfile, algorithm: Any) -> None:
+    """A1: run BEFORE any GPU process exists. Raises :class:`ProfileError`.
+
+    * the profile must be bound to exactly this algorithm description
+      (``algorithm_spec_sha256 == algorithm.sha256()``);
+    * ``max_policy_age <= AlgorithmSpec.execution.max_policy_staleness``;
+    * the mode's certified maximum age must not exceed what the algorithm
+      tolerates either (the engine side of the same comparison).
+    """
+    digest = algorithm.sha256()
+    if profile.algorithm_spec_sha256 is None:
+        raise ProfileError(
+            f"profile {profile.name!r} is not bound to an AlgorithmSpec "
+            "(algorithm_spec_sha256 missing)"
+        )
+    if profile.algorithm_spec_sha256 != digest:
+        raise ProfileError(
+            f"profile {profile.name!r} is bound to algorithm {profile.algorithm_spec_sha256}, "
+            f"run uses {digest}"
+        )
+    tolerated = algorithm_max_policy_staleness(algorithm)
+    if profile.max_policy_age > tolerated:
+        raise ProfileError(
+            f"profile max_policy_age={profile.max_policy_age} exceeds the algorithm's "
+            f"max_policy_staleness={tolerated}"
+        )
+    produced = execution_max_policy_staleness([profile.execution_mode])
+    if produced > tolerated:
+        raise ProfileError(
+            f"{profile.execution_mode} may produce policy age {produced}; the algorithm "
+            f"tolerates {tolerated}"
         )
 
 

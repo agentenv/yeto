@@ -331,12 +331,110 @@ def test_launch_and_island_checks():
         alg.unregister(launch_check="t_launch", island_check="t_island")
 
 
-def test_gradient_rule_only_relaxes():
-    alg.register_gradient_rule("t_rule", lambda s, b, m: False if s.entropy_coef == 0.25 else None)
+def test_relaxing_gradient_rule_is_bound_to_its_mechanism():
+    # A rule that would relax *every* round is consulted only for specs that
+    # require its mechanism: default GRPO stays exactly the R0 rule.
+    alg.register_gradient_rule("t_rule", lambda s, b, m: False,
+                               mechanism="features:entropy_bonus")
     try:
         batch = _groups(0.5)
-        assert AlgorithmSpec(entropy_coef=0.25).expects_gradient(batch) is False
-        assert AlgorithmSpec().expects_gradient(batch) is True
+        assert AlgorithmSpec(entropy_coef=0.25).gradient_expectation(batch) == (
+            False, "gradient_rule:t_rule (features:entropy_bonus)")
+        for spec in (AlgorithmSpec(), BOUNDED):
+            for stds in ((0.5,), (0.0,), (0.0, 0.2)):
+                b = _groups(*stds)
+                assert spec.expects_gradient(b, SimpleNamespace(masked_fraction=1.0)) \
+                    == _r0_driver_rule(b)
         assert AlgorithmSpec(entropy_coef=0.25).expects_gradient(_groups(0.0)) is False
+        with pytest.raises(ValueError, match="dimension:name"):
+            alg.register_gradient_rule("t_bad", lambda s, b, m: None, mechanism="entropy")
     finally:
         alg.unregister(gradient_rule="t_rule")
+
+
+def test_masked_fraction_must_be_a_real_fraction():
+    alg.register_mechanism("features", "t_mask2", lambda s: s.loss.eps_clip == 0.125,
+                           masks_tokens=True)
+    try:
+        spec = AlgorithmSpec(loss=LossSpec(eps_clip=0.125))
+        for bad in (True, 2.0, -1, "1.0", float("nan")):
+            assert spec.expects_gradient(_groups(0.5), SimpleNamespace(masked_fraction=bad))
+        assert not spec.expects_gradient(_groups(0.5), SimpleNamespace(masked_fraction=1))
+    finally:
+        alg.unregister(mechanism=("features", "t_mask2"))
+
+
+def test_register_field_requires_hashable_values():
+    with pytest.raises(ValueError, match="hashable"):
+        alg.register_field("loss", "t_list_default", default=[], parse=lambda p, v: v)
+    alg.register_field("loss", "t_list", default=None, parse=lambda p, v: v)
+    try:
+        with pytest.raises(AlgorithmSpecError, match=r"loss\.t_list.*unhashable"):
+            LossSpec().with_ext(t_list=[1, 2])
+        assert LossSpec().with_ext(t_list=(1, 2)).t_list == (1, 2)
+    finally:
+        alg.unregister(field=("loss", "t_list"))
+
+
+def test_load_extensions_retries_after_a_failed_import(monkeypatch):
+    import yeto.rl.algos as algos
+
+    monkeypatch.setattr(alg, "_EXTENSIONS_LOADED", False)
+    monkeypatch.setattr(algos, "EXTENSION_MODULES", ("yeto.rl.algos.no_such_extension",))
+    with pytest.raises(ImportError):
+        alg.load_extensions()
+    assert alg._EXTENSIONS_LOADED is False
+    monkeypatch.setattr(algos, "EXTENSION_MODULES", ())
+    alg.load_extensions()
+    assert alg._EXTENSIONS_LOADED is True
+
+
+def test_gradient_rule_may_tighten_only_for_its_mechanism():
+    alg.register_gradient_rule("t_tight", lambda s, b, m: True,
+                               mechanism="features:entropy_bonus")
+    try:
+        zero = _groups(0.0, 0.0)
+        assert AlgorithmSpec(entropy_coef=0.25).gradient_expectation(zero) == (
+            True, "tightened:gradient_rule:t_tight (features:entropy_bonus)")
+        for spec in (AlgorithmSpec(), BOUNDED):  # default GRPO unchanged
+            for stds in ((0.5,), (0.0,), (0.0, 0.2)):
+                b = _groups(*stds)
+                assert spec.expects_gradient(b) == _r0_driver_rule(b)
+    finally:
+        alg.unregister(gradient_rule="t_tight")
+
+
+def test_extension_owned_pipeline_plugins_do_not_require_features_plugins(monkeypatch):
+    import yeto.rl.algos as algos
+
+    ref = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+    spec = AlgorithmSpec(plugins=(ref,))
+    assert ("features", "plugins") in spec.required_mechanisms()  # foreign plugin
+    monkeypatch.setattr(alg, "_PIPELINE_PLUGIN_MODULES", {"yeto.rl.engine.algorithm"})
+    assert ("features", "plugins") not in spec.required_mechanisms()
+    assert spec.sha256() != AlgorithmSpec().sha256()  # identity still hashed
+    monkeypatch.setattr(alg, "_PIPELINE_PLUGIN_MODULES", set())
+    monkeypatch.setattr(algos, "EXTENSION_MODULES", ("yeto.rl.engine.algorithm",))
+    assert ("features", "plugins") not in spec.required_mechanisms()
+    with pytest.raises(ValueError, match="yeto namespace"):
+        alg.register_pipeline_plugin_module("miles.x")
+
+
+def test_tightening_wins_over_relaxing_and_truthy_verdicts():
+    import numpy as np
+
+    alg.register_gradient_rule("t_relax", lambda s, b, m: np.bool_(False),
+                               mechanism="features:entropy_bonus")
+    alg.register_gradient_rule("t_tighten", lambda s, b, m: np.bool_(True),
+                               mechanism="features:entropy_bonus")
+    try:
+        spec = AlgorithmSpec(entropy_coef=0.25)
+        for stds in ((0.5,), (0.0,)):
+            assert spec.gradient_expectation(_groups(*stds)) == (
+                True, "tightened:gradient_rule:t_tighten (features:entropy_bonus)")
+        alg.unregister(gradient_rule="t_tighten")
+        assert spec.gradient_expectation(_groups(0.5)) == (
+            False, "gradient_rule:t_relax (features:entropy_bonus)")
+    finally:
+        alg.unregister(gradient_rule="t_relax")
+        alg.unregister(gradient_rule="t_tighten")

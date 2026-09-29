@@ -230,3 +230,17 @@ def test_ports_argv_installs_the_buffer_filter():
 
     assert "--buffer-filter-path" in mc.ADAPTER_OWNED_FLAGS
     assert mc.POLICY_BUFFER_FILTER_PATH.endswith("rollout_meta_hook.policy_buffer_filter")
+
+
+def test_filtered_count_comes_from_metadata_not_aborted():
+    """alignment A2/F5: filtered (terminal) is read from the hook metadata;
+    carried_over is not tracked yet and stays None (never inferred)."""
+    g = {"group_id": "g0", "sample_ids": ["s0"], "policy_token": "t", "reward_mean": 0.0,
+         "reward_std": 0.0, "token_count": 1}
+    payload = {"schema": hook.METADATA_SCHEMA, "rollout_id": 3, "groups": [g], "completed": 1,
+               "aborted": 2, "filtered": 5}
+    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
+    assert (h.aborted, h.filtered, h.carried_over) == (2, 5, None)
+    payload.pop("filtered")
+    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
+    assert h.filtered is None

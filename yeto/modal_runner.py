@@ -617,7 +617,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--learner-id", type=int, required=True, help="slot printed by the launch log")
     p.add_argument("--num-learners", type=int, required=True)
-    p.add_argument("--syncer-addr", required=True, help="HOST:PORT reachable from Modal")
+    p.add_argument("--syncer-addr", default=None, help="HOST:PORT reachable from Modal")
+    p.add_argument("--rl-single-island-no-sync", action="store_true",
+                   help="RL island with no syncer (rl-algorithm-capabilities); no --syncer-addr")
     p.add_argument("--cluster-prefix", default="yeto", help="run name (names the Modal app)")
     p.add_argument("--gpu", default="H100", help="sky accelerator name")
     p.add_argument("--gpus-per-node", type=int, default=1)
@@ -635,7 +637,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def config_from_cli(ns: argparse.Namespace) -> ModalIslandConfig:
-    envs = {"SYNCER_ADDR": ns.syncer_addr, "LEARNER_ID": str(ns.learner_id), "NUM_LEARNERS": str(ns.num_learners)}
+    envs = {"LEARNER_ID": str(ns.learner_id), "NUM_LEARNERS": str(ns.num_learners)}
+    if not getattr(ns, "rl_single_island_no_sync", False):
+        envs["SYNCER_ADDR"] = ns.syncer_addr
     for item in ns.env:
         key, _, value = item.partition("=")
         envs[key] = value
@@ -668,12 +672,21 @@ def config_from_cli(ns: argparse.Namespace) -> ModalIslandConfig:
 
 def main(argv: list[str] | None = None) -> int:
     ns = _parse_args(argv)
+    if ns.rl_single_island_no_sync:
+        if ns.training_mode != "rl" or ns.syncer_addr is not None or ns.num_learners != 1:
+            print("[modal] --rl-single-island-no-sync needs --training-mode rl, one learner "
+                  "and no --syncer-addr", file=sys.stderr)
+            return 2
+    elif ns.syncer_addr is None:
+        print("[modal] --syncer-addr is required", file=sys.stderr)
+        return 2
     cfg = config_from_cli(ns)
     cfg.validate()
     if not modal_available():
         print(f"[modal] no Modal credentials: {modal_credential_hint()}", file=sys.stderr)
         return 1
-    resolve_syncer_for_modal(ns.syncer_addr, None)
+    if not ns.rl_single_island_no_sync:
+        resolve_syncer_for_modal(ns.syncer_addr, None)
     ops = ModalOps(cfg.app_name)
     ops.define(cfg)
     ops.deploy()

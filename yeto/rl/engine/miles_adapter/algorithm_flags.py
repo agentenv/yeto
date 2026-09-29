@@ -229,6 +229,10 @@ _UNMAPPED = [
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}
+# Reviewed P0 rows (design D3) and rows added by extension modules; the
+# table must always equal their union (tests/test_rl_algorithm_flags.py).
+BUILTIN_FLAGS: frozenset[str] = frozenset(MAPPINGS)
+EXTENSION_FLAGS: set[str] = set()
 UNMAPPED_OBJECTIVE_FLAGS: set[str] = set(_UNMAPPED)
 
 
@@ -254,6 +258,7 @@ def register_flag(row: FlagMapping) -> None:
     if row.flag in MAPPINGS:
         raise ValueError(f"{row.flag} is already mapped")
     MAPPINGS[row.flag] = row
+    EXTENSION_FLAGS.add(row.flag)
     UNMAPPED_OBJECTIVE_FLAGS.discard(row.flag)
 
 
@@ -433,7 +438,10 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     try:
         base = resolve_ports_algorithm(args, rl_engine="ports")
         spec, remaining, absorbed = absorb_extra_argv(base, shlex.split(args.extra))
-        allow = check_unverified_allowance(args.rl_allow_unverified_mechanism or (), islands=1)
+        # models a single-island G1 smoke without outer sync (D11)
+        allow = check_unverified_allowance(
+            args.rl_allow_unverified_mechanism or (), islands=1, outer_sync=False
+        )
         result.update(
             schema=spec.schema,
             algorithm_spec=json.loads(spec.canonical_json()),
@@ -462,4 +470,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Run the package module, not this ``__main__`` copy: extension modules
+    # (``register_flag``) register rows into the package module's tables.
+    from yeto.rl.engine.miles_adapter import algorithm_flags as _package_module
+
+    raise SystemExit(_package_module.main())

@@ -155,6 +155,14 @@ def _validate_profile(profile: dict[str, Any]) -> None:
     for key in ("publish_rule", "reset_rule", "loss_normalization"):
         if not isinstance(profile.get(key), str) or not profile[key]:
             raise ManifestError(f"profile.{key} must be a non-empty string")
+    # alignment.md A1: the execution contract names the AlgorithmSpec by hash.
+    digest = profile.get("algorithm_spec_sha256")
+    if digest is not None and not (
+        isinstance(digest, str)
+        and len(digest) == 64
+        and all(c in "0123456789abcdef" for c in digest)
+    ):
+        raise ManifestError("profile.algorithm_spec_sha256 must be 64 lowercase hex characters")
 
 
 def _validate_matrix(matrix: dict[str, Any]) -> None:

@@ -176,7 +176,7 @@ class EngineCapabilities:
         return getattr(self, dimension)
 
     def with_unverified(self, names: Iterable[str]) -> "EngineCapabilities":
-        """Same declaration plus a single-island unverified-mechanism allowance."""
+        """Same declaration plus a D11 allowance (``dimension:name`` entries)."""
 
         from dataclasses import replace
 
@@ -296,7 +296,7 @@ class EngineCapabilities:
         }
         for dimension, name in sorted(pairs):
             supported = self.mechanisms(dimension)
-            if name in supported or name in self.unverified_mechanisms:
+            if name in supported or f"{dimension}:{name}" in self.unverified_mechanisms:
                 continue
             label = labels.get(dimension, f"{dimension} mechanism")
             problems.append(

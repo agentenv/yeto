@@ -66,3 +66,31 @@ GPU 验证：本 change 不需要，也没有做。没有使用任何云资源�
 ## 下一步
 - 主 agent 合入 `p0-driver.patch`，之后勾选 4.1/4.2。
 - 子 change 基于 `algo-cap` 最新提交 rebase，按 `EXTENSION_MODULES` 接入。
+
+## 2026-09-29（ALGO-CAP，合并 infra-a 并按独立审查修订）
+
+- 已合并 infra-a；调用 selection 时传入 `placement=args.rl_placement`（learner、launcher）；`miles_args.yeto_rl_expected_algorithm_sha256` 写入 learner。
+- 处理的审查意见：F2（research §1/§5 标为历史基线）、F4（注册字段必须可哈希）、F5（`load_extensions` 只在导入成功后置位）、F6（梯度规则绑定到机制，默认 GRPO 的判定不变）、F7（launcher 在起云资源前运行 launch_problems 与 capability check）、F8（`dimension:name`）、F9/F10（存在任何外层同步即拒绝放行）、F11（夹具按字段注册情况分支；1b 字段存在时真实测试往返）、F12（见下）、F14（launcher 与 learner 哈希口径一致；learner 吸收参数后哈希变化会被拒绝，已加测试）。F15/F16/F17 在 driver.py/trainer.py 中，改动放在 `p0-driver-2.patch`，algorithm.py 侧（`gradient_expectation`、`valid_masked_fraction`）已直接实现。
+- F12（ports 默认路径上可见的变化）：island learner 命令多了 `--rl-expected-algorithm-sha256`；`rl_engine_selected` 事件多了 `rl/algorithm_spec` 与 `rl/algorithm_absorbed_flags`；默认 GRPO 的 Miles argv 仍与 R0 逐字节相同。
+- 任务状态有变化：2.6、5.3、5.5 改回未勾选，4.1、4.2 勾选（详见 tasks.md 的修订记录）。
+
+### 待批准（新增）
+- **G1 与放行开关：已新增单岛无外层同步运行模式（主 agent 决定，用户可推翻）；放行开关口径未放宽。** 原问题：D11 按原文执行后，learner（`--syncer` 必填）和 launcher 两个入口都带外层同步，`--rl-allow-unverified-mechanism` 在所有真实入口上都会被拒绝。需另批：要么放宽口径（允许单岛带 1 成员 syncer），要么新增一个无 syncer 的单岛入口。在批准之前，各子 change 的 G1 无法通过放行开关运行。
+- 2.6 补救需要一次 Modal CPU 运行，按计划执行，费用 < $1。
+
+## 2026-09-29（ALGO-CAP，新增单岛无外层同步运行模式；主 agent 决定，用户可推翻；放行开关口径未放宽）
+
+- 新增显式入口 `--rl-single-island-no-sync`（learner、cli/launcher 都有），只用于 ports。行为：单岛、不连 syncer、`yeto_policy_sync=False`（LocalOnlySync，不做外层同步）。launcher 在这种模式下不启动 syncer 集群；Modal 岛不需要解析 syncer 地址，结果从岛本身取回。
+- 启动前拒绝的组合：`--syncer`、`--num-learners` ≠ 1、`--learner-id` ≠ 0、非默认 sync preset、initial adapter、legacy；launcher 还拒绝多个 `--gpu` 条目和 external learners。
+- 这是 D11 放行开关唯一合法的使用场景，满足原文“只在单岛运行中生效，与多岛或外层同步组合时拒绝”；没有放宽任何验收。
+- 事件中带 `rl/outer_sync=false`；有放行时带 `rl/contains_unverified_mechanisms=true` 和 `rl/unverified_mechanisms`。
+- 测试：`tests/test_rl_algorithm_provenance.py` 中的 no-sync 用例。全量失败集合与基线逐 id 相同。尚未做真实 GPU 运行，第一次真实使用由子 change 的 G1 完成。
+
+## 2026-09-29（ALGO-CAP，复审 bddb58a..2f9f02c 的修复）
+
+- **E1/E2/E3**：2.6 改回未勾选。result.md 已如实写明比较口径的偏离，以及原计划口径本身有误；两份运行日志已 `git add -f` 入库（入库前扫描无凭据）；yeto 版本按推断记录；第 3 次运行的计划 `attempt3-plan.md` 已先于运行提交。
+- **N1**：`--rl-single-island-no-sync` 在非 RL 模式下，`run()` 一开始就拒绝，先于其他任何准备步骤，已加测试。**N2**：措辞已改。**N3**：`rl/outer_sync` 现在总是写入事件。**N4**：modal_runner 归 IMG，补丁放在 `infra-drafts/algocap-modal-runner-nosync.patch`，已本地验证。
+- **G1**：固定优先级：只要有规则要求期望梯度就期望（收紧优先），之后才考虑放宽；规则返回值按 bool 转换，None 视为弃权；名不副实的旧测试已重命名；design D6 追加了一句说明收紧方向。**G2**：放在 `infra-drafts/p0-driver-3.patch`（基于 infra-a 39fa0ac）。在 infra-a 上单独套用本分支的 algorithm.py 时，`test_rl_algorithm_spec_v2` 中有一个用例会因为来源字符串改为 `tightened:` 而失败；algo-cap 合入 infra-a 后这个用例同步更新，失败随之消失。
+- **F-a**：映射表必须等于 D3（`BUILTIN_FLAGS`）与扩展声明的映射（`EXTENSION_FLAGS`）之并；`--gamma` 恢复为未映射参数的参数化用例，扩展注册了它的映射时跳过。
+- **S2**：docs 中子 change 的两个小节加了注：由对应子 change 提供，在集成分支生效。
+- **1b-p0tests-f1**：夹具改为只要 `grpo_knobs` 在 `EXTENSION_MODULES` 中就调用 `with_pipeline_plugins`，不再靠 import 异常回退；algo-cap 与 origin/algo-1b 2722cad 上都通过。
