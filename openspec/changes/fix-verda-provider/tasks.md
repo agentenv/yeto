@@ -2,22 +2,22 @@
 
 ## 1. provider、凭据与候选（A 块）
 
-- [ ] 1.1 `yeto/shape/providers.py`：凭据同时支持 JSON、INI（Verda CLI 格式）与环境变量；非 JSON 响应按文本处理，HTTP 错误保留响应内容且不输出凭据；地区列表去掉 ICL-01；型号表补 RTX PRO 6000、A100 40GB（参考 `/home/michael/work/gpu-verda/r0fix/verda.diff`）。验证：用 `/home/michael/work/verda-rca/*.json` 与新增的纯文本、空响应、503 夹具做单测，覆盖三种凭据来源。
-- [ ] 1.2 生成本地 SkyPilot Verda 目录（全部型号 × 全部地区 × 价格），本机在启动前生成，head 在 bootstrap 时生成同一份。验证：单测用临时 `SKY_HOME` 让 SkyPilot 的 Verda 目录模块读取生成的 CSV，L40S、RTX PRO 6000 等型号可被识别。
-- [ ] 1.3 候选按实时 `/instance-availability` 过滤与排序；下发 SkyPilot 时带 `instance_type` 与 `any_of` 多候选；容量失败后刷新可用性并有上限退避，全部失败时报告各候选的失败原因。验证：单测覆盖排序、`any_of` 生成、无货降权、退避上限与失败报告。
+- [x] 1.1 `yeto/shape/providers.py`：凭据同时支持 JSON、INI（Verda CLI 格式）与环境变量；非 JSON 响应按文本处理，HTTP 错误保留响应内容且不输出凭据；地区列表去掉 ICL-01；型号表补 RTX PRO 6000、A100 40GB（参考 `/home/michael/work/gpu-verda/r0fix/verda.diff`）。验证：用 `/home/michael/work/verda-rca/*.json` 与新增的纯文本、空响应、503 夹具做单测，覆盖三种凭据来源。
+- [x] 1.2 生成本地 SkyPilot Verda 目录（全部型号 × 全部地区 × 价格），本机在启动前生成，head 在 bootstrap 时生成同一份。验证：单测用临时 `SKY_HOME` 让 SkyPilot 的 Verda 目录模块读取生成的 CSV，L40S、RTX PRO 6000 等型号可被识别。
+- [x] 1.3 候选按实时 `/instance-availability` 过滤与排序；下发 SkyPilot 时带 `instance_type` 与 `any_of` 多候选；容量失败后刷新可用性并有上限退避，全部失败时报告各候选的失败原因。验证：单测覆盖排序、`any_of` 生成、无货降权、退避上限与失败报告。
 
 ## 2. 误删防护（B 块）
 
-- [ ] 2.1 集群名统一小写（`yeto/launcher.py` 的 `learner_cluster_names` 及其他生成集群名的位置）。验证：单测断言含大写 region 的输入生成全小写集群名；已有运行的 `yeto down` 仍按运行记录中的名字拆除。
-- [ ] 2.2 新增 `yeto/sky_patches/verda.py`：修正 `query_instances` 签名、查找状态、主机名精确匹配、失败清理只删本次新建 id、状态映射补全、等待条件 `>=`、空结果按 id 复查；带版本守卫。验证：mock Verda 客户端的单测覆盖同名前缀实例不被删、创建失败保留运行中实例、未知状态映射为 INIT、空结果按 id 复查、版本不匹配时不打补丁。
-- [ ] 2.3 补丁在本机与 head 都生效：本机在 yeto 导入 sky 后应用；head bootstrap 安装固定版本的 SkyPilot（`yeto/cli.py:1244`），并通过 `.pth` 入口让 SkyPilot API 服务进程也加载补丁。验证：单测检查 bootstrap 命令固定了版本并写入 `.pth`；真机验收项见 5.x。
-- [ ] 2.4 运行记录保存 Verda 实例 id；恢复前按 id 核实旧实例状态：仍在运行则不重拉并报告，已消失则以新集群名重拉。验证：恢复监督器单测覆盖 running、deleted、不存在三种情况与新名字生成。
-- [ ] 2.5 补丁未生效（版本不在已验证列表）时，Verda 岛强制 `recover_timeout=0` 并在启动时告警。验证：单测断言版本守卫失败时 Verda 岛的恢复被禁用、日志含告警，其他云不受影响。
+- [x] 2.1 集群名统一小写（`yeto/launcher.py` 的 `learner_cluster_names` 及其他生成集群名的位置）。验证：单测断言含大写 region 的输入生成全小写集群名；已有运行的 `yeto down` 仍按运行记录中的名字拆除。
+- [x] 2.2 新增 `yeto/sky_patches/verda.py`：修正 `query_instances` 签名、查找状态、主机名精确匹配、失败清理只删本次新建 id、状态映射补全、等待条件 `>=`、空结果按 id 复查；带版本守卫。验证：mock Verda 客户端的单测覆盖同名前缀实例不被删、创建失败保留运行中实例、未知状态映射为 INIT、空结果按 id 复查、版本不匹配时不打补丁。
+- [x] 2.3 补丁在本机与 head 都生效：本机在 yeto 导入 sky 后应用；head bootstrap 安装固定版本的 SkyPilot（`yeto/cli.py:1244`），并通过 `.pth` 入口让 SkyPilot API 服务进程也加载补丁。验证：单测检查 bootstrap 命令固定了版本并写入 `.pth`；真机验收项见 5.x。
+- [x] 2.4 运行记录保存 Verda 实例 id；恢复前按 id 核实旧实例状态：仍在运行则不重拉并报告，已消失则以新集群名重拉。验证：恢复监督器单测覆盖 running、deleted、不存在三种情况与新名字生成。
+- [x] 2.5 补丁未生效（版本不在已验证列表）时，Verda 岛强制 `recover_timeout=0` 并在启动时告警。验证：单测断言版本守卫失败时 Verda 岛的恢复被禁用、日志含告警，其他云不受影响。
 
 ## 3. 拆除与可观测（G 块）
 
-- [ ] 3.1 拆除前 best-effort 回传岛的事件磁带与作业日志、head 的 SkyPilot 日志与集群事件，失败只告警。验证：单测用 mock 的回传命令覆盖成功、超时、失败三种情况，拆除都会继续。
-- [ ] 3.2 Verda 拆除核实改为按实例 id 查询 Verda，并确认系统卷已永久删除（含回收站）；未确认时报告拆除未完成并列出剩余资源。验证：单测覆盖"SkyPilot 报告已删但实例仍在运行"与"卷在回收站"两种情况。
+- [x] 3.1 拆除前 best-effort 回传岛的事件磁带与作业日志、head 的 SkyPilot 日志与集群事件，失败只告警。验证：单测用 mock 的回传命令覆盖成功、超时、失败三种情况，拆除都会继续。
+- [x] 3.2 Verda 拆除核实改为按实例 id 查询 Verda，并确认系统卷已永久删除（含回收站）；未确认时报告拆除未完成并列出剩余资源。验证：单测覆盖"SkyPilot 报告已删但实例仍在运行"与"卷在回收站"两种情况。
 
 ## 4. 虚拟机内容器与规划器（C、E 块，在 `rl-engine-ports` 合入 main 之后）
 
@@ -27,7 +27,7 @@
 
 ## 5. Verda head / syncer（D 块）
 
-- [ ] 5.1 对 Verda 的 syncer 任务不传 `ports`；启动后本机对 syncer 端口做 TCP 探测，成功才启动岛，失败则拆除 head 并报告；实例内 ufw 只放行 SSH 与 syncer 端口。验证：单测覆盖探测成功与失败两条路径、ufw 规则生成。
+- [x] 5.1 对 Verda 的 syncer 任务不传 `ports`；启动后本机对 syncer 端口做 TCP 探测，成功才启动岛，失败则拆除 head 并报告；实例内 ufw 只放行 SSH 与 syncer 端口。验证：单测覆盖探测成功与失败两条路径、ufw 规则生成。
 
 ## 6. 真机验收（单卡按需 A100 80GB 或 L40S，预算约 $15）
 
@@ -36,3 +36,23 @@
 - [ ] 6.3 恢复：手动删除岛实例，yeto 按 id 确认已消失后以新集群名重拉并继续训练。验证：launch 日志与 Verda API 记录。
 - [ ] 6.4 Verda head：在 Verda CPU 实例上起 head，外部探测 syncer 端口成功，ufw 拒绝其他端口；岛（Verda 或其他云）连上 syncer 完成至少 1 轮同步。验证：探测与同步日志、拆除证明。
 - [ ] 6.5 恢复 `rl-engine-ports` 7.1 的 Verda 默认参数真实运行（2 岛 strict-avg 3 轮），作为本 change 的收尾验证。验证：两岛每轮 hash 一致、grad_norm 与 delta 非零、拆除证明。
+
+## 完成记录
+
+分支 `fix-verda-provider-r0`（基于 `origin/rl-engine-ports` d355e06）。证据目录 `openspec/changes/fix-verda-provider/evidence/`：
+`test_verda_provider.txt`（53 项单测逐项结果）、`real-sky-scenarios.json`（在 SkyPilot 0.13.0 真实 Verda 适配器上、以内存假 Verda 客户端驱动的补丁场景）、`pytest-summary.txt` 与 `pytest-failures-{before,after}.txt`（全量回归失败集合对比，按测试 id 去重后完全相同）。
+以下均为 CPU 单测 / 本地假客户端验证，**不含真实云实验**；真机验收在 6.x。
+
+- 1.1 `yeto/shape/providers.py`：`verda_credentials` 依次读环境变量、`~/.verda/config.json`、`~/.verda/credentials`（INI，任意 section）；`_verda_request` 对 JSON / 纯文本 id / 空响应分别返回对象 / 字符串 / None，HTTP 错误带响应体且脱敏凭据与 bearer；地区列表去掉 ICL-01；型号表加 `RTX PRO 6000 → RTX-PRO-6000`、`A100 40GB → A100`（`launcher.GPU_MEM_GB`、`catalog.PEAK_TFLOPS_BF16` 同步补齐）。测试：`test_credentials_*`、`test_request_handles_json_text_and_empty[*]`（含 verda-rca 抓取的 `instance_types.json`）、`test_http_error_keeps_body_and_hides_credentials`（503）、`test_locations_and_models`。
+- 1.2 `write_verda_sky_catalog` 写"全部型号 × 全部地区 × 价格"到 `$SKY_RUNTIME_DIR/.sky/catalogs/v8/verda/vms.csv`（SkyPilot 0.13 实际使用的变量是 `SKY_RUNTIME_DIR`，即任务中的"临时 SKY_HOME"）；本机在 `launcher.prepare_verda_islands` 生成，head 在 bootstrap 的 `VERDA_HEAD_CATALOG_STEP` 生成。测试 `test_generated_catalog_is_what_sky_reads` 在 SkyPilot 0.13.0 Python 子进程中用临时目录让 `sky.catalog.verda_catalog` 读取生成的 CSV：`1L40S.20V`、`1RTXPRO6000.30V` 存在，加速器含 L40S / RTX-PRO-6000 / A100 / A100-80GB / H100，价格与地区正确；`test_head_bootstrap_writes_the_catalog_for_verda_fleets`。
+- 1.3 `verda_candidates`（按实时可用性过滤，按失败次数降权→价格→地区排序，上限 4）、`verda_any_of`（带 `instance_type` 的有序多候选）、`launch_with_verda_candidates`（每次重试重新拉取可用性、指数退避有上限、非容量错误立即抛出、全部失败抛 `VerdaCapacityExhausted` 并逐候选列原因）；`launcher.launch_verda_island` 把候选作为有序 `Resources` 列表下发。测试：`test_candidates_*`、`test_launch_*`、`test_launch_verda_island_sends_ordered_any_of`。
+- 2.1 `launcher.sky_cluster_name` 把学习岛、syncer、head 集群名统一小写；`yeto down` 使用运行记录中的原名。测试：`test_cluster_names_are_lower_case`、`test_down_uses_recorded_names_verbatim`。
+- 2.2 `yeto/sky_patches/verda.py`：新签名 `query_instances`、`ACTIVE→running`、主机名精确匹配（`-head` / `-worker[-N]`）、失败清理只删本次新建 id（随后 provisioner 的 teardown 不再删旧实例）、状态映射补全且未知→INIT、等待条件 `>=`、空结果按已记录 id 复查、版本守卫（仅 0.13.0）。测试：假模块 8 项 `test_patch_*`，以及 `test_patch_against_real_sky_provisioner`（真实 sky 0.13.0 适配器，结果见 `real-sky-scenarios.json`：同名前缀实例未删、503 时运行中实例保留、未知状态 INIT、空列表按 id 复查为 UP、经 dispatcher 的参数顺序正确、版本不匹配不打补丁）。
+- 2.3 本机：`launcher.run` 导入 sky 后 `sky_patches.install()`（导入钩子），并为本机 SkyPilot API 服务进程写 `.pth`（`ensure_local_pth`；已在运行的 API 服务需 `sky api stop` 重启，会提示）。head：bootstrap 固定 `skypilot[...]==0.13.0`（`cli.HEAD_SKYPILOT_VERSION`）并写 `.pth`。测试：`test_head_bootstrap_pins_sky_and_writes_pth`、`test_pth_line_installs_the_hook_in_a_fresh_interpreter`、`test_install_patches_on_import_of_the_target`、`test_local_pth_for_the_sky_api_server`。"API 服务进程确实加载补丁"的真机核验在 6.2。
+- 2.4 `yeto/verda_ops.py` `VerdaInstanceGuard`：岛启动后按主机名取实例 id，经 `on_instance_ids` 写入运行记录 `verda_instance_ids`；`FleetController` 重拉前按 id 查询：running/provisioning 等→不重拉并报告；deleted / 404→以 `<name>-rN` 新名重拉（同步 teardown 列表与运行记录）；查询失败→本轮不重拉。测试：`test_guard_by_instance_id[running|provisioning|deleted|None]`、`test_next_cluster_name`、`test_controller_*`、`test_worker_saves_verda_ids_in_the_run_record`。
+- 2.5 `prepare_verda_islands`：版本不在已验证列表（或 `.pth` 写不进）时 Verda 岛进入 `no_recover`（等价 `recover_timeout=0`）并告警，其他云照常恢复。测试：`test_unverified_sky_disables_verda_recovery_only`、`test_local_pth_for_the_sky_api_server`。
+- 3.1 `launcher.collect_teardown_diagnostics`（`sky logs`、岛 `~/yeto-output/*.jsonl` 事件磁带；head 上另取 `~/.sky/api_server/server.log` 与集群事件），每条有超时、失败只告警；`teardown_island` 先回传再拆除。测试：`test_diagnostics_never_block_teardown[ok|timeout|fail]`。
+- 3.2 `verda_ops.verify_teardown` 按实例 id 查询 Verda、残留则再删、确认 OS 卷不在活动列表且回收站中的永久删除；`terminate_and_verify(verda_check=...)` 以 Verda 结果为准。测试：`test_teardown_reports_a_node_sky_called_deleted`、`test_teardown_purges_volumes_from_the_trash`、`test_terminate_and_verify_uses_the_verda_answer`。
+- 5.1 `launcher.syncer_ports` 对 Verda 返回 None（syncer 与 head 任务都不传 `ports`），`ufw_setup` 只放行 22 与 syncer 端口；本地 syncer 集群起来后 `tcp_probe`；head 模式先在 head 上起一次性监听（`probe_listener_command`）由本机探测，失败则拆除 head、不提交控制作业。测试：`test_verda_syncer_gets_no_ports_and_a_ufw_setup`、`test_tcp_probe_success_and_failure`、`test_head_launch_on_verda_probes_before_islands[True|False]`。
+
+未完成：4.1–4.3 依赖 `rl-engine-ports`（PR #69）合入 main；6.x 真机验收尚未运行（计划见 `progress.md`）。

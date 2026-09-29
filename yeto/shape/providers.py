@@ -856,21 +856,32 @@ class NebiusSignals(BaseCloudSignals):
 
 VERDA_API = "https://api.verda.com/v1"
 VERDA_CONFIG_PATH = "~/.verda/config.json"
+# The Verda CLI/SDK (and sky's Verda adaptor) write an INI file:
+# [default] verda_client_id = ... / verda_client_secret = ...
+VERDA_CREDENTIALS_PATH = "~/.verda/credentials"
 # Used when /locations cannot be read (it needs auth); verified 2026-09.
-VERDA_LOCATIONS_FALLBACK = ("FIN-01", "FIN-02", "FIN-03", "ICL-01")
-# Verda `model` string -> sky accelerator name. Confidential-computing
-# ("... CC") and pre-bf16 models are deliberately absent.
+# ICL-01 was retired in 2026-09 (absent from /instance-availability).
+VERDA_LOCATIONS_FALLBACK = ("FIN-01", "FIN-02", "FIN-03")
+# Verda `model` string -> sky accelerator name (the names sky's own
+# fetch_verda.py emits, so a generated catalog and sky agree).
+# Confidential-computing ("... CC") and pre-bf16 models are deliberately
+# absent.
 _VERDA_MODELS: dict[str, str] = {
     "H100": "H100",
     "H200": "H200",
     "B200": "B200",
     "A100 80GB": "A100-80GB",
+    "A100 40GB": "A100",
     "L40S": "L40S",
+    "RTX PRO 6000": "RTX-PRO-6000",
 }
 
 
 def verda_credentials() -> tuple[str, str] | None:
-    """(client_id, client_secret) from the env or ~/.verda/config.json."""
+    """(client_id, client_secret) from, in order: VERDA_CLIENT_ID /
+    VERDA_CLIENT_SECRET, ~/.verda/config.json (JSON), ~/.verda/credentials
+    (the Verda CLI's INI format, any section)."""
+    import configparser
     import json
     import os
 
@@ -880,17 +891,46 @@ def verda_credentials() -> tuple[str, str] | None:
     try:
         with open(os.path.expanduser(VERDA_CONFIG_PATH), encoding="utf-8") as f:
             cfg = json.load(f)
+        if isinstance(cfg, dict):
+            cid, secret = cfg.get("client_id"), cfg.get("client_secret")
+            if cid and secret:
+                return str(cid), str(secret)
     except (OSError, ValueError):
+        pass
+    ini = configparser.ConfigParser()
+    try:
+        if not ini.read(os.path.expanduser(VERDA_CREDENTIALS_PATH), encoding="utf-8"):
+            return None
+    except (configparser.Error, OSError, UnicodeDecodeError):
         return None
-    cid, secret = cfg.get("client_id"), cfg.get("client_secret")
-    return (str(cid), str(secret)) if cid and secret else None
+    for section in [ini.default_section, *ini.sections()]:
+        sec = ini[section]
+        cid = sec.get("verda_client_id") or sec.get("client_id")
+        secret = sec.get("verda_client_secret") or sec.get("client_secret")
+        if cid and secret:
+            return cid.strip(), secret.strip()
+    return None
 
 
 def verda_available() -> bool:
     return verda_credentials() is not None
 
 
+def _redact_verda(text: str) -> str:
+    """Strip anything that looks like our credentials or a bearer token."""
+    import re
+
+    creds = verda_credentials()
+    for secret in creds or ():
+        if secret:
+            text = text.replace(secret, "***")
+    return re.sub(r"(?i)(bearer\s+|access_token\"?\s*[:=]\s*\"?)[A-Za-z0-9._\-]+", r"\1***", text)
+
+
 def _verda_request(method: str, path: str, token: str | None = None, body: dict | None = None, params: dict | None = None):
+    """One Verda API call. JSON bodies come back parsed; create endpoints
+    answer with a bare id (returned as a string) and deletes with an empty
+    body (None). HTTP errors keep the (redacted) response body."""
     import json
     import urllib.error
     import urllib.parse
@@ -907,9 +947,23 @@ def _verda_request(method: str, path: str, token: str | None = None, body: dict 
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
+            raw = resp.read()
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"Verda API {path} -> HTTP {exc.code}") from exc
+        try:
+            detail = (exc.read() or b"")[:500].decode("utf-8", errors="replace").strip()
+        except Exception:  # noqa: BLE001 - the status code alone still helps
+            detail = ""
+        detail = _redact_verda(detail)
+        err = RuntimeError(f"Verda API {method} {path} -> HTTP {exc.code}" + (f": {detail}" if detail else ""))
+        err.status = exc.code  # type: ignore[attr-defined]
+        raise err from None
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
+    if not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text.strip()
 
 
 class VerdaSignals(BaseCloudSignals):
@@ -1051,6 +1105,242 @@ class VerdaSignals(BaseCloudSignals):
         if self._cache is None:
             return fetch()
         return self._cache.get_or(key, fetch, ttl=ttl)
+
+
+# -- Verda: local sky catalog + live candidates ---------------------------------
+#
+# sky's hosted verda/vms.csv is a stock snapshot (only the type x location
+# pairs in stock when it was scraped). A locally written catalog is never
+# overwritten by sky (catalog/common.py: a file without sky's .md5 sidecar
+# counts as user-modified), so yeto writes the full type x location x price
+# table itself — on this machine before a launch and on the head at
+# bootstrap — and lets live /instance-availability decide what to ask for.
+
+VERDA_SKY_CATALOG_COLUMNS = (
+    "InstanceType", "UpstreamCloudId", "vCPUs", "MemoryGiB", "AcceleratorName",
+    "AcceleratorCount", "GpuInfo", "Region", "Price", "SpotPrice",
+)
+SKY_CATALOG_SCHEMA_VERSION = "v8"  # sky 0.13 (sky.skylet.constants.CATALOG_SCHEMA_VERSION)
+
+
+def verda_sky_accelerator_name(model: str, gpu_mem_gb: float) -> str:
+    """sky's name for a Verda `model` (mirrors sky's fetch_verda.py)."""
+    if not model or model.startswith("CPU"):
+        return ""
+    name = model.replace(" ", "-")
+    if name.startswith("Tesla-"):
+        name = name[len("Tesla-"):]
+    if name.startswith("A100-"):
+        name = "A100" if int(gpu_mem_gb) == 40 else "A100-80GB"
+    return name
+
+
+def verda_sky_catalog_rows(types: list[dict], locations: list[str]) -> list[dict]:
+    """Every instance type x every location, priced, in sky's vms.csv schema.
+    Confidential-computing (".CC") types are skipped: sky cannot launch them."""
+    import json
+
+    rows: list[dict] = []
+    for t in types:
+        itype = str(t.get("instance_type") or "")
+        if not itype or itype.endswith(".CC"):
+            continue
+        count = int(((t.get("gpu") or {}).get("number_of_gpus")) or 0)
+        total_mem = float(((t.get("gpu_memory") or {}).get("size_in_gigabytes")) or 0)
+        per_gpu = total_mem / count if count else 0.0
+        acc = verda_sky_accelerator_name(str(t.get("model") or ""), per_gpu) if count else ""
+        gpu_info = ""
+        if acc and count and total_mem:
+            gpu_info = json.dumps(
+                {
+                    "Gpus": [{"Name": acc, "Count": count, "MemoryInfo": {"SizeInMiB": int(total_mem * 1024 / count)}}],
+                    "TotalGpuMemoryInMiB": total_mem * 1024,
+                }
+            )
+        price = _float_or_none(t.get("price_per_hour"))
+        spot = _float_or_none(t.get("spot_price"))
+        for loc in locations:
+            rows.append(
+                {
+                    "InstanceType": itype,
+                    "UpstreamCloudId": itype,
+                    "vCPUs": float(((t.get("cpu") or {}).get("number_of_cores")) or 0),
+                    "MemoryGiB": float(((t.get("memory") or {}).get("size_in_gigabytes")) or 0),
+                    "AcceleratorName": acc,
+                    "AcceleratorCount": float(count) if acc else "",
+                    "GpuInfo": gpu_info,
+                    "Region": loc,
+                    "Price": "" if price is None else price,
+                    "SpotPrice": "" if spot is None else spot,
+                }
+            )
+    return rows
+
+
+def verda_sky_catalog_path(runtime_dir: str | None = None) -> str:
+    """Where sky reads verda/vms.csv: $SKY_RUNTIME_DIR (default ~) /.sky/catalogs/<v>/."""
+    import os
+
+    base = os.path.expanduser(runtime_dir or os.environ.get("SKY_RUNTIME_DIR") or "~")
+    return os.path.join(base, ".sky", "catalogs", SKY_CATALOG_SCHEMA_VERSION, "verda", "vms.csv")
+
+
+def write_verda_sky_catalog(
+    types: list[dict] | None = None,
+    locations: list[str] | None = None,
+    runtime_dir: str | None = None,
+) -> str:
+    """Write the full Verda catalog where sky will read it; returns the path.
+    Written atomically (sky may be reading it in another process)."""
+    import csv
+    import os
+
+    sig = VerdaSignals(cache=None)
+    if types is None:
+        types = sig._fetch_types()
+    if locations is None:
+        locations = sig._locations()
+    rows = verda_sky_catalog_rows(types, locations)
+    if not rows:
+        raise RuntimeError("Verda catalog would be empty (no instance types)")
+    path = verda_sky_catalog_path(runtime_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.yeto-tmp-{os.getpid()}"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(VERDA_SKY_CATALOG_COLUMNS))
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(tmp, path)
+    return path
+
+
+# Shell step for the head's setup (runs from the synced repo workdir).
+VERDA_HEAD_CATALOG_STEP = (
+    'python3 -c "from yeto.shape.providers import write_verda_sky_catalog as w; '
+    'print(\'[yeto] verda catalog:\', w())"'
+)
+
+
+def verda_candidates(
+    gpu: str,
+    count: int,
+    types: list[dict],
+    availability: dict[str, list[str]],
+    regions: list[str] | None = None,
+    *,
+    use_spot: bool = False,
+    demoted: dict[tuple[str, str], int] | None = None,
+    limit: int = 4,
+) -> list[dict]:
+    """Live-stock candidates for one island, best first.
+
+    Keeps only (instance type, location) pairs /instance-availability says
+    can start now; ranks by how often the pair already failed with a
+    capacity error this launch (fewer first), then price, then location.
+    Each candidate: {instance_type, region, price}."""
+    demoted = demoted or {}
+    out: list[dict] = []
+    for t in types:
+        itype = str(t.get("instance_type") or "")
+        n = int(((t.get("gpu") or {}).get("number_of_gpus")) or 0)
+        if itype.endswith(".CC") or n != count or _VERDA_MODELS.get(str(t.get("model") or "")) != gpu:
+            continue
+        price = _float_or_none(t.get("spot_price" if use_spot else "price_per_hour"))
+        for loc, stocked in availability.items():
+            if regions and loc not in regions:
+                continue
+            if itype not in (stocked or []):
+                continue
+            out.append({"instance_type": itype, "region": loc, "price": price})
+    out.sort(
+        key=lambda c: (
+            demoted.get((c["instance_type"], c["region"]), 0),
+            c["price"] if c["price"] is not None else float("inf"),
+            c["region"],
+            c["instance_type"],
+        )
+    )
+    return out[: max(1, limit)]
+
+
+def verda_any_of(candidates: list[dict], gpu: str, count: int) -> list[dict]:
+    """sky.Resources overrides, one per candidate (an ordered any_of)."""
+    return [
+        {"infra": f"verda/{c['region']}", "instance_type": c["instance_type"], "accelerators": f"{gpu}:{count}"}
+        for c in candidates
+    ]
+
+
+def is_capacity_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(
+        k in text
+        for k in (
+            "resourcesunavailable", "capacity", "unavailable", "out of stock",
+            "insufficient", "not available", "http 503", "no stock",
+        )
+    )
+
+
+class VerdaCapacityExhausted(RuntimeError):
+    """Every candidate failed for lack of capacity; `.report` has the why."""
+
+    def __init__(self, report: list[str]):
+        self.report = report
+        super().__init__("Verda: no candidate could be started:\n  " + "\n  ".join(report))
+
+
+def launch_with_verda_candidates(
+    launch: Callable[[list[dict]], Any],
+    fetch_availability: Callable[[], dict[str, list[str]]],
+    build: Callable[[dict[str, list[str]], dict], list[dict]],
+    *,
+    max_attempts: int = 4,
+    base_delay: float = 30.0,
+    max_delay: float = 300.0,
+    sleep: Callable[[float], None] | None = None,
+    log: Callable[[str], None] = print,
+) -> Any:
+    """Launch over live candidates, refreshing stock after capacity failures.
+
+    Each attempt re-reads availability (never cached), builds candidates
+    with failed pairs demoted, and hands the whole ordered list to
+    `launch` (sky tries them in order). Non-capacity errors propagate at
+    once. Delays double from `base_delay`, capped at `max_delay`; after
+    `max_attempts` a VerdaCapacityExhausted lists every candidate's last
+    failure."""
+    import time
+
+    sleep = sleep or time.sleep
+    demoted: dict[tuple[str, str], int] = {}
+    reasons: dict[tuple[str, str], str] = {}
+    for attempt in range(max_attempts):
+        try:
+            availability = fetch_availability()
+        except Exception as exc:  # noqa: BLE001 - stale stock is still worth trying
+            log(f"[verda] availability refresh failed ({exc}); retrying")
+            availability = {}
+        cands = build(availability, demoted)
+        if not cands:
+            reasons.setdefault(("*", "*"), "")
+            reasons[("*", "*")] = f"attempt {attempt + 1}: no in-stock candidate in /instance-availability"
+        else:
+            try:
+                return launch(cands)
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if not is_capacity_error(exc):
+                    raise
+                msg = " ".join(str(exc).split())[:300]
+                for c in cands:
+                    key = (c["instance_type"], c["region"])
+                    demoted[key] = demoted.get(key, 0) + 1
+                    reasons[key] = f"attempt {attempt + 1}: {msg}"
+        if attempt + 1 < max_attempts:
+            delay = min(max_delay, base_delay * (2 ** attempt))
+            log(f"[verda] capacity attempt {attempt + 1}/{max_attempts} failed; retrying in {delay:.0f}s")
+            sleep(delay)
+    report = [f"{it}@{rg}: {why}" if it != "*" else why for (it, rg), why in reasons.items()]
+    raise VerdaCapacityExhausted(report)
 
 
 def _float_or_none(value: Any) -> float | None:

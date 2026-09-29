@@ -1,0 +1,6 @@
+Cluster vfix-r already has 1 nodes, no need to start more.
+API error during instance launch: 503 Service Unavailable: no capacity for this instance type
+[yeto] vfix-k: failed-launch teardown limited to nothing
+Launched instance new-1.
+Waiting for instances to be ready: (1/1).
+{"sky_version": "0.13.0", "guard_rejects_other_version": true, "install_status": {"sky.provision.verda.instance": "applied"}, "patched": true, "package_reexports_patched": true, "sibling_prefix": {"query": ["a"], "deleted": ["a"]}, "relaunch_running": {"result": "ok", "created": [], "deleted": [], "r1": "running"}, "create_fails_keeps_running": {"result": "failed: ResourcesUnavailableError", "deleted": [], "k1": "running"}, "unknown_status": {"u1": "ClusterStatus.INIT", "u2": "ClusterStatus.INIT"}, "empty_recheck": {"e1": "ClusterStatus.UP"}, "dispatcher": {"d1": "ClusterStatus.UP"}, "fresh_launch": {"result": "ok", "created": ["new-1"], "deleted": []}, "status_up": "ClusterStatus.UP"}
