@@ -39,11 +39,12 @@
 - [x] 3.1 `miles_adapter/config.py`：把 RL 运行配置和 `AlgorithmSpec` 翻译成 upstream Miles 参数，未映射的配置项拒绝启动；单 cell 断言；禁用 FT 相关参数。验证：单元测试覆盖参数翻译、未映射项拒绝和 FT 参数拒绝。在 upstream 源码上跑 Miles 的 `parse_args`，确认没有未知参数。
 - [x] 3.2 `miles_adapter/rollout.py` 与元数据提取回调：`generate` 返回 `RolloutBatchHandle`，元数据通过 `--rollout-all-samples-process-path` 在 rollout 进程内提取。验证：GPU 冒烟测试中一轮生成后，yeto 进程只持有元数据，policy token 与期望快照一致；token 不匹配的注入测试会在训练前被拒绝。
 - [x] 3.3 `miles_adapter/trainer.py`：`train_step`、`onload`、`offload`，返回 `LocalStepReceipt`；训练后释放 rollout 引用。验证：GPU 冒烟测试完成一次训练步，receipt 字段完整。
-- [ ] 3.4 `miles_adapter/state_plugin.py` 与 `state.py`：基于 1.4 的插件入口，在 upstream 的 LoRA 结构上实现导出和应用（保留或重置 optimizer），遵守 D4 的梯度流约束。验证：
+- [x] 3.4 `miles_adapter/state_plugin.py` 与 `state.py`：基于 1.4 的插件入口，在 upstream 的 LoRA 结构上实现导出和应用（保留或重置 optimizer），遵守 D4 的梯度流约束。验证：
   - `test_rl_grad_accumulator_hook` 通过；
   - GPU 测试完成"导出 → 应用 → 再导出"，hash 一致；
   - 重置模式下 moments 被清零且 scheduler 对齐；
   - 在同一 checkpoint 上与 legacy 的导出结果逐张量比对，全部一致。
+  - 完成记录（2026-09-29）：`test_rl_grad_accumulator_hook`（#64）CPU 通过；GPU（923b304，`evidence/2026-09-29-rerun-smoke-normal/probe.jsonl`）导出→应用（preserve/reset）→再导出 hash 一致，reset 后 moments 清零、scheduler 对齐；同一初始 checkpoint 上两条引擎导出的 LoRA（392 张量，TF 的 audit `base.f32`）逐位一致（relL2=0、layout_hash 相同），见 `evidence/2026-09-29-eq62-v3/report.md`。
 - [x] 3.5 `miles_adapter/publish.py`：基于 upstream 的 `update_weights` 完成发布，生成带成员集合与 payload hash 的 `InferencePublicationManifest`。验证：GPU 测试中发布后所有 engine 的权重 checksum 与清单一致；注入单个 engine 失败时返回错误，而不是一份清单。
 - [x] 3.6 `miles_adapter/placement.py`：返回共置和启动时固定分区的只读描述；检测到 Miles 参数规范化改写了请求的放置时拒绝启动。验证：单元测试覆盖两种放置和改写检测。
 
@@ -62,14 +63,16 @@
 ## 6. 等价性验收
 
 - [x] 6.1 编写对照脚本 `scripts/rl_engine_equivalence.py`，按 spec 的四层口径（design D12）判定：第 1 轮严格、teacher forcing、第 2 轮起按 seed 汇总的置换检验、路径内 hash。脚本负责多 seed（默认 17–21）运行编排（`plan`/`run`）、对已有运行目录的分析（`analyze`）和报告输出；loss/grad_norm 缺失时从 `miles.log` 补齐并记录来源；阈值为脚本常量，写入报告头。teacher forcing 入口为 `yeto.rl.teacher_forcing.replay_generate`（经 `benchmark_rl.py --custom-generate-function-path` 与 `YETO_RL_REPLAY_ROLLOUTS` 回放 legacy 第 1 轮 rollout）。验证：`plan` 能输出 legacy/ports × seed 与 teacher forcing 的命令；`fake` 模式生成带 FAKE 标记的分层报告；`tests/test_rl_engine_equivalence.py` 覆盖分层判定、置换检验判定、teacher forcing 报告解析与回放；在已提交的 legacy-baseline-v2 与 strict2 证据上，第 1 层复现 0.6%/1.0% 的 grad_norm 相对差并通过。
-- [ ] 6.2 用小模型（Qwen3-0.6B + LoRA）跑两岛 strict-avg 3 轮：legacy 与 ports 各 5 个 seed（17–21），并以 legacy seed 17 第 1 轮的 rollout 做 teacher forcing。验证：`analyze --preset strict-avg` 的报告结论为 PASS，即
+- [x] 6.2 用小模型（Qwen3-0.6B + LoRA）跑两岛 strict-avg 3 轮：legacy 与 ports 各 5 个 seed（17–21），并以 legacy seed 17 第 1 轮的 rollout 做 teacher forcing。验证：`analyze --preset strict-avg` 的报告结论为 PASS，即
   - 第 1 层：seed 17 第 1 轮 group/token/reward 完全相等，grad_norm 相对差 ≤ 3%；
-  - 第 2 层：回放复现记录，初始 LoRA 一致，loss 绝对差 ≤ max(1e-6, 1e-3×|legacy|)，grad_norm 相对差 ≤ 3%，optimizer 之前的 LoRA 梯度（`optimizer.step()` 入口、DP 规约后、裁剪前，全部 LoRA 张量按 canonical 名对齐拼接；`YETO_RL_AUDIT_GRADS=1` 时由 `yeto.rl.grad_audit` 写出 `audit/round-00000001.grad.{f32,json}`，TF 运行由 `run` 自动设置）相对 L2 ≤ 3% 且余弦 ≥ 0.99；LoRA 更新量相对 L2、余弦、符号翻转比例、范数比只报告（D12，2026-09-29 经用户批准的口径修改）；
+  - 第 2 层：回放复现记录，初始 LoRA 一致，loss 绝对差 ≤ max(1e-6, 1e-3×|legacy|)，grad_norm 相对差 ≤ 3%；optimizer 之前的 LoRA 梯度（`optimizer.step()` 入口、DP 规约后、裁剪前，全部 LoRA 张量按 canonical 名对齐拼接；`YETO_RL_AUDIT_GRADS=1` 时由 `yeto.rl.grad_audit` 写出 `audit/round-00000001.grad.{f32,json}`，TF 运行由 `run` 自动设置）以 CPU fp32 参考为锚（`yeto.rl.fp32_reference`，由 `analyze` 调用；同一初始 LoRA `base.f32`、同一回放 batch、固定 revision 的模型、与引擎一致的 GRPO 损失）：每个岛 `relL2(ports, fp32) ≤ relL2(legacy, fp32) + 0.05` 且 `cos(ports, fp32) ≥ cos(legacy, fp32) − 0.005`；报告记录回放样本、初始 LoRA、模型权重的来源与 sha256，fp32 参考缺输入或计算失败判未完成；跨路径梯度相对 L2/余弦与 LoRA 更新量相对 L2、余弦、符号翻转比例、范数比只报告（D12，2026-09-29 两次经用户批准的口径修改）；
   - 第 3 层：每个 seed 把第 2 轮起的 reward_mean、loss、grad_norm、action_tokens 分别平均，legacy 与 ports 各 5 个值做精确双侧置换检验（252 种划分，均值差），Bonferroni α=0.0125，四个指标 p 均 ≥ 0.0125；报告列出各 seed 原始值、效应量与检出力局限；
   - 第 4 层：每条路径每个 seed 内各岛同一轮 hash 一致；
   原始记录与报告存放在本 change 目录下。
-- [ ] 6.3 用小模型跑两岛 decoupled（P=8、tau=2、H=4）到导出：legacy 与 ports 各 5 个 seed，并做 teacher forcing。验证：`analyze --preset decoupled` 的报告结论为 PASS，即第 2 层（loss、grad_norm，以及与 6.2 相同的 LoRA 梯度判定：拼接后相对 L2 ≤ 3% 且余弦 ≥ 0.99；decoupled 的 teacher forcing 未写出梯度审计文件时取自 6.2 的 teacher forcing；更新量只报告）、第 3 层（同 6.2 的置换检验口径）、第 4 层（非部分应用的版本与最终 cut）通过，第 1 层只报告；两条路径全部 seed 导出的 PEFT 都能被标准 PEFT 加载；报告给出 seed 17 两条路径最终 LoRA 的相对 L2 距离和 legacy 跨 seed 的同一距离，不设硬阈值（第 2 轮起采样分叉，该距离反映轨迹差异而非 trainer 误差）。
+  - 完成记录（2026-09-29）：`evidence/2026-09-29-eq62-v3/report.md` 结论 PASS（H100；第 1、2 层用 18695ae 的 legacy-s17/ports-s17/tf-*，原始记录在 `evidence/2026-09-29-eq62-v2/`；第 3 层 seeds 18–21 用 4bc018e 的 `evidence/2026-09-29-eq62/`）。第 2 层按用户批准的 fp32 锚定口径（design D12 第二次口径修改）。限制：仅覆盖单轮任务，见 design 风险。
+- [x] 6.3 用小模型跑两岛 decoupled（P=8、tau=2、H=4）到导出：legacy 与 ports 各 5 个 seed，并做 teacher forcing。验证：`analyze --preset decoupled` 的报告结论为 PASS，即第 2 层（loss、grad_norm，以及与 6.2 相同的以 fp32 参考为锚的 LoRA 梯度判定；decoupled 的 teacher forcing 未写出梯度审计文件时继续引用 6.2 的 strict-avg teacher forcing；跨路径梯度距离与更新量只报告）、第 3 层（同 6.2 的置换检验口径）、第 4 层（非部分应用的版本与最终 cut）通过，第 1 层只报告；两条路径全部 seed 导出的 PEFT 都能被标准 PEFT 加载；报告给出 seed 17 两条路径最终 LoRA 的相对 L2 距离和 legacy 跨 seed 的同一距离，不设硬阈值（第 2 轮起采样分叉，该距离反映轨迹差异而非 trainer 误差）。
 
+  - 完成记录（2026-09-29）：`evidence/2026-09-29-eq63-v3/report.md` 结论 PASS（H100，4bc018e 的 5 seed；第 2 层引用 6.2 的 strict TF）；10/10 个 PEFT 可被标准 PEFT 加载；最终 LoRA 跨路径相对 L2 0.0083（legacy 跨 seed ≈1.414）。两条路径同样存在 decoupled 学习率衰减到 0 的已知问题（由 `fix-decoupled-lr-schedule` 另行修复）。
 ## 7. 切换与退役
 
 - [ ] 7.0 检查迁移清单：R0 期间合入的所有 RL PR 都已登记，且每一项都已关闭。验证：`migration-ledger.md` 中没有未关闭项；对照 `gh pr list --state merged --search "rl:"` 在 R0 期间合入的列表，没有遗漏。

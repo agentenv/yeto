@@ -13,15 +13,21 @@ Tier 1 -- round 1, strict (strict-avg gated; decoupled reported only).
 Tier 2 -- teacher forcing.
     Legacy's recorded round-1 rollouts (``--save-debug-rollout-data`` dumps)
     are replayed through ``yeto.rl.teacher_forcing.replay_generate`` into a
-    1-round run on EACH engine. Compared per island, legacy-TF vs ports-TF:
-    loss (``|d| <= max(1e-6, 1e-3 * |loss_l|)``), grad_norm (rel <= 3%) and
-    the pre-optimizer LoRA gradient (``round-1.grad.f32``, written by
-    ``yeto.rl.grad_audit`` when ``YETO_RL_AUDIT_GRADS=1``, which ``run`` sets
-    for the TF runs): all LoRA tensors concatenated in canonical name order,
-    ``||g_p - g_l|| / ||g_l|| <= 3%`` and cosine >= 0.99; the worst tensors are
-    listed. The LoRA update (round-1 audit delta) is REPORTED only: rel L2,
-    cosine, sign-flip fraction and norm ratio (Adam's first step ~ lr*sign(g),
-    so near-zero gradient elements flip sign under bf16 noise; design D12).
+    1-round run on EACH engine. Gated per island: loss
+    (``|d| <= max(1e-6, 1e-3 * |loss_l|)``), grad_norm (rel <= 3%) and the
+    pre-optimizer LoRA gradient (``round-1.grad.f32``, written by
+    ``yeto.rl.grad_audit`` when ``YETO_RL_AUDIT_GRADS=1``) ANCHORED ON AN FP32
+    REFERENCE (design D12, second data-driven revision, approved by the user):
+    ``yeto.rl.fp32_reference`` recomputes the gradient on CPU in float32 from
+    the same initial LoRA (audit ``base.f32``), the same replayed batch and the
+    engines' GRPO loss, and ports must be as close to it as legacy is:
+    ``relL2(ports, fp32) <= relL2(legacy, fp32) + 0.05`` and
+    ``cos(ports, fp32) >= cos(legacy, fp32) - 0.005``. A missing input or a
+    failed fp32 computation makes the tier INCOMPLETE. The cross-path
+    legacy-vs-ports gradient distance / cosine / worst tensors and the LoRA
+    update (rel L2, cosine, sign-flip fraction, norm ratio) are REPORTED only:
+    two independent bf16 errors of 8-14 % each compose into a cross-path
+    distance that says nothing about which engine is wrong.
     Preconditions: the legacy-TF run reproduces the recording (reward /
     tokens / groups equal to the reference run) and both runs start from the
     same LoRA (audit base rel L2 <= 1e-6, same layout hash).
@@ -84,8 +90,8 @@ ROUND1_GRAD_NORM_REL = 0.03
 TF_LOSS_ABS = 1e-6
 TF_LOSS_REL = 1e-3
 TF_GRAD_NORM_REL = 0.03
-TF_GRAD_REL_L2 = 0.03
-TF_GRAD_COSINE = 0.99
+TF_FP32_REL_L2_MARGIN = 0.05  # relL2(ports, fp32) <= relL2(legacy, fp32) + margin
+TF_FP32_COS_MARGIN = 0.005  # cos(ports, fp32) >= cos(legacy, fp32) - margin
 TF_GRAD_WORST = 5  # per-tensor rows listed in the report
 TF_BASE_REL_L2 = 1e-6
 DIST_METRICS = ("reward_mean", "loss", "grad_norm", "action_tokens")
@@ -500,10 +506,47 @@ def update_stats(dl, dp) -> dict[str, Any]:
             "norm_ratio": float(np.linalg.norm(dp)) / nl if nl else None}
 
 
+def fp32_anchor_compare(legacy_path: str | Path, ports_path: str | Path,
+                        ref: dict[str, Any]) -> dict[str, Any]:
+    """Legacy and ports LoRA gradients vs the fp32 reference (canonical name order)."""
+    import numpy as np
+
+    order = ref["order"]
+    out: dict[str, Any] = {}
+    for label, path in (("legacy", legacy_path), ("ports", ports_path)):
+        idx, flat = read_grad(path)
+        t = grad_tensors(idx, flat)
+        if set(t) != set(order):
+            return {"error": f"{label} gradient tensor names differ from the fp32 reference"}
+        shapes = {s["name"]: s["shape"] for s in idx["specs"]}
+        bad = [n for n in order if list(shapes[n]) != list(ref["shapes"][n])]
+        if bad:
+            return {"error": f"{label} gradient shapes differ from the fp32 reference: {bad[:3]}"}
+        g = np.concatenate([t[n] for n in order])
+        out[label] = {"rel_l2": rel_l2(ref["flat"], g), "cosine": cosine(ref["flat"], g),
+                      "norm": float(np.linalg.norm(g.astype(np.float64)))}
+    out["fp32_norm"] = ref["grad_norm"]
+    return out
+
+
+def fp32_gate(anchor: dict[str, Any]) -> dict[str, Any]:
+    """Option A (design D12): ports at least as close to fp32 as legacy, within margins."""
+    lg, pt = anchor["legacy"], anchor["ports"]
+    rel_ok = pt["rel_l2"] <= lg["rel_l2"] + TF_FP32_REL_L2_MARGIN
+    cos_ok = (pt["cosine"] is not None and lg["cosine"] is not None
+              and pt["cosine"] >= lg["cosine"] - TF_FP32_COS_MARGIN)
+    return {"rel_ok": rel_ok, "cos_ok": cos_ok}
+
+
 def teacher_forcing_check(reference: dict[int, dict], legacy_tf: dict[int, dict],
-                          ports_tf: dict[int, dict], *, require_update: bool = True) -> dict:
+                          ports_tf: dict[int, dict], *, require_update: bool = True,
+                          fp32: dict[int, dict] | None = None) -> dict:
     """``require_update=False`` (decoupled) reports a missing gradient/round audit instead
-    of failing; the LoRA-gradient gate then comes from the strict-avg TF run."""
+    of failing; the LoRA-gradient gate then comes from the strict-avg TF run.
+
+    ``fp32``: island -> ``yeto.rl.fp32_reference.compute_island`` result, or
+    ``{"error": ...}`` when an input was missing / the computation failed
+    (-> INCOMPLETE). ``None`` means the reference was not computed at all."""
     rows = []
 
     def add(island, check, legacy, ports, value, rule, ok, gate=True, **extra):
@@ -547,17 +590,39 @@ def teacher_forcing_check(reference: dict[int, dict], legacy_tf: dict[int, dict]
                  else "not available (see strict-avg TF)"),
                 False if require_update else None, gate=require_update)
         else:
+            ref32 = (fp32 or {}).get(i)
+            if ref32 is None or "error" in ref32:
+                why = ("not computed" if ref32 is None else ref32["error"])
+                add(i, "fp32 reference gradient", None, None, None,
+                    "fp32 reference computed from recorded inputs", False, incomplete=True,
+                    detail=why)
+            else:
+                a = fp32_anchor_compare(grads[0], grads[1], ref32)
+                if "error" in a:
+                    add(i, "LoRA gradient tensors aligned with fp32 reference", None, None, None,
+                        "same names/shapes", False, detail=a["error"])
+                else:
+                    gate = fp32_gate(a)
+                    lr, pr = a["legacy"]["rel_l2"], a["ports"]["rel_l2"]
+                    lc, pc = a["legacy"]["cosine"], a["ports"]["cosine"]
+                    add(i, "LoRA gradient relL2 vs fp32", lr, pr, pr - lr,
+                        f"ports <= legacy + {TF_FP32_REL_L2_MARGIN}", gate["rel_ok"])
+                    add(i, "LoRA gradient cosine vs fp32", lc, pc,
+                        None if pc is None or lc is None else pc - lc,
+                        f"ports >= legacy - {TF_FP32_COS_MARGIN}", gate["cos_ok"])
+                    add(i, "LoRA gradient norm legacy/ports/fp32 (info)", a["legacy"]["norm"],
+                        a["ports"]["norm"], a["fp32_norm"], "reported", None, gate=False)
+                    add(i, "fp32 reference loss (info)", None, None, ref32.get("loss"),
+                        "reported", None, gate=False)
             g = grad_compare(grads[0], grads[1])
             if "error" in g:
                 add(i, "LoRA gradient tensors aligned", None, None, None, "same names/shapes",
                     False, detail=g)
             else:
-                add(i, "LoRA gradient rel L2", None, None, g["rel_l2"], f"<= {TF_GRAD_REL_L2}",
-                    g["rel_l2"] <= TF_GRAD_REL_L2, cosine=g["cosine"])
-                add(i, "LoRA gradient cosine", None, None, g["cosine"], f">= {TF_GRAD_COSINE}",
-                    g["cosine"] is not None and g["cosine"] >= TF_GRAD_COSINE)
-                for k, (a, b) in g["meta"].items():
-                    add(i, f"grad audit {k} (info)", a, b, None, "reported", None, gate=False)
+                add(i, "cross-path LoRA gradient rel L2 (info)", None, None, g["rel_l2"],
+                    "reported", None, gate=False, cosine=g["cosine"])
+                for k, (x, y) in g["meta"].items():
+                    add(i, f"grad audit {k} (info)", x, y, None, "reported", None, gate=False)
                 for w in g["worst"]:
                     add(i, f"worst tensor {w['name']} (info)", None, None, w["rel_l2"],
                         "reported", None, gate=False, cosine=w["cosine"])
@@ -581,7 +646,11 @@ def teacher_forcing_check(reference: dict[int, dict], legacy_tf: dict[int, dict]
         add(i, "LoRA update norm ratio ports/legacy (info)", None, None, u["norm_ratio"],
             "reported", None, gate=False)
     gated = [r for r in rows if r["gate"]]
-    return {"passed": bool(gated) and all(r["pass"] for r in gated), "rows": rows}
+    failed = [r for r in gated if not r["pass"]]
+    return {"passed": bool(gated) and not failed, "rows": rows,
+            "incomplete": bool(failed) and all(r.get("incomplete") for r in failed),
+            "fp32_provenance": {str(k): v.get("provenance") if "error" not in v else v
+                                for k, v in (fp32 or {}).items()}}
 
 
 # ---------------------------------------------------------------------------
@@ -690,8 +759,11 @@ def thresholds() -> dict[str, Any]:
     return {"round1_exact": list(ROUND1_EXACT), "round1_grad_norm_rel": ROUND1_GRAD_NORM_REL,
             "tf_loss": f"|d| <= max({TF_LOSS_ABS}, {TF_LOSS_REL}*|loss_legacy|)",
             "tf_grad_norm_rel": TF_GRAD_NORM_REL,
-            "tf_lora_grad": (f"pre-optimizer LoRA gradient, all tensors concatenated: rel L2 <= "
-                             f"{TF_GRAD_REL_L2} and cosine >= {TF_GRAD_COSINE}"),
+            "tf_lora_grad": (f"pre-optimizer LoRA gradient (all tensors concatenated) anchored on "
+                             f"a CPU fp32 reference: relL2(ports, fp32) <= relL2(legacy, fp32) + "
+                             f"{TF_FP32_REL_L2_MARGIN} and cos(ports, fp32) >= cos(legacy, fp32) - "
+                             f"{TF_FP32_COS_MARGIN}; fp32 missing/failed -> INCOMPLETE; "
+                             f"cross-path legacy-vs-ports distance reported only"),
             "tf_lora_update": "reported only (rel L2, cosine, sign-flip fraction, norm ratio)",
             "tf_initial_lora_rel_l2": TF_BASE_REL_L2,
             "distribution": (f"per seed: mean over (island, round >= 2) of {list(DIST_METRICS)}; "
@@ -736,6 +808,19 @@ def render_report(meta: dict, result: dict) -> str:
         extra = f" (cos {r['cosine']:.6f})" if r.get("cosine") is not None else ""
         L.append(f"| {r['island']} | {r['check']} | {_fmt(r['legacy'])} | {_fmt(r['ports'])} | "
                  f"{_fmt(r['value'])}{extra} | {r['rule']} | {mark} |")
+    for isl, prov in sorted((t.get("fp32_provenance") or {}).items()):
+        L += ["", f"### fp32 reference inputs, island {isl}", ""]
+        if not prov or "error" in prov:
+            L.append(f"- INCOMPLETE: {(prov or {}).get('error', 'not computed')}")
+            continue
+        L.append(f"- replay batch: {prov['replay']['path']} sha256 {prov['replay']['sha256']}")
+        L.append(f"- initial LoRA: {prov['initial_lora']['path']} sha256 "
+                 f"{prov['initial_lora']['sha256']} (layout {prov['initial_lora']['layout_hash']})")
+        m = prov["model"]
+        L.append(f"- model: {m['id']}@{m['revision']} ({m['dir']})")
+        for name, h in m["files_sha256"].items():
+            L.append(f"  - {name} sha256 {h}")
+        L.append(f"- loss: {prov['loss']}; {prov['dtype']} on {prov['device']}, torch {prov['torch']}")
     t = result["tiers"]["3_distribution"]
     L += ["", "## Tier 3: distribution over seeds (rounds >= 2, per-seed means, permutation test)", ""]
     if t.get("stats"):
@@ -792,6 +877,117 @@ def _raw(runs: dict[int, dict]) -> dict:
             for s, r in sorted(runs.items())}
 
 
+_MILES_ARG = re.compile(r"^  (\w+) \.{3,} (.*)$")
+LOSS_ARGS = ("advantage_estimator", "rewards_normalization", "grpo_std_normalization",
+             "eps_clip", "eps_clip_high", "calculate_per_token_loss", "global_batch_size",
+             "clip_grad", "lora_alpha", "kl_coef", "use_kl_loss", "entropy_coef", "use_tis",
+             "use_rollout_logprobs", "normalize_advantages")
+
+
+def miles_loss_args(log_path: str | Path) -> dict[str, str]:
+    """First value of each :data:`LOSS_ARGS` in a Miles argument dump (``miles.log``)."""
+    out: dict[str, str] = {}
+    for line in Path(log_path).read_text(errors="ignore").splitlines():
+        m = _MILES_ARG.match(line)
+        if m and m.group(1) in LOSS_ARGS and m.group(1) not in out:
+            out[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def fp32_loss_config(legacy_args: dict[str, str], ports_args: dict[str, str]):
+    """LossConfig matching both engines, or a reason the fp32 reference cannot model them."""
+    from yeto.rl.fp32_reference import LossConfig
+
+    diff = {k: (legacy_args.get(k), ports_args.get(k)) for k in LOSS_ARGS
+            if legacy_args.get(k) != ports_args.get(k)}
+    if diff:
+        return f"engines' loss arguments differ: {diff}"
+    a = legacy_args
+    missing = [k for k in ("advantage_estimator", "eps_clip", "global_batch_size") if k not in a]
+    if missing:
+        return f"loss arguments missing from miles.log: {missing}"
+    unsupported = {k: a.get(k) for k, ok in (
+        ("advantage_estimator", a.get("advantage_estimator") in ("grpo", "gspo")),
+        ("calculate_per_token_loss", a.get("calculate_per_token_loss", "False") == "False"),
+        ("use_kl_loss", a.get("use_kl_loss", "False") == "False"),
+        ("entropy_coef", float(a.get("entropy_coef", "0") or 0) == 0.0),
+        ("use_tis", a.get("use_tis", "False") == "False"),
+        ("normalize_advantages", a.get("normalize_advantages", "False") == "False"),
+    ) if not ok}
+    if unsupported:
+        return f"loss configuration not modelled by the fp32 reference: {unsupported}"
+    hi = a.get("eps_clip_high")
+    return LossConfig(
+        rewards_normalization=a.get("rewards_normalization", "True") == "True",
+        grpo_std_normalization=a.get("grpo_std_normalization", "True") == "True",
+        eps_clip=float(a["eps_clip"]),
+        eps_clip_high=float(hi) if hi not in (None, "None") else float(a["eps_clip"]),
+        num_samples=int(a["global_batch_size"]),
+        clip_grad=float(a.get("clip_grad", "1.0")),
+        lora_alpha=float(a["lora_alpha"]) if a.get("lora_alpha") not in (None, "None") else None)
+
+
+def compute_fp32_references(args, ref_arm: Path, legacy_arm: Path, ports_arm: Path,
+                            legacy_tf: dict[int, dict]) -> dict[int, dict]:
+    """island -> fp32 reference (or ``{"error": ...}`` -> INCOMPLETE)."""
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from yeto.rl import fp32_reference as f32
+    except Exception as error:  # noqa: BLE001
+        return {i: {"error": f"fp32 reference unavailable: {error}"} for i in legacy_tf}
+    cfg_json = legacy_arm.parents[2] / "report" / "config.json"
+    arguments = (json.loads(cfg_json.read_text()).get("arguments", {})
+                 if cfg_json.is_file() else {})
+    model = args.fp32_model or arguments.get("model")
+    out: dict[int, dict] = {}
+    loaded = None
+    for i, lg in sorted(legacy_tf.items()):
+        try:
+            revision = (args.fp32_revision or (lg.get("audit_meta") or {}).get("base_model_revision")
+                        or arguments.get("model_revision"))
+            if not model or not revision:
+                raise f32.ReferenceInputError("model id / revision unknown")
+            logs = [legacy_arm / f"island-{i}" / "miles.log", ports_arm / f"island-{i}" / "miles.log"]
+            if not all(p.is_file() for p in logs):
+                raise f32.ReferenceInputError(f"miles.log (engine loss arguments) missing: {logs}")
+            cfg = fp32_loss_config(miles_loss_args(logs[0]), miles_loss_args(logs[1]))
+            if isinstance(cfg, str):
+                raise f32.ReferenceInputError(cfg)
+            pattern = args.tf_replay or str(ref_arm / "rollouts" / "island-{island}"
+                                            / f"{args.tf_rollout_id}.pt")
+            hits = sorted(glob.glob(pattern.replace("{island}", str(i))))
+            if len(hits) != 1:
+                raise f32.ReferenceInputError(
+                    f"replay batch for island {i}: {len(hits)} files match {pattern}")
+            stem = Path(lg["audit_base"]).name[: -len(".base.f32")]
+            meta = Path(lg["audit_base"]).with_name(stem + ".json")
+            if loaded is None:
+                mdir = f32.resolve_model_dir(model, revision, local_path=args.fp32_model_path,
+                                             cache_dir=args.fp32_cache_dir)
+                loaded = f32.load_base_model(mdir)
+            t0 = time.time()
+            res = f32.compute_island(
+                replay=hits[0], base_f32=lg["audit_base"], base_meta=str(meta), model=model,
+                revision=revision, cfg=cfg, model_path=args.fp32_model_path,
+                cache_dir=args.fp32_cache_dir, num_threads=args.fp32_threads, loaded_model=loaded)
+            res["provenance"]["seconds"] = round(time.time() - t0, 1)
+            if args.fp32_save_dir:
+                d = Path(args.fp32_save_dir) / f"island-{i}"
+                d.mkdir(parents=True, exist_ok=True)
+                res["flat"].tofile(str(d / "fp32ref.grad.f32"))
+                res["provenance"]["saved_grad"] = {
+                    "path": str(d / "fp32ref.grad.f32"),
+                    "sha256": f32.sha256_file(d / "fp32ref.grad.f32")}
+            print(f"fp32 reference island {i}: norm {res['grad_norm']:.6f} "
+                  f"({res['provenance']['seconds']} s)", flush=True)
+            out[i] = res
+        except Exception as error:  # noqa: BLE001 - reported as INCOMPLETE
+            out[i] = {"error": f"{type(error).__name__}: {error}"}
+    return out
+
+
 def analyze(args) -> int:
     legacy = load_runs(args.legacy)
     ports = load_runs(args.ports)
@@ -799,10 +995,13 @@ def analyze(args) -> int:
     if args.tf_reference or args.tf_legacy or args.tf_ports:
         if not (args.tf_reference and args.tf_legacy and args.tf_ports):
             raise SystemExit("--tf-reference, --tf-legacy and --tf-ports go together")
-        tf = teacher_forcing_check(load_tf_arm(_one_arm(args.tf_reference)),
-                                   load_tf_arm(_one_arm(args.tf_legacy)),
-                                   load_tf_arm(_one_arm(args.tf_ports)),
-                                   require_update=args.preset == "strict-avg")
+        ref_arm, l_arm, p_arm = (_one_arm(args.tf_reference), _one_arm(args.tf_legacy),
+                                 _one_arm(args.tf_ports))
+        legacy_tf = load_tf_arm(l_arm)
+        fp32 = (None if getattr(args, "no_fp32", False)
+                else compute_fp32_references(args, ref_arm, l_arm, p_arm, legacy_tf))
+        tf = teacher_forcing_check(load_tf_arm(ref_arm), legacy_tf, load_tf_arm(p_arm),
+                                   require_update=args.preset == "strict-avg", fp32=fp32)
     extras = None
     if args.preset == "decoupled":
         extras = decoupled_extras(legacy, ports, primary_seed=args.primary_seed,
@@ -878,7 +1077,10 @@ def run(args) -> int:
         tf_legacy=str(out / "tf-legacy") if args.teacher_forcing else None,
         tf_ports=str(out / "tf-ports") if args.teacher_forcing else None,
         preset=args.preset, primary_seed=args.primary_seed, out_dir=args.out_dir,
-        config=args.launch_args, peft_base_model=args.peft_base_model)
+        config=args.launch_args, peft_base_model=args.peft_base_model,
+        tf_replay=None, tf_rollout_id=args.tf_rollout_id, fp32_model=None, fp32_revision=None,
+        fp32_model_path=None, fp32_cache_dir=None, fp32_threads=None, fp32_save_dir=None,
+        no_fp32=False)
     return analyze(ns)
 
 
@@ -1038,6 +1240,22 @@ def parse_args(argv=None):
     sp.add_argument("--tf-legacy", help="legacy teacher-forcing run")
     sp.add_argument("--tf-ports", help="ports teacher-forcing run")
     sp.add_argument("--config", default="", help="free-text config description for the report")
+    sp.add_argument("--tf-replay", default=None,
+                    help="glob of the replayed dump per island ({island} placeholder); default "
+                         "<tf-reference arm>/rollouts/island-{island}/<tf-rollout-id>.pt")
+    sp.add_argument("--tf-rollout-id", type=int, default=0)
+    sp.add_argument("--fp32-model", default=None,
+                    help="HF model id (default: TF run report/config.json)")
+    sp.add_argument("--fp32-revision", default=None,
+                    help="40-hex revision (default: audit base_model_revision)")
+    sp.add_argument("--fp32-model-path", default=None,
+                    help="local snapshot dir named after the revision (instead of the HF cache)")
+    sp.add_argument("--fp32-cache-dir", default=None, help="HF cache dir (offline lookup)")
+    sp.add_argument("--fp32-threads", type=int, default=None)
+    sp.add_argument("--fp32-save-dir", default=None,
+                    help="also write each island's fp32 reference gradient here")
+    sp.add_argument("--no-fp32", action="store_true",
+                    help="skip the fp32 reference (tier 2 then reports INCOMPLETE)")
 
     sp = sub.add_parser("fake")
     sp.add_argument("--out-dir", default="rl-engine-equivalence-fake")

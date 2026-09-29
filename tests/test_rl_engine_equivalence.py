@@ -206,10 +206,10 @@ GRADS = {"base_model.model.l0.q_proj.lora_A.weight": [[0.3, -0.2], [0.1, 0.05]],
 
 
 def _tf_arms(tmp_path, *, ports_gn=1.01, ports_delta=None, ports_base=None, ports_tokens=100,
-             ports_audit=True, loss_p=1e-8, ports_grads=None, grads=True):
+             ports_audit=True, loss_p=1e-8, ports_grads=None, grads=True, legacy_grads=None):
     base = [0.5, -0.25, 1.0, 2.0]
     delta = [0.01, -0.02, 0.0, 0.03]
-    lgrads = GRADS if grads else None
+    lgrads = (legacy_grads or GRADS) if grads else None
     pgrads = (ports_grads or GRADS) if grads else None
     ref = _write_arm(tmp_path / "ref" / "work" / "seed-17" / "a",
                      {(i, 1): _row(gn=1.0, loss=1.2e-8) for i in (0, 1)})
@@ -223,15 +223,39 @@ def _tf_arms(tmp_path, *, ports_gn=1.01, ports_delta=None, ports_base=None, port
     return eq.load_tf_arm(ref), eq.load_tf_arm(lg), eq.load_tf_arm(pt)
 
 
+def _fp32_ref(grads=GRADS, islands=(0, 1)):
+    """An fp32 reference in the shape ``yeto.rl.fp32_reference.compute_island`` returns."""
+    order = sorted(grads)
+    flat = np.concatenate([np.asarray(grads[n], dtype="<f4").ravel() for n in order])
+    ref = {"flat": flat, "order": order,
+           "shapes": {n: list(np.asarray(grads[n]).shape) for n in order},
+           "grad_norm": float(np.linalg.norm(flat)), "loss": 0.0,
+           "provenance": {"replay": {"path": "r.pt", "sha256": "0"},
+                          "initial_lora": {"path": "b.f32", "sha256": "1", "layout_hash": "L"},
+                          "model": {"id": "org/m", "revision": "a" * 40, "dir": "d",
+                                    "files_sha256": {"config.json": "2"}},
+                          "loss": {"aggregation": "sample_mean"}, "dtype": "float32",
+                          "device": "cpu", "torch": "t"}}
+    return {i: ref for i in islands}
+
+
+def _tfc(tmp_path, *, fp32=GRADS, require_update=True, **kwargs):
+    return eq.teacher_forcing_check(*_tf_arms(tmp_path, **kwargs), require_update=require_update,
+                                    fp32=(_fp32_ref(fp32) if isinstance(fp32, dict)
+                                          and all(isinstance(k, str) for k in fp32) else fp32))
+
+
 def test_teacher_forcing_passes_within_thresholds(tmp_path):
     near = [0.0101, -0.0201, 0.0, 0.0301]  # rel L2 ~0.5%
-    res = eq.teacher_forcing_check(*_tf_arms(tmp_path, ports_delta=near))
+    res = _tfc(tmp_path, ports_delta=near)
     assert res["passed"], [r for r in res["rows"] if r["gate"] and not r["pass"]]
     upd = [r for r in res["rows"] if r["check"] == "LoRA update rel L2 (info)"]
     assert len(upd) == 2 and upd[0]["value"] < 0.01 and upd[0]["cosine"] > 0.999
     assert not upd[0]["gate"]
-    g = [r for r in res["rows"] if r["check"] == "LoRA gradient rel L2"]
-    assert len(g) == 2 and g[0]["value"] == 0.0 and g[0]["gate"] and g[0]["pass"]
+    g = [r for r in res["rows"] if r["check"] == "LoRA gradient relL2 vs fp32"]
+    assert len(g) == 2 and g[0]["ports"] == 0.0 and g[0]["gate"] and g[0]["pass"]
+    cross = next(r for r in res["rows"] if r["check"] == "cross-path LoRA gradient rel L2 (info)")
+    assert cross["gate"] is False
     loss = next(r for r in res["rows"] if r["check"] == "loss")
     assert loss["pass"] and loss["value"] == pytest.approx(2e-9)
 
@@ -239,10 +263,10 @@ def test_teacher_forcing_passes_within_thresholds(tmp_path):
 @pytest.mark.parametrize("kwargs,failing", [
     ({"ports_gn": 1.04}, "grad_norm"),
     ({"ports_grads": {**GRADS, "base_model.model.l0.q_proj.lora_A.weight": [[0.33, -0.2], [0.1, 0.05]]}},
-     "LoRA gradient rel L2"),
+     "LoRA gradient relL2 vs fp32"),
     ({"ports_grads": {"base_model.model.l0.q_proj.lora_A.weight": [[0.3, -0.2], [0.1, 0.05]],
                       "base_model.model.l0.k_proj.lora_B.weight": [[1e-4, -2e-4]]}},
-     "LoRA gradient tensors aligned"),
+     "LoRA gradient tensors aligned with fp32 reference"),
     ({"grads": False}, "LoRA gradient (grad audit f32)"),
     ({"ports_base": [0.5, -0.25, 1.0, 2.1]}, "initial LoRA rel L2"),
     ({"ports_tokens": 99}, "fidelity ports-TF action_tokens == reference"),
@@ -250,13 +274,13 @@ def test_teacher_forcing_passes_within_thresholds(tmp_path):
     ({"ports_audit": False}, "LoRA base/update (audit f32)"),
 ])
 def test_teacher_forcing_failures(tmp_path, kwargs, failing):
-    res = eq.teacher_forcing_check(*_tf_arms(tmp_path, **kwargs))
+    res = _tfc(tmp_path, **kwargs)
     assert not res["passed"]
     assert failing in {r["check"] for r in res["rows"] if r["gate"] and not r["pass"]}
 
 
 def test_teacher_forcing_decoupled_without_audit_reports_update_ungated(tmp_path):
-    res = eq.teacher_forcing_check(*_tf_arms(tmp_path, ports_audit=False), require_update=False)
+    res = _tfc(tmp_path, ports_audit=False, require_update=False)
     assert res["passed"]
     row = next(r for r in res["rows"] if r["check"] == "LoRA base/update (audit f32)")
     assert row["gate"] is False and row["pass"] is None
@@ -266,9 +290,83 @@ def test_teacher_forcing_decoupled_without_audit_reports_update_ungated(tmp_path
     assert row["gate"] is False
 
 
+def _scaled(grads, noise):
+    """GRADS with a deterministic perturbation of relative size ``noise`` per element."""
+    out = {}
+    for k, (n, v) in enumerate(sorted(grads.items())):
+        a = np.asarray(v, dtype=np.float64)
+        signs = np.where((np.arange(a.size).reshape(a.shape) + k) % 2 == 0, 1.0, -1.0)
+        out[n] = (a * (1 + noise * signs)).tolist()
+    return out
+
+
+def test_fp32_anchor_passes_when_ports_is_as_close_as_legacy(tmp_path):
+    # Legacy 8 % and ports 12 % away from fp32 (cross-path ~20 %): passes option A.
+    res = _tfc(tmp_path, fp32=_scaled(GRADS, 0.0), grads=True,
+               ports_grads=_scaled(GRADS, -0.12), legacy_grads=_scaled(GRADS, 0.08))
+    rows = {r["check"]: r for r in res["rows"] if r["island"] == 0}
+    assert res["passed"], [r for r in res["rows"] if r["gate"] and not r["pass"]]
+    rel = rows["LoRA gradient relL2 vs fp32"]
+    assert rel["legacy"] == pytest.approx(0.08, rel=1e-3) and rel["ports"] == pytest.approx(0.12, rel=1e-3)
+    assert rows["cross-path LoRA gradient rel L2 (info)"]["value"] > 0.18
+
+
+def test_fp32_anchor_fails_when_ports_is_farther_than_legacy_plus_margin(tmp_path):
+    res = _tfc(tmp_path, fp32=GRADS, legacy_grads=_scaled(GRADS, 0.08),
+               ports_grads=_scaled(GRADS, 0.14))
+    assert not res["passed"] and not res["incomplete"]
+    bad = {r["check"] for r in res["rows"] if r["gate"] and not r["pass"]}
+    assert "LoRA gradient relL2 vs fp32" in bad
+
+
+def test_fp32_anchor_cosine_margin():
+    ok = {"legacy": {"rel_l2": 0.1, "cosine": 0.995}, "ports": {"rel_l2": 0.1, "cosine": 0.9901}}
+    assert eq.fp32_gate(ok) == {"rel_ok": True, "cos_ok": True}
+    bad = {"legacy": {"rel_l2": 0.1, "cosine": 0.995}, "ports": {"rel_l2": 0.1, "cosine": 0.9899}}
+    assert eq.fp32_gate(bad)["cos_ok"] is False
+
+
+def test_fp32_reference_missing_or_failed_is_incomplete(tmp_path):
+    for fp32 in (None, {0: {"error": "ReferenceInputError: replay batch missing"},
+                        1: {"error": "x"}}):
+        res = _tfc(tmp_path / str(bool(fp32)), fp32=fp32)
+        assert not res["passed"] and res["incomplete"], res["rows"]
+        tiers = eq.evaluate(preset="strict-avg", legacy_runs={}, ports_runs={}, primary_seed=17,
+                            tf=res)
+        assert tiers["tiers"]["2_teacher_forcing"]["incomplete"]
+    # A real gate failure next to a missing reference is a FAIL, not INCOMPLETE.
+    res = _tfc(tmp_path / "f", fp32=None, ports_gn=1.5)
+    assert not res["passed"] and not res["incomplete"]
+
+
+def test_miles_loss_args_and_loss_config(tmp_path):
+    log = tmp_path / "miles.log"
+    log.write_text("\n".join([
+        "  advantage_estimator ....... grpo", "  eps_clip .......... 0.2",
+        "  eps_clip_high ...... 0.28", "  global_batch_size ....... 32",
+        "  global_batch_size ....... 99", "  calculate_per_token_loss ...... False",
+        "  lora_alpha ....... 16", "  grpo_std_normalization ..... True", "noise"]))
+    a = eq.miles_loss_args(log)
+    assert a["global_batch_size"] == "32" and a["eps_clip_high"] == "0.28"
+    cfg = eq.fp32_loss_config(a, dict(a))
+    assert cfg.num_samples == 32 and cfg.eps_clip_high == 0.28 and cfg.lora_alpha == 16.0
+    assert "differ" in eq.fp32_loss_config(a, {**a, "eps_clip": "0.3"})
+    assert "not modelled" in eq.fp32_loss_config({**a, "calculate_per_token_loss": "True"},
+                                                 {**a, "calculate_per_token_loss": "True"})
+
+
+def test_compute_fp32_references_missing_replay_is_reported(tmp_path):
+    _tf_arms(tmp_path)
+    ref, lg, pt = (eq._one_arm(str(tmp_path / n)) for n in ("ref", "tfl", "tfp"))
+    args = eq.parse_args(["analyze", "--legacy", "x", "--ports", "y",
+                          "--fp32-model", "org/m", "--fp32-revision", "a" * 40])
+    out = eq.compute_fp32_references(args, ref, lg, pt, eq.load_tf_arm(lg))
+    assert set(out) == {0, 1} and all("error" in v for v in out.values())
+
+
 def test_teacher_forcing_update_is_reported_not_gated(tmp_path):
     # Adam step 1 ~ lr*sign(g): a large update distance with matching gradients passes (D12).
-    res = eq.teacher_forcing_check(*_tf_arms(tmp_path, ports_delta=[0.01, 0.02, 0.0, -0.03]))
+    res = _tfc(tmp_path, ports_delta=[0.01, 0.02, 0.0, -0.03])
     assert res["passed"], [r for r in res["rows"] if r["gate"] and not r["pass"]]
     rows = {r["check"]: r for r in res["rows"] if r["island"] == 0}
     assert rows["LoRA update rel L2 (info)"]["value"] > 1.0
@@ -297,7 +395,8 @@ def test_grad_compare_cosine_gate_and_worst_tensors(tmp_path):
     assert eq.thresholds()["tf_lora_update"].startswith("reported only")
 
 
-def test_analyze_cli_with_teacher_forcing_writes_report(tmp_path):
+def test_analyze_cli_with_teacher_forcing_writes_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(eq, "compute_fp32_references", lambda *a, **k: _fp32_ref())
     ref, lg, pt = (tmp_path / n for n in ("ref", "tfl", "tfp"))
     _tf_arms(tmp_path)
     legacy_dirs, ports_dirs = [], []

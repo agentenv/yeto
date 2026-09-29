@@ -68,7 +68,7 @@ RL learner 与启动器 SHALL 接受 `--rl-engine`，取值为 `legacy` 或 `por
 ### Requirement: 等价性验收
 在切换默认值之前，SHALL 对每个受支持的同步预设完成等价性验收。两条路径使用同一模型与 revision、同一数据与 revision、同一 reward 和同一硬件类型；验收按下列四层判定，阈值 MUST 在 ports 实验之前固定并写入报告头，MUST NOT 根据 ports 的结果调整：
 - 第 1 层（第 1 轮严格）：主 seed 的第 1 轮，两条路径从相同权重与相同 prompt 出发，每个岛的 `completed_groups`、`action_tokens`、`reward_mean` MUST 完全相等，grad_norm 相对差 MUST ≤ 3%。
-- 第 2 层（teacher forcing）：把 legacy 第 1 轮记录的 rollout（`--save-debug-rollout-data` 产物）分别回放给 legacy 与 ports 的 trainer 各训练一步。回放 MUST 复现记录（reward、token 与 group 计数与原运行相等），两条路径的初始 LoRA MUST 一致；每个岛比较 loss（绝对差 ≤ max(1e-6, 1e-3×|legacy loss|)）、grad_norm（相对差 ≤ 3%）和 optimizer 之前的 LoRA 梯度：两条路径 MUST 在 `optimizer.step()` 入口（DP 规约之后、梯度裁剪之前，去除 loss scale）按 canonical PEFT 名导出全部 LoRA 张量的 f32 梯度及裁剪系数，按名字一一对齐后拼接，`‖g_ports − g_legacy‖₂ / ‖g_legacy‖₂` MUST ≤ 3% 且余弦相似度 MUST ≥ 0.99；报告 MUST 列出相对 L2 最大的若干张量。LoRA 更新量（`‖Δ_ports − Δ_legacy‖₂ / ‖Δ_legacy‖₂`）、其余弦相似度、符号翻转比例与范数比只报告，不判定。
+- 第 2 层（teacher forcing）：把 legacy 第 1 轮记录的 rollout（`--save-debug-rollout-data` 产物）分别回放给 legacy 与 ports 的 trainer 各训练一步。回放 MUST 复现记录（reward、token 与 group 计数与原运行相等），两条路径的初始 LoRA MUST 一致；每个岛比较 loss（绝对差 ≤ max(1e-6, 1e-3×|legacy loss|)）、grad_norm（相对差 ≤ 3%）和 optimizer 之前的 LoRA 梯度。两条路径 MUST 在 `optimizer.step()` 入口（DP 规约之后、梯度裁剪之前，去除 loss scale）按 canonical PEFT 名导出全部 LoRA 张量的 f32 梯度及裁剪系数。LoRA 梯度以 fp32 参考为锚判定：在 CPU 上以 float32 计算参考梯度，输入与引擎相同——同一初始 LoRA（取自审计文件 `base.f32`）、同一回放 batch、同一固定 revision 的模型权重（MUST NOT 启用 trust_remote_code），损失与引擎配置一致（GRPO 优势按组归一化、PPO clip、按样本平均后除以样本数；原始裁剪前梯度）。按名字一一对齐拼接后，每个岛 MUST 满足 `relL2(ports, fp32) ≤ relL2(legacy, fp32) + 0.05` 且 `cos(ports, fp32) ≥ cos(legacy, fp32) − 0.005`，其中 `relL2(x, fp32) = ‖g_x − g_fp32‖₂ / ‖g_fp32‖₂`。报告 MUST 记录 fp32 参考所用回放样本、初始 LoRA 与模型权重的来源和 sha256；任一输入缺失或 fp32 参考计算失败时该层为未完成。两条路径之间的梯度相对 L2、余弦与相对 L2 最大的张量，以及 LoRA 更新量（`‖Δ_ports − Δ_legacy‖₂ / ‖Δ_legacy‖₂`）、其余弦相似度、符号翻转比例与范数比，只报告，不判定。
 - 第 3 层（第 2 轮起的分布口径）：legacy 与 ports 各以同一组 5 个 seed（17–21）运行；每个 seed 把第 2 轮起全部（岛, 轮）的 reward_mean、loss、grad_norm、action_tokens 分别平均，每个指标每个 seed 得到一个值。对每个指标，以两条路径各 5 个值做双侧双样本置换检验（精确枚举 C(10,5)=252 种划分，统计量为均值差），采用 Bonferroni 校正 α=0.05/4=0.0125：任一指标 p<0.0125 MUST 判定失败，否则通过。报告 MUST 给出各 seed 原始值、p 值、效应量（均值差/合并标准差），并写明 n=5 时的检出力局限（最小可达 p 与 80% 检出力所需的最小效应量）。
 - 第 4 层（路径内 hash）：每条路径、每个 seed 内，同一策略版本在各岛应用后的全局策略 hash MUST 一致（decoupled 只比较非部分应用的版本与最终 cut）。跨路径 MUST NOT 比较 hash。
 - strict-avg 预设按全部四层判定；decoupled 预设按第 2、3、4 层判定，第 1 层只报告不判定，另外两条路径导出的 PEFT MUST 都能被标准 PEFT 加载。decoupled 的 teacher forcing 未写出梯度审计文件时，LoRA 梯度的判定取自同一 trainer 配置下 strict-avg 的 teacher forcing 结果。
@@ -87,13 +87,21 @@ RL learner 与启动器 SHALL 接受 `--rl-engine`，取值为 `legacy` 或 `por
 - **WHEN** teacher forcing 回放后的 reward 或 token 计数与 legacy 原运行不相等，或某个 prompt 不在记录中
 - **THEN** 回放失败或 teacher forcing 层判定失败，不以重新采样的数据代替
 
-#### Scenario: teacher forcing 梯度判定
-- **WHEN** teacher forcing 中 loss 与 grad_norm 通过，两条路径拼接后的 LoRA 梯度相对 L2 ≤ 3% 且余弦 ≥ 0.99，但 LoRA 更新量的相对 L2 较大（Adam 第一步约为 `lr·sign(g)`，近零梯度元素的符号被数值噪声翻转）
-- **THEN** 第 2 层通过，报告仍给出更新量的相对 L2、余弦、符号翻转比例与范数比
+#### Scenario: ports 与 legacy 离 fp32 同等接近
+- **WHEN** teacher forcing 中 loss 与 grad_norm 通过，legacy 与 ports 的 LoRA 梯度各自相对 fp32 参考有 bf16 量级的误差（例如 8%～14%），两者之间的跨路径相对 L2 因两份独立误差合成而更大（例如 19%），且 ports 的相对 L2 不超过 legacy 加 0.05、余弦不低于 legacy 减 0.005
+- **THEN** 第 2 层通过，报告仍给出跨路径梯度相对 L2/余弦、LoRA 更新量的相对 L2、余弦、符号翻转比例与范数比
+
+#### Scenario: 聚合 bug 被拦下
+- **WHEN** ports 的 loss 聚合方式错误（例如按 token 平均代替按样本平均），使其 LoRA 梯度相对 fp32 参考的相对 L2 超过 legacy 加 0.05，或余弦低于 legacy 减 0.005
+- **THEN** 第 2 层判定失败，验收失败
 
 #### Scenario: teacher forcing 梯度不一致
-- **WHEN** 某个岛拼接后的 LoRA 梯度相对 L2 超过 3%，或余弦低于 0.99，或两条路径的梯度张量名字/形状不能一一对应，或缺少梯度审计文件
+- **WHEN** 某个岛 ports 的 LoRA 梯度离 fp32 参考比 legacy 远出上述余量，或梯度张量名字/形状与 fp32 参考不能一一对应，或缺少梯度审计文件
 - **THEN** 第 2 层判定失败，验收失败
+
+#### Scenario: fp32 参考缺失
+- **WHEN** fp32 参考所需的回放样本、初始 LoRA 或模型权重缺失，或参考梯度计算失败，且第 2 层没有其他失败项
+- **THEN** 第 2 层为未完成，验收结果为未完成，MUST NOT 切换默认值
 
 #### Scenario: 第 2 轮起分布显著不同
 - **WHEN** 某个指标按 seed 汇总后，legacy 与 ports 的置换检验 p<0.0125

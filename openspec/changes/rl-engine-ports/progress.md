@@ -23,6 +23,9 @@
 4. 7.x 依赖 6.x 通过；rl-infra-spec E0–E3 以 R0 验收为前置，未开工。
 
 ## 已知风险
+- R0 等价结论只覆盖单轮任务：upstream Miles 以 `rollout_mask_sums`/`num_rollouts` 归一化 loss，单轮时与 legacy 等价，多轮/共享 `rollout_id` 时变为按 token 平均，未被实验覆盖（design Risks，后续项）。
+- legacy fork 的 dashboard_columns 写入在两岛同机时偶发 rename 竞态（`evidence/2026-09-29-tf-diagnosis/tfl-a-failed-race`），R0 不修。
+- 第 2 层梯度判定改为锚定 CPU fp32 参考（design D12 第二次口径修改，方案 A）；v3 报告：`evidence/2026-09-29-eq62-v3/`、`evidence/2026-09-29-eq63-v3/`。
 - 驱动在 trainer 常驻时发布（upstream train.py 先 offload），共置可能 OOM。
 - ports 仅上报 grad_norm，loss/lr/KL 为 None，等价性 loss 对比受限。
 - upstream LoRA 导出名非 canonical PEFT（无 `base_model.model.` 前缀），state_plugin 哈希/PEFT 导出前需归一化——GPU 上核实。
