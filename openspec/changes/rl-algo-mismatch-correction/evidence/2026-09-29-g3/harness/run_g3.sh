@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u; G=$(pwd); E=$G/run; mkdir -p $E; T=/tmp/algo1a/tree-g3; H=/tmp/algo1a/g3home; APP=yeto-algo1a-g3
 rm -rf $T $H; mkdir -p $T $H/yeto-output
-git -C /home/michael/work/algo-1a archive $(cat YETO_SHA) | tar x -C $T; rm -rf $T/openspec $T/tests $T/docs; cp harness/gsm8k_reward.py $T/
+git -C /home/michael/work/algo-1a archive $(cat YETO_SHA) | tar x -C $T; rm -rf $T/openspec $T/tests $T/docs; cp harness/gsm8k_reward.py harness/run_local_head.py $T/
 cp /home/michael/work/gpu-default-modal/home/yeto-syncer $H/; ln -s /home/michael/.modal.toml $H/.modal.toml; ln -s /home/michael/.sky $H/.sky
 ss -ltn | grep -q ":29410 " && { echo "port 29410 busy" | tee $E/port_check.txt; exit 5; }; echo "29410 free $(date -u +%FT%TZ)" > $E/port_check.txt
 eval "$(/tmp/yeto-venv/bin/python - <<'PY'
@@ -20,7 +20,7 @@ setsid nohup bash -c "sleep 3300; /tmp/modal-venv/bin/modal app stop -y $APP; pk
 ( while sleep 20; do for c in $(timeout 60 /tmp/modal-venv/bin/modal container list --json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x['container_id'] for x in json.load(sys.stdin) if x['app_name']=='$APP'))" 2>/dev/null); do
     for i in 0 1; do timeout 60 /tmp/modal-venv/bin/modal container exec $c -- sh -c "cat /root/yeto-output/rl-island-$i.jsonl 2>/dev/null" > $E/.t.$i 2>/dev/null; grep -q '"event"' $E/.t.$i 2>/dev/null && mv $E/.t.$i $E/island-$i.jsonl; done; done; done ) & PULLER=$!
 date -u +%FT%TZ > $E/start_time.txt
-cd $T && HOME=$H YETO_RUNS_DIR=$H/runs SYNCER_PUBLIC_IP=185.189.44.160 PYTHONPATH=$T timeout 3000 /home/michael/work/gpu-head/venv/bin/python $G/harness/run_local_head.py $E/args.txt > $E/launch.log 2>&1
+cd $T && HOME=$H YETO_RUNS_DIR=$H/runs SYNCER_PUBLIC_IP=185.189.44.160 PYTHONPATH=$T timeout 3000 /home/michael/work/gpu-head/venv/bin/python $T/run_local_head.py $E/args.txt > $E/launch.log 2>&1
 echo $? > $E/rc; date -u +%FT%TZ > $E/end_time.txt; sleep 30; kill $PULLER; kill $(cat $E/watchdog.pid) 2>/dev/null
 cp $H/yeto-output/*.jsonl $E/ 2>/dev/null; cp $H/yeto-syncer.log $E/ 2>/dev/null
 cleanup; timeout 60 /tmp/modal-venv/bin/modal app list 2>/dev/null | grep "$APP" > $E/app_after_stop.txt; ss -ltn | grep -c ":29410 " > $E/port_after.txt

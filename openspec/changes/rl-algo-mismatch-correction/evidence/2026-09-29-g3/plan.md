@@ -33,3 +33,8 @@
   must show it stopped with 0 tasks; `ss -ltn` shows 29410 closed.
 - Cost: 2x H100 ~20 min = ~0.7 H100 h, ~ $3; cap $8. Single attempt; a harness failure before the
   app exists may be fixed and rerun once after a committed diagnosis.
+
+## Attempt 1 (harness, before any cloud resource)
+- `RL reward source must be inside the synced Yeto workdir`: gsm8k_reward resolved from harness/
+  (the head script's directory is sys.path[0]). Fix: copy run_local_head.py into the upload tree
+  and run it from there. Rerun once.
