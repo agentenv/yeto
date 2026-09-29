@@ -44,16 +44,16 @@
 | 5.3 | CPU 通过 | |
 | 6.1 | 未完成 | fake.py 归 ALGO-CAP；补丁见 1a-declare.patch |
 | 6.2 / 6.3 | CPU 通过 | |
-| 7.1 | 已实现 | |
+| 7.1 | 已实现（原撤销后已按原文补做 dry-run） | evidence/2026-09-29-dryrun |
 | 7.2 | GPU 验收通过（G1） | tis、icepop、opsm_trainer、mismatch_observe、mis、mis_mask；opsm_rollout 未跑 |
-| 7.3 | 未完成 | entry.py 归 ALGO-CAP；tis/opsm_trainer 的声明补丁在 1a-declare.patch，其余项先需 1a-shared.patch |
+| 7.3 | 未完成 | 已声明 none/tis/opsm/opsm_trainer（opsm 为 OPSM 维度，不放行来源）；其余机制待集成分支处理或补触发验证 |
 | 7.4 | GPU 验收通过（G2） | evidence/2026-09-29-g1b/runs/g2-observe/report.md |
-| 7.5 | 未完成 | G3 两岛未跑 |
+| 7.5 | 未完成 | G3（TIS）跑过一次，未通过（判据 3、4 不成立：磁带截断），待重跑并补跑 IcePop |
 | 7.6 | 已实现 | 无残留，费用见下 |
 | 7.7 | 未完成（可选） | |
 | 8.1 / 8.2 / 8.3 | CPU 通过 / 已实现 | |
 
-仍为 ⚙（Miles adapter 未声明）的机制：全部，包括 mismatch_observe、tis、icepop、opsm_trainer、opsm_rollout、mis、mis_mask。其中 tis 和 opsm_trainer 的 G1 已通过，等 ALGO-CAP 合入 1a-declare.patch 后即变为 ✅。
+（更正，以下一行为准）早先记录的“仍为 ⚙（Miles adapter 未声明）的机制：全部”已被取代：tis、opsm、opsm_trainer 已声明；仍为 ⚙ 的是 mismatch_observe、icepop、opsm_rollout、mis、mis_mask。原句：包括 mismatch_observe、tis、icepop、opsm_trainer、opsm_rollout、mis、mis_mask。其中 tis 和 opsm_trainer 的 G1 已通过，等 ALGO-CAP 合入 1a-declare.patch 后即变为 ✅。
 
 ### 1.2 接口核对
 
@@ -132,3 +132,11 @@
 - 待批准（新增）：5.2 偏离原文（能 import 却仍使用副本），需用户批准；主 agent 倾向保留副本。
 - 全量测试：68 failed + 26 errors，按 id 与基线 3d1b466 相同。
 - 云资源：本轮没有新建任何资源（g1c 的 3 次尝试都在 app 创建前失败）。之前的 algo1a-g1 和 algo1a-g1b 仍为 stopped、0 tasks。g1c 留下 3 个孤儿 `sleep 3000` 进程，它们原本是 watchdog 的子进程，父进程已结束，醒来后不会执行任何操作。
+
+## 2026-09-29 复验 / G3 / 生效验证（ALGO-1a）
+
+- 7.1 补做完成：`yeto launch --rl-single-island-no-sync --controller local --dry-run` 的输出为 total_gpus 1、syncer null、outer_sync false（`evidence/2026-09-29-dryrun/`）。
+- g1c 入口复验：tis、icepop、opsm-trainer 全部 PASS（判据 1-6）。前 4 次尝试都是环境或入口问题：venv 缺 sky、线程上限、FleetController 缺陷（已由 P0 修复）。opsm-trainer 有一处流程偏离：启动时线程数高于我自定的前置阈值；中止时误杀了 wrapper，事件改用 launcher 回传的磁带。两处都已在 plan 中如实记录。
+- 生效验证（`evidence/2026-09-29-trigger/`）：tis、icepop、mis_mask 的截断/屏蔽比例 >0；OPSM 在 `--rl-optimizer-steps 2` 下 opsm_clipfrac >0。因此“声明需 GPU 上确实生效”的条件对 tis 和 opsm_trainer 已满足。
+- G3（TIS，两个 Modal 岛 + 本机 syncer 在 29410 端口）**未通过**：判据 3、4 无法成立，原因是 island-1 的磁带拉取截断；syncer 显示 3 步 strict 同步、两个 responder 都在，v0/v1 的权重 hash 一致。重跑需先提交 harness 修复（改用 launcher 回传磁带，前提是两岛路径也支持回传）。
+- 本节云资源：g1c 3 次（约 32 min）+ trigger 4 次（约 33 min）+ G3 2×H100 约 17 min，合计约 1.65 H100·h、约 $6.5（估算，未经账单确认）；连同此前两轮，总计约 $10.5。所有 algo1a 应用均无容器残留（`modal container list` 为 0），29410 端口已关闭，watchdog 已结束。
