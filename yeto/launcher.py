@@ -1545,6 +1545,7 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
         MILES_BUNDLE_SHA256,
         MILES_COMMIT,
         MILES_NEXT_COMMIT,
+        MILES_NEXT_IMAGE_SGLANG_ROOT,
         MILES_NEXT_REPOSITORY,
         MILES_PEFT_VERSION,
         MILES_REPOSITORY,
@@ -1564,21 +1565,48 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
                 f"git -C {path} remote set-url origin {repo}\n"
                 f'test "$(git -C {path} config --get remote.origin.url)" = '
                 f"{repo}\n"
+                # MILES_NEXT_IMAGE already has the pinned fork checked out
+                # at ~/miles (/root/miles); only fetch when it is not HEAD.
+                f'if [ "$(git -C {path} rev-parse HEAD 2>/dev/null)" != '
+                f"{commit} ]; then\n"
                 f"git -C {path} fetch --depth 1 origin {commit}\n"
                 f"git -C {path} checkout --detach {commit}\n"
+                "fi\n"
                 f'test "$(git -C {path} rev-parse HEAD)" = {commit}\n'
                 f'test "$(git -C {path} rev-parse --abbrev-ref HEAD)" = HEAD\n'
                 f'test -z "$(git -C {path} status --porcelain '
                 '--untracked-files=all)"\n'
             )
 
+        # MILES_NEXT_IMAGE ships the pinned SGLang fork installed editable
+        # at /sgl-workspace/sglang: ~/sglang (first on the island's
+        # PYTHONPATH) becomes a link to it.  Any other image, or an existing
+        # ~/sglang directory, gets the clone + install at ~/sglang as before.
+        image_root = shlex.quote(MILES_NEXT_IMAGE_SGLANG_ROOT)
+        sglang_in_image = (
+            f'{{ [ ! -e ~/sglang ] || [ "$(readlink ~/sglang)" = {image_root} ]; }} && '
+            f'[ "$(git -C {image_root} rev-parse HEAD 2>/dev/null)" = '
+            f"{SGLANG_NEXT_COMMIT} ] && "
+            f'[ "$(git -C {image_root} config --get remote.origin.url)" = '
+            f"{shlex.quote(SGLANG_NEXT_REPOSITORY)} ] && "
+            f'[ -z "$(git -C {image_root} status --porcelain '
+            '--untracked-files=all)" ] && '
+            "python3 -c 'import os, sys, sglang; sys.exit(0 if os.path.realpath("
+            f'sglang.__file__).startswith("{MILES_NEXT_IMAGE_SGLANG_ROOT}/python/'
+            "\") else 1)'"
+        )
         return (
             "set -e\n"
             + checkout("~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
             + "python3 -m pip install -q --no-deps -e ~/miles "
             f"'peft=={MILES_PEFT_VERSION}'",
-            checkout("~/sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT)
-            + "python3 -m pip install -q --no-deps -e ~/sglang/python",
+            f"if {sglang_in_image}; then\n"
+            f"ln -sfn {image_root} ~/sglang\n"
+            f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"
+            "else\n"
+            + checkout("~/sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT)
+            + "python3 -m pip install -q --no-deps -e ~/sglang/python\n"
+            "fi",
         )
     if rl_engine != "legacy":
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
@@ -1627,6 +1655,7 @@ def make_miles_island_task(
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
+    from .modal_runner import registry_credentials
     from .models import resolve
     from .provenance import is_local_reference
     from .rl import SIGNED_CODEX_AGENTS
@@ -1877,6 +1906,10 @@ def make_miles_island_task(
     island_pythonpath = (
         "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
+    # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): SkyPilot's
+    # docker login, as task secrets so it stays out of the task envs.
+    registry_secrets = registry_credentials(args.rl_image, os.environ)
+    task_kwargs = {"secrets": registry_secrets} if registry_secrets else {}
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
         setup="\n".join(setup_steps),
@@ -1928,6 +1961,7 @@ def make_miles_island_task(
         num_nodes=spec.num_nodes,
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts or None,
+        **task_kwargs,
     )
     resources = {
         "infra": f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud,
@@ -2681,6 +2715,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         run_script=str(getattr(task, "run", "") or ""),
         envs={k: str(v) for k, v in envs.items() if v is not None},
         region=spec.region,
+        gpu_exact=bool(getattr(args, "modal_gpu_exact", False)),
         image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
         setup_script=str(getattr(task, "setup", "") or "") if rl else None,
         pip_requirements=requirements,
