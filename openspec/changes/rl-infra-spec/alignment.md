@@ -143,13 +143,22 @@
 
 同一文件在同一时刻只有一个写入者。共享注册文件（`algorithm.py`、`algorithm_flags.py`、`entry.py`、`fake.py`、`docs/MILES_RL.md` 的算法小节）在 P0 完成后仍归 WP-CAP 负责人；子 change 以补丁形式提交，由该负责人合并，或者主 agent 按时间片轮流授予独占。
 
+## 7b. 主 agent 决定（2026-09-29，可被用户推翻）
+
+1. **GPU 预算**：用户已授权“执行必要 GPU 实验不再逐轮批准”，原待批准项“GPU 预算”删除。预算与每轮计划仍按 [`gpu-plan.md`](gpu-plan.md) 和 BRIEF 的 GPU 规则（事先写计划、容差与硬超时，并有回收机制）执行。
+2. **推送授权**：用户已授权推送 michaellchung/yeto、michaellchung/miles、michaellchung/sglang 的功能分支。算法 tasks 中“commit 和 push 需要用户确认”按此解释为已授权，原文不改。
+3. **`miles_adapter/config.py` 与 `entry.py` 按函数划分**：ALGO-CAP 拥有 `config.py` 的算法翻译函数（`translate_run_config` 的算法部分、`check_extra_argv`、`ADAPTER_OWNED_FLAGS`）以及 `entry.py` 的能力声明；INFRA 拥有两文件的其余部分。同一时间只有一个写入者，由主 agent 调度。
+4. **`driver.py` 的唯一负责人是 INFRA**。P0 4.2 对 `_check_gradient` 的改动由 ALGO-CAP 以补丁形式交给主 agent，主 agent 在 INFRA 空档合入。§7 顺序原则第 4 条与 WP-CAP 行中“`driver.py`（仅 `_check_gradient`）”以本条为准。
+5. **E3 认证范围**：首轮只认证默认 GRPO 属于缩窄认证范围，仍保留为待批准（§8 第 3 项）；在批准前，E3 先按默认 GRPO 执行。
+6. **infra 代码工作的基底**：集成分支 `rl-integ` = `rl-infra-spec` 6fca4a8 + `fix-decoupled-lr-schedule` 63ea45a（merge `c5e05f4`，已推送；CPU 失败集合按测试 id 与基线相同）。WP-INFRA2 与 WP-CAP 的代码改动基于 `rl-integ`；规划文档仍在 `rl-infra-spec`。
+
 ## 8. 待批准事项
 
-1. **GPU 预算**：`/home/michael/work/infra-drafts/gpu-plan.md`（task 1.3 草案，约 $3,052，含 25% 余量上限约 $3,815；4.6 no-go 时约 $1,966）；另有各算法 change 的 G1/G3 预算（每个 change 自行申请）。
+1. （已删除：GPU 预算，见 §7b 第 1 条。）
 2. **2b 路线 A/B 的决定**；若选 B，还需同意向 `michaellchung/miles` 的 `yeto/ports` 提交（2b 1.2）。
-3. **E3 认证范围**：A4 使变 DP 的认证绑定到算法描述。建议首轮只认证默认 GRPO，其他算法请求 E3 边时拒绝。是否扩大到其他算法需要另批预算。
-4. **`miles_adapter/config.py`、`entry.py` 的归属**：BRIEF 规定 `miles_adapter/*` 归 INFRA（第二批），但 P0 必须修改这两个文件的算法部分。建议按函数划分：算法翻译与能力声明归 WP-CAP，placement/rollout/publish/cut 归 INFRA，由主 agent 确认。
-5. **算法 tasks 中“commit 和 push 需要用户确认”**与 BRIEF“可推送功能分支”不一致，请主 agent 或用户澄清；本轮保留原文，未改。
+3. **E3 认证范围**：A4 使变 DP 的认证绑定到算法描述。建议首轮只认证默认 GRPO，其他算法请求 E3 边时拒绝。批准前 E3 先按默认 GRPO 执行（§7b 第 5 条）。
+4. **`miles_adapter/config.py`、`entry.py` 的归属**：BRIEF 规定 `miles_adapter/*` 归 INFRA（第二批），但 P0 必须修改这两个文件的算法部分。已由主 agent 按函数划分决定（§7b 第 3 条），不再待批准。
+5. （已由主 agent 决定，见 §7b 第 2 条。）
 6. **1.8** 需要 DynaResize 原文 PDF（本地没有）。
 7. **lr-fix 与 fix-verda-provider 的实际状态与用户所说“已完成”不符**：
    - lr-fix（`fix-decoupled-lr-schedule`，HEAD 63ea45a）为 9/10，3.2 两岛 decoupled 需要在 head 模式实跑；
