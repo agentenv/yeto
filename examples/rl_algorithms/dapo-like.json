@@ -4,7 +4,7 @@
     "reward_binary": false,
     "reward_postprocess": {
       "path": "yeto.rl.algos.reward_pipeline.post_process",
-      "sha256": "35cd5262518f6055cddba3f1791d70218595f26ef5b889e1ed6097a78d5b7115"
+      "sha256": "9d1974027811ccc7c2cfbcf0fcdfafb741db3456ff1d9599b4d38abc28a1d7f0"
     },
     "reward_shapers": [
       {
@@ -51,7 +51,7 @@
   "plugins": [
     {
       "path": "yeto.rl.algos.reward_pipeline.grpo_default",
-      "sha256": "35cd5262518f6055cddba3f1791d70218595f26ef5b889e1ed6097a78d5b7115"
+      "sha256": "9d1974027811ccc7c2cfbcf0fcdfafb741db3456ff1d9599b4d38abc28a1d7f0"
     }
   ],
   "sampling": {
