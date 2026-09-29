@@ -56,6 +56,14 @@ def parse_args(argv=None):
     # Required unless --rl-single-island-no-sync (checked after parsing).
     parser.add_argument("--syncer", default=None)
     parser.add_argument(
+        "--rl-echo-events",
+        action="store_true",
+        help=(
+            "ports: echo every event-tape record to stdout as 'YETO_RL_EVENT <json>' "
+            "(the launcher sets it for Modal islands, whose ~/yeto-output is not fetchable)"
+        ),
+    )
+    parser.add_argument(
         "--rl-single-island-no-sync",
         action="store_true",
         help=(
@@ -1753,7 +1761,9 @@ def run_miles(
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
     _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
-    if rl_engine == "ports" and getattr(args, "rl_single_island_no_sync", False):
+    if rl_engine == "ports" and (
+        getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_echo_events", False)
+    ):
         install_event_echo()
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)

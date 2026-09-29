@@ -1812,6 +1812,7 @@ def make_miles_island_task(
             if getattr(args, "rl_single_island_no_sync", False)
             else " --syncer $SYNCER_ADDR"
         )
+        + (" --rl-echo-events" if _echoes_events(args, spec) else "")
         + " --learner-id $LEARNER_ID"
         f" --reward-function {shlex.quote(args.reward_function)}"
         f" --reward-sha256 {shlex.quote(args.reward_sha256)}"
@@ -3665,8 +3666,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         raise ValueError("--rl-single-island-no-sync has no syncer; do not run it as a head")
     specs = parse_gpu_spec(args.gpu)
     no_sync_incomplete: list[str] = []
-    events_dir = _no_sync_events_dir(args) if no_sync else None
-    if no_sync:
+    # Islands whose tape travels over the log stream (no fetchable
+    # ~/yeto-output): every Modal RL ports island, and a no-sync island.
+    echo_names = {
+        name for name, spec in zip(learner_cluster_names(args.cluster_prefix, specs), specs)
+        if _echoes_events(args, spec)
+    }
+    events_dir = _no_sync_events_dir(args) if echo_names else None
+    if echo_names:
         # Refuse to mix runs in one tape, before anything is provisioned.
         existing = sorted(str(p) for p in events_dir.glob("*.jsonl*")) if events_dir.exists() else []
         if existing:
@@ -3856,7 +3863,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         def spawn_tail(name: str, job_id) -> None:
             label = "syncer" if name == syncer_cluster else name
             collector = None
-            if no_sync and name != syncer_cluster:
+            if name in echo_names:
                 # No syncer tape and (on Modal) no fetchable ~/yeto-output: the
                 # island echoes its tape into the log; rebuild it locally.
                 collector = event_collectors.get(name)
@@ -3897,7 +3904,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             fixed_roster=getattr(args, "training_mode", "sft") == "rl",
         )
         exit_codes = controller.run()
-        if no_sync:
+        if echo_names:
             # The island's last events (finalization) must be on disk before
             # teardown: the log streams end when the island exits; bounded wait.
             deadline = time.monotonic() + NO_SYNC_EVENT_DRAIN_S
@@ -3918,18 +3925,19 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                         f"record; marked {collector.incomplete_marker}",
                         file=sys.stderr,
                     )
-            for name in learner_names:
+            for name in sorted(echo_names):
                 if name not in event_collectors:  # never streamed: nothing received
                     no_sync_incomplete.append(name)
                     EventCollector(events_dir / f"{name}.jsonl", fresh=False).close()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
         if no_sync_incomplete:
             print(
-                f"[launcher] no-sync event tape incomplete for {no_sync_incomplete}; "
+                f"[launcher] event tape incomplete for {no_sync_incomplete}; "
                 f"exit {NO_SYNC_INCOMPLETE_EXIT}",
                 file=sys.stderr,
             )
-            return NO_SYNC_INCOMPLETE_EXIT
+            if no_sync:  # nothing else to secure: no syncer checkpoint
+                return NO_SYNC_INCOMPLETE_EXIT
 
         # Secure the artifact BEFORE the finally block tears learners down:
         # fetch ~/yeto-output from the winning learner onto this machine
@@ -3993,7 +4001,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                 print(f"[launcher] upload to {output} failed: {e}; the model "
                       f"remains at {local_dest}", file=sys.stderr)
                 return 2
-        return 1 if failed else 0
+        if failed:
+            return 1
+        # A synced run still fetches/delivers its checkpoint first, then
+        # fails closed on an incomplete island tape.
+        return NO_SYNC_INCOMPLETE_EXIT if no_sync_incomplete else 0
     finally:
         # Clusters the controller already tore down (abandoned learners, or
         # the syncer after a total loss) are skipped — even with --keep.
@@ -4060,6 +4072,16 @@ NO_SYNC_EVENT_DRAIN_S = 120.0
 # no-sync run whose island tape lacks rl_learner_finalized (differs from 2:
 # "artifact not fetchable").
 NO_SYNC_INCOMPLETE_EXIT = 3
+
+
+def _echoes_events(args, spec) -> bool:
+    """Whether this island's tape is echoed to its log and rebuilt locally."""
+
+    return (
+        getattr(args, "training_mode", "sft") == "rl"
+        and getattr(args, "rl_engine", "ports") == "ports"
+        and (bool(getattr(args, "rl_single_island_no_sync", False)) or spec.cloud == "modal")
+    )
 
 
 def _no_sync_events_dir(args) -> Path:
