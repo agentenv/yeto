@@ -647,6 +647,19 @@ Before any GPU process exists, the driver handshake refuses:
     binary;
   - `reinforce_plus_plus*` without `whiten`.
 
+**Declaration policy** (main-agent decision, may be overridden by the user;
+alignment §7b): a mechanism is declared in `miles_capabilities` only on
+evidence that it actually takes effect on GPU. Current Miles adapter
+declarations beyond R0:
+
+- `corrections`: `tis`, `opsm`, `opsm_trainer` (rl-algo-mismatch-correction).
+  **G1 only proved they run; that their truncation/masking branches take
+  effect is pending a triggering run.** They are withdrawn if that run does
+  not show the effect.
+- `features`: `maxrl`, `mapo` (rl-algo-seq-and-adv G1). A real run also needs
+  `reward_postprocessors:custom_reward_postprocess`, which waits for the
+  rl-algo-grpo-knobs G1. `gdpo` is held back.
+
 "Expressible, not enabled" means the spec can describe and translate a
 mechanism, but `miles_capabilities` does not declare it yet. A follow-up
 algorithm change declares it after its single-GPU smoke passes.

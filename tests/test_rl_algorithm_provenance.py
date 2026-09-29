@@ -698,3 +698,16 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
     spec, mechanisms = algorithm_from_event_tape(local)
     assert spec == launch.algorithm.canonical_json()
     assert mechanisms == ("features:clip_higher",)
+
+
+def test_event_echo_format_and_extract(tmp_path):
+    from yeto.rl import event_echo
+
+    record = {"island_id": 0, "time_unix": 1.5, "event": "x", "b": [1]}
+    line = event_echo.format_record(record)
+    assert line == 'YETO_RL_EVENT {"b":[1],"event":"x","island_id":0,"time_unix":1.5}'
+    log = tmp_path / "head.log"
+    log.write_text(f"[yeto-l0] {line}\nnoise\n[yeto-l0] {line}\nYETO_RL_EVENT {{bad\n")
+    out = tmp_path / "tape.jsonl"
+    assert event_echo.main([str(log), str(out)]) == 0
+    assert out.read_text() == line[len("YETO_RL_EVENT "):] + "\n"

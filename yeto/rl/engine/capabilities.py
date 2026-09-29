@@ -170,6 +170,17 @@ class EngineCapabilities:
             _names(self.unverified_mechanisms, None, "unverified mechanisms"),
         )
 
+    def declared_mechanisms(self) -> frozenset[str]:
+        """Every declared mechanism as ``dimension:name`` (all dimensions)."""
+
+        from .algorithm import MECHANISM_DIMENSIONS
+
+        return frozenset(
+            f"{dimension}:{name}"
+            for dimension in MECHANISM_DIMENSIONS
+            for name in self.mechanisms(dimension)
+        )
+
     def mechanisms(self, dimension: str) -> frozenset[str]:
         """Declared mechanism names of one ``MECHANISM_DIMENSIONS`` entry."""
 
