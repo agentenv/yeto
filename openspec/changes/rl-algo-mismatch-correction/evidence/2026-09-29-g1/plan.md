@@ -52,3 +52,4 @@
   do not extrapolate to partitioned mode (NCCL broadcast), larger models or MoE.
 - 5.1: in the same sandbox, `cd /root && python -c "import examples.infra_features.train_infer_mismatch_helper.mis"`
   with PYTHONPATH=/root/miles, and the same from /work/yeto, output recorded; license line from /root/miles/LICENSE.
+YETO_SHA updated before any G1 run: header comment of vendored MIS corrected after the 5.1 check (no code change)
