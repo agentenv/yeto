@@ -183,3 +183,11 @@
 
 - `openspec validate <change> --strict`：6 个 change 的结果见本分支 rl-infra-spec/progress.md 的 2026-09-29 ALIGN 条目。
 - 推送：普通 push 到 `origin rl-infra-spec`（不强推）；推送的 HEAD 即包含本文件的提交。
+
+## 10. Agent INFRA 追加（2026-09-29，分支 `infra-a`）
+
+- **A1 已落地为代码**（bf47641/115ee9a/e4d227a）：`ExecutionProfile.algorithm_spec_sha256`、`check_algorithm_contract`、`execution_max_policy_staleness`（所有模式均为 0），ports 入口在 GPU init 之前执行 preflight。读取 `AlgorithmSpec.execution.max_policy_staleness` 时按 P0 design 的字段路径以鸭子类型处理，v1 spec 视为 0。**需要与 ALGO-CAP 对齐**：v2 `ExecutionSpec` 冻结后，确认字段名与类型。
+- **A4 已落地为 schema**：certified edge 可以带 `algorithm_spec_sha256` 列表；trainer-dp/role-transfer 边只对列表中的哈希有效。
+- **A5**：driver 在 `observe=True` 时给每轮算法指标打 profile/epoch/权重传输标签（colocated 为 `cuda-ipc`，fixed-partition 为 `nccl-broadcast`）；2.2 保留每组 policy token 校验。
+- **§8 第 6 项（1.8 缺原文）已解除**：原文为 arXiv:2607.22614，假设见 `dynaresize-hypotheses.md`。关键发现：论文以 one-step-off-policy 异步流水线为前提（p.2–3），与本 change 的 age 0 不同，因此论文结论不能外推，也不能作为开放 overlap 的依据。
+- **entry.py 的能力声明**：infra 的 placement/mode 声明放在单独的 `with_partitioned_serial()` 中，没有修改 ALGO-CAP 负责的 `miles_capabilities()`。

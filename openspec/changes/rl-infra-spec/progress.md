@@ -48,3 +48,50 @@
 - GPU 计划纳入本目录的 `gpu-plan.md`，其中 E3 的 gather 阶段改名为 DEV-GATHER。
 - 主 agent 的决定见 alignment.md §7b。infra 代码工作的基底为 `rl-integ`（merge c5e05f4）。
 - 六个 change 的 `openspec validate --strict` 在推送前重新运行，全部 valid。
+
+## 2026-09-29（Agent INFRA，阶段 A + E0 的 CPU 部分，分支 `infra-a`）
+
+- 分支与 worktree：`infra-a`，位于 `/home/michael/work/infra-a`，基于 `origin/rl-integ` a50e9d2。所有提交均已普通 push 到 `origin/infra-a`，没有未提交改动（本条目所在提交之后）。
+- 提交：bf47641（1.4/1.5/1.6 A1/A4）、115ee9a（driver profiles/观测，1.4/1.7/2.2）、e4d227a（2.1/2.1a 分区与 M1 map、入口 preflight）、47e7d7e（1.1 manifest 工具、1.3 计划定稿、1.8 假设）、本条目所在的文档提交。
+- 没有使用任何 GPU 或云资源，费用为 $0，没有残留。
+
+### 状态（五选一）
+
+| task | 状态 | 证据 |
+|---|---|---|
+| 1.1 | 未完成（manifest 工具 CPU 通过，待镜像） | `yeto/rl/engine/runtime_manifest.py`，`tests/test_rl_runtime_manifest.py` |
+| 1.2 | 未完成（待镜像/GPU A1） | — |
+| 1.3 | 已实现（计划定稿；依赖 1.1，未勾选） | `gpu-plan.md` §8 |
+| 1.4 | CPU 通过（依赖 1.2，未勾选；AlgorithmSpec v2 接口待对齐） | `tests/test_rl_execution_profile.py`、`tests/test_rl_driver_profiles.py` |
+| 1.5 | CPU 通过（未勾选） | `tests/test_rl_pause_audit.py` |
+| 1.6 | CPU 通过（未勾选） | `tests/test_rl_elastic_config_schema.py` |
+| 1.7 | 未完成（driver 事件与"关闭观测兼容"CPU 通过；rollout 计数待 M3 镜像） | `tests/test_rl_driver_profiles.py` |
+| 1.8 | 已实现（依赖 1.4/1.7，未勾选） | `dynaresize-hypotheses.md` |
+| 2.1 | CPU 通过（GPU 未做） | `tests/test_rl_miles_adapter_config.py`、`tests/test_rl_miles_adapter_placement.py` |
+| 2.1a | CPU 通过（fork M1 单测与 yeto 侧校验；GPU 未做） | miles-elastic `tests/fast/ray/test_placement_map.py` |
+| 2.2 | CPU 通过（GPU A2 未做） | `tests/test_rl_driver_profiles.py` |
+| 2.3 | 未完成（CPU 重叠分析已做；X9 待 GPU） | tasks.md 2.3 进展 |
+| 2.4 | 未完成 | — |
+
+### 测试
+
+- 命令：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors`。结果：68 failed / 2081 passed / 41 skipped / 26 errors（基线 `/tmp/integ-full.txt`：68 failed / 2062 passed / 26 errors）。
+- 失败集合按测试 id 去重后与基线**完全相同**（均为 94 个 id，`diff` 为空）。新增的 19 个测试全部通过。输出见 `/tmp/infra-a-full.txt`。
+- fork M1：`/tmp/review-miles-venv/bin/python -m pytest -q tests/fast/ray/test_placement_map.py tests/fast/ray/test_placement_group.py`，61 passed。
+
+### 阻塞与解除条件
+
+- 1.1/1.2/2.1–2.4 的 GPU 部分：需要 Agent IMG 提供含 fork M1（`yeto-elastic-m1-m6` 3ae99fd1 及其后的审查修复）的 `MILES_NEXT_COMMIT` 与镜像 digest。拿到 digest 后按 gpu-plan §8 顺序执行：F0（1.1 manifest）→ A1（1.2）→ F2 → A2（2.1/2.1a/2.2/2.3 X9）→ A3（2.4）。
+- 1.7 的 queued/active/tool-wait 计数：依赖 M3 进入镜像。
+- CLI：`--rl-placement`/`--rl-standby-gpus` 需要加到 `yeto/rl/learner.py`（以及 launcher、harness 的透传），不在 INFRA 的写入范围内。
+- launcher 的 Modal `H100` 映射没有 `!`（`modal_runner.py:59-60`）：逐位实验在修复前改用独立的 Modal 脚本。
+
+### 待批准
+
+无新增。1.8 原先的阻塞"缺原文"已解除（见 alignment.md 追加条目）。
+
+### 下一步（可直接执行）
+
+1. 主 agent 合入 ALGO-CAP 的 `_check_gradient` 补丁后，在其上继续开发；ALGO-CAP 的 v2 `ExecutionSpec` 冻结后，复核 `execution_profile.algorithm_max_policy_staleness`。
+2. 镜像 digest 到位后，在镜像内运行 `python -m yeto.rl.engine.runtime_manifest --image <digest> --out manifest.json --capability ports-partitioned-serial --capability fixed-partition-standby`。
+3. 先写 A1/A2 的实验计划（容差、seed、硬超时、前缀 `infra-a-`）并提交，然后再租用。
