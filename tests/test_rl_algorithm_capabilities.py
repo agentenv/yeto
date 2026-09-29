@@ -377,7 +377,16 @@ def test_miles_and_fake_declarations():
     fake = fake_capabilities()
     assert fake.corrections == {"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
                                 "opsm_trainer", "opsm_rollout", "mis", "mis_mask"}
-    assert fake.features == {"mismatch_metrics", "rollout_logprobs_as_old"}
+    # the fake also declares what the Miles adapter declares for 1b (8.3,
+    # grpo_knobs.merge_declared)
+    assert fake.features == {"mismatch_metrics", "rollout_logprobs_as_old", "clip_higher",
+                             "entropy_bonus", "eps_clip", "kl_loss_ref_model",
+                             "no_grpo_std_normalization", "over_sampling", "overlong_filter",
+                             "overlong_penalty"}
+    assert fake.loss_aggregations == {"default", "constant", "token"}
+    assert fake.kl_placements == {"none", "reward", "loss"}
+    assert fake.reward_postprocessors == {"custom_reward_postprocess"}
+    assert fake.advantage_estimators == {"grpo"}
     for caps in (miles, fake):
         assert caps.execution == ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True)
@@ -527,8 +536,14 @@ def test_always_emit_field_only_when_its_mechanism_applies():
 def test_estimator_mandated_settings_are_claimed_by_the_estimator():
     # a caps object with exactly gspo/rpp declared and none of the companion
     # features: pins the claim itself, independent of later declarations
-    caps = fake_capabilities(advantage_estimators={"grpo", "gspo", "reinforce_plus_plus"},
-                             features=set())
+    import dataclasses
+
+    # gspo/rpp declared and, explicitly, no feature at all (the fake would add
+    # 1b's features, clip_higher among them): pins the claim itself
+    caps = dataclasses.replace(
+        fake_capabilities(advantage_estimators={"grpo", "gspo", "reinforce_plus_plus"}),
+        features=frozenset())
+    assert caps.features == frozenset()
     gspo = AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
                          loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4))
     assert not {("features", "eps_clip"), ("features", "clip_higher")} & gspo.required_mechanisms()
