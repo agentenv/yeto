@@ -122,3 +122,15 @@
 - 全量：68F + 26E = 94（`after-failures-570e468.txt`），是 756946b 基线（99 条）的真子集：没有新增失败，另有 5 条合并引入项已被他人修复。
 - 状态更新：3.1、3.6、6.3、8.1 → 完成（CPU 通过）。5.5 仍未完成（等 INFRA R2：非零条目数进入 batch_summary）；2.2 等 R1。
 - G1 仍等 1b F1（哈希覆盖/load_extensions）与 INFRA R1/R2；届时撤掉 `plugins` 身份要求、重生成示例、单独提交改用 `--rl-single-island-no-sync` 的修订计划后再跑（这将是该入口首次真实 GPU 使用，会记录）。
+
+## 2026-09-29 merge algo-1b 2722cad / algo-cap 6149a90 / infra-a 39fa0ac；G1
+- 适配：撤掉 `seq_adv_transform_identity`，改用 `grpo_knobs.with_pipeline_plugins`；Miles 对照测试补 `pipeline_sha256`；变换写 `args.yeto_rl_round_metadata["nonzero_advantages"]`（R2）；新增 2.2/5.5 测试与示例新鲜度守卫测试。
+- 全量（`after-failures-infra-a.txt`）：70F+26E。相对 756946b 基线只多 1 条 `tests/test_rl_grpo_knobs.py::test_examples_build_and_translate[dapo-like]`：1b 的示例 spec 在 1b 分支上生成，不含 seq_adv 模块的 PluginRef（F1 要求所有注册模块都列入）——需 1b 在集成分支重生成该示例；另有 P0 已知的 `test_each_mapped_field_translates[change9]`（ALGO-CAP 修复中，基线中也有）。
+- G1（`evidence/g1/plan.md` attempts 2–4，代码均为已推送 SHA，无临时补丁）：
+  - attempt 2（8d7f752）：gspo_s2 生成与首轮两步训练成功（step0 clipfrac 0.0，step1 clipfrac 0.4375），随后 `LocalStepReceipt(algorithm='gspo')` 被 `contracts._ALGORITHMS={"grpo","sao"}` 拒绝。所有非 grpo 估计方式受影响 → 补丁 `infra-drafts/2a-receipt.patch`；GSPO/rpp/rpp_baseline 的 G1（7.2/7.3）等其合入。
+  - attempt 3：我的示例 spec 过期（seq_adv.py 改后未重生成），启动前被拒；已修并加守卫测试。
+  - attempt 4（e54d2f7）：MaxRL、MAPO、GDPO 全部通过预声明标准 → 7.4 完成。
+  - 发现 INFRA R2 缺陷：`rl_round_trained.nonzero_advantages` 滞后一轮。
+- 7.5：`infra-drafts/2a-entry.patch` 声明 features maxrl/mapo/gdpo（ALGO-CAP 合入；还需 1b 声明 `reward_postprocessors:custom_reward_postprocess`）。
+- 费用：attempts 1–4 合计 2056 s 单卡 H100，估 ≈$3.1；无残留（两个 app stopped/0 tasks，watchdog 已杀）。
+- 任务状态变化：2.2、5.5、7.4 → 完成；7.2、7.3 未完成（receipt 缺陷）；7.5 未完成（补丁待合入）；7.6 未完成（待 7.5，按 R0 7.1 Modal 2 岛 + 本机 syncer）；7.7 部分（已回收，汇总待 7.2/7.3/7.6 后）。

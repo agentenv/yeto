@@ -15,7 +15,7 @@
 ## 2. GSPO（design D1/D2）
 
 - [x] 2.1 在 clip 缺失的拒绝报错中补充"引擎默认 0.2、论文 3e-4/4e-4"；GSPO 与 advantage 变换组合按未开放拒绝。验证：参数化单测检查报错文本与拒绝场景。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
-- [ ] 2.2 adapter 从 Miles 训练指标读取 `pg_clipfrac`（整轮 token 加权）填入 `masked_fraction`，并写入每轮事件。验证：单测覆盖有值、多 mini-batch 聚合、缺失三种情况。
+- [x] 2.2 adapter 从 Miles 训练指标读取 `pg_clipfrac`（整轮 token 加权）填入 `masked_fraction`，并写入每轮事件。验证：单测覆盖有值、多 mini-batch 聚合、缺失三种情况。 完成记录：INFRA R1（infra-a 39fa0ac）+ test_trainer_reads_gspo_clipfrac_through_seq_adv；progress.md。
 - [x] 2.3 实现 GSPO 的 `expects_gradient`（D2）。验证：fake driver 测试覆盖：clipfrac=1 且 grad_norm=0 不失败；clipfrac 缺失且 grad_norm=0 失败；clipfrac<1 且 grad_norm=0 失败；grad_norm 非有限失败。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 2.4 在 miles-next-venv 中用 Miles `compute_gspo_kl`/`compute_policy_loss` 对小张量计算序列 ratio 与 clip，与手写公式（exp(mean log ρ)、序列级 clip）逐元素比对，并确认全裁时 clipfrac=1、梯度为 0。验证：测试在 miles 不可用时 skip，在 miles-next-venv 实际通过，命令与结果写入 `progress.md`。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 2.5 翻译用例：gspo + 显式 clip 生成的 argv 经 upstream `parse_args` 解析通过。验证：miles-next-venv 中测试通过。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
@@ -42,7 +42,7 @@
 - [x] 5.2 分派器实现 GDPO：读取 `sample.metadata["yeto_reward_components"]`，缺分量、多分量、非有限、段间不一致时本轮失败并报告样本与分量；组内分量归一、加权、岛内样本级白化。验证：单测覆盖各失败场景。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 5.3 数值测试：与论文公式参考实现逐元素比对，覆盖 G=1、某分量组内恒定、全批恒定（白化仅减均值）、多段 rollout。验证：`tests/test_rl_adv_transforms.py` 通过。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 5.4 提供一个两分量示例 reward 函数（如 correctness + format），供 G1 使用，并写单测。验证：单测确认写入的 metadata 格式可被分派器接受。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
-- [ ] 5.5 GDPO 的 `expects_gradient` 读取分派器上报的非零条目数，读不到时按期望梯度处理。验证：fake driver 单测。
+- [x] 5.5 GDPO 的 `expects_gradient` 读取分派器上报的非零条目数，读不到时按期望梯度处理。验证：fake driver 单测。 完成记录：INFRA R2 + fake driver 测试 test_fake_driver_gdpo_*；progress.md（注意 R2 在 GPU 上滞后一轮，已报缺陷）。
 
 ## 6. 能力声明机制与文档
 
@@ -59,7 +59,7 @@
 - [x] 7.1 向用户提交预算申请：G1 共 6 次 1 卡冒烟（可在同一 1 卡会话中顺序执行）、G3 一次 1+1 卡，估算卡时与费用。验证：用户书面批准，记录于 `progress.md`。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [ ] 7.2 G1 GSPO：1 卡，使用放行参数，2–3 轮，`optimizer_steps≥2`，显式 clip；另跑一组 `optimizer_steps=1` 作对照。报告每轮 clipfrac、grad_norm、零梯度判定结果。验证：运行完成、无不变量误报，日志与指标存入 `openspec/changes/rl-algo-seq-and-adv/evidence/`。
 - [ ] 7.3 G1 REINFORCE++ 与 REINFORCE++-baseline：各 1 卡 2–3 轮，whiten 开，`kl.placement=reward`。报告 ref 加载、advantage 统计、grad_norm。验证：同 7.2。
-- [ ] 7.4 G1 MaxRL、MAPO、GDPO：各 1 卡 2–3 轮（GDPO 用 5.4 的示例 reward）。报告全错/全对组比例、零梯度判定。验证：同 7.2。
+- [x] 7.4 G1 MaxRL、MAPO、GDPO：各 1 卡 2–3 轮（GDPO 用 5.4 的示例 reward）。报告全错/全对组比例、零梯度判定。验证：同 7.2。 完成记录：evidence/g1/plan.md Attempt 4（e54d2f7，H100）。
 - [ ] 7.5 对 G1 通过的机制在 `miles_adapter/entry.py` 中声明支持，未通过的保持未开放并记录原因。验证：能力声明单测更新；Miles adapter 组合根测试中已声明机制可启动。
 - [ ] 7.6 G3：MaxRL 两岛 strict-avg（每岛 1 卡），用正式声明（不带放行参数），2–3 轮。验证：两岛算法哈希一致、每轮外层应用后状态 hash 一致、不变量无误报；证据存入 `evidence/`。
 - [ ] 7.7 拆除全部 GPU 资源，列出云端资源证明无残留，汇总实际费用。验证：无残留截图或命令输出与费用写入 `progress.md`。

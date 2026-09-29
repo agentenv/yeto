@@ -98,3 +98,28 @@ that fails twice stays undeclared (7.5) with the reason recorded.
   The example specs were generated before d5ffa61 changed seq_adv.py and were not regenerated.
 - Fix: regenerated examples; new test `test_example_specs_are_current` fails whenever an example
   is stale. Attempt 4 reruns maxrl/mapo/gdpo with the commit containing this fix.
+
+## Attempt 4 (sb-d5jaFqTcmupKs4Pm7STePI, H100 80GB HBM3 asserted, 1158 s, code e54d2f7) -- maxrl/mapo/gdpo PASS
+Per pre-declared criteria (evidence attempt4/<run>/miles.log, island-0/events.jsonl):
+| run | 1 rc / trained rounds | 2 errors | 3 grad_norm per round (finite) | 4 dispatcher argv + transform events | 5 unverified recorded |
+|---|---|---|---|---|---|
+| maxrl | 0 / 3 | 0 | 0.339 0.598 0.662 | custom_reward_post_process_path=...post_process; 3 events | features:maxrl, reward_postprocessors:custom_reward_postprocess; rl/outer_sync=false |
+| mapo | 0 / 3 | 0 | 0.456 0.439 0.380 | same; 3 events | features:mapo, ...; outer_sync=false |
+| gdpo | 0 / 3 | 0 | 0.566 0.384 0.439 | same; 3 events | features:gdpo, ...; outer_sync=false |
+Observations (not criteria): per round (all-right groups / all-wrong groups / non-zero advantages of 32):
+maxrl 1/0/24, 1/1/16, 0/1/24; mapo 1/0/24, 1/1/16, 0/2/16; gdpo (correctness) 1/0/32, 1/1/32, 0/3/32 --
+GDPO round 3 has 3 all-wrong groups on correctness yet 32 non-zero advantages from the format
+component (the D8 case the tightened rule covers). No zero-gradient event in any round.
+Defect found (INFRA R2): `rl_round_trained.nonzero_advantages` lags one round (round 0 None,
+round k shows round k-1's dispatcher count: maxrl dispatcher 24,16,24 vs events None,24,16;
+mapo 24,16,16 vs None,24,16). The rollout metadata hook reads the counter before the reward
+post-process of the same round runs. GDPO/REINFORCE++ zero-gradient decisions would use the
+previous round's count until fixed.
+First real use of the P0 single-island no-sync entry (learner side): events carry
+rl/outer_sync=false and rl/contains_unverified_mechanisms=true.
+
+## Cost / cleanup (attempts 1-4)
+Sandboxes: 207 s + 557 s + 134 s + 1158 s = 2056 s of 1x H100 (+16 CPU / 128 GiB).
+Estimate ~ $3.1 (H100 $3.95/h + ~$1.5/h CPU/mem; not billing-confirmed); cap $20.
+Both algo2a-g1 apps `stopped`, 0 tasks; watchdogs killed (teardown-attempt1.txt, teardown-attempts2-4.txt).
+No volumes, no named secrets.
