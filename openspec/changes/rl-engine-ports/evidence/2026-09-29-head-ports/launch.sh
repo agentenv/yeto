@@ -1,0 +1,11 @@
+cd /home/michael/work/gpu-head/yeto
+PYTHONPATH=/home/michael/work/gpu-head/yeto exec ../venv/bin/yeto launch --training-mode rl --rl-engine ports --rl-sync-preset decoupled \
+  --gpu nebius:1xh100@eu-north1,nebius:1xh100@eu-north1 --syncer-region nebius/eu-north1 --on-demand \
+  --cluster-prefix yeto-hp929d \
+  --model Qwen/Qwen3-0.6B --model-revision c1899de289a04d12100db370d81485cdf75e47ca \
+  --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae \
+  --reward-function gsm8k_reward:score \
+  --tuning lora --lora-r 16 --lora-targets all-linear \
+  --total-steps 4 --fragments 4 --pipeline 2 --local-rl-rounds-per-sync 2 \
+  --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 \
+  --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{"enable_thinking": false}' --trust-remote-code

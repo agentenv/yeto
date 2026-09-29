@@ -1,0 +1,13 @@
+Warning: Permanently added '195.242.30.143' (ED25519) to the list of known hosts.
+== yeto-hp929c-l0-eu-north1
+miles HEAD=0394715083c91182b5eb0c526eeee4196ac694b9 ref=HEAD origin=https://github.com/michaellchung/miles dirty_lines=0
+sglang HEAD=9f29303bef1eea38eb613e5f454a52db1326422d ref=HEAD origin=https://github.com/michaellchung/sglang dirty_lines=0
+miles import None
+sglang import None
+prompts.jsonl
+== yeto-hp929c-l1-eu-north1
+miles HEAD=0394715083c91182b5eb0c526eeee4196ac694b9 ref=HEAD origin=https://github.com/michaellchung/miles dirty_lines=0
+sglang HEAD=9f29303bef1eea38eb613e5f454a52db1326422d ref=HEAD origin=https://github.com/michaellchung/sglang dirty_lines=0
+miles import None
+sglang import None
+prompts.jsonl

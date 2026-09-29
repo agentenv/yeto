@@ -43,3 +43,10 @@
 | 4.2 | 通过：两岛 strict-avg 3 轮 hash 一致 | `rerun-strict2` |
 | 4.3 | 通过：两岛 decoupled 到最终 cut，最终 hash 一致，PEFT 可被标准 PEFT 加载（Nebius 首跑） | `rerun-decoupled`、`decoupled2/verify_peft.log` |
 | 4.4 | 部分：第 2 轮 kill 后以 reset 应用权威 cut 并跑完；**与 legacy 的对照未做** | `rerun-kill44` |
+
+## 已知问题（R0 不修，后续单独 PR）：decoupled 下学习率衰减到 0
+
+- 现象：head 模式两岛 decoupled（`2cbd45c`，global_rounds=4、local horizon 2）中 island 的 `train/lr-pg_0` 为 7.5e-6→5e-6→2.5e-6→0，此后 grad_norm 非零但 delta 为 0，syncer 从第 7 步起 global_delta_norm=0。证据：`/home/michael/work/gpu-head/evidence/2026-09-29-head-ports/attempt4-2cbd45c/`。
+- 根因：Miles 以 `train_iters = num_rollout × rollout_batch × n_samples / global_batch` 推出 `lr_decay_iters`，默认 linear 衰减到 0；yeto 传 `--num-rollout = global_rounds`，而 decoupled 为 run-until-stop，本地步数没有预知上限。legacy（agentenv fork `model.py:85-105`，`learner.py:1000`）与 ports 完全相同；eq63 中两边 lr 序列逐位一致。benchmark 未暴露是因为本地步数恰好等于 global_rounds。
+- 决定（用户，2026-09-29）：R0 只换底座不改行为，ports 与 legacy 保持相同行为，6.3 等价结论有效。之后单独提 agentenv/yeto PR，在 legacy 与 ports 两条路径上同时把 decoupled 改为显式常数 lr（strict 显式写出原线性调度，数值不变），并重跑 decoupled。ports 侧改动草稿：`/home/michael/work/followups/decoupled-constant-lr-ports.patch`。
+- head 模式验收（基础设施层面）：默认公开镜像、fork checkout、`rl_engine_selected=ports`、两岛到达最终 cut 且 hash 一致均通过；训练后半程无更新属于上述已知问题，与 legacy 行为一致。
