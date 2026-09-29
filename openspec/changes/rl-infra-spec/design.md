@@ -172,7 +172,7 @@ any failure -> CANCELLED / REBUILD_OLD / RECOVERY_REQUIRED
 |---|---|
 | trainer | 模型/adapter/可训练 expert、FP32 master、optimizer moments 与 step、参数组超参、LR scheduler/counters、loss scaler（若有）、backend 所需 precision/量化或 FP8 状态、reference/old-policy 副本或不可变重建引用 |
 | stochastic/progress | Python/NumPy/Torch CPU/CUDA/Megatron RNG、rollout seed/数据采样器状态、dataset cursor与分片、packing plan、rollout id、已消费 sample/group/batch、optimizer applied 计数 |
-| algorithm/outer | current base/snapshot、fragment versions、permit/attempt/已提交状态、optimizer-reset count、local horizon、budget/token 计数、policy hash、外层 session/contract identity |
+| algorithm/outer | current base/snapshot、fragment versions、permit/attempt/已提交状态、optimizer-reset count、local horizon、budget/token 计数、policy hash、外层 session/contract identity；`algorithm_spec_sha256`、插件 PluginRef 与 `yeto_algo_plugins` 哈希、ref 模型身份（KL 启用时） |
 | rollout | completed/aborted/retry 组及既有语义、session 路由版本、engine 权重身份；首版要求无活跃轨迹，KV 可丢弃重建，不能丢未结束工具状态 |
 | runtime | source/backend fingerprint、配置、GPU映射、checkpoint shard schema、checksum、tx/cut ID、是否已 commit epoch |
 

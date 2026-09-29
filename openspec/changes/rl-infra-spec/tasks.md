@@ -45,9 +45,9 @@
 
 ## 4. 阶段 E2/E3：完整恢复、trainer DP 与训推角色转移
 
-- [ ] 4.1 [M；依赖1.2,3.1；可与E1并行] 审计完整ReconfigurationCut所需master/moments/scheduler/RNG/data/ref状态及LoRA保存分支；验收：逐项来源明确，与默认no-save/load-optim/rng路径隔离，缺状态拒绝。
+- [ ] 4.1 [M；依赖1.2,3.1；可与E1并行] 审计完整ReconfigurationCut所需master/moments/scheduler/RNG/data/ref状态及LoRA保存分支；验收：逐项来源明确，与默认no-save/load-optim/rng路径隔离，缺状态拒绝。审计同时覆盖算法相关状态（alignment.md A3）：`algorithm_spec_sha256`、插件 PluginRef 哈希与 `yeto_algo_plugins` runtime attrs 哈希、KL loss/reward KL 时的 ref 模型身份（`ref_model.revision`）与 ref 权重来源、动态过滤/超采样的 rollout 侧状态。
 - [ ] 4.1b [Y；依赖4.1，E2开工时] 修改 `docs/MILES_RL.md` 的“不做 controller”一条为：允许岛内yeto侧重配置控制器，仍不做跨岛控制器与通用恢复框架；验收：文档与本change design D1一致，评审通过。
-- [ ] 4.2 [M+Y；依赖4.1,3.6] 新增端口动词 `TrainerGroup.save_cut/restore_cut`，实现完整cut导出/加载、manifest/fsync和算法账本对账；验收：坏checksum、截断、step不一致拒绝，源释放前恢复依据完整。
+- [ ] 4.2 [M+Y；依赖4.1,3.6] 新增端口动词 `TrainerGroup.save_cut/restore_cut`，实现完整cut导出/加载、manifest/fsync和算法账本对账；验收：坏checksum、截断、step不一致拒绝，源释放前恢复依据完整；cut manifest 记录 `algorithm_spec_sha256` 与插件哈希，恢复时与当前运行不一致即拒绝。
 - [ ] 4.2a [M-fork；LoRA profile 的 4.2/4.6前置] fork-M5：LoRA `save/load_lora_checkpoint` 增加可选格式：optimizer state 以参数名为键（DP 不变）并保存/恢复 RNG（DP 变化时的 RNG 策略为显式选项）；缺省格式不变；对 DistributedOptimizer 等不支持配置在参数解析阶段 fail-fast。**需新增 DistributedOptimizer 分片状态的 gather/reshard 实现**（本地分支未实现），完成前 LoRA+DistOpt 的 E3 为 no-go。验收：CPU roundtrip 单测；DistOpt gather 实现后由 4.3 X3 与 4.6 X4 GPU 实验验证。
 - [ ] 4.3 [M；依赖4.2] 新增 `TrainerGroup.rebuild(plan)`；同形trainer子进程重建、fresh groups和完整restore；验收X3：训练2步后重建，对冻结下一batch比较RNG/计数/moments/参数更新，无额外reset。
 - [ ] 4.4 [Y；依赖4.3] `IslandDriver` 替换端口背后的实现（无需rebind）、保留bridge状态并重发正确权重；验收：不重复initialize/after_local_train，外层进度不因重建重放。
