@@ -24,3 +24,7 @@
 ## 资源与回收
 - 每个 run 1 张 H100（Modal app `yeto-algo1b-g1f-<x>`）。硬超时：本地 `timeout 3600`，独立 watchdog 3900 秒时 `modal app stop`，无进展超时 25 分钟；结束时执行 `yeto down` 加 `modal app stop`，并用 `modal app list` 核实。
 - 预计每个 run 10–15 分钟，两个合计 ≤ $3。
+
+## 第 1 次尝试结论（21:1x Z，没有使用 GPU）
+- 两个 run 都在 Modal 镜像构建阶段失败（launcher rc=1）：`launch.log was modified during build process`。原因是日志写在 yeto 工作树里，而 launcher 构建镜像时会同步这个工作树，日志在构建过程中被改写。app 为 stopped，没有产生训练。
+- 修复：运行输出改写到 `/tmp/algo1b-g1f/out-<x>`（工作树之外），结束后再拷回证据目录。判据与配置不变。日志在 `attempt1/`。
