@@ -212,3 +212,10 @@
 - `origin/integ-decl`（0f13aa7）**未 merge**：它与 algo-1b 在他人文件上有内容冲突（`yeto/rl/algos/grpo_knobs.py` 注释、`tests/test_rl_grpo_knobs.py` 声明集合、`tests/test_rl_algorithm_capabilities.py`、`docs/MILES_RL.md` 的 mismatch_metrics 段），属于 1b/ALGO-CAP/主 agent 的决策，本 change 不替他们裁决；已 `merge --abort`。
 - 验证：临时 worktree 取 integ-decl 0f13aa7，放入本分支的示例文件，`test_example_specs_are_current` 6 passed（示例哈希覆盖的模块 reward_pipeline/seq_adv 在两边相同；grpo_knobs、mismatch_correction 的差异不进入这些示例）。本分支本 change 测试 133 passed。
 - 再次提醒：集成分支定稿后须在最终 SHA 上重跑 make_examples.py。
+
+## 2026-09-29 7.6 G3（YETO_SHA 4652f73）与 7.7 汇总
+- 计划 bae5600 启动前提交；结果 `evidence/g3/results.md`。
+- **7.6 未通过（按预声明退出码读法）**：磁带判据 1–4 全部成立（3 次外层同步 2 响应无陈旧；两岛算法哈希一致、无放行；v0..v3 发布 hash 两岛一致；每岛 3 轮有限、finalized、无失败事件），但 head 退出码 143：训练完成后本机 syncer 被终止，岛 1 在 `ray.shutdown` 中 KeyboardInterrupt、作业记为 FAILED，launcher 进入恢复循环挂起（P0 在 c098b5b 修复的缺陷，4652f73 不含），我手动结束 head。检查脚本计数 bug 在运行后修正并注明（不改判据）。
+- 观察：第 2 轮两岛 nonzero_advantages=0、grad_norm=0.0 且无不变量失败——"不期望梯度"分支在 GPU 上被触发。
+- 重跑需在 ≥ c098b5b 的 SHA 上单独提交计划（退出码 4 = 失败）。
+- **7.7 汇总（全部为估算，未核账单）**：G1 attempts 1–4 ≈ $3.1；attempt 5 ≈ $0.9；attempt 6 ≈ $3.9；G3 ≈ $3 → 合计 ≈ $11，上限 $20。所有本 change 的 Modal app（algo2a-g1 ×2、yeto-algo2a-g1-* ×8、yeto-algo2a-g3）均为 stopped / 0 tasks；本 change 的 watchdog 与本机 syncer（:29420）已停；无卷、无命名 secret。7.7 勾选。

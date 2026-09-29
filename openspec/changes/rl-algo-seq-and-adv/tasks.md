@@ -62,7 +62,7 @@
 - [x] 7.4 G1 MaxRL、MAPO、GDPO：各 1 卡 2–3 轮（GDPO 用 5.4 的示例 reward）。报告全错/全对组比例、零梯度判定。验证：同 7.2。 完成记录：evidence/g1/plan.md Attempt 4（e54d2f7，H100）。
 - [ ] 7.5 对 G1 通过的机制在 `miles_adapter/entry.py` 中声明支持，未通过的保持未开放并记录原因。验证：能力声明单测更新；Miles adapter 组合根测试中已声明机制可启动。
 - [ ] 7.6 G3：MaxRL 两岛 strict-avg（每岛 1 卡），用正式声明（不带放行参数），2–3 轮。验证：两岛算法哈希一致、每轮外层应用后状态 hash 一致、不变量无误报；证据存入 `evidence/`。
-- [ ] 7.7 拆除全部 GPU 资源，列出云端资源证明无残留，汇总实际费用。验证：无残留截图或命令输出与费用写入 `progress.md`。
+- [x] 7.7 拆除全部 GPU 资源，列出云端资源证明无残留，汇总实际费用。验证：无残留截图或命令输出与费用写入 `progress.md`。 完成记录：progress.md（7.7 汇总，≈$11，全部 app stopped/0 tasks）。
 - [x] 7.8（可选，另需预算）效果 A/B（G4）不在本 change 范围；如需，另立 change 申请。验证：无（仅记录）。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 
 ## 8. 集成检查

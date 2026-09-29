@@ -36,7 +36,8 @@ failing = {"rl_invariant_failed", "rl_round_failed", "rl_algorithm_mismatch", "r
 def rounds(ev):
     return [e for e in ev if e.get("event") in ("rl_local_round", "rl_round_trained")]
 c["4_rounds_finite_finalized_no_failures"] = two and all(
-    len({e.get("rollout_id") for e in rounds(ev)}) == 3
+    len([e for e in ev if e.get("event") == "rl_local_round"]) == 3
+    and len([e for e in ev if e.get("event") == "rl_round_trained"]) == 3
     and all(math.isfinite(float(e["grad_norm"])) for e in rounds(ev) if "grad_norm" in e)
     and any(e.get("event") == "rl_learner_finalized" for e in ev)
     and not any(e.get("event") in failing for e in ev) for ev in isl)
