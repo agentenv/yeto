@@ -1,0 +1,81 @@
+{
+ "run": "icepop",
+ "checks": {
+  "rc0": true,
+  "train_steps": true,
+  "keys_present": true,
+  "keys_finite": true,
+  "no_invariant_errors_in_log": true,
+  "rounds_events": true,
+  "publications_with_tokens": true,
+  "no_failure_events": true,
+  "grad_norm_finite": true,
+  "selected_sha_and_allowances": true
+ },
+ "steps": {
+  "0": {
+   "train/loss": -0.00029144342988729477,
+   "train/pg_loss": -0.00029144342988729477,
+   "train/entropy_loss": 0.0,
+   "train/pg_clipfrac": 0.0,
+   "train/ppo_kl": -2.899248896515161e-10,
+   "train/ess_ratio": 1.0,
+   "train/train_rollout_logprob_abs_diff": 0.012201795354485512,
+   "train/train_rollout_kl": 0.0005710572004318237,
+   "train/ois": 1.0,
+   "train/tis": 0.9999749064445496,
+   "train/tis_clipfrac": 0.0,
+   "train/tis_abs": 0.012203935533761978,
+   "train/grad_norm": 0.5960708260536194,
+   "train/lr-pg_0": 6.666666666666668e-06,
+   "train/step": 0
+  },
+  "1": {
+   "train/loss": -6.553158164024353e-05,
+   "train/pg_loss": -6.553158164024353e-05,
+   "train/entropy_loss": 0.0,
+   "train/pg_clipfrac": 0.0,
+   "train/ppo_kl": 0.0,
+   "train/ess_ratio": 1.0,
+   "train/train_rollout_logprob_abs_diff": 0.014858332462608814,
+   "train/train_rollout_kl": 0.0006916148704476655,
+   "train/ois": 1.0,
+   "train/tis": 0.9992578625679016,
+   "train/tis_clipfrac": 0.0,
+   "train/tis_abs": 0.01480010524392128,
+   "train/grad_norm": 0.42718449234962463,
+   "train/lr-pg_0": 3.333333333333334e-06,
+   "train/step": 1
+  },
+  "2": {
+   "train/loss": 0.0003334302455186844,
+   "train/pg_loss": 0.0003334302455186844,
+   "train/entropy_loss": 0.0,
+   "train/pg_clipfrac": 0.0,
+   "train/ppo_kl": 0.0,
+   "train/ess_ratio": 1.0,
+   "train/train_rollout_logprob_abs_diff": 0.016644969582557678,
+   "train/train_rollout_kl": 0.00077006162609905,
+   "train/ois": 1.0,
+   "train/tis": 0.9996200799942017,
+   "train/tis_clipfrac": 0.0,
+   "train/tis_abs": 0.016606632620096207,
+   "train/grad_norm": 0.3378796875476837,
+   "train/lr-pg_0": 0.0,
+   "train/step": 2
+  }
+ },
+ "missing": {
+  "0": [],
+  "1": [],
+  "2": []
+ },
+ "event_counts": {
+  "rl_driver_phase": 20,
+  "rl_driver_start": 1,
+  "rl_engine_selected": 1,
+  "rl_local_round": 3,
+  "rl_publication": 4
+ },
+ "pass": true
+}
