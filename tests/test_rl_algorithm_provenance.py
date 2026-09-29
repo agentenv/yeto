@@ -161,6 +161,13 @@ def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
 
 
 @pytest.fixture(autouse=True)
+def _no_modal_listing(monkeypatch):
+    import yeto.launcher as launcher
+
+    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: [])  # nothing listed = stopped
+
+
+@pytest.fixture(autouse=True)
 def _fake_sky(monkeypatch):
     import sys
     import types
@@ -592,7 +599,11 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
         def cancel(self, call_id):
             events.append(("cancel", call_id))
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             events.append(("stop_app",))
 
         def tail_logs(self, call_id, entries=100):
@@ -697,7 +708,11 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
         def cancel(self, call_id):
             pass
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             pass
 
         def tail_logs(self, call_id, entries=100):
@@ -872,7 +887,11 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
         def cancel(self, call_id):
             pass
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             pass
 
         def tail_logs(self, call_id, entries=100):
@@ -929,10 +948,12 @@ def sys_modules_sky(monkeypatch):
     return sys.modules["sky"]
 
 
-def test_modal_islands_get_echo_flag_sky_islands_do_not():
+def test_every_ports_island_gets_the_echo_flag_legacy_does_not():
+    # every ports RL island echoes its tape: rl_learner_finalized is how the
+    # launcher tells a shutdown-phase error from an island failure
     modal_run = _island_run(_launcher_args("ports", gpu="modal:1xa100"))
     assert "--rl-echo-events" in modal_run and "--syncer $SYNCER_ADDR" in modal_run
-    assert "--rl-echo-events" not in _island_run(_launcher_args("ports"))
+    assert "--rl-echo-events" in _island_run(_launcher_args("ports"))
     assert "--rl-echo-events" not in _island_run(_launcher_args("legacy", gpu="modal:1xa100"))
     args = rl_learner.parse_args(_learner_argv(("--rl-echo-events",)))
     assert args.rl_echo_events

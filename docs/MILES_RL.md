@@ -715,6 +715,41 @@ the run exit 3. A synced run still fetches its checkpoint first.
 `--rl-event-tape` export refuses incomplete tapes unless
 `--allow-incomplete` is given.
 
+**Launcher exit codes.**
+
+| code | meaning |
+| --- | --- |
+| 0 | success |
+| 1 | a learner failed (non-RL), or no learner succeeded |
+| 2 | artifact not fetchable (Modal island) |
+| 3 | incomplete island event tape |
+| 4 | a fixed-roster RL island could not be recovered |
+| 5 | the Modal app was not confirmed stopped after teardown |
+| 6 | the run stalled: no island event for `--rl-stall-timeout` seconds (default 900, 0 disables) and not every island finalized |
+
+For exit 5, every row of `modal app list` with the run's app name must be
+`stopped` with 0 tasks; an earlier run's row with the same name counts too.
+If no row is listed any more, that also counts as stopped. The rows created
+after this run started are this run's app, and their app ids are recorded.
+The launcher checks at most 5 times. It prints a WARN
+naming the `modal app stop` command to run by hand. The result is written to
+`<run dir>/teardown.json`. Exit 5 takes precedence over 0/2/3/4, because a
+possibly still-running app matters more than the run's own outcome.
+
+The stall check needs the event echo, so it applies to every ports RL
+island. Its clock starts at the first received event, so islands still pulling
+their image or loading the model do not count as stalled. On a stall the
+launcher drains the tapes (bounded), tears everything down and does not
+relaunch. A typical cause is a dead island-syncer connection.
+
+Strict syncer failures, strict RL job failures, "all learners abandoned" and
+internal errors propagate as exceptions (exit 1 from the CLI worker).
+
+An island whose tape already holds `rl_learner_finalized` is counted as
+succeeded even if its job then ends non-zero, for example an interrupt during
+Ray shutdown after the syncer stopped. It is not relaunched, and the syncer is
+not restarted once every learner has finalized.
+
 **Launch dry run.** `yeto launch ... --dry-run` validates the whole launch
 (arguments, provenance, the ports algorithm and capability checks) and prints
 JSON with the resource request (GPU type and count per island, island count,
