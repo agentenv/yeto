@@ -406,9 +406,9 @@ def test_fake_declaration_admits_every_mechanism():
 
 
 MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer", "mismatch_observe", "icepop", "mis_mask"}  # G1 + effect evidence (7.3, integ-decl)
-# icepop / mismatch_observe specs set correction.mismatch_metrics, which is
-# undeclared (integ-decl review: no effect under use_tis) -> refused on it.
-ACCEPTED_BY_MILES = {"tis", "opsm_trainer", "mis_mask"}
+# mismatch_metrics under a use_tis correction is claimed by that correction
+# (P0 CORRECTION_COMPANIONS, alignment §7b), so icepop/observe are accepted.
+ACCEPTED_BY_MILES = {"tis", "opsm_trainer", "mis_mask", "icepop", "mismatch_observe"}
 
 
 def test_miles_adapter_declares_exactly_g1_passed_corrections():

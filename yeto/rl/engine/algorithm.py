@@ -113,6 +113,16 @@ ESTIMATOR_COMPANIONS: dict[str, frozenset[tuple[str, str]]] = {
 }
 
 
+# Same principle for corrections: mechanisms that make Miles set use_tis
+# already produce the mismatch metrics (losses.py:233/386: get_mismatch_metrics
+# or use_tis), so --get-mismatch-metrics changes nothing there and is claimed
+# by them. Main-agent decision, alignment §7b (may be overridden by the user).
+CORRECTION_COMPANIONS: dict[tuple[str, str], frozenset[tuple[str, str]]] = {
+    ("corrections", name): frozenset({("features", "mismatch_metrics")})
+    for name in ("tis", "icepop", "mis_mask", "mismatch_observe")
+}
+
+
 class AlgorithmSpecError(ValueError):
     """An algorithm description is malformed or unsupported."""
 
@@ -1089,6 +1099,9 @@ class AlgorithmSpec:
 
         required = {(m.dimension, m.name) for m in registered_mechanisms() if m.detect(self)}
         required -= ESTIMATOR_COMPANIONS.get(self.advantage.estimator, frozenset())
+        for claimant, companions in CORRECTION_COMPANIONS.items():
+            if claimant in required:
+                required -= companions
         return frozenset(required)
 
     def _mechanism_defs(self) -> list[MechanismDef]:

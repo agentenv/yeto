@@ -111,8 +111,10 @@ CANDIDATES = {
     "features:entropy_bonus": dict(entropy_coef=0.001),
     "features:kl_unbiased": dict(kl=dict(placement="loss", coef=0.01, estimator="k3",
                                          unbiased=True)),
-    "features:mismatch_metrics": dict(correction=dict(method="tis", tis_clip=2.0,
-                                                      tis_clip_low=0.0, mismatch_metrics=True)),
+    # under a generic custom function (tis/icepop/... claim it, CORRECTION_COMPANIONS)
+    "features:mismatch_metrics": dict(correction=dict(method="custom", function=_REF,
+                                                      tis_clip=5.0, tis_clip_low=0.5,
+                                                      mismatch_metrics=True)),
     "features:no_grpo_std_normalization": dict(advantage=dict(std_normalization=False)),
     "features:no_rewards_normalization": dict(advantage=dict(rewards_normalization=False)),
     "features:over_sampling": dict(sampling=dict(filter=alg.BOUNDED_NONZERO_STD_FILTER,
@@ -552,3 +554,19 @@ def test_named_reducer_claimed_only_by_its_own_mechanism(monkeypatch):
         loss=LossSpec(reducer=other, aggregation="constant")).required_mechanisms()
     with pytest.raises(ValueError):
         alg.register_named_reducer(ref.path, mechanisms=("constant",))
+
+
+def test_mismatch_metrics_claimed_by_use_tis_corrections_only():
+    caps = miles_capabilities(FP)
+    tis = AlgorithmSpec(correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0,
+                                                  mismatch_metrics=True))
+    assert ("features", "mismatch_metrics") not in tis.required_mechanisms()
+    _check(caps, tis)
+    # a generic custom function (not a use_tis correction mechanism) keeps it
+    generic = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=_REF,
+                                                      tis_clip=5.0, tis_clip_low=0.5,
+                                                      mismatch_metrics=True))
+    assert ("features", "mismatch_metrics") in generic.required_mechanisms()
+    # mismatch_metrics without any correction is not even expressible
+    with pytest.raises(AlgorithmSpecError, match="mismatch_metrics"):
+        CorrectionSpec(mismatch_metrics=True)

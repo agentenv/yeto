@@ -670,8 +670,12 @@ Withdrawn after independent review:
 - features:mismatch_metrics: every evidence run already had use_tis, and
   Miles emits the metrics under `get_mismatch_metrics or use_tis`.
 
-Because mismatch_metrics is withdrawn, icepop and mismatch_observe specs that
-set `correction.mismatch_metrics` are refused on that feature.
+Under a correction that makes Miles set use_tis (tis, icepop, mis_mask,
+mismatch_observe), `correction.mismatch_metrics` is claimed by that correction
+(`CORRECTION_COMPANIONS`; main-agent decision, may be overridden by the user),
+because the flag has no effect there. icepop and mismatch_observe specs are
+therefore accepted. Under a generic custom function it is still a separate,
+undeclared mechanism.
 
 Not declared, pending evidence or approval:
 
