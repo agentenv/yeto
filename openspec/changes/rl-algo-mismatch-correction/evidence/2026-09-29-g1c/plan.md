@@ -50,3 +50,10 @@ committed diagnosis.
   at launcher.py:3626 before any Modal call (runs/tis-attempt1-nosky). Fix: run the launcher with
   /home/michael/work/gpu-head/venv/bin/python (the venv the R0 Modal runs used), PYTHONPATH = the
   archived tree. Rerun once.
+
+## tis attempt 2 (host failure, no cloud resource created)
+- Modal deploy failed while uploading the working-tree mount: `RuntimeError: can't start new thread`
+  (host near the per-user thread limit: ~10.8k threads system-wide, `ulimit -u` 4096). No app was
+  created (app list shows none). Mitigation: the archived tree drops openspec/, tests/, docs/
+  (2508 files -> fewer mount uploads); runtime code unchanged. One more attempt; if it fails the
+  same way, the re-verification is reported as blocked by the host.

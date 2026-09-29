@@ -3,7 +3,7 @@
 set -u; R=$1; SPEC=$2; shift 2
 E=$(pwd)/runs/$R; mkdir -p $E; T=/tmp/algo1a/tree-$R
 PFX=algo1a-g1c-$R; APP=yeto-$PFX
-rm -rf $T; mkdir -p $T; git -C /home/michael/work/algo-1a archive $(cat YETO_SHA) | tar x -C $T
+rm -rf $T; mkdir -p $T; git -C /home/michael/work/algo-1a archive $(cat YETO_SHA) | tar x -C $T; rm -rf $T/openspec $T/tests $T/docs
 cp harness/gsm8k_reward.py $T/; cp $SPEC $E/spec.json
 eval "$(/tmp/yeto-venv/bin/python - <<'PY'
 import base64,json,os,shlex
