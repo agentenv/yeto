@@ -347,6 +347,7 @@ EXPECTED_MILES_DECLARED = {
     "loss_aggregations:constant",
     "kl_placements:loss",
     "features:kl_loss_ref_model",
+    "features:entropy_bonus",
 }
 
 
