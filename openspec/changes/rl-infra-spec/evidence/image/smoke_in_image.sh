@@ -18,7 +18,7 @@ assert rl.MILES_NEXT_BASE_IMAGE.endswith(m["base"]["index_digest"])
 assert m["base"]["manifest_digest"] == "sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c"
 PY'
 echo "== imports / metadata"
-check imports_point_at_forks 'python3 - <<PY
+check imports_point_at_forks 'PYTHONPATH=/root/miles python3 - <<PY
 import importlib.metadata as md, inspect, os
 import miles, sglang
 from miles.ray.train.group import TrainerController

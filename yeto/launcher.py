@@ -2713,6 +2713,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         run_script=str(getattr(task, "run", "") or ""),
         envs={k: str(v) for k, v in envs.items() if v is not None},
         region=spec.region,
+        gpu_exact=bool(getattr(args, "modal_gpu_exact", False)),
         image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
         setup_script=str(getattr(task, "setup", "") or "") if rl else None,
         pip_requirements=requirements,

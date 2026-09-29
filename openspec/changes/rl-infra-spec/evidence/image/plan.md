@@ -27,3 +27,23 @@
   pytest could not find tests/.  Fixed by running that check in a subshell.
 All other checks passed (private pull, L40S, manifest==pins, git identity, launcher setup reuse).
 Attempt 2 reruns the same plan unchanged otherwise.
+
+## Attempt 2 (sb-39ljVyIC1pSw4NlV18Qs5a, L40S, 190 s, evidence attempt2/)
+PASS: gpu_is_l40s, manifest_matches_pins, git identity (/root/miles, /sgl-workspace/sglang),
+launcher_ports_setup (exit 0), setup_used_image_sglang, setup_skipped_miles_fetch,
+after_setup_still_fork, parse_args_tests (31 passed, 1 skipped).
+FAIL imports_point_at_forks -- check-script assumption: without PYTHONPATH, `/root` is on the base
+image's sys.path so `import miles` becomes a namespace package over the /root/miles repo dir
+(`miles.__file__` None).  ns_probe.log shows the *public base image* behaves identically; yeto
+always runs with PYTHONPATH=$HOME/miles (regular package; after_setup_still_fork PASS).
+The check was changed to use PYTHONPATH=/root/miles (runtime condition) and rerun alone on a
+CPU-only sandbox (sb-88pkNZTN7G3r9UF63pup52, imports_cpu.log): PASS (miles /root/miles/miles,
+sglang /sgl-workspace/sglang/python, version 0.5.21.dev67+g9f29303 x1, run_plugin and
+enable_disk_backup present).  No GPU rerun: remaining checks are GPU-independent.
+
+## Cost / cleanup
+L40S sandboxes 528 s + 190 s; CPU sandboxes (2 probes, 2 cpu/8 GiB) < 15 min total.
+Estimate (Modal list prices): ~ $0.40 GPU + ~ $0.20 CPU/mem = ~ $0.6 (not billing-confirmed).
+All sandboxes terminated in `finally`; `modal app stop -y img-smoke` after each run; app list
+shows every img-smoke app `stopped`, 0 tasks (modal_app_list_after_stop.txt); watchdog killed.
+No volumes / secrets created (pull secret was an in-memory Secret.from_dict).

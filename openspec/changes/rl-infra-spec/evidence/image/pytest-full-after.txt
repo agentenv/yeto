@@ -22,7 +22,7 @@ E       ModuleNotFoundError: No module named 'sky'
 yeto/launcher.py:2011: ModuleNotFoundError
 _______________ test_islands_are_told_which_fleet_they_belong_to _______________
 
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbb546270>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbbcbd1c0>
 
     def test_islands_are_told_which_fleet_they_belong_to(monkeypatch):
         monkeypatch.setenv("WANDB_API_KEY", "secret")
@@ -47,7 +47,7 @@ E       ModuleNotFoundError: No module named 'sky'
 yeto/launcher.py:2011: ModuleNotFoundError
 ______________________ test_a_missing_key_still_launches _______________________
 
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbb546420>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbbcbef00>
 
     def test_a_missing_key_still_launches(monkeypatch):
         monkeypatch.delenv("WANDB_API_KEY", raising=False)
@@ -72,7 +72,7 @@ E       ModuleNotFoundError: No module named 'sky'
 yeto/launcher.py:2011: ModuleNotFoundError
 _______________ test_an_omitted_entity_is_not_forwarded_as_none ________________
 
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbb5478f0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbbcbd0a0>
 
     def test_an_omitted_entity_is_not_forwarded_as_none(monkeypatch):
         monkeypatch.delenv("WANDB_API_KEY", raising=False)
@@ -97,7 +97,7 @@ E       ModuleNotFoundError: No module named 'sky'
 yeto/launcher.py:2011: ModuleNotFoundError
 ________________ test_a_failed_install_does_not_fail_the_island ________________
 
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbb545370>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbbcbef60>
 
     def test_a_failed_install_does_not_fail_the_island(monkeypatch):
         monkeypatch.delenv("WANDB_API_KEY", raising=False)
@@ -122,7 +122,7 @@ E       ModuleNotFoundError: No module named 'sky'
 yeto/launcher.py:2011: ModuleNotFoundError
 __________ test_every_backend_forwards_the_flags[torch-yeto.learner] ___________
 
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbbc856a0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbbcbd100>
 backend = 'torch', entrypoint = 'yeto.learner'
 
     @pytest.mark.parametrize(
@@ -152,7 +152,7 @@ E       ModuleNotFoundError: No module named 'sky'
 yeto/launcher.py:2011: ModuleNotFoundError
 ____ test_every_backend_forwards_the_flags[megatron-yeto.megatron.learner] _____
 
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbbc85460>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fffbbcbcd70>
 backend = 'megatron', entrypoint = 'yeto.megatron.learner'
 
     @pytest.mark.parametrize(
@@ -397,4 +397,4 @@ ERROR tests/test_rl_integration.py::test_checkpoint_failure_happens_before_any_b
 ERROR tests/test_rl_integration.py::test_stale_update_fails_strict_run_and_records_metric
 ERROR tests/test_rl_integration.py::test_rl_resume_layout_mismatch_is_a_strict_failure
 ERROR tests/test_rl_integration.py::test_restart_before_and_after_commit_recovers_old_and_new_cut
-68 failed, 2023 passed, 41 skipped, 30 warnings, 26 errors in 43.05s
+68 failed, 2029 passed, 41 skipped, 30 warnings, 26 errors in 45.29s

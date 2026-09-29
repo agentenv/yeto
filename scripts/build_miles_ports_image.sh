@@ -7,7 +7,8 @@
 #   scripts/build_miles_ports_image.sh [--push]
 #
 # Inputs (env, defaults = this checkout's pins):
-#   MILES_SRC / SGLANG_SRC   local clones containing the pinned commits
+#   MILES_SRC / SGLANG_SRC   local clones containing the commits
+#   MILES_COMMIT / SGLANG_COMMIT  override the pinned fork commits
 #   CRANE                    crane binary (go-containerregistry >= 0.20)
 #   DEST_REPO                ghcr.io/michaellchung/yeto-miles-ports (private)
 # Registry auth: crane reads ~/.docker/config.json; nothing is printed.
@@ -40,8 +41,12 @@ for k in ("MILES_NEXT_REPOSITORY", "MILES_NEXT_COMMIT", "MILES_NEXT_UPSTREAM_COM
 PY
 )
 eval "$pins"
-[ "$(git -C "$MILES_SRC" rev-parse "$MILES_NEXT_COMMIT^{commit}")" = "$MILES_NEXT_COMMIT" ]
-[ "$(git -C "$SGLANG_SRC" rev-parse "$SGLANG_NEXT_COMMIT^{commit}")" = "$SGLANG_NEXT_COMMIT" ]
+# Rebuild for other fork commits (e.g. a Miles branch under review):
+#   MILES_COMMIT=<sha> MILES_SRC=<clone> scripts/build_miles_ports_image.sh --push
+# then pin yeto/rl (MILES_NEXT_COMMIT, MILES_NEXT_IMAGE) to what it prints --
+# the image manifest must match the pins it is used with.
+MILES_NEXT_COMMIT=$(git -C "$MILES_SRC" rev-parse "${MILES_COMMIT:-$MILES_NEXT_COMMIT}^{commit}")
+SGLANG_NEXT_COMMIT=$(git -C "$SGLANG_SRC" rev-parse "${SGLANG_COMMIT:-$SGLANG_NEXT_COMMIT}^{commit}")
 git -C "$SGLANG_SRC" cat-file -e "$BASE_SGLANG_COMMIT^{commit}"
 git -C "$MILES_SRC" cat-file -e "$BASE_MILES_COMMIT^{commit}"
 

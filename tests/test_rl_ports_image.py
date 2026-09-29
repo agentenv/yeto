@@ -183,3 +183,66 @@ def test_image_manifest_schema_in_build_script():
     for key in ('"miles"', '"sglang"', '"base"', '"commit"', '"index_digest"', '"manifest_digest"'):
         assert key in script
     assert json.loads('{"schema": 1}')  # manifest is plain JSON
+
+
+# ------------------------------------------------------ exact Modal GPU
+
+
+def test_default_gpu_request_is_unchanged():
+    assert _cfg().gpu_request == "H100:8"  # Modal may still upgrade to H200
+    assert _cfg(gpu="L40S", gpus_per_node=1).gpu_request == "L40S:1"
+
+
+def test_exact_gpu_pins_h100_and_leaves_others_alone():
+    assert _cfg(gpu_exact=True).gpu_request == "H100!:8"
+    assert _cfg(gpu="L40S", gpus_per_node=1, gpu_exact=True).gpu_request == "L40S:1"
+    cfg = _cfg(gpu_exact=True)
+    assert mr.ModalIslandConfig.from_json(cfg.to_json()).gpu_request == "H100!:8"
+    # Configs serialised before the field existed load as non-exact.
+    old = json.loads(_cfg().to_json())
+    old.pop("gpu_exact")
+    assert mr.ModalIslandConfig.from_json(json.dumps(old)).gpu_exact is False
+
+
+def test_check_gpu_names():
+    h100 = "NVIDIA H100 80GB HBM3"
+    mr.check_gpu_names("H100", [h100] * 2, 2)
+    mr.check_gpu_names("L4", ["NVIDIA L4"], 1)
+    mr.check_gpu_names("A100-80GB", ["NVIDIA A100-SXM4-80GB"], 1)
+    for gpu, names, count in (
+        ("H100", ["NVIDIA H200"], 1),
+        ("H100", [h100, "NVIDIA H200"], 2),
+        ("H100", [h100], 2),
+        ("L4", ["NVIDIA L40S"], 1),
+        ("A100-80GB", ["NVIDIA A100-SXM4-40GB"], 1),
+    ):
+        with pytest.raises(RuntimeError, match="exact"):
+            mr.check_gpu_names(gpu, names, count)
+    assert set(mr.MODAL_GPU_NAME_PATTERNS) == set(mr.MODAL_GPUS)
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_island_main_asserts_the_gpu_only_when_exact(monkeypatch, exact):
+    ran = []
+    monkeypatch.setattr(mr, "visible_gpu_names", lambda: ["NVIDIA H200"])
+    monkeypatch.setattr(mr.subprocess, "call", lambda *a, **k: ran.append(a) or 0)
+    cfg = _cfg(gpus_per_node=1, gpu_exact=exact)
+    if exact:
+        with pytest.raises(RuntimeError, match="H200"):
+            mr.island_main(cfg.to_json())
+        assert ran == []  # nothing runs on the wrong GPU
+    else:
+        assert mr.island_main(cfg.to_json()) == 0 and ran
+
+
+def test_launcher_flag_reaches_the_modal_config(monkeypatch, no_login):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    spec = parse_gpu_spec("modal:1xh100")[0]
+    for flag, expected in ((("--modal-gpu-exact",), "H100!:1"), ((), "H100:1")):
+        args = _cli(flag)
+        _prepare_rl_args(args)
+        task = _island_task(args, monkeypatch)
+        args.cluster_prefix = "img-test"
+        cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:5")
+        assert cfg.gpu_request == expected
