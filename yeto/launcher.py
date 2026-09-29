@@ -3248,6 +3248,14 @@ class _RelaunchAttempt:
         self.finished = False
 
 
+# Fixed-roster RL islands: relaunches allowed per island over the whole run.
+FIXED_ROSTER_MAX_RELAUNCHES = 2
+# run() exit code when a fixed-roster island failed for good (distinct from
+# 2 = artifact not fetchable and 3 = incomplete event tape).
+ISLAND_FAILED_EXIT = 4
+FAILED_RUN_DRAIN_S = 20.0
+
+
 class FleetController:
     """Supervises the syncer + learner fleet after the initial launch.
 
@@ -3462,6 +3470,11 @@ class FleetController:
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
         rec["state"] = RECOVERING
         rec["failed_at"] = self.ops.now()
+        # Fixed-roster RL: the recovery budget is cumulative over relaunches
+        # (an island that fails again right after every relaunch must not be
+        # relaunched forever while the rest of the fleet waits on the syncer).
+        rec.setdefault("first_failed_at", rec["failed_at"])
+        rec["failures"] = rec.get("failures", 0) + 1
         print(
             f"[launcher] {rec['name']}: {reason}; starting recovery "
             f"(timeout {self.recover_timeout}s)",
@@ -3492,6 +3505,11 @@ class FleetController:
                 file=sys.stderr,
             )
         elapsed = self.ops.now() - rec["failed_at"]
+        if self.fixed_roster and not is_syncer:
+            elapsed = self.ops.now() - rec.get("first_failed_at", rec["failed_at"])
+            if rec.get("failures", 0) > FIXED_ROSTER_MAX_RELAUNCHES:
+                self._abandon(rec, elapsed)
+                return
         if self.recover_timeout <= 0 or elapsed > self.recover_timeout:
             if is_syncer:
                 # The syncer is never abandoned: without it no learner can
@@ -3930,32 +3948,44 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             syncer_restart=local_syncer.restart if head_mode else None,
             fixed_roster=getattr(args, "training_mode", "sft") == "rl",
         )
-        exit_codes = controller.run()
-        if echo_names:
-            # The island's last events (finalization) must be on disk before
-            # teardown: the log streams end when the island exits; bounded wait.
-            deadline = time.monotonic() + NO_SYNC_EVENT_DRAIN_S
-            for thread in tail_threads:
-                thread.join(max(0.0, deadline - time.monotonic()))
-            # Fail closed: stop writing (a stream still alive after the bounded
-            # wait can no longer touch the tape) and mark unfinalized tapes.
-            for name, collector in event_collectors.items():
-                complete = collector.close()
-                print(
-                    f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
-                    f"{collector.discarded} malformed prefixed line(s) discarded"
-                )
-                if not complete:
-                    no_sync_incomplete.append(name)
+        def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
+            if echo_names:
+                # The island's last events (finalization) must be on disk before
+                # teardown: the log streams end when the island exits; bounded wait.
+                deadline = time.monotonic() + limit
+                for thread in tail_threads:
+                    thread.join(max(0.0, deadline - time.monotonic()))
+                # Fail closed: stop writing (a stream still alive after the bounded
+                # wait can no longer touch the tape) and mark unfinalized tapes.
+                for name, collector in event_collectors.items():
+                    complete = collector.close()
                     print(
-                        f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
-                        f"record; marked {collector.incomplete_marker}",
-                        file=sys.stderr,
+                        f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
+                        f"{collector.discarded} malformed prefixed line(s) discarded"
                     )
-            for name in sorted(echo_names):
-                if name not in event_collectors:  # never streamed: nothing received
-                    no_sync_incomplete.append(name)
-                    EventCollector(events_dir / f"{name}.jsonl", fresh=False).close()
+                    if not complete:
+                        no_sync_incomplete.append(name)
+                        print(
+                            f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
+                            f"record; marked {collector.incomplete_marker}",
+                            file=sys.stderr,
+                        )
+                for name in sorted(echo_names):
+                    if name not in event_collectors:  # never streamed: nothing received
+                        no_sync_incomplete.append(name)
+                        EventCollector(events_dir / f"{name}.jsonl", fresh=False).close()
+
+        try:
+            exit_codes = controller.run()
+        except RuntimeError as error:
+            # A fixed-roster island failed for good (or the syncer did): the
+            # run cannot finish. Secure the tapes (bounded), then the finally
+            # block tears every recorded resource down.
+            print(f"[launcher] ERROR: {error}; stopping the run", file=sys.stderr)
+            # surviving islands still stream (blocked on the syncer): short wait
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return ISLAND_FAILED_EXIT
+        drain_tapes()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
         if no_sync_incomplete:
             print(
