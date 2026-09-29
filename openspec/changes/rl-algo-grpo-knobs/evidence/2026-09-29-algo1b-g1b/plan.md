@@ -39,3 +39,17 @@
 - 修复：改用 `yeto.rl.math_reward:reward_func`（Miles 签名）。其余不变，重跑 A。
 - 回收：app 已 stopped。两个残留的 watchdog sleep 进程已按 pid 结束（run.sh 的 pkill 匹配式没有匹配到它们，需要修）。另外发现 `sbx.py list` 通过 App.lookup(create_if_missing) 建出了一个空的 `algo1b-g1` app，处于 deployed 状态，已 `modal app stop`。
 - 费用：约 1 小时 H100，估算约 $4，未按账单核实。日志：`attempt2-out-a/`。
+
+## run A 第 3 次尝试结论（19:29:02–19:29:06Z）
+- launcher 启动时就拒绝了："run 'algo1b-g1b-a' already has a live worker (pid 1915592)"。第 2 次尝试的本地 `timeout` 只结束了前台的 `yeto launch`，launcher 分离出的 `yeto _worker` 进程仍在运行。这次没有建 app，也没有用 GPU。
+- 处理：先 `yeto down algo1b-g1b-a` 并结束 pid 1915592（已核实进程不存在，Modal app 为 stopped），再修改 run.sh：结束时先 `yeto down <prefix>`，然后再 `modal app stop`。
+
+## 三次失败汇总与重跑依据（按主 agent 要求）
+| 尝试 | 失败阶段 | 原因 | 修复与提交 | 是否用 GPU |
+|---|---|---|---|---|
+| 1 | Modal 镜像构建 | 私有 ghcr 镜像缺拉取凭据 | 在进程内导出凭据，提交 `algo1b-g1b: run A attempt 1 … + fix`（先于第 2 次尝试） | 否 |
+| 2 | rollout 阶段，一轮也没完成 | reward 入口写错：`score` 被当作 Miles 的 `custom_rm`，签名不符，每个任务都抛 TypeError | 改为 `reward_func`，提交 `… attempt 2 (wrong reward entry, timeout) + fix`（先于第 3 次尝试） | 是，约 1 小时 H100 |
+| 3 | launcher 启动 | 第 2 次尝试残留的 detached worker 还在 | 结束残留 worker；run.sh 增加 `yeto down`，本条提交先于第 4 次尝试 | 否 |
+
+- 三次都是环境或 harness 问题，都发生在第一个训练 step 之前，没有产生任何判据数据。没有因为结果不理想而重跑；判据、spec、配置、seed 都没有改动（`clip_higher.json`、`over_sampling.json` 与预登记时一致）。
+- 第 4 次尝试如果能完成训练，无论 pg_clipfrac 是否大于 0，都按预登记判据如实交付，不再加跑。

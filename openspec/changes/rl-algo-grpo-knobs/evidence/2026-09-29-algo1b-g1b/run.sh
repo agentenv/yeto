@@ -22,6 +22,8 @@ print(f"export SKYPILOT_DOCKER_USERNAME={shlex.quote(u)} SKYPILOT_DOCKER_PASSWOR
 PY
 )"
 cd $Y && PYTHONPATH=$Y timeout 3600 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli $ARGS > $D/out-$X/launch.log 2>&1; echo "rc=$?" >> $D/out-$X/launch.log
+# The launcher detaches a `yeto _worker`; a local timeout does not stop it.
+(cd $Y && PYTHONPATH=$Y timeout 300 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli down $P) >> $D/out-$X/teardown.log 2>&1
 $M app stop -y $APP >> $D/out-$X/teardown.log 2>&1
 pkill -P $(cat $D/out-$X/watchdog_pid) sleep 2>/dev/null; kill $(cat $D/out-$X/watchdog_pid) 2>/dev/null
 date -u +%FT%TZ > $D/out-$X/t_end
