@@ -1,0 +1,36 @@
+{"event": "rl_driver_start", "execution_mode": "partitioned-serial", "island_id": 0, "placement": "fixed-partition", "rl/algorithm_spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea", "runtime_fingerprint": "sha256:a40128facb1336b668809836ce15d70758645ac49b57b67bf768f74f71777ce6", "time_unix": 1790709435.3652}
+{"event": "rl_driver_phase", "island_id": 0, "optimizer": "reset", "phase": "apply", "policy_version": 0, "time_unix": 1790709445.6314692}
+{"event": "rl_policy_apply", "island_id": 0, "local_step": 0, "optimizer": "reset", "partial_fragment_apply": false, "policy_version": 0, "sync/apply_seconds": 128.739159783, "sync/global_policy_hash": "a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4", "time_unix": 1790709574.3713615}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 0, "time_unix": 1790709574.4463718}
+{"event": "rl_publication", "island_id": 0, "policy_version": 0, "rl/policy_token": "yeto:0:a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4", "sync/publication_members": ["engine:inference-engine-all-0-0-00000"], "sync/publication_payload_bytes": 40370176, "sync/publication_payload_hash": "373abf70cb687c7dfe3b8391c678d27be175a19d0e847349c362ed042f7ba43f", "time_unix": 1790709580.9421573}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 0, "rollout_id": 0, "time_unix": 1790709580.942846}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 0, "time_unix": 1790709589.2662883}
+{"applied_lrs": [1e-05], "clip_fraction": null, "event": "rl_round_trained", "island_id": 0, "masked_fraction": null, "nonzero_advantages": null, "rollout_id": 0, "time_unix": 1790709624.181805, "trained_groups": 4, "trained_sample_ids_sha256": "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d", "trained_samples": 32}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 0, "time_unix": 1790709624.1826274}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "export_push", "rollout_id": 0, "time_unix": 1790709624.1846647}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "wait_global", "policy_version": 1, "time_unix": 1790709625.1540709}
+{"event": "rl_driver_phase", "island_id": 0, "optimizer": "reset", "phase": "apply", "policy_version": 1, "time_unix": 1790709633.8425217}
+{"event": "rl_policy_apply", "island_id": 0, "local_step": 1, "optimizer": "reset", "partial_fragment_apply": false, "policy_version": 1, "sync/apply_seconds": 67.50961952700004, "sync/global_policy_hash": "e5362df2ef4212d47e533aaf5df2ac2b4e2e1f9a6bfc0c5330ef967595da52e0", "time_unix": 1790709701.3529656}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 1, "time_unix": 1790709701.4288166}
+{"event": "rl_publication", "island_id": 0, "policy_version": 1, "rl/policy_token": "yeto:1:e5362df2ef4212d47e533aaf5df2ac2b4e2e1f9a6bfc0c5330ef967595da52e0", "sync/publication_members": ["engine:inference-engine-all-0-0-00000"], "sync/publication_payload_bytes": 40370176, "sync/publication_payload_hash": "46909babe13883ef58cf1d419b437216576575a7c0d6754360e960fe107f8bbf", "time_unix": 1790709702.4203691}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 1, "rollout_id": 1, "time_unix": 1790709702.4212747}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 1, "time_unix": 1790709704.6461258}
+{"applied_lrs": [6.666666666666668e-06], "clip_fraction": null, "event": "rl_round_trained", "island_id": 0, "masked_fraction": null, "nonzero_advantages": null, "rollout_id": 1, "time_unix": 1790709721.8101141, "trained_groups": 4, "trained_sample_ids_sha256": "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04", "trained_samples": 32}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 1, "time_unix": 1790709721.8106332}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "export_push", "rollout_id": 1, "time_unix": 1790709721.8110702}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "wait_global", "policy_version": 2, "time_unix": 1790709723.565385}
+{"event": "rl_driver_phase", "island_id": 0, "optimizer": "reset", "phase": "apply", "policy_version": 2, "time_unix": 1790709776.8915799}
+{"event": "rl_policy_apply", "island_id": 0, "local_step": 2, "optimizer": "reset", "partial_fragment_apply": false, "policy_version": 2, "sync/apply_seconds": 56.11971724499995, "sync/global_policy_hash": "6364c8c4da9843cbc318bd4fb2a8e23e2a8c95a70f64cb741f774afd32c86a7c", "time_unix": 1790709833.0120468}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 2, "time_unix": 1790709833.0878887}
+{"event": "rl_publication", "island_id": 0, "policy_version": 2, "rl/policy_token": "yeto:2:6364c8c4da9843cbc318bd4fb2a8e23e2a8c95a70f64cb741f774afd32c86a7c", "sync/publication_members": ["engine:inference-engine-all-0-0-00000"], "sync/publication_payload_bytes": 40370176, "sync/publication_payload_hash": "75a5b937feb71c1d9d1cc525cda4ae73e84bed3a67c1e24143b3bfb1cca9bc78", "time_unix": 1790709834.0513825}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 2, "rollout_id": 2, "time_unix": 1790709834.0525115}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 2, "time_unix": 1790709836.2091975}
+{"applied_lrs": [3.333333333333334e-06], "clip_fraction": null, "event": "rl_round_trained", "island_id": 0, "masked_fraction": null, "nonzero_advantages": null, "rollout_id": 2, "time_unix": 1790709852.413214, "trained_groups": 4, "trained_sample_ids_sha256": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef", "trained_samples": 32}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 2, "time_unix": 1790709852.4137042}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "export_push", "rollout_id": 2, "time_unix": 1790709852.4140775}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "wait_global", "policy_version": 3, "time_unix": 1790709853.2103927}
+{"event": "rl_driver_phase", "island_id": 0, "optimizer": "reset", "phase": "apply", "policy_version": 3, "time_unix": 1790709880.7042923}
+{"event": "rl_policy_apply", "island_id": 0, "local_step": 3, "optimizer": "reset", "partial_fragment_apply": false, "policy_version": 3, "sync/apply_seconds": 49.149672915999986, "sync/global_policy_hash": "6c1a1bb56e3f448659c476d47ab7d9ba234071dca732c3adb729549b3044b187", "time_unix": 1790709929.8545957}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 3, "time_unix": 1790709929.9260519}
+{"event": "rl_publication", "island_id": 0, "policy_version": 3, "rl/policy_token": "yeto:3:6c1a1bb56e3f448659c476d47ab7d9ba234071dca732c3adb729549b3044b187", "sync/publication_members": ["engine:inference-engine-all-0-0-00000"], "sync/publication_payload_bytes": 40370176, "sync/publication_payload_hash": "d4e3f0bf6067bb962dc4495bc70b82ad30a559294e3a14b40523fe0d2ef22080", "time_unix": 1790709930.8073564}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "finish", "rollout_id": 3, "time_unix": 1790709930.8081686}

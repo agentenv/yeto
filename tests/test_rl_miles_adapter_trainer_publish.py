@@ -304,6 +304,7 @@ def test_gspo_clip_fraction_reaches_step_metrics_from_miles_train_one_step_resul
     import sys
     import types
 
+    from yeto.rl.engine.algorithm import AdvantageSpec, AlgorithmSpec
     from yeto.rl.engine.miles_adapter import state_plugin
     from yeto.rl.engine.miles_adapter.state_plugin import STEP_LOSSES
 
@@ -333,7 +334,7 @@ def test_gspo_clip_fraction_reaches_step_metrics_from_miles_train_one_step_resul
         args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
         actor_model=actor, learner_id=0, learner_generation=0,
         parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
-        algorithm="grpo", spec=SimpleNamespace(advantage_estimator="gspo"),
+        algorithm="grpo", spec=AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo")),
     )
     receipt = t.train_step(handle())
     assert receipt.algorithm == "grpo"

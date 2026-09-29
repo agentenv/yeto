@@ -111,7 +111,7 @@ MISMATCH_KEY_MARKERS = ("train_rollout_kl", "tis", "mis_", "ois", "mismatch", "o
 
 
 def _has_corrections(spec: Any) -> bool:
-    if spec is None:
+    if spec is None or getattr(spec, "correction", None) is None:
         return False
     try:
         from yeto.rl.algos.mismatch_correction import selected_corrections
