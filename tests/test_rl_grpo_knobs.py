@@ -371,11 +371,8 @@ def test_overlong_filter_default_is_noop():
 
 import yeto.rl.engine.algorithm as _alg  # noqa: E402
 
-needs_patch = pytest.mark.skipif(not hasattr(_alg, "register_runtime_attrs"),
-                                 reason="needs infra-drafts/1b-shared.patch (P0 hooks)")
 
 
-@needs_patch
 def test_runtime_attrs_wired_through_spec():
     spec = pipeline_spec(reward_shapers=[OVERLONG])
     attrs = spec.to_legacy_runtime_attrs()
@@ -385,9 +382,8 @@ def test_runtime_attrs_wired_through_spec():
     }
 
 
-@needs_patch
 def test_translate_run_config_launch_checks():
-    from tests.test_rl_miles_adapter_config import make_config
+    from test_rl_miles_adapter_config import make_config
     from yeto.rl.engine.miles_adapter import config as mc
 
     spec = pipeline_spec(reward_shapers=[{"name": "overlong_penalty", "max_length": 4096, "cache_length": 256}])
@@ -404,7 +400,6 @@ def test_translate_run_config_launch_checks():
     assert rp.PIPELINE_ATTR not in default.runtime_attrs
 
 
-@needs_patch
 def test_island_check_ref_model():
     assert _alg.island_problems(kl_spec(), {"base_model_revision": "rev-a"}) == []
     problems = _alg.island_problems(kl_spec(), {"base_model_revision": "rev-b"})
@@ -426,9 +421,110 @@ def test_overlong_gradient_rule():
     assert gk.overlong_gradient_rule(AlgorithmSpec(), full) is None
 
 
-@needs_patch
 def test_expects_gradient_with_overlong_filter():
     spec = AlgorithmSpec(sampling={"overlong_filter": True})
     assert spec.expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 4),))) is False
     assert spec.expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 3),))) is True
     assert AlgorithmSpec().expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 4),))) is True
+
+
+# ---------------------------------------------------------------- 6.3 hook (1b-hook.patch)
+
+from yeto.rl.engine.miles_adapter import rollout_meta_hook as rmh  # noqa: E402
+import inspect as _inspect  # noqa: E402
+
+needs_hook = pytest.mark.skipif("apply_sample_filters" not in _inspect.getsource(rmh.record_trained_groups),
+                                reason="needs infra-drafts/1b-hook.patch")
+
+
+def _hook_samples(statuses, group_index):
+    return [SimpleNamespace(index=group_index * 10 + i, group_index=group_index, rollout_id=3,
+                            status=SimpleNamespace(value=s), remove_sample=False, metadata=None,
+                            reward=float(i % 2), response_length=5, weight_versions=None)
+            for i, s in enumerate(statuses)]
+
+
+@needs_hook
+def test_hook_overlong_filter_and_metadata():
+    spec = AlgorithmSpec(sampling={"overlong_filter": True})
+    args = SimpleNamespace(**gk.runtime_attrs(spec))
+    data = [_hook_samples(["completed", "truncated"], 0), _hook_samples(["truncated", "truncated"], 1)]
+    rmh.record_trained_groups(args, data)
+    meta = rmh.build_metadata(args, data)
+    assert meta["filtered_samples"] == {"overlong_filter": 3}
+    assert [g["filtered_samples"] for g in meta["groups"]] == [1, 2]
+    assert [s.remove_sample for g in data for s in g] == [False, True, True, True]
+
+
+@needs_hook
+def test_hook_default_unchanged():
+    args = SimpleNamespace()
+    data = [_hook_samples(["completed", "truncated"], 0)]
+    rmh.record_trained_groups(args, data)
+    meta = rmh.build_metadata(args, data)
+    assert "filtered_samples" not in meta and "filtered_samples" not in meta["groups"][0]
+    assert [s.remove_sample for s in data[0]] == [False, False]
+    assert set(meta) == {"schema", "rollout_id", "groups", "completed", "filtered", "aborted",
+                         "trained_sample_indices"}
+
+
+# ---------------------------------------------------------------- 3.2 learner (before outer sync)
+
+
+def test_two_islands_ref_model_checked_before_joining(tmp_path):
+    """Island B's base revision differs from the spec's KL reference: B fails in
+    verify_ports_algorithm (called before any bridge, P0 test_learner_checks_before_the_bridge)."""
+
+    from test_rl_miles_adapter_config import make_config
+    from yeto.rl import learner as rl_learner
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    spec = kl_spec()
+    launch = mc.translate_run_config(make_config(), spec)
+    results = {}
+    for island, revision in ((0, "rev-a"), (1, "rev-b")):
+        tape = tmp_path / f"tape{island}.jsonl"
+        args = SimpleNamespace(rl_expected_algorithm_sha256=spec.sha256(), event_tape=str(tape),
+                               learner_id=island, rl_allow_unverified_mechanism=None,
+                               model_revision=revision)
+        try:
+            rl_learner.verify_ports_algorithm(args, SimpleNamespace(), launch)
+            results[island] = "joined"
+        except rl_learner.AlgorithmMismatchError as exc:
+            results[island] = str(exc)
+        results[f"tape{island}"] = ([json.loads(x) for x in tape.read_text().splitlines()]
+                                    if tape.exists() else [])
+    assert results[0] == "joined" and results["tape0"] == []
+    assert "base_model_revision 'rev-b'" in results[1]
+    [event] = results["tape1"]
+    assert event["event"] == "rl_algorithm_island_rejected" and event["island_id"] == 1
+    # a different reference revision is a different algorithm hash (outer-sync identity)
+    assert kl_spec(revision="rev-b").sha256() != spec.sha256()
+
+
+# ---------------------------------------------------------------- 7.1 examples
+
+from pathlib import Path  # noqa: E402
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "rl_algorithms"
+
+
+@pytest.mark.parametrize("name", ["dapo-like", "dr-grpo"])
+def test_examples_build_and_translate(name):
+    from test_rl_miles_adapter_config import make_config, sub
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    spec = AlgorithmSpec.from_json_file(str(EXAMPLES / f"{name}.json"))
+    # plugin hashes are the current sources (a dispatcher/reducer edit must
+    # regenerate the examples: the hash is the plugin identity)
+    spec.verify_plugins()
+    assert spec.rejections() == []
+    cfg = make_config()
+    if spec.sampling.over_sampling_batch_size is not None:
+        cfg = sub(cfg, "batch", over_sampling_batch_size=spec.sampling.over_sampling_batch_size,
+                  groups_per_round=4)
+    launch = mc.translate_run_config(cfg, spec)
+    assert launch.algorithm_sha256 == spec.sha256()
+    assert set(algorithm_argv(spec)) <= set(launch.argv)
+    # default GRPO argv unchanged by the examples' existence
+    assert "--custom-reward-post-process-path" not in mc.translate_run_config(make_config(), AlgorithmSpec()).argv
