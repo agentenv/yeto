@@ -48,3 +48,13 @@ with optimizer_steps=1 GSPO's clip fraction is ~0 (design D1).
 A failing run is diagnosed from its logs; only a run whose cause is identified and fixed is
 rerun (at most one rerun per mechanism). No seed/prompt changes between attempts. A mechanism
 that fails twice stays undeclared (7.5) with the reason recorded.
+
+## Attempt 1 (sb-NCEOOOmOOTK45bK8f140xp, H100 80GB HBM3 asserted, 207 s) -- harness bug
+- gspo_s2 worker rc=1 after 149 s: Miles `RayWorkerManager.init` -> `ServerUnavailable`,
+  `HTTPConnection(host='127.0.0.1', port=8265) Connection refused` (Ray state API; the
+  Ray dashboard was disabled by g1.py `include_dashboard=False`; the rl-engine-ports
+  harness this was derived from uses `include_dashboard=True`). Excerpt read live from the
+  sandbox (attempt1/miles_excerpt.txt); the sandbox was then terminated by hand (the
+  remaining runs would fail the same way), so out.tgz could not be fetched.
+- Fix: `include_dashboard=True`; run_all.sh now re-tars after every run and aborts the
+  session if the first run fails. Attempt 2 reruns the same runs, otherwise unchanged.

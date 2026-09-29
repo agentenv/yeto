@@ -22,6 +22,8 @@ for r in $1; do
   python /work/g1/g1.py $r /work/out/$r > /work/out/$r.run.log 2>&1; echo "rc=$?" | tee /work/out/$r.rc
   tail -3 /work/out/$r.run.log
   ray stop --force >/dev/null 2>&1; pkill -9 -f sglang >/dev/null 2>&1; sleep 5
+  tar czf /tmp/out.tgz --exclude='*.pt' --exclude='*.safetensors' --exclude='*.f32' --exclude='state.ckpt*' -C /work out
+  if [ "$(cat /work/out/$r.rc)" != "rc=0" ] && [ "$r" = "$(echo $1 | cut -d' ' -f1)" ]; then echo "FIRST_RUN_FAILED_ABORT"; break; fi
 done
 tar czf /tmp/out.tgz --exclude='*.pt' --exclude='*.safetensors' --exclude='*.f32' --exclude='state.ckpt*' -C /work out
 echo ALL_DONE

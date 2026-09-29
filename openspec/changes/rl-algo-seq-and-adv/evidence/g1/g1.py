@@ -48,7 +48,7 @@ payload["extra_argv"] = ["--save-debug-rollout-data", str(out / "rollouts" / "{r
 (out / "worker.json").write_text(json.dumps(payload, indent=1, default=str))
 import ray
 os.environ["PYTHONPATH"] = "/root/miles:/work/yeto:/work/g1:" + os.environ.get("PYTHONPATH", "")
-ctx = ray.init(num_gpus=1, include_dashboard=False, logging_level="ERROR")
+ctx = ray.init(num_gpus=1, include_dashboard=True, logging_level="ERROR")
 env = B._training_environment(ctx.address_info["address"], Path("/root/miles"))
 env["PYTHONPATH"] = env["PYTHONPATH"] + ":/work/g1"
 t0 = time.time()
