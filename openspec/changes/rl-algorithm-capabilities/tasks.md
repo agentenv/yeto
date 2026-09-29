@@ -27,7 +27,7 @@
 - [x] 2.3 把映射表中的参数全部加入 `ADAPTER_OWNED_FLAGS`；让 `check_extra_argv` 改为吸收已映射参数、对冲突报错、拒绝清单内未映射的参数。验证：单测覆盖吸收、冲突、拒绝三种情况，报错内容包含参数名和取值。
 - [x] 2.4 让 `translate_run_config` 按映射表从 spec 生成算法参数，与 v1 默认值对应的参数不输出。验证：`tests/test_rl_argv_snapshot.py` 与 `tests/test_rl_miles_adapter_config.py` 不改就能通过（默认 GRPO 的 argv 逐字节不变）；新增用例覆盖每个映射字段的非默认值翻译。
 - [x] 2.5 实现 KL 放置规则（D5）：grpo/gspo 配 reward 中的 KL 且系数大于 0 时拒绝；`placement=loss` 翻译为 `--use-kl-loss` 系列参数；`placement=none` 时不输出 `--kl-coef`。验证：参数化单测覆盖上述情况，以及 v1 `kl_coef` 为 None、0.0、大于 0 这三种输入。
-- [ ] 2.6 用 upstream `parse_args` 解析非默认映射所生成的 argv。验证：在 miles-next-venv 中逐字段解析通过；把测试与运行结果写进任务说明。
+- [x] 2.6 用 upstream `parse_args` 解析非默认映射所生成的 argv。验证：在 miles-next-venv 中逐字段解析通过；把测试与运行结果写进任务说明。
 
 ## 3. 能力声明、执行要求与拒绝矩阵（design D4）
 
@@ -83,3 +83,4 @@
 - 4.1、4.2 **CPU 通过，已勾选**：`p0-driver.patch` 已在 infra-a 378b7b1 生效，algo-cap 已合并 infra-a。`tests/test_rl_engine_driver.py` 与 rl-integ 相比 diff 为 0 行，全部通过；`tests/test_rl_algorithm_gradient.py` 通过；全量失败集合与基线相同。审查意见 F15/F16/F17（事件记录放宽来源、masked_fraction 只接受 [0,1] 内的非 bool 实数、缺少逐算法接口时退回 R0 判定）写成增量补丁 `/home/michael/work/infra-drafts/p0-driver-2.patch`（在 infra-a 上 `git apply --check` 通过；打上后全量失败集合不变），由 INFRA 合入。
 - 5.3 **改回未勾选**：真实的导出调用点 `ssh_harness.py` 还没有传入 algorithm_spec（IMG 正在补），接线合入后再勾选。
 - 5.5 **改回未勾选**：已按 spec 原文改为“存在任何外层同步就拒绝”（之前的实现只在“岛数 > 1”时拒绝），放行名称改用 `dimension:name` 形式。现在 learner 和 launcher 两个入口都会接 syncer，所以 G1 用不了放行开关，这一点记为“需另批”（见 progress 与 alignment 的待批准）。另外，导出接线尚未合入。
+- 2.6 **重新勾选：CPU 通过（完整 argv + Megatron parse_args）**。按事先提交的计划（`evidence/2.6-plan.md`、`evidence/2026-09-29-megatron-parse/attempt2-plan.md`），在私有 ports 镜像（Modal T4）中对 ports 完整 argv 跑 upstream `parse_miles_args`，20/20 通过，结果见 `evidence/2026-09-29-megatron-parse/result.md`。费用 < $0.2，资源已回收。
