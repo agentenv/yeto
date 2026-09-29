@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 from collections.abc import Sequence
+from typing import Any
 from pathlib import Path
 
 import torch
@@ -263,18 +264,40 @@ def export_rl_checkpoint(
     local_horizon: int = 1,
     benchmark_learner_budget_steps: int | None = None,
     rl_engine: str = "ports",
+    algorithm_spec: Any = None,
+    unverified_mechanisms: Sequence[str] = (),
 ) -> CanonicalLoraState:
     """Export the authoritative RL checkpoint as a PEFT adapter.
 
     ``rl_engine="ports"`` (the default) is recorded in
     ``yeto_rl_provenance.json``; an explicit ``rl_engine="legacy"`` leaves the
     provenance output byte-identical to pre-ports exports.
+
+    ports only (change rl-algorithm-capabilities D9/D11): ``algorithm_spec``
+    (an ``AlgorithmSpec``, a mapping or a JSON string) is recorded as its
+    canonical JSON ``algorithm_spec`` plus ``algorithm_spec_sha256`` -- the
+    same values as the run's ``rl_engine_selected`` event; unverified
+    mechanisms admitted for the run are recorded as
+    ``rl/unverified_mechanisms`` and mark the artifact.
     """
 
     from ..models import resolve
 
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
+    if rl_engine != "ports" and (algorithm_spec is not None or unverified_mechanisms):
+        raise ValueError("algorithm provenance is recorded only for rl_engine='ports'")
+    algorithm = None
+    if algorithm_spec is not None:
+        from .engine.algorithm import AlgorithmSpec
+
+        if isinstance(algorithm_spec, str):
+            algorithm_spec = json.loads(algorithm_spec)
+        algorithm = (
+            algorithm_spec
+            if isinstance(algorithm_spec, AlgorithmSpec)
+            else AlgorithmSpec.from_dict(algorithm_spec)
+        )
 
     model = resolve(model)
     checkpoint = parse_checkpoint(checkpoint_path)
@@ -390,6 +413,12 @@ def export_rl_checkpoint(
             **(provenance or {"sync_preset": sync_preset, "policy_hash": policy_tensor_hash(state)}),
             "rl_engine": rl_engine,
         }
+        if algorithm is not None:
+            provenance["algorithm_spec"] = algorithm.canonical_json()
+            provenance["algorithm_spec_sha256"] = algorithm.sha256()
+        if unverified_mechanisms:
+            provenance["rl/unverified_mechanisms"] = sorted(set(unverified_mechanisms))
+            provenance["contains_unverified_mechanisms"] = True
     if provenance is not None:
         path = Path(output_dir).expanduser() / "yeto_rl_provenance.json"
         temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -439,6 +468,17 @@ def parse_args(argv=None):
         default="ports",
         help="engine that produced the checkpoint (recorded in provenance for ports)",
     )
+    parser.add_argument(
+        "--rl-algorithm-spec",
+        default=None,
+        help="ports: the run's AlgorithmSpec JSON (recorded with its hash)",
+    )
+    parser.add_argument(
+        "--rl-unverified-mechanism",
+        action="append",
+        default=None,
+        help="ports: an unverified mechanism the run admitted (repeatable)",
+    )
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args(argv)
 
@@ -458,6 +498,12 @@ def main(argv=None) -> None:
         pipeline=args.pipeline,
         local_horizon=args.local_horizon,
         rl_engine=args.rl_engine,
+        algorithm_spec=(
+            Path(args.rl_algorithm_spec).read_text(encoding="utf-8")
+            if args.rl_algorithm_spec
+            else None
+        ),
+        unverified_mechanisms=args.rl_unverified_mechanism or (),
     )
     if args.sync_preset == "decoupled":
         print(

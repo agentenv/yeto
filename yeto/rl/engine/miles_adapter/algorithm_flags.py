@@ -25,6 +25,7 @@ unmapped set in the same call.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -327,10 +328,18 @@ def absorb_extra_argv(
     """
 
     load_extensions()
+    split = _split(extra_argv)
+    flags_present = {flag for flag, _, _ in split if flag}
+    custom_tis = "--custom-tis-function-path" in flags_present
+    if custom_tis and "--use-tis" not in flags_present:
+        raise AlgorithmSpecError(
+            "--custom-tis-function-path takes effect only with --use-tis; pass both "
+            "(correction.method='custom') or neither"
+        )
     remaining: list[str] = []
     absorbed: dict[str, Any] = {}
     assignments: dict[str, tuple[Any, str]] = {}  # path -> (value, source flag)
-    for flag, raw, tokens in _split(extra_argv):
+    for flag, raw, tokens in split:
         if not flag:
             name = tokens[0].split("=", 1)[0]
             if tokens[0].startswith("--") and name in UNMAPPED_OBJECTIVE_FLAGS:
@@ -350,7 +359,10 @@ def absorb_extra_argv(
                 f"{flag} given twice in extra argv ({absorbed[flag]!r} vs {raw!r})"
             )
         absorbed[flag] = raw if raw is not None else True
-        for path, new in row.absorb(value):
+        pairs = row.absorb(value)
+        if flag == "--use-tis" and custom_tis:
+            pairs = []  # --use-tis + --custom-tis-function-path = correction.method custom
+        for path, new in pairs:
             current = spec.get_path(path)
             default = AlgorithmSpec.default_at(path)
             shown = new.path if isinstance(new, PluginRef) else new
@@ -388,3 +400,66 @@ def absorb_extra_argv(
     # would be carried over; the reward->loss switch is a conflict only if
     # the spec itself set a reward KL (caught above via kl.placement).
     return AlgorithmSpec.from_dict(payload), tuple(remaining), absorbed
+
+
+# --------------------------------------------------------------------------
+# dry run (docs/MILES_RL.md "Algorithm specs")
+# --------------------------------------------------------------------------
+
+
+def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
+    """Resolve, absorb, check and translate an algorithm without any engine.
+
+    Mirrors the ports learner: ``--rl-algorithm-spec`` (else R0 default GRPO),
+    absorption of ``--extra`` argv, the rejection matrix and the Miles
+    adapter's capability declaration (with ``--rl-allow-unverified-mechanism``
+    as a single-island allowance).
+    """
+
+    import argparse
+    import shlex
+
+    from ..algorithm import check_unverified_allowance, resolve_ports_algorithm
+    from ..capabilities import CapabilityMismatch
+    from .entry import miles_capabilities
+
+    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags")
+    parser.add_argument("--dry-run", action="store_true", required=True)
+    parser.add_argument("--rl-algorithm-spec", default=None)
+    parser.add_argument("--extra", default="", help="extra Miles argv (one shell string)")
+    parser.add_argument("--rl-allow-unverified-mechanism", action="append", default=None)
+    args = parser.parse_args(argv)
+    result: dict[str, Any] = {}
+    try:
+        base = resolve_ports_algorithm(args, rl_engine="ports")
+        spec, remaining, absorbed = absorb_extra_argv(base, shlex.split(args.extra))
+        allow = check_unverified_allowance(args.rl_allow_unverified_mechanism or (), islands=1)
+        result.update(
+            schema=spec.schema,
+            algorithm_spec=json.loads(spec.canonical_json()),
+            algorithm_spec_sha256=spec.sha256(),
+            absorbed_flags=absorbed,
+            remaining_extra_argv=list(remaining),
+            miles_argv=["--advantage-estimator", spec.advantage_estimator]
+            + (["--kl-coef", str(spec.kl_coef)] if spec.kl_coef is not None else [])
+            + algorithm_argv(spec),
+            required_mechanisms=sorted(f"{d}:{n}" for d, n in spec.required_mechanisms()),
+        )
+        caps = miles_capabilities("sha256:" + "0" * 64, unverified_mechanisms=allow)
+        caps.check(layout="lora", placement="colocated", execution_mode="colocated-serial",
+                   algorithm=spec)
+        result["verdict"] = "accepted"
+    except (AlgorithmSpecError, CapabilityMismatch) as exc:
+        result["verdict"] = "rejected"
+        result["error"] = str(exc)
+    return result
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    result = dry_run(argv)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result["verdict"] == "accepted" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
