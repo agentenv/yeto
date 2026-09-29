@@ -336,6 +336,9 @@ def test_upstream_parse_args_accepts_translation(tmp_path, colocated):
         make_config(colocated=colocated), hf_checkpoint=str(tmp_path), ref_load=str(tmp_path)
     )
     cfg = sub(cfg, "data", prompt_path=str(tmp_path / "p.jsonl"))
+    if not colocated:
+        # LoRA fixed partition keeps the trainer resident (config.py guard).
+        cfg = sub(cfg, "serving", offload_train=False)
     # HF target names avoid the Megatron-Bridge round trip parse_args needs for Megatron names.
     cfg = sub(cfg, "trainable", target_modules=("q_proj", "k_proj", "v_proj", "o_proj"))
     spec = AlgorithmSpec(
