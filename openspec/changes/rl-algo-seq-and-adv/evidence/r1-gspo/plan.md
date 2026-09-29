@@ -32,3 +32,8 @@
   (exit 0/2 -> tape decides, 3/4/5/other FAIL; 3 rounds + finalized; per round clip_fraction and
   masked_fraction non-null and equal to the round's step mean within 1e-6).
 - Same SHA 501d71d, same run.sh/config. No further runs after this one. Cost ~ $0.9.
+- Rerun pre-launch refusal (21:32:46Z, no cloud resource created): the launcher refused to start
+  because the first run's event tape already existed under the same run name
+  (`event tapes already exist for run 'algo2a-r1-gspo'`, P0 same-name guard). Evidence
+  rerun-prelaunch-refused/. Fix: run.sh takes PREFIX from the environment; the rerun uses
+  `PREFIX=algo2a-r1-gspo2`. Nothing else changes; this is still the single approved rerun.

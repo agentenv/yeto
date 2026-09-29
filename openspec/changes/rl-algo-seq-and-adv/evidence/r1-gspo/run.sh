@@ -2,7 +2,7 @@
 # R1 channel GPU recheck: gspo_s2 on integ-decl 501d71d (plan.md). usage: run.sh
 set -u; G=$(cd "$(dirname "$0")" && pwd); E=$G/run; mkdir -p $E; T=/tmp/a2-r1
 [ "$(git -C $T rev-parse --short=7 HEAD)" = "$(cat $G/YETO_SHA)" ] || { echo "tree not at YETO_SHA"; exit 9; }
-PREFIX=algo2a-r1-gspo; APP=yeto-$PREFIX; RUNS=/tmp/algo2a/r1runs; mkdir -p /tmp/algo2a
+PREFIX=${PREFIX:-algo2a-r1-gspo}; APP=yeto-$PREFIX; RUNS=/tmp/algo2a/r1runs; mkdir -p /tmp/algo2a
 eval "$(python3 - <<'PY'
 import base64, json, os, shlex
 a = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
