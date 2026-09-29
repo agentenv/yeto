@@ -1,36 +1,36 @@
-# 2026-09-29T23:04:06Z modal app list (algo1b*) after stopping the leftover empty apps
+# 2026-09-29T23:03:36Z modal app list (algo1b*) after all runs
 [
  {
-  "app_id": "ap-WUaTywrnL0llbfuYDPKLVW",
-  "description": "algo1b-g1j",
-  "state": "stopped",
+  "app_id": "ap-lDAlaL4WxLufiAhNVZhGEu",
+  "description": "algo1b-g1g",
+  "state": "deployed",
   "tasks": "0",
-  "created_at": "2026-09-29 22:55:02+00:00",
-  "stopped_at": "2026-09-29 23:03:52+00:00"
- },
- {
-  "app_id": "ap-I5YJlti1ofApqIAmiBGm7l",
-  "description": "algo1b-g1i",
-  "state": "stopped",
-  "tasks": "0",
-  "created_at": "2026-09-29 22:36:06+00:00",
-  "stopped_at": "2026-09-29 23:03:51+00:00"
+  "created_at": "2026-09-29 21:56:58+00:00",
+  "stopped_at": null
  },
  {
   "app_id": "ap-gvxyWVUOffXaHbVoyXge0X",
   "description": "algo1b-g1h",
-  "state": "stopped",
+  "state": "deployed",
   "tasks": "0",
   "created_at": "2026-09-29 22:20:42+00:00",
-  "stopped_at": "2026-09-29 23:03:50+00:00"
+  "stopped_at": null
  },
  {
-  "app_id": "ap-lDAlaL4WxLufiAhNVZhGEu",
-  "description": "algo1b-g1g",
-  "state": "stopped",
+  "app_id": "ap-I5YJlti1ofApqIAmiBGm7l",
+  "description": "algo1b-g1i",
+  "state": "deployed",
   "tasks": "0",
-  "created_at": "2026-09-29 21:56:58+00:00",
-  "stopped_at": "2026-09-29 23:03:49+00:00"
+  "created_at": "2026-09-29 22:36:06+00:00",
+  "stopped_at": null
+ },
+ {
+  "app_id": "ap-WUaTywrnL0llbfuYDPKLVW",
+  "description": "algo1b-g1j",
+  "state": "deployed",
+  "tasks": "0",
+  "created_at": "2026-09-29 22:55:02+00:00",
+  "stopped_at": null
  },
  {
   "app_id": "ap-t2p5DGG51WZuVsjrU7DfPQ",
@@ -129,4 +129,4 @@
   "stopped_at": "2026-09-29 21:11:48+00:00"
  }
 ]
-not stopped: []
+not stopped: ['algo1b-g1g', 'algo1b-g1h', 'algo1b-g1i', 'algo1b-g1j']

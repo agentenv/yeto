@@ -45,7 +45,7 @@
 
 回收证明：
 - g1c–g1j 每次运行都有 `out/teardown.log`（sandbox terminated）。**运行当时没有单独留存 modal app list**，依据 teardown.log，并在之后执行了 `modal app stop`。
-- 事后留存的汇总列表在 `evidence/teardown_proof_final.txt`，所有 algo1b 前缀的 app 均为 stopped。
+- 事后核对时发现，algo1b-g1g、g1h、g1i、g1j 四个同名 app 仍处于 deployed 状态（tasks=0，没有计算），见 `evidence/teardown_proof_final_before_stop.txt`。原因是 run_all 结束后，`sbx.py list` 通过 `App.lookup(create_if_missing=True)` 建出了空 app，而我前面的 `modal app stop` 执行得早于这一步。已逐个 `modal app stop`；停止后的列表见 `evidence/teardown_proof_final.txt`，algo1b 前缀下没有未停止的 app。这些空 app 没有产生 GPU 费用，但本应在当时就被回收。
 
 ## 2026-09-29 第四轮（触发实验与隔离对照）——已被"最终汇总"一节取代
 
