@@ -42,7 +42,7 @@
 
 - [x] 6.1 实现 `REWARD_SHAPERS["overlong_penalty"]`，按 rollout 合并后的响应长度计算惩罚；spec 增加 L_max、L_cache 字段与约束（0 < L_cache ≤ L_max ≤ 生成长度上限）。验证：单测覆盖 L_max=100、L_cache=20 时长度 80/90/100/101 对应 0/−0.5/−1/−1，多段样本塑形后同 rollout 奖励仍一致，越界参数启动前拒绝。
 - [x] 6.2 原始奖励写入 `sample.metadata["yeto_raw_reward"]`，事件汇总原始与塑形后奖励。验证：单测确认两者都出现在事件中。
-- [ ] 6.3 在 `record_trained_groups` hook 中组合 overlong 过滤：`sampling.overlong_filter=true` 时对 `status == truncated` 的样本设置 `remove_sample=True`，并把被过滤样本数写入 rollout 元数据。验证：单测确认截断样本被标记、未截断样本不变、默认配置下 hook 行为与之前完全一致。
+- [x] 6.3 在 `record_trained_groups` hook 中组合 overlong 过滤：`sampling.overlong_filter=true` 时对 `status == truncated` 的样本设置 `remove_sample=True`，并把被过滤样本数写入 rollout 元数据。验证：单测确认截断样本被标记、未截断样本不变、默认配置下 hook 行为与之前完全一致。
 - [x] 6.4 CPU 核对语义：在 miles-next-venv 中对含 `remove_sample` 样本的批次调用 Miles 训练数据转换，确认 loss mask 全 0、同组其他样本的 advantage 不变；用 `get_sum_of_sample_mean` 确认被屏蔽样本是否计入分母。验证：测试通过，结论写入 `docs/MILES_RL.md`。
 - [x] 6.5 通过 `expects_gradient()` 声明 overlong 过滤的判定：非零方差组的样本全部被过滤时不期望梯度。验证：fake driver 测试中全截断且 grad_norm=0 的轮次不失败；部分截断且 grad_norm=0 仍失败；grad_norm 非有限仍失败。
 
@@ -57,7 +57,7 @@
 > 本组的 G1（1 卡冒烟）统一使用 P0 提供的 `--rl-allow-unverified-mechanism <机制名>` 放行（见 `rl-algorithm-capabilities` design D11），只在单岛运行中生效；G1 通过后再在 adapter 中正式声明支持；两岛 G3 只用正式声明，不带放行参数。
 
 - [x] 8.1 准备：复用 R0 冒烟小模型与 harness，证据目录 `openspec/changes/rl-algo-grpo-knobs/evidence/<日期>-<名称>/`，含 `YETO_SHA`、argv、事件与指标 jsonl。只开所需卡数（1 卡或 1+1 卡），不开整机；Modal 使用 `H100!:N` 并在启动时断言 GPU 名；日志与证据中不打印凭据。验证：dry-run 输出的资源请求与预期卡数一致；凭据扫描（grep token/key 模式）无命中。
-- [ ] 8.2 G1（1 卡）：clip-higher、dual-clip、token 级聚合、Dr.GRPO（去 std + 常数分母）、KL loss（k3）、entropy、超采样、overlong 软惩罚、overlong 过滤（调小生成长度以触发截断）各 2–3 轮。验证：每项相关指标键存在且有限（如 clipfrac、kl_loss、entropy_loss、被过滤样本数）、零梯度不变量无误报、policy token 与 receipt 正常；KL loss 另记录峰值显存与每轮耗时，并与同配置默认 GRPO 对比；结果逐项写入 `progress.md`。
+- [x] 8.2 G1（1 卡）：clip-higher、dual-clip、token 级聚合、Dr.GRPO（去 std + 常数分母）、KL loss（k3）、entropy、超采样、overlong 软惩罚、overlong 过滤（调小生成长度以触发截断）各 2–3 轮。验证：每项相关指标键存在且有限（如 clipfrac、kl_loss、entropy_loss、被过滤样本数）、零梯度不变量无误报、policy token 与 receipt 正常；KL loss 另记录峰值显存与每轮耗时，并与同配置默认 GRPO 对比；结果逐项写入 `progress.md`。
 - [ ] 8.3 对 G1 通过的每项，在 Miles adapter 能力声明中加入该机制（每项单独变更），fake engine 同步。验证：`check()` 单测接受已声明项、仍拒绝未通过项；`progress.md` 引用对应证据目录。
 - [ ] 8.4 G3（1+1 卡）：两岛 strict-avg，组合配置 clip-higher + token 级聚合 + overlong（软惩罚与过滤），约 3 轮。验证：两岛算法哈希一致、外层同步后权重 hash 一致、不变量无失败、两岛有效样本数已记录。不做 decoupled 对比（须等 `fix-decoupled-lr-schedule` 合入）。
 - [ ] 8.5 拆除与费用：每次运行后拆除全部资源。验证：provider 侧列出 app/实例/卷为空的输出存入证据目录（无残留证明）；按运行汇总卡时与费用写入 `progress.md`。

@@ -209,6 +209,21 @@
 3. P0 4.2 与 1b-hook.patch 都合入后，补 6.5 的 fake driver 测试。
 4. harness 确定后执行 8.x。
 
+## 6.3 / 8.2 完成记录（g1i 之后）
+- 6.3 CPU 通过 ✔，GPU 上确认生效：1b-hook.patch 已由 INFRA 合入 integ-decl 21912fe。`record_trained_groups` 会先运行 sample filters；CPU 测试（`test_hook_overlong_filter_and_metadata`、`test_hook_default_unchanged`）在包含该 hook 的代码上通过。g1i（algo-1b-os 分支，`evidence/2026-09-29-algo1b-g1i/results.md`）中 filtered_samples 为 16/16/31，截断样本被屏蔽；过滤关闭时为 None。
+- 8.2 GPU 验证通过 ✔：原文所列各项都已做过 1 卡冒烟，每项 2–3 轮及以上，相关指标都存在且有限，零梯度不变量没有误报，policy token 与 receipt 正常。证据如下：
+  - clip-higher、dual-clip、token、Dr.GRPO、KL k3、entropy、超采样、overlong 软惩罚：g1 attempt2；
+  - overlong 过滤：g1i，调小生成长度至 160 以触发截断；
+  - KL loss 峰值显存 38184 MiB，默认 GRPO 为 38142 MiB；每轮耗时 345.8 s 对 418.8 s（后者含首次下载）。
+- 注意：8.2 只要求冒烟通过。按主 agent 的规则，能力声明另外要求"生效"证据。各机制的生效结论见第四轮一节和后续实验：
+  - token：g1f 修复后生效；
+  - no_std：g1c 生效；
+  - over_sampling：g1h 判据满足，但区分力弱，另有事后推断的补充证据；
+  - overlong_filter：g1i 生效；
+  - eps_clip：g1b A-r1 生效；
+  - clip_higher：g1e、g1g 未能证明，g1j 为最终实验；
+  - dual_clip：未能证明。
+
 ## SHA 核对（主 agent 要求，2026-09-29）
 - 本轮向主 agent 报错过 4 次 SHA：9b7c6c8→604078e、8ab4d2e→ac0d382、675a2be→d53397d、f26d5e3→3fec259，均已更正。
 - 核对方法：对 algo-1b、algo-1b-os、algo-1b-token 三个分支中本 change 的全部 .md 文件，提取其中的十六进制串，逐个做 `git cat-file -e <sha>^{commit}`，yeto 中不存在的再到 miles-next/sglang-next 中查。
