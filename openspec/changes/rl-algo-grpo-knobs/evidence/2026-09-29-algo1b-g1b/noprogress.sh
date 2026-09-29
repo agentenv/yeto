@@ -4,7 +4,7 @@
 # within FIRST_STEP_MIN minutes of t_start, or (2) >= REPEAT_MAX
 # "Task raised exception" / "Traceback" lines not followed by any train step
 # (i.e. repeated failures before training progresses).
-X=$1; P=algo1b-g1b-$X; D=$(cd $(dirname $0) && pwd); L=$D/out-$X/launch.log; Y=/home/michael/work/algo-1b
+X=$1; P=algo1b-g1b-$X${ATTEMPT:+-$ATTEMPT}; D=$(cd $(dirname $0) && pwd); L=$D/out-$X/launch.log; Y=/home/michael/work/algo-1b
 FIRST_STEP_MIN=${FIRST_STEP_MIN:-25}; REPEAT_MAX=${REPEAT_MAX:-20}
 start=$(date +%s)
 abort() { echo "$(date -u +%FT%TZ) ABORT: $1" >> $D/out-$X/noprogress.log

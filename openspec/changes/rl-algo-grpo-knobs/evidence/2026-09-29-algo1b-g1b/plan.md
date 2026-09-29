@@ -60,3 +60,8 @@
   - 出现第一个训练 step 之前，`Task raised exception` 与 `Traceback` 累计达到 **20 次**。SGLang 那条良性的 freeze_gc 链每次运行只有 4 行，不会触发。
 - 第 4 次尝试是在它启动约数分钟后才挂上这个监控的；run C 从启动起就用它（run.sh 会自动拉起）。
 - 如果第 4 次尝试仍然在第一个训练 step 之前失败：保存证据，报告阻塞，转做其他项，不再无限重试。
+
+## run A 第 4 次尝试结论（19:30:07–19:30:21Z）
+- 还是在 launcher 启动阶段就失败："event tapes already exist for run 'algo1b-g1b-a'"。第 2 次尝试的事件磁带仍留在 `~/.yeto/runs/algo1b-g1b-a/`。这次没有建 app，也没有用 GPU。
+- 修复：把第 2 次尝试的 run 目录（events、meta.json）存进 `attempt2-out-a/yeto-run/` 作为证据，原目录不删；之后每次尝试用新的 cluster-prefix，`ATTEMPT=5` 时为 `algo1b-g1b-a-5`（app 为 `yeto-algo1b-g1b-a-5`）。判据与配置都不变。
+- 按主 agent 的规定：如果第 5 次尝试仍然在第一个训练 step 之前失败，就保存证据、报告阻塞，不再重试。
