@@ -159,6 +159,24 @@ def parse_args(argv=None):
         default="ports",
         help="RL engine path (default ports); ports rejects unsupported combinations at startup",
     )
+    # rl-algorithm-capabilities D8/D9/D11 (ports only; refused on legacy).
+    parser.add_argument(
+        "--rl-algorithm-spec",
+        default=None,
+        help="AlgorithmSpec JSON (v1 or v2) for --rl-engine ports",
+    )
+    parser.add_argument(
+        "--rl-expected-algorithm-sha256",
+        default=None,
+        help="algorithm hash the launcher expects every island to build (ports)",
+    )
+    parser.add_argument(
+        "--rl-allow-unverified-mechanism",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="single-island smoke: admit an expressible but undeclared mechanism (ports)",
+    )
     parser.add_argument("--miles-source-sha256", default=None)
     parser.add_argument("--megatron-ref-load", default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -180,7 +198,76 @@ def parse_args(argv=None):
             _require_ports_supported(args)
         except ValueError as error:
             parser.error(str(error))
+    try:
+        _check_ports_algorithm_options(args)
+    except ValueError as error:
+        parser.error(str(error))
     return args
+
+
+def _check_ports_algorithm_options(args) -> None:
+    """Startup refusal of the ports algorithm options (D8/D11), before any work."""
+
+    from .engine.algorithm import check_unverified_allowance
+
+    rl_engine = getattr(args, "rl_engine", "ports")
+    if rl_engine != "ports":
+        from .engine.algorithm import resolve_ports_algorithm
+
+        resolve_ports_algorithm(args, rl_engine=rl_engine)  # raises if any is used
+        return
+    check_unverified_allowance(
+        getattr(args, "rl_allow_unverified_mechanism", None) or (),
+        islands=int(getattr(args, "num_learners", 1) or 1),
+    )
+
+
+def _append_ports_event(args, miles_args, event: dict) -> None:
+    from .miles import _append_rl_event
+
+    miles_args.yeto_rl_event_tape = args.event_tape
+    miles_args.yeto_rl_learner_id = args.learner_id
+    _append_rl_event(miles_args, event)
+
+
+class AlgorithmMismatchError(RuntimeError):
+    """This island's algorithm hash differs from the launcher's expectation."""
+
+
+def verify_ports_algorithm(args, miles_args, launch) -> None:
+    """D9/D11: before the island joins outer sync (no bridge exists yet).
+
+    Plugins are re-hashed and imported; the island's algorithm hash is
+    compared with ``--rl-expected-algorithm-sha256`` (mismatch: event +
+    refusal; missing: warning event, for manually started islands);
+    absorbed flags and unverified allowances are recorded.
+    """
+
+    algorithm = launch.algorithm
+    algorithm.verify_plugins()
+    actual = launch.algorithm_sha256
+    expected = getattr(args, "rl_expected_algorithm_sha256", None)
+    if expected is None:
+        _append_ports_event(args, miles_args, {
+            "event": "rl_algorithm_expected_hash_missing",
+            "level": "warning",
+            "rl/algorithm_spec_sha256": actual,
+        })
+    elif expected.lower() != actual:
+        _append_ports_event(args, miles_args, {
+            "event": "rl_algorithm_mismatch",
+            "rl/algorithm_spec_sha256": actual,
+            "rl/expected_algorithm_spec_sha256": expected.lower(),
+            "rl/algorithm_spec": algorithm.canonical_json(),
+        })
+        raise AlgorithmMismatchError(
+            f"island {args.learner_id} algorithm hash {actual} differs from the launcher's "
+            f"expected {expected.lower()}; refusing to join outer sync"
+        )
+    miles_args.yeto_rl_algorithm_absorbed_flags = dict(launch.absorbed_flags)
+    miles_args.yeto_rl_unverified_mechanisms = tuple(
+        sorted(set(getattr(args, "rl_allow_unverified_mechanism", None) or ()))
+    )
 
 
 def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
@@ -1515,6 +1602,7 @@ def run_miles(
     rl_engine = getattr(args, "rl_engine", "ports")
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
+    _check_ports_algorithm_options(args)
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
         from .engine.miles_adapter.state import require_run_plugin
@@ -1671,7 +1759,10 @@ def run_miles(
     if rl_engine == "ports":
         # Same engine-agnostic RLRunConfig as legacy; only the translation
         # differs (design D8).
-        from .engine.algorithm import AlgorithmSpec
+        import dataclasses
+
+        from .engine.algorithm import resolve_ports_algorithm
+        from .engine.miles_adapter.algorithm_flags import absorb_extra_argv
         from .engine.miles_adapter.config import parse_miles_args, translate_run_config
         from .engine.run_config import resolve_rl_run_config
 
@@ -1688,12 +1779,23 @@ def run_miles(
             target_modules=canonical_targets,
             yeto_policy_sync=yeto_policy_sync,
         )
-        ports_algorithm = AlgorithmSpec.from_legacy_args(args)
-        ports_launch = translate_run_config(
-            run_config, ports_algorithm, extra_argv=tuple(extra_argv)
+        # D8: --rl-algorithm-spec (else the legacy CLI, as in R0), then the
+        # mapped extra-argv flags are absorbed by the translation.
+        base_algorithm = resolve_ports_algorithm(args, rl_engine="ports")
+        absorbed, _, _ = absorb_extra_argv(base_algorithm, tuple(extra_argv))
+        run_config = dataclasses.replace(
+            run_config,
+            algorithm=dataclasses.replace(
+                run_config.algorithm, advantage_estimator=absorbed.advantage_estimator
+            ),
         )
+        ports_launch = translate_run_config(
+            run_config, base_algorithm, extra_argv=tuple(extra_argv)
+        )
+        ports_algorithm = ports_launch.algorithm
         miles_argv = list(ports_launch.argv)
         miles_args = parse_miles_args(ports_launch)
+        verify_ports_algorithm(args, miles_args, ports_launch)
     else:
         miles_argv = build_miles_argv(
             args,
