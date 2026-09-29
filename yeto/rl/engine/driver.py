@@ -100,6 +100,34 @@ _PHASE_ROLE = {
 _PHASE_TASK = {"sync": "outer_sync"}
 
 
+FAULT_INJECTION_ENV = "YETO_RL_FAULT_INJECTION"
+FAULT_INJECTION_FILE = "yeto-rl-fault-injection.json"  # at the repo root
+
+
+def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, float]:
+    """Test-only fault injection (rl-infra-spec 2.3 X9); empty = off (default).
+
+    Source: the JSON file named by ``YETO_RL_FAULT_INJECTION``, else
+    ``<repo>/yeto-rl-fault-injection.json`` (present only in an experiment's
+    frozen code snapshot). Keys: ``publish_delay_s``.
+    """
+    import os
+
+    environ = os.environ if environ is None else environ
+    path = environ.get(FAULT_INJECTION_ENV)
+    candidate = Path(path) if path else Path(__file__).resolve().parents[3] / FAULT_INJECTION_FILE
+    if not candidate.is_file():
+        return {}
+    raw = json.loads(candidate.read_text(encoding="utf-8"))
+    unknown = sorted(set(raw) - {"publish_delay_s"})
+    if unknown:
+        raise ValueError(f"unknown fault injection keys {unknown}")
+    delay = float(raw.get("publish_delay_s", 0.0))
+    if not math.isfinite(delay) or delay < 0:
+        raise ValueError("publish_delay_s must be a non-negative number")
+    return {"publish_delay_s": delay} if delay else {}
+
+
 class DriverError(RuntimeError):
     """The island loop cannot continue safely."""
 
@@ -220,6 +248,13 @@ def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
     }
 
 
+def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
+    import hashlib
+
+    ids = sorted(f"{g.group_id}/{s}" for g in batch.groups for s in g.sample_ids)
+    return hashlib.sha256("\n".join(ids).encode()).hexdigest()
+
+
 def _pooled_reward(batch: RolloutBatchHandle) -> tuple[float, float]:
     total = sum(len(g.sample_ids) for g in batch.groups)
     if total == 0:
@@ -283,6 +318,7 @@ class IslandDriver:
         self.weight_transport: str | None = None
         self.trained_version: int | None = None
         self._open_span: tuple[str, float, int | None] | None = None
+        self.fault_injection = load_fault_injection()
 
     # -- events ----------------------------------------------------------
     def emit(self, event: str, **fields: Any) -> None:
@@ -460,6 +496,11 @@ class IslandDriver:
             )
         expected_hash = state.policy_tensor_hash()
         self.phase("publish", policy_version=rollout_id)
+        delay = self.fault_injection.get("publish_delay_s")
+        if delay:
+            self.emit("rl_fault_injected", kind="publish_delay", seconds=delay,
+                      policy_version=rollout_id)
+            time.sleep(delay)
         result = self.publisher.publish(state)
         manifest = result.manifest
         if (
@@ -681,6 +722,7 @@ class IslandDriver:
             rollout_id=rollout_id,
             trained_groups=len(batch.groups),
             trained_samples=sum(len(g.sample_ids) for g in batch.groups),
+            trained_sample_ids_sha256=_sample_ids_sha256(batch),
             masked_fraction=metrics.masked_fraction,
             clip_fraction=metrics.clip_fraction,
             nonzero_advantages=getattr(batch, "nonzero_advantages", None),
