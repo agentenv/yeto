@@ -658,7 +658,8 @@ each with its evidence, are the `MILES_DECLARED` table in
 - loss_aggregations: constant, token (token only on Miles 0af62f4d+, where
   the LoRA bridge honours calculate_per_token_loss; entry.MILES_DECLARED_PINS
   withholds it under other pins); features: over_sampling (Miles 0af62f4d only;
-  weak evidence, see MILES_DECLARED), kl_loss_ref_model, entropy_bonus,
+  weak evidence, see MILES_DECLARED), overlong_filter (Miles 0af62f4d; needs
+  the rollout hook of integ-decl 21912fe+), kl_loss_ref_model, entropy_bonus,
   overlong_penalty, no_grpo_std_normalization (g1c isolated control), eps_clip
   (g1b run A-r1; eps 0.001/0.002 are trigger test values, not
   recommendations); kl_placements: loss; reward_postprocessors:
@@ -686,7 +687,7 @@ Not declared, pending evidence or approval:
 
 - clip_higher: withdrawn because pg_clipfrac sums both bounds; an
   isolating probe is planned. dual_clip;
-- overlong_filter, mis, opsm_rollout, generic corrections:custom;
+- mis, opsm_rollout, generic corrections:custom;
 - features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
   reducer, and that reducer is claimed by `loss_aggregations:constant`
   (`register_named_reducer`).

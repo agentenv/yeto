@@ -47,6 +47,7 @@ _E1B_B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1b"
 _E1B_C = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1c"
 _E1B_G1F = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1f"
 _E1B_G1H = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1h"
+_E1B_G1I = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1i"
 _E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
 MILES_DECLARED: dict[str, str] = {
     "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
@@ -96,6 +97,14 @@ MILES_DECLARED: dict[str, str] = {
         "over_sampling_batch_size; strong evidence awaits a rerun once Miles records the "
         "batch size of every submission. Miles 0af62f4d only"
     ),
+    "features:overlong_filter": (
+        f"{_E1B_G1I} (branch algo-1b-os bf9f914): paired (step-1 raw_reward 0.65625 both "
+        "arms, truncation rate 0.5); (a) of_on filtered_samples 16/16/31, (b) of_off None, "
+        "(c) step-1 grad_norm 0.5647 vs 0.6329; round 3 (31/32 filtered) raised no "
+        "zero-gradient false alarm. Requires the 1b hook (integ-decl 21912fe or later: "
+        "rollout_meta_hook applies the sample filter before recording trained groups). "
+        "Miles 0af62f4d only"
+    ),
 }
 
 
@@ -106,6 +115,7 @@ MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # grad_norm bit-identical to the baseline)
     "loss_aggregations:token": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
     "features:over_sampling": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+    "features:overlong_filter": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
 }
 
 

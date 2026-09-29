@@ -212,7 +212,7 @@ def test_expressible_but_not_enabled_is_rejected_with_options():
     assert "expressible but not enabled" in text
 
 
-def test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter():
+def test_miles_accepts_each_declared_mechanism_and_rejects_dual_clip():
     caps = miles_capabilities(FP)
     declared = caps.declared_mechanisms()
     covered = []
@@ -228,9 +228,9 @@ def test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter():
     _check(caps, AlgorithmSpec())  # the R0 declarations
     assert covered, "no declared non-R0 mechanism was exercised"
     assert {"corrections:tis", "corrections:opsm"} <= set(covered)
-    assert "features:overlong_filter" not in declared
-    with pytest.raises(CapabilityMismatch, match="'overlong_filter' not supported"):
-        _check(caps, _combine(CANDIDATES["features:overlong_filter"]))
+    assert "features:dual_clip" not in declared  # no GPU evidence of effect yet
+    with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported"):
+        _check(caps, _combine(CANDIDATES["features:dual_clip"]))
 
 
 def test_critic_rejected_pointing_to_legacy():
@@ -361,6 +361,7 @@ EXPECTED_MILES_DECLARED = {
     "features:no_grpo_std_normalization",
     "loss_aggregations:token",
     "features:over_sampling",
+    "features:overlong_filter",
 }
 
 
