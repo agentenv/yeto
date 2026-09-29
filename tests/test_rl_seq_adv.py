@@ -235,8 +235,12 @@ def test_rpp_family_whiten_rules(estimator):
     assert rpp(estimator).rejections() == []  # reward KL is allowed for the rpp family
     unwhitened = AlgorithmSpec(advantage={"estimator": estimator})
     assert any("[rpp_requires_whiten]" in p for p in unwhitened.rejections())
-    # undeclared until G1: expressible, not opened
-    with pytest.raises(CapabilityMismatch, match=f"'{estimator}' not supported"):
+    # the Miles adapter: the estimator is refused until declared (7.5); once
+    # declared, the spec is still refused while features:whiten_advantages
+    # (required by the rpp_requires_whiten rule) has no declaration
+    expected = ("'whiten_advantages' not supported" if estimator in MILES_2A_DECLARED
+                else f"'{estimator}' not supported")
+    with pytest.raises(CapabilityMismatch, match=expected):
         miles_capabilities("sha256:" + "0" * 64).check(
             layout="lora", placement="colocated", execution_mode="colocated-serial",
             algorithm=rpp(estimator))
