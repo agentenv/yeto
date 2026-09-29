@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import threading
+import time as _time
 
 TARGET_MODULE = "sky.provision.verda.instance"
 PACKAGE_MODULE = "sky.provision.verda"
@@ -61,7 +62,11 @@ PENDING = frozenset({"ordered", "provisioning", "new", "validating", "restoring"
 
 # In-process: cluster -> ids this process created in a launch that failed.
 # The provisioner's teardown that follows deletes only these.
-_FAILED_LAUNCH: dict[str, list[str]] = {}
+# Entries expire after FAILED_LAUNCH_TTL_S and are always removed by the
+# first teardown that consumes them, so a later deliberate `sky down` is a
+# normal, full teardown.
+_FAILED_LAUNCH: dict[str, tuple[list[str], float]] = {}
+FAILED_LAUNCH_TTL_S = 600.0
 _LOCK = threading.Lock()
 
 
@@ -192,12 +197,15 @@ def _build(m):
             out[inst.instance_id] = inst
         return out
 
-    def _delete(ids):
+    def _delete(ids) -> list[str]:
+        failed = []
         for iid in ids:
             try:
                 m.verda.instance_action(instance_id=iid, action="delete")
             except Exception as exc:  # noqa: BLE001 - report, keep going
+                failed.append(iid)
                 m.logger.warning(f"[yeto] delete of Verda instance {iid} failed: {exc}")
+        return failed
 
     orig_run = m.run_instances
 
@@ -212,7 +220,7 @@ def _build(m):
             after = set(_filter_instances(name))
             created = sorted(after - before)
             with _LOCK:
-                _FAILED_LAUNCH[name] = created
+                _FAILED_LAUNCH[name] = (created, _time.monotonic())
             if created:
                 m.logger.warning(f"[yeto] Verda launch of {name} failed; deleting only new instance(s) {created}")
                 _delete(created)
@@ -224,10 +232,21 @@ def _build(m):
         name = cluster_name_on_cloud
         with _LOCK:
             failed = _FAILED_LAUNCH.pop(name, None)
-        if failed is not None:
+        if failed is not None and _time.monotonic() - failed[1] <= FAILED_LAUNCH_TTL_S:
             # Teardown right after a failed launch: only what that launch
-            # created (already deleted above) may go; pre-existing nodes stay.
-            m.logger.info(f"[yeto] {name}: failed-launch teardown limited to {failed or 'nothing'}")
+            # created may go; pre-existing nodes stay. Deletes that failed
+            # in run_instances are retried here.
+            created = failed[0]
+            live = _filter_instances(name)
+            retry = [i for i in created if i in live]
+            m.logger.info(f"[yeto] {name}: failed-launch teardown limited to {created or 'nothing'}")
+            still = _delete(retry) if retry else []
+            if still:
+                # Not raised (it would mask sky's capacity error and stop
+                # failover); the entry is gone, so the next `sky down` of
+                # this cluster is a full teardown that retries them.
+                m.logger.warning(f"[yeto] {name}: instance(s) {still} of the failed launch still not deleted; "
+                                 "a later `sky down` will retry")
             return
         instances = _filter_instances(name)
         targets = [

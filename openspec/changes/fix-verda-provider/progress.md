@@ -8,6 +8,12 @@
 - 全量 pytest：前 68 failed / 1984 passed / 26 errors；后 68 failed / 2037 passed / 26 errors。失败集合（94 个 id，均为已知环境问题：缺 syncer 二进制、miles、boto3 等）前后完全一致，没有新增失败。
 - 本轮没有创建任何云资源，费用 $0。
 
+## 2026-09-29 第二轮（独立审查修复）
+
+- 审查指出 2.4、3.2 用显示名匹配主机名（真实为 `cluster_name_on_cloud`，含 user hash），先取消勾选，修复并以 sky 真实命名测试后重新勾选。其余 7 条（远端/新写 `.pth` 视为未生效、token 刷新、teardown 只处理记录 id、`_FAILED_LAUNCH` TTL、`.pth` 惰性化与清理、并行诊断、探测不依赖 exec 阻塞语义）均已修复，见 tasks.md。
+- 本机负载高时，导入 torch 的 pytest 进程会无输出退出（在基线 d355e06 上同样复现，OMP_NUM_THREADS=1 可避免）；本轮前后对比均在 `OMP_NUM_THREADS=1` 下跑：基线 68 failed / 1984 passed / 26 errors，修复后 68 failed / 2044 passed / 26 errors，失败 id 集合（94）完全相同。
+- 未在 `yeto down` 中移除 `.pth`（运行被 SIGKILL 时残留）：可用 `python -m yeto.sky_patches uninstall` 清理。
+
 ## 阻塞
 
 - 4.1（虚拟机内容器）、4.2（规划器放行 Verda）、4.3（CLOUDS.md）等 PR #69（`rl-engine-ports`）合入 main 后再做。在 4.1 完成之前，Verda 学习岛仍然会带 `image_id`，而 sky 的 Verda 不支持 docker 镜像（R5），所以 6.1、6.2 的训练部分、6.3、6.5 也都依赖 4.1。
@@ -20,7 +26,7 @@
 |---|---|---|---|---|
 | 6.2a | 补丁/误删回归：起 1 台 `1L40S.20V`（或 `1A100.22V`），再以同名触发一次必然 503 的重拉（例如请求 count=2 或在无货地区），确认旧实例仍在运行；查 head 的 API 服务进程 `/proc/<pid>/maps` 或打印 `yeto.sky_patches.status()` | L40S $1.543/h 或 A100 80GB $1.797/h；Nebius CPU head 约 $0.1/h | 约 0.5 h | 约 $1 |
 | 6.3 | 恢复：手动删除岛实例，yeto 按 id 确认已消失后以 `-r1` 重拉 | 同上 | 约 0.7 h | 约 $1.5 |
-| 6.4 | Verda head：`CPU.4V.16G`（$0.048/h）起 head，外部探测 syncer 端口，nmap 验证其他端口被 ufw 拒绝；岛用 Nebius 或 Verda L40S 完成 1 轮同步 | CPU 节点 + 1 张 L40S | 约 1 h | 约 $2 |
+| 6.4 | Verda head（另核实 `sky.exec`+`stream_and_get` 是否阻塞到作业结束）：`CPU.4V.16G`（$0.048/h）起 head，外部探测 syncer 端口，nmap 验证其他端口被 ufw 拒绝；岛用 Nebius 或 Verda L40S 完成 1 轮同步 | CPU 节点 + 1 张 L40S | 约 1 h | 约 $2 |
 | 6.1 | 默认参数单卡 RL 岛（需 4.1 完成）：容器内 fork checkout、校验、至少 1 轮同步；拆除证明 | 1 张 A100 80GB / L40S + Nebius head | 约 1.5 h（镜像拉取约 6 分钟） | 约 $3 |
 | 6.5 | `rl-engine-ports` 7.1 的 Verda 默认参数真实运行：2 岛 strict-avg 3 轮（需 4.x 完成） | 2 张 A100 80GB + Nebius head | 约 1.5–2 h | 约 $6–7 |
 

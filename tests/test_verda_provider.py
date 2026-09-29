@@ -152,12 +152,20 @@ def test_catalog_rows_cover_every_type_and_location():
     assert by[("CPU.4V.16G", "FIN-02")]["AcceleratorName"] == ""
 
 
+# A test process that has imported torch makes a child's numpy import die
+# with SIGINT unless its thread pools are pinned (seen with this machine's
+# SkyPilot venv); pin them for every sky subprocess.
+SKY_ENV = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+
+
 def _sky_python() -> str | None:
     cand = os.environ.get("YETO_SKY_PYTHON") or "/home/michael/work/gpu-head/venv/bin/python"
     if cand and os.path.exists(cand):
-        ok = subprocess.run([cand, "-c", "import sky"], capture_output=True).returncode == 0
-        if ok:
+        r = subprocess.run([cand, "-c", "import sky"], capture_output=True, text=True,
+                           env=dict(os.environ, **SKY_ENV))
+        if r.returncode == 0:
             return cand
+        print("sky python unusable:", r.stderr[-800:])
     return None
 
 
@@ -178,7 +186,7 @@ def test_generated_catalog_is_what_sky_reads(tmp_path):
         " 'accs': sorted(accs), 'l40s_fin01': c.get_hourly_cost('1L40S.20V', region='FIN-01'),"
         " 'regions': sorted(set(c._df['Region']))}))\n"
     )
-    env = dict(os.environ, SKY_RUNTIME_DIR=str(tmp_path), HOME=str(tmp_path))
+    env = dict(os.environ, SKY_RUNTIME_DIR=str(tmp_path), HOME=str(tmp_path), **SKY_ENV)
     out = subprocess.run([py, "-c", code], capture_output=True, text=True, env=env, timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     got = json.loads(out.stdout.strip().splitlines()[-1])
@@ -485,7 +493,7 @@ def test_patch_against_real_sky_provisioner(tmp_path):
     py = _sky_python()
     if py is None:
         pytest.skip("no SkyPilot 0.13 Python (set YETO_SKY_PYTHON)")
-    env = dict(os.environ, HOME=str(tmp_path), SKY_RUNTIME_DIR=str(tmp_path))
+    env = dict(os.environ, HOME=str(tmp_path), SKY_RUNTIME_DIR=str(tmp_path), **SKY_ENV)
     out = subprocess.run([py, str(Path(__file__).parent / "verda_sky_scenarios.py"), str(REPO)],
                          capture_output=True, text=True, env=env, timeout=300)
     assert out.returncode == 0, out.stderr[-3000:]
@@ -499,6 +507,12 @@ def test_patch_against_real_sky_provisioner(tmp_path):
     assert r["empty_recheck"] == {"e1": "ClusterStatus.UP"}
     assert r["dispatcher"] == {"d1": "ClusterStatus.UP"}
     assert r["fresh_launch"]["created"] == ["new-1"] and r["fresh_launch"]["deleted"] == []
+    rn = r["real_naming"]
+    assert rn["on_cloud"].startswith("vfix-l0-fin-01-") and rn["on_cloud"] != "vfix-l0-fin-01"
+    assert rn["hostnames"] == [rn["on_cloud"] + "-head"]  # sky's real node name
+    assert rn["display_name_matches"] == [] and rn["on_cloud_matches"] == ["new-1"]
+    assert rn["verify_after_down"] == [True, []] and rn["live_after_down"] == []
+    assert rn["verify_without_ids"][0] is False
 
 
 # --- 2.3 local + head activation ----------------------------------------------------
@@ -524,13 +538,26 @@ def test_pth_line_installs_the_hook_in_a_fresh_interpreter(tmp_path):
     (site_dir / PTH_NAME).write_text(pth_line(str(REPO)))
     code = (
         f"import site; site.addsitedir({str(site_dir)!r})\n"
-        "import sys, yeto.sky_patches as p\n"
-        "print(any(type(f).__name__ == '_Finder' for f in sys.meta_path), p.status())\n"
+        "import sys\n"
+        "lazy = any(type(f).__name__ == '_YetoLazy' for f in sys.meta_path)\n"
+        "print(lazy, 'yeto' in sys.modules)\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "import yeto.sky_patches as p\n"
+        "print(p.status())\n"
     )
     out = subprocess.run([sys.executable, "-S", "-c", code], capture_output=True, text=True,
                          cwd=str(tmp_path), env={"PATH": os.environ.get("PATH", "")})
     assert out.returncode == 0, out.stderr
-    assert out.stdout.startswith("True") and "pending" in out.stdout
+    # Lazy: the hook is armed but yeto is not imported by unrelated processes.
+    assert out.stdout.splitlines()[0] == "True False" and out.stderr == ""
+    from yeto.sky_patches import pth_repo
+
+    assert pth_repo(str(site_dir / PTH_NAME)) == str(REPO)
+    # A hook pointing at a missing worktree stays silent (no startup noise).
+    (site_dir / PTH_NAME).write_text(pth_line(str(tmp_path / "gone")))
+    out = subprocess.run([sys.executable, "-S", "-c", f"import site; site.addsitedir({str(site_dir)!r})"],
+                         capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "")})
+    assert out.returncode == 0 and out.stderr == ""
 
 
 def test_install_patches_on_import_of_the_target(monkeypatch, ids_file):
@@ -578,6 +605,14 @@ class FakeApi:
         self.trash[vid]["is_permanently_deleted"] = True
 
 
+# sky names Verda nodes `<cluster_name_on_cloud>-head`, where the name on
+# cloud is make_cluster_name_on_cloud(display, 120) = display.lower() + '-'
+# + user hash (8 hex). The real function is exercised in
+# verda_sky_scenarios.py; here the same shape with a fixed hash.
+USER_HASH = "2ea485ea"
+ON_CLOUD = f"r-l0-fin-01-{USER_HASH}"
+
+
 @pytest.mark.parametrize(
     "state,expect",
     [("running", "alive"), ("provisioning", "alive"), ("deleted", "gone"), (None, "gone")],
@@ -585,9 +620,16 @@ class FakeApi:
 def test_guard_by_instance_id(state, expect):
     from yeto.verda_ops import VerdaInstanceGuard
 
-    insts = [] if state is None else [{"id": "i1", "status": state, "hostname": "r-l0-fin-01-head"}]
-    guard = VerdaInstanceGuard(FakeApi(insts), ["r-l0-fin-01"])
-    guard.ids["r-l0-fin-01"] = ["i1"]
+    api = FakeApi([{"id": "i1", "status": "running", "hostname": f"{ON_CLOUD}-head"}])
+    guard = VerdaInstanceGuard(api, ["r-l0-fin-01"], resolve_on_cloud=lambda c: None)
+    assert guard.record("r-l0-fin-01") == []  # no name on cloud -> nothing guessed
+    assert guard.check("r-l0-fin-01")[0] == "unknown"  # and no blind relaunch
+    assert guard.record("r-l0-fin-01", "r-l0-fin-01") == []  # display name never matches
+    assert guard.record("r-l0-fin-01", ON_CLOUD) == ["i1"]
+    if state is None:
+        del api.instances["i1"]
+    else:
+        api.instances["i1"]["status"] = state
     kind, detail = guard.check("r-l0-fin-01")
     assert kind == expect
     if expect == "gone":
@@ -698,7 +740,17 @@ def test_unverified_sky_disables_verda_recovery_only(monkeypatch, capsys):
     import yeto.sky_patches as patches
 
     monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", False))
+    monkeypatch.setattr(launcher, "remote_sky_api_server", lambda: None)
     assert launcher.prepare_verda_islands(["l0"])["no_recover"] == set()
+    # Hook only now written: a running server may be unpatched -> no recovery.
+    monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", True))
+    prep = launcher.prepare_verda_islands(["l0"])
+    assert prep["no_recover"] == {"l0"} and prep["pth_written"] == "/x/yeto_sky_patches.pth"
+    # Remote API server: cannot be patched from here.
+    monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", False))
+    monkeypatch.setattr(launcher, "remote_sky_api_server", lambda: "https://sky.example.com")
+    prep = launcher.prepare_verda_islands(["l0"])
+    assert prep["no_recover"] == {"l0"} and "remote" in capsys.readouterr().err
 
     ops = FakeOps()
     for n in ("l0", "l1"):
@@ -760,7 +812,7 @@ def test_teardown_reports_a_node_sky_called_deleted(monkeypatch):
 
     api = FakeApi([{"id": "i1", "status": "running", "hostname": "t-l0-fin-01-head", "sticky": True,
                     "os_volume_id": "v1", "volume_ids": ["v1"]}])
-    ok, left = verify_teardown(api, "t-l0-fin-01", ["i1"], attempts=3, sleep_fn=lambda s: None)
+    ok, left = verify_teardown(api, ["i1"], "t-l0-fin-01", attempts=3, sleep_fn=lambda s: None)
     assert not ok and "i1" in left[0] and "running" in left[0]
     assert api.deleted == ["i1", "i1", "i1"]  # re-deleted each round, by id
 
@@ -772,13 +824,65 @@ def test_teardown_purges_volumes_from_the_trash():
         [{"id": "i1", "status": "running", "hostname": "t-head", "os_volume_id": "v1", "volume_ids": ["v1"]}],
         trash=[{"id": "v1", "is_permanently_deleted": False}],
     )
-    ok, left = verify_teardown(api, "t", ["i1"], attempts=3, sleep_fn=lambda s: None)
+    ok, left = verify_teardown(api, ["i1"], "t", attempts=3, sleep_fn=lambda s: None)
     assert ok and left == [] and api.purged == ["v1"]
 
     api = FakeApi([], volumes=[{"id": "v2", "status": "attached"}])
     api.instances["i2"] = {"id": "i2", "status": "deleted", "hostname": "u-head", "os_volume_id": "v2"}
-    ok, left = verify_teardown(api, "u", ["i2"], attempts=2, sleep_fn=lambda s: None)
+    ok, left = verify_teardown(api, ["i2"], "u", attempts=2, sleep_fn=lambda s: None)
     assert not ok and "v2" in left[0]
+
+
+def test_teardown_never_succeeds_without_ids_and_never_deletes_strangers():
+    from yeto.verda_ops import verify_teardown
+
+    api = FakeApi([{"id": "x9", "status": "running", "hostname": f"{ON_CLOUD}-head", "os_volume_id": "vx"},
+                   {"id": "i1", "status": "running", "hostname": f"{ON_CLOUD}-head", "os_volume_id": "v1",
+                    "volume_ids": ["v1", "data-vol"]}],
+                  trash=[{"id": "v1", "is_permanently_deleted": False},
+                         {"id": "data-vol", "is_permanently_deleted": False}])
+    ok, left = verify_teardown(api, [], ON_CLOUD, sleep_fn=lambda s: None)
+    assert not ok and "no Verda instance ids" in left[0] and api.deleted == []
+    ok, left = verify_teardown(api, ["i1"], ON_CLOUD, attempts=2, sleep_fn=lambda s: None)
+    assert api.deleted == ["i1"]  # the stranger x9 is reported, never deleted
+    assert not ok and any("suspected leftover" in x and "x9" in x for x in left)
+    assert api.purged == ["v1"]  # only the recorded instance's OS volume
+
+
+def test_verda_teardown_check_falls_back_without_ids(monkeypatch):
+    import yeto.launcher as launcher
+    from yeto.verda_ops import VerdaInstanceGuard
+
+    guard = VerdaInstanceGuard(FakeApi(), ["c"], resolve_on_cloud=lambda c: None)
+    monkeypatch.setitem(launcher.VERDA_ISLANDS, "c", guard)
+    assert launcher._verda_teardown_check("c") is None  # sky's cloud probe decides instead
+    guard.ids["c"], guard.on_cloud["c"] = ["i1"], ON_CLOUD
+    assert callable(launcher._verda_teardown_check("c"))
+
+
+def test_verda_api_refreshes_expired_token_and_retries_401(home):
+    from yeto.verda_ops import VerdaApi
+
+    (home / ".verda" / "config.json").write_text('{"client_id": "a", "client_secret": "b"}')
+    now = [0.0]
+    tokens, calls = [], []
+
+    def request(method, path, token=None, body=None, params=None):
+        if path == "/oauth2/token":
+            tokens.append(len(tokens) + 1)
+            return {"access_token": f"t{len(tokens)}", "expires_in": 3600}
+        calls.append(token)
+        if token == "t2" and len([c for c in calls if c == "t2"]) == 1:
+            err = RuntimeError("HTTP 401")
+            err.status = 401
+            raise err
+        return []
+
+    api = VerdaApi(request=request, clock=lambda: now[0])
+    api.list_instances()
+    now[0] = 3550.0  # within the refresh margin of expiry
+    api.list_instances()
+    assert calls == ["t1", "t2", "t3"] and tokens == [1, 2, 3]  # refreshed, then 401 -> refreshed once more
 
 
 def test_terminate_and_verify_uses_the_verda_answer():
@@ -804,6 +908,16 @@ def test_local_pth_for_the_sky_api_server(tmp_path, monkeypatch, capsys):
     path, fresh = ensure_local_pth(str(REPO), site_dir=str(tmp_path))
     assert fresh and path == str(tmp_path / PTH_NAME)
     assert ensure_local_pth(str(REPO), site_dir=str(tmp_path)) == (path, False)
+    from yeto.sky_patches import remove_local_pth, uninstall
+
+    # Another worktree takes over with a warning; ours is then not removed.
+    ensure_local_pth("/other/worktree", site_dir=str(tmp_path))
+    assert "another worktree" in capsys.readouterr().err
+    assert remove_local_pth(path, str(REPO)) is False and os.path.exists(path)
+    assert remove_local_pth(path, "/other/worktree") is True and not os.path.exists(path)
+    ensure_local_pth(str(REPO), site_dir=str(tmp_path))
+    assert uninstall(site_dir=str(tmp_path)) == path and not os.path.exists(path)
+    monkeypatch.setattr(launcher, "remote_sky_api_server", lambda: None)
 
     monkeypatch.setattr(vp, "verified_for_current_sky", lambda: (True, ""))
     monkeypatch.setattr("yeto.shape.providers.write_verda_sky_catalog", lambda: "/tmp/x.csv")
@@ -949,3 +1063,91 @@ def test_head_launch_on_verda_probes_before_islands(tmp_path, monkeypatch, reach
         assert ("exec", "vh-head") in events and ("down", "vh-head") not in events
     else:
         assert rc == 1 and events[2:] == [("down", "vh-head")]  # never exec'd, torn down
+
+
+def test_remote_api_server_detection(monkeypatch):
+    import yeto.launcher as launcher
+
+    monkeypatch.setitem(sys.modules, "sky.server", None)  # sky absent -> env var decides
+    monkeypatch.delenv("SKYPILOT_API_SERVER_ENDPOINT", raising=False)
+    assert launcher.remote_sky_api_server() is None
+    monkeypatch.setenv("SKYPILOT_API_SERVER_ENDPOINT", "http://127.0.0.1:46580")
+    assert launcher.remote_sky_api_server() is None
+    monkeypatch.setenv("SKYPILOT_API_SERVER_ENDPOINT", "https://sky.example.com")
+    assert launcher.remote_sky_api_server() == "https://sky.example.com"
+
+
+def test_failed_launch_marker_expires_and_retries_failed_deletes(ids_file, monkeypatch):
+    from yeto.sky_patches import verda as vp
+
+    m, fake = _patched([{"id": "k1", "status": "running", "hostname": "vfix-t-head"}])
+    orig_create = fake.instance_create
+
+    def create_then_hang(cfg):
+        orig_create(cfg)
+        fake.instances[fake.created[-1]]["status"] = "provisioning"
+
+    fake.instance_create = create_then_hang
+    orig_action = fake.instance_action
+    fails = [True]
+
+    def flaky_delete(instance_id, action):
+        if fails[0]:
+            fails[0] = False
+            raise RuntimeError("HTTP 500")
+        orig_action(instance_id, action)
+
+    fake.instance_action = flaky_delete
+    with pytest.raises(RuntimeError):
+        m.run_instances("FIN-01", "vfix-t", "vfix-t", SimpleNamespace(count=2))
+    assert fake.deleted == []  # the in-launch delete failed
+    m.terminate_instances("vfix-t", {})  # provisioner teardown retries it
+    assert fake.deleted == ["new-1"] and fake.instances["k1"]["status"] == "running"
+    assert "vfix-t" not in vp._FAILED_LAUNCH
+    # A stale marker (past the TTL) does not shield a later deliberate down.
+    vp._FAILED_LAUNCH["vfix-t"] = ([], 0.0)
+    monkeypatch.setattr(vp, "FAILED_LAUNCH_TTL_S", 1.0)
+    m.terminate_instances("vfix-t", {})
+    assert "k1" in fake.deleted
+
+
+def test_parallel_diagnostics_are_bounded(monkeypatch):
+    import threading as th
+
+    import yeto.launcher as launcher
+
+    monkeypatch.setenv("YETO_TEARDOWN_DIAG", "1")
+    release = th.Event()
+    seen = []
+
+    def collect(c, head=False):
+        seen.append(c)
+        if c == "slow":
+            release.wait(5)
+        return {"job_log": "ok"}
+
+    got = launcher.collect_diagnostics_parallel(["a", "slow", "b"], total_timeout=0.3, collect=collect)
+    release.set()
+    assert sorted(seen) == ["a", "b", "slow"] and set(got) == {"a", "b"}
+
+
+def test_probe_runs_while_the_listener_job_is_still_submitting(monkeypatch):
+    import threading as th
+
+    import yeto.cli as cli
+    import yeto.launcher as launcher
+
+    job_done = th.Event()
+    fake_sky = types.ModuleType("sky")
+    fake_sky.Task = lambda **kw: SimpleNamespace(**kw)
+    fake_sky.exec = lambda task, cluster_name: "rid"
+    fake_sky.stream_and_get = lambda rid: job_done.wait(5)  # blocks until the listener exits
+    monkeypatch.setitem(sys.modules, "sky", fake_sky)
+    monkeypatch.setattr(cli, "PROBE_SUBMIT_JOIN_S", 1.0)
+
+    def probe(host, port, expect=None):
+        job_done.set()  # our connection is what ends the listener job
+        return True, "reachable"
+
+    monkeypatch.setattr(launcher, "tcp_probe", probe)
+    assert cli._probe_head_port("vh-head", "203.0.113.5") is True

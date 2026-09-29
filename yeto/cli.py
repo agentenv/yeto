@@ -1377,6 +1377,9 @@ def _make_head_task(args, extra_mounts: dict | None = None):
     return task
 
 
+PROBE_SUBMIT_JOIN_S = 30.0
+
+
 def _probe_head_port(cluster: str, head_ip: str) -> bool:
     """Cloud without open_ports (Verda): before any island exists, prove
     from this machine that the head's syncer port is reachable — a
@@ -1386,8 +1389,23 @@ def _probe_head_port(cluster: str, head_ip: str) -> bool:
     from . import launcher
 
     listener = sky.Task(name="yeto-port-probe", run=launcher.probe_listener_command(launcher.SYNCER_PORT))
-    sky.stream_and_get(sky.exec(listener, cluster_name=cluster))
+    submit_error: list = []
+
+    def submit():
+        # Submitted in the background: whether stream_and_get returns at
+        # job submission or only when the listener exits (to be confirmed
+        # on a real head, 6.4), the probe below runs while it listens.
+        try:
+            sky.stream_and_get(sky.exec(listener, cluster_name=cluster))
+        except Exception as e:  # noqa: BLE001
+            submit_error.append(e)
+
+    t = threading.Thread(target=submit, daemon=True)
+    t.start()
     ok, detail = launcher.tcp_probe(head_ip, launcher.SYNCER_PORT, expect=launcher.PROBE_BANNER)
+    t.join(PROBE_SUBMIT_JOIN_S)
+    if submit_error and not ok:
+        detail += f" (listener job failed: {submit_error[0]})"
     print(f"[yeto] {cluster}: syncer port probe: {detail}", file=sys.stderr if not ok else sys.stdout)
     return ok
 

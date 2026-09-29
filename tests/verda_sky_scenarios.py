@@ -162,6 +162,50 @@ def main(repo: str) -> dict:
     m.verda = fake
     out["fresh_launch"] = {"result": provision("vfix-f", 1), "created": fake.created, "deleted": fake.deleted}
     out["status_up"] = str(status_lib.ClusterStatus.UP)
+
+    # 8. yeto's own Verda view uses sky's REAL cluster_name_on_cloud.
+    from sky import clouds
+    from sky.utils import common_utils
+
+    from yeto.verda_ops import VerdaInstanceGuard, instances_on_cloud, verify_teardown
+
+    display = "vfix-l0-fin-01"
+    on_cloud = common_utils.make_cluster_name_on_cloud(display, clouds.Verda.max_cluster_name_length())
+    fake = FakeVerda([])
+    m.verda = fake
+    provision(on_cloud, 1)
+
+    class Api:  # yeto.verda_ops.VerdaApi surface over the same fake
+        def list_instances(self):
+            return [dict(d, os_volume_id=f"vol-{d['id']}") for d in fake.instances.values()]
+
+        def get_instance(self, iid):
+            d = fake.instances.get(iid)
+            return None if d is None else dict(d, os_volume_id=f"vol-{iid}")
+
+        def delete_instance(self, iid, volume_ids=None):
+            fake.instance_action(iid, "delete")
+
+        def list_volumes(self):
+            return []
+
+        def list_trash(self):
+            return []
+
+    api = Api()
+    guard = VerdaInstanceGuard(api, [display], resolve_on_cloud=lambda c: None)
+    by_display = guard.record(display, display)
+    by_on_cloud = guard.record(display, on_cloud)
+    m.terminate_instances(on_cloud, {})
+    out["real_naming"] = {
+        "on_cloud": on_cloud,
+        "hostnames": sorted(d["hostname"] for d in fake.instances.values()),
+        "display_name_matches": by_display,
+        "on_cloud_matches": by_on_cloud,
+        "verify_after_down": verify_teardown(api, by_on_cloud, on_cloud, sleep_fn=lambda s: None),
+        "verify_without_ids": verify_teardown(api, [], on_cloud, sleep_fn=lambda s: None),
+        "live_after_down": [i["id"] for i in instances_on_cloud(api, on_cloud)],
+    }
     return out
 
 

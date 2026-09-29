@@ -3423,6 +3423,13 @@ class FleetController:
             attempt.name = target
             try:
                 attempt.result = self.ops.relaunch(task, target)
+                if attempt.result is not None and self.instance_guard is not None:
+                    after = getattr(self.instance_guard, "after_relaunch", None)
+                    if after is not None:
+                        try:
+                            after(target)
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[launcher] recording ids of {target} failed: {e}", file=sys.stderr)
             except Exception as e:
                 print(f"[launcher] relaunch of {name} raised: {e}", file=sys.stderr)
                 attempt.result = None
@@ -3592,12 +3599,49 @@ VERDA_ISLANDS: dict = {}
 
 
 def _verda_teardown_check(cluster: str):
+    """Verda-by-id verification for a Verda island whose ids are on record;
+    None (sky's own cloud probe decides) when there are none — an empty id
+    set must never read as "confirmed gone"."""
     guard = VERDA_ISLANDS.get(cluster)
     if guard is None:
         return None
+    ids = guard.ids.get(cluster)
+    if not ids:
+        print(f"[launcher] WARNING: {cluster}: no Verda instance ids on record; "
+              "falling back to sky's cloud probe", file=sys.stderr)
+        return None
     from .verda_ops import verify_teardown
 
-    return lambda: verify_teardown(guard.api, cluster, guard.ids.get(cluster))
+    return lambda: verify_teardown(guard.api, ids, guard.on_cloud.get(cluster))
+
+
+def collect_diagnostics_parallel(clusters, *, head: bool = False, total_timeout: float = 300.0,
+                                 collect=None) -> dict:
+    """Pre-teardown diagnostics for every island at once, bounded in total:
+    islands still collecting after `total_timeout` are left behind (their
+    threads are daemons) and the teardown proceeds."""
+    if not clusters or os.environ.get("YETO_TEARDOWN_DIAG", "1") == "0":
+        return {}
+    collect = collect or collect_teardown_diagnostics
+    out: dict = {}
+
+    def one(c):
+        try:
+            out[c] = collect(c, head=head)
+        except Exception as e:  # noqa: BLE001
+            out[c] = {"error": str(e)}
+
+    threads = [threading.Thread(target=one, args=(c,), daemon=True) for c in clusters]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + total_timeout
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    late = [c for c in clusters if c not in out]
+    if late:
+        print(f"[launcher] WARNING: diagnostics still running for {late} after {total_timeout:.0f}s; "
+              "tearing down anyway", file=sys.stderr)
+    return out
 
 
 def prepare_verda_islands(names: list[str], on_instance_ids=None) -> dict:
@@ -3613,16 +3657,23 @@ def prepare_verda_islands(names: list[str], on_instance_ids=None) -> dict:
     except Exception as e:  # noqa: BLE001 - sky's own catalog still works, just thinner
         print(f"[launcher] WARNING: could not write the Verda sky catalog: {e}", file=sys.stderr)
     ok, why = verda_patch.verified_for_current_sky()
+    pth_written = None
+    if ok and remote_sky_api_server():
+        # Provisioning runs in a server we cannot patch from here.
+        ok, why = False, f"sky API server is remote ({remote_sky_api_server()})"
     if ok:
         from .sky_patches import ensure_local_pth
 
         try:
             pth, fresh = ensure_local_pth(str(REPO_ROOT))
             if fresh:
-                print(
-                    f"[launcher] verda: installed the sky patch hook {pth}; if a sky API "
-                    "server was already running, restart it (`sky api stop`) so it loads the patch",
-                    file=sys.stderr,
+                # A server already running keeps the unpatched code: treat
+                # the patch as not in effect for this run (2.5).
+                pth_written = pth
+                ok, why = False, (
+                    f"patch hook {pth} was only now installed; a sky API server started "
+                    "before it runs unpatched (install it persistently with "
+                    "`python -m yeto.sky_patches install`, then `sky api stop`)"
                 )
         except OSError as e:
             ok, why = False, f"cannot install the patch hook for sky's API server ({e})"
@@ -3637,7 +3688,26 @@ def prepare_verda_islands(names: list[str], on_instance_ids=None) -> dict:
     guard = VerdaInstanceGuard(VerdaApi(), names, on_ids=on_instance_ids)
     for n in names:
         VERDA_ISLANDS[n] = guard
-    return {"guard": guard, "no_recover": no_recover}
+    return {"guard": guard, "no_recover": no_recover, "pth_written": pth_written}
+
+
+def remote_sky_api_server() -> str | None:
+    """The sky API server endpoint when it is not on this machine, else None."""
+    endpoint = os.environ.get("SKYPILOT_API_SERVER_ENDPOINT")
+    try:
+        from sky.server import common as server_common
+
+        endpoint = server_common.get_server_url()
+        if server_common.is_api_server_local(endpoint):
+            return None
+        return endpoint
+    except Exception:  # noqa: BLE001 - sky absent or API drift: judge the env var
+        if not endpoint:
+            return None
+        from urllib.parse import urlparse
+
+        host = urlparse(endpoint).hostname or ""
+        return None if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"} else endpoint
 
 
 def verda_launch_candidates(spec, args, availability, demoted) -> list[dict]:
@@ -3958,7 +4028,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             try:
                 if isinstance(rid, tuple) and rid and rid[0] == "verda":
                     results[name] = launch_verda_island(sky, tasks[name], name, rid[1], args)
-                    verda["guard"].record(name)
+                    verda["guard"].record(
+                        name, getattr(results[name][1], "cluster_name_on_cloud", None)
+                    )
                 else:
                     results[name] = sky.stream_and_get(rid)
             except Exception as e:
@@ -4088,6 +4160,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 return 2
         return 1 if failed else 0
     finally:
+        if verda is not None and verda.get("pth_written"):
+            from .sky_patches import remove_local_pth
+
+            remove_local_pth(verda["pth_written"])
         # Clusters the controller already tore down (abandoned learners, or
         # the syncer after a total loss) are skipped — even with --keep.
         downed = controller.downed_clusters if controller is not None else set()
@@ -4096,6 +4172,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             print(f"[launcher] keeping clusters: {remaining}")
         else:
             unverified = []
+            collect_diagnostics_parallel(
+                [n for n in remaining if n not in modal_cfgs], head=head_mode
+            )
             for name in remaining:
                 print(f"[launcher] tearing down {name}")
                 if name in modal_cfgs:
@@ -4105,7 +4184,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     except Exception as e:  # noqa: BLE001 - app stop below is the backstop
                         print(f"[launcher] cancel of {name} failed: {e}", file=sys.stderr)
                     continue
-                if not teardown_island(sky, name, head=head_mode):
+                if not teardown_island(sky, name, head=head_mode, collect=None):
                     unverified.append(name)
             if modal_ops is not None:
                 # Belt and braces: stop the whole per-run Modal app so no

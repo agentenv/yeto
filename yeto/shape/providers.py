@@ -924,7 +924,11 @@ def _redact_verda(text: str) -> str:
     for secret in creds or ():
         if secret:
             text = text.replace(secret, "***")
-    return re.sub(r"(?i)(bearer\s+|access_token\"?\s*[:=]\s*\"?)[A-Za-z0-9._\-]+", r"\1***", text)
+    return re.sub(
+        r"(?i)(bearer\s+|(?:access|refresh)_token\"?\s*[:=]\s*\"?|client_secret\"?\s*[:=]\s*\"?)[A-Za-z0-9._\-]+",
+        r"\1***",
+        text,
+    )
 
 
 def _verda_request(method: str, path: str, token: str | None = None, body: dict | None = None, params: dict | None = None):
