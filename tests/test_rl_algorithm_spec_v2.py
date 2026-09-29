@@ -292,3 +292,51 @@ def test_v1_constructor_keeps_r0_validation():
         AlgorithmSpec(advantage_estimator="ppo")
     with pytest.raises(AlgorithmSpecError, match="unknown algorithm spec fields"):
         AlgorithmSpec.from_dict({"advantage_estimator": "grpo", "eps_clip": 0.2})
+
+
+# -- shared extension points (1b-shared.patch) ------------------------------------
+
+
+def test_runtime_attrs_extension_and_clash():
+    alg.register_runtime_attrs("t_attrs", lambda s: {"yeto_algo_test": s.entropy_coef}
+                               if s.entropy_coef else {})
+    try:
+        assert AlgorithmSpec().to_legacy_runtime_attrs() == {
+            "yeto_rl_dynamic_sampling_max_replacements": None}
+        assert AlgorithmSpec(entropy_coef=0.5).to_legacy_runtime_attrs()["yeto_algo_test"] == 0.5
+        alg.register_runtime_attrs(
+            "t_clash", lambda s: {"yeto_rl_dynamic_sampling_max_replacements": 1})
+        with pytest.raises(AlgorithmSpecError, match="redefines"):
+            AlgorithmSpec().to_legacy_runtime_attrs()
+    finally:
+        alg.unregister(runtime_attrs="t_attrs")
+        alg.unregister(runtime_attrs="t_clash")
+    with pytest.raises(ValueError, match="already registered"):
+        alg.register_runtime_attrs("x", dict)
+        alg.register_runtime_attrs("x", dict)
+    alg.unregister(runtime_attrs="x")
+
+
+def test_launch_and_island_checks():
+    alg.register_launch_check("t_launch", lambda s, run: [f"cp={run['context_parallel_size']}"]
+                              if s.entropy_coef == 0.25 else [])
+    alg.register_island_check("t_island", lambda s, isl: ["rev"]
+                              if s.entropy_coef == 0.25 and isl["base_model_revision"] else [])
+    try:
+        spec = AlgorithmSpec(entropy_coef=0.25)
+        assert alg.launch_problems(spec, {"context_parallel_size": 1}) == ["[t_launch] cp=1"]
+        assert alg.launch_problems(AlgorithmSpec(), {"context_parallel_size": 1}) == []
+        assert alg.island_problems(spec, {"base_model_revision": "a"}) == ["[t_island] rev"]
+    finally:
+        alg.unregister(launch_check="t_launch", island_check="t_island")
+
+
+def test_gradient_rule_only_relaxes():
+    alg.register_gradient_rule("t_rule", lambda s, b, m: False if s.entropy_coef == 0.25 else None)
+    try:
+        batch = _groups(0.5)
+        assert AlgorithmSpec(entropy_coef=0.25).expects_gradient(batch) is False
+        assert AlgorithmSpec().expects_gradient(batch) is True
+        assert AlgorithmSpec(entropy_coef=0.25).expects_gradient(_groups(0.0)) is False
+    finally:
+        alg.unregister(gradient_rule="t_rule")

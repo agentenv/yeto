@@ -123,6 +123,12 @@ def parse_args(argv=None):
     parser.add_argument("--expert-parallel", type=int, default=None)
     parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     parser.add_argument("--rollout-num-gpus", type=int, default=None)
+    # rl-infra-spec 2.1 (ports only): LoRA fixed partition + reserved standby
+    # GPUs, read by engine.run_config.resolve_rl_run_config.
+    parser.add_argument(
+        "--rl-placement", choices=["colocated", "fixed-partition"], default="colocated"
+    )
+    parser.add_argument("--rl-standby-gpus", type=int, default=0)
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -211,6 +217,11 @@ def _check_ports_algorithm_options(args) -> None:
     from .engine.algorithm import check_unverified_allowance
 
     rl_engine = getattr(args, "rl_engine", "ports")
+    if rl_engine != "ports" and (
+        getattr(args, "rl_placement", "colocated") != "colocated"
+        or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
+    ):
+        raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
     if rl_engine != "ports":
         from .engine.algorithm import resolve_ports_algorithm
 
@@ -245,6 +256,19 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
 
     algorithm = launch.algorithm
     algorithm.verify_plugins()
+    from .engine.algorithm import island_problems
+
+    problems = island_problems(algorithm, {"base_model_revision": getattr(args, "model_revision", None)})
+    if problems:
+        _append_ports_event(args, miles_args, {
+            "event": "rl_algorithm_island_rejected",
+            "rl/algorithm_spec_sha256": launch.algorithm_sha256,
+            "problems": problems,
+        })
+        raise AlgorithmMismatchError(
+            f"island {args.learner_id} algorithm spec rejected before joining outer sync: "
+            + "; ".join(problems)
+        )
     actual = launch.algorithm_sha256
     expected = getattr(args, "rl_expected_algorithm_sha256", None)
     if expected is None:
