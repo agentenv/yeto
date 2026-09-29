@@ -446,3 +446,28 @@ def test_default_spec_unchanged():
     assert spec.rejections() == [] and spec.to_legacy_runtime_attrs() == {
         "yeto_rl_dynamic_sampling_max_replacements": None}
     assert af.algorithm_argv(spec) == []
+
+
+def test_p0_hook_tightens_for_gdpo_and_rpp():
+    """D8 via the P0 hook (True verdicts require a gradient the R0 rule misses)."""
+
+    flat = _batch(_group(0.0), _group(0.0))
+    assert rpp().expects_gradient(flat) is True  # reward KL enters advantages
+    no_kl = AlgorithmSpec(advantage={"estimator": "reinforce_plus_plus", "whiten": True})
+    assert no_kl.expects_gradient(_batch(_group(0.0, 1.0), _group(0.0, 0.0))) is True
+    assert no_kl.expects_gradient(flat) is False
+    gdpo = transform_spec("gdpo", gdpo=GDPO)
+    assert gdpo.expects_gradient(_batch(_group(0.0), nonzero_advantages=2)) is True
+    assert gdpo.expects_gradient(_batch(_group(0.0), nonzero_advantages=0)) is False
+    # default GRPO untouched
+    assert AlgorithmSpec().expects_gradient(flat) is False
+
+
+@pytest.mark.parametrize("estimator", ["reinforce_plus_plus"])
+def test_fake_driver_rpp_reward_kl_constant_round_expects_gradient(tmp_path, estimator):
+    caps = fake_capabilities(advantage_estimators={"grpo", estimator},
+                             features={"whiten_advantages"})
+    _, driver = _driver(tmp_path, rpp(estimator), caps, zero_grad_rounds={1},
+                        constant_reward_rounds={1})
+    with pytest.raises(StrictRlInvariantError, match="grad_norm 0"):
+        driver.run()

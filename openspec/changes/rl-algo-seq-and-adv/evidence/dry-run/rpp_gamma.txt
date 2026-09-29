@@ -1,4 +1,4 @@
-$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/rpp_gamma.json --rl-allow-unverified-mechanism reinforce_plus_plus --rl-allow-unverified-mechanism whiten_advantages
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/rpp_gamma.json --rl-allow-unverified-mechanism advantage_estimators:reinforce_plus_plus --rl-allow-unverified-mechanism features:whiten_advantages
 {
   "absorbed_flags": {},
   "algorithm_spec": {
@@ -56,7 +56,9 @@ $ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorit
   "miles_argv": [
     "--advantage-estimator",
     "reinforce_plus_plus",
-    "--normalize-advantages"
+    "--normalize-advantages",
+    "--gamma",
+    "0.99"
   ],
   "remaining_extra_argv": [],
   "required_mechanisms": [

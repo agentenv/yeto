@@ -114,3 +114,11 @@
 - `tests/test_rl_seq_adv.py tests/test_rl_adv_transforms.py` 116 passed；miles-next-venv `test_rl_seq_adv_miles.py` 20 passed。
 - 全量：70F + 26E = 96（`after-failures-f3ee263.txt`）。与 756946b 基线相比：合并引入的 5 条（test_rl_algorithm_flags 4 条、test_rl_algorithm_spec_v2::test_launch_and_island_checks）已消失（8.1 复核完成）；仍只多出 2a-shared.patch hunk 3 对应的 2 条（`test_design_d3_flags_are_all_mapped`、`test_unmapped_objective_flag_rejected[--gamma]`）。
 - 仍等：1b F1（哈希覆盖/load_extensions）、ALGO-CAP 合入 2a-shared 其余部分与文档、INFRA R1/R2、P0 无 syncer 单岛入口。
+
+## 2026-09-29 merge origin/algo-cap 2f9f02c（570e468）
+- ALGO-CAP 已合入 2a-shared.patch 的梯度收紧、flags 子集测试、`__main__` dry-run 修复，以及 2a-docs.patch（`docs/MILES_RL.md` 第 865 行起）。P0 无 syncer 单岛入口 09607d6：`--rl-single-island-no-sync`。
+- 新增测试 `test_p0_hook_tightens_for_gdpo_and_rpp`、`test_fake_driver_rpp_reward_kl_constant_round_expects_gradient`：`test_rl_seq_adv.py` 82 passed；miles-next-venv `test_rl_seq_adv_miles.py test_rl_algorithm_flags_upstream.py` 40 passed。
+- dry-run 证据按 `dimension:name` 重跑（`evidence/dry-run/`），示例 spec 按新分派器哈希重生成；结果与文档一致（放行后接受、未放行拒绝、gspo 无 clip / rpp gamma=0.99 / grpo+gamma / --lambd 拒绝、gamma=1.0 接受）。
+- 全量：68F + 26E = 94（`after-failures-570e468.txt`），是 756946b 基线（99 条）的真子集：没有新增失败，另有 5 条合并引入项已被他人修复。
+- 状态更新：3.1、3.6、6.3、8.1 → 完成（CPU 通过）。5.5 仍未完成（等 INFRA R2：非零条目数进入 batch_summary）；2.2 等 R1。
+- G1 仍等 1b F1（哈希覆盖/load_extensions）与 INFRA R1/R2；届时撤掉 `plugins` 身份要求、重生成示例、单独提交改用 `--rl-single-island-no-sync` 的修订计划后再跑（这将是该入口首次真实 GPU 使用，会记录）。

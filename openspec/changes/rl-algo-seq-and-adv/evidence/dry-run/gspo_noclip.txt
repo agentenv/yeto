@@ -1,4 +1,4 @@
-$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/gspo_noclip.json --rl-allow-unverified-mechanism gspo
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/gspo_noclip.json --rl-allow-unverified-mechanism advantage_estimators:gspo
 {
   "absorbed_flags": {},
   "algorithm_spec": {

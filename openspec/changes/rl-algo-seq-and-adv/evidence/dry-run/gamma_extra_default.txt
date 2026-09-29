@@ -1,5 +1,4 @@
-# with infra-drafts/2a-shared.patch applied
-$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --extra '--gamma 1.0'
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --extra --gamma 1.0
 {
   "absorbed_flags": {
     "--gamma": "1.0"

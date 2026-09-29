@@ -24,7 +24,7 @@
   "plugins": [
     {
       "path": "yeto.rl.algos.seq_adv.registered_transforms",
-      "sha256": "ca17085fbfa55d200a04efa425f7fedff193bc7336c4a7b8161e4d4da54f9950"
+      "sha256": "062980850c89a6dfc82910e566c607e57c48680ab0356e386f461ef1d75ad58b"
     }
   ]
 }

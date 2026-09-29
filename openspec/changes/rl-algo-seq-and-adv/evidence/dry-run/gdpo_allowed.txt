@@ -1,4 +1,4 @@
-$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/gdpo.json --rl-allow-unverified-mechanism gdpo --rl-allow-unverified-mechanism custom_reward_postprocess --rl-allow-unverified-mechanism plugins
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/gdpo.json --rl-allow-unverified-mechanism features:gdpo --rl-allow-unverified-mechanism reward_postprocessors:custom_reward_postprocess --rl-allow-unverified-mechanism features:plugins
 {
   "absorbed_flags": {},
   "algorithm_spec": {
@@ -61,7 +61,7 @@ $ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorit
     "plugins": [
       {
         "path": "yeto.rl.algos.seq_adv.registered_transforms",
-        "sha256": "ca17085fbfa55d200a04efa425f7fedff193bc7336c4a7b8161e4d4da54f9950"
+        "sha256": "062980850c89a6dfc82910e566c607e57c48680ab0356e386f461ef1d75ad58b"
       }
     ],
     "sampling": {
@@ -72,7 +72,7 @@ $ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorit
     },
     "schema": "yeto-rl-algorithm-spec-v2"
   },
-  "algorithm_spec_sha256": "ef470cefea8b1edcaa7cac025d08410886f68903ae834a6f12d6534b084df301",
+  "algorithm_spec_sha256": "0bd48f7aa1812c581fc0d705f456066d86b3ec344ec2982d36f2018adad1783e",
   "miles_argv": [
     "--advantage-estimator",
     "grpo",

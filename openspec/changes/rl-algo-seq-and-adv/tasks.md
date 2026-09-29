@@ -22,12 +22,12 @@
 
 ## 3. REINFORCE++ 家族与 gamma（design D3/D4）
 
-- [ ] 3.1 在 `algorithm_flags.py` 新增 `--gamma` → `advantage.gamma` 映射行（默认 1.0 不输出），从"未映射清单"移出；`--lambd` 保留在未映射清单。验证：映射表子集测试、upstream 存在性测试通过；`tests/test_rl_argv_snapshot.py` 不改即通过。
+- [x] 3.1 在 `algorithm_flags.py` 新增 `--gamma` → `advantage.gamma` 映射行（默认 1.0 不输出），从"未映射清单"移出；`--lambd` 保留在未映射清单。验证：映射表子集测试、upstream 存在性测试通过；`tests/test_rl_argv_snapshot.py` 不改即通过。 完成记录：progress.md（2026-09-29 merge algo-cap 2f9f02c）。
 - [x] 3.2 校验规则：gamma≠1.0 只允许 `reinforce_plus_plus`，其他估计方式拒绝；rpp/rpp_baseline 与 `whiten=false` 为可表达未开放。验证：参数化单测。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 3.3 分派器对 rpp（恒等）与 rpp_baseline（组内减均值、不除 std）的路径，与 Miles 内置 `_post_process_rewards` 逐元素比对，含多段 rollout。验证：miles-next-venv 中对照测试通过。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 3.4 在 miles-next-venv 中对 `get_reinforce_plus_plus_returns`、`get_reinforce_plus_plus_baseline_advantages` 与 `normalize_advantages`（单进程 DP=1）构造小输入，确认 reward-KL 进入 advantage、白化后均值约 0。验证：测试通过，记录于 `progress.md`。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 3.5 翻译用例：rpp/rpp_baseline + whiten + `kl.placement=reward` 生成的 argv 经 upstream `parse_args` 解析通过。验证：miles-next-venv 中测试通过。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
-- [ ] 3.6 rpp 与 rpp_baseline 的 `expects_gradient`（D8）。验证：fake driver 单测覆盖期望/不期望梯度与读不到统计三种情况。
+- [x] 3.6 rpp 与 rpp_baseline 的 `expects_gradient`（D8）。验证：fake driver 单测覆盖期望/不期望梯度与读不到统计三种情况。 完成记录：progress.md（2026-09-29 merge algo-cap 2f9f02c）。
 
 ## 4. MaxRL 与 MAPO（design D5/D7/D8）
 
@@ -48,7 +48,7 @@
 
 - [x] 6.1 确认 P0 的 `--rl-allow-unverified-mechanism` 能放行本 change 的每个机制名（GSPO、REINFORCE++、REINFORCE++-baseline、MaxRL、MAPO、GDPO）。验证：fake 组合根单测覆盖每个机制在单岛放行时可以启动、不放行时被拒。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 6.2 在 fake engine 中声明全部六个机制，供 CPU 组合根测试；Miles adapter 暂不声明。验证：fake 组合根测试中各机制可启动，Miles adapter 声明未变。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
-- [ ] 6.3 更新 `docs/MILES_RL.md`：六个机制的配置示例、GSPO clip 必须显式及 clipfrac 监控、单步 optimizer 下 clip 不起作用、岛内白化语义与外层尺度推断、奖励向量格式、二值奖励要求、MAPO 证据弱、"声明支持不等于有收益"。验证：示例命令 `--dry-run` 执行结果与文档一致。
+- [x] 6.3 更新 `docs/MILES_RL.md`：六个机制的配置示例、GSPO clip 必须显式及 clipfrac 监控、单步 optimizer 下 clip 不起作用、岛内白化语义与外层尺度推断、奖励向量格式、二值奖励要求、MAPO 证据弱、"声明支持不等于有收益"。验证：示例命令 `--dry-run` 执行结果与文档一致。 完成记录：progress.md（2026-09-29 merge algo-cap 2f9f02c）。
 
 ## 7. GPU 验证（需用户批准卡数与预算后执行）
 
@@ -67,6 +67,6 @@
 
 ## 8. 集成检查
 
-- [ ] 8.1 运行 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.1 基线相同。验证：两集合 diff 为空，结果写入 `progress.md`。
+- [x] 8.1 运行 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.1 基线相同。验证：两集合 diff 为空，结果写入 `progress.md`。 完成记录：progress.md（2026-09-29 merge algo-cap 2f9f02c）。
 - [x] 8.2 `openspec validate rl-algo-seq-and-adv --strict` 通过。验证：命令输出无错误。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 8.3 在 `openspec/changes/rl-algo-seq-and-adv/progress.md` 中逐项列出任务状态，区分"已实现""CPU 测试通过""GPU 验证通过（G1/G3）"，并列出未通过或未声明的机制。验证：文件存在且与本任务列表逐项对应。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
