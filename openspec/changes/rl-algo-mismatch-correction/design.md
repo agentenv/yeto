@@ -28,7 +28,7 @@ ports 串行 driver 下，行为策略 π_behav（SGLang 以 W_r 生成）与 π
 
 - strict-avg 每轮 apply 时重置优化器，decoupled 保留优化器，二者都发生在轮边界，修正在轮内计算，**不影响修正语义**。
 - π_θ 相对 π_old 的偏移来自轮内 k 个 mini-batch，由 PPO clip 处理，与修正无关。
-- Miles TIS 在数学上等价于截断版的 AReaL 解耦 PPO（research.md §2），是未来 rl-infra-spec 异步模式（staleness>0）的基础。本 change 保持 `execution.max_policy_staleness=0`，spec 中写明不放开。
+- Miles TIS 在数学上等价于截断版的 AReaL 解耦 PPO（research.md §2），可作为未来 staleness>0 算法契约的候选组件；该契约须另立 change 设计，rl-infra-spec 不会通过资源调度开放它（alignment.md A6）。本 change 保持 `execution.max_policy_staleness=0`，spec 中写明不放开。
 
 ### D2. 只观测插件：`yeto.rl.algos.mismatch_observe`
 

@@ -85,7 +85,7 @@ R0（`rl-engine-ports`）把 yeto 与 Miles 之间的算法边界收敛成了 `A
 | CISPO / SAPO-Qwen / GMPO | 无；需 custom loss 或改 fork | `loss.variant` 字段 | `rl-algo-loss-variants`（P2，另需决策） | ⚙ |
 | `kl_coef>0` + grpo/gspo | Miles 会丢弃该 KL | 拒绝，并提示改用 `placement=loss` | 本 change | ⛔ |
 | PPO / VAPO / SAO / CompactionRL | Miles 有 critic | `needs_critic` 要求不满足则拒绝，提示改用 legacy | 暂缓：需要 critic 状态和外层归属 | ⛔ |
-| 异步目标（staleness>0） | TIS ≈ 截断版解耦 PPO | `max_policy_staleness` 与执行能力的匹配 | 暂缓：需要 rl-infra-spec 提供异步模式 | ⛔ |
+| 异步目标（staleness>0） | TIS ≈ 截断版解耦 PPO | `max_policy_staleness` 与执行能力的匹配 | 暂缓：需另立独立算法契约 change；rl-infra-spec 2.3 不擅自开放 one-step-off-policy，其 partitioned-overlap 只在已认证契约内重叠（alignment.md A6） | ⛔ |
 | OTB / GiGPO / ARPO / SAPO-Gensyn | 无 | — | 暂缓：OTB 要改 fork，GiGPO 依赖 agent，ARPO 要改 SGLang，SAPO-Gensyn 是外层协议 | — |
 | Training-free GRPO | — | — | 不做：不更新权重 | — |
 
