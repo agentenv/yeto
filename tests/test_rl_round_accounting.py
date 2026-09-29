@@ -180,3 +180,21 @@ def test_receipt_label_is_the_role_family_matching_the_layout():
 
     with pytest.raises(ValueError):
         _require_algorithm("gspo")  # contracts keep the role-family vocabulary
+
+
+def test_round_id_comes_from_the_policy_token_not_trajectory_keys(tmp_path):
+    """Multi-segment agentic rollouts: Sample.rollout_id is a trajectory key."""
+    from yeto.rl.core import policy_snapshot_token
+    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+
+    source = DirMetadataSource(tmp_path)
+    sink = source.sink_spec
+    source.set_policy_token(policy_snapshot_token(3, H))
+    segments = [[SimpleNamespace(rollout_id=1001)], [SimpleNamespace(rollout_id=1002)]]
+    assert hook.current_round_id(hook._flat(segments), sink) == 3
+    hook.put_to_sink({"schema": hook.METADATA_SCHEMA, "rollout_id": 3, "groups": [_group()],
+                      "completed": 1, "aborted": 0}, sink)
+    hook.record_round_metadata(None, segments, sink=sink, nonzero_advantages=5)
+    assert source.take(3)["nonzero_advantages"] == 5
+    # no token (fixtures/legacy): sample fallback
+    assert hook.current_round_id([SimpleNamespace(rollout_id=7)], f"dir:{tmp_path}/none") == 7
