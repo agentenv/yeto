@@ -88,6 +88,8 @@ ports 用户能观察到这一变化，proposal 的 Impact 已经写明。
 - 默认 GRPO：`any(reward_std > 0)`，与 R0 相同；
 - 声明了屏蔽行为的机制：结合 `step_metrics` 中的屏蔽比例判定。本 change 先把接口和默认实现写好，各机制的判定由对应 change 补充。
 
+（追加，2026-09-29）各机制的判定规则也可以**收紧**，即在 R0 判定式认为“不期望梯度”时要求有梯度（例如 GDPO、REINFORCE++）。规则只在 spec 需要该机制时生效，且收紧优先于放宽，默认 GRPO 的判定不变；不允许借此放宽 R0 判定。
+
 `TrainStepMetrics` 增加一个可选字段 `masked_fraction`，adapter 从 Miles 训练日志中的对应键读取；读不到时记为 None，判定按"期望有梯度"处理，即保守地沿用 R0 的行为。
 
 ### D7. 插件身份

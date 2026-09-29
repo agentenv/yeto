@@ -233,3 +233,50 @@ def test_fewer_groups_than_rollout_batch_size_still_trains(tmp_path, mode, kind)
     driver, trained = _driver(engine, tmp_path, profile=_profile(mode, groups_per_batch=100))
     driver.run()
     assert len(trained) == 3
+
+
+def test_publish_delay_injection_is_off_by_default_and_never_lets_generation_run_early(
+    tmp_path, monkeypatch
+):
+    from yeto.rl.engine import driver as drv
+
+    assert drv.load_fault_injection({}) == {} or (
+        __import__("pathlib").Path(drv.__file__).resolve().parents[3] / drv.FAULT_INJECTION_FILE
+    ).exists()
+    cfg = tmp_path / "fi.json"
+    cfg.write_text('{"publish_delay_s": 0.05}')
+    monkeypatch.setenv(drv.FAULT_INJECTION_ENV, str(cfg))
+    engine = _engine(placement_kind="fixed-partition")
+    driver, _ = _driver(engine, tmp_path, profile=_profile("partitioned-serial"))
+    driver.run()
+    events = _events(tmp_path / "events.jsonl")
+    kinds = [e["event"] for e in events]
+    assert kinds.count("rl_fault_injected") == 4  # initial + 3 rounds
+    # every generation of round r comes after the publication of policy r
+    order = [(e["event"], e.get("phase"), e.get("policy_version", e.get("rollout_id")))
+             for e in events if e["event"] in ("rl_publication", "rl_driver_phase")]
+    published = set()
+    for kind, phase, v in order:
+        if kind == "rl_publication":
+            published.add(v)
+        elif phase == "generate":
+            assert v in published
+    trained = [e for e in events if e["event"] == "rl_round_trained"]
+    assert all(len(e["trained_sample_ids_sha256"]) == 64 for e in trained)
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"drop_publish": 1}')
+    with pytest.raises(ValueError):
+        drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(bad)})
+
+
+def test_event_echo_is_off_by_default_and_prints_when_enabled(tmp_path, monkeypatch, capsys):
+    from yeto.rl.engine import driver as drv
+
+    tape = drv.EventTape(tmp_path / "t.jsonl", 0)
+    if not drv._ECHO_EVENTS:
+        tape.append({"event": "x"})
+        assert "YETO_RL_EVENT" not in capsys.readouterr().out
+    monkeypatch.setattr(drv, "_ECHO_EVENTS", True)
+    tape.append({"event": "y"})
+    line = capsys.readouterr().out.strip()
+    assert line.startswith("YETO_RL_EVENT ") and json.loads(line.split(" ", 1)[1])["event"] == "y"

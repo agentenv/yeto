@@ -524,7 +524,13 @@ def _record_step_losses(result: Any) -> None:
             raw = losses[key]
             clipfrac = float(raw.item() if hasattr(raw, "item") else raw)
             break
-    _STEP_LOSSES.append({"pg_clipfrac": clipfrac, "loss_tokens": None})
+    scalars = {}
+    for key, raw in losses.items():
+        try:
+            scalars[str(key)] = float(raw.item() if hasattr(raw, "item") else raw)
+        except (TypeError, ValueError):
+            continue
+    _STEP_LOSSES.append({"pg_clipfrac": clipfrac, "loss_tokens": None, "metrics": scalars})
 
 
 def step_losses(actor: Any) -> list[dict[str, float | None]]:

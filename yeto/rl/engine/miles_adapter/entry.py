@@ -263,6 +263,7 @@ def compose_island(
             learner_generation=0,
             parameter_layout_hash=lambda: layout_hash,
             algorithm=algorithm.advantage_estimator,
+            spec=algorithm,
             release_refs=release_refs,
             runner=runner,
         ),
@@ -322,8 +323,8 @@ def selection_event(
     if unverified_mechanisms:
         event["rl/unverified_mechanisms"] = sorted(unverified_mechanisms)
         event["rl/contains_unverified_mechanisms"] = True
-    if outer_sync is not None:
-        event["rl/outer_sync"] = bool(outer_sync)
+    # Always recorded; an unknown mode (None) is the R0 default: outer sync on.
+    event["rl/outer_sync"] = True if outer_sync is None else bool(outer_sync)
     return event
 
 

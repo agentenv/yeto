@@ -105,6 +105,46 @@ def clipfrac_masked_fraction(step_losses: list[dict[str, Any]]) -> float | None:
     return clipfrac_from_losses(step_losses, None if None in tokens else tokens)
 
 
+# Miles loss-dict keys that are train/rollout mismatch diagnostics
+# (rl-algo-mismatch-correction; alignment A5 labels them per round).
+MISMATCH_KEY_MARKERS = ("train_rollout_kl", "tis", "mis_", "ois", "mismatch", "opsm")
+
+
+def _has_corrections(spec: Any) -> bool:
+    if spec is None:
+        return False
+    try:
+        from yeto.rl.algos.mismatch_correction import selected_corrections
+    except ImportError:
+        return False
+    return bool(selected_corrections(spec))
+
+
+def mean_step_metrics(step_losses: list[dict[str, Any]] | None) -> dict[str, float]:
+    """Per-key mean over the round's optimizer steps of Miles' loss-dict scalars."""
+    sums: dict[str, list[float]] = {}
+    for step in step_losses or ():
+        for key, value in (step.get("metrics") or {}).items():
+            sums.setdefault(key, []).append(float(value))
+    return {k: sum(v) / len(v) for k, v in sums.items()}
+
+
+def mismatch_metrics(round_metrics: dict[str, float]) -> dict[str, float]:
+    return {
+        k: v for k, v in sorted(round_metrics.items())
+        if any(m in k.removeprefix("train/") for m in MISMATCH_KEY_MARKERS)
+    }
+
+
+def correction_masked_fraction(spec: Any, round_metrics: dict[str, float]) -> float | None:
+    """1a ``masked_fraction_from_metrics`` (optional import; absent -> None)."""
+    try:
+        from yeto.rl.algos.mismatch_correction import masked_fraction_from_metrics
+    except ImportError:
+        return None
+    return masked_fraction_from_metrics(spec, round_metrics)
+
+
 def _mean_clipfrac(step_losses: list[dict[str, Any]] | None) -> float | None:
     values = [s.get("pg_clipfrac") for s in step_losses or ()]
     if not values or any(v is None for v in values):
@@ -136,7 +176,9 @@ class MilesTrainerGroup:
         release_refs: Callable[[Any, Any], None] | None = None,
         check_policy_tokens: bool = True,
         runner: LoopRunner | None = None,
+        spec: Any = None,
     ) -> None:
+        self._spec = spec
         self._args = args
         self._actor = actor_model
         self._learner_id = learner_id
@@ -177,9 +219,18 @@ class MilesTrainerGroup:
                     raise TrainStepError(f"non-finite grad norm {norms}")
                 self.last_grad_norm = max(norms)
                 self.last_applied_lrs = self._applied_lrs()
-                if self._algorithm in CLIPFRAC_MASKED_ESTIMATORS:
+                corrections = _has_corrections(self._spec)
+                if self._algorithm in CLIPFRAC_MASKED_ESTIMATORS or corrections:
                     self.last_step_losses = self._step_losses()
-                    if self.last_masked_fraction is None:
+                    round_metrics = mean_step_metrics(self.last_step_losses)
+                    if self.last_masked_fraction is None and corrections:
+                        self.last_masked_fraction = correction_masked_fraction(
+                            self._spec, round_metrics
+                        )
+                    if (
+                        self.last_masked_fraction is None
+                        and self._algorithm in CLIPFRAC_MASKED_ESTIMATORS
+                    ):
                         self.last_masked_fraction = clipfrac_masked_fraction(
                             self.last_step_losses
                         )
@@ -212,6 +263,11 @@ class MilesTrainerGroup:
         if any(v != per_rank[0] for v in per_rank[1:]):
             raise TrainStepError(f"ranks disagree on the applied learning rates {per_rank}")
         return tuple(float(x) for x in per_rank[0])
+
+    def algorithm_metrics(self) -> dict[str, float]:
+        """Mismatch diagnostics of the last round (empty when not collected)."""
+        steps = getattr(self, "last_step_losses", None)
+        return mismatch_metrics(mean_step_metrics(steps)) if steps else {}
 
     def _step_losses(self) -> list[dict[str, Any]]:
         # Only the last pipeline stage records losses; take the first rank that did.

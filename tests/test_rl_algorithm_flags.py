@@ -51,7 +51,20 @@ def complete(spec):
     if (spec.kl.placement == "loss" and _registered("kl", "ref_model")
             and spec.kl.ref_model is None):
         spec = spec.replace(kl=spec.kl.with_ext(ref_model=KL_REF))
+    if "yeto.rl.algos.grpo_knobs" in _extension_modules():
+        # rl-algo-grpo-knobs F1: pipeline code modules pinned in spec.plugins
+        from yeto.rl.algos.grpo_knobs import with_pipeline_plugins
+
+        spec = with_pipeline_plugins(spec)
     return spec
+
+
+def _extension_modules():
+    import yeto.rl.algos as algos
+
+    return algos.EXTENSION_MODULES
+
+
 R0_ARGV = mc.translate_run_config(make_config(), AlgorithmSpec()).argv
 
 
@@ -81,8 +94,11 @@ def test_design_d3_flags_are_all_mapped():
         "--custom-reward-post-process-path", "--loss-type", "--custom-loss-function-path",
         "--dynamic-sampling-filter-path", "--over-sampling-batch-size",
     }
-    # Follow-up changes add rows (rl-algo-seq-and-adv: --gamma), so a subset.
-    assert d3 <= af.mapped_flags()
+    # The reviewed P0 rows are exactly D3; the table is D3 plus the rows that
+    # registered extension modules declared (register_flag) -- nothing else.
+    assert af.BUILTIN_FLAGS == d3
+    assert af.mapped_flags() == d3 | af.EXTENSION_FLAGS
+    assert not (af.EXTENSION_FLAGS & d3)
 
 
 def test_objective_flags_are_adapter_owned():
@@ -124,9 +140,11 @@ def test_conflict_names_flag_and_both_values():
         mc.translate_run_config(make_config(), base, extra_argv=("--eps-clip-high", "0.3"))
 
 
-@pytest.mark.parametrize("flag", ["--value-clip", "--lambd", "--use-routing-replay",
+@pytest.mark.parametrize("flag", ["--gamma", "--value-clip", "--lambd", "--use-routing-replay",
                                   "--rollout-temperature", "--partial-rollout"])
 def test_unmapped_objective_flag_rejected(flag):
+    if flag in af.mapped_flags():
+        pytest.skip(f"{flag} is mapped by a registered extension (EXTENSION_FLAGS)")
     argv = [flag] if flag in ("--use-routing-replay", "--partial-rollout") else [flag, "0.9"]
     with pytest.raises(mc.MilesConfigError, match=flag):
         mc.check_extra_argv(argv)
