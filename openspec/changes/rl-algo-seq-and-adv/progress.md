@@ -206,3 +206,9 @@
 ## 2026-09-29 P0 4373cd9（记录）
 - 事件磁带回传已扩展到所有 Modal ports 岛（含带 syncer 的多岛），磁带在 `<run dir>/events/<island>.jsonl`；缺 `rl_learner_finalized` → 退出码 3。7.6 MaxRL 两岛 G3 计划将用它读每岛磁带（算法哈希一致、外层应用后状态 hash 一致、不变量无误报），放置按 R0 7.1（Modal 2 岛 + 本机 syncer）。
 - 7.6 仍等 7.5 声明在集成分支合入（主 agent 统一处理），届时 merge 后先单独提交计划再跑。
+
+## 2026-09-29 merge origin/algo-1b 176ba25+（fcd58b9）与示例重生成
+- 已 merge `origin/algo-1b`（echo 补丁后的 reward_pipeline），`make_examples.py` 重生成 maxrl/mapo/gdpo 示例。
+- `origin/integ-decl`（0f13aa7）**未 merge**：它与 algo-1b 在他人文件上有内容冲突（`yeto/rl/algos/grpo_knobs.py` 注释、`tests/test_rl_grpo_knobs.py` 声明集合、`tests/test_rl_algorithm_capabilities.py`、`docs/MILES_RL.md` 的 mismatch_metrics 段），属于 1b/ALGO-CAP/主 agent 的决策，本 change 不替他们裁决；已 `merge --abort`。
+- 验证：临时 worktree 取 integ-decl 0f13aa7，放入本分支的示例文件，`test_example_specs_are_current` 6 passed（示例哈希覆盖的模块 reward_pipeline/seq_adv 在两边相同；grpo_knobs、mismatch_correction 的差异不进入这些示例）。本分支本 change 测试 133 passed。
+- 再次提醒：集成分支定稿后须在最终 SHA 上重跑 make_examples.py。
