@@ -125,3 +125,32 @@ Sandboxes: 207 s + 557 s + 134 s + 1158 s = 2056 s of 1x H100 (+16 CPU / 128 GiB
 Estimate ~ $3.1 (H100 $3.95/h + ~$1.5/h CPU/mem; not billing-confirmed); cap $20.
 Both algo2a-g1 apps `stopped`, 0 tasks; watchdogs killed (teardown-attempt1.txt, teardown-attempts2-4.txt).
 No volumes, no named secrets.
+
+## Attempt 5 plan (committed before launch) -- launcher entry, GSPO / REINFORCE++ family + GDPO
+- Why: attempt 2's receipt defect is fixed (infra-a e9f20cc); P0 requires the launcher entry
+  `yeto launch --rl-single-island-no-sync --controller local --rl-optimizer-steps N` (algo-cap
+  6d53fc3 fixed its crash). Attempt 4 used the learner side only and does not count as entry
+  validation. GDPO is rerun because 5.5 needs per-round evidence of the fixed R2 channel.
+- Code: the pushed commit containing this section (launch_run.sh records `git rev-parse HEAD`).
+- Runs (sequential, one Modal app `yeto-algo2a-g1-<run>` each, 1x `H100!` via
+  `--modal-gpu-exact`, container asserts the GPU type): gspo_s2 (optimizer_steps 2), gspo_s1
+  (1), rpp, rpp_baseline, gdpo. Same model/data/seed/3 rounds/4x8 as before; binary reward
+  `yeto.rl.algos.gdpo_reward:correctness_reward` (GSM8K label after "####"), GDPO
+  `yeto.rl.algos.gdpo_reward:reward_func`. Allowances per launch_run.sh.
+- Limits: local `timeout 2400` around each launcher; independent setsid watchdog per run
+  `sleep 2700; modal app stop -y yeto-<prefix>`; after each run `yeto down <prefix>` +
+  `modal app stop` + app list proof. Estimate 5 x ~12 min ~ 1 h H100 ~ $5.5; total cap for the
+  change stays $20 (spent so far ~$3.1).
+- Reading the result: the launcher's exit code 2 for a Modal no-sync island is an explicit
+  "artifacts not pulled" notice, not a failure. Criteria are read from the streamed learner
+  log (launch.log) and the event tape lines it carries: criteria 1-5 of the original plan,
+  with criterion 1 = learner exit 0 in the stream and 3 `rl_round_trained` events.
+  Criterion 4 for gspo: argv `--advantage-estimator gspo --eps-clip 0.0003 --eps-clip-high
+  0.0004`; rpp family `--kl-coef 0.01 --normalize-advantages`.
+- Additional pre-declared checks (observations unless stated):
+  - gspo: per-round `masked_fraction`/`clip_fraction` in `rl_round_trained` (R1);
+    expectation only: gspo_s1 clip fraction ~0.
+  - gdpo (5.5 criterion, pass/fail): for each round k, `rl_round_trained.nonzero_advantages`
+    equals the dispatcher's `rl_advantage_transform` count logged for round k (event
+    `rollout_id` = k). Any mismatch or missing value = 5.5 not passed.
+- Failure handling as before (diagnose; one rerun per mechanism after a fix).

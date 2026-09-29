@@ -22,7 +22,9 @@ COMPONENTS = ("correctness", "format")
 def _correct(response: str, label) -> bool:
     from yeto.rl.math_reward import score
 
-    return score(response, label) == 1.0
+    # GSM8K-style labels carry the reasoning before "#### <answer>".
+    truth = None if label is None else str(label).split("####")[-1].strip().replace(",", "")
+    return score(response, truth) == 1.0
 
 
 def components(response: str, label) -> dict[str, float]:
@@ -30,6 +32,12 @@ def components(response: str, label) -> dict[str, float]:
     has_box = "\\boxed{" in answer
     correct = has_box and _correct(response, label)
     return {"correctness": 1.0 if correct else 0.0, "format": 1.0 if has_box else 0.0}
+
+
+async def correctness_reward(args, sample, **kwargs) -> float:
+    """Binary {0,1} correctness only (the ``correctness`` component), for MaxRL/MAPO/GSPO/rpp G1."""
+
+    return components(sample.response or "", sample.label)["correctness"]
 
 
 async def reward_func(args, sample, **kwargs) -> float:

@@ -347,3 +347,14 @@ def test_example_reward_writes_accepted_components(monkeypatch):
     spec_gdpo = {"components": [{"name": n, "weight": 1.0} for n in gdpo_reward.COMPONENTS]}
     out = _run("gdpo", samples, gdpo=spec_gdpo)
     assert len(out) == 4 and all(math.isfinite(v) for v in out)
+
+
+def test_gsm8k_style_label_and_binary_reward(monkeypatch):
+    from yeto.rl.algos import gdpo_reward
+
+    seen = []
+    monkeypatch.setattr("yeto.rl.math_reward.score",
+                        lambda response, truth: seen.append(truth) or float(truth == "1234"))
+    sample = _Sample(response="so \\boxed{1234}", label="work ... #### 1,234", metadata=None)
+    assert asyncio.run(gdpo_reward.correctness_reward(None, sample)) == 1.0
+    assert seen == ["1234"]
