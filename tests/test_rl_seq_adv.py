@@ -543,3 +543,15 @@ def test_trainer_reads_gspo_clipfrac_through_seq_adv():
     assert trainer.clipfrac_masked_fraction([{"pg_clipfrac": 1.0}, {}]) is None
     tokens = [{"pg_clipfrac": 1.0, "loss_tokens": 30}, {"pg_clipfrac": 0.0, "loss_tokens": 10}]
     assert trainer.clipfrac_masked_fraction(tokens) == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize("name", ["gspo", "rpp", "rpp_baseline", "maxrl", "mapo", "gdpo"])
+def test_example_specs_are_current(name):
+    """G1 uses these files: their plugin hashes must match the current sources."""
+
+    from pathlib import Path
+
+    path = (Path(__file__).resolve().parents[1]
+            / "openspec/changes/rl-algo-seq-and-adv/examples" / f"{name}.json")
+    spec = AlgorithmSpec.from_json_file(str(path))
+    assert spec.rejections() == [], "regenerate with examples/make_examples.py"

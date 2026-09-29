@@ -91,3 +91,10 @@ that fails twice stays undeclared (7.5) with the reason recorded.
   rerun is kept for after the fix).
 - MaxRL / MAPO / GDPO use `advantage.estimator="grpo"` (receipt label "grpo") and are not
   affected: attempt 3 runs exactly those three with the same code (8d7f752) and harness.
+
+## Attempt 3 (sb-NI3Hz3weM7E0P0opmx8zPd, H100 asserted, 134 s, code 8d7f752) -- my stale example
+- maxrl refused before training (pre-GPU rejection working as designed):
+  `[grpo_knobs_pipeline_plugins] plugins ['yeto.rl.algos.seq_adv.gdpo']: source hash differs`.
+  The example specs were generated before d5ffa61 changed seq_adv.py and were not regenerated.
+- Fix: regenerated examples; new test `test_example_specs_are_current` fails whenever an example
+  is stale. Attempt 4 reruns maxrl/mapo/gdpo with the commit containing this fix.
