@@ -60,8 +60,16 @@ MILES_DECLARED: dict[str, str] = {
     "reward_postprocessors:custom_reward_postprocess": f"{_E1B}/g1_report_v2.json overlong_penalty (dispatcher shaped 4/7/21 of 32 samples)",
     "features:overlong_penalty": f"{_E1B}/g1_report_v2.json overlong_penalty (shaped_samples 4/7/21)",
     "advantage_estimators:gspo": f"{_E2A}/attempt6 gspo_s2 (optimizer_steps 2: second-step clipfrac 0.1875/0.5/0.5; steps 1: 0)",
-    "advantage_estimators:reinforce_plus_plus": f"{_E2A}/attempt6 rpp (3 rounds, finalized, finite grad_norm)",
-    "advantage_estimators:reinforce_plus_plus_baseline": f"{_E2A}/attempt6 rpp_baseline (3 rounds, finalized, finite grad_norm)",
+    "advantage_estimators:reinforce_plus_plus": (
+        f"{_E2A}/attempt6 rpp; plan.md 'Attempt 6 addenda': rollout/advantages mean "
+        "0.0155/0.0742/-0.0217 (non-zero where GRPO's group-normalized mean is ~0), "
+        "ref_log_probs scored every round, diverging from round 1 (reward KL active)"
+    ),
+    "advantage_estimators:reinforce_plus_plus_baseline": (
+        f"{_E2A}/attempt6 rpp_baseline; plan.md 'Attempt 6 addenda': rollout/advantages "
+        "mean 0.0374/0.1242/0.1093 (vs ~0 for GRPO), ref_log_probs scored, diverging from "
+        "round 1"
+    ),
     "features:gdpo": f"{_E2A}/attempt6 gdpo (per-round nonzero_advantages 32/24/32 match the dispatcher)",
     "corrections:mismatch_observe": f"{_E1A}/2026-09-29-g1b observe + g2-observe (observation only; weights constant 1)",
     "corrections:icepop": f"{_E1A}/2026-09-29-trigger icepop [0.99,1.01] (masked tis_clipfrac 0.192/0.225/0.267)",
