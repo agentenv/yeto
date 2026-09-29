@@ -45,26 +45,39 @@ DEFAULT_SINK = f"ray:{DEFAULT_SINK_ACTOR}"
 METADATA_SCHEMA = "yeto-rollout-meta-v1"
 _TRAINED_ATTR = "_yeto_trained_group_keys"
 _BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
-# Per-round algorithm counters written by rollout-side algorithm code (e.g. the
-# rl-algo-seq-and-adv reward dispatcher's non-zero advantage count) into
-# ``args.yeto_rl_round_metadata``; copied into the metadata, then reset.
-ROUND_METADATA_ATTR = "yeto_rl_round_metadata"
+# Per-round algorithm counters reported by rollout-side algorithm code AFTER
+# the all-samples hook ran (e.g. the rl-algo-seq-and-adv reward dispatcher's
+# non-zero advantage count, computed in reward post-processing). They travel
+# as a separate sink record keyed by rollout_id and are merged into that
+# rollout's metadata by the driver-side reader, so they are never attributed
+# to the next round.
+ROUND_META_SCHEMA = "yeto-rl-round-metadata-v1"
 ROUND_METADATA_KEYS = frozenset({"nonzero_advantages"})
 
 
-def _round_metadata(args: Any) -> dict[str, int]:
-    raw = getattr(args, ROUND_METADATA_ATTR, None) or {}
-    unknown = sorted(set(raw) - ROUND_METADATA_KEYS)
+def record_round_metadata(
+    args: Any, samples_or_rollout_id: Any, *, sink: str | None = None, **counts: int
+) -> None:
+    """Rollout side: report this rollout's per-round counters (call once per rollout)."""
+
+    del args
+    unknown = sorted(set(counts) - ROUND_METADATA_KEYS)
     if unknown:
         raise RuntimeError(f"unknown per-round metadata keys {unknown}")
-    out = {}
-    for key, value in raw.items():
-        if value is None:
-            continue
+    for key, value in counts.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise RuntimeError(f"per-round metadata {key} must be a non-negative int")
-        out[key] = value
-    return out
+    if isinstance(samples_or_rollout_id, int) and not isinstance(samples_or_rollout_id, bool):
+        rollout_id = samples_or_rollout_id
+    else:
+        rollout_id = next(
+            (s.rollout_id for s in _flat(samples_or_rollout_id)
+             if getattr(s, "rollout_id", None) is not None),
+            None,
+        )
+    if rollout_id is None:
+        raise RuntimeError("per-round metadata needs the rollout id")
+    put_to_sink({"schema": ROUND_META_SCHEMA, "rollout_id": int(rollout_id), **counts}, sink)
 POLICY_TOKEN_FILE = "policy-token"
 _REUSABLE_STATUSES = frozenset({"completed", "truncated"})
 
@@ -186,7 +199,6 @@ def build_metadata(args: Any, all_samples: Iterable[Sequence[Any]]) -> dict[str,
         "trained_sample_indices": sorted(
             int(i[1:]) for g in groups for i in g["sample_ids"] if i[1:].lstrip("-").isdigit()
         ),
-        **_round_metadata(args),  # empty by default: key set unchanged
     }
 
 
@@ -216,7 +228,8 @@ def put_to_sink(payload: dict[str, Any], sink: str | None = None) -> None:
         directory = Path(target)
         directory.mkdir(parents=True, exist_ok=True)
         rid = payload.get("rollout_id")
-        name = f"rollout-{rid if rid is not None else 'latest'}.json"
+        prefix = "round" if payload.get("schema") == ROUND_META_SCHEMA else "rollout"
+        name = f"{prefix}-{rid if rid is not None else 'latest'}.json"
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(encoded)
@@ -301,6 +314,6 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
         # Reset per-rollout state: the bounded filter keys its memo on
         # ``yeto_rl_policy_version`` which legacy advanced per round; here the
         # rollout boundary is the reset point.
-        for attr in (_TRAINED_ATTR, _BOUNDED_FILTER_STATE_ATTR, ROUND_METADATA_ATTR):
+        for attr in (_TRAINED_ATTR, _BOUNDED_FILTER_STATE_ATTR):
             if hasattr(args, attr):
                 setattr(args, attr, None)

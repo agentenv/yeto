@@ -53,21 +53,42 @@ def _group():
             "reward_std": 0.0, "token_count": 1}
 
 
-def test_nonzero_advantages_travel_through_rollout_metadata():
-    args = SimpleNamespace(**{hook.ROUND_METADATA_ATTR: {"nonzero_advantages": 7}})
-    assert hook._round_metadata(args) == {"nonzero_advantages": 7}
-    assert hook._round_metadata(SimpleNamespace()) == {}  # default: key set unchanged
-    with pytest.raises(RuntimeError, match="unknown"):
-        hook._round_metadata(SimpleNamespace(**{hook.ROUND_METADATA_ATTR: {"x": 1}}))
-    with pytest.raises(RuntimeError, match="non-negative"):
-        hook._round_metadata(SimpleNamespace(**{hook.ROUND_METADATA_ATTR: {"nonzero_advantages": -1}}))
-    payload = {"schema": hook.METADATA_SCHEMA, "rollout_id": 3, "groups": [_group()],
-               "completed": 1, "aborted": 0, "nonzero_advantages": 7}
-    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
-    assert h.nonzero_advantages == 7
-    payload.pop("nonzero_advantages")
-    assert handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H,
+def test_nonzero_advantages_are_attributed_to_their_own_round(tmp_path):
+    """Review R2 lag: the dispatcher reports AFTER the all-samples hook; each round's
+    handle must carry that round's count (24, 16, 24), never the previous one."""
+    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+
+    source = DirMetadataSource(tmp_path)
+    sink = source.sink_spec
+    seen = []
+    for rollout_id, count in ((0, 24), (1, 16), (2, 24)):
+        payload = {"schema": hook.METADATA_SCHEMA, "rollout_id": rollout_id, "groups": [_group()],
+                   "completed": 1, "aborted": 0}
+        hook.put_to_sink(payload, sink)  # all-samples hook first
+        sample = SimpleNamespace(rollout_id=rollout_id)
+        hook.record_round_metadata(None, [[sample]], sink=sink, nonzero_advantages=count)
+        merged = source.take(rollout_id)
+        h = handle_from_metadata(merged, rollout_id=rollout_id, policy_version=rollout_id,
+                                 policy_hash=H, data_pack=None)
+        seen.append(h.nonzero_advantages)
+    assert seen == [24, 16, 24]
+    # without a report the value is unknown, not stale
+    hook.put_to_sink({"schema": hook.METADATA_SCHEMA, "rollout_id": 3, "groups": [_group()],
+                      "completed": 1, "aborted": 0}, sink)
+    assert handle_from_metadata(source.take(3), rollout_id=3, policy_version=3, policy_hash=H,
                                 data_pack=None).nonzero_advantages is None
+    with pytest.raises(RuntimeError, match="unknown"):
+        hook.record_round_metadata(None, 4, sink=sink, x=1)
+    with pytest.raises(RuntimeError, match="non-negative"):
+        hook.record_round_metadata(None, 4, sink=sink, nonzero_advantages=-1)
+
+
+def test_round_metadata_for_another_rollout_is_refused():
+    from yeto.rl.engine.miles_adapter.rollout import RolloutMetadataError, merge_round_metadata
+
+    with pytest.raises(RolloutMetadataError, match="arrived with rollout 2"):
+        merge_round_metadata({"rollout_id": 2}, [{"schema": hook.ROUND_META_SCHEMA,
+                                                  "rollout_id": 1, "nonzero_advantages": 3}], 2)
 
 
 def test_mismatch_metrics_and_correction_masked_fraction(monkeypatch):
@@ -118,3 +139,40 @@ def test_driver_round_event_carries_labelled_mismatch(tmp_path):
     assert trained["mismatch"] == {"train/train_rollout_kl": 0.01}
     assert trained["label/weight_transport"] == "nccl-broadcast"
     assert trained["label/profile_hash"] == profile.contract_hash
+
+
+def test_driver_reports_each_rounds_own_nonzero_advantages(tmp_path):
+    import dataclasses
+    import json
+
+    import torch
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0)
+    counts = {0: 24, 1: 16, 2: 24}
+    original = engine.rollout.generate
+    engine.rollout.generate = lambda r: dataclasses.replace(original(r), nonzero_advantages=counts[r])
+    IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+                 policy_state=engine.policy_state, publisher=engine.publisher,
+                 placement=engine.placement, capabilities=fake_capabilities(),
+                 algorithm=AlgorithmSpec(), sync=LocalOnlySync(3),
+                 events=EventTape(tmp_path / "e.jsonl", 0)).run()
+    events = [json.loads(line) for line in (tmp_path / "e.jsonl").read_text().splitlines()]
+    got = {e["rollout_id"]: e["nonzero_advantages"] for e in events if e["event"] == "rl_round_trained"}
+    assert got == counts
+
+
+def test_receipt_accepts_spec_estimators_and_rejects_unknown():
+    from yeto.rl.contracts import _require_algorithm
+    from yeto.rl.engine.algorithm import ADVANTAGE_ESTIMATORS
+
+    for name in ("grpo", "sao", *ADVANTAGE_ESTIMATORS):
+        _require_algorithm(name)
+    assert "gspo" in ADVANTAGE_ESTIMATORS
+    with pytest.raises(ValueError, match="unsupported local RL algorithm"):
+        _require_algorithm("dpo")

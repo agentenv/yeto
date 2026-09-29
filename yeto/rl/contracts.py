@@ -29,7 +29,15 @@ def _require_nonnegative_int(name: str, value: int) -> None:
 
 
 def _require_algorithm(value: str) -> None:
-    if value not in _ALGORITHMS:
+    """Receipt label: legacy ``grpo``/``sao``, or any advantage estimator the
+    ``AlgorithmSpec`` vocabulary defines (the ports trainer reports
+    ``spec.advantage.estimator``; whether a run may use it is decided by the
+    spec/capability checks, not here). Derived, not a second whitelist."""
+    if value in _ALGORITHMS:
+        return
+    from .engine.algorithm import ADVANTAGE_ESTIMATORS
+
+    if value not in ADVANTAGE_ESTIMATORS:
         raise ValueError(f"unsupported local RL algorithm: {value!r}")
 
 
