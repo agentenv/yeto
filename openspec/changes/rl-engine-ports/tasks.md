@@ -75,6 +75,7 @@
   - 完成记录（2026-09-29）：`evidence/2026-09-29-eq63-v3/report.md` 结论 PASS（H100，4bc018e 的 5 seed；第 2 层引用 6.2 的 strict TF）；10/10 个 PEFT 可被标准 PEFT 加载；最终 LoRA 跨路径相对 L2 0.0083（legacy 跨 seed ≈1.414）。两条路径同样存在 decoupled 学习率衰减到 0 的已知问题（由 `fix-decoupled-lr-schedule` 另行修复）。
 ## 7. 切换与退役
 
-- [ ] 7.0 检查迁移清单：R0 期间合入的所有 RL PR 都已登记，且每一项都已关闭。验证：`migration-ledger.md` 中没有未关闭项；对照 `gh pr list --state merged --search "rl:"` 在 R0 期间合入的列表，没有遗漏。
+- [x] 7.0 检查迁移清单：R0 期间合入的所有 RL PR 都已登记，且每一项都已关闭。验证：`migration-ledger.md` 中没有未关闭项；对照 `gh pr list --state merged --search "rl:"` 在 R0 期间合入的列表，没有遗漏。
+  - 完成记录（2026-09-29）：对照 2026-09-24 之后合入的 #48–#68（按改动文件筛选），`migration-ledger.md` 已登记全部触及 RL 行为的 PR 并全部关闭；补登记 #60（外部 SGLang router：ports 显式不复刻，由 `require_ports_router_mode` 拒绝预设地址、Modal 仅 legacy 设置该 env，测试见 `tests/test_rl_engine_selection.py`）；#58、#61/#67、#68 与 #48–#57 登记为与引擎无关或已含于基线。遗留：yeto 自身 Modal launcher 路径上尚无 ports 的真实运行（验收中的 Modal 运行走的是 sandbox harness）。
 - [ ] 7.1 把默认值切换为 `ports`，legacy 仍可显式选择；更新文档。验证：launcher 测试断言新的默认值；用默认参数完成一次真实运行。
 - [ ] 7.2 至少一个真实运行周期之后，删除 legacy 路径：旧 `MILES_*` 常量、`miles-*.bundle`、`MilesPolicySync` 回调集成、legacy 参数翻译，以及 `--rl-engine` 参数本身。仅 legacy 支持的功能（SAO、dense-full、DSV4）在文档中标注为待迁移。验证：全部测试通过，仓库中搜索 `MILES_BASE_COMMIT`、`external-policy-sync-path` 与 `--rl-engine` 均无结果，`docs/MILES_RL.md` 已更新。

@@ -54,3 +54,5 @@
 - 决定（用户，2026-09-29）：R0 只换底座不改行为，ports 与 legacy 保持相同行为，6.3 等价结论有效。之后单独提 agentenv/yeto PR，在 legacy 与 ports 两条路径上同时把 decoupled 改为显式常数 lr（strict 显式写出原线性调度，数值不变），并重跑 decoupled。ports 侧改动草稿：`/home/michael/work/followups/decoupled-constant-lr-ports.patch`。
 - head 模式验收（基础设施层面）：默认公开镜像、fork checkout、`rl_engine_selected=ports`、两岛到达最终 cut 且 hash 一致均通过；训练后半程无更新属于上述已知问题，与 legacy 行为一致。
 - 任务 0.3 完成（2026-09-29）：三个分支经 `git ls-remote` 与 compare API 核对，基底 commit（yeto `e21a7ff`、Miles `9e4260d`、SGLang sglang-miles `571212b`）与当前 HEAD 记入 design D6/D11。
+
+- 2026-09-29 7.0 迁移清单核对：对照 #48–#68 合入列表，补登记 #60（Modal 外部 router，ports 以 `require_ports_router_mode` 拒绝/忽略，单测覆盖，CLOSED）以及 #58/#67/#68 与基线内 #48–#57；清单无未关闭项。遗留：Modal 上 ports 未实跑。

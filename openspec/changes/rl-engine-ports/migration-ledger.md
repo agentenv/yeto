@@ -13,6 +13,9 @@
 | #62 | `fix/sky-island-ray-stop` | MERGED，ports 侧 CLOSED（共用岛脚本） | `cb55aca` |
 | #63 | `fix/sky-island-tp-env` | 经重新提交的 PR #67/#68 进入 main，ports 侧 CLOSED（共用岛 env 表） | `e21a7ff` 之前 |
 | #61 | `pr13/head-run-teardown` | 经重新提交的 PR #67/#68 进入 main（与 R0 无关） | `e21a7ff` 之前 |
+| #60 | `pr7/head-cloud-credentials`（Nebius/Verda/Modal） | MERGED，ports 侧 CLOSED（7.0 补登记，见下） | `89aee13` |
+| #58 | `pr12/head-cli-fixes` | MERGED，与引擎无关（仅 `yeto/cli.py` head 模式） | `e4ee4ac` |
+| #67 / #68 | #61 / #63 的重新提交 | MERGED，内容同 #61 / #63 | `e21a7ff` |
 
 ---
 
@@ -85,3 +88,17 @@
 - **legacy 逐字节一致（证据，已在 `e21a7ff` 上重做）**：用 pytest 插件包住 `make_miles_island_task`，在 main 与整合树上分别跑 `tests/test_rl_launcher.py`，录得的 9 个岛任务 `setup`/`run` 完全相同；`tests/test_rl_engine_pins.py` 的 legacy golden 已按 main 重新捕获（仅 #64 的 `MILES_COMMIT`/bundle sha 变化），`_host_setup_script` 的 sha256 与 main 一致（`1eec0953…`）。
 - **#63（经 #67/#68 重新合入，main `e21a7ff`）**：岛 `envs` 表加 `CUDA_DEVICE_MAX_CONNECTIONS=1`、去掉 `NVTE_*_ATTN` 硬钉。ports 与 legacy 共用该表，无需移植。证据：在 `e21a7ff` 干净 worktree 与整合树上分别跑 `tests/test_rl_launcher.py`，录得 9 个岛任务的 `setup`/`run`/`envs` 完全一致（含 `CUDA_DEVICE_MAX_CONNECTIONS`）；pins golden 与 `_host_setup_script` sha256（`1eec0953…`）在 `e21a7ff` 上重新捕获，与 `cb55aca` 相同；argv 快照 3/3 与 `e21a7ff` 一致。
 - `yeto/rl/ssh_harness.py` 未被 #62/#63 改动（仍整机 `ray stop --force`，不在 SkyPilot 上，不受影响）。
+
+## #60 Modal 岛的外部 SGLang router（7.0 补登记）
+
+- **PR**：#60 "clouds: add Nebius, Verda and Modal to the planner and launcher"（main `89aee13`，在 R0 基线 `cb55aca` 之内）。RL 相关改动：`yeto/rl/learner.py` 新增 `start_external_sglang_router` 与 `YETO_RL_EXTERNAL_ROUTER`（Modal 岛上 legacy Miles 自带 router 30 s 期限不够，由 yeto 先起 router）；`yeto/launcher.py` 新增 `check_cloud_prerequisites`（Modal + RL 要求镜像按 digest 固定），Modal 岛配置对 RL 设置该 env。
+- **ports 落点（CLOSED）**：upstream Miles 以 Ray worker 启动 router（120 s 预算）且已移除外部 router 模式，因此 ports 不复刻，改为显式拒绝/忽略：`yeto/rl/learner.py::require_ports_router_mode`（约 1412 行，预置 `sglang_router_ip` 报错，env=1 打印忽略）；`yeto/launcher.py` 约 2646 行 Modal 岛只对 legacy 设 `YETO_RL_EXTERNAL_ROUTER`；ports 的 `image_ref` 走 `default_rl_image("ports")`。
+- **证据**：`tests/test_rl_engine_selection.py::test_modal_ports_island_does_not_request_the_external_router`、`::test_ports_router_mode_ignores_external_router_and_refuses_preset_address`、`::test_run_miles_ports_never_starts_the_legacy_external_router`，`tests/test_launch_auto.py` 117/133 行；2026-09-29 复跑 `test_rl_engine_selection.py`、`test_launch_auto.py`、`test_head_mode.py` 共 97 passed。
+- **遗留风险（不阻塞关闭）**：尚无 Modal 上 `--rl-engine ports` 的真实 GPU 运行；upstream router 120 s 预算在 Modal CPU 上是否足够只有文档依据。首次 Modal ports 运行时需确认 router 就绪日志。
+
+## 与引擎无关、无需迁移的 PR（7.0 复核）
+
+- **#58**（`yeto/cli.py`）：head 模式 run name 遮蔽与 external seats，不区分引擎；ports 的 head 模式（`2cbd45c`）在其之上开发，`tests/test_head_mode.py` 通过。
+- **#61 / #67**（`yeto/cli.py`、`yeto/launcher.py`、`yeto/modal_runner.py`）：head run 拆除与云端确认，按集群名操作，与引擎无关。
+- **#48–#57**（2026-09-25 03:38 合入，早于本 change 创建日 2026-09-28）：均已包含在 R0 基线 `cb55aca` 中（#49、#52 改过 `yeto/rl/learner.py`，#49/#53/#56/#57 改过 `yeto/launcher.py`），ports 直接在其上开发，不属于在途迁移。#54 无代码中 RL 改动。
+- 核对方法：`gh pr list -R agentenv/yeto --state merged --limit 100 --json number,title,mergedAt,files`，筛 2026-09-24 之后合入且改动 `yeto/rl/**`、`yeto/launcher.py`、`yeto/cli.py`、`yeto/modal_runner.py`、`scripts/benchmark_rl*.py`、`docs/MILES_RL.md` 的 PR（#48–#68）。R0 期间没有 PR 改动 `scripts/benchmark_rl.py` 或 `docs/MILES_RL.md`。
