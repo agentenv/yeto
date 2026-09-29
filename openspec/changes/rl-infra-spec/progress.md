@@ -107,3 +107,10 @@
 - F7：full 模式或未请求 fixed-partition 时给 `--rl-standby-gpus` 显式报错，有测试。
 - selection：`ports_rejections(placement=...)` 在显式 `fixed-partition` 且 `rollout_num_gpus≥1` 时放行；learner/launcher/harness 的调用需传 `placement=args.rl_placement`（不在 INFRA 写入范围）。
 - 1.8 措辞按审查修正；2.3 将来若交否定结论须补流式 reward/多 minibatch 流水的细粒度论证。
+
+### 合并与 GPU（2026-09-29 INFRA，续）
+
+- 已合入：origin/algo-cap ebd436b（entry.py 冲突时保留 `with_partitioned_serial` 与 `unverified_mechanisms`；preflight/driver 调用 `caps.check(..., max_policy_age=profile.max_policy_age)`）；`p0-driver.patch` 干净应用；origin/rl-integ（镜像 pin 5da40a07）。全量测试：68 failed / 2246 passed / 26 errors，失败 id 集合与基线相同（94）。
+- **1.1 GPU 验收通过（已勾选）**：`evidence/infra-a/1.1/`。云资源：Modal app `infra-a-manifest`，sandbox sb-8avihvjXJ5HpcSMbpNcqxQ（attempt1，91 s）与 attempt2（同 app 名，新 app ap-lEMebdd69SIlDhCPtW8YB2），各 1×L40S，合计约 3 分钟，费用约 $0.10。两个 app 均为 stopped，见 `modal_app_list_after_stop.txt`，无残留卷。
+- 1b hook 补丁（`1b-hook.patch`）：审阅结论是与 A2/F5 一致。样本级 `filtered_samples` 属于终态 filtered；组级 `filtered` 计数不变；carried_over 未涉及，仍由 3.6/4.1 负责。**选择等 algo-1b 并入 rl-integ 后再合入**：该补丁在 hook 中硬导入 `yeto.rl.algos.sample_filters`，本分支没有这个模块，现在合入会让所有 ports 运行的 hook 失败；如果改成惰性导入并在缺失时静默 no-op，又会掩盖"配置了过滤器却没有生效"的错误。
+- 1.2：尚未启动。需要 strict-avg 外层同步的 head（按 memory，Modal 不能承载 head），计划为 Nebius 4×H100 island，head 放在本机或 Nebius CPU VM。
