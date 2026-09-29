@@ -89,6 +89,10 @@ def test_old_declaration_reads_as_r0_mechanisms():
 # produce companions too). Tests pick the ones an engine has NOT declared, so
 # a later declaration (a follow-up change's G1) never turns them into no-ops.
 _REF = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+# With rl-algo-grpo-knobs registered, the only allowed reward post-process is
+# its dispatcher, and specs are completed by the same fixture as the flags test.
+from test_rl_algorithm_flags import DISPATCHER as _POSTPROCESS  # noqa: E402
+from test_rl_algorithm_flags import complete as _complete  # noqa: E402
 CANDIDATES = {
     "advantage_estimators:gspo": dict(advantage=dict(estimator="gspo"),
                                       loss=dict(eps_clip=3e-4, eps_clip_high=4e-4)),
@@ -122,7 +126,7 @@ CANDIDATES = {
     "loss_aggregations:constant": dict(loss=dict(aggregation="constant", reducer=_REF)),
     "losses:custom_loss": dict(loss=dict(variant="custom_loss", custom_loss=_REF)),
     "reward_postprocessors:custom_reward_postprocess": dict(
-        advantage=dict(reward_postprocess=_REF)),
+        advantage=dict(reward_postprocess=_POSTPROCESS)),
 }
 R0_MECHANISMS_P0 = {
     "advantage_estimators:grpo", "losses:policy_loss", "loss_aggregations:default",
@@ -214,7 +218,7 @@ def test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter():
         kwargs = CANDIDATES.get(mechanism)
         if kwargs is None:
             continue  # R0 (default spec) or an extension mechanism not registered here
-        spec = _combine(kwargs)
+        spec = _complete(_combine(kwargs))
         needs = {f"{d}:{n}" for d, n in spec.required_mechanisms()}
         if needs <= declared:
             _check(caps, spec)  # accepted
@@ -494,6 +498,7 @@ def test_always_emit_field_only_when_its_mechanism_applies():
 
 
 def test_reward_dispatcher_rejection_explains_the_pending_declaration():
-    caps = miles_capabilities(FP)
+    caps = fake_capabilities()  # an engine without the dispatcher declaration
     with pytest.raises(CapabilityMismatch, match="maxrl/mapo is not declared yet"):
-        _check(caps, _combine(CANDIDATES["reward_postprocessors:custom_reward_postprocess"]))
+        _check(caps, _complete(_combine(
+            CANDIDATES["reward_postprocessors:custom_reward_postprocess"])))
