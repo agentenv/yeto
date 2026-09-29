@@ -182,3 +182,25 @@ No volumes, no named secrets.
 - Criteria unchanged (attempt 5 section); criterion 1 counts `rl_round_trained` and
   criterion 5 reads `rl_engine_selected` from the returned tape; 5.5 check as declared.
 - Runs: gspo_s2, gspo_s1, rpp, rpp_baseline, gdpo. Spent so far ~$4 of $20.
+
+## Attempt 6 result (code fb588a4, launcher no-sync entry, event tape returned) -- 5/5 PASS
+Per run (attempt6/<run>/criteria.json, produced by attempt6/check.py from launch.log + events/):
+| run | app | finalized / rl_round_trained | errors | grad_norm finite | argv | unverified + outer_sync |
+|---|---|---|---|---|---|---|
+| gspo_s2 | ap-JDjymkEZox76D7QLx4gz3R | yes / 3 | none | yes | gspo, eps 3e-4/4e-4 | gspo, eps_clip, clip_higher; false |
+| gspo_s1 | ap-qkl3KihH8uHgbQ9GEC2unv | yes / 3 | none | yes | same | same; false |
+| rpp | ap-g0SuZBHPVMakOPo65qRpnf | yes / 3 | none | yes | kl_coef 0.01, normalize_advantages True, ref loaded | rpp, whiten; false |
+| rpp_baseline | ap-gyfCgbhzYujHWxsejU6ly7 | yes / 3 | none | yes | same | rpp_baseline, whiten; false |
+| gdpo | ap-0qCQ2iFAbH848CZb8NjVVa | yes / 3 | none | yes | dispatcher | gdpo, custom_reward_postprocess; false |
+All on "NVIDIA H100 80GB HBM3". Launcher rc 2 each (pre-declared notice). No zero-gradient events.
+- GSPO clip path (per optimizer step, Miles log): gspo_s2 (clipfrac, grad_norm) =
+  (0.0, 0.900) (0.1875, 0.307) | (0.0, 0.646) (0.5, 0.528) | (0.0, 0.478) (0.5, 0.246);
+  gspo_s1: clipfrac 0.0 in all 3 rounds (expectation D1 held: one step -> ratio ~1).
+- 5.5 criterion (declared in attempt 5): gdpo `rl_round_trained.nonzero_advantages` per round
+  = 32, 24, 32; dispatcher `rl_advantage_transform` for rollout_id 0, 1, 2 = 32, 24, 32. Match,
+  no missing value -> PASS (R2 channel correct on GPU).
+- Observation / defect (INFRA R1): `masked_fraction` and `clip_fraction` are null in every
+  `rl_round_trained` event, including gspo_s2 whose Miles log shows pg_clipfrac 0.5 --
+  the per-step pg_clipfrac does not reach the round event on the real engine.
+- Teardown: all apps stopped / 0 tasks (attempt6/teardown.txt); watchdogs killed.
+  Attempt 6 ~ 5 x 8.5 min H100 ~ $3.9; change total ~ $8 (not billing-confirmed), cap $20.
