@@ -946,6 +946,7 @@ def _prepare_rl_args(
             lora_targets=getattr(args, "lora_targets", None),
             expert_full_count=getattr(args, "expert_full_count", 0) or 0,
             rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
+            placement=getattr(args, "rl_placement", "colocated"),
         )
     _prepare_ports_algorithm(args, rl_engine)
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":

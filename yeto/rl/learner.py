@@ -289,6 +289,11 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
             f"expected {expected.lower()}; refusing to join outer sync"
         )
     miles_args.yeto_rl_algorithm_absorbed_flags = dict(launch.absorbed_flags)
+    # INFRA compares it with the runtime AlgorithmSpec before connect_island_ray
+    # (a partitioned run without it is refused there).
+    miles_args.yeto_rl_expected_algorithm_sha256 = (
+        expected.lower() if expected is not None else None
+    )
     miles_args.yeto_rl_unverified_mechanisms = tuple(
         sorted(set(getattr(args, "rl_allow_unverified_mechanism", None) or ()))
     )
@@ -306,6 +311,7 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
         lora_targets=getattr(args, "lora_targets", None),
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
+        placement=getattr(args, "rl_placement", "colocated"),
         extra_argv=tuple(extra_argv),
     )
 

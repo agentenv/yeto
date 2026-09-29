@@ -299,3 +299,24 @@ def test_island_check_refuses_before_outer_sync(tmp_path):
         assert event["event"] == "rl_algorithm_island_rejected"
     finally:
         alg.unregister(island_check="t_rev")
+
+
+def test_expected_hash_on_miles_args(tmp_path):
+    miles_args, _ = _check(tmp_path, V2.sha256().upper())
+    assert miles_args.yeto_rl_expected_algorithm_sha256 == V2.sha256()
+    miles_args, _ = _check(tmp_path, None)
+    assert miles_args.yeto_rl_expected_algorithm_sha256 is None
+
+
+def test_fixed_partition_passes_selection_on_learner_and_launcher(capsys):
+    import inspect
+
+    from yeto import launcher
+
+    args = rl_learner.parse_args(_learner_argv(("--rl-placement", "fixed-partition",
+                                                "--rollout-num-gpus", "1")))
+    assert args.rl_placement == "fixed-partition"
+    with pytest.raises(SystemExit):  # without --rl-placement it is still refused
+        rl_learner.parse_args(_learner_argv(("--rollout-num-gpus", "1")))
+    assert 'placement=getattr(args, "rl_placement", "colocated")' in inspect.getsource(
+        launcher._prepare_rl_args)
