@@ -28,7 +28,7 @@
 - clip_higher、dual_clip、over_sampling、overlong_filter 不声明。
 
 ### 8.1 与 8.2
-- 8.1：`yeto launch --dry-run`（P0 319d974）的输出见 `evidence/2026-09-29-algo1b-dryrun/dry-run.txt`：一个岛，modal H100×1，total_gpus 1，no-sync，放行开关与 spec 哈希都出现在输出中。凭据扫描 `cred_scan.txt` 结果为 0 hits。dry-run 里 gpu 字段写的是 "H100"，不是 "H100!"；本 change 不做逐位实验，影响不大，但照实记录。
+- 8.1：`yeto launch --dry-run`（P0 319d974）的输出见 `evidence/2026-09-29-algo1b-dryrun/dry-run.txt`：一个岛，modal H100×1，total_gpus 1，no-sync，放行开关与 spec 哈希都出现在输出中。凭据扫描 `cred_scan.txt` 结果为 0 hits。dry-run 里的 gpu 字段写的是 "H100"：这是请求的规格；是否锁定型号（不升级到 H200）由 `--modal-gpu-exact` 控制，它不体现在这个字段里。本 change 不做逐位实验，没有使用该开关。建议 P0 在 dry-run 输出中加一个显示 gpu_exact 的字段，已报告主 agent。
 - 8.2：保持未完成：overlong_filter 没有跑，要等 1b-hook.patch 合入。
 
 ### 进行中
