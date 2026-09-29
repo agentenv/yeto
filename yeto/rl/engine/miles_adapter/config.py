@@ -253,6 +253,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.dedicated_rollout_gpus": _ok,
     "parallel.visible_gpus_per_node": _ok,
     "parallel.uneven_pipeline_layers": _ok,
+    "parallel.standby_gpus": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
     "trainable.lora_targets": _check_lora_targets,
@@ -410,6 +411,7 @@ def placement_request(config) -> PlacementRequest:
         trainer_gpus=trainer,
         rollout_gpus=int(parallel.dedicated_rollout_gpus),
         gpus_per_engine=parallel.rollout_num_gpus_per_engine,
+        standby_gpus=int(getattr(parallel, "standby_gpus", 0) or 0),
     )
 
 
@@ -516,6 +518,25 @@ def translate_run_config(
         placement_values = ["--colocate"]
     else:
         placement_values = ["--rollout-num-gpus", str(request.rollout_gpus)]
+        if trainable.parameter_mode == "lora":
+            if serving.offload_train:
+                # Conservative choice of this change, NOT an upstream
+                # constraint: upstream train.py:139-151 also offloads outside
+                # colocate. Refused until a partitioned GPU run shows that a
+                # per-round onload + NCCL broadcast publish is safe/cheap.
+                raise MilesConfigError(
+                    "a LoRA fixed partition publishes over NCCL broadcast every round; "
+                    "the trainer must stay resident (no offload_train)"
+                )
+            # upstream protocol.py:73-89: only broadcast (or colocate CUDA IPC)
+            # supports LoRA; p2p/disk-delta assert no LoRA.
+            placement_values += ["--update-weight-transfer-mode", "broadcast"]
+        if request.placement_map is not None:
+            # fork-M1 (--yeto-placement-map): explicit role -> bundle map.
+            placement_values += [
+                "--yeto-placement-map",
+                json.dumps(request.placement_map, sort_keys=True, separators=(",", ":")),
+            ]
 
     model_recipe_values: list[str] = []
     if recipe.name == RECIPE_QWEN3_5:
@@ -561,7 +582,13 @@ def translate_run_config(
         "--lora-dropout", "0",
         "--lora-type", "canonical_lora",
         "--target-modules", ",".join(trainable.target_modules),
-        "--lora-base-cpu-backup",
+        # upstream applies the LoRA base CPU backup only under colocate
+        # (utils/lora/utils.py:39-41); a LoRA fixed partition drops it.
+        *(
+            []
+            if request.kind != "colocated" and trainable.parameter_mode == "lora"
+            else ["--lora-base-cpu-backup"]
+        ),
         "--sglang-max-lora-rank", str(trainable.lora_rank),
         # placement
         "--actor-num-nodes", str(parallel.actor_num_nodes),

@@ -1,0 +1,23 @@
+$ cd /home/michael/work/algo-cap && PYTHONPATH=/home/michael/work/miles-next:$PWD:$PWD/tests /home/michael/work/miles-next-venv/bin/python -m pytest -v -p no:cacheprovider tests/test_rl_algorithm_flags_upstream.py
+# miles-next HEAD 0394715083c91182b5eb0c526eeee4196ac694b9 (== MILES_NEXT_COMMIT)
+tests/test_rl_algorithm_flags_upstream.py::test_objective_and_mapped_flags_exist_upstream PASSED [  5%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change0-expected0] PASSED [ 10%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change1-expected1] PASSED [ 15%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change2-expected2] PASSED [ 20%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change3-expected3] PASSED [ 25%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change4-expected4] PASSED [ 30%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change5-expected5] PASSED [ 35%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change6-expected6] PASSED [ 40%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change7-expected7] PASSED [ 45%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change8-expected8] PASSED [ 50%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change9-expected9] PASSED [ 55%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change10-expected10] PASSED [ 60%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change11-expected11] PASSED [ 65%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change12-expected12] PASSED [ 70%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change13-expected13] PASSED [ 75%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change14-expected14] PASSED [ 80%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change15-expected15] PASSED [ 85%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change16-expected16] PASSED [ 90%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change17-expected17] PASSED [ 95%]
+tests/test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping[change18-expected18] PASSED [100%]
+======================= 20 passed, 14 warnings in 12.61s =======================

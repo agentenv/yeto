@@ -66,6 +66,22 @@ MODAL_GPUS: dict[str, str] = {
     "A10G": "A10G",
     "T4": "T4",
 }
+# Modal silently upgrades a plain "H100" request to H200 when it can; the
+# "!" suffix pins the exact type (needed for bitwise comparisons, where the
+# model swap changes bf16 numerics).  Only H100 is upgraded, so only it
+# takes the suffix.
+MODAL_EXACT_PINNABLE = frozenset({"H100"})
+# nvidia-smi --query-gpu=name must match these for an exact-GPU island.
+MODAL_GPU_NAME_PATTERNS: dict[str, str] = {
+    "H100": r"\bH100\b",
+    "H200": r"\bH200\b",
+    "B200": r"\bB200\b",
+    "A100-80GB": r"\bA100\b.*\b80GB\b",
+    "L40S": r"\bL40S\b",
+    "L4": r"\bL4\b",
+    "A10G": r"\bA10G\b",
+    "T4": r"\bT4\b",
+}
 MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB": 8}
 # CPU / memory the runner reserves per GPU (Modal bills max(request,
 # usage)); the shape planner prices the same reservation.
@@ -169,6 +185,9 @@ class ModalIslandConfig:
     pip_requirements: tuple[str, ...] = ()  # SFT image: requirements to install
     volume_name: str | None = None  # RL spot checkpoints
     volume_mount: str | None = None
+    # Request exactly `gpu` ("H100!" -- no H200 upgrade) and fail the
+    # container at start-up unless nvidia-smi reports that type.
+    gpu_exact: bool = False
     timeout_s: int = DEFAULT_TIMEOUT_S
     retries: int = DEFAULT_RETRIES
     workdir: str = str(REPO_ROOT)
@@ -180,7 +199,8 @@ class ModalIslandConfig:
 
     @property
     def gpu_request(self) -> str:
-        return f"{MODAL_GPUS[self.gpu]}:{self.gpus_per_node}"
+        pin = "!" if self.gpu_exact and self.gpu in MODAL_EXACT_PINNABLE else ""
+        return f"{MODAL_GPUS[self.gpu]}{pin}:{self.gpus_per_node}"
 
     @property
     def cpu_request(self) -> int:
@@ -219,6 +239,42 @@ def image_ref_from_rl_image(rl_image: str) -> str:
     return ref
 
 
+# SkyPilot's own private-registry login variables (sky.Task envs/secrets;
+# see sky.task._check_docker_login_config).  The launcher reads them from its
+# environment and hands them to SkyPilot as task *secrets* and to Modal as the
+# ``from_registry`` pull secret -- never into the container environment.
+DOCKER_LOGIN_ENV_VARS = (
+    "SKYPILOT_DOCKER_USERNAME",
+    "SKYPILOT_DOCKER_PASSWORD",
+    "SKYPILOT_DOCKER_SERVER",
+)
+
+
+def registry_host(image_ref: str) -> str:
+    """Registry host of ``[docker:]<repo>[@digest]`` (Docker Hub default)."""
+    ref = image_ref[len("docker:"):] if image_ref.startswith("docker:") else image_ref
+    first = ref.split("/", 1)[0]
+    if "/" in ref and ("." in first or ":" in first or first == "localhost"):
+        return first
+    return "docker.io"
+
+
+def registry_credentials(image_ref: str | None, environ) -> dict[str, str] | None:
+    """The SKYPILOT_DOCKER_* login from ``environ`` if it is for the
+    registry ``image_ref`` lives on, else None (public image, or a login
+    for some other registry).  A partial login is an error, as in SkyPilot."""
+    present = {k: environ[k] for k in DOCKER_LOGIN_ENV_VARS if environ.get(k)}
+    if not present or not image_ref:
+        return None
+    if len(present) != len(DOCKER_LOGIN_ENV_VARS):
+        missing = sorted(set(DOCKER_LOGIN_ENV_VARS) - set(present))
+        raise ValueError(f"registry login needs all of {DOCKER_LOGIN_ENV_VARS}; missing {missing}")
+    server = re.sub(r"^https?://", "", present["SKYPILOT_DOCKER_SERVER"]).rstrip("/")
+    if server.split("/", 1)[0] != registry_host(image_ref):
+        return None
+    return present
+
+
 def skypilot_env(rank: int, container_ips: list[str], gpus_per_node: int) -> dict[str, str]:
     """The variables the sky task scripts read, emulated for a container."""
     return {
@@ -227,6 +283,24 @@ def skypilot_env(rank: int, container_ips: list[str], gpus_per_node: int) -> dic
         "SKYPILOT_NODE_RANK": str(rank),
         "SKYPILOT_NUM_GPUS_PER_NODE": str(gpus_per_node),
     }
+
+
+def check_gpu_names(gpu: str, names: list[str], count: int) -> None:
+    """Raise unless exactly ``count`` GPUs of type ``gpu`` are visible."""
+    pattern = MODAL_GPU_NAME_PATTERNS[gpu]
+    wrong = [n for n in names if not re.search(pattern, n)]
+    if wrong or len(names) != count:
+        raise RuntimeError(
+            f"requested {count}x {gpu} (exact) but the container sees {names!r}"
+        )
+
+
+def visible_gpu_names() -> list[str]:
+    out = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 def container_command(run_script: str) -> list[str]:
@@ -247,6 +321,15 @@ def island_main(cfg_json: str) -> int:
         rank, ips = 0, ["127.0.0.1"]
     env = {**os.environ, **cfg.envs, **skypilot_env(rank, ips, cfg.gpus_per_node), "HOME": "/root"}
     print(f"[modal-island {cfg.learner_id}] rank {rank}/{len(ips)} starting", flush=True)
+    try:
+        names = visible_gpu_names()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        if cfg.gpu_exact:
+            raise RuntimeError(f"island {cfg.learner_id}: cannot read GPU names: {exc}") from exc
+        names = []
+    print(f"[modal-island {cfg.learner_id}] requested {cfg.gpu_request}, got {names}", flush=True)
+    if cfg.gpu_exact:
+        check_gpu_names(cfg.gpu, names, cfg.gpus_per_node)
     if cfg.setup_script:
         code = subprocess.call(container_command(cfg.setup_script), env=env)
         if code != 0:
@@ -276,7 +359,19 @@ class ModalOps:
     def build_image(self, cfg: ModalIslandConfig):
         modal = self._modal()
         if cfg.training_mode == "rl":
-            image = modal.Image.from_registry(cfg.image_ref)
+            creds = registry_credentials(cfg.image_ref, os.environ)
+            if creds:  # private registry (e.g. MILES_NEXT_IMAGE on ghcr.io)
+                image = modal.Image.from_registry(
+                    cfg.image_ref,
+                    secret=modal.Secret.from_dict(
+                        {
+                            "REGISTRY_USERNAME": creds["SKYPILOT_DOCKER_USERNAME"],
+                            "REGISTRY_PASSWORD": creds["SKYPILOT_DOCKER_PASSWORD"],
+                        }
+                    ),
+                )
+            else:
+                image = modal.Image.from_registry(cfg.image_ref)
         else:
             image = modal.Image.debian_slim(python_version=cfg.python_version)
             if cfg.pip_requirements:
@@ -523,6 +618,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--gpus-per-node", type=int, default=1)
     p.add_argument("--num-nodes", type=int, default=1)
     p.add_argument("--region", default=None, help="Modal region hint (surcharge); default unpinned")
+    p.add_argument("--gpu-exact", action="store_true",
+                   help="pin the GPU type (H100! -- no H200 upgrade) and assert it in the container")
     p.add_argument("--training-mode", choices=["sft", "rl"], default="sft")
     p.add_argument("--rl-image", default=None, help="docker:<repo>@sha256:<hex> for RL islands")
     p.add_argument("--run-script", required=True, help="path to a file with the island run script")
@@ -557,6 +654,7 @@ def config_from_cli(ns: argparse.Namespace) -> ModalIslandConfig:
         run_script=Path(ns.run_script).read_text(encoding="utf-8"),
         envs=envs,
         region=ns.region,
+        gpu_exact=ns.gpu_exact,
         image_ref=image_ref_from_rl_image(ns.rl_image) if ns.rl_image else None,
         pip_requirements=reqs,
     )
