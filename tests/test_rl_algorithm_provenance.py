@@ -477,3 +477,18 @@ def test_outer_sync_always_in_event():
     plain = selection_event(launch=_launch(AlgorithmSpec()), algorithm=AlgorithmSpec(),
                             miles_commit="x")
     assert plain["rl/outer_sync"] is True
+
+
+def test_launcher_forwards_optimizer_steps():
+    from yeto.launcher import _prepare_rl_args
+
+    assert "--optimizer-steps 1 " in _island_run(_launcher_args("ports"))
+    run = _island_run(_launcher_args("ports", ("--rl-single-island-no-sync",
+                                               "--rl-optimizer-steps", "2")))
+    assert "--optimizer-steps 2 " in run  # rollout 4 x 2 samples = 8, divisible
+    for extra, match in ((("--rl-optimizer-steps", "3"), "must divide"),
+                         (("--rl-optimizer-steps", "0"), "positive int")):
+        with pytest.raises(ValueError, match=match):
+            _prepare_rl_args(_launcher_args("ports", extra))
+    with pytest.raises(ValueError, match="only applies to --rl-engine ports"):
+        _prepare_rl_args(_launcher_args("legacy", ("--rl-optimizer-steps", "2")))
