@@ -339,3 +339,37 @@ def test_tool_wait_seconds_are_summed_from_all_generated_samples(tmp_path):
     stats = IslandDriver._stats(SimpleNamespace(learner_id=0), 3, handle,
                                 TrainStepMetrics(grad_norm=1.0), 1.0, 1.0)
     assert stats.tool_wait_seconds == pytest.approx(7.5)
+
+
+def test_over_sampling_submitted_and_aborted_in_flight_groups(tmp_path):
+    """1b g1d: generated (completed all_samples groups) is not what over-sampling submits.
+    Miles draws over_sampling_batch_size prompts per submission and aborts the in-flight
+    ones when the batch fills; the data-source offset advance counts what was drawn."""
+    args = SimpleNamespace()
+    source = SimpleNamespace(sample_offset=0)
+    assert hook.submitted_groups(args, source.__dict__ and source) is None  # first rollout
+    source.sample_offset = 8  # one submission of over_sampling_batch_size=8
+    assert hook.submitted_groups(args, source) == 8
+    source.sample_offset = 3  # epoch wrap-around: unknown
+    assert hook.submitted_groups(args, source) is None
+    buffered = SimpleNamespace(sample_offset=5, buffer=[["g"]])
+    assert hook.submitted_groups(args, buffered) is None
+
+    sink = f"dir:{tmp_path}"
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    dropped = [group(2, [1.0, 1.0])]
+    args = SimpleNamespace()
+    args._yeto_data_source_offset = 0
+    hook.record_trained_groups(args, kept)
+    import os
+
+    os.environ[hook.META_SINK_ENV] = sink
+    try:
+        hook.extract_rollout_metadata(args, sorted(kept + dropped, key=lambda g: g[0].index),
+                                      SimpleNamespace(sample_offset=8))
+    finally:
+        os.environ.pop(hook.META_SINK_ENV)
+    payload = json.loads((tmp_path / "rollout-3.json").read_text())
+    assert (payload["submitted_groups"], payload["aborted_in_flight_groups"]) == (8, 5)
+    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
+    assert (h.submitted_groups, h.aborted_in_flight_groups) == (8, 5)

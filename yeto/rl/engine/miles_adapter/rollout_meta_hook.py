@@ -327,11 +327,44 @@ def policy_buffer_filter(args: Any, _rollout_id: Any, buffer: list, num_samples:
     return selected
 
 
+_OFFSET_ATTR = "_yeto_data_source_offset"
+
+
+def submitted_groups(args: Any, data_source: Any) -> int | None:
+    """Prompt groups drawn from the data source this rollout (over-sampling included).
+
+    Miles ``generate_rollout`` submits ``over_sampling_batch_size`` groups at a
+    time and aborts the ones still in flight once enough are accepted; those
+    never reach ``all_samples``. The drawn count is the advance of the data
+    source's ``sample_offset`` since the previous rollout (first rollout:
+    unknown; an epoch wrap-around or a buffer source: unknown -> None).
+    """
+    source = getattr(data_source, "__self__", data_source)
+    offset = getattr(source, "sample_offset", None)
+    if not isinstance(offset, int) or getattr(source, "buffer", None):
+        setattr(args, _OFFSET_ATTR, offset if isinstance(offset, int) else None)
+        return None
+    previous = getattr(args, _OFFSET_ATTR, None)
+    setattr(args, _OFFSET_ATTR, offset)
+    if not isinstance(previous, int) or offset < previous:
+        return None
+    return offset - previous
+
+
 def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = None) -> None:
     """``--rollout-all-samples-process-path`` hook."""
 
     try:
-        put_to_sink(build_metadata(args, all_samples))
+        payload = build_metadata(args, all_samples)
+        submitted = submitted_groups(args, data_source)
+        if submitted is not None:
+            generated = payload["completed"] + payload["filtered"]
+            payload["submitted_groups"] = submitted
+            # submitted but not completed when the batch filled: aborted in
+            # flight (partial_rollout off -> their prompts are consumed, never
+            # trained: terminal, A2/F5 'filtered' with reason aborted_in_flight)
+            payload["aborted_in_flight_groups"] = max(0, submitted - generated)
+        put_to_sink(payload)
     finally:
         # Reset per-rollout state: the bounded filter keys its memo on
         # ``yeto_rl_policy_version`` which legacy advanced per round; here the
