@@ -32,3 +32,10 @@
 
 ## 追加（在第一次 s5 运行出结果之前写入）：launcher 关闭阶段误判
 本扫描每次运行都带 syncer（strict-avg，1 个 learner），会受到 launcher 已知缺陷影响：learner 已 finalized、停 syncer 时关闭 Ray，被判为 FAILED。约定如下：若退出码为 4，且该岛已发出 `rl_learner_finalized`，失败只发生在关闭阶段，则该次运行记为"launcher 缺陷导致的无效运行"，既不判通过，也不判机制失败，其数据不进入比较；P0 修复后按同一计划重跑该次。其他退出码 4 仍判为失败。
+
+## 追加（事后，配置/seed/判据未改）：T2R2 s29 失败与重跑
+- T2R2 s29（ebcdad9）：rl_driver_start 之后，learner 与本机 syncer 的连接在 22:08 UTC 断开（syncer 日志：`Connection reset by peer`，22:39 又出现 `Connection timed out`）。岛之后再无事件，launcher 也没有退出。22:41 人工回收（app stopped、0 tasks）。记为"失败：基础设施（syncer 连接中断）"，数据不进入比较。
+- 修复（主 agent 批准重跑的前提）：
+  1. syncer 客户端连接启用 TCP keepalive（idle 60 s，15 s × 4 次探测，120 s 内判定对端死亡），连接异常时 `check_health` 报错退出，不再静默等待，提交 12cde71；
+  2. 合入 launcher 的无进展检测 `--rl-stall-timeout`（algo-cap e484341）。本次取 900 s：s17 三次运行中相邻事件的最大间隔为 526 s（T2R2），900 s 留有余量；超时退出码 6，判为失败（基础设施）。
+- T2R2 s29 在扫描结束后，以 12cde71（或其后仅文档变化的 SHA）按同一计划重跑一次，加 `--rl-stall-timeout 900`。这次重跑与其他 5 次运行的代码 SHA 不同，差异只在网络保活与 launcher 超时，不影响训练计算路径，比较时会注明。

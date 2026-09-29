@@ -488,6 +488,7 @@ class SyncerClient:
         sock = socket.create_connection(self.addr, timeout=timeout)
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        enable_tcp_keepalive(sock)
         return sock
 
     def _connect_one(self) -> socket.socket:
@@ -1719,6 +1720,30 @@ class SyncerClient:
 
     def _set_protocol_error(self, message: str) -> None:
         self._protocol_failed(self._gen, ProtocolError(message))
+
+
+# TCP keepalive for syncer connections (rl-infra-spec pause-audit: without it
+# a NAT/LB that drops an idle flow leaves the learner blocked on recv forever;
+# seen in the 2.4 T2R2 s29 run). Probes start after KEEPIDLE s of silence and a
+# dead peer is detected after KEEPIDLE + KEEPINTVL*KEEPCNT = 120 s, well below
+# common NAT idle timeouts (>= 300 s); the socket then errors, the supervisor
+# records the failure and check_health() raises (max_reconnects=0) instead of
+# waiting silently.
+TCP_KEEPIDLE_S = 60
+TCP_KEEPINTVL_S = 15
+TCP_KEEPCNT = 4
+
+
+def enable_tcp_keepalive(sock: socket.socket) -> None:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for name, value in (
+        ("TCP_KEEPIDLE", TCP_KEEPIDLE_S),
+        ("TCP_KEEPINTVL", TCP_KEEPINTVL_S),
+        ("TCP_KEEPCNT", TCP_KEEPCNT),
+    ):
+        option = getattr(socket, name, None)
+        if option is not None:  # Linux; other platforms keep their defaults
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
 
 
 def _close_socket(sock: socket.socket) -> None:
