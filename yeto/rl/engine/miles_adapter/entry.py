@@ -52,6 +52,70 @@ def miles_capabilities(fingerprint: str) -> EngineCapabilities:
     )
 
 
+def with_partitioned_serial(capabilities: EngineCapabilities) -> EngineCapabilities:
+    """Infra declaration (rl-infra-spec 2.1/2.2): the fixed-partition placement and
+    the partitioned-serial driver mode are implemented on the ports path.
+
+    Kept apart from :func:`miles_capabilities` (the algorithm/R0 declaration).
+    Declaration is not certification: the #66 attestation for a runtime
+    fingerprint is issued only after the 2.1/2.2 GPU acceptance.
+    """
+    import dataclasses
+
+    return dataclasses.replace(
+        capabilities,
+        placements=capabilities.placements | {"fixed-partition"},
+        execution_modes=capabilities.execution_modes | {"partitioned-serial"},
+        partitioned_driver=True,
+    )
+
+
+def outer_protocol(miles_args: Any, *, yeto_policy_sync: bool) -> str:
+    if not yeto_policy_sync:
+        return "none"
+    return (
+        "decoupled"
+        if getattr(miles_args, "yeto_rl_sync_preset", "strict-avg") == "decoupled"
+        else "strict-avg"
+    )
+
+
+def execution_profile_for(
+    miles_args: Any, launch: Any, algorithm: AlgorithmSpec, *, yeto_policy_sync: bool
+):
+    """The run's :class:`ExecutionProfile`, bound to ``algorithm`` (alignment A1).
+
+    colocated placement -> ``colocated-serial``; fixed partition ->
+    ``partitioned-serial`` (no overlap is certified, task 2.3).
+    """
+    from ..execution_profile import ExecutionProfile
+
+    mode = "colocated-serial" if launch.placement.kind == "colocated" else "partitioned-serial"
+    profile = ExecutionProfile(
+        name=f"miles-lora-{mode}",
+        execution_mode=mode,
+        outer_protocol=outer_protocol(miles_args, yeto_policy_sync=yeto_policy_sync),
+        groups_per_batch=int(miles_args.rollout_batch_size),
+        samples_per_group=int(miles_args.n_samples_per_prompt),
+        optimizer_steps_per_round=int(getattr(miles_args, "num_steps_per_rollout", 1) or 1),
+    )
+    return profile.bind_algorithm(algorithm)
+
+
+def preflight(profile: Any, algorithm: AlgorithmSpec, capabilities: EngineCapabilities) -> None:
+    """A1: profile/algorithm/capability agreement, before any GPU process exists."""
+    from ..execution_profile import check_algorithm_contract
+
+    check_algorithm_contract(profile, algorithm)
+    placement = "colocated" if profile.execution_mode == "colocated-serial" else "fixed-partition"
+    capabilities.check(
+        layout="lora",
+        placement=placement,
+        execution_mode=profile.execution_mode,
+        algorithm=algorithm,
+    )
+
+
 def build_sync(miles_args: Any, *, yeto_policy_sync: bool) -> tuple[Any, Any]:
     """(sync session, progress store) for the preset the learner selected."""
 
@@ -96,6 +160,8 @@ def compose_island(
     flatten_checksums: Callable[[Any], list[dict[str, Any]]] | None = None,
     verify_engine_checksums: bool = True,
     placement: Any = None,
+    profile: Any = None,
+    observe: bool = False,
 ):
     """Wire the adapter ports into an ``IslandDriver`` (no upstream imports)."""
 
@@ -165,6 +231,8 @@ def compose_island(
         progress=progress,
         evaluate=evaluate,
         eval_interval=eval_interval,
+        profile=profile,
+        observe=observe,
     )
     holder["driver"] = driver
     return driver
@@ -233,6 +301,13 @@ def run_ports_island(
     from .state import require_run_plugin
 
     require_run_plugin()  # before any upstream component or model exists
+    capabilities = with_partitioned_serial(
+        miles_capabilities(runtime_fingerprint(launch, MILES_NEXT_COMMIT))
+    )
+    profile = execution_profile_for(
+        miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync
+    )
+    preflight(profile, algorithm, capabilities)  # A1: before any GPU process
     connect_island_ray()
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
@@ -288,10 +363,12 @@ def run_ports_island(
             sync=sync,
             progress=progress,
             metadata=RayMetadataSink(),
-            capabilities=miles_capabilities(runtime_fingerprint(launch, MILES_NEXT_COMMIT)),
+            capabilities=capabilities,
             runner=runner,
             evaluate=lambda rollout_id: runner.run(evaluate(rollout_id)),
             eval_interval=getattr(miles_args, "eval_interval", None),
+            profile=profile,
+            observe=bool(getattr(miles_args, "yeto_rl_observe_timeline", False)),
         )
         return driver.run()
     except BaseException as exc:

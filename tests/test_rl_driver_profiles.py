@@ -150,3 +150,33 @@ def test_strict_profile_refuses_generation_on_an_older_published_policy(tmp_path
     with pytest.raises(ReadinessError, match="behind trained"):
         driver._generate(0)
     assert ("generate", 0) not in engine.calls
+
+
+def test_ports_entry_builds_a_bound_profile_and_preflights_before_gpu():
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.capabilities import CapabilityMismatch
+    from yeto.rl.engine.execution_profile import ProfileError
+    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+
+    args = SimpleNamespace(rollout_batch_size=4, n_samples_per_prompt=8, num_steps_per_rollout=1,
+                           yeto_rl_sync_preset="strict-avg")
+    part = SimpleNamespace(placement=PlacementRequest("fixed-partition", 2, 2, 1), argv=("x",))
+    spec = AlgorithmSpec()
+    profile = entry.execution_profile_for(args, part, spec, yeto_policy_sync=True)
+    assert profile.execution_mode == "partitioned-serial"
+    assert profile.outer_protocol == "strict-avg"
+    assert profile.algorithm_spec_sha256 == spec.sha256()
+    r0 = entry.miles_capabilities("sha256:" + "1" * 64)
+    with pytest.raises(CapabilityMismatch):
+        entry.preflight(profile, spec, r0)  # R0 declaration: colocated only
+    caps = entry.with_partitioned_serial(r0)
+    entry.preflight(profile, spec, caps)
+    assert caps.partitioned_driver and r0.advantage_estimators == caps.advantage_estimators
+    with pytest.raises(ProfileError):
+        entry.preflight(profile, AlgorithmSpec(kl_coef=0.1), caps)
+    colo = SimpleNamespace(placement=PlacementRequest("colocated", 2, 2, 1), argv=("x",))
+    p = entry.execution_profile_for(args, colo, spec, yeto_policy_sync=False)
+    assert (p.execution_mode, p.outer_protocol) == ("colocated-serial", "none")
+    entry.preflight(p, spec, r0)

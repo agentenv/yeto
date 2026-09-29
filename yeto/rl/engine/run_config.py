@@ -146,6 +146,9 @@ class ParallelLayout:
     visible_gpus_per_node: int
     # Uneven pipeline split: (first, last) stage layer counts, else None.
     uneven_pipeline_layers: tuple[int, int] | None
+    # rl-infra-spec 2.1: reserved standby GPUs of a fixed partition (never
+    # started by any role); a non-zero value needs the fork-M1 placement map.
+    standby_gpus: int = 0
 
     @property
     def colocated(self) -> bool:
@@ -529,8 +532,30 @@ def resolve_rl_run_config(
             raise ValueError("pinned Qwen3.5 requires TP1 SGLang inference engines")
         dedicated_rollout_gpus = rollout_gpus
         visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus
+    elif getattr(args, "rl_placement", "colocated") == "fixed-partition":
+        # rl-infra-spec 2.1: a LoRA fixed partition (ports engine only; the
+        # legacy CLI never sets rl_placement, so its layout is unchanged).
+        rollout_gpus = getattr(args, "rollout_num_gpus", None)
+        per_engine = getattr(args, "rollout_num_gpus_per_engine", 1)
+        if (
+            args.actor_num_nodes != 1
+            or type(rollout_gpus) is not int
+            or rollout_gpus < 1
+            or rollout_gpus % per_engine
+        ):
+            raise ValueError(
+                "a LoRA fixed partition needs one node and --rollout-num-gpus as a "
+                "positive multiple of --rollout-num-gpus-per-engine"
+            )
+        dedicated_rollout_gpus = rollout_gpus
+        standby_gpus = int(getattr(args, "rl_standby_gpus", 0) or 0)
+        if standby_gpus < 0:
+            raise ValueError("--rl-standby-gpus must be non-negative")
+        visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus + standby_gpus
     else:
         visible_gpus_per_node = args.actor_num_gpus_per_node
+    if dedicated_rollout_gpus is None or parameter_mode == "full":
+        standby_gpus = 0
 
     ref_load = _resolve_ref_load(args, model_path)
     global_batch = args.groups_per_round * args.samples_per_group // args.optimizer_steps
@@ -687,6 +712,7 @@ def resolve_rl_run_config(
             dedicated_rollout_gpus=dedicated_rollout_gpus,
             visible_gpus_per_node=visible_gpus_per_node,
             uneven_pipeline_layers=uneven_pipeline_layers,
+            standby_gpus=standby_gpus,
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
