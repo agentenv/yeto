@@ -1,8 +1,8 @@
 #!/bin/bash
 # 7.6 MaxRL two-island strict-avg G3 (plan.md). Run from evidence/g3.
-set -u; G=$(pwd); E=$G/run; mkdir -p $E; T=/tmp/algo2a/tree-g3; H=/tmp/algo2a/g3home; APP=yeto-algo2a-g3; PORT=29420
+set -u; G=$(pwd); R=${1:-run}; E=$G/$R; mkdir -p $E; T=/tmp/algo2a/tree-g3; H=/tmp/algo2a/g3home; APP=yeto-algo2a-g3; PORT=29420
 rm -rf $T $H; mkdir -p $T $H/yeto-output /tmp/algo2a
-git -C /home/michael/work/algo-2a archive $(cat YETO_SHA) | tar x -C $T; rm -rf $T/tests $T/docs
+git -C /home/michael/work/algo-2a archive $(cat $G/$R/YETO_SHA 2>/dev/null || cat YETO_SHA) | tar x -C $T; rm -rf $T/tests $T/docs
 find $T/openspec -mindepth 1 -maxdepth 1 ! -name changes -exec rm -rf {} +; cp harness/run_local_head.py $T/
 cp /home/michael/work/gpu-default-modal/home/yeto-syncer $H/; ln -s /home/michael/.modal.toml $H/.modal.toml; ln -s /home/michael/.sky $H/.sky
 ss -ltn | grep -q ":$PORT " && { echo "port $PORT busy" | tee $E/port_check.txt; exit 5; }; echo "$PORT free $(date -u +%FT%TZ)" > $E/port_check.txt

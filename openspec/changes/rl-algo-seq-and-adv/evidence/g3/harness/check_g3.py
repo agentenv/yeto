@@ -2,9 +2,10 @@
 import json, math, re, sys
 from pathlib import Path
 d = Path(sys.argv[1]); c = {}
-sys.path.insert(0, "/tmp/a2-g3")  # 4652f73 tree
+sys.path.insert(0, "/tmp/a2-g3")  # YETO_SHA tree
 from yeto.rl.engine.algorithm import AlgorithmSpec
-sha = AlgorithmSpec.from_json_file(str(d.parent / "maxrl.json")).sha256()
+spec_path = d / "maxrl.json" if (d / "maxrl.json").exists() else d.parent / "maxrl.json"
+sha = AlgorithmSpec.from_json_file(str(spec_path)).sha256()
 rc = (d / "rc").read_text().strip()
 c["0_exit_code"] = rc  # 0 pass; 2 -> tapes decide; 3 or other -> fail
 sync = [json.loads(x) for x in (d / "yeto-tape.jsonl").read_text().splitlines() if x.strip()] \
