@@ -132,25 +132,60 @@ def test_registry_credentials_match_the_image_registry():
     partial = {k: v for k, v in LOGIN.items() if k != "SKYPILOT_DOCKER_PASSWORD"}
     with pytest.raises(ValueError, match="SKYPILOT_DOCKER_PASSWORD"):
         mr.registry_credentials(ghcr, partial)
+    # ... but a partial login only matters for its own registry.
+    assert mr.registry_credentials(rl.MILES_NEXT_BASE_IMAGE, partial) is None
+    assert mr.registry_credentials(ghcr, {"SKYPILOT_DOCKER_USERNAME": "u"}) is None
 
 
-def test_sky_task_gets_the_login_as_secrets_not_envs(monkeypatch, login):
+def _fake_login_config(monkeypatch):
+    monkeypatch.setattr(launcher, "_sky_docker_login_config", lambda login: ("login", dict(login)))
+
+
+def test_sky_ports_task_logs_in_via_docker_login_config_only(monkeypatch, login):
+    _fake_login_config(monkeypatch)
     args = _cli()
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert task.secrets == LOGIN
+    assert task.resources._docker_login_config == ("login", LOGIN)
+    # Neither envs nor secrets: SkyPilot exports both into setup/run.
+    assert not hasattr(task, "secrets")
     assert not set(LOGIN) & set(task.envs)
+    assert "not-a-real-token" not in json.dumps(task.envs) + task.setup + task.run
     assert task.resources.image_id == rl.MILES_NEXT_IMAGE
 
 
 @pytest.mark.parametrize("engine", ["ports", "legacy"])
-def test_no_login_means_no_secrets(monkeypatch, no_login, engine):
+def test_no_login_means_no_docker_login(monkeypatch, no_login, engine):
     args = _cli(("--rl-engine", engine))
     _prepare_rl_args(args)
-    assert not hasattr(_island_task(args, monkeypatch), "secrets")
+    task = _island_task(args, monkeypatch)
+    assert not hasattr(task, "secrets")
+    assert not hasattr(task.resources, "_docker_login_config")
+
+
+def _legacy_task_blob(monkeypatch):
+    args = _cli(("--rl-engine", "legacy"))
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    d = {k: v for k, v in vars(task).items() if k not in ("calls", "storage_mounts")}
+    d["resources"] = vars(d["resources"])
+    return json.dumps(d, sort_keys=True, default=str)
+
+
+@pytest.mark.parametrize(
+    "env",
+    [LOGIN, {"SKYPILOT_DOCKER_SERVER": "ghcr.io"}, {**LOGIN, "SKYPILOT_DOCKER_SERVER": "docker.io"}],
+)
+def test_legacy_task_ignores_any_registry_login(monkeypatch, no_login, env):
+    _fake_login_config(monkeypatch)
+    before = _legacy_task_blob(monkeypatch)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert _legacy_task_blob(monkeypatch) == before  # even for its ghcr.io image
 
 
 def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
+    _fake_login_config(monkeypatch)
     args = _cli()
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
@@ -158,7 +193,7 @@ def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
 
     args.cluster_prefix = "img-test"
     cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xh100")[0], 0, task, "1.2.3.4:5")
-    assert cfg.image_ref == mr.image_ref_from_rl_image(rl.MILES_NEXT_IMAGE)
+    assert cfg.registry_login and cfg.image_ref == mr.image_ref_from_rl_image(rl.MILES_NEXT_IMAGE)
     assert not set(LOGIN) & set(cfg.envs)  # never inside the container
     assert "not-a-real-token" not in cfg.to_json()
     state = fake_modal(monkeypatch)
@@ -171,11 +206,80 @@ def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
     )
 
 
+def test_modal_legacy_pull_ignores_the_login(monkeypatch, login):
+    args = _cli(("--rl-engine", "legacy"))
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args.cluster_prefix = "img-test"
+    cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xh100")[0], 0, task, "1.2.3.4:5")
+    assert cfg.registry_login is False
+    state = fake_modal(monkeypatch)
+    mr.ModalOps("img-test").define(cfg)
+    assert state["images"][0].calls[0] == ("from_registry", (cfg.image_ref,), {})
+
+
 def test_modal_public_image_pull_is_unchanged(monkeypatch, no_login):
     state = fake_modal(monkeypatch)
     ref = "ghcr.io/x/miles@sha256:" + "c" * 64
     mr.ModalOps("yeto-run").define(_cfg(training_mode="rl", image_ref=ref, setup_script="true"))
     assert state["images"][0].calls[0] == ("from_registry", (ref,), {})
+
+
+def test_sky_docker_login_config_is_skypilots_type():
+    sky_utils = pytest.importorskip("sky.provision.docker_utils")
+    config = launcher._sky_docker_login_config(LOGIN)
+    assert isinstance(config, sky_utils.DockerLoginConfig) and config.server == "ghcr.io"
+
+
+def test_pure_python_check_rejects_build_inputs(tmp_path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("make_layer", REPO / "docker/miles-ports/make_layer.py")
+    ml = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ml)
+    repo = tmp_path / "r"
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+    repo.mkdir()
+    run("init", "-q")
+    run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base")
+    base = run("rev-parse", "HEAD")
+    pkgs = ("python/sglang/",)
+    for path, ok in (
+        ("python/sglang/srt/x.py", True),
+        ("test/registered/t.py", True),
+        ("README.md", True),
+        ("python/pyproject.toml", False),
+        ("python/setup.py", False),
+        ("python/sglang/setup.cfg", False),
+        ("python/requirements.txt", False),
+        ("sgl-kernel/python/sgl_kernel/x.py", False),
+        ("rust/src/lib.rs", False),
+        ("python/sglang/srt/kernel.cu", False),
+    ):
+        run("checkout", "-q", "--detach", base)
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text("x\n")
+        run("add", path)
+        run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", path)
+        head = run("rev-parse", "HEAD")
+        (repo / path).unlink()
+        if ok:
+            assert ml.check_pure_python(repo, base, head, pkgs) == [path]
+        else:
+            with pytest.raises(SystemExit, match="pure-Python"):
+                ml.check_pure_python(repo, base, head, pkgs)
+
+
+def test_gpu_exact_needs_modal_islands():
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _cli(("--modal-gpu-exact",))
+    with pytest.raises(ValueError, match="only to Modal"):
+        launcher.require_modal_for_gpu_exact(args, parse_gpu_spec("modal:1xh100,aws:1xa100@us-east-1"))
+    launcher.require_modal_for_gpu_exact(args, parse_gpu_spec("modal:1xh100"))
+    launcher.require_modal_for_gpu_exact(_cli(), parse_gpu_spec("aws:1xa100@us-east-1"))
 
 
 def test_image_manifest_schema_in_build_script():

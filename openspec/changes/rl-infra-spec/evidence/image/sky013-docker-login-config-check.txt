@@ -1,0 +1,1 @@
+sky 0.13.0 DockerLoginConfig resources.docker_login_config.server = ghcr.io
