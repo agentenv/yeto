@@ -36,6 +36,8 @@ try:  # 1a-shared.patch (OPSM combinable with tis/custom) applied?
     HAS_OPSM_COMBINATION = True
 except AlgorithmSpecError:
     pass
+HAS_NAMED_CUSTOM = hasattr(__import__("yeto.rl.engine.algorithm", fromlist=["x"]),
+                           "register_named_correction_function")
 
 
 def spec(**correction):
@@ -441,3 +443,55 @@ def test_fake_driver_full_mask_round_is_not_a_failure(tmp_path, name):
     for fraction in ({1: 0.5}, {}):
         with pytest.raises(StrictRlInvariantError, match="grad_norm 0"):
             run(masked_fraction_rounds=fraction)
+
+
+@pytest.mark.skipif(not HAS_NAMED_CUSTOM, reason="needs 1a-shared.patch (named custom functions)")
+@pytest.mark.parametrize("name", ["mismatch_observe", "icepop", "mis", "mis_mask"])
+def test_named_function_does_not_require_generic_custom(name):
+    pairs = ALL[name]().required_mechanisms()
+    assert ("corrections", "custom") not in pairs and ("corrections", name) in pairs
+    other = AlgorithmSpec(correction={"method": "custom", "function": {
+        "path": "yeto.rl.engine.algorithm.plugin_source_sha256", "sha256": "2" * 64}})
+    assert ("corrections", "custom") in other.required_mechanisms()
+
+
+@pytest.mark.skipif(not HAS_OPSM_COMBINATION, reason="needs 1a-shared.patch (always_emit)")
+def test_opsm_source_always_in_canonical_json():
+    assert json.loads(opsm().canonical_json())["correction"]["opsm_old_logprob_source"] == "trainer"
+    assert "opsm_old_logprob_source" not in json.loads(tis().canonical_json())["correction"]
+
+
+# -- 6.3 documentation examples through the P0 dry run --------------------------
+
+
+def _doc_examples():
+    import pathlib
+    import re
+
+    text = (pathlib.Path(__file__).resolve().parents[1] / "docs/MILES_RL.md").read_text()
+    pattern = re.compile(r"<!-- mismatch-example allow=([\w,]+) -->\n```json\n(.*?)```", re.S)
+    return [(allow.split(","), body) for allow, body in pattern.findall(text)]
+
+
+def test_doc_has_every_example():
+    assert len(_doc_examples()) == 6
+
+
+@pytest.mark.parametrize("index", range(6))
+def test_doc_example_dry_run(tmp_path, index):
+    from yeto.rl.engine.miles_adapter.algorithm_flags import dry_run
+
+    allow, body = _doc_examples()[index]
+    path = tmp_path / "spec.json"
+    path.write_text(body)
+    spec = AlgorithmSpec.from_json_file(str(path))
+    assert spec.rejections() == []
+    rejected = dry_run(["--dry-run", "--rl-algorithm-spec", str(path)])
+    assert rejected["verdict"] == "rejected" and "supported: ['none']" in rejected["error"]
+    argv = ["--dry-run", "--rl-algorithm-spec", str(path)]
+    for name in allow:
+        argv += ["--rl-allow-unverified-mechanism", name]
+    accepted = dry_run(argv)
+    assert accepted["verdict"] == "accepted", accepted.get("error")
+    assert accepted["algorithm_spec_sha256"] == spec.sha256()
+    assert accepted["miles_argv"][2:] == algorithm_argv(spec)

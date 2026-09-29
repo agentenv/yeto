@@ -634,6 +634,145 @@ and `legacy` plans all four arms including `native`; explicitly adding the
 `native` arm to a ports run exits with an error naming
 `--arms single,federated,decoupled`.
 
+### Train/inference mismatch corrections
+
+Change `rl-algo-mismatch-correction` (registration module
+`yeto/rl/algos/mismatch_correction.py`). On the serial ports driver the
+behavior policy (SGLang generating with `W_r`) and `pi_old` (Megatron
+re-scoring with `W_r`) are the **same weights**: the per-group policy token
+enforces it. The ratio `exp(train_old - rollout)` therefore measures only the
+numeric difference between the two engines (kernels, bf16, the LoRA weight
+publish path). These mechanisms correct that difference; they are not an
+off-policy license: `execution.max_policy_staleness` stays 0 and a non-zero
+value is rejected before any GPU process.
+
+Every threshold is explicit. yeto sets no default and does not inherit Miles'
+parser defaults (for example `--tis-clip-low 0`); the translated argv always
+carries the values from the spec. At most one importance-weighting correction
+(observe-only, TIS, IcePop or MIS) can be selected, because they share
+`correction.method` and Miles has one `--custom-tis-function-path`. Selecting
+two of them through extra argv is a conflict that names both flags. OPSM alone
+uses `correction.method: "opsm"`. Combining OPSM with TIS, IcePop or MIS needs
+the shared-interface patch `1a-shared.patch`, which is pending. Observe-only
+can never be combined with another mechanism.
+
+| mechanism | spec (`correction`) | Miles argv / attributes | masks tokens | validation |
+| --- | --- | --- | --- | --- |
+| `mismatch_observe` | `method: custom`, `function: yeto.rl.algos.mismatch_observe.observe_mismatch`, `mismatch_metrics: true` | `--use-tis --custom-tis-function-path ... --get-mismatch-metrics` | no | CPU (loss and gradient `torch.equal` to no correction) |
+| `tis` | `method: tis`, `tis_clip`, `tis_clip_low` | `--use-tis --tis-clip H --tis-clip-low L` | no | CPU |
+| `icepop` | `method: custom`, `function: miles...corrections.icepop_function`, `tis_clip_low` < `tis_clip` | `--use-tis --tis-clip H --tis-clip-low L --custom-tis-function-path ...` | yes | CPU |
+| `opsm_trainer` / `opsm_rollout` | `method: opsm`, `opsm_delta`, `opsm_old_logprob_source` | `--use-opsm --opsm-delta d` (+ `--use-rollout-logprobs` for `rollout`) | yes (sequences) | CPU |
+| `mis` / `mis_mask` | `method: custom`, `function: yeto.rl.algos.vendor.miles_mis.compute_mis_weights_with_cp`, `mis_level`, `mis_mode`, `mis_upper_bound` (+ `mis_lower_bound` for clip/mask), `mis_batch_normalize` | `--use-tis --custom-tis-function-path ...` plus namespace attributes `tis_level`, `tis_mode`, `tis_*_bound`, `tis_batch_normalize`, `use_rs=false` | `mis_mask` only | CPU |
+
+Validation levels: "CPU" means numeric tests against the Miles sources at
+`MILES_NEXT_COMMIT` (`tests/test_rl_mismatch_observe.py`, run in miles-next-venv)
+plus spec, translation and rejection tests (`tests/test_rl_mismatch_correction.py`).
+**No mechanism has passed the single-GPU smoke (G1) or the two-island
+strict-avg run (G3) yet.** The Miles adapter therefore declares none of them
+(`corrections: ["none"]`), and a ports run that selects one fails at startup
+with a list of the supported mechanisms. For a single-island G1 smoke only,
+`--rl-allow-unverified-mechanism` admits them. Nothing here claims a training
+benefit.
+
+Threshold meaning. The literature values below have not been verified in this
+repository; they are shown only for orientation:
+
+- TIS: the weight is `clamp(ratio, tis_clip_low, tis_clip)` and multiplies the
+  per-token PPO loss. No token is masked. Miles' own example uses `C = 2`
+  (unverified).
+- IcePop: a token whose ratio lies in `[tis_clip_low, tis_clip]` gets the weight
+  `ratio`; any other token gets weight 0. The paper's interval is `[0.5, 5]`
+  (unverified).
+- OPSM: a sequence is masked when its advantage is negative and the
+  sequence-level `mean(pi_old - pi_theta) > opsm_delta`. With
+  `opsm_old_logprob_source: "trainer"` (the default, as in Miles) `pi_old` is
+  the Megatron re-score, so OPSM only masks sequences that the inner
+  mini-batches moved too far; it does not cover train/inference mismatch.
+  `"rollout"` requires `use_rollout_logprobs: true`
+  (`--use-rollout-logprobs`), which **also replaces `pi_old` in the PPO ratio**,
+  not only in OPSM. Because of that, it is rejected together with TIS. The
+  DeepSeek-V3.2 report uses the inference-side logprobs (unverified).
+- MIS: `mis_mode` is `truncate` (cap at the upper bound), `clip` (clamp to
+  `[lower, upper]`) or `mask` (zero the tokens outside the interval), and
+  `mis_level` is `token`, `sequence` or `geometric` (geometric mean). Miles'
+  example suggests `[0.9999, 1.0001]` for the geometric level (unverified).
+  Rejection sampling and the veto threshold of Miles' `mis.yaml` are not
+  exposed. MIS is a verbatim copy of Miles
+  `examples/infra_features/train_infer_mismatch_helper/mis.py` at `9e4260d`
+  (Apache-2.0; header in `yeto/rl/algos/vendor/miles_mis.py`). The copy is
+  needed because plugins must live under `yeto.`/`miles.` and Miles'
+  `examples/` is not an installed package. On a Miles upgrade, re-copy it and
+  rerun `tests/test_rl_mismatch_observe.py`, which checks that the copy equals
+  the original. Do the same with `ICEPOP_SOURCE_SHA256`.
+
+Zero-gradient rule: `icepop`, `opsm_*` and `mis_mask` may legitimately mask a
+whole round. A round with zero gradient is accepted only when the trainer
+reports `masked_fraction == 1.0`. The helper
+`mismatch_correction.masked_fraction_from_metrics` derives it from the Miles
+metrics: `tis_clipfrac` for IcePop and `mis_tis_mask_fraction_low + _high` for
+MIS. It returns None for OPSM, whose `opsm_clipfrac` is not a token fraction. An
+unknown fraction keeps the strict R0 rule. A non-finite `grad_norm` always
+fails. The trainer-side wiring is pending INFRA.
+
+Metrics: `tis`, `tis_abs`, `ois`, `train_rollout_kl`,
+`train_rollout_logprob_abs_diff` and `ess_ratio`, plus
+`mismatch_outside_0p5_5` for observe-only (the fraction of tokens outside the
+IcePop reference interval `[0.5, 5]`). They appear in Miles' `train/*` log. The
+ports event stream does not carry them yet (pending INFRA). The serial
+colocated mode publishes LoRA weights over CUDA IPC. The partitioned mode of
+`rl-infra-spec` must use NCCL broadcast, so a mismatch measured in one mode
+does not carry over to the other.
+
+Examples. Each block is checked by `tests/test_rl_mismatch_correction.py`
+through the P0 dry run (`python3 -m yeto.rl.engine.miles_adapter.algorithm_flags
+--dry-run --rl-algorithm-spec FILE [--rl-allow-unverified-mechanism NAME ...]`):
+it is rejected as undeclared without the allowances and accepted with them.
+
+<!-- mismatch-example allow=custom,mismatch_observe,mismatch_metrics -->
+```json
+{"schema": "yeto-rl-algorithm-spec-v2",
+ "correction": {"method": "custom", "mismatch_metrics": true,
+   "function": {"path": "yeto.rl.algos.mismatch_observe.observe_mismatch",
+                "sha256": "89d30b28540ac6dd5c0a9ec0aab41a6d445de9f169ee1bd5e7307673c9687bac"}}}
+```
+
+<!-- mismatch-example allow=tis -->
+```json
+{"schema": "yeto-rl-algorithm-spec-v2",
+ "correction": {"method": "tis", "tis_clip": 2.0, "tis_clip_low": 0.0}}
+```
+
+<!-- mismatch-example allow=custom,icepop,mismatch_metrics -->
+```json
+{"schema": "yeto-rl-algorithm-spec-v2",
+ "correction": {"method": "custom", "tis_clip_low": 0.5, "tis_clip": 5.0,
+   "mismatch_metrics": true,
+   "function": {"path": "miles.backends.training_utils.loss_hub.corrections.icepop_function",
+                "sha256": "971ccb0bf00b43b0582839c5b8dc05e91162c878ab7ec0ca878e3b1e668f5318"}}}
+```
+
+<!-- mismatch-example allow=opsm,opsm_trainer -->
+```json
+{"schema": "yeto-rl-algorithm-spec-v2",
+ "correction": {"method": "opsm", "opsm_delta": 0.0001, "opsm_old_logprob_source": "trainer"}}
+```
+
+<!-- mismatch-example allow=opsm,opsm_rollout,rollout_logprobs_as_old -->
+```json
+{"schema": "yeto-rl-algorithm-spec-v2",
+ "correction": {"method": "opsm", "opsm_delta": 0.0001, "opsm_old_logprob_source": "rollout",
+   "use_rollout_logprobs": true}}
+```
+
+<!-- mismatch-example allow=custom,mis_mask -->
+```json
+{"schema": "yeto-rl-algorithm-spec-v2",
+ "correction": {"method": "custom", "mis_level": "geometric", "mis_mode": "mask",
+   "mis_lower_bound": 0.9999, "mis_upper_bound": 1.0001,
+   "function": {"path": "yeto.rl.algos.vendor.miles_mis.compute_mis_weights_with_cp",
+                "sha256": "70b20362d32e485f303b6964785b27b5b27a3d2476b678a9f7dd1d2a86174b83"}}}
+```
+
 ## Benchmark
 
 [`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs up to four local,

@@ -38,9 +38,11 @@ pi_behav = pi_old weights, design D1); they are not an off-policy license.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping
 from typing import Any
 
+from yeto.rl.engine import algorithm as _algorithm
 from yeto.rl.engine.algorithm import (
     AlgorithmSpec,
     AlgorithmSpecError,
@@ -154,9 +156,15 @@ def _positive(path: str, value: Any):
     return _number(path, value, low=0.0, low_open=True)
 
 
+# With 1a-shared.patch (FieldDef.always_emit) the source is written to the
+# canonical JSON whenever OPSM is selected, even at its default "trainer".
+_ALWAYS_EMIT = (
+    {"always_emit": lambda group: group.opsm_delta is not None}
+    if "always_emit" in inspect.signature(register_field).parameters else {}
+)
 register_field(
     "correction", "opsm_old_logprob_source", default="trainer",
-    parse=lambda path, value: _choice(path, value, OPSM_SOURCES),
+    parse=lambda path, value: _choice(path, value, OPSM_SOURCES), **_ALWAYS_EMIT,
 )
 register_field("correction", "mis_level", default=None, parse=_optional_choice(MIS_LEVELS))
 register_field("correction", "mis_mode", default=None, parse=_optional_choice(MIS_MODES))
@@ -168,6 +176,12 @@ register_field("correction", "mis_batch_normalize", default=False, parse=_boolea
 # --------------------------------------------------------------------------
 # mechanisms (design D7/D8)
 # --------------------------------------------------------------------------
+
+# With 1a-shared.patch these functions no longer also require the generic
+# ("corrections", "custom") mechanism, so an engine can declare them alone.
+if hasattr(_algorithm, "register_named_correction_function"):
+    for _path in (OBSERVE_PATH, ICEPOP_PATH, MIS_PATH):
+        _algorithm.register_named_correction_function(_path)
 
 for _name in CORRECTION_MECHANISMS:
     if _name == "tis":
