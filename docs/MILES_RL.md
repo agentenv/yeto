@@ -649,16 +649,54 @@ Before any GPU process exists, the driver handshake refuses:
 
 **Declaration policy** (main-agent decision, may be overridden by the user;
 alignment §7b): a mechanism is declared in `miles_capabilities` only on
-evidence that it actually takes effect on GPU. Current Miles adapter
-declarations beyond R0:
+evidence that it actually takes effect on GPU. The declarations beyond R0,
+each with its evidence, are the `MILES_DECLARED` table in
+`yeto/rl/engine/miles_adapter/entry.py` (one commit per mechanism):
 
-- `corrections`: `tis`, `opsm`, `opsm_trainer` (rl-algo-mismatch-correction).
-  **G1 only proved they run; that their truncation/masking branches take
-  effect is pending a triggering run.** They are withdrawn if that run does
-  not show the effect.
-- `features`: `maxrl`, `mapo` (rl-algo-seq-and-adv G1). A real run also needs
-  `reward_postprocessors:custom_reward_postprocess`, which waits for the
-  rl-algo-grpo-knobs G1. `gdpo` is held back.
+- corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe
+  (rl-algo-mismatch-correction);
+- loss_aggregations: constant; features: kl_loss_ref_model, entropy_bonus,
+  overlong_penalty; kl_placements: loss; reward_postprocessors:
+  custom_reward_postprocess (rl-algo-grpo-knobs);
+- advantage estimators: gspo, reinforce_plus_plus,
+  reinforce_plus_plus_baseline; features: maxrl, mapo, gdpo
+  (rl-algo-seq-and-adv).
+
+Withdrawn after independent review:
+
+- loss_aggregations:token: grad_norm was bit-identical to the baseline.
+- features:no_grpo_std_normalization: no run isolates it from the
+  `constant` aggregation.
+- features:mismatch_metrics: every evidence run already had use_tis, and
+  Miles emits the metrics under `get_mismatch_metrics or use_tis`.
+
+Because mismatch_metrics is withdrawn, icepop and mismatch_observe specs that
+set `correction.mismatch_metrics` are refused on that feature.
+
+Not declared, pending evidence or approval:
+
+- clip_higher, dual_clip, over_sampling;
+- overlong_filter, mis, opsm_rollout, generic corrections:custom;
+- features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
+  reducer, and that reducer is claimed by `loss_aggregations:constant`
+  (`register_named_reducer`).
+
+Settings an estimator mandates are claimed by that estimator's mechanism in
+that combination only (`ESTIMATOR_COMPANIONS`; main-agent decision, may be
+overridden by the user): GSPO's explicit clip range and the rpp family's
+advantage whitening. The same settings under grpo are still separate,
+undeclared mechanisms.
+
+Measured on integ-decl with the committed example specs:
+
+- accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
+- refused: dapo-like (clip_higher, eps_clip, over_sampling, token) and
+  dr-grpo, which is now refused only on no_grpo_std_normalization (the
+  reducer is claimed by `constant`).
+
+**Combinations are not GPU-verified.** Each declared mechanism has its own
+GPU evidence. Combinations such as tis+opsm_trainer or icepop+opsm_trainer
+have none, so they are accepted but unverified.
 
 "Expressible, not enabled" means the spec can describe and translate a
 mechanism, but `miles_capabilities` does not declare it yet. A follow-up
@@ -701,6 +739,19 @@ The Miles argv of default GRPO is byte-identical to R0.
 `yeto-rl-export --rl-algorithm-spec PATH` writes `algorithm_spec`, the
 canonical JSON, and `algorithm_spec_sha256` to the ports provenance. The
 legacy provenance is unchanged.
+
+**Event tapes of Modal islands.** A Modal island's `~/yeto-output` cannot be
+fetched. So every ports Modal island, and every `--rl-single-island-no-sync`
+island, runs with `--rl-echo-events`: the learner prints each tape record as
+`YETO_RL_EVENT <json>` (`yeto/rl/event_echo.py`), and the launcher rebuilds
+`<run dir>/events/<island>.jsonl` from the log stream.
+
+The check fails closed. A tape without `rl_learner_finalized`, for example a
+stream cut when the container exited, gets a `.incomplete` marker and makes
+the run exit 3. A synced run still fetches its checkpoint first.
+
+`--rl-event-tape` export refuses incomplete tapes unless
+`--allow-incomplete` is given.
 
 **Launch dry run.** `yeto launch ... --dry-run` validates the whole launch
 (arguments, provenance, the ports algorithm and capability checks) and prints

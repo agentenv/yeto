@@ -101,6 +101,18 @@ def valid_masked_fraction(value: Any) -> float | None:
     return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
 
 
+# Settings an estimator requires (by the rejection matrix or upstream Miles)
+# are part of that estimator's mechanism, not separately declared features:
+# GSPO's explicit clip range (sequence_ratio_without_clip) and the rpp
+# family's advantage normalization (rpp_requires_whiten). Decision: main
+# agent, rl-infra-spec alignment §7b (may be overridden by the user).
+ESTIMATOR_COMPANIONS: dict[str, frozenset[tuple[str, str]]] = {
+    "gspo": frozenset({("features", "eps_clip"), ("features", "clip_higher")}),
+    "reinforce_plus_plus": frozenset({("features", "whiten_advantages")}),
+    "reinforce_plus_plus_baseline": frozenset({("features", "whiten_advantages")}),
+}
+
+
 class AlgorithmSpecError(ValueError):
     """An algorithm description is malformed or unsupported."""
 
@@ -360,6 +372,33 @@ def register_named_correction_function(path: str) -> None:
     if not path.startswith("yeto."):
         raise ValueError(f"named correction function {path!r} must be in the yeto namespace")
     NAMED_CORRECTION_FUNCTIONS.add(path)
+
+
+# reducer path -> the "dimension:name" mechanisms that claim it
+NAMED_REDUCERS: dict[str, frozenset[str]] = {}
+
+
+def register_named_reducer(path: str, *, mechanisms: Iterable[str]) -> None:
+    """``path`` (a pg_loss reducer) is claimed by its own mechanisms.
+
+    While one of ``mechanisms`` detects a spec using this reducer, the generic
+    ``features:custom_pg_loss_reducer`` is not required (so declaring e.g.
+    ``loss_aggregations:constant`` admits exactly this reducer, and no other).
+    """
+
+    mechanisms = frozenset(mechanisms)
+    if not mechanisms or any(":" not in m for m in mechanisms):
+        raise ValueError(f"named reducer {path!r} needs 'dimension:name' mechanism(s)")
+    if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
+        raise ValueError(f"named reducer {path!r} must be in {sorted(PLUGIN_NAMESPACES)}")
+    NAMED_REDUCERS[path] = NAMED_REDUCERS.get(path, frozenset()) | mechanisms
+
+
+def _named_reducer_claimed(spec: "AlgorithmSpec") -> bool:
+    owners = NAMED_REDUCERS.get(spec.loss.reducer.path, frozenset())
+    return any(
+        f"{m.dimension}:{m.name}" in owners and m.detect(spec) for m in registered_mechanisms()
+    )
 
 
 def register_rejection(name: str, check: Callable[["AlgorithmSpec"], str | None]) -> None:
@@ -1031,11 +1070,16 @@ class AlgorithmSpec:
 
     # -- derived (design D4/D6) ----------------------------------------------
     def required_mechanisms(self) -> frozenset[tuple[str, str]]:
-        """(dimension, mechanism) pairs the engine must declare."""
+        """(dimension, mechanism) pairs the engine must declare.
 
-        return frozenset(
-            (m.dimension, m.name) for m in registered_mechanisms() if m.detect(self)
-        )
+        Settings an estimator mandates (:data:`ESTIMATOR_COMPANIONS`) are
+        claimed by that estimator's mechanism in this combination only; the
+        same setting under another estimator is its own mechanism.
+        """
+
+        required = {(m.dimension, m.name) for m in registered_mechanisms() if m.detect(self)}
+        required -= ESTIMATOR_COMPANIONS.get(self.advantage.estimator, frozenset())
+        return frozenset(required)
 
     def _mechanism_defs(self) -> list[MechanismDef]:
         return [m for m in registered_mechanisms() if m.detect(self)]
@@ -1205,7 +1249,8 @@ def _builtin_mechanisms() -> None:
         "eps_clip": lambda s: s.loss.eps_clip is not None,
         "clip_higher": lambda s: s.loss.eps_clip_high is not None,
         "dual_clip": lambda s: s.loss.eps_clip_c is not None,
-        "custom_pg_loss_reducer": lambda s: s.loss.reducer is not None,
+        "custom_pg_loss_reducer": lambda s: s.loss.reducer is not None
+        and not _named_reducer_claimed(s),
         "no_grpo_std_normalization": lambda s: not s.advantage.std_normalization,
         "no_rewards_normalization": lambda s: not s.advantage.rewards_normalization,
         "whiten_advantages": lambda s: s.advantage.whiten,

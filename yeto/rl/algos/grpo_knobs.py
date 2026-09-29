@@ -196,6 +196,11 @@ def _reject_stage_params(s) -> str | None:
 def _reject_constant(s) -> str | None:
     constant = s.loss.aggregation == "constant"
     denominator = s.loss.constant_denominator
+    if s.loss.reducer is not None and s.loss.reducer.path != REDUCER_PATH:
+        return (
+            f"loss.reducer {s.loss.reducer.path!r}: the only pg_loss reducer on the ports path is "
+            f"the vendored Dr.GRPO reducer {REDUCER_PATH!r} (with loss.aggregation='constant')"
+        )
     if constant and denominator is None:
         return "loss.aggregation='constant' requires loss.constant_denominator (a finite number > 0)"
     if not constant and denominator is not None:
@@ -454,18 +459,28 @@ register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule,
 # --------------------------------------------------------------------------
 
 G1_EVIDENCE = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
+# integ-decl: the only allowed reducer is claimed by the constant-denominator
+# aggregation (P0 register_named_reducer), so declaring loss_aggregations:
+# constant admits it without the generic features:custom_pg_loss_reducer.
+from yeto.rl.engine.algorithm import register_named_reducer  # noqa: E402
+
+register_named_reducer(REDUCER_PATH, mechanisms=("loss_aggregations:constant",))
+
 G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
     # G1 run name -> mechanisms declared from it (dimension -> names). Only
     # mechanisms shown to take effect on the GPU are declared (coordinator
     # decision): clip_higher / dual_clip (clipfrac 0) and over_sampling (no
     # replacement) wait for a G1 that triggers them.
-    "token": {"loss_aggregations": frozenset({"token"})},
-    "drgrpo": {"features": frozenset({"custom_pg_loss_reducer", "no_grpo_std_normalization"}),
-               "loss_aggregations": frozenset({"constant"})},
+    # custom_pg_loss_reducer is declared by ALGO-CAP as "only the Dr.GRPO reducer"
+    # (grpo_knobs_constant_aggregation refuses any other loss.reducer).
+    # drgrpo: only the constant aggregation (token and no_grpo_std_normalization
+    # were withdrawn after review: no isolated evidence; see evidence/2026-09-29-algo1b-g1c).
+    "drgrpo": {"loss_aggregations": frozenset({"constant"})},
     "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
     "entropy": {"features": frozenset({"entropy_bonus"})},
     "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
                          "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
+    "clip_higher": {"features": frozenset({"clip_higher", "eps_clip"})},  # g1b run A-r1 (clipfrac > 0)
 }
 
 

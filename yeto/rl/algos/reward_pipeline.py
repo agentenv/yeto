@@ -383,7 +383,8 @@ def emit_event(args: Any, event: dict[str, Any]) -> None:
     if getattr(args, "yeto_rl_event_tape", None) and learner is not None:
         from yeto.rl.miles import _append_rl_event
 
-        _append_rl_event(args, event)
+        _append_rl_event(args, event)  # tape write; echoed by the writer when enabled
+        return
     from yeto.rl.event_echo import format_record
 
     record = {"island_id": int(learner) if learner is not None else None,
