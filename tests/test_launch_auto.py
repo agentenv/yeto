@@ -121,6 +121,7 @@ def test_modal_island_config_reuses_the_sky_task_script(monkeypatch, tmp_path):
     args = _args([
         "--gpu", "modal:8xh100", "--cluster-prefix", "run", "--training-mode", "rl",
         "--rl-image", digest, "--rl-completed-groups-path", "~/yeto-rl/groups.jsonl",
+        "--rl-engine", "legacy",
     ])
     (spec,) = _specs(args.gpu)
     cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:5000")
@@ -128,8 +129,8 @@ def test_modal_island_config_reuses_the_sky_task_script(monkeypatch, tmp_path):
     assert cfg.setup_script == task.setup and cfg.pip_requirements == ()
     assert cfg.volume_name == _rl_checkpoint_storage_name("run", 0)
     assert cfg.volume_mount == "/root/yeto-rl"
-    # Modal RL islands start the SGLang router themselves (Miles' 30 s
-    # router deadline is missed on Modal); SFT islands do not.
+    # Legacy Modal RL islands start the SGLang router themselves (Miles' 30 s
+    # router deadline is missed on Modal); SFT and ports islands do not.
     assert cfg.envs["YETO_RL_EXTERNAL_ROUTER"] == "1"
     cfg.validate()
 

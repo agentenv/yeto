@@ -262,12 +262,13 @@ def export_rl_checkpoint(
     pipeline: int = 1,
     local_horizon: int = 1,
     benchmark_learner_budget_steps: int | None = None,
-    rl_engine: str = "legacy",
+    rl_engine: str = "ports",
 ) -> CanonicalLoraState:
     """Export the authoritative RL checkpoint as a PEFT adapter.
 
-    ``rl_engine="ports"`` is recorded in ``yeto_rl_provenance.json``; the
-    legacy default leaves the provenance output byte-identical.
+    ``rl_engine="ports"`` (the default) is recorded in
+    ``yeto_rl_provenance.json``; an explicit ``rl_engine="legacy"`` leaves the
+    provenance output byte-identical to pre-ports exports.
     """
 
     from ..models import resolve
@@ -432,6 +433,12 @@ def parse_args(argv=None):
     parser.add_argument("--fragments", type=int, default=1)
     parser.add_argument("--pipeline", type=int, default=1)
     parser.add_argument("--local-horizon", type=int, default=1)
+    parser.add_argument(
+        "--rl-engine",
+        choices=["legacy", "ports"],
+        default="ports",
+        help="engine that produced the checkpoint (recorded in provenance for ports)",
+    )
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args(argv)
 
@@ -450,6 +457,7 @@ def main(argv=None) -> None:
         fragments=args.fragments,
         pipeline=args.pipeline,
         local_horizon=args.local_horizon,
+        rl_engine=args.rl_engine,
     )
     if args.sync_preset == "decoupled":
         print(

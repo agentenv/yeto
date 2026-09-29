@@ -907,6 +907,9 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
 
     assert plan["learner"]["data"] == "/workspace/data/dataset.jsonl"
     assert plan["learner"]["data_local_path"] == str(prompts.resolve())
+    # ports is the default engine and is recorded in the plan; only an
+    # explicit legacy run keeps the key-less (digest-compatible) plan.
+    assert plan["rl_engine"] == "ports"
     assert plan["learner"]["data_revision"] is None
     assert plan["syncer_address"] == "100.64.0.6:29400"
     assert plan["syncer_host"] == "root@syncer0"

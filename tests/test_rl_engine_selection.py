@@ -92,13 +92,31 @@ def _island_task(args, monkeypatch):
     return make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 2, "127.0.0.1:29400")
 
 
-def test_cli_default_is_legacy_and_learner_command_is_unchanged(monkeypatch):
+def test_cli_default_is_ports(monkeypatch):
     args = _cli()
+    assert args.rl_engine == "ports"
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    assert "--rl-engine ports" in task.run
+    assert launcher._miles_source_setup("ports")[0] in task.setup
+
+
+def test_explicit_legacy_is_forwarded_to_learner_and_source_setup(monkeypatch):
+    args = _cli(("--rl-engine", "legacy"))
     assert args.rl_engine == "legacy"
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert "--rl-engine" not in task.run
+    # The learner's own default is ports, so legacy is always explicit.
+    assert "--rl-engine legacy" in task.run
     assert launcher._miles_source_setup("legacy")[0] in task.setup
+
+
+def test_default_ports_rejects_legacy_only_runs_with_a_legacy_hint():
+    args = _cli(("--rl-model-recipe", "deepseek-v4-flash"))
+    with pytest.raises(UnsupportedPortsCombination) as error:
+        _prepare_rl_args(args)
+    assert "--rl-engine legacy" in str(error.value)
+    assert "default" in str(error.value)
 
 
 def test_ports_is_forwarded_to_learner_and_source_setup(monkeypatch):
@@ -110,7 +128,7 @@ def test_ports_is_forwarded_to_learner_and_source_setup(monkeypatch):
 
 
 def test_ports_provenance_is_recorded_only_for_ports():
-    legacy = _cli()
+    legacy = _cli(("--rl-engine", "legacy"))
     legacy._provenance = {"model": {}, "dataset": {}}
     with pytest.raises(ValueError):  # provenance fixture is not HF-pinned
         _prepare_rl_args(legacy)
@@ -120,15 +138,23 @@ def test_ports_provenance_is_recorded_only_for_ports():
     with pytest.raises(ValueError):
         _prepare_rl_args(ports)
     assert ports._provenance["rl_engine"] == "ports"
+    default = _cli()
+    default._provenance = {"model": {}, "dataset": {}}
+    with pytest.raises(ValueError):
+        _prepare_rl_args(default)
+    assert default._provenance["rl_engine"] == "ports"  # default is recorded
 
 
 def test_rl_image_default_follows_the_engine(monkeypatch):
     from yeto.rl import MILES_IMAGE, MILES_NEXT_IMAGE
 
-    legacy = _cli()
+    legacy = _cli(("--rl-engine", "legacy"))
     assert legacy.rl_image is None
     _prepare_rl_args(legacy)
     assert legacy.rl_image == MILES_IMAGE  # legacy default unchanged
+    default = _cli()
+    _prepare_rl_args(default)
+    assert default.rl_image == MILES_NEXT_IMAGE
     ports = _cli(("--rl-engine", "ports"))
     _prepare_rl_args(ports)
     assert ports.rl_image == MILES_NEXT_IMAGE
@@ -141,7 +167,7 @@ def test_rl_image_default_follows_the_engine(monkeypatch):
 
 
 def test_ports_island_puts_the_pinned_miles_checkout_first(monkeypatch):
-    legacy = _cli()
+    legacy = _cli(("--rl-engine", "legacy"))
     _prepare_rl_args(legacy)
     legacy_run = _island_task(legacy, monkeypatch).run
     assert "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} " in legacy_run
@@ -160,7 +186,7 @@ def test_modal_ports_island_does_not_request_the_external_router():
     from yeto.gpu_spec import parse_gpu_spec
 
     task = SimpleNamespace(run="true", envs={}, setup="true")
-    legacy = _cli(("--gpu", "modal:1xh100", "--cluster-prefix", "run"))
+    legacy = _cli(("--gpu", "modal:1xh100", "--cluster-prefix", "run", "--rl-engine", "legacy"))
     _prepare_rl_args(legacy)
     (spec,) = parse_gpu_spec(legacy.gpu)
     cfg = launcher.build_modal_island_config(legacy, spec, 0, task, "1.2.3.4:5000")
@@ -216,9 +242,9 @@ def _learner_argv(extra=()):
     ]
 
 
-def test_learner_default_is_legacy():
-    assert rl_learner.parse_args(_learner_argv()).rl_engine == "legacy"
-    assert rl_learner.parse_args(_learner_argv(("--rl-engine", "ports"))).rl_engine == "ports"
+def test_learner_default_is_ports():
+    assert rl_learner.parse_args(_learner_argv()).rl_engine == "ports"
+    assert rl_learner.parse_args(_learner_argv(("--rl-engine", "legacy"))).rl_engine == "legacy"
 
 
 @pytest.mark.parametrize(
@@ -237,9 +263,13 @@ def test_learner_parser_rejects_unsupported_ports_runs(extra, capsys):
     with pytest.raises(SystemExit):
         rl_learner.parse_args(argv)
     assert "only supported by the legacy path" in capsys.readouterr().err
-    # legacy accepts the same combination at parse time
-    legacy = [a for a in argv if a not in ("--rl-engine", "ports")]
-    rl_learner.parse_args(legacy)
+    # the default (ports) rejects it too
+    default = [a for a in argv if a not in ("--rl-engine", "ports")]
+    with pytest.raises(SystemExit):
+        rl_learner.parse_args(default)
+    assert "--rl-engine legacy" in capsys.readouterr().err
+    # explicit legacy accepts the same combination at parse time
+    rl_learner.parse_args([*default, "--rl-engine", "legacy"])
 
 
 @pytest.mark.parametrize(
@@ -302,6 +332,12 @@ def test_learner_main_verifies_the_ports_pin_group(monkeypatch):
     calls.clear()
     with pytest.raises(Stop):
         rl_learner.main(_learner_argv(("--data-revision", "f" * 40)))
+    assert calls == [{"expected": MILES_NEXT_PINS}]  # ports is the default
+    calls.clear()
+    with pytest.raises(Stop):
+        rl_learner.main(
+            _learner_argv(("--rl-engine", "legacy", "--data-revision", "f" * 40))
+        )
     assert calls == [{"expected_source_sha256": None}]  # legacy call unchanged
 
 
@@ -313,9 +349,12 @@ def test_harness_plan_key_only_for_ports():
     from yeto.rl import ssh_harness
     from yeto.rl.ssh_harness import HarnessError, _learner_argv
 
-    plan = _plan()
+    plan = _plan()  # no rl_engine key = legacy plan (digest unchanged)
     ssh_harness._validate_plan(plan)
-    assert "--rl-engine" not in _learner_argv(plan, 0)
+    argv = _learner_argv(plan, 0)
+    # The learner defaults to ports, so a legacy plan passes legacy explicitly.
+    assert argv[argv.index("--rl-engine") + 1] == "legacy"
+    assert rl_learner.parse_args(argv[3:]).rl_engine == "legacy"
     ports = {**_plan(), "rl_engine": "ports"}
     ssh_harness._validate_plan(ports)
     argv = _learner_argv(ports, 0)

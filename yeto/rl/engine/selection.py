@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 RL_ENGINES = ("legacy", "ports")
-DEFAULT_RL_ENGINE = "legacy"
+DEFAULT_RL_ENGINE = "ports"
 PORTS_SYNC_PRESETS = frozenset({"strict-avg", "decoupled"})
 
 
@@ -78,7 +78,8 @@ def require_ports_supported(**kwargs) -> None:
             "--rl-engine ports does not support: "
             + "; ".join(reasons)
             + ". This combination is only supported by the legacy path "
-            "(--rl-engine legacy)."
+            "(--rl-engine legacy). ports is the default engine, so pass "
+            "--rl-engine legacy explicitly for this run."
         )
 
 

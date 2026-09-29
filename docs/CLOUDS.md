@@ -245,7 +245,8 @@ and SGLang are still installed at their pinned commits by the island
 setup, so the image swap does not change the code that runs.
 
 ```bash
-yeto launch --training-mode rl --gpu modal:8xh100 --syncer-region nebius/eu-north1 \
+yeto launch --training-mode rl --rl-engine legacy \
+  --gpu modal:8xh100 --syncer-region nebius/eu-north1 \
   --cluster-prefix yeto-rl84f \
   --rl-image docker:radixark/miles@sha256:cd40db923225c4146e90fdf4aa04bc000b71c1e980cc42df6f368de7545eaa09 \
   --model Qwen/Qwen3-1.7B --model-revision 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e \

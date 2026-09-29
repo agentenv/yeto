@@ -7,13 +7,17 @@
 ## ADDED Requirements
 
 ### Requirement: 引擎路径选择
-RL learner 与启动器 SHALL 接受 `--rl-engine`，取值为 `legacy` 或 `ports`，默认为 `legacy`。
+RL learner 与启动器 SHALL 接受 `--rl-engine`，取值为 `legacy` 或 `ports`。在等价性验收通过之前默认为 `legacy`；通过之后按"legacy 路径的退役"切换为默认 `ports`。
 - 选择结果 MUST 在启动前确定，在一次运行内保持不变，并写入运行事件与产物来源记录。
 - 选择 MUST 由用户显式给出，MUST NOT 从模型、岛数量或其他参数推断。
 
-#### Scenario: 默认行为不变
-- **WHEN** 用户不传 `--rl-engine` 启动 RL 运行
+#### Scenario: 切换前默认行为不变
+- **WHEN** 在默认值切换之前，用户不传 `--rl-engine` 启动 RL 运行
 - **THEN** 运行走 legacy 路径，参数、源码准备和训练行为与引入该参数之前完全一致
+
+#### Scenario: 切换后显式 legacy 行为不变
+- **WHEN** 在默认值切换之后，用户显式传 `--rl-engine legacy` 启动 RL 运行
+- **THEN** Miles 参数、源码准备与训练行为与切换之前的 legacy 路径一致，唯一差异是传给 learner 的命令显式带上 `--rl-engine legacy`
 
 #### Scenario: 选择被记录
 - **WHEN** 以 `--rl-engine ports` 启动

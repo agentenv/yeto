@@ -440,7 +440,7 @@ def syncer_command(
     return command
 
 
-def rollout_dump_dir(run_dir: Path, learner_id: int, rl_engine: str = "legacy") -> Path:
+def rollout_dump_dir(run_dir: Path, learner_id: int, rl_engine: str = "ports") -> Path:
     """Where an island's ``--save-debug-rollout-data`` dumps land.
 
     Upstream Miles (the ports engine) also writes dashboard columns to
@@ -453,7 +453,7 @@ def rollout_dump_dir(run_dir: Path, learner_id: int, rl_engine: str = "legacy") 
 
 
 def miles_extra_argv(
-    worker: WorkerSpec, run_dir: Path, rounds: int, rl_engine: str = "legacy"
+    worker: WorkerSpec, run_dir: Path, rounds: int, rl_engine: str = "ports"
 ) -> list[str]:
     values = [
         "--save-debug-rollout-data",
@@ -601,7 +601,7 @@ def worker_payload(
         "miles_root": str(args.miles_root.expanduser().resolve()),
         "trust_remote_code": args.trust_remote_code,
     }
-    if getattr(args, "rl_engine", "legacy") == "ports":
+    if getattr(args, "rl_engine", "ports") == "ports":
         # Upstream Miles has no fork-only port isolation flags; the ports
         # translation rejects them, so the island uses upstream defaults.
         for name in (
@@ -611,6 +611,9 @@ def worker_payload(
         ):
             values.pop(name, None)
         values["rl_engine"] = "ports"
+    else:
+        # The learner defaults to ports; legacy must be explicit in-process.
+        values["rl_engine"] = "legacy"
     if arm.kind == "decoupled":
         values.update(
             sync_preset="decoupled",
@@ -626,7 +629,7 @@ def worker_payload(
         "prompt_path": str(worker.prompt_path),
         "policy_sync": worker.policy_sync,
         "extra_argv": miles_extra_argv(
-            worker, run_dir, args.global_rounds, getattr(args, "rl_engine", "legacy")
+            worker, run_dir, args.global_rounds, getattr(args, "rl_engine", "ports")
         ),
     }
 
@@ -1752,11 +1755,7 @@ def run_arm(
             benchmark_learner_budget_steps=(
                 args.global_rounds if arm.kind == "decoupled" else None
             ),
-            **(
-                {"rl_engine": "ports"}
-                if getattr(args, "rl_engine", "legacy") == "ports"
-                else {}
-            ),
+            rl_engine=getattr(args, "rl_engine", "ports"),
         )
         artifact_s = time.monotonic() - export_started
         if state.policy_version != expected_version:
@@ -1772,7 +1771,7 @@ def run_arm(
 
     rollout_paths = tuple(
         tuple(
-            rollout_dump_dir(run_dir, worker.learner_id, getattr(args, "rl_engine", "legacy"))
+            rollout_dump_dir(run_dir, worker.learner_id, getattr(args, "rl_engine", "ports"))
             / f"{round_id}.pt"
             for round_id in range(args.global_rounds)
         )
@@ -2096,7 +2095,7 @@ def _resume_identity(args, arms: list[Arm]) -> dict[str, Any]:
             _IMPLEMENTATION_PATHS,
         ),
     }
-    if getattr(args, "rl_engine", "legacy") == "ports":
+    if getattr(args, "rl_engine", "ports") == "ports":
         from yeto.rl import MILES_NEXT_COMMIT
 
         identity.update(rl_engine="ports", miles_commit=MILES_NEXT_COMMIT)
@@ -2465,8 +2464,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reward-function", required=True)
     parser.add_argument(
         "--arms",
-        default=",".join(_ARM_KINDS),
-        help="comma-separated benchmark arms: native,single,federated,decoupled",
+        default=None,
+        help=(
+            "comma-separated benchmark arms: native,single,federated,decoupled "
+            "(default: all four with --rl-engine legacy; single,federated,"
+            "decoupled with --rl-engine ports, which has no native arm)"
+        ),
     )
     parser.add_argument("--islands", default="2")
     parser.add_argument("--seeds", default="17,29,43")
@@ -2537,8 +2540,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rl-engine",
         choices=["legacy", "ports"],
-        default="legacy",
-        help="RL engine path for every arm (ports: LoRA/GRPO/colocated only)",
+        default="ports",
+        help="RL engine path for every arm (default ports; legacy explicit) (ports: LoRA/GRPO/colocated only)",
     )
     return parser
 
@@ -2596,6 +2599,14 @@ def main(argv=None) -> int:
     args.report_dir = args.report_dir.expanduser().resolve()
     if args.eval_samples_per_prompt is None:
         args.eval_samples_per_prompt = args.samples_per_group
+    if args.arms is None:
+        # Resolved before the resume identity is built, so an existing legacy
+        # run resumed with --rl-engine legacy keeps its recorded arm string.
+        args.arms = ",".join(
+            kind
+            for kind in _ARM_KINDS
+            if not (args.rl_engine == "ports" and kind == "native")
+        )
     try:
         arms = select_arms(
             args.islands,

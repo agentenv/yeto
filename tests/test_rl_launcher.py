@@ -73,9 +73,31 @@ def _args(extra=()):
             "--reward-function",
             "pkg.reward:score",
             "--trust-remote-code",
+            # This suite pins the legacy path; ports is the CLI default and
+            # is covered by tests/test_rl_engine_selection.py.
+            "--rl-engine",
+            "legacy",
             *extra,
         ]
     )
+
+
+def test_default_rl_engine_is_ports():
+    args = parse_args(
+        [
+            "--gpu",
+            "aws:1xa100@us-east-1",
+            "--model",
+            "org/model",
+            "--data",
+            "org/data",
+            "--training-mode",
+            "rl",
+            "--reward-function",
+            "pkg.reward:score",
+        ]
+    )
+    assert args.rl_engine == "ports"
 
 
 def test_init_rl_cli_and_strict_preset_are_the_public_contract():
@@ -2023,6 +2045,7 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text('{"messages":[]}\n', encoding="utf-8")
     args = argparse.Namespace(
+        rl_engine="legacy",
         parameter_mode="full",
         sync_preset="dense-full",
         model=QWEN35_MODEL,
@@ -2431,6 +2454,7 @@ def test_miles_runner_keeps_native_arm_outside_yeto_policy_sync(monkeypatch):
         lambda argv: argparse.Namespace(argv=argv),
     )
     args = argparse.Namespace(
+        rl_engine="legacy",
         trust_remote_code=True,
         lora_r=4,
         lora_targets="auto",
@@ -2503,6 +2527,7 @@ def test_miles_runner_builds_the_decoupled_runtime_contract(monkeypatch, tmp_pat
         lambda argv: argparse.Namespace(argv=argv),
     )
     args = argparse.Namespace(
+        rl_engine="legacy",
         trust_remote_code=True,
         lora_r=4,
         lora_targets="all-linear",
@@ -2636,6 +2661,7 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
         lambda argv: argparse.Namespace(argv=argv),
     )
     args = argparse.Namespace(
+        rl_engine="legacy",
         trust_remote_code=True,
         rl_model_recipe="deepseek-v4-flash",
         lora_r=8,
@@ -2719,7 +2745,9 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
 def test_decoupled_runner_rejects_multiple_optimizer_steps_per_rollout(tmp_path):
     with pytest.raises(ValueError, match="one optimizer step"):
         rl_learner.run_miles(
-            argparse.Namespace(sync_preset="decoupled", optimizer_steps=2),
+            argparse.Namespace(
+                rl_engine="legacy", sync_preset="decoupled", optimizer_steps=2
+            ),
             model_path=tmp_path,
             prompt_path=tmp_path / "prompts.jsonl",
         )

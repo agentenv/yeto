@@ -1990,7 +1990,7 @@ def prepare(namespace) -> Path:
                 args.expert_selection_contract_sha256
             ),
         )
-    if getattr(args, "rl_engine", "legacy") == "ports":
+    if getattr(args, "rl_engine", "ports") == "ports":
         plan["rl_engine"] = "ports"
     _validate_plan(plan)
     _write_plan(plan_path, plan)
@@ -3276,8 +3276,9 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         )
     if learner.get("rl_offload_train"):
         values.append("--rl-offload-train")
-    if plan.get("rl_engine") == "ports":
-        values.extend(("--rl-engine", "ports"))
+    # Absent key = legacy plan (digest-compatible); the learner defaults to
+    # ports, so the engine is always passed explicitly.
+    values.extend(("--rl-engine", plan.get("rl_engine", "legacy")))
     if learner.get("data_revision") is not None:
         values.extend(("--data-revision", learner["data_revision"]))
     if learner.get("expert_parallel") is not None:
@@ -4768,7 +4769,7 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
             fragments=learner.get("fragments", 1),
             pipeline=learner.get("pipeline", 1),
             local_horizon=learner.get("local_horizon", 1),
-            **({"rl_engine": "ports"} if plan.get("rl_engine") == "ports" else {}),
+            rl_engine=plan.get("rl_engine", "legacy"),
         )
         print(f"exported standard PEFT adapter to {Path(export_dir).expanduser()}")
 

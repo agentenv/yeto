@@ -92,11 +92,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument(
         "--rl-engine",
         choices=["legacy", "ports"],
-        default="legacy",
+        default="ports",
         help=(
-            "RL engine path: legacy (agentenv Miles fork, default) or ports "
-            "(yeto-owned island loop over upstream Miles; LoRA + GRPO + "
-            "serial colocated + strict-avg/decoupled only)"
+            "RL engine path: ports (default; yeto-owned island loop over "
+            "upstream Miles; LoRA + GRPO + serial colocated + "
+            "strict-avg/decoupled only) or legacy (agentenv Miles fork; "
+            "required for SAO, dense-full, DeepSeek V4, critic, fixed "
+            "partition and non-causal models; deprecated)"
         ),
     )
     rl.add_argument(

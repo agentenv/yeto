@@ -156,8 +156,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--rl-engine",
         choices=["legacy", "ports"],
-        default="legacy",
-        help="RL engine path; ports rejects unsupported combinations at startup",
+        default="ports",
+        help="RL engine path (default ports); ports rejects unsupported combinations at startup",
     )
     parser.add_argument("--miles-source-sha256", default=None)
     parser.add_argument("--megatron-ref-load", default=None)
@@ -1507,7 +1507,7 @@ def run_miles(
 ) -> None:
     """Run one Miles job, optionally with Yeto's external policy boundary."""
 
-    rl_engine = getattr(args, "rl_engine", "legacy")
+    rl_engine = getattr(args, "rl_engine", "ports")
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
     if rl_engine == "ports":
@@ -2042,7 +2042,7 @@ def main(argv=None) -> None:
     miles_root = str(Path(args.miles_root).expanduser().resolve())
     if miles_root not in sys.path:
         sys.path.insert(0, miles_root)
-    if getattr(args, "rl_engine", "legacy") == "ports":
+    if getattr(args, "rl_engine", "ports") == "ports":
         from . import MILES_NEXT_PINS
 
         verify_miles_revision(miles_root, expected=MILES_NEXT_PINS)

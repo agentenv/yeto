@@ -322,6 +322,8 @@ def test_federated_workers_use_disjoint_miles_host_ports(tmp_path):
             "pkg.reward:score",
             "--pipeline-parallel",
             "2",
+            "--rl-engine",
+            "legacy",
         ]
     )
     args._active_seed = 17
@@ -584,6 +586,8 @@ def test_dry_run_does_not_import_ray_or_materialize_data(monkeypatch, capsys):
             "2",
             "--pipeline-parallel",
             "2",
+            "--rl-engine",
+            "legacy",
             "--dry-run",
         ]
     )
@@ -618,6 +622,8 @@ def test_dry_run_can_select_only_the_current_native_miles_arm(capsys):
             "native",
             "--islands",
             "2",
+            "--rl-engine",
+            "legacy",
             "--dry-run",
         ]
     ) == 0
@@ -1476,15 +1482,17 @@ def _benchmark_argv(*extra):
     ]
 
 
-def test_rl_engine_defaults_to_legacy_and_keeps_resume_identity(monkeypatch):
+def test_rl_engine_defaults_to_ports_and_keeps_legacy_resume_identity(monkeypatch):
     import yeto.benchmark_resume
 
     monkeypatch.setattr(
         yeto.benchmark_resume, "implementation_fingerprint", lambda *a, **k: "0" * 64
     )
-    legacy = benchmark.build_parser().parse_args(_benchmark_argv())
-    assert legacy.rl_engine == "legacy"
-    ports = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", "ports"))
+    assert benchmark.build_parser().parse_args(_benchmark_argv()).rl_engine == "ports"
+    # An explicit legacy run keeps the pre-ports identity (no rl_engine field),
+    # so existing legacy work dirs still resume with --rl-engine legacy.
+    legacy = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", "legacy"))
+    ports = benchmark.build_parser().parse_args(_benchmark_argv())
     for args in (legacy, ports):
         args.eval_samples_per_prompt = args.samples_per_group
     arms = benchmark.select_arms(legacy.islands, legacy.gpus_per_island, legacy.groups_per_island)
@@ -1504,4 +1512,28 @@ def test_rl_engine_ports_dry_run_records_selection_and_rejects_native(capsys):
     ) == 0
     assert "RL_ENGINE ports" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="native arm"):
-        benchmark.main(_benchmark_argv("--rl-engine", "ports", "--dry-run"))
+        benchmark.main(_benchmark_argv("--arms", "native,single", "--dry-run"))
+    # Without --arms, the default ports engine plans only the Yeto arms.
+    assert benchmark.main(_benchmark_argv("--dry-run")) == 0
+    output = capsys.readouterr().out
+    assert "RL_ENGINE ports" in output
+    assert "native-miles" not in output and "yeto-decoupled" in output
+    assert benchmark.main(_benchmark_argv("--rl-engine", "legacy", "--dry-run")) == 0
+    output = capsys.readouterr().out
+    assert "native-miles" in output and "RL_ENGINE" not in output
+
+
+def test_legacy_worker_payload_passes_the_engine_explicitly(tmp_path):
+    for engine in ("legacy", "ports"):
+        args = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", engine))
+        args._active_seed = 17
+        arm = benchmark.select_arms("2", 2, 4)[2]
+        island_paths = (tmp_path / "island-0.jsonl", tmp_path / "island-1.jsonl")
+        for path in island_paths:
+            path.write_text("{}\n", encoding="utf-8")
+        worker = benchmark.worker_specs(arm, tmp_path / "combined.jsonl", island_paths)[0]
+        payload = benchmark.worker_payload(
+            args, worker, arm=arm, run_dir=tmp_path, model_path=tmp_path / "model",
+            syncer="127.0.0.1:30000", reward_sha256="c" * 64,
+        )
+        assert payload["arguments"]["rl_engine"] == engine

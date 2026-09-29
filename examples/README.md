@@ -13,7 +13,8 @@ It is a smoke test, not a benchmark: MATH-500 is a *test* set and the reward
 is exact-match.
 
 ```bash
-yeto launch --training-mode rl --gpu modal:8xh100 --syncer-region nebius/eu-north1 \
+yeto launch --training-mode rl --rl-engine legacy \
+  --gpu modal:8xh100 --syncer-region nebius/eu-north1 \
   --cluster-prefix math-smoke \
   --rl-image docker:radixark/miles@sha256:cd40db923225c4146e90fdf4aa04bc000b71c1e980cc42df6f368de7545eaa09 \
   --model Qwen/Qwen3-1.7B --model-revision 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e \
@@ -26,6 +27,11 @@ yeto launch --training-mode rl --gpu modal:8xh100 --syncer-region nebius/eu-nort
   --seq-len 2048 --inner-lr 1e-5 --seed 17 --trust-remote-code --on-demand
 ```
 
+- `--rl-engine legacy` reproduces the recorded run below, which pinned the
+  public `radixark/miles:v0.1.0` image and the legacy Miles fork. The default
+  engine is now `ports` (LoRA + GRPO is inside its boundary); drop both
+  `--rl-engine legacy` and `--rl-image` to run the same smoke on `ports` with
+  its pinned default image.
 - `--rl-prompt-column` / `--rl-label-column` name the dataset columns; the RL
   data path otherwise expects `messages` / `prompt` / `input` and `label`,
   and never guesses. A named column that is missing is an error.

@@ -532,7 +532,7 @@ def resolve_default_rl_image(args) -> None:
     if getattr(args, "rl_image", None) is None:
         from .rl import default_rl_image
 
-        args.rl_image = default_rl_image(getattr(args, "rl_engine", "legacy"))
+        args.rl_image = default_rl_image(getattr(args, "rl_engine", "ports"))
 
 
 def prepare_launch_args(
@@ -860,7 +860,7 @@ def _prepare_rl_args(
 
     from .models import resolve_model_kind
 
-    rl_engine = getattr(args, "rl_engine", "legacy")
+    rl_engine = getattr(args, "rl_engine", "ports")
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"--rl-engine must be legacy or ports, got {rl_engine!r}")
     if rl_engine == "ports":
@@ -1534,7 +1534,7 @@ def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
     return stem[: 63 - len(suffix)].rstrip("-") + suffix
 
 
-def _miles_source_setup(rl_engine: str = "legacy") -> tuple[str, str]:
+def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
     """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``."""
 
     from .rl import (
@@ -1717,8 +1717,9 @@ def make_miles_island_task(
         )
     if args.rl_offload_train:
         flags += " --rl-offload-train"
-    if getattr(args, "rl_engine", "legacy") == "ports":
-        flags += " --rl-engine ports"
+    # Always explicit: the learner's own default is ports, so a legacy run
+    # must say so (and an older remote learner must not guess).
+    flags += f" --rl-engine {getattr(args, 'rl_engine', 'ports')}"
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
     for flag, name in (
@@ -1788,7 +1789,7 @@ def make_miles_island_task(
             f"{shlex.quote(args.rl_initial_adapter_sha256)}"
         )
     miles_setup, sglang_setup = _miles_source_setup(
-        getattr(args, "rl_engine", "legacy")
+        getattr(args, "rl_engine", "ports")
     )
     model = resolve(args.model)
     if is_local_reference(model):
@@ -1872,7 +1873,7 @@ def make_miles_island_task(
     # Ports images (radixark/miles) ship their own Miles at /root/miles on
     # PYTHONPATH; the pinned fork checkout must shadow it.  Legacy unchanged.
     island_pythonpath = (
-        "$HOME/miles:" if getattr(args, "rl_engine", "legacy") == "ports" else ""
+        "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
@@ -2646,7 +2647,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     rl = getattr(args, "training_mode", "sft") == "rl"
     envs = dict(getattr(task, "envs", None) or {})
     envs["SYNCER_ADDR"] = syncer_addr
-    if rl and getattr(args, "rl_engine", "legacy") != "ports":
+    if rl and getattr(args, "rl_engine", "ports") != "ports":
         # Legacy Miles' own router launch misses its 30 s deadline on Modal's
         # CPUs (see yeto.rl.learner.start_external_sglang_router).  Upstream
         # Miles (ports) launches its router as a Ray worker with a 120 s

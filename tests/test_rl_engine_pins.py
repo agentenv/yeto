@@ -84,11 +84,12 @@ def test_next_pin_groups_are_independent_of_legacy_and_bundle_free():
 
 
 def test_launcher_legacy_setup_is_byte_identical():
-    assert _miles_source_setup() == (
+    assert _miles_source_setup("legacy") == (
         LEGACY_LAUNCHER_MILES_SETUP,
         LEGACY_LAUNCHER_SGLANG_SETUP,
     )
-    assert _miles_source_setup("legacy") == _miles_source_setup()
+    # ports is the default engine.
+    assert _miles_source_setup() == _miles_source_setup("ports")
 
 
 def test_harness_legacy_setup_is_byte_identical():
