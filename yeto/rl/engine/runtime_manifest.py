@@ -93,6 +93,15 @@ def _package_root(module: str) -> Path | None:
     return Path(file).resolve().parent.parent if file else None
 
 
+def _image_manifest() -> dict[str, Any]:
+    try:
+        from yeto.rl import MILES_NEXT_IMAGE_MANIFEST
+
+        return json.loads(Path(MILES_NEXT_IMAGE_MANIFEST).read_text())
+    except Exception:
+        return {}
+
+
 def collect(*, image: str | None) -> dict[str, Any]:
     """Probe the current interpreter (run inside the pinned image)."""
 
@@ -112,17 +121,27 @@ def collect(*, image: str | None) -> dict[str, Any]:
     except Exception:
         pass
     roots = {"miles": _package_root("miles"), "sglang": _package_root("sglang")}
-    commits = {}
+    commits: dict[str, str | None] = {}
+    commit_source: dict[str, str] = {}
+    image_manifest = _image_manifest()
     for name, root in roots.items():
         commits[name] = _git_head(root) if root else None
         if name == "sglang" and commits[name] is None and root is not None:
             commits[name] = _git_head(root.parent)  # sglang/python/sglang layout
+        commit_source[name] = "git"
+        if commits[name] is None and image_manifest.get(name, {}).get("commit"):
+            # pure-Python overlay images carry no .git; the build record is the
+            # only source. Recorded as such, together with the version string.
+            commits[name] = image_manifest[name]["commit"]
+            commit_source[name] = "image-manifest"
     return {
         "schema": MANIFEST_SCHEMA,
         "image": image,
         "python": sys.version.split()[0],
         "import_paths": {k: (str(v) if v else None) for k, v in roots.items()},
         "commits": commits,
+        "commit_source": commit_source,
+        "image_build_manifest": image_manifest or None,
         "versions": {**versions, "cuda": cuda, "nccl": nccl},
         "interfaces": {name: _probe(*where) for name, where in INTERFACES.items()},
     }
