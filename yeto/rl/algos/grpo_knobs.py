@@ -463,6 +463,7 @@ G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
     "drgrpo": {"features": frozenset({"custom_pg_loss_reducer", "no_grpo_std_normalization"}),
                "loss_aggregations": frozenset({"constant"})},
     "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
+    "entropy": {"features": frozenset({"entropy_bonus"})},
 }
 
 
