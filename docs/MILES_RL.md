@@ -581,6 +581,287 @@ equivalent (`--rollout-engine-base-port`, `--train-master-base-port`,
 benchmark's `native` arm measures stock Miles' own loop and is rejected with
 `--rl-engine ports`.
 
+### Algorithm specs (`--rl-algorithm-spec`)
+
+On `ports` the training objective is described by one `AlgorithmSpec`
+(`yeto/rl/engine/algorithm.py`), and the Miles algorithm flags are generated
+only from it. The spec has these groups: `advantage` (estimator,
+`std_normalization`, `rewards_normalization`, `whiten`, `reward_postprocess`,
+`reward_binary`), `loss` (`variant`, `eps_clip`, `eps_clip_high`,
+`eps_clip_c`, `aggregation`, `reducer`, `custom_loss`), `kl` (`placement`,
+`coef`, `estimator`, `unbiased`), `correction`, `sampling`, `execution`,
+`entropy_coef` and `plugins`. A plugin is written as `{path, sha256}` (the
+SHA256 of the plugin module's source file). Only the `yeto.` and `miles.`
+namespaces are accepted. The learner re-hashes and imports every plugin before
+it joins outer sync, and refuses to start if the hash differs.
+
+Where the spec comes from:
+
+1. `--rl-algorithm-spec PATH`, a v1 or v2 JSON file. `yeto launch` and
+   `python3 -m yeto.rl.learner` both accept it; it applies to `ports` only.
+2. Without that flag, the legacy CLI builds the spec exactly as in R0.
+3. Mapped Miles flags found in the extra argv are absorbed into the spec.
+
+A spec that only uses R0 fields keeps the R0 v1 canonical JSON, so its hash
+is unchanged. Setting any new field switches the spec to
+`yeto-rl-algorithm-spec-v2`.
+
+**Absorb and reject.** `yeto/rl/engine/miles_adapter/algorithm_flags.py` maps
+each Miles flag to a spec field. Every flag in that table is adapter-owned:
+
+- A mapped flag in the extra argv is absorbed. It is recorded as
+  `rl/algorithm_absorbed_flags` in the `rl_engine_selected` event.
+- A value that disagrees with the spec is refused, and the error shows both
+  values.
+- A flag that changes the objective but has no mapping yet is refused. These
+  are the flags in `UNMAPPED_OBJECTIVE_FLAGS`, for example `--gamma` or
+  `--rollout-temperature`.
+
+**KL placement.**
+
+- `kl.placement=loss` translates to
+  `--use-kl-loss --kl-loss-coef C --kl-loss-type T`, and `T` must be given.
+- `placement=reward` translates to `--kl-coef`. With `grpo` or `gspo` and a
+  coefficient above 0 it is refused, because Miles drops a KL placed in the
+  reward for these estimators; use `placement=loss` instead.
+- An R0 `kl_coef` is read as `placement=reward`. `0.0` still emits
+  `--kl-coef 0.0`, so the hash is unchanged. `placement=none` emits no KL flag,
+  and Miles loads no reference model.
+
+**Capabilities and execution.** The engine declares what it supports per
+mechanism dimension: `advantage_estimators`, `losses`, `loss_aggregations`,
+`kl_placements`, `corrections`, `reward_postprocessors`,
+`dynamic_sampling_filters` and `features`. It also declares an `execution`
+block: `critic=false`, `max_policy_staleness=0` and `rollout_logprobs=true`.
+
+Before any GPU process exists, the driver handshake refuses:
+
+- every mechanism the spec requires that the engine does not declare;
+- a critic;
+- a policy age above `execution.max_policy_staleness`, which is fixed at 0;
+- every entry of the rejection matrix:
+  - TIS together with `use_rollout_logprobs`;
+  - reward KL together with loss KL;
+  - `gspo` without an explicit clip range;
+  - a mechanism that needs a binary reward when the reward is not declared
+    binary;
+  - `reinforce_plus_plus*` without `whiten`.
+
+"Expressible, not enabled" means the spec can describe and translate a
+mechanism, but `miles_capabilities` does not declare it yet. A follow-up
+algorithm change declares it after its single-GPU smoke passes.
+
+`--rl-allow-unverified-mechanism DIMENSION:NAME` (repeatable, for example
+`features:clip_higher`) exempts only the named mechanisms from the "not
+declared" check, and only on a single-island run **without outer sync**.
+Every launched run and every `yeto.rl.learner` run joins a syncer, so today
+the allowance is refused on those entry points; only the fake engine and the
+dry run (which models a sync-less single island) accept it.
+Every other check still applies. The allowance does not change the hash. It is
+recorded as `rl/unverified_mechanisms` in the event and in
+`yeto_rl_provenance.json`, which is also marked
+`contains_unverified_mechanisms`.
+
+**Island consistency and provenance.** On `ports`, `yeto launch` builds the
+spec once and sends each island two things:
+
+- its canonical JSON, as `~/yeto-rl/algorithm_spec.json`;
+- `--rl-expected-algorithm-sha256`.
+
+Each learner compares its own hash with the expected one before it joins outer
+sync:
+
+- on a mismatch it writes an `rl_algorithm_mismatch` event and exits;
+- when the expected hash is missing (a learner started by hand) it writes a
+  warning event.
+
+Visible default-path changes on `ports` (no algorithm option given):
+
+- the island learner command always carries
+  `--rl-expected-algorithm-sha256 <hash>`;
+- the `rl_engine_selected` event additionally carries `rl/algorithm_spec`
+  (canonical JSON) and `rl/algorithm_absorbed_flags` (`{}` by default).
+
+The Miles argv of default GRPO is byte-identical to R0.
+
+`yeto-rl-export --rl-algorithm-spec PATH` writes `algorithm_spec`, the
+canonical JSON, and `algorithm_spec_sha256` to the ports provenance. The
+legacy provenance is unchanged.
+
+**Dry run.** `python3 -m yeto.rl.engine.miles_adapter.algorithm_flags
+--dry-run [--rl-algorithm-spec PATH] [--extra "<miles argv>"]
+[--rl-allow-unverified-mechanism NAME]` runs the same steps as the ports
+learner, with no engine: resolve, absorb, rejection matrix, then the Miles
+adapter's declaration. It prints the canonical spec, the hash, the absorbed
+flags, the Miles algorithm flags and the verdict. The exit code is 0 only when
+the spec is accepted.
+
+```bash
+M="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags"
+$M --dry-run          # default GRPO: v1 schema, hash 27df1133..., accepted
+echo '{"schema":"yeto-rl-algorithm-spec-v2","loss":{"eps_clip_high":0.28}}' > clip_higher.json
+$M --dry-run --rl-algorithm-spec clip_higher.json
+    # rejected: features mechanism 'clip_higher' not supported (expressible but not enabled)
+$M --dry-run --rl-algorithm-spec clip_higher.json --rl-allow-unverified-mechanism features:clip_higher
+    # accepted; hash 1b49346c...
+$M --dry-run --extra "--eps-clip-high 0.28" --rl-allow-unverified-mechanism features:clip_higher
+    # accepted; absorbed {"--eps-clip-high": "0.28"}; same hash 1b49346c...
+$M --dry-run --rl-algorithm-spec clip_higher.json --extra "--eps-clip-high 0.3"
+    # rejected: ... sets loss.eps_clip_high=0.3 but the algorithm spec has ...=0.28
+$M --dry-run --extra "--kl-coef 0.1"   # rejected: ... use kl.placement='loss'
+$M --dry-run --extra "--gamma 0.9"     # rejected: --gamma ... not part of the algorithm spec yet
+```
+
+The recorded outputs are in
+`openspec/changes/rl-algorithm-capabilities/evidence/2026-09-29-dry-run/`.
+
+**Extending (follow-up algorithm changes).** Add a module under
+`yeto/rl/algos/` and one line to `yeto.rl.algos.EXTENSION_MODULES`. The module
+registers what it needs:
+
+- in `algorithm.py`: `register_field`, `register_mechanism`,
+  `register_rejection`, `register_launch_check`, `register_island_check`,
+  `register_runtime_attrs`, `register_gradient_rule`;
+- in `algorithm_flags.py`: `register_flag`.
+
+A registered field enters the v2 canonical JSON only when it differs from its
+default, so registering one never changes an existing hash. The mechanism is
+declared in `miles_adapter/entry.py::miles_capabilities` only after its
+single-GPU smoke (G1) passes.
+
+**When Miles is upgraded.** Update `MILES_NEXT_COMMIT`, then re-review the
+objective-changing flags of the new `miles/utils/arguments.py` (the algorithm,
+rollout and reward groups):
+
+1. Add each new flag to the mapping table or to `UNMAPPED_OBJECTIVE_FLAGS`.
+2. Run `tests/test_rl_algorithm_flags_upstream.py` in the upstream venv:
+
+   ```bash
+   PYTHONPATH=<miles checkout>:$PWD:$PWD/tests \
+     <miles venv>/bin/python -m pytest -q tests/test_rl_algorithm_flags_upstream.py
+   ```
+
+   It checks that every listed flag exists upstream and that upstream
+   `parse_args` accepts every non-default mapping.
+3. Re-check the estimator and KL rules in `algorithm.py` against
+   `loss_hub/advantages.py` and `miles/ray/specs/train.py`.
+
+### GRPO-family knobs (`rl-algo-grpo-knobs`)
+
+Registered by `yeto/rl/algos/grpo_knobs.py`. Every mechanism below can be
+expressed and translated, but none is declared in `miles_capabilities` until
+its single-GPU smoke (G1) passes. A declared mechanism means only that G1
+(and G3 where it applies) passed. It says nothing about training gains.
+
+| Mechanism | Spec | Miles argv | Constraint (checked before any GPU process) |
+|---|---|---|---|
+| clip-higher | `loss.eps_clip_high` (and `eps_clip`) | `--eps-clip-high` | finite, > 0 |
+| dual-clip | `loss.eps_clip_c` | `--eps-clip-c` | > 1 (Miles asserts the same, later) |
+| token aggregation | `loss.aggregation="token"` | `--calculate-per-token-loss` | |
+| Dr.GRPO, no std | `advantage.std_normalization=false` | `--disable-grpo-std-normalization` | |
+| Dr.GRPO, constant denominator | `loss.aggregation="constant"`, `loss.constant_denominator=D`, `loss.reducer=yeto.rl.algos.reducers.constant_denominator_reducer` | `--custom-pg-loss-reducer-function-path` | D finite > 0; not with token aggregation (one enum; `--calculate-per-token-loss` in extra argv conflicts); CP = 1 |
+| KL loss | `kl.placement="loss"`, `coef`, `estimator` ∈ k1/k2/k3/low_var_kl, `kl.ref_model={source, revision}` | `--use-kl-loss --kl-loss-coef --kl-loss-type` | `ref_model` required; its revision must equal the island's `--model-revision` |
+| entropy | `entropy_coef` | `--entropy-coef` | finite |
+| over-sampling | `sampling.over_sampling_batch_size` | `--over-sampling-batch-size` (R0 slot, from the run config) | needs `sampling.filter`; ≥ rollout batch size |
+| overlong penalty | `advantage.reward_shapers=[{name: overlong_penalty, max_length, cache_length}]` + the dispatcher | `--custom-reward-post-process-path yeto.rl.algos.reward_pipeline.post_process` | 0 < cache_length ≤ max_length ≤ `rollout_max_response_len` |
+| overlong filter | `sampling.overlong_filter=true` | none (the shared `--rollout-sample-filter-path` hook) | |
+
+**Dr.GRPO and RLOO.** The constant-denominator reducer is vendored from Miles
+`9e4260d` `examples/experimental/DrGRPO/custom_reducer.py` (blob `96390ac3`).
+The only change is that D comes from the spec instead of the constant 1000.
+It applies to pg_loss only; clipfrac, KL and entropy keep the default reducer.
+RLOO is not implemented separately: with std normalization off its advantage
+is G/(G−1) times the Dr.GRPO advantage, and Adam is nearly invariant to a
+constant gradient scale.
+
+**KL loss.** Miles loads the `--ref-load` model only when `kl_coef != 0` or
+`use_kl_loss` (`miles/ray/specs/train.py:58`), so KL loss adds a reference
+model and one extra reference forward pass. G1 records the effect on peak
+memory and round time. `kl.ref_model` is part of the algorithm hash, so two
+islands with different references disagree before outer sync. The learner
+also refuses a reference revision that differs from `--model-revision`
+(`rl_algorithm_island_rejected`).
+
+**Reward dispatcher.** `yeto.rl.algos.reward_pipeline.post_process` is the
+only reward post-processing hook on `ports`. It is emitted only when the spec
+selects a reward shaper or a non-default `advantage.transform`; default GRPO
+keeps Miles' built-in path, and its argv is unchanged. The dispatcher runs
+`raw → shapers → advantage transform`. `grpo_default` is element-wise equal
+(`torch.equal`) to Miles `_post_process_rewards`: prompt groups, one reward
+per multi-segment rollout, the error on inconsistent siblings, G=1, std=0,
+`+1e-6`, and the estimator and `rewards_normalization` gates. The comparison
+is `tests/test_rl_reward_pipeline_equivalence.py`; it pins the SHA256 of
+`train_data_conversion.py`. Details:
+
+- Multi-LoRA is refused, because a custom post-process cannot see
+  `prompt_group_sizes`.
+- A batch with no `group_index` and no fixed fan-out falls back to one
+  whole-batch group, as Miles does, and emits `rl_reward_group_fallback`.
+- The configuration reaches Miles as `args.yeto_algo_plugins = {config,
+  sha256}`, set through the spec's runtime attrs. The dispatcher and reducer
+  re-hash it and refuse a mismatch.
+
+**Adding an advantage transform (P2).**
+
+1. Register it in `reward_pipeline.py` with `register_advantage_transform(name,
+   fn(args, samples, rewards, groups, params), validate=...)`. This keeps it
+   under the dispatcher's PluginRef hash.
+2. Select it with `advantage.transform=name` plus `transform_params`.
+3. Register its mechanism and leave it undeclared until G1 passes.
+4. Add a CPU test that compares it with a hand computation, and with
+   `grpo_default` in its degenerate case.
+
+Any edit to `reward_pipeline.py` changes the dispatcher's source hash:
+regenerate specs that pin it (for example `examples/rl_algorithms/*.json`).
+
+**Overlong penalty (DAPO).** For a response of length L:
+
+- L ≤ Lmax − Lcache: penalty 0;
+- Lmax − Lcache < L ≤ Lmax: penalty (Lmax − Lcache − L)/Lcache;
+- L > Lmax: penalty −1.
+
+The penalty is added to the raw reward before group normalization. L is the
+summed length of a rollout's segments, so siblings stay consistent. The
+shaped reward is what Miles logs as raw reward. The original reward is kept
+in `sample.metadata["yeto_raw_reward"]`, and an `rl_reward_shaping` event
+summarizes raw against shaped rewards.
+
+**Overlong filter vs DAPO.** Truncated samples get `remove_sample=True` in
+`record_trained_groups`. Checked on CPU against Miles:
+
+- Their loss mask becomes all zero, but their reward still enters the group
+  mean and std, so the other samples' advantages are unchanged.
+- Under the default sample-mean aggregation a removed sample contributes 0 to
+  the numerator. It still counts in the `global_batch_size` divisor
+  (`loss.py:197-210`), which dilutes the others.
+- Under token aggregation it adds 1 to the reported token count
+  (`clamp_min`).
+
+DAPO's paper masks truncated samples in the loss but does not say whether
+their reward enters the group statistics. The rollout metadata carries
+`filtered_samples`, which the ledger records in the terminal state `filtered`;
+over-sampling leftovers are `carried_over`. A round in which every
+non-zero-variance group was filtered completely does not trip the zero-gradient
+invariant.
+
+**Over-sampling and outer averaging.** strict-avg and decoupled average the
+islands' deltas with equal weights, not weighted by sample count (inferred;
+not verified). Islands that train on different numbers of samples therefore
+count equally. The weighting rule is unchanged. Recording each island's
+trained samples and groups in the per-round event is task 7.2; it needs a
+driver-side event field and is still open.
+
+```bash
+M="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags"
+$M --dry-run --rl-algorithm-spec examples/rl_algorithms/dr-grpo.json
+    # rejected: custom_pg_loss_reducer / no_grpo_std_normalization not declared (pre-G1)
+$M --dry-run --rl-algorithm-spec examples/rl_algorithms/dr-grpo.json \
+   --rl-allow-unverified-mechanism constant --rl-allow-unverified-mechanism custom_pg_loss_reducer \
+   --rl-allow-unverified-mechanism no_grpo_std_normalization   # accepted, hash 725e4216...
+```
+
+Recorded outputs: `openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-dry-run/`.
+
 ### Port responsibilities
 
 | port | responsibility | Miles adapter (`yeto/rl/engine/miles_adapter/`) |

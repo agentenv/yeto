@@ -301,6 +301,7 @@ def selection_event(
     algorithm: AlgorithmSpec,
     miles_commit: str,
     unverified_mechanisms: Any = (),
+    outer_sync: bool | None = None,
 ) -> dict[str, Any]:
     """Run event carrying the algorithm identity (D9) and its provenance.
 
@@ -320,6 +321,9 @@ def selection_event(
     }
     if unverified_mechanisms:
         event["rl/unverified_mechanisms"] = sorted(unverified_mechanisms)
+        event["rl/contains_unverified_mechanisms"] = True
+    if outer_sync is not None:
+        event["rl/outer_sync"] = bool(outer_sync)
     return event
 
 
@@ -406,6 +410,7 @@ def run_ports_island(
             algorithm=algorithm,
             miles_commit=MILES_NEXT_COMMIT,
             unverified_mechanisms=getattr(miles_args, "yeto_rl_unverified_mechanisms", ()),
+            outer_sync=getattr(miles_args, "yeto_rl_outer_sync", None),
         ),
     )
     runner = LoopRunner()
