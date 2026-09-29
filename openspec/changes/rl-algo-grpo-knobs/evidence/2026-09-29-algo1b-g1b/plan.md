@@ -81,3 +81,9 @@ run A 第 5 次：生效判据满足（第 2 步 pg_clipfrac 0.105/0.105/0.111�
   - 以下三条**同时**满足时视为运行成功：launcher 退出码为 0，或者退出码为 2 且 launcher 日志含 launcher.py 的那行提示 "--rl-single-island-no-sync island ran on Modal (...); its ~/yeto-output is not fetchable over ssh and there is no syncer checkpoint"；回传的事件磁带中有 `rl_learner_finalized`；launcher 日志中有 "job finished: SUCCEEDED"。
   - 退出码 3（缺 finalized，run 标记为 .incomplete）或其他退出码均为失败。
 - 这次重跑是因为判据措辞，不是因为结果：run A 按 R1 **只重跑一次**（prefix `algo1b-g1b-a-r1`），run C 若同样出现退出码 2，也只重跑一次（prefix `algo1b-g1b-c-r1`）。结果按预登记判据如实交付，不再加跑。
+
+## run C 结论（prefix algo1b-g1b-c，19:42:12–19:54:34Z，app 已 stopped）
+- 5 轮全部完成，每轮 8 组 64 条样本；有 finalized，job 为 SUCCEEDED；没有 invariant 错误，4 行 Traceback 都是 freeze_gc 良性链。launcher 退出码为 2，原因与 run A 相同（no-sync Modal 路径无法回传产物）。
+- **生效判据（事件中 dynamic_filter_dropped_groups 或 dynamic_filter_replacement_attempts 至少一轮 > 0）：不满足**，5 轮都是 0/0，generated 也是 0。另外，判据"rc=0"字面上也不满足。结论：**未能证明 over_sampling 生效，不声明。**
+- 补充观察（不作为判定依据，未预登记）：Miles 的 rollout 指标中，`raw_reward_unfiltered`（0.6125/0.7125/0.875/0.675/0.8125）与训练所用的 `raw_reward`（0.64/0.77/0.84/0.72/0.77）每轮都不相同，说明生成的样本比训练用的多，超采样或过滤在 Miles 侧可能起了作用。与此同时 yeto 的 `rl_local_round.dynamic_filter_*` 在 ports 路径上可能根本没有接线（generated 恒为 0）。这属于接口缺口（INFRA/P0），不能据此补判。
+- 按 R1 规定，run C 本可以再跑一次；但预登记的生效判据依赖的字段在 ports 路径上始终为 0，重跑不会改变结论，所以**不重跑**。需要先由 INFRA/P0 在 ports 路径接好 `dynamic_filter_*`（或另立判据的新计划）。
