@@ -1,0 +1,2313 @@
+{
+  "meta": {
+    "mode": "real",
+    "fake": false,
+    "preset": "decoupled",
+    "config": "--model Qwen/Qwen3-0.6B --model-revision c1899de289a04d12100db370d81485cdf75e47ca --data /work/data/gsm8k.jsonl --reward-function gsm8k_reward:score --islands 2 --gpus-per-island 1 --groups-per-island 4 --samples-per-group 8 --rollout-max-response-len 384 --seq-len 1024 --lora-r 16 --lora-targets all-linear --eval-prompts 8 --eval-samples-per-prompt 1 --pass-k 1 --eval-device cuda --miles-root /opt/miles-next --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --arms decoupled --global-rounds 8 --fragments 8 --pipeline 2 --local-horizon 4 --arm-timeout-min 60 (legacy: --miles-root /opt/miles-legacy)",
+    "primary_seed": 17,
+    "legacy_seeds": [
+      17,
+      18,
+      19,
+      20,
+      21
+    ],
+    "ports_seeds": [
+      17,
+      18,
+      19,
+      20,
+      21
+    ],
+    "created_unix": 1790666717.0347345
+  },
+  "thresholds": {
+    "round1_exact": [
+      "completed_groups",
+      "action_tokens",
+      "reward_mean"
+    ],
+    "round1_grad_norm_rel": 0.03,
+    "tf_loss": "|d| <= max(1e-06, 0.001*|loss_legacy|)",
+    "tf_grad_norm_rel": 0.03,
+    "tf_update_rel_l2": 0.05,
+    "tf_initial_lora_rel_l2": 1e-06,
+    "distribution": "per seed: mean over (island, round >= 2) of ['reward_mean', 'loss', 'grad_norm', 'action_tokens']; exact two-sided permutation test legacy vs ports (mean diff), FAIL if p < 0.05/4",
+    "hash": "within path: all islands equal per policy version; never cross-path"
+  },
+  "verdict": "PASS",
+  "passed": true,
+  "tiers": {
+    "1_round1": {
+      "passed": true,
+      "rows": [
+        {
+          "island": 0,
+          "metric": "completed_groups",
+          "legacy": 4,
+          "ports": 4,
+          "rule": "exact",
+          "pass": true
+        },
+        {
+          "island": 0,
+          "metric": "action_tokens",
+          "legacy": 5227,
+          "ports": 5227,
+          "rule": "exact",
+          "pass": true
+        },
+        {
+          "island": 0,
+          "metric": "reward_mean",
+          "legacy": 0.8125,
+          "ports": 0.8125,
+          "rule": "exact",
+          "pass": true
+        },
+        {
+          "island": 0,
+          "metric": "grad_norm",
+          "legacy": 0.638507670254143,
+          "ports": 0.6349465847015381,
+          "rel_diff": 0.00557720089907067,
+          "rule": "rel <= 0.03",
+          "pass": true
+        },
+        {
+          "island": 1,
+          "metric": "completed_groups",
+          "legacy": 4,
+          "ports": 4,
+          "rule": "exact",
+          "pass": true
+        },
+        {
+          "island": 1,
+          "metric": "action_tokens",
+          "legacy": 6145,
+          "ports": 6145,
+          "rule": "exact",
+          "pass": true
+        },
+        {
+          "island": 1,
+          "metric": "reward_mean",
+          "legacy": 0.4375,
+          "ports": 0.4375,
+          "rule": "exact",
+          "pass": true
+        },
+        {
+          "island": 1,
+          "metric": "grad_norm",
+          "legacy": 0.3976386795209205,
+          "ports": 0.40183985233306885,
+          "rel_diff": 0.010565302191451655,
+          "rule": "rel <= 0.03",
+          "pass": true
+        }
+      ],
+      "gated": false
+    },
+    "2_teacher_forcing": {
+      "passed": true,
+      "rows": [
+        {
+          "island": 0,
+          "check": "fidelity legacy-TF completed_groups == reference",
+          "legacy": 4,
+          "ports": 4,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 0,
+          "check": "fidelity ports-TF completed_groups == reference",
+          "legacy": 4,
+          "ports": 4,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 0,
+          "check": "fidelity legacy-TF action_tokens == reference",
+          "legacy": 5227,
+          "ports": 5227,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 0,
+          "check": "fidelity ports-TF action_tokens == reference",
+          "legacy": 5227,
+          "ports": 5227,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 0,
+          "check": "fidelity legacy-TF reward_mean == reference",
+          "legacy": 0.8125,
+          "ports": 0.8125,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 0,
+          "check": "fidelity ports-TF reward_mean == reference",
+          "legacy": 0.8125,
+          "ports": 0.8125,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 0,
+          "check": "legacy-TF grad_norm vs reference (info)",
+          "legacy": 0.638507670254143,
+          "ports": 0.638507670254143,
+          "value": 0.0,
+          "rule": "reported",
+          "gate": false,
+          "pass": null
+        },
+        {
+          "island": 0,
+          "check": "loss",
+          "legacy": 1.210719347000122e-08,
+          "ports": 1.210719347000122e-08,
+          "value": 0.0,
+          "rule": "|d| <= max(1e-06, 0.001*|loss_l|)",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 0,
+          "check": "grad_norm",
+          "legacy": 0.638507670254143,
+          "ports": 0.6349465847015381,
+          "value": 0.00557720089907067,
+          "rule": "rel <= 0.03",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 0,
+          "check": "LoRA update (audit f32)",
+          "legacy": false,
+          "ports": false,
+          "value": null,
+          "rule": "not available (see strict-avg TF)",
+          "gate": false,
+          "pass": null
+        },
+        {
+          "island": 1,
+          "check": "fidelity legacy-TF completed_groups == reference",
+          "legacy": 4,
+          "ports": 4,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 1,
+          "check": "fidelity ports-TF completed_groups == reference",
+          "legacy": 4,
+          "ports": 4,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 1,
+          "check": "fidelity legacy-TF action_tokens == reference",
+          "legacy": 6145,
+          "ports": 6145,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 1,
+          "check": "fidelity ports-TF action_tokens == reference",
+          "legacy": 6145,
+          "ports": 6145,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 1,
+          "check": "fidelity legacy-TF reward_mean == reference",
+          "legacy": 0.4375,
+          "ports": 0.4375,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 1,
+          "check": "fidelity ports-TF reward_mean == reference",
+          "legacy": 0.4375,
+          "ports": 0.4375,
+          "value": null,
+          "rule": "exact",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 1,
+          "check": "legacy-TF grad_norm vs reference (info)",
+          "legacy": 0.3976386795209205,
+          "ports": 0.3976386795209205,
+          "value": 0.0,
+          "rule": "reported",
+          "gate": false,
+          "pass": null
+        },
+        {
+          "island": 1,
+          "check": "loss",
+          "legacy": -1.862645149230957e-09,
+          "ports": -1.862645149230957e-09,
+          "value": 0.0,
+          "rule": "|d| <= max(1e-06, 0.001*|loss_l|)",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 1,
+          "check": "grad_norm",
+          "legacy": 0.3976386795209205,
+          "ports": 0.40183985233306885,
+          "value": 0.010565302191451655,
+          "rule": "rel <= 0.03",
+          "gate": true,
+          "pass": true
+        },
+        {
+          "island": 1,
+          "check": "LoRA update (audit f32)",
+          "legacy": false,
+          "ports": false,
+          "value": null,
+          "rule": "not available (see strict-avg TF)",
+          "gate": false,
+          "pass": null
+        }
+      ],
+      "gated": true
+    },
+    "3_distribution": {
+      "passed": true,
+      "rows": [
+        {
+          "metric": "reward_mean",
+          "legacy_values": {
+            "17": 0.5535714285714286,
+            "18": 0.6049107142857143,
+            "19": 0.5691964285714286,
+            "20": 0.5803571428571429,
+            "21": 0.578125
+          },
+          "ports_values": {
+            "17": 0.6004464285714286,
+            "18": 0.6049107142857143,
+            "19": 0.5446428571428571,
+            "20": 0.546875,
+            "21": 0.6004464285714286
+          },
+          "alpha": 0.0125,
+          "legacy_mean": 0.5772321428571429,
+          "ports_mean": 0.5794642857142858,
+          "p_value": 0.9761904761904762,
+          "effect_size": 0.08752085706444403,
+          "pass": true
+        },
+        {
+          "metric": "loss",
+          "legacy_values": {
+            "17": 7.98276492527553e-10,
+            "18": -2.3283064365386963e-09,
+            "19": -2.66092164175851e-10,
+            "20": 2.66092164175851e-09,
+            "21": -2.195260354450771e-09
+          },
+          "ports_values": {
+            "17": 1.862645149230957e-09,
+            "18": 5.32184328351702e-10,
+            "19": -1.7961221081869943e-09,
+            "20": 5.9205506529126845e-09,
+            "21": -3.3261520521981376e-10
+          },
+          "alpha": 0.0125,
+          "legacy_mean": -2.66092164175851e-10,
+          "ports_mean": 1.2373285634177071e-09,
+          "p_value": 0.4126984126984127,
+          "effect_size": 0.5887732989501746,
+          "pass": true
+        },
+        {
+          "metric": "grad_norm",
+          "legacy_values": {
+            "17": 0.2903493413009561,
+            "18": 0.30076818070353023,
+            "19": 0.3328788975646721,
+            "20": 0.3207761942457079,
+            "21": 0.45238412446182724
+          },
+          "ports_values": {
+            "17": 0.298094385436603,
+            "18": 0.27495632427079336,
+            "19": 0.2901454546621868,
+            "20": 0.34407767334154676,
+            "21": 0.39443339833191465
+          },
+          "alpha": 0.0125,
+          "legacy_mean": 0.3394313476553387,
+          "ports_mean": 0.3203414472086089,
+          "p_value": 0.6111111111111112,
+          "effect_size": -0.3312307044654283,
+          "pass": true
+        },
+        {
+          "metric": "action_tokens",
+          "legacy_values": {
+            "17": 7882.357142857143,
+            "18": 7670.785714285715,
+            "19": 7232.642857142857,
+            "20": 7536.285714285715,
+            "21": 6483.214285714285
+          },
+          "ports_values": {
+            "17": 7720.357142857143,
+            "18": 7735.928571428572,
+            "19": 7220.571428571428,
+            "20": 6875.928571428572,
+            "21": 6845.142857142857
+          },
+          "alpha": 0.0125,
+          "legacy_mean": 7361.057142857144,
+          "ports_mean": 7279.585714285715,
+          "p_value": 0.8095238095238095,
+          "effect_size": -0.16530799889546716,
+          "pass": true
+        }
+      ],
+      "stats": {
+        "n_legacy_seeds": 5,
+        "n_ports_seeds": 5,
+        "alpha_family": 0.05,
+        "alpha_per_metric": 0.0125,
+        "splits": 252,
+        "min_p": 0.007936507936507936,
+        "reject_only_if_fully_separated": true,
+        "min_effect_80pct_power_sd": 3.2
+      },
+      "gated": true
+    },
+    "4_hash": {
+      "passed": true,
+      "rows": [
+        {
+          "path": "legacy",
+          "seed": 17,
+          "version": 0,
+          "hashes": {
+            "0": "a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4",
+            "1": "a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 17,
+          "version": 8,
+          "hashes": {
+            "0": "3f225c4cea700ba46d8d35700ecdd64a70546c2042c5d4e1629f04b3159ecaf0",
+            "1": "3f225c4cea700ba46d8d35700ecdd64a70546c2042c5d4e1629f04b3159ecaf0"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 18,
+          "version": 0,
+          "hashes": {
+            "0": "9f7a8361b590b705b1c84b77a89acf65b9f2c96f6b2837f40e6ad45f43f33ee2",
+            "1": "9f7a8361b590b705b1c84b77a89acf65b9f2c96f6b2837f40e6ad45f43f33ee2"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 18,
+          "version": 8,
+          "hashes": {
+            "0": "68cd9bbfeb41c7f2145a6c65a637f036de00951a4511c26df1c4c04c3a94604d",
+            "1": "68cd9bbfeb41c7f2145a6c65a637f036de00951a4511c26df1c4c04c3a94604d"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 19,
+          "version": 0,
+          "hashes": {
+            "0": "2f1d1f609dbe053803764caa9233df3f17613540131114c44b5c08105cdf2fea",
+            "1": "2f1d1f609dbe053803764caa9233df3f17613540131114c44b5c08105cdf2fea"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 19,
+          "version": 8,
+          "hashes": {
+            "0": "0456b1c09fb9087b2f6ff6c9dd0edd6a4cece6410be44fb1b91b4b9ac65faef8",
+            "1": "0456b1c09fb9087b2f6ff6c9dd0edd6a4cece6410be44fb1b91b4b9ac65faef8"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 20,
+          "version": 0,
+          "hashes": {
+            "0": "aa65ca450f8df42268d3d6e6a09348c1805bb4dbb71074fb7c7a6192fbee75e1",
+            "1": "aa65ca450f8df42268d3d6e6a09348c1805bb4dbb71074fb7c7a6192fbee75e1"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 20,
+          "version": 8,
+          "hashes": {
+            "0": "8f5a05868bda1f496e51b828db3bd38f049abd57d3fda3ce040f61497a299807",
+            "1": "8f5a05868bda1f496e51b828db3bd38f049abd57d3fda3ce040f61497a299807"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 21,
+          "version": 0,
+          "hashes": {
+            "0": "26348c608aadf733a121d75bf3349e8130c2e1b4648f5000615e3cc8efc9855f",
+            "1": "26348c608aadf733a121d75bf3349e8130c2e1b4648f5000615e3cc8efc9855f"
+          },
+          "pass": true
+        },
+        {
+          "path": "legacy",
+          "seed": 21,
+          "version": 8,
+          "hashes": {
+            "0": "968d853a1b8cf8a0c1bf2360922fd38a4304a25c4c35bb8a6745a1cfb88be668",
+            "1": "968d853a1b8cf8a0c1bf2360922fd38a4304a25c4c35bb8a6745a1cfb88be668"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 17,
+          "version": 0,
+          "hashes": {
+            "0": "a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4",
+            "1": "a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 17,
+          "version": 8,
+          "hashes": {
+            "0": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+            "1": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 18,
+          "version": 0,
+          "hashes": {
+            "0": "9f7a8361b590b705b1c84b77a89acf65b9f2c96f6b2837f40e6ad45f43f33ee2",
+            "1": "9f7a8361b590b705b1c84b77a89acf65b9f2c96f6b2837f40e6ad45f43f33ee2"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 18,
+          "version": 8,
+          "hashes": {
+            "0": "35b3d0145df8335a76a735d0547e926e005db36726dfec6816b6f32086a8b6eb",
+            "1": "35b3d0145df8335a76a735d0547e926e005db36726dfec6816b6f32086a8b6eb"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 19,
+          "version": 0,
+          "hashes": {
+            "0": "2f1d1f609dbe053803764caa9233df3f17613540131114c44b5c08105cdf2fea",
+            "1": "2f1d1f609dbe053803764caa9233df3f17613540131114c44b5c08105cdf2fea"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 19,
+          "version": 8,
+          "hashes": {
+            "0": "77e2e20658f865149686ff0687f409123b83ece1936333572621bfb07a8d9a37",
+            "1": "77e2e20658f865149686ff0687f409123b83ece1936333572621bfb07a8d9a37"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 20,
+          "version": 0,
+          "hashes": {
+            "0": "aa65ca450f8df42268d3d6e6a09348c1805bb4dbb71074fb7c7a6192fbee75e1",
+            "1": "aa65ca450f8df42268d3d6e6a09348c1805bb4dbb71074fb7c7a6192fbee75e1"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 20,
+          "version": 8,
+          "hashes": {
+            "0": "a142c6abd4b15c9872c3941dff61f086ef4a3760df4d8dcba7e8e130910ba21d",
+            "1": "a142c6abd4b15c9872c3941dff61f086ef4a3760df4d8dcba7e8e130910ba21d"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 21,
+          "version": 0,
+          "hashes": {
+            "0": "26348c608aadf733a121d75bf3349e8130c2e1b4648f5000615e3cc8efc9855f",
+            "1": "26348c608aadf733a121d75bf3349e8130c2e1b4648f5000615e3cc8efc9855f"
+          },
+          "pass": true
+        },
+        {
+          "path": "ports",
+          "seed": 21,
+          "version": 8,
+          "hashes": {
+            "0": "7c9e16b0ea5c6e15d0b35400abce0274f25c2c8465b3a3677b6d73fd7b0eb4b8",
+            "1": "7c9e16b0ea5c6e15d0b35400abce0274f25c2c8465b3a3677b6d73fd7b0eb4b8"
+          },
+          "pass": true
+        }
+      ],
+      "gated": true
+    },
+    "5_peft": {
+      "peft": [
+        {
+          "dir": "legacy-s17/work/seed-17/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "legacy-s18/work/seed-18/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "legacy-s19/work/seed-19/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "legacy-s20/work/seed-20/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "legacy-s21/work/seed-21/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "ports-s17/work/seed-17/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "ports-s18/work/seed-18/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "ports-s19/work/seed-19/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "ports-s20/work/seed-20/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        },
+        {
+          "dir": "ports-s21/work/seed-21/yeto-decoupled-m2/adapter",
+          "pass": true,
+          "peft_type": "PeftType.LORA",
+          "tensors": 392,
+          "full_model_load": true
+        }
+      ],
+      "passed": true,
+      "final_lora_rel_l2_legacy_vs_ports": 0.00828608998540591,
+      "final_lora_rel_l2_legacy_seed_to_seed": {
+        "17->18": 1.4149817493402717,
+        "17->19": 1.4144959885815358,
+        "17->20": 1.4146158882749975,
+        "17->21": 1.4140258766986409
+      },
+      "gated": true
+    }
+  },
+  "raw": {
+    "legacy": {
+      "17": {
+        "dir": "legacy-s17/work/seed-17/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/1/grad_norm": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/2/grad_norm": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/3/grad_norm": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/4/grad_norm": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/5/grad_norm": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/6/grad_norm": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/7/grad_norm": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "0/8/grad_norm": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/1/grad_norm": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/2/grad_norm": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/3/grad_norm": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/4/grad_norm": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/5/grad_norm": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/6/grad_norm": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/7/grad_norm": "miles.log step 6",
+          "1/8/loss": "miles.log step 7",
+          "1/8/grad_norm": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.8125,
+            "loss": 1.210719347000122e-08,
+            "grad_norm": 0.638507670254143,
+            "completed_groups": 4,
+            "action_tokens": 5227,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.0625,
+            "loss": 0.0,
+            "grad_norm": 0.17284007492255157,
+            "completed_groups": 4,
+            "action_tokens": 10876,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.15625,
+            "loss": -7.450580596923828e-09,
+            "grad_norm": 0.25436398255016773,
+            "completed_groups": 4,
+            "action_tokens": 8493,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.78125,
+            "loss": 2.7939677238464355e-09,
+            "grad_norm": 0.1498372561029136,
+            "completed_groups": 4,
+            "action_tokens": 7051,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.90625,
+            "loss": 1.1175870895385742e-08,
+            "grad_norm": 0.3493297353605781,
+            "completed_groups": 4,
+            "action_tokens": 6227,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.46875,
+            "loss": -5.587935447692871e-09,
+            "grad_norm": 0.358379831272873,
+            "completed_groups": 4,
+            "action_tokens": 7482,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.75,
+            "loss": 0.0,
+            "grad_norm": 0.0,
+            "completed_groups": 4,
+            "action_tokens": 7602,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.625,
+            "loss": -1.1175870895385742e-08,
+            "grad_norm": 0.33890494760110923,
+            "completed_groups": 4,
+            "action_tokens": 8758,
+            "post_sync_hash": "3f225c4cea700ba46d8d35700ecdd64a70546c2042c5d4e1629f04b3159ecaf0"
+          },
+          "1/1": {
+            "reward_mean": 0.4375,
+            "loss": -1.862645149230957e-09,
+            "grad_norm": 0.3976386795209205,
+            "completed_groups": 4,
+            "action_tokens": 6145,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.5625,
+            "loss": 5.587935447692871e-09,
+            "grad_norm": 0.2708347974639833,
+            "completed_groups": 4,
+            "action_tokens": 7935,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.53125,
+            "loss": -7.450580596923828e-09,
+            "grad_norm": 0.3342715473212992,
+            "completed_groups": 4,
+            "action_tokens": 8271,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.5,
+            "loss": -7.450580596923828e-09,
+            "grad_norm": 0.24830134547528127,
+            "completed_groups": 4,
+            "action_tokens": 8371,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.6875,
+            "loss": 1.30385160446167e-08,
+            "grad_norm": 0.49388921320301093,
+            "completed_groups": 4,
+            "action_tokens": 6627,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.6875,
+            "loss": 0.0,
+            "grad_norm": 0.45770671846223254,
+            "completed_groups": 4,
+            "action_tokens": 6631,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.65625,
+            "loss": 1.3969838619232178e-08,
+            "grad_norm": 0.33935463445547176,
+            "completed_groups": 4,
+            "action_tokens": 7672,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.375,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.2968766940219131,
+            "completed_groups": 4,
+            "action_tokens": 8357,
+            "post_sync_hash": "3f225c4cea700ba46d8d35700ecdd64a70546c2042c5d4e1629f04b3159ecaf0"
+          }
+        }
+      },
+      "18": {
+        "dir": "legacy-s18/work/seed-18/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/1/grad_norm": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/2/grad_norm": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/3/grad_norm": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/4/grad_norm": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/5/grad_norm": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/6/grad_norm": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/7/grad_norm": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "0/8/grad_norm": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/1/grad_norm": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/2/grad_norm": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/3/grad_norm": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/4/grad_norm": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/5/grad_norm": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/6/grad_norm": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/7/grad_norm": "miles.log step 6",
+          "1/8/loss": "miles.log step 7",
+          "1/8/grad_norm": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.875,
+            "loss": 0.0,
+            "grad_norm": 0.219120010725562,
+            "completed_groups": 4,
+            "action_tokens": 5159,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.03125,
+            "loss": -5.587935447692871e-09,
+            "grad_norm": 0.2244995263212555,
+            "completed_groups": 4,
+            "action_tokens": 10406,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.21875,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.3179174058404798,
+            "completed_groups": 4,
+            "action_tokens": 7922,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.78125,
+            "loss": 0.0,
+            "grad_norm": 0.3501253103828893,
+            "completed_groups": 4,
+            "action_tokens": 7175,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.90625,
+            "loss": 9.313225746154785e-10,
+            "grad_norm": 0.3590197258314253,
+            "completed_groups": 4,
+            "action_tokens": 5177,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.625,
+            "loss": -1.1175870895385742e-08,
+            "grad_norm": 0.30446684011842884,
+            "completed_groups": 4,
+            "action_tokens": 7212,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.75,
+            "loss": 0.0,
+            "grad_norm": 0.0,
+            "completed_groups": 4,
+            "action_tokens": 7179,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.78125,
+            "loss": -1.4901161193847656e-08,
+            "grad_norm": 0.3256417838144136,
+            "completed_groups": 4,
+            "action_tokens": 8126,
+            "post_sync_hash": "68cd9bbfeb41c7f2145a6c65a637f036de00951a4511c26df1c4c04c3a94604d"
+          },
+          "1/1": {
+            "reward_mean": 0.4375,
+            "loss": -1.6763806343078613e-08,
+            "grad_norm": 0.4024507695057408,
+            "completed_groups": 4,
+            "action_tokens": 6129,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.625,
+            "loss": -2.7939677238464355e-09,
+            "grad_norm": 0.31206479762809364,
+            "completed_groups": 4,
+            "action_tokens": 7723,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.59375,
+            "loss": 0.0,
+            "grad_norm": 0.23907903102989536,
+            "completed_groups": 4,
+            "action_tokens": 8443,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.59375,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.30490431040813254,
+            "completed_groups": 4,
+            "action_tokens": 8869,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.75,
+            "loss": 0.0,
+            "grad_norm": 0.34035066091154714,
+            "completed_groups": 4,
+            "action_tokens": 7021,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.875,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.3604567666246632,
+            "completed_groups": 4,
+            "action_tokens": 6752,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.5625,
+            "loss": -2.7939677238464355e-09,
+            "grad_norm": 0.4213655362601234,
+            "completed_groups": 4,
+            "action_tokens": 7325,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.375,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.35086283467807633,
+            "completed_groups": 4,
+            "action_tokens": 8061,
+            "post_sync_hash": "68cd9bbfeb41c7f2145a6c65a637f036de00951a4511c26df1c4c04c3a94604d"
+          }
+        }
+      },
+      "19": {
+        "dir": "legacy-s19/work/seed-19/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/1/grad_norm": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/2/grad_norm": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/3/grad_norm": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/4/grad_norm": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/5/grad_norm": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/6/grad_norm": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/7/grad_norm": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "0/8/grad_norm": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/1/grad_norm": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/2/grad_norm": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/3/grad_norm": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/4/grad_norm": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/5/grad_norm": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/6/grad_norm": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/7/grad_norm": "miles.log step 6",
+          "1/8/loss": "miles.log step 7",
+          "1/8/grad_norm": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.90625,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.24868674611008262,
+            "completed_groups": 4,
+            "action_tokens": 4952,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.0625,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.32960596115829066,
+            "completed_groups": 4,
+            "action_tokens": 10604,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.15625,
+            "loss": 9.313225746154785e-10,
+            "grad_norm": 0.28879741163863853,
+            "completed_groups": 4,
+            "action_tokens": 7849,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.71875,
+            "loss": 5.587935447692871e-09,
+            "grad_norm": 0.23206658816724146,
+            "completed_groups": 4,
+            "action_tokens": 7244,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.90625,
+            "loss": -5.587935447692871e-09,
+            "grad_norm": 0.35714406541211235,
+            "completed_groups": 4,
+            "action_tokens": 5447,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.53125,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.4503290304661472,
+            "completed_groups": 4,
+            "action_tokens": 6526,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.65625,
+            "loss": -6.51925802230835e-09,
+            "grad_norm": 0.3301072418191635,
+            "completed_groups": 4,
+            "action_tokens": 6587,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.6875,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.2809522164959499,
+            "completed_groups": 4,
+            "action_tokens": 7340,
+            "post_sync_hash": "0456b1c09fb9087b2f6ff6c9dd0edd6a4cece6410be44fb1b91b4b9ac65faef8"
+          },
+          "1/1": {
+            "reward_mean": 0.46875,
+            "loss": -3.166496753692627e-08,
+            "grad_norm": 0.4141055930403612,
+            "completed_groups": 4,
+            "action_tokens": 6172,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.59375,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.27819591218274764,
+            "completed_groups": 4,
+            "action_tokens": 8216,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.59375,
+            "loss": -7.450580596923828e-09,
+            "grad_norm": 0.132506073146767,
+            "completed_groups": 4,
+            "action_tokens": 8264,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.53125,
+            "loss": -1.1175870895385742e-08,
+            "grad_norm": 0.40196556539162964,
+            "completed_groups": 4,
+            "action_tokens": 7728,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.625,
+            "loss": -1.862645149230957e-09,
+            "grad_norm": 0.4887687843156989,
+            "completed_groups": 4,
+            "action_tokens": 5464,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.8125,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.4434029477928245,
+            "completed_groups": 4,
+            "action_tokens": 6176,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.6875,
+            "loss": 9.313225746154785e-09,
+            "grad_norm": 0.30253598265191534,
+            "completed_groups": 4,
+            "action_tokens": 6628,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.40625,
+            "loss": 0.0,
+            "grad_norm": 0.3439267852662831,
+            "completed_groups": 4,
+            "action_tokens": 7184,
+            "post_sync_hash": "0456b1c09fb9087b2f6ff6c9dd0edd6a4cece6410be44fb1b91b4b9ac65faef8"
+          }
+        }
+      },
+      "20": {
+        "dir": "legacy-s20/work/seed-20/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/1/grad_norm": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/2/grad_norm": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/3/grad_norm": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/4/grad_norm": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/5/grad_norm": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/6/grad_norm": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/7/grad_norm": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "0/8/grad_norm": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/1/grad_norm": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/2/grad_norm": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/3/grad_norm": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/4/grad_norm": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/5/grad_norm": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/6/grad_norm": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/7/grad_norm": "miles.log step 6",
+          "1/8/loss": "miles.log step 7",
+          "1/8/grad_norm": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.90625,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.22971062511366674,
+            "completed_groups": 4,
+            "action_tokens": 4931,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.15625,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.34944060317046494,
+            "completed_groups": 4,
+            "action_tokens": 10488,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.1875,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.3531530850137583,
+            "completed_groups": 4,
+            "action_tokens": 7915,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.78125,
+            "loss": 2.7939677238464355e-09,
+            "grad_norm": 0.17163433217948132,
+            "completed_groups": 4,
+            "action_tokens": 6948,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.875,
+            "loss": -1.862645149230957e-09,
+            "grad_norm": 0.3216220092945732,
+            "completed_groups": 4,
+            "action_tokens": 5524,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.5625,
+            "loss": -2.2351741790771484e-08,
+            "grad_norm": 0.35800471494409547,
+            "completed_groups": 4,
+            "action_tokens": 6836,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.71875,
+            "loss": 9.313225746154785e-10,
+            "grad_norm": 0.1660475868424499,
+            "completed_groups": 4,
+            "action_tokens": 7495,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.6875,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.37183490825566334,
+            "completed_groups": 4,
+            "action_tokens": 6918,
+            "post_sync_hash": "8f5a05868bda1f496e51b828db3bd38f049abd57d3fda3ce040f61497a299807"
+          },
+          "1/1": {
+            "reward_mean": 0.4375,
+            "loss": -1.4901161193847656e-08,
+            "grad_norm": 0.3282736827408483,
+            "completed_groups": 4,
+            "action_tokens": 6063,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.5625,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.32612377657282515,
+            "completed_groups": 4,
+            "action_tokens": 7921,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.59375,
+            "loss": -9.313225746154785e-09,
+            "grad_norm": 0.45784336871341597,
+            "completed_groups": 4,
+            "action_tokens": 8964,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.46875,
+            "loss": 9.313225746154785e-09,
+            "grad_norm": 0.2571627492107715,
+            "completed_groups": 4,
+            "action_tokens": 8276,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.6875,
+            "loss": 1.7695128917694092e-08,
+            "grad_norm": 0.29775276421577834,
+            "completed_groups": 4,
+            "action_tokens": 6454,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.8125,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.36503856938524243,
+            "completed_groups": 4,
+            "action_tokens": 6843,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.65625,
+            "loss": 2.7939677238464355e-09,
+            "grad_norm": 0.3510981247870853,
+            "completed_groups": 4,
+            "action_tokens": 6998,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.375,
+            "loss": 1.862645149230957e-08,
+            "grad_norm": 0.3441101268543059,
+            "completed_groups": 4,
+            "action_tokens": 7928,
+            "post_sync_hash": "8f5a05868bda1f496e51b828db3bd38f049abd57d3fda3ce040f61497a299807"
+          }
+        }
+      },
+      "21": {
+        "dir": "legacy-s21/work/seed-21/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/1/grad_norm": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/2/grad_norm": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/3/grad_norm": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/4/grad_norm": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/5/grad_norm": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/6/grad_norm": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/7/grad_norm": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "0/8/grad_norm": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/1/grad_norm": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/2/grad_norm": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/3/grad_norm": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/4/grad_norm": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/5/grad_norm": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/6/grad_norm": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/7/grad_norm": "miles.log step 6",
+          "1/8/loss": "miles.log step 7",
+          "1/8/grad_norm": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.9375,
+            "loss": 0.0,
+            "grad_norm": 0.21124073590895445,
+            "completed_groups": 4,
+            "action_tokens": 4901,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.125,
+            "loss": -5.587935447692871e-09,
+            "grad_norm": 0.41699018634253426,
+            "completed_groups": 4,
+            "action_tokens": 9614,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.25,
+            "loss": -1.4901161193847656e-08,
+            "grad_norm": 0.36453124309986173,
+            "completed_groups": 4,
+            "action_tokens": 7165,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.8125,
+            "loss": 5.587935447692871e-09,
+            "grad_norm": 1.356799481090073,
+            "completed_groups": 4,
+            "action_tokens": 5371,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.96875,
+            "loss": 4.6566128730773926e-09,
+            "grad_norm": 0.23047003503214894,
+            "completed_groups": 4,
+            "action_tokens": 5007,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.5,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.3662171426883141,
+            "completed_groups": 4,
+            "action_tokens": 5699,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.65625,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.2659089870385987,
+            "completed_groups": 4,
+            "action_tokens": 5601,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.8125,
+            "loss": -1.862645149230957e-09,
+            "grad_norm": 0.43638676972417306,
+            "completed_groups": 4,
+            "action_tokens": 5283,
+            "post_sync_hash": "968d853a1b8cf8a0c1bf2360922fd38a4304a25c4c35bb8a6745a1cfb88be668"
+          },
+          "1/1": {
+            "reward_mean": 0.40625,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.33949447090312423,
+            "completed_groups": 4,
+            "action_tokens": 5973,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.4375,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.3146400725225382,
+            "completed_groups": 4,
+            "action_tokens": 8298,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.53125,
+            "loss": -7.450580596923828e-09,
+            "grad_norm": 0.2646776725133633,
+            "completed_groups": 4,
+            "action_tokens": 8396,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.53125,
+            "loss": -1.1175870895385742e-08,
+            "grad_norm": 0.3661546994578782,
+            "completed_groups": 4,
+            "action_tokens": 7280,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.78125,
+            "loss": 0.0,
+            "grad_norm": 0.39067998499119694,
+            "completed_groups": 4,
+            "action_tokens": 5628,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.65625,
+            "loss": -1.5832483768463135e-08,
+            "grad_norm": 0.5298191323350652,
+            "completed_groups": 4,
+            "action_tokens": 5242,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.65625,
+            "loss": 6.51925802230835e-09,
+            "grad_norm": 0.5755681382382679,
+            "completed_groups": 4,
+            "action_tokens": 5534,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.375,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.45453419739156736,
+            "completed_groups": 4,
+            "action_tokens": 6647,
+            "post_sync_hash": "968d853a1b8cf8a0c1bf2360922fd38a4304a25c4c35bb8a6745a1cfb88be668"
+          }
+        }
+      }
+    },
+    "ports": {
+      "17": {
+        "dir": "ports-s17/work/seed-17/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/8/loss": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.8125,
+            "loss": 1.210719347000122e-08,
+            "grad_norm": 0.6349465847015381,
+            "completed_groups": 4,
+            "action_tokens": 5227,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.15625,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.28957298398017883,
+            "completed_groups": 4,
+            "action_tokens": 10958,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.1875,
+            "loss": -1.210719347000122e-08,
+            "grad_norm": 0.288250207901001,
+            "completed_groups": 4,
+            "action_tokens": 8696,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.8125,
+            "loss": 0.0,
+            "grad_norm": 0.2023099660873413,
+            "completed_groups": 4,
+            "action_tokens": 6850,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.84375,
+            "loss": -1.0244548320770264e-08,
+            "grad_norm": 0.27874892950057983,
+            "completed_groups": 4,
+            "action_tokens": 6160,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.53125,
+            "loss": 0.0,
+            "grad_norm": 0.32454198598861694,
+            "completed_groups": 4,
+            "action_tokens": 7097,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.65625,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.25402066111564636,
+            "completed_groups": 4,
+            "action_tokens": 7190,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.78125,
+            "loss": 0.0,
+            "grad_norm": 0.27034592628479004,
+            "completed_groups": 4,
+            "action_tokens": 7302,
+            "post_sync_hash": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60"
+          },
+          "1/1": {
+            "reward_mean": 0.4375,
+            "loss": -1.862645149230957e-09,
+            "grad_norm": 0.40183985233306885,
+            "completed_groups": 4,
+            "action_tokens": 6145,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.5625,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.32811254262924194,
+            "completed_groups": 4,
+            "action_tokens": 8256,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.625,
+            "loss": 4.6566128730773926e-09,
+            "grad_norm": 0.2787056565284729,
+            "completed_groups": 4,
+            "action_tokens": 8537,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.5625,
+            "loss": 1.4901161193847656e-08,
+            "grad_norm": 0.25190484523773193,
+            "completed_groups": 4,
+            "action_tokens": 8219,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.75,
+            "loss": 1.210719347000122e-08,
+            "grad_norm": 0.38487347960472107,
+            "completed_groups": 4,
+            "action_tokens": 6447,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.90625,
+            "loss": 1.30385160446167e-08,
+            "grad_norm": 0.3767525255680084,
+            "completed_groups": 4,
+            "action_tokens": 6916,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.65625,
+            "loss": 5.587935447692871e-09,
+            "grad_norm": 0.3444005846977234,
+            "completed_groups": 4,
+            "action_tokens": 7413,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.375,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.30078110098838806,
+            "completed_groups": 4,
+            "action_tokens": 8044,
+            "post_sync_hash": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60"
+          }
+        }
+      },
+      "18": {
+        "dir": "ports-s18/work/seed-18/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/8/loss": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.875,
+            "loss": 0.0,
+            "grad_norm": 0.2194380760192871,
+            "completed_groups": 4,
+            "action_tokens": 5159,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.0,
+            "loss": 0.0,
+            "grad_norm": 0.0,
+            "completed_groups": 4,
+            "action_tokens": 10530,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.375,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.37156060338020325,
+            "completed_groups": 4,
+            "action_tokens": 8476,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.78125,
+            "loss": -1.1175870895385742e-08,
+            "grad_norm": 0.3354044258594513,
+            "completed_groups": 4,
+            "action_tokens": 7444,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.96875,
+            "loss": -1.862645149230957e-09,
+            "grad_norm": 0.23593732714653015,
+            "completed_groups": 4,
+            "action_tokens": 5447,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.46875,
+            "loss": -5.587935447692871e-09,
+            "grad_norm": 0.32582521438598633,
+            "completed_groups": 4,
+            "action_tokens": 7209,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.75,
+            "loss": 0.0,
+            "grad_norm": 0.0,
+            "completed_groups": 4,
+            "action_tokens": 7133,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.78125,
+            "loss": -1.0244548320770264e-08,
+            "grad_norm": 0.3275436460971832,
+            "completed_groups": 4,
+            "action_tokens": 7800,
+            "post_sync_hash": "35b3d0145df8335a76a735d0547e926e005db36726dfec6816b6f32086a8b6eb"
+          },
+          "1/1": {
+            "reward_mean": 0.4375,
+            "loss": -1.6763806343078613e-08,
+            "grad_norm": 0.3998885750770569,
+            "completed_groups": 4,
+            "action_tokens": 6129,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.59375,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.25243890285491943,
+            "completed_groups": 4,
+            "action_tokens": 7807,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.59375,
+            "loss": -6.51925802230835e-09,
+            "grad_norm": 0.3209047317504883,
+            "completed_groups": 4,
+            "action_tokens": 8979,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.65625,
+            "loss": 1.1175870895385742e-08,
+            "grad_norm": 0.3170758783817291,
+            "completed_groups": 4,
+            "action_tokens": 8723,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.78125,
+            "loss": 2.7939677238464355e-09,
+            "grad_norm": 0.38144052028656006,
+            "completed_groups": 4,
+            "action_tokens": 7077,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.6875,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.38538357615470886,
+            "completed_groups": 4,
+            "action_tokens": 6424,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.65625,
+            "loss": -2.7939677238464355e-09,
+            "grad_norm": 0.2643921375274658,
+            "completed_groups": 4,
+            "action_tokens": 7590,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.375,
+            "loss": 1.4901161193847656e-08,
+            "grad_norm": 0.33148157596588135,
+            "completed_groups": 4,
+            "action_tokens": 7664,
+            "post_sync_hash": "35b3d0145df8335a76a735d0547e926e005db36726dfec6816b6f32086a8b6eb"
+          }
+        }
+      },
+      "19": {
+        "dir": "ports-s19/work/seed-19/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/8/loss": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.90625,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.24842989444732666,
+            "completed_groups": 4,
+            "action_tokens": 4952,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.0,
+            "loss": 0.0,
+            "grad_norm": 0.0,
+            "completed_groups": 4,
+            "action_tokens": 10490,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.1875,
+            "loss": -7.450580596923828e-09,
+            "grad_norm": 0.24448257684707642,
+            "completed_groups": 4,
+            "action_tokens": 8292,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.6875,
+            "loss": 0.0,
+            "grad_norm": 0.3211006224155426,
+            "completed_groups": 4,
+            "action_tokens": 6866,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.96875,
+            "loss": 0.0,
+            "grad_norm": 0.2607271671295166,
+            "completed_groups": 4,
+            "action_tokens": 5413,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.5625,
+            "loss": -2.7939677238464355e-09,
+            "grad_norm": 0.3385556638240814,
+            "completed_groups": 4,
+            "action_tokens": 6871,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.625,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.22958186268806458,
+            "completed_groups": 4,
+            "action_tokens": 7190,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.6875,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.27515795826911926,
+            "completed_groups": 4,
+            "action_tokens": 7186,
+            "post_sync_hash": "77e2e20658f865149686ff0687f409123b83ece1936333572621bfb07a8d9a37"
+          },
+          "1/1": {
+            "reward_mean": 0.46875,
+            "loss": -3.166496753692627e-08,
+            "grad_norm": 0.41202738881111145,
+            "completed_groups": 4,
+            "action_tokens": 6172,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.65625,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.21954140067100525,
+            "completed_groups": 4,
+            "action_tokens": 7723,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.59375,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.3956073820590973,
+            "completed_groups": 4,
+            "action_tokens": 8101,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.40625,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.26139795780181885,
+            "completed_groups": 4,
+            "action_tokens": 7547,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.65625,
+            "loss": -1.862645149230957e-09,
+            "grad_norm": 0.4207340180873871,
+            "completed_groups": 4,
+            "action_tokens": 5404,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.59375,
+            "loss": -1.862645149230957e-08,
+            "grad_norm": 0.4385458528995514,
+            "completed_groups": 4,
+            "action_tokens": 5805,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.59375,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.4134841561317444,
+            "completed_groups": 4,
+            "action_tokens": 6588,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.40625,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.2431197464466095,
+            "completed_groups": 4,
+            "action_tokens": 7612,
+            "post_sync_hash": "77e2e20658f865149686ff0687f409123b83ece1936333572621bfb07a8d9a37"
+          }
+        }
+      },
+      "20": {
+        "dir": "ports-s20/work/seed-20/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/8/loss": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.90625,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.22859744727611542,
+            "completed_groups": 4,
+            "action_tokens": 4931,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.0,
+            "loss": 0.0,
+            "grad_norm": 0.0,
+            "completed_groups": 4,
+            "action_tokens": 10158,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.1875,
+            "loss": 0.0,
+            "grad_norm": 0.25978773832321167,
+            "completed_groups": 4,
+            "action_tokens": 7972,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.75,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.37917792797088623,
+            "completed_groups": 4,
+            "action_tokens": 7140,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 0.875,
+            "loss": 1.1175870895385742e-08,
+            "grad_norm": 0.49867531657218933,
+            "completed_groups": 4,
+            "action_tokens": 4812,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.46875,
+            "loss": 1.4901161193847656e-08,
+            "grad_norm": 0.24825330078601837,
+            "completed_groups": 4,
+            "action_tokens": 6700,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.71875,
+            "loss": 4.6566128730773926e-09,
+            "grad_norm": 0.27144855260849,
+            "completed_groups": 4,
+            "action_tokens": 6393,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.65625,
+            "loss": 1.1175870895385742e-08,
+            "grad_norm": 0.3292413055896759,
+            "completed_groups": 4,
+            "action_tokens": 7040,
+            "post_sync_hash": "a142c6abd4b15c9872c3941dff61f086ef4a3760df4d8dcba7e8e130910ba21d"
+          },
+          "1/1": {
+            "reward_mean": 0.4375,
+            "loss": -1.4901161193847656e-08,
+            "grad_norm": 0.3288249373435974,
+            "completed_groups": 4,
+            "action_tokens": 6063,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.59375,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.29033705592155457,
+            "completed_groups": 4,
+            "action_tokens": 7941,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.6875,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.424394428730011,
+            "completed_groups": 4,
+            "action_tokens": 7905,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.53125,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.3755337595939636,
+            "completed_groups": 4,
+            "action_tokens": 7148,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.625,
+            "loss": 9.313225746154785e-09,
+            "grad_norm": 0.3506220579147339,
+            "completed_groups": 4,
+            "action_tokens": 4910,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.75,
+            "loss": 1.862645149230957e-09,
+            "grad_norm": 0.4702308475971222,
+            "completed_groups": 4,
+            "action_tokens": 5627,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.53125,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.5304133892059326,
+            "completed_groups": 4,
+            "action_tokens": 5695,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.28125,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.388971745967865,
+            "completed_groups": 4,
+            "action_tokens": 6822,
+            "post_sync_hash": "a142c6abd4b15c9872c3941dff61f086ef4a3760df4d8dcba7e8e130910ba21d"
+          }
+        }
+      },
+      "21": {
+        "dir": "ports-s21/work/seed-21/yeto-decoupled-m2",
+        "filled_from_miles_log": {
+          "0/1/loss": "miles.log step 0",
+          "0/2/loss": "miles.log step 1",
+          "0/3/loss": "miles.log step 2",
+          "0/4/loss": "miles.log step 3",
+          "0/5/loss": "miles.log step 4",
+          "0/6/loss": "miles.log step 5",
+          "0/7/loss": "miles.log step 6",
+          "0/8/loss": "miles.log step 7",
+          "1/1/loss": "miles.log step 0",
+          "1/2/loss": "miles.log step 1",
+          "1/3/loss": "miles.log step 2",
+          "1/4/loss": "miles.log step 3",
+          "1/5/loss": "miles.log step 4",
+          "1/6/loss": "miles.log step 5",
+          "1/7/loss": "miles.log step 6",
+          "1/8/loss": "miles.log step 7"
+        },
+        "rounds": {
+          "0/1": {
+            "reward_mean": 0.9375,
+            "loss": 0.0,
+            "grad_norm": 0.20819419622421265,
+            "completed_groups": 4,
+            "action_tokens": 4901,
+            "post_sync_hash": null
+          },
+          "0/2": {
+            "reward_mean": 0.09375,
+            "loss": 0.0,
+            "grad_norm": 0.2598939836025238,
+            "completed_groups": 4,
+            "action_tokens": 9868,
+            "post_sync_hash": null
+          },
+          "0/3": {
+            "reward_mean": 0.28125,
+            "loss": 1.6763806343078613e-08,
+            "grad_norm": 0.3140263259410858,
+            "completed_groups": 4,
+            "action_tokens": 7410,
+            "post_sync_hash": null
+          },
+          "0/4": {
+            "reward_mean": 0.75,
+            "loss": -1.6763806343078613e-08,
+            "grad_norm": 1.2104072570800781,
+            "completed_groups": 4,
+            "action_tokens": 6087,
+            "post_sync_hash": null
+          },
+          "0/5": {
+            "reward_mean": 1.0,
+            "loss": 0.0,
+            "grad_norm": 0.0,
+            "completed_groups": 4,
+            "action_tokens": 5377,
+            "post_sync_hash": null
+          },
+          "0/6": {
+            "reward_mean": 0.59375,
+            "loss": 0.0,
+            "grad_norm": 0.45325228571891785,
+            "completed_groups": 4,
+            "action_tokens": 6032,
+            "post_sync_hash": null
+          },
+          "0/7": {
+            "reward_mean": 0.71875,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.38183584809303284,
+            "completed_groups": 4,
+            "action_tokens": 6374,
+            "post_sync_hash": null
+          },
+          "0/8": {
+            "reward_mean": 0.65625,
+            "loss": -5.587935447692871e-09,
+            "grad_norm": 0.33135533332824707,
+            "completed_groups": 4,
+            "action_tokens": 6542,
+            "post_sync_hash": "7c9e16b0ea5c6e15d0b35400abce0274f25c2c8465b3a3677b6d73fd7b0eb4b8"
+          },
+          "1/1": {
+            "reward_mean": 0.40625,
+            "loss": -3.725290298461914e-09,
+            "grad_norm": 0.3390273153781891,
+            "completed_groups": 4,
+            "action_tokens": 5973,
+            "post_sync_hash": null
+          },
+          "1/2": {
+            "reward_mean": 0.5,
+            "loss": 3.725290298461914e-09,
+            "grad_norm": 0.29522234201431274,
+            "completed_groups": 4,
+            "action_tokens": 8507,
+            "post_sync_hash": null
+          },
+          "1/3": {
+            "reward_mean": 0.59375,
+            "loss": 4.6566128730773926e-09,
+            "grad_norm": 0.22065961360931396,
+            "completed_groups": 4,
+            "action_tokens": 8833,
+            "post_sync_hash": null
+          },
+          "1/4": {
+            "reward_mean": 0.5625,
+            "loss": -1.30385160446167e-08,
+            "grad_norm": 0.3322617709636688,
+            "completed_groups": 4,
+            "action_tokens": 7078,
+            "post_sync_hash": null
+          },
+          "1/5": {
+            "reward_mean": 0.84375,
+            "loss": 1.30385160446167e-08,
+            "grad_norm": 0.39538460969924927,
+            "completed_groups": 4,
+            "action_tokens": 5493,
+            "post_sync_hash": null
+          },
+          "1/6": {
+            "reward_mean": 0.75,
+            "loss": -5.587935447692871e-09,
+            "grad_norm": 0.43789976835250854,
+            "completed_groups": 4,
+            "action_tokens": 5482,
+            "post_sync_hash": null
+          },
+          "1/7": {
+            "reward_mean": 0.71875,
+            "loss": 7.450580596923828e-09,
+            "grad_norm": 0.4850274920463562,
+            "completed_groups": 4,
+            "action_tokens": 5847,
+            "post_sync_hash": null
+          },
+          "1/8": {
+            "reward_mean": 0.34375,
+            "loss": -5.587935447692871e-09,
+            "grad_norm": 0.40484094619750977,
+            "completed_groups": 4,
+            "action_tokens": 6902,
+            "post_sync_hash": "7c9e16b0ea5c6e15d0b35400abce0274f25c2c8465b3a3677b6d73fd7b0eb4b8"
+          }
+        }
+      }
+    }
+  }
+}
