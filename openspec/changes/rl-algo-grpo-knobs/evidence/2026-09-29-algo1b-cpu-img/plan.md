@@ -24,3 +24,13 @@
 - 只运行 full parse 部分（4.1 已有结论，不重复）；pytest 加 `-rfEs` 输出失败与跳过的原因。
 - 成功条件：`test_full_parse_args` 12 个参数化用例全部 passed（不 skip），P0 的 `upstream_parse` 2 个用例 passed。
 - 失败条件：任一用例 failed 或 skipped，按实际结论记录；除非查明原因并修复，否则不再重跑。
+
+## 第 2 次运行结论（app ap-JyzgEPFHYfn7MQw5E9lrgP，T4，exit=0，入口结束后已自动停止）
+
+- `nvidia-smi`：Tesla T4。P0 的 upstream_parse 2 个用例 passed，说明换到有驱动的容器后完整 parse_args 可用。
+- 本 change 的 13 个用例失败，原因是测试代码的 bug，与被测代码无关：
+  - 12 个 full_parse 失败于 `ModuleNotFoundError: tests.test_rl_miles_adapter_config`：镜像里另有一个 `tests` 包遮蔽了本仓库的 tests 目录；
+  - `test_kl_loss_triggers_ref_load_branch` 失败，因为测试里写死了本机的 miles-next 路径。
+- 修复：改用 P0 的导入写法 `from test_rl_miles_adapter_config import ...`；MILES_REPO 改为从 `miles.utils.arguments.__file__` 推出。
+
+## 第 3 次运行计划（只修上述测试 bug，其余与第 2 次相同：T4、timeout 1200/1800、成功与失败条件不变）

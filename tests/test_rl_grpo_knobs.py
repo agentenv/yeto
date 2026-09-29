@@ -383,7 +383,7 @@ def test_runtime_attrs_wired_through_spec():
 
 
 def test_translate_run_config_launch_checks():
-    from tests.test_rl_miles_adapter_config import make_config
+    from test_rl_miles_adapter_config import make_config
     from yeto.rl.engine.miles_adapter import config as mc
 
     spec = pipeline_spec(reward_shapers=[{"name": "overlong_penalty", "max_length": 4096, "cache_length": 256}])
@@ -475,7 +475,7 @@ def test_two_islands_ref_model_checked_before_joining(tmp_path):
     """Island B's base revision differs from the spec's KL reference: B fails in
     verify_ports_algorithm (called before any bridge, P0 test_learner_checks_before_the_bridge)."""
 
-    from tests.test_rl_miles_adapter_config import make_config
+    from test_rl_miles_adapter_config import make_config
     from yeto.rl import learner as rl_learner
     from yeto.rl.engine.miles_adapter import config as mc
 
@@ -511,7 +511,7 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "rl_algorithms"
 
 @pytest.mark.parametrize("name", ["dapo-like", "dr-grpo"])
 def test_examples_build_and_translate(name):
-    from tests.test_rl_miles_adapter_config import make_config, sub
+    from test_rl_miles_adapter_config import make_config, sub
     from yeto.rl.engine.miles_adapter import config as mc
 
     spec = AlgorithmSpec.from_json_file(str(EXAMPLES / f"{name}.json"))
