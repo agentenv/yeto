@@ -35,3 +35,4 @@
 - 版本：YETO_SHA 为 8d30ad2（分支 algo-1b-token，基于 501d71d），token run 中 `calculate_per_token_loss = True`。launch.log 里没有打印镜像 digest，所以镜像是按这个 SHA 的 ports 默认值 `MILES_NEXT_IMAGE`（`…@sha256:c6f5455c…`）推定的，并非从日志中直接核实。
 - 配对有效：两者第 1 步的 rollout/raw_reward 都是 0.90625。
 - **token 生效**：第 1 步 grad_norm 为 0.4310283064842224，baseline 为 0.48665371537208557，两者不相等，判据满足。**loss_aggregations:token 可以声明**（仅限修复后的镜像，即 Miles 0af62f4d 及以后）。
+- 镜像 digest 由主 agent 从 8d30ad2 的源码核实（默认 MILES_NEXT_IMAGE = sha256:c6f5455c…，MILES_NEXT_COMMIT = 0af62f4d），launch.log 中没有打印 digest；两个 run 的 cmd.txt 都没有使用 `--rl-image` 覆盖（grep 计数为 0）。
