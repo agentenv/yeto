@@ -489,3 +489,23 @@ def test_reward_dispatcher_rejection_explains_the_pending_declaration():
     caps = miles_capabilities(FP)
     with pytest.raises(CapabilityMismatch, match="maxrl/mapo is not declared yet"):
         _check(caps, _combine(CANDIDATES["reward_postprocessors:custom_reward_postprocess"]))
+
+
+def test_estimator_mandated_settings_are_claimed_by_the_estimator():
+    caps = fake_capabilities(advantage_estimators={"grpo", "gspo", "reinforce_plus_plus"})
+    gspo = AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
+                         loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4))
+    assert not {("features", "eps_clip"), ("features", "clip_higher")} & gspo.required_mechanisms()
+    _check(caps, gspo)  # accepted with gspo declared (clip claimed by gspo)
+    rpp = AlgorithmSpec(advantage=AdvantageSpec(estimator="reinforce_plus_plus", whiten=True))
+    _check(caps, rpp)
+    # the same settings under grpo stay independent mechanisms
+    with pytest.raises(CapabilityMismatch, match="'clip_higher' not supported"):
+        _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28)))
+    with pytest.raises(CapabilityMismatch, match="'whiten_advantages' not supported"):
+        _check(caps, AlgorithmSpec(advantage=AdvantageSpec(whiten=True)))
+    # a companion beyond the mandated set is still checked (dual-clip under gspo)
+    with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported"):
+        _check(caps, AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
+                                   loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4,
+                                                 eps_clip_c=3.0)))

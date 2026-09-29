@@ -365,6 +365,10 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
             "its actors could resolve the wrong Ray instance"
         )
     env_vars = {"RAY_ADDRESS": address}
+    from yeto.rl.event_echo import ECHO_ENV
+
+    if environ.get(ECHO_ENV):
+        env_vars[ECHO_ENV] = environ[ECHO_ENV]  # Ray workers echo their tape writes too
     if environ.get("PYTHONPATH"):
         env_vars["PYTHONPATH"] = environ["PYTHONPATH"]
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})

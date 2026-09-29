@@ -15,12 +15,56 @@ lines, i.e. byte-identical to the island's file).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 from collections.abc import Iterable
 from pathlib import Path
 
 PREFIX = "YETO_RL_EVENT "
+# Set (to "1") by the learner for islands whose tape travels over the log
+# stream; inherited by the island's Ray workers (entry.connect_island_ray).
+ECHO_ENV = "YETO_RL_ECHO_EVENTS"
+_WRITE_LOCK = threading.Lock()
+
+
+def echo_enabled() -> bool:
+    return os.environ.get(ECHO_ENV) == "1"
+
+
+def enable_echo() -> None:
+    os.environ[ECHO_ENV] = "1"
+
+
+def encode(record: dict) -> str:
+    """The tape line of ``record`` (the one encoding every writer uses)."""
+
+    return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+
+def append_record(path, record: dict) -> str:
+    """Append one record to a tape -- the single low-level tape writer.
+
+    With echo enabled the identical line is printed as ``YETO_RL_EVENT
+    <line>`` right after the write, so the rebuilt tape equals the file.
+    """
+
+    line = encode(record)
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _WRITE_LOCK:
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        if echo_enabled():
+            print(PREFIX + line, flush=True)
+    return line
+
+
+def echo_record(record: dict) -> None:
+    """Echo a record that has no tape file in this process (e.g. a Ray worker)."""
+
+    if echo_enabled():
+        print(PREFIX + encode(record), flush=True)
 
 
 FINALIZED_EVENT = "rl_learner_finalized"
@@ -29,8 +73,8 @@ INVALID = object()  # prefix present but not a tape record (e.g. truncated line)
 
 
 def format_record(record: dict) -> str:
-    # Exactly the tape writer's encoding (yeto.rl.miles._append_rl_event).
-    return PREFIX + json.dumps(record, sort_keys=True, separators=(",", ":"))
+    # Exactly the tape writer's encoding (append_record).
+    return PREFIX + encode(record)
 
 
 def parse_line(line):
