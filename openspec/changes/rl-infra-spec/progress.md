@@ -24,11 +24,11 @@
   - 暂停前调用 `pause_audit.pause_decision`。
 - `yeto/rl/engine/bridges.py`：暴露 outer phase，取值为 `round-boundary-published` / `in-boundary` / `stop-round` / `finalizing` / `budget-consolidation`，以及是否处于 learner-budget 模式。
 - `yeto/rl/engine/miles_adapter/rollout.py`：提供 queued/active/tool-wait 计数，数据来自 fork-M3 的 in-flight 计数。
-- `yeto/rl/engine/ports.py` 的预留注释更新见 tasks 补充草案 3.4a（待确认）。
+- `yeto/rl/engine/ports.py` 的预留注释更新见 tasks 3.4a（已写入 tasks，代码未改）。
 
 ### Miles fork（本地，未推送）
 
-分支 `yeto-elastic-m1-m6`（worktree `/home/michael/work/miles-elastic`，基于 03947150）。提交：M1 3ae99fd1、M2 4c96cf45、M3 b14392b3、M4 f91020e8、M5 ed9282e6、M6 b2837089；审查修复 738136c2（M3）、9ba38f6d（M2/M4）、10b52a9e（M5）、965ef314（M6）。仅 CPU 单测；已知缺口：M4 无 payload checksum ACK（需 yeto Publisher 读回校验），M5 DistOpt DP gather 未实现、CUDA/Megatron RNG 未在 GPU 验证；real_ray 测试在本机 ray.init 卡住（基线同样），未运行。tasks.md 的 M1–M6 补充草案在 `/home/michael/work/infra-drafts/tasks-m1-m6.patch`，**待用户确认，未写入**。
+分支 `yeto-elastic-m1-m6`（worktree `/home/michael/work/miles-elastic`，基于 03947150）。提交：M1 3ae99fd1、M2 4c96cf45、M3 b14392b3、M4 f91020e8、M5 ed9282e6、M6 b2837089；审查修复 738136c2（M3）、9ba38f6d（M2/M4）、10b52a9e（M5）、965ef314（M6）。仅 CPU 单测；已知缺口：M4 无 payload checksum ACK（需 yeto Publisher 读回校验），M5 DistOpt DP gather 未实现、CUDA/Megatron RNG 未在 GPU 验证；real_ray 测试在本机 ray.init 卡住（基线同样），未运行。tasks.md 的 M1–M6 任务（2.1a/3.3a/3.3b/3.4a/3.5a/4.2a/4.6a）已于 `15e864d` 写入（底稿 `/home/michael/work/infra-drafts/tasks-m1-m6.patch`），并按审查在 F1–F3 修订为 fork 的实际语义。
 
 ### 测试
 
