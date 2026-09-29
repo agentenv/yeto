@@ -52,6 +52,10 @@
     {
       "path": "yeto.rl.algos.reward_pipeline.grpo_default",
       "sha256": "9d1974027811ccc7c2cfbcf0fcdfafb741db3456ff1d9599b4d38abc28a1d7f0"
+    },
+    {
+      "path": "yeto.rl.algos.seq_adv.gdpo",
+      "sha256": "2c710922aa44d7e0e6108450dc0fac6128063714385501c528def06c1ea4e656"
     }
   ],
   "sampling": {
