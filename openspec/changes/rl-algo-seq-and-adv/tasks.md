@@ -60,13 +60,13 @@
 - [x] 7.2 G1 GSPO：1 卡，使用放行参数，2–3 轮，`optimizer_steps≥2`，显式 clip；另跑一组 `optimizer_steps=1` 作对照。报告每轮 clipfrac、grad_norm、零梯度判定结果。验证：运行完成、无不变量误报，日志与指标存入 `openspec/changes/rl-algo-seq-and-adv/evidence/`。 完成记录：evidence/g1/plan.md Attempt 6（fb588a4，launcher no-sync 入口，H100）；R1 的 masked_fraction 在 GPU 事件中为空，已报 INFRA。
 - [x] 7.3 G1 REINFORCE++ 与 REINFORCE++-baseline：各 1 卡 2–3 轮，whiten 开，`kl.placement=reward`。报告 ref 加载、advantage 统计、grad_norm。验证：同 7.2。 完成记录：evidence/g1/plan.md Attempt 6。
 - [x] 7.4 G1 MaxRL、MAPO、GDPO：各 1 卡 2–3 轮（GDPO 用 5.4 的示例 reward）。报告全错/全对组比例、零梯度判定。验证：同 7.2。 完成记录：evidence/g1/plan.md Attempt 4（e54d2f7，H100）。
-- [ ] 7.5 对 G1 通过的机制在 `miles_adapter/entry.py` 中声明支持，未通过的保持未开放并记录原因。验证：能力声明单测更新；Miles adapter 组合根测试中已声明机制可启动。
+- [x] 7.5 对 G1 通过的机制在 `miles_adapter/entry.py` 中声明支持，未通过的保持未开放并记录原因。验证：能力声明单测更新；Miles adapter 组合根测试中已声明机制可启动。 完成记录：声明位于集成分支 integ-decl 501d71d（MILES_DECLARED：maxrl、mapo、gdpo、gspo、reinforce_plus_plus、reinforce_plus_plus_baseline）；evidence/7.5-501d71d：六个示例 `yeto launch --dry-run`（两岛、无放行）均接受，adapter dry-run 均 accepted，未声明项（features:dual_clip）被拒；test_rl_seq_adv 声明/放行测试通过。
 - [x] 7.6 G3：MaxRL 两岛 strict-avg（每岛 1 卡），用正式声明（不带放行参数），2–3 轮。验证：两岛算法哈希一致、每轮外层应用后状态 hash 一致、不变量无误报；证据存入 `evidence/`。 完成记录：evidence/g3/rerun/results.md（a602fa2，退出码 0，判据 1–4 通过；首次运行按预登记未通过，见 evidence/g3/results.md）。
 - [x] 7.7 拆除全部 GPU 资源，列出云端资源证明无残留，汇总实际费用。验证：无残留截图或命令输出与费用写入 `progress.md`。 完成记录：progress.md（7.7 汇总，≈$11，全部 app stopped/0 tasks）。
 - [x] 7.8（可选，另需预算）效果 A/B（G4）不在本 change 范围；如需，另立 change 申请。验证：无（仅记录）。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 
 ## 8. 集成检查
 
-- [ ] 8.1 运行 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.1 基线相同。验证：两集合 diff 为空，结果写入 `progress.md`。
+- [x] 8.1 运行 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.1 基线相同。验证：两集合 diff 为空，结果写入 `progress.md`。 完成记录：integ-decl 501d71d 全量 68F+26E=94，按 id 与 algo-1b 40ee1a2 基线（94）完全相同，相对本 change 1.1 基线（756946b，99）无新增、少 5 条合并引入项；after-failures-integ-decl-501d71d.txt。
 - [x] 8.2 `openspec validate rl-algo-seq-and-adv --strict` 通过。验证：命令输出无错误。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 8.3 在 `openspec/changes/rl-algo-seq-and-adv/progress.md` 中逐项列出任务状态，区分"已实现""CPU 测试通过""GPU 验证通过（G1/G3）"，并列出未通过或未声明的机制。验证：文件存在且与本任务列表逐项对应。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。

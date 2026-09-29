@@ -230,3 +230,11 @@
 - 更正：首次 7.6 的 watchdog 消失**已查明**——algo-1a 在约 20:37–20:40Z 执行 `pkill -x -f "sleep 3300"`（见 algo-1a 7ebfc59 progress），杀掉了本运行 watchdog 的 sleep 子进程，watchdog 随即执行 `modal app stop` 与 pkill 本机 syncer，与本运行收尾期重合；岛 1 在 `ray.shutdown` 中 KeyboardInterrupt、作业被判 FAILED 很可能由此触发（launcher 恢复循环缺陷另由 P0 在 a602fa2 修复）。首次运行正式结果仍按预登记为**未通过**，不改判。
 - 重跑（唯一一次；计划 1698744 启动前提交；YETO_SHA=a602fa2；加固 watchdog 唯一脚本名）：退出码 0，判据 1–4 全部通过（`evidence/g3/rerun/results.md`、`rerun/check.json`）→ 7.6 勾选（GPU 验收通过）。主 agent 后来提到的 501d71d 在收到通知时本次重跑已按 a602fa2 提交并启动，按指示未更换。
 - 7.7 更新：累计 ≈ $11 + $2.9 ≈ $14（估算，未核账单），上限 $20；app ap-aivVXMrZwnfkkB7zj2rQFm stopped/0 tasks，本机 syncer 已停、29420 关闭、watchdog 已结束。
+
+## 2026-09-29 收尾：7.5 与 8.1（集成分支 integ-decl 501d71d）
+- 7.5 勾选：声明位于集成分支 integ-decl 501d71d。临时 worktree 核对：六个示例 spec 用 `yeto launch --dry-run`（两岛 strict-avg，不带放行）全部被接受、`unverified_mechanisms: []`；adapter `algorithm_flags --dry-run` 全部 accepted；未声明项 `features:dual_clip` 被拒（"not supported"）；`gspo_noclip`、`rpp_gamma` 仍按拒绝矩阵被拒。证据 `evidence/7.5-501d71d/`。
+- 示例 spec 在 501d71d 上是最新的（`test_example_specs_are_current` 通过，make_examples.py 无差异）。集成分支若再变动注册模块源码，需在最终集成 SHA 上再生成。
+- 8.1 勾选：501d71d 全量 68F+26E=94，按 id 与 algo-1b 40ee1a2 基线完全相同；相对本 change 1.1 基线（756946b，99 条，含 5 条当时的合并引入项）无新增。
+
+### 最终状态
+全部 task 已勾选（1.1–8.3）。GPU 验收通过：5.5、7.2、7.3、7.4、7.6；7.5 声明在集成分支；其余为 CPU 通过/完成。已知限制：INFRA R1 在 attempt 6 时 GPU 上 masked_fraction 为空（infra-a 后续修复，本 change 未复验 GPU）；REINFORCE++ 的 reward-KL 分支因 KL 大小未上报而不执行。费用累计 ≈ $14（估算），无残留。
