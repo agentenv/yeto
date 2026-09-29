@@ -22,7 +22,8 @@
 **分支与提交**：worktree `/home/michael/work/algo-cap`，分支 `algo-cap`，基于 `origin/rl-integ` c5e05f4，采用普通 push（非强推）。
 - `3d1b466` 接口冻结：AlgorithmSpec v2、注册入口、能力维度、映射表、learner 参数。
 - `ebd436b` 合入 1b-shared 扩展点；launcher/export/cli 接线；补全测试。
-- 本条目所在的提交：文档、tasks/progress、证据。
+- `d5af9df` 文档、research 更新、tasks/progress、证据。
+- `62647fb` 合入 1b-p0tests.patch：只改测试夹具，并改为与分支无关的写法，algo-cap 与 origin/algo-1b 479f73e 上都通过。已核对 1b spec 原文：KL loss 必须记录参考模型身份，超采样只能配合动态过滤，reward 后处理只能用 yeto 分派器；这些规则只作用于启用了对应机制的描述。
 
 **任务状态**（逐项）：
 | 任务 | 状态 | 证据 |
