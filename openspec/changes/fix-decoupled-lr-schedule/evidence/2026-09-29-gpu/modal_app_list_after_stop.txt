@@ -1,0 +1,15 @@
+                                            Apps                                
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━┳━━━
+┃ App ID                    ┃ Description  ┃ State   ┃ Tasks ┃ Created at   ┃ St
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━╇━━━
+│ ap-YuIxwWxWXBiqNpdPNLYBBf │ lrfix-gpu    │ stopped │ 0     │ 2026-09-29   │ 20
+│                           │              │         │       │ 13:53 UTC    │ 14
+│ ap-K7WPbPXjdwxgrSZP5ywLdP │ yeto-yeto-x… │ stopped │ 0     │ 2026-09-29   │ 20
+│                           │              │         │       │ 12:54 UTC    │ 13
+│ ap-kpLcdYzLJzC5UIJKaD5wJT │ yeto-yeto-x… │ stopped │ 0     │ 2026-09-29   │ 20
+│                           │              │         │       │ 12:40 UTC    │ 12
+│ ap-tGFKJLXtjJJYIGqNrh9XZD │ yeto-yeto-g… │ stopped │ 0     │ 2026-09-29   │ 20
+│                           │              │         │       │ 12:06 UTC    │ 12
+│ ap-WcjsDKHJiqd5iyA6Zw8YhQ │ yeto-yeto-x… │ stopped │ 0     │ 2026-09-29   │ 20
+│                           │              │         │       │ 12:21 UTC    │ 12
+└───────────────────────────┴──────────────┴─────────┴───────┴──────────────┴───
