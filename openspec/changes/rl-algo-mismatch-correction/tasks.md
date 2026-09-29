@@ -85,7 +85,9 @@
 - [x] 7.4 G2（1 卡）：只观测约 20 轮，产出报告（每轮 `train_rollout_kl`、`tis_abs` 分位数、`ess_ratio`、[0.5,5] 区间外 token 比例），注明模型与配置、不外推。验证：报告文件存在于证据目录，数据可由指标 jsonl 重新生成；是否推荐默认开启交用户决定，不在本 change 内修改默认。
   - 完成记录（GPU 验收通过，G2）：只观测 20 轮，报告见 `evidence/2026-09-29-g1b/runs/g2-observe/report.md`，可由 `metrics.jsonl`/`miles.log` 用 `harness/report_g2.py` 重新生成。报告注明 colocated-serial / CUDA IPC、模型与配置，并声明不外推；不给推荐，默认值不改。
   - 未达成的设计意图：design D2/G2 把 `ess_ratio` 列为训推差异指标，但 Miles 的 `ess_ratio` 是 π_θ/π_old，每轮一步时恒为 1，不反映训推差异。报告中已注明，这一点记为未达成意图。
-- [ ] 7.5 G3（1+1 卡）：两岛 strict-avg，TIS 与 IcePop 各一次，约 3 轮。验证：两岛算法哈希一致、外层同步后权重 hash 一致、不变量无失败。不做 decoupled 对比（须等 `fix-decoupled-lr-schedule` 合入）。
+- [x] 7.5 G3（1+1 卡）：两岛 strict-avg，TIS 与 IcePop 各一次，约 3 轮。验证：两岛算法哈希一致、外层同步后权重 hash 一致、不变量无失败。不做 decoupled 对比（须等 `fix-decoupled-lr-schedule` 合入）。
+  - g3c 的 IcePop 判定（主 agent）：判据 1-4 通过；判据 5 **失败**，原因是日志交错丢了岛前缀（按 pid 归属时三个键齐全，只作观察，不作判定依据）。
+  - 完成记录（GPU 验收通过，G3）：TIS 两岛见 `evidence/2026-09-29-g3c/run-tis`，判据 1-5 全部通过。IcePop 两岛按修订计划只重跑一次，见 `evidence/2026-09-29-g3d`（基于 integ-decl，含 c098b5b 与 0c2cd99），判据 1-5 全部通过，判据 5 的证据来自回传磁带中 rl_round_trained 的 mismatch 字典。两岛算法哈希一致，每轮外层同步后的权重 hash 一致，不变量无失败。没有做 decoupled 对比。
   - 第三次（`evidence/2026-09-29-g3c/`，基于 integ-decl，计划先提交）：TIS 两岛判据 1-5 **全部通过**。IcePop 两岛判据 1-4 通过；判据 5 在检查脚本下失败，原因是 island l0 step 0 的日志行在流式输出中丢了岛前缀，脚本无法归属。按 pid 归属后三个键都在，由主 agent 判定。因此暂不勾选。
   - 重跑（`evidence/2026-09-29-g3b/`，计划先提交）：判据 1、2、3（v0-v3 权重 hash 两岛一致）、5 通过；判据 4 不通过：launcher 回传的磁带没有任何 rl_local_round 事件（疑为 P0 回传遗漏）。**未通过**。IcePop 两岛未跑：多岛只能用已声明的机制，而 icepop 尚未声明。
   - G3 已运行一次（`evidence/2026-09-29-g3/results.md`），**未通过**：判据 1、2、5 通过，判据 3、4 无法成立，原因是 island-1 的磁带拉取截断（v2/v3 缺失），不是机制失败。重跑需要先提交 harness 修复（改用 launcher 回传磁带）。
