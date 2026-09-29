@@ -336,7 +336,9 @@ def install_event_echo() -> bool:
             original(args, event)
             with path.open("rb") as handle:
                 handle.seek(before)
-                written = handle.read().decode("utf-8")
+                data = handle.read()
+            # only whole lines (up to the last newline): never a half record
+            written = data[: data.rfind(b"\n") + 1].decode("utf-8")
         for line in written.splitlines():
             if line.strip():
                 print(PREFIX + line, flush=True)
@@ -2193,6 +2195,8 @@ def run_miles(
             canonical_targets=canonical_targets,
             yeto_policy_sync=yeto_policy_sync,
         )
+        # Last tape record: a rebuilt (no-sync) tape without it is incomplete.
+        _append_ports_event(args, miles_args, {"event": "rl_learner_finalized"})
         print(f"[rl] learner {args.learner_id} finalized (rl_engine=ports)")
         return
 

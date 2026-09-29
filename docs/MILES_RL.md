@@ -692,6 +692,7 @@ Visible default-path changes on `ports` (no algorithm option given):
 
 - the island learner command always carries
   `--rl-expected-algorithm-sha256 <hash>`;
+- the tape ends with an `rl_learner_finalized` record;
 - the `rl_engine_selected` event additionally carries `rl/algorithm_spec`
   (canonical JSON) and `rl/algorithm_absorbed_flags` (`{}` by default).
 
