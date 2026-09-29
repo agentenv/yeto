@@ -59,13 +59,22 @@ class FakeOps:
         self.relaunch_calls = []  # cluster names, in order
         self.relaunch_tasks = []  # tasks passed to relaunch, in order
         self.down_calls = []  # cluster names, in order
+        self.alive = {}  # cluster -> bool answered by job_alive (default False)
+        self.alive_calls = []  # (cluster, job_id) queries, in order
 
     def job_status(self, cluster, job_id):
         seq = self.status_seq[cluster]
-        return seq.pop(0) if len(seq) > 1 else seq[0]
+        item = seq.pop(0) if len(seq) > 1 else seq[0]
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     def cluster_up(self, cluster):
         return self.up.get(cluster, True)
+
+    def job_alive(self, cluster, job_id):
+        self.alive_calls.append((cluster, job_id))
+        return self.alive.get(cluster, False)
 
     def relaunch(self, task, cluster):
         self.relaunch_calls.append(cluster)
@@ -124,6 +133,58 @@ def test_learner_recovers_within_timeout():
     assert ops.relaunch_calls == ["l0"]
     assert ops.relaunch_tasks == ["task-l0"]
     assert ops.down_calls == []
+
+
+INIT_REFUSED = RuntimeError(
+    "Getting job status: skipped for cluster 'l0' (status: INIT). "
+    "It is only allowed for UP and AUTOSTOPPING clusters."
+)
+
+
+def test_status_refusal_with_live_job_is_not_a_failure():
+    # sky refuses job_status while the cluster reads INIT, but the job is
+    # still running on it: keep waiting, never relaunch (live-run-failures #37).
+    ops = FakeOps()
+    ops.status_seq["l0"] = [INIT_REFUSED, INIT_REFUSED, SUCCEEDED]
+    ops.alive["l0"] = True
+    ctl = make_controller(ops, {"l0": 1})
+
+    exit_codes = ctl.run()
+
+    assert exit_codes == {"l0": "JobStatus.SUCCEEDED"}
+    assert ops.relaunch_calls == []
+    assert ops.down_calls == []
+    assert ops.alive_calls == [("l0", 1), ("l0", 1)]
+    assert ctl.learners["l0"]["job_id"] == 1
+
+
+def test_status_refusal_with_dead_job_still_recovers():
+    ops = FakeOps()
+    ops.status_seq["l0"] = [INIT_REFUSED]
+    ops.alive["l0"] = False
+    ops.relaunch_results["l0"] = [101]
+    ops.after_relaunch["l0"] = [RUNNING, SUCCEEDED]
+    ctl = make_controller(ops, {"l0": 1})
+
+    exit_codes = ctl.run()
+
+    assert exit_codes == {"l0": "JobStatus.SUCCEEDED"}
+    assert ops.relaunch_calls == ["l0"]
+    assert ctl.learners["l0"]["job_id"] == 101
+
+
+def test_cluster_not_up_with_live_job_is_not_a_failure():
+    ops = FakeOps()
+    ops.status_seq["l0"] = [RUNNING, RUNNING, SUCCEEDED]
+    ops.up["l0"] = False
+    ops.alive["l0"] = True
+    ctl = make_controller(ops, {"l0": 1})
+
+    exit_codes = ctl.run()
+
+    assert exit_codes == {"l0": "JobStatus.SUCCEEDED"}
+    assert ops.relaunch_calls == []
+    assert ops.alive_calls == [("l0", 1), ("l0", 1)]
 
 
 def test_learner_abandoned_after_timeout_run_continues(capsys):
