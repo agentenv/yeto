@@ -6,8 +6,20 @@ from yeto.rl.engine.execution_profile import ExecutionProfile
 from yeto.rl.engine.pause_audit import PAUSABLE_PHASE, audit_for, pause_decision
 
 
+_SPEC = "0" * 64
+
+
 def _p(mode="partitioned-serial", outer="strict-avg", **kw) -> ExecutionProfile:
+    kw.setdefault("algorithm_spec_sha256", _SPEC)
     return ExecutionProfile(name="p", execution_mode=mode, outer_protocol=outer, **kw)
+
+
+def test_profile_without_algorithm_identity_is_unknown():
+    d = pause_decision(_p(algorithm_spec_sha256=None), outer_phase=PAUSABLE_PHASE,
+                       expected_pause_s=1)
+    assert not d.allowed and "AlgorithmSpec" in d.reason
+    ok = pause_decision(_p(), outer_phase=PAUSABLE_PHASE, expected_pause_s=1)
+    assert ok.allowed and ok.profile_hash == _p().contract_hash
 
 
 def test_unknown_or_unaudited_profiles_disable_reconfiguration():

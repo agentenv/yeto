@@ -85,6 +85,9 @@ class PauseDecision:
     reason: str
     budget_s: float | None = None
     stalls_peers: bool = False
+    # Identity the decision was made for (profile contract hash, which binds
+    # the AlgorithmSpec hash per alignment A1); journaled with the decision.
+    profile_hash: str | None = None
 
 
 def audit_for(profile: ExecutionProfile) -> PauseAudit | None:
@@ -107,6 +110,35 @@ def pause_decision(
     """May the island pause now for ``expected_pause_s``? Fail closed."""
     if profile is None:
         return PauseDecision(False, "unknown profile: reconfiguration disabled")
+    if profile.algorithm_spec_sha256 is None:
+        # A1: a profile without an AlgorithmSpec identity is an unknown profile.
+        return PauseDecision(
+            False, "profile not bound to an AlgorithmSpec: reconfiguration disabled"
+        )
+    decision = _decide(
+        profile,
+        outer_phase=outer_phase,
+        expected_pause_s=expected_pause_s,
+        budget_mode=budget_mode,
+        idle_flow_timeout_s=idle_flow_timeout_s,
+        quorum_timeout_s=quorum_timeout_s,
+        margin=margin,
+    )
+    from dataclasses import replace
+
+    return replace(decision, profile_hash=profile.contract_hash)
+
+
+def _decide(
+    profile: ExecutionProfile,
+    *,
+    outer_phase: str,
+    expected_pause_s: float,
+    budget_mode: bool,
+    idle_flow_timeout_s: float | None,
+    quorum_timeout_s: float,
+    margin: float,
+) -> PauseDecision:
     if outer_phase not in OUTER_PHASES:
         return PauseDecision(False, f"unknown outer phase {outer_phase!r}")
     audit = audit_for(profile)
