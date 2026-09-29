@@ -175,3 +175,7 @@ GDPO 需要分派器把"非零条目数"交给 driver。做法：分派器把统
   cumulatively. Observation only: every round's `clip_fraction` and `masked_fraction` were non-null
   and equal to the mean of that round's two Miles `pg_clipfrac` values (0.09375, 0.25, 0.25). The
   full-clip branch of D2 remains uncovered on GPU.
+- R1 GPU recheck rerun (evidence/r1-gspo/results.md, 501d71d): **passed** under the fixed,
+  pre-declared checker -- per round clip_fraction = masked_fraction = mean of the round's Miles
+  pg_clipfrac (0.09375, 0.25, 0.25), all non-null. Deviation 1 is narrowed to: the full-clip
+  relaxation itself (masked_fraction >= 1) has not occurred on GPU.

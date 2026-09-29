@@ -253,5 +253,10 @@
 ## 2026-09-29 R1 GPU 复验（integ-decl 501d71d，计划 f6e25b4 启动前提交）
 - 预登记检查脚本结果：**未通过**——脚本按 Miles "step 0" 切分轮次，但 Miles 的 step 编号在整次运行中累计（0..5），导致判定失效；按规则不改判。
 - 观察（不计通过）：三轮 `rl_round_trained` 的 clip_fraction/masked_fraction 均非 null，且等于该轮两步 pg_clipfrac 的均值（0.09375、0.25、0.25），与 R1 通道在 GPU 上工作一致。未出现全裁剪轮次，D2 全裁放宽路径仍记为 GPU 未覆盖。已写入 design.md Known deviations。
-- 退出码 2（按磁带判定）；app ap-xbkY9rLSJ3vjXCBmcuSrVi stopped/0 tasks；watchdog 已结束。费用 ≈ $0.9；本 change 合计 ≈ $15（估算，未核账单），上限 $20。
+- 退出码 2（按磁带判定）；app ap-xbkY9rLSJ3vjXCBmcuSrVi stopped/0 tasks；watchdog 已结束。费用 ≈ $0.9；本 change 合计 ≈ $15（估算，未核账单），上限 $20（后续更新见下）。
 - 偏离 2（rpp reward-KL）保持待用户决定。
+
+## 2026-09-29 R1 复验重跑（批准的唯一一次，501d71d）
+- 计划与修正后的检查脚本 5b0ae97 启动前提交（按 optimizer_steps=2 每两步一组划分轮次）。第一次启动在任何云资源创建前被 launcher 同名磁带保护拒绝（9415033 记录，改用前缀 algo2a-r1-gspo2），随后正式运行。
+- 结果：**通过**——三轮 clip_fraction = masked_fraction = 该轮两步 pg_clipfrac 均值（0.09375、0.25、0.25），均非 null；退出码 2 按磁带判定。偏离 1 收窄为：全裁剪放宽路径本身未在 GPU 上发生。
+- 费用：本次 ≈ $0.9；本 change 累计 ≈ $16（估算，未核账单），上限 $20。app ap-sEPPygSJmxCvTy4kz7Y1bk stopped/0 tasks，watchdog 已结束。

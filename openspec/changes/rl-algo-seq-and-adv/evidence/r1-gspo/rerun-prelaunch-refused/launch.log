@@ -1,0 +1,12 @@
+[yeto] run 'algo2a-r1-gspo' submitted; worker pid 2587167.
+[yeto] log: /tmp/algo2a/r1runs/algo2a-r1-gspo/launcher.log
+[yeto] streaming logs — Ctrl-C detaches, the run keeps going.
+
+Traceback (most recent call last):
+  File "/tmp/a2-r1/yeto/cli.py", line 1657, in cmd_worker
+    code = launcher_run(args, on_clusters=record_clusters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/a2-r1/yeto/launcher.py", line 3889, in run
+    raise ValueError(
+ValueError: event tapes already exist for run 'algo2a-r1-gspo': ['/tmp/algo2a/r1runs/algo2a-r1-gspo/events/algo2a-r1-gspo-l0-modal.jsonl']; use another --cluster-prefix or remove them
+[yeto] run 'algo2a-r1-gspo' finished: FAILED (exit code 1)
