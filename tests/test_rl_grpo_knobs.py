@@ -500,3 +500,31 @@ def test_two_islands_ref_model_checked_before_joining(tmp_path):
     assert event["event"] == "rl_algorithm_island_rejected" and event["island_id"] == 1
     # a different reference revision is a different algorithm hash (outer-sync identity)
     assert kl_spec(revision="rev-b").sha256() != spec.sha256()
+
+
+# ---------------------------------------------------------------- 7.1 examples
+
+from pathlib import Path  # noqa: E402
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "rl_algorithms"
+
+
+@pytest.mark.parametrize("name", ["dapo-like", "dr-grpo"])
+def test_examples_build_and_translate(name):
+    from tests.test_rl_miles_adapter_config import make_config, sub
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    spec = AlgorithmSpec.from_json_file(str(EXAMPLES / f"{name}.json"))
+    # plugin hashes are the current sources (a dispatcher/reducer edit must
+    # regenerate the examples: the hash is the plugin identity)
+    spec.verify_plugins()
+    assert spec.rejections() == []
+    cfg = make_config()
+    if spec.sampling.over_sampling_batch_size is not None:
+        cfg = sub(cfg, "batch", over_sampling_batch_size=spec.sampling.over_sampling_batch_size,
+                  groups_per_round=4)
+    launch = mc.translate_run_config(cfg, spec)
+    assert launch.algorithm_sha256 == spec.sha256()
+    assert set(algorithm_argv(spec)) <= set(launch.argv)
+    # default GRPO argv unchanged by the examples' existence
+    assert "--custom-reward-post-process-path" not in mc.translate_run_config(make_config(), AlgorithmSpec()).argv

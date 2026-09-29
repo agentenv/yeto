@@ -283,3 +283,16 @@ def test_full_parse_args(tmp_path, name):
         assert not hasattr(args, rp.PIPELINE_ATTR) or getattr(args, rp.PIPELINE_ATTR) is None
     else:
         assert rp.read_plugins(args) == {"schema": rp.PLUGINS_SCHEMA, **plugins}
+
+
+@pytest.mark.parametrize("name", ["dapo-like", "dr-grpo"])
+def test_examples_parse_upstream(name):
+    spec = AlgorithmSpec.from_json_file(str(Path(__file__).resolve().parents[1]
+                                            / "examples" / "rl_algorithms" / f"{name}.json"))
+    ns = miles_parse(["--advantage-estimator", "grpo", *algorithm_argv(spec)])
+    if name == "dapo-like":
+        assert (ns.eps_clip, ns.eps_clip_high, ns.calculate_per_token_loss) == (0.2, 0.28, True)
+        assert ns.custom_reward_post_process_path == rp.DISPATCHER_PATH
+    else:
+        assert ns.grpo_std_normalization is False
+        assert ns.custom_pg_loss_reducer_function_path == gk.REDUCER_PATH
