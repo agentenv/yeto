@@ -80,7 +80,7 @@
 - **D1 = 6.1–6.3**：shadow 负载归因与收益预测（X8）、半自动建议（带有效期、expected_epoch、profile hash）、执行前重验。依赖 1.7、2.4、5.7。
 - **D2 = 6.4–6.7**：默认关闭的 auto 模式、disabled/manual/recommend/auto 切换、四场景对比、综合故障/学习/回退验收。依赖 D1 通过，以及至少一条实测净收益边（6.4 原文）。
 - 如果 2.4 或 5.7 给出“尚无净收益边”的合法否定结论，D2 不开工，系统保持 manual/recommend，该结论照原文交付。
-- 命名冲突提示：`/home/michael/work/infra-drafts/gpu-plan.md` §4/§5 用“D1”表示 E3 的 spike 实验，与阶段 D1 同名。建议 gpu-plan 改名为 “S1” 之类；该文件不在 openspec 下，本轮没有改它。
+- 命名冲突已处理：GPU 计划原先用“D1”表示 E3 的 DistOpt gather 开发调试，已改名为 “DEV-GATHER”。计划已纳入版本管理，见 [`gpu-plan.md`](gpu-plan.md)（草稿源 `/home/michael/work/infra-drafts/gpu-plan.md` 同步修改）。
 
 ## 5. C 与 F 的范围
 
