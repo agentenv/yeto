@@ -7,8 +7,10 @@
 #   license           : Apache License 2.0 (Miles repository LICENSE)
 #   modifications     : none (this header only; no import changes were needed)
 #
-# Reason: the runtime image does not put Miles' examples/ on sys.path and
-# yeto plugins must live in the yeto./miles. namespaces (PluginRef).
+# Reason: yeto plugins must live in the yeto./miles. namespaces (PluginRef,
+# rl-algorithm-capabilities D7). The runtime image can import the original as
+# examples.infra_features.train_infer_mismatch_helper.mis (task 5.1), but that
+# namespace is not an allowed plugin namespace.
 # Do not edit below this line; re-copy on Miles upgrades (docs/MILES_RL.md).
 from typing import Any
 

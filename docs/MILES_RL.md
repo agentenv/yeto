@@ -699,9 +699,9 @@ repository; they are shown only for orientation:
   Rejection sampling and the veto threshold of Miles' `mis.yaml` are not
   exposed. MIS is a verbatim copy of Miles
   `examples/infra_features/train_infer_mismatch_helper/mis.py` at `9e4260d`
-  (Apache-2.0; header in `yeto/rl/algos/vendor/miles_mis.py`). The copy is
-  needed because plugins must live under `yeto.`/`miles.` and Miles'
-  `examples/` is not an installed package. On a Miles upgrade, re-copy it and
+  (Apache-2.0; header in `yeto/rl/algos/vendor/miles_mis.py`). The runtime image
+  can import the original (`examples.infra_features...mis`, checked in the
+  image), but plugins must live under `yeto.`/`miles.`, so yeto uses the copy. On a Miles upgrade, re-copy it and
   rerun `tests/test_rl_mismatch_observe.py`, which checks that the copy equals
   the original. Do the same with `ICEPOP_SOURCE_SHA256`.
 
@@ -770,7 +770,7 @@ it is rejected as undeclared without the allowances and accepted with them.
  "correction": {"method": "custom", "mis_level": "geometric", "mis_mode": "mask",
    "mis_lower_bound": 0.9999, "mis_upper_bound": 1.0001,
    "function": {"path": "yeto.rl.algos.vendor.miles_mis.compute_mis_weights_with_cp",
-                "sha256": "70b20362d32e485f303b6964785b27b5b27a3d2476b678a9f7dd1d2a86174b83"}}}
+                "sha256": "f75f86c302edb7563ae8026b3bf4dda992217d9eed23b5c7ad0ae93936fd9096"}}}
 ```
 
 ## Benchmark
