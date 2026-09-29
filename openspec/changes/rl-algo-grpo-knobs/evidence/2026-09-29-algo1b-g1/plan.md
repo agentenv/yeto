@@ -46,3 +46,9 @@
   - 本地 `timeout 11400` 包裹 run_all.sh；
   - EXIT trap 按 id 终止 sandbox。
 - 结束后先拉取日志和事件（out/<mech>），再终止 sandbox；用 `modal app list` 和 sandbox 列表核实无残留，结果写入 `out/teardown_proof.txt`。不创建卷。
+
+## 第 1 次尝试（sandbox sb-fwUsN4xXObdicf3CYM1dIm）结论
+- setup 通过（SETUP_OK，GPU 为 NVIDIA H100 80GB HBM3，GPU 断言通过）。
+- 所有机制都在启动前失败：exec 命令写 `/work/out/<m>.log` 时 `/work/out` 目录不存在。这是 harness 的 bug，不涉及被测代码，也没有训练过任何一轮。
+- 修复：exec 前先 `mkdir -p /work/out`。其余计划不变，按第 2 次尝试执行。
+- sandbox 已由 EXIT trap 终止（输出 terminated），watchdog 已停止，`sbx.py list` 为空。日志在 `attempt1/`。

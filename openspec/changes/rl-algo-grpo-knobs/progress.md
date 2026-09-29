@@ -2,6 +2,37 @@
 
 对齐结论、依赖矩阵、工作包与待批准事项见 [`../rl-infra-spec/alignment.md`](../rl-infra-spec/alignment.md)（以 `rl-infra-spec` 分支为准）。
 
+## 2026-09-29 第二轮（审查修复，Agent ALGO-1b）——以本节为准，覆盖下一节中与之冲突的状态
+
+### 合入与提交
+- 已普通 merge：algo-cap 099756c、63a78bd、6149a90（以及其后的 HEAD）和 infra-a（driver 的 `expects_gradient`）。关键提交：
+  - `a978b3c`：register_gradient_rule 增加 mechanism=，2a 在等这个修复；
+  - `063bc3e`：F1–F5、3.2、3.3、6.5；
+  - `2722cad`：register_pipeline_plugin_module；
+  - `6dee803`：run4 证据与 G1 计划；
+  - `6dcca57`：勾选状态。
+- c1a9a5a（及后续）修改了本 change 的 `design.md`。阶段 0 之后允许各 change 负责人维护本 change 的文档，两处改动都没有放宽验收：一处同步 F5 的 carried_over 说法，一处从 rl-infra-spec 取回的 A2 措辞。
+
+### 审查项
+- F1：用了分派器的 spec，必须在 `plugins` 里列出每个注册了 shaper/transform 的模块，按模块名排序，由 `grpo_knobs.with_pipeline_plugins` 补齐。这些模块的源码哈希因此进入算法哈希，learner 启动时会重新核验。合并哈希 `pipeline_sha256` 随 `yeto_algo_plugins` 下发；Miles 进程里 `post_process` 先调用 `load_extensions()`，再核对这个值。未注册的阶段在 launch check 阶段就被拒绝。注册函数时会自动调用 `register_pipeline_plugin_module`。
+- F2/F3：`sample_filters` 纳入覆盖：spec.plugins 要列出它，另下发 `sample_filters_sha256`。ports 运行中如果 runtime attrs 没送到 Miles 进程（`yeto_algo_plugins` 与 `yeto_rl_dynamic_sampling_max_replacements` 都不存在），`apply_sample_filters` 直接报错，不静默跳过。
+- F4：`read_plugins` 比对 payload 中的 `algorithm_spec_sha256` 与 `yeto_rl_expected_algorithm_sha256`。
+- F5：Miles 不会把超额完成的组放回 buffer（`sglang_rollout.py:505-510`），只有 `--partial-rollout` 下被 abort 的样本回 buffer，所以超采样不产生 `carried_over` 余量。已更正 sample_filters、design.md、1b-hook.patch 的 docstring，MILES_RL.md 的改法写成 1b-docs-f5.patch（已由 ALGO-CAP 在 6149a90 合入）。
+- F6：run1–4 的日志用 `git add -f` 入库，入库前扫描过密钥，无命中；删除了 `__pycache__`；各次运行的 yeto 版本见 `YETO_SHA.txt`；run3、run4 的结论已补进 plan.md。
+
+### 任务状态更新
+| task | 状态 | 证据 |
+|---|---|---|
+| 2.3 / 4.3 / 7.1 | CPU 通过 ✔（按主 agent 的口径决定，alignment §7b 第 7 条） | 钉住镜像中完整 `parse_args` + `validate_parsed_args`：run3 12 项，run4 14 项（含两个示例）。环境差异：用镜像自带的 megatron，miles 解析器为 0394715，而不是原文的 miles-next-venv |
+| 3.2 | CPU 通过 ✔ | `test_fake_two_islands_ref_mismatch_fails_before_outer_sync`：fake 组合根两岛走 strict-avg。ref 相同时两岛都加入外层同步并完成一轮；ref revision 不同的岛在 `verify_ports_algorithm` 处失败，client_factory 从未被调用（未加入外层同步），并写出 `rl_algorithm_island_rejected`。revision 比较不区分大小写，与 learner 的 `.lower()` 一致 |
+| 3.3 | CPU 通过 ✔ | `kl.ref_model.source` 必须等于 `--model`，`--ref-load` 由它解析得出；KL loss 下拒绝 `--megatron-ref-load`，因为无法把它绑定到 ref 身份。learner 的传参（1b-refload.patch）已由 ALGO-CAP 在 6149a90 合入。测试：`test_ref_source_bound_to_base_model`、`test_learner_binds_ref_source_and_override` |
+| 4.1 | CPU 通过 ✔（表述已更正） | run4：镜像 `PYTHONPATH=/pkg/:/root/`，Miles 以 editable 方式装在 /root/miles；在 cwd=/tmp 时 `import examples…` 报 ModuleNotFoundError |
+| 5.2 | CPU 通过 ✔（补充） | 在钉住镜像内用镜像自带的 Miles 跑 equivalence，69 passed；源码 sha256 相同（同源） |
+| 5.5 / 6.4 / 7.3 | CPU 通过 ✔ | 文档已由 1b-docs.patch 合入 algo-cap 099756c，F5 的更正在 6149a90 |
+| 6.5 | CPU 通过 ✔ | driver 调用 `expects_gradient`（来自 infra-a），规则通过 `register_gradient_rule(mechanism="features:overlong_filter")` 注册。fake driver 结果：全部截断且 grad 为 0 时不失败；部分截断且 grad 为 0 时仍失败；grad 为 nan 时仍失败。1b-hook.patch 合入前，`GroupMetadata.filtered_samples` 由测试里的同名子类提供；打上补丁后同一组测试也通过 |
+| 6.3 | 已实现（未勾选） | 等 INFRA 合入 1b-hook.patch（已按 F5 更新，在当前 HEAD 上可以 apply，打上后 79 passed） |
+| 7.2 | 未完成 | 需要 driver 事件字段（INFRA） |
+
 ## 2026-09-29（Agent ALGO-1b）
 
 ### 分支与提交
