@@ -12,6 +12,7 @@ else
   ARGS="$COMMON --rollout-batch-size 8 --over-sampling-batch-size 16 --dynamic-sampling-filter-path yeto.rl.filters.bounded_nonzero_reward_std --dynamic-sampling-max-replacements 2 --inner-lr 1e-5 --total-steps 5 --rl-algorithm-spec $D/over_sampling.json --rl-allow-unverified-mechanism features:over_sampling"
 fi
 echo "yeto $ARGS" > out-$X/cmd.txt
+setsid nohup $D/noprogress.sh $X >/dev/null 2>&1 &
 # Private ports image: registry credentials decoded in-process from
 # ~/.docker/config.json (ghcr.io auth); never printed or logged.
 eval "$(python3 - <<'PY'

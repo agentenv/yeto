@@ -53,3 +53,10 @@
 
 - 三次都是环境或 harness 问题，都发生在第一个训练 step 之前，没有产生任何判据数据。没有因为结果不理想而重跑；判据、spec、配置、seed 都没有改动（`clip_higher.json`、`over_sampling.json` 与预登记时一致）。
 - 第 4 次尝试如果能完成训练，无论 pg_clipfrac 是否大于 0，都按预登记判据如实交付，不再加跑。
+
+## 无进展超时（主 agent 要求；在 run A 第 4 次尝试运行期间加入，不改变任何判据）
+- `noprogress.sh`（setsid 后台运行，与终端无关）满足任一条件即执行 `yeto down` 加 `modal app stop` 并回收：
+  - `t_start` 后 **25 分钟**内日志中没有出现任何 `'train/pg_loss'` 训练 step 行（第一次 G1 的单个 run 全程 5–7 分钟，镜像拉取也包含在这 25 分钟里）；
+  - 出现第一个训练 step 之前，`Task raised exception` 与 `Traceback` 累计达到 **20 次**。SGLang 那条良性的 freeze_gc 链每次运行只有 4 行，不会触发。
+- 第 4 次尝试是在它启动约数分钟后才挂上这个监控的；run C 从启动起就用它（run.sh 会自动拉起）。
+- 如果第 4 次尝试仍然在第一个训练 step 之前失败：保存证据，报告阻塞，转做其他项，不再无限重试。
