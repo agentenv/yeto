@@ -1,0 +1,8 @@
+2026-09-29T16:57:13Z
+--- modal app list (algo2a rows)
+┃ App ID                    ┃ Description  ┃ State    ┃ Tasks ┃ Created at   ┃ S
+│ ap-q20m8GE1i2WpZcKRBMNj1K │ algo2a-g1    │ stopped  │ 0     │ 2026-09-29   │ 2
+--- sandboxes of algo2a-g1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+modal.exception.NotFoundError: App 'algo2a-g1' not found in environment 'main'
+watchdog (pid 1792349/1792538) killed after teardown 2026-09-29T16:57:28Z
