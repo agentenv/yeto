@@ -348,6 +348,7 @@ EXPECTED_MILES_DECLARED = {
     "kl_placements:loss",
     "features:kl_loss_ref_model",
     "features:entropy_bonus",
+    "reward_postprocessors:custom_reward_postprocess",
 }
 
 
