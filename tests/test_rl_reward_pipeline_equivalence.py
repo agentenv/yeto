@@ -52,7 +52,7 @@ def _args(estimator="grpo", *, rewards_normalization=True, std=True, n=4, batch=
     # is the "identity" configuration compared with the built-in path.
     setattr(args, rp.PIPELINE_ATTR, rp.plugins_payload({
         "reward_pipeline": {"reward_shapers": [], "advantage_transform": "grpo_default",
-                            "advantage_params": {}},
+                            "advantage_params": {}, "pipeline_sha256": rp.pipeline_sha256()},
         "algorithm_spec_sha256": spec.sha256(),
     }))
     return args
@@ -147,10 +147,10 @@ def test_miles_calls_dispatcher_through_custom_path():
 def test_overlong_shaping_then_builtin_normalization():
     """With the overlong shaper the dispatcher == built-in normalization of shaped rewards."""
 
-    spec = AlgorithmSpec(advantage={
+    spec = grpo_knobs.with_pipeline_plugins(AlgorithmSpec(advantage={
         "reward_postprocess": rp.dispatcher_ref().to_dict(),
         "reward_shapers": [{"name": "overlong_penalty", "max_length": 100, "cache_length": 20}],
-    })
+    }))
     args = _args()
     setattr(args, rp.PIPELINE_ATTR, grpo_knobs.runtime_attrs(spec)[rp.PIPELINE_ATTR])
     lengths = [80, 90, 100, 101]

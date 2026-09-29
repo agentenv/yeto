@@ -34,3 +34,21 @@
 - 修复：改用 P0 的导入写法 `from test_rl_miles_adapter_config import ...`；MILES_REPO 改为从 `miles.utils.arguments.__file__` 推出。
 
 ## 第 3 次运行计划（只修上述测试 bug，其余与第 2 次相同：T4、timeout 1200/1800、成功与失败条件不变）
+
+## 第 3 次运行结论（app ap-IFjK3spr0lcOfFUfQIopEL，T4，exit=0，已停止）
+
+- 本 change 25 项通过：full_parse_args 12 个、Miles 参数提供器 12 个、ref-load 条件 1 个。P0 的 upstream_parse 2 个通过。满足本计划的成功条件。
+- 各次运行挂载的 yeto 代码版本见 `YETO_SHA.txt`；日志 run1/2/3.log 已用 `git add -f` 入库，入库前扫描过密钥，无命中。
+
+## 第 4 次运行计划（审查 F6/4.1/7.1/5.2 补充；实验前提交）
+
+- 目的：
+  - (a) 4.1 补证据：打印镜像内 miles 的实际位置（`miles.__path__`、`pip show -f miles`）、`examples/` 目录是否存在，以及在 run1 相同条件下（cwd=/tmp、不设 PYTHONPATH）和在 Miles 仓库根目录作为 cwd 时分别 import 的结果；
+  - (b) 7.1：两个示例 `dapo-like`、`dr-grpo` 跑完整 `parse_args` + `validate_parsed_args`（miles-next 0394715 解析器，镜像内的 megatron）；
+  - (c) 5.2 补充：只用镜像自带的 Miles（PYTHONPATH 只含 /yeto），跑 `test_rl_reward_pipeline_equivalence.py`，并打印镜像内 `train_data_conversion.py` 的 sha256。
+- 资源、超时、回收：与第 2、3 次相同（T4×1，函数 timeout 1200，本地 timeout 1800，临时 app `algo1b-cpu-img`）。预计 ≤ 15 分钟，费用 < $0.3。
+- 成功条件：
+  - (b) 的 `test_full_parse_args` 共 14 项（12 项机制 + 2 个示例）全部 passed，无 skip；
+  - (c) 的 equivalence 全部 passed。若只有源码哈希锁定一项失败，说明镜像内的 Miles 与 0394715 不同源；该结论照实记录，不改锁定值；
+  - (a) 只记录事实。
+- 失败条件：(b) 或 (c) 中任一项 failed，照实记录，除非查明原因并修复，否则不重跑。

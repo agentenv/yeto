@@ -435,6 +435,10 @@ from yeto.rl.engine.algorithm import (  # noqa: E402
     register_runtime_attrs,
 )
 
+from yeto.rl.engine.algorithm import register_pipeline_plugin_module  # noqa: E402
+
+register_pipeline_plugin_module("yeto.rl.algos.reward_pipeline")
+register_pipeline_plugin_module("yeto.rl.algos.sample_filters")
 register_runtime_attrs("grpo_knobs", runtime_attrs)
 register_launch_check("grpo_knobs", _launch_check)
 register_island_check("grpo_knobs_ref_model", island_problems)

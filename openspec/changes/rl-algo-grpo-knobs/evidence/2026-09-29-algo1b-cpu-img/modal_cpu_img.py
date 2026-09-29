@@ -40,10 +40,36 @@ PYTHONPATH=/yeto:/miles-next python -m pytest -q -p no:cacheprovider -rs \
 """
 
 
+RUN4 = r"""
+set -x
+nvidia-smi --query-gpu=name --format=csv
+python -c "import pytest" 2>/dev/null || pip install -q pytest
+echo '--- 4.1 detail'
+cd /tmp
+python -c "import miles; print('miles.__file__', miles.__file__, 'miles.__path__', list(miles.__path__))"
+pip show -f miles 2>/dev/null | head -12
+MROOT=$(python -c "import miles,os; print(os.path.dirname(list(miles.__path__)[0]))")
+echo "MROOT=$MROOT"; ls "$MROOT" | head -30; ls "$MROOT/examples/experimental/DrGRPO" 2>&1 | head
+echo "PYTHONPATH=${PYTHONPATH:-<unset>}"
+python -c "import examples.experimental.DrGRPO.custom_reducer as m; print('IMPORT_OK(cwd=/tmp)', m.__file__)" 2>&1 | tail -1
+cd "$MROOT" && python -c "import examples.experimental.DrGRPO.custom_reducer as m; print('IMPORT_OK(cwd=MROOT)', m.__file__)" 2>&1 | tail -1
+cd /tmp
+echo '--- 5.2 equivalence with the image Miles only'
+python -c "import hashlib,miles.ray.rollout.train_data_conversion as t; print('image train_data_conversion sha256', hashlib.sha256(open(t.__file__,'rb').read()).hexdigest(), t.__file__)"
+cd /yeto
+PYTHONPATH=/yeto python -m pytest -q -p no:cacheprovider -rfEs tests/test_rl_reward_pipeline_equivalence.py 2>&1 | tail -25
+echo '--- 7.1 + mechanisms: full parse_args (miles-next 0394715 parser)'
+PYTHONPATH=/yeto:/miles-next python -m pytest -q -p no:cacheprovider -rfEs tests/test_rl_grpo_knobs_upstream.py -k full_parse_args 2>&1 | tail -30
+"""
+
+
 @app.function(cpu=2.0, memory=8192, timeout=1200, gpu=GPU)
-def run(run2: bool = False) -> str:
+def run(run2: bool = False, mode: str = "") -> str:
     import subprocess
 
+    if mode == "run4":
+        out = subprocess.run(["bash", "-c", RUN4], capture_output=True, text=True)
+        return out.stdout + "\n--- stderr ---\n" + out.stderr[-8000:]
     script = SCRIPT
     if run2:
         script = script.split("echo '--- full parse_args")[0].split("echo '--- 4.1")[0] + \
@@ -56,4 +82,4 @@ def run(run2: bool = False) -> str:
 
 @app.local_entrypoint()
 def main():
-    print(run.remote(RUN2))
+    print(run.remote(RUN2, os.environ.get("ALGO1B_MODE", "")))

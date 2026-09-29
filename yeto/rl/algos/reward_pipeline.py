@@ -141,10 +141,20 @@ def _check_stage_fn(kind: str, name: str, fn) -> None:
         )
 
 
+def _own_module(fn) -> None:
+    """Stage modules are extension-owned plugin modules (no features:plugins)."""
+
+    from yeto.rl.engine.algorithm import register_pipeline_plugin_module
+
+    if fn.__module__.startswith("yeto."):
+        register_pipeline_plugin_module(fn.__module__)
+
+
 def register_reward_shaper(name: str, fn, *, validate=None) -> StageDef:
     if name in REWARD_SHAPERS:
         raise ValueError(f"reward shaper {name!r} already registered")
     _check_stage_fn("reward shaper", name, fn)
+    _own_module(fn)
     stage = StageDef(name, fn, validate or _no_params("reward shaper", name))
     REWARD_SHAPERS[name] = stage
     return stage
@@ -154,6 +164,7 @@ def register_advantage_transform(name: str, fn, *, validate=None) -> StageDef:
     if name in ADV_TRANSFORMS:
         raise ValueError(f"advantage transform {name!r} already registered")
     _check_stage_fn("advantage transform", name, fn)
+    _own_module(fn)
     stage = StageDef(name, fn, validate or _no_params("advantage transform", name))
     ADV_TRANSFORMS[name] = stage
     return stage

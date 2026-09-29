@@ -63,8 +63,8 @@ SPECS = {
         {"custom_pg_loss_reducer_function_path": gk.REDUCER_PATH, "calculate_per_token_loss": False},
     ),
     "overlong": (
-        AlgorithmSpec(advantage={"reward_postprocess": _dispatcher(), "reward_shapers": [
-            {"name": "overlong_penalty", "max_length": 1024, "cache_length": 128}]}),
+        gk.with_pipeline_plugins(AlgorithmSpec(advantage={"reward_postprocess": _dispatcher(), "reward_shapers": [
+            {"name": "overlong_penalty", "max_length": 1024, "cache_length": 128}]})),
         {"custom_reward_post_process_path": rp.DISPATCHER_PATH},
     ),
     **{
@@ -252,7 +252,21 @@ def test_remove_sample_semantics(monkeypatch):
     assert token(x).item() == float(sum(sum(m) for m in removed["loss_masks"]))
 
 
-@pytest.mark.parametrize("name", sorted(SPECS))
+def _example(name):
+    return AlgorithmSpec.from_json_file(str(Path(__file__).resolve().parents[1]
+                                            / "examples" / "rl_algorithms" / f"{name}.json"))
+
+
+EXAMPLE_EXPECTED = {
+    "dapo-like": {"eps_clip": 0.2, "eps_clip_high": 0.28, "calculate_per_token_loss": True,
+                  "custom_reward_post_process_path": rp.DISPATCHER_PATH,
+                  "over_sampling_batch_size": 8},
+    "dr-grpo": {"grpo_std_normalization": False,
+                "custom_pg_loss_reducer_function_path": gk.REDUCER_PATH},
+}
+
+
+@pytest.mark.parametrize("name", sorted(SPECS) + [f"example:{n}" for n in sorted(EXAMPLE_EXPECTED)])
 def test_full_parse_args(tmp_path, name):
     """Upstream ``parse_args`` + ``validate_parsed_args`` on the full translated
     argv (pinned image only: needs megatron.training)."""
@@ -269,7 +283,10 @@ def test_full_parse_args(tmp_path, name):
     cfg = dataclasses.replace(make_config(), hf_checkpoint=str(tmp_path), ref_load=str(tmp_path))
     cfg = sub(cfg, "data", prompt_path=str(tmp_path / "p.jsonl"))
     cfg = sub(cfg, "trainable", target_modules=("q_proj", "k_proj", "v_proj", "o_proj"))
-    spec, expected = SPECS[name]
+    if name.startswith("example:"):
+        spec, expected = _example(name[8:]), EXAMPLE_EXPECTED[name[8:]]
+    else:
+        spec, expected = SPECS[name]
     if spec.sampling.over_sampling_batch_size is not None:
         cfg = sub(cfg, "batch", over_sampling_batch_size=spec.sampling.over_sampling_batch_size)
     launch = mc.translate_run_config(cfg, spec)
