@@ -405,7 +405,7 @@ def test_fake_declaration_admits_every_mechanism():
         caps.check(**CHECK, algorithm=build())
 
 
-MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer"}  # G1 passed (tasks 7.3)
+MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer"}  # G1 + effect evidence (7.3, integ-decl)
 ACCEPTED_BY_MILES = {"tis", "opsm_trainer"}
 
 
