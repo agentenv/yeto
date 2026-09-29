@@ -33,7 +33,8 @@ assert "enable_disk_backup" in inspect.signature(TorchMemorySaverAdapter.region)
 print("sglang dists:", sorted(d.metadata["Version"] for d in md.distributions() if d.metadata["Name"] == "sglang"))
 assert len([d for d in md.distributions() if d.metadata["Name"] == "sglang"]) == 1
 PY'
-for r in /root/miles:0394715083c91182b5eb0c526eeee4196ac694b9:https://github.com/michaellchung/miles /sgl-workspace/sglang:9f29303bef1eea38eb613e5f454a52db1326422d:https://github.com/michaellchung/sglang; do
+PINS=$(python3 -c 'import sys; sys.path.insert(0, "/work/yeto"); import yeto.rl as r; print(f"/root/miles:{r.MILES_NEXT_COMMIT}:{r.MILES_NEXT_REPOSITORY} /sgl-workspace/sglang:{r.SGLANG_NEXT_COMMIT}:{r.SGLANG_NEXT_REPOSITORY}")')
+for r in $PINS; do
   d=${r%%:*}; rest=${r#*:}; c=${rest%%:*}; o=${rest#*:}
   echo "$d HEAD=$(git -C $d rev-parse HEAD) origin=$(git -C $d config --get remote.origin.url)"
   git -C $d status --porcelain --untracked-files=all | head -5
