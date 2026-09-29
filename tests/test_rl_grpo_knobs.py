@@ -768,3 +768,26 @@ def test_overlong_nonfinite_grad_still_fails(tmp_path):
 
     with pytest.raises(StrictRlInvariantError, match="grad_norm=nan"):
         _overlong_driver(tmp_path, "all", grad_nan=True).run()
+
+
+def test_learner_binds_ref_source_and_override(tmp_path):
+    """3.3: the learner passes --model / --megatron-ref-load to the island check."""
+
+    from test_rl_miles_adapter_config import make_config
+    from yeto.rl import learner as rl_learner
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    spec = kl_spec()
+    launch = mc.translate_run_config(make_config(), spec)
+
+    def verify(**kw):
+        args = SimpleNamespace(rl_expected_algorithm_sha256=spec.sha256(), learner_id=0,
+                               event_tape=str(tmp_path / "t.jsonl"), rl_allow_unverified_mechanism=None,
+                               model_revision="REV-A", **kw)
+        rl_learner.verify_ports_algorithm(args, SimpleNamespace(), launch)
+
+    verify(model=REF["source"], megatron_ref_load=None)
+    with pytest.raises(rl_learner.AlgorithmMismatchError, match="kl.ref_model.source"):
+        verify(model="Qwen/Other", megatron_ref_load=None)
+    with pytest.raises(rl_learner.AlgorithmMismatchError, match="--megatron-ref-load"):
+        verify(model=REF["source"], megatron_ref_load="/ckpt/megatron")
