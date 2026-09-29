@@ -154,3 +154,8 @@ No volumes, no named secrets.
     equals the dispatcher's `rl_advantage_transform` count logged for round k (event
     `rollout_id` = k). Any mismatch or missing value = 5.5 not passed.
 - Failure handling as before (diagnose; one rerun per mechanism after a fix).
+- Attempt 5 try 1 (gspo_s2, no GPU started): Modal image build failed pulling the private image
+  (`skopeo copy ... unable to retrieve`): launch_run.sh did not export the registry credentials
+  the launcher reads (SKYPILOT_DOCKER_USERNAME/PASSWORD/SERVER). Fixed in launch_run.sh
+  (decoded in-process from ~/.docker/config.json, never printed). Evidence
+  attempt5/gspo_s2-try1-nopullcreds/. Same runs follow.

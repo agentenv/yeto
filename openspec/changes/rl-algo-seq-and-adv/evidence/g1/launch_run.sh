@@ -26,6 +26,15 @@ echo "$PREFIX" > "$out/prefix.txt"; git rev-parse HEAD > "$out/yeto_sha.txt"
 # independent reclamation: stop the run's Modal app after 45 min whatever happens here
 setsid nohup bash -c "sleep 2700; /tmp/modal-venv/bin/modal app stop -y yeto-$PREFIX" >/dev/null 2>&1 < /dev/null &
 echo $! > "$out/watchdog.pid"
+# Private image pull credentials: decoded from the ghcr.io entry of ~/.docker/config.json
+# into this process's environment only (never printed or written).
+eval "$(python3 - <<'PY'
+import base64, json, os, shlex
+auth = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
+user, token = base64.b64decode(auth).decode().split(":", 1)
+print(f"export SKYPILOT_DOCKER_USERNAME={shlex.quote(user)} SKYPILOT_DOCKER_PASSWORD={shlex.quote(token)} SKYPILOT_DOCKER_SERVER=ghcr.io")
+PY
+)"
 PYTHONPATH=$PWD timeout 2400 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli launch "${COMMON[@]}" "${EXTRA[@]}" > "$out/launch.log" 2>&1
 echo "launcher rc=$?" | tee "$out/launcher_rc.txt"
 PYTHONPATH=$PWD timeout 300 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli down $PREFIX > "$out/down.log" 2>&1
