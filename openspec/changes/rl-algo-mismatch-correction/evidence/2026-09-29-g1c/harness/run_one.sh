@@ -21,7 +21,7 @@ echo $! > $E/watchdog.pid
     for x in $c; do timeout 60 /tmp/modal-venv/bin/modal container exec $x -- sh -c "cat /root/yeto-output/rl-island-0.jsonl 2>/dev/null" > $E/.tape 2>/dev/null && [ -s $E/.tape ] && grep -q '"event"' $E/.tape && mv $E/.tape $E/tape.jsonl; done; done ) &
 PULLER=$!
 date -u +%FT%TZ > $E/start_time.txt
-cd $T && PYTHONPATH=$T timeout 2700 /tmp/yeto-venv/bin/python -m yeto.cli launch --training-mode rl --rl-engine ports \
+cd $T && PYTHONPATH=$T timeout 2700 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli launch --training-mode rl --rl-engine ports \
   --gpu modal:1xh100 --modal-gpu-exact --controller local --rl-single-island-no-sync \
   --rl-algorithm-spec $E/spec.json "${ALLOW[@]}" --cluster-prefix $PFX \
   --model Qwen/Qwen3-0.6B --model-revision c1899de289a04d12100db370d81485cdf75e47ca \

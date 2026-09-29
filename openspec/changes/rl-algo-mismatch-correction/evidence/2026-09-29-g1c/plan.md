@@ -44,3 +44,9 @@ committed diagnosis.
   cap $8.
 - 7.1: `yeto launch` has no --dry-run; the 1-GPU resource request is recorded from the launch log
   ("gpu=H100!" in the Modal function definition) instead, labelled as such.
+
+## tis attempt 1 (harness failure, no cloud resource created)
+- `yeto launch` ran in /tmp/yeto-venv, which has no `sky`: `ModuleNotFoundError: No module named 'sky'`
+  at launcher.py:3626 before any Modal call (runs/tis-attempt1-nosky). Fix: run the launcher with
+  /home/michael/work/gpu-head/venv/bin/python (the venv the R0 Modal runs used), PYTHONPATH = the
+  archived tree. Rerun once.
