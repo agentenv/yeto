@@ -126,3 +126,15 @@
 - 1.4：依赖 1.2 已满足，但验收是 X9（design 表：在固定分区对严格 policy 依赖注入延迟，是 GPU 实验），要等 2.3 的 GPU 运行 → 仍不勾选。
 - 1.5 依赖 1.4，1.6 依赖 1.3–1.5，1.8 依赖 1.4/1.7 → 随 1.4 一起不勾选。
 - launcher partition 补丁已按授权合入 infra-a（launcher.py 中 fixed-partition 的 GPU 划分部分归 INFRA）。
+
+### E0 GPU（2026-09-29 INFRA，续 4）
+- 2.2：第四轮满足预登记条件 1–4；第三轮按预登记判为不通过（A 第 3 轮 applied_lrs 缺证据），两轮都如实记录在 tasks 2.2。因依赖未满足，不勾选。
+- 2.3：X9 guard（第三轮 C）通过；2.3 整体未完成。
+- 云资源（全部为 Modal，均 stopped、0 tasks，列表见 `evidence/infra-a/2.2-2.3/modal_apps_round*.txt`）：
+  - A-attempt2 约 15 分钟 × 1 卡；
+  - 第二轮 A 约 15 分钟 × 1 卡；
+  - 第三轮 A 12.5 分钟 × 1 卡、B 12.5 分钟 × 2 卡、C 14.5 分钟 × 2 卡；
+  - 第四轮 A 13.5 分钟 × 1 卡、B 18.5 分钟 × 2 卡；
+  - 合计约 2.5 H100·h，约 $10。
+- 所有 watchdog 均已结束（`sleep 3900` 中没有 infra-a 残留）。
+- 2.4 计划已单独提交（3b26fde），尚未启动。

@@ -39,8 +39,16 @@
   - 进展（2026-09-29 INFRA，CPU 通过，GPU 未做）：fork-M1 3ae99fd1 的 CPU 单测覆盖重复、越界、重叠拒绝和缺省等价（`tests/fast/ray/test_placement_map.py` 与 `test_placement_group.py`，在 `/tmp/review-miles-venv` 中 61 passed）；yeto 侧在启动前按同一规则校验，见 2.1。尚未完成：M1 打入镜像（pin 由 IMG 负责），以及 GPU 上以显式映射启动并记录 bundle↔GPU UUID（按 gpu-plan §8.3，用 `nvidia-smi` UUID 对照 M1 日志中的 node/gpu id）。
 - [ ] 2.2 [Y；依赖2.1,1.4] 在yeto `IslandDriver` 上新增 `partitioned-serial` 执行模式，在目标分区管理就绪任务、权重身份、有限缓冲与反压；验收：partitioned-serial完成固定算法步数，不因分卡改变sample IDs/optimizer时序；保留 R0 每组 policy token 校验（`driver.py` generate 后的 `mismatched_groups` 检查），`rl-algo-mismatch-correction` 依赖的“π_behav 与 π_old 同一权重”前提在分区模式下仍成立（alignment.md A5）。
   - 进展（2026-09-29 INFRA，CPU 通过，GPU 未做）：`IslandDriver` 支持 `partitioned-serial`：要求 fixed-partition placement，不做 offload/onload，同时只允许一个 batch 在途，生成与训练前做 readiness 检查（与 R0 的发布清单/每组 token 检查基本重复，不作为独立证据，F4；不按 rollout_batch_size 计数，F3），保留每组 policy token 校验（A5）；`partitioned-overlap` 拒绝运行。CPU 证据：fake engine 上 partitioned 与 colocated 的训练 sample IDs、引擎调用顺序（除 offload/onload）与最终权重相同；stale token 在训练前被拒；已发布版本落后时拒绝生成。GPU 验收按 gpu-plan A2 执行。提交 115ee9a。
+  - GPU 结果（2026-09-29 INFRA；验收证据已具备，未勾选：依赖 2.1（其依赖 1.6、2.1a 未满足）与 1.4 未勾选）：计划 a37403a（`evidence/infra-a/2.2-2.3/plan.md`，判据未改，事后追加的说明均在计划末尾）。所有尝试如下：
+    - A-attempt1：本机线程上限导致 deploy 前失败，无资源。
+    - A-attempt2（a37403a）：SUCCEEDED，磁带只拉到 2/3 轮，已存档，不参与判定。
+    - 第二轮（d2018b5）：A SUCCEEDED；B/C 因 launch 的参数缩写问题在 deploy 前被拒，无资源。
+    - 第三轮（95203615）：A/B/C 均 SUCCEEDED，条件 1、2、4 满足，但条件 3 在 A 的第 3 轮缺证据，**按预登记判为不通过**（`round3-check.json`）。
+    - 第四轮（6e4e3506；依据是证据缺失，这是最后一次重跑）：A=T1 共置 1×H100!，B=T1R1 分区 2×H100!，均 SUCCEEDED。条件 1–4 全部满足（`round4-check.json`）：B 为 partitioned-serial；三轮的 sample-id 哈希、组数、样本数 A=B；phase 顺序相同，每轮 applied_lrs 长度=1；publication 成员非空，token 与 apply 一致。
+    - 各次 A 之间的可比数据：四次 A（attempt2 仅前 2 轮）的逐轮 sample-id 哈希完全一致，没有差异。
 - [ ] 2.3 [X；依赖2.2,1.7] 对同一算法契约允许的独立任务做重叠实验，并实现对应guard；验收X9：延迟发布不能触发旧版本生成，队列有界；若不存在合法训推重叠，记录partitioned-serial结论与独立算法后续项，不擅自开放one-step-off-policy。
   - 进展（2026-09-29 INFRA，未完成）：CPU 分析（`execution_profile.overlap_violation`，age 0）：合法的重叠对只有 generate‖checkpoint、reward‖eval、reward‖checkpoint、train‖eval、outer_sync‖eval、eval‖checkpoint；generate 不能与 train/outer_sync/publish 重叠。driver 当前拒绝运行 overlap 模式。X9 需要 GPU 延迟注入（gpu-plan A2），尚未执行，因此还不能给出结论。若将来交付否定结论，须补细粒度论证：流式 reward 与同轮生成的重叠、`num_steps_per_rollout>1` 时 minibatch 流水，不能只凭任务级依赖表（审查意见）。
+  - X9 guard GPU 结果（2026-09-29 INFRA；2.3 整体仍未完成）：第三轮 C（95203615，T1R1 2×H100!，快照内注入 publish_delay_s=30）SUCCEEDED。条件 5–7 满足（`round3-check.json`）：4 次发布前均有 30 s 延迟事件；每轮 generate 都晚于该版本的 publication，publish 与 publication 之间没有 generate（在途 ≤1）；无失败。结论只覆盖 partitioned-serial 下的 guard。age 0 下的合法重叠对（train‖eval 等）尚未实现和实验，因此 2.3 不勾选，也不交付否定结论。
 - [ ] 2.4 [X；依赖2.2,1.3,1.7；overlap另依赖2.3] 在云实验池扫描少量固定配置，记录默认兼容配置、目标profile最佳固定和收益面；验收：同profile公平比较、全池/备用GPU-hours和原始trace齐全，可得“尚无净收益边”的结论。P62/P44仅候选，不预设合法或更快。
   - 进展（2026-09-29 INFRA，未完成）：依赖 2.2 GPU、1.3、1.7；按 gpu-plan A3 执行，未启动。
 
