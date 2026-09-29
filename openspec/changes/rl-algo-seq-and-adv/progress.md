@@ -165,3 +165,11 @@
 | 7.7 | 未完成（attempts 1–4 已回收并核实；汇总待剩余运行） |
 | 7.8 8.2 8.3 | 完成 |
 | 8.1 | 未完成（dapo-like 依赖 1b） |
+
+## 2026-09-29 G1 attempt 5（launcher 入口）与 merge infra-a 8cf1dec（947fdbc）
+- 计划 b06f928（启动前提交）。try 1：未导出私有镜像拉取凭据，Modal 镜像构建失败，未起 GPU；已修 launch_run.sh（进程内解码，不打印）。
+- try 2：gspo_s2 在 launcher no-sync 入口上跑完（learner finalized、job SUCCEEDED、launcher rc 2＝预声明的"产物不可取"提示），3 轮×2 步，第二步 clipfrac 0.1875/0.5，grad_norm 全有限。但事件磁带不在流式日志里、Modal 岛的 ~/yeto-output 也取不回，预声明标准 1（rl_round_trained 计数）、5（unverified 事件）以及 R1 masked_fraction、5.5 的逐轮对应**无法评估** → 只记录，不计通过。
+- 因 INFRA 8cf1dec 改了 receipt 语义，手动停掉刚启动的 gspo_s1，其余未启动；全部 app stopped/0 tasks，watchdog 已杀。
+- 已 merge infra-a 8cf1dec：本 change 测试 141 passed；全量 `after-failures-947fdbc.txt`，相对基线新增仍只有 dapo-like（依赖 1b）。
+- **阻塞（需 P0/INFRA）**：Modal no-sync 岛的事件磁带需进入流式日志或被拉回，否则 7.2/7.3 的标准 5 与 5.5 的逐轮证据都无法在 launcher 入口上取得。解除后按 attempt 5 计划重跑 gspo_s2、gspo_s1、rpp、rpp_baseline、gdpo。
+- 累计 GPU：attempts 1–5 ≈ 2056 s + ≈ 600 s 单卡 H100，估 ≈ $4（未核账单），上限 $20。
