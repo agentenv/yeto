@@ -1,0 +1,8 @@
+{
+ "mechanism": "over_sampling",
+ "algorithm_spec_sha256": "6053fad26acf57ba5f022a08baca5a7384ae74917174b351a5c586e661be77f9",
+ "allow_unverified": [
+  "features:over_sampling"
+ ],
+ "rounds": 3
+}

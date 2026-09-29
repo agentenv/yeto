@@ -649,16 +649,30 @@ Before any GPU process exists, the driver handshake refuses:
 
 **Declaration policy** (main-agent decision, may be overridden by the user;
 alignment §7b): a mechanism is declared in `miles_capabilities` only on
-evidence that it actually takes effect on GPU. Current Miles adapter
-declarations beyond R0:
+evidence that it actually takes effect on GPU. The declarations beyond R0,
+each with its evidence, are the `MILES_DECLARED` table in
+`yeto/rl/engine/miles_adapter/entry.py` (one commit per mechanism):
 
-- `corrections`: `tis`, `opsm`, `opsm_trainer` (rl-algo-mismatch-correction).
-  **G1 only proved they run; that their truncation/masking branches take
-  effect is pending a triggering run.** They are withdrawn if that run does
-  not show the effect.
-- `features`: `maxrl`, `mapo` (rl-algo-seq-and-adv G1). A real run also needs
-  `reward_postprocessors:custom_reward_postprocess`, which waits for the
-  rl-algo-grpo-knobs G1. `gdpo` is held back.
+- corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe;
+  features: mismatch_metrics (rl-algo-mismatch-correction);
+- loss_aggregations: token, constant; features: no_grpo_std_normalization,
+  kl_loss_ref_model, entropy_bonus, overlong_penalty; kl_placements: loss;
+  reward_postprocessors: custom_reward_postprocess (rl-algo-grpo-knobs);
+- advantage estimators: gspo, reinforce_plus_plus,
+  reinforce_plus_plus_baseline; features: maxrl, mapo, gdpo
+  (rl-algo-seq-and-adv).
+
+Not declared, pending evidence or approval:
+
+- clip_higher, dual_clip, over_sampling: triggering runs in progress.
+- overlong_filter, mis, opsm_rollout, generic corrections:custom.
+- features:custom_pg_loss_reducer: it would admit any reducer plugin, and only
+  the Dr.GRPO reducer has evidence.
+- eps_clip / clip_higher as GSPO's mandatory clip, and whiten_advantages as
+  REINFORCE++'s mandatory normalization.
+
+Because of the last two items, dr-grpo, gspo and rpp specs are still refused,
+each on its supporting feature.
 
 "Expressible, not enabled" means the spec can describe and translate a
 mechanism, but `miles_capabilities` does not declare it yet. A follow-up

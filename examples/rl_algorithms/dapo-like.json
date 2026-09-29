@@ -1,0 +1,68 @@
+{
+  "advantage": {
+    "estimator": "grpo",
+    "reward_binary": false,
+    "reward_postprocess": {
+      "path": "yeto.rl.algos.reward_pipeline.post_process",
+      "sha256": "7f223f5cdbe637d1e3acb4458235901d09d43841d2a9ff55fc7f8d258f8ce5d1"
+    },
+    "reward_shapers": [
+      {
+        "cache_length": 128,
+        "max_length": 1024,
+        "name": "overlong_penalty"
+      }
+    ],
+    "rewards_normalization": true,
+    "std_normalization": true,
+    "whiten": false
+  },
+  "correction": {
+    "function": null,
+    "method": "none",
+    "mismatch_metrics": false,
+    "opsm_delta": null,
+    "tis_clip": null,
+    "tis_clip_low": null,
+    "use_rollout_logprobs": false
+  },
+  "entropy_coef": 0.0,
+  "execution": {
+    "group_required": true,
+    "max_policy_staleness": 0,
+    "needs_critic": false,
+    "needs_rollout_logprobs": false
+  },
+  "kl": {
+    "coef": null,
+    "estimator": null,
+    "placement": "none",
+    "unbiased": false
+  },
+  "loss": {
+    "aggregation": "token",
+    "custom_loss": null,
+    "eps_clip": 0.2,
+    "eps_clip_c": null,
+    "eps_clip_high": 0.28,
+    "reducer": null,
+    "variant": "policy_loss"
+  },
+  "plugins": [
+    {
+      "path": "yeto.rl.algos.reward_pipeline.grpo_default",
+      "sha256": "7f223f5cdbe637d1e3acb4458235901d09d43841d2a9ff55fc7f8d258f8ce5d1"
+    },
+    {
+      "path": "yeto.rl.algos.seq_adv.gdpo",
+      "sha256": "2c710922aa44d7e0e6108450dc0fac6128063714385501c528def06c1ea4e656"
+    }
+  ],
+  "sampling": {
+    "filter": "yeto.rl.filters.bounded_nonzero_reward_std",
+    "max_replacements": 2,
+    "over_sampling_batch_size": 8,
+    "overlong_filter": false
+  },
+  "schema": "yeto-rl-algorithm-spec-v2"
+}

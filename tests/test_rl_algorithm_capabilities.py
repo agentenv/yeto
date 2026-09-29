@@ -89,6 +89,10 @@ def test_old_declaration_reads_as_r0_mechanisms():
 # produce companions too). Tests pick the ones an engine has NOT declared, so
 # a later declaration (a follow-up change's G1) never turns them into no-ops.
 _REF = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+# With rl-algo-grpo-knobs registered, the only allowed reward post-process is
+# its dispatcher, and specs are completed by the same fixture as the flags test.
+from test_rl_algorithm_flags import DISPATCHER as _POSTPROCESS  # noqa: E402
+from test_rl_algorithm_flags import complete as _complete  # noqa: E402
 CANDIDATES = {
     "advantage_estimators:gspo": dict(advantage=dict(estimator="gspo"),
                                       loss=dict(eps_clip=3e-4, eps_clip_high=4e-4)),
@@ -122,7 +126,7 @@ CANDIDATES = {
     "loss_aggregations:constant": dict(loss=dict(aggregation="constant", reducer=_REF)),
     "losses:custom_loss": dict(loss=dict(variant="custom_loss", custom_loss=_REF)),
     "reward_postprocessors:custom_reward_postprocess": dict(
-        advantage=dict(reward_postprocess=_REF)),
+        advantage=dict(reward_postprocess=_POSTPROCESS)),
 }
 R0_MECHANISMS_P0 = {
     "advantage_estimators:grpo", "losses:policy_loss", "loss_aggregations:default",
@@ -214,7 +218,7 @@ def test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter():
         kwargs = CANDIDATES.get(mechanism)
         if kwargs is None:
             continue  # R0 (default spec) or an extension mechanism not registered here
-        spec = _combine(kwargs)
+        spec = _complete(_combine(kwargs))
         needs = {f"{d}:{n}" for d, n in spec.required_mechanisms()}
         if needs <= declared:
             _check(caps, spec)  # accepted
@@ -330,22 +334,46 @@ def test_binary_reward_declared_passes(binary_mechanism):
 # -- 3.4 declarations ----------------------------------------------------------------
 
 
+# The Miles adapter's declarations beyond R0, one line per mechanism (each
+# added in its own commit together with its MILES_DECLARED evidence entry).
+EXPECTED_MILES_DECLARED = {
+    "corrections:tis",
+    "corrections:opsm",
+    "corrections:opsm_trainer",
+    "features:maxrl",
+    "features:mapo",
+    "loss_aggregations:token",
+    "features:no_grpo_std_normalization",
+    "loss_aggregations:constant",
+    "kl_placements:loss",
+    "features:kl_loss_ref_model",
+    "features:entropy_bonus",
+    "reward_postprocessors:custom_reward_postprocess",
+    "features:overlong_penalty",
+    "advantage_estimators:gspo",
+    "advantage_estimators:reinforce_plus_plus",
+    "advantage_estimators:reinforce_plus_plus_baseline",
+    "features:gdpo",
+    "features:mismatch_metrics",
+    "corrections:mismatch_observe",
+    "corrections:icepop",
+    "corrections:mis_mask",
+}
+
+
 def test_miles_and_fake_declarations():
-    # rl-algo-mismatch-correction 7.3 (G1 passed): the adapter declares tis and
-    # OPSM (trainer pi_old); the fake declares every correction for CPU tests.
-    expected = {
-        # rl-algo-seq-and-adv 7.5 G1: maxrl/mapo (gdpo held back)
-        "miles": ({"none", "tis", "opsm", "opsm_trainer"}, {"maxrl", "mapo"}),
-        "fake": ({"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
-                  "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
-                 {"mismatch_metrics", "rollout_logprobs_as_old"}),
-    }
-    for kind, caps in (("miles", miles_capabilities(FP)), ("fake", fake_capabilities())):
-        corrections, features = expected[kind]
-        assert caps.advantage_estimators == {"grpo"}
-        assert caps.losses == {"policy_loss"} and caps.loss_aggregations == {"default"}
-        assert caps.kl_placements == {"none", "reward"} and caps.corrections == corrections
-        assert caps.reward_postprocessors == frozenset() and caps.features == features
+    from yeto.rl.engine.miles_adapter.entry import MILES_DECLARED
+
+    miles = miles_capabilities(FP)
+    assert set(MILES_DECLARED) == EXPECTED_MILES_DECLARED
+    assert miles.declared_mechanisms() == R0_MECHANISMS_P0 | EXPECTED_MILES_DECLARED
+    assert all(MILES_DECLARED[m] for m in MILES_DECLARED)  # every entry cites evidence
+    # the fake declares every correction for CPU tests (and nothing else extra)
+    fake = fake_capabilities()
+    assert fake.corrections == {"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
+                                "opsm_trainer", "opsm_rollout", "mis", "mis_mask"}
+    assert fake.features == {"mismatch_metrics", "rollout_logprobs_as_old"}
+    for caps in (miles, fake):
         assert caps.execution == ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True)
         assert caps.unverified_mechanisms == frozenset()
@@ -465,7 +493,7 @@ def test_named_custom_function_only_exempt_when_its_mechanism_detects():
             alg.unregister(mechanism=("corrections", "t_named"))
     finally:
         alg.NAMED_CORRECTION_FUNCTIONS.discard(ref.path)
-    with pytest.raises(ValueError, match="yeto namespace"):
+    with pytest.raises(ValueError, match="must be in"):
         alg.register_named_correction_function("examples.x.fn")
 
 
@@ -486,6 +514,7 @@ def test_always_emit_field_only_when_its_mechanism_applies():
 
 
 def test_reward_dispatcher_rejection_explains_the_pending_declaration():
-    caps = miles_capabilities(FP)
+    caps = fake_capabilities()  # an engine without the dispatcher declaration
     with pytest.raises(CapabilityMismatch, match="maxrl/mapo is not declared yet"):
-        _check(caps, _combine(CANDIDATES["reward_postprocessors:custom_reward_postprocess"]))
+        _check(caps, _complete(_combine(
+            CANDIDATES["reward_postprocessors:custom_reward_postprocess"])))

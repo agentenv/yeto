@@ -38,6 +38,53 @@ def runtime_fingerprint(launch: Any, miles_commit: str) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+# Declared beyond R0: "dimension:name" -> evidence that the mechanism takes
+# effect on GPU (declaration policy, rl-infra-spec alignment §7b; may be
+# overridden by the user). One entry per mechanism, added in its own commit.
+_E1A = "openspec/changes/rl-algo-mismatch-correction/evidence"
+_E1B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
+_E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
+MILES_DECLARED: dict[str, str] = {
+    "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
+    "corrections:opsm": (
+        f"{_E1A}/2026-09-29-trigger (opsm_clipfrac > 0, optimizer_steps 2); the OPSM "
+        "dimension that every source-specific OPSM mechanism also requires"
+    ),
+    "corrections:opsm_trainer": f"{_E1A}/2026-09-29-trigger (opsm_clipfrac > 0)",
+    "features:maxrl": f"{_E2A}/attempt4 (maxrl)",
+    "features:mapo": f"{_E2A}/attempt4 (mapo)",
+    "loss_aggregations:token": f"{_E1B}/g1_report_v2.json token (pg_loss 0.035/0.0068/0.0026 vs baseline ~1e-8)",
+    "features:no_grpo_std_normalization": f"{_E1B}/g1_report_v2.json drgrpo (pg_loss 0.0079/0.0072/0.019 vs baseline ~1e-8)",
+    "loss_aggregations:constant": f"{_E1B}/g1_report_v2.json drgrpo (constant-denominator aggregation)",
+    "kl_placements:loss": f"{_E1B}/g1_report_v2.json kl_k3 (kl_loss 0 / 0.00079 / 0.00082)",
+    "features:kl_loss_ref_model": f"{_E1B}/g1_report_v2.json kl_k3 (ref model loaded, kl_loss > 0)",
+    "features:entropy_bonus": f"{_E1B}/g1_report_v2.json entropy (entropy_loss 0.30/0.38/0.45)",
+    "reward_postprocessors:custom_reward_postprocess": f"{_E1B}/g1_report_v2.json overlong_penalty (dispatcher shaped 4/7/21 of 32 samples)",
+    "features:overlong_penalty": f"{_E1B}/g1_report_v2.json overlong_penalty (shaped_samples 4/7/21)",
+    "advantage_estimators:gspo": f"{_E2A}/attempt6 gspo_s2 (optimizer_steps 2: second-step clipfrac 0.1875/0.5/0.5; steps 1: 0)",
+    "advantage_estimators:reinforce_plus_plus": f"{_E2A}/attempt6 rpp (3 rounds, finalized, finite grad_norm)",
+    "advantage_estimators:reinforce_plus_plus_baseline": f"{_E2A}/attempt6 rpp_baseline (3 rounds, finalized, finite grad_norm)",
+    "features:gdpo": f"{_E2A}/attempt6 gdpo (per-round nonzero_advantages 32/24/32 match the dispatcher)",
+    "features:mismatch_metrics": f"{_E1A}/2026-09-29-trigger icepop + 2026-09-29-g1b observe (mismatch metrics reported; observation only, loss unchanged)",
+    "corrections:mismatch_observe": f"{_E1A}/2026-09-29-g1b observe + g2-observe (observation only; weights constant 1)",
+    "corrections:icepop": f"{_E1A}/2026-09-29-trigger icepop [0.99,1.01] (masked tis_clipfrac 0.192/0.225/0.267)",
+    "corrections:mis_mask": f"{_E1A}/2026-09-29-trigger mis-mask token [0.99,1.01] (mask fraction 0.192/0.225/0.267)",
+}
+
+
+def declared_by_dimension() -> dict[str, set[str]]:
+    """R0 mechanism sets plus :data:`MILES_DECLARED`, per dimension."""
+
+    from ..capabilities import R0_MECHANISMS
+
+    out = {dim: set(names) for dim, names in R0_MECHANISMS.items()}
+    out["advantage_estimators"] = {"grpo"}
+    for mechanism in MILES_DECLARED:
+        dimension, name = mechanism.split(":", 1)
+        out.setdefault(dimension, set()).add(name)
+    return out
+
+
 def miles_capabilities(
     fingerprint: str, *, unverified_mechanisms=()
 ) -> EngineCapabilities:
@@ -58,26 +105,37 @@ def miles_capabilities(
         runtime_fingerprint=fingerprint,
         parameter_layouts={"lora"},
         placements={"colocated"},
-        advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
-        # rl-algo-mismatch-correction 7.3: declared only after the single-GPU
-        # smoke (G1) passed -- evidence/2026-09-29-g1/runs/{tis,opsm-trainer}.
-        # opsm_rollout, mismatch_observe, icepop and mis* stay undeclared
-        # (observe/icepop/mis additionally need 1a-shared.patch so that a
-        # named custom function does not require the generic 'custom').
-        corrections={"none", "tis", "opsm", "opsm_trainer"},
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),
-        # rl-algo-seq-and-adv 7.5: G1 passed on 1xH100 (evidence/g1/attempt4, e54d2f7).
-        # gdpo held back (main agent); maxrl/mapo formally usable only once
-        # reward_postprocessors:custom_reward_postprocess is declared (1b G1).
-        features=set(R0_MECHANISMS["features"]) | {"maxrl", "mapo"},
+        **declared_by_dimension(),
     )
     if unverified_mechanisms:
         capabilities = capabilities.with_unverified(unverified_mechanisms)
     return capabilities
+
+
+def receipt_role_family(algorithm: AlgorithmSpec) -> str:
+    """``LocalStepReceipt.algorithm``: the TRAINING ROLE FAMILY, not the estimator.
+
+    It must equal ``ParameterLayout.algorithm`` (``local_learner.py`` checks
+    both; the layout hash covers it), whose families are grpo / sao. Every
+    critic-free estimator (grpo, gspo, reinforce_plus_plus[_baseline]) trains
+    the single actor role -> ``"grpo"``; the estimator itself is identified by
+    ``algorithm_spec_sha256``. Critic estimators (ppo) have no family in the
+    layout contract and are refused.
+    """
+    from ..algorithm import CRITIC_ESTIMATORS
+
+    estimator = algorithm.advantage_estimator
+    if estimator in CRITIC_ESTIMATORS:
+        raise ValueError(
+            f"advantage estimator {estimator!r} needs a critic role family, which the "
+            "receipt/layout contract does not define"
+        )
+    return "grpo"
 
 
 def with_partitioned_serial(capabilities: EngineCapabilities) -> EngineCapabilities:
@@ -272,7 +330,8 @@ def compose_island(
             learner_id=learner_id,
             learner_generation=0,
             parameter_layout_hash=lambda: layout_hash,
-            algorithm=algorithm.advantage_estimator,
+            algorithm=receipt_role_family(algorithm),
+            spec=algorithm,
             release_refs=release_refs,
             runner=runner,
         ),

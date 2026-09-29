@@ -357,8 +357,12 @@ def register_named_correction_function(path: str) -> None:
     check; its source identity stays covered by the PluginRef hash.
     """
 
-    if not path.startswith("yeto."):
-        raise ValueError(f"named correction function {path!r} must be in the yeto namespace")
+    if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
+        raise ValueError(
+            f"named correction function {path!r} must be in {sorted(PLUGIN_NAMESPACES)} "
+            "(Miles built-ins such as icepop_function are named too; the source "
+            "hash of the PluginRef still pins them)"
+        )
     NAMED_CORRECTION_FUNCTIONS.add(path)
 
 

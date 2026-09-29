@@ -1,0 +1,22 @@
+sandbox sb-fwUsN4xXObdicf3CYM1dIm
+
+
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+tar: /work/out: Cannot open: No such file or directory
+tar: Error is not recoverable: exiting now
+exit=0

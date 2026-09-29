@@ -1,0 +1,125 @@
+✓ Initialized. View run at 
+https://modal.com/apps/yetalabs/main/ap-NwnNkUKRNgnMPlraQLkxhp
+✓ Created objects.
+├── 🔨 Created mount 
+│   /home/michael/work/algo-1b/openspec/changes/rl-algo-grpo-knobs/evidence/2026
+│   -09-29-algo1b-cpu-img/modal_cpu_img.py
+├── 🔨 Created mount /home/michael/work/algo-1b
+├── 🔨 Created mount /home/michael/work/miles-next
+└── 🔨 Created function run.
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 13.0.3
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+WARNING: The NVIDIA Driver was not detected.  GPU functionality will not be available.
+   Use the NVIDIA Container Toolkit to start this container with GPU support; see
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+image miles None
+--- 4.1: import examples.experimental.DrGRPO.custom_reducer (image Miles only)
+IMPORT_FAILED
+examples spec None None
+Name: miles
+Version: 0.1.1
+Summary: 
+--- full parse_args (miles-next 0394715 parser, image megatron)
+                 use_last_error=False,
+                 winmode=None):
+        if name:
+            name = _os.fspath(name)
+        self._name = name
+        flags = self._func_flags_
+        if use_errno:
+            flags |= _FUNCFLAG_USE_ERRNO
+        if use_last_error:
+            flags |= _FUNCFLAG_USE_LASTERROR
+        if _sys.platform.startswith("aix"):
+            """When the name contains ".a(" and ends with ")",
+               e.g., "libFOO.a(libFOO.so)" - this is taken to be an
+               archive(member) syntax for dlopen(), and the mode is adjusted.
+               Otherwise, name is presented to dlopen() as a file argument.
+            """
+            if name and name.endswith(")") and ".a(" in name:
+                mode |= ( _os.RTLD_MEMBER | _os.RTLD_NOW )
+        if _os.name == "nt":
+            if winmode is not None:
+                mode = winmode
+            else:
+                import nt
+                mode = nt._LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                if '/' in name or '\\' in name:
+                    self._name = nt._getfullpathname(self._name)
+                    mode |= nt._LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+    
+        class _FuncPtr(_CFuncPtr):
+            _flags_ = flags
+            _restype_ = self._func_restype_
+        self._FuncPtr = _FuncPtr
+    
+        if handle is None:
+>           self._handle = _dlopen(self._name, mode)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+E           OSError: libcuda.so.1: cannot open shared object file: No such file or directory
+
+/usr/lib/python3.12/ctypes/__init__.py:379: OSError
+13 failed, 12 passed, 21 deselected in 45.36s
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+E           OSError: libcuda.so.1: cannot open shared object file: No such file or directory
+
+/usr/lib/python3.12/ctypes/__init__.py:379: OSError
+2 failed, 36 deselected in 19.86s
+
+--- stderr ---
++ cd /tmp
++ python -c 'import pytest'
++ python -c 'import miles, sys; print('\''image miles'\'', miles.__file__)'
++ echo '--- 4.1: import examples.experimental.DrGRPO.custom_reducer (image Miles only)'
++ python -
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+  File "/usr/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1310, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1310, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1310, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'examples'
++ python -c 'import importlib.util as u; s=u.find_spec('\''examples'\''); print('\''examples spec'\'', s and s.origin, s and list(s.submodule_search_locations or []))'
++ pip show miles
++ head -3
++ echo '--- full parse_args (miles-next 0394715 parser, image megatron)'
++ cd /yeto
++ PYTHONPATH=/yeto:/miles-next
++ python -m pytest -q -p no:cacheprovider -rs tests/test_rl_grpo_knobs_upstream.py -k 'full_parse_args or miles_parser or kl_loss_triggers'
++ tail -40
++ PYTHONPATH=/yeto:/miles-next
++ python -m pytest -q -p no:cacheprovider -rs tests/test_rl_miles_adapter_config.py -k upstream_parse
++ tail -5
+
+Stopping app - local entrypoint completed.
+✓ App completed. View run at 
+https://modal.com/apps/yetalabs/main/ap-NwnNkUKRNgnMPlraQLkxhp
+exit=0

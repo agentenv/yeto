@@ -1,0 +1,55 @@
+{
+ "run": "rpp",
+ "finalized": true,
+ "rl_round_trained": 3,
+ "errors": [],
+ "steps(clipfrac,grad_norm)": [
+  [
+   "0.0",
+   "0.8606950640678406"
+  ],
+  [
+   "0.0",
+   "0.54714035987854"
+  ],
+  [
+   "0.0",
+   "0.37589532136917114"
+  ]
+ ],
+ "grad_norm_finite": true,
+ "unverified": [
+  "advantage_estimators:reinforce_plus_plus",
+  "features:whiten_advantages"
+ ],
+ "outer_sync": false,
+ "round_fields": [
+  {
+   "rollout_id": 0,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": null
+  },
+  {
+   "rollout_id": 1,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": null
+  },
+  {
+   "rollout_id": 2,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": null
+  }
+ ],
+ "zero_grad_events": [],
+ "argv_gspo": false,
+ "argv_kl_coef": [
+  "0.01"
+ ],
+ "argv_normalize_advantages": [
+  "True"
+ ],
+ "transform_events": []
+}

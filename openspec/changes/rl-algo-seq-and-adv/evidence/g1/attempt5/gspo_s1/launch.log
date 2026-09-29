@@ -1,0 +1,19 @@
+[yeto] run 'algo2a-g1-gspo-s1' submitted; worker pid 3296963.
+[yeto] log: /home/michael/.yeto/runs/algo2a-g1-gspo-s1/launcher.log
+[yeto] streaming logs — Ctrl-C detaches, the run keeps going.
+
+[launcher] --rl-single-island-no-sync: no syncer, no outer sync
+[launcher] deploying Modal app yeto-algo2a-g1-gspo-s1 (1 island(s))
+✓ Created objects.
+├── ✓ Uploaded PythonPackage:yeto
+├── ✓ Uploaded /home/michael/work/algo-2a
+└── ✓ Created Function island-0.
+✓ App deployed in 15.063s! 🎉
+
+View Deployment: 
+https://modal.com/apps/yetalabs/main/deployed/yeto-algo2a-g1-gspo-s1
+[launcher] launching learner 0 on Modal as algo2a-g1-gspo-s1-l0-modal
+[algo2a-g1-gspo-s1-l0-modal] [modal-island 0] rank 0/1 starting
+[algo2a-g1-gspo-s1-l0-modal] 
+[algo2a-g1-gspo-s1-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']
+[algo2a-g1-gspo-s1-l0-modal] 

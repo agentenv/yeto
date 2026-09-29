@@ -163,6 +163,10 @@
 5. **E3 认证范围**：首轮只认证默认 GRPO 属于缩窄认证范围，仍保留为待批准（§8 第 3 项）；在批准前，E3 先按默认 GRPO 执行。
 6. **infra 代码工作的基底**：集成分支 `rl-integ` = `rl-infra-spec` 6fca4a8 + `fix-decoupled-lr-schedule` 63ea45a（merge `c5e05f4`，已推送；CPU 失败集合按测试 id 与基线相同）。WP-INFRA2 与 WP-CAP 的代码改动基于 `rl-integ`；规划文档仍在 `rl-infra-spec`。
 
+7. **rl-algo-grpo-knobs 的解析口径**（ALGO-1b 追加）：2.3、4.3、7.1 在钉住镜像中运行完整 `parse_args` + `validate_parsed_args`，miles 解析器用 0394715，megatron 用镜像自带的。这比原文要求的 "miles-next-venv"（该环境缺 `megatron.training`）更严格，视为满足原文意图，完成记录中注明环境差异。5.2 另在钉住镜像内用镜像自带的 Miles 补跑一次 equivalence，作为同源证据。
+
+8. **rl-algo-grpo-knobs 的能力声明标准**（主 agent 决定，ALGO-1b 追加）：只有 GPU 上确实生效的机制才声明。首批声明 token、drgrpo（constant 聚合、custom_pg_loss_reducer、no_grpo_std_normalization）、kl_k3（kl_placements:loss、kl_loss_ref_model）、entropy_bonus、overlong_penalty 与 reward_postprocessors:custom_reward_postprocess。clip_higher、dual_clip（clipfrac 为 0）和 over_sampling（没有补采）暂不声明，等拿到"clipfrac>0 / 补采次数>0"的证据后再声明。
+
 ## 8. 待批准事项
 
 1. （已删除：GPU 预算，见 §7b 第 1 条。）
@@ -196,3 +200,8 @@
 
 - **P0 D11 放行开关与 G1**：按 spec 原文，“多岛或外层同步”即拒绝。当前 learner 与 launcher 两个入口都带外层同步，所以放行开关在真实运行中无法使用，各算法 change 的 G1 也就无法借助它运行。需另批二选一：(a) 允许单岛带 1 成员 syncer 时放行；(b) 新增无 syncer 的单岛 learner 入口。ALGO-CAP 没有自行放宽。
 - **更新**：新增了单岛无外层同步运行模式（主 agent 决定，用户可推翻，见 §7b）；放行开关口径未放宽。ALGO-CAP 已实现 `--rl-single-island-no-sync`（单岛、无 syncer、无外层同步），放行开关只在这个入口上可用；F9 的严格拒绝保持不变。
+
+## 11. Agent INFRA 追加（2026-09-29，fork 事实更新）
+
+- §2 矩阵中"新 engine 准入（payload 校验后才进 router）"一行原为 ✖。现状：fork `yeto-elastic-m1-m6` 1a68f893 已实现方案 (a)（`start_update_weights(admit_cordoned=True)` → 调用方 `check_weights` 读回 → `admit_cells(cell_ids, expected_epoch)`）。该行改记为 **△（机制已在 fork 实现，CPU 单测；第三轮独立审查中，未合回 yeto/ports、未进镜像，3.5 GPU 未验证）**。3.5 的验收不变。
+- M5（4.2a）现在支持 bf16 与 DistributedOptimizer，但 GPU 未验证，E3 LoRA+DistOpt 仍按 DEV-GATHER 的结论处理；M6 rebuild 失败语义（`TrainerRebuildError`，不自动回滚）已写入 4.6a，3.7/4.7 失败矩阵需覆盖。

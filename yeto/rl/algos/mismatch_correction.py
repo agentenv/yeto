@@ -180,9 +180,9 @@ register_field("correction", "mis_batch_normalize", default=False, parse=_boolea
 # With 1a-shared.patch these functions no longer also require the generic
 # ("corrections", "custom") mechanism, so an engine can declare them alone.
 if hasattr(_algorithm, "register_named_correction_function"):
-    # P0 accepts only yeto. paths; IcePop (a miles. path) keeps requiring
-    # corrections:custom as well.
-    for _path in (OBSERVE_PATH, MIS_PATH):
+    # P0 accepts yeto. and miles. paths (integ-decl): IcePop's built-in
+    # function is named too, claimed by ("corrections", "icepop").
+    for _path in (OBSERVE_PATH, MIS_PATH, ICEPOP_PATH):
         _algorithm.register_named_correction_function(_path)
 
 for _name in CORRECTION_MECHANISMS:

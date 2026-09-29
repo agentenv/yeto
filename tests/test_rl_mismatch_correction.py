@@ -405,8 +405,8 @@ def test_fake_declaration_admits_every_mechanism():
         caps.check(**CHECK, algorithm=build())
 
 
-MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer"}  # G1 passed (tasks 7.3)
-ACCEPTED_BY_MILES = {"tis", "opsm_trainer"}
+MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer", "mismatch_observe", "icepop", "mis_mask"}  # G1 + effect evidence (7.3, integ-decl)
+ACCEPTED_BY_MILES = {"tis", "opsm_trainer", "mismatch_observe", "icepop", "mis_mask"}
 
 
 def test_miles_adapter_declares_exactly_g1_passed_corrections():
@@ -474,10 +474,12 @@ def test_named_function_does_not_require_generic_custom(name):
     assert ("corrections", "custom") in other.required_mechanisms()
 
 
-def test_icepop_miles_path_still_requires_generic_custom():
-    # P0 accepts only yeto. paths as named correction functions.
+def test_icepop_is_claimed_by_its_own_mechanism_not_generic_custom():
+    # integ-decl: P0 accepts miles. built-ins as named correction functions,
+    # so IcePop is declared as ("corrections", "icepop") alone.
     pairs = icepop().required_mechanisms()
-    assert {("corrections", "custom"), ("corrections", "icepop")} <= pairs
+    assert ("corrections", "icepop") in pairs
+    assert ("corrections", "custom") not in pairs
 
 
 @pytest.mark.skipif(not HAS_OPSM_COMBINATION, reason="needs 1a-shared.patch (always_emit)")

@@ -100,6 +100,34 @@ _PHASE_ROLE = {
 _PHASE_TASK = {"sync": "outer_sync"}
 
 
+FAULT_INJECTION_ENV = "YETO_RL_FAULT_INJECTION"
+FAULT_INJECTION_FILE = "yeto-rl-fault-injection.json"  # at the repo root
+
+
+def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, float]:
+    """Test-only fault injection (rl-infra-spec 2.3 X9); empty = off (default).
+
+    Source: the JSON file named by ``YETO_RL_FAULT_INJECTION``, else
+    ``<repo>/yeto-rl-fault-injection.json`` (present only in an experiment's
+    frozen code snapshot). Keys: ``publish_delay_s``.
+    """
+    import os
+
+    environ = os.environ if environ is None else environ
+    path = environ.get(FAULT_INJECTION_ENV)
+    candidate = Path(path) if path else Path(__file__).resolve().parents[3] / FAULT_INJECTION_FILE
+    if not candidate.is_file():
+        return {}
+    raw = json.loads(candidate.read_text(encoding="utf-8"))
+    unknown = sorted(set(raw) - {"publish_delay_s"})
+    if unknown:
+        raise ValueError(f"unknown fault injection keys {unknown}")
+    delay = float(raw.get("publish_delay_s", 0.0))
+    if not math.isfinite(delay) or delay < 0:
+        raise ValueError("publish_delay_s must be a non-negative number")
+    return {"publish_delay_s": delay} if delay else {}
+
+
 class DriverError(RuntimeError):
     """The island loop cannot continue safely."""
 
@@ -189,6 +217,10 @@ class ProgressStore(Protocol):
     ) -> None: ...
 
 
+ECHO_EVENTS_FILE = "yeto-rl-echo-events"  # at the repo root (experiment snapshots only)
+_ECHO_EVENTS = (Path(__file__).resolve().parents[3] / ECHO_EVENTS_FILE).is_file()
+
+
 class EventTape:
     """JSONL RL event tape in the legacy format (``island_id``, ``time_unix``)."""
 
@@ -198,6 +230,15 @@ class EventTape:
         self.args = args
 
     def append(self, event: Mapping[str, Any]) -> None:
+        if _ECHO_EVENTS:
+            # Experiment-only: container stdout reaches the head's launch log,
+            # so the tape survives container teardown (off by default).
+            print(
+                "YETO_RL_EVENT "
+                + json.dumps({"island_id": self.island_id, "time_unix": time.time(), **event},
+                             sort_keys=True, separators=(",", ":"), default=str),
+                flush=True,
+            )
         if self.args is not None:
             from yeto.rl.miles import _append_rl_event
 
@@ -218,6 +259,13 @@ def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
         "group_p95_seconds": 0.0,
         "group_p99_seconds": 0.0,
     }
+
+
+def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
+    import hashlib
+
+    ids = sorted(f"{g.group_id}/{s}" for g in batch.groups for s in g.sample_ids)
+    return hashlib.sha256("\n".join(ids).encode()).hexdigest()
 
 
 def _pooled_reward(batch: RolloutBatchHandle) -> tuple[float, float]:
@@ -283,6 +331,7 @@ class IslandDriver:
         self.weight_transport: str | None = None
         self.trained_version: int | None = None
         self._open_span: tuple[str, float, int | None] | None = None
+        self.fault_injection = load_fault_injection()
 
     # -- events ----------------------------------------------------------
     def emit(self, event: str, **fields: Any) -> None:
@@ -460,6 +509,11 @@ class IslandDriver:
             )
         expected_hash = state.policy_tensor_hash()
         self.phase("publish", policy_version=rollout_id)
+        delay = self.fault_injection.get("publish_delay_s")
+        if delay:
+            self.emit("rl_fault_injected", kind="publish_delay", seconds=delay,
+                      policy_version=rollout_id)
+            time.sleep(delay)
         result = self.publisher.publish(state)
         manifest = result.manifest
         if (
@@ -544,20 +598,36 @@ class IslandDriver:
                 "nonfinite_grad_norm", f"rollout {rollout_id}: grad_norm={grad_norm}"
             )
         # Per-algorithm rule (rl-algorithm-capabilities D6); default GRPO:
-        # some group has non-zero reward variance, exactly as in R0.
-        expects_gradient = self.algorithm.expects_gradient(batch, metrics)
+        # some group has non-zero reward variance, exactly as in R0. A
+        # description without the per-algorithm API keeps the R0 rule.
+        r0_expects = any(g.reward_std > 0 for g in batch.groups)
+        judge = getattr(self.algorithm, "gradient_expectation", None)
+        if callable(judge):
+            expects_gradient, relaxed_by = judge(batch, metrics)
+        else:
+            expects_gradient, relaxed_by = r0_expects, None
         if expects_gradient and grad_norm == 0.0:
+            if relaxed_by and relaxed_by.startswith("tightened:"):
+                # A mechanism rule requires a gradient the R0 rule cannot see.
+                raise StrictRlInvariantError(
+                    "zero_grad_norm_with_required_gradient",
+                    f"rollout {rollout_id}: {relaxed_by[len('tightened:'):]} requires a "
+                    "gradient but grad_norm is 0; adapter gradients are not flowing",
+                )
             raise StrictRlInvariantError(
                 "zero_grad_norm_with_nonzero_advantages",
                 f"rollout {rollout_id}: non-zero advantages produced grad_norm 0; "
                 "adapter gradients are not flowing",
             )
-        if grad_norm == 0.0 and any(g.reward_std > 0 for g in batch.groups):
-            # A declared masking mechanism legitimately removed every token.
+        if grad_norm == 0.0 and r0_expects:
+            # A declared mechanism legitimately lifted the expectation; the
+            # event names how (full mask vs a mechanism's gradient rule).
+            masked = bool(relaxed_by) and relaxed_by.startswith("masked:")
             self.emit(
-                "rl_zero_gradient_masked",
+                "rl_zero_gradient_masked" if masked else "rl_zero_gradient_rule_relaxed",
                 rollout_id=rollout_id,
                 masked_fraction=metrics.masked_fraction,
+                relaxed_by=relaxed_by,
             )
 
     def _stats(self, rollout_id, batch, metrics, rollout_seconds, train_seconds):
@@ -593,6 +663,14 @@ class IslandDriver:
             applied_lr=None if not metrics.applied_lrs else min(metrics.applied_lrs),
             applied_lrs=metrics.applied_lrs or None,
         )
+
+    def _mismatch_fields(self) -> dict[str, Any]:
+        """A5: mismatch metrics with profile/epoch/transport labels; nothing when absent."""
+        probe = getattr(self.trainer, "algorithm_metrics", None)
+        values = dict(probe() or {}) if callable(probe) else {}
+        if not values:
+            return {}
+        return {"mismatch": values, **{f"label/{k}": v for k, v in self._labels().items()}}
 
     def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
         """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
@@ -667,6 +745,20 @@ class IslandDriver:
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         self.trained_version = rollout_id + 1
+        # Per-round accounting of this island (rl-algo-grpo-knobs 7.2,
+        # rl-algo-seq-and-adv): what was trained, masked and counted.
+        self.emit(
+            "rl_round_trained",
+            rollout_id=rollout_id,
+            trained_groups=len(batch.groups),
+            trained_samples=sum(len(g.sample_ids) for g in batch.groups),
+            trained_sample_ids_sha256=_sample_ids_sha256(batch),
+            masked_fraction=metrics.masked_fraction,
+            clip_fraction=metrics.clip_fraction,
+            applied_lrs=list(metrics.applied_lrs) if metrics.applied_lrs else None,
+            nonzero_advantages=getattr(batch, "nonzero_advantages", None),
+            **self._mismatch_fields(),
+        )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)
