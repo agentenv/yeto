@@ -95,7 +95,7 @@ def load_records(patterns: str) -> list[dict[str, Any]]:
         raise FileNotFoundError(f"{REPLAY_ENV}={patterns!r} matched no recorded rollout dumps")
     records: list[dict[str, Any]] = []
     for path in paths:
-        dump = torch.load(path, map_location="cpu", weights_only=False)
+        dump = torch.load(path, map_location="cpu", weights_only=True)
         records.extend(dump["samples"])
     return records
 

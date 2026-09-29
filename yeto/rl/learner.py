@@ -1409,6 +1409,31 @@ def _syncer_address(value: str) -> tuple[str, int]:
 EXTERNAL_ROUTER_ENV = "YETO_RL_EXTERNAL_ROUTER"
 
 
+def require_ports_router_mode(miles_args, environ=None) -> None:
+    """Ports path: upstream Miles owns the SGLang router.
+
+    Upstream launches the router as an ``inference-router`` Ray worker with
+    a 120 s readiness budget (the legacy 30 s deadline that
+    ``start_external_sglang_router`` works around is gone), and it removed
+    external router mode: a pre-set ``sglang_router_ip`` without its
+    per-model router map is an assertion failure.  So ``YETO_RL_EXTERNAL_ROUTER``
+    is a no-op here, and a pre-set router address is refused before launch.
+    """
+
+    environ = os.environ if environ is None else environ
+    if getattr(miles_args, "sglang_router_ip", None) is not None:
+        raise ValueError(
+            "--rl-engine ports does not support an external SGLang router "
+            "(--sglang-router-ip); upstream Miles launches its own router"
+        )
+    if environ.get(EXTERNAL_ROUTER_ENV) == "1":
+        print(
+            f"[rl] {EXTERNAL_ROUTER_ENV}=1 ignored on --rl-engine ports: "
+            "upstream Miles launches the SGLang router as a Ray worker",
+            flush=True,
+        )
+
+
 def start_external_sglang_router(
     miles_args,
     *,
@@ -1905,7 +1930,9 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
             )
 
-    if os.environ.get(EXTERNAL_ROUTER_ENV) == "1":
+    if rl_engine == "ports":
+        require_ports_router_mode(miles_args)
+    elif os.environ.get(EXTERNAL_ROUTER_ENV) == "1":
         start_external_sglang_router(miles_args)
 
     if rl_engine == "ports":

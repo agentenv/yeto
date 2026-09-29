@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -179,6 +180,40 @@ def selection_event(*, launch: Any, algorithm: AlgorithmSpec, miles_commit: str)
     }
 
 
+def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
+    """Connect the driver to the island's own Ray and pin every actor to it.
+
+    A SkyPilot machine runs two Ray instances: the island's (6379, started by
+    the island task) and SkyPilot's runtime Ray (6380).  The launcher gives
+    the driver ``RAY_ADDRESS``, but Ray workers inherit the raylet's
+    environment, not the driver's.  Legacy Miles only resolved the address in
+    the driver (``compute_ray_pin_head_options`` ran in placement_group.py);
+    upstream Miles calls ``ray.util.state.list_nodes()`` inside the
+    ``RayWorkerManager`` actor, which then sees both instances and fails with
+    "Found multiple active Ray instances".  A job-level ``runtime_env``
+    ``env_vars`` entry is merged into every actor and task the job creates,
+    so they resolve the same address as the driver.  ``PYTHONPATH`` travels
+    with it so actors import the pinned Miles checkout, not the image's.
+    """
+
+    environ = os.environ if environ is None else environ
+    address = environ.get("RAY_ADDRESS")
+    if not address:
+        return None
+    if ray_module is None:
+        import ray as ray_module
+    if ray_module.is_initialized():
+        raise RuntimeError(
+            "Ray was initialized before the ports island pinned RAY_ADDRESS; "
+            "its actors could resolve the wrong Ray instance"
+        )
+    env_vars = {"RAY_ADDRESS": address}
+    if environ.get("PYTHONPATH"):
+        env_vars["PYTHONPATH"] = environ["PYTHONPATH"]
+    ray_module.init(address=address, runtime_env={"env_vars": env_vars})
+    return address
+
+
 def run_ports_island(
     miles_args: Any,
     launch: Any,
@@ -198,6 +233,7 @@ def run_ports_island(
     from .state import require_run_plugin
 
     require_run_plugin()  # before any upstream component or model exists
+    connect_island_ray()
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
     from miles.ray.rollout.eval_dispatch import EvalDispatcher

@@ -44,6 +44,17 @@ MILES_NEXT_IMAGE = (
     "90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d"
 )
 
+
+def default_rl_image(rl_engine: str) -> str:
+    """The digest-pinned ``--rl-image`` default for an RL engine.
+
+    Legacy keeps the agentenv fork image; ports uses the public upstream
+    Miles image (the private ghcr.io/agentenv image is not pullable by Modal
+    or by a SkyPilot docker runtime without registry credentials).
+    """
+
+    return MILES_NEXT_IMAGE if rl_engine == "ports" else MILES_IMAGE
+
 SECRLENV_AGENT_PATH = "yeto_miles_secrlenv/agent.py"
 SECRLENV_AGENT_SHA256 = (
     "0f76c7fbd81135bc5b02cab2488629aaff1bb58dc59eae9228ca317583d90c26"

@@ -99,7 +99,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
             "serial colocated + strict-avg/decoupled only)"
         ),
     )
-    rl.add_argument("--rl-image", default=MILES_IMAGE)
+    rl.add_argument(
+        "--rl-image",
+        default=None,
+        help=(
+            "digest-pinned RL image (docker:REPO@sha256:DIGEST); defaults to "
+            f"{MILES_IMAGE} for --rl-engine legacy and the upstream Miles "
+            "image for --rl-engine ports"
+        ),
+    )
     rl.add_argument(
         "--rl-model-recipe",
         choices=["generic", "deepseek-v4-flash"],

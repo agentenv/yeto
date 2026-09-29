@@ -122,6 +122,67 @@ def test_ports_provenance_is_recorded_only_for_ports():
     assert ports._provenance["rl_engine"] == "ports"
 
 
+def test_rl_image_default_follows_the_engine(monkeypatch):
+    from yeto.rl import MILES_IMAGE, MILES_NEXT_IMAGE
+
+    legacy = _cli()
+    assert legacy.rl_image is None
+    _prepare_rl_args(legacy)
+    assert legacy.rl_image == MILES_IMAGE  # legacy default unchanged
+    ports = _cli(("--rl-engine", "ports"))
+    _prepare_rl_args(ports)
+    assert ports.rl_image == MILES_NEXT_IMAGE
+    assert "ghcr.io/agentenv" not in ports.rl_image
+    assert _island_task(ports, monkeypatch).resources.image_id == MILES_NEXT_IMAGE
+    explicit = "docker:example/miles@sha256:" + "e" * 64
+    pinned = _cli(("--rl-engine", "ports", "--rl-image", explicit))
+    _prepare_rl_args(pinned)
+    assert pinned.rl_image == explicit
+
+
+def test_ports_island_puts_the_pinned_miles_checkout_first(monkeypatch):
+    legacy = _cli()
+    _prepare_rl_args(legacy)
+    legacy_run = _island_task(legacy, monkeypatch).run
+    assert "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} " in legacy_run
+    ports = _cli(("--rl-engine", "ports"))
+    _prepare_rl_args(ports)
+    ports_run = _island_task(ports, monkeypatch).run
+    # The upstream image's /root/miles is on its PYTHONPATH; ours shadows it.
+    assert (
+        "PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
+        in ports_run
+    )
+    assert 'RAY_ADDRESS="$MASTER_ADDR:6379"' in ports_run
+
+
+def test_modal_ports_island_does_not_request_the_external_router():
+    from yeto.gpu_spec import parse_gpu_spec
+
+    task = SimpleNamespace(run="true", envs={}, setup="true")
+    legacy = _cli(("--gpu", "modal:1xh100", "--cluster-prefix", "run"))
+    _prepare_rl_args(legacy)
+    (spec,) = parse_gpu_spec(legacy.gpu)
+    cfg = launcher.build_modal_island_config(legacy, spec, 0, task, "1.2.3.4:5000")
+    assert cfg.envs["YETO_RL_EXTERNAL_ROUTER"] == "1"
+    ports = _cli(("--gpu", "modal:1xh100", "--cluster-prefix", "run", "--rl-engine", "ports"))
+    _prepare_rl_args(ports)
+    cfg = launcher.build_modal_island_config(ports, spec, 0, task, "1.2.3.4:5000")
+    assert "YETO_RL_EXTERNAL_ROUTER" not in cfg.envs
+    assert cfg.image_ref == ports.rl_image.removeprefix("docker:")
+
+
+def test_ports_router_mode_ignores_external_router_and_refuses_preset_address(capsys):
+    args = SimpleNamespace(sglang_router_ip=None, sglang_router_port=None)
+    rl_learner.require_ports_router_mode(args, environ={rl_learner.EXTERNAL_ROUTER_ENV: "1"})
+    assert args.sglang_router_ip is None  # upstream resolves its own router
+    assert "ignored on --rl-engine ports" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="external SGLang router"):
+        rl_learner.require_ports_router_mode(
+            SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=3000), environ={}
+        )
+
+
 @pytest.mark.parametrize(
     "extra, reason",
     [
@@ -489,3 +550,26 @@ def test_ports_composition_root_over_stubbed_upstream(tmp_path, monkeypatch):
     assert all(e["sync/publication_members"] == ["engine:c0"] for e in publications)
     local = [e for e in events if e["event"] == "rl_local_round"]
     assert [e["grad_norm"] for e in local] == [2.0, 2.0]
+
+
+def test_run_miles_ports_never_starts_the_legacy_external_router(monkeypatch):
+    from yeto.rl.engine.miles_adapter.state import PolicyStateError
+
+    group = types.ModuleType("miles.ray.train.group")
+    group.TrainerController = type("TrainerController", (), {})
+    # Upstream Miles: no get_host_info in http_utils.
+    http_utils = types.ModuleType("miles.utils.http_utils")
+    for name in ("miles", "miles.ray", "miles.ray.train", "miles.utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "miles.ray.train.group", group)
+    monkeypatch.setitem(sys.modules, "miles.utils.http_utils", http_utils)
+    monkeypatch.setitem(sys.modules, "megatron", None)
+    monkeypatch.setenv(rl_learner.EXTERNAL_ROUTER_ENV, "1")
+
+    def legacy_router(*_args, **_kwargs):
+        raise AssertionError("ports must not start the legacy external router")
+
+    monkeypatch.setattr(rl_learner, "start_external_sglang_router", legacy_router)
+    args = rl_learner.parse_args(_learner_argv(("--rl-engine", "ports")))
+    with pytest.raises(PolicyStateError, match="run_plugin"):  # got past the router
+        rl_learner.run_miles(args, model_path="/x", prompt_path="/x")

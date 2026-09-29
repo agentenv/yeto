@@ -524,6 +524,17 @@ def resolve_loss_function(
     return _stage_pickled_loss(cloudpickle.dumps(fn))
 
 
+def resolve_default_rl_image(args) -> None:
+    """Fill an omitted ``--rl-image`` with the engine's pinned default."""
+
+    if getattr(args, "training_mode", "sft") != "rl":
+        return
+    if getattr(args, "rl_image", None) is None:
+        from .rl import default_rl_image
+
+        args.rl_image = default_rl_image(getattr(args, "rl_engine", "legacy"))
+
+
 def prepare_launch_args(
     args,
     *,
@@ -619,6 +630,7 @@ def prepare_launch_args(
                 f"{expected_adapter_sha256.lower()}, got {adapter_sha256}"
             )
         args.diffusion_adapter_sha256 = adapter_sha256
+    resolve_default_rl_image(args)
     if getattr(args, "gpu", None):
         check_cloud_prerequisites(parse_gpu_spec(args.gpu), args=args)
     _prepare_rl_args(
@@ -758,6 +770,7 @@ def check_cloud_prerequisites(
             raise ValueError(f"modal islands need a Modal token: {modal_credential_hint()}")
         if args is not None:
             if getattr(args, "training_mode", "sft") == "rl":
+                resolve_default_rl_image(args)
                 image_ref_from_rl_image(getattr(args, "rl_image", "") or "")
             data = getattr(args, "data", None)
             if data:
@@ -802,6 +815,7 @@ def _prepare_rl_args(
     allow_local_data: bool = False,
     allow_remote_model: bool = False,
 ) -> None:
+    resolve_default_rl_image(args)
     if getattr(args, "training_mode", "sft") != "rl":
         if getattr(args, "rl_initial_adapter", None) is not None or getattr(
             args, "rl_initial_adapter_sha256", None
@@ -1855,6 +1869,11 @@ def make_miles_island_task(
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
     setup_steps.append(prefetch)
+    # Ports images (radixark/miles) ship their own Miles at /root/miles on
+    # PYTHONPATH; the pinned fork checkout must shadow it.  Legacy unchanged.
+    island_pythonpath = (
+        "$HOME/miles:" if getattr(args, "rl_engine", "legacy") == "ports" else ""
+    )
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
         setup="\n".join(setup_steps),
@@ -1891,7 +1910,8 @@ def make_miles_island_task(
             # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
-            "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
+            f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir"
+            "${PYTHONPATH:+:$PYTHONPATH} "
             f"python3 -m yeto.rl.learner{flags}\n"
             "else\n"
             '  until ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"; '
@@ -2626,9 +2646,11 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     rl = getattr(args, "training_mode", "sft") == "rl"
     envs = dict(getattr(task, "envs", None) or {})
     envs["SYNCER_ADDR"] = syncer_addr
-    if rl:
-        # Miles' own router launch misses its 30 s deadline on Modal's
-        # CPUs (see yeto.rl.learner.start_external_sglang_router).
+    if rl and getattr(args, "rl_engine", "legacy") != "ports":
+        # Legacy Miles' own router launch misses its 30 s deadline on Modal's
+        # CPUs (see yeto.rl.learner.start_external_sglang_router).  Upstream
+        # Miles (ports) launches its router as a Ray worker with a 120 s
+        # budget and has no external router mode.
         envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
     token_path = os.path.expanduser(HF_TOKEN_PATH)
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):
