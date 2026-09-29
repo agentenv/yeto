@@ -3269,6 +3269,45 @@ class FixedRosterIslandAbandoned(RuntimeError):
 # 2 = artifact not fetchable and 3 = incomplete event tape).
 ISLAND_FAILED_EXIT = 4
 FAILED_RUN_DRAIN_S = 20.0
+# Modal app not confirmed stopped (state stopped, 0 tasks) after teardown.
+TEARDOWN_UNVERIFIED_EXIT = 5
+MODAL_STOP_VERIFY_ATTEMPTS = 5
+MODAL_STOP_VERIFY_DELAY_S = 5.0
+
+
+def _verify_modal_app_stopped(modal_ops, args) -> bool:
+    """After stop_app: the provider must list this run's app as stopped with
+    0 tasks (bounded retries). The result goes to <run dir>/teardown.json."""
+
+    from . import runs
+
+    attempts = []
+    confirmed = False
+    for attempt in range(MODAL_STOP_VERIFY_ATTEMPTS):
+        try:
+            status = modal_ops.app_status()
+        except Exception as e:  # noqa: BLE001 - an unreadable listing is "unverified"
+            status = f"error: {e}"
+        attempts.append(status if not isinstance(status, tuple) else list(status))
+        if status is None or (isinstance(status, tuple) and status[0] == "stopped"
+                              and status[1] == 0):
+            confirmed = True  # stopped with 0 tasks, or no longer listed
+            break
+        if attempt + 1 < MODAL_STOP_VERIFY_ATTEMPTS:
+            time.sleep(MODAL_STOP_VERIFY_DELAY_S)
+    record = {"provider": "modal", "app": modal_ops.app_name, "confirmed_stopped": confirmed,
+              "checks": attempts}
+    try:
+        path = runs.run_dir(args.cluster_prefix) / "teardown.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[launcher] could not write the teardown record: {e}", file=sys.stderr)
+    if not confirmed:
+        print(f"[launcher] WARN: Modal app {modal_ops.app_name} not confirmed stopped after "
+              f"{len(attempts)} check(s) ({attempts[-1]}); stop it by hand: modal app stop "
+              f"{modal_ops.app_name} (exit {TEARDOWN_UNVERIFIED_EXIT})", file=sys.stderr)
+    return confirmed
 
 
 class FleetController:
@@ -3831,6 +3870,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             print(f"[launcher] on_clusters hook failed: {e}", file=sys.stderr)
     clusters: list[str] = []
     controller = None
+    teardown_unverified = False
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -4186,6 +4226,8 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     modal_ops.stop_app()
                 except Exception as e:  # noqa: BLE001
                     print(f"[launcher] Modal app stop failed: {e}", file=sys.stderr)
+                if not _verify_modal_app_stopped(modal_ops, args):
+                    teardown_unverified = True
             if unverified:
                 # The head must NOT self-terminate: it is the only thing that
                 # can still reach these orphaned learner clusters via sky.
@@ -4219,6 +4261,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"head — tear it down with: yeto down {prefix}",
                     flush=True,
                 )
+        if teardown_unverified and sys.exc_info()[0] is None:
+            # the run's own outcome is secondary to a possibly still-running app
+            return TEARDOWN_UNVERIFIED_EXIT  # noqa: B012
 
 
 NO_SYNC_EVENT_DRAIN_S = 120.0

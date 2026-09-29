@@ -78,7 +78,11 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
         def cancel(self, call_id):
             record.append(("cancel", call_id))
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             record.append(("stop_app",))
 
         def tail_logs(self, call_id, entries=100):
@@ -193,3 +197,40 @@ def test_error_after_finalized_is_success_no_recovery(monkeypatch, tmp_path, pro
     assert code in (0, 2), code  # 2: Modal artifact not fetchable over ssh
     assert not [r for r in record if r[0] == "relaunch"]
     assert [r for r in record if r[0] == "spawn"] in ([("spawn", 0), ("spawn", 1)], [])
+
+
+def test_modal_app_still_running_after_stop_warns_and_exits_5(monkeypatch, tmp_path, capsys):
+    import json as _json
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing={0}, clock=clock, record=record)
+    monkeypatch.setattr(launcher, "MODAL_STOP_VERIFY_DELAY_S", 0.0)
+    monkeypatch.setattr(modal_runner.ModalOps, "app_status",
+                        lambda self: ("deployed", 1), raising=False)  # provider says running
+    args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync",
+                                    "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100")
+    args.keep, args.recover_timeout = False, 0.0
+    assert launcher.run(args) == launcher.TEARDOWN_UNVERIFIED_EXIT == 5
+    assert "not confirmed stopped" in capsys.readouterr().err
+    from yeto import runs
+
+    rec = _json.loads((runs.run_dir(args.cluster_prefix) / "teardown.json").read_text())
+    assert rec["confirmed_stopped"] is False
+    assert len(rec["checks"]) == launcher.MODAL_STOP_VERIFY_ATTEMPTS
+
+
+def test_modal_app_confirmed_stopped_is_recorded(monkeypatch, tmp_path):
+    import json as _json
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing={0}, clock=clock, record=record)
+    args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync",
+                                    "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100")
+    args.keep, args.recover_timeout = False, 0.0
+    assert launcher.run(args) == 4
+    from yeto import runs
+
+    rec = _json.loads((runs.run_dir(args.cluster_prefix) / "teardown.json").read_text())
+    assert rec["confirmed_stopped"] is True
