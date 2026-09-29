@@ -3652,6 +3652,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     """
     import sky
 
+    if getattr(args, "rl_single_island_no_sync", False) and (
+        getattr(args, "training_mode", "sft") != "rl"
+    ):
+        # Checked first: the flag must never turn an SFT launch syncer-less.
+        raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
     prepare_launch_args(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
