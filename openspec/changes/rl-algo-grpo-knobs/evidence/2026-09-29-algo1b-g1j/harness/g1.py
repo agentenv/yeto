@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path[:0] = ["/work/yeto", "/work/harness", "/opt/miles-next"]
 mech, out = sys.argv[1], Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
 MODEL, REV = "Qwen/Qwen3-0.6B", "c1899de289a04d12100db370d81485cdf75e47ca"
-ROUNDS, GROUPS, SPG, RESP = 3, int(os.environ.get("GROUPS", 4)), 8, 384
+ROUNDS, GROUPS, SPG, RESP = 3, int(os.environ.get("G1_GROUPS", 4)), 8, 384
 import importlib.util
 spec_ = importlib.util.spec_from_file_location("bench", "/work/yeto/scripts/benchmark_rl.py")
 B = importlib.util.module_from_spec(spec_); sys.modules["bench"] = B; spec_.loader.exec_module(B)

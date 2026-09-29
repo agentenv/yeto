@@ -19,3 +19,7 @@ Modal Sandbox `H100!`×1（运行前断言型号），app `algo1b-g1j`；sandbox
 
 ## 运行前修订（单独提交，发生在任何运行之前）
 - 每轮 4 组 × 8 条 = 32 条样本，不能被 3 个 optimizer step 整除（run_config 算出的 global_batch 为 32//3=10，Miles 要求整除）。因此改为**每轮 6 组 × 8 条 = 48 条，每个 step 16 条**。这是唯一的偏离，其余不变：seed 17、lr 1e-4、eps 设定、3 轮、判据。之所以不用 3 组，是为了让每个 step 有足够的非零方差组，减少"第 1、2 步梯度为 0"的风险；这是在运行前做出的配置选择，没有看过任何结果。
+
+## 第 1 次尝试结论（没有训练；两个 run 都在第一个训练 step 之前失败）
+- worker 报错：`strict LR schedule requires rollout_batch_size * n_samples_per_prompt == global_batch * optimizer_steps (got 4 * 8 != 10 * 3)`。worker.json 中 groups_per_round 为 4，说明修订里的 `GROUPS=6` 没有生效。原因是 `GROUPS` 是 bash 的特殊变量（当前用户的组 ID 数组），在命令前给它赋值会被忽略。这是 harness 的 bug。
+- 修复：环境变量改名为 `G1_GROUPS`，其余不变（每轮 6 组、seed 17、3 步、判据不变）。sandbox 已终止，每个 run 只用了约 1 分钟 GPU。日志在 `attempt1/`。
