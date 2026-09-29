@@ -168,3 +168,8 @@
 - **2026-09-29 约 20:37–20:40Z**，命令 `pkill -x -f "sleep 3300"`（在清理 g3c 的 watchdog 时执行）。**影响：结束了其他 agent（2a 7.6）watchdog 的 sleep 子进程，使其 watchdog 提前执行 `modal app stop`，其他 agent 的运行因此被提前停止。**
 - 更早的按模式结束进程（模式里都带我的唯一前缀，没有波及别人，但做法同样违规）：`pkill -f "watchdog.sh 6600 <sandbox-id>"`、`pkill -f "run_one.sh opsm-trainer"`、`pkill -f "cluster-prefix algo1a-g1c-opsm-trainer"`、`pkill -f "sleep 3300; ... yeto-algo1a-g3c"`。
 - 整改：今后只按记录的 pid 结束进程，结束前核对父进程和命令行里的唯一前缀。之后的运行统一使用 `evidence/harness-common/algo1a_watchdog.sh`：用 bash 内建的 `read -t` 等待，命令行里不再出现裸 `sleep N`；只停止带 algo1a 前缀的 app，只结束 pidfile 中记录、且命令行含 `/tmp/algo1a/` 的进程。已提交的 evidence harness 保持原样，不改历史证据。
+
+## 可选项决定
+
+- features:mismatch_metrics：保持未声明。原因是“use_tis=False、只开该标志”的对照运行无法表达（P0 对 custom 函数总是输出 `--use-tis`），而且 CORRECTION_COMPANIONS 已由各修正机制认领该标志。
+- mis（truncate/clip）：保持未声明，本轮不做触发验证。
