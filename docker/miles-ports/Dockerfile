@@ -1,5 +1,6 @@
-# yeto miles-ports image (MILES_NEXT_IMAGE) -- docker-build equivalent of
-# scripts/build_miles_ports_image.sh, which produces the same filesystem with
+# yeto miles-ports image (MILES_NEXT_IMAGE) -- APPROXIMATE, UNVERIFIED
+# docker-build equivalent of scripts/build_miles_ports_image.sh (never built:
+# the build host has no docker).  The script produces the real image with
 # `crane append` (one layer from docker/miles-ports/make_layer.py) because the
 # build host has no docker daemon.  Pushed PRIVATE to
 # ghcr.io/michaellchung/yeto-miles-ports:<miles7>-<sglang7>.

@@ -103,3 +103,57 @@ def test_request_validation():
         PlacementRequest("elastic", trainer_gpus=2, rollout_gpus=2, gpus_per_engine=1)
     with pytest.raises(ValueError):
         PlacementRequest("fixed-partition", trainer_gpus=2, rollout_gpus=3, gpus_per_engine=2)
+
+
+# -- rl-infra-spec 2.1 / 2.1a: standby and explicit bundle map (fork-M1) -------
+
+
+def _part_args(**kw):
+    return args(colocate=False, actor_num_gpus_per_node=2, rollout_num_gpus=2,
+                rollout_num_gpus_per_engine=1, **kw)
+
+
+def test_bundle_map_is_validated_like_fork_m1():
+    base = dict(kind="fixed-partition", trainer_gpus=2, rollout_gpus=2, gpus_per_engine=1,
+                standby_gpus=1)
+    ok = PlacementRequest(**base, bundle_map={"trainer": [4, 0], "rollout": [1, 2], "standby": [3]})
+    assert ok.role_bundles()["trainer"] == (4, 0)
+    for bad, why in (
+        ({"trainer": [0, 0], "rollout": [1, 2], "standby": [3]}, "repeats"),
+        ({"trainer": [0, 9], "rollout": [1, 2], "standby": [3]}, "outside"),
+        ({"trainer": [0, 1], "rollout": [1, 2], "standby": [3]}, "overlaps"),
+        ({"trainer": [0], "rollout": [1, 2], "standby": [3]}, "requested"),
+        ({"trainer": [0, 1], "rollout": [2, 3], "spare": [4]}, "unknown"),
+    ):
+        with pytest.raises(ValueError, match=why):
+            PlacementRequest(**base, bundle_map=bad)
+    with pytest.raises(ValueError, match="colocated"):
+        PlacementRequest("colocated", 2, 2, 1, standby_gpus=1)
+    # default: no standby -> no map -> upstream offset layout (unchanged)
+    assert PARTITION.placement_map is None
+
+
+def test_standby_placement_describes_m1_roles_and_detects_rewrites():
+    req = PlacementRequest("fixed-partition", 2, 2, 1, standby_gpus=2)
+    pm = req.placement_map
+    assert pm == {"trainer": [0, 1], "rollout": [2, 3], "standby": [4, 5]}
+    import json
+
+    d = MilesPlacement.from_parsed_args(req, _part_args(yeto_placement_map=json.dumps(pm))).describe()
+    assert d.trainer_gpus == ("bundle0", "bundle1")
+    assert d.rollout_gpus == ("bundle2", "bundle3")
+    assert d.extra["standby_gpus"] == ("bundle4", "bundle5")
+    assert d.extra["weight_transport"] == "nccl-broadcast"
+    with pytest.raises(PlacementRewriteError, match="placement map"):
+        check_placement_not_rewritten(req, _part_args())  # Miles dropped the map
+    # physical M1 output: actor holds trainer bundles only, standby separate
+    groups = {
+        "actor": (None, [5, 1], [5, 1]),
+        "rollout": (None, [2, 3], [2, 3]),
+        "standby": (None, [0, 4], [0, 4]),
+    }
+    phys = MilesPlacement(req, groups).describe()
+    assert phys.trainer_gpus == ("bundle5:gpu5", "bundle1:gpu1")
+    groups["standby"] = (None, [0, 3], [0, 3])
+    with pytest.raises(PlacementRewriteError, match="overlapping"):
+        MilesPlacement(req, groups)

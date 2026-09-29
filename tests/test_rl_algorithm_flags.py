@@ -21,6 +21,37 @@ from yeto.rl.engine.miles_adapter import config as mc
 from test_rl_miles_adapter_config import make_config, sub
 
 REF = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+# rl-algo-grpo-knobs: the only reward post-process of the ports path is the
+# yeto dispatcher, and a loss-placed KL must name its reference model.
+KL_REF = {"source": "Qwen/Qwen3-0.6B", "revision": "rev-a"}
+
+
+def _registered(group, name):
+    from yeto.rl.engine import algorithm as alg
+
+    alg.load_extensions()
+    return name in alg._FIELDS.get(group, {})
+
+
+# Branch on whether rl-algo-grpo-knobs has registered its fields (not on an
+# exception): with them, the dispatcher is the only reward post-process.
+KNOBS = _registered("advantage", "reward_shapers")
+DISPATCHER = (PluginRef.from_path("yeto.rl.algos.reward_pipeline.post_process")
+              if KNOBS else REF)
+
+
+def complete(spec):
+    """Add the rl-algo-grpo-knobs companions argv cannot carry (no argv change)."""
+
+    if (spec.advantage.reward_postprocess is not None
+            and _registered("advantage", "reward_shapers")
+            and not spec.advantage.reward_shapers):
+        spec = spec.replace(advantage=spec.advantage.with_ext(reward_shapers=[
+            {"name": "overlong_penalty", "max_length": 1024, "cache_length": 128}]))
+    if (spec.kl.placement == "loss" and _registered("kl", "ref_model")
+            and spec.kl.ref_model is None):
+        spec = spec.replace(kl=spec.kl.with_ext(ref_model=KL_REF))
+    return spec
 R0_ARGV = mc.translate_run_config(make_config(), AlgorithmSpec()).argv
 
 
@@ -50,7 +81,8 @@ def test_design_d3_flags_are_all_mapped():
         "--custom-reward-post-process-path", "--loss-type", "--custom-loss-function-path",
         "--dynamic-sampling-filter-path", "--over-sampling-batch-size",
     }
-    assert af.mapped_flags() == d3
+    # Follow-up changes add rows (rl-algo-seq-and-adv: --gamma), so a subset.
+    assert d3 <= af.mapped_flags()
 
 
 def test_objective_flags_are_adapter_owned():
@@ -92,7 +124,7 @@ def test_conflict_names_flag_and_both_values():
         mc.translate_run_config(make_config(), base, extra_argv=("--eps-clip-high", "0.3"))
 
 
-@pytest.mark.parametrize("flag", ["--gamma", "--lambd", "--use-routing-replay",
+@pytest.mark.parametrize("flag", ["--value-clip", "--lambd", "--use-routing-replay",
                                   "--rollout-temperature", "--partial-rollout"])
 def test_unmapped_objective_flag_rejected(flag):
     argv = [flag] if flag in ("--use-routing-replay", "--partial-rollout") else [flag, "0.9"]
@@ -143,8 +175,8 @@ CASES = [
     (dict(advantage=AdvantageSpec(rewards_normalization=False)),
      ["--disable-rewards-normalization"]),
     (dict(advantage=AdvantageSpec(whiten=True)), ["--normalize-advantages"]),
-    (dict(advantage=AdvantageSpec(reward_postprocess=REF)),
-     ["--custom-reward-post-process-path", REF.path]),
+    (dict(advantage=AdvantageSpec(reward_postprocess=DISPATCHER)),
+     ["--custom-reward-post-process-path", DISPATCHER.path]),
     (dict(kl=KlSpec(placement="loss", coef=0.01, estimator="k3", unbiased=True)),
      ["--use-kl-loss", "--kl-loss-coef", "0.01", "--kl-loss-type", "k3", "--use-unbiased-kl"]),
     (dict(entropy_coef=0.001), ["--entropy-coef", "0.001"]),
@@ -167,7 +199,9 @@ def test_each_mapped_field_translates(change, fragment):
     # absorption of the translation reproduces the spec (round trip)
     absorbed, rest, _ = af.absorb_extra_argv(AlgorithmSpec(), fragment)
     assert absorbed == spec and rest == ()
-    argv = list(mc.translate_run_config(make_config(), spec).argv)
+    # absorbed -> completed (1b: ref_model / reward_shapers) -> translated
+    assert complete(absorbed) == complete(spec)
+    argv = list(mc.translate_run_config(make_config(), complete(absorbed)).argv)
     i = argv.index(fragment[0])
     assert argv[i:i + len(fragment)] == fragment
     # the rest of the argv is the default GRPO argv, byte for byte
@@ -183,12 +217,14 @@ def test_r0_positioned_fields_translate():
     stock = AlgorithmSpec(sampling=SamplingSpec(filter=STOCK_NONZERO_STD_FILTER))
     argv = list(mc.translate_run_config(make_config(), stock).argv)
     assert argv[argv.index("--dynamic-sampling-filter-path") + 1] == STOCK_NONZERO_STD_FILTER
-    over = AlgorithmSpec(sampling=SamplingSpec(over_sampling_batch_size=4))
+    over = AlgorithmSpec(sampling=SamplingSpec(filter=BOUNDED_NONZERO_STD_FILTER,
+                                               over_sampling_batch_size=4))
     argv = list(mc.translate_run_config(make_config(), over).argv)
     assert argv[argv.index("--over-sampling-batch-size") + 1] == "4"
     with pytest.raises(mc.UnmappedConfigError, match="over_sampling_batch_size"):
         mc.translate_run_config(make_config(), AlgorithmSpec(
-            sampling=SamplingSpec(over_sampling_batch_size=8)))
+            sampling=SamplingSpec(filter=BOUNDED_NONZERO_STD_FILTER,
+                                  over_sampling_batch_size=8)))
 
 
 # -- 2.5 KL placement -------------------------------------------------------------------
@@ -218,7 +254,7 @@ def test_reward_kl_allowed_for_reinforce_plus_plus():
 
 
 def test_loss_kl_translates():
-    spec = AlgorithmSpec(kl=KlSpec(placement="loss", coef=0.02, estimator="low_var_kl"))
+    spec = complete(AlgorithmSpec(kl=KlSpec(placement="loss", coef=0.02, estimator="low_var_kl")))
     argv = list(mc.translate_run_config(make_config(), spec).argv)
     assert "--kl-coef" not in argv
     i = argv.index("--use-kl-loss")

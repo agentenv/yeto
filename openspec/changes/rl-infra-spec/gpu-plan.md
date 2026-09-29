@@ -1,4 +1,4 @@
-# rl-infra-spec E0–E3 GPU 实验计划与预算（草案，未启动任何 GPU）
+# rl-infra-spec E0–E3 GPU 实验计划与预算（1.3 定稿，2026-09-29 INFRA；未启动任何 GPU）
 
 作者：Agent I，2026-09-29。基于 `openspec/changes/rl-infra-spec/{tasks.md,design.md,upstream-mechanisms.md}`。本计划是 task 1.3 的交付草案，**需用户确认后才租卡**。
 
@@ -6,7 +6,7 @@
 
 - 所有实验在 ports 路径、`MILES_NEXT_IMAGE`（按 digest 固定）上进行。E1 需要 Miles fork M2–M4，E2 需要 yeto 侧 `save_cut/restore_cut`（和 LoRA 下的 M5 RNG），E3 需要 M1/M5/M6。这些提交目前只在本地分支 `yeto-elastic-m1-m6`，**没有进镜像**。每个 GPU 阶段开始前，先把对应 fork 提交打进一个新镜像 digest，并生成 1.1 manifest。
 - 模型：功能验证用 Qwen3-0.6B LoRA；验收用 Qwen3-1.7B LoRA（TP=PP=CP=EP=1，strict-avg，GRPO）。4B（#66 示例）只在 2.4 收益面需要时才上。
-- 云：本仓库已接入 Modal / Verda / Nebius（PR #60）。约束（见 memory）：Verda 与 Modal 不能承载 head。两岛实验 head 放置见 §6。
+- 云：本计划只使用**已支持**的 Nebius（SkyPilot）与 Modal（`yeto/modal_runner.py`）。Verda 的 provider 修复（change `fix-verda-provider`，PR #69 未合入）仍在途，**不视为已支持，不出现在任何实验行里**。约束（见 memory）：Verda 与 Modal 不能承载 head。两岛实验 head 放置见 §6。
 - **逐位/数值对比规则**：凡是需要逐位对比或"下一步数值对比"的实验（X3、4.3、4.6），必须在**同一次租用**内同时跑两个 arm。用 Modal 时写成 `H100!:N`（禁止 H100→H200 自动升级），并在启动时断言 `nvidia-smi` 报告的 GPU 名称。统计比较（2.4、4.8）要求同一 provider、同一 GPU 型号，并同样断言 GPU 名称。
 - **H100 验收默认用 Nebius（约 $2.95/GPU·h）；逐位/数值对比与 DistOpt 调试用 Modal `H100!:N`（约 $3.95）。Verda（约 $2.30）只在 change `fix-verda-provider` 合入后作为可选降价方案，不计入默认预算。** L40S（Modal）约 $1.95。单价是估算，下单前核对当日价格。GPU-hours 按整池 × wall time 计（备用卡也计入）。时长已包含镜像拉取和预热。
 
@@ -88,3 +88,46 @@ F0 → F1 → A1 → F2 → A2 → A3。之后 F3→A4→A5（E1）与 F4→A6�
 - M5 的 DistributedOptimizer gather/reshard 未实现（DEV-GATHER 预算）；未完成前 LoRA+DistOpt 的 E3 为 no-go。
 - DynaResize 原文本地未找到，1.8 不影响本预算。
 - 单价未核对当日报价。
+
+## 8. 1.3 定稿：池身份、launcher 映射与每次租用记录（Agent INFRA，2026-09-29）
+
+本节是 task 1.3 的交付物。它补齐 1.3 验收要求而前文未写全的部分：如何映射到现有 launcher/harness 与 #66 pool 身份，每次租用必须记录哪些字段，以及清理。前文 §0–§7 的实验行与预算保持不变，只改了 §0 中对 Verda 的表述（改为：不视为已支持）。
+
+### 8.1 与现有接入的映射
+
+| 云 | 启动入口（现有代码） | 限时/自动回收（机制） | 本计划用途 |
+|---|---|---|---|
+| Nebius H100 | `yeto` launcher → SkyPilot（`yeto/launcher.py` 云凭据表 `:651-660`，Nebius 每个 region 需要一个 project，`:746-756`） | `sky launch --down` + `--idle-minutes-to-autostop`；另起独立 watchdog 按集群名 `infra-a-*` 执行 `sky down <name>`（只处理本计划记录的名称） | 1.2 A1、E0 A2/A3、E1、E2 的统计类实验 |
+| Modal L40S/A100/H100 | `yeto/modal_runner.py`（`validate_modal_shape`，`ModalIslandConfig.timeout_s`） | Modal 函数 `timeout=`（`modal_runner.py:313`），结束后 `modal app stop -y infra-a-*` 并用 `modal app list` 核实 | F 阶段功能验证 |
+| Modal `H100!:N`（逐位比较） | **缺口**：`MODAL_GPUS["H100"] = "H100"`（`modal_runner.py:59-60`），没有 `!`，Modal 可能升级为 H200。在修复前，逐位实验（A6/A8/DEV-GATHER）不走 launcher 的 Modal 路径，改用独立的 Modal 脚本：`gpu="H100!:N"`，启动时断言 `nvidia-smi --query-gpu=name` 全部为 H100，否则退出。launcher 的修复归 Agent IMG / launcher 负责人，已列入待办。 | 同上 | 4.3 X3、4.6 X4 |
+| Verda | — | — | **不使用**（在途 provider） |
+| 本机 | — | — | 只跑 CPU 测试；本机 GPU 占用不作为约束，也不参与实验 |
+
+镜像：一律使用 `MILES_NEXT_IMAGE` 的 digest 形式（`--rl-image docker:<repo>@sha256:<digest>`，`launcher.py:1243` 会校验）。每个 GPU 阶段开始前，由 Agent IMG 提供包含所需 fork 提交的新 digest；1.1 manifest 与这个 digest 一一对应。
+
+### 8.2 pool 身份（写入 #66 study manifest 的 `resources`）
+
+- `pool_id` = `infra-a-<实验 ID>-<UTC 日期>-<序号>`，例如 `infra-a-A2-20261001-1`；同时用作 SkyPilot 集群名或 Modal app 名的前缀，以便按名回收。
+- `pool_epoch`：池内 GPU 集合每变化一次加 1；同一次租用内切换配置不改变 epoch（配置 epoch 由 3.2 的 journal 管理）。
+- `gpus`：`[{uuid, model, node, index}]`，由租用后执行 `nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv` 得到，不预先填写。
+- `standby`：备用卡按 config 的 `standby` 计入 GPU·h（§0 口径）。E0 的 T4R4/T4R2S2 固定配置中的 S 就是这里的备用卡。
+
+### 8.3 每次租用必须记录的字段（写入该实验的证据目录 `rental.json`）
+
+`pool_id`、云与 region、实例/集群/app ID、owner（`infra-a`）、用途（task 编号）、创建时间与释放时间（UTC）、GPU 型号与各卡 UUID（断言输出原文）、NUMA 与互联（`nvidia-smi topo -m` 原文、`lscpu` 的 NUMA 段）、主存（`free -g`）、镜像 digest、yeto commit、miles fork commit、备用卡数量、租期上限（硬超时）、预估费用与实际费用、回收方式与核实输出（`sky status` / `modal app list` / Nebius API）。无法核实的项写“未确认”。
+
+### 8.4 租期与清理（机制优先）
+
+1. 启动前，把本次的 task 编号、验收项、模型、GPU 型号与数量、预计时长、费用估算、事先登记的成功/失败条件与容差、硬超时写进计划文件并提交。
+2. 云端限时：Modal 用 `timeout=`；SkyPilot 用 `--down` 与 autostop。
+3. 独立于终端与 agent 的回收：用 `timeout <硬超时> <启动命令>` 包裹，再加一个后台 watchdog 脚本，到期后按记录的 ID 执行 `sky down <name>` 或 `modal app stop -y <name>`，并把核实结果写入 `rental.json`。
+4. 结束或失败时：先拉日志、事件磁带和结果，再释放资源；删除本次创建的卷；核实没有残留资源。
+5. 只操作 `infra-a-` 前缀或已记录 ID 的资源；不执行 `sky down -a` 这类全局命令；共享配置只读。
+
+### 8.5 1.3 验收对照
+
+- “计划可映射现有 launcher/harness 和 pool 身份”：见 §8.1、§8.2。
+- “记录 GPU/NUMA/互联、主存、镜像、备用卡、租期及清理”：§8.3 规定每次租用记录的字段（实际值只有租用后才有），§8.4 规定租期与清理。
+- “不把本机占用当限制”：见 §8.1 最后一行。
+- “不把在途 provider 当已支持”：Verda 已从所有实验行和默认预算中排除（§0、§8.1）。
+- “本任务交付计划，实际租用按实验执行范围进行”：本节只是计划，没有租用任何资源。

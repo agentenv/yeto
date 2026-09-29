@@ -94,10 +94,16 @@ class Attestation:
     optimized_paths: frozenset[str]
     auto_controller: bool
     partitioned_driver: bool
+    # alignment.md A4: a certified trainer edge (DP change / role transfer)
+    # holds only for the AlgorithmSpec hashes it was certified with.
+    edge_algorithms: tuple[tuple[tuple[str, str, str], frozenset[str]], ...] = ()
 
     @staticmethod
     def none() -> "Attestation":
         return Attestation(None, frozenset(), frozenset(), frozenset(), False, False)
+
+    def algorithms_for(self, key: tuple[str, str, str]) -> frozenset[str]:
+        return dict(self.edge_algorithms).get(key, frozenset())
 
 
 def load_attestation(path: Path | None) -> Attestation:
@@ -118,9 +124,20 @@ def attestation_from_dict(payload: dict[str, Any]) -> Attestation:
     if unknown:
         raise ManifestError(f"attestation lists unknown execution modes: {unknown}")
     edges = []
+    bound: dict[tuple[str, str, str], frozenset[str]] = {}
     for edge in payload.get("certified_edges", []):
         parsed = parse_edge(edge)
         edges.append(parsed.key)
+        hashes = edge.get("algorithm_spec_sha256", [])
+        if isinstance(hashes, str):
+            hashes = [hashes]
+        if not isinstance(hashes, list) or not all(_is_sha256_hex(h) for h in hashes):
+            raise ManifestError(
+                f"certified edge {parsed.source}->{parsed.target} algorithm_spec_sha256 "
+                "must be a list of 64-hex hashes"
+            )
+        if hashes:
+            bound[parsed.key] = frozenset(hashes)
     fingerprint = payload.get("runtime_fingerprint")
     if fingerprint is not None and not isinstance(fingerprint, str):
         raise ManifestError("attestation runtime_fingerprint must be a string")
@@ -131,7 +148,18 @@ def attestation_from_dict(payload: dict[str, Any]) -> Attestation:
         optimized_paths=frozenset(payload.get("optimized_paths", [])),
         auto_controller=bool(payload.get("auto_controller", False)),
         partitioned_driver=bool(payload.get("partitioned_driver", False)),
+        edge_algorithms=tuple(sorted(bound.items())),
     )
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+# Edges whose certification depends on the loss/advantage normalization (A4).
+ALGORITHM_BOUND_EDGE_KINDS = ("trainer-dp", "role-transfer")
 
 
 def parse_edge(edge: dict[str, Any]) -> Edge:
@@ -379,7 +407,10 @@ def arm_status(
         return STATUS_BLOCKED, "runtime has not attested the partitioned driver"
     if kind in FIXED_ARM_KINDS:
         return STATUS_SUPPORTED, None
-    return _dynamic_status(arm, edges=edges, attestation=attestation)
+    return _dynamic_status(
+        arm, edges=edges, attestation=attestation,
+        algorithm_spec_sha256=profile.get("algorithm_spec_sha256"),
+    )
 
 
 def fingerprint_rejection(expected: str | None, attestation: Attestation) -> str | None:
@@ -403,7 +434,11 @@ def _legacy_status(arm: dict[str, Any]) -> tuple[str, str | None]:
 
 
 def _dynamic_status(
-    arm: dict[str, Any], *, edges: list[Edge], attestation: Attestation
+    arm: dict[str, Any],
+    *,
+    edges: list[Edge],
+    attestation: Attestation,
+    algorithm_spec_sha256: str | None = None,
 ) -> tuple[str, str | None]:
     declared = {(e.source, e.target): e for e in edges}
     for source, target in _arm_transitions(arm):
@@ -412,6 +447,18 @@ def _dynamic_status(
             return STATUS_UNSUPPORTED, f"no declared edge {source}->{target}"
         if edge.key not in attestation.certified_edges:
             return STATUS_BLOCKED, f"edge {source}->{target} ({edge.kind}) is not certified"
+        if edge.kind in ALGORITHM_BOUND_EDGE_KINDS:
+            certified_for = attestation.algorithms_for(edge.key)
+            if algorithm_spec_sha256 is None:
+                return STATUS_BLOCKED, (
+                    f"edge {source}->{target} ({edge.kind}) needs the study profile's "
+                    "algorithm_spec_sha256"
+                )
+            if algorithm_spec_sha256 not in certified_for:
+                return STATUS_BLOCKED, (
+                    f"edge {source}->{target} ({edge.kind}) is not certified for algorithm "
+                    f"{algorithm_spec_sha256}"
+                )
     if arm["kind"] == "scheduled-optimized" and not attestation.optimized_paths:
         return STATUS_BLOCKED, "no optimized migration path is certified"
     if arm["kind"] == "auto" and not attestation.auto_controller:

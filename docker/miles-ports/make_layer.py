@@ -14,8 +14,10 @@ checkouts only in pure-Python files (checked below), so the layer:
   ``sglang/_version.py``) for the fork's setuptools-scm version,
 * adds /opt/yeto/image-manifest.json with every component SHA.
 
-Equivalent Dockerfile: docker/miles-ports/Dockerfile.  Deterministic: all
-entries root-owned with a fixed mtime, sorted.
+Approximate docker equivalent (unverified): docker/miles-ports/Dockerfile.
+Rebuilds are file-content equivalent, not byte-identical: entries are
+root-owned, fixed-mtime and sorted, .git/hooks samples are dropped, but
+.git/index (stat data) and the fetched pack are regenerated each build.
 """
 from __future__ import annotations
 
@@ -31,8 +33,11 @@ import tempfile
 from pathlib import Path
 
 SITE = "opt/sglang/lib/python3.12/site-packages"
-NATIVE_SUFFIXES = (".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".rs",
-                   ".pyx", ".pxd", ".toml", ".cfg", ".txt", ".in", ".cmake")
+# A fork may differ from the base's checkout only in Python modules of the
+# editable-installed packages (plus tests/docs).  Anything else -- setup.py,
+# pyproject.toml, setup.cfg, requirements*, sgl-kernel/**, rust/**, csrc,
+# .cu/.cpp -- changes what a real install builds and needs a docker build.
+EXEMPT_PREFIXES = ("test/", "tests/", "docs/")
 
 
 def git(repo: Path, *argv: str) -> str:
@@ -40,17 +45,16 @@ def git(repo: Path, *argv: str) -> str:
                           capture_output=True, text=True).stdout
 
 
-def check_pure_python(repo: Path, base: str, commit: str, prefix: str) -> list[str]:
+def check_pure_python(repo: Path, base: str, commit: str, packages: tuple[str, ...]) -> list[str]:
     status = git(repo, "diff", "--name-status", "--no-renames", base, commit).splitlines()
     names = []
     for line in status:
         kind, name = line.split("\t", 1)
         if kind == "D":
             raise SystemExit(f"{name}: fork deletes a base file; add a whiteout first")
-        if name.startswith(prefix) and not name.endswith(".py"):
-            raise SystemExit(f"{name}: non-Python change needs a real (docker) build")
-        if name.endswith(NATIVE_SUFFIXES) and not name.startswith(("test/", "tests/", "docs/")):
-            raise SystemExit(f"{name}: build-relevant non-Python change")
+        in_package = name.startswith(packages) and name.endswith(".py")
+        if not (in_package or name.startswith(EXEMPT_PREFIXES) or name.endswith(".md")):
+            raise SystemExit(f"{name}: not a pure-Python package change; needs a real (docker) build")
         names.append(name)
     return names
 
@@ -108,8 +112,8 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     a = p.parse_args()
 
-    check_pure_python(a.miles_src, a.miles_base_commit, a.miles_commit, "miles")
-    check_pure_python(a.sglang_src, a.sglang_base_commit, a.sglang_commit, "python/")
+    check_pure_python(a.miles_src, a.miles_base_commit, a.miles_commit, ("miles/", "miles_plugins/"))
+    check_pure_python(a.sglang_src, a.sglang_base_commit, a.sglang_commit, ("python/sglang/",))
 
     entries: dict[str, tuple[str, bytes | None, int, str | None]] = {}
 
@@ -147,6 +151,8 @@ def main() -> None:
         ):
             clone = Path(tmp, dest.replace("/", "_"))
             shallow_clone(src, commit, origin, clone)
+            for hook in (clone / ".git" / "hooks").glob("*.sample"):
+                hook.unlink()
             add_tree(clone, dest)
             # hide the base image's .git (other history/origin) entirely
             add_file(f"{dest}/.git/.wh..wh..opq", b"", 0o644)

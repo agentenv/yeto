@@ -433,7 +433,10 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     try:
         base = resolve_ports_algorithm(args, rl_engine="ports")
         spec, remaining, absorbed = absorb_extra_argv(base, shlex.split(args.extra))
-        allow = check_unverified_allowance(args.rl_allow_unverified_mechanism or (), islands=1)
+        # models a single-island G1 smoke without outer sync (D11)
+        allow = check_unverified_allowance(
+            args.rl_allow_unverified_mechanism or (), islands=1, outer_sync=False
+        )
         result.update(
             schema=spec.schema,
             algorithm_spec=json.loads(spec.canonical_json()),
@@ -462,4 +465,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Run the package module, not this ``__main__`` copy: extension modules
+    # (``register_flag``) register rows into the package module's tables.
+    from yeto.rl.engine.miles_adapter import algorithm_flags as _package_module
+
+    raise SystemExit(_package_module.main())

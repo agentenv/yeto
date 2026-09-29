@@ -30,6 +30,10 @@ class PlacementRequest:
     trainer_gpus: int
     rollout_gpus: int
     gpus_per_engine: int
+    # rl-infra-spec 2.1/2.1a: reserved standby GPUs (fixed partition only) and
+    # an optional explicit logical-bundle map {"trainer","rollout","standby"}.
+    standby_gpus: int = 0
+    bundle_map: Mapping[str, tuple[int, ...]] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("colocated", "fixed-partition"):
@@ -42,13 +46,93 @@ class PlacementRequest:
             raise ValueError("colocated placement shares one GPU set")
         if self.rollout_gpus % self.gpus_per_engine:
             raise ValueError("rollout GPUs must be a multiple of GPUs per engine")
+        if isinstance(self.standby_gpus, bool) or not isinstance(self.standby_gpus, int) \
+                or self.standby_gpus < 0:
+            raise ValueError("standby_gpus must be a non-negative int")
+        if self.kind == "colocated" and (self.standby_gpus or self.bundle_map is not None):
+            raise ValueError("colocated placement has no standby GPUs or bundle map")
+        if self.bundle_map is not None:
+            object.__setattr__(self, "bundle_map", validate_bundle_map(
+                self.bundle_map, trainer=self.trainer_gpus, rollout=self.rollout_gpus,
+                standby=self.standby_gpus,
+            ))
+
+    @property
+    def total_gpus(self) -> int:
+        if self.kind == "colocated":
+            return self.trainer_gpus
+        return self.trainer_gpus + self.rollout_gpus + self.standby_gpus
+
+    @property
+    def placement_map(self) -> dict[str, list[int]] | None:
+        """``--yeto-placement-map`` payload (fork-M1), or None for the upstream offset layout.
+
+        A standby reservation always needs the map; otherwise only an explicit
+        ``bundle_map`` emits one (the offset layout is identical without it).
+        """
+        if self.kind == "colocated":
+            return None
+        if self.bundle_map is not None:
+            return {k: list(v) for k, v in self.bundle_map.items()}
+        if not self.standby_gpus:
+            return None
+        t, r = self.trainer_gpus, self.rollout_gpus
+        return {
+            "trainer": list(range(t)),
+            "rollout": list(range(t, t + r)),
+            "standby": list(range(t + r, t + r + self.standby_gpus)),
+        }
+
+    def role_bundles(self) -> dict[str, tuple[int, ...]]:
+        pm = self.placement_map
+        if pm is not None:
+            return {k: tuple(pm.get(k, ())) for k in ("trainer", "rollout", "standby")}
+        total, offset = self.expected_layout()
+        if self.kind == "colocated":
+            return {"trainer": tuple(range(total)), "rollout": tuple(range(total)), "standby": ()}
+        return {"trainer": tuple(range(offset)), "rollout": tuple(range(offset, total)),
+                "standby": ()}
 
     def expected_layout(self) -> tuple[int, int]:
-        """``(total_bundles, rollout_offset)`` as upstream lays out the PG."""
+        """``(total_bundles, rollout_offset)`` of the upstream args layout (standby excluded)."""
 
         if self.kind == "colocated":
             return self.trainer_gpus, 0
         return self.trainer_gpus + self.rollout_gpus, self.trainer_gpus
+
+
+BUNDLE_ROLES = ("trainer", "rollout", "standby")
+
+
+def validate_bundle_map(
+    raw: Mapping[str, Any], *, trainer: int, rollout: int, standby: int
+) -> dict[str, tuple[int, ...]]:
+    """Same rules as fork-M1 ``validate_placement_map``, checked before launch."""
+    unknown = sorted(set(raw) - set(BUNDLE_ROLES))
+    if unknown:
+        raise ValueError(f"bundle map names unknown roles {unknown}")
+    out = {}
+    for role in BUNDLE_ROLES:
+        values = raw.get(role, ())
+        if isinstance(values, (str, bytes)) or not all(
+            isinstance(i, int) and not isinstance(i, bool) for i in values
+        ):
+            raise ValueError(f"bundle map role {role!r} must be a list of ints")
+        out[role] = tuple(values)
+    n = trainer + rollout + standby
+    seen: set[int] = set()
+    for role, want in zip(BUNDLE_ROLES, (trainer, rollout, standby), strict=True):
+        idx = out[role]
+        if len(set(idx)) != len(idx):
+            raise ValueError(f"bundle map role {role!r} repeats bundles")
+        if any(not 0 <= i < n for i in idx):
+            raise ValueError(f"bundle map role {role!r} has bundles outside 0..{n - 1}")
+        if seen & set(idx):
+            raise ValueError(f"bundle map role {role!r} overlaps another role")
+        if len(idx) != want:
+            raise ValueError(f"bundle map gives {role} {len(idx)} bundles, requested {want}")
+        seen |= set(idx)
+    return out
 
 
 def _parsed_layout(args: Any) -> tuple[int, int] | None:
@@ -80,6 +164,13 @@ def check_placement_not_rewritten(request: PlacementRequest, args: Any) -> None:
     engine = getattr(args, "rollout_num_gpus_per_engine", request.gpus_per_engine)
     if int(engine) != request.gpus_per_engine:
         conflicts.append(f"GPUs per engine {engine} != requested {request.gpus_per_engine}")
+    parsed_map = getattr(args, "yeto_placement_map", None)
+    if isinstance(parsed_map, str):
+        import json
+
+        parsed_map = json.loads(parsed_map)
+    if parsed_map != request.placement_map:
+        conflicts.append(f"placement map {parsed_map} != requested {request.placement_map}")
     if not conflicts and _parsed_layout(args) != request.expected_layout():
         conflicts.append(
             f"placement-group layout {_parsed_layout(args)} != requested {request.expected_layout()}"
@@ -114,6 +205,35 @@ class MilesPlacement:
         self._request = request
         actor = _gpu_ids(placement_groups["actor"], logical)
         rollout = _gpu_ids(placement_groups["rollout"], logical)
+        standby: tuple[str, ...] = ()
+        if request.placement_map is not None:
+            # fork-M1 returns each role sliced from the map: "actor" holds the
+            # trainer bundles only and "standby" the reserved ones.
+            standby = _gpu_ids(placement_groups.get("standby", (None, [], [])), logical)
+            everything = actor + rollout + standby
+            if len(actor) != request.trainer_gpus or len(standby) != request.standby_gpus \
+                    or len(set(everything)) != len(everything):
+                raise PlacementRewriteError(
+                    f"placement map produced trainer={len(actor)} rollout={len(rollout)} "
+                    f"standby={len(standby)} (overlapping or wrong sizes)"
+                )
+            if len(rollout) != request.rollout_gpus:
+                raise PlacementRewriteError(
+                    f"rollout partition has {len(rollout)} GPUs, requested {request.rollout_gpus}"
+                )
+            self._request = request
+            self._description = PlacementDescription(
+                kind=request.kind,
+                trainer_gpus=actor,
+                rollout_gpus=rollout,
+                extra={
+                    "gpus_per_engine": request.gpus_per_engine,
+                    "logical": logical,
+                    "standby_gpus": standby,
+                    "weight_transport": "nccl-broadcast",
+                },
+            )
+            return
         total, offset = request.expected_layout()
         if len(actor) != total:
             raise PlacementRewriteError(
@@ -149,6 +269,11 @@ class MilesPlacement:
         """
 
         check_placement_not_rewritten(request, args)
+        if request.placement_map is not None:
+            roles = request.role_bundles()
+            view = {k: (None, list(v), list(v)) for k, v in roles.items()}
+            return cls(request, {"actor": view["trainer"], "rollout": view["rollout"],
+                                 "standby": view["standby"]}, logical=True)
         total, offset = _parsed_layout(args)
         bundles = list(range(total))
         actor = (None, bundles, bundles)
