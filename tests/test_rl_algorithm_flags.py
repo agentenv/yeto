@@ -305,3 +305,11 @@ def test_v1_kl_coef_inputs(kl_coef, kl_flag, rejected):
 def test_reward_and_loss_kl_cannot_coexist():
     with pytest.raises(AlgorithmSpecError):
         KlSpec(placement="reward", coef=0.1, estimator="k1")
+
+
+def test_custom_config_path_refused():
+    with pytest.raises(mc.MilesConfigError, match="--custom-config-path"):
+        mc.check_extra_argv(["--custom-config-path", "x.yaml"])
+    with pytest.raises(mc.MilesConfigError, match="--custom-config-path"):
+        mc.translate_run_config(make_config(), AlgorithmSpec(),
+                                extra_argv=("--custom-config-path=x.yaml",))
