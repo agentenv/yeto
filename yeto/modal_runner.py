@@ -219,6 +219,42 @@ def image_ref_from_rl_image(rl_image: str) -> str:
     return ref
 
 
+# SkyPilot's own private-registry login variables (sky.Task envs/secrets;
+# see sky.task._check_docker_login_config).  The launcher reads them from its
+# environment and hands them to SkyPilot as task *secrets* and to Modal as the
+# ``from_registry`` pull secret -- never into the container environment.
+DOCKER_LOGIN_ENV_VARS = (
+    "SKYPILOT_DOCKER_USERNAME",
+    "SKYPILOT_DOCKER_PASSWORD",
+    "SKYPILOT_DOCKER_SERVER",
+)
+
+
+def registry_host(image_ref: str) -> str:
+    """Registry host of ``[docker:]<repo>[@digest]`` (Docker Hub default)."""
+    ref = image_ref[len("docker:"):] if image_ref.startswith("docker:") else image_ref
+    first = ref.split("/", 1)[0]
+    if "/" in ref and ("." in first or ":" in first or first == "localhost"):
+        return first
+    return "docker.io"
+
+
+def registry_credentials(image_ref: str | None, environ) -> dict[str, str] | None:
+    """The SKYPILOT_DOCKER_* login from ``environ`` if it is for the
+    registry ``image_ref`` lives on, else None (public image, or a login
+    for some other registry).  A partial login is an error, as in SkyPilot."""
+    present = {k: environ[k] for k in DOCKER_LOGIN_ENV_VARS if environ.get(k)}
+    if not present or not image_ref:
+        return None
+    if len(present) != len(DOCKER_LOGIN_ENV_VARS):
+        missing = sorted(set(DOCKER_LOGIN_ENV_VARS) - set(present))
+        raise ValueError(f"registry login needs all of {DOCKER_LOGIN_ENV_VARS}; missing {missing}")
+    server = re.sub(r"^https?://", "", present["SKYPILOT_DOCKER_SERVER"]).rstrip("/")
+    if server.split("/", 1)[0] != registry_host(image_ref):
+        return None
+    return present
+
+
 def skypilot_env(rank: int, container_ips: list[str], gpus_per_node: int) -> dict[str, str]:
     """The variables the sky task scripts read, emulated for a container."""
     return {
@@ -276,7 +312,19 @@ class ModalOps:
     def build_image(self, cfg: ModalIslandConfig):
         modal = self._modal()
         if cfg.training_mode == "rl":
-            image = modal.Image.from_registry(cfg.image_ref)
+            creds = registry_credentials(cfg.image_ref, os.environ)
+            if creds:  # private registry (e.g. MILES_NEXT_IMAGE on ghcr.io)
+                image = modal.Image.from_registry(
+                    cfg.image_ref,
+                    secret=modal.Secret.from_dict(
+                        {
+                            "REGISTRY_USERNAME": creds["SKYPILOT_DOCKER_USERNAME"],
+                            "REGISTRY_PASSWORD": creds["SKYPILOT_DOCKER_PASSWORD"],
+                        }
+                    ),
+                )
+            else:
+                image = modal.Image.from_registry(cfg.image_ref)
         else:
             image = modal.Image.debian_slim(python_version=cfg.python_version)
             if cfg.pip_requirements:

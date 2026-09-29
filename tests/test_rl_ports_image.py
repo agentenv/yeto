@@ -1,0 +1,185 @@
+"""MILES_NEXT_IMAGE (private ghcr ports image) pins, registry-credential
+wiring for SkyPilot and Modal, and the image-aware ports source setup.
+Legacy must be unchanged."""
+
+import hashlib
+import json
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tests.test_modal_runner import _cfg, fake_modal
+from tests.test_rl_engine_selection import _cli, _island_task
+from yeto import launcher
+from yeto import modal_runner as mr
+from yeto import rl
+from yeto.launcher import _prepare_rl_args, build_modal_island_config
+
+REPO = Path(__file__).resolve().parents[1]
+LOGIN = {
+    "SKYPILOT_DOCKER_USERNAME": "user",
+    "SKYPILOT_DOCKER_PASSWORD": "not-a-real-token",
+    "SKYPILOT_DOCKER_SERVER": "ghcr.io",
+}
+
+
+@pytest.fixture
+def no_login(monkeypatch):
+    for key in mr.DOCKER_LOGIN_ENV_VARS:
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture
+def login(monkeypatch):
+    for key, value in LOGIN.items():
+        monkeypatch.setenv(key, value)
+
+
+# ------------------------------------------------------------------ pins
+
+
+def test_ports_image_is_the_private_digest_pinned_fork_image():
+    assert rl.default_rl_image("ports") == rl.MILES_NEXT_IMAGE
+    assert re.fullmatch(
+        r"docker:ghcr\.io/michaellchung/yeto-miles-ports@sha256:[0-9a-f]{64}",
+        rl.MILES_NEXT_IMAGE,
+    )
+    assert rl.MILES_NEXT_BASE_IMAGE.startswith("docker:docker.io/radixark/miles@sha256:")
+    assert rl.MILES_NEXT_IMAGE_MANIFEST == "/opt/yeto/image-manifest.json"
+    # The tag the build script pushes names the pinned commits.
+    tag = f"{rl.MILES_NEXT_COMMIT[:7]}-{rl.SGLANG_NEXT_COMMIT[:7]}"
+    assert f"Tag {tag};" in (REPO / "yeto/rl/__init__.py").read_text()
+
+
+def test_legacy_image_default_is_unchanged():
+    assert rl.default_rl_image("legacy") == rl.MILES_IMAGE == (
+        "docker:ghcr.io/agentenv/miles@sha256:"
+        "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
+    )
+
+
+def test_build_inputs_match_the_pins():
+    dockerfile = (REPO / "docker/miles-ports/Dockerfile").read_text()
+    base = rl.MILES_NEXT_BASE_IMAGE.split("@")[1]
+    assert f"index {base}" in dockerfile.replace("\n# ", " ")
+    for value in (rl.MILES_NEXT_COMMIT, rl.SGLANG_NEXT_COMMIT,
+                  rl.MILES_NEXT_REPOSITORY, rl.SGLANG_NEXT_REPOSITORY):
+        assert value in dockerfile
+    script = (REPO / "scripts/build_miles_ports_image.sh").read_text()
+    assert f"BASE_INDEX_DIGEST={base}" in script
+    assert "yeto/rl/__init__.py" in script  # commits are read from the pins
+    subprocess.run(["bash", "-n", str(REPO / "scripts/build_miles_ports_image.sh")], check=True)
+
+
+# --------------------------------------------------------- source setup
+
+LEGACY_SETUP_SHA256 = "1166134dbe978365d349f5e8f1851be7ccf7599c62dd28b01e88a64901425985"
+
+
+def test_legacy_source_setup_is_byte_identical():
+    miles, sglang = launcher._miles_source_setup("legacy")
+    digest = hashlib.sha256((miles + "\0" + sglang).encode()).hexdigest()
+    assert digest == LEGACY_SETUP_SHA256
+
+
+def test_ports_setup_reuses_the_image_forks_and_still_verifies():
+    miles, sglang = launcher._miles_source_setup("ports")
+    subprocess.run(["bash", "-n"], input=miles + "\n" + sglang, text=True, check=True)
+    c = rl.MILES_NEXT_COMMIT
+    # Miles: the image's /root/miles (= ~/miles) is already at the pin, so
+    # the fetch is conditional; identity checks stay unconditional.
+    assert f'if [ "$(git -C ~/miles rev-parse HEAD 2>/dev/null)" != {c} ]; then\n' in miles
+    guard = miles.index(f"!= {c} ]; then\n")
+    fetch = miles.index(f"git -C ~/miles fetch --depth 1 origin {c}")
+    end = miles.index("\nfi\n", guard)
+    assert guard < fetch < end
+    assert end < miles.index(f'test "$(git -C ~/miles rev-parse HEAD)" = {c}')
+    assert "status --porcelain --untracked-files=all" in miles
+    # SGLang: reuse /sgl-workspace/sglang only if it is exactly the pinned,
+    # clean fork checkout that `import sglang` resolves to; else clone.
+    s = rl.SGLANG_NEXT_COMMIT
+    guard, rest = sglang.split("; then\n", 1)
+    assert guard.startswith("if ")
+    for needle in (
+        f'[ "$(git -C /sgl-workspace/sglang rev-parse HEAD 2>/dev/null)" = {s} ]',
+        f'= {rl.SGLANG_NEXT_REPOSITORY} ]',
+        "git -C /sgl-workspace/sglang status --porcelain --untracked-files=all",
+        "import os, sys, sglang",
+        "[ ! -e ~/sglang ]",
+    ):
+        assert needle in guard
+    reuse, fallback = rest.split("\nelse\n", 1)
+    assert "ln -sfn /sgl-workspace/sglang ~/sglang" in reuse
+    assert f"git -C ~/sglang fetch --depth 1 origin {s}" in fallback
+    assert fallback.endswith("pip install -q --no-deps -e ~/sglang/python\nfi")
+
+
+# ------------------------------------------------------ registry login
+
+
+def test_registry_credentials_match_the_image_registry():
+    ghcr = rl.MILES_NEXT_IMAGE
+    assert mr.registry_host(ghcr) == "ghcr.io"
+    assert mr.registry_host("docker:radixark/miles@sha256:" + "a" * 64) == "docker.io"
+    assert mr.registry_credentials(ghcr, {}) is None
+    assert mr.registry_credentials(ghcr, LOGIN) == LOGIN
+    assert mr.registry_credentials(ghcr, {**LOGIN, "SKYPILOT_DOCKER_SERVER": "https://ghcr.io/"}) is not None
+    # A login for another registry is not sent to this one.
+    assert mr.registry_credentials(rl.MILES_NEXT_BASE_IMAGE, LOGIN) is None
+    assert mr.registry_credentials(None, LOGIN) is None
+    partial = {k: v for k, v in LOGIN.items() if k != "SKYPILOT_DOCKER_PASSWORD"}
+    with pytest.raises(ValueError, match="SKYPILOT_DOCKER_PASSWORD"):
+        mr.registry_credentials(ghcr, partial)
+
+
+def test_sky_task_gets_the_login_as_secrets_not_envs(monkeypatch, login):
+    args = _cli()
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    assert task.secrets == LOGIN
+    assert not set(LOGIN) & set(task.envs)
+    assert task.resources.image_id == rl.MILES_NEXT_IMAGE
+
+
+@pytest.mark.parametrize("engine", ["ports", "legacy"])
+def test_no_login_means_no_secrets(monkeypatch, no_login, engine):
+    args = _cli(("--rl-engine", engine))
+    _prepare_rl_args(args)
+    assert not hasattr(_island_task(args, monkeypatch), "secrets")
+
+
+def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
+    args = _cli()
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args.cluster_prefix = "img-test"
+    cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xh100")[0], 0, task, "1.2.3.4:5")
+    assert cfg.image_ref == mr.image_ref_from_rl_image(rl.MILES_NEXT_IMAGE)
+    assert not set(LOGIN) & set(cfg.envs)  # never inside the container
+    assert "not-a-real-token" not in cfg.to_json()
+    state = fake_modal(monkeypatch)
+    mr.ModalOps("img-test").define(cfg)
+    (img,) = state["images"]
+    assert img.calls[0] == (
+        "from_registry",
+        (cfg.image_ref,),
+        {"secret": ("secret", {"REGISTRY_USERNAME": "user", "REGISTRY_PASSWORD": "not-a-real-token"})},
+    )
+
+
+def test_modal_public_image_pull_is_unchanged(monkeypatch, no_login):
+    state = fake_modal(monkeypatch)
+    ref = "ghcr.io/x/miles@sha256:" + "c" * 64
+    mr.ModalOps("yeto-run").define(_cfg(training_mode="rl", image_ref=ref, setup_script="true"))
+    assert state["images"][0].calls[0] == ("from_registry", (ref,), {})
+
+
+def test_image_manifest_schema_in_build_script():
+    script = (REPO / "scripts/build_miles_ports_image.sh").read_text()
+    for key in ('"miles"', '"sglang"', '"base"', '"commit"', '"index_digest"', '"manifest_digest"'):
+        assert key in script
+    assert json.loads('{"schema": 1}')  # manifest is plain JSON
