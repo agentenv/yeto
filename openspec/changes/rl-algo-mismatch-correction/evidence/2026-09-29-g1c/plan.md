@@ -96,3 +96,4 @@ committed diagnosis.
 - Runs in order tis, icepop, opsm-trainer, one at a time, started only after G3 has finished and
   with the per-user thread count at most 3296 (>= 800 free of 4096).
 - Harness change before attempt 5 (lesson from G3's truncated tape): the tape is pulled every 5 s instead of 20 s. Criteria unchanged.
+- Before icepop/opsm-trainer: merged origin/algo-cap 2bce8ed (the launcher writes <run dir>/events/<island>.jsonl). YETO_SHA moves to that merge; mechanism code unchanged. The pulled container tape stays the primary source (same as tis); the launcher copy is kept as additional evidence.
