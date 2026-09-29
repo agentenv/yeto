@@ -702,6 +702,19 @@ The Miles argv of default GRPO is byte-identical to R0.
 canonical JSON, and `algorithm_spec_sha256` to the ports provenance. The
 legacy provenance is unchanged.
 
+**Event tapes of Modal islands.** A Modal island's `~/yeto-output` cannot be
+fetched. So every ports Modal island, and every `--rl-single-island-no-sync`
+island, runs with `--rl-echo-events`: the learner prints each tape record as
+`YETO_RL_EVENT <json>` (`yeto/rl/event_echo.py`), and the launcher rebuilds
+`<run dir>/events/<island>.jsonl` from the log stream.
+
+The check fails closed. A tape without `rl_learner_finalized`, for example a
+stream cut when the container exited, gets a `.incomplete` marker and makes
+the run exit 3. A synced run still fetches its checkpoint first.
+
+`--rl-event-tape` export refuses incomplete tapes unless
+`--allow-incomplete` is given.
+
 **Launch dry run.** `yeto launch ... --dry-run` validates the whole launch
 (arguments, provenance, the ports algorithm and capability checks) and prints
 JSON with the resource request (GPU type and count per island, island count,
