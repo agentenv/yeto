@@ -1,0 +1,10 @@
+{
+ "mechanism": "drgrpo",
+ "algorithm_spec_sha256": "0b000b1c9cc850271ee20120fc2b3b8fbf624545d0f8a73cc21aa3389aaf6e85",
+ "allow_unverified": [
+  "features:custom_pg_loss_reducer",
+  "features:no_grpo_std_normalization",
+  "loss_aggregations:constant"
+ ],
+ "rounds": 3
+}

@@ -1,0 +1,70 @@
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/gspo_noclip.json --rl-allow-unverified-mechanism advantage_estimators:gspo
+{
+  "absorbed_flags": {},
+  "algorithm_spec": {
+    "advantage": {
+      "estimator": "gspo",
+      "reward_binary": false,
+      "reward_postprocess": null,
+      "rewards_normalization": true,
+      "std_normalization": true,
+      "whiten": false
+    },
+    "correction": {
+      "function": null,
+      "method": "none",
+      "mismatch_metrics": false,
+      "opsm_delta": null,
+      "tis_clip": null,
+      "tis_clip_low": null,
+      "use_rollout_logprobs": false
+    },
+    "entropy_coef": 0.0,
+    "execution": {
+      "group_required": true,
+      "max_policy_staleness": 0,
+      "needs_critic": false,
+      "needs_rollout_logprobs": false
+    },
+    "kl": {
+      "coef": null,
+      "estimator": null,
+      "placement": "none",
+      "unbiased": false
+    },
+    "loss": {
+      "aggregation": "default",
+      "custom_loss": null,
+      "eps_clip": null,
+      "eps_clip_c": null,
+      "eps_clip_high": null,
+      "reducer": null,
+      "variant": "policy_loss"
+    },
+    "plugins": [],
+    "sampling": {
+      "filter": null,
+      "max_replacements": null,
+      "over_sampling_batch_size": null,
+      "overlong_filter": false
+    },
+    "schema": "yeto-rl-algorithm-spec-v2"
+  },
+  "algorithm_spec_sha256": "ac596c87e5995ca4488b32fe91178185a1758ddf4b4cdfaff6e3de8be95c4f8d",
+  "error": "engine 'miles-upstream': [sequence_ratio_without_clip] advantage estimator 'gspo' uses a sequence-level ratio; set loss.eps_clip and loss.eps_clip_high explicitly (token-level defaults do not apply); [seq_adv_gspo_clip_hint] GSPO clips the sequence-level ratio: give loss.eps_clip and loss.eps_clip_high explicitly. yeto sets no default; the engine default (Miles --eps-clip 0.2) is a token-level value, while the GSPO paper uses 3e-4 (low) / 4e-4 (high)",
+  "miles_argv": [
+    "--advantage-estimator",
+    "gspo"
+  ],
+  "remaining_extra_argv": [],
+  "required_mechanisms": [
+    "advantage_estimators:gspo",
+    "corrections:none",
+    "kl_placements:none",
+    "loss_aggregations:default",
+    "losses:policy_loss"
+  ],
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "verdict": "rejected"
+}
+exit=1

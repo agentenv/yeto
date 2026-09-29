@@ -1,0 +1,5 @@
+# diff baseline-failures.txt after-failures.txt (by test id)
+66a67
+> FAILED tests/test_rl_algorithm_flags.py::test_design_d3_flags_are_all_mapped
+70a72
+> FAILED tests/test_rl_algorithm_flags.py::test_unmapped_objective_flag_rejected[--gamma]

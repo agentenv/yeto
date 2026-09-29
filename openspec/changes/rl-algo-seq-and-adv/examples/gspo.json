@@ -1,0 +1,49 @@
+{
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "advantage": {
+    "estimator": "gspo",
+    "std_normalization": true,
+    "rewards_normalization": true,
+    "whiten": false,
+    "reward_postprocess": null,
+    "reward_binary": false
+  },
+  "loss": {
+    "variant": "policy_loss",
+    "eps_clip": 0.0003,
+    "eps_clip_high": 0.0004,
+    "eps_clip_c": null,
+    "aggregation": "default",
+    "reducer": null,
+    "custom_loss": null
+  },
+  "kl": {
+    "placement": "none",
+    "coef": null,
+    "estimator": null,
+    "unbiased": false
+  },
+  "correction": {
+    "method": "none",
+    "tis_clip": null,
+    "tis_clip_low": null,
+    "opsm_delta": null,
+    "function": null,
+    "use_rollout_logprobs": false,
+    "mismatch_metrics": false
+  },
+  "sampling": {
+    "filter": null,
+    "max_replacements": null,
+    "over_sampling_batch_size": null,
+    "overlong_filter": false
+  },
+  "execution": {
+    "needs_critic": false,
+    "max_policy_staleness": 0,
+    "group_required": true,
+    "needs_rollout_logprobs": false
+  },
+  "entropy_coef": 0.0,
+  "plugins": []
+}

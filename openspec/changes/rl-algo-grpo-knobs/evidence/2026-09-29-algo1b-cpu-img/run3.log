@@ -1,0 +1,64 @@
+✓ Initialized. View run at 
+https://modal.com/apps/yetalabs/main/ap-IFjK3spr0lcOfFUfQIopEL
+✓ Created objects.
+├── 🔨 Created mount 
+│   /home/michael/work/algo-1b/openspec/changes/rl-algo-grpo-knobs/evidence/2026
+│   -09-29-algo1b-cpu-img/modal_cpu_img.py
+├── 🔨 Created mount /home/michael/work/algo-1b
+├── 🔨 Created mount /home/michael/work/miles-next
+└── 🔨 Created function run.
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 13.0.3
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+image miles None
+name
+Tesla T4
+--- full parse_args (miles-next 0394715 parser, image megatron)
+.........................                                                [100%]
+=============================== warnings summary ===============================
+tests/test_rl_grpo_knobs_upstream.py: 60 warnings
+  /usr/lib/python3.12/argparse.py:1489: DeprecationWarning: 'type' is deprecated as of Python 3.12 and will be removed in Python 3.14.
+    action = action_class(**kwargs)
+
+tests/test_rl_grpo_knobs_upstream.py: 12 warnings
+  /root/Megatron-LM/megatron/core/_rank_utils.py:39: UserWarning: Could not determine rank from torch.distributed, RANK, or SLURM_PROCID. Defaulting to rank 0.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+25 passed, 23 deselected, 72 warnings in 74.70s (0:01:14)
+  /root/Megatron-LM/megatron/core/_rank_utils.py:39: UserWarning: Could not determine rank from torch.distributed, RANK, or SLURM_PROCID. Defaulting to rank 0.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 36 deselected, 12 warnings in 36.77s
+
+--- stderr ---
++ cd /tmp
++ python -c 'import pytest'
++ python -c 'import miles, sys; print('\''image miles'\'', miles.__file__)'
++ nvidia-smi --query-gpu=name --format=csv
++ echo '--- full parse_args (miles-next 0394715 parser, image megatron)'
++ cd /yeto
++ PYTHONPATH=/yeto:/miles-next
++ python -m pytest -q -p no:cacheprovider -rfEs tests/test_rl_grpo_knobs_upstream.py -k 'full_parse_args or miles_parser or kl_loss_triggers'
++ tail -80
++ PYTHONPATH=/yeto:/miles-next
++ python -m pytest -q -p no:cacheprovider -rfEs tests/test_rl_miles_adapter_config.py -k upstream_parse
++ tail -5
+
+Stopping app - local entrypoint completed.
+✓ App completed. View run at 
+https://modal.com/apps/yetalabs/main/ap-IFjK3spr0lcOfFUfQIopEL
+exit=0
