@@ -261,6 +261,25 @@ def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
     }
 
 
+def _dynamic_filter_counts(batch: RolloutBatchHandle) -> dict[str, int]:
+    """Legacy ``rl/dynamic_filter/*`` round stats from the rollout metadata.
+
+    The all-samples hook sees every generated group; ``filtered`` counts the
+    generated groups that were not trained this round (dynamic-filter drops
+    and over-sampling leftovers; whether leftovers are reused -- A2/F5
+    ``carried_over`` -- is audited in 4.1). Unknown (None) keeps the defaults.
+    """
+    filtered = getattr(batch, "filtered", None)
+    if filtered is None:
+        return {}
+    trained = len(batch.groups)
+    return {
+        "dynamic_filter_generated_groups": trained + int(filtered),
+        "dynamic_filter_dropped_groups": int(filtered),
+        "dynamic_filter_replacement_attempts": int(filtered),
+    }
+
+
 def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
     import hashlib
 
@@ -662,6 +681,7 @@ class IslandDriver:
             lr=metrics.lr,
             applied_lr=None if not metrics.applied_lrs else min(metrics.applied_lrs),
             applied_lrs=metrics.applied_lrs or None,
+            **_dynamic_filter_counts(batch),
         )
 
     def _mismatch_fields(self) -> dict[str, Any]:

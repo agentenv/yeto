@@ -280,3 +280,19 @@ def test_round_counters_align_end_to_end_through_the_pool(tmp_path):
         current["v"] = next(versions)
         seen[rid] = p.generate(rid).nonzero_advantages
     assert seen == counts
+
+
+def test_dynamic_filter_round_stats_come_from_the_all_samples_metadata(tmp_path):
+    """1b gap: rl_local_round dynamic_filter_* stayed 0 on ports. Real hook path: 2 groups
+    trained, 2 generated groups dropped by the filter -> generated 4, dropped 2."""
+    from yeto.rl.engine.driver import IslandDriver, TrainStepMetrics
+
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    dropped = [group(2, [1.0, 1.0]), group(3, [0.0, 0.0])]
+    _, p = pool(tmp_path, kept, dropped)
+    handle = p.generate(3)
+    assert handle.filtered == 2
+    stats = IslandDriver._stats(SimpleNamespace(learner_id=0), 3, handle,
+                                TrainStepMetrics(grad_norm=1.0), 1.0, 1.0)
+    assert (stats.dynamic_filter_generated_groups, stats.dynamic_filter_dropped_groups,
+            stats.dynamic_filter_replacement_attempts) == (4, 2, 2)
