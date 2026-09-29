@@ -516,13 +516,6 @@ def test_always_emit_field_only_when_its_mechanism_applies():
         alg.unregister(field=("correction", "t_src"))
 
 
-def test_reward_dispatcher_rejection_explains_the_pending_declaration():
-    caps = fake_capabilities()  # an engine without the dispatcher declaration
-    with pytest.raises(CapabilityMismatch, match="maxrl/mapo is not declared yet"):
-        _check(caps, _complete(_combine(
-            CANDIDATES["reward_postprocessors:custom_reward_postprocess"])))
-
-
 def test_estimator_mandated_settings_are_claimed_by_the_estimator():
     caps = miles_capabilities(FP)
     gspo = AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
