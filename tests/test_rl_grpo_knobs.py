@@ -466,3 +466,37 @@ def test_hook_default_unchanged():
     assert [s.remove_sample for s in data[0]] == [False, False]
     assert set(meta) == {"schema", "rollout_id", "groups", "completed", "filtered", "aborted",
                          "trained_sample_indices"}
+
+
+# ---------------------------------------------------------------- 3.2 learner (before outer sync)
+
+
+def test_two_islands_ref_model_checked_before_joining(tmp_path):
+    """Island B's base revision differs from the spec's KL reference: B fails in
+    verify_ports_algorithm (called before any bridge, P0 test_learner_checks_before_the_bridge)."""
+
+    from tests.test_rl_miles_adapter_config import make_config
+    from yeto.rl import learner as rl_learner
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    spec = kl_spec()
+    launch = mc.translate_run_config(make_config(), spec)
+    results = {}
+    for island, revision in ((0, "rev-a"), (1, "rev-b")):
+        tape = tmp_path / f"tape{island}.jsonl"
+        args = SimpleNamespace(rl_expected_algorithm_sha256=spec.sha256(), event_tape=str(tape),
+                               learner_id=island, rl_allow_unverified_mechanism=None,
+                               model_revision=revision)
+        try:
+            rl_learner.verify_ports_algorithm(args, SimpleNamespace(), launch)
+            results[island] = "joined"
+        except rl_learner.AlgorithmMismatchError as exc:
+            results[island] = str(exc)
+        results[f"tape{island}"] = ([json.loads(x) for x in tape.read_text().splitlines()]
+                                    if tape.exists() else [])
+    assert results[0] == "joined" and results["tape0"] == []
+    assert "base_model_revision 'rev-b'" in results[1]
+    [event] = results["tape1"]
+    assert event["event"] == "rl_algorithm_island_rejected" and event["island_id"] == 1
+    # a different reference revision is a different algorithm hash (outer-sync identity)
+    assert kl_spec(revision="rev-b").sha256() != spec.sha256()

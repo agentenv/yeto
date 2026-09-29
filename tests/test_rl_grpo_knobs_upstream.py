@@ -252,6 +252,34 @@ def test_remove_sample_semantics(monkeypatch):
     assert token(x).item() == float(sum(sum(m) for m in removed["loss_masks"]))
 
 
-def test_full_parse_args():
+@pytest.mark.parametrize("name", sorted(SPECS))
+def test_full_parse_args(tmp_path, name):
+    """Upstream ``parse_args`` + ``validate_parsed_args`` on the full translated
+    argv (pinned image only: needs megatron.training)."""
+
     pytest.importorskip("megatron.training")
-    pytest.skip("covered by the pinned-image run (progress.md); megatron.training present here")
+    import dataclasses
+    import json
+
+    from tests.test_rl_miles_adapter_config import _TINY_QWEN3, make_config, sub
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    (tmp_path / "config.json").write_text(json.dumps(_TINY_QWEN3))
+    (tmp_path / "p.jsonl").write_text('{"messages":[{"role":"user","content":"hi"}],"label":"x"}\n')
+    cfg = dataclasses.replace(make_config(), hf_checkpoint=str(tmp_path), ref_load=str(tmp_path))
+    cfg = sub(cfg, "data", prompt_path=str(tmp_path / "p.jsonl"))
+    cfg = sub(cfg, "trainable", target_modules=("q_proj", "k_proj", "v_proj", "o_proj"))
+    spec, expected = SPECS[name]
+    if spec.sampling.over_sampling_batch_size is not None:
+        cfg = sub(cfg, "batch", over_sampling_batch_size=spec.sampling.over_sampling_batch_size)
+    launch = mc.translate_run_config(cfg, spec)
+    args = mc.parse_miles_args(launch)
+    for key, value in expected.items():
+        assert getattr(args, key) == value, key
+    if name == "over_sampling":
+        assert args.over_sampling_batch_size == 64
+    plugins = gk.plugins_config(spec)
+    if plugins is None:
+        assert not hasattr(args, rp.PIPELINE_ATTR) or getattr(args, rp.PIPELINE_ATTR) is None
+    else:
+        assert rp.read_plugins(args) == {"schema": rp.PLUGINS_SCHEMA, **plugins}

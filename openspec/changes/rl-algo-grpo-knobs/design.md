@@ -116,7 +116,7 @@ post_process(args, samples)
 
 overlong 过滤与软惩罚可以同时启用，二者不冲突。
 
-与 `rl-infra-spec` 3.6 账本的对齐（alignment.md A2）：`record_trained_groups` 是两边共用的唯一 hook。本 change 先设置 `remove_sample` 并写被过滤样本数，infra 账本在同一 hook 之后把这些样本记为终态 `filtered`；两边都不得另开 `--rollout-sample-filter-path`。
+与 `rl-infra-spec` 3.6 账本的对齐（alignment.md A2）：`record_trained_groups` 是两边共用的唯一 hook。本 change 先设置 `remove_sample` 并写被过滤样本数，infra 账本在同一 hook 之后把这些样本记为终态 `filtered`（超采样可复用的余量组记为非终态 `carried_over`）；两边都不得另开 `--rollout-sample-filter-path`。
 
 ### D8. 超采样与外层等权平均
 
