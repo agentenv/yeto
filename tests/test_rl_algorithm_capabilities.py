@@ -460,38 +460,44 @@ def test_opsm_combines_with_tis_and_translates_both():
         CorrectionSpec(opsm_delta=1e-4)
 
 
-def test_named_custom_function_only_exempt_when_its_mechanism_detects():
+def test_named_custom_function_only_exempt_when_its_own_mechanism_detects():
     from yeto.rl.engine.algorithm import PluginRef
 
     ref = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
-    spec = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=ref,
-                                                   tis_clip=5, tis_clip_low=0.5))
+    other = PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
+
+    def spec_for(fn):
+        return AlgorithmSpec(correction=CorrectionSpec(method="custom", function=fn,
+                                                       tis_clip=5, tis_clip_low=0.5))
+
+    spec = spec_for(ref)
     assert ("corrections", "custom") in spec.required_mechanisms()
-    alg.register_named_correction_function(ref.path)
+    with pytest.raises(ValueError, match="mechanism name"):
+        alg.register_named_correction_function(ref.path, mechanisms=())
+    alg.register_named_correction_function(ref.path, mechanisms=("t_named",))
     try:
-        # named but no mechanism claims it: still generic custom (no escape)
+        # named but its own mechanism not registered: still generic custom
+        assert ("corrections", "custom") in spec.required_mechanisms()
+        # another named mechanism that happens to detect this spec does NOT
+        # exempt it (it is not this path's own detector)
+        alg.register_mechanism("corrections", "t_foreign",
+                               lambda s: s.correction.method == "custom")
         assert ("corrections", "custom") in spec.required_mechanisms()
         alg.register_mechanism("corrections", "t_named",
                                lambda s: s.correction.function is not None
                                and s.correction.function.path == ref.path)
-        try:
-            required = spec.required_mechanisms()
-            assert ("corrections", "t_named") in required
-            assert ("corrections", "custom") not in required
-            # the adapter declaring only generic 'custom' does not admit it
-            with pytest.raises(CapabilityMismatch, match="'t_named' not supported"):
-                _check(fake_capabilities(corrections={"none", "custom"}), spec)
-            # a different function (other path) still needs 'custom'
-            other = PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
-            spec2 = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=other,
-                                                            tis_clip=5, tis_clip_low=0.5))
-            assert ("corrections", "custom") in spec2.required_mechanisms()
-        finally:
-            alg.unregister(mechanism=("corrections", "t_named"))
+        required = spec.required_mechanisms()
+        assert ("corrections", "t_named") in required
+        assert ("corrections", "custom") not in required
+        with pytest.raises(CapabilityMismatch, match="'t_named' not supported"):
+            _check(fake_capabilities(corrections={"none", "custom", "t_foreign"}), spec)
+        assert ("corrections", "custom") in spec_for(other).required_mechanisms()
     finally:
-        alg.NAMED_CORRECTION_FUNCTIONS.discard(ref.path)
+        alg.unregister(mechanism=("corrections", "t_named"))
+        alg.unregister(mechanism=("corrections", "t_foreign"))
+        alg.NAMED_CORRECTION_FUNCTIONS.pop(ref.path, None)
     with pytest.raises(ValueError, match="must be in"):
-        alg.register_named_correction_function("examples.x.fn")
+        alg.register_named_correction_function("examples.x.fn", mechanisms=("x",))
 
 
 def test_always_emit_field_only_when_its_mechanism_applies():
