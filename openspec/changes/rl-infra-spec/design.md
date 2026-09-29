@@ -30,7 +30,7 @@
 | `partitioned-serial` | E0 分区/状态/映射基线 | trainer/rollout 卡组独立，算法有依赖时仍串行；分离本身不算性能成功 |
 | `partitioned-overlap` | 目标中有条件的重叠执行 | 只有运行 profile 明确允许、且就绪的任务才重叠；启用前必须完成依赖与版本契约验证 |
 
-`ExecutionProfile` 至少含 policy 对每条轨迹的绑定、batch/组就绪、允许的版本年龄、更新/发布/外层同步顺序、允许重叠的任务对、最大在途 batch/轨迹、缓冲容量和反压、quiescent cut 条件。执行模式及算法契约 hash 在一次运行中固定，不由自动控制临时改写。算法契约 hash 即 `rl-algorithm-capabilities` 的 `AlgorithmSpec` 规范化哈希（`algorithm_spec_sha256`），不另设算法身份；profile 的允许版本年龄 `max_policy_age` 必须不大于 `AlgorithmSpec.execution.max_policy_staleness`，引擎能力 `execution.max_policy_staleness` 由已认证执行模式可产生的最大年龄决定（当前三种模式中只有经认证的 `partitioned-overlap` 可能大于 0，本 change 未认证任何大于 0 的契约）。
+`ExecutionProfile` 至少含 policy 对每条轨迹的绑定、batch/组就绪、允许的版本年龄、更新/发布/外层同步顺序、允许重叠的任务对、最大在途 batch/轨迹、缓冲容量和反压、quiescent cut 条件。执行模式及算法契约 hash 在一次运行中固定，不由自动控制临时改写。算法契约 hash 即 `rl-algorithm-capabilities` 的 `AlgorithmSpec` 规范化哈希（`algorithm_spec_sha256`），不另设算法身份；profile 的允许版本年龄 `max_policy_age` 必须不大于 `AlgorithmSpec.execution.max_policy_staleness`，引擎能力 `execution.max_policy_staleness` 由已认证执行模式可产生的最大年龄决定。年龄大于 0 只能来自另立 change 认证的算法契约；本 change 的所有执行模式（含 `partitioned-overlap`）策略年龄均为 0。
 
 E0 默认交付 `partitioned-serial`，同时审计现有算法允许的重叠（例如独立 CPU 工作与不依赖它的 GPU 工作）。如果生成下一 batch 需要本次更新后的权重，明确保留 `update -> publish -> next rollout` 依赖，不启动旧版本 rollout。若只有引入 one-step-off-policy 等新契约才能获得流水线收益，则记录算法变更为独立后续设计，不擅自放宽本 change 的陈旧度约束；本阶段可以得出“该 profile 尚无可启用的并发路径”的有效结论。
 
@@ -113,7 +113,7 @@ E1先固定trainer，例如`T4R2S2 -> T4R4S0`（S为池内备用卡），验证r
 
 `generate_rollout`/reward/group 校验与现有 bridge 决定 `ready_for_train`；调度只在就绪任务中分配资源，不能用队列阈值提前截断 GRPO 组或改样本利用。配置 epoch 与权重版本不同：一次纯资源切换增加 epoch，但不制造新策略版本或 optimizer step。
 
-轨迹标识至少 `(run_id, learner_id, rollout_id, group_id, sample_id, attempt_id)`；每个 segment/token 请求绑定 policy token/hash 和 worker/config epoch。数据提交按 group_id 和既有 retry 语义去重；batch 消费清单持久记录 `prepared -> optimizer_applied -> outer_recorded`，与完整 checkpoint 的切点关联。内存里“曾经提交”不能作为 crash 后去重凭据。算法层按描述有意丢弃的样本/组（动态过滤、超采样多余组、overlong 过滤）记为显式终态 `filtered`，与“丢失”区分。
+轨迹标识至少 `(run_id, learner_id, rollout_id, group_id, sample_id, attempt_id)`；每个 segment/token 请求绑定 policy token/hash 和 worker/config epoch。数据提交按 group_id 和既有 retry 语义去重；batch 消费清单持久记录 `prepared -> optimizer_applied -> outer_recorded`，与完整 checkpoint 的切点关联。内存里“曾经提交”不能作为 crash 后去重凭据。算法层按描述有意丢弃、数据游标已推进的样本/组记为显式终态 `filtered`，与“丢失”区分；可被后续轮复用的余量组记为非终态 `carried_over`，不属于终态，仍按未消费组进入 cut。
 
 ### D4. 安全点与显式协议
 
@@ -259,6 +259,17 @@ baseline 对比默认固定、测试范围内最佳固定、动态三组；相�
 岛内切换在已分配池中进行，通常比云申请/镜像启动/模型加载更短；云供给不保证即时或零成本。资源记录增加`pool_id/pool_epoch/capacity/standby/reservation_identity`。首轮pool_epoch不变；后续扩池需先云侧就绪、验收拓扑/镜像、注册Ray资源并提交新的pool epoch，再允许配置引用新卡；缩池先drain并证明确无状态/任务依赖，再释放云资源。worker变化不自动改变logical learner roster。
 
 本机8×H200/NV18/约2TiB RAM仅是一次只读观察，不定义支持范围，不因当时显存占用推迟方案或声称GPU空闲。CPU中转要按租用实例的NUMA、RAM/带宽测量；H20论文数据不可移用。备用容量、初始化重叠所需额外卡和云启动等待都计入实测成本。
+
+### D12. 岛间扩展（后续占位，范围延后，待用户审阅）
+
+出处：用户 2026-09-29 无人值守轮指示：F 只做单岛 7.1/7.2 设计，7.3 跨岛分配、多云、DiLoCo 成员变更留待以后，只写后续占位。本段只占位，不构成 7.3 的交付。
+
+- **延后原因**：首轮只有单岛、固定 DiLoCo 成员；跨岛分配和成员变更要改外层协议；在途云接入 change（`add-nebius-verda-modal-clouds`、fix-verda-provider）尚未合入；Verda 与 Modal 暂不能承载 head。
+- **前置条件**：E1 3.8（含 X6 两小岛 strict 暂停）通过；7.1/7.2 设计评审通过；fix-verda-provider 合入；用户批准在线云扩缩范围。
+- **后续 7.3 必须遵守的约束**（沿用原 7.3 验收要点）：
+  1. 不重复实现 provider 已有能力，跨岛分配与多云只调用现有云接入 change 的生命周期接口；
+  2. 不把容器或实例重启当作岛内切换，岛内切换仍走 D4 事务，跨岛或成员变化另走外层协议；
+  3. 不预设每次都需要全局 barrier，确需协调时单独设计协议并给出证据。
 
 ## Risks / Trade-offs
 
