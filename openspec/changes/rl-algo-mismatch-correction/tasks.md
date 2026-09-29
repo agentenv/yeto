@@ -32,7 +32,8 @@
 - [x] 3.3 实现"至多一种修正方式"的拒绝（只观测、TIS、IcePop、MIS 两两互斥；OPSM 可组合，只观测除外）。验证：参数化单测，报错列出冲突项，均在构建 GPU 进程前失败。
   - 复审后完成（CPU 通过）：合入 algo-cap fefcbe0（含 1a-shared.patch）后，`test_opsm_combines_with_tis_but_not_with_observe` 不再 skip，已通过。
   - 状态（已实现，部分）：只观测、TIS、IcePop、MIS 两两互斥，冲突在构建 GPU 进程前失败，报错列出两个 flag。“OPSM 可与其他修正组合”需要 `1a-shared.patch`（P0 的 `method` 是单值），相关测试在未打补丁时 skip。
-- [ ] 3.4 IcePop 的 `expects_gradient`：`masked_fraction == 1.0` 时不期望梯度；adapter 从 Miles 指标读取或推导屏蔽比例。验证：fake 测试覆盖全屏蔽不失败、部分屏蔽零梯度失败、屏蔽比例缺失时按期望梯度判定、grad_norm 非有限失败。
+- [x] 3.4 IcePop 的 `expects_gradient`：`masked_fraction == 1.0` 时不期望梯度；adapter 从 Miles 指标读取或推导屏蔽比例。验证：fake 测试覆盖全屏蔽不失败、部分屏蔽零梯度失败、屏蔽比例缺失时按期望梯度判定、grad_norm 非有限失败。
+  - 完成记录（CPU 通过 + GPU 核对）：INFRA 0c2cd99 已让 adapter 调用 `masked_fraction_from_metrics`。GPU 磁带核对（g3c/g3d 均含 0c2cd99）：IcePop 两岛每轮 `rl_round_trained.masked_fraction` 都等于同一事件 mismatch 字典中的 `tis_clipfrac`（0.0），与 Miles 日志中的 train/tis_clipfrac 一致；TIS 两岛的 masked_fraction 为 None（TIS 不屏蔽，按设计返回 None）。局限：GPU 上只见到 0 值，非零值的推导以及 MIS 的 mask_fraction 相加只由 CPU 测试覆盖（trigger 运行早于 0c2cd99）。fake 测试已覆盖全屏蔽不失败、部分屏蔽或屏蔽比例缺失时零梯度失败、grad_norm 非有限失败。
   - 状态（已实现 + CPU 通过，adapter 接线未完成）：已有 fake driver 测试 `test_fake_driver_full_mask_round_is_not_a_failure`（全屏蔽不失败；部分屏蔽或缺失时零梯度失败）和 `masked_fraction_from_metrics`。但 trainer 目前只读 `masked_fraction` 键，还没有调用这个 helper，属于 INFRA 需求。
 
 ## 4. OPSM（design D5/D7）
@@ -80,6 +81,7 @@
   - 入口复验（`evidence/2026-09-29-g1c/`）：tis、icepop、opsm-trainer 走 `yeto launch --rl-single-island-no-sync --controller local` 真实入口复验，判据 1-6 全部通过（判据 6 为显式的 receipt 统计判据）。另有生效验证（`evidence/2026-09-29-trigger/`）：在事先固定的小阈值下，tis、icepop、mis_mask 的截断/屏蔽比例均 >0，OPSM 在 2 步/轮时 opsm_clipfrac >0，均通过。
   - 注：g1c 中 icepop 与 tis 在自然训推差异下数值逐位相同（没有 token 越界），所以生效以 trigger 运行为准。check.json 中 `rc0` 键的含义是“退出码可接受”（0，或 2 且同时打印不可取回的说明），新运行将改名为 `rc_ok`。
 - [ ] 7.3 对 G1 通过的每项，在 Miles adapter 的 `EngineCapabilities.corrections` 中加入声明（每项单独变更）。验证：adapter 的 `check()` 单测接受已声明项、仍拒绝未通过项；`progress.md` 引用对应证据目录。
+  - 状态（未完成）：opsm_rollout 与 mis 按原文可以声明，但主 agent 决定声明必须有 GPU 生效证据（比原文更严），因此暂缓；用户可推翻这一决定。
   - 进展（更正）：Miles adapter 声明了 {none, tis, opsm, opsm_trainer}。其中 `opsm` 是内置的“使用了 OPSM（设置了 opsm_delta）”维度，任何 OPSM 规格都要求它，它本身不放行任何来源；来源由 `opsm_trainer` 或 `opsm_rollout` 各自决定，`opsm_rollout` 未声明，也没有 G1 或生效验证。opsm_trainer 的生效证据（trigger 中 opsm_clipfrac>0）同时覆盖 `opsm` 这一维度在 trainer 来源下的代码路径。tis 的生效也已验证。mismatch_observe、icepop、mis、mis_mask 尚未声明：icepop 与 mis_mask 由集成分支统一处理（icepop 需要 corrections:custom 粒度）；mis（截断/裁剪变体）若要声明，需先补一次事先提交计划的触发验证。“对 G1 通过的每项声明”尚未全部满足，保持未勾选。
   - 状态（未完成）：`entry.py` 由 ALGO-CAP 负责。G1 已通过的 tis、opsm_trainer 的声明补丁在 `1a-declare.patch`；observe、icepop、mis、mis_mask 需要先合入 `1a-shared.patch`（custom 粒度），否则声明 custom 会放开任意函数。
 - [x] 7.4 G2（1 卡）：只观测约 20 轮，产出报告（每轮 `train_rollout_kl`、`tis_abs` 分位数、`ess_ratio`、[0.5,5] 区间外 token 比例），注明模型与配置、不外推。验证：报告文件存在于证据目录，数据可由指标 jsonl 重新生成；是否推荐默认开启交用户决定，不在本 change 内修改默认。
