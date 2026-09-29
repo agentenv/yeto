@@ -63,6 +63,7 @@ MILES_DECLARED: dict[str, str] = {
     "features:overlong_penalty": f"{_E1B}/g1_report_v2.json overlong_penalty (shaped_samples 4/7/21)",
     "advantage_estimators:gspo": f"{_E2A}/attempt6 gspo_s2 (optimizer_steps 2: second-step clipfrac 0.1875/0.5/0.5; steps 1: 0)",
     "advantage_estimators:reinforce_plus_plus": f"{_E2A}/attempt6 rpp (3 rounds, finalized, finite grad_norm)",
+    "advantage_estimators:reinforce_plus_plus_baseline": f"{_E2A}/attempt6 rpp_baseline (3 rounds, finalized, finite grad_norm)",
 }
 
 
