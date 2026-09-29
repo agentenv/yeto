@@ -28,6 +28,21 @@ ECHO_ENV = "YETO_RL_ECHO_EVENTS"
 _WRITE_LOCK = threading.Lock()
 
 
+def _emit(text: str) -> None:
+    """One write per record, then flush.
+
+    A single ``write`` of a line up to PIPE_BUF (4096 bytes on Linux) to a
+    pipe is atomic, so records of several processes (learner + Ray workers)
+    sharing a stdout pipe do not interleave. A longer record may interleave
+    with another process's output; the collector then counts it as a
+    discarded malformed line (and a missing record makes the tape incomplete:
+    fail closed, never a silently wrong tape).
+    """
+
+    sys.stdout.write(text + "\n")
+    sys.stdout.flush()
+
+
 def echo_enabled() -> bool:
     return os.environ.get(ECHO_ENV) == "1"
 
@@ -56,7 +71,7 @@ def append_record(path, record: dict) -> str:
         with target.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
         if echo_enabled():
-            print(PREFIX + line, flush=True)
+            _emit(PREFIX + line)
     return line
 
 
@@ -64,7 +79,7 @@ def echo_record(record: dict) -> None:
     """Echo a record that has no tape file in this process (e.g. a Ray worker)."""
 
     if echo_enabled():
-        print(PREFIX + encode(record), flush=True)
+        _emit(PREFIX + encode(record))
 
 
 FINALIZED_EVENT = "rl_learner_finalized"
