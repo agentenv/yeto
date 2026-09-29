@@ -77,3 +77,17 @@ that fails twice stays undeclared (7.5) with the reason recorded.
   additionally reads the `rl_round_trained` event fields (masked_fraction / clip_fraction /
   nonzero_advantages) as observations. Known open P0 items (fixture failure id, driver event
   names) do not affect these criteria.
+
+## Attempt 2 (sb-p3xH10YsZ2hFlfXqMXikR3, H100 80GB HBM3 asserted, 557 s, code 8d7f752) -- infra defect
+- gspo_s2: generation, rollout and the first round's two optimizer steps ran (Miles log: step 0
+  pg_clipfrac 0.0 grad_norm 1.129; step 1 pg_clipfrac 0.4375 grad_norm 0.417 -- the sequence clip
+  binds on the second step, as design D1 predicts). Then `MilesTrainerGroup.train_step` built
+  `LocalStepReceipt(algorithm='gspo')` and `yeto/rl/contracts.py` refused it:
+  `ValueError: unsupported local RL algorithm: 'gspo'` (`_ALGORITHMS = {"grpo", "sao"}`).
+  worker rc=1; run_all aborted the session (first run failed). Evidence: attempt2/.
+- Cause is outside this change (contracts.py / entry.py:265): every non-grpo estimator
+  (gspo, reinforce_plus_plus, reinforce_plus_plus_baseline) fails the same way. Proposed fix:
+  `infra-drafts/2a-receipt.patch`. GSPO / rpp / rpp_baseline G1 wait for it (their one allowed
+  rerun is kept for after the fix).
+- MaxRL / MAPO / GDPO use `advantage.estimator="grpo"` (receipt label "grpo") and are not
+  affected: attempt 3 runs exactly those three with the same code (8d7f752) and harness.
