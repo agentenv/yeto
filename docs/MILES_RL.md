@@ -839,8 +839,11 @@ summarizes raw against shaped rewards.
 
 DAPO's paper masks truncated samples in the loss but does not say whether
 their reward enters the group statistics. The rollout metadata carries
-`filtered_samples`, which the ledger records in the terminal state `filtered`;
-over-sampling leftovers are `carried_over`. A round in which every
+`filtered_samples`, which the ledger records in the terminal state `filtered`.
+Over-sampling leaves no reusable remainder: once a rollout has its batch,
+Miles does not return further kept groups to the buffer
+(`sglang_rollout.py:505-510`); only samples aborted under `--partial-rollout`
+go back. A round in which every
 non-zero-variance group was filtered completely does not trip the zero-gradient
 invariant.
 

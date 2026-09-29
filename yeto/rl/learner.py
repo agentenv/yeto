@@ -302,7 +302,11 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
     algorithm.verify_plugins()
     from .engine.algorithm import island_problems
 
-    problems = island_problems(algorithm, {"base_model_revision": getattr(args, "model_revision", None)})
+    problems = island_problems(algorithm, {
+        "base_model_revision": getattr(args, "model_revision", None),
+        "base_model": getattr(args, "model", None),
+        "ref_load_override": getattr(args, "megatron_ref_load", None),
+    })
     if problems:
         _append_ports_event(args, miles_args, {
             "event": "rl_algorithm_island_rejected",

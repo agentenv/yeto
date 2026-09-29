@@ -402,3 +402,19 @@ def test_gradient_rule_may_tighten_only_for_its_mechanism():
                 assert spec.expects_gradient(b) == _r0_driver_rule(b)
     finally:
         alg.unregister(gradient_rule="t_tight")
+
+
+def test_extension_owned_pipeline_plugins_do_not_require_features_plugins(monkeypatch):
+    import yeto.rl.algos as algos
+
+    ref = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+    spec = AlgorithmSpec(plugins=(ref,))
+    assert ("features", "plugins") in spec.required_mechanisms()  # foreign plugin
+    monkeypatch.setattr(alg, "_PIPELINE_PLUGIN_MODULES", {"yeto.rl.engine.algorithm"})
+    assert ("features", "plugins") not in spec.required_mechanisms()
+    assert spec.sha256() != AlgorithmSpec().sha256()  # identity still hashed
+    monkeypatch.setattr(alg, "_PIPELINE_PLUGIN_MODULES", set())
+    monkeypatch.setattr(algos, "EXTENSION_MODULES", ("yeto.rl.engine.algorithm",))
+    assert ("features", "plugins") not in spec.required_mechanisms()
+    with pytest.raises(ValueError, match="yeto namespace"):
+        alg.register_pipeline_plugin_module("miles.x")
