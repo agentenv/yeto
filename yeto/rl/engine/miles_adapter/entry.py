@@ -61,6 +61,12 @@ def miles_capabilities(
         advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
+        # rl-algo-mismatch-correction 7.3: declared only after the single-GPU
+        # smoke (G1) passed -- evidence/2026-09-29-g1/runs/{tis,opsm-trainer}.
+        # opsm_rollout, mismatch_observe, icepop and mis* stay undeclared
+        # (observe/icepop/mis additionally need 1a-shared.patch so that a
+        # named custom function does not require the generic 'custom').
+        corrections={"none", "tis", "opsm", "opsm_trainer"},
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),
@@ -322,8 +328,8 @@ def selection_event(
     if unverified_mechanisms:
         event["rl/unverified_mechanisms"] = sorted(unverified_mechanisms)
         event["rl/contains_unverified_mechanisms"] = True
-    if outer_sync is not None:
-        event["rl/outer_sync"] = bool(outer_sync)
+    # Always recorded; an unknown mode (None) is the R0 default: outer sync on.
+    event["rl/outer_sync"] = True if outer_sync is None else bool(outer_sync)
     return event
 
 

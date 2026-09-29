@@ -94,3 +94,5 @@
   - 事件与来源记录写入 `rl/unverified_mechanisms`；导出标记 `contains_unverified_mechanisms`，无 syncer 单岛产生的事件经 `--rl-event-tape` 导出后已验证标记正确。
   - 放行不影响哈希，也不绕过拒绝矩阵。
   相关测试在 `tests/test_rl_algorithm_capabilities.py` 与 `tests/test_rl_algorithm_provenance.py`。说明：ssh_harness 的 verify 依赖 syncer 磁带，不覆盖无 syncer 的运行，所以无 syncer 运行走 `--rl-event-tape` 导出。全量失败集合与基线相同（94 个）。
+- 2.6 **再次改回未勾选**（复审 E2）：第 2 次运行没有执行原计划中的 argv 比较，事后改了比较口径，而且原口径本身有误。第 3 次按 `evidence/2026-09-29-megatron-parse/attempt3-plan.md` 运行，通过后才重新勾选。
+- 2.6 **重新勾选：CPU 通过**（第 3 次运行，按事先提交的 `evidence/2026-09-29-megatron-parse/attempt3-plan.md`）。yeto 版本 5d8ba40。28 例全部通过 learner 路径生成 argv、带 Megatron 校验的 upstream 解析和字段核对，本地与远端 argv 逐字节相同，详见 `result.md`。

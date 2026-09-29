@@ -265,6 +265,10 @@ class FieldDef:
     default: Any
     parse: Callable[[str, Any], Any]  # (field path, raw) -> normalized value
     to_json: Callable[[Any], Any] = lambda value: value
+    # When it returns True for the group, the value is kept in the canonical
+    # JSON even if it equals the default (a semantic choice that must be
+    # explicit in the identity whenever it applies, e.g. OPSM's pi_old source).
+    always_emit: Callable[[Any], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -282,11 +286,15 @@ class MechanismDef:
 _FIELDS: dict[str, dict[str, FieldDef]] = {}
 _MECHANISMS: dict[tuple[str, str], MechanismDef] = {}
 _REJECTIONS: dict[str, Callable[["AlgorithmSpec"], str | None]] = {}
+# correction.function paths that have their own mechanism name (see
+# register_named_correction_function); they no longer require 'custom'.
+NAMED_CORRECTION_FUNCTIONS: set[str] = set()
 
 
 def register_field(group: str, name: str, *, default: Any,
                    parse: Callable[[str, Any], Any],
-                   to_json: Callable[[Any], Any] | None = None) -> FieldDef:
+                   to_json: Callable[[Any], Any] | None = None,
+                   always_emit: Callable[[Any], bool] | None = None) -> FieldDef:
     if group not in _GROUPS:
         raise ValueError(f"unknown spec group {group!r}; one of {sorted(_GROUPS)}")
     core = {f.name for f in fields(_GROUPS[group])}
@@ -296,7 +304,8 @@ def register_field(group: str, name: str, *, default: Any,
         hash(default)
     except TypeError as exc:
         raise ValueError(f"field {group}.{name}: default must be hashable") from exc
-    definition = FieldDef(group, name, default, parse, to_json or (lambda value: value))
+    definition = FieldDef(group, name, default, parse, to_json or (lambda value: value),
+                          always_emit)
     _FIELDS.setdefault(group, {})[name] = definition
     return definition
 
@@ -312,6 +321,45 @@ def register_mechanism(dimension: str, name: str, detect: Callable[["AlgorithmSp
     definition = MechanismDef(dimension, name, detect, masks_tokens, requires_binary_reward)
     _MECHANISMS[key] = definition
     return definition
+
+
+_PIPELINE_PLUGIN_MODULES: set[str] = set()
+
+
+def register_pipeline_plugin_module(module: str) -> None:
+    """Declare ``module`` an extension-owned plugin module.
+
+    A ``spec.plugins`` entry whose callable lives in such a module (or in a
+    module listed in ``yeto.rl.algos.EXTENSION_MODULES``) still enters the
+    hash and is re-hashed at startup, but does not require the
+    ``features:plugins`` mechanism.
+    """
+
+    if not module.startswith("yeto."):
+        raise ValueError(f"pipeline plugin module {module!r} must be in the yeto namespace")
+    _PIPELINE_PLUGIN_MODULES.add(module)
+
+
+def _owned_plugin(path: str) -> bool:
+    load_extensions()
+    from yeto.rl.algos import EXTENSION_MODULES
+
+    module = path.rpartition(".")[0]
+    return module in _PIPELINE_PLUGIN_MODULES or module in EXTENSION_MODULES
+
+
+def register_named_correction_function(path: str) -> None:
+    """``path`` is declared by its own correction mechanism, not 'custom'.
+
+    The exemption from ``corrections:custom`` applies only while some other
+    registered ``corrections`` mechanism actually detects the spec (see the
+    'custom' detector), so a named path can never escape the capability
+    check; its source identity stays covered by the PluginRef hash.
+    """
+
+    if not path.startswith("yeto."):
+        raise ValueError(f"named correction function {path!r} must be in the yeto namespace")
+    NAMED_CORRECTION_FUNCTIONS.add(path)
 
 
 def register_rejection(name: str, check: Callable[["AlgorithmSpec"], str | None]) -> None:
@@ -486,8 +534,10 @@ class _Group:
                 f"unknown {self.GROUP} fields: {[f'{self.GROUP}.{u}' for u in unknown]}"
             )
         normalized = []
-        for name in sorted(raw):
-            value = definitions[name].parse(f"{self.GROUP}.{name}", raw[name])
+        for name in sorted(set(raw) | set(definitions)):
+            definition = definitions[name]
+            value = definition.parse(f"{self.GROUP}.{name}", raw[name]) if name in raw \
+                else definition.default
             try:
                 hash(value)
             except TypeError:
@@ -495,7 +545,8 @@ class _Group:
                     f"{self.GROUP}.{name}: the registered parser returned an unhashable "
                     f"{type(value).__name__} (return tuples / frozen values)"
                 ) from None
-            if value != definitions[name].default:
+            forced = definition.always_emit is not None and definition.always_emit(self)
+            if value != definition.default or forced:
                 normalized.append((name, value))
         object.__setattr__(self, "ext", tuple(normalized))
 
@@ -647,8 +698,11 @@ class CorrectionSpec(_Group):
             raise AlgorithmSpecError(
                 "correction.tis_clip/tis_clip_low require correction.method tis or custom"
             )
-        if self.method != "opsm" and self.opsm_delta is not None:
-            raise AlgorithmSpecError("correction.opsm_delta requires correction.method='opsm'")
+        if self.method == "none" and self.opsm_delta is not None:
+            raise AlgorithmSpecError(
+                "correction.opsm_delta requires correction.method 'opsm' (OPSM alone) or "
+                "'tis'/'custom' (OPSM combined with an importance-weighting correction)"
+            )
         if self.method == "opsm" and self.opsm_delta is None:
             raise AlgorithmSpecError("correction.opsm_delta is required for correction.method='opsm'")
         if self.method == "tis" and (self.tis_clip is None or self.tis_clip_low is None):
@@ -1012,30 +1066,36 @@ class AlgorithmSpec:
     def gradient_expectation(
         self, batch_summary: Any, step_metrics: Any = None
     ) -> tuple[bool, str | None]:
-        """``(expects_gradient, source)``; ``source`` names what relaxed it.
+        """``(expects_gradient, source)``; ``source`` names the deciding rule.
 
         ``source`` is None when the R0 rule decides; otherwise
         ``"gradient_rule:<name> (<mechanism>)"`` or ``"masked:<mechanism>"``,
         for the driver's event.
+
+        Precedence (fixed): a tightening rule wins. If any rule of a required
+        mechanism returns a truthy verdict the round expects a gradient
+        (source ``"tightened:gradient_rule:..."``); only otherwise can a
+        falsy verdict (``False``, ``np.bool_(False)``; ``None`` abstains) or
+        a full mask relax the R0 rule.
         """
 
         groups = getattr(batch_summary, "groups", batch_summary)
         required = {f"{d}:{n}" for d, n in self.required_mechanisms()}
-        verdicts = [
-            (name, mechanism, rule(self, batch_summary, step_metrics))
-            for name, (mechanism, rule) in _GRADIENT_RULES.items()
-            if mechanism in required
-        ]
+        verdicts = []
+        for name, (mechanism, rule) in _GRADIENT_RULES.items():
+            if mechanism in required:
+                verdict = rule(self, batch_summary, step_metrics)
+                if verdict is not None:
+                    verdicts.append((name, mechanism, bool(verdict)))
+        for name, mechanism, verdict in verdicts:
+            if verdict:
+                # e.g. GDPO reward vectors / REINFORCE++ group means: a gradient
+                # the scalar reward-variance rule cannot see.
+                return True, f"tightened:gradient_rule:{name} ({mechanism})"
         if not any(g.reward_std > 0 for g in groups):
-            # A mechanism whose advantages do not come from the scalar reward
-            # variance (GDPO reward vectors; REINFORCE++ group means / reward KL)
-            # may require a gradient the R0 rule cannot see.
-            for name, mechanism, verdict in verdicts:
-                if verdict is True:
-                    return True, f"gradient_rule:{name} ({mechanism})"
             return False, None
         for name, mechanism, verdict in verdicts:
-            if verdict is False:
+            if not verdict:
                 return False, f"gradient_rule:{name} ({mechanism})"
         masked = valid_masked_fraction(getattr(step_metrics, "masked_fraction", None))
         if masked is not None and masked >= 1.0:
@@ -1115,9 +1175,24 @@ def _builtin_mechanisms() -> None:
     for placement in KL_PLACEMENTS:
         register_mechanism("kl_placements", placement, lambda s, p=placement: s.kl.placement == p)
     for method in CORRECTION_METHODS:
+        if method in ("opsm", "custom"):
+            continue
         register_mechanism(
             "corrections", method, lambda s, m=method: s.correction.method == m
         )
+    # OPSM alone (method='opsm') or combined with tis/custom (opsm_delta set).
+    register_mechanism("corrections", "opsm", lambda s: s.correction.opsm_delta is not None)
+    # A custom function that a follow-up change registered under its own
+    # mechanism name is declared under that name, not as generic 'custom'.
+    register_mechanism(
+        "corrections", "custom",
+        lambda s: s.correction.method == "custom"
+        and s.correction.function is not None
+        and not (
+            s.correction.function.path in NAMED_CORRECTION_FUNCTIONS
+            and _named_correction_detected(s)
+        ),
+    )
     register_mechanism(
         "reward_postprocessors", "custom_reward_postprocess",
         lambda s: s.advantage.reward_postprocess is not None,
@@ -1140,10 +1215,26 @@ def _builtin_mechanisms() -> None:
         "mismatch_metrics": lambda s: s.correction.mismatch_metrics,
         "over_sampling": lambda s: s.sampling.over_sampling_batch_size is not None,
         "overlong_filter": lambda s: s.sampling.overlong_filter,
-        "plugins": lambda s: bool(s.plugins),
+        # Only plugins that no registered extension owns: the PluginRefs a
+        # registered pipeline (reward shapers / advantage transforms) writes
+        # into spec.plugins are identity records of mechanisms that are
+        # capability-checked under their own names.
+        "plugins": lambda s: any(not _owned_plugin(p.path) for p in s.plugins),
     }
     for name, detect in features.items():
         register_mechanism("features", name, detect)
+
+
+_GENERIC_CORRECTIONS = frozenset(CORRECTION_METHODS) | {"opsm"}
+
+
+def _named_correction_detected(spec: "AlgorithmSpec") -> bool:
+    """Some registered non-generic ``corrections`` mechanism claims the spec."""
+
+    return any(
+        m.dimension == "corrections" and m.name not in _GENERIC_CORRECTIONS and m.detect(spec)
+        for m in registered_mechanisms()
+    )
 
 
 def _reject_reward_kl(s: AlgorithmSpec) -> str | None:
