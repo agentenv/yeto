@@ -176,7 +176,7 @@ any failure -> CANCELLED / REBUILD_OLD / RECOVERY_REQUIRED
 | rollout | completed/aborted/retry 组及既有语义、session 路由版本、engine 权重身份；首版要求无活跃轨迹，KV 可丢弃重建，不能丢未结束工具状态 |
 | runtime | source/backend fingerprint、配置、GPU映射、checkpoint shard schema、checksum、tx/cut ID、是否已 commit epoch |
 
-RNG 跨 DP 不是简单复制每个旧 rank 状态到所有新 rank。同形恢复先要求对应 RNG 精确；不同 DP 需可解释的样本/种子映射与数值/学习行为验证。如果当前 backend 不能提供所需 RNG/optimizer 重分片就拒绝该边，不以“浮点允许差异”掩盖遗漏。
+RNG 跨 DP 不是简单复制每个旧 rank 状态到所有新 rank。同形恢复先要求对应 RNG 精确；不同 DP 需可解释的样本/种子映射与数值/学习行为验证。如果当前 backend 不能提供所需 RNG/optimizer 重分片就拒绝该边，不以“浮点允许差异”掩盖遗漏。变 DP 边的认证绑定算法描述哈希：loss 聚合/归一化（token 级、常数分母、DP 组内 advantage 白化）随 DP 变化的算法须单独认证。
 
 **直接恢复边界**：仅旧 worker 都仍存活、未改写权重/通信成员、没有破坏性 release 前允许 unquiesce。若已 offload 但进程/同形状态仍健康，允许既有 onload；失败升级为重建。**release 后**依靠已 fsync 的完整 cut、算法 journal、数据 ledger、不可变 base model 和 fingerprint；旧配置也必须从 cut 重建，不能称无成本回滚。CPU RAM 不能容纳双份：顺序导出分片到磁盘、验证完整 manifest、销毁旧进程、逐块恢复；磁盘/时间也不足就拒绝切换。
 

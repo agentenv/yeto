@@ -52,7 +52,7 @@
 - [ ] 4.3 [M；依赖4.2] 新增 `TrainerGroup.rebuild(plan)`；同形trainer子进程重建、fresh groups和完整restore；验收X3：训练2步后重建，对冻结下一batch比较RNG/计数/moments/参数更新，无额外reset。
 - [ ] 4.4 [Y；依赖4.3] `IslandDriver` 替换端口背后的实现（无需rebind）、保留bridge状态并重发正确权重；验收：不重复initialize/after_local_train，外层进度不因重建重放。
 - [ ] 4.5 [X；依赖4.4,3.8] 同形恢复故障矩阵；验收：rank失败、collective超时、迁移中断、controller crash提交不确定均有界恢复或RECOVERY_REQUIRED，不继续不确定的消费。
-- [ ] 4.6 [M；依赖4.5,1.6] DP1↔2重分片spike，固定TP/PP/CP/EP、GBS及算法；验收X4：master/optimizer/RNG/样本映射和下一步数值比较给出go/no-go，不直接加入白名单。
+- [ ] 4.6 [M；依赖4.5,1.6] DP1↔2重分片spike，固定TP/PP/CP/EP、GBS及算法；验收X4：master/optimizer/RNG/样本映射和下一步数值比较给出go/no-go，不直接加入白名单。go 结论只对实验所用 `algorithm_spec_sha256` 成立；改变 loss 归一化的机制（token 级聚合、Dr.GRPO 常数分母、`--normalize-advantages` 的 DP 组内白化、GSPO/GMPO 序列级量在 CP 下的收集）须在各自 spec 上单独认证，未认证的算法描述请求该边时拒绝（alignment.md A4）。
 - [ ] 4.6a [M-fork；4.7前置，依赖2.1a] fork-M6：`RayWorkerManager` 允许把已停止 cell 重绑到 M1 映射内的另一 bundle；trainer 侧基于 `create_training_models` 在新 bundle 集以新 `actor_num_gpus` 重建 handle 并 dispose 旧 handle，不走 `_refresh_cells`/indep-DP；验收：CPU 单测 + 4.7 角色转移 GPU 实验。
 - [ ] 4.7 [M+Y；依赖4.6通过,2.4] 实现经认证的trainer DP转换及池内角色转移，按资源规模验证P62↔P44或更小等价边；验收：实际GPU从trainer转给rollout及反向，复杂并行维度固定，双向成功/失败恢复、batch语义和epoch都正确。
 - [ ] 4.8 [X；依赖4.7] 匹配数据预算、多seed的连续固定/同形恢复/变DP学习验证；验收：预声明数值/学习容差、heldout/reward与NaN/发散检查。未通过不开放trainer边；E1仍可独立交付但不得计为trainer完成。
