@@ -15,3 +15,9 @@
 
 ## 资源与回收
 与 g1e 相同：Modal Sandbox `H100!`×1，app `algo1b-g1g`；sandbox timeout 10800 秒，watchdog 11100 秒，每个 exec 1800 秒，本地 `timeout 11400`，EXIT trap；结束后执行 `modal app stop algo1b-g1g`。预计约 25 分钟，≤ $3。在 g1f 结束后再运行。
+
+## 结论（sandbox 已终止，app 已 stopped；YETO_SHA e04d531）
+- 两个 run 均 rc=0、3 轮完成、无 invariant 错误。
+- 配对有效：第 1 步 grad_norm 两边都是 0.0，逐位相等；第 1 步 raw_reward 都是 0.875。
+- 第 1 轮第 2 步 grad_norm 两边都是 0.4388761520385742，**相等**，按预登记判为**未能证明 clip_higher 生效，不声明**。
+- 如实说明（未预登记，只作解释）：seed 18 下第 1 轮第 1 个 optimizer step 的梯度为 0（这一半 batch 里的组组内奖励方差都为 0），权重没有更新，所以第 2 步仍然是 on-policy，ratio≡1，pg_clipfrac 为 0，上界根本没有机会起作用。这是配置没有触发机制，而不是机制失效。按规则，不因为这个结果重跑。若主 agent 要求，可以另立新计划（例如在第 1 步事先要求 grad_norm>0，或改为每轮 3 步），作为新实验单独提交。
