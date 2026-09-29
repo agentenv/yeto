@@ -53,3 +53,11 @@
 - 5.1: in the same sandbox, `cd /root && python -c "import examples.infra_features.train_infer_mismatch_helper.mis"`
   with PYTHONPATH=/root/miles, and the same from /work/yeto, output recorded; license line from /root/miles/LICENSE.
 YETO_SHA updated before any G1 run: header comment of vendored MIS corrected after the 5.1 check (no code change)
+
+## g1-observe attempt 1 failure and fix (recorded before the rerun)
+- Failure: `datasets.load_dataset("openai/gsm8k")` in harness g1.py raised
+  `httpx.RemoteProtocolError: Server disconnected without sending a response` (HF Hub network), before
+  any Miles process started (no miles.log). Not a mechanism failure.
+- Fix (harness only): `harness/predownload.py` fetches the model and dataset with retries once; the
+  observe run is then repeated once, unchanged otherwise. G2 is added after it as planned.
+- report_g2.py (report generator for 7.4) added before G2 starts.
