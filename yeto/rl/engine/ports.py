@@ -83,6 +83,10 @@ class RolloutBatchHandle:
     # rl-infra-spec 1.7: summed non-generation (tool) time of the rollout's
     # samples; None = not reported.
     tool_wait_seconds: float | None = None
+    # Groups drawn from the data source (over-sampling included) and those
+    # aborted in flight; None = unknown (see rollout_meta_hook.submitted_groups).
+    submitted_groups: int | None = None
+    aborted_in_flight_groups: int | None = None
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)

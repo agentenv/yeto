@@ -817,7 +817,7 @@ class IslandDriver:
             # (= groups not trained), not Miles' actual resample count.
             **(
                 {"dynamic_filter_source": {
-                    "generated_groups": "all_samples_hook",
+                    "generated_groups": "all_samples_hook_completed_groups",
                     "dropped_groups": "all_samples_hook_not_trained",
                     "replacement_attempts": "proxy_filtered",
                 }}
@@ -830,6 +830,8 @@ class IslandDriver:
             # no sample filter is configured.
             filtered_samples=_filtered_samples(batch),
             tool_wait_seconds=getattr(batch, "tool_wait_seconds", None),
+            submitted_groups=getattr(batch, "submitted_groups", None),
+            aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
