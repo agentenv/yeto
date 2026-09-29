@@ -57,7 +57,7 @@ payload["arguments"].update(rl_algorithm_spec=str(out / "spec.json"), rl_allow_u
                             rl_expected_algorithm_sha256=spec.sha256(), rl_single_island_no_sync=True)
 # The learner CLI's startup check for the D11 allowance (the benchmark worker path skips CLI parsing).
 from yeto.rl.learner import _check_ports_algorithm_options
-_check_ports_algorithm_options(SimpleNamespace(**payload["arguments"], num_learners=1), outer_sync=False)
+_check_ports_algorithm_options(SimpleNamespace(**{**payload["arguments"], "num_learners": 1}), outer_sync=False)
 (out / "worker.json").write_text(json.dumps(payload, indent=1, default=str))
 import ray
 os.environ["PYTHONPATH"] = "/root/miles:/work/yeto:/work/harness:" + os.environ.get("PYTHONPATH", "")

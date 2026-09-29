@@ -18,3 +18,4 @@ rules, reclaim) except:
   tis / icepop / opsm-trainer are not rerun (round 1 passed on the same mechanism code).
 - Cloud: Modal app `algo1a-g1b`, one sandbox, `H100!` x1 (GPU name asserted), cpu 16, mem 128 GiB,
   sandbox timeout 6000 s + local watchdog 6600 s + app stop; est. ~60 min, ~ $5; cap $12.
+- Pre-launch harness fix: build the check namespace with a dict merge (avoid a duplicate num_learners kwarg). The harness is uploaded from this commit; YETO_SHA code is unchanged.
