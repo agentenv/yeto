@@ -213,6 +213,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports: colocated (default) or a LoRA fixed partition (rl-infra-spec 2.1)",
     )
     rl.add_argument(
+        "--rl-rollout-gpus",
+        dest="rollout_num_gpus",
+        type=int,
+        default=None,
+        help="ports fixed partition: dedicated rollout GPUs per island node (rl-infra-spec 2.1). "
+        "Note: on `launch`, a bare --rollout-num-gpus is an argparse abbreviation of "
+        "--rollout-num-gpus-per-engine, not this option",
+    )
+    rl.add_argument(
         "--rl-standby-gpus",
         type=int,
         default=0,

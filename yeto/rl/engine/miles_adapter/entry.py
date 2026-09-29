@@ -70,6 +70,27 @@ def miles_capabilities(
     return capabilities
 
 
+def receipt_role_family(algorithm: AlgorithmSpec) -> str:
+    """``LocalStepReceipt.algorithm``: the TRAINING ROLE FAMILY, not the estimator.
+
+    It must equal ``ParameterLayout.algorithm`` (``local_learner.py`` checks
+    both; the layout hash covers it), whose families are grpo / sao. Every
+    critic-free estimator (grpo, gspo, reinforce_plus_plus[_baseline]) trains
+    the single actor role -> ``"grpo"``; the estimator itself is identified by
+    ``algorithm_spec_sha256``. Critic estimators (ppo) have no family in the
+    layout contract and are refused.
+    """
+    from ..algorithm import CRITIC_ESTIMATORS
+
+    estimator = algorithm.advantage_estimator
+    if estimator in CRITIC_ESTIMATORS:
+        raise ValueError(
+            f"advantage estimator {estimator!r} needs a critic role family, which the "
+            "receipt/layout contract does not define"
+        )
+    return "grpo"
+
+
 def with_partitioned_serial(capabilities: EngineCapabilities) -> EngineCapabilities:
     """Infra declaration (rl-infra-spec 2.1/2.2): the fixed-partition placement and
     the partitioned-serial driver mode are implemented on the ports path.
@@ -262,7 +283,7 @@ def compose_island(
             learner_id=learner_id,
             learner_generation=0,
             parameter_layout_hash=lambda: layout_hash,
-            algorithm=algorithm.advantage_estimator,
+            algorithm=receipt_role_family(algorithm),
             spec=algorithm,
             release_refs=release_refs,
             runner=runner,

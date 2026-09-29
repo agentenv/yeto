@@ -167,12 +167,16 @@ def test_driver_reports_each_rounds_own_nonzero_advantages(tmp_path):
     assert got == counts
 
 
-def test_receipt_accepts_spec_estimators_and_rejects_unknown():
-    from yeto.rl.contracts import _require_algorithm
-    from yeto.rl.engine.algorithm import ADVANTAGE_ESTIMATORS
+def test_receipt_label_is_the_role_family_matching_the_layout():
+    from yeto.rl.engine.miles_adapter.entry import receipt_role_family
+    from yeto.rl.local_learner import _ROLES_BY_ALGORITHM
 
-    for name in ("grpo", "sao", *ADVANTAGE_ESTIMATORS):
-        _require_algorithm(name)
-    assert "gspo" in ADVANTAGE_ESTIMATORS
-    with pytest.raises(ValueError, match="unsupported local RL algorithm"):
-        _require_algorithm("dpo")
+    for estimator in ("grpo", "gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline"):
+        label = receipt_role_family(SimpleNamespace(advantage_estimator=estimator))
+        assert label == "grpo" and label in _ROLES_BY_ALGORITHM
+    with pytest.raises(ValueError, match="critic"):
+        receipt_role_family(SimpleNamespace(advantage_estimator="ppo"))
+    from yeto.rl.contracts import _require_algorithm
+
+    with pytest.raises(ValueError):
+        _require_algorithm("gspo")  # contracts keep the role-family vocabulary

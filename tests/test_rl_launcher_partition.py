@@ -33,3 +33,15 @@ def test_partition_flags_forward_rollout_gpus_only_when_partitioned():
     _, part = launcher._ports_algorithm_flags(SimpleNamespace(
         **base, rl_placement="fixed-partition", rl_standby_gpus=0, rollout_num_gpus=2))
     assert "--rl-placement fixed-partition" in part and "--rollout-num-gpus 2" in part
+
+
+def test_launch_cli_rollout_gpus_option():
+    from yeto import cli
+
+    a = cli.build_parser().parse_args(
+        ["launch", "--training-mode", "rl", "--gpu", "modal:2xh100", "--rl-placement",
+         "fixed-partition", "--rl-rollout-gpus", "1", "--model", "x", "--data", "y"])
+    assert a.rollout_num_gpus == 1 and a.rollout_num_gpus_per_engine == 1
+    b = cli.build_parser().parse_args(["launch", "--training-mode", "rl", "--gpu", "modal:1xh100",
+                                       "--model", "x", "--data", "y"])
+    assert b.rollout_num_gpus is None
