@@ -36,6 +36,7 @@
 | 端口 `Placement.describe/reconfigure` | infra 2.1、3.4、4.7；fork M1/M6（2.1a/4.6a） | 无算法消费者 | `reconfigure(plan, epoch)`（design D1），与 ports.py 预留签名 `reconfigure(target: PlacementDescription, *, epoch)` 不同 | 签名在 3.4a 更新 ports.py 时以 design 为准定稿；预留注释标为 E3，需提前到 E1（3.4a） | △ |
 | 端口 `RolloutPool.add_engines/remove_engines/drain` | infra 3.4；M2/M3（3.3a/3.3b） | 无 | `add_engines(count,*,epoch)`、`remove_engines(members,*,epoch)`、`drain(members, deadline)` | `drain` 原先未预留，由 3.4a 补上 | △ |
 | 端口 `Publisher.publish(policy, members)` | infra 3.5；M4（3.5a） | 1a（发布路径决定训推差异） | 现有 `publish(state)`，扩展成员集合 | upstream 没有 payload 级 ACK，由 yeto 读回校验补齐（3.5a）；分区模式的 LoRA 必须用 NCCL broadcast，与 colocate 的 CUDA IPC 不同（A5） | △ |
+| 新 engine 准入（payload 校验后才进 router） | infra 3.5；fork M4（3.5a） | 无 | 现实现（9ba38f6d）在 `end_update_weights` 内注册 router，`check_weights` 同锁，只能进 router 后读回 | 按现实现达不到 3.5 验收；3.5a 已写明两种补充机制（cordoned 加入后 uncordon，或 M4b 延迟准入），未实现 | ✖ |
 | 端口 `TrainerGroup.save_cut/restore_cut/rebuild` | infra 4.2/4.3；M5（4.2a）、M6（4.6a） | 无直接消费者；算法状态须进入 cut | `save_cut(*,epoch)->id`、`restore_cut(id,*,epoch)`、`rebuild(plan)` | 缺算法相关状态，已补（A3） | △ |
 | group/batch/update 账本 | infra 3.6 | 1b 动态过滤/超采样/overlong 过滤；2a 多段 rollout | `prepared→optimizer_applied→outer_recorded`，新增终态 `filtered` | 原先无法区分有意丢弃与丢失，已补（A2）；与 1b 共用 `record_trained_groups` hook | △ |
 | 完整 cut 状态 | infra 4.1/4.2 | 1b KL loss（ref 模型）、1b/2a 插件（PluginRef、`yeto_algo_plugins`）、P0 算法哈希 | cut manifest 记录 `algorithm_spec_sha256` 与插件哈希，不一致就拒绝恢复 | 已补（A3） | △ |
