@@ -390,6 +390,30 @@ def _append_rl_event(args, event: dict[str, Any]) -> None:
     _wandb_tee(args, event)
 
 
+def _require_training_progress(stats: LocalRoundStats) -> None:
+    """Fail a round that trained on real advantages yet produced no gradient.
+
+    A round whose advantages are all zero (every GRPO group scored the same)
+    legitimately has nothing to learn from, so a zero gradient norm is fine
+    there.  A round with nonzero advantages and a gradient norm of exactly
+    ``0.0`` means the gradients never reached the optimizer; committing its
+    state would hand the syncer fp32 round-trip noise as if it were learning.
+    """
+
+    if stats.grad_norm is None or stats.grad_norm != 0.0:
+        return
+    if not stats.nonzero_advantage_count:
+        return
+    raise StrictRlInvariantError(
+        "zero_grad_norm_with_nonzero_advantages",
+        f"local round {stats.local_round_id} (global policy "
+        f"{stats.base_policy_version}) reported grad_norm={stats.grad_norm!r} "
+        f"although {stats.nonzero_advantage_count} of "
+        f"{stats.completed_trajectories} trained samples had nonzero "
+        "advantages; the round's local state was not submitted",
+    )
+
+
 def _record_strict_failure(args, error: StrictRlInvariantError, bridge=None) -> None:
     _append_rl_event(
         args,
@@ -1717,6 +1741,10 @@ class MilesPolicySync:
             or len(set(sample_indices)) != expected_samples
         ):
             raise RuntimeError("Miles DP rollout shards do not form one complete batch")
+        nonzero_advantage_count = self._nonzero_advantage_count(
+            [value for batch in batches for value in batch.get("rewards", [])],
+            expected_samples,
+        )
         raw_rewards = batches[0].get("raw_reward")
         if not isinstance(raw_rewards, list) or len(raw_rewards) != expected_samples:
             raise RuntimeError("Miles rollout lacks scalar raw rewards")
@@ -1804,7 +1832,28 @@ class MilesPolicySync:
             dynamic_filter_replacement_attempts=int(
                 metrics.get("rl/dynamic_filter/replacement_attempts", 0)
             ),
+            nonzero_advantage_count=nonzero_advantage_count,
         )
+
+    def _nonzero_advantage_count(
+        self, advantages: list[Any], expected_samples: int
+    ) -> int | None:
+        # Miles' GRPO/GSPO path trains on the group-normalized ``rewards`` list
+        # verbatim as each sample's advantage (``get_grpo_returns``), and that
+        # list is split across the DP shards like ``response_lengths``.  Other
+        # estimators derive advantages later inside the actor, where the hook
+        # cannot see them; report "unknown" rather than guess.
+        if getattr(self.args, "advantage_estimator", None) not in ("grpo", "gspo"):
+            return None
+        if len(advantages) != expected_samples:
+            raise RuntimeError("Miles DP rollout shards lack per-sample advantages")
+        try:
+            values = [float(value) for value in advantages]
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Miles rollout advantages are not scalars") from error
+        if any(not math.isfinite(value) for value in values):
+            raise RuntimeError("Miles rollout advantages are not finite")
+        return sum(1 for value in values if value != 0.0)
 
     async def _initialize(self, *, actor_model, rollout_manager) -> None:
         from .bridge import StrictRlBridge
@@ -1863,6 +1912,7 @@ class MilesPolicySync:
             train_state = await export_chunks(self._group_names(groups))
             try:
                 stats = self._round_stats(rollout_id, rollout_data, train_state)
+                _require_training_progress(stats)
                 self.bridge.submit_chunked_local_state(
                     self.permit,
                     self.current,
@@ -1881,6 +1931,7 @@ class MilesPolicySync:
             train_state = await actor_model.export_trainable_state()
             local = self._canonical_state(train_state)
             stats = self._round_stats(rollout_id, rollout_data, train_state)
+            _require_training_progress(stats)
             self.bridge.submit_local_state(self.permit, self.current, local, stats)
             release_base_before_commit()
         if not base_released:
@@ -2317,6 +2368,7 @@ class DecoupledMilesPolicySync(MilesPolicySync):
         exported = await actor_model.export_trainable_state()
         local = self._canonical_at_progress(exported, next_rollout_id)
         stats = self._round_stats(rollout_id, rollout_data, exported)
+        _require_training_progress(stats)
         self.optimizer_steps += 1
         self.action_tokens += stats.action_tokens
         if self.optimizer_steps != next_rollout_id:

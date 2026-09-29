@@ -1,0 +1,193 @@
+<title>Nebius 岛 INIT 循环</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f4f6f7; --panel:#ffffff; --ink:#1d2430; --muted:#5d6878; --line:#c9d1d9;
+  --ok:#0f766e; --ok-soft:#d7efe9; --bad:#c62828; --bad-soft:#fde2e2;
+  --lane1:#e9eef3; --lane2:#e6f0f5; --lane3:#e5f3ef; --code:#eef1f4;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#151a21; --panel:#1d232c; --ink:#e6eaf0; --muted:#9aa6b5; --line:#3a4451;
+    --ok:#3fc1b0; --ok-soft:#183f3a; --bad:#ff6b6b; --bad-soft:#4a1f1f;
+    --lane1:#222a34; --lane2:#1f2c36; --lane3:#1e3029; --code:#262e38;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#151a21; --panel:#1d232c; --ink:#e6eaf0; --muted:#9aa6b5; --line:#3a4451;
+  --ok:#3fc1b0; --ok-soft:#183f3a; --bad:#ff6b6b; --bad-soft:#4a1f1f;
+  --lane1:#222a34; --lane2:#1f2c36; --lane3:#1e3029; --code:#262e38;
+}
+body{background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;font-size:15px;line-height:1.6;padding-block:32px 64px;padding-inline:16px;margin:0}
+main{max-width:1240px;margin:0 auto;display:grid;gap:32px}
+h1{font-size:1.9rem;font-weight:600;letter-spacing:-0.01em;margin:0 0 6px;text-wrap:balance}
+h2{font-size:1.15rem;font-weight:600;margin:0 0 10px}
+p{margin:0 0 10px;max-width:72ch}
+.lead{color:var(--muted)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.86em;background:var(--code);padding:1px 5px;border-radius:4px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media (max-width:900px){.pair{grid-template-columns:1fr}}
+figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:grid;gap:8px;align-content:start}
+figure .scroll{overflow-x:auto}
+figure svg{display:block;max-width:100%;height:auto;min-width:520px}
+figcaption{color:var(--muted);font-size:0.9rem;max-width:70ch}
+.tag{display:inline-block;font-size:0.78rem;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;padding:2px 8px;border-radius:999px}
+.tag.ok{background:var(--ok-soft);color:var(--ok)}
+.tag.bad{background:var(--bad-soft);color:var(--bad)}
+.legend{display:flex;flex-wrap:wrap;gap:14px 22px;font-size:0.85rem;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:14px;height:14px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+.diff{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 18px}
+.diff table{border-collapse:collapse;width:100%;font-size:0.92rem}
+.diff th,.diff td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+.diff th{color:var(--muted);font-weight:500;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.06em}
+.diff td:first-child{white-space:nowrap;color:var(--muted)}
+.bad-cell{color:var(--bad);font-weight:600}
+.ok-cell{color:var(--ok);font-weight:600}
+</style>
+
+<main>
+<header>
+  <h1>Nebius 岛 INIT 循环</h1>
+  <p class="lead">2026-09-24 <code>yeto-gh2</code>：RL 岛开在 Nebius（走 SkyPilot），setup 反复跑了 9 遍，训练从未开始。左边是同一套脚本在 Modal 上（<code>yeto-gh4</code>）为什么没事，右边是 sky 岛上到底谁把谁杀了。</p>
+</header>
+
+<div class="pair">
+  <figure>
+    <div><span class="tag ok">正常 · Modal 岛（gh4）</span></div>
+    <div class="scroll">
+    <svg viewBox="0 0 600 620" role="img" aria-label="Modal 岛的时序：head launcher 通过 Modal SDK 启动容器，容器里 ray stop --force 只杀掉容器内本来就不存在的 Ray，Miles 的 Ray 正常启动，launcher 通过 Modal 函数状态看到 RUNNING，训练照常进行。">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+        <marker id="a1ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--ok)"/></marker>
+      </defs>
+      <rect x="10" y="10" width="180" height="600" rx="8" fill="var(--lane2)"/>
+      <rect x="210" y="10" width="180" height="600" rx="8" fill="var(--lane1)"/>
+      <rect x="410" y="10" width="180" height="600" rx="8" fill="var(--lane3)"/>
+      <g fill="currentColor" font-size="13" font-weight="600" text-anchor="middle">
+        <text x="100" y="34">head launcher</text>
+        <text x="300" y="34">Modal 平台</text>
+        <text x="500" y="34">岛容器</text>
+      </g>
+      <g fill="var(--muted)" font-size="11" text-anchor="middle">
+        <text x="100" y="50">FleetController._probe</text>
+        <text x="300" y="50">函数状态 API</text>
+        <text x="500" y="50">无 sky 运行时</text>
+      </g>
+      <g stroke="currentColor" stroke-dasharray="3 5" stroke-opacity="0.45">
+        <line x1="100" y1="60" x2="100" y2="600"/><line x1="300" y1="60" x2="300" y2="600"/><line x1="500" y1="60" x2="500" y2="600"/>
+      </g>
+      <g font-size="11.5" fill="currentColor">
+        <line x1="100" y1="90" x2="294" y2="90" stroke="currentColor" marker-end="url(#a1)"/>
+        <text x="197" y="84" text-anchor="middle">modal_runner：起函数（setup+run）</text>
+        <line x1="300" y1="120" x2="494" y2="120" stroke="currentColor" marker-end="url(#a1)"/>
+        <text x="397" y="114" text-anchor="middle">拉镜像，起容器</text>
+        <rect x="420" y="140" width="160" height="50" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="500" y="159" text-anchor="middle">setup：bundle → Miles</text>
+        <text x="500" y="176" text-anchor="middle" fill="var(--muted)">pip -e，约 90 s，跑一次</text>
+        <rect x="420" y="204" width="160" height="66" rx="5" fill="var(--ok-soft)" stroke="var(--ok)"/>
+        <text x="500" y="222" text-anchor="middle">run：ray stop --force</text>
+        <text x="500" y="238" text-anchor="middle" fill="var(--muted)">容器里没有别的 Ray，空操作</text>
+        <text x="500" y="256" text-anchor="middle">ray start --port 6379 → learner</text>
+        <line x1="100" y1="300" x2="294" y2="300" stroke="currentColor" marker-end="url(#a1)"/>
+        <text x="197" y="294" text-anchor="middle">job_status？</text>
+        <line x1="294" y1="330" x2="106" y2="330" stroke="var(--ok)" marker-end="url(#a1ok)"/>
+        <text x="197" y="324" text-anchor="middle" fill="var(--ok)">RUNNING（函数还在跑）</text>
+        <text x="100" y="356" text-anchor="middle" fill="var(--muted)">_probe → 健康，继续等</text>
+        <rect x="420" y="380" width="160" height="50" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="500" y="399" text-anchor="middle">Miles 训练循环</text>
+        <text x="500" y="416" text-anchor="middle" fill="var(--muted)">6 轮，每轮与 syncer 同步</text>
+        <line x1="494" y1="470" x2="306" y2="470" stroke="currentColor" marker-end="url(#a1)"/>
+        <text x="397" y="464" text-anchor="middle">函数返回 0</text>
+        <line x1="294" y1="500" x2="106" y2="500" stroke="var(--ok)" marker-end="url(#a1ok)"/>
+        <text x="197" y="494" text-anchor="middle" fill="var(--ok)">SUCCEEDED</text>
+        <line x1="100" y1="540" x2="294" y2="540" stroke="currentColor" marker-end="url(#a1)"/>
+        <text x="197" y="534" text-anchor="middle">app stop（拆岛）</text>
+        <text x="300" y="580" text-anchor="middle" fill="var(--muted)">总耗时：setup 1 次 + 训练约 12 min</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>Modal 岛的健康检查走 Modal 自己的函数状态，容器里也没有 SkyPilot 的运行时 Ray，所以 <code>ray stop --force</code> 没有东西可杀。</figcaption>
+  </figure>
+
+  <figure>
+    <div><span class="tag bad">出问题 · Nebius sky 岛（gh2）</span></div>
+    <div class="scroll">
+    <svg viewBox="0 0 600 620" role="img" aria-label="Nebius sky 岛的时序：sky launch 后 VM 上同时有 SkyPilot 的运行时 Ray（6380）和岛脚本；脚本执行 ray stop --force 杀掉 SkyPilot 的 Ray；随后 head launcher 查 job 状态时 sky 先刷新集群状态，ray status 失败，集群标为 INIT，job_status 抛错；launcher 进入 recovery 重新 sky launch，重新 provision 并重跑 setup，脚本再次 ray stop --force，循环。">
+      <defs>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+        <marker id="a2bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--bad)"/></marker>
+      </defs>
+      <rect x="10" y="10" width="180" height="600" rx="8" fill="var(--lane2)"/>
+      <rect x="210" y="10" width="180" height="600" rx="8" fill="var(--lane1)"/>
+      <rect x="410" y="10" width="180" height="600" rx="8" fill="var(--lane3)"/>
+      <g fill="currentColor" font-size="13" font-weight="600" text-anchor="middle">
+        <text x="100" y="34">head launcher</text>
+        <text x="300" y="34">head 上的 sky</text>
+        <text x="500" y="34">岛 VM（docker）</text>
+      </g>
+      <g fill="var(--muted)" font-size="11" text-anchor="middle">
+        <text x="100" y="50">FleetController._probe</text>
+        <text x="300" y="50">status 刷新 = 云端 + ray status</text>
+        <text x="500" y="50">sky Ray :6380 ＋ 岛脚本</text>
+      </g>
+      <g stroke="currentColor" stroke-dasharray="3 5" stroke-opacity="0.45">
+        <line x1="100" y1="60" x2="100" y2="600"/><line x1="300" y1="60" x2="300" y2="600"/><line x1="500" y1="60" x2="500" y2="600"/>
+      </g>
+      <g font-size="11.5" fill="currentColor">
+        <line x1="100" y1="90" x2="294" y2="90" stroke="currentColor" marker-end="url(#a2)"/>
+        <text x="197" y="84" text-anchor="middle">sky.launch(island task)</text>
+        <line x1="300" y1="120" x2="494" y2="120" stroke="currentColor" marker-end="url(#a2)"/>
+        <text x="397" y="114" text-anchor="middle">开 VM，起容器，装 sky Ray :6380</text>
+        <text x="300" y="146" text-anchor="middle" fill="var(--muted)">标 UP（“Cluster launched”）</text>
+        <rect x="420" y="158" width="160" height="34" rx="5" fill="var(--panel)" stroke="var(--line)"/>
+        <text x="500" y="179" text-anchor="middle">setup：bundle → Miles，90 s</text>
+        <!-- the kill -->
+        <rect x="420" y="204" width="160" height="66" rx="5" fill="var(--bad-soft)" stroke="var(--bad)" stroke-width="2"/>
+        <text x="500" y="222" text-anchor="middle" fill="var(--bad)" font-weight="600">run：ray stop --force</text>
+        <text x="500" y="238" text-anchor="middle" fill="var(--bad)">杀掉全部 Ray，含 sky 的 :6380</text>
+        <text x="500" y="256" text-anchor="middle">ray start :6379 → learner 开始跑</text>
+        <!-- probe -->
+        <line x1="100" y1="300" x2="294" y2="300" stroke="currentColor" marker-end="url(#a2)"/>
+        <text x="197" y="294" text-anchor="middle">sky.job_status(cluster, job)</text>
+        <line x1="300" y1="326" x2="494" y2="326" stroke="currentColor" marker-end="url(#a2)"/>
+        <text x="397" y="320" text-anchor="middle">刷新：云端 RUNNING ✓，ray status？</text>
+        <line x1="494" y1="352" x2="306" y2="352" stroke="var(--bad)" marker-end="url(#a2bad)"/>
+        <text x="397" y="346" text-anchor="middle" fill="var(--bad)">ray status 连不上 :6380 ✗</text>
+        <rect x="220" y="366" width="160" height="34" rx="5" fill="var(--bad-soft)" stroke="var(--bad)" stroke-width="2"/>
+        <text x="300" y="387" text-anchor="middle" fill="var(--bad)" font-weight="600">集群标为 INIT</text>
+        <line x1="294" y1="424" x2="106" y2="424" stroke="var(--bad)" marker-end="url(#a2bad)"/>
+        <text x="197" y="418" text-anchor="middle" fill="var(--bad)">抛错：skipped … (status: INIT)</text>
+        <rect x="20" y="438" width="160" height="50" rx="5" fill="var(--bad-soft)" stroke="var(--bad)" stroke-width="2"/>
+        <text x="100" y="457" text-anchor="middle" fill="var(--bad)" font-weight="600">_probe → “岛失联”</text>
+        <text x="100" y="474" text-anchor="middle" fill="var(--bad)">_enter_recovering</text>
+        <!-- relaunch loop -->
+        <line x1="100" y1="520" x2="294" y2="520" stroke="var(--bad)" stroke-width="2" marker-end="url(#a2bad)"/>
+        <text x="197" y="514" text-anchor="middle" fill="var(--bad)" font-weight="600">sky.launch 同名集群（relaunch）</text>
+        <path d="M300,532 L300,556 L500,556 L500,540" fill="none" stroke="var(--bad)" stroke-width="2" marker-end="url(#a2bad)"/>
+        <text x="400" y="575" text-anchor="middle" fill="var(--bad)">重新 provision：sky Ray 复活、标 UP、setup 从头再跑、learner 被杀</text>
+        <text x="400" y="596" text-anchor="middle" fill="var(--bad)" font-weight="600">→ 回到 run：ray stop --force。每圈约 90 s，跑了 9 圈（job 2…11）</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>sky 岛上多了一个“旁观者”：SkyPilot 自己的运行时 Ray。岛脚本第一句 <code>ray stop --force</code> 把它一起杀了，之后 sky 的每次状态刷新都判定集群不健康（INIT），launcher 又把 INIT 当作岛丢了，于是 relaunch，relaunch 又重跑 setup 并再次杀掉 Ray。</figcaption>
+  </figure>
+</div>
+
+<div class="legend">
+  <span><i class="sw" style="background:var(--bad-soft);border-color:var(--bad)"></i>出问题的环节</span>
+  <span><i class="sw" style="background:var(--ok-soft);border-color:var(--ok)"></i>同一步在 Modal 上为什么无害</span>
+  <span><i class="sw" style="background:var(--panel)"></i>两边相同的步骤</span>
+</div>
+
+<section class="diff">
+  <h2>两条链的差异，只在三处</h2>
+  <table>
+    <tr><th>环节</th><th>Modal 岛（正常）</th><th>Nebius sky 岛（出问题）</th></tr>
+    <tr><td>容器里有没有别的 Ray</td><td class="ok-cell">没有</td><td class="bad-cell">有：SkyPilot 运行时 Ray，:6380，sky 靠它做健康检查</td></tr>
+    <tr><td><code>ray stop --force</code> 的效果</td><td class="ok-cell">空操作</td><td class="bad-cell">把 sky 的 Ray 也杀了 → 之后每次刷新都是 INIT</td></tr>
+    <tr><td>launcher 怎么判断岛还活着</td><td class="ok-cell">问 Modal 函数状态，与容器内 Ray 无关</td><td class="bad-cell">问 sky <code>job_status</code>，而 sky 对 INIT 集群拒答并抛错 → 当失联 → relaunch</td></tr>
+  </table>
+  <p style="margin-top:12px">修法：去掉 <code>yeto/launcher.py</code> 岛 run 脚本里的 <code>ray stop --force</code>（开头一句和 EXIT trap），Miles 用 6379、sky 用 6380 本不冲突；退出时只停自己的实例。另外 launcher 把 INIT 一律当失联并立刻 relaunch 也应收敛：先看 job 是否仍在跑。详见 live-run-failures 第 37 条。</p>
+</section>
+</main>

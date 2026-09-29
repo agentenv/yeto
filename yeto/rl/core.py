@@ -536,6 +536,11 @@ class LocalRoundStats:
     dynamic_filter_generated_groups: int = 0
     dynamic_filter_dropped_groups: int = 0
     dynamic_filter_replacement_attempts: int = 0
+    # Number of trained samples whose advantage was nonzero, or None when the
+    # island cannot tell (non group-relative estimators).  A round whose
+    # advantages are all zero legitimately produces no gradient; one that has
+    # nonzero advantages and still reports ``grad_norm == 0.0`` did not train.
+    nonzero_advantage_count: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -589,3 +594,13 @@ class LocalRoundStats:
                 raise ValueError(f"{name} must be finite when present")
         if self.pass_rate is not None and not 0.0 <= self.pass_rate <= 1.0:
             raise ValueError("pass_rate must be in [0, 1] when present")
+        if self.nonzero_advantage_count is not None and (
+            isinstance(self.nonzero_advantage_count, bool)
+            or not isinstance(self.nonzero_advantage_count, int)
+            or self.nonzero_advantage_count < 0
+            or self.nonzero_advantage_count > self.completed_trajectories
+        ):
+            raise ValueError(
+                "nonzero_advantage_count must be an integer in "
+                "[0, completed_trajectories] when present"
+            )
