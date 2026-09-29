@@ -217,6 +217,10 @@ class ProgressStore(Protocol):
     ) -> None: ...
 
 
+ECHO_EVENTS_FILE = "yeto-rl-echo-events"  # at the repo root (experiment snapshots only)
+_ECHO_EVENTS = (Path(__file__).resolve().parents[3] / ECHO_EVENTS_FILE).is_file()
+
+
 class EventTape:
     """JSONL RL event tape in the legacy format (``island_id``, ``time_unix``)."""
 
@@ -226,6 +230,15 @@ class EventTape:
         self.args = args
 
     def append(self, event: Mapping[str, Any]) -> None:
+        if _ECHO_EVENTS:
+            # Experiment-only: container stdout reaches the head's launch log,
+            # so the tape survives container teardown (off by default).
+            print(
+                "YETO_RL_EVENT "
+                + json.dumps({"island_id": self.island_id, "time_unix": time.time(), **event},
+                             sort_keys=True, separators=(",", ":"), default=str),
+                flush=True,
+            )
         if self.args is not None:
             from yeto.rl.miles import _append_rl_event
 

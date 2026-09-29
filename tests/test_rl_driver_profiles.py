@@ -267,3 +267,16 @@ def test_publish_delay_injection_is_off_by_default_and_never_lets_generation_run
     bad.write_text('{"drop_publish": 1}')
     with pytest.raises(ValueError):
         drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(bad)})
+
+
+def test_event_echo_is_off_by_default_and_prints_when_enabled(tmp_path, monkeypatch, capsys):
+    from yeto.rl.engine import driver as drv
+
+    tape = drv.EventTape(tmp_path / "t.jsonl", 0)
+    if not drv._ECHO_EVENTS:
+        tape.append({"event": "x"})
+        assert "YETO_RL_EVENT" not in capsys.readouterr().out
+    monkeypatch.setattr(drv, "_ECHO_EVENTS", True)
+    tape.append({"event": "y"})
+    line = capsys.readouterr().out.strip()
+    assert line.startswith("YETO_RL_EVENT ") and json.loads(line.split(" ", 1)[1])["event"] == "y"

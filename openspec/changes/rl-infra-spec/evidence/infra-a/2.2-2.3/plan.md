@@ -31,3 +31,6 @@ X9 guard（C）通过需同时满足：
 - 预计每个 arm 约 20 分钟。费用：(1+2+2) H100 × 0.35 h × $3.95 ≈ $7。每个 arm 硬超时 60 分钟（`timeout 3600`），上限 5 GPU·h ≈ $20。
 - 回收：launcher 结束时自行拆除；`timeout 3600` 包裹；独立 watchdog（setsid），3900 s 后执行 `modal app stop -y yeto-<prefix>`；结束后用 `modal app list --json` 核实 stopped/0 tasks 并存档；停止 puller 与 watchdog。
 - 三个 arm 串行执行（避免本机线程压力），同一 provider、同一型号断言。
+
+## 追加（事后，判定条件未改）：测量手段修正
+A-attempt2（a37403a，1×H100!，SUCCEEDED）的 island 磁带靠轮询拉取，只拉到 2/3 个 `rl_round_trained`：最后一轮写出后容器很快被拆除。这会让条件 2（A/B 轮数与逐轮 sample-id 比较）因为采集缺失而误判。修正：driver 在快照根目录存在 `yeto-rl-echo-events` 时，把每条事件同时打印到 stdout（前缀 `YETO_RL_EVENT`），由 head 的 launch.log 完整收集；该功能默认关闭。修正提交之后，A、B、C 都用同一个新 SHA 重跑，A-attempt2 只作为记录保留，不参与判定。
