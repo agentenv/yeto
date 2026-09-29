@@ -17,16 +17,14 @@ the P0 registry (never by editing the shared files) it adds:
   before its G1 smoke;
 * rejections (pre-GPU): GSPO clip hint (engine default 0.2 vs paper 3e-4/4e-4),
   GSPO + advantage transform, transform/estimator mismatch, MaxRL/MAPO with the
-  overlong soft penalty, non-default gamma, GDPO declaration consistency and
-  the transform module identity (``plugins``);
+  overlong soft penalty, non-default gamma, GDPO declaration consistency;
 * gradient rules (design D2/D8): GSPO fully clipped round; GDPO / REINFORCE++
   where the reported statistics say no advantage is non-zero;
 * runtime attrs ``yeto_rl_seq_adv`` (GDPO components for the Miles process).
 
-Transform module identity: the transforms live in this module, whose source
-is not covered by the dispatcher's PluginRef. A spec selecting one of them
-must therefore list :func:`transform_ref` in ``plugins`` so this file's
-SHA256 enters the algorithm hash and is verified at startup.
+Transform module identity: the 1b dispatcher's pipeline-plugins rule requires
+this module's PluginRef (``yeto.rl.algos.seq_adv.<stage>``, path chosen by
+1b) in ``spec.plugins``; ``grpo_knobs.with_pipeline_plugins(spec)`` adds it.
 
 Import-light: no torch/miles at import time.
 """
@@ -39,7 +37,6 @@ from typing import Any
 
 from yeto.rl.engine.algorithm import (
     AlgorithmSpecError,
-    PluginRef,
     register_field,
     register_gradient_rule,
     register_mechanism,
@@ -51,7 +48,6 @@ from yeto.rl.engine.miles_adapter.algorithm_flags import _float, _num, _value_ro
 from . import reward_pipeline as rp
 
 MODULE = "yeto.rl.algos.seq_adv"
-TRANSFORM_REF_PATH = f"{MODULE}.registered_transforms"
 SEQ_ADV_ATTR = "yeto_rl_seq_adv"
 SEQ_ADV_SCHEMA = "yeto-rl-seq-adv-v1"
 REWARD_COMPONENTS_KEY = "yeto_reward_components"
@@ -163,7 +159,7 @@ register_mechanism("features", "gdpo", lambda s: _transform(s) == "gdpo")
 
 # Mechanisms of this change as (dimension, name); ``--rl-allow-unverified-mechanism``
 # takes them qualified, ``"dimension:name"`` (task 6.1). A transform additionally needs the dispatcher
-# (``custom_reward_postprocess``) and its module identity (``plugins``).
+# (``custom_reward_postprocess``).
 MECHANISMS = {
     "gspo": ("advantage_estimators", "gspo"),
     "reinforce_plus_plus": ("advantage_estimators", "reinforce_plus_plus"),
@@ -172,12 +168,6 @@ MECHANISMS = {
     "mapo": ("features", "mapo"),
     "gdpo": ("features", "gdpo"),
 }
-
-
-def transform_ref() -> PluginRef:
-    """PluginRef pinning this module's source (list it in ``spec.plugins``)."""
-
-    return PluginRef.from_path(TRANSFORM_REF_PATH)
 
 
 # --------------------------------------------------------------------------
@@ -258,25 +248,12 @@ def _reject_gdpo(s) -> str | None:
     return None
 
 
-def _reject_transform_identity(s) -> str | None:
-    if _transform(s) not in GROUP_TRANSFORMS:
-        return None
-    if not any(p.path == TRANSFORM_REF_PATH for p in s.plugins):
-        return (
-            f"advantage.transform={_transform(s)!r} runs code of {MODULE}; list "
-            f"{{path: {TRANSFORM_REF_PATH!r}, sha256: <source sha256>}} in plugins so its "
-            "source enters the algorithm hash (yeto.rl.algos.seq_adv.transform_ref())"
-        )
-    return None
-
-
 register_rejection("seq_adv_gspo_clip_hint", _reject_gspo_clip)
 register_rejection("seq_adv_gspo_transform", _reject_gspo_transform)
 register_rejection("seq_adv_transform_estimator", _reject_transform_estimator)
 register_rejection("seq_adv_binary_overlong", _reject_binary_with_overlong)
 register_rejection("seq_adv_gamma", _reject_gamma)
 register_rejection("seq_adv_gdpo", _reject_gdpo)
-register_rejection("seq_adv_transform_identity", _reject_transform_identity)
 
 
 # --------------------------------------------------------------------------
@@ -534,12 +511,6 @@ def _validate_gdpo(params: Mapping[str, Any], spec: Any) -> list[str]:
         return [f"advantage transform 'gdpo' takes no transform_params (use advantage.gdpo), "
                 f"got {sorted(params)}"]
     return []
-
-
-def registered_transforms() -> tuple[str, ...]:
-    """Identity anchor of this module's transforms (``transform_ref``)."""
-
-    return GROUP_TRANSFORMS
 
 
 rp.register_advantage_transform("maxrl", maxrl)

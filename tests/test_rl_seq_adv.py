@@ -17,6 +17,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from yeto.rl.algos import grpo_knobs  # noqa: E402
 from yeto.rl.algos import reward_pipeline as rp  # noqa: E402
 from yeto.rl.algos import seq_adv as sa  # noqa: E402
 from yeto.rl.core import StrictRlInvariantError  # noqa: E402
@@ -64,7 +65,8 @@ def transform_spec(transform, *, estimator="grpo", binary=True, gdpo=None, plugi
                  "reward_postprocess": _dispatcher(), "reward_shapers": list(shapers)}
     if gdpo is not None:
         advantage["gdpo"] = gdpo
-    return AlgorithmSpec(advantage=advantage, plugins=[sa.transform_ref()] if plugins else [])
+    spec = AlgorithmSpec(advantage=advantage)
+    return grpo_knobs.with_pipeline_plugins(spec) if plugins else spec
 
 
 GDPO = {"components": [{"name": "format", "weight": 0.5}, {"name": "correctness", "weight": 1.0}],
@@ -303,7 +305,9 @@ def test_binary_transforms_need_binary_reward_and_no_overlong_penalty(transform)
 
 def test_transform_identity_required():
     text = "; ".join(transform_spec("maxrl", plugins=False).rejections())
-    assert "[seq_adv_transform_identity]" in text and sa.TRANSFORM_REF_PATH in text
+    assert "[grpo_knobs_pipeline_plugins]" in text and "yeto.rl.algos.seq_adv" in text
+    listed = [p.path for p in transform_spec("maxrl").plugins]
+    assert any(p.startswith("yeto.rl.algos.seq_adv.") for p in listed)
 
 
 # -- 4.4 MaxRL all-wrong round in the fake driver ----------------------------------------

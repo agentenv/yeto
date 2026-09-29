@@ -43,7 +43,9 @@ def _spec(transform, gdpo=None, estimator="grpo"):
                  "reward_postprocess": rp.dispatcher_ref().to_dict()}
     if gdpo is not None:
         advantage["gdpo"] = gdpo
-    return AlgorithmSpec(advantage=advantage, plugins=[sa.transform_ref()])
+    from yeto.rl.algos import grpo_knobs
+
+    return grpo_knobs.with_pipeline_plugins(AlgorithmSpec(advantage=advantage))
 
 
 def _args(spec, **extra):

@@ -163,10 +163,9 @@ def test_mapped_gamma_parses_upstream(tmp_path, monkeypatch):
 
 
 def _args(estimator, transform="grpo_default", n=4, batch=2):
-    spec = AlgorithmSpec(advantage={"estimator": "grpo", "transform": "maxrl",
-                                    "reward_binary": True,
-                                    "reward_postprocess": rp.dispatcher_ref().to_dict()},
-                         plugins=[sa.transform_ref()])
+    spec = grpo_knobs.with_pipeline_plugins(AlgorithmSpec(
+        advantage={"estimator": "grpo", "transform": "maxrl", "reward_binary": True,
+                   "reward_postprocess": rp.dispatcher_ref().to_dict()}))
     args = SimpleNamespace(advantage_estimator=estimator, rewards_normalization=True,
                            grpo_std_normalization=True, n_samples_per_prompt=n,
                            rollout_batch_size=batch, reward_key=None, multi_lora=False)
