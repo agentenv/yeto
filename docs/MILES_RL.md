@@ -1035,13 +1035,22 @@ can never be combined with another mechanism.
 Validation levels: "CPU" means numeric tests against the Miles sources at
 `MILES_NEXT_COMMIT` (`tests/test_rl_mismatch_observe.py`, run in miles-next-venv)
 plus spec, translation and rejection tests (`tests/test_rl_mismatch_correction.py`).
-**No mechanism has passed the single-GPU smoke (G1) or the two-island
-strict-avg run (G3) yet.** The Miles adapter therefore declares none of them
-(`corrections: ["none"]`), and a ports run that selects one fails at startup
-with a list of the supported mechanisms. For a single-island G1 smoke only,
-`--rl-single-island-no-sync --rl-allow-unverified-mechanism corrections:<name>` (and
-`features:<name>` where needed) admits them. Nothing here claims a training
-benefit.
+Single-GPU smoke (G1, Modal H100, 3 rounds, Qwen3-0.6B LoRA) passed for all
+mechanisms except `opsm_rollout`. The Miles adapter declares `tis`, `opsm` and
+`opsm_trainer` (`corrections: ["none", "opsm", "opsm_trainer", "tis"]`); the
+declaration is pending re-verification through the `yeto launch
+--rl-single-island-no-sync` entry. Any other mechanism fails at startup with a
+list of the supported ones. For a single-island smoke only,
+`--rl-single-island-no-sync --rl-allow-unverified-mechanism corrections:<name>`
+(and `features:<name>` where needed) admits them. The two-island run (G3) has not
+been done.
+
+Limits of that GPU evidence: no clipping or masking branch fired on GPU (every
+ratio stayed inside the bounds, so `tis_clipfrac`, the IcePop and MIS mask
+fractions were all 0). With one optimizer step per round, OPSM cannot trigger by
+construction, because pi_theta = pi_old. For the same reason `ess_ratio` and `ois`
+are always 1: they are pi_theta/pi_old statistics and do not reflect the
+train/inference mismatch. Nothing here claims a training benefit.
 
 Threshold meaning. The literature values below have not been verified in this
 repository; they are shown only for orientation:

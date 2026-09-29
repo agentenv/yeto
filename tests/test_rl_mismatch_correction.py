@@ -248,6 +248,13 @@ def test_spec_correction_plus_argv_correction_conflict(base, argv):
         absorb_extra_argv(base(), argv)
 
 
+def test_custom_config_path_refused_on_ports():
+    from yeto.rl.engine.miles_adapter.config import MilesConfigError, check_extra_argv
+
+    with pytest.raises(MilesConfigError, match="custom-config-path"):
+        check_extra_argv(["--custom-config-path", "x.yaml"], AlgorithmSpec())
+
+
 def test_conflict_fails_before_gpu_process():
     from yeto.rl.engine.miles_adapter.config import MilesConfigError, check_extra_argv
 
@@ -398,20 +405,24 @@ def test_fake_declaration_admits_every_mechanism():
         caps.check(**CHECK, algorithm=build())
 
 
+MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer"}  # G1 passed (tasks 7.3)
+ACCEPTED_BY_MILES = {"tis", "opsm_trainer"}
+
+
+def test_miles_adapter_declares_exactly_g1_passed_corrections():
+    assert miles_capabilities(FINGERPRINT).corrections == MILES_DECLARED
+
+
 @pytest.mark.parametrize("name", sorted(ALL))
-def test_miles_adapter_admits_exactly_declared_mechanisms(name):
+def test_miles_adapter_accepts_declared_rejects_others(name):
     caps = miles_capabilities(FINGERPRINT)
-    spec = ALL[name]()
-    needed = {n for d, n in spec.required_mechanisms() if d == "corrections"}
-    if needed <= caps.corrections and not (
-        {n for d, n in spec.required_mechanisms() if d == "features"} - caps.features
-    ):
-        caps.check(**CHECK, algorithm=spec)
+    if name in ACCEPTED_BY_MILES:
+        caps.check(**CHECK, algorithm=ALL[name]())
         return
     with pytest.raises(CapabilityMismatch) as info:
-        caps.check(**CHECK, algorithm=spec)
+        caps.check(**CHECK, algorithm=ALL[name]())
     text = str(info.value)
-    assert "not supported" in text and f"supported: {sorted(caps.corrections)}" in text
+    assert "not supported" in text and f"supported: {sorted(MILES_DECLARED)}" in text
 
 
 def test_unverified_allowance_admits_single_island_smoke():
@@ -454,13 +465,19 @@ def test_fake_driver_full_mask_round_is_not_a_failure(tmp_path, name):
 
 
 @pytest.mark.skipif(not HAS_NAMED_CUSTOM, reason="needs 1a-shared.patch (named custom functions)")
-@pytest.mark.parametrize("name", ["mismatch_observe", "icepop", "mis", "mis_mask"])
+@pytest.mark.parametrize("name", ["mismatch_observe", "mis", "mis_mask"])
 def test_named_function_does_not_require_generic_custom(name):
     pairs = ALL[name]().required_mechanisms()
     assert ("corrections", "custom") not in pairs and ("corrections", name) in pairs
     other = AlgorithmSpec(correction={"method": "custom", "function": {
         "path": "yeto.rl.engine.algorithm.plugin_source_sha256", "sha256": "2" * 64}})
     assert ("corrections", "custom") in other.required_mechanisms()
+
+
+def test_icepop_miles_path_still_requires_generic_custom():
+    # P0 accepts only yeto. paths as named correction functions.
+    pairs = icepop().required_mechanisms()
+    assert {("corrections", "custom"), ("corrections", "icepop")} <= pairs
 
 
 @pytest.mark.skipif(not HAS_OPSM_COMBINATION, reason="needs 1a-shared.patch (always_emit)")
@@ -494,10 +511,15 @@ def test_doc_example_dry_run(tmp_path, index):
     path.write_text(body)
     spec = AlgorithmSpec.from_json_file(str(path))
     assert spec.rejections() == []
-    rejected = dry_run(["--dry-run", "--rl-algorithm-spec", str(path)])
-    declared = miles_capabilities(FINGERPRINT).corrections
-    if not {n.split(":", 1)[1] for n in allow if n.startswith("corrections:")} <= declared:
-        assert rejected["verdict"] == "rejected" and "not supported" in rejected["error"]
+    plain = dry_run(["--dry-run", "--rl-algorithm-spec", str(path)])
+    name = {0: "mismatch_observe", 1: "tis", 2: "icepop", 3: "opsm_trainer", 4: "opsm_rollout",
+            5: "mis_mask"}[index]
+    assert name in mc.selected_corrections(spec)
+    if name in ACCEPTED_BY_MILES:
+        assert plain["verdict"] == "accepted", plain.get("error")
+        assert plain["miles_argv"][2:] == algorithm_argv(spec)
+    else:
+        assert plain["verdict"] == "rejected" and "not supported" in plain["error"]
     argv = ["--dry-run", "--rl-algorithm-spec", str(path)]
     for name in allow:
         argv += ["--rl-allow-unverified-mechanism", name]
