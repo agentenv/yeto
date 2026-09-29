@@ -30,4 +30,4 @@ Modal Sandbox `H100!`×1（运行前断言型号），app `algo1b-g1h`；sandbox
 - 判据 (a)：over_sampling 的 5 个有值轮次都是 8 的倍数（均为 8），满足。
 - 判据 (b)：os_off 的有值轮次都是 4 的倍数，并且第 3 轮（rollout 2）正好为 4，满足。
 - 两个臂的有值轮次都有 5 个，不少于 2。
-- **结论：over_sampling 在 GPU 上证明生效，可以声明 `features:over_sampling`。**（os_off 其余几轮提交了 8 组，是动态过滤补采了一批 4 组；over_sampling 则每一轮都一次提交 8 组。）
+- **结论：over_sampling 预登记判据满足（区分力弱，另有补充证据，见 results.md），可以声明 `features:over_sampling`。**（审查更正：区分力与决定性证据见 `results.md`。）
