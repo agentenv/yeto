@@ -384,6 +384,33 @@ def register_named_correction_function(path: str, *, mechanisms: Iterable[str]) 
     NAMED_CORRECTION_FUNCTIONS[path] = NAMED_CORRECTION_FUNCTIONS.get(path, frozenset()) | mechanisms
 
 
+# reducer path -> the "dimension:name" mechanisms that claim it
+NAMED_REDUCERS: dict[str, frozenset[str]] = {}
+
+
+def register_named_reducer(path: str, *, mechanisms: Iterable[str]) -> None:
+    """``path`` (a pg_loss reducer) is claimed by its own mechanisms.
+
+    While one of ``mechanisms`` detects a spec using this reducer, the generic
+    ``features:custom_pg_loss_reducer`` is not required (so declaring e.g.
+    ``loss_aggregations:constant`` admits exactly this reducer, and no other).
+    """
+
+    mechanisms = frozenset(mechanisms)
+    if not mechanisms or any(":" not in m for m in mechanisms):
+        raise ValueError(f"named reducer {path!r} needs 'dimension:name' mechanism(s)")
+    if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
+        raise ValueError(f"named reducer {path!r} must be in {sorted(PLUGIN_NAMESPACES)}")
+    NAMED_REDUCERS[path] = NAMED_REDUCERS.get(path, frozenset()) | mechanisms
+
+
+def _named_reducer_claimed(spec: "AlgorithmSpec") -> bool:
+    owners = NAMED_REDUCERS.get(spec.loss.reducer.path, frozenset())
+    return any(
+        f"{m.dimension}:{m.name}" in owners and m.detect(spec) for m in registered_mechanisms()
+    )
+
+
 def register_rejection(name: str, check: Callable[["AlgorithmSpec"], str | None]) -> None:
     """``check(spec)`` returns a problem (with the viable alternative) or None."""
 
@@ -1231,7 +1258,8 @@ def _builtin_mechanisms() -> None:
         "eps_clip": lambda s: s.loss.eps_clip is not None,
         "clip_higher": lambda s: s.loss.eps_clip_high is not None,
         "dual_clip": lambda s: s.loss.eps_clip_c is not None,
-        "custom_pg_loss_reducer": lambda s: s.loss.reducer is not None,
+        "custom_pg_loss_reducer": lambda s: s.loss.reducer is not None
+        and not _named_reducer_claimed(s),
         "no_grpo_std_normalization": lambda s: not s.advantage.std_normalization,
         "no_rewards_normalization": lambda s: not s.advantage.rewards_normalization,
         "whiten_advantages": lambda s: s.advantage.whiten,

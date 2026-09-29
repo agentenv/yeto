@@ -677,8 +677,9 @@ Not declared, pending evidence or approval:
 
 - clip_higher, dual_clip, over_sampling;
 - overlong_filter, mis, opsm_rollout, generic corrections:custom;
-- features:custom_pg_loss_reducer: waits for 1b to restrict the reducer to
-  its own, after which that named reducer is claimed by constant/drgrpo.
+- features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
+  reducer, and that reducer is claimed by `loss_aggregations:constant`
+  (`register_named_reducer`).
 
 Settings an estimator mandates are claimed by that estimator's mechanism in
 that combination only (`ESTIMATOR_COMPANIONS`; main-agent decision, may be
@@ -690,7 +691,8 @@ Measured on integ-decl with the committed example specs:
 
 - accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
 - refused: dapo-like (clip_higher, eps_clip, over_sampling, token) and
-  dr-grpo (custom_pg_loss_reducer, no_grpo_std_normalization).
+  dr-grpo, which is now refused only on no_grpo_std_normalization (the
+  reducer is claimed by `constant`).
 
 **Combinations are not GPU-verified.** Each declared mechanism has its own
 GPU evidence. Combinations such as tis+opsm_trainer or icepop+opsm_trainer

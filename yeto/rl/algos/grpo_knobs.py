@@ -459,6 +459,13 @@ register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule,
 # --------------------------------------------------------------------------
 
 G1_EVIDENCE = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
+# integ-decl: the only allowed reducer is claimed by the constant-denominator
+# aggregation (P0 register_named_reducer), so declaring loss_aggregations:
+# constant admits it without the generic features:custom_pg_loss_reducer.
+from yeto.rl.engine.algorithm import register_named_reducer  # noqa: E402
+
+register_named_reducer(REDUCER_PATH, mechanisms=("loss_aggregations:constant",))
+
 G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
     # G1 run name -> mechanisms declared from it (dimension -> names). Only
     # mechanisms shown to take effect on the GPU are declared (coordinator
