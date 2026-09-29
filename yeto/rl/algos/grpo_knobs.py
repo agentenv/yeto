@@ -375,4 +375,5 @@ from yeto.rl.engine.algorithm import (  # noqa: E402
 register_runtime_attrs("grpo_knobs", runtime_attrs)
 register_launch_check("grpo_knobs", _launch_check)
 register_island_check("grpo_knobs_ref_model", island_problems)
-register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule)
+register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule,
+                       mechanism="features:overlong_filter")
