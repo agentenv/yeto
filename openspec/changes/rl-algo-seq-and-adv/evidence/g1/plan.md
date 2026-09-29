@@ -204,3 +204,33 @@ All on "NVIDIA H100 80GB HBM3". Launcher rc 2 each (pre-declared notice). No zer
   the per-step pg_clipfrac does not reach the round event on the real engine.
 - Teardown: all apps stopped / 0 tasks (attempt6/teardown.txt); watchdogs killed.
   Attempt 6 ~ 5 x 8.5 min H100 ~ $3.9; change total ~ $8 (not billing-confirmed), cap $20.
+
+### Attempt 6 result -- addenda after review (facts only; criteria unchanged)
+1. 7.3 advantage statistics and reference loading, per round from attempt6/<run>/launch.log
+   (Miles `rollout/*` metrics; the zero_std line of each round is logged separately and is
+   matched to rounds by order of appearance):
+   | run | round | raw_reward | rollout/advantages (mean) | zero_std all_zero / all_one | log_probs | ref_log_probs |
+   |---|---|---|---|---|---|---|
+   | rpp | 0 | 0.90625 | 0.015506 | 0.0 / 0.5 | -0.271700 | -0.271700 |
+   | rpp | 1 | 0.375 | 0.074231 | 0.25 / 0.0 | -0.332989 | -0.332878 |
+   | rpp | 2 | 0.125 | -0.021691 | 0.5 / 0.0 | -0.451432 | -0.452067 |
+   | rpp_baseline | 0 | 0.90625 | 0.037357 | 0.0 / 0.5 | -0.271700 | -0.271700 |
+   | rpp_baseline | 1 | 0.40625 | 0.124236 | 0.25 / 0.0 | -0.340052 | -0.340069 |
+   | rpp_baseline | 2 | 0.09375 | 0.109296 | 0.5 / 0.0 | -0.470870 | -0.470733 |
+   `rollout/ref_log_probs` is present every round, so the reference model was loaded and
+   scored. Round 0 log_probs == ref_log_probs (LoRA B = 0: policy equals reference, reward KL
+   0); they diverge from round 1 on. The advantages are after `--normalize-advantages`
+   (token-masked whitening), so their batch mean is near 0 but not exactly 0.
+2. `attempt6/check.py` was written and committed after the runs (47f3105). It only
+   mechanises the criteria declared before launch (attempt 5 / attempt 6 sections); it does
+   not add or change criteria.
+3. Criterion 1 was written in attempt 5 as "learner exit 0 in the stream". The launcher
+   entry does not stream the learner process exit code; check.py reads the learner's own
+   `[rl] learner 0 finalized` line / `rl_learner_finalized` event (printed only after
+   `run_miles` returns normally), together with the launcher's
+   `learner jobs finished: {...: 'SUCCEEDED'}` (Modal function returned without error).
+   Every attempt-6 run shows both.
+4. 5.5: on GPU all three gdpo rounds have non-zero counts (32 / 24 / 32 > 0), so only the
+   "non-zero advantages -> gradient expected" side was exercised; the "no non-zero advantage
+   -> no gradient expected" branch was not triggered on GPU and is covered only by the fake
+   driver test `test_fake_driver_gdpo_no_nonzero_advantage_zero_grad_passes`.
