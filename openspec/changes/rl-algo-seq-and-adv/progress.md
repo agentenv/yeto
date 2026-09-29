@@ -196,3 +196,9 @@
 | 7.6 | 未完成（待 7.5 合入；Modal 2 岛 + 本机 syncer） |
 | 7.7 | 未完成（已完成运行均已回收并核实；汇总待 7.6） |
 | 8.1 | 未完成（dapo-like 依赖 1b） |
+
+## 2026-09-29 merge origin/algo-1a、origin/algo-1b、origin/infra-a（29e0fec）+ 示例重生成
+- 逐个 merge，未 rebase。algo-1a 与本分支在 `yeto/rl/algos/__init__.py` 冲突（各加一行），按 rl-integ-2 的顺序解决（grpo_knobs、seq_adv、mismatch_correction）。
+- `make_examples.py` 重生成 maxrl/mapo/gdpo 示例（分派器 PluginRef 的合并哈希因 mismatch_correction 与 1b 最新 reward_pipeline 变化）。验证：在 rl-integ-2 ff61352 上 merge 本分支（无冲突），`yeto/rl/algos/*.py` 与本分支逐字节相同，用本分支示例跑 `test_example_specs_are_current` 6 passed，在该树上再生成示例无差异。
+- **注意**：示例 spec 的 PluginRef 哈希随任一注册模块（reward_pipeline、grpo_knobs、seq_adv、mismatch_correction、sample_filters 等）源码变化而变。集成分支定稿后须在其最终 SHA 上再运行一次 `PYTHONPATH=. python openspec/changes/rl-algo-seq-and-adv/examples/make_examples.py`（`test_example_specs_are_current` 会在过期时失败）。
+- 本 change 测试 133 passed（yeto-venv）；全量见 `after-failures-29e0fec.txt`。
