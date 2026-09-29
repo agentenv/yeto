@@ -38,7 +38,7 @@
 | 端口 `Publisher.publish(policy, members)` | infra 3.5；M4（3.5a） | 1a（发布路径决定训推差异） | 现有 `publish(state)`，扩展成员集合 | upstream 没有 payload 级 ACK，由 yeto 读回校验补齐（3.5a）；分区模式的 LoRA 必须用 NCCL broadcast，与 colocate 的 CUDA IPC 不同（A5） | △ |
 | 新 engine 准入（payload 校验后才进 router） | infra 3.5；fork M4（3.5a） | 无 | 现实现（9ba38f6d）在 `end_update_weights` 内注册 router，`check_weights` 同锁，只能进 router 后读回 | 按现实现达不到 3.5 验收；3.5a 已写明两种补充机制（cordoned 加入后 uncordon，或 M4b 延迟准入），未实现 | ✖ |
 | 端口 `TrainerGroup.save_cut/restore_cut/rebuild` | infra 4.2/4.3；M5（4.2a）、M6（4.6a） | 无直接消费者；算法状态须进入 cut | `save_cut(*,epoch)->id`、`restore_cut(id,*,epoch)`、`rebuild(plan)` | 缺算法相关状态，已补（A3） | △ |
-| group/batch/update 账本 | infra 3.6 | 1b 动态过滤/超采样/overlong 过滤；2a 多段 rollout | `prepared→optimizer_applied→outer_recorded`，新增终态 `filtered` | 原先无法区分有意丢弃与丢失，已补（A2）；与 1b 共用 `record_trained_groups` hook | △ |
+| group/batch/update 账本 | infra 3.6 | 1b 动态过滤/超采样/overlong 过滤；2a 多段 rollout | `prepared→optimizer_applied→outer_recorded`，新增终态 `filtered` | 原先无法区分有意丢弃与丢失，已补（A2）；审查 F5 进一步区分终态 `filtered` 与非终态余量 `carried_over`，Miles buffer 回收行为在 4.1 核实；与 1b 共用 `record_trained_groups` hook | △ |
 | 完整 cut 状态 | infra 4.1/4.2 | 1b KL loss（ref 模型）、1b/2a 插件（PluginRef、`yeto_algo_plugins`）、P0 算法哈希 | cut manifest 记录 `algorithm_spec_sha256` 与插件哈希，不一致就拒绝恢复 | 已补（A3） | △ |
 | E3 变 DP 与算法归一化 | infra 4.6/4.8 | 1b token 级聚合与 Dr.GRPO 常数分母（CP>1 拒绝）；2a `--normalize-advantages`（DP 组内 all-reduce）与 GSPO；2b GMPO（CP 全收集） | 认证绑定 `algorithm_spec_sha256` | 已补（A4）。GRPO 以外的算法是否认证属于预算问题，待批准 | △/✖ |
 | IslandDriver 挂载点 | `driver.py` `_generate`（policy token 检查）、`_check_gradient`（零梯度）、`phase()` 事件 | P0 4.2 `expects_gradient`；lr-fix 2.1 学习率指标；infra 1.7/2.2/3.1 | 单文件 | 写入冲突，需按顺序单写（§7） | ✖（顺序已定，待派发） |
