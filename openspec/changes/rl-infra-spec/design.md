@@ -30,7 +30,7 @@
 | `partitioned-serial` | E0 分区/状态/映射基线 | trainer/rollout 卡组独立，算法有依赖时仍串行；分离本身不算性能成功 |
 | `partitioned-overlap` | 目标中有条件的重叠执行 | 只有运行 profile 明确允许、且就绪的任务才重叠；启用前必须完成依赖与版本契约验证 |
 
-`ExecutionProfile` 至少含 policy 对每条轨迹的绑定、batch/组就绪、允许的版本年龄、更新/发布/外层同步顺序、允许重叠的任务对、最大在途 batch/轨迹、缓冲容量和反压、quiescent cut 条件。执行模式及算法契约 hash 在一次运行中固定，不由自动控制临时改写。
+`ExecutionProfile` 至少含 policy 对每条轨迹的绑定、batch/组就绪、允许的版本年龄、更新/发布/外层同步顺序、允许重叠的任务对、最大在途 batch/轨迹、缓冲容量和反压、quiescent cut 条件。执行模式及算法契约 hash 在一次运行中固定，不由自动控制临时改写。算法契约 hash 即 `rl-algorithm-capabilities` 的 `AlgorithmSpec` 规范化哈希（`algorithm_spec_sha256`），不另设算法身份；profile 的允许版本年龄 `max_policy_age` 必须不大于 `AlgorithmSpec.execution.max_policy_staleness`，引擎能力 `execution.max_policy_staleness` 由已认证执行模式可产生的最大年龄决定（当前三种模式中只有经认证的 `partitioned-overlap` 可能大于 0，本 change 未认证任何大于 0 的契约）。
 
 E0 默认交付 `partitioned-serial`，同时审计现有算法允许的重叠（例如独立 CPU 工作与不依赖它的 GPU 工作）。如果生成下一 batch 需要本次更新后的权重，明确保留 `update -> publish -> next rollout` 依赖，不启动旧版本 rollout。若只有引入 one-step-off-policy 等新契约才能获得流水线收益，则记录算法变更为独立后续设计，不擅自放宽本 change 的陈旧度约束；本阶段可以得出“该 profile 尚无可启用的并发路径”的有效结论。
 
