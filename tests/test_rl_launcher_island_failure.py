@@ -12,6 +12,13 @@ import yeto.modal_runner as modal_runner
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args  # noqa: F401  (fixture)
 
 
+@pytest.fixture(autouse=True)
+def _no_modal_listing(monkeypatch):
+    # provider listing after teardown: nothing listed (= stopped) unless a test says so
+    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: [])
+    monkeypatch.setattr(launcher, "MODAL_STOP_VERIFY_DELAY_S", 0.0)
+
+
 class Status:
     def __init__(self, text):
         self.text = text
@@ -199,38 +206,53 @@ def test_error_after_finalized_is_success_no_recovery(monkeypatch, tmp_path, pro
     assert [r for r in record if r[0] == "spawn"] in ([("spawn", 0), ("spawn", 1)], [])
 
 
-def test_modal_app_still_running_after_stop_warns_and_exits_5(monkeypatch, tmp_path, capsys):
-    import json as _json
+def _rows(app, *rows):
+    return [{"app_id": i, "description": app, "state": st, "tasks": str(t),
+             "created_at": c} for i, st, t, c in rows]
 
+
+def _run_one_modal(monkeypatch, tmp_path, listing):
     record, clock = [], Clock()
     _setup(monkeypatch, tmp_path, failing={0}, clock=clock, record=record)
-    monkeypatch.setattr(launcher, "MODAL_STOP_VERIFY_DELAY_S", 0.0)
-    monkeypatch.setattr(modal_runner.ModalOps, "app_status",
-                        lambda self: ("deployed", 1), raising=False)  # provider says running
     args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync",
                                     "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
                           gpu="modal:1xa100")
     args.keep, args.recover_timeout = False, 0.0
-    assert launcher.run(args) == launcher.TEARDOWN_UNVERIFIED_EXIT == 5
-    assert "not confirmed stopped" in capsys.readouterr().err
+    app = modal_runner.modal_app_name(args.cluster_prefix)
+    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: listing(app))
+    code = launcher.run(args)
     from yeto import runs
 
-    rec = _json.loads((runs.run_dir(args.cluster_prefix) / "teardown.json").read_text())
-    assert rec["confirmed_stopped"] is False
+    rec = __import__("json").loads((runs.run_dir(args.cluster_prefix) / "teardown.json").read_text())
+    return code, rec
+
+
+def test_modal_app_still_running_after_stop_warns_and_exits_5(monkeypatch, tmp_path, capsys):
+    code, rec = _run_one_modal(monkeypatch, tmp_path, lambda app: _rows(
+        app, ("ap-new", "deployed", 1, "2999-01-01T00:00:00+00:00")))
+    assert code == launcher.TEARDOWN_UNVERIFIED_EXIT == 5
+    assert "not confirmed stopped" in capsys.readouterr().err
+    assert rec["confirmed_stopped"] is False and rec["this_run_app_ids"] == ["ap-new"]
     assert len(rec["checks"]) == launcher.MODAL_STOP_VERIFY_ATTEMPTS
 
 
-def test_modal_app_confirmed_stopped_is_recorded(monkeypatch, tmp_path):
-    import json as _json
+def test_same_name_old_stopped_new_running_is_not_confirmed(monkeypatch, tmp_path):
+    code, rec = _run_one_modal(monkeypatch, tmp_path, lambda app: _rows(
+        app, ("ap-old", "stopped", 0, "2020-01-01T00:00:00+00:00"),
+        ("ap-new", "deployed", 1, "2999-01-01T00:00:00+00:00")))
+    assert code == 5 and rec["confirmed_stopped"] is False
+    assert rec["this_run_app_ids"] == ["ap-new"]  # only this run's row, by created_at
 
-    record, clock = [], Clock()
-    _setup(monkeypatch, tmp_path, failing={0}, clock=clock, record=record)
-    args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync",
-                                    "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
-                          gpu="modal:1xa100")
-    args.keep, args.recover_timeout = False, 0.0
-    assert launcher.run(args) == 4
-    from yeto import runs
 
-    rec = _json.loads((runs.run_dir(args.cluster_prefix) / "teardown.json").read_text())
-    assert rec["confirmed_stopped"] is True
+def test_same_name_rows_all_stopped_is_confirmed(monkeypatch, tmp_path):
+    code, rec = _run_one_modal(monkeypatch, tmp_path, lambda app: _rows(
+        app, ("ap-old", "stopped", 0, "2020-01-01T00:00:00+00:00"),
+        ("ap-new", "stopped", 0, "2999-01-01T00:00:00+00:00")))
+    assert code == 4 and rec["confirmed_stopped"] is True  # 4: the island failed
+
+
+def test_old_same_name_row_still_running_also_blocks(monkeypatch, tmp_path):
+    code, rec = _run_one_modal(monkeypatch, tmp_path, lambda app: _rows(
+        app, ("ap-old", "deployed", 2, "2020-01-01T00:00:00+00:00"),
+        ("ap-new", "stopped", 0, "2999-01-01T00:00:00+00:00")))
+    assert code == 5 and rec["confirmed_stopped"] is False

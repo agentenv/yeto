@@ -3275,28 +3275,65 @@ MODAL_STOP_VERIFY_ATTEMPTS = 5
 MODAL_STOP_VERIFY_DELAY_S = 5.0
 
 
-def _verify_modal_app_stopped(modal_ops, args) -> bool:
-    """After stop_app: the provider must list this run's app as stopped with
-    0 tasks (bounded retries). The result goes to <run dir>/teardown.json."""
+def _list_modal_apps() -> list[dict]:
+    """Rows of ``modal app list --json`` (app_id, description, state, tasks,
+    created_at, stopped_at). Raises when the listing fails."""
+
+    import subprocess as _subprocess
+
+    proc = _subprocess.run(
+        [sys.executable, "-m", "modal", "app", "list", "--json"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"modal app list failed: {(proc.stdout + proc.stderr).strip() or proc.returncode}")
+    return json.loads(proc.stdout or "[]")
+
+
+def _created_unix(row) -> float | None:
+    from datetime import datetime
+
+    value = row.get("created_at")
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None = None) -> bool:
+    """After stop_app, confirm on the provider that nothing of this app runs.
+
+    ``modal app list`` can hold several rows with the same app name (earlier
+    runs). EVERY row with this name must be stopped with 0 tasks (bounded
+    retries); the rows created at/after this run's start are this run's app,
+    and their app ids are recorded in <run dir>/teardown.json.
+    """
 
     from . import runs
 
-    attempts = []
-    confirmed = False
+    checks, confirmed, ours = [], False, []
     for attempt in range(MODAL_STOP_VERIFY_ATTEMPTS):
         try:
-            status = modal_ops.app_status()
+            rows = [r for r in _list_modal_apps() if r.get("description") == modal_ops.app_name]
         except Exception as e:  # noqa: BLE001 - an unreadable listing is "unverified"
-            status = f"error: {e}"
-        attempts.append(status if not isinstance(status, tuple) else list(status))
-        if status is None or (isinstance(status, tuple) and status[0] == "stopped"
-                              and status[1] == 0):
-            confirmed = True  # stopped with 0 tasks, or no longer listed
-            break
+            checks.append(f"error: {e}")
+        else:
+            ours = [r.get("app_id") for r in rows
+                    if run_started_unix is not None
+                    and (_created_unix(r) or 0) >= run_started_unix - 1]
+            summary = [{"app_id": r.get("app_id"), "state": str(r.get("state", "")).lower(),
+                        "tasks": r.get("tasks"), "created_at": r.get("created_at")}
+                       for r in rows]
+            checks.append(summary)
+            if all(s["state"] == "stopped" and int(s["tasks"] or 0) == 0 for s in summary):
+                confirmed = True  # also when no row is listed any more
+                break
         if attempt + 1 < MODAL_STOP_VERIFY_ATTEMPTS:
             time.sleep(MODAL_STOP_VERIFY_DELAY_S)
-    record = {"provider": "modal", "app": modal_ops.app_name, "confirmed_stopped": confirmed,
-              "checks": attempts}
+    record = {"provider": "modal", "app": modal_ops.app_name, "this_run_app_ids": ours,
+              "confirmed_stopped": confirmed, "checks": checks}
     try:
         path = runs.run_dir(args.cluster_prefix) / "teardown.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3305,7 +3342,8 @@ def _verify_modal_app_stopped(modal_ops, args) -> bool:
         print(f"[launcher] could not write the teardown record: {e}", file=sys.stderr)
     if not confirmed:
         print(f"[launcher] WARN: Modal app {modal_ops.app_name} not confirmed stopped after "
-              f"{len(attempts)} check(s) ({attempts[-1]}); stop it by hand: modal app stop "
+              f"{len(checks)} check(s) (every row with this name must be stopped with 0 "
+              f"tasks; last: {checks[-1]}); stop it by hand: modal app stop "
               f"{modal_ops.app_name} (exit {TEARDOWN_UNVERIFIED_EXIT})", file=sys.stderr)
     return confirmed
 
@@ -3871,6 +3909,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     clusters: list[str] = []
     controller = None
     teardown_unverified = False
+    run_started_unix = time.time()  # Modal rows created after this are this run's app
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -4226,7 +4265,8 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     modal_ops.stop_app()
                 except Exception as e:  # noqa: BLE001
                     print(f"[launcher] Modal app stop failed: {e}", file=sys.stderr)
-                if not _verify_modal_app_stopped(modal_ops, args):
+                if not _verify_modal_app_stopped(modal_ops, args,
+                                                 run_started_unix=run_started_unix):
                     teardown_unverified = True
             if unverified:
                 # The head must NOT self-terminate: it is the only thing that
