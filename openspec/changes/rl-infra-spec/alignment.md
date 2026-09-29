@@ -205,3 +205,11 @@
 
 - §2 矩阵中"新 engine 准入（payload 校验后才进 router）"一行原为 ✖。现状：fork `yeto-elastic-m1-m6` 1a68f893 已实现方案 (a)（`start_update_weights(admit_cordoned=True)` → 调用方 `check_weights` 读回 → `admit_cells(cell_ids, expected_epoch)`）。该行改记为 **△（机制已在 fork 实现，CPU 单测；第三轮独立审查中，未合回 yeto/ports、未进镜像，3.5 GPU 未验证）**。3.5 的验收不变。
 - M5（4.2a）现在支持 bf16 与 DistributedOptimizer，但 GPU 未验证，E3 LoRA+DistOpt 仍按 DEV-GATHER 的结论处理；M6 rebuild 失败语义（`TrainerRebuildError`，不自动回滚）已写入 4.6a，3.7/4.7 失败矩阵需覆盖。
+
+## 12. 待批准追加（2026-09-29 INFRA，来自 f-design.md 接口缺口）
+
+以下三项需要用户另行批准，本轮不实施：
+
+- **G4 运行中云扩缩与节点追加**：包括按 ID 释放资源。这属于实际的云扩缩实现，按 BRIEF 需要另批。
+- **G6 运行中增删 bundle/cell**：需要新的 Miles fork M 项（现有 M1–M6 只支持启动时预声明的 bundle/cell），需要另批。
+- **G11 fixed-roster 重启与扩缩后的池形状**：首版重启时恢复到启动时的池形状；在支持按新形状重建之前，不启用扩池。需要确认该约定。

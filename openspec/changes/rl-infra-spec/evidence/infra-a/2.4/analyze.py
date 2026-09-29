@@ -2,7 +2,8 @@
 import datetime as dt, json, statistics, sys, pathlib
 root = pathlib.Path(sys.argv[1])
 rows = {}
-for d in sorted(root.glob("*-s*")):
+import re
+for d in sorted(p for p in root.iterdir() if re.fullmatch(r"(t2r2|t1r3|c4)-s(17|29)", p.name)):
     tape = [json.loads(l) for l in open(d / "tape.jsonl")]
     t = [e["time_unix"] for e in tape if e["event"] == "rl_round_trained"]
     deltas = [b - a for a, b in zip(t, t[1:])]  # round k wall for k=2..N
