@@ -464,6 +464,8 @@ G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
                "loss_aggregations": frozenset({"constant"})},
     "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
     "entropy": {"features": frozenset({"entropy_bonus"})},
+    "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
+                         "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
 }
 
 
