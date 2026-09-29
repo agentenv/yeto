@@ -655,7 +655,9 @@ each with its evidence, are the `MILES_DECLARED` table in
 
 - corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe
   (rl-algo-mismatch-correction);
-- loss_aggregations: constant; features: kl_loss_ref_model, entropy_bonus,
+- loss_aggregations: constant, token (token only on Miles 0af62f4d+, where
+  the LoRA bridge honours calculate_per_token_loss; entry.MILES_DECLARED_PINS
+  withholds it under other pins); features: kl_loss_ref_model, entropy_bonus,
   overlong_penalty, no_grpo_std_normalization (g1c isolated control), eps_clip
   (g1b run A-r1; eps 0.001/0.002 are trigger test values, not
   recommendations); kl_placements: loss; reward_postprocessors:
@@ -697,7 +699,7 @@ undeclared mechanisms.
 Measured on integ-decl with the committed example specs:
 
 - accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
-- refused: dapo-like (clip_higher, over_sampling, token);
+- refused: dapo-like (clip_higher, over_sampling);
 - dr-grpo is accepted after the no_grpo_std_normalization re-declaration. Its
   reducer is claimed by `constant` only at the evidenced source hash.
 

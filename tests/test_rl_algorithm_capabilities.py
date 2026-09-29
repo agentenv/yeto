@@ -359,6 +359,7 @@ EXPECTED_MILES_DECLARED = {
     "corrections:mis_mask",
     "features:eps_clip",
     "features:no_grpo_std_normalization",
+    "loss_aggregations:token",
 }
 
 
@@ -603,3 +604,13 @@ def test_mismatch_metrics_claimed_by_use_tis_corrections_only():
     # mismatch_metrics without any correction is not even expressible
     with pytest.raises(AlgorithmSpecError, match="mismatch_metrics"):
         CorrectionSpec(mismatch_metrics=True)
+
+
+def test_pinned_declaration_only_on_its_verified_miles_commit():
+    from yeto.rl.engine.miles_adapter import entry
+
+    assert "loss_aggregations:token" in entry.MILES_DECLARED_PINS
+    good = next(iter(entry.MILES_DECLARED_PINS["loss_aggregations:token"]))
+    assert "token" in entry.declared_by_dimension(good)["loss_aggregations"]
+    # an older (unfixed) Miles pin: token is not declared
+    assert "token" not in entry.declared_by_dimension("9e4260d" + "0" * 33)["loss_aggregations"]
