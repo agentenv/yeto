@@ -109,7 +109,11 @@ MILES_DECLARED: dict[str, str] = {
     "features:clip_higher": (
         f"{_E1B_G1J} (branch algo-1b 53cb477): 6 groups x 3 steps, seed 17; step-1 "
         "grad_norm bit-identical in both arms (1.1293506622314453), round-1 step-3 "
-        "grad_norm A 0.5642 vs B 0.6572 -- pre-registered criterion met. RAN ON Miles "
+        "grad_norm A 0.5642 vs B 0.6572 -- pre-registered criterion met. Nature of the "
+        "evidence: a deterministic same-seed reproduction of the post-hoc g1e observation "
+        "(step-2 grad_norm differs; g1j's first two steps are bit-identical to g1e), not "
+        "an independent confirmation; the attribution holds (the arms differ only in "
+        "eps_clip_high, step 1 bit-identical). RAN ON Miles "
         "0394715, not the pinned 0af62f4d: transferred because `git diff 0394715..0af62f4d "
         "-- miles` (13 files, checked by the main agent and ALGO-CAP) touches no "
         "loss/policy file and leaves the clip path unchanged -- a code-diff argument, not "
