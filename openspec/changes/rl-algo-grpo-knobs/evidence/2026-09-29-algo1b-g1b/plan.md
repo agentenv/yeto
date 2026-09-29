@@ -92,3 +92,8 @@ run A 第 5 次：生效判据满足（第 2 步 pg_clipfrac 0.105/0.105/0.111�
 - 运行成功（按 R1 判据）：launcher 退出码 2，日志中有"not fetchable over ssh"那行提示，事件磁带中有 `rl_learner_finalized`，job 状态为 SUCCEEDED。没有 invariant 错误。
 - **生效判据满足**：3 轮 × 2 步，每轮第 2 步的 pg_clipfrac 为 0.1046/0.1107/0.1046，都大于 0 且有限（第 1 步 on-policy，为 0）。
 - 结论：clip_higher（`features:clip_higher` 与 `features:eps_clip`）在 GPU 上证明生效，可以声明。说明：本次为了触发 clip 分支，把窗口设为 eps 0.001/0.002，这验证的是机制确实起作用，不代表推荐这个取值。
+
+## 审查更正（事后记录）
+- **R1 是事后修订**：它由主 agent 在看到第 5 次尝试的结果（rc=2）之后批准，理由是 rc=2 是 no-sync Modal 路径的确定性行为（launcher.py:3994，产物无法回传），而不是训练失败。R1 只放宽了"运行成功"的读法，其余判据未改。它的事后性质在此如实记录。
+- **clip_higher 结论撤回**：`pg_clipfrac` 是上下界裁剪的合计。在 eps 0.001/0.002 下，即使 `eps_clip_high` 没有生效（上界退回到 0.001），clipfrac 也会大于 0。因此 A-r1 只能证明 **eps_clip（裁剪窗口）生效**，不能证明 clip_higher（独立的上界）生效。clip_higher 已由 P0 撤回，eps_clip 保留。要声明 clip_higher，需要另立一个能隔离上界的配对计划。
+- 事件磁带中 `rl_local_round.clip_fraction` 各轮都是 null（ports 路径没有填这个字段），clipfrac 取自训练日志中的 `train/pg_clipfrac`。

@@ -798,7 +798,7 @@ def test_learner_binds_ref_source_and_override(tmp_path):
 EXPECTED_1B_DECLARED = {
     "loss_aggregations": {"constant"},
     "features": {"kl_loss_ref_model", "no_grpo_std_normalization", "entropy_bonus", "overlong_penalty",
-                 "clip_higher", "eps_clip"},
+                 "eps_clip"},
     "kl_placements": {"loss"},
     "reward_postprocessors": {"custom_reward_postprocess"},
 }
@@ -821,12 +821,12 @@ def test_declared_caps_accept_1b_and_refuse_undeclared():
     from yeto.rl.engine.miles_adapter.entry import miles_capabilities
 
     caps = gk.merge_declared(miles_capabilities("sha256:" + "0" * 64))
-    for spec in (pipeline_spec(reward_shapers=[OVERLONG]), AlgorithmSpec(loss={"eps_clip_high": 0.28}),
+    for spec in (pipeline_spec(reward_shapers=[OVERLONG]), AlgorithmSpec(loss={"eps_clip": 0.2}),
                  kl_spec(), AlgorithmSpec(entropy_coef=0.001)):
         missing = [f"{d}:{n}" for d, n in spec.required_mechanisms() if n not in getattr(caps, d)]
         assert missing == [], missing
     assert "token" not in gk.declared_mechanisms().get("loss_aggregations", frozenset())
-    for name in ("dual_clip", "over_sampling", "overlong_filter"):
+    for name in ("clip_higher", "dual_clip", "over_sampling", "overlong_filter"):
         assert name not in gk.declared_mechanisms().get("features", frozenset())
 
 

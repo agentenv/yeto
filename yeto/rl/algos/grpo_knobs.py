@@ -480,7 +480,9 @@ G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
     "entropy": {"features": frozenset({"entropy_bonus"})},
     "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
                          "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
-    "clip_higher": {"features": frozenset({"clip_higher", "eps_clip"})},  # g1b run A-r1 (clipfrac > 0)
+    # g1b run A-r1: clipfrac > 0 proves the clip window (eps_clip) only; clip_higher
+    # (upper bound) withdrawn after review -- needs an isolated upper-bound control.
+    "clip_higher": {"features": frozenset({"eps_clip"})},
     "no_std": {"features": frozenset({"no_grpo_std_normalization"})},  # g1c paired step-1 grad_norm differs
 }
 
