@@ -38,6 +38,37 @@ def runtime_fingerprint(launch: Any, miles_commit: str) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+# Declared beyond R0: "dimension:name" -> evidence that the mechanism takes
+# effect on GPU (declaration policy, rl-infra-spec alignment §7b; may be
+# overridden by the user). One entry per mechanism, added in its own commit.
+_E1A = "openspec/changes/rl-algo-mismatch-correction/evidence"
+_E1B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
+_E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
+MILES_DECLARED: dict[str, str] = {
+    "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
+    "corrections:opsm": (
+        f"{_E1A}/2026-09-29-trigger (opsm_clipfrac > 0, optimizer_steps 2); the OPSM "
+        "dimension that every source-specific OPSM mechanism also requires"
+    ),
+    "corrections:opsm_trainer": f"{_E1A}/2026-09-29-trigger (opsm_clipfrac > 0)",
+    "features:maxrl": f"{_E2A}/attempt4 (maxrl)",
+    "features:mapo": f"{_E2A}/attempt4 (mapo)",
+}
+
+
+def declared_by_dimension() -> dict[str, set[str]]:
+    """R0 mechanism sets plus :data:`MILES_DECLARED`, per dimension."""
+
+    from ..capabilities import R0_MECHANISMS
+
+    out = {dim: set(names) for dim, names in R0_MECHANISMS.items()}
+    out["advantage_estimators"] = {"grpo"}
+    for mechanism in MILES_DECLARED:
+        dimension, name = mechanism.split(":", 1)
+        out.setdefault(dimension, set()).add(name)
+    return out
+
+
 def miles_capabilities(
     fingerprint: str, *, unverified_mechanisms=()
 ) -> EngineCapabilities:
@@ -58,22 +89,12 @@ def miles_capabilities(
         runtime_fingerprint=fingerprint,
         parameter_layouts={"lora"},
         placements={"colocated"},
-        advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
-        # rl-algo-mismatch-correction 7.3: declared only after the single-GPU
-        # smoke (G1) passed -- evidence/2026-09-29-g1/runs/{tis,opsm-trainer}.
-        # opsm_rollout, mismatch_observe, icepop and mis* stay undeclared
-        # (observe/icepop/mis additionally need 1a-shared.patch so that a
-        # named custom function does not require the generic 'custom').
-        corrections={"none", "tis", "opsm", "opsm_trainer"},
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),
-        # rl-algo-seq-and-adv 7.5: G1 passed on 1xH100 (evidence/g1/attempt4, e54d2f7).
-        # gdpo held back (main agent); maxrl/mapo formally usable only once
-        # reward_postprocessors:custom_reward_postprocess is declared (1b G1).
-        features=set(R0_MECHANISMS["features"]) | {"maxrl", "mapo"},
+        **declared_by_dimension(),
     )
     if unverified_mechanisms:
         capabilities = capabilities.with_unverified(unverified_mechanisms)

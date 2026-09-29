@@ -465,7 +465,7 @@ def test_named_custom_function_only_exempt_when_its_mechanism_detects():
             alg.unregister(mechanism=("corrections", "t_named"))
     finally:
         alg.NAMED_CORRECTION_FUNCTIONS.discard(ref.path)
-    with pytest.raises(ValueError, match="yeto namespace"):
+    with pytest.raises(ValueError, match="must be in"):
         alg.register_named_correction_function("examples.x.fn")
 
 
