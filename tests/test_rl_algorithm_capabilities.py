@@ -521,48 +521,73 @@ def test_always_emit_field_only_when_its_mechanism_applies():
 
 
 def test_estimator_mandated_settings_are_claimed_by_the_estimator():
-    caps = miles_capabilities(FP)
+    # a caps object with exactly gspo/rpp declared and none of the companion
+    # features: pins the claim itself, independent of later declarations
+    caps = fake_capabilities(advantage_estimators={"grpo", "gspo", "reinforce_plus_plus"},
+                             features=set())
     gspo = AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
                          loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4))
     assert not {("features", "eps_clip"), ("features", "clip_higher")} & gspo.required_mechanisms()
-    _check(caps, gspo)  # accepted with gspo declared (clip claimed by gspo)
-    rpp = AlgorithmSpec(advantage=AdvantageSpec(estimator="reinforce_plus_plus", whiten=True))
-    _check(caps, rpp)
-    # the same settings under grpo stay independent mechanisms: required, and
-    # accepted only through their own declaration
-    grpo_clip = AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28))
-    assert ("features", "clip_higher") in grpo_clip.required_mechanisms()
-    if "features:clip_higher" in caps.declared_mechanisms():
-        _check(caps, grpo_clip)  # declared on its own evidence (1b g1b run A-r1)
-    else:
-        with pytest.raises(CapabilityMismatch, match="'clip_higher' not supported"):
-            _check(caps, grpo_clip)
+    _check(caps, gspo)  # gspo + its clip settings: accepted
+    _check(caps, AlgorithmSpec(advantage=AdvantageSpec(estimator="reinforce_plus_plus",
+                                                       whiten=True)))
+    with pytest.raises(CapabilityMismatch, match="'clip_higher' not supported"):
+        _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28)))  # grpo + clip
     with pytest.raises(CapabilityMismatch, match="'whiten_advantages' not supported"):
-        _check(caps, AlgorithmSpec(advantage=AdvantageSpec(whiten=True)))
-    # a companion beyond the mandated set is still checked (dual-clip under gspo)
+        _check(caps, AlgorithmSpec(advantage=AdvantageSpec(whiten=True)))  # grpo + whiten
+    with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported"):
+        _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_c=3.0)))  # grpo + dual_clip
     with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported"):
         _check(caps, AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
                                    loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4,
-                                                 eps_clip_c=3.0)))
+                                                 eps_clip_c=3.0)))  # beyond the mandate
 
-
-def test_named_reducer_claimed_only_by_its_own_mechanism(monkeypatch):
+def test_named_reducer_claimed_only_by_its_own_mechanism_and_pinned_source(monkeypatch):
     ref = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
     monkeypatch.setattr(alg, "NAMED_REDUCERS", {})
     spec = AlgorithmSpec(loss=LossSpec(reducer=ref))
     assert ("features", "custom_pg_loss_reducer") in spec.required_mechanisms()
-    alg.register_named_reducer(ref.path, mechanisms=("loss_aggregations:constant",))
+    alg.register_named_reducer(ref.path, mechanisms=("loss_aggregations:constant",),
+                               sha256=ref.sha256)
     # the owner does not detect this spec (default aggregation): still generic
     assert ("features", "custom_pg_loss_reducer") in spec.required_mechanisms()
     constant = AlgorithmSpec(loss=LossSpec(reducer=ref, aggregation="constant"))
     assert ("features", "custom_pg_loss_reducer") not in constant.required_mechanisms()
-    assert ("loss_aggregations", "constant") in constant.required_mechanisms()
+    # another source of the same path is not the evidenced reducer
+    other_source = AlgorithmSpec(loss=LossSpec(reducer=alg.PluginRef(ref.path, "0" * 64),
+                                               aggregation="constant"))
+    assert ("features", "custom_pg_loss_reducer") in other_source.required_mechanisms()
     other = alg.PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
     assert ("features", "custom_pg_loss_reducer") in AlgorithmSpec(
         loss=LossSpec(reducer=other, aggregation="constant")).required_mechanisms()
     with pytest.raises(ValueError):
         alg.register_named_reducer(ref.path, mechanisms=("constant",))
+    with pytest.raises(ValueError, match="already pinned"):
+        alg.register_named_reducer(ref.path, mechanisms=("loss_aggregations:constant",),
+                                   sha256="1" * 64)
 
+
+def test_correction_companion_claims(monkeypatch):
+    """mismatch_metrics claimed by tis/icepop/mis_mask/mismatch_observe only.
+
+    Plain 'mis' (truncate) is deliberately NOT in the table (conservative: it is
+    undeclared and has no triggering run), so it keeps the feature requirement.
+    """
+
+    import sys
+
+    sys.path.insert(0, "tests")
+    import test_rl_mismatch_correction as t
+
+    assert set(alg.CORRECTION_COMPANIONS) == {
+        ("corrections", n) for n in ("tis", "icepop", "mis_mask", "mismatch_observe")}
+    for name in ("tis", "icepop", "mis_mask", "mismatch_observe", "mis"):
+        spec = t.ALL[name]()
+        if not spec.correction.mismatch_metrics:
+            spec = spec.replace(correction=spec.correction.__class__.from_dict(
+                {**spec.correction.to_dict(), "mismatch_metrics": True}))
+        claimed = ("features", "mismatch_metrics") not in spec.required_mechanisms()
+        assert claimed == (name != "mis"), name
 
 def test_mismatch_metrics_claimed_by_use_tis_corrections_only():
     caps = miles_capabilities(FP)

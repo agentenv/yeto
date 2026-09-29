@@ -394,16 +394,20 @@ def register_named_correction_function(path: str, *, mechanisms: Iterable[str]) 
     NAMED_CORRECTION_FUNCTIONS[path] = NAMED_CORRECTION_FUNCTIONS.get(path, frozenset()) | mechanisms
 
 
-# reducer path -> the "dimension:name" mechanisms that claim it
-NAMED_REDUCERS: dict[str, frozenset[str]] = {}
+# reducer path -> (the "dimension:name" mechanisms that claim it, pinned
+# source sha256 or None)
+NAMED_REDUCERS: dict[str, tuple[frozenset[str], str | None]] = {}
 
 
-def register_named_reducer(path: str, *, mechanisms: Iterable[str]) -> None:
+def register_named_reducer(path: str, *, mechanisms: Iterable[str],
+                           sha256: str | None = None) -> None:
     """``path`` (a pg_loss reducer) is claimed by its own mechanisms.
 
-    While one of ``mechanisms`` detects a spec using this reducer, the generic
-    ``features:custom_pg_loss_reducer`` is not required (so declaring e.g.
-    ``loss_aggregations:constant`` admits exactly this reducer, and no other).
+    While one of ``mechanisms`` detects a spec using this reducer -- and, when
+    ``sha256`` is given, the spec's PluginRef pins exactly that source (the
+    one the declaration's evidence ran) -- the generic
+    ``features:custom_pg_loss_reducer`` is not required. Any other reducer, or
+    another source of this one, still requires it.
     """
 
     mechanisms = frozenset(mechanisms)
@@ -411,38 +415,16 @@ def register_named_reducer(path: str, *, mechanisms: Iterable[str]) -> None:
         raise ValueError(f"named reducer {path!r} needs 'dimension:name' mechanism(s)")
     if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
         raise ValueError(f"named reducer {path!r} must be in {sorted(PLUGIN_NAMESPACES)}")
-    NAMED_REDUCERS[path] = NAMED_REDUCERS.get(path, frozenset()) | mechanisms
+    old, pinned = NAMED_REDUCERS.get(path, (frozenset(), None))
+    if pinned is not None and sha256 is not None and pinned != sha256:
+        raise ValueError(f"named reducer {path!r} already pinned to {pinned}")
+    NAMED_REDUCERS[path] = (old | mechanisms, sha256 or pinned)
 
 
 def _named_reducer_claimed(spec: "AlgorithmSpec") -> bool:
-    owners = NAMED_REDUCERS.get(spec.loss.reducer.path, frozenset())
-    return any(
-        f"{m.dimension}:{m.name}" in owners and m.detect(spec) for m in registered_mechanisms()
-    )
-
-
-# reducer path -> the "dimension:name" mechanisms that claim it
-NAMED_REDUCERS: dict[str, frozenset[str]] = {}
-
-
-def register_named_reducer(path: str, *, mechanisms: Iterable[str]) -> None:
-    """``path`` (a pg_loss reducer) is claimed by its own mechanisms.
-
-    While one of ``mechanisms`` detects a spec using this reducer, the generic
-    ``features:custom_pg_loss_reducer`` is not required (so declaring e.g.
-    ``loss_aggregations:constant`` admits exactly this reducer, and no other).
-    """
-
-    mechanisms = frozenset(mechanisms)
-    if not mechanisms or any(":" not in m for m in mechanisms):
-        raise ValueError(f"named reducer {path!r} needs 'dimension:name' mechanism(s)")
-    if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
-        raise ValueError(f"named reducer {path!r} must be in {sorted(PLUGIN_NAMESPACES)}")
-    NAMED_REDUCERS[path] = NAMED_REDUCERS.get(path, frozenset()) | mechanisms
-
-
-def _named_reducer_claimed(spec: "AlgorithmSpec") -> bool:
-    owners = NAMED_REDUCERS.get(spec.loss.reducer.path, frozenset())
+    owners, pinned = NAMED_REDUCERS.get(spec.loss.reducer.path, (frozenset(), None))
+    if pinned is not None and spec.loss.reducer.sha256 != pinned:
+        return False
     return any(
         f"{m.dimension}:{m.name}" in owners and m.detect(spec) for m in registered_mechanisms()
     )

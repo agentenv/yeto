@@ -464,7 +464,11 @@ G1_EVIDENCE = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1
 # constant admits it without the generic features:custom_pg_loss_reducer.
 from yeto.rl.engine.algorithm import register_named_reducer  # noqa: E402
 
-register_named_reducer(REDUCER_PATH, mechanisms=("loss_aggregations:constant",))
+# Pinned to the reducer source the drgrpo G1 ran (evidence
+# 2026-09-29-algo1b-g1/out/drgrpo/algorithm_spec.json).
+REDUCER_SOURCE_SHA256 = "253856acaefbea8de936b03ea89bf5c50039719732f21709aa66358f9f78e4ed"
+register_named_reducer(REDUCER_PATH, mechanisms=("loss_aggregations:constant",),
+                       sha256=REDUCER_SOURCE_SHA256)
 
 G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
     # G1 run name -> mechanisms declared from it (dimension -> names). Only
