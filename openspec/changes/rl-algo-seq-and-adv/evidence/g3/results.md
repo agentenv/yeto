@@ -41,7 +41,7 @@ teardown. Remaining yeto-syncer / watchdog processes on this host belong to algo
 Rerun (needs a new committed plan): base on an integ-decl SHA >= c098b5b (exit code 4 = FAIL
 added to the reading); same criteria.
 
-## Watchdog disappearance (investigation)
+## Watchdog disappearance (investigation) -- RESOLVED (see correction below)
 - The watchdog was `setsid nohup bash -c "sleep 3300; modal app stop -y yeto-algo2a-g3; pkill -f ..."`
   (pid 1836651); at 20:38Z the pid no longer existed, while the head (timeout 3000) was still running.
   Nothing in this change's scripts kills it before the run ends. Other agents on the host run
@@ -53,3 +53,15 @@ added to the reading); same criteria.
   line), started with setsid + nohup in its own session/process group, ignoring HUP/INT/TERM (only
   SIGKILL stops it), writing a heartbeat line every 60 s to run/watchdog.log; the harness checks it
   every minute and restarts it with the same deadline if it is gone, and logs that.
+
+### Correction (2026-09-29, after the main agent's notice): cause identified
+- algo-1a acknowledged running `pkill -x -f "sleep 3300"` at about 20:37-20:40Z (algo-1a progress,
+  commit 7ebfc59). That killed the `sleep 3300` child of this run's watchdog; the watchdog shell then
+  immediately executed its next command, `modal app stop -y yeto-algo2a-g3` (app stopped_at
+  20:36:20Z) and `pkill` of this run's syncer. This coincides with this run's close-down: the local
+  syncer "Terminated" and island 1's `KeyboardInterrupt` in `ray.shutdown` -> job FAILED -> the
+  launcher recovery loop (the loop itself is the launcher defect P0 fixed in a602fa2). The trigger
+  of the failure was therefore most likely another agent's pattern kill of this run's watchdog,
+  not the mechanism or this change's code. The watchdog cause is no longer "undetermined".
+- The official result of this run stays as pre-registered: **not passed** (exit 143; criterion 4
+  not established by the pre-declared script). The one allowed rerun is reported in rerun/results.md.

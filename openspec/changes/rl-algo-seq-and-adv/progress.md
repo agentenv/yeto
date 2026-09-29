@@ -225,3 +225,8 @@
 - 根因在 launcher（两岛 finalized 后先停 syncer，岛 1 关闭期异常被判 FAILED 并进入恢复循环；c098b5b 后会返回 4，仍属误判），已由主 agent 交 P0 修复。修复推送后允许在新 SHA 上按单独提交的新计划只重跑一次：判据不变；检查脚本运行前改为按 rl_local_round/rl_round_trained 事件计数（已在 harness 中改好，随新计划提交）；退出码 0/2 由磁带判定，3/4/其他非零为失败。
 - watchdog 中途消失：原因未查明（疑似他人按模式批量 kill 同形 `sleep 3300` watchdog）；harness 已加固（独立命名脚本、setsid+nohup、忽略 HUP/INT/TERM、60 s 心跳日志、每分钟自检并按原截止时间重启），见 `evidence/g3/results.md`。
 - **5.5 补充证据（GPU）**：7.6 运行中 MaxRL 第 2 轮两岛 `rl_round_trained.nonzero_advantages = 0`、`rl_local_round.grad_norm = 0.0`、无不变量失败事件——"非零 advantage 为 0 → 不期望梯度"分支在 GPU 上真实走到（此前仅 fake driver 覆盖）。
+
+## 2026-09-29 7.6 首次失败根因更正 + 重跑通过
+- 更正：首次 7.6 的 watchdog 消失**已查明**——algo-1a 在约 20:37–20:40Z 执行 `pkill -x -f "sleep 3300"`（见 algo-1a 7ebfc59 progress），杀掉了本运行 watchdog 的 sleep 子进程，watchdog 随即执行 `modal app stop` 与 pkill 本机 syncer，与本运行收尾期重合；岛 1 在 `ray.shutdown` 中 KeyboardInterrupt、作业被判 FAILED 很可能由此触发（launcher 恢复循环缺陷另由 P0 在 a602fa2 修复）。首次运行正式结果仍按预登记为**未通过**，不改判。
+- 重跑（唯一一次；计划 1698744 启动前提交；YETO_SHA=a602fa2；加固 watchdog 唯一脚本名）：退出码 0，判据 1–4 全部通过（`evidence/g3/rerun/results.md`、`rerun/check.json`）→ 7.6 勾选（GPU 验收通过）。主 agent 后来提到的 501d71d 在收到通知时本次重跑已按 a602fa2 提交并启动，按指示未更换。
+- 7.7 更新：累计 ≈ $11 + $2.9 ≈ $14（估算，未核账单），上限 $20；app ap-aivVXMrZwnfkkB7zj2rQFm stopped/0 tasks，本机 syncer 已停、29420 关闭、watchdog 已结束。
