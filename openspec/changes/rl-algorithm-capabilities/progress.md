@@ -75,5 +75,13 @@ GPU 验证：本 change 不需要，也没有做。没有使用任何云资源�
 - 任务状态有变化：2.6、5.3、5.5 改回未勾选，4.1、4.2 勾选（详见 tasks.md 的修订记录）。
 
 ### 待批准（新增）
-- **G1 与放行开关**：D11 按原文执行后，learner（`--syncer` 必填）和 launcher 两个入口都带外层同步，`--rl-allow-unverified-mechanism` 在所有真实入口上都会被拒绝。需另批：要么放宽口径（允许单岛带 1 成员 syncer），要么新增一个无 syncer 的单岛入口。在批准之前，各子 change 的 G1 无法通过放行开关运行。
+- **（已由主 agent 以新增入口解决，用户可推翻）G1 与放行开关**：D11 按原文执行后，learner（`--syncer` 必填）和 launcher 两个入口都带外层同步，`--rl-allow-unverified-mechanism` 在所有真实入口上都会被拒绝。需另批：要么放宽口径（允许单岛带 1 成员 syncer），要么新增一个无 syncer 的单岛入口。在批准之前，各子 change 的 G1 无法通过放行开关运行。
 - 2.6 补救需要一次 Modal CPU 运行，按计划执行，费用 < $1。
+
+## 2026-09-29（ALGO-CAP，无 syncer 单岛入口；主 agent 决定，用户可推翻）
+
+- 新增显式入口 `--rl-single-island-no-sync`（learner、cli/launcher 都有），只用于 ports。行为：单岛、不连 syncer、`yeto_policy_sync=False`（LocalOnlySync，不做外层同步）。launcher 在这种模式下不启动 syncer 集群；Modal 岛不需要解析 syncer 地址，结果从岛本身取回。
+- 启动前拒绝的组合：`--syncer`、`--num-learners` ≠ 1、`--learner-id` ≠ 0、非默认 sync preset、initial adapter、legacy；launcher 还拒绝多个 `--gpu` 条目和 external learners。
+- 这是 D11 放行开关唯一合法的使用场景，满足原文“只在单岛运行中生效，与多岛或外层同步组合时拒绝”；没有放宽任何验收。
+- 事件中带 `rl/outer_sync=false`；有放行时带 `rl/contains_unverified_mechanisms=true` 和 `rl/unverified_mechanisms`。
+- 测试：`tests/test_rl_algorithm_provenance.py` 中的 no-sync 用例。全量失败集合与基线逐 id 相同。尚未做真实 GPU 运行，第一次真实使用由子 change 的 G1 完成。

@@ -361,3 +361,81 @@ def test_fixed_partition_passes_selection_on_learner_and_launcher(capsys):
         rl_learner.parse_args(_learner_argv(("--rollout-num-gpus", "1")))
     assert 'placement=getattr(args, "rl_placement", "colocated")' in inspect.getsource(
         launcher._prepare_rl_args)
+
+
+# -- single-island no-sync entry (main-agent decision, alignment §7b) -----------------
+
+
+def _no_sync_argv(extra=()):
+    argv = _learner_argv(("--rl-single-island-no-sync", *extra))
+    i = argv.index("--syncer")
+    del argv[i:i + 2]
+    return argv
+
+
+def test_no_sync_entry_admits_allowance_and_refuses_sync_combinations(capsys):
+    args = rl_learner.parse_args(_no_sync_argv(("--rl-allow-unverified-mechanism",
+                                                "features:clip_higher")))
+    assert args.rl_single_island_no_sync and args.syncer is None
+    for extra in (("--syncer", "127.0.0.1:1"), ("--num-learners", "2"),
+                  ("--sync-preset", "decoupled"), ("--rl-engine", "legacy")):
+        argv = _no_sync_argv(extra) if extra[0] != "--syncer" else \
+            _learner_argv(("--rl-single-island-no-sync",))
+        with pytest.raises(SystemExit):
+            rl_learner.parse_args(argv)
+        assert "cannot be combined" in capsys.readouterr().err or extra[0] == "--rl-engine"
+    argv = _learner_argv()
+    i = argv.index("--syncer")
+    del argv[i:i + 2]
+    with pytest.raises(SystemExit):
+        rl_learner.parse_args(argv)
+    assert "--syncer is required" in capsys.readouterr().err
+
+
+def test_no_sync_marks_event_and_namespace(tmp_path):
+    tape = tmp_path / "tape.jsonl"
+    args = SimpleNamespace(rl_expected_algorithm_sha256=V2.sha256(), event_tape=str(tape),
+                           learner_id=0, rl_allow_unverified_mechanism=["features:clip_higher"],
+                           rl_single_island_no_sync=True)
+    miles_args = SimpleNamespace()
+    rl_learner.verify_ports_algorithm(args, miles_args, _launch())
+    assert miles_args.yeto_rl_outer_sync is False
+    event = selection_event(launch=_launch(), algorithm=V2, miles_commit="x",
+                            unverified_mechanisms=miles_args.yeto_rl_unverified_mechanisms,
+                            outer_sync=miles_args.yeto_rl_outer_sync)
+    assert event["rl/contains_unverified_mechanisms"] is True
+    assert event["rl/outer_sync"] is False
+
+
+def test_main_runs_without_policy_sync_in_no_sync_mode():
+    import inspect
+
+    assert 'yeto_policy_sync=not getattr(args, "rl_single_island_no_sync", False)' in \
+        inspect.getsource(rl_learner.main)
+
+
+def test_launcher_no_sync_island_and_refusals():
+    from yeto.launcher import _prepare_rl_args
+
+    run = _island_run(_launcher_args("ports", ("--rl-single-island-no-sync",
+                                               "--rl-allow-unverified-mechanism",
+                                               "features:clip_higher")))
+    assert "--rl-single-island-no-sync" in run and "--syncer" not in run
+    assert "--rl-allow-unverified-mechanism features:clip_higher" in run
+    with pytest.raises(ValueError, match="exactly one island"):
+        _prepare_rl_args(_launcher_args("ports", ("--rl-single-island-no-sync",),
+                                        gpu="aws:1xa100@us-east-1,aws:1xa100@us-west-2"))
+    with pytest.raises(ValueError, match="only applies to --rl-engine ports"):
+        _prepare_rl_args(_launcher_args("legacy", ("--rl-single-island-no-sync",)))
+    normal = _island_run(_launcher_args("ports"))
+    assert "--syncer $SYNCER_ADDR" in normal and "no-sync" not in normal
+
+
+def test_launcher_run_skips_syncer_in_no_sync_mode():
+    import inspect
+
+    from yeto import launcher
+
+    source = inspect.getsource(launcher.run)
+    assert 'syncer_cluster = None if head_mode or no_sync else f"{prefix}-syncer"' in source
+    assert "if no_sync:\n            syncer_task = syncer_job = None" in source
