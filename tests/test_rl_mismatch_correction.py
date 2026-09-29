@@ -406,7 +406,9 @@ def test_fake_declaration_admits_every_mechanism():
 
 
 MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer", "mismatch_observe", "icepop", "mis_mask"}  # G1 + effect evidence (7.3, integ-decl)
-ACCEPTED_BY_MILES = {"tis", "opsm_trainer", "mismatch_observe", "icepop", "mis_mask"}
+# icepop / mismatch_observe specs set correction.mismatch_metrics, which is
+# undeclared (integ-decl review: no effect under use_tis) -> refused on it.
+ACCEPTED_BY_MILES = {"tis", "opsm_trainer", "mis_mask"}
 
 
 def test_miles_adapter_declares_exactly_g1_passed_corrections():
@@ -422,7 +424,10 @@ def test_miles_adapter_accepts_declared_rejects_others(name):
     with pytest.raises(CapabilityMismatch) as info:
         caps.check(**CHECK, algorithm=ALL[name]())
     text = str(info.value)
-    assert "not supported" in text and f"supported: {sorted(MILES_DECLARED)}" in text
+    if name in MILES_DECLARED:  # declared, refused on the undeclared mismatch_metrics
+        assert "features mechanism 'mismatch_metrics' not supported" in text
+    else:
+        assert "not supported" in text and f"supported: {sorted(MILES_DECLARED)}" in text
 
 
 def test_unverified_allowance_admits_single_island_smoke():
