@@ -1534,6 +1534,13 @@ def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
     return stem[: 63 - len(suffix)].rstrip("-") + suffix
 
 
+def _sky_docker_login_config(login: dict[str, str]):
+    """SkyPilot's DockerLoginConfig for a SKYPILOT_DOCKER_* triple."""
+    from sky.provision.docker_utils import DockerLoginConfig
+
+    return DockerLoginConfig.from_env_vars(login)
+
+
 def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
     """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``."""
 
@@ -1904,10 +1911,17 @@ def make_miles_island_task(
     island_pythonpath = (
         "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
-    # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): SkyPilot's
-    # docker login, as task secrets so it stays out of the task envs.
-    registry_secrets = registry_credentials(args.rl_image, os.environ)
-    task_kwargs = {"secrets": registry_secrets} if registry_secrets else {}
+    # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): the
+    # SKYPILOT_DOCKER_* login goes only into the resources'
+    # docker_login_config, which SkyPilot uses for `docker login` at
+    # provisioning.  Not task envs/secrets: SkyPilot 0.13 exports both into
+    # every setup/run process.  Ports engine only (legacy is unchanged); use
+    # a token with read:packages only.
+    registry_login = (
+        registry_credentials(args.rl_image, os.environ)
+        if getattr(args, "rl_engine", "ports") == "ports"
+        else None
+    )
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
         setup="\n".join(setup_steps),
@@ -1959,7 +1973,6 @@ def make_miles_island_task(
         num_nodes=spec.num_nodes,
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts or None,
-        **task_kwargs,
     )
     resources = {
         "infra": f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud,
@@ -1970,6 +1983,8 @@ def make_miles_island_task(
         "disk_size": args.disk_size,
     }
     resources["image_id"] = args.rl_image
+    if registry_login:
+        resources["_docker_login_config"] = _sky_docker_login_config(registry_login)
     if spec.num_nodes > 1:
         resources["network_tier"] = "best"
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
@@ -2714,6 +2729,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs={k: str(v) for k, v in envs.items() if v is not None},
         region=spec.region,
         gpu_exact=bool(getattr(args, "modal_gpu_exact", False)),
+        registry_login=rl and getattr(args, "rl_engine", "ports") == "ports",
         image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
         setup_script=str(getattr(task, "setup", "") or "") if rl else None,
         pip_requirements=requirements,
@@ -2721,6 +2737,17 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         volume_mount=volume_mount,
         workdir=str(REPO_ROOT),
     )
+
+
+def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
+    """--modal-gpu-exact only means something on Modal islands; refuse it
+    rather than silently launching unpinned learners elsewhere."""
+    if getattr(args, "modal_gpu_exact", False):
+        other = sorted({s.cloud for s in specs if s.cloud != "modal"})
+        if other:
+            raise ValueError(
+                f"--modal-gpu-exact applies only to Modal islands; --gpu also has {other}"
+            )
 
 
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
@@ -3487,6 +3514,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     # simply dial in with the printed join command.
     external = max(0, getattr(args, "external_learners", 0) or 0)
     num_learners = len(specs) + external
+    require_modal_for_gpu_exact(args, specs)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
     syncer_cluster = None if head_mode else f"{prefix}-syncer"
