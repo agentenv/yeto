@@ -479,12 +479,52 @@ def parse_args(argv=None):
         default=None,
         help="ports: an unverified mechanism the run admitted (repeatable)",
     )
+    parser.add_argument(
+        "--rl-event-tape",
+        default=None,
+        help=(
+            "ports: take the algorithm spec and unverified mechanisms from the "
+            "island tape's rl_engine_selected event (e.g. a --rl-single-island-no-sync run)"
+        ),
+    )
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args(argv)
 
 
+def algorithm_from_event_tape(path) -> tuple[str, tuple[str, ...]]:
+    """(canonical spec JSON, unverified mechanisms) of one island tape.
+
+    Every ``rl_engine_selected`` event must agree and match its hash.
+    """
+
+    from .engine.algorithm import AlgorithmSpec
+
+    seen = set()
+    for line in Path(path).expanduser().read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        if event.get("event") != "rl_engine_selected":
+            continue
+        spec, digest = event.get("rl/algorithm_spec"), event.get("rl/algorithm_spec_sha256")
+        if not isinstance(spec, str) or AlgorithmSpec.from_dict(json.loads(spec)).sha256() != digest:
+            raise ValueError("rl_engine_selected event has no valid algorithm spec/hash")
+        seen.add((spec, tuple(sorted(event.get("rl/unverified_mechanisms") or ()))))
+    if len(seen) != 1:
+        raise ValueError(f"expected one algorithm in {path}, found {len(seen)}")
+    return seen.pop()
+
+
 def main(argv=None) -> None:
     args = parse_args(argv)
+    algorithm_spec = (
+        Path(args.rl_algorithm_spec).read_text(encoding="utf-8")
+        if args.rl_algorithm_spec
+        else None
+    )
+    unverified = list(args.rl_unverified_mechanism or ())
+    if args.rl_event_tape:
+        if algorithm_spec is not None or unverified:
+            raise SystemExit("--rl-event-tape replaces --rl-algorithm-spec/--rl-unverified-mechanism")
+        algorithm_spec, unverified = algorithm_from_event_tape(args.rl_event_tape)
     state = export_rl_checkpoint(
         args.checkpoint,
         args.output_dir,
@@ -498,12 +538,8 @@ def main(argv=None) -> None:
         pipeline=args.pipeline,
         local_horizon=args.local_horizon,
         rl_engine=args.rl_engine,
-        algorithm_spec=(
-            Path(args.rl_algorithm_spec).read_text(encoding="utf-8")
-            if args.rl_algorithm_spec
-            else None
-        ),
-        unverified_mechanisms=args.rl_unverified_mechanism or (),
+        algorithm_spec=algorithm_spec,
+        unverified_mechanisms=unverified,
     )
     if args.sync_preset == "decoupled":
         print(
