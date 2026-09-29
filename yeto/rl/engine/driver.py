@@ -267,7 +267,9 @@ def _dynamic_filter_counts(batch: RolloutBatchHandle) -> dict[str, int]:
     The all-samples hook sees every generated group; ``filtered`` counts the
     generated groups that were not trained this round (dynamic-filter drops
     and over-sampling leftovers; whether leftovers are reused -- A2/F5
-    ``carried_over`` -- is audited in 4.1). Unknown (None) keeps the defaults.
+    ``carried_over`` -- is audited in 4.1). ``replacement_attempts`` is a PROXY
+    (Miles does not report its resample count); ``rl_round_trained`` records
+    the source of each value. Unknown (None) keeps the defaults.
     """
     filtered = getattr(batch, "filtered", None)
     if filtered is None:
@@ -776,6 +778,18 @@ class IslandDriver:
             masked_fraction=metrics.masked_fraction,
             clip_fraction=metrics.clip_fraction,
             applied_lrs=list(metrics.applied_lrs) if metrics.applied_lrs else None,
+            # rl_local_round dynamic_filter_* provenance: generated/dropped are
+            # counted from the all-samples hook; replacement_attempts is a proxy
+            # (= groups not trained), not Miles' actual resample count.
+            **(
+                {"dynamic_filter_source": {
+                    "generated_groups": "all_samples_hook",
+                    "dropped_groups": "all_samples_hook_not_trained",
+                    "replacement_attempts": "proxy_filtered",
+                }}
+                if getattr(batch, "filtered", None) is not None
+                else {}
+            ),
             nonzero_advantages=getattr(batch, "nonzero_advantages", None),
             **self._mismatch_fields(),
         )

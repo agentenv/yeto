@@ -296,3 +296,29 @@ def test_dynamic_filter_round_stats_come_from_the_all_samples_metadata(tmp_path)
                                 TrainStepMetrics(grad_norm=1.0), 1.0, 1.0)
     assert (stats.dynamic_filter_generated_groups, stats.dynamic_filter_dropped_groups,
             stats.dynamic_filter_replacement_attempts) == (4, 2, 2)
+
+
+def test_dynamic_filter_source_is_labelled_on_the_round_event(tmp_path):
+    import json
+
+    import torch
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0)
+    import dataclasses
+
+    original = engine.rollout.generate
+    engine.rollout.generate = lambda r: dataclasses.replace(original(r), filtered=1)
+    IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+                 policy_state=engine.policy_state, publisher=engine.publisher,
+                 placement=engine.placement, capabilities=fake_capabilities(),
+                 algorithm=AlgorithmSpec(), sync=LocalOnlySync(1),
+                 events=EventTape(tmp_path / "e.jsonl", 0)).run()
+    (ev,) = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()
+             if '"rl_round_trained"' in l]
+    assert ev["dynamic_filter_source"]["replacement_attempts"] == "proxy_filtered"
