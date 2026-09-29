@@ -1,0 +1,132 @@
+✓ Initialized. View run at 
+https://modal.com/apps/yetalabs/main/ap-JyzgEPFHYfn7MQw5E9lrgP
+✓ Created objects.
+├── 🔨 Created mount 
+│   /home/michael/work/algo-1b/openspec/changes/rl-algo-grpo-knobs/evidence/2026
+│   -09-29-algo1b-cpu-img/modal_cpu_img.py
+├── 🔨 Created mount /home/michael/work/algo-1b
+├── 🔨 Created mount /home/michael/work/miles-next
+└── 🔨 Created function run.
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 13.0.3
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+image miles None
+name
+Tesla T4
+--- full parse_args (miles-next 0394715 parser, image megatron)
+        """Upstream ``parse_args`` + ``validate_parsed_args`` on the full translated
+        argv (pinned image only: needs megatron.training)."""
+    
+        pytest.importorskip("megatron.training")
+        import dataclasses
+        import json
+    
+>       from tests.test_rl_miles_adapter_config import _TINY_QWEN3, make_config, sub
+E       ModuleNotFoundError: No module named 'tests.test_rl_miles_adapter_config'
+
+tests/test_rl_grpo_knobs_upstream.py:264: ModuleNotFoundError
+_____________________ test_full_parse_args[over_sampling] ______________________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_full_parse_args_over_samp0')
+name = 'over_sampling'
+
+    @pytest.mark.parametrize("name", sorted(SPECS))
+    def test_full_parse_args(tmp_path, name):
+        """Upstream ``parse_args`` + ``validate_parsed_args`` on the full translated
+        argv (pinned image only: needs megatron.training)."""
+    
+        pytest.importorskip("megatron.training")
+        import dataclasses
+        import json
+    
+>       from tests.test_rl_miles_adapter_config import _TINY_QWEN3, make_config, sub
+E       ModuleNotFoundError: No module named 'tests.test_rl_miles_adapter_config'
+
+tests/test_rl_grpo_knobs_upstream.py:264: ModuleNotFoundError
+________________________ test_full_parse_args[overlong] ________________________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_full_parse_args_overlong_0')
+name = 'overlong'
+
+    @pytest.mark.parametrize("name", sorted(SPECS))
+    def test_full_parse_args(tmp_path, name):
+        """Upstream ``parse_args`` + ``validate_parsed_args`` on the full translated
+        argv (pinned image only: needs megatron.training)."""
+    
+        pytest.importorskip("megatron.training")
+        import dataclasses
+        import json
+    
+>       from tests.test_rl_miles_adapter_config import _TINY_QWEN3, make_config, sub
+E       ModuleNotFoundError: No module named 'tests.test_rl_miles_adapter_config'
+
+tests/test_rl_grpo_knobs_upstream.py:264: ModuleNotFoundError
+_________________________ test_full_parse_args[token] __________________________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_full_parse_args_token_0')
+name = 'token'
+
+    @pytest.mark.parametrize("name", sorted(SPECS))
+    def test_full_parse_args(tmp_path, name):
+        """Upstream ``parse_args`` + ``validate_parsed_args`` on the full translated
+        argv (pinned image only: needs megatron.training)."""
+    
+        pytest.importorskip("megatron.training")
+        import dataclasses
+        import json
+    
+>       from tests.test_rl_miles_adapter_config import _TINY_QWEN3, make_config, sub
+E       ModuleNotFoundError: No module named 'tests.test_rl_miles_adapter_config'
+
+tests/test_rl_grpo_knobs_upstream.py:264: ModuleNotFoundError
+=========================== short test summary info ============================
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_kl_loss_triggers_ref_load_branch
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[clip_higher]
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[constant]
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[dual_clip]
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[entropy] - ...
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[kl_k1] - Mo...
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[kl_k2] - Mo...
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[kl_k3] - Mo...
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[kl_low_var_kl]
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[no_std] - M...
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[over_sampling]
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[overlong]
+FAILED tests/test_rl_grpo_knobs_upstream.py::test_full_parse_args[token] - Mo...
+13 failed, 12 passed, 23 deselected in 68.40s (0:01:08)
+  /root/Megatron-LM/megatron/core/_rank_utils.py:39: UserWarning: Could not determine rank from torch.distributed, RANK, or SLURM_PROCID. Defaulting to rank 0.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 36 deselected, 12 warnings in 39.85s
+
+--- stderr ---
++ cd /tmp
++ python -c 'import pytest'
++ python -c 'import miles, sys; print('\''image miles'\'', miles.__file__)'
++ nvidia-smi --query-gpu=name --format=csv
++ echo '--- full parse_args (miles-next 0394715 parser, image megatron)'
++ cd /yeto
++ PYTHONPATH=/yeto:/miles-next
++ python -m pytest -q -p no:cacheprovider -rfEs tests/test_rl_grpo_knobs_upstream.py -k 'full_parse_args or miles_parser or kl_loss_triggers'
++ tail -80
++ PYTHONPATH=/yeto:/miles-next
++ python -m pytest -q -p no:cacheprovider -rfEs tests/test_rl_miles_adapter_config.py -k upstream_parse
++ tail -5
+
+Stopping app - local entrypoint completed.
+✓ App completed. View run at 
+https://modal.com/apps/yetalabs/main/ap-JyzgEPFHYfn7MQw5E9lrgP
+exit=0
