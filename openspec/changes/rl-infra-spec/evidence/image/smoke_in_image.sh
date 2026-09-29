@@ -40,6 +40,7 @@ for r in $PINS; do
   git -C $d status --porcelain --untracked-files=all | head -5
   check "git_$d" "[ \"\$(git -C $d rev-parse HEAD)\" = $c ] && [ \"\$(git -C $d config --get remote.origin.url)\" = $o ] && [ -z \"\$(git -C $d status --porcelain --untracked-files=all)\" ]"
 done
+check lora_bridge_per_token_loss 'grep -n "provider.calculate_per_token_loss = args.calculate_per_token_loss" /root/miles/miles/backends/megatron_utils/lora/bridge.py'
 echo "== launcher ports setup in image"
 python3 -c 'import sys; sys.path.insert(0, "/work/yeto"); from yeto.launcher import _miles_source_setup as f; m, s = f("ports"); open("/tmp/setup.sh", "w").write(m + "\n" + s + "\n")'
 check launcher_ports_setup 'HOME=/root GIT_TRACE=0 bash -x /tmp/setup.sh > /tmp/setup.log 2>&1'
