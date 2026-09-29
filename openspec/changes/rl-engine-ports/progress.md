@@ -27,3 +27,19 @@
 - ports 仅上报 grad_norm，loss/lr/KL 为 None，等价性 loss 对比受限。
 - upstream LoRA 导出名非 canonical PEFT（无 `base_model.model.` 前缀），state_plugin 哈希/PEFT 导出前需归一化——GPU 上核实。
 - launcher/harness 未接 `MILES_NEXT_IMAGE`。
+
+## GPU 验收（在已提交代码上复跑，2026-09-29）
+
+代码 `923b3049a6dea345186adaa16da11d76693614b3`（`git archive` 上传，证据目录内有 `YETO_SHA`），Miles `0394715`、SGLang `9f29303`，Modal H100。证据：`evidence/2026-09-29-rerun-*`。
+
+| 任务 | 结果 | 证据 |
+|---|---|---|
+| 1.4b | 通过：两岛同机无端口冲突（端口由 router 端口派生），TITO Qwen3.8 由 upstream `qwen38small` 覆盖（fork 测试 30 项通过） | `rerun-strict2`、`miles-port-notes.md` |
+| 3.2 | 通过：yeto 侧只持有元数据；过期 token 在训练前被 `PolicyIdentityError` 拒绝 | `rerun-smoke-normal`、`rerun-smoke-badtoken` |
+| 3.3 | 通过：receipt 字段齐全 | `rerun-smoke-normal` |
+| 3.4 | 部分：导出→应用→再导出 hash 一致、reset 清零与 scheduler 对齐、PEFT 名归一化通过；`test_rl_grad_accumulator_hook`（#64）CPU 通过；**与 legacy 逐张量比对未做**（由 6.2 teacher forcing 覆盖后再判） | `rerun-smoke-normal/probe.jsonl` |
+| 3.5 | 通过：checksum 与清单一致；单 engine 失败返回错误、无清单 | `rerun-smoke-normal`、`rerun-smoke-pubfail` |
+| 4.1 | 通过：事件顺序符合 spec；零梯度注入该轮失败、不提交 | `rerun-smoke-normal`、`rerun-smoke-zerograd` |
+| 4.2 | 通过：两岛 strict-avg 3 轮 hash 一致 | `rerun-strict2` |
+| 4.3 | 通过：两岛 decoupled 到最终 cut，最终 hash 一致，PEFT 可被标准 PEFT 加载（Nebius 首跑） | `rerun-decoupled`、`decoupled2/verify_peft.log` |
+| 4.4 | 部分：第 2 轮 kill 后以 reset 应用权威 cut 并跑完；**与 legacy 的对照未做** | `rerun-kill44` |

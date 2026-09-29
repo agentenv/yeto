@@ -21,7 +21,7 @@
   - `openspec/changes/rl-engine-ports/sglang-patch-port.md` 逐个补丁记录：移植后的 commit、上游是否已有等价实现、测试结果；
   - `SGLANG_NEXT_COMMIT` 固定在该分支的最新提交上。
 - [x] 1.4 在 `michaellchung/miles` 的 `yeto/ports` 分支上实现通用插件调用入口：train actor 增加 `run_plugin`，`TrainGroup` 增加透传方法；只提交到 fork，不向官方 `radixark/miles` 提 PR。验证：Miles 侧单元测试通过；`MILES_NEXT_COMMIT` 固定在包含该提交的 commit 上。
-- [ ] 1.4b 检查 `agentenv/miles` 中的端口隔离提交（`5494a6ce`）和 TITO Qwen3.8 提交（`5a9cf0d0`、`e2ad83d8`）在 upstream 上是否已有等价实现；没有的话就移植到 `yeto/ports`，提交说明注明来源 SHA。验证：在两岛同机的冒烟测试中没有端口冲突；Qwen3.8 的 TITO 单元测试通过。
+- [x] 1.4b 检查 `agentenv/miles` 中的端口隔离提交（`5494a6ce`）和 TITO Qwen3.8 提交（`5a9cf0d0`、`e2ad83d8`）在 upstream 上是否已有等价实现；没有的话就移植到 `yeto/ports`，提交说明注明来源 SHA。验证：在两岛同机的冒烟测试中没有端口冲突；Qwen3.8 的 TITO 单元测试通过。
 - [x] 1.5 在 `launcher.py` 与 `ssh_harness.py` 的远端准备脚本中，按 `--rl-engine` 分支 checkout 与安装源码。验证：新增 launcher 和 harness 单元测试，断言 legacy 生成的脚本与改动前逐字节一致，ports 生成的脚本从 `michaellchung/miles` 与 `michaellchung/sglang` 获取固定 commit，包含 origin、commit 与工作区干净检查，并且不包含任何 bundle 步骤。
 
 ## 2. 端口定义与配置拆分
@@ -35,21 +35,21 @@
 ## 3. MilesAdapter
 
 - [x] 3.1 `miles_adapter/config.py`：把 RL 运行配置和 `AlgorithmSpec` 翻译成 upstream Miles 参数，未映射的配置项拒绝启动；单 cell 断言；禁用 FT 相关参数。验证：单元测试覆盖参数翻译、未映射项拒绝和 FT 参数拒绝。在 upstream 源码上跑 Miles 的 `parse_args`，确认没有未知参数。
-- [ ] 3.2 `miles_adapter/rollout.py` 与元数据提取回调：`generate` 返回 `RolloutBatchHandle`，元数据通过 `--rollout-all-samples-process-path` 在 rollout 进程内提取。验证：GPU 冒烟测试中一轮生成后，yeto 进程只持有元数据，policy token 与期望快照一致；token 不匹配的注入测试会在训练前被拒绝。
-- [ ] 3.3 `miles_adapter/trainer.py`：`train_step`、`onload`、`offload`，返回 `LocalStepReceipt`；训练后释放 rollout 引用。验证：GPU 冒烟测试完成一次训练步，receipt 字段完整。
+- [x] 3.2 `miles_adapter/rollout.py` 与元数据提取回调：`generate` 返回 `RolloutBatchHandle`，元数据通过 `--rollout-all-samples-process-path` 在 rollout 进程内提取。验证：GPU 冒烟测试中一轮生成后，yeto 进程只持有元数据，policy token 与期望快照一致；token 不匹配的注入测试会在训练前被拒绝。
+- [x] 3.3 `miles_adapter/trainer.py`：`train_step`、`onload`、`offload`，返回 `LocalStepReceipt`；训练后释放 rollout 引用。验证：GPU 冒烟测试完成一次训练步，receipt 字段完整。
 - [ ] 3.4 `miles_adapter/state_plugin.py` 与 `state.py`：基于 1.4 的插件入口，在 upstream 的 LoRA 结构上实现导出和应用（保留或重置 optimizer），遵守 D4 的梯度流约束。验证：
   - `test_rl_grad_accumulator_hook` 通过；
   - GPU 测试完成"导出 → 应用 → 再导出"，hash 一致；
   - 重置模式下 moments 被清零且 scheduler 对齐；
   - 在同一 checkpoint 上与 legacy 的导出结果逐张量比对，全部一致。
-- [ ] 3.5 `miles_adapter/publish.py`：基于 upstream 的 `update_weights` 完成发布，生成带成员集合与 payload hash 的 `InferencePublicationManifest`。验证：GPU 测试中发布后所有 engine 的权重 checksum 与清单一致；注入单个 engine 失败时返回错误，而不是一份清单。
+- [x] 3.5 `miles_adapter/publish.py`：基于 upstream 的 `update_weights` 完成发布，生成带成员集合与 payload hash 的 `InferencePublicationManifest`。验证：GPU 测试中发布后所有 engine 的权重 checksum 与清单一致；注入单个 engine 失败时返回错误，而不是一份清单。
 - [x] 3.6 `miles_adapter/placement.py`：返回共置和启动时固定分区的只读描述；检测到 Miles 参数规范化改写了请求的放置时拒绝启动。验证：单元测试覆盖两种放置和改写检测。
 
 ## 4. IslandDriver 与同步集成
 
-- [ ] 4.1 `yeto/rl/engine/driver.py`：实现 colocated-serial 循环（生成 → 训练 → 安全边界同步 → 完整发布），包括 offload/onload 时序、eval 与进度保存；每轮检查 grad_norm 不变量。验证：GPU 冒烟测试在无外层同步的单岛上跑完 3 轮，事件顺序符合 spec；注入零梯度时该轮失败且不提交。
-- [ ] 4.2 把 strict-avg bridge 接到 driver 的安全边界，用端口的 `PolicyState` 和 `Publisher` 代替 `MilesPolicySync` 中对 Miles 内部的调用。验证：`tests/test_rl_integration.py` 中 strict 的 CPU/伪引擎用例在 ports 路径上通过；GPU 上两岛 strict-avg 完成 3 轮，两岛同步后的 hash 相同。
-- [ ] 4.3 把 decoupled bridge 接到 driver，包括 run-until-stop、在安全边界 drain BCAST/PULL、finalization 以及"发布一次后停止"。验证：`tests/test_rl_decoupled.py` 在 ports 路径的伪引擎上通过；GPU 上两岛 decoupled 跑到最终 cut 并导出 PEFT。
+- [x] 4.1 `yeto/rl/engine/driver.py`：实现 colocated-serial 循环（生成 → 训练 → 安全边界同步 → 完整发布），包括 offload/onload 时序、eval 与进度保存；每轮检查 grad_norm 不变量。验证：GPU 冒烟测试在无外层同步的单岛上跑完 3 轮，事件顺序符合 spec；注入零梯度时该轮失败且不提交。
+- [x] 4.2 把 strict-avg bridge 接到 driver 的安全边界，用端口的 `PolicyState` 和 `Publisher` 代替 `MilesPolicySync` 中对 Miles 内部的调用。验证：`tests/test_rl_integration.py` 中 strict 的 CPU/伪引擎用例在 ports 路径上通过；GPU 上两岛 strict-avg 完成 3 轮，两岛同步后的 hash 相同。
+- [x] 4.3 把 decoupled bridge 接到 driver，包括 run-until-stop、在安全边界 drain BCAST/PULL、finalization 以及"发布一次后停止"。验证：`tests/test_rl_decoupled.py` 在 ports 路径的伪引擎上通过；GPU 上两岛 decoupled 跑到最终 cut 并导出 PEFT。
 - [ ] 4.4 island 进度 checkpoint 与恢复在 ports 路径上沿用现有格式（不含 LoRA 和 optimizer），重启后以重置方式应用权威 cut。验证：GPU 测试在第 2 轮 kill 掉 learner 并重启，恢复后的轮次与 group 复用规则与 legacy 一致。
 
 ## 5. 路径选择

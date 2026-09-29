@@ -1,0 +1,1 @@
+python /work/harness/smoke.py normal /work/out/smoke-normal
