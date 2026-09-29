@@ -473,6 +473,7 @@ G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
     "entropy": {"features": frozenset({"entropy_bonus"})},
     "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
                          "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
+    "clip_higher": {"features": frozenset({"clip_higher", "eps_clip"})},  # g1b run A-r1 (clipfrac > 0)
 }
 
 

@@ -797,7 +797,8 @@ def test_learner_binds_ref_source_and_override(tmp_path):
 
 EXPECTED_1B_DECLARED = {
     "loss_aggregations": {"token", "constant"},
-    "features": {"no_grpo_std_normalization", "kl_loss_ref_model", "entropy_bonus", "overlong_penalty"},
+    "features": {"no_grpo_std_normalization", "kl_loss_ref_model", "entropy_bonus", "overlong_penalty",
+                 "clip_higher", "eps_clip"},
     "kl_placements": {"loss"},
     "reward_postprocessors": {"custom_reward_postprocess"},
 }
@@ -824,7 +825,7 @@ def test_declared_caps_accept_1b_and_refuse_undeclared():
                  kl_spec(), AlgorithmSpec(entropy_coef=0.001)):
         missing = [f"{d}:{n}" for d, n in spec.required_mechanisms() if n not in getattr(caps, d)]
         assert missing == [], missing
-    for name in ("clip_higher", "dual_clip", "over_sampling", "overlong_filter"):
+    for name in ("dual_clip", "over_sampling", "overlong_filter"):
         assert name not in gk.declared_mechanisms().get("features", frozenset())
 
 
