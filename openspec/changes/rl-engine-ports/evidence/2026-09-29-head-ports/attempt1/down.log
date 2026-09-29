@@ -1,0 +1,13 @@
+[yeto] Modal app stop failed: modal app stop yeto-yeto-hp929 failed: /home/michael/work/gpu-head/venv/bin/python3: No module named modal
+[yeto] yeto-hp929-l0-modal: not confirmed stopped (Modal app yeto-yeto-hp929: status unverified (modal app list failed: /home/michael/work/gpu-head/venv/bin/python3: No module named modal))
+[yeto] yeto-hp929-l1-modal: not confirmed stopped (Modal app yeto-yeto-hp929: status unverified (modal app list failed: /home/michael/work/gpu-head/venv/bin/python3: No module named modal))
+/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
+  return nebius.sdk.SDK(
+[launcher] yeto-hp929-head: 1 instance(s) still live after down (computeinstance-e00rhzadgr8x466ej8); retrying teardown (1/4)
+[launcher] sky.down(yeto-hp929-head) error: Cluster 'yeto-hp929-head' does not exist.
+[launcher] yeto-hp929-head: 1 instance(s) still live after down (computeinstance-e00rhzadgr8x466ej8); retrying teardown (2/4)
+[launcher] sky.down(yeto-hp929-head) error: Cluster 'yeto-hp929-head' does not exist.
+[yeto] run 'yeto-hp929' is NOT fully down; unconfirmed: yeto-hp929-l0-modal, yeto-hp929-l1-modal. Rerun `yeto down yeto-hp929`, or check the cloud console for instances named after them.
+[yeto] worker is not running
+[yeto] tearing down 3 cluster(s): yeto-hp929-head, yeto-hp929-l0-modal, yeto-hp929-l1-modal
+[yeto] yeto-hp929-head: down

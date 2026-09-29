@@ -1,0 +1,31 @@
+2026-09-29T06:09:32.659756Z  INFO yeto_syncer::server: syncer listening port=33814 semantic_profile_sha256="ef847e53fa37aa340201ec5a8711c33695baa602ce13a5180b4076f277978cb0" require_profile_binding=false
+2026-09-29T06:09:32.659870Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=1
+2026-09-29T06:09:32.747763Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:18334
+2026-09-29T06:12:14.262651Z  INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=0 generation=13329284770800178665 num_streams=4
+2026-09-29T06:12:14.263256Z  INFO yeto_syncer::server: initialized global state iso_backend=scalar
+2026-09-29T06:12:14.351176Z  INFO yeto_syncer::server: global parameters initialized
+2026-09-29T06:12:14.551070Z  INFO yeto_syncer::server: checkpoint committed step=0 path=/work/out/kill44/state.ckpt
+2026-09-29T06:15:46.497508Z  INFO yeto_syncer::server: checkpoint committed step=1 path=/work/out/kill44/state.ckpt
+2026-09-29T06:15:46.539275Z  INFO yeto_syncer::server: outer step step=1 fragment=0 responders=[Member { learner_id: 0, generation: 13329284770800178665 }] gnorm="0.0234" ms=211935
+2026-09-29T06:17:18.363157Z  INFO yeto_syncer::server: checkpoint committed step=2 path=/work/out/kill44/state.ckpt
+2026-09-29T06:17:18.414332Z  INFO yeto_syncer::server: outer step step=2 fragment=0 responders=[Member { learner_id: 0, generation: 13329284770800178665 }] gnorm="0.0207" ms=91874
+2026-09-29T06:18:25.781428Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:29239
+2026-09-29T06:18:25.781463Z  WARN yeto_syncer::server: learner connection generation disconnected learner_id=0 generation=13329284770800178665
+2026-09-29T06:18:25.781663Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:61970
+2026-09-29T06:18:25.781807Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:47883
+2026-09-29T06:18:25.781832Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:47215
+2026-09-29T06:18:25.781812Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:19301
+2026-09-29T06:21:34.478538Z  INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=0 generation=7379835841192737056 num_streams=4
+2026-09-29T06:21:34.530096Z  INFO yeto_syncer::server: rebound outstanding pull to reconnected learner generation learner_id=0 old_generation=13329284770800178665 generation=7379835841192737056 step=3 fragment=0 attempt=1 base_version=2
+2026-09-29T06:24:34.110343Z  INFO yeto_syncer::server: checkpoint committed step=3 path=/work/out/kill44/state.ckpt
+2026-09-29T06:24:34.162526Z  INFO yeto_syncer::server: outer step step=3 fragment=0 responders=[Member { learner_id: 0, generation: 7379835841192737056 }] gnorm="0.0135" ms=435747
+2026-09-29T06:26:14.292943Z  INFO yeto_syncer::server: checkpoint committed step=4 path=/work/out/kill44/state.ckpt
+2026-09-29T06:26:14.296382Z  INFO yeto_syncer::server: outer step step=4 fragment=0 responders=[Member { learner_id: 0, generation: 7379835841192737056 }] gnorm="0.0070" ms=100133
+2026-09-29T06:27:04.661078Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=0 generation=7379835841192737056 step=4 remaining=0
+2026-09-29T06:27:04.661130Z  INFO yeto_syncer::server: all learners acknowledged final cut learners=1
+2026-09-29T06:27:04.661140Z  INFO yeto_syncer::server: training complete after 4 outer steps
+2026-09-29T06:27:04.799168Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:33101
+2026-09-29T06:27:04.802388Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:59930
+2026-09-29T06:27:04.802500Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:16261
+2026-09-29T06:27:04.802682Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:27293
+2026-09-29T06:27:04.803106Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:56052

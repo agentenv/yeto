@@ -1,0 +1,242 @@
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+{
+ "island0": {
+  "n_events": 132,
+  "event_kinds": [
+   "rl_driver_phase",
+   "rl_driver_start",
+   "rl_engine_selected",
+   "rl_fragment_bcast",
+   "rl_fragment_push",
+   "rl_local_round",
+   "rl_policy_apply",
+   "rl_policy_snapshot",
+   "rl_publication",
+   "rl_sync_hook"
+  ],
+  "last_apply": {
+   "event": "rl_policy_apply",
+   "island_id": 0,
+   "local_step": 8,
+   "optimizer": "preserve",
+   "partial_fragment_apply": true,
+   "policy_version": 8,
+   "sync/apply_seconds": 0.906831529999863,
+   "sync/global_policy_hash": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+   "time_unix": 1790657068.283698
+  },
+  "tail": [
+   {
+    "base_version": 8,
+    "c_steps": 8,
+    "c_tokens": 59480,
+    "delta_l2_norm": 0.17140410840511322,
+    "event": "rl_fragment_push",
+    "fragment_id": 7,
+    "global_step": 16,
+    "island_id": 0,
+    "payload_bytes": 5046272,
+    "pull_to_push_seconds": 0.028142118000005212,
+    "realized_h": 8,
+    "round_attempt": 1,
+    "time_unix": 1790657067.3766575
+   },
+   {
+    "event": "rl_driver_phase",
+    "island_id": 0,
+    "optimizer": "preserve",
+    "phase": "apply",
+    "policy_version": 8,
+    "time_unix": 1790657067.376718
+   },
+   {
+    "event": "rl_policy_apply",
+    "island_id": 0,
+    "local_step": 8,
+    "optimizer": "preserve",
+    "partial_fragment_apply": true,
+    "policy_version": 8,
+    "sync/apply_seconds": 0.906831529999863,
+    "sync/global_policy_hash": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+    "time_unix": 1790657068.283698
+   },
+   {
+    "event": "rl_policy_snapshot",
+    "island_id": 0,
+    "rl/canonical_layout_hash": "f1c29481efeffd57ff1451a1e510ab088b2fdb082e01341d6313140ccf03b8b3",
+    "rl/fragment_versions": [
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16
+    ],
+    "rl/mixed_version_group_count": 0,
+    "rl/policy_hash": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+    "rl/policy_token": "yeto:8:41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+    "rl/rollout_id": 8,
+    "rl/sync_layout_fingerprint": "16a4d88fc98c2525fbee672648d6c151c5eeb324a3ccd8ef6caeac5f17383d12",
+    "time_unix": 1790657068.4894679
+   },
+   {
+    "event": "rl_sync_hook",
+    "island_id": 0,
+    "rl/rollout_id": 7,
+    "sync/finalization": true,
+    "sync/hook_seconds": 6.537137942000072,
+    "sync/remote_quorum_wait_seconds": 0.0,
+    "time_unix": 1790657068.641325
+   },
+   {
+    "event": "rl_driver_phase",
+    "island_id": 0,
+    "phase": "publish",
+    "policy_version": 8,
+    "time_unix": 1790657068.7204113
+   },
+   {
+    "event": "rl_publication",
+    "island_id": 0,
+    "policy_version": 8,
+    "rl/policy_token": "yeto:8:41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+    "sync/publication_members": [
+     "engine:inference-engine-all-0-0-00000"
+    ],
+    "sync/publication_payload_bytes": 40370176,
+    "sync/publication_payload_hash": "ee1a0457706ee7d52ef631d7d5aca82f0c86d569c4a40b0cdc81da5e704d91c9",
+    "time_unix": 1790657069.7397597
+   },
+   {
+    "event": "rl_driver_phase",
+    "island_id": 0,
+    "phase": "finish",
+    "rollout_id": 8,
+    "time_unix": 1790657069.7402756
+   }
+  ]
+ },
+ "island1": {
+  "n_events": 132,
+  "event_kinds": [
+   "rl_driver_phase",
+   "rl_driver_start",
+   "rl_engine_selected",
+   "rl_fragment_bcast",
+   "rl_fragment_push",
+   "rl_local_round",
+   "rl_policy_apply",
+   "rl_policy_snapshot",
+   "rl_publication",
+   "rl_sync_hook"
+  ],
+  "last_apply": {
+   "event": "rl_policy_apply",
+   "island_id": 1,
+   "local_step": 8,
+   "optimizer": "preserve",
+   "partial_fragment_apply": true,
+   "policy_version": 8,
+   "sync/apply_seconds": 1.454939548999846,
+   "sync/global_policy_hash": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+   "time_unix": 1790657068.9525995
+  },
+  "tail": [
+   {
+    "base_version": 8,
+    "c_steps": 8,
+    "c_tokens": 59977,
+    "delta_l2_norm": 0.17341628670692444,
+    "event": "rl_fragment_push",
+    "fragment_id": 7,
+    "global_step": 16,
+    "island_id": 1,
+    "payload_bytes": 5046272,
+    "pull_to_push_seconds": 0.010652423999999883,
+    "realized_h": 8,
+    "round_attempt": 1,
+    "time_unix": 1790657067.497421
+   },
+   {
+    "event": "rl_driver_phase",
+    "island_id": 1,
+    "optimizer": "preserve",
+    "phase": "apply",
+    "policy_version": 8,
+    "time_unix": 1790657067.4974859
+   },
+   {
+    "event": "rl_policy_apply",
+    "island_id": 1,
+    "local_step": 8,
+    "optimizer": "preserve",
+    "partial_fragment_apply": true,
+    "policy_version": 8,
+    "sync/apply_seconds": 1.454939548999846,
+    "sync/global_policy_hash": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+    "time_unix": 1790657068.9525995
+   },
+   {
+    "event": "rl_policy_snapshot",
+    "island_id": 1,
+    "rl/canonical_layout_hash": "f1c29481efeffd57ff1451a1e510ab088b2fdb082e01341d6313140ccf03b8b3",
+    "rl/fragment_versions": [
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16
+    ],
+    "rl/mixed_version_group_count": 0,
+    "rl/policy_hash": "41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+    "rl/policy_token": "yeto:8:41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+    "rl/rollout_id": 8,
+    "rl/sync_layout_fingerprint": "16a4d88fc98c2525fbee672648d6c151c5eeb324a3ccd8ef6caeac5f17383d12",
+    "time_unix": 1790657069.027938
+   },
+   {
+    "event": "rl_sync_hook",
+    "island_id": 1,
+    "rl/rollout_id": 7,
+    "sync/finalization": true,
+    "sync/hook_seconds": 14.7205672099999,
+    "sync/remote_quorum_wait_seconds": 0.0,
+    "time_unix": 1790657069.0748827
+   },
+   {
+    "event": "rl_driver_phase",
+    "island_id": 1,
+    "phase": "publish",
+    "policy_version": 8,
+    "time_unix": 1790657069.1338925
+   },
+   {
+    "event": "rl_publication",
+    "island_id": 1,
+    "policy_version": 8,
+    "rl/policy_token": "yeto:8:41cccefa43adb187d13e003b9bc14fc9ce12951fbef9bc2106c13c0412857e60",
+    "sync/publication_members": [
+     "engine:inference-engine-all-0-0-00000"
+    ],
+    "sync/publication_payload_bytes": 40370176,
+    "sync/publication_payload_hash": "ee1a0457706ee7d52ef631d7d5aca82f0c86d569c4a40b0cdc81da5e704d91c9",
+    "time_unix": 1790657070.1687844
+   },
+   {
+    "event": "rl_driver_phase",
+    "island_id": 1,
+    "phase": "finish",
+    "rollout_id": 8,
+    "time_unix": 1790657070.1692758
+   }
+  ]
+ }
+}
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 11912.15it/s]
+PEFT_LOAD_OK peft 0.18.1 lora_tensors 392 sum|lora_B| 1264.716542005539
+['yeto_rl_provenance.json', 'adapter_model.safetensors', 'adapter_config.json']

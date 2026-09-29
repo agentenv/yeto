@@ -1,0 +1,63 @@
+2026-09-29T06:00:31.795415Z  INFO yeto_syncer::server: syncer listening port=26070 semantic_profile_sha256="9812a9142295593e466c67e1caf8dd5af6a86a96e439a4c296e1f05e1bb902ae" require_profile_binding=false
+2026-09-29T06:00:31.795504Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2
+2026-09-29T06:00:31.878393Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:61259
+2026-09-29T06:03:28.802588Z  INFO yeto_syncer::server: learner connected (layout: 8 fragments) learner_id=0 generation=8561360201991348752 num_streams=4
+2026-09-29T06:03:28.802763Z  INFO yeto_syncer::server: initialized global state iso_backend=scalar
+2026-09-29T06:03:28.820043Z  INFO yeto_syncer::server: learner connected (layout: 8 fragments) learner_id=1 generation=14764248707833878600 num_streams=4
+2026-09-29T06:03:28.893607Z  INFO yeto_syncer::server: global parameters initialized
+2026-09-29T06:03:29.415808Z  INFO yeto_syncer::server: checkpoint committed step=0 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:07:02.670141Z  INFO yeto_syncer::server: checkpoint committed step=1 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:07:02.683867Z  INFO yeto_syncer::server: outer step step=1 fragment=0 responders=[Member { learner_id: 0, generation: 8561360201991348752 }, Member { learner_id: 1, generation: 14764248707833878600 }] gnorm="0.1268" ms=213189
+2026-09-29T06:07:03.053540Z  INFO yeto_syncer::server: checkpoint committed step=2 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:07:03.080301Z  INFO yeto_syncer::server: outer step step=2 fragment=1 responders=[Member { learner_id: 0, generation: 8561360201991348752 }, Member { learner_id: 1, generation: 14764248707833878600 }] gnorm="0.1374" ms=213585
+2026-09-29T06:07:23.532500Z  INFO yeto_syncer::server: checkpoint committed step=3 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:07:23.541532Z  INFO yeto_syncer::server: outer step step=3 fragment=2 responders=[Member { learner_id: 0, generation: 8561360201991348752 }, Member { learner_id: 1, generation: 14764248707833878600 }] gnorm="0.1412" ms=20857
+2026-09-29T06:07:23.880765Z  INFO yeto_syncer::server: checkpoint committed step=4 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:07:23.901912Z  INFO yeto_syncer::server: outer step step=4 fragment=3 responders=[Member { learner_id: 0, generation: 8561360201991348752 }, Member { learner_id: 1, generation: 14764248707833878600 }] gnorm="0.1476" ms=20820
+2026-09-29T06:07:46.971777Z  INFO yeto_syncer::server: checkpoint committed step=5 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:07:46.980788Z  INFO yeto_syncer::server: outer step step=5 fragment=4 responders=[Member { learner_id: 0, generation: 8561360201991348752 }, Member { learner_id: 1, generation: 14764248707833878600 }] gnorm="0.1452" ms=23438
+2026-09-29T06:07:47.332771Z  INFO yeto_syncer::server: checkpoint committed step=6 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:07:47.352963Z  INFO yeto_syncer::server: outer step step=6 fragment=5 responders=[Member { learner_id: 0, generation: 8561360201991348752 }, Member { learner_id: 1, generation: 14764248707833878600 }] gnorm="0.1588" ms=13546
+2026-09-29T06:08:08.263406Z  INFO yeto_syncer::server: checkpoint committed step=7 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:08.276974Z  INFO yeto_syncer::server: outer step step=7 fragment=6 responders=[Member { learner_id: 0, generation: 8561360201991348752 }, Member { learner_id: 1, generation: 14764248707833878600 }] gnorm="0.1467" ms=21295
+2026-09-29T06:08:08.720356Z  INFO yeto_syncer::server: checkpoint committed step=8 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:08.731047Z  INFO yeto_syncer::server: outer step step=8 fragment=7 responders=[Member { learner_id: 0, generation: 8561360201991348752 }, Member { learner_id: 1, generation: 14764248707833878600 }] gnorm="0.1630" ms=10850
+2026-09-29T06:08:30.644847Z  INFO yeto_syncer::server: learner-budget cutoff checkpoint written step=8 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:30.644931Z  INFO yeto_syncer::server: learner-budget cutoff established cancelled_inflight=1 cancelled_computing=0 cancelled_ready=0 target_steps=8 step=8
+2026-09-29T06:08:31.062512Z  INFO yeto_syncer::server: syncer listening port=26070 semantic_profile_sha256="65f22e935c1c3ecdbf0ba8fd545971218fd23dbc28da021cf92f83ba22b4f26d" require_profile_binding=false
+2026-09-29T06:08:31.062634Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2
+2026-09-29T06:08:31.143019Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:22630
+2026-09-29T06:08:31.653714Z  INFO yeto_syncer::server: learner connected (layout: 8 fragments) learner_id=1 generation=6763311666289758190 num_streams=4
+2026-09-29T06:08:31.653854Z  INFO yeto_syncer::server: initialized global state iso_backend=scalar
+2026-09-29T06:08:31.654066Z  INFO yeto_syncer::server: learner connected (layout: 8 fragments) learner_id=0 generation=3575760379445732088 num_streams=4
+2026-09-29T06:08:31.732872Z  INFO yeto_syncer::server: resumed from checkpoint step=8
+2026-09-29T06:08:32.296313Z  INFO yeto_syncer::server: checkpoint committed step=9 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:32.306349Z  INFO yeto_syncer::server: outer step step=9 fragment=0 responders=[Member { learner_id: 0, generation: 3575760379445732088 }, Member { learner_id: 1, generation: 6763311666289758190 }] gnorm="0.0229" ms=495
+2026-09-29T06:08:32.831127Z  INFO yeto_syncer::server: checkpoint committed step=10 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:32.840455Z  INFO yeto_syncer::server: outer step step=10 fragment=1 responders=[Member { learner_id: 0, generation: 3575760379445732088 }, Member { learner_id: 1, generation: 6763311666289758190 }] gnorm="0.0225" ms=521
+2026-09-29T06:08:33.300149Z  INFO yeto_syncer::server: checkpoint committed step=11 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:33.321827Z  INFO yeto_syncer::server: outer step step=11 fragment=2 responders=[Member { learner_id: 0, generation: 3575760379445732088 }, Member { learner_id: 1, generation: 6763311666289758190 }] gnorm="0.0111" ms=470
+2026-09-29T06:08:33.715544Z  INFO yeto_syncer::server: checkpoint committed step=12 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:33.741555Z  INFO yeto_syncer::server: outer step step=12 fragment=3 responders=[Member { learner_id: 0, generation: 3575760379445732088 }, Member { learner_id: 1, generation: 6763311666289758190 }] gnorm="0.0111" ms=418
+2026-09-29T06:08:34.073098Z  INFO yeto_syncer::server: checkpoint committed step=13 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:34.090981Z  INFO yeto_syncer::server: outer step step=13 fragment=4 responders=[Member { learner_id: 0, generation: 3575760379445732088 }, Member { learner_id: 1, generation: 6763311666289758190 }] gnorm="0.0037" ms=348
+2026-09-29T06:08:34.437580Z  INFO yeto_syncer::server: checkpoint committed step=14 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:34.446293Z  INFO yeto_syncer::server: outer step step=14 fragment=5 responders=[Member { learner_id: 0, generation: 3575760379445732088 }, Member { learner_id: 1, generation: 6763311666289758190 }] gnorm="0.0036" ms=351
+2026-09-29T06:08:34.809564Z  INFO yeto_syncer::server: checkpoint committed step=15 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:34.829044Z  INFO yeto_syncer::server: outer step step=15 fragment=6 responders=[Member { learner_id: 0, generation: 3575760379445732088 }, Member { learner_id: 1, generation: 6763311666289758190 }] gnorm="0.0469" ms=372
+2026-09-29T06:08:35.169873Z  INFO yeto_syncer::server: checkpoint committed step=16 path=/work/out/decoupled/work/seed-17/yeto-decoupled-m2/state.ckpt
+2026-09-29T06:08:35.188110Z  INFO yeto_syncer::server: outer step step=16 fragment=7 responders=[Member { learner_id: 0, generation: 3575760379445732088 }, Member { learner_id: 1, generation: 6763311666289758190 }] gnorm="0.0521" ms=356
+2026-09-29T06:08:36.269415Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=0 generation=3575760379445732088 step=16 remaining=1
+2026-09-29T06:08:36.290073Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=1 generation=6763311666289758190 step=16 remaining=0
+2026-09-29T06:08:36.290121Z  INFO yeto_syncer::server: all learners acknowledged final cut learners=2
+2026-09-29T06:08:36.290150Z  INFO yeto_syncer::server: training complete after 16 outer steps
+2026-09-29T06:08:37.325786Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:60566
+2026-09-29T06:08:37.326717Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:64880
+2026-09-29T06:08:37.326763Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:58096
+2026-09-29T06:08:37.326861Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:39947
+2026-09-29T06:08:37.326982Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:20918
+2026-09-29T06:08:37.375995Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:46026
+2026-09-29T06:08:37.376801Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:19442
+2026-09-29T06:08:37.377033Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:37508
+2026-09-29T06:08:37.377203Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:19022
+2026-09-29T06:08:37.377464Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:20143

@@ -1,0 +1,5 @@
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 814.87it/s]
+{"step": "first_learner_exit", "rc": -9, "killed": true, "t": 1790662705.7815042}
+{"step": "events_before_restart", "n": 34, "t": 1790662725.7827563}
+{"step": "restart_exit", "rc": 0, "t": 1790663234.6397407}
+{"step": "syncer_exit", "rc": 0, "t": 1790663234.640138}

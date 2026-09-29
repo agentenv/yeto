@@ -1,0 +1,13 @@
+/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
+  return nebius.sdk.SDK(
+[launcher] yeto-hp929d-head: 1 instance(s) still live after down (computeinstance-e00htmj1ya36a514g0); retrying teardown (1/4)
+[launcher] sky.down(yeto-hp929d-head) error: Cluster 'yeto-hp929d-head' does not exist.
+[yeto] worker is not running
+[yeto] tearing down 3 cluster(s): yeto-hp929d-head, yeto-hp929d-l0-eu-north1, yeto-hp929d-l1-eu-north1
+[2mFailed to connect to SkyPilot API server at http://127.0.0.1:46580. Starting a local server.[0m
+[0m[32m✓ SkyPilot API server started. [0m[0m
+[head] yeto-hp929d-l0-eu-north1: down
+[head] yeto-hp929d-l1-eu-north1: down
+[yeto] learner clusters torn down from yeto-hp929d-head: yeto-hp929d-l0-eu-north1, yeto-hp929d-l1-eu-north1
+[yeto] yeto-hp929d-head: down
+[yeto] run 'yeto-hp929d' is down

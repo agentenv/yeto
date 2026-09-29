@@ -1,0 +1,11 @@
+[yeto] Modal app stop failed: modal app stop yeto-yeto-hp929 failed: ╭─ Error ──────────────────────────────────────────────────────────────────────╮
+│ No App with name 'yeto-yeto-hp929' found in the 'main' environment.          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+[yeto] yeto-hp929-head: not cloud-verifiable here; trusting sky
+[launcher] sky.down(yeto-hp929-head) error: Cluster 'yeto-hp929-head' does not exist.
+[yeto] worker is not running
+[yeto] tearing down 3 cluster(s): yeto-hp929-head, yeto-hp929-l0-modal, yeto-hp929-l1-modal
+[yeto] yeto-hp929-l0-modal: stopped with the Modal app (Modal app yeto-yeto-hp929: stopped, 0 tasks)
+[yeto] yeto-hp929-l1-modal: stopped with the Modal app (Modal app yeto-yeto-hp929: stopped, 0 tasks)
+[yeto] yeto-hp929-head: down
+[yeto] run 'yeto-hp929' is down

@@ -1,0 +1,195 @@
+[yeto] provisioning head cluster yeto-hp929d-head in nebius/eu-north1
+Running on cluster: yeto-hp929d-head
+Considered resources (1 node):
+---------------------------------------------------------------------------------------
+ INFRA                INSTANCE            vCPUs   Mem(GB)   GPUS   COST ($)   CHOSEN   
+---------------------------------------------------------------------------------------
+ Nebius (eu-north1)   cpu-d3_8vcpu-32gb   8       32        -      0.20       [32m   ✔[0m     
+---------------------------------------------------------------------------------------
+/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
+  return nebius.sdk.SDK(
+[0m⚙︎ Launching on Nebius eu-north1[0m.
+[2m└── [0m[2mInstance is up.[0m
+[0m[32m✓ Cluster launched: yeto-hp929d-head.[0m[0m  [2mView logs: [1msky logs --provision yeto-hp929d-head[0m[0m
+[0m⚙︎ Syncing files.
+  [2mSyncing workdir (to 1 node): /home/michael/work/gpu-head/yeto -> ~/sky_workdir[0m
+[0m[32m✓ Synced workdir.[0m[0m  [2mView logs: sky api logs -l sky-2026-09-29-07-12-05-388802/workdir_sync.log[0m
+  [2mSyncing (to 1 node): /home/michael/.nebius -> ~/.nebius[0m
+  [2mSyncing (to 1 node): /home/michael/.sky/config.yaml -> ~/.sky/config.yaml[0m
+[0m[32m✓ Synced file_mounts.[0m[0m  [2mView logs: sky api logs -l sky-2026-09-29-07-12-05-388802/file_mounts.log[0m
+[0m[32m✓ Setup detached.[0m[0m
+[0m⚙︎ Job submitted, ID: 1
+[yeto] head is up at 89.169.103.113; submitting the controller job
+/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
+  return nebius.sdk.SDK(
+[0m⚙︎ Job submitted, ID: 2
+[yeto] run 'yeto-hp929d' submitted: job 2 on yeto-hp929d-head.
+[yeto] this machine is no longer needed; the head supervises the fleet.
+[yeto] streaming head logs — Ctrl-C detaches, the run keeps going.
+
+[2m├── [0m[2mWaiting for task resources on 1 node.[0m
+[2m└── [0mJob started. Streaming logs... [2m(Ctrl-C to exit log streaming; job will not be killed)[0m
+[36m(yeto-head-job, pid=2819)[0m [launcher] syncer subprocess started (pid 5391)
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:16:55.253798Z  INFO yeto_syncer::server: syncer listening port=29400 semantic_profile_sha256="0f1dd003fd8d40cae8ef7d8f2e253b2f58a00806038150774069d84926a804a9" require_profile_binding=false
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:16:55.253858Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2
+[36m(yeto-head-job, pid=2819)[0m [launcher] syncer runs on this head node at 89.169.103.113:29400
+[36m(yeto-head-job, pid=2819)[0m [launcher] launching learner 0 on nebius:1x1xH100@eu-north1 as yeto-hp929d-l0-eu-north1
+[36m(yeto-head-job, pid=2819)[0m [2mFailed to connect to SkyPilot API server at http://127.0.0.1:46580. Starting a local server.[0m
+[36m(yeto-head-job, pid=2819)[0m [0m[32m✓ SkyPilot API server started. [0m[0m
+[36m(yeto-head-job, pid=2819)[0m Running on cluster: yeto-hp929d-l0-eu-north1
+[36m(yeto-head-job, pid=2819)[0m [launcher] launching learner 1 on nebius:1x1xH100@eu-north1 as yeto-hp929d-l1-eu-north1
+[36m(yeto-head-job, pid=2819)[0m Running on cluster: yeto-hp929d-l1-eu-north1
+[36m(yeto-head-job, pid=2819)[0m WARNING:deprecation:Service nebius.iam.v1.ProjectService is deprecated. Supported until 12/16/26. Project service v1 API is deprecated. Please use the v2 API instead. All projects remain accessible through the v2 API.
+[36m(yeto-head-job, pid=2819)[0m Stack (most recent call last):
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/threading.py", line 973, in _bootstrap
+[36m(yeto-head-job, pid=2819)[0m     self._bootstrap_inner()
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/threading.py", line 1016, in _bootstrap_inner
+[36m(yeto-head-job, pid=2819)[0m     self.run()
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/threading.py", line 953, in run
+[36m(yeto-head-job, pid=2819)[0m     self._target(*self._args, **self._kwargs)
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+[36m(yeto-head-job, pid=2819)[0m     result = (True, func(*args, **kwds))
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/site-packages/sky/check.py", line 206, in check_one_cloud_one_capability
+[36m(yeto-head-job, pid=2819)[0m     ok, reason = cloud.check_credentials(capability)
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/site-packages/sky/clouds/cloud.py", line 544, in check_credentials
+[36m(yeto-head-job, pid=2819)[0m     return cls._check_compute_credentials()
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/site-packages/sky/clouds/nebius.py", line 525, in _check_compute_credentials
+[36m(yeto-head-job, pid=2819)[0m     service = nebius.iam().ProjectServiceClient(sdk)
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/site-packages/nebius/aio/client.py", line 165, in __init__
+[36m(yeto-head-job, pid=2819)[0m     super().__init__(channel)
+[36m(yeto-head-job, pid=2819)[0m WARNING:deprecation:Service nebius.iam.v1.ProjectService is deprecated. Supported until 12/16/26. Project service v1 API is deprecated. Please use the v2 API instead. All projects remain accessible through the v2 API.
+[36m(yeto-head-job, pid=2819)[0m Stack (most recent call last):
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/threading.py", line 973, in _bootstrap
+[36m(yeto-head-job, pid=2819)[0m     self._bootstrap_inner()
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/threading.py", line 1016, in _bootstrap_inner
+[36m(yeto-head-job, pid=2819)[0m     self.run()
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/threading.py", line 953, in run
+[36m(yeto-head-job, pid=2819)[0m     self._target(*self._args, **self._kwargs)
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+[36m(yeto-head-job, pid=2819)[0m     result = (True, func(*args, **kwds))
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/site-packages/sky/check.py", line 206, in check_one_cloud_one_capability
+[36m(yeto-head-job, pid=2819)[0m     ok, reason = cloud.check_credentials(capability)
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/site-packages/sky/clouds/cloud.py", line 544, in check_credentials
+[36m(yeto-head-job, pid=2819)[0m     return cls._check_compute_credentials()
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/site-packages/sky/clouds/nebius.py", line 525, in _check_compute_credentials
+[36m(yeto-head-job, pid=2819)[0m     service = nebius.iam().ProjectServiceClient(sdk)
+[36m(yeto-head-job, pid=2819)[0m   File "/home/ubuntu/miniconda3/lib/python3.10/site-packages/nebius/aio/client.py", line 165, in __init__
+[36m(yeto-head-job, pid=2819)[0m     super().__init__(channel)
+[36m(yeto-head-job, pid=2819)[0m Considered resources (1 node):
+[36m(yeto-head-job, pid=2819)[0m ------------------------------------------------------------------------------------------------------
+[36m(yeto-head-job, pid=2819)[0m  INFRA                INSTANCE                         vCPUs   Mem(GB)   GPUS     COST ($)   CHOSEN   
+[36m(yeto-head-job, pid=2819)[0m ------------------------------------------------------------------------------------------------------
+[36m(yeto-head-job, pid=2819)[0m  Nebius (eu-north1)   gpu-h100-sxm_1gpu-16vcpu-200gb   16      200       H100:1   3.85       [32m   ✔[0m     
+[36m(yeto-head-job, pid=2819)[0m ------------------------------------------------------------------------------------------------------
+[36m(yeto-head-job, pid=2819)[0m Considered resources (1 node):
+[36m(yeto-head-job, pid=2819)[0m ------------------------------------------------------------------------------------------------------
+[36m(yeto-head-job, pid=2819)[0m  INFRA                INSTANCE                         vCPUs   Mem(GB)   GPUS     COST ($)   CHOSEN   
+[36m(yeto-head-job, pid=2819)[0m ------------------------------------------------------------------------------------------------------
+[36m(yeto-head-job, pid=2819)[0m  Nebius (eu-north1)   gpu-h100-sxm_1gpu-16vcpu-200gb   16      200       H100:1   3.85       [32m   ✔[0m     
+[36m(yeto-head-job, pid=2819)[0m ------------------------------------------------------------------------------------------------------
+[36m(yeto-head-job, pid=2819)[0m [0m⚙︎ Launching on Nebius eu-north1[0m.
+[36m(yeto-head-job, pid=2819)[0m [0m⚙︎ Launching on Nebius eu-north1[0m.
+[36m(yeto-head-job, pid=2819)[0m [2m├── [0m[2mInstance is up.[0m
+[36m(yeto-head-job, pid=2819)[0m [2m├── [0m[2mInstance is up.[0m
+[36m(yeto-head-job, pid=2819)[0m [2m└── [0m[2mDocker container is up.[0m
+[36m(yeto-head-job, pid=2819)[0m [2m└── [0m[2mDocker container is up.[0m
+[36m(yeto-head-job, pid=2819)[0m [0m[32m✓ Cluster launched: yeto-hp929d-l0-eu-north1.[0m[0m  [2mView logs: [1msky logs --provision yeto-hp929d-l0-eu-north1[0m[0m
+[36m(yeto-head-job, pid=2819)[0m [0m⚙︎ Syncing files.
+[36m(yeto-head-job, pid=2819)[0m   [2mSyncing workdir (to 1 node): /home/ubuntu/sky_workdir -> ~/sky_workdir[0m
+[36m(yeto-head-job, pid=2819)[0m [0m[32m✓ Synced workdir.[0m[0m  [2mView logs: sky api logs -l sky-2026-09-29-07-17-03-700034/workdir_sync.log[0m
+[36m(yeto-head-job, pid=2819)[0m [0m[32m✓ Setup detached.[0m[0m
+[36m(yeto-head-job, pid=2819)[0m [0m⚙︎ Job submitted, ID: 1
+[36m(yeto-head-job, pid=2819)[0m 
+[36m(yeto-head-job, pid=2819)[0m [0m[32m✓ Cluster launched: yeto-hp929d-l1-eu-north1.[0m[0m  [2mView logs: [1msky logs --provision yeto-hp929d-l1-eu-north1[0m[0m
+[36m(yeto-head-job, pid=2819)[0m [0m⚙︎ Syncing files.
+[36m(yeto-head-job, pid=2819)[0m   [2mSyncing workdir (to 1 node): /home/ubuntu/sky_workdir -> ~/sky_workdir[0m
+[36m(yeto-head-job, pid=2819)[0m [0m[32m✓ Synced workdir.[0m[0m  [2mView logs: sky api logs -l sky-2026-09-29-07-17-03-926924/workdir_sync.log[0m
+[36m(yeto-head-job, pid=2819)[0m [0m[32m✓ Setup detached.[0m[0m
+[36m(yeto-head-job, pid=2819)[0m [0m⚙︎ Job submitted, ID: 1
+[36m(yeto-head-job, pid=2819)[0m 
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [2m├── [0m[2mWaiting for task resources on 1 node.[0m
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [2m└── [0mJob started. Streaming logs... [2m(Ctrl-C to exit log streaming; job will not be killed)[0m
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [36m(setup pid=2048)[0m From https://github.com/michaellchung/miles
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [36m(setup pid=2048)[0m  * branch                0394715083c91182b5eb0c526eeee4196ac694b9 -> FETCH_HEAD
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [36m(setup pid=2048)[0m HEAD is now at 039471508 Add --worker-dynamic-port-start for port isolation
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [36m(setup pid=2048)[0m Cloning into '/root/sglang'...
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [2m├── [0m[2mWaiting for task resources on 1 node.[0m
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [2m└── [0mJob started. Streaming logs... [2m(Ctrl-C to exit log streaming; job will not be killed)[0m
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [36m(setup pid=2045)[0m From https://github.com/michaellchung/miles
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [36m(setup pid=2045)[0m  * branch                0394715083c91182b5eb0c526eeee4196ac694b9 -> FETCH_HEAD
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [36m(setup pid=2045)[0m HEAD is now at 039471508 Add --worker-dynamic-port-start for port isolation
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [36m(setup pid=2045)[0m Cloning into '/root/sglang'...
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [36m(setup pid=2048)[0m From https://github.com/michaellchung/sglang
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [36m(setup pid=2048)[0m  * branch                  9f29303bef1eea38eb613e5f454a52db1326422d -> FETCH_HEAD
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l0-eu-north1] [36m(setup pid=2048)[0m HEAD is now at 9f29303bef Support disk-backed weight memory saver
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [36m(setup pid=2045)[0m From https://github.com/michaellchung/sglang
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [36m(setup pid=2045)[0m  * branch                  9f29303bef1eea38eb613e5f454a52db1326422d -> FETCH_HEAD
+[36m(yeto-head-job, pid=2819)[0m [yeto-hp929d-l1-eu-north1] [36m(setup pid=2045)[0m HEAD is now at 9f29303bef Support disk-backed weight memory saver
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:34:40.565376Z  INFO yeto_syncer::server: learner connected (layout: 4 fragments) learner_id=0 generation=1867343362453586532 num_streams=4
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:34:40.565491Z  INFO yeto_syncer::server: initialized global state iso_backend=scalar
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:34:40.684584Z  INFO yeto_syncer::server: global parameters initialized
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:35:13.370344Z  INFO yeto_syncer::server: learner connected (layout: 4 fragments) learner_id=1 generation=4446586226812817769 num_streams=4
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:35:13.476827Z  INFO yeto_syncer::server: checkpoint committed step=0 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:37:53.466714Z  INFO yeto_syncer::server: checkpoint committed step=1 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:37:53.486678Z  INFO yeto_syncer::server: outer step step=1 fragment=0 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0151" ms=159893
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:37:53.741796Z  INFO yeto_syncer::server: checkpoint committed step=2 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:37:53.761224Z  INFO yeto_syncer::server: outer step step=2 fragment=1 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0176" ms=160168
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:38:17.463954Z  INFO yeto_syncer::server: checkpoint committed step=3 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:38:17.488588Z  INFO yeto_syncer::server: outer step step=3 fragment=2 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0177" ms=23997
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:38:17.731071Z  INFO yeto_syncer::server: checkpoint committed step=4 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:38:17.750168Z  INFO yeto_syncer::server: outer step step=4 fragment=3 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0202" ms=23986
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:39:02.647491Z  INFO yeto_syncer::server: checkpoint committed step=5 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:39:02.674291Z  INFO yeto_syncer::server: outer step step=5 fragment=0 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0018" ms=45184
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:39:02.919378Z  INFO yeto_syncer::server: checkpoint committed step=6 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:39:02.946102Z  INFO yeto_syncer::server: outer step step=6 fragment=1 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0018" ms=33533
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:39:24.272295Z  INFO yeto_syncer::server: checkpoint committed step=7 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:39:24.296766Z  INFO yeto_syncer::server: outer step step=7 fragment=2 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=21622
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:39:33.605993Z  INFO yeto_syncer::server: checkpoint committed step=8 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:39:33.627703Z  INFO yeto_syncer::server: outer step step=8 fragment=3 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=19366
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:40:07.565706Z  INFO yeto_syncer::server: checkpoint committed step=9 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:40:07.590408Z  INFO yeto_syncer::server: outer step step=9 fragment=0 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=41737
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:40:07.821997Z  INFO yeto_syncer::server: checkpoint committed step=10 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:40:07.841146Z  INFO yeto_syncer::server: outer step step=10 fragment=1 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=30830
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:40:27.813305Z  INFO yeto_syncer::server: checkpoint committed step=11 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:40:27.837161Z  INFO yeto_syncer::server: outer step step=11 fragment=2 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=20246
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:40:34.580972Z  INFO yeto_syncer::server: checkpoint committed step=12 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:40:34.600540Z  INFO yeto_syncer::server: outer step step=12 fragment=3 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=16039
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:09.775319Z  INFO yeto_syncer::server: checkpoint committed step=13 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:09.800149Z  INFO yeto_syncer::server: outer step step=13 fragment=0 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=40269
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:10.042893Z  INFO yeto_syncer::server: checkpoint committed step=14 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:10.063402Z  INFO yeto_syncer::server: outer step step=14 fragment=1 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=30025
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:30.813833Z  INFO yeto_syncer::server: checkpoint committed step=15 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:30.834631Z  INFO yeto_syncer::server: outer step step=15 fragment=2 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=21034
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:35.137606Z  INFO yeto_syncer::server: checkpoint committed step=16 path=/home/ubuntu/yeto-output/yeto-state.ckpt
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:35.137633Z  INFO yeto_syncer::server: outer step step=16 fragment=3 responders=[Member { learner_id: 0, generation: 1867343362453586532 }, Member { learner_id: 1, generation: 4446586226812817769 }] gnorm="0.0000" ms=14850
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.043167Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=0 generation=1867343362453586532 step=16 remaining=1
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.119649Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=1 generation=4446586226812817769 step=16 remaining=0
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.119689Z  INFO yeto_syncer::server: all learners acknowledged final cut learners=2
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.119693Z  INFO yeto_syncer::server: training complete after 16 outer steps
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.910688Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.123.122:44404
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.912503Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.123.122:44414
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.912673Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.123.122:44428
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.912724Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.123.122:44444
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:36.912879Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.123.122:44446
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:37.027784Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.108.196:49658
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:37.028130Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.108.196:49680
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:37.028140Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.108.196:49668
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:37.028199Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.108.196:49682
+[36m(yeto-head-job, pid=2819)[0m [syncer] 2026-09-29T07:41:37.028261Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=89.169.108.196:49684
+[36m(yeto-head-job, pid=2819)[0m [launcher] yeto-hp929d-l0-eu-north1 job finished: JobStatus.SUCCEEDED
+[36m(yeto-head-job, pid=2819)[0m [launcher] yeto-hp929d-l1-eu-north1 job finished: JobStatus.SUCCEEDED
+[36m(yeto-head-job, pid=2819)[0m [launcher] learner jobs finished: {'yeto-hp929d-l0-eu-north1': 'JobStatus.SUCCEEDED', 'yeto-hp929d-l1-eu-north1': 'JobStatus.SUCCEEDED'}
+[36m(yeto-head-job, pid=2819)[0m [launcher] committed RL checkpoint retained at /home/ubuntu/yeto-output
+[36m(yeto-head-job, pid=2819)[0m [launcher] tearing down yeto-hp929d-l0-eu-north1
+[36m(yeto-head-job, pid=2819)[0m [launcher] yeto-hp929d-l0-eu-north1: 1 instance(s) still live after down (computeinstance-e00stsr1cn718j6ywv); retrying teardown (1/4)
+[36m(yeto-head-job, pid=2819)[0m [launcher] sky.down(yeto-hp929d-l0-eu-north1) error: Cluster 'yeto-hp929d-l0-eu-north1' does not exist.
+[36m(yeto-head-job, pid=2819)[0m [launcher] tearing down yeto-hp929d-l1-eu-north1
+[36m(yeto-head-job, pid=2819)[0m [launcher] yeto-hp929d-l1-eu-north1: 1 instance(s) still live after down (computeinstance-e00xsjhten4fy3za0a); retrying teardown (1/4)
+[36m(yeto-head-job, pid=2819)[0m [launcher] sky.down(yeto-hp929d-l1-eu-north1) error: Cluster 'yeto-hp929d-l1-eu-north1' does not exist.
+[36m(yeto-head-job, pid=2819)[0m [launcher] yeto-hp929d-l1-eu-north1: 1 instance(s) still live after down (computeinstance-e00xsjhten4fy3za0a); retrying teardown (2/4)
+[36m(yeto-head-job, pid=2819)[0m [launcher] sky.down(yeto-hp929d-l1-eu-north1) error: Cluster 'yeto-hp929d-l1-eu-north1' does not exist.
+[36m(yeto-head-job, pid=2819)[0m [launcher] yeto-hp929d-l1-eu-north1: 1 instance(s) still live after down (computeinstance-e00xsjhten4fy3za0a); retrying teardown (3/4)
+[36m(yeto-head-job, pid=2819)[0m [launcher] sky.down(yeto-hp929d-l1-eu-north1) error: Cluster 'yeto-hp929d-l1-eu-north1' does not exist.
+[36m(yeto-head-job, pid=2819)[0m [launcher] run finished; model + checkpoint live on the head — tear it down with: yeto down yeto-hp929d
+[0m[32m✓ Job finished (status: SUCCEEDED).[0m[0m
+[yeto] head job ended; the head cluster yeto-hp929d-head is still up — tear everything down with: yeto down yeto-hp929d
