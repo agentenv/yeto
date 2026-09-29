@@ -197,4 +197,4 @@
 ## 追加待批准（Agent ALGO-CAP，2026-09-29）
 
 - **P0 D11 放行开关与 G1**：按 spec 原文，“多岛或外层同步”即拒绝。当前 learner 与 launcher 两个入口都带外层同步，所以放行开关在真实运行中无法使用，各算法 change 的 G1 也就无法借助它运行。需另批二选一：(a) 允许单岛带 1 成员 syncer 时放行；(b) 新增无 syncer 的单岛 learner 入口。ALGO-CAP 没有自行放宽。
-- **更新（主 agent 决定，用户可推翻；见 §7b）**：采用 (b)。ALGO-CAP 已实现 `--rl-single-island-no-sync`（单岛、无 syncer、无外层同步），放行开关只在这个入口上可用；F9 的严格拒绝保持不变。
+- **更新**：新增了单岛无外层同步运行模式（主 agent 决定，用户可推翻，见 §7b）；放行开关口径未放宽。ALGO-CAP 已实现 `--rl-single-island-no-sync`（单岛、无 syncer、无外层同步），放行开关只在这个入口上可用；F9 的严格拒绝保持不变。

@@ -748,6 +748,11 @@ rollout and reward groups):
 
 ### GRPO-family knobs (`rl-algo-grpo-knobs`)
 
+> **Availability.** The modules, fields and mechanisms in this section are
+> provided by the `rl-algo-grpo-knobs` change and take effect on the integration branch
+> that contains it. The P0 framework branch (`algo-cap`) alone does not ship
+> them; there only the extension points described above exist.
+
 Registered by `yeto/rl/algos/grpo_knobs.py`. Every mechanism below can be
 expressed and translated, but none is declared in `miles_capabilities` until
 its single-GPU smoke (G1) passes. A declared mechanism means only that G1
@@ -866,6 +871,11 @@ $M --dry-run --rl-algorithm-spec examples/rl_algorithms/dr-grpo.json \
 Recorded outputs: `openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-dry-run/`.
 
 ### Sequence-level ratio and advantage variants (`rl-algo-seq-and-adv`)
+
+> **Availability.** The modules, fields and mechanisms in this section are
+> provided by the `rl-algo-seq-and-adv` change and take effect on the integration branch
+> that contains it. The P0 framework branch (`algo-cap`) alone does not ship
+> them; there only the extension points described above exist.
 
 Six optional mechanisms, all **expressible but not declared** by the Miles
 adapter until their single-GPU smoke (G1) passes. Declared support is not a

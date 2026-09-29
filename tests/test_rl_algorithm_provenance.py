@@ -462,3 +462,18 @@ def test_no_sync_run_export_is_marked_from_its_event_tape(tmp_path, monkeypatch)
     bad.write_text(json.dumps({**event, "rl/algorithm_spec_sha256": "0" * 64}) + "\n")
     with pytest.raises(ValueError):
         rl_export.algorithm_from_event_tape(bad)
+
+
+def test_no_sync_requires_rl_training_mode():
+    from yeto import launcher
+
+    args = _launcher_args("ports", ("--rl-single-island-no-sync",))
+    args.training_mode = "sft"
+    with pytest.raises(ValueError, match="requires --training-mode rl"):
+        launcher.run(args)
+
+
+def test_outer_sync_always_in_event():
+    plain = selection_event(launch=_launch(AlgorithmSpec()), algorithm=AlgorithmSpec(),
+                            miles_commit="x")
+    assert plain["rl/outer_sync"] is True
