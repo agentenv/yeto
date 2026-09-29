@@ -95,3 +95,4 @@ committed diagnosis.
   the final tape pull misses events, the round-count criteria fail; they are not relaxed.
 - Runs in order tis, icepop, opsm-trainer, one at a time, started only after G3 has finished and
   with the per-user thread count at most 3296 (>= 800 free of 4096).
+- Harness change before attempt 5 (lesson from G3's truncated tape): the tape is pulled every 5 s instead of 20 s. Criteria unchanged.

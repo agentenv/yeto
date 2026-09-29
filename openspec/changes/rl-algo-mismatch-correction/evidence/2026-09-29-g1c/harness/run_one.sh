@@ -17,7 +17,7 @@ cleanup(){ timeout 120 /tmp/modal-venv/bin/modal app stop -y $APP >/dev/null 2>&
 trap cleanup EXIT
 setsid nohup bash -c "sleep 3000; /tmp/modal-venv/bin/modal app stop -y $APP" >/dev/null 2>&1 < /dev/null &
 echo $! > $E/watchdog.pid
-( while sleep 20; do c=$(timeout 60 /tmp/modal-venv/bin/modal container list --json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x['container_id'] for x in json.load(sys.stdin) if x['app_name']=='$APP'))" 2>/dev/null)
+( while sleep 5; do c=$(timeout 60 /tmp/modal-venv/bin/modal container list --json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x['container_id'] for x in json.load(sys.stdin) if x['app_name']=='$APP'))" 2>/dev/null)
     for x in $c; do timeout 60 /tmp/modal-venv/bin/modal container exec $x -- sh -c "cat /root/yeto-output/rl-island-0.jsonl 2>/dev/null" > $E/.tape 2>/dev/null && [ -s $E/.tape ] && grep -q '"event"' $E/.tape && mv $E/.tape $E/tape.jsonl; done; done ) &
 PULLER=$!
 date -u +%FT%TZ > $E/start_time.txt
