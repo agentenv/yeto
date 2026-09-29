@@ -161,6 +161,13 @@ def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
 
 
 @pytest.fixture(autouse=True)
+def _no_modal_listing(monkeypatch):
+    import yeto.launcher as launcher
+
+    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: [])  # nothing listed = stopped
+
+
+@pytest.fixture(autouse=True)
 def _fake_sky(monkeypatch):
     import sys
     import types
