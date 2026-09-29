@@ -12,3 +12,4 @@ cost cap $8 per run), except:
 - Criterion 5 for icepop reads the same keys (train/tis, train/tis_abs, train/tis_clipfrac), which
   IcePop reports whenever it runs (use_tis is emitted).
 - One attempt each; a failure is reported as it is.
+- Amendment before the icepop run: merged origin/integ-decl 0f13aa7 (CORRECTION_COMPANIONS; named-function registration now takes mechanisms=...; P0's edit to mismatch_correction.py was checked, 93 passed). YETO_SHA for icepop = the commit in YETO_SHA_icepop. icepop.json is unchanged and still has no mismatch_metrics. Criteria unchanged.
