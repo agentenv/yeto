@@ -386,8 +386,9 @@ def _append_rl_event(args, event: dict[str, Any]) -> None:
         "time_unix": time.time(),
         **event,
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+    from .event_echo import append_record
+
+    append_record(path, event)  # echoed when YETO_RL_ECHO_EVENTS=1
     # The tape is the island's telemetry; W&B is a second reader of it, not
     # a second instrumentation pass. Writing the file first keeps the tape
     # authoritative when the network is not.

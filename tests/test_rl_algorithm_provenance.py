@@ -637,7 +637,7 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
 def test_no_sync_event_echo_matches_tape(tmp_path, monkeypatch, capsys):
     from yeto.rl import miles
 
-    monkeypatch.setattr(miles, "_append_rl_event", miles._append_rl_event)
+    monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")  # restored after the test
     assert rl_learner.install_event_echo() is True
     assert rl_learner.install_event_echo() is False  # idempotent
     tape = tmp_path / "tape.jsonl"
@@ -658,7 +658,7 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     # the island side: produce the echoed log with the real echo
-    monkeypatch.setattr(miles, "_append_rl_event", miles._append_rl_event)
+    monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")  # restored after the test
     rl_learner.install_event_echo()
     island_tape = tmp_path / "island.jsonl"
     ns = SimpleNamespace(yeto_rl_event_tape=str(island_tape), yeto_rl_learner_id=0)
@@ -768,20 +768,48 @@ def test_no_sync_run_refuses_existing_tapes(monkeypatch, tmp_path):
         launcher.run(args)
 
 
-def test_echo_never_emits_half_lines(tmp_path, monkeypatch, capsys):
-    from yeto.rl import miles
+def test_echo_line_is_the_written_line(tmp_path, monkeypatch, capsys):
+    from yeto.rl import event_echo
 
-    def partial_writer(args, event):  # a writer that leaves a partial last line
-        with open(args.yeto_rl_event_tape, "a") as handle:
-            handle.write(json.dumps({"island_id": 0, "time_unix": 1, **event}) + "\n{partial")
-
-    monkeypatch.setattr(miles, "_append_rl_event", partial_writer)
-    rl_learner.install_event_echo()
-    miles._append_rl_event(SimpleNamespace(yeto_rl_event_tape=str(tmp_path / "t"),
-                                           yeto_rl_learner_id=0), {"event": "a"})
+    monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "1")
+    tape = tmp_path / "t.jsonl"
+    event_echo.append_record(tape, {"island_id": 0, "time_unix": 1.5, "event": "a"})
     out = [l for l in capsys.readouterr().out.splitlines() if l.startswith("YETO_RL_EVENT")]
-    assert len(out) == 1 and "partial" not in out[0]
+    assert [l[len("YETO_RL_EVENT "):] for l in out] == tape.read_text().splitlines()
+    monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")
+    event_echo.append_record(tape, {"island_id": 0, "time_unix": 2.0, "event": "b"})
+    assert "YETO_RL_EVENT" not in capsys.readouterr().out
 
+
+def test_two_island_strict_run_echoes_every_tape_writer(tmp_path, monkeypatch, capsys):
+    """Driver, bridge (rl_local_round, rl_publication ...) records: all echoed, per island
+    identical to the island tape (the 1a G3 gap: bridge writes bypassed the echo)."""
+    import torch
+
+    from test_rl_engine_driver import _engine, _run_threads, _strict_driver, _strict_syncer
+    from yeto.rl import event_echo
+
+    monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "1")
+    engines = (_engine(torch.tensor([1.0, 3.0])), _engine(torch.tensor([3.0, 5.0])))
+    syncer = _strict_syncer(engines[0], learners=2, rounds=2)
+    drivers = [_strict_driver(tmp_path, e, syncer, learner_id=i, rounds=2)
+               for i, e in enumerate(engines)]
+    results, errors = _run_threads(drivers)
+    assert errors == {}
+    echoed = []
+    for line in capsys.readouterr().out.splitlines():
+        raw = event_echo.parse_line(line)
+        if raw not in (None, event_echo.INVALID):
+            echoed.append(raw)
+    tapes = [(tmp_path / f"island-{i}.jsonl").read_text().splitlines() for i in (0, 1)]
+    # every written line was echoed once, nothing else (the fixture's driver
+    # tapes all carry island_id 0, so match by content and order, not by id)
+    assert sorted(echoed) == sorted(tapes[0] + tapes[1])
+    for lines in tapes:
+        position = [echoed.index(l) for l in lines]
+        assert position == sorted(position)  # same order as on the island
+        kinds = {json.loads(l)["event"] for l in lines}
+        assert {"rl_local_round", "rl_driver_phase", "rl_publication"} <= kinds, kinds
 
 def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch, tmp_path, capsys):
     """G3 shape: two Modal islands + a syncer; island 1's stream is cut mid-line."""

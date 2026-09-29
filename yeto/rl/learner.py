@@ -311,48 +311,23 @@ def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
 
 
 def install_event_echo() -> bool:
-    """--rl-single-island-no-sync: echo every tape record to stdout.
+    """Echo every tape record of this island to stdout (``YETO_RL_EVENT``).
 
-    Such an island has no syncer tape and (on Modal) no fetchable
-    ~/yeto-output, so each record written by ``yeto.rl.miles._append_rl_event``
-    (driver, learner and adapter events) is printed as
-    ``YETO_RL_EVENT <the exact tape line>``; the launcher rebuilds the tape
-    from the log stream. Idempotent; returns True when installed now.
+    For islands whose ~/yeto-output cannot be fetched (Modal, no-sync): sets
+    ``YETO_RL_ECHO_EVENTS=1`` so the single low-level tape writer
+    (``yeto.rl.event_echo.append_record``, used by the driver, bridge, learner
+    and adapter events) prints each line it writes; Ray workers inherit it
+    (``entry.connect_island_ray``). Idempotent; True when enabled now.
     """
 
-    import threading
-
-    from . import miles
     from .engine import driver
-    from .event_echo import PREFIX
+    from .event_echo import echo_enabled, enable_echo
 
-    # This echo covers every record (driver ones included), in the same
-    # format; the driver's own experiment echo would print driver records a
-    # second time with another time_unix, so it is switched off here.
     if getattr(driver, "_ECHO_EVENTS", False):
-        driver._ECHO_EVENTS = False
-
-    original = miles._append_rl_event
-    if getattr(original, "_yeto_echo", False):
+        driver._ECHO_EVENTS = False  # would print driver records a second time
+    if echo_enabled():
         return False
-    lock = threading.Lock()
-
-    def echo(args, event):
-        with lock:
-            path = Path(args.yeto_rl_event_tape).expanduser()
-            before = path.stat().st_size if path.exists() else 0
-            original(args, event)
-            with path.open("rb") as handle:
-                handle.seek(before)
-                data = handle.read()
-            # only whole lines (up to the last newline): never a half record
-            written = data[: data.rfind(b"\n") + 1].decode("utf-8")
-        for line in written.splitlines():
-            if line.strip():
-                print(PREFIX + line, flush=True)
-
-    echo._yeto_echo = True
-    miles._append_rl_event = echo
+    enable_echo()
     return True
 
 
