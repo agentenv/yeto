@@ -13,3 +13,4 @@ cost cap $8 per run), except:
   IcePop reports whenever it runs (use_tis is emitted).
 - One attempt each; a failure is reported as it is.
 - Amendment before the icepop run: merged origin/integ-decl 0f13aa7 (CORRECTION_COMPANIONS; named-function registration now takes mechanisms=...; P0's edit to mismatch_correction.py was checked, 93 passed). YETO_SHA for icepop = the commit in YETO_SHA_icepop. icepop.json is unchanged and still has no mismatch_metrics. Criteria unchanged.
+- Reclaim note (coordinator reminder, recorded while the icepop run was in progress): the run does not depend on the launcher exiting. The head is wrapped in `timeout 3000`, and an independent setsid watchdog (sleep 3300) stops Modal app yeto-algo1a-g3c-icepop by name and kills the local syncer. Both were in place from launch.
