@@ -29,6 +29,11 @@ All other checks passed (private pull, L40S, manifest==pins, git identity, launc
 Attempt 2 reruns the same plan unchanged otherwise.
 
 ## Attempt 2 (sb-39ljVyIC1pSw4NlV18Qs5a, L40S, 190 s, evidence attempt2/)
+**Note: in attempt 2 the import check FAILED; afterwards the check method was corrected
+(PYTHONPATH=/root/miles) and only that one check was rerun, on a CPU-only sandbox -- not a
+full GPU rerun.**  Scripts actually used: attempt1/*.used (commit 9638262),
+attempt2/*.used (commit 3efd272); the CPU rerun used attempt2/imports_cpu.py with the
+corrected smoke_in_image.sh at 47c110e.
 PASS: gpu_is_l40s, manifest_matches_pins, git identity (/root/miles, /sgl-workspace/sglang),
 launcher_ports_setup (exit 0), setup_used_image_sglang, setup_skipped_miles_fetch,
 after_setup_still_fork, parse_args_tests (31 passed, 1 skipped).
@@ -47,3 +52,9 @@ Estimate (Modal list prices): ~ $0.40 GPU + ~ $0.20 CPU/mem = ~ $0.6 (not billin
 All sandboxes terminated in `finally`; `modal app stop -y img-smoke` after each run; app list
 shows every img-smoke app `stopped`, 0 tasks (modal_app_list_after_stop.txt); watchdog killed.
 No volumes / secrets created (pull secret was an in-memory Secret.from_dict).
+
+## Post-review notes (no rebuild)
+- The pushed image's /opt/yeto/image-manifest.json still carries the old miles "install"
+  wording; the build script now writes the accurate one (namespace package without
+  PYTHONPATH; yeto runs with PYTHONPATH=$HOME/miles).  Takes effect on the next build.
+- Rebuilds are file-content equivalent, not byte-identical (.git/index, pack).

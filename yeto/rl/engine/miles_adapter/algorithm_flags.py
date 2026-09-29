@@ -465,4 +465,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Run the package module, not this ``__main__`` copy: extension modules
+    # (``register_flag``) register rows into the package module's tables.
+    from yeto.rl.engine.miles_adapter import algorithm_flags as _package_module
+
+    raise SystemExit(_package_module.main())

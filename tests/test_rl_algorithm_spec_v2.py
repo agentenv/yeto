@@ -387,3 +387,18 @@ def test_load_extensions_retries_after_a_failed_import(monkeypatch):
     monkeypatch.setattr(algos, "EXTENSION_MODULES", ())
     alg.load_extensions()
     assert alg._EXTENSIONS_LOADED is True
+
+
+def test_gradient_rule_may_tighten_only_for_its_mechanism():
+    alg.register_gradient_rule("t_tight", lambda s, b, m: True,
+                               mechanism="features:entropy_bonus")
+    try:
+        zero = _groups(0.0, 0.0)
+        assert AlgorithmSpec(entropy_coef=0.25).gradient_expectation(zero) == (
+            True, "gradient_rule:t_tight (features:entropy_bonus)")
+        for spec in (AlgorithmSpec(), BOUNDED):  # default GRPO unchanged
+            for stds in ((0.5,), (0.0,), (0.0, 0.2)):
+                b = _groups(*stds)
+                assert spec.expects_gradient(b) == _r0_driver_rule(b)
+    finally:
+        alg.unregister(gradient_rule="t_tight")
