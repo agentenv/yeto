@@ -213,6 +213,88 @@ class AlgorithmConfig:
     lr: Any
     seed: int
     rollout_seed: int
+    # Explicit learning-rate schedule (never Miles' implicit default, which
+    # derives its horizon from ``--num-rollout`` = global rounds).  ``None``
+    # (eval-only) emits no schedule flags.
+    lr_schedule: "LrSchedule | None" = None
+
+
+LR_DECAY_STYLES = frozenset({"linear", "constant"})
+
+
+@dataclass(frozen=True)
+class LrSchedule:
+    """Per-island optimizer LR schedule, in local optimizer steps.
+
+    strict-avg: every island runs exactly ``global_rounds * optimizer_steps``
+    local steps, so linear decay over that horizon is well defined (and is
+    what Miles' implicit default already produced).  decoupled: islands run
+    until the syncer stops them, so the local step count is not known up
+    front and any finite linear horizon can reach zero mid-run; the LR is
+    held constant.
+    """
+
+    decay_style: str
+    decay_iters: int
+
+    def __post_init__(self) -> None:
+        if self.decay_style not in LR_DECAY_STYLES:
+            raise ValueError(f"unsupported LR decay style {self.decay_style!r}")
+        if type(self.decay_iters) is not int or self.decay_iters < 1:
+            raise ValueError("LR decay horizon must be a positive step count")
+
+
+LR_SCHEDULE_FLAGS = ("--lr-decay-style", "--lr-decay-iters", "--lr-warmup-iters", "--min-lr")
+
+
+def lr_schedule_argv(schedule: "LrSchedule | None") -> tuple[str, ...]:
+    """Miles/Megatron flags for ``schedule``; shared verbatim by both engines."""
+
+    if schedule is None:
+        return ()
+    return (
+        "--lr-decay-style", schedule.decay_style,
+        "--lr-decay-iters", str(schedule.decay_iters),
+        "--lr-warmup-iters", "0",
+        "--min-lr", "0",
+    )
+
+
+def resolve_lr_schedule(
+    *,
+    sync_preset: str,
+    eval_only: bool,
+    global_rounds: int,
+    optimizer_steps: int,
+    rollout_batch_size: int,
+    n_samples_per_prompt: int,
+    global_batch: int,
+) -> LrSchedule | None:
+    """The island's LR schedule, decided by the sync mode (design D1-D3).
+
+    Both engine translations (legacy ``_legacy_miles_argv`` and ports
+    ``translate_run_config``) emit exactly this schedule.
+    """
+
+    if eval_only:
+        return None
+    horizon = global_rounds * optimizer_steps
+    if sync_preset == "decoupled":
+        # Run-until-stop: the local step count is unknown up front.
+        # decay_iters only satisfies Megatron's ``lr_decay_steps > 0``; a
+        # constant schedule never reads it.
+        return LrSchedule("constant", horizon)
+    # strict-avg / dense-full: one local round (optimizer_steps steps) per
+    # global round.  The explicit linear horizon equals Miles' implicit
+    # ``num_rollout * rollout_batch_size * n_samples / global_batch`` only
+    # when every round is exactly ``optimizer_steps`` optimizer steps.
+    if rollout_batch_size * n_samples_per_prompt != global_batch * optimizer_steps:
+        raise ValueError(
+            "strict LR schedule requires rollout_batch_size * n_samples_per_prompt "
+            f"== global_batch * optimizer_steps (got {rollout_batch_size} * "
+            f"{n_samples_per_prompt} != {global_batch} * {optimizer_steps})"
+        )
+    return LrSchedule("linear", horizon)
 
 
 @dataclass(frozen=True)
@@ -640,6 +722,15 @@ def resolve_rl_run_config(
             advantage_estimator="grpo",
             reward_function=args.reward_function,
             lr=args.inner_lr,
+            lr_schedule=resolve_lr_schedule(
+                sync_preset=getattr(args, "sync_preset", "strict-avg"),
+                eval_only=bool(getattr(args, "eval_only", False)),
+                global_rounds=args.global_rounds,
+                optimizer_steps=args.optimizer_steps,
+                rollout_batch_size=args.groups_per_round,
+                n_samples_per_prompt=args.samples_per_group,
+                global_batch=global_batch,
+            ),
             seed=args.seed,
             rollout_seed=getattr(args, "rollout_seed", args.seed + args.learner_id),
         ),

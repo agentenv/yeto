@@ -84,6 +84,10 @@ class FakeEngine:
     stale_token_rounds: set[int] = field(default_factory=set)
     constant_reward_rounds: set[int] = field(default_factory=set)
     grad_norm_reported: bool = True
+    # Rounds whose optimizer step applies LR 0 (gradients flow, parameters
+    # do not move) -- the decayed-to-zero schedule of fix-decoupled-lr-schedule.
+    zero_lr_rounds: set[int] = field(default_factory=set)
+    lr: float = 1e-5
 
     def __post_init__(self) -> None:
         self.tensors = {k: v.detach().clone().float() for k, v in self.tensors.items()}
@@ -182,17 +186,21 @@ class FakeTrainerGroup:
             raise RuntimeError("train step on an offloaded trainer")
         zero = batch.rollout_id in e.zero_grad_rounds
         failed = batch.rollout_id in e.failed_step_rounds
+        applied_lr = 0.0 if batch.rollout_id in e.zero_lr_rounds else e.lr
         norm_sq = 0.0
         if not zero and not failed:
             for name in sorted(e.tensors):
                 delta = e.delta_for(name)
+                norm_sq += float(delta.pow(2).sum())
+                if applied_lr == 0.0:
+                    continue
                 e.tensors[name] = e.tensors[name] + delta
                 e.moments[name] = e.moments[name] + delta.abs()
-                norm_sq += float(delta.pow(2).sum())
             e.scheduler_step += 1
         e._last_metrics = TrainStepMetrics(
             grad_norm=norm_sq**0.5, loss=0.1, pg_loss=0.1, lr=1e-5,
             train_step=batch.rollout_id,
+            applied_lrs=None if failed else (applied_lr,),
         )
         tokens = sum(g.token_count for g in batch.groups)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)

@@ -33,6 +33,7 @@ from ..algorithm import (
     STOCK_NONZERO_STD_FILTER,
     AlgorithmSpec,
 )
+from ..run_config import LR_SCHEDULE_FLAGS
 from .placement import PlacementRequest, check_placement_not_rewritten
 
 ROLLOUT_META_HOOK_PATH = (
@@ -92,6 +93,9 @@ ADAPTER_OWNED_FLAGS = frozenset(
         "--trainer-controller-addrs",
         "--eval-num-gpus",
         "--external-policy-sync-path",  # legacy fork only; the driver owns sync
+        # LR schedule is decided by RLRunConfig.algorithm.lr_schedule
+        # (legacy rejects the same LR_SCHEDULE_FLAGS in learner.py).
+        *LR_SCHEDULE_FLAGS,
     }
 )
 # Parsed-namespace attributes that must stay off (post-normalization check).
@@ -261,6 +265,9 @@ LEAF_POLICY: dict[str, _Check] = {
     "algorithm.advantage_estimator": _ok,  # cross-checked against AlgorithmSpec
     "algorithm.reward_function": _ok,
     "algorithm.lr": _ok,
+    "algorithm.lr_schedule": _ok,
+    "algorithm.lr_schedule.decay_style": _ok,
+    "algorithm.lr_schedule.decay_iters": _ok,
     "algorithm.seed": _ok,
     "algorithm.rollout_seed": _ok,
     "eval": _ok,
@@ -430,7 +437,7 @@ def translate_run_config(
     dynamic_filter = _algorithm_filter(config, algorithm)
     check_extra_argv(extra_argv)
 
-    from ..run_config import RECIPE_QWEN3_5
+    from ..run_config import RECIPE_QWEN3_5, lr_schedule_argv
 
     geometry = config.geometry
     parallel = config.parallel
@@ -547,6 +554,9 @@ def translate_run_config(
         "--seed", str(config.algorithm.seed),
         "--pin-rollout-manager-to-head",
     ]
+    # Explicit LR schedule: Miles' default horizon is --num-rollout (global
+    # rounds), which under decoupled is not the island's local step count.
+    values.extend(lr_schedule_argv(config.algorithm.lr_schedule))
     if algorithm.kl_coef is not None:
         values.extend(("--kl-coef", str(algorithm.kl_coef)))
     if dynamic_filter is not None:

@@ -1,6 +1,6 @@
 # Implementation tasks
 
-本轮仅更新规划，未实施以下任务。**前提：change `rl-engine-ports`（R0）已完成并切换到 ports 路径。** Y=yeto（IslandController/IslandDriver/bridge），M=引擎机制：`yeto/rl/engine/` 端口新增动词及其 MilesAdapter 实现，仅在确需时于 `michaellchung/miles` 或 `michaellchung/sglang` 的 `yeto/ports` 分支增加小提交；X=跨层集成。决策、护栏与 journal 一律在 yeto 侧。miles 的 cell 只在适配层内部，不使用 FT/indep-DP/healing/api_server。技术栈保持yeto+miles/Ray/Megatron/SGLang，不引入veRL。引擎版本与端口定义见 ../rl-engine-ports/design.md。
+本轮仅更新规划，未实施以下任务。**前提：change `rl-engine-ports`（R0）已完成并切换到 ports 路径。** Y=yeto（IslandController/IslandDriver/bridge），M=引擎机制：`yeto/rl/engine/` 端口新增动词及其 MilesAdapter 实现，仅在确需时于 `michaellchung/miles` 或 `michaellchung/sglang` 的 `yeto/ports` 分支增加小提交（Miles 侧已识别 fork-M1–M6，见 upstream-mechanisms.md，对应任务 2.1a/3.3a/3.3b/3.5a/4.2a/4.6a；SGLang 无需 fork）；M-fork=Miles fork 小提交，均默认关闭、缺省行为不变。草稿在 `michaellchung/miles` 分支 `yeto-elastic-m1-m6`（基于 `yeto/ports` 03947150）；上线步骤：评审后合回 `yeto/ports` → 更新 yeto `MILES_NEXT_COMMIT` → 重建镜像并更新 `MILES_NEXT_IMAGE` digest → 生成 1.1 runtime manifest → capability 才可声明对应动词；X=跨层集成。决策、护栏与 journal 一律在 yeto 侧。miles 的 cell 只在适配层内部，不使用 FT/indep-DP/healing/api_server。技术栈保持yeto+miles/Ray/Megatron/SGLang，不引入veRL。引擎版本与端口定义见 ../rl-engine-ports/design.md。
 
 路线：A调查/资源/依赖 → E0固定训推分区基线 → E1–E3手动重配置 → D1半自动 → D2自动；C成本优化对已验证边按瓶颈推进，可与D1建议工具并行。E1 rollout与E2同形恢复研究可并行，E3 trainer DP/角色转移必须有E2证据。实验未通过则不启用对应profile，不宣称trainer弹性完成。固定分区可先串行，获得合法重叠证据后才启用overlap；需要新算法契约时单列后续设计，不在资源参数中偷改。
 
@@ -9,21 +9,22 @@
 - [ ] 1.1 [X；依赖rl-engine-ports完成] 在 rl-engine-ports 固定镜像中生成runtime manifest，核对miles/SGLang fork commit、import路径、Megatron/Torch/CUDA/NCCL/TMS/PEFT，并记录 `EngineCapabilities`；验收：manifest与 `MILES_NEXT_*`/`SGLANG_NEXT_*` 一致，缺接口组合拒绝认证。
 - [ ] 1.2 [X；依赖1.1] 选定小模型LoRA/strict-avg兼容profile，在ports路径上执行现有串行固定配置；验收：完成一轮生成、更新、外层同步与权重确认，形成兼容baseline。不以最小代码差异限制后续架构。
 - [ ] 1.3 [Y；依赖1.1] 形成通过已有云接入租用独立单岛GPU池的实验计划，记录GPU/NUMA/互联、主存、镜像、备用卡、租期及清理；验收：计划可映射现有launcher/harness和pool身份，不把本机占用当限制、不把在途provider当已支持。本任务交付计划，实际租用按实验执行范围进行。
-- [ ] 1.4 [Y+M；依赖1.2] 定义ExecutionProfile和readiness，覆盖策略版本、group/reward、更新/发布依赖、在途batch/队列容量、允许重叠任务和反压；验收X9：依赖表区分serial-colocated/partitioned-serial/partitioned-overlap，严格profile禁止旧版本偷跑，外层decoupled不被误当岛内async。
+- [ ] 1.4 [Y+M；依赖1.2] 定义ExecutionProfile和readiness，覆盖策略版本、group/reward、更新/发布依赖、在途batch/队列容量、允许重叠任务和反压；验收X9：依赖表区分serial-colocated/partitioned-serial/partitioned-overlap，严格profile禁止旧版本偷跑，外层decoupled不被误当岛内async。接口对齐（见 alignment.md A1）：`ExecutionProfile.algorithm_contract` 绑定 `rl-algorithm-capabilities` 的 `AlgorithmSpec` 规范化哈希（字段 `algorithm_spec_sha256`），`max_policy_age` 不得大于 `AlgorithmSpec.execution.max_policy_staleness`；`EngineCapabilities.execution.max_policy_staleness` 由已认证执行模式可能产生的最大策略年龄给出（本 change 所有模式含 partitioned-overlap 均为 0；大于 0 只能来自另立 change 认证的算法契约），比对在创建 GPU 进程之前完成。
   - 进展（2026-09-29，已实现 + CPU 测试通过，依赖未满足，未勾选：依赖1.2未完成；验收X9为GPU实验，待2.3/A2）：`yeto/rl/engine/execution_profile.py` 定义 `ExecutionProfile`（模式、外层协议、算法契约、policy age、group/batch、optimizer 步数、在途 batch、ready 缓冲、允许重叠对、contract hash，可由 #66 manifest profile/work 构造）、`ReadinessSnapshot`（D3 字段）、`dependency_table`、`generate_blockers`/`train_blockers`/`quiescent_cut_blockers`。依赖表区分三种模式；age 0 下落后版本不得 generate；decoupled 外层不放宽岛内 age，非 on-policy 契约拒绝。证据：`tests/test_rl_execution_profile.py`（7 passed）。driver 接入属于 2.2（`driver.py` 当前冻结）；X9 的 GPU 延迟注入在 2.3/A2 做。
 - [ ] 1.5 [Y；依赖1.4] 逐profile审计permit、quorum/grace、budget/final ACK、连接generation及Fleet恢复超时；验收：给出可暂停阶段和预算，未知profile默认禁用重配置。
   - 进展（2026-09-29，已实现 + CPU 测试通过，依赖未满足（1.4未勾选），未勾选）：源码审计见 `pause-audit.md`（permit、quorum/grace、BUDGET_DONE、final ACK、连接 generation、Fleet 恢复超时，均附 file:line）；`yeto/rl/engine/pause_audit.py` 只在 `round-boundary-published` 阶段放行；strict 预算为 min(0.5×quorum 900 s, 空闲流超时)；none 不设外层上限；decoupled、partitioned-overlap 和未知 profile 默认禁用。证据：`tests/test_rl_pause_audit.py`（3 passed）。strict 跨 quorum 暂停的放宽要等 X6（3.8）。
 - [ ] 1.6 [Y+M；依赖1.3-1.5] 以PR #66 的capability认证格式为准定义配置/有向边schema（不另设schema），含pool epoch、备用资源、显存/CPU/磁盘峰值、执行契约、复杂并行维度和恢复方案；验收：非法GPU映射、未知fingerprint、dense-full DP>1、GBS/DP/microbatch/累积不匹配被纯校验拒绝。
   - 进展（2026-09-29，已实现 + CPU 测试通过，依赖未满足（1.3-1.5未完成），未勾选）：在 #66 `yeto/rl/elastic_benchmark/capabilities.py` 原格式上扩展（没有另设 schema）。config 新增可选的 `placement`（per-role GPU UUID、per-engine 列表）、`parallel`（TP/PP/CP/EP）、`rollout_engine_gpus`、`gradient_accumulation`、`capacity`（显存/CPU/pinned/object-store/磁盘峰值）；edge 新增 `recovery`，并校验 TP/PP/CP/EP 保持不变；study 的 runtime fingerprint 与 attestation 不一致时判为 blocked。pool_id/pool_epoch/standby 沿用 #66。纯校验拒绝以下情况：非法 GPU 映射（重复、不在池内、数量不符、跨节点 engine）、未知 fingerprint、dense-full DP>1、GBS/步数/DP/microbatch/累积不匹配。证据：`tests/test_rl_elastic_config_schema.py`（10 passed）与 `tests/test_rl_elastic_benchmark.py`（19 passed）。实际池数据待 1.3 租用后填写。
-- [ ] 1.7 [M+Y；依赖1.4] 采集带profile/epoch的执行与等待时间线、queued/active/tool-wait、ready组、消费速率、policy age及资源峰值；验收：区分工具等待与GPU饱和，串行和重叠时间不重复计费，关闭观测兼容旧路径。
+- [ ] 1.7 [M+Y；依赖1.4] 采集带profile/epoch的执行与等待时间线、queued/active/tool-wait、ready组、消费速率、policy age及资源峰值，并给算法每轮指标（`masked_fraction`/clipfrac、mismatch 指标、被过滤样本与组数）打上同一 profile/epoch 与权重传输方式标签（alignment.md A5）；验收：区分工具等待与GPU饱和，串行和重叠时间不重复计费，关闭观测兼容旧路径。
   - 进展（2026-09-29，部分实现，未勾选）：纯计量部分已完成，即 `yeto/rl/engine/timeline.py` 的区间并集计费（重叠不重复计）、profile/epoch 标签和工具等待/饱和/长尾分类，测试为 `tests/test_rl_timeline.py`（3 passed）。**阻塞**：事件发射需要改 `yeto/rl/engine/driver.py`（每阶段 span、ReadinessSnapshot 填充）和 `miles_adapter/rollout.py`（queued/active/tool-wait 计数），这两处要等 lr-fix 合入。验收里的"关闭观测兼容旧路径"要等接入后才能验证。
 - [ ] 1.8 [X；依赖1.4,1.7] 将DynaResize证据转成实验假设，区分角色分区、进程复用、权重同步组预热、host backing/传输buffer和延迟optimizer；验收：每项有论文页码、miles适配点和否定结果处理，不采用论文性能常量。
   - 进展（2026-09-29，阻塞，未勾选）：本地没有找到 DynaResize 原文 PDF，无法给出论文页码，需要用户提供原文路径。
 
 ## 2. 阶段 E0：目标执行模式的固定训推分区基线
 
-- [ ] 2.1 [Y+M；依赖1.6] 经 `Placement` 端口表达trainer/rollout/standby物理映射并在启动时显式给出，适配LoRA启动参数避免colocate规范化覆盖分区；验收：小模型固定分区正常启动，旧共置配置保持原行为。
-- [ ] 2.2 [Y；依赖2.1,1.4] 在yeto `IslandDriver` 上新增 `partitioned-serial` 执行模式，在目标分区管理就绪任务、权重身份、有限缓冲与反压；验收：partitioned-serial完成固定算法步数，不因分卡改变sample IDs/optimizer时序。
+- [ ] 2.1 [Y+M；依赖1.6,2.1a] 经 `Placement` 端口表达trainer/rollout/standby物理映射并在启动时显式给出，适配LoRA启动参数避免colocate规范化覆盖分区；验收：小模型固定分区正常启动，旧共置配置保持原行为。
+- [ ] 2.1a [M-fork；2.1前置] fork-M1：`miles/ray/placement_group.py` 接受显式 role→bundle 映射（trainer/rollout/standby），替代单一 offset；缺省行为不变，colocate 下拒绝；验收：CPU 单测覆盖重复/越界/重叠拒绝与缺省等价，打入镜像后 2.1 以显式映射启动并记录 bundle↔GPU UUID。依据 upstream-mechanisms.md E0“Missing for 2.1”。
+- [ ] 2.2 [Y；依赖2.1,1.4] 在yeto `IslandDriver` 上新增 `partitioned-serial` 执行模式，在目标分区管理就绪任务、权重身份、有限缓冲与反压；验收：partitioned-serial完成固定算法步数，不因分卡改变sample IDs/optimizer时序；保留 R0 每组 policy token 校验（`driver.py` generate 后的 `mismatched_groups` 检查），`rl-algo-mismatch-correction` 依赖的“π_behav 与 π_old 同一权重”前提在分区模式下仍成立（alignment.md A5）。
 - [ ] 2.3 [X；依赖2.2,1.7] 对同一算法契约允许的独立任务做重叠实验，并实现对应guard；验收X9：延迟发布不能触发旧版本生成，队列有界；若不存在合法训推重叠，记录partitioned-serial结论与独立算法后续项，不擅自开放one-step-off-policy。
 - [ ] 2.4 [X；依赖2.2,1.3,1.7；overlap另依赖2.3] 在云实验池扫描少量固定配置，记录默认兼容配置、目标profile最佳固定和收益面；验收：同profile公平比较、全池/备用GPU-hours和原始trace齐全，可得“尚无净收益边”的结论。P62/P44仅候选，不预设合法或更快。
 
@@ -31,28 +32,34 @@
 
 - [ ] 3.1 [Y；依赖2.2,1.5] 在 `IslandDriver` 中实现模式对应安全点与全岛quiescent cut：兼容模式轮次边界，重叠模式先停准入并排空；验收：梯度累积中不切换，ready未消费组与策略身份可恢复。
 - [ ] 3.2 [Y；依赖3.1,1.6] 实现单事务controller、request ID/expected epoch、journal和plan/status/cancel入口；验收：重复请求幂等、并发/旧epoch拒绝，提交应答丢失可查询，不重复训练。
-- [ ] 3.3 [Y+M；依赖3.2,1.7] 实现轨迹级admission fence与工具drain；验收X5：active请求为0但tool-wait>0时保留旧路由，超时取消切换而不重放外部副作用。
-- [ ] 3.4 [M；依赖3.3,2.1] 新增端口动词 `RolloutPool.add_engines/remove_engines/drain` 与 `Placement.reconfigure(plan, epoch)` 并在MilesAdapter中基于InferenceController实现，调整active engines、router、health monitor与权重更新成员，先测T4R2S2↔T4R4S0；验收X2：trainer不动、未占用池外资源，不等待故意停用engine，备用卡计入成本。
-- [ ] 3.5 [M+Y；依赖3.4] 新增 `Publisher.publish(policy, members)`；新engine隔离加载、payload/版本ACK后原子提交epoch和路由；验收：旧generation ACK、错误payload、迟到请求都不能污染新配置。
-- [ ] 3.6 [Y；依赖3.5] 接入group/batch/update账本和既有completed-groups/retry进度；验收：重试/部分组/publish失败无重复消费、无静默丢样本。
-- [ ] 3.7 [M+Y；依赖3.2-3.6] 增加绝对deadline/watchdog和release前取消、release后重建旧rollout、commit后恢复；验收：启动/通信/发布失败有界处理，learner/bridge/trainer身份与状态正确。
+- [ ] 3.3 [Y+M；依赖3.2,1.7,3.3b] 实现轨迹级admission fence与工具drain；验收X5：active请求为0但tool-wait>0时保留旧路由，超时取消切换而不重放外部副作用。
+- [ ] 3.3a [M-fork；3.4前置] fork-M2：公开 `InferenceController.start_cells/stop_cells(cell_ids, expected_epoch)` 与 `RayWorkerProvider.start_cells`，替代 TEMPORARY 的 `stop_cell_between_weight_updates`；仅作用于启动时预声明的 cell，epoch 不符拒绝、重复调用幂等。fork 内 membership epoch 只是 yeto 事务 epoch 的镜像：yeto `pool_epoch`/配置 epoch 为唯一权威（journal 中 durable CAS），每次调用传入 yeto 的 expected epoch；learner/controller 重启后先读 journal，再以 `describe` 得到的 fork epoch 对账，不一致则 RECOVERY_REQUIRED，不以 fork 状态覆盖 journal；stop 失败时路由与 epoch 不前进。按现实现（9ba38f6d）：cell 已 deregister 后 stop 失败时，fork epoch 不前进并标记 `incomplete`（`get_membership_status -> {epoch, incomplete}`），其间其他成员变更与成员发布一律报 `MembershipIncompleteError`，只接受对同一 stop 的重试；yeto journal 把该状态记为待重试，重试超出事务绝对 deadline 即转 RECOVERY_REQUIRED，3.7 的失败矩阵覆盖该状态。`start_cells` 返回时 cell 尚未被 server 跟踪，成员发布前须调用 `wait_cells_tracked(cell_ids, timeout_seconds)`；失败的 start 由 worker manager 回滚、成员不变。验收：CPU 单测 + 3.4 X2 GPU 实验。
+- [ ] 3.3b [M-fork；3.3/3.4前置] fork-M3：router 按 worker cordon/uncordon（不删计数、不 dispose）并暴露 in-flight 数，提供 cordon 后等待 in-flight=0 的 drain（超时返回失败、不 abort）；每次注册分配 registration generation（738136c2），旧注册的请求结束不会扣减重新加入的同一 URL 的计数，非 serving 的 cell 视为已排空；验收：CPU 单测；3.3 X5 中 active=0 判定取自该计数，tool-wait 仍由 yeto 计。
+- [ ] 3.4 [M；依赖3.3,2.1,3.3a,3.3b,3.4a] 新增端口动词 `RolloutPool.add_engines/remove_engines/drain` 与 `Placement.reconfigure(plan, epoch)` 并在MilesAdapter中基于InferenceController实现，调整active engines、router、health monitor与权重更新成员，先测T4R2S2↔T4R4S0；验收X2：trainer不动、未占用池外资源，不等待故意停用engine，备用卡计入成本。
+- [ ] 3.4a [Y；3.4前置] 更新 `yeto/rl/engine/ports.py` 预留注释：`Placement.reconfigure` 由 E3 提前到 E1，新增 `RolloutPool.drain(members, deadline)` 与成员限定的 `Publisher.publish(policy, members)`，并加入 `RESERVED_PORT_VERBS`；验收：能力声明只在实现后列出这些动词。
+- [ ] 3.5 [M+Y；依赖3.4,3.5a] 新增 `Publisher.publish(policy, members)`；新engine隔离加载、payload/版本ACK后原子提交epoch和路由；验收：旧generation ACK、错误payload、迟到请求都不能污染新配置。
+- [ ] 3.5a [M-fork；3.5前置] fork-M4：`start_update_weights` 接受显式成员集合与 epoch，`UpdatableEngines` 只含这些成员，`end_update_weights` 只标记这些成员 ready、不更新非成员 weight version；缺省为全体成员。ACK 现状：upstream 仅有 `end_update_weights` 的 cell hash 快照比对与 `update_weight_version` 元数据，**没有 payload 级 ACK**；“payload/版本 ACK 后才进 router”须由 yeto `Publisher` 读回校验补齐（本地分支完成度见其提交说明）。按 fork 现实现（9ba38f6d）新 cell 在 `end_update_weights` 内即进 router，而 `check_weights` 与发布同锁、只能在进 router 之后读回，**达不到 3.5 验收**。补充机制（二选一，由 3.5 实现选定并记入 progress）：(a) 新 cell 以 cordoned 状态加入（复用 M3 cordon），yeto `Publisher` 读回 checksum 与发布清单一致后才 uncordon；(b) fork-M4b：`end_update_weights` 对新成员延迟准入，由显式 `admit_cells(cell_ids, expected_epoch)` 在读回校验通过后注册 router。验收：CPU 单测证明非成员状态不变、校验前新 cell 不接收请求；3.5 GPU 实验中新 engine 仅在其 payload 读回校验通过后进 router（3.5 验收原文不变）。
+- [ ] 3.6 [Y；依赖3.5] 接入group/batch/update账本和既有completed-groups/retry进度；验收：重试/部分组/publish失败无重复消费、无静默丢样本。算法层有意丢弃的样本/组（bounded 动态过滤替换、超采样多余组、overlong 过滤的 `remove_sample`）区分两类：数据游标已推进、本轮不会训练的样本/组记为终态 `filtered`（附原因与机制名），不计为丢失也不计为已消费；超采样或替换留下、可被后续轮复用的余量组记为非终态 `carried_over`（附来源轮次与策略身份），必须在后续轮被消费或转为 `filtered`，cut 与恢复时按未消费组处理；账本记录接在 `miles_adapter/rollout_meta_hook.py::record_trained_groups` 之后，与 `rl-algo-grpo-knobs` 6.3 的过滤标记共用该 hook（alignment.md A2）。
+- [ ] 3.7 [M+Y；依赖3.2-3.6] 增加绝对deadline/watchdog和release前取消、release后重建旧rollout、commit后恢复；验收：启动/通信/发布失败有界处理，learner/bridge/trainer身份与状态正确；失败矩阵包含 3.3a 的 stop 半失败（`incomplete`）状态：重试同一 stop 成功则继续，超出 deadline 转 RECOVERY_REQUIRED。
 - [ ] 3.8 [X；依赖3.7,2.4] 验收手动双向rollout切换与两小岛strict暂停兼容；验收X6：样本/step/policy/roster不变，quorum超时/PULL重发正确，finalization拒绝切换。报告明确仅完成rollout能力。
 
 ## 4. 阶段 E2/E3：完整恢复、trainer DP 与训推角色转移
 
-- [ ] 4.1 [M；依赖1.2,3.1；可与E1并行] 审计完整ReconfigurationCut所需master/moments/scheduler/RNG/data/ref状态及LoRA保存分支；验收：逐项来源明确，与默认no-save/load-optim/rng路径隔离，缺状态拒绝。
+- [ ] 4.1 [M；依赖1.2,3.1；可与E1并行] 审计完整ReconfigurationCut所需master/moments/scheduler/RNG/data/ref状态及LoRA保存分支；验收：逐项来源明确，与默认no-save/load-optim/rng路径隔离，缺状态拒绝。审计同时覆盖算法相关状态（alignment.md A3）：`algorithm_spec_sha256`、插件 PluginRef 哈希与 `yeto_algo_plugins` runtime attrs 哈希、KL loss/reward KL 时的 ref 模型身份（`ref_model.revision`）与 ref 权重来源、动态过滤/超采样的 rollout 侧状态；并核实 Miles 对超采样余量组的 buffer 回收行为（丢弃还是放回 data buffer 供下一轮复用、复用时的策略版本），据此确定 3.6 中 `carried_over` 的实际范围。
 - [ ] 4.1b [Y；依赖4.1，E2开工时] 修改 `docs/MILES_RL.md` 的“不做 controller”一条为：允许岛内yeto侧重配置控制器，仍不做跨岛控制器与通用恢复框架；验收：文档与本change design D1一致，评审通过。
-- [ ] 4.2 [M+Y；依赖4.1,3.6] 新增端口动词 `TrainerGroup.save_cut/restore_cut`，实现完整cut导出/加载、manifest/fsync和算法账本对账；验收：坏checksum、截断、step不一致拒绝，源释放前恢复依据完整。
+- [ ] 4.2 [M+Y；依赖4.1,3.6；LoRA profile另依赖4.2a] 新增端口动词 `TrainerGroup.save_cut/restore_cut`，实现完整cut导出/加载、manifest/fsync和算法账本对账；验收：坏checksum、截断、step不一致拒绝，源释放前恢复依据完整；cut manifest 记录 `algorithm_spec_sha256` 与插件哈希，恢复时与当前运行不一致即拒绝。
+- [ ] 4.2a [M-fork；LoRA profile 的 4.2/4.6前置] fork-M5：LoRA `save/load_lora_checkpoint` 增加可选格式：optimizer state 以参数名为键（DP 不变）并保存/恢复 RNG（DP 变化时的 RNG 策略为显式选项）；缺省格式不变；对 DistributedOptimizer 等不支持配置在参数解析阶段 fail-fast。**需新增 DistributedOptimizer 分片状态的 gather/reshard 实现**（本地分支未实现），完成前 LoRA+DistOpt 的 E3 为 no-go。现实现（10b52a9e）的 `--lora-dp-invariant-state` 在参数解析阶段拒绝：`--use-distributed-optimizer`、`--bf16`/`--fp16`（fp32 main 副本不是模型参数）、CP>1、EP>1；RNG 策略必须显式为 `exact`（逐 rank 恢复，DP 变化即报错）或 `keep_on_dp_change`（DP 不变时恢复，DP 变化时保留新进程的 fresh RNG）。对 E2/E3 的影响：若 1.2 选定的兼容 profile 是 bf16 LoRA（R0 冒烟配置），M5 路径不可用，E2 须在 4.1 中写明替代路径（Megatron `torch_dist` 完整 dist-ckpt + `run_plugin` 显式 RNG，或在 1.2 另选 fp32 主参数的 LoRA profile 作为 E2/E3 profile），二者择一并记录理由，不得静默降级。`keep_on_dp_change` 满足 design D5“可解释种子映射”的方式：cut manifest 记录每个新 rank 的 RNG 来源（恢复 / fresh）及 fresh 种子的推导（Megatron `--seed` 与 rank 偏移），4.6 的数值比较按该映射解释差异；未记录映射则拒绝该边。验收：CPU roundtrip 单测；DistOpt gather 实现后由 4.3 X3 与 4.6 X4 GPU 实验验证。
 - [ ] 4.3 [M；依赖4.2] 新增 `TrainerGroup.rebuild(plan)`；同形trainer子进程重建、fresh groups和完整restore；验收X3：训练2步后重建，对冻结下一batch比较RNG/计数/moments/参数更新，无额外reset。
 - [ ] 4.4 [Y；依赖4.3] `IslandDriver` 替换端口背后的实现（无需rebind）、保留bridge状态并重发正确权重；验收：不重复initialize/after_local_train，外层进度不因重建重放。
 - [ ] 4.5 [X；依赖4.4,3.8] 同形恢复故障矩阵；验收：rank失败、collective超时、迁移中断、controller crash提交不确定均有界恢复或RECOVERY_REQUIRED，不继续不确定的消费。
-- [ ] 4.6 [M；依赖4.5,1.6] DP1↔2重分片spike，固定TP/PP/CP/EP、GBS及算法；验收X4：master/optimizer/RNG/样本映射和下一步数值比较给出go/no-go，不直接加入白名单。
-- [ ] 4.7 [M+Y；依赖4.6通过,2.4] 实现经认证的trainer DP转换及池内角色转移，按资源规模验证P62↔P44或更小等价边；验收：实际GPU从trainer转给rollout及反向，复杂并行维度固定，双向成功/失败恢复、batch语义和epoch都正确。
+- [ ] 4.6 [M；依赖4.5,1.6；LoRA profile另依赖4.2a] DP1↔2重分片spike，固定TP/PP/CP/EP、GBS及算法；验收X4：master/optimizer/RNG/样本映射和下一步数值比较给出go/no-go，不直接加入白名单。go 结论只对实验所用 `algorithm_spec_sha256` 成立；改变 loss 归一化的机制（token 级聚合、Dr.GRPO 常数分母、`--normalize-advantages` 的 DP 组内白化、GSPO/GMPO 序列级量在 CP 下的收集）须在各自 spec 上单独认证，未认证的算法描述请求该边时拒绝（alignment.md A4）。
+- [ ] 4.6a [M-fork；4.7前置，依赖2.1a] fork-M6：`RayWorkerManager` 允许把已停止 cell 重绑到 M1 映射内的另一 bundle；trainer 侧基于 `create_training_models` 在新 bundle 集以新 `actor_num_gpus` 重建 handle 并 dispose 旧 handle，不走 `_refresh_cells`/indep-DP；验收：CPU 单测 + 4.7 角色转移 GPU 实验。
+- [ ] 4.7 [M+Y；依赖4.6通过,2.4,2.1a,4.6a] 实现经认证的trainer DP转换及池内角色转移，按资源规模验证P62↔P44或更小等价边；验收：实际GPU从trainer转给rollout及反向，复杂并行维度固定，双向成功/失败恢复、batch语义和epoch都正确。
 - [ ] 4.8 [X；依赖4.7] 匹配数据预算、多seed的连续固定/同形恢复/变DP学习验证；验收：预声明数值/学习容差、heldout/reward与NaN/发散检查。未通过不开放trainer边；E1仍可独立交付但不得计为trainer完成。
 
 ## 5. 阶段 C：论文机制迁移与实测成本优化
 
-本组先选瓶颈再选做机制，不要求将论文所有机制一并实现；未选机制记录理由，不伪记为已实现。
+本组先选瓶颈再选做机制，不要求将论文所有机制一并实现；未选机制记录理由，不伪记为已实现。5.2–5.5 只执行 5.1 实测选中的瓶颈路径；未选中的子任务记“未选中（5.1 证据路径）”，不视为未完成的阻塞项，也不勾选（见 alignment.md）。
 
 - [ ] 5.1 [X；依赖3.8；trainer边另依赖4.5或4.8] 分析等待安全点、drain/export/init/restore/publish、首step/后台恢复与资源峰值；验收：形成每个source→target的成本分布，确定首先优化的一个瓶颈。
 - [ ] 5.2 [M；依赖5.1选择host路径] 验证bounded host staging/分块的完整状态载体和生命周期，预算分开backing/pinned/object-store/scratch；验收X7：源释放时manifest全覆盖、无唯一状态丢失、内存受限时持久路径可恢复。
@@ -64,6 +71,8 @@
 
 ## 6. 阶段 D1/D2：半自动、自动与验收
 
+边界：D1 = 6.1–6.3（shadow 归因、建议、人工触发前重验）；D2 = 6.4–6.7（默认关闭的自动模式、模式切换、四场景对比与综合验收）。D2 只有在 D1 验收通过且存在至少一条实测净收益边后才开工；若 2.4/5.7 得出“尚无净收益边”的合法否定结论，D2 按 6.4 原文不开工，系统保持 manual/recommend。
+
 - [ ] 6.1 [Y；依赖1.7,2.4,5.7] 实现shadow负载归因与收益预测，分别对应串行或已认证重叠时间线；验收X8：工具等待/长尾/发布阻塞可区分，不统一套max(R,T)，无净收益边保持当前配置。
 - [ ] 6.2 [Y；依赖6.1] 增加半自动建议：source/target、expected_epoch、profile hash、收益/成本区间、有效期与拒绝原因；验收：建议不自行执行，人工触发进入与手动相同事务。
 - [ ] 6.3 [Y+M；依赖6.2] 执行前重验建议有效期、epoch、profile、负载与pause guard；验收：批准过期或条件变化的建议明确拒绝，不静默续批或替换目标。
@@ -73,6 +82,8 @@
 - [ ] 6.7 [X；依赖6.6] 综合故障、学习行为与部署回退验收；验收：sample/step/policy/roster正确或fail closed，学习符合预设标准，更新capability matrix/fork bundle/手册；未通过收益门槛保持manual/recommend。
 
 ## 7. 阶段 F：云资源池与岛间扩展设计
+
+本轮范围（出处：用户 2026-09-29 无人值守轮指示：F 只做单岛 7.1/7.2 设计，7.3 跨岛分配、多云、DiLoCo 成员变更留待以后，只写后续占位）：7.1、7.2 交付设计文档（不实现、不做实际云扩缩）；7.3 本轮只在 design “D12. 岛间扩展（后续占位）”写占位段，**范围延后，待用户审阅**，保持未勾选（见 alignment.md）。
 
 - [ ] 7.1 [Y；依赖1.5,3.8] 设计IslandStatus/pool epoch及未来pause-budget/veto，包含资源需求、safe point、outer phase、预计暂停/恢复；验收：运行/切换/失败状态完整，读取状态不触发云扩缩。
 - [ ] 7.2 [X；依赖7.1] 设计运行中扩池/缩池的云就绪→资源认证→pool提交/排空→释放顺序；验收：区分云供给慢路径与岛内快路径，worker增减不等于DiLoCo成员变化，记录成本与回退边界，不在本轮实现。

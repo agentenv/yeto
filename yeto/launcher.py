@@ -911,6 +911,8 @@ def _prepare_rl_args(
         raise ValueError(
             "RL --dynamic-sampling-max-replacements must be non-negative"
         )
+    if not args.inner_lr > 0:
+        raise ValueError(f"RL requires --inner-lr > 0 (got {args.inner_lr})")
     if args.rl_sync_preset == "strict-avg":
         if args.local_rl_rounds_per_sync != 1:
             raise ValueError("RL v0 requires --local-rl-rounds-per-sync 1")

@@ -711,3 +711,95 @@ def test_decoupled_run_until_stop_against_fake_syncer(tmp_path):
         e["phase"] for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_driver_phase"
     ]
     assert "drain_bcast" in phases and "drain_pull" in phases
+
+
+# ---------------------------------------------------------------------------
+# fix-decoupled-lr-schedule 2.1: zero learning rate before the final round
+# ---------------------------------------------------------------------------
+def test_zero_lr_non_final_round_fails_without_commit(tmp_path):
+    engine = _engine(zero_lr_rounds={1})
+    with pytest.raises(StrictRlInvariantError, match="local round 2") as info:
+        _driver(engine, LocalOnlySync(3), tmp_path).run()
+    assert info.value.metric == "zero_lr_before_final_round"
+    assert "learning rate 0.0" in str(info.value)
+    assert [c for c in engine.calls if c[0] == "publish"] == [("publish", 0), ("publish", 1)]
+    events = _events(tmp_path / "events.jsonl")
+    assert [e["metric"] for e in events if e["event"] == "rl_strict_failure"] == [
+        "zero_lr_before_final_round"
+    ]
+    rounds = [e for e in events if e["event"] == "rl_local_round"]
+    assert len(rounds) == 1  # round 2 was never handed to the sync session
+    assert rounds[0]["applied_lr"] == 1e-5 and rounds[0]["applied_lrs"] == [1e-5]
+
+
+def test_zero_lr_on_the_last_local_round_is_not_a_failure(tmp_path):
+    engine = _engine(zero_lr_rounds={2})
+    final = _driver(engine, LocalOnlySync(3), tmp_path).run()
+    assert final.policy_version == 3
+    rounds = [e for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_local_round"]
+    assert [r["applied_lr"] for r in rounds] == [1e-5, 1e-5, 0.0]
+
+
+def test_strict_zero_lr_before_last_round_pushes_nothing(tmp_path):
+    engine = _engine(torch.tensor([1.0, 3.0]), zero_lr_rounds={1})
+    syncer = _strict_syncer(engine, learners=1, rounds=3)
+    driver = _strict_driver(tmp_path, engine, syncer, learner_id=0, rounds=3)
+    with pytest.raises(StrictRlInvariantError, match="local round 2") as info:
+        driver.run()
+    assert info.value.metric == "zero_lr_before_final_round"
+    assert syncer.history == [0, 1]  # round 2 never reached the syncer
+
+
+def test_strict_last_round_with_zero_lr_is_not_a_failure(tmp_path):
+    # Strict final round: local_round_id == global_rounds.
+    engine = _engine(torch.tensor([1.0, 3.0]), zero_lr_rounds={2})
+    syncer = _strict_syncer(engine, learners=1, rounds=3)
+    driver = _strict_driver(tmp_path, engine, syncer, learner_id=0, rounds=3)
+    assert driver.run().policy_version == 3
+    assert syncer.history == [0, 1, 2, 3]
+
+
+def test_decoupled_zero_lr_before_final_cut_fails(tmp_path):
+    args = _dargs(tmp_path)
+    engine = _dengine(zero_lr_rounds={2})
+    initial = engine.canonical(0)
+    syncer = FakeDecoupledSyncer(
+        build_rl_fragment_layout(initial.specs, 2), initial.tensors,
+        learners=1, total_steps=4, pipeline=2,
+    )
+    sync = DecoupledSync(args, client_factory=lambda _bridge: syncer.client(0))
+    driver = _driver(
+        engine, sync, tmp_path, progress=DecoupledIslandProgress(args), max_rollouts=20
+    )
+    with pytest.raises(StrictRlInvariantError, match="local round 3") as info:
+        driver.run()
+    assert info.value.metric == "zero_lr_before_final_round"
+    assert syncer.final_manifest is None
+
+
+def test_decoupled_final_round_is_defined_by_the_final_cut(tmp_path):
+    args = _dargs(tmp_path)
+    sync = DecoupledSync(args)
+    sync.bridge = SimpleNamespace(finalizing=False)
+    assert not sync.is_final_round(None, rollout_id=0)
+    assert not sync.is_final_round(None, rollout_id=50)  # never by round count
+    sync.bridge = SimpleNamespace(finalizing=True)  # final cut announced
+    assert sync.is_final_round(None, rollout_id=0)
+    sync.bridge = SimpleNamespace(finalizing=False)
+    args.yeto_rl_learner_budget_steps = 3
+    sync.optimizer_steps = 1
+    assert not sync.is_final_round(None, rollout_id=1)
+    sync.optimizer_steps = 2
+    assert sync.is_final_round(None, rollout_id=2)  # this round exhausts the budget
+
+
+def test_decoupled_zero_lr_after_the_final_cut_is_announced_is_not_a_failure(tmp_path):
+    engine = _engine(zero_lr_rounds={1})
+
+    class Finalizing(LocalOnlySync):
+        # decoupled semantics: rounds after the syncer announced the final cut
+        def is_final_round(self, driver, *, rollout_id):
+            return rollout_id >= 1
+
+    final = _driver(engine, Finalizing(2), tmp_path).run()
+    assert final.policy_version == 2

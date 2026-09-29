@@ -1,0 +1,30 @@
+SBX sb-gnfpP1ufBBRSCQNBYKVU6b
+Traceback (most recent call last):
+  File "/tmp/lrfix/ctl/sbx.py", line 43, in <module>
+    p = sb.exec("bash", "-lc", sys.argv[3], timeout=int(os.environ.get("T", "3000")))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/modal-venv/lib/python3.12/site-packages/modal/sandbox.py", line 2130, in exec
+    return await self._exec(
+           ^^^^^^^^^^^^^^^^^
+  File "/tmp/modal-venv/lib/python3.12/site-packages/modal/sandbox.py", line 2173, in _exec
+    task_id = await self._get_task_id(raise_if_task_complete=True)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/modal-venv/lib/python3.12/site-packages/modal/sandbox.py", line 1988, in _get_task_id
+    raise ConflictError(msg)
+modal.exception.ConflictError: Sandbox was cancelled by user
+Traceback (most recent call last):
+  File "/tmp/lrfix/ctl/sbx.py", line 43, in <module>
+    p = sb.exec("bash", "-lc", sys.argv[3], timeout=int(os.environ.get("T", "3000")))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/modal-venv/lib/python3.12/site-packages/modal/sandbox.py", line 2130, in exec
+    return await self._exec(
+           ^^^^^^^^^^^^^^^^^
+  File "/tmp/modal-venv/lib/python3.12/site-packages/modal/sandbox.py", line 2173, in _exec
+    task_id = await self._get_task_id(raise_if_task_complete=True)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/modal-venv/lib/python3.12/site-packages/modal/sandbox.py", line 1988, in _get_task_id
+    raise ConflictError(msg)
+modal.exception.ConflictError: Sandbox was cancelled by user
+TRAP
+terminated
+DOWN

@@ -37,6 +37,7 @@ _PLUGIN_MODULE = "yeto.rl.engine.miles_adapter.state_plugin"
 EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
 APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
 GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
+APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
 
 
 class StatePluginError(RuntimeError):
@@ -449,6 +450,10 @@ def _apply_state(
 # ``get_grad_norm`` recomputes over already-consumed buffers (observed 0.0 on
 # GPU while Miles logged a non-zero ``train/grad_norm``).
 _STEP_GRAD_NORMS: list[float] = []
+# LR each optimizer step applies, read on entry to ``train_one_step`` (before
+# ``optimizer.step()`` and the scheduler step that follows it); upstream logs
+# only the post-step LR (fix-decoupled-lr-schedule D4).
+_STEP_APPLIED_LRS: list[float] = []
 _RECORDER_INSTALLED = False
 
 
@@ -471,6 +476,7 @@ def install_grad_norm_recorder() -> bool:
         return False
 
     def train_one_step(*args: Any, **kwargs: Any):
+        _record_applied_lr(original, args, kwargs)
         _arm_grad_audit(original, args, kwargs)
         result = original(*args, **kwargs)
         try:
@@ -483,6 +489,28 @@ def install_grad_norm_recorder() -> bool:
     megatron_model.train_one_step = train_one_step
     _RECORDER_INSTALLED = True
     return True
+
+
+def _record_applied_lr(original: Any, args: tuple, kwargs: dict) -> float | None:
+    import inspect
+
+    from yeto.rl.applied_lr import optimizer_lr
+
+    optimizer = inspect.signature(original).bind_partial(*args, **kwargs).arguments.get("optimizer")
+    if optimizer is None:
+        return None
+    lr = optimizer_lr(optimizer)
+    _STEP_APPLIED_LRS.append(lr)
+    return lr
+
+
+def applied_lrs(actor: Any) -> list[float]:
+    """LRs applied by the optimizer steps since the last call (then cleared)."""
+
+    del actor
+    values = list(_STEP_APPLIED_LRS)
+    _STEP_APPLIED_LRS.clear()
+    return values
 
 
 def _arm_grad_audit(original: Any, args: tuple, kwargs: dict) -> bool:
