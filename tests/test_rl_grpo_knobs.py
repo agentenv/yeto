@@ -895,3 +895,14 @@ def test_two_islands_record_their_own_trained_counts(tmp_path):
     g0 = {kept[(0, r)] for r in (0, 1) if (0, r) in kept}
     g1 = {kept[(1, r)] for r in (0, 1) if (1, r) in kept}
     assert g0 != g1  # the islands differ and each records its own
+
+
+def test_fake_engine_declares_the_1b_mechanisms():
+    from yeto.rl.engine.fake import fake_capabilities
+
+    caps = fake_capabilities()
+    if not EXPECTED_1B_DECLARED["features"] <= set(caps.features):
+        pytest.skip("needs infra-drafts/1b-fake-declare.patch (fake.py is ALGO-CAP's)")
+    for dim, names in EXPECTED_1B_DECLARED.items():
+        assert names <= set(getattr(caps, dim)), dim
+    assert "dual_clip" not in caps.features

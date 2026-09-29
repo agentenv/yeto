@@ -2,7 +2,52 @@
 
 对齐结论、依赖矩阵、工作包与待批准事项见 [`../rl-infra-spec/alignment.md`](../rl-infra-spec/alignment.md)（以 `rl-infra-spec` 分支为准）。
 
-## 2026-09-29 第四轮（触发实验与隔离对照）——以本节为准
+## 最终汇总（以本节为准）
+
+### 能力声明（8.3）：以 GPU 上"确实生效"为准
+声明位于集成分支 integ-decl 的 `MILES_DECLARED`（5f56ff9）。`grpo_knobs.G1_DECLARED` 与其中 1b 的部分完全一致，测试 `test_declared_table_matches_final_declaration` 用相等断言核对。
+
+| 机制 | 声明 | 证据及其性质 |
+|---|---|---|
+| loss_aggregations:constant（仅 Dr.GRPO reducer，P0 register_named_reducer） | 是 | g1 attempt2 drgrpo |
+| kl_placements:loss + kl_loss_ref_model | 是 | g1 attempt2 kl_k3：kl_loss 0/0.00079/0.00082，峰值 38184 MiB |
+| entropy_bonus | 是 | g1 attempt2：entropy_loss 0.30/0.38/0.45 |
+| overlong_penalty + custom_reward_postprocess | 是 | g1 attempt2：rl_reward_shaping，塑形后奖励低于原始 |
+| eps_clip | 是 | g1b A-r1：第 2 步 clipfrac 约 0.105–0.111。只能证明裁剪窗口生效 |
+| no_grpo_std_normalization | 是 | g1c 配对：第 1 步 grad_norm 0.2428 对 0.6349 |
+| loss_aggregations:token | 是（钉 Miles 0af62f4d） | g1f 配对：第 1 步 grad_norm 0.4310 对 0.4867。修复前（g1c）逐位相同，根因是 LoRA bridge 没有设置 calculate_per_token_loss，且 mbs=1 |
+| over_sampling | 是（钉 0af62f4d） | g1h：预登记判据字面满足但区分力弱；决定性证据是对 rollout 1 的事后推断（submitted 8，filtered 0），只有一轮，见 g1h results.md |
+| overlong_filter | 是（钉 0af62f4d） | g1i：filtered_samples 16/16/31；过滤关闭时为 None；第 1 步 grad_norm 0.5647 对 0.6329 |
+| clip_higher | 是（钉 0af62f4d） | 证据性质：g1e 的事后观察（第 2 步 grad_norm 已不同，但当时的判据是 clipfrac），加上 g1j 在同一 seed 17 下的确定性复现（前两步与 g1e 逐位相同），g1j 第 3 步 grad_norm 0.5642 对 0.6572 满足预登记判据。g1j 跑在 Miles 0394715 上，靠代码 diff（clip 路径未变）迁移到 0af62f4d |
+| dual_clip | 否 | Miles 没有 dual 分支的指标，无法证明生效 |
+
+- fake engine 同步：fake.py 归 ALGO-CAP，补丁在 `infra-drafts/1b-fake-declare.patch`，让 fake_capabilities 合并 G1_DECLARED。打上后 P0 的 `test_miles_and_fake_declarations` 与 `test_estimator_mandated_settings_are_claimed_by_the_estimator` 需要按新的声明集合更新（它们断言的是精确的 fake 集合）。本分支的 `test_fake_engine_declares_the_1b_mechanisms` 在补丁合入前 skip。
+- 8.3 勾选依据：G1 通过的机制都已按机制逐项声明（每项独立的证据与提交，见 integ-decl 的 MILES_DECLARED 注释）；`check()` 单测接受已声明项、拒绝 dual_clip；fake 的同步以补丁形式交付。
+
+### 口径说明
+- `rl_round_trained.trained_samples` 统计的是进入训练的组中的全部样本，**包括被 overlong_filter 屏蔽的样本**。例如 g1i 的 of_on 中被过滤 16/16/31 条，trained_samples 仍记为 32。被屏蔽的数量另见 `filtered_samples`。
+- 事件磁带中 `rl_local_round.clip_fraction` 为 null，clipfrac 取自训练日志中的 `train/pg_clipfrac`。
+
+### g1c–g1j 卡时与费用（估算，未核账单；sandbox 按 H100 加 16 CPU / 128 GiB 约 $5.5/h 计，launcher 岛按约 $4.5/h 计）
+| 运行 | 起止（UTC） | 时长 | 估算费用 |
+|---|---|---|---|
+| g1c 第 1 次（setup 失败） | —（几分钟） | <0.1 h | <$0.5 |
+| g1c 第 2 次 | 20:10:13–20:32:08 | 0.37 h | ~$2.0 |
+| g1d | 20:37:45–20:55:42 | 0.30 h | ~$1.6 |
+| g1e | 20:56:01–21:10:41 | 0.24 h | ~$1.3 |
+| g1f 第 1 次（镜像构建失败，未训练） | 约 21:13 | 约 0 | ~$0 |
+| g1f baseline / token | 21:15:34–21:23:20 / 21:23:20–21:32:36 | 0.13 h + 0.15 h | ~$1.3 |
+| g1g | 21:32:42–21:56:26 | 0.40 h | ~$2.2 |
+| g1h | 21:56:54–22:20:12 | 0.39 h | ~$2.1 |
+| g1i | 22:20:29–22:35:35 | 0.25 h | ~$1.4 |
+| g1j 第 1 次（训练前失败） | 约 22:30 前后，数分钟 | <0.1 h | <$0.5 |
+| g1j 第 2 次 | 22:39:27–22:54:28 | 0.25 h | ~$1.4 |
+
+回收证明：
+- g1c–g1j 每次运行都有 `out/teardown.log`（sandbox terminated）。**运行当时没有单独留存 modal app list**，依据 teardown.log，并在之后执行了 `modal app stop`。
+- 事后留存的汇总列表在 `evidence/teardown_proof_final.txt`，所有 algo1b 前缀的 app 均为 stopped。
+
+## 2026-09-29 第四轮（触发实验与隔离对照）——已被"最终汇总"一节取代
 
 | 机制 | 结论 | 证据 |
 |---|---|---|
@@ -19,7 +64,7 @@
 - 全量测试相对基线多出 4 个失败 id，都属于 2a 的 test_rl_seq_adv：3 个是示例 spec 的哈希因 reward_pipeline 改动而过期（需 2a 重新生成），另 1 个 declares_none 是跨分支冲突。
 - 费用（估算，未核账单）：g1b 共约 1.3 小时 H100，其中 A 第 2 次约 1 小时，A-5、A-r1、C 各约 10 分钟；g1c 约 25 分钟。所有 app 与 sandbox 都已停止。
 
-## 2026-09-29 第三轮（G1 与声明，Agent ALGO-1b）——以本节为准
+## 2026-09-29 第三轮（G1 与声明，Agent ALGO-1b）——已被"最终汇总"一节取代
 
 ### G1 第 2 次尝试逐项结果
 证据：`evidence/2026-09-29-algo1b-g1/`，包括 plan.md、`g1_report.json`（原始判定）和 `g1_report_v2.json`（按审查决定把 SGLang freeze_gc 良性链式异常列入白名单后的判定）。所有 run 都用 Modal sandbox，1 张 H100，单岛、no-sync，每个 3 轮。
