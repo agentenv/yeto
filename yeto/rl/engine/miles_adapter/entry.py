@@ -45,6 +45,7 @@ _E1A = "openspec/changes/rl-algo-mismatch-correction/evidence"
 _E1B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
 _E1B_B = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1b"
 _E1B_C = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1c"
+_E1B_G1F = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1f"
 _E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
 MILES_DECLARED: dict[str, str] = {
     "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
@@ -78,17 +79,43 @@ MILES_DECLARED: dict[str, str] = {
     "corrections:mis_mask": f"{_E1A}/2026-09-29-trigger mis-mask token [0.99,1.01] (mask fraction 0.192/0.225/0.267)",
     "features:eps_clip": f"{_E1B_B}/plan.md run A-r1 (eps_clip 0.001 / eps_clip_high 0.002, test values to trigger the clip, not recommendations): step-2 pg_clipfrac 0.1046/0.1107/0.1046",
     "features:no_grpo_std_normalization": f"{_E1B_C}/g1c_report.json no_std (isolated paired step 1: grad_norm 0.2428 vs baseline 0.6349; effective, paired_valid; analyze.py 12b592f)",
+    "loss_aggregations:token": (
+        f"{_E1B_G1F} (branch algo-1b-token 604078e..9f6f8a6, YETO_SHA 8d30ad2): paired "
+        "step 1 (raw_reward 0.90625 both) grad_norm 0.4310 vs baseline 0.4867; ONLY on "
+        "Miles 0af62f4d+ (LoRA bridge sets calculate_per_token_loss); image "
+        "sha256:c6f5455c... inferred from the pin and verified from source by the main "
+        "agent (launch.log printed no digest)"
+    ),
 }
 
 
-def declared_by_dimension() -> dict[str, set[str]]:
-    """R0 mechanism sets plus :data:`MILES_DECLARED`, per dimension."""
+# Declarations whose evidence holds only for specific Miles pins (exact
+# commits; a new pin must be re-verified before it is added here).
+MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
+    # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
+    # grad_norm bit-identical to the baseline)
+    "loss_aggregations:token": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+}
+
+
+def declared_by_dimension(miles_commit: str | None = None) -> dict[str, set[str]]:
+    """R0 mechanism sets plus :data:`MILES_DECLARED`, per dimension.
+
+    An entry of :data:`MILES_DECLARED_PINS` is declared only when the Miles
+    pin (``miles_commit``, default ``yeto.rl.MILES_NEXT_COMMIT``) is one of
+    its verified commits.
+    """
 
     from ..capabilities import R0_MECHANISMS
 
+    if miles_commit is None:
+        from yeto.rl import MILES_NEXT_COMMIT as miles_commit
     out = {dim: set(names) for dim, names in R0_MECHANISMS.items()}
     out["advantage_estimators"] = {"grpo"}
     for mechanism in MILES_DECLARED:
+        pins = MILES_DECLARED_PINS.get(mechanism)
+        if pins is not None and miles_commit not in pins:
+            continue
         dimension, name = mechanism.split(":", 1)
         out.setdefault(dimension, set()).add(name)
     return out

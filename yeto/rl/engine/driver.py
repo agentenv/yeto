@@ -45,6 +45,7 @@ tape is identical to the R0 driver's.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 import math
 import time
 from collections.abc import Callable, Mapping
@@ -251,7 +252,7 @@ def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
     return {
         "active_groups": float(len(batch.groups)),
         "cancelled_groups": float(batch.aborted),
-        "tool_wait_seconds": 0.0,
+        "tool_wait_seconds": float(getattr(batch, "tool_wait_seconds", None) or 0.0),
         "group_p50_seconds": 0.0,
         "group_p95_seconds": 0.0,
         "group_p99_seconds": 0.0,
@@ -585,7 +586,8 @@ class IslandDriver:
                 f"generation of rollout {rollout_id}",
             )
         self.phase("generate", rollout_id=rollout_id, policy_version=rollout_id)
-        batch = self.rollout.generate(rollout_id)
+        with self._load_sampler(rollout_id):
+            batch = self.rollout.generate(rollout_id)
         if batch.rollout_id != rollout_id or batch.policy_version != rollout_id:
             raise PolicyIdentityError(
                 f"rollout pool returned rollout {batch.rollout_id} "
@@ -667,7 +669,7 @@ class IslandDriver:
             cancelled_groups=int(batch.aborted),
             completed_trajectories=sum(len(g.sample_ids) for g in batch.groups),
             action_tokens=sum(int(g.token_count) for g in batch.groups),
-            tool_wait_seconds=0.0,
+            tool_wait_seconds=float(getattr(batch, "tool_wait_seconds", None) or 0.0),
             group_p50_seconds=0.0,
             group_p95_seconds=0.0,
             group_p99_seconds=0.0,
@@ -697,6 +699,34 @@ class IslandDriver:
         if not values:
             return {}
         return {"mismatch": values, **{f"label/{k}": v for k, v in self._labels().items()}}
+
+    load_sample_interval_s = 5.0
+
+    @contextmanager
+    def _load_sampler(self, rollout_id: int):
+        """1.7 (observe only): sample engine in-flight counts while generating."""
+        probe = getattr(self.rollout, "load_sample", None)
+        if not self.observe or not callable(probe):
+            yield
+            return
+        import threading
+
+        stop = threading.Event()
+
+        def loop() -> None:
+            while not stop.wait(self.load_sample_interval_s):
+                sample = probe()
+                if sample is not None:
+                    self.emit("rl_load_sample", rollout_id=rollout_id, **sample,
+                              profile_hash=self.profile_hash, epoch=self.config_epoch)
+
+        thread = threading.Thread(target=loop, name="yeto-load-sampler", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=self.load_sample_interval_s + 5)
 
     def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
         """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
@@ -787,7 +817,7 @@ class IslandDriver:
             # (= groups not trained), not Miles' actual resample count.
             **(
                 {"dynamic_filter_source": {
-                    "generated_groups": "all_samples_hook",
+                    "generated_groups": "all_samples_hook_completed_groups",
                     "dropped_groups": "all_samples_hook_not_trained",
                     "replacement_attempts": "proxy_filtered",
                 }}
@@ -799,6 +829,9 @@ class IslandDriver:
             # groups masked by a spec-selected sample filter (1b D7); None when
             # no sample filter is configured.
             filtered_samples=_filtered_samples(batch),
+            tool_wait_seconds=getattr(batch, "tool_wait_seconds", None),
+            submitted_groups=getattr(batch, "submitted_groups", None),
+            aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)

@@ -253,10 +253,22 @@ def handle_from_metadata(
         # leftovers are not tracked until 3.6/4.1 audit the Miles buffer.
         filtered=int(payload["filtered"]) if "filtered" in payload else None,
         carried_over=None,
+        submitted_groups=payload.get("submitted_groups"),
+        aborted_in_flight_groups=payload.get("aborted_in_flight_groups"),
+        tool_wait_seconds=(
+            float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
+        ),
         nonzero_advantages=(
             int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
         ),
     )
+
+
+def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
+    import urllib.request
+
+    with urllib.request.urlopen(url, timeout=timeout_s) as response:  # noqa: S310 - router URL
+        return json.loads(response.read().decode("utf-8"))
 
 
 class MilesRolloutPool:
@@ -299,6 +311,31 @@ class MilesRolloutPool:
         except BaseException:
             _release(data_pack)
             raise
+
+    def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, int] | None:
+        """rl-infra-spec 1.7: engine in-flight counts from the fork-M3 router.
+
+        ``GET /worker_inflight`` -> ``{"inflight": {worker_url: n}, "cordoned": [...]}``.
+        None when the router address is unknown or the router lacks the
+        endpoint (stock Miles without M3): unknown, never reported as 0.
+        """
+        args = self._args
+        ip = getattr(args, "sglang_router_ip", None)
+        port = getattr(args, "sglang_router_port", None)
+        if not ip or not port:
+            return None
+        try:
+            data = (http_get or _http_get_json)(f"http://{ip}:{port}/worker_inflight")
+        except Exception:  # noqa: BLE001 - observation only; absent endpoint = unknown
+            return None
+        inflight = data.get("inflight") if isinstance(data, dict) else None
+        if not isinstance(inflight, dict):
+            return None
+        return {
+            "active_requests": int(sum(int(v) for v in inflight.values())),
+            "workers": len(inflight),
+            "cordoned": len(data.get("cordoned") or ()),
+        }
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""

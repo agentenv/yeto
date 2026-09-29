@@ -256,3 +256,23 @@ def test_old_same_name_row_still_running_also_blocks(monkeypatch, tmp_path):
         app, ("ap-old", "deployed", 2, "2020-01-01T00:00:00+00:00"),
         ("ap-new", "stopped", 0, "2999-01-01T00:00:00+00:00")))
     assert code == 5 and rec["confirmed_stopped"] is False
+
+
+def test_run_manifest_records_image_and_pins(monkeypatch, tmp_path, capsys):
+    import json as _json
+
+    import yeto.rl as rl
+    from yeto import runs
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing={0}, clock=clock, record=record)
+    args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync"),
+                          gpu="modal:1xa100")
+    args.keep, args.recover_timeout = False, 0.0
+    launcher.run(args)
+    manifest = _json.loads((runs.run_dir(args.cluster_prefix) / "run_manifest.json").read_text())
+    assert manifest["rl_image"] == rl.MILES_NEXT_IMAGE  # the ports default, no override
+    assert manifest["miles_commit"] == rl.MILES_NEXT_COMMIT
+    assert manifest["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
+    out = capsys.readouterr().out
+    assert f"image {rl.MILES_NEXT_IMAGE}" in out and rl.MILES_NEXT_COMMIT in out

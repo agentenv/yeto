@@ -14,3 +14,8 @@
 - dos1（67fcac7）：DP=2 / DistOpt 下初始导出与发布成功（这正是 2.4 第一次运行失败的位置），条件 2 满足；但首次训练在 trainer 侧失败：`TrainStepError: expected one train output from the single-cell group, got 2`。原因是 `TrainerController.train` 按 worker 返回输出（一个 cell 含 2 个 worker），trainer 却按"一个输出"校验，这是 R0 在 DP=1 下未暴露的假设。修复：期望输出数 = 单 cell 的 worker 数，单 cell 不变量仍在启动时校验。
 - launcher 在 island 失败后没有退出（与 2.4 T2R2 那次相同），由 `stop_arm.sh` 手动回收：app 已 stopped、0 tasks，本机 syncer 与 watchdog 已结束。
 - 修复提交后按同一计划重跑（dos2）。
+
+## attempt2 结果（dos2，8f2c801）：通过
+- 3×H100! 断言通过；日志中 `data_parallel_size == 2`、`use_distributed_optimizer == True`。
+- SUCCEEDED；无 `StatePluginError`、无 `rl_strict_failure`；两轮都有 `rl_round_trained`；policy_version 0/1/2 的 publication token 均与 apply 哈希一致（导出 → 应用 → 发布闭环）。
+- app ap-DyEmrYXxZ77dV8kGl7WgzH 已 stopped、0 tasks；约 13 分钟 × 3 H100。
