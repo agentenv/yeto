@@ -206,11 +206,6 @@ def test_sample_filter_counts_reach_the_round_event(tmp_path):
     import dataclasses
     import json
 
-
-def test_router_inflight_probe_and_driver_sampler(tmp_path):
-    import json
-    import time as _time
-
     import torch
 
     from yeto.rl.engine.algorithm import AlgorithmSpec
@@ -238,6 +233,15 @@ def test_router_inflight_probe_and_driver_sampler(tmp_path):
     assert ev["filtered_samples"] == sum(range(engine.groups))
 
 
+def test_router_inflight_probe_and_driver_sampler(tmp_path):
+    import json
+    import time as _time
+
+    import torch
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.rl.engine.execution_profile import ExecutionProfile
     from yeto.rl.engine.fake import FakeEngine, fake_capabilities
     from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
