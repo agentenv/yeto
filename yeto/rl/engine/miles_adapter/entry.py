@@ -75,11 +75,6 @@ def miles_capabilities(
         # reward_postprocessors:custom_reward_postprocess is declared (1b G1).
         features=set(R0_MECHANISMS["features"]) | {"maxrl", "mapo"},
     )
-    # rl-algo-grpo-knobs 8.3: mechanisms whose G1 showed them taking effect
-    # (yeto.rl.algos.grpo_knobs.G1_DECLARED, one entry per G1 run).
-    from yeto.rl.algos.grpo_knobs import merge_declared
-
-    capabilities = merge_declared(capabilities)
     if unverified_mechanisms:
         capabilities = capabilities.with_unverified(unverified_mechanisms)
     return capabilities
