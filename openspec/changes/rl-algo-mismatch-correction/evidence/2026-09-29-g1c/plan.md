@@ -83,3 +83,15 @@ committed diagnosis.
   (runs/tis/app_list_check.txt). GPU time: seconds at most (container start only).
 - Not bypassed and not retried: the fix belongs to P0 (ALGO-CAP, launcher `--rl-single-island-no-sync`
   + FleetController). icepop and opsm-trainer not started. After the fix, run this plan unchanged.
+
+## Amendment before attempt 5 (after merging origin/algo-cap 6d53fc3 FleetController fix + 319d974 dry-run)
+- YETO_SHA moves to the merge commit that contains the fix (recorded in YETO_SHA before launch);
+  mechanism code is unchanged.
+- The command already uses `--controller local` (unchanged).
+- Criterion 1 reading, declared before the run: the launcher's exit code 2 is accepted only
+  together with its documented message that the Modal island's ~/yeto-output cannot be fetched
+  back. Any other non-zero exit fails. Events come from the tape pulled out of the running container
+  (/root/yeto-output/rl-island-0.jsonl, every 20 s) and Miles steps from the streamed launch log. If
+  the final tape pull misses events, the round-count criteria fail; they are not relaxed.
+- Runs in order tis, icepop, opsm-trainer, one at a time, started only after G3 has finished and
+  with the per-user thread count at most 3296 (>= 800 free of 4096).
