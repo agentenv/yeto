@@ -70,7 +70,8 @@
 
 > 本组的 G1（1 卡冒烟）统一使用 P0 提供的 `--rl-allow-unverified-mechanism <机制名>` 放行（见 `rl-algorithm-capabilities` design D11），只在单岛运行中生效；G1 通过后再在 adapter 中正式声明支持；两岛 G3 只用正式声明，不带放行参数。
 
-- [ ] 7.1 准备：复用 R0 冒烟小模型与 harness，证据目录 `openspec/changes/rl-algo-mismatch-correction/evidence/<日期>-<名称>/`，含 `YETO_SHA`、argv、事件与指标 jsonl。Modal 使用 `H100!:N` 并在启动时断言 GPU 名；日志与证据中不打印凭据。验证：dry-run 输出的资源请求为 1 卡；凭据扫描（grep token/key 模式）无命中。
+- [x] 7.1 准备：复用 R0 冒烟小模型与 harness，证据目录 `openspec/changes/rl-algo-mismatch-correction/evidence/<日期>-<名称>/`，含 `YETO_SHA`、argv、事件与指标 jsonl。Modal 使用 `H100!:N` 并在启动时断言 GPU 名；日志与证据中不打印凭据。验证：dry-run 输出的资源请求为 1 卡；凭据扫描（grep token/key 模式）无命中。
+  - 补做完成（已实现）：`yeto launch --rl-single-island-no-sync --controller local --dry-run`（algo-cap 319d974）的输出为 `total_gpus: 1`、`islands: 1`、`syncer: null`、`outer_sync: false`，并列出 unverified_mechanisms，见 `evidence/2026-09-29-dryrun/dryrun.log`（凭据扫描无命中）。
   - 复审撤销勾选（未完成）：原文要求 launcher dry-run 输出资源请求为 1 卡，但当前 `yeto launch` 没有 `--dry-run` 选项（`launch --help` 中无此项），无法按原文补做；已作为接口需求上报。
   - 完成记录（已实现）：计划与 harness 见 `evidence/2026-09-29-g1/plan.md` 和 `evidence/2026-09-29-g1b/plan.md`；Modal `H100!`×1，启动前断言 GPU 名称（`runs/gpu_name.txt`）；凭据扫描无命中。注：资源请求是 sandbox 的 `gpu="H100!"`，没有经过 launcher 的 dry-run。
 - [x] 7.2 G1（1 卡）：只观测、TIS、IcePop、OPSM(trainer)、MIS 各 2–3 轮；OPSM(rollout) 可选。验证：每项指标键存在且有限、不变量无误报、policy token 与 receipt 正常；结果逐项写入 `progress.md`。
