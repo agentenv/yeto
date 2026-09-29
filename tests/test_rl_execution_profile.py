@@ -131,3 +131,61 @@ def test_profile_from_manifest_is_stable_and_rejects_floor_division():
     assert p.execution_mode == "partitioned-serial" and p.batch_samples == 48
     with pytest.raises(ProfileError, match="floor division"):
         _profile(groups_per_batch=3, samples_per_group=3, optimizer_steps_per_round=2)
+
+
+# -- alignment A1: AlgorithmSpec binding ------------------------------------
+
+from yeto.rl.engine.algorithm import AlgorithmSpec  # noqa: E402
+from yeto.rl.engine.execution_profile import (  # noqa: E402
+    algorithm_max_policy_staleness,
+    check_algorithm_contract,
+    execution_max_policy_staleness,
+)
+
+
+class _StaleSpec:
+    """Stand-in for a future spec whose execution group tolerates staleness 0."""
+
+    def __init__(self, staleness, digest="a" * 64):
+        self.execution = type("E", (), {"max_policy_staleness": staleness})()
+        self._digest = digest
+
+    def sha256(self):
+        return self._digest
+
+
+def test_profile_binds_the_algorithm_spec_hash_and_hash_changes_identity():
+    spec = AlgorithmSpec()
+    unbound = _profile()
+    bound = unbound.bind_algorithm(spec)
+    assert bound.algorithm_spec_sha256 == spec.sha256()
+    assert bound.contract_hash != unbound.contract_hash
+    check_algorithm_contract(bound, spec)
+    other = AlgorithmSpec(kl_coef=0.1)
+    with pytest.raises(ProfileError, match="bound to algorithm"):
+        check_algorithm_contract(bound, other)
+    with pytest.raises(ProfileError, match="not bound"):
+        check_algorithm_contract(unbound, spec)
+    with pytest.raises(ProfileError, match="64 lowercase hex"):
+        _profile(algorithm_spec_sha256="xyz")
+
+
+def test_policy_age_never_exceeds_algorithm_staleness_and_modes_produce_zero():
+    assert algorithm_max_policy_staleness(AlgorithmSpec()) == 0  # v1: on-policy
+    assert algorithm_max_policy_staleness(_StaleSpec(0)) == 0
+    with pytest.raises(ProfileError):
+        algorithm_max_policy_staleness(_StaleSpec(-1))
+    assert execution_max_policy_staleness(
+        ["colocated-serial", "partitioned-serial", "partitioned-overlap"]
+    ) == 0
+    with pytest.raises(ProfileError):
+        execution_max_policy_staleness(["one-step-off"])
+    spec = _StaleSpec(0)
+    check_algorithm_contract(_profile(algorithm_spec_sha256=spec.sha256()), spec)
+
+
+def test_manifest_profile_carries_algorithm_hash():
+    manifest = example_manifest()
+    manifest["profile"]["algorithm_spec_sha256"] = AlgorithmSpec().sha256()
+    profile = ExecutionProfile.from_manifest_profile(manifest["profile"], manifest["work"])
+    check_algorithm_contract(profile, AlgorithmSpec())
