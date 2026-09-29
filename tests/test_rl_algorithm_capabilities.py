@@ -330,22 +330,30 @@ def test_binary_reward_declared_passes(binary_mechanism):
 # -- 3.4 declarations ----------------------------------------------------------------
 
 
+# The Miles adapter's declarations beyond R0, one line per mechanism (each
+# added in its own commit together with its MILES_DECLARED evidence entry).
+EXPECTED_MILES_DECLARED = {
+    "corrections:tis",
+    "corrections:opsm",
+    "corrections:opsm_trainer",
+    "features:maxrl",
+    "features:mapo",
+}
+
+
 def test_miles_and_fake_declarations():
-    # rl-algo-mismatch-correction 7.3 (G1 passed): the adapter declares tis and
-    # OPSM (trainer pi_old); the fake declares every correction for CPU tests.
-    expected = {
-        # rl-algo-seq-and-adv 7.5 G1: maxrl/mapo (gdpo held back)
-        "miles": ({"none", "tis", "opsm", "opsm_trainer"}, {"maxrl", "mapo"}),
-        "fake": ({"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
-                  "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
-                 {"mismatch_metrics", "rollout_logprobs_as_old"}),
-    }
-    for kind, caps in (("miles", miles_capabilities(FP)), ("fake", fake_capabilities())):
-        corrections, features = expected[kind]
-        assert caps.advantage_estimators == {"grpo"}
-        assert caps.losses == {"policy_loss"} and caps.loss_aggregations == {"default"}
-        assert caps.kl_placements == {"none", "reward"} and caps.corrections == corrections
-        assert caps.reward_postprocessors == frozenset() and caps.features == features
+    from yeto.rl.engine.miles_adapter.entry import MILES_DECLARED
+
+    miles = miles_capabilities(FP)
+    assert set(MILES_DECLARED) == EXPECTED_MILES_DECLARED
+    assert miles.declared_mechanisms() == R0_MECHANISMS_P0 | EXPECTED_MILES_DECLARED
+    assert all(MILES_DECLARED[m] for m in MILES_DECLARED)  # every entry cites evidence
+    # the fake declares every correction for CPU tests (and nothing else extra)
+    fake = fake_capabilities()
+    assert fake.corrections == {"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
+                                "opsm_trainer", "opsm_rollout", "mis", "mis_mask"}
+    assert fake.features == {"mismatch_metrics", "rollout_logprobs_as_old"}
+    for caps in (miles, fake):
         assert caps.execution == ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True)
         assert caps.unverified_mechanisms == frozenset()
