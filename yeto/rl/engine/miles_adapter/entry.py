@@ -263,6 +263,7 @@ def compose_island(
             learner_generation=0,
             parameter_layout_hash=lambda: layout_hash,
             algorithm=algorithm.advantage_estimator,
+            spec=algorithm,
             release_refs=release_refs,
             runner=runner,
         ),

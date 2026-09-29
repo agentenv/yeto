@@ -22,8 +22,9 @@ def test_step_loss_recorder_keeps_clipfrac_and_skips_non_last_stage():
     state_plugin._record_step_losses(({}, 0.5, "ok"))  # not last PP stage
     state_plugin._record_step_losses(({"train/loss": 1.0}, 0.5, "ok"))
     assert state_plugin.step_losses(None) == [
-        {"pg_clipfrac": 0.25, "loss_tokens": None},
-        {"pg_clipfrac": None, "loss_tokens": None},
+        {"pg_clipfrac": 0.25, "loss_tokens": None,
+         "metrics": {"train/pg_clipfrac": 0.25, "train/loss": 1.0}},
+        {"pg_clipfrac": None, "loss_tokens": None, "metrics": {"train/loss": 1.0}},
     ]
     assert state_plugin.step_losses(None) == []
 
@@ -67,3 +68,53 @@ def test_nonzero_advantages_travel_through_rollout_metadata():
     payload.pop("nonzero_advantages")
     assert handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H,
                                 data_pack=None).nonzero_advantages is None
+
+
+def test_mismatch_metrics_and_correction_masked_fraction(monkeypatch):
+    steps = [
+        {"pg_clipfrac": 0.1, "metrics": {"train/train_rollout_kl": 0.02, "train/tis_clipfrac": 0.3,
+                                         "train/loss": 1.0}},
+        {"pg_clipfrac": 0.1, "metrics": {"train/train_rollout_kl": 0.04, "train/tis_clipfrac": 0.5,
+                                         "train/loss": 2.0}},
+    ]
+    round_metrics = tr.mean_step_metrics(steps)
+    assert round_metrics["train/tis_clipfrac"] == pytest.approx(0.4)
+    assert set(tr.mismatch_metrics(round_metrics)) == {"train/train_rollout_kl", "train/tis_clipfrac"}
+    monkeypatch.setitem(sys.modules, "yeto.rl.algos.mismatch_correction", None)
+    assert tr.correction_masked_fraction(object(), round_metrics) is None
+    assert tr._has_corrections(object()) is False
+    fake = types.ModuleType("yeto.rl.algos.mismatch_correction")
+    fake.selected_corrections = lambda spec: ("icepop",)
+    fake.masked_fraction_from_metrics = lambda spec, m: m["train/tis_clipfrac"]
+    monkeypatch.setitem(sys.modules, "yeto.rl.algos.mismatch_correction", fake)
+    assert tr._has_corrections(object()) is True
+    assert tr.correction_masked_fraction(object(), round_metrics) == pytest.approx(0.4)
+
+
+def test_driver_round_event_carries_labelled_mismatch(tmp_path):
+    import json
+
+    import torch
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0, placement_kind="fixed-partition")
+    engine.trainer.algorithm_metrics = lambda: {"train/train_rollout_kl": 0.01}
+    profile = ExecutionProfile(name="p", execution_mode="partitioned-serial",
+                               outer_protocol="none").bind_algorithm(AlgorithmSpec())
+    IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+                 policy_state=engine.policy_state, publisher=engine.publisher,
+                 placement=engine.placement,
+                 capabilities=fake_capabilities(execution_modes={"partitioned-serial"}),
+                 algorithm=AlgorithmSpec(), sync=LocalOnlySync(1),
+                 events=EventTape(tmp_path / "e.jsonl", 0), profile=profile).run()
+    events = [json.loads(line) for line in (tmp_path / "e.jsonl").read_text().splitlines()]
+    (trained,) = [e for e in events if e["event"] == "rl_round_trained"]
+    assert trained["mismatch"] == {"train/train_rollout_kl": 0.01}
+    assert trained["label/weight_transport"] == "nccl-broadcast"
+    assert trained["label/profile_hash"] == profile.contract_hash

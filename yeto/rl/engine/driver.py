@@ -664,6 +664,14 @@ class IslandDriver:
             applied_lrs=metrics.applied_lrs or None,
         )
 
+    def _mismatch_fields(self) -> dict[str, Any]:
+        """A5: mismatch metrics with profile/epoch/transport labels; nothing when absent."""
+        probe = getattr(self.trainer, "algorithm_metrics", None)
+        values = dict(probe() or {}) if callable(probe) else {}
+        if not values:
+            return {}
+        return {"mismatch": values, **{f"label/{k}": v for k, v in self._labels().items()}}
+
     def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
         """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
 
@@ -748,6 +756,7 @@ class IslandDriver:
             masked_fraction=metrics.masked_fraction,
             clip_fraction=metrics.clip_fraction,
             nonzero_advantages=getattr(batch, "nonzero_advantages", None),
+            **self._mismatch_fields(),
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         if self.observe:
