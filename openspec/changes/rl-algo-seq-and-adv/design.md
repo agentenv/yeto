@@ -170,3 +170,8 @@ GDPO 需要分派器把"非零条目数"交给 driver。做法：分派器把统
   reported to the driver (it is exactly 0 on round 0). This is looser than the spec requirement
   "advantages not all equal before whitening -> gradient expected": it can only miss a failure,
   never raise a false one.
+- R1 GPU recheck (evidence/r1-gspo, integ-decl 501d71d, gspo_s2): pre-declared checker result
+  **not passed** because its round delimiter (Miles "step 0") was wrong -- Miles numbers steps
+  cumulatively. Observation only: every round's `clip_fraction` and `masked_fraction` were non-null
+  and equal to the mean of that round's two Miles `pg_clipfrac` values (0.09375, 0.25, 0.25). The
+  full-clip branch of D2 remains uncovered on GPU.

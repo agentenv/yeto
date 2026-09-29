@@ -249,3 +249,9 @@
 ## 待批准（已知偏离，需用户确认）
 1. **GSPO 全裁放宽路径（design D2）在 GPU 上未跑到**：attempt 6 时 `masked_fraction` 为 null（早于 INFRA d9bf29c）。若真实引擎上 masked_fraction 仍为 null，则一轮全部序列被裁、grad_norm=0 时会**误报**零梯度失败（严格侧）。需在 d9bf29c 之后的 SHA 上做 GPU 复验。
 2. **REINFORCE++ 在奖励全相同但有 reward KL 时退回 R0 规则**：比 spec.md 第 135–136 行（"本岛本轮 advantage 在白化前不全相等 → 期望梯度"）宽松——只会漏报、不会误报；原因是 reward-KL 大小未上报给 driver（第 0 轮恰为 0）。若要严格满足 spec，需要上报每轮 reward-KL 统计。
+
+## 2026-09-29 R1 GPU 复验（integ-decl 501d71d，计划 f6e25b4 启动前提交）
+- 预登记检查脚本结果：**未通过**——脚本按 Miles "step 0" 切分轮次，但 Miles 的 step 编号在整次运行中累计（0..5），导致判定失效；按规则不改判。
+- 观察（不计通过）：三轮 `rl_round_trained` 的 clip_fraction/masked_fraction 均非 null，且等于该轮两步 pg_clipfrac 的均值（0.09375、0.25、0.25），与 R1 通道在 GPU 上工作一致。未出现全裁剪轮次，D2 全裁放宽路径仍记为 GPU 未覆盖。已写入 design.md Known deviations。
+- 退出码 2（按磁带判定）；app ap-xbkY9rLSJ3vjXCBmcuSrVi stopped/0 tasks；watchdog 已结束。费用 ≈ $0.9；本 change 合计 ≈ $15（估算，未核账单），上限 $20。
+- 偏离 2（rpp reward-KL）保持待用户决定。

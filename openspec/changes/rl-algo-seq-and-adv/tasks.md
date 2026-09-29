@@ -62,7 +62,7 @@
 - [x] 7.4 G1 MaxRL、MAPO、GDPO：各 1 卡 2–3 轮（GDPO 用 5.4 的示例 reward）。报告全错/全对组比例、零梯度判定。验证：同 7.2。 完成记录：evidence/g1/plan.md Attempt 4（e54d2f7，H100）。
 - [x] 7.5 对 G1 通过的机制在 `miles_adapter/entry.py` 中声明支持，未通过的保持未开放并记录原因。验证：能力声明单测更新；Miles adapter 组合根测试中已声明机制可启动。 完成记录：声明位于集成分支 integ-decl 501d71d（MILES_DECLARED：maxrl、mapo、gdpo、gspo、reinforce_plus_plus、reinforce_plus_plus_baseline）；evidence/7.5-501d71d：六个示例 `yeto launch --dry-run`（两岛、无放行）均接受，adapter dry-run 均 accepted，未声明项（features:dual_clip）被拒；test_rl_seq_adv 声明/放行测试通过。
 - [x] 7.6 G3：MaxRL 两岛 strict-avg（每岛 1 卡），用正式声明（不带放行参数），2–3 轮。验证：两岛算法哈希一致、每轮外层应用后状态 hash 一致、不变量无误报；证据存入 `evidence/`。 完成记录：evidence/g3/rerun/results.md（a602fa2，退出码 0，判据 1–4 通过；首次运行按预登记未通过，见 evidence/g3/results.md）。
-- [x] 7.7 拆除全部 GPU 资源，列出云端资源证明无残留，汇总实际费用。验证：无残留截图或命令输出与费用写入 `progress.md`。 完成记录：全部 app stopped/0 tasks、本机 syncer 已停、无卷/命名 secret；费用合计 ≈$14（估算，未核账单），上限 $20。
+- [x] 7.7 拆除全部 GPU 资源，列出云端资源证明无残留，汇总实际费用。验证：无残留截图或命令输出与费用写入 `progress.md`。 完成记录：全部 app stopped/0 tasks、本机 syncer 已停、无卷/命名 secret；费用合计 ≈$15（估算，未核账单；含 R1 复验 ≈$0.9），上限 $20。
 - [x] 7.8（可选，另需预算）效果 A/B（G4）不在本 change 范围；如需，另立 change 申请。验证：无（仅记录）。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 
 ## 8. 集成检查
