@@ -1,0 +1,516 @@
+"""Trainable-state export/apply executed *inside* every Megatron rank (task 3.4, D4).
+
+Loaded by upstream's generic entry point (``michaellchung/miles`` ``yeto/ports``):
+``TrainGroup.run_plugin(fn_path, kwargs)`` -> ``train_actor.run_plugin`` ->
+``load_function(fn_path)(actor, **kwargs)`` on every rank of every cell (the
+ports path guarantees a single cell). Every function here is collective: all
+ranks must enter it.
+
+Ported from the agentenv fork's ``megatron_backends/.../trainable_state.py``
+onto upstream's structure (Bridge-based LoRA under ``megatron_utils/lora/``;
+``actor.model`` / ``actor.optimizer`` / ``actor.opt_param_scheduler`` /
+``actor.weights_backuper``), with the #64 gradient-flow invariant:
+
+* never assign ``Parameter.data`` across dtypes. To expose an FP32 master as
+  the module parameter (Bridge conversion reads module parameters), a *new*
+  ``Parameter`` sharing the master storage with ``requires_grad=False`` is
+  placed temporarily in ``module._parameters[name]`` and the original
+  Parameter object is restored afterwards (:func:`masters_as_module_parameters`);
+* after apply, every adapter Parameter is still the registered object with
+  ``requires_grad=True`` (:func:`assert_grad_flow_intact`), so the next step's
+  grad accumulation hooks still fire.
+
+torch / megatron / miles are imported lazily; importing this module is cheap.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any
+
+CANONICAL_PREFIX = "base_model.model."
+OPTIMIZER_MODES = ("preserve", "reset")
+
+_PLUGIN_MODULE = "yeto.rl.engine.miles_adapter.state_plugin"
+EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
+APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
+GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
+
+
+class StatePluginError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class AdapterBinding:
+    """One trainable adapter tensor: canonical PEFT name <-> Megatron Parameter."""
+
+    name: str
+    parameter: Any  # torch.nn.Parameter registered in the model
+    to_hf: Callable[[Any], Any]  # megatron tensor -> canonical HF tensor
+    from_hf: Callable[[Any], Any]  # canonical HF tensor -> megatron-shaped tensor
+
+
+# --------------------------------------------------------------------------
+# Gradient-flow-safe master exposure (#64 / D4)
+# --------------------------------------------------------------------------
+
+
+def master_of(parameter: Any) -> Any:
+    """The FP32 optimizer master viewed in the parameter's shape."""
+
+    import torch
+
+    main = getattr(parameter, "main_param", None)
+    if main is None:
+        if parameter.dtype != torch.float32:
+            raise StatePluginError("low-precision adapter parameter has no FP32 optimizer master")
+        return parameter.detach()
+    if main.dtype != torch.float32 or main.numel() != parameter.numel():
+        raise StatePluginError(
+            "adapter parameter has no complete FP32 optimizer master "
+            "(sharded distributed-optimizer masters are not supported)"
+        )
+    return main.view(parameter.shape)
+
+
+def parameter_owners(modules: Iterable[Any], parameters: Iterable[Any]) -> dict[int, tuple[Any, str]]:
+    wanted = {id(p) for p in parameters}
+    owners: dict[int, tuple[Any, str]] = {}
+    for root in modules:
+        for module in root.modules():
+            for attr, param in module._parameters.items():
+                if param is not None and id(param) in wanted:
+                    owners.setdefault(id(param), (module, attr))
+    missing = wanted - set(owners)
+    if missing:
+        raise StatePluginError(f"{len(missing)} adapter parameters are not registered in the model")
+    return owners
+
+
+@contextmanager
+def masters_as_module_parameters(modules: Sequence[Any], parameters: Sequence[Any]):
+    """Temporarily register FP32 masters as the module parameters.
+
+    A fresh ``Parameter`` that shares the master's storage and has
+    ``requires_grad=False`` replaces the entry in ``module._parameters``; the
+    original Parameter object (with its grad-accumulation hooks and
+    ``main_grad``) is untouched and restored on exit. ``Parameter.data`` is
+    never reassigned.
+    """
+
+    import torch
+
+    owners = parameter_owners(modules, parameters)
+    swapped: list[tuple[Any, str, Any]] = []
+    try:
+        for param in parameters:
+            master = master_of(param)
+            if master.data_ptr() == param.data_ptr() and master.dtype == param.dtype:
+                continue  # already FP32 and self-mastered
+            module, attr = owners[id(param)]
+            module._parameters[attr] = torch.nn.Parameter(master, requires_grad=False)
+            swapped.append((module, attr, param))
+        yield
+    finally:
+        for module, attr, param in reversed(swapped):
+            module._parameters[attr] = param
+
+
+def assert_grad_flow_intact(modules: Sequence[Any], parameters: Sequence[Any]) -> None:
+    owners = parameter_owners(modules, parameters)
+    for param in parameters:
+        module, attr = owners[id(param)]
+        if module._parameters[attr] is not param:
+            raise StatePluginError(f"adapter parameter {attr!r} was replaced")
+        if not param.requires_grad:
+            raise StatePluginError(f"adapter parameter {attr!r} no longer requires grad")
+
+
+# --------------------------------------------------------------------------
+# Binding resolution
+# --------------------------------------------------------------------------
+
+
+def _canonical(name: str) -> str:
+    return name if name.startswith(CANONICAL_PREFIX) else CANONICAL_PREFIX + name
+
+
+def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
+    """Resolve (and cache) adapter bindings via Megatron-Bridge conversion tasks.
+
+    Tests (and alternative backends) may preset ``actor._yeto_adapter_bindings``.
+    """
+
+    cached = getattr(actor, "_yeto_adapter_bindings", None)
+    if cached is not None:
+        return tuple(cached)
+
+    # Upstream's cached bridge: Miles owns the remote-code decision for its checkpoint.
+    from miles.backends.megatron_utils.hf_export import _get_hf_bridge
+
+    bridge = _get_hf_bridge(actor.args.hf_checkpoint)
+    model_bridge = getattr(bridge, "_model_bridge", None)
+    build_tasks = getattr(model_bridge, "build_adapter_conversion_tasks", None)
+    if build_tasks is None:
+        raise StatePluginError("Megatron-Bridge lacks adapter conversion tasks")
+    bindings = []
+    tasks_by_base = build_tasks(actor.model)
+    for base_name in sorted(tasks_by_base):
+        for task in sorted(tasks_by_base[base_name], key=lambda t: t.adapter_key or ""):
+            for side in (task.linear_in_task, task.linear_out_task):
+                if side.param_weight is None:
+                    continue
+                converted = side.mapping.megatron_to_hf(master_of(side.param_weight), side.megatron_module)
+                if len(converted) != 1:
+                    raise StatePluginError(f"ambiguous LoRA mapping for {side.param_name!r}")
+                name = _canonical(next(iter(converted)))
+
+                def to_hf(tensor, _side=side):
+                    return next(iter(_side.mapping.megatron_to_hf(tensor, _side.megatron_module).values()))
+
+                def from_hf(tensor, _side=side):
+                    return _side.mapping.hf_to_megatron(tensor, _side.megatron_module)
+
+                bindings.append(AdapterBinding(name, side.param_weight, to_hf, from_hf))
+    names = [b.name for b in bindings]
+    if not names or len(names) != len(set(names)):
+        raise StatePluginError("Megatron produced an empty or duplicate LoRA mapping")
+    trainable = {id(p) for chunk in actor.model for p in chunk.parameters() if p.requires_grad}
+    if {id(b.parameter) for b in bindings} != trainable:
+        raise StatePluginError("adapter conversion does not cover every trainable parameter")
+    actor._yeto_adapter_bindings = tuple(sorted(bindings, key=lambda b: b.name))
+    return actor._yeto_adapter_bindings
+
+
+def _model_parallel(actor: Any) -> bool:
+    args = actor.args
+    return any(
+        int(getattr(args, name, 1) or 1) > 1
+        for name in (
+            "tensor_model_parallel_size",
+            "pipeline_model_parallel_size",
+            "expert_model_parallel_size",
+        )
+    )
+
+
+def _is_main_rank(actor: Any) -> bool:
+    flag = getattr(actor, "_is_first_replica_megatron_main_rank", None)
+    if flag is not None:
+        return bool(flag)
+    try:
+        import torch.distributed as dist
+    except ImportError:  # pragma: no cover
+        return True
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+
+def _barrier() -> None:
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
+@contextmanager
+def trainer_resident(actor: Any):
+    """Run a state plugin on a resident trainer, restoring its residency.
+
+    Upstream ``--offload-train`` actors start asleep (``sleep()`` at the end of
+    init) and ``update_weights`` works while asleep, so export/apply can be
+    reached with the Megatron memory paused and the process groups destroyed.
+    Wake the actor for the plugin and put it back to sleep afterwards.
+    """
+
+    asleep = bool(getattr(actor, "_asleep", False)) and bool(
+        getattr(getattr(actor, "args", None), "offload_train", False)
+    )
+    if asleep:
+        actor.wake_up()
+    try:
+        yield
+    finally:
+        if asleep:
+            actor.sleep()
+
+
+# --------------------------------------------------------------------------
+# Plugins (signature: fn(actor, **kwargs))
+# --------------------------------------------------------------------------
+
+
+def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
+    """Canonical FP32 PEFT tensors on the first-replica main rank, else ``None``."""
+
+    install_grad_norm_recorder()
+    with trainer_resident(actor):
+        return _export_state(actor, policy_version=policy_version)
+
+
+def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
+
+    import torch
+
+    bindings = adapter_bindings(actor)
+    params = [b.parameter for b in bindings]
+    tensors: dict[str, Any] = {}
+    with torch.no_grad():
+        if _model_parallel(actor):
+            tensors = _collective_export(actor, bindings)
+        else:
+            for b in bindings:
+                tensors[b.name] = b.to_hf(master_of(b.parameter))
+        if not _is_main_rank(actor):
+            return None
+        out = {}
+        for name, value in sorted(tensors.items()):
+            value = value.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
+            if not torch.isfinite(value).all().item():
+                raise StatePluginError(f"{name!r} contains NaN or Inf")
+            out[name] = value
+    assert_grad_flow_intact(actor.model, params)
+    return {"policy_version": int(policy_version), "tensors": out}
+
+
+def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[str, Any]:
+    """TP/PP/EP: Bridge adapter export is collective; masters exposed per D4."""
+
+    import torch
+    from miles.backends.megatron_utils.hf_export import _get_hf_bridge
+    from miles.utils import megatron_bridge_utils
+
+    bridge = _get_hf_bridge(actor.args.hf_checkpoint)
+    retain = _is_main_rank(actor)
+    expected = {b.name for b in bindings}
+    tensors: dict[str, Any] = {}
+    names: set[str] = set()
+    with masters_as_module_parameters(actor.model, [b.parameter for b in bindings]):
+        with megatron_bridge_utils.patch_megatron_model(actor.model):
+            for item in bridge.export_adapter_weights(actor.model, cpu=False, show_progress=False):
+                name = _canonical(item[0])
+                names.add(name)
+                if retain:
+                    value = item[1].detach().to(device="cpu", dtype=torch.float32).contiguous()
+                    prev = tensors.get(name)
+                    if prev is not None and not torch.equal(prev, value):
+                        raise StatePluginError(f"conflicting collective LoRA tensor {name!r}")
+                    tensors[name] = value
+    # Local bindings only cover this rank's stage; the exported name set is global.
+    if retain and not expected <= names:
+        raise StatePluginError(f"collective LoRA export misses local tensors: {sorted(expected - names)[:4]}")
+    return tensors
+
+
+def _optimizer_children(optimizer: Any) -> list[Any]:
+    return list(getattr(optimizer, "chained_optimizers", None) or (optimizer,))
+
+
+def _copy_masters_to_model(actor: Any, bindings: Sequence[AdapterBinding]) -> None:
+    if all(getattr(b.parameter, "main_param", None) is None for b in bindings):
+        return  # FP32 params are their own masters
+    for child in _optimizer_children(actor.optimizer):
+        copy = getattr(child, "_copy_main_params_to_model_params", None)
+        if copy is None:
+            raise StatePluginError("Megatron optimizer lacks main-to-model copy")
+        copy()
+
+
+def reset_optimizer_moments(optimizer: Any) -> None:
+    """Zero moments in place; the optimizer object and its param groups survive."""
+
+    try:
+        from miles.backends.megatron_utils.optimizer_state_reset import reset_optimizer_states
+    except ImportError:
+        reset_optimizer_states = None
+    if reset_optimizer_states is not None:
+        reset_optimizer_states(optimizer)
+        return
+    import torch
+
+    def leaves(opt):
+        for attr in ("chained_optimizers", "sub_optimizers"):
+            if hasattr(opt, attr):
+                for child in getattr(opt, attr):
+                    yield from leaves(child)
+                return
+        inner = getattr(opt, "optimizer", None)
+        yield from (leaves(inner) if inner is not None else (opt,))
+
+    for leaf in leaves(optimizer):
+        for state in leaf.state.values():
+            for key, value in state.items():
+                if key == "step":
+                    if isinstance(value, torch.Tensor):
+                        value.zero_()
+                    else:
+                        state[key] = 0
+                elif key in ("exp_avg", "exp_avg_sq", "momentum_buffer", "moment2_buffer"):
+                    value.zero_()
+
+
+def align_scheduler(actor: Any, local_step: int) -> int:
+    """Scheduler progress := ``local_step`` optimizer steps (in samples, as Megatron counts)."""
+
+    scheduler = getattr(actor, "opt_param_scheduler", None)
+    batch = int(actor.args.global_batch_size)
+    target = int(local_step) * batch
+    if scheduler is None or batch <= 0 or scheduler.num_steps % batch:
+        raise StatePluginError("Megatron scheduler progress is not an integral optimizer step")
+    if scheduler.num_steps > target:
+        raise StatePluginError(
+            f"Megatron scheduler ({scheduler.num_steps // batch} steps) is ahead of local step {local_step}"
+        )
+    if scheduler.num_steps < target:
+        scheduler.step(increment=target - scheduler.num_steps)
+    return target
+
+
+def apply_state(
+    actor: Any,
+    *,
+    tensors: Mapping[str, Any],
+    policy_version: int,
+    local_step: int,
+    optimizer: str,
+) -> dict[str, Any]:
+    """Write canonical tensors into FP32 masters, then the model copies.
+
+    Returns an identical summary on every rank.
+    """
+
+    install_grad_norm_recorder()
+    with trainer_resident(actor):
+        return _apply_state(
+            actor,
+            tensors=tensors,
+            policy_version=policy_version,
+            local_step=local_step,
+            optimizer=optimizer,
+        )
+
+
+def _apply_state(
+    actor: Any,
+    *,
+    tensors: Mapping[str, Any],
+    policy_version: int,
+    local_step: int,
+    optimizer: str,
+) -> dict[str, Any]:
+
+    import torch
+
+    if optimizer not in OPTIMIZER_MODES:
+        raise StatePluginError(f"optimizer mode must be one of {OPTIMIZER_MODES}")
+    bindings = adapter_bindings(actor)
+    params = [b.parameter for b in bindings]
+    local = {b.name for b in bindings}
+    incoming = set(tensors)
+    # Under PP a rank holds a stage; every local tensor must be supplied and
+    # (single-stage) nothing unknown may be supplied.
+    missing = sorted(local - incoming)
+    extra = sorted(incoming - local) if not _model_parallel(actor) else []
+    if missing or extra:
+        raise StatePluginError(f"global LoRA mapping mismatch: missing={missing[:4]}, extra={extra[:4]}")
+    with torch.no_grad():
+        targets = {}
+        for b in bindings:
+            value = tensors[b.name]
+            if value.dtype != torch.float32 or not torch.isfinite(value).all().item():
+                raise StatePluginError(f"{b.name!r} is not finite FP32")
+            target = b.from_hf(value.to(device=master_of(b.parameter).device))
+            if target.numel() != b.parameter.numel():
+                raise StatePluginError(f"global LoRA shape mismatch for {b.name!r}")
+            targets[b.name] = target.reshape(b.parameter.shape)
+        scheduler_samples = align_scheduler(actor, local_step)
+        for b in bindings:
+            master_of(b.parameter).copy_(targets[b.name])
+        _copy_masters_to_model(actor, bindings)
+    _barrier()
+    if optimizer == "reset":
+        reset_optimizer_moments(actor.optimizer)
+    backuper = getattr(actor, "weights_backuper", None)
+    if backuper is not None:  # colocated update_weights reads the CPU backup
+        backuper.backup("actor")
+    assert_grad_flow_intact(actor.model, params)
+    return {
+        "policy_version": int(policy_version),
+        "tensors": len(tensors),
+        "optimizer": optimizer,
+        "scheduler_samples": scheduler_samples,
+    }
+
+
+# Megatron's per-step grad norms, recorded in this rank's process. Upstream
+# ``train`` does not return them, and once the step is done the optimizer's
+# ``get_grad_norm`` recomputes over already-consumed buffers (observed 0.0 on
+# GPU while Miles logged a non-zero ``train/grad_norm``).
+_STEP_GRAD_NORMS: list[float] = []
+_RECORDER_INSTALLED = False
+
+
+def install_grad_norm_recorder() -> bool:
+    """Wrap upstream ``train_one_step`` to record the grad norm it returns.
+
+    Idempotent; called from every state plugin, and the driver always exports
+    the trainable state before the first training step.
+    """
+
+    global _RECORDER_INSTALLED
+    if _RECORDER_INSTALLED:
+        return True
+    try:
+        from miles.backends.megatron_utils import model as megatron_model
+    except ImportError:
+        return False
+    original = getattr(megatron_model, "train_one_step", None)
+    if original is None:
+        return False
+
+    def train_one_step(*args: Any, **kwargs: Any):
+        result = original(*args, **kwargs)
+        try:
+            norm = result[1]
+            _STEP_GRAD_NORMS.append(float(norm.item() if hasattr(norm, "item") else norm))
+        except (TypeError, IndexError, ValueError):
+            pass
+        return result
+
+    megatron_model.train_one_step = train_one_step
+    _RECORDER_INSTALLED = True
+    return True
+
+
+def grad_norm(actor: Any) -> float:
+    """Norm of the last step's gradients (Megatron's own reduction when available).
+
+    Must run after ``train`` and before ``offload``. Clipping may have scaled
+    the value; the driver's invariant only depends on it being zero or not.
+    """
+
+    import math
+
+    import torch
+
+    if _STEP_GRAD_NORMS:
+        norms = list(_STEP_GRAD_NORMS)
+        _STEP_GRAD_NORMS.clear()
+        return max(norms)
+    getter = getattr(actor.optimizer, "get_grad_norm", None)
+    if callable(getter):
+        value = getter()
+        return float(value.item() if isinstance(value, torch.Tensor) else value)
+    total = 0.0
+    for chunk in actor.model:
+        for p in chunk.parameters():
+            if not p.requires_grad:
+                continue
+            g = getattr(p, "main_grad", None)
+            if g is None:
+                g = p.grad
+            if g is not None:
+                total += float(g.detach().float().pow(2).sum().item())
+    return math.sqrt(total)

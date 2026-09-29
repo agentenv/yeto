@@ -768,6 +768,15 @@ def test_strict_syncer_command_is_one_fragment_exact_base_avg(tmp_path):
     assert "--mark-final-checkpoint" not in command
 
 
+def test_strict_syncer_resumes_only_an_existing_checkpoint(tmp_path):
+    arm = benchmark.select_arms("2", 2, 4)[2]
+    fresh = benchmark.syncer_command(arm, 29400, tmp_path, rounds=3)
+    assert "--resume" not in fresh
+    (tmp_path / "state.ckpt").write_bytes(b"ckpt")
+    resumed = benchmark.syncer_command(arm, 29400, tmp_path, rounds=3)
+    assert "--resume" in resumed
+
+
 def test_decoupled_syncer_commands_split_budget_cutoff_and_consolidation(tmp_path):
     arm = benchmark.select_arms(
         "2",
@@ -1437,3 +1446,42 @@ def test_gpu_drain_check_ignores_compute_apps_on_hidden_devices(monkeypatch):
 
     assert benchmark._visible_gpu_uuids() == {"GPU-visible"}
     benchmark.wait_for_free_gpus(timeout_s=0)
+
+
+def _benchmark_argv(*extra):
+    return [
+        "--model", "org/model", "--model-revision", "a" * 40,
+        "--data", "org/data", "--data-revision", "b" * 40,
+        "--reward-function", "pkg.reward:score", *extra,
+    ]
+
+
+def test_rl_engine_defaults_to_legacy_and_keeps_resume_identity(monkeypatch):
+    import yeto.benchmark_resume
+
+    monkeypatch.setattr(
+        yeto.benchmark_resume, "implementation_fingerprint", lambda *a, **k: "0" * 64
+    )
+    legacy = benchmark.build_parser().parse_args(_benchmark_argv())
+    assert legacy.rl_engine == "legacy"
+    ports = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", "ports"))
+    for args in (legacy, ports):
+        args.eval_samples_per_prompt = args.samples_per_group
+    arms = benchmark.select_arms(legacy.islands, legacy.gpus_per_island, legacy.groups_per_island)
+    legacy_identity = benchmark._resume_identity(legacy, arms)
+    assert "rl_engine" not in legacy_identity
+    assert "rl_engine" not in legacy_identity["arguments"]
+    ports_identity = benchmark._resume_identity(ports, arms)
+    from yeto.rl import MILES_NEXT_COMMIT
+
+    assert ports_identity["rl_engine"] == "ports"
+    assert ports_identity["miles_commit"] == MILES_NEXT_COMMIT
+
+
+def test_rl_engine_ports_dry_run_records_selection_and_rejects_native(capsys):
+    assert benchmark.main(
+        _benchmark_argv("--arms", "single,federated", "--rl-engine", "ports", "--dry-run")
+    ) == 0
+    assert "RL_ENGINE ports" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="native arm"):
+        benchmark.main(_benchmark_argv("--rl-engine", "ports", "--dry-run"))

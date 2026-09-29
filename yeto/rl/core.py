@@ -494,7 +494,17 @@ class PolicySnapshot:
 
     @property
     def token(self) -> str:
-        return f"yeto:{self.rollout_id}:{self.policy_hash}"
+        return policy_snapshot_token(self.rollout_id, self.policy_hash)
+
+
+def policy_snapshot_token(rollout_id: int, policy_tensor_hash: str) -> str:
+    """The one policy token format, ``yeto:<rollout_id>:<policy_tensor_hash>``.
+
+    Written as the SGLang weight version on every sample; parsed by
+    :func:`parse_policy_snapshot_token`.
+    """
+
+    return f"yeto:{rollout_id}:{policy_tensor_hash}"
 
 
 def parse_policy_snapshot_token(token: object) -> tuple[int, str]:

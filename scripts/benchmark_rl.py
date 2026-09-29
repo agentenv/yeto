@@ -41,6 +41,9 @@ _RESUME_EXCLUDES = {
     "_pass_ks",
     "dry_run",
     "overwrite",
+    # Recorded separately and only for ports, so legacy resume identities
+    # are unchanged.
+    "rl_engine",
     "report_dir",
     "resume",
     "work_dir",
@@ -430,7 +433,9 @@ def syncer_command(
             command.extend(("--resume", "--mark-final-checkpoint"))
         else:
             command.extend(("--learner-budget-steps", str(rounds)))
-    else:
+    elif (run_dir / "state.ckpt").is_file():
+        # Strict arms resume an existing authoritative checkpoint; a fresh run
+        # has none, and the syncer refuses --resume without the file.
         command.append("--resume")
     return command
 
@@ -580,6 +585,16 @@ def worker_payload(
         "miles_root": str(args.miles_root.expanduser().resolve()),
         "trust_remote_code": args.trust_remote_code,
     }
+    if getattr(args, "rl_engine", "legacy") == "ports":
+        # Upstream Miles has no fork-only port isolation flags; the ports
+        # translation rejects them, so the island uses upstream defaults.
+        for name in (
+            "rollout_engine_base_port",
+            "sglang_router_prometheus_port",
+            "train_master_base_port",
+        ):
+            values.pop(name, None)
+        values["rl_engine"] = "ports"
     if arm.kind == "decoupled":
         values.update(
             sync_preset="decoupled",
@@ -1719,6 +1734,11 @@ def run_arm(
             benchmark_learner_budget_steps=(
                 args.global_rounds if arm.kind == "decoupled" else None
             ),
+            **(
+                {"rl_engine": "ports"}
+                if getattr(args, "rl_engine", "legacy") == "ports"
+                else {}
+            ),
         )
         artifact_s = time.monotonic() - export_started
         if state.policy_version != expected_version:
@@ -2046,7 +2066,7 @@ def _resume_identity(args, arms: list[Arm]) -> dict[str, Any]:
     from yeto.benchmark_resume import implementation_fingerprint, jsonable_arguments
     from yeto.rl import MILES_COMMIT
 
-    return {
+    identity = {
         "format_version": 1,
         "benchmark": "miles-rl-lm",
         "arguments": jsonable_arguments(args, exclude=_RESUME_EXCLUDES),
@@ -2057,6 +2077,11 @@ def _resume_identity(args, arms: list[Arm]) -> dict[str, Any]:
             _IMPLEMENTATION_PATHS,
         ),
     }
+    if getattr(args, "rl_engine", "legacy") == "ports":
+        from yeto.rl import MILES_NEXT_COMMIT
+
+        identity.update(rl_engine="ports", miles_commit=MILES_NEXT_COMMIT)
+    return identity
 
 
 def write_run_config(
@@ -2484,6 +2509,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--rl-engine",
+        choices=["legacy", "ports"],
+        default="legacy",
+        help="RL engine path for every arm (ports: LoRA/GRPO/colocated only)",
+    )
     return parser
 
 
@@ -2551,9 +2582,28 @@ def main(argv=None) -> int:
             local_horizon=args.local_horizon,
         )
         validate_args(args, arms, check_runtime=not args.dry_run)
+        if args.rl_engine == "ports":
+            from yeto.rl.engine.selection import require_ports_supported
+
+            if any(arm.kind == "native" for arm in arms):
+                raise ValueError(
+                    "the native arm is stock Miles' own loop; select "
+                    "--arms single,federated,decoupled with --rl-engine ports"
+                )
+
+            require_ports_supported(
+                sync_preset=(
+                    "decoupled"
+                    if any(arm.kind == "decoupled" for arm in arms)
+                    else "strict-avg"
+                ),
+                lora_targets=args.lora_targets,
+            )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     print_plan(args, arms)
+    if args.rl_engine == "ports":
+        print("RL_ENGINE ports")
     if args.dry_run:
         return 0
 
@@ -2571,7 +2621,12 @@ def main(argv=None) -> int:
     reward_sha256 = python_spec_sha256(args.reward_function, base_dir=REPO_ROOT)
     args.reward_sha256 = reward_sha256
     args.source_sha256 = source_tree_sha256()
-    verify_miles_revision(args.miles_root)
+    if args.rl_engine == "ports":
+        from yeto.rl import MILES_NEXT_PINS
+
+        verify_miles_revision(args.miles_root, expected=MILES_NEXT_PINS)
+    else:
+        verify_miles_revision(args.miles_root)
     if any(arm.kind != "native" for arm in arms):
         ensure_syncer()
     model_path = resolve_model_path(args)

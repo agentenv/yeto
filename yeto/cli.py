@@ -89,6 +89,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="training workflow (default: sft)",
     )
     rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
+    rl.add_argument(
+        "--rl-engine",
+        choices=["legacy", "ports"],
+        default="legacy",
+        help=(
+            "RL engine path: legacy (agentenv Miles fork, default) or ports "
+            "(yeto-owned island loop over upstream Miles; LoRA + GRPO + "
+            "serial colocated + strict-avg/decoupled only)"
+        ),
+    )
     rl.add_argument("--rl-image", default=MILES_IMAGE)
     rl.add_argument(
         "--rl-model-recipe",

@@ -262,8 +262,18 @@ def export_rl_checkpoint(
     pipeline: int = 1,
     local_horizon: int = 1,
     benchmark_learner_budget_steps: int | None = None,
+    rl_engine: str = "legacy",
 ) -> CanonicalLoraState:
+    """Export the authoritative RL checkpoint as a PEFT adapter.
+
+    ``rl_engine="ports"`` is recorded in ``yeto_rl_provenance.json``; the
+    legacy default leaves the provenance output byte-identical.
+    """
+
     from ..models import resolve
+
+    if rl_engine not in ("legacy", "ports"):
+        raise ValueError(f"unknown rl_engine {rl_engine!r}")
 
     model = resolve(model)
     checkpoint = parse_checkpoint(checkpoint_path)
@@ -350,6 +360,7 @@ def export_rl_checkpoint(
         model_revision=model_revision,
         rank=rank,
     )
+    provenance = None
     if sync_preset == "decoupled":
         provenance = {
             "sync_preset": sync_preset,
@@ -373,6 +384,12 @@ def export_rl_checkpoint(
             "sync_layout_fingerprint": checkpoint.layout_hash,
             "checkpoint_sha256": checkpoint.sha256,
         }
+    if rl_engine == "ports":
+        provenance = {
+            **(provenance or {"sync_preset": sync_preset, "policy_hash": policy_tensor_hash(state)}),
+            "rl_engine": rl_engine,
+        }
+    if provenance is not None:
         path = Path(output_dir).expanduser() / "yeto_rl_provenance.json"
         temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
         try:
