@@ -5,9 +5,12 @@ Runs where upstream Miles imports::
     PYTHONPATH=<yeto>:/home/michael/work/miles-next \\
       /home/michael/work/miles-next-venv/bin/python -m pytest -q tests/test_rl_seq_adv_miles.py
 
-and is skipped otherwise (``/tmp/yeto-venv`` has no Miles). Element-wise
-comparisons use ``torch.equal`` against Miles, ``torch.allclose`` (float32
-tolerance) against the hand formulas.
+and is skipped otherwise (``/tmp/yeto-venv`` has no Miles). Comparison modes:
+``torch.equal`` (bitwise) for the dispatcher vs Miles ``_post_process_rewards``
+(3.3, 4.3) and for the GSPO clip indicator; ``torch.allclose`` (float32
+tolerance, rtol 1e-6) for Miles functions vs hand formulas (2.4 ratio/loss,
+3.4 returns/advantages); whitening checks masked mean |.| < 1e-6 and unbiased
+variance within rel 1e-4 of 1.
 """
 
 from __future__ import annotations

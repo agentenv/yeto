@@ -109,7 +109,9 @@ Per pre-declared criteria (evidence attempt4/<run>/miles.log, island-0/events.js
 Observations (not criteria): per round (all-right groups / all-wrong groups / non-zero advantages of 32):
 maxrl 1/0/24, 1/1/16, 0/1/24; mapo 1/0/24, 1/1/16, 0/2/16; gdpo (correctness) 1/0/32, 1/1/32, 0/3/32 --
 GDPO round 3 has 3 all-wrong groups on correctness yet 32 non-zero advantages from the format
-component (the D8 case the tightened rule covers). No zero-gradient event in any round.
+component. [Corrected after review] The D8 tightening branch (R0 rule says no gradient, GDPO rule
+requires one) was NOT exercised on GPU: every round had some group with scalar reward_std > 0, and
+the per-round count reached the driver one round late (R2 defect below). No zero-gradient event in any round.
 Defect found (INFRA R2): `rl_round_trained.nonzero_advantages` lags one round (round 0 None,
 round k shows round k-1's dispatcher count: maxrl dispatcher 24,16,24 vs events None,24,16;
 mapo 24,16,16 vs None,24,16). The rollout metadata hook reads the counter before the reward

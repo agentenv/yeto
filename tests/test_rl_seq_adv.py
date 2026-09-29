@@ -252,7 +252,9 @@ def test_rpp_expects_gradient_rule():
     assert sa.expects_gradient(no_kl, varied) is True
     assert sa.expects_gradient(no_kl, flat_same) is False
     assert sa.expects_gradient(no_kl, flat_diff) is True  # means differ: not all equal
-    assert sa.expects_gradient(rpp(), flat_same) is True  # reward KL enters advantages
+    # reward KL alone: size unreported (0 on round 0, LoRA B=0) -> no verdict, R0 rule
+    assert sa.expects_gradient(rpp(), flat_same) is False
+    assert sa.expects_gradient(rpp(), flat_diff) is True
     unknown = _batch(SimpleNamespace(reward_std=None, reward_mean=None))
     assert sa.expects_gradient(no_kl, unknown) is True  # unreadable -> expect gradient
     # P0 hook (relax-only) agrees wherever the default already expects a gradient
@@ -275,7 +277,7 @@ def test_fake_driver_rpp_rounds(tmp_path, estimator):
                         constant_reward_rounds={1})
     assert driver.run().policy_version == 2  # not expected -> zero grad is fine
     _, driver = _driver(tmp_path, rpp(estimator), caps, zero_grad_rounds={1})
-    with pytest.raises(StrictRlInvariantError, match="grad_norm 0"):
+    with pytest.raises(StrictRlInvariantError, match=r"grad_norm (is )?0"):
         driver.run()  # expected -> zero grad fails
 
 
@@ -456,7 +458,7 @@ def test_p0_hook_tightens_for_gdpo_and_rpp():
     """D8 via the P0 hook (True verdicts require a gradient the R0 rule misses)."""
 
     flat = _batch(_group(0.0), _group(0.0))
-    assert rpp().expects_gradient(flat) is True  # reward KL enters advantages
+    assert rpp().expects_gradient(flat) is False  # reward KL alone: no verdict (round 0 KL = 0)
     no_kl = AlgorithmSpec(advantage={"estimator": "reinforce_plus_plus", "whiten": True})
     assert no_kl.expects_gradient(_batch(_group(0.0, 1.0), _group(0.0, 0.0))) is True
     assert no_kl.expects_gradient(flat) is False
@@ -467,14 +469,30 @@ def test_p0_hook_tightens_for_gdpo_and_rpp():
     assert AlgorithmSpec().expects_gradient(flat) is False
 
 
-@pytest.mark.parametrize("estimator", ["reinforce_plus_plus"])
-def test_fake_driver_rpp_reward_kl_constant_round_expects_gradient(tmp_path, estimator):
-    caps = fake_capabilities(advantage_estimators={"grpo", estimator},
+def test_fake_driver_rpp_reward_kl_round0_identical_rewards_is_not_a_failure(tmp_path):
+    """Review item 6: round 0 (LoRA B = 0, policy == reference, reward KL = 0) with
+    identical rewards everywhere has all-equal advantages; zero grad must pass."""
+
+    caps = fake_capabilities(advantage_estimators={"grpo", "reinforce_plus_plus"},
                              features={"whiten_advantages"})
-    _, driver = _driver(tmp_path, rpp(estimator), caps, zero_grad_rounds={1},
-                        constant_reward_rounds={1})
-    with pytest.raises(StrictRlInvariantError, match="grad_norm 0"):
-        driver.run()
+    _, driver = _driver(tmp_path, rpp(), caps, zero_grad_rounds={0, 1},
+                        constant_reward_rounds={0, 1})
+    assert driver.run().policy_version == 2
+    # other cases are not relaxed: differing group means still require a gradient
+    no_kl = AlgorithmSpec(advantage={"estimator": "reinforce_plus_plus", "whiten": True})
+    assert rpp().expects_gradient(_batch(_group(0.0, 1.0), _group(0.0, 0.0))) is True
+    assert no_kl.expects_gradient(_batch(_group(0.5))) is True
+
+
+@pytest.mark.parametrize("cp,rejected", [(1, False), (2, True)])
+def test_gspo_context_parallel_refused_before_launch(cp, rejected):
+    problems = alg.launch_problems(gspo(), {"rollout_batch_size": 4,
+                                            "rollout_max_response_len": 384,
+                                            "context_parallel_size": cp, "multi_lora": False})
+    assert any("[seq_adv]" in p and "context parallel" in p for p in problems) is rejected
+    assert not any("[seq_adv]" in p for p in alg.launch_problems(
+        AlgorithmSpec(), {"rollout_batch_size": 4, "rollout_max_response_len": 384,
+                          "context_parallel_size": 2, "multi_lora": False}))
 
 
 # -- 5.5 GDPO through the fake driver (INFRA R2: RolloutBatchHandle.nonzero_advantages) --------
@@ -506,16 +524,17 @@ def test_fake_driver_gdpo_expected_zero_grad_fails(tmp_path, count):
     # scalar reward constant (R0 rule: no gradient) but the reward vector is not
     driver = _gdpo_driver(tmp_path, lambda r: count, zero_grad_rounds={1},
                           constant_reward_rounds={1})
-    with pytest.raises(StrictRlInvariantError, match="grad_norm 0"):
+    with pytest.raises(StrictRlInvariantError, match=r"grad_norm (is )?0"):
         driver.run()
 
 
-def test_transforms_report_round_counter_for_the_metadata_hook():
-    from yeto.rl.engine.miles_adapter.rollout_meta_hook import ROUND_METADATA_ATTR, _round_metadata
+def test_transforms_report_round_counter_for_the_metadata_hook(tmp_path, monkeypatch):
+    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
 
-    assert sa.ROUND_METADATA_ATTR == ROUND_METADATA_ATTR
+    sink = f"dir:{tmp_path}"
+    monkeypatch.setenv(hook.META_SINK_ENV, sink)
+    hook.put_policy_token("yeto:7:" + "a" * 64, sink)
     spec = transform_spec("maxrl")
-    from yeto.rl.algos import grpo_knobs as gk
 
     class S(SimpleNamespace):
         def get_reward_value(self, args):
@@ -526,10 +545,19 @@ def test_transforms_report_round_counter_for_the_metadata_hook():
                            rollout_batch_size=2, multi_lora=False)
     for key, value in spec.to_legacy_runtime_attrs().items():
         setattr(args, key, value)
-    samples = [S(reward=r, group_index=g, index=i, rollout_id=None, metadata={}, response_length=4)
+    # Sample.rollout_id is a trajectory key (here 100+i), not the training round (7)
+    samples = [S(reward=r, group_index=g, index=i, rollout_id=100 + i, metadata={},
+                 response_length=4)
                for i, (g, r) in enumerate([(0, 1.0), (0, 0.0), (1, 0.0), (1, 0.0)])]
     rp.post_process(args, samples)
-    assert _round_metadata(args) == {"nonzero_advantages": 2}
+    records = [json.loads(p.read_text()) for p in tmp_path.iterdir()
+               if p.name != hook.POLICY_TOKEN_FILE and not p.name.startswith(".")]
+    counts = [r for r in records if r.get("nonzero_advantages") is not None]
+    assert [(r["rollout_id"], r["nonzero_advantages"]) for r in counts] == [(7, 2)]
+
+
+def test_no_sink_no_round_record():
+    assert sa._current_round_id() is None  # CPU: no sink env, no Ray
 
 
 def test_trainer_reads_gspo_clipfrac_through_seq_adv():

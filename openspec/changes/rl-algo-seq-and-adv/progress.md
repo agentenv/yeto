@@ -32,7 +32,7 @@
 | 梯度规则 | P0 `register_gradient_rule(name, rule, *, mechanism)`，只能放宽 | GSPO 全裁放宽可用；GDPO/REINFORCE++ 需要"收紧"（D8），见 2a-shared.patch hunk 2 |
 | 变换模块身份 | 1b 文档假设变换写在 `reward_pipeline.py` 内（受分派器 PluginRef 覆盖）；本轮派发不允许改该文件 | 拒绝规则要求 `plugins` 含 `yeto.rl.algos.seq_adv.registered_transforms` 的 PluginRef，使 `seq_adv.py` 源码哈希进入算法哈希 |
 
-### 任务状态（五种之一）
+### 任务状态（五种之一）【已过期：以文末"当前状态总表"为准】
 | task | 状态 | 证据 / 说明 |
 |---|---|---|
 | 1.1 | 完成 | `baseline-failures.txt`：756946b 上 73 failed + 26 errors = 99 条，与 pytest 汇总一致 |
@@ -70,8 +70,8 @@
 | 8.2 | 完成 | `openspec validate rl-algo-seq-and-adv --strict` → valid |
 | 8.3 | 完成 | 本表 |
 
-### 测试命令与结果
-- CPU：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_rl_seq_adv.py tests/test_rl_adv_transforms.py` → 116 passed（本地加 grpo_knobs 一行修复；该修复不提交）。2a-shared.patch 应用后同样 116 passed。
+### 测试命令与结果【历史记录，数字已过期】
+- CPU（历史，f78dee6 时）：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_rl_seq_adv.py tests/test_rl_adv_transforms.py` → 116 passed（当时本地加 grpo_knobs 一行修复，未提交；已于 f3ee263 还原）。2a-shared.patch 应用后同样 116 passed。
 - Miles 对照：`OMP_NUM_THREADS=1 PYTHONPATH=$PWD:/home/michael/work/miles-next /home/michael/work/miles-next-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_rl_seq_adv_miles.py` → 20 passed（Miles 0394715，torch 2.13.0）。同环境 `test_rl_algorithm_flags_upstream.py test_rl_reward_pipeline_equivalence.py` → 89 passed。
 - 全量（改动前后同口径，`--continue-on-collection-errors -p no:cacheprovider`）：前 756946b 73F+26E=99；后 9dec0f7 75F+26E=101。按 id 差集（`failure-diff.txt`）只多：
   - `tests/test_rl_algorithm_flags.py::test_design_d3_flags_are_all_mapped`
@@ -134,3 +134,34 @@
 - 7.5：`infra-drafts/2a-entry.patch` 声明 features maxrl/mapo/gdpo（ALGO-CAP 合入；还需 1b 声明 `reward_postprocessors:custom_reward_postprocess`）。
 - 费用：attempts 1–4 合计 2056 s 单卡 H100，估 ≈$3.1；无残留（两个 app stopped/0 tasks，watchdog 已杀）。
 - 任务状态变化：2.2、5.5、7.4 → 完成；7.2、7.3 未完成（receipt 缺陷）；7.5 未完成（补丁待合入）；7.6 未完成（待 7.5，按 R0 7.1 Modal 2 岛 + 本机 syncer）；7.7 部分（已回收，汇总待 7.2/7.3/7.6 后）。
+
+## 2026-09-29 merge infra-a e9f20cc + 独立审查处理
+- R2 新接口：变换每个 rollout 调一次 `rollout_meta_hook.record_round_metadata(args, <round id>, nonzero_advantages=n)`。**轮次 id 取自 driver 发布的 policy token（`yeto:<rollout_id>:<hash>`，`current_policy_token()`）**，不取 `Sample.rollout_id`：后者在 Miles 中是轨迹键（多段合并键，`agentic_tool_call.py:147`），不是训练轮次。给 INFRA 的提示：`record_round_metadata(args, samples)` 与 `build_metadata` 从 `Sample.rollout_id` 推轮次，在多段 agentic rollout 上会拿到轨迹 id。无 sink（CPU）时不记录。测试 `test_transforms_report_round_counter_for_the_metadata_hook`（轨迹 id 100+i，轮次 7 → 记录 (7, 2)）。
+- 审查 1：`evidence/g1` 下被 `*.log` 忽略的日志已扫描（仅有值为 None 的 password/api_key 配置项）后 `git add -f`；0 字节 `out.tgz` 已删除。7.4 保持勾选（证据已入库）。
+- 审查 2：5.5 取消勾选。需 R2 修复后的逐轮对应证据（端到端或 GPU）再勾。
+- 审查 3：8.1 取消勾选。当前 HEAD 全量 69F+26E（`after-failures-review.txt`），相对 756946b 基线只多 `test_rl_grpo_knobs.py::test_examples_build_and_translate[dapo-like]`——依赖 1b 在集成分支重生成该示例（须含 seq_adv 模块 PluginRef）。
+- 审查 5：`test_rl_seq_adv_miles.py` 文件头按实际比较方式改写（`torch.equal` 仅用于分派器 vs Miles 与 clip 指示；2.4/3.4 为 `allclose`）。
+- 审查 6：REINFORCE++ + reward KL 且全部奖励相同（第 0 轮 LoRA B=0 时 KL=0）不再判"期望梯度"：此情形规则不给结论（退回 R0）。组均值不同或组内有方差仍判期望梯度，其他情形未放宽。测试 `test_fake_driver_rpp_reward_kl_round0_identical_rewards_is_not_a_failure`。D8 的"reward KL 使 advantage 不全相等"分支因 KL 大小未上报而不执行，记为已知限制。
+- 审查 7：plan.md 中 GDPO 表述改为如实"D8 收紧分支在 GPU 上未触发"。2a-entry.patch 的 gdpo 声明等 R2 修复后的证据再定（maxrl/mapo 不受影响）。
+- 审查 8（A4）：GSPO 且 context parallel size ≠ 1 在启动前拒绝（`register_launch_check("seq_adv")`），测试 `test_gspo_context_parallel_refused_before_launch`。
+- 测试：`tests/test_rl_seq_adv.py tests/test_rl_adv_transforms.py tests/test_rl_round_accounting.py` 140 passed；miles-next-venv `test_rl_seq_adv_miles.py test_rl_reward_pipeline_equivalence.py` 89 passed；`openspec validate --strict` valid。
+
+### 当前状态总表（取代上文各表）
+| task | 状态 |
+|---|---|
+| 1.1 1.2 | 完成 |
+| 2.1 2.3 2.4 2.5 | CPU 通过 |
+| 2.2 | CPU 通过（INFRA R1 + trainer 测试）；GPU 上的 masked_fraction 待 GSPO G1 |
+| 3.1 3.2 3.3 3.4 3.5 | CPU 通过 |
+| 3.6 | CPU 通过（审查 6 修正后；reward-KL 分支不执行，见上） |
+| 4.1–4.4 5.1–5.4 | CPU 通过 |
+| 5.5 | 未完成（待 R2 修复后的逐轮对应证据） |
+| 6.1 6.2 6.3 | CPU 通过 / 完成 |
+| 7.1 | 完成 |
+| 7.2 7.3 | 未完成（attempt 2 被 receipt 缺陷挡住；INFRA 已修，待按单独提交计划经 launcher 重跑） |
+| 7.4 | GPU 验收通过（attempt 4，e54d2f7） |
+| 7.5 | 未完成（2a-entry.patch：maxrl/mapo 可声明；gdpo 待 R2 证据） |
+| 7.6 | 未完成（待 7.5；按 R0 7.1 Modal 2 岛 + 本机 syncer） |
+| 7.7 | 未完成（attempts 1–4 已回收并核实；汇总待剩余运行） |
+| 7.8 8.2 8.3 | 完成 |
+| 8.1 | 未完成（dapo-like 依赖 1b） |

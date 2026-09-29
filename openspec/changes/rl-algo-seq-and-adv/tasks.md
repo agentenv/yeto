@@ -42,7 +42,7 @@
 - [x] 5.2 分派器实现 GDPO：读取 `sample.metadata["yeto_reward_components"]`，缺分量、多分量、非有限、段间不一致时本轮失败并报告样本与分量；组内分量归一、加权、岛内样本级白化。验证：单测覆盖各失败场景。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 5.3 数值测试：与论文公式参考实现逐元素比对，覆盖 G=1、某分量组内恒定、全批恒定（白化仅减均值）、多段 rollout。验证：`tests/test_rl_adv_transforms.py` 通过。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 5.4 提供一个两分量示例 reward 函数（如 correctness + format），供 G1 使用，并写单测。验证：单测确认写入的 metadata 格式可被分派器接受。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
-- [x] 5.5 GDPO 的 `expects_gradient` 读取分派器上报的非零条目数，读不到时按期望梯度处理。验证：fake driver 单测。 完成记录：INFRA R2 + fake driver 测试 test_fake_driver_gdpo_*；progress.md（注意 R2 在 GPU 上滞后一轮，已报缺陷）。
+- [ ] 5.5 GDPO 的 `expects_gradient` 读取分派器上报的非零条目数，读不到时按期望梯度处理。验证：fake driver 单测。
 
 ## 6. 能力声明机制与文档
 
@@ -67,6 +67,6 @@
 
 ## 8. 集成检查
 
-- [x] 8.1 运行 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.1 基线相同。验证：两集合 diff 为空，结果写入 `progress.md`。 完成记录：progress.md（2026-09-29 merge algo-cap 2f9f02c）。
+- [ ] 8.1 运行 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.1 基线相同。验证：两集合 diff 为空，结果写入 `progress.md`。
 - [x] 8.2 `openspec validate rl-algo-seq-and-adv --strict` 通过。验证：命令输出无错误。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 8.3 在 `openspec/changes/rl-algo-seq-and-adv/progress.md` 中逐项列出任务状态，区分"已实现""CPU 测试通过""GPU 验证通过（G1/G3）"，并列出未通过或未声明的机制。验证：文件存在且与本任务列表逐项对应。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。

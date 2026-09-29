@@ -39,6 +39,7 @@ from yeto.rl.engine.algorithm import (
     AlgorithmSpecError,
     register_field,
     register_gradient_rule,
+    register_launch_check,
     register_mechanism,
     register_rejection,
     register_runtime_attrs,
@@ -306,6 +307,23 @@ def read_seq_adv_config(args: Any) -> dict[str, Any]:
 register_runtime_attrs("seq_adv", runtime_attrs)
 
 
+def launch_problems(spec, values) -> list[str]:
+    """Checks needing the run configuration (alignment A4)."""
+
+    problems = []
+    cp = int(values.get("context_parallel_size", 1) or 1)
+    if spec.advantage.estimator == "gspo" and cp != 1:
+        problems.append(
+            f"GSPO with context parallel size {cp}: the sequence-level ratio gathers every "
+            "sequence across CP ranks; that layout is not verified (rl-infra-spec A4). Use "
+            "context parallel size 1"
+        )
+    return problems
+
+
+register_launch_check("seq_adv", launch_problems)
+
+
 # --------------------------------------------------------------------------
 # numerics (pure python float64 would differ from Miles' float32; the
 # transforms use torch float32 exactly like grpo_default so MAPO at p=0.5 is
@@ -406,16 +424,46 @@ def _summary(name, per_group_rewards, advantages) -> dict[str, Any]:
     }
 
 
-ROUND_METADATA_ATTR = "yeto_rl_round_metadata"  # rollout_meta_hook.ROUND_METADATA_ATTR (INFRA R2)
+def _current_round_id() -> int | None:
+    """Training rollout id of the round being post-processed, or None.
+
+    ``Sample.rollout_id`` is a per-trajectory key (multi-segment merging), not
+    the training round; the round is read from the policy token the driver
+    publishes before each rollout (``yeto:<rollout_id>:<hash>``, INFRA sink).
+    No sink (no ``YETO_ROLLOUT_META_SINK`` and no Ray): None.
+    """
+
+    import os
+
+    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+
+    if not os.environ.get(hook.META_SINK_ENV):
+        try:
+            import ray
+        except ImportError:
+            return None
+        if not ray.is_initialized():
+            return None
+    token = hook.current_policy_token()
+    if not token:
+        return None
+    parts = token.split(":")
+    if len(parts) != 3 or parts[0] != "yeto" or not parts[1].isdigit():
+        raise AdvantageTransformError(f"unexpected policy token {token!r}")
+    return int(parts[1])
 
 
 def _report_round(args, name, per_group_rewards, advantages) -> None:
-    """Event + per-round counter read by the rollout metadata hook (-> batch_summary)."""
+    """Event + this rollout's non-zero advantage count for the driver (INFRA R2)."""
 
     summary = _summary(name, per_group_rewards, advantages)
-    metadata = dict(getattr(args, ROUND_METADATA_ATTR, None) or {})
-    metadata["nonzero_advantages"] = int(summary["nonzero_advantages"])
-    setattr(args, ROUND_METADATA_ATTR, metadata)
+    round_id = _current_round_id()
+    summary["rollout_id"] = round_id
+    if round_id is not None:
+        from yeto.rl.engine.miles_adapter.rollout_meta_hook import record_round_metadata
+
+        record_round_metadata(args, round_id,
+                              nonzero_advantages=int(summary["nonzero_advantages"]))
     rp.emit_event(args, summary)
 
 
@@ -614,15 +662,17 @@ def gdpo_expects_gradient(batch_summary) -> bool:
     return int(nonzero) > 0
 
 
-def rpp_expects_gradient(batch_summary, *, reward_kl: bool) -> bool:
+def rpp_expects_gradient(batch_summary, *, reward_kl: bool) -> bool | None:
     """D8: REINFORCE++ advantages (before whitening) are not all equal.
 
-    From group statistics: some group varies, or group means differ, or a
-    reward-side KL makes per-token returns differ. Missing statistics -> True.
+    From group statistics: some group varies or group means differ -> True;
+    missing statistics -> True. With identical rewards everywhere the only
+    remaining source is a reward-side KL, whose size is not reported to the
+    driver (it is exactly 0 on round 0, when the LoRA B matrices are 0 and the
+    policy equals the reference): that case returns None (no verdict; the R0
+    rule applies) with a reward KL, False without one.
     """
 
-    if reward_kl:
-        return True
     groups = list(getattr(batch_summary, "groups", batch_summary) or ())
     if not groups:
         return True
@@ -632,7 +682,9 @@ def rpp_expects_gradient(batch_summary, *, reward_kl: bool) -> bool:
         return True
     if any(float(s) > 0 for s in stds):
         return True
-    return len({float(m) for m in means}) > 1
+    if len({float(m) for m in means}) > 1:
+        return True
+    return None if reward_kl else False
 
 
 def advantage_gradient_rule(spec, batch_summary, step_metrics=None):
@@ -667,7 +719,9 @@ def expects_gradient(spec, batch_summary, step_metrics=None) -> bool:
         return gdpo_expects_gradient(batch_summary)
     if spec.advantage.estimator == "reinforce_plus_plus":
         reward_kl = spec.kl.placement == "reward" and (spec.kl.coef or 0.0) > 0
-        return rpp_expects_gradient(batch_summary, reward_kl=reward_kl)
+        verdict = rpp_expects_gradient(batch_summary, reward_kl=reward_kl)
+        if verdict is not None:
+            return verdict
     expected = any(g.reward_std > 0 for g in groups)
     if expected and gspo_gradient_rule(spec, batch_summary, step_metrics) is False:
         return False
