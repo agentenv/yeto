@@ -10,3 +10,6 @@
   3. `RolloutPool.add_engines`：预期 **拒绝**，缺 M2/M3。
 - 成功条件：1 通过，2、3 按预期拒绝，manifest 记录的 torch/megatron/cuda/nccl/TMS/peft 版本齐全。失败条件：1 被拒绝，或 2/3 被通过（任一出现即判 1.1 未通过，记录原因，不重跑到通过）。
 - 凭据：进程内从 ~/.docker/config.json 解码 ghcr 凭据，只放进 Modal Secret，不打印、不落盘。
+
+## attempt1 结果与重跑理由（事后追加，计划条件未改）
+attempt1（sb-8avihvjXJ5HpcSMbpNcqxQ，91 s，L40S）：基础能力认证通过，standby 与 add_engines 按预期被拒绝。但 `torch_memory_saver` 模块没有 `__version__`，被记成 "unknown"，而 `check_manifest` 把 "unknown" 当作已记录。原因已修复：采集时回退到 `importlib.metadata`，检查时拒绝 "unknown"。修复后按同一计划重跑一次（attempt2）。

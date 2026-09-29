@@ -109,7 +109,16 @@ def collect(*, image: str | None) -> dict[str, Any]:
     for name in VERSION_MODULES:
         try:
             mod = importlib.import_module(name)
-            versions[name] = str(getattr(mod, "__version__", "unknown"))
+            version = getattr(mod, "__version__", None)
+            if version is None:
+                import importlib.metadata as md
+
+                dist = {"torch_memory_saver": "torch-memory-saver"}.get(name, name.split(".")[0])
+                try:
+                    version = md.version(dist)
+                except md.PackageNotFoundError:
+                    version = None
+            versions[name] = str(version) if version is not None else "unknown"
         except Exception:
             versions[name] = None
     cuda = nccl = None
@@ -168,7 +177,7 @@ def check_manifest(manifest: Mapping[str, Any], pins: Mapping[str, str]) -> list
         problems.append(f"image {image!r} != pinned {pinned!r}")
     versions = manifest.get("versions", {})
     for name in ("torch", "megatron.core", "cuda", "nccl", "torch_memory_saver", "peft"):
-        if not versions.get(name):
+        if not versions.get(name) or versions.get(name) == "unknown":
             problems.append(f"{name} version not recorded")
     return problems
 
