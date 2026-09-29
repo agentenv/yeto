@@ -69,6 +69,8 @@ def masked_fraction(outputs: Any) -> float | None:
     (rl-algorithm-capabilities D6). Unknown (None) keeps the R0 rule.
     """
 
+    from ..algorithm import valid_masked_fraction
+
     values = []
     for output in outputs or ():
         metrics = getattr(output, "metrics", output)
@@ -76,9 +78,10 @@ def masked_fraction(outputs: Any) -> float | None:
             continue
         for key in MASKED_FRACTION_KEYS:
             if metrics.get(key) is not None:
-                values.append(float(metrics[key]))
+                values.append(valid_masked_fraction(metrics[key]))
                 break
-    if not values or any(not math.isfinite(v) for v in values):
+    # Only non-bool real numbers in [0, 1]; anything else -> unknown (None).
+    if not values or any(v is None for v in values):
         return None
     return min(values)  # conservative: fully masked only if every cell is
 

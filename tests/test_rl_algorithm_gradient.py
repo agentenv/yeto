@@ -69,6 +69,9 @@ def test_adapter_reads_masked_fraction_when_present():
     assert masked_fraction([SimpleNamespace(outcome="normal")]) is None
     assert masked_fraction([]) is None
     assert masked_fraction([{"masked_fraction": math.nan}]) is None
+    for bad in (True, 1.5, -0.1, "1.0", None):
+        assert masked_fraction([{"masked_fraction": bad}]) is None, bad
+    assert masked_fraction([{"masked_fraction": 1}]) == 1.0
 
 
 def test_miles_trainer_step_metrics_carry_masked_fraction():
@@ -100,7 +103,8 @@ def test_declared_full_mask_round_is_not_a_failure(tmp_path, masking_mechanism):
     final = driver.run()
     assert final.policy_version == 3
     masked = [e for e in _events(tmp_path) if e["event"] == "rl_zero_gradient_masked"]
-    assert masked == [dict(masked[0], rollout_id=1, masked_fraction=1.0)]
+    assert masked == [dict(masked[0], rollout_id=1, masked_fraction=1.0,
+                           relaxed_by="masked:features:test_full_mask")]
 
 
 def test_masking_mechanism_without_full_mask_still_fails(tmp_path, masking_mechanism):
@@ -121,3 +125,32 @@ def test_nonfinite_grad_norm_fails_for_any_algorithm(tmp_path, masking_mechanism
         with pytest.raises(StrictRlInvariantError) as info:
             driver.run()
         assert info.value.metric == "nonfinite_grad_norm"
+
+
+def test_algorithm_without_per_algorithm_api_keeps_r0_rule(tmp_path):
+    class R0Only:  # R0-shaped description: no gradient_expectation
+        def __init__(self):
+            self._spec = AlgorithmSpec()
+
+        def __getattr__(self, name):
+            if name in ("gradient_expectation", "expects_gradient"):
+                raise AttributeError(name)
+            return getattr(self._spec, name)
+
+    _, driver = _run(tmp_path, R0Only(), zero_grad_rounds={1},
+                     masked_fraction_rounds={1: 1.0})
+    with pytest.raises(StrictRlInvariantError) as info:
+        driver.run()
+    assert info.value.metric == "zero_grad_norm_with_nonzero_advantages"
+
+
+def test_gradient_rule_relaxation_is_recorded(tmp_path):
+    alg.register_gradient_rule("t_rule_evt", lambda s, b, m: False,
+                               mechanism="features:eps_clip")
+    try:
+        _, driver = _run(tmp_path, MASKING, features={"eps_clip"}, zero_grad_rounds={1})
+        driver.run()
+        [event] = [e for e in _events(tmp_path) if e["event"] == "rl_zero_gradient_masked"]
+        assert event["relaxed_by"] == "gradient_rule:t_rule_evt (features:eps_clip)"
+    finally:
+        alg.unregister(gradient_rule="t_rule_evt")
