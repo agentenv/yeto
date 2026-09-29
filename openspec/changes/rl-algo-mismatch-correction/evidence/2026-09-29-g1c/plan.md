@@ -57,3 +57,10 @@ committed diagnosis.
   created (app list shows none). Mitigation: the archived tree drops openspec/, tests/, docs/
   (2508 files -> fewer mount uploads); runtime code unchanged. One more attempt; if it fails the
   same way, the re-verification is reported as blocked by the host.
+
+## tis attempt 3: same host failure -> re-verification BLOCKED (not a mechanism result)
+- Identical `RuntimeError: can't start new thread` during the Modal mount upload
+  (runs/tis/launch.log). No Modal app was created in any attempt (`modal app list | grep g1c`
+  count 0: no_app_created.txt); no GPU time used. Per this plan no further attempt: icepop and
+  opsm-trainer were not started. Unblock: run the launcher on a host with thread headroom (or
+  raise the per-user limit), then execute this plan unchanged.

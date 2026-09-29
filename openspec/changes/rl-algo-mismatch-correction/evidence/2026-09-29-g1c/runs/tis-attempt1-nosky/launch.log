@@ -1,0 +1,12 @@
+[yeto] run 'algo1a-g1c-tis' submitted; worker pid 2550344.
+[yeto] log: /home/michael/.yeto/runs/algo1a-g1c-tis/launcher.log
+[yeto] streaming logs — Ctrl-C detaches, the run keeps going.
+
+Traceback (most recent call last):
+  File "/tmp/algo1a/tree-tis/yeto/cli.py", line 1614, in cmd_worker
+    code = launcher_run(args, on_clusters=record_clusters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/algo1a/tree-tis/yeto/launcher.py", line 3626, in run
+    import sky
+ModuleNotFoundError: No module named 'sky'
+[yeto] run 'algo1a-g1c-tis' finished: FAILED (exit code 1)
