@@ -48,7 +48,7 @@
 | 7.2 | GPU 验收通过（G1） | tis、icepop、opsm_trainer、mismatch_observe、mis、mis_mask；opsm_rollout 未跑 |
 | 7.3 | 未完成 | 已声明 none/tis/opsm/opsm_trainer（opsm 为 OPSM 维度，不放行来源）；其余机制待集成分支处理或补触发验证 |
 | 7.4 | GPU 验收通过（G2） | evidence/2026-09-29-g1b/runs/g2-observe/report.md |
-| 7.5 | 未完成 | G3（TIS）跑过一次，未通过（判据 3、4 不成立：磁带截断），待重跑并补跑 IcePop |
+| 7.5 | GPU 验收通过（G3） | TIS：g3c；IcePop：g3d（g3c 中 IcePop 判据 5 失败，按修订计划重跑一次后通过） |
 | 7.6 | 已实现 | 无残留，费用见下 |
 | 7.7 | 未完成（可选） | |
 | 8.1 / 8.2 / 8.3 | CPU 通过 / 已实现 | |
