@@ -230,7 +230,43 @@ def _reject_over_sampling(s) -> str | None:
     return None
 
 
+def required_plugins(spec) -> tuple:
+    """PluginRefs a spec must list in ``plugins`` (review F1/F2)."""
+
+    from yeto.rl.engine.algorithm import PluginRef
+
+    refs = list(rp.stage_plugin_refs()) if uses_pipeline(spec) else []
+    if spec.sampling.overlong_filter:
+        refs.append(PluginRef.from_path(rp.SAMPLE_FILTERS_PATH))
+    return tuple(sorted(refs, key=lambda r: r.path))
+
+
+def with_pipeline_plugins(spec):
+    """``spec`` with the required pipeline/sample-filter PluginRefs in ``plugins``."""
+
+    required = {r.path: r for r in required_plugins(spec)}
+    kept = [p for p in spec.plugins if p.path not in required]
+    return spec.replace(plugins=[*kept, *required.values()])
+
+
+def _reject_plugins(s) -> str | None:
+    required = required_plugins(s)
+    listed = {p.path: p.sha256 for p in s.plugins}
+    missing = [r.path for r in required if r.path not in listed]
+    stale = [r.path for r in required if r.path in listed and listed[r.path] != r.sha256]
+    problems = []
+    if missing:
+        problems.append(
+            f"plugins must list the code of every reward-pipeline / sample-filter module "
+            f"{missing} (grpo_knobs.with_pipeline_plugins adds them)"
+        )
+    if stale:
+        problems.append(f"plugins {stale}: source hash differs from the current module source")
+    return "; ".join(problems) or None
+
+
 register_rejection("grpo_knobs_reward_pipeline", _reject_pipeline)
+register_rejection("grpo_knobs_pipeline_plugins", _reject_plugins)
 register_rejection("grpo_knobs_stage_params", _reject_stage_params)
 register_rejection("grpo_knobs_constant_aggregation", _reject_constant)
 register_rejection("grpo_knobs_kl_ref_model", _reject_ref_model)
@@ -251,11 +287,13 @@ def plugins_config(spec) -> dict[str, Any] | None:
             "reward_shapers": _shapers_json(spec.advantage.reward_shapers),
             "advantage_transform": spec.advantage.transform,
             "advantage_params": dict(spec.advantage.transform_params),
+            "pipeline_sha256": rp.pipeline_sha256(),
         }
     if spec.loss.aggregation == "constant":
         config["reducer"] = {"denominator": spec.loss.constant_denominator}
     if spec.sampling.overlong_filter:
         config["overlong_filter"] = True
+        config["sample_filters_sha256"] = rp.plugin_sha(rp.SAMPLE_FILTERS_PATH)
     if not config:
         return None
     config["algorithm_spec_sha256"] = spec.sha256()
@@ -283,6 +321,11 @@ def launch_problems(
     """
 
     problems = []
+    for item in spec.advantage.reward_shapers:
+        if dict(item)["name"] not in rp.REWARD_SHAPERS:
+            problems.append(f"reward shaper {dict(item)['name']!r} is not registered")
+    if spec.advantage.transform not in rp.ADV_TRANSFORMS:
+        problems.append(f"advantage transform {spec.advantage.transform!r} is not registered")
     over = spec.sampling.over_sampling_batch_size
     if over is not None and rollout_batch_size is not None and over < rollout_batch_size:
         problems.append(
@@ -310,23 +353,43 @@ def launch_problems(
     return problems
 
 
-def check_ref_model(spec, base_model_revision: str | None) -> None:
-    """Task 3.2: the KL reference must be this island's base model revision."""
+def check_ref_model(spec, base_model_revision: str | None, *, base_model: str | None = None,
+                    ref_load_override: str | None = None) -> None:
+    """Tasks 3.2/3.3: the KL reference must be this island's base model.
+
+    ``--ref-load`` is resolved from the pinned base model (``--model`` at
+    ``--model-revision``, ``run_config._resolve_ref_load``) unless
+    ``--megatron-ref-load`` overrides it with an unverifiable local
+    checkpoint, which is refused with KL loss. Revisions compare
+    case-insensitively (the learner lower-cases ``model_revision``).
+    """
 
     ref = spec.kl.ref_model
     if ref is None:
         return
     ref = dict(ref)
-    if base_model_revision is None or ref["revision"] != base_model_revision:
+    if base_model_revision is None or ref["revision"].lower() != str(base_model_revision).lower():
         raise AlgorithmSpecError(
             f"kl.ref_model.revision {ref['revision']!r} does not match this island's "
             f"base_model_revision {base_model_revision!r}; the reference model is the base"
+        )
+    if base_model is not None and ref["source"] != base_model:
+        raise AlgorithmSpecError(
+            f"kl.ref_model.source {ref['source']!r} does not match this island's base model "
+            f"{base_model!r} (--ref-load is resolved from --model)"
+        )
+    if ref_load_override:
+        raise AlgorithmSpecError(
+            f"kl.placement='loss' with --megatron-ref-load {ref_load_override!r}: the reference "
+            "checkpoint cannot be bound to kl.ref_model {source, revision}; drop the override"
         )
 
 
 def island_problems(spec, island) -> list[str]:
     try:
-        check_ref_model(spec, island.get("base_model_revision"))
+        check_ref_model(spec, island.get("base_model_revision"),
+                        base_model=island.get("base_model"),
+                        ref_load_override=island.get("ref_load_override"))
     except AlgorithmSpecError as exc:
         return [str(exc)]
     return []

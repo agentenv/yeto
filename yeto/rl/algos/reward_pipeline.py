@@ -51,18 +51,28 @@ Frozen interface (consumed by ``rl-algo-seq-and-adv``)
 Registering a new advantage transform (P2)
 ------------------------------------------
 
-1. Add ``fn`` and register it in this module (``register_advantage_transform``)
-   with a ``validate`` for its parameters. Registration in this module keeps
-   the dispatcher's PluginRef (the source SHA256 of this file) covering it,
-   so the new stage enters the algorithm hash.
-2. Select it from the spec: ``advantage.transform = "<name>"`` (and
-   ``advantage.transform_params`` for parameters) plus
-   ``advantage.reward_postprocess = dispatcher_ref()``.
-3. Map any new mechanism (``register_mechanism``) and keep it undeclared
+1. In your extension module (listed in ``yeto.rl.algos.EXTENSION_MODULES``),
+   define a *module-level* ``fn`` and call ``register_advantage_transform``
+   with a ``validate`` for its parameters.
+2. Code identity (review F1): every module that registers a shaper or
+   transform is covered. ``stage_plugin_refs()`` gives one PluginRef per such
+   module (sorted by module name); a spec that uses the dispatcher must list
+   exactly these in ``plugins`` (``grpo_knobs.with_pipeline_plugins(spec)``
+   adds them), so their source hashes enter the algorithm hash and are
+   re-verified by the learner. Their merged hash (``pipeline_sha256()``) is
+   shipped in ``args.yeto_algo_plugins`` and re-checked by ``post_process``
+   in the Miles process after ``load_extensions()``.
+3. Select it from the spec: ``advantage.transform = "<name>"`` (and
+   ``advantage.transform_params``) plus
+   ``advantage.reward_postprocess = dispatcher_ref()``. Unknown names are
+   refused when the spec is parsed / launched, never first on the GPU.
+4. Map any new mechanism (``register_mechanism``) and keep it undeclared
    until its GPU smoke passes.
-4. Add a CPU test: with the transform's degenerate parameters (if it has
-   any) it must equal ``grpo_default`` element-wise, and its own numerics
-   must match a hand computation.
+5. Add a CPU test: with degenerate parameters (if any) it equals
+   ``grpo_default`` element-wise, and its numerics match a hand computation.
+
+Any edit to a covered module changes the identity: regenerate specs that pin
+it (``examples/rl_algorithms/*.json``).
 
 Import-light: no torch/miles at import time (torch is imported on use).
 """
@@ -99,6 +109,16 @@ class StageDef:
     fn: Callable[..., list[float]]
     validate: Callable[[Mapping[str, Any], Any], list[str]]
 
+    @property
+    def module(self) -> str:
+        return self.fn.__module__
+
+    @property
+    def path(self) -> str:
+        """Dotted callable path (a PluginRef path hashing the stage's module)."""
+
+        return f"{self.fn.__module__}.{self.fn.__qualname__}"
+
 
 REWARD_SHAPERS: dict[str, StageDef] = {}
 ADV_TRANSFORMS: dict[str, StageDef] = {}
@@ -113,9 +133,18 @@ def _no_params(kind: str, name: str):
     return validate
 
 
+def _check_stage_fn(kind: str, name: str, fn) -> None:
+    if "." in fn.__qualname__ or "<" in fn.__qualname__:
+        raise ValueError(
+            f"{kind} {name!r}: register a module-level function (its module source is "
+            f"hashed into the dispatcher identity), got {fn.__qualname__!r}"
+        )
+
+
 def register_reward_shaper(name: str, fn, *, validate=None) -> StageDef:
     if name in REWARD_SHAPERS:
         raise ValueError(f"reward shaper {name!r} already registered")
+    _check_stage_fn("reward shaper", name, fn)
     stage = StageDef(name, fn, validate or _no_params("reward shaper", name))
     REWARD_SHAPERS[name] = stage
     return stage
@@ -124,6 +153,7 @@ def register_reward_shaper(name: str, fn, *, validate=None) -> StageDef:
 def register_advantage_transform(name: str, fn, *, validate=None) -> StageDef:
     if name in ADV_TRANSFORMS:
         raise ValueError(f"advantage transform {name!r} already registered")
+    _check_stage_fn("advantage transform", name, fn)
     stage = StageDef(name, fn, validate or _no_params("advantage transform", name))
     ADV_TRANSFORMS[name] = stage
     return stage
@@ -144,6 +174,70 @@ def plugins_payload(config: Mapping[str, Any]) -> dict[str, Any]:
 
     config = {"schema": PLUGINS_SCHEMA, **dict(config)}
     return {"config": config, "sha256": canonical_sha256(config)}
+
+
+# --------------------------------------------------------------------------
+# identity of the pipeline code (review F1/F2)
+# --------------------------------------------------------------------------
+
+SAMPLE_FILTERS_PATH = "yeto.rl.algos.sample_filters.apply_sample_filters"
+
+
+def _load_extensions() -> None:
+    from yeto.rl.engine.algorithm import load_extensions
+
+    load_extensions()
+
+
+def stage_plugin_paths() -> tuple[str, ...]:
+    """One callable path per module that registered a shaper or transform,
+    sorted by module name (after every extension module is imported)."""
+
+    _load_extensions()
+    by_module: dict[str, str] = {}
+    for stage in sorted([*REWARD_SHAPERS.values(), *ADV_TRANSFORMS.values()], key=lambda d: d.path):
+        by_module.setdefault(stage.module, stage.path)
+    return tuple(by_module[m] for m in sorted(by_module))
+
+
+def stage_plugin_refs():
+    """PluginRefs (current source SHA256) of every stage-registering module."""
+
+    from yeto.rl.engine.algorithm import PluginRef
+
+    return tuple(PluginRef.from_path(p) for p in stage_plugin_paths())
+
+
+def combined_sha256(refs) -> str:
+    """Merged identity: sha256 over ``module<TAB>source-sha256`` lines, sorted by module."""
+
+    lines = sorted(f"{r.path.rpartition('.')[0]}\t{r.sha256}\n" for r in refs)
+    return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+
+def plugin_sha(path: str) -> str:
+    from yeto.rl.engine.algorithm import plugin_source_sha256
+
+    return plugin_source_sha256(path)
+
+
+def pipeline_sha256() -> str:
+    return combined_sha256(stage_plugin_refs())
+
+
+def expected_algorithm_sha256(args: Any) -> str | None:
+    for name in ("yeto_rl_expected_algorithm_sha256", "rl_expected_algorithm_sha256"):
+        value = getattr(args, name, None)
+        if value:
+            return str(value).lower()
+    return None
+
+
+def runtime_attrs_delivered(args: Any) -> bool:
+    """The ports adapter's runtime attrs reached this Miles namespace (it always
+    sets ``yeto_rl_dynamic_sampling_max_replacements``, possibly None)."""
+
+    return hasattr(args, PIPELINE_ATTR) or hasattr(args, "yeto_rl_dynamic_sampling_max_replacements")
 
 
 def read_plugins(args: Any, *, required: bool = True) -> dict[str, Any] | None:
@@ -170,6 +264,13 @@ def read_plugins(args: Any, *, required: bool = True) -> dict[str, Any] | None:
         )
     if config.get("schema") != PLUGINS_SCHEMA:
         raise RewardPipelineError(f"args.{PIPELINE_ATTR}: unknown schema {config.get('schema')!r}")
+    expected = expected_algorithm_sha256(args)
+    declared = config.get("algorithm_spec_sha256")
+    if expected is not None and declared is not None and declared != expected:
+        raise RewardPipelineError(
+            f"args.{PIPELINE_ATTR} was derived from algorithm spec {declared}, but this run "
+            f"expects {expected} (--rl-expected-algorithm-sha256)"
+        )
     return dict(config)
 
 
@@ -371,7 +472,15 @@ def post_process(args: Any, samples: list[Any]) -> tuple[list[float], list[float
     """Miles ``--custom-reward-post-process-path`` entry."""
 
     _check_multi_lora(args)
+    _load_extensions()  # stages registered by other extension modules (e.g. P2)
     cfg = pipeline_config(args)
+    declared = cfg.get("pipeline_sha256")
+    actual = pipeline_sha256()
+    if declared != actual:
+        raise RewardPipelineError(
+            f"reward pipeline code identity {actual} differs from the spec's {declared} "
+            "(a shaper/transform module changed or is missing in this process)"
+        )
     raw = [sample.get_reward_value(args) for sample in samples]
     shaped = raw
     shapers = cfg.get("reward_shapers") or []
