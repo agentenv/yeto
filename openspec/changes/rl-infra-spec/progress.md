@@ -120,3 +120,9 @@
 - **1.2 GPU 验收通过（已勾选）**：计划单独提交于 65b56ca，之后才启动。Modal 2 个 island，各 1×`H100!`（`--modal-gpu-exact` 首次真 H100 验证：两个 island 断言均得到 NVIDIA H100 80GB HBM3），本机作为 head。app `yeto-infra-a-b12`（ap-b43AWL3WDVThSe6RHSUEEp），16:48–17:03 UTC，约 $2，已 stopped、0 tasks；watchdog 与 puller 已结束。证据：`evidence/infra-a/1.2/`，提交 810b03b。
 - 已合入：p0-driver-2.patch（7d5457b，基于 algo-cap 09607d6）；1b/2a 所需通道（d235e0b）；origin/algo-cap 2e40652（a66219c）。每次合入后全量失败集合按 id 与基线相同。
 - **2.2/2.3/2.4 GPU 阻塞**：`yeto launch` 在 fixed-partition 下仍把整节点 GPU 作为 trainer（`--actor-num-gpus-per-node {spec.gpus_per_node}`），且不透传 `--rollout-num-gpus`。补丁 `/home/michael/work/infra-drafts/infra-launcher-partition.patch`（launcher.py 与新增测试，对 infra-a HEAD `git apply --check` 通过）需要 launcher 负责人合入，或由主 agent 授权 INFRA 合入。合入后按顺序执行：先单独提交 2.2/2.3 计划（T2R2 或 T4R4，Modal `H100!`，X9 用发布延迟注入），再提交 2.4 计划。
+
+### 依赖复核（2026-09-29 INFRA，续 3）
+- 1.3：依赖 1.1 已满足，计划满足验收原文 → **勾选**。
+- 1.4：依赖 1.2 已满足，但验收是 X9（design 表：在固定分区对严格 policy 依赖注入延迟，是 GPU 实验），要等 2.3 的 GPU 运行 → 仍不勾选。
+- 1.5 依赖 1.4，1.6 依赖 1.3–1.5，1.8 依赖 1.4/1.7 → 随 1.4 一起不勾选。
+- launcher partition 补丁已按授权合入 infra-a（launcher.py 中 fixed-partition 的 GPU 划分部分归 INFRA）。
