@@ -2899,45 +2899,7 @@ def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
             )
 
 
-EVENT_LINE_PREFIX = "YETO_RL_EVENT "  # same marker as the driver's experiment echo
-
-
-class EventCollector:
-    """Rebuilds an island's event tape from ``YETO_RL_EVENT <json>`` log lines.
-
-    Used for --rl-single-island-no-sync islands, whose ~/yeto-output cannot
-    be fetched (Modal) and which have no syncer tape. Lines are appended in
-    stream order; an exact repeat (a log stream that reconnected and replayed)
-    or a second echo of the same record (the driver's experiment echo, whose
-    ``time_unix`` differs) is written once.
-    """
-
-    def __init__(self, path) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._seen: set[str] = set()
-        self._lock = threading.Lock()
-        self.count = 0
-
-    def feed(self, line) -> None:
-        text = str(line)
-        at = text.find(EVENT_LINE_PREFIX)
-        if at < 0:
-            return
-        payload = text[at + len(EVENT_LINE_PREFIX):].strip()
-        try:
-            record = json.loads(payload)
-        except ValueError:
-            return
-        key = json.dumps({k: v for k, v in record.items() if k != "time_unix"},
-                         sort_keys=True, separators=(",", ":"), default=str)
-        with self._lock:
-            if key in self._seen:
-                return
-            self._seen.add(key)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(payload + "\n")
-            self.count += 1
+from .rl.event_echo import TapeCollector as EventCollector  # noqa: E402  (no-sync tapes)
 
 
 def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:

@@ -302,9 +302,6 @@ def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
     )
 
 
-EVENT_LINE_PREFIX = "YETO_RL_EVENT "  # launcher.EventCollector / driver echo
-
-
 def install_event_echo() -> bool:
     """--rl-single-island-no-sync: echo every tape record to stdout.
 
@@ -318,6 +315,14 @@ def install_event_echo() -> bool:
     import threading
 
     from . import miles
+    from .engine import driver
+    from .event_echo import PREFIX
+
+    # This echo covers every record (driver ones included), in the same
+    # format; the driver's own experiment echo would print driver records a
+    # second time with another time_unix, so it is switched off here.
+    if getattr(driver, "_ECHO_EVENTS", False):
+        driver._ECHO_EVENTS = False
 
     original = miles._append_rl_event
     if getattr(original, "_yeto_echo", False):
@@ -334,7 +339,7 @@ def install_event_echo() -> bool:
                 written = handle.read().decode("utf-8")
         for line in written.splitlines():
             if line.strip():
-                print(EVENT_LINE_PREFIX + line, flush=True)
+                print(PREFIX + line, flush=True)
 
     echo._yeto_echo = True
     miles._append_rl_event = echo
