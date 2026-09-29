@@ -1,7 +1,7 @@
 # Tasks
 
 执行约定：
-- 工作目录为 `/home/michael/work/rl-algos`（分支 `rl-algorithms`），测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`，upstream 参数解析在 `/home/michael/work/miles-next-venv` 中运行。
+- 规划文档以 `rl-infra-spec` 分支上的副本为准；实现 worktree、分支与可修改路径按 `../rl-infra-spec/alignment.md` 的工作包派发（原 `/home/michael/work/rl-algos` 分支 `rl-algorithms` 不再作为规划来源），测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`，upstream 参数解析在 `/home/michael/work/miles-next-venv` 中运行。
 - 不改 legacy `build_miles_argv`，默认 GRPO 不变。
 - fork 改动只能提交到 `michaellchung/miles` 的 `yeto/ports` 分支，且必须先得到用户同意；绝不向 radixark/miles 或 sgl-project/sglang 提 PR。
 - commit 与 push 需要用户确认。

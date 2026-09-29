@@ -1,7 +1,7 @@
 # Tasks
 
 执行约定：
-- 在 `/home/michael/work/rl-algos`（分支 `rl-algorithms`）中工作；前置：P0 `rl-algorithm-capabilities` 与 P1-b `rl-algo-grpo-knobs` 的分派器已合入。
+- 规划文档以 `rl-infra-spec` 分支上的副本为准；实现 worktree、分支与可修改路径按 `../rl-infra-spec/alignment.md` 的工作包派发（原 `/home/michael/work/rl-algos` 分支 `rl-algorithms` 不再作为规划来源）；前置：P0 `rl-algorithm-capabilities` 与 P1-b `rl-algo-grpo-knobs` 的分派器已合入。
 - 测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`；全量以"失败集合前后相同"为准。涉及 upstream 参数解析或 Miles 原函数对照的测试在 `/home/michael/work/miles-next-venv` 中运行。
 - 不修改 legacy `build_miles_argv`，不修改 Miles/SGLang fork，不向 radixark/miles 或 sgl-project/sglang 提 PR。
 - 状态严格区分"已实现""CPU 测试通过""GPU 验证通过"；mock/fake 测试不能替代 GPU 验收。

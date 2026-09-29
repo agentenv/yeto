@@ -1,10 +1,11 @@
 # Tasks
 
 执行约定：
-- 在 `/home/michael/work/rl-algos`（分支 `rl-algorithms`）中工作。
+- 规划文档以 `rl-infra-spec` 分支上的副本为准；实现 worktree、分支与可修改路径按 `../rl-infra-spec/alignment.md` 的工作包派发（原 `/home/michael/work/rl-algos` 分支 `rl-algorithms` 不再作为规划来源）。
 - 测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`。全量测试以"改动前后失败集合相同"为准，改动前的基线要先记录下来（见 0.1）。
 - 不修改 legacy 的 `build_miles_argv`，不修改 Miles/SGLang fork。
 - 本 change 不需要 GPU。
+- `yeto/rl/engine/driver.py` 同时被 4.2、`fix-decoupled-lr-schedule` 2.1 与 `rl-infra-spec` 1.7/2.2 修改；按 alignment.md 的顺序由单一写入者提交，4.2 只改 `_check_gradient` 的判定调用。
 - commit 和 push 需要用户确认。
 
 ## 0. 基线

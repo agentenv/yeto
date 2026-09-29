@@ -1,5 +1,5 @@
 约定：
-- 在 `/home/michael/work/rl-algos`（分支 `rl-algorithms`）中工作。测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`；全量测试以"改动前后失败集合相同"为准。
+- 规划文档以 `rl-infra-spec` 分支上的副本为准；实现 worktree、分支与可修改路径按 `../rl-infra-spec/alignment.md` 的工作包派发（原 `/home/michael/work/rl-algos` 分支 `rl-algorithms` 不再作为规划来源）。测试命令为 `/tmp/yeto-venv/bin/python -m pytest -q`；全量测试以"改动前后失败集合相同"为准。
 - 依赖 Miles 源码的 CPU 测试与 upstream 参数解析在 `/home/michael/work/miles-next-venv` 中运行，miles 不可用时 skip；任务说明中记录命令与结果。
 - 不修改 legacy `build_miles_argv`，不修改 Miles/SGLang fork，默认 GRPO 的 argv 与哈希不变；不向 radixark/miles 或 sgl-project/sglang 提 PR。
 - 状态严格区分"已实现""CPU 测试通过""GPU 验证通过"；mock/fake 测试不能替代 GPU 验收。能力声明只在 G1 通过后加入（第 8 组）。
