@@ -68,7 +68,10 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         ),
     )
     values.update(overrides)
-    return EngineCapabilities(**values)
+    # rl-algo-grpo-knobs 8.3: the fake declares what the Miles adapter declares.
+    from yeto.rl.algos.grpo_knobs import merge_declared
+
+    return merge_declared(EngineCapabilities(**values))
 
 
 def _sha(data: bytes) -> str:

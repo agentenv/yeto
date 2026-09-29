@@ -455,17 +455,10 @@ register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule,
 
 G1_EVIDENCE = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
 G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
-    # G1 run name -> mechanisms it exercised (dimension -> names)
-    "clip_higher": {"features": frozenset({"clip_higher", "eps_clip"})},
-    "dual_clip": {"features": frozenset({"dual_clip"})},
-    "token": {"loss_aggregations": frozenset({"token"})},
-    "drgrpo": {"features": frozenset({"custom_pg_loss_reducer", "no_grpo_std_normalization"}),
-               "loss_aggregations": frozenset({"constant"})},
-    "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
-    "entropy": {"features": frozenset({"entropy_bonus"})},
-    "over_sampling": {"features": frozenset({"over_sampling"})},
-    "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
-                         "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
+    # G1 run name -> mechanisms declared from it (dimension -> names). Only
+    # mechanisms shown to take effect on the GPU are declared (coordinator
+    # decision): clip_higher / dual_clip (clipfrac 0) and over_sampling (no
+    # replacement) wait for a G1 that triggers them.
 }
 
 
@@ -477,3 +470,15 @@ def declared_mechanisms() -> dict[str, frozenset[str]]:
         for dim, names in dims.items():
             out.setdefault(dim, set()).update(names)
     return {d: frozenset(n) for d, n in out.items()}
+
+
+def merge_declared(capabilities):
+    """``capabilities`` with the G1-declared mechanisms added (union per dimension)."""
+
+    import dataclasses
+
+    extra = declared_mechanisms()
+    if not extra:
+        return capabilities
+    return dataclasses.replace(capabilities, **{
+        dim: frozenset(getattr(capabilities, dim)) | names for dim, names in extra.items()})
