@@ -18,6 +18,7 @@ from yeto.rl.elastic_benchmark.manifest import (
     EXECUTION_MODES,
     FIXED_ARM_KINDS,
     ManifestError,
+    canonical_execution_mode,
 )
 
 LEGACY_CONFIG = "colocated"
@@ -112,7 +113,7 @@ def load_attestation(path: Path | None) -> Attestation:
 def attestation_from_dict(payload: dict[str, Any]) -> Attestation:
     if not isinstance(payload, dict):
         raise ManifestError("capability attestation must be a JSON object")
-    modes = payload.get("execution_modes", [])
+    modes = [canonical_execution_mode(m) for m in payload.get("execution_modes", [])]
     unknown = sorted(set(modes) - set(EXECUTION_MODES))
     if unknown:
         raise ManifestError(f"attestation lists unknown execution modes: {unknown}")
@@ -372,7 +373,7 @@ def arm_status(
     reason = fingerprint_rejection(runtime_fingerprint, attestation)
     if reason:
         return STATUS_BLOCKED, reason
-    if profile["execution_mode"] not in attestation.execution_modes:
+    if canonical_execution_mode(profile["execution_mode"]) not in attestation.execution_modes:
         return STATUS_BLOCKED, f"runtime has not attested {profile['execution_mode']}"
     if not attestation.partitioned_driver:
         return STATUS_BLOCKED, "runtime has not attested the partitioned driver"
@@ -382,9 +383,9 @@ def arm_status(
 
 
 def fingerprint_rejection(expected: str | None, attestation: Attestation) -> str | None:
-    """A resolved study fingerprint must equal the attested runtime fingerprint."""
+    """The study must pin a runtime fingerprint equal to the attested one (fail closed)."""
     if expected is None or expected == "unresolved":
-        return None
+        return "study runtime fingerprint is unresolved; nothing can be certified against it"
     if attestation.runtime_fingerprint is None:
         return "runtime fingerprint not attested"
     if attestation.runtime_fingerprint != expected:

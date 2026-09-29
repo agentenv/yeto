@@ -27,12 +27,11 @@ from dataclasses import dataclass
 
 from .execution_profile import ExecutionProfile
 
-# Defaults from the audit (seconds).
-SYNCER_QUORUM_TIMEOUT_S = 900.0  # syncer --quorum-timeout-s default
-FINALIZATION_TIMEOUT_S = 900.0  # yeto/protocol.py FINALIZATION_TIMEOUT
-SYNCER_WRITE_TIMEOUT_S = 180.0  # only if the learner stops reading its socket
-MILES_DIST_TIMEOUT_S = 600.0  # --rl-distributed-timeout-minutes default 10
-FLEET_RECOVER_TIMEOUT_S = 1200.0  # FleetController never checks progress
+# Syncer --quorum-timeout-s default (seconds). The BUDGET_DONE lease uses the
+# same value, so both are expressed as quorum_timeout_s below.
+DEFAULT_QUORUM_TIMEOUT_S = 900.0
+# Policy, not a code limit: stay under half a quorum timeout until X6 certifies
+# pauses across a fixed-roster PULL re-send.
 DEFAULT_MARGIN = 0.5
 
 PAUSABLE_PHASE = "round-boundary-published"
@@ -54,8 +53,8 @@ class PauseAudit:
     certified: bool
     holds_permit_at_pause: bool
     stalls_peers: bool
-    hard_limit_s: float | None  # a timeout that fails the run, if any
-    budget_s: float | None  # certified pause upper bound (None = no outer limit)
+    hard_limit_s: float | None  # a timeout that fails the run in the pausable phase
+    budget_s: float | None  # fixed bound, else derived from quorum_timeout_s
     note: str
 
 
@@ -65,15 +64,16 @@ _OUTER_AUDIT: Mapping[str, PauseAudit] = {
         "LocalOnlySync: no syncer connection; only in-island collectives must be quiescent",
     ),
     "strict-avg": PauseAudit(
-        "strict-avg", True, True, True, None, SYNCER_QUORUM_TIMEOUT_S * DEFAULT_MARGIN,
-        "fixed roster: the syncer re-sends the same PULL every quorum timeout and never "
-        "drops the learner; peers stall for the pause. Budget stays under one quorum "
-        "timeout until X6 certifies pauses across a re-send",
+        "strict-avg", True, True, True, None, None,
+        "fixed roster: the syncer re-sends the same PULL every quorum_timeout_s and never "
+        "drops the learner; peers stall for the pause. The budget (margin x "
+        "quorum_timeout_s) is a conservative policy until X6, not a code limit",
     ),
     "decoupled": PauseAudit(
-        "decoupled", False, False, False, FINALIZATION_TIMEOUT_S, None,
-        "learner-budget mode fails the run after a 900 s BUDGET_DONE lease; broadcast "
-        "queues are unbounded. Disabled until X6-decoupled is run",
+        "decoupled", False, False, False, None, None,
+        "learner-budget mode fails the run if a pause outlives the quorum_timeout_s "
+        "BUDGET_DONE lease in the collect_budget_reports window; non-budget mode has no "
+        "proven-safe bound. Disabled until X6-decoupled is run",
     ),
 }
 _AUDITED_MODES = frozenset({"colocated-serial", "partitioned-serial"})
@@ -101,6 +101,8 @@ def pause_decision(
     expected_pause_s: float,
     budget_mode: bool = False,
     idle_flow_timeout_s: float | None = None,
+    quorum_timeout_s: float = DEFAULT_QUORUM_TIMEOUT_S,
+    margin: float = DEFAULT_MARGIN,
 ) -> PauseDecision:
     """May the island pause now for ``expected_pause_s``? Fail closed."""
     if profile is None:
@@ -120,10 +122,11 @@ def pause_decision(
         return PauseDecision(False, "learner-budget mode: BUDGET_DONE lease may expire")
     if not isinstance(expected_pause_s, (int, float)) or expected_pause_s <= 0:
         return PauseDecision(False, "expected pause must be a positive bound")
-    limits = [x for x in (audit.budget_s, idle_flow_timeout_s) if x is not None]
+    if audit.outer_protocol == "none":
+        return PauseDecision(True, audit.note, None, False)  # no outer connection
+    policy = quorum_timeout_s * margin if audit.stalls_peers else None
+    limits = [x for x in (policy, idle_flow_timeout_s) if x is not None]
     budget = min(limits) if limits else None
-    if idle_flow_timeout_s is not None and audit.outer_protocol == "none":
-        budget = None  # no outer connection to keep alive
     if budget is not None and expected_pause_s > budget:
         return PauseDecision(
             False, f"expected pause {expected_pause_s:.0f}s exceeds budget {budget:.0f}s",

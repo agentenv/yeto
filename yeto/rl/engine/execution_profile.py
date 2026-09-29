@@ -29,7 +29,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ..elastic_benchmark.manifest import EXECUTION_MODES, OUTER_PROTOCOLS
+from ..elastic_benchmark.manifest import (
+    EXECUTION_MODES,
+    OUTER_PROTOCOLS,
+    canonical_execution_mode,
+)
 
 PROFILE_SCHEMA = "yeto-rl-execution-profile-v1"
 
@@ -129,6 +133,7 @@ class ExecutionProfile:
     def __post_init__(self) -> None:
         if not self.name:
             raise ProfileError("profile name is required")
+        object.__setattr__(self, "execution_mode", canonical_execution_mode(self.execution_mode))
         if self.execution_mode not in EXECUTION_MODES:
             raise ProfileError(f"execution_mode must be one of {EXECUTION_MODES}")
         if self.outer_protocol not in OUTER_PROTOCOLS:

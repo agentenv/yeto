@@ -40,3 +40,9 @@ def test_standalone_has_no_outer_limit():
     d = pause_decision(_p("colocated-serial", "none"), outer_phase=PAUSABLE_PHASE,
                        expected_pause_s=5000, idle_flow_timeout_s=100)
     assert d.allowed and d.budget_s is None and not d.stalls_peers
+
+
+def test_strict_budget_follows_configured_quorum_timeout():
+    d = pause_decision(_p(), outer_phase=PAUSABLE_PHASE, expected_pause_s=1000,
+                       quorum_timeout_s=3600)
+    assert d.allowed and d.budget_s == 1800

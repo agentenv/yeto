@@ -28,6 +28,13 @@ FIELD_GROUPS = (
 )
 PARAMETER_MODES = ("lora", "full")
 EXECUTION_MODES = ("colocated-serial", "partitioned-serial", "partitioned-overlap")
+# The rl-infra-spec spec/tasks spell the compatibility mode "serial-colocated";
+# code (driver, #66) uses "colocated-serial". Both are accepted, canonical is the latter.
+EXECUTION_MODE_ALIASES = {"serial-colocated": "colocated-serial"}
+
+
+def canonical_execution_mode(mode: object) -> object:
+    return EXECUTION_MODE_ALIASES.get(mode, mode) if isinstance(mode, str) else mode
 OUTER_PROTOCOLS = ("none", "strict-avg", "decoupled")
 ARM_KINDS = (
     "legacy-fixed",
@@ -131,7 +138,7 @@ def _validate_identity(identity: dict[str, Any], mode: str) -> None:
 def _validate_profile(profile: dict[str, Any]) -> None:
     if profile.get("parameter_mode") not in PARAMETER_MODES:
         raise ManifestError(f"profile.parameter_mode must be one of {PARAMETER_MODES}")
-    if profile.get("execution_mode") not in EXECUTION_MODES:
+    if canonical_execution_mode(profile.get("execution_mode")) not in EXECUTION_MODES:
         raise ManifestError(f"profile.execution_mode must be one of {EXECUTION_MODES}")
     if profile.get("outer_protocol") not in OUTER_PROTOCOLS:
         raise ManifestError(f"profile.outer_protocol must be one of {OUTER_PROTOCOLS}")

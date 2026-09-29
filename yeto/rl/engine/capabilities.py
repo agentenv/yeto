@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..elastic_benchmark.manifest import EDGE_KINDS, EXECUTION_MODES
+from ..elastic_benchmark.manifest import EDGE_KINDS, EXECUTION_MODES, canonical_execution_mode
 from .trainable_state import TRAINABLE_LAYOUTS
 
 CAPABILITY_SCHEMA = "yeto-rl-engine-capabilities-v1"
@@ -82,7 +82,11 @@ class EngineCapabilities:
         s(
             self,
             "execution_modes",
-            _names(self.execution_modes, EXECUTION_MODES, "execution modes"),
+            _names(
+                [canonical_execution_mode(m) for m in _names(self.execution_modes, None, "modes")],
+                EXECUTION_MODES,
+                "execution modes",
+            ),
         )
         s(self, "port_verbs", _names(self.port_verbs, RESERVED_PORT_VERBS, "port verbs"))
         edges = frozenset(tuple(e) for e in self.certified_edges)
@@ -160,7 +164,7 @@ class EngineCapabilities:
         for what, value, supported in (
             ("parameter layout", layout, self.parameter_layouts),
             ("placement", placement, self.placements),
-            ("execution mode", execution_mode, self.execution_modes),
+            ("execution mode", canonical_execution_mode(execution_mode), self.execution_modes),
             ("advantage estimator", algorithm.advantage_estimator, self.advantage_estimators),
         ):
             if value not in supported:

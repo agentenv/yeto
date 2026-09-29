@@ -122,3 +122,41 @@ def test_edges_keep_complex_parallel_dims_and_declare_recovery():
         caps.validate_edges(r, caps.parse_configs(r))
     r["edges"][0]["recovery"] = "reinit-rollout"
     caps.validate_edges(r, caps.parse_configs(r))
+
+
+@pytest.mark.parametrize("pinned", [None, "unresolved"])
+def test_unpinned_study_fingerprint_fails_closed(pinned):
+    attest = caps.attestation_from_dict(
+        {"runtime_fingerprint": "sha256:" + "1" * 64, "execution_modes": ["partitioned-serial"],
+         "partitioned_driver": True}
+    )
+    assert "unresolved" in caps.fingerprint_rejection(pinned, attest)
+    m = _formal()
+    m["identity"]["fingerprints"]["runtime"] = pinned
+    plan = build_plan(m, attest, study_hash="h")
+    target = [i for i in plan.items if i.kind != "legacy-fixed"]
+    assert target and all(i.status == caps.STATUS_BLOCKED for i in target)
+
+
+def test_spec_mode_name_serial_colocated_is_an_alias():
+    from yeto.rl.elastic_benchmark.manifest import canonical_execution_mode, validate_manifest
+    from yeto.rl.engine.capabilities import EngineCapabilities
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+
+    assert canonical_execution_mode("serial-colocated") == "colocated-serial"
+    p = ExecutionProfile(name="p", execution_mode="serial-colocated", outer_protocol="none")
+    assert p.execution_mode == "colocated-serial"
+    attest = caps.attestation_from_dict({"execution_modes": ["serial-colocated"]})
+    assert attest.execution_modes == frozenset({"colocated-serial"})
+    c = EngineCapabilities(
+        engine="e", runtime_fingerprint="sha256:" + "0" * 64, parameter_layouts=[],
+        placements=["colocated"], advantage_estimators=[], dynamic_sampling_filters=[],
+        execution_modes=["serial-colocated"],
+    )
+    assert c.execution_modes == frozenset({"colocated-serial"})
+    m = example_manifest()
+    m["profile"]["execution_mode"] = "serial-colocated"
+    validate_manifest(m)
+    with pytest.raises(ManifestError):
+        m["profile"]["execution_mode"] = "serial-overlap"
+        validate_manifest(m)

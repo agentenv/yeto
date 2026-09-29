@@ -8,10 +8,10 @@
 |---|---|---|
 | 1.1 runtime manifest | 未开始：需要镜像环境（见 GPU 计划 F0） | — |
 | 1.2 兼容 baseline | 未开始：需要 GPU（A1） | — |
-| 1.3 云实验池计划 | 草案已交付，待用户确认，未勾选 | `/home/michael/work/infra-drafts/gpu-plan.md` |
-| 1.4 ExecutionProfile/readiness | 已实现 + CPU 通过，已勾选；driver 接入在 2.2 | `yeto/rl/engine/execution_profile.py`，`tests/test_rl_execution_profile.py` |
-| 1.5 暂停审计 | 已实现 + CPU 通过，已勾选 | `pause-audit.md`，`yeto/rl/engine/pause_audit.py`，`tests/test_rl_pause_audit.py` |
-| 1.6 配置/边 schema | 已实现 + CPU 通过，已勾选；实际池数据待 1.3 | `yeto/rl/elastic_benchmark/capabilities.py`、`plan.py`，`tests/test_rl_elastic_config_schema.py` |
+| 1.3 云实验池计划 | 草案已交付，待用户确认，未勾选 | `/home/michael/work/infra-drafts/gpu-plan.md`（2026-09-29 修订：默认 Nebius/Modal，合计≈$3,052） |
+| 1.4 ExecutionProfile/readiness | 已实现 + CPU 通过，依赖未满足未勾选（依赖1.2；X9为GPU实验） | `yeto/rl/engine/execution_profile.py`，`tests/test_rl_execution_profile.py` |
+| 1.5 暂停审计 | 已实现 + CPU 通过，依赖未满足未勾选（1.4） | `pause-audit.md`，`yeto/rl/engine/pause_audit.py`，`tests/test_rl_pause_audit.py` |
+| 1.6 配置/边 schema | 已实现 + CPU 通过，依赖未满足未勾选（1.3–1.5） | `yeto/rl/elastic_benchmark/capabilities.py`、`plan.py`，`tests/test_rl_elastic_config_schema.py` |
 | 1.7 时间线观测 | 纯计量已实现 + CPU 通过；事件发射**阻塞**（driver.py / miles_adapter 冻结） | `yeto/rl/engine/timeline.py`，`tests/test_rl_timeline.py` |
 | 1.8 DynaResize 假设 | **阻塞**：本地没有原文 | — |
 
