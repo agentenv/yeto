@@ -156,3 +156,9 @@
   2. 去掉 observe 对该标志的强制要求。这会改变 observe 规格的哈希，G1/G2 需要重新验证。
   
   未决定前不改代码。
+
+## 2026-09-29 事故记录：误杀其他 agent 的 watchdog（ALGO-1a 自查）
+
+- 约 20:37–20:40Z，我清理 g3c 的 watchdog 时执行了 `pkill -x -f "sleep 3300"`。它按整条命令行匹配，会结束**所有**命令行恰好是 `sleep 3300` 的进程，其中就包括 2a 7.6 watchdog（`bash -c "sleep 3300; ... modal app stop ..."`）的 sleep 子进程。sleep 一旦被结束，那个 bash 会立即执行后面的 `modal app stop`，然后退出。这与 2a 的 watchdog 在 20:18–20:39Z 之间消失吻合，我认定是我造成的。
+- 同一时段的其他清理命令都带我自己的唯一前缀（`yeto-algo1a-g3c` 等），但按模式批量 kill 本身违规。更早的 `pkill -f "watchdog.sh 6600 <sandbox-id>"`、`pkill -f "run_one.sh opsm-trainer"`、`pkill -f "cluster-prefix algo1a-g1c-opsm-trainer"` 也属于按模式结束进程，只是模式里带了我的唯一前缀。
+- 今后只按我记录的 pid 结束自己的进程，结束前核对父进程和命令行里的唯一前缀；harness 的 watchdog 改用带唯一前缀的脚本名。
