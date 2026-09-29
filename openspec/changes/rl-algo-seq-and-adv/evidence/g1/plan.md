@@ -159,3 +159,17 @@ No volumes, no named secrets.
   the launcher reads (SKYPILOT_DOCKER_USERNAME/PASSWORD/SERVER). Fixed in launch_run.sh
   (decoded in-process from ~/.docker/config.json, never printed). Evidence
   attempt5/gspo_s2-try1-nopullcreds/. Same runs follow.
+- Attempt 5 try 2 (code aa74ecf; receipt = infra-a e9f20cc whitelist, since reverted by INFRA 8cf1dec):
+  - gspo_s2 (app ap-ECUGDQDcE31SQnqAtP7vgv, H100 80GB HBM3, ~9 min): learner finalized, job
+    SUCCEEDED, launcher rc 2 (the pre-declared "artifacts not fetchable" notice). From the stream:
+    argv gspo, eps_clip 0.0003 / eps_clip_high 0.0004; 3 rounds x 2 optimizer steps, per step
+    (clipfrac, grad_norm): (0.0, 0.900) (0.1875, 0.307) | (0.0, 0.646) (0.5, 0.528) |
+    (0.0, 0.478) (…second step in launch.log); all finite; no invariant error.
+    **Not assessable**: criterion 1's `rl_round_trained` count, criterion 5 (unverified in the
+    events) and the R1 `masked_fraction` observation -- the event tape is not in the streamed log
+    and the Modal no-sync island's ~/yeto-output cannot be fetched. So this run is recorded, not
+    counted as a pass. Needed from P0/INFRA: stream the event-tape lines (or pull them) for Modal
+    no-sync islands.
+  - gspo_s1 was stopped by hand ~1 min after start (app ap-wfkKkSassVbNcGoJIqdIyA) because the
+    receipt code changed (infra-a 8cf1dec); rpp / rpp_baseline / gdpo not started.
+  - All apps stopped, 0 tasks; watchdogs killed.
