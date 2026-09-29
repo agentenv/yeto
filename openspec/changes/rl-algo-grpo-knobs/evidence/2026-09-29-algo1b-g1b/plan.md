@@ -32,3 +32,10 @@
 - 本计划的判据只依赖 learner 进程写出的事件（rl_local_round 的 clip_fraction/dynamic_filter_*）和训练日志里的 train/pg_clipfrac，不依赖 reward_pipeline 在 rollout 子进程中写的事件，因此不受 P0 50fe818 回传范围的限制。
 - 从 run C 起，yeto 代码包含 `emit_event` 的 stdout 回显（`YETO_RL_EVENT `）。
 - no-sync 运行如果缺少 rl_learner_finalized，launcher 会以退出码 3 结束并标记 .incomplete。这种情况视为 rc≠0，按失败处理。
+
+## run A 第 2 次尝试结论（18:27:42–19:27:44Z，Modal app yeto-algo1b-g1b-a，已 stopped）
+- 本地 `timeout 3600` 到期后终止（rc=124），一轮训练都没完成。
+- 原因是 harness 配置错误，与被测机制无关：`--reward-function yeto.rl.math_reward:score` 被当作 Miles 的 `--custom-rm-path` 使用，而 Miles 的调用签名是 `async (args, sample)`，`score(response, label)` 于是收到 args，每个 rollout 任务都抛 `TypeError: 'NoneType' object is not callable`。rollout 一直补不满批次，直到超时。
+- 修复：改用 `yeto.rl.math_reward:reward_func`（Miles 签名）。其余不变，重跑 A。
+- 回收：app 已 stopped。两个残留的 watchdog sleep 进程已按 pid 结束（run.sh 的 pkill 匹配式没有匹配到它们，需要修）。另外发现 `sbx.py list` 通过 App.lookup(create_if_missing) 建出了一个空的 `algo1b-g1` app，处于 deployed 状态，已 `modal app stop`。
+- 费用：约 1 小时 H100，估算约 $4，未按账单核实。日志：`attempt2-out-a/`。
