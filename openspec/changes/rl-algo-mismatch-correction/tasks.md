@@ -72,21 +72,22 @@
 
 - [x] 7.1 准备：复用 R0 冒烟小模型与 harness，证据目录 `openspec/changes/rl-algo-mismatch-correction/evidence/<日期>-<名称>/`，含 `YETO_SHA`、argv、事件与指标 jsonl。Modal 使用 `H100!:N` 并在启动时断言 GPU 名；日志与证据中不打印凭据。验证：dry-run 输出的资源请求为 1 卡；凭据扫描（grep token/key 模式）无命中。
   - 补做完成（已实现）：`yeto launch --rl-single-island-no-sync --controller local --dry-run`（algo-cap 319d974）的输出为 `total_gpus: 1`、`islands: 1`、`syncer: null`、`outer_sync: false`，并列出 unverified_mechanisms，见 `evidence/2026-09-29-dryrun/dryrun.log`（凭据扫描无命中）。
-  - 复审撤销勾选（未完成）：原文要求 launcher dry-run 输出资源请求为 1 卡，但当前 `yeto launch` 没有 `--dry-run` 选项（`launch --help` 中无此项），无法按原文补做；已作为接口需求上报。
+  - （已被下方“补做完成”取代）复审撤销勾选（未完成）：原文要求 launcher dry-run 输出资源请求为 1 卡，但当前 `yeto launch` 没有 `--dry-run` 选项（`launch --help` 中无此项），无法按原文补做；已作为接口需求上报。
   - 完成记录（已实现）：计划与 harness 见 `evidence/2026-09-29-g1/plan.md` 和 `evidence/2026-09-29-g1b/plan.md`；Modal `H100!`×1，启动前断言 GPU 名称（`runs/gpu_name.txt`）；凭据扫描无命中。注：资源请求是 sandbox 的 `gpu="H100!"`，没有经过 launcher 的 dry-run。
 - [x] 7.2 G1（1 卡）：只观测、TIS、IcePop、OPSM(trainer)、MIS 各 2–3 轮；OPSM(rollout) 可选。验证：每项指标键存在且有限、不变量无误报、policy token 与 receipt 正常；结果逐项写入 `progress.md`。
   - 完成记录（GPU 验收通过，G1）：Modal H100 单卡，单岛、无 syncer，每项 3 轮，预先声明的判据全部通过。通过的项有 tis、icepop、opsm_trainer（`evidence/2026-09-29-g1/runs/*/check.json`，YETO_SHA bc7a330）和 mismatch_observe、mis、mis_mask（`evidence/2026-09-29-g1b/runs/*/check.json`，YETO_SHA 3b6dfa9；round 2 另验 `rl/outer_sync=false`）。observe 第一次尝试在 harness 下载数据时因网络失败（Miles 未启动）；修复为预下载后重跑一次。opsm_rollout（可选）未跑。launcher 入口 `yeto launch --rl-single-island-no-sync` 未经实跑。
   - 复审补记：round 1（tis/icepop/opsm-trainer）用的是 bc7a330 代码和裸名放行，没有判据 5，入口也不是 launcher，所以不能作为声明依据，改由 launcher 入口按新计划重新验证（见 `evidence/2026-09-29-g1c/`）。原计划没有显式的“receipt 正常”判据；receipt 只由 driver 失败即报事件间接覆盖，没有显式判据，不据此宣告 receipt 通过。GPU 上所有截断/屏蔽分支都未触发（clipfrac 与 mask fraction 均为 0）；每轮一步时 OPSM 结构上不可能触发；ess_ratio/ois 每轮一步恒为 1，不反映训推差异。上传时刻：round 1 的 yeto 代码在 16:4x 以 `git archive bc7a330` 上传（observe 第一次尝试之前重新上传过一次），round 2 在 17:09 后以 `git archive 3b6dfa9` 上传，harness 取自 c8ec241。精确时刻没有另行记录。
   - 入口复验（`evidence/2026-09-29-g1c/`）：tis、icepop、opsm-trainer 走 `yeto launch --rl-single-island-no-sync --controller local` 真实入口复验，判据 1-6 全部通过（判据 6 为显式的 receipt 统计判据）。另有生效验证（`evidence/2026-09-29-trigger/`）：在事先固定的小阈值下，tis、icepop、mis_mask 的截断/屏蔽比例均 >0，OPSM 在 2 步/轮时 opsm_clipfrac >0，均通过。
+  - 注：g1c 中 icepop 与 tis 在自然训推差异下数值逐位相同（没有 token 越界），所以生效以 trigger 运行为准。check.json 中 `rc0` 键的含义是“退出码可接受”（0，或 2 且同时打印不可取回的说明），新运行将改名为 `rc_ok`。
 - [ ] 7.3 对 G1 通过的每项，在 Miles adapter 的 `EngineCapabilities.corrections` 中加入声明（每项单独变更）。验证：adapter 的 `check()` 单测接受已声明项、仍拒绝未通过项；`progress.md` 引用对应证据目录。
-  - 进展：已声明 {none, tis, opsm, opsm_trainer}，均已经入口复验并确认生效。mismatch_observe、icepop、mis、mis_mask 的 G1 与生效验证已通过但尚未声明（归 ALGO-CAP，其中 icepop 还需要 custom），因此“对 G1 通过的每项声明”尚未全部满足，保持未勾选。
+  - 进展（更正）：Miles adapter 声明了 {none, tis, opsm, opsm_trainer}。其中 `opsm` 是内置的“使用了 OPSM（设置了 opsm_delta）”维度，任何 OPSM 规格都要求它，它本身不放行任何来源；来源由 `opsm_trainer` 或 `opsm_rollout` 各自决定，`opsm_rollout` 未声明，也没有 G1 或生效验证。opsm_trainer 的生效证据（trigger 中 opsm_clipfrac>0）同时覆盖 `opsm` 这一维度在 trainer 来源下的代码路径。tis 的生效也已验证。mismatch_observe、icepop、mis、mis_mask 尚未声明：icepop 与 mis_mask 由集成分支统一处理（icepop 需要 corrections:custom 粒度）；mis（截断/裁剪变体）若要声明，需先补一次事先提交计划的触发验证。“对 G1 通过的每项声明”尚未全部满足，保持未勾选。
   - 状态（未完成）：`entry.py` 由 ALGO-CAP 负责。G1 已通过的 tis、opsm_trainer 的声明补丁在 `1a-declare.patch`；observe、icepop、mis、mis_mask 需要先合入 `1a-shared.patch`（custom 粒度），否则声明 custom 会放开任意函数。
 - [x] 7.4 G2（1 卡）：只观测约 20 轮，产出报告（每轮 `train_rollout_kl`、`tis_abs` 分位数、`ess_ratio`、[0.5,5] 区间外 token 比例），注明模型与配置、不外推。验证：报告文件存在于证据目录，数据可由指标 jsonl 重新生成；是否推荐默认开启交用户决定，不在本 change 内修改默认。
   - 完成记录（GPU 验收通过，G2）：只观测 20 轮，报告见 `evidence/2026-09-29-g1b/runs/g2-observe/report.md`，可由 `metrics.jsonl`/`miles.log` 用 `harness/report_g2.py` 重新生成。报告注明 colocated-serial / CUDA IPC、模型与配置，并声明不外推；不给推荐，默认值不改。
   - 未达成的设计意图：design D2/G2 把 `ess_ratio` 列为训推差异指标，但 Miles 的 `ess_ratio` 是 π_θ/π_old，每轮一步时恒为 1，不反映训推差异。报告中已注明，这一点记为未达成意图。
 - [ ] 7.5 G3（1+1 卡）：两岛 strict-avg，TIS 与 IcePop 各一次，约 3 轮。验证：两岛算法哈希一致、外层同步后权重 hash 一致、不变量无失败。不做 decoupled 对比（须等 `fix-decoupled-lr-schedule` 合入）。
   - G3 已运行一次（`evidence/2026-09-29-g3/results.md`），**未通过**：判据 1、2、5 通过，判据 3、4 无法成立，原因是 island-1 的磁带拉取截断（v2/v3 缺失），不是机制失败。重跑需要先提交 harness 修复（改用 launcher 回传磁带）。
-  - 状态（未完成）：G3 两岛这一轮没有运行。
+  - （更正：已被下一行取代）早先记录的“G3 两岛这一轮没有运行”已不成立：G3 后来跑过一次，但未通过。
 - [x] 7.6 拆除与费用：每次运行后拆除全部资源。验证：provider 侧列出 app/实例/卷为空的输出存入证据目录（"无残留"证明）；按运行汇总卡时与费用写入 `progress.md`。
   - 完成记录（已实现）：两个 sandbox 均已 terminate，`algo1a-g1`/`algo1a-g1b` 均为 stopped、0 tasks（`*/modal_app_list_after_stop.txt`）；没有卷，没有命名 secret；watchdog 已停止。卡时约 0.83 H100·h，估算约 $4（未经账单确认），明细见 progress.md。
 - [ ] 7.7 （可选，需另行申请预算）G4 效果 A/B：不在本 change 验收范围内，仅在用户批准后记录方案。
