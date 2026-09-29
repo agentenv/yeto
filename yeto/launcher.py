@@ -809,6 +809,77 @@ def _rl_miles_function(
         raise ValueError(f"{flag} must be package.module.function")
 
 
+def _prepare_ports_algorithm(args, rl_engine: str) -> None:
+    """rl-algorithm-capabilities D8/D9/D11, before any cloud or GPU work.
+
+    ports: build the run's AlgorithmSpec once (``--rl-algorithm-spec`` or the
+    legacy CLI), refuse the rejection matrix and multi-island unverified
+    allowances, and keep the canonical JSON + expected hash that every island
+    receives. legacy: the ports-only options are refused.
+    """
+
+    from .rl.engine.algorithm import (
+        AlgorithmSpecError,
+        check_unverified_allowance,
+        resolve_ports_algorithm,
+    )
+
+    if rl_engine != "ports" and (
+        getattr(args, "rl_placement", "colocated") != "colocated"
+        or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
+    ):
+        raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
+    try:
+        spec = resolve_ports_algorithm(args, rl_engine=rl_engine)
+        if spec is None:
+            return
+        problems = spec.rejections()
+        if problems:
+            raise AlgorithmSpecError("algorithm spec rejected: " + "; ".join(problems))
+        islands = (
+            len(parse_gpu_spec(args.gpu)) if getattr(args, "gpu", None) else 1
+        ) + max(0, getattr(args, "external_learners", 0) or 0)
+        args.rl_allow_unverified_mechanism = list(
+            check_unverified_allowance(
+                getattr(args, "rl_allow_unverified_mechanism", None) or (), islands=islands
+            )
+        )
+    except AlgorithmSpecError as error:
+        raise ValueError(str(error)) from error
+    args.rl_algorithm_spec_json = spec.canonical_json()
+    args.rl_expected_algorithm_sha256 = spec.sha256()
+
+
+def _ports_algorithm_flags(args) -> tuple[str, str]:
+    """(run prelude, learner flags) carrying the algorithm to a ports island."""
+
+    if getattr(args, "rl_engine", "ports") != "ports":
+        return "", ""
+    expected = getattr(args, "rl_expected_algorithm_sha256", None)
+    if expected is None:
+        return "", ""
+    prelude = ""
+    flags = f" --rl-expected-algorithm-sha256 {expected}"
+    if getattr(args, "rl_algorithm_spec", None):
+        prelude = (
+            "mkdir -p ~/yeto-rl && printf '%s' "
+            f"{shlex.quote(args.rl_algorithm_spec_json)} > ~/yeto-rl/algorithm_spec.json\n"
+        )
+        flags += " --rl-algorithm-spec ~/yeto-rl/algorithm_spec.json"
+    # rl-infra-spec 2.1 placement options, forwarded only when non-default
+    # (the default argv is unchanged).
+    if getattr(args, "rl_placement", "colocated") != "colocated":
+        flags += f" --rl-placement {shlex.quote(args.rl_placement)}"
+    if getattr(args, "rl_standby_gpus", 0):
+        flags += f" --rl-standby-gpus {int(args.rl_standby_gpus)}"
+    allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
+    for name in allowed:
+        flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
+    if allowed:
+        flags += " --num-learners 1"  # single island checked by the launcher (D11)
+    return prelude, flags
+
+
 def _prepare_rl_args(
     args,
     *,
@@ -876,6 +947,7 @@ def _prepare_rl_args(
             expert_full_count=getattr(args, "expert_full_count", 0) or 0,
             rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
         )
+    _prepare_ports_algorithm(args, rl_engine)
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
     if args.tuning != "lora":
@@ -1722,6 +1794,8 @@ def make_miles_island_task(
     # Always explicit: the learner's own default is ports, so a legacy run
     # must say so (and an older remote learner must not guess).
     flags += f" --rl-engine {getattr(args, 'rl_engine', 'ports')}"
+    algorithm_prelude, algorithm_flags = _ports_algorithm_flags(args)
+    flags += algorithm_flags
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
     for flag, name in (
@@ -1912,6 +1986,7 @@ def make_miles_island_task(
             "  trap stop_miles_ray EXIT\n"
             # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.
+            f"{algorithm_prelude}"
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir"
             "${PYTHONPATH:+:$PYTHONPATH} "

@@ -386,6 +386,11 @@ class IslandDriver:
             placement=description.kind,
             execution_mode=self.execution_mode,
             algorithm=self.algorithm,
+            **(
+                {"max_policy_age": self.profile.max_policy_age}
+                if self.profile is not None
+                else {}
+            ),
         )
         if not callable(getattr(self.trainer, "step_metrics", None)):
             raise DriverError(
