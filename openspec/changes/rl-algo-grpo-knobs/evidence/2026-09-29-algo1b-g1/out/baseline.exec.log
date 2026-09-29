@@ -1,0 +1,4 @@
+rc=0
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  6.30it/s]Fetching 10 files:  60%|██████    | 6/10 [00:00<00:00, 22.66it/s]Fetching 10 files:  90%|█████████ | 9/10 [00:03<00:00,  2.15it/s]Fetching 10 files: 100%|██████████| 10/10 [00:06<00:00,  1.56it/s]
+G1_RESULT {"mechanism": "baseline", "rc": 0, "seconds": 418.8, "peak_gpu_mib": 38142}

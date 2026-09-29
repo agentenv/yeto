@@ -52,3 +52,30 @@
 - 所有机制都在启动前失败：exec 命令写 `/work/out/<m>.log` 时 `/work/out` 目录不存在。这是 harness 的 bug，不涉及被测代码，也没有训练过任何一轮。
 - 修复：exec 前先 `mkdir -p /work/out`。其余计划不变，按第 2 次尝试执行。
 - sandbox 已由 EXIT trap 终止（输出 terminated），watchdog 已停止，`sbx.py list` 为空。日志在 `attempt1/`。
+
+## 第 2 次尝试（sandbox sb-8qUwjZaxz81BXolqPwobhP，17:19:55–18:15:59Z）结论
+
+- setup 通过，GPU 断言为 H100 80GB HBM3。yeto 代码 = `harness/YETO_SHA`，即 2026-09-29 17:19 的 HEAD（git archive）。
+- 9 个运行全部 rc=0，每个都完成 3 轮、3 个 train step。事件带中没有 zero_grad、nonfinite、policy token、receipt 相关错误。各项指标都存在且有限，逐项数值见 `g1_report.json`：
+
+| 机制 | 秒 | 峰值 MiB | 指标 |
+|---|---|---|---|
+| baseline | 418.8（含首次下载） | 38142 | grad_norm 0.63/0.41/0.27 |
+| clip_higher | 330.7 | 38178 | pg_clipfrac 0/0/0 |
+| dual_clip | 349.6 | 36784 | pg_clipfrac 0/0/0 |
+| token | 363.2 | 38178 | pg_loss 0.035/0.0068/0.0026 |
+| drgrpo | 333.2 | 38178 | pg_loss 0.0079/0.0072/0.019 |
+| kl_k3 | 345.8 | 38184 | kl_loss 0/0.00079/0.00082 |
+| entropy | 327.4 | 38178 | entropy_loss 0.30/0.38/0.45 |
+| over_sampling | 316.7 | 36924 | completed_groups 4/4/4；dropped/replacement 0 |
+| overlong_penalty | 362.8 | 38174 | 3 条 rl_reward_shaping，raw mean 0.8125 → shaped 0.7512 等 |
+
+- **分析脚本比计划更严，写明如下**：`analyze.py` 在计划判据之外，把日志里出现 `Traceback` 也当成失败。它写于 baseline 结果出来之后，判据仍以本计划为准。8 个非 baseline 运行的日志里都出现了同一条 SGLang 启动信息 `post-warmup freeze_gc failed`：服务器刚启动时 /freeze_gc 连接被拒绝，SGLang 捕获后照常运行，之后 3 轮训练全部完成。这条信息不属于计划列出的 invariant 错误，因此按计划判为通过。g1_report.json 中的 FAIL 标记由这条额外规则产生，保留原样，没有修改脚本或基线。
+- **覆盖面的局限（如实记录）**：
+  - clip_higher、dual_clip 的 clipfrac 三轮都是 0：每轮只有 1 个 optimizer step 且 on-policy，ratio 恒为 1，clip 分支在 GPU 上没有被数值触发（数值由 CPU 2.4 覆盖）；
+  - over_sampling 的动态过滤三轮都没有丢组或替换，没有真正触发补采；
+  - overlong_filter 没有运行（hook 补丁未合入）。
+- KL loss 与 baseline 相比：峰值显存 38184 对 38142 MiB（+42）；耗时 345.8 对 418.8 秒，但 baseline 含首次模型下载，不宜直接比较。
+- 无残留：EXIT trap 已 terminate sandbox，watchdog 已结束，`sbx.py list` 为空。
+- 费用：H100 加 16 CPU / 128GiB，约 56 分钟，估算约 $5，未按账单核实。
+- 判据只用 sandbox 内的事件带与 miles.log（直接从 sandbox 取回），不依赖 launcher 的 no-sync 事件带回收。
