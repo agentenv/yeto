@@ -101,6 +101,10 @@ ADAPTER_OWNED_FLAGS = frozenset(
         "--trainer-controller-addrs",
         "--eval-num-gpus",
         "--external-policy-sync-path",  # legacy fork only; the driver owns sync
+        # rl-infra-spec 2.1 (fixed partition): the transfer mode and the
+        # fork-M1 role->bundle map are decided by the placement translation.
+        "--update-weight-transfer-mode",
+        "--yeto-placement-map",
         # LR schedule is decided by RLRunConfig.algorithm.lr_schedule
         # (legacy rejects the same LR_SCHEDULE_FLAGS in learner.py).
         *LR_SCHEDULE_FLAGS,
@@ -471,6 +475,16 @@ def translate_run_config(
     problems = algorithm.rejections()
     if problems:
         raise MilesConfigError("algorithm spec rejected: " + "; ".join(problems))
+    from ..algorithm import launch_problems
+
+    problems = launch_problems(algorithm, {
+        "rollout_batch_size": config.batch.groups_per_round,
+        "rollout_max_response_len": config.batch.rollout_max_response_len,
+        "context_parallel_size": 1,  # ports emits --context-parallel-size 1
+        "multi_lora": any(t.split("=", 1)[0] == "--multi-lora" for t in extra_argv),
+    })
+    if problems:
+        raise MilesConfigError("algorithm spec rejected for this run: " + "; ".join(problems))
     requested_over = algorithm.sampling.over_sampling_batch_size
     if requested_over is not None and requested_over != config.batch.over_sampling_batch_size:
         raise UnmappedConfigError(

@@ -19,7 +19,12 @@ Structure (change ``rl-algorithm-capabilities``, design D1/D2/D7):
 
 Extension points for the follow-up algorithm changes (a new module plus one
 line in :data:`yeto.rl.algos.EXTENSION_MODULES`): :func:`register_field`,
-:func:`register_mechanism` and :func:`register_rejection`. Registered fields
+:func:`register_mechanism`, :func:`register_rejection` (spec-only rejection
+matrix), :func:`register_launch_check` (needs run configuration values),
+:func:`register_island_check` (needs this island's identity, before outer
+sync), :func:`register_runtime_attrs` (Miles namespace attributes, e.g. plugin
+configuration) and :func:`register_gradient_rule` (may only relax the
+zero-gradient expectation). Registered fields
 enter the canonical v2 JSON only when they differ from their default, so a new
 field never changes an existing hash.
 """
@@ -62,6 +67,8 @@ CRITIC_ESTIMATORS = frozenset({"ppo"})
 REWARD_KL_DROPPING_ESTIMATORS = frozenset({"grpo", "gspo"})
 # Estimators that define a sequence-level ratio: clip range must be explicit.
 SEQUENCE_RATIO_ESTIMATORS = {"gspo"}
+# Upstream Miles refuses these estimators without --normalize-advantages.
+WHITEN_REQUIRED_ESTIMATORS = frozenset({"reinforce_plus_plus", "reinforce_plus_plus_baseline"})
 LOSS_VARIANTS = ["policy_loss", "custom_loss"]
 LOSS_AGGREGATIONS = ["default", "token", "constant"]
 KL_PLACEMENTS = ("none", "reward", "loss")
@@ -302,17 +309,93 @@ def register_rejection(name: str, check: Callable[["AlgorithmSpec"], str | None]
     _REJECTIONS[name] = check
 
 
+_RUNTIME_ATTRS: dict[str, Callable[["AlgorithmSpec"], Mapping[str, Any]]] = {}
+_LAUNCH_CHECKS: dict[str, Callable[["AlgorithmSpec", Mapping[str, Any]], Iterable[str]]] = {}
+_ISLAND_CHECKS: dict[str, Callable[["AlgorithmSpec", Mapping[str, Any]], Iterable[str]]] = {}
+_GRADIENT_RULES: dict[str, Callable[["AlgorithmSpec", Any, Any], "bool | None"]] = {}
+
+
+def register_runtime_attrs(name: str, derive: Callable[["AlgorithmSpec"], Mapping[str, Any]]) -> None:
+    """``derive(spec)`` -> extra Miles namespace attributes (``{}`` when unused).
+
+    Merged into :meth:`AlgorithmSpec.to_legacy_runtime_attrs`; a default spec
+    must derive ``{}`` so the R0 attributes stay unchanged.
+    """
+
+    if name in _RUNTIME_ATTRS:
+        raise ValueError(f"runtime attrs {name!r} already registered")
+    _RUNTIME_ATTRS[name] = derive
+
+
+def register_launch_check(
+    name: str, check: Callable[["AlgorithmSpec", Mapping[str, Any]], Iterable[str]]
+) -> None:
+    """``check(spec, run_values)`` -> problems needing the run configuration.
+
+    ``run_values`` (adapter-provided): ``rollout_batch_size``,
+    ``rollout_max_response_len``, ``context_parallel_size``, ``multi_lora``.
+    """
+
+    if name in _LAUNCH_CHECKS:
+        raise ValueError(f"launch check {name!r} already registered")
+    _LAUNCH_CHECKS[name] = check
+
+
+def register_island_check(
+    name: str, check: Callable[["AlgorithmSpec", Mapping[str, Any]], Iterable[str]]
+) -> None:
+    """``check(spec, island)`` -> problems against this island's identity.
+
+    ``island``: ``base_model_revision`` (learner, before joining outer sync).
+    """
+
+    if name in _ISLAND_CHECKS:
+        raise ValueError(f"island check {name!r} already registered")
+    _ISLAND_CHECKS[name] = check
+
+
+def register_gradient_rule(
+    name: str, rule: Callable[["AlgorithmSpec", Any, Any], "bool | None"]
+) -> None:
+    """``rule(spec, batch_summary, step_metrics)``: ``False`` lifts the gradient
+    expectation for this round, ``None`` abstains. Rules only ever relax the
+    default rule; a non-finite grad norm is checked by the driver regardless."""
+
+    if name in _GRADIENT_RULES:
+        raise ValueError(f"gradient rule {name!r} already registered")
+    _GRADIENT_RULES[name] = rule
+
+
+def launch_problems(spec: "AlgorithmSpec", run_values: Mapping[str, Any]) -> list[str]:
+    load_extensions()
+    return [f"[{name}] {p}" for name, check in _LAUNCH_CHECKS.items() for p in check(spec, run_values)]
+
+
+def island_problems(spec: "AlgorithmSpec", island: Mapping[str, Any]) -> list[str]:
+    load_extensions()
+    return [f"[{name}] {p}" for name, check in _ISLAND_CHECKS.items() for p in check(spec, island)]
+
+
 def unregister(*, field: tuple[str, str] | None = None,
                mechanism: tuple[str, str] | None = None,
-               rejection: str | None = None) -> None:
+               rejection: str | None = None,
+               runtime_attrs: str | None = None,
+               launch_check: str | None = None,
+               island_check: str | None = None,
+               gradient_rule: str | None = None) -> None:
     """Test helper: undo a registration."""
 
     if field is not None:
         _FIELDS.get(field[0], {}).pop(field[1], None)
     if mechanism is not None:
         _MECHANISMS.pop(mechanism, None)
-    if rejection is not None:
-        _REJECTIONS.pop(rejection, None)
+    for registry, name in (
+        (_REJECTIONS, rejection), (_RUNTIME_ATTRS, runtime_attrs),
+        (_LAUNCH_CHECKS, launch_check), (_ISLAND_CHECKS, island_check),
+        (_GRADIENT_RULES, gradient_rule),
+    ):
+        if name is not None:
+            registry.pop(name, None)
 
 
 def registered_mechanisms() -> tuple[MechanismDef, ...]:
@@ -739,10 +822,10 @@ class AlgorithmSpec:
     # -- identity (design D2) -----------------------------------------------
     def is_v1_expressible(self) -> bool:
         return (
-            self.advantage == AdvantageSpec(estimator=self.advantage.estimator)
-            and self.advantage.estimator in SUPPORTED_ADVANTAGE_ESTIMATORS
-            and self.loss == LossSpec(variant=self.loss.variant)
+            self.advantage.estimator in SUPPORTED_ADVANTAGE_ESTIMATORS
+            and self.advantage == AdvantageSpec(estimator=self.advantage.estimator)
             and self.loss.variant in SUPPORTED_LOSSES
+            and self.loss == LossSpec(variant=self.loss.variant)
             and self.kl.placement in ("none", "reward")
             and not self.kl.ext
             and self.correction.is_default()
@@ -893,6 +976,10 @@ class AlgorithmSpec:
         expected = any(g.reward_std > 0 for g in groups)
         if not expected:
             return False
+        load_extensions()
+        for rule in _GRADIENT_RULES.values():
+            if rule(self, batch_summary, step_metrics) is False:
+                return False
         masked = getattr(step_metrics, "masked_fraction", None)
         if masked is not None and float(masked) >= 1.0 and any(
             m.masks_tokens for m in self._mechanism_defs()
@@ -934,11 +1021,19 @@ class AlgorithmSpec:
     def to_legacy_runtime_attrs(self) -> dict[str, Any]:
         """Attributes legacy sets on the Miles namespace (read by the filter)."""
 
-        return {
+        attrs: dict[str, Any] = {
             "yeto_rl_dynamic_sampling_max_replacements": (
                 self.dynamic_sampling_max_replacements
             )
         }
+        load_extensions()
+        for name, derive in _RUNTIME_ATTRS.items():
+            extra = dict(derive(self))
+            clash = sorted(set(extra) & set(attrs))
+            if clash:
+                raise AlgorithmSpecError(f"runtime attrs {name!r} redefines {clash}")
+            attrs.update(extra)
+        return attrs
 
 
 # --------------------------------------------------------------------------
@@ -1057,6 +1152,16 @@ def _reject_staleness(s: AlgorithmSpec) -> str | None:
     return None
 
 
+def _reject_rpp_without_whiten(s: AlgorithmSpec) -> str | None:
+    # Upstream miles_validate_args asserts it (found by 2.6's parse_args run).
+    if s.advantage.estimator in WHITEN_REQUIRED_ESTIMATORS and not s.advantage.whiten:
+        return (
+            f"advantage estimator {s.advantage.estimator!r} requires advantage normalization; "
+            "set advantage.whiten=true (--normalize-advantages)"
+        )
+    return None
+
+
 def _reject_kl_loss_zero(s: AlgorithmSpec) -> str | None:
     if s.kl.placement == "loss" and s.kl.coef == 0.0:
         return "kl.placement='loss' with kl.coef=0 has no effect; use kl.placement='none'"
@@ -1080,6 +1185,7 @@ def _builtin_rejections() -> None:
     register_rejection("critic_estimator", _reject_critic)
     register_rejection("policy_staleness", _reject_staleness)
     register_rejection("kl_loss_zero_coef", _reject_kl_loss_zero)
+    register_rejection("rpp_requires_whiten", _reject_rpp_without_whiten)
     register_rejection("constant_aggregation_reducer", _reject_constant_with_token)
 
 
