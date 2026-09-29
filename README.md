@@ -34,12 +34,27 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
 ```
 
 - `--gpu` grammar: `cloud:[nodes x]<count>x<gpu>[@region]`, one entry per
-  learner island.
+  learner island. Clouds: `aws`, `runpod`, `nebius`, `verda` (via SkyPilot)
+  and `modal` (a Modal GPU container, not a VM; `modal:8xh100` runs
+  unpinned, `modal:8xh100@us` pins a region at Modal's surcharge; multi-
+  container islands need whole nodes, e.g. `modal:2x8xh100`).
 - Omitting `--gpu` invokes `yeto shape`: an exact solver maximizes effective
   TFLOPs under your budget (or minimizes cost to reach `--flops`), subject to
   live spot quotas minus usage, spot placement scores, RunPod stock, and an
   FSDP memory model of the model. Run `yeto shape` directly to see the plan,
   rejected shapes with reasons, and the launch line without launching.
+- `yeto shape --clouds` picks the clouds to plan across (default: `aws` plus
+  every cloud whose credentials are on this machine — `runpod`, `nebius`,
+  `verda`, `modal`; AWS credentials are only required when `aws` is listed).
+  `--regions` takes `cloud:region` entries, e.g.
+  `--regions aws:us-east-1,nebius:eu-north1,verda:FIN-03`; a bare region
+  means `aws` (the old spelling), `cloud:all` lifts the limit for one cloud
+  and `all` for every cloud. Clouds you do not name are unrestricted, except
+  AWS, which stays on its default US regions. A `modal:<region>` entry pins
+  Modal containers to that area at Modal's region surcharge; leave it out to
+  run unpinned at the base price. Credentials go where each cloud's own CLI
+  puts them (`~/.aws`, `~/.runpod`, `~/.nebius`, `~/.verda`, `~/.modal.toml`);
+  see docs/CLOUDS.md.
 - `--data`: HF dataset id, local path (jsonl/json/parquet or `save_to_disk`
   dir), or any sky-supported object-store URI — non-HF sources ship to
   learners via SkyPilot file mounts.

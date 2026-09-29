@@ -1,0 +1,2 @@
+yeto shape --model qwen3-8b --budget 20 --clouds aws --regions us-east-1,us-east-2 --json
+yeto shape --model qwen3-8b --budget 60 --clouds aws --regions us-east-1,us-east-2 --json
