@@ -3840,6 +3840,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         # Checked first: the flag must never turn an SFT launch syncer-less.
         raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
     prepare_launch_args(args)
+    _write_run_manifest(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
     # (validated in _prepare_ports_algorithm before any cloud work).
@@ -4293,6 +4294,35 @@ def _echoes_events(args, spec) -> bool:
         and getattr(args, "rl_engine", "ports") == "ports"
     )  # every ports RL island (sky too): rl_learner_finalized tells the launcher
     # that a later non-zero exit is a shutdown error, not an island failure
+
+
+def _write_run_manifest(args) -> dict | None:
+    """Record the engine pins actually used (launch.log + <run dir>/run_manifest.json)."""
+
+    if getattr(args, "training_mode", "sft") != "rl":
+        return None
+    from . import rl as _rl
+    from . import runs
+
+    engine = getattr(args, "rl_engine", "ports")
+    manifest = {
+        "rl_engine": engine,
+        "rl_image": getattr(args, "rl_image", None),
+        "miles_commit": _rl.MILES_NEXT_COMMIT if engine == "ports" else _rl.MILES_COMMIT,
+        "sglang_commit": getattr(_rl, "SGLANG_NEXT_COMMIT", None) if engine == "ports" else None,
+        "source_sha256": getattr(args, "source_sha256", None),
+        "cluster_prefix": args.cluster_prefix,
+        "written_unix": time.time(),
+    }
+    print(f"[launcher] RL engine {engine}: image {manifest['rl_image']}, "
+          f"miles {manifest['miles_commit']}, sglang {manifest['sglang_commit']}", flush=True)
+    try:
+        path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[launcher] could not write the run manifest: {e}", file=sys.stderr)
+    return manifest
 
 
 def _no_sync_events_dir(args) -> Path:
