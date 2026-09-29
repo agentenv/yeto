@@ -7,7 +7,7 @@
     "whiten": false,
     "reward_postprocess": {
       "path": "yeto.rl.algos.reward_pipeline.post_process",
-      "sha256": "35cd5262518f6055cddba3f1791d70218595f26ef5b889e1ed6097a78d5b7115"
+      "sha256": "9d1974027811ccc7c2cfbcf0fcdfafb741db3456ff1d9599b4d38abc28a1d7f0"
     },
     "reward_binary": false,
     "gdpo": {
@@ -65,11 +65,11 @@
   "plugins": [
     {
       "path": "yeto.rl.algos.reward_pipeline.grpo_default",
-      "sha256": "35cd5262518f6055cddba3f1791d70218595f26ef5b889e1ed6097a78d5b7115"
+      "sha256": "9d1974027811ccc7c2cfbcf0fcdfafb741db3456ff1d9599b4d38abc28a1d7f0"
     },
     {
       "path": "yeto.rl.algos.seq_adv.gdpo",
-      "sha256": "c81a63303137d298bb04fd4e449a56c0436b0b2701ac7d171334a846ce2bf1a2"
+      "sha256": "62c0fcaaa017af91eab95a3030fe069705ffaa15c46b955c1baf28b2d9ab553e"
     }
   ]
 }

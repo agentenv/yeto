@@ -171,7 +171,7 @@ def _args(estimator, transform="grpo_default", n=4, batch=2):
                            rollout_batch_size=batch, reward_key=None, multi_lora=False)
     setattr(args, rp.PIPELINE_ATTR, rp.plugins_payload({
         "reward_pipeline": {"reward_shapers": [], "advantage_transform": transform,
-                            "advantage_params": {}},
+                            "advantage_params": {}, "pipeline_sha256": rp.pipeline_sha256()},
         "algorithm_spec_sha256": spec.sha256(),
     }))
     return args

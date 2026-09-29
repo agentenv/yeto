@@ -17,9 +17,9 @@ RUNS = {  # spec, allowance, reward function, optimizer steps
     "rpp": (f"{EX}/rpp.json", ["advantage_estimators:reinforce_plus_plus", "features:whiten_advantages"], "gsm8k_reward:score", 1),
     "rpp_baseline": (f"{EX}/rpp_baseline.json", ["advantage_estimators:reinforce_plus_plus_baseline", "features:whiten_advantages"],
                      "gsm8k_reward:score", 1),
-    "maxrl": (f"{EX}/maxrl.json", ["features:maxrl", "reward_postprocessors:custom_reward_postprocess", "features:plugins"], "gsm8k_reward:score", 1),
-    "mapo": (f"{EX}/mapo.json", ["features:mapo", "reward_postprocessors:custom_reward_postprocess", "features:plugins"], "gsm8k_reward:score", 1),
-    "gdpo": (f"{EX}/gdpo.json", ["features:gdpo", "reward_postprocessors:custom_reward_postprocess", "features:plugins"],
+    "maxrl": (f"{EX}/maxrl.json", ["features:maxrl", "reward_postprocessors:custom_reward_postprocess"], "gsm8k_reward:score", 1),
+    "mapo": (f"{EX}/mapo.json", ["features:mapo", "reward_postprocessors:custom_reward_postprocess"], "gsm8k_reward:score", 1),
+    "gdpo": (f"{EX}/gdpo.json", ["features:gdpo", "reward_postprocessors:custom_reward_postprocess"],
              "yeto.rl.algos.gdpo_reward:reward_func", 1),
 }
 spec_path, allow, reward_fn, opt_steps = RUNS[name]

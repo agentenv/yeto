@@ -1,4 +1,4 @@
-$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/gdpo.json --rl-allow-unverified-mechanism features:gdpo --rl-allow-unverified-mechanism reward_postprocessors:custom_reward_postprocess --rl-allow-unverified-mechanism features:plugins
+$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/gdpo.json --rl-allow-unverified-mechanism features:gdpo --rl-allow-unverified-mechanism reward_postprocessors:custom_reward_postprocess
 {
   "absorbed_flags": {},
   "algorithm_spec": {
@@ -20,7 +20,7 @@ $ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorit
       "reward_binary": false,
       "reward_postprocess": {
         "path": "yeto.rl.algos.reward_pipeline.post_process",
-        "sha256": "d0fa606b57ea84e1441c8077aa731a0c11e89da8bd2106d41c8501a1dfa337cb"
+        "sha256": "9d1974027811ccc7c2cfbcf0fcdfafb741db3456ff1d9599b4d38abc28a1d7f0"
       },
       "rewards_normalization": true,
       "std_normalization": true,
@@ -60,8 +60,12 @@ $ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorit
     },
     "plugins": [
       {
-        "path": "yeto.rl.algos.seq_adv.registered_transforms",
-        "sha256": "062980850c89a6dfc82910e566c607e57c48680ab0356e386f461ef1d75ad58b"
+        "path": "yeto.rl.algos.reward_pipeline.grpo_default",
+        "sha256": "9d1974027811ccc7c2cfbcf0fcdfafb741db3456ff1d9599b4d38abc28a1d7f0"
+      },
+      {
+        "path": "yeto.rl.algos.seq_adv.gdpo",
+        "sha256": "62c0fcaaa017af91eab95a3030fe069705ffaa15c46b955c1baf28b2d9ab553e"
       }
     ],
     "sampling": {
@@ -72,7 +76,7 @@ $ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorit
     },
     "schema": "yeto-rl-algorithm-spec-v2"
   },
-  "algorithm_spec_sha256": "0bd48f7aa1812c581fc0d705f456066d86b3ec344ec2982d36f2018adad1783e",
+  "algorithm_spec_sha256": "bcfa94bd0aacf209365e508dc34b4435c3a07c552d9e97c5d0ee875047774a54",
   "miles_argv": [
     "--advantage-estimator",
     "grpo",
@@ -84,7 +88,6 @@ $ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorit
     "advantage_estimators:grpo",
     "corrections:none",
     "features:gdpo",
-    "features:plugins",
     "kl_placements:none",
     "loss_aggregations:default",
     "losses:policy_loss",
