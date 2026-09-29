@@ -29,3 +29,6 @@
 ## 追加（事后，配置、seed、判据均未改）：恢复扫描
 - 第一次运行（T2R2 s17）失败的原因是运行时能力缺失（DistOpt 分片主参数、trainer 按单输出校验），并非实验结果本身。两处修复（66afb1e、8f2c801）已由 DistOpt 冒烟验证（`distopt-smoke/`）。按主 agent 决定 (a)，用修复后的同一 SHA 重跑全部 6 次运行，第一次运行的证据保留在 `t2r2-s17-attempt1/`。
 - 已合入 launcher 修复（algo-cap）：island 最终失败时 launcher 退出码为 4，**判为失败**；每次运行仍保留独立 watchdog 与 `stop_arm.sh` 兜底。
+
+## 追加（在第一次 s5 运行出结果之前写入）：launcher 关闭阶段误判
+本扫描每次运行都带 syncer（strict-avg，1 个 learner），会受到 launcher 已知缺陷影响：learner 已 finalized、停 syncer 时关闭 Ray，被判为 FAILED。约定如下：若退出码为 4，且该岛已发出 `rl_learner_finalized`，失败只发生在关闭阶段，则该次运行记为"launcher 缺陷导致的无效运行"，既不判通过，也不判机制失败，其数据不进入比较；P0 修复后按同一计划重跑该次。其他退出码 4 仍判为失败。
