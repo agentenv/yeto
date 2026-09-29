@@ -3236,6 +3236,15 @@ FINALIZE_GRACE_S = 60.0
 RELAUNCH_JOIN_S = 120.0
 
 
+class RunStalled(RuntimeError):
+    """No island produced an event for the stall timeout (and not all finalized)."""
+
+
+# Exit code when the run stalled (no island event for --rl-stall-timeout).
+RUN_STALLED_EXIT = 6
+DEFAULT_RL_STALL_TIMEOUT_S = 900.0
+
+
 class FixedRosterIslandAbandoned(RuntimeError):
     """A fixed-roster RL island could not be recovered: the run cannot finish."""
 # run() exit code when a fixed-roster island failed for good (distinct from
@@ -3371,6 +3380,8 @@ class FleetController:
         syncer_restart=None,
         fixed_roster: bool = False,
         finalized_probe=None,
+        progress_probe=None,
+        stall_timeout: float = 0.0,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -3387,6 +3398,13 @@ class FleetController:
         # (training complete); a non-zero exit after that is a shutdown-phase
         # error, not an island failure.
         self.finalized_probe = finalized_probe
+        # () -> int: events received from the islands so far (log echo). With
+        # stall_timeout > 0 a run with no new event for that long, and not every
+        # learner finalized, is stalled (e.g. a dead syncer connection).
+        self.progress_probe = progress_probe
+        self.stall_timeout = stall_timeout
+        self._progress = None
+        self._progress_at = None
         self.learners = {
             name: self._make_record(name, task, job_id)
             for name, (task, job_id) in learners.items()
@@ -3434,6 +3452,7 @@ class FleetController:
                 self._poll(rec, is_syncer=False)
             if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
                 break
+            self._check_stall()
             self.ops.sleep(self.poll_interval)
         exit_codes = {name: rec["exit"] for name, rec in self.learners.items()}
         print(f"[launcher] learner jobs finished: {exit_codes}")
@@ -3517,6 +3536,25 @@ class FleetController:
                 self._enter_recovering(rec, verdict, is_syncer)
         elif rec["state"] == RECOVERING:
             self._drive_recovery(rec, is_syncer)
+
+    def _check_stall(self) -> None:
+        if self.progress_probe is None or self.stall_timeout <= 0:
+            return
+        try:
+            progress = int(self.progress_probe())
+        except Exception:
+            return
+        now = self.ops.now()
+        if progress == 0:
+            return  # islands still starting (image pull, model load): no clock yet
+        if self._progress is None or progress != self._progress:
+            self._progress, self._progress_at = progress, now
+            return
+        if now - self._progress_at >= self.stall_timeout and not self._all_learners_finalized():
+            message = (f"no island event for {now - self._progress_at:.0f}s "
+                       f"(stall timeout {self.stall_timeout:.0f}s, {progress} events so far)")
+            print(f"[launcher] ERROR: run stalled: {message}", file=sys.stderr)
+            raise RunStalled(message)
 
     def _all_learners_finalized(self) -> bool:
         return self.finalized_probe is not None and all(
@@ -4091,6 +4129,13 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                 (lambda name: name in event_collectors and event_collectors[name].finalized)
                 if echo_names else None
             ),
+            progress_probe=(
+                (lambda: sum(c.count for c in list(event_collectors.values())))
+                if echo_names else None
+            ),
+            stall_timeout=float(
+                getattr(args, "rl_stall_timeout", None) or DEFAULT_RL_STALL_TIMEOUT_S
+            ) if getattr(args, "rl_stall_timeout", None) != 0 else 0.0,
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -4121,6 +4166,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
         try:
             exit_codes = controller.run()
+        except RunStalled as error:
+            print(f"[launcher] ERROR: {error}; stopping the run (exit {RUN_STALLED_EXIT})",
+                  file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return RUN_STALLED_EXIT
         except FixedRosterIslandAbandoned as error:
             # A fixed-roster island failed for good: the run cannot finish.
             # Secure the tapes (bounded), then the finally block tears every

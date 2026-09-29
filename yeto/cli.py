@@ -228,6 +228,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-stall-timeout",
+        type=float,
+        default=None,
+        help=(
+            "ports RL: stop the run (exit 6) when no island event arrives for this many "
+            "seconds and not every island finalized (default 900; 0 disables)"
+        ),
+    )
+    rl.add_argument(
         "--rl-optimizer-steps",
         type=int,
         default=1,

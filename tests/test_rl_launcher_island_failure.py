@@ -276,3 +276,36 @@ def test_run_manifest_records_image_and_pins(monkeypatch, tmp_path, capsys):
     assert manifest["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
     out = capsys.readouterr().out
     assert f"image {rl.MILES_NEXT_IMAGE}" in out and rl.MILES_NEXT_COMMIT in out
+
+
+def test_stalled_run_exits_6_and_tears_down(monkeypatch, tmp_path, capsys):
+    """INFRA 2.4 s29: the syncer connection died; islands keep RUNNING with no new event."""
+    from yeto.rl import event_echo
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
+
+    def one_event(*args, **kwargs):  # each island logs one event, then nothing
+        collector = args[-1]
+        if collector is not None:
+            collector.feed(event_echo.format_record(
+                {"island_id": 0, "time_unix": 1.0, "event": "rl_engine_selected"}))
+
+    monkeypatch.setattr(launcher, "_tail_modal", one_event)
+    args = _launcher_args("ports", ("--controller", "local", "--rl-image",
+                                    "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100,modal:1xa100")
+    args.keep, args.recover_timeout, args.controller_poll = False, 600.0, 30.0
+    args.rl_stall_timeout = 900.0
+    assert launcher.run(args) == launcher.RUN_STALLED_EXIT == 6
+    assert 900 <= clock.t < 1000  # bounded by the stall timeout, no endless waiting
+    assert "run stalled" in capsys.readouterr().err
+    assert record.count(("stop_app",)) == 1  # every resource torn down
+    assert not [r for r in record if r[0] == "relaunch"]
+
+
+def test_stall_detection_disabled_with_zero(monkeypatch, tmp_path):
+    ctl = launcher.FleetController(
+        learners={}, syncer=None, sky_ops=types.SimpleNamespace(now=lambda: 0.0),
+        poll_interval=30, recover_timeout=0, progress_probe=lambda: 5, stall_timeout=0.0)
+    ctl._check_stall()  # never raises when disabled
