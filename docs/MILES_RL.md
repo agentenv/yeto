@@ -656,7 +656,8 @@ each with its evidence, are the `MILES_DECLARED` table in
 - corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe
   (rl-algo-mismatch-correction);
 - loss_aggregations: constant; features: kl_loss_ref_model, entropy_bonus,
-  overlong_penalty; kl_placements: loss; reward_postprocessors:
+  overlong_penalty, clip_higher, eps_clip (g1b run A-r1; eps 0.001/0.002 are
+  trigger test values, not recommendations); kl_placements: loss; reward_postprocessors:
   custom_reward_postprocess (rl-algo-grpo-knobs);
 - advantage estimators: gspo, reinforce_plus_plus,
   reinforce_plus_plus_baseline; features: maxrl, mapo, gdpo
@@ -679,7 +680,7 @@ undeclared mechanism.
 
 Not declared, pending evidence or approval:
 
-- clip_higher, dual_clip, over_sampling;
+- dual_clip, over_sampling;
 - overlong_filter, mis, opsm_rollout, generic corrections:custom;
 - features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
   reducer, and that reducer is claimed by `loss_aggregations:constant`
@@ -694,7 +695,7 @@ undeclared mechanisms.
 Measured on integ-decl with the committed example specs:
 
 - accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
-- refused: dapo-like (clip_higher, eps_clip, over_sampling, token) and
+- refused: dapo-like (over_sampling, token) and
   dr-grpo, which is now refused only on no_grpo_std_normalization (the
   reducer is claimed by `constant`).
 
