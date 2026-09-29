@@ -101,6 +101,18 @@ def valid_masked_fraction(value: Any) -> float | None:
     return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
 
 
+# Settings an estimator requires (by the rejection matrix or upstream Miles)
+# are part of that estimator's mechanism, not separately declared features:
+# GSPO's explicit clip range (sequence_ratio_without_clip) and the rpp
+# family's advantage normalization (rpp_requires_whiten). Decision: main
+# agent, rl-infra-spec alignment §7b (may be overridden by the user).
+ESTIMATOR_COMPANIONS: dict[str, frozenset[tuple[str, str]]] = {
+    "gspo": frozenset({("features", "eps_clip"), ("features", "clip_higher")}),
+    "reinforce_plus_plus": frozenset({("features", "whiten_advantages")}),
+    "reinforce_plus_plus_baseline": frozenset({("features", "whiten_advantages")}),
+}
+
+
 class AlgorithmSpecError(ValueError):
     """An algorithm description is malformed or unsupported."""
 
@@ -1035,11 +1047,16 @@ class AlgorithmSpec:
 
     # -- derived (design D4/D6) ----------------------------------------------
     def required_mechanisms(self) -> frozenset[tuple[str, str]]:
-        """(dimension, mechanism) pairs the engine must declare."""
+        """(dimension, mechanism) pairs the engine must declare.
 
-        return frozenset(
-            (m.dimension, m.name) for m in registered_mechanisms() if m.detect(self)
-        )
+        Settings an estimator mandates (:data:`ESTIMATOR_COMPANIONS`) are
+        claimed by that estimator's mechanism in this combination only; the
+        same setting under another estimator is its own mechanism.
+        """
+
+        required = {(m.dimension, m.name) for m in registered_mechanisms() if m.detect(self)}
+        required -= ESTIMATOR_COMPANIONS.get(self.advantage.estimator, frozenset())
+        return frozenset(required)
 
     def _mechanism_defs(self) -> list[MechanismDef]:
         return [m for m in registered_mechanisms() if m.detect(self)]
