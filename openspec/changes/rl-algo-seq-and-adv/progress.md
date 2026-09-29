@@ -206,3 +206,57 @@
 ## 2026-09-29 P0 4373cd9（记录）
 - 事件磁带回传已扩展到所有 Modal ports 岛（含带 syncer 的多岛），磁带在 `<run dir>/events/<island>.jsonl`；缺 `rl_learner_finalized` → 退出码 3。7.6 MaxRL 两岛 G3 计划将用它读每岛磁带（算法哈希一致、外层应用后状态 hash 一致、不变量无误报），放置按 R0 7.1（Modal 2 岛 + 本机 syncer）。
 - 7.6 仍等 7.5 声明在集成分支合入（主 agent 统一处理），届时 merge 后先单独提交计划再跑。
+
+## 2026-09-29 merge origin/algo-1b 176ba25+（fcd58b9）与示例重生成
+- 已 merge `origin/algo-1b`（echo 补丁后的 reward_pipeline），`make_examples.py` 重生成 maxrl/mapo/gdpo 示例。
+- `origin/integ-decl`（0f13aa7）**未 merge**：它与 algo-1b 在他人文件上有内容冲突（`yeto/rl/algos/grpo_knobs.py` 注释、`tests/test_rl_grpo_knobs.py` 声明集合、`tests/test_rl_algorithm_capabilities.py`、`docs/MILES_RL.md` 的 mismatch_metrics 段），属于 1b/ALGO-CAP/主 agent 的决策，本 change 不替他们裁决；已 `merge --abort`。
+- 验证：临时 worktree 取 integ-decl 0f13aa7，放入本分支的示例文件，`test_example_specs_are_current` 6 passed（示例哈希覆盖的模块 reward_pipeline/seq_adv 在两边相同；grpo_knobs、mismatch_correction 的差异不进入这些示例）。本分支本 change 测试 133 passed。
+- 再次提醒：集成分支定稿后须在最终 SHA 上重跑 make_examples.py。
+
+## 2026-09-29 7.6 G3（YETO_SHA 4652f73）与 7.7 汇总
+- 计划 bae5600 启动前提交；结果 `evidence/g3/results.md`。
+- **7.6 未通过（按预声明退出码读法）**：磁带判据 1–4 全部成立（3 次外层同步 2 响应无陈旧；两岛算法哈希一致、无放行；v0..v3 发布 hash 两岛一致；每岛 3 轮有限、finalized、无失败事件），但 head 退出码 143：训练完成后本机 syncer 被终止，岛 1 在 `ray.shutdown` 中 KeyboardInterrupt、作业记为 FAILED，launcher 进入恢复循环挂起（P0 在 c098b5b 修复的缺陷，4652f73 不含），我手动结束 head。检查脚本计数 bug 在运行后修正并注明（不改判据）。
+- 观察：第 2 轮两岛 nonzero_advantages=0、grad_norm=0.0 且无不变量失败——"不期望梯度"分支在 GPU 上被触发。
+- 重跑需在 ≥ c098b5b 的 SHA 上单独提交计划（退出码 4 = 失败）。
+- **7.7 汇总（全部为估算，未核账单）**：G1 attempts 1–4 ≈ $3.1；attempt 5 ≈ $0.9；attempt 6 ≈ $3.9；G3 ≈ $3 → 合计 ≈ $11，上限 $20。所有本 change 的 Modal app（algo2a-g1 ×2、yeto-algo2a-g1-* ×8、yeto-algo2a-g3）均为 stopped / 0 tasks；本 change 的 watchdog 与本机 syncer（:29420）已停；无卷、无命名 secret。7.7 勾选。
+
+## 2026-09-29 7.6 判定口径修正（主 agent）与补充证据
+- 7.6 正式结果：未通过——退出码 143，且判据 4 按事先提交的检查脚本判定"不成立"（`run/check-as-declared.json`）；运行后按事件计数的"成立"只作观察（`results.md` 已改）。
+- 根因在 launcher（两岛 finalized 后先停 syncer，岛 1 关闭期异常被判 FAILED 并进入恢复循环；c098b5b 后会返回 4，仍属误判），已由主 agent 交 P0 修复。修复推送后允许在新 SHA 上按单独提交的新计划只重跑一次：判据不变；检查脚本运行前改为按 rl_local_round/rl_round_trained 事件计数（已在 harness 中改好，随新计划提交）；退出码 0/2 由磁带判定，3/4/其他非零为失败。
+- watchdog 中途消失：原因未查明（疑似他人按模式批量 kill 同形 `sleep 3300` watchdog）；harness 已加固（独立命名脚本、setsid+nohup、忽略 HUP/INT/TERM、60 s 心跳日志、每分钟自检并按原截止时间重启），见 `evidence/g3/results.md`。
+- **5.5 补充证据（GPU）**：7.6 运行中 MaxRL 第 2 轮两岛 `rl_round_trained.nonzero_advantages = 0`、`rl_local_round.grad_norm = 0.0`、无不变量失败事件——"非零 advantage 为 0 → 不期望梯度"分支在 GPU 上真实走到（此前仅 fake driver 覆盖）。
+
+## 2026-09-29 7.6 首次失败根因更正 + 重跑通过
+- 【已被最终审查修订，见文末】更正：首次 7.6 的 watchdog 消失**已查明**——algo-1a 在约 20:37–20:40Z 执行 `pkill -x -f "sleep 3300"`（见 algo-1a 7ebfc59 progress），杀掉了本运行 watchdog 的 sleep 子进程，watchdog 随即执行 `modal app stop` 与 pkill 本机 syncer，与本运行收尾期重合；岛 1 在 `ray.shutdown` 中 KeyboardInterrupt、作业被判 FAILED 很可能由此触发（launcher 恢复循环缺陷另由 P0 在 a602fa2 修复）。首次运行正式结果仍按预登记为**未通过**，不改判。
+- 重跑（唯一一次；计划 1698744 启动前提交；YETO_SHA=a602fa2；加固 watchdog 唯一脚本名）：退出码 0，判据 1–4 全部通过（`evidence/g3/rerun/results.md`、`rerun/check.json`）→ 7.6 勾选（GPU 验收通过）。主 agent 后来提到的 501d71d 在收到通知时本次重跑已按 a602fa2 提交并启动，按指示未更换。
+- 7.7 更新：累计 ≈ $11 + $2.9 ≈ $14（估算，未核账单），上限 $20；app ap-aivVXMrZwnfkkB7zj2rQFm stopped/0 tasks，本机 syncer 已停、29420 关闭、watchdog 已结束。
+
+## 2026-09-29 收尾：7.5 与 8.1（集成分支 integ-decl 501d71d）
+- 7.5 勾选：声明位于集成分支 integ-decl 501d71d。临时 worktree 核对：六个示例 spec 用 `yeto launch --dry-run`（两岛 strict-avg，不带放行）全部被接受、`unverified_mechanisms: []`；adapter `algorithm_flags --dry-run` 全部 accepted；未声明项 `features:dual_clip` 被拒（"not supported"）；`gspo_noclip`、`rpp_gamma` 仍按拒绝矩阵被拒。证据 `evidence/7.5-501d71d/`。
+- 示例 spec 在 501d71d 上是最新的（`test_example_specs_are_current` 通过，make_examples.py 无差异）。集成分支若再变动注册模块源码，需在最终集成 SHA 上再生成。
+- 8.1 勾选：501d71d 全量 68F+26E=94，按 id 与 algo-1b 40ee1a2 基线完全相同；相对本 change 1.1 基线（756946b，99 条，含 5 条当时的合并引入项）无新增。
+
+### 最终状态
+全部 task 已勾选（1.1–8.3）。GPU 验收通过：5.5、7.2、7.3、7.4、7.6；7.5 声明在集成分支；其余为 CPU 通过/完成。已知限制：INFRA R1 在 attempt 6 时 GPU 上 masked_fraction 为空（infra-a 后续修复，本 change 未复验 GPU）；REINFORCE++ 的 reward-KL 分支因 KL 大小未上报而不执行。费用累计 ≈ $14（估算），无残留。
+
+## 2026-09-29 最终审查修订（不重跑、不改判）
+- 8.1：以 1.1 基线（756946b，99 条）为准：无新增失败；差集仅 5 条非本 change 引入、已被他人修复（id 见 tasks.md 8.1）。
+- 7.6 首次失败根因：日志时序与 1a 自报的 pkill 时间窗（20:37–20:40Z）不符——syncer 于 20:36:09–14Z 被 Terminated，app stopped_at 20:36:20Z，且顺序与 watchdog 命令顺序相反。改为"很可能由外部进程被结束触发；归因于 1a 的 pkill 未证实"（evidence/g3/results.md）。上文"已查明"一条作废。
+- 2.2：adapter 接线引用 INFRA d9bf29c（R1 真正修复）；GPU 未复验（attempt 6 时 masked_fraction 为 null）。
+- 7.7：费用统一为 ≈$14（估算，未核账单）。
+- harness/check_g3.py：YETO_SHA 树路径改为参数（第二参数或环境变量 G3_TREE），不影响已有结果。
+
+## 待批准（已知偏离，需用户确认）
+1. **GSPO 全裁放宽路径（design D2）在 GPU 上未跑到**：attempt 6 时 `masked_fraction` 为 null（早于 INFRA d9bf29c）。若真实引擎上 masked_fraction 仍为 null，则一轮全部序列被裁、grad_norm=0 时会**误报**零梯度失败（严格侧）。需在 d9bf29c 之后的 SHA 上做 GPU 复验。
+2. **REINFORCE++ 在奖励全相同但有 reward KL 时退回 R0 规则**：比 spec.md 第 135–136 行（"本岛本轮 advantage 在白化前不全相等 → 期望梯度"）宽松——只会漏报、不会误报；原因是 reward-KL 大小未上报给 driver（第 0 轮恰为 0）。若要严格满足 spec，需要上报每轮 reward-KL 统计。
+
+## 2026-09-29 R1 GPU 复验（integ-decl 501d71d，计划 f6e25b4 启动前提交）
+- 预登记检查脚本结果：**未通过**——脚本按 Miles "step 0" 切分轮次，但 Miles 的 step 编号在整次运行中累计（0..5），导致判定失效；按规则不改判。
+- 观察（不计通过）：三轮 `rl_round_trained` 的 clip_fraction/masked_fraction 均非 null，且等于该轮两步 pg_clipfrac 的均值（0.09375、0.25、0.25），与 R1 通道在 GPU 上工作一致。未出现全裁剪轮次，D2 全裁放宽路径仍记为 GPU 未覆盖。已写入 design.md Known deviations。
+- 退出码 2（按磁带判定）；app ap-xbkY9rLSJ3vjXCBmcuSrVi stopped/0 tasks；watchdog 已结束。费用 ≈ $0.9；本 change 合计 ≈ $15（估算，未核账单），上限 $20（后续更新见下）。
+- 偏离 2（rpp reward-KL）保持待用户决定。
+
+## 2026-09-29 R1 复验重跑（批准的唯一一次，501d71d）
+- 计划与修正后的检查脚本 5b0ae97 启动前提交（按 optimizer_steps=2 每两步一组划分轮次）。第一次启动在任何云资源创建前被 launcher 同名磁带保护拒绝（9415033 记录，改用前缀 algo2a-r1-gspo2），随后正式运行。
+- 结果：**通过**——三轮 clip_fraction = masked_fraction = 该轮两步 pg_clipfrac 均值（0.09375、0.25、0.25），均非 null；退出码 2 按磁带判定。偏离 1 收窄为：全裁剪放宽路径本身未在 GPU 上发生。
+- 费用：本次 ≈ $0.9；本 change 累计 ≈ $16（估算，未核账单），上限 $20。app ap-sEPPygSJmxCvTy4kz7Y1bk stopped/0 tasks，watchdog 已结束。

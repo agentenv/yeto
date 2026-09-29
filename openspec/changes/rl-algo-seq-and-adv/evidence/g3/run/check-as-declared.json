@@ -1,0 +1,137 @@
+{
+ "checks": {
+  "0_exit_code": "143",
+  "1_three_outer_steps_2_responders_no_stale": true,
+  "tapes": [
+   "algo2a-g3-l0-modal.jsonl",
+   "algo2a-g3-l1-modal.jsonl"
+  ],
+  "2_same_sha_no_unverified": true,
+  "3_publication_hashes_equal_v0_3": true,
+  "4_rounds_finite_finalized_no_failures": false
+ },
+ "pass": false,
+ "sha": "e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9",
+ "publication_hashes": [
+  {
+   "0": "373abf70cb687c7dfe3b8391c678d27be175a19d0e847349c362ed042f7ba43f",
+   "1": "343af438b4dfd876dd8f5414eadb079733e37259953a61c42703e569f8ea3f93",
+   "2": "4750813eda7caa6d73b9dbbbc6bdb696743d27982d5bbbcbda483a51fa9355d6",
+   "3": "e736949b46c40f985027d1f4d3dbb26055af71c8aabaf49baecf0e4aa9cf1e53"
+  },
+  {
+   "0": "373abf70cb687c7dfe3b8391c678d27be175a19d0e847349c362ed042f7ba43f",
+   "1": "343af438b4dfd876dd8f5414eadb079733e37259953a61c42703e569f8ea3f93",
+   "2": "4750813eda7caa6d73b9dbbbc6bdb696743d27982d5bbbcbda483a51fa9355d6",
+   "3": "e736949b46c40f985027d1f4d3dbb26055af71c8aabaf49baecf0e4aa9cf1e53"
+  }
+ ],
+ "unparsable_lines": [
+  0,
+  0
+ ],
+ "sync_steps": [
+  {
+   "sync/base_version": 0,
+   "sync/responders": 2
+  },
+  {
+   "sync/base_version": 1,
+   "sync/responders": 2
+  },
+  {
+   "sync/base_version": 2,
+   "sync/responders": 2
+  }
+ ],
+ "observations": {
+  "transform_events_per_island": {
+   "l0": 6,
+   "l1": 6
+  },
+  "nonzero_advantages_per_round": [
+   [
+    [
+     0,
+     16
+    ],
+    [
+     1,
+     16
+    ],
+    [
+     2,
+     0
+    ]
+   ],
+   [
+    [
+     0,
+     16
+    ],
+    [
+     1,
+     24
+    ],
+    [
+     2,
+     0
+    ]
+   ]
+  ],
+  "grad_norms": [
+   [
+    [
+     0,
+     null
+    ],
+    [
+     null,
+     0.28802576661109924
+    ],
+    [
+     1,
+     null
+    ],
+    [
+     null,
+     0.29601961374282837
+    ],
+    [
+     2,
+     null
+    ],
+    [
+     null,
+     0.0
+    ]
+   ],
+   [
+    [
+     0,
+     null
+    ],
+    [
+     null,
+     0.28512442111968994
+    ],
+    [
+     1,
+     null
+    ],
+    [
+     null,
+     0.7853845357894897
+    ],
+    [
+     2,
+     null
+    ],
+    [
+     null,
+     0.0
+    ]
+   ]
+  ]
+ }
+}
