@@ -733,7 +733,7 @@ it is rejected as undeclared without the allowances and accepted with them.
 {"schema": "yeto-rl-algorithm-spec-v2",
  "correction": {"method": "custom", "mismatch_metrics": true,
    "function": {"path": "yeto.rl.algos.mismatch_observe.observe_mismatch",
-                "sha256": "89d30b28540ac6dd5c0a9ec0aab41a6d445de9f169ee1bd5e7307673c9687bac"}}}
+                "sha256": "9d5209db978e940d9b246d6e08dcb56c23e114594da08bb8ac1c88c79b8d6255"}}}
 ```
 
 <!-- mismatch-example allow=tis -->

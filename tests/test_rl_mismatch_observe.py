@@ -136,6 +136,11 @@ def test_observe_metrics_match_vanilla_tis(seed):
     ratio = reference["tis"]
     expected = (~((ratio >= 0.5) & (ratio <= 5.0))).float()
     assert torch.equal(metrics["mismatch_outside_0p5_5"], expected)
+    active = reference["tis_abs"][torch.cat(data["loss_masks"]) > 0]
+    for name, level in (("p50", 0.5), ("p90", 0.9), ("p99", 0.99)):
+        value = metrics[f"tis_abs_{name}"]
+        assert value.shape == ratio.shape and torch.all(value == value[0])
+        assert float(value[0]) == pytest.approx(float(torch.quantile(active, level)))
 
 
 # -- 2.3 observe-only leaves loss and gradient bit-identical ----------------------

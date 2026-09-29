@@ -495,3 +495,15 @@ def test_doc_example_dry_run(tmp_path, index):
     assert accepted["verdict"] == "accepted", accepted.get("error")
     assert accepted["algorithm_spec_sha256"] == spec.sha256()
     assert accepted["miles_argv"][2:] == algorithm_argv(spec)
+
+
+def test_doc_examples_pin_current_plugin_sources(tmp_path):
+    for _, body in _doc_examples():
+        path = tmp_path / "s.json"
+        path.write_text(body)
+        spec = AlgorithmSpec.from_json_file(str(path))
+        for ref in spec.referenced_plugins():
+            if ref.path.startswith("yeto."):
+                ref.verify(import_callable=False)
+            else:
+                assert ref.sha256 == mc.ICEPOP_SOURCE_SHA256
