@@ -261,7 +261,7 @@ yeto 与 SGLang 的关系：
 | 层 | 比较对象 | 判定 | 阈值依据 |
 |---|---|---|---|
 | 1 第 1 轮严格 | 主 seed 第 1 轮 | group/token/reward 相等；grad_norm 相对差 ≤ 3% | 相同权重、相同 prompt 下计数已观测到完全相等；3% 为观测最大值 1.0% 的 3 倍 |
-| 2 teacher forcing | legacy 第 1 轮 rollout 回放到两条路径各训一步 | loss 绝对差 ≤ max(1e-6, 1e-3×\|legacy\|)；grad_norm 相对差 ≤ 3%；LoRA 更新量相对 L2 ≤ 5% | 见下 |
+| 2 teacher forcing | legacy 第 1 轮 rollout 回放到两条路径各训一步 | loss 绝对差 ≤ max(1e-6, 1e-3×\|legacy\|)；grad_norm 相对差 ≤ 3%；optimizer 之前的 LoRA 梯度拼接后相对 L2 ≤ 3% 且余弦 ≥ 0.99；LoRA 更新量只报告 | 见下（梯度口径为 2026-09-29 实验后经用户批准的修改） |
 | 3 分布 | 第 2 轮起，每 seed 每指标取各（岛, 轮）平均；legacy/ports 各 5 个 seed（17–21） | 精确双侧置换检验（252 种划分，均值差），任一指标 p < 0.05/4 = 0.0125 失败 | 用户选定；Bonferroni 控制 4 个指标的全体误判率 ≤ 5% |
 | 4 hash | 每条路径每个 seed 内 | 同一版本各岛 hash 一致；不跨路径比较 | 两条路径数值不同，跨路径 hash 必然不同 |
 
@@ -269,12 +269,14 @@ yeto 与 SGLang 的关系：
 
 - loss：on-policy GRPO 第一步的 loss 由组内零均值 advantage 相消，量级约 1e-8（两条路径观测值都是 1.2107e-08），相对差没有信息量。绝对下限 1e-6 高出该量级两个数量级，能拦住 KL/entropy 项或 loss 聚合方式配置错误这类会让 loss 离开零点的错误；loss 不是这一层的主要信号。
 - grad_norm：与第 1 层相同的 3%。输入逐 token 相同，差异只来自 trainer 数值，不应大于第 1 轮自由采样时的观测值。
-- LoRA 更新量：`‖Δ_ports − Δ_legacy‖₂ / ‖Δ_legacy‖₂`，Δ 取自两条路径共用的每轮审计文件 `audit/round-00000001.delta.f32`（canonical 布局，同一 `layout_hash`）。前提是 `base.f32` 一致（相对 L2 ≤ 1e-6），否则比较无效。5% 目前**没有直接数据支撑**：现有证据未保留 f32 审计文件。需要注意，Adam 第一步的更新近似 `lr·sign(g)`，梯度接近 0 的元素的符号会被 bf16 噪声翻转，更新量的相对 L2 可能明显大于 grad_norm 的相对差。若 grad_norm 与 loss 通过而更新量超出 5%，按失败处理，并以报告中的余弦相似度和逐元素差分分析原因；修改该阈值必须先修改 spec 并附数据，不在实验后放宽。
+- LoRA 梯度（判定）：两条路径在 `optimizer.step()` 入口导出全部 LoRA 张量的梯度（`yeto.rl.grad_audit`，`YETO_RL_AUDIT_GRADS=1` 启用，写到 `audit/round-00000001.grad.f32` 与索引 `.grad.json`）。语义两边一致：forward/backward 与 Megatron `finalize_model_grads` 之后（DP all-reduce 已完成；两边都开 `--accumulate-allreduce-grads-in-fp32`，取 FP32 `main_grad`，没有才退回 `param.grad`），除以 optimizer 的 loss scale（bf16 无 scaler 时为 1），**裁剪之前**的原始梯度；Megatron 将施加的裁剪系数 `min(1, clip_grad/(‖g‖+1e-6))` 与 `optimizer.step()` 返回的 grad_norm 一并写入索引。张量经 Megatron-Bridge 的 adapter 转换任务变换为 canonical HF 形状，并归一化为 canonical PEFT 名（`base_model.model.*.lora_{A,B}.weight`），按名字排序拼接。判定：按名字一一对齐（名字或形状不一致即失败），拼接后 `‖g_p − g_l‖₂ / ‖g_l‖₂ ≤ 3%` 且余弦 ≥ 0.99，报告列出相对 L2 最大的 5 个张量。3% 与 grad_norm 的阈值相同：输入逐 token 相同，逐元素梯度差只来自 trainer 数值。挂点：ports 由 `state_plugin` 已有的 `train_one_step` 记录器在每步武装一次性的 `optimizer.step` 包装；legacy 由 learner 设置 Miles 的 `--custom-megatron-before-train-step-hook-path yeto.rl.grad_audit.before_train_step`（fork 已有该钩子，不改 fork 代码），两边调用同一个 `grad_audit.arm`。只支持 DP 复制的梯度：TP/PP/EP > 1 或 DP > 1 且使用分布式优化器（`main_grad` 只在本地分片有效）时拒绝运行；teacher forcing 每岛 1 GPU。
+- LoRA 更新量（只报告）：`‖Δ_ports − Δ_legacy‖₂ / ‖Δ_legacy‖₂`，Δ 取自两条路径共用的每轮审计文件 `audit/round-00000001.delta.f32`（canonical 布局，同一 `layout_hash`），同时报告余弦、符号翻转比例（`sign(Δ_p) ≠ sign(Δ_l)` 的元素比例）与范数比 `‖Δ_p‖/‖Δ_l‖`。前提 `base.f32` 一致（相对 L2 ≤ 1e-6）仍为判定项。
+- 口径修改记录（2026-09-29，实验后依据数据、经用户批准）：原口径以"LoRA 更新量相对 L2 ≤ 5%"判定，并写明"修改该阈值必须先修改 spec 并附数据"。strict-avg teacher forcing（证据 `gpu-eq/evidence/2026-09-29-eq62/report.md`）中 loss 与 grad_norm 通过（grad_norm 相对差 0.56% / 1.06%），初始 LoRA 一致（相对 L2 = 0），但更新量相对 L2 为 0.333 / 0.424（余弦 0.944 / 0.910），范数比 1.000，符号翻转比例 1.5% / 2.5%。原因分析：Adam 第一步 `m̂/√v̂ = g/|g| = sign(g)`，更新量 ≈ `lr·sign(g)`，每个元素的幅度都是 lr、与梯度大小无关，所以范数比恒为 1；两条路径 bf16/kernel 差异只让 |g| 接近 0 的元素改变符号，而每个翻转元素贡献 `(2·lr)²`，于是相对 L2 ≈ 2√(翻转比例)：√0.015×2 ≈ 0.245、√0.025×2 ≈ 0.316，与观测的 0.333 / 0.424 同量级（其余差来自 ε 附近的非饱和元素）。也就是说第一步的更新量把梯度的幅度信息丢掉、只放大符号噪声，不能反映 trainer 误差；optimizer 之前的梯度才是 trainer 数值的直接度量。因此判定对象改为梯度（相对 L2 ≤ 3%、余弦 ≥ 0.99），更新量的四个统计改为只报告。这是一次实验之后的口径修改，不是放宽同一指标的阈值；新口径同样在 ports 梯度数据产生之前固定。
 - 回放入口 `yeto.rl.teacher_forcing.replay_generate` 作为 Miles 的 custom generate 函数，在两条路径的正常流程中用记录的 token、logprob 和 reward 替换采样，并按各自路径重打策略 token；记录中没有的 prompt 直接报错，不回退为真实采样。回放运行本身的 reward/token/group 计数必须与原运行相等，作为回放复现的前提检查。
 
 第 3 层的统计局限：每个 seed 先汇总成一个值，避免逐（岛, 轮）检验的多重比较和轮间相关；两条路径同分布时，全体误判率由 Bonferroni 控制在 5% 以内。代价是检出力很低：5 对 5 时共 252 种划分，最小可达 p = 2/252 ≈ 0.0079，只有当两组值完全分离（一方全部大于另一方）时才可能低于 0.0125；按高斯近似，要有 80% 的检出力，均值差需约 3 个合并标准差。因此该层通过只说明没有发现大的分布偏移，不能证明差异小。报告给出各 seed 原始值、p 值、效应量与上述局限，效应量较大但未达显著时应人工复核；若要提高检出力，只能增加 seed，并先改 spec。
 
-decoupled：部分 fragment 应用会把全局 fragment 混入本岛进度，各岛 hash 本来就不同，所以第 4 层只比较非部分应用的版本与最终 cut；decoupled 不写每轮审计文件，第 2 层的更新量判定取自 strict-avg 的 teacher forcing（trainer 与 optimizer 配置相同）；最终 LoRA 的跨路径相对 L2 距离只报告，并附 legacy 跨 seed 的同一距离作为参照，不设硬阈值，因为第 2 轮起采样分叉，该距离主要反映轨迹差异，而非 trainer 误差。
+decoupled：部分 fragment 应用会把全局 fragment 混入本岛进度，各岛 hash 本来就不同，所以第 4 层只比较非部分应用的版本与最终 cut；decoupled 的 teacher forcing 同样由 `YETO_RL_AUDIT_GRADS=1` 写出梯度审计文件并按同一梯度口径判定；若未写出，第 2 层的梯度判定取自 strict-avg 的 teacher forcing（trainer 与 optimizer 配置相同）；最终 LoRA 的跨路径相对 L2 距离只报告，并附 legacy 跨 seed 的同一距离作为参照，不设硬阈值，因为第 2 轮起采样分叉，该距离主要反映轨迹差异，而非 trainer 误差。
 
 ## Risks / Trade-offs
 

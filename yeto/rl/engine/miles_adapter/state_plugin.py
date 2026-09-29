@@ -471,6 +471,7 @@ def install_grad_norm_recorder() -> bool:
         return False
 
     def train_one_step(*args: Any, **kwargs: Any):
+        _arm_grad_audit(original, args, kwargs)
         result = original(*args, **kwargs)
         try:
             norm = result[1]
@@ -482,6 +483,48 @@ def install_grad_norm_recorder() -> bool:
     megatron_model.train_one_step = train_one_step
     _RECORDER_INSTALLED = True
     return True
+
+
+def _arm_grad_audit(original: Any, args: tuple, kwargs: dict) -> bool:
+    """``YETO_RL_AUDIT_GRADS=1``: capture this step's pre-clip LoRA gradients (D12).
+
+    Same capture point and semantics as the legacy hook (``yeto.rl.grad_audit``):
+    entry of ``optimizer.step()``, after DP reduction, before clipping.
+    """
+
+    from types import SimpleNamespace
+
+    from yeto.rl import grad_audit
+
+    if not grad_audit.enabled():
+        return False
+    import inspect
+
+    bound = inspect.signature(original).bind_partial(*args, **kwargs).arguments
+    miles_args, model = bound.get("args"), bound.get("model")
+    holder = SimpleNamespace(args=miles_args, model=model)
+
+    def bindings():
+        cached = _GRAD_BINDINGS.get(id(model))
+        if cached is None:
+            cached = tuple(
+                grad_audit.GradBinding(grad_audit.canonical_grad_name(b.name), b.parameter, b.to_hf)
+                for b in adapter_bindings(holder)
+            )
+            _GRAD_BINDINGS[id(model)] = cached
+        return cached
+
+    return grad_audit.arm(
+        miles_args,
+        bound.get("rollout_id", 0),
+        bound.get("step_id", 0),
+        bound.get("optimizer"),
+        bindings,
+        engine="ports",
+    )
+
+
+_GRAD_BINDINGS: dict[int, Any] = {}
 
 
 def grad_norm(actor: Any) -> float:

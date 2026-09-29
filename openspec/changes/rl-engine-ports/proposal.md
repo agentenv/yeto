@@ -19,7 +19,7 @@ Yeto 的 RL 路径目前把 Miles 当成一个整体来调用：`yeto/rl/learner
 - SGLang 同样改为 yeto 自有 fork `michaellchung/sglang`：以最新 Miles 使用的 `sgl-project/sglang` `sglang-miles` 分支为基底，移植 `agentenv/sglang` 的全部 5 个 LoRA/TMS 补丁并逐个验证。
 - 在途 PR 的处理写入计划：先合入 #64、#65、#59，并确认 #66 的状态，然后才开始 R0；这些 PR 的语义进入迁移清单，由等价性验收逐条覆盖。Miles 的 cell 结构只在适配层内部使用；不启用 FT、indep-DP、healing，也不启用 FT api_server。
 - 新增启动参数 `--rl-engine {legacy,ports}`，默认 `legacy`。旧路径（旧 fork、bundle、`MilesPolicySync` 回调）完全不变，作为兜底和对照组。
-- 新增等价性验收：同一模型、数据和硬件下，分别跑 `legacy` 和 `ports`，按四层口径判定：第 1 轮严格相等（grad_norm 相对差 ≤ 3%）、legacy rollout 回放的 teacher forcing、第 2 轮起按 seed 汇总后的置换检验、路径内各岛策略 hash 一致（见 design D12）。验收通过后，按任务清单将默认值切换为 `ports`，再删除 legacy 路径及 `--rl-engine` 参数。**BREAKING**：删除发生在本 change 的最后一个阶段，届时旧 fork pin、bundle 和 `--external-policy-sync-path` 集成都会移除。
+- 新增等价性验收：同一模型、数据和硬件下，分别跑 `legacy` 和 `ports`，按四层口径判定：第 1 轮严格相等（grad_norm 相对差 ≤ 3%）、legacy rollout 回放的 teacher forcing（loss、grad_norm 与 optimizer 之前的 LoRA 梯度判定，梯度拼接后相对 L2 ≤ 3% 且余弦 ≥ 0.99；LoRA 更新量只报告）、第 2 轮起按 seed 汇总后的置换检验、路径内各岛策略 hash 一致（见 design D12）。验收通过后，按任务清单将默认值切换为 `ports`，再删除 legacy 路径及 `--rl-engine` 参数。**BREAKING**：删除发生在本 change 的最后一个阶段，届时旧 fork pin、bundle 和 `--external-policy-sync-path` 集成都会移除。
 - 端口要保留已合并 PR 的语义：
   - #64 的 LoRA 梯度流不变量；
   - #65 的 GDN hybrid recipe；

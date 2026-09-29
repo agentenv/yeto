@@ -82,9 +82,17 @@ def _write_arm(arm: Path, rows: dict, *, hashes=None, log_metrics=True, audit=No
         if log_metrics:
             (d / "miles.log").write_text("\n".join(log) + "\n")
         if audit is not None and island in audit:
-            base, delta, layout = audit[island]
+            base, delta, layout, *grads = audit[island]
             a = d / "audit"
             a.mkdir()
+            if grads and grads[0] is not None:
+                import torch
+
+                from yeto.rl import grad_audit
+
+                grad_audit.write(a, "round-00000001",
+                                 {n: torch.tensor(v, dtype=torch.float32) for n, v in grads[0].items()},
+                                 {"engine": "test", "grad_norm_l2": 1.0})
             np.asarray(base, dtype="<f4").tofile(a / "round-00000001.base.f32")
             np.asarray(delta, dtype="<f4").tofile(a / "round-00000001.delta.f32")
             (a / "round-00000001.json").write_text(json.dumps({"layout_hash": layout}))
@@ -193,18 +201,24 @@ def test_distribution_edges_missing_values_and_too_few_seeds():
 # ---------------------------------------------------------------------------
 # tier 2 (teacher forcing report parsing)
 # ---------------------------------------------------------------------------
+GRADS = {"base_model.model.l0.q_proj.lora_A.weight": [[0.3, -0.2], [0.1, 0.05]],
+         "base_model.model.l0.q_proj.lora_B.weight": [[1e-4, -2e-4]]}
+
+
 def _tf_arms(tmp_path, *, ports_gn=1.01, ports_delta=None, ports_base=None, ports_tokens=100,
-             ports_audit=True, loss_p=1e-8):
+             ports_audit=True, loss_p=1e-8, ports_grads=None, grads=True):
     base = [0.5, -0.25, 1.0, 2.0]
     delta = [0.01, -0.02, 0.0, 0.03]
+    lgrads = GRADS if grads else None
+    pgrads = (ports_grads or GRADS) if grads else None
     ref = _write_arm(tmp_path / "ref" / "work" / "seed-17" / "a",
                      {(i, 1): _row(gn=1.0, loss=1.2e-8) for i in (0, 1)})
     lg = _write_arm(tmp_path / "tfl" / "work" / "seed-17" / "a",
                     {(i, 1): _row(gn=1.0, loss=1.2e-8) for i in (0, 1)},
-                    audit={i: (base, delta, "L") for i in (0, 1)})
+                    audit={i: (base, delta, "L", lgrads) for i in (0, 1)})
     pt = _write_arm(tmp_path / "tfp" / "work" / "seed-17" / "a",
                     {(i, 1): _row(gn=ports_gn, loss=loss_p, tokens=ports_tokens) for i in (0, 1)},
-                    audit=({i: (ports_base or base, ports_delta or delta, "L") for i in (0, 1)}
+                    audit=({i: (ports_base or base, ports_delta or delta, "L", pgrads) for i in (0, 1)}
                            if ports_audit else None))
     return eq.load_tf_arm(ref), eq.load_tf_arm(lg), eq.load_tf_arm(pt)
 
@@ -213,19 +227,27 @@ def test_teacher_forcing_passes_within_thresholds(tmp_path):
     near = [0.0101, -0.0201, 0.0, 0.0301]  # rel L2 ~0.5%
     res = eq.teacher_forcing_check(*_tf_arms(tmp_path, ports_delta=near))
     assert res["passed"], [r for r in res["rows"] if r["gate"] and not r["pass"]]
-    upd = [r for r in res["rows"] if r["check"] == "LoRA update rel L2"]
+    upd = [r for r in res["rows"] if r["check"] == "LoRA update rel L2 (info)"]
     assert len(upd) == 2 and upd[0]["value"] < 0.01 and upd[0]["cosine"] > 0.999
+    assert not upd[0]["gate"]
+    g = [r for r in res["rows"] if r["check"] == "LoRA gradient rel L2"]
+    assert len(g) == 2 and g[0]["value"] == 0.0 and g[0]["gate"] and g[0]["pass"]
     loss = next(r for r in res["rows"] if r["check"] == "loss")
     assert loss["pass"] and loss["value"] == pytest.approx(2e-9)
 
 
 @pytest.mark.parametrize("kwargs,failing", [
     ({"ports_gn": 1.04}, "grad_norm"),
-    ({"ports_delta": [0.02, -0.02, 0.0, 0.03]}, "LoRA update rel L2"),
+    ({"ports_grads": {**GRADS, "base_model.model.l0.q_proj.lora_A.weight": [[0.33, -0.2], [0.1, 0.05]]}},
+     "LoRA gradient rel L2"),
+    ({"ports_grads": {"base_model.model.l0.q_proj.lora_A.weight": [[0.3, -0.2], [0.1, 0.05]],
+                      "base_model.model.l0.k_proj.lora_B.weight": [[1e-4, -2e-4]]}},
+     "LoRA gradient tensors aligned"),
+    ({"grads": False}, "LoRA gradient (grad audit f32)"),
     ({"ports_base": [0.5, -0.25, 1.0, 2.1]}, "initial LoRA rel L2"),
     ({"ports_tokens": 99}, "fidelity ports-TF action_tokens == reference"),
     ({"loss_p": 5e-6}, "loss"),
-    ({"ports_audit": False}, "LoRA update (audit f32)"),
+    ({"ports_audit": False}, "LoRA base/update (audit f32)"),
 ])
 def test_teacher_forcing_failures(tmp_path, kwargs, failing):
     res = eq.teacher_forcing_check(*_tf_arms(tmp_path, **kwargs))
@@ -236,8 +258,43 @@ def test_teacher_forcing_failures(tmp_path, kwargs, failing):
 def test_teacher_forcing_decoupled_without_audit_reports_update_ungated(tmp_path):
     res = eq.teacher_forcing_check(*_tf_arms(tmp_path, ports_audit=False), require_update=False)
     assert res["passed"]
-    row = next(r for r in res["rows"] if r["check"] == "LoRA update (audit f32)")
+    row = next(r for r in res["rows"] if r["check"] == "LoRA base/update (audit f32)")
     assert row["gate"] is False and row["pass"] is None
+    res = eq.teacher_forcing_check(*_tf_arms(tmp_path / "g", grads=False), require_update=False)
+    assert res["passed"]
+    row = next(r for r in res["rows"] if r["check"] == "LoRA gradient (grad audit f32)")
+    assert row["gate"] is False
+
+
+def test_teacher_forcing_update_is_reported_not_gated(tmp_path):
+    # Adam step 1 ~ lr*sign(g): a large update distance with matching gradients passes (D12).
+    res = eq.teacher_forcing_check(*_tf_arms(tmp_path, ports_delta=[0.01, 0.02, 0.0, -0.03]))
+    assert res["passed"], [r for r in res["rows"] if r["gate"] and not r["pass"]]
+    rows = {r["check"]: r for r in res["rows"] if r["island"] == 0}
+    assert rows["LoRA update rel L2 (info)"]["value"] > 1.0
+    assert rows["LoRA update sign-flip fraction (info)"]["value"] == pytest.approx(0.5)
+    assert rows["LoRA update norm ratio ports/legacy (info)"]["value"] == pytest.approx(1.0)
+
+
+def test_grad_compare_cosine_gate_and_worst_tensors(tmp_path):
+    # Concatenated metrics over canonical-name order; the worst tensor is listed first.
+    import torch
+
+    from yeto.rl import grad_audit
+
+    def put(d, tensors):
+        grad_audit.write(d, "round-00000001", {n: torch.tensor(v) for n, v in tensors.items()}, {})
+        return d / "round-00000001.grad.f32"
+
+    a = put(tmp_path / "a", {"base_model.model.x.lora_A.weight": [1.0, 0.0],
+                             "base_model.model.y.lora_B.weight": [0.0, 1.0]})
+    b = put(tmp_path / "b", {"base_model.model.x.lora_A.weight": [1.0, 0.02],
+                             "base_model.model.y.lora_B.weight": [0.0, 1.0]})
+    g = eq.grad_compare(a, b)
+    assert g["tensors"] == 2 and g["numel"] == 4
+    assert g["rel_l2"] == pytest.approx(0.02 / 2 ** 0.5, rel=1e-5)
+    assert g["worst"][0]["name"] == "base_model.model.x.lora_A.weight"
+    assert eq.thresholds()["tf_lora_update"].startswith("reported only")
 
 
 def test_analyze_cli_with_teacher_forcing_writes_report(tmp_path):
@@ -303,6 +360,8 @@ def test_plan_seeds_and_teacher_forcing_commands(tmp_path, capsys):
         "yeto.rl.teacher_forcing.replay_generate"
     assert tf["command"][len(tf["command"]) - tf["command"][::-1].index("--global-rounds")] == "1"
     assert tf["env"]["YETO_RL_REPLAY_ROLLOUTS"].endswith("legacy-s17/work/seed-17/*/rollouts/island-*/0.pt")
+    assert all(s["env"].get("YETO_RL_AUDIT_GRADS") == "1" for s in plan["steps"][-2:])
+    assert not any(s["env"] for s in plan["steps"][:-2])
     assert not list(tmp_path.iterdir())
     with pytest.raises(SystemExit):
         eq.parse_args(["plan", "--launch-args", "x", "--seeds", "18", "--primary-seed", "17"])

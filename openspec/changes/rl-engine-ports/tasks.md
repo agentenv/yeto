@@ -62,11 +62,11 @@
 - [x] 6.1 编写对照脚本 `scripts/rl_engine_equivalence.py`，按 spec 的四层口径（design D12）判定：第 1 轮严格、teacher forcing、第 2 轮起按 seed 汇总的置换检验、路径内 hash。脚本负责多 seed（默认 17–21）运行编排（`plan`/`run`）、对已有运行目录的分析（`analyze`）和报告输出；loss/grad_norm 缺失时从 `miles.log` 补齐并记录来源；阈值为脚本常量，写入报告头。teacher forcing 入口为 `yeto.rl.teacher_forcing.replay_generate`（经 `benchmark_rl.py --custom-generate-function-path` 与 `YETO_RL_REPLAY_ROLLOUTS` 回放 legacy 第 1 轮 rollout）。验证：`plan` 能输出 legacy/ports × seed 与 teacher forcing 的命令；`fake` 模式生成带 FAKE 标记的分层报告；`tests/test_rl_engine_equivalence.py` 覆盖分层判定、置换检验判定、teacher forcing 报告解析与回放；在已提交的 legacy-baseline-v2 与 strict2 证据上，第 1 层复现 0.6%/1.0% 的 grad_norm 相对差并通过。
 - [ ] 6.2 用小模型（Qwen3-0.6B + LoRA）跑两岛 strict-avg 3 轮：legacy 与 ports 各 5 个 seed（17–21），并以 legacy seed 17 第 1 轮的 rollout 做 teacher forcing。验证：`analyze --preset strict-avg` 的报告结论为 PASS，即
   - 第 1 层：seed 17 第 1 轮 group/token/reward 完全相等，grad_norm 相对差 ≤ 3%；
-  - 第 2 层：回放复现记录，初始 LoRA 一致，loss 绝对差 ≤ max(1e-6, 1e-3×|legacy|)，grad_norm 相对差 ≤ 3%，LoRA 更新量相对 L2 ≤ 5%；
+  - 第 2 层：回放复现记录，初始 LoRA 一致，loss 绝对差 ≤ max(1e-6, 1e-3×|legacy|)，grad_norm 相对差 ≤ 3%，optimizer 之前的 LoRA 梯度（`optimizer.step()` 入口、DP 规约后、裁剪前，全部 LoRA 张量按 canonical 名对齐拼接；`YETO_RL_AUDIT_GRADS=1` 时由 `yeto.rl.grad_audit` 写出 `audit/round-00000001.grad.{f32,json}`，TF 运行由 `run` 自动设置）相对 L2 ≤ 3% 且余弦 ≥ 0.99；LoRA 更新量相对 L2、余弦、符号翻转比例、范数比只报告（D12，2026-09-29 经用户批准的口径修改）；
   - 第 3 层：每个 seed 把第 2 轮起的 reward_mean、loss、grad_norm、action_tokens 分别平均，legacy 与 ports 各 5 个值做精确双侧置换检验（252 种划分，均值差），Bonferroni α=0.0125，四个指标 p 均 ≥ 0.0125；报告列出各 seed 原始值、效应量与检出力局限；
   - 第 4 层：每条路径每个 seed 内各岛同一轮 hash 一致；
   原始记录与报告存放在本 change 目录下。
-- [ ] 6.3 用小模型跑两岛 decoupled（P=8、tau=2、H=4）到导出：legacy 与 ports 各 5 个 seed，并做 teacher forcing。验证：`analyze --preset decoupled` 的报告结论为 PASS，即第 2 层（loss、grad_norm；LoRA 更新量取自 6.2 的 teacher forcing，除非 decoupled 也写出审计文件）、第 3 层（同 6.2 的置换检验口径）、第 4 层（非部分应用的版本与最终 cut）通过，第 1 层只报告；两条路径全部 seed 导出的 PEFT 都能被标准 PEFT 加载；报告给出 seed 17 两条路径最终 LoRA 的相对 L2 距离和 legacy 跨 seed 的同一距离，不设硬阈值（第 2 轮起采样分叉，该距离反映轨迹差异而非 trainer 误差）。
+- [ ] 6.3 用小模型跑两岛 decoupled（P=8、tau=2、H=4）到导出：legacy 与 ports 各 5 个 seed，并做 teacher forcing。验证：`analyze --preset decoupled` 的报告结论为 PASS，即第 2 层（loss、grad_norm，以及与 6.2 相同的 LoRA 梯度判定：拼接后相对 L2 ≤ 3% 且余弦 ≥ 0.99；decoupled 的 teacher forcing 未写出梯度审计文件时取自 6.2 的 teacher forcing；更新量只报告）、第 3 层（同 6.2 的置换检验口径）、第 4 层（非部分应用的版本与最终 cut）通过，第 1 层只报告；两条路径全部 seed 导出的 PEFT 都能被标准 PEFT 加载；报告给出 seed 17 两条路径最终 LoRA 的相对 L2 距离和 legacy 跨 seed 的同一距离，不设硬阈值（第 2 轮起采样分叉，该距离反映轨迹差异而非 trainer 误差）。
 
 ## 7. 切换与退役
 

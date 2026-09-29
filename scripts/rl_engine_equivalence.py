@@ -15,7 +15,13 @@ Tier 2 -- teacher forcing.
     are replayed through ``yeto.rl.teacher_forcing.replay_generate`` into a
     1-round run on EACH engine. Compared per island, legacy-TF vs ports-TF:
     loss (``|d| <= max(1e-6, 1e-3 * |loss_l|)``), grad_norm (rel <= 3%) and
-    the LoRA update (round-1 audit delta, ``||d_p - d_l|| / ||d_l|| <= 5%``).
+    the pre-optimizer LoRA gradient (``round-1.grad.f32``, written by
+    ``yeto.rl.grad_audit`` when ``YETO_RL_AUDIT_GRADS=1``, which ``run`` sets
+    for the TF runs): all LoRA tensors concatenated in canonical name order,
+    ``||g_p - g_l|| / ||g_l|| <= 3%`` and cosine >= 0.99; the worst tensors are
+    listed. The LoRA update (round-1 audit delta) is REPORTED only: rel L2,
+    cosine, sign-flip fraction and norm ratio (Adam's first step ~ lr*sign(g),
+    so near-zero gradient elements flip sign under bf16 noise; design D12).
     Preconditions: the legacy-TF run reproduces the recording (reward /
     tokens / groups equal to the reference run) and both runs start from the
     same LoRA (audit base rel L2 <= 1e-6, same layout hash).
@@ -78,7 +84,9 @@ ROUND1_GRAD_NORM_REL = 0.03
 TF_LOSS_ABS = 1e-6
 TF_LOSS_REL = 1e-3
 TF_GRAD_NORM_REL = 0.03
-TF_UPDATE_REL_L2 = 0.05
+TF_GRAD_REL_L2 = 0.03
+TF_GRAD_COSINE = 0.99
+TF_GRAD_WORST = 5  # per-tensor rows listed in the report
 TF_BASE_REL_L2 = 1e-6
 DIST_METRICS = ("reward_mean", "loss", "grad_norm", "action_tokens")
 DIST_MIN_SEEDS = 3
@@ -96,6 +104,7 @@ DEFAULT_LAUNCH_CMD = (
 )
 TF_GENERATE = "yeto.rl.teacher_forcing.replay_generate"
 REPLAY_ENV = "YETO_RL_REPLAY_ROLLOUTS"
+GRAD_AUDIT_ENV = "YETO_RL_AUDIT_GRADS"  # == yeto.rl.grad_audit.GRAD_AUDIT_ENV
 
 Key = tuple[int, int]  # (island_id, round)
 
@@ -431,15 +440,70 @@ def load_tf_arm(arm_dir: str | Path, *, round_id: int = 1) -> dict[int, dict[str
         out[island] = {**{m: row.get(m) for m in ALL_METRICS},
                        "audit_base": str(audit / f"{stem}.base.f32"),
                        "audit_delta": str(audit / f"{stem}.delta.f32"),
+                       "audit_grad": str(audit / f"{stem}.grad.f32"),
                        "audit_meta": (json.loads(meta_path.read_text())
                                       if meta_path.is_file() else None)}
     return out
 
 
+def read_grad(path: str | Path) -> tuple[dict[str, Any], Any]:
+    """(index, flat f32) of a ``*.grad.f32`` written by ``yeto.rl.grad_audit``."""
+    import numpy as np
+
+    path = Path(path)
+    index = json.loads(path.with_name(path.name[: -len(".f32")] + ".json").read_text())
+    flat = np.fromfile(str(path), dtype="<f4")
+    if flat.size != index["numel"]:
+        raise ValueError(f"{path}: {flat.size} values, index says {index['numel']}")
+    return index, flat
+
+
+def grad_tensors(index: dict[str, Any], flat) -> dict[str, Any]:
+    return {s["name"]: flat[s["offset"]: s["offset"] + s["numel"]] for s in index["specs"]}
+
+
+def grad_compare(legacy_path: str | Path, ports_path: str | Path, *,
+                 worst: int = TF_GRAD_WORST) -> dict[str, Any]:
+    """Concatenated (canonical name order) rel L2 / cosine and the worst tensors."""
+    import numpy as np
+
+    li, lf = read_grad(legacy_path)
+    pi, pf = read_grad(ports_path)
+    lt, pt = grad_tensors(li, lf), grad_tensors(pi, pf)
+    if set(lt) != set(pt):
+        return {"error": "tensor names differ", "only_legacy": sorted(set(lt) - set(pt))[:5],
+                "only_ports": sorted(set(pt) - set(lt))[:5]}
+    names = sorted(lt)
+    shapes = {n for n in names if [s for s in li["specs"] if s["name"] == n][0]["shape"]
+              != [s for s in pi["specs"] if s["name"] == n][0]["shape"]}
+    if shapes:
+        return {"error": "tensor shapes differ", "tensors": sorted(shapes)[:5]}
+    gl = np.concatenate([lt[n] for n in names])
+    gp = np.concatenate([pt[n] for n in names])
+    per = sorted(({"name": n, "rel_l2": rel_l2(lt[n], pt[n]), "cosine": cosine(lt[n], pt[n])}
+                  for n in names), key=lambda r: -r["rel_l2"])
+    meta = {k: (li.get(k), pi.get(k)) for k in ("grad_norm_l2", "clip_coefficient",
+                                                 "optimizer_grad_norm", "grad_source", "grad_dtype")}
+    return {"rel_l2": rel_l2(gl, gp), "cosine": cosine(gl, gp), "tensors": len(names),
+            "numel": int(gl.size), "worst": per[:worst], "meta": meta}
+
+
+def update_stats(dl, dp) -> dict[str, Any]:
+    """Reported-only LoRA update comparison (design D12)."""
+    import numpy as np
+
+    dl = np.asarray(dl, dtype=np.float64)
+    dp = np.asarray(dp, dtype=np.float64)
+    nl = float(np.linalg.norm(dl))
+    return {"rel_l2": rel_l2(dl, dp), "cosine": cosine(dl, dp),
+            "sign_flip": float(np.mean(np.sign(dl) != np.sign(dp))) if dl.size else None,
+            "norm_ratio": float(np.linalg.norm(dp)) / nl if nl else None}
+
+
 def teacher_forcing_check(reference: dict[int, dict], legacy_tf: dict[int, dict],
                           ports_tf: dict[int, dict], *, require_update: bool = True) -> dict:
-    """``require_update=False`` (decoupled: no round audit is written) reports a missing
-    audit instead of failing; the LoRA-update gate then comes from the strict-avg TF run."""
+    """``require_update=False`` (decoupled) reports a missing gradient/round audit instead
+    of failing; the LoRA-gradient gate then comes from the strict-avg TF run."""
     rows = []
 
     def add(island, check, legacy, ports, value, rule, ok, gate=True, **extra):
@@ -475,10 +539,32 @@ def teacher_forcing_check(reference: dict[int, dict], legacy_tf: dict[int, dict]
         d = rel_diff(lg.get("grad_norm"), pt.get("grad_norm"))
         add(i, "grad_norm", lg.get("grad_norm"), pt.get("grad_norm"), d,
             f"rel <= {TF_GRAD_NORM_REL}", d is not None and d <= TF_GRAD_NORM_REL)
+        grads = [lg.get("audit_grad"), pt.get("audit_grad")]
+        if not all(g and Path(g).is_file() for g in grads):
+            add(i, "LoRA gradient (grad audit f32)", bool(grads[0] and Path(grads[0]).is_file()),
+                bool(grads[1] and Path(grads[1]).is_file()), None,
+                (f"grad audit present ({GRAD_AUDIT_ENV}=1)" if require_update
+                 else "not available (see strict-avg TF)"),
+                False if require_update else None, gate=require_update)
+        else:
+            g = grad_compare(grads[0], grads[1])
+            if "error" in g:
+                add(i, "LoRA gradient tensors aligned", None, None, None, "same names/shapes",
+                    False, detail=g)
+            else:
+                add(i, "LoRA gradient rel L2", None, None, g["rel_l2"], f"<= {TF_GRAD_REL_L2}",
+                    g["rel_l2"] <= TF_GRAD_REL_L2, cosine=g["cosine"])
+                add(i, "LoRA gradient cosine", None, None, g["cosine"], f">= {TF_GRAD_COSINE}",
+                    g["cosine"] is not None and g["cosine"] >= TF_GRAD_COSINE)
+                for k, (a, b) in g["meta"].items():
+                    add(i, f"grad audit {k} (info)", a, b, None, "reported", None, gate=False)
+                for w in g["worst"]:
+                    add(i, f"worst tensor {w['name']} (info)", None, None, w["rel_l2"],
+                        "reported", None, gate=False, cosine=w["cosine"])
         lm, pm = lg.get("audit_meta"), pt.get("audit_meta")
         files = [lg["audit_base"], lg["audit_delta"], pt["audit_base"], pt["audit_delta"]]
         if lm is None or pm is None or not all(Path(f).is_file() for f in files):
-            add(i, "LoRA update (audit f32)", lm is not None, pm is not None, None,
+            add(i, "LoRA base/update (audit f32)", lm is not None, pm is not None, None,
                 "audit present" if require_update else "not available (see strict-avg TF)",
                 False if require_update else None, gate=require_update)
             continue
@@ -487,10 +573,13 @@ def teacher_forcing_check(reference: dict[int, dict], legacy_tf: dict[int, dict]
         base = rel_l2(read_f32(lg["audit_base"]), read_f32(pt["audit_base"]))
         add(i, "initial LoRA rel L2", None, None, base, f"<= {TF_BASE_REL_L2}",
             base <= TF_BASE_REL_L2)
-        dl, dp = read_f32(lg["audit_delta"]), read_f32(pt["audit_delta"])
-        upd = rel_l2(dl, dp)
-        add(i, "LoRA update rel L2", None, None, upd, f"<= {TF_UPDATE_REL_L2}",
-            upd <= TF_UPDATE_REL_L2, cosine=cosine(dl, dp))
+        u = update_stats(read_f32(lg["audit_delta"]), read_f32(pt["audit_delta"]))
+        add(i, "LoRA update rel L2 (info)", None, None, u["rel_l2"], "reported", None,
+            gate=False, cosine=u["cosine"])
+        add(i, "LoRA update sign-flip fraction (info)", None, None, u["sign_flip"], "reported",
+            None, gate=False)
+        add(i, "LoRA update norm ratio ports/legacy (info)", None, None, u["norm_ratio"],
+            "reported", None, gate=False)
     gated = [r for r in rows if r["gate"]]
     return {"passed": bool(gated) and all(r["pass"] for r in gated), "rows": rows}
 
@@ -600,7 +689,10 @@ def evaluate(*, preset: str, legacy_runs: dict[int, dict], ports_runs: dict[int,
 def thresholds() -> dict[str, Any]:
     return {"round1_exact": list(ROUND1_EXACT), "round1_grad_norm_rel": ROUND1_GRAD_NORM_REL,
             "tf_loss": f"|d| <= max({TF_LOSS_ABS}, {TF_LOSS_REL}*|loss_legacy|)",
-            "tf_grad_norm_rel": TF_GRAD_NORM_REL, "tf_update_rel_l2": TF_UPDATE_REL_L2,
+            "tf_grad_norm_rel": TF_GRAD_NORM_REL,
+            "tf_lora_grad": (f"pre-optimizer LoRA gradient, all tensors concatenated: rel L2 <= "
+                             f"{TF_GRAD_REL_L2} and cosine >= {TF_GRAD_COSINE}"),
+            "tf_lora_update": "reported only (rel L2, cosine, sign-flip fraction, norm ratio)",
             "tf_initial_lora_rel_l2": TF_BASE_REL_L2,
             "distribution": (f"per seed: mean over (island, round >= 2) of {list(DIST_METRICS)}; "
                              f"exact two-sided permutation test legacy vs ports (mean diff), "
@@ -756,7 +848,8 @@ def build_plan(args) -> dict[str, Any]:
         for engine in ("legacy", "ports"):
             run_dir = out / f"tf-{engine}"
             steps.append({"name": run_dir.name, "engine": engine, "seed": args.primary_seed,
-                          "run_dir": str(run_dir), "env": {REPLAY_ENV: replay},
+                          "run_dir": str(run_dir),
+                          "env": {REPLAY_ENV: replay, GRAD_AUDIT_ENV: "1"},
                           "command": shlex.split(args.launch_cmd.format(
                               engine=engine, seed=args.primary_seed, run_dir=run_dir,
                               launch_args=tf_args))})

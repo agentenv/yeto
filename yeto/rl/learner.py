@@ -1930,6 +1930,8 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
             )
 
+    _configure_grad_audit(args, miles_args, rl_engine)
+
     if rl_engine == "ports":
         require_ports_router_mode(miles_args)
     elif os.environ.get(EXTERNAL_ROUTER_ENV) == "1":
@@ -1952,6 +1954,32 @@ def run_miles(
 
     asyncio.run(miles_train(miles_args))
     print(f"[rl] learner {args.learner_id} finalized")
+
+
+def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
+    """``YETO_RL_AUDIT_GRADS=1`` (teacher forcing, design D12): export pre-clip LoRA grads.
+
+    Both engines write next to the round audit (``args.audit_dir``). Ports arms
+    the capture from its ``train_one_step`` recorder; legacy through Miles'
+    before-train-step hook, which the fork already calls (fork code untouched).
+    """
+
+    from . import grad_audit
+
+    if not grad_audit.enabled():
+        return False
+    directory = getattr(args, "audit_dir", None)
+    if not directory:
+        raise ValueError(f"{grad_audit.GRAD_AUDIT_ENV}=1 requires an audit_dir")
+    setattr(miles_args, grad_audit.GRAD_AUDIT_DIR_ATTR, str(Path(directory).expanduser()))
+    if rl_engine != "ports":
+        existing = getattr(miles_args, "custom_megatron_before_train_step_hook_path", None)
+        if existing and existing != grad_audit.HOOK_PATH:
+            raise ValueError(
+                f"{grad_audit.GRAD_AUDIT_ENV}=1 conflicts with before-train-step hook {existing!r}"
+            )
+        miles_args.custom_megatron_before_train_step_hook_path = grad_audit.HOOK_PATH
+    return True
 
 
 def _run_ports(
