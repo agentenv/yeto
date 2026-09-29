@@ -92,7 +92,7 @@ def test_expressible_but_not_enabled_is_rejected_with_options():
         _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28, aggregation="token")))
     text = str(info.value)
     # every problem at once, each with the supported options
-    assert "features mechanism 'clip_higher' not supported (supported: []" in text
+    assert "features mechanism 'clip_higher' not supported (supported: ['mapo', 'maxrl']" in text
     assert "loss_aggregations mechanism 'token' not supported (supported: ['default']" in text
     assert "expressible but not enabled" in text
 
@@ -204,7 +204,8 @@ def test_miles_and_fake_declarations():
     # rl-algo-mismatch-correction 7.3 (G1 passed): the adapter declares tis and
     # OPSM (trainer pi_old); the fake declares every correction for CPU tests.
     expected = {
-        "miles": ({"none", "tis", "opsm", "opsm_trainer"}, frozenset()),
+        # rl-algo-seq-and-adv 7.5 G1: maxrl/mapo (gdpo held back)
+        "miles": ({"none", "tis", "opsm", "opsm_trainer"}, {"maxrl", "mapo"}),
         "fake": ({"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
                   "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
                  {"mismatch_metrics", "rollout_logprobs_as_old"}),

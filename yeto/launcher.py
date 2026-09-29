@@ -2899,19 +2899,62 @@ def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
             )
 
 
-def _tail_modal(modal_ops, call_id: str, prefix: str) -> int:
+EVENT_LINE_PREFIX = "YETO_RL_EVENT "  # same marker as the driver's experiment echo
+
+
+class EventCollector:
+    """Rebuilds an island's event tape from ``YETO_RL_EVENT <json>`` log lines.
+
+    Used for --rl-single-island-no-sync islands, whose ~/yeto-output cannot
+    be fetched (Modal) and which have no syncer tape. Lines are appended in
+    stream order; an exact repeat (a log stream that reconnected and replayed)
+    or a second echo of the same record (the driver's experiment echo, whose
+    ``time_unix`` differs) is written once.
+    """
+
+    def __init__(self, path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+        self.count = 0
+
+    def feed(self, line) -> None:
+        text = str(line)
+        at = text.find(EVENT_LINE_PREFIX)
+        if at < 0:
+            return
+        payload = text[at + len(EVENT_LINE_PREFIX):].strip()
+        try:
+            record = json.loads(payload)
+        except ValueError:
+            return
+        key = json.dumps({k: v for k, v in record.items() if k != "time_unix"},
+                         sort_keys=True, separators=(",", ":"), default=str)
+        with self._lock:
+            if key in self._seen:
+                return
+            self._seen.add(key)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(payload + "\n")
+            self.count += 1
+
+
+def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
     """Stream a Modal island's container logs (the Modal twin of _tail)."""
     while True:
         try:
             for line in modal_ops.stream_logs(call_id):
                 print(f"[{prefix}] {str(line).rstrip()}", flush=True)
+                if collector is not None:
+                    collector.feed(line)
             return 0
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
             time.sleep(5)
 
 
-def _tail(cluster: str, job_id: int, prefix: str) -> int:
+def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
     import sky
 
     while True:
@@ -2921,6 +2964,8 @@ def _tail(cluster: str, job_id: int, prefix: str) -> int:
                 if line is None:
                     break
                 print(f"[{prefix}] {line.rstrip()}", flush=True)
+                if collector is not None:
+                    collector.feed(line)
             return 0
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
@@ -3838,12 +3883,27 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         #    past --recover-timeout.
         def spawn_tail(name: str, job_id) -> None:
             label = "syncer" if name == syncer_cluster else name
+            collector = None
+            if no_sync and name != syncer_cluster:
+                # No syncer tape and (on Modal) no fetchable ~/yeto-output: the
+                # island echoes its tape into the log; rebuild it locally.
+                collector = event_collectors.setdefault(
+                    name, EventCollector(events_dir / f"{name}.jsonl")
+                )
             if modal_ops is not None and name in modal_cfgs:
-                threading.Thread(
-                    target=_tail_modal, args=(modal_ops, job_id, label), daemon=True
-                ).start()
-                return
-            threading.Thread(target=_tail, args=(name, job_id, label), daemon=True).start()
+                thread = threading.Thread(
+                    target=_tail_modal, args=(modal_ops, job_id, label, collector), daemon=True
+                )
+            else:
+                thread = threading.Thread(
+                    target=_tail, args=(name, job_id, label, collector), daemon=True
+                )
+            thread.start()
+            tail_threads.append(thread)
+
+        tail_threads: list[threading.Thread] = []
+        event_collectors: dict[str, EventCollector] = {}
+        events_dir = _no_sync_events_dir(args)
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
@@ -3864,6 +3924,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             fixed_roster=getattr(args, "training_mode", "sft") == "rl",
         )
         exit_codes = controller.run()
+        if no_sync:
+            # The island's last events (finalization) must be on disk before
+            # teardown: the log streams end when the island exits; bounded wait.
+            deadline = time.monotonic() + NO_SYNC_EVENT_DRAIN_S
+            for thread in tail_threads:
+                thread.join(max(0.0, deadline - time.monotonic()))
+            for name, collector in event_collectors.items():
+                print(f"[launcher] {name}: {collector.count} event(s) -> {collector.path}")
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
 
         # Secure the artifact BEFORE the finally block tears learners down:
@@ -3989,6 +4057,17 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"head — tear it down with: yeto down {prefix}",
                     flush=True,
                 )
+
+
+NO_SYNC_EVENT_DRAIN_S = 120.0
+
+
+def _no_sync_events_dir(args) -> Path:
+    """``<run dir>/events`` (yeto run registry), for --rl-single-island-no-sync."""
+
+    from . import runs
+
+    return runs.run_dir(args.cluster_prefix) / "events"
 
 
 def dry_run_plan(args) -> dict:
