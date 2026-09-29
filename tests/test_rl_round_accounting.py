@@ -108,8 +108,10 @@ def test_mismatch_metrics_and_correction_masked_fraction(monkeypatch):
     fake.selected_corrections = lambda spec: ("icepop",)
     fake.masked_fraction_from_metrics = lambda spec, m: m["train/tis_clipfrac"]
     monkeypatch.setitem(sys.modules, "yeto.rl.algos.mismatch_correction", fake)
-    assert tr._has_corrections(object()) is True
-    assert tr.correction_masked_fraction(object(), round_metrics) == pytest.approx(0.4)
+    spec = SimpleNamespace(correction=object())
+    assert tr._has_corrections(spec) is True
+    assert tr._has_corrections(object()) is False  # no correction field: robust default
+    assert tr.correction_masked_fraction(spec, round_metrics) == pytest.approx(0.4)
 
 
 def test_driver_round_event_carries_labelled_mismatch(tmp_path):
@@ -180,3 +182,21 @@ def test_receipt_label_is_the_role_family_matching_the_layout():
 
     with pytest.raises(ValueError):
         _require_algorithm("gspo")  # contracts keep the role-family vocabulary
+
+
+def test_round_id_comes_from_the_policy_token_not_trajectory_keys(tmp_path):
+    """Multi-segment agentic rollouts: Sample.rollout_id is a trajectory key."""
+    from yeto.rl.core import policy_snapshot_token
+    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+
+    source = DirMetadataSource(tmp_path)
+    sink = source.sink_spec
+    source.set_policy_token(policy_snapshot_token(3, H))
+    segments = [[SimpleNamespace(rollout_id=1001)], [SimpleNamespace(rollout_id=1002)]]
+    assert hook.current_round_id(hook._flat(segments), sink) == 3
+    hook.put_to_sink({"schema": hook.METADATA_SCHEMA, "rollout_id": 3, "groups": [_group()],
+                      "completed": 1, "aborted": 0}, sink)
+    hook.record_round_metadata(None, segments, sink=sink, nonzero_advantages=5)
+    assert source.take(3)["nonzero_advantages"] == 5
+    # no token (fixtures/legacy): sample fallback
+    assert hook.current_round_id([SimpleNamespace(rollout_id=7)], f"dir:{tmp_path}/none") == 7

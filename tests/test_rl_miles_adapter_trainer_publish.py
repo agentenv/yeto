@@ -294,3 +294,70 @@ def test_step_metrics_reports_applied_lrs_per_optimizer_step():
     for lrs in (((),()), ((1e-5, 0.0), (1e-5, 0.0)), ((1e-5,), (0.0,))):
         with pytest.raises(TrainStepError):
             trainer(FakeActorGroup(lrs=lrs), []).train_step(handle())
+
+
+def test_gspo_clip_fraction_reaches_step_metrics_from_miles_train_one_step_result(monkeypatch):
+    """Review R1: the real path -- Miles ``train_one_step`` returns
+    ``(aggregate_train_losses(...), grad_norm, outcome)``; the state-plugin wrapper
+    records it in the rank, the trainer fetches it via ``run_plugin(STEP_LOSSES)``.
+    The receipt label is "grpo" (role family); the estimator comes from the spec."""
+    import sys
+    import types
+
+    from yeto.rl.engine.algorithm import AdvantageSpec, AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import state_plugin
+    from yeto.rl.engine.miles_adapter.state_plugin import STEP_LOSSES
+
+    # loss dict keys exactly as Miles aggregates them (algo-2a G1 attempt6
+    # gspo_s2 log line minus the "train/" prefix log_train_step adds)
+    miles_losses = [
+        {"loss": -3.7e-09, "pg_loss": -3.7e-09, "entropy_loss": 0.0, "pg_clipfrac": 0.5,
+         "ppo_kl": 1.1e-09, "ess_ratio": 1.0, "train_rollout_logprob_abs_diff": 0.0107,
+         "train_rollout_kl": 0.00041},
+    ]
+    state_plugin._STEP_LOSSES.clear()
+    for losses in miles_losses:
+        state_plugin._record_step_losses((losses, 0.9, "NORMAL"))
+
+    class RankActor(FakeActorGroup):
+        async def run_plugin(self, fn_path, kwargs=None):
+            if fn_path == STEP_LOSSES:
+                self.calls.append(("plugin", fn_path))
+                return [state_plugin.step_losses(None), []]  # last PP stage rank, other rank
+            return await super().run_plugin(fn_path, kwargs)
+
+    fake = types.ModuleType("yeto.rl.algos.seq_adv")
+    fake.clipfrac_from_losses = lambda steps, tokens=None: steps[0]["pg_clipfrac"]
+    monkeypatch.setitem(sys.modules, "yeto.rl.algos.seq_adv", fake)
+    actor = RankActor(lrs=((1e-5,), (1e-5,)))
+    t = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
+        actor_model=actor, learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
+        algorithm="grpo", spec=AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo")),
+    )
+    receipt = t.train_step(handle())
+    assert receipt.algorithm == "grpo"
+    m = t.step_metrics()
+    assert m.clip_fraction == 0.5 and m.masked_fraction == 0.5
+    assert ("plugin", STEP_LOSSES) in actor.calls
+
+
+def test_one_output_per_worker_of_the_single_cell_at_dp2():
+    """2.4 smoke finding: TrainerController.train returns one output per worker;
+    trainer DP=2 in one cell gives two outputs, which is not a multi-cell group."""
+    t = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=False,
+                             actor_num_nodes=1, actor_num_gpus_per_node=2),
+        actor_model=FakeActorGroup(outputs=2), learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
+    )
+    assert t.train_step(handle()).optimizer_step_succeeded
+    t3 = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=False,
+                             actor_num_nodes=1, actor_num_gpus_per_node=2),
+        actor_model=FakeActorGroup(outputs=3), learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
+    )
+    with pytest.raises(TrainStepError, match="expected 2 train outputs"):
+        t3.train_step(handle())

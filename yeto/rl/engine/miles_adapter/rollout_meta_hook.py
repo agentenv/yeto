@@ -55,6 +55,25 @@ ROUND_META_SCHEMA = "yeto-rl-round-metadata-v1"
 ROUND_METADATA_KEYS = frozenset({"nonzero_advantages"})
 
 
+def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:
+    """The training round of the rollout being processed.
+
+    Authoritative source: the policy token the driver published for this
+    rollout (``yeto:<rollout_id>:<hash>``). ``Sample.rollout_id`` is NOT used
+    when a token exists: in multi-segment agentic rollouts it is a trajectory
+    key (Miles ``agentic_tool_call.py``), not the round. Without a token (unit
+    fixtures, legacy) the first sample's ``rollout_id`` is the fallback.
+    """
+    token = current_policy_token(sink)
+    if token:
+        from yeto.rl.core import parse_policy_snapshot_token
+
+        return parse_policy_snapshot_token(token)[0]
+    return next(
+        (s.rollout_id for s in samples if getattr(s, "rollout_id", None) is not None), None
+    )
+
+
 def record_round_metadata(
     args: Any, samples_or_rollout_id: Any, *, sink: str | None = None, **counts: int
 ) -> None:
@@ -70,11 +89,7 @@ def record_round_metadata(
     if isinstance(samples_or_rollout_id, int) and not isinstance(samples_or_rollout_id, bool):
         rollout_id = samples_or_rollout_id
     else:
-        rollout_id = next(
-            (s.rollout_id for s in _flat(samples_or_rollout_id)
-             if getattr(s, "rollout_id", None) is not None),
-            None,
-        )
+        rollout_id = current_round_id(_flat(samples_or_rollout_id), sink)
     if rollout_id is None:
         raise RuntimeError("per-round metadata needs the rollout id")
     put_to_sink({"schema": ROUND_META_SCHEMA, "rollout_id": int(rollout_id), **counts}, sink)
@@ -159,7 +174,9 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
     }
 
 
-def build_metadata(args: Any, all_samples: Iterable[Sequence[Any]]) -> dict[str, Any]:
+def build_metadata(
+    args: Any, all_samples: Iterable[Sequence[Any]], sink: str | None = None
+) -> dict[str, Any]:
     trained = getattr(args, _TRAINED_ATTR, None)
     if trained is None:
         raise RuntimeError(
@@ -173,10 +190,7 @@ def build_metadata(args: Any, all_samples: Iterable[Sequence[Any]]) -> dict[str,
         if not samples:
             continue
         if rollout_id is None:
-            rollout_id = next(
-                (s.rollout_id for s in samples if getattr(s, "rollout_id", None) is not None),
-                None,
-            )
+            rollout_id = current_round_id(samples, sink)
         record = group_record(args, group)
         aborted += int(record.pop("aborted"))
         key = tuple(record.pop("_key"))
