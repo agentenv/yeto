@@ -102,7 +102,7 @@ TIS、IcePop 与变体组合是允许的，但它们要等 `rl-algo-mismatch-cor
 ## Migration Plan
 
 - 默认 variant 为 `policy_loss`，现有配置的哈希和 argv 不变。
-- 路线 B：fork 提交后更新 `MILES_NEXT_COMMIT` pin 与镜像。回滚方式是恢复 pin；未选用变体的运行不受影响。
+- 路线 B：fork 提交后更新 `MILES_NEXT_COMMIT` pin 与镜像。回滚方式是恢复 pin；未选用变体的运行不受影响。`rl-infra-spec` 的 fork-M1–M6（草稿分支 `yeto-elastic-m1-m6`）也落在同一 `yeto/ports`：两者按 alignment.md A7 串行合回 `yeto/ports`，每次合回只由 pin/镜像负责人（Agent IMG）更新一次 pin 与 digest，任一方 rebase 后须重跑对方的 fork CPU 测试。
 - 路线 A：插件是新文件，回滚方式是撤销 `losses` 声明。
 
 ## Open Questions
