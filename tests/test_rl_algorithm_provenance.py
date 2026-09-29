@@ -210,8 +210,9 @@ def test_launcher_refusals(tmp_path):
     with pytest.raises(ValueError, match="only apply to --rl-engine ports"):
         _prepare_rl_args(_launcher_args("legacy", ("--rl-algorithm-spec", rejected)))
     # F7: undeclared mechanisms and registered launch checks fail before any cloud work
-    undeclared = _spec_file(tmp_path, json.loads(V2.canonical_json()), "v2.json")
-    with pytest.raises(ValueError, match="'clip_higher' not supported"):
+    dual = AlgorithmSpec(loss=LossSpec(eps_clip_c=3.0))  # dual_clip: never declared yet
+    undeclared = _spec_file(tmp_path, json.loads(dual.canonical_json()), "v2.json")
+    with pytest.raises(ValueError, match="'dual_clip' not supported"):
         _prepare_rl_args(_launcher_args("ports", ("--rl-algorithm-spec", undeclared)))
     from yeto.rl.engine import algorithm as alg
 
