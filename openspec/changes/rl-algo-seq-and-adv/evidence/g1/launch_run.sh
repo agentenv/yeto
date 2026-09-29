@@ -37,6 +37,8 @@ PY
 )"
 PYTHONPATH=$PWD timeout 2400 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli launch "${COMMON[@]}" "${EXTRA[@]}" > "$out/launch.log" 2>&1
 echo "launcher rc=$?" | tee "$out/launcher_rc.txt"
+# echoed event tape (algo-cap 2bce8ed: launcher writes <run dir>/events/<island>.jsonl)
+cp -r "${YETO_RUNS_DIR:-$HOME/.yeto/runs}/$PREFIX/events" "$out/events" 2>/dev/null || echo "no events dir" > "$out/events_missing.txt"
 PYTHONPATH=$PWD timeout 300 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli down $PREFIX > "$out/down.log" 2>&1
 /tmp/modal-venv/bin/modal app stop -y yeto-$PREFIX >> "$out/down.log" 2>&1
 /tmp/modal-venv/bin/modal app list 2>&1 | grep -E "yeto-$PREFIX|App ID" > "$out/app_list_after.txt"

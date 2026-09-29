@@ -173,3 +173,64 @@ No volumes, no named secrets.
   - gspo_s1 was stopped by hand ~1 min after start (app ap-wfkKkSassVbNcGoJIqdIyA) because the
     receipt code changed (infra-a 8cf1dec); rpp / rpp_baseline / gdpo not started.
   - All apps stopped, 0 tasks; watchdogs killed.
+
+## Attempt 6 (committed before launch) -- same plan as attempt 5, event tape now returned
+- Code: pushed commit containing this section (merges algo-cap 2bce8ed event echo, infra-a
+  080bcbf round ids / 8cf1dec receipt family "grpo" for gspo/rpp). Entry unchanged
+  (launcher no-sync, `--controller local`, `--rl-optimizer-steps`); the only harness change is
+  copying `<run dir>/events/*.jsonl` into the evidence (launch_run.sh).
+- Criteria unchanged (attempt 5 section); criterion 1 counts `rl_round_trained` and
+  criterion 5 reads `rl_engine_selected` from the returned tape; 5.5 check as declared.
+- Runs: gspo_s2, gspo_s1, rpp, rpp_baseline, gdpo. Spent so far ~$4 of $20.
+
+## Attempt 6 result (code fb588a4, launcher no-sync entry, event tape returned) -- 5/5 PASS
+Per run (attempt6/<run>/criteria.json, produced by attempt6/check.py from launch.log + events/):
+| run | app | finalized / rl_round_trained | errors | grad_norm finite | argv | unverified + outer_sync |
+|---|---|---|---|---|---|---|
+| gspo_s2 | ap-JDjymkEZox76D7QLx4gz3R | yes / 3 | none | yes | gspo, eps 3e-4/4e-4 | gspo, eps_clip, clip_higher; false |
+| gspo_s1 | ap-qkl3KihH8uHgbQ9GEC2unv | yes / 3 | none | yes | same | same; false |
+| rpp | ap-g0SuZBHPVMakOPo65qRpnf | yes / 3 | none | yes | kl_coef 0.01, normalize_advantages True, ref loaded | rpp, whiten; false |
+| rpp_baseline | ap-gyfCgbhzYujHWxsejU6ly7 | yes / 3 | none | yes | same | rpp_baseline, whiten; false |
+| gdpo | ap-0qCQ2iFAbH848CZb8NjVVa | yes / 3 | none | yes | dispatcher | gdpo, custom_reward_postprocess; false |
+All on "NVIDIA H100 80GB HBM3". Launcher rc 2 each (pre-declared notice). No zero-gradient events.
+- GSPO clip path (per optimizer step, Miles log): gspo_s2 (clipfrac, grad_norm) =
+  (0.0, 0.900) (0.1875, 0.307) | (0.0, 0.646) (0.5, 0.528) | (0.0, 0.478) (0.5, 0.246);
+  gspo_s1: clipfrac 0.0 in all 3 rounds (expectation D1 held: one step -> ratio ~1).
+- 5.5 criterion (declared in attempt 5): gdpo `rl_round_trained.nonzero_advantages` per round
+  = 32, 24, 32; dispatcher `rl_advantage_transform` for rollout_id 0, 1, 2 = 32, 24, 32. Match,
+  no missing value -> PASS (R2 channel correct on GPU).
+- Observation / defect (INFRA R1): `masked_fraction` and `clip_fraction` are null in every
+  `rl_round_trained` event, including gspo_s2 whose Miles log shows pg_clipfrac 0.5 --
+  the per-step pg_clipfrac does not reach the round event on the real engine.
+- Teardown: all apps stopped / 0 tasks (attempt6/teardown.txt); watchdogs killed.
+  Attempt 6 ~ 5 x 8.5 min H100 ~ $3.9; change total ~ $8 (not billing-confirmed), cap $20.
+
+### Attempt 6 result -- addenda after review (facts only; criteria unchanged)
+1. 7.3 advantage statistics and reference loading, per round from attempt6/<run>/launch.log
+   (Miles `rollout/*` metrics; the zero_std line of each round is logged separately and is
+   matched to rounds by order of appearance):
+   | run | round | raw_reward | rollout/advantages (mean) | zero_std all_zero / all_one | log_probs | ref_log_probs |
+   |---|---|---|---|---|---|---|
+   | rpp | 0 | 0.90625 | 0.015506 | 0.0 / 0.5 | -0.271700 | -0.271700 |
+   | rpp | 1 | 0.375 | 0.074231 | 0.25 / 0.0 | -0.332989 | -0.332878 |
+   | rpp | 2 | 0.125 | -0.021691 | 0.5 / 0.0 | -0.451432 | -0.452067 |
+   | rpp_baseline | 0 | 0.90625 | 0.037357 | 0.0 / 0.5 | -0.271700 | -0.271700 |
+   | rpp_baseline | 1 | 0.40625 | 0.124236 | 0.25 / 0.0 | -0.340052 | -0.340069 |
+   | rpp_baseline | 2 | 0.09375 | 0.109296 | 0.5 / 0.0 | -0.470870 | -0.470733 |
+   `rollout/ref_log_probs` is present every round, so the reference model was loaded and
+   scored. Round 0 log_probs == ref_log_probs (LoRA B = 0: policy equals reference, reward KL
+   0); they diverge from round 1 on. The advantages are after `--normalize-advantages`
+   (token-masked whitening), so their batch mean is near 0 but not exactly 0.
+2. `attempt6/check.py` was written and committed after the runs (47f3105). It only
+   mechanises the criteria declared before launch (attempt 5 / attempt 6 sections); it does
+   not add or change criteria.
+3. Criterion 1 was written in attempt 5 as "learner exit 0 in the stream". The launcher
+   entry does not stream the learner process exit code; check.py reads the learner's own
+   `[rl] learner 0 finalized` line / `rl_learner_finalized` event (printed only after
+   `run_miles` returns normally), together with the launcher's
+   `learner jobs finished: {...: 'SUCCEEDED'}` (Modal function returned without error).
+   Every attempt-6 run shows both.
+4. 5.5: on GPU all three gdpo rounds have non-zero counts (32 / 24 / 32 > 0), so only the
+   "non-zero advantages -> gradient expected" side was exercised; the "no non-zero advantage
+   -> no gradient expected" branch was not triggered on GPU and is covered only by the fake
+   driver test `test_fake_driver_gdpo_no_nonzero_advantage_zero_grad_passes`.

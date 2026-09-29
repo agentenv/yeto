@@ -173,3 +173,26 @@
 - 已 merge infra-a 8cf1dec：本 change 测试 141 passed；全量 `after-failures-947fdbc.txt`，相对基线新增仍只有 dapo-like（依赖 1b）。
 - **阻塞（需 P0/INFRA）**：Modal no-sync 岛的事件磁带需进入流式日志或被拉回，否则 7.2/7.3 的标准 5 与 5.5 的逐轮证据都无法在 launcher 入口上取得。解除后按 attempt 5 计划重跑 gspo_s2、gspo_s1、rpp、rpp_baseline、gdpo。
 - 累计 GPU：attempts 1–5 ≈ 2056 s + ≈ 600 s 单卡 H100，估 ≈ $4（未核账单），上限 $20。
+
+## 2026-09-29 G1 attempt 6 PASS + merge algo-cap 50fe818（2751cda）
+- attempt 6（计划 fb588a4 启动前提交；代码 fb588a4；launcher `--rl-single-island-no-sync --controller local`，事件磁带回传）：gspo_s2、gspo_s1、rpp、rpp_baseline、gdpo 五个 run 全部满足预声明标准（逐项见 `evidence/g1/plan.md` Attempt 6 与 `attempt6/<run>/criteria.json`）。
+  - GSPO：optimizer_steps=2 时第二步 clipfrac 0.1875/0.5/0.5；=1 时全 0（符合 D1）。
+  - 5.5：gdpo 磁带逐轮 nonzero_advantages 32/24/32 与分派器逐轮计数一致 → 勾选。
+  - **缺陷（INFRA R1）**：所有 `rl_round_trained` 的 masked_fraction/clip_fraction 为 null（gspo_s2 的 Miles 日志 pg_clipfrac 为 0.5）。GSPO 全裁判定在真实引擎上因此读不到值（按设计退回严格侧，不会误放宽）。2.2 保持"CPU 通过"。
+- 能力测试已按主 agent 要求改为断言具体声明集（3d82d0e）。
+- 7.5：`infra-drafts/2a-entry.patch` v2（基于 2751cda）追加声明 gspo、reinforce_plus_plus、reinforce_plus_plus_baseline、gdpo；支撑机制（eps_clip/clip_higher、whiten_advantages、custom_reward_postprocess）是否声明由负责人决定。
+- 全量（`after-failures-2751cda.txt`）69F+26E，相对基线仅多 dapo-like（依赖 1b）。validate valid。
+- 费用：attempt 6 ≈ $3.9；累计 ≈ $8（未核账单），上限 $20；全部 app stopped/0 tasks，watchdog 已杀。
+
+### 当前状态总表（取代上一张）
+| task | 状态 |
+|---|---|
+| 1.1 1.2 7.1 7.8 8.2 8.3 | 完成 |
+| 2.1 2.3 2.4 2.5 3.1–3.6 4.1–4.4 5.1–5.4 6.1–6.3 | CPU 通过 |
+| 2.2 | CPU 通过；GPU 上 R1 值为空（INFRA 缺陷） |
+| 5.5 | GPU 验收通过（逐轮磁带证据） |
+| 7.2 7.3 7.4 | GPU 验收通过（Attempt 6 / Attempt 4） |
+| 7.5 | 未完成：maxrl/mapo 已由 ALGO-CAP 声明；其余见 2a-entry.patch v2 |
+| 7.6 | 未完成（待 7.5 合入；Modal 2 岛 + 本机 syncer） |
+| 7.7 | 未完成（已完成运行均已回收并核实；汇总待 7.6） |
+| 8.1 | 未完成（dapo-like 依赖 1b） |
