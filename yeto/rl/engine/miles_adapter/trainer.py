@@ -208,9 +208,16 @@ class MilesTrainerGroup:
             outputs = list(outputs or [])
             self.last_outputs = outputs
             self.last_masked_fraction = masked_fraction(outputs)
-            if len(outputs) != 1:
+            # Upstream returns one output per train WORKER of the single cell
+            # (TrainerController.train flattens cell -> worker results); the
+            # single-cell invariant itself is checked at startup.
+            workers = int(getattr(self._args, "actor_num_nodes", 1) or 1) * int(
+                getattr(self._args, "actor_num_gpus_per_node", 1) or 1
+            )
+            if len(outputs) != workers:
                 raise TrainStepError(
-                    f"expected one train output from the single-cell group, got {len(outputs)}"
+                    f"expected {workers} train outputs (one per worker of the single-cell group), "
+                    f"got {len(outputs)}"
                 )
             succeeded = all(_outcome_ok(o) for o in outputs)
             if succeeded:
