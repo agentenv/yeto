@@ -9,7 +9,7 @@ import pytest
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
 from yeto.rl.engine.miles_adapter.publish import MilesPublisher, PublicationError
 from yeto.rl.engine.miles_adapter.rollout import PolicyTokenMismatch, policy_token
-from yeto.rl.engine.miles_adapter.state_plugin import GRAD_NORM
+from yeto.rl.engine.miles_adapter.state_plugin import APPLIED_LRS, GRAD_NORM
 from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup, TrainStepError, batch_hash
 from yeto.rl.engine.ports import GroupMetadata, Publisher, RolloutBatchHandle, TrainerGroup
 
@@ -30,8 +30,9 @@ def handle(token=TOKEN, payload="PACK"):
 
 
 class FakeActorGroup:
-    def __init__(self, outcome="NORMAL", norm=0.3, outputs=1):
+    def __init__(self, outcome="NORMAL", norm=0.3, outputs=1, lrs=((1e-5,), (1e-5,))):
         self.outcome, self.norm, self.outputs = outcome, norm, outputs
+        self.lrs = lrs
         self.calls = []
 
     async def train(self, rollout_id, pack):
@@ -40,6 +41,8 @@ class FakeActorGroup:
 
     async def run_plugin(self, fn_path, kwargs=None):
         self.calls.append(("plugin", fn_path))
+        if fn_path == APPLIED_LRS:
+            return [list(v) for v in self.lrs]
         return [self.norm, self.norm]
 
     async def onload(self):
@@ -69,6 +72,7 @@ def test_train_step_receipt_and_release():
     assert isinstance(receipt, LocalStepReceipt)
     assert actor.calls[0] == ("train", 3, "PACK")  # opaque payload passed straight through
     assert actor.calls[1] == ("plugin", GRAD_NORM)
+    assert actor.calls[2] == ("plugin", APPLIED_LRS)
     assert released == ["PACK"]
     assert receipt.optimizer_step_succeeded and receipt.optimizer_steps == 1
     assert receipt.trained_tokens == 17
@@ -277,3 +281,16 @@ def test_step_metrics_reports_grad_norm_for_the_driver():
     import math
 
     assert math.isnan(t2.step_metrics().grad_norm)
+    assert t2.step_metrics().applied_lrs is None
+
+
+def test_step_metrics_reports_applied_lrs_per_optimizer_step():
+    t = trainer(FakeActorGroup(lrs=((2e-5,), (2e-5,))), [])
+    t.train_step(handle())
+    assert t.step_metrics().applied_lrs == (2e-5,)
+    # a step count mismatch or rank disagreement is a failed train step
+    from yeto.rl.engine.miles_adapter.trainer import TrainStepError
+
+    for lrs in (((),()), ((1e-5, 0.0), (1e-5, 0.0)), ((1e-5,), (0.0,))):
+        with pytest.raises(TrainStepError):
+            trainer(FakeActorGroup(lrs=lrs), []).train_step(handle())

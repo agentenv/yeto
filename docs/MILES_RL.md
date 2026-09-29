@@ -258,6 +258,68 @@ Syncer fragment step and island rollout progress are separate identities.
 Miles `TrainableState.policy_version` carries only the latter in decoupled
 applies.
 
+### Learning-rate schedule
+
+Yeto decides the inner learning-rate schedule explicitly
+(`RLRunConfig.algorithm.lr_schedule`, resolved from the sync preset) and both
+engine paths translate it into the same four Miles flags; neither path relies
+on Miles' implicit default, whose horizon is
+`--num-rollout x rollout_batch_size x n_samples_per_prompt / global_batch_size`
+(= global rounds x optimizer steps).
+
+| Preset | `--lr-decay-style` | `--lr-decay-iters` | `--lr-warmup-iters` | `--min-lr` |
+|--------|--------------------|--------------------|---------------------|------------|
+| `strict-avg`, `dense-full` | `linear` | `global_rounds x optimizer_steps` | `0` | `0` |
+| `decoupled` | `constant` | `global_rounds x optimizer_steps` (unused; satisfies Megatron's `lr_decay_steps > 0`) | `0` | `0` |
+| eval-only | not passed | | | |
+
+- **strict-avg** runs exactly one local round (`optimizer_steps` optimizer
+  steps) per global round, so the explicit linear schedule is bit-identical to
+  the previous implicit one. The launcher refuses a strict run where
+  `rollout_batch_size x n_samples_per_prompt != global_batch_size x
+  optimizer_steps`, because the two horizons would then differ. The last
+  optimizer step still trains with a positive learning rate.
+- **decoupled uses a constant learning rate starting with this change.** A
+  decoupled island runs until the syncer's final cut, so its local step count
+  is not known up front; the previous implicit linear schedule reached 0 after
+  `global_rounds x optimizer_steps` local steps and every later round trained
+  with learning rate 0 (gradients computed, parameters unchanged, global delta
+  0). Decoupled runs from before this change are therefore not bit-reproducible
+  with the new trajectory; the yeto commit in their provenance tells them
+  apart. Strict-avg is unaffected.
+- The four flags are owned by the adapter: passing them through extra Miles
+  argv is rejected on the ports path.
+
+**Zero learning-rate invariant.** Every `rl_local_round` event records
+`applied_lr` (the minimum over the round's optimizer steps) and `applied_lrs`
+(one value per optimizer step): the learning rate each `optimizer.step()`
+actually applied, read from `optimizer.param_groups[*]["lr"]` before Miles
+advances the scheduler. (`train/lr` is Miles' post-step value, i.e. the next
+step's learning rate.) Ports records it in the state plugin's
+`train_one_step` recorder; legacy through Miles'
+`--custom-megatron-before-train-step-hook-path`, using the combined hook
+`yeto.rl.applied_lr.before_train_step`, which also runs the gradient audit
+hook when `YETO_RL_AUDIT_GRADS=1`. If a round applied learning rate 0 and the
+island will keep training, the round fails with
+`rl_strict_failure metric=zero_lr_before_final_round` (naming the local round
+and the learning rate) and is not submitted to the syncer. The final round is
+`local_round_id >= global_rounds` for strict-avg; for decoupled it is a round
+trained after the syncer announced the final cut (or the round that exhausts
+`learner_budget_steps`).
+
+The dry-run plan below selects the decoupled preset without GPUs; it does not
+print Miles argv. The resolved flags for each preset, and their equality across
+the two engine paths, are pinned by `tests/test_rl_argv_snapshot.py` and
+`tests/test_rl_miles_adapter_config.py`.
+
+```bash
+python3 scripts/benchmark_rl.py --model Qwen/Qwen3-0.6B \
+  --model-revision c1899de289a04d12100db370d81485cdf75e47ca \
+  --data openai/gsm8k --data-revision e53f048856ff4f594e959d75785d2c2d37b678ee \
+  --reward-function project.rewards:score \
+  --islands 2 --arms decoupled --rl-engine ports --dry-run
+```
+
 ## Launching
 
 A strict two-island run uses the default preset:
@@ -614,7 +676,9 @@ Island JSONL records include:
 - applied and submitted fragment IDs, fragment tensor payload bytes, delta
   norm, realized `H`, PULL-to-PUSH time, and BCAST queue time;
 - full-policy apply time, snapshot publications, and optimizer-reset count;
-- hook duration and whether the hook performed finalization.
+- hook duration and whether the hook performed finalization;
+- `applied_lr` / `applied_lrs`, the learning rate the round's optimizer steps
+  applied (see [Learning-rate schedule](#learning-rate-schedule)).
 
 The syncer tape remains authoritative for outer step, fragment, exact base,
 round attempt, full responder roster, Nesterov update norm, merge time, and
