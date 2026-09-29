@@ -263,7 +263,7 @@ baseline 对比默认固定、测试范围内最佳固定、动态三组；相�
 ## Risks / Trade-offs
 
 - [rl-engine-ports 未完成或其等价性未通过] → 本 change 全部阶段以 R0 完成为前提；R0 未通过前只做 A 阶段的调查、计划与观测设计。
-- [端口动词需要 miles 新能力] → 优先用 upstream 已有机制（InferenceController、placement group）在 MilesAdapter 实现；确需改 miles 时在 `michaellchung/miles` 的 `yeto/ports` 分支加单独小提交并评估提交 upstream，避免重现旧 fork 膨胀。
+- [端口动词需要 miles 新能力] → 优先用 upstream 已有机制（InferenceController、placement group）在 MilesAdapter 实现；确需改 miles 时在 `michaellchung/miles` 的 `yeto/ports` 分支加单独小提交（永不向 radixark/miles 或 sgl-project/sglang 提 PR），避免重现旧 fork 膨胀。
 - [禁存 optimizer/RNG，adapter checkpoint 不完整] → 专用完整 cut；无法完成就只交付 E1，并明确 trainer 未完成。
 - [兼容共置已满池或目标profile依赖严格，调整未必获益] → 先测 baseline；允许“没有值得自动切换的边”结论。
 - [full/SAO 尚未迁移到 ports 路径，DP=1 硬限制] → 分开 profile，首版拒绝而非放松算法约束。
