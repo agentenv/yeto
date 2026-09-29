@@ -349,6 +349,7 @@ EXPECTED_MILES_DECLARED = {
     "features:kl_loss_ref_model",
     "features:entropy_bonus",
     "reward_postprocessors:custom_reward_postprocess",
+    "features:overlong_penalty",
 }
 
 
