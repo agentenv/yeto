@@ -218,7 +218,13 @@ class ProgressStore(Protocol):
 
 
 ECHO_EVENTS_FILE = "yeto-rl-echo-events"  # at the repo root (experiment snapshots only)
-_ECHO_EVENTS = (Path(__file__).resolve().parents[3] / ECHO_EVENTS_FILE).is_file()
+# One echo mechanism: yeto.rl.event_echo (YETO_RL_ECHO_EVENTS=1, echoed by the
+# single tape writer ``append_record``). The snapshot marker file used by the
+# rl-infra-spec E0 experiments just turns that switch on.
+if (Path(__file__).resolve().parents[3] / ECHO_EVENTS_FILE).is_file():
+    from yeto.rl.event_echo import enable_echo as _enable_echo
+
+    _enable_echo()
 
 
 class EventTape:
@@ -230,24 +236,15 @@ class EventTape:
         self.args = args
 
     def append(self, event: Mapping[str, Any]) -> None:
-        if _ECHO_EVENTS:
-            # Experiment-only: container stdout reaches the head's launch log,
-            # so the tape survives container teardown (off by default).
-            print(
-                "YETO_RL_EVENT "
-                + json.dumps({"island_id": self.island_id, "time_unix": time.time(), **event},
-                             sort_keys=True, separators=(",", ":"), default=str),
-                flush=True,
-            )
+        from yeto.rl.event_echo import append_record
+
         if self.args is not None:
             from yeto.rl.miles import _append_rl_event
 
             _append_rl_event(self.args, dict(event))
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         record = {"island_id": self.island_id, "time_unix": time.time(), **event}
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+        append_record(self.path, record)
 
 
 def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
