@@ -244,3 +244,39 @@ def test_filtered_count_comes_from_metadata_not_aborted():
     payload.pop("filtered")
     h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
     assert h.filtered is None
+
+
+def test_round_counters_align_end_to_end_through_the_pool(tmp_path):
+    """R2 end to end (no per-round injection into handles): the executor runs the
+    real hooks in the rollout-process order -- trained-groups filter, all-samples
+    hook, then a reward-postprocess dispatcher reporting its own count -- and each
+    MilesRolloutPool.generate(r) handle carries round r's count."""
+
+    counts = {3: 24, 4: 16, 5: 24}
+
+    class DispatchingExecutor(FakeExecutor):
+        async def get(self, rollout_id):
+            for g in self.kept:
+                for s in g:
+                    s.rollout_id = rollout_id
+            result = await super().get(rollout_id)
+            nonzero = counts[rollout_id]  # computed during reward post-processing
+            hook.record_round_metadata(self.args, self.kept, sink=self.sink,
+                                       nonzero_advantages=nonzero)
+            return result
+
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    executor = DispatchingExecutor(SimpleNamespace(), f"dir:{tmp_path}", kept, [])
+    versions = iter([3, 4, 5])
+    current = {}
+
+    def expected():
+        return current["v"], H
+
+    p = MilesRolloutPool(inference_controller=FakeController(), rollout_executor=executor,
+                         metadata=DirMetadataSource(tmp_path), expected_policy=expected)
+    seen = {}
+    for rid in (3, 4, 5):
+        current["v"] = next(versions)
+        seen[rid] = p.generate(rid).nonzero_advantages
+    assert seen == counts
