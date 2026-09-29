@@ -342,6 +342,7 @@ EXPECTED_MILES_DECLARED = {
     "corrections:opsm_trainer",
     "features:maxrl",
     "features:mapo",
+    "loss_aggregations:token",
 }
 
 

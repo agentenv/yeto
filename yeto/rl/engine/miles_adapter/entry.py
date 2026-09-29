@@ -53,6 +53,7 @@ MILES_DECLARED: dict[str, str] = {
     "corrections:opsm_trainer": f"{_E1A}/2026-09-29-trigger (opsm_clipfrac > 0)",
     "features:maxrl": f"{_E2A}/attempt4 (maxrl)",
     "features:mapo": f"{_E2A}/attempt4 (mapo)",
+    "loss_aggregations:token": f"{_E1B}/g1_report_v2.json token (pg_loss 0.035/0.0068/0.0026 vs baseline ~1e-8)",
 }
 
 
