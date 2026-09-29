@@ -41,11 +41,11 @@ PYTHONPATH=/yeto:/miles-next python -m pytest -q -p no:cacheprovider -rs \
 
 
 @app.function(cpu=2.0, memory=8192, timeout=1200, gpu=GPU)
-def run() -> str:
+def run(run2: bool = False) -> str:
     import subprocess
 
     script = SCRIPT
-    if RUN2:
+    if run2:
         script = script.split("echo '--- full parse_args")[0].split("echo '--- 4.1")[0] + \
             "nvidia-smi --query-gpu=name --format=csv\necho '--- full parse_args" + \
             SCRIPT.split("echo '--- full parse_args")[1]
@@ -56,4 +56,4 @@ def run() -> str:
 
 @app.local_entrypoint()
 def main():
-    print(run.remote())
+    print(run.remote(RUN2))
