@@ -219,6 +219,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports fixed partition: reserved standby GPUs never started by any role",
     )
     rl.add_argument(
+        "--rl-optimizer-steps",
+        type=int,
+        default=1,
+        help=(
+            "ports: optimizer steps per RL round (default 1); must divide "
+            "rollout-batch-size * n-samples-per-prompt"
+        ),
+    )
+    rl.add_argument(
         "--rl-single-island-no-sync",
         action="store_true",
         help=(

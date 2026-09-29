@@ -835,6 +835,21 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
     ):
         raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
+    steps = getattr(args, "rl_optimizer_steps", 1)
+    if steps is None:
+        steps = 1
+    if type(steps) is not int or steps < 1:
+        raise ValueError(f"--rl-optimizer-steps must be a positive int (got {steps!r})")
+    if steps != 1:
+        if rl_engine != "ports":
+            raise ValueError("--rl-optimizer-steps > 1 only applies to --rl-engine ports")
+        samples = int(args.rollout_batch_size) * int(args.n_samples_per_prompt)
+        if samples % steps:
+            # run_config: rollout_batch_size * n_samples == global_batch * optimizer_steps
+            raise ValueError(
+                f"--rl-optimizer-steps {steps} must divide --rollout-batch-size * "
+                f"--n-samples-per-prompt ({samples}) into equal optimizer batches"
+            )
     if rl_engine != "ports" and getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-single-island-no-sync only applies to --rl-engine ports")
     try:
@@ -1811,7 +1826,7 @@ def make_miles_island_task(
         f" --samples-per-group {args.n_samples_per_prompt}"
         f" --over-sampling-batch-size {args.over_sampling_batch_size}"
         f" --rl-distributed-timeout-minutes {args.rl_distributed_timeout_minutes}"
-        " --optimizer-steps 1"
+        f" --optimizer-steps {int(getattr(args, 'rl_optimizer_steps', 1) or 1)}"
         f" --rollout-max-response-len {args.rollout_max_response_len}"
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
