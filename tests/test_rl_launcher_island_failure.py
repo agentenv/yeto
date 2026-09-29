@@ -31,12 +31,15 @@ class Clock:
         return self.t
 
     def sleep(self, seconds):
+        import time
+
+        time.sleep(0.005)  # let the log-tail threads run (real time passes too)
         self.t += seconds
         if self.t > 36000:  # a hang in fake time: fail instead of looping forever
             raise AssertionError("controller did not terminate")
 
 
-def _setup(monkeypatch, tmp_path, *, failing, clock, record):
+def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
     from yeto import runs
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
@@ -48,7 +51,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record):
     monkeypatch.setattr(launcher, "FAILED_RUN_DRAIN_S", 0.0, raising=False)
     monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: None)
     monkeypatch.setattr(launcher, "terminate_and_verify",
-                        lambda sky, name, **k: record.append(("down", name)) or True)
+                        lambda sky, name, **k: record.append(("terminate", name)) or True)
     monkeypatch.setattr(modal_runner, "resolve_syncer_for_modal", lambda addr, public: addr)
 
     class FakeModalOps:
@@ -68,7 +71,9 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record):
             return call
 
         def status(self, call_id):
-            return "FAILED" if self.owner[call_id] in failing else "RUNNING"
+            island = self.owner[call_id]
+            return ("FAILED" if island in failing
+                    else "SUCCEEDED" if island in succeeding else "RUNNING")
 
         def cancel(self, call_id):
             record.append(("cancel", call_id))
@@ -81,8 +86,12 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record):
 
     class FakeSkyOps:  # sky side of RoutingOps (sky islands and the syncer)
         def job_status(self, cluster, job_id):
-            if "-l" in cluster and int(cluster.split("-l")[1].split("-")[0]) in failing:
-                return Status("FAILED")
+            if "-l" in cluster:
+                island = int(cluster.split("-l")[1].split("-")[0])
+                if island in failing:
+                    return Status("FAILED")
+                if island in succeeding:
+                    return Status("SUCCEEDED")
             return Status("RUNNING")
 
         def job_alive(self, cluster, job_id):
@@ -136,14 +145,51 @@ def test_island_failure_exits_4_and_tears_everything_down(
     assert code == launcher.ISLAND_FAILED_EXIT == 4
     assert clock.t < 36000
     names = launcher.learner_cluster_names(args.cluster_prefix, launcher.parse_gpu_spec(gpu))
+    # the controller downs the failed island itself (Modal: cancels its call;
+    # sky: FakeSkyOps.down), the finally block tears down the rest
     if provider == "modal":
-        assert ("stop_app",) in record
+        assert [r for r in record if r[0] == "cancel" and r[1].startswith("fc-0-")]
+        assert record.count(("stop_app",)) == 1
+        if syncer:  # the surviving island is cancelled by the finally block
+            assert [r for r in record if r[0] == "cancel" and r[1].startswith("fc-1-")]
     else:
-        for name in names:
-            assert ("down", name) in record
+        assert ("down", names[0]) in record  # controller
+        assert ("terminate", names[0]) not in record  # not torn down twice
+        for name in names[1:]:
+            assert ("terminate", name) in record  # finally
     if syncer:
-        assert ("down", f"{args.cluster_prefix}-syncer") in record
+        assert ("terminate", f"{args.cluster_prefix}-syncer") in record
     if recover_timeout > 0:  # bounded relaunches of the failing island
         relaunches = [r for r in record if r[0] in ("relaunch",)] + [
             r for r in record if r == ("spawn", 0)][1:]
         assert 1 <= len(relaunches) <= launcher.FIXED_ROSTER_MAX_RELAUNCHES
+
+
+@pytest.mark.parametrize("provider", ["modal", "sky"])
+def test_error_after_finalized_is_success_no_recovery(monkeypatch, tmp_path, provider):
+    """2a 7.6: both islands finalized, then island 1 dies in ray.shutdown (job FAILED)
+    and the syncer stops -- a completed run, not an island failure."""
+    from yeto.rl import event_echo
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing={1}, succeeding={0}, clock=clock, record=record)
+    fin = {i: event_echo.format_record({"island_id": i, "time_unix": 1.0,
+                                        "event": "rl_learner_finalized"}) for i in (0, 1)}
+
+    def feed_all(*args, **kwargs):  # the tail thread delivers each island's finalized record
+        collector = args[-1]
+        if collector is not None:
+            island = 0 if "-l0-" in str(collector.path) else 1
+            collector.feed(fin[island])
+
+    monkeypatch.setattr(launcher, "_tail_modal", feed_all)
+    monkeypatch.setattr(launcher, "_tail", feed_all)
+    one = "modal:1xa100" if provider == "modal" else "aws:1xa100@us-east-1"
+    args = _launcher_args("ports", ("--controller", "local", "--rl-image",
+                                    "docker:ghcr.io/x/y@sha256:" + "a" * 64), gpu=f"{one},{one}")
+    args.keep, args.recover_timeout, args.controller_poll = False, 600.0, 30.0
+    args.output = str(tmp_path / "out")
+    code = launcher.run(args)
+    assert code in (0, 2), code  # 2: Modal artifact not fetchable over ssh
+    assert not [r for r in record if r[0] == "relaunch"]
+    assert [r for r in record if r[0] == "spawn"] in ([("spawn", 0), ("spawn", 1)], [])
