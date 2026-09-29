@@ -24,3 +24,7 @@
 - **尚未解释的部分**：只有 config 缺失这一条，按上面的推导梯度仍然会变化（Megatron 会改为除以 num_tokens），**不足以解释 GPU 上的逐位相同**。说明训练 actor 中实际参与反向的 loss 很可能没有走 per-token 分支，或者在别处被归一化成了同一个值。原因未确认。
 - yeto 这一侧：翻译和参数传递都正确（参数表中为 True），目前没有发现 yeto 的缺陷。
 - 处理：token 聚合不声明。定位还需要一个 GPU 探针：在训练 actor 中记录 `loss_function` 返回的 (loss, num_tokens)、`model.config.calculate_per_token_loss`，以及 backward 之前的标量 loss；token 与 baseline 各跑 1 步。该实验需另立计划并单独提交。
+
+## 根因（独立审查结论，主 agent 转达）
+- g1c 的配置为 micro_batch_size=1、global_batch_size=32、DP=1。修复前 LoRA 路径的状态是 args.calculate_per_token_loss=True，而 Megatron 的 config 为 False。在"每个 microbatch 只有一个样本"的条件下，这种混合状态与样本均值逐位相同：per-token 模式下 Miles 返回 token 求和并附上 num_tokens，Megatron 按 config=False 除以 num_tokens，得到的正是这个样本的 token 均值；与样本均值相比，只差乘除 32 与 1，而这在浮点下是精确的。这也解释了本报告前面"单是 config 漏设不足以解释逐位相同"的疑点：我的 CPU 复现把所有样本放进了同一个 microbatch，没有覆盖 mbs=1 的情形。
+- 修复：让 LoRA bridge 设置 calculate_per_token_loss，已在 michaellchung/miles yeto/ports 0af62f4d 中完成，镜像正在由 IMG 重建。修复后即使 mbs=1，token 聚合（Σtokens/Σlen）也与样本聚合不同。新镜像就绪后另立计划，重新做 baseline 对 token 的配对对照。
