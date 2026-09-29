@@ -124,6 +124,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="RL reward callable as package.module:function",
     )
     rl.add_argument(
+        "--rl-prompt-column",
+        default=None,
+        help="dataset column holding the prompt (default: messages, prompt or input)",
+    )
+    rl.add_argument(
+        "--rl-label-column",
+        default=None,
+        help="dataset column passed to the reward function as the label (default: label)",
+    )
+    rl.add_argument(
         "--cybergym-url",
         default=os.environ.get("CYBERGYM_URL", "http://127.0.0.1:8666"),
     )
