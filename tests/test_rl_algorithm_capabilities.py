@@ -350,6 +350,7 @@ EXPECTED_MILES_DECLARED = {
     "features:entropy_bonus",
     "reward_postprocessors:custom_reward_postprocess",
     "features:overlong_penalty",
+    "advantage_estimators:gspo",
 }
 
 
