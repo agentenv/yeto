@@ -441,26 +441,30 @@ def test_fake_declaration_launches_each_mechanism(tmp_path, name):
     assert driver.run().policy_version == 2
 
 
+# Mechanisms of this change the Miles adapter declares (7.5; one per commit).
+MILES_2A_DECLARED = {"maxrl", "mapo"}
+
+
 def test_miles_adapter_declarations_follow_g1():
-    """7.5: MaxRL/MAPO declared after G1 (attempt 4); GDPO and the estimators not yet."""
+    """7.5: exactly MILES_2A_DECLARED of this change is declared; the rest refused."""
 
     caps = miles_capabilities("sha256:" + "0" * 64)
-    assert caps.advantage_estimators == frozenset({"grpo"})
-    assert {"maxrl", "mapo"} <= set(caps.features)
-    assert not ({"gdpo"} & set(caps.features))
+    mine = {"gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline",
+            "maxrl", "mapo", "gdpo"}
+    estimators = {"gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline"}
+    assert (set(caps.advantage_estimators) | set(caps.features)) & mine == MILES_2A_DECLARED
+    assert caps.advantage_estimators == frozenset({"grpo"} | (MILES_2A_DECLARED & estimators))
     check = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
-    # undeclared mechanisms of this change are still refused (expressible, not opened)
-    with pytest.raises(CapabilityMismatch, match="'gdpo' not supported"):
-        caps.check(**check, algorithm=transform_spec("gdpo", gdpo=GDPO))
-    for name in ("gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline"):
-        with pytest.raises(CapabilityMismatch, match=f"'{name}' not supported"):
-            caps.check(**check, algorithm=_mechanism_spec(name))
-    # declared transforms pass the mechanism check for maxrl/mapo themselves
-    for name in ("maxrl", "mapo"):
+    for name in sorted(mine):
         try:
-            caps.check(**check, algorithm=transform_spec(name))
+            caps.check(**check, algorithm=_mechanism_spec(name))
+            text = ""
         except CapabilityMismatch as exc:
-            assert f"'{name}' not supported" not in str(exc)
+            text = str(exc)
+        if name in MILES_2A_DECLARED:
+            assert f"'{name}' not supported" not in text, text
+        else:  # undeclared mechanisms of this change are still refused
+            assert f"'{name}' not supported" in text
 
 
 def test_default_spec_unchanged():
