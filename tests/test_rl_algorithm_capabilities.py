@@ -343,6 +343,7 @@ EXPECTED_MILES_DECLARED = {
     "features:maxrl",
     "features:mapo",
     "loss_aggregations:token",
+    "features:no_grpo_std_normalization",
 }
 
 
