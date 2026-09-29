@@ -66,6 +66,7 @@ MILES_DECLARED: dict[str, str] = {
     "advantage_estimators:reinforce_plus_plus_baseline": f"{_E2A}/attempt6 rpp_baseline (3 rounds, finalized, finite grad_norm)",
     "features:gdpo": f"{_E2A}/attempt6 gdpo (per-round nonzero_advantages 32/24/32 match the dispatcher)",
     "features:mismatch_metrics": f"{_E1A}/2026-09-29-trigger icepop + 2026-09-29-g1b observe (mismatch metrics reported; observation only, loss unchanged)",
+    "corrections:mismatch_observe": f"{_E1A}/2026-09-29-g1b observe + g2-observe (observation only; weights constant 1)",
 }
 
 

@@ -355,6 +355,7 @@ EXPECTED_MILES_DECLARED = {
     "advantage_estimators:reinforce_plus_plus_baseline",
     "features:gdpo",
     "features:mismatch_metrics",
+    "corrections:mismatch_observe",
 }
 
 
