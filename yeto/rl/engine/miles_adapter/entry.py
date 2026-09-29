@@ -81,14 +81,29 @@ MILES_DECLARED: dict[str, str] = {
 }
 
 
-def declared_by_dimension() -> dict[str, set[str]]:
-    """R0 mechanism sets plus :data:`MILES_DECLARED`, per dimension."""
+# Declarations whose evidence holds only for specific Miles pins (exact
+# commits; a new pin must be re-verified before it is added here).
+MILES_DECLARED_PINS: dict[str, frozenset[str]] = {}
+
+
+def declared_by_dimension(miles_commit: str | None = None) -> dict[str, set[str]]:
+    """R0 mechanism sets plus :data:`MILES_DECLARED`, per dimension.
+
+    An entry of :data:`MILES_DECLARED_PINS` is declared only when the Miles
+    pin (``miles_commit``, default ``yeto.rl.MILES_NEXT_COMMIT``) is one of
+    its verified commits.
+    """
 
     from ..capabilities import R0_MECHANISMS
 
+    if miles_commit is None:
+        from yeto.rl import MILES_NEXT_COMMIT as miles_commit
     out = {dim: set(names) for dim, names in R0_MECHANISMS.items()}
     out["advantage_estimators"] = {"grpo"}
     for mechanism in MILES_DECLARED:
+        pins = MILES_DECLARED_PINS.get(mechanism)
+        if pins is not None and miles_commit not in pins:
+            continue
         dimension, name = mechanism.split(":", 1)
         out.setdefault(dimension, set()).add(name)
     return out
