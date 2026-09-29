@@ -72,6 +72,10 @@ class RolloutBatchHandle:
     # ``carried_over``). None = the engine does not report it (3.6/4.1).
     filtered: int | None = None
     carried_over: int | None = None
+    # Non-zero advantages counted by the rollout-side reward dispatcher
+    # (rl-algo-seq-and-adv R2); None = not reported. Read by per-algorithm
+    # gradient expectations (``gradient_expectation(batch, metrics)``).
+    nonzero_advantages: int | None = None
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)

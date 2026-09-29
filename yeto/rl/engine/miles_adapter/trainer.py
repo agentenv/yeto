@@ -28,7 +28,7 @@ from yeto.rl.contracts import LocalStepReceipt
 from ..ports import RolloutBatchHandle
 from . import LoopRunner
 from .rollout import policy_token, require_policy_tokens
-from .state_plugin import APPLIED_LRS, GRAD_NORM
+from .state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
 
 
 class TrainStepError(RuntimeError):
@@ -69,6 +69,8 @@ def masked_fraction(outputs: Any) -> float | None:
     (rl-algorithm-capabilities D6). Unknown (None) keeps the R0 rule.
     """
 
+    from ..algorithm import valid_masked_fraction
+
     values = []
     for output in outputs or ():
         metrics = getattr(output, "metrics", output)
@@ -76,11 +78,38 @@ def masked_fraction(outputs: Any) -> float | None:
             continue
         for key in MASKED_FRACTION_KEYS:
             if metrics.get(key) is not None:
-                values.append(float(metrics[key]))
+                values.append(valid_masked_fraction(metrics[key]))
                 break
-    if not values or any(not math.isfinite(v) for v in values):
+    # Only non-bool real numbers in [0, 1]; anything else -> unknown (None).
+    if not values or any(v is None for v in values):
         return None
     return min(values)  # conservative: fully masked only if every cell is
+
+
+# Estimators whose masked fraction comes from the per-step clip fraction
+# (rl-algo-seq-and-adv D2: GSPO clips whole sequences).
+CLIPFRAC_MASKED_ESTIMATORS = frozenset({"gspo"})
+
+
+def clipfrac_masked_fraction(step_losses: list[dict[str, Any]]) -> float | None:
+    """GSPO ``masked_fraction`` via ``yeto.rl.algos.seq_adv.clipfrac_from_losses``.
+
+    Optional import: without the rl-algo-seq-and-adv module the value stays
+    None (unknown keeps the R0 gradient rule).
+    """
+    try:
+        from yeto.rl.algos.seq_adv import clipfrac_from_losses
+    except ImportError:
+        return None
+    tokens = [s.get("loss_tokens") for s in step_losses]
+    return clipfrac_from_losses(step_losses, None if None in tokens else tokens)
+
+
+def _mean_clipfrac(step_losses: list[dict[str, Any]] | None) -> float | None:
+    values = [s.get("pg_clipfrac") for s in step_losses or ()]
+    if not values or any(v is None for v in values):
+        return None
+    return sum(values) / len(values)
 
 
 def _outcome_ok(output: Any) -> bool:
@@ -120,6 +149,7 @@ class MilesTrainerGroup:
         self.last_grad_norm: float | None = None
         self.last_applied_lrs: tuple[float, ...] | None = None
         self.last_masked_fraction: float | None = None
+        self.last_step_losses: list[dict[str, Any]] | None = None
         self.last_outputs: list[Any] | None = None
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
@@ -128,6 +158,7 @@ class MilesTrainerGroup:
         self.last_grad_norm = None
         self.last_applied_lrs = None
         self.last_masked_fraction = None
+        self.last_step_losses = None
         try:
             if self._check_tokens:  # spec: reject before training
                 require_policy_tokens(batch, policy_token(batch.rollout_id, batch.policy_hash))
@@ -146,6 +177,12 @@ class MilesTrainerGroup:
                     raise TrainStepError(f"non-finite grad norm {norms}")
                 self.last_grad_norm = max(norms)
                 self.last_applied_lrs = self._applied_lrs()
+                if self._algorithm in CLIPFRAC_MASKED_ESTIMATORS:
+                    self.last_step_losses = self._step_losses()
+                    if self.last_masked_fraction is None:
+                        self.last_masked_fraction = clipfrac_masked_fraction(
+                            self.last_step_losses
+                        )
         finally:
             self._release(self._args, batch.payload)
         steps = int(self._args.num_steps_per_rollout) if succeeded else 0
@@ -176,6 +213,11 @@ class MilesTrainerGroup:
             raise TrainStepError(f"ranks disagree on the applied learning rates {per_rank}")
         return tuple(float(x) for x in per_rank[0])
 
+    def _step_losses(self) -> list[dict[str, Any]]:
+        # Only the last pipeline stage records losses; take the first rank that did.
+        per_rank = [list(v) for v in self._run(self._actor.run_plugin(STEP_LOSSES, {}))]
+        return next((v for v in per_rank if v), [])
+
     def step_metrics(self):
         """Telemetry of the last ``train_step`` (NaN grad_norm if it failed)."""
 
@@ -186,6 +228,7 @@ class MilesTrainerGroup:
             grad_norm=math.nan if norm is None else float(norm),
             applied_lrs=self.last_applied_lrs,
             masked_fraction=self.last_masked_fraction,
+            clip_fraction=_mean_clipfrac(getattr(self, "last_step_losses", None)),
         )
 
     def onload(self) -> None:

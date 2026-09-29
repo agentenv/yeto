@@ -544,20 +544,27 @@ class IslandDriver:
                 "nonfinite_grad_norm", f"rollout {rollout_id}: grad_norm={grad_norm}"
             )
         # Per-algorithm rule (rl-algorithm-capabilities D6); default GRPO:
-        # some group has non-zero reward variance, exactly as in R0.
-        expects_gradient = self.algorithm.expects_gradient(batch, metrics)
+        # some group has non-zero reward variance, exactly as in R0. A
+        # description without the per-algorithm API keeps the R0 rule.
+        r0_expects = any(g.reward_std > 0 for g in batch.groups)
+        judge = getattr(self.algorithm, "gradient_expectation", None)
+        if callable(judge):
+            expects_gradient, relaxed_by = judge(batch, metrics)
+        else:
+            expects_gradient, relaxed_by = r0_expects, None
         if expects_gradient and grad_norm == 0.0:
             raise StrictRlInvariantError(
                 "zero_grad_norm_with_nonzero_advantages",
                 f"rollout {rollout_id}: non-zero advantages produced grad_norm 0; "
                 "adapter gradients are not flowing",
             )
-        if grad_norm == 0.0 and any(g.reward_std > 0 for g in batch.groups):
-            # A declared masking mechanism legitimately removed every token.
+        if grad_norm == 0.0 and r0_expects:
+            # A declared mechanism legitimately lifted the expectation.
             self.emit(
                 "rl_zero_gradient_masked",
                 rollout_id=rollout_id,
                 masked_fraction=metrics.masked_fraction,
+                relaxed_by=relaxed_by,
             )
 
     def _stats(self, rollout_id, batch, metrics, rollout_seconds, train_seconds):
@@ -667,6 +674,17 @@ class IslandDriver:
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         self.trained_version = rollout_id + 1
+        # Per-round accounting of this island (rl-algo-grpo-knobs 7.2,
+        # rl-algo-seq-and-adv): what was trained, masked and counted.
+        self.emit(
+            "rl_round_trained",
+            rollout_id=rollout_id,
+            trained_groups=len(batch.groups),
+            trained_samples=sum(len(g.sample_ids) for g in batch.groups),
+            masked_fraction=metrics.masked_fraction,
+            clip_fraction=metrics.clip_fraction,
+            nonzero_advantages=getattr(batch, "nonzero_advantages", None),
+        )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)

@@ -20,6 +20,7 @@ Flow:
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -216,6 +217,18 @@ fi
 
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
+
+
+def rl_actor_gpus_per_node(args, spec) -> int:
+    """Trainer GPUs per node: all of them when colocated; under
+    ``--rl-placement fixed-partition`` the rest after rollout and standby."""
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        return spec.gpus_per_node
+    rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
+    standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
+    if rollout < 1:
+        raise ValueError("--rl-placement fixed-partition needs --rollout-num-gpus >= 1")
+    return spec.gpus_per_node - rollout - standby
 
 
 def build_syncer_binary() -> Path:
@@ -912,6 +925,8 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
         flags += f" --rl-placement {shlex.quote(args.rl_placement)}"
     if getattr(args, "rl_standby_gpus", 0):
         flags += f" --rl-standby-gpus {int(args.rl_standby_gpus)}"
+    if getattr(args, "rl_placement", "colocated") == "fixed-partition":
+        flags += f" --rollout-num-gpus {int(args.rollout_num_gpus)}"
     allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
     for name in allowed:
         flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
@@ -1245,6 +1260,18 @@ def _prepare_rl_args(
         if any(spec.total_gpus % args.expert_parallel for spec in specs):
             raise ValueError("RL expert parallelism must divide every island")
     for spec in specs:
+        if getattr(args, "rl_placement", "colocated") == "fixed-partition":
+            # rl-infra-spec 2.1: the node's GPUs are trainer + rollout + standby;
+            # parallel-size checks below apply to the trainer part.
+            actor = rl_actor_gpus_per_node(args, spec)
+            if spec.num_nodes != 1 or actor < 1:
+                raise ValueError(
+                    "--rl-placement fixed-partition needs one node with "
+                    "--rollout-num-gpus + --rl-standby-gpus < GPUs per node"
+                )
+            if int(args.rollout_num_gpus) % args.rollout_num_gpus_per_engine:
+                raise ValueError("--rollout-num-gpus must be a multiple of --rollout-num-gpus-per-engine")
+            spec = dataclasses.replace(spec, gpus_per_node=actor)
         if spec.total_gpus % model_parallel:
             raise ValueError(
                 "RL TP*PP must divide every island GPU world size"
@@ -1816,7 +1843,7 @@ def make_miles_island_task(
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
         f" --actor-num-nodes {spec.num_nodes}"
-        f" --actor-num-gpus-per-node {spec.gpus_per_node}"
+        f" --actor-num-gpus-per-node {rl_actor_gpus_per_node(args, spec)}"
         f" --tensor-parallel {args.tensor_parallel}"
         f" --pipeline-parallel {args.pipeline_parallel}"
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"

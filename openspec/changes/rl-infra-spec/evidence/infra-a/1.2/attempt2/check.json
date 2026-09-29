@@ -1,0 +1,72 @@
+{
+ "PASS_conditions_1_to_4": true,
+ "algo_hash_ok": true,
+ "apply_hash_equal_across_islands": true,
+ "apply_versions_common": [
+  0,
+  1
+ ],
+ "at_least_one_round": true,
+ "baseline": {
+  "0": [
+   {
+    "grad_norm": 0.4499274790287018,
+    "local_round_id": 1,
+    "loss": null,
+    "reward_mean": 0.9375,
+    "reward_std": 0.24206145913796356,
+    "rollout_seconds": 15.338099401000022,
+    "train_seconds": 36.13797957299994
+   },
+   {
+    "grad_norm": 0.41625210642814636,
+    "local_round_id": 2,
+    "loss": null,
+    "reward_mean": 0.4375,
+    "reward_std": 0.49607837082461076,
+    "rollout_seconds": 8.441753560999928,
+    "train_seconds": 16.798150469000007
+   }
+  ],
+  "1": [
+   {
+    "grad_norm": 0.4454193711280823,
+    "local_round_id": 1,
+    "loss": null,
+    "reward_mean": 0.9375,
+    "reward_std": 0.24206145913796356,
+    "rollout_seconds": 14.690605235999897,
+    "train_seconds": 36.660812100000044
+   },
+   {
+    "grad_norm": 0.4326492249965668,
+    "local_round_id": 2,
+    "loss": null,
+    "reward_mean": 0.4375,
+    "reward_std": 0.49607837082461076,
+    "rollout_seconds": 8.513321227000006,
+    "train_seconds": 16.366339038999968
+   },
+   {
+    "grad_norm": 0.18188698589801788,
+    "local_round_id": 3,
+    "loss": null,
+    "reward_mean": 0.0625,
+    "reward_std": 0.24206145913796354,
+    "rollout_seconds": 6.183168848000037,
+    "train_seconds": 16.922406974999944
+   }
+  ]
+ },
+ "execution_mode": {
+  "0": "colocated-serial",
+  "1": "colocated-serial"
+ },
+ "no_strict_failure": true,
+ "phase_sequence_ok": true,
+ "publication_matches_apply_and_members": true,
+ "rounds_per_island": {
+  "0": 2,
+  "1": 3
+ }
+}
