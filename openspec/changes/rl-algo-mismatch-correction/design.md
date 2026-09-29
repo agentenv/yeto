@@ -88,7 +88,7 @@ Miles 的 OPSM 默认用训练端重算的 π_old，只有 `--use-rollout-logpro
 复用 R0 冒烟的小模型、镜像与 harness，证据按 `openspec/changes/rl-engine-ports/progress.md` 的习惯放在 `openspec/changes/rl-algo-mismatch-correction/evidence/<日期>-<名称>/`，含 `YETO_SHA`、事件与指标 jsonl、argv、GPU 名断言输出、费用记录。Modal 上用 `H100!:N` 并断言 GPU 名。
 
 - **G1（1 卡）**：只观测、TIS、IcePop、OPSM(trainer)、MIS 各跑 2–3 轮（OPSM(rollout) 可选）。通过标准：指标键存在且有限；不变量无误报；每轮 policy token 与 receipt 正常。
-- **G2（1 卡）**：只观测约 20 轮，输出报告：每轮 `train_rollout_kl`、`tis_abs` 分布（分位数）、`ess_ratio`，以及区间 [0.5,5] 外的 token 比例（用于评估 IcePop 会屏蔽多少）。报告只陈述数据，是否推荐默认开启由用户决定。
+- **G2（1 卡）**：只观测约 20 轮，输出报告：每轮 `train_rollout_kl`、`tis_abs` 分布（分位数）、`ess_ratio`，以及区间 [0.5,5] 外的 token 比例（用于评估 IcePop 会屏蔽多少）。报告只陈述数据，是否推荐默认开启由用户决定。报告注明执行模式与权重传输方式（serial-colocated 为 CUDA IPC；`rl-infra-spec` 的 partitioned 模式下 LoRA 必须走 NCCL broadcast），结论不外推到未测的执行模式（alignment.md A5）。
 - **G3（1+1 卡）**：两岛 strict-avg，TIS 与 IcePop 各一次，每次 3 轮左右。通过标准：两岛算法哈希一致、外层同步后权重 hash 一致、不变量无失败。
 
 ## Risks / Trade-offs

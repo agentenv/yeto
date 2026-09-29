@@ -15,7 +15,7 @@
   - 进展（2026-09-29，已实现 + CPU 测试通过，依赖未满足（1.4未勾选），未勾选）：源码审计见 `pause-audit.md`（permit、quorum/grace、BUDGET_DONE、final ACK、连接 generation、Fleet 恢复超时，均附 file:line）；`yeto/rl/engine/pause_audit.py` 只在 `round-boundary-published` 阶段放行；strict 预算为 min(0.5×quorum 900 s, 空闲流超时)；none 不设外层上限；decoupled、partitioned-overlap 和未知 profile 默认禁用。证据：`tests/test_rl_pause_audit.py`（3 passed）。strict 跨 quorum 暂停的放宽要等 X6（3.8）。
 - [ ] 1.6 [Y+M；依赖1.3-1.5] 以PR #66 的capability认证格式为准定义配置/有向边schema（不另设schema），含pool epoch、备用资源、显存/CPU/磁盘峰值、执行契约、复杂并行维度和恢复方案；验收：非法GPU映射、未知fingerprint、dense-full DP>1、GBS/DP/microbatch/累积不匹配被纯校验拒绝。
   - 进展（2026-09-29，已实现 + CPU 测试通过，依赖未满足（1.3-1.5未完成），未勾选）：在 #66 `yeto/rl/elastic_benchmark/capabilities.py` 原格式上扩展（没有另设 schema）。config 新增可选的 `placement`（per-role GPU UUID、per-engine 列表）、`parallel`（TP/PP/CP/EP）、`rollout_engine_gpus`、`gradient_accumulation`、`capacity`（显存/CPU/pinned/object-store/磁盘峰值）；edge 新增 `recovery`，并校验 TP/PP/CP/EP 保持不变；study 的 runtime fingerprint 与 attestation 不一致时判为 blocked。pool_id/pool_epoch/standby 沿用 #66。纯校验拒绝以下情况：非法 GPU 映射（重复、不在池内、数量不符、跨节点 engine）、未知 fingerprint、dense-full DP>1、GBS/步数/DP/microbatch/累积不匹配。证据：`tests/test_rl_elastic_config_schema.py`（10 passed）与 `tests/test_rl_elastic_benchmark.py`（19 passed）。实际池数据待 1.3 租用后填写。
-- [ ] 1.7 [M+Y；依赖1.4] 采集带profile/epoch的执行与等待时间线、queued/active/tool-wait、ready组、消费速率、policy age及资源峰值；验收：区分工具等待与GPU饱和，串行和重叠时间不重复计费，关闭观测兼容旧路径。
+- [ ] 1.7 [M+Y；依赖1.4] 采集带profile/epoch的执行与等待时间线、queued/active/tool-wait、ready组、消费速率、policy age及资源峰值，并给算法每轮指标（`masked_fraction`/clipfrac、mismatch 指标、被过滤样本与组数）打上同一 profile/epoch 与权重传输方式标签（alignment.md A5）；验收：区分工具等待与GPU饱和，串行和重叠时间不重复计费，关闭观测兼容旧路径。
   - 进展（2026-09-29，部分实现，未勾选）：纯计量部分已完成，即 `yeto/rl/engine/timeline.py` 的区间并集计费（重叠不重复计）、profile/epoch 标签和工具等待/饱和/长尾分类，测试为 `tests/test_rl_timeline.py`（3 passed）。**阻塞**：事件发射需要改 `yeto/rl/engine/driver.py`（每阶段 span、ReadinessSnapshot 填充）和 `miles_adapter/rollout.py`（queued/active/tool-wait 计数），这两处要等 lr-fix 合入。验收里的"关闭观测兼容旧路径"要等接入后才能验证。
 - [ ] 1.8 [X；依赖1.4,1.7] 将DynaResize证据转成实验假设，区分角色分区、进程复用、权重同步组预热、host backing/传输buffer和延迟optimizer；验收：每项有论文页码、miles适配点和否定结果处理，不采用论文性能常量。
   - 进展（2026-09-29，阻塞，未勾选）：本地没有找到 DynaResize 原文 PDF，无法给出论文页码，需要用户提供原文路径。
@@ -24,7 +24,7 @@
 
 - [ ] 2.1 [Y+M；依赖1.6] 经 `Placement` 端口表达trainer/rollout/standby物理映射并在启动时显式给出，适配LoRA启动参数避免colocate规范化覆盖分区；验收：小模型固定分区正常启动，旧共置配置保持原行为。
 - [ ] 2.1a [M-fork；2.1前置] fork-M1：`miles/ray/placement_group.py` 接受显式 role→bundle 映射（trainer/rollout/standby），替代单一 offset；缺省行为不变，colocate 下拒绝；验收：CPU 单测覆盖重复/越界/重叠拒绝与缺省等价，打入镜像后 2.1 以显式映射启动并记录 bundle↔GPU UUID。依据 upstream-mechanisms.md E0“Missing for 2.1”。
-- [ ] 2.2 [Y；依赖2.1,1.4] 在yeto `IslandDriver` 上新增 `partitioned-serial` 执行模式，在目标分区管理就绪任务、权重身份、有限缓冲与反压；验收：partitioned-serial完成固定算法步数，不因分卡改变sample IDs/optimizer时序。
+- [ ] 2.2 [Y；依赖2.1,1.4] 在yeto `IslandDriver` 上新增 `partitioned-serial` 执行模式，在目标分区管理就绪任务、权重身份、有限缓冲与反压；验收：partitioned-serial完成固定算法步数，不因分卡改变sample IDs/optimizer时序；保留 R0 每组 policy token 校验（`driver.py` generate 后的 `mismatched_groups` 检查），`rl-algo-mismatch-correction` 依赖的“π_behav 与 π_old 同一权重”前提在分区模式下仍成立（alignment.md A5）。
 - [ ] 2.3 [X；依赖2.2,1.7] 对同一算法契约允许的独立任务做重叠实验，并实现对应guard；验收X9：延迟发布不能触发旧版本生成，队列有界；若不存在合法训推重叠，记录partitioned-serial结论与独立算法后续项，不擅自开放one-step-off-policy。
 - [ ] 2.4 [X；依赖2.2,1.3,1.7；overlap另依赖2.3] 在云实验池扫描少量固定配置，记录默认兼容配置、目标profile最佳固定和收益面；验收：同profile公平比较、全池/备用GPU-hours和原始trace齐全，可得“尚无净收益边”的结论。P62/P44仅候选，不预设合法或更快。
 
