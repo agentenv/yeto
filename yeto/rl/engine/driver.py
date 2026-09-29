@@ -251,7 +251,7 @@ def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
     return {
         "active_groups": float(len(batch.groups)),
         "cancelled_groups": float(batch.aborted),
-        "tool_wait_seconds": 0.0,
+        "tool_wait_seconds": float(getattr(batch, "tool_wait_seconds", None) or 0.0),
         "group_p50_seconds": 0.0,
         "group_p95_seconds": 0.0,
         "group_p99_seconds": 0.0,
@@ -660,7 +660,7 @@ class IslandDriver:
             cancelled_groups=int(batch.aborted),
             completed_trajectories=sum(len(g.sample_ids) for g in batch.groups),
             action_tokens=sum(int(g.token_count) for g in batch.groups),
-            tool_wait_seconds=0.0,
+            tool_wait_seconds=float(getattr(batch, "tool_wait_seconds", None) or 0.0),
             group_p50_seconds=0.0,
             group_p95_seconds=0.0,
             group_p99_seconds=0.0,
@@ -788,6 +788,7 @@ class IslandDriver:
                 else {}
             ),
             nonzero_advantages=getattr(batch, "nonzero_advantages", None),
+            tool_wait_seconds=getattr(batch, "tool_wait_seconds", None),
             **self._mismatch_fields(),
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)

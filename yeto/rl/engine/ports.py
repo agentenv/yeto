@@ -76,6 +76,9 @@ class RolloutBatchHandle:
     # (rl-algo-seq-and-adv R2); None = not reported. Read by per-algorithm
     # gradient expectations (``gradient_expectation(batch, metrics)``).
     nonzero_advantages: int | None = None
+    # rl-infra-spec 1.7: summed non-generation (tool) time of the rollout's
+    # samples; None = not reported.
+    tool_wait_seconds: float | None = None
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
