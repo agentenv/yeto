@@ -94,3 +94,14 @@ GPU 验证：本 change 不需要，也没有做。没有使用任何云资源�
 - **F-a**：映射表必须等于 D3（`BUILTIN_FLAGS`）与扩展声明的映射（`EXTENSION_FLAGS`）之并；`--gamma` 恢复为未映射参数的参数化用例，扩展注册了它的映射时跳过。
 - **S2**：docs 中子 change 的两个小节加了注：由对应子 change 提供，在集成分支生效。
 - **1b-p0tests-f1**：夹具改为只要 `grpo_knobs` 在 `EXTENSION_MODULES` 中就调用 `with_pipeline_plugins`，不再靠 import 异常回退；algo-cap 与 origin/algo-1b 2722cad 上都通过。
+
+## 2026-09-29（ALGO-CAP，no-sync 事件磁带、声明策略）
+
+- `171408b`：no-sync 岛通过日志回传事件磁带。
+  - learner 的 `install_event_echo()` 把每条磁带记录原样输出为 `YETO_RL_EVENT <磁带行>`，前缀与 INFRA driver 的实验 echo 相同。
+  - launcher 的 `EventCollector` 从 Modal/sky 日志流重建 `<run dir>/events/<island>.jsonl`，流重放和 driver echo 造成的重复会被去掉；拆除前最多等 120 s，让日志流结束。
+  - 端到端测试：岛侧 echo → fake Modal 日志流 → 本地磁带与岛磁带逐行相同，然后用 `--rl-event-tape` 导出。
+  - adapter 声明加入 maxrl、mapo（gdpo 暂缓）。
+- 声明策略（主 agent 决定，用户可推翻，见 alignment §7b）：只有 GPU 上机制确实生效的证据才能声明。
+  - tis、opsm_trainer 暂时保留声明，但注明“G1 只证明能运行，是否生效待触发运行”；1a 触发运行没能证明生效就撤回。
+  - `test_rl_algorithm_capabilities.py` 中的 4 个用例改为从候选机制与 `declared_mechanisms()` 的差集中动态选取未声明项，并断言差集非空；“一次列出全部问题并给出可选项”等断言都保留。另外新增一个用例：Miles adapter 接受每个已声明项，拒绝 overlong_filter。

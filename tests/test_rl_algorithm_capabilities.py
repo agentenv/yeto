@@ -85,16 +85,76 @@ def test_old_declaration_reads_as_r0_mechanisms():
 
 # -- 3.2 ------------------------------------------------------------------------
 
+# One spec per mechanism the P0 framework can express beyond R0, each touching
+# a single field. Tests pick the ones an engine has NOT declared, so a later
+# declaration (a follow-up change's G1) never turns them into no-ops.
+CANDIDATES = {
+    "features:clip_higher": dict(loss=dict(eps_clip_high=0.28)),
+    "features:dual_clip": dict(loss=dict(eps_clip_c=3.0)),
+    "features:eps_clip": dict(loss=dict(eps_clip=0.25)),
+    "loss_aggregations:token": dict(loss=dict(aggregation="token")),
+    "features:no_grpo_std_normalization": dict(advantage=dict(std_normalization=False)),
+    "features:no_rewards_normalization": dict(advantage=dict(rewards_normalization=False)),
+    "features:entropy_bonus": dict(entropy_coef=0.001),
+    "features:overlong_filter": dict(sampling=dict(overlong_filter=True)),
+    "kl_placements:loss": dict(kl=dict(placement="loss", coef=0.01, estimator="k3")),
+}
+
+
+def undeclared(caps):
+    """[(mechanism, kwargs)] of candidates ``caps`` does not declare (non-empty)."""
+
+    declared = caps.declared_mechanisms()
+    found = [(m, kw) for m, kw in CANDIDATES.items() if m not in declared]
+    assert found, "every candidate is declared; extend CANDIDATES"
+    return found
+
+
+def _combine(*kwargs_list):
+    merged = {}
+    for kw in kwargs_list:
+        for group, value in kw.items():
+            if isinstance(value, dict):
+                merged.setdefault(group, {}).update(value)
+            else:
+                merged[group] = value
+    return AlgorithmSpec(**merged)
+
+
+def _disjoint_pair(items):
+    for i, (m1, k1) in enumerate(items):
+        for m2, k2 in items[i + 1:]:
+            if not (set(k1) & set(k2)) or all(
+                not (set(k1[g]) & set(k2[g])) for g in set(k1) & set(k2)
+                if isinstance(k1[g], dict)
+            ):
+                return (m1, k1), (m2, k2)
+    pytest.skip("fewer than two combinable undeclared candidates")
+
 
 def test_expressible_but_not_enabled_is_rejected_with_options():
     caps = miles_capabilities(FP)
+    (m1, k1), (m2, k2) = _disjoint_pair(undeclared(caps))
     with pytest.raises(CapabilityMismatch) as info:
-        _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28, aggregation="token")))
+        _check(caps, _combine(k1, k2))
     text = str(info.value)
     # every problem at once, each with the supported options
-    assert "features mechanism 'clip_higher' not supported (supported: []" in text
-    assert "loss_aggregations mechanism 'token' not supported (supported: ['default']" in text
+    for mechanism in (m1, m2):
+        dimension, name = mechanism.split(":")
+        supported = sorted(caps.mechanisms(dimension))
+        assert f"{dimension} mechanism {name!r} not supported (supported: {supported}" in text
     assert "expressible but not enabled" in text
+
+
+def test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter():
+    caps = miles_capabilities(FP)
+    declared = caps.declared_mechanisms()
+    for mechanism, kwargs in CANDIDATES.items():
+        if mechanism in declared:
+            _check(caps, _combine(kwargs))  # accepted
+    assert "features:overlong_filter" not in declared
+    with pytest.raises(CapabilityMismatch, match="'overlong_filter' not supported"):
+        _check(caps, _combine(CANDIDATES["features:overlong_filter"]))
 
 
 def test_critic_rejected_pointing_to_legacy():
@@ -204,7 +264,8 @@ def test_miles_and_fake_declarations():
     # rl-algo-mismatch-correction 7.3 (G1 passed): the adapter declares tis and
     # OPSM (trainer pi_old); the fake declares every correction for CPU tests.
     expected = {
-        "miles": ({"none", "tis", "opsm", "opsm_trainer"}, frozenset()),
+        # rl-algo-seq-and-adv 7.5 G1: maxrl/mapo (gdpo held back)
+        "miles": ({"none", "tis", "opsm", "opsm_trainer"}, {"maxrl", "mapo"}),
         "fake": ({"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
                   "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
                  {"mismatch_metrics", "rollout_logprobs_as_old"}),
@@ -223,11 +284,8 @@ def test_miles_and_fake_declarations():
 def test_fake_root_default_grpo_starts_other_mechanisms_rejected(tmp_path):
     engine, driver = _driver(tmp_path, AlgorithmSpec(), fake_capabilities())
     assert driver.run().policy_version == 1
-    for spec in (AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28)),
-                 AlgorithmSpec(kl=KlSpec(placement="loss", coef=0.01, estimator="k3")),
-                 AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
-                               loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4)),
-                 AlgorithmSpec(loss=LossSpec(eps_clip_c=3.0))):
+    for _mechanism, kwargs in undeclared(fake_capabilities()):
+        spec = _combine(kwargs)
         engine, driver = _driver(tmp_path, spec, fake_capabilities())
         with pytest.raises(CapabilityMismatch, match="not supported"):
             driver.run()
@@ -238,14 +296,15 @@ def test_fake_root_default_grpo_starts_other_mechanisms_rejected(tmp_path):
 
 
 def test_unverified_allowance_single_island_without_outer_sync(tmp_path):
-    spec = AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28))
-    names = check_unverified_allowance(["features:clip_higher"], islands=1, outer_sync=False)
+    mechanism, kwargs = undeclared(fake_capabilities())[0]
+    spec = _combine(kwargs)
+    names = check_unverified_allowance([mechanism], islands=1, outer_sync=False)
     caps = fake_capabilities().with_unverified(names)
     engine, driver = _driver(tmp_path, spec, caps)  # LocalOnlySync: no outer sync
     assert driver.run().policy_version == 1
-    assert json.loads(caps.to_json())["unverified_mechanisms"] == ["features:clip_higher"]
+    assert json.loads(caps.to_json())["unverified_mechanisms"] == [mechanism]
     # the allowance does not enter the algorithm hash
-    assert spec.sha256() == AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28)).sha256()
+    assert spec.sha256() == _combine(kwargs).sha256()
 
 
 def test_unverified_allowance_refused_with_outer_sync_multi_island_unknown():
@@ -278,12 +337,12 @@ def test_unverified_allowance_does_not_bypass_rejection_matrix(tmp_path):
 
 
 def test_unverified_allowance_exempts_only_named(tmp_path):
-    spec = AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28, eps_clip_c=3.0))
-    caps = fake_capabilities().with_unverified(["features:clip_higher"])
-    engine, driver = _driver(tmp_path, spec, caps)
-    with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported") as info:
+    (m1, k1), (m2, k2) = _disjoint_pair(undeclared(fake_capabilities()))
+    caps = fake_capabilities().with_unverified([m1])
+    engine, driver = _driver(tmp_path, _combine(k1, k2), caps)
+    with pytest.raises(CapabilityMismatch, match=f"{m2.split(':')[1]!r} not supported") as info:
         driver.run()
-    assert "clip_higher" not in str(info.value)
+    assert f"{m1.split(':')[1]!r} not supported" not in str(info.value)
 
 
 # -- 1a-shared: OPSM combinations, named custom functions, always-emit fields -----
