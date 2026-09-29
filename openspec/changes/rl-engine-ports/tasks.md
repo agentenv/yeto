@@ -53,8 +53,9 @@
 - [x] 4.1 `yeto/rl/engine/driver.py`：实现 colocated-serial 循环（生成 → 训练 → 安全边界同步 → 完整发布），包括 offload/onload 时序、eval 与进度保存；每轮检查 grad_norm 不变量。验证：GPU 冒烟测试在无外层同步的单岛上跑完 3 轮，事件顺序符合 spec；注入零梯度时该轮失败且不提交。
 - [x] 4.2 把 strict-avg bridge 接到 driver 的安全边界，用端口的 `PolicyState` 和 `Publisher` 代替 `MilesPolicySync` 中对 Miles 内部的调用。验证：`tests/test_rl_integration.py` 中 strict 的 CPU/伪引擎用例在 ports 路径上通过；GPU 上两岛 strict-avg 完成 3 轮，两岛同步后的 hash 相同。
 - [x] 4.3 把 decoupled bridge 接到 driver，包括 run-until-stop、在安全边界 drain BCAST/PULL、finalization 以及"发布一次后停止"。验证：`tests/test_rl_decoupled.py` 在 ports 路径的伪引擎上通过；GPU 上两岛 decoupled 跑到最终 cut 并导出 PEFT。
-- [ ] 4.4 island 进度 checkpoint 与恢复在 ports 路径上沿用现有格式（不含 LoRA 和 optimizer），重启后以重置方式应用权威 cut。验证：GPU 测试在第 2 轮 kill 掉 learner 并重启，恢复后的轮次与 group 复用规则与 legacy 一致。
+- [x] 4.4 island 进度 checkpoint 与恢复在 ports 路径上沿用现有格式（不含 LoRA 和 optimizer），重启后以重置方式应用权威 cut。验证：GPU 测试在第 2 轮 kill 掉 learner 并重启，恢复后的轮次与 group 复用规则与 legacy 一致。
 
+  - 完成记录（2026-09-29）：`evidence/2026-09-29-kill44-legacy-vs-ports/report.md`（代码 2bb651d，H100，同一 kill 点：第 2 轮训练中）。两边重启后都从 rollout 2 继续、以 reset 应用 kill 前相同的权威 cut v2、丢弃被杀轮次的轨迹并重新生成、此后每轮 4 组、syncer 4 个 outer step 完成并确认最终 cut。发现并修复 ports 的记录缺陷：重启后未覆盖被杀轮次的 `rollout_metrics`（`bridges.py` `StrictIslandProgress.after_generate`，新增测试 `test_strict_progress_replaces_a_killed_learners_record_for_the_same_round`）。规格允许的差异：over-sampling 大于 batch 时 ports 不复用剩余 group（legacy 注释标明该队列可丢弃）。
 ## 5. 路径选择
 
 - [x] 5.1 在 CLI、launcher 与 learner 中加入 `--rl-engine {legacy,ports}`，默认 `legacy`。选择写入事件与来源记录；ports 遇到不支持的组合（SAO、dense-full、DSV4、critic、分区）时在启动前拒绝。验证：launcher 与 learner 单元测试覆盖默认值、记录和拒绝矩阵；legacy 的全部现有测试不变。

@@ -93,7 +93,9 @@ class StrictIslandProgress:
 
     The rollout process may already have written this round's record together
     with its completed-group queue (legacy ``_save_completed_groups``); that
-    record is kept. Otherwise the driver writes metrics with an empty queue.
+    record is kept. Otherwise the driver writes this generation's metrics with
+    an empty queue, replacing any record a killed learner left for the same
+    round (as legacy's recovery rewrites it).
     """
 
     def __init__(self, args: Any) -> None:
@@ -118,6 +120,7 @@ class StrictIslandProgress:
             and payload.get("config") == legacy._island_checkpoint_config(self.args)
             and isinstance(payload.get("rollout_metrics"), Mapping)
             and payload["rollout_metrics"]
+            and payload.get("completed_groups")
         ):
             return
         legacy._atomic_save_island_checkpoint(

@@ -56,3 +56,7 @@
 - 任务 0.3 完成（2026-09-29）：三个分支经 `git ls-remote` 与 compare API 核对，基底 commit（yeto `e21a7ff`、Miles `9e4260d`、SGLang sglang-miles `571212b`）与当前 HEAD 记入 design D6/D11。
 
 - 2026-09-29 7.0 迁移清单核对：对照 #48–#68 合入列表，补登记 #60（Modal 外部 router，ports 以 `require_ports_router_mode` 拒绝/忽略，单测覆盖，CLOSED）以及 #58/#67/#68 与基线内 #48–#57；清单无未关闭项。遗留：Modal 上 ports 未实跑。
+
+## 已知问题（两条路径共有，R0 不修）：重启后 prompt 流从 0 开始
+
+kill/重启对照（`evidence/2026-09-29-kill44-legacy-vs-ports/`）中，legacy 与 ports 重启后第 2 轮都使用 prompt 0–3（kill 前为 8–11），prompt 12–15 从未被使用。原因是 Miles 数据源在没有 `args.load` 时不恢复偏移（legacy fork `data_source.py:142`；upstream 同理）。行为与 legacy 一致，不属于 R0；建议单独立项，让岛进度 checkpoint 记录并恢复数据源偏移。

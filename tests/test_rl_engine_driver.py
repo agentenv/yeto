@@ -297,6 +297,27 @@ def _strict_args(tmp_path, engine):
     )
 
 
+def test_strict_progress_replaces_a_killed_learners_record_for_the_same_round(tmp_path):
+    # A learner killed mid-round leaves that round's record; the restart
+    # regenerates the round and must record the new batch's metrics (legacy
+    # recovery rewrites the record too). A record carrying a completed-group
+    # queue was written by the rollout process and is kept.
+    engine = _engine(torch.tensor([1.0, 3.0]))
+    args = _strict_args(tmp_path, engine)
+    progress = StrictIslandProgress(args)
+    progress.after_generate(rollout_id=1, policy_token="yeto:1:a", metrics={"reward": 0.25})
+    progress.after_generate(rollout_id=1, policy_token="yeto:1:a", metrics={"reward": 0.75})
+    payload = torch.load(tmp_path / "island.pt", weights_only=True)
+    assert payload["rollout_metrics"] == {"reward": 0.75}
+
+    payload["completed_groups"] = [{"group": 0}]
+    torch.save(payload, tmp_path / "island.pt")
+    progress.after_generate(rollout_id=1, policy_token="yeto:1:a", metrics={"reward": 0.5})
+    kept = torch.load(tmp_path / "island.pt", weights_only=True)
+    assert kept["rollout_metrics"] == {"reward": 0.75}
+    assert kept["completed_groups"] == [{"group": 0}]
+
+
 def test_single_island_strict_progress_and_publication_tokens(tmp_path):
     # Mirrors test_miles_public_hook_runs_against_real_syncer.
     engine = _engine(torch.tensor([1.0, 3.0]))
