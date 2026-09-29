@@ -161,6 +161,13 @@ def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
 
 
 @pytest.fixture(autouse=True)
+def _no_modal_listing(monkeypatch):
+    import yeto.launcher as launcher
+
+    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: [])  # nothing listed = stopped
+
+
+@pytest.fixture(autouse=True)
 def _fake_sky(monkeypatch):
     import sys
     import types
@@ -210,8 +217,9 @@ def test_launcher_refusals(tmp_path):
     with pytest.raises(ValueError, match="only apply to --rl-engine ports"):
         _prepare_rl_args(_launcher_args("legacy", ("--rl-algorithm-spec", rejected)))
     # F7: undeclared mechanisms and registered launch checks fail before any cloud work
-    undeclared = _spec_file(tmp_path, json.loads(V2.canonical_json()), "v2.json")
-    with pytest.raises(ValueError, match="'clip_higher' not supported"):
+    dual = AlgorithmSpec(loss=LossSpec(eps_clip_c=3.0))  # dual_clip: never declared yet
+    undeclared = _spec_file(tmp_path, json.loads(dual.canonical_json()), "v2.json")
+    with pytest.raises(ValueError, match="'dual_clip' not supported"):
         _prepare_rl_args(_launcher_args("ports", ("--rl-algorithm-spec", undeclared)))
     from yeto.rl.engine import algorithm as alg
 
@@ -592,7 +600,11 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
         def cancel(self, call_id):
             events.append(("cancel", call_id))
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             events.append(("stop_app",))
 
         def tail_logs(self, call_id, entries=100):
@@ -697,7 +709,11 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
         def cancel(self, call_id):
             pass
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             pass
 
         def tail_logs(self, call_id, entries=100):
@@ -787,15 +803,6 @@ def test_echo_line_is_the_written_line(tmp_path, monkeypatch, capsys):
     assert "YETO_RL_EVENT" not in capsys.readouterr().out
 
 
-def _writers_on_append_record() -> bool:
-    from yeto.rl.bridge import StrictRlBridge
-
-    return "append_record" in StrictRlBridge._append_event.__code__.co_names
-
-
-@pytest.mark.skipif(not _writers_on_append_record(),
-                    reason="needs infra-drafts/echo-writers-infra.patch (bridge/driver/miles "
-                           "writers on event_echo.append_record; INFRA-owned files)")
 def test_two_island_strict_run_echoes_every_tape_writer(tmp_path, monkeypatch, capsys):
     """Driver, bridge (rl_local_round, rl_publication ...) records: all echoed, per island
     identical to the island tape (the 1a G3 gap: bridge writes bypassed the echo)."""
@@ -872,7 +879,11 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
         def cancel(self, call_id):
             pass
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             pass
 
         def tail_logs(self, call_id, entries=100):
@@ -929,10 +940,12 @@ def sys_modules_sky(monkeypatch):
     return sys.modules["sky"]
 
 
-def test_modal_islands_get_echo_flag_sky_islands_do_not():
+def test_every_ports_island_gets_the_echo_flag_legacy_does_not():
+    # every ports RL island echoes its tape: rl_learner_finalized is how the
+    # launcher tells a shutdown-phase error from an island failure
     modal_run = _island_run(_launcher_args("ports", gpu="modal:1xa100"))
     assert "--rl-echo-events" in modal_run and "--syncer $SYNCER_ADDR" in modal_run
-    assert "--rl-echo-events" not in _island_run(_launcher_args("ports"))
+    assert "--rl-echo-events" in _island_run(_launcher_args("ports"))
     assert "--rl-echo-events" not in _island_run(_launcher_args("legacy", gpu="modal:1xa100"))
     args = rl_learner.parse_args(_learner_argv(("--rl-echo-events",)))
     assert args.rl_echo_events

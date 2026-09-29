@@ -64,7 +64,10 @@ def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> in
     key (Miles ``agentic_tool_call.py``), not the round. Without a token (unit
     fixtures, legacy) the first sample's ``rollout_id`` is the fallback.
     """
-    token = current_policy_token(sink)
+    try:
+        token = current_policy_token(sink)
+    except ImportError:  # no Ray in this process (unit fixtures): no published token
+        token = None
     if token:
         from yeto.rl.core import parse_policy_snapshot_token
 
@@ -112,8 +115,21 @@ def _group_key(group: Sequence[Any]) -> tuple[Any, ...]:
 
 
 def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
-    """``--rollout-sample-filter-path`` hook: remember the kept groups (no-op filter)."""
+    """``--rollout-sample-filter-path`` hook: remember the kept groups.
 
+    Shared by rl-algo-grpo-knobs (sample filters, D7) and the rl-infra-spec
+    3.6 ledger (alignment A2/F5). Spec-selected sample filters run first
+    (``yeto.rl.algos.sample_filters``: overlong filter sets
+    ``remove_sample=True`` on truncated samples; default config: untouched).
+    Filtered samples are the ledger's terminal ``filtered``. Over-sampling
+    leaves no reusable remainder: Miles does not return surplus kept groups
+    to its buffer (``sglang_rollout.py:505-510``); only samples aborted under
+    ``--partial-rollout`` go back.
+    """
+
+    from yeto.rl.algos.sample_filters import apply_sample_filters
+
+    apply_sample_filters(args, data)
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
 
 
@@ -183,6 +199,10 @@ def build_metadata(
             "rollout metadata hook ran without record_trained_groups; "
             "--rollout-sample-filter-path must be the yeto recorder"
         )
+    from yeto.rl.algos.sample_filters import group_filtered_samples, metadata_fields
+
+    extra = metadata_fields(args)
+    sample_filter_counts = extra.get("filtered_samples")
     rollout_id = None
     groups, filtered, aborted = [], 0, 0
     for group in all_samples:
@@ -195,6 +215,9 @@ def build_metadata(
         aborted += int(record.pop("aborted"))
         key = tuple(record.pop("_key"))
         if key in trained:
+            if sample_filter_counts:
+                # terminal ledger state ``filtered`` (alignment A2/F5)
+                record["filtered_samples"] = group_filtered_samples(group)
             groups.append(record)
         else:
             filtered += 1
@@ -213,6 +236,7 @@ def build_metadata(
         "trained_sample_indices": sorted(
             int(i[1:]) for g in groups for i in g["sample_ids"] if i[1:].lstrip("-").isdigit()
         ),
+        **extra,
     }
 
 
@@ -328,6 +352,9 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
         # Reset per-rollout state: the bounded filter keys its memo on
         # ``yeto_rl_policy_version`` which legacy advanced per round; here the
         # rollout boundary is the reset point.
+        from yeto.rl.algos.sample_filters import reset as _reset_sample_filters
+
+        _reset_sample_filters(args)
         for attr in (_TRAINED_ATTR, _BOUNDED_FILTER_STATE_ATTR):
             if hasattr(args, attr):
                 setattr(args, attr, None)

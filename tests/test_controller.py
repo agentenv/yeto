@@ -255,3 +255,65 @@ def test_syncer_never_abandoned(capsys):
     assert ops.relaunch_calls.count(SYNCER) == 3
     err = capsys.readouterr().err
     assert "syncer unrecovered" in err and "still retrying" in err
+
+
+# -- fixed-roster RL recovery windows (P0 batch review) ------------------------
+
+from yeto.launcher import (  # noqa: E402
+    FIXED_ROSTER_MAX_RELAUNCHES,
+    RECOVERY_STABLE_S,
+    FixedRosterIslandAbandoned,
+)
+
+
+def _fixed(ops, recover_timeout=3600):
+    ops.status_seq.setdefault(SYNCER, [RUNNING])
+    return FleetController(
+        learners={"l0": ("task-l0", 1)}, syncer=(SYNCER, "task-syncer", 1), sky_ops=ops,
+        poll_interval=30, recover_timeout=recover_timeout, thread_cls=ImmediateThread,
+        fixed_roster=True,
+    )
+
+
+def test_fixed_roster_recovered_island_that_fails_hours_later_is_relaunched_again():
+    ops = FakeOps()
+    ops.status_seq["l0"] = [FAILED]
+    healthy_for_hours = [RUNNING] * int(6 * 3600 / 30)  # >> RECOVERY_STABLE_S
+    ops.relaunch_results["l0"] = [101, 102, 103]
+    ops.after_relaunch["l0"] = healthy_for_hours + [FAILED]
+    original = ops.relaunch
+
+    def relaunch(task, cluster):
+        job = original(task, cluster)
+        # each later relaunch is again healthy for hours, then the last one finishes
+        ops.after_relaunch["l0"] = (healthy_for_hours + [FAILED] if job < 102
+                                    else [RUNNING, SUCCEEDED])
+        return job
+
+    ops.relaunch = relaunch
+    ops.sleeps = -100000  # the long healthy phases poll many times
+    # 3 failures separated by hours: each opens a fresh window (count/budget
+    # reset), so even more relaunches than the per-window cap are allowed
+    assert _fixed(ops, recover_timeout=600).run() == {"l0": "JobStatus.SUCCEEDED"}
+    assert len(ops.relaunch_calls) == 3 > FIXED_ROSTER_MAX_RELAUNCHES
+    assert RECOVERY_STABLE_S < 6 * 3600
+
+
+def test_fixed_roster_persistently_failing_island_abandoned_after_the_cap():
+    ops = FakeOps()
+    ops.status_seq["l0"] = [FAILED]
+    ops.relaunch_results["l0"] = list(range(200, 220))
+    ops.after_relaunch["l0"] = [FAILED]  # dies right after every relaunch
+    with pytest.raises(FixedRosterIslandAbandoned):
+        _fixed(ops).run()
+    assert len(ops.relaunch_calls) == FIXED_ROSTER_MAX_RELAUNCHES
+    assert "l0" in ops.down_calls
+
+
+def test_non_fixed_roster_abandon_keeps_the_fleet_running():
+    ops = FakeOps()
+    ops.status_seq["l0"] = [FAILED]
+    ops.status_seq["l1"] = [RUNNING, SUCCEEDED]
+    ctl = make_controller(ops, {"l0": 1, "l1": 2}, recover_timeout=0)
+    codes = ctl.run()  # SFT: no exception, l0 abandoned, l1 finishes
+    assert ctl.learners["l0"]["state"] == "abandoned" and codes["l1"] == "JobStatus.SUCCEEDED"

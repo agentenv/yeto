@@ -828,6 +828,8 @@ def test_declared_caps_accept_1b_and_refuse_undeclared():
     assert "token" not in gk.declared_mechanisms().get("loss_aggregations", frozenset())
     for name in ("clip_higher", "dual_clip", "over_sampling", "overlong_filter"):
         assert name not in gk.declared_mechanisms().get("features", frozenset())
+    # token withdrawn after review (grad_norm identical to the baseline)
+    assert "token" not in gk.declared_mechanisms().get("loss_aggregations", frozenset())
 
 
 def test_only_the_drgrpo_reducer_is_accepted():

@@ -27,8 +27,9 @@ MILES_IMAGE = (
 MILES_NEXT_REPOSITORY = "https://github.com/michaellchung/miles"
 MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # yeto/ports (= yeto-elastic-m1-m6 after four review rounds): run_plugin,
-# --worker-dynamic-port-start and the elastic M1-M6 changes on top of the base.
-MILES_NEXT_COMMIT = "d002615f44816ae243169643dc093eb2c29029d8"
+# --worker-dynamic-port-start, the elastic M1-M6 changes and the LoRA bridge
+# calculate_per_token_loss fix on top of the base.
+MILES_NEXT_COMMIT = "0af62f4d48ed6a5b185c257578d8f7e22312aa87"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -51,10 +52,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PRIVATE (ghcr.io/michaellchung): launches pass registry
 # credentials via SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} (ports only; use
 # a read:packages-only token).
-# Tag d002615-9f29303; linux/amd64 only.
+# Tag 0af62f4-9f29303; linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "9f0977dad5376b2cfd8bca7a15b2f78bd3ce7ffe199e5176c3cd6628ec7e6245"
+    "c6f5455c8a88d131c780cf99d07c3fdd913d2beda25b6d94739db06916d602ed"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Where MILES_NEXT_IMAGE installed the SGLang fork (editable).

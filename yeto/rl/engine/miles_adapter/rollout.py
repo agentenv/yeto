@@ -226,6 +226,9 @@ def handle_from_metadata(
             reward_mean=_number(g["reward_mean"]),
             reward_std=_number(g["reward_std"]),
             token_count=int(g["token_count"]),
+            filtered_samples=(
+                int(g["filtered_samples"]) if g.get("filtered_samples") is not None else None
+            ),
         )
         for g in payload["groups"]
     )

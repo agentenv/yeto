@@ -113,6 +113,16 @@ ESTIMATOR_COMPANIONS: dict[str, frozenset[tuple[str, str]]] = {
 }
 
 
+# Same principle for corrections: mechanisms that make Miles set use_tis
+# already produce the mismatch metrics (losses.py:233/386: get_mismatch_metrics
+# or use_tis), so --get-mismatch-metrics changes nothing there and is claimed
+# by them. Main-agent decision, alignment §7b (may be overridden by the user).
+CORRECTION_COMPANIONS: dict[tuple[str, str], frozenset[tuple[str, str]]] = {
+    ("corrections", name): frozenset({("features", "mismatch_metrics")})
+    for name in ("tis", "icepop", "mis_mask", "mismatch_observe")
+}
+
+
 class AlgorithmSpecError(ValueError):
     """An algorithm description is malformed or unsupported."""
 
@@ -300,7 +310,8 @@ _MECHANISMS: dict[tuple[str, str], MechanismDef] = {}
 _REJECTIONS: dict[str, Callable[["AlgorithmSpec"], str | None]] = {}
 # correction.function paths that have their own mechanism name (see
 # register_named_correction_function); they no longer require 'custom'.
-NAMED_CORRECTION_FUNCTIONS: set[str] = set()
+# path -> the corrections mechanisms that claim it (the path's own detectors)
+NAMED_CORRECTION_FUNCTIONS: dict[str, frozenset[str]] = {}
 
 
 def register_field(group: str, name: str, *, default: Any,
@@ -360,30 +371,43 @@ def _owned_plugin(path: str) -> bool:
     return module in _PIPELINE_PLUGIN_MODULES or module in EXTENSION_MODULES
 
 
-def register_named_correction_function(path: str) -> None:
-    """``path`` is declared by its own correction mechanism, not 'custom'.
+def register_named_correction_function(path: str, *, mechanisms: Iterable[str]) -> None:
+    """``path`` is declared by its own correction mechanisms, not 'custom'.
 
-    The exemption from ``corrections:custom`` applies only while some other
-    registered ``corrections`` mechanism actually detects the spec (see the
-    'custom' detector), so a named path can never escape the capability
-    check; its source identity stays covered by the PluginRef hash.
+    The exemption from ``corrections:custom`` applies only while one of the
+    path's OWN mechanisms (``mechanisms``, corrections dimension) detects the
+    spec, so a named path can never escape the capability check through
+    another mechanism's detector; its source identity stays covered by the
+    PluginRef hash.
     """
 
-    if not path.startswith("yeto."):
-        raise ValueError(f"named correction function {path!r} must be in the yeto namespace")
-    NAMED_CORRECTION_FUNCTIONS.add(path)
+    mechanisms = frozenset(mechanisms)
+    if not mechanisms:
+        raise ValueError(f"named correction function {path!r} needs its mechanism name(s)")
+
+    if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
+        raise ValueError(
+            f"named correction function {path!r} must be in {sorted(PLUGIN_NAMESPACES)} "
+            "(Miles built-ins such as icepop_function are named too; the source "
+            "hash of the PluginRef still pins them)"
+        )
+    NAMED_CORRECTION_FUNCTIONS[path] = NAMED_CORRECTION_FUNCTIONS.get(path, frozenset()) | mechanisms
 
 
-# reducer path -> the "dimension:name" mechanisms that claim it
-NAMED_REDUCERS: dict[str, frozenset[str]] = {}
+# reducer path -> (the "dimension:name" mechanisms that claim it, pinned
+# source sha256 or None)
+NAMED_REDUCERS: dict[str, tuple[frozenset[str], str | None]] = {}
 
 
-def register_named_reducer(path: str, *, mechanisms: Iterable[str]) -> None:
+def register_named_reducer(path: str, *, mechanisms: Iterable[str],
+                           sha256: str | None = None) -> None:
     """``path`` (a pg_loss reducer) is claimed by its own mechanisms.
 
-    While one of ``mechanisms`` detects a spec using this reducer, the generic
-    ``features:custom_pg_loss_reducer`` is not required (so declaring e.g.
-    ``loss_aggregations:constant`` admits exactly this reducer, and no other).
+    While one of ``mechanisms`` detects a spec using this reducer -- and, when
+    ``sha256`` is given, the spec's PluginRef pins exactly that source (the
+    one the declaration's evidence ran) -- the generic
+    ``features:custom_pg_loss_reducer`` is not required. Any other reducer, or
+    another source of this one, still requires it.
     """
 
     mechanisms = frozenset(mechanisms)
@@ -391,11 +415,16 @@ def register_named_reducer(path: str, *, mechanisms: Iterable[str]) -> None:
         raise ValueError(f"named reducer {path!r} needs 'dimension:name' mechanism(s)")
     if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
         raise ValueError(f"named reducer {path!r} must be in {sorted(PLUGIN_NAMESPACES)}")
-    NAMED_REDUCERS[path] = NAMED_REDUCERS.get(path, frozenset()) | mechanisms
+    old, pinned = NAMED_REDUCERS.get(path, (frozenset(), None))
+    if pinned is not None and sha256 is not None and pinned != sha256:
+        raise ValueError(f"named reducer {path!r} already pinned to {pinned}")
+    NAMED_REDUCERS[path] = (old | mechanisms, sha256 or pinned)
 
 
 def _named_reducer_claimed(spec: "AlgorithmSpec") -> bool:
-    owners = NAMED_REDUCERS.get(spec.loss.reducer.path, frozenset())
+    owners, pinned = NAMED_REDUCERS.get(spec.loss.reducer.path, (frozenset(), None))
+    if pinned is not None and spec.loss.reducer.sha256 != pinned:
+        return False
     return any(
         f"{m.dimension}:{m.name}" in owners and m.detect(spec) for m in registered_mechanisms()
     )
@@ -1079,6 +1108,9 @@ class AlgorithmSpec:
 
         required = {(m.dimension, m.name) for m in registered_mechanisms() if m.detect(self)}
         required -= ESTIMATOR_COMPANIONS.get(self.advantage.estimator, frozenset())
+        for claimant, companions in CORRECTION_COMPANIONS.items():
+            if claimant in required:
+                required -= companions
         return frozenset(required)
 
     def _mechanism_defs(self) -> list[MechanismDef]:
@@ -1233,8 +1265,7 @@ def _builtin_mechanisms() -> None:
         lambda s: s.correction.method == "custom"
         and s.correction.function is not None
         and not (
-            s.correction.function.path in NAMED_CORRECTION_FUNCTIONS
-            and _named_correction_detected(s)
+            _named_correction_detected(s)
         ),
     )
     register_mechanism(
@@ -1274,10 +1305,12 @@ _GENERIC_CORRECTIONS = frozenset(CORRECTION_METHODS) | {"opsm"}
 
 
 def _named_correction_detected(spec: "AlgorithmSpec") -> bool:
-    """Some registered non-generic ``corrections`` mechanism claims the spec."""
+    """One of the function path's own named mechanisms detects the spec."""
 
+    owners = NAMED_CORRECTION_FUNCTIONS.get(spec.correction.function.path, frozenset())
     return any(
-        m.dimension == "corrections" and m.name not in _GENERIC_CORRECTIONS and m.detect(spec)
+        m.dimension == "corrections" and m.name in owners
+        and m.name not in _GENERIC_CORRECTIONS and m.detect(spec)
         for m in registered_mechanisms()
     )
 

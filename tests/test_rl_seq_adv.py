@@ -235,11 +235,16 @@ def test_rpp_family_whiten_rules(estimator):
     assert rpp(estimator).rejections() == []  # reward KL is allowed for the rpp family
     unwhitened = AlgorithmSpec(advantage={"estimator": estimator})
     assert any("[rpp_requires_whiten]" in p for p in unwhitened.rejections())
-    # undeclared until G1: expressible, not opened
-    with pytest.raises(CapabilityMismatch, match=f"'{estimator}' not supported"):
-        miles_capabilities("sha256:" + "0" * 64).check(
-            layout="lora", placement="colocated", execution_mode="colocated-serial",
-            algorithm=rpp(estimator))
+    # the Miles adapter: refused until the estimator is declared (7.5); once
+    # declared, the mandated whiten is claimed by the estimator (P0
+    # ESTIMATOR_COMPANIONS, alignment §7b) and the spec is accepted
+    caps = miles_capabilities("sha256:" + "0" * 64)
+    check = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
+    if estimator in MILES_2A_DECLARED:
+        caps.check(**check, algorithm=rpp(estimator))
+    else:
+        with pytest.raises(CapabilityMismatch, match=f"'{estimator}' not supported"):
+            caps.check(**check, algorithm=rpp(estimator))
 
 
 # -- 3.6 REINFORCE++ / baseline expects_gradient ----------------------------------------
@@ -441,10 +446,30 @@ def test_fake_declaration_launches_each_mechanism(tmp_path, name):
     assert driver.run().policy_version == 2
 
 
-def test_miles_adapter_declares_none_of_them():
+# Mechanisms of this change the Miles adapter declares (7.5; one per commit).
+MILES_2A_DECLARED = {"maxrl", "mapo", "gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline", "gdpo"}
+
+
+def test_miles_adapter_declarations_follow_g1():
+    """7.5: exactly MILES_2A_DECLARED of this change is declared; the rest refused."""
+
     caps = miles_capabilities("sha256:" + "0" * 64)
-    assert caps.advantage_estimators == frozenset({"grpo"})
-    assert not ({"maxrl", "mapo", "gdpo"} & set(caps.features))
+    mine = {"gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline",
+            "maxrl", "mapo", "gdpo"}
+    estimators = {"gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline"}
+    assert (set(caps.advantage_estimators) | set(caps.features)) & mine == MILES_2A_DECLARED
+    assert caps.advantage_estimators == frozenset({"grpo"} | (MILES_2A_DECLARED & estimators))
+    check = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
+    for name in sorted(mine):
+        try:
+            caps.check(**check, algorithm=_mechanism_spec(name))
+            text = ""
+        except CapabilityMismatch as exc:
+            text = str(exc)
+        if name in MILES_2A_DECLARED:
+            assert f"'{name}' not supported" not in text, text
+        else:  # undeclared mechanisms of this change are still refused
+            assert f"'{name}' not supported" in text
 
 
 def test_default_spec_unchanged():

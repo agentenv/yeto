@@ -118,3 +118,16 @@ GPU 验证：本 change 不需要，也没有做。没有使用任何云资源�
 - **写者覆盖范围**：在 algo-cap 上，ports 路径的所有磁带写入都在 learner 进程内，经 `yeto.rl.miles._append_rl_event`（包括 driver 的 EventTape、learner 和 entry 的事件），所以都被 echo 覆盖。在 Ray actor 或 Miles 子进程里写同一磁带的扩展（例如 1b reward_pipeline 的 emit_event）不在覆盖范围内；它们需要自己用 `yeto.rl.event_echo.format_record` 打印到 stdout（Ray 会把 worker 日志转发到 driver，行内前缀照样能解析）。已提示主 agent。
 - `format_record` 的编码与磁带写入器（`_append_rl_event`）一致，不带 default=str；INFRA driver 的实验 echo 带 default=str，对可序列化的记录两者输出相同。
 - **声明测试**：CANDIDATES 覆盖 P0 注册表中 R0 之外的全部内置机制；ppo 例外，已注明原因。新增测试从注册表逐项核对这一点。可组合的候选项不足时直接失败，不再 skip。“接受已声明项”的用例改为遍历 `declared_mechanisms()`，并断言至少覆盖了 tis 和 opsm。reward 分派器被拒时，报错提示 maxrl/mapo 所需的声明待 1b G1。
+
+## 2026-09-29（ALGO-CAP，集成分支 integ-decl：统一能力声明）
+
+- 在 rl-integ-2 上依次合入 algo-cap 4373cd9、infra-a d9bf29c、algo-1a 10f5000、algo-1b 3c570f5、algo-2a ef44594，全部为 merge（未 rebase），三行扩展注册都保留了。有一处集成修复：infra-a 的 GSPO clipfrac 测试中，替身 spec 需要带 correction 组。
+- 声明集中写在 `entry.MILES_DECLARED` 表里，格式为“机制 → 证据”。每个机制单独一个提交，提交说明里写明证据。逐机制清单见 docs/MILES_RL.md 的 Declaration policy。
+- 未声明、待批准或待证据的项：
+  - **features:custom_pg_loss_reducer**：通用 reducer 插件入口，只有 Dr.GRPO reducer 有证据；因此 dr-grpo spec 仍被拒。建议 1b 加一条规则，把 reducer 限定为 REDUCER_PATH，之后即可声明。
+  - **GSPO 需要的 eps_clip/clip_higher**、**rpp 需要的 whiten_advantages**：GSPO 运行中 clip 生效只能证明 gspo 本身，不能作为通用 clip_higher 的证据；whiten 同理。所以 gspo/rpp spec 仍会因这些配套项被拒。二选一：（a）配套项由估计器强制要求时，不计入独立机制（改 P0 的检测）；（b）补独立的生效证据。
+  - clip_higher、dual_clip、over_sampling（触发实验进行中）；overlong_filter、mis、opsm_rollout、通用 custom。
+- 保留 `corrections:opsm`：它是所有来源特定 OPSM 机制都需要的维度，证据是 trigger 中 opsm_clipfrac > 0；它不会放行 opsm_rollout，后者需要自己的机制名。
+- IcePop：命名修正函数现在也接受 `miles.` 内置函数（源码哈希照样固定），所以 icepop 由 corrections:icepop 认领，不再要求通用 custom。
+- 全量失败集合与 /tmp/integ-fail.ids（94 个）逐 id 相同；六个 change 的 validate --strict 都通过；2a/1b 的示例 spec 插件哈希都是最新的（make_examples 重跑后无差异）。
+- （主 agent 决定，alignment §7b，用户可推翻）实现 `ESTIMATOR_COMPANIONS`：估计器强制要求的配套设置（gspo 的 eps_clip/clip_higher，rpp 家族的 whiten_advantages）只在“该估计器加该配套设置”的组合下由估计器机制认领。加了测试：gspo 与 rpp 的 spec 被接受；grpo 加 clip_higher 仍被拒；grpo 加 whiten 仍被拒；gspo 加 dual_clip 仍被拒。

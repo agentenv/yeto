@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from yeto.rl.engine.algorithm import AlgorithmSpec
+
 import pytest
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt

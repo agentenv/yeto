@@ -1,0 +1,25 @@
+{
+ "checks": {
+  "rc": true,
+  "train_steps": true,
+  "rounds_and_receipt_stats": true,
+  "no_failure_events": true,
+  "selected": true,
+  "metrics_finite": true,
+  "EFFECT_fraction_gt_0": true
+ },
+ "pass": true,
+ "effect_per_step": [
+  0.19246116280555725,
+  0.22505170106887817,
+  0.2666429877281189
+ ],
+ "event_counts": {
+  "rl_driver_phase": 20,
+  "rl_driver_start": 1,
+  "rl_engine_selected": 1,
+  "rl_learner_finalized": 1,
+  "rl_local_round": 3,
+  "rl_publication": 4
+ }
+}

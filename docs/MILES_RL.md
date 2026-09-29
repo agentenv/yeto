@@ -656,7 +656,9 @@ each with its evidence, are the `MILES_DECLARED` table in
 - corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe
   (rl-algo-mismatch-correction);
 - loss_aggregations: constant; features: kl_loss_ref_model, entropy_bonus,
-  overlong_penalty; kl_placements: loss; reward_postprocessors:
+  overlong_penalty, no_grpo_std_normalization (g1c isolated control), eps_clip
+  (g1b run A-r1; eps 0.001/0.002 are trigger test values, not
+  recommendations); kl_placements: loss; reward_postprocessors:
   custom_reward_postprocess (rl-algo-grpo-knobs);
 - advantage estimators: gspo, reinforce_plus_plus,
   reinforce_plus_plus_baseline; features: maxrl, mapo, gdpo
@@ -670,12 +672,17 @@ Withdrawn after independent review:
 - features:mismatch_metrics: every evidence run already had use_tis, and
   Miles emits the metrics under `get_mismatch_metrics or use_tis`.
 
-Because mismatch_metrics is withdrawn, icepop and mismatch_observe specs that
-set `correction.mismatch_metrics` are refused on that feature.
+Under a correction that makes Miles set use_tis (tis, icepop, mis_mask,
+mismatch_observe), `correction.mismatch_metrics` is claimed by that correction
+(`CORRECTION_COMPANIONS`; main-agent decision, may be overridden by the user),
+because the flag has no effect there. icepop and mismatch_observe specs are
+therefore accepted. Under a generic custom function it is still a separate,
+undeclared mechanism.
 
 Not declared, pending evidence or approval:
 
-- clip_higher, dual_clip, over_sampling;
+- clip_higher: withdrawn because pg_clipfrac sums both bounds; an
+  isolating probe is planned. dual_clip, over_sampling;
 - overlong_filter, mis, opsm_rollout, generic corrections:custom;
 - features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
   reducer, and that reducer is claimed by `loss_aggregations:constant`
@@ -690,9 +697,9 @@ undeclared mechanisms.
 Measured on integ-decl with the committed example specs:
 
 - accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
-- refused: dapo-like (clip_higher, eps_clip, over_sampling, token) and
-  dr-grpo, which is now refused only on no_grpo_std_normalization (the
-  reducer is claimed by `constant`).
+- refused: dapo-like (clip_higher, over_sampling, token);
+- dr-grpo is accepted after the no_grpo_std_normalization re-declaration. Its
+  reducer is claimed by `constant` only at the evidenced source hash.
 
 **Combinations are not GPU-verified.** Each declared mechanism has its own
 GPU evidence. Combinations such as tis+opsm_trainer or icepop+opsm_trainer
@@ -752,6 +759,34 @@ the run exit 3. A synced run still fetches its checkpoint first.
 
 `--rl-event-tape` export refuses incomplete tapes unless
 `--allow-incomplete` is given.
+
+**Launcher exit codes.**
+
+| code | meaning |
+| --- | --- |
+| 0 | success |
+| 1 | a learner failed (non-RL), or no learner succeeded |
+| 2 | artifact not fetchable (Modal island) |
+| 3 | incomplete island event tape |
+| 4 | a fixed-roster RL island could not be recovered |
+| 5 | the Modal app was not confirmed stopped after teardown |
+
+For exit 5, every row of `modal app list` with the run's app name must be
+`stopped` with 0 tasks; an earlier run's row with the same name counts too.
+If no row is listed any more, that also counts as stopped. The rows created
+after this run started are this run's app, and their app ids are recorded.
+The launcher checks at most 5 times. It prints a WARN
+naming the `modal app stop` command to run by hand. The result is written to
+`<run dir>/teardown.json`. Exit 5 takes precedence over 0/2/3/4, because a
+possibly still-running app matters more than the run's own outcome.
+
+Strict syncer failures, strict RL job failures, "all learners abandoned" and
+internal errors propagate as exceptions (exit 1 from the CLI worker).
+
+An island whose tape already holds `rl_learner_finalized` is counted as
+succeeded even if its job then ends non-zero, for example an interrupt during
+Ray shutdown after the syncer stopped. It is not relaunched, and the syncer is
+not restarted once every learner has finalized.
 
 **Launch dry run.** `yeto launch ... --dry-run` validates the whole launch
 (arguments, provenance, the ports algorithm and capability checks) and prints

@@ -89,6 +89,10 @@ def test_old_declaration_reads_as_r0_mechanisms():
 # produce companions too). Tests pick the ones an engine has NOT declared, so
 # a later declaration (a follow-up change's G1) never turns them into no-ops.
 _REF = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+# With rl-algo-grpo-knobs registered, the only allowed reward post-process is
+# its dispatcher, and specs are completed by the same fixture as the flags test.
+from test_rl_algorithm_flags import DISPATCHER as _POSTPROCESS  # noqa: E402
+from test_rl_algorithm_flags import complete as _complete  # noqa: E402
 CANDIDATES = {
     "advantage_estimators:gspo": dict(advantage=dict(estimator="gspo"),
                                       loss=dict(eps_clip=3e-4, eps_clip_high=4e-4)),
@@ -107,8 +111,10 @@ CANDIDATES = {
     "features:entropy_bonus": dict(entropy_coef=0.001),
     "features:kl_unbiased": dict(kl=dict(placement="loss", coef=0.01, estimator="k3",
                                          unbiased=True)),
-    "features:mismatch_metrics": dict(correction=dict(method="tis", tis_clip=2.0,
-                                                      tis_clip_low=0.0, mismatch_metrics=True)),
+    # under a generic custom function (tis/icepop/... claim it, CORRECTION_COMPANIONS)
+    "features:mismatch_metrics": dict(correction=dict(method="custom", function=_REF,
+                                                      tis_clip=5.0, tis_clip_low=0.5,
+                                                      mismatch_metrics=True)),
     "features:no_grpo_std_normalization": dict(advantage=dict(std_normalization=False)),
     "features:no_rewards_normalization": dict(advantage=dict(rewards_normalization=False)),
     "features:over_sampling": dict(sampling=dict(filter=alg.BOUNDED_NONZERO_STD_FILTER,
@@ -122,7 +128,7 @@ CANDIDATES = {
     "loss_aggregations:constant": dict(loss=dict(aggregation="constant", reducer=_REF)),
     "losses:custom_loss": dict(loss=dict(variant="custom_loss", custom_loss=_REF)),
     "reward_postprocessors:custom_reward_postprocess": dict(
-        advantage=dict(reward_postprocess=_REF)),
+        advantage=dict(reward_postprocess=_POSTPROCESS)),
 }
 R0_MECHANISMS_P0 = {
     "advantage_estimators:grpo", "losses:policy_loss", "loss_aggregations:default",
@@ -214,7 +220,7 @@ def test_miles_accepts_each_declared_mechanism_and_rejects_overlong_filter():
         kwargs = CANDIDATES.get(mechanism)
         if kwargs is None:
             continue  # R0 (default spec) or an extension mechanism not registered here
-        spec = _combine(kwargs)
+        spec = _complete(_combine(kwargs))
         needs = {f"{d}:{n}" for d, n in spec.required_mechanisms()}
         if needs <= declared:
             _check(caps, spec)  # accepted
@@ -330,22 +336,45 @@ def test_binary_reward_declared_passes(binary_mechanism):
 # -- 3.4 declarations ----------------------------------------------------------------
 
 
+# The Miles adapter's declarations beyond R0, one line per mechanism (each
+# added in its own commit together with its MILES_DECLARED evidence entry).
+EXPECTED_MILES_DECLARED = {
+    "corrections:tis",
+    "corrections:opsm",
+    "corrections:opsm_trainer",
+    "features:maxrl",
+    "features:mapo",
+    "loss_aggregations:constant",
+    "kl_placements:loss",
+    "features:kl_loss_ref_model",
+    "features:entropy_bonus",
+    "reward_postprocessors:custom_reward_postprocess",
+    "features:overlong_penalty",
+    "advantage_estimators:gspo",
+    "advantage_estimators:reinforce_plus_plus",
+    "advantage_estimators:reinforce_plus_plus_baseline",
+    "features:gdpo",
+    "corrections:mismatch_observe",
+    "corrections:icepop",
+    "corrections:mis_mask",
+    "features:eps_clip",
+    "features:no_grpo_std_normalization",
+}
+
+
 def test_miles_and_fake_declarations():
-    # rl-algo-mismatch-correction 7.3 (G1 passed): the adapter declares tis and
-    # OPSM (trainer pi_old); the fake declares every correction for CPU tests.
-    expected = {
-        # rl-algo-seq-and-adv 7.5 G1: maxrl/mapo (gdpo held back)
-        "miles": ({"none", "tis", "opsm", "opsm_trainer"}, {"maxrl", "mapo"}),
-        "fake": ({"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
-                  "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
-                 {"mismatch_metrics", "rollout_logprobs_as_old"}),
-    }
-    for kind, caps in (("miles", miles_capabilities(FP)), ("fake", fake_capabilities())):
-        corrections, features = expected[kind]
-        assert caps.advantage_estimators == {"grpo"}
-        assert caps.losses == {"policy_loss"} and caps.loss_aggregations == {"default"}
-        assert caps.kl_placements == {"none", "reward"} and caps.corrections == corrections
-        assert caps.reward_postprocessors == frozenset() and caps.features == features
+    from yeto.rl.engine.miles_adapter.entry import MILES_DECLARED
+
+    miles = miles_capabilities(FP)
+    assert set(MILES_DECLARED) == EXPECTED_MILES_DECLARED
+    assert miles.declared_mechanisms() == R0_MECHANISMS_P0 | EXPECTED_MILES_DECLARED
+    assert all(MILES_DECLARED[m] for m in MILES_DECLARED)  # every entry cites evidence
+    # the fake declares every correction for CPU tests (and nothing else extra)
+    fake = fake_capabilities()
+    assert fake.corrections == {"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
+                                "opsm_trainer", "opsm_rollout", "mis", "mis_mask"}
+    assert fake.features == {"mismatch_metrics", "rollout_logprobs_as_old"}
+    for caps in (miles, fake):
         assert caps.execution == ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True)
         assert caps.unverified_mechanisms == frozenset()
@@ -435,38 +464,44 @@ def test_opsm_combines_with_tis_and_translates_both():
         CorrectionSpec(opsm_delta=1e-4)
 
 
-def test_named_custom_function_only_exempt_when_its_mechanism_detects():
+def test_named_custom_function_only_exempt_when_its_own_mechanism_detects():
     from yeto.rl.engine.algorithm import PluginRef
 
     ref = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
-    spec = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=ref,
-                                                   tis_clip=5, tis_clip_low=0.5))
+    other = PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
+
+    def spec_for(fn):
+        return AlgorithmSpec(correction=CorrectionSpec(method="custom", function=fn,
+                                                       tis_clip=5, tis_clip_low=0.5))
+
+    spec = spec_for(ref)
     assert ("corrections", "custom") in spec.required_mechanisms()
-    alg.register_named_correction_function(ref.path)
+    with pytest.raises(ValueError, match="mechanism name"):
+        alg.register_named_correction_function(ref.path, mechanisms=())
+    alg.register_named_correction_function(ref.path, mechanisms=("t_named",))
     try:
-        # named but no mechanism claims it: still generic custom (no escape)
+        # named but its own mechanism not registered: still generic custom
+        assert ("corrections", "custom") in spec.required_mechanisms()
+        # another named mechanism that happens to detect this spec does NOT
+        # exempt it (it is not this path's own detector)
+        alg.register_mechanism("corrections", "t_foreign",
+                               lambda s: s.correction.method == "custom")
         assert ("corrections", "custom") in spec.required_mechanisms()
         alg.register_mechanism("corrections", "t_named",
                                lambda s: s.correction.function is not None
                                and s.correction.function.path == ref.path)
-        try:
-            required = spec.required_mechanisms()
-            assert ("corrections", "t_named") in required
-            assert ("corrections", "custom") not in required
-            # the adapter declaring only generic 'custom' does not admit it
-            with pytest.raises(CapabilityMismatch, match="'t_named' not supported"):
-                _check(fake_capabilities(corrections={"none", "custom"}), spec)
-            # a different function (other path) still needs 'custom'
-            other = PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
-            spec2 = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=other,
-                                                            tis_clip=5, tis_clip_low=0.5))
-            assert ("corrections", "custom") in spec2.required_mechanisms()
-        finally:
-            alg.unregister(mechanism=("corrections", "t_named"))
+        required = spec.required_mechanisms()
+        assert ("corrections", "t_named") in required
+        assert ("corrections", "custom") not in required
+        with pytest.raises(CapabilityMismatch, match="'t_named' not supported"):
+            _check(fake_capabilities(corrections={"none", "custom", "t_foreign"}), spec)
+        assert ("corrections", "custom") in spec_for(other).required_mechanisms()
     finally:
-        alg.NAMED_CORRECTION_FUNCTIONS.discard(ref.path)
-    with pytest.raises(ValueError, match="yeto namespace"):
-        alg.register_named_correction_function("examples.x.fn")
+        alg.unregister(mechanism=("corrections", "t_named"))
+        alg.unregister(mechanism=("corrections", "t_foreign"))
+        alg.NAMED_CORRECTION_FUNCTIONS.pop(ref.path, None)
+    with pytest.raises(ValueError, match="must be in"):
+        alg.register_named_correction_function("examples.x.fn", mechanisms=("x",))
 
 
 def test_always_emit_field_only_when_its_mechanism_applies():
@@ -485,45 +520,86 @@ def test_always_emit_field_only_when_its_mechanism_applies():
         alg.unregister(field=("correction", "t_src"))
 
 
-def test_reward_dispatcher_rejection_explains_the_pending_declaration():
-    caps = miles_capabilities(FP)
-    with pytest.raises(CapabilityMismatch, match="maxrl/mapo is not declared yet"):
-        _check(caps, _combine(CANDIDATES["reward_postprocessors:custom_reward_postprocess"]))
-
-
 def test_estimator_mandated_settings_are_claimed_by_the_estimator():
-    caps = fake_capabilities(advantage_estimators={"grpo", "gspo", "reinforce_plus_plus"})
+    # a caps object with exactly gspo/rpp declared and none of the companion
+    # features: pins the claim itself, independent of later declarations
+    caps = fake_capabilities(advantage_estimators={"grpo", "gspo", "reinforce_plus_plus"},
+                             features=set())
     gspo = AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
                          loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4))
     assert not {("features", "eps_clip"), ("features", "clip_higher")} & gspo.required_mechanisms()
-    _check(caps, gspo)  # accepted with gspo declared (clip claimed by gspo)
-    rpp = AlgorithmSpec(advantage=AdvantageSpec(estimator="reinforce_plus_plus", whiten=True))
-    _check(caps, rpp)
-    # the same settings under grpo stay independent mechanisms
+    _check(caps, gspo)  # gspo + its clip settings: accepted
+    _check(caps, AlgorithmSpec(advantage=AdvantageSpec(estimator="reinforce_plus_plus",
+                                                       whiten=True)))
     with pytest.raises(CapabilityMismatch, match="'clip_higher' not supported"):
-        _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28)))
+        _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28)))  # grpo + clip
     with pytest.raises(CapabilityMismatch, match="'whiten_advantages' not supported"):
-        _check(caps, AlgorithmSpec(advantage=AdvantageSpec(whiten=True)))
-    # a companion beyond the mandated set is still checked (dual-clip under gspo)
+        _check(caps, AlgorithmSpec(advantage=AdvantageSpec(whiten=True)))  # grpo + whiten
+    with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported"):
+        _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_c=3.0)))  # grpo + dual_clip
     with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported"):
         _check(caps, AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
                                    loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4,
-                                                 eps_clip_c=3.0)))
+                                                 eps_clip_c=3.0)))  # beyond the mandate
 
-
-def test_named_reducer_claimed_only_by_its_own_mechanism(monkeypatch):
+def test_named_reducer_claimed_only_by_its_own_mechanism_and_pinned_source(monkeypatch):
     ref = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
     monkeypatch.setattr(alg, "NAMED_REDUCERS", {})
     spec = AlgorithmSpec(loss=LossSpec(reducer=ref))
     assert ("features", "custom_pg_loss_reducer") in spec.required_mechanisms()
-    alg.register_named_reducer(ref.path, mechanisms=("loss_aggregations:constant",))
+    alg.register_named_reducer(ref.path, mechanisms=("loss_aggregations:constant",),
+                               sha256=ref.sha256)
     # the owner does not detect this spec (default aggregation): still generic
     assert ("features", "custom_pg_loss_reducer") in spec.required_mechanisms()
     constant = AlgorithmSpec(loss=LossSpec(reducer=ref, aggregation="constant"))
     assert ("features", "custom_pg_loss_reducer") not in constant.required_mechanisms()
-    assert ("loss_aggregations", "constant") in constant.required_mechanisms()
+    # another source of the same path is not the evidenced reducer
+    other_source = AlgorithmSpec(loss=LossSpec(reducer=alg.PluginRef(ref.path, "0" * 64),
+                                               aggregation="constant"))
+    assert ("features", "custom_pg_loss_reducer") in other_source.required_mechanisms()
     other = alg.PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
     assert ("features", "custom_pg_loss_reducer") in AlgorithmSpec(
         loss=LossSpec(reducer=other, aggregation="constant")).required_mechanisms()
     with pytest.raises(ValueError):
         alg.register_named_reducer(ref.path, mechanisms=("constant",))
+    with pytest.raises(ValueError, match="already pinned"):
+        alg.register_named_reducer(ref.path, mechanisms=("loss_aggregations:constant",),
+                                   sha256="1" * 64)
+
+
+def test_correction_companion_claims(monkeypatch):
+    """mismatch_metrics claimed by tis/icepop/mis_mask/mismatch_observe only.
+
+    Plain 'mis' (truncate) is deliberately NOT in the table (conservative: it is
+    undeclared and has no triggering run), so it keeps the feature requirement.
+    """
+
+    import sys
+
+    sys.path.insert(0, "tests")
+    import test_rl_mismatch_correction as t
+
+    assert set(alg.CORRECTION_COMPANIONS) == {
+        ("corrections", n) for n in ("tis", "icepop", "mis_mask", "mismatch_observe")}
+    for name in ("tis", "icepop", "mis_mask", "mismatch_observe", "mis"):
+        spec = t.ALL[name]()
+        if not spec.correction.mismatch_metrics:
+            spec = spec.replace(correction=spec.correction.__class__.from_dict(
+                {**spec.correction.to_dict(), "mismatch_metrics": True}))
+        claimed = ("features", "mismatch_metrics") not in spec.required_mechanisms()
+        assert claimed == (name != "mis"), name
+
+def test_mismatch_metrics_claimed_by_use_tis_corrections_only():
+    caps = miles_capabilities(FP)
+    tis = AlgorithmSpec(correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0,
+                                                  mismatch_metrics=True))
+    assert ("features", "mismatch_metrics") not in tis.required_mechanisms()
+    _check(caps, tis)
+    # a generic custom function (not a use_tis correction mechanism) keeps it
+    generic = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=_REF,
+                                                      tis_clip=5.0, tis_clip_low=0.5,
+                                                      mismatch_metrics=True))
+    assert ("features", "mismatch_metrics") in generic.required_mechanisms()
+    # mismatch_metrics without any correction is not even expressible
+    with pytest.raises(AlgorithmSpecError, match="mismatch_metrics"):
+        CorrectionSpec(mismatch_metrics=True)
