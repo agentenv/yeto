@@ -66,7 +66,7 @@
 - 机制维度与 R0 相同，即 grpo、`policy_loss`、默认聚合、KL 为 `none`/`reward`、无修正、bounded 过滤；
 - `execution` 为 `critic=False`、`max_policy_staleness=0`、`rollout_logprobs=True`（依据 `sglang_rollout.py:187` 的 `return_logprob=True`）。
 
-与 `rl-infra-spec` 的对齐（alignment.md A1）：`execution.max_policy_staleness` 表示该运行所选执行模式可能产生的最大策略年龄，由 `rl-infra-spec` 的 `ExecutionProfile.max_policy_age` 提供；serial-colocated 与 partitioned-serial 均为 0。`ExecutionProfile` 以本 change 的 `AlgorithmSpec` 规范化哈希作为算法契约身份，不另设算法 schema。
+与 `rl-infra-spec` 的对齐（alignment.md A1）：`execution.max_policy_staleness` 表示该运行所选执行模式可能产生的最大策略年龄，由 `rl-infra-spec` 的 `ExecutionProfile.max_policy_age` 提供；本 change 与 `rl-infra-spec` 的所有执行模式（含 partitioned-overlap）均为 0；大于 0 只能来自另立 change 认证的算法契约。`ExecutionProfile` 以本 change 的 `AlgorithmSpec` 规范化哈希作为算法契约身份，不另设算法 schema。
 
 fake engine 同步声明，供 CPU 测试使用。
 
