@@ -78,6 +78,124 @@ def master_of(parameter: Any) -> Any:
     return main.view(parameter.shape)
 
 
+# --------------------------------------------------------------------------
+# DistributedOptimizer: DP-sharded FP32 masters (rl-infra-spec 2.4, decision (a))
+# --------------------------------------------------------------------------
+# Under Megatron's DistributedOptimizer with DP>1 a bf16 adapter parameter has
+# no ``main_param``: each DP rank's optimizer owns the FP32 main copy of a
+# sub-range ``gbuf_ranges[..]["param_map"][param]["param"]`` of the flattened
+# parameter (same layout fork-M5 v2 reads). Export gathers the full master by
+# filling each rank's range into zeros and summing over the DP group (every
+# element is owned by exactly one rank); apply writes each rank's range from
+# the full target and sets the bf16 model copy on every rank.
+
+
+def _optimizer_leaves(optimizer: Any) -> list[Any]:
+    chained = getattr(optimizer, "chained_optimizers", None)
+    if chained is not None:
+        return [leaf for member in chained for leaf in _optimizer_leaves(member)]
+    return [optimizer]
+
+
+def _is_distributed(leaf: Any) -> bool:
+    return hasattr(leaf, "gbuf_ranges") and hasattr(leaf, "model_param_group_index_map")
+
+
+def distributed_ranges(optimizer: Any) -> tuple[bool, dict[int, tuple[Any, Any, int, int]]]:
+    """(has a DistributedOptimizer, {id(model_param): (leaf, param, start, end)} owned here)."""
+    found, owned = False, {}
+    for leaf in _optimizer_leaves(optimizer) if optimizer is not None else ():
+        if not _is_distributed(leaf):
+            continue
+        found = True
+        if getattr(getattr(leaf, "config", None), "use_precision_aware_optimizer_no_fp8_or_ds_fp8", False):
+            raise StatePluginError("sharded masters under the precision-aware optimizer are not supported")
+        for gbuf_range_maps in leaf.gbuf_ranges:
+            for per_bucket in gbuf_range_maps.values():
+                for bucket_range_map in per_bucket:
+                    for param, range_map in bucket_range_map["param_map"].items():
+                        r = range_map["param"]
+                        if r.end > r.start:
+                            if id(param) in owned:
+                                raise StatePluginError("a parameter range appears twice on one rank")
+                            owned[id(param)] = (leaf, param, int(r.start), int(r.end))
+    return found, owned
+
+
+def _dp_all_reduce_sum(optimizer: Any, flat: Any) -> None:
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    group = None
+    for leaf in _optimizer_leaves(optimizer):
+        group = getattr(leaf, "data_parallel_group", None) or group
+    dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=group)
+
+
+def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=None) -> list[Any]:
+    """FP32 masters in each parameter's shape; DP-sharded ones are gathered.
+
+    Collective over the DP group when any parameter is DP-sharded (every rank
+    must call it with the same parameters in the same order).
+    """
+    import torch
+
+    has_dist, owned = distributed_ranges(optimizer)
+    out: list[Any] = []
+    pending: list[tuple[int, Any]] = []
+    for i, param in enumerate(parameters):
+        if getattr(param, "main_param", None) is not None or param.dtype == torch.float32:
+            out.append(master_of(param))
+            continue
+        if not has_dist:
+            out.append(master_of(param))  # raises: no master anywhere
+            continue
+        full = torch.zeros(param.numel(), dtype=torch.float32, device=param.device)
+        if id(param) in owned:
+            leaf, _, start, end = owned[id(param)]
+            shard = leaf._get_main_param_and_optimizer_states(param)["param"]
+            if shard.dtype != torch.float32 or shard.numel() != end - start:
+                raise StatePluginError("distributed-optimizer main shard does not match its range")
+            full[start:end] = shard.detach().reshape(-1)
+        out.append(full)
+        pending.append((i, full))
+    if pending:
+        flat = torch.cat([f for _, f in pending])
+        (all_reduce_sum or (lambda t: _dp_all_reduce_sum(optimizer, t)))(flat)
+        offset = 0
+        for i, full in pending:
+            n = full.numel()
+            out[i] = flat[offset : offset + n].view(parameters[i].shape)
+            offset += n
+    return out
+
+
+def write_masters(optimizer: Any, parameters: Sequence[Any], targets: Sequence[Any]) -> bool:
+    """Write full FP32 targets into the masters; returns whether model copies were set here.
+
+    For DP-sharded masters each rank writes its own range and sets the bf16
+    model copy directly (in place; ``Parameter.data`` is not reassigned).
+    """
+    import torch
+
+    has_dist, owned = distributed_ranges(optimizer)
+    wrote_model = False
+    for param, target in zip(parameters, targets, strict=True):
+        if getattr(param, "main_param", None) is not None or param.dtype == torch.float32:
+            master_of(param).copy_(target)
+            continue
+        if not has_dist:
+            master_of(param)  # raises
+        if id(param) in owned:
+            leaf, _, start, end = owned[id(param)]
+            shard = leaf._get_main_param_and_optimizer_states(param)["param"]
+            shard.data.copy_(target.reshape(-1)[start:end].reshape(shard.shape))
+        param.data.copy_(target.to(dtype=param.dtype))
+        wrote_model = True
+    return wrote_model
+
+
 def parameter_owners(modules: Iterable[Any], parameters: Iterable[Any]) -> dict[int, tuple[Any, str]]:
     wanted = {id(p) for p in parameters}
     owners: dict[int, tuple[Any, str]] = {}
@@ -165,7 +283,8 @@ def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
             for side in (task.linear_in_task, task.linear_out_task):
                 if side.param_weight is None:
                     continue
-                converted = side.mapping.megatron_to_hf(master_of(side.param_weight), side.megatron_module)
+                # names only: the model copy has the master's shape
+                converted = side.mapping.megatron_to_hf(side.param_weight, side.megatron_module)
                 if len(converted) != 1:
                     raise StatePluginError(f"ambiguous LoRA mapping for {side.param_name!r}")
                 name = _canonical(next(iter(converted)))
@@ -263,8 +382,9 @@ def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
         if _model_parallel(actor):
             tensors = _collective_export(actor, bindings)
         else:
-            for b in bindings:
-                tensors[b.name] = b.to_hf(master_of(b.parameter))
+            masters = full_masters(getattr(actor, "optimizer", None), params)
+            for b, master in zip(bindings, masters, strict=True):
+                tensors[b.name] = b.to_hf(master)
         if not _is_main_rank(actor):
             return None
         out = {}
@@ -423,14 +543,15 @@ def _apply_state(
             value = tensors[b.name]
             if value.dtype != torch.float32 or not torch.isfinite(value).all().item():
                 raise StatePluginError(f"{b.name!r} is not finite FP32")
-            target = b.from_hf(value.to(device=master_of(b.parameter).device))
+            target = b.from_hf(value.to(device=b.parameter.device))
             if target.numel() != b.parameter.numel():
                 raise StatePluginError(f"global LoRA shape mismatch for {b.name!r}")
             targets[b.name] = target.reshape(b.parameter.shape)
         scheduler_samples = align_scheduler(actor, local_step)
-        for b in bindings:
-            master_of(b.parameter).copy_(targets[b.name])
-        _copy_masters_to_model(actor, bindings)
+        opt = getattr(actor, "optimizer", None)
+        sharded = write_masters(opt, params, [targets[b.name] for b in bindings])
+        if not sharded:
+            _copy_masters_to_model(actor, bindings)
     _barrier()
     if optimizer == "reset":
         reset_optimizer_moments(actor.optimizer)
