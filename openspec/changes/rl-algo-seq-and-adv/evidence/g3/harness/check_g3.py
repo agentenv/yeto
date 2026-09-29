@@ -1,8 +1,10 @@
 """Pre-declared 7.6 criteria (plan.md). usage: check_g3.py <run dir>"""
 import json, math, re, sys
 from pathlib import Path
+import os
 d = Path(sys.argv[1]); c = {}
-sys.path.insert(0, "/tmp/a2-g3")  # YETO_SHA tree
+# checkout of YETO_SHA: argv[2] or $G3_TREE (the runs used /tmp/a2-g3)
+sys.path.insert(0, sys.argv[2] if len(sys.argv) > 2 else os.environ.get("G3_TREE", "/tmp/a2-g3"))
 from yeto.rl.engine.algorithm import AlgorithmSpec
 spec_path = d / "maxrl.json" if (d / "maxrl.json").exists() else d.parent / "maxrl.json"
 sha = AlgorithmSpec.from_json_file(str(spec_path)).sha256()

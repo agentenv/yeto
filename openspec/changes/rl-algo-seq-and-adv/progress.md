@@ -227,7 +227,7 @@
 - **5.5 补充证据（GPU）**：7.6 运行中 MaxRL 第 2 轮两岛 `rl_round_trained.nonzero_advantages = 0`、`rl_local_round.grad_norm = 0.0`、无不变量失败事件——"非零 advantage 为 0 → 不期望梯度"分支在 GPU 上真实走到（此前仅 fake driver 覆盖）。
 
 ## 2026-09-29 7.6 首次失败根因更正 + 重跑通过
-- 更正：首次 7.6 的 watchdog 消失**已查明**——algo-1a 在约 20:37–20:40Z 执行 `pkill -x -f "sleep 3300"`（见 algo-1a 7ebfc59 progress），杀掉了本运行 watchdog 的 sleep 子进程，watchdog 随即执行 `modal app stop` 与 pkill 本机 syncer，与本运行收尾期重合；岛 1 在 `ray.shutdown` 中 KeyboardInterrupt、作业被判 FAILED 很可能由此触发（launcher 恢复循环缺陷另由 P0 在 a602fa2 修复）。首次运行正式结果仍按预登记为**未通过**，不改判。
+- 【已被最终审查修订，见文末】更正：首次 7.6 的 watchdog 消失**已查明**——algo-1a 在约 20:37–20:40Z 执行 `pkill -x -f "sleep 3300"`（见 algo-1a 7ebfc59 progress），杀掉了本运行 watchdog 的 sleep 子进程，watchdog 随即执行 `modal app stop` 与 pkill 本机 syncer，与本运行收尾期重合；岛 1 在 `ray.shutdown` 中 KeyboardInterrupt、作业被判 FAILED 很可能由此触发（launcher 恢复循环缺陷另由 P0 在 a602fa2 修复）。首次运行正式结果仍按预登记为**未通过**，不改判。
 - 重跑（唯一一次；计划 1698744 启动前提交；YETO_SHA=a602fa2；加固 watchdog 唯一脚本名）：退出码 0，判据 1–4 全部通过（`evidence/g3/rerun/results.md`、`rerun/check.json`）→ 7.6 勾选（GPU 验收通过）。主 agent 后来提到的 501d71d 在收到通知时本次重跑已按 a602fa2 提交并启动，按指示未更换。
 - 7.7 更新：累计 ≈ $11 + $2.9 ≈ $14（估算，未核账单），上限 $20；app ap-aivVXMrZwnfkkB7zj2rQFm stopped/0 tasks，本机 syncer 已停、29420 关闭、watchdog 已结束。
 
@@ -238,3 +238,14 @@
 
 ### 最终状态
 全部 task 已勾选（1.1–8.3）。GPU 验收通过：5.5、7.2、7.3、7.4、7.6；7.5 声明在集成分支；其余为 CPU 通过/完成。已知限制：INFRA R1 在 attempt 6 时 GPU 上 masked_fraction 为空（infra-a 后续修复，本 change 未复验 GPU）；REINFORCE++ 的 reward-KL 分支因 KL 大小未上报而不执行。费用累计 ≈ $14（估算），无残留。
+
+## 2026-09-29 最终审查修订（不重跑、不改判）
+- 8.1：以 1.1 基线（756946b，99 条）为准：无新增失败；差集仅 5 条非本 change 引入、已被他人修复（id 见 tasks.md 8.1）。
+- 7.6 首次失败根因：日志时序与 1a 自报的 pkill 时间窗（20:37–20:40Z）不符——syncer 于 20:36:09–14Z 被 Terminated，app stopped_at 20:36:20Z，且顺序与 watchdog 命令顺序相反。改为"很可能由外部进程被结束触发；归因于 1a 的 pkill 未证实"（evidence/g3/results.md）。上文"已查明"一条作废。
+- 2.2：adapter 接线引用 INFRA d9bf29c（R1 真正修复）；GPU 未复验（attempt 6 时 masked_fraction 为 null）。
+- 7.7：费用统一为 ≈$14（估算，未核账单）。
+- harness/check_g3.py：YETO_SHA 树路径改为参数（第二参数或环境变量 G3_TREE），不影响已有结果。
+
+## 待批准（已知偏离，需用户确认）
+1. **GSPO 全裁放宽路径（design D2）在 GPU 上未跑到**：attempt 6 时 `masked_fraction` 为 null（早于 INFRA d9bf29c）。若真实引擎上 masked_fraction 仍为 null，则一轮全部序列被裁、grad_norm=0 时会**误报**零梯度失败（严格侧）。需在 d9bf29c 之后的 SHA 上做 GPU 复验。
+2. **REINFORCE++ 在奖励全相同但有 reward KL 时退回 R0 规则**：比 spec.md 第 135–136 行（"本岛本轮 advantage 在白化前不全相等 → 期望梯度"）宽松——只会漏报、不会误报；原因是 reward-KL 大小未上报给 driver（第 0 轮恰为 0）。若要严格满足 spec，需要上报每轮 reward-KL 统计。

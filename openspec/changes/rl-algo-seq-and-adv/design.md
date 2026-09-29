@@ -158,3 +158,15 @@ GDPO 需要分派器把"非零条目数"交给 driver。做法：分派器把统
 - MaxRL 原文的 r̂ 是否为留一均值 [未核实]：若是，只改变变换内部公式和 CPU 参考值，不改变 spec 要求（spec 以组均值写出，届时同步修改需求文本与测试）。
 - MAPO 原文的 σ 是总体 std 还是样本 std [未核实]：本 change 按 D5 采用与 Miles GRPO 一致的定义；若与原文不同，在文档中注明差异。
 - syncer 外层平均的加权规则 [未核实]（research §10 问题 4）：影响 D10 的推断是否成立，不影响本 change 的实现。
+
+## Known deviations after implementation (2026-09-29, pending approval; see progress.md "待批准")
+
+- D2 (GSPO fully-clipped round): the relaxing path was not exercised on GPU. In attempt 6 the
+  round event's `masked_fraction` was null (before INFRA d9bf29c). While it is null the rule
+  stays strict, so a round in which every sequence is clipped and grad_norm is 0 would be
+  reported as a zero-gradient failure (a false alarm, never a missed one).
+- D8 (REINFORCE++): with identical rewards everywhere and a reward-side KL, the rule gives no
+  verdict and falls back to the R0 rule (no gradient expected), because the reward-KL size is not
+  reported to the driver (it is exactly 0 on round 0). This is looser than the spec requirement
+  "advantages not all equal before whitening -> gradient expected": it can only miss a failure,
+  never raise a false one.

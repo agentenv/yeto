@@ -15,7 +15,7 @@
 ## 2. GSPO（design D1/D2）
 
 - [x] 2.1 在 clip 缺失的拒绝报错中补充"引擎默认 0.2、论文 3e-4/4e-4"；GSPO 与 advantage 变换组合按未开放拒绝。验证：参数化单测检查报错文本与拒绝场景。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
-- [x] 2.2 adapter 从 Miles 训练指标读取 `pg_clipfrac`（整轮 token 加权）填入 `masked_fraction`，并写入每轮事件。验证：单测覆盖有值、多 mini-batch 聚合、缺失三种情况。 完成记录：INFRA R1（infra-a 39fa0ac）+ test_trainer_reads_gspo_clipfrac_through_seq_adv；progress.md。
+- [x] 2.2 adapter 从 Miles 训练指标读取 `pg_clipfrac`（整轮 token 加权）填入 `masked_fraction`，并写入每轮事件。验证：单测覆盖有值、多 mini-batch 聚合、缺失三种情况。 完成记录：纯函数 seq_adv.clipfrac_from_losses + 单测；adapter 接线为 INFRA d9bf29c（R1 真正修复：按 spec 估计器收集 clip fraction）；GPU 未复验（attempt 6 时 rl_round_trained.masked_fraction 为 null，早于 d9bf29c）。
 - [x] 2.3 实现 GSPO 的 `expects_gradient`（D2）。验证：fake driver 测试覆盖：clipfrac=1 且 grad_norm=0 不失败；clipfrac 缺失且 grad_norm=0 失败；clipfrac<1 且 grad_norm=0 失败；grad_norm 非有限失败。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 2.4 在 miles-next-venv 中用 Miles `compute_gspo_kl`/`compute_policy_loss` 对小张量计算序列 ratio 与 clip，与手写公式（exp(mean log ρ)、序列级 clip）逐元素比对，并确认全裁时 clipfrac=1、梯度为 0。验证：测试在 miles 不可用时 skip，在 miles-next-venv 实际通过，命令与结果写入 `progress.md`。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 2.5 翻译用例：gspo + 显式 clip 生成的 argv 经 upstream `parse_args` 解析通过。验证：miles-next-venv 中测试通过。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
@@ -62,11 +62,11 @@
 - [x] 7.4 G1 MaxRL、MAPO、GDPO：各 1 卡 2–3 轮（GDPO 用 5.4 的示例 reward）。报告全错/全对组比例、零梯度判定。验证：同 7.2。 完成记录：evidence/g1/plan.md Attempt 4（e54d2f7，H100）。
 - [x] 7.5 对 G1 通过的机制在 `miles_adapter/entry.py` 中声明支持，未通过的保持未开放并记录原因。验证：能力声明单测更新；Miles adapter 组合根测试中已声明机制可启动。 完成记录：声明位于集成分支 integ-decl 501d71d（MILES_DECLARED：maxrl、mapo、gdpo、gspo、reinforce_plus_plus、reinforce_plus_plus_baseline）；evidence/7.5-501d71d：六个示例 `yeto launch --dry-run`（两岛、无放行）均接受，adapter dry-run 均 accepted，未声明项（features:dual_clip）被拒；test_rl_seq_adv 声明/放行测试通过。
 - [x] 7.6 G3：MaxRL 两岛 strict-avg（每岛 1 卡），用正式声明（不带放行参数），2–3 轮。验证：两岛算法哈希一致、每轮外层应用后状态 hash 一致、不变量无误报；证据存入 `evidence/`。 完成记录：evidence/g3/rerun/results.md（a602fa2，退出码 0，判据 1–4 通过；首次运行按预登记未通过，见 evidence/g3/results.md）。
-- [x] 7.7 拆除全部 GPU 资源，列出云端资源证明无残留，汇总实际费用。验证：无残留截图或命令输出与费用写入 `progress.md`。 完成记录：progress.md（7.7 汇总，≈$11，全部 app stopped/0 tasks）。
+- [x] 7.7 拆除全部 GPU 资源，列出云端资源证明无残留，汇总实际费用。验证：无残留截图或命令输出与费用写入 `progress.md`。 完成记录：全部 app stopped/0 tasks、本机 syncer 已停、无卷/命名 secret；费用合计 ≈$14（估算，未核账单），上限 $20。
 - [x] 7.8（可选，另需预算）效果 A/B（G4）不在本 change 范围；如需，另立 change 申请。验证：无（仅记录）。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 
 ## 8. 集成检查
 
-- [x] 8.1 运行 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.1 基线相同。验证：两集合 diff 为空，结果写入 `progress.md`。 完成记录：integ-decl 501d71d 全量 68F+26E=94，按 id 与 algo-1b 40ee1a2 基线（94）完全相同，相对本 change 1.1 基线（756946b，99）无新增、少 5 条合并引入项；after-failures-integ-decl-501d71d.txt。
+- [x] 8.1 运行 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.1 基线相同。验证：两集合 diff 为空，结果写入 `progress.md`。 完成记录：相对 1.1 基线（756946b，99 条）无新增失败；差集仅为 5 条非本 change 引入、已被他人修复的失败：tests/test_rl_algorithm_flags.py::test_each_mapped_field_translates[change10-fragment10]、[change9-fragment9]、test_loss_kl_translates、test_r0_positioned_fields_translate、tests/test_rl_algorithm_spec_v2.py::test_launch_and_island_checks（integ-decl 501d71d 全量 68F+26E=94；after-failures-integ-decl-501d71d.txt）。
 - [x] 8.2 `openspec validate rl-algo-seq-and-adv --strict` 通过。验证：命令输出无错误。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。
 - [x] 8.3 在 `openspec/changes/rl-algo-seq-and-adv/progress.md` 中逐项列出任务状态，区分"已实现""CPU 测试通过""GPU 验证通过（G1/G3）"，并列出未通过或未声明的机制。验证：文件存在且与本任务列表逐项对应。 完成记录：progress.md（2026-09-29 ALGO-2a 任务状态表）。

@@ -54,14 +54,16 @@ added to the reading); same criteria.
   SIGKILL stops it), writing a heartbeat line every 60 s to run/watchdog.log; the harness checks it
   every minute and restarts it with the same deadline if it is gone, and logs that.
 
-### Correction (2026-09-29, after the main agent's notice): cause identified
-- algo-1a acknowledged running `pkill -x -f "sleep 3300"` at about 20:37-20:40Z (algo-1a progress,
-  commit 7ebfc59). That killed the `sleep 3300` child of this run's watchdog; the watchdog shell then
-  immediately executed its next command, `modal app stop -y yeto-algo2a-g3` (app stopped_at
-  20:36:20Z) and `pkill` of this run's syncer. This coincides with this run's close-down: the local
-  syncer "Terminated" and island 1's `KeyboardInterrupt` in `ray.shutdown` -> job FAILED -> the
-  launcher recovery loop (the loop itself is the launcher defect P0 fixed in a602fa2). The trigger
-  of the failure was therefore most likely another agent's pattern kill of this run's watchdog,
-  not the mechanism or this change's code. The watchdog cause is no longer "undetermined".
+### Correction (2026-09-29, after the main agent's notice) -- revised after final review
+- algo-1a reported running `pkill -x -f "sleep 3300"` at about 20:37-20:40Z (algo-1a progress, 7ebfc59).
+- **The timing does not match that window**: this run's local syncer was "Terminated" at
+  20:36:09-20:36:14Z (launch.log) and the Modal app's stopped_at is 20:36:20Z -- both before
+  20:37Z. The order is also the reverse of the watchdog's commands (watchdog: `modal app stop`
+  first, then `pkill` of the syncer; observed: syncer terminated first, app stopped after).
+- Conclusion: the failure was most likely triggered by an external process being ended (the
+  syncer terminated, then island 1's `KeyboardInterrupt` in `ray.shutdown`, job FAILED, launcher
+  recovery loop -- the loop being the launcher defect fixed in a602fa2). Attribution to algo-1a's
+  pkill is **not established**. The watchdog's disappearance itself remains consistent with that
+  pkill but is also unproven.
 - The official result of this run stays as pre-registered: **not passed** (exit 143; criterion 4
   not established by the pre-declared script). The one allowed rerun is reported in rerun/results.md.
