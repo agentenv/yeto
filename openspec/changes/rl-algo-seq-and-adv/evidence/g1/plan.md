@@ -58,3 +58,22 @@ that fails twice stays undeclared (7.5) with the reason recorded.
   remaining runs would fail the same way), so out.tgz could not be fetched.
 - Fix: `include_dashboard=True`; run_all.sh now re-tars after every run and aborts the
   session if the first run fails. Attempt 2 reruns the same runs, otherwise unchanged.
+
+## Attempt 2 plan revision (committed before launch; supersedes "Code under test" above)
+- Code under test: exactly the pushed algo-2a commit that contains this section (no local
+  patch). It includes 1b F1 (dispatcher PluginRef covers seq_adv, `load_extensions`),
+  ALGO-CAP 2f9f02c/6149a90 (gradient tightening, `dimension:name` allowances, pipeline
+  modules no longer need `features:plugins`) and INFRA R1/R2 (infra-a 39fa0ac:
+  `masked_fraction`/`clip_fraction`/`nonzero_advantages` in `rl_round_trained`).
+- Entry: P0 09607d6 single island without syncer / outer sync, learner side
+  (`rl_single_island_no_sync=True` in the worker arguments, `LocalOnlySync`). First real GPU
+  use of that entry. The launcher's `--rl-single-island-no-sync` is not used because the
+  launcher hard-codes `--optimizer-steps 1` (launcher.py) and 7.2 needs optimizer_steps=2.
+- Allowances (qualified): gspo `advantage_estimators:gspo features:eps_clip
+  features:clip_higher`; rpp family `advantage_estimators:<estimator> features:whiten_advantages`;
+  transforms `features:<name> reward_postprocessors:custom_reward_postprocess`.
+- Example specs regenerated with `grpo_knobs.with_pipeline_plugins` (make_examples.py).
+- Pass criteria 1-5, observations, resources, limits and cost cap unchanged. Criterion 4
+  additionally reads the `rl_round_trained` event fields (masked_fraction / clip_fraction /
+  nonzero_advantages) as observations. Known open P0 items (fixture failure id, driver event
+  names) do not affect these criteria.

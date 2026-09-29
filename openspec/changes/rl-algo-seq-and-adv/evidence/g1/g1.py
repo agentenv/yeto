@@ -44,6 +44,9 @@ payload = B.worker_payload(args, worker, arm=arm, run_dir=out, model_path=model_
                            reward_sha256=python_spec_sha256(reward_fn))
 payload["arguments"]["rl_algorithm_spec"] = spec_path
 payload["arguments"]["rl_allow_unverified_mechanism"] = list(allow)
+# P0 09607d6 single-island entry, learner side: no syncer, no outer sync (events carry
+# rl/outer_sync=false). The launcher side is not used: it fixes --optimizer-steps 1.
+payload["arguments"]["rl_single_island_no_sync"] = True
 payload["extra_argv"] = ["--save-debug-rollout-data", str(out / "rollouts" / "{rollout_id}.pt")]
 (out / "worker.json").write_text(json.dumps(payload, indent=1, default=str))
 import ray
