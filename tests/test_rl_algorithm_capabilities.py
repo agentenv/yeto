@@ -342,7 +342,6 @@ EXPECTED_MILES_DECLARED = {
     "corrections:opsm_trainer",
     "features:maxrl",
     "features:mapo",
-    "features:no_grpo_std_normalization",
     "loss_aggregations:constant",
     "kl_placements:loss",
     "features:kl_loss_ref_model",
