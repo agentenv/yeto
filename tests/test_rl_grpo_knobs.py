@@ -432,3 +432,43 @@ def test_expects_gradient_with_overlong_filter():
     assert spec.expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 4),))) is False
     assert spec.expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 3),))) is True
     assert AlgorithmSpec().expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 4),))) is True
+
+
+# ---------------------------------------------------------------- 6.3 hook (1b-hook.patch)
+
+from yeto.rl.engine.miles_adapter import rollout_meta_hook as rmh  # noqa: E402
+import inspect as _inspect  # noqa: E402
+
+needs_hook = pytest.mark.skipif("apply_sample_filters" not in _inspect.getsource(rmh.record_trained_groups),
+                                reason="needs infra-drafts/1b-hook.patch")
+
+
+def _hook_samples(statuses, group_index):
+    return [SimpleNamespace(index=group_index * 10 + i, group_index=group_index, rollout_id=3,
+                            status=SimpleNamespace(value=s), remove_sample=False, metadata=None,
+                            reward=float(i % 2), response_length=5, weight_versions=None)
+            for i, s in enumerate(statuses)]
+
+
+@needs_hook
+def test_hook_overlong_filter_and_metadata():
+    spec = AlgorithmSpec(sampling={"overlong_filter": True})
+    args = SimpleNamespace(**gk.runtime_attrs(spec))
+    data = [_hook_samples(["completed", "truncated"], 0), _hook_samples(["truncated", "truncated"], 1)]
+    rmh.record_trained_groups(args, data)
+    meta = rmh.build_metadata(args, data)
+    assert meta["filtered_samples"] == {"overlong_filter": 3}
+    assert [g["filtered_samples"] for g in meta["groups"]] == [1, 2]
+    assert [s.remove_sample for g in data for s in g] == [False, True, True, True]
+
+
+@needs_hook
+def test_hook_default_unchanged():
+    args = SimpleNamespace()
+    data = [_hook_samples(["completed", "truncated"], 0)]
+    rmh.record_trained_groups(args, data)
+    meta = rmh.build_metadata(args, data)
+    assert "filtered_samples" not in meta and "filtered_samples" not in meta["groups"][0]
+    assert [s.remove_sample for s in data[0]] == [False, False]
+    assert set(meta) == {"schema", "rollout_id", "groups", "completed", "filtered", "aborted",
+                         "trained_sample_indices"}
