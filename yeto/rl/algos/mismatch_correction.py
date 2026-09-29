@@ -182,8 +182,10 @@ register_field("correction", "mis_batch_normalize", default=False, parse=_boolea
 if hasattr(_algorithm, "register_named_correction_function"):
     # P0 accepts yeto. and miles. paths (integ-decl): IcePop's built-in
     # function is named too, claimed by ("corrections", "icepop").
-    for _path in (OBSERVE_PATH, MIS_PATH, ICEPOP_PATH):
-        _algorithm.register_named_correction_function(_path)
+    for _path, _owners in ((OBSERVE_PATH, ("mismatch_observe",)),
+                           (MIS_PATH, ("mis", "mis_mask")),
+                           (ICEPOP_PATH, ("icepop",))):
+        _algorithm.register_named_correction_function(_path, mechanisms=_owners)
 
 for _name in CORRECTION_MECHANISMS:
     if _name == "tis":

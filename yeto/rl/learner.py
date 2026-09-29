@@ -328,7 +328,38 @@ def install_event_echo() -> bool:
     if echo_enabled():
         return False
     enable_echo()
+    from . import miles
+
+    if "append_record" not in miles._append_rl_event.__code__.co_names:
+        _wrap_legacy_tape_writer(miles)  # a writer not yet on append_record
     return True
+
+
+def _wrap_legacy_tape_writer(miles) -> None:
+    """Echo for a ``_append_rl_event`` that writes the file itself (pre
+    echo-writers patch): read back exactly the whole lines it appended."""
+
+    import threading
+
+    from .event_echo import PREFIX
+
+    original = miles._append_rl_event
+    lock = threading.Lock()
+
+    def echo(args, event):
+        with lock:
+            path = Path(args.yeto_rl_event_tape).expanduser()
+            before = path.stat().st_size if path.exists() else 0
+            original(args, event)
+            with path.open("rb") as handle:
+                handle.seek(before)
+                data = handle.read()
+        written = data[: data.rfind(b"\n") + 1].decode("utf-8")
+        for line in written.splitlines():
+            if line.strip():
+                print(PREFIX + line, flush=True)
+
+    miles._append_rl_event = echo
 
 
 def _append_ports_event(args, miles_args, event: dict) -> None:

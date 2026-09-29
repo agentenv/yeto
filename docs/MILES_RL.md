@@ -653,28 +653,54 @@ evidence that it actually takes effect on GPU. The declarations beyond R0,
 each with its evidence, are the `MILES_DECLARED` table in
 `yeto/rl/engine/miles_adapter/entry.py` (one commit per mechanism):
 
-- corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe;
-  features: mismatch_metrics (rl-algo-mismatch-correction);
-- loss_aggregations: token, constant; features: no_grpo_std_normalization,
-  kl_loss_ref_model, entropy_bonus, overlong_penalty; kl_placements: loss;
-  reward_postprocessors: custom_reward_postprocess (rl-algo-grpo-knobs);
+- corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe
+  (rl-algo-mismatch-correction);
+- loss_aggregations: constant; features: kl_loss_ref_model, entropy_bonus,
+  overlong_penalty; kl_placements: loss; reward_postprocessors:
+  custom_reward_postprocess (rl-algo-grpo-knobs);
 - advantage estimators: gspo, reinforce_plus_plus,
   reinforce_plus_plus_baseline; features: maxrl, mapo, gdpo
   (rl-algo-seq-and-adv).
 
+Withdrawn after independent review:
+
+- loss_aggregations:token: grad_norm was bit-identical to the baseline.
+- features:no_grpo_std_normalization: no run isolates it from the
+  `constant` aggregation.
+- features:mismatch_metrics: every evidence run already had use_tis, and
+  Miles emits the metrics under `get_mismatch_metrics or use_tis`.
+
+Under a correction that makes Miles set use_tis (tis, icepop, mis_mask,
+mismatch_observe), `correction.mismatch_metrics` is claimed by that correction
+(`CORRECTION_COMPANIONS`; main-agent decision, may be overridden by the user),
+because the flag has no effect there. icepop and mismatch_observe specs are
+therefore accepted. Under a generic custom function it is still a separate,
+undeclared mechanism.
+
 Not declared, pending evidence or approval:
 
-- clip_higher, dual_clip, over_sampling: triggering runs in progress.
-- overlong_filter, mis, opsm_rollout, generic corrections:custom.
-- features:custom_pg_loss_reducer: it would admit any reducer plugin, and only
-  the Dr.GRPO reducer has evidence.
+- clip_higher, dual_clip, over_sampling;
+- overlong_filter, mis, opsm_rollout, generic corrections:custom;
+- features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
+  reducer, and that reducer is claimed by `loss_aggregations:constant`
+  (`register_named_reducer`).
 
 Settings an estimator mandates are claimed by that estimator's mechanism in
 that combination only (`ESTIMATOR_COMPANIONS`; main-agent decision, may be
 overridden by the user): GSPO's explicit clip range and the rpp family's
 advantage whitening. The same settings under grpo are still separate,
-undeclared mechanisms. dr-grpo stays refused until 1b restricts the reducer to
-its own reducer.
+undeclared mechanisms.
+
+Measured on integ-decl with the committed example specs:
+
+- accepted: gspo, rpp, rpp_baseline, maxrl, gdpo;
+- refused: dapo-like (clip_higher, eps_clip, over_sampling, token) and
+  dr-grpo, which is now refused only on no_grpo_std_normalization (the
+  reducer is claimed by `constant`).
+
+**Combinations are not GPU-verified.** Each declared mechanism has its own
+GPU evidence. Combinations such as tis+opsm_trainer or icepop+opsm_trainer
+have none, so they are accepted but unverified.
 
 "Expressible, not enabled" means the spec can describe and translate a
 mechanism, but `miles_capabilities` does not declare it yet. A follow-up

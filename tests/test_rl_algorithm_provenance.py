@@ -638,6 +638,9 @@ def test_no_sync_event_echo_matches_tape(tmp_path, monkeypatch, capsys):
     from yeto.rl import miles
 
     monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")  # restored after the test
+    from yeto.rl import miles as _miles
+
+    monkeypatch.setattr(_miles, "_append_rl_event", _miles._append_rl_event)  # restored too
     assert rl_learner.install_event_echo() is True
     assert rl_learner.install_event_echo() is False  # idempotent
     tape = tmp_path / "tape.jsonl"
@@ -659,6 +662,9 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     # the island side: produce the echoed log with the real echo
     monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")  # restored after the test
+    from yeto.rl import miles as _miles
+
+    monkeypatch.setattr(_miles, "_append_rl_event", _miles._append_rl_event)  # restored too
     rl_learner.install_event_echo()
     island_tape = tmp_path / "island.jsonl"
     ns = SimpleNamespace(yeto_rl_event_tape=str(island_tape), yeto_rl_learner_id=0)

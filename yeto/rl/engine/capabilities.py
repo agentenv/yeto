@@ -310,15 +310,9 @@ class EngineCapabilities:
             if name in supported or f"{dimension}:{name}" in self.unverified_mechanisms:
                 continue
             label = labels.get(dimension, f"{dimension} mechanism")
-            hint = ""
-            if (dimension, name) == ("reward_postprocessors", "custom_reward_postprocess"):
-                hint = (
-                    "; the yeto reward dispatcher needed by advantage transforms such as "
-                    "maxrl/mapo is not declared yet (pending the rl-algo-grpo-knobs G1)"
-                )
             problems.append(
                 f"{label} {name!r} not supported (supported: {sorted(supported)}; "
-                f"expressible but not enabled on this engine{hint})"
+                "expressible but not enabled on this engine)"
             )
         execution = getattr(algorithm, "execution", None)
         if execution is not None and callable(required):

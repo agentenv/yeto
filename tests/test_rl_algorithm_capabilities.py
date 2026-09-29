@@ -111,8 +111,10 @@ CANDIDATES = {
     "features:entropy_bonus": dict(entropy_coef=0.001),
     "features:kl_unbiased": dict(kl=dict(placement="loss", coef=0.01, estimator="k3",
                                          unbiased=True)),
-    "features:mismatch_metrics": dict(correction=dict(method="tis", tis_clip=2.0,
-                                                      tis_clip_low=0.0, mismatch_metrics=True)),
+    # under a generic custom function (tis/icepop/... claim it, CORRECTION_COMPANIONS)
+    "features:mismatch_metrics": dict(correction=dict(method="custom", function=_REF,
+                                                      tis_clip=5.0, tis_clip_low=0.5,
+                                                      mismatch_metrics=True)),
     "features:no_grpo_std_normalization": dict(advantage=dict(std_normalization=False)),
     "features:no_rewards_normalization": dict(advantage=dict(rewards_normalization=False)),
     "features:over_sampling": dict(sampling=dict(filter=alg.BOUNDED_NONZERO_STD_FILTER,
@@ -342,8 +344,6 @@ EXPECTED_MILES_DECLARED = {
     "corrections:opsm_trainer",
     "features:maxrl",
     "features:mapo",
-    "loss_aggregations:token",
-    "features:no_grpo_std_normalization",
     "loss_aggregations:constant",
     "kl_placements:loss",
     "features:kl_loss_ref_model",
@@ -354,7 +354,6 @@ EXPECTED_MILES_DECLARED = {
     "advantage_estimators:reinforce_plus_plus",
     "advantage_estimators:reinforce_plus_plus_baseline",
     "features:gdpo",
-    "features:mismatch_metrics",
     "corrections:mismatch_observe",
     "corrections:icepop",
     "corrections:mis_mask",
@@ -463,38 +462,44 @@ def test_opsm_combines_with_tis_and_translates_both():
         CorrectionSpec(opsm_delta=1e-4)
 
 
-def test_named_custom_function_only_exempt_when_its_mechanism_detects():
+def test_named_custom_function_only_exempt_when_its_own_mechanism_detects():
     from yeto.rl.engine.algorithm import PluginRef
 
     ref = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
-    spec = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=ref,
-                                                   tis_clip=5, tis_clip_low=0.5))
+    other = PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
+
+    def spec_for(fn):
+        return AlgorithmSpec(correction=CorrectionSpec(method="custom", function=fn,
+                                                       tis_clip=5, tis_clip_low=0.5))
+
+    spec = spec_for(ref)
     assert ("corrections", "custom") in spec.required_mechanisms()
-    alg.register_named_correction_function(ref.path)
+    with pytest.raises(ValueError, match="mechanism name"):
+        alg.register_named_correction_function(ref.path, mechanisms=())
+    alg.register_named_correction_function(ref.path, mechanisms=("t_named",))
     try:
-        # named but no mechanism claims it: still generic custom (no escape)
+        # named but its own mechanism not registered: still generic custom
+        assert ("corrections", "custom") in spec.required_mechanisms()
+        # another named mechanism that happens to detect this spec does NOT
+        # exempt it (it is not this path's own detector)
+        alg.register_mechanism("corrections", "t_foreign",
+                               lambda s: s.correction.method == "custom")
         assert ("corrections", "custom") in spec.required_mechanisms()
         alg.register_mechanism("corrections", "t_named",
                                lambda s: s.correction.function is not None
                                and s.correction.function.path == ref.path)
-        try:
-            required = spec.required_mechanisms()
-            assert ("corrections", "t_named") in required
-            assert ("corrections", "custom") not in required
-            # the adapter declaring only generic 'custom' does not admit it
-            with pytest.raises(CapabilityMismatch, match="'t_named' not supported"):
-                _check(fake_capabilities(corrections={"none", "custom"}), spec)
-            # a different function (other path) still needs 'custom'
-            other = PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
-            spec2 = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=other,
-                                                            tis_clip=5, tis_clip_low=0.5))
-            assert ("corrections", "custom") in spec2.required_mechanisms()
-        finally:
-            alg.unregister(mechanism=("corrections", "t_named"))
+        required = spec.required_mechanisms()
+        assert ("corrections", "t_named") in required
+        assert ("corrections", "custom") not in required
+        with pytest.raises(CapabilityMismatch, match="'t_named' not supported"):
+            _check(fake_capabilities(corrections={"none", "custom", "t_foreign"}), spec)
+        assert ("corrections", "custom") in spec_for(other).required_mechanisms()
     finally:
-        alg.NAMED_CORRECTION_FUNCTIONS.discard(ref.path)
+        alg.unregister(mechanism=("corrections", "t_named"))
+        alg.unregister(mechanism=("corrections", "t_foreign"))
+        alg.NAMED_CORRECTION_FUNCTIONS.pop(ref.path, None)
     with pytest.raises(ValueError, match="must be in"):
-        alg.register_named_correction_function("examples.x.fn")
+        alg.register_named_correction_function("examples.x.fn", mechanisms=("x",))
 
 
 def test_always_emit_field_only_when_its_mechanism_applies():
@@ -511,13 +516,6 @@ def test_always_emit_field_only_when_its_mechanism_applies():
         assert '"t_src":"trainer"' in opsm.canonical_json()
     finally:
         alg.unregister(field=("correction", "t_src"))
-
-
-def test_reward_dispatcher_rejection_explains_the_pending_declaration():
-    caps = fake_capabilities()  # an engine without the dispatcher declaration
-    with pytest.raises(CapabilityMismatch, match="maxrl/mapo is not declared yet"):
-        _check(caps, _complete(_combine(
-            CANDIDATES["reward_postprocessors:custom_reward_postprocess"])))
 
 
 def test_estimator_mandated_settings_are_claimed_by_the_estimator():
@@ -538,3 +536,37 @@ def test_estimator_mandated_settings_are_claimed_by_the_estimator():
         _check(caps, AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
                                    loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4,
                                                  eps_clip_c=3.0)))
+
+
+def test_named_reducer_claimed_only_by_its_own_mechanism(monkeypatch):
+    ref = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+    monkeypatch.setattr(alg, "NAMED_REDUCERS", {})
+    spec = AlgorithmSpec(loss=LossSpec(reducer=ref))
+    assert ("features", "custom_pg_loss_reducer") in spec.required_mechanisms()
+    alg.register_named_reducer(ref.path, mechanisms=("loss_aggregations:constant",))
+    # the owner does not detect this spec (default aggregation): still generic
+    assert ("features", "custom_pg_loss_reducer") in spec.required_mechanisms()
+    constant = AlgorithmSpec(loss=LossSpec(reducer=ref, aggregation="constant"))
+    assert ("features", "custom_pg_loss_reducer") not in constant.required_mechanisms()
+    assert ("loss_aggregations", "constant") in constant.required_mechanisms()
+    other = alg.PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
+    assert ("features", "custom_pg_loss_reducer") in AlgorithmSpec(
+        loss=LossSpec(reducer=other, aggregation="constant")).required_mechanisms()
+    with pytest.raises(ValueError):
+        alg.register_named_reducer(ref.path, mechanisms=("constant",))
+
+
+def test_mismatch_metrics_claimed_by_use_tis_corrections_only():
+    caps = miles_capabilities(FP)
+    tis = AlgorithmSpec(correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0,
+                                                  mismatch_metrics=True))
+    assert ("features", "mismatch_metrics") not in tis.required_mechanisms()
+    _check(caps, tis)
+    # a generic custom function (not a use_tis correction mechanism) keeps it
+    generic = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=_REF,
+                                                      tis_clip=5.0, tis_clip_low=0.5,
+                                                      mismatch_metrics=True))
+    assert ("features", "mismatch_metrics") in generic.required_mechanisms()
+    # mismatch_metrics without any correction is not even expressible
+    with pytest.raises(AlgorithmSpecError, match="mismatch_metrics"):
+        CorrectionSpec(mismatch_metrics=True)

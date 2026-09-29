@@ -1,7 +1,7 @@
 #!/bin/bash
 # usage: run.sh a|c
 set -u
-X=$1; P=algo1b-g1b-$X; APP=yeto-$P; D=$(pwd); Y=/home/michael/work/algo-1b
+X=$1; P=algo1b-g1b-$X${ATTEMPT:+-$ATTEMPT}; APP=yeto-$P; D=$(pwd); Y=/home/michael/work/algo-1b
 M=/tmp/modal-venv/bin/modal
 mkdir -p out-$X; date -u +%FT%TZ > out-$X/t_start; git -C $Y rev-parse HEAD > out-$X/YETO_SHA
 setsid nohup bash -c "sleep 3900; $M app stop -y $APP > $D/out-$X/watchdog.log 2>&1" >/dev/null 2>&1 & echo $! > out-$X/watchdog_pid
@@ -12,6 +12,7 @@ else
   ARGS="$COMMON --rollout-batch-size 8 --over-sampling-batch-size 16 --dynamic-sampling-filter-path yeto.rl.filters.bounded_nonzero_reward_std --dynamic-sampling-max-replacements 2 --inner-lr 1e-5 --total-steps 5 --rl-algorithm-spec $D/over_sampling.json --rl-allow-unverified-mechanism features:over_sampling"
 fi
 echo "yeto $ARGS" > out-$X/cmd.txt
+setsid nohup $D/noprogress.sh $X >/dev/null 2>&1 &
 # Private ports image: registry credentials decoded in-process from
 # ~/.docker/config.json (ghcr.io auth); never printed or logged.
 eval "$(python3 - <<'PY'
@@ -22,6 +23,8 @@ print(f"export SKYPILOT_DOCKER_USERNAME={shlex.quote(u)} SKYPILOT_DOCKER_PASSWOR
 PY
 )"
 cd $Y && PYTHONPATH=$Y timeout 3600 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli $ARGS > $D/out-$X/launch.log 2>&1; echo "rc=$?" >> $D/out-$X/launch.log
+# The launcher detaches a `yeto _worker`; a local timeout does not stop it.
+(cd $Y && PYTHONPATH=$Y timeout 300 /home/michael/work/gpu-head/venv/bin/python -m yeto.cli down $P) >> $D/out-$X/teardown.log 2>&1
 $M app stop -y $APP >> $D/out-$X/teardown.log 2>&1
 pkill -P $(cat $D/out-$X/watchdog_pid) sleep 2>/dev/null; kill $(cat $D/out-$X/watchdog_pid) 2>/dev/null
 date -u +%FT%TZ > $D/out-$X/t_end
