@@ -2,7 +2,8 @@
 
 ## 0. 在途 PR 与分支准备
 
-- [ ] 0.1 合入 #64、#65、#59，关闭已失效的 #43；如果 #62、#63 先合入，记录它们对远端准备脚本的改动。验证：`gh pr list -R agentenv/yeto --state open` 中已经没有这三个 PR 和 #43；main 上 `python -m pytest -q tests/test_rl_*.py` 通过。
+- [x] 0.1 合入 #64、#65、#59，关闭已失效的 #43；如果 #62、#63 先合入，记录它们对远端准备脚本的改动。验证：`gh pr list -R agentenv/yeto --state open` 中已经没有这三个 PR 和 #43；main 上 `python -m pytest -q tests/test_rl_*.py` 通过。
+  - 完成记录（2026-09-29）：#64、#65、#59 以及 #58、#60–#63、#66 已合入 agentenv/yeto main（#61、#63 经 #67、#68 重新合入）。#43 是他人（AlexEisie）的 PR，本人无权关闭，经用户决定视为不在本 change 范围内。main 上 `tests/test_rl_*.py` 与整合分支的失败集合完全相同（均为缺 syncer 二进制、miles 模块等环境原因），无新增失败。
 - [x] 0.2 创建 `openspec/changes/rl-engine-ports/migration-ledger.md`，登记以下各项，每项都写明 PR、行为、ports 实现位置和验证方式：
   - #64：梯度流不变量，以及零梯度时拒绝提交；
   - #65：GDN recipe；
@@ -10,7 +11,8 @@
   - #66：capability 格式。
 
   验证：清单覆盖以上 4 项，每项的字段都齐全。
-- [ ] 0.3 从 main 开出 `rl-engine-ports` 分支；在 `michaellchung/miles` 上基于 `9e4260d` 开出 `yeto/ports` 分支；新建 `michaellchung/sglang`（fork 自 `sgl-project/sglang`），并基于 Miles pin 所用的 `sglang-miles` commit 开出 `yeto/ports` 分支。验证：三个分支都存在，两个 fork 分支的基底 commit 记录在 design D6 与 D11 中。
+- [x] 0.3 从 main 开出 `rl-engine-ports` 分支；在 `michaellchung/miles` 上基于 `9e4260d` 开出 `yeto/ports` 分支；新建 `michaellchung/sglang`（fork 自 `sgl-project/sglang`），并基于 Miles pin 所用的 `sglang-miles` commit 开出 `yeto/ports` 分支。验证：三个分支都存在，两个 fork 分支的基底 commit 记录在 design D6 与 D11 中。
+  完成记录（2026-09-29）：`git ls-remote` 确认三个分支存在：`michaellchung/yeto` rl-engine-ports=`1143117`（基底 agentenv/yeto main `e21a7ff`，即 #64/#65/#59 合入后的 main）；`michaellchung/miles` yeto/ports=`0394715`（基底 `9e4260d`，ahead 2/behind 0）；`michaellchung/sglang` yeto/ports=`9f29303`（基底 sglang-miles `571212b`，ahead 4/behind 0）。`gh api .../compare` 的 merge_base 均等于所记基底。HEAD 与 `yeto/rl/__init__.py` 的 `MILES_NEXT_COMMIT`/`SGLANG_NEXT_COMMIT` 一致。基底与来源已写入 design D6、D11。
 
 ## 1. 固定 fork 版本与依赖验证
 

@@ -173,6 +173,11 @@ policy token 沿用 yeto 现有格式 `yeto:<rollout_id>:<policy_hash>`，经由
 - 升级 upstream 时（这不在本 change 范围内，按需进行），把 `yeto/ports` rebase 到新的 main，重新跑端口契约测试和等价性测试，再更新 `MILES_NEXT_COMMIT`。
 - 只要不主动升级，就一直使用同一个固定版本。
 
+**已开出的分支（任务 0.3，2026-09-29 核对）**
+
+- yeto：`michaellchung/yeto` 的 `rl-engine-ports`，基底为 `agentenv/yeto` main `e21a7ff0cc3f999f6ef4c9902cbb39644f8b755d`（#64/#65/#59 合入后的 main；原任务写"从 main 开出"，实际基于该时刻的 main，以便带上这三个 PR）。
+- Miles：`michaellchung/miles` 的 `yeto/ports`，基底为 `radixark/miles` `9e4260de047a704208535c0e90c531929879ab40`（即 `MILES_NEXT_UPSTREAM_COMMIT`）。当前 HEAD `0394715083c91182b5eb0c526eeee4196ac694b9`（即 `MILES_NEXT_COMMIT`），基底之上两个提交：`e8b3b65`（run_plugin）、`0394715`（`--worker-dynamic-port-start` 端口隔离）。
+
 `yeto/rl/__init__.py` 增加一组 `MILES_NEXT_*` 常量：repository 为 `https://github.com/michaellchung/miles`，另有 commit 和源码 hash。SGLang 使用另一组 `SGLANG_NEXT_*`（见 D11）。旧的 `MILES_*`、`SGLANG_*` 常量保持不变。
 
 远端准备脚本（`launcher.py` 中的 miles_setup，以及 `ssh_harness.py` 中对应的部分）按 `--rl-engine` 选择 checkout 目标：
@@ -253,6 +258,8 @@ yeto 与 SGLang 的关系：
 - 如果上游已有等价实现，就在提交说明中记录，并保留 yeto 侧的测试作为回归测试。
 
 `95d4d69` 的"与 Miles 对齐"部分需要按 upstream Miles 当前的 LoRA 请求格式重新对齐，不能照搬。
+
+**已开出的分支（任务 0.3，2026-09-29 核对）**：`michaellchung/sglang` 的 `yeto/ports`，基底为 `sgl-project/sglang` `sglang-miles` 分支上的 `571212b636baca45e10fa3b4da11a289123f3235`（即 `SGLANG_NEXT_UPSTREAM_COMMIT`）。upstream Miles 不固定 SGLang commit，该基底是按 Miles `9e4260d` 提交时刻推定的 `sglang-miles` 分支头（该分支现已前进到 `e5bba1f`，不跟随）。当前 HEAD `9f29303bef1eea38eb613e5f454a52db1326422d`（即 `SGLANG_NEXT_COMMIT`），基底之上 4 个移植提交：`c49b760`（对应 `b34df47`）、`30e4d5b`（对应 `95d4d69`）、`c9309b9`、`9f29303`（对应 `e1b57eb`）。`c2cb40a` 经用户确认不移植。
 
 ### D12. 等价性验收采用分层口径
 
