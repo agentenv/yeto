@@ -108,3 +108,9 @@
 - 1b 推送后撤掉 `plugins` 列 seq_adv 源码哈希与额外放行 `features:plugins` 的做法。
 - 预算上限 $20 获准。7.6 G3 放置：参考 R0 7.1（Modal 2 岛 + 本机 syncer，非 head 模式）。
 - 8.1：基线中 5 条合并引入的失败待 1b/ALGO-CAP 修复后复核。
+
+## 2026-09-29 merge origin/algo-1b a978b3c（f3ee263）
+- 本地 grpo_knobs 临时改动已还原，工作区干净。
+- `tests/test_rl_seq_adv.py tests/test_rl_adv_transforms.py` 116 passed；miles-next-venv `test_rl_seq_adv_miles.py` 20 passed。
+- 全量：70F + 26E = 96（`after-failures-f3ee263.txt`）。与 756946b 基线相比：合并引入的 5 条（test_rl_algorithm_flags 4 条、test_rl_algorithm_spec_v2::test_launch_and_island_checks）已消失（8.1 复核完成）；仍只多出 2a-shared.patch hunk 3 对应的 2 条（`test_design_d3_flags_are_all_mapped`、`test_unmapped_objective_flag_rejected[--gamma]`）。
+- 仍等：1b F1（哈希覆盖/load_extensions）、ALGO-CAP 合入 2a-shared 其余部分与文档、INFRA R1/R2、P0 无 syncer 单岛入口。
