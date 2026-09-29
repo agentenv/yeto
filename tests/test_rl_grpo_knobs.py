@@ -371,11 +371,8 @@ def test_overlong_filter_default_is_noop():
 
 import yeto.rl.engine.algorithm as _alg  # noqa: E402
 
-needs_patch = pytest.mark.skipif(not hasattr(_alg, "register_runtime_attrs"),
-                                 reason="needs infra-drafts/1b-shared.patch (P0 hooks)")
 
 
-@needs_patch
 def test_runtime_attrs_wired_through_spec():
     spec = pipeline_spec(reward_shapers=[OVERLONG])
     attrs = spec.to_legacy_runtime_attrs()
@@ -385,7 +382,6 @@ def test_runtime_attrs_wired_through_spec():
     }
 
 
-@needs_patch
 def test_translate_run_config_launch_checks():
     from tests.test_rl_miles_adapter_config import make_config
     from yeto.rl.engine.miles_adapter import config as mc
@@ -404,7 +400,6 @@ def test_translate_run_config_launch_checks():
     assert rp.PIPELINE_ATTR not in default.runtime_attrs
 
 
-@needs_patch
 def test_island_check_ref_model():
     assert _alg.island_problems(kl_spec(), {"base_model_revision": "rev-a"}) == []
     problems = _alg.island_problems(kl_spec(), {"base_model_revision": "rev-b"})
@@ -426,7 +421,6 @@ def test_overlong_gradient_rule():
     assert gk.overlong_gradient_rule(AlgorithmSpec(), full) is None
 
 
-@needs_patch
 def test_expects_gradient_with_overlong_filter():
     spec = AlgorithmSpec(sampling={"overlong_filter": True})
     assert spec.expects_gradient(SimpleNamespace(groups=(_g(0.5, 4, 4),))) is False

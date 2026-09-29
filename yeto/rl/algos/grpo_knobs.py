@@ -272,28 +272,33 @@ def runtime_attrs(spec) -> dict[str, Any]:
 def launch_problems(
     spec,
     *,
-    rollout_batch_size: int,
-    rollout_max_response_len: int,
-    context_parallel_size: int = 1,
+    rollout_batch_size: int | None = None,
+    rollout_max_response_len: int | None = None,
+    context_parallel_size: int | None = 1,
     multi_lora: bool = False,
 ) -> list[str]:
-    """Checks needing the run configuration (before any GPU process)."""
+    """Checks needing the run configuration (before any GPU process).
+
+    A value the adapter does not provide (None) skips its check.
+    """
 
     problems = []
     over = spec.sampling.over_sampling_batch_size
-    if over is not None and over < rollout_batch_size:
+    if over is not None and rollout_batch_size is not None and over < rollout_batch_size:
         problems.append(
             f"sampling.over_sampling_batch_size={over} must be >= the rollout batch size "
             f"{rollout_batch_size}"
         )
     for item in spec.advantage.reward_shapers:
         params = dict(item)
-        if params["name"] == "overlong_penalty" and params["max_length"] > rollout_max_response_len:
+        if (params["name"] == "overlong_penalty" and rollout_max_response_len is not None
+                and params["max_length"] > rollout_max_response_len):
             problems.append(
                 f"overlong_penalty.max_length={params['max_length']} exceeds the generation "
                 f"limit rollout_max_response_len={rollout_max_response_len}"
             )
-    if spec.loss.aggregation == "constant" and context_parallel_size != 1:
+    if (spec.loss.aggregation == "constant" and context_parallel_size is not None
+            and context_parallel_size != 1):
         problems.append(
             f"loss.aggregation='constant' requires context parallel size 1, got {context_parallel_size}"
         )
@@ -352,21 +357,22 @@ def overlong_gradient_rule(spec, batch_summary, step_metrics=None):
 def _launch_check(spec, values):
     return launch_problems(
         spec,
-        rollout_batch_size=values["rollout_batch_size"],
-        rollout_max_response_len=values["rollout_max_response_len"],
+        rollout_batch_size=values.get("rollout_batch_size"),
+        rollout_max_response_len=values.get("rollout_max_response_len"),
         context_parallel_size=values.get("context_parallel_size", 1),
         multi_lora=bool(values.get("multi_lora", False)),
     )
 
 
-# Generic P0 hooks proposed in infra-drafts/1b-shared.patch (algorithm.py
-# register_runtime_attrs / register_launch_check / register_island_check /
-# register_gradient_rule). Until that patch is merged the plugins get no
-# ``args.yeto_algo_plugins`` and fail loudly instead of running unconfigured.
-import yeto.rl.engine.algorithm as _algorithm  # noqa: E402
+# P0 extension hooks (algo-cap ebd436b, merged from infra-drafts/1b-shared.patch).
+from yeto.rl.engine.algorithm import (  # noqa: E402
+    register_gradient_rule,
+    register_island_check,
+    register_launch_check,
+    register_runtime_attrs,
+)
 
-if hasattr(_algorithm, "register_runtime_attrs"):
-    _algorithm.register_runtime_attrs("grpo_knobs", runtime_attrs)
-    _algorithm.register_launch_check("grpo_knobs", _launch_check)
-    _algorithm.register_island_check("grpo_knobs_ref_model", island_problems)
-    _algorithm.register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule)
+register_runtime_attrs("grpo_knobs", runtime_attrs)
+register_launch_check("grpo_knobs", _launch_check)
+register_island_check("grpo_knobs_ref_model", island_problems)
+register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule)

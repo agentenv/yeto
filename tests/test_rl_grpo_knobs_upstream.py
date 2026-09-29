@@ -114,16 +114,17 @@ def _policy_loss():
 @pytest.mark.parametrize("ratio", [0.5, 0.9, 1.0, 1.1, 1.25, 1.5, 5.0])
 def test_dual_clip_and_clip_higher(adv, ratio):
     eps, eps_high, c = 0.2, 0.28, 3.0
-    ppo_kl = torch.tensor([-torch.log(torch.tensor(ratio)).item()], dtype=torch.float64)
+    # Miles evaluates the clip bounds in float32: compare at float32 precision.
+    ppo_kl = -torch.log(torch.tensor([ratio], dtype=torch.float64))
     a = torch.tensor([adv], dtype=torch.float64)
     r = torch.exp(-ppo_kl).item()
     clipped = min(max(r, 1 - eps), 1 + eps_high)
     base = max(-r * adv, -clipped * adv)  # PPO clipped surrogate (upper bound 1 + eps_high)
     expected_dual = min(-c * adv, base) if adv < 0 else base  # dual-clip: loss <= -c*A for A<0
     got, clipfrac = _policy_loss()(ppo_kl, a, eps, eps_high, c)
-    assert got.item() == pytest.approx(expected_dual, rel=0, abs=1e-12)
+    assert got.item() == pytest.approx(expected_dual, rel=1e-6, abs=1e-6)
     got_plain, _ = _policy_loss()(ppo_kl, a, eps, eps_high, None)
-    assert got_plain.item() == pytest.approx(base, rel=0, abs=1e-12)
+    assert got_plain.item() == pytest.approx(base, rel=1e-6, abs=1e-6)
     if adv > 0 and r > 1 + eps_high:
         assert got_plain.item() == pytest.approx(-(1 + eps_high) * adv) and clipfrac.item() == 1.0
     if adv < 0 and r > 1 + eps_high:
@@ -229,7 +230,7 @@ def test_remove_sample_semantics(monkeypatch):
 
     args = SimpleNamespace(advantage_estimator="grpo", rewards_normalization=True,
                            grpo_std_normalization=True, n_samples_per_prompt=4, rollout_batch_size=1,
-                           reward_key=None)
+                           reward_key=None, use_dynamic_global_batch_size=False)
     kept = tdc.convert_samples_to_train_data(args, samples(False), {}, None, None)
     removed = tdc.convert_samples_to_train_data(args, samples(True), {}, None, None)
     assert removed["loss_masks"][0] == [0, 0, 0, 0]
