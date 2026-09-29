@@ -203,6 +203,7 @@ def build_metadata(
 
     extra = metadata_fields(args)
     sample_filter_counts = extra.get("filtered_samples")
+    tool_wait = 0.0
     rollout_id = None
     groups, filtered, aborted = [], 0, 0
     for group in all_samples:
@@ -212,6 +213,7 @@ def build_metadata(
         if rollout_id is None:
             rollout_id = current_round_id(samples, sink)
         record = group_record(args, group)
+        tool_wait += sum(float(getattr(x, "non_generation_time", 0.0) or 0.0) for x in samples)
         aborted += int(record.pop("aborted"))
         key = tuple(record.pop("_key"))
         if key in trained:
@@ -233,6 +235,9 @@ def build_metadata(
         "completed": len(groups),
         "filtered": filtered,
         "aborted": aborted,
+        # 1.7: time trajectories spent outside generation (tool calls), summed
+        # over every generated sample (Miles Sample.non_generation_time).
+        "tool_wait_seconds": tool_wait,
         "trained_sample_indices": sorted(
             int(i[1:]) for g in groups for i in g["sample_ids"] if i[1:].lstrip("-").isdigit()
         ),

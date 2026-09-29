@@ -253,6 +253,9 @@ def handle_from_metadata(
         # leftovers are not tracked until 3.6/4.1 audit the Miles buffer.
         filtered=int(payload["filtered"]) if "filtered" in payload else None,
         carried_over=None,
+        tool_wait_seconds=(
+            float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
+        ),
         nonzero_advantages=(
             int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
         ),

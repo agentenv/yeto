@@ -322,3 +322,20 @@ def test_dynamic_filter_source_is_labelled_on_the_round_event(tmp_path):
     (ev,) = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()
              if '"rl_round_trained"' in l]
     assert ev["dynamic_filter_source"]["replacement_attempts"] == "proxy_filtered"
+
+
+def test_tool_wait_seconds_are_summed_from_all_generated_samples(tmp_path):
+    """rl-infra-spec 1.7: tool waiting comes from Miles Sample.non_generation_time and is
+    carried separately from generation time (not GPU saturation)."""
+    from yeto.rl.engine.driver import IslandDriver, TrainStepMetrics
+
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    dropped = [group(2, [1.0, 1.0])]
+    for i, s in enumerate(s for g in kept + dropped for s in g):
+        s.non_generation_time = 0.5 * i
+    _, p = pool(tmp_path, kept, dropped)
+    handle = p.generate(3)
+    assert handle.tool_wait_seconds == pytest.approx(sum(0.5 * i for i in range(6)))
+    stats = IslandDriver._stats(SimpleNamespace(learner_id=0), 3, handle,
+                                TrainStepMetrics(grad_norm=1.0), 1.0, 1.0)
+    assert stats.tool_wait_seconds == pytest.approx(7.5)
