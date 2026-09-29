@@ -358,6 +358,7 @@ EXPECTED_MILES_DECLARED = {
     "corrections:icepop",
     "corrections:mis_mask",
     "features:eps_clip",
+    "features:no_grpo_std_normalization",
 }
 
 
