@@ -688,6 +688,13 @@ The Miles argv of default GRPO is byte-identical to R0.
 canonical JSON, and `algorithm_spec_sha256` to the ports provenance. The
 legacy provenance is unchanged.
 
+**Launch dry run.** `yeto launch ... --dry-run` validates the whole launch
+(arguments, provenance, the ports algorithm and capability checks) and prints
+JSON with the resource request (GPU type and count per island, island count,
+whether a syncer is started), the algorithm hash and each learner command. It
+creates no cloud resource. With `--rl-single-island-no-sync` (which needs
+`--controller local`) it shows one island, no syncer and `outer_sync: false`.
+
 **Dry run.** `python3 -m yeto.rl.engine.miles_adapter.algorithm_flags
 --dry-run [--rl-algorithm-spec PATH] [--extra "<miles argv>"]
 [--rl-allow-unverified-mechanism NAME]` runs the same steps as the ports

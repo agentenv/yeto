@@ -10,7 +10,7 @@ import torch
 
 from yeto.rl.elastic_benchmark.capabilities import attestation_from_dict
 from yeto.rl.engine import algorithm as alg
-from yeto.rl.engine.algorithm import (
+from yeto.rl.engine.algorithm import (  # noqa: I001
     AdvantageSpec,
     AlgorithmSpec,
     AlgorithmSpecError,
@@ -87,7 +87,7 @@ def test_old_declaration_reads_as_r0_mechanisms():
 
 
 def test_expressible_but_not_enabled_is_rejected_with_options():
-    caps = fake_capabilities()
+    caps = miles_capabilities(FP)
     with pytest.raises(CapabilityMismatch) as info:
         _check(caps, AlgorithmSpec(loss=LossSpec(eps_clip_high=0.28, aggregation="token")))
     text = str(info.value)
@@ -201,11 +201,20 @@ def test_binary_reward_declared_passes(binary_mechanism):
 
 
 def test_miles_and_fake_declarations():
-    for caps in (miles_capabilities(FP), fake_capabilities()):
+    # rl-algo-mismatch-correction 7.3 (G1 passed): the adapter declares tis and
+    # OPSM (trainer pi_old); the fake declares every correction for CPU tests.
+    expected = {
+        "miles": ({"none", "tis", "opsm", "opsm_trainer"}, frozenset()),
+        "fake": ({"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
+                  "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
+                 {"mismatch_metrics", "rollout_logprobs_as_old"}),
+    }
+    for kind, caps in (("miles", miles_capabilities(FP)), ("fake", fake_capabilities())):
+        corrections, features = expected[kind]
         assert caps.advantage_estimators == {"grpo"}
         assert caps.losses == {"policy_loss"} and caps.loss_aggregations == {"default"}
-        assert caps.kl_placements == {"none", "reward"} and caps.corrections == {"none"}
-        assert caps.reward_postprocessors == frozenset() and caps.features == frozenset()
+        assert caps.kl_placements == {"none", "reward"} and caps.corrections == corrections
+        assert caps.reward_postprocessors == frozenset() and caps.features == features
         assert caps.execution == ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True)
         assert caps.unverified_mechanisms == frozenset()
@@ -218,7 +227,7 @@ def test_fake_root_default_grpo_starts_other_mechanisms_rejected(tmp_path):
                  AlgorithmSpec(kl=KlSpec(placement="loss", coef=0.01, estimator="k3")),
                  AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"),
                                loss=LossSpec(eps_clip=3e-4, eps_clip_high=4e-4)),
-                 AlgorithmSpec(correction=CorrectionSpec(method="opsm", opsm_delta=1e-4))):
+                 AlgorithmSpec(loss=LossSpec(eps_clip_c=3.0))):
         engine, driver = _driver(tmp_path, spec, fake_capabilities())
         with pytest.raises(CapabilityMismatch, match="not supported"):
             driver.run()
@@ -275,3 +284,70 @@ def test_unverified_allowance_exempts_only_named(tmp_path):
     with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported") as info:
         driver.run()
     assert "clip_higher" not in str(info.value)
+
+
+# -- 1a-shared: OPSM combinations, named custom functions, always-emit fields -----
+
+
+def test_opsm_combines_with_tis_and_translates_both():
+    from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv
+
+    spec = AlgorithmSpec(correction=CorrectionSpec(method="tis", tis_clip=2, tis_clip_low=0,
+                                                   opsm_delta=1e-4))
+    assert ("corrections", "opsm") in spec.required_mechanisms()
+    assert ("corrections", "tis") in spec.required_mechanisms()
+    argv = algorithm_argv(spec)
+    assert "--use-tis" in argv and argv[argv.index("--use-opsm") + 2] == "0.0001"
+    _check(miles_capabilities(FP), spec)
+    with pytest.raises(AlgorithmSpecError, match="opsm_delta requires"):
+        CorrectionSpec(opsm_delta=1e-4)
+
+
+def test_named_custom_function_only_exempt_when_its_mechanism_detects():
+    from yeto.rl.engine.algorithm import PluginRef
+
+    ref = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
+    spec = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=ref,
+                                                   tis_clip=5, tis_clip_low=0.5))
+    assert ("corrections", "custom") in spec.required_mechanisms()
+    alg.register_named_correction_function(ref.path)
+    try:
+        # named but no mechanism claims it: still generic custom (no escape)
+        assert ("corrections", "custom") in spec.required_mechanisms()
+        alg.register_mechanism("corrections", "t_named",
+                               lambda s: s.correction.function is not None
+                               and s.correction.function.path == ref.path)
+        try:
+            required = spec.required_mechanisms()
+            assert ("corrections", "t_named") in required
+            assert ("corrections", "custom") not in required
+            # the adapter declaring only generic 'custom' does not admit it
+            with pytest.raises(CapabilityMismatch, match="'t_named' not supported"):
+                _check(fake_capabilities(corrections={"none", "custom"}), spec)
+            # a different function (other path) still needs 'custom'
+            other = PluginRef.from_path("yeto.rl.engine.algorithm.load_extensions")
+            spec2 = AlgorithmSpec(correction=CorrectionSpec(method="custom", function=other,
+                                                            tis_clip=5, tis_clip_low=0.5))
+            assert ("corrections", "custom") in spec2.required_mechanisms()
+        finally:
+            alg.unregister(mechanism=("corrections", "t_named"))
+    finally:
+        alg.NAMED_CORRECTION_FUNCTIONS.discard(ref.path)
+    with pytest.raises(ValueError, match="yeto namespace"):
+        alg.register_named_correction_function("examples.x.fn")
+
+
+def test_always_emit_field_only_when_its_mechanism_applies():
+    from yeto.rl.engine.algorithm import CorrectionSpec as C
+
+    alg.register_field("correction", "t_src", default="trainer",
+                       parse=lambda p, v: v, always_emit=lambda g: g.opsm_delta is not None)
+    try:
+        assert AlgorithmSpec().sha256() == AlgorithmSpec().replace().sha256()
+        assert "t_src" not in AlgorithmSpec().canonical_json()
+        tis = AlgorithmSpec(correction=C(method="tis", tis_clip=2, tis_clip_low=0))
+        assert "t_src" not in tis.canonical_json()
+        opsm = AlgorithmSpec(correction=C(method="opsm", opsm_delta=1e-4))
+        assert '"t_src":"trainer"' in opsm.canonical_json()
+    finally:
+        alg.unregister(field=("correction", "t_src"))

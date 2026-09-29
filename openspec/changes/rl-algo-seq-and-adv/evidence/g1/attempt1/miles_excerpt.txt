@@ -1,0 +1,6 @@
+(read live from /work/out/gspo_s2/miles.log in sb-NCEOOOmOOTK45bK8f140xp before terminating)
+(RayWorkerManager pid=2799)   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 577, in _gather_or_raise
+(RayWorkerManager pid=2799)     raise result
+(RayWorkerManager pid=2799)     raise ServerUnavailable(err_str)
+ray.exceptions.RayTaskError(ServerUnavailable): ray::RayWorkerManager.init() (pid=2799, ip=172.20.0.236, ...)
+urllib3.exceptions.MaxRetryError: HTTPConnectionPool(host='127.0.0.1', port=8265): Max retries exceeded with url: /api/v0/nodes?limit=100&timeout=24&detail=False&exclude_driver=True&server_timeout_multiplier=0.8 (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=8265): Failed to establish a new connection: [Errno 111] Connection refused"))

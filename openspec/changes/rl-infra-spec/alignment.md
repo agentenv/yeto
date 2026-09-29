@@ -198,3 +198,8 @@
 
 - **P0 D11 放行开关与 G1**：按 spec 原文，“多岛或外层同步”即拒绝。当前 learner 与 launcher 两个入口都带外层同步，所以放行开关在真实运行中无法使用，各算法 change 的 G1 也就无法借助它运行。需另批二选一：(a) 允许单岛带 1 成员 syncer 时放行；(b) 新增无 syncer 的单岛 learner 入口。ALGO-CAP 没有自行放宽。
 - **更新**：新增了单岛无外层同步运行模式（主 agent 决定，用户可推翻，见 §7b）；放行开关口径未放宽。ALGO-CAP 已实现 `--rl-single-island-no-sync`（单岛、无 syncer、无外层同步），放行开关只在这个入口上可用；F9 的严格拒绝保持不变。
+
+## 11. Agent INFRA 追加（2026-09-29，fork 事实更新）
+
+- §2 矩阵中"新 engine 准入（payload 校验后才进 router）"一行原为 ✖。现状：fork `yeto-elastic-m1-m6` 1a68f893 已实现方案 (a)（`start_update_weights(admit_cordoned=True)` → 调用方 `check_weights` 读回 → `admit_cells(cell_ids, expected_epoch)`）。该行改记为 **△（机制已在 fork 实现，CPU 单测；第三轮独立审查中，未合回 yeto/ports、未进镜像，3.5 GPU 未验证）**。3.5 的验收不变。
+- M5（4.2a）现在支持 bf16 与 DistributedOptimizer，但 GPU 未验证，E3 LoRA+DistOpt 仍按 DEV-GATHER 的结论处理；M6 rebuild 失败语义（`TrainerRebuildError`，不自动回滚）已写入 4.6a，3.7/4.7 失败矩阵需覆盖。

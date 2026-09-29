@@ -20,7 +20,12 @@ from typing import Any, Protocol
 
 from ..ports import GroupMetadata, RolloutBatchHandle
 from . import LoopRunner
-from .rollout_meta_hook import DEFAULT_SINK_ACTOR, METADATA_SCHEMA, put_policy_token
+from .rollout_meta_hook import (
+    DEFAULT_SINK_ACTOR,
+    METADATA_SCHEMA,
+    ROUND_META_SCHEMA,
+    put_policy_token,
+)
 
 
 class RolloutMetadataError(RuntimeError):
@@ -101,8 +106,34 @@ class DirMetadataSource:
             if path.exists():
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 path.unlink()
-                return payload
+                extra = []
+                round_path = self.directory / f"round-{rollout_id}.json"
+                if round_path.exists():
+                    extra.append(json.loads(round_path.read_text(encoding="utf-8")))
+                    round_path.unlink()
+                return merge_round_metadata(payload, extra, rollout_id)
         raise RolloutMetadataError(f"no rollout metadata for rollout {rollout_id} in {self.directory}")
+
+
+def merge_round_metadata(
+    payload: dict[str, Any], records: list[dict[str, Any]], rollout_id: int
+) -> dict[str, Any]:
+    """Attach per-round counters reported after the all-samples hook (same rollout only)."""
+
+    merged = dict(payload)
+    for record in records:
+        if record.get("rollout_id") != rollout_id:
+            raise RolloutMetadataError(
+                f"per-round metadata for rollout {record.get('rollout_id')} "
+                f"arrived with rollout {rollout_id}"
+            )
+        for key, value in record.items():
+            if key in ("schema", "rollout_id"):
+                continue
+            if key in merged:
+                raise RolloutMetadataError(f"per-round metadata {key} reported twice")
+            merged[key] = value
+    return merged
 
 
 def _sink_actor_class():
@@ -151,13 +182,15 @@ class RayMetadataSink:
     def take(self, rollout_id: int) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_s
         while True:
-            items = self._ray.get(self._actor.take_all.remote())
+            items = [json.loads(i) for i in self._ray.get(self._actor.take_all.remote())]
+            main = [i for i in items if i.get("schema") != ROUND_META_SCHEMA]
+            extra = [i for i in items if i.get("schema") == ROUND_META_SCHEMA]
             if items:
-                if len(items) != 1:
+                if len(main) != 1:
                     raise RolloutMetadataError(
-                        f"expected one metadata record for rollout {rollout_id}, got {len(items)}"
+                        f"expected one metadata record for rollout {rollout_id}, got {len(main)}"
                     )
-                return json.loads(items[0])
+                return merge_round_metadata(main[0], extra, rollout_id)
             if time.monotonic() > deadline:
                 raise RolloutMetadataError(f"no rollout metadata for rollout {rollout_id}")
             time.sleep(0.05)
@@ -217,6 +250,9 @@ def handle_from_metadata(
         # leftovers are not tracked until 3.6/4.1 audit the Miles buffer.
         filtered=int(payload["filtered"]) if "filtered" in payload else None,
         carried_over=None,
+        nonzero_advantages=(
+            int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
+        ),
     )
 
 

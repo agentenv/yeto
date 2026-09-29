@@ -213,10 +213,37 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports: colocated (default) or a LoRA fixed partition (rl-infra-spec 2.1)",
     )
     rl.add_argument(
+        "--rl-rollout-gpus",
+        dest="rollout_num_gpus",
+        type=int,
+        default=None,
+        help="ports fixed partition: dedicated rollout GPUs per island node (rl-infra-spec 2.1). "
+        "Note: on `launch`, a bare --rollout-num-gpus is an argparse abbreviation of "
+        "--rollout-num-gpus-per-engine, not this option",
+    )
+    rl.add_argument(
         "--rl-standby-gpus",
         type=int,
         default=0,
         help="ports fixed partition: reserved standby GPUs never started by any role",
+    )
+    rl.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "validate the launch (arguments, provenance, ports algorithm and "
+            "capability checks) and print the resource request, algorithm hash "
+            "and learner command as JSON; creates no cloud resource"
+        ),
+    )
+    rl.add_argument(
+        "--rl-optimizer-steps",
+        type=int,
+        default=1,
+        help=(
+            "ports: optimizer steps per RL round (default 1); must divide "
+            "rollout-batch-size * n-samples-per-prompt"
+        ),
     )
     rl.add_argument(
         "--rl-single-island-no-sync",
@@ -1260,6 +1287,22 @@ def cmd_launch(args) -> int:
     except (ImportError, OSError, PermissionError, ValueError) as exc:
         print(f"[yeto] provenance validation failed: {exc}", file=sys.stderr)
         return 1
+    if getattr(args, "rl_single_island_no_sync", False) and (
+        getattr(args, "controller", "local") == "head"
+    ):
+        print("[yeto] --rl-single-island-no-sync has no syncer; use --controller local",
+              file=sys.stderr)
+        return 1
+    if getattr(args, "dry_run", False):
+        from .launcher import dry_run_plan
+
+        try:
+            plan = dry_run_plan(args)
+        except ValueError as exc:
+            print(f"[yeto] dry run rejected: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
     if getattr(args, "controller", "local") == "head":
         return cmd_launch_head(args)
 

@@ -61,6 +61,12 @@ def miles_capabilities(
         advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
+        # rl-algo-mismatch-correction 7.3: declared only after the single-GPU
+        # smoke (G1) passed -- evidence/2026-09-29-g1/runs/{tis,opsm-trainer}.
+        # opsm_rollout, mismatch_observe, icepop and mis* stay undeclared
+        # (observe/icepop/mis additionally need 1a-shared.patch so that a
+        # named custom function does not require the generic 'custom').
+        corrections={"none", "tis", "opsm", "opsm_trainer"},
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),
@@ -68,6 +74,27 @@ def miles_capabilities(
     if unverified_mechanisms:
         capabilities = capabilities.with_unverified(unverified_mechanisms)
     return capabilities
+
+
+def receipt_role_family(algorithm: AlgorithmSpec) -> str:
+    """``LocalStepReceipt.algorithm``: the TRAINING ROLE FAMILY, not the estimator.
+
+    It must equal ``ParameterLayout.algorithm`` (``local_learner.py`` checks
+    both; the layout hash covers it), whose families are grpo / sao. Every
+    critic-free estimator (grpo, gspo, reinforce_plus_plus[_baseline]) trains
+    the single actor role -> ``"grpo"``; the estimator itself is identified by
+    ``algorithm_spec_sha256``. Critic estimators (ppo) have no family in the
+    layout contract and are refused.
+    """
+    from ..algorithm import CRITIC_ESTIMATORS
+
+    estimator = algorithm.advantage_estimator
+    if estimator in CRITIC_ESTIMATORS:
+        raise ValueError(
+            f"advantage estimator {estimator!r} needs a critic role family, which the "
+            "receipt/layout contract does not define"
+        )
+    return "grpo"
 
 
 def with_partitioned_serial(capabilities: EngineCapabilities) -> EngineCapabilities:
@@ -262,7 +289,8 @@ def compose_island(
             learner_id=learner_id,
             learner_generation=0,
             parameter_layout_hash=lambda: layout_hash,
-            algorithm=algorithm.advantage_estimator,
+            algorithm=receipt_role_family(algorithm),
+            spec=algorithm,
             release_refs=release_refs,
             runner=runner,
         ),
