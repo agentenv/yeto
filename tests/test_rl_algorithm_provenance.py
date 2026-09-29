@@ -592,7 +592,11 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
         def cancel(self, call_id):
             events.append(("cancel", call_id))
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             events.append(("stop_app",))
 
         def tail_logs(self, call_id, entries=100):
@@ -697,7 +701,11 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
         def cancel(self, call_id):
             pass
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             pass
 
         def tail_logs(self, call_id, entries=100):
@@ -872,7 +880,11 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
         def cancel(self, call_id):
             pass
 
+        def app_status(self):  # provider view after stop (P0 teardown check)
+            return None if getattr(self, "_stopped", False) else ("deployed", 1)
+
         def stop_app(self):
+            self._stopped = True
             pass
 
         def tail_logs(self, call_id, entries=100):

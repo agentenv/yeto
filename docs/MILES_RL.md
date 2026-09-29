@@ -715,6 +715,31 @@ the run exit 3. A synced run still fetches its checkpoint first.
 `--rl-event-tape` export refuses incomplete tapes unless
 `--allow-incomplete` is given.
 
+**Launcher exit codes.**
+
+| code | meaning |
+| --- | --- |
+| 0 | success |
+| 1 | a learner failed (non-RL), or no learner succeeded |
+| 2 | artifact not fetchable (Modal island) |
+| 3 | incomplete island event tape |
+| 4 | a fixed-roster RL island could not be recovered |
+| 5 | the Modal app was not confirmed stopped after teardown |
+
+For exit 5, the provider must list the run's app as `stopped` with 0 tasks
+(or no longer list it); the launcher checks at most 5 times. It prints a WARN
+naming the `modal app stop` command to run by hand. The result is written to
+`<run dir>/teardown.json`. Exit 5 takes precedence over 0/2/3/4, because a
+possibly still-running app matters more than the run's own outcome.
+
+Strict syncer failures, strict RL job failures, "all learners abandoned" and
+internal errors propagate as exceptions (exit 1 from the CLI worker).
+
+An island whose tape already holds `rl_learner_finalized` is counted as
+succeeded even if its job then ends non-zero, for example an interrupt during
+Ray shutdown after the syncer stopped. It is not relaunched, and the syncer is
+not restarted once every learner has finalized.
+
 **Launch dry run.** `yeto launch ... --dry-run` validates the whole launch
 (arguments, provenance, the ports algorithm and capability checks) and prints
 JSON with the resource request (GPU type and count per island, island count,
