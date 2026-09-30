@@ -1,0 +1,2 @@
+openspec/changes/rl-algo-loss-variants/tasks.md:65:- 4.3：pin `MILES_NEXT_COMMIT` = 5c1b49eb（IMG，cbf3d22）；镜像 tag 5c1b49e-9f29303，digest sha256:17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef；fork 仓库 `git remote -v` 只有 michaellchung/miles，`yeto/ports` = 5c1b49eb；未开任何 PR（用户 2026-09-30 同意路线 B 与 fork 提交）。
+tools/probes/e2_cut_harness.py:33:IMAGE_DIGEST = "sha256:db81588406e157baa6a579f6378484b890371065abcc51eacd5a9650b5820cbf"
