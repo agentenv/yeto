@@ -91,7 +91,7 @@ def masked_fraction(outputs: Any) -> float | None:
 # (rl-algo-seq-and-adv D2: GSPO clips whole sequences).
 CLIPFRAC_MASKED_ESTIMATORS = frozenset({"gspo"})
 # Policy-loss variants whose gradient rule reads the clip fraction
-# (rl-algo-loss-variants D5: GMPO, share of A != 0 tokens clipped in log space).
+# (rl-algo-loss-variants D5: GMPO, global gmpo_clip_num / gmpo_clip_den).
 # CISPO keeps gradients on clipped tokens and SAPO never clips: not listed.
 CLIPFRAC_LOSS_VARIANTS = frozenset({"gmpo"})
 
@@ -314,8 +314,25 @@ class MilesTrainerGroup:
             grad_norm=math.nan if norm is None else float(norm),
             applied_lrs=self.last_applied_lrs,
             masked_fraction=self.last_masked_fraction,
-            clip_fraction=_mean_clipfrac(getattr(self, "last_step_losses", None)),
+            clip_fraction=self._clip_fraction(),
         )
+
+    def _clip_fraction(self) -> float | None:
+        """Mean ``pg_clipfrac``; for GMPO the global num/den clip fraction.
+
+        rl-algo-loss-variants D5 (fork 5c1b49eb): GMPO's gradient rule needs
+        sum(gmpo_clip_num) / sum(gmpo_clip_den) over the round, not the
+        per-sequence-mean ``pg_clipfrac`` (which stays in the step metrics).
+        """
+        step_losses = getattr(self, "last_step_losses", None)
+        loss = getattr(getattr(self, "_spec", None), "loss", None)
+        if getattr(loss, "policy_loss_variant", None) in CLIPFRAC_LOSS_VARIANTS:
+            try:
+                from yeto.rl.algos.loss_variants import gmpo_clip_fraction
+            except ImportError:
+                return None
+            return gmpo_clip_fraction(step_losses)
+        return _mean_clipfrac(step_losses)
 
     def onload(self) -> None:
         # Upstream wake_up asserts --offload-train; without it the actor stays resident.
