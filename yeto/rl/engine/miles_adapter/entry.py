@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 import os
 import time
 from collections.abc import Callable
@@ -510,10 +511,11 @@ def compose_island(
         _wire_trainer_rebuild(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
                               actor_model=actor_model, rollout_executor=rollout_executor,
                               runner=runner, base_model_revision=base_model_revision)
-        _wire_trainer_edges(driver, elastic=elastic, miles_args=miles_args, launch=launch,
-                            algorithm=algorithm, actor_model=actor_model,
-                            rollout_executor=rollout_executor, runner=runner,
-                            base_model_revision=base_model_revision)
+        if (getattr(miles_args, "yeto_rl_elastic", None) or {}).get("trainer_edges"):
+            _wire_trainer_edges(driver, elastic=elastic, miles_args=miles_args, launch=launch,
+                                algorithm=algorithm, actor_model=actor_model,
+                                rollout_executor=rollout_executor, runner=runner,
+                                base_model_revision=base_model_revision)
     holder["driver"] = driver
     return driver
 
@@ -805,7 +807,23 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         # 3.8 pause-budget inputs, only when the learner was given them.
         **{k: config[k] for k in ("quorum_timeout_s", "idle_flow_timeout_s", "pause_margin")
            if config.get(k) is not None},
+        # 4.7: pool GPU ids (manifest resources.gpus, in logical-bundle order), only
+        # with trainer edges; every other elastic run keeps the described pool.
+        **({"pool_gpus": manifest_pool_gpus(config["resources"])}
+           if config.get("trainer_edges") else {}),
     )
+
+
+def manifest_pool_gpus(resources: Any) -> tuple[str, ...]:
+    """``resources.gpus[*].uuid`` in manifest order = logical bundle 0..N-1 of the
+    fork-M1 placement map (the manifest must list the pool in that order)."""
+    if not isinstance(resources, dict):
+        resources = json.loads(Path(resources).expanduser().read_text(encoding="utf-8"))
+    gpus = [g.get("uuid") for g in (resources.get("gpus") or [])]
+    if not gpus or not all(isinstance(g, str) and g for g in gpus) or len(set(gpus)) != len(gpus):
+        raise ValueError("--rl-elastic-trainer-edges needs the manifest's resources.gpus "
+                         "(distinct uuids, in logical bundle order)")
+    return tuple(gpus)
 
 
 def run_ports_island(

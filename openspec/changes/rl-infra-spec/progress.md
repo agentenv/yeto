@@ -506,3 +506,16 @@
 - plan-v3：镜像 17d428a2…（5c1b49e-9f29303）、Miles 5c1b49eb、Qwen3-0.6B c1899de…、Qwen3-1.7B 70d244cc…；判据沿用 plan-v2 原文。
 - 阻塞：① LoRA dropout 0.05 无法表达（需要 config 翻译开关，或由主 agent 裁定）；② G-4.5 第 5 行需要 E1 提供实时 `data_cursor`；③ E1 需合入补丁 `infra-e2-e1-harness-injections-v1.patch`。
 - 测试：全量 68 failed / 26 errors / 3059 passed。失败 id（94 个）与 integ-decl b90c18d 基线（3037 passed）按 id 相同。
+
+### INFRA-E1：主 agent 队列 ①–⑤（2026-09-30）
+- ① c51735e：`--rl-elastic-trainer-edges`。只有开启它时才去掉 `--balance-data`，其余 argv 逐字节不变（有 e2e 测试）。
+- ② 0860a14：应用 INFRA-E2 harness/注入补丁 v1（先合并 origin/infra-e2 ad26f2d）；rebuild-fail 只保留 E2 的一份实现，rank 0 不再被当作未设置。
+- ③ b2a8e3c：`--rl-lora-dropout`，默认值 0 时 argv 不变；canonical/导出配置仍是 dropout 0；E3 的 DP 边照旧拒绝 dropout>0。
+- ④ d8245c5：`live_data_cursor()` 实时读 executor 的 data_source；`data_cursor()` 优先用实时值，读不到时退回上一 batch 的缓存。
+- ⑤（本节提交）F-R1 接线：
+  - `--rl-elastic-trainer-edges` 时，从 manifest 的 `resources.gpus`（按逻辑 bundle 顺序）得到 `pool_gpus`，并接线 trainer 边；其他 elastic 路径不传 pool_gpus。
+  - `member_gpus` 改用 fork `describe_cells` 的 bundles。
+  - 新增 `unbind_members`。
+  - `trainer_view` 优先用公开的 `slice_pg_info`，私有名留作兜底。
+  - 按 FR1 的调用顺序核对：正向 `bind_members`→`add_engines`（start_cells/wait_cells_tracked）→`publish_members`（cordoned 发布→check_weights→admit_cells）一致。反向缺 `unbind_cell`，给 E3 出了补丁 `infra-drafts/patches/infra-e1-e3-unbind-after-stop.patch`：stop 之后调用 `unbind_members`，REBUILD_OLD 时先把原 GPU 绑回再 start。已在本地套用验证，E3 测试 20 个通过，**未提交**（trainer_transition.py 归 E3）。
+  - F-R1 的绑定只在内存，对 E1-D ⑤⑥⑦ 与 A9 f5 的影响写入 plan v2 §7，需主 agent 在运行前从 (a)/(b)/(c) 中选定。
