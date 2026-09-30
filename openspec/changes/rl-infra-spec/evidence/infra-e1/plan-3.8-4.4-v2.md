@@ -10,7 +10,7 @@ v1（`plan-3.8-4.4.md`）的拓扑（2×8 卡、8 轮）、"最终 policy hash �
 1. 代码：集成分支 SHA（运行时记录），须包含 infra-e1 的 3.8（533afdc）、4.4（d397cf3）、watchdog（2b67145）以及本轮审查修复 5946ffd（F2）、e477bcb（F3）、500555a（F6），另含 E2 `SwappableActor` 接线。
 2. 镜像与 manifest：按 gpu-plan-v2 §1 与 gpu-plan.md §8。
 3. 开关：两岛都带 `--rl-elastic`（不带则没有 data cursor，4.4 会在动 trainer 之前被拒）。岛0 另带 `--rl-elastic-resources/-initial-config/-cells`；resources 按 1.6 格式列出 T1R1S1、T1R2S0 与两条 `rollout-only` 边；fork 启动时声明 2 个 rollout cell，只启动 1 个。
-4. **start_cells 前的 150 s 延迟注入**（gpu-plan-v2 A5 第 2 条）：已实现（9a5f181），只供测试使用，默认关闭。开启方式：launcher 加 `--rl-test-inject-start-delay-s 150`（要求同时带 `--rl-elastic`），它在岛的运行命令里 `export YETO_RL_TEST_INJECT_START_DELAY_S=150.0`；`MilesRolloutPool.add_engines` 在本进程**第一次**调用 fork `start_cells` 之前 sleep 这么多秒，同时在 stderr 打印 `TEST INJECTION` 一行。只有 quorum 运行带这个开关。§4 需要的 `update_weights` 阻塞注入点**尚未实现**，执行前须按同样方式补上并提交，否则 §4 不运行。
+4. **start_cells 前的 150 s 延迟注入**（gpu-plan-v2 A5 第 2 条）：已实现（9a5f181），只供测试使用，默认关闭。开启方式：launcher 加 `--rl-test-inject-start-delay-s 150`（要求同时带 `--rl-elastic`），它在岛的运行命令里 `export YETO_RL_TEST_INJECT_START_DELAY_S=150.0`；`MilesRolloutPool.add_engines` 在本进程**第一次**调用 fork `start_cells` 之前 sleep 这么多秒，同时在 stderr 打印 `TEST INJECTION` 一行。只有 quorum 运行带这个开关。§4 需要的 `update_weights` 阻塞注入点见 §4。
 5. quorum 运行的暂停预算（gpu-plan-v2 未写，属于执行 A5 第 2 条的必要条件）：`--quorum-timeout-s 120` 时默认预算为 0.5×120 = 60 s，150 s 的延迟会在 plan 阶段被 `pause_decision` 拒绝，第 2 条就无从执行。因此 quorum 运行中岛0 用 `--rl-elastic-quorum-timeout-s 120 --rl-elastic-pause-margin 2.0`，up 请求的 deadline 设为 230 s（≤ 240 s 预算）。launcher 会把同一个 120 同时传给 syncer 的 `--quorum-timeout-s`。空闲流探测若测得路径会在 150 s 内丢流，按 gpu-plan-v2 A5 第 4 条判为环境阻塞；此时 `--rl-elastic-idle-flow-timeout-s` 取实测值，并会让该请求被拒，正好与"不运行"一致。
 6. finalization 用例（A5 第 3 条）：在第 6 轮的 train 期间，经 CommandInbox 提交 `up`。实现上，该请求在 stop 边界被取消（journal：`finalization` 记录与 `phase=CANCELLED`，错误为 "finalization refuses reconfiguration"）；stop 边界之后提交的请求直接被拒（status 文件为 `rejected`）。两种结果都满足第 3 条"拒绝或取消"。
 
@@ -31,7 +31,7 @@ v1（`plan-3.8-4.4.md`）的拓扑（2×8 卡、8 轮）、"最终 policy hash �
 
 ## 4. watchdog 默认动作（与 A4 E1-D 同批执行；判据为 `evidence/infra-e1/plan.md` E1-D 的补充，运行前固定）
 
-注入：在 up 事务中阻塞新 engine 的 `update_weights`（与 §1-4 同样的环境变量注入点，同样需要先实现），deadline 120 s。通过条件全部满足：
+注入：launcher 加 `--rl-test-inject-update-weights-block-s 600`（要求同时带 `--rl-elastic`，会 `export YETO_RL_TEST_INJECT_UPDATE_WEIGHTS_BLOCK_S=600.0`）。效果：本进程第一次调用成员 `update_weights` 之前，`MilesPublisher` 最多阻塞 600 s，每 1 s 检查一次目标 cell 的 worker actor 是否存活（经 fork `RayWorkerManager` 按 generation 取句柄并调用 `__ray_ready__`），一旦有 actor 死亡就立即报错。**这是在 yeto 侧模拟的阻塞，不是 SGLang 内部真的挂起**：它验证的是"watchdog 杀掉目标 generation → 阻塞的发布调用失败 → REBUILD_OLD"这一链路，以及被杀进程和 GPU 是否真正释放；真实引擎挂起能否被 kill 打断不在本用例范围内。deadline 120 s。实现提交见本文件所在提交的前一个代码提交。通过条件全部满足：
 1. 120 s 到期后，journal 出现 `watchdog`（`target_cells` 为新 cell）和 `watchdog_action`（`killed` 列出这些 cell 的 worker 与 generation）；
 2. 阻塞的调用在 60 s 内返回错误，事务终态为 `REBUILT_OLD`（审查 F2 修复后，watchdog 触发的事务不会再提交为 SUCCEEDED）；
 3. 旧成员集合与其 SGLang 进程 PID 不变；
