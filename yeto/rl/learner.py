@@ -320,6 +320,9 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         "declared_cells": _elastic_cells(args.rl_elastic_cells),
     }
     # M1: rollout metadata carries data_cursor/buffer_length only when asked.
+    # The attribute covers the driver process; the env var reaches Ray workers
+    # (where the metadata hook runs) through connect_island_ray's job-level
+    # runtime_env, since workers inherit the raylet's env, not the driver's.
     from .engine.miles_adapter.rollout_meta_hook import ELASTIC_METADATA_ENV
 
     miles_args.yeto_rl_elastic_metadata = True

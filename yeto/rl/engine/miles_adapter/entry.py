@@ -538,7 +538,9 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
     "Found multiple active Ray instances".  A job-level ``runtime_env``
     ``env_vars`` entry is merged into every actor and task the job creates,
     so they resolve the same address as the driver.  ``PYTHONPATH`` travels
-    with it so actors import the pinned Miles checkout, not the image's.
+    with it so actors import the pinned Miles checkout, not the image's;
+    ``YETO_RL_ELASTIC_METADATA`` (only when ``--rl-elastic`` set it) so the
+    rollout metadata hook in the workers reports the data cursor.
     """
 
     environ = os.environ if environ is None else environ
@@ -559,6 +561,12 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
         env_vars[ECHO_ENV] = environ[ECHO_ENV]  # Ray workers echo their tape writes too
     if environ.get("PYTHONPATH"):
         env_vars["PYTHONPATH"] = environ["PYTHONPATH"]
+    from .rollout_meta_hook import ELASTIC_METADATA_ENV
+
+    if environ.get(ELASTIC_METADATA_ENV) == "1":
+        # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
+        # inherit the raylet's environment, not the driver's.
+        env_vars[ELASTIC_METADATA_ENV] = "1"
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
 
