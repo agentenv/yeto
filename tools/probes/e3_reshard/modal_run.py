@@ -48,7 +48,8 @@ PROFILES = {
 OVERRIDES = {"dev-gather": ["hidden_dropout=0.0", "attention_dropout=0.0"]}
 OVERRIDES["a8"] = list(OVERRIDES["dev-gather"])
 REQUIRED_ARGV = {"dev-gather": (), "a8": ("--deterministic-mode",)}
-DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "NVIDIA_TF32_OVERRIDE": "0"}
+DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "NVIDIA_TF32_OVERRIDE": "0",
+                   "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0"}  # = entry.DETERMINISM_ENV (checked by a test)
 
 
 PACKED_MARKER = "=== PACKED READY ==="
@@ -122,6 +123,8 @@ def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = 
         f"test \"$(git --git-dir=/root/miles/.git rev-parse HEAD)\" = {MILES_COMMIT} || {{ echo 'miles pin mismatch'; exit 4; }}",
         f"PYTHONPATH=/root/miles:/yeto python -m yeto.rl.engine.runtime_manifest --image {IMAGE} "
         f"--out {work}/runtime_manifest.json || exit 8",
+        # determinism env before the raylet starts, so every Ray worker inherits it (A8)
+        *([f"export {k}={shlex.quote(v)}" for k, v in DETERMINISM_ENV.items()] if p["deterministic"] else []),
         "ray start --head --port=6379 --num-gpus=2 --disable-usage-stats > /dev/null || exit 9",
         "export RAY_ADDRESS=127.0.0.1:6379",
         'run_phase dry "--phase dry"',
