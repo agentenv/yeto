@@ -21,7 +21,8 @@ from yeto.rl.engine.miles_adapter.trainer_rebuild import (
 
 ALGO = AlgorithmIdentity("a" * 64)
 ARGS = SimpleNamespace(actor_num_nodes=1, actor_num_gpus_per_node=1, num_steps_per_rollout=1,
-                       global_batch_size=GBS, load=None, start_rollout_id=0)
+                       global_batch_size=GBS, load="/ref", requested_load=None,
+                       start_rollout_id=0)
 LAYOUT = {"world": 1, "tp": 1, "pp": 1, "cp": 1, "ep": 1, "dp": 1}
 
 
@@ -126,6 +127,14 @@ def _rebuild_error(stage, *, cleanup=None, previous_view=None, restored=False):
     return err
 
 
+class Cursor:
+    def __init__(self):
+        self.value = {"sample_offset": 4, "epoch_id": 0, "sample_group_index": 4, "sample_index": 32}
+
+    def data_cursor(self):
+        return dict(self.value)
+
+
 def _setup(tmp_path):
     rank = _trained_rank()
     group = RankGroup([rank])
@@ -146,7 +155,7 @@ def test_same_shape_rebuild_swaps_the_handle_and_restores(tmp_path):
         return fresh, None
 
     result = rebuild_same_shape(
-        trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run, worker_manager="wm",
+        trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run, worker_manager="wm", rollout=Cursor(),
         rebuild=rebuild,
         restore=lambda: trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect()),
     )
@@ -168,7 +177,7 @@ def test_failed_rebuild_is_rebuilt_old_from_the_same_cut(tmp_path):
         return fresh, None
 
     result = rebuild_same_shape(
-        trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run, worker_manager="wm",
+        trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run, worker_manager="wm", rollout=Cursor(),
         rebuild=rebuild,
         restore=lambda: trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect()),
     )
@@ -189,7 +198,7 @@ def test_unrecoverable_rebuild_requires_recovery(tmp_path, failure):
 
     with pytest.raises(RecoveryRequired) as info:
         rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
-                           worker_manager="wm", rebuild=rebuild, restore=lambda: None)
+                           worker_manager="wm", rollout=Cursor(), rebuild=rebuild, restore=lambda: None)
     assert info.value.attempts
 
 
@@ -200,21 +209,110 @@ def test_restore_failure_after_rebuild_requires_recovery(tmp_path):
     async def rebuild(args, executor, **kw):
         return RankGroup([make_rank(4)]), None
 
-    with pytest.raises(RecoveryRequired, match="restore failed"):
+    with pytest.raises(RecoveryRequired, match="unusable after rebuild"):
         rebuild_same_shape(
-            trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run, worker_manager="wm",
+            trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run, worker_manager="wm", rollout=Cursor(),
             rebuild=rebuild,
             restore=lambda: trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect()),
         )
 
 
 def test_rebuild_preconditions():
+    # bridge mode: args.load is --ref-load and start_rollout_id is 0 -- not a refusal
     assert rebuild_preconditions(ARGS) == []
-    bad = SimpleNamespace(load="/ckpt", start_rollout_id=None, use_fault_tolerance=True, indep_dp=False,
+    bad = SimpleNamespace(requested_load="/ckpt", use_fault_tolerance=True, indep_dp=False,
                           trainer_controller_addrs=["x"])
     problems = " ".join(rebuild_preconditions(bad))
-    for word in ("--load", "start_rollout_id", "fault-tolerance", "independently"):
+    for word in ("--load was requested", "fault-tolerance", "independently"):
         assert word in problems
+
+
+def test_data_cursor_change_across_rebuild_requires_recovery(tmp_path):
+    _, _, actor, trainer = _setup(tmp_path)
+    cursor = Cursor()
+
+    async def rebuild(args, executor, **kw):
+        cursor.value = {**cursor.value, "sample_offset": 0}  # e.g. rollout_executor.load rewound it
+        return RankGroup([make_rank(4)]), None
+
+    with pytest.raises(RecoveryRequired, match="data cursor changed"):
+        rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
+                           worker_manager="wm", rollout=cursor, rebuild=rebuild,
+                           restore=lambda: pytest.fail("restore must not run"))
+
+
+def test_any_failure_after_swap_requires_recovery(tmp_path):
+    _, _, actor, trainer = _setup(tmp_path)
+
+    async def rebuild(args, executor, **kw):
+        return RankGroup([make_rank(4)]), None
+
+    def restore():
+        raise KeyError("unexpected")
+
+    with pytest.raises(RecoveryRequired):
+        rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
+                           worker_manager="wm", rollout=Cursor(), rebuild=rebuild, restore=restore)
+
+
+def test_layout_is_read_back_from_the_ranks(tmp_path):
+    _, _, actor, trainer = _setup(tmp_path)
+    other = make_rank(4, coord={"global_rank": 0, "tp": 0, "pp": 0, "dp": 0, "dp_size": 1, "cp_size": 1,
+                                "ep_size": 1, "tp_size": 2, "pp_size": 1})
+
+    async def rebuild(args, executor, **kw):
+        return RankGroup([other]), None
+
+    with pytest.raises(RecoveryRequired, match="layout changed"):
+        rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
+                           worker_manager="wm", rollout=Cursor(), rebuild=rebuild, restore=lambda: None)
+
+
+def test_restore_into_live_trainer_is_refused(tmp_path):
+    rank, _, _, trainer = _setup(tmp_path)  # the same (trained) trainer: scheduler not at 0
+    with pytest.raises(Exception, match="freshly built"):
+        trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+def test_context_is_checked_before_any_rank_writes(tmp_path):
+    rank = _trained_rank()
+    with pytest.raises(CutError, match="cursor"):
+        _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path, data={}))
+    assert not (tmp_path / "cut-a").exists()
+
+
+def test_missing_optimizer_coverage_is_refused(tmp_path, monkeypatch):
+    from yeto.rl.engine.miles_adapter import cut_plugin
+
+    real = cut_plugin._save
+    monkeypatch.setattr(cut_plugin, "_save", lambda *a, **k: {**real(*a, **k), "optimizer_names": ["lora_A"]})
+    with pytest.raises(CutError, match="no optimizer state"):
+        _trainer(RankGroup([_trained_rank()])).save_cut(epoch=1, context=_context(tmp_path))
+
+
+def test_no_shared_filesystem_refuses_distopt_dp2(tmp_path):
+    ranks = [make_rank(0, coord={"global_rank": i, "tp": 0, "pp": 0, "dp": i, "dp_size": 2, "cp_size": 1,
+                                 "ep_size": 1, "tp_size": 1, "pp_size": 1}) for i in range(2)]
+    for r in ranks:
+        r.args = SimpleNamespace(fp16=False, bf16=True, global_batch_size=GBS, use_distributed_optimizer=True)
+    args = SimpleNamespace(**{**ARGS.__dict__, "actor_num_gpus_per_node": 2, "use_distributed_optimizer": True})
+    t = MilesTrainerGroup(args=args, actor_model=RankGroup(ranks), learner_id=0, learner_generation=0,
+                          parameter_layout_hash=lambda: "L", runner=LoopRunner())
+    t.save_cut(epoch=1, context=_context(tmp_path, progress=CutProgress(0, 0, GBS, 0, 0, "h")))
+    with pytest.raises(CutError, match="shared cut filesystem"):
+        t.restore_cut("cut-a", epoch=1, root=str(tmp_path), shared_filesystem=False,
+                      expect=_expect(layout={**LAYOUT, "world": 2, "dp": 2}, local_step=0, policy_version=0))
+
+
+def test_swappable_actor_dispose_resolves_current_target():
+    import asyncio
+
+    a, b = RankGroup([]), RankGroup([])
+    proxy = SwappableActor(a)
+    bound_at_add = proxy.dispose  # what Miles Disposer.add stores
+    proxy.swap(b)
+    asyncio.run(bound_at_add())
+    assert b.disposed and not a.disposed
 
 
 def test_swappable_actor_forwards():

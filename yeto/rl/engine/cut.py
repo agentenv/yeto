@@ -263,11 +263,10 @@ class CutManifest:
 
     def completeness_problems(self) -> list[str]:
         """Required state that is missing or inconsistent (4.1: missing state is refused)."""
-        out = [f"progress: {p}" for p in self.progress.problems()]
-        if not _CUT_ID.match(self.cut_id):
-            out.append(f"invalid cut_id {self.cut_id!r}")
-        if not self.algorithm.algorithm_spec_sha256:
-            out.append("algorithm: algorithm_spec_sha256 missing")
+        out = context_problems(
+            cut_id=self.cut_id, progress=self.progress, algorithm=self.algorithm, data=self.data,
+            ledger=self.ledger, outer=self.outer, runtime=self.runtime,
+        )
         if not self.files:
             out.append("files: no trainer shard")
         paths = [f.path for f in self.files]
@@ -275,20 +274,6 @@ class CutManifest:
             out.append("files: duplicate path")
         if len(self.rank_summaries) != len(self.files):
             out.append(f"rank_summaries: {len(self.rank_summaries)} for {len(self.files)} shards")
-        for key in ("sample_offset", "epoch_id", "sample_group_index", "sample_index"):
-            if not isinstance(self.data.get(key), int):
-                out.append(f"data: cursor field {key!r} missing")
-        if self.ledger.get("carried_over") != 0:
-            # 4.1 audit: on the ports path Miles returns no reusable leftover
-            # (partial rollout refused, surplus groups dropped, buffer not saved).
-            out.append(f"ledger: carried_over must be 0 on the Miles ports path, got {self.ledger.get('carried_over')!r}")
-        if self.ledger.get("ready_unconsumed") != 0:
-            out.append("ledger: first-version cut requires no ready-unconsumed group (quiescent cut)")
-        if self.outer.get("settled") is not True:
-            out.append("outer: the outer commit of this cut is not settled (D5)")
-        for key in ("backend_fingerprint", "layout", "rng_policy"):
-            if not self.runtime.get(key):
-                out.append(f"runtime: {key} missing")
         for i, summary in enumerate(self.rank_summaries):
             if summary.get("scheduler_samples") != self.progress.scheduler_samples:
                 out.append(
@@ -298,6 +283,44 @@ class CutManifest:
             if not summary.get("has_optimizer_state") or not summary.get("has_rng"):
                 out.append(f"rank {i}: optimizer state or RNG missing")
         return out
+
+
+DATA_CURSOR_FIELDS = ("sample_offset", "epoch_id", "sample_group_index", "sample_index")
+
+
+def context_problems(
+    *,
+    cut_id: str,
+    progress: CutProgress,
+    algorithm: AlgorithmIdentity,
+    data: Mapping[str, Any],
+    ledger: Mapping[str, Any],
+    outer: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+) -> list[str]:
+    """Checks that do not need the trainer shards; ``save_cut`` runs them before writing anything."""
+    out = [f"progress: {p}" for p in progress.problems()]
+    if not _CUT_ID.match(cut_id):
+        out.append(f"invalid cut_id {cut_id!r}")
+    if not algorithm.algorithm_spec_sha256:
+        out.append("algorithm: algorithm_spec_sha256 missing")
+    for key in DATA_CURSOR_FIELDS:
+        if not isinstance(data.get(key), int):
+            out.append(f"data: cursor field {key!r} missing")
+    if data.get("buffer_length") not in (None, 0):
+        out.append(f"data: Miles data buffer holds {data.get('buffer_length')} groups (not carried by a cut)")
+    if ledger.get("carried_over") != 0:
+        # 4.1 audit: on the ports path Miles returns no reusable leftover
+        # (partial rollout refused, surplus groups dropped, buffer not saved).
+        out.append(f"ledger: carried_over must be 0 on the Miles ports path, got {ledger.get('carried_over')!r}")
+    if ledger.get("ready_unconsumed") != 0:
+        out.append("ledger: first-version cut requires no ready-unconsumed group (quiescent cut)")
+    if outer.get("settled") is not True:
+        out.append("outer: the outer commit of this cut is not settled (D5)")
+    for key in ("backend_fingerprint", "layout", "rng_policy"):
+        if not runtime.get(key):
+            out.append(f"runtime: {key} missing")
+    return out
 
 
 def cut_dir(root: str | os.PathLike[str], cut_id: str) -> Path:

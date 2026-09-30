@@ -328,10 +328,18 @@ class MilesTrainerGroup:
         a non-zero ``carried_over``/ready-unconsumed ledger, an unsettled outer
         commit or a missing data cursor.
         """
-        from ..cut import CutFile, CutManifest, commit_manifest, cut_dir
-        from .cut_plugin import SAVE_CUT_SHARD
+        from ..cut import CutError, CutFile, CutManifest, commit_manifest, context_problems, cut_dir
+        from .cut_plugin import SAVE_CUT_SHARD, config_problems
 
         cut_id = context.cut_id
+        runtime = self._runtime(context)
+        # Everything that does not need the shards is refused before any rank writes.
+        problems = context_problems(
+            cut_id=cut_id, progress=context.progress, algorithm=context.algorithm, data=context.data,
+            ledger=context.ledger, outer=context.outer, runtime=runtime,
+        ) + config_problems(self._args)
+        if problems:
+            raise CutError("refusing to save a cut: " + "; ".join(problems))
         directory = cut_dir(context.root, cut_id)
         summaries = [
             dict(s) for s in self._run(
@@ -341,18 +349,25 @@ class MilesTrainerGroup:
         expected = trainer_workers(self._args)
         if len(summaries) != expected:
             raise TrainStepError(f"expected {expected} cut shards (one per rank), got {len(summaries)}")
+        # has_optimizer_state means: every adapter tensor of each (tp, pp) has
+        # optimizer state on at least one of its DP ranks (DistOpt ranges).
+        covered: dict[tuple[int, int], tuple[set[str], set[str]]] = {}
+        for s in summaries:
+            key = (s["coord"]["tp"], s["coord"]["pp"])
+            adapters, optimized = covered.setdefault(key, (set(), set()))
+            adapters.update(s.get("adapter_names") or ())
+            optimized.update(s.get("optimizer_names") or ())
+        for key, (adapters, optimized) in sorted(covered.items()):
+            if not adapters or not adapters <= optimized:
+                missing = sorted(adapters - optimized)[:4]
+                for s in summaries:
+                    if (s["coord"]["tp"], s["coord"]["pp"]) == key:
+                        s["has_optimizer_state"] = False
+                problems.append(f"tp{key[0]}/pp{key[1]}: no optimizer state for {missing or 'any adapter'}")
         manifest = CutManifest(
             cut_id=cut_id,
             epoch=int(epoch),
-            runtime={
-                "backend_fingerprint": context.backend_fingerprint,
-                "layout": self.layout(),
-                "rng_policy": "exact",
-                "precision": "fp16" if getattr(self._args, "fp16", False) else (
-                    "bf16" if getattr(self._args, "bf16", False) else "fp32"),
-                "distributed_optimizer": bool(getattr(self._args, "use_distributed_optimizer", False)),
-                "shard_schema": "yeto.cut_shard/v1",
-            },
+            runtime=runtime,
             progress=context.progress,
             algorithm=context.algorithm,
             data=context.data,
@@ -367,8 +382,38 @@ class MilesTrainerGroup:
                 for s in summaries
             ),
         )
+        if problems:
+            raise CutError("refusing an incomplete cut: " + "; ".join(problems))
         commit_manifest(context.root, manifest, check_files=context.shared_filesystem)
         return cut_id
+
+    def _runtime(self, context: "CutContext") -> dict[str, Any]:
+        return {
+            "backend_fingerprint": context.backend_fingerprint,
+            "layout": self.layout(),
+            "rng_policy": "exact",
+            "precision": "fp16" if getattr(self._args, "fp16", False) else (
+                "bf16" if getattr(self._args, "bf16", False) else "fp32"),
+            "distributed_optimizer": bool(getattr(self._args, "use_distributed_optimizer", False)),
+            "shard_schema": "yeto.cut_shard/v1",
+        }
+
+    def actual_layout(self) -> dict[str, int]:
+        """Layout read back from the running ranks (not from args)."""
+        from .cut_plugin import RANK_COORDS
+
+        coords = [dict(c) for c in self._run(self._actor.run_plugin(RANK_COORDS, {}))]
+        if not coords:
+            raise TrainStepError("trainer reported no ranks")
+        first = coords[0]
+        return {
+            "world": len(coords),
+            "tp": int(first.get("tp_size", 1)),
+            "pp": int(first.get("pp_size", 1)),
+            "cp": int(first.get("cp_size", 1)),
+            "ep": int(first.get("ep_size", 1)),
+            "dp": int(first.get("dp_size", 1)),
+        }
 
     def restore_cut(self, cut_id: str, *, epoch: int, root: str, expect: Any,
                     shared_filesystem: bool = True) -> Any:
@@ -377,6 +422,11 @@ class MilesTrainerGroup:
         After loading, each rank re-exports its state; the digest of adapter +
         optimizer (FP32 main, moments, step, hyper-parameters) + scheduler +
         Megatron counters, and the RNG digest, must equal the saved ones.
+
+        Only for a freshly built trainer (its LR scheduler must be at 0:
+        Megatron ``load_state_dict`` adds the saved progress). ANY exception
+        raised here leaves the trainer in an unknown state: the caller treats
+        it as RECOVERY_REQUIRED and never resumes training on it.
         """
         from ..cut import CutError, cut_dir, verify_cut
         from .cut_plugin import RESTORE_CUT_SHARD
@@ -384,8 +434,12 @@ class MilesTrainerGroup:
         manifest = verify_cut(root, cut_id, expect, check_files=shared_filesystem)
         if manifest.epoch > epoch:
             raise CutError(f"cut epoch {manifest.epoch} is newer than the restoring epoch {epoch}")
-        if dict(manifest.runtime["layout"]) != self.layout():
-            raise CutError(f"cut layout {manifest.runtime['layout']} != trainer layout {self.layout()}")
+        actual = self.actual_layout()
+        if dict(manifest.runtime["layout"]) != actual:
+            raise CutError(f"cut layout {manifest.runtime['layout']} != running trainer layout {actual}")
+        if not shared_filesystem and manifest.runtime.get("distributed_optimizer") and actual["dp"] > 1:
+            # A DistOpt rank merges every DP shard of its (tp, pp): they must all be readable here.
+            raise CutError("DistributedOptimizer with DP>1 needs a shared cut filesystem")
         files = [f.to_dict() for f in manifest.files]
         results = [
             dict(r) for r in self._run(

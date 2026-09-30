@@ -65,6 +65,7 @@ class MilesCutBackend:
         return {
             "global_rank": dist.get_rank() if dist.is_initialized() else 0,
             "tp": ps.tp.rank, "pp": ps.pp.rank, "dp": ps.intra_dp.rank, "dp_size": ps.intra_dp.size,
+            "tp_size": ps.tp.size, "pp_size": ps.pp.size,
             "cp_size": ps.cp.size, "ep_size": ps.ep.size,
         }
 
@@ -142,6 +143,12 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None) -> list[s
         out.append("--num-distributed-optimizer-instances > 1 (partial DP optimizer groups)")
     cp = int((coord or {}).get("cp_size") or getattr(args, "context_parallel_size", 1) or 1)
     ep = int((coord or {}).get("ep_size") or getattr(args, "expert_model_parallel_size", 1) or 1)
+    tp = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
+    pp = int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
+    if (tp > 1 or pp > 1) and getattr(args, "use_distributed_optimizer", False):
+        # The post-restore republish (state_plugin._collective_export) cannot
+        # expose DP-sharded masters under TP/PP; refuse before saving.
+        out.append("TP/PP>1 together with DistributedOptimizer-sharded masters is not supported")
     if cp > 1:
         out.append("CP>1 is not supported")
     if ep > 1:
@@ -156,6 +163,11 @@ def _require(actor: Any, backend: Any) -> dict[str, int]:
         problems.append("the trainer has no optimizer")
     if getattr(actor, "opt_param_scheduler", None) is None:
         problems.append("the trainer has no LR scheduler")
+    if not problems and (coord.get("tp_size", 1) > 1 or coord.get("pp_size", 1) > 1):
+        from .state_plugin import distributed_ranges
+
+        if distributed_ranges(actor.optimizer)[0]:
+            problems.append("TP/PP>1 together with DistributedOptimizer-sharded masters is not supported")
     if problems:
         raise CutPluginError("ReconfigurationCut unsupported: " + "; ".join(problems))
     return coord
@@ -311,6 +323,8 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng),
         "adapter_tensors": len(named),
+        "adapter_names": sorted(n for n, _ in named),
+        "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
     }
 
 
@@ -338,6 +352,39 @@ def _peer_entries(files: list[Mapping[str, Any]], coord: Mapping[str, int]) -> l
         and (f.get("coord") or {}).get("tp") == coord["tp"]
         and (f.get("coord") or {}).get("pp") == coord["pp"]
     ]
+
+
+def _scheduler_steps(state: Mapping[str, Any]) -> int:
+    return int(state["num_iters"] if "num_iters" in state else state["num_steps"])
+
+
+def check_scheduler(scheduler: Any, saved: Mapping[str, Any]) -> None:
+    """Pre-check before Megatron ``OptimizerParamScheduler.load_state_dict``.
+
+    Megatron's load ends with ``step(increment=num_steps)``, i.e. it ADDS the
+    saved progress: restore_cut is only for a freshly built trainer whose
+    scheduler is at 0. Hyper-parameters are compared strictly (the
+    ``_check_and_set`` values: max/min lr, warmup/decay steps and style,
+    weight-decay schedule), independent of ``override``/``use_checkpoint``
+    flags -- a cut restores the same run.
+    """
+    if int(scheduler.num_steps) != 0:
+        raise CutPluginError(
+            f"LR scheduler already at {scheduler.num_steps}: restore_cut only restores into a freshly built trainer"
+        )
+    current = scheduler.state_dict()
+    skip = {"num_steps", "num_iters"}
+    diff = sorted(k for k in set(current) | set(saved) if k not in skip and current.get(k) != saved.get(k))
+    if diff:
+        raise CutPluginError(f"LR scheduler hyper-parameters differ from the cut: {diff}")
+
+
+def rank_coords(actor: Any) -> dict[str, int]:
+    """This rank's actual parallel coordinate (read back after a rebuild)."""
+    return _backend(actor).coord()
+
+
+RANK_COORDS = f"{_MODULE}.rank_coords"
 
 
 def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
@@ -378,13 +425,16 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     states = [shard["optimizer_named"]]
     for peer in _peer_entries(files, coord):
         states.append(_load_verified(directory, peer, cut_id)["optimizer_named"])
-    # Validate against the rebuilt optimizer before any write.
+    # Validate against the rebuilt optimizer and scheduler before any write.
     merged = backend.check_optimizer(actor.optimizer, named, states)
+    check_scheduler(actor.opt_param_scheduler, shard["scheduler"])
     with torch.no_grad():
         for n, p in named:
             p.data.copy_(adapter[n].to(device=p.device))
         backend.load_optimizer(actor.optimizer, named, merged)
     actor.opt_param_scheduler.load_state_dict(shard["scheduler"])
+    if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
+        raise CutPluginError("LR scheduler progress after restore differs from the cut")
     backend.set_megatron_counters(shard.get("megatron_counters") or {})
     backuper = getattr(actor, "weights_backuper", None)
     if backuper is not None:  # colocated update_weights reads the CPU backup

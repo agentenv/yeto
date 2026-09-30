@@ -15,7 +15,8 @@ class TorchCutBackend:
     """Same interface as ``MilesCutBackend`` over a plain torch optimizer."""
 
     def __init__(self, coord=None):
-        self._coord = coord or {"global_rank": 0, "tp": 0, "pp": 0, "dp": 0, "dp_size": 1, "cp_size": 1, "ep_size": 1}
+        self._coord = coord or {"global_rank": 0, "tp": 0, "pp": 0, "dp": 0, "dp_size": 1, "cp_size": 1, "ep_size": 1,
+                                "tp_size": 1, "pp_size": 1}
 
     def coord(self):
         return dict(self._coord)
@@ -92,8 +93,10 @@ class Scheduler:
         return {"num_steps": self.num_steps, "lr0": self.lr0}
 
     def load_state_dict(self, state):
-        self.num_steps, self.lr0 = state["num_steps"], state["lr0"]
-        self._apply()
+        # Megatron semantics: hyper-parameters via _check_and_set, then
+        # step(increment=num_steps) -- progress is ADDED to the current one.
+        assert self.lr0 == state["lr0"], "_check_and_set mismatch"
+        self.step(state["num_steps"])
 
 
 class LoraModule(torch.nn.Module):

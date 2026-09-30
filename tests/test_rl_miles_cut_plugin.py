@@ -161,3 +161,42 @@ def test_plugin_paths_resolve():
     for path in (cut_plugin.SAVE_CUT_SHARD, cut_plugin.RESTORE_CUT_SHARD):
         module, name = path.rsplit(".", 1)
         assert callable(getattr(importlib.import_module(module), name))
+
+
+def test_restore_into_a_trained_scheduler_is_refused_before_any_write(tmp_path):
+    """Megatron load_state_dict ADDS num_steps: only a fresh trainer (scheduler at 0) may be restored."""
+    rank = make_rank(0)
+    train_step(rank, _batches(1)[0])
+    s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    live = make_rank(3)
+    train_step(live, _batches(1)[0])
+    before = params(live)
+    with pytest.raises(CutPluginError, match="freshly built"):
+        restore_cut_shard(live, directory=str(tmp_path), files=[s], cut_id="c1")
+    assert live.opt_param_scheduler.num_steps == 4
+    for n, v in before.items():
+        assert torch.equal(v, params(live)[n])
+
+
+def test_scheduler_hyper_parameter_mismatch_is_refused_before_any_write(tmp_path):
+    rank = make_rank(0)
+    s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    fresh = make_rank(3)
+    fresh.opt_param_scheduler.lr0 = 0.5
+    before = params(fresh)
+    with pytest.raises(CutPluginError, match="hyper-parameters"):
+        restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")
+    for n, v in before.items():
+        assert torch.equal(v, params(fresh)[n])
+
+
+def test_tp_pp_with_distributed_optimizer_is_refused():
+    args = SimpleNamespace(tensor_model_parallel_size=2, use_distributed_optimizer=True)
+    assert any("DistributedOptimizer" in p for p in config_problems(args))
+    assert not config_problems(SimpleNamespace(tensor_model_parallel_size=2))
+    assert not config_problems(SimpleNamespace(use_distributed_optimizer=True))
+
+
+def test_save_reports_optimizer_coverage(tmp_path):
+    s = save_cut_shard(make_rank(0), directory=str(tmp_path), cut_id="c1")
+    assert s["adapter_names"] == s["optimizer_names"] == ["lora_A", "lora_B"]
