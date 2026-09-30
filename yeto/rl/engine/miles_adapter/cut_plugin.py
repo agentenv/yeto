@@ -209,6 +209,44 @@ def _feed(digest: Any, value: Any) -> None:
         digest.update(repr(value).encode())
 
 
+_NDARRAY = "__yeto_ndarray__"
+
+
+def to_safe(value: Any) -> Any:
+    """Encode NumPy arrays/scalars (e.g. ``np.random.get_state()``) for ``torch.load(weights_only=True)``."""
+    import numpy as np
+    import torch
+
+    if isinstance(value, np.ndarray):
+        raw = np.ascontiguousarray(value)
+        return {_NDARRAY: torch.frombuffer(bytearray(raw.tobytes()), dtype=torch.uint8),
+                "dtype": raw.dtype.str, "shape": list(raw.shape)}
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {k: to_safe(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return tuple(to_safe(v) for v in value)
+    if isinstance(value, list):
+        return [to_safe(v) for v in value]
+    return value
+
+
+def from_safe(value: Any) -> Any:
+    import numpy as np
+
+    if isinstance(value, Mapping):
+        if _NDARRAY in value:
+            data = value[_NDARRAY].numpy().tobytes()
+            return np.frombuffer(data, dtype=np.dtype(value["dtype"])).reshape(value["shape"]).copy()
+        return {k: from_safe(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return tuple(from_safe(v) for v in value)
+    if isinstance(value, list):
+        return [from_safe(v) for v in value]
+    return value
+
+
 def _sha256(path: str) -> str:
     from yeto.rl.engine.cut import sha256_file
 
@@ -258,7 +296,7 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         raise CutPluginError(f"cut shard {final} already exists (cuts are immutable)")
     tmp = final + ".tmp"
     with open(tmp, "wb") as fh:
-        torch.save(shard, fh)
+        torch.save(to_safe(shard), fh)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, final)
@@ -284,7 +322,8 @@ def _load_verified(directory: str, entry: Mapping[str, Any], cut_id: str) -> dic
         raise CutPluginError(f"cut shard {path} is missing or truncated")
     if _sha256(path) != entry["sha256"]:
         raise CutPluginError(f"cut shard {path} checksum mismatch")
-    shard = torch.load(path, map_location="cpu", weights_only=False)
+    # weights_only: a cut shard is data, never code (test_provenance).
+    shard = from_safe(torch.load(path, map_location="cpu", weights_only=True))
     if shard.get("schema") != SHARD_SCHEMA or shard.get("cut_id") != cut_id:
         raise CutPluginError(f"{path} is not a shard of cut {cut_id!r}")
     return shard
