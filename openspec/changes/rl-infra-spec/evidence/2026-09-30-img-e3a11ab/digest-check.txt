@@ -1,0 +1,5 @@
+registry(crane digest tag)=sha256:2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff
+build-record=sha256:2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff
+yeto.rl.MILES_NEXT_IMAGE=sha256:2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff
+yeto.rl.MILES_NEXT_COMMIT=e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841
+THREE-WAY MATCH

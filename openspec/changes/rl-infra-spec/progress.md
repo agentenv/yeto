@@ -555,6 +555,8 @@
 - L3：删去 `optimizer_diff` 中的死代码。
 - L4：新增替身测试，直接调用 `MilesCutBackend.export_optimizer`，并用 defaultdict 模拟 state。
 - **L5 已知限制**：`save_cut` 时如果部分 rank 拒绝，已经成功的 rank 会在 cut 目录留下分片。没有 manifest 时 cut 视为不存在，恢复不会使用这些分片，但它们不会被自动清理；同一 cut_id 再次保存会因分片已存在而被拒。调用方应换用新的 cut_id，或手动清理。
+- A2 rerun2 退出码 3 的原因与修复（上一代码提交）：一条 Modal 日志条目同时带了 `rl_learner_finalized` 记录和下一行 `[rl] learner 0 finalized`。收集器把整条条目当作一行解析，JSON 失败，这条记录被当作"格式损坏"丢弃，磁带因此没有 finalized 记录。现在收集器按换行切分每个条目；某条目末尾不完整、尚不能解析成记录的一段先暂存，与下一条目拼接（确实损坏的计为丢弃，后面的记录照常保留，关闭时再判一次）。Modal 日志的每一行都带岛名前缀。判定磁带完整之前的等待改为按事件返回：全部岛收到 finalized，或全部日志流结束，或到达有界时限。退出码语义不变。测试 `tests/test_rl_tape_collector_stream.py` 覆盖多行条目、跨条目半行、真损坏行、关闭时判定、最后事件晚到。
+- 全量：68F/3127P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b7.ids`）。
 ## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
 - 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
 - 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。
