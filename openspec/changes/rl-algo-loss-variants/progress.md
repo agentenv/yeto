@@ -118,3 +118,6 @@
 ### 待批准 / 交接
 - trainer v2 补丁请在 INFRA-E3 空档合入；v1 已在 cbf3d22 中。
 - 4.4 是否可按 §7b.7 的口径（钉住镜像 + 完整 parse_args，需要 CUDA 容器）补跑，由主 agent 决定。
+
+## 2026-09-30 ALGO-2b-T4：4.4 完整 parse_args 补跑计划（运行前提交）
+用户 2026-09-30 批准 Modal T4 补跑，单独记账，上限 $2。计划、判据、硬超时见 `evidence/2026-09-30-t4-parse/plan.md`（判据：CISPO/SAPO/GMPO 的 yeto 生成 argv 通过完整 parse_args + validate_parsed_args；应拒绝组合被拒；镜像 miles = 5c1b49eb；函数 timeout 840s + 本地 timeout 900 + 独立 watchdog 1080s；预计 < $0.30）。
