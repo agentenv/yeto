@@ -40,6 +40,76 @@ def _algorithm_identity(algorithm: Any, *, ref_model: Mapping[str, Any] | None) 
     return AlgorithmIdentity.from_spec(algorithm, runtime_attrs=runtime_attrs, ref_model=ref_model)
 
 
+class CutSource:
+    """What the driver contributes to a cut (E2 ``CutContext``) and what a
+    restore must match (``RestoreExpectation``); shared by the 4.4 same-shape
+    rebuilder and E3's ``MilesTrainerOps`` (4.7)."""
+
+    def __init__(self, *, driver: Any, trainer: Any, rollout: Any, ledger: Any, algorithm: Any,
+                 backend_fingerprint: str, cut_root: str, global_batch_size: int,
+                 ref_model: Mapping[str, Any] | None = None,
+                 shared_filesystem: bool = True) -> None:
+        self.driver_ref = driver  # the driver, or a zero-arg callable returning it
+        self.trainer = trainer
+        self.rollout = rollout
+        self.ledger = ledger
+        self.identity = _algorithm_identity(algorithm, ref_model=ref_model)
+        self.backend_fingerprint = backend_fingerprint
+        self.cut_root = cut_root
+        self.global_batch_size = int(global_batch_size)
+        self.shared_filesystem = shared_filesystem
+
+    @property
+    def driver(self) -> Any:
+        ref = self.driver_ref
+        return ref() if callable(ref) and not hasattr(ref, "published_state") else ref
+
+    def context(self, cut_id: str) -> Any:
+        from ..controller import RebuildRefused
+        from ..cut import CutProgress
+        from .trainer import CutContext
+
+        driver = self.driver
+        state = driver.published_state
+        if state is None or driver.published_version is None:
+            raise RebuildRefused("no published policy to cut")
+        cursor = (self.rollout.data_cursor()
+                  if callable(getattr(self.rollout, "data_cursor", None)) else None)
+        if cursor is None:
+            raise RebuildRefused("rollout data cursor unknown (needs the elastic metadata)")
+        data = dict(cursor)
+        summary = dict(self.ledger.cut_summary()) if self.ledger is not None else {}
+        if summary.get("engine_buffer_length") is not None:
+            data.setdefault("buffer_length", summary["engine_buffer_length"])
+        progress = CutProgress(
+            local_step=int(driver.local_step),
+            scheduler_samples=int(driver.local_step) * self.global_batch_size,
+            global_batch_size=self.global_batch_size,
+            next_rollout_id=int(driver.published_version),
+            policy_version=int(state.policy_version),
+            policy_hash=state.policy_tensor_hash(),
+        )
+        return CutContext(
+            root=self.cut_root, cut_id=cut_id, backend_fingerprint=self.backend_fingerprint,
+            progress=progress, algorithm=self.identity, data=data, ledger=summary,
+            # The safe point is after boundary() returned non-stop and every
+            # member acknowledged the policy: the outer commit is settled.
+            outer={"settled": bool(driver.at_safe_point), "policy_version": state.policy_version,
+                   "policy_token": driver.expected_token},
+            shared_filesystem=self.shared_filesystem,
+        )
+
+    def expectation(self, layout: Mapping[str, int], *, epoch: int) -> Any:
+        from ..cut import RestoreExpectation
+
+        driver = self.driver
+        return RestoreExpectation(
+            algorithm=self.identity, layout=dict(layout),
+            backend_fingerprint=self.backend_fingerprint, local_step=int(driver.local_step),
+            policy_version=int(driver.published_state.policy_version), epoch=epoch,
+        )
+
+
 def make_trainer_rebuilder(
     *,
     trainer: Any,  # MilesTrainerGroup
@@ -62,53 +132,23 @@ def make_trainer_rebuilder(
     executor, :class:`SwappableActor`, runner and data-cursor source."""
 
     from ..controller import RebuildRefused
-    from ..cut import CutError, CutProgress, RestoreExpectation
-    from .trainer import CutContext
-
-    identity = _algorithm_identity(algorithm, ref_model=ref_model)
+    from ..cut import CutError
 
     def rebuilder(driver: Any, *, epoch: int, cut_id: str) -> Mapping[str, Any]:
         problems = list(preconditions()) if preconditions is not None else []
         if problems:
             raise RebuildRefused("same-shape trainer rebuild refused: " + "; ".join(problems))
-        state = driver.published_state
-        if state is None or driver.published_version is None:
-            raise RebuildRefused("no published policy to cut")
-        policy_hash = state.policy_tensor_hash()
-        cursor = rollout.data_cursor() if callable(getattr(rollout, "data_cursor", None)) else None
-        if cursor is None:
-            raise RebuildRefused("rollout data cursor unknown (needs the elastic metadata)")
-        data = dict(cursor)
-        summary = dict(ledger.cut_summary()) if ledger is not None else {}
-        if summary.get("engine_buffer_length") is not None:
-            data.setdefault("buffer_length", summary["engine_buffer_length"])
-        progress = CutProgress(
-            local_step=int(driver.local_step),
-            scheduler_samples=int(driver.local_step) * int(global_batch_size),
-            global_batch_size=int(global_batch_size),
-            next_rollout_id=int(driver.published_version),
-            policy_version=int(state.policy_version),
-            policy_hash=policy_hash,
-        )
-        context = CutContext(
-            root=cut_root, cut_id=cut_id, backend_fingerprint=backend_fingerprint,
-            progress=progress, algorithm=identity, data=data,
-            ledger=summary,
-            # The safe point is after boundary() returned non-stop and every
-            # member acknowledged the policy: the outer commit is settled.
-            outer={"settled": bool(driver.at_safe_point), "policy_version": state.policy_version,
-                   "policy_token": driver.expected_token},
-            shared_filesystem=shared_filesystem,
-        )
+        source = CutSource(driver=driver, trainer=trainer, rollout=rollout, ledger=ledger,
+                           algorithm=algorithm, backend_fingerprint=backend_fingerprint,
+                           cut_root=cut_root, global_batch_size=global_batch_size,
+                           ref_model=ref_model, shared_filesystem=shared_filesystem)
+        context = source.context(cut_id)
+        progress = context.progress
         try:
             trainer.save_cut(epoch=epoch, context=context)
         except CutError as exc:
             raise RebuildRefused(f"cut refused: {exc}") from exc
-        expect = RestoreExpectation(
-            algorithm=identity, layout=trainer.actual_layout(),
-            backend_fingerprint=backend_fingerprint, local_step=progress.local_step,
-            policy_version=progress.policy_version, epoch=epoch,
-        )
+        expect = source.expectation(trainer.actual_layout(), epoch=epoch)
         before = (driver.rounds_completed, driver.local_step, driver.published_version,
                   driver.expected_token)
 
@@ -117,7 +157,7 @@ def make_trainer_rebuilder(
                                        shared_filesystem=shared_filesystem)
 
         result = driver.rebuild_trainer(lambda: rebuild_same_shape(restore=restore),
-                                        cut_policy_hash=policy_hash)
+                                        cut_policy_hash=progress.policy_hash)
         after = (driver.rounds_completed, driver.local_step, driver.published_version,
                  driver.expected_token)
         if after != before:
@@ -127,7 +167,7 @@ def make_trainer_rebuilder(
             "outcome": getattr(result, "outcome", None),
             "generation": getattr(result, "generation", None),
             "attempts": list(getattr(result, "attempts", []) or []),
-            "policy_hash": policy_hash,
+            "policy_hash": progress.policy_hash,
             "local_step": progress.local_step,
         }
 

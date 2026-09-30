@@ -66,6 +66,92 @@ class PublicationError(RuntimeError):
         self.failed_members = failed_members
 
 
+# Test-only fault injection (plan-3.8-4.4-v2 §4, watchdog case): block this many
+# seconds before the FIRST member ``update_weights`` of the process (see
+# ``MilesPublisher._injected_block``). Unset (default) = no effect. Set by the
+# launcher's ``--rl-test-inject-update-weights-block-s``.
+INJECT_UPDATE_BLOCK_ENV = "YETO_RL_TEST_INJECT_UPDATE_WEIGHTS_BLOCK_S"
+
+
+def injected_update_block(environ: Any = None) -> float | None:
+    import os
+
+    raw = (os.environ if environ is None else environ).get(INJECT_UPDATE_BLOCK_ENV)
+    if raw in (None, ""):
+        return None
+    value = float(raw)
+    if not value > 0:
+        raise ValueError(f"{INJECT_UPDATE_BLOCK_ENV} must be a positive number of seconds")
+    return value
+
+
+class InjectedBlockProbeError(RuntimeError):
+    """The liveness probe of the injected block failed for a reason other than a
+    dead/replaced target worker: NOT evidence of a kill (review M2)."""
+
+
+class RayTargetLiveness:
+    """Liveness of the target generation for the injected block (review M2).
+
+    ``snapshot(cells)`` records each target worker's (name, generation) when the
+    block starts; ``status()`` then reports ``"alive"`` or ``"dead: <why>"``:
+    a cell with no workers (stopped), a changed worker set / generation
+    (restarted by the health monitor) or a killed actor all count as the
+    target generation being dead. Any other error raises
+    :class:`InjectedBlockProbeError` (logged, reported separately).
+    """
+
+    def __init__(self, *, manager: Any = None, ray_module: Any = None) -> None:
+        self._manager = manager
+        self._ray = ray_module
+        self.targets: dict[str, list[tuple[str, int]]] = {}
+
+    def _deps(self) -> tuple[Any, Any]:
+        if self._ray is None:
+            import ray
+
+            self._ray = ray
+        if self._manager is None:
+            from miles.utils.workers.ray_worker_manager import RayWorkerManager
+
+            self._manager = RayWorkerManager.get_handle()
+        return self._manager, self._ray
+
+    async def snapshot(self, cells: list[str]) -> None:
+        manager, _ = self._deps()
+        self.targets = {c: sorted((i.name, int(i.generation))
+                                  for i in await manager.get_worker_infos.remote(c))
+                        for c in cells}
+        empty = [c for c, t in self.targets.items() if not t]
+        if empty:
+            raise InjectedBlockProbeError(f"target cells {empty} have no workers at block start")
+
+    async def status(self) -> str:
+        manager, ray = self._deps()
+        actor_died = getattr(getattr(ray, "exceptions", None), "RayActorError", ())
+        try:
+            for cell, targets in self.targets.items():
+                now = sorted((i.name, int(i.generation))
+                             for i in await manager.get_worker_infos.remote(cell))
+                if not now:
+                    return f"dead: cell {cell} has no workers (stopped)"
+                if now != targets:
+                    return f"dead: cell {cell} workers/generation changed {targets} -> {now}"
+                for name, generation in targets:
+                    handle = await manager.get_actor_handle.remote(
+                        name, expected_generation=generation)
+                    await asyncio.wait_for(handle.__ray_ready__.remote(), timeout=10)
+        except actor_died as exc:  # type: ignore[misc]
+            return f"dead: actor died ({type(exc).__name__})"
+        except Exception as exc:  # noqa: BLE001 - not a kill: report it as such
+            import sys
+
+            print(f"[yeto] TEST INJECTION probe error (not a kill): {exc!r}", file=sys.stderr,
+                  flush=True)
+            raise InjectedBlockProbeError(f"liveness probe failed: {exc!r}") from exc
+        return "alive"
+
+
 def payload_digest(state: TrainableState) -> tuple[str, int]:
     """SHA256 and byte count of the canonical FP32 tensor payload."""
 
@@ -134,6 +220,11 @@ class MilesPublisher:
         # engines all reported the same body: the payload reference (3.5).
         self._reference: tuple[str, dict[str, Any]] | None = None
         self.track_timeout_s = 600.0
+        # Test-only block before the FIRST member update_weights (INJECT_UPDATE_BLOCK_ENV).
+        self._inject_block = injected_update_block()
+        self.injected_blocks: list[float] = []
+        self.liveness_probe: Any = None  # RayTargetLiveness-like (snapshot/status)
+        self.block_poll_s = 1.0
 
     def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
         tensor_hash = state.policy_tensor_hash()
@@ -310,12 +401,35 @@ class MilesPublisher:
             raise PublicationError(f"serving engines do not all report {token}: {exc}") from exc
         await self._controller.end_commit_weight_version()
 
+    async def _injected_block(self, cells: list[str], seconds: float) -> None:
+        """TEST ONLY (plan-3.8-4.4-v2 §4): stand in for an ``update_weights`` blocked
+        on the new engines. Blocks up to ``seconds``; every ``block_poll_s`` it
+        checks that the target cells' worker actors are alive and fails as soon
+        as one is dead (as the real call fails when its engine is killed). It
+        emulates the blocked call on the yeto side; it is not a hang inside SGLang."""
+        import sys
+
+        self.injected_blocks.append(seconds)
+        print(f"[yeto] TEST INJECTION {INJECT_UPDATE_BLOCK_ENV}: blocking {seconds}s before "
+              f"update_weights({cells})", file=sys.stderr, flush=True)
+        probe = self.liveness_probe or RayTargetLiveness()
+        await probe.snapshot(cells)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + seconds
+        while loop.time() < deadline:
+            await asyncio.sleep(min(self.block_poll_s, max(0.0, deadline - loop.time())))
+            state = await probe.status()
+            if state != "alive":
+                raise RuntimeError(f"target engine of {cells} {state} during the injected block")
+
     async def _publish_members(
         self, token: str, cells: list[str], epoch: int
     ) -> dict[str, Any] | None:
         update_weights = self._update_weights or _default_update_weights()
         try:
             await self._controller.wait_cells_tracked(cells, timeout_seconds=self.track_timeout_s)
+            if self._inject_block is not None and not self.injected_blocks:
+                await self._injected_block(cells, self._inject_block)
             await update_weights(
                 self._args, self._actor, self._executor, self._controller,
                 members=cells, expected_epoch=epoch, admit_cordoned=True,

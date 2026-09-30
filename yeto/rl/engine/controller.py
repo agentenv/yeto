@@ -50,6 +50,25 @@ from .driver import RebuildNotStarted
 from .journal import EpochState, Journal, read_epochs, read_journal
 from .pause_audit import DEFAULT_MARGIN, DEFAULT_QUORUM_TIMEOUT_S, PAUSABLE_PHASE, pause_decision
 from .ports import ElasticRolloutPool, MemberPublisher, PlacementDescription, ReconfigurablePlacement
+try:  # E3 (4.7) module; absent until infra-e3 is integrated -> trainer edges refused
+    from .trainer_transition import (
+        READY_TO_COMMIT,
+        TRAINER_EDGE_KINDS,
+        TrainerEdgeRejected,
+        TrainerTransition,
+        plan_trainer_edge,
+        recovery_decision,
+    )
+except ImportError:  # pragma: no cover - depends on the integrated tree
+    READY_TO_COMMIT = "READY_TO_COMMIT"
+    TRAINER_EDGE_KINDS = frozenset({"trainer-dp", "role-transfer"})
+    TrainerTransition = plan_trainer_edge = None
+
+    class TrainerEdgeRejected(ValueError):
+        pass
+
+    def recovery_decision(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return {"action": "none"}
 
 # D4 phase names.
 VALIDATING = "VALIDATING"
@@ -120,6 +139,7 @@ class Plan:
     expected_pause_s: float
     pause_budget_s: float | None
     profile_hash: str | None
+    trainer: Mapping[str, Any] | None = None  # E3 (4.7): TrainerEdgePlan.to_dict()
 
     @property
     def add(self) -> int:
@@ -198,6 +218,7 @@ class IslandController:
         on_watchdog: Callable[[str, str], None] | None = None,
         inbox: "CommandInbox | None" = None,
         trainer_rebuilder: Callable[..., Mapping[str, Any]] | None = None,
+        trainer_edges: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         if initial_config not in configs:
             raise Rejected(f"initial config {initial_config!r} is unknown")
@@ -228,6 +249,10 @@ class IslandController:
         # the transaction cannot commit; once the commit began it cannot kill.
         self._watchdog_lock = threading.RLock()
         self._committing = False
+        # E3 (4.7): None keeps trainer edges refused. Otherwise returns
+        # {"spec", "args", "global_batch_size", "micro_batch_size", "ops"} where
+        # ops is a trainer_transition.TrainerOps (miles_adapter.trainer_resize.MilesTrainerOps).
+        self._trainer_edges = trainer_edges
         self.journal = Journal(self.state_dir / "reconfig", wall_clock=wall_clock)
         if self.journal.epochs.config_id is None:
             self.journal.compare_and_swap(
@@ -282,13 +307,22 @@ class IslandController:
         tx = self._tx
         if tx is None or tx.phase not in (INITIALIZING, VERIFYING):
             return []
-        return sorted(tx.added)
+        if tx.added:
+            return sorted(tx.added)
+        # E3 trainer edges journal their new engines as add_intent
+        intent = next((r for r in reversed(self.journal.records)
+                       if r["kind"] == "add_intent" and r.get("tx_id") == tx.tx_id), None)
+        return sorted(intent["members"]) if intent else []
 
     def record_watchdog_action(self, tx_id: str, **fields: Any) -> None:
         self._record("watchdog_action", tx_id=tx_id, **fields)
 
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler
+
+    def set_trainer_edges(self, provider: Callable[[], Mapping[str, Any]] | None) -> None:
+        """E3 (4.7): wired by compose_island once the trainer/pool exist."""
+        self._trainer_edges = provider
 
     def _phase(self, tx: _Tx, phase: str, **fields: Any) -> None:
         with self._watchdog_lock:  # the watchdog reads tx.phase under this lock
@@ -349,6 +383,12 @@ class IslandController:
                              phase=CANCELLED, config_epoch=epochs.config_epoch,
                              fork_epoch=self._fork_epoch, error="learner restarted before release")
             else:
+                # E3: the trainer was rebuilt from startup args; the hint names the cut
+                # a manual recovery would restore (trainer_transition.recovery_decision).
+                hint = recovery_decision(list(self.journal.iter_tx(tx_id)), epochs.config_id,
+                                         epochs.last_tx_id)
+                if hint.get("action") not in (None, "none"):
+                    self._record("trainer_recovery_hint", tx_id=tx_id, **hint)
                 self._enter_recovery(tx_id, "learner restarted after release, before commit")
         self._open_after_restart = []
         if self.recovery_required is None:
@@ -413,6 +453,8 @@ class IslandController:
         if not edges:
             raise Rejected(f"edge {source}->{target} is not certified")
         kinds = {k[2] for k in edges}
+        if kinds & TRAINER_EDGE_KINDS and not kinds & E1_EDGE_KINDS:
+            return self._plan_trainer(source, target, expected_epoch, deadline_s)
         if not kinds & E1_EDGE_KINDS:
             raise Rejected(f"edge {source}->{target} kinds {sorted(kinds)} are not E1 "
                            "(rollout-only) edges")
@@ -464,6 +506,48 @@ class IslandController:
                          finalization_rollout_id=int(rollout_id))
             cancelled.append(tx.request_id)
         return cancelled
+    def _trainer_plan(self, source: str, target: str, expected_epoch: int):
+        if self._trainer_edges is None or plan_trainer_edge is None:
+            raise Rejected(f"edge {source}->{target} is not E1 (rollout-only) and trainer edges "
+                           "are not enabled (E3)")
+        ctx = self._trainer_edges()
+        pool = getattr(self, "_pool", None)
+        probe = getattr(pool, "member_gpus", None)
+        try:
+            member_gpus = probe() if callable(probe) else None
+        except Exception:  # noqa: BLE001 - unknown map: the edge refuses it (plan stays side-effect free)
+            member_gpus = None
+        try:
+            return plan_trainer_edge(
+                member_gpus=member_gpus,
+                configs=self.configs, attestation=self.attestation, source=source, target=target,
+                expected_config_epoch=expected_epoch, spec=ctx["spec"], args=ctx["args"],
+                global_batch_size=ctx["global_batch_size"], micro_batch_size=ctx["micro_batch_size"])
+        except TrainerEdgeRejected as exc:
+            raise Rejected(str(exc)) from exc
+
+    def _plan_trainer(self, source: str, target: str, expected_epoch: int, deadline_s: float) -> Plan:
+        """E3 (4.7): trainer-dp / role-transfer edges; validation in trainer_transition (no side effect)."""
+        if self.profile is None or self.profile.execution_mode == "colocated-serial":
+            raise Rejected("trainer reconfiguration needs a partitioned profile")
+        tplan = self._trainer_plan(source, target, expected_epoch)
+        src, dst = self.configs[source], self.configs[target]
+        body = request_body(target, expected_epoch, deadline_s)
+        plan = Plan(
+            request_body_hash=body_hash(body), source=source, target=target, kind=tplan.kind,
+            expected_config_epoch=expected_epoch,
+            source_engines=src.rollout // src.rollout_engine_gpus,
+            target_engines=dst.rollout // dst.rollout_engine_gpus,
+            expected_pause_s=0.0, pause_budget_s=None, profile_hash=self.profile.contract_hash,
+            trainer=tplan.to_dict(),
+        )
+        pause_s = float(self._expected_pause(plan)) if self._expected_pause else float(deadline_s)
+        decision = self._pause_decision(PAUSABLE_PHASE, pause_s)
+        if not decision.allowed:
+            raise Rejected(f"pause not allowed: {decision.reason}")
+        from dataclasses import replace
+
+        return replace(plan, expected_pause_s=pause_s, pause_budget_s=decision.budget_s)
 
     # ------------------------------------------------------------------ request / cancel
     def request(self, request_id: str, target: str, expected_epoch: int,
@@ -789,6 +873,8 @@ class IslandController:
                 self._sleep(self.timeouts.retry_interval)
 
     def _execute(self, tx: _Tx, driver: Any, snapshot: ReadinessSnapshot) -> str:
+        if tx.plan.kind in TRAINER_EDGE_KINDS:
+            return self._execute_trainer(tx, driver, snapshot)
         pool: ElasticRolloutPool = driver.rollout
         publisher: MemberPublisher = driver.publisher
         self._pool = pool
@@ -910,13 +996,7 @@ class IslandController:
             fired = self._watchdog_fired.is_set()
             if not fired:
                 self._committing = True
-                epochs = self.journal.epochs
-                new_epoch = epochs.config_epoch + 1
-                self.journal.compare_and_swap(
-                    expected_config_epoch=epochs.config_epoch,
-                    new=EpochState(new_epoch, plan.target, self._fork_epoch,
-                                   tuple(sorted(target_members)), tx.tx_id),
-                )
+                new_epoch = self._commit(tx, plan.target, target_members)
         if fired:
             return self._rebuild_old(tx, driver, old_members,
                                      "watchdog fired before the commit point")
@@ -941,6 +1021,140 @@ class IslandController:
         driver.config_epoch = new_epoch
         self._finish(tx, SUCCEEDED, config_epoch_to=new_epoch)
         return SUCCEEDED
+
+    # -- the ONLY transaction commit point (durable epoch CAS), shared by the
+    # E1 rollout edges and the E3 trainer edges ----------------------------------
+    def _commit(self, tx: _Tx, target: str, members: Any, *,
+                cut_id: str | None = None) -> int:
+        """Durable CAS. A failed CAS (EpochConflict, fsync/rename error) leaves
+        the new members/trainer running with the commit durable or not: never a
+        silent continue -> RECOVERY_REQUIRED. For a trainer edge (``cut_id``)
+        the recovery hint is decided from the durable epochs file (E3 v3):
+        ``last_tx_id == tx`` -> ``restore_target`` (committed=True); another
+        tx -> ``restore_old`` (committed=False); epochs unreadable ->
+        ``recovery_required`` (committed=None)."""
+        epochs = self.journal.epochs
+        new_epoch = epochs.config_epoch + 1
+        try:
+            self.journal.compare_and_swap(
+                expected_config_epoch=epochs.config_epoch,
+                new=EpochState(new_epoch, target, self._fork_epoch, tuple(sorted(members)),
+                               tx.tx_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - EpochConflict, I/O error
+            if cut_id is not None:
+                try:
+                    durable = read_epochs(self.state_dir / "reconfig")
+                except Exception as read_exc:  # noqa: BLE001 - unknown: no restore hint
+                    durable, why = None, f"epochs unreadable: {read_exc!r}"
+                else:
+                    why = f"durable last_tx_id={durable.last_tx_id}"
+                # three states (E3 v3): durable commit / not committed / unknown
+                committed = None if durable is None else durable.last_tx_id == tx.tx_id
+                action = ("recovery_required" if committed is None
+                          else "restore_target" if committed else "restore_old")
+                self._record("trainer_recovery_hint", tx_id=tx.tx_id, action=action,
+                             committed=committed, cut_id=cut_id, cut_epoch=epochs.config_epoch,
+                             config=target if committed else epochs.config_id,
+                             reason=f"commit CAS failed: {exc!r}; {why}")
+            self._enter_recovery(tx.tx_id, f"commit CAS failed: {exc!r}")
+            self._tx = None
+            raise RecoveryRequired(self.recovery_required) from exc
+        return new_epoch
+
+    def _sync_fork_mirror(self) -> None:
+        """REBUILT_OLD: config epoch unchanged; only the fork membership mirror moved."""
+        epochs = self.journal.epochs
+        if epochs.fork_membership_epoch != self._fork_epoch:
+            self.journal.compare_and_swap(
+                expected_config_epoch=epochs.config_epoch,
+                new=EpochState(epochs.config_epoch, epochs.config_id, self._fork_epoch,
+                               epochs.members, epochs.last_tx_id),
+            )
+
+    def _execute_trainer(self, tx: _Tx, driver: Any, snapshot: ReadinessSnapshot) -> str:
+        """E3 (4.7): run the trainer edge to the commit point, then commit here (single CAS)."""
+        pool: ElasticRolloutPool = driver.rollout
+        self._pool = pool
+        plan = tx.plan
+        tplan = self._trainer_plan(plan.source, plan.target, plan.expected_config_epoch)
+        committed = frozenset(self.journal.epochs.members)
+        if committed and frozenset(pool.members()) != committed:
+            self._enter_recovery(tx.tx_id, "serving members differ from the committed members")
+            self._tx = None
+            raise RecoveryRequired(self.recovery_required)
+        state = driver.published_state
+        if state is None or (driver.ledger is not None and driver.ledger.unconsumed()):
+            self._finish(tx, CANCELLED, error="no published policy or unconsumed batches at the cut")
+            return CANCELLED
+        self.admission_open = False
+        ctx = self._trainer_edges()
+        transition = TrainerTransition(
+            plan=tplan, tx_id=tx.tx_id, epoch=self.journal.epochs.config_epoch, trainer=ctx["ops"],
+            pool=pool, publisher=driver.publisher, published_state=state,
+            published_version=driver.published_version,
+            record=lambda kind, **f: self._trainer_record(tx, kind, **f),
+            fork_call=lambda op, members, call: self._fork_call(tx, op, members, call),
+            fork_epoch=lambda: self._fork_epoch,
+            drain_deadline=self._wall() + min(self.timeouts.drain, self._remaining(tx)),
+        )
+        result = transition.run()
+        if result.phase == CANCELLED:
+            self._finish(tx, CANCELLED, error=result.error)
+            return CANCELLED
+        if result.phase == RECOVERY_REQUIRED:
+            self._enter_recovery(tx.tx_id, result.error or "trainer transition failed")
+            self._tx = None
+            raise RecoveryRequired(self.recovery_required)
+        if result.phase == REBUILT_OLD:
+            self._sync_fork_mirror()
+            self._finish(tx, REBUILT_OLD, error=result.error)
+            return REBUILT_OLD
+        assert result.phase == READY_TO_COMMIT, result.phase
+        with self._watchdog_lock:
+            fired = self._watchdog_fired.is_set()
+            if not fired:
+                self._committing = True
+                new_epoch = self._commit(tx, plan.target, result.target_members,
+                                         cut_id=result.cut_id)
+        if fired:
+            # the watchdog may have killed the new engines after the transition's
+            # last check: never commit; the trainer already runs the target layout
+            self._record("trainer_recovery_hint", tx_id=tx.tx_id, action="restore_old",
+                         cut_id=result.cut_id, cut_epoch=self.journal.epochs.config_epoch,
+                         config=self.journal.epochs.config_id,
+                         reason="watchdog fired before the commit point")
+            self._enter_recovery(tx.tx_id, "watchdog fired before the trainer edge commit")
+            self._tx = None
+            raise RecoveryRequired(self.recovery_required)
+        self._phase(tx, COMMITTED, members=sorted(result.target_members), cut_id=result.cut_id)
+        self._phase(tx, RESUMING)
+        placement = driver.placement
+        gpus = self.configs[plan.target].placement or {}
+        if isinstance(placement, ReconfigurablePlacement):
+            current = placement.describe()
+            try:
+                move = getattr(placement, "reconfigure_trainer", None)
+                if not callable(move):
+                    raise RuntimeError("placement cannot record a trainer GPU change")
+                move(PlacementDescription(current.kind, tuple(gpus.get("trainer") or ()),
+                                          tuple(gpus.get("rollout") or ()), dict(current.extra)),
+                     epoch=new_epoch)
+            except Exception as exc:  # noqa: BLE001 - committed: never roll back blindly
+                self._enter_recovery(tx.tx_id, f"placement bookkeeping failed after commit: {exc}")
+                self._tx = None
+                raise RecoveryRequired(self.recovery_required) from exc
+        driver.config_epoch = new_epoch
+        self._finish(tx, SUCCEEDED, config_epoch_to=new_epoch)
+        return SUCCEEDED
+
+    def _trainer_record(self, tx: _Tx, kind: str, **fields: Any) -> None:
+        if kind == "phase":
+            with self._watchdog_lock:  # the watchdog reads tx.phase under this lock
+                tx.phase = fields["phase"]  # the fork mirror and cancel() read the current phase
+            fields.setdefault("config_epoch", self.journal.epochs.config_epoch)
+            fields.setdefault("fork_epoch", self._fork_epoch)
+        self._record(kind, request_id=tx.request_id, **fields)
 
     def _quiesce(self, tx: _Tx, pool: ElasticRolloutPool, removed: frozenset[str]) -> bool:
         """3.3: admission is fenced; wait for engine requests AND tool waits to reach 0.
@@ -1008,14 +1222,7 @@ class IslandController:
             self._enter_recovery(tx.tx_id, f"rebuild of the old engine set failed: {exc}")
             self._tx = None
             raise RecoveryRequired(self.recovery_required) from exc
-        epochs = self.journal.epochs
-        if epochs.fork_membership_epoch != self._fork_epoch:
-            # config epoch unchanged; only the fork mirror moved (start+stop)
-            self.journal.compare_and_swap(
-                expected_config_epoch=epochs.config_epoch,
-                new=EpochState(epochs.config_epoch, epochs.config_id, self._fork_epoch,
-                               epochs.members, epochs.last_tx_id),
-            )
+        self._sync_fork_mirror()
         self._finish(tx, REBUILT_OLD, error=error)
         return REBUILT_OLD
 

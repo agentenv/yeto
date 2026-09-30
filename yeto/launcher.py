@@ -948,6 +948,7 @@ _ELASTIC_PAUSE_FLAGS = (
 # exported into the island run command; off unless given.
 _ELASTIC_TEST_FLAGS = (
     ("rl_test_inject_start_delay_s", "--rl-test-inject-start-delay-s"),
+    ("rl_test_inject_update_weights_block_s", "--rl-test-inject-update-weights-block-s"),
 )
 ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
 _EVAL_LAUNCH_FLAGS = (
@@ -1105,6 +1106,11 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             from .rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
 
             prelude += f"export {INJECT_START_DELAY_ENV}={float(delay)!r}\n"
+        block = getattr(args, "rl_test_inject_update_weights_block_s", None)
+        if block is not None:
+            from .rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV
+
+            prelude += f"export {INJECT_UPDATE_BLOCK_ENV}={float(block)!r}\n"
         if getattr(args, "rl_elastic_attestation_json", None):
             prelude += (
                 "printf '%s' "

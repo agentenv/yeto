@@ -255,6 +255,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-inject-start-delay-s", type=float, default=None, metavar="S",
                     help="--rl-elastic, TEST ONLY (GPU acceptance fault injection): sleep S "
                     "seconds before the island's first fork start_cells; off by default")
+    rl.add_argument("--rl-test-inject-update-weights-block-s", type=float, default=None,
+                    metavar="S",
+                    help="--rl-elastic, TEST ONLY (watchdog fault injection): block up to S "
+                    "seconds before the island's first member update_weights, failing as soon "
+                    "as a target engine dies; off by default")
     rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                     help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
                     "X6 cross-quorum runs only)")
