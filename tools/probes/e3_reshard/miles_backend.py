@@ -86,38 +86,60 @@ class MilesBackend:
         self._disposer = self._executor = self._actor = self.trainer = self._controller = None
 
     # ------------------------------------------------------------------ phases
-    def generate_frozen(self, count: int, progress=None) -> None:
-        from miles.ray.placement_group import update_weights
+    def generate_frozen(self, count: int, progress=None, *, identity: dict | None = None,
+                        metadata_sink=None) -> None:
+        """Frozen rollouts through the PRODUCTION round components, in the IslandDriver order.
 
+        See ``evidence/infra-e3/dev-gather-parity.md``. Per rollout r (no train step; base policy):
+        publish(state0, token r) [MilesPublisher: onload_weights (not first) -> update_weights ->
+        onload_kv -> start_update_weights / update_weight_version(token) / end_update_weights ->
+        check_weights checksum] -> trainer.offload() -> MilesRolloutPool.generate(r) [sink token ->
+        prepare_rollout -> executor.get (saves the samples) -> offload rollout -> metadata take] ->
+        release refs -> trainer.onload().
+        """
+        from yeto.rl.engine.miles_adapter.publish import MilesPublisher
+        from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool, RayMetadataSink
+        from yeto.rl.engine.miles_adapter.state import MilesPolicyState
+        from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
+
+        identity = dict(identity or {})
+        say = progress or (lambda _msg: None)
         # Keep the launcher's trainer size: in the colocated profile every engine shares a GPU with a
         # trainer rank; a DP=1 trainer next to 2 engines is a "hybrid colocated+distributed" deployment
         # whose LoRA weight sync Miles refuses (DEV-GATHER run 4, cuda_ipc.py:98).
         args = self._args(save_debug_rollout_data=self.frozen_template, load_debug_rollout_data=None)
         executor, actor = self._open(args, trainer=True)
         try:
-            if progress is not None:
-                progress("gen components up")
-            self.runner.run(update_weights(args, actor, executor, self._controller))
-            if progress is not None:
-                progress("gen weights published")
-            if getattr(args, "offload_rollout", False):
-                self.runner.run(self._controller.onload_kv())
-            # The ports argv installs yeto's rollout hooks (metadata, trained groups, buffer filter);
-            # like the production driver (entry.run_ports_island) they need the named metadata sink and
-            # the current policy token (DEV-GATHER run 5). Base policy: a fixed harness hash.
-            from yeto.rl.engine.miles_adapter.rollout import RayMetadataSink, policy_token
-
-            sink = RayMetadataSink()
+            say("gen components up")
+            # entry.run_ports_island: metadata=RayMetadataSink() (DEV-GATHER run 5)
+            sink = metadata_sink if metadata_sink is not None else RayMetadataSink()
+            state_port = MilesPolicyState(
+                actor_model=actor, base_model_revision=identity.get("base_model_revision", ""),
+                config_hash=identity.get("lora_config_hash", ""),
+                expected_layout_hash=identity.get("layout_hash"), runner=self.runner)
+            trainer = MilesTrainerGroup(args=args, actor_model=actor, learner_id=0, learner_generation=0,
+                                        parameter_layout_hash=lambda: identity.get("layout_hash", ""),
+                                        runner=self.runner, spec=self.algorithm)
+            state = state_port.export(policy_version=0)  # LocalOnlySync.start: export at version 0
+            publisher = MilesPublisher(args=args, actor_model=actor, rollout_executor=executor,
+                                       inference_controller=self._controller,
+                                       export_trainer_state=state_port.export, runner=self.runner)
+            current = {"version": 0}
+            pool = MilesRolloutPool(inference_controller=self._controller, rollout_executor=executor,
+                                    metadata=sink, runner=self.runner, args=args,
+                                    expected_policy=lambda: (current["version"], state.policy_tensor_hash()))
+            colocated = bool(getattr(args, "colocate", False))
             for rollout_id in range(count):
-                sink.set_policy_token(policy_token(rollout_id, "e3-harness-base-policy"))
-                self.runner.run(self._controller.prepare_rollout(rollout_id))
-                pack = self.runner.run(executor.get(rollout_id))
-                sink.take(rollout_id)  # drain this rollout's metadata, as the driver does
-                from miles.utils.data import remove_rollout_data_refs
-
-                remove_rollout_data_refs(args, pack)
-                if progress is not None:
-                    progress(f"gen rollout {rollout_id} saved")
+                current["version"] = rollout_id
+                publisher.publish(state, token_rollout_id=rollout_id)
+                say(f"gen published token {rollout_id}")
+                if colocated:
+                    trainer.offload()
+                batch = pool.generate(rollout_id)
+                trainer._release(args, batch.payload)
+                say(f"gen rollout {rollout_id} saved ({len(batch.groups)} groups)")
+                if colocated:
+                    trainer.onload()
         finally:
             self._close()
 
@@ -137,6 +159,9 @@ class MilesBackend:
     def train(self, rollout_id: int) -> dict:
         from yeto.rl.engine.miles_adapter.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
 
+        # IslandDriver.run_round: colocated -> trainer.onload() before the train step.
+        if bool(getattr(self.trainer._args, "colocate", False)):
+            self.trainer.onload()
         pack = self.runner.run(self._executor.get(rollout_id))
         try:
             outputs = list(self.runner.run(self._actor.train(rollout_id, pack)) or [])

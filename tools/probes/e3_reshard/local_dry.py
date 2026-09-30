@@ -66,6 +66,51 @@ def build_launch(flags_text: str):
     return learner.build_ports_launch(args, config)
 
 
+FORK_REPO = Path("/home/michael/work/miles-elastic")
+
+
+def argv_callables(argv: list[str]) -> list[tuple[str, str]]:
+    """(flag, dotted callable) for every ``--*-path`` / ``--custom-rm-path`` value of the Miles argv."""
+    out = []
+    for i, token in enumerate(argv[:-1]):
+        value = argv[i + 1]
+        if token.startswith("--") and token.endswith("-path") and "." in value and "/" not in value:
+            out.append((token, value))
+    return out
+
+
+def resolve_callables(argv: list[str], miles_commit: str | None = None) -> list[dict]:
+    """Import every yeto/local hook the argv names (the step that failed in run 5 lives behind
+    these); ``miles.*`` callables are checked in the fork at the pinned commit (miles is not
+    installed locally)."""
+    import importlib
+    import subprocess
+
+    results = []
+    for flag, dotted in argv_callables(argv):
+        module, _, name = dotted.rpartition(".")
+        entry = {"flag": flag, "callable": dotted}
+        if module.startswith("miles."):
+            path = module.replace(".", "/") + ".py"
+            if miles_commit and FORK_REPO.is_dir():
+                shown = subprocess.run(["git", "-C", str(FORK_REPO), "show", f"{miles_commit}:{path}"],
+                                       capture_output=True, text=True)
+                entry["ok"] = shown.returncode == 0 and (f"def {name}(" in shown.stdout
+                                                          or f"class {name}" in shown.stdout
+                                                          or f"{name} =" in shown.stdout)
+                entry["how"] = f"fork {miles_commit[:8]}:{path}"
+            else:
+                entry["ok"], entry["how"] = None, "unverified (no fork checkout)"
+        else:
+            try:
+                entry["ok"] = callable(getattr(importlib.import_module(module), name))
+                entry["how"] = "imported"
+            except Exception as exc:  # noqa: BLE001
+                entry["ok"], entry["how"] = False, f"{type(exc).__name__}: {exc}"
+        results.append(entry)
+    return results
+
+
 def local_dry(profile: str, flags_text: str) -> dict:
     from learner_shim import argv_check, parse_overrides, summary_problems
     from modal_run import OVERRIDES, REQUIRED_ARGV
@@ -74,6 +119,11 @@ def local_dry(profile: str, flags_text: str) -> dict:
     summary = argv_check(list(launch.argv), launch.algorithm, parse_overrides(OVERRIDES[profile]))
     summary["problems"] = summary_problems(summary)
     summary["problems"] += [f"argv lacks {flag}" for flag in REQUIRED_ARGV[profile] if flag not in launch.argv]
+    from modal_run import MILES_COMMIT
+
+    summary["callables"] = resolve_callables(list(launch.argv), MILES_COMMIT)
+    summary["problems"] += [f"{c['flag']} {c['callable']}: {c['how']}" for c in summary["callables"]
+                            if c["ok"] is False]
     if "--balance-data" in launch.argv:
         summary["problems"].append("--balance-data present: not the production trainer-edge translation")
     summary["argv"] = list(launch.argv)

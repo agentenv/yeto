@@ -106,7 +106,7 @@ def parse_overrides(items: list[str]) -> dict:
 def make_phase(ns):
     work = Path(ns.work)
 
-    def run_ports_island(miles_args, launch, algorithm, **_kw):
+    def run_ports_island(miles_args, launch, algorithm, **kw):
         work.mkdir(parents=True, exist_ok=True)
         overrides = parse_overrides(getattr(ns, "set", None) or [])
         for key, value in overrides.items():
@@ -130,7 +130,8 @@ def make_phase(ns):
             (work / "frozen").mkdir(parents=True, exist_ok=True)
             from harness import progress_line
 
-            backend.generate_frozen(FROZEN_ROLLOUTS, progress=progress_line)
+            backend.generate_frozen(FROZEN_ROLLOUTS, progress=progress_line, identity={
+                k: kw.get(k) for k in ("base_model_revision", "lora_config_hash", "layout_hash")})
             return None
         from harness import ARM_BY_NAME, run_arm
 

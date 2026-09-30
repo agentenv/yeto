@@ -284,7 +284,29 @@ def test_argv_and_parsed_disagreement_is_refused(tmp_path):
 FLAGS = (Path(__file__).resolve().parent / "data_e3_learner_flags.txt").read_text()
 
 
-def test_local_dry_run_reproduces_the_container_refusal_and_passes_with_the_profile():
+@pytest.fixture
+def reward_module(tmp_path, monkeypatch):
+    (tmp_path / "gsm8k_reward.py").write_text("def score(*a, **k):\n    return 0.0\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    yield
+    sys.modules.pop("gsm8k_reward", None)
+
+
+def test_local_dry_resolves_every_hook_the_argv_names(reward_module):
+    local_dry = importlib.import_module("local_dry")
+    summary = local_dry.local_dry("dev-gather", FLAGS)
+    flags = {c["flag"]: c for c in summary["callables"]}
+    assert flags["--rollout-all-samples-process-path"]["ok"] is True
+    assert flags["--custom-rm-path"]["ok"] is True and summary["problems"] == []
+
+
+def test_local_dry_reports_a_missing_hook_module(monkeypatch):
+    local_dry = importlib.import_module("local_dry")
+    sys.modules.pop("gsm8k_reward", None)
+    assert any("gsm8k_reward" in p for p in local_dry.local_dry("dev-gather", FLAGS)["problems"])
+
+
+def test_local_dry_run_reproduces_the_container_refusal_and_passes_with_the_profile(reward_module):
     local_dry = importlib.import_module("local_dry")
     shim = importlib.import_module("learner_shim")
     modal_run = importlib.import_module("modal_run")
@@ -353,5 +375,129 @@ def test_generation_provides_the_rollout_metadata_sink():
     """DEV-GATHER run 5: the ports rollout hooks look up the named sink actor and the policy token."""
     src = (TOOLS / "miles_backend.py").read_text()
     body = src[src.index("def generate_frozen"):src.index("def start_arm")]
-    assert "RayMetadataSink()" in body and "set_policy_token" in body and "sink.take(rollout_id)" in body
-    assert body.index("set_policy_token") < body.index("executor.get(rollout_id)")
+    assert "RayMetadataSink()" in body and "MilesRolloutPool(" in body and "metadata=sink" in body
+
+
+# ---------------------------------------------------------------- production parity of the gen phase
+
+
+class _Log(list):
+    def rec(self, *item):
+        self.append(item)
+
+
+def _fake_miles_world(log, colocate=True):
+    class Engine:
+        def __init__(self, i):
+            self.server_url, self.version = f"e{i}", None
+
+        async def update_weight_version(self, token):
+            log.rec("update_weight_version", token)
+            self.version = token
+
+        async def get_weight_version(self):
+            return self.version
+
+    engines = [Engine(0), Engine(1)]
+
+    class Controller:
+        async def onload_weights(self): log.rec("onload_weights")
+        async def onload_kv(self): log.rec("onload_kv")
+        async def offload_kv(self): log.rec("offload_kv")
+        async def start_update_weights(self):
+            log.rec("start_update_weights")
+            return SimpleNamespace(rollout_engines=engines, snapshot_cell_id_to_hashes={"c0": 1, "c1": 2})
+        async def end_update_weights(self, **_): log.rec("end_update_weights")
+        async def abort_update_weights(self): log.rec("abort_update_weights")
+        async def check_weights(self, action): log.rec("check_weights", action); return "raw"
+        async def get_cell_statuses(self):
+            return {"c0": SimpleNamespace(phase="Running"), "c1": SimpleNamespace(phase="Running")}
+        async def prepare_rollout(self, rid): log.rec("prepare_rollout", rid)
+
+    class Executor:
+        async def get(self, rid): log.rec("executor.get", rid); return f"pack{rid}"
+
+    class Actor:
+        async def run_plugin(self, path, kwargs=None):
+            log.rec("plugin", path.rsplit(".", 1)[1])
+            return [None]
+        async def onload(self): log.rec("trainer.onload")
+        async def offload(self): log.rec("trainer.offload")
+        async def clear_memory(self): log.rec("trainer.clear_memory")
+
+    args = SimpleNamespace(colocate=colocate, offload_rollout=True, colocate_memory_peak_device="gpu",
+                           offload_train=True, global_batch_size=GBS, micro_batch_size=1,
+                           actor_num_nodes=1, actor_num_gpus_per_node=2)
+    return Controller(), Executor(), Actor(), args
+
+
+class _Sink:
+    def __init__(self, log):
+        self.log = log
+
+    def set_policy_token(self, token):
+        self.log.rec("sink.set_policy_token", token)
+
+    def take(self, rid):
+        self.log.rec("sink.take", rid)
+        return {"rollout_id": rid}
+
+
+def test_gen_phase_runs_the_production_round_components_in_driver_order(monkeypatch):
+    miles_backend = importlib.import_module("miles_backend")
+    from yeto.rl.engine.miles_adapter import publish as publish_mod
+    from yeto.rl.engine.miles_adapter import rollout as rollout_mod
+    from yeto.rl.engine.miles_adapter import state as state_mod
+
+    log = _Log()
+    controller, executor, actor, args = _fake_miles_world(log)
+
+    async def update_weights(a, act, ex, ctl):
+        log.rec("update_weights")
+
+    class State:
+        def __init__(self, **kw): pass
+        def export(self, policy_version=0):
+            log.rec("export", policy_version)
+            return SimpleNamespace(policy_version=policy_version, policy_tensor_hash=lambda: "a" * 64,
+                                   lora=None)
+
+    monkeypatch.setattr(publish_mod, "_default_update_weights", lambda: update_weights)
+    monkeypatch.setattr(publish_mod, "_default_flatten", lambda: (lambda raw: [{"w": 1}, {"w": 1}]))
+    monkeypatch.setattr(publish_mod, "payload_digest", lambda state: ("b" * 64, 1))
+    monkeypatch.setattr(state_mod, "MilesPolicyState", State)
+    monkeypatch.setattr(rollout_mod, "handle_from_metadata",
+                        lambda payload, **k: SimpleNamespace(groups=[1, 2], payload=k["data_pack"],
+                                                             data_cursor=None))
+    backend = miles_backend.MilesBackend.__new__(miles_backend.MilesBackend)
+    backend.base_args, backend.algorithm, backend.frozen_template = args, _spec(), "/f/r_{rollout_id}.pt"
+    backend.runner = LoopRunner()
+    backend.trainer = None
+
+    def fake_open(a, *, trainer):
+        backend._controller, backend._executor, backend._actor = controller, executor, actor
+        return executor, actor
+
+    backend._open = fake_open
+    backend._close = lambda: log.rec("close")
+    released = []
+    monkeypatch.setattr(miles_backend, "_release_refs", lambda a, p: released.append(p), raising=False)
+    from yeto.rl.engine.miles_adapter import trainer as trainer_mod
+
+    monkeypatch.setattr(trainer_mod, "_default_release", lambda a, p: released.append(p))
+    backend.generate_frozen(2, identity={"layout_hash": "L"}, metadata_sink=_Sink(log))
+    names = [e[0] for e in log]
+    first = names[:names.index("executor.get") + 1]
+    assert first == ["export", "export", "update_weights", "onload_kv", "start_update_weights", "update_weight_version",
+                     "update_weight_version", "end_update_weights", "check_weights", "trainer.offload",
+                     "sink.set_policy_token", "prepare_rollout", "executor.get"]
+    second = names[names.index("executor.get") + 1:]
+    assert second[:5] == ["offload_kv", "sink.take", "trainer.onload", "export", "onload_weights"]
+    assert ("update_weight_version", policy_token_for(1)) in log
+    assert released == ["pack0", "pack1"] and names[-1] == "close"
+
+
+def policy_token_for(rid):
+    from yeto.rl.engine.miles_adapter.rollout import policy_token
+
+    return policy_token(rid, "a" * 64)
