@@ -377,3 +377,11 @@
 - F-R1：已从源码核实（`RayWorkerManager.init` 对全部已声明 cell 执行 `start_cells`；cell 只能绑本 pool 视图），需求写入 plan-v2 §4。
 - 测试：全量 68 failed, 2937 passed, 49 skipped, 26 errors；失败/错误 id 94 个与 /tmp/integ-s2-base.ids（第二列）完全相同。v2 补丁临时应用后 controller 级 + E1 reconfig 测试 38 passed，随后撤回。openspec validate --strict 通过。
 - 状态不变：4.2a 未完成；4.6 CPU 通过；4.6a 未完成；4.7 已实现（yeto 侧，CPU 通过）；均未勾选。
+
+### INFRA-E3 复审修复（2026-09-30；复审结论"A8 可按 plan-v2 执行"，以下为 A9/生产路径问题）
+- M1：`infra-e3-controller-v3.patch`（v2 改名 `.v2-OBSOLETE`）：提交 CAS 抛错后读回 epochs，`last_tx_id` 为本事务（写入后 fsync 才抛错）→ hint `restore_target`；否则 `restore_old`；读不回 → `recovery_required`；均进入 RECOVERY_REQUIRED。新增"写入后才抛错"测试。
+- M2：`batch_problems` 写入前拒绝 `--indep-dp`、`--multimodal-keys`；DP 变化后 `MilesTrainerGroup.train_step` 训练前经 `batch_guard_problems` 守卫：各 rank 须公布完整 `train_parallel_config` 且 dp 等于计划，批次 rollout 数须为 steps×GBS 且被两侧 scheduled 路径接受，否则拒绝（payload 照常释放）。残余：yeto 看不到分片内容，无法直接读 `micro_batch_indices`；守卫覆盖的是 fork 退回 raw 的全部条件（`can_schedule_on_rollout_side`，`rollout_ids` 由 fork 恒设），A8 在 rank 内直接断言分片带 `micro_batch_indices/num_rollouts`。
+- L1：静态整除检查的"每 rollout 1 条样本"假设已写入文档，生产每批由守卫调用 `step_problems`。
+- L2：`plan-v3.md`（v2 保留并标注已取代）A9 判据新增"新 engine 所在 GPU 等于 moved GPU"。
+- 测试：全量 68 failed, 2940 passed, 49 skipped, 26 errors；失败/错误 id 94 个与 /tmp/integ-s2-base.ids（第二列）完全相同。v3 补丁临时应用后 controller 级 + E1 reconfig 测试 39 passed，随后撤回。
+- 状态不变：4.2a 未完成；4.6 CPU 通过；4.6a 未完成；4.7 已实现（yeto 侧，CPU 通过）；均未勾选。无云资源，$0。
