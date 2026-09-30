@@ -268,6 +268,10 @@ except Exception: d=[]
     if [ ! -f $R/pulled/stall_stop.txt ] && { [ $((now - $(cat $R/pulled/.progress))) -gt %(stall)d ] || [ "$errs" -gt %(errs)d ]; }; then
       echo "$(date -u +%%FT%%TZ) stall_or_errors lines=$lines errs=$errs" > $R/pulled/stall_stop.txt; $M app stop -y $APP >> $R/pulled/stall_stop.txt 2>&1
     fi
+    # a live data cursor that cannot be read makes the cut/rebuild rows meaningless: stop early
+    if grep -q "live data cursor unknown" $R/launch.log 2>/dev/null && [ ! -f $R/pulled/cursor_stop.txt ]; then
+      grep -m1 "live data cursor unknown" $R/launch.log > $R/pulled/cursor_stop.txt; $M app stop -y $APP >> $R/pulled/cursor_stop.txt 2>&1
+    fi
     # the learner exited (Modal would retry the island and bill again): evidence is pulled above -> stop
     if grep -q "exited with" $R/launch.log 2>/dev/null && [ ! -f $R/pulled/exit_stop.txt ]; then
       date -u +%%FT%%TZ > $R/pulled/exit_stop.txt; $M app stop -y $APP >> $R/pulled/exit_stop.txt 2>&1
