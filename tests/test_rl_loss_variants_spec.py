@@ -38,12 +38,12 @@ RUN = {"rollout_batch_size": 4, "rollout_max_response_len": 384,
        "context_parallel_size": 1, "multi_lora": False}
 
 
-CISPO_CLIP = {"eps_clip": 0.2, "eps_clip_high": 0.28}
+CISPO_CLIP = {"eps_clip": 0.2, "eps_clip_high": 0.28, "aggregation": "token"}
 
 
 def spec(variant, **loss):
-    if variant == "cispo" and not loss.keys() & set(CISPO_CLIP):
-        loss = {**CISPO_CLIP, **loss}  # CISPO needs an explicit clip range
+    if variant == "cispo":
+        loss = {**CISPO_CLIP, **loss}  # CISPO: explicit clip range, token aggregation
     return AlgorithmSpec.from_dict({"schema": alg.ALGORITHM_SPEC_SCHEMA_V2,
                                     "loss": {"policy_loss_variant": variant, **loss}})
 
@@ -402,7 +402,8 @@ def test_single_island_allowance_admits_variant_on_miles_capabilities():
 def test_dry_run_reports_expressible_not_opened(monkeypatch):
     monkeypatch.setattr(lv, "FORK_COMMITS", frozenset())  # a pin without the fork commit
     result = af.dry_run(["--dry-run", "--extra",
-                         "--policy-loss-variant cispo --eps-clip 0.2 --eps-clip-high 0.28"])
+                         "--policy-loss-variant cispo --eps-clip 0.2 --eps-clip-high 0.28 "
+                         "--calculate-per-token-loss"])
     assert result["verdict"] == "rejected"
     assert "losses mechanism 'cispo' not supported" in result["error"]
     allowed = af.dry_run(["--dry-run", "--extra", "--policy-loss-variant sapo",
@@ -444,7 +445,8 @@ def test_gmpo_context_parallel_refused(cp, rejected, monkeypatch):
 
 def test_translation_emits_variant_and_explicit_parameters():
     assert af.algorithm_argv(spec("cispo", eps_clip=0.2, eps_clip_high=0.28)) == [
-        "--eps-clip", "0.2", "--eps-clip-high", "0.28", "--policy-loss-variant", "cispo"]
+        "--eps-clip", "0.2", "--eps-clip-high", "0.28", "--calculate-per-token-loss",
+        "--policy-loss-variant", "cispo"]
     assert af.algorithm_argv(spec("gmpo", gmpo_log_clip_low=0.3))[-6:] == [
         "--policy-loss-variant", "gmpo", "--gmpo-log-clip-low", "0.3",
         "--gmpo-log-clip-high", "0.4"]
@@ -493,3 +495,104 @@ def test_cispo_requires_explicit_clip_range(loss):
 def test_absorbed_stray_parameter_is_rejected():
     s, _, _ = af.absorb_extra_argv(AlgorithmSpec(), ["--gmpo-log-clip-low", "0.2"])
     assert "[loss_variant_params]" in "; ".join(s.rejections())
+
+
+# -- review round 3: GMPO global num/den, per-token loss ---------------------------------
+
+
+def test_reference_gmpo_global_clip_excludes_zero_advantage_sequences():
+    old = _t(0.0, 0.0)
+    m = torch.tensor([1, 1])
+    seqs = [(_t(0.5, 0.6), old, _t(1.0, 1.0), m),     # both clipped
+            (_t(0.1, 0.5), old, _t(-1.0, -1.0), m),   # A<0: none clipped
+            (_t(0.9, 0.9), old, _t(0.0, 0.0), m)]     # A=0: not counted
+    assert ref.gmpo_global_clip(seqs) == (2.0, 4.0)
+    assert ref.gmpo_global_clip(seqs[:1] + seqs[2:]) == (2.0, 2.0)
+
+
+def _steps(*pairs):
+    return [{"pg_clipfrac": 0.1, "metrics": {"gmpo_clip_num": n, "gmpo_clip_den": d,
+                                             "pg_clipfrac": 0.1}} for n, d in pairs]
+
+
+def test_gmpo_clip_fraction_from_fork_counts():
+    assert lv.gmpo_clip_fraction(_steps((2.0, 4.0), (3.0, 3.0))) == pytest.approx(5 / 7)
+    # CP duplication / micro-batch averaging scale num and den alike
+    assert lv.gmpo_clip_fraction(_steps((4.0, 4.0), (0.5, 0.5))) == 1.0
+    assert lv.gmpo_clip_fraction([{"gmpo_clip_num": torch.tensor(1.0),
+                                   "gmpo_clip_den": torch.tensor(2.0)}]) == 0.5
+
+
+@pytest.mark.parametrize("steps", [
+    [], None, _steps((0.0, 0.0)), [{"metrics": {"pg_clipfrac": 1.0}}],
+    _steps((1.0, 1.0)) + [{"metrics": {}}], _steps((math.nan, 1.0)), _steps((-1.0, 1.0)),
+    _steps((2.0, 1.0)), [{"metrics": {"gmpo_clip_num": True, "gmpo_clip_den": 1.0}}],
+])
+def test_gmpo_clip_fraction_unknown(steps):
+    assert lv.gmpo_clip_fraction(steps) is None
+
+
+def test_gmpo_rule_on_global_fraction():
+    s = spec("gmpo")
+    batch = _batch(_group(0.5))
+    full = lv.gmpo_clip_fraction(_steps((3.0, 3.0), (1.0, 1.0)))
+    assert s.expects_gradient(batch, _metrics(None, full)) is False
+    partial = lv.gmpo_clip_fraction(_steps((3.0, 3.0), (0.0, 1.0)))
+    assert s.expects_gradient(batch, _metrics(None, partial)) is True
+
+
+def test_gmpo_with_per_token_loss_rejected_before_launch(tmp_path):
+    s = spec("gmpo", aggregation="token")
+    assert "[loss_variant_gmpo_per_token]" in "; ".join(s.rejections())
+    caps = fake_capabilities(loss_aggregations={"default", "token"})
+    engine, driver = _driver(tmp_path, s, caps)
+    with pytest.raises(CapabilityMismatch, match="loss_variant_gmpo_per_token"):
+        driver.run()
+    assert engine.calls == []
+    for name in ("cispo", "sapo"):
+        assert spec(name, aggregation="token").rejections() == []
+
+
+@pytest.mark.parametrize("aggregation", ["default", "constant"])
+def test_cispo_requires_token_aggregation(aggregation):
+    loss = {"policy_loss_variant": "cispo", "eps_clip": 0.2, "eps_clip_high": 0.28,
+            "aggregation": aggregation}
+    if aggregation == "constant":
+        loss["reducer"] = alg.PluginRef.from_path(
+            "yeto.rl.engine.algorithm.plugin_source_sha256").to_dict()
+    s = AlgorithmSpec.from_dict({"schema": alg.ALGORITHM_SPEC_SCHEMA_V2, "loss": loss})
+    text = "; ".join(s.rejections())
+    assert "[loss_variant_cispo_aggregation]" in text and "loss.aggregation='token'" in text
+
+
+def test_reference_sapo_is_a_sequence_mean():
+    a, b = _t(1.0, 1.0, 1.0), _t(4.0)
+    ma, mb = torch.tensor([1, 1, 1]), torch.tensor([1])
+    assert ref.sample_mean([a, b], [ma, mb]).item() == pytest.approx(2.5)  # (1 + 4) / 2
+    assert ref.token_mean(torch.cat([a, b]), torch.cat([ma, mb])).item() == pytest.approx(7 / 4)
+
+
+# -- 4.4 translation through the Miles adapter + provenance on the pinned fork ----------
+
+
+@pytest.mark.parametrize("variant", lv.VARIANTS)
+def test_translate_run_config_and_provenance_carry_variant_and_fork_commit(variant):
+    from test_rl_miles_adapter_config import make_config
+
+    from yeto.rl import MILES_NEXT_COMMIT
+    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.engine.miles_adapter.entry import selection_event
+
+    assert lv.fork_supports_variants(MILES_NEXT_COMMIT)
+    s = spec(variant)
+    launch = mc.translate_run_config(make_config(), s)
+    argv = list(launch.argv)
+    i = argv.index("--policy-loss-variant")
+    assert argv[i + 1] == variant
+    event = selection_event(launch=launch, algorithm=launch.algorithm,
+                            miles_commit=MILES_NEXT_COMMIT)
+    assert event["miles_commit"] == MILES_NEXT_COMMIT
+    recorded = json.loads(event["rl/algorithm_spec"])["loss"]
+    assert recorded["policy_loss_variant"] == variant
+    for name, value in lv.variant_params(s).items():
+        assert recorded[name] == value

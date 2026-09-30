@@ -79,6 +79,25 @@ def cells_of(members: Any) -> list[str]:
     return sorted(cell_of(m) for m in members)
 
 
+# Test-only fault injection (rl-infra-spec 3.8 X6 quorum case, gpu-plan-v2 A5):
+# sleep this many seconds before the FIRST fork ``start_cells`` of the process.
+# Unset (default) = no effect. Set by the launcher's
+# ``--rl-test-inject-start-delay-s`` (exported in the island run command).
+INJECT_START_DELAY_ENV = "YETO_RL_TEST_INJECT_START_DELAY_S"
+
+
+def injected_start_delay(environ: Any = None) -> float | None:
+    import os
+
+    raw = (os.environ if environ is None else environ).get(INJECT_START_DELAY_ENV)
+    if raw in (None, ""):
+        return None
+    value = float(raw)
+    if not value > 0:
+        raise ValueError(f"{INJECT_START_DELAY_ENV} must be a positive number of seconds")
+    return value
+
+
 class MembershipPlanError(RuntimeError):
     """The pool cannot provide the requested engines."""
 
@@ -329,6 +348,10 @@ class MilesRolloutPool:
         self._expected_policy = expected_policy
         self._run = (runner or LoopRunner()).run
         self._last_cursor: dict[str, int] | None = None
+        # test-only start delay (INJECT_START_DELAY_ENV); applied once per process
+        self._inject_start_delay = injected_start_delay()
+        self.injected_start_delays: list[float] = []
+        self._sleep = time.sleep
 
     def data_cursor(self) -> dict[str, int] | None:
         """4.2: data cursor after the last generated batch (None = unknown)."""
@@ -445,6 +468,13 @@ class MilesRolloutPool:
         unknown = sorted(set(cells) - set(self._require_declared()))
         if unknown:
             raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        if self._inject_start_delay is not None and not self.injected_start_delays:
+            import sys
+
+            print(f"[yeto] TEST INJECTION {INJECT_START_DELAY_ENV}: sleeping "
+                  f"{self._inject_start_delay}s before start_cells({cells})", file=sys.stderr, flush=True)
+            self.injected_start_delays.append(self._inject_start_delay)
+            self._sleep(self._inject_start_delay)
         self._run(self._controller.start_cells(cells, expected_epoch=epoch))
         self._run(self._controller.wait_cells_tracked(cells, timeout_seconds=self._track_timeout_s))
         return chosen

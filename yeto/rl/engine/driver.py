@@ -151,6 +151,10 @@ class DriverError(RuntimeError):
     """The island loop cannot continue safely."""
 
 
+class RebuildNotStarted(DriverError):
+    """4.4: the trainer rebuild was refused before ``rebuild()`` ran (trainer untouched)."""
+
+
 class PublicationError(DriverError):
     """A publication was incomplete or did not match the requested policy."""
 
@@ -228,6 +232,12 @@ class SyncSession(Protocol):
     # (strict: local_round_id >= global_rounds; decoupled: the final cut is
     # known).  Sessions without it are treated as non-final.
     # def is_final_round(self, driver, *, rollout_id: int) -> bool: ...
+
+    # Optional (rl-infra-spec 3.8): the outer phase at the round-boundary safe
+    # point, one of ``pause_audit.OUTER_PHASES``. Sessions without it are at
+    # the pausable phase (the safe point is only offered after a non-stop
+    # boundary and a complete publication).
+    # def outer_phase(self, driver, *, rollout_id: int) -> str: ...
 
 
 class ProgressStore(Protocol):
@@ -370,6 +380,9 @@ class IslandDriver:
         self.expected_token: str | None = None
         self.published_version: int | None = None
         self.rounds_completed = 0
+        # Optimizer steps the trainer's scheduler has counted (4.2/4.4 cut
+        # progress): set by every apply, advanced by every trained round.
+        self.local_step = 0
         self.profile = profile
         self.observe = bool(observe)
         self.config_epoch = int(config_epoch)
@@ -543,6 +556,7 @@ class IslandDriver:
         self.phase("apply", policy_version=state.policy_version, optimizer=optimizer)
         started = time.monotonic()
         self.policy_state.apply(state, optimizer=optimizer, local_step=local_step)
+        self.local_step = int(local_step)
         applied = self.policy_state.export()
         expected = state.policy_tensor_hash()
         if applied.policy_tensor_hash() != expected:
@@ -930,6 +944,9 @@ class IslandDriver:
             aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
         )
+        self.local_step += (
+            int(self.profile.optimizer_steps_per_round) if self.profile is not None else 1
+        )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)
@@ -984,6 +1001,30 @@ class IslandDriver:
             config_epoch=self.config_epoch,
         )
 
+    def outer_phase(self, rollout_id: int) -> str:
+        """The outer-sync phase at this safe point (3.8; pause_audit.OUTER_PHASES)."""
+        from .pause_audit import PAUSABLE_PHASE
+
+        probe = getattr(self.sync, "outer_phase", None)
+        return str(probe(self, rollout_id=rollout_id)) if callable(probe) else PAUSABLE_PHASE
+
+    def refuse_reconfiguration_for_finalization(self, rollout_id: int) -> None:
+        """3.8/X6: once the run is finalizing no switch may start; a pending
+        request is cancelled (journaled) and later requests are rejected."""
+        if self.controller is None:
+            return
+        refuse = getattr(self.controller, "enter_finalization", None)
+        if not callable(refuse):
+            return
+        poll = getattr(self.controller, "poll_commands", None)
+        if callable(poll):
+            poll()
+        cancelled = refuse(rollout_id=rollout_id)
+        for request_id in cancelled:
+            self.emit("rl_reconfiguration", rollout_id=rollout_id, result="CANCELLED",
+                      request_id=request_id, error="finalization refuses reconfiguration",
+                      config_epoch=self.config_epoch)
+
     def safe_point(self, rollout_id: int) -> str | None:
         """Offer the controller the round-boundary safe point; returns its result phase."""
         self.at_safe_point = True
@@ -1004,8 +1045,11 @@ class IslandDriver:
             {"eval_due": None if self.eval_overlap.due is None else self.eval_overlap.due[0]}
             if self.eval_overlap is not None else {}
         )
+        outer_phase = self.outer_phase(rollout_id)
         try:
-            result = self.controller.run_at_safe_point(self, self.safe_point_snapshot(rollout_id))
+            result = self.controller.run_at_safe_point(
+                self, self.safe_point_snapshot(rollout_id), outer_phase=outer_phase
+            )
         except RecoveryRequired as error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch, **eval_due)
@@ -1032,12 +1076,12 @@ class IslandDriver:
         """
         state = self.published_state
         if state is None or self.published_version is None:
-            raise DriverError("trainer rebuild before any publication")
+            raise RebuildNotStarted("trainer rebuild before any publication")
         if not self.at_safe_point:
-            raise DriverError("trainer rebuild outside a safe point")
+            raise RebuildNotStarted("trainer rebuild outside a safe point")
         published_hash = state.policy_tensor_hash()
         if cut_policy_hash != published_hash:
-            raise DriverError(
+            raise RebuildNotStarted(
                 f"cut policy {cut_policy_hash} is not the published policy {published_hash}"
             )
         self.phase("rebuild", rollout_id=self.published_version)
@@ -1089,6 +1133,7 @@ class IslandDriver:
                     rollout_id += 1
                     self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)
                     finished = boundary.stop
+                self.refuse_reconfiguration_for_finalization(rollout_id)
                 self.phase("finish", rollout_id=rollout_id)
                 self._close_span()
                 self.sync.finish(self)

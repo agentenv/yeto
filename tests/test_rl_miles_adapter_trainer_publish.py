@@ -424,7 +424,9 @@ def test_gspo_and_gmpo_clip_fraction_unchanged_by_unconditional_drain(variant, m
                 policy_loss_variant=next(iter(CLIPFRAC_LOSS_VARIANTS))),
         )
     state_plugin._STEP_LOSSES.clear()
-    state_plugin._record_step_losses(({"loss": 0.1, "pg_clipfrac": 0.25}, 0.9, "NORMAL"))
+    # GMPO reads the fork's global counts (1/4), GSPO pg_clipfrac (0.25): both 0.25
+    state_plugin._record_step_losses(({"loss": 0.1, "pg_clipfrac": 0.25, "gmpo_clip_num": 1.0,
+                                       "gmpo_clip_den": 4.0}, 0.9, "NORMAL"))
     t = MilesTrainerGroup(
         args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
         actor_model=_rank_actor_draining_state_plugin(), learner_id=0, learner_generation=0,

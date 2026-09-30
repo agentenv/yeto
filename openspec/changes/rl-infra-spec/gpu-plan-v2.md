@@ -67,21 +67,21 @@
 - E1-D 的合并：①②③ 的终态都不中断训练，按事务序号合并为 1 次运行（D1）。④ 单独运行（终态为 RECOVERY_REQUIRED）。⑤⑥⑦ 各自单独运行。共 5 次运行，每项判据按原文不变。
   - 如果故障注入文件不支持按事务序号调度，①②③ 拆成 3 次运行，**增加约 $11**（从 B1 预算中支出）。
   - ⑤⑥⑦ 需要"kill learner 后用同一 `--rl-elastic-state-dir` 重启"。启动前必须在 CPU 上确认 Modal 路径的 state dir 位于持久卷上、能原地重启。不满足时，⑤⑥⑦ 判为**环境阻塞、不运行**，3.7 保持未完成，并如实报告。
-- 已知风险（integ-s2 progress）：3.7 watchdog 默认没有接 kill（`on_watchdog` 未接线）。启动 E1-D 前如果仍未接线，涉及阻塞引擎调用的项可能超出 deadline。**不为此放宽判据**，失败即如实记录。
+- 已知风险（integ-s2 progress）：3.7 watchdog 默认没有接 kill（`on_watchdog` 未接线）。启动 E1-D 前如果仍未接线，涉及阻塞引擎调用的项可能超出 deadline。**不为此放宽判据**，失败即如实记录。 （**已过时**：watchdog kill 已由 2b67145 实现并合入；见 §8.7(2)）
 
 ## 3. 预先固定的判据（本文件提交后即冻结；没有在此写出的项，以所引计划原文为准）
 
 - **A2 / A2+**：`local-gpu-plan.md` L-2.3 判据 1–6（含"追加"中运行前修正的口径）；L-1.7 判据 1–5。判据 6 不满足时，按原文处理为合法否定结论。
 - **F0**：manifest 与 pin 一致；0.6B 单卡完成 1 轮，退出码 0。任一项不满足，判"镜像在 sm_89 不可用"，F-E1 和 DEV-GATHER 的 L40S 应急都取消（回退方式见 §5）。F0 与 F-E1 的结果**都不作为验收或性能证据**。
 - **F-E1**：只看 up/down 两个事务能否到达终态并且没有 Python 异常。不设通过/失败判定，也不计入任何 task。
-- **A4 / A4b**：`evidence/infra-e1/plan.md` E1-A…E1-E 原判据（4 卡档按 §2.1 换算）。全部为精确相等或精确出现，没有数值容差，每项 1 个 seed。
-- **A5（3.8 X6）**：
+- **A4 / A4b**：`evidence/infra-e1/plan.md` E1-A…E1-E 原判据（4 卡档按 §2.1 换算）。全部为精确相等或精确出现，没有数值容差，每项 1 个 seed。 （8 卡原文档执行、E1-D 另加 watchdog 判据，见 §8.7(2)(5)）
+- **A5（3.8 X6）**： （补充判据见 §8.7(1)）
   1. 切换运行中岛0 完成 up（第 3 轮前）和 down（第 5 轮前），两个事务的终态都是 `SUCCEEDED`。两岛的逐轮 `trained_sample_ids_sha256`、组数、样本数与基线运行逐轮相等（样本不变）。每岛每轮恰好一次 optimizer 步（step 不变）。两岛在每个 policy_version 上的 `sync/global_policy_hash` 相同，紧随其后的 publication token 与 apply 一致（policy 身份链不变，但不要求与基线的哈希相等，因为 rollout engine 数量不同，生成文本可以不同）。syncer 磁带中每轮 roster 都是 {岛0, 岛1}，与基线相同。
   2. quorum 运行：`--quorum-timeout-s 120`，岛0 的 up 事务在 `start_cells` 前注入 150 s 延迟。syncer 磁带中该轮至少有 1 次 PULL 重发，岛1 没有退出，roster 没有变化，该轮最终完成，没有 `rl_strict_failure`。
   3. finalization：在最后一轮（第 6 轮）的 finalization 阶段提交 up 请求，事务被拒绝（journal 中为拒绝或取消，原因是 finalization），config_epoch 不变。
   4. 运行前按 gpu-plan §6 做 30 分钟空闲流探测（只用 CPU，无 GPU 费用）。若测得路径会在 150 s 内丢流，quorum 用例判为**环境阻塞、不运行**，不改为其他网络路径冒充。
   5. 报告明确写明"仅完成 rollout 能力"。
-- **A6a/A6/A6b/A7**：`evidence/infra-e2/4.2-4.5/plan-v2.md` 的 G-4.2、G-4.3、G-4.4、G-4.5 与 §3 L2 原判据（C1、C2、C3 不变）。确定性设置中任一项不可用即判为环境阻塞，不降级。
+- **A6a/A6/A6b/A7**：`evidence/infra-e2/4.2-4.5/plan-v2.md` 的 G-4.2、G-4.3、G-4.4、G-4.5 与 §3 L2 原判据（C1、C2、C3 不变）。确定性设置中任一项不可用即判为环境阻塞，不降级。 （A6b 补充判据见 §8.7(1)）
 - **A8（4.6 X4）**：`H100!:2`，C2 配置（0.6B，bf16，DistOpt，GBS=16，确定性设置同 plan-v2 §0）。同一容器内依次运行以下 arm：
   - R：DP2 连续训练 3 步，第 3 步用落盘的冻结 batch；
   - D21：DP2 训练 2 步 → cut → 以 DP1 重建 → 恢复 → 在同一冻结 batch 上训练第 3 步；
@@ -95,7 +95,7 @@
     4. 下一步数值：设 Δ 为第 3 步 LoRA 参数更新量。rel-L2(Δ_D21, Δ_R) ≤ max(3×rel-L2(Δ_N, Δ_R), 1e-6)；D12 对 R1 用同一公式，噪声底取 rel-L2(Δ_N, Δ_R)。grad_norm 的相对差按同一规则判定；loss 在同一冻结 batch 上的相对差 ≤ 1e-3。
   - 任一不满足即为 **no-go**（合法否定结论，4.6 如实交付）。原因如果是实现缺陷而不是原理问题，在结论中写明，并按 §5 处理。
   - go 结论只对本次的 `algorithm_spec_sha256` 成立（默认 GRPO），不直接加入白名单。
-- **A9（4.7）**：3 卡 T2R1↔T1R2，6 轮。第 3 轮前 trainer→rollout（T2R1→T1R2），第 5 轮前反向。通过需同时满足：
+- **A9（4.7）**：3 卡 T2R1↔T1R2，6 轮。 （**拓扑与资源被 §8.7(4) 取代**；以下原文保留）第 3 轮前 trainer→rollout（T2R1→T1R2），第 5 轮前反向。通过需同时满足：
   1. 两个事务终态都是 `SUCCEEDED`，config_epoch 为 0→1→2；GPU UUID 在 trainer 和 rollout 之间实际转移（按 bundle↔UUID 记录）；TP/PP/CP/EP 不变。
   2. 逐轮 sample-id 哈希、组数、GBS 与固定 T2R1 基线相等；每轮一次 optimizer 步；epoch 与数据游标连续，不回卷。
   3. 失败恢复三次运行：(i) 方向 T2R1→T1R2 时 `create_training_models` 抛 `TrainerRebuildError`，结果为用旧参数重建并从 cut 恢复，终态 `REBUILT_OLD`；有 cleanup_error 时判 RECOVERY_REQUIRED；(ii) 反向时新 rollout engine `start_cells` 被 kill，终态 `REBUILT_OLD`，trainer 以原 DP 继续，下一轮 token 校验通过；(iii) commit CAS 之后 kill controller 再重启，按 journal 对账，不回滚，也不重复消费。
@@ -105,12 +105,12 @@
 ## 4. 批次、依赖与预算（硬上限 $300，已含重跑）
 
 代码就绪情况（2026-09-30）：
-- A2（2.3）代码已就绪，但经 launcher 运行还需要 eval 配置接线（进行中；integ-s2 已接入 `--rl-overlap-eval`，eval 源接线仍有缺口）。
+- A2（2.3）代码已就绪，但经 launcher 运行还需要 eval 配置接线（进行中；integ-s2 已接入 `--rl-overlap-eval`，eval 源接线仍有缺口）。 （**已过时**：launcher eval 接线已合入集成分支；见 §8.7(3)）
 - A4/A4b（3.3–3.7）已就绪。
 - A6a/A6（4.2/4.3）已就绪；A7（4.5）部分就绪。
 - 以下正在由其他 agent 实现：A5 需要 3.8，A6b 需要 4.4，A8 需要 4.6，A9 需要 4.7（且只在 4.6 为 go 时运行）。
 
-| 批次 | 启动条件 | 内容（顺序） | 期望费用 | 本批硬预算（4 卡档） | 本批硬预算（8 卡原文档） |
+| 批次 | 启动条件 | 内容（顺序） | 期望费用 | 本批硬预算（4 卡档） | 本批硬预算（8 卡原文档） | （按 8 卡原文档执行，见 §8.7(5)）
 |---|---|---|---|---|---|
 | B1 | A4 代码与 elastic 接线在集成分支上；A2 等 eval 接线完成（未完成时 A2/A2+ 顺延，不阻塞 A4） | F0 → F-E1 → A4（E1-A/基线/E1-B/E1-D）→ A4b；A2 → A2+ | 4 卡：$74.3（其中 A2+ $8.3）；8 卡：$133.5 | **$115** | **$170** |
 | B2 | 3.8、4.4 代码合入集成分支；A4 已出结论 | A5（空闲流探测 → 基线 → 切换 → quorum）；E2 合租（A6a→A6→A6b→A7） | $46.8 | **$95** | **$80** |
@@ -174,18 +174,61 @@
 - F 阶段只保留 F0 和 F-E1。
 - v1 的 A1–A9 为 $1,500 以上，v2 的期望费用约 $154（4 卡档）。
 
-## 8. 批次 1 执行计划（用户决定后更新，2026-09-30，GPU-B1；本节提交后判据冻结）
+## 8. 2026-09-30 用户决定与修订（主 agent 维护，INTEG 代笔；本节为修订，不改 §3 任何判据文字）
+
+### 8.1 用户决定（2026-09-30）
+- A4 按 3.4 原文 **8 卡 T4R2S2↔T4R4S0** 实测（即 §2.1 的"8 卡原文版本"，直接使用 `evidence/infra-e1/plan.md` 原判据，不做 4 卡换算）。
+- 加跑 A2+（L-1.7）。
+- 非逐位比较项改用 Nebius：先做一次路径验证冒烟，不通则退回 Modal。逐位项（A6/A8 等）仍用 Modal `H100!`。
+- 超预算前停下，报告并阐述进度。
+- 未分配余额不得动用。
+
+### 8.2 A5 修订（INFRA-E1 提出，运行前）
+- quorum 用例（§3 A5 第 2 条）须带 `--rl-elastic-pause-margin 2.0`，up 请求 deadline 设 230 s；否则 `--quorum-timeout-s 120` 下默认暂停预算 60 s，150 s 注入延迟会在 plan 阶段被 pause 审计拒绝，第 2 条无从执行。详见 `evidence/infra-e1/plan-3.8-4.4-v2.md` §1 第 5 条。
+- "`start_cells` 前注入 150 s"的注入点已由 infra-e1 9a5f181 实现并随本次集成合入：launcher `--rl-test-inject-start-delay-s 150`（须同时带 `--rl-elastic`；岛上 `export YETO_RL_TEST_INJECT_START_DELAY_S=150.0`；默认不设置，无影响）。quorum 用例参数为 `--rl-elastic-quorum-timeout-s 120 --rl-elastic-pause-margin 2.0`，请求 deadline 230 s。
+
+### 8.3 A8/A9 规模（计划口径，采纳 INFRA-E3 `evidence/infra-e3/plan-v2.md`） （被 §8.7(4) 取代：以 plan-v3 为准）
+- A8：2×H100!，上限 $15.8。
+- A9：4×L40S，T2R2↔T1R3，上限 $27.3；仅在 A8 为 go 时运行（F-R1 已获用户批准，见 8.4）。
+- DEV-GATHER：A10G，上限 $3.3。
+- 注意：E3 分支尚在复审、未合入集成分支；此处仅记录计划口径，判据以 E3 plan-v2 合入后的文本为准。§2 表中 A8/A9/DEV-GATHER 的旧配置与费用被本条取代（§3 A9 判据中的"3 卡 T2R1↔T1R2"拓扑文字未改动，差异待主 agent 裁定）。
+
+### 8.4 A9 前置
+- fork 需求 F-R1（启动时可声明不启动、延迟绑定的停止 cell）：**用户 2026-09-30 已批准**（FORK-FR1 已开工，miles 分支 `yeto-deferred-cell`）。A9 仍须 A8 为 go 才运行。
+
+### 8.5 变 DP 认证范围
+- 变 DP 认证仅覆盖 dropout=0（`lora_dropout=hidden_dropout=attention_dropout=0`，代码在 DP 变化时拒绝非 0 或未知）：**用户 2026-09-30 已接受**。
+
+### 8.6 2b 的 4.4 补跑
+- 用户 2026-09-30 批准 rl-algo 2b 的 4.4 用 Modal T4 补跑，单独记账，不占 A1–A9 的 $300 预算。
+
+### 8.7 主 agent 裁定：计划统一（2026-09-30，运行前）
+本条只补充与澄清，不放宽任何判据；被影响的原文保留并标注"见 §8.7"。
+1. **A5 与 A6b**：`evidence/infra-e1/plan-3.8-4.4-v2.md` 是本计划的组成部分，其开关、前置条件、补充观测与判据一并生效：
+   - A5：quorum 用例用 `--rl-elastic-quorum-timeout-s 120 --rl-elastic-pause-margin 2.0`，请求 deadline 230 s，注入开关 `--rl-test-inject-start-delay-s 150`（§8.2）；岛0 每个执行事务的 `pause_decision`（`outer_phase=round-boundary-published`、`allowed=true`、`stalls_peers=true`、`budget_s` 与输入一致）；quorum 该 step 岛0 只有一次 PUSH，bridge 磁带中没有 "conflicting PULL permits" 和 "invalid PULL permit"。
+   - A6b：cut manifest `progress.local_step = 3`、`outer.settled = true`、ledger `carried_over = 0` 且 `ready_unconsumed = 0`；`rl_driver_start` 1 条、`rl_trainer_rebuilt` 1 条（`policy_version = 3`、成员齐全）；重建后第 1 轮的 `trained_sample_ids_sha256` 与数据游标对 B1 精确相等；`SwappableActor.generation` 在 RESTORED 时为 1，在 REBUILD_OLD 时为 2。
+   - 被杀 cell 所在 GPU 的空闲检查（plan-3.8-4.4-v2 §4 第 4 条）。
+   - 两者冲突时取更严者。逐条核对的结果：没有互相矛盾的判据，plan-3.8-4.4-v2 各条都是在 §3 之上追加的条件，所以两边同时生效。唯一的口径差异是：§3 A5 第 2 条只写了 `--quorum-timeout-s 120`，没写暂停预算；按 plan-3.8-4.4-v2 执行，这是让该判据能够执行的必要条件，不是放宽。
+2. **E1-D watchdog**：plan-3.8-4.4-v2 §4 的 5 条判据纳入 A4 的 3.7 部分，与 E1-D 原判据同时满足才算通过。该用例依赖"阻塞 `update_weights`"注入点（INFRA-E1 正在实现），注入点合入集成分支前不得运行。§2.1 中"3.7 watchdog 默认没有接 kill"已过时（2b67145 已实现并合入）。
+3. §4 中"A2 eval 源接线仍有缺口"已过时，launcher eval 接线（infra-e1 f79e016）已合入。
+4. **A8/A9/DEV-GATHER 以 `evidence/infra-e3/plan-v3.md` 为准**（infra-e3 870a329 已合入集成分支）：
+   - A8：`H100!:2`，上限 $15.8。
+   - A9：4×L40S，T2R2↔T1R3，上限 $27.3。前置条件：A8 为 go；F-R1 的 fork 实现完成并重建镜像；以及 plan-v3 §5 所列的其余前置（controller/elastic-wiring 补丁合入、E1 的 `bind_members`/`MilesTrainerOps` 接线）。
+   - DEV-GATHER：Modal 2×A10G，上限 $3.3。
+   - §2 表中与 §3 A9 的 3 卡 T2R1↔T1R2 拓扑被本条取代；判据以 plan-v3 为准。
+5. **批次硬预算按 8 卡原文档执行**：B1 $170 / B2 $80 / B3 $50，全局 $300。非逐位项已改用 Nebius（§8.1），实际费用按台账 `infra-drafts/gpu-spend.md` 计。
+## 9. 批次 1 执行计划（用户决定后更新，2026-09-30，GPU-B1；本节提交后判据冻结）
 
 用户决定（2026-09-30）：A1–A9，A10 暂缓；全部 GPU ≤ $300（含重跑）；**A4 按 3.4 原文 8 卡 T4R2S2↔T4R4S0**（§2.1 的 8 卡原文档，判据直接用 `evidence/infra-e1/plan.md` 原文，不换算）；加跑 A2+（L-1.7）；**非逐位行改 Nebius**，先做路径验证冒烟，不通则退回 Modal；未分配余额不得动用。代码基线 gpu-b1 = integ-decl a303cbb，镜像 pin 5c1b49e-9f29303（`yeto/rl/__init__.py` 的 MILES_NEXT_IMAGE digest）。台账 `infra-drafts/gpu-spend.md`；证据 `evidence/infra-v2-b1/<run>/`。
 
-### 8.1 价格与本批硬预算
+### 9.1 价格与本批硬预算
 
 - Nebius H100：v2 §1 写 $2.95/GPU·h；**运行前核对 SkyPilot 目录（`sky show-gpus H100 --cloud nebius`，2026-09-30）为 $3.85/GPU·h**（`gpu-h100-sxm_8gpu-128vcpu-1600gb` $30.80/h，1 卡 $3.85/h，eu-north1），与 Modal `H100!` $3.95 基本持平。Nebius 只有 1 卡与 8 卡两种 H100 规格，6 卡基线也只能租 8 卡。费用门控一律按 $3.85 计最坏费用。
 - Modal L40S $1.95/GPU·h（v2 §1）。
 - **本批硬预算**：v2 8 卡档 B1 $170 按 v2 所写 Nebius/Modal 价比折算：$170 × 2.95/3.95 = **$127**（取整）。用目录价 $3.85 折算会得到 $166，取较小者 $127。全局累计仍 ≤ $300。
 - 门控：每次启动前 本批已花 + 本次最坏费用（卡数 × watchdog 硬上限时长 × 单价）> $127 或全局 > $300 → 不启动，报告。
 
-### 8.2 代码就绪核查（a303cbb，CPU 只读核查，运行前）
+### 9.2 代码就绪核查（a303cbb，CPU 只读核查，运行前）
 
 | 项 | 需要 | a303cbb 现状 | 处理 |
 |---|---|---|---|
@@ -197,11 +240,11 @@
 | A2（L-2.3） | launcher 传 `--eval-interval`/eval 集 | launcher 无 eval 配置（`_check_ports_infra_switches` 注释明确） | **等待代码** |
 | A2+（L-1.7） | `observe=True` 经 launcher 开启；W-tool 工具负载 | `yeto_rl_observe_timeline` 无任何 CLI/launcher 入口；无工具负载 | **等待代码** |
 
-### 8.3 本批运行（顺序、卡、时长、费用、硬超时）
+### 9.3 本批运行（顺序、卡、时长、费用、硬超时）
 
 | 序 | 运行 | 前缀 | 云/卡 | 期望时长 | 硬超时（外层 timeout / watchdog 释放） | 最坏费用 | 判据 |
 |---|---|---|---|---|---|---|---|
-| 1 | Nebius 路径冒烟 | `infra-v2-b1-nsmoke-20260930-1` | Nebius 1×H100（`gpu-h100-sxm_1gpu`），sky `--down` + autostop 10 min | 0.4 h | 45 min / 50 min `sky down` | 1×3.85×50/60 = **$3.2** | 见 8.4-1 |
+| 1 | Nebius 路径冒烟 | `infra-v2-b1-nsmoke-20260930-1` | Nebius 1×H100（`gpu-h100-sxm_1gpu`），sky `--down` + autostop 10 min | 0.4 h | 45 min / 50 min `sky down` | 1×3.85×50/60 = **$3.2** | 见 9.4-1 |
 | 2 | F0 | `infra-v2-b1-f0-20260930-1` | Modal 1×L40S | 0.25 h | 30 min / 35 min `modal app stop` | **$1.2** | v2 §3 F0 原文 |
 | 3a | F-E1 指纹 | `infra-v2-b1-fe1fp-20260930-1` | Modal 3×L40S，T1R1S1，无请求，取到 `rl_driver_start` 即停 | 0.25 h | 25 min / 30 min | **$2.9** | 仅取指纹，不判 |
 | 3b | F-E1 | `infra-v2-b1-fe1-20260930-1` | Modal 3×L40S，T1R1S1↔T1R2S0，一次 up/down，6 轮 | ≤1 h | 70 min / 75 min | **$7.3** | v2 §3 F-E1 原文（不判通过/失败，不计入 task） |
@@ -216,9 +259,23 @@
 - 请求提交：写入岛内 `~/yeto-rl/elastic-state/inbox/<request_id>.request.json`（`CommandInbox` 原格式），经 `ssh <cluster>` 在第 2 轮 / 第 7 轮 generate 期间提交，使其在第 3 / 第 8 轮前的安全点执行；`<request_id>.status.json` 与 journal 取回存档。
 - 采集：puller 每 ≤10 s 取事件磁带、`nvidia-smi --query-compute-apps=pid,gpu_uuid`、`nvidia-smi -L`，结束前取 journal/epochs/ledger。
 
-### 8.4 判据（冻结）
+### 9.4 判据（冻结）
 
-1. **Nebius 冒烟**（路径验证，不计入 task）：通过 = (a) sky 集群 UP 且岛容器内 `nvidia-smi` 为 H100；(b) 岛连上本机 head syncer（本机 syncer 日志有该岛连接、磁带有外层同步完成事件）；(c) 1 轮完成，launcher 退回码 0；(d) 运行期间无 keepalive/连接中断导致的失败。任一不满足 = 不通，按 8.3 退回 Modal，不在 Nebius 上排错。公网 IPv4 用量记录（配额 3，本次 1）。
+1. **Nebius 冒烟**（路径验证，不计入 task）：通过 = (a) sky 集群 UP 且岛容器内 `nvidia-smi` 为 H100；(b) 岛连上本机 head syncer（本机 syncer 日志有该岛连接、磁带有外层同步完成事件）；(c) 1 轮完成，launcher 退回码 0；(d) 运行期间无 keepalive/连接中断导致的失败。任一不满足 = 不通，按 9.3 退回 Modal，不在 Nebius 上排错。公网 IPv4 用量记录（配额 3，本次 1）。
 2. **F0 / F-E1**：v2 §3 原文。
 3. **E1-A / E1-E**：`evidence/infra-e1/plan.md` §1 E1-A (a)–(g) 与 E1-E 原文，逐字适用，无数值容差，1 个 seed。3.4 只有 E1-A 全部满足才勾选；3.1/3.2/3.6 旁证只记录，不据此勾选。E1-A (e) 的"池"= 该 8 卡 VM 的 8 张 UUID。
-4. 3.3、3.5、3.7、2.3、1.7 本批不运行，状态按 8.2 记录，不勾选。
+4. 3.3、3.5、3.7、2.3、1.7 本批不运行，状态按 9.2 记录，不勾选。
+
+### 9.5 合并 integ-decl 15d88bd（含 47c625e）后的就绪复核（运行前；判据不变）
+
+主 agent 2026-09-30 指示：未开跑项合并 integ-decl 47c625e 后再跑，判据以已提交为准。gpu-b1 已合并 origin/integ-decl 15d88bd（47c625e 为其祖先）。已完成项的代码 SHA：Nebius 冒烟、F0 = a303cbb。其后各运行用本合并提交（证据中逐次记录 SHA）。复核结果（只改就绪判断，不改 §9.4 与 §8.7 任何判据）：
+
+| 项 | 15d88bd 现状 | 处理 |
+|---|---|---|
+| A2（L-2.3） | launcher 已有 `--rl-eval-interval/-data/-dataset-name/-samples-per-prompt` 与 `--rl-overlap-eval`；**但 launcher 不转发 `--eval-temperature`**，Miles `eval_temperature` 缺省回落到 `rollout_temperature`（默认 1.0，`miles/utils/eval_config.py`），L-2.3 判据 5 要求的贪心 eval（temperature=0）经 launcher 无法设置 | **等待代码**（launcher 需转发 eval temperature），不运行 |
+| A2+（L-1.7） | `yeto_rl_observe_timeline` 仍无 CLI/launcher 入口；无工具负载 | **等待代码** |
+| E1-B（3.5） | `load_fault_injection` 仍只认 `publish_delay_s`；无权重覆盖注入 | **等待代码** |
+| E1-C / A4b（3.3） | `elastic_wiring_for` 仍不传 `tool_wait_board`；无工具负载 | **等待代码** |
+| E1-D（3.7） | watchdog kill 已合入（2b67145/5946ffd）；§8.7(2) 所需"阻塞 update_weights"注入点未合入；③④ 的 stop_cells 半失败注入、⑦ 的 fork 重启入口仍无；⑤⑥ state dir 仍在容器内非持久路径 | ①②③④⑦ 与 watchdog 用例 **等待代码**；⑤⑥ **环境阻塞** |
+| E1-A/E1-E（3.4） | 不变，可运行 | **运行**（9.3 第 3–5 项，代码 = 本合并提交） |
+| 本批硬预算 | §8.7(5) 写 B1 $170；本节 9.1 按用户"按 Nebius 价折算"取 **$127**（更严），维持 | — |

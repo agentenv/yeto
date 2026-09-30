@@ -347,3 +347,95 @@
 - 复用不重跑：A1（1.2 已勾）、A3（2.4 合法否定结论）、2.1/2.2/2.3 X9 guard 已有 GPU 证据。
 - 待用户确认：A4 4 卡代替原文 8 卡（实质改变验收）；A2+（L-1.7）；可选 Nebius；未分配 $25 的动用授权。
 - 状态：仅规划；未启动任何资源，费用 $0；无 task 勾选变化。4.8：未完成（用户决定暂缓）。
+
+## 2026-09-30（Agent INFRA-E1 第二轮：launcher eval 接线、3.8、4.4、H2；分支 `infra-e1`）
+
+### 分支与状态
+- worktree `/home/michael/work/infra-e1`，基于 integ-decl 65ca03b。提交：f79e016（launcher eval）、533afdc（3.8）、d397cf3（4.4）、2b67145（H2 watchdog）、4d8ec81（计划与 tasks 进展），以及本条目所在的提交。已普通推送 `origin infra-e1`。未启动任何 GPU 或云资源，费用 $0。
+
+### task 状态（五选一）
+- launcher eval 接线（非 task，A2/L-2.3 前置）：**已实现 + CPU 通过**。
+- 3.8：**已实现 + CPU 通过，未勾选**（X6 需两岛 GPU；依赖 3.7、2.4 未勾选）。
+- 4.4：**已实现 + CPU 通过，未勾选**（依赖 4.3；需 GPU A6b）。
+- 3.7（H2）：**已实现 + CPU 通过，未勾选**。默认 watchdog 会杀掉目标 generation；限制仍在，见 tasks 3.7。
+- 4.5：未完成（新增两条 CPU 覆盖）。
+
+### 关键改动
+- launcher 新增 `--rl-eval-interval/-data/-dataset-name/-samples-per-prompt`，转发为 learner 的 `--eval-*`。heldout 文件内联进运行命令（≤1 MiB），岛上按 SHA256 校验。learner 的 `_verify_eval_dataset_identity` 与 `run_config._resolve_eval` 共用 `ports_training_eval()`：ports LoRA 允许训练期 heldout eval（必须是与 `--data` 不同的文件），legacy LoRA 仍然拒绝。launcher 本地的 overlap 检查改用它实际转发的同一个 interval。**此前的真实缺口**：不止 launcher，直接启动的 learner 在 ports LoRA 上带 `--eval-interval` 也会被 `_resolve_eval` 拒绝（"restricted to dense full mode"），所以 2.3 的 overlap eval 以前在任何入口都起不来。
+- 3.8：`SyncSession.outer_phase`（strict、decoupled）；`IslandController.run_at_safe_point(..., outer_phase=)` 重新做 pause 决定并写入 journal；`enter_finalization`；暂停预算的输入沿 launcher → learner → build_elastic 传递，同时传给 syncer 的 `--quorum-timeout-s`。
+- 4.4：`IslandController.request_trainer_rebuild`、`REBUILDING_TRAINER`、`RebuildRefused`；`miles_adapter/rebuild_wiring.py`；driver 新增 `local_step`；`entry._wire_trainer_rebuild`。
+- H2：`elastic_wiring.kill_target_generation`（默认启用，`on_watchdog=None` 可关闭）；controller 的 journal 追加加了线程锁。
+
+### 写入范围说明
+- 本轮改了 `yeto/cli.py`（launch 新参数）、`yeto/rl/learner.py`（eval 身份校验与 elastic 暂停参数）、`yeto/rl/engine/run_config.py`（`_resolve_eval` 的 ports 分支）、`bridges.py`（`outer_phase`）。这些都属于 launcher/learner 的 INFRA 接线，没有其他写入者，在此声明。trainer.py、state_plugin.py 未改，没有交给 E3 的补丁。
+
+### 测试
+- 全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`：68 failed / 2937 passed / 49 skipped / 26 errors。失败与错误的 id 按第二列去重共 94 个，与 `/tmp/integ-s2-base.ids` 完全相同，没有新增（`/tmp/infra-e1-r2.ids`）。
+- 新增和修改的测试：`tests/test_rl_infra_switches.py`（eval 与暂停参数，+9）、`tests/test_rl_reconfig_x6.py`（10）、`tests/test_rl_trainer_rebuild_e1.py`（10）、`tests/test_rl_reconfig_e1.py`（watchdog，+3）。
+- `openspec validate rl-infra-spec --strict`：valid。
+- fake 只证明协议，不作为 3.8、4.4、3.7 的验收证据。
+
+### GPU 计划
+- `evidence/infra-e1/plan-3.8-4.4.md`：A5（X6-a..e）、A6b（4.4）、§3 watchdog。判据在运行前固定。X6-b 与 §3 需要的故障注入点**尚未实现**，执行前须先补上并提交。
+
+### 已知限制与阻塞
+- 4.4：`MilesRolloutPool.data_cursor()` 返回缓存值，不在 rollout 进程内实时读取；重建前后的游标比对因此检查不到 `rollout_executor.load` 的回卷。
+- 3.7：阻塞在旧成员集上的调用仍不受截止时间约束；fork health monitor 对被杀 cell 的行为未知。
+- head 两跳（fleet head 模式）下，`--rl-eval-data` 与 `--rl-elastic-resources` 一样，只内联到岛的运行命令，没有另行处理 head 上的暂存。
+- 待批准：无新增。
+
+### INFRA-E1 第二轮审查修复（2026-09-30，结论"需修复"）
+- F1：新执行说明 `evidence/infra-e1/plan-3.8-4.4-v2.md`，以集成分支 `gpu-plan-v2.md` §2–§3 为唯一判据来源，只补充开关、前置条件、E1 观测点与已知限制。v1 `plan-3.8-4.4.md` 保留，并标注"已被取代"。删去了两条不可达的判据："最终 policy hash 等于 B0"与"syncer base 等于 B0"。A6b 的 `progress.local_step` 写成确定值 3。需要主 agent 知悉、gpu-plan-v2 可能需要补充的两点：(a) A5 quorum 用例要让 150 s 延迟通过 pause 审计，必须带 `--rl-elastic-pause-margin 2.0`，deadline 设 230 s，否则请求会在 plan 阶段被拒；(b) "start_cells 前注入 150 s"的注入点尚未实现，执行前须先补上并提交。
+- F2（5946ffd）：watchdog 的判定与终止、`tx.phase` 变更、commit CAS 前的复查共用一把锁。watchdog 已触发时，事务走 REBUILD_OLD；提交开始后，watchdog 不再终止任何 cell。新增 2 个测试。
+- F3（e477bcb）：driver 新增 `RebuildNotStarted`（无发布、不在安全点、cut hash 不符），rebuilder 在写 cut 之前检查 `rebuild_preconditions(miles_args)`，这两类拒绝都判 CANCELLED。前提不满足时 entry 不接线 rebuilder，请求在 plan 阶段即被拒。新增 3 个测试。
+- F4：已写入 v2 §4 第 4 条（被杀 cell 所在 bundle 的 GPU 上 `nvidia-smi --query-compute-apps` 为空）。tasks 4.4、4.5 已写明 `REBUILDING_TRAINER` 阶段不受 deadline 强制终止的限制。
+- F5：v2 §3 第 3 条：重建后下一轮的 `trained_sample_ids_sha256` 与数据游标须与 B1 相等。
+- F6（500555a）：内联 eval 数据上限改为 96 KiB，并加测试。
+- 全量：68 failed / 2943 passed / 49 skipped / 26 errors，失败 id 共 94 个，与 `/tmp/integ-s2-base.ids` 相同（`/tmp/infra-e1-r2b.ids`）。validate strict 通过。
+- E3 吸收工作暂停在本地分支 `infra-e1-e3wip`（430f49f，未推送，未完成）。
+
+## INFRA-E3（2026-09-30，4.2a/4.6/4.6a/4.7 的 CPU 部分；分支 `infra-e3`，worktree `/home/michael/work/infra-e3`，基于 integ-decl 65ca03b）
+
+### task 状态（五选一，均未勾选）
+- 4.2a：未完成。fork 接口已满足（按名 optimizer 状态 + DistOpt 文件式收集/切片），缺 GPU 验证（DEV-GATHER/A8）。
+- 4.6：CPU 通过。GPU 验收 A8 未运行；依赖 4.5、1.6 未满足。
+- 4.6a：未完成。trainer 侧 M6 满足；角色转移缺 fork 需求 F-R1（启动时声明延迟绑定的 rollout cell，需另批）。
+- 4.7：已实现（yeto 侧，CPU 通过）；controller 接线以补丁交 E1；A9 依赖 4.6 go、F-R1。
+
+### 改动
+- `yeto/rl/engine/miles_adapter/reshard.py`（新）；`cut_plugin.restore_resharded_shard`；`MilesTrainerGroup.restore_cut_resharded/rebind_args`；`trainer_rebuild.rebuild_resharded/resized_args/trainer_view`；`miles_adapter/trainer_resize.py`（新，`MilesTrainerOps`）；`engine/trainer_transition.py`（新）。
+- 测试：`tests/rl_reshard_fakes.py`、`tests/test_rl_trainer_reshard.py`（13）、`tests/test_rl_trainer_transition.py`（12）。纯 torch 替身，只证协议，不作验收。
+- 计划：`evidence/infra-e3/plan.md`（DEV-GATHER、A8、A9，判据与上限预先固定；E3 上限合计约 $46）。
+
+### 测试
+- 全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`：68 failed, 2930 passed, 49 skipped, 26 errors；失败/错误 id 94 个，与 `/tmp/integ-s2-base.ids`（第二列）完全相同，无新增失败。
+- 补丁验证：在本分支临时应用两个补丁后 `tests/test_rl_controller_trainer_edge.py` + `tests/test_rl_reconfig_e1.py` 37 passed，随后撤回。
+- `openspec validate rl-infra-spec --strict` 通过。云资源：无；费用 $0。
+
+### 交给其他写入者
+- `infra-drafts/patches/infra-e3-controller.patch`、`infra-e3-elastic-wiring.patch`（基于 65ca03b；在 infra-e1 533afdc 上 controller.py `__init__` 附近冲突，需手工合入）。接口见 plan.md §5。
+- E1 需实现 `MilesRolloutPool.bind_members(members, gpus)` 与 `compose_island` 中 `MilesTrainerOps` 的构造。
+
+### 待批准 / 阻塞
+- F-R1（fork 新需求，与 G6 相邻）：阻塞 A9/4.7 GPU。
+- PLAN-V2 需采纳本计划的缩小规模（A8 2×H100!、A9 4×L40S T2R2↔T1R3、DEV-GATHER 用 A10G）。
+- dropout>0 的变 DP 边不在首轮认证范围（plan.md §0）。
+
+### INFRA-E3 审查修复（2026-09-30，"需修复"结论）
+- H1：`reshard.py` 改按 fork scheduled 路径建模（`scheduled_partitions`/`sample_mapping`/`step_problems`，GBS 按 rollout 计、`num_rollouts` 归一）；删除 round-robin 假设；拒绝 `--balance-data`、`--balance-by-flops`、动态 batch、部分步、vpp>1。A8 arm 改走 `split_train_data_by_dp` 真实分派（plan-v2）。
+- H2：rollout→trainer 要摘除的 engine 由 pool 的成员→GPU 映射按 `moved_gpus` 选出（`members_on_gpus`），选不出、跨界或数量不符在 plan 阶段拒绝，执行前再核一次（变化则 CANCELLED）；新增"成员名顺序与 GPU 顺序不一致"测试。
+- M1：DP 变化时 `lora_dropout`/`hidden_dropout`/`attention_dropout` 任一非 0 或未知即拒绝。M2：loss 权重按 fork `loss_function` 缩放参数化复算；CPU 只验证算术，归一化证据交 A8 G2（tasks 4.6 已改述）。
+- M3：`infra-e3-controller-v2.patch`（v1 改名 `.v1-OBSOLETE`）：提交 CAS 失败 → `_enter_recovery` + `trainer_recovery_hint`（restore_old，含 cut_epoch），有测试。
+- M4：`resize/restore_source` 显式接收 cut epoch；`trainer_cut` 记录 `cut_epoch`，`recovery_decision` 的提示带 epoch 并写明边界；新增"重启后无 save_cut 也能 restore_source"测试。
+- L1：yeto 侧替身（`tests/rl_reshard_fakes.py`）自带简化的合并逻辑，**不证明** fork-M5 的区间重叠/覆盖检测；那部分依赖 fork 自己的 CPU 单测与 GPU 验证。L2：reshard 文档措辞已改。L3：`trainer_view` 调用前检查 `_slice_pg_info` 存在且签名为 `(info, indices)`（miles 在 CPU 环境不可 import，故在调用时而非模块 import 时检查），有签名测试。L4：plan-v2 写明 G3 第二次仍不可判定即 no-go。
+- F-R1：已从源码核实（`RayWorkerManager.init` 对全部已声明 cell 执行 `start_cells`；cell 只能绑本 pool 视图），需求写入 plan-v2 §4。
+- 测试：全量 68 failed, 2937 passed, 49 skipped, 26 errors；失败/错误 id 94 个与 /tmp/integ-s2-base.ids（第二列）完全相同。v2 补丁临时应用后 controller 级 + E1 reconfig 测试 38 passed，随后撤回。openspec validate --strict 通过。
+- 状态不变：4.2a 未完成；4.6 CPU 通过；4.6a 未完成；4.7 已实现（yeto 侧，CPU 通过）；均未勾选。
+
+### INFRA-E3 复审修复（2026-09-30；复审结论"A8 可按 plan-v2 执行"，以下为 A9/生产路径问题）
+- M1：`infra-e3-controller-v3.patch`（v2 改名 `.v2-OBSOLETE`）：提交 CAS 抛错后读回 epochs，`last_tx_id` 为本事务（写入后 fsync 才抛错）→ hint `restore_target`；否则 `restore_old`；读不回 → `recovery_required`；均进入 RECOVERY_REQUIRED。新增"写入后才抛错"测试。
+- M2：`batch_problems` 写入前拒绝 `--indep-dp`、`--multimodal-keys`；DP 变化后 `MilesTrainerGroup.train_step` 训练前经 `batch_guard_problems` 守卫：各 rank 须公布完整 `train_parallel_config` 且 dp 等于计划，批次 rollout 数须为 steps×GBS 且被两侧 scheduled 路径接受，否则拒绝（payload 照常释放）。残余：yeto 看不到分片内容，无法直接读 `micro_batch_indices`；守卫覆盖的是 fork 退回 raw 的全部条件（`can_schedule_on_rollout_side`，`rollout_ids` 由 fork 恒设），A8 在 rank 内直接断言分片带 `micro_batch_indices/num_rollouts`。
+- L1：静态整除检查的"每 rollout 1 条样本"假设已写入文档，生产每批由守卫调用 `step_problems`。
+- L2：`plan-v3.md`（v2 保留并标注已取代）A9 判据新增"新 engine 所在 GPU 等于 moved GPU"。
+- 测试：全量 68 failed, 2940 passed, 49 skipped, 26 errors；失败/错误 id 94 个与 /tmp/integ-s2-base.ids（第二列）完全相同。v3 补丁临时应用后 controller 级 + E1 reconfig 测试 39 passed，随后撤回。
+- 状态不变：4.2a 未完成；4.6 CPU 通过；4.6a 未完成；4.7 已实现（yeto 侧，CPU 通过）；均未勾选。无云资源，$0。
