@@ -578,3 +578,9 @@
 - L-D0：D1、D2 rc=0，v1–v3 token 逐位相同 → 通过（`evidence/infra-v2-b1/ld0/RESULT.md`），≤$4.21。
 - A2 重跑（加 --rl-deterministic-trainer）：S2 rc=0；O2 训练完整且判据 2/3/5/6 通过（S2 与 O2 token 与 eval 分数全同），但 launcher 因磁带最后一条 `rl_learner_finalized` 收集竞态返回 rc=3 → 判据 1 不满足，链条停止，OD2 未跑。2.3 仍未完成；需 launcher 修复磁带完整性判定。≤$5.15（`evidence/infra-v2-b1/a2/rerun2/RESULT.md`）。
 - hrun/mrun 已加 `--modal-retries 0 --modal-timeout-s <硬超时+5min>` 与 20 min 进度看门狗。
+
+## GPU-B1 暂停点（2026-09-30 09:59Z，用户下班暂停）
+- F-E1 第四次（3×A10G，代码 37155d8，镜像 2cc5cc52/Miles e3a11ab3）：**通过**——up/down 均 SUCCEEDED、fork cell id、旧成员不变（`evidence/infra-v2-b1/fe1r4/RESULT.md`）。
+- A2 第三次（代码 37155d8，三 arm 同 SHA，含 --rl-deterministic-trainer）：S3 rc=0、O3 rc=0；S3 对 O3 判据 2、3、5、6 通过（`evidence/infra-v2-b1/a2/rerun3/partial-analysis-S-O.json`）；**OD3 在运行中按用户指示停止（rc=143）**，判据 1（OD）、3（OD）、4 未评估 → 2.3 仍未完成。
+- 继续点：在同一 SHA 37155d8（或主 agent 指定的新 SHA；若换 SHA 则三 arm 全重跑）补跑 OD3，然后用 `a2/analyze_a2.py rerun3/S rerun3/O rerun3/OD` 判定。之后按主 agent 批准执行 A4（8 卡 H100，代码合并 integ-decl 4dcc52b；先写 §9 A4 计划、8 卡 dry-run、调度探测、`--rl-print-attestation-fingerprint` 取指纹）。F-E2 等新镜像（已是 2cc5cc52，可在 A10G 上跑）。
+- 本批累计 ≤$33.60（上界）。所有 infra-v2-b1-* Modal app stopped/0；本地 launcher/syncer/watchdog/puller 已终止。
