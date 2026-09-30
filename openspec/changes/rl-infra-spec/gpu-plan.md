@@ -1,3 +1,5 @@
+> **已被 [gpu-plan-v2.md](gpu-plan-v2.md) 取代（A1–A9 部分，2026-09-30）**；§6 head 放置与 §8 池身份/租用记录/回收仍有效。A10（4.8）用户决定暂缓。
+
 # rl-infra-spec E0–E3 GPU 实验计划与预算（1.3 定稿，2026-09-29 INFRA；未启动任何 GPU）
 
 作者：Agent I，2026-09-29。基于 `openspec/changes/rl-infra-spec/{tasks.md,design.md,upstream-mechanisms.md}`。本计划是 task 1.3 的交付草案，**需用户确认后才租卡**。
