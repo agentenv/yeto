@@ -320,3 +320,8 @@
 - 前缀按本 agent 资源纪律用 `infra-v2-b1-d0-{1,2}-20260930`（L-D0 原文示例为 `infra-a-d0-…`，仅名字不同）。Modal `H100!:2`，strict-avg 单岛 + 本机 head，无 eval，3 轮 seed 17，依次运行；外层 30 min，`--modal-timeout-s 2100`，watchdog 35 min，进度看门狗 20 min；最坏合计 $9.2。
 - F-E1/F-E2 因 Modal L40S 无容量暂停（`modal app logs`：waiting to be scheduled on a GPU_L40S worker）。
 - 9.11 结果：L-D0 判据 1、2 通过（`evidence/infra-v2-b1/ld0/RESULT.md`）。按结论规则重跑 A2 三 arm：§9.7 配置 + `--rl-deterministic-trainer --modal-retries 0 --modal-timeout-s 3000` + 进度看门狗，代码 aeaf6e2，前缀 `infra-v2-b1-a2{s,o,od}-20260930-2`；判据 L-2.3 1–6 不变；dry-run（a2/test_a2_dryrun.py 加开关）3 passed；最坏 3×$6.6。
+
+### 9.12 冒烟改用 A10G（主 agent 2026-09-30 裁定；不计入 task，判据不变）
+- Modal L40S 无容量，F-E1、F-E2 改用 Modal A10G，卡数不变（F-E1 3×A10G）。单价按 Modal A10G $1.10/GPU·h（运行前未核实当日价）。
+- F-E1 第四次：代码 037d4f5（合并 integ-decl aaebc90），镜像仍为 db815884…（F-E1 不涉及 cut）。dry-run（fe1r/test_fe1r_dryrun.py，卡改 3xa10g）1 passed。先取指纹（watchdog 20 min），再正式运行（第 1 轮 train up、第 3 轮 train down，watchdog 25 min）；最坏 3×1.10×45/60 = $2.5。判据同 §9.9：up 与 down 都 SUCCEEDED、成员为 fork cell id、旧成员不变。
+- F-E2 等新镜像 pin 合入后再跑（A10G，卡数 3）。

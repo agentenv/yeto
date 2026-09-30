@@ -30,7 +30,7 @@ def test_fe1r(tmp_path, monkeypatch):
     from yeto.rl.engine.run_config import resolve_rl_run_config
 
     assert MILES_NEXT_IMAGE.endswith(DIGEST) and MILES_NEXT_COMMIT.startswith("2f23a0fc")
-    cli = ("--gpu", "modal:3xl40s", "--total-steps", "6", "--seed", "17",
+    cli = ("--gpu", "modal:3xa10g", "--total-steps", "6", "--seed", "17",
            "--rl-single-island-no-sync", "--controller", "local",
            "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1", "--rl-standby-gpus", "1",
            "--rl-elastic", "--rl-elastic-declare-cells", "--rl-elastic-cells", "c0,c1",
