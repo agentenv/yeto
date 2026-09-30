@@ -341,6 +341,31 @@ def execution_profile_for(
     )
 
 
+def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
+    """1.7: where load samples read the in-flight tool-wait count from.
+
+    The elastic drain board when wired; the island's named board when the
+    tool-wait workload generate is configured (it counts on that board); 0
+    (``TOOL_WAIT_NO_BOARD_STOCK``) for Miles' stock generate, which makes no
+    tool calls; None (unknown) for any other custom generate.
+    """
+    from .rollout import TOOL_WAIT_NO_BOARD_STOCK
+
+    board = getattr(elastic, "tool_wait_board", None) if elastic is not None else None
+    if board is not None:
+        return board
+    custom = getattr(miles_args, "custom_generate_function_path", None)
+    if not custom:
+        return TOOL_WAIT_NO_BOARD_STOCK
+    from yeto.rl.tool_wait_workload import GENERATE_PATH
+
+    if custom == GENERATE_PATH:
+        from .elastic_wiring import LazyBoardActor
+
+        return LazyBoardActor(int(getattr(miles_args, "yeto_rl_learner_id", 0) or 0))
+    return None
+
+
 def preflight(profile: Any, algorithm: AlgorithmSpec, capabilities: EngineCapabilities) -> None:
     """A1: the launcher-bound profile agrees with the runtime AlgorithmSpec and the
     declared capabilities, before any GPU process exists (before connect_island_ray)."""
@@ -448,6 +473,7 @@ def compose_island(
             expected_policy=expected_policy,
             runner=runner,
             args=miles_args,
+            load_tool_wait=load_tool_wait_source(miles_args, elastic),
             **(
                 {"declared_cells": resolve_declared_cells(
                     inference_controller, runner, elastic.declared_cells),
@@ -746,8 +772,12 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
 
 
 # E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode).
+# NVTE_ALLOW_NONDETERMINISTIC_ALGO=0: Megatron's --deterministic-mode only
+# setdefaults it in the process that validates the args, while Transformer
+# Engine reads it in each trainer rank (Ray worker); set it here so it reaches
+# every rank through connect_island_ray (A2 follow-up, local-gpu-plan L-2.3).
 DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                   "NVIDIA_TF32_OVERRIDE": "0"}
+                   "NVIDIA_TF32_OVERRIDE": "0", "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0"}
 
 
 def resolve_declared_cells(inference_controller: Any, runner: Any,
@@ -797,6 +827,7 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
     config = getattr(miles_args, "yeto_rl_elastic", None)
     if not config:
         return None
+    check_elastic_miles_args(miles_args)
     from .elastic_wiring import LazyBoardActor, build_elastic
 
     return build_elastic(
@@ -819,6 +850,21 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
            if config.get("trainer_edges") else {}),
     )
+
+
+def check_elastic_miles_args(miles_args: Any) -> None:
+    """Miles preconditions of the fork verbs the E1 controller uses, refused before
+    Ray: cordon / drain_cells / admit_cells / cordoned update_weights need the
+    Miles router; member publication needs a resident partitioned rollout."""
+    problems = []
+    if not getattr(miles_args, "use_miles_router", False):
+        problems.append("--use-miles-router (fork cordon/drain/admit_cordoned need the Miles router)")
+    if getattr(miles_args, "colocate", False):
+        problems.append("no --colocate (elastic needs a fixed partition)")
+    if getattr(miles_args, "offload_rollout", False):
+        problems.append("no rollout offload (member publication needs resident engines)")
+    if problems:
+        raise ValueError("--rl-elastic needs " + "; ".join(problems))
 
 
 def manifest_pool_gpus(resources: Any) -> tuple[str, ...]:

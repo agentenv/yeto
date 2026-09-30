@@ -76,7 +76,7 @@ def test_observe_and_tool_wait_board_reach_the_island_wiring(tmp_path, monkeypat
                                                   "--rl-elastic-tool-wait-board"), monkeypatch)
     args, _ = learner_from_run(run, tmp_path / "home")
     assert args.rl_observe_timeline and args.rl_elastic_tool_wait_board
-    miles_args = SimpleNamespace(yeto_rl_learner_id=0)
+    miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
     learner.apply_ports_infra_switches(args, miles_args, {})
     assert miles_args.yeto_rl_observe_timeline is True
     seen = {}
@@ -97,7 +97,7 @@ def test_defaults_set_neither_observe_nor_board(tmp_path, monkeypatch):
     from yeto.rl.engine.miles_adapter import elastic_wiring, entry
 
     args, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "h")
-    miles_args = SimpleNamespace(yeto_rl_learner_id=0)
+    miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
     learner.apply_ports_infra_switches(args, miles_args, {})
     assert not hasattr(miles_args, "yeto_rl_observe_timeline")
     seen = {}
@@ -437,9 +437,11 @@ def test_trainer_edges_drop_balance_data_only(tmp_path, monkeypatch):
     assert edges.rl_elastic_trainer_edges and not plain.rl_elastic_trainer_edges
     with_edges, elastic_only, off = _argv_from(edges), _argv_from(plain), _argv_from(default)
     assert "--balance-data" not in with_edges
-    assert "--balance-data" in elastic_only and elastic_only == off  # byte-identical otherwise
+    assert "--balance-data" in elastic_only and "--balance-data" in off
+    # elastic adds only --use-miles-router; trainer edges only drop --balance-data
+    assert [a for a in elastic_only if a != "--use-miles-router"] == list(off)
     assert [a for a in elastic_only if a != "--balance-data"] == list(with_edges)
-    miles_args = SimpleNamespace(yeto_rl_learner_id=0)
+    miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
     learner.apply_ports_infra_switches(edges, miles_args, {})
     assert miles_args.yeto_rl_elastic["trainer_edges"] is True
 
@@ -518,3 +520,48 @@ def test_lora_dropout_range_is_checked():
         launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "1.0")), "ports")
     with pytest.raises(ValueError, match="--rl-lora-dropout"):
         launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "0.05")), "legacy")
+
+
+# ---------------------------------------------------------------- Miles router under --rl-elastic
+def test_elastic_runs_carry_use_miles_router_and_defaults_do_not(tmp_path, monkeypatch):
+    import argparse
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    elastic, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "a")
+    default, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "b")
+    (base,), kwargs = _captured_args()
+
+    def argv(args_ns):
+        ns = argparse.Namespace(**{**vars(base), "rl_placement": "fixed-partition",
+                                   "rollout_num_gpus": 1, "rl_elastic": args_ns.rl_elastic})
+        return mc.translate_run_config(rc.resolve_rl_run_config(ns, **kwargs), AlgorithmSpec()).argv
+
+    on, off = argv(elastic), argv(default)
+    assert "--use-miles-router" in on and "--use-miles-router" not in off
+    assert [a for a in on if a != "--use-miles-router"] == list(off)
+    plain = argparse.Namespace(**{**vars(base)})
+    assert "--use-miles-router" not in mc.translate_run_config(
+        rc.resolve_rl_run_config(plain, **kwargs), AlgorithmSpec()).argv
+
+
+def test_elastic_wiring_refuses_missing_fork_verb_preconditions():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from yeto.rl.engine.miles_adapter import entry
+
+    cfg = {"resources": {}, "attestation": None, "state_dir": "/s", "initial_config": "c0",
+           "declared_cells": ()}
+    with pytest.raises(ValueError, match="--use-miles-router"):
+        entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=cfg, use_miles_router=False),
+                                 profile=None, fingerprint="f")
+    with pytest.raises(ValueError, match="rollout offload"):
+        entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=cfg, use_miles_router=True,
+                                                 offload_rollout=True), profile=None,
+                                 fingerprint="f")
+    entry.check_elastic_miles_args(SimpleNamespace(use_miles_router=True))

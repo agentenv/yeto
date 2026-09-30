@@ -379,6 +379,9 @@ class RLRunConfig:
     # (--rl-elastic-trainer-edges); the first certified DP profile refuses
     # --balance-data, so the translation drops it only then.
     trainer_dp_edges: bool = False
+    # 3.x (--rl-elastic): the fork's cordon / drain / cordoned admission need the
+    # Miles router (fork server_cell._assert_cordonable, admit_cordoned).
+    use_miles_router: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -825,6 +828,7 @@ def resolve_rl_run_config(
         yeto_policy_sync=yeto_policy_sync,
         distributed_timeout_minutes=getattr(args, "rl_distributed_timeout_minutes", 10),
         deterministic_trainer=bool(getattr(args, "rl_deterministic_trainer", False)),
+        use_miles_router=bool(getattr(args, "rl_elastic", False)),
         trainer_dp_edges=bool(getattr(args, "rl_elastic", False)
                               and getattr(args, "rl_elastic_trainer_edges", False)),
     )
