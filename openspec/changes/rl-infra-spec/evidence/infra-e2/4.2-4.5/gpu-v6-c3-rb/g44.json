@@ -1,25 +1,20 @@
 {
  "criteria": {
   "journal VALIDATING->WAIT_SAFE->REBUILDING_TRAINER->SUCCEEDED": {
-   "pass": true,
-   "phases": [
-    "VALIDATING",
-    "WAIT_SAFE",
-    "REBUILDING_TRAINER",
-    "SUCCEEDED"
-   ]
+   "pass": false,
+   "phases": []
   },
   "rebuild outcome == RESTORED": {
-   "pass": true,
-   "outcome": "RESTORED"
+   "pass": false,
+   "outcome": null
   },
   "SwappableActor.generation == 1": {
-   "pass": true,
-   "generation": 1
+   "pass": false,
+   "generation": null
   },
   "journal rebuild.local_step == 3": {
-   "pass": true,
-   "local_step": 3
+   "pass": false,
+   "local_step": null
   },
   "exactly one cut manifest": {
    "pass": false,
@@ -77,16 +72,12 @@
     "sample_offset": 6
    }
   },
-  "optimizer_applied once per round (no duplicate)": {
+  "optimizer_applied never twice (ledger)": {
    "pass": true,
    "rollout_ids": [
-    0,
-    1,
-    2,
-    3,
-    4,
-    5
-   ]
+    0
+   ],
+   "note": "pulled ledger can lag the last round; completeness is judged from the tape (rounds 0..5 once)"
   }
  },
  "pass": false

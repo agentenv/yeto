@@ -638,3 +638,10 @@
   - 测试用模拟的 ActorHandle 复现"无 data_source 属性"的路径：经 `__ray_call__` 读到实时值；actor 调用失败时为未知；游标在重建期间于 actor 内被改动，`rebuild_same_shape` 判 RECOVERY_REQUIRED（G-4.5 第 5 行的 CPU 协议检查）。
   - **依赖**：Ray 的 `ActorHandle.__ray_call__`（Ray 2.x 为所有 actor 提供）。本机 yeto-venv 没有 ray，无法在真实 handle 上验证；若镜像内的 Ray 不支持它，读取会失败并判为未知（不会静默使用旧值），那时需要 fork 增加只读方法 `RolloutExecutor.get_data_cursor()`（新 M 项需求）。
   - 全量：68F/3172P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b11.ids`）。
+
+### INFRA-E2 追加运行（2026-09-30 下午）
+- G-4.5 第 6a 行：通过（`gpu-v6-c3-f6a/`）。kill 发生在 REBUILDING_TRAINER，写 cut 之前。原地重启后 journal 对账判 RECOVERY_REQUIRED（"learner restarted after release, before commit"），重启的 learner 账本拒绝重训 rollout 0–2，无重复消费。
+- 第 6b 行：同形重建不适用（状态机没有 COMMITTED 阶段）。第 2 行按主 agent 裁定记为不通过，"REBUILDING_TRAINER 无 deadline 强制"写入 4.5 已知限制。
+- C3-rebuild 补跑（e2z）：磁带侧判据与首跑一致；manifest 和 journal 仍未拉回（整包分块拉取过慢）。工具已改为只拉小文件（214ba19）。
+- G-4.5 第 5 行重跑（e2z，f707dc3）：仍阻塞。实时游标读不到，CutSource 拒绝写 cut（CANCELLED）。原因：executor 是 RayWorkerHandle 包装，E1 的 `_is_ray_handle` 没有解包 `_actor_handle`。
+- B2 累计 ≤ $45.70。所有 app stopped/0，无残留进程。
