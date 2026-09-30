@@ -47,6 +47,6 @@
   ]
  },
  "env": {
-  "YETO_RL_TEST_INJECT_WEIGHT_OVERRIDE_PATH": "/root/.cache/base-ckpt"
+  "YETO_RL_TEST_INJECT_LORA_PERTURB": "0.01"
  }
 }

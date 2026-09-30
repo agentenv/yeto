@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[5]
+REPO = Path(__file__).resolve().parents[6]
 sys.path.insert(0, str(REPO / "tests"))
 from rl_e2e_launch import island_run, learner_from_run  # noqa: E402
 

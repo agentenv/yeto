@@ -24,7 +24,7 @@ BASE = ("--gpu", "modal:8xh100", "--modal-gpu-exact", "--total-steps", "12", "--
 CASES = {
     "base": (),
     "x2": (),
-    "e1b": ("--rl-test-inject-weight-override", "/root/.cache/base-ckpt"),
+    "e1b": ("--rl-test-inject-lora-perturb", "0.01"),
     "e1c": ("--custom-generate-function-path", "yeto.rl.tool_wait_workload.generate",
             "--rl-test-tool-delay-s", "30", "--rl-elastic-tool-wait-board",
             "--rl-elastic-drain-timeout-s", "5"),
@@ -66,7 +66,7 @@ def test_case(case, tmp_path, monkeypatch):
     got = {"argv_has_miles_router": True, "placement_map": pm,
            "env": {k: v for k, v in env.items() if k.startswith("YETO_RL_TEST")}}
     if case == "e1b":
-        assert env.get("YETO_RL_TEST_INJECT_WEIGHT_OVERRIDE_PATH") == "/root/.cache/base-ckpt"
+        assert float(env.get("YETO_RL_TEST_INJECT_LORA_PERTURB")) == 0.01
     if case == "d34":
         assert env.get("YETO_RL_TEST_INJECT_STOP_FAILURES") == "1"
     if case in ("d5", "d6"):
