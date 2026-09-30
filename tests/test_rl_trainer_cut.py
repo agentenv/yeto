@@ -323,3 +323,22 @@ def test_swappable_actor_forwards():
     assert proxy.ranks is b.ranks and proxy.generation == 1
     with pytest.raises(RuntimeError):
         proxy.swap(object())
+
+
+def test_digest_mismatch_names_the_differing_components(tmp_path, monkeypatch):
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    from yeto.rl.engine.miles_adapter import cut_plugin
+
+    real = cut_plugin._snapshot
+    calls = []
+
+    def skewed(actor, backend, named):
+        snap = real(actor, backend, named)
+        calls.append(1)
+        snap["scheduler"] = {**snap["scheduler"], "lr0": 999}
+        return snap
+
+    monkeypatch.setattr(cut_plugin, "_snapshot", skewed)
+    with pytest.raises(CutError, match="scheduler/lr0"):
+        _trainer(RankGroup([make_rank(1)])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())

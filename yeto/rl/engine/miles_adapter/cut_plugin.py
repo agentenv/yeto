@@ -265,6 +265,17 @@ def _sha256(path: str) -> str:
     return sha256_file(path)
 
 
+def component_digests(value: Any, *, depth: int = 5, prefix: str = "") -> dict[str, str]:
+    """Digest per nested component (mapping keys up to ``depth``) -- names what differs
+    when an overall state digest does not match (GPU C1 attempt 4)."""
+    if depth <= 0 or not isinstance(value, Mapping):
+        return {prefix or ".": state_digest(value)}
+    out: dict[str, str] = {}
+    for key in sorted(value, key=repr):
+        out.update(component_digests(value[key], depth=depth - 1, prefix=f"{prefix}/{key}"))
+    return out
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
@@ -347,6 +358,7 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "has_rng": rng is not None,
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng),
+        "components": component_digests({"state": snap, "rng": rng}),
         "adapter_tensors": len(named),
         "adapter_names": sorted(n for n, _ in named),
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
@@ -509,6 +521,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng_now),
+        "components": component_digests({"state": snap, "rng": rng_now}),
     }
     return summary
 

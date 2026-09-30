@@ -454,7 +454,7 @@ class MilesTrainerGroup:
             ),
             rank_summaries=tuple(
                 {k: s[k] for k in ("path", "scheduler_samples", "has_optimizer_state", "has_rng",
-                                   "state_digest", "rng_digest")}
+                                   "state_digest", "rng_digest", "components") if k in s}
                 for s in summaries
             ),
         )
@@ -537,7 +537,10 @@ class MilesTrainerGroup:
             s = saved[r["path"]]
             for key in ("scheduler_samples", "state_digest", "rng_digest"):
                 if r[key] != s[key]:
-                    raise CutError(f"{r['path']}: restored {key} differs from the cut")
+                    saved_c, now_c = s.get("components") or {}, r.get("components") or {}
+                    differ = sorted(k for k in set(saved_c) | set(now_c) if saved_c.get(k) != now_c.get(k))
+                    raise CutError(f"{r['path']}: restored {key} differs from the cut; "
+                                   f"differing components ({len(differ)}): {differ[:40]}")
         return manifest
 
     def restore_cut_resharded(self, cut_id: str, *, epoch: int, root: str, expect: Any, plan: Any,
