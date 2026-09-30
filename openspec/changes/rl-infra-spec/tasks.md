@@ -54,6 +54,7 @@
   - 进展（2026-09-29 INFRA，未完成）：依赖 2.2 GPU、1.3、1.7；按 gpu-plan A3 执行，未启动。
   - GPU 结果（2026-09-29 INFRA，未完成，阻塞）：计划单独提交于 3b26fde。第一次运行 T2R2 seed17（4×H100!）在首轮训练后失败：`StatePluginError: low-precision adapter parameter has no FP32 optimizer master`。原因是 miles 在 adam 下默认启用 DistributedOptimizer，trainer DP>1 时 fp32 主参数按 DP 分片，而 ports 的 `state_plugin.master_of` 只支持完整主参数。因此当前运行时下 trainer DP>1 的配置（T2R2、C4 共置 4 卡）都跑不起来，唯一可跑的 T1R3 没有同 profile 的比较对象。按计划：失败配置已记录原因，未重复启动，其余 5 次运行没有启动。解除条件：state plugin 支持分片主参数的导出/应用（可复用 fork-M5 v2 的按参数名 gather），或者另行登记一个关闭 DistOpt 的 profile。证据：`evidence/infra-a/2.4/t2r2-s17-attempt1/`，约 1.4 GPU·h（≈$5.5）。
   - 阻塞解除（2026-09-29 INFRA，按主 agent 决定 (a)）：state_plugin 支持 DP 分片的 fp32 主参数（66afb1e，CPU 下与不分片逐位一致）；trainer 改为按单 cell 的 worker 数校验输出数（8f2c801）。冒烟过程：dos1 暴露了 trainer 的单输出假设（证据 `distopt-smoke/attempt1`）；修复后 dos2（T2R1，3×H100!，DP=2 + DistOpt）通过（`distopt-smoke/attempt2`）。按计划 3b26fde 恢复扫描，理由见该计划末尾的追加说明。
+  - 完成记录（2026-09-30 INFRA，**合法否定结论：尚无净收益边**；依赖 2.2、1.7 未勾选，因此本项不勾选）：见 `evidence/infra-a/2.4/RESULT.md`。同 profile（partitioned-serial）下，两个 seed 中 T1R3 的中位轮时都比 T2R2 快 ≥10%（74.5/75.5 s vs 89.3/86.9 s），是 4 卡池的最佳固定配置；默认兼容配置 C4（共置）约 110 s，仅作参考。全池 GPU·h、备用卡（0）与原始 trace 齐全。尚未实现任何切换边，因此不存在可测的净收益边。
 
 ## 3. 阶段 E1：单岛手动 rollout 重配置
 
