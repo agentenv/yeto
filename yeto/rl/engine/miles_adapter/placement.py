@@ -34,9 +34,9 @@ class PlacementRequest:
     # an optional explicit logical-bundle map {"trainer","rollout","standby"}.
     standby_gpus: int = 0
     bundle_map: Mapping[str, tuple[int, ...]] | None = None
-    # fork F-R1: extra rollout cells declared stopped + unbound at startup. Needs
-    # a Miles fork that knows the "deferred_rollout_cells" map key.
-    deferred_rollout_cells: int = 0
+    # fork F-R1: yeto names of the rollout engine cells declared to the fork
+    # (placement map "rollout_cells"); needs a Miles fork with F-R1.
+    rollout_cell_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in ("colocated", "fixed-partition"):
@@ -52,11 +52,14 @@ class PlacementRequest:
         if isinstance(self.standby_gpus, bool) or not isinstance(self.standby_gpus, int) \
                 or self.standby_gpus < 0:
             raise ValueError("standby_gpus must be a non-negative int")
-        if isinstance(self.deferred_rollout_cells, bool) or not isinstance(
-                self.deferred_rollout_cells, int) or self.deferred_rollout_cells < 0:
-            raise ValueError("deferred_rollout_cells must be a non-negative int")
-        if self.kind == "colocated" and self.deferred_rollout_cells:
-            raise ValueError("colocated placement has no deferred rollout cells")
+        names = tuple(self.rollout_cell_names)
+        if len(set(names)) != len(names) or any(not isinstance(n, str) or not n for n in names):
+            raise ValueError("rollout cell names must be distinct non-empty strings")
+        if self.kind == "colocated" and names:
+            raise ValueError("colocated placement declares no rollout cells")
+        if names and len(names) < self.rollout_gpus // self.gpus_per_engine:
+            raise ValueError(f"{len(names)} rollout cell names for "
+                             f"{self.rollout_gpus // self.gpus_per_engine} started engines")
         if self.kind == "colocated" and (self.standby_gpus or self.bundle_map is not None):
             raise ValueError("colocated placement has no standby GPUs or bundle map")
         if self.bundle_map is not None:
@@ -93,15 +96,28 @@ class PlacementRequest:
 
     @property
     def placement_map_arg(self) -> dict[str, Any] | None:
-        """The ``--yeto-placement-map`` JSON: the role map plus, when asked,
-        ``deferred_rollout_cells`` (fork F-R1; forces an explicit map)."""
+        """The ``--yeto-placement-map`` JSON: the role map plus, when cell names
+        are given, the fork-F-R1 ``rollout_cells`` declaration (forces a map).
+
+        Layout (in name order): the first rollout/gpus_per_engine cells start on
+        consecutive runs of the rollout role; the next ones are stopped and bound
+        to consecutive runs of the standby role; the rest are stopped and unbound
+        (bound later with ``rebind_cell``, e.g. on GPUs a trainer releases)."""
         pm = self.placement_map
-        if not self.deferred_rollout_cells:
+        if not self.rollout_cell_names:
             return pm
         if pm is None:
             t, r = self.trainer_gpus, self.rollout_gpus
             pm = {"trainer": list(range(t)), "rollout": list(range(t, t + r)), "standby": []}
-        return {**pm, "deferred_rollout_cells": self.deferred_rollout_cells}
+        g = self.gpus_per_engine
+        runs = [(list(pm["rollout"][i:i + g]), True) for i in range(0, len(pm["rollout"]), g)]
+        standby = list(pm.get("standby", []))
+        runs += [(standby[i:i + g], False) for i in range(0, len(standby) - g + 1, g)]
+        cells = []
+        for index, name in enumerate(self.rollout_cell_names):
+            bundles, start = runs[index] if index < len(runs) else ([], False)
+            cells.append({"name": name, "bundles": bundles, "start": start})
+        return {**pm, "rollout_cells": cells}
 
     def role_bundles(self) -> dict[str, tuple[int, ...]]:
         pm = self.placement_map_arg

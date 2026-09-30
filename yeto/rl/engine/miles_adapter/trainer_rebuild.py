@@ -121,9 +121,56 @@ class RebuildResult:
 
 
 def _default_rebuild() -> Callable[..., Awaitable[tuple[Any, Any]]]:
+    from miles.ray import placement_group
     from miles.ray.placement_group import rebuild_training_models
 
-    return rebuild_training_models
+    from . import cut_injection
+
+    failures = cut_injection.rebuild_fail_count()
+    if not failures:
+        return rebuild_training_models
+    return inject_rebuild_failures(rebuild_training_models, placement_group, failures)
+
+
+def inject_rebuild_failures(rebuild: Callable[..., Awaitable[Any]], module: Any,
+                            failures: int) -> Callable[..., Awaitable[Any]]:
+    """Test-only (G-4.5): the first ``failures`` calls fail INSIDE the fork at its
+    ``create_training_models`` stage, so the fork's own cleanup and
+    ``TrainerRebuildError`` path runs (not a yeto-side stand-in)."""
+    remaining = [int(failures)]
+
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        if remaining[0] <= 0:
+            return await rebuild(*args, **kwargs)
+        remaining[0] -= 1
+        original = module.create_training_models
+
+        async def failing(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError("yeto test injection: create_training_models failed")
+
+        module.create_training_models = failing
+        try:
+            return await rebuild(*args, **kwargs)
+        finally:
+            module.create_training_models = original
+
+    return wrapped
+
+
+def _inject_cursor_shift(args: Any, cursor: Mapping[str, int], rollout: Any = None) -> str | None:
+    from . import cut_injection
+
+    groups = cut_injection.cursor_shift()
+    if groups is None:
+        return None
+    # The row only means something when the cursor is read LIVE after the
+    # rebuild (MilesRolloutPool.live_data_cursor); a cached last-batch cursor
+    # would let the rewind pass unseen -> refuse instead of passing vacuously.
+    live = getattr(rollout, "live_data_cursor", None)
+    if not callable(live) or live()[0] is None:
+        raise cut_injection.InjectionConfigError(
+            f"{cut_injection.CURSOR_SHIFT_ENV}: the rollout data cursor is not readable live")
+    return cut_injection.write_shifted_dataset_state(args, cursor, groups)
 
 
 def _default_worker_manager() -> Any:
@@ -164,6 +211,9 @@ def rebuild_same_shape(
     rebuild = rebuild or _default_rebuild()
     manager = worker_manager if worker_manager is not None else _default_worker_manager()
     attempts: list[dict[str, Any]] = []
+    shifted = _inject_cursor_shift(args, cursor, rollout)
+    if shifted is not None:
+        attempts.append({"attempt": -1, "stage": "test_inject_cursor_shift", "path": shifted})
     view = None
     for attempt in range(max_attempts):
         try:
@@ -235,7 +285,9 @@ def trainer_view(startup_view: Any, bundle_positions: tuple[int, ...]) -> Any:
     """
     from miles.ray import placement_group
 
-    fn = check_slice_pg_info(getattr(placement_group, "_slice_pg_info", None))
+    # fork F-R1 (2f23a0fc) publishes slice_pg_info; the private name stays as a fallback
+    fn = check_slice_pg_info(getattr(placement_group, "slice_pg_info", None)
+                             or getattr(placement_group, "_slice_pg_info", None))
     return fn(startup_view, tuple(bundle_positions))
 
 

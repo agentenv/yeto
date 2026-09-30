@@ -153,6 +153,14 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    # ports LoRA training-time dropout (default 0 = unchanged argv)
+    parser.add_argument("--rl-lora-dropout", type=float, default=None)
+    # Print the attestation runtime_fingerprint (same Miles argv as the island)
+    # and exit before Ray/GPU (ports only).
+    parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
+    # E2 plan-v2 §0 determinism: Megatron --deterministic-mode + DETERMINISM_ENV
+    # in the learner and every Ray worker; off by default.
+    parser.add_argument("--rl-deterministic-trainer", action="store_true")
     # 3.3 X5: wire the island's ToolWaitBoard actor into the elastic pool (needs a
     # rollout workload that records tool waits, e.g. yeto.rl.tool_wait_workload).
     parser.add_argument("--rl-elastic-tool-wait-board", action="store_true")
@@ -162,8 +170,11 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
     parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
     parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
-    # fork F-R1: K extra rollout cells declared stopped + unbound (placement map).
-    parser.add_argument("--rl-elastic-deferred-cells", type=int, default=0)
+    # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
+    parser.add_argument("--rl-elastic-declare-cells", action="store_true")
+    # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,
+    # wires MilesTrainerOps and the pool GPU ids)
+    parser.add_argument("--rl-elastic-trainer-edges", action="store_true")
     # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
@@ -306,11 +317,12 @@ def _check_ports_infra_switches(args) -> None:
     given = [flag for name, flag in _ELASTIC_COMPANIONS if getattr(args, name, None) is not None]
     if getattr(args, "rl_elastic_tool_wait_board", False):
         given.append("--rl-elastic-tool-wait-board")
+    if getattr(args, "rl_elastic_trainer_edges", False):
+        given.append("--rl-elastic-trainer-edges")
     if getattr(args, "rl_observe_timeline", False) and not ports:
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
-    if int(getattr(args, "rl_elastic_deferred_cells", 0) or 0) and not getattr(
-            args, "rl_elastic", False):
-        raise ValueError("--rl-elastic-deferred-cells needs --rl-elastic")
+    if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -323,8 +335,8 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-elastic needs " + ", ".join(missing))
     if args.rl_elastic_cells is not None and not _elastic_cells(args.rl_elastic_cells):
         raise ValueError("--rl-elastic-cells names no cell")
-    if int(getattr(args, "rl_elastic_deferred_cells", 0) or 0) < 0:
-        raise ValueError("--rl-elastic-deferred-cells must be non-negative")
+    if getattr(args, "rl_elastic_declare_cells", False) and not _elastic_cells(args.rl_elastic_cells):
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
     for name in _ELASTIC_PAUSE:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
@@ -343,6 +355,10 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_overlap_eval = True
     if getattr(args, "rl_observe_timeline", False):
         miles_args.yeto_rl_observe_timeline = True
+    if getattr(args, "rl_deterministic_trainer", False):
+        from .engine.miles_adapter.entry import DETERMINISM_ENV
+
+        (os.environ if environ is None else environ).update(DETERMINISM_ENV)
     if not getattr(args, "rl_elastic", False):
         return
     miles_args.yeto_rl_elastic = {
@@ -354,6 +370,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     }
     if getattr(args, "rl_elastic_tool_wait_board", False):
         miles_args.yeto_rl_elastic["tool_wait_board"] = True
+    if getattr(args, "rl_elastic_trainer_edges", False):
+        miles_args.yeto_rl_elastic["trainer_edges"] = True
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
             miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))
@@ -1869,6 +1887,23 @@ def start_external_sglang_router(
     return process
 
 
+def print_attestation_fingerprint(args, ports_launch, out=None) -> bool:
+    """``--rl-print-attestation-fingerprint`` (A5/A9 attestation on CPU): print
+    the runtime fingerprint of THIS launch -- computed by the same function
+    ``run_ports_island`` uses -- as one JSON line; True when printed."""
+    if not getattr(args, "rl_print_attestation_fingerprint", False):
+        return False
+    from .engine.miles_adapter.entry import ports_runtime_fingerprint
+
+    print(json.dumps({
+        "event": "rl_attestation_fingerprint",
+        "runtime_fingerprint": ports_runtime_fingerprint(ports_launch),
+        "learner_id": getattr(args, "learner_id", None),
+        "miles_argv": list(ports_launch.argv),
+    }, sort_keys=True), file=out or sys.stdout, flush=True)
+    return True
+
+
 def run_miles(
     args,
     *,
@@ -2066,6 +2101,8 @@ def run_miles(
         miles_argv = list(ports_launch.argv)
         miles_args = parse_miles_args(ports_launch)
         verify_ports_algorithm(args, miles_args, ports_launch)
+        if print_attestation_fingerprint(args, ports_launch):
+            return  # CPU entry: nothing below (Ray, GPU, sync) runs
     else:
         miles_argv = build_miles_argv(
             args,
