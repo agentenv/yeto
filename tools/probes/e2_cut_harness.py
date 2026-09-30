@@ -256,11 +256,10 @@ except Exception: d=[]
     fi
     # small harness results pulled on their own (a tar of a changing tree can come back truncated)
     # `modal container exec` output is capped at 8 KiB: files are pulled in base64 chunks
-    for f in $(timeout 60 $M container exec $c -- sh -c "ls ~/yeto-rl/e2-harness/*/results.json ~/yeto-rl/e2-harness/*/steps.jsonl ~/yeto-rl/elastic-state/cuts/*/manifest.json 2>/dev/null"); do
+    # small files only, each on its own (a whole-state tar is too slow in 6 KB exec chunks)
+    for f in $(timeout 60 $M container exec $c -- sh -c "ls ~/yeto-rl/e2-harness/*/results.json ~/yeto-rl/e2-harness/*/steps.jsonl ~/yeto-rl/elastic-state/cuts/*/manifest.json ~/yeto-rl/elastic-state/reconfig/journal.jsonl ~/yeto-rl/elastic-state/reconfig/epochs.json ~/yeto-rl/elastic-state/ledger/journal.jsonl ~/yeto-rl/inwatch.log 2>/dev/null" | tr -d '\r'); do
       pullf $c $f $R/pulled/$(echo $f | sed 's#.*/yeto-rl/##; s#/#__#g')
     done
-    timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf /tmp/yeto-state.tgz --exclude=trainer_*.pt e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts inwatch.log 2>/dev/null; echo ok" > /dev/null
-    pullf $c /tmp/yeto-state.tgz $R/pulled/state.tgz
     # progress watchdog: no new tape event for STALL_S, or too many error lines -> evidence above, then stop
     now=$(date +%%s); lines=$(grep -c YETO_RL_EVENT $R/launch.log 2>/dev/null || echo 0)  # echoed tape events (exec output is capped)
     if [ "$lines" != "$(cat $R/pulled/.lines 2>/dev/null)" ]; then echo $lines > $R/pulled/.lines; echo $now > $R/pulled/.progress; fi

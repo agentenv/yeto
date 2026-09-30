@@ -63,8 +63,14 @@ def load(run: Path) -> dict:
     tapes = sorted(glob.glob(str(run / "runs" / "*" / "events" / "*.jsonl*")))
     events = _jsonl(tapes[0]) if tapes else []
     es = state / "elastic-state"
-    journal = _jsonl(es / "reconfig" / "journal.jsonl") if (es / "reconfig" / "journal.jsonl").exists() else []
-    ledger = _jsonl(es / "ledger" / "journal.jsonl") if (es / "ledger" / "journal.jsonl").exists() else []
+
+    def newest(*paths: Path) -> list[dict]:
+        found = [p for p in paths if p.exists()]
+        return _jsonl(max(found, key=lambda p: p.stat().st_size)) if found else []
+
+    pulled = run / "pulled"
+    journal = newest(es / "reconfig" / "journal.jsonl", pulled / "elastic-state__reconfig__journal.jsonl")
+    ledger = newest(es / "ledger" / "journal.jsonl", pulled / "elastic-state__ledger__journal.jsonl")
     manifests = []
     for p in glob.glob(str(es / "cuts" / "*" / "manifest.json")) + glob.glob(str(run / "pulled" / "cut-manifest*.json")) + glob.glob(
             str(run / "pulled" / "elastic-state__cuts__*__manifest.json")):
