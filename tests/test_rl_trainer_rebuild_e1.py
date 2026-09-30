@@ -511,3 +511,37 @@ def test_live_data_cursor_reads_the_executor_data_source_now():
                            "sample_index": 32}
     assert remote.live_data_cursor() == (None, None)
     assert remote.data_cursor()["sample_offset"] == 4
+
+
+def test_colocated_rebuild_does_not_republish_the_resident_policy(tmp_path):
+    """E2 C1 attempt 2: on a colocated island a second publish of the policy the
+    engines already hold made SGLang resume non-offloaded weights (KeyError
+    'weights'). The rebuild still checks restored == cut == published."""
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": __import__("torch").zeros(1, 2)},
+                        step_delta=1.0)  # colocated
+    driver = IslandDriver(
+        learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+        policy_state=engine.policy_state, publisher=engine.publisher, placement=engine.placement,
+        algorithm=AlgorithmSpec(), sync=LocalOnlySync(3),
+        events=EventTape(tmp_path / "events.jsonl", 0), capabilities=fake_capabilities())
+    log = []
+    orig = driver.safe_point
+
+    def safe_point(rid):
+        out = orig(rid)
+        if rid == 1:
+            before = [c for c in engine.calls if c[0] == "publish"]
+            _fake_rebuild(engine, log)(driver, epoch=0, cut_id="rb")
+            assert [c for c in engine.calls if c[0] == "publish"] == before  # no republish
+        return out
+
+    driver.safe_point = safe_point
+    driver.run()
+    assert log and log[-1][0] == "restored"
+    rebuilt = [e for e in _events(tmp_path) if e["event"] == "rl_trainer_rebuilt"]
+    assert rebuilt[0]["republished"] is False and "colocated" in rebuilt[0]["republish_skipped"]
