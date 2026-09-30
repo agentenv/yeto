@@ -396,3 +396,26 @@ def test_entry_leaves_the_rebuilder_unwired_when_preconditions_fail(tmp_path):
     assert ctl.trainer_rebuilder is None
     with pytest.raises(Rejected, match="no trainer rebuilder"):
         ctl.request_trainer_rebuild("rb", 0, 60)
+
+
+def test_round_trained_event_carries_the_data_cursor_only_when_reported(tmp_path):
+    import dataclasses
+
+    driver, ctl, engine, trained, log = _island(tmp_path / "a")
+    driver.run()
+    assert all("data_cursor" not in e for e in _events(tmp_path / "a")
+               if e["event"] == "rl_round_trained")
+    driver, ctl, engine, trained, log = _island(tmp_path / "b")
+    real = driver.rollout.generate
+
+    def generate(rollout_id):
+        batch = real(rollout_id)
+        return dataclasses.replace(batch, data_cursor={"sample_offset": 4 * (rollout_id + 1),
+                                                       "epoch_id": 0, "sample_group_index": 0,
+                                                       "sample_index": 0})
+
+    driver.rollout.generate = generate
+    driver.run()
+    cursors = [e["data_cursor"]["sample_offset"] for e in _events(tmp_path / "b")
+               if e["event"] == "rl_round_trained"]
+    assert cursors == [4, 8, 12, 16]
