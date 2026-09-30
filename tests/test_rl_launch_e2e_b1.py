@@ -343,3 +343,19 @@ def test_injection_switches_are_refused_without_elastic_or_restart():
                                              "ports")
     with pytest.raises(ValueError, match="must be one of"):
         launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "NOPE")), "ports")
+
+
+# ---------------------------------------------------------------- item 7: A5 as two 3-GPU islands
+def test_a5_three_plus_three_islands_launch_with_standby_and_elastic(tmp_path, monkeypatch):
+    run = island_run(("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
+                      "--rl-standby-gpus", "1",
+                      "--gpu", "aws:3xa100@us-east-1,aws:3xa100@us-west-2")
+                     + _elastic(tmp_path)[:-2]
+                     + ("--rl-elastic-cells", "r0,r1", "--rl-elastic-declare-cells",
+                        "--rl-elastic-quorum-timeout-s", "120", "--rl-elastic-pause-margin", "2.0",
+                        "--rl-test-inject-start-delay-s", "150"), monkeypatch)
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert (args.actor_num_gpus_per_node, args.rollout_num_gpus, args.rl_standby_gpus) == (1, 1, 1)
+    assert args.rl_elastic and args.rl_elastic_declare_cells and args.rl_elastic_cells == "r0,r1"
+    assert (args.rl_elastic_quorum_timeout_s, args.rl_elastic_pause_margin) == (120.0, 2.0)
+    assert env["YETO_RL_TEST_INJECT_START_DELAY_S"] == "150.0"

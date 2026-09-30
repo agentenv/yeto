@@ -143,6 +143,13 @@ def test_bidirectional_switch_on_one_strict_island_keeps_fleet_invariants(tmp_pa
     results, errors = _run([d0, d1])
     assert errors == {}
     assert resent and resent[0].global_step == 2
+    # the resend is on island 0's JSONL tape (A5 quorum criterion)
+    tape = [json.loads(x) for x in (tmp_path / "x" / "bridge-0.jsonl").read_text().splitlines()]
+    resends = [e for e in tape if e["event"] == "rl_pull_resend"]
+    assert [(e["global_step"], e["round_attempt"], e["pulls_received"]) for e in resends] == [
+        (2, 1, 2)]
+    base_tape = (tmp_path / "base" / "bridge-0.jsonl").read_text()
+    assert "rl_pull_resend" not in base_tape  # default path: no extra event without a resend
     assert ctl.status("up")["phase"] == SUCCEEDED and ctl.status("down")["phase"] == SUCCEEDED
     # samples / steps / policy / roster unchanged vs the no-switch fleet
     assert trained0 == b_trained0 and trained1 == b_trained1
