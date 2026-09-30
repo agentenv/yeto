@@ -617,3 +617,13 @@ def test_resized_args_sets_world_size_with_the_trainer_size():
     assert (base.actor_num_gpus_per_node, base.world_size) == (2, 2) and new.lr == base.lr
     with pytest.raises(RuntimeError, match="single-node"):
         resized_args(SimpleNamespace(actor_num_nodes=2, actor_num_gpus_per_node=2), 1)
+
+
+def test_a8_determinism_env_equals_production_and_precedes_ray():
+    modal_run = importlib.import_module("modal_run")
+    from yeto.rl.engine.miles_adapter.entry import DETERMINISM_ENV
+
+    assert modal_run.DETERMINISM_ENV == DETERMINISM_ENV
+    script = modal_run.container_script("a8")
+    assert script.index("export NCCL_ALGO=Ring") < script.index("ray start")
+    assert "export NCCL_ALGO" not in modal_run.container_script("dev-gather")
