@@ -102,9 +102,17 @@ class MilesBackend:
                 progress("gen weights published")
             if getattr(args, "offload_rollout", False):
                 self.runner.run(self._controller.onload_kv())
+            # The ports argv installs yeto's rollout hooks (metadata, trained groups, buffer filter);
+            # like the production driver (entry.run_ports_island) they need the named metadata sink and
+            # the current policy token (DEV-GATHER run 5). Base policy: a fixed harness hash.
+            from yeto.rl.engine.miles_adapter.rollout import RayMetadataSink, policy_token
+
+            sink = RayMetadataSink()
             for rollout_id in range(count):
+                sink.set_policy_token(policy_token(rollout_id, "e3-harness-base-policy"))
                 self.runner.run(self._controller.prepare_rollout(rollout_id))
                 pack = self.runner.run(executor.get(rollout_id))
+                sink.take(rollout_id)  # drain this rollout's metadata, as the driver does
                 from miles.utils.data import remove_rollout_data_refs
 
                 remove_rollout_data_refs(args, pack)

@@ -347,3 +347,11 @@ def test_generation_keeps_the_colocated_trainer_size():
     fn = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef) and n.name == "generate_frozen")
     calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "_args"]
     assert calls and all("actor_num_gpus_per_node" not in [k.arg for k in c.keywords] for c in calls)
+
+
+def test_generation_provides_the_rollout_metadata_sink():
+    """DEV-GATHER run 5: the ports rollout hooks look up the named sink actor and the policy token."""
+    src = (TOOLS / "miles_backend.py").read_text()
+    body = src[src.index("def generate_frozen"):src.index("def start_arm")]
+    assert "RayMetadataSink()" in body and "set_policy_token" in body and "sink.take(rollout_id)" in body
+    assert body.index("set_policy_token") < body.index("executor.get(rollout_id)")
