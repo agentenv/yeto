@@ -551,3 +551,10 @@
 - 其他发现：Nebius H100 SkyPilot 目录价 $3.85/GPU·h（非 v2 所写 $2.95），与 Modal H100! $3.95 基本持平，且 Nebius 只有 1/8 卡规格；attestation 指纹无离线计算入口，需先跑同参数运行取 `rl_driver_start.runtime_fingerprint`。
 - 需要的代码修复（交代码负责人）：(1) F-R1 fork 声明停止 cell + yeto 把声明 cell id 传给 fork 并与在役成员名统一；(2) launcher 转发 `--eval-temperature`（A2）；(3) observe 开关与工具负载/tool_wait_board 接线（A2+、A4b）；(4) E1-B 权重覆盖注入、E1-D ③④ stop_cells 半失败注入、⑦ fork 重启入口；(5) 可选：sky 0.13 私有镜像登录序列化、Nebius 不用 spot。
 - 下一步：以上 (1) 合入并重建镜像后，先重跑 F-E1（≈$1–3），通过再按 §9.3/§9.6 跑 E1-A 基线、E1-A、watchdog 用例（Modal H100!:8，最坏合计 ≈$95）。
+
+## GPU-B1 续（2026-09-30 05:37–07:05Z）
+- A2（L-2.3）：S/O/OD 三 arm 在 Modal H100!:2 完成（代码 11911b8）。判据 1、2、3、4、6 通过；**判据 5 硬条件未通过**（S 与 O 自 v1 起 policy token 不同，样本身份与奖励相同；与事先登记的 L3(a) RNG 消耗顺序差异一致）→ 2.3 未完成，不勾选。证据 `evidence/infra-v2-b1/a2/RESULT.md`。费用 ≤$6.98。
+- A2+（L-1.7）：本地核查不通，等待代码（`rl_load_sample` 无 tool-wait/queued/capacity 字段，classify_load 无法计算）。见 gpu-plan-v2 §9.8。
+- F-E1 重跑（F-R1 镜像 db815884）：新 cell 按 fork id 启动成功；发布阶段因缺 `--use-miles-router` 失败 → REBUILT_OLD；down 未执行。缺口：launcher 无 `--use-miles-router` 入口。证据 `evidence/infra-v2-b1/fe1r/RESULT.md`。费用 ≤$2.92。
+- F-E2：本地 dry-run 通过（`evidence/infra-v2-b1/fe2/`），未上卡（F-E1 失败即停；后续须合并 3f88c1d 并带 `--modal-retries 0 --modal-timeout-s`）。
+- 本批累计 ≤$12.99；所有 infra-v2-b1-* Modal app stopped/0；本地进程已清理。

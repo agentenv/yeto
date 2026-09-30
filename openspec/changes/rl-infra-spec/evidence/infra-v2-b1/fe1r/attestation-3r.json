@@ -1,0 +1,2 @@
+{"runtime_fingerprint":"sha256:88ef27277de1ae61887c9d5c076c8594e8d9e59341de2af6d61c288fdcf231bc","execution_modes":["partitioned-serial"],
+ "certified_edges":[{"source":"T1R1S1","target":"T1R2S0","kind":"rollout-only"},{"source":"T1R2S0","target":"T1R1S1","kind":"rollout-only"}]}
