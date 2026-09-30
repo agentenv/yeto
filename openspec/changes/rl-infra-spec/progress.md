@@ -591,3 +591,9 @@
 - 审查"小修后可合入"：M-A 合并 integ-decl b2fe5dd（Miles e3a11ab3、镜像 e3a11ab-9f29303 @sha256:2cc5cc52…、`side_effect_free_state`），harness/测试从 `yeto/rl/__init__.py` 读 pin，plan-v6；重分片恢复自检要求状态键与 cut 一致（防 exp_avg/exp_avg_sq 静默丢失）；L-1 批次守卫在 `restore_cut` 与回到非目标布局的 `rebind_args` 时清除，加测试；world_size 单独测试。
 - 已知限制（审查 L-3/L-4）：重分片路径的错误类型没有与同形路径的 "refused"（拒绝且未写入）语义对齐——部分错误在写入后抛出，调用方一律按 RECOVERY_REQUIRED 处理；`resized_args` 只改 trainer 大小与 `world_size`，不更新共置模式下由 trainer 大小派生的 `rollout_num_gpus`（共置 profile 不支持 trainer 变 DP 边，4.7 用 fixed-partition）。
 - 待办：E2 f898516 进入集成分支后，把 `miles_counters` 加入 `_restore_resharded` 的 DP 复制一致性校验，并补"变 DP 后重发版本连续"测试。
+
+### INFRA-E3 暂停点（2026-09-30 约 09:58Z，用户下班，暂停一切工作）
+- A8 第 1 次（ap-w6NmaMWQraIIiPmFqzCfmo，代码 517f745，Modal H100!:2）09:55:43 启动，约 1.5 分钟后在拉镜像阶段按主 agent 指令手动 stop（已核实 stopped/0，watchdog 与启动脚本已停），未进入任何阶段、无结论，费用 ≤$0.25。证据 `evidence/infra-e3/a8-attempt1-paused/`。
+- 已完成：4.6 重分片（CPU 通过）、4.7 yeto 侧（已实现）、A8/DEV-GATHER harness（DEV-GATHER 第 7 次 6 个 arm 跑通）、数据兜底与离线 compare、审查小修与 L-2（weight_version 跨 DP 连续），plan-v6 与 `a8-run-plan.md` 已在运行前提交。
+- 下一步：经主 agent 重新批准后，**A8 从头重跑**：用 `/home/michael/work/infra-e3-gpu/b3a8/go.sh`（快照为 517f745，learner 参数已生成、本地 dry-run 通过）或按 `a8-run-plan.md` 重建快照；台账先记一行，线程 <3000。A9 仍受 F-R1 布局与 A8=go 约束。
+- B3 合计 ≤$5.49。
