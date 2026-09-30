@@ -39,6 +39,16 @@ def runtime_fingerprint(launch: Any, miles_commit: str) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def ports_runtime_fingerprint(launch: Any) -> str:
+    """The island's runtime fingerprint (attestation ``runtime_fingerprint``,
+    ``rl_driver_start``): pinned Miles commit + the full Miles argv. The ONE
+    function both ``run_ports_island`` and ``--rl-print-attestation-fingerprint``
+    call, so the printed value is the value the island will check."""
+    from yeto.rl import MILES_NEXT_COMMIT
+
+    return runtime_fingerprint(launch, MILES_NEXT_COMMIT)
+
+
 # Declared beyond R0: "dimension:name" -> evidence that the mechanism takes
 # effect on GPU (declaration policy, rl-infra-spec alignment §7b; may be
 # overridden by the user). One entry per mechanism, added in its own commit.
@@ -850,7 +860,7 @@ def run_ports_island(
     require_run_plugin()  # before any upstream component or model exists
     from ..overlap import loop_eval_starter
 
-    fingerprint = runtime_fingerprint(launch, MILES_NEXT_COMMIT)
+    fingerprint = ports_runtime_fingerprint(launch)
     capabilities = with_partitioned_serial(
         miles_capabilities(
             fingerprint,

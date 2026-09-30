@@ -252,6 +252,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-kill-learner-at", default=None, metavar="PHASE",
                     help="--rl-elastic, TEST ONLY (3.7 E1-D ⑤⑥): hard-kill the learner once when a "
                     "transaction journals PHASE (needs --rl-elastic-restart-attempts)")
+    rl.add_argument("--rl-print-attestation-fingerprint", action="store_true",
+                    help="ports: each island learner builds its Miles argv exactly as a real run, "
+                    "prints the attestation runtime_fingerprint as one JSON line and exits "
+                    "before Ray/GPU work (run it on CPU with the same flags as the real run)")
     rl.add_argument("--rl-deterministic-trainer", action="store_true",
                     help="ports: Megatron --deterministic-mode plus NCCL_ALGO=Ring, "
                     "CUBLAS_WORKSPACE_CONFIG=:4096:8, NVIDIA_TF32_OVERRIDE=0 on the learner and "

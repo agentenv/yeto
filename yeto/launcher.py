@@ -1177,6 +1177,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_deterministic_trainer", False):
         flags += " --rl-deterministic-trainer"
+    if getattr(args, "rl_print_attestation_fingerprint", False):
+        flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "

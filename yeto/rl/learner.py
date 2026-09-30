@@ -153,6 +153,9 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    # Print the attestation runtime_fingerprint (same Miles argv as the island)
+    # and exit before Ray/GPU (ports only).
+    parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
     # E2 plan-v2 §0 determinism: Megatron --deterministic-mode + DETERMINISM_ENV
     # in the learner and every Ray worker; off by default.
     parser.add_argument("--rl-deterministic-trainer", action="store_true")
@@ -1875,6 +1878,23 @@ def start_external_sglang_router(
     return process
 
 
+def print_attestation_fingerprint(args, ports_launch, out=None) -> bool:
+    """``--rl-print-attestation-fingerprint`` (A5/A9 attestation on CPU): print
+    the runtime fingerprint of THIS launch -- computed by the same function
+    ``run_ports_island`` uses -- as one JSON line; True when printed."""
+    if not getattr(args, "rl_print_attestation_fingerprint", False):
+        return False
+    from .engine.miles_adapter.entry import ports_runtime_fingerprint
+
+    print(json.dumps({
+        "event": "rl_attestation_fingerprint",
+        "runtime_fingerprint": ports_runtime_fingerprint(ports_launch),
+        "learner_id": getattr(args, "learner_id", None),
+        "miles_argv": list(ports_launch.argv),
+    }, sort_keys=True), file=out or sys.stdout, flush=True)
+    return True
+
+
 def run_miles(
     args,
     *,
@@ -2072,6 +2092,8 @@ def run_miles(
         miles_argv = list(ports_launch.argv)
         miles_args = parse_miles_args(ports_launch)
         verify_ports_algorithm(args, miles_args, ports_launch)
+        if print_attestation_fingerprint(args, ports_launch):
+            return  # CPU entry: nothing below (Ray, GPU, sync) runs
     else:
         miles_argv = build_miles_argv(
             args,
