@@ -26,8 +26,10 @@ CASES = {
     "x2": (),
     "e1b": ("--rl-test-inject-weight-override", "/root/.cache/base-ckpt"),
     "e1c": ("--custom-generate-function-path", "yeto.rl.tool_wait_workload.generate",
-            "--rl-test-tool-delay-s", "30", "--rl-elastic-tool-wait-board"),
+            "--rl-test-tool-delay-s", "30", "--rl-elastic-tool-wait-board",
+            "--rl-elastic-drain-timeout-s", "5"),
     "d34": ("--rl-test-inject-stop-failures", "1"),
+    "d4": ("--rl-test-inject-stop-failures", "100000", "--rl-elastic-recovery-timeout-s", "120"),
     "d5": ("--rl-elastic-restart-attempts", "1", "--rl-test-kill-learner-at", "COMMITTED"),
     "d6": ("--rl-elastic-restart-attempts", "1", "--rl-test-kill-learner-at", "QUIESCING"),
     "wd": ("--rl-test-inject-update-weights-block-s", "600"),
@@ -75,6 +77,10 @@ def test_case(case, tmp_path, monkeypatch):
     if case == "e1c":
         assert args.rl_elastic_tool_wait_board and float(env["YETO_RL_TEST_TOOL_DELAY_S"]) == 30.0
         assert "--custom-generate-function-path" in argv
+    if case == "e1c":
+        assert args.rl_elastic_drain_timeout_s == 5
+    if case == "d4":
+        assert args.rl_elastic_recovery_timeout_s == 120
     if case == "fp":
         assert args.rl_print_attestation_fingerprint
     (Path(__file__).parent / f"dryrun-{case}.json").write_text(json.dumps(got, indent=1))

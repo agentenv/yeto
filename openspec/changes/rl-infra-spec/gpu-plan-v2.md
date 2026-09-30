@@ -383,3 +383,10 @@
 
 - 分组合计（最坏）：只做 3.4 ≈ $58（含探测，用 CPU 指纹则 $47.4）；+3.5 ≈ $74；+3.7 全部 ≈ $187；+3.3 ≈ $203。期望费用约为最坏的 55–60%。
 - 可降费选项（需用户/主 agent 决定，不影响判据）：E1-D 各项轮数压到 4 轮、硬超时 25 min（每项最坏 $13.2）；①②③ 合并为一次运行（按事务顺序），约省 $31；④ 可与 ③ 分开但共享一次 up 前缀。
+
+### 9.17 A4/A4b 全做（用户决定 2026-09-30；运行前；判据不变）
+- 用户：A4 全做（3.4、3.5、3.7 全部失败矩阵、3.3/A4b），全局上限提到 **$400**；平台 Nebius（先冒烟）或 Modal（先有 8 卡空位者，同一时刻只跑一份 A4）。
+- 代码：dfea39d（合并 integ-decl 0c0dac3：`--rl-elastic-drain-timeout-s`、`--rl-elastic-recovery-timeout-s` → controller Timeouts）。8 卡 dry-run（a4/test_a4_dryrun.py）10 passed，新增：E1-C 带 `--rl-elastic-drain-timeout-s 5`；E1-D ④ 带 `--rl-test-inject-stop-failures 100000 --rl-elastic-recovery-timeout-s 120`（T_recovery=120 s，持续失败超过它 → RECOVERY_REQUIRED；原判据"持续失败超过 T_recovery"不变，只是把 T_recovery 设小以省时）。
+- 降费（主 agent 批准，不改判据）：E1-D 各项 4 轮、硬超时 25 min；①②③ 合并为一次运行（按事务顺序：up#1 中 ① kill 新 cell 于 `fork_op start issued` → REBUILT_OLD；up#2 中 ② kill 新 cell 于 VERIFYING → REBUILT_OLD；up#3 成功后 down 带 ③ 一次 stop 半失败 → 重试 SUCCEEDED）。
+- Nebius（待 INFRA-E1 发射路径修复 SHA）：先冒烟（1×H100、1 轮、≤$5；VM、私有镜像、岛连本机 head、按 ID 回收并 nebius API 核实），失败即停。通过后 A4 用 Nebius 8×H100 按需实例（目录价 $3.85/GPU·h，下单后按账单核对），`sky launch --down` + autostop + 独立 watchdog 按集群名 `sky down`。
+- 顺序与每项最坏费用同 §9.14/§9.16（E1-D 按上面降费）。每次启动前按全局 $400 与 B1 余额门控，逼近先报告。
