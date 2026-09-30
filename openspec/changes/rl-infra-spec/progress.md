@@ -151,3 +151,38 @@
 ### 2.4 与 2.1a（2026-09-30 INFRA）
 - 2.4：扫描完成，结论为合法否定结论"尚无净收益边"，同 profile 下最佳固定配置为 T1R3，见 `evidence/infra-a/2.4/RESULT.md`；因依赖 2.2、1.7 未勾选，本项不勾选。本轮扫描 6 次有效运行加 1 次基础设施失败，约 10.5 H100·h，约 $41。
 - 2.1a：attempt1 以显式映射启动并记录了 UUID，但"standby 上无进程"缺少直接证据，未通过预登记条件。已补充采样手段，重跑 attempt2 已排队。
+
+## 交接（2026-09-30，Agent INFRA 会话结束；GPU 验证按用户决定暂停）
+
+### 分支与状态
+- 分支 `infra-a`，worktree `/home/michael/work/infra-a`，已推送；integ-decl 已快进到同一 SHA（见本条目所在提交）。本条目提交后没有未提交改动。
+- 运行中的云资源：无。`modal app list` 中 infra-a 前缀的 app 全部为 stopped、0 tasks（`evidence/infra-a/modal_app_list_final_20260930.txt`）。本机没有残留的 arm/run 脚本、watchdog 或 syncer 进程。
+- 实验脚本在 `/home/michael/work/infra-a-gpu/`（arm*.sh、stop_arm.sh、run*.sh），不在仓库中。以后在自有集群上验证时可参考这些脚本：计划先单独提交；每次运行配独立 watchdog；launcher 退出码 4/6 判失败；需加 `--rl-stall-timeout`。
+
+### task 状态（五选一）
+- 已勾选：1.1、1.2、1.3（GPU/计划验收），2.1a（GPU 验收）。
+- GPU 证据齐备、依赖未满足未勾选：2.1（依赖 1.6）、2.2（依赖 2.1、1.4）。
+- 合法否定结论（依赖 2.2、1.7 未勾选，未勾选）：2.4"尚无净收益边"（`evidence/infra-a/2.4/RESULT.md`，4 卡池最佳固定配置为 T1R3）。
+- CPU 通过、未勾选：1.4（验收 X9 需 2.3 GPU）、1.5、1.6（依赖链）。
+- 已实现、未勾选：1.8（依赖 1.4/1.7），7.1/7.2（设计文档，依赖 1.5、3.8）。
+- 未完成：1.7（CPU 已完成 tool_wait、router in-flight 探针与观测采样线程；GPU 验证暂停），2.3（X9 guard GPU 已通过；age 0 下合法重叠 train‖eval 等未实现）。
+- E1–E3（3.x、4.x）尚未开工；按用户决定拆分给 INFRA-E1（3.x）、INFRA-E2（4.1–4.5）；INFRA-A 继续 2.3/1.4/1.7/5.1；DEV-GATHER 延后。
+
+### 关键代码（infra-a）
+- `yeto/rl/engine/execution_profile.py`：ExecutionProfile 绑定 AlgorithmSpec 哈希，`check_algorithm_contract`。
+- `yeto/rl/engine/driver.py`：profile/partitioned-serial；readiness（只在分区模式启用）；观测事件；`rl_round_trained`（trained groups/samples、sample-id 哈希、applied_lrs、masked/clip fraction、mismatch 与 A5 标签、nonzero_advantages、filtered_samples、tool_wait、submitted/aborted_in_flight、dynamic_filter_source）；测试用的发布延迟注入。
+- `miles_adapter/entry.py`：preflight 用外部期望哈希；`with_partitioned_serial`；`receipt_role_family`。
+- `miles_adapter/state_plugin.py`：DistOpt 分片主参数的 `full_masters`/`write_masters`，每步 loss 记录。
+- `miles_adapter/trainer.py`：按单 cell 的 worker 数校验输出数；gspo/corrections 时拉取 step losses。
+- `miles_adapter/rollout_meta_hook.py`/`rollout.py`：round metadata 走独立 sink 记录；轮次号取自 policy token；submitted_groups；router 探针。
+- `yeto/protocol.py`：TCP keepalive。
+- `yeto/launcher.py`：fixed-partition 的 GPU 划分与 `--rl-rollout-gpus`（这一部分归 INFRA）。
+- `yeto/rl/engine/runtime_manifest.py`：1.1 使用的 manifest 工具。
+
+### 下一步（可直接执行，均为 CPU）
+1. INFRA-A：2.3 实现 age 0 下的合法重叠（eval 与 train/outer_sync 重叠），加 guard 与 CPU 测试；GPU 的 X9 overlap 实验等自有集群。
+2. INFRA-A：1.7 剩余 GPU 验证（M3 in-flight 计数，带工具等待的负载）等自有集群；CPU 侧已完成。
+3. INFRA-E1：3.4a 更新 ports.py 预留动词；3.1/3.2 控制器与 journal；第二批 fork 接线（restore_membership_state 重连回写、admit_cordoned→check_weights→admit_cells(expected_weight_version)、commit_weight_version）。fork 为 miles d002615f（yeto/ports），镜像 9f0977 已包含 M1–M6。
+4. INFRA-E2：4.1 cut 状态审计（含 A3 算法状态与 Miles 超采样余量回收行为；已知：partial_rollout 关闭时在飞中被中止的组被丢弃，不回收）。
+5. 已知限制：TP/PP 集体导出与 DistOpt 分片主参数的组合仍拒绝；precision-aware optimizer 拒绝。
+6. 测试基线：`/tmp/integ-full.txt` 中的 94 个失败 id（环境性）；每次合入按 id 对比。
