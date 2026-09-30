@@ -153,6 +153,9 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    # E2 plan-v2 §0 determinism: Megatron --deterministic-mode + DETERMINISM_ENV
+    # in the learner and every Ray worker; off by default.
+    parser.add_argument("--rl-deterministic-trainer", action="store_true")
     # 3.3 X5: wire the island's ToolWaitBoard actor into the elastic pool (needs a
     # rollout workload that records tool waits, e.g. yeto.rl.tool_wait_workload).
     parser.add_argument("--rl-elastic-tool-wait-board", action="store_true")
@@ -342,6 +345,10 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_overlap_eval = True
     if getattr(args, "rl_observe_timeline", False):
         miles_args.yeto_rl_observe_timeline = True
+    if getattr(args, "rl_deterministic_trainer", False):
+        from .engine.miles_adapter.entry import DETERMINISM_ENV
+
+        (os.environ if environ is None else environ).update(DETERMINISM_ENV)
     if not getattr(args, "rl_elastic", False):
         return
     miles_args.yeto_rl_elastic = {

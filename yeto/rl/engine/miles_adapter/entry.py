@@ -705,6 +705,10 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
 
     from yeto.rl.tool_wait_workload import TOOL_DELAY_ENV
 
+    for key, value in DETERMINISM_ENV.items():  # --rl-deterministic-trainer set them
+        if environ.get(key) == value:
+            env_vars[key] = value
+
     if environ.get(TOOL_DELAY_ENV):  # test tool-wait workload runs in Ray workers
         env_vars[TOOL_DELAY_ENV] = environ[TOOL_DELAY_ENV]
     if environ.get(ELASTIC_METADATA_ENV) == "1":
@@ -713,6 +717,11 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
         env_vars[ELASTIC_METADATA_ENV] = "1"
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
+
+
+# E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode).
+DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                   "NVIDIA_TF32_OVERRIDE": "0"}
 
 
 def resolve_declared_cells(inference_controller: Any, runner: Any,

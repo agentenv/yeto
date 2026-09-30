@@ -346,6 +346,7 @@ LEAF_POLICY: dict[str, _Check] = {
     # The driver owns the loop and the outer sync; no Miles callback needed.
     "yeto_policy_sync": _ok,
     "distributed_timeout_minutes": _ok,
+    "deterministic_trainer": _ok,
 }
 
 
@@ -697,6 +698,8 @@ def translate_run_config(
     if parallel.tensor_parallel > 1:
         values.append("--sequence-parallel")
     values.extend(("--distributed-timeout-minutes", str(config.distributed_timeout_minutes)))
+    if getattr(config, "deterministic_trainer", False):
+        values.append("--deterministic-mode")  # Megatron deterministic kernels (E2 plan-v2 §0)
     if config.data.chat_template_kwargs:
         values.extend(
             (

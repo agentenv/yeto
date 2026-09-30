@@ -369,6 +369,9 @@ class RLRunConfig:
     agent: AgentConfig
     yeto_policy_sync: bool
     distributed_timeout_minutes: int
+    # E2 plan-v2 §0 (A6/A6b/A8): Megatron --deterministic-mode; the matching
+    # NCCL/cuBLAS/TF32 environment is set by the learner (--rl-deterministic-trainer).
+    deterministic_trainer: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -813,6 +816,7 @@ def resolve_rl_run_config(
         ),
         yeto_policy_sync=yeto_policy_sync,
         distributed_timeout_minutes=getattr(args, "rl_distributed_timeout_minutes", 10),
+        deterministic_trainer=bool(getattr(args, "rl_deterministic_trainer", False)),
     )
 
 

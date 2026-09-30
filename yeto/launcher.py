@@ -1072,6 +1072,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                            eval_uses_snapshots=UNKNOWN)
     if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
+        raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
              if getattr(args, name, None) is not None]
     if getattr(args, "rl_elastic_tool_wait_board", False):
@@ -1171,6 +1173,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-overlap-eval"
     if getattr(args, "rl_observe_timeline", False):
         flags += " --rl-observe-timeline"
+    if getattr(args, "rl_deterministic_trainer", False):
+        flags += " --rl-deterministic-trainer"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "

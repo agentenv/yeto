@@ -359,3 +359,50 @@ def test_a5_three_plus_three_islands_launch_with_standby_and_elastic(tmp_path, m
     assert args.rl_elastic and args.rl_elastic_declare_cells and args.rl_elastic_cells == "r0,r1"
     assert (args.rl_elastic_quorum_timeout_s, args.rl_elastic_pause_margin) == (120.0, 2.0)
     assert env["YETO_RL_TEST_INJECT_START_DELAY_S"] == "150.0"
+
+
+# ---------------------------------------------------------------- item 10: determinism
+def test_deterministic_trainer_reaches_miles_argv_env_and_ray_workers(tmp_path, monkeypatch):
+    import argparse
+    from types import SimpleNamespace
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl import learner
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.engine.miles_adapter.entry import DETERMINISM_ENV, connect_island_ray
+
+    args, _ = learner_from_run(island_run(BASE + ("--rl-deterministic-trainer",), monkeypatch),
+                               tmp_path / "home")
+    assert args.rl_deterministic_trainer
+    environ = {}
+    learner.apply_ports_infra_switches(args, SimpleNamespace(), environ)
+    assert environ == DETERMINISM_ENV
+    (base,), kwargs = _captured_args()
+    merged = argparse.Namespace(**{**vars(base), "rl_deterministic_trainer": True})
+    argv = mc.translate_run_config(rc.resolve_rl_run_config(merged, **kwargs), AlgorithmSpec()).argv
+    assert "--deterministic-mode" in argv
+    seen = {}
+    ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
+    connect_island_ray(environ={"RAY_ADDRESS": "1.2.3.4:6379", **environ}, ray_module=ray)
+    for key, value in DETERMINISM_ENV.items():
+        assert seen["runtime_env"]["env_vars"][key] == value
+
+
+def test_determinism_is_off_by_default(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl import learner
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    args, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "home")
+    environ = {}
+    learner.apply_ports_infra_switches(args, SimpleNamespace(), environ)
+    assert environ == {}
+    (base,), kwargs = _captured_args()
+    assert "--deterministic-mode" not in mc.translate_run_config(
+        rc.resolve_rl_run_config(base, **kwargs), AlgorithmSpec()).argv
