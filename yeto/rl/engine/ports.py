@@ -93,6 +93,12 @@ class RolloutBatchHandle:
     # aborted in flight; None = unknown (see rollout_meta_hook.submitted_groups).
     submitted_groups: int | None = None
     aborted_in_flight_groups: int | None = None
+    # rl-infra-spec 4.2 CutContext.data: the rollout data source position
+    # after this rollout drew its prompts ({sample_offset, epoch_id,
+    # sample_group_index, sample_index}) and its reuse-buffer length (0 on the
+    # ports path, cut-audit §3). None = not reported.
+    data_cursor: Mapping[str, int] | None = field(default=None, compare=False)
+    buffer_length: int | None = None
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
@@ -119,6 +125,8 @@ class RolloutPool(Protocol):
     def generate(self, rollout_id: int) -> RolloutBatchHandle: ...
     def abort(self) -> None: ...
     def members(self) -> frozenset[str]: ...
+    # Optional (4.2): def data_cursor(self) -> Mapping[str, int] | None: ...
+    #   the data cursor of the last generated batch (RolloutBatchHandle.data_cursor).
     # E1 verbs (3.4/3.4a): see ElasticRolloutPool below.
 
 
@@ -154,10 +162,17 @@ class TrainerGroup(Protocol):
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt: ...
     def onload(self) -> None: ...
     def offload(self) -> None: ...
-    # E2 (reserved, 4.2): def save_cut(self, *, epoch: int) -> str: ...  # snapshot id
-    # E2 (reserved, 4.2): def restore_cut(self, snapshot_id: str, *, epoch: int) -> None: ...
-    # E3 (reserved, 4.3/4.7): def rebuild(self, plan: Any) -> None: ...  (DP resize / role
-    # transfer go through Placement.reconfigure, now an E1 verb.)
+    # E2 (optional; advertised via EngineCapabilities.port_verbs, not part of
+    # the R0 protocol so R0 fakes stay conforming). Types: yeto.rl.engine.cut,
+    # miles_adapter.trainer.CutContext (rl-infra-spec 4.2, cut-audit.md):
+    # def layout(self) -> dict[str, int]: ...
+    # def save_cut(self, *, epoch: int, context: CutContext) -> str: ...  # cut id
+    # def restore_cut(self, cut_id: str, *, epoch: int, root: str,
+    #                 expect: RestoreExpectation, shared_filesystem: bool = True) -> CutManifest: ...
+    # Same-shape rebuild (4.3) is miles_adapter.trainer_rebuild.rebuild_same_shape
+    # over a SwappableActor: the driver keeps its port objects (no rebind) and
+    # re-publishes through IslandDriver.rebuild_trainer (4.4).
+    # E3 (reserved): data-parallel resize / role transfer via Placement.reconfigure.
 
 
 @runtime_checkable

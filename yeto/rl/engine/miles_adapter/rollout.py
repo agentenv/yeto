@@ -276,9 +276,12 @@ def handle_from_metadata(
         aborted=int(payload["aborted"]),
         payload=data_pack,
         # rollout_meta_hook: trained-group filter drops (terminal). Carried-over
-        # leftovers are not tracked until 3.6/4.1 audit the Miles buffer.
+        # leftovers (cut-audit §3): the ports path forbids partial rollout, so the
+        # only reuse is the data buffer; a reported empty buffer means 0.
         filtered=int(payload["filtered"]) if "filtered" in payload else None,
-        carried_over=None,
+        carried_over=0 if payload.get("buffer_length") == 0 else None,
+        data_cursor=payload.get("data_cursor"),
+        buffer_length=payload.get("buffer_length"),
         submitted_groups=payload.get("submitted_groups"),
         aborted_in_flight_groups=payload.get("aborted_in_flight_groups"),
         tool_wait_seconds=(
@@ -321,6 +324,11 @@ class MilesRolloutPool:
         self._metadata = metadata
         self._expected_policy = expected_policy
         self._run = (runner or LoopRunner()).run
+        self._last_cursor: dict[str, int] | None = None
+
+    def data_cursor(self) -> dict[str, int] | None:
+        """4.2: data cursor after the last generated batch (None = unknown)."""
+        return None if self._last_cursor is None else dict(self._last_cursor)
 
     def generate(self, rollout_id: int) -> RolloutBatchHandle:
         policy_version, policy_hash = self._expected_policy()
@@ -332,7 +340,7 @@ class MilesRolloutPool:
         self._offload_after_rollout()
         try:
             payload = self._metadata.take(rollout_id)
-            return handle_from_metadata(
+            handle = handle_from_metadata(
                 payload,
                 rollout_id=rollout_id,
                 policy_version=policy_version,
@@ -342,6 +350,8 @@ class MilesRolloutPool:
         except BaseException:
             _release(data_pack)
             raise
+        self._last_cursor = dict(handle.data_cursor) if handle.data_cursor else None
+        return handle
 
     def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, int] | None:
         """rl-infra-spec 1.7: engine in-flight counts from the fork-M3 router.

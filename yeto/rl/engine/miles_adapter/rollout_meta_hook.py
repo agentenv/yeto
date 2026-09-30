@@ -375,11 +375,43 @@ def submitted_groups(args: Any, data_source: Any) -> int | None:
     return offset - previous
 
 
+_CURSOR_FIELDS = ("sample_offset", "epoch_id", "sample_group_index", "sample_index")
+
+
+def data_cursor(data_source: Any) -> tuple[dict[str, int] | None, int | None]:
+    """rl-infra-spec 4.2: data source position and reuse-buffer length (cut-audit §3).
+
+    Read in the rollout process after the rollout drew its prompts (Miles
+    ``RolloutDataSource`` attributes; ``get_buffer_length`` on the buffered
+    source). Missing or non-integer fields: unknown (None), never guessed.
+    """
+    source = getattr(data_source, "__self__", data_source)
+    if source is None:
+        return None, None
+    cursor = {f: getattr(source, f, None) for f in _CURSOR_FIELDS}
+    known = {k: int(v) for k, v in cursor.items() if isinstance(v, int) and not isinstance(v, bool)}
+    length = None
+    getter = getattr(source, "get_buffer_length", None)
+    try:
+        if callable(getter):
+            length = int(getter())
+        elif isinstance(getattr(source, "buffer", None), list):
+            length = len(source.buffer)
+    except Exception:  # noqa: BLE001 - unknown, reported as None
+        length = None
+    return (known if len(known) == len(_CURSOR_FIELDS) else None), length
+
+
 def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = None) -> None:
     """``--rollout-all-samples-process-path`` hook."""
 
     try:
         payload = build_metadata(args, all_samples)
+        cursor, buffer_length = data_cursor(data_source)
+        if cursor is not None:
+            payload["data_cursor"] = cursor
+        if buffer_length is not None:
+            payload["buffer_length"] = buffer_length
         submitted = submitted_groups(args, data_source)
         if submitted is not None:
             generated = payload["completed"] + payload["filtered"]

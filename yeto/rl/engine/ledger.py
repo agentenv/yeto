@@ -17,6 +17,13 @@ outer progress). Terminal states besides ``outer_recorded``:
   earlier outer state, so that update no longer exists); its groups may be
   generated and trained again. A restart below an ``outer_recorded`` batch is
   refused (commit uncertainty is never replayed automatically, D7-8).
+* ``engine_discarded`` -- groups the engine drew (data cursor advanced) and
+  threw away for a known engine reason, not an algorithm decision: groups
+  still in flight when the batch filled are aborted and dropped with
+  ``partial_rollout`` off (cut-audit §3, Miles ``sglang_rollout.py:420-437``).
+  Counted, never lost, never ``filtered``, never consumed. (Completed groups
+  beyond ``rollout_batch_size`` under over-sampling are ``filtered`` as task
+  3.6 names them: an algorithm-configured surplus.)
 * ``discarded`` -- a prepared batch that was not trained because the round
   failed before the optimizer step (e.g. a refused train gate); recorded with
   the error so the gap is explicit, never silent.
@@ -46,7 +53,9 @@ from .journal import Journal
 
 LEDGER_DIR = "ledger"
 STATES = ("prepared", "optimizer_applied", "outer_recorded")
-TERMINAL = frozenset({"outer_recorded", "filtered", "discarded", "superseded"})
+TERMINAL = frozenset(
+    {"outer_recorded", "filtered", "engine_discarded", "discarded", "superseded"}
+)
 
 
 class LedgerError(RuntimeError):
@@ -80,6 +89,7 @@ class BatchLedger:
         self._batches: dict[int, _Batch] = {}
         self._consumed_groups: dict[str, int] = {}
         self._carried: dict[str, dict[str, Any]] = {}
+        self._last_report: dict[str, Any] = {}
         for record in self._journal.records:
             self._replay(record)
 
@@ -112,6 +122,9 @@ class BatchLedger:
                 self._batches[rid].filtered = dict(r.get("detail") or {})
             for gid in r.get("group_ids") or ():
                 self._carried.pop(gid, None)
+        elif kind == "carried_over_report":
+            self._last_report = {"carried_over": r.get("carried_over"),
+                                 "buffer_length": r.get("buffer_length")}
         elif kind == "carried_over":
             for gid in r["group_ids"]:
                 self._carried[gid] = {"rollout_id": rid, "policy_token": r["policy_token"]}
@@ -133,6 +146,21 @@ class BatchLedger:
 
     def open_carried_over(self) -> dict[str, dict[str, Any]]:
         return dict(self._carried)
+
+    def cut_summary(self) -> dict[str, Any]:
+        """``CutContext.ledger`` (4.2): what a cut must treat as unconsumed."""
+        ready = [gid for r in self.unconsumed() for gid in self._batches[r].group_ids]
+        report = self._last_report
+        return {
+            "ready_unconsumed": len(ready),
+            "ready_unconsumed_group_ids": sorted(ready),
+            "carried_over": len(self._carried),
+            "carried_over_group_ids": sorted(self._carried),
+            "engine_carried_over": report.get("carried_over"),
+            "engine_buffer_length": report.get("buffer_length"),
+            "last_rollout_id": max(self._batches) if self._batches else None,
+            "last_state": self._batches[max(self._batches)].state if self._batches else None,
+        }
 
     def unconsumed(self) -> list[int]:
         """Prepared batches whose optimizer step is not recorded (cut: unconsumed)."""
@@ -169,19 +197,29 @@ class BatchLedger:
         if filtered is not None:
             detail["groups"] = int(filtered)
             detail["mechanism"] = "rollout_meta_hook.record_trained_groups"
-            detail["reason"] = "generated groups not trained this round (dynamic filter / over-sampling)"
+            detail["reason"] = ("completed groups not trained this round: dynamic-filter drops "
+                                "and over-sampling surplus (not returned to the buffer)")
         if any(c is not None for c in filtered_samples):
             detail["samples"] = sum(int(c or 0) for c in filtered_samples)
             detail["sample_mechanism"] = "spec sample filter (rl-algo-grpo-knobs D7)"
         if detail:
             self._journal.append("filtered", rollout_id=rid, attempt=attempt, detail=detail)
             self._replay(self._journal.records[-1])
+        aborted = getattr(batch, "aborted_in_flight_groups", None)
+        if aborted:
+            self._journal.append(
+                "engine_discarded", rollout_id=rid, attempt=attempt, groups=int(aborted),
+                reason="aborted in flight when the batch filled (partial_rollout off)",
+                mechanism="miles generate_rollout abort",
+            )
         carried = getattr(batch, "carried_over", None)
         self._journal.append(
             "carried_over_report", rollout_id=rid, attempt=attempt,
             carried_over_reported=carried is not None,
             carried_over=None if carried is None else int(carried),
+            buffer_length=getattr(batch, "buffer_length", None),
         )
+        self._replay(self._journal.records[-1])
         return batch_hash
 
     def _advance(self, rollout_id: int, to: str, **fields: Any) -> None:
