@@ -279,3 +279,10 @@
 | E1-D（3.7） | watchdog kill 已合入（2b67145/5946ffd）；§8.7(2) 所需"阻塞 update_weights"注入点未合入；③④ 的 stop_cells 半失败注入、⑦ 的 fork 重启入口仍无；⑤⑥ state dir 仍在容器内非持久路径 | ①②③④⑦ 与 watchdog 用例 **等待代码**；⑤⑥ **环境阻塞** |
 | E1-A/E1-E（3.4） | 不变，可运行 | **运行**（9.3 第 3–5 项，代码 = 本合并提交） |
 | 本批硬预算 | §8.7(5) 写 B1 $170；本节 9.1 按用户"按 Nebius 价折算"取 **$127**（更严），维持 | — |
+
+### 9.6 合并 integ-decl a5123ca 后的补充（运行前；判据不变）
+
+- gpu-b1 已合并 origin/integ-decl a5123ca（含 `--rl-test-inject-update-weights-block-s`）。此后的运行（F-E1 起）使用本合并提交；F-E1 指纹运行（9.3 第 3a 项）已在 05822ff 上启动，不中断；Miles argv 相关代码（`miles_adapter/config.py`、`run_config.py`）在 05822ff→本提交之间无改动，指纹不受影响。
+- **Nebius 冒烟不通**（`evidence/infra-v2-b1/nsmoke/`），按 9.3 退回 Modal：E1-A 基线与 E1-A 用 Modal `H100!:8`（`--modal-gpu-exact`，运行前断言 GPU 名），最坏每次 8×3.95×65/60 = $34.2。
+- **新增运行 6：E1-D watchdog 用例**（按 §8.7(2) 与 `evidence/infra-e1/plan-3.8-4.4-v2.md` §4、§6，判据原文适用，未改）：前缀 `infra-v2-b1-a4wd-20260930-1`，Modal `H100!:8`，T4R2S2 起始，`--rl-test-inject-update-weights-block-s 600`，第 3 轮前 up（deadline 120 s），共 4 轮；期望 0.5 h；硬超时 外层 45 min / watchdog 50 min；最坏 8×3.95×50/60 = **$26.3**。E1-D 其余 ①–⑦ 仍按 9.5（等待代码/环境阻塞），因此即使本用例通过，3.7 也不勾选。
+- 更新后本批最坏合计：已花（≤$0.42 + 指纹运行）+ F-E1 $7.3 + 基线 $34.2 + E1-A $34.2 + watchdog $26.3 ≈ $105，< $127。顺序：F-E1 → 基线 → E1-A → watchdog；每次仍按门控计算。
