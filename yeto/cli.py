@@ -864,6 +864,22 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "may upgrade H100 to H200) and fail at container start unless "
         "nvidia-smi reports it; use for bitwise comparisons",
     )
+    infra.add_argument(
+        "--modal-retries",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Modal islands: function retries after a failed island (default: the Modal "
+        "runner's 10); acceptance runs use 0 so a learner exit is final",
+    )
+    infra.add_argument(
+        "--modal-timeout-s",
+        type=int,
+        default=None,
+        metavar="S",
+        help="Modal islands: function timeout in seconds (default: 24 h); the Modal-side "
+        "hard stop of a run",
+    )
     infra.add_argument("--disk-size", type=int, default=512, help="learner disk (GB)")
     infra.add_argument(
         "--learner-cpus",

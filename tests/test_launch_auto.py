@@ -301,3 +301,21 @@ def test_empty_plan_stops_launch(monkeypatch):
     empty.plan.counts = {}
     monkeypatch.setattr("yeto.shape.plan.build_shape", lambda **kw: empty)
     assert cli._resolve_auto_fleet(_args(["--budget", "1"])) == 1
+
+
+def test_modal_retries_and_timeout_are_opt_in(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.launcher import build_modal_island_config
+    from yeto.modal_runner import DEFAULT_RETRIES, DEFAULT_TIMEOUT_S
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    task = SimpleNamespace(run="true", envs={}, setup="")
+    args = _args(["--gpu", "modal:1xh100", "--cluster-prefix", "run"])
+    (spec,) = _specs(args.gpu)
+    cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:5000")
+    assert cfg.retries == DEFAULT_RETRIES and cfg.timeout_s == DEFAULT_TIMEOUT_S  # default unchanged
+    args = _args(["--gpu", "modal:1xh100", "--cluster-prefix", "run",
+                  "--modal-retries", "0", "--modal-timeout-s", "5400"])
+    cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:5000")
+    assert cfg.retries == 0 and cfg.timeout_s == 5400
