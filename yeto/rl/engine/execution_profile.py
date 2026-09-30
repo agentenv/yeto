@@ -74,18 +74,26 @@ class ProfileError(ValueError):
     """The execution profile is malformed or asks for an uncertified contract."""
 
 
-def check_overlap_eval(*, placement_kind: str, eval_uses_snapshots: bool,
-                       eval_interval: Any) -> None:
-    """Preconditions of eval overlap (task 2.3); shared by the island
-    (miles_adapter.entry) and the launcher's local pre-provisioning check."""
+UNKNOWN = object()  # a precondition whose value the caller has no source for
 
-    if placement_kind != "fixed-partition":
+
+def check_overlap_eval(*, placement_kind: Any, eval_uses_snapshots: Any = UNKNOWN,
+                       eval_interval: Any = UNKNOWN) -> None:
+    """Preconditions of eval overlap (task 2.3); shared by the island
+    (miles_adapter.entry) and the launcher's local pre-provisioning check.
+
+    A value passed as :data:`UNKNOWN` is not checked here: a caller without a
+    real source for it (the launcher has no eval configuration) leaves that
+    precondition to the island, which always passes every value.
+    """
+
+    if placement_kind is not UNKNOWN and placement_kind != "fixed-partition":
         raise ProfileError("eval overlap (2.3) needs a fixed-partition placement")
-    if eval_uses_snapshots:
+    if eval_uses_snapshots is not UNKNOWN and eval_uses_snapshots:
         # Miles would fire the eval and return; its end could then cross the
         # next publication, which the 2.3 join guard cannot see.
         raise ProfileError("eval overlap (2.3) is refused with --eval-uses-snapshots")
-    if not eval_interval:
+    if eval_interval is not UNKNOWN and not eval_interval:
         raise ProfileError("eval overlap (2.3) needs --eval-interval")
 
 

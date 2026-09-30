@@ -107,10 +107,10 @@ def test_launcher_forwards_switches(monkeypatch, tmp_path):
     resources.write_text(json.dumps({"configs": {"c0": {}}, "edges": []}))
     attestation = tmp_path / "att.json"
     attestation.write_text("{}")
-    args = _cli(("--rl-overlap-eval", "--rl-elastic", "--rl-elastic-resources", str(resources),
+    args = _cli(("--rl-placement", "fixed-partition",
+                 "--rl-overlap-eval", "--rl-elastic", "--rl-elastic-resources", str(resources),
                  "--rl-elastic-attestation", str(attestation),
                  "--rl-elastic-initial-config", "c0", "--rl-elastic-cells", "a,b"))
-    args.rl_placement, args.eval_interval = "fixed-partition", 5
     launcher._check_ports_infra_switches(args, "ports")
     prelude, flags = launcher._ports_infra_flags(args)
     assert flags == (" --rl-overlap-eval --rl-elastic --rl-elastic-resources "
@@ -145,28 +145,38 @@ def _elastic_files(tmp_path, attestation="{}"):
     return str(resources), str(att)
 
 
-def _partitioned(args, **extra):
-    args.rl_placement = "fixed-partition"
-    for k, v in extra.items():
-        setattr(args, k, v)
-    return args
+def test_launcher_accepts_overlap_eval_from_real_cli_with_fixed_partition(monkeypatch):
+    """Regression of 7139080: the launcher has no eval-interval source, so it
+    must not refuse locally for it (the island checks it on miles_args)."""
+    args = _cli(("--rl-overlap-eval", "--rl-placement", "fixed-partition",
+                 "--rl-rollout-gpus", "1", "--gpu", "aws:2xa100@us-east-1"))
+    assert not hasattr(args, "eval_interval") and not hasattr(args, "eval_uses_snapshots")
+    launcher._check_ports_infra_switches(args, "ports")
+    # placement source: the same --rl-placement value reaches the learner command
+    _prepare_rl_args(args)
+    run = _island_task(args, monkeypatch).run
+    assert "--rl-placement fixed-partition" in run and "--rl-overlap-eval" in run
 
 
-@pytest.mark.parametrize("attrs, message", [
-    ({"rl_placement": "colocated", "eval_interval": 5}, "fixed-partition"),
-    ({"rl_placement": "fixed-partition", "eval_interval": None}, "--eval-interval"),
-    ({"rl_placement": "fixed-partition", "eval_interval": 5, "eval_uses_snapshots": True},
-     "--eval-uses-snapshots"),
-])
-def test_launcher_refuses_overlap_eval_preconditions_locally(attrs, message):
-    """Integ-s2 finding 3: same check as the island profile, before provisioning."""
+def test_launcher_refuses_overlap_eval_on_colocated_from_real_cli():
     from yeto.rl.engine.execution_profile import ProfileError
 
-    args = _cli(("--rl-overlap-eval",))
-    for k, v in attrs.items():
-        setattr(args, k, v)
+    with pytest.raises(ProfileError, match="fixed-partition"):
+        launcher._check_ports_infra_switches(_cli(("--rl-overlap-eval",)), "ports")
+
+
+@pytest.mark.parametrize("miles, message", [
+    ({"eval_interval": None}, "--eval-interval"),
+    ({"eval_interval": 5, "eval_uses_snapshots": True}, "--eval-uses-snapshots"),
+])
+def test_shared_check_still_refuses_known_eval_values(miles, message):
+    """The island passes real miles_args values; they are still checked."""
+    from yeto.rl.engine.execution_profile import ProfileError, check_overlap_eval
+
     with pytest.raises(ProfileError, match=message):
-        launcher._check_ports_infra_switches(args, "ports")
+        check_overlap_eval(placement_kind="fixed-partition",
+                           eval_uses_snapshots=miles.get("eval_uses_snapshots", False),
+                           eval_interval=miles["eval_interval"])
 
 
 def test_launcher_and_island_share_the_overlap_eval_check():
@@ -187,17 +197,19 @@ def test_launcher_refuses_colocated_elastic(tmp_path):
     args = _elastic_cli(res, "--rl-elastic-initial-config", "c0")
     with pytest.raises(ProfileError, match="fixed-partition"):
         launcher._check_ports_infra_switches(args, "ports")
-    launcher._check_ports_infra_switches(_partitioned(args), "ports")
+    launcher._check_ports_infra_switches(
+        _elastic_cli(res, "--rl-elastic-initial-config", "c0",
+                     "--rl-placement", "fixed-partition"), "ports")
 
 
 def test_launcher_refuses_unknown_initial_config_and_bad_attestation(tmp_path):
     from yeto.rl.elastic_benchmark.manifest import ManifestError
 
     res, att = _elastic_files(tmp_path, attestation=json.dumps({"execution_modes": ["bogus"]}))
-    args = _partitioned(_elastic_cli(res, "--rl-elastic-initial-config", "nope"))
+    args = _elastic_cli(res, "--rl-elastic-initial-config", "nope", "--rl-placement", "fixed-partition")
     with pytest.raises(ValueError, match="not a manifest config"):
         launcher._check_ports_infra_switches(args, "ports")
-    args = _partitioned(_elastic_cli(res, "--rl-elastic-initial-config", "c0",
-                                     "--rl-elastic-attestation", att))
+    args = _elastic_cli(res, "--rl-elastic-initial-config", "c0", "--rl-placement",
+                        "fixed-partition", "--rl-elastic-attestation", att)
     with pytest.raises(ManifestError):
         launcher._check_ports_infra_switches(args, "ports")

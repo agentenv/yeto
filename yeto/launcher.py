@@ -939,12 +939,12 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         if rl_engine != "ports":
             raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
         # Same check the island's execution profile applies, run before any
-        # resource is provisioned.
-        check_overlap_eval(
-            placement_kind=placement,
-            eval_uses_snapshots=bool(getattr(args, "eval_uses_snapshots", False)),
-            eval_interval=getattr(args, "eval_interval", None),
-        )
+        # resource is provisioned, on the values the launcher really has:
+        # --rl-placement is forwarded verbatim to the learner (the island's
+        # launch.placement.kind). The launcher has no eval configuration (no
+        # --eval-interval / --eval-uses-snapshots, no run-config file, no Miles
+        # argv passthrough), so those two are left to the island's check.
+        check_overlap_eval(placement_kind=placement)
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS if getattr(args, name, None)]
     if not getattr(args, "rl_elastic", False):
         if given:
