@@ -475,3 +475,46 @@ def test_cut_injections_rank_zero_reaches_the_island_and_ray_workers(tmp_path, m
     assert forwarded["YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"] == "1:30"
     assert "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK" not in island_run(BASE + _elastic(tmp_path),
                                                                         monkeypatch)
+
+
+# ---------------------------------------------------------------- --rl-lora-dropout
+def test_lora_dropout_reaches_the_miles_argv_and_default_stays_zero(tmp_path, monkeypatch):
+    import argparse
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    args, _ = learner_from_run(island_run(BASE + ("--rl-lora-dropout", "0.05"), monkeypatch),
+                               tmp_path / "a")
+    assert args.rl_lora_dropout == 0.05
+    (base,), kwargs = _captured_args()
+
+    def argv(**extra):
+        ns = argparse.Namespace(**{**vars(base), "rl_engine": "ports", "parameter_mode": "lora",
+                                   **extra})
+        return mc.translate_run_config(rc.resolve_rl_run_config(ns, **kwargs), AlgorithmSpec()).argv
+
+    if getattr(base, "parameter_mode", "lora") != "lora":
+        import pytest
+
+        pytest.skip("captured base run is not LoRA")
+    on, off = argv(rl_lora_dropout=args.rl_lora_dropout), argv()
+    assert on[on.index("--lora-dropout") + 1] == "0.05"
+    assert off[off.index("--lora-dropout") + 1] == "0"
+    assert [a if a != "0.05" else "0" for a in on] == list(off)
+    default, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "b")
+    assert default.rl_lora_dropout is None
+
+
+def test_lora_dropout_range_is_checked():
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    with pytest.raises(ValueError, match="--rl-lora-dropout"):
+        launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "1.0")), "ports")
+    with pytest.raises(ValueError, match="--rl-lora-dropout"):
+        launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "0.05")), "legacy")

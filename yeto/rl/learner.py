@@ -153,6 +153,8 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    # ports LoRA training-time dropout (default 0 = unchanged argv)
+    parser.add_argument("--rl-lora-dropout", type=float, default=None)
     # Print the attestation runtime_fingerprint (same Miles argv as the island)
     # and exit before Ray/GPU (ports only).
     parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")

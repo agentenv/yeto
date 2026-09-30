@@ -1083,6 +1083,9 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                            eval_uses_snapshots=UNKNOWN)
     if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    dropout = getattr(args, "rl_lora_dropout", None)
+    if dropout is not None and (rl_engine != "ports" or not 0.0 <= dropout < 1.0):
+        raise ValueError("--rl-lora-dropout needs --rl-engine ports and a value in [0, 1)")
     if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
         raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
@@ -1189,6 +1192,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_deterministic_trainer", False):
         flags += " --rl-deterministic-trainer"
+    if getattr(args, "rl_lora_dropout", None) is not None:
+        flags += f" --rl-lora-dropout {float(args.rl_lora_dropout)!r}"
     if getattr(args, "rl_print_attestation_fingerprint", False):
         flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_elastic", False):

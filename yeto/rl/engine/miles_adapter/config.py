@@ -257,6 +257,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.rollout_cell_names": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
+    "trainable.lora_dropout": _ok,
     "trainable.lora_targets": _check_lora_targets,
     "trainable.target_modules": _ok,
     "trainable.expert_full_count": _check_expert_full,
@@ -583,7 +584,9 @@ def translate_run_config(
         # LoRA (upstream miles/utils/lora/arguments.py)
         "--lora-rank", str(trainable.lora_rank),
         "--lora-alpha", str(trainable.lora_rank),
-        "--lora-dropout", "0",
+        # "0" (default argv unchanged) unless --rl-lora-dropout
+        "--lora-dropout", (format(trainable.lora_dropout, "g")
+                           if getattr(trainable, "lora_dropout", 0.0) else "0"),
         "--lora-type", "canonical_lora",
         "--target-modules", ",".join(trainable.target_modules),
         # upstream applies the LoRA base CPU backup only under colocate

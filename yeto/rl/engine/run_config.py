@@ -165,6 +165,9 @@ class TrainableConfig:
     lora_targets: str  # preset name, e.g. "attention"
     target_modules: tuple[str, ...]  # engine-resolved module names
     expert_full_count: int
+    # Training-time LoRA dropout (ports only; --rl-lora-dropout). The exported
+    # adapter / canonical LoRA config keep dropout 0 (inference is unaffected).
+    lora_dropout: float = 0.0
 
     @property
     def routed_expert_lora(self) -> bool:
@@ -736,6 +739,7 @@ def resolve_rl_run_config(
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
             lora_rank=args.lora_r,
+            lora_dropout=_lora_dropout(args, parameter_mode),
             lora_targets=args.lora_targets,
             target_modules=tuple(target_modules),
             expert_full_count=expert_full_count,
@@ -836,6 +840,18 @@ def _rollout_cell_names(args, dedicated_rollout_gpus) -> tuple[str, ...]:
     if not names:
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the cell names)")
     return names
+
+
+def _lora_dropout(args, parameter_mode: str) -> float:
+    value = getattr(args, "rl_lora_dropout", None)
+    if value is None:
+        return 0.0
+    value = float(value)
+    if not 0.0 <= value < 1.0:
+        raise ValueError("--rl-lora-dropout must be in [0, 1)")
+    if getattr(args, "rl_engine", "ports") != "ports" or parameter_mode != "lora":
+        raise ValueError("--rl-lora-dropout only applies to the ports LoRA engine")
+    return value
 
 
 def ports_training_eval(args, *, parameter_mode: str | None) -> bool:
