@@ -1067,6 +1067,84 @@ All three transforms run in the yeto dispatcher; their module
 enters the algorithm hash. Each round emits `rl_advantage_transform`
 (all-wrong / all-right groups, non-zero advantages).
 
+### Policy-loss variants (`rl-algo-loss-variants`)
+
+> **Status: expressible, not opened.** Route B (user decision 2026-09-30):
+> the computation is a variant branch in the Miles fork (`michaellchung/miles`
+> `yeto/ports`, `--policy-loss-variant`); yeto only describes, translates and
+> validates. The Miles adapter does **not** declare `losses:cispo` /
+> `losses:sapo` / `losses:gmpo`, and every launch is refused until the pin
+> (`yeto.rl.MILES_NEXT_COMMIT`) is a fork commit listed in
+> `yeto.rl.algos.loss_variants.FORK_COMMITS` (empty today). GPU validation is
+> paused by the user; the variants are CPU-tested only. No effect A/B has been
+> run and none is claimed.
+
+The variants replace only the token-level pg_loss inside `--loss-type
+policy_loss`; TIS / IcePop / OPSM weights, KL loss, entropy and the
+aggregation are applied afterwards by Miles' unchanged code (variant loss
+first, then the correction weight, then aggregation). With rho = pi_theta /
+pi_old and A the advantage:
+
+| Variant (`loss.policy_loss_variant`) | Token loss | Parameters (default) | Miles argv |
+|---|---|---|---|
+| `policy_loss` (default) | PPO clip (unchanged) | -- | nothing emitted (default GRPO argv and hash unchanged) |
+| `cispo` | -sg(clip(rho, 1-eps_l, 1+eps_h)) * A * log pi_theta; every token keeps a gradient | `loss.eps_clip` / `loss.eps_clip_high` (engine default when unset) | `--policy-loss-variant cispo [--eps-clip .. --eps-clip-high ..]` |
+| `sapo` | -sigmoid(tau (rho-1)) * 4/tau * A; tau = tau_pos for A>0, tau_neg otherwise; no hard mask | `loss.sapo_tau_pos` (1.0), `loss.sapo_tau_neg` (1.05) | `--policy-loss-variant sapo --sapo-tau-pos .. --sapo-tau-neg ..` |
+| `gmpo` | l_t = sign(A) clip(sign(A) log rho_t, -delta_l, delta_h); sequence ratio exp(mean_t l_t) over the whole sequence; -ratio * A | `loss.gmpo_log_clip_low` (0.4), `loss.gmpo_log_clip_high` (0.4) | `--policy-loss-variant gmpo --gmpo-log-clip-low .. --gmpo-log-clip-high ..` |
+
+`loss.variant` (P0) stays `--loss-type`; the variant is its own field.
+A variant's parameters enter the canonical form (and the hash) exactly when
+that variant is selected, then always (even at the default value), and are
+always emitted explicitly (never the fork's own default). Absorbed from extra
+argv, the fork flags follow the usual rule: a value that differs from the spec
+fails before launch naming both values.
+
+Refused before any GPU process:
+
+- a variant with `advantage.estimator="gspo"` (both define the ratio);
+- a variant with `loss.eps_clip_c` (dual-clip is for the PPO clip objective);
+- a variant with `loss.variant="custom_loss"`;
+- SAPO / GMPO with `loss.eps_clip` / `loss.eps_clip_high` (no effect there);
+- a parameter of another variant (e.g. `loss.sapo_tau_pos` with `gmpo`);
+- tau or delta that is not a positive finite number (the error names the field);
+- GMPO with context parallel size > 1 (CPU-tested only);
+- any variant on a Miles pin without the fork commit (launch check `[loss_variants]`).
+
+Zero-gradient invariant: CISPO and SAPO keep the GRPO rule (a round whose
+every ratio is out of range still expects a gradient). GMPO may legitimately
+produce no gradient when every token is clipped in log space: the round is
+relaxed only when the reported clip fraction (`masked_fraction`, from
+`pg_clipfrac`) is 1; unknown keeps the GRPO rule. A non-finite grad norm fails
+under every variant. The Miles trainer wiring for GMPO's clip fraction is the
+patch `infra-drafts/patches/algo-2b-trainer.patch` (INFRA-owned `trainer.py`).
+
+Outer sync: the variants only change the loss and are orthogonal to strict-avg
+and decoupled; ports run serially (staleness 0, pi_old is this round's start).
+
+```bash
+python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
+  --extra "--policy-loss-variant cispo --eps-clip 0.2 --eps-clip-high 0.28"
+# verdict "rejected": losses mechanism 'cispo' not supported (... expressible but not enabled)
+python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
+  --extra "--policy-loss-variant sapo" --rl-allow-unverified-mechanism losses:sapo
+# verdict "accepted"; miles_argv ends with
+#   --policy-loss-variant sapo --sapo-tau-pos 1.0 --sapo-tau-neg 1.05
+# (the dry run models the capability check only; a real launch is still refused
+#  by the [loss_variants] pin check until FORK_COMMITS has the pinned commit)
+python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
+  --extra "--policy-loss-variant gmpo --sapo-tau-pos 1.2" \
+  --rl-allow-unverified-mechanism losses:gmpo
+# verdict "rejected": [loss_variant_params] ['loss.sapo_tau_pos'] only apply to ...
+```
+
+Upgrading Miles: the variant lives in one branch point of the fork's
+`policy_loss_function` (`losses.py`) plus `math_utils.py` / `arguments.py`.
+After every rebase of `yeto/ports`, rerun the fork's variant tests, add the
+reviewed commit to `FORK_COMMITS` when Agent IMG moves `MILES_NEXT_COMMIT`
+and the image digest (this makes the single-island
+`--rl-allow-unverified-mechanism` smoke launchable), and declare a variant in
+`entry.MILES_DECLARED` only after its GPU smoke passed.
+
 ### Port responsibilities
 
 | port | responsibility | Miles adapter (`yeto/rl/engine/miles_adapter/`) |

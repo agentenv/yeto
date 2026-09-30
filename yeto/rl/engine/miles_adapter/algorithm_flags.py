@@ -230,6 +230,15 @@ _UNMAPPED = [
     # (arguments.py:3194-3199), i.e. arbitrary overrides incl. use_tis/eps_clip:
     # it would bypass the spec entirely, so it is refused like any unmapped flag.
     "--custom-config-path",
+    # Miles fork (michaellchung/miles yeto/ports, rl-algo-loss-variants route
+    # B): mapped by yeto.rl.algos.loss_variants; listed here so they are
+    # adapter-owned from import time. Upstream only once the pin carries them
+    # (loss_variants.FORK_COMMITS).
+    "--policy-loss-variant",
+    "--sapo-tau-pos",
+    "--sapo-tau-neg",
+    "--gmpo-log-clip-low",
+    "--gmpo-log-clip-high",
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}
