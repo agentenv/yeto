@@ -173,3 +173,52 @@
 - A10 暂缓。
 - F 阶段只保留 F0 和 F-E1。
 - v1 的 A1–A9 为 $1,500 以上，v2 的期望费用约 $154（4 卡档）。
+
+## 8. 批次 1 执行计划（用户决定后更新，2026-09-30，GPU-B1；本节提交后判据冻结）
+
+用户决定（2026-09-30）：A1–A9，A10 暂缓；全部 GPU ≤ $300（含重跑）；**A4 按 3.4 原文 8 卡 T4R2S2↔T4R4S0**（§2.1 的 8 卡原文档，判据直接用 `evidence/infra-e1/plan.md` 原文，不换算）；加跑 A2+（L-1.7）；**非逐位行改 Nebius**，先做路径验证冒烟，不通则退回 Modal；未分配余额不得动用。代码基线 gpu-b1 = integ-decl a303cbb，镜像 pin 5c1b49e-9f29303（`yeto/rl/__init__.py` 的 MILES_NEXT_IMAGE digest）。台账 `infra-drafts/gpu-spend.md`；证据 `evidence/infra-v2-b1/<run>/`。
+
+### 8.1 价格与本批硬预算
+
+- Nebius H100：v2 §1 写 $2.95/GPU·h；**运行前核对 SkyPilot 目录（`sky show-gpus H100 --cloud nebius`，2026-09-30）为 $3.85/GPU·h**（`gpu-h100-sxm_8gpu-128vcpu-1600gb` $30.80/h，1 卡 $3.85/h，eu-north1），与 Modal `H100!` $3.95 基本持平。Nebius 只有 1 卡与 8 卡两种 H100 规格，6 卡基线也只能租 8 卡。费用门控一律按 $3.85 计最坏费用。
+- Modal L40S $1.95/GPU·h（v2 §1）。
+- **本批硬预算**：v2 8 卡档 B1 $170 按 v2 所写 Nebius/Modal 价比折算：$170 × 2.95/3.95 = **$127**（取整）。用目录价 $3.85 折算会得到 $166，取较小者 $127。全局累计仍 ≤ $300。
+- 门控：每次启动前 本批已花 + 本次最坏费用（卡数 × watchdog 硬上限时长 × 单价）> $127 或全局 > $300 → 不启动，报告。
+
+### 8.2 代码就绪核查（a303cbb，CPU 只读核查，运行前）
+
+| 项 | 需要 | a303cbb 现状 | 处理 |
+|---|---|---|---|
+| E1-A/E1-E（3.4 X2，3.1/3.2/3.6 旁证） | `--rl-elastic` 经 launcher、CommandInbox、ElasticPlacement、declared_cells | 已接线（launcher `_ports_infra_flags`，entry `elastic_wiring_for`/`ElasticPlacement`）；8 卡 Nebius dry-run 通过 | **运行** |
+| attestation 指纹 | attestation `runtime_fingerprint` 必须等于岛上 `sha256(miles_commit + Miles argv)` | 无离线计算入口（需镜像内 Megatron bridge）；同参数两次运行指纹相同（infra-a s4/s5 t2r2-s17 均为 213ae47a…） | 先跑**无请求的 T4R2S2 基线**（本来就是 E1-A 的基线），从其 `rl_driver_start` 取指纹写入 E1-A 的 attestation；elastic/attestation 标志不进入 Miles argv |
+| E1-B（3.5） | 在 `check_weights` 前用 `update_weights_from_disk` 覆盖一个新 engine 的故障注入；旧 epoch `start_update_weights` 调用入口 | `load_fault_injection` 只认 `publish_delay_s`，fork 无对应注入 | **等待代码**，不运行 |
+| E1-C / A4b（3.3） | 工具等待负载（`tool_wait_scope` 的 generate 函数）+ 岛上 ToolWaitBoard 传入 elastic wiring | `elastic_wiring_for` 未传 `tool_wait_board`（恒 None，drain 只靠串行轮边界）；仓库内无使用 `tool_wait_scope` 的 generate 函数 | **等待代码**，不运行 |
+| E1-D（3.7） | ③④ stop_cells 半失败注入；⑤⑥ 原地重启 learner（同一 state dir）；⑦ fork InferenceController 重启 | ③④ 无注入入口；state dir = 容器内 `~/yeto-rl/elastic-state`（非持久卷），Modal 函数 retries 在新容器重跑、Nebius 经 launcher 无原地重启 learner 入口；⑦ 无入口；`on_watchdog` 未接 kill | ③④⑦ **等待代码**；⑤⑥ **环境阻塞**（CPU 前置不满足）；①② 单独跑不能使 3.7 满足原文，为省钱不运行，待注入代码合入后与 ③④ 同批 |
+| A2（L-2.3） | launcher 传 `--eval-interval`/eval 集 | launcher 无 eval 配置（`_check_ports_infra_switches` 注释明确） | **等待代码** |
+| A2+（L-1.7） | `observe=True` 经 launcher 开启；W-tool 工具负载 | `yeto_rl_observe_timeline` 无任何 CLI/launcher 入口；无工具负载 | **等待代码** |
+
+### 8.3 本批运行（顺序、卡、时长、费用、硬超时）
+
+| 序 | 运行 | 前缀 | 云/卡 | 期望时长 | 硬超时（外层 timeout / watchdog 释放） | 最坏费用 | 判据 |
+|---|---|---|---|---|---|---|---|
+| 1 | Nebius 路径冒烟 | `infra-v2-b1-nsmoke-20260930-1` | Nebius 1×H100（`gpu-h100-sxm_1gpu`），sky `--down` + autostop 10 min | 0.4 h | 45 min / 50 min `sky down` | 1×3.85×50/60 = **$3.2** | 见 8.4-1 |
+| 2 | F0 | `infra-v2-b1-f0-20260930-1` | Modal 1×L40S | 0.25 h | 30 min / 35 min `modal app stop` | **$1.2** | v2 §3 F0 原文 |
+| 3a | F-E1 指纹 | `infra-v2-b1-fe1fp-20260930-1` | Modal 3×L40S，T1R1S1，无请求，取到 `rl_driver_start` 即停 | 0.25 h | 25 min / 30 min | **$2.9** | 仅取指纹，不判 |
+| 3b | F-E1 | `infra-v2-b1-fe1-20260930-1` | Modal 3×L40S，T1R1S1↔T1R2S0，一次 up/down，6 轮 | ≤1 h | 70 min / 75 min | **$7.3** | v2 §3 F-E1 原文（不判通过/失败，不计入 task） |
+| 4 | E1-A 基线 | `infra-v2-b1-a4base-20260930-1` | Nebius 8×H100，T4R2S2 elastic，无请求，12 轮 | 0.7 h | 60 min / 65 min `sky down` | 8×3.85×65/60 = **$33.4** | 基线（同时提供指纹） |
+| 5 | E1-A | `infra-v2-b1-a4x2-20260930-1` | Nebius 8×H100，第 3 轮前 up T4R2S2→T4R4S0，第 8 轮前 down，deadline 各 600 s，12 轮 | 0.75 h | 60 min / 65 min | **$33.4** | infra-e1/plan.md E1-A (a)–(g)、E1-E 原文 |
+| | 合计最坏 | | | | | **$81.4** | 余 $45.6 只用于"查明原因并修复后"的重跑 |
+
+- F-E1 用 3×L40S（v2 §2 原 F-E1 规格）而不是 §2.1 所写 7×L40S：F-E1 只验证事务控制流，不产生证据，3 卡更省；判据不受影响。
+- Nebius 冒烟不通时：拉日志 → `sky down` → Nebius API 核实 → 写结论，第 4/5 项改在 Modal `H100!:8`（$3.95，最坏 8×3.95×65/60 = $34.2/次，合计最坏 $83，仍在 $127 内）。
+- 若 F0 不通过：按 v2 §5 取消 F-E1，E1-A 直接上 H100。
+- 固定参数（所有 H100 运行）：Qwen3-0.6B（rev c1899de2…）LoRA r16 all-linear，GRPO 默认 spec，gsm8k（rev 0cbd9f31…），`--rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17`，`--rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-single-island-no-sync --controller local --rl-elastic --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-initial-config T4R2S2`，资源清单 `evidence/infra-v2-b1/cfg/resources-8.json`（T4R2S2、T4R4S0 与双向 `rollout-only` 边）。E1-A 另带 attestation（两条边、`execution_modes: [partitioned-serial]`、指纹取自第 4 项）。
+- 请求提交：写入岛内 `~/yeto-rl/elastic-state/inbox/<request_id>.request.json`（`CommandInbox` 原格式），经 `ssh <cluster>` 在第 2 轮 / 第 7 轮 generate 期间提交，使其在第 3 / 第 8 轮前的安全点执行；`<request_id>.status.json` 与 journal 取回存档。
+- 采集：puller 每 ≤10 s 取事件磁带、`nvidia-smi --query-compute-apps=pid,gpu_uuid`、`nvidia-smi -L`，结束前取 journal/epochs/ledger。
+
+### 8.4 判据（冻结）
+
+1. **Nebius 冒烟**（路径验证，不计入 task）：通过 = (a) sky 集群 UP 且岛容器内 `nvidia-smi` 为 H100；(b) 岛连上本机 head syncer（本机 syncer 日志有该岛连接、磁带有外层同步完成事件）；(c) 1 轮完成，launcher 退回码 0；(d) 运行期间无 keepalive/连接中断导致的失败。任一不满足 = 不通，按 8.3 退回 Modal，不在 Nebius 上排错。公网 IPv4 用量记录（配额 3，本次 1）。
+2. **F0 / F-E1**：v2 §3 原文。
+3. **E1-A / E1-E**：`evidence/infra-e1/plan.md` §1 E1-A (a)–(g) 与 E1-E 原文，逐字适用，无数值容差，1 个 seed。3.4 只有 E1-A 全部满足才勾选；3.1/3.2/3.6 旁证只记录，不据此勾选。E1-A (e) 的"池"= 该 8 卡 VM 的 8 张 UUID。
+4. 3.3、3.5、3.7、2.3、1.7 本批不运行，状态按 8.2 记录，不勾选。
