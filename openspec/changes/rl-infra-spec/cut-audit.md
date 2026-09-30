@@ -20,6 +20,7 @@
 | trainer | 参数组超参 | optimizer param_groups | `optimizer_named.entries[*].hyper` | 同上 |
 | trainer | LR scheduler 与计数 | `actor.opt_param_scheduler.state_dict()`（`num_steps` 以样本数计） | `scheduler` | 必须满足 `num_steps == local_step × GBS`，否则拒绝（manifest 与每个 rank 都检查） |
 | trainer | loss scaler | 只有 fp16 才有 | — | 拒绝 fp16 |
+| trainer | Miles 权重版本计数 | `actor.weight_updater.weight_version`（每次 update_weights 加一；rollout executor 拒绝版本回退） | 每个分片的 `miles_counters.weight_version` | 2026-09-30 GPU C1 运行中发现此项遗漏（重建后重新发布报 "weight version went backwards"），已补：写入前检查，写入时恢复，计入摘要 |
 | trainer | Megatron 全局计数 | `get_args().iteration / consumed_train_samples` | `megatron_counters` | 读不到时写空；恢复时回写 |
 | trainer | reference 模型 | `--ref-load`（`config.py:561`），不可变，不训练（`--ref-update-interval` 被拒绝，`algorithm_flags.py:_UNMAPPED`） | 不存权重，只在 manifest `algorithm.ref_model` 记 `{ref_load, base_model_revision}` 身份 | 恢复时与当前运行比对，不一致即拒绝 |
 | trainer | old-policy 副本 | `--keep-old-actor` 被拒绝 | — | 不适用 |
