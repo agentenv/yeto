@@ -339,3 +339,30 @@
 - 测试：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE` 结果为 68 failed, 2904 passed, 49 skipped, 26 errors。（回归修复后复跑：68 failed, 2905 passed, 49 skipped, 26 errors）失败和错误的 id 共 94 个，按 id 前缀规范化后与 /tmp/integ-s2-base.ids（修复前基线）完全一致，没有新增失败，都是已知环境性失败。`openspec validate rl-infra-spec --strict` 通过。
 - 仍存限制：3.7 watchdog 默认没有接 kill（`on_watchdog` 默认未接线，阻塞的引擎调用不受截止时间约束）；H2 限制见 E1 记录。GPU 验收均未进行，task 勾选状态不变。
 - 云资源：无；费用 $0。
+
+## INFRA-E3（2026-09-30，4.2a/4.6/4.6a/4.7 的 CPU 部分；分支 `infra-e3`，worktree `/home/michael/work/infra-e3`，基于 integ-decl 65ca03b）
+
+### task 状态（五选一，均未勾选）
+- 4.2a：未完成。fork 接口已满足（按名 optimizer 状态 + DistOpt 文件式收集/切片），缺 GPU 验证（DEV-GATHER/A8）。
+- 4.6：CPU 通过。GPU 验收 A8 未运行；依赖 4.5、1.6 未满足。
+- 4.6a：未完成。trainer 侧 M6 满足；角色转移缺 fork 需求 F-R1（启动时声明延迟绑定的 rollout cell，需另批）。
+- 4.7：已实现（yeto 侧，CPU 通过）；controller 接线以补丁交 E1；A9 依赖 4.6 go、F-R1。
+
+### 改动
+- `yeto/rl/engine/miles_adapter/reshard.py`（新）；`cut_plugin.restore_resharded_shard`；`MilesTrainerGroup.restore_cut_resharded/rebind_args`；`trainer_rebuild.rebuild_resharded/resized_args/trainer_view`；`miles_adapter/trainer_resize.py`（新，`MilesTrainerOps`）；`engine/trainer_transition.py`（新）。
+- 测试：`tests/rl_reshard_fakes.py`、`tests/test_rl_trainer_reshard.py`（13）、`tests/test_rl_trainer_transition.py`（12）。纯 torch 替身，只证协议，不作验收。
+- 计划：`evidence/infra-e3/plan.md`（DEV-GATHER、A8、A9，判据与上限预先固定；E3 上限合计约 $46）。
+
+### 测试
+- 全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`：68 failed, 2930 passed, 49 skipped, 26 errors；失败/错误 id 94 个，与 `/tmp/integ-s2-base.ids`（第二列）完全相同，无新增失败。
+- 补丁验证：在本分支临时应用两个补丁后 `tests/test_rl_controller_trainer_edge.py` + `tests/test_rl_reconfig_e1.py` 37 passed，随后撤回。
+- `openspec validate rl-infra-spec --strict` 通过。云资源：无；费用 $0。
+
+### 交给其他写入者
+- `infra-drafts/patches/infra-e3-controller.patch`、`infra-e3-elastic-wiring.patch`（基于 65ca03b；在 infra-e1 533afdc 上 controller.py `__init__` 附近冲突，需手工合入）。接口见 plan.md §5。
+- E1 需实现 `MilesRolloutPool.bind_members(members, gpus)` 与 `compose_island` 中 `MilesTrainerOps` 的构造。
+
+### 待批准 / 阻塞
+- F-R1（fork 新需求，与 G6 相邻）：阻塞 A9/4.7 GPU。
+- PLAN-V2 需采纳本计划的缩小规模（A8 2×H100!、A9 4×L40S T2R2↔T1R3、DEV-GATHER 用 A10G）。
+- dropout>0 的变 DP 边不在首轮认证范围（plan.md §0）。
