@@ -84,6 +84,10 @@ def cells_of(members: Any) -> list[str]:
 # Unset (default) = no effect. Set by the launcher's
 # ``--rl-test-inject-start-delay-s`` (exported in the island run command).
 INJECT_START_DELAY_ENV = "YETO_RL_TEST_INJECT_START_DELAY_S"
+# Test-only (plan.md E1-D ③④, 3.7): the next N fork ``stop_cells`` calls fail
+# inside the fork AFTER deregistration (its engine provider's stop raises), so
+# the fork records ``incomplete``. Unset (default) = no effect.
+INJECT_STOP_FAILURES_ENV = "YETO_RL_TEST_INJECT_STOP_FAILURES"
 
 
 def injected_start_delay(environ: Any = None) -> float | None:
@@ -355,6 +359,12 @@ class MilesRolloutPool:
         self._inject_start_delay = injected_start_delay()
         self.injected_start_delays: list[float] = []
         self._sleep = time.sleep
+        import os
+
+        self._stop_failures_left = int(os.environ.get(INJECT_STOP_FAILURES_ENV) or 0)
+        if self._stop_failures_left < 0:
+            raise ValueError(f"{INJECT_STOP_FAILURES_ENV} must be >= 0")
+        self.injected_stop_failures = 0
         # E3 role transfer (4.7): fork RayWorkerManager handle (None = the named
         # actor, looked up on first use), the startup bundle map
         # (bundles.StartupBundles: pool GPU ids <-> startup PG bundles) and
@@ -568,8 +578,31 @@ class MilesRolloutPool:
 
     def remove_engines(self, members: frozenset[str], *, epoch: int) -> frozenset[str]:
         """Deregister and stop ``members`` (drain them first); returns the remaining members."""
+        if self._stop_failures_left > 0:
+            self._arm_stop_failure()
         self._run(self._controller.stop_cells(cells_of(members), expected_epoch=epoch))
         return self.members()
+
+    def _arm_stop_failure(self) -> None:
+        """TEST ONLY: make the fork's engine provider fail this stop once (the fork
+        then marks the membership ``incomplete``, its real half-failure path)."""
+        provider = getattr(self._controller, "_engine_provider", None)
+        if provider is None:
+            raise MembershipPlanError("stop failure injection: the fork has no engine provider")
+        real = provider.stop_cells
+        pool = self
+
+        async def failing_stop(*args: Any, **kwargs: Any) -> Any:
+            provider.stop_cells = real  # one shot
+            pool._stop_failures_left -= 1
+            pool.injected_stop_failures += 1
+            import sys
+
+            print(f"[yeto] TEST INJECTION {INJECT_STOP_FAILURES_ENV}: provider stop_cells fails",
+                  file=sys.stderr, flush=True)
+            raise RuntimeError("injected provider stop failure (test)")
+
+        provider.stop_cells = failing_stop
 
     def drain(self, members: frozenset[str], deadline: float) -> bool:
         """Cordon ``members`` and wait for zero in-flight requests until ``deadline`` (wall clock).

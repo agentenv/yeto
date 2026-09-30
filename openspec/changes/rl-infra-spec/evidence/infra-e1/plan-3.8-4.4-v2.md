@@ -18,6 +18,8 @@ v1（`plan-3.8-4.4.md`）的拓扑（2×8 卡、8 轮）、"最终 policy hash �
 
 - 岛0 journal 中每个执行了的事务都有一条 `pause_decision`，其 `outer_phase=round-boundary-published`、`allowed=true`、`stalls_peers=true`，`budget_s` 等于按第 5 条输入计算的值。这是 3.8 实现本身的正确性检查；不满足时记为 3.8 实现缺陷。
 - quorum 运行：该 step 岛0 只有一次 PUSH；bridge 磁带里没有 "conflicting PULL permits" 和 "invalid PULL permit"。
+- gpu-plan-v2 A5 第 2 条"磁带中至少 1 次 PULL 重发"的取证位置（主 agent 裁定，2026-09-30）：以岛0 learner JSONL 磁带中的 `rl_pull_resend` 记录为准（0f0bcf3）。
+- A5 岛0、岛1 的 attestation `runtime_fingerprint` 在 CPU 上取：launch 命令与正式运行完全相同，另加 `--rl-print-attestation-fingerprint`。learner 按同一套 Miles argv 构造，调用同一个 `ports_runtime_fingerprint`，打印一行 JSON 后退出，不连接 Ray，也不需要 GPU。
 
 ## 3. A6b（4.4）的 E1 操作与补充观测
 
@@ -26,7 +28,7 @@ v1（`plan-3.8-4.4.md`）的拓扑（2×8 卡、8 轮）、"最终 policy hash �
   1. journal 依次为 `VALIDATING → WAIT_SAFE → REBUILDING_TRAINER → SUCCEEDED`；cut manifest 中 `progress.local_step = 3`（第 3 轮安全点之前已完成 3 次 optimizer step，每轮 1 步），`outer.settled = true`，`ledger.carried_over = 0`，`ledger.ready_unconsumed = 0`。
   2. `rl_driver_start` 只有 1 条；`rl_trainer_rebuilt` 1 条，其 `policy_version = 3`、`sync/publication_members` 为全部成员。
   3. **样本一致（替代数值比较）**：重建后下一轮（rollout 3，即重建后的第 1 轮）的 `trained_sample_ids_sha256` 与不重建基线 B1 的同一轮相等；该轮开始前 rollout 进程的数据游标 `{sample_offset, epoch_id, sample_group_index, sample_index}` 与 B1 相等。这两条都是精确相等。重建前后的 grad_norm/loss 只记录，不作判据。
-  4. `SwappableActor.generation` 在 RESTORED 时为 1，在 REBUILD_OLD 时为 2。
+  4. **运行前更正（主 agent 裁定，2026-09-30）**。原文："`SwappableActor.generation` 在 RESTORED 时为 1，在 REBUILD_OLD 时为 2。"更正后：`generation` 在两种路径下都为 1。原因是原文在逻辑上不可能成立：`rebuild_same_shape` 只在重建成功时 swap 一次，失败的那次尝试不 swap。两条路径改由 journal 的 `rebuild.outcome` 与 `rebuild.attempts` 区分：REBUILD_OLD 时 `attempts` 的 stage 依次为 `create_training_models`、`done`。REBUILD_OLD 路径用 `--rl-test-inject-rebuild-fail` 触发，它让 fork 中 `create_training_models` 的第一次调用失败。更正发生在任何运行之前，替代判据不弱于原意。
 - 已知限制（不放宽判据）：`REBUILDING_TRAINER` 阶段**没有** deadline 强制终止。默认 watchdog 只杀 rollout 事务在 INITIALIZING/VERIFYING 阶段新启动的 cell，trainer 重建阻塞时只会写 journal；超时由 E2 plan-v2 G-4.5 的各项和外层硬超时覆盖。
 
 ## 4. watchdog 默认动作（与 A4 E1-D 同批执行；判据为 `evidence/infra-e1/plan.md` E1-D 的补充，运行前固定）

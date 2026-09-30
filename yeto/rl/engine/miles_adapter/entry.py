@@ -39,6 +39,16 @@ def runtime_fingerprint(launch: Any, miles_commit: str) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def ports_runtime_fingerprint(launch: Any) -> str:
+    """The island's runtime fingerprint (attestation ``runtime_fingerprint``,
+    ``rl_driver_start``): pinned Miles commit + the full Miles argv. The ONE
+    function both ``run_ports_island`` and ``--rl-print-attestation-fingerprint``
+    call, so the printed value is the value the island will check."""
+    from yeto.rl import MILES_NEXT_COMMIT
+
+    return runtime_fingerprint(launch, MILES_NEXT_COMMIT)
+
+
 # Declared beyond R0: "dimension:name" -> evidence that the mechanism takes
 # effect on GPU (declaration policy, rl-infra-spec alignment §7b; may be
 # overridden by the user). One entry per mechanism, added in its own commit.
@@ -132,9 +142,16 @@ MILES_DECLARED: dict[str, str] = {
 # --policy-loss-variant policy_loss the loss path calls the same
 # compute_policy_loss with the same arguments, need_full_log_probs is
 # unchanged, and the new flags only add parser entries/validation.
+# 2f23a0fc = 5c1b49eb + F-R1, same basis: `git diff --stat 5c1b49eb..2f23a0fc
+# -- miles` touches only miles/ray/{placement_group,rollout/inference_controller,
+# specs/inference}.py, miles/utils/workers/* and the --yeto-placement-map help
+# text in arguments.py -- no loss_hub/backends file; without rollout_cells /
+# deferred cells the startup path starts the same cells (evidence
+# openspec/changes/rl-infra-spec/evidence/2026-09-30-img-2f23a0f).
 _PINS_0AF62F4D_PLUS = frozenset({
     "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
     "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
+    "2f23a0fca9b80f6a7300da401703c343014b03c0",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
@@ -534,6 +551,8 @@ def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model
         rebuild_same_shape=lambda *, restore: rebuild_same_shape(
             driver.trainer, args=miles_args, rollout_executor=rollout_executor,
             actor=actor_model, run=runner.run, restore=restore, rollout=driver.rollout,
+            **({"rebuild": injected_rebuild_failure()} if os.environ.get(INJECT_REBUILD_FAIL_ENV)
+               else {}),
         ),
         ref_model=(None if not ref_load
                    else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
@@ -547,6 +566,42 @@ def _role_map(request: Any) -> dict[str, Any] | None:
     if pm is None:
         pm = getattr(request, "placement_map", None)
     return None if pm is None else {k: v for k, v in pm.items() if k in ("trainer", "rollout", "standby")}
+
+
+# TEST ONLY (A6b / G-4.5, 4.4 REBUILD_OLD path): the first same-shape rebuild of
+# the process fails inside the fork at stage ``create_training_models`` (the
+# fork then stops the trainer pools and raises TrainerRebuildError);
+# rebuild_same_shape rebuilds once more from the same cut -> outcome REBUILD_OLD.
+INJECT_REBUILD_FAIL_ENV = "YETO_RL_TEST_INJECT_REBUILD_FAIL"
+
+
+def injected_rebuild_failure(module: Any = None) -> Any:
+    """The fork's ``rebuild_training_models`` whose FIRST call hits a failing
+    ``create_training_models`` (patched in the fork module for that one call)."""
+    if module is None:
+        import miles.ray.placement_group as module
+    state = {"armed": True}
+
+    async def rebuild(*args: Any, **kwargs: Any) -> Any:
+        if not state["armed"]:
+            return await module.rebuild_training_models(*args, **kwargs)
+        state["armed"] = False
+        real = module.create_training_models
+
+        async def failing(*_a: Any, **_k: Any) -> Any:
+            import sys
+
+            print(f"[yeto] TEST INJECTION {INJECT_REBUILD_FAIL_ENV}: create_training_models fails",
+                  file=sys.stderr, flush=True)
+            raise RuntimeError("injected create_training_models failure (test)")
+
+        module.create_training_models = failing
+        try:
+            return await module.rebuild_training_models(*args, **kwargs)
+        finally:
+            module.create_training_models = real
+
+    return rebuild
 
 
 def _startup_views(manager: Any, runner: Any) -> dict[str, Any]:
@@ -705,6 +760,10 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
 
     from yeto.rl.tool_wait_workload import TOOL_DELAY_ENV
 
+    for key, value in DETERMINISM_ENV.items():  # --rl-deterministic-trainer set them
+        if environ.get(key) == value:
+            env_vars[key] = value
+
     if environ.get(TOOL_DELAY_ENV):  # test tool-wait workload runs in Ray workers
         env_vars[TOOL_DELAY_ENV] = environ[TOOL_DELAY_ENV]
     if environ.get(ELASTIC_METADATA_ENV) == "1":
@@ -715,14 +774,21 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
     return address
 
 
+# E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode).
+DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                   "NVIDIA_TF32_OVERRIDE": "0"}
+
+
 def resolve_declared_cells(inference_controller: Any, runner: Any,
                            explicit: Any = ()) -> tuple[str, ...]:
-    """The rollout cells the E1 verbs manage, named as the FORK names them.
+    """The fork cell ids the E1 verbs manage.
 
-    With a fork that lists its declared cells (``describe_cells``, F-R1) the
-    list comes from there; explicit ``--rl-elastic-cells`` must then be a
-    subset of it (a yeto-invented name such as ``c0`` is refused). Without it
-    the explicit list is required and taken as given.
+    With a fork that lists its declared cells (``describe_cells``, F-R1), each
+    explicit ``--rl-elastic-cells`` name is resolved to the fork cell id: by the
+    ``alias`` the fork reports (the yeto name declared in placement map
+    ``rollout_cells``), else by the cell id itself; an unknown name is refused.
+    Without explicit names every declared cell is managed. A fork without
+    ``describe_cells`` needs explicit names, taken as its cell ids.
     """
     explicit = tuple(str(c) for c in (explicit or ()))
     describe = getattr(inference_controller, "describe_cells", None)
@@ -731,16 +797,21 @@ def resolve_declared_cells(inference_controller: Any, runner: Any,
             raise ValueError("--rl-elastic-cells is required: this Miles fork cannot list its "
                              "declared cells (describe_cells, F-R1)")
         return explicit
-    declared = tuple(sorted(runner.run(_awaitable(describe()))))
-    if not declared:
+    cells = dict(runner.run(_awaitable(describe())) or {})
+    if not cells:
         raise ValueError("the fork declares no rollout cells")
-    if explicit:
-        unknown = sorted(set(explicit) - set(declared))
-        if unknown:
-            raise ValueError(f"--rl-elastic-cells {unknown} are not cells the fork declares "
-                             f"({list(declared)})")
-        return explicit
-    return declared
+    if not explicit:
+        return tuple(sorted(cells))
+    by_alias = {str(d.get("alias")): cid for cid, d in cells.items()
+                if isinstance(d, dict) and d.get("alias")}
+    out, unknown = [], []
+    for name in explicit:
+        cid = by_alias.get(name) or (name if name in cells else None)
+        (out.append(cid) if cid else unknown.append(name))
+    if unknown:
+        raise ValueError(f"--rl-elastic-cells {unknown} are not cells the fork declares "
+                         f"(aliases {sorted(by_alias)}, ids {sorted(cells)})")
+    return tuple(out)
 
 
 async def _awaitable(value: Any) -> Any:
@@ -796,7 +867,7 @@ def run_ports_island(
     require_run_plugin()  # before any upstream component or model exists
     from ..overlap import loop_eval_starter
 
-    fingerprint = runtime_fingerprint(launch, MILES_NEXT_COMMIT)
+    fingerprint = ports_runtime_fingerprint(launch)
     capabilities = with_partitioned_serial(
         miles_capabilities(
             fingerprint,
