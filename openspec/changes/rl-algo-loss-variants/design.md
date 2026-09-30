@@ -55,7 +55,7 @@
 - `sapo_tau_pos`（默认 1.0）、`sapo_tau_neg`（默认 1.05）；
 - `gmpo_log_clip_low`、`gmpo_log_clip_high`（默认均为 0.4）。
 
-CISPO 复用 `eps_clip`/`eps_clip_high` 作为 ε_l/ε_h。变体参数只在 variant 与之匹配时才进入规范化。variant 不匹配时如果设置了这些参数，按"无效字段"拒绝，以免同一语义出现两种哈希。
+CISPO 复用 `eps_clip`/`eps_clip_high` 作为 ε_l/ε_h，且两者必须显式给出（进入哈希与 argv；2026-09-30 审查修正）。变体参数只在 variant 与之匹配时才进入规范化。variant 不匹配时如果设置了这些参数，按"无效字段"拒绝，以免同一语义出现两种哈希。
 
 翻译规则分路线：
 - 路线 B：翻译为 `--policy-loss-variant` 及对应参数（实际参数名以 fork 提交为准），映射表同时登记吸收规则。
@@ -66,7 +66,7 @@ CISPO 复用 `eps_clip`/`eps_clip_high` 作为 ε_l/ε_h。变体参数只在 va
 逐 token 定义（ρ=exp(log π_θ − log π_old)，Â 为优势）：
 - CISPO：loss = −sg(clamp(ρ, 1−ε_l, 1+ε_h))·Â·log π_θ；clipfrac 统计越界 token。
 - SAPO：loss = −f_τ(ρ)·Â，其中 f_τ(ρ)=σ(τ(ρ−1))·4/τ，τ 按 sign(Â) 选择；Â=0 时损失为 0。
-- GMPO：先算 ℓ_t=clamp(sign(Â)·log ρ_t, −δ_l, δ_h)·sign(Â)，序列 ratio 为 exp(mean_t ℓ_t)，loss = −ratio·Â。CP 下 mean 在全序列上计算，做法与 GSPO 相同。
+- GMPO（arXiv:2507.20673v3 式 (4)，在 log 空间做单侧截断，2026-09-30 审查修正）：ℓ_t = sign(Â)·min(sign(Â)·log ρ_t, sign(Â)·clamp(log ρ_t, −δ_l, δ_h))，即 Â>0 只截断 log ρ>δ_h，Â<0 只截断 log ρ<−δ_l；序列 ratio 为 exp(mean_t ℓ_t)，loss = −ratio·Â。CP 下 mean 在全序列上计算，做法与 GSPO 相同。
 
 组合顺序与 Miles 现有逻辑一致：先算出变体的 pg_loss，然后依次乘 OPSM mask、TIS/IcePop 权重，再做聚合；KL loss 和 entropy 最后相加。CPU 测试的参考实现独立用 torch 小张量写出，不 import 被测代码。
 
@@ -83,7 +83,7 @@ TIS、IcePop 与变体组合是允许的，但它们要等 `rl-algo-mismatch-cor
 ### D5. expects_gradient
 
 - CISPO、SAPO：存在有效 token 且 Â 不全为零时，期望非零梯度。组内 reward 方差判定保持 GRPO 语义。
-- GMPO：在上面的判定之外再加一条：如果引擎报告的序列级 clip 比例为 1（所有序列都在 clip 外），允许零梯度。读不到 clip 比例时，退回 GRPO 判定（保守做法：可能误报失败，但不会漏报）。
+- GMPO：在上面的判定之外再加一条：如果引擎报告的 GMPO clip 比例为 1，允许零梯度。clip 比例定义为：有效且 Â≠0 的 token 中 log 空间截断生效的比例（Â=0 token 与 padding 不计入；fork 的 pg_clipfrac 同口径）。该比例经 `TrainStepMetrics.clip_fraction` 传递，不走 `masked_fraction`（开 corrections 时后者承载修正 mask）。读不到 clip 比例时，退回 GRPO 判定（保守做法：可能误报失败，但不会漏报）。
 - 任何变体下，grad_norm 非有限都判为失败。
 
 ### D6. 外层同步

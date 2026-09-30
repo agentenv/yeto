@@ -8,17 +8,17 @@
 
 ## 1. 决策门与基线
 
-- [ ] 1.1 在 pin 的 Miles 提交（`9e4260d` 或当前 `MILES_NEXT_COMMIT`）上重新核对 design Context 中的事实：`compute_policy_loss` 的导入方式、`policy_loss_function` 的结构、是否已有 `policy_objective` 分支、batch 白名单。验证：把核对结果（含文件行号）写入 `openspec/changes/rl-algo-loss-variants/progress.md`。
-- [ ] 1.2 向用户呈交 design D1 的路线对比与推荐（路线 B），由用户选择路线 A 或 B；如果选 B，还要确认用户同意向 `michaellchung/miles` `yeto/ports` 提交。验证：在 progress.md 中记录用户决定的原文和日期；决定之前不开始第 3 组及以后的实现任务。
-- [ ] 1.3 记录 pytest 失败基线：`/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合保存到 `openspec/changes/rl-algo-loss-variants/baseline-failures.txt`。验证：文件存在，条目数与 pytest 汇总一致。
+- [x] 1.1 在 pin 的 Miles 提交（`9e4260d` 或当前 `MILES_NEXT_COMMIT`）上重新核对 design Context 中的事实：`compute_policy_loss` 的导入方式、`policy_loss_function` 的结构、是否已有 `policy_objective` 分支、batch 白名单。验证：把核对结果（含文件行号）写入 `openspec/changes/rl-algo-loss-variants/progress.md`。
+- [x] 1.2 向用户呈交 design D1 的路线对比与推荐（路线 B），由用户选择路线 A 或 B；如果选 B，还要确认用户同意向 `michaellchung/miles` `yeto/ports` 提交。验证：在 progress.md 中记录用户决定的原文和日期；决定之前不开始第 3 组及以后的实现任务。
+- [x] 1.3 记录 pytest 失败基线：`/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合保存到 `openspec/changes/rl-algo-loss-variants/baseline-failures.txt`。验证：文件存在，条目数与 pytest 汇总一致。
 
 ## 2. 参考公式与 spec 字段（与路线无关）
 
 - [ ] 2.1 新建 `tests/rl_loss_variant_reference.py`，用独立的 torch 小张量写出 CISPO、SAPO、GMPO 的参考实现（design D3），在注释中写明论文出处和公式编号，且不 import 被测代码。验证：自检用例用手算值核对 3–5 个元素。
-- [ ] 2.2 在 `yeto/rl/engine/algorithm.py` 的 `loss` 组中加入变体参数（design D2）：校验、默认值、"只在匹配的 variant 下进入规范化"、不匹配时拒绝。验证：新增 `tests/test_rl_loss_variants_spec.py`，覆盖默认哈希不变（P0 golden 用例不改就能通过）、每个变体的哈希不同、非法 τ/δ 报错并指明字段、参数与 variant 不匹配被拒。
-- [ ] 2.3 实现拒绝规则（design D4）：变体与 GSPO 组合、变体与 dual-clip 组合。验证：参数化单测，都在 fake 组合根中、在创建 GPU 进程之前失败，报错中给出替代方案。
-- [ ] 2.4 实现各变体的 `expects_gradient` 判定（design D5）。验证：单测覆盖 CISPO 全部越界仍期望梯度、SAPO 同 CISPO、GMPO 在 clip 比例为 1 时允许零梯度、GMPO 读不到 clip 比例时退回 GRPO 判定、任何变体下 grad_norm 非有限都判失败。
-- [ ] 2.5 保持 adapter 的 `losses` 声明不变（三个变体仍是"可表达未开放"）。验证：fake 测试确认选用变体会被拒，报错为"可表达未开放"。
+- [x] 2.2 在 `yeto/rl/engine/algorithm.py` 的 `loss` 组中加入变体参数（design D2）：校验、默认值、"只在匹配的 variant 下进入规范化"、不匹配时拒绝。验证：新增 `tests/test_rl_loss_variants_spec.py`，覆盖默认哈希不变（P0 golden 用例不改就能通过）、每个变体的哈希不同、非法 τ/δ 报错并指明字段、参数与 variant 不匹配被拒。
+- [x] 2.3 实现拒绝规则（design D4）：变体与 GSPO 组合、变体与 dual-clip 组合。验证：参数化单测，都在 fake 组合根中、在创建 GPU 进程之前失败，报错中给出替代方案。
+- [x] 2.4 实现各变体的 `expects_gradient` 判定（design D5）。验证：单测覆盖 CISPO 全部越界仍期望梯度、SAPO 同 CISPO、GMPO 在 clip 比例为 1 时允许零梯度、GMPO 读不到 clip 比例时退回 GRPO 判定、任何变体下 grad_norm 非有限都判失败。
+- [x] 2.5 保持 adapter 的 `losses` 声明不变（三个变体仍是"可表达未开放"）。验证：fake 测试确认选用变体会被拒，报错为"可表达未开放"。
 
 ## 3. 路线 A：yeto custom loss 插件（仅当选择路线 A 时执行）
 
@@ -36,7 +36,7 @@
 
 ## 5. 开放声明与文档（路线实现完成后执行）
 
-- [ ] 5.1 fake engine 声明 `cispo`、`sapo`、`gmpo`，供 CPU 测试使用；Miles adapter 暂不声明，第 6 组 G1 使用 P0 的 `--rl-allow-unverified-mechanism` 放行。验证：单测确认 adapter 未放行时拒绝、单岛放行时可以启动；默认 GRPO 不受影响（`tests/test_rl_argv_snapshot.py` 不改就能通过）。
+- [x] 5.1 fake engine 声明 `cispo`、`sapo`、`gmpo`，供 CPU 测试使用；Miles adapter 暂不声明，第 6 组 G1 使用 P0 的 `--rl-allow-unverified-mechanism` 放行。验证：单测确认 adapter 未放行时拒绝、单岛放行时可以启动；默认 GRPO 不受影响（`tests/test_rl_argv_snapshot.py` 不改就能通过）。
 - [ ] 5.2 更新 `docs/MILES_RL.md`：写明变体的公式、参数、默认值、拒绝规则、所选路线及其升级注意事项（路线 A 的守护测试，或路线 B 的 pin 更新），并注明外层同步的正交性和"未做效果 A/B"。验证：文档中的示例命令用 `--dry-run` 执行，结果与描述一致。
 
 ## 6. GPU 验证（需用户批准卡数与预算后执行）
@@ -50,6 +50,12 @@
 
 ## 7. 集成检查
 
-- [ ] 7.1 跑全量 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.3 的基线相同。验证：两次集合的 diff 为空，结果写入 progress.md。
-- [ ] 7.2 `openspec validate rl-algo-loss-variants --strict` 通过。验证：命令输出无错误。
-- [ ] 7.3 在 progress.md 中逐项列出任务状态，严格区分"已实现""CPU 测试通过""GPU 验证通过"，并写明所选路线、未执行的路线分支组，以及未经 GPU 验证的项（如 GMPO 在 CP>1 下）。验证：文件存在且与任务逐项对应。
+- [x] 7.1 跑全量 `/tmp/yeto-venv/bin/python -m pytest -q tests/ --continue-on-collection-errors`，失败集合与 1.3 的基线相同。验证：两次集合的 diff 为空，结果写入 progress.md。
+- [x] 7.2 `openspec validate rl-algo-loss-variants --strict` 通过。验证：命令输出无错误。
+- [x] 7.3 在 progress.md 中逐项列出任务状态，严格区分"已实现""CPU 测试通过""GPU 验证通过"，并写明所选路线、未执行的路线分支组，以及未经 GPU 验证的项（如 GMPO 在 CP>1 下）。验证：文件存在且与任务逐项对应。
+
+## 完成记录（ALGO-2b，2026-09-30，分支 algo-2b）
+
+- 1.1 / 1.2 / 1.3 / 2.2–2.5 / 5.1 / 7.1–7.3：核对结果、证据与命令见 `progress.md` 的 2026-09-30 ALGO-2b 条目。
+- 未勾选：2.1（参考实现与手算自检已完成，但离线无法核对论文公式编号，原文要求写明公式编号）；第 3 组（路线 A，未选）；4.1/4.2（FORK-2b 负责）；4.3/4.4（需 fork 审查、快进 yeto/ports、IMG 更新 pin 后才能做）；5.2（文档与 dry-run 已写并核对，但所选路线的 pin/提交号尚未落地）；第 6 组（GPU 暂停，见 progress.md 的"待本地 GPU 验证"计划）。
+- 5.1 注：仅在能力检查层面放行（fake 声明、`--rl-allow-unverified-mechanism` 单岛放行通过 capability check）；真实 Miles 启动仍被 `[loss_variants]` pin 检查阻止，直到 `FORK_COMMITS` 含钉住的提交。

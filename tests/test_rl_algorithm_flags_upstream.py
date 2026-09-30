@@ -57,7 +57,12 @@ def _upstream_option_strings() -> set[str]:
 
 def test_objective_and_mapped_flags_exist_upstream():
     options = _upstream_option_strings()
-    missing = sorted(af.objective_flags() - options)
+    # rl-algo-loss-variants: the fork flags exist only once the pin moves to
+    # a fork commit that implements them (loss_variants.FORK_COMMITS).
+    from yeto.rl.algos import loss_variants
+
+    pending = frozenset() if loss_variants.fork_supports_variants() else loss_variants.FORK_FLAGS
+    missing = sorted(af.objective_flags() - options - pending)
     assert not missing, f"not in the upstream Miles parser: {missing}"
 
 
