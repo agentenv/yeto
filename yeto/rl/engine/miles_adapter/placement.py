@@ -34,6 +34,9 @@ class PlacementRequest:
     # an optional explicit logical-bundle map {"trainer","rollout","standby"}.
     standby_gpus: int = 0
     bundle_map: Mapping[str, tuple[int, ...]] | None = None
+    # fork F-R1: extra rollout cells declared stopped + unbound at startup. Needs
+    # a Miles fork that knows the "deferred_rollout_cells" map key.
+    deferred_rollout_cells: int = 0
 
     def __post_init__(self) -> None:
         if self.kind not in ("colocated", "fixed-partition"):
@@ -49,6 +52,11 @@ class PlacementRequest:
         if isinstance(self.standby_gpus, bool) or not isinstance(self.standby_gpus, int) \
                 or self.standby_gpus < 0:
             raise ValueError("standby_gpus must be a non-negative int")
+        if isinstance(self.deferred_rollout_cells, bool) or not isinstance(
+                self.deferred_rollout_cells, int) or self.deferred_rollout_cells < 0:
+            raise ValueError("deferred_rollout_cells must be a non-negative int")
+        if self.kind == "colocated" and self.deferred_rollout_cells:
+            raise ValueError("colocated placement has no deferred rollout cells")
         if self.kind == "colocated" and (self.standby_gpus or self.bundle_map is not None):
             raise ValueError("colocated placement has no standby GPUs or bundle map")
         if self.bundle_map is not None:
@@ -83,8 +91,20 @@ class PlacementRequest:
             "standby": list(range(t + r, t + r + self.standby_gpus)),
         }
 
-    def role_bundles(self) -> dict[str, tuple[int, ...]]:
+    @property
+    def placement_map_arg(self) -> dict[str, Any] | None:
+        """The ``--yeto-placement-map`` JSON: the role map plus, when asked,
+        ``deferred_rollout_cells`` (fork F-R1; forces an explicit map)."""
         pm = self.placement_map
+        if not self.deferred_rollout_cells:
+            return pm
+        if pm is None:
+            t, r = self.trainer_gpus, self.rollout_gpus
+            pm = {"trainer": list(range(t)), "rollout": list(range(t, t + r)), "standby": []}
+        return {**pm, "deferred_rollout_cells": self.deferred_rollout_cells}
+
+    def role_bundles(self) -> dict[str, tuple[int, ...]]:
+        pm = self.placement_map_arg
         if pm is not None:
             return {k: tuple(pm.get(k, ())) for k in ("trainer", "rollout", "standby")}
         total, offset = self.expected_layout()
@@ -169,8 +189,8 @@ def check_placement_not_rewritten(request: PlacementRequest, args: Any) -> None:
         import json
 
         parsed_map = json.loads(parsed_map)
-    if parsed_map != request.placement_map:
-        conflicts.append(f"placement map {parsed_map} != requested {request.placement_map}")
+    if parsed_map != request.placement_map_arg:
+        conflicts.append(f"placement map {parsed_map} != requested {request.placement_map_arg}")
     if not conflicts and _parsed_layout(args) != request.expected_layout():
         conflicts.append(
             f"placement-group layout {_parsed_layout(args)} != requested {request.expected_layout()}"
@@ -206,7 +226,7 @@ class MilesPlacement:
         actor = _gpu_ids(placement_groups["actor"], logical)
         rollout = _gpu_ids(placement_groups["rollout"], logical)
         standby: tuple[str, ...] = ()
-        if request.placement_map is not None:
+        if request.placement_map_arg is not None:
             # fork-M1 returns each role sliced from the map: "actor" holds the
             # trainer bundles only and "standby" the reserved ones.
             standby = _gpu_ids(placement_groups.get("standby", (None, [], [])), logical)
@@ -269,7 +289,7 @@ class MilesPlacement:
         """
 
         check_placement_not_rewritten(request, args)
-        if request.placement_map is not None:
+        if request.placement_map_arg is not None:
             roles = request.role_bundles()
             view = {k: (None, list(v), list(v)) for k, v in roles.items()}
             return cls(request, {"actor": view["trainer"], "rollout": view["rollout"],

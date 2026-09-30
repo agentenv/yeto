@@ -431,7 +431,8 @@ def compose_island(
             runner=runner,
             args=miles_args,
             **(
-                {"declared_cells": elastic.declared_cells,
+                {"declared_cells": resolve_declared_cells(
+                    inference_controller, runner, elastic.declared_cells),
                  "track_timeout_s": elastic.track_timeout_s,
                  "tool_wait_board": elastic.tool_wait_board}
                 if elastic is not None
@@ -540,6 +541,14 @@ def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model
     )
 
 
+def _role_map(request: Any) -> dict[str, Any] | None:
+    """The role -> logical bundle part of the ``--yeto-placement-map`` Miles got."""
+    pm = getattr(request, "placement_map_arg", None)
+    if pm is None:
+        pm = getattr(request, "placement_map", None)
+    return None if pm is None else {k: v for k, v in pm.items() if k in ("trainer", "rollout", "standby")}
+
+
 def _startup_views(manager: Any, runner: Any) -> dict[str, Any]:
     """The fork's startup placement-group views, read once before any is re-pointed."""
     views = {}
@@ -588,7 +597,7 @@ def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor
     views = _startup_views(manager, runner)
     try:
         bundles = StartupBundles(pool_gpus=elastic.pool_gpus, views=views,
-                                 placement_map=launch.placement.placement_map)
+                                 placement_map=_role_map(launch.placement))
     except Exception:  # noqa: BLE001 - no usable map: leave trainer edges refused
         return False
     pool = driver.rollout
@@ -700,6 +709,38 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
         env_vars[ELASTIC_METADATA_ENV] = "1"
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
+
+
+def resolve_declared_cells(inference_controller: Any, runner: Any,
+                           explicit: Any = ()) -> tuple[str, ...]:
+    """The rollout cells the E1 verbs manage, named as the FORK names them.
+
+    With a fork that lists its declared cells (``describe_cells``, F-R1) the
+    list comes from there; explicit ``--rl-elastic-cells`` must then be a
+    subset of it (a yeto-invented name such as ``c0`` is refused). Without it
+    the explicit list is required and taken as given.
+    """
+    explicit = tuple(str(c) for c in (explicit or ()))
+    describe = getattr(inference_controller, "describe_cells", None)
+    if not callable(describe):
+        if not explicit:
+            raise ValueError("--rl-elastic-cells is required: this Miles fork cannot list its "
+                             "declared cells (describe_cells, F-R1)")
+        return explicit
+    declared = tuple(sorted(runner.run(_awaitable(describe()))))
+    if not declared:
+        raise ValueError("the fork declares no rollout cells")
+    if explicit:
+        unknown = sorted(set(explicit) - set(declared))
+        if unknown:
+            raise ValueError(f"--rl-elastic-cells {unknown} are not cells the fork declares "
+                             f"({list(declared)})")
+        return explicit
+    return declared
+
+
+async def _awaitable(value: Any) -> Any:
+    return await value if hasattr(value, "__await__") else value
 
 
 def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):

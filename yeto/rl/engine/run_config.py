@@ -149,6 +149,9 @@ class ParallelLayout:
     # rl-infra-spec 2.1: reserved standby GPUs of a fixed partition (never
     # started by any role); a non-zero value needs the fork-M1 placement map.
     standby_gpus: int = 0
+    # rl-infra-spec 3.x/4.7 (fork F-R1): extra rollout engine cells declared
+    # stopped and unbound at startup (placement map "deferred_rollout_cells").
+    deferred_rollout_cells: int = 0
 
     @property
     def colocated(self) -> bool:
@@ -721,6 +724,7 @@ def resolve_rl_run_config(
             visible_gpus_per_node=visible_gpus_per_node,
             uneven_pipeline_layers=uneven_pipeline_layers,
             standby_gpus=standby_gpus,
+            deferred_rollout_cells=_deferred_rollout_cells(args, dedicated_rollout_gpus),
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
@@ -810,6 +814,15 @@ def resolve_rl_run_config(
         yeto_policy_sync=yeto_policy_sync,
         distributed_timeout_minutes=getattr(args, "rl_distributed_timeout_minutes", 10),
     )
+
+
+def _deferred_rollout_cells(args, dedicated_rollout_gpus) -> int:
+    value = int(getattr(args, "rl_elastic_deferred_cells", 0) or 0)
+    if value < 0:
+        raise ValueError("--rl-elastic-deferred-cells must be non-negative")
+    if value and dedicated_rollout_gpus is None:
+        raise ValueError("--rl-elastic-deferred-cells needs --rl-placement fixed-partition")
+    return value
 
 
 def ports_training_eval(args, *, parameter_mode: str | None) -> bool:

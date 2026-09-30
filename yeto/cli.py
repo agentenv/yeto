@@ -251,7 +251,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME",
                     help="--rl-elastic: initial config id in the manifest")
     rl.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
-                    help="--rl-elastic: rollout cell ids the fork declares at startup")
+                    help="--rl-elastic: the fork's rollout cell ids to manage (fork names, e.g. "
+                    "inference-engine-all-0-0-00000); default: every cell the fork declares "
+                    "(needs a fork with describe_cells, F-R1)")
+    rl.add_argument("--rl-elastic-deferred-cells", type=int, default=None, metavar="K",
+                    help="--rl-elastic: declare K extra rollout engine cells stopped and unbound "
+                    "at startup (placement map deferred_rollout_cells; needs the fork F-R1)")
     rl.add_argument("--rl-elastic-quorum-timeout-s", type=int, default=None, metavar="S",
                     help="--rl-elastic: syncer --quorum-timeout-s, also the island's strict "
                     "pause budget input (default: syncer default 900)")

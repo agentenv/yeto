@@ -162,6 +162,8 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
     parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
     parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
+    # fork F-R1: K extra rollout cells declared stopped + unbound (placement map).
+    parser.add_argument("--rl-elastic-deferred-cells", type=int, default=0)
     # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
@@ -289,8 +291,10 @@ _ELASTIC_COMPANIONS = (
 )
 _ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s",
                   "rl_elastic_pause_margin")
+# --rl-elastic-cells is optional: without it the island lists the fork's
+# declared cells (InferenceController.describe_cells, fork F-R1) at compose time.
 _ELASTIC_REQUIRED = ("rl_elastic_resources", "rl_elastic_state_dir",
-                     "rl_elastic_initial_config", "rl_elastic_cells")
+                     "rl_elastic_initial_config")
 
 
 def _check_ports_infra_switches(args) -> None:
@@ -304,6 +308,9 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-tool-wait-board")
     if getattr(args, "rl_observe_timeline", False) and not ports:
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    if int(getattr(args, "rl_elastic_deferred_cells", 0) or 0) and not getattr(
+            args, "rl_elastic", False):
+        raise ValueError("--rl-elastic-deferred-cells needs --rl-elastic")
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -314,8 +321,10 @@ def _check_ports_infra_switches(args) -> None:
                if name in _ELASTIC_REQUIRED and not getattr(args, name, None)]
     if missing:
         raise ValueError("--rl-elastic needs " + ", ".join(missing))
-    if not _elastic_cells(args.rl_elastic_cells):
+    if args.rl_elastic_cells is not None and not _elastic_cells(args.rl_elastic_cells):
         raise ValueError("--rl-elastic-cells names no cell")
+    if int(getattr(args, "rl_elastic_deferred_cells", 0) or 0) < 0:
+        raise ValueError("--rl-elastic-deferred-cells must be non-negative")
     for name in _ELASTIC_PAUSE:
         value = getattr(args, name, None)
         if value is not None and not value > 0:

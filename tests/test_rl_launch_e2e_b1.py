@@ -104,3 +104,70 @@ def test_defaults_set_neither_observe_nor_board(tmp_path, monkeypatch):
     monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
     entry.elastic_wiring_for(miles_args, profile="P", fingerprint="F")
     assert "tool_wait_board" not in seen
+
+
+# ---------------------------------------------------------------- item 1: fork cells (F-R1 prep)
+def test_deferred_cells_travel_from_the_cli_to_the_miles_placement_map(tmp_path, monkeypatch):
+    import argparse
+    import json
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    run = island_run(BASE + _elastic(tmp_path)[:-2] + ("--rl-elastic-deferred-cells", "2"),
+                     monkeypatch)
+    args, _ = learner_from_run(run, tmp_path / "home")
+    assert args.rl_elastic_deferred_cells == 2 and args.rl_elastic_cells is None
+    (base,), kwargs = _captured_args()
+    merged = argparse.Namespace(**{**vars(base), "rl_placement": "fixed-partition",
+                                   "rollout_num_gpus": 1,
+                                   "rl_elastic_deferred_cells": args.rl_elastic_deferred_cells})
+    argv = mc.translate_run_config(rc.resolve_rl_run_config(merged, **kwargs), AlgorithmSpec()).argv
+    pm = json.loads(argv[argv.index("--yeto-placement-map") + 1])
+    assert pm["deferred_rollout_cells"] == 2 and pm["rollout"] and "trainer" in pm
+
+
+def test_default_run_has_no_deferred_cells_and_no_placement_map_change(tmp_path, monkeypatch):
+    import argparse
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    args, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "h")
+    assert args.rl_elastic_deferred_cells == 0
+    (base,), kwargs = _captured_args()
+    part = argparse.Namespace(**{**vars(base), "rl_placement": "fixed-partition",
+                                 "rollout_num_gpus": 1})
+    before = mc.translate_run_config(rc.resolve_rl_run_config(part, **kwargs), AlgorithmSpec()).argv
+    part.rl_elastic_deferred_cells = 0
+    after = mc.translate_run_config(rc.resolve_rl_run_config(part, **kwargs), AlgorithmSpec()).argv
+    assert before == after and "--yeto-placement-map" not in after
+
+
+def test_declared_cells_come_from_the_fork_names():
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    from yeto.rl.engine.miles_adapter.entry import resolve_declared_cells
+
+    runner = SimpleNamespace(run=asyncio.run)
+    names = {"inference-engine-all-0-0-00000": {}, "inference-engine-all-0-0-00001": {}}
+
+    class Fork:
+        async def describe_cells(self):
+            return names
+
+    assert resolve_declared_cells(Fork(), runner) == tuple(sorted(names))
+    assert resolve_declared_cells(Fork(), runner, ("inference-engine-all-0-0-00001",)) == (
+        "inference-engine-all-0-0-00001",)
+    with pytest.raises(ValueError, match=r"\['c0'\] are not cells the fork declares"):
+        resolve_declared_cells(Fork(), runner, ("c0",))
+    with pytest.raises(ValueError, match="--rl-elastic-cells is required"):
+        resolve_declared_cells(object(), runner, ())
+    assert resolve_declared_cells(object(), runner, ("x",)) == ("x",)
