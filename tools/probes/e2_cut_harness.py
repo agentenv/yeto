@@ -223,6 +223,17 @@ PULLER = r"""#!/bin/bash
 # usage: puller.sh <run dir> <app> <gpus>: tape, GPU/image guard (stop the app on mismatch), state
 R=$1; APP=$2; NG=$3; M=%(modal)s; export HOME=$R/home
 MC=%(miles)s
+pullf() {  # <container> <remote file> <local file>: whole file in 6000-byte base64 chunks (exec caps 8 KiB)
+  local c=$1 src=$2 dst=$3 size off=0
+  size=$(timeout 60 $M container exec $c -- sh -c "wc -c < $src 2>/dev/null" | tr -dc 0-9)
+  [ -n "$size" ] && [ "$size" -gt 0 ] || return 1
+  : > $dst.part
+  while [ $off -lt $size ]; do
+    timeout 60 $M container exec $c -- sh -c "tail -c +$((off + 1)) $src | head -c 6000 | base64 -w0" | base64 -d >> $dst.part || return 1
+    off=$((off + 6000))
+  done
+  [ "$(wc -c < $dst.part)" = "$size" ] && mv $dst.part $dst
+}
 while [ ! -f $R/rc.txt ]; do
   for c in $($M container list --json 2>/dev/null | /usr/bin/python3 -c "import json,sys
 try: d=json.load(sys.stdin)
@@ -244,13 +255,14 @@ except Exception: d=[]
       fi
     fi
     # small harness results pulled on their own (a tar of a changing tree can come back truncated)
-    timeout 60 $M container exec $c -- sh -c "cat ~/yeto-rl/elastic-state/cuts/*/manifest.json 2>/dev/null" > $R/pulled/.m && [ -s $R/pulled/.m ] && mv $R/pulled/.m $R/pulled/cut-manifest.json
-    for f in results.json steps.jsonl; do
-      timeout 60 $M container exec $c -- sh -c "cat ~/yeto-rl/e2-harness/*/$f 2>/dev/null" > $R/pulled/.r && [ -s $R/pulled/.r ] && mv $R/pulled/.r $R/pulled/harness-$f
+    # `modal container exec` output is capped at 8 KiB: files are pulled in base64 chunks
+    for f in $(timeout 60 $M container exec $c -- sh -c "ls ~/yeto-rl/e2-harness/*/results.json ~/yeto-rl/e2-harness/*/steps.jsonl ~/yeto-rl/elastic-state/cuts/*/manifest.json 2>/dev/null"); do
+      pullf $c $f $R/pulled/$(echo $f | sed 's#.*/yeto-rl/##; s#/#__#g')
     done
-    timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf - --exclude=trainer_*.pt e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts inwatch.log 2>/dev/null | base64 -w0" > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/state.tgz.b64
+    timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf /tmp/yeto-state.tgz --exclude=trainer_*.pt e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts inwatch.log 2>/dev/null; echo ok" > /dev/null
+    pullf $c /tmp/yeto-state.tgz $R/pulled/state.tgz
     # progress watchdog: no new tape event for STALL_S, or too many error lines -> evidence above, then stop
-    now=$(date +%%s); lines=$(wc -l < $R/pulled/rl-island-0.jsonl 2>/dev/null || echo 0)
+    now=$(date +%%s); lines=$(grep -c YETO_RL_EVENT $R/launch.log 2>/dev/null || echo 0)  # echoed tape events (exec output is capped)
     if [ "$lines" != "$(cat $R/pulled/.lines 2>/dev/null)" ]; then echo $lines > $R/pulled/.lines; echo $now > $R/pulled/.progress; fi
     [ -s $R/pulled/.progress ] || echo $now > $R/pulled/.progress
     errs=$(grep -cE " 5[0-9][0-9] |Traceback|RayTaskError" $R/launch.log 2>/dev/null || echo 0)

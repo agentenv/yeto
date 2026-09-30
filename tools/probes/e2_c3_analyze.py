@@ -29,14 +29,35 @@ def _jsonl(path: str | Path) -> list[dict]:
     return out
 
 
+def _complete_sections(text: str) -> dict | None:
+    """Top-level sections of a pretty-printed manifest that are complete in a truncated
+    copy (a section counts only when the next top-level key follows it)."""
+    import re
+
+    keys = [(m.start(), m.group(1)) for m in re.finditer(r'^ "([a-z_]+)": ', text, re.M)]
+    out = {}
+    for (start, key), (nxt, _) in zip(keys, keys[1:]):
+        body = text[start:nxt].rstrip().rstrip(",")
+        try:
+            out.update(json.loads("{" + body + "}"))
+        except ValueError:
+            continue
+    if not {"progress", "outer", "ledger"} <= set(out):
+        return None
+    out["_truncated_copy"] = True
+    return out
+
+
 def load(run: Path) -> dict:
     state = run / "state"
-    b64 = run / "pulled" / "state.tgz.b64"
-    if b64.exists() and not (state / "elastic-state").exists():
+    tgz, b64 = run / "pulled" / "state.tgz", run / "pulled" / "state.tgz.b64"
+    if not (state / "elastic-state").exists():
         state.mkdir(exist_ok=True)
         try:
-            with tarfile.open(fileobj=io.BytesIO(base64.b64decode(b64.read_text())), mode="r:gz") as tf:
-                tf.extractall(state, filter="data")
+            raw = tgz.read_bytes() if tgz.exists() else base64.b64decode(b64.read_text()) if b64.exists() else b""
+            if raw:
+                with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
+                    tf.extractall(state, filter="data")
         except (tarfile.TarError, EOFError, ValueError):
             pass
     tapes = sorted(glob.glob(str(run / "runs" / "*" / "events" / "*.jsonl*")))
@@ -45,11 +66,15 @@ def load(run: Path) -> dict:
     journal = _jsonl(es / "reconfig" / "journal.jsonl") if (es / "reconfig" / "journal.jsonl").exists() else []
     ledger = _jsonl(es / "ledger" / "journal.jsonl") if (es / "ledger" / "journal.jsonl").exists() else []
     manifests = []
-    for p in glob.glob(str(es / "cuts" / "*" / "manifest.json")) + glob.glob(str(run / "pulled" / "cut-manifest*.json")):
+    for p in glob.glob(str(es / "cuts" / "*" / "manifest.json")) + glob.glob(str(run / "pulled" / "cut-manifest*.json")) + glob.glob(
+            str(run / "pulled" / "elastic-state__cuts__*__manifest.json")):
+        text = Path(p).read_text()
         try:
-            manifests.append(json.loads(Path(p).read_text()))
+            manifests.append(json.loads(text))
         except ValueError:
-            continue  # truncated pull: judged as missing, never guessed
+            part = _complete_sections(text)  # 8 KiB-truncated pull: only fully present sections
+            if part:
+                manifests.append(part)
     manifests = list({m.get("cut_id"): m for m in manifests}.values())
     return {"events": events, "journal": journal, "ledger": ledger, "manifests": manifests}
 
@@ -113,18 +138,51 @@ def analyze(run: Path, base: Path, expect_outcome: str = "RESTORED") -> dict:
       run=(rr.get(2) or {}).get("data_cursor"), b1=(br.get(2) or {}).get("data_cursor"))
     applied = [j for j in r["ledger"] if j.get("kind") == "optimizer_applied"]
     ids = [int(j.get("rollout_id", -1)) for j in applied]
-    c("optimizer_applied once per round (no duplicate)", sorted(ids) == sorted(set(ids)) and len(ids) >= 6,
-      rollout_ids=ids)
+    c("optimizer_applied never twice (ledger)", len(ids) == len(set(ids)) and bool(ids), rollout_ids=ids,
+      note="pulled ledger can lag the last round; completeness is judged from the tape (rounds 0..5 once)")
+    return {"criteria": crit, "pass": all(v["pass"] for v in crit.values())}
+
+
+def analyze_fault(run: Path, *, bound_s: float = 600.0) -> dict:
+    """G-4.5 rows 1/2/3/5: bounded RECOVERY_REQUIRED (or REBUILD_OLD success), no consumption
+    after the rebuild request, optimizer_applied never twice, cursor never rewound."""
+    r = load(run)
+    crit: dict[str, dict] = {}
+
+    def c(name: str, ok: bool, **detail) -> None:
+        crit[name] = {"pass": bool(ok), **detail}
+
+    phases = [j for j in r["journal"] if j.get("kind") == "phase"]
+    start = next((j for j in phases if j.get("phase") == "REBUILDING_TRAINER"), None)
+    end = next((j for j in phases if j.get("phase") in ("RECOVERY_REQUIRED", "SUCCEEDED", "REBUILT_OLD",
+                                                          "CANCELLED")), None)
+    c("rebuild reached REBUILDING_TRAINER", start is not None)
+    terminal = (end or {}).get("phase")
+    c("terminal RECOVERY_REQUIRED (or a successful REBUILD_OLD)", terminal in ("RECOVERY_REQUIRED", "SUCCEEDED"),
+      terminal=terminal, error=(end or {}).get("error"))
+    if start and end:
+        took = float(end["wall_time"]) - float(start["wall_time"])
+        c(f"bounded (<= {bound_s:.0f} s)", took <= bound_s, seconds=round(took, 1))
+    ev = r["events"]
+    after = [e for e in ev if e.get("event") == "rl_round_trained" and int(e.get("rollout_id", -1)) >= 3]
+    if terminal == "RECOVERY_REQUIRED":
+        c("no consumption after RECOVERY_REQUIRED", not after, rounds_after=[e.get("rollout_id") for e in after])
+    applied = [int(j.get("rollout_id", -1)) for j in r["ledger"] if j.get("kind") == "optimizer_applied"]
+    c("optimizer_applied never twice", len(applied) == len(set(applied)), rollout_ids=applied)
+    cursors = [e.get("data_cursor", {}).get("sample_offset") for e in ev
+               if e.get("event") == "rl_round_trained" and e.get("data_cursor")]
+    c("data cursor never rewound", all(b > a for a, b in zip(cursors, cursors[1:])), offsets=cursors)
     return {"criteria": crit, "pass": all(v["pass"] for v in crit.values())}
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("run", type=Path)
-    p.add_argument("baseline", type=Path)
+    p.add_argument("baseline", type=Path, nargs="?")
     p.add_argument("--expect-outcome", default="RESTORED")
+    p.add_argument("--fault", action="store_true", help="G-4.5 fault-row evaluation (no baseline)")
     ns = p.parse_args()
-    res = analyze(ns.run, ns.baseline, ns.expect_outcome)
+    res = analyze_fault(ns.run) if ns.fault else analyze(ns.run, ns.baseline, ns.expect_outcome)
     print(json.dumps(res, indent=1, default=repr))
     return 0 if res["pass"] else 1
 
