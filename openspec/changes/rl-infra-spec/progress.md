@@ -456,3 +456,18 @@
 - L2：`_wire_trainer_edges` 在 `rebuild_preconditions(miles_args)` 不满足时不接线 trainer 边，请求在 plan 阶段即被拒；有测试。
 - L3：**F-R1 未解决前不得认证 role-transfer 的 trainer→rollout 边**（plan v2 §6）。启动期的 bind 能力检查不可行（fork 没有可读接口），也未实现。
 - pool_gpus 入口：按主 agent 安排，等 F-R1 在 fork 实现后再做。
+
+### INFRA-E2 GPU harness 与注入（2026-09-30，仅 dry-run；未启动任何 GPU/云资源）
+- 容器内 harness：`miles_adapter/e2_harness.py`。snapshot 根目录有 `yeto-rl-e2-harness.json` 时代替 `driver.run()`，依次执行：逐 rank 确定性读回、G-4.2 (a)–(g)、G-4.3 冻结 batch 的双 arm 逐位比较、L2。CPU 伪岛测试覆盖通过、RNG 丢失、确定性缺失、dropout 不符四种情形。
+- 主机侧：`tools/probes/e2_cut_harness.py`，按 plan-v3 顺序生成 11 个 run 目录。`run.sh` 带 `YETO_E2_GPU_APPROVED` 守卫、watchdog、puller 与 rebuild 触发器；工具本身拒绝 `--execute`。本地两级检查为 launcher `--dry-run` 与 learner preflight（与容器内 learner 在 GPU 之前的检查相同，并翻译出 Miles argv）。
+- 本地 dry-run 结果（`evidence/infra-e2/4.2-4.5/dry-run-20260930.md`）：11 个 run 的 launcher dry-run 全部 rc=0。C3 九个 run 的 preflight rc=0；C1/C2 的 preflight rc=1，原因是 ports 路径 `--lora-dropout` 固定为 0，而计划要求 0.05。这条阻塞已在本地暴露，判据未改。
+- A7 注入开关（`miles_adapter/cut_injection.py`，默认关闭）：
+  - save 途中 kill rank；
+  - restore 途中 kill rank；
+  - restore 前 sleep；
+  - rebuild 在 fork 的 `create_training_models` 处失败；
+  - rebuild 前写入偏移的数据集游标文件；
+  - 第 6 项（CAS 前后 kill controller）使用 E1 的 `--rl-test-kill-learner-at` 加 restart loop，在同一容器内重启。
+- plan-v3：镜像 17d428a2…（5c1b49e-9f29303）、Miles 5c1b49eb、Qwen3-0.6B c1899de…、Qwen3-1.7B 70d244cc…；判据沿用 plan-v2 原文。
+- 阻塞：① LoRA dropout 0.05 无法表达（需要 config 翻译开关，或由主 agent 裁定）；② G-4.5 第 5 行需要 E1 提供实时 `data_cursor`；③ E1 需合入补丁 `infra-e2-e1-harness-injections-v1.patch`。
+- 测试：全量 68 failed / 26 errors / 3059 passed。失败 id（94 个）与 integ-decl b90c18d 基线（3037 passed）按 id 相同。
