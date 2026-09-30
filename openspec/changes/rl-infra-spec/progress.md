@@ -535,3 +535,10 @@
   - 按 FR1 的调用顺序核对：正向 `bind_members`→`add_engines`（start_cells/wait_cells_tracked）→`publish_members`（cordoned 发布→check_weights→admit_cells）一致。反向缺 `unbind_cell`，给 E3 出了补丁 `infra-drafts/patches/infra-e1-e3-unbind-after-stop.patch`：stop 之后调用 `unbind_members`，REBUILD_OLD 时先把原 GPU 绑回再 start。已在本地套用验证，E3 测试 20 个通过，**未提交**（trainer_transition.py 归 E3）。
   - F-R1 的绑定只在内存，对 E1-D ⑤⑥⑦ 与 A9 f5 的影响写入 plan v2 §7，需主 agent 在运行前从 (a)/(b)/(c) 中选定。
 - 全量：68F/3091P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b4.ids`）；validate strict 通过。
+
+### INFRA-E2 plan-v4 与镜像内 CPU preflight（2026-09-30）
+- 合并 origin/integ-decl 9d2029d 与 origin/infra-e1（含 d8245c5 `live_data_cursor`、`--rl-lora-dropout`，以及已合入的 E2 注入/harness 补丁）。
+- plan-v4：镜像 db815884（2f23a0f-9f29303），Miles 2f23a0fc；判据文字不变。工具的 pin 校验改为对应 plan-v4；C1/C2 使用 `--rl-lora-dropout 0.05`；G-4.5 第 5 行已解除阻塞，但要求实时游标可读，否则拒绝。
+- **pin 缺陷（上报）**：integ-decl 9d2029d 的 `MILES_NEXT_IMAGE` digest 仍是 17d428a2，只改了 commit 和注释。工具在真实检出上 rc=3。在模拟修正后的检出上，11 个 run 共 22 项本地检查全部 rc=0（`dry-run-v4-20260930.md`）。
+- 镜像内 CPU preflight（B2 批准，app ap-AOEKeEOxdqbPDpGJNSPQyD，≤$0.02，已 stopped）：learner 在 import transformer_engine 时因缺 libcuda 失败，没有得到 Bridge/Miles parse 的结论；runtime manifest 的 commits 与当时的 pin 一致。需要 GPU 容器（例如 T4），待批准。证据：`preflight-cpu-20260930/`。
+- 测试：全量 68 failed / 26 errors / 3092 passed，失败 id（94 个）与 integ-decl 9d2029d 基线（3058 passed）一致。

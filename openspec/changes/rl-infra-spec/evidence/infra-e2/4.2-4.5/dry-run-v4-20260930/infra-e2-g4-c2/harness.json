@@ -1,0 +1,9 @@
+{
+ "schema": "yeto.e2_harness_plan/v1",
+ "config": "C2",
+ "warmup_rounds": 2,
+ "out_dir": "~/yeto-rl/e2-harness",
+ "expected_dp": 2,
+ "lora_dropout": 0.05,
+ "plan": "plan-v4"
+}
