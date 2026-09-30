@@ -254,7 +254,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.visible_gpus_per_node": _ok,
     "parallel.uneven_pipeline_layers": _ok,
     "parallel.standby_gpus": _ok,
-    "parallel.deferred_rollout_cells": _ok,
+    "parallel.rollout_cell_names": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
     "trainable.lora_targets": _check_lora_targets,
@@ -413,7 +413,7 @@ def placement_request(config) -> PlacementRequest:
         rollout_gpus=int(parallel.dedicated_rollout_gpus),
         gpus_per_engine=parallel.rollout_num_gpus_per_engine,
         standby_gpus=int(getattr(parallel, "standby_gpus", 0) or 0),
-        deferred_rollout_cells=int(getattr(parallel, "deferred_rollout_cells", 0) or 0),
+        rollout_cell_names=tuple(getattr(parallel, "rollout_cell_names", ()) or ()),
     )
 
 

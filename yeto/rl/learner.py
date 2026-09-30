@@ -162,8 +162,8 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
     parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
     parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
-    # fork F-R1: K extra rollout cells declared stopped + unbound (placement map).
-    parser.add_argument("--rl-elastic-deferred-cells", type=int, default=0)
+    # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
+    parser.add_argument("--rl-elastic-declare-cells", action="store_true")
     # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
@@ -308,9 +308,8 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-tool-wait-board")
     if getattr(args, "rl_observe_timeline", False) and not ports:
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
-    if int(getattr(args, "rl_elastic_deferred_cells", 0) or 0) and not getattr(
-            args, "rl_elastic", False):
-        raise ValueError("--rl-elastic-deferred-cells needs --rl-elastic")
+    if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -323,8 +322,8 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-elastic needs " + ", ".join(missing))
     if args.rl_elastic_cells is not None and not _elastic_cells(args.rl_elastic_cells):
         raise ValueError("--rl-elastic-cells names no cell")
-    if int(getattr(args, "rl_elastic_deferred_cells", 0) or 0) < 0:
-        raise ValueError("--rl-elastic-deferred-cells must be non-negative")
+    if getattr(args, "rl_elastic_declare_cells", False) and not _elastic_cells(args.rl_elastic_cells):
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
     for name in _ELASTIC_PAUSE:
         value = getattr(args, name, None)
         if value is not None and not value > 0:

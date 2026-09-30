@@ -1076,8 +1076,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
              if getattr(args, name, None) is not None]
     if getattr(args, "rl_elastic_tool_wait_board", False):
         given.append("--rl-elastic-tool-wait-board")
-    if getattr(args, "rl_elastic_deferred_cells", None):
-        given.append("--rl-elastic-deferred-cells")
+    if getattr(args, "rl_elastic_declare_cells", False):
+        given.append("--rl-elastic-declare-cells")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
@@ -1108,9 +1108,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         cells = [c.strip() for c in args.rl_elastic_cells.split(",") if c.strip()]
         if not cells or any(not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", c) for c in cells):
             raise ValueError(f"--rl-elastic-cells: bad cell ids {args.rl_elastic_cells!r}")
-    deferred = getattr(args, "rl_elastic_deferred_cells", None)
-    if deferred is not None and deferred < 0:
-        raise ValueError("--rl-elastic-deferred-cells must be non-negative")
+    if getattr(args, "rl_elastic_declare_cells", False) and args.rl_elastic_cells is None:
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
     from .rl.elastic_benchmark.capabilities import load_attestation, parse_configs
 
     resources = json.loads(Path(args.rl_elastic_resources).expanduser().read_text(encoding="utf-8"))
@@ -1186,8 +1185,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         )
         if args.rl_elastic_cells is not None:
             flags += f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
-        if getattr(args, "rl_elastic_deferred_cells", None):
-            flags += f" --rl-elastic-deferred-cells {int(args.rl_elastic_deferred_cells)}"
+        if getattr(args, "rl_elastic_declare_cells", False):
+            flags += " --rl-elastic-declare-cells"
         if getattr(args, "rl_elastic_tool_wait_board", False):
             flags += " --rl-elastic-tool-wait-board"
         for name, flag in _ELASTIC_PAUSE_FLAGS:

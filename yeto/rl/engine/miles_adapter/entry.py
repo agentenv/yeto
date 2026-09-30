@@ -717,12 +717,14 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
 
 def resolve_declared_cells(inference_controller: Any, runner: Any,
                            explicit: Any = ()) -> tuple[str, ...]:
-    """The rollout cells the E1 verbs manage, named as the FORK names them.
+    """The fork cell ids the E1 verbs manage.
 
-    With a fork that lists its declared cells (``describe_cells``, F-R1) the
-    list comes from there; explicit ``--rl-elastic-cells`` must then be a
-    subset of it (a yeto-invented name such as ``c0`` is refused). Without it
-    the explicit list is required and taken as given.
+    With a fork that lists its declared cells (``describe_cells``, F-R1), each
+    explicit ``--rl-elastic-cells`` name is resolved to the fork cell id: by the
+    ``alias`` the fork reports (the yeto name declared in placement map
+    ``rollout_cells``), else by the cell id itself; an unknown name is refused.
+    Without explicit names every declared cell is managed. A fork without
+    ``describe_cells`` needs explicit names, taken as its cell ids.
     """
     explicit = tuple(str(c) for c in (explicit or ()))
     describe = getattr(inference_controller, "describe_cells", None)
@@ -731,16 +733,21 @@ def resolve_declared_cells(inference_controller: Any, runner: Any,
             raise ValueError("--rl-elastic-cells is required: this Miles fork cannot list its "
                              "declared cells (describe_cells, F-R1)")
         return explicit
-    declared = tuple(sorted(runner.run(_awaitable(describe()))))
-    if not declared:
+    cells = dict(runner.run(_awaitable(describe())) or {})
+    if not cells:
         raise ValueError("the fork declares no rollout cells")
-    if explicit:
-        unknown = sorted(set(explicit) - set(declared))
-        if unknown:
-            raise ValueError(f"--rl-elastic-cells {unknown} are not cells the fork declares "
-                             f"({list(declared)})")
-        return explicit
-    return declared
+    if not explicit:
+        return tuple(sorted(cells))
+    by_alias = {str(d.get("alias")): cid for cid, d in cells.items()
+                if isinstance(d, dict) and d.get("alias")}
+    out, unknown = [], []
+    for name in explicit:
+        cid = by_alias.get(name) or (name if name in cells else None)
+        (out.append(cid) if cid else unknown.append(name))
+    if unknown:
+        raise ValueError(f"--rl-elastic-cells {unknown} are not cells the fork declares "
+                         f"(aliases {sorted(by_alias)}, ids {sorted(cells)})")
+    return tuple(out)
 
 
 async def _awaitable(value: Any) -> Any:

@@ -270,12 +270,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME",
                     help="--rl-elastic: initial config id in the manifest")
     rl.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
-                    help="--rl-elastic: the fork's rollout cell ids to manage (fork names, e.g. "
-                    "inference-engine-all-0-0-00000); default: every cell the fork declares "
-                    "(needs a fork with describe_cells, F-R1)")
-    rl.add_argument("--rl-elastic-deferred-cells", type=int, default=None, metavar="K",
-                    help="--rl-elastic: declare K extra rollout engine cells stopped and unbound "
-                    "at startup (placement map deferred_rollout_cells; needs the fork F-R1)")
+                    help="--rl-elastic: the rollout cells to manage: yeto names declared to the fork "
+                    "with --rl-elastic-declare-cells (F-R1), else the fork's own cell ids; "
+                    "default: every cell the fork declares (needs describe_cells, F-R1)")
+    rl.add_argument("--rl-elastic-declare-cells", action="store_true",
+                    help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
+                    "rollout engine cells (placement map rollout_cells: started on the rollout "
+                    "GPUs, then stopped on standby GPUs, then stopped unbound; needs fork F-R1)")
     rl.add_argument("--rl-elastic-quorum-timeout-s", type=int, default=None, metavar="S",
                     help="--rl-elastic: syncer --quorum-timeout-s, also the island's strict "
                     "pause budget input (default: syncer default 900)")
