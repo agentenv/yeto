@@ -24,6 +24,7 @@ class ElasticWiring:
     declared_cells: tuple[str, ...]
     pool_gpus: tuple[str, ...] | None = None
     track_timeout_s: float = 600.0
+    tool_wait_board: Any = None
 
 
 def build_elastic(
@@ -38,6 +39,7 @@ def build_elastic(
     pool_gpus: Sequence[str] | None = None,
     timeouts: Any = None,
     on_watchdog: Any = None,
+    tool_wait_board: Any = None,
 ) -> ElasticWiring:
     """``on_watchdog(tx_id, phase)`` runs on the watchdog thread when the absolute
     transaction deadline passes while a step is still blocked. It is the only
@@ -70,4 +72,5 @@ def build_elastic(
         ledger=BatchLedger(state),
         declared_cells=tuple(str(c) for c in declared_cells),
         pool_gpus=None if pool_gpus is None else tuple(pool_gpus),
+        tool_wait_board=tool_wait_board,
     )

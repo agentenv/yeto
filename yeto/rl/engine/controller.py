@@ -757,12 +757,17 @@ class IslandController:
                 # unknown load: only the serial round boundary proves quiescence
                 # (generate returned, D6 round-boundary drain); any other mode fails closed
                 return self.profile is not None and self.profile.execution_mode == "partitioned-serial"
-            active, tool_wait = int(load.get("active_requests", 0)), int(load.get("tool_wait", 0))
-            if active == 0 and tool_wait == 0:
+            if "blockers" in load:  # tool_wait.drain_blockers: unknown counts fail closed
+                blockers = list(load["blockers"])
+            else:
+                blockers = [f"{k}={load.get(k)}" for k in ("active_requests", "tool_wait")
+                            if load.get(k) is None or int(load[k]) > 0]
+            active, tool_wait = load.get("active_requests"), load.get("tool_wait")
+            if not blockers:
                 return True
             if self._wall() >= deadline:
                 self._record("drain_timeout", tx_id=tx.tx_id, active_requests=active,
-                             tool_wait=tool_wait)
+                             tool_wait=tool_wait, blockers=blockers)
                 return False
             self._sleep(self.timeouts.retry_interval)
 

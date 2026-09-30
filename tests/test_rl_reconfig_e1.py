@@ -762,3 +762,83 @@ def test_journal_files_are_fsynced(tmp_path, monkeypatch):
         n = len(calls)
         j.compare_and_swap(expected_config_epoch=0, new=EpochState(1, "A"))
     assert n >= 1 and len(calls) >= n + 2  # file + directory
+
+
+# --------------------------------------------------------------------------- review fixes
+def test_safe_point_with_a_deferred_eval_in_flight_does_not_drain(tmp_path):
+    """M2: an overlapped eval still holding the rollout role blocks WAIT_SAFE."""
+    from dataclasses import replace
+
+    driver, ctl, fork, pool, *_ = _setup(tmp_path)
+    driver.handshake()
+    start = driver.sync.start(driver)
+    driver.publish(start.state, rollout_id=0)
+    driver.at_safe_point = True
+    ctl.request("r", "T4R4S0", 0, 60)
+    snap = replace(driver.safe_point_snapshot(0), eval_in_flight=1)
+    assert ctl.run_at_safe_point(driver, snap) == "WAIT_SAFE"
+    assert not [c for c in fork.calls if c[0] in ("drain", "start", "stop")]
+    assert ctl.has_pending() and ctl.admission_open
+    blocked = [r for r in read_journal(tmp_path / "state/reconfig") if r["kind"] == "safe_point_blocked"]
+    assert "overlapped evals in flight" in blocked[-1]["blockers"][0]
+
+
+def test_tool_wait_board_feeds_the_drain_and_unknown_fails_closed(tmp_path):
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.engine.tool_wait import ToolWaitBoard
+
+    board = ToolWaitBoard()
+    pool = MilesRolloutPool(inference_controller=object(), rollout_executor=object(), metadata=None,
+                            expected_policy=lambda: (0, "h"), tool_wait_board=board)
+    assert "router in-flight count unknown" in pool.trajectory_load()["blockers"]
+    pool.load_sample = lambda: {"active_requests": 0, "workers": 2, "cordoned": 0}
+    board.enter("t1")
+    load = pool.trajectory_load()
+    assert load["tool_wait"] == 1 and load["blockers"] == ["1 trajectories waiting on tools"]
+    board.exit("t1")
+    assert pool.trajectory_load()["blockers"] == []
+    no_board = MilesRolloutPool(inference_controller=object(), rollout_executor=object(),
+                                metadata=None, expected_policy=lambda: (0, "h"))
+    assert no_board.trajectory_load() is None
+
+
+def test_committed_placement_is_restored_after_restart():
+    p = ElasticPlacement(_StaticPlacement(), pool_gpus=tuple(f"g{i}" for i in range(8)), epoch=2)
+    out = p.restore_committed(("g4", "g5", "g6", "g7"), epoch=2)
+    assert out.rollout_gpus == ("g4", "g5", "g6", "g7") and p.epoch == 2
+    with pytest.raises(PlacementPlanError):
+        p.restore_committed(("g4",), epoch=1)
+
+
+def test_rebase_promotes_applied_batches_below_the_restart(tmp_path):
+    led = BatchLedger(tmp_path)
+    led.prepare(_B(0, ["g0"]), policy_token="t0")
+    led.optimizer_applied(0)  # crashed before outer_recorded, but the outer took it
+    assert led.rebase(1) == []
+    assert led.state(0) == "outer_recorded"
+    rec = [r for r in read_journal(tmp_path / "ledger") if r["kind"] == "outer_recorded"]
+    assert rec[-1]["recovered"] is True
+    led.close()
+
+
+def test_engine_discarded_survives_replay(tmp_path):
+    led = BatchLedger(tmp_path)
+    b = _B(0, ["g0"])
+    b.aborted_in_flight_groups = 2
+    led.prepare(b, policy_token="t")
+    led.close()
+    led = BatchLedger(tmp_path)
+    assert led.batch(0)["engine_discarded"] == 2
+    assert led.cut_summary()["engine_discarded_groups"] == 2
+    led.close()
+
+
+def test_missing_group_index_fails_closed():
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter.rollout_meta_hook import group_record
+
+    sample = SimpleNamespace(index=3, reward=1.0, weight_versions=[])
+    for args in (SimpleNamespace(), SimpleNamespace(yeto_rl_elastic_metadata=True)):
+        with pytest.raises(RuntimeError, match="group_index"):
+            group_record(args, [sample])

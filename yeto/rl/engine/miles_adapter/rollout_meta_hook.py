@@ -165,13 +165,6 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
     samples = _flat(group)
     indices = [getattr(s, "index", None) for s in samples]
     group_index = getattr(samples[0], "group_index", None) if samples else None
-    if group_index is None and elastic_metadata_enabled(args):
-        # the ledger (3.6) dedups on group ids across rollouts; a sample index
-        # fallback is not unique over the run, so fail closed
-        raise RuntimeError(
-            "rollout sample without group_index: the batch ledger needs the data "
-            "source's monotonic sample_group_index as group id"
-        )
     if group_index is None:
         # the 3.6 ledger keys groups on Miles' monotonic sample_group_index;
         # a sample index is not a group identity (fail closed)

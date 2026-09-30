@@ -33,8 +33,11 @@ keeps the R0 behaviour byte-for-byte (execution mode label
   (``generate_blockers``/``train_blockers``) is enforced from a
   :class:`ReadinessSnapshot` before every generation and train step, on top of
   the R0 per-group policy-token check;
-* ``partitioned-overlap`` is refused: no legal train/inference overlap has been
-  certified (task 2.3).
+* ``partitioned-overlap`` runs only the age-0 overlap implemented in
+  ``overlap.py`` (task 2.3): evaluation of the published policy on the rollout
+  GPUs overlaps train/outer_sync of the same round and is joined before the
+  next publication. Every other overlap (in particular generation ahead of
+  publication) is refused.
 
 Reconfiguration (rl-infra-spec 3.1-3.7) is opt-in (``controller=``): the
 loop offers the :class:`~yeto.rl.engine.controller.IslandController` one safe
@@ -80,6 +83,7 @@ from .execution_profile import (
     require,
     train_blockers,
 )
+from .overlap import EvalOverlap, EvalStarter, overlap_refusal
 from .ports import (
     Placement,
     PolicyState,
@@ -91,9 +95,13 @@ from .ports import (
 from .trainable_state import TrainableState, require_supported_layout
 
 EXECUTION_MODE = "colocated-serial"
-# Modes the driver can run (partitioned-overlap: no certified overlap, 2.3).
-DRIVER_MODES = frozenset({"colocated-serial", "partitioned-serial"})
-_MODE_PLACEMENT = {"colocated-serial": "colocated", "partitioned-serial": "fixed-partition"}
+# Modes the driver can run (partitioned-overlap: eval||train/outer_sync only, 2.3).
+DRIVER_MODES = frozenset({"colocated-serial", "partitioned-serial", "partitioned-overlap"})
+_MODE_PLACEMENT = {
+    "colocated-serial": "colocated",
+    "partitioned-serial": "fixed-partition",
+    "partitioned-overlap": "fixed-partition",
+}
 # Upstream weight transport by placement (miles protocol.py:73-89): colocate
 # uses CUDA IPC; a LoRA fixed partition must use NCCL broadcast.
 _DEFAULT_TRANSPORT = {"colocated": "cuda-ipc", "fixed-partition": "nccl-broadcast"}
@@ -334,6 +342,7 @@ class IslandDriver:
         progress: ProgressStore | None = None,
         evaluate: Callable[[int], Mapping[str, float]] | None = None,
         eval_interval: int | None = None,
+        evaluate_start: EvalStarter | None = None,
         max_rollouts: int | None = None,
         profile: ExecutionProfile | None = None,
         observe: bool = False,
@@ -374,6 +383,9 @@ class IslandDriver:
         self.ledger = ledger
         self.published_state: TrainableState | None = None
         self.at_safe_point = False
+        self.eval_overlap: EvalOverlap | None = None
+        if profile is not None and profile.execution_mode == "partitioned-overlap" and evaluate_start:
+            self.eval_overlap = EvalOverlap(evaluate_start, emit=self.emit, clock=self.clock)
 
     # -- events ----------------------------------------------------------
     def emit(self, event: str, **fields: Any) -> None:
@@ -442,6 +454,7 @@ class IslandDriver:
             publication_complete=self.expected_token is not None,
             driver_safe_point=safe_point,
             config_epoch=self.config_epoch,
+            eval_in_flight=self.eval_overlap.in_flight if self.eval_overlap is not None else 0,
             **fields,
         )
         if self.observe:
@@ -452,6 +465,7 @@ class IslandDriver:
                 published_policy_version=snap.published_policy_version,
                 ready_groups=len(snap.ready_group_ids),
                 inflight_batches=snap.inflight_batches,
+                **({"eval_in_flight": snap.eval_in_flight} if self.eval_overlap else {}),
                 profile_hash=self.profile_hash,
                 epoch=self.config_epoch,
             )
@@ -463,10 +477,18 @@ class IslandDriver:
 
         require_supported_layout(self.layout, self.capabilities.parameter_layouts)
         if self.profile is not None:
-            if self.execution_mode not in DRIVER_MODES:
+            refusal = overlap_refusal(self.profile)
+            if self.execution_mode not in DRIVER_MODES or refusal:
                 raise DriverError(
-                    f"execution mode {self.execution_mode!r} is not runnable: no legal "
-                    "train/inference overlap is certified (rl-infra-spec 2.3)"
+                    f"execution mode {self.execution_mode!r} is not runnable: "
+                    f"{refusal or 'unknown mode'} (rl-infra-spec 2.3)"
+                )
+            if self.execution_mode == "partitioned-overlap" and (
+                self.eval_overlap is None or self.evaluate is None or not self.eval_interval
+            ):
+                raise DriverError(
+                    "partitioned-overlap needs evaluate, eval_interval and evaluate_start "
+                    "(the eval||train overlap is its only overlapped task; rl-infra-spec 2.3)"
                 )
             try:
                 check_algorithm_contract(self.profile, self.algorithm)
@@ -602,6 +624,8 @@ class IslandDriver:
         if self.colocated:
             self.phase("offload", rollout_id=rollout_id)
             self.trainer.offload()
+        if self.eval_overlap is not None:
+            self.eval_overlap.before_generate(rollout_id)
         if self._gated:
             require(
                 generate_blockers(self.profile, self._snapshot(rollout_id)),
@@ -624,6 +648,10 @@ class IslandDriver:
             )
         if not batch.groups:
             raise PolicyIdentityError(f"rollout {rollout_id} produced no complete group")
+        if self.eval_overlap is not None:
+            self.eval_overlap.after_generate(
+                rollout_id, token=self.expected_token, published_version=self.published_version
+            )
         bad = [
             g.group_id
             for g in batch.groups
@@ -773,10 +801,16 @@ class IslandDriver:
         probe = getattr(self.sync, "is_final_round", None)
         return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
 
-    def _maybe_eval(self, rollout_id: int, *, force: bool = False) -> None:
+    def _maybe_eval(self, rollout_id: int, *, force: bool = False, defer: bool = False) -> None:
         if self.evaluate is None or not self.eval_interval:
             return
         if not force and rollout_id % self.eval_interval:
+            return
+        if defer and self.eval_overlap is not None:
+            # 2.3: started after the next generation, joined before the next publish.
+            self.eval_overlap.schedule(
+                rollout_id, token=self.expected_token, published_version=self.published_version
+            )
             return
         self.phase("eval", rollout_id=rollout_id)
         metrics = self.evaluate(rollout_id)
@@ -785,6 +819,30 @@ class IslandDriver:
             policy_version=rollout_id,
             **{"rl/policy_token": self.expected_token},
             **{f"eval/{k}": float(v) for k, v in dict(metrics).items()},
+        )
+
+    def _join_eval(self) -> None:
+        if self.eval_overlap is None:
+            return
+        done = self.eval_overlap.before_publish(
+            token=self.expected_token, published_version=self.published_version
+        )
+        if done is None:
+            return
+        if self.observe and done["begin"] is not None and done["end"] is not None:
+            # The eval's real interval (recorded inside the eval coroutine), not
+            # the generate->join window, so overlap with train is falsifiable.
+            self.emit(
+                "rl_timeline_span", task="eval", role="rollout", kind="compute",
+                start=done["begin"], end=done["end"], rollout_id=done["rollout_id"],
+                profile_hash=self.profile_hash, epoch=self.config_epoch,
+            )
+        self.emit(
+            "rl_eval",
+            policy_version=done["rollout_id"],
+            overlapped=True,
+            **{"rl/policy_token": done["token"]},
+            **{f"eval/{k}": float(v) for k, v in done["metrics"].items()},
         )
 
     def run_round(self, rollout_id: int) -> SyncBoundary:
@@ -881,6 +939,7 @@ class IslandDriver:
         boundary = self.sync.boundary(self, rollout_id=rollout_id, stats=stats)
         if self.ledger is not None:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
+        self._join_eval()
         self.publish(boundary.state, rollout_id=rollout_id + 1)
         self._close_span()
         self.rounds_completed += 1
@@ -914,8 +973,11 @@ class IslandDriver:
                 self.published_version if self.published_version is not None else -1
             ),
             publication_complete=self.expected_token is not None,
-            active_requests=int(load.get("active_requests", 0)),
-            tool_wait=int(load.get("tool_wait", 0)),
+            active_requests=int(load.get("active_requests") or 0),
+            tool_wait=int(load.get("tool_wait") or 0),
+            # 2.3: a deferred/overlapped eval still holds the rollout role; the
+            # controller's WAIT_SAFE refuses to drain/remove until it is joined.
+            eval_in_flight=self.eval_overlap.in_flight if self.eval_overlap is not None else 0,
             inflight_batches=len(unconsumed),
             grad_accumulation_open=grad_open,
             driver_safe_point=self.at_safe_point,
@@ -1008,7 +1070,8 @@ class IslandDriver:
                     self.ledger.rebase(start.rollout_id)
                 state = start.state
                 self.publish(state, rollout_id=start.rollout_id)
-                self._maybe_eval(start.rollout_id, force=start.rollout_id == 0)
+                self._maybe_eval(start.rollout_id, force=start.rollout_id == 0,
+                                 defer=not start.finished)
                 rollout_id = start.rollout_id
                 finished = start.finished
                 while not finished:
@@ -1018,7 +1081,7 @@ class IslandDriver:
                     boundary = self.run_round(rollout_id)
                     state = boundary.state
                     rollout_id += 1
-                    self._maybe_eval(rollout_id, force=boundary.stop)
+                    self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)
                     finished = boundary.stop
                 self.phase("finish", rollout_id=rollout_id)
                 self._close_span()
@@ -1033,4 +1096,6 @@ class IslandDriver:
                 )
                 raise
         finally:
+            if self.eval_overlap is not None:
+                self.eval_overlap.abort()  # no orphan eval task on error/cancel paths
             self.sync.close()

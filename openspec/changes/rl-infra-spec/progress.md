@@ -266,3 +266,13 @@
 ### 追加（2026-09-30 INFRA-A）：审查修复与工具等待计数
 - 审查 H1/M1/M2/L1–L4 已修复（215e1b8）；driver/entry 补丁换为 `patches/infra-a-driver-2.3-eval-overlap-v2.patch`（取代 v1）。
 - 应 INFRA-E1 请求新增 `yeto/rl/engine/tool_wait.py`（瞬时在途工具等待计数与 drain 判定），不需要改 driver/rollout，因此没有补丁；E1 对接时用的接口：`board_actor(learner_id)`、`read_tool_wait(handle)`、`drain_blockers(router_in_flight, snapshot)`；生产侧用 `async_tool_wait_scope(handle, trajectory_id)`。
+
+### 审查修复（2026-09-30 INFRA-E1，响应独立审查"需修复"）
+- H1：`publish._commit_version` 只在 `start_commit_weight_version` 成功后才调用 `end_commit_weight_version`（fork `@acquires_lock` 失败时自行释放锁）；测试 fake 模拟 acquires/releases 语义并覆盖失败用例。
+- H2：`build_elastic(on_watchdog=...)` 已接到控制器；**未实现** kill 目标 generation 的默认动作。结论如实：3.7 的“有界处理”未证明，阻塞中的引擎调用不会被截止时间打断（3.7 进展已注明）。
+- M1：data_cursor/buffer_length 只在 `args.yeto_rl_elastic_metadata` 或 `YETO_RL_ELASTIC_METADATA=1` 时上报；默认元数据逐键不变、`carried_over` 仍为 None（回归测试 `test_default_metadata_is_unchanged_without_elastic`）。launcher 开关落地时需在 rollout 进程启动前设置该属性/环境变量。
+- M2：合并 origin/infra-a（cf3e713，含 215e1b8），应用 `infra-a-driver-2.3-eval-overlap-v2.patch`，冲突两边保留，顺序为 `ledger.outer_recorded` → `_join_eval()` → `publish`；`safe_point_snapshot` 带 `eval_in_flight`，控制器 WAIT_SAFE 因此在延迟 eval 未完成时不 drain/remove（测试）。`MilesRolloutPool(tool_wait_board=...)` 的 `trajectory_load()` 用 `tool_wait.drain_blockers`（未知计数 fail closed），控制器按 blockers 判定排空；`ElasticWiring/build_elastic` 增加 `tool_wait_board`。
+- M3：commit 后重启时 `compose_island` 按 `configs[config_id].placement["rollout"]` 调 `ElasticPlacement.restore_committed` 重建描述。恢复范围：只恢复 yeto 侧描述与 epoch；实际 engine 成员由控制器 `open()` 与 journal 成员比对，不一致转 RECOVERY_REQUIRED，不自动重启/停止 cell。
+- M4：`rebase(start)` 把 rid<start 且停在 `optimizer_applied` 的批次提升为 `outer_recorded`（`recovered: true`）。
+- L1：`engine_discarded` 进入 `_replay`（`batch()`、`cut_summary()` 可见）。L2：缺 `group_index` 时 `group_record` 明确报错（fail closed，所有路径）。L5：3.4a 完成记录注明 `publish_members` 命名。L6：E2/4.4 接口保留。
+- 全量：68 failed / 2732 passed / 49 skipped / 26 errors，失败 id 集合与 ef2d6b0 基线相同（94）。

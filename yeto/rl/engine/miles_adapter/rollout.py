@@ -314,7 +314,11 @@ class MilesRolloutPool:
         args: Any = None,
         declared_cells: Any = None,
         track_timeout_s: float = 600.0,
+        tool_wait_board: Any = None,
     ) -> None:
+        # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
+        # tool-wait count, so trajectory_load() is unknown (None).
+        self._tool_wait_board = tool_wait_board
         self._args = args
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
@@ -463,6 +467,29 @@ class MilesRolloutPool:
 
     def undrain(self, members: frozenset[str]) -> None:
         self._run(self._controller.uncordon_cells(cells_of(members)))
+
+    def trajectory_load(self) -> dict[str, Any] | None:
+        """3.3 drain probe: router in-flight + in-flight tool waits (``tool_wait.drain_blockers``).
+
+        None without a tool-wait board (the controller then relies on the
+        serial round boundary only). Unknown counts are reported as blockers
+        (fail closed).
+        """
+        if self._tool_wait_board is None:
+            return None
+        from ..tool_wait import drain_blockers, read_tool_wait
+
+        sample = self.load_sample()
+        active = None if sample is None else int(sample["active_requests"])
+        try:
+            snap = read_tool_wait(self._tool_wait_board)
+        except Exception:  # noqa: BLE001 - unknown: fail closed below
+            snap = None
+        return {
+            "active_requests": active,
+            "tool_wait": None if snap is None else int(snap.in_flight),
+            "blockers": drain_blockers(active, snap),
+        }
 
     def membership_status(self) -> dict[str, Any]:
         status = dict(self._run(self._controller.get_membership_status()))
