@@ -339,3 +339,39 @@
 - 测试：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE` 结果为 68 failed, 2904 passed, 49 skipped, 26 errors。（回归修复后复跑：68 failed, 2905 passed, 49 skipped, 26 errors）失败和错误的 id 共 94 个，按 id 前缀规范化后与 /tmp/integ-s2-base.ids（修复前基线）完全一致，没有新增失败，都是已知环境性失败。`openspec validate rl-infra-spec --strict` 通过。
 - 仍存限制：3.7 watchdog 默认没有接 kill（`on_watchdog` 默认未接线，阻塞的引擎调用不受截止时间约束）；H2 限制见 E1 记录。GPU 验收均未进行，task 勾选状态不变。
 - 云资源：无；费用 $0。
+
+## 2026-09-30（Agent INFRA-E1 第二轮：launcher eval 接线、3.8、4.4、H2；分支 `infra-e1`）
+
+### 分支与状态
+- worktree `/home/michael/work/infra-e1`，基于 integ-decl 65ca03b。提交：f79e016（launcher eval）、533afdc（3.8）、d397cf3（4.4）、2b67145（H2 watchdog）、4d8ec81（计划与 tasks 进展），以及本条目所在的提交。已普通推送 `origin infra-e1`。未启动任何 GPU 或云资源，费用 $0。
+
+### task 状态（五选一）
+- launcher eval 接线（非 task，A2/L-2.3 前置）：**已实现 + CPU 通过**。
+- 3.8：**已实现 + CPU 通过，未勾选**（X6 需两岛 GPU；依赖 3.7、2.4 未勾选）。
+- 4.4：**已实现 + CPU 通过，未勾选**（依赖 4.3；需 GPU A6b）。
+- 3.7（H2）：**已实现 + CPU 通过，未勾选**。默认 watchdog 会杀掉目标 generation；限制仍在，见 tasks 3.7。
+- 4.5：未完成（新增两条 CPU 覆盖）。
+
+### 关键改动
+- launcher 新增 `--rl-eval-interval/-data/-dataset-name/-samples-per-prompt`，转发为 learner 的 `--eval-*`。heldout 文件内联进运行命令（≤1 MiB），岛上按 SHA256 校验。learner 的 `_verify_eval_dataset_identity` 与 `run_config._resolve_eval` 共用 `ports_training_eval()`：ports LoRA 允许训练期 heldout eval（必须是与 `--data` 不同的文件），legacy LoRA 仍然拒绝。launcher 本地的 overlap 检查改用它实际转发的同一个 interval。**此前的真实缺口**：不止 launcher，直接启动的 learner 在 ports LoRA 上带 `--eval-interval` 也会被 `_resolve_eval` 拒绝（"restricted to dense full mode"），所以 2.3 的 overlap eval 以前在任何入口都起不来。
+- 3.8：`SyncSession.outer_phase`（strict、decoupled）；`IslandController.run_at_safe_point(..., outer_phase=)` 重新做 pause 决定并写入 journal；`enter_finalization`；暂停预算的输入沿 launcher → learner → build_elastic 传递，同时传给 syncer 的 `--quorum-timeout-s`。
+- 4.4：`IslandController.request_trainer_rebuild`、`REBUILDING_TRAINER`、`RebuildRefused`；`miles_adapter/rebuild_wiring.py`；driver 新增 `local_step`；`entry._wire_trainer_rebuild`。
+- H2：`elastic_wiring.kill_target_generation`（默认启用，`on_watchdog=None` 可关闭）；controller 的 journal 追加加了线程锁。
+
+### 写入范围说明
+- 本轮改了 `yeto/cli.py`（launch 新参数）、`yeto/rl/learner.py`（eval 身份校验与 elastic 暂停参数）、`yeto/rl/engine/run_config.py`（`_resolve_eval` 的 ports 分支）、`bridges.py`（`outer_phase`）。这些都属于 launcher/learner 的 INFRA 接线，没有其他写入者，在此声明。trainer.py、state_plugin.py 未改，没有交给 E3 的补丁。
+
+### 测试
+- 全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`：68 failed / 2937 passed / 49 skipped / 26 errors。失败与错误的 id 按第二列去重共 94 个，与 `/tmp/integ-s2-base.ids` 完全相同，没有新增（`/tmp/infra-e1-r2.ids`）。
+- 新增和修改的测试：`tests/test_rl_infra_switches.py`（eval 与暂停参数，+9）、`tests/test_rl_reconfig_x6.py`（10）、`tests/test_rl_trainer_rebuild_e1.py`（10）、`tests/test_rl_reconfig_e1.py`（watchdog，+3）。
+- `openspec validate rl-infra-spec --strict`：valid。
+- fake 只证明协议，不作为 3.8、4.4、3.7 的验收证据。
+
+### GPU 计划
+- `evidence/infra-e1/plan-3.8-4.4.md`：A5（X6-a..e）、A6b（4.4）、§3 watchdog。判据在运行前固定。X6-b 与 §3 需要的故障注入点**尚未实现**，执行前须先补上并提交。
+
+### 已知限制与阻塞
+- 4.4：`MilesRolloutPool.data_cursor()` 返回缓存值，不在 rollout 进程内实时读取；重建前后的游标比对因此检查不到 `rollout_executor.load` 的回卷。
+- 3.7：阻塞在旧成员集上的调用仍不受截止时间约束；fork health monitor 对被杀 cell 的行为未知。
+- head 两跳（fleet head 模式）下，`--rl-eval-data` 与 `--rl-elastic-resources` 一样，只内联到岛的运行命令，没有另行处理 head 上的暂存。
+- 待批准：无新增。
