@@ -207,6 +207,7 @@ class MilesTrainerGroup:
         self.last_masked_fraction = None
         self.last_step_losses = None
         try:
+            self._reshard_guard(batch)
             if self._check_tokens:  # spec: reject before training
                 require_policy_tokens(batch, policy_token(batch.rollout_id, batch.policy_hash))
             outputs = self._run(self._actor.train(batch.rollout_id, batch.payload))
@@ -282,6 +283,22 @@ class MilesTrainerGroup:
             optimizer_step_succeeded=succeeded,
             parameter_layout_hash=self._layout_hash(),
         )
+
+    def _reshard_guard(self, batch: RolloutBatchHandle) -> None:
+        """After a DP change: refuse a batch the fork would split on its unscheduled path (4.6 review M2)."""
+        plan = getattr(self, "_reshard_plan", None)
+        if plan is None:
+            return
+        from .cut_plugin import TRAIN_PARALLEL_CONFIG
+        from .reshard import batch_guard_problems
+
+        configs = [dict(c) for c in self._run(self._actor.run_plugin(TRAIN_PARALLEL_CONFIG, {}))]
+        # One sample per rollout on the GRPO ports path: the fork's rollout id falls back to the sample index.
+        rollout_indices = [i for i, _ in enumerate(s for g in batch.groups for s in g.sample_ids)]
+        problems = batch_guard_problems(plan, rank_configs=configs, rollout_indices=rollout_indices,
+                                        steps=int(getattr(self._args, "num_steps_per_rollout", 1) or 1))
+        if problems:
+            raise TrainStepError("batch refused after a DP change: " + "; ".join(problems))
 
     def _applied_lrs(self) -> tuple[float, ...]:
         per_rank = [list(v) for v in self._run(self._actor.run_plugin(APPLIED_LRS, {}))]
@@ -541,6 +558,7 @@ class MilesTrainerGroup:
             c = r["coord"]
             if expected.get((c["tp"], c["pp"], c["dp"])) != r["rng"]:
                 raise CutError(f"rank {c}: RNG {r['rng']} does not follow the recorded mapping")
+        self._reshard_plan = plan  # every later batch is guarded (batch_guard_problems)
         return {"manifest": manifest, "plan": plan.to_dict(), "rng_mapping": mapping,
                 "full_state_digests": {f"tp{k[0]}_pp{k[1]}": g[0]["full_state_digest"]
                                        for k, g in sorted(by_group.items())},

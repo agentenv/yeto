@@ -3,7 +3,7 @@
 The E1 :class:`~yeto.rl.engine.controller.IslandController` owns the
 transaction, the journal and the epochs; it hands ``trainer-dp`` and
 ``role-transfer`` edges to this module (interface in
-``infra-drafts/patches/infra-e3-controller-v2.patch``):
+``infra-drafts/patches/infra-e3-controller-v3.patch``):
 
 * :func:`plan_trainer_edge` -- pure validation, called from
   ``IslandController.plan``: the edge must be certified in the attestation

@@ -588,3 +588,11 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
         "adapter_names": sorted(names),
     }
 
+
+
+TRAIN_PARALLEL_CONFIG = f"{_MODULE}.train_parallel_config"
+
+
+def train_parallel_config(actor: Any) -> dict[str, Any]:
+    """The config the rank advertised to the rollout side (Megatron actor ``train_parallel_config``)."""
+    return dict(getattr(actor, "train_parallel_config", None) or {})

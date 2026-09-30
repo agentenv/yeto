@@ -100,10 +100,12 @@ DROPOUT_ARGS = ("lora_dropout", "hidden_dropout", "attention_dropout")
 def batch_problems(plan: ReshardPlan, args: Any = None) -> list[str]:
     """Batch-semantics refusals. GBS counts ROLLOUTS (fork ``build_dp_schedule``).
 
-    Static precondition (one sample per rollout, the GRPO ports path): the
-    per-step micro-batch count ``GBS / mbs`` must be a multiple of dp in both
-    layouts (the fork asserts it at run time; refused here before any write).
-    Rollouts with several samples are checked per batch by :func:`step_problems`.
+    Static precondition ASSUMING one sample per rollout (the GRPO ports path):
+    the per-step micro-batch count ``GBS / mbs`` must be a multiple of dp in
+    both layouts (refused here before any write). Because that assumption is
+    not guaranteed, every production batch after a DP change is checked again
+    by :func:`batch_guard_problems` (``MilesTrainerGroup.train_step``) before
+    the engine trains on it.
     """
     out = []
     gbs, mbs = int(plan.global_batch_size), int(plan.micro_batch_size)
@@ -126,6 +128,11 @@ def batch_problems(plan: ReshardPlan, args: Any = None) -> list[str]:
                            "(packing/assignment depends on dp)")
         if int(getattr(args, "virtual_pipeline_model_parallel_size", 1) or 1) > 1:
             out.append("virtual pipeline (vpp>1) changes the DP alignment; not certified")
+        if getattr(args, "indep_dp", False):
+            out.append("--indep-dp: the trainer advertises no train_parallel_config and the fork "
+                       "falls back to the unscheduled split")
+        if getattr(args, "multimodal_keys", None):
+            out.append("--multimodal-keys: multimodal batches take the fork's unscheduled split")
         if getattr(args, "calculate_per_token_loss", False):
             out.append("--calculate-per-token-loss (token-level normalization) is not certified (A4)")
         if getattr(args, "normalize_advantages", False):
@@ -342,4 +349,42 @@ def rng_mapping(plan: ReshardPlan, target_coords: Iterable[Mapping[str, int]], a
             out.append({"coord": key, "source": "fresh", "seed": fresh_seed(args, coord)})
         else:
             raise ReshardRefused("RNG policy 'exact' cannot change DP")
+    return out
+
+
+SCHEDULE_CONFIG_KEYS = ("dp_size", "cp_size", "vpp_size", "microbatch_group_size_per_vp_stage")
+
+
+def batch_guard_problems(plan: ReshardPlan, *, rank_configs: list[Mapping[str, Any]],
+                         rollout_indices: list[int], steps: int) -> list[str]:
+    """Per-batch production guard after a DP change (review M2/L1).
+
+    The fork silently falls back to ``split_train_data_by_dp_raw`` (floor
+    division, round-robin, no ``num_rollouts``) when the trainer advertises an
+    incomplete ``train_parallel_config`` (indep-DP), for multimodal batches,
+    without ``rollout_ids`` or with fewer distinct rollouts than GBS
+    (``train_data_conversion.can_schedule_on_rollout_side``). Here: every rank
+    must advertise the full schedule config with the planned dp, and the batch
+    (``rollout_indices`` per sample) must hold ``steps * GBS`` rollouts that the
+    scheduled path accepts on both layouts. Multimodal is refused statically
+    (``--multimodal-keys``); ``rollout_ids`` are always set by the fork's
+    ``_convert_samples_to_train_data`` (``rollout_id or index``).
+    """
+    out = []
+    dp = int(plan.target["dp"])
+    if not rank_configs:
+        out.append("no rank reported its train_parallel_config")
+    for i, cfg in enumerate(rank_configs):
+        missing = [k for k in SCHEDULE_CONFIG_KEYS if k not in cfg]
+        if missing:
+            out.append(f"rank {i}: train_parallel_config lacks {missing} (fork would use the unscheduled split)")
+        elif int(cfg["dp_size"]) != dp:
+            out.append(f"rank {i}: advertises dp_size {cfg['dp_size']}, planned {dp}")
+    distinct = len(dict.fromkeys(rollout_indices))
+    if distinct < plan.global_batch_size:
+        out.append(f"{distinct} rollouts < GBS {plan.global_batch_size} (fork would use the unscheduled split)")
+    elif distinct != steps * plan.global_batch_size:
+        out.append(f"{distinct} rollouts != {steps} steps x GBS {plan.global_batch_size} (trailing rollouts dropped)")
+    else:
+        out += step_problems(list(rollout_indices), plan)
     return out

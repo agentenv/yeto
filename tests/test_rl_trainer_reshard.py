@@ -248,3 +248,46 @@ def test_target_layout_is_read_back_from_the_ranks(tmp_path):
     with pytest.raises(CutError, match="planned target"):
         _trainer(make_world(1)).restore_cut_resharded("c", epoch=1, root=str(tmp_path), expect=_expect(1),
                                                       plan=_plan(1, 2), certified=[SPEC_SHA])
+
+
+FULL = {"dp_size": 2, "cp_size": 1, "vpp_size": 1, "microbatch_group_size_per_vp_stage": 1}
+
+
+def test_indep_dp_and_multimodal_are_refused_before_any_write():
+    for extra, match in (({"indep_dp": True}, "indep-dp"), ({"multimodal_keys": '{"image": "images"}'}, "multimodal")):
+        args = SimpleNamespace(**{**vars(default_args(2)), **extra})
+        assert any(match in x for x in reshard_problems(_plan(1, 2), args=args, spec=_spec()))
+
+
+def test_batch_guard_refuses_what_the_fork_would_split_unscheduled():
+    from yeto.rl.engine.miles_adapter.reshard import batch_guard_problems
+
+    plan = _plan(1, 2)
+    ok = batch_guard_problems(plan, rank_configs=[FULL, FULL], rollout_indices=list(range(GBS)), steps=1)
+    assert ok == []
+    assert any("lacks" in x for x in batch_guard_problems(plan, rank_configs=[{}, {}],
+                                                          rollout_indices=list(range(GBS)), steps=1))
+    assert any("dp_size 1" in x for x in batch_guard_problems(plan, rank_configs=[{**FULL, "dp_size": 1}],
+                                                              rollout_indices=list(range(GBS)), steps=1))
+    assert any("< GBS" in x for x in batch_guard_problems(plan, rank_configs=[FULL, FULL],
+                                                          rollout_indices=list(range(GBS - 1)), steps=1))
+    # multi-sample rollout -> odd micro-batch count on dp 2 (L1: static check assumed 1 sample/rollout)
+    assert batch_guard_problems(plan, rank_configs=[FULL, FULL], rollout_indices=[0, 0, 1, 2, 3], steps=1)
+
+
+def test_train_step_is_guarded_after_a_resharded_restore(tmp_path):
+    from yeto.rl.engine.miles_adapter.trainer import TrainStepError
+
+    ranks = _trained(1)
+    _trainer(ranks).save_cut(epoch=1, context=_context(tmp_path, "c"))
+    new = make_world(2, seed=9)
+    trainer = _trainer(new)
+    trainer.restore_cut_resharded("c", epoch=1, root=str(tmp_path), expect=_expect(1), plan=_plan(1, 2),
+                                  certified=[SPEC_SHA])
+    released = []
+    trainer._release = lambda args, payload: released.append(payload)
+    batch = SimpleNamespace(payload="refs", groups=[SimpleNamespace(sample_ids=(0, 1, 2, 3))],
+                            rollout_id=3, policy_hash="h", policy_version=2)
+    with pytest.raises(TrainStepError, match="train_parallel_config lacks"):
+        trainer.train_step(batch)  # fake ranks advertise no schedule config
+    assert released == ["refs"]
