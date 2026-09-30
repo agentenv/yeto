@@ -220,3 +220,4 @@
   - 主 agent 依据"尽可能节省"采用、**待用户确认**（实质改变验收）：A4 用 4 卡 T2R1S1↔T2R2S0 代替 3.4 原文 T4R2S2↔T4R4S0（8 卡原文档增量约 $59，两档均在 $300 内）；A2+（1.7 L-1.7，$8.3，超出 A1–A9 字面但为 2.3/2.4 勾选链依赖）。详见 gpu-plan-v2.md §6。
 - 2026-09-30 用户（GPU 验收执行决定）：A4 按 3.4 原文 8 卡 T4R2S2↔T4R4S0 实测；加跑 A2+（L-1.7）；非逐位比较项改用 Nebius（先做路径验证冒烟，不通退回 Modal）；超预算前停下报告并阐述进度；未分配余额不得动用。随附修订（A5 quorum 暂停预算与注入点前置、A8/A9 按 E3 plan-v2 口径、A5 注入点已由 infra-e1 9a5f181 实现）见 [`gpu-plan-v2.md`](gpu-plan-v2.md) §8。
 - 2026-09-30 用户：(1) 批准 fork 需求 F-R1（延迟绑定、声明时不启动的 cell；FORK-FR1 已开工，miles 分支 `yeto-deferred-cell`），A9 仍须 A8 为 go 才运行；(2) 接受变 DP 认证仅覆盖 dropout=0（代码拒绝非 0）；(3) 批准 rl-algo 2b 的 4.4 用 Modal T4 补跑，单独记账，不占 $300。见 [`gpu-plan-v2.md`](gpu-plan-v2.md) §8.4–8.6。
+- 2026-09-30 主 agent 裁定：计划统一。plan-3.8-4.4-v2 并入 gpu-plan-v2（A5/A6b/watchdog 判据，冲突时取更严者）；A8/A9/DEV-GATHER 以 infra-e3 plan-v3 为准；批次硬预算按 8 卡档 B1 $170 / B2 $80 / B3 $50，全局 $300。见 [`gpu-plan-v2.md`](gpu-plan-v2.md) §8.7。
