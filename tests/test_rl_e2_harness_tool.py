@@ -70,9 +70,13 @@ def test_run_scripts_parse_and_carry_the_strict_guards(tmp_path, monkeypatch):
     for d in sorted(tmp_path.glob("p-*")):
         script = (d / "run.sh").read_text()
         assert subprocess.run(["bash", "-n", str(d / "run.sh")]).returncode == 0, d
-        assert tool.GPU_NAME in script and tool.MILES_COMMIT in script and "2f23a0f-9f29303" in script
-        assert "guard.fail" in script and "app stop -y" in script
+        puller = (d / "puller.sh").read_text()
+        assert subprocess.run(["bash", "-n", str(d / "puller.sh")]).returncode == 0, d
+        assert tool.GPU_NAME in puller and tool.MILES_COMMIT in puller and "2f23a0f-9f29303" in puller
+        assert "guard.fail" in puller and "app stop -y" in puller and "puller.sh" in script
         args = (d / "args.txt").read_text()
         assert "--rl-elastic-cells" not in args
         if json.loads((d / "spec.json").read_text())["rebuild_trigger"]:
-            assert "e2_inwatch.py train 2 rb1 0 900" in script
+            arm = (d / "arm_inwatch.sh").read_text()
+            assert subprocess.run(["bash", "-n", str(d / "arm_inwatch.sh")]).returncode == 0
+            assert "e2_inwatch.py train 2 rb1 0 900" in arm and "arm_inwatch.sh" in script
