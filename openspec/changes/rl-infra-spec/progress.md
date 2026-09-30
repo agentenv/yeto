@@ -660,8 +660,8 @@
   - 第 1、3、6a 行通过；第 4 行由 C3-rebuild-old 覆盖。
   - 第 2 行不通过：该故障模式在当前设计中不存在，已知限制为 REBUILDING_TRAINER 无 deadline。
   - 第 6b 行不适用：没有 COMMITTED 阶段。
-  - **第 5 行待跑**：在 058b00e 上的运行（app ap-AeM99hituVOMdEHpcYV08Q）因交接在重建前被停止，游标尚未被读取。
-  - **4.5 未完成。**
+  - **第 5 行通过（会话 3 重跑，2026-09-30 15:46–15:59Z，bbc830c，app ap-CNAZjvRxXnZJ2gARBpQikV，H100!:3，retries=0，GPU 名称由 puller 断言 guard.ok）**：实时游标可读（cut rb-0-cf5ecb1130c6 已写出，重建前后游标比对得到 `sample_offset 6→7`）；journal REBUILDING_TRAINER → RECOVERY_REQUIRED（76 s，≤600 s），无 restore 阶段（未调用 restore）；`optimizer_applied` 仅 rollout 0/1/2 各一次；游标 2/4/6 不回卷；重建后无消费。`e2_c3_analyze --fault` 全部判据 pass。证据 `evidence/infra-e2/4.2-4.5/gpu-v6-c3-f5-e2r/`（g45.json）。费用 ≤$2.57（13 min × 3 H100!），app 已 stopped/0，watchdog 已终止。launcher rc=4 为 RECOVERY_REQUIRED 的预期退出。
+  - **4.5 GPU 侧 G-4.5 各行**：1/3/5/6a 通过，4 由 C3-rebuild-old 覆盖，2 不通过（该故障模式不存在，已知限制），6b 不适用；4.5 因依赖（3.1、3.6、4.1、4.2a）未勾。
 - **下一步（第 5 行，约 $2.2，已获批）**：
   1. `cd /home/michael/work/infra-e2 && git fetch origin && git merge origin/integ-decl`
   2. 重新生成：`cp /tmp/gsm8k_reward.py . && /tmp/yeto-venv/bin/python tools/probes/e2_cut_harness.py --root /tmp/e2gen --prefix <新前缀> --yeto-sha <HEAD> --launcher-dry-run && rm gsm8k_reward.py`（24 项须 rc=0）。

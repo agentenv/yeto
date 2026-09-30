@@ -1,0 +1,38 @@
+{
+ "criteria": {
+  "rebuild reached REBUILDING_TRAINER": {
+   "pass": true
+  },
+  "terminal RECOVERY_REQUIRED (or a successful REBUILD_OLD)": {
+   "pass": true,
+   "terminal": "RECOVERY_REQUIRED",
+   "error": "trainer rebuild failed: RecoveryRequired(\"trainer unusable after rebuild: data cursor changed across the trainer rebuild: {'sample_offset': 6, 'epoch_id': 0, 'sample_group_index': 6, 'sample_index': 48} -> {'sample_offset': 7, 'epoch_id': 0, 'sample_group_index': 7, 'sample_index': 48}\")",
+   "source": "journal"
+  },
+  "bounded (<= 600 s)": {
+   "pass": true,
+   "seconds": 76.0
+  },
+  "no consumption after RECOVERY_REQUIRED": {
+   "pass": true,
+   "rounds_after": []
+  },
+  "optimizer_applied never twice": {
+   "pass": true,
+   "rollout_ids": [
+    0,
+    1,
+    2
+   ]
+  },
+  "data cursor never rewound": {
+   "pass": true,
+   "offsets": [
+    2,
+    4,
+    6
+   ]
+  }
+ },
+ "pass": true
+}
