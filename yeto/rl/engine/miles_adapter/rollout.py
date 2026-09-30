@@ -323,6 +323,57 @@ def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _http_flush(url: str, headers: dict[str, str], timeout_s: float = 30.0) -> int:
+    """GET ``url`` (SGLang ``/flush_cache``); the HTTP status (400 = engine busy)."""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
+            return int(response.status)
+    except urllib.error.HTTPError as error:
+        return int(error.code)
+
+
+class EvalIsolationError(RuntimeError):
+    """The rollout engines' prefix cache could not be reset before training generation."""
+
+
+# 1.7 load attribution: what the tool-wait count is when no board is wired.
+# ``stock``: Miles' own generate (no custom generate function) makes no tool
+# calls, so 0 is known; any other custom generate without a board is unknown.
+TOOL_WAIT_NO_BOARD_STOCK = "stock-generate"
+
+
+def _engine_load(entries: Any) -> tuple[int, int] | None:
+    """SGLang ``/get_load`` (one entry per DP rank) -> (running, waiting)."""
+    if not isinstance(entries, list) or not entries:
+        return None
+    running = waiting = 0
+    for entry in entries:
+        if not isinstance(entry, dict) or "num_reqs" not in entry or "num_waiting_reqs" not in entry:
+            return None
+        total, queued = int(entry["num_reqs"]), int(entry["num_waiting_reqs"])
+        running += total - queued
+        waiting += queued
+    return running, waiting
+
+
+def _engine_capacity(info: Any) -> int | None:
+    """SGLang ``/server_info``: concurrent requests the engine admits (sum over DP ranks)."""
+    if not isinstance(info, dict):
+        return None
+    states = info.get("internal_states")
+    if isinstance(states, list) and states:
+        values = [s.get("effective_max_running_requests_per_dp") for s in states
+                  if isinstance(s, dict)]
+        if values and all(isinstance(v, int) and v > 0 for v in values):
+            return int(sum(values))
+    value = info.get("max_running_requests")
+    return int(value) if isinstance(value, int) and value > 0 else None
+
+
 class MilesRolloutPool:
     """``RolloutPool`` port. ``expected_policy`` returns the published (version, hash)."""
 
@@ -341,10 +392,23 @@ class MilesRolloutPool:
         worker_manager: Any = None,
         bundles: Any = None,
         gpus_per_engine: int | None = None,
+        isolate_eval_cache: bool = False,
+        load_tool_wait: Any = None,
     ) -> None:
         # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
         # tool-wait count, so trajectory_load() is unknown (None).
         self._tool_wait_board = tool_wait_board
+        # 1.7 load samples read tool waits from ``load_tool_wait`` (a board,
+        # TOOL_WAIT_NO_BOARD_STOCK, or None = unknown); default: the drain board.
+        self._load_tool_wait = load_tool_wait if load_tool_wait is not None else tool_wait_board
+        # 2.3 (A2 criterion 5): reset every engine's prefix cache before each
+        # training generation, so an eval's cached prompts (before generate in
+        # serial, after it in overlap) never change what training generation
+        # computes. Set by the entry when evaluation is configured.
+        self._isolate_eval_cache = bool(isolate_eval_cache)
+        self._capacity: dict[str, int] = {}
+        self.cache_flushes: list[dict[str, Any]] = []
+        self._http_flush = _http_flush
         self._args = args
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
@@ -403,6 +467,8 @@ class MilesRolloutPool:
         setter = getattr(self._metadata, "set_policy_token", None)
         if setter is not None:  # rollout-side group-reuse filter reads it
             setter(policy_token(policy_version, policy_hash))
+        if self._isolate_eval_cache:
+            self.flush_engine_caches(rollout_id)
         self._run(self._controller.prepare_rollout(rollout_id))
         data_pack = self._run(self._executor.get(rollout_id))
         self._offload_after_rollout()
@@ -421,30 +487,138 @@ class MilesRolloutPool:
         self._last_cursor = dict(handle.data_cursor) if handle.data_cursor else None
         return handle
 
-    def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, int] | None:
-        """rl-infra-spec 1.7: engine in-flight counts from the fork-M3 router.
-
-        ``GET /worker_inflight`` -> ``{"inflight": {worker_url: n}, "cordoned": [...]}``.
-        None when the router address is unknown or the router lacks the
-        endpoint (stock Miles without M3): unknown, never reported as 0.
-        """
+    def _router_inflight(self, http_get: Callable[[str], Any]) -> dict[str, Any] | None:
         args = self._args
         ip = getattr(args, "sglang_router_ip", None)
         port = getattr(args, "sglang_router_port", None)
         if not ip or not port:
             return None
         try:
-            data = (http_get or _http_get_json)(f"http://{ip}:{port}/worker_inflight")
+            data = http_get(f"http://{ip}:{port}/worker_inflight")
         except Exception:  # noqa: BLE001 - observation only; absent endpoint = unknown
             return None
         inflight = data.get("inflight") if isinstance(data, dict) else None
         if not isinstance(inflight, dict):
             return None
-        return {
+        return {"inflight": inflight, "cordoned": data.get("cordoned") or ()}
+
+    def flush_engine_caches(self, rollout_id: int, *, http_get: Callable[[str], Any] | None = None,
+                            attempts: int = 30, retry_s: float = 1.0) -> list[str]:
+        """2.3: ``/flush_cache`` on every rollout engine; fail closed.
+
+        Engine URLs come from the fork-M3 router (every registered worker,
+        cordoned ones included). SGLang refuses (HTTP 400) while requests are
+        running or waiting; before a training generation none should be, so a
+        few retries cover a just-finished eval, then the run stops rather than
+        generating on an un-isolated cache.
+        """
+        router = self._router_inflight(http_get or _http_get_json)
+        if router is None or not router["inflight"]:
+            raise EvalIsolationError(
+                f"rollout {rollout_id}: engine URLs unknown (router /worker_inflight); "
+                "cannot reset the prefix cache before training generation"
+            )
+        key = getattr(self._args, "sglang_api_key", None)
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        urls = sorted(router["inflight"])
+        for url in urls:
+            for attempt in range(attempts):
+                status = self._http_flush(url.rstrip("/") + "/flush_cache", headers)
+                if status == 200:
+                    break
+                if attempt + 1 < attempts:
+                    self._sleep(retry_s)
+            else:
+                raise EvalIsolationError(
+                    f"rollout {rollout_id}: {url}/flush_cache refused {attempts} times "
+                    f"(last HTTP {status})"
+                )
+        record = {"rollout_id": rollout_id, "engines": urls}
+        self.cache_flushes.append(record)
+        print("YETO_RL_EVAL_CACHE_FLUSH " + json.dumps(record, sort_keys=True), flush=True)
+        return urls
+
+    def _tool_wait_count(self) -> int | None:
+        source = self._load_tool_wait
+        if source is None:
+            return None
+        if source == TOOL_WAIT_NO_BOARD_STOCK:
+            return 0
+        from ..tool_wait import read_tool_wait
+
+        try:
+            return int(read_tool_wait(source).in_flight)
+        except Exception:  # noqa: BLE001 - observation only: unknown
+            return None
+
+    def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, Any] | None:
+        """rl-infra-spec 1.7: one load sample for ``timeline.classify_load``.
+
+        * ``active_requests``/``workers``/``cordoned``: fork-M3 router
+          ``GET /worker_inflight`` (E1's drain reads ``active_requests``);
+        * ``running_requests``/``queued_requests``: sum over engines of SGLang
+          ``GET /get_load`` (``num_reqs - num_waiting_reqs`` / ``num_waiting_reqs``);
+        * ``engine_capacity``: sum over engines of SGLang ``/server_info``
+          ``effective_max_running_requests_per_dp`` (read once per engine);
+        * ``tool_wait_trajectories``: the ToolWaitBoard count (0 for stock
+          generate, None = unknown);
+        * ``load_class``: ``classify_load`` of the above, ``"unknown"`` if any
+          input is unknown. ``ready_groups`` is not observable mid-rollout: None.
+
+        None when the router is unknown (stock Miles without M3): unknown,
+        never reported as 0. A failing engine endpoint makes its field None.
+        """
+        get = http_get or _http_get_json
+        router = self._router_inflight(get)
+        if router is None:
+            return None
+        inflight = router["inflight"]
+        sample: dict[str, Any] = {
             "active_requests": int(sum(int(v) for v in inflight.values())),
             "workers": len(inflight),
-            "cordoned": len(data.get("cordoned") or ()),
+            "cordoned": len(router["cordoned"]),
         }
+        running: int | None = 0
+        queued: int | None = 0
+        capacity: int | None = 0
+        for url in sorted(inflight):
+            base = url.rstrip("/")
+            try:
+                load = _engine_load(get(base + "/get_load"))
+            except Exception:  # noqa: BLE001
+                load = None
+            if load is None:
+                running = queued = None
+            elif running is not None:
+                running += load[0]
+                queued += load[1]
+            if url not in self._capacity:
+                try:
+                    cap = _engine_capacity(get(base + "/server_info"))
+                except Exception:  # noqa: BLE001
+                    cap = None
+                if cap is not None:
+                    self._capacity[url] = cap
+            cap = self._capacity.get(url)
+            capacity = None if cap is None or capacity is None else capacity + cap
+        tool = self._tool_wait_count()
+        sample.update(
+            running_requests=running,
+            queued_requests=queued,
+            engine_capacity=capacity or None,
+            tool_wait_trajectories=tool,
+            ready_groups=None,
+        )
+        from ..timeline import LoadSample, classify_load
+
+        known = None not in (running, queued, sample["engine_capacity"], tool)
+        sample["load_class"] = (
+            classify_load(LoadSample(queued_requests=queued, active_requests=running,
+                                     tool_wait_trajectories=tool, ready_groups=0,
+                                     engine_capacity=sample["engine_capacity"]))
+            if known else "unknown"
+        )
+        return sample
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""

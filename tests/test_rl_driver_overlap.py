@@ -149,6 +149,10 @@ def test_ports_entry_opts_into_eval_overlap_only_when_asked():
     assert build(part).execution_mode == "partitioned-serial"  # default unchanged
     args.yeto_rl_overlap_eval = True
     args.eval_interval = 1
+    # A2 criterion 5: a sampled eval (rollout temperature by default) is refused
+    with pytest.raises(ProfileError, match="greedy eval"):
+        build(part)
+    args.eval_temperature = 0.0
     p = build(part)
     assert p.execution_mode == "partitioned-overlap" and p.allowed_overlap == IMPLEMENTED_OVERLAP
     caps = entry.with_partitioned_serial(entry.miles_capabilities("sha256:" + "1" * 64))

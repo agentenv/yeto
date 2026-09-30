@@ -64,3 +64,11 @@
 - 判据 6 原稿用 driver 发射的 eval span（generate 结束→join），该区间恒包住 train，判据无法证伪，也会让 1.7 计费虚高（独立审查 H1）。已改为 eval 协程内部记录的真实区间与 train span 的交集，并同步修改代码（`overlap.LoopEvalHandle`）。
 - 判据 5 原稿允许运行前在两种口径中二选一；现已定死为上文口径（审查 L4）。
 - 已知差异（审查 L3），不作为不通过理由，但须在结果中如实记录：(a) O 中 eval(v_r) 挪到 generate(r) 之后执行，SGLang 引擎内的采样 RNG 消耗顺序与 S 不同；eval 为贪心不受影响，但**训练 rollout** 若使用引擎内 RNG，第 r+1 轮起 generate 前的 RNG 状态可能与 S 不同，判据 2（sample-id 哈希）只比较样本身份，不比较生成文本；若判据 2 失败而原因为 RNG 顺序，按"未通过"记录并另行分析，不改判据。(b) 若某轮在 train/outer_sync 中失败，O 会取消在飞的 eval(v_r)（`rl_eval_overlap_aborted`），该点的 eval 结果丢失；S 中 eval(v_r) 在 generate(r) 之前已完成，不会丢失。
+
+### L-2.3 追加：A2 判据 5 未通过后的代码修复（2026-09-30 INFRA-A；判定条件未改）
+
+- A2 结果（gpu-b1 `evidence/infra-v2-b1/a2/RESULT.md`）：判据 1/2/3/4/6 通过，判据 5 硬条件不通过（v1 起 S 与 O 的 policy token 不同）。判据不改；按"查明原因并修复后才重跑"处理。
+- 原因分析：eval 为 temperature 0，SGLang 将其规范化为 top_k=1，采样走 argmax（`sampling_params.py:217-220`、`sampler.py:184`），**不消耗**引擎采样 RNG。因此 L3(a) 中登记的"RNG 消耗顺序"不是主要机制。更符合证据的解释是引擎状态：发布时 Miles 在暂停引擎后 `flush_cache`（`weight_update/session.py pause_engines`，`--pause-generation-mode` 不是 in_place 时），S 在发布之后、generate 之前跑 eval，eval prompt 留在 radix cache 与 KV 分配器中，训练 generate 的前缀命中与 KV 布局随之改变，数值不同，采样分叉；O 与无 eval 的 B 在 generate 前都是刚 flush 的状态，所以 token 相同（与旁证一致）。该解释在 CPU 上无法证实，只能由重跑检验。
+- 修复（代码，已提交）：配置了 eval 时，每次训练 generate 之前对所有 rollout engine 调 SGLang `/flush_cache`（URL 取自 fork-M3 router `/worker_inflight`；忙时重试，最终失败即中止运行，不在未隔离的 cache 上生成）。S 与 O 的训练 generate 因此都从同一个刚 flush 的引擎状态开始，与 eval 的有无和时序无关。stdout 打印 `YETO_RL_EVAL_CACHE_FLUSH {"rollout_id", "engines"}` 作为证据。overlap 另外要求 eval 为贪心（temperature 0，缺省则取 rollout temperature 并拒绝），因为带采样的 eval 会消耗引擎 RNG，而本修复不隔离 RNG。
+- 对默认路径的影响：不配置 eval 的运行完全不变（不 flush）。配置了 eval 的 serial 运行每轮 generate 前多一次 flush：prefix cache 只影响性能，不改变采样分布；但生成文本的具体数值会与修复前的运行不同，所以修复前运行的 token 不能与修复后的运行逐位比较。既有判据都是同一批次内各 arm 之间的比较，不受影响。
+- 重跑 A2 的前提：同一计划、同一判据、三个 arm 用修复后的同一 SHA。已知残余风险（事先登记）：多 engine 时 router 的负载均衡状态也会受 eval 请求影响，A2 为单 engine（T1R1），不涉及。

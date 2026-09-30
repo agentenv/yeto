@@ -317,6 +317,7 @@ def execution_profile_for(
             placement_kind="colocated" if mode == "colocated-serial" else "fixed-partition",
             eval_uses_snapshots=bool(getattr(miles_args, "eval_uses_snapshots", False)),
             eval_interval=getattr(miles_args, "eval_interval", None),
+            eval_temperature=effective_eval_temperature(miles_args),
         )
         mode, overlap = "partitioned-overlap", IMPLEMENTED_OVERLAP
     if expected_sha256 is None:
@@ -339,6 +340,37 @@ def execution_profile_for(
         algorithm_spec_sha256=expected_sha256,
         extra={"algorithm_hash_source": source},
     )
+
+
+def effective_eval_temperature(miles_args: Any) -> Any:
+    """Miles' eval temperature: ``--eval-temperature``, else the rollout one."""
+    value = getattr(miles_args, "eval_temperature", None)
+    return getattr(miles_args, "rollout_temperature", 1.0) if value is None else value
+
+
+def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
+    """1.7: where load samples read the in-flight tool-wait count from.
+
+    The elastic drain board when wired; the island's named board when the
+    tool-wait workload generate is configured (it counts on that board); 0
+    (``TOOL_WAIT_NO_BOARD_STOCK``) for Miles' stock generate, which makes no
+    tool calls; None (unknown) for any other custom generate.
+    """
+    from .rollout import TOOL_WAIT_NO_BOARD_STOCK
+
+    board = getattr(elastic, "tool_wait_board", None) if elastic is not None else None
+    if board is not None:
+        return board
+    custom = getattr(miles_args, "custom_generate_function_path", None)
+    if not custom:
+        return TOOL_WAIT_NO_BOARD_STOCK
+    from yeto.rl.tool_wait_workload import GENERATE_PATH
+
+    if custom == GENERATE_PATH:
+        from .elastic_wiring import LazyBoardActor
+
+        return LazyBoardActor(int(getattr(miles_args, "yeto_rl_learner_id", 0) or 0))
+    return None
 
 
 def preflight(profile: Any, algorithm: AlgorithmSpec, capabilities: EngineCapabilities) -> None:
@@ -448,6 +480,12 @@ def compose_island(
             expected_policy=expected_policy,
             runner=runner,
             args=miles_args,
+            # 2.3 (A2 criterion 5): with evaluation configured, training
+            # generation always starts from a flushed prefix cache, so eval
+            # timing (serial before generate / overlapped after it) cannot
+            # change what training generation computes.
+            isolate_eval_cache=bool(evaluate is not None and eval_interval),
+            load_tool_wait=load_tool_wait_source(miles_args, elastic),
             **(
                 {"declared_cells": resolve_declared_cells(
                     inference_controller, runner, elastic.declared_cells),
