@@ -336,6 +336,11 @@ class MilesTrainerGroup:
     def layout(self) -> dict[str, int]:
         return trainer_layout(self._args)
 
+    def rebind_args(self, args: Any) -> None:
+        """Follow the Miles args of the rebuilt trainer (4.6/4.7: another DP size / bundle set)."""
+        trainer_layout(args)  # validates world % (tp*pp*cp)
+        self._args = args
+
     def save_cut(self, *, epoch: int, context: "CutContext") -> str:
         """Write every rank's shard, then commit the manifest; returns the cut id.
 
