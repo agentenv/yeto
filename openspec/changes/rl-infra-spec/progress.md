@@ -339,3 +339,11 @@
 - 测试：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE` 结果为 68 failed, 2904 passed, 49 skipped, 26 errors。（回归修复后复跑：68 failed, 2905 passed, 49 skipped, 26 errors）失败和错误的 id 共 94 个，按 id 前缀规范化后与 /tmp/integ-s2-base.ids（修复前基线）完全一致，没有新增失败，都是已知环境性失败。`openspec validate rl-infra-spec --strict` 通过。
 - 仍存限制：3.7 watchdog 默认没有接 kill（`on_watchdog` 默认未接线，阻塞的引擎调用不受截止时间约束）；H2 限制见 E1 记录。GPU 验收均未进行，task 勾选状态不变。
 - 云资源：无；费用 $0。
+
+## GPU 验收计划 v2（2026-09-30，PLAN-V2；分支 gpu-plan-v2，基于 integ-decl 65ca03b）
+- 用户决定：GPU 验收先做 A1–A9，A10（4.8）暂缓；A1–A9 硬上限 $300（含重跑）。
+- 交付：`gpu-plan-v2.md`（逐项 task/原文、复用证据、卡×数、时长、GPU·h、估价、事先固定判据、硬超时、回收、前缀 `infra-v2-*`、批次与预算、砍项顺序）；`gpu-plan.md` 顶部注明被 v2 取代（A1–A9 部分）；alignment §7b 追加用户决定。
+- 期望费用：4 卡档 ≈$154（4.6 no-go ≈$131），8 卡原文档 ≈$213；批次硬预算 4 卡档 B1 $115 / B2 $95 / B3 $65 / 未分配 $25，8 卡档 B1 $170 / B2 $80 / B3 $50。
+- 复用不重跑：A1（1.2 已勾）、A3（2.4 合法否定结论）、2.1/2.2/2.3 X9 guard 已有 GPU 证据。
+- 待用户确认：A4 4 卡代替原文 8 卡（实质改变验收）；A2+（L-1.7）；可选 Nebius；未分配 $25 的动用授权。
+- 状态：仅规划；未启动任何资源，费用 $0；无 task 勾选变化。4.8：未完成（用户决定暂缓）。
