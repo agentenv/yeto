@@ -728,3 +728,14 @@
 - 运行脚本（本机，非仓库）：`/home/michael/work/gpu-b1-runs/`：`n2run.sh`（Nebius no-sync 岛，含 autostop/watchdog/20 min 进度看门狗/ssh puller）、`n2inwatch.sh`+`inwatch.py`（容器内按磁带相位写 inbox，同时启动 `router_sampler.py`）、`router_sampler.py`（节点 IP 自动发现 Miles router、0.5 s 采样 /worker_inflight，2 s 采样 compute-apps）、`run_probe.sh`+`fork_probe.py`（用 learner 同一解释器/环境调用 fork：membership、weight versions、cell statuses、stale ACK、旧 epoch）、`selfcheck.sh`（首个 generate 后自检采样器与探针，不可用即 nstop）、`after_term.sh`（事务终态后探针+停机）、`nstop.sh`（拉证据、sky down、nebius API 核实）、`arun.sh`/`mrun.sh`/`hrun.sh`（Modal 版）。参数：`cfg/a4-args.txt`、`cfg/resources-8.json`、`cfg/attestation-8.json`（指纹 2d0a00f4，仅对代码 47efd25 的 argv 有效）。注意：`router_sampler.py` 与 `run_probe.sh` 的修复（节点 IP、`[y]eto.rl.learner`）尚未在真机上验证过。
 - 资源：Modal 本 agent app 全部 stopped；Nebius 实例 0；sky 无集群；本地进程已停。累计 ≤$92.58。
 - 交接停止补充：A4 watchdog 重跑实际 ≤$5.39（14:57:48–15:08:18），台账已标“交接停止”。Nebius 遗留孤儿安全组 vpcsecuritygroup-e00a60g9g8z4kdhc83 已由主 agent 记入交接文档，本 agent 未处理。
+
+## GPU-B1 会话 3：A4 续跑（停在代码缺陷 / 待裁定处）
+- 分支 gpu-b1 已与 origin/integ-decl（9a06c4b）合并（快进）；运行用 `git archive 9a06c4b`。计划 gpu-plan-v2 §9.20；证据与 RESULT：`evidence/infra-v2-b1/a4s3/`（`RESULT.md`、`e1b/`、`watchdog/`、`tools/`）。
+- 步骤 1 指纹：本机重建、在 47efd25 上复现真机 2d0a00f4…；9a06c4b 12 轮仍为 2d0a00f4…（argv 未变）；3/4/5 轮另有值；真机 `rl_driver_start` 两次核对一致。
+- 步骤 2 E1-A：**未上卡，待裁定**（§9.18 口径下 down 无成员发布事件 → (c) 必然未通过；需给 down 补事件或改口径）。
+- 步骤 3 E1-B：**不通过，yeto 代码缺陷**：`--rl-test-inject-lora-perturb` 的钩子在 async `_publish_members` 内同步调用 `perturb_trainer`，报 "This event loop is already running"，随后 driver "Fatal async misuse" 中止；REBUILT_OLD 的原因不是 check_weights 拒绝。需 INFRA 修（放 executor/改 await），再跑（约 $13）。
+- 步骤 4 watchdog：**判据 1 未通过，待裁定**：Nebius 上 start_cells ≈143 s > deadline 120 s，watchdog 触发时无目标进程可杀。重跑需把 deadline 设为 ≥ 启动时间+margin（改参数，需裁定）。
+- 步骤 5、6（E1-D ①–⑦、E1-C/A4b）：未跑；注入器 `dkill.py`/`dctl.py`、after-hook 已备好（tools/）。
+- 工具修复：探针（解释器无 ray；`ray.init("auto")` 连到 SkyPilot 的 Ray 2.9.3，改用 learner 的 RAY_ADDRESS + 能 import ray 的 /opt/sglang python）、selfcheck 增加指纹比对且探针失败非致命、nstop 杀 `_worker` 残留并拉 dkill/dctl/gpu_samples 日志。
+- 费用：本批（会话 3）≤$44.58（E1-B 两次 selfcheck 停止 $9.70+$9.71、watchdog $12.21、E1-B 第三次 $12.96）；全局按主 agent 口径约 $152+$44.6。云资源：sky 无集群、nebius 实例 0、本地无残留进程。
+- 下一步：INFRA 修 lora_perturber → 重跑 E1-B；裁定 E1-A(c)/watchdog deadline 后重跑；再按 §9.20 跑 E1-D（D123 合并 5 轮 35 min、D4、D5、D6、D7）与 E1-C/A4b；全部结束后合入 integ-s2（integ-s3）跑全量测试做 id 对比、`openspec validate --strict`，再快进 push integ-s3 与 integ-decl。

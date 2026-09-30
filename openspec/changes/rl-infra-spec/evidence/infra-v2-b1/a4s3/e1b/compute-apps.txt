@@ -1,0 +1,142 @@
+2026-09-30T17:41:46Z
+2026-09-30T17:42:03Z
+2026-09-30T17:42:20Z
+2026-09-30T17:42:37Z
+2026-09-30T17:42:53Z
+2026-09-30T17:43:10Z
+2026-09-30T17:43:28Z
+2026-09-30T17:43:46Z
+2026-09-30T17:44:03Z
+2026-09-30T17:44:20Z
+2026-09-30T17:44:37Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 33748 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 33748 MiB
+2026-09-30T17:44:54Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 33876 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 33876 MiB
+2026-09-30T17:45:11Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 34430 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 34430 MiB
+2026-09-30T17:45:28Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 34508 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 34508 MiB
+2026-09-30T17:45:49Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 34622 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 34622 MiB
+2026-09-30T17:46:08Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 34798 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 34798 MiB
+2026-09-30T17:46:26Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 34652 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 34666 MiB
+2026-09-30T17:46:42Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 34676 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 34676 MiB
+2026-09-30T17:47:00Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor.init, 3666 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor.init, 3714 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor.init, 3714 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor.init, 3474 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 34696 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 34696 MiB
+2026-09-30T17:47:17Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor.train, 6380 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor.train, 5670 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor.train, 5702 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor.train, 5250 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35820 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35760 MiB
+2026-09-30T17:47:35Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35790 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35732 MiB
+2026-09-30T17:47:54Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35750 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35690 MiB
+2026-09-30T17:48:13Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35750 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35690 MiB
+2026-09-30T17:48:34Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35750 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35690 MiB
+GPU-924c939e-d083-1868-d3b1-67104f406995, 33822, sglang::scheduler, 34386 MiB
+GPU-d2b26979-0808-847c-dabf-b21eda1b13f6, 33825, sglang::scheduler, 34386 MiB
+2026-09-30T17:48:53Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35750 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35690 MiB
+GPU-924c939e-d083-1868-d3b1-67104f406995, 33822, sglang::scheduler, 34474 MiB
+GPU-d2b26979-0808-847c-dabf-b21eda1b13f6, 33825, sglang::scheduler, 34474 MiB
+2026-09-30T17:49:11Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35750 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35690 MiB
+GPU-924c939e-d083-1868-d3b1-67104f406995, 33822, sglang::scheduler, 34554 MiB
+GPU-d2b26979-0808-847c-dabf-b21eda1b13f6, 33825, sglang::scheduler, 34554 MiB
+2026-09-30T17:49:27Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35750 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35690 MiB
+GPU-924c939e-d083-1868-d3b1-67104f406995, 33822, sglang::scheduler, 34658 MiB
+GPU-d2b26979-0808-847c-dabf-b21eda1b13f6, 33825, sglang::scheduler, 34658 MiB
+2026-09-30T17:49:45Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35750 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35690 MiB
+GPU-924c939e-d083-1868-d3b1-67104f406995, 33822, sglang::scheduler, 34832 MiB
+GPU-d2b26979-0808-847c-dabf-b21eda1b13f6, 33825, sglang::scheduler, 34832 MiB
+2026-09-30T17:50:01Z
+GPU-4cdc8a05-2dd3-dc20-22d7-fdabbf9f7225, 24258, ray::MegatronTrainRayActor, 9384 MiB
+GPU-ae868ea1-7f40-a04c-2df3-0b9d14c6a1df, 24259, ray::MegatronTrainRayActor, 9738 MiB
+GPU-68bcc519-a234-3163-941c-11bcd18a2fbe, 24260, ray::MegatronTrainRayActor, 8686 MiB
+GPU-6f7bef9a-6dc6-59cb-e09d-475a93190e1a, 24261, ray::MegatronTrainRayActor, 7814 MiB
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 25602, sglang::scheduler, 35750 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 25599, sglang::scheduler, 35690 MiB
+GPU-924c939e-d083-1868-d3b1-67104f406995, 33822, sglang::scheduler, 34672 MiB
+GPU-d2b26979-0808-847c-dabf-b21eda1b13f6, 33825, sglang::scheduler, 34672 MiB
+2026-09-30T17:50:19Z
+2026-09-30T17:50:38Z
+2026-09-30T17:50:55Z
+2026-09-30T17:51:15Z
+2026-09-30T17:51:31Z
+2026-09-30T17:51:48Z
+2026-09-30T17:52:05Z
+2026-09-30T17:52:21Z
+2026-09-30T17:52:37Z
+2026-09-30T17:52:54Z
+2026-09-30T17:53:12Z
+2026-09-30T17:53:30Z
+2026-09-30T17:53:47Z
+2026-09-30T17:54:04Z
+2026-09-30T17:54:21Z
+2026-09-30T17:54:38Z
+2026-09-30T17:54:55Z
+GPU-598228a0-9553-dd33-386f-c2f464aaaa22, 52757, sglang::scheduler, 34386 MiB
+GPU-5a2ae627-3c2c-44c0-f6be-1735a85472c0, 52754, sglang::scheduler, 34386 MiB
