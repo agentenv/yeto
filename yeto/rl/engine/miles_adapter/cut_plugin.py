@@ -746,6 +746,11 @@ def _slice_check(export: Mapping[str, Any], merged: Mapping[str, Any]) -> list[s
             out.append(f"{name}: not in the cut")
             continue
         start, end = int(entry["start"]), int(entry["end"])
+        if set(entry["tensors"]) != set(full["tensors"]) or set(entry["scalars"]) != set(full["scalars"]):
+            # e.g. exp_avg/exp_avg_sq silently not restored (lazy optimizer state, GPU C1 diagnostic 2)
+            out.append(f"{name}: restored state keys {sorted(entry['tensors'])}+{sorted(entry['scalars'])} "
+                       f"!= cut {sorted(full['tensors'])}+{sorted(full['scalars'])}")
+            continue
         for key, piece in entry["tensors"].items():
             want = full["tensors"][key][start:end]
             if not torch.equal(piece.reshape(-1).to(want.dtype), want):

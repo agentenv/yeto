@@ -273,6 +273,7 @@ def resized_args(args: Any, trainer_gpus: int) -> Any:
         raise RuntimeError("trainer DP change is implemented for a single-node trainer only")
     new = copy.copy(args)
     new.actor_num_gpus_per_node = int(trainer_gpus)
+    new.world_size = int(trainer_gpus)  # parse derives it (arguments.py:2850); the ranks reset it from dist
     return new
 
 

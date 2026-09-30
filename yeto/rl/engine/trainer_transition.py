@@ -257,10 +257,12 @@ class TrainerTransition:
         cut_hash = self.state.policy_tensor_hash()
         cursor = dict(self.trainer.data_cursor())
         removed: frozenset[str] = frozenset()
+        again_gpus = None
         if plan.remove_engines:
             removed = frozenset(plan.remove_members)
             current = getattr(self.pool, "member_gpus", None)
-            again, problem = members_on_gpus(current() if callable(current) else None, plan.moved_gpus)
+            again_gpus = current() if callable(current) else None
+            again, problem = members_on_gpus(again_gpus, plan.moved_gpus)
             if problem or frozenset(again) != removed or not removed <= old_members:
                 return TransitionResult("CANCELLED", error="engines on the moved GPUs changed since planning: "
                                                            f"{problem or sorted(again)} vs {sorted(removed)}")
@@ -284,6 +286,14 @@ class TrainerTransition:
         try:
             if removed:
                 self._fork_call("stop", removed, lambda e: self.pool.remove_engines(removed, epoch=e))
+                # fork F-R1 order (rollout->trainer): drain -> stop_cells -> unbind_cell ->
+                # trainer M6; the stopped cells release their bundles to the trainer.
+                self._removed_gpus = {m: tuple(g) for m, g in (again_gpus or {}).items()
+                                      if m in removed}
+                unbind = getattr(self.pool, "unbind_members", None)
+                if callable(unbind):
+                    unbind(removed)
+                    self._record("engines_unbound", tx_id=self.tx_id, members=sorted(removed))
             result = self.trainer.resize(plan, cut_id, epoch=self.epoch)
             self._record("trainer_rebuilt", tx_id=self.tx_id, outcome=result.outcome,
                          attempts=list(getattr(result, "attempts", ())))
@@ -356,6 +366,12 @@ class TrainerTransition:
         try:
             missing = old_members - frozenset(self.pool.members())
             if missing:
+                # unbound by the forward path: bind them back to the GPUs they had
+                previous = getattr(self, "_removed_gpus", {}) or {}
+                bind = getattr(self.pool, "bind_members", None)
+                if previous and callable(bind):
+                    for member in sorted(missing & set(previous)):
+                        bind(frozenset({member}), previous[member])
                 self._fork_call("start", missing,
                                 lambda e: self.pool.add_engines(len(missing), epoch=e, members=missing))
                 pub = self.publisher.publish_members(self.state, missing, epoch=self._fork_epoch(),
