@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from types import SimpleNamespace
 
 import pytest
@@ -68,14 +70,11 @@ def test_corrupted_truncated_and_foreign_shards_are_refused(tmp_path):
     path = tmp_path / s["path"]
     data = path.read_bytes()
     path.write_bytes(data[:-10])
-    with pytest.raises(CutPluginError, match="truncated"):
-        restore_cut_shard(make_rank(1), directory=str(tmp_path), files=[s], cut_id="c1")
+    assert re.search("truncated", restore_cut_shard(make_rank(1), directory=str(tmp_path), files=[s], cut_id="c1")["refused"])
     path.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
-    with pytest.raises(CutPluginError, match="checksum"):
-        restore_cut_shard(make_rank(1), directory=str(tmp_path), files=[s], cut_id="c1")
+    assert re.search("checksum", restore_cut_shard(make_rank(1), directory=str(tmp_path), files=[s], cut_id="c1")["refused"])
     path.write_bytes(data)
-    with pytest.raises(CutPluginError, match="not a shard of cut"):
-        restore_cut_shard(make_rank(1), directory=str(tmp_path), files=[s], cut_id="other")
+    assert re.search("not a shard of cut", restore_cut_shard(make_rank(1), directory=str(tmp_path), files=[s], cut_id="other")["refused"])
 
 
 def test_layout_change_is_refused(tmp_path):
@@ -83,8 +82,7 @@ def test_layout_change_is_refused(tmp_path):
     s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
     other = make_rank(0, coord={"global_rank": 0, "tp": 0, "pp": 0, "dp": 0, "dp_size": 2,
                                 "cp_size": 1, "ep_size": 1})
-    with pytest.raises(CutPluginError, match="same-shape"):
-        restore_cut_shard(other, directory=str(tmp_path), files=[s], cut_id="c1")
+    assert re.search("same-shape", restore_cut_shard(other, directory=str(tmp_path), files=[s], cut_id="c1")["refused"])
 
 
 def test_refused_restore_writes_nothing(tmp_path):
@@ -94,8 +92,7 @@ def test_refused_restore_writes_nothing(tmp_path):
     fresh = make_rank(3)
     fresh._yeto_cut_backend.check_optimizer = lambda *a: (_ for _ in ()).throw(ValueError("mismatch"))
     before = params(fresh)
-    with pytest.raises(ValueError):
-        restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")
+    assert "mismatch" in restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")["refused"]
     for n, v in before.items():
         assert torch.equal(v, params(fresh)[n])
 
@@ -103,15 +100,13 @@ def test_refused_restore_writes_nothing(tmp_path):
 def test_shard_is_immutable(tmp_path):
     rank = make_rank(0)
     save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
-    with pytest.raises(CutPluginError, match="immutable"):
-        save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    assert re.search("immutable", save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")["refused"])
 
 
 def test_pending_step_records_mean_not_at_step_boundary(tmp_path):
     state_plugin._STEP_GRAD_NORMS.append(1.0)
     try:
-        with pytest.raises(CutPluginError, match="step boundary"):
-            save_cut_shard(make_rank(0), directory=str(tmp_path), cut_id="c1")
+        assert re.search("step boundary", save_cut_shard(make_rank(0), directory=str(tmp_path), cut_id="c1")["refused"])
     finally:
         state_plugin._STEP_GRAD_NORMS.clear()
 
@@ -119,8 +114,7 @@ def test_pending_step_records_mean_not_at_step_boundary(tmp_path):
 def test_non_lora_trainable_parameters_are_refused(tmp_path):
     rank = make_rank(0)
     rank.model[0].base.weight.requires_grad_(True)
-    with pytest.raises(CutPluginError, match="other than LoRA"):
-        save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    assert re.search("other than LoRA", save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")["refused"])
 
 
 @pytest.mark.parametrize(
@@ -139,8 +133,7 @@ def test_unsupported_configurations(args, match):
 
 def test_unsupported_configuration_fails_before_writing(tmp_path):
     rank = make_rank(0, args=SimpleNamespace(fp16=True))
-    with pytest.raises(CutPluginError, match="fp16"):
-        save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    assert re.search("fp16", save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")["refused"])
     assert not list(tmp_path.iterdir())
 
 
@@ -171,8 +164,7 @@ def test_restore_into_a_trained_scheduler_is_refused_before_any_write(tmp_path):
     live = make_rank(3)
     train_step(live, _batches(1)[0])
     before = params(live)
-    with pytest.raises(CutPluginError, match="freshly built"):
-        restore_cut_shard(live, directory=str(tmp_path), files=[s], cut_id="c1")
+    assert re.search("freshly built", restore_cut_shard(live, directory=str(tmp_path), files=[s], cut_id="c1")["refused"])
     assert live.opt_param_scheduler.num_steps == 4
     for n, v in before.items():
         assert torch.equal(v, params(live)[n])
@@ -184,8 +176,7 @@ def test_scheduler_hyper_parameter_mismatch_is_refused_before_any_write(tmp_path
     fresh = make_rank(3)
     fresh.opt_param_scheduler.lr0 = 0.5
     before = params(fresh)
-    with pytest.raises(CutPluginError, match="hyper-parameters"):
-        restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")
+    assert re.search("hyper-parameters", restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")["refused"])
     for n, v in before.items():
         assert torch.equal(v, params(fresh)[n])
 
@@ -200,3 +191,70 @@ def test_tp_pp_with_distributed_optimizer_is_refused():
 def test_save_reports_optimizer_coverage(tmp_path):
     s = save_cut_shard(make_rank(0), directory=str(tmp_path), cut_id="c1")
     assert s["adapter_names"] == s["optimizer_names"] == ["lora_A", "lora_B"]
+
+
+def test_refusal_is_returned_but_a_failure_after_writing_raises(tmp_path, monkeypatch):
+    """Miles marks a cell errored on any run_plugin exception (GPU C1, 2026-09-30):
+    refusals before any write return {"refused"}; a failure after writing still raises."""
+    rank = make_rank(0)
+    train_step(rank, _batches(1)[0])
+    s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    assert "freshly built" in restore_cut_shard(rank, directory=str(tmp_path), files=[s], cut_id="c1")["refused"]
+    fresh = make_rank(4)
+
+    def boom(*a, **k):
+        raise RuntimeError("load failed")
+
+    fresh._yeto_cut_backend.load_optimizer = boom
+    with pytest.raises(RuntimeError, match="load failed"):
+        restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")
+
+
+def test_side_effect_free_state_removes_entries_created_by_a_read():
+    from collections import defaultdict
+
+    from yeto.rl.engine.miles_adapter.cut_plugin import side_effect_free_state
+
+    inner = SimpleNamespace(state=defaultdict(dict))
+    inner.state["kept"] = {"exp_avg": 1}
+    leaf = SimpleNamespace(optimizer=inner)  # Megatron wrapper -> torch optimizer
+    chained = SimpleNamespace(chained_optimizers=[leaf])
+    with side_effect_free_state(chained):
+        inner.state["new-empty"]
+        inner.state["new-filled"]["x"] = 1
+    assert set(inner.state) == {"kept", "new-filled"}
+
+
+def test_side_effect_free_state_never_swallows_errors():
+    """Defence in depth only: an exception raised by the read (e.g. a fixed fork-M5 refusing
+    missing/extra keys) propagates unchanged; only empty entries created by the read go."""
+    from collections import defaultdict
+
+    from yeto.rl.engine.miles_adapter.cut_plugin import side_effect_free_state
+
+    inner = SimpleNamespace(state=defaultdict(dict))
+
+    class ForkError(RuntimeError):
+        pass
+
+    with pytest.raises(ForkError, match="lacks exp_avg"):
+        with side_effect_free_state(SimpleNamespace(optimizer=inner)):
+            inner.state["p"]
+            raise ForkError("saved state of 'p' lacks exp_avg")
+    assert not inner.state
+
+
+def test_a_fixed_fork_setter_error_reaches_restore_cut(tmp_path):
+    """After the fork fix, a key mismatch raises inside load (after writes began) and the
+    restore fails -- not masked by the read wrapper."""
+    rank = make_rank(0)
+    train_step(rank, _batches(1)[0])
+    s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    fresh = make_rank(4)
+
+    def strict_load(optimizer, named, merged):
+        raise ValueError("saved state has keys the destination lacks: ['exp_avg']")
+
+    fresh._yeto_cut_backend.load_optimizer = strict_load
+    with pytest.raises(ValueError, match="destination lacks"):
+        restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")

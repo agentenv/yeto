@@ -29,7 +29,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PLAN_VERSION = "plan-v4"
+PLAN_VERSION = "plan-v5"
 IMAGE_DIGEST = "sha256:db81588406e157baa6a579f6378484b890371065abcc51eacd5a9650b5820cbf"
 IMAGE = f"ghcr.io/michaellchung/yeto-miles-ports@{IMAGE_DIGEST}"
 MILES_COMMIT = "2f23a0fca9b80f6a7300da401703c343014b03c0"
@@ -41,6 +41,10 @@ DATA = ("zhuzilin/gsm8k", "0cbd9f31d91ac21a7613dcbc7fef992adac459ae")
 HARNESS_PLAN_FILE = "yeto-rl-e2-harness.json"
 STATE_DIR = "~/yeto-rl/elastic-state"
 MODAL = "/tmp/modal-venv/bin/modal"
+INWATCH = Path(__file__).resolve().parent / "e2_inwatch.py"
+GPU_NAME = "NVIDIA H100 80GB HBM3"
+STALL_S = 20 * 60  # progress watchdog: no new tape event for 20 min (image pull + load included)
+ERROR_LINES = 40  # Traceback / RayTaskError / 5xx lines in the mirrored container log
 HEAD_PY = "/home/michael/work/gpu-head/venv/bin/python"
 
 
@@ -57,6 +61,8 @@ def common_args(model: str, *, gpu: str, prefix: str) -> list[str]:
         "--rollout-max-response-len", "384", "--seq-len", "1024", "--inner-lr", "1e-5",
         "--seed", "1234", "--apply-chat-template-kwargs", '{"enable_thinking": false}',
         "--trust-remote-code", "--rl-deterministic-trainer",
+        # no Modal re-run after a learner exit; Modal-side hard stop = plan-v3 §0 90 min + 5
+        "--modal-retries", "0", "--modal-timeout-s", "5700",
     ]
 
 
@@ -73,6 +79,10 @@ class Run:
     blocked: str | None = None  # why it cannot produce evidence yet (still generated)
     hard_s: int = 5400  # plan-v3 §0: 90 min
 
+    @property
+    def gpus(self) -> int:
+        return int(self.gpu.split(":", 1)[1].split("x", 1)[0])
+
     def args(self, prefix: str) -> list[str]:
         return common_args(self.model, gpu=self.gpu, prefix=f"{prefix}-{self.name}") + self.extra
 
@@ -87,8 +97,12 @@ def _elastic_c3(extra: list[str]) -> list[str]:
     return [
         "--total-steps", "6", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
         "--rl-elastic", "--rl-elastic-resources", "{RESOURCES}", "--rl-elastic-initial-config", "T2R1S0",
-        "--rl-elastic-cells", "c0", *extra,
+        # plan-v2 §0: C3 = Qwen3-1.7B, otherwise as C2 (LoRA dropout 0.05 included)
+        "--rl-lora-dropout", "0.05", *extra,
     ]
+
+
+FIXED_PARTITION = ["--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1"]
 
 
 def plan_runs() -> list[Run]:
@@ -96,10 +110,14 @@ def plan_runs() -> list[Run]:
     g42 = [f"G-4.2({c})" for c in "abcdeg"]
     g43 = ["G-4.3(1)", "G-4.3(2)", "G-4.3(3)", "G-4.3(4)", "L2"]
     runs = [
-        Run("c1", "C1", "modal:1xh100", "Qwen/Qwen3-0.6B", g42 + g43,
-            extra=["--total-steps", "6", "--rl-lora-dropout", "0.05"], harness=_harness("C1", 1)),
-        Run("c2", "C2", "modal:2xh100", "Qwen/Qwen3-0.6B", g42 + ["G-4.2(f)"] + g43,
-            extra=["--total-steps", "6", "--rl-lora-dropout", "0.05"], harness=_harness("C2", 2)),
+        # plan-v5: fixed-partition (trainer bundles exclusive; the fork refuses to start a
+        # rebuilt trainer cell on a bundle a running rollout cell uses)
+        Run("c1", "C1", "modal:2xh100", "Qwen/Qwen3-0.6B", g42 + g43,
+            extra=["--total-steps", "6", "--rl-lora-dropout", "0.05", *FIXED_PARTITION],
+            harness=_harness("C1", 1)),
+        Run("c2", "C2", "modal:3xh100", "Qwen/Qwen3-0.6B", g42 + ["G-4.2(f)"] + g43,
+            extra=["--total-steps", "6", "--rl-lora-dropout", "0.05", *FIXED_PARTITION],
+            harness=_harness("C2", 2)),
         Run("c3-b1", "C3", "modal:3xh100", "Qwen/Qwen3-1.7B", ["G-4.4 baseline"], extra=_elastic_c3([])),
         Run("c3-rb", "C3", "modal:3xh100", "Qwen/Qwen3-1.7B", ["G-4.4"], extra=_elastic_c3([]),
             rebuild_trigger=True),
@@ -155,22 +173,8 @@ def run_script(run: Run, rdir: Path, *, yeto_sha: str, source_repo: Path) -> str
     harness_copy = (f"cp {rdir}/harness.json $R/yeto/{HARNESS_PLAN_FILE}\n" if run.harness else "")
     trigger = ""
     if run.rebuild_trigger:
-        trigger = f"""
-# controller rebuild-trainer once two rounds are on the tape (G-4.4 / G-4.5)
-setsid nohup bash -c '
-until [ -f $R/rc.txt ]; do
-  n=$(grep -c "\\"rl_round_trained\\"" $R/pulled/rl-island-0.jsonl 2>/dev/null || echo 0)
-  if [ "$n" -ge 2 ] && [ ! -f $R/rebuild.sent ]; then
-    c=$(cat $R/pulled/container_id.txt)
-    HOME=$R/home timeout 1200 {MODAL} container exec $c -- sh -c "cd ~/sky_workdir && PYTHONPATH=~/miles:~/sglang/python:. python3 -m yeto.rl.engine.controller --state-dir {STATE_DIR} rebuild-trainer rb1 --expected-epoch 0 --deadline-s 900" > $R/rebuild.out 2>&1
-    touch $R/rebuild.sent
-  fi
-  sleep 10
-done' > $R/trigger.log 2>&1 &
-"""
-    pull_extra = ("timeout 120 $M container exec $c -- sh -c 'cd ~/yeto-rl && tar czf - e2-harness 2>/dev/null | base64 -w0' > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/e2-harness.tgz.b64\n"
-                  if run.harness else
-                  "timeout 120 $M container exec $c -- sh -c 'cd ~/yeto-rl && tar czf - --exclude=elastic-state/cuts/*/trainer_* elastic-state 2>/dev/null | base64 -w0' > $R/pulled/.s && [ -s $R/pulled/.s ] && mv $R/pulled/.s $R/pulled/elastic-state.tgz.b64\n")
+        trigger = (f"# in-container trigger: rebuild request during round 2 train -> safe point before round 3\n"
+                   f"setsid nohup {rdir}/arm_inwatch.sh {rdir} > {rdir}/trigger.log 2>&1 < /dev/null &\n")
     return f"""#!/bin/bash
 # {PLAN_VERSION} {run.name} ({run.config}); generated by tools/probes/e2_cut_harness.py -- DRY-RUN ARTIFACT
 {GUARD}set -u
@@ -183,24 +187,19 @@ touch $R/yeto/yeto-rl-echo-events
 {harness_copy}# independent watchdog: stop the app after the hard timeout plus 5 min
 setsid nohup bash -c "sleep {run.hard_s + 300}; HOME=$R/home $M app stop -y {app} > $R/watchdog.out 2>&1" >/dev/null 2>&1 &
 echo $! > $R/watchdog.pid
-setsid nohup bash -c '
-export HOME=$R/home
-while [ ! -f $R/rc.txt ]; do
-  for c in $($M container list --json 2>/dev/null | /usr/bin/python3 -c "import json,sys
-try: d=json.load(sys.stdin)
-except Exception: d=[]
-[print(x[\\"container_id\\"]) for x in d if x.get(\\"app_name\\")==\\"{app}\\"]"); do
-    echo $c > $R/pulled/container_id.txt
-    timeout 60 $M container exec $c -- sh -c "cat /root/yeto-output/rl-island-0.jsonl 2>/dev/null" > $R/pulled/.t && [ -s $R/pulled/.t ] && mv $R/pulled/.t $R/pulled/rl-island-0.jsonl
-    [ -s $R/pulled/gpu.txt ] || timeout 60 $M container exec $c -- sh -c "nvidia-smi --query-gpu=index,uuid,name,driver_version --format=csv,noheader" > $R/pulled/gpu.txt
-    {pull_extra.strip()}
-  done
-  sleep 10
-done' > $R/puller.log 2>&1 &
+setsid nohup $R/puller.sh $R {app} {run.gpus} > $R/puller.log 2>&1 < /dev/null &
 echo $! > $R/puller.pid
 {trigger}
 (
 export HOME=$R/home YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto
+# private image pull credentials for the launcher (never printed)
+eval "$(/usr/bin/python3 - <<'PY'
+import base64, json, shlex
+a = json.load(open("/home/michael/.docker/config.json"))["auths"]["ghcr.io"]["auth"]
+u, t = base64.b64decode(a).decode().split(":", 1)
+print(f"export SKYPILOT_DOCKER_USERNAME={{shlex.quote(u)}} SKYPILOT_DOCKER_PASSWORD={{shlex.quote(t)}} SKYPILOT_DOCKER_SERVER=ghcr.io")
+PY
+)"
 cd $R/yeto
 date -u +%FT%TZ > $R/start_utc.txt
 eval "timeout {run.hard_s} {HEAD_PY} -m yeto.cli $(cat $R/args.txt)" > $R/launch.log 2>&1
@@ -210,6 +209,58 @@ sleep 15; mv $R/rc.txt.tmp $R/rc.txt
 )
 HOME=$R/home $M app stop -y {app} > $R/stop.out 2>&1
 HOME=$R/home $M app list > $R/app_list_after.txt 2>&1
+"""
+
+
+PULLER = r"""#!/bin/bash
+# usage: puller.sh <run dir> <app> <gpus>: tape, GPU/image guard (stop the app on mismatch), state
+R=$1; APP=$2; NG=$3; M=%(modal)s; export HOME=$R/home
+MC=%(miles)s
+while [ ! -f $R/rc.txt ]; do
+  for c in $($M container list --json 2>/dev/null | /usr/bin/python3 -c "import json,sys
+try: d=json.load(sys.stdin)
+except Exception: d=[]
+[print(x['container_id']) for x in d if x.get('app_name')=='$APP']"); do
+    echo $c > $R/pulled/container_id.txt
+    timeout 60 $M container exec $c -- sh -c "cat /root/yeto-output/rl-island-0.jsonl 2>/dev/null" > $R/pulled/.t && [ -s $R/pulled/.t ] && mv $R/pulled/.t $R/pulled/rl-island-0.jsonl
+    [ -s $R/pulled/gpu.txt ] || timeout 60 $M container exec $c -- sh -c "nvidia-smi --query-gpu=index,uuid,name,driver_version --format=csv,noheader" > $R/pulled/gpu.txt
+    if [ -s $R/pulled/gpu.txt ] && [ ! -f $R/pulled/guard.ok ] && [ ! -f $R/pulled/guard.fail ]; then
+      timeout 60 $M container exec $c -- sh -c "git --git-dir=/root/miles/.git rev-parse HEAD; cat /opt/yeto/image-manifest.json" > $R/pulled/image.txt
+      n=$(grep -c "%(gpu)s" $R/pulled/gpu.txt); total=$(grep -c . $R/pulled/gpu.txt)
+      tries=$(( $(cat $R/pulled/.guard_tries 2>/dev/null || echo 0) + 1 )); echo $tries > $R/pulled/.guard_tries
+      if [ ! -s $R/pulled/image.txt ] && [ "$tries" -lt 12 ]; then
+        :  # exec not answered yet (container still starting): retry next loop, never judge on empty output
+      elif [ "$n" = "$NG" ] && [ "$total" = "$NG" ] && grep -q "^$MC$" $R/pulled/image.txt && grep -q "2f23a0f-9f29303" $R/pulled/image.txt; then
+        date -u +%%FT%%TZ > $R/pulled/guard.ok
+      else
+        date -u +%%FT%%TZ > $R/pulled/guard.fail; $M app stop -y $APP > $R/guard_stop.out 2>&1
+      fi
+    fi
+    timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf - --exclude=trainer_*.pt e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts inwatch.log 2>/dev/null | base64 -w0" > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/state.tgz.b64
+    # progress watchdog: no new tape event for STALL_S, or too many error lines -> evidence above, then stop
+    now=$(date +%%s); lines=$(wc -l < $R/pulled/rl-island-0.jsonl 2>/dev/null || echo 0)
+    if [ "$lines" != "$(cat $R/pulled/.lines 2>/dev/null)" ]; then echo $lines > $R/pulled/.lines; echo $now > $R/pulled/.progress; fi
+    [ -s $R/pulled/.progress ] || echo $now > $R/pulled/.progress
+    errs=$(grep -cE " 5[0-9][0-9] |Traceback|RayTaskError" $R/launch.log 2>/dev/null || echo 0)
+    if [ ! -f $R/pulled/stall_stop.txt ] && { [ $((now - $(cat $R/pulled/.progress))) -gt %(stall)d ] || [ "$errs" -gt %(errs)d ]; }; then
+      echo "$(date -u +%%FT%%TZ) stall_or_errors lines=$lines errs=$errs" > $R/pulled/stall_stop.txt; $M app stop -y $APP >> $R/pulled/stall_stop.txt 2>&1
+    fi
+    # the learner exited (Modal would retry the island and bill again): evidence is pulled above -> stop
+    if grep -q "exited with" $R/launch.log 2>/dev/null && [ ! -f $R/pulled/exit_stop.txt ]; then
+      date -u +%%FT%%TZ > $R/pulled/exit_stop.txt; $M app stop -y $APP >> $R/pulled/exit_stop.txt 2>&1
+    fi
+  done
+  sleep 10
+done
+"""
+
+ARM_INWATCH = r"""#!/bin/bash
+# usage: arm_inwatch.sh <run dir>: install the in-container rebuild trigger once the guard passed
+R=$1; M=%(modal)s; export HOME=$R/home
+until [ -s $R/pulled/container_id.txt ] && [ -f $R/pulled/guard.ok ]; do [ -f $R/rc.txt ] && exit 1; [ -f $R/pulled/guard.fail ] && exit 1; sleep 5; done
+c=$(cat $R/pulled/container_id.txt); b64=$(base64 -w0 %(inwatch)s)
+timeout 120 $M container exec $c -- sh -c "mkdir -p ~/yeto-rl && echo $b64 | base64 -d > ~/yeto-rl/e2_inwatch.py && nohup python3 ~/yeto-rl/e2_inwatch.py train 2 rb1 0 900 > ~/yeto-rl/inwatch.out 2>&1 & sleep 2; ps -eo pid,args | grep [e]2_inwatch" > $R/inwatch-arm.txt 2>&1
+echo "armed rc=$? $(date -u +%%FT%%TZ)" >> $R/inwatch-arm.txt
 """
 
 
@@ -231,6 +282,13 @@ def write_plan(root: Path, prefix: str, *, yeto_sha: str, source_repo: Path) -> 
                 "model_revision": MODELS[run.model], "criteria": run.criteria, "blocked": run.blocked,
                 "hard_timeout_s": run.hard_s, "rebuild_trigger": run.rebuild_trigger}
         (rdir / "spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
+        fills = {"modal": MODAL, "miles": MILES_COMMIT, "gpu": GPU_NAME, "inwatch": INWATCH,
+                 "stall": STALL_S, "errs": ERROR_LINES}
+        (rdir / "puller.sh").write_text(PULLER % fills, encoding="utf-8")
+        (rdir / "puller.sh").chmod(0o755)
+        if run.rebuild_trigger:
+            (rdir / "arm_inwatch.sh").write_text(ARM_INWATCH % fills, encoding="utf-8")
+            (rdir / "arm_inwatch.sh").chmod(0o755)
         script = rdir / "run.sh"
         script.write_text(run_script(run, rdir, yeto_sha=yeto_sha, source_repo=source_repo), encoding="utf-8")
         script.chmod(0o755)

@@ -139,3 +139,58 @@ def train_step(rank, batch):
 
 def params(rank):
     return {n: p.detach().clone() for n, p in rank.model[0].named_parameters() if "lora" in n}
+
+
+class LazyStateDistOptBackend(TorchCutBackend):
+    """Reproduces the fork-M5 + Megatron DistOpt behaviour seen on GPU (C1 diagnostic 2):
+
+    * reading state (``_get_main_param_and_optimizer_states``) indexes a defaultdict ->
+      creates empty per-param entries on a fresh optimizer;
+    * the loader initializes Adam state (dummy step) only when ``state`` is empty, and
+    * its setter copies only keys the destination already has (extra keys silently dropped).
+    ``side_effect_free`` wraps reads the way ``MilesCutBackend.export_optimizer`` does.
+    """
+
+    def __init__(self, coord=None, *, side_effect_free=True):
+        super().__init__(coord)
+        self.side_effect_free = side_effect_free
+
+    def export_optimizer(self, optimizer, named):
+        from collections import defaultdict
+
+        from yeto.rl.engine.miles_adapter.cut_plugin import side_effect_free_state
+
+        if not isinstance(optimizer.state, defaultdict):
+            optimizer.state = defaultdict(dict, optimizer.state)
+        by_id = {id(p): n for n, p in named}
+
+        def read():
+            entries = {}
+            for group in optimizer.param_groups:
+                hyper = {k: v for k, v in group.items() if k != "params"}
+                for p in group["params"]:
+                    state = optimizer.state[p]  # defaultdict: creates an empty entry
+                    entries[by_id[id(p)]] = {"param": p.detach().clone(),
+                                             "state": {k: (v.clone() if torch.is_tensor(v) else v)
+                                                       for k, v in state.items()},
+                                             "hyper": dict(hyper)}
+            return {"format": "torch-test", "entries": entries}
+
+        if self.side_effect_free:
+            with side_effect_free_state(optimizer):
+                return read()
+        return read()
+
+    def load_optimizer(self, optimizer, named, merged):
+        by_name = dict(named)
+        if not optimizer.state:  # M5: dummy init only when the whole state is empty
+            for n, p in named:
+                optimizer.state[p] = {"step": torch.tensor(0.0), "exp_avg": torch.zeros_like(p),
+                                      "exp_avg_sq": torch.zeros_like(p)}
+        for name, entry in merged.items():
+            p = by_name[name]
+            p.data.copy_(entry["param"])
+            dst = optimizer.state[p]
+            for key, value in entry["state"].items():  # Megatron setter: existing keys only
+                if key in dst:
+                    dst[key] = value.clone() if torch.is_tensor(value) else value

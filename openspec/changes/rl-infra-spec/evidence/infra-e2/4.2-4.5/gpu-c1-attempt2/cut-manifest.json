@@ -1,0 +1,89 @@
+{
+ "algorithm": {
+  "algorithm_spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+  "plugin_sha256": [],
+  "ref_model": {
+   "base_model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+   "ref_load": "/root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+  },
+  "runtime_attrs_sha256": "d33da832a10b39274e9f76901b6927ffc0801d8002ba42c2fae307a6b8dc0f41"
+ },
+ "cut_id": "e2-c1-c0",
+ "data": {
+  "buffer_length": 0,
+  "epoch_id": 0,
+  "sample_group_index": 4,
+  "sample_index": 32,
+  "sample_offset": 4
+ },
+ "epoch": 0,
+ "files": [
+  {
+   "bytes": 141870129,
+   "coord": {
+    "cp_size": 1,
+    "dp": 0,
+    "dp_size": 1,
+    "ep_size": 1,
+    "global_rank": 0,
+    "pp": 0,
+    "pp_size": 1,
+    "tp": 0,
+    "tp_size": 1
+   },
+   "path": "trainer_tp0_pp0_dp0.pt",
+   "sha256": "e390869520c7d2dd5d65ce2796c40dec70c413cf1e05b1cc4c3b3c5a65a86add"
+  }
+ ],
+ "ledger": {
+  "carried_over": 0,
+  "carried_over_group_ids": [],
+  "engine_buffer_length": 0,
+  "engine_carried_over": 0,
+  "engine_discarded_groups": 0,
+  "last_rollout_id": 1,
+  "last_state": "outer_recorded",
+  "ready_unconsumed": 0,
+  "ready_unconsumed_group_ids": []
+ },
+ "manifest_sha256": "857c0f092c674c400fecc2e0c96062ee29abced9e812162c697aedb329de218b",
+ "outer": {
+  "policy_token": "yeto:2:ebbafd1f3065acb537edbec529b2857231350c3e86e0b1178ad2fac3ad264749",
+  "policy_version": 2,
+  "settled": true
+ },
+ "progress": {
+  "global_batch_size": 16,
+  "local_step": 2,
+  "next_rollout_id": 2,
+  "policy_hash": "ebbafd1f3065acb537edbec529b2857231350c3e86e0b1178ad2fac3ad264749",
+  "policy_version": 2,
+  "scheduler_samples": 32
+ },
+ "rank_summaries": [
+  {
+   "has_optimizer_state": true,
+   "has_rng": true,
+   "path": "trainer_tp0_pp0_dp0.pt",
+   "rng_digest": "ae418c90d869801d3966ac407c0bffdd74452d5416c586846bed7cd6fdfaa9a8",
+   "scheduler_samples": 32,
+   "state_digest": "bae8e12b71c5dfd1843935b66f3490146238c08bdcde1ebc21b9e0639bc4bc59"
+  }
+ ],
+ "runtime": {
+  "backend_fingerprint": "sha256:92c5f677bfffe90b9bb65390d38d04374b74a05c61c1c2c1f103f75e8dd7bc8a",
+  "distributed_optimizer": true,
+  "layout": {
+   "cp": 1,
+   "dp": 1,
+   "ep": 1,
+   "pp": 1,
+   "tp": 1,
+   "world": 1
+  },
+  "precision": "bf16",
+  "rng_policy": "exact",
+  "shard_schema": "yeto.cut_shard/v1"
+ },
+ "schema": "yeto.reconfiguration_cut/v1"
+}
