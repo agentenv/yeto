@@ -66,6 +66,43 @@ class PublicationError(RuntimeError):
         self.failed_members = failed_members
 
 
+# Test-only fault injection (plan-3.8-4.4-v2 §4, watchdog case): block this many
+# seconds before the FIRST member ``update_weights`` of the process (see
+# ``MilesPublisher._injected_block``). Unset (default) = no effect. Set by the
+# launcher's ``--rl-test-inject-update-weights-block-s``.
+INJECT_UPDATE_BLOCK_ENV = "YETO_RL_TEST_INJECT_UPDATE_WEIGHTS_BLOCK_S"
+
+
+def injected_update_block(environ: Any = None) -> float | None:
+    import os
+
+    raw = (os.environ if environ is None else environ).get(INJECT_UPDATE_BLOCK_ENV)
+    if raw in (None, ""):
+        return None
+    value = float(raw)
+    if not value > 0:
+        raise ValueError(f"{INJECT_UPDATE_BLOCK_ENV} must be a positive number of seconds")
+    return value
+
+
+async def _ray_cells_alive(cells: list[str]) -> bool:
+    """Every worker actor of ``cells`` answers (fork RayWorkerManager, exact generation)."""
+    import ray
+    from miles.utils.workers.ray_worker_manager import RayWorkerManager
+
+    manager = RayWorkerManager.get_handle()
+    try:
+        for cell in cells:
+            for info in await manager.get_worker_infos.remote(cell):
+                handle = await manager.get_actor_handle.remote(
+                    info.name, expected_generation=info.generation)
+                await asyncio.wait_for(handle.__ray_ready__.remote(), timeout=10)
+    except (ray.exceptions.RayActorError, asyncio.TimeoutError, AssertionError,
+            ray.exceptions.RayTaskError):
+        return False
+    return True
+
+
 def payload_digest(state: TrainableState) -> tuple[str, int]:
     """SHA256 and byte count of the canonical FP32 tensor payload."""
 
@@ -134,6 +171,11 @@ class MilesPublisher:
         # engines all reported the same body: the payload reference (3.5).
         self._reference: tuple[str, dict[str, Any]] | None = None
         self.track_timeout_s = 600.0
+        # Test-only block before the FIRST member update_weights (INJECT_UPDATE_BLOCK_ENV).
+        self._inject_block = injected_update_block()
+        self.injected_blocks: list[float] = []
+        self.liveness_probe: Callable[[list[str]], Any] | None = None  # async cells -> bool
+        self.block_poll_s = 1.0
 
     def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
         tensor_hash = state.policy_tensor_hash()
@@ -310,12 +352,33 @@ class MilesPublisher:
             raise PublicationError(f"serving engines do not all report {token}: {exc}") from exc
         await self._controller.end_commit_weight_version()
 
+    async def _injected_block(self, cells: list[str], seconds: float) -> None:
+        """TEST ONLY (plan-3.8-4.4-v2 §4): stand in for an ``update_weights`` blocked
+        on the new engines. Blocks up to ``seconds``; every ``block_poll_s`` it
+        checks that the target cells' worker actors are alive and fails as soon
+        as one is dead (as the real call fails when its engine is killed). It
+        emulates the blocked call on the yeto side; it is not a hang inside SGLang."""
+        import sys
+
+        self.injected_blocks.append(seconds)
+        print(f"[yeto] TEST INJECTION {INJECT_UPDATE_BLOCK_ENV}: blocking {seconds}s before "
+              f"update_weights({cells})", file=sys.stderr, flush=True)
+        probe = self.liveness_probe or _ray_cells_alive
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + seconds
+        while loop.time() < deadline:
+            await asyncio.sleep(min(self.block_poll_s, max(0.0, deadline - loop.time())))
+            if not await probe(cells):
+                raise RuntimeError(f"target engine of {cells} died during the injected block")
+
     async def _publish_members(
         self, token: str, cells: list[str], epoch: int
     ) -> dict[str, Any] | None:
         update_weights = self._update_weights or _default_update_weights()
         try:
             await self._controller.wait_cells_tracked(cells, timeout_seconds=self.track_timeout_s)
+            if self._inject_block is not None and not self.injected_blocks:
+                await self._injected_block(cells, self._inject_block)
             await update_weights(
                 self._args, self._actor, self._executor, self._controller,
                 members=cells, expected_epoch=epoch, admit_cordoned=True,
