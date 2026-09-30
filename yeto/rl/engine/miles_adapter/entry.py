@@ -586,6 +586,9 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         initial_config=config["initial_config"],
         runtime_fingerprint=fingerprint,
         declared_cells=tuple(config["declared_cells"]),
+        # 3.8 pause-budget inputs, only when the learner was given them.
+        **{k: config[k] for k in ("quorum_timeout_s", "idle_flow_timeout_s", "pause_margin")
+           if config.get(k) is not None},
     )
 
 

@@ -247,6 +247,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic: initial config id in the manifest")
     rl.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
                     help="--rl-elastic: rollout cell ids the fork declares at startup")
+    rl.add_argument("--rl-elastic-quorum-timeout-s", type=int, default=None, metavar="S",
+                    help="--rl-elastic: syncer --quorum-timeout-s, also the island's strict "
+                    "pause budget input (default: syncer default 900)")
+    rl.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic: measured network idle-flow timeout capping the pause")
+    rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
+                    help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
+                    "X6 cross-quorum runs only)")
     # Ports LoRA training-time heldout eval (forwarded to the learner's
     # --eval-*; the file is shipped inline and checked by SHA256 there).
     rl.add_argument("--rl-eval-interval", type=int, default=None, metavar="N",

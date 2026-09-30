@@ -229,6 +229,12 @@ class SyncSession(Protocol):
     # known).  Sessions without it are treated as non-final.
     # def is_final_round(self, driver, *, rollout_id: int) -> bool: ...
 
+    # Optional (rl-infra-spec 3.8): the outer phase at the round-boundary safe
+    # point, one of ``pause_audit.OUTER_PHASES``. Sessions without it are at
+    # the pausable phase (the safe point is only offered after a non-stop
+    # boundary and a complete publication).
+    # def outer_phase(self, driver, *, rollout_id: int) -> str: ...
+
 
 class ProgressStore(Protocol):
     def after_generate(
@@ -984,6 +990,30 @@ class IslandDriver:
             config_epoch=self.config_epoch,
         )
 
+    def outer_phase(self, rollout_id: int) -> str:
+        """The outer-sync phase at this safe point (3.8; pause_audit.OUTER_PHASES)."""
+        from .pause_audit import PAUSABLE_PHASE
+
+        probe = getattr(self.sync, "outer_phase", None)
+        return str(probe(self, rollout_id=rollout_id)) if callable(probe) else PAUSABLE_PHASE
+
+    def refuse_reconfiguration_for_finalization(self, rollout_id: int) -> None:
+        """3.8/X6: once the run is finalizing no switch may start; a pending
+        request is cancelled (journaled) and later requests are rejected."""
+        if self.controller is None:
+            return
+        refuse = getattr(self.controller, "enter_finalization", None)
+        if not callable(refuse):
+            return
+        poll = getattr(self.controller, "poll_commands", None)
+        if callable(poll):
+            poll()
+        cancelled = refuse(rollout_id=rollout_id)
+        for request_id in cancelled:
+            self.emit("rl_reconfiguration", rollout_id=rollout_id, result="CANCELLED",
+                      request_id=request_id, error="finalization refuses reconfiguration",
+                      config_epoch=self.config_epoch)
+
     def safe_point(self, rollout_id: int) -> str | None:
         """Offer the controller the round-boundary safe point; returns its result phase."""
         self.at_safe_point = True
@@ -1004,8 +1034,11 @@ class IslandDriver:
             {"eval_due": None if self.eval_overlap.due is None else self.eval_overlap.due[0]}
             if self.eval_overlap is not None else {}
         )
+        outer_phase = self.outer_phase(rollout_id)
         try:
-            result = self.controller.run_at_safe_point(self, self.safe_point_snapshot(rollout_id))
+            result = self.controller.run_at_safe_point(
+                self, self.safe_point_snapshot(rollout_id), outer_phase=outer_phase
+            )
         except RecoveryRequired as error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch, **eval_due)
@@ -1089,6 +1122,7 @@ class IslandDriver:
                     rollout_id += 1
                     self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)
                     finished = boundary.stop
+                self.refuse_reconfiguration_for_finalization(rollout_id)
                 self.phase("finish", rollout_id=rollout_id)
                 self._close_span()
                 self.sync.finish(self)

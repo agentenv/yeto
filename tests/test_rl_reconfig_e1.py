@@ -232,7 +232,7 @@ class _StaticPlacement:
 
 
 def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, inbox=False,
-           driver_kw=None):
+           driver_kw=None, sync_factory=None, outer="none", learner_id=0):
     engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, step_delta=1.0,
                         placement_kind="fixed-partition")
     fork = ForkMembership(engine, declared=[f"engine:c{i}" for i in range(4)],
@@ -247,7 +247,7 @@ def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, in
     clock = {"t": 1000.0}
     ctl = IslandController(
         state_dir=tmp_path / "state", configs=configs, attestation=_attestation(),
-        profile=_profile(), initial_config="T4R2S2", runtime_fingerprint=FP,
+        profile=_profile(outer=outer), initial_config="T4R2S2", runtime_fingerprint=FP,
         wall_clock=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
         inbox=CommandInbox(tmp_path / "state" / "inbox") if inbox else None,
         **(controller_kw or {}),
@@ -263,11 +263,14 @@ def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, in
 
     engine.trainer.train_step = train_step
     driver = IslandDriver(
-        learner_id=0, rollout=pool, trainer=engine.trainer, policy_state=engine.policy_state,
-        publisher=publisher, placement=ElasticFakePlacement(),
+        learner_id=learner_id, rollout=pool, trainer=engine.trainer,
+        policy_state=engine.policy_state, publisher=publisher, placement=ElasticFakePlacement(),
         algorithm=AlgorithmSpec(),
-        sync=LocalOnlySync(rounds), events=EventTape(tmp_path / "events.jsonl", 0),
-        **{"capabilities": fake_capabilities(execution_modes=MODES), "profile": _profile(), "controller": ctl, "ledger": led, **(driver_kw or {})},
+        sync=sync_factory(engine) if sync_factory else LocalOnlySync(rounds),
+        events=EventTape(tmp_path / "events.jsonl", learner_id),
+        **{"capabilities": fake_capabilities(execution_modes=MODES),
+           "profile": _profile(outer=outer), "controller": ctl, "ledger": led,
+           **(driver_kw or {})},
     )
     return driver, ctl, fork, pool, publisher, trained, clock
 

@@ -266,6 +266,17 @@ def _resume_if_exists(checkpoint: str) -> str:
     return f"$(test -f {checkpoint} && echo --resume)"
 
 
+def _syncer_quorum_timeout(args) -> str:
+    """``--rl-elastic-quorum-timeout-s`` (3.8): the syncer's --quorum-timeout-s,
+    the same value the island's pause budget uses; "" by default (syncer 900 s)."""
+    value = getattr(args, "rl_elastic_quorum_timeout_s", None)
+    if value is None or not getattr(args, "rl_elastic", False):
+        return ""
+    if float(value) != int(value):
+        raise ValueError("--rl-elastic-quorum-timeout-s must be whole seconds (syncer u64)")
+    return f" --quorum-timeout-s {int(value)}"
+
+
 def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
@@ -285,6 +296,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
             f" --sync-interval-steps {args.sync_interval_steps}"
             f" --delta-correction {args.delta_correction}"
             f" --total-steps {total_steps}"
+            f"{_syncer_quorum_timeout(args)}"
             f" --outer-lr {args.outer_lr}"
             f" --outer-momentum {args.outer_momentum}"
             " --max-base-lag 0 --learner-weight equal"
@@ -925,6 +937,13 @@ _ELASTIC_LAUNCH_FLAGS = (
     ("rl_elastic_initial_config", "--rl-elastic-initial-config"),
     ("rl_elastic_cells", "--rl-elastic-cells"),
 )
+# 3.8 strict pause budget: forwarded to the learner; the quorum timeout also
+# goes to the syncer so both sides use the same value.
+_ELASTIC_PAUSE_FLAGS = (
+    ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
+    ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
+    ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
+)
 ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
 _EVAL_LAUNCH_FLAGS = (
     ("rl_eval_data", "--rl-eval-data"),
@@ -1004,7 +1023,12 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         # learner never sets it), so that one stays with the island's check.
         check_overlap_eval(placement_kind=placement, eval_interval=eval_interval,
                            eval_uses_snapshots=UNKNOWN)
-    given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS if getattr(args, name, None)]
+    given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
+             if getattr(args, name, None) is not None]
+    for name, flag in _ELASTIC_PAUSE_FLAGS:
+        value = getattr(args, name, None)
+        if value is not None and not value > 0:
+            raise ValueError(f"{flag} must be positive")
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -1066,6 +1090,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             f" --rl-elastic-initial-config {shlex.quote(args.rl_elastic_initial_config)}"
             f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
         )
+        for name, flag in _ELASTIC_PAUSE_FLAGS:
+            value = getattr(args, name, None)
+            if value is not None:
+                flags += f" {flag} {value!r}"
         if getattr(args, "rl_elastic_attestation_json", None):
             prelude += (
                 "printf '%s' "

@@ -40,6 +40,9 @@ def build_elastic(
     timeouts: Any = None,
     on_watchdog: Any = None,
     tool_wait_board: Any = None,
+    quorum_timeout_s: float | None = None,
+    idle_flow_timeout_s: float | None = None,
+    pause_margin: float | None = None,
 ) -> ElasticWiring:
     """``on_watchdog(tx_id, phase)`` runs on the watchdog thread when the absolute
     transaction deadline passes while a step is still blocked. It is the only
@@ -66,6 +69,12 @@ def build_elastic(
         timeouts=timeouts or Timeouts(),
         inbox=CommandInbox(state / "inbox"),
         on_watchdog=on_watchdog,
+        # 3.8: the strict pause budget is min(margin x the syncer's
+        # --quorum-timeout-s, measured idle-flow timeout); None keeps the
+        # audited defaults (syncer default 900 s, margin 0.5).
+        **{k: float(v) for k, v in (("quorum_timeout_s", quorum_timeout_s),
+                                    ("idle_flow_timeout_s", idle_flow_timeout_s),
+                                    ("pause_margin", pause_margin)) if v is not None},
     )
     return ElasticWiring(
         controller=controller,

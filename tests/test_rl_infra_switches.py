@@ -299,3 +299,31 @@ def test_launcher_refuses_unknown_initial_config_and_bad_attestation(tmp_path):
                         "fixed-partition", "--rl-elastic-attestation", att)
     with pytest.raises(ManifestError):
         launcher._check_ports_infra_switches(args, "ports")
+
+
+def test_launcher_forwards_strict_pause_inputs_to_learner_and_syncer(tmp_path):
+    resources, attestation = _elastic_files(tmp_path)
+    args = _cli(("--rl-placement", "fixed-partition", "--rl-elastic",
+                 "--rl-elastic-resources", resources, "--rl-elastic-initial-config", "c0",
+                 "--rl-elastic-cells", "a", "--rl-elastic-quorum-timeout-s", "120",
+                 "--rl-elastic-idle-flow-timeout-s", "300", "--rl-elastic-pause-margin", "0.25"))
+    launcher._check_ports_infra_switches(args, "ports")
+    _, flags = launcher._ports_infra_flags(args)
+    assert flags.endswith(" --rl-elastic-quorum-timeout-s 120 --rl-elastic-idle-flow-timeout-s"
+                          " 300.0 --rl-elastic-pause-margin 0.25")
+    assert launcher._syncer_quorum_timeout(args) == " --quorum-timeout-s 120"
+    island = [t.replace("~/yeto-rl", "/y") for t in flags.split()]
+    parsed = learner.parse_args(_learner_argv(tuple(island)))
+    miles_args = SimpleNamespace()
+    learner.apply_ports_infra_switches(parsed, miles_args, {})
+    assert {k: miles_args.yeto_rl_elastic[k] for k in
+            ("quorum_timeout_s", "idle_flow_timeout_s", "pause_margin")} == {
+        "quorum_timeout_s": 120.0, "idle_flow_timeout_s": 300.0, "pause_margin": 0.25}
+
+
+def test_default_syncer_command_has_no_quorum_timeout():
+    args = _cli()
+    assert launcher._syncer_quorum_timeout(args) == ""
+    with pytest.raises(ValueError, match="need --rl-elastic"):
+        launcher._check_ports_infra_switches(
+            _cli(("--rl-elastic-quorum-timeout-s", "120")), "ports")

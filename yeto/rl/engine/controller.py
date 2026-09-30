@@ -175,6 +175,7 @@ class IslandController:
         expected_pause_s: Callable[[Plan], float] | None = None,
         quorum_timeout_s: float = DEFAULT_QUORUM_TIMEOUT_S,
         pause_margin: float = DEFAULT_MARGIN,
+        idle_flow_timeout_s: float | None = None,
         budget_mode: bool = False,
         wall_clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
@@ -192,7 +193,9 @@ class IslandController:
         self._expected_pause = expected_pause_s
         self.quorum_timeout_s = quorum_timeout_s
         self.pause_margin = pause_margin
+        self.idle_flow_timeout_s = idle_flow_timeout_s
         self.budget_mode = budget_mode
+        self.finalizing: int | None = None  # rollout id at which finalization began (3.8)
         self._wall = wall_clock
         self._sleep = sleep
         self._on_watchdog = on_watchdog
@@ -388,16 +391,34 @@ class IslandController:
             profile_hash=self.profile.contract_hash,
         )
         pause_s = float(self._expected_pause(plan)) if self._expected_pause else float(deadline_s)
-        decision = pause_decision(
-            self.profile, outer_phase=PAUSABLE_PHASE, expected_pause_s=pause_s,
-            budget_mode=self.budget_mode, quorum_timeout_s=self.quorum_timeout_s,
-            margin=self.pause_margin,
-        )
+        decision = self._pause_decision(PAUSABLE_PHASE, pause_s)
         if not decision.allowed:
             raise Rejected(f"pause not allowed: {decision.reason}")
         from dataclasses import replace
 
         return replace(plan, expected_pause_s=pause_s, pause_budget_s=decision.budget_s)
+
+    def _pause_decision(self, outer_phase: str, pause_s: float) -> Any:
+        return pause_decision(
+            self.profile, outer_phase=outer_phase, expected_pause_s=pause_s,
+            budget_mode=self.budget_mode, quorum_timeout_s=self.quorum_timeout_s,
+            margin=self.pause_margin, idle_flow_timeout_s=self.idle_flow_timeout_s,
+        )
+
+    def enter_finalization(self, *, rollout_id: int) -> list[str]:
+        """3.8/X6: the run is finalizing (stop boundary reached). Cancel the
+        pending request (journaled) and reject every later one. Returns the
+        cancelled request ids."""
+        cancelled = []
+        if self.finalizing is None:
+            self.finalizing = int(rollout_id)
+            self._record("finalization", rollout_id=int(rollout_id))
+        tx = self._tx
+        if tx is not None and tx.phase in (VALIDATING, WAIT_SAFE):
+            self._finish(tx, CANCELLED, error="finalization refuses reconfiguration",
+                         finalization_rollout_id=int(rollout_id))
+            cancelled.append(tx.request_id)
+        return cancelled
 
     # ------------------------------------------------------------------ request / cancel
     def request(self, request_id: str, target: str, expected_epoch: int,
@@ -411,6 +432,9 @@ class IslandController:
             if known["body_hash"] != digest:
                 raise Rejected(f"request {request_id!r} was already used with another body")
             return self.status(request_id)  # idempotent: same answer, no second transaction
+        if self.finalizing is not None:
+            raise Rejected("finalization refuses reconfiguration "
+                           f"(finalizing since rollout {self.finalizing})")
         if self._tx is not None:
             raise Rejected(f"transaction {self._tx.tx_id} is in progress (one per island)")
         if not deadline_s or deadline_s <= 0:
@@ -480,8 +504,14 @@ class IslandController:
         timer.start()
         return timer
 
-    def run_at_safe_point(self, driver: Any, snapshot: ReadinessSnapshot) -> str | None:
-        """Called by the driver at a round-boundary safe point; returns the final phase."""
+    def run_at_safe_point(self, driver: Any, snapshot: ReadinessSnapshot, *,
+                          outer_phase: str = PAUSABLE_PHASE) -> str | None:
+        """Called by the driver at a round-boundary safe point; returns the final phase.
+
+        ``outer_phase`` is the sync session's phase here (3.8): the pause is
+        re-decided with it, so finalization / a stop round / a non-audited
+        phase cancels the request instead of pausing the fleet.
+        """
         if self.recovery_required:
             raise RecoveryRequired(self.recovery_required)
         tx = self._tx
@@ -497,6 +527,17 @@ class IslandController:
                       deadline_s=float(tx.body["deadline_s"]))
         except Rejected as exc:
             self._finish(tx, CANCELLED, error=f"revalidation failed: {exc}")
+            return CANCELLED
+        decision = self._pause_decision(outer_phase, tx.plan.expected_pause_s)
+        self._record("pause_decision", tx_id=tx.tx_id, rollout_id=snapshot.rollout_id,
+                     outer_phase=outer_phase, allowed=decision.allowed, reason=decision.reason,
+                     budget_s=decision.budget_s, stalls_peers=decision.stalls_peers,
+                     expected_pause_s=tx.plan.expected_pause_s,
+                     quorum_timeout_s=self.quorum_timeout_s, margin=self.pause_margin,
+                     idle_flow_timeout_s=self.idle_flow_timeout_s)
+        if not decision.allowed:
+            self._finish(tx, CANCELLED, error=f"pause not allowed: {decision.reason}",
+                         outer_phase=outer_phase)
             return CANCELLED
         self._phase(tx, WAIT_SAFE, safe_point_rollout_id=snapshot.rollout_id)
         # WAIT_SAFE covers step/outer/publication state; in-flight requests and
