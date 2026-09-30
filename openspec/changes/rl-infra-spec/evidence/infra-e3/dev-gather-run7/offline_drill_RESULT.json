@@ -1,0 +1,88 @@
+{
+ "G1": {
+  "pass": null,
+  "unavailable": true
+ },
+ "G2": {
+  "A1_B1": [],
+  "A2_B2": [],
+  "pass": true
+ },
+ "G3": {
+  "pass": true,
+  "problems": [],
+  "states_checked": false
+ },
+ "G4": {
+  "A1_B1": {
+   "grad_norm_rel": 0.0,
+   "problems": [],
+   "states_checked": false
+  },
+  "A2_B2": {
+   "grad_norm_rel": 0.0,
+   "problems": [],
+   "states_checked": false
+  },
+  "pass": true
+ },
+ "G5": {
+  "pass": true,
+  "problems": [],
+  "seeds": {
+   "B1": [
+    [
+     1234,
+     1234,
+     "40feebdb0a1f7161423b6911c9238991a0b0d7b1716df7092516c72f1ea32224"
+    ],
+    [
+     1234,
+     1234,
+     "40feebdb0a1f7161423b6911c9238991a0b0d7b1716df7092516c72f1ea32224"
+    ]
+   ],
+   "B1p": [
+    [
+     1234,
+     1234,
+     "40feebdb0a1f7161423b6911c9238991a0b0d7b1716df7092516c72f1ea32224"
+    ],
+    [
+     1234,
+     1234,
+     "40feebdb0a1f7161423b6911c9238991a0b0d7b1716df7092516c72f1ea32224"
+    ]
+   ]
+  }
+ },
+ "G6": {
+  "A1_B1": {
+   "master_rel_l2": null,
+   "problems": []
+  },
+  "A2_B2": {
+   "master_rel_l2": null,
+   "problems": []
+  },
+  "pass": true
+ },
+ "decision": "incomplete (state files missing)",
+ "unavailable": [
+  "A1/s2: neither packed nor per-rank state files are present",
+  "A1/s3: neither packed nor per-rank state files are present",
+  "A1/s8: neither packed nor per-rank state files are present",
+  "A2/s2: neither packed nor per-rank state files are present",
+  "A2/s3: neither packed nor per-rank state files are present",
+  "A2/s8: neither packed nor per-rank state files are present",
+  "B1/restored: neither packed nor per-rank state files are present",
+  "B1/s3: neither packed nor per-rank state files are present",
+  "B1/s8: neither packed nor per-rank state files are present",
+  "B1p/restored: neither packed nor per-rank state files are present",
+  "B1p/s3: neither packed nor per-rank state files are present",
+  "B2/restored: neither packed nor per-rank state files are present",
+  "B2/s3: neither packed nor per-rank state files are present",
+  "B2/s8: neither packed nor per-rank state files are present",
+  "RT/restored: neither packed nor per-rank state files are present"
+ ]
+}

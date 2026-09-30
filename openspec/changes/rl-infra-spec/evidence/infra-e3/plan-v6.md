@@ -1,4 +1,44 @@
-> **已被 `plan-v4.md` 取代**（pin、trainer 边配置、进度看门狗、A9 拓扑核对；判据不变）。保留供追溯。
+# E3 待验证计划 v6：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v5.md；运行前提交，判据与容差不变）
+
+与 v5 的差别（独立审查"小修后可合入"的 M-A、L-1）：
+- **pin 更新**：Miles `e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841`（含 fork-M5 lazy-state 修复），镜像 `ghcr.io/michaellchung/yeto-miles-ports@sha256:2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff`（tag e3a11ab-9f29303）；同时合入 yeto 侧规避 `cut_plugin.side_effect_free_state`（读取优化器状态不创建空条目，否则 exp_avg/exp_avg_sq 会静默不恢复，E2 已在 H100 上实证）。harness 与测试一律从 `yeto/rl/__init__.py` 读取 pin，不再写死；容器内仍断言 `/root/miles` 的提交等于该 pin。旧 pin（5c1b49eb、2f23a0fc）的镜像**不得**用于 A8。
+- **重分片恢复自检加强**：恢复后重新导出的每个参数的状态键（param、exp_avg、exp_avg_sq、step）必须与 cut 完全一致，缺任何一个即拒绝（此前只比较导出里存在的键）。
+- **批次守卫复位**：`restore_cut`（同形）与 `rebind_args` 回到非目标布局时清除 DP 变化批次守卫（回滚后不再误拒训练）。
+- 其余（数据兜底、G1 口径、G1–G6 判据、容差、go/no-go、费用上限 $15.8）同 v5。
+
+以下保留 v5 全文。
+
+---
+
+# E3 待验证计划 v5：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v4.md；运行前提交，判据与容差不放宽）
+
+与 v4 的差别：
+
+1. **A8 数据兜底**（DEV-GATHER 第 7 次 compare 出错且状态文件未取回的教训）：
+   - 容器退出（成功或失败）前运行 `pack_states.py`：把每个 (arm, tag) 的各 rank 状态用 fork-M5 合并成一个汇总文件 `packed/<arm>_<tag>.pt`（adapter、FP32 主参数、exp_avg、exp_avg_sq、step、hyper、scheduler、Megatron 计数与 weight_version、各 rank RNG 摘要；`s8` 只留 FP32 主参数以控制大小，按 LoRA r16 约 1000 万参数估计总计约 1.8 GB），`packed/index.json` 记录每个文件的字节数、sha256 与逐字段摘要；
+   - 容器输出 `=== PACKED READY ===` 后最多等待 20 分钟，本地 `modal_run` 经 Sandbox 文件接口逐块拷出并校验 sha256，写回释放标记后容器才打包事件证据并退出（等待期间 H100 最多多花约 $2.6，仍在 $15.8 上限内）；
+   - 本地离线重跑入口：`python compare.py <取回目录> --offline`，只用事件与 packed 文件即可算出 G1–G6；缺状态文件时只报告能算的部分，判定为 `incomplete`，不给 go/no-go。已用 DEV-GATHER 第 7 次取回的事件演练（`dev-gather-run7/offline_drill_RESULT.json`：G2、G3（事件部分）、G4（loss/grad_norm 部分）、G5、G6（loss 部分）可算，G1 与状态比较部分如实为 unavailable）。
+2. **G1 比较口径写明（不放宽）**：G1 只比较"恢复后的 trainer 汇总状态"与"同一个 cut 的源状态"——B1、B1p 对 A1 的 `s2`（C1），B2 对 A2 的 `s2`（C2），RT 对 A1 的 `s2`（C1→C1′→DP1 往返）；逐位比较的字段为 adapter、FP32 主参数、exp_avg、exp_avg_sq、每个参数的 step、scheduler、Megatron 计数与 weight_version（v3 已列出计数，compare 之前漏比，本版补上）；hyper 与 shape 同样记录并报告差异。**不同 cut 之间（C1 与 C2）从不比较。**
+3. **"A1/A2 步 3 grad_norm 相同但 C1/C2 摘要不同"的静态结论**：C1 与 C2 来自两条不同的训练（A1 为 DP1、A2 为 DP2），DP 不同导致梯度归约顺序不同，FP32 主参数与动量可以在末位不同；前向用的是 bf16 模型副本，末位差异在转 bf16 后通常消失，因此逐样本 loss 与 grad_norm 可以逐位相同而 FP32 状态摘要不同。这与 G1 的口径不冲突（G1 不跨 cut 比较），G4 也只比较同一 cut 出发的两条 arm（A1 对 B1、A2 对 B2），不会因此误判。A8 的 `index.json` 逐字段摘要会给出 C1 与 C2 究竟在哪些字段不同（仅作记录，不是判据）。
+4. **生产改动单列**：`trainer_rebuild.resized_args` 同步设置 `world_size`（已有单独测试）；E2 f898516（cut 携带 `weight_version`）合入集成分支后，E3 补"重建后重发版本连续"测试。
+
+以下保留 v4 全文。
+
+---
+
+# E3 待验证计划 v4：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v3.md；判据与容差不变，运行前提交）
+
+与 v3 的差别（全部是执行配置与前提，**G1–G6、A9 判据、容差、go/no-go 规则均不变**）：
+- **镜像/pin**：Miles `2f23a0fc`（含 F-R1，训练路径未变），镜像 `ghcr.io/michaellchung/yeto-miles-ports@sha256:db815884…0cbf`（tag 2f23a0f-9f29303）；harness 从 `yeto/rl/__init__.py` 读取 pin，不再写死。
+- **A8 配置 = 生产 trainer 边配置**：harness 的 Miles argv 走生产翻译的 trainer 边分支（`RLRunConfig.trainer_dp_edges=True`，即 `--rl-elastic-trainer-edges` 所设字段），因此不含 `--balance-data`，不再手动覆盖 `balance_data`；A8 的确定性来自 learner 开关 `--rl-deterministic-trainer`（Megatron `--deterministic-mode` 与 NCCL/cuBLAS/TF32 环境），本地 dry-run 检查 argv 含 `--deterministic-mode`；LoRA dropout 用 `--rl-lora-dropout`（默认 0）；Megatron hidden/attention dropout 没有 yeto 开关，仍在 parse 后置 0 并记录。
+- **harness 进度看门狗**（DEV-GATHER 第 3 次在生成阶段卡住约 58 分钟的教训）：每个阶段在容器内单独监控，`progress.log` 20 分钟无新进展或该阶段日志中 5xx/`request failed with server error` 超过 200 行即杀掉该阶段并失败；任何退出路径都打包证据；本地实时镜像容器输出到 `container.log`，25 分钟无输出即终止 Sandbox；`modal_run` 在任何退出路径 stop app。
+- **生成冻结数据**按上游 `train.py` 的启动顺序：建 rollout 组件 → 建 DP=1 trainer → `update_weights` → 需要时 `onload_kv` → 每个 rollout `prepare_rollout` + `get`（不训练，基座策略）。第 3 次失败原因是旧实现 parse 后置 `debug_rollout_only` 且没有推权重/载入 KV，共置的引擎对 /generate 返回 400/503。
+- **A9 拓扑核对（F-R1 限制：只有启动时声明为停止的 cell 可以解绑）**：A9 以 T2R2 起步，启动参数加 `--rl-elastic --rl-elastic-trainer-edges --rl-elastic-declare-cells --rl-elastic-cells <含 g1 上的备用 cell>`；T2R2→T1R3 时新 engine 用这个声明为停止的 cell 绑到 g1（`bind_members`），T1R3→T2R2 时摘除的正是它（按 GPU 选择，停后 `unbind_members` 释放 bundle 给 trainer，回退时先绑回 g1 再启动），因此让出的总是可解绑 cell。所有故障注入都从 T2R2 或经 T2R2→T1R3 到达的 T1R3 开始，**不从启动即为 T1R3 的配置开始**（那样 g1 上的 cell 启动即运行，不能解绑）。
+- **A9 f5**（trainer_cut 之后、COMMITTED 之前 kill learner）：F-R1 的绑定只在内存中，重启后按设计判 RECOVERY_REQUIRED 并写 `trainer_recovery_hint`（restore_old，含 cut_epoch）；与 v3 §3.1 的期望一致，不自动恢复训练。
+
+以下保留 v3 全文。
+
+---
 
 # E3 待验证计划 v3：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v2.md；判据运行前固定，事后不改）
 
