@@ -737,5 +737,5 @@
 - 步骤 4 watchdog：**判据 1 未通过，待裁定**：Nebius 上 start_cells ≈143 s > deadline 120 s，watchdog 触发时无目标进程可杀。重跑需把 deadline 设为 ≥ 启动时间+margin（改参数，需裁定）。
 - 步骤 5、6（E1-D ①–⑦、E1-C/A4b）：未跑；注入器 `dkill.py`/`dctl.py`、after-hook 已备好（tools/）。
 - 工具修复：探针（解释器无 ray；`ray.init("auto")` 连到 SkyPilot 的 Ray 2.9.3，改用 learner 的 RAY_ADDRESS + 能 import ray 的 /opt/sglang python）、selfcheck 增加指纹比对且探针失败非致命、nstop 杀 `_worker` 残留并拉 dkill/dctl/gpu_samples 日志。
-- 费用：本批（会话 3）≤$44.58（E1-B 两次 selfcheck 停止 $9.70+$9.71、watchdog $12.21、E1-B 第三次 $12.96）；全局按主 agent 口径约 $152+$44.6。云资源：sky 无集群、nebius 实例 0、本地无残留进程。
+- 费用：本批（会话 3）≤$85.44（含孤儿实例事故 ≤$40.86，见 RESULT.md；运行本身 ≤$44.58：E1-B 两次 selfcheck 停止 $9.70+$9.71、watchdog $12.21、E1-B 第三次 $12.96）；全局按主 agent 口径约 $152+$44.6。云资源：收尾时发现并删除了首次 E1-B 的孤儿实例（launcher `_worker` 重新开通，RUNNING 16:40–18:00）；之后 sky 无集群、eu-north1 project（project-e00eqrj3pr00622zrgdeyc）下无本批实例、本地无残留。**注意：此前 nstop/台账的 nebius 核验用默认 project，口径无效。**
 - 下一步：INFRA 修 lora_perturber → 重跑 E1-B；裁定 E1-A(c)/watchdog deadline 后重跑；再按 §9.20 跑 E1-D（D123 合并 5 轮 35 min、D4、D5、D6、D7）与 E1-C/A4b；全部结束后合入 integ-s2（integ-s3）跑全量测试做 id 对比、`openspec validate --strict`，再快进 push integ-s3 与 integ-decl。

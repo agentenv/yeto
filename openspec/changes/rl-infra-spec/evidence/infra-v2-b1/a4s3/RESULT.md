@@ -1,6 +1,6 @@
 # A4 续跑（会话 3）结果，代码 9a06c4b（= origin/integ-decl），Nebius 8×H100 on-demand，2026-09-30
 
-计划：`gpu-plan-v2.md` §9.20（运行前提交）。工具：`tools/`（脚本本机运行、此处留档）。本批已花 ≤$44.58（台账 `infra-drafts/gpu-spend.md`）。
+计划：`gpu-plan-v2.md` §9.20（运行前提交）。工具：`tools/`（脚本本机运行、此处留档）。本批已花 ≤$85.44（台账 `infra-drafts/gpu-spend.md`：运行 $44.58 + 孤儿实例事故 ≤$40.86）。
 
 ## 步骤 1 指纹
 - 本机用与真机同一 CLI→learner→`build_ports_launch` 路径重建 Miles argv，先在 47efd25 上复现真机值 `sha256:2d0a00f4…`（argv 逐项相同），再在 9a06c4b 上取值：12 轮 = `2d0a00f4…`（argv 未变）；`--total-steps` 进入 argv（`--num-rollout`/`--lr-decay-iters`），3/4/5 轮分别为 `1c4ceeb1…`/`210f27dc…`/`c72f80da…`（`tools/attestation-*.json`）。真机 `rl_driver_start.runtime_fingerprint` 在 E1-B（12 轮）与 watchdog（4 轮）两次运行中与本机值一致（selfcheck 比对）。
@@ -23,3 +23,6 @@
 
 ## 步骤 5、6：未运行
 E1-D ①–⑦ 与 E1-C/A4b 未跑（停在代码缺陷/待裁定处；预算未到 $90 上限）。D 的运行安排、注入器（`dkill.py`、`dctl.py`）已写好留档，计划见 §9.20。
+
+## 事故：孤儿实例（≤$40.86）与核验口径
+首次 E1-B 启动（`a4e1b-…-3`）在 selfcheck 失败后由 nstop 执行 `sky down`；launcher 的 `yeto.cli _worker` 子进程随后重新开通了同名集群（实例创建 16:40:34），我只杀了 `_worker` 而没有复核，实例一直 RUNNING 到 18:00 收尾核对才被发现并 `sky down`（约 79.6 min，≤$40.86）。此前 nstop/台账里的 “nebius instance list = []” 用的是 CLI 默认 project（project-e07…），而 sky 的 eu-north1 project 是 `project-e00eqrj3pr00622zrgdeyc`，所以核验一直为空，口径无效（此前各轮同样口径的“无残留”证明需重新核实）。已修：nstop 先杀 `_worker`，并按正确 project 列实例。
