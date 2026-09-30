@@ -489,6 +489,10 @@ def compose_island(
         _wire_trainer_rebuild(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
                               actor_model=actor_model, rollout_executor=rollout_executor,
                               runner=runner, base_model_revision=base_model_revision)
+        _wire_trainer_edges(driver, elastic=elastic, miles_args=miles_args, launch=launch,
+                            algorithm=algorithm, actor_model=actor_model,
+                            rollout_executor=rollout_executor, runner=runner,
+                            base_model_revision=base_model_revision)
     holder["driver"] = driver
     return driver
 
@@ -524,6 +528,87 @@ def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model
                    else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
         preconditions=lambda: rebuild_preconditions(miles_args),
     )
+
+
+def _startup_views(manager: Any, runner: Any) -> dict[str, Any]:
+    """The fork's startup placement-group views, read once before any is re-pointed."""
+    views = {}
+    for name in ("actor", "rollout", "standby"):
+        try:
+            views[name] = runner.run(_await_ref(manager.get_pg_view.remote(name)))
+        except Exception:  # noqa: BLE001 - a role without a view (e.g. no standby)
+            continue
+    return views
+
+
+async def _await_ref(ref: Any) -> Any:
+    return await ref
+
+
+def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor_model,
+                        rollout_executor, runner, base_model_revision, manager=None) -> bool:
+    """E3 (4.7): the startup bundle map on the rollout pool (bind_members /
+    member_gpus) and ``MilesTrainerOps`` behind ``IslandController.trainer_edges``.
+
+    Skipped (trainer edges stay refused) without the SwappableActor proxy,
+    without pool GPU ids (``ElasticWiring.pool_gpus``), when E3's modules are
+    not in the tree, or when the startup views cannot be read. Returns whether
+    the edges were wired. Attested trainer edges are still required per edge.
+    """
+    from .trainer_rebuild import SwappableActor
+
+    controller = elastic.controller
+    if (not isinstance(actor_model, SwappableActor) or elastic.pool_gpus is None
+            or not callable(getattr(controller, "set_trainer_edges", None))):
+        return False
+    try:
+        from .trainer_resize import MilesTrainerOps
+    except ImportError:  # E3 not integrated in this tree
+        return False
+    from .bundles import StartupBundles
+    from .rebuild_wiring import CutSource
+
+    if manager is None:
+        from miles.utils.workers.ray_worker_manager import RayWorkerManager
+
+        manager = RayWorkerManager.get_handle()
+    views = _startup_views(manager, runner)
+    try:
+        bundles = StartupBundles(pool_gpus=elastic.pool_gpus, views=views,
+                                 placement_map=launch.placement.placement_map)
+    except Exception:  # noqa: BLE001 - no usable map: leave trainer edges refused
+        return False
+    pool = driver.rollout
+    pool._bundles = bundles
+    pool._worker_manager = manager
+    pool._gpus_per_engine = int(launch.placement.gpus_per_engine)
+    ref_load = getattr(miles_args, "ref_load", None)
+    source = CutSource(
+        driver=lambda: driver, trainer=driver.trainer, rollout=pool, ledger=elastic.ledger,
+        algorithm=algorithm, backend_fingerprint=controller.runtime_fingerprint or "",
+        cut_root=str(controller.state_dir / "cuts"),
+        global_batch_size=int(miles_args.global_batch_size),
+        ref_model=(None if not ref_load
+                   else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
+    )
+    ops = MilesTrainerOps(
+        trainer=driver.trainer, actor=actor_model, rollout_executor=rollout_executor,
+        run=runner.run, rollout=pool, root=source.cut_root, context_for=source.context,
+        expect_for=lambda layout: source.expectation(
+            layout, epoch=controller.journal.epochs.config_epoch),
+        view_for=bundles.view_for,
+        policy_hash_fn=lambda: driver.policy_state.export().policy_tensor_hash(),
+        certified_for=lambda plan: controller.attestation.algorithms_for(
+            (plan.source, plan.target, plan.kind)),
+        worker_manager=manager,
+    )
+    controller.set_trainer_edges(lambda: {
+        "spec": algorithm, "args": driver.trainer._args,
+        "global_batch_size": int(miles_args.global_batch_size),
+        "micro_batch_size": int(getattr(miles_args, "micro_batch_size", 1) or 1),
+        "ops": ops,
+    })
+    return True
 
 
 def selection_event(

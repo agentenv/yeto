@@ -334,6 +334,9 @@ class MilesRolloutPool:
         declared_cells: Any = None,
         track_timeout_s: float = 600.0,
         tool_wait_board: Any = None,
+        worker_manager: Any = None,
+        bundles: Any = None,
+        gpus_per_engine: int | None = None,
     ) -> None:
         # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
         # tool-wait count, so trajectory_load() is unknown (None).
@@ -352,6 +355,14 @@ class MilesRolloutPool:
         self._inject_start_delay = injected_start_delay()
         self.injected_start_delays: list[float] = []
         self._sleep = time.sleep
+        # E3 role transfer (4.7): fork RayWorkerManager handle (None = the named
+        # actor, looked up on first use), the startup bundle map
+        # (bundles.StartupBundles: pool GPU ids <-> startup PG bundles) and
+        # GPUs per engine.
+        self._worker_manager = worker_manager
+        self._bundles = bundles
+        self._gpus_per_engine = gpus_per_engine
+        self._bind_seq = 0
 
     def data_cursor(self) -> dict[str, int] | None:
         """4.2: data cursor after the last generated batch (None = unknown)."""
@@ -478,6 +489,82 @@ class MilesRolloutPool:
         self._run(self._controller.start_cells(cells, expected_epoch=epoch))
         self._run(self._controller.wait_cells_tracked(cells, timeout_seconds=self._track_timeout_s))
         return chosen
+
+    def _manager(self) -> Any:
+        if self._worker_manager is None:
+            from miles.utils.workers.ray_worker_manager import RayWorkerManager
+
+            self._worker_manager = RayWorkerManager.get_handle()
+        return self._worker_manager
+
+    def member_gpus(self, members: Any = None) -> dict[str, tuple[str, ...]]:
+        """Pool GPU ids each member (declared cell) is bound to now (E3 H2: choose
+        the members to remove by the GPUs a transfer moves). Read from the fork's
+        ``RayWorkerManager.get_cell_bundles`` and mapped back through the startup
+        bundle map; ``members`` None = the serving members."""
+        declared = self._require_declared()
+        if self._bundles is None:
+            raise MembershipPlanError("no GPU -> bundle view mapping: cannot report member GPUs")
+        cells = cells_of(self.members() if members is None else frozenset(members))
+        unknown = sorted(set(cells) - set(declared))
+        if unknown:
+            raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        manager = self._manager()
+
+        async def read() -> dict[str, list[int]]:
+            return {c: list(await manager.get_cell_bundles.remote(c)) for c in cells}
+
+        bundles = self._run(read())
+        return {member_id(c): self._bundles.gpus_for_bundles(b) for c, b in sorted(bundles.items())}
+
+    def members_on_gpus(self, gpus: Any, members: Any = None) -> frozenset[str]:
+        """Members whose GPUs all lie in ``gpus`` (and none elsewhere)."""
+        wanted = {str(g) for g in gpus}
+        return frozenset(m for m, owned in self.member_gpus(members).items()
+                         if owned and set(owned) <= wanted)
+
+    def bind_members(self, members: frozenset[str], gpus: tuple[str, ...]) -> str:
+        """Bind stopped declared cells to the GPUs a trainer released (E3 role transfer, 4.7).
+
+        Points a fresh placement-group view (fork-M6 ``set_pg_view``) at the
+        startup bundles of ``gpus`` and rebinds each cell (``rebind_cell``) to
+        consecutive slots of it, in sorted member order, so the next
+        ``add_engines`` starts them there. Returns the view name.
+
+        Depends on fork gap F-R1: the fork (M1) cannot declare at startup a
+        stopped rollout cell whose default binding lies outside the rollout
+        view, so on the real fork there may be no such cell to bind yet.
+        """
+        declared = self._require_declared()
+        cells = sorted(cells_of(frozenset(members)))
+        unknown = sorted(set(cells) - set(declared))
+        if unknown:
+            raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        if not cells:
+            raise MembershipPlanError("bind_members needs at least one member")
+        per = int(self._gpus_per_engine or getattr(self._args, "rollout_num_gpus_per_engine", 1) or 1)
+        gpus = tuple(str(g) for g in gpus)
+        if len(gpus) != per * len(cells) or len(set(gpus)) != len(gpus):
+            raise MembershipPlanError(
+                f"{len(cells)} engines x {per} GPUs need {per * len(cells)} distinct GPUs, got {list(gpus)}")
+        if self._bundles is None:
+            raise MembershipPlanError("no GPU -> bundle view mapping: cannot bind engines to GPUs")
+        tracked = set(self._run(self._controller.get_cell_statuses()) or {})
+        running = sorted(set(cells) & tracked)
+        if running:
+            raise MembershipPlanError(f"cells {running} are running; only stopped cells can be bound")
+        info = self._bundles.view_for(gpus)
+        manager = self._manager()
+        self._bind_seq += 1
+        view = f"yeto-rollout-bind-{self._bind_seq}-{'-'.join(cells)}"
+
+        async def bind() -> None:
+            await manager.set_pg_view.remote(view, info)
+            for i, cell in enumerate(cells):
+                await manager.rebind_cell.remote(cell, pg_name=view, pg_slot_offset=i * per)
+
+        self._run(bind())
+        return view
 
     def remove_engines(self, members: frozenset[str], *, epoch: int) -> frozenset[str]:
         """Deregister and stop ``members`` (drain them first); returns the remaining members."""

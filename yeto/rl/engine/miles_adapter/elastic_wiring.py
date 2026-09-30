@@ -43,6 +43,7 @@ def build_elastic(
     quorum_timeout_s: float | None = None,
     idle_flow_timeout_s: float | None = None,
     pause_margin: float | None = None,
+    trainer_edges: Any = None,
 ) -> ElasticWiring:
     """``on_watchdog(tx_id, phase)`` runs on the watchdog thread when the absolute
     transaction deadline passes while a step is still blocked. Default
@@ -52,6 +53,11 @@ def build_elastic(
     transaction goes to REBUILD_OLD. Old members are never killed; a blocked
     call on the OLD set (drain, REBUILD_OLD restart) is still not bounded.
     ``None`` disables the action (journal + flag only).
+
+    ``trainer_edges`` (E3, 4.7; default None = trainer edges refused) is the
+    ``IslandController(trainer_edges=...)`` callable returning
+    ``{"spec", "args", "global_batch_size", "micro_batch_size", "ops"}``,
+    ``ops`` being a :class:`.trainer_resize.MilesTrainerOps`.
     """
     from yeto.rl.elastic_benchmark.capabilities import load_attestation, parse_configs
 
@@ -74,6 +80,7 @@ def build_elastic(
         timeouts=timeouts or Timeouts(),
         inbox=CommandInbox(state / "inbox"),
         on_watchdog=None if isinstance(on_watchdog, str) else on_watchdog,
+        trainer_edges=trainer_edges,
         # 3.8: the strict pause budget is min(margin x the syncer's
         # --quorum-timeout-s, measured idle-flow timeout); None keeps the
         # audited defaults (syncer default 900 s, margin 0.5).
