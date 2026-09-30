@@ -446,6 +446,13 @@ def set_miles_counters(actor: Any, counters: Mapping[str, int]) -> None:
         updater.weight_version = int(counters["weight_version"])
 
 
+def train_state_digest(snap: Mapping[str, Any]) -> str:
+    """Digest of the training state WITHOUT the publication counter (``miles_counters``):
+    a re-publication legitimately advances ``weight_version`` without touching the
+    trainable state (E2 harness pre-step comparisons)."""
+    return state_digest({k: v for k, v in snap.items() if k != "miles_counters"})
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
@@ -529,6 +536,8 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "has_optimizer_state": snap["optimizer_named"] is not None,
         "has_rng": rng is not None,
         "state_digest": state_digest(snap),
+        "train_state_digest": train_state_digest(snap),
+        "weight_version": (snap.get("miles_counters") or {}).get("weight_version"),
         "rng_digest": state_digest(rng),
         "components": component_digests({"state": snap, "rng": rng}),
         "adapter_tensors": len(named),
@@ -938,6 +947,8 @@ def _state_summary(actor: Any) -> dict[str, Any]:
     return {
         "coord": backend.coord(),
         "state_digest": state_digest(snap),
+        "train_state_digest": train_state_digest(snap),
+        "weight_version": (snap.get("miles_counters") or {}).get("weight_version"),
         "rng_digest": state_digest(rng),
         "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
         "tensors": tensors,

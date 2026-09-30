@@ -454,7 +454,8 @@ class MilesTrainerGroup:
             ),
             rank_summaries=tuple(
                 {k: s[k] for k in ("path", "scheduler_samples", "has_optimizer_state", "has_rng",
-                                   "state_digest", "rng_digest", "components") if k in s}
+                                   "state_digest", "rng_digest", "components", "train_state_digest",
+                                   "weight_version") if k in s}
                 for s in summaries
             ),
         )

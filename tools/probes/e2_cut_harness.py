@@ -243,6 +243,10 @@ except Exception: d=[]
         date -u +%%FT%%TZ > $R/pulled/guard.fail; $M app stop -y $APP > $R/guard_stop.out 2>&1
       fi
     fi
+    # small harness results pulled on their own (a tar of a changing tree can come back truncated)
+    for f in results.json steps.jsonl; do
+      timeout 60 $M container exec $c -- sh -c "cat ~/yeto-rl/e2-harness/*/$f 2>/dev/null" > $R/pulled/.r && [ -s $R/pulled/.r ] && mv $R/pulled/.r $R/pulled/harness-$f
+    done
     timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf - --exclude=trainer_*.pt e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts inwatch.log 2>/dev/null | base64 -w0" > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/state.tgz.b64
     # progress watchdog: no new tape event for STALL_S, or too many error lines -> evidence above, then stop
     now=$(date +%%s); lines=$(wc -l < $R/pulled/rl-island-0.jsonl 2>/dev/null || echo 0)
