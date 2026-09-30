@@ -185,16 +185,19 @@
 
 ### 8.2 A5 修订（INFRA-E1 提出，运行前）
 - quorum 用例（§3 A5 第 2 条）须带 `--rl-elastic-pause-margin 2.0`，up 请求 deadline 设 230 s；否则 `--quorum-timeout-s 120` 下默认暂停预算 60 s，150 s 注入延迟会在 plan 阶段被 pause 审计拒绝，第 2 条无从执行。详见 `evidence/infra-e1/plan-3.8-4.4-v2.md` §1 第 5 条。
-- "`start_cells` 前注入 150 s"的注入点由 INFRA-E1 实现，开关名待补；该注入点合入集成分支前，A5 quorum 用例不得运行。
+- "`start_cells` 前注入 150 s"的注入点已由 infra-e1 9a5f181 实现并随本次集成合入：launcher `--rl-test-inject-start-delay-s 150`（须同时带 `--rl-elastic`；岛上 `export YETO_RL_TEST_INJECT_START_DELAY_S=150.0`；默认不设置，无影响）。quorum 用例参数为 `--rl-elastic-quorum-timeout-s 120 --rl-elastic-pause-margin 2.0`，请求 deadline 230 s。
 
 ### 8.3 A8/A9 规模（计划口径，采纳 INFRA-E3 `evidence/infra-e3/plan-v2.md`）
 - A8：2×H100!，上限 $15.8。
-- A9：4×L40S，T2R2↔T1R3，上限 $27.3；仅在 A8 为 go 且 fork 需求 F-R1 获批后运行。
+- A9：4×L40S，T2R2↔T1R3，上限 $27.3；仅在 A8 为 go 时运行（F-R1 已获用户批准，见 8.4）。
 - DEV-GATHER：A10G，上限 $3.3。
 - 注意：E3 分支尚在复审、未合入集成分支；此处仅记录计划口径，判据以 E3 plan-v2 合入后的文本为准。§2 表中 A8/A9/DEV-GATHER 的旧配置与费用被本条取代（§3 A9 判据中的"3 卡 T2R1↔T1R2"拓扑文字未改动，差异待主 agent 裁定）。
 
 ### 8.4 A9 前置
-- fork 需求 F-R1（启动时可声明不启动、延迟绑定的停止 cell）待用户批准；主 agent 建议待 A8 结果后再定。
+- fork 需求 F-R1（启动时可声明不启动、延迟绑定的停止 cell）：**用户 2026-09-30 已批准**（FORK-FR1 已开工，miles 分支 `yeto-deferred-cell`）。A9 仍须 A8 为 go 才运行。
 
 ### 8.5 变 DP 认证范围
-- 变 DP 认证仅覆盖 dropout=0（`lora_dropout=hidden_dropout=attention_dropout=0`，代码在 DP 变化时拒绝非 0 或未知），待用户确认。
+- 变 DP 认证仅覆盖 dropout=0（`lora_dropout=hidden_dropout=attention_dropout=0`，代码在 DP 变化时拒绝非 0 或未知）：**用户 2026-09-30 已接受**。
+
+### 8.6 2b 的 4.4 补跑
+- 用户 2026-09-30 批准 rl-algo 2b 的 4.4 用 Modal T4 补跑，单独记账，不占 A1–A9 的 $300 预算。
