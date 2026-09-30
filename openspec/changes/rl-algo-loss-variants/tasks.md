@@ -58,3 +58,4 @@
 
 - 1.1 / 1.2 / 1.3 / 2.2–2.5 / 5.1 / 7.1–7.3：核对结果、证据与命令见 `progress.md` 的 2026-09-30 ALGO-2b 条目。
 - 未勾选：2.1（参考实现与手算自检已完成，但离线无法核对论文公式编号，原文要求写明公式编号）；第 3 组（路线 A，未选）；4.1/4.2（FORK-2b 负责）；4.3/4.4（需 fork 审查、快进 yeto/ports、IMG 更新 pin 后才能做）；5.2（文档与 dry-run 已写并核对，但所选路线的 pin/提交号尚未落地）；第 6 组（GPU 暂停，见 progress.md 的"待本地 GPU 验证"计划）。
+- 5.1 注：仅在能力检查层面放行（fake 声明、`--rl-allow-unverified-mechanism` 单岛放行通过 capability check）；真实 Miles 启动仍被 `[loss_variants]` pin 检查阻止，直到 `FORK_COMMITS` 含钉住的提交。

@@ -38,7 +38,12 @@ RUN = {"rollout_batch_size": 4, "rollout_max_response_len": 384,
        "context_parallel_size": 1, "multi_lora": False}
 
 
+CISPO_CLIP = {"eps_clip": 0.2, "eps_clip_high": 0.28}
+
+
 def spec(variant, **loss):
+    if variant == "cispo" and not loss.keys() & set(CISPO_CLIP):
+        loss = {**CISPO_CLIP, **loss}  # CISPO needs an explicit clip range
     return AlgorithmSpec.from_dict({"schema": alg.ALGORITHM_SPEC_SCHEMA_V2,
                                     "loss": {"policy_loss_variant": variant, **loss}})
 
@@ -80,16 +85,43 @@ def test_reference_gmpo_hand_values_and_log_clip():
     old = _t(0.0, 0.0, 0.0)
     mask = torch.tensor([1, 1, 0])
     loss, clip = ref.gmpo_sequence(logp, old, _t(1.0, 1.0, 1.0), mask)
-    # l = [0.1, 0.4 (clipped from 0.5)], mean 0.25 over the 2 valid tokens
+    # A > 0: l = [0.1, 0.4 (0.5 clipped at delta_h)], mean 0.25 over 2 valid tokens
     assert loss[0].item() == pytest.approx(-math.exp(0.25))
     assert clip.item() == pytest.approx(0.5)
-    neg, _ = ref.gmpo_sequence(logp, old, _t(-1.0, -1.0, -1.0), mask)
-    # sign -1: clamp(-0.1, -0.5 -> -0.4) * -1 = [0.1, 0.4]
-    assert neg[0].item() == pytest.approx(math.exp(0.25))
+    # A < 0: one-sided, log r = 0.5 > delta_h is NOT clipped -> l = [0.1, 0.5]
+    neg, neg_clip = ref.gmpo_sequence(logp, old, _t(-1.0, -1.0, -1.0), mask)
+    assert neg[0].item() == pytest.approx(math.exp(0.3))
+    assert neg_clip.item() == 0.0
     # a clipped token contributes no gradient
     lp = logp.clone().requires_grad_()
     ref.gmpo_sequence(lp, old, _t(1.0, 1.0, 1.0), mask)[0].sum().backward()
     assert lp.grad[1].item() == 0.0 and lp.grad[0].item() != 0.0
+
+
+def test_reference_gmpo_positive_advantage_far_below_keeps_gradient():
+    lp = _t(-2.0, 0.0).requires_grad_()  # log r = -2 << -delta_l
+    loss, clip = ref.gmpo_sequence(lp, _t(0.0, 0.0), _t(1.0, 1.0), torch.tensor([1, 1]))
+    assert loss[0].item() == pytest.approx(-math.exp(-1.0))  # not clipped: mean(-2, 0)
+    assert clip.item() == 0.0
+    loss[0].backward()
+    assert lp.grad[0].item() != 0.0
+
+
+def test_reference_gmpo_asymmetric_bounds_and_negative_advantage():
+    old = _t(0.0, 0.0, 0.0)
+    mask = torch.tensor([1, 1, 1])
+    logp = _t(-0.5, 0.5, 0.1)
+    # A < 0, delta_l=0.2, delta_h=0.6: -0.5 -> -0.2 (clipped), 0.5 kept, 0.1 kept
+    loss, clip = ref.gmpo_sequence(logp, old, _t(-2.0, -2.0, -2.0), mask, 0.2, 0.6)
+    assert loss[0].item() == pytest.approx(2.0 * math.exp((-0.2 + 0.5 + 0.1) / 3))
+    assert clip.item() == pytest.approx(1 / 3)
+    # A > 0 with the same bounds: 0.5 < delta_h 0.6 kept, -0.5 kept -> nothing clipped
+    loss, clip = ref.gmpo_sequence(logp, old, _t(1.0, 1.0, 1.0), mask, 0.2, 0.6)
+    assert loss[0].item() == pytest.approx(-math.exp(0.1 / 3))
+    assert clip.item() == 0.0
+    # zero advantage: no loss, clip fraction undefined (no A != 0 token)
+    loss, clip = ref.gmpo_sequence(logp, old, _t(0.0, 0.0, 0.0), mask)
+    assert loss.abs().sum().item() == 0.0 and clip is None
 
 
 def test_reference_gmpo_context_parallel_matches_unsplit():
@@ -141,7 +173,7 @@ def test_each_variant_hashes_differently_and_carries_its_parameters():
     assert len(hashes) == 4
     assert spec("sapo", sapo_tau_pos=1.2).sha256() != spec("sapo").sha256()
     assert spec("gmpo", gmpo_log_clip_high=0.3).sha256() != spec("gmpo").sha256()
-    assert spec("cispo", eps_clip=0.2, eps_clip_high=0.28).sha256() != spec("cispo").sha256()
+    assert spec("cispo", eps_clip=0.1, eps_clip_high=0.28).sha256() != spec("cispo").sha256()
     # round trip
     for name in lv.VARIANTS:
         s = spec(name, **({"sapo_tau_neg": 2.0} if name == "sapo" else {}))
@@ -202,6 +234,8 @@ def test_rejections_fail_in_fake_root_before_any_engine_verb(tmp_path, variant, 
     if variant in ("sapo", "gmpo"):
         payload["loss"].pop("eps_clip", None)
         payload["loss"].pop("eps_clip_high", None)
+    else:
+        payload["loss"] = {**CISPO_CLIP, **payload["loss"]}
     s = AlgorithmSpec.from_dict(payload)
     text = "; ".join(s.rejections())
     assert f"[{rule}]" in text and alternative in text
@@ -223,7 +257,8 @@ def test_gmpo_gspo_message_names_both_ratios():
 def test_variant_with_custom_loss_rejected():
     ref_ = alg.PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
     s = AlgorithmSpec.from_dict({"schema": alg.ALGORITHM_SPEC_SCHEMA_V2, "loss": {
-        "variant": "custom_loss", "custom_loss": ref_.to_dict(), "policy_loss_variant": "cispo"}})
+        "variant": "custom_loss", "custom_loss": ref_.to_dict(), "policy_loss_variant": "cispo",
+        **CISPO_CLIP}})
     assert "[loss_variant_custom_loss]" in "; ".join(s.rejections())
 
 
@@ -237,7 +272,8 @@ def test_unused_clip_bounds_rejected(variant):
 def test_variants_combine_with_tis_and_entropy():
     for name in lv.VARIANTS:
         s = AlgorithmSpec.from_dict({
-            "schema": alg.ALGORITHM_SPEC_SCHEMA_V2, "loss": {"policy_loss_variant": name},
+            "schema": alg.ALGORITHM_SPEC_SCHEMA_V2,
+            "loss": {"policy_loss_variant": name, **(CISPO_CLIP if name == "cispo" else {})},
             "correction": {"method": "tis", "tis_clip": 2.0, "tis_clip_low": 0.0},
             "entropy_coef": 0.001})
         assert s.rejections() == [], name
@@ -254,8 +290,8 @@ def _batch(*groups):
     return SimpleNamespace(groups=tuple(groups))
 
 
-def _metrics(masked):
-    return SimpleNamespace(masked_fraction=masked)
+def _metrics(masked, clip=None):
+    return SimpleNamespace(masked_fraction=masked, clip_fraction=clip)
 
 
 @pytest.mark.parametrize("variant", ["cispo", "sapo"])
@@ -268,16 +304,26 @@ def test_cispo_sapo_expect_gradient_even_fully_clipped(variant):
 def test_gmpo_full_clip_lifts_expectation_unknown_falls_back():
     s = spec("gmpo")
     batch = _batch(_group(0.5))
-    assert s.gradient_expectation(batch, _metrics(1.0)) == (
+    assert s.gradient_expectation(batch, _metrics(None, 1.0)) == (
         False, "gradient_rule:loss_variant_gmpo_full_clip (losses:gmpo)")
-    for masked in (None, 0.99, math.nan, True):
-        assert s.expects_gradient(batch, _metrics(masked)) is True
+    for clip in (None, 0.99, math.nan, True, "1.0"):
+        assert s.expects_gradient(batch, _metrics(None, clip)) is True
     assert s.expects_gradient(batch, None) is True
 
 
+def test_gmpo_rule_reads_clip_fraction_not_the_correction_mask():
+    # corrections fill masked_fraction with their own mask; GMPO must not read it
+    s = spec("gmpo")
+    batch = _batch(_group(0.5))
+    assert s.expects_gradient(batch, _metrics(1.0, 0.3)) is True
+    assert s.expects_gradient(batch, _metrics(0.2, 1.0)) is False
+
+
 def test_gmpo_rule_does_not_touch_other_variants():
-    assert lv.gmpo_gradient_rule(spec("cispo"), None, _metrics(1.0)) is None
-    assert AlgorithmSpec().expects_gradient(_batch(_group(0.5)), _metrics(1.0)) is True
+    assert lv.gmpo_gradient_rule(spec("cispo"), None, _metrics(1.0, 1.0)) is None
+    assert AlgorithmSpec().expects_gradient(_batch(_group(0.5)), _metrics(1.0, 1.0)) is True
+    # CISPO: every ratio out of range (clip fraction 1) still expects a gradient
+    assert spec("cispo").expects_gradient(_batch(_group(0.5)), _metrics(None, 1.0)) is True
 
 
 def _caps():
@@ -294,15 +340,35 @@ def test_nonfinite_grad_norm_fails_for_every_variant(tmp_path, variant):
     assert info.value.metric == "nonfinite_grad_norm"
 
 
+def _with_clip_fraction(engine, rounds):
+    import dataclasses
+
+    original = engine.trainer.step_metrics
+
+    def metrics():
+        m = original()
+        return dataclasses.replace(m, clip_fraction=rounds.get(m.train_step))
+
+    engine.trainer.step_metrics = metrics
+
+
 def test_fake_driver_gmpo_full_clip_round_passes_cispo_fails(tmp_path):
-    _, driver = _driver(tmp_path, spec("gmpo"), _caps(), zero_grad_rounds={1},
-                        masked_fraction_rounds={1: 1.0})
+    engine, driver = _driver(tmp_path, spec("gmpo"), _caps(), zero_grad_rounds={1})
+    _with_clip_fraction(engine, {1: 1.0})
     assert driver.run().policy_version == 3
-    _, driver = _driver(tmp_path / "c", spec("cispo"), _caps(), zero_grad_rounds={1},
-                        masked_fraction_rounds={1: 1.0})
+    engine, driver = _driver(tmp_path / "c", spec("cispo"), _caps(), zero_grad_rounds={1})
+    _with_clip_fraction(engine, {1: 1.0})
     with pytest.raises(StrictRlInvariantError) as info:
         driver.run()
     assert info.value.metric == "zero_grad_norm_with_nonzero_advantages"
+
+
+def test_fake_driver_gmpo_correction_mask_does_not_relax(tmp_path):
+    engine, driver = _driver(tmp_path, spec("gmpo"), _caps(), zero_grad_rounds={1},
+                             masked_fraction_rounds={1: 1.0})
+    _with_clip_fraction(engine, {1: 0.5})
+    with pytest.raises(StrictRlInvariantError):
+        driver.run()
 
 
 # -- 2.5 / 5.1 declarations ------------------------------------------------------------
@@ -334,12 +400,16 @@ def test_single_island_allowance_admits_variant_on_miles_capabilities():
 
 
 def test_dry_run_reports_expressible_not_opened():
-    result = af.dry_run(["--dry-run", "--extra", "--policy-loss-variant cispo"])
+    result = af.dry_run(["--dry-run", "--extra",
+                         "--policy-loss-variant cispo --eps-clip 0.2 --eps-clip-high 0.28"])
     assert result["verdict"] == "rejected"
     assert "losses mechanism 'cispo' not supported" in result["error"]
     allowed = af.dry_run(["--dry-run", "--extra", "--policy-loss-variant sapo",
                           "--rl-allow-unverified-mechanism", "losses:sapo"])
     assert allowed["verdict"] == "accepted"
+    # the dry run also reports the launch checks (pin): a real launch is still refused
+    assert any("[loss_variants]" in w and "not opened" in w for w in allowed["launch_warnings"])
+    assert af.dry_run(["--dry-run"])["launch_warnings"] == []
     assert allowed["miles_argv"][-6:] == ["--policy-loss-variant", "sapo", "--sapo-tau-pos",
                                           "1.0", "--sapo-tau-neg", "1.05"]
 
@@ -400,6 +470,19 @@ def test_absorbed_parameter_conflict_lists_both_values():
     with pytest.raises(AlgorithmSpecError, match="loss.sapo_tau_pos"):
         af.absorb_extra_argv(AlgorithmSpec(), ["--policy-loss-variant", "sapo",
                                                "--sapo-tau-pos", "-1"])
+
+
+@pytest.mark.parametrize("loss", [{}, {"eps_clip": 0.2}, {"eps_clip_high": 0.28}])
+def test_cispo_requires_explicit_clip_range(loss):
+    s = AlgorithmSpec.from_dict({"schema": alg.ALGORITHM_SPEC_SCHEMA_V2,
+                                 "loss": {"policy_loss_variant": "cispo", **loss}})
+    text = "; ".join(s.rejections())
+    assert "[loss_variant_cispo_clip]" in text and "loss.eps_clip" in text
+    ok = spec("cispo")
+    assert ok.rejections() == []
+    loss_json = json.loads(ok.canonical_json())["loss"]
+    assert (loss_json["eps_clip"], loss_json["eps_clip_high"]) == (0.2, 0.28)
+    assert af.algorithm_argv(ok)[:4] == ["--eps-clip", "0.2", "--eps-clip-high", "0.28"]
 
 
 def test_absorbed_stray_parameter_is_rejected():

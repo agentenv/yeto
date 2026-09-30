@@ -466,6 +466,14 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
             + algorithm_argv(spec),
             required_mechanisms=sorted(f"{d}:{n}" for d, n in spec.required_mechanisms()),
         )
+        # Launch checks need the run configuration; the dry run reports them
+        # with the ports defaults (CP 1) as warnings -- a real launch refuses them.
+        from ..algorithm import launch_problems
+
+        result["launch_warnings"] = launch_problems(spec, {
+            "rollout_batch_size": None, "rollout_max_response_len": None,
+            "context_parallel_size": 1, "multi_lora": False,
+        })
         caps = miles_capabilities("sha256:" + "0" * 64, unverified_mechanisms=allow)
         caps.check(layout="lora", placement="colocated", execution_mode="colocated-serial",
                    algorithm=spec)

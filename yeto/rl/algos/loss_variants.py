@@ -235,7 +235,22 @@ def _reject_unused_clip(s) -> str | None:
     return None
 
 
+def _reject_cispo_implicit_clip(s) -> str | None:
+    # review 2026-09-30 finding 4: CISPO's IS-weight clip range must be in the
+    # identity; the engine default (Miles --eps-clip 0.2, --eps-clip-high =
+    # --eps-clip when unset) would silently set it outside the hash.
+    if variant(s) == "cispo" and (s.loss.eps_clip is None or s.loss.eps_clip_high is None):
+        return (
+            "loss.policy_loss_variant='cispo' clips the IS weight to [1-eps_l, 1+eps_h]: give "
+            "loss.eps_clip (eps_l) and loss.eps_clip_high (eps_h) explicitly so both enter the "
+            "algorithm hash and the argv (yeto sets no default; the engine default is "
+            "--eps-clip 0.2)"
+        )
+    return None
+
+
 register_rejection("loss_variant_params", _reject_param_mismatch)
+register_rejection("loss_variant_cispo_clip", _reject_cispo_implicit_clip)
 register_rejection("loss_variant_custom_loss", _reject_custom_loss)
 register_rejection("loss_variant_sequence_ratio", _reject_sequence_ratio)
 register_rejection("loss_variant_dual_clip", _reject_dual_clip)
@@ -259,6 +274,9 @@ def launch_problems(spec, values) -> list[str]:
             f"{VARIANT_FLAG}; the pinned Miles {commit[:12]} does not (known commits: "
             f"{sorted(FORK_COMMITS) or 'none yet'}). Expressible but not opened"
         )
+    # Callers today pass context_parallel_size=1 hard-coded (miles_adapter/config.py
+    # and launcher.py do not expose CP yet), so this check is a guard for when
+    # CP becomes configurable, not a currently reachable refusal.
     cp = int(values.get("context_parallel_size", 1) or 1)
     if name == "gmpo" and cp != 1:
         problems.append(
@@ -278,22 +296,27 @@ register_launch_check("loss_variants", launch_problems)
 
 
 def gmpo_gradient_rule(spec, batch_summary, step_metrics=None):
-    """GMPO: every token clipped in log space (reported fraction 1) -> no gradient.
+    """GMPO: every token with A != 0 clipped in log space -> no gradient.
 
-    The fraction arrives as ``masked_fraction`` (the P0 contract; the Miles
-    trainer fills it from ``pg_clipfrac`` for GMPO -- patch
-    ``infra-drafts/patches/algo-2b-trainer.patch``). Unknown keeps the GRPO
-    rule. CISPO and SAPO register no rule: they never mask a token, so the
-    GRPO rule is theirs (a fully clipped CISPO round still expects a gradient).
+    Reads ``step_metrics.clip_fraction`` (the round's Miles ``pg_clipfrac``),
+    NOT ``masked_fraction``: with corrections on, ``masked_fraction`` carries
+    the correction mask (review 2026-09-30, finding 3). Semantics (design D5,
+    fork-side the same): among valid tokens with A != 0, the fraction whose
+    one-sided log-space clip binds. Clipped tokens carry no gradient and
+    A = 0 tokens carry none either, so fraction 1 means a zero gradient is
+    legitimate. Unknown / non-finite / < 1 abstains (GRPO rule). The Miles
+    trainer collects the fraction for GMPO with
+    ``infra-drafts/patches/algo-2b-trainer.patch``; without it the value stays
+    None (stricter). CISPO and SAPO register no rule: they never mask a token.
     """
 
     if variant(spec) != "gmpo":
         return None
-    masked = getattr(step_metrics, "masked_fraction", None)
-    if masked is None or isinstance(masked, bool):
+    fraction = getattr(step_metrics, "clip_fraction", None)
+    if fraction is None or isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
         return None
-    masked = float(masked)
-    if math.isfinite(masked) and masked >= FULL_CLIP_THRESHOLD:
+    fraction = float(fraction)
+    if math.isfinite(fraction) and fraction >= FULL_CLIP_THRESHOLD:
         return False
     return None
 

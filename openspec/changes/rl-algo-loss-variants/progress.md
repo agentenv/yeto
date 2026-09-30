@@ -80,3 +80,11 @@
 1. FORK-2b 提交后：`git -C /home/michael/work/miles-2b diff 0af62f4d` 再核对 flag 名、默认值与 `pg_clipfrac` 语义（GMPO：序列内被 clip 的 token 比例）。
 2. yeto/ports 快进 + IMG 更新 pin 后：把新提交写入 `FORK_COMMITS`，在钉住镜像中用 upstream `parse_args` 解析 `algorithm_argv` 输出（4.4），重跑 7.1。
 3. 本地 GPU 可用后按上面的计划执行第 6 组。
+
+### 2026-09-30 审查修复（ALGO-2b 第二轮）
+- 高1：参考实现 GMPO 改为论文 arXiv:2507.20673v3 式 (4) 的单侧截断，在 log 空间 ℓ = sign·min(sign·log r, sign·clamp(log r, −δl, δh))。推导依据是论文式 (4) 与论文伪代码（HTML v3 全文，通过 WebFetch 读取）；官方仓库 github.com/callsys/GMPO 未逐行读取。新增用例：A>0 且 log r≪−δ 时不截断、仍有梯度；δl≠δh 非对称；A<0；A=0。与 FORK-2b 工作区（未提交）`compute_gmpo_loss` 核对：公式与 clipfrac 口径一致（fork 在无 A≠0 token 时返回 0，参考实现返回 None；两者都不会触发放宽）。
+- 中2：GMPO clip 比例定义为"有效且 A≠0 的 token 中截断生效的比例"，写入 design D5、docs 并加测试。注意：Miles 用 sum_of_sample_mean 聚合 pg_clipfrac，全零优势序列计为 0，所以一轮里只要有这样的序列，整轮比例就小于 1。这是保守方向：不放宽、可能误报。
+- 中3：GMPO 规则改读 `TrainStepMetrics.clip_fraction`（driver 已有字段，不改 driver），不读 `masked_fraction`；trainer 补丁改为只在 GMPO 下收集 step losses（`clip_fraction` 由现有 `_mean_clipfrac` 填充），不再写 `masked_fraction`。补丁已更新并在临时副本上 apply，相关测试通过（除基线环境性错误）。
+- 中4：CISPO 必须显式给出 `loss.eps_clip` 与 `loss.eps_clip_high`（新拒绝 `loss_variant_cispo_clip`），两者进入哈希与 argv。
+- 低5：GMPO CP 检查加注释（调用方目前硬编码 CP=1，属防护）。低6：dry-run 输出 `launch_warnings`（跑 launch_problems，CP=1），会显示 pin 检查。
+- 5.1 完成记录已注明：仅能力检查层面放行，真实启动仍被 pin 检查阻止。

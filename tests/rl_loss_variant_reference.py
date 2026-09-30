@@ -20,10 +20,19 @@ the formulas are the ones research.md and design D3 quote):
   df/dr = 4 sigma (1 - sigma) equals 1 at r = 1 (PPO-like on-policy gradient).
   Token normalization as the fork (whether the paper normalizes per token
   is not re-checked; design Risks).
-* GMPO -- "Geometric-Mean Policy Optimization" (arXiv:2507.20673):
-  per token l_t = sign(A) * clip(sign(A) * log r_t, -delta_l, delta_h);
-  sequence ratio exp(mean_t l_t) over the sequence's valid tokens; loss
-  -ratio * A. Default delta = 0.4 (range (e^-0.4, e^0.4)).
+* GMPO -- "Geometric-Mean Policy Optimization" (arXiv:2507.20673v3, eq. (4)):
+  J = 1/G sum_i { prod_t |min[rho_t A, clip(rho_t, e^-delta_l, e^delta_h) A]| }^(1/|o_i|)
+  * sgn(A). The paper states that the product and the clipping are done in
+  log space; in log space, per token (derived here from eq. (4), checked
+  against the paper's pseudo-code ``torch.min(sgn_A*logr, clamp(...))``; the
+  official repo github.com/callsys/GMPO was not re-read):
+      l_t = sign(A) * min(sign(A) * log r_t, sign(A) * clamp(log r_t, -delta_l, delta_h))
+  i.e. ONE-SIDED (PPO-pessimistic): for A > 0 only log r > delta_h is clipped
+  (log r << -delta_l keeps its gradient); for A < 0 only log r < -delta_l.
+  Sequence ratio exp(mean_t l_t) over valid tokens; with a per-sequence
+  constant A, |A| * sgn(A) = A, so loss = -ratio * A. Default delta = 0.4.
+  Clip fraction (yeto D5 semantics): clipped tokens among valid tokens with
+  A != 0.
 * Combination order (design D3): variant token loss first, then multiplied by
   the (truncated) TIS / IcePop weight, then aggregated.
 """
@@ -49,28 +58,37 @@ def sapo(logp, old_logp, adv, tau_pos=1.0, tau_neg=1.05):
     return -gate * adv
 
 
-def gmpo_sequence(logp, old_logp, adv, mask, delta_low=0.4, delta_high=0.4):
-    """One sequence (1-D tensors); ``adv`` is constant along the sequence (GRPO)."""
-
+def _gmpo_ell(logp, old_logp, adv, delta_low, delta_high):
+    log_r = logp - old_logp
     sign = torch.sign(adv)
-    signed = sign * (logp - old_logp)
-    clipped = signed.clamp(-delta_low, delta_high)
-    ell = sign * clipped
+    unclipped = sign * log_r
+    clipped = sign * log_r.clamp(-delta_low, delta_high)
+    chosen = torch.minimum(unclipped, clipped)
+    return sign * chosen, (chosen != unclipped) & (adv != 0)
+
+
+def gmpo_sequence(logp, old_logp, adv, mask, delta_low=0.4, delta_high=0.4):
+    """One sequence (1-D tensors); ``adv`` is constant along the sequence (GRPO).
+
+    Returns (per-token loss, clip fraction among valid A != 0 tokens or None).
+    """
+
+    ell, is_clipped = _gmpo_ell(logp, old_logp, adv, delta_low, delta_high)
     m = mask.to(logp.dtype)
     seq_ratio = torch.exp((ell * m).sum() / m.sum().clamp_min(1))
-    return -seq_ratio * adv, ((clipped != signed).to(m.dtype) * m).sum() / m.sum().clamp_min(1)
+    active = m * (adv != 0).to(m.dtype)
+    frac = None if active.sum() == 0 else (is_clipped.to(m.dtype) * active).sum() / active.sum()
+    return -seq_ratio * adv, frac
 
 
 def gmpo_sharded(logp, old_logp, adv, mask, shards, delta_low=0.4, delta_high=0.4):
     """Context parallel: each shard reduces (sum l, count) and all-reduces them."""
 
-    sign = torch.sign(adv)
-    ell = sign * (sign * (logp - old_logp)).clamp(-delta_low, delta_high)
+    ell, _ = _gmpo_ell(logp, old_logp, adv, delta_low, delta_high)
     m = mask.to(logp.dtype)
     bounds = torch.tensor_split(torch.arange(len(logp)), shards)
-    partial = [((ell[i] * m[i]).sum(), m[i].sum()) for i in bounds]
-    total = sum(p[0] for p in partial)
-    count = sum(p[1] for p in partial)
+    total = sum((ell[i] * m[i]).sum() for i in bounds)
+    count = sum(m[i].sum() for i in bounds)
     seq_ratio = torch.exp(total / count.clamp_min(1))
     return [(-seq_ratio * adv[i]) for i in bounds]
 
