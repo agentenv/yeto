@@ -219,3 +219,12 @@
 ### 下一步
 1. E1 定稿 ports 签名，提供 data_cursor 与账本计数后，driver 实现 4.4（重建 → restore → 重发 → 校验）。
 2. 本地 GPU 到位后按 plan 依次跑 G-4.2 → G-4.3（DP1、DP2+DistOpt）→ G-4.4 → G-4.5。
+
+### INFRA-E2 审查修复（2026-09-30，"需修复"结论）
+- H1：重建前提改为检查 `args.requested_load is None`。原因是 bridge 模式下 `args.load` 等于 ref_load，`start_rollout_id` 等于 0。重建前后各读一次 `data_cursor()`（E1 接口未就绪时用 `DataCursorSource` 协议占位），不一致即判 RECOVERY_REQUIRED；该检查覆盖 `generate_rollout.load`。`cut-audit.md` §2 已更正。
+- H2：写入前断言 scheduler `num_steps==0`（`restore_cut` 只用于新建 trainer），并预检超参；测试替身改为 Megatron 的累加语义；新增"在线 trainer 就地恢复被拒绝"的测试。
+- H3：`SwappableActor.dispose()` 在调用时解析当前 target。已确认 EvalDispatcher 只保存代理对象，没有缓存方法。
+- M1：swap 之后出现任何异常都判 RECOVERY_REQUIRED。M2：`shared_filesystem=False` 且 DistOpt、DP>1 时拒绝。M3：写分片前先做 context 检查，并拒绝 TP/PP+DistOpt。M4：新版计划 `evidence/infra-e2/4.2-4.5/plan-v2.md`（v1 保留，并标注已被取代）。
+- L1：`has_optimizer_state` 要求每个 (tp,pp) 覆盖全部 adapter 名；重建后的布局从 rank 读回（`actual_layout`）。L3：yeto ports 引擎不读 `args.start_rollout_id`。L2：已写入 plan-v2 §3，待 GPU 确认。
+- 补丁：`infra-e2-ports-v2.patch`、`infra-e2-entry-swappable-actor-v2.patch`；v1 已改名为 `*.v1-OBSOLETE.patch`。
+- task 状态不变：4.1 已实现；4.1b 已实现；4.2 CPU 通过；4.3 已实现；4.4、4.5 未完成。均未勾选。
