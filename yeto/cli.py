@@ -233,6 +233,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports fixed partition: run eval overlapped with train/outer sync "
         "(rl-infra-spec 2.3; needs --rl-eval-interval); off by default",
     )
+    rl.add_argument("--rl-test-tool-delay-s", type=float, default=None, metavar="S",
+                    help="ports, TEST ONLY: every training trajectory waits S seconds on a fake "
+                    "tool call (needs --custom-generate-function-path "
+                    "yeto.rl.tool_wait_workload.generate); off by default")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",

@@ -1027,6 +1027,7 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     from .rl.engine.execution_profile import UNKNOWN
 
     placement = getattr(args, "rl_placement", "colocated") or "colocated"
+    _check_test_tool_delay(args, rl_engine)
     eval_interval = _check_ports_eval(args, rl_engine)
     if getattr(args, "rl_overlap_eval", False):
         if rl_engine != "ports":
@@ -1089,10 +1090,29 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         )
 
 
+def _check_test_tool_delay(args, rl_engine: str) -> None:
+    """``--rl-test-tool-delay-s`` (TEST ONLY): the tool-wait workload's delay."""
+    from .rl.tool_wait_workload import GENERATE_PATH
+
+    delay = getattr(args, "rl_test_tool_delay_s", None)
+    if delay is None:
+        return
+    if rl_engine != "ports":
+        raise ValueError("--rl-test-tool-delay-s only applies to --rl-engine ports")
+    if not delay > 0:
+        raise ValueError("--rl-test-tool-delay-s must be positive")
+    if getattr(args, "custom_generate_function_path", None) != GENERATE_PATH:
+        raise ValueError(f"--rl-test-tool-delay-s needs --custom-generate-function-path {GENERATE_PATH}")
+
+
 def _ports_infra_flags(args) -> tuple[str, str]:
     """(prelude, learner flags) for the opt-in 2.3/3.x switches; ("", "") by default."""
 
     prelude, flags = "", ""
+    if getattr(args, "rl_test_tool_delay_s", None) is not None:
+        from .rl.tool_wait_workload import TOOL_DELAY_ENV
+
+        prelude += f"export {TOOL_DELAY_ENV}={float(args.rl_test_tool_delay_s)!r}\n"
     if getattr(args, "rl_eval_interval", None) is not None:
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "

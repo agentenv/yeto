@@ -171,3 +171,90 @@ def test_declared_cells_come_from_the_fork_names():
     with pytest.raises(ValueError, match="--rl-elastic-cells is required"):
         resolve_declared_cells(object(), runner, ())
     assert resolve_declared_cells(object(), runner, ("x",)) == ("x",)
+
+
+# ---------------------------------------------------------------- item 4: tool-wait workload
+TOOL = ("--custom-generate-function-path", "yeto.rl.tool_wait_workload.generate",
+        "--rl-test-tool-delay-s", "30")
+
+
+def test_tool_workload_reaches_the_learner_and_every_ray_worker(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.tool_wait_workload import TOOL_DELAY_ENV, tool_delay_s
+
+    run = island_run(BASE + TOOL, monkeypatch)
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert args.custom_generate_function_path == "yeto.rl.tool_wait_workload.generate"
+    assert env[TOOL_DELAY_ENV] == "30.0" and tool_delay_s(env) == 30.0
+    seen = {}
+    ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
+    connect_island_ray(environ={"RAY_ADDRESS": "10.0.0.1:6379", **env}, ray_module=ray)
+    assert seen["runtime_env"]["env_vars"][TOOL_DELAY_ENV] == "30.0"
+
+
+def test_tool_delay_needs_the_workload_generate(tmp_path, monkeypatch):
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    with pytest.raises(ValueError, match="needs --custom-generate-function-path"):
+        launcher._check_ports_infra_switches(_cli(("--rl-test-tool-delay-s", "30")), "ports")
+    run = island_run(BASE, monkeypatch)
+    assert "YETO_RL_TEST_TOOL_DELAY_S" not in run
+
+
+def test_tool_call_is_counted_on_the_board_and_in_non_generation_time():
+    import asyncio
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.tool_wait import ToolWaitBoard, read_tool_wait
+    from yeto.rl.tool_wait_workload import tool_call
+
+    board = ToolWaitBoard()
+    sample = SimpleNamespace(group_index=3, index=1, non_generation_time=0.5)
+    during = []
+
+    async def sleep(seconds):
+        during.append((seconds, read_tool_wait(board).in_flight))
+
+    clock = iter([10.0, 40.0])
+    waited = asyncio.run(tool_call(sample, delay=30.0, board=board, sleep=sleep,
+                                   clock=lambda: next(clock)))
+    assert during == [(30.0, 1)] and waited == 30.0
+    assert read_tool_wait(board).in_flight == 0 and sample.non_generation_time == 30.5
+
+
+def test_workload_generate_delays_train_samples_only(monkeypatch):
+    import asyncio
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    from yeto.rl import tool_wait_workload as w
+
+    calls = []
+
+    async def stock(args, sample, params, evaluation=False):
+        calls.append(("gen", evaluation))
+        return sample
+
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout",
+                        types.SimpleNamespace(generate=stock))
+    monkeypatch.setitem(sys.modules, "miles.rollout.base_types",
+                        types.SimpleNamespace(GenerateFnOutput=lambda samples: ("out", samples)))
+
+    async def fake_call(sample, *, delay, board):
+        calls.append(("tool", delay))
+
+    monkeypatch.setattr(w, "tool_call", fake_call)
+    monkeypatch.setattr(w, "_board", lambda lid: "B")
+    monkeypatch.setenv(w.TOOL_DELAY_ENV, "5")
+    inp = SimpleNamespace(args=SimpleNamespace(yeto_rl_learner_id=0), sample="S",
+                          sampling_params={}, evaluation=False)
+    assert asyncio.run(w.generate(inp)) == ("out", "S")
+    inp.evaluation = True
+    asyncio.run(w.generate(inp))
+    assert calls == [("tool", 5.0), ("gen", False), ("gen", True)]

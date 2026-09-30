@@ -703,6 +703,10 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
         env_vars["PYTHONPATH"] = environ["PYTHONPATH"]
     from .rollout_meta_hook import ELASTIC_METADATA_ENV
 
+    from yeto.rl.tool_wait_workload import TOOL_DELAY_ENV
+
+    if environ.get(TOOL_DELAY_ENV):  # test tool-wait workload runs in Ray workers
+        env_vars[TOOL_DELAY_ENV] = environ[TOOL_DELAY_ENV]
     if environ.get(ELASTIC_METADATA_ENV) == "1":
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
         # inherit the raylet's environment, not the driver's.
