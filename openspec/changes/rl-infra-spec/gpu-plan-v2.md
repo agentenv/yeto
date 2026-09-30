@@ -286,3 +286,12 @@
 - **Nebius 冒烟不通**（`evidence/infra-v2-b1/nsmoke/`），按 9.3 退回 Modal：E1-A 基线与 E1-A 用 Modal `H100!:8`（`--modal-gpu-exact`，运行前断言 GPU 名），最坏每次 8×3.95×65/60 = $34.2。
 - **新增运行 6：E1-D watchdog 用例**（按 §8.7(2) 与 `evidence/infra-e1/plan-3.8-4.4-v2.md` §4、§6，判据原文适用，未改）：前缀 `infra-v2-b1-a4wd-20260930-1`，Modal `H100!:8`，T4R2S2 起始，`--rl-test-inject-update-weights-block-s 600`，第 3 轮前 up（deadline 120 s），共 4 轮；期望 0.5 h；硬超时 外层 45 min / watchdog 50 min；最坏 8×3.95×50/60 = **$26.3**。E1-D 其余 ①–⑦ 仍按 9.5（等待代码/环境阻塞），因此即使本用例通过，3.7 也不勾选。
 - 更新后本批最坏合计：已花（≤$0.42 + 指纹运行）+ F-E1 $7.3 + 基线 $34.2 + E1-A $34.2 + watchdog $26.3 ≈ $105，< $127。顺序：F-E1 → 基线 → E1-A → watchdog；每次仍按门控计算。
+
+### 9.7 A2（L-2.3）执行安排（主 agent 2026-09-30 指示；合并 integ-decl 6838fe9 后，运行前；判据 = local-gpu-plan L-2.3 1–6 原文，不改）
+
+- Nebius 不再使用（主 agent 决定），全部 Modal。本轮只做 A2。
+- 本地端到端 dry-run（`evidence/infra-v2-b1/a2/test_a2_dryrun.py`，3 passed）：真实 CLI → 岛 run 命令 → 临时 HOME 执行 prelude → `learner.parse_args` → `_resolve_eval` → `resolve_rl_run_config`/`build_ports_launch`（translate_run_config）→ `apply_ports_infra_switches` → `execution_profile_for`。确认：eval interval 1、Miles argv `--eval-temperature 0.0`、fixed-partition `--rollout-num-gpus 1`、observe 开启、S=partitioned-serial、O/OD=partitioned-overlap（允许 eval‖train、eval‖outer_sync）、heldout 文件逐字节送达。
+- dry-run 发现：`--rl-single-island-no-sync` 与 eval 不兼容（`_resolve_eval`："Yeto evaluation requires the external policy boundary"），因此三个 arm 都用 `--rl-sync-preset strict-avg` 单岛 + 本机 head（与 infra-a 2.x 的 GPU 证据同一路径）。
+- 事件来源：`rl_eval`（含 `overlapped`、`rl/policy_token`）、`rl_eval_overlap_start`、`rl_timeline_span(task=eval)`（LoopEvalHandle 真实区间，需 observe）、train span、`rl_publication`、`rl_fault_injected` 在磁带；**eval 分数不在磁带**（`evaluate()` 返回 {}），取自 Miles 日志行 `eval <rollout_id>: {...}`（`miles/ray/rollout/metrics.py` log_eval_rollout_data），判据 5 的分数条件按该行计算。
+- 配置：Modal `H100!:2`（`--modal-gpu-exact`），T1R1，`--total-steps 3 --seed 17`，`--rl-observe-timeline --rl-eval-interval 1 --rl-eval-data heldout-gsm8k-test-first32.jsonl（gsm8k test 前 32 条，N=32）--rl-eval-samples-per-prompt 1 --rl-eval-temperature 0 --rl-eval-max-response-len 384`；O/OD 加 `--rl-overlap-eval`；OD 另在代码快照根放 `yeto-rl-fault-injection.json` = `{"publish_delay_s": 30}`。三个 arm 依次运行，前缀 `infra-v2-b1-a2{s,o,od}-20260930-1`。
+- 每 arm 硬超时：外层 45 min / watchdog 50 min `modal app stop`；最坏 2×3.95×50/60 = **$6.6**，三 arm 最坏 $19.8；本批已花 ≤$2.91，合计 < $127。
