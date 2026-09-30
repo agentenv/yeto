@@ -145,7 +145,10 @@ def run_harness(ctx: HarnessContext) -> dict[str, Any]:
     except HarnessFailed:
         raise
     except Exception as error:  # noqa: BLE001 - recorded, then re-raised
-        rec.criterion("harness_completed", False, error=f"{type(error).__name__}: {error}")
+        rec.criterion("harness_completed", False, error=f"{type(error).__name__}: {error}",
+                      # RecoveryRequired carries the rebuild attempts (fork stage + cause)
+                      attempts=list(getattr(error, "attempts", None) or []),
+                      cause=repr(error.__cause__) if error.__cause__ is not None else None)
         rec.write()
         raise
     results = rec.write()

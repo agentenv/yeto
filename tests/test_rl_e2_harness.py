@@ -184,3 +184,19 @@ def test_plan_lora_dropout_must_match_the_ranks(tmp_path, determinism):
         r.args.lora_dropout = 0.0
     with pytest.raises(e2_harness.EnvironmentBlocked, match="dropout"):
         e2_harness.run_harness(ctx)
+
+
+def test_failed_rebuild_records_the_attempts(tmp_path, determinism):
+    ctx = _ctx(tmp_path)
+
+    async def failing(args, executor, *, old_handles, worker_manager, trainer_pg_view):
+        err = type("TrainerRebuildError", (RuntimeError,), {})("failed at start_pools")
+        err.stage, err.cleanup_error, err.previous_view, err.view_restored = "start_pools", None, None, False
+        raise err from RuntimeError("bundles [0] are in use by running cell inference-0")
+
+    ctx.rebuild = failing
+    with pytest.raises(Exception):
+        e2_harness.run_harness(ctx)
+    crit = json.loads((tmp_path / "C1" / "results.json").read_text())["criteria"]["harness_completed"]
+    assert [a["stage"] for a in crit["attempts"]] == ["start_pools", "start_pools"]
+    assert "in use by running cell" in crit["attempts"][0]["error"]
