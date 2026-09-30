@@ -1,0 +1,9 @@
+[33mTailing logs of job 2 on cluster 'yeto-hp929c-l1-eu-north1'...[0m
+[2m├── [0m[2mWaiting for task resources on 1 node.[0m
+[2m└── [0mJob started. Streaming logs... [2m(Ctrl-C to exit log streaming; job will not be killed)[0m
+[36m(setup pid=2047)[0m From https://github.com/michaellchung/miles
+[36m(setup pid=2047)[0m  * branch                0394715083c91182b5eb0c526eeee4196ac694b9 -> FETCH_HEAD
+[36m(setup pid=2047)[0m HEAD is now at 039471508 Add --worker-dynamic-port-start for port isolation
+[36m(setup pid=2047)[0m From https://github.com/michaellchung/sglang
+[36m(setup pid=2047)[0m  * branch                  9f29303bef1eea38eb613e5f454a52db1326422d -> FETCH_HEAD
+[36m(setup pid=2047)[0m HEAD is now at 9f29303bef Support disk-backed weight memory saver

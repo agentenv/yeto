@@ -1,0 +1,15 @@
+SBX sb-OKv3k0NJhqj9kj0u6CGFIA
+GPU: NVIDIA H100 80GB HBM3
+target/release/yeto-syncer
+200 /work/data/gsm8k.jsonl
+2bb651dcffd8871e278622303488b973a2e57b50
+rc=0
+{"step": "first_learner_exit", "rc": -9, "killed": true, "t": 1790681679.134222}
+{"step": "events_before_restart", "n": 34, "cg": {"tag": "before_restart", "sha256": "051f6e93a90e17b3f6c5218f7e10a54829b4f9f24c88808cba753bbc03e1e319", "keys": ["completed_groups", "config", "local_round_id", "local_round_stats", "policy_version", "rollout_metrics", "schema_version"], "schema_version": 3, "policy_version": 2, "local_round_id": 3, "local_round_stats": null, "rollout_metrics_n": 7,
+{"step": "restart_exit", "rc": 0, "t": 1790682125.341569}
+{"step": "syncer_exit", "rc": 0, "cg": {"tag": "final", "sha256": "b8e2395becf691372de103c77057d55d0ad605fd7bba5831a6e1f7100e9bee8d", "keys": ["completed_groups", "config", "local_round_id", "local_round_stats", "policy_version", "rollout_metrics", "schema_version"], "schema_version": 3, "policy_version": 3, "local_round_id": 4, "local_round_stats": {"local_round_id": 4, "base_policy_version": 3, 
+copied /home/michael/work/r0-integ/openspec/changes/rl-engine-ports/evidence/2026-09-29-kill44-legacy-vs-ports/kill44-ports
+ALLDONE
+TRAP
+terminated
+DOWN

@@ -89,7 +89,27 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="training workflow (default: sft)",
     )
     rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
-    rl.add_argument("--rl-image", default=MILES_IMAGE)
+    rl.add_argument(
+        "--rl-engine",
+        choices=["legacy", "ports"],
+        default="ports",
+        help=(
+            "RL engine path: ports (default; yeto-owned island loop over "
+            "upstream Miles; LoRA + GRPO + serial colocated + "
+            "strict-avg/decoupled only) or legacy (agentenv Miles fork; "
+            "required for SAO, dense-full, DeepSeek V4, critic, fixed "
+            "partition and non-causal models; deprecated)"
+        ),
+    )
+    rl.add_argument(
+        "--rl-image",
+        default=None,
+        help=(
+            "digest-pinned RL image (docker:REPO@sha256:DIGEST); defaults to "
+            f"{MILES_IMAGE} for --rl-engine legacy and the upstream Miles "
+            "image for --rl-engine ports"
+        ),
+    )
     rl.add_argument(
         "--rl-model-recipe",
         choices=["generic", "deepseek-v4-flash"],

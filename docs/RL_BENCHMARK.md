@@ -80,8 +80,11 @@ python scripts/benchmark_rl.py \
 ```
 
 `--arms` selects a comma-separated subset of `native`, `single`, and
-`federated`. For example, `--arms native` runs the direct Miles reference
-without building or starting the Yeto syncer.
+`federated`. For example, `--arms native --rl-engine legacy` runs the direct
+Miles reference without building or starting the Yeto syncer. The default RL
+engine is `ports`, which has no `native` arm: without `--arms` it runs the Yeto
+arms only, and the example above compares against native Miles only with
+`--rl-engine legacy` (see `docs/MILES_RL.md`, "Engine selection").
 
 With `G=2`, this example uses `4` total GPUs for every `M=2` arm and `8`
 total GPUs for every `M=4` arm. Use `--dry-run` to inspect every topology and

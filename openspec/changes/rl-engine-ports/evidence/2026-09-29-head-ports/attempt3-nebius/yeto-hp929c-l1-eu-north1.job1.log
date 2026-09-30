@@ -1,0 +1,401 @@
+[33mTailing logs of job 1 on cluster 'yeto-hp929c-l1-eu-north1'...[0m
+[2m├── [0m[2mWaiting for task resources on 1 node.[0m
+[2m└── [0mJob started. Streaming logs... [2m(Ctrl-C to exit log streaming; job will not be killed)[0m
+[36m(setup pid=2055)[0m From https://github.com/michaellchung/miles
+[36m(setup pid=2055)[0m  * branch                0394715083c91182b5eb0c526eeee4196ac694b9 -> FETCH_HEAD
+[36m(setup pid=2055)[0m HEAD is now at 039471508 Add --worker-dynamic-port-start for port isolation
+[36m(setup pid=2055)[0m Cloning into '/root/sglang'...
+[36m(setup pid=2055)[0m From https://github.com/michaellchung/sglang
+[36m(setup pid=2055)[0m  * branch                  9f29303bef1eea38eb613e5f454a52db1326422d -> FETCH_HEAD
+[36m(setup pid=2055)[0m HEAD is now at 9f29303bef Support disk-backed weight memory saver
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:00,824	INFO usage_lib.py:448 -- Usage stats collection is disabled.
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:00,825	INFO scripts.py:1042 -- [37mLocal node IP[39m: [1m10.0.0.96[22m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	SUCC scripts.py:1081 -- [32m--------------------[39m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	SUCC scripts.py:1082 -- [32mRay runtime started.[39m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	SUCC scripts.py:1083 -- [32m--------------------[39m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1085 -- [36mNext steps[39m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO cli_output_helpers.py:16 -- [2mNote: The following commands are intended for use on[22m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO cli_output_helpers.py:17 -- [2mthe head node or within the cluster network.[22m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1089 -- To add another node to this Ray cluster, run
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1092 -- [1m  ray start --address='10.0.0.96:6379'[22m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1103 -- To connect to this Ray cluster:
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1105 -- [35mimport[39m[26m ray
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1106 -- ray[35m.[39m[26minit(_node_ip_address[35m=[39m[26m[33m'10.0.0.96'[39m[26m)
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1120 -- To submit a Ray job using the Ray Jobs CLI:
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1121 -- [1m  RAY_API_SERVER_ADDRESS='http://127.0.0.1:8265' ray job submit --working-dir . -- python my_script.py[22m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1130 -- See https://docs.ray.io/en/latest/cluster/running-applications/job-submission/index.html 
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1134 -- for more information on submitting Ray jobs to the Ray cluster.
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,824	INFO scripts.py:1139 -- To terminate the Ray runtime, run
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,825	INFO scripts.py:1140 -- [1m  ray stop[22m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,825	INFO scripts.py:1143 -- To view the status of the cluster, use
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,825	INFO scripts.py:1144 --   [1mray status[22m[26m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,825	INFO scripts.py:1148 -- To monitor and debug Ray, view the dashboard at 
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,825	INFO scripts.py:1149 --   [1m127.0.0.1:8265[22m[26m
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:08,825	INFO scripts.py:1156 -- [4mIf connection to the dashboard fails, check your firewall settings and network configuration.[24m
+[36m(yeto-rl-island-1, pid=2055)[0m Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+[36m(yeto-rl-island-1, pid=2055)[0m Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+[36m(yeto-rl-island-1, pid=2055)[0m WARNING:megatron.bridge.models.muse_glimmer:Muse Glimmer Hugging Face classes are unavailable with transformers 5.12.1. Upgrade transformers to a version that supports Muse Glimmer.
+[36m(yeto-rl-island-1, pid=2055)[0m WARNING:miles_plugins.models.qwen3_vl:megatron-bridge Qwen3VLModel lacks native CP-local vision-embed selection; CP runs with vision tokens will mis-place vision embeddings. Apply the matching Megatron-Bridge patch (radixark/Megatron-Bridge PR #9).
+[36m(yeto-rl-island-1, pid=2055)[0m 
+[36m(yeto-rl-island-1, pid=2055)[0m Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[36m(yeto-rl-island-1, pid=2055)[0m WARNING:huggingface_hub.utils._http:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[36m(yeto-rl-island-1, pid=2055)[0m 
+[36m(yeto-rl-island-1, pid=2055)[0m Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  7.02it/s]
+[36m(yeto-rl-island-1, pid=2055)[0m Fetching 10 files:  70%|███████   | 7/10 [00:00<00:00, 28.04it/s]
+Fetching 10 files: 100%|██████████| 10/10 [00:09<00:00,  1.24s/it]
+Fetching 10 files: 100%|██████████| 10/10 [00:09<00:00,  1.04it/s]
+[36m(yeto-rl-island-1, pid=2055)[0m 
+Generating train split: 0 examples [00:00, ? examples/s]
+Generating train split: 7473 examples [00:00, 273998.28 examples/s]
+[36m(yeto-rl-island-1, pid=2055)[0m 
+Generating test split: 0 examples [00:00, ? examples/s]
+Generating test split: 1319 examples [00:00, 262380.22 examples/s]
+[36m(yeto-rl-island-1, pid=2055)[0m WARNING:megatron.bridge.models.conversion.auto_bridge:Loading a model with trust_remote_code=True allows arbitrary code execution from the model repository. Only use this with models you trust.
+[36m(yeto-rl-island-1, pid=2055)[0m [transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[36m(yeto-rl-island-1, pid=2055)[0m WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+[36m(yeto-rl-island-1, pid=2055)[0m Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+[36m(yeto-rl-island-1, pid=2055)[0m Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.559 main] arguments.py:49 - --tokenizer-model not set, use --hf-checkpoint as tokenizer model.
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.582 main] arguments.py:152 - MoE-expert LoRA layout: per-expert (--experts-shared-outer-loras).
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.582 main] arguments.py:3616 - Colocate mode: defaulting --sglang-cuda-graph-backend-prefill=disabled to avoid NVLS OOM. Set --sglang-cuda-graph-backend-prefill explicitly to override.
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.582 main] arguments.py:3626 - rollout_num_gpus None != actor_num_gpus_per_node 1 * actor_num_nodes 1, overriding rollout_num_gpus to match actor_num_gpus_per_node * actor_num_nodes.
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.582 main] arguments.py:3858 - args.eval_max_context_len is not set. Use args.rollout_max_context_len 1024 as default value.
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.582 main] arguments.py:3866 - args.rollout_max_prompt_len is not set. Use args.rollout_max_context_len - 1 (1024 - 1) as default value so that there is at least one generated token to compute loss.
+[36m(yeto-rl-island-1, pid=2055)[0m using world size: 1, data-parallel size: 1, context-parallel size: 1, hierarchical context-parallel sizes: None, tensor-model-parallel size: 1, pipeline-model-parallel size: 1
+[36m(yeto-rl-island-1, pid=2055)[0m Number of virtual stages per pipeline stage: None
+[36m(yeto-rl-island-1, pid=2055)[0m using torch.bfloat16 for parameters ...
+[36m(yeto-rl-island-1, pid=2055)[0m ------------------------ arguments ------------------------
+[36m(yeto-rl-island-1, pid=2055)[0m   _is_global_batch_size_explicitly_specified ...... True
+[36m(yeto-rl-island-1, pid=2055)[0m   account_for_embedding_in_pipeline_split ......... False
+[36m(yeto-rl-island-1, pid=2055)[0m   account_for_loss_in_pipeline_split .............. False
+[36m(yeto-rl-island-1, pid=2055)[0m   accumulate_allreduce_grads_in_fp32 .............. True
+[36m(yeto-rl-island-1, pid=2055)[0m   activation_func_clamp_shared_expert ............. True
+[36m(yeto-rl-island-1, pid=2055)[0m   activation_func_clamp_value ..................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   activation_offload_fraction ..................... 1.0
+[36m(yeto-rl-island-1, pid=2055)[0m   actor_num_gpus_per_node ......................... 1
+[36m(yeto-rl-island-1, pid=2055)[0m   actor_num_nodes ................................. 1
+[36m(yeto-rl-island-1, pid=2055)[0m   adam_beta1 ...................................... 0.9
+[36m(yeto-rl-island-1, pid=2055)[0m   adam_beta2 ...................................... 0.999
+[36m(yeto-rl-island-1, pid=2055)[0m   adam_eps ........................................ 1e-08
+[36m(yeto-rl-island-1, pid=2055)[0m   add_bias_linear ................................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   add_position_embedding .......................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   add_qkv_bias .................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   adlr_autoresume ................................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   adlr_autoresume_interval ........................ 1000
+[36m(yeto-rl-island-1, pid=2055)[0m   advantage_estimator ............................. grpo
+[36m(yeto-rl-island-1, pid=2055)[0m   align_grad_reduce ............................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   align_param_gather .............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   allgather_cp .................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   allow_ambiguous_pad_tokens ...................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   allow_partial_train_step ........................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   api_server_host ................................. 127.0.0.1
+[36m(yeto-rl-island-1, pid=2055)[0m   api_server_port ................................. 0
+[36m(yeto-rl-island-1, pid=2055)[0m   app_tag_run_name ................................ None
+[36m(yeto-rl-island-1, pid=2055)[0m   app_tag_run_version ............................. 0.0.0
+[36m(yeto-rl-island-1, pid=2055)[0m   apply_chat_template ............................. True
+[36m(yeto-rl-island-1, pid=2055)[0m   apply_chat_template_kwargs ...................... {'enable_thinking': False}
+[36m(yeto-rl-island-1, pid=2055)[0m   apply_dsa_kernel_fusion ......................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   apply_query_key_layer_scaling ................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   apply_residual_connection_post_layernorm ........ False
+[36m(yeto-rl-island-1, pid=2055)[0m   apply_rope_fusion ............................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   apply_wd_to_qk_layernorm ........................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   async_ckpt_cpu_priority ......................... 10
+[36m(yeto-rl-island-1, pid=2055)[0m   async_ckpt_io_priority .......................... 3
+[36m(yeto-rl-island-1, pid=2055)[0m   async_ckpt_use_cpu_shm .......................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   async_data_buffer_capacity_factor ............... 2.0
+[36m(yeto-rl-island-1, pid=2055)[0m   async_max_concurrent_samples .................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   async_save ...................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   async_strategy .................................. mcore
+[36m(yeto-rl-island-1, pid=2055)[0m   async_unused_samples_handler .................... drop
+[36m(yeto-rl-island-1, pid=2055)[0m   attention_backend ............................... AttnBackend.unfused
+[36m(yeto-rl-island-1, pid=2055)[0m   attention_dropout ............................... 0.1
+[36m(yeto-rl-island-1, pid=2055)[0m   attention_output_gate ........................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   attention_softmax_in_fp32 ....................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   auto_detect_ckpt_format ......................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   balance_by_flops ................................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   balance_data .................................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   barrier_with_L1_time ............................ True
+[36m(yeto-rl-island-1, pid=2055)[0m   batch_invariant_mode ............................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   bert_binary_head ................................ True
+[36m(yeto-rl-island-1, pid=2055)[0m   bert_embedder_type .............................. megatron
+[36m(yeto-rl-island-1, pid=2055)[0m   bert_load ....................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   beta_fast ....................................... 32
+[36m(yeto-rl-island-1, pid=2055)[0m   beta_slow ....................................... 1
+[36m(yeto-rl-island-1, pid=2055)[0m   bf16 ............................................ True
+[36m(yeto-rl-island-1, pid=2055)[0m   bias_dropout_fusion ............................. True
+[36m(yeto-rl-island-1, pid=2055)[0m   bias_gelu_fusion ................................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   bias_swiglu_fusion .............................. True
+[36m(yeto-rl-island-1, pid=2055)[0m   biencoder_projection_dim ........................ 0
+[36m(yeto-rl-island-1, pid=2055)[0m   biencoder_shared_query_context_model ............ False
+[36m(yeto-rl-island-1, pid=2055)[0m   block_data_path ................................. None
+[36m(yeto-rl-island-1, pid=2055)[0m   buffer_filter_path .............................. yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter
+[36m(yeto-rl-island-1, pid=2055)[0m   cache_mla_latents ............................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   calc_ft_timeouts ................................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   calculate_per_token_loss ........................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   chat_template ................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   chat_template_path .............................. None
+[36m(yeto-rl-island-1, pid=2055)[0m   check_for_large_grads ........................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   check_for_nan_in_loss_and_grad .................. True
+[36m(yeto-rl-island-1, pid=2055)[0m   check_for_spiky_loss ............................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   check_lora_weight_equal ......................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   check_rematerialize_param_from_master_weight .... False
+[36m(yeto-rl-island-1, pid=2055)[0m   check_weight_hash_across_dp_replicas_interval ... None
+[36m(yeto-rl-island-1, pid=2055)[0m   check_weight_update_allow_quant_error ........... False
+[36m(yeto-rl-island-1, pid=2055)[0m   check_weight_update_equal ....................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   check_weight_update_selector .................... all
+[36m(yeto-rl-island-1, pid=2055)[0m   check_weight_update_skip_list ................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   chunked_optimizer_state_offload ................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   ci_check_model_hash ............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   ci_disable_kl_checker ........................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   ci_disable_logprobs_checker ..................... False
+... [truncated: 1646 of 2046 lines removed; full evidence archived outside repo] ...
+[36m(yeto-rl-island-1, pid=2055)[0m   use_critic ...................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_dist_ckpt ................................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   use_dist_ckpt_deprecated ........................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_distributed_optimizer ....................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   use_distributed_post ............................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_dynamic_batch_size .......................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_dynamic_global_batch_size ................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_fault_tolerance ............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_flash_attn .................................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_fused_mhc ................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_fused_weighted_squared_relu ................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_gloo_process_groups ......................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   use_grouped_gemm_for_dense_mlp .................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_grouped_gemm_for_shared_expert .............. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_indexer_replay .............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_kitchen_attention ........................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_kl_loss ..................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_layer_wise_distributed_optimizer ............ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_layer_wise_param_layout ..................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_legacy_static_engine ........................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_mamba_mem_eff_path .......................... True
+[36m(yeto-rl-island-1, pid=2055)[0m   use_megatron_fsdp ............................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_miles_dashboard ............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_miles_router ................................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_mlflow ...................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_mp_args_from_checkpoint_args ................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_mup ......................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_one_sent_docs ............................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_opd ......................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_opsm ........................................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_persistent_ckpt_worker ...................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_precision_aware_optimizer ................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_prometheus .................................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_pytorch_profiler ............................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_ring_exchange_p2p ........................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_rollout_entropy ............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_rollout_indexer_replay ...................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_rollout_logprobs ............................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_rollout_routing_replay ...................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_rope_scaling ................................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_rotary_position_embeddings .................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_routing_replay .............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_sampling_support_replay ..................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_session_server .............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_sharp ....................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_te_activation_func .......................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_tensorboard ................................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_tis ......................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_tokenizer_model_from_checkpoint_args ........ True
+[36m(yeto-rl-island-1, pid=2055)[0m   use_torch_fsdp2 ................................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_torch_optimizer_for_cpu_offload ............. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_tp_pp_dp_mapping ............................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_transformer_engine_op_fuser ................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_unbiased_kl ................................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_varlen_dataset .............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   use_wandb ....................................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   v_head_dim ...................................... 128
+[36m(yeto-rl-island-1, pid=2055)[0m   valid_data_path ................................. None
+[36m(yeto-rl-island-1, pid=2055)[0m   validation_set_names ............................ None
+[36m(yeto-rl-island-1, pid=2055)[0m   value_clip ...................................... 0.2
+[36m(yeto-rl-island-1, pid=2055)[0m   varlen_mock_dataset_config_json ................. None
+[36m(yeto-rl-island-1, pid=2055)[0m   varlen_sbhd_validation .......................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   verify_integrity ................................ False
+[36m(yeto-rl-island-1, pid=2055)[0m   virtual_pipeline_model_parallel_size ............ None
+[36m(yeto-rl-island-1, pid=2055)[0m   vision_backbone_type ............................ vit
+[36m(yeto-rl-island-1, pid=2055)[0m   vision_pretraining .............................. False
+[36m(yeto-rl-island-1, pid=2055)[0m   vision_pretraining_type ......................... classify
+[36m(yeto-rl-island-1, pid=2055)[0m   vocab_extra_ids ................................. 0
+[36m(yeto-rl-island-1, pid=2055)[0m   vocab_file ...................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   vocab_size ...................................... 151936
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_always_use_train_step ..................... False
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_dir ....................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_entity .................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_exp_name .................................. None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_group ..................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_host ...................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_key ....................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_mode ...................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_project ................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_random_suffix ............................. True
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_run_id .................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_save_dir .................................. None
+[36m(yeto-rl-island-1, pid=2055)[0m   wandb_team ...................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   weight_decay .................................... 0.01
+[36m(yeto-rl-island-1, pid=2055)[0m   weight_decay_incr_style ......................... constant
+[36m(yeto-rl-island-1, pid=2055)[0m   wgrad_deferral_limit ............................ 0
+[36m(yeto-rl-island-1, pid=2055)[0m   window_attn_skip_freq ........................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   window_size ..................................... None
+[36m(yeto-rl-island-1, pid=2055)[0m   witness_buffer_size ............................. 1048576
+[36m(yeto-rl-island-1, pid=2055)[0m   worker_comm_backend ............................. ray
+[36m(yeto-rl-island-1, pid=2055)[0m   worker_dynamic_port_start ....................... 20000
+[36m(yeto-rl-island-1, pid=2055)[0m   worker_urls ..................................... []
+[36m(yeto-rl-island-1, pid=2055)[0m   world_size ...................................... 1
+[36m(yeto-rl-island-1, pid=2055)[0m   yaml_cfg ........................................ None
+[36m(yeto-rl-island-1, pid=2055)[0m   yarn_beta_fast .................................. None
+[36m(yeto-rl-island-1, pid=2055)[0m   yarn_beta_slow .................................. None
+[36m(yeto-rl-island-1, pid=2055)[0m   yarn_correction_range_round_to_int .............. None
+[36m(yeto-rl-island-1, pid=2055)[0m   yarn_original_max_position_embeddings ........... None
+[36m(yeto-rl-island-1, pid=2055)[0m   yeto_rl_dynamic_sampling_max_replacements ....... None
+[36m(yeto-rl-island-1, pid=2055)[0m -------------------- end of arguments ---------------------
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.612 main] arguments.py:2843 - --moe-token-dispatcher-type allgather does not support variable sequence length, please use alltoall dispatcher instead.
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.747 main] reporter.py:90 - audit op=env_report_summary hostname=computeinstance-e00n5s39enrk1rdj02 versions="{\"python\":\"3.12.3\",\"platform\":\"Linux-6.11.0-1016-nvidia-x86_64-with-glibc2.39\",\"torch\":\"2.13.0+cu130\",\"torch_cuda\":\"13.0\"}" repos="{}" num_packages=0 num_env_vars=118 packages_probed=false stored=false
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:56.765 main] placement_group.py:151 - Creating placement group with 1 GPUs...
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:56,765	INFO worker.py:1683 -- Using address 10.0.0.96:6379 set in the environment variable RAY_ADDRESS
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:56,768	INFO worker.py:1833 -- Connecting to existing Ray cluster at address: 10.0.0.96:6379...
+[36m(yeto-rl-island-1, pid=2055)[0m 2026-09-29 06:48:56,779	INFO worker.py:2015 -- Connected to Ray cluster. View the dashboard at [1m[32mhttp://127.0.0.1:8265 [39m[22m
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:57.531 main] placement_group.py:114 -   bundle    0, actual_bundle_index:    0, node: 10.0.0.96, gpu: 0
+[36m(yeto-rl-island-1, pid=2055)[0m [2026-09-29 06:48:59.545 main] reporter.py:90 - audit op=env_report_summary hostname=computeinstance-e00n5s39enrk1rdj02 versions="{\"python\":\"3.12.3\",\"platform\":\"Linux-6.11.0-1016-nvidia-x86_64-with-glibc2.39\",\"miles\":\"0.1.1\",\"sglang\":\"0.0.0.dev1+g9f29303be\",\"sglang-router\":\"0.3.2\",\"megatron-core\":\"0.19.0+a84b10547\",\"transformers\":\"5.12.1\",\"ray\":\"2.58.0\",\"flashinfer-python\":\"0.6.18\",\"torch\":\"2.13.0+cu130\",\"torch_cuda\":\"13.0\"}" repos="{\"miles\":\"0394715083c91182b5eb0c526eeee4196ac694b9\",\"sglang\":\"9f29303bef1eea38eb613e5f454a52db1326422d\",\"megatron-core\":\"a84b105473eca9c9c6e49dbf1c8aa460c5cf796e\"}" num_packages=425 num_env_vars=118 packages_probed=true stored=false
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(pid=17434)[0m Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(pid=17434)[0m Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(pid=17434)[0m WARNING:megatron.bridge.models.muse_glimmer:Muse Glimmer Hugging Face classes are unavailable with transformers 5.12.1. Upgrade transformers to a version that supports Muse Glimmer.
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(pid=17434)[0m WARNING:miles_plugins.models.qwen3_vl:megatron-bridge Qwen3VLModel lacks native CP-local vision-embed selection; CP runs with vision tokens will mis-place vision embeddings. Apply the matching Megatron-Bridge patch (radixark/Megatron-Bridge PR #9).
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m [2026-09-29 06:49:12.271 worker_manager] reporter.py:90 - audit op=env_report_summary hostname=computeinstance-e00n5s39enrk1rdj02 versions="{\"python\":\"3.12.3\",\"platform\":\"Linux-6.11.0-1016-nvidia-x86_64-with-glibc2.39\",\"torch\":\"2.13.0+cu130\",\"torch_cuda\":\"13.0\"}" repos="{}" num_packages=0 num_env_vars=118 packages_probed=false stored=false
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m [2026-09-29 06:49:13.713 worker_manager] ray_worker_manager.py:96 - Starting cells ['rollout-executor-00000', 'inference-controller-00000', 'inference-router-0-00000', 'inference-engine-all-0-0-00000', 'trainer-controller-actor-00000', 'trainer-engine-actor-00000'] failed, rolling back
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m Traceback (most recent call last):
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 92, in start_cells
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     await _gather_or_raise([c.launch_actors() for c in cells])
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 577, in _gather_or_raise
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     raise result
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 241, in launch_actors
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     await self._for_all_actors(lambda a: a.launch_actor())
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 286, in _for_all_actors
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     await asyncio.gather(*[fn(a) for a in self.actors])
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 475, in launch_actor
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     self.actor_handle = self._create_actor(
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m                         ^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 393, in _create_actor
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     **(compute_ray_pin_head_options() if self.spec.scheduling.pin_to_head else {}),
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/root/miles/miles/utils/ray_utils.py", line 15, in compute_ray_pin_head_options
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     head_node_id = _get_head_node_id()
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m                    ^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/root/miles/miles/utils/ray_utils.py", line 25, in _get_head_node_id
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     for node in list_nodes():
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m                 ^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/util/state/api.py", line 919, in list_nodes
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     return StateApiClient(address=address).list(
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/util/state/api.py", line 144, in __init__
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     api_server_url = get_address_for_submission_client(address)
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/dashboard/utils.py", line 745, in get_address_for_submission_client
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     address = ray_address_to_api_server_url(address)
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/dashboard/utils.py", line 687, in ray_address_to_api_server_url
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     address = services.canonicalize_bootstrap_address_or_die(address)
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/_private/services.py", line 759, in canonicalize_bootstrap_address_or_die
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m     raise ConnectionError(
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m ConnectionError: Found multiple active Ray instances: {'10.0.0.96:6379', '10.0.0.96:6380'}. Please specify the one to connect to by setting the `--address` flag or `RAY_ADDRESS` environment variable.
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m [2026-09-29 06:49:13.715 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x76d22f2c37d0>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x76d22f2c37d0>, cell_index=0, spec=ServeWorkerSpec(name='trainer-controller-actor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x76d204814540>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=False), meta=None, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.READ_DELETE: 'read-delete'>, worker_class='miles.ray.train.group.TrainerController', ctor_kwargs=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x76d204814680>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-17' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='trainer-controller-actor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x76d204814540>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=False), meta=None, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.READ_DELETE: 'read-delete'>, worker_class='miles.ray.train.group.TrainerController', ctor_kwargs=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x76d204814680>, concurrency_groups=None), actor_handle=Actor(TrainerController, 69b8c187def1da1461e3f06601000000), self_addrs=None, local_gpu_ids=None, gpu_slot_index=None)
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m [2026-09-29 06:49:13.715 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x76d22f2c37d0>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x76d22f2c37d0>, cell_index=0, spec=ServeWorkerSpec(name='trainer-engine-actor', category='trainer_engine', port_infos=[PortInfo(name='master', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer.<locals>.<lambda> at 0x76d204814720>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.4, num_cpus_per_worker=0.4, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='actor', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_trainer.<locals>.<lambda> at 0x76d204815bc0>, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.backends.megatron_utils.actor.MegatronTrainRayActor', ctor_kwargs=<function _compute_spec_trainer.<locals>.<lambda> at 0x76d2048167a0>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-18' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='trainer-engine-actor', category='trainer_engine', port_infos=[PortInfo(name='master', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer.<locals>.<lambda> at 0x76d204814720>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.4, num_cpus_per_worker=0.4, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='actor', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_trainer.<locals>.<lambda> at 0x76d204815bc0>, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.backends.megatron_utils.actor.MegatronTrainRayActor', ctor_kwargs=<function _compute_spec_trainer.<locals>.<lambda> at 0x76d2048167a0>, concurrency_groups=None), actor_handle=Actor(MegatronTrainRayActor, de8b391725f69d5fa231d7b901000000), self_addrs=None, local_gpu_ids=None, gpu_slot_index=0)
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m [2026-09-29 06:49:14.231 worker_manager] reporter.py:90 - audit op=env_report_summary hostname=computeinstance-e00n5s39enrk1rdj02 versions="{\"python\":\"3.12.3\",\"platform\":\"Linux-6.11.0-1016-nvidia-x86_64-with-glibc2.39\",\"miles\":\"0.1.1\",\"sglang\":\"0.0.0.dev1+g9f29303be\",\"sglang-router\":\"0.3.2\",\"megatron-core\":\"0.19.0+a84b10547\",\"transformers\":\"5.12.1\",\"ray\":\"2.58.0\",\"flashinfer-python\":\"0.6.18\",\"torch\":\"2.13.0+cu130\",\"torch_cuda\":\"13.0\"}" repos="{\"miles\":\"0394715083c91182b5eb0c526eeee4196ac694b9\",\"sglang\":\"9f29303bef1eea38eb613e5f454a52db1326422d\",\"megatron-core\":\"a84b105473eca9c9c6e49dbf1c8aa460c5cf796e\"}" num_packages=425 num_env_vars=118 packages_probed=true stored=false
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(pid=18337)[0m Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(pid=18337)[0m Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(pid=18337)[0m WARNING:megatron.bridge.models.muse_glimmer:Muse Glimmer Hugging Face classes are unavailable with transformers 5.12.1. Upgrade transformers to a version that supports Muse Glimmer.
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(RayWorkerManager pid=17434)[0m [2026-09-29 06:49:26.840 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_CommandActorManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x76d22f2c37d0>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x76d22f2c37d0>, cell_index=0, spec=CommandWorkerSpec(name='inference-engine-all-0-0', category='inference_engine', port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='dist_init', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=31, offset_by_cell=False), PortInfo(name='nccl', static_port=10000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='engine_info_bootstrap', static_port=12000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='gate', static_port=13000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x76d204814220>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.2, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='rollout', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x76d204814360>, deploy_component=<DeployComponent.INFERENCE: 'inference'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_inference_engine.<locals>._compute_launch_command at 0x76d2048144a0>), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-16' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=CommandWorkerSpec(name='inference-engine-all-0-0', category='inference_engine', port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='dist_init', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=31, offset_by_cell=False), PortInfo(name='nccl', static_port=10000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='engine_info_bootstrap', static_port=12000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='gate', static_port=13000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x76d204814220>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.2, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='rollout', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x76d204814360>, deploy_component=<DeployComponent.INFERENCE: 'inference'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_inference_engine.<locals>._compute_launch_command at 0x76d2048144a0>), actor_handle=Actor(CommandActor, 96d34ed2ad41054a76934f3901000000), self_addrs=None, local_gpu_ids=None, gpu_slot_index=0)
+[36m(yeto-rl-island-1, pid=2055)[0m [36m(pid=18337)[0m WARNING:miles_plugins.models.qwen3_vl:megatron-bridge Qwen3VLModel lacks native CP-local vision-embed selection; CP runs with vision tokens will mis-place vision embeddings. Apply the matching Megatron-Bridge patch (radixark/Megatron-Bridge PR #9).
+[36m(yeto-rl-island-1, pid=2055)[0m Traceback (most recent call last):
+[36m(yeto-rl-island-1, pid=2055)[0m   File "<frozen runpy>", line 198, in _run_module_as_main
+[36m(yeto-rl-island-1, pid=2055)[0m   File "<frozen runpy>", line 88, in _run_code
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/sky_workdir/yeto/rl/learner.py", line 2075, in <module>
+[36m(yeto-rl-island-1, pid=2055)[0m     main()
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/sky_workdir/yeto/rl/learner.py", line 2065, in main
+[36m(yeto-rl-island-1, pid=2055)[0m     run_miles(
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/sky_workdir/yeto/rl/learner.py", line 1912, in run_miles
+[36m(yeto-rl-island-1, pid=2055)[0m     _run_ports(
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/sky_workdir/yeto/rl/learner.py", line 1953, in _run_ports
+[36m(yeto-rl-island-1, pid=2055)[0m     run_ports_island(
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/sky_workdir/yeto/rl/engine/miles_adapter/entry.py", line 231, in run_ports_island
+[36m(yeto-rl-island-1, pid=2055)[0m     controller, executor, actor, dispatcher = runner.run(init())
+[36m(yeto-rl-island-1, pid=2055)[0m                                               ^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/sky_workdir/yeto/rl/engine/miles_adapter/__init__.py", line 48, in run
+[36m(yeto-rl-island-1, pid=2055)[0m     return self.loop.run_until_complete(_await(value))
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+[36m(yeto-rl-island-1, pid=2055)[0m     return future.result()
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/sky_workdir/yeto/rl/engine/miles_adapter/__init__.py", line 57, in _await
+[36m(yeto-rl-island-1, pid=2055)[0m     return await value
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/sky_workdir/yeto/rl/engine/miles_adapter/entry.py", line 218, in init
+[36m(yeto-rl-island-1, pid=2055)[0m     init_orchestration_script(miles_args, disposer=disposer)
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/orchestration_utils.py", line 22, in init_orchestration_script
+[36m(yeto-rl-island-1, pid=2055)[0m     worker_manager = launch_worker_manager(args)
+[36m(yeto-rl-island-1, pid=2055)[0m                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/ray/wiring.py", line 18, in launch_worker_manager
+[36m(yeto-rl-island-1, pid=2055)[0m     return _launch_ray_worker_manager(args)
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/ray/wiring.py", line 42, in _launch_ray_worker_manager
+[36m(yeto-rl-island-1, pid=2055)[0m     return RayWorkerManager.launch(args, specs, pgs, comm_backend=WorkerCommBackend(args.worker_comm_backend))
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 65, in launch
+[36m(yeto-rl-island-1, pid=2055)[0m     ray.get(obj.init.remote(args, specs, pgs, comm_backend=comm_backend))
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/_private/auto_init_hook.py", line 22, in auto_init_wrapper
+[36m(yeto-rl-island-1, pid=2055)[0m     return fn(*args, **kwargs)
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/_private/client_mode_hook.py", line 134, in wrapper
+[36m(yeto-rl-island-1, pid=2055)[0m     return func(*args, **kwargs)
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/_private/worker.py", line 2986, in get
+[36m(yeto-rl-island-1, pid=2055)[0m     values, debugger_breakpoint = worker.get_objects(
+[36m(yeto-rl-island-1, pid=2055)[0m                                   ^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/_private/worker.py", line 1050, in get_objects
+[36m(yeto-rl-island-1, pid=2055)[0m     raise value.as_instanceof_cause()
+[36m(yeto-rl-island-1, pid=2055)[0m ray.exceptions.RayTaskError(ConnectionError): [36mray::RayWorkerManager.init()[39m (pid=17434, ip=10.0.0.96, actor_id=dc39d15e2c451ff189c2a93501000000, repr=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x76d22f2c37d0>)
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+[36m(yeto-rl-island-1, pid=2055)[0m     return self.__get_result()
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+[36m(yeto-rl-island-1, pid=2055)[0m     raise self._exception
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 86, in init
+[36m(yeto-rl-island-1, pid=2055)[0m     await self.start_cells([c.cell_id for c in self._all_cells()])
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 92, in start_cells
+[36m(yeto-rl-island-1, pid=2055)[0m     await _gather_or_raise([c.launch_actors() for c in cells])
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 577, in _gather_or_raise
+[36m(yeto-rl-island-1, pid=2055)[0m     raise result
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 241, in launch_actors
+[36m(yeto-rl-island-1, pid=2055)[0m     await self._for_all_actors(lambda a: a.launch_actor())
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 286, in _for_all_actors
+[36m(yeto-rl-island-1, pid=2055)[0m     await asyncio.gather(*[fn(a) for a in self.actors])
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 475, in launch_actor
+[36m(yeto-rl-island-1, pid=2055)[0m     self.actor_handle = self._create_actor(
+[36m(yeto-rl-island-1, pid=2055)[0m                         ^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/workers/ray_worker_manager.py", line 393, in _create_actor
+[36m(yeto-rl-island-1, pid=2055)[0m     **(compute_ray_pin_head_options() if self.spec.scheduling.pin_to_head else {}),
+[36m(yeto-rl-island-1, pid=2055)[0m        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/ray_utils.py", line 15, in compute_ray_pin_head_options
+[36m(yeto-rl-island-1, pid=2055)[0m     head_node_id = _get_head_node_id()
+[36m(yeto-rl-island-1, pid=2055)[0m                    ^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/root/miles/miles/utils/ray_utils.py", line 25, in _get_head_node_id
+[36m(yeto-rl-island-1, pid=2055)[0m     for node in list_nodes():
+[36m(yeto-rl-island-1, pid=2055)[0m                 ^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/util/state/api.py", line 919, in list_nodes
+[36m(yeto-rl-island-1, pid=2055)[0m     return StateApiClient(address=address).list(
+[36m(yeto-rl-island-1, pid=2055)[0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/util/state/api.py", line 144, in __init__
+[36m(yeto-rl-island-1, pid=2055)[0m     api_server_url = get_address_for_submission_client(address)
+[36m(yeto-rl-island-1, pid=2055)[0m                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/dashboard/utils.py", line 745, in get_address_for_submission_client
+[36m(yeto-rl-island-1, pid=2055)[0m     address = ray_address_to_api_server_url(address)
+[36m(yeto-rl-island-1, pid=2055)[0m               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m   File "/opt/sglang/lib/python3.12/site-packages/ray/dashboard/utils.py", line 687, in ray_address_to_api_server_url
+[36m(yeto-rl-island-1, pid=2055)[0m     address = services.canonicalize_bootstrap_address_or_die(address)
+[36m(yeto-rl-island-1, pid=2055)[0m               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-rl-island-1, pid=2055)[0m ConnectionError: Found multiple active Ray instances: {'10.0.0.96:6379', '10.0.0.96:6380'}. Please specify the one to connect to by setting the `--address` flag or `RAY_ADDRESS` environment variable.
+ERROR: [31mJob 1 failed with return code list:[0m [1] 
+[0m[32m✓ Job finished (status: FAILED).[0m[0m

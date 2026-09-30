@@ -1,0 +1,20 @@
+[yeto] worker is not running
+[yeto] tearing down 2 cluster(s): yeto-gdm929-l0-modal, yeto-gdm929-l1-modal
+[yeto] Modal app yeto-yeto-gdm929: already stopped
+[yeto] yeto-gdm929-l0-modal: stopped with the Modal app (Modal app yeto-yeto-gdm929: stopped, 0 tasks)
+[yeto] yeto-gdm929-l1-modal: stopped with the Modal app (Modal app yeto-yeto-gdm929: stopped, 0 tasks)
+[yeto] run 'yeto-gdm929' is down
+== modal app list
+┃ App ID                    ┃ Description  ┃ State   ┃ Tasks ┃ Created at    ┃ S
+│ ap-X4tByQd4nWBOS1zlXS6vbS │ yeto-gdm929… │ stopped │ 0     │ 2026-09-29    │ 2
+== modal container list
+                          Active Containers in environment:                     
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━
+┃ Container ID                  ┃ App ID                    ┃ App Name ┃ Start T
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━
+└───────────────────────────────┴───────────────────────────┴──────────┴────────
+== local procs
+428698 /bin/bash -c source /home/michael/.claude/shell-snapshots/snapshot-bash-1790648971892-jjtmzi.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'source /home/michael/work/gpu-default-modal/evidence/env.sh; G=/home/michael/work/gpu-default-modal; E=$G/evidence; cat $G/export/yeto_rl_provenance.json $G/export/adapter_config.json > $E/export_meta.txt; cd $G/yeto; pgrep -af "run_local_head|yeto-syncer" | grep -v pgrep; ( $Y/yeto down yeto-gdm929 ; echo "== modal app list"; modal app list 2>&1 | grep -E "gdm929|App ID" ; echo "== modal container list"; modal container list 2>&1; echo "== local procs"; pgrep -af "run_local_head|yeto-syncer|puller.sh" ; ss -ltnp | grep 29400 ) 2>&1 | tee $E/teardown_proof.txt' < /dev/null && pwd -P >| /tmp/claude-b271-cwd
+428849 /bin/bash -c source /home/michael/.claude/shell-snapshots/snapshot-bash-1790648971892-jjtmzi.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'source /home/michael/work/gpu-default-modal/evidence/env.sh; G=/home/michael/work/gpu-default-modal; E=$G/evidence; cat $G/export/yeto_rl_provenance.json $G/export/adapter_config.json > $E/export_meta.txt; cd $G/yeto; pgrep -af "run_local_head|yeto-syncer" | grep -v pgrep; ( $Y/yeto down yeto-gdm929 ; echo "== modal app list"; modal app list 2>&1 | grep -E "gdm929|App ID" ; echo "== modal container list"; modal container list 2>&1; echo "== local procs"; pgrep -af "run_local_head|yeto-syncer|puller.sh" ; ss -ltnp | grep 29400 ) 2>&1 | tee $E/teardown_proof.txt' < /dev/null && pwd -P >| /tmp/claude-b271-cwd
+{'app_id': 'ap-tGFKJLXtjJJYIGqNrh9XZD', 'description': 'yeto-yeto-gdm929', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 12:06:06+00:00', 'stopped_at': '2026-09-29 12:38:38+00:00'}
+{'app_id': 'ap-X4tByQd4nWBOS1zlXS6vbS', 'description': 'yeto-gdm929-probe', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 12:04:01+00:00', 'stopped_at': '2026-09-29 12:04:07+00:00'}

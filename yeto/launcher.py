@@ -524,6 +524,17 @@ def resolve_loss_function(
     return _stage_pickled_loss(cloudpickle.dumps(fn))
 
 
+def resolve_default_rl_image(args) -> None:
+    """Fill an omitted ``--rl-image`` with the engine's pinned default."""
+
+    if getattr(args, "training_mode", "sft") != "rl":
+        return
+    if getattr(args, "rl_image", None) is None:
+        from .rl import default_rl_image
+
+        args.rl_image = default_rl_image(getattr(args, "rl_engine", "ports"))
+
+
 def prepare_launch_args(
     args,
     *,
@@ -619,6 +630,7 @@ def prepare_launch_args(
                 f"{expected_adapter_sha256.lower()}, got {adapter_sha256}"
             )
         args.diffusion_adapter_sha256 = adapter_sha256
+    resolve_default_rl_image(args)
     if getattr(args, "gpu", None):
         check_cloud_prerequisites(parse_gpu_spec(args.gpu), args=args)
     _prepare_rl_args(
@@ -758,6 +770,7 @@ def check_cloud_prerequisites(
             raise ValueError(f"modal islands need a Modal token: {modal_credential_hint()}")
         if args is not None:
             if getattr(args, "training_mode", "sft") == "rl":
+                resolve_default_rl_image(args)
                 image_ref_from_rl_image(getattr(args, "rl_image", "") or "")
             data = getattr(args, "data", None)
             if data:
@@ -802,6 +815,7 @@ def _prepare_rl_args(
     allow_local_data: bool = False,
     allow_remote_model: bool = False,
 ) -> None:
+    resolve_default_rl_image(args)
     if getattr(args, "training_mode", "sft") != "rl":
         if getattr(args, "rl_initial_adapter", None) is not None or getattr(
             args, "rl_initial_adapter_sha256", None
@@ -846,6 +860,22 @@ def _prepare_rl_args(
 
     from .models import resolve_model_kind
 
+    rl_engine = getattr(args, "rl_engine", "ports")
+    if rl_engine not in ("legacy", "ports"):
+        raise ValueError(f"--rl-engine must be legacy or ports, got {rl_engine!r}")
+    if rl_engine == "ports":
+        from .rl.engine.selection import require_ports_supported
+
+        # Rejected before any cloud or GPU work (spec rl-engine-selection).
+        require_ports_supported(
+            sync_preset=args.rl_sync_preset,
+            model_kind=resolve_model_kind(args.model, args.model_kind),
+            tuning=args.tuning,
+            model_recipe=getattr(args, "rl_model_recipe", "generic"),
+            lora_targets=getattr(args, "lora_targets", None),
+            expert_full_count=getattr(args, "expert_full_count", 0) or 0,
+            rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
+        )
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
     if args.tuning != "lora":
@@ -1257,6 +1287,9 @@ def _prepare_rl_args(
         _rl_checkpoint_mount(args.rl_completed_groups_path)
 
     provenance = getattr(args, "_provenance", None)
+    if provenance and rl_engine == "ports":
+        # Legacy provenance stays byte-identical; ports is recorded.
+        provenance["rl_engine"] = "ports"
     if provenance:
         for name in ("model", "dataset"):
             source = provenance.get(name) or {}
@@ -1501,6 +1534,85 @@ def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
     return stem[: 63 - len(suffix)].rstrip("-") + suffix
 
 
+def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
+    """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``."""
+
+    from .rl import (
+        MILES_BASE_COMMIT,
+        MILES_BUNDLE_PATH,
+        MILES_BUNDLE_SHA256,
+        MILES_COMMIT,
+        MILES_NEXT_COMMIT,
+        MILES_NEXT_REPOSITORY,
+        MILES_PEFT_VERSION,
+        MILES_REPOSITORY,
+        SGLANG_COMMIT,
+        SGLANG_NEXT_COMMIT,
+        SGLANG_NEXT_REPOSITORY,
+        SGLANG_REPOSITORY,
+    )
+
+    if rl_engine == "ports":
+
+        def checkout(path: str, repository: str, commit: str) -> str:
+            repo = shlex.quote(repository)
+            return (
+                f"if [ ! -d {path}/.git ]; then git clone --no-checkout "
+                f"{repo} {path}; fi\n"
+                f"git -C {path} remote set-url origin {repo}\n"
+                f'test "$(git -C {path} config --get remote.origin.url)" = '
+                f"{repo}\n"
+                f"git -C {path} fetch --depth 1 origin {commit}\n"
+                f"git -C {path} checkout --detach {commit}\n"
+                f'test "$(git -C {path} rev-parse HEAD)" = {commit}\n'
+                f'test "$(git -C {path} rev-parse --abbrev-ref HEAD)" = HEAD\n'
+                f'test -z "$(git -C {path} status --porcelain '
+                '--untracked-files=all)"\n'
+            )
+
+        return (
+            "set -e\n"
+            + checkout("~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
+            + "python3 -m pip install -q --no-deps -e ~/miles "
+            f"'peft=={MILES_PEFT_VERSION}'",
+            checkout("~/sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT)
+            + "python3 -m pip install -q --no-deps -e ~/sglang/python",
+        )
+    if rl_engine != "legacy":
+        raise ValueError(f"unknown rl_engine {rl_engine!r}")
+    miles_setup = (
+        "set -e\n"
+        f"MILES_BUNDLE=~/sky_workdir/{MILES_BUNDLE_PATH}\n"
+        'test -f "$MILES_BUNDLE" && test ! -L "$MILES_BUNDLE"\n'
+        f"printf '%s  %s\\n' {MILES_BUNDLE_SHA256} \"$MILES_BUNDLE\" "
+        "| sha256sum --check -\n"
+        f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
+        f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
+        # An image may ship its own Miles clone from another remote (the
+        # public radixark/miles images do); the runtime verifier requires
+        # the pinned repository as origin.
+        f"git -C ~/miles remote set-url origin {shlex.quote(MILES_REPOSITORY)}\n"
+        f"git -C ~/miles fetch --depth 1 origin {MILES_BASE_COMMIT}\n"
+        f"git -C ~/miles checkout --detach {MILES_BASE_COMMIT}\n"
+        'git -C ~/miles bundle verify "$MILES_BUNDLE" >/dev/null\n'
+        f'git -C ~/miles fetch "$MILES_BUNDLE" {MILES_COMMIT}\n'
+        f"git -C ~/miles checkout --detach {MILES_COMMIT}\n"
+        f'test "$(git -C ~/miles rev-parse HEAD)" = {MILES_COMMIT}\n'
+        'test -z "$(git -C ~/miles status --porcelain --untracked-files=all)"\n'
+        f"python3 -m pip install -q --no-deps -e ~/miles "
+        f"'peft=={MILES_PEFT_VERSION}'"
+    )
+    sglang_setup = (
+        f"if [ ! -d ~/sglang/.git ]; then git clone --no-checkout "
+        f"{shlex.quote(SGLANG_REPOSITORY)} ~/sglang; fi\n"
+        f"git -C ~/sglang fetch --depth 1 {shlex.quote(SGLANG_REPOSITORY)} "
+        f"{SGLANG_COMMIT}\n"
+        f"git -C ~/sglang checkout --detach {SGLANG_COMMIT}\n"
+        "python3 -m pip install -q --no-deps -e ~/sglang/python"
+    )
+    return miles_setup, sglang_setup
+
+
 def make_miles_island_task(
     args,
     spec: ClusterSpec,
@@ -1515,17 +1627,7 @@ def make_miles_island_task(
     from .datasource import learner_data_arg, learner_file_mounts
     from .models import resolve
     from .provenance import is_local_reference
-    from .rl import (
-        MILES_BASE_COMMIT,
-        MILES_BUNDLE_PATH,
-        MILES_BUNDLE_SHA256,
-        MILES_COMMIT,
-        MILES_PEFT_VERSION,
-        MILES_REPOSITORY,
-        SGLANG_COMMIT,
-        SGLANG_REPOSITORY,
-        SIGNED_CODEX_AGENTS,
-    )
+    from .rl import SIGNED_CODEX_AGENTS
 
     if not getattr(args, "source_sha256", None) or not getattr(
         args, "reward_sha256", None
@@ -1615,6 +1717,9 @@ def make_miles_island_task(
         )
     if args.rl_offload_train:
         flags += " --rl-offload-train"
+    # Always explicit: the learner's own default is ports, so a legacy run
+    # must say so (and an older remote learner must not guess).
+    flags += f" --rl-engine {getattr(args, 'rl_engine', 'ports')}"
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
     for flag, name in (
@@ -1683,35 +1788,8 @@ def make_miles_island_task(
             " --initial-adapter-sha256 "
             f"{shlex.quote(args.rl_initial_adapter_sha256)}"
         )
-    miles_setup = (
-        "set -e\n"
-        f"MILES_BUNDLE=~/sky_workdir/{MILES_BUNDLE_PATH}\n"
-        'test -f "$MILES_BUNDLE" && test ! -L "$MILES_BUNDLE"\n'
-        f"printf '%s  %s\\n' {MILES_BUNDLE_SHA256} \"$MILES_BUNDLE\" "
-        "| sha256sum --check -\n"
-        f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
-        f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
-        # An image may ship its own Miles clone from another remote (the
-        # public radixark/miles images do); the runtime verifier requires
-        # the pinned repository as origin.
-        f"git -C ~/miles remote set-url origin {shlex.quote(MILES_REPOSITORY)}\n"
-        f"git -C ~/miles fetch --depth 1 origin {MILES_BASE_COMMIT}\n"
-        f"git -C ~/miles checkout --detach {MILES_BASE_COMMIT}\n"
-        'git -C ~/miles bundle verify "$MILES_BUNDLE" >/dev/null\n'
-        f'git -C ~/miles fetch "$MILES_BUNDLE" {MILES_COMMIT}\n'
-        f"git -C ~/miles checkout --detach {MILES_COMMIT}\n"
-        f'test "$(git -C ~/miles rev-parse HEAD)" = {MILES_COMMIT}\n'
-        'test -z "$(git -C ~/miles status --porcelain --untracked-files=all)"\n'
-        f"python3 -m pip install -q --no-deps -e ~/miles "
-        f"'peft=={MILES_PEFT_VERSION}'"
-    )
-    sglang_setup = (
-        f"if [ ! -d ~/sglang/.git ]; then git clone --no-checkout "
-        f"{shlex.quote(SGLANG_REPOSITORY)} ~/sglang; fi\n"
-        f"git -C ~/sglang fetch --depth 1 {shlex.quote(SGLANG_REPOSITORY)} "
-        f"{SGLANG_COMMIT}\n"
-        f"git -C ~/sglang checkout --detach {SGLANG_COMMIT}\n"
-        "python3 -m pip install -q --no-deps -e ~/sglang/python"
+    miles_setup, sglang_setup = _miles_source_setup(
+        getattr(args, "rl_engine", "ports")
     )
     model = resolve(args.model)
     if is_local_reference(model):
@@ -1792,6 +1870,11 @@ def make_miles_island_task(
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
     setup_steps.append(prefetch)
+    # Ports images (radixark/miles) ship their own Miles at /root/miles on
+    # PYTHONPATH; the pinned fork checkout must shadow it.  Legacy unchanged.
+    island_pythonpath = (
+        "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
+    )
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
         setup="\n".join(setup_steps),
@@ -1828,7 +1911,8 @@ def make_miles_island_task(
             # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
-            "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
+            f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir"
+            "${PYTHONPATH:+:$PYTHONPATH} "
             f"python3 -m yeto.rl.learner{flags}\n"
             "else\n"
             '  until ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"; '
@@ -2563,9 +2647,11 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     rl = getattr(args, "training_mode", "sft") == "rl"
     envs = dict(getattr(task, "envs", None) or {})
     envs["SYNCER_ADDR"] = syncer_addr
-    if rl:
-        # Miles' own router launch misses its 30 s deadline on Modal's
-        # CPUs (see yeto.rl.learner.start_external_sglang_router).
+    if rl and getattr(args, "rl_engine", "ports") != "ports":
+        # Legacy Miles' own router launch misses its 30 s deadline on Modal's
+        # CPUs (see yeto.rl.learner.start_external_sglang_router).  Upstream
+        # Miles (ports) launches its router as a Ray worker with a 120 s
+        # budget and has no external router mode.
         envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
     token_path = os.path.expanduser(HF_TOKEN_PATH)
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):

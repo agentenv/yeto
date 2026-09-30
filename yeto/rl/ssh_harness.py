@@ -44,6 +44,8 @@ from . import (
     MILES_BUNDLE_PATH,
     MILES_BUNDLE_SHA256,
     MILES_COMMIT,
+    MILES_NEXT_COMMIT,
+    MILES_NEXT_REPOSITORY,
     MILES_PEFT_VERSION,
     MILES_REPOSITORY,
     SECRLENV_AGENTS,
@@ -53,6 +55,8 @@ from . import (
     SECRLENV_REWARD,
     SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
     SGLANG_COMMIT,
+    SGLANG_NEXT_COMMIT,
+    SGLANG_NEXT_REPOSITORY,
     SGLANG_REPOSITORY,
     SIGNED_CODEX_AGENTS,
 )
@@ -1007,6 +1011,21 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _require_ports_plan(learner: dict[str, Any]) -> None:
+    from .engine.selection import UnsupportedPortsCombination, require_ports_supported
+
+    try:
+        require_ports_supported(
+            sync_preset=learner.get("sync_preset", "strict-avg"),
+            model_recipe=learner.get("rl_model_recipe", "generic"),
+            lora_targets=learner.get("lora_targets"),
+            expert_full_count=learner.get("expert_full_count", 0) or 0,
+            rollout_num_gpus=learner.get("rollout_num_gpus"),
+        )
+    except UnsupportedPortsCombination as error:
+        raise HarnessError(str(error)) from error
+
+
 def _plan_digest(plan: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(plan).encode()).hexdigest()
 
@@ -1097,6 +1116,12 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     learner = plan.get("learner")
     if not isinstance(learner, dict):
         raise HarnessError("plan has no learner configuration")
+    # Legacy plans never carry the key (their digest is unchanged); only an
+    # explicit ports selection is recorded.
+    if "rl_engine" in plan:
+        if plan["rl_engine"] != "ports":
+            raise HarnessError("plan rl_engine must be absent (legacy) or 'ports'")
+        _require_ports_plan(learner)
     daemon = plan.get("secrlenv_daemon")
     if learner.get("custom_agent_function_path") in SECRLENV_AGENTS:
         if not isinstance(daemon, dict):
@@ -1965,6 +1990,8 @@ def prepare(namespace) -> Path:
                 args.expert_selection_contract_sha256
             ),
         )
+    if getattr(args, "rl_engine", "ports") == "ports":
+        plan["rl_engine"] = "ports"
     _validate_plan(plan)
     _write_plan(plan_path, plan)
     print(f"prepared {plan_path}")
@@ -2590,7 +2617,20 @@ if ! docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null 2>&1; t
   docker pull {shlex.quote(plan['docker_image'])}
 fi
 docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
-{tms_patch_check}{jit_cache_setup}if [ ! -d "$RUN/miles/.git" ]; then
+{tms_patch_check}{jit_cache_setup}{_source_checkout_script(plan)}"""
+
+
+def _source_checkout_script(plan: dict[str, Any]) -> str:
+    """Miles/SGLang checkout steps; ``plan['rl_engine']`` selects the path."""
+
+    rl_engine = plan.get("rl_engine", "legacy")
+    if rl_engine == "ports":
+        return _ports_source_checkout_script()
+    if rl_engine != "legacy":
+        raise HarnessError(f"unknown rl_engine {rl_engine!r}")
+    sglang = plan["sglang"]
+    miles = plan["miles"]
+    return f"""if [ ! -d "$RUN/miles/.git" ]; then
   rmdir "$RUN/miles"
   git clone --no-checkout {shlex.quote(MILES_REPOSITORY)} "$RUN/miles"
 fi
@@ -2613,6 +2653,30 @@ git -C "$RUN/sglang" remote set-url origin {shlex.quote(SGLANG_REPOSITORY)}
 git -C "$RUN/sglang" fetch --depth 1 origin {shlex.quote(sglang['commit'])}
 git -C "$RUN/sglang" checkout --detach {shlex.quote(sglang['commit'])}
 """
+
+
+def _ports_source_checkout_script() -> str:
+    lines = []
+    for name, repository, commit in (
+        ("miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT),
+        ("sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT),
+    ):
+        path = f'"$RUN/{name}"'
+        lines += [
+            f'if [ ! -d "$RUN/{name}/.git" ]; then',
+            f"  rmdir {path}",
+            f"  git clone --no-checkout {shlex.quote(repository)} {path}",
+            "fi",
+            f"git -C {path} remote set-url origin {shlex.quote(repository)}",
+            f'test "$(git -C {path} config --get remote.origin.url)" = '
+            f"{shlex.quote(repository)}",
+            f"git -C {path} fetch --depth 1 origin {shlex.quote(commit)}",
+            f"git -C {path} checkout --detach {shlex.quote(commit)}",
+            f'test "$(git -C {path} rev-parse HEAD)" = {shlex.quote(commit)}',
+            f'test "$(git -C {path} rev-parse --abbrev-ref HEAD)" = HEAD',
+            f'test -z "$(git -C {path} status --porcelain --untracked-files=all)"',
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def _syncer_host_setup_script(plan: dict[str, Any]) -> str:
@@ -3212,6 +3276,9 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         )
     if learner.get("rl_offload_train"):
         values.append("--rl-offload-train")
+    # Absent key = legacy plan (digest-compatible); the learner defaults to
+    # ports, so the engine is always passed explicitly.
+    values.extend(("--rl-engine", plan.get("rl_engine", "legacy")))
     if learner.get("data_revision") is not None:
         values.extend(("--data-revision", learner["data_revision"]))
     if learner.get("expert_parallel") is not None:
@@ -4702,6 +4769,7 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
             fragments=learner.get("fragments", 1),
             pipeline=learner.get("pipeline", 1),
             local_horizon=learner.get("local_horizon", 1),
+            rl_engine=plan.get("rl_engine", "legacy"),
         )
         print(f"exported standard PEFT adapter to {Path(export_dir).expanduser()}")
 

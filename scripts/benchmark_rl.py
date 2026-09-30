@@ -41,6 +41,9 @@ _RESUME_EXCLUDES = {
     "_pass_ks",
     "dry_run",
     "overwrite",
+    # Recorded separately and only for ports, so legacy resume identities
+    # are unchanged.
+    "rl_engine",
     "report_dir",
     "resume",
     "work_dir",
@@ -430,15 +433,31 @@ def syncer_command(
             command.extend(("--resume", "--mark-final-checkpoint"))
         else:
             command.extend(("--learner-budget-steps", str(rounds)))
-    else:
+    elif (run_dir / "state.ckpt").is_file():
+        # Strict arms resume an existing authoritative checkpoint; a fresh run
+        # has none, and the syncer refuses --resume without the file.
         command.append("--resume")
     return command
 
 
-def miles_extra_argv(worker: WorkerSpec, run_dir: Path, rounds: int) -> list[str]:
+def rollout_dump_dir(run_dir: Path, learner_id: int, rl_engine: str = "ports") -> Path:
+    """Where an island's ``--save-debug-rollout-data`` dumps land.
+
+    Upstream Miles (the ports engine) also writes dashboard columns to
+    ``<dump dir>/../dashboard_columns/rollout_<id>.parquet`` through a fixed
+    ``.tmp`` name, so co-resident islands must not share the dump's
+    grandparent; ports nests one level deeper. Legacy keeps its layout.
+    """
+    island = run_dir / "rollouts" / f"island-{learner_id}"
+    return island / "dumps" if rl_engine == "ports" else island
+
+
+def miles_extra_argv(
+    worker: WorkerSpec, run_dir: Path, rounds: int, rl_engine: str = "ports"
+) -> list[str]:
     values = [
         "--save-debug-rollout-data",
-        str(run_dir / "rollouts" / f"island-{worker.learner_id}" / "{rollout_id}.pt"),
+        str(rollout_dump_dir(run_dir, worker.learner_id, rl_engine) / "{rollout_id}.pt"),
     ]
     if not worker.policy_sync:
         values.extend(
@@ -554,7 +573,9 @@ def worker_payload(
         "optimizer_steps": args.optimizer_steps,
         "rollout_max_response_len": args.rollout_max_response_len,
         "apply_chat_template_kwargs": args.apply_chat_template_kwargs,
-        "custom_generate_function_path": None,
+        "custom_generate_function_path": getattr(
+            args, "custom_generate_function_path", None
+        ),
         "use_session_server": False,
         "session_server_ip": None,
         "session_server_port": None,
@@ -580,6 +601,19 @@ def worker_payload(
         "miles_root": str(args.miles_root.expanduser().resolve()),
         "trust_remote_code": args.trust_remote_code,
     }
+    if getattr(args, "rl_engine", "ports") == "ports":
+        # Upstream Miles has no fork-only port isolation flags; the ports
+        # translation rejects them, so the island uses upstream defaults.
+        for name in (
+            "rollout_engine_base_port",
+            "sglang_router_prometheus_port",
+            "train_master_base_port",
+        ):
+            values.pop(name, None)
+        values["rl_engine"] = "ports"
+    else:
+        # The learner defaults to ports; legacy must be explicit in-process.
+        values["rl_engine"] = "legacy"
     if arm.kind == "decoupled":
         values.update(
             sync_preset="decoupled",
@@ -594,7 +628,9 @@ def worker_payload(
         "model_path": str(model_path),
         "prompt_path": str(worker.prompt_path),
         "policy_sync": worker.policy_sync,
-        "extra_argv": miles_extra_argv(worker, run_dir, args.global_rounds),
+        "extra_argv": miles_extra_argv(
+            worker, run_dir, args.global_rounds, getattr(args, "rl_engine", "ports")
+        ),
     }
 
 
@@ -1719,6 +1755,7 @@ def run_arm(
             benchmark_learner_budget_steps=(
                 args.global_rounds if arm.kind == "decoupled" else None
             ),
+            rl_engine=getattr(args, "rl_engine", "ports"),
         )
         artifact_s = time.monotonic() - export_started
         if state.policy_version != expected_version:
@@ -1734,7 +1771,8 @@ def run_arm(
 
     rollout_paths = tuple(
         tuple(
-            run_dir / "rollouts" / f"island-{worker.learner_id}" / f"{round_id}.pt"
+            rollout_dump_dir(run_dir, worker.learner_id, getattr(args, "rl_engine", "ports"))
+            / f"{round_id}.pt"
             for round_id in range(args.global_rounds)
         )
         for worker in workers
@@ -2046,7 +2084,7 @@ def _resume_identity(args, arms: list[Arm]) -> dict[str, Any]:
     from yeto.benchmark_resume import implementation_fingerprint, jsonable_arguments
     from yeto.rl import MILES_COMMIT
 
-    return {
+    identity = {
         "format_version": 1,
         "benchmark": "miles-rl-lm",
         "arguments": jsonable_arguments(args, exclude=_RESUME_EXCLUDES),
@@ -2057,6 +2095,11 @@ def _resume_identity(args, arms: list[Arm]) -> dict[str, Any]:
             _IMPLEMENTATION_PATHS,
         ),
     }
+    if getattr(args, "rl_engine", "ports") == "ports":
+        from yeto.rl import MILES_NEXT_COMMIT
+
+        identity.update(rl_engine="ports", miles_commit=MILES_NEXT_COMMIT)
+    return identity
 
 
 def write_run_config(
@@ -2421,8 +2464,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reward-function", required=True)
     parser.add_argument(
         "--arms",
-        default=",".join(_ARM_KINDS),
-        help="comma-separated benchmark arms: native,single,federated,decoupled",
+        default=None,
+        help=(
+            "comma-separated benchmark arms: native,single,federated,decoupled "
+            "(default: all four with --rl-engine legacy; single,federated,"
+            "decoupled with --rl-engine ports, which has no native arm)"
+        ),
     )
     parser.add_argument("--islands", default="2")
     parser.add_argument("--seeds", default="17,29,43")
@@ -2431,6 +2478,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples-per-group", type=int, default=4)
     parser.add_argument("--over-sampling-batch-size", type=int, default=None)
     parser.add_argument("--dynamic-sampling-filter-path", default=None)
+    parser.add_argument(
+        "--custom-generate-function-path",
+        default=None,
+        help="Miles custom generate callable for every island (e.g. "
+        "yeto.rl.teacher_forcing.replay_generate for equivalence teacher forcing)",
+    )
     parser.add_argument("--optimizer-steps", type=int, default=1)
     parser.add_argument("--gpus-per-island", type=int, default=1)
     parser.add_argument("--pipeline-parallel", type=int, default=1)
@@ -2484,6 +2537,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--rl-engine",
+        choices=["legacy", "ports"],
+        default="ports",
+        help="RL engine path for every arm (default ports; legacy explicit) (ports: LoRA/GRPO/colocated only)",
+    )
     return parser
 
 
@@ -2540,6 +2599,14 @@ def main(argv=None) -> int:
     args.report_dir = args.report_dir.expanduser().resolve()
     if args.eval_samples_per_prompt is None:
         args.eval_samples_per_prompt = args.samples_per_group
+    if args.arms is None:
+        # Resolved before the resume identity is built, so an existing legacy
+        # run resumed with --rl-engine legacy keeps its recorded arm string.
+        args.arms = ",".join(
+            kind
+            for kind in _ARM_KINDS
+            if not (args.rl_engine == "ports" and kind == "native")
+        )
     try:
         arms = select_arms(
             args.islands,
@@ -2551,9 +2618,28 @@ def main(argv=None) -> int:
             local_horizon=args.local_horizon,
         )
         validate_args(args, arms, check_runtime=not args.dry_run)
+        if args.rl_engine == "ports":
+            from yeto.rl.engine.selection import require_ports_supported
+
+            if any(arm.kind == "native" for arm in arms):
+                raise ValueError(
+                    "the native arm is stock Miles' own loop; select "
+                    "--arms single,federated,decoupled with --rl-engine ports"
+                )
+
+            require_ports_supported(
+                sync_preset=(
+                    "decoupled"
+                    if any(arm.kind == "decoupled" for arm in arms)
+                    else "strict-avg"
+                ),
+                lora_targets=args.lora_targets,
+            )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     print_plan(args, arms)
+    if args.rl_engine == "ports":
+        print("RL_ENGINE ports")
     if args.dry_run:
         return 0
 
@@ -2571,7 +2657,12 @@ def main(argv=None) -> int:
     reward_sha256 = python_spec_sha256(args.reward_function, base_dir=REPO_ROOT)
     args.reward_sha256 = reward_sha256
     args.source_sha256 = source_tree_sha256()
-    verify_miles_revision(args.miles_root)
+    if args.rl_engine == "ports":
+        from yeto.rl import MILES_NEXT_PINS
+
+        verify_miles_revision(args.miles_root, expected=MILES_NEXT_PINS)
+    else:
+        verify_miles_revision(args.miles_root)
     if any(arm.kind != "native" for arm in arms):
         ensure_syncer()
     model_path = resolve_model_path(args)

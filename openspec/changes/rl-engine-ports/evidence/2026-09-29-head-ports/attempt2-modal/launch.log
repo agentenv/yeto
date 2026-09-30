@@ -1,0 +1,401 @@
+[yeto] provisioning head cluster yeto-hp929b-head in nebius/eu-north1
+Running on cluster: yeto-hp929b-head
+Considered resources (1 node):
+---------------------------------------------------------------------------------------
+ INFRA                INSTANCE            vCPUs   Mem(GB)   GPUS   COST ($)   CHOSEN   
+---------------------------------------------------------------------------------------
+ Nebius (eu-north1)   cpu-d3_8vcpu-32gb   8       32        -      0.20       [32m   ✔[0m     
+---------------------------------------------------------------------------------------
+/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
+  return nebius.sdk.SDK(
+[0m⚙︎ Launching on Nebius eu-north1[0m.
+[2m└── [0m[2mInstance is up.[0m
+[0m[32m✓ Cluster launched: yeto-hp929b-head.[0m[0m  [2mView logs: [1msky logs --provision yeto-hp929b-head[0m[0m
+[0m⚙︎ Syncing files.
+  [2mSyncing workdir (to 1 node): /home/michael/work/gpu-head/yeto -> ~/sky_workdir[0m
+[0m[32m✓ Synced workdir.[0m[0m  [2mView logs: sky api logs -l sky-2026-09-29-05-59-15-628799/workdir_sync.log[0m
+  [2mSyncing (to 1 node): /home/michael/.nebius -> ~/.nebius[0m
+  [2mSyncing (to 1 node): /home/michael/.modal.toml -> ~/.modal.toml[0m
+  [2mSyncing (to 1 node): /home/michael/.sky/config.yaml -> ~/.sky/config.yaml[0m
+[0m[32m✓ Synced file_mounts.[0m[0m  [2mView logs: sky api logs -l sky-2026-09-29-05-59-15-628799/file_mounts.log[0m
+[0m[32m✓ Setup detached.[0m[0m
+[0m⚙︎ Job submitted, ID: 1
+[yeto] head is up at 89.169.111.95; submitting the controller job
+/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
+  return nebius.sdk.SDK(
+[0m⚙︎ Job submitted, ID: 2
+[yeto] run 'yeto-hp929b' submitted: job 2 on yeto-hp929b-head.
+[yeto] this machine is no longer needed; the head supervises the fleet.
+[yeto] streaming head logs — Ctrl-C detaches, the run keeps going.
+
+/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
+  return nebius.sdk.SDK(
+[2m├── [0m[2mWaiting for task resources on 1 node.[0m
+[2m└── [0mJob started. Streaming logs... [2m(Ctrl-C to exit log streaming; job will not be killed)[0m
+[36m(yeto-head-job, pid=2847)[0m [launcher] syncer subprocess started (pid 5429)
+[36m(yeto-head-job, pid=2847)[0m [syncer] 2026-09-29T06:04:09.966477Z  INFO yeto_syncer::server: syncer listening port=29400 semantic_profile_sha256="0f1dd003fd8d40cae8ef7d8f2e253b2f58a00806038150774069d84926a804a9" require_profile_binding=false
+[36m(yeto-head-job, pid=2847)[0m [syncer] 2026-09-29T06:04:09.966538Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2
+[36m(yeto-head-job, pid=2847)[0m [launcher] syncer runs on this head node at 89.169.111.95:29400
+[36m(yeto-head-job, pid=2847)[0m [launcher] deploying Modal app yeto-yeto-hp929b (2 island(s))
+[36m(yeto-head-job, pid=2847)[0m Building image im-zuPHdfhn2T6N87IgvOqcAJ
+[36m(yeto-head-job, pid=2847)[0m Building image im-zuPHdfhn2T6N87IgvOqcAJ
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m => Step 0: FROM base
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m => Step 1: ENV HOME=/root
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m => Step 2: ENV PYTHONUNBUFFERED=1
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m => Step 0: FROM base
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m => Step 1: ENV HOME=/root
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m => Step 2: ENV PYTHONUNBUFFERED=1
+[36m(yeto-head-job, pid=2847)[0m Saving image...
+[36m(yeto-head-job, pid=2847)[0m Saving image...
+[36m(yeto-head-job, pid=2847)[0m Image saved, took 3.10s
+[36m(yeto-head-job, pid=2847)[0m Image saved, took 3.10s
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m Built image im-zuPHdfhn2T6N87IgvOqcAJ in 4.65s
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m Built image im-zuPHdfhn2T6N87IgvOqcAJ in 4.65s
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m ✓ Created objects.
+[36m(yeto-head-job, pid=2847)[0m ├── ✓ Uploaded PythonPackage:yeto
+[36m(yeto-head-job, pid=2847)[0m ├── ✓ Uploaded /home/ubuntu/sky_workdir
+[36m(yeto-head-job, pid=2847)[0m ├── ✓ Created Function island-0.
+[36m(yeto-head-job, pid=2847)[0m └── ✓ Created Function island-1.
+[36m(yeto-head-job, pid=2847)[0m ✓ App deployed in 8.464s! 🎉
+[36m(yeto-head-job, pid=2847)[0m 
+[36m(yeto-head-job, pid=2847)[0m View Deployment: https://modal.com/apps/yetalabs/main/deployed/yeto-yeto-hp929b
+[36m(yeto-head-job, pid=2847)[0m [launcher] launching learner 0 on Modal as yeto-hp929b-l0-modal
+[36m(yeto-head-job, pid=2847)[0m [launcher] launching learner 1 on Modal as yeto-hp929b-l1-modal
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] [modal-island 0] rank 0/1 starting
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] From https://github.com/michaellchung/miles
+[36m(yeto-head-job, pid=2847)[0m  * branch                0394715083c91182b5eb0c526eeee4196ac694b9 -> FETCH_HEAD
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] HEAD is now at 039471508 Add --worker-dynamic-port-start for port isolation
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] Cloning into '/root/sglang'...
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] From https://github.com/michaellchung/sglang
+[36m(yeto-head-job, pid=2847)[0m  * branch                  9f29303bef1eea38eb613e5f454a52db1326422d -> FETCH_HEAD
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] HEAD is now at 9f29303bef Support disk-backed weight memory saver
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] [modal-island 1] rank 0/1 starting
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] From https://github.com/michaellchung/miles
+[36m(yeto-head-job, pid=2847)[0m  * branch                0394715083c91182b5eb0c526eeee4196ac694b9 -> FETCH_HEAD
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] HEAD is now at 039471508 Add --worker-dynamic-port-start for port isolation
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] Cloning into '/root/sglang'...
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] From https://github.com/michaellchung/sglang
+[36m(yeto-head-job, pid=2847)[0m  * branch                  9f29303bef1eea38eb613e5f454a52db1326422d -> FETCH_HEAD
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] HEAD is now at 9f29303bef Support disk-backed weight memory saver
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:14,775	INFO usage_lib.py:474 -- Usage stats collection is enabled by default without user confirmation because this terminal is detected to be non-interactive. To disable this, add `--disable-usage-stats` to the command that starts the cluster, or run the following command: `ray disable-usage-stats` before starting the cluster. See https://docs.ray.io/en/master/cluster/usage-stats.html for more details.
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:14,775	INFO scripts.py:1042 -- [37mLocal node IP[39m: [1m172.20.2.145[22m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,158	SUCC scripts.py:1081 -- [32m--------------------[39m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	SUCC scripts.py:1082 -- [32mRay runtime started.[39m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	SUCC scripts.py:1083 -- [32m--------------------[39m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1085 -- [36mNext steps[39m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO cli_output_helpers.py:16 -- [2mNote: The following commands are intended for use on[22m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO cli_output_helpers.py:17 -- [2mthe head node or within the cluster network.[22m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1089 -- To add another node to this Ray cluster, run
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1092 -- [1m  ray start --address='172.20.2.145:6379'[22m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1103 -- To connect to this Ray cluster:
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1105 -- [35mimport[39m[26m ray
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1106 -- ray[35m.[39m[26minit(_node_ip_address[35m=[39m[26m[33m'172.20.2.145'[39m[26m)
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1120 -- To submit a Ray job using the Ray Jobs CLI:
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1121 -- [1m  RAY_API_SERVER_ADDRESS='http://127.0.0.1:8265' ray job submit --working-dir . -- python my_script.py[22m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1130 -- See https://docs.ray.io/en/latest/cluster/running-applications/job-submission/index.html
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1134 -- for more information on submitting Ray jobs to the Ray cluster.
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,159	INFO scripts.py:1139 -- To terminate the Ray runtime, run
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,160	INFO scripts.py:1140 -- [1m  ray stop[22m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,160	INFO scripts.py:1143 -- To view the status of the cluster, use
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,160	INFO scripts.py:1144 --   [1mray status[22m[26m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,160	INFO scripts.py:1148 -- To monitor and debug Ray, view the dashboard at
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,160	INFO scripts.py:1149 --   [1m127.0.0.1:8265[22m[26m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 2026-09-29 06:13:23,160	INFO scripts.py:1156 -- [4mIf connection to the dashboard fails, check your firewall settings and network configuration.[24m
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] /opt/sglang/lib/python3.12/site-packages/huggingface_hub/constants.py:301: FutureWarning: The `HF_HUB_ENABLE_HF_TRANSFER` environment variable is deprecated as 'hf_transfer' is not used anymore. Please use `HF_XET_HIGH_PERFORMANCE` instead to enable high performance transfer with Xet. Visit https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfxethighperformance for more details.
+[36m(yeto-head-job, pid=2847)[0m   warnings.warn(
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] /opt/sglang/lib/python3.12/site-packages/transformer_engine/__init__.py:103: RuntimeWarning: Detected a Jax installation but could not find the shared object file for the Transformer Engine Jax extension library. If this is not intentional, please reinstall Transformer Engine with `pip install transformer_engine[jax]` or build from source with `NVTE_FRAMEWORK=jax`.
+[36m(yeto-head-job, pid=2847)[0m   warnings.warn(
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] WARNING:megatron.bridge.models.muse_glimmer:Muse Glimmer Hugging Face classes are unavailable with transformers 5.12.1. Upgrade transformers to a version that supports Muse Glimmer.
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] WARNING:miles_plugins.models.qwen3_vl:megatron-bridge Qwen3VLModel lacks native CP-local vision-embed selection; CP runs with vision tokens will mis-place vision embeddings. Apply the matching Megatron-Bridge patch (radixark/Megatron-Bridge PR #9).
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] WARNING:huggingface_hub.utils._http:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Fetching 10 files:  10%|█         | 1/10 [00:00<00:04,  2.22it/s]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Fetching 10 files:  20%|██        | 2/10 [00:00<00:02,  3.80it/s]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Fetching 10 files:  60%|██████    | 6/10 [00:00<00:00,  8.39it/s]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Fetching 10 files:  80%|████████  | 8/10 [00:01<00:00,  6.52it/s]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Fetching 10 files:  90%|█████████ | 9/10 [00:03<00:00,  1.64it/s]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Fetching 10 files: 100%|██████████| 10/10 [00:10<00:00,  2.00s/it]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Fetching 10 files: 100%|██████████| 10/10 [00:10<00:00,  1.06s/it]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Generating train split: 0 examples [00:00, ? examples/s]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+Generating train split: 7473 examples [00:00, 344731.63 examples/s]
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l0-modal] 
+... [truncated: 6898 of 7298 lines removed; full evidence archived outside repo] ...
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   update_weight_transfer_mode ..................... broadcast
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   update_weights_interval ......................... 1
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_checkpoint_args ............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_checkpoint_opt_param_scheduler .............. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_cpu_initialization .......................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_critic ...................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_dist_ckpt ................................... True
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_dist_ckpt_deprecated ........................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_distributed_optimizer ....................... True
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_distributed_post ............................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_dynamic_batch_size .......................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_dynamic_global_batch_size ................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_fault_tolerance ............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_flash_attn .................................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_fused_mhc ................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_fused_weighted_squared_relu ................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_gloo_process_groups ......................... True
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_grouped_gemm_for_dense_mlp .................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_grouped_gemm_for_shared_expert .............. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_indexer_replay .............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_kitchen_attention ........................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_kl_loss ..................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_layer_wise_distributed_optimizer ............ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_layer_wise_param_layout ..................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_legacy_static_engine ........................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_mamba_mem_eff_path .......................... True
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_megatron_fsdp ............................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_miles_dashboard ............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_miles_router ................................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_mlflow ...................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_mp_args_from_checkpoint_args ................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_mup ......................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_one_sent_docs ............................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_opd ......................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_opsm ........................................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_persistent_ckpt_worker ...................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_precision_aware_optimizer ................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_prometheus .................................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_pytorch_profiler ............................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_ring_exchange_p2p ........................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_rollout_entropy ............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_rollout_indexer_replay ...................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_rollout_logprobs ............................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_rollout_routing_replay ...................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_rope_scaling ................................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_rotary_position_embeddings .................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_routing_replay .............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_sampling_support_replay ..................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_session_server .............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_sharp ....................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_te_activation_func .......................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_tensorboard ................................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_tis ......................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_tokenizer_model_from_checkpoint_args ........ True
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_torch_fsdp2 ................................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_torch_optimizer_for_cpu_offload ............. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_tp_pp_dp_mapping ............................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_transformer_engine_op_fuser ................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_unbiased_kl ................................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_varlen_dataset .............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   use_wandb ....................................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   v_head_dim ...................................... 128
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   valid_data_path ................................. None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   validation_set_names ............................ None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   value_clip ...................................... 0.2
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   varlen_mock_dataset_config_json ................. None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   varlen_sbhd_validation .......................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   verify_integrity ................................ False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   virtual_pipeline_model_parallel_size ............ None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   vision_backbone_type ............................ vit
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   vision_pretraining .............................. False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   vision_pretraining_type ......................... classify
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   vocab_extra_ids ................................. 0
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   vocab_file ...................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   vocab_size ...................................... 151936
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_always_use_train_step ..................... False
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_dir ....................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_entity .................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_exp_name .................................. None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_group ..................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_host ...................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_key ....................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_mode ...................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_project ................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_random_suffix ............................. True
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_run_id .................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_save_dir .................................. None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wandb_team ...................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   weight_decay .................................... 0.01
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   weight_decay_incr_style ......................... constant
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   wgrad_deferral_limit ............................ 0
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   window_attn_skip_freq ........................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   window_size ..................................... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   witness_buffer_size ............................. 1048576
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   worker_comm_backend ............................. ray
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   worker_dynamic_port_start ....................... 20000
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   worker_urls ..................................... []
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   world_size ...................................... 1
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   yaml_cfg ........................................ None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   yarn_beta_fast .................................. None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   yarn_beta_slow .................................. None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   yarn_correction_range_round_to_int .............. None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   yarn_original_max_position_embeddings ........... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   yeto_rl_dynamic_sampling_max_replacements ....... None
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] -------------------- end of arguments ---------------------
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] [2026-09-29 06:20:18.253 main] arguments.py:2843 - --moe-token-dispatcher-type allgather does not support variable sequence length, please use alltoall dispatcher instead.
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] Traceback (most recent call last):
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "<frozen runpy>", line 198, in _run_module_as_main
+[36m(yeto-head-job, pid=2847)[0m   File "<frozen runpy>", line 88, in _run_code
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "/root/sky_workdir/yeto/rl/learner.py", line 2075, in <module>
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] main()
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "/root/sky_workdir/yeto/rl/learner.py", line 2065, in main
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] run_miles(
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "/root/sky_workdir/yeto/rl/learner.py", line 1909, in run_miles
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]     start_external_sglang_router(miles_args)
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "/root/sky_workdir/yeto/rl/learner.py", line 1433, in start_external_sglang_router
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] from miles.utils.http_utils import find_available_port, get_host_info
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] ImportError
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] :
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] cannot import name 'get_host_info' from 'miles.utils.http_utils' (/root/miles/miles/utils/http_utils.py)
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] 
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] Traceback (most recent call last):
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "/pkg/modal/_runtime/container_io_manager.py", line 987, in handle_input_exception
+[36m(yeto-head-job, pid=2847)[0m     yield
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "/pkg/modal/_container_entrypoint.py", line 189, in run_input_sync
+[36m(yeto-head-job, pid=2847)[0m     values = io_context.call_function_sync()
+[36m(yeto-head-job, pid=2847)[0m              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "/pkg/modal/_runtime/container_io_manager.py", line 266, in call_function_sync
+[36m(yeto-head-job, pid=2847)[0m     expected_value_or_values = self.finalized_function.callable(*args, **kwargs)
+[36m(yeto-head-job, pid=2847)[0m                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal]   File "/root/yeto/modal_runner.py", line 256, in island_main
+[36m(yeto-head-job, pid=2847)[0m     raise RuntimeError(f"island {cfg.learner_id} rank {rank} exited with {code}")
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] RuntimeError: island 1 rank 0 exited with 1
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] [modal-island 1] rank 0/1 starting
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] From https://github.com/michaellchung/miles
+[36m(yeto-head-job, pid=2847)[0m  * branch                0394715083c91182b5eb0c526eeee4196ac694b9 -> FETCH_HEAD
+[36m(yeto-head-job, pid=2847)[0m [yeto-hp929b-l1-modal] HEAD is now at 039471508 Add --worker-dynamic-port-start for port isolation
+'sky.logs' request 7eb5fe81-fe72-4b9d-9444-ce22eb1276ad cancelled
+[yeto] head job ended; the head cluster yeto-hp929b-head is still up — tear everything down with: yeto down yeto-hp929b

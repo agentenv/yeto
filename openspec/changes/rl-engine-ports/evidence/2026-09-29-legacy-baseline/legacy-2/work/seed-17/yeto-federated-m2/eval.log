@@ -1,0 +1,6 @@
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 3567.06it/s]
+Unable to import `torchao` Tensor objects. This may affect loading checkpoints serialized with `torchao`
+/usr/local/lib/python3.12/dist-packages/modelopt/torch/__init__.py:51: UserWarning: transformers 5.12.1 is not tested with current version of modelopt and may cause issues. Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.
+  _warnings.warn(
+[ERROR] `cache_position` is part of Qwen3ASRThinkerTextModel.forward's signature, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/modeling_qwen3_asr.py.
+[ERROR] `cache_position` is part of Qwen3ASRThinkerForConditionalGeneration.forward's signature, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/modeling_qwen3_asr.py.

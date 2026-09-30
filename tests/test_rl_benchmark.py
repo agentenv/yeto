@@ -322,6 +322,8 @@ def test_federated_workers_use_disjoint_miles_host_ports(tmp_path):
             "pkg.reward:score",
             "--pipeline-parallel",
             "2",
+            "--rl-engine",
+            "legacy",
         ]
     )
     args._active_seed = 17
@@ -584,6 +586,8 @@ def test_dry_run_does_not_import_ray_or_materialize_data(monkeypatch, capsys):
             "2",
             "--pipeline-parallel",
             "2",
+            "--rl-engine",
+            "legacy",
             "--dry-run",
         ]
     )
@@ -618,6 +622,8 @@ def test_dry_run_can_select_only_the_current_native_miles_arm(capsys):
             "native",
             "--islands",
             "2",
+            "--rl-engine",
+            "legacy",
             "--dry-run",
         ]
     ) == 0
@@ -766,6 +772,15 @@ def test_strict_syncer_command_is_one_fragment_exact_base_avg(tmp_path):
     assert value("--max-base-lag") == "0"
     assert value("--learner-weight") == "equal"
     assert "--mark-final-checkpoint" not in command
+
+
+def test_strict_syncer_resumes_only_an_existing_checkpoint(tmp_path):
+    arm = benchmark.select_arms("2", 2, 4)[2]
+    fresh = benchmark.syncer_command(arm, 29400, tmp_path, rounds=3)
+    assert "--resume" not in fresh
+    (tmp_path / "state.ckpt").write_bytes(b"ckpt")
+    resumed = benchmark.syncer_command(arm, 29400, tmp_path, rounds=3)
+    assert "--resume" in resumed
 
 
 def test_decoupled_syncer_commands_split_budget_cutoff_and_consolidation(tmp_path):
@@ -967,6 +982,26 @@ def test_worker_miles_extras_capture_real_rollouts_and_only_native_saves(tmp_pat
     assert native_extra[native_extra.index("--save-interval") + 1] == "3"
     assert "--save-hf" not in native_extra
     assert "--save-hf" not in single_extra
+
+
+def test_ports_islands_do_not_share_the_dashboard_column_directory(tmp_path):
+    # Upstream Miles writes dashboard columns to <dump dir>/../dashboard_columns
+    # through a fixed .tmp name; two islands sharing that grandparent race on
+    # the rename (teacher-forcing replay finished both islands together).
+    _, single, _, _ = benchmark.select_arms("2", 2, 4)
+    workers = benchmark.worker_specs(single, tmp_path / "all", ())
+    run_dir = tmp_path / "run"
+
+    def dump(worker, engine):
+        extra = benchmark.miles_extra_argv(worker, run_dir, 3, engine)
+        return Path(extra[extra.index("--save-debug-rollout-data") + 1])
+
+    legacy = [dump(w, "legacy") for w in workers]
+    ports = [dump(w, "ports") for w in workers]
+    assert legacy[0] == run_dir / "rollouts" / "island-0" / "{rollout_id}.pt"
+    assert len({p.parent.parent for p in ports}) == len(workers)
+    for worker, path in zip(workers, ports):
+        assert path.parent == benchmark.rollout_dump_dir(run_dir, worker.learner_id, "ports")
 
 
 def test_native_miles_adapter_names_are_mapped_to_the_exact_peft_contract():
@@ -1437,3 +1472,68 @@ def test_gpu_drain_check_ignores_compute_apps_on_hidden_devices(monkeypatch):
 
     assert benchmark._visible_gpu_uuids() == {"GPU-visible"}
     benchmark.wait_for_free_gpus(timeout_s=0)
+
+
+def _benchmark_argv(*extra):
+    return [
+        "--model", "org/model", "--model-revision", "a" * 40,
+        "--data", "org/data", "--data-revision", "b" * 40,
+        "--reward-function", "pkg.reward:score", *extra,
+    ]
+
+
+def test_rl_engine_defaults_to_ports_and_keeps_legacy_resume_identity(monkeypatch):
+    import yeto.benchmark_resume
+
+    monkeypatch.setattr(
+        yeto.benchmark_resume, "implementation_fingerprint", lambda *a, **k: "0" * 64
+    )
+    assert benchmark.build_parser().parse_args(_benchmark_argv()).rl_engine == "ports"
+    # An explicit legacy run keeps the pre-ports identity (no rl_engine field),
+    # so existing legacy work dirs still resume with --rl-engine legacy.
+    legacy = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", "legacy"))
+    ports = benchmark.build_parser().parse_args(_benchmark_argv())
+    for args in (legacy, ports):
+        args.eval_samples_per_prompt = args.samples_per_group
+    arms = benchmark.select_arms(legacy.islands, legacy.gpus_per_island, legacy.groups_per_island)
+    legacy_identity = benchmark._resume_identity(legacy, arms)
+    assert "rl_engine" not in legacy_identity
+    assert "rl_engine" not in legacy_identity["arguments"]
+    ports_identity = benchmark._resume_identity(ports, arms)
+    from yeto.rl import MILES_NEXT_COMMIT
+
+    assert ports_identity["rl_engine"] == "ports"
+    assert ports_identity["miles_commit"] == MILES_NEXT_COMMIT
+
+
+def test_rl_engine_ports_dry_run_records_selection_and_rejects_native(capsys):
+    assert benchmark.main(
+        _benchmark_argv("--arms", "single,federated", "--rl-engine", "ports", "--dry-run")
+    ) == 0
+    assert "RL_ENGINE ports" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="native arm"):
+        benchmark.main(_benchmark_argv("--arms", "native,single", "--dry-run"))
+    # Without --arms, the default ports engine plans only the Yeto arms.
+    assert benchmark.main(_benchmark_argv("--dry-run")) == 0
+    output = capsys.readouterr().out
+    assert "RL_ENGINE ports" in output
+    assert "native-miles" not in output and "yeto-decoupled" in output
+    assert benchmark.main(_benchmark_argv("--rl-engine", "legacy", "--dry-run")) == 0
+    output = capsys.readouterr().out
+    assert "native-miles" in output and "RL_ENGINE" not in output
+
+
+def test_legacy_worker_payload_passes_the_engine_explicitly(tmp_path):
+    for engine in ("legacy", "ports"):
+        args = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", engine))
+        args._active_seed = 17
+        arm = benchmark.select_arms("2", 2, 4)[2]
+        island_paths = (tmp_path / "island-0.jsonl", tmp_path / "island-1.jsonl")
+        for path in island_paths:
+            path.write_text("{}\n", encoding="utf-8")
+        worker = benchmark.worker_specs(arm, tmp_path / "combined.jsonl", island_paths)[0]
+        payload = benchmark.worker_payload(
+            args, worker, arm=arm, run_dir=tmp_path, model_path=tmp_path / "model",
+            syncer="127.0.0.1:30000", reward_sha256="c" * 64,
+        )
+        assert payload["arguments"]["rl_engine"] == engine

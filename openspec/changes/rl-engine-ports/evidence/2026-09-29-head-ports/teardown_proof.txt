@@ -1,0 +1,22 @@
+Tue Sep 29 06:57:58 AM UTC 2026
+## instances eu-north1
+computeinstance-e00dw22czytrarg5ep rlf-h200-pilot-03 STOPPED 2026-09-24T05:20:24.095142Z
+computeinstance-e00fk3jj7tm2y1244e rlf-h200-qualification-02 STOPPED 2026-09-23T19:02:15.863988Z
+computeinstance-e00rvtr14b08aeewed yeto-rl84f-head-2aebdd34-8456-head STOPPED 2026-09-23T14:06:54.559619Z
+computeinstance-e00hhvedz3tgb4dgna cyberrl-verl-smoke-20260923 STOPPED 2026-09-23T09:43:52.052701Z
+## disks
+computedisk-e00dk3bwpqrkww91h5 disk-yeto-rl84f-head-2aebdd34-8456-head READY 2026-09-23T14:07:13.391135Z
+computedisk-e00kk0fs4v3a9pyp61 cyberrl-verl-smoke-boot-20260923 READY 2026-09-23T09:44:16.799828Z
+## allocations (IPs)
+vpcallocation-e00kp18mafbwahsph7 auto-allocation-xcb6k2x7 ASSIGNED 10.0.0.70/32 2026-09-24T05:20:39.989202Z
+vpcallocation-e00mk6xtgcwm374kgv auto-allocation-9wytvpms ASSIGNED 10.0.0.17/32 2026-09-23T09:44:10.136048Z
+vpcallocation-e00pah3br0sgbnbyn9 auto-allocation-mn5tfe2w ASSIGNED 10.0.0.75/32 2026-09-23T19:02:30.739662Z
+vpcallocation-e00xwbexyzx9b30j7s auto-allocation-1duwqons ASSIGNED 10.0.0.61/32 2026-09-23T14:07:08.377972Z
+## filter hp929
+## modal
+  App ID                      ion        State      Tasks   at         at       
+                              o-hp929b                      29 06:04   -29      
+                              o-hp929                       29 05:56   -29      
+{'app_id': 'ap-xypNkQMqU23yofgnFA2ac4', 'description': 'yeto-yeto-hp929b', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 06:04:11+00:00', 'stopped_at': '2026-09-29 06:26:00+00:00'}
+{'app_id': 'ap-3pDXVNpYpa7rPLNZFcBXEq', 'description': 'yeto-yeto-hp929', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 05:56:54+00:00', 'stopped_at': '2026-09-29 05:56:56+00:00'}
+No existing clusters.

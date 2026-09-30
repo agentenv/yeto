@@ -190,9 +190,10 @@ without recording it in the launch arguments.
 
 The LM benchmark accepts the resulting prompt files and reward callable
 unchanged. Use
-`--arms native` to run only the direct Miles reference, or select any
-comma-separated combination of `native`, `single`, `federated`, and
-`decoupled`.
+`--arms native --rl-engine legacy` to run only the direct Miles reference, or
+select any comma-separated combination of `native`, `single`, `federated`, and
+`decoupled` (`native` needs `--rl-engine legacy`; the default `ports` engine
+runs only the Yeto arms).
 
 To reduce zero-advantage GRPO groups, add Miles oversampling and its shipped
 nonzero-reward-variance filter to the RL launch:

@@ -1,0 +1,5 @@
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  5.44it/s]Fetching 10 files:  70%|███████   | 7/10 [00:00<00:00, 24.01it/s]Fetching 10 files: 100%|██████████| 10/10 [00:06<00:00,  1.13it/s]Fetching 10 files: 100%|██████████| 10/10 [00:06<00:00,  1.44it/s]
+Generating train split:   0%|          | 0/7473 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 7473/7473 [00:00<00:00, 279994.94 examples/s]
+Generating test split:   0%|          | 0/1319 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1319/1319 [00:00<00:00, 162547.00 examples/s]
+worker rc 0 seconds 293

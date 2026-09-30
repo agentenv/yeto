@@ -1,0 +1,401 @@
+Unable to import `torchao` Tensor objects. This may affect loading checkpoints serialized with `torchao`
+/usr/local/lib/python3.12/dist-packages/modelopt/torch/__init__.py:51: UserWarning: transformers 5.12.1 is not tested with current version of modelopt and may cause issues. Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.
+  _warnings.warn(
+Loading a model with trust_remote_code=True allows arbitrary code execution from the model repository. Only use this with models you trust.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+/root/Megatron-LM/megatron/core/transformer/transformer_config.py:1811: UserWarning: full scope is deprecated. Use empty cuda_graph_scope to capture the whole layer.
+  warnings.warn(
+[ERROR] `cache_position` is part of Qwen3ASRThinkerTextModel.forward's signature, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/modeling_qwen3_asr.py.
+[ERROR] `cache_position` is part of Qwen3ASRThinkerForConditionalGeneration.forward's signature, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/megatron/bridge/models/qwen3_asr/hf_qwen3_asr/modeling_qwen3_asr.py.
+LANG_RL Log directory: None
+ > padded vocab (size: 151936) with 0 dummy tokens (new size: 151936)
+[2026-09-29 04:10:53.691 main] arguments.py:40 - --tokenizer-model not set, use --hf-checkpoint as tokenizer model.
+[2026-09-29 04:10:53.691 main] arguments.py:2668 - MoE-expert LoRA layout: per-expert (--experts-shared-outer-loras).
+[2026-09-29 04:10:53.693 main] arguments.py:2816 - Colocate mode: defaulting --sglang-cuda-graph-backend-prefill=disabled to avoid NVLS OOM. Set --sglang-cuda-graph-backend-prefill explicitly to override.
+[2026-09-29 04:10:53.693 main] arguments.py:2826 - rollout_num_gpus None != actor_num_gpus_per_node 1 * actor_num_nodes 1, overriding rollout_num_gpus to match actor_num_gpus_per_node * actor_num_nodes.
+[2026-09-29 04:10:53.693 main] arguments.py:2910 - args.eval_max_context_len is not set. Use args.rollout_max_context_len 1024 as default value.
+[2026-09-29 04:10:53.693 main] arguments.py:2918 - args.rollout_max_prompt_len is not set. Use args.rollout_max_context_len - 1 (1024 - 1) as default value so that there is at least one generated token to compute loss.
+using world size: 1, data-parallel size: 1, context-parallel size: 1, hierarchical context-parallel sizes: None, tensor-model-parallel size: 1, pipeline-model-parallel size: 1
+Number of virtual stages per pipeline stage: None
+using torch.bfloat16 for parameters ...
+------------------------ arguments ------------------------
+  account_for_embedding_in_pipeline_split ......... False
+  account_for_loss_in_pipeline_split .............. False
+  accumulate_allreduce_grads_in_fp32 .............. True
+  activation_func_clamp_shared_expert ............. True
+  activation_func_clamp_value ..................... None
+  actor_num_gpus_per_node ......................... 1
+  actor_num_nodes ................................. 1
+  adam_beta1 ...................................... 0.9
+  adam_beta2 ...................................... 0.999
+  adam_eps ........................................ 1e-08
+  add_bias_linear ................................. False
+  add_position_embedding .......................... True
+  add_qkv_bias .................................... False
+  adlr_autoresume ................................. False
+  adlr_autoresume_interval ........................ 1000
+  advantage_estimator ............................. grpo
+  align_grad_reduce ............................... True
+  align_param_gather .............................. False
+  allgather_cp .................................... False
+  allow_ambiguous_pad_tokens ...................... False
+  app_tag_run_name ................................ None
+  app_tag_run_version ............................. 0.0.0
+  apply_chat_template ............................. True
+  apply_chat_template_kwargs ...................... {'enable_thinking': False}
+  apply_query_key_layer_scaling ................... False
+  apply_residual_connection_post_layernorm ........ False
+  apply_rope_fusion ............................... True
+  apply_wd_to_qk_layernorm ........................ False
+  async_max_concurrent_samples .................... None
+  async_save ...................................... False
+  async_tensor_model_parallel_allreduce ........... True
+  attention_backend ............................... AttnBackend.unfused
+  attention_dropout ............................... 0.1
+  attention_output_gate ........................... False
+  attention_softmax_in_fp32 ....................... True
+  auto_detect_ckpt_format ......................... False
+  balance_data .................................... True
+  barrier_with_L1_time ............................ True
+  batch_invariant_mode ............................ False
+  bert_binary_head ................................ True
+  bert_embedder_type .............................. megatron
+  bert_load ....................................... None
+  beta_fast ....................................... 32
+  beta_slow ....................................... 1
+  bf16 ............................................ True
+  bias_dropout_fusion ............................. True
+  bias_gelu_fusion ................................ False
+  bias_swiglu_fusion .............................. True
+  biencoder_projection_dim ........................ 0
+  biencoder_shared_query_context_model ............ False
+  block_data_path ................................. None
+  buffer_filter_path .............................. None
+  cache_mla_latents ............................... False
+  calc_ft_timeouts ................................ False
+  calculate_per_token_loss ........................ False
+  chat_template_path .............................. None
+  check_for_large_grads ........................... False
+  check_for_nan_in_loss_and_grad .................. True
+  check_for_spiky_loss ............................ False
+  check_lora_weight_equal ......................... False
+  check_weight_hash_across_dp_replicas_interval ... None
+  check_weight_update_allow_quant_error ........... False
+  check_weight_update_equal ....................... False
+  check_weight_update_selector .................... all
+  check_weight_update_skip_list ................... None
+  ci_check_model_hash ............................. False
+  ci_disable_kl_checker ........................... False
+  ci_disable_logprobs_checker ..................... False
+  ci_disable_weight_update_checker ................ False
+  ci_enable_metrics_capture ....................... False
+  ci_ft_test_actions .............................. None
+  ci_inject_rollout_data_min_match_ratio .......... 0.9
+  ci_inject_rollout_data_path ..................... None
+  ci_inject_rollout_data_start_rollout_id ......... None
+  ci_load_grad_norm ............................... None
+  ci_metric_checker_key ........................... None
+  ci_metric_checker_threshold ..................... None
+  ci_save_grad_norm ............................... None
+  ci_save_model_hash .............................. False
+  ci_test ......................................... False
+  ckpt_assume_constant_structure .................. False
+  ckpt_convert_format ............................. None
+  ckpt_convert_save ............................... None
+  ckpt_convert_update_legacy_dist_opt_format ...... False
+  ckpt_format ..................................... torch_dist
+  ckpt_fully_parallel_load ........................ False
+  ckpt_fully_parallel_save ........................ True
+  ckpt_fully_parallel_save_deprecated ............. False
+  ckpt_step ....................................... None
+  classes_fraction ................................ 1.0
+  clip_grad ....................................... 1.0
+  clone_scatter_output_in_embedding ............... True
+  colocate ........................................ True
+  compress_ratios ................................. None
+  compute_advantages_and_returns .................. True
+  config_logger_dir ............................... 
+  consumed_train_samples .......................... 0
+  consumed_valid_samples .......................... 0
+  context_parallel_size ........................... 1
+  control_server_port ............................. 0
+  cp_comm_type .................................... ['p2p']
+  cpu_offloading_num_layers ....................... 0
+  create_all_gather_group ......................... False
+  create_attention_mask_in_dataloader ............. True
+  critic_load ..................................... /root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
+  critic_lr ....................................... 0.0001
+  critic_lr_warmup_iters .......................... 0
+  critic_num_gpus_per_node ........................ 1
+  critic_num_nodes ................................ 1
+  critic_save ..................................... None
+  cross_entropy_fusion_impl ....................... native
+  cross_entropy_loss_fusion ....................... False
+  cuda_graph_impl ................................. none
+  cuda_graph_scope ................................ []
+  cuda_graph_warmup_steps ......................... 3
+  custom_config_path .............................. None
+  custom_convert_samples_to_train_data_path ....... None
+  custom_eval_rollout_log_function_path ........... None
+  custom_generate_function_path ................... None
+  custom_loss_function_path ....................... None
+  custom_megatron_before_log_prob_hook_path ....... None
+  custom_megatron_before_train_step_hook_path ..... None
+  custom_megatron_init_path ....................... None
+  custom_megatron_post_save_hook_path ............. None
+  custom_model_provider_path ...................... None
+  custom_pg_loss_reducer_function_path ............ None
+  custom_reward_post_process_path ................. None
+  custom_rm_path .................................. gsm8k_reward.score
+  custom_rollout_log_function_path ................ None
+... [truncated: 1802 of 2202 lines removed; full evidence archived outside repo] ...
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:45.748 actor_cell0_rank0] timer.py:31 - Timer data_preprocess start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:45.754 actor_cell0_rank0] timer.py:42 - Timer data_preprocess end (elapsed: 0.0s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:45.754 actor_cell0_rank0] structured_log.py:23 - ft cls=MegatronTrainRayActor fn=train_actor phase=start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:45.755 actor_cell0_rank0] timer.py:42 - Timer train_wait end (elapsed: 11.2s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:45.755 actor_cell0_rank0] timer.py:31 - Timer train start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:45.801 actor_cell0_rank0] structured_log.py:23 - ft cls=MegatronTrainRayActor fn=compute_log_prob phase=start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:45.801 actor_cell0_rank0] timer.py:31 - Timer log_probs start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:51.605 actor_cell0_rank0] timer.py:42 - Timer log_probs end (elapsed: 5.8s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:51.605 actor_cell0_rank0] structured_log.py:27 - ft cls=MegatronTrainRayActor fn=compute_log_prob phase=end ok=true elapsed_s=5.8
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:51.615 actor_cell0_rank0] log_utils.py:42 - ft op=cross_cell phase=start kind=log_gather rank=0
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:51.616 actor_cell0_rank0] log_utils.py:48 - ft op=cross_cell phase=end kind=log_gather rank=0 success=true
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:51.616 actor_cell0_rank0] log_utils.py:66 - rollout 1: {'rollout/response_lengths': 251.65625, 'rollout/rewards': 2.7939677238464355e-09, 'rollout/truncated': 0.125, 'rollout/rollout_log_probs': -0.27532416582107544, 'rollout/raw_reward': 0.5625, 'rollout/total_lengths': 324.65625, 'rollout/log_probs': -0.2755417227745056, 'rollout/advantages': 2.7939677238464355e-09, 'rollout/returns': 2.7939677238464355e-09}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:15:51.617 actor_cell0_rank0] timer.py:31 - Timer actor_train start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.244 actor_cell0_rank0] model.py:601 - ft op=train_step rollout=1 step=0 attempt=0 outcome=NORMAL valid_step=true
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.246 actor_cell0_rank0] log_utils.py:460 - step 1: {'train/loss': -2.7939677238464355e-09, 'train/pg_loss': -2.7939677238464355e-09, 'train/entropy_loss': 0.0, 'train/pg_clipfrac': 0.0, 'train/ppo_kl': 0.0, 'train/ess_ratio': 1.0, 'train/train_rollout_logprob_abs_diff': 0.010591782629489899, 'train/train_rollout_kl': 0.00047533854376524687, 'train/grad_norm': 0.0, 'train/lr-pg_0': 3.333333333333334e-05, 'train/step': 1}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.246 actor_cell0_rank0] model.py:814 - step 1: {'train/loss': -2.7939677238464355e-09, 'train/pg_loss': -2.7939677238464355e-09, 'train/entropy_loss': 0.0, 'train/pg_clipfrac': 0.0, 'train/ppo_kl': 0.0, 'train/ess_ratio': 1.0, 'train/train_rollout_logprob_abs_diff': 0.010591782629489899, 'train/train_rollout_kl': 0.00047533854376524687, 'train/grad_norm': 0.0, 'train/lr-pg_0': 3.333333333333334e-05, 'train/step': 1}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.246 actor_cell0_rank0] timer.py:42 - Timer actor_train end (elapsed: 10.6s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.246 actor_cell0_rank0] timer.py:42 - Timer train end (elapsed: 16.5s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.246 actor_cell0_rank0] timer.py:31 - Timer train_wait start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.290 actor_cell0_rank0] train_metric_utils.py:50 - perf 1: {'perf/update_weights_time': 0.8762021064758301, 'perf/data_preprocess_time': 0.0059130191802978516, 'perf/train_wait_time': 11.200982809066772, 'perf/log_probs_time': 5.8036909103393555, 'perf/actor_train_time': 10.629396915435791, 'perf/train_time': 16.490779876708984, 'perf/log_probs_tflops': 1.9302103705259128, 'perf/actor_train_tflops': 3.161706483891721, 'perf/actor_train_tok_per_s': 977.3837671743454, 'perf/step_time': 27.691762685775757, 'perf/wait_time_ratio': 0.4044878954137617}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.291 actor_cell0_rank0] structured_log.py:27 - ft cls=MegatronTrainRayActor fn=train_actor phase=end ok=true elapsed_s=16.5
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:02.291 actor_cell0_rank0] structured_log.py:27 - ft cls=MegatronTrainRayActor fn=train phase=end ok=true elapsed_s=16.5
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:36] INFO:     172.20.2.176:59755 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:37] INFO:     172.20.2.176:26089 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:37] INFO:     172.20.2.176:26327 - "POST /pause_generation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:37] INFO:     172.20.2.176:29851 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:37] INFO:     172.20.2.176:62765 - "POST /unload_lora_adapter HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:37] INFO:     172.20.2.176:51683 - "POST /load_lora_adapter_from_tensors HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:38] INFO:     172.20.2.176:46422 - "POST /continue_generation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:38] INFO:     172.20.2.176:62716 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:39] INFO:     172.20.2.176:51160 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:39] INFO:     172.20.2.176:47347 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:39] INFO:     172.20.2.176:37842 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:39] INFO:     172.20.2.176:64658 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:39] INFO:     172.20.2.176:18843 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:39] INFO:     172.20.2.176:29763 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:40] INFO:     172.20.2.176:34705 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:40] INFO:     172.20.2.176:27199 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:40] INFO:     172.20.2.176:51160 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:40] INFO:     172.20.2.176:47347 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:40] INFO:     172.20.2.176:37842 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:41] INFO:     172.20.2.176:64658 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:41] INFO:     172.20.2.176:29763 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:41] INFO:     172.20.2.176:27199 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:41] INFO:     172.20.2.176:18843 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:41] INFO:     172.20.2.176:51160 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:41] INFO:     172.20.2.176:34705 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:42] INFO:     172.20.2.176:47347 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:42] INFO:     172.20.2.176:37842 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:42] INFO:     172.20.2.176:29763 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:42] INFO:     172.20.2.176:64658 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:43] INFO:     172.20.2.176:27199 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:43] INFO:     172.20.2.176:18843 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:43] INFO:     172.20.2.176:51160 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:44] INFO:     172.20.2.176:34705 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:44] INFO:     172.20.2.176:47347 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:44] INFO:     172.20.2.176:37842 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:44] INFO:     172.20.2.176:18843 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:44] INFO:     172.20.2.176:64658 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:44] INFO:     172.20.2.176:27199 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:44] INFO:     172.20.2.176:29763 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:45] INFO:     172.20.2.176:51160 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:45] INFO:     172.20.2.176:43907 - "POST /abort_request HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:45] INFO:     172.20.2.176:45794 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:15:45] INFO:     172.20.2.176:29805 - "POST /release_memory_occupation HTTP/1.1" 200 OK
+[yeto-rl-policy-apply-progress] {"event":"rl_policy_apply_progress","phase":"begin","policy_version":2}
+[yeto-rl-policy-apply-progress] {"event":"rl_policy_apply_progress","phase":"apply_finished","policy_version":2}
+[yeto-rl-policy-apply-progress] {"event":"rl_policy_apply_progress","phase":"hash_begin","policy_version":2}
+[yeto-rl-policy-apply-progress] {"event":"rl_policy_apply_progress","phase":"hash_finished","policy_version":2}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:05.156 actor_cell0_rank0] memory_utils.py:41 - [Rank 0] Memory-Usage before TrainRayActor.clear_memory: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 70.03, 'used_GB': 9.15, 'allocated_GB': 1.3, 'reserved_GB': 4.56}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:05.918 actor_cell0_rank0] memory_utils.py:41 - [Rank 0] Memory-Usage after TrainRayActor.clear_memory: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 73.11, 'used_GB': 6.07, 'allocated_GB': 1.3, 'reserved_GB': 1.48}
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] Cache flushed successfully!
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:06.055 actor_cell0_rank0] structured_log.py:23 - ft cls=MegatronTrainRayActor fn=update_weights phase=start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:06.056 actor_cell0_rank0] timer.py:31 - Timer update_weights start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:06.056 actor_cell0_rank0] memory_utils.py:41 - [Rank 0] Memory-Usage before update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 71.93, 'used_GB': 7.25, 'allocated_GB': 1.3, 'reserved_GB': 1.48}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:06.131 actor_cell0_rank0] update_weight_from_tensor.py:461 - Packed 392 LoRA tensors (20185088 bytes) into 1 flattened buckets (max 268435456 bytes/1024 tensors)
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] Start unload Lora adapter. Lora name=miles_lora
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] LoRA adapter unloading starts: LoRARef(lora_id=647401c52b55472981f9ff0ba4f6b397, lora_name=miles_lora). avail mem=71.95 GB
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] LoRA adapter unloading completes: LoRARef(lora_id=647401c52b55472981f9ff0ba4f6b397, lora_name=miles_lora). avail mem=71.95 GB
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] Start load Lora adapter from tensors. Lora name=miles_lora
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] LoRA adapter loading from tensors starts: LoRARef(lora_id=e73f485295324efe9fb71d787497de6c, lora_name=miles_lora, lora_path=__tensor__, pinned=False).
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] LoRA adapter loading from tensors completes: LoRARef(lora_id=e73f485295324efe9fb71d787497de6c, lora_name=miles_lora, lora_path=__tensor__, pinned=False).
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] [continue_generation] torch.cuda.empty_cache() called: reserved 33096.0 MB -> 33096.0 MB (freed 0.0 MB)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:06.869 actor_cell0_rank0] memory_utils.py:41 - [Rank 0] Memory-Usage after update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 71.95, 'used_GB': 7.23, 'allocated_GB': 1.3, 'reserved_GB': 1.48}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:06.869 actor_cell0_rank0] timer.py:42 - Timer update_weights end (elapsed: 0.8s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:06.870 actor_cell0_rank0] structured_log.py:27 - ft cls=MegatronTrainRayActor fn=update_weights phase=end ok=true elapsed_s=0.8
+[36m(RolloutManager pid=25498)[0m Rollout generation:   0%|          | 0/32 [00:00<?, ?it/s]
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] LoRA adapter 'e73f485295324efe9fb71d787497de6c': loaded weights for target modules ['down_proj', 'gate_up_proj', 'o_proj', 'qkv_proj'].
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] Prefill batch, #new-seq: 1, #new-token: 94, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 3.97
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] Prefill batch, #new-seq: 7, #new-token: 658, #cached-token: 0, token usage: 0.00, #running-req: 1, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 120045.70
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] Decode batch, #running-req: 8, #token: 422, token usage: 0.00, cuda graph: True, gen throughput (token/s): 14.49, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] Decode batch, #running-req: 8, #token: 742, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1769.29, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] Decode batch, #running-req: 8, #token: 1062, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1692.57, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] Prefill batch, #new-seq: 1, #new-token: 69, #cached-token: 3, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 88.74
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] Decode batch, #running-req: 8, #token: 1132, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1341.25, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 71, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 15.49
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 71, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 9.07
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 71, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 11.49
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Decode batch, #running-req: 8, #token: 1090, token usage: 0.00, cuda graph: True, gen throughput (token/s): 969.68, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 71, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 5.01
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 71, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 15.44
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Decode batch, #running-req: 8, #token: 970, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1130.52, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 71, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 4.79
+[36m(RolloutManager pid=25498)[0m [2026-09-29 04:16:08.635 rollout_manager] sglang_rollout.py:473 - First rollout sample: ["<|im_start|>user\nBella bought stamps at the post office. Some of the stamps had a snowflake design, some had a truck design, and some had a rose design. Bella bought 11 snowflake stamps. She bought 9 more truck stamps than snowflake stamps, and 13 fewer rose stamps than truck stamps. How many stamps did Bella buy in all?\nPut the final numeric answer in \\boxed{}.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nLet's break down the information given:\n\n- Bella bought **11** snowflake stamps.\n- She bought **9 more truck stamps** than snowflake stamps.  \n  So, the **number of truck stamps** = 11 + 9 = **20**.\n- She bought **13 fewer rose stamps** than truck stamps.  \n  So, the **number of rose stamps** = 20 - 13 = **7**.\n\nNow, add the total number of stamps:\n\n- Snowflake: 11  \n- Truck: 20  \n- Rose: 7  \nTotal = $11 + 20 + 7 = 38$\n\n### Final Answer:\n$$\n\\boxed{38}\n$$<|im_end|>"], label: 38, reward: 1.0
+[36m(RolloutManager pid=25498)[0m Rollout generation:  25%|██▌       | 8/32 [00:01<00:05,  4.63it/s]
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 71, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 8.15
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Decode batch, #running-req: 8, #token: 671, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1119.76, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] Decode batch, #running-req: 8, #token: 991, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1690.19, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] Decode batch, #running-req: 8, #token: 1311, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1686.47, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] Prefill batch, #new-seq: 1, #new-token: 77, #cached-token: 3, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 137.66
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 79, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 12.80
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] Decode batch, #running-req: 8, #token: 1275, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1116.86, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 79, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 4.92
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] Decode batch, #running-req: 8, #token: 1337, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1346.82, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] Decode batch, #running-req: 8, #token: 1657, token usage: 0.01, cuda graph: True, gen throughput (token/s): 1727.70, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Decode batch, #running-req: 8, #token: 1977, token usage: 0.01, cuda graph: True, gen throughput (token/s): 1669.18, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 79, token usage: 0.01, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 1.63
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Decode batch, #running-req: 7, #token: 1631, token usage: 0.01, cuda graph: True, gen throughput (token/s): 1122.48, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 79, token usage: 0.01, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 6.96
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 79, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 8.74
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 79, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 15.92
+[36m(RolloutManager pid=25498)[0m Rollout generation:  50%|█████     | 16/32 [00:03<00:03,  4.29it/s]
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Decode batch, #running-req: 8, #token: 1294, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1125.87, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 79, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 5.42
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Decode batch, #running-req: 8, #token: 1159, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1345.66, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] Decode batch, #running-req: 8, #token: 1479, token usage: 0.01, cuda graph: True, gen throughput (token/s): 1679.11, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] Decode batch, #running-req: 8, #token: 1799, token usage: 0.01, cuda graph: True, gen throughput (token/s): 1665.95, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] Decode batch, #running-req: 8, #token: 2119, token usage: 0.01, cuda graph: True, gen throughput (token/s): 1597.81, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] Prefill batch, #new-seq: 1, #new-token: 75, #cached-token: 3, token usage: 0.01, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 92.44
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 77, token usage: 0.01, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 12.54
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 77, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 10.13
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] Decode batch, #running-req: 8, #token: 1518, token usage: 0.01, cuda graph: True, gen throughput (token/s): 948.21, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 77, token usage: 0.00, #running-req: 6, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 5.23
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 77, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 244.32
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 77, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 5.05
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] Decode batch, #running-req: 8, #token: 923, token usage: 0.00, cuda graph: True, gen throughput (token/s): 965.58, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 77, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 7.20
+[36m(RolloutManager pid=25498)[0m Rollout generation:  75%|███████▌  | 24/32 [00:05<00:01,  4.53it/s]
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 77, token usage: 0.00, #running-req: 7, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 7.99
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] Decode batch, #running-req: 8, #token: 619, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1154.93, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] Decode batch, #running-req: 8, #token: 939, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1691.71, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] Decode batch, #running-req: 8, #token: 1064, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1687.32, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] Decode batch, #running-req: 6, #token: 1127, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1376.92, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] Decode batch, #running-req: 5, #token: 1132, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1232.92, #queue-req: 0
+[36m(RolloutManager pid=25498)[0m Rollout generation: 100%|██████████| 32/32 [00:06<00:00,  5.44it/s]Rollout generation: 100%|██████████| 32/32 [00:06<00:00,  5.04it/s]
+[36m(RolloutManager pid=25498)[0m [2026-09-29 04:16:13.263 rollout_manager] sglang_rollout.py:494 - Finish rollout: ["<|im_start|>user\nAnn's favorite store was having a summer clearance. For $75 she bought 5 pairs of shorts for $7 each and 2 pairs of shoes for $10 each. She also bought 4 tops, all at the same price. How much did each top cost?\nPut the final numeric answer in \\boxed{}.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nLet's break down the problem step by step:\n\n### Given:\n- $75 was spent.\n- She bought:\n  - **5 pairs of shorts at $7 each**: $5 × 7 = $35.\n  - **2 pairs of shoes at $10 each**: $2 × 10 = $20.\n  - **4 tops at the same price**: Let the cost of each top be $t. So, total for tops is $4t.\n\n### Total cost = sum of short + shoes + tops:\n\n$$\n35 + 20 + 4t = 75\n$$\n\n$$\n55 + 4t = 75\n$$\n\n$$\n4t = 75 - 55 = 20\n$$\n\n$$\nt = 5\n$$\n\n### Final answer:\n\n$$\n\\boxed{5} \\text{ dollars each top}\n$$<|im_end|>"], label: 5, reward: 1.0
+[36m(RolloutManager pid=25498)[0m [2026-09-29 04:16:13.265 rollout_manager] sglang_rollout.py:391 - Abort request for ['http://172.20.2.176:22100']
+[36m(RolloutManager pid=25498)[0m [2026-09-29 04:16:13.270 rollout_manager] rollout_data_conversion.py:42 - Final collected 32 samples from rollout to train
+[36m(RolloutManager pid=25498)[0m [2026-09-29 04:16:13.270 rollout_manager] debug_data.py:107 - Save debug rollout data to /work/out/legacy-2/work/seed-17/yeto-federated-m2/rollouts/island-1/2.pt
+[36m(RolloutManager pid=25498)[0m [2026-09-29 04:16:13.282 rollout_manager] metrics.py:79 - perf 2: {'rollout/response_len/mean': 258.1875, 'rollout/response_len/median': 242.0, 'rollout/response_len/max': 384, 'rollout/response_len/min': 156, 'rollout/zero_std/count_1.0': 3, 'rollout/zero_std/all_zero_percentage': 0.0, 'rollout/zero_std/all_one_percentage': 0.75, 'rollout/prefix_cache_hit_rate': 0.6165123456790124, 'rollout/avg_cached_tokens_per_sample': 49.9375, 'rollout/repetition_frac': 0.0, 'rollout/truncated_ratio': 0.125, 'perf/rollout_time': 6.374028205871582, 'perf/tokens_per_gpu_per_sec': 1296.197590150177, 'perf/longest_sample_tokens_per_sec': 60.244477683087375, 'perf/effective_tokens_per_gpu_per_sec': 1296.197590150177, 'perf/longest_effective_sample_tokens_per_sec': 60.244477683087375}
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, cuda graph: True, gen throughput (token/s): 703.55, #queue-req: 0
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] Cache flushed successfully!
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] Cache flushed successfully!
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:13.735 actor_cell0_rank0] structured_log.py:23 - ft cls=MegatronTrainRayActor fn=train phase=start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:13.735 actor_cell0_rank0] timer.py:31 - Timer data_preprocess start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:13.741 actor_cell0_rank0] timer.py:42 - Timer data_preprocess end (elapsed: 0.0s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:13.741 actor_cell0_rank0] structured_log.py:23 - ft cls=MegatronTrainRayActor fn=train_actor phase=start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:13.741 actor_cell0_rank0] timer.py:42 - Timer train_wait end (elapsed: 11.5s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:13.742 actor_cell0_rank0] timer.py:31 - Timer train start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:13.788 actor_cell0_rank0] structured_log.py:23 - ft cls=MegatronTrainRayActor fn=compute_log_prob phase=start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:13.788 actor_cell0_rank0] timer.py:31 - Timer log_probs start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:19.639 actor_cell0_rank0] timer.py:42 - Timer log_probs end (elapsed: 5.9s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:19.640 actor_cell0_rank0] structured_log.py:27 - ft cls=MegatronTrainRayActor fn=compute_log_prob phase=end ok=true elapsed_s=5.9
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:19.650 actor_cell0_rank0] log_utils.py:42 - ft op=cross_cell phase=start kind=log_gather rank=0
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:19.651 actor_cell0_rank0] log_utils.py:48 - ft op=cross_cell phase=end kind=log_gather rank=0 success=true
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:19.651 actor_cell0_rank0] log_utils.py:66 - rollout 2: {'rollout/response_lengths': 258.1875, 'rollout/rewards': 9.313225746154785e-10, 'rollout/truncated': 0.125, 'rollout/rollout_log_probs': -0.3324357569217682, 'rollout/raw_reward': 0.78125, 'rollout/total_lengths': 339.1875, 'rollout/log_probs': -0.3322925567626953, 'rollout/advantages': 7.450580596923828e-09, 'rollout/returns': 7.450580596923828e-09}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:19.651 actor_cell0_rank0] timer.py:31 - Timer actor_train start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.472 actor_cell0_rank0] model.py:601 - ft op=train_step rollout=2 step=0 attempt=0 outcome=NORMAL valid_step=true
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.474 actor_cell0_rank0] log_utils.py:460 - step 2: {'train/loss': -7.450580596923828e-09, 'train/pg_loss': -7.450580596923828e-09, 'train/entropy_loss': 0.0, 'train/pg_clipfrac': 0.0, 'train/ppo_kl': 0.0, 'train/ess_ratio': 1.0, 'train/train_rollout_logprob_abs_diff': 0.01221636962145567, 'train/train_rollout_kl': 0.0005654006963595748, 'train/grad_norm': 0.0, 'train/lr-pg_0': 0.0, 'train/step': 2}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.474 actor_cell0_rank0] model.py:814 - step 2: {'train/loss': -7.450580596923828e-09, 'train/pg_loss': -7.450580596923828e-09, 'train/entropy_loss': 0.0, 'train/pg_clipfrac': 0.0, 'train/ppo_kl': 0.0, 'train/ess_ratio': 1.0, 'train/train_rollout_logprob_abs_diff': 0.01221636962145567, 'train/train_rollout_kl': 0.0005654006963595748, 'train/grad_norm': 0.0, 'train/lr-pg_0': 0.0, 'train/step': 2}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.475 actor_cell0_rank0] timer.py:42 - Timer actor_train end (elapsed: 10.8s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.475 actor_cell0_rank0] timer.py:42 - Timer train end (elapsed: 16.7s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.475 actor_cell0_rank0] timer.py:31 - Timer train_wait start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.519 actor_cell0_rank0] train_metric_utils.py:50 - perf 2: {'perf/update_weights_time': 0.8138155937194824, 'perf/data_preprocess_time': 0.005868673324584961, 'perf/train_wait_time': 11.495069980621338, 'perf/log_probs_time': 5.851299524307251, 'perf/actor_train_time': 10.823602676391602, 'perf/train_time': 16.733445405960083, 'perf/log_probs_tflops': 2.0016483600556474, 'perf/actor_train_tflops': 3.246306552596586, 'perf/actor_train_tok_per_s': 1002.8084293665639, 'perf/step_time': 28.22851538658142, 'perf/wait_time_ratio': 0.40721482597294445}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.520 actor_cell0_rank0] structured_log.py:27 - ft cls=MegatronTrainRayActor fn=train_actor phase=end ok=true elapsed_s=16.8
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:30.520 actor_cell0_rank0] structured_log.py:27 - ft cls=MegatronTrainRayActor fn=train phase=end ok=true elapsed_s=16.8
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:05] INFO:     172.20.2.176:53000 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:05] INFO:     172.20.2.176:62312 - "GET /health HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] INFO:     172.20.2.176:30131 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] INFO:     172.20.2.176:64644 - "POST /pause_generation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] INFO:     172.20.2.176:45470 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] INFO:     172.20.2.176:27753 - "POST /unload_lora_adapter HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] INFO:     172.20.2.176:56656 - "POST /load_lora_adapter_from_tensors HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] INFO:     172.20.2.176:49799 - "POST /continue_generation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:06] INFO:     172.20.2.176:26601 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] INFO:     172.20.2.176:18277 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] INFO:     172.20.2.176:54141 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:07] INFO:     172.20.2.176:45833 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] INFO:     172.20.2.176:41567 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] INFO:     172.20.2.176:26070 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] INFO:     172.20.2.176:43732 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] INFO:     172.20.2.176:51435 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:08] INFO:     172.20.2.176:57862 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] INFO:     172.20.2.176:45833 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] INFO:     172.20.2.176:18277 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:09] INFO:     172.20.2.176:54141 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] INFO:     172.20.2.176:51435 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] INFO:     172.20.2.176:41567 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] INFO:     172.20.2.176:26070 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] INFO:     172.20.2.176:57862 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:10] INFO:     172.20.2.176:43732 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] INFO:     172.20.2.176:45833 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] INFO:     172.20.2.176:18277 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] INFO:     172.20.2.176:41567 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] INFO:     172.20.2.176:54141 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] INFO:     172.20.2.176:26070 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:11] INFO:     172.20.2.176:51435 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] INFO:     172.20.2.176:57862 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] INFO:     172.20.2.176:43732 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] INFO:     172.20.2.176:45833 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:12] INFO:     172.20.2.176:41567 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:26070 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:18277 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:51435 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:43732 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:54141 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:57862 - "POST /generate HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:33964 - "POST /abort_request HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:63876 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:13] INFO:     172.20.2.176:33265 - "POST /release_memory_occupation HTTP/1.1" 200 OK
+[yeto-rl-policy-apply-progress] {"event":"rl_policy_apply_progress","phase":"begin","policy_version":3}
+[yeto-rl-policy-apply-progress] {"event":"rl_policy_apply_progress","phase":"apply_finished","policy_version":3}
+[yeto-rl-policy-apply-progress] {"event":"rl_policy_apply_progress","phase":"hash_begin","policy_version":3}
+[yeto-rl-policy-apply-progress] {"event":"rl_policy_apply_progress","phase":"hash_finished","policy_version":3}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:32.630 actor_cell0_rank0] memory_utils.py:41 - [Rank 0] Memory-Usage before TrainRayActor.clear_memory: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 70.29, 'used_GB': 8.88, 'allocated_GB': 1.3, 'reserved_GB': 4.3}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:33.376 actor_cell0_rank0] memory_utils.py:41 - [Rank 0] Memory-Usage after TrainRayActor.clear_memory: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 73.11, 'used_GB': 6.06, 'allocated_GB': 1.3, 'reserved_GB': 1.48}
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] Cache flushed successfully!
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:33.595 actor_cell0_rank0] structured_log.py:23 - ft cls=MegatronTrainRayActor fn=update_weights phase=start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:33.595 actor_cell0_rank0] timer.py:31 - Timer update_weights start
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:33.596 actor_cell0_rank0] memory_utils.py:41 - [Rank 0] Memory-Usage before update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 71.93, 'used_GB': 7.25, 'allocated_GB': 1.3, 'reserved_GB': 1.48}
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] Start unload Lora adapter. Lora name=miles_lora
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] LoRA adapter unloading starts: LoRARef(lora_id=e73f485295324efe9fb71d787497de6c, lora_name=miles_lora). avail mem=71.95 GB
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] LoRA adapter unloading completes: LoRARef(lora_id=e73f485295324efe9fb71d787497de6c, lora_name=miles_lora). avail mem=71.95 GB
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] Start load Lora adapter from tensors. Lora name=miles_lora
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] LoRA adapter loading from tensors starts: LoRARef(lora_id=f5396b8cd5114cf0aa6e1c5c9c9ca17e, lora_name=miles_lora, lora_path=__tensor__, pinned=False).
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] LoRA adapter loading from tensors completes: LoRARef(lora_id=f5396b8cd5114cf0aa6e1c5c9c9ca17e, lora_name=miles_lora, lora_path=__tensor__, pinned=False).
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:33.672 actor_cell0_rank0] update_weight_from_tensor.py:461 - Packed 392 LoRA tensors (20185088 bytes) into 1 flattened buckets (max 268435456 bytes/1024 tensors)
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:34] [continue_generation] torch.cuda.empty_cache() called: reserved 33096.0 MB -> 33096.0 MB (freed 0.0 MB)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:34.407 actor_cell0_rank0] memory_utils.py:41 - [Rank 0] Memory-Usage after update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 71.95, 'used_GB': 7.23, 'allocated_GB': 1.3, 'reserved_GB': 1.48}
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:34.407 actor_cell0_rank0] timer.py:42 - Timer update_weights end (elapsed: 0.8s)
+[36m(MegatronTrainRayActor pid=30355)[0m [2026-09-29 04:16:34.408 actor_cell0_rank0] structured_log.py:27 - ft cls=MegatronTrainRayActor fn=update_weights phase=end ok=true elapsed_s=0.8
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:32] INFO:     172.20.2.176:53502 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] INFO:     172.20.2.176:39020 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] INFO:     172.20.2.176:64612 - "POST /pause_generation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] INFO:     172.20.2.176:49576 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] INFO:     172.20.2.176:41371 - "POST /unload_lora_adapter HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:33] INFO:     172.20.2.176:56638 - "POST /load_lora_adapter_from_tensors HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:34] INFO:     172.20.2.176:21562 - "POST /continue_generation HTTP/1.1" 200 OK
+[36m(SGLangEngine pid=28784)[0m [2026-09-29 04:16:34] INFO:     172.20.2.176:38102 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[rl] learner 1 finalized

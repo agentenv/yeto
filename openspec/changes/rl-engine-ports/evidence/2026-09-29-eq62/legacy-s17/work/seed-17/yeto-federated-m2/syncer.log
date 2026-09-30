@@ -1,0 +1,28 @@
+2026-09-29T06:28:11.002124Z  INFO yeto_syncer::server: syncer listening port=20193 semantic_profile_sha256="1e3a092fbeb8c06c79dcc3d771088ab76debcdc692d0507904484411c0864cd6" require_profile_binding=false
+2026-09-29T06:28:11.002221Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2
+2026-09-29T06:28:11.089356Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:22399
+2026-09-29T06:34:27.451195Z  INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=0 generation=15553222964629889096 num_streams=4
+2026-09-29T06:34:27.451332Z  INFO yeto_syncer::server: initialized global state iso_backend=scalar
+2026-09-29T06:34:27.536011Z  INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=1 generation=13293842417864280067 num_streams=4
+2026-09-29T06:34:27.544886Z  INFO yeto_syncer::server: global parameters initialized
+2026-09-29T06:34:27.742016Z  INFO yeto_syncer::server: checkpoint committed step=0 path=/work/out/legacy-s17/work/seed-17/yeto-federated-m2/state.ckpt
+2026-09-29T06:35:26.163559Z  INFO yeto_syncer::server: checkpoint committed step=1 path=/work/out/legacy-s17/work/seed-17/yeto-federated-m2/state.ckpt
+2026-09-29T06:35:26.252420Z  INFO yeto_syncer::server: outer step step=1 fragment=0 responders=[Member { learner_id: 0, generation: 15553222964629889096 }, Member { learner_id: 1, generation: 13293842417864280067 }] gnorm="0.1651" ms=58422
+2026-09-29T06:36:04.320178Z  INFO yeto_syncer::server: checkpoint committed step=2 path=/work/out/legacy-s17/work/seed-17/yeto-federated-m2/state.ckpt
+2026-09-29T06:36:04.404617Z  INFO yeto_syncer::server: outer step step=2 fragment=0 responders=[Member { learner_id: 0, generation: 15553222964629889096 }, Member { learner_id: 1, generation: 13293842417864280067 }] gnorm="0.0734" ms=38151
+2026-09-29T06:36:40.632008Z  INFO yeto_syncer::server: checkpoint committed step=3 path=/work/out/legacy-s17/work/seed-17/yeto-federated-m2/state.ckpt
+2026-09-29T06:36:40.638820Z  INFO yeto_syncer::server: outer step step=3 fragment=0 responders=[Member { learner_id: 0, generation: 15553222964629889096 }, Member { learner_id: 1, generation: 13293842417864280067 }] gnorm="0.0435" ms=36233
+2026-09-29T06:36:43.410004Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=1 generation=13293842417864280067 step=3 remaining=1
+2026-09-29T06:36:43.432148Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=0 generation=15553222964629889096 step=3 remaining=0
+2026-09-29T06:36:43.432195Z  INFO yeto_syncer::server: all learners acknowledged final cut learners=2
+2026-09-29T06:36:43.432207Z  INFO yeto_syncer::server: training complete after 3 outer steps
+2026-09-29T06:36:43.558528Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:24020
+2026-09-29T06:36:43.560005Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:38058
+2026-09-29T06:36:43.560238Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:30034
+2026-09-29T06:36:43.560521Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:31590
+2026-09-29T06:36:43.560691Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:50210
+2026-09-29T06:36:43.582596Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:40609
+2026-09-29T06:36:43.585813Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:32800
+2026-09-29T06:36:43.585955Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:19279
+2026-09-29T06:36:43.586259Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:37948
+2026-09-29T06:36:43.586602Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:28809

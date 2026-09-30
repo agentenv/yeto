@@ -457,10 +457,127 @@ provided. Normal checkpoint recovery within the new phase remains unchanged.
 Use a new `--cluster-prefix` for each fresh phase; reusing an existing run
 identity keeps the normal in-phase recovery behavior instead.
 
+## Engine selection
+
+`--rl-engine {legacy,ports}` selects how an island drives Miles. It is accepted
+by `yeto launch`, `python3 -m yeto.rl.learner`, the SSH harness (through the
+launch arguments), `scripts/benchmark_rl.py` and `yeto-rl-export`. The default
+is `ports`; the choice is never inferred from the model, island count or other
+flags, is fixed before startup, and does not change during a run.
+
+`legacy` stays available for one release as an explicit opt-in: pass
+`--rl-engine legacy` to keep the agentenv fork path, which is still required
+for every combination outside the ports boundary below (SAO, `dense-full` /
+full-parameter, the DeepSeek V4 recipe, critic / non-GRPO estimators, fixed
+partition, non-causal models) and for the benchmark's `native` arm. Because the
+default is `ports`, such a run without the flag now fails before startup with a
+message naming `--rl-engine legacy` instead of silently taking the fork path.
+The legacy path is deprecated and is removed after task 7.2 of the
+`rl-engine-ports` change; migrate LoRA/GRPO runs to `ports`.
+
+| path | engine source | who owns the island loop |
+| --- | --- | --- |
+| `legacy` (explicit, deprecated) | `agentenv/miles` fork at `MILES_COMMIT`, installed from the bundled git bundle | Miles `train.py`; Yeto plugs in through the external policy sync callback (`MilesPolicySync`) |
+| `ports` (default) | `michaellchung/miles` at `MILES_NEXT_COMMIT` and `michaellchung/sglang` at `SGLANG_NEXT_COMMIT`, fetched directly (no bundle) | Yeto's `IslandDriver` (`yeto/rl/engine/driver.py`); upstream Miles is used as a library through role ports |
+
+Each path pins and verifies its own source (repository, commit, clean detached
+checkout, import path) before any model is loaded; changing one pin group never
+touches the other. With `ports`, the learner calls
+`verify_miles_revision(..., expected=MILES_NEXT_PINS)`.
+
+With `legacy`, source preparation, events, plans and exported provenance are
+byte-for-byte what they were before the flag existed (a legacy SSH plan has no
+`rl_engine` key, so its digest is unchanged, and a legacy benchmark resume
+identity has no `rl_engine` field, so existing legacy runs still resume with
+`--rl-engine legacy`). The one difference is that the learner command now
+carries `--rl-engine legacy` explicitly, because the learner's own default is
+`ports`. With `ports` (explicit or default), the selection is recorded: the
+learner command carries `--rl-engine ports`, the
+island tape starts with an `rl_engine_selected` event (`rl_engine=ports`, Miles
+commit, `rl/algorithm_spec_sha256`, placement), the SSH plan carries
+`"rl_engine": "ports"`, launcher provenance carries `rl_engine`, and
+`yeto_rl_provenance.json` of the exported adapter contains `"rl_engine": "ports"`.
+
+### Ports boundary (R0)
+
+`ports` supports exactly: causal LM + LoRA, GRPO, serial colocated execution,
+and the `strict-avg` and `decoupled` presets. Everything else is rejected
+before startup with a message pointing at `--rl-engine legacy`:
+
+| rejected on `ports` | detected from |
+| --- | --- |
+| full-parameter / `dense-full` | `--parameter-mode full`, `--sync-preset dense-full`, `--tuning full` |
+| SAO streaming compaction | an `sao*` preset or `--sao-*` Miles arguments |
+| DeepSeek V4 recipe | `--rl-model-recipe deepseek-v4-flash`, `attention-routed-experts`, `--expert-full-count > 0` |
+| critic / non-GRPO | `--use-critic`, `--advantage-estimator` other than `grpo` |
+| fixed partition | `--rollout-num-gpus` (dedicated rollout GPUs) |
+
+The ports Miles translation also rejects fork-only options with no upstream
+equivalent (`--rollout-engine-base-port`, `--train-master-base-port`,
+`--sglang-router-prometheus-port`, `--custom-agent-function-path`,
+`--tito-allowed-append-roles`) and all Miles fault-tolerance flags. The
+benchmark's `native` arm measures stock Miles' own loop and is rejected with
+`--rl-engine ports`.
+
+### Port responsibilities
+
+| port | responsibility | Miles adapter (`yeto/rl/engine/miles_adapter/`) |
+| --- | --- | --- |
+| `RolloutPool` | generate one rollout of complete groups from the published policy; members | `rollout.py` over `InferenceController` + `RolloutExecutor`; metadata from `rollout_meta_hook.py` inside the rollout process |
+| `TrainerGroup` | one optimizer step on an opaque batch; onload/offload; grad norm for the per-round invariant | `trainer.py` over the single-cell actor group |
+| `PolicyState` | export/apply the LoRA trainable state (optimizer reset or preserve, scheduler alignment) | `state.py` + `state_plugin.py`, run on every Megatron rank through `run_plugin` |
+| `Publisher` | full publication of one exact policy, acknowledged by every rollout member | `publish.py` over upstream `update_weights`, stamping `yeto:<version>:<policy_tensor_hash>` as the SGLang weight version |
+| `Placement` | read-only placement description; detects Miles rewriting the request | `placement.py` |
+
+The policy token `yeto:<rollout_id>:<policy_tensor_hash>` has one definition,
+`yeto.rl.core.policy_snapshot_token` (also `PolicySnapshot.token`). On `ports`
+the driver hands the published token to the rollout process, where
+`--buffer-filter-path` (`policy_buffer_filter`) reuses only complete groups of
+exactly that policy, the ports equivalent of legacy's completed-group queue
+filtering. Outer synchronization reuses the legacy `strict-avg` and `decoupled`
+state machines and island checkpoint formats (`yeto/rl/engine/bridges.py`).
+
+### The one Miles-side patch
+
+`ports` needs a single generic entry point in Miles: `run_plugin(fn_path,
+kwargs)` on the train actor and a pass-through on the trainer group
+(`TrainerController`), which loads `fn_path` and calls it with the actor on
+every rank. The trainable-state export/apply and grad-norm plugins themselves
+live in Yeto. The patch is carried as one commit on `michaellchung/miles`
+`yeto/ports` and proposed upstream. Until `MILES_NEXT_COMMIT` points at a commit
+carrying it, `--rl-engine ports` refuses to start (before any Miles component
+or model is created) with an error naming the pin.
+
+### Dry-run examples
+
+The benchmark plans either path without GPUs:
+
+```bash
+python3 scripts/benchmark_rl.py --model Qwen/Qwen3-0.6B \
+  --model-revision c1899de289a04d12100db370d81485cdf75e47ca \
+  --data openai/gsm8k --data-revision e53f048856ff4f594e959d75785d2c2d37b678ee \
+  --reward-function project.rewards:score \
+  --islands 2 --arms single,federated,decoupled --rl-engine legacy --dry-run
+
+python3 scripts/benchmark_rl.py --model Qwen/Qwen3-0.6B \
+  --model-revision c1899de289a04d12100db370d81485cdf75e47ca \
+  --data openai/gsm8k --data-revision e53f048856ff4f594e959d75785d2c2d37b678ee \
+  --reward-function project.rewards:score \
+  --islands 2 --arms single,federated,decoupled --dry-run
+```
+
+The second command (default engine, `ports`) prints the same plan followed by
+`RL_ENGINE ports`. Without `--arms`, `ports` plans `single,federated,decoupled`
+and `legacy` plans all four arms including `native`; explicitly adding the
+`native` arm to a ports run exits with an error naming
+`--arms single,federated,decoupled`.
+
 ## Benchmark
 
-[`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs four local,
-equal-hardware real-Miles arms:
+[`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs up to four local,
+equal-hardware real-Miles arms. The `native` arm is stock Miles' own loop and
+needs `--rl-engine legacy`; with the default `ports` engine the default arm set
+is `single,federated,decoupled`:
 
 | arm | purpose |
 | --- | --- |

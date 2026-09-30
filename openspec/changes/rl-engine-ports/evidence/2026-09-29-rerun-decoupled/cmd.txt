@@ -1,0 +1,1 @@
+bash /work/harness/decoupled.sh /work/out/decoupled

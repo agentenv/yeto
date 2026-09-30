@@ -1,0 +1,17 @@
+SBX sb-qO5zd57bNB4RC6k0hybtaa
+GPU: NVIDIA H100 80GB HBM3
+NVIDIA H100 80GB HBM3
+SITE /usr/local/lib/python3.12/dist-packages
+SHIM_OK
+target/release/yeto-syncer
+2
+4b18d149c6c73b889f0030815407ef321c1bc0d0a80a58b0b34c8f4605b906ce  /work/out/legacy-s17/work/seed-17/yeto-federated-m2/rollouts/island-0/0.pt
+c660105eb28008e5f9a206323acf7cf1fcea5e0b6e69eae4202cee22e56c5b36  /work/out/legacy-s17/work/seed-17/yeto-federated-m2/rollouts/island-1/0.pt
+tfl-a rc=1
+    os.replace(self, target)
+FileNotFoundError: [Errno 2] No such file or directory: '/work/out/tfl-a/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_0.tmp' -> '/work/out/tfl-a/work/seed-17/yeto-federated-m2/rollouts/dashboard_columns/rollout_0.parquet'
+copied tfl-a rc=1 tfd=0
+ALLDONE
+TRAP
+terminated
+DOWN

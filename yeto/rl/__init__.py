@@ -1,5 +1,14 @@
 """Pinned Miles reinforcement-learning integration."""
 
+from typing import NamedTuple
+
+
+class MilesRevisionPins(NamedTuple):
+    """Expected Miles checkout identity for one ``--rl-engine`` path."""
+
+    repository: str
+    commit: str
+
 MILES_REPOSITORY = "https://github.com/agentenv/miles"
 MILES_BASE_COMMIT = "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
 MILES_COMMIT = "ae475060fa670145aef75d678809039ae999cb97"
@@ -12,6 +21,39 @@ MILES_IMAGE = (
     "docker:ghcr.io/agentenv/miles@sha256:"
     "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
 )
+
+# Ports engine (``--rl-engine ports``): upstream Miles plus yeto compatibility
+# commits on michaellchung/miles ``yeto/ports``; fetched directly, no bundle.
+MILES_NEXT_REPOSITORY = "https://github.com/michaellchung/miles"
+MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
+# yeto/ports: run_plugin + --worker-dynamic-port-start on top of the base.
+MILES_NEXT_COMMIT = "0394715083c91182b5eb0c526eeee4196ac694b9"
+# sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
+# committed (upstream's Dockerfile follows that branch unpinned).
+SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
+SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
+# yeto/ports: the ported agentenv/sglang patches (see sglang-patch-port.md).
+SGLANG_NEXT_COMMIT = "9f29303bef1eea38eb613e5f454a52db1326422d"
+# radixark/miles:dev multi-arch index (upstream docker/Dockerfile, sglang
+# v0.5.20 base).  TODO(rl-engine-ports D6): replace with the digest of the
+# image built from upstream's Dockerfile at MILES_NEXT_UPSTREAM_COMMIT.
+MILES_LEGACY_PINS = MilesRevisionPins(MILES_REPOSITORY, MILES_COMMIT)
+MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
+MILES_NEXT_IMAGE = (
+    "docker:docker.io/radixark/miles@sha256:"
+    "90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d"
+)
+
+
+def default_rl_image(rl_engine: str) -> str:
+    """The digest-pinned ``--rl-image`` default for an RL engine.
+
+    Legacy keeps the agentenv fork image; ports uses the public upstream
+    Miles image (the private ghcr.io/agentenv image is not pullable by Modal
+    or by a SkyPilot docker runtime without registry credentials).
+    """
+
+    return MILES_NEXT_IMAGE if rl_engine == "ports" else MILES_IMAGE
 
 SECRLENV_AGENT_PATH = "yeto_miles_secrlenv/agent.py"
 SECRLENV_AGENT_SHA256 = (

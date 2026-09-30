@@ -1,0 +1,401 @@
+[local-head] rl_engine arg = ports  rl_image = docker:docker.io/radixark/miles@sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d
+[launcher] syncer subprocess started (pid 167515)
+[launcher] syncer runs on this head node at 185.189.44.160:29400
+[launcher] deploying Modal app yeto-yeto-gdm929 (2 island(s))
+[syncer] 2026-09-29T12:06:05.897186Z  INFO yeto_syncer::server: syncer listening port=29400 semantic_profile_sha256="1e3a092fbeb8c06c79dcc3d771088ab76debcdc692d0507904484411c0864cd6" require_profile_binding=false
+[syncer] 2026-09-29T12:06:05.897233Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2
+Building image im-Ox9eKLZzLIe1bn2cLy5cvu
+
+=> Step 0: FROM docker.io/radixark/miles@sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d
+Getting image source signatures
+Copying blob sha256:adebc1576f3c07100011ce7679aef5e7bb1e4aaca050e6d8e729273d22a2442a
+Copying blob sha256:ccf9c70a85fc6158d617c85f3f719f669efb00c28fd45fa292575d351435bd2f
+Copying blob sha256:cb3db0ad5ae089b6ae0c5b39b73e73cac40a558df052e602f8b0f24972b003b4
+Copying blob sha256:8bd080c2e4b22c71c5058be60551a2735c1bead7341fe005313ca704578d9fa5
+Copying blob sha256:a30da298bda6986d68697bc361b9204f189616a3b7cc748c91846ecddbb873aa
+Copying blob sha256:b533a7368b7da8141f98b9a2442f84b5aa5d32f2d286c2611a32f725361f84b6
+Copying blob sha256:730c8029606bf4b4533d7a7159458cf5e3f348ea956ccfb10ce5da3e20adac8f
+Copying blob sha256:95e35692d3cc347d712fd236fd2af3b1c697783518182b1ae716722f694ed616
+Copying blob sha256:cc689184d8c0977f56d2da63b3a3d225dc9c7fadb9375338768cf4909b016b32
+Copying blob sha256:21e0ed254c8bac8e7e21e80b250a5dc4a92211bbc2f658f9f81ef93c7c623f03
+Copying blob sha256:5e25946ba40dcbc2410bf1852d135a46cb31cc7f89c05b9ef1ab12a6ef988aeb
+Copying blob sha256:689b91d88a0f4086057ec826027b128902ecf2b516be510371c115bc55da19a6
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:400821fd86ee1a17c460a7addf3892121cfb660a274b37e6a23cf36e7eaa931c
+Copying blob sha256:f0af354daeda18f18684b23520969ef6bb3de82bb267936f867b12769be9125d
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:2aed42a8a48dc6c035fd5ec92f34c73741c0211cf077bc7d65871ec29eadb166
+Copying blob sha256:935d31342cd5e25cdc31391d2404014cbcdba670e683ef5b1011d7e6ebb091b7
+Copying blob sha256:f41328bd705d089cfa52bc663154af33220b3637600bb16603ced11d834d8d72
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:039b64830ed6081885457df32a1b0ace925ebcf4b7039f4fe3eb83c34ef7e3c5
+Copying blob sha256:7b999ece6ae5ebe700943dc744101515bf55b84f861550dc081b1b2182e44f9b
+Copying blob sha256:111d246da71d080c5b1492dea5abaf7875da5e415b075c60a01248dd916ed134
+Copying blob sha256:185fedfb07e0d9d5a20c4690bbbd894061d39be9ce1da8ab9c73ab72c23c18ca
+Copying blob sha256:b038a66f4cbe425ebcc436214e786423bbce22562531bb2a736808c0b3cbb793
+Copying blob sha256:ab71f57d09b9edcf08f886ec62f5e47f06e9b3aa3bc2dc57ef8da5b2ecc5c62e
+Copying blob sha256:16f3784b5dc551dcb9fefc56fa0a2bb6bfc03ced8c23485d814bb2f3e27bbe1d
+Copying blob sha256:93df5e781e6741d2b3df3c60569584848d4a3c23d0315bdb6365a674b9d805ea
+Copying blob sha256:d6a95fc732325c983e8949823b25e31e13d60cc5928256cbc4390c9ac9166976
+Copying blob sha256:0dd9da690b991f866980c3a1103515b9103919084af485c5448d55fa2648acf2
+Copying blob sha256:524c7ecf6b5e5974b71d799983c9a3f70b3de96f064ae12efeb25a8465c712d9
+Copying blob sha256:3ce18898973d54b3446b44c68d1a0ac0208e65ad6f3b03f6ccbd84f4de86fd3a
+Copying blob sha256:a015a69d27f92404809c11202489befc741cd885c2fd3dbaf20f951c0064fae3
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:571b0dcaab4683188818a5c7cb01a3d1cc58c585fdb2fb9a5fb7b72e8c8ebbd8
+Copying blob sha256:5d2270e09c8e6e35301b6518bb73bb349c1308c4bdb657d935591c13378937b2
+Copying blob sha256:f6d6bb60bc470b4fcec4760006b6068ee544e252125128d79ed8079c1768d54c
+Copying blob sha256:2c21269a480081b27fb884e299cae37bc8a70ad89559995c0d0f3e71a70d1ade
+Copying blob sha256:4fbbc13a3901a7d1fb4fda8893a4b31e31ac456a29d4f2a89524b6aca945e021
+Copying blob sha256:2dddf78177fa94da9ef5c4b961e5c5ee26469b6f2560fb5b9f6a6895ca4f5b29
+Copying blob sha256:17539d0fc58fc0c094ac385f293382f535fb10cc034f870b6dc69dacce3b1219
+Copying blob sha256:ae89691758eb03d7df662008958a1cf469dfefce52bfdb6c7244ad4d4f9b5234
+Copying blob sha256:0fa0309c9da6828dbb7f5f61f5af7bd1956e3a7187a2067db446661a125cfecc
+Copying blob sha256:9d3348c3291af4aff971863441dc70fa73b2086c3b605cbaf9a6a66d9d50ecd9
+Copying blob sha256:50fa8cf4ca6cee52a76a126bb7165c85633262b1ccfe8a62fa37e0b0d3441d8d
+Copying blob sha256:458cae297e48dbeb3a7fa35e1b06400367ea7775addf2c41a6a6d274b2043aec
+Copying blob sha256:1d3315eca3585600f5cac02d98a42e9bc1700c50177872e8c7366c900419e2fd
+Copying blob sha256:b19774865a264f9904cd851cdfb6be53224835e6160b1b86a44a8e2f2fcbc41b
+Copying blob sha256:dfcbe8037935d3caa70d5bc1c6543889e7c239efc6d93502628e8ce343bab848
+Copying blob sha256:c934f3da45276918c786eb78af1e2caaa057baea3bf263b0cc0d60c4dabad1e0
+Copying blob sha256:6a4a731887c488fa905d7044b28e535d37c989f4771ca77bd038a2581430a04b
+Copying blob sha256:f87452529f110adba22becde5b51b0249d8fab83f4711df22d6e8235de4370b2
+Copying blob sha256:5b6836e30e3123a3472d3ee1a3d81a37fbdf95bd16ba5c5d37abcdbd25279b5e
+Copying blob sha256:dc997b53f184856166f069251484bba8282ae5ffc30478018e344a038309e58a
+Copying blob sha256:4860e32aea2ccdc0e56a4f69e44d1f2586649744f123483397c152f489a9928e
+Copying blob sha256:c682787e7a64d7e4999e2cd4dad71603c68c83d30814cbee798cf076e8e1f5cd
+Copying blob sha256:aef12d0a0b03d12a4a89f1349888d58f09ac3dc6477226d7b0aca632d0930b6d
+Copying blob sha256:1fb6fb6ba67fbbb7c6e1f0131d43861cb771bb0ea4f810599de0ed6b1af80c80
+Copying blob sha256:f74d88777f1977ba978fbf4930e1f9b02f019bf503fa82e906a09f200efea900
+Copying blob sha256:cf5507595d1fc9246e6b6d8939d74f240eaea8cee9f27e0f9f83f712fe3b0331
+Copying blob sha256:ba037d68d26fe937411e1fef0006ad4ddfa29ab2616032ea654300891acd5d88
+Copying blob sha256:28253f25dbebd4e04701fd73b7a752533da8bab6b3a0d9ff148d73955dd49b32
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:d8c06617985ef70b653cb8833a55f8d4c7b5f02d71c42eaa5c5b3fcfe6fc60e4
+Copying blob sha256:2069d7acc4e0f4a4b8d1bea5e36bb29fb6cbda2b841ba44b08b7cb535fb2f809
+Copying blob sha256:30451c158d3a9683b8c3f34da325f7ee922dd7c3a7d32ca74beba6e725eee756
+Copying blob sha256:82e5a6fdac1dd0ef3124ad06b75c04ba42c880ba2f1a80097a82352a93eaf75b
+Copying blob sha256:3ccb4a6f5b982fde32631b052baeb331bc93e973112ee7fc9da86eb32b41133e
+Copying blob sha256:ade5cd857924ea76f0e0d6c6f1a27232f5acbc81ebc221b7ac87f0e6ece9ac96
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Building image im-Ox9eKLZzLIe1bn2cLy5cvu
+Copying blob sha256:76c8a9bda291a12494dd51693b06950be12236393cb9f85128a584f791d2e752
+
+=> Step 0: FROM docker.io/radixark/miles@sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d
+Copying blob sha256:0c596e75f361497ee6782b600ce812f433d63b47deb35112f211d04946c2cc8e
+Getting image source signatures
+Copying blob sha256:0bf0306603ee7aa3459e3e1a93bd12c2c6ad6daa1c9999b5b3f3903a5d9c2c13
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:1956b1f7e96042f8f5c4c65627356a4a180685de4c35ddc782e265c432a3b4a6
+Copying blob sha256:015569105da170f02dc3fd4686dd69ee8f78a0883edbc28f79407dbaa3311d0c
+Copying blob sha256:adebc1576f3c07100011ce7679aef5e7bb1e4aaca050e6d8e729273d22a2442a
+Copying blob sha256:ccf9c70a85fc6158d617c85f3f719f669efb00c28fd45fa292575d351435bd2f
+Copying blob sha256:cb3db0ad5ae089b6ae0c5b39b73e73cac40a558df052e602f8b0f24972b003b4
+Copying blob sha256:8bd080c2e4b22c71c5058be60551a2735c1bead7341fe005313ca704578d9fa5
+Copying blob sha256:a30da298bda6986d68697bc361b9204f189616a3b7cc748c91846ecddbb873aa
+Copying blob sha256:b533a7368b7da8141f98b9a2442f84b5aa5d32f2d286c2611a32f725361f84b6
+Copying blob sha256:730c8029606bf4b4533d7a7159458cf5e3f348ea956ccfb10ce5da3e20adac8f
+Copying blob sha256:95e35692d3cc347d712fd236fd2af3b1c697783518182b1ae716722f694ed616
+Copying blob sha256:cc689184d8c0977f56d2da63b3a3d225dc9c7fadb9375338768cf4909b016b32
+Copying blob sha256:21e0ed254c8bac8e7e21e80b250a5dc4a92211bbc2f658f9f81ef93c7c623f03
+Copying blob sha256:5e25946ba40dcbc2410bf1852d135a46cb31cc7f89c05b9ef1ab12a6ef988aeb
+Copying blob sha256:689b91d88a0f4086057ec826027b128902ecf2b516be510371c115bc55da19a6
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:400821fd86ee1a17c460a7addf3892121cfb660a274b37e6a23cf36e7eaa931c
+Copying blob sha256:f0af354daeda18f18684b23520969ef6bb3de82bb267936f867b12769be9125d
+Copying blob sha256:1ac8b9672b05463e12056e931764b9d8f62cca1550a442595c779ce67f7315d5
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:33bb35167603ea643e5b3ed74ca6f8c5540222bdaec5c6819e16e5c8ee9aa29f
+Copying blob sha256:2aed42a8a48dc6c035fd5ec92f34c73741c0211cf077bc7d65871ec29eadb166
+Copying blob sha256:a994098da9f35ddbfe73c157477187f90b5fddf25201ce16000f756f85c3972f
+Copying blob sha256:935d31342cd5e25cdc31391d2404014cbcdba670e683ef5b1011d7e6ebb091b7
+Copying blob sha256:f41328bd705d089cfa52bc663154af33220b3637600bb16603ced11d834d8d72
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:039b64830ed6081885457df32a1b0ace925ebcf4b7039f4fe3eb83c34ef7e3c5
+Copying blob sha256:7b999ece6ae5ebe700943dc744101515bf55b84f861550dc081b1b2182e44f9b
+Copying blob sha256:111d246da71d080c5b1492dea5abaf7875da5e415b075c60a01248dd916ed134
+Copying blob sha256:185fedfb07e0d9d5a20c4690bbbd894061d39be9ce1da8ab9c73ab72c23c18ca
+Copying blob sha256:b038a66f4cbe425ebcc436214e786423bbce22562531bb2a736808c0b3cbb793
+Copying blob sha256:ab71f57d09b9edcf08f886ec62f5e47f06e9b3aa3bc2dc57ef8da5b2ecc5c62e
+Copying blob sha256:16f3784b5dc551dcb9fefc56fa0a2bb6bfc03ced8c23485d814bb2f3e27bbe1d
+Copying blob sha256:20dd0957811ed19749cf3eb17fd7ca50ad88f42c405bf3b09c0ffb69fac5dc7e
+Copying blob sha256:93df5e781e6741d2b3df3c60569584848d4a3c23d0315bdb6365a674b9d805ea
+Copying blob sha256:709a16a86fa3d86ee4cb2e0c5e30529a9dc2197093b1d0582441622ee8821c8d
+Copying blob sha256:e063fe2a605017bc30f9a5c6b53ea5f33fb9add21d1fe7825f7d11368fe18372
+Copying blob sha256:45ff40583cfa511bc676e86772a47f523bc10172ff549d6f12a25f69978d7d56
+Copying blob sha256:d6a95fc732325c983e8949823b25e31e13d60cc5928256cbc4390c9ac9166976
+Copying blob sha256:0dd9da690b991f866980c3a1103515b9103919084af485c5448d55fa2648acf2
+Copying blob sha256:524c7ecf6b5e5974b71d799983c9a3f70b3de96f064ae12efeb25a8465c712d9
+Copying blob sha256:3ce18898973d54b3446b44c68d1a0ac0208e65ad6f3b03f6ccbd84f4de86fd3a
+Copying blob sha256:a015a69d27f92404809c11202489befc741cd885c2fd3dbaf20f951c0064fae3
+Copying blob sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1
+Copying blob sha256:571b0dcaab4683188818a5c7cb01a3d1cc58c585fdb2fb9a5fb7b72e8c8ebbd8
+Copying blob sha256:88b77a2db14693fc2dbaea183f7c65865a26d41a1e24800ae3f5f3af607a568c
+Copying blob sha256:5d2270e09c8e6e35301b6518bb73bb349c1308c4bdb657d935591c13378937b2
+Copying blob sha256:f6d6bb60bc470b4fcec4760006b6068ee544e252125128d79ed8079c1768d54c
+Copying blob sha256:2c21269a480081b27fb884e299cae37bc8a70ad89559995c0d0f3e71a70d1ade
+Copying blob sha256:926a4bf2fa35d5f6725bc4b6190da36bd931dc669135671a694c4189032f1b6e
+Copying blob sha256:4fbbc13a3901a7d1fb4fda8893a4b31e31ac456a29d4f2a89524b6aca945e021
+Copying blob sha256:0cb72186e923b060a5c3136c3449c177993295a2b80a928cb6153d8732cca13f
+Copying blob sha256:2dddf78177fa94da9ef5c4b961e5c5ee26469b6f2560fb5b9f6a6895ca4f5b29
+Copying blob sha256:17539d0fc58fc0c094ac385f293382f535fb10cc034f870b6dc69dacce3b1219
+Copying blob sha256:85c70af6f90a39476eba657111260c09d16de02858ab46676e8286a94adba582
+Copying blob sha256:ae89691758eb03d7df662008958a1cf469dfefce52bfdb6c7244ad4d4f9b5234
+Copying blob sha256:0fa0309c9da6828dbb7f5f61f5af7bd1956e3a7187a2067db446661a125cfecc
+Copying blob sha256:dce263b0837e4946a8a0e0bfca9a2fced88953faf6e5737cce9f1e8e9c698b83
+Copying blob sha256:9d3348c3291af4aff971863441dc70fa73b2086c3b605cbaf9a6a66d9d50ecd9
+Copying blob sha256:5dbf98043f5489bd7874c8ab989e8f59141ff6a3b579b846e87f59fa51b85ad6
+Copying blob sha256:50fa8cf4ca6cee52a76a126bb7165c85633262b1ccfe8a62fa37e0b0d3441d8d
+Copying blob sha256:5c251ef93ba39874dd8c7c9a81dc083dcbb075d18980cda452670effc7a17767
+... [truncated: 11226 of 11626 lines removed; full evidence archived outside repo] ...
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [miles-colocate] Update weights: 0it [00:00, ?it/s]
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] INFO:     172.20.4.61:50686 - "POST /update_weights_from_tensor HTTP/1.1" 200 OK
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] LoRA adapter loading from tensors starts: LoRARef(lora_id=993f36d0b274495585ce33f5f9a131a1, lora_name=miles_lora, lora_path=__stream__, pinned=False, reloadable=False).
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] LoRA adapter '993f36d0b274495585ce33f5f9a131a1': loaded weights for target modules ['down_proj', 'gate_up_proj', 'o_proj', 'qkv_proj'].
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.324 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.4.61:20001/update_weights_from_tensor "HTTP/1.1 200 OK"
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.324 actor_cell00000_rank00000] timer.py:42 - Timer update_weights_implementation end (elapsed: 0.1s)
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.324 actor_cell00000_rank00000] timer.py:31 - Timer finalize_and_resume_engines start
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(InferenceController pid=12884)[0m [2026-09-29 12:37:33.447 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.4.61:20001/resume_memory_occupation "HTTP/1.1 200 OK"
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] INFO:     172.20.4.61:50686 - "POST /end_weight_update HTTP/1.1" 200 OK
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] INFO:     172.20.4.61:50686 - "POST /update_weight_version HTTP/1.1" 200 OK
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] INFO:     172.20.4.61:50686 - "POST /continue_generation HTTP/1.1" 200 OK
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] INFO:     172.20.4.61:28541 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] INFO:     172.20.4.61:43388 - "POST /update_weight_version HTTP/1.1" 200 OK
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] INFO:     172.20.4.61:43388 - "GET /model_info HTTP/1.1" 200 OK
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] LoRA adapter loading from tensors completes: LoRARef(lora_id=993f36d0b274495585ce33f5f9a131a1, lora_name=miles_lora, lora_path=__stream__, pinned=False, reloadable=False).
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] Weight version changed. old_version='yeto:2:adf3cce945aadc123726236f48f7780500c5db5ef47d25eb6e8d239382a2808a' new_version='4' num_recorded=0
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] [continue_generation] torch.cuda.empty_cache() called: reserved 32306.0 MB -> 32266.0 MB (freed 40.0 MB)
+[36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] Weight version changed. old_version='4' new_version='yeto:3:e2977f78535bfa6535a49a2273fdf3ad4c2e7de76dd528ebd3163dd19eda21f1' num_recorded=0
+[36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] [WeightChecker] handle action=checksum allow_quant_error=False skip_tensor_list=None
+[yeto-gdm929-l1-modal] [36m(TrainerController pid=12889)[0m [2026-09-29 12:37:33.414 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=update_weights ok=true elapsed_s=0.2
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.386 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.4.61:20001/end_weight_update "HTTP/1.1 200 OK"
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.389 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.4.61:20001/update_weight_version "HTTP/1.1 200 OK"
+[yeto-gdm929-l1-modal] 
+[36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.392 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.4.61:20001/continue_generation "HTTP/1.1 200 OK"
+[36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.392 actor_cell00000_rank00000] timer.py:42 - Timer finalize_and_resume_engines end (elapsed: 0.1s)
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [miles-colocate] Update weights: 1it [00:00,  6.32it/s]
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.412 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage after update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 71.95, 'used_GB': 7.23, 'allocated_GB': 1.38, 'reserved_GB': 1.52}
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.412 actor_cell00000_rank00000] timer.py:42 - Timer update_weights end (elapsed: 0.2s)
+[yeto-gdm929-l1-modal] [36m(MegatronTrainRayActor pid=13123)[0m [2026-09-29 12:37:33.413 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=update_weights phase=end ok=true elapsed_s=0.2
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(InferenceController pid=12884)[0m [2026-09-29 12:37:33.496 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.4.61:20001/weights_checker "HTTP/1.1 200 OK"
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] [WeightChecker] checksum computed for 226 tensors in 0.030s
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] INFO:     172.20.4.61:28541 - "POST /weights_checker HTTP/1.1" 200 OK
+[syncer] 2026-09-29T12:37:33.561354Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=1 generation=9553993225268345573 step=3 remaining=1
+[syncer] 2026-09-29T12:37:33.846225Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=18.188.252.190:47593
+[syncer] 2026-09-29T12:37:33.846488Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=18.188.252.190:44766
+[syncer] 2026-09-29T12:37:33.846520Z  WARN yeto_syncer::server: learner disconnected during finalization; waiting for reconnect learner_id=1 generation=9553993225268345573
+[syncer] 2026-09-29T12:37:33.850476Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=18.188.252.190:57646
+[syncer] 2026-09-29T12:37:33.850733Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=18.188.252.190:28497
+[syncer] 2026-09-29T12:37:33.850912Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=18.188.252.190:24420
+[yeto-gdm929-l1-modal] [36m(InferenceController pid=12884)[0m [2026-09-29 12:37:33.799 inference_controller] rollout_server.py:132 - Killing server cell_id='inference-engine-all-0-0-00000'...
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(InferenceController pid=12884)[0m [2026-09-29 12:37:33.801 inference_controller] _client.py:1740 - HTTP Request: GET http://172.20.4.61:20000/workers "HTTP/1.1 200 OK"
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(InferenceController pid=12884)[0m [2026-09-29 12:37:33.803 inference_controller] _client.py:1740 - HTTP Request: DELETE http://172.20.4.61:20000/workers/a5511043-e139-4207-9347-de1c5da3273e "HTTP/1.1 202 Accepted"
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(InferenceController pid=12884)[0m [2026-09-29 12:37:33.804 inference_controller] server_cell.py:268 - Cell inference-engine-all-0-0-00000 dispose start old=addr_info=CellAddrInfo(server_url='http://172.20.4.61:20001', bootstrap_port=None, gate_url='http://172.20.4.61:20036')
+[yeto-gdm929-l1-modal] [36m(InferenceController pid=12884)[0m [2026-09-29 12:37:33.804 inference_controller] server_cell.py:271 - Cell inference-engine-all-0-0-00000 dispose end new=
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(RayWorkerManager pid=12683)[0m [2026-09-29 12:37:33.807 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, cell_index=0, spec=ServeWorkerSpec(name='rollout-executor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_rollout_executor.<locals>.<lambda> at 0x2a9150af3240>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.ray.rollout.rollout_executor.RolloutExecutor', ctor_kwargs=<function spec_rollout_executor.<locals>.<lambda> at 0x2a9150b144a0>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-16' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='rollout-executor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_rollout_executor.<locals>.<lambda> at 0x2a9150af3240>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.ray.rollout.rollout_executor.RolloutExecutor', ctor_kwargs=<function spec_rollout_executor.<locals>.<lambda> at 0x2a9150b144a0>, concurrency_groups=None), actor_handle=Actor(RolloutExecutor, 5144f18518ae90cf35cb776501000000), self_addrs={'rpc': HostAndPort(host='172.20.4.61', port=20037, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(RayWorkerManager pid=12683)[0m [2026-09-29 12:37:33.808 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, cell_index=0, spec=ServeWorkerSpec(name='inference-controller', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_inference_controller.<locals>.<lambda> at 0x2a9150b145e0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.READ: 'read'>, worker_class='miles.ray.rollout.inference_controller.InferenceController', ctor_kwargs=<function spec_inference_controller.<locals>.<lambda> at 0x2a916e500540>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-17' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='inference-controller', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_inference_controller.<locals>.<lambda> at 0x2a9150b145e0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.READ: 'read'>, worker_class='miles.ray.rollout.inference_controller.InferenceController', ctor_kwargs=<function spec_inference_controller.<locals>.<lambda> at 0x2a916e500540>, concurrency_groups=None), actor_handle=Actor(InferenceController, ba12789932ab4550e3628c3701000000), self_addrs={'rpc': HostAndPort(host='172.20.4.61', port=20038, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] SIGTERM received. signum=None frame=None. Draining requests and shutting down...
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(RayWorkerManager pid=12683)[0m [2026-09-29 12:37:33.810 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, cell_index=0, spec=ServeWorkerSpec(name='trainer-controller-actor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2a916e500b80>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=False), meta=None, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.READ_DELETE: 'read-delete'>, worker_class='miles.ray.train.group.TrainerController', ctor_kwargs=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2a916e500cc0>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-20' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='trainer-controller-actor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2a916e500b80>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=False), meta=None, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.READ_DELETE: 'read-delete'>, worker_class='miles.ray.train.group.TrainerController', ctor_kwargs=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2a916e500cc0>, concurrency_groups=None), actor_handle=Actor(TrainerController, dd52c4462d2f1b820e7639a101000000), self_addrs={'rpc': HostAndPort(host='172.20.4.61', port=20041, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(RayWorkerManager pid=12683)[0m [2026-09-29 12:37:33.812 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, cell_index=0, spec=ServeWorkerSpec(name='trainer-engine-actor', category='trainer_engine', port_infos=[PortInfo(name='master', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer.<locals>.<lambda> at 0x2a916e500d60>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.4, num_cpus_per_worker=0.4, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='actor', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_trainer.<locals>.<lambda> at 0x2a916e502200>, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.backends.megatron_utils.actor.MegatronTrainRayActor', ctor_kwargs=<function _compute_spec_trainer.<locals>.<lambda> at 0x2a916e502de0>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-21' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='trainer-engine-actor', category='trainer_engine', port_infos=[PortInfo(name='master', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer.<locals>.<lambda> at 0x2a916e500d60>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.4, num_cpus_per_worker=0.4, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='actor', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_trainer.<locals>.<lambda> at 0x2a916e502200>, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.backends.megatron_utils.actor.MegatronTrainRayActor', ctor_kwargs=<function _compute_spec_trainer.<locals>.<lambda> at 0x2a916e502de0>, concurrency_groups=None), actor_handle=Actor(MegatronTrainRayActor, 677fc4bfd92a68e9736c6c1e01000000), self_addrs={'master': HostAndPort(host='172.20.4.61', port=20039, external_host=None), 'rpc': HostAndPort(host='172.20.4.61', port=20040, external_host=None)}, local_gpu_ids=[0], gpu_slot_index=0)
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] Subprocess detokenizer (pid=13929) crashed with exit code -15. Triggering SIGQUIT for cleanup...
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] SIGQUIT received. signum=None, frame=None. It usually means one child failed.
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m [2026-09-29 12:37:33] Sleeping 5 seconds before crash diagnostics to let GPU activity settle.
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(RayWorkerManager pid=12683)[0m [2026-09-29 12:37:34.004 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_CommandActorManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, cell_index=0, spec=CommandWorkerSpec(name='inference-router-0', category=None, port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='prometheus', static_port=9000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_router.<locals>.<lambda> at 0x2a916e5005e0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_router.<locals>._compute_launch_command at 0x2a916e500680>), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-18' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=CommandWorkerSpec(name='inference-router-0', category=None, port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='prometheus', static_port=9000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_router.<locals>.<lambda> at 0x2a916e5005e0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_router.<locals>._compute_launch_command at 0x2a916e500680>), actor_handle=Actor(CommandActor, 6c323a6d00974895985d567701000000), self_addrs={'primary': HostAndPort(host='172.20.4.61', port=20000, external_host=None), 'prometheus': HostAndPort(host='172.20.4.61', port=20002, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [rl] learner 1 finalized (rl_engine=ports)
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(RayWorkerManager pid=12683)[0m [2026-09-29 12:37:38.890 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_CommandActorManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2a9150562270>, cell_index=0, spec=CommandWorkerSpec(name='inference-engine-all-0-0', category='inference_engine', port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='dist_init', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=31, offset_by_cell=False), PortInfo(name='nccl', static_port=10000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='engine_info_bootstrap', static_port=12000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='gate', static_port=13000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2a916e500860>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.2, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='rollout', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2a916e5009a0>, deploy_component=<DeployComponent.INFERENCE: 'inference'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_inference_engine.<locals>._compute_launch_command at 0x2a916e500ae0>), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-19' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=CommandWorkerSpec(name='inference-engine-all-0-0', category='inference_engine', port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='dist_init', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=31, offset_by_cell=False), PortInfo(name='nccl', static_port=10000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='engine_info_bootstrap', static_port=12000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='gate', static_port=13000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2a916e500860>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.2, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='rollout', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2a916e5009a0>, deploy_component=<DeployComponent.INFERENCE: 'inference'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_inference_engine.<locals>._compute_launch_command at 0x2a916e500ae0>), actor_handle=Actor(CommandActor, 9c51231eadb07f9253a782dc01000000), self_addrs={'primary': HostAndPort(host='172.20.4.61', port=20001, external_host=None), 'dist_init': HostAndPort(host='172.20.4.61', port=20003, external_host=None), 'nccl': HostAndPort(host='172.20.4.61', port=20034, external_host=None), 'engine_info_bootstrap': HostAndPort(host='172.20.4.61', port=20035, external_host=None), 'gate': HostAndPort(host='172.20.4.61', port=20036, external_host=None)}, local_gpu_ids=[0], gpu_slot_index=0)
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l1-modal] [36m(CommandActor pid=12888)[0m WARNING:miles.utils.workers.process_utils:Process 13618 did not exit within 5.0s after SIGTERM; escalating to SIGKILL
+[yeto-gdm929-l1-modal] 
+[yeto-gdm929-l0-modal] [36m(TrainerController pid=15259)[0m [2026-09-29 12:37:43.153 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=run_plugin ok=true elapsed_s=30.0
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(TrainerController pid=15259)[0m [2026-09-29 12:37:43.266 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=run_plugin n_actors=1
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(TrainerController pid=15259)[0m [2026-09-29 12:37:43.800 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=run_plugin ok=true elapsed_s=0.5
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(TrainerController pid=15259)[0m [2026-09-29 12:37:44.260 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=run_plugin n_actors=1
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(TrainerController pid=15259)[0m [2026-09-29 12:37:44.669 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=run_plugin ok=true elapsed_s=0.4
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(InferenceController pid=15254)[0m [2026-09-29 12:37:45.174 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/resume_memory_occupation "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:45271 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:31960 - "POST /pause_generation HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:31960 - "GET /flush_cache HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] Cache flush skipped: KV cache memory is released.
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(TrainerController pid=15259)[0m [2026-09-29 12:37:45.183 trainer_controller_actor] group.py:392 - ft op=update_weights phase=start rollout=
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(TrainerController pid=15259)[0m [2026-09-29 12:37:45.184 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=update_weights n_actors=1
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.186 actor_cell00000_rank00000] structured_log.py:24 - actor cls=MegatronTrainRayActor fn=update_weights phase=start
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.186 actor_cell00000_rank00000] timer.py:31 - Timer update_weights start
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.188 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage before update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 68.71, 'used_GB': 10.47, 'allocated_GB': 1.38, 'reserved_GB': 4.73}
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.193 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/pause_generation "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.198 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: GET http://172.20.2.250:20000/flush_cache "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:31960 - "POST /begin_weight_update HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.203 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/begin_weight_update "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.204 actor_cell00000_rank00000] timer.py:31 - Timer update_weights_implementation start
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [miles-colocate] Update weights: 0it [00:00, ?it/s]
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:31960 - "POST /update_weights_from_tensor HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] LoRA adapter loading from tensors starts: LoRARef(lora_id=da9e4f6d8654463a9e2f8dcad309ef1f, lora_name=miles_lora, lora_path=__stream__, pinned=False, reloadable=False).
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.298 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/update_weights_from_tensor "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.299 actor_cell00000_rank00000] timer.py:42 - Timer update_weights_implementation end (elapsed: 0.1s)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.300 actor_cell00000_rank00000] timer.py:31 - Timer finalize_and_resume_engines start
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:31960 - "POST /end_weight_update HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:31960 - "POST /update_weight_version HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:31960 - "POST /continue_generation HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] LoRA adapter 'da9e4f6d8654463a9e2f8dcad309ef1f': loaded weights for target modules ['down_proj', 'gate_up_proj', 'o_proj', 'qkv_proj'].
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] LoRA adapter loading from tensors completes: LoRARef(lora_id=da9e4f6d8654463a9e2f8dcad309ef1f, lora_name=miles_lora, lora_path=__stream__, pinned=False, reloadable=False).
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] Weight version changed. old_version='yeto:2:adf3cce945aadc123726236f48f7780500c5db5ef47d25eb6e8d239382a2808a' new_version='4' num_recorded=0
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] [continue_generation] torch.cuda.empty_cache() called: reserved 32306.0 MB -> 32266.0 MB (freed 40.0 MB)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.376 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/end_weight_update "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.382 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/update_weight_version "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.385 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/continue_generation "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.386 actor_cell00000_rank00000] timer.py:42 - Timer finalize_and_resume_engines end (elapsed: 0.1s)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(TrainerController pid=15259)[0m [2026-09-29 12:37:45.476 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=update_weights ok=true elapsed_s=0.3
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [miles-colocate] Update weights: 1it [00:00,  3.76it/s]
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.472 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage after update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 71.98, 'used_GB': 7.2, 'allocated_GB': 1.38, 'reserved_GB': 1.49}
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.474 actor_cell00000_rank00000] timer.py:42 - Timer update_weights end (elapsed: 0.3s)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(MegatronTrainRayActor pid=15549)[0m [2026-09-29 12:37:45.474 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=update_weights phase=end ok=true elapsed_s=0.3
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(InferenceController pid=15254)[0m [2026-09-29 12:37:45.554 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/resume_memory_occupation "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(InferenceController pid=15254)[0m [2026-09-29 12:37:45.616 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.2.250:20000/weights_checker "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:45271 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:58147 - "POST /update_weight_version HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:58147 - "GET /model_info HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] INFO:     172.20.2.250:45271 - "POST /weights_checker HTTP/1.1" 200 OK
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] Weight version changed. old_version='4' new_version='yeto:3:e2977f78535bfa6535a49a2273fdf3ad4c2e7de76dd528ebd3163dd19eda21f1' num_recorded=0
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] [WeightChecker] handle action=checksum allow_quant_error=False skip_tensor_list=None
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] [WeightChecker] checksum computed for 226 tensors in 0.033s
+[yeto-gdm929-l0-modal] 
+[syncer] 2026-09-29T12:37:45.704044Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=0 generation=13919163391167366394 step=3 remaining=0
+[syncer] 2026-09-29T12:37:45.704113Z  INFO yeto_syncer::server: all learners acknowledged final cut learners=2
+[syncer] 2026-09-29T12:37:45.704127Z  INFO yeto_syncer::server: training complete after 3 outer steps
+[syncer] 2026-09-29T12:37:45.839127Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=184.32.99.223:31141
+[syncer] 2026-09-29T12:37:45.844878Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=184.32.99.223:49774
+[syncer] 2026-09-29T12:37:45.845132Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=184.32.99.223:17481
+[syncer] 2026-09-29T12:37:45.845855Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=184.32.99.223:19872
+[syncer] 2026-09-29T12:37:45.849860Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=184.32.99.223:61149
+[yeto-gdm929-l0-modal] [36m(RayWorkerManager pid=14910)[0m [2026-09-29 12:37:45.788 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, cell_index=0, spec=ServeWorkerSpec(name='rollout-executor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_rollout_executor.<locals>.<lambda> at 0x2b169c27b420>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.ray.rollout.rollout_executor.RolloutExecutor', ctor_kwargs=<function spec_rollout_executor.<locals>.<lambda> at 0x2b169c294680>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-16' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='rollout-executor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_rollout_executor.<locals>.<lambda> at 0x2b169c27b420>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.ray.rollout.rollout_executor.RolloutExecutor', ctor_kwargs=<function spec_rollout_executor.<locals>.<lambda> at 0x2b169c294680>, concurrency_groups=None), actor_handle=Actor(RolloutExecutor, fa3038c76bae55c12d7dabdf01000000), self_addrs={'rpc': HostAndPort(host='172.20.2.250', port=20037, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(RayWorkerManager pid=14910)[0m [2026-09-29 12:37:45.790 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, cell_index=0, spec=ServeWorkerSpec(name='inference-controller', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_inference_controller.<locals>.<lambda> at 0x2b169c2947c0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.READ: 'read'>, worker_class='miles.ray.rollout.inference_controller.InferenceController', ctor_kwargs=<function spec_inference_controller.<locals>.<lambda> at 0x2b16b5c14720>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-17' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='inference-controller', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_inference_controller.<locals>.<lambda> at 0x2b169c2947c0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.READ: 'read'>, worker_class='miles.ray.rollout.inference_controller.InferenceController', ctor_kwargs=<function spec_inference_controller.<locals>.<lambda> at 0x2b16b5c14720>, concurrency_groups=None), actor_handle=Actor(InferenceController, d9a26d14a57778e645b8437e01000000), self_addrs={'rpc': HostAndPort(host='172.20.2.250', port=20040, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(RayWorkerManager pid=14910)[0m [2026-09-29 12:37:45.791 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, cell_index=0, spec=ServeWorkerSpec(name='trainer-controller-actor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2b16b5c14d60>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=False), meta=None, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.READ_DELETE: 'read-delete'>, worker_class='miles.ray.train.group.TrainerController', ctor_kwargs=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2b16b5c14ea0>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-20' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:260> wait_for=<_GatheringFuture pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='trainer-controller-actor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2b16b5c14d60>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=False), meta=None, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.READ_DELETE: 'read-delete'>, worker_class='miles.ray.train.group.TrainerController', ctor_kwargs=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2b16b5c14ea0>, concurrency_groups=None), actor_handle=Actor(TrainerController, ece5a9681631da9f23cd431801000000), self_addrs={'rpc': HostAndPort(host='172.20.2.250', port=20041, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(RayWorkerManager pid=14910)[0m [2026-09-29 12:37:45.793 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, cell_index=0, spec=ServeWorkerSpec(name='trainer-engine-actor', category='trainer_engine', port_infos=[PortInfo(name='master', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b16b5c14f40>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.4, num_cpus_per_worker=0.4, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='actor', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b16b5c163e0>, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.backends.megatron_utils.actor.MegatronTrainRayActor', ctor_kwargs=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b16b5c16fc0>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-21' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='trainer-engine-actor', category='trainer_engine', port_infos=[PortInfo(name='master', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b16b5c14f40>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.4, num_cpus_per_worker=0.4, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='actor', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b16b5c163e0>, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.backends.megatron_utils.actor.MegatronTrainRayActor', ctor_kwargs=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b16b5c16fc0>, concurrency_groups=None), actor_handle=Actor(MegatronTrainRayActor, c856f7032783f620adc9ac2901000000), self_addrs={'master': HostAndPort(host='172.20.2.250', port=20038, external_host=None), 'rpc': HostAndPort(host='172.20.2.250', port=20039, external_host=None)}, local_gpu_ids=[0], gpu_slot_index=0)
+[yeto-gdm929-l0-modal] [36m(InferenceController pid=15254)[0m [2026-09-29 12:37:45.777 inference_controller] rollout_server.py:132 - Killing server cell_id='inference-engine-all-0-0-00000'...
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(InferenceController pid=15254)[0m [2026-09-29 12:37:45.780 inference_controller] _client.py:1740 - HTTP Request: GET http://172.20.2.250:20035/workers "HTTP/1.1 200 OK"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(InferenceController pid=15254)[0m [2026-09-29 12:37:45.783 inference_controller] _client.py:1740 - HTTP Request: DELETE http://172.20.2.250:20035/workers/91c7c1f3-6c0e-4239-9ac6-a624ade19a19 "HTTP/1.1 202 Accepted"
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(InferenceController pid=15254)[0m [2026-09-29 12:37:45.783 inference_controller] server_cell.py:268 - Cell inference-engine-all-0-0-00000 dispose start old=addr_info=CellAddrInfo(server_url='http://172.20.2.250:20000', bootstrap_port=None, gate_url='http://172.20.2.250:20034')
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(InferenceController pid=15254)[0m [2026-09-29 12:37:45.784 inference_controller] server_cell.py:271 - Cell inference-engine-all-0-0-00000 dispose end new=
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:45] SIGTERM received. signum=None frame=None. Draining requests and shutting down...
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(RayWorkerManager pid=14910)[0m [2026-09-29 12:37:45.909 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_CommandActorManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, cell_index=0, spec=CommandWorkerSpec(name='inference-router-0', category=None, port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='prometheus', static_port=9000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_router.<locals>.<lambda> at 0x2b16b5c147c0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_router.<locals>._compute_launch_command at 0x2b16b5c14860>), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-18' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=CommandWorkerSpec(name='inference-router-0', category=None, port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='prometheus', static_port=9000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_router.<locals>.<lambda> at 0x2b16b5c147c0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_router.<locals>._compute_launch_command at 0x2b16b5c14860>), actor_handle=Actor(CommandActor, 6e18da8f60e3f8804472d3e201000000), self_addrs={'primary': HostAndPort(host='172.20.2.250', port=20035, external_host=None), 'prometheus': HostAndPort(host='172.20.2.250', port=20036, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:46] Gracefully exiting... Remaining number of requests 0. Remaining requests remaining_rids=[].
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:46] kill_process_tree called: parent_pid=16238, include_parent=False, pid=16238
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:46] INFO:     Shutting down
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:46] INFO:     Waiting for application shutdown.
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:46] INFO:     Application shutdown complete.
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:46] INFO:     Finished server process [16238]
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [36m(CommandActor pid=15260)[0m [2026-09-29 12:37:46] kill_process_tree called: parent_pid=16238, include_parent=False, pid=16238
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] [rl] learner 0 finalized (rl_engine=ports)
+[yeto-gdm929-l0-modal] [36m(RayWorkerManager pid=14910)[0m [2026-09-29 12:37:49.093 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_CommandActorManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b1683c4e390>, cell_index=0, spec=CommandWorkerSpec(name='inference-engine-all-0-0', category='inference_engine', port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='dist_init', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=31, offset_by_cell=False), PortInfo(name='nccl', static_port=10000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='engine_info_bootstrap', static_port=12000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='gate', static_port=13000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2b16b5c14a40>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.2, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='rollout', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2b16b5c14b80>, deploy_component=<DeployComponent.INFERENCE: 'inference'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_inference_engine.<locals>._compute_launch_command at 0x2b16b5c14cc0>), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-19' coro=<_CellManager._scan_liveness_forever() running at /root/miles/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=CommandWorkerSpec(name='inference-engine-all-0-0', category='inference_engine', port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='dist_init', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=31, offset_by_cell=False), PortInfo(name='nccl', static_port=10000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='engine_info_bootstrap', static_port=12000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='gate', static_port=13000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2b16b5c14a40>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.2, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='rollout', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2b16b5c14b80>, deploy_component=<DeployComponent.INFERENCE: 'inference'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_inference_engine.<locals>._compute_launch_command at 0x2b16b5c14cc0>), actor_handle=Actor(CommandActor, 3d06d91061e1e77aaeb729f901000000), self_addrs={'primary': HostAndPort(host='172.20.2.250', port=20000, external_host=None), 'dist_init': HostAndPort(host='172.20.2.250', port=20001, external_host=None), 'nccl': HostAndPort(host='172.20.2.250', port=20032, external_host=None), 'engine_info_bootstrap': HostAndPort(host='172.20.2.250', port=20033, external_host=None), 'gate': HostAndPort(host='172.20.2.250', port=20034, external_host=None)}, local_gpu_ids=[0], gpu_slot_index=0)
+[yeto-gdm929-l0-modal] 
+[yeto-gdm929-l0-modal] 
+[launcher] yeto-gdm929-l1-modal job finished: SUCCEEDED
+[launcher] yeto-gdm929-l0-modal job finished: SUCCEEDED
+[launcher] learner jobs finished: {'yeto-gdm929-l0-modal': 'SUCCEEDED', 'yeto-gdm929-l1-modal': 'SUCCEEDED'}
+[launcher] committed RL checkpoint retained at /home/michael/work/gpu-default-modal/home/yeto-output
+[launcher] tearing down yeto-gdm929-l0-modal
+[launcher] tearing down yeto-gdm929-l1-modal
+[launcher] run finished; model + checkpoint live on the head — tear it down with: yeto down yeto-gdm929

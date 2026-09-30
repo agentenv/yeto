@@ -1,0 +1,10 @@
+7a1993abffa9c733dabe9cb54f185eca2b9c7e20b66142cf6395b397f7564ccf
+GPU 0: NVIDIA A100-SXM4-80GB (UUID: GPU-bbef9c18-145e-b251-db69-6712f581ee75)
+miles                                    0.1.1                 /root/miles
+peft                                     0.18.1
+sglang                                   0.5.21.dev64+ge5bba1f /sgl-workspace/sglang/python
+torch                                    2.13.0+cu130
+Successfully installed sglang-0.0.0.dev18354+g9f29303be
+Successfully installed miles-0.1.1
+CFLAGS_x86_64-unknown-linux-gnu = None
+SETUP_OK

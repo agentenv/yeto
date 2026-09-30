@@ -1,0 +1,401 @@
+/opt/sglang/lib/python3.12/site-packages/transformer_engine/__init__.py:103: RuntimeWarning: Detected a Jax installation but could not find the shared object file for the Transformer Engine Jax extension library. If this is not intentional, please reinstall Transformer Engine with `pip install transformer_engine[jax]` or build from source with `NVTE_FRAMEWORK=jax`.
+  warnings.warn(
+Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+Flax classes are deprecated and will be removed in Diffusers v1.0.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.
+WARNING:megatron.bridge.models.muse_glimmer:Muse Glimmer Hugging Face classes are unavailable with transformers 5.12.1. Upgrade transformers to a version that supports Muse Glimmer.
+WARNING:miles_plugins.models.qwen3_vl:megatron-bridge Qwen3VLModel lacks native CP-local vision-embed selection; CP runs with vision tokens will mis-place vision embeddings. Apply the matching Megatron-Bridge patch (radixark/Megatron-Bridge PR #9).
+WARNING:megatron.bridge.models.conversion.auto_bridge:Loading a model with trust_remote_code=True allows arbitrary code execution from the model repository. Only use this with models you trust.
+/opt/sglang/lib/python3.12/site-packages/megatron/bridge/models/qwen/qwen3_bridge.py:45: FutureWarning: Qwen3Bridge.provider_bridge() and AutoBridge.to_megatron_provider() are deprecated for builder-backed models. Use AutoBridge.get_model_config() for training recipes or AutoBridge.get_model() to construct a model. Legacy provider support will be removed in a future release.
+  provider = super().provider_bridge(hf_pretrained)
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+/root/Megatron-LM/megatron/core/transformer/transformer_config.py:3249: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+[2026-09-29 03:04:50.490 main] arguments.py:49 - --tokenizer-model not set, use --hf-checkpoint as tokenizer model.
+[2026-09-29 03:04:50.540 main] arguments.py:152 - MoE-expert LoRA layout: per-expert (--experts-shared-outer-loras).
+[2026-09-29 03:04:50.541 main] arguments.py:3616 - Colocate mode: defaulting --sglang-cuda-graph-backend-prefill=disabled to avoid NVLS OOM. Set --sglang-cuda-graph-backend-prefill explicitly to override.
+[2026-09-29 03:04:50.541 main] arguments.py:3626 - rollout_num_gpus None != actor_num_gpus_per_node 1 * actor_num_nodes 1, overriding rollout_num_gpus to match actor_num_gpus_per_node * actor_num_nodes.
+[2026-09-29 03:04:50.541 main] arguments.py:3858 - args.eval_max_context_len is not set. Use args.rollout_max_context_len 1024 as default value.
+[2026-09-29 03:04:50.541 main] arguments.py:3866 - args.rollout_max_prompt_len is not set. Use args.rollout_max_context_len - 1 (1024 - 1) as default value so that there is at least one generated token to compute loss.
+/root/Megatron-LM/megatron/core/_rank_utils.py:39: UserWarning: Could not determine rank from torch.distributed, RANK, or SLURM_PROCID. Defaulting to rank 0.
+  warnings.warn(
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+using world size: 1, data-parallel size: 1, context-parallel size: 1, hierarchical context-parallel sizes: None, tensor-model-parallel size: 1, pipeline-model-parallel size: 1
+Number of virtual stages per pipeline stage: None
+using torch.bfloat16 for parameters ...
+------------------------ arguments ------------------------
+  _is_global_batch_size_explicitly_specified ...... True
+  account_for_embedding_in_pipeline_split ......... False
+  account_for_loss_in_pipeline_split .............. False
+  accumulate_allreduce_grads_in_fp32 .............. True
+  activation_func_clamp_shared_expert ............. True
+  activation_func_clamp_value ..................... None
+  activation_offload_fraction ..................... 1.0
+  actor_num_gpus_per_node ......................... 1
+  actor_num_nodes ................................. 1
+  adam_beta1 ...................................... 0.9
+  adam_beta2 ...................................... 0.999
+  adam_eps ........................................ 1e-08
+  add_bias_linear ................................. False
+  add_position_embedding .......................... True
+  add_qkv_bias .................................... False
+  adlr_autoresume ................................. False
+  adlr_autoresume_interval ........................ 1000
+  advantage_estimator ............................. grpo
+  align_grad_reduce ............................... True
+  align_param_gather .............................. False
+  allgather_cp .................................... False
+  allow_ambiguous_pad_tokens ...................... False
+  allow_partial_train_step ........................ False
+  api_server_host ................................. 127.0.0.1
+  api_server_port ................................. 0
+  app_tag_run_name ................................ None
+  app_tag_run_version ............................. 0.0.0
+  apply_chat_template ............................. True
+  apply_chat_template_kwargs ...................... {'enable_thinking': False}
+  apply_dsa_kernel_fusion ......................... None
+  apply_query_key_layer_scaling ................... False
+  apply_residual_connection_post_layernorm ........ False
+  apply_rope_fusion ............................... True
+  apply_wd_to_qk_layernorm ........................ False
+  async_ckpt_cpu_priority ......................... 10
+  async_ckpt_io_priority .......................... 3
+  async_ckpt_use_cpu_shm .......................... False
+  async_data_buffer_capacity_factor ............... 2.0
+  async_max_concurrent_samples .................... None
+  async_save ...................................... False
+  async_strategy .................................. mcore
+  async_unused_samples_handler .................... drop
+  attention_backend ............................... AttnBackend.unfused
+  attention_dropout ............................... 0.1
+  attention_output_gate ........................... False
+  attention_softmax_in_fp32 ....................... True
+  auto_detect_ckpt_format ......................... False
+  balance_by_flops ................................ False
+  balance_data .................................... True
+  barrier_with_L1_time ............................ True
+  batch_invariant_mode ............................ False
+  bert_binary_head ................................ True
+  bert_embedder_type .............................. megatron
+  bert_load ....................................... None
+  beta_fast ....................................... 32
+  beta_slow ....................................... 1
+  bf16 ............................................ True
+  bias_dropout_fusion ............................. True
+  bias_gelu_fusion ................................ False
+  bias_swiglu_fusion .............................. True
+  biencoder_projection_dim ........................ 0
+  biencoder_shared_query_context_model ............ False
+  block_data_path ................................. None
+  buffer_filter_path .............................. yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter
+  cache_mla_latents ............................... False
+  calc_ft_timeouts ................................ False
+  calculate_per_token_loss ........................ False
+  chat_template ................................... None
+  chat_template_path .............................. None
+  check_for_large_grads ........................... False
+  check_for_nan_in_loss_and_grad .................. True
+  check_for_spiky_loss ............................ False
+  check_lora_weight_equal ......................... False
+  check_rematerialize_param_from_master_weight .... False
+  check_weight_hash_across_dp_replicas_interval ... None
+  check_weight_update_allow_quant_error ........... False
+  check_weight_update_equal ....................... False
+  check_weight_update_selector .................... all
+  check_weight_update_skip_list ................... None
+  chunked_optimizer_state_offload ................. False
+  ci_check_model_hash ............................. False
+  ci_disable_kl_checker ........................... False
+  ci_disable_logprobs_checker ..................... False
+  ci_disable_weight_update_checker ................ False
+  ci_enable_metrics_capture ....................... False
+  ci_ft_test_actions .............................. None
+  ci_ft_test_actions_path ......................... None
+  ci_inject_rollout_data_min_match_ratio .......... 0.9
+  ci_inject_rollout_data_path ..................... None
+  ci_inject_rollout_data_start_rollout_id ......... None
+  ci_load_grad_norm ............................... None
+  ci_metric_checker_expect_num .................... None
+  ci_metric_checker_key ........................... None
+  ci_metric_checker_threshold ..................... None
+  ci_save_grad_norm ............................... None
+  ci_save_model_hash .............................. False
+  ci_test ......................................... False
+  ci_tito_special_token_count_threshold ........... 0.0
+  ckpt_assume_constant_structure .................. False
+  ckpt_convert_format ............................. None
+  ckpt_convert_save ............................... None
+  ckpt_convert_update_legacy_dist_opt_format ...... False
+  ckpt_format ..................................... torch_dist
+  ckpt_fully_parallel_load ........................ False
+  ckpt_fully_parallel_load_exchange_algo .......... broadcast
+  ckpt_fully_parallel_load_process_group .......... dp
+  ckpt_fully_parallel_save ........................ True
+  ckpt_fully_parallel_save_deprecated ............. False
+  ckpt_fully_parallel_save_process_group .......... dp
+  ckpt_load_validate_sharding_integrity ........... True
+  ckpt_step ....................................... None
+  classes_fraction ................................ 1.0
+  clear_quantized_weight_workspaces_on_offload .... True
+  clip_grad ....................................... 1.0
+  clone_scatter_output_in_embedding ............... True
+  cluster_backend ................................. ray
+  colocate ........................................ True
+  colocate_memory_peak_device ..................... cpu
+  compress_ratios ................................. None
+  compute_advantages_and_returns .................. True
+  config_logger_dir ............................... 
+  consumed_train_samples .......................... 0
+  consumed_valid_samples .......................... 0
+... [truncated: 2442 of 2842 lines removed; full evidence archived outside repo] ...
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:29.147 actor_cell00000_rank00000] timer.py:42 - Timer finalize_and_resume_engines end (elapsed: 0.1s)
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] [continue_generation] torch.cuda.empty_cache() called: reserved 32306.0 MB -> 32266.0 MB (freed 40.0 MB)
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:16:29.265 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/resume_memory_occupation "HTTP/1.1 200 OK"
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:29.199 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=update_weights ok=true elapsed_s=0.2
+[36m(MegatronTrainRayActor pid=15836)[0m [miles-colocate] Update weights: 1it [00:00,  4.41it/s]
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:29.195 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage after update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 71.96, 'used_GB': 7.22, 'allocated_GB': 1.38, 'reserved_GB': 1.51}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:29.196 actor_cell00000_rank00000] timer.py:42 - Timer update_weights end (elapsed: 0.2s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:29.197 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=update_weights phase=end ok=true elapsed_s=0.2
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:16:29.314 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/weights_checker "HTTP/1.1 200 OK"
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:29.324 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=sleep n_actors=1
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] Weight version changed. old_version='3' new_version='yeto:2:63b0317bb2ce36b7906fce2e3e8ceb45e4d87a67e8617a607fd5f6d5c886f3d5' num_recorded=0
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] [WeightChecker] handle action=checksum allow_quant_error=False skip_tensor_list=None
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] [WeightChecker] checksum computed for 226 tensors in 0.021s
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:29.326 actor_cell00000_rank00000] structured_log.py:24 - actor cls=MegatronTrainRayActor fn=sleep phase=start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:29.326 actor_cell00000_rank00000] timer.py:31 - Timer sleep start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:30.167 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage before offload model: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 41.93, 'used_GB': 37.25, 'allocated_GB': 1.38, 'reserved_GB': 1.49}
+[36m(RolloutExecutor pid=12653)[0m Rollout generation:   0%|          | 0/32 [00:00<?, ?it/s]
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:30.730 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=sleep ok=true elapsed_s=1.4
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:30.727 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage after offload model: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 43.39, 'used_GB': 35.78, 'allocated_GB': 1.38, 'reserved_GB': 1.49}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:30.728 actor_cell00000_rank00000] log_utils.py:436 - [CPU memory] after_offload_train: 120.40 GB (rollout_id=1, step=1)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:30.728 actor_cell00000_rank00000] timer.py:42 - Timer sleep end (elapsed: 1.4s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:30.728 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=sleep phase=end ok=true elapsed_s=1.4
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:33] Prefill batch, #new-seq: 1, #new-token: 77, #cached-token: 0, token usage: 0.01, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 0.95
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:33] Prefill batch, #new-seq: 31, #new-token: 2707, #cached-token: 0, token usage: 0.00, #running-req: 1, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 227172.21
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:33] Decode batch, #running-req: 32, #token: 1651, token usage: 0.01, cuda graph: True, gen throughput (token/s): 16.17, #queue-req: 0
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:33] Decode batch, #running-req: 32, #token: 2931, token usage: 0.01, cuda graph: True, gen throughput (token/s): 6159.74, #queue-req: 0
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:33] Decode batch, #running-req: 32, #token: 4211, token usage: 0.02, cuda graph: True, gen throughput (token/s): 6159.94, #queue-req: 0
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] Decode batch, #running-req: 31, #token: 5330, token usage: 0.02, cuda graph: True, gen throughput (token/s): 5973.06, #queue-req: 0
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] Decode batch, #running-req: 25, #token: 5364, token usage: 0.02, cuda graph: True, gen throughput (token/s): 5268.80, #queue-req: 0
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] Decode batch, #running-req: 22, #token: 5641, token usage: 0.02, cuda graph: True, gen throughput (token/s): 4526.74, #queue-req: 0
+
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:03] INFO:     172.20.0.14:41683 - "POST /end_weight_update HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:03] INFO:     172.20.0.14:41683 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:03] INFO:     172.20.0.14:41683 - "POST /continue_generation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:03] INFO:     172.20.0.14:27160 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:03] INFO:     172.20.0.14:30257 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:03] INFO:     172.20.0.14:30257 - "GET /model_info HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:03] INFO:     172.20.0.14:27160 - "POST /weights_checker HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:51548 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:26031 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:27933 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:30480 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:34838 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:26716 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:42151 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:45119 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:13] INFO:     172.20.0.14:57546 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:22030 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:51839 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:54041 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:22291 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:58240 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:24542 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:35334 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:58032 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:35803 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:58901 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:58699 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:25932 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:38919 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:22009 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:31537 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:53715 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:41921 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:28989 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:65138 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:27511 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:49620 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:36606 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:16986 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:48417 - "POST /abort_request HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:14] INFO:     172.20.0.14:65070 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:15] INFO:     172.20.0.14:65070 - "POST /release_memory_occupation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:15:27] INFO:     172.20.0.14:36317 - "GET /health HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:27] INFO:     172.20.0.14:20014 - "GET /health HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:28] INFO:     172.20.0.14:58805 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:28] INFO:     172.20.0.14:19069 - "POST /pause_generation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:28] INFO:     172.20.0.14:19069 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:28] INFO:     172.20.0.14:19069 - "POST /begin_weight_update HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] INFO:     172.20.0.14:19069 - "POST /update_weights_from_tensor HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] INFO:     172.20.0.14:19069 - "POST /end_weight_update HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] INFO:     172.20.0.14:19069 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] INFO:     172.20.0.14:19069 - "POST /continue_generation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] INFO:     172.20.0.14:58805 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] INFO:     172.20.0.14:61182 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] INFO:     172.20.0.14:61182 - "GET /model_info HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:29] INFO:     172.20.0.14:58805 - "POST /weights_checker HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:35409 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:46617 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:22092 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:58065 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:28849 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:38781 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:55200 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:23328 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:27271 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:27869 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:34558 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:26905 - "POST /generate HTTP/1.1" 200 OK[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] Decode batch, #running-req: 14, #token: 4273, token usage: 0.02, cuda graph: True, gen throughput (token/s): 3419.02, #queue-req: 0
+[36m(RolloutExecutor pid=12653)[0m [2026-09-29 03:16:34.856 rollout_executor] inference_rollout_train.py:137 - First rollout sample: text_preview=<|im_start|>user\nIt takes Roque two hours to walk to work and one hour to ride his bike to work. Roque walks to and from work three times a week and rides his bike to and from work twice a week. How many hours in total does he take to get to and from work a week with walking and biking?\nPut the final numeric answer in \boxed{}.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nWe are told the following information:\n\n- **Walking to work and back**: 3 times a week  \n- **Time per round trip**: 2 ho...<truncated chars=479>, label=16, reward_summary=0.0
+[36m(RolloutExecutor pid=12653)[0m Rollout generation:  25%|██▌       | 8/32 [00:04<00:12,  1.94it/s]
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] Decode batch, #running-req: 10, #token: 3467, token usage: 0.01, cuda graph: True, gen throughput (token/s): 2210.22, #queue-req: 0
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] Decode batch, #running-req: 4, #token: 1701, token usage: 0.01, cuda graph: True, gen throughput (token/s): 1434.74, #queue-req: 0
+[36m(RolloutExecutor pid=12653)[0m Rollout generation:  50%|█████     | 16/32 [00:04<00:03,  4.10it/s]Rollout generation: 100%|██████████| 32/32 [00:04<00:00,  7.02it/s]
+[36m(RolloutExecutor pid=12653)[0m [2026-09-29 03:16:35.301 rollout_executor] inference_rollout_train.py:161 - Finish rollout: text_preview=<|im_start|>user\nTim rides his bike back and forth to work for each of his 5 workdays.  His work is 20 miles away.  He also goes for a weekend bike ride of 200 miles.    If he can bike at 25 mph how much time does he spend biking a week?\nPut the final numeric answer in \boxed{}.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nWe are told the following information:\n\n- Tim rides his bike **back and forth** to work **for 5 workdays**.\n- His job is **20 miles away**, and he goes to work **a weeken...<truncated chars=856>, label=16, reward_summary=1.0
+[36m(RolloutExecutor pid=12653)[0m [2026-09-29 03:16:35.303 rollout_executor] inference_rollout_train.py:33 - Abort request for ['http://172.20.0.14:21102']
+[36m(RolloutExecutor pid=12653)[0m [2026-09-29 03:16:35.310 rollout_executor] rollout_data_conversion.py:39 - Final collected 32 samples from rollout to train
+[36m(RolloutExecutor pid=12653)[0m [2026-09-29 03:16:35.311 rollout_executor] debug_data.py:124 - Save debug rollout data to /work/out/strict2-federated/work/seed-17/yeto-federated-m2/rollouts/island-0/2.pt
+[36m(RolloutExecutor pid=12653)[0m [2026-09-29 03:16:35.322 rollout_executor] metrics.py:93 - perf 2: {'rollout/raw_reward_unfiltered': 0.28125, 'rollout/num_training_samples': 32, 'rollout/episode_raw_reward': 0.28125, 'rollout/episode_response_length/mean': 273.0, 'rollout/episode_response_length/median': 272.0, 'rollout/episode_response_length/max': 384, 'rollout/episode_response_length/min': 148, 'rollout/episode_total_response_length/mean': 273.0, 'rollout/response_len/mean': 273.0, 'rollout/response_len/median': 272.0, 'rollout/response_len/max': 384, 'rollout/response_len/min': 148, 'rollout/zero_std/count_0.0': 1, 'rollout/zero_std/all_zero_percentage': 0.25, 'rollout/zero_std/all_one_percentage': 0.0, 'rollout/prefix_cache_hit_rate': 0.0, 'rollout/avg_cached_tokens_per_sample': 0.0, 'rollout/repetition_frac': 0.0, 'rollout/truncated_ratio': 0.0625, 'perf/rollout_time': 4.581277847290039, 'perf/tokens_per_gpu_per_sec': 1906.8915466822432, 'perf/longest_sample_tokens_per_sec': 83.81940864537333, 'perf/effective_tokens_per_gpu_per_sec': 1906.8915466822432, 'perf/longest_effective_sample_tokens_per_sec': 83.81940864537333}
+[36m(RolloutExecutor pid=12653)[0m [2026-09-29 03:16:35.323 rollout_executor] train_data_conversion.py:334 - Rollout-side DP schedule: num_samples=32, num_rollouts=[32], num_microbatches=[32]
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:16:35.346 inference_controller] _client.py:1740 - HTTP Request: GET http://172.20.0.14:21102/flush_cache "HTTP/1.1 200 OK"
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] Cache flushed successfully!
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] Cache flushed successfully!
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:16:35.841 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/release_memory_occupation "HTTP/1.1 200 OK"
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:35.848 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=wake_up n_actors=1
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:35.849 actor_cell00000_rank00000] structured_log.py:24 - actor cls=MegatronTrainRayActor fn=wake_up phase=start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:35.850 actor_cell00000_rank00000] timer.py:31 - Timer wake_up start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:35.850 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage before wake_up model: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 74.61, 'used_GB': 4.57, 'allocated_GB': 1.38, 'reserved_GB': 1.49}
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:36.756 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=wake_up ok=true elapsed_s=0.9
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:36.760 trainer_controller_actor] group.py:190 - ft op=train phase=start rollout=2 attempt=0
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:36.760 trainer_controller_actor] group.py:534 - ft op=refresh phase=start rollout=2 alive=0 healing= all_states="(0, 'StateAllocatedAlive')" quorum=0
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:36.761 trainer_controller_actor] group.py:557 - ft op=refresh phase=decision rollout=2 needs_reconfigure=false reason=alive_config_unchanged,no_healing quorum=0
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:36.761 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=train n_actors=1
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.753 actor_cell00000_rank00000] reloadable_process_group.py:151 - Reloading 0 process groups in pid 15836
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.754 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage after wake_up model: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 73.14, 'used_GB': 6.04, 'allocated_GB': 1.38, 'reserved_GB': 1.49}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.754 actor_cell00000_rank00000] timer.py:42 - Timer wake_up end (elapsed: 0.9s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.755 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=wake_up phase=end ok=true elapsed_s=0.9
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.762 actor_cell00000_rank00000] structured_log.py:24 - actor cls=MegatronTrainRayActor fn=train phase=start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.762 actor_cell00000_rank00000] timer.py:31 - Timer data_preprocess start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.768 actor_cell00000_rank00000] timer.py:42 - Timer data_preprocess end (elapsed: 0.0s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.768 actor_cell00000_rank00000] structured_log.py:24 - actor cls=MegatronTrainRayActor fn=_train_actor phase=start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.768 actor_cell00000_rank00000] timer.py:42 - Timer train_wait end (elapsed: 63.7s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.768 actor_cell00000_rank00000] timer.py:31 - Timer train start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.768 actor_cell00000_rank00000] structured_log.py:24 - actor cls=MegatronTrainRayActor fn=_compute_log_prob phase=start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:36.769 actor_cell00000_rank00000] timer.py:31 - Timer log_probs start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:42.851 actor_cell00000_rank00000] timer.py:42 - Timer log_probs end (elapsed: 6.1s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:42.851 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=_compute_log_prob phase=end ok=true elapsed_s=6.1
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:42.858 actor_cell00000_rank00000] log_utils.py:100 - ft op=cross_cell phase=start kind=log_gather rank=0
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:42.859 actor_cell00000_rank00000] log_utils.py:106 - ft op=cross_cell phase=end kind=log_gather rank=0 success=true
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:42.859 actor_cell00000_rank00000] log_utils.py:126 - rollout 2: {'rollout/response_lengths': 273.0, 'rollout/rewards': -3.725290298461914e-09, 'rollout/truncated': 0.0625, 'rollout/rollout_log_probs': -0.36793065071105957, 'rollout/raw_reward': 0.28125, 'rollout/total_lengths': 360.0, 'rollout/log_probs': -0.36848196387290955, 'rollout/advantages': 1.1175870895385742e-08, 'rollout/returns': 1.1175870895385742e-08}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:42.859 actor_cell00000_rank00000] timer.py:31 - Timer actor_train start
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:54.081 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=train ok=true elapsed_s=17.3
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:54.081 trainer_controller_actor] group.py:290 - ft op=check errored= discarded= normal=0 decision=no_retry reason="survivors normal, gradients valid"
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:54.085 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=run_plugin n_actors=1
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:54.088 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=run_plugin ok=true elapsed_s=0.0
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:54.091 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=run_plugin n_actors=1
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.076 actor_cell00000_rank00000] model.py:637 - train op=train_step rollout=2 step=0 attempt=0 outcome=NORMAL valid_step=true
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.077 actor_cell00000_rank00000] log_utils.py:554 - step 2: {'train/loss': -1.1175870895385742e-08, 'train/pg_loss': -1.1175870895385742e-08, 'train/entropy_loss': 0.0, 'train/pg_clipfrac': 0.0, 'train/ppo_kl': 0.0, 'train/ess_ratio': 1.0, 'train/train_rollout_logprob_abs_diff': 0.014273852109909058, 'train/train_rollout_kl': 0.0007000528858043253, 'train/grad_norm': 0.34883660078048706, 'train/lr-pg_0': 0.0, 'train/step': 2}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.077 actor_cell00000_rank00000] model.py:847 - step 2: {'train/loss': -1.1175870895385742e-08, 'train/pg_loss': -1.1175870895385742e-08, 'train/entropy_loss': 0.0, 'train/pg_clipfrac': 0.0, 'train/ppo_kl': 0.0, 'train/ess_ratio': 1.0, 'train/train_rollout_logprob_abs_diff': 0.014273852109909058, 'train/train_rollout_kl': 0.0007000528858043253, 'train/grad_norm': 0.34883660078048706, 'train/lr-pg_0': 0.0, 'train/step': 2}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.077 actor_cell00000_rank00000] timer.py:42 - Timer actor_train end (elapsed: 11.2s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.077 actor_cell00000_rank00000] timer.py:42 - Timer train end (elapsed: 17.3s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.077 actor_cell00000_rank00000] timer.py:31 - Timer train_wait start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.078 actor_cell00000_rank00000] train_metric_utils.py:56 - perf 2: {'perf/update_weights_implementation_time': 0.1061704158782959, 'perf/finalize_and_resume_engines_time': 0.07411813735961914, 'perf/update_weights_time': 0.2443220615386963, 'perf/sleep_time': 1.4020717144012451, 'perf/wake_up_time': 0.9047815799713135, 'perf/data_preprocess_time': 0.0056591033935546875, 'perf/train_wait_time': 63.682080030441284, 'perf/log_probs_time': 6.082097291946411, 'perf/actor_train_time': 11.218274354934692, 'perf/train_time': 17.30893349647522, 'perf/log_probs_tflops': 2.049669530388341, 'perf/actor_train_tflops': 3.3337452193820694, 'perf/actor_train_tok_per_s': 1026.8959053343694, 'perf/mfu_peak_tflops': 989.0, 'perf/actor_train_mfu': 0.0033708242865339425, 'perf/step_time': 80.9910135269165, 'perf/wait_time_ratio': 0.7862857526690565}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.078 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=_train_actor phase=end ok=true elapsed_s=17.3
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:16:54.079 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=train phase=end ok=true elapsed_s=17.3
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:16:54.378 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=run_plugin ok=true elapsed_s=0.3
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:23.262 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=run_plugin n_actors=1
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:49.424 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=run_plugin ok=true elapsed_s=26.2
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:49.520 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=run_plugin n_actors=1
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:49.844 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=run_plugin ok=true elapsed_s=0.3
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:50.378 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=run_plugin n_actors=1
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:50.756 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=run_plugin ok=true elapsed_s=0.4
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:17:51.163 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/resume_memory_occupation "HTTP/1.1 200 OK"
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:51.171 trainer_controller_actor] group.py:392 - ft op=update_weights phase=start rollout=
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:51.172 trainer_controller_actor] cell.py:231 - ft op=execute phase=start cell=trainer-engine-actor-00000 fn=update_weights n_actors=1
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] Cache flush skipped: KV cache memory is released.
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.174 actor_cell00000_rank00000] structured_log.py:24 - actor cls=MegatronTrainRayActor fn=update_weights phase=start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.174 actor_cell00000_rank00000] timer.py:31 - Timer update_weights start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.175 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage before update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 69.36, 'used_GB': 9.82, 'allocated_GB': 1.38, 'reserved_GB': 4.09}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.179 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/pause_generation "HTTP/1.1 200 OK"
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.183 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: GET http://172.20.0.14:21102/flush_cache "HTTP/1.1 200 OK"
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.187 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/begin_weight_update "HTTP/1.1 200 OK"
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.188 actor_cell00000_rank00000] timer.py:31 - Timer update_weights_implementation start
+[36m(MegatronTrainRayActor pid=15836)[0m [miles-colocate] Update weights: 0it [00:00, ?it/s]
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] LoRA adapter loading from tensors starts: LoRARef(lora_id=57047798205c462da2967b12f5666406, lora_name=miles_lora, lora_path=__stream__, pinned=False, reloadable=False).
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] LoRA adapter '57047798205c462da2967b12f5666406': loaded weights for target modules ['down_proj', 'gate_up_proj', 'o_proj', 'qkv_proj'].
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] LoRA adapter loading from tensors completes: LoRARef(lora_id=57047798205c462da2967b12f5666406, lora_name=miles_lora, lora_path=__stream__, pinned=False, reloadable=False).
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] Weight version changed. old_version='yeto:2:63b0317bb2ce36b7906fce2e3e8ceb45e4d87a67e8617a607fd5f6d5c886f3d5' new_version='4' num_recorded=0
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.267 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/update_weights_from_tensor "HTTP/1.1 200 OK"
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.268 actor_cell00000_rank00000] timer.py:42 - Timer update_weights_implementation end (elapsed: 0.1s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.268 actor_cell00000_rank00000] timer.py:31 - Timer finalize_and_resume_engines start
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.314 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/end_weight_update "HTTP/1.1 200 OK"
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.318 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/update_weight_version "HTTP/1.1 200 OK"
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.321 actor_cell00000_rank00000] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/continue_generation "HTTP/1.1 200 OK"
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.321 actor_cell00000_rank00000] timer.py:42 - Timer finalize_and_resume_engines end (elapsed: 0.1s)
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] [continue_generation] torch.cuda.empty_cache() called: reserved 32306.0 MB -> 32266.0 MB (freed 40.0 MB)
+[36m(TrainerController pid=12659)[0m [2026-09-29 03:17:51.606 trainer_controller_actor] cell.py:239 - ft op=execute phase=end cell=trainer-engine-actor-00000 fn=update_weights ok=true elapsed_s=0.4
+[36m(MegatronTrainRayActor pid=15836)[0m [miles-colocate] Update weights: 1it [00:00,  2.42it/s]
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.603 actor_cell00000_rank00000] memory_utils.py:41 - [Rank 0] Memory-Usage after update_weights: {'gpu': '0', 'total_GB': 79.18, 'free_GB': 71.96, 'used_GB': 7.22, 'allocated_GB': 1.38, 'reserved_GB': 1.51}
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.604 actor_cell00000_rank00000] timer.py:42 - Timer update_weights end (elapsed: 0.4s)
+[36m(MegatronTrainRayActor pid=15836)[0m [2026-09-29 03:17:51.605 actor_cell00000_rank00000] structured_log.py:28 - actor cls=MegatronTrainRayActor fn=update_weights phase=end ok=true elapsed_s=0.4
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:17:51.660 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/resume_memory_occupation "HTTP/1.1 200 OK"
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:17:51.705 inference_controller] _client.py:1740 - HTTP Request: POST http://172.20.0.14:21102/weights_checker "HTTP/1.1 200 OK"
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] Weight version changed. old_version='4' new_version='yeto:3:2d30c85bbf38b14b9a93fa5a5f4ddb04a896235c2c81b9b62e27d8a83c40327a' num_recorded=0
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] [WeightChecker] handle action=checksum allow_quant_error=False skip_tensor_list=None
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] [WeightChecker] checksum computed for 226 tensors in 0.021s
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:17:51.865 inference_controller] rollout_server.py:132 - Killing server cell_id='inference-engine-all-0-0-00000'...
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:17:51.868 inference_controller] _client.py:1740 - HTTP Request: GET http://172.20.0.14:21000/workers "HTTP/1.1 200 OK"
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:17:51.869 inference_controller] _client.py:1740 - HTTP Request: DELETE http://172.20.0.14:21000/workers/af77e186-53f3-41bb-8f64-3d62c1236455 "HTTP/1.1 202 Accepted"
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:17:51.870 inference_controller] server_cell.py:268 - Cell inference-engine-all-0-0-00000 dispose start old=addr_info=CellAddrInfo(server_url='http://172.20.0.14:21102', bootstrap_port=None, gate_url='http://172.20.0.14:21136')
+[36m(InferenceController pid=12655)[0m [2026-09-29 03:17:51.870 inference_controller] server_cell.py:271 - Cell inference-engine-all-0-0-00000 dispose end new=
+[36m(RayWorkerManager pid=12651)[0m [2026-09-29 03:17:51.874 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, cell_index=0, spec=ServeWorkerSpec(name='rollout-executor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_rollout_executor.<locals>.<lambda> at 0x2b59889d23e0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.ray.rollout.rollout_executor.RolloutExecutor', ctor_kwargs=<function spec_rollout_executor.<locals>.<lambda> at 0x2b59889d3600>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-16' coro=<_CellManager._scan_liveness_forever() running at /opt/miles-next/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='rollout-executor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_rollout_executor.<locals>.<lambda> at 0x2b59889d23e0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.ray.rollout.rollout_executor.RolloutExecutor', ctor_kwargs=<function spec_rollout_executor.<locals>.<lambda> at 0x2b59889d3600>, concurrency_groups=None), actor_handle=Actor(RolloutExecutor, c7cddfd8fdbe69f3704eb82f02000000), self_addrs={'rpc': HostAndPort(host='172.20.0.14', port=21137, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[36m(RayWorkerManager pid=12651)[0m [2026-09-29 03:17:51.874 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, cell_index=0, spec=ServeWorkerSpec(name='inference-controller', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_inference_controller.<locals>.<lambda> at 0x2b59889d3740>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.READ: 'read'>, worker_class='miles.ray.rollout.inference_controller.InferenceController', ctor_kwargs=<function spec_inference_controller.<locals>.<lambda> at 0x2b59a644bba0>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-17' coro=<_CellManager._scan_liveness_forever() running at /opt/miles-next/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='inference-controller', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function spec_inference_controller.<locals>.<lambda> at 0x2b59889d3740>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.READ: 'read'>, worker_class='miles.ray.rollout.inference_controller.InferenceController', ctor_kwargs=<function spec_inference_controller.<locals>.<lambda> at 0x2b59a644bba0>, concurrency_groups=None), actor_handle=Actor(InferenceController, bbd0db2679aea8b58219675d02000000), self_addrs={'rpc': HostAndPort(host='172.20.0.14', port=21100, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[36m(RayWorkerManager pid=12651)[0m [2026-09-29 03:17:51.877 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, cell_index=0, spec=ServeWorkerSpec(name='trainer-controller-actor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2b59a6470220>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=False), meta=None, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.READ_DELETE: 'read-delete'>, worker_class='miles.ray.train.group.TrainerController', ctor_kwargs=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2b59a6470360>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-20' coro=<_CellManager._scan_liveness_forever() running at /opt/miles-next/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='trainer-controller-actor', category=None, port_infos=[PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2b59a6470220>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=1.0, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=False), meta=None, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.READ_DELETE: 'read-delete'>, worker_class='miles.ray.train.group.TrainerController', ctor_kwargs=<function _compute_spec_trainer_controller.<locals>.<lambda> at 0x2b59a6470360>, concurrency_groups=None), actor_handle=Actor(TrainerController, 5bb45a25e0f4f56135e2dab202000000), self_addrs={'rpc': HostAndPort(host='172.20.0.14', port=21140, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[36m(RayWorkerManager pid=12651)[0m [2026-09-29 03:17:51.877 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_ServeActorRayCommManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, cell_index=0, spec=ServeWorkerSpec(name='trainer-engine-actor', category='trainer_engine', port_infos=[PortInfo(name='master', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b59a6470400>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.4, num_cpus_per_worker=0.4, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='actor', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b59a64718a0>, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.backends.megatron_utils.actor.MegatronTrainRayActor', ctor_kwargs=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b59a6472480>, concurrency_groups=None), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-21' coro=<_CellManager._scan_liveness_forever() running at /opt/miles-next/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=ServeWorkerSpec(name='trainer-engine-actor', category='trainer_engine', port_infos=[PortInfo(name='master', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='rpc', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b59a6470400>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.4, num_cpus_per_worker=0.4, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='actor', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b59a64718a0>, deploy_component=<DeployComponent.TRAINER: 'trainer'>, platform_access=<PlatformAccess.NONE: 'none'>, worker_class='miles.backends.megatron_utils.actor.MegatronTrainRayActor', ctor_kwargs=<function _compute_spec_trainer.<locals>.<lambda> at 0x2b59a6472480>, concurrency_groups=None), actor_handle=Actor(MegatronTrainRayActor, ad5af937c3c5a415543bc4d002000000), self_addrs={'master': HostAndPort(host='172.20.0.14', port=21138, external_host=None), 'rpc': HostAndPort(host='172.20.0.14', port=21139, external_host=None)}, local_gpu_ids=[0], gpu_slot_index=0)
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] SIGTERM received. signum=None frame=None. Draining requests and shutting down...
+[36m(RayWorkerManager pid=12651)[0m [2026-09-29 03:17:51.993 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_CommandActorManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, cell_index=0, spec=CommandWorkerSpec(name='inference-router-0', category=None, port_infos=[PortInfo(name='primary', static_port=21000, mode='per_worker', allow_dynamic=False, num_consecutive=1, offset_by_cell=False), PortInfo(name='prometheus', static_port=9000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_router.<locals>.<lambda> at 0x2b59a644bc40>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_router.<locals>._compute_launch_command at 0x2b59a644bce0>), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-18' coro=<_CellManager._scan_liveness_forever() running at /opt/miles-next/miles/utils/workers/ray_worker_manager.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=CommandWorkerSpec(name='inference-router-0', category=None, port_infos=[PortInfo(name='primary', static_port=21000, mode='per_worker', allow_dynamic=False, num_consecutive=1, offset_by_cell=False), PortInfo(name='prometheus', static_port=9000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_router.<locals>.<lambda> at 0x2b59a644bc40>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.0, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=0, num_gpus_per_node=0, pg_name=None, pg_slot_offset=0, pin_to_head=True), meta=None, deploy_component=<DeployComponent.PRIMARY: 'primary'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_router.<locals>._compute_launch_command at 0x2b59a644bce0>), actor_handle=Actor(CommandActor, 8508d8a663facc146d080ce202000000), self_addrs={'primary': HostAndPort(host='172.20.0.14', port=21000, external_host=None), 'prometheus': HostAndPort(host='172.20.0.14', port=21101, external_host=None)}, local_gpu_ids=[], gpu_slot_index=None)
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:52] Subprocess detokenizer (pid=18575) crashed with exit code -15. Triggering SIGQUIT for cleanup...
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:52] SIGQUIT received. signum=None, frame=None. It usually means one child failed.
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:52] Sleeping 5 seconds before crash diagnostics to let GPU activity settle.
+[36m(CommandActor pid=15596)[0m WARNING:miles.utils.workers.process_utils:Process 17640 did not exit within 5.0s after SIGTERM; escalating to SIGKILL
+[36m(RayWorkerManager pid=12651)[0m [2026-09-29 03:17:56.955 worker_manager] ray_worker_manager.py:409 - Killed actor at self=_CommandActorManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, parent=_CellManager(manager=<miles.utils.workers.ray_worker_manager.RayWorkerManager object at 0x2b5988617e00>, cell_index=0, spec=CommandWorkerSpec(name='inference-engine-all-0-0', category='inference_engine', port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='dist_init', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=31, offset_by_cell=False), PortInfo(name='nccl', static_port=10000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='engine_info_bootstrap', static_port=12000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='gate', static_port=13000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2b59a644bec0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.2, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='rollout', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2b59a6470040>, deploy_component=<DeployComponent.INFERENCE: 'inference'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_inference_engine.<locals>._compute_launch_command at 0x2b59a6470180>), actors=[...], generation=1, liveness_scan_task=<Task pending name='Task-19' coro=<_CellManager._scan_liveness_forever() running at /opt/miles-next/miles/utils/workers/ray_worker_manager.py:260> wait_for=<_GatheringFuture pending cb=[Task.task_wakeup()]>>), worker_in_cell_index=0, spec=CommandWorkerSpec(name='inference-engine-all-0-0', category='inference_engine', port_infos=[PortInfo(name='primary', static_port=8000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='dist_init', static_port=9000, mode='master', allow_dynamic=True, num_consecutive=31, offset_by_cell=False), PortInfo(name='nccl', static_port=10000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='engine_info_bootstrap', static_port=12000, mode='per_worker', allow_dynamic=True, num_consecutive=1, offset_by_cell=False), PortInfo(name='gate', static_port=13000, mode='master', allow_dynamic=True, num_consecutive=1, offset_by_cell=False)], env_var=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2b59a644bec0>, scheduling=SchedulingSpec(num_cells=1, num_workers_per_cell=1, num_gpus_per_worker=0.2, num_cpus_per_worker=0.2, num_gpu_slots_per_worker=1, num_gpus_per_node=1, pg_name='rollout', pg_slot_offset=0, pin_to_head=False), meta=<function _compute_spec_inference_engine.<locals>.<lambda> at 0x2b59a6470040>, deploy_component=<DeployComponent.INFERENCE: 'inference'>, platform_access=<PlatformAccess.NONE: 'none'>, launch_command=<function _compute_spec_inference_engine.<locals>._compute_launch_command at 0x2b59a6470180>), actor_handle=Actor(CommandActor, b9a886e549015aad89c2194002000000), self_addrs={'primary': HostAndPort(host='172.20.0.14', port=21102, external_host=None), 'dist_init': HostAndPort(host='172.20.0.14', port=21103, external_host=None), 'nccl': HostAndPort(host='172.20.0.14', port=21134, external_host=None), 'engine_info_bootstrap': HostAndPort(host='172.20.0.14', port=21135, external_host=None), 'gate': HostAndPort(host='172.20.0.14', port=21136, external_host=None)}, local_gpu_ids=[0], gpu_slot_index=0)
+
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:19660 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:46059 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:21225 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:52070 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:25455 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:29774 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:45662 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:23242 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:25935 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:34] INFO:     172.20.0.14:56246 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:38160 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:54350 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:40287 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:22524 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:34987 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:44346 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:44981 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:40025 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:57536 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:21598 - "POST /generate HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:44969 - "POST /abort_request HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:62566 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:16:35] INFO:     172.20.0.14:62566 - "POST /release_memory_occupation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:27] INFO:     172.20.0.14:47909 - "GET /health HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:16868 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:46924 - "POST /pause_generation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:46924 - "GET /flush_cache HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:46924 - "POST /begin_weight_update HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:46924 - "POST /update_weights_from_tensor HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:46924 - "POST /end_weight_update HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:46924 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:46924 - "POST /continue_generation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:16868 - "POST /resume_memory_occupation HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:44880 - "POST /update_weight_version HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:44880 - "GET /model_info HTTP/1.1" 200 OK
+[36m(CommandActor pid=15596)[0m [2026-09-29 03:17:51] INFO:     172.20.0.14:16868 - "POST /weights_checker HTTP/1.1" 200 OK
+[rl] learner 0 finalized (rl_engine=ports)

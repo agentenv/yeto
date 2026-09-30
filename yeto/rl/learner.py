@@ -153,6 +153,12 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--wan-streams", type=int, default=4)
     parser.add_argument("--miles-root", required=True)
+    parser.add_argument(
+        "--rl-engine",
+        choices=["legacy", "ports"],
+        default="ports",
+        help="RL engine path (default ports); ports rejects unsupported combinations at startup",
+    )
     parser.add_argument("--miles-source-sha256", default=None)
     parser.add_argument("--megatron-ref-load", default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -166,7 +172,28 @@ def parse_args(argv=None):
         parser.error("LoRA mode requires --lora-r and --lora-targets")
     if (args.parameter_mode == "full") != (args.sync_preset == "dense-full"):
         parser.error("--parameter-mode full requires --sync-preset dense-full")
+    if args.rl_engine == "ports":
+        try:
+            _require_ports_supported(args)
+        except ValueError as error:
+            parser.error(str(error))
     return args
+
+
+def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
+    """Reject combinations outside the R0 ports matrix before any startup."""
+
+    from .engine.selection import require_ports_supported
+
+    require_ports_supported(
+        sync_preset=getattr(args, "sync_preset", "strict-avg"),
+        parameter_mode=getattr(args, "parameter_mode", "lora"),
+        model_recipe=getattr(args, "rl_model_recipe", "generic"),
+        lora_targets=getattr(args, "lora_targets", None),
+        expert_full_count=getattr(args, "expert_full_count", 0) or 0,
+        rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
+        extra_argv=tuple(extra_argv),
+    )
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -838,127 +865,55 @@ def build_miles_argv(
     target_modules: list[str],
     yeto_policy_sync: bool = True,
 ) -> list[str]:
-    """Construct Miles arguments from Bridge's actual model provider."""
+    """Construct Miles arguments from Bridge's actual model provider.
 
-    parameter_mode = getattr(args, "parameter_mode", "lora")
-    if parameter_mode not in {"lora", "full"}:
-        raise ValueError("unsupported RL parameter mode")
-    if parameter_mode == "full":
-        if target_modules:
-            raise ValueError("full-parameter Miles must not select LoRA targets")
-    elif not target_modules:
-        raise ValueError("PEFT selected no LoRA target modules")
+    Two layers: ``resolve_rl_run_config`` validates and resolves the
+    engine-agnostic run; ``_legacy_miles_argv`` is the pure legacy (agentenv
+    Miles fork) translation of that config.
+    """
 
-    from .codex_backend import QWEN35_MODEL, QWEN35_REVISION
+    from .engine.run_config import resolve_rl_run_config
 
-    # Miles runs gated-delta-net hybrids (Qwen3.5 / Qwen3.6 dense) through
-    # its own layer spec, not through the generic GPT provider path; the
-    # pinned Codex profile is one such model, and Bridge reports the
-    # capability on the provider for every other checkpoint of the family.
-    gdn_hybrid = (
-        _text(getattr(provider, "experimental_attention_variant", None))
-        == "gated_delta_net"
+    config = resolve_rl_run_config(
+        args,
+        model_path=model_path,
+        rollout_model_path=rollout_model_path,
+        prompt_path=prompt_path,
+        eval_prompt_path=eval_prompt_path,
+        provider=provider,
+        target_modules=target_modules,
+        yeto_policy_sync=yeto_policy_sync,
     )
-    qwen35_recipe = gdn_hybrid or (
-        getattr(args, "model", None) == QWEN35_MODEL
-        and getattr(args, "model_revision", None) == QWEN35_REVISION
+    return _legacy_miles_argv(config)
+
+
+def _legacy_miles_argv(config) -> list[str]:
+    """Translate an ``RLRunConfig`` into legacy Miles argv (order is load-bearing)."""
+
+    from .engine.run_config import (
+        RECIPE_DEEPSEEK_V4_FLASH,
+        RECIPE_QWEN3_5,
     )
 
-    hidden = _positive_int(provider, "hidden_size")
-    heads = _positive_int(provider, "num_attention_heads")
-    layers = _positive_int(provider, "num_layers")
-    ffn = _positive_int(provider, "ffn_hidden_size")
-    query_groups = int(getattr(provider, "num_query_groups", heads))
-    multi_latent_attention = bool(
-        getattr(provider, "multi_latent_attention", False)
-    )
-    kv_channels = int(getattr(provider, "kv_channels", hidden // heads))
-    max_positions = int(
-        _provider_value(
-            provider,
-            "seq_length",
-            "max_sequence_length",
-            "max_position_embeddings",
-        )
-    )
-    if args.seq_len > max_positions:
-        raise ValueError(
-            f"--seq-len {args.seq_len} exceeds model context limit {max_positions}"
-        )
-    vocab_size = _positive_int(provider, "vocab_size", "padded_vocab_size")
-    normalization = _text(getattr(provider, "normalization", "RMSNorm"))
-    epsilon = float(
-        _provider_value(provider, "layernorm_epsilon", "norm_epsilon")
-    )
-    position_type = _text(getattr(provider, "position_embedding_type", "rope"))
-    rope_type = None
-    if position_type == "yarn":
-        position_type, rope_type = "rope", "yarn"
-    rotary_base = int(getattr(provider, "rotary_base", 10000))
-    rotary_percent = float(getattr(provider, "rotary_percent", 1.0))
-    actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
-    tensor_parallel = getattr(args, "tensor_parallel", 1)
-    pipeline_parallel = getattr(args, "pipeline_parallel", 1)
-    model_parallel = tensor_parallel * pipeline_parallel
-    if tensor_parallel <= 0 or pipeline_parallel <= 0 or actor_gpus % model_parallel:
-        raise ValueError("Miles actor world must be divisible by TP*PP")
-    is_moe = getattr(provider, "num_moe_experts", None) is not None
-    expert_parallel = getattr(args, "expert_parallel", None) or (
-        actor_gpus if is_moe else 1
-    )
-    if not is_moe and expert_parallel != 1:
-        raise ValueError("EP>1 requires a MoE model")
-    if actor_gpus % expert_parallel:
-        raise ValueError("expert parallelism must divide Miles actor world size")
-    if is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
-        raise ValueError(
-            "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
-        )
-    if args.lora_targets == "attention-routed-experts" and (
-        not is_moe or getattr(args, "rl_model_recipe", "generic") != "deepseek-v4-flash"
-    ):
-        raise ValueError(
-            "attention-routed-experts is reserved for the expanded DeepSeek V4 recipe"
-        )
-    expert_full_count = int(getattr(args, "expert_full_count", 0) or 0)
-    if not 0 <= expert_full_count <= 32:
-        raise ValueError("expert-full count must be between 1 and 32 when enabled")
-    expert_full = expert_full_count > 0
-    if expert_full and (
-        getattr(args, "rl_model_recipe", "generic") != "deepseek-v4-flash"
-        or args.lora_targets != "attention"
-    ):
-        raise ValueError(
-            "expert-full tuning requires the DeepSeek V4 recipe and attention LoRA"
-        )
-    data_parallel = actor_gpus // model_parallel
-    if parameter_mode == "full" and data_parallel != 1:
-        raise ValueError("dense full-parameter GRPO requires DP=1")
-    if parameter_mode == "full":
-        rollout_gpus = getattr(args, "rollout_num_gpus", None)
-        rollout_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None)
-        if (
-            args.actor_num_nodes != 1
-            or type(rollout_gpus) is not int
-            or rollout_gpus < 1
-            or type(rollout_gpus_per_engine) is not int
-            or rollout_gpus_per_engine < 1
-            or rollout_gpus % rollout_gpus_per_engine
-        ):
-            raise ValueError(
-                "Milestone-1 dense full-parameter mode requires one node and "
-                "dedicated, evenly partitioned inference engines"
-            )
-        if qwen35_recipe and (
-            rollout_gpus_per_engine != 1
-            or getattr(args, "sglang_tp_size", None) not in {None, 1}
-        ):
-            raise ValueError(
-                "pinned Qwen3.5 requires TP1 SGLang inference engines"
-            )
+    geometry = config.geometry
+    parallel = config.parallel
+    trainable = config.trainable
+    batch = config.batch
+    recipe = config.model_recipe
+    serving = config.serving
+    agent = config.agent
+    columns = config.data.columns
+    lora = trainable.parameter_mode == "lora"
+    deepseek = recipe.name == RECIPE_DEEPSEEK_V4_FLASH
+
+    if config.algorithm.advantage_estimator != "grpo":
+        raise ValueError("legacy Miles translation supports only GRPO")
+    if parallel.colocated:
+        placement_values = ["--colocate"]
+    else:
         placement_values = [
             "--rollout-num-gpus",
-            str(rollout_gpus),
+            str(parallel.dedicated_rollout_gpus),
             "--bridge-distributed-weight-sync",
             "--allow-missing-unquantized-weight-update-hooks",
             "--update-weight-transfer-mode",
@@ -966,64 +921,12 @@ def build_miles_argv(
             "--rollout-weight-version-format",
             "yeto-policy",
         ]
-        visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus
-    else:
-        placement_values = ["--colocate"]
-        visible_gpus_per_node = args.actor_num_gpus_per_node
 
-    ref_load = str(model_path)
-    configured_ref_load = getattr(args, "megatron_ref_load", None)
-    if configured_ref_load is not None:
-        configured_path = Path(configured_ref_load).expanduser()
-        if not configured_path.is_absolute():
-            raise ValueError("--megatron-ref-load must be an absolute local path")
-        if configured_path.is_symlink() or not configured_path.is_dir():
-            raise ValueError("--megatron-ref-load must be a real local directory")
-        release_marker = configured_path / "latest_checkpointed_iteration.txt"
-        try:
-            marker = release_marker.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise ValueError(
-                "--megatron-ref-load has no readable release marker"
-            ) from exc
-        if release_marker.is_symlink() or marker != "release":
-            raise ValueError("--megatron-ref-load is not a release checkpoint")
-        ref_load = str(configured_path.resolve())
-    global_batch = (
-        args.groups_per_round * args.samples_per_group // args.optimizer_steps
-    )
-    if global_batch % data_parallel:
-        raise ValueError("Miles global batch must divide evenly across DP ranks")
-    target_value = ",".join(target_modules)
-    recipe = getattr(args, "rl_model_recipe", "generic")
     model_recipe_values: list[str] = []
-    if recipe == "deepseek-v4-flash":
-        expected_lora_targets = (
-            "attention" if expert_full else "attention-routed-experts"
-        )
-        if args.lora_targets != expected_lora_targets:
-            raise ValueError(
-                "expanded DeepSeek V4 recipe requires "
-                f"{expected_lora_targets}"
-            )
-        if (
-            tensor_parallel != 8
-            or expert_parallel != 8
-            or getattr(args, "rollout_num_gpus_per_engine", 1) != 8
-        ):
-            raise ValueError(
-                "expanded DeepSeek V4 requires TP8/EP8 pipeline stages and "
-                "per-node eight-GPU rollout replicas"
-            )
-        if layers != 43 or not is_moe or not multi_latent_attention:
-            raise ValueError(
-                "DeepSeek V4 Flash recipe requires the 43-layer MoE/MLA provider"
-            )
+    if deepseek:
         model_name = "deepseekv4"
-        training_attention_backend = "flash"
-    elif qwen35_recipe:
+    elif recipe.name == RECIPE_QWEN3_5:
         model_name = "qwen3_5"
-        training_attention_backend = "flash"
         model_recipe_values = [
             "--spec",
             "miles_plugins.models.qwen3_5",
@@ -1036,98 +939,85 @@ def build_miles_argv(
             "0.0",
         ]
     else:
-        model_name = type(provider).__name__
-        training_attention_backend = "unfused"
+        model_name = recipe.provider_class
 
     lora_values: list[str] = []
-    if parameter_mode == "lora":
+    if lora:
         lora_values = [
             "--lora-rank",
-            str(args.lora_r),
+            str(trainable.lora_rank),
             "--lora-alpha",
-            str(args.lora_r),
+            str(trainable.lora_rank),
             "--lora-dropout",
             "0",
             "--lora-type",
-            (
-                "lora"
-                if args.lora_targets == "attention-routed-experts"
-                else "canonical_lora"
-            ),
+            "lora" if trainable.routed_expert_lora else "canonical_lora",
             "--target-modules",
-            target_value,
+            ",".join(trainable.target_modules),
             "--lora-base-cpu-backup",
         ]
 
     values = [
         "train.py",
         "--train-backend", "megatron",
-        "--hf-checkpoint", str(rollout_model_path or model_path),
-        "--ref-load", ref_load,
+        "--hf-checkpoint", config.hf_checkpoint,
+        "--ref-load", config.ref_load,
         "--megatron-to-hf-mode", "bridge",
         "--model-name", model_name,
         *model_recipe_values,
-        "--num-layers", str(layers),
-        "--hidden-size", str(hidden),
-        "--num-attention-heads", str(heads),
-        "--num-query-groups", str(query_groups),
-        "--kv-channels", str(kv_channels),
-        "--ffn-hidden-size", str(ffn),
-        "--max-position-embeddings", str(max_positions),
-        "--seq-length", str(args.seq_len),
-        "--normalization", normalization,
-        "--norm-epsilon", str(epsilon),
-        "--position-embedding-type", position_type,
-        "--rotary-base", str(rotary_base),
-        "--rotary-percent", str(rotary_percent),
-        "--vocab-size", str(vocab_size),
+        "--num-layers", str(geometry.num_layers),
+        "--hidden-size", str(geometry.hidden_size),
+        "--num-attention-heads", str(geometry.num_attention_heads),
+        "--num-query-groups", str(geometry.num_query_groups),
+        "--kv-channels", str(geometry.kv_channels),
+        "--ffn-hidden-size", str(geometry.ffn_hidden_size),
+        "--max-position-embeddings", str(geometry.max_position_embeddings),
+        "--seq-length", str(batch.seq_len),
+        "--normalization", geometry.normalization,
+        "--norm-epsilon", str(geometry.norm_epsilon),
+        "--position-embedding-type", geometry.position_embedding_type,
+        "--rotary-base", str(geometry.rotary_base),
+        "--rotary-percent", str(geometry.rotary_percent),
+        "--vocab-size", str(geometry.vocab_size),
         *lora_values,
-        "--actor-num-nodes", str(args.actor_num_nodes),
-        "--actor-num-gpus-per-node", str(args.actor_num_gpus_per_node),
-        "--num-gpus-per-node", str(visible_gpus_per_node),
-        "--rollout-num-gpus-per-engine",
-        str(getattr(args, "rollout_num_gpus_per_engine", 1)),
+        "--actor-num-nodes", str(parallel.actor_num_nodes),
+        "--actor-num-gpus-per-node", str(parallel.actor_num_gpus_per_node),
+        "--num-gpus-per-node", str(parallel.visible_gpus_per_node),
+        "--rollout-num-gpus-per-engine", str(parallel.rollout_num_gpus_per_engine),
         *placement_values,
-        (
-            "--offload-train"
-            if getattr(args, "rl_offload_train", False)
-            else "--no-offload-train"
-        ),
-        "--sglang-mem-fraction-static",
-        str(getattr(args, "sglang_mem_fraction_static", 0.4)),
-        "--tensor-model-parallel-size", str(tensor_parallel),
-        "--pipeline-model-parallel-size", str(pipeline_parallel),
+        "--offload-train" if serving.offload_train else "--no-offload-train",
+        "--sglang-mem-fraction-static", str(serving.mem_fraction_static),
+        "--tensor-model-parallel-size", str(parallel.tensor_parallel),
+        "--pipeline-model-parallel-size", str(parallel.pipeline_parallel),
         "--context-parallel-size", "1",
-        "--expert-model-parallel-size", str(expert_parallel),
+        "--expert-model-parallel-size", str(parallel.expert_parallel),
         "--expert-tensor-parallel-size", "1",
-        "--prompt-data", str(prompt_path),
-        "--input-key", "messages",
-        "--label-key", "label",
-        "--metadata-key", "metadata",
-        "--rollout-seed",
-        str(getattr(args, "rollout_seed", args.seed + args.learner_id)),
-        "--num-rollout",
-        str(0 if getattr(args, "eval_only", False) else args.global_rounds),
-        "--rollout-batch-size", str(args.groups_per_round),
-        "--n-samples-per-prompt", str(args.samples_per_group),
-        "--over-sampling-batch-size", str(args.over_sampling_batch_size),
-        "--num-steps-per-rollout", str(args.optimizer_steps),
-        "--global-batch-size", str(global_batch),
+        "--prompt-data", config.data.prompt_path,
+        "--input-key", columns.input_key,
+        "--label-key", columns.label_key,
+        "--metadata-key", columns.metadata_key,
+        "--rollout-seed", str(config.algorithm.rollout_seed),
+        "--num-rollout", str(0 if batch.eval_only else batch.global_rounds),
+        "--rollout-batch-size", str(batch.groups_per_round),
+        "--n-samples-per-prompt", str(batch.samples_per_group),
+        "--over-sampling-batch-size", str(batch.over_sampling_batch_size),
+        "--num-steps-per-rollout", str(batch.optimizer_steps),
+        "--global-batch-size", str(batch.global_batch),
         "--balance-data",
-        "--rollout-max-context-len", str(args.seq_len),
-        "--rollout-max-response-len", str(args.rollout_max_response_len),
+        "--rollout-max-context-len", str(batch.seq_len),
+        "--rollout-max-response-len", str(batch.rollout_max_response_len),
         "--rollout-function-path",
         (
             "yeto.rl.miles.generate_rollout"
-            if yeto_policy_sync
+            if config.yeto_policy_sync
             else "miles.rollout.sglang_rollout.generate_rollout"
         ),
-        "--custom-rm-path", _miles_callable(args.reward_function),
+        "--custom-rm-path", _miles_callable(config.algorithm.reward_function),
         "--advantage-estimator", "grpo",
-        "--lr", str(args.inner_lr),
+        "--lr", str(config.algorithm.lr),
         "--accumulate-allreduce-grads-in-fp32",
         "--attention-softmax-in-fp32",
-        "--attention-backend", training_attention_backend,
+        "--attention-backend", recipe.training_attention_backend,
         "--no-gradient-accumulation-fusion",
         "--bf16",
         "--no-load-optim",
@@ -1135,131 +1025,74 @@ def build_miles_argv(
         "--no-save-optim",
         "--no-save-rng",
         "--finetune",
-        "--seed", str(args.seed),
+        "--seed", str(config.algorithm.seed),
         "--pin-rollout-manager-to-head",
     ]
-    if parameter_mode == "lora":
-        values.extend(("--sglang-max-lora-rank", str(args.lora_r)))
-    eval_interval = getattr(args, "eval_interval", None)
-    if eval_interval is not None:
-        if not yeto_policy_sync:
-            raise ValueError("Yeto evaluation requires the external policy boundary")
-        if eval_interval <= 0:
-            raise ValueError("evaluation interval must be positive")
-        eval_only = getattr(args, "eval_only", False)
-        dense_train_eval = (
-            not eval_only
-            and parameter_mode == "full"
-            and getattr(args, "sync_preset", None) == "dense-full"
-        )
-        if eval_only:
-            if eval_interval != 1:
-                raise ValueError("SSH evaluation must be one separate eval-only run")
-            selected_eval_prompt_path = prompt_path
-        elif dense_train_eval:
-            if eval_interval != args.global_rounds + 1:
-                raise ValueError(
-                    "dense full evaluation interval must remain outside the "
-                    "training-round budget"
-                )
-            if eval_prompt_path is None:
-                raise ValueError("dense full evaluation requires heldout prompt data")
-            selected_eval_prompt_path = eval_prompt_path
-        else:
-            raise ValueError("training-time evaluation is restricted to dense full mode")
-        eval_name = getattr(args, "eval_dataset_name", None)
-        eval_samples = getattr(args, "eval_samples_per_prompt", None)
-        if not eval_name or not isinstance(eval_samples, int) or eval_samples <= 0:
-            raise ValueError(
-                "evaluation requires a dataset name and positive sample count"
-            )
-        # Eval-only reuses its sole normalized prompt file.  Dense training
-        # instead binds a separately normalized, immutable heldout split.  Its
-        # interval sits beyond the rollout budget because the dense policy hook
-        # evaluates only the exact initial and terminal published policies.
+    if lora:
+        values.extend(("--sglang-max-lora-rank", str(trainable.lora_rank)))
+    evaluation = config.eval
+    if evaluation is not None:
         values.extend(
             (
                 "--eval-function-path",
                 "yeto.rl.miles.generate_rollout",
                 "--eval-prompt-data",
-                str(eval_name),
-                str(selected_eval_prompt_path),
+                evaluation.dataset_name,
+                evaluation.prompt_path,
                 "--eval-interval",
-                str(eval_interval),
+                str(evaluation.interval),
                 "--skip-eval-before-train",
                 "--n-samples-per-eval-prompt",
-                str(eval_samples),
+                str(evaluation.samples_per_prompt),
                 "--log-passrate",
             )
         )
-        for flag, name in (
-            ("--eval-temperature", "eval_temperature"),
-            ("--eval-top-p", "eval_top_p"),
-            ("--eval-max-prompt-len", "eval_max_prompt_len"),
-            ("--eval-max-response-len", "eval_max_response_len"),
-            ("--eval-max-context-len", "eval_max_context_len"),
+        for flag, value in (
+            ("--eval-temperature", evaluation.temperature),
+            ("--eval-top-p", evaluation.top_p),
+            ("--eval-max-prompt-len", evaluation.max_prompt_len),
+            ("--eval-max-response-len", evaluation.max_response_len),
+            ("--eval-max-context-len", evaluation.max_context_len),
         ):
-            value = getattr(args, name, None)
             if value is not None:
                 values.extend((flag, str(value)))
-    if expert_full:
+    if trainable.expert_full:
         values.extend(
             (
-                "--optimizer",
-                "adam",
-                "--adam-beta1",
-                "0.9",
-                "--adam-beta2",
-                "0.98",
-                "--adam-eps",
-                str(1e-8),
-                "--weight-decay",
-                "0",
-                "--clip-grad",
-                "1.0",
-                "--kl-coef",
-                "0.001",
+                "--optimizer", "adam",
+                "--adam-beta1", "0.9",
+                "--adam-beta2", "0.98",
+                "--adam-eps", str(1e-8),
+                "--weight-decay", "0",
+                "--clip-grad", "1.0",
+                "--kl-coef", "0.001",
             )
         )
-    if getattr(args, "sglang_deterministic_inference", True):
+    if serving.deterministic_inference:
         values.append("--sglang-enable-deterministic-inference")
-    if recipe == "deepseek-v4-flash":
+    if deepseek:
         values.extend(
             (
-                "--transformer-impl",
-                "transformer_engine",
-                "--qkv-format",
-                "bshd",
-                "--recompute-granularity",
-                "full",
-                "--recompute-method",
-                "uniform",
-                "--recompute-num-layers",
-                "1",
-                "--micro-batch-size",
-                "1",
-                "--train-memory-margin-bytes",
-                str(3 * 1024**3),
-                "--moe-token-dispatcher-type",
-                "alltoall",
+                "--transformer-impl", "transformer_engine",
+                "--qkv-format", "bshd",
+                "--recompute-granularity", "full",
+                "--recompute-method", "uniform",
+                "--recompute-num-layers", "1",
+                "--micro-batch-size", "1",
+                "--train-memory-margin-bytes", str(3 * 1024**3),
+                "--moe-token-dispatcher-type", "alltoall",
                 "--moe-router-freeze-gate",
                 "--freeze-e-score-correction-bias",
-                "--attention-dropout",
-                "0.0",
-                "--hidden-dropout",
-                "0.0",
-                "--sglang-moe-runner-backend",
-                "triton",
+                "--attention-dropout", "0.0",
+                "--hidden-dropout", "0.0",
+                "--sglang-moe-runner-backend", "triton",
                 "--sglang-disable-shared-experts-fusion",
             )
         )
-        if args.lora_targets == "attention-routed-experts":
+        if trainable.routed_expert_lora:
             values.append("--no-sglang-lora-use-virtual-experts")
-    if pipeline_parallel > 1 and layers % pipeline_parallel:
-        middle_layers = layers // pipeline_parallel
-        remainder = layers - middle_layers * pipeline_parallel
-        first_layers = middle_layers + (remainder + 1) // 2
-        last_layers = middle_layers + remainder // 2
+    if parallel.uneven_pipeline_layers is not None:
+        first_layers, last_layers = parallel.uneven_pipeline_layers
         values.extend(
             (
                 "--decoder-first-pipeline-num-layers",
@@ -1268,32 +1101,29 @@ def build_miles_argv(
                 str(last_layers),
             )
         )
-    # Agentic session generation must receive the original message list.  A
-    # pre-render here would be rendered again by the session server and breaks
-    # both tool-role validation and TITO token identity.
-    if not getattr(args, "custom_agent_function_path", None):
+    if config.data.apply_chat_template:
         values.append("--apply-chat-template")
-    if tensor_parallel > 1:
+    if parallel.tensor_parallel > 1:
         values.append("--sequence-parallel")
     values.extend(
-        (
-            "--distributed-timeout-minutes",
-            str(getattr(args, "rl_distributed_timeout_minutes", 10)),
-        )
+        ("--distributed-timeout-minutes", str(config.distributed_timeout_minutes))
     )
-    chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None)
-    if chat_template_kwargs:
+    if config.data.chat_template_kwargs:
         values.extend(
             (
                 "--apply-chat-template-kwargs",
-                json.dumps(chat_template_kwargs, sort_keys=True, separators=(",", ":")),
+                json.dumps(
+                    config.data.chat_template_kwargs,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             )
         )
-    if yeto_policy_sync:
+    if config.yeto_policy_sync:
         policy_sync_path = (
             "yeto.rl.miles_full_parameter_dense."
             "create_miles_full_parameter_dense_sync"
-            if parameter_mode == "full"
+            if trainable.parameter_mode == "full"
             else "yeto.rl.miles.create_policy_sync"
         )
         values.extend(
@@ -1304,157 +1134,104 @@ def build_miles_argv(
                 policy_sync_path,
             )
         )
-    for flag, name in (
-        ("--rollout-engine-base-port", "rollout_engine_base_port"),
-        ("--sglang-router-port", "sglang_router_port"),
-        ("--sglang-router-prometheus-port", "sglang_router_prometheus_port"),
-        ("--train-master-base-port", "train_master_base_port"),
+    ports = config.ports
+    for flag, value in (
+        ("--rollout-engine-base-port", ports.rollout_engine_base_port),
+        ("--sglang-router-port", ports.sglang_router_port),
+        ("--sglang-router-prometheus-port", ports.sglang_router_prometheus_port),
+        ("--train-master-base-port", ports.train_master_base_port),
+        ("--sglang-tp-size", serving.tp_size),
+        ("--sglang-dp-size", serving.dp_size),
+        ("--sglang-ep-size", serving.ep_size),
+        ("--sglang-attention-backend", serving.attention_backend),
+        ("--sglang-page-size", serving.page_size),
+        ("--sglang-max-running-requests", serving.max_running_requests),
+        ("--sglang-chunked-prefill-size", serving.chunked_prefill_size),
     ):
-        value = getattr(args, name, None)
         if value is not None:
             values.extend((flag, str(value)))
-    for flag, name in (
-        ("--sglang-tp-size", "sglang_tp_size"),
-        ("--sglang-dp-size", "sglang_dp_size"),
-        ("--sglang-ep-size", "sglang_ep_size"),
-        ("--sglang-attention-backend", "sglang_attention_backend"),
-        ("--sglang-page-size", "sglang_page_size"),
-        ("--sglang-max-running-requests", "sglang_max_running_requests"),
-        ("--sglang-chunked-prefill-size", "sglang_chunked_prefill_size"),
-    ):
-        value = getattr(args, name, None)
-        if value is not None:
-            values.extend((flag, str(value)))
-    if getattr(args, "use_rollout_routing_replay", False):
+    if agent.use_rollout_routing_replay:
         values.append("--use-rollout-routing-replay")
-    if args.custom_generate_function_path:
+    if agent.custom_generate_function_path:
         values.extend(
-            (
-                "--custom-generate-function-path",
-                args.custom_generate_function_path,
-            )
+            ("--custom-generate-function-path", agent.custom_generate_function_path)
         )
-    if getattr(args, "custom_agent_function_path", None):
-        agent_max_seq_len = getattr(args, "agent_max_seq_len", None) or args.seq_len
-        if eval_interval is not None and getattr(
-            args, "eval_max_context_len", None
-        ) is not None:
-            agent_max_seq_len = args.eval_max_context_len
+    if agent.custom_agent_function_path:
         values.extend(
             (
                 "--custom-agent-function-path",
-                args.custom_agent_function_path,
+                agent.custom_agent_function_path,
                 "--max-seq-len",
-                str(agent_max_seq_len),
+                str(agent.agent_max_seq_len),
             )
         )
-    dynamic_filter = getattr(args, "dynamic_sampling_filter_path", None)
-    if dynamic_filter:
+    if agent.dynamic_sampling_filter_path:
         values.extend(
-            (
-                "--dynamic-sampling-filter-path",
-                dynamic_filter,
-            )
+            ("--dynamic-sampling-filter-path", agent.dynamic_sampling_filter_path)
         )
-    if args.use_session_server:
+    if agent.use_session_server:
         values.append("--use-session-server")
-        if args.session_server_ip:
-            values.extend(("--session-server-ip", args.session_server_ip))
-        if args.session_server_port:
+        if agent.session_server_ip:
+            values.extend(("--session-server-ip", agent.session_server_ip))
+        if agent.session_server_port:
             values.append("--session-server-port")
-            values.extend(str(port) for port in args.session_server_port)
-        if args.tito_model:
+            values.extend(str(port) for port in agent.session_server_port)
+        if agent.tito_model:
             from miles.utils.chat_template_utils import (
                 resolve_reasoning_and_tool_call_parser,
             )
 
-            values.extend(("--tito-model", args.tito_model))
+            values.extend(("--tito-model", agent.tito_model))
             reasoning_parser, tool_call_parser = (
-                resolve_reasoning_and_tool_call_parser(args.tito_model)
+                resolve_reasoning_and_tool_call_parser(agent.tito_model)
             )
             if reasoning_parser is not None:
-                values.extend(
-                    ("--sglang-reasoning-parser", reasoning_parser)
-                )
+                values.extend(("--sglang-reasoning-parser", reasoning_parser))
             if tool_call_parser is not None:
-                values.extend(
-                    ("--sglang-tool-call-parser", tool_call_parser)
-                )
-        if getattr(args, "tito_allowed_append_roles", None):
+                values.extend(("--sglang-tool-call-parser", tool_call_parser))
+        if agent.tito_allowed_append_roles:
             values.append("--tito-allowed-append-roles")
-            values.extend(args.tito_allowed_append_roles)
-    # Megatron rejects GQA together with MLA.  MLA's compressed KV geometry is
-    # expressed by its own rank/head arguments even when the provider exposes
-    # fewer query groups than attention heads.
-    if query_groups < heads and not multi_latent_attention:
+            values.extend(agent.tito_allowed_append_roles)
+    if geometry.group_query_attention:
         values.append("--group-query-attention")
-    if rope_type is not None:
-        values.extend(("--rope-type", rope_type))
-    if position_type == "mrope":
-        section = _provider_value(provider, "mrope_section")
+    if geometry.rope_type is not None:
+        values.extend(("--rope-type", geometry.rope_type))
+    if geometry.mrope_section is not None:
         values.append("--mrope-section")
-        values.extend(str(int(value)) for value in section)
-    if bool(getattr(provider, "gated_linear_unit", False)):
+        values.extend(str(value) for value in geometry.mrope_section)
+    if geometry.gated_linear_unit:
         values.append("--swiglu")
-    if not bool(getattr(provider, "share_embeddings_and_output_weights", True)):
+    if geometry.untie_embeddings_and_output_weights:
         values.append("--untie-embeddings-and-output-weights")
-    if getattr(provider, "add_bias_linear", None) is False:
+    if geometry.disable_bias_linear:
         values.append("--disable-bias-linear")
-    if bool(getattr(provider, "add_qkv_bias", False)):
+    if geometry.add_qkv_bias:
         values.append("--add-qkv-bias")
-    if bool(getattr(provider, "qk_layernorm", False)):
+    if geometry.qk_layernorm:
         values.append("--qk-layernorm")
-    if (
-        _text(getattr(provider, "experimental_attention_variant", None))
-        == "gated_delta_net"
-    ):
-        values.extend(("--qkv-format", "bshd"))
-    if getattr(provider, "num_moe_experts", None) is not None:
-        moe_layer_freq = _provider_value(provider, "moe_layer_freq")
-        if recipe == "deepseek-v4-flash":
-            if isinstance(moe_layer_freq, (list, tuple)):
-                mask = tuple(int(value) for value in moe_layer_freq)
-                if len(mask) != layers or set(mask) != {1}:
-                    raise ValueError(
-                        "DeepSeek V4 Flash requires every one of its 43 layers "
-                        "to be an MoE layer"
-                    )
-            elif int(moe_layer_freq) != 1:
-                raise ValueError(
-                    "DeepSeek V4 Flash requires moe_layer_freq=1"
-                )
-            # Pinned Miles' moe_freq_type parser accepts the uniform topology
-            # as a scalar, not the provider's Python list string.
-            moe_layer_freq = 1
+    if recipe.gdn.gated_delta_net:
+        values.extend(("--qkv-format", recipe.gdn.qkv_format))
+    moe = geometry.moe
+    if moe is not None:
         values.extend(
             (
-                "--num-experts",
-                str(_positive_int(provider, "num_moe_experts")),
-                "--moe-ffn-hidden-size",
-                str(_positive_int(provider, "moe_ffn_hidden_size")),
-                "--moe-router-topk",
-                str(_positive_int(provider, "moe_router_topk")),
-                "--moe-layer-freq",
-                str(moe_layer_freq),
+                "--num-experts", str(moe.num_experts),
+                "--moe-ffn-hidden-size", str(moe.ffn_hidden_size),
+                "--moe-router-topk", str(moe.router_topk),
+                "--moe-layer-freq", str(moe.layer_freq),
             )
         )
-        shared = getattr(provider, "moe_shared_expert_intermediate_size", None)
-        if shared is not None:
+        if moe.shared_expert_intermediate_size is not None:
             values.extend(
-                ("--moe-shared-expert-intermediate-size", str(int(shared)))
+                (
+                    "--moe-shared-expert-intermediate-size",
+                    str(moe.shared_expert_intermediate_size),
+                )
             )
-    if multi_latent_attention:
+    if geometry.multi_latent_attention:
         values.append("--multi-latent-attention")
-        for name in (
-            "q_lora_rank",
-            "kv_lora_rank",
-            "qk_head_dim",
-            "qk_pos_emb_head_dim",
-            "v_head_dim",
-        ):
-            value = getattr(provider, name, None)
-            if value is not None:
-                values.extend((f"--{name.replace('_', '-')}", str(int(value))))
+        for name, value in geometry.mla_dims:
+            values.extend((f"--{name.replace('_', '-')}", str(value)))
     return values
 
 
@@ -1632,6 +1409,31 @@ def _syncer_address(value: str) -> tuple[str, int]:
 EXTERNAL_ROUTER_ENV = "YETO_RL_EXTERNAL_ROUTER"
 
 
+def require_ports_router_mode(miles_args, environ=None) -> None:
+    """Ports path: upstream Miles owns the SGLang router.
+
+    Upstream launches the router as an ``inference-router`` Ray worker with
+    a 120 s readiness budget (the legacy 30 s deadline that
+    ``start_external_sglang_router`` works around is gone), and it removed
+    external router mode: a pre-set ``sglang_router_ip`` without its
+    per-model router map is an assertion failure.  So ``YETO_RL_EXTERNAL_ROUTER``
+    is a no-op here, and a pre-set router address is refused before launch.
+    """
+
+    environ = os.environ if environ is None else environ
+    if getattr(miles_args, "sglang_router_ip", None) is not None:
+        raise ValueError(
+            "--rl-engine ports does not support an external SGLang router "
+            "(--sglang-router-ip); upstream Miles launches its own router"
+        )
+    if environ.get(EXTERNAL_ROUTER_ENV) == "1":
+        print(
+            f"[rl] {EXTERNAL_ROUTER_ENV}=1 ignored on --rl-engine ports: "
+            "upstream Miles launches the SGLang router as a Ray worker",
+            flush=True,
+        )
+
+
 def start_external_sglang_router(
     miles_args,
     *,
@@ -1705,6 +1507,14 @@ def run_miles(
 ) -> None:
     """Run one Miles job, optionally with Yeto's external policy boundary."""
 
+    rl_engine = getattr(args, "rl_engine", "ports")
+    if rl_engine not in ("legacy", "ports"):
+        raise ValueError(f"unknown rl_engine {rl_engine!r}")
+    if rl_engine == "ports":
+        _require_ports_supported(args, extra_argv)
+        from .engine.miles_adapter.state import require_run_plugin
+
+        require_run_plugin()
     parameter_mode = getattr(args, "parameter_mode", "lora")
     sync_preset = getattr(args, "sync_preset", "strict-avg")
     dense_full = parameter_mode == "full" or sync_preset == "dense-full"
@@ -1852,18 +1662,46 @@ def run_miles(
         standard_grouped_experts=clone_only_lora,
         pipeline_parallel=getattr(args, "pipeline_parallel", 1),
     )
-    miles_argv = build_miles_argv(
-        args,
-        model_path=model_path,
-        rollout_model_path=rollout_model_path,
-        prompt_path=prompt_path,
-        eval_prompt_path=eval_prompt_path,
-        provider=provider,
-        target_modules=miles_targets,
-        yeto_policy_sync=yeto_policy_sync,
-    )
-    miles_argv.extend(extra_argv)
-    miles_args = _parse_miles_args(miles_argv)
+    ports_launch = ports_algorithm = None
+    if rl_engine == "ports":
+        # Same engine-agnostic RLRunConfig as legacy; only the translation
+        # differs (design D8).
+        from .engine.algorithm import AlgorithmSpec
+        from .engine.miles_adapter.config import parse_miles_args, translate_run_config
+        from .engine.run_config import resolve_rl_run_config
+
+        run_config = resolve_rl_run_config(
+            args,
+            model_path=model_path,
+            rollout_model_path=rollout_model_path,
+            prompt_path=prompt_path,
+            eval_prompt_path=eval_prompt_path,
+            provider=provider,
+            # Upstream Miles resolves HF module names itself (canonical_lora
+            # via Bridge); the fork's per-layer Megatron names have no Bridge
+            # mapping upstream.
+            target_modules=canonical_targets,
+            yeto_policy_sync=yeto_policy_sync,
+        )
+        ports_algorithm = AlgorithmSpec.from_legacy_args(args)
+        ports_launch = translate_run_config(
+            run_config, ports_algorithm, extra_argv=tuple(extra_argv)
+        )
+        miles_argv = list(ports_launch.argv)
+        miles_args = parse_miles_args(ports_launch)
+    else:
+        miles_argv = build_miles_argv(
+            args,
+            model_path=model_path,
+            rollout_model_path=rollout_model_path,
+            prompt_path=prompt_path,
+            eval_prompt_path=eval_prompt_path,
+            provider=provider,
+            target_modules=miles_targets,
+            yeto_policy_sync=yeto_policy_sync,
+        )
+        miles_argv.extend(extra_argv)
+        miles_args = _parse_miles_args(miles_argv)
 
     if yeto_policy_sync:
         if dense_full:
@@ -2092,13 +1930,91 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
             )
 
-    if os.environ.get(EXTERNAL_ROUTER_ENV) == "1":
+    _configure_grad_audit(args, miles_args, rl_engine)
+
+    if rl_engine == "ports":
+        require_ports_router_mode(miles_args)
+    elif os.environ.get(EXTERNAL_ROUTER_ENV) == "1":
         start_external_sglang_router(miles_args)
+
+    if rl_engine == "ports":
+        _run_ports(
+            args,
+            miles_args,
+            ports_launch,
+            ports_algorithm,
+            specs=specs,
+            canonical_targets=canonical_targets,
+            yeto_policy_sync=yeto_policy_sync,
+        )
+        print(f"[rl] learner {args.learner_id} finalized (rl_engine=ports)")
+        return
 
     from train import train as miles_train
 
     asyncio.run(miles_train(miles_args))
     print(f"[rl] learner {args.learner_id} finalized")
+
+
+def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
+    """``YETO_RL_AUDIT_GRADS=1`` (teacher forcing, design D12): export pre-clip LoRA grads.
+
+    Both engines write next to the round audit (``args.audit_dir``). Ports arms
+    the capture from its ``train_one_step`` recorder; legacy through Miles'
+    before-train-step hook, which the fork already calls (fork code untouched).
+    """
+
+    from . import grad_audit
+
+    if not grad_audit.enabled():
+        return False
+    directory = getattr(args, "audit_dir", None)
+    if not directory:
+        raise ValueError(f"{grad_audit.GRAD_AUDIT_ENV}=1 requires an audit_dir")
+    setattr(miles_args, grad_audit.GRAD_AUDIT_DIR_ATTR, str(Path(directory).expanduser()))
+    if rl_engine != "ports":
+        existing = getattr(miles_args, "custom_megatron_before_train_step_hook_path", None)
+        if existing and existing != grad_audit.HOOK_PATH:
+            raise ValueError(
+                f"{grad_audit.GRAD_AUDIT_ENV}=1 conflicts with before-train-step hook {existing!r}"
+            )
+        miles_args.custom_megatron_before_train_step_hook_path = grad_audit.HOOK_PATH
+    return True
+
+
+def _run_ports(
+    args,
+    miles_args,
+    launch,
+    algorithm,
+    *,
+    specs,
+    canonical_targets,
+    yeto_policy_sync: bool,
+) -> None:
+    """Ports path: yeto's IslandDriver over upstream Miles (design D2)."""
+
+    from .core import canonical_layout_hash, canonical_lora_config_hash
+    from .engine.miles_adapter.entry import run_ports_island
+
+    layout_hash = canonical_layout_hash(specs)
+    lora_config_hash = canonical_lora_config_hash(
+        rank=args.lora_r, target_modules=canonical_targets
+    )
+    # The event tape and island identity are needed even without outer sync.
+    miles_args.yeto_rl_event_tape = args.event_tape
+    miles_args.yeto_rl_learner_id = args.learner_id
+    miles_args.yeto_rl_engine = "ports"
+    run_ports_island(
+        miles_args,
+        launch,
+        algorithm,
+        learner_id=args.learner_id,
+        base_model_revision=args.model_revision,
+        lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash,
+        yeto_policy_sync=yeto_policy_sync,
+    )
 
 
 def main(argv=None) -> None:
@@ -2126,14 +2042,19 @@ def main(argv=None) -> None:
     miles_root = str(Path(args.miles_root).expanduser().resolve())
     if miles_root not in sys.path:
         sys.path.insert(0, miles_root)
-    verify_miles_revision(
-        miles_root,
-        expected_source_sha256=(
-            args.miles_source_sha256
-            if args.parameter_mode == "full"
-            else None
-        ),
-    )
+    if getattr(args, "rl_engine", "ports") == "ports":
+        from . import MILES_NEXT_PINS
+
+        verify_miles_revision(miles_root, expected=MILES_NEXT_PINS)
+    else:
+        verify_miles_revision(
+            miles_root,
+            expected_source_sha256=(
+                args.miles_source_sha256
+                if args.parameter_mode == "full"
+                else None
+            ),
+        )
     _preflight_codex_harness(args)
 
     from miles.utils.misc import load_function

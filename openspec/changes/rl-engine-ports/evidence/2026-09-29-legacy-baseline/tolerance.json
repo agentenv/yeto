@@ -1,0 +1,233 @@
+{
+  "meta": {
+    "mode": "real (legacy side only)",
+    "fake": false,
+    "created_unix": 1790655641.845219,
+    "config": "benchmark_rl.py federated/strict-avg, Qwen/Qwen3-0.6B@c1899de, GSM8K (/work/data/gsm8k.jsonl, train/eval manifests == ports strict2 run), 2 islands x 1 H100, 3 global rounds, 4 groups x 8 samples, LoRA r16 all-linear, seed 17, --rl-engine legacy",
+    "legacy_repeats": 3,
+    "tolerance_factor": 2.0,
+    "tolerance_floor": 1e-06
+  },
+  "tolerance": {
+    "reward_mean": {
+      "kind": "abs",
+      "noise_spread": 0.0,
+      "tolerance": 1e-06
+    },
+    "loss": {
+      "kind": "abs",
+      "noise_spread": 0.0,
+      "tolerance": 1e-06
+    },
+    "grad_norm": {
+      "kind": "abs",
+      "noise_spread": 0.0,
+      "tolerance": 1e-06
+    },
+    "completed_groups": {
+      "kind": "exact"
+    },
+    "action_tokens": {
+      "kind": "exact"
+    },
+    "post_sync_hash": {
+      "kind": "exact"
+    }
+  },
+  "legacy_repeats": {
+    "legacy-0": {
+      "0/1": {
+        "reward_mean": 0.8125,
+        "loss": 1.210719347000122e-08,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 5227,
+        "post_sync_hash": "c6e252269a4df367e1a7b8a0f90339e99c4b9dc2468c8c932223b951b397b414"
+      },
+      "0/2": {
+        "reward_mean": 0.25,
+        "loss": -3.725290298461914e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 9325,
+        "post_sync_hash": "3a7fa6b5831539b46532f5517828a202a10b2bd12fc1e0ebb8f7a6731e8bdbba"
+      },
+      "0/3": {
+        "reward_mean": 0.3125,
+        "loss": -2.9802322387695312e-08,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 7898,
+        "post_sync_hash": "b473f51a351f5efb09e4e86afe4ea41702ee093a4131023215078c7bda17ff97"
+      },
+      "1/1": {
+        "reward_mean": 0.4375,
+        "loss": -1.862645149230957e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 6145,
+        "post_sync_hash": "c6e252269a4df367e1a7b8a0f90339e99c4b9dc2468c8c932223b951b397b414"
+      },
+      "1/2": {
+        "reward_mean": 0.5625,
+        "loss": -2.7939677238464355e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 8053,
+        "post_sync_hash": "3a7fa6b5831539b46532f5517828a202a10b2bd12fc1e0ebb8f7a6731e8bdbba"
+      },
+      "1/3": {
+        "reward_mean": 0.78125,
+        "loss": -7.450580596923828e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 8262,
+        "post_sync_hash": "b473f51a351f5efb09e4e86afe4ea41702ee093a4131023215078c7bda17ff97"
+      }
+    },
+    "legacy-1": {
+      "0/1": {
+        "reward_mean": 0.8125,
+        "loss": 1.210719347000122e-08,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 5227,
+        "post_sync_hash": "c6e252269a4df367e1a7b8a0f90339e99c4b9dc2468c8c932223b951b397b414"
+      },
+      "0/2": {
+        "reward_mean": 0.25,
+        "loss": -3.725290298461914e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 9325,
+        "post_sync_hash": "3a7fa6b5831539b46532f5517828a202a10b2bd12fc1e0ebb8f7a6731e8bdbba"
+      },
+      "0/3": {
+        "reward_mean": 0.3125,
+        "loss": -2.9802322387695312e-08,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 7898,
+        "post_sync_hash": "b473f51a351f5efb09e4e86afe4ea41702ee093a4131023215078c7bda17ff97"
+      },
+      "1/1": {
+        "reward_mean": 0.4375,
+        "loss": -1.862645149230957e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 6145,
+        "post_sync_hash": "c6e252269a4df367e1a7b8a0f90339e99c4b9dc2468c8c932223b951b397b414"
+      },
+      "1/2": {
+        "reward_mean": 0.5625,
+        "loss": -2.7939677238464355e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 8053,
+        "post_sync_hash": "3a7fa6b5831539b46532f5517828a202a10b2bd12fc1e0ebb8f7a6731e8bdbba"
+      },
+      "1/3": {
+        "reward_mean": 0.78125,
+        "loss": -7.450580596923828e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 8262,
+        "post_sync_hash": "b473f51a351f5efb09e4e86afe4ea41702ee093a4131023215078c7bda17ff97"
+      }
+    },
+    "legacy-2": {
+      "0/1": {
+        "reward_mean": 0.8125,
+        "loss": 1.210719347000122e-08,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 5227,
+        "post_sync_hash": "c6e252269a4df367e1a7b8a0f90339e99c4b9dc2468c8c932223b951b397b414"
+      },
+      "0/2": {
+        "reward_mean": 0.25,
+        "loss": -3.725290298461914e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 9325,
+        "post_sync_hash": "3a7fa6b5831539b46532f5517828a202a10b2bd12fc1e0ebb8f7a6731e8bdbba"
+      },
+      "0/3": {
+        "reward_mean": 0.3125,
+        "loss": -2.9802322387695312e-08,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 7898,
+        "post_sync_hash": "b473f51a351f5efb09e4e86afe4ea41702ee093a4131023215078c7bda17ff97"
+      },
+      "1/1": {
+        "reward_mean": 0.4375,
+        "loss": -1.862645149230957e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 6145,
+        "post_sync_hash": "c6e252269a4df367e1a7b8a0f90339e99c4b9dc2468c8c932223b951b397b414"
+      },
+      "1/2": {
+        "reward_mean": 0.5625,
+        "loss": -2.7939677238464355e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 8053,
+        "post_sync_hash": "3a7fa6b5831539b46532f5517828a202a10b2bd12fc1e0ebb8f7a6731e8bdbba"
+      },
+      "1/3": {
+        "reward_mean": 0.78125,
+        "loss": -7.450580596923828e-09,
+        "grad_norm": 0.0,
+        "completed_groups": 4,
+        "action_tokens": 8262,
+        "post_sync_hash": "b473f51a351f5efb09e4e86afe4ea41702ee093a4131023215078c7bda17ff97"
+      }
+    }
+  },
+  "filled_from_miles_log": {
+    "legacy-0": {
+      "0/1/loss": "miles.log",
+      "0/1/grad_norm": "miles.log",
+      "0/2/loss": "miles.log",
+      "0/2/grad_norm": "miles.log",
+      "0/3/loss": "miles.log",
+      "0/3/grad_norm": "miles.log",
+      "1/1/loss": "miles.log",
+      "1/1/grad_norm": "miles.log",
+      "1/2/loss": "miles.log",
+      "1/2/grad_norm": "miles.log",
+      "1/3/loss": "miles.log",
+      "1/3/grad_norm": "miles.log"
+    },
+    "legacy-1": {
+      "0/1/loss": "miles.log",
+      "0/1/grad_norm": "miles.log",
+      "0/2/loss": "miles.log",
+      "0/2/grad_norm": "miles.log",
+      "0/3/loss": "miles.log",
+      "0/3/grad_norm": "miles.log",
+      "1/1/loss": "miles.log",
+      "1/1/grad_norm": "miles.log",
+      "1/2/loss": "miles.log",
+      "1/2/grad_norm": "miles.log",
+      "1/3/loss": "miles.log",
+      "1/3/grad_norm": "miles.log"
+    },
+    "legacy-2": {
+      "0/1/loss": "miles.log",
+      "0/1/grad_norm": "miles.log",
+      "0/2/loss": "miles.log",
+      "0/2/grad_norm": "miles.log",
+      "0/3/loss": "miles.log",
+      "0/3/grad_norm": "miles.log",
+      "1/1/loss": "miles.log",
+      "1/1/grad_norm": "miles.log",
+      "1/2/loss": "miles.log",
+      "1/2/grad_norm": "miles.log",
+      "1/3/loss": "miles.log",
+      "1/3/grad_norm": "miles.log"
+    }
+  }
+}

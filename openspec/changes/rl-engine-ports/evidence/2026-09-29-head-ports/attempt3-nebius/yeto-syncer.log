@@ -1,0 +1,2 @@
+2026-09-29T06:32:29.943232Z  INFO yeto_syncer::server: syncer listening port=29400 semantic_profile_sha256="0f1dd003fd8d40cae8ef7d8f2e253b2f58a00806038150774069d84926a804a9" require_profile_binding=false
+2026-09-29T06:32:29.943267Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2

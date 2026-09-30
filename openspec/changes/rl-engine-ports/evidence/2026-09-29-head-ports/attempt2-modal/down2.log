@@ -1,0 +1,9 @@
+[yeto] yeto-hp929b-head: not cloud-verifiable here; trusting sky
+[launcher] sky.down(yeto-hp929b-head) error: Cluster 'yeto-hp929b-head' does not exist.
+[yeto] worker is not running
+[yeto] tearing down 3 cluster(s): yeto-hp929b-head, yeto-hp929b-l0-modal, yeto-hp929b-l1-modal
+[yeto] Modal app yeto-yeto-hp929b: already stopped
+[yeto] yeto-hp929b-l0-modal: stopped with the Modal app (Modal app yeto-yeto-hp929b: stopped, 0 tasks)
+[yeto] yeto-hp929b-l1-modal: stopped with the Modal app (Modal app yeto-yeto-hp929b: stopped, 0 tasks)
+[yeto] yeto-hp929b-head: down
+[yeto] run 'yeto-hp929b' is down

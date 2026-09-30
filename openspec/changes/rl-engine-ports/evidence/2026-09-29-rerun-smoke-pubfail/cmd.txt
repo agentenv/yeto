@@ -1,0 +1,1 @@
+python /work/harness/smoke.py pubfail /work/out/smoke-pubfail

@@ -1,0 +1,12 @@
+{
+  "pass_at_k": {
+    "1": 0.75
+  },
+  "prompts": 8,
+  "response_tokens": 1806,
+  "reward_mean": 0.75,
+  "reward_std": 0.4629100498862757,
+  "samples": 8,
+  "truncated_samples": 1,
+  "wall_s": 107.68487649200006
+}

@@ -2993,6 +2993,11 @@ def _exec_island(args: argparse.Namespace) -> None:
 
     original_parse_args = learner.parse_args
     learner_argv = argv[3:]
+    if "--rl-engine" not in learner_argv:
+        # Dense-full is legacy-only and the learner now defaults to ports.
+        # Injected at launch (not in the manifest argv) so existing manifest
+        # hashes and argv attestation stay unchanged.
+        learner_argv = [*learner_argv, "--rl-engine", "legacy"]
     ports = island["ports"]
 
     def parse_with_local_ports(values=None):

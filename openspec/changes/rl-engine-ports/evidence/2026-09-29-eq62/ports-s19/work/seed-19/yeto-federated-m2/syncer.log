@@ -1,0 +1,29 @@
+2026-09-29T06:29:56.134784Z  INFO yeto_syncer::server: syncer listening port=47816 semantic_profile_sha256="1e3a092fbeb8c06c79dcc3d771088ab76debcdc692d0507904484411c0864cd6" require_profile_binding=false
+2026-09-29T06:29:56.134839Z  INFO yeto_syncer::server: waiting for learners and INIT_PARAMS expected=2
+2026-09-29T06:29:56.221803Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:24221
+2026-09-29T06:32:38.709673Z  INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=0 generation=1069670424350555669 num_streams=4
+2026-09-29T06:32:38.709774Z  INFO yeto_syncer::server: initialized global state iso_backend=scalar
+2026-09-29T06:32:38.789549Z  INFO yeto_syncer::server: global parameters initialized
+2026-09-29T06:32:38.811247Z  INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=1 generation=17230896460425105154 num_streams=4
+2026-09-29T06:32:38.988562Z  INFO yeto_syncer::server: checkpoint committed step=0 path=/work/out/ports-s19/work/seed-19/yeto-federated-m2/state.ckpt
+2026-09-29T06:35:53.995654Z  INFO yeto_syncer::server: checkpoint committed step=1 path=/work/out/ports-s19/work/seed-19/yeto-federated-m2/state.ckpt
+2026-09-29T06:35:54.068924Z  INFO yeto_syncer::server: outer step step=1 fragment=0 responders=[Member { learner_id: 0, generation: 1069670424350555669 }, Member { learner_id: 1, generation: 17230896460425105154 }] gnorm="0.1676" ms=194997
+2026-09-29T06:37:36.632994Z  INFO yeto_syncer::server: checkpoint committed step=2 path=/work/out/ports-s19/work/seed-19/yeto-federated-m2/state.ckpt
+2026-09-29T06:37:36.711606Z  INFO yeto_syncer::server: outer step step=2 fragment=0 responders=[Member { learner_id: 0, generation: 1069670424350555669 }, Member { learner_id: 1, generation: 17230896460425105154 }] gnorm="0.1389" ms=102642
+2026-09-29T06:39:10.101961Z  INFO yeto_syncer::server: checkpoint committed step=3 path=/work/out/ports-s19/work/seed-19/yeto-federated-m2/state.ckpt
+2026-09-29T06:39:10.105540Z  INFO yeto_syncer::server: outer step step=3 fragment=0 responders=[Member { learner_id: 0, generation: 1069670424350555669 }, Member { learner_id: 1, generation: 17230896460425105154 }] gnorm="0.0713" ms=93393
+2026-09-29T06:40:00.096772Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=0 generation=1069670424350555669 step=3 remaining=1
+2026-09-29T06:40:00.228659Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:61318
+2026-09-29T06:40:00.228676Z  WARN yeto_syncer::server: learner disconnected during finalization; waiting for reconnect learner_id=0 generation=1069670424350555669
+2026-09-29T06:40:00.229814Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:49049
+2026-09-29T06:40:00.229847Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:42185
+2026-09-29T06:40:00.230116Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:17720
+2026-09-29T06:40:00.230276Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:22650
+2026-09-29T06:40:00.910710Z  INFO yeto_syncer::server: learner finalized authoritative parameters learner_id=1 generation=17230896460425105154 step=3 remaining=0
+2026-09-29T06:40:00.910869Z  INFO yeto_syncer::server: all learners acknowledged final cut learners=2
+2026-09-29T06:40:00.910931Z  INFO yeto_syncer::server: training complete after 3 outer steps
+2026-09-29T06:40:01.034753Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:56965
+2026-09-29T06:40:01.036282Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:19953
+2026-09-29T06:40:01.036558Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:25306
+2026-09-29T06:40:01.036754Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:42658
+2026-09-29T06:40:01.036921Z  WARN yeto_syncer::server: connection ended: unexpected end of file peer=127.0.0.1:30968
