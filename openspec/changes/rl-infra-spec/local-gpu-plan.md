@@ -28,8 +28,8 @@
 2. S 与 O 的逐轮 `trained_sample_ids_sha256`、trained_groups/samples 相同；每轮 `applied_lrs` 长度 = 1。
 3. O 与 OD：每个 `rl_eval(overlapped=true)` 的 `rl/policy_token` 等于该 eval 开始时最近一次 `rl_publication` 的 token；每个 `rl_eval_overlap_start` 与其 `rl_eval` 之间磁带上没有 `rl_publication` 和 `phase=generate`。
 4. OD：4 次发布前都有 `rl_fault_injected`；所有 `phase=generate` 的 `policy_version` 等于其前最近一次发布版本（延迟发布不触发旧版本生成）；overlapped eval 同时在飞 ≤ 1（`rl_eval_overlap_start` 与 `rl_eval` 严格交替）。
-5. O 的 eval 分数与 S 同一 policy_version 的 eval 分数：S/O 用同一 policy token 时应一致（贪心解码下逐项相等；若 eval 采样非确定，只比较 token 相同，不比较分数——在运行前按 eval 配置二选一写入证据目录 `criteria-choice.txt`，本计划默认"贪心解码，逐项相等"）。
-6. 观测（`observe=True`）：O 的 `rl_timeline_span` 中 eval span 与 train/outer_sync span 在时间上有交集（证明确实重叠，而非串行执行），`summarize` 的 `overlap_s > 0`。**若判据 1–5 通过而判据 6 不满足**（例如 trainer 调用在事件循环外阻塞，eval 未与训练交错推进），则 2.3 交付为"guard 正确，但当前运行时下无实际重叠收益"，按合法否定结论处理（记录 partitioned-serial 结论与后续项），不宣称重叠已生效。
+5. eval 固定用贪心解码（temperature=0，eval 集 N≥16 条）。硬条件：S 与 O 的每个 eval 点的 `policy_version` 与 `rl/policy_token` 逐项相同。分数条件：同一 policy_version 上 S 与 O 的 eval 平均分之差 ≤ 2/N（最多 2 条 prompt 结果不同；用于容纳 SGLang 在不同批组成下的贪心数值不确定性），超出即不通过。
+6. 观测（`observe=True`）：O 中至少 2 个 eval 点满足"真实 eval 区间 ∩ 同轮 train span 的长度 > 0"。真实 eval 区间取 `rl_timeline_span(task=eval)`，它由 `LoopEvalHandle` 在 eval 协程第一条语句与返回前（finally）用 driver 时钟记录，**不是** generate 结束到 join 的调度窗口。**若判据 1–5 通过而判据 6 不满足**（例如 trainer 调用在事件循环外阻塞，eval 未与训练交错推进），则 2.3 交付为"guard 正确，但当前运行时下无实际重叠收益"，按合法否定结论处理（记录 partitioned-serial 结论与后续项），不宣称重叠已生效。
 
 通过后：2.3 勾选；1.4 的 X9 由本实验与已完成的 partitioned-serial X9 guard（第三轮 C，95203615）共同满足，1.4 依赖 1.2 已勾，可勾选。
 
@@ -58,3 +58,9 @@
 2. 对每条边取各阶段 p50 占该边 p50 阻塞总时长的比例，边间等权平均；比例最大的阶段即"首先优化的瓶颈"。平局时不自动选择，由人记录选择与理由。
 3. 输出每个 source→target 的 p50/p90/max 分布（`transition_cost_distribution`），原始样本入证据目录。
 4. 若所有边的 p50 阻塞总时长 < 该边一轮训练中位时长的 10%，结论为"基线无需优化"（5.7 的另一依赖路径），5.2–5.5 记"未选中"。
+
+### L-2.3 追加：运行前修正（2026-09-30，尚未运行任何 GPU；判定条件在运行前修改，提交记录可查）
+
+- 判据 6 原稿用 driver 发射的 eval span（generate 结束→join），该区间恒包住 train，判据无法证伪，也会让 1.7 计费虚高（独立审查 H1）。已改为 eval 协程内部记录的真实区间与 train span 的交集，并同步修改代码（`overlap.LoopEvalHandle`）。
+- 判据 5 原稿允许运行前在两种口径中二选一；现已定死为上文口径（审查 L4）。
+- 已知差异（审查 L3），不作为不通过理由，但须在结果中如实记录：(a) O 中 eval(v_r) 挪到 generate(r) 之后执行，SGLang 引擎内的采样 RNG 消耗顺序与 S 不同；eval 为贪心不受影响，但**训练 rollout** 若使用引擎内 RNG，第 r+1 轮起 generate 前的 RNG 状态可能与 S 不同，判据 2（sample-id 哈希）只比较样本身份，不比较生成文本；若判据 2 失败而原因为 RNG 顺序，按"未通过"记录并另行分析，不改判据。(b) 若某轮在 train/outer_sync 中失败，O 会取消在飞的 eval(v_r)（`rl_eval_overlap_aborted`），该点的 eval 结果丢失；S 中 eval(v_r) 在 generate(r) 之前已完成，不会丢失。

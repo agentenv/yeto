@@ -33,6 +33,10 @@ def _profile(pairs=IMPLEMENTED_OVERLAP, **kw):
 class _Handle:
     def __init__(self, log, rid):
         self.log, self.rid = log, rid
+        self.begin, self.end = 10.0 + rid, 11.0 + rid
+
+    def cancel(self):
+        self.log.append(("cancel", self.rid))
 
     def result(self):
         self.log.append(("result", self.rid))
@@ -75,7 +79,8 @@ def test_eval_starts_after_generate_and_is_joined_before_publish():
         ov.before_generate(4)
     done = ov.before_publish(token="t3", published_version=3)
     assert done["rollout_id"] == 3 and done["metrics"] == {"score": 1.0}
-    assert done["start"] < done["end"] and ov.in_flight == 0
+    # the handle's real eval interval, not the schedule window
+    assert (done["begin"], done["end"]) == (13.0, 14.0) and ov.in_flight == 0
     assert ov.before_publish(token="t3", published_version=3) is None
 
 
@@ -105,6 +110,30 @@ def test_eval_never_runs_on_another_version():
         ov.before_publish(token="t3", published_version=3)
 
 
+def test_unstarted_due_eval_at_publication_is_refused_and_abort_cancels():
+    log = []
+    ov = _overlap(log)
+    ov.schedule(1, token="t1", published_version=1)
+    with pytest.raises(OverlapGuardError, match="never started"):
+        ov.before_publish(token="t1", published_version=1)
+    ov = _overlap(log)
+    ov.schedule(1, token="t1", published_version=1)
+    ov.after_generate(1, token="t1", published_version=1)
+    ov.abort()
+    assert ("cancel", 1) in log and ov.in_flight == 0 and ov.due is None
+    ov.abort()  # idempotent
+
+
+def test_eval_in_flight_vetoes_a_pause():
+    from yeto.rl.engine.pause_audit import PAUSABLE_PHASE, pause_decision
+
+    p = ExecutionProfile(name="s", execution_mode="partitioned-serial", outer_protocol="none",
+                         algorithm_spec_sha256=SHA)
+    assert pause_decision(p, outer_phase=PAUSABLE_PHASE, expected_pause_s=1).allowed
+    d = pause_decision(p, outer_phase=PAUSABLE_PHASE, expected_pause_s=1, eval_in_flight=1)
+    assert not d.allowed and "overlapped evals" in d.reason
+
+
 def test_eval_in_flight_blocks_a_quiescent_cut():
     snap = ReadinessSnapshot(rollout_id=1, optimizer_step=1, trained_policy_version=1,
                              published_policy_version=1, publication_complete=True,
@@ -129,10 +158,34 @@ def test_loop_handle_progresses_cooperatively_on_the_island_loop():
         await asyncio.sleep(0.01)
         order.append("train-end")
 
-    handle = loop_eval_starter(runner, evaluate)(7)
+    ticks = iter(range(100))
+    clock = lambda: float(next(ticks))  # noqa: E731
+    handle = loop_eval_starter(runner, evaluate, clock)(7)
+    assert handle.begin is None  # created, not yet running
     runner.run(train())  # the trainer drives the same loop; eval progresses meanwhile
+    assert handle.begin is not None and handle.end > handle.begin
     # eval ran to completion inside the trainer's loop drive (before train ended)
     assert order.index(("eval-end", 7)) < order.index("train-end")
     assert order.index("train-begin") < order.index("train-end")
     assert handle.result() == {"acc": 0.5}
+    runner.close()
+
+
+def test_loop_handle_cancel_waits_for_the_task_to_end():
+    from yeto.rl.engine.miles_adapter import LoopRunner
+
+    runner = LoopRunner(asyncio.new_event_loop())
+    state = []
+
+    async def evaluate(rid):
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            state.append("cleaned")
+
+    handle = loop_eval_starter(runner, evaluate, lambda: 0.0)(1)
+    runner.run(asyncio.sleep(0))  # let it start
+    handle.cancel()
+    assert state == ["cleaned"] and handle._task.cancelled()
+    handle.cancel()  # idempotent
     runner.close()

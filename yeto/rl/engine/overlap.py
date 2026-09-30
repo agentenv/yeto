@@ -46,7 +46,14 @@ class OverlapGuardError(RuntimeError):
 
 
 class EvalHandle(Protocol):
+    """``begin``/``end``: real eval interval (driver clock) once known, else None."""
+
+    begin: float | None
+    end: float | None
+
     def result(self) -> Mapping[str, float]: ...
+
+    def cancel(self) -> None: ...
 
 
 EvalStarter = Callable[[int], EvalHandle]
@@ -135,17 +142,20 @@ class EvalOverlap:
     def before_publish(self, *, token: str | None, published_version: int | None) -> dict | None:
         """Join the in-flight eval; it must still see the policy it was started on.
 
-        Returns ``{"rollout_id", "token", "metrics", "start", "end"}`` or None.
+        Returns ``{"rollout_id", "token", "metrics", "begin", "end"}`` or None.
+        ``begin``/``end`` are the eval's REAL interval as recorded by the handle
+        (None when the handle cannot tell), never the schedule window.
         """
         if self.due is not None:
-            # generation never ran after the eval point (it failed or the run
-            # stopped); nothing overlapped, the caller runs the eval serially.
-            return None
+            # after_generate always consumes ``due`` before train; reaching a
+            # publication with it pending means generation was skipped.
+            raise OverlapGuardError(
+                f"eval of v{self.due[0]} was scheduled but never started before publication"
+            )
         pending, self.pending = self.pending, None
         if pending is None:
             return None
         metrics = dict(pending.handle.result())
-        end = self.clock()
         if published_version != pending.rollout_id or token != pending.token:
             raise OverlapGuardError(
                 f"publication moved to v{published_version} while eval of "
@@ -155,9 +165,20 @@ class EvalOverlap:
             "rollout_id": pending.rollout_id,
             "token": pending.token,
             "metrics": metrics,
-            "start": pending.started_at,
-            "end": end,
+            "begin": getattr(pending.handle, "begin", None),
+            "end": getattr(pending.handle, "end", None),
         }
+
+    def abort(self) -> None:
+        """Cancel an in-flight eval and wait for it to end (error/cancel paths)."""
+        self.due = None
+        pending, self.pending = self.pending, None
+        if pending is None:
+            return
+        cancel = getattr(pending.handle, "cancel", None)
+        if callable(cancel):
+            cancel()
+        self.emit("rl_eval_overlap_aborted", policy_version=pending.rollout_id)
 
 
 class LoopEvalHandle:
@@ -168,13 +189,41 @@ class LoopEvalHandle:
     during train/outer_sync; ``result`` drives the loop until it finishes.
     """
 
-    def __init__(self, runner: Any, coro: Any) -> None:
+    def __init__(self, runner: Any, coro: Any, clock: Callable[[], float]) -> None:
         self._runner = runner
-        self._task = runner.loop.create_task(coro)
+        self.begin: float | None = None
+        self.end: float | None = None
+
+        async def timed() -> Any:
+            self.begin = clock()  # first statement: the eval really starts here
+            try:
+                return await coro
+            finally:
+                self.end = clock()
+
+        self._task = runner.loop.create_task(timed())
 
     def result(self) -> Mapping[str, float]:
         return self._runner.run(self._task) or {}
 
+    def cancel(self) -> None:
+        """Cancel and drive the loop until the task has actually finished."""
+        import asyncio
 
-def loop_eval_starter(runner: Any, evaluate: Callable[[int], Any]) -> EvalStarter:
-    return lambda rollout_id: LoopEvalHandle(runner, evaluate(rollout_id))
+        if self._task.done():
+            if not self._task.cancelled():
+                self._task.exception()  # retrieve, so no "never retrieved" warning
+            return
+        self._task.cancel()
+
+        async def settle() -> None:
+            await asyncio.gather(self._task, return_exceptions=True)
+
+        self._runner.run(settle())
+
+
+def loop_eval_starter(
+    runner: Any, evaluate: Callable[[int], Any], clock: Callable[[], float]
+) -> EvalStarter:
+    """``clock`` must be the driver's clock so eval and train spans share one axis."""
+    return lambda rollout_id: LoopEvalHandle(runner, evaluate(rollout_id), clock)
