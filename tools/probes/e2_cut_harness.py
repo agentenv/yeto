@@ -227,7 +227,10 @@ except Exception: d=[]
     if [ -s $R/pulled/gpu.txt ] && [ ! -f $R/pulled/guard.ok ] && [ ! -f $R/pulled/guard.fail ]; then
       timeout 60 $M container exec $c -- sh -c "git --git-dir=/root/miles/.git rev-parse HEAD; cat /opt/yeto/image-manifest.json" > $R/pulled/image.txt
       n=$(grep -c "%(gpu)s" $R/pulled/gpu.txt); total=$(grep -c . $R/pulled/gpu.txt)
-      if [ "$n" = "$NG" ] && [ "$total" = "$NG" ] && grep -q "^$MC$" $R/pulled/image.txt && grep -q "2f23a0f-9f29303" $R/pulled/image.txt; then
+      tries=$(( $(cat $R/pulled/.guard_tries 2>/dev/null || echo 0) + 1 )); echo $tries > $R/pulled/.guard_tries
+      if [ ! -s $R/pulled/image.txt ] && [ "$tries" -lt 12 ]; then
+        :  # exec not answered yet (container still starting): retry next loop, never judge on empty output
+      elif [ "$n" = "$NG" ] && [ "$total" = "$NG" ] && grep -q "^$MC$" $R/pulled/image.txt && grep -q "2f23a0f-9f29303" $R/pulled/image.txt; then
         date -u +%%FT%%TZ > $R/pulled/guard.ok
       else
         date -u +%%FT%%TZ > $R/pulled/guard.fail; $M app stop -y $APP > $R/guard_stop.out 2>&1

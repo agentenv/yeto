@@ -84,3 +84,10 @@ def test_run_scripts_parse_and_carry_the_strict_guards(tmp_path, monkeypatch):
             arm = (d / "arm_inwatch.sh").read_text()
             assert subprocess.run(["bash", "-n", str(d / "arm_inwatch.sh")]).returncode == 0
             assert "e2_inwatch.py train 2 rb1 0 900" in arm and "arm_inwatch.sh" in script
+
+
+def test_guard_retries_an_empty_image_answer(tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "check_pins", lambda repo: [])
+    assert tool.main(["--root", str(tmp_path), "--yeto-sha", "abc1234", "--prefix", "p"]) == 0
+    puller = (tmp_path / "p-c1" / "puller.sh").read_text()
+    assert '[ ! -s $R/pulled/image.txt ] && [ "$tries" -lt 12 ]' in puller
