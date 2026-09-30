@@ -476,3 +476,14 @@
 6. **fea44cc**：`--rl-elastic-state-dir ISLAND_PATH` 可指向持久卷（Modal volume 挂载点）。`--rl-elastic-restart-attempts N` 让岛运行命令用 bash 循环，以相同参数和 state dir 原地重启 learner。**Modal 注意**：这需要 Modal island 执行的是同一段 run 脚本；若 Modal runner 自己拼 learner 命令，要在 runner 里套同样的循环。未在 Modal 上验证。
 7. sky 0.13 私有镜像登录报 `asdict() should be called on dataclass instances`，**已定位，未修；主 agent 决定暂缓（不再用 Nebius）**。原因：launcher 在 Resources 中传入 `DockerLoginConfig` 对象；sky 0.13 客户端/服务端之间把 Task 序列化成 YAML 再读回时，`Resources.from_yaml_config` 直接 `config.pop('_docker_login_config')`，得到的是 dict，没有转回 dataclass；下一次 `to_yaml_config` 调用 `dataclasses.asdict(dict)` 就报错（`sky/resources.py:2654` 与 `:2755`）。可选方案：(a) 在 yeto 侧给 sky 打补丁，读回时把 dict 包成 DockerLoginConfig；(b) 改用 `SKYPILOT_DOCKER_*` 环境变量（`task.py:198`），但 0.13 会把它导出到所有 setup/run 进程，launcher 原本正是为此回避它；(c) 升级 sky 或向上游报告。待主 agent/用户决定。Nebius 不使用 spot，已知悉。
 - 全量：68F/3046P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b1.ids`）。
+
+### INFRA-E1：就绪审计 7–13 项（2026-09-30）
+- cell 接口对齐 FR1（032878d）：见上一节第 1 条的更正。
+- 7（0f0bcf3）：A5 按两岛各 3 卡 T1R1S1 做端到端检查，elastic/declare-cells/quorum/margin/start-delay 各开关都能到达岛上的 learner。launcher 不支持按岛分别配置。
+- 8（0f0bcf3）：`StrictRlBridge` 收到同一 step 的第二个 PULL（fixed roster 下 quorum 超时后的重发）时，向 learner 的 JSONL 磁带追加一条 `rl_pull_resend`（global_step、round_attempt、fragment_id、pulls_received）。兼容性：没有重发时磁带不变；仓库内没有任何磁带消费者会拒绝未知事件。Rust syncer 磁带未改：本机没有 cargo，无法编译测试；A5 判据取证位置请以 learner 磁带为准（主 agent 裁定）。
+- 9（888d177）：`scripts/idle_flow_probe.py`，本机 listener 加 Modal CPU 客户端，在 60/180/350/600/900/1200/1800 s 各空闲点检查连接存活，输出 `idle_flow_timeout_s`。本地测试通过，未在 Modal 上运行。
+- 10（9e73c9b）：`--rl-deterministic-trainer` 给 Miles argv 加 `--deterministic-mode`，并在 learner 与所有 Ray worker 上设 `NCCL_ALGO=Ring`、`CUBLAS_WORKSPACE_CONFIG=:4096:8`、`NVIDIA_TF32_OVERRIDE=0`。SGLang 确定性推理沿用 `--sglang-deterministic-inference`（默认开）。默认不变。
+- 11（8f316a0）：`rl_round_trained` 事件在 batch 带数据游标时（elastic 元数据开启）附带 `data_cursor`。
+- 12（79b1e18）：`--rl-test-inject-rebuild-fail` 让 fork 的 `rebuild_training_models` 第一次在 `create_training_models` 阶段失败，走 fork 真实的 TrainerRebuildError 路径，结果为 REBUILD_OLD。**运行前更正** plan v2 §3 第 4 条：REBUILD_OLD 时 `generation` 仍为 1，因为只有重建成功才会 swap。
+- 13：**未完成**。F-R1 尚未提交（miles-fr1 HEAD 仍为 5c1b49eb，工作区有 12 个未提交文件），pool_gpus 入口接线等它合入。
+- 全量：68F/3055P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b2.ids`）；validate strict 通过。
