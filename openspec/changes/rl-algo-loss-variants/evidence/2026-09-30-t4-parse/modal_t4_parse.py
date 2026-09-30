@@ -1,22 +1,22 @@
-"""algo2b-t4-parse: full Miles parse_args + validate_parsed_args in the pinned image (4.4).
+"""algo2b-t4-parse (run 2): Modal Sandbox driver, runs locally only.
 Registry credentials are read from ~/.docker/config.json and passed only as the
-from_registry pull secret (never printed, never in the task env)."""
-import base64, json, os
+from_registry pull secret (never printed, never in the task env).
+usage: python modal_t4_parse.py <outdir>"""
+import base64, json, os, sys, time
 import modal
 
 APP = "algo2b-t4-parse"
 IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
          "17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef")  # miles 5c1b49eb
-_auth = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
-_user, _token = base64.b64decode(_auth).decode().split(":", 1)
-_secret = modal.Secret.from_dict({"REGISTRY_USERNAME": _user, "REGISTRY_PASSWORD": _token})
-image = (modal.Image.from_registry(IMAGE, secret=_secret).entrypoint([])
+HERE = os.path.dirname(os.path.abspath(__file__))
+out = sys.argv[1]
+auth = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
+user, token = base64.b64decode(auth).decode().split(":", 1)
+secret = modal.Secret.from_dict({"REGISTRY_USERNAME": user, "REGISTRY_PASSWORD": token})
+image = (modal.Image.from_registry(IMAGE, secret=secret).entrypoint([])
          .add_local_dir("/home/michael/work/algo-2b", "/yeto", copy=False,
                         ignore=[".git", "**/__pycache__", "openspec/**"])
-         .add_local_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "full_parse.py"),
-                         "/work/full_parse.py", copy=False))
-app = modal.App(APP, image=image)
-
+         .add_local_file(os.path.join(HERE, "full_parse.py"), "/work/full_parse.py", copy=False))
 SCRIPT = r"""
 set -x
 nvidia-smi --query-gpu=name,driver_version --format=csv
@@ -26,15 +26,15 @@ PYTHONPATH=/yeto:${PYTHONPATH} python /work/full_parse.py /tmp/result.json 2>&1 
 echo "=== RESULT_JSON ==="
 cat /tmp/result.json
 """
-
-
-@app.function(gpu="T4", cpu=2.0, memory=8192, timeout=840)
-def run() -> str:
-    import subprocess
-    out = subprocess.run(["bash", "-c", SCRIPT], capture_output=True, text=True)
-    return out.stdout + "\n--- stderr (tail) ---\n" + out.stderr[-6000:]
-
-
-@app.local_entrypoint()
-def main():
-    print(run.remote())
+app = modal.App.lookup(APP, create_if_missing=True)
+print("app", app.app_id, flush=True)
+sb = modal.Sandbox.create("bash", "-c", SCRIPT, app=app, image=image, gpu="T4",
+                          cpu=2.0, memory=8192, timeout=840)
+open(os.path.join(out, "sandbox_id.txt"), "a").write(f"{app.app_id} {sb.object_id} {time.strftime('%FT%TZ', time.gmtime())}\n")
+print("sandbox", sb.object_id, flush=True)
+sb.wait(raise_on_termination=False)
+stdout, stderr = sb.stdout.read(), sb.stderr.read()
+print(stdout); print("--- stderr (tail) ---"); print(stderr[-6000:])
+print("sandbox returncode", sb.returncode)
+if "=== RESULT_JSON ===" in stdout:
+    open(os.path.join(out, "result.json"), "w").write(stdout.split("=== RESULT_JSON ===", 1)[1].strip() + "\n")

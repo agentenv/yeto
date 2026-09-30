@@ -14,3 +14,9 @@
 - 失败处理：任一项不满足照实记录、不勾 4.4；只有查明原因并修复后才重跑，不重复启动同一实验。
 - 容差：精确相等；无 seed。
 - 结束：拉日志 → `modal app stop -y` 本前缀 app → `modal app list` 只核实 algo2b-t4-* → 记录实际费用。
+
+## 第 1 次运行结论（app ap-z00PQUsU90bkkq0UVMqKq4，未产出结果）
+- 失败原因：`modal run` 在容器内也会 import 驱动脚本，模块级读取 ~/.docker/config.json 在容器里 FileNotFoundError，容器反复重启（13 次 Runner failed）直到本地 `timeout 900` 结束（exit=124）；之后 app 仍为 ephemeral、0 task，已手动 `modal app stop -y`，16:17 后 stopped。未执行任何解析。凭据未出现在日志中（日志里只有源码行）。
+- 修复：改为 Modal Sandbox 驱动（与 rl-algo-seq-and-adv g1_sbx.py 同法，脚本只在本地执行），`Sandbox.create(..., gpu="T4", timeout=840)`；判据、镜像、资源、上限不变；本地 `timeout 900` 与独立 watchdog（1080 秒）照旧。
+
+## 第 2 次运行计划：同上，只换驱动方式。
