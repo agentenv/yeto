@@ -548,3 +548,10 @@
 - 02f6c5b：launcher 新增 `--no-island-relaunch`；`--modal-retries 0` 隐含此开关。fleet controller 的 learner 重启预算因此为 0，失败的岛直接拆除，不会再起第二个付费容器；syncer 照旧会被恢复。默认仍按 `--recover-timeout`。sky 岛走同一个 FleetController 循环，同样可以用 `--no-island-relaunch` 或 `--recover-timeout 0` 关闭。
 - 下一提交（4.4）：共置岛上 `rebuild_trainer` 在 restored == cut == published 校验通过后不再重发（引擎一直持有该 policy，重发会让 SGLang 去恢复并未 offload 的权重，报 KeyError 'weights'）；`rl_trainer_rebuilt` 记 `republished=false`。fixed-partition 不变，判据不变。
 - 全量：68F/3104P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b6.ids`）。
+
+### INFRA-E2 审查低严重度项（2026-09-30，合入 35f52ea 后）
+- L1：恢复后"加载后立即读取"的完整导出改为可选，需设 `YETO_RL_CUT_RESTORE_DIAGNOSTICS=1`。默认只在摘要不一致时报告 cut 与重新导出之间的差异；这两份数据都已在内存里，不多做一次导出。
+- L2：写入前的结果带上 `refusal_kind`，区分 `refused`（有意拒绝）与 `failed_before_write`（写入前出错）。trainer 侧对两者都抛 `CutError`，行为不变。
+- L3：删去 `optimizer_diff` 中的死代码。
+- L4：新增替身测试，直接调用 `MilesCutBackend.export_optimizer`，并用 defaultdict 模拟 state。
+- **L5 已知限制**：`save_cut` 时如果部分 rank 拒绝，已经成功的 rank 会在 cut 目录留下分片。没有 manifest 时 cut 视为不存在，恢复不会使用这些分片，但它们不会被自动清理；同一 cut_id 再次保存会因分片已存在而被拒。调用方应换用新的 cut_id，或手动清理。

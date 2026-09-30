@@ -258,3 +258,26 @@ def test_a_fixed_fork_setter_error_reaches_restore_cut(tmp_path):
     fresh._yeto_cut_backend.load_optimizer = strict_load
     with pytest.raises(ValueError, match="destination lacks"):
         restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")
+
+
+def test_miles_backend_export_leaves_no_empty_state_entries(monkeypatch):
+    """L4: MilesCutBackend.export_optimizer itself (fork-M5 export stubbed as Megatron reads it:
+    ``optimizer.state[main_param]`` on a defaultdict) leaves the state as it was."""
+    from collections import defaultdict
+
+    main = torch.nn.Parameter(torch.zeros(3))
+    inner = SimpleNamespace(state=defaultdict(dict), param_groups=[{"params": [main]}])
+    distopt = SimpleNamespace(optimizer=inner)
+
+    def export_named_optimizer_state(optimizer, named):
+        entries = {}
+        for n, _ in named:
+            state = optimizer.optimizer.state[main]  # Megatron _get_main_param_and_optimizer_states
+            entries[n] = {"tensors": {"param": main.detach().clone(), **dict(state)}}
+        return {"entries": entries}
+
+    backend = cut_plugin.MilesCutBackend()
+    monkeypatch.setattr(backend, "_dps", lambda: SimpleNamespace(
+        export_named_optimizer_state=export_named_optimizer_state))
+    out = backend.export_optimizer(distopt, [("w", main)])
+    assert list(out["entries"]) == ["w"] and not inner.state

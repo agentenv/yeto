@@ -419,7 +419,7 @@ class MilesTrainerGroup:
                 self._actor.run_plugin(SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": cut_id})
             )
         ]
-        refused = [s["refused"] for s in summaries if "refused" in s]
+        refused = [f"[{s.get('refusal_kind', 'refused')}] {s['refused']}" for s in summaries if "refused" in s]
         if refused:
             raise CutError("rank refused the cut: " + "; ".join(sorted(set(refused))))
         expected = trainer_workers(self._args)
@@ -525,7 +525,7 @@ class MilesTrainerGroup:
                 )
             )
         ]
-        refused = [r["refused"] for r in results if "refused" in r]
+        refused = [f"[{r.get('refusal_kind', 'refused')}] {r['refused']}" for r in results if "refused" in r]
         if refused:
             # every rank refused before writing, or some ranks wrote: the
             # caller treats any restore_cut error as RECOVERY_REQUIRED either way
@@ -540,6 +540,7 @@ class MilesTrainerGroup:
                     saved_c, now_c = s.get("components") or {}, r.get("components") or {}
                     differ = sorted(k for k in set(saved_c) | set(now_c) if saved_c.get(k) != now_c.get(k))
                     raise CutError(f"{r['path']}: restored {key} differs from the cut; "
+                                   f"cut->reexport {r.get('optimizer_cut_vs_reexport')}; "
                                    f"cut->after_load {r.get('optimizer_cut_vs_after_load')}; "
                                    f"after_load->reexport {r.get('optimizer_after_load_vs_reexport')}; "
                                    f"rank diff {r.get('diff')}; "

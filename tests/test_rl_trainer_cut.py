@@ -363,7 +363,10 @@ def test_rank_diff_reports_leaf_values(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("where", ["load", "after"])
-def test_optimizer_diff_splits_load_from_later_changes(tmp_path, where):
+def test_optimizer_diff_splits_load_from_later_changes(tmp_path, where, monkeypatch):
+    from yeto.rl.engine.miles_adapter.cut_plugin import RESTORE_DIAGNOSTICS_ENV
+
+    monkeypatch.setenv(RESTORE_DIAGNOSTICS_ENV, "1")
     rank = _trained_rank()
     _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
     fresh = make_rank(1)
@@ -418,3 +421,38 @@ def test_reading_a_fresh_optimizer_must_not_break_the_restore(tmp_path, side_eff
     else:
         with pytest.raises(CutError, match="missing:exp_avg"):
             trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+def test_after_load_diagnostics_are_opt_in(tmp_path, monkeypatch):
+    from yeto.rl.engine.miles_adapter.cut_plugin import RESTORE_DIAGNOSTICS_ENV
+
+    monkeypatch.delenv(RESTORE_DIAGNOSTICS_ENV, raising=False)
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    fresh = make_rank(1)
+    backend = fresh._yeto_cut_backend
+    exports, real_load, real_export = [], backend.load_optimizer, backend.export_optimizer
+
+    def load(optimizer, named, merged):
+        real_load(optimizer, named, merged)
+        for p in optimizer.state:
+            optimizer.state[p]["exp_avg"].mul_(2)
+
+    backend.load_optimizer = load
+    backend.export_optimizer = lambda o, n: (exports.append(1), real_export(o, n))[1]
+    with pytest.raises(CutError) as info:
+        _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+    msg = str(info.value)
+    assert "cut->after_load None" in msg and "'state:exp_avg': {'differ': 2" in msg.split("cut->reexport ")[1]
+    assert len(exports) == 1  # only the final re-export, no extra after-load export
+
+
+def test_failure_before_any_write_is_told_apart_from_a_refusal(tmp_path):
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    fresh = make_rank(1)
+    fresh._yeto_cut_backend.check_optimizer = lambda *a: (_ for _ in ()).throw(KeyError("no such param"))
+    with pytest.raises(CutError, match=r"\[failed_before_write\] KeyError"):
+        _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+    with pytest.raises(CutError, match=r"\[refused\] .*freshly built"):
+        _trainer(RankGroup([rank])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())

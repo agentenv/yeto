@@ -46,6 +46,8 @@ _MODULE = "yeto.rl.engine.miles_adapter.cut_plugin"
 SAVE_CUT_SHARD = f"{_MODULE}.save_cut_shard"
 RESTORE_CUT_SHARD = f"{_MODULE}.restore_cut_shard"
 SHARD_SCHEMA = "yeto.cut_shard/v1"
+# Opt-in: read the optimizer back right after the load and report where a mismatch arises.
+RESTORE_DIAGNOSTICS_ENV = "YETO_RL_CUT_RESTORE_DIAGNOSTICS"
 
 
 class CutPluginError(StatePluginError):
@@ -381,25 +383,24 @@ def optimizer_diff(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> 
             out["ranges"] += 1
         fx, fy = _entry_tensors(x), _entry_tensors(y)
         for key in sorted(set(fx) | set(fy)):
-            if True:
-                stat = out["keys"].setdefault(key, {"differ": 0, "max_abs": 0.0, "max_rel": 0.0,
-                                                    "dtypes": set()})
-                u, v = fx.get(key), fy.get(key)
-                if u is None or v is None:
-                    stat["differ"] += 1
-                    stat["dtypes"].add("missing")
-                    continue
-                u, v = u.detach().cpu(), v.detach().cpu()
-                stat["dtypes"].add(f"{u.dtype}->{v.dtype}")
-                if u.shape != v.shape:
-                    stat["differ"] += 1
-                    continue
-                if not torch.equal(u, v):
-                    stat["differ"] += 1
-                    d = (u.double() - v.double()).abs()
-                    stat["max_abs"] = max(stat["max_abs"], float(d.max()))
-                    denom = u.double().abs().clamp_min(1e-30)
-                    stat["max_rel"] = max(stat["max_rel"], float((d / denom).max()))
+            stat = out["keys"].setdefault(key, {"differ": 0, "max_abs": 0.0, "max_rel": 0.0,
+                                                "dtypes": set()})
+            u, v = fx.get(key), fy.get(key)
+            if u is None or v is None:
+                stat["differ"] += 1
+                stat["dtypes"].add("missing")
+                continue
+            u, v = u.detach().cpu(), v.detach().cpu()
+            stat["dtypes"].add(f"{u.dtype}->{v.dtype}")
+            if u.shape != v.shape:
+                stat["differ"] += 1
+                continue
+            if not torch.equal(u, v):
+                stat["differ"] += 1
+                d = (u.double() - v.double()).abs()
+                stat["max_abs"] = max(stat["max_abs"], float(d.max()))
+                denom = u.double().abs().clamp_min(1e-30)
+                stat["max_rel"] = max(stat["max_rel"], float((d / denom).max()))
         if x.get("hyper") != y.get("hyper"):
             out["keys"].setdefault("hyper", {"differ": 0})["differ"] += 1
     for stat in out["keys"].values():
@@ -426,7 +427,8 @@ def shard_name(coord: Mapping[str, int]) -> str:
     return f"trainer_tp{coord['tp']}_pp{coord['pp']}_dp{coord['dp']}.pt"
 
 
-REFUSED = "refused"
+REFUSED = "refused"  # key of a "nothing written" result (reason text)
+REFUSAL_KIND = "refusal_kind"  # "refused" (deliberate) | "failed_before_write"
 
 
 def save_cut_shard(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
@@ -441,7 +443,7 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]
         with trainer_resident(actor):
             return _save(actor, directory=directory, cut_id=cut_id)
     except CutPluginError as error:
-        return {REFUSED: str(error)}
+        return {REFUSED: str(error), REFUSAL_KIND: "refused"}
 
 
 def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
@@ -567,9 +569,12 @@ def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, An
     except Exception as error:  # noqa: BLE001
         if progress["written"]:
             raise  # state partly written: the trainer is unusable (RECOVERY_REQUIRED)
-        # Refused before any write: the trainer is untouched; return instead of
-        # raising so Miles does not mark the cell errored (see save_cut_shard).
-        return {REFUSED: f"{type(error).__name__}: {error}"}
+        # Nothing written: the trainer is untouched; return instead of raising so
+        # Miles does not mark the cell errored (see save_cut_shard). A deliberate
+        # refusal (CutPluginError) and any other failure before the first write
+        # are told apart by REFUSAL_KIND; the trainer side raises CutError for both.
+        kind = "refused" if isinstance(error, CutPluginError) else "failed_before_write"
+        return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: kind}
 
 
 def _inject_restore_sleep(actor: Any) -> None:
@@ -633,9 +638,11 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
             p.data.copy_(adapter[n].to(device=p.device))
         _inject_restore_kill(coord)
         backend.load_optimizer(actor.optimizer, named, merged)
-        # diagnostics: optimizer state read back right after the load (fork-M5 export
-        # format), to split "load wrote something else" from "changed afterwards"
-        after_load = backend.export_optimizer(actor.optimizer, named)
+        # Opt-in diagnostics (a full optimizer export costs time and host memory on a
+        # large model): the state read right after the load, to split "the load wrote
+        # something else" from "changed afterwards" (GPU C1 diagnostic 2).
+        after_load = (backend.export_optimizer(actor.optimizer, named)
+                      if os.environ.get(RESTORE_DIAGNOSTICS_ENV) == "1" else None)
     actor.opt_param_scheduler.load_state_dict(shard["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
@@ -660,8 +667,12 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     }
     saved_snap = {k: shard.get(k) for k in snap}
     if state_digest(saved_snap) != summary["state_digest"]:
-        summary["optimizer_cut_vs_after_load"] = optimizer_diff(shard.get("optimizer_named"), after_load)
-        summary["optimizer_after_load_vs_reexport"] = optimizer_diff(after_load, snap["optimizer_named"])
+        # cut vs final re-export: free (both already in memory); the after-load split
+        # only with the opt-in diagnostics
+        summary["optimizer_cut_vs_reexport"] = optimizer_diff(shard.get("optimizer_named"), snap["optimizer_named"])
+        if after_load is not None:
+            summary["optimizer_cut_vs_after_load"] = optimizer_diff(shard.get("optimizer_named"), after_load)
+            summary["optimizer_after_load_vs_reexport"] = optimizer_diff(after_load, snap["optimizer_named"])
         diffs = state_diff(saved_snap, snap)
         kinds: dict[str, int] = {}
         for p_, kind, _ in diffs:
