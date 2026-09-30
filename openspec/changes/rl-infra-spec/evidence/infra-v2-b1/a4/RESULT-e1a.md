@@ -15,5 +15,10 @@
 | E1-E：重复提交同一 request_id 返回同一 tx_id | 通过 | 第二次提交后 `a4up.status.json` = tx-0-d13c83e0da4b-a4up / SUCCEEDED，journal 仅 1 条 a4up request |
 | E1-E：ledger 每轮恰好一条 prepared/optimizer_applied/outer_recorded | 通过 | 12 轮 × 5 类记录，无重复 |
 
-结论：3.4 **暂不勾选**——(c) 字面口径与实际执行时序差一轮，需主 agent 裁定（口径澄清，非放宽）；其余判据全部通过。成员全程使用 fork cell id（engine:inference-engine-all-0-0-0000{0..3}）。
+## (c) 按主 agent 裁定复判（2026-09-30）
+- 口径：事件自身轮次字段。`rl_publication` 没有单独的 round 字段，自身轮次字段为 `policy_version`；driver 的轮次定义（driver.py：publish(v) 之后 generate(rollout_id=v)，轮次 r（从 1 计）= rollout_id r−1）与运行前计划 infra-e1/plan.md（"第 3 轮前 request up，第 8 轮前 request down"，轮次从 1 计）一致 → 第 3–7 轮对应 policy_version 2–6，其余轮对应 0、1、7–11。
+- 事件（原始行见 `x2/c-events.txt`）：policy_version 0、1、**2** 为 2 成员；3、4、5、6、**7** 为 4 成员；8–11 为 2 成员。
+- 判定：v2 = 2（应为 4）、v7 = 4（应为 2）→ **(c) 未通过**。成员变化在 v2 发布后生效（up 的 weight_admission 以 v2 权重接纳新 cell，`rl_reconfiguration` rollout_id 2 members=4，generate(2) 在 4 成员上执行），发布事件晚一轮体现；down 同理（在 v7 发布之后生效）。
+
+结论：**3.4 不勾选**（(c) 未通过）；(a)(b)(d)(e)(f)(g) 与 E1-E 通过。成员全程使用 fork cell id（engine:inference-engine-all-0-0-0000{0..3}）。
 费用：基线 ≤$12.11，切换 ≤$12.92（25.2 min×$30.8/h）。释放：nebius instance list 为空，sky 无集群。
