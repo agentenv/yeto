@@ -1,0 +1,8 @@
+{"ranks": [{"coord": {"cp_size": 1, "dp": 0, "dp_size": 1, "ep_size": 1, "global_rank": 0, "pp": 0, "pp_size": 1, "tp": 0, "tp_size": 1}, "deterministic_mode": true, "env": {"CUBLAS_WORKSPACE_CONFIG": ":4096:8", "NCCL_ALGO": "Ring", "NVIDIA_TF32_OVERRIDE": "0"}, "env_ok": true, "info_env": {"NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0"}, "lora_dropout": 0.05}], "step": "determinism", "t": 1790754083.9481134}
+{"name": "determinism_settings", "ok": true, "step": "criterion", "t": 1790754083.9494905}
+{"layout": {"cp": 1, "dp": 1, "ep": 1, "pp": 1, "tp": 1, "world": 1}, "step": "layout", "t": 1790754083.9557185}
+{"local_step": 2, "next_rollout_id": 2, "step": "warmup_done", "t": 1790754283.0487}
+{"cut_id": "e2-c1-c0", "files": [{"bytes": 141870129, "coord": {"cp_size": 1, "dp": 0, "dp_size": 1, "ep_size": 1, "global_rank": 0, "pp": 0, "pp_size": 1, "tp": 0, "tp_size": 1}, "path": "trainer_tp0_pp0_dp0.pt", "sha256": "e390869520c7d2dd5d65ce2796c40dec70c413cf1e05b1cc4c3b3c5a65a86add"}], "step": "cut_saved", "t": 1790754284.9093523}
+{"name": "G-4.2(g) live restore refused, state unchanged", "ok": true, "step": "criterion", "t": 1790754286.821514}
+{"name": "G-4.3 arm A pre-step state == cut", "ok": true, "step": "criterion", "t": 1790754287.4315393}
+{"name": "harness_completed", "ok": false, "step": "criterion", "t": 1790754305.9315047}

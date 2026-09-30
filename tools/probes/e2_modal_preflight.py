@@ -12,10 +12,13 @@ import time
 
 import modal
 
-APP = "infra-v2-b2-e2pf-20260930-1"
-IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-         "17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef")
+APP = os.environ.get("E2PF_APP", "infra-v2-b2-e2pf-20260930-1")
+GPU = os.environ.get("E2PF_GPU") or None  # e.g. "T4": libcuda must dlopen for Megatron/TE imports
 repo, dry, out, runs = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+sys.path.insert(0, repo)
+from yeto.rl import MILES_NEXT_IMAGE  # noqa: E402  the checkout's pin
+
+IMAGE = MILES_NEXT_IMAGE.removeprefix("docker:")
 os.makedirs(out, exist_ok=True)
 auth = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
 user, token = base64.b64decode(auth).decode().split(":", 1)
@@ -46,7 +49,7 @@ for run in runs:
         f"> /tmp/{run}.log 2>&1; echo rc_{run}=$?; tail -3 /tmp/{run}.log; "
         f"echo '=== RESULT {run} ==='; cat /tmp/{run}.json; echo '=== END ==='")
 SCRIPT = "\n".join([
-    "nproc; git --git-dir=/root/miles/.git rev-parse HEAD; nvidia-smi -L 2>&1 | head -2",
+    "nproc; git --git-dir=/root/miles/.git rev-parse HEAD; nvidia-smi --query-gpu=name,driver_version --format=csv 2>&1 | head -3",
     *steps,
     "cd /yeto && PYTHONPATH=/root/miles:/root/sglang/python:/yeto timeout 240 python3 -m "
     f"yeto.rl.engine.runtime_manifest --image {IMAGE} --out /tmp/m.json > /tmp/m.log 2>&1; echo rc_manifest=$?; "
@@ -54,7 +57,8 @@ SCRIPT = "\n".join([
 ])
 app = modal.App.lookup(APP, create_if_missing=True)
 print("app", app.app_id, flush=True)
-sb = modal.Sandbox.create("bash", "-c", SCRIPT, app=app, image=image, cpu=4.0, memory=16384, timeout=1080)
+sb = modal.Sandbox.create("bash", "-c", SCRIPT, app=app, image=image, cpu=2.0, memory=8192, timeout=1080,
+                          **({"gpu": GPU} if GPU else {}))
 with open(os.path.join(out, "sandbox_id.txt"), "a") as fh:
     fh.write(f"{app.app_id} {sb.object_id} {time.strftime('%FT%TZ', time.gmtime())}\n")
 print("sandbox", sb.object_id, flush=True)
