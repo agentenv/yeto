@@ -311,3 +311,6 @@
 - 预算：两次合计 ≤ $3（硬超时 (a) 20 min、(b) 40 min；最坏 3×1.95×(25+45)/60 = $6.8 超过 $3 → 两次运行的实际停止由本 agent 在达到判据后立即执行，若累计实际费用将超 $3 即停止并回报）。失败即停并回报 journal。
 - 9.9 补充（F-E1 重跑启动前）：指纹运行实际 ≤$1.17（指纹 `sha256:88ef2727…`；manifest 镜像内 miles = 2f23a0fc，launcher 拉取 digest = db815884…）。为守住 $3，F-E1 改为第 1 轮 train 时 up、第 3 轮 train 时 down，两事务终态出现后立即停止；watchdog 18 min（最坏 3×1.95×18/60 = $1.76，累计 ≤ $2.93）。判据不变。
 - 9.8 补充（F-E2 启动前，判据不变）：代码 ec249ef（合并 integ-decl 3f88c1d）；运行带 `--modal-retries 0 --modal-timeout-s 2700`（外层硬超时 40 min + 5 min），并加进度看门狗（20 分钟无新事件即拉证据后 `modal app stop`）。按 F-R1 后的约定，不再传 `--rl-elastic-cells c0`（未 declare 时该名字会被岛上拒绝），改为缺省"fork 声明的全部 cell"；launcher dry-run rc=0（3 卡）。
+
+### 9.10 F-E1 第三次（合并 integ-decl c28aaf1 后，运行前；判据同 §9.9，不变）
+- 代码 f76bf1d；dry-run `fe1r/test_fe1r_dryrun.py` 追加断言 Miles argv 含 `--use-miles-router`，1 passed。Miles argv 变化 → 重新取指纹（前缀 `infra-v2-b1-fe1r2fp-20260930-1`），再跑 `infra-v2-b1-fe1r2-20260930-1`（第 1 轮 train up，第 3 轮 train down）。均带 `--modal-retries 0 --modal-timeout-s`、进度看门狗 20 min。两次合计 ≤ $3：指纹运行 watchdog 20 min，正式运行 watchdog 18 min；累计实际将超 $3 即停。

@@ -48,5 +48,6 @@ def test_fe1r(tmp_path, monkeypatch):
     assert pm["trainer"] == [0] and pm["rollout"] == [1] and pm["standby"] == [2]
     assert pm["rollout_cells"] == [{"name": "c0", "bundles": [1], "start": True},
                                    {"name": "c1", "bundles": [2], "start": False}], pm
+    assert "--use-miles-router" in argv
     (Path(__file__).parent / "dryrun.json").write_text(json.dumps(
         {"placement_map": pm, "image": MILES_NEXT_IMAGE, "miles": MILES_NEXT_COMMIT}, indent=1))
