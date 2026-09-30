@@ -1,4 +1,16 @@
-> **已被 `plan-v4.md` 取代**（pin、trainer 边配置、进度看门狗、A9 拓扑核对；判据不变）。保留供追溯。
+# E3 待验证计划 v4：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v3.md；判据与容差不变，运行前提交）
+
+与 v3 的差别（全部是执行配置与前提，**G1–G6、A9 判据、容差、go/no-go 规则均不变**）：
+- **镜像/pin**：Miles `2f23a0fc`（含 F-R1，训练路径未变），镜像 `ghcr.io/michaellchung/yeto-miles-ports@sha256:db815884…0cbf`（tag 2f23a0f-9f29303）；harness 从 `yeto/rl/__init__.py` 读取 pin，不再写死。
+- **A8 配置 = 生产 trainer 边配置**：harness 的 Miles argv 走生产翻译的 trainer 边分支（`RLRunConfig.trainer_dp_edges=True`，即 `--rl-elastic-trainer-edges` 所设字段），因此不含 `--balance-data`，不再手动覆盖 `balance_data`；A8 的确定性来自 learner 开关 `--rl-deterministic-trainer`（Megatron `--deterministic-mode` 与 NCCL/cuBLAS/TF32 环境），本地 dry-run 检查 argv 含 `--deterministic-mode`；LoRA dropout 用 `--rl-lora-dropout`（默认 0）；Megatron hidden/attention dropout 没有 yeto 开关，仍在 parse 后置 0 并记录。
+- **harness 进度看门狗**（DEV-GATHER 第 3 次在生成阶段卡住约 58 分钟的教训）：每个阶段在容器内单独监控，`progress.log` 20 分钟无新进展或该阶段日志中 5xx/`request failed with server error` 超过 200 行即杀掉该阶段并失败；任何退出路径都打包证据；本地实时镜像容器输出到 `container.log`，25 分钟无输出即终止 Sandbox；`modal_run` 在任何退出路径 stop app。
+- **生成冻结数据**按上游 `train.py` 的启动顺序：建 rollout 组件 → 建 DP=1 trainer → `update_weights` → 需要时 `onload_kv` → 每个 rollout `prepare_rollout` + `get`（不训练，基座策略）。第 3 次失败原因是旧实现 parse 后置 `debug_rollout_only` 且没有推权重/载入 KV，共置的引擎对 /generate 返回 400/503。
+- **A9 拓扑核对（F-R1 限制：只有启动时声明为停止的 cell 可以解绑）**：A9 以 T2R2 起步，启动参数加 `--rl-elastic --rl-elastic-trainer-edges --rl-elastic-declare-cells --rl-elastic-cells <含 g1 上的备用 cell>`；T2R2→T1R3 时新 engine 用这个声明为停止的 cell 绑到 g1（`bind_members`），T1R3→T2R2 时摘除的正是它（按 GPU 选择，停后 `unbind_members` 释放 bundle 给 trainer，回退时先绑回 g1 再启动），因此让出的总是可解绑 cell。所有故障注入都从 T2R2 或经 T2R2→T1R3 到达的 T1R3 开始，**不从启动即为 T1R3 的配置开始**（那样 g1 上的 cell 启动即运行，不能解绑）。
+- **A9 f5**（trainer_cut 之后、COMMITTED 之前 kill learner）：F-R1 的绑定只在内存中，重启后按设计判 RECOVERY_REQUIRED 并写 `trainer_recovery_hint`（restore_old，含 cut_epoch）；与 v3 §3.1 的期望一致，不自动恢复训练。
+
+以下保留 v3 全文。
+
+---
 
 # E3 待验证计划 v3：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v2.md；判据运行前固定，事后不改）
 

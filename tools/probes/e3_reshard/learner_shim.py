@@ -80,6 +80,19 @@ def summary_problems(summary: dict) -> list[str]:
     return out
 
 
+def with_trainer_edges(resolve):
+    """The production trainer-edge translation: ``RLRunConfig.trainer_dp_edges=True`` is exactly what
+    ``--rl-elastic-trainer-edges`` sets (run_config.py); the translation then omits ``--balance-data``.
+    The flag itself also needs --rl-elastic wiring, which the harness does not run."""
+    import dataclasses
+
+    def resolve_with_trainer_edges(*a, **k):
+        return dataclasses.replace(resolve(*a, **k), trainer_dp_edges=True)
+
+    resolve_with_trainer_edges.__wrapped__ = resolve
+    return resolve_with_trainer_edges
+
+
 def parse_overrides(items: list[str]) -> dict:
     out = {}
     for item in items:
@@ -115,7 +128,9 @@ def make_phase(ns):
                                fingerprint=runtime_fingerprint(launch, MILES_NEXT_COMMIT))
         if ns.phase == "gen":
             (work / "frozen").mkdir(parents=True, exist_ok=True)
-            backend.generate_frozen(FROZEN_ROLLOUTS)
+            from harness import progress_line
+
+            backend.generate_frozen(FROZEN_ROLLOUTS, progress=progress_line)
             return None
         from harness import ARM_BY_NAME, run_arm
 
@@ -141,9 +156,11 @@ def main(argv: list[str] | None = None) -> int:
     if ns.phase == "arm" and not ns.arm:
         raise SystemExit("--phase arm needs --arm")
     from yeto.rl import learner
+    from yeto.rl.engine import run_config
     from yeto.rl.engine.miles_adapter import entry
 
     entry.run_ports_island = make_phase(ns)
+    run_config.resolve_rl_run_config = with_trainer_edges(run_config.resolve_rl_run_config)
     learner.main(argv[split + 1:])
     return 0
 

@@ -214,15 +214,36 @@ def test_rank_info_and_dump_state_on_a_fake_rank(tmp_path):
 def test_container_script_asserts_before_running_arms():
     modal_run = importlib.import_module("modal_run")
     script = modal_run.container_script("a8")
-    order = [script.index(x) for x in ("nvidia-smi", "GPU assertion failed", "miles pin mismatch",
-                                       "--phase dry", "--phase gen", "--arm A1", "--arm A2", "--arm B1 ",
-                                       "--arm B1p", "--arm B2", "--arm RT", "compare.py")]
+    order = [script.index(x) for x in ("trap pack EXIT", "nvidia-smi", "GPU assertion failed", "miles pin mismatch",
+                                       "run_phase dry", "run_phase gen", "run_phase A1 ", "run_phase A2 ",
+                                       "run_phase B1 ", "run_phase B1p ", "run_phase B2 ", "run_phase RT ",
+                                       "compare.py")]
     assert order == sorted(order)
-    assert "NCCL_ALGO=Ring" in script and "NVIDIA H100 80GB HBM3" in script
+    assert "NCCL_ALGO=Ring" in script and "^(NVIDIA H100 80GB HBM3)," in script
     dev = modal_run.container_script("dev-gather")
     assert "NCCL_ALGO" not in dev and "^(NVIDIA A10G|NVIDIA A10)," in dev
-    assert "^(NVIDIA H100 80GB HBM3)," in script
     assert modal_run.PROFILES["a8"]["gpu"] == "H100!:2"
+    # per-phase stall and server-error watchdogs, not only the Sandbox timeout
+    assert f"-gt {modal_run.STALL_MINUTES * 60} ]" in dev and "503 Service Unavailable" in dev
+    assert modal_run.MILES_COMMIT.startswith("2f23a0f") and "db81588406e1" in modal_run.IMAGE
+
+
+def test_stall_watchdog_kills_a_silent_phase(tmp_path):
+    """Run the real run_phase shell function with a phase that never reports progress."""
+    import subprocess
+
+    modal_run = importlib.import_module("modal_run")
+    script = modal_run.container_script("dev-gather", work=str(tmp_path), flags_file="/dev/null")
+    head = script[:script.index("nvidia-smi --query")]
+    head = head.replace("sleep 30", "sleep 1").replace("cd /yeto", "cd " + str(tmp_path))
+    head = head.replace(f"-gt {modal_run.STALL_MINUTES * 60} ]", "-gt 2 ]")
+    body = head
+    # replace the phase command by a silent sleeper
+    body = body.replace("bash -c \"python", "sleep 60; : \"python")
+    proc = subprocess.run(["bash", "-c", body + 'run_phase gen "--phase gen"; echo NOT-REACHED'],
+                          capture_output=True, text=True, timeout=60)
+    assert "STALLED" in (tmp_path / "progress.log").read_text()
+    assert "NOT-REACHED" not in proc.stdout and "=== EVIDENCE_B64 ===" in proc.stdout
 
 
 def test_learner_flags_are_taken_from_the_dry_run_plan():
@@ -263,27 +284,36 @@ def test_argv_and_parsed_disagreement_is_refused(tmp_path):
 FLAGS = (Path(__file__).resolve().parent / "data_e3_learner_flags.txt").read_text()
 
 
-def test_local_dry_run_reproduces_the_container_refusal_and_passes_with_the_profile(monkeypatch):
+def test_local_dry_run_reproduces_the_container_refusal_and_passes_with_the_profile():
     local_dry = importlib.import_module("local_dry")
-    modal_run = importlib.import_module("modal_run")
-    launch = local_dry.build_launch(FLAGS)
-    assert "--balance-data" in launch.argv  # hard-coded by the ports translation
     shim = importlib.import_module("learner_shim")
-    old = shim.argv_check(list(launch.argv), launch.algorithm,
-                          shim.parse_overrides([o for o in modal_run.OVERRIDES["dev-gather"]
-                                                if not o.startswith("balance_data")]))
-    assert any("balance-data" in p for p in shim.summary_problems(old))  # the first DEV-GATHER refusal
+    modal_run = importlib.import_module("modal_run")
+    from yeto.rl import learner
+    from yeto.rl.engine.run_config import resolve_rl_run_config
+
+    # Without the trainer-edge translation the argv carries --balance-data: the DEV-GATHER run 1 refusal.
+    args = learner.parse_args(local_dry.learner_argv(FLAGS))
+    plain = learner.build_ports_launch(args, resolve_rl_run_config(
+        args, model_path="/m", prompt_path="/p", provider=SimpleNamespace(**local_dry.QWEN3_0_6B_PROVIDER),
+        target_modules=list(local_dry.TARGETS), yeto_policy_sync=False))
+    assert "--balance-data" in plain.argv
+    old = shim.argv_check(list(plain.argv), plain.algorithm, shim.parse_overrides(modal_run.OVERRIDES["dev-gather"]))
+    assert any("balance-data" in p for p in shim.summary_problems(old))
+    # The harness uses the production trainer-edge translation: no --balance-data, no override needed.
     summary = local_dry.local_dry("dev-gather", FLAGS)
     assert summary["problems"] == [], summary["problems"]
-    assert summary["argv_profile"]["balance_data"] is False and summary["argv_profile"]["global_batch_size"] == 16
-    assert local_dry.local_dry("a8", FLAGS)["problems"] == []
+    assert "--balance-data" not in summary["argv"] and summary["argv_profile"]["balance_data"] is False
+    assert summary["argv_profile"]["global_batch_size"] == 16
+    # A8 needs the deterministic trainer flag.
+    assert "argv lacks --deterministic-mode" in local_dry.local_dry("a8", FLAGS)["problems"]
+    assert local_dry.local_dry("a8", FLAGS + " --rl-deterministic-trainer")["problems"] == []
 
 
 def test_profile_overrides_are_applied_and_recorded(tmp_path):
     shim = importlib.import_module("learner_shim")
     modal_run = importlib.import_module("modal_run")
     assert "--set hidden_dropout=0.0" in modal_run.container_script("dev-gather")
-    assert "--set deterministic_mode=true" in modal_run.container_script("a8")
+    assert "balance_data" not in modal_run.container_script("a8")
     assert shim.parse_overrides(["hidden_dropout=0.0", "deterministic_mode=true"]) == {
         "hidden_dropout": 0.0, "deterministic_mode": True}
     ns = SimpleNamespace(work=str(tmp_path), phase="dry", arm=None,
@@ -291,3 +321,19 @@ def test_profile_overrides_are_applied_and_recorded(tmp_path):
     args = SimpleNamespace(**{**vars(default_args(1)), "lora_dropout": 0.05})
     assert shim.make_phase(ns)(args, SimpleNamespace(argv=ARGV), _spec()) is None
     assert json.loads((tmp_path / "miles_args.dry.json").read_text())["overrides"]["lora_dropout"] == 0.0
+
+
+def test_server_error_watchdog_kills_a_retrying_phase(tmp_path):
+    import subprocess
+
+    modal_run = importlib.import_module("modal_run")
+    script = modal_run.container_script("dev-gather", work=str(tmp_path), flags_file="/dev/null",
+                                        max_server_errors=5)
+    head = script[:script.index("nvidia-smi --query")].replace("sleep 30", "sleep 1")
+    head = head.replace("cd /yeto", "cd " + str(tmp_path))
+    body = head.replace('bash -c "python', 'bash -c "for i in 1 2 3 4 5 6 7 8; do echo 503 Service Unavailable; '
+                        'done; sleep 60; : python')
+    proc = subprocess.run(["bash", "-c", body + 'run_phase gen "--phase gen"; echo NOT-REACHED'],
+                          capture_output=True, text=True, timeout=60)
+    assert "SERVER-ERRORS" in (tmp_path / "progress.log").read_text()
+    assert "NOT-REACHED" not in proc.stdout

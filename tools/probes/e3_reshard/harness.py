@@ -77,6 +77,17 @@ class Evidence:
             fh.write(json.dumps({"kind": kind, **fields}, sort_keys=True, default=repr) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+        progress_line(f"{self.dir.name} {kind}")
+
+
+def progress_line(text: str) -> None:
+    """Heartbeat for the container's per-phase stall watchdog (E3_PROGRESS_FILE)."""
+    import time
+
+    path = os.environ.get("E3_PROGRESS_FILE")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {text}\n")
 
 
 def read_events(directory: Path) -> list[dict[str, Any]]:

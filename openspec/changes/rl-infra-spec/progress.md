@@ -559,3 +559,7 @@
 - 镜像内 CPU preflight（B2 批准，app ap-AOEKeEOxdqbPDpGJNSPQyD，≤$0.02，已 stopped）：learner 在 import transformer_engine 时因缺 libcuda 失败，没有得到 Bridge/Miles parse 的结论；runtime manifest 的 commits 与当时的 pin 一致。需要 GPU 容器（例如 T4），待批准。证据：`preflight-cpu-20260930/`。
 - 测试：全量 68 failed / 26 errors / 3092 passed，失败 id（94 个）与 integ-decl 9d2029d 基线（3058 passed）一致。
 - 裁定（2026-09-30）：F-R1 绑定只在内存对 E1-D ⑤⑥⑦ 的影响按 (c) 处理，调整用例安排、原判据不变，写入 plan v2 §7.1；已提交配置≠启动配置时重启 → RECOVERY_REQUIRED 记为已知限制，不作为本轮判据；A9 f5 与 E3 plan-v3 一致。
+- 第 3 次（ap-tBFGEHdjRX37cYsbKSWrFu，05:52:49–06:50:39Z，≤$2.12，代码 c1c888e）：GPU 断言（接受 A10G/A10）通过，dry 通过，**生成冻结数据阶段卡住**：共置的 SGLang 引擎对 /generate 返回 400/503，rollout executor 反复重试（stdout 尾部 3094 行 "request failed with server error"），无进展约 58 分钟，主 agent 手动 stop（已核实 stopped/0）。本地 launch.log 为空（旧实现只在结束时读 stdout）。原因：gen 阶段在 parse 之后置 `debug_rollout_only`，没有按上游 train.py 先建 trainer、`update_weights`、`onload_kv`、`prepare_rollout`，引擎没有可服务的权重/KV。证据 `evidence/infra-e3/dev-gather-run3/`（只保留到 stdout 尾部）。
+- 修复（未重跑，等批）：gen 阶段按 train.py 顺序执行；每个 arm 训练后 offload；容器内逐阶段看门狗（20 分钟无进展或 >200 行 5xx 即杀并失败）、任何退出都打包证据；本地实时镜像到 `container.log`、25 分钟无输出终止 Sandbox；pin 改读 `yeto/rl/__init__.py`（2f23a0fc / db815884…）；harness argv 改走生产 trainer 边翻译（`trainer_dp_edges=True`，无 `--balance-data`），A8 用 `--rl-deterministic-trainer`。计划 `plan-v4.md`（判据不变）。
+- 合入 INFRA-E1 补丁 `infra-e1-e3-unbind-after-stop.patch`（rollout→trainer 停 cell 后 `unbind_members`，回退先绑回原 GPU），新增测试；A9 拓扑核对写入 plan-v4。
+- 测试：全量 68 failed, 3109 passed, 49 skipped, 26 errors，失败 id 与基线完全相同。B3 合计 ≤$2.44。

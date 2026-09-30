@@ -8,7 +8,13 @@ frozen rollouts replayed through Miles' own ``--load-debug-rollout-data``
 with the train_parallel_config the new trainer advertised (so the scheduled
 split is exercised inside the fork's object store; the rank probe reads the
 shard back). ``generate_frozen`` writes the frozen rollouts once with
-``--save-debug-rollout-data`` (``debug_rollout_only``, base policy).
+``--save-debug-rollout-data``, following upstream ``train.py``'s start-up
+order exactly (create rollout components -> create the DP=1 trainer ->
+``update_weights`` -> ``onload_kv`` when rollout is offloaded -> per rollout
+``prepare_rollout`` + ``get``), no training step, so the samples come from
+the base policy. DEV-GATHER run 3 (B3) hung here: the earlier version set
+``debug_rollout_only`` after parse and never pushed weights / onloaded the KV
+cache of the colocated engines, which then answered /generate with 400/503.
 
 Nothing in this module runs on CPU; its CPU coverage is the dry-run of
 ``harness.py`` with a fake backend. DEV-GATHER (2xA10G) is its first run.
@@ -38,6 +44,7 @@ class MilesBackend:
         self.micro_batch_size = int(getattr(miles_args, "micro_batch_size", 1) or 1)
         self.runner = LoopRunner()
         self.trainer = None
+        self._controller = None
         self._actor = self._executor = self._disposer = None
 
     # ------------------------------------------------------------------ helpers
@@ -60,6 +67,7 @@ class MilesBackend:
             init_orchestration_script(args, disposer=disposer)
             controller, executor, _ = await create_rollout_components(args)
             disposer.add(controller, executor)
+            self._controller = controller
             actor = None
             if trainer:
                 actor, critic = await create_training_models(args, executor)
@@ -75,18 +83,31 @@ class MilesBackend:
     def _close(self) -> None:
         if self._disposer is not None:
             self.runner.run(self._disposer.__aexit__(None, None, None))
-        self._disposer = self._executor = self._actor = self.trainer = None
+        self._disposer = self._executor = self._actor = self.trainer = self._controller = None
 
     # ------------------------------------------------------------------ phases
-    def generate_frozen(self, count: int) -> None:
-        args = self._args(debug_rollout_only=True, save_debug_rollout_data=self.frozen_template,
+    def generate_frozen(self, count: int, progress=None) -> None:
+        from miles.ray.placement_group import update_weights
+
+        args = self._args(actor_num_gpus_per_node=1, save_debug_rollout_data=self.frozen_template,
                           load_debug_rollout_data=None)
-        executor, _ = self._open(args, trainer=False)
+        executor, actor = self._open(args, trainer=True)
         try:
-            # split needs a config; dp=1 here, the arms re-split the saved samples themselves.
-            self.runner.run(executor.set_train_parallel_config({"dp_size": 1, **SCHEDULE}))
+            if progress is not None:
+                progress("gen components up")
+            self.runner.run(update_weights(args, actor, executor, self._controller))
+            if progress is not None:
+                progress("gen weights published")
+            if getattr(args, "offload_rollout", False):
+                self.runner.run(self._controller.onload_kv())
             for rollout_id in range(count):
-                self.runner.run(executor.get(rollout_id))
+                self.runner.run(self._controller.prepare_rollout(rollout_id))
+                pack = self.runner.run(executor.get(rollout_id))
+                from miles.utils.data import remove_rollout_data_refs
+
+                remove_rollout_data_refs(args, pack)
+                if progress is not None:
+                    progress(f"gen rollout {rollout_id} saved")
         finally:
             self._close()
 
@@ -111,6 +132,8 @@ class MilesBackend:
             outputs = list(self.runner.run(self._actor.train(rollout_id, pack)) or [])
         finally:
             self.trainer._release(self.trainer._args, pack)
+        # upstream train.py: offload (or clear memory) after every train step
+        self.trainer.offload()
         norms = [float(n) for n in self.plugin(GRAD_NORM)]
         lrs = [list(v) for v in self.plugin(APPLIED_LRS)]
         self.plugin(STEP_LOSSES)  # drained so a later save_cut sees a step boundary

@@ -16,6 +16,7 @@ only the image pull secret (never printed, never in the task env).
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import sys
 import time
@@ -23,9 +24,15 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-         "17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef")  # tag 5c1b49e-9f29303
-MILES_COMMIT = "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"
+def _pins() -> tuple[str, str]:
+    """MILES_NEXT_IMAGE digest and MILES_NEXT_COMMIT of this checkout (read as text: no yeto import)."""
+    text = (REPO / "yeto" / "rl" / "__init__.py").read_text()
+    image = re.search(r'MILES_NEXT_IMAGE = \(\s*"docker:([^"]+)"\s*"([^"]+)"', text)
+    commit = re.search(r'MILES_NEXT_COMMIT = "([0-9a-f]{40})"', text)
+    return image.group(1) + image.group(2), commit.group(1)
+
+
+IMAGE, MILES_COMMIT = _pins()
 ARMS = ("A1", "A2", "B1", "B1p", "B2", "RT")
 # plan-v3: GPU, expected nvidia-smi name, hard timeout (s), whether determinism env is mandatory
 PROFILES = {
@@ -33,46 +40,83 @@ PROFILES = {
     "a8": {"gpu": "H100!:2", "expect": ("NVIDIA H100 80GB HBM3",), "timeout": 7200, "deterministic": True},
 }
 # plan-v3 §0 profile: every dropout 0 (Megatron defaults hidden/attention to 0.1); A8 adds deterministic mode.
-# balance_data: the ports translation (miles_adapter/config.py) always emits --balance-data, which the
-# first-round DP certification refuses (review H1); the harness profile turns it off.
-OVERRIDES = {"dev-gather": ["lora_dropout=0.0", "hidden_dropout=0.0", "attention_dropout=0.0",
-                            "balance_data=false"]}
-OVERRIDES["a8"] = OVERRIDES["dev-gather"] + ["deterministic_mode=true"]
+# Profile overrides applied after parse (recorded in miles_args.*.json). --balance-data is NOT
+# overridden: the harness uses the production trainer-edge translation (RLRunConfig.trainer_dp_edges,
+# the field --rl-elastic-trainer-edges sets), which omits it. A8's determinism comes from the learner flag
+# --rl-deterministic-trainer (Megatron --deterministic-mode + NCCL/cuBLAS/TF32 env), checked in local_dry.
+# Megatron hidden/attention dropout have no yeto flag (default 0.1): set to 0 here.
+OVERRIDES = {"dev-gather": ["hidden_dropout=0.0", "attention_dropout=0.0"]}
+OVERRIDES["a8"] = list(OVERRIDES["dev-gather"])
+REQUIRED_ARGV = {"dev-gather": (), "a8": ("--deterministic-mode",)}
 DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "NVIDIA_TF32_OVERRIDE": "0"}
 
 
-def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = "/work/learner_flags.txt") -> str:
+STALL_MINUTES = 20  # a phase with no new progress line for this long is killed (fail)
+MAX_SERVER_ERRORS = 200  # 5xx / "request failed with server error" lines in one phase -> fail
+LOCAL_SILENCE_MINUTES = 25  # the local launcher stops the Sandbox when no output arrives for this long
+
+
+def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = "/work/learner_flags.txt",
+                     stall_minutes: int = STALL_MINUTES, max_server_errors: int = MAX_SERVER_ERRORS) -> str:
     p = PROFILES[profile]
     env = " ".join(f"{k}={shlex.quote(v)}" for k, v in DETERMINISM_ENV.items()) if p["deterministic"] else ""
     shim = "/yeto/tools/probes/e3_reshard/learner_shim.py"
     sets = " ".join(f"--set {o}" for o in OVERRIDES[profile])
-    run = (f'env {env} PYTHONPATH=/root/miles:/sgl-workspace/sglang/python:/yeto:${{PYTHONPATH}} '
-           f'bash -c "python {shim} --work {work} {sets} %s -- $(cat {flags_file})"')
+    # bash -c re-parses the shell-quoted learner flags (e.g. the chat-template JSON).
+    cmd = (f'env {env} PYTHONPATH=/root/miles:/sgl-workspace/sglang/python:/yeto:${{PYTHONPATH:-}} '
+           f'bash -c "python {shim} --work {work} {sets} $2 -- $(cat {flags_file})"')
     lines = [
-        "set -euo pipefail",
+        "set -uo pipefail",
         "cd /yeto",  # the reward module (gsm8k_reward.py) is imported from the working directory
         "export LEARNER_ID=0",  # the dry-run learner line reads $LEARNER_ID
-        f"mkdir -p {work}",
+        f"mkdir -p {work}/logs",
+        f"export E3_PROGRESS_FILE={work}/progress.log",
+        # Evidence is packed on EVERY exit (success, failure, stall kill).
+        "pack() {",
+        f"  tar czf /work/e3-evidence.tgz -C {work} --exclude=cuts --exclude='arms/*/state' --exclude=frozen . "
+        "2>/dev/null",
+        '  echo "=== EVIDENCE_B64 ==="; base64 -w0 /work/e3-evidence.tgz; echo',
+        "}",
+        "trap pack EXIT",
+        "progress() { echo \"$(date -u +%FT%TZ) $*\" | tee -a $E3_PROGRESS_FILE; }",
+        # run_phase NAME ARGS: stall / server-error watchdog per phase (not only the Sandbox timeout).
+        "run_phase() {",
+        f'  local log={work}/logs/$1.log; progress "phase $1 start"',
+        f'  ( {cmd} ) > "$log" 2>&1 &',
+        "  local pid=$!",
+        "  while kill -0 $pid 2>/dev/null; do",
+        "    sleep 30",
+        "    local age=$(( $(date +%s) - $(stat -c %Y $E3_PROGRESS_FILE) ))",
+        "    local errs=$(grep -cE '503 Service Unavailable|request failed with server error' \"$log\" || true)",
+        f'    if [ $age -gt {stall_minutes * 60} ]; then progress "phase $1 STALLED ${{age}}s"; '
+        'kill -TERM $pid; sleep 10; kill -KILL $pid 2>/dev/null; tail -200 "$log"; exit 5; fi',
+        f'    if [ "$errs" -gt {max_server_errors} ]; then progress "phase $1 SERVER-ERRORS $errs"; '
+        'kill -TERM $pid; sleep 10; kill -KILL $pid 2>/dev/null; tail -200 "$log"; exit 6; fi',
+        "  done",
+        "  wait $pid; local rc=$?",
+        '  tail -40 "$log"; progress "phase $1 rc=$rc"',
+        '  if [ $rc -ne 0 ]; then exit 7; fi',
+        "}",
         # GPU name assertion before anything else (plan-v3 §0)
         f"nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | tee {work}/gpus.txt",
         # DEV-GATHER (debug, no cross-model bitwise comparison) accepts A10G or A10 (main agent ruling);
         # A8 stays strict. The actual name and driver are in gpus.txt.
         "n=$(grep -c . {w}/gpus.txt); bad=$(grep -vcE '^({names}),' {w}/gpus.txt || true)".format(
             w=work, names="|".join(p["expect"])),
-        f'if [ "$n" != 2 ] || [ "$bad" != 0 ]; then echo "GPU assertion failed"; exit 3; fi',
+        'if [ "$n" != 2 ] || [ "$bad" != 0 ]; then echo "GPU assertion failed"; exit 3; fi',
         f"test \"$(git --git-dir=/root/miles/.git rev-parse HEAD)\" = {MILES_COMMIT} || {{ echo 'miles pin mismatch'; exit 4; }}",
-        f"PYTHONPATH=/root/miles:/yeto python -m yeto.rl.engine.runtime_manifest --image {IMAGE} --out {work}/runtime_manifest.json",
-        "ray start --head --port=6379 --num-gpus=2 --disable-usage-stats",
+        f"PYTHONPATH=/root/miles:/yeto python -m yeto.rl.engine.runtime_manifest --image {IMAGE} "
+        f"--out {work}/runtime_manifest.json || exit 8",
+        "ray start --head --port=6379 --num-gpus=2 --disable-usage-stats > /dev/null || exit 9",
         "export RAY_ADDRESS=127.0.0.1:6379",
-        run % "--phase dry",
-        run % "--phase gen",
+        'run_phase dry "--phase dry"',
+        'run_phase gen "--phase gen"',
     ]
-    lines += [run % f"--phase arm --arm {arm}" for arm in ARMS]
+    lines += [f'run_phase {arm} "--phase arm --arm {arm}"' for arm in ARMS]
     lines += [
+        'progress "compare start"',
         f"PYTHONPATH=/root/miles:/yeto python /yeto/tools/probes/e3_reshard/compare.py {work} "
-        f"|| echo compare-failed",
-        f"tar czf /work/e3-evidence.tgz -C {work} --exclude=cuts --exclude='arms/*/state' --exclude=frozen .",
-        "echo === EVIDENCE_B64 ===; base64 -w0 /work/e3-evidence.tgz; echo",
+        f"|| progress compare-failed",
     ]
     return "\n".join(lines)
 
@@ -116,19 +160,40 @@ def main(argv: list[str]) -> int:  # pragma: no cover - needs Modal credentials 
 
 def _run(app, image, profile, p, out):  # pragma: no cover - needs Modal
     import base64
+    import threading
 
     import modal
 
-    sb = modal.Sandbox.create("bash", "-c", container_script(profile), app=app, image=image, gpu=p["gpu"],
-                              cpu=8.0, memory=65536, timeout=p["timeout"])
+    # 2>&1: one stream, mirrored line by line into <out>/container.log while it runs.
+    sb = modal.Sandbox.create("bash", "-c", container_script(profile) + " 2>&1", app=app, image=image,
+                              gpu=p["gpu"], cpu=8.0, memory=65536, timeout=p["timeout"])
     (out / "resources.txt").open("a").write(
         f"{app.app_id} {sb.object_id} {profile} {time.strftime('%FT%TZ', time.gmtime())}\n")
+    last = [time.monotonic()]
+    stop = threading.Event()
+
+    def silence_guard():
+        while not stop.wait(30):
+            if time.monotonic() - last[0] > LOCAL_SILENCE_MINUTES * 60:
+                (out / "local_silence_kill.txt").write_text(time.strftime("%FT%TZ", time.gmtime()) + "\n")
+                sb.terminate()
+                return
+
+    threading.Thread(target=silence_guard, daemon=True).start()
+    chunks = []
+    with open(out / "container.log", "a", encoding="utf-8") as log:
+        for line in sb.stdout:
+            last[0] = time.monotonic()
+            chunks.append(line)
+            if "=== EVIDENCE_B64 ===" not in line and len(line) < 100000:
+                log.write(line)
+                log.flush()
+    stop.set()
     sb.wait(raise_on_termination=False)
-    stdout, stderr = sb.stdout.read(), sb.stderr.read()
-    (out / "stdout.txt").write_text(stdout.split("=== EVIDENCE_B64 ===")[0])
-    (out / "stderr_tail.txt").write_text(stderr[-20000:])
+    stdout = "".join(chunks)
     if "=== EVIDENCE_B64 ===" in stdout:
-        (out / "evidence.tgz").write_bytes(base64.b64decode(stdout.split("=== EVIDENCE_B64 ===", 1)[1].strip()))
+        payload = stdout.split("=== EVIDENCE_B64 ===", 1)[1].strip().split()[0]
+        (out / "evidence.tgz").write_bytes(base64.b64decode(payload))
     (out / "returncode.txt").write_text(str(sb.returncode))
     return 0
 
