@@ -541,3 +541,75 @@ def test_container_script_merges_stderr():
     modal_run = importlib.import_module("modal_run")
     script = modal_run.container_script("dev-gather")
     assert script.splitlines()[1] == "exec 2>&1" and "RESULT.json" in script
+
+
+# ---------------------------------------------------------------- A8 data safety net
+
+
+def test_packed_states_let_compare_run_offline(tmp_path):
+    """pack_states in the container -> pulled files -> compare --offline gives the same G1-G6."""
+    pack_states = importlib.import_module("pack_states")
+    harness.run_all(lambda arm: FakeBackend(), tmp_path)
+    online = compare.judge(tmp_path, gbs=GBS, mbs=MBS, merge=_merge, load=_load)
+    index = pack_states.pack(tmp_path, _merge, _load)
+    assert len(index["files"]) == 15 and not index.get("errors")
+    assert index["fields"]["B1_restored"]["param"] == index["fields"]["A1_s2"]["param"]
+    # offline: per-rank dumps gone, only events + packed states
+    import shutil
+
+    for arm in ("A1", "A2", "B1", "B1p", "B2", "RT"):
+        shutil.rmtree(tmp_path / "arms" / arm / "state")
+
+    def no_merge(_states):
+        raise compare.Unavailable("offline")
+
+    offline = compare.judge(tmp_path, gbs=GBS, mbs=MBS, merge=no_merge, load=_load)
+    assert offline["decision"] == online["decision"] == "go" and offline["unavailable"] == []
+    for g in ("G1", "G2", "G3", "G5"):
+        assert offline[g] == online[g]
+
+
+def test_offline_compare_on_events_only_reports_incomplete(tmp_path):
+    harness.run_all(lambda arm: FakeBackend(), tmp_path)
+    import shutil
+
+    for arm in ("A1", "A2", "B1", "B1p", "B2", "RT"):
+        shutil.rmtree(tmp_path / "arms" / arm / "state")
+    res = compare.main([str(tmp_path), "--offline", "--gbs", str(GBS), "--mbs", str(MBS)])
+    result = json.loads((tmp_path / "RESULT.json").read_text())
+    assert res == 0 and result["decision"].startswith("incomplete") and result["G1"]["pass"] is None
+    assert result["G2"]["pass"] and result["G3"]["pass"]
+
+
+def test_pull_packed_copies_verifies_and_releases(tmp_path):
+    modal_run = importlib.import_module("modal_run")
+    pack_states = importlib.import_module("pack_states")
+    work = tmp_path / "work"
+    harness.run_all(lambda arm: FakeBackend(), work)
+    pack_states.pack(work, _merge, _load)
+    released = []
+
+    class FakeSandbox:
+        def open(self, path, mode="r"):
+            if path == modal_run.PULLED_FLAG:
+                released.append(path)
+                return open(tmp_path / "pulled", mode)
+            return open(str(path).replace("/work/e3", str(work)), mode)
+
+    import io
+
+    log = io.StringIO()
+    report = modal_run.pull_packed(FakeSandbox(), tmp_path / "out", touch=lambda: None, log=log)
+    assert len(report["ok"]) == 15 and not report["bad"] and released
+    assert "15 ok" in log.getvalue()
+
+
+def test_resized_args_sets_world_size_with_the_trainer_size():
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import resized_args
+
+    base = SimpleNamespace(actor_num_nodes=1, actor_num_gpus_per_node=2, world_size=2, lr=1e-5)
+    new = resized_args(base, 1)
+    assert (new.actor_num_gpus_per_node, new.world_size) == (1, 1)
+    assert (base.actor_num_gpus_per_node, base.world_size) == (2, 2) and new.lr == base.lr
+    with pytest.raises(RuntimeError, match="single-node"):
+        resized_args(SimpleNamespace(actor_num_nodes=2, actor_num_gpus_per_node=2), 1)

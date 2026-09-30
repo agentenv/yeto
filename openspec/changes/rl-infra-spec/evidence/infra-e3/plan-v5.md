@@ -1,4 +1,18 @@
-> **已被 `plan-v5.md` 取代**（数据兜底、G1 口径写明；判据不变）。保留供追溯。
+# E3 待验证计划 v5：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v4.md；运行前提交，判据与容差不放宽）
+
+与 v4 的差别：
+
+1. **A8 数据兜底**（DEV-GATHER 第 7 次 compare 出错且状态文件未取回的教训）：
+   - 容器退出（成功或失败）前运行 `pack_states.py`：把每个 (arm, tag) 的各 rank 状态用 fork-M5 合并成一个汇总文件 `packed/<arm>_<tag>.pt`（adapter、FP32 主参数、exp_avg、exp_avg_sq、step、hyper、scheduler、Megatron 计数与 weight_version、各 rank RNG 摘要；`s8` 只留 FP32 主参数以控制大小，按 LoRA r16 约 1000 万参数估计总计约 1.8 GB），`packed/index.json` 记录每个文件的字节数、sha256 与逐字段摘要；
+   - 容器输出 `=== PACKED READY ===` 后最多等待 20 分钟，本地 `modal_run` 经 Sandbox 文件接口逐块拷出并校验 sha256，写回释放标记后容器才打包事件证据并退出（等待期间 H100 最多多花约 $2.6，仍在 $15.8 上限内）；
+   - 本地离线重跑入口：`python compare.py <取回目录> --offline`，只用事件与 packed 文件即可算出 G1–G6；缺状态文件时只报告能算的部分，判定为 `incomplete`，不给 go/no-go。已用 DEV-GATHER 第 7 次取回的事件演练（`dev-gather-run7/offline_drill_RESULT.json`：G2、G3（事件部分）、G4（loss/grad_norm 部分）、G5、G6（loss 部分）可算，G1 与状态比较部分如实为 unavailable）。
+2. **G1 比较口径写明（不放宽）**：G1 只比较"恢复后的 trainer 汇总状态"与"同一个 cut 的源状态"——B1、B1p 对 A1 的 `s2`（C1），B2 对 A2 的 `s2`（C2），RT 对 A1 的 `s2`（C1→C1′→DP1 往返）；逐位比较的字段为 adapter、FP32 主参数、exp_avg、exp_avg_sq、每个参数的 step、scheduler、Megatron 计数与 weight_version（v3 已列出计数，compare 之前漏比，本版补上）；hyper 与 shape 同样记录并报告差异。**不同 cut 之间（C1 与 C2）从不比较。**
+3. **"A1/A2 步 3 grad_norm 相同但 C1/C2 摘要不同"的静态结论**：C1 与 C2 来自两条不同的训练（A1 为 DP1、A2 为 DP2），DP 不同导致梯度归约顺序不同，FP32 主参数与动量可以在末位不同；前向用的是 bf16 模型副本，末位差异在转 bf16 后通常消失，因此逐样本 loss 与 grad_norm 可以逐位相同而 FP32 状态摘要不同。这与 G1 的口径不冲突（G1 不跨 cut 比较），G4 也只比较同一 cut 出发的两条 arm（A1 对 B1、A2 对 B2），不会因此误判。A8 的 `index.json` 逐字段摘要会给出 C1 与 C2 究竟在哪些字段不同（仅作记录，不是判据）。
+4. **生产改动单列**：`trainer_rebuild.resized_args` 同步设置 `world_size`（已有单独测试）；E2 f898516（cut 携带 `weight_version`）合入集成分支后，E3 补"重建后重发版本连续"测试。
+
+以下保留 v4 全文。
+
+---
 
 # E3 待验证计划 v4：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v3.md；判据与容差不变，运行前提交）
 

@@ -6,6 +6,7 @@ states of one (tp, pp) (fork-M5 ``merge_named_optimizer_states`` in the
 container; a test stand-in on CPU).
 
 usage (container): python compare.py <work> [--gbs 16 --mbs 1] -> <work>/RESULT.json
+usage (offline):   python compare.py <retrieved work dir> --offline   (events + packed/*.pt)
 """
 
 from __future__ import annotations
@@ -38,11 +39,20 @@ def _load(path: str) -> dict:
     return from_safe(torch.load(path, map_location="cpu", weights_only=True))
 
 
+class Unavailable(LookupError):
+    """The state files a check needs were not retrieved (offline run on events only)."""
+
+
 def gathered(work: Path, arm: str, tag: str, merge: Callable, load: Callable = _load) -> dict:
+    packed = Path(work) / "packed" / f"{arm}_{tag}.pt"
+    if packed.is_file():  # pack_states.py output (container) or retrieved copy (offline)
+        return load(str(packed))
     events = read_events(Path(work) / "arms" / arm)
     dump = next((e for e in events if e["kind"] == "dump" and e["tag"] == tag), None)
     if dump is None:
         raise KeyError(f"{arm}: no dump {tag}")
+    if not all(Path(r["path"]).is_file() for r in dump["ranks"]):
+        raise Unavailable(f"{arm}/{tag}: neither packed nor per-rank state files are present")
     states = [load(r["path"]) for r in dump["ranks"]]
     import torch
 
@@ -53,7 +63,9 @@ def gathered(work: Path, arm: str, tag: str, merge: Callable, load: Callable = _
                 if not torch.equal(v, s[key][n]):
                     raise AssertionError(f"{arm}/{tag}: DP ranks hold different {key} {n}")
     return {"adapter": first["adapter"], "optimizer": merge([s["optimizer_named"] for s in states]),
-            "scheduler": first["scheduler"], "rng": sorted(r["digest"] for r in dump["ranks"]),
+            "scheduler": first["scheduler"],
+            "counters": {"megatron": first.get("megatron_counters") or {},
+                         "weight_version": first.get("weight_version")},
             "rank_rng": {json.dumps(s["coord"], sort_keys=True): s["rng_digest"] for s in states}}
 
 
@@ -82,6 +94,8 @@ def bitwise_problems(a: dict, b: dict) -> list[str]:
                 out.append(f"{n}.{k} (scalar)")
     if a["scheduler"] != b["scheduler"]:
         out.append("scheduler")
+    if a.get("counters") != b.get("counters"):
+        out.append(f"counters {a.get('counters')} != {b.get('counters')}")
     return out
 
 
@@ -181,57 +195,81 @@ def _mean_loss(work: Path, arm: str, step: int) -> float:
     return sum(values) / len(values) if values else math.nan
 
 
+def _restore_rng_problems(work: Path) -> list[str]:
+    def rng(arm):
+        restore = next(e for e in read_events(Path(work) / "arms" / arm) if e["kind"] == "restore")
+        return sorted(r["rng_digest"] for r in restore["ranks"])
+
+    return [] if rng("B1") == rng("B1p") else ["restored RNG digests differ (restore events)"]
+
+
 def judge(work: Path, *, gbs: int, mbs: int, merge: Callable, load: Callable = _load) -> dict[str, Any]:
     work = Path(work)
     G = lambda arm, tag: gathered(work, arm, tag, merge, load)  # noqa: E731
     dp = {"A1": 1, "A2": 2, "B1": 2, "B1p": 2, "B2": 1, "RT": 1}
     res: dict[str, Any] = {}
-    a1s2, a2s2 = G("A1", "s2"), G("A2", "s2")
-    b1r, b2r, rtr = G("B1", "restored"), G("B2", "restored"), G("RT", "restored")
-    res["G1"] = {"B1_vs_C1": bitwise_problems(a1s2, b1r), "B2_vs_C2": bitwise_problems(a2s2, b2r),
-                 "RT_vs_C1": bitwise_problems(a1s2, rtr)}
-    res["G1"]["pass"] = not any(res["G1"].values())
+    unavailable: list[str] = []
+
+    def state(arm: str, tag: str):
+        try:
+            return G(arm, tag)
+        except Unavailable as exc:
+            unavailable.append(str(exc))
+            return None
+
+    a1s2, a2s2 = state("A1", "s2"), state("A2", "s2")
+    b1r, b2r, rtr = state("B1", "restored"), state("B2", "restored"), state("RT", "restored")
+    if None in (a1s2, a2s2, b1r, b2r, rtr):
+        res["G1"] = {"pass": None, "unavailable": True}
+    else:
+        res["G1"] = {"B1_vs_C1": bitwise_problems(a1s2, b1r), "B2_vs_C2": bitwise_problems(a2s2, b2r),
+                     "RT_vs_C1": bitwise_problems(a1s2, rtr)}
+        res["G1"]["pass"] = not any(res["G1"].values())
     res["G2"] = {"A1_B1": g2(work, "A1", "B1", gbs=gbs, mbs=mbs, dp=dp),
                  "A2_B2": g2(work, "A2", "B2", gbs=gbs, mbs=mbs, dp=dp)}
     res["G2"]["pass"] = not res["G2"]["A1_B1"] and not res["G2"]["A2_B2"]
-    b1s3, b1ps3 = G("B1", "s3"), G("B1p", "s3")
-    b1pr = G("B1p", "restored")
-    g3 = bitwise_problems(b1s3, b1ps3)
+    b1s3, b1ps3 = state("B1", "s3"), state("B1p", "s3")
+    b1pr = state("B1p", "restored")
+    g3 = bitwise_problems(b1s3, b1ps3) if None not in (b1s3, b1ps3) else []
     if _losses(_train(work, "B1", 3)) != _losses(_train(work, "B1p", 3)):
         g3.append("per-sample losses differ")
     if _grad_norm(work, "B1", 3) != _grad_norm(work, "B1p", 3):
         g3.append("grad_norm differs")
-    if b1r["rank_rng"] != b1pr["rank_rng"]:
+    if None in (b1r, b1pr):
+        g3 += _restore_rng_problems(work)  # same fact from the restore events
+    elif b1r["rank_rng"] != b1pr["rank_rng"]:
         g3.append("restored RNG digests differ")
-    res["G3"] = {"problems": g3, "pass": not g3}
+    res["G3"] = {"problems": g3, "pass": not g3, "states_checked": None not in (b1s3, b1ps3)}
     g4: dict[str, Any] = {}
     for ref, new, ref_before, new_before in (("A1", "B1", a1s2, b1r), ("A2", "B2", a2s2, b2r)):
-        after_ref, after_new = G(ref, "s3"), G(new, "s3")
-        n = numeric(ref_before, after_ref, new_before, after_new)
+        after_ref, after_new = state(ref, "s3"), state(new, "s3")
+        states_ok = None not in (ref_before, new_before, after_ref, after_new)
+        n = numeric(ref_before, after_ref, new_before, after_new) if states_ok else {}
         problems = []
         if _losses(_train(work, ref, 3)) != _losses(_train(work, new, 3)):
             problems.append("per-sample loss not bitwise equal")
-        for name, ea in after_ref["optimizer"].items():
+        for name, ea in (after_ref["optimizer"].items() if states_ok else ()):
             import torch
 
             if not torch.equal(torch.as_tensor(ea["scalars"].get("step")),
                                torch.as_tensor(after_new["optimizer"][name]["scalars"].get("step"))):
                 problems.append(f"step differs for {name}")
                 break
-        if after_ref["scheduler"] != after_new["scheduler"]:
+        if states_ok and after_ref["scheduler"] != after_new["scheduler"]:
             problems.append("scheduler differs")
         gr, gn = _grad_norm(work, ref, 3), _grad_norm(work, new, 3)
         n["grad_norm_rel"] = abs(gr - gn) / abs(gr) if gr else math.inf
         if not n["grad_norm_rel"] <= GRAD_NORM_REL:
             problems.append(f"grad_norm rel {n['grad_norm_rel']}")
-        if not n["update_rel_l2"] <= UPDATE_REL_L2:
-            problems.append(f"update rel L2 {n['update_rel_l2']}")
-        if not n["sign_agreement"] >= SIGN_AGREEMENT:
-            problems.append(f"sign agreement {n['sign_agreement']}")
-        for key in ("exp_avg_rel_l2", "exp_avg_sq_rel_l2"):
-            if not n[key] <= MOMENT_REL_L2:
-                problems.append(f"{key} {n[key]}")
-        g4[f"{ref}_{new}"] = {**n, "problems": problems}
+        if states_ok:
+            if not n["update_rel_l2"] <= UPDATE_REL_L2:
+                problems.append(f"update rel L2 {n['update_rel_l2']}")
+            if not n["sign_agreement"] >= SIGN_AGREEMENT:
+                problems.append(f"sign agreement {n['sign_agreement']}")
+            for key in ("exp_avg_rel_l2", "exp_avg_sq_rel_l2"):
+                if not n[key] <= MOMENT_REL_L2:
+                    problems.append(f"{key} {n[key]}")
+        g4[f"{ref}_{new}"] = {**n, "problems": problems, "states_checked": states_ok}
     g4["pass"] = not any(v["problems"] for v in g4.values() if isinstance(v, dict))
     res["G4"] = g4
     g5 = []
@@ -246,14 +284,17 @@ def judge(work: Path, *, gbs: int, mbs: int, merge: Callable, load: Callable = _
                              r.get("megatron_tracker_digest")) for r in info["ranks"])
     if seeds["B1"] != seeds["B1p"]:
         g5.append("fresh seeds differ between B1 and B1p (not reproducible)")
-    if b1r["rank_rng"] != b1pr["rank_rng"]:
+    if None in (b1r, b1pr):
+        g5 += _restore_rng_problems(work)
+    elif b1r["rank_rng"] != b1pr["rank_rng"]:
         g5.append("restored RNG digests differ between B1 and B1p")
     res["G5"] = {"problems": g5, "seeds": seeds, "pass": not g5}
     g6 = {}
     for ref, new in (("A1", "B1"), ("A2", "B2")):
         problems = []
-        rel = _rel(_flat(G(ref, "s8"), "param"), _flat(G(new, "s8"), "param"))
-        if not rel <= SHORT_RUN_REL:
+        s8r, s8n = state(ref, "s8"), state(new, "s8")
+        rel = _rel(_flat(s8r, "param"), _flat(s8n, "param")) if None not in (s8r, s8n) else None
+        if rel is not None and not rel <= SHORT_RUN_REL:
             problems.append(f"master rel L2 at step 8: {rel}")
         for step in range(3, 9):
             lr, ln = _mean_loss(work, ref, step), _mean_loss(work, new, step)
@@ -264,7 +305,11 @@ def judge(work: Path, *, gbs: int, mbs: int, merge: Callable, load: Callable = _
         g6[f"{ref}_{new}"] = {"master_rel_l2": rel, "problems": problems}
     g6["pass"] = not any(v["problems"] for v in g6.values() if isinstance(v, dict))
     res["G6"] = g6
-    if not res["G3"]["pass"]:
+    res["unavailable"] = sorted(set(unavailable))
+    if res["unavailable"]:
+        # Offline run on events only: report every check that could run, never a decision.
+        res["decision"] = "incomplete (state files missing)"
+    elif not res["G3"]["pass"]:
         res["decision"] = "inconclusive"
     elif all(res[g]["pass"] for g in ("G1", "G2", "G4", "G5", "G6")):
         res["decision"] = "go"
@@ -280,12 +325,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("work")
     ap.add_argument("--gbs", type=int, default=16)
     ap.add_argument("--mbs", type=int, default=1)
+    ap.add_argument("--offline", action="store_true",
+                    help="retrieved artifacts only (events + packed states): no miles import needed")
     a = ap.parse_args(argv)
-    from miles.backends.megatron_utils.lora.dp_invariant_state import merge_named_optimizer_states
+    if a.offline:
+        def merge(_states):
+            raise Unavailable("offline: per-rank dumps are not merged here; use the packed states")
+    else:
+        from miles.backends.megatron_utils.lora.dp_invariant_state import merge_named_optimizer_states as merge
 
-    result = judge(Path(a.work), gbs=a.gbs, mbs=a.mbs, merge=merge_named_optimizer_states)
+    result = judge(Path(a.work), gbs=a.gbs, mbs=a.mbs, merge=merge)
     (Path(a.work) / "RESULT.json").write_text(json.dumps(result, indent=1, sort_keys=True, default=repr))
-    print(json.dumps({"decision": result["decision"],
+    print(json.dumps({"decision": result["decision"], "unavailable": result["unavailable"],
                       **{g: result[g]["pass"] for g in ("G1", "G2", "G3", "G4", "G5", "G6")}}))
     return 0
 

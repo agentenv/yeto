@@ -51,6 +51,9 @@ REQUIRED_ARGV = {"dev-gather": (), "a8": ("--deterministic-mode",)}
 DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "NVIDIA_TF32_OVERRIDE": "0"}
 
 
+PACKED_MARKER = "=== PACKED READY ==="
+PULLED_FLAG = "/work/pulled"
+PULL_WAIT_S = 1200
 STALL_MINUTES = 20  # a phase with no new progress line for this long is killed (fail)
 MAX_SERVER_ERRORS = 200  # 5xx / "request failed with server error" lines in one phase -> fail
 LOCAL_SILENCE_MINUTES = 25  # the local launcher stops the Sandbox when no output arrives for this long
@@ -74,7 +77,18 @@ def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = 
         f"export E3_PROGRESS_FILE={work}/progress.log",
         # Evidence is packed on EVERY exit (success, failure, stall kill).
         "pack() {",
-        f"  tar czf /work/e3-evidence.tgz -C {work} --exclude=cuts --exclude='arms/*/state' --exclude=frozen . "
+        # Data safety net (also after a failure): pack gathered states and wait until the launcher
+        # pulled them (<= PULL_WAIT_S), so G1-G6 can be recomputed offline if compare fails.
+        f'  if ls {work}/arms/*/state >/dev/null 2>&1; then',
+        f'    echo "$(date -u +%FT%TZ) pack start" >> {work}/progress.log',
+        f"    PYTHONPATH=/root/miles:/yeto python /yeto/tools/probes/e3_reshard/pack_states.py {work} "
+        f"|| echo pack-failed >> {work}/progress.log",
+        f'    echo "{PACKED_MARKER}"',
+        f"    for i in $(seq 1 {PULL_WAIT_S // 5}); do [ -f {PULLED_FLAG} ] && break; sleep 5; done",
+        f'    [ -f {PULLED_FLAG} ] && echo "packed pulled" >> {work}/progress.log',
+        "  fi",
+        f"  tar czf /work/e3-evidence.tgz -C {work} --exclude=cuts --exclude='arms/*/state' --exclude=frozen "
+        "--exclude=packed . "
         "2>/dev/null",
         '  echo "=== EVIDENCE_B64 ==="; base64 -w0 /work/e3-evidence.tgz; echo',
         "}",
@@ -160,6 +174,43 @@ def main(argv: list[str]) -> int:  # pragma: no cover - needs Modal credentials 
         (out / "app_stopped.txt").write_text(f"{app.app_id} {time.strftime('%FT%TZ', time.gmtime())}\n")
 
 
+def pull_packed(sb, dest: Path, *, touch, log, work: str = "/work/e3", chunk: int = 8 << 20) -> dict:
+    """Copy <work>/packed/* out of the running Sandbox, verify sha256, then release the container."""
+    import hashlib
+    import json as _json
+
+    dest.mkdir(parents=True, exist_ok=True)
+    report = {"ok": [], "bad": []}
+    try:
+        with sb.open(f"{work}/packed/index.json", "r") as fh:
+            index = _json.loads(fh.read())
+        (dest / "index.json").write_text(_json.dumps(index, indent=1, sort_keys=True))
+        for name, meta in sorted(index["files"].items()):
+            digest = hashlib.sha256()
+            with sb.open(f"{work}/packed/{name}", "rb") as src, open(dest / name, "wb") as dst:
+                while True:
+                    block = src.read(chunk)
+                    if not block:
+                        break
+                    dst.write(block)
+                    digest.update(block)
+                    touch()
+            (report["ok"] if digest.hexdigest() == meta["sha256"] else report["bad"]).append(name)
+    except Exception as exc:  # noqa: BLE001 - report, never leave the container waiting
+        report["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            with sb.open(PULLED_FLAG, "w") as fh:
+                fh.write("pulled\n")
+        except Exception as exc:  # noqa: BLE001
+            report["release_error"] = repr(exc)
+    (dest / "pull_report.json").write_text(_json.dumps(report, indent=1))
+    log.write(f"[local] pulled packed states: {len(report['ok'])} ok, {len(report['bad'])} bad, "
+              f"error={report.get('error')}\n")
+    log.flush()
+    return report
+
+
 def _run(app, image, profile, p, out):  # pragma: no cover - needs Modal
     import base64
     import threading
@@ -186,6 +237,12 @@ def _run(app, image, profile, p, out):  # pragma: no cover - needs Modal
     with open(out / "container.log", "a", encoding="utf-8") as log:
         for line in sb.stdout:
             last[0] = time.monotonic()
+            if line.strip() == PACKED_MARKER:
+                log.write(line)
+                log.flush()
+                pull_packed(sb, out / "work" / "packed", touch=lambda: last.__setitem__(0, time.monotonic()),
+                            log=log)
+                continue
             chunks.append(line)
             if "=== EVIDENCE_B64 ===" not in line and len(line) < 100000:
                 log.write(line)

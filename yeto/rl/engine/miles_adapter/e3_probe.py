@@ -185,6 +185,8 @@ def dump_state(actor: Any, *, directory: str, tag: str) -> dict[str, Any]:
                 "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
                 "optimizer_named": backend.export_optimizer(actor.optimizer, named),
                 "scheduler": actor.opt_param_scheduler.state_dict(),
+                "megatron_counters": backend.megatron_counters(),
+                "weight_version": getattr(getattr(actor, "weight_updater", None), "weight_version", None),
                 "rng_digest": state_digest(backend.capture_rng()),
             }
     os.makedirs(directory, exist_ok=True)
