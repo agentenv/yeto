@@ -207,6 +207,7 @@ class MilesTrainerGroup:
         self.last_masked_fraction = None
         self.last_step_losses = None
         try:
+            self._reshard_guard(batch)
             if self._check_tokens:  # spec: reject before training
                 require_policy_tokens(batch, policy_token(batch.rollout_id, batch.policy_hash))
             outputs = self._run(self._actor.train(batch.rollout_id, batch.payload))
@@ -283,6 +284,22 @@ class MilesTrainerGroup:
             parameter_layout_hash=self._layout_hash(),
         )
 
+    def _reshard_guard(self, batch: RolloutBatchHandle) -> None:
+        """After a DP change: refuse a batch the fork would split on its unscheduled path (4.6 review M2)."""
+        plan = getattr(self, "_reshard_plan", None)
+        if plan is None:
+            return
+        from .cut_plugin import TRAIN_PARALLEL_CONFIG
+        from .reshard import batch_guard_problems
+
+        configs = [dict(c) for c in self._run(self._actor.run_plugin(TRAIN_PARALLEL_CONFIG, {}))]
+        # One sample per rollout on the GRPO ports path: the fork's rollout id falls back to the sample index.
+        rollout_indices = [i for i, _ in enumerate(s for g in batch.groups for s in g.sample_ids)]
+        problems = batch_guard_problems(plan, rank_configs=configs, rollout_indices=rollout_indices,
+                                        steps=int(getattr(self._args, "num_steps_per_rollout", 1) or 1))
+        if problems:
+            raise TrainStepError("batch refused after a DP change: " + "; ".join(problems))
+
     def _applied_lrs(self) -> tuple[float, ...]:
         per_rank = [list(v) for v in self._run(self._actor.run_plugin(APPLIED_LRS, {}))]
         steps = int(self._args.num_steps_per_rollout)
@@ -352,6 +369,11 @@ class MilesTrainerGroup:
 
     def layout(self) -> dict[str, int]:
         return trainer_layout(self._args)
+
+    def rebind_args(self, args: Any) -> None:
+        """Follow the Miles args of the rebuilt trainer (4.6/4.7: another DP size / bundle set)."""
+        trainer_layout(args)  # validates world % (tp*pp*cp)
+        self._args = args
 
     def save_cut(self, *, epoch: int, context: "CutContext") -> str:
         """Write every rank's shard, then commit the manifest; returns the cut id.
@@ -491,6 +513,73 @@ class MilesTrainerGroup:
                 if r[key] != s[key]:
                     raise CutError(f"{r['path']}: restored {key} differs from the cut")
         return manifest
+
+    def restore_cut_resharded(self, cut_id: str, *, epoch: int, root: str, expect: Any, plan: Any,
+                              certified: Any = None, shared_filesystem: bool = True) -> dict[str, Any]:
+        """Load a cut written at ``plan.source`` DP into this freshly built trainer at ``plan.target`` DP (4.6).
+
+        ``expect`` describes the run with the SOURCE layout (the cut's). The
+        edge is refused before any rank writes when :func:`.reshard.reshard_problems`
+        finds anything (layout other than DP changes, batch/loss normalization,
+        uncertified algorithm, unsupported precision/optimizer) or the ranks
+        cannot read every DP shard. After loading, every rank's re-exported
+        optimizer ranges must equal the gathered cut, the gathered full-state
+        digest must agree across the DP ranks of each (tp, pp), and the RNG
+        source of every rank must match the recorded mapping. As with
+        :meth:`restore_cut`, ANY exception means RECOVERY_REQUIRED.
+        """
+        from dataclasses import replace
+
+        from ..cut import CutError, cut_dir, verify_cut
+        from .cut_plugin import RANK_COORDS, RESTORE_RESHARDED_SHARD
+        from .reshard import ReshardRefused, reshard_problems, rng_mapping
+
+        problems = reshard_problems(plan, args=self._args, spec=self._spec, certified=certified)
+        if not shared_filesystem:
+            problems.append("a DP change needs a shared cut filesystem (every rank reads all DP shards)")
+        if problems:
+            raise ReshardRefused("DP edge refused: " + "; ".join(problems))
+        manifest = verify_cut(root, cut_id, replace(expect, layout=dict(plan.source)), check_files=True)
+        if manifest.epoch > epoch:
+            raise CutError(f"cut epoch {manifest.epoch} is newer than the restoring epoch {epoch}")
+        coords = [dict(c) for c in self._run(self._actor.run_plugin(RANK_COORDS, {}))]
+        actual = self.actual_layout()
+        if actual != dict(plan.target):
+            raise CutError(f"running trainer layout {actual} != planned target {dict(plan.target)}")
+        mapping = rng_mapping(plan, coords, self._args)
+        files = [f.to_dict() for f in manifest.files]
+        results = [
+            dict(r) for r in self._run(
+                self._actor.run_plugin(
+                    RESTORE_RESHARDED_SHARD,
+                    {"directory": str(cut_dir(root, cut_id)), "files": files, "cut_id": cut_id,
+                     "source_dp": int(plan.source["dp"]), "rng_policy": plan.rng_policy},
+                )
+            )
+        ]
+        if len(results) != int(plan.target["world"]):
+            raise CutError(f"{len(results)} ranks restored, target world is {plan.target['world']}")
+        by_group: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for r in results:
+            if r["scheduler_samples"] != manifest.progress.scheduler_samples:
+                raise CutError(f"rank {r['coord']}: scheduler at {r['scheduler_samples']} samples after restore")
+            by_group.setdefault((r["coord"]["tp"], r["coord"]["pp"]), []).append(r)
+        for key, group in sorted(by_group.items()):
+            if len({r["full_state_digest"] for r in group}) != 1:
+                raise CutError(f"tp{key[0]}/pp{key[1]}: DP ranks gathered different states")
+            covered = set().union(*(set(r["optimizer_names"]) for r in group))
+            if not set(group[0]["adapter_names"]) <= covered:
+                raise CutError(f"tp{key[0]}/pp{key[1]}: optimizer ranges do not cover every adapter")
+        expected = {(m["coord"]["tp"], m["coord"]["pp"], m["coord"]["dp"]): m["source"] for m in mapping}
+        for r in results:
+            c = r["coord"]
+            if expected.get((c["tp"], c["pp"], c["dp"])) != r["rng"]:
+                raise CutError(f"rank {c}: RNG {r['rng']} does not follow the recorded mapping")
+        self._reshard_plan = plan  # every later batch is guarded (batch_guard_problems)
+        return {"manifest": manifest, "plan": plan.to_dict(), "rng_mapping": mapping,
+                "full_state_digests": {f"tp{k[0]}_pp{k[1]}": g[0]["full_state_digest"]
+                                       for k, g in sorted(by_group.items())},
+                "ranks": results}
 
 
 def trainer_workers(args: Any) -> int:
