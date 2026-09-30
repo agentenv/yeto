@@ -14,3 +14,11 @@
 - **停止条件**：任一阶段失败即停（`set -e`），不在卡上反复排错；先拉 stdout/stderr 与证据包，再释放。
 - **回收**：Modal `timeout=`；本地独立 watchdog（`timeout` 包裹 + 按 `resources.txt` 中的 app id 在 95 min 时 `modal app stop`）；结束后 `modal app list` 只核实 `infra-v2-b3-devgather-*` 为 stopped、0 tasks。不动他人资源，不做全局清理。
 - **花费台账**：`infra-drafts/gpu-spend.md` 批次 B3。
+
+## 第 2 次运行（2026-09-30，运行前追加）
+
+- 第 1 次（app ap-7XaksVC7xRWXm1UBcRk2Ob，04:56:34–05:00:13，≤$0.30）在容器内 dry 阶段被拒：ports 翻译（`miles_adapter/config.py`）固定输出 `--balance-data`，首轮 DP 认证拒绝它。本地当时只跑了 `yeto launch --dry-run`（只生成 learner 命令行），Miles argv 与重分片检查第一次是在容器里构造的，所以本地没有暴露。
+- 修复（0083a8d）：`local_dry.py` 用与容器相同的步骤构造 Miles argv（`learner.parse_args` → `resolve_rl_run_config`（模型维度用公开 Qwen3-0.6B 配置的 stub，所检查的参数都与它无关）→ `build_ports_launch`），再跑与容器第一步相同的 `argv_check`；不通过则 `modal_run` 不创建 Sandbox。容器内另查 parse 后的参数，并要求它与 argv 一致。harness profile 覆盖 `balance_data=false`（与 dropout=0 一样记录在证据中）。`modal_run` 在任何退出路径上都执行 `modal app stop`，watchdog 仅作兜底。
+- 其他默认项：本地 dry-run 在不加覆盖时只拒绝 `--balance-data` 与 hidden/attention dropout（Megatron 默认 0.1），均已由 profile 覆盖；本地 dry-run 结果 `problems=[]`。
+- 代码：yeto 0083a8d（上传快照 `git archive` + gsm8k_reward.py，源码树 sha256 f422d383…）。其余（资源、上限 $3.3、90 min、停止条件、回收）同上。
+- 线程数 >3000 时不启动。
