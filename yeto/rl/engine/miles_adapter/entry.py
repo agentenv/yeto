@@ -710,7 +710,7 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
     config = getattr(miles_args, "yeto_rl_elastic", None)
     if not config:
         return None
-    from .elastic_wiring import build_elastic
+    from .elastic_wiring import LazyBoardActor, build_elastic
 
     return build_elastic(
         state_dir=config["state_dir"],
@@ -720,6 +720,10 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         initial_config=config["initial_config"],
         runtime_fingerprint=fingerprint,
         declared_cells=tuple(config["declared_cells"]),
+        # 3.3 X5: the island's named ToolWaitBoard actor, created lazily after
+        # connect_island_ray (only when the learner asked for it).
+        **({"tool_wait_board": LazyBoardActor(int(getattr(miles_args, "yeto_rl_learner_id", 0)))}
+           if config.get("tool_wait_board") else {}),
         # 3.8 pause-budget inputs, only when the learner was given them.
         **{k: config[k] for k in ("quorum_timeout_s", "idle_flow_timeout_s", "pause_margin")
            if config.get(k) is not None},

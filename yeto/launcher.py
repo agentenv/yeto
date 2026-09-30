@@ -1039,8 +1039,12 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         # learner never sets it), so that one stays with the island's check.
         check_overlap_eval(placement_kind=placement, eval_interval=eval_interval,
                            eval_uses_snapshots=UNKNOWN)
+    if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
+        raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
              if getattr(args, name, None) is not None]
+    if getattr(args, "rl_elastic_tool_wait_board", False):
+        given.append("--rl-elastic-tool-wait-board")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
@@ -1100,6 +1104,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
                 flags += f" {flag} {value!r}"
     if getattr(args, "rl_overlap_eval", False):
         flags += " --rl-overlap-eval"
+    if getattr(args, "rl_observe_timeline", False):
+        flags += " --rl-observe-timeline"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -1111,6 +1117,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             f" --rl-elastic-initial-config {shlex.quote(args.rl_elastic_initial_config)}"
             f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
         )
+        if getattr(args, "rl_elastic_tool_wait_board", False):
+            flags += " --rl-elastic-tool-wait-board"
         for name, flag in _ELASTIC_PAUSE_FLAGS:
             value = getattr(args, name, None)
             if value is not None:

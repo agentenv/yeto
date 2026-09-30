@@ -233,6 +233,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports fixed partition: run eval overlapped with train/outer sync "
         "(rl-infra-spec 2.3; needs --rl-eval-interval); off by default",
     )
+    rl.add_argument("--rl-observe-timeline", action="store_true",
+                    help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
+    rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
+                    help="--rl-elastic: feed the island's tool-wait board into the drain check "
+                    "(3.3; needs a workload that records tool waits)")
     rl.add_argument(
         "--rl-elastic",
         action="store_true",
