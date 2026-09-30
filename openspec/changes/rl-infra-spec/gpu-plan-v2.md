@@ -314,3 +314,8 @@
 
 ### 9.10 F-E1 第三次（合并 integ-decl c28aaf1 后，运行前；判据同 §9.9，不变）
 - 代码 f76bf1d；dry-run `fe1r/test_fe1r_dryrun.py` 追加断言 Miles argv 含 `--use-miles-router`，1 passed。Miles argv 变化 → 重新取指纹（前缀 `infra-v2-b1-fe1r2fp-20260930-1`），再跑 `infra-v2-b1-fe1r2-20260930-1`（第 1 轮 train up，第 3 轮 train down）。均带 `--modal-retries 0 --modal-timeout-s`、进度看门狗 20 min。两次合计 ≤ $3：指纹运行 watchdog 20 min，正式运行 watchdog 18 min；累计实际将超 $3 即停。
+
+### 9.11 L-D0（主 agent 批准，不计入 task；判据 = local-gpu-plan.md L-D0 原文，不改）
+- 代码 aeaf6e2（合并 integ-decl a382490；launcher `--modal-retries 0` 自动关闭 relaunch）。dry-run `evidence/infra-v2-b1/ld0/test_ld0_dryrun.py` 1 passed：learner 收到 `--rl-deterministic-trainer`，Miles argv 含 `--deterministic-mode`（及 `--sglang-enable-deterministic-inference`），`NCCL_ALGO=Ring`、`CUBLAS_WORKSPACE_CONFIG=:4096:8`、`NVIDIA_TF32_OVERRIDE=0`、`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0` 写入环境并由 connect_island_ray 转发给 Ray worker。
+- 前缀按本 agent 资源纪律用 `infra-v2-b1-d0-{1,2}-20260930`（L-D0 原文示例为 `infra-a-d0-…`，仅名字不同）。Modal `H100!:2`，strict-avg 单岛 + 本机 head，无 eval，3 轮 seed 17，依次运行；外层 30 min，`--modal-timeout-s 2100`，watchdog 35 min，进度看门狗 20 min；最坏合计 $9.2。
+- F-E1/F-E2 因 Modal L40S 无容量暂停（`modal app logs`：waiting to be scheduled on a GPU_L40S worker）。
