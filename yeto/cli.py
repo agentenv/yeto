@@ -274,6 +274,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-eval-interval: eval dataset name")
     rl.add_argument("--rl-eval-samples-per-prompt", type=int, default=None, metavar="N",
                     help="--rl-eval-interval: samples per eval prompt")
+    # Optional eval sampling/length knobs, forwarded verbatim (learner --eval-*).
+    rl.add_argument("--rl-eval-temperature", type=float, default=None, metavar="T",
+                    help="--rl-eval-interval: eval sampling temperature (0 = greedy)")
+    rl.add_argument("--rl-eval-top-p", type=float, default=None, metavar="P",
+                    help="--rl-eval-interval: eval top-p")
+    rl.add_argument("--rl-eval-max-prompt-len", type=int, default=None, metavar="N")
+    rl.add_argument("--rl-eval-max-response-len", type=int, default=None, metavar="N")
+    rl.add_argument("--rl-eval-max-context-len", type=int, default=None, metavar="N")
     rl.add_argument(
         "--dry-run",
         action="store_true",

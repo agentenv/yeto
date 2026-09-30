@@ -956,6 +956,14 @@ _EVAL_LAUNCH_FLAGS = (
     ("rl_eval_dataset_name", "--rl-eval-dataset-name"),
     ("rl_eval_samples_per_prompt", "--rl-eval-samples-per-prompt"),
 )
+# optional eval knobs: launcher flag attr -> learner flag (forwarded when given)
+_EVAL_OPTIONAL_FLAGS = (
+    ("rl_eval_temperature", "--eval-temperature"),
+    ("rl_eval_top_p", "--eval-top-p"),
+    ("rl_eval_max_prompt_len", "--eval-max-prompt-len"),
+    ("rl_eval_max_response_len", "--eval-max-response-len"),
+    ("rl_eval_max_context_len", "--eval-max-context-len"),
+)
 EVAL_ISLAND_DATA_PATH = "~/yeto-rl/eval-heldout.jsonl"
 EVAL_INLINE_MAX_BYTES = 96 * 1024  # shipped inline in the run command (ARG_MAX headroom)
 
@@ -970,6 +978,8 @@ def _check_ports_eval(args, rl_engine: str) -> int | None:
 
     interval = getattr(args, "rl_eval_interval", None)
     given = [flag for name, flag in _EVAL_LAUNCH_FLAGS if getattr(args, name, None) is not None]
+    given += ["--rl-" + flag[2:] for name, flag in _EVAL_OPTIONAL_FLAGS
+              if getattr(args, name, None) is not None]
     args.rl_eval_data_text = None
     if interval is None:
         if given:
@@ -1084,6 +1094,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             f" --eval-dataset-name {shlex.quote(args.rl_eval_dataset_name)}"
             f" --eval-samples-per-prompt {int(args.rl_eval_samples_per_prompt)}"
         )
+        for name, flag in _EVAL_OPTIONAL_FLAGS:
+            value = getattr(args, name, None)
+            if value is not None:
+                flags += f" {flag} {value!r}"
     if getattr(args, "rl_overlap_eval", False):
         flags += " --rl-overlap-eval"
     if getattr(args, "rl_elastic", False):
