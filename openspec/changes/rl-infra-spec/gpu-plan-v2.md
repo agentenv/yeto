@@ -390,3 +390,9 @@
 - 降费（主 agent 批准，不改判据）：E1-D 各项 4 轮、硬超时 25 min；①②③ 合并为一次运行（按事务顺序：up#1 中 ① kill 新 cell 于 `fork_op start issued` → REBUILT_OLD；up#2 中 ② kill 新 cell 于 VERIFYING → REBUILT_OLD；up#3 成功后 down 带 ③ 一次 stop 半失败 → 重试 SUCCEEDED）。
 - Nebius（待 INFRA-E1 发射路径修复 SHA）：先冒烟（1×H100、1 轮、≤$5；VM、私有镜像、岛连本机 head、按 ID 回收并 nebius API 核实），失败即停。通过后 A4 用 Nebius 8×H100 按需实例（目录价 $3.85/GPU·h，下单后按账单核对），`sky launch --down` + autostop + 独立 watchdog 按集群名 `sky down`。
 - 顺序与每项最坏费用同 §9.14/§9.16（E1-D 按上面降费）。每次启动前按全局 $400 与 B1 余额门控，逼近先报告。
+
+### 9.18 E1-A 重跑读取口径与 E1-B 注入更新（主 agent 2026-09-30 指示；运行前提交；判据文字不改）
+- 代码：b0b9773（合并 integ-decl 97d2ca5：`rl_member_publication` 磁带事件；E1-B 注入改为 `--rl-test-inject-lora-perturb EPS`，旧 `--rl-test-inject-weight-override` 删除）。
+- **E1-A (c) 读取口径（运行前固定）**：判据"第 3–7 轮发布成员数为 4，其余为 2"不改。第 r 轮（从 1 计，rollout_id = r−1）生成所用策略为 v_{r−1}；该轮的"发布成员"取磁带上在 `generate(rollout_id=r−1)` 之前、policy_version = r−1 的最后一条 `rl_publication` 或 `rl_member_publication`：前者取 `sync/publication_members`，后者取 `sync/serving_members`（二者合并，按出现顺序取最后一条）。若缩容之后、generate(7) 之前没有任何此类事件体现 2 个成员，则第 8 轮按 v7 的 `rl_publication`（4 成员）计，(c) 判未通过，不另作推算。
+- **E1-B 注入**：`--rl-test-inject-lora-perturb 0.01`（第一次成员更新下发 LoRA 适配器 + 0.01，trainer 随即恢复），预期 check_weights 拒绝新 engine → REBUILT_OLD；判据 E1-B (a)–(d) 不变。(a) 用容器内 router 采样（端口自动发现，运行开头自检 `/worker_inflight` 可达），(c)(d) 用 `fork_probe.py`（learner 同一解释器与环境）。
+- 顺序：当前 watchdog → E1-D → E1-C/A4b（代码 47efd25，不换）完成后，重跑 E1-A（基线 + 切换）与 E1-B（代码 b0b9773，需重取指纹：同参数 `--rl-print-attestation-fingerprint` 或以基线 `rl_driver_start` 为准）。
