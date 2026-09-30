@@ -257,6 +257,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.rollout_cell_names": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
+    "trainable.lora_dropout": _ok,
     "trainable.lora_targets": _check_lora_targets,
     "trainable.target_modules": _ok,
     "trainable.expert_full_count": _check_expert_full,
@@ -347,6 +348,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "yeto_policy_sync": _ok,
     "distributed_timeout_minutes": _ok,
     "deterministic_trainer": _ok,
+    "trainer_dp_edges": _ok,
 }
 
 
@@ -582,7 +584,9 @@ def translate_run_config(
         # LoRA (upstream miles/utils/lora/arguments.py)
         "--lora-rank", str(trainable.lora_rank),
         "--lora-alpha", str(trainable.lora_rank),
-        "--lora-dropout", "0",
+        # "0" (default argv unchanged) unless --rl-lora-dropout
+        "--lora-dropout", (format(trainable.lora_dropout, "g")
+                           if getattr(trainable, "lora_dropout", 0.0) else "0"),
         "--lora-type", "canonical_lora",
         "--target-modules", ",".join(trainable.target_modules),
         # upstream applies the LoRA base CPU backup only under colocate
@@ -623,7 +627,9 @@ def translate_run_config(
         "--over-sampling-batch-size", str(batch.over_sampling_batch_size),
         "--num-steps-per-rollout", str(batch.optimizer_steps),
         "--global-batch-size", str(batch.global_batch),
-        "--balance-data",
+        # E3 DP certification refuses --balance-data (reshard.reshard_problems):
+        # dropped only when trainer DP-change edges are enabled.
+        *(() if getattr(config, "trainer_dp_edges", False) else ("--balance-data",)),
         "--rollout-max-context-len", str(batch.seq_len),
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
         # D3: metadata is extracted inside the rollout process

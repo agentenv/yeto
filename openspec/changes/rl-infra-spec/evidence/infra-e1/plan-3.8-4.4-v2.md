@@ -50,3 +50,14 @@ v1（`plan-3.8-4.4.md`）的拓扑（2×8 卡、8 轮）、"最终 policy hash �
 - §4 探测的口径（审查 M2）：阻塞开始时记录每个目标 worker 的 (name, generation)。之后出现以下任一情况即判定"目标 generation 已死"：worker 列表为空（cell 已停止）、name 或 generation 变化（被 health monitor 以新 generation 拉起）、actor 已死（RayActorError）。其他探测异常一律写入 stderr，并以 "liveness probe failed" 报出，**不算作被 kill**；RESULT 中若出现这类报错，§4 判据 2 判为未通过。
 - watchdog 在两类边上的行为不同（审查 L1）：rollout 边在 watchdog 触发后走 REBUILD_OLD，并恢复旧成员。trainer 边（E3，4.7）的 TrainerTransition 执行期间不检查 watchdog，只在提交前复查一次；若已触发，则**不提交**，转 RECOVERY_REQUIRED，并写 `trainer_recovery_hint`（action=restore_old）。这时 trainer 已经换成目标形状，只能人工或按 hint 恢复。
 - F-R1（审查 L3）：fork 缺口 F-R1 解决之前，**不得认证任何需要在释放出的 trainer GPU 上启动 engine 的 trainer 边**（role-transfer，trainer→rollout 方向），因为 `bind_members` 在真实 fork 上无 cell 可绑。启动期的能力检查没有实现：yeto 侧没有办法从 fork 读出"是否存在可重绑的停止 cell"，只能靠该边真正执行时 `bind_members`/`rebind_cell` 失败，事务再走 REBUILT_OLD。
+
+## 7. F-R1 cell 绑定只在内存：对 E1-D ⑤⑥⑦ 原地重启用例的影响（2026-09-30，运行前评估）
+
+fork `yeto/ports` 2f23a0fc（F-R1）的 cell 绑定（`rebind_cell`/`unbind_cell`、`set_pg_view` 的具名视图）只保存在 `RayWorkerManager` 的内存里。learner 原地重启（`--rl-elastic-restart-attempts`）时，旧 Ray job 连同 fork 控制器一起结束；新 job 按启动参数（placement map 的 `rollout_cells`）重新声明 cell，只启动 `start: true` 的 cell，运行中改过的绑定全部丢失，fork membership epoch 归 0。controller 在 `open()` 时把 fork 实际在役的成员与 journal 提交的成员比对，不一致即判 RECOVERY_REQUIRED，不会自动启停 cell（alignment G11"首版重启回启动形状"仍待用户批准）。据此：
+
+- **⑤（COMMITTED 之后 kill，事务为 up）**：journal 中该请求判 `SUCCEEDED`（`recovered_after_restart`），但重启后 fork 只运行启动时的 cell，与提交的成员（多出 up 加入的 cell）不一致，island 转 **RECOVERY_REQUIRED**。`evidence/infra-e1/plan.md` E1-D ⑤ 原判据"成员 = journal 成员"在现设计下不可达。可选：(a) 按"status=SUCCEEDED 且 island 以 membership mismatch 转 RECOVERY_REQUIRED、不消费数据"判定，属于更改判据，须主 agent 在运行前裁定；(b) 实现"重启后按 journal 重放提交的成员"，这是 G11 的范围，需用户批准；(c) 让 ⑤ 的被杀事务以启动配置为目标（例如先 up，再在 down 的 COMMITTED 后 kill），重启后成员与启动形状一致。
+- **⑥（QUIESCING 中 kill）**：未 release，journal 判 CANCELLED；重启后成员等于启动形状，前提是 journal 最近一次提交的配置也等于启动配置。先 up 再在 down 的 QUIESCING 中 kill 时，提交的成员不等于启动形状，同样会 RECOVERY_REQUIRED。**执行前须让被杀事务之前的已提交配置等于启动配置**，即 ⑥ 只在 epoch 0 上做。
+- **⑦（fork 重启、epoch 归 0）**：`restore_membership_state` 能把 fork 的 epoch 镜像恢复到 journal 的值，但恢复不了绑定和在役集合；两者与启动形状不一致时，结果与 ⑤ 相同。
+- **A9（4.7）**：role-transfer 靠 `bind_members` 做的绑定在重启后丢失；A9 f5（kill learner）因此只能以 RECOVERY_REQUIRED 结束，与 E3 plan 的写法一致。
+
+结论：在 G11 获批并实现"按 journal 重放提交的成员"之前，⑤⑥⑦ 只有在被杀事务之前的已提交配置等于启动配置时，才能得到原判据的结果；否则按原判据应判"未通过（设计限制）"。请主 agent 在运行前从 (a)/(b)/(c) 中选定。

@@ -153,6 +153,8 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    # ports LoRA training-time dropout (default 0 = unchanged argv)
+    parser.add_argument("--rl-lora-dropout", type=float, default=None)
     # Print the attestation runtime_fingerprint (same Miles argv as the island)
     # and exit before Ray/GPU (ports only).
     parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
@@ -170,6 +172,9 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
     # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
     parser.add_argument("--rl-elastic-declare-cells", action="store_true")
+    # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,
+    # wires MilesTrainerOps and the pool GPU ids)
+    parser.add_argument("--rl-elastic-trainer-edges", action="store_true")
     # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
@@ -312,6 +317,8 @@ def _check_ports_infra_switches(args) -> None:
     given = [flag for name, flag in _ELASTIC_COMPANIONS if getattr(args, name, None) is not None]
     if getattr(args, "rl_elastic_tool_wait_board", False):
         given.append("--rl-elastic-tool-wait-board")
+    if getattr(args, "rl_elastic_trainer_edges", False):
+        given.append("--rl-elastic-trainer-edges")
     if getattr(args, "rl_observe_timeline", False) and not ports:
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
@@ -363,6 +370,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     }
     if getattr(args, "rl_elastic_tool_wait_board", False):
         miles_args.yeto_rl_elastic["tool_wait_board"] = True
+    if getattr(args, "rl_elastic_trainer_edges", False):
+        miles_args.yeto_rl_elastic["trainer_edges"] = True
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
             miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))

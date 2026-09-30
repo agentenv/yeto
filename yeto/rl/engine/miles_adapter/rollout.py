@@ -374,8 +374,28 @@ class MilesRolloutPool:
         self._gpus_per_engine = gpus_per_engine
         self._bind_seq = 0
 
+    def live_data_cursor(self) -> tuple[dict[str, int] | None, int | None]:
+        """The data source position NOW (and its reuse-buffer length), read from
+        the rollout executor's data source -- not the last batch's cached value.
+        Catches a cursor moved outside generation (e.g. ``rollout_executor.load``
+        during a trainer rebuild; E2 G-4.5). (None, None) when the executor's
+        data source is not reachable from this process (unknown, never guessed)."""
+        from .rollout_meta_hook import data_cursor as read_cursor
+
+        source = getattr(self._executor, "data_source", None)
+        if source is None:
+            return None, None
+        try:
+            return read_cursor(source)
+        except Exception:  # noqa: BLE001 - unknown
+            return None, None
+
     def data_cursor(self) -> dict[str, int] | None:
-        """4.2: data cursor after the last generated batch (None = unknown)."""
+        """4.2/4.4: the live data cursor when readable, else the cursor after the
+        last generated batch (None = unknown)."""
+        live, _ = self.live_data_cursor()
+        if live is not None:
+            return dict(live)
         return None if self._last_cursor is None else dict(self._last_cursor)
 
     def generate(self, rollout_id: int) -> RolloutBatchHandle:
@@ -519,12 +539,22 @@ class MilesRolloutPool:
         unknown = sorted(set(cells) - set(declared))
         if unknown:
             raise MembershipPlanError(f"cells {unknown} were not declared at startup")
-        manager = self._manager()
+        describe = getattr(self._controller, "describe_cells", None)
+        if callable(describe):
+            # fork F-R1: the controller reports each declared cell's bundles
+            # (reordered bundle indices of the startup placement group)
+            described = dict(self._run(describe()) or {})
+            missing = sorted(set(cells) - set(described))
+            if missing:
+                raise MembershipPlanError(f"the fork does not describe cells {missing}")
+            bundles = {c: list(described[c].get("bundles") or []) for c in cells}
+        else:
+            manager = self._manager()
 
-        async def read() -> dict[str, list[int]]:
-            return {c: list(await manager.get_cell_bundles.remote(c)) for c in cells}
+            async def read() -> dict[str, list[int]]:
+                return {c: list(await manager.get_cell_bundles.remote(c)) for c in cells}
 
-        bundles = self._run(read())
+            bundles = self._run(read())
         return {member_id(c): self._bundles.gpus_for_bundles(b) for c, b in sorted(bundles.items())}
 
     def members_on_gpus(self, gpus: Any, members: Any = None) -> frozenset[str]:
@@ -575,6 +605,23 @@ class MilesRolloutPool:
 
         self._run(bind())
         return view
+
+    def unbind_members(self, members: frozenset[str]) -> None:
+        """Return stopped deferred cells to unbound (fork F-R1 ``unbind_cell``), so
+        their bundles are free for a growing trainer (4.7 rollout->trainer, after
+        ``remove_engines``). Only cells declared stopped (``start: false``) can be
+        unbound; a startup-started cell keeps its bundles (the fork asserts)."""
+        cells = sorted(cells_of(frozenset(members)))
+        unknown = sorted(set(cells) - set(self._require_declared()))
+        if unknown:
+            raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        manager = self._manager()
+
+        async def unbind() -> None:
+            for cell in cells:
+                await manager.unbind_cell.remote(cell)
+
+        self._run(unbind())
 
     def remove_engines(self, members: frozenset[str], *, epoch: int) -> frozenset[str]:
         """Deregister and stop ``members`` (drain them first); returns the remaining members."""

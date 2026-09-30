@@ -278,7 +278,9 @@ def trainer_view(startup_view: Any, bundle_positions: tuple[int, ...]) -> Any:
     """
     from miles.ray import placement_group
 
-    fn = check_slice_pg_info(getattr(placement_group, "_slice_pg_info", None))
+    # fork F-R1 (2f23a0fc) publishes slice_pg_info; the private name stays as a fallback
+    fn = check_slice_pg_info(getattr(placement_group, "slice_pg_info", None)
+                             or getattr(placement_group, "_slice_pg_info", None))
     return fn(startup_view, tuple(bundle_positions))
 
 
