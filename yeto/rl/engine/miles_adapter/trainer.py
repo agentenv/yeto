@@ -20,7 +20,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from yeto.rl.contracts import LocalStepReceipt
@@ -310,3 +311,127 @@ class MilesTrainerGroup:
             self._run(self._actor.offload())
         else:
             self._run(self._actor.clear_memory())
+
+    # ------------------------------------------------------------------
+    # ReconfigurationCut (rl-infra-spec 4.2): explicit, off the default
+    # checkpoint path. The driver calls these only at a quiescent cut.
+    # ------------------------------------------------------------------
+
+    def layout(self) -> dict[str, int]:
+        return trainer_layout(self._args)
+
+    def save_cut(self, *, epoch: int, context: "CutContext") -> str:
+        """Write every rank's shard, then commit the manifest; returns the cut id.
+
+        Refuses (``CutError``) an incomplete cut: missing optimizer/RNG on any
+        rank, scheduler progress that disagrees with the driver's local step,
+        a non-zero ``carried_over``/ready-unconsumed ledger, an unsettled outer
+        commit or a missing data cursor.
+        """
+        from ..cut import CutFile, CutManifest, commit_manifest, cut_dir
+        from .cut_plugin import SAVE_CUT_SHARD
+
+        cut_id = context.cut_id
+        directory = cut_dir(context.root, cut_id)
+        summaries = [
+            dict(s) for s in self._run(
+                self._actor.run_plugin(SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": cut_id})
+            )
+        ]
+        expected = trainer_workers(self._args)
+        if len(summaries) != expected:
+            raise TrainStepError(f"expected {expected} cut shards (one per rank), got {len(summaries)}")
+        manifest = CutManifest(
+            cut_id=cut_id,
+            epoch=int(epoch),
+            runtime={
+                "backend_fingerprint": context.backend_fingerprint,
+                "layout": self.layout(),
+                "rng_policy": "exact",
+                "precision": "fp16" if getattr(self._args, "fp16", False) else (
+                    "bf16" if getattr(self._args, "bf16", False) else "fp32"),
+                "distributed_optimizer": bool(getattr(self._args, "use_distributed_optimizer", False)),
+                "shard_schema": "yeto.cut_shard/v1",
+            },
+            progress=context.progress,
+            algorithm=context.algorithm,
+            data=context.data,
+            ledger=context.ledger,
+            outer=context.outer,
+            files=tuple(
+                CutFile(s["path"], s["sha256"], int(s["bytes"]), s["coord"]) for s in summaries
+            ),
+            rank_summaries=tuple(
+                {k: s[k] for k in ("path", "scheduler_samples", "has_optimizer_state", "has_rng",
+                                   "state_digest", "rng_digest")}
+                for s in summaries
+            ),
+        )
+        commit_manifest(context.root, manifest, check_files=context.shared_filesystem)
+        return cut_id
+
+    def restore_cut(self, cut_id: str, *, epoch: int, root: str, expect: Any,
+                    shared_filesystem: bool = True) -> Any:
+        """Verify the cut against the running trainer, load it on every rank and check the digests.
+
+        After loading, each rank re-exports its state; the digest of adapter +
+        optimizer (FP32 main, moments, step, hyper-parameters) + scheduler +
+        Megatron counters, and the RNG digest, must equal the saved ones.
+        """
+        from ..cut import CutError, cut_dir, verify_cut
+        from .cut_plugin import RESTORE_CUT_SHARD
+
+        manifest = verify_cut(root, cut_id, expect, check_files=shared_filesystem)
+        if manifest.epoch > epoch:
+            raise CutError(f"cut epoch {manifest.epoch} is newer than the restoring epoch {epoch}")
+        if dict(manifest.runtime["layout"]) != self.layout():
+            raise CutError(f"cut layout {manifest.runtime['layout']} != trainer layout {self.layout()}")
+        files = [f.to_dict() for f in manifest.files]
+        results = [
+            dict(r) for r in self._run(
+                self._actor.run_plugin(
+                    RESTORE_CUT_SHARD,
+                    {"directory": str(cut_dir(root, cut_id)), "files": files, "cut_id": cut_id},
+                )
+            )
+        ]
+        saved = {s["path"]: s for s in manifest.rank_summaries}
+        if len(results) != len(saved) or {r["path"] for r in results} != set(saved):
+            raise CutError(f"restored shards {sorted(r['path'] for r in results)} != cut {sorted(saved)}")
+        for r in results:
+            s = saved[r["path"]]
+            for key in ("scheduler_samples", "state_digest", "rng_digest"):
+                if r[key] != s[key]:
+                    raise CutError(f"{r['path']}: restored {key} differs from the cut")
+        return manifest
+
+
+def trainer_workers(args: Any) -> int:
+    return int(getattr(args, "actor_num_nodes", 1) or 1) * int(getattr(args, "actor_num_gpus_per_node", 1) or 1)
+
+
+def trainer_layout(args: Any) -> dict[str, int]:
+    """TP/PP/CP/EP and the derived DP of the single trainer cell."""
+    tp = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
+    pp = int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
+    cp = int(getattr(args, "context_parallel_size", 1) or 1)
+    ep = int(getattr(args, "expert_model_parallel_size", 1) or 1)
+    world = trainer_workers(args)
+    if world % (tp * pp * cp):
+        raise TrainStepError(f"world size {world} is not divisible by tp*pp*cp={tp * pp * cp}")
+    return {"world": world, "tp": tp, "pp": pp, "cp": cp, "ep": ep, "dp": world // (tp * pp * cp)}
+
+
+@dataclass(frozen=True)
+class CutContext:
+    """What the caller (driver/executor) contributes to a cut besides the trainer shards."""
+
+    root: str
+    cut_id: str
+    backend_fingerprint: str
+    progress: Any  # yeto.rl.engine.cut.CutProgress
+    algorithm: Any  # yeto.rl.engine.cut.AlgorithmIdentity
+    data: Mapping[str, Any]  # rollout data cursor
+    ledger: Mapping[str, Any]
+    outer: Mapping[str, Any]
+    shared_filesystem: bool = True
