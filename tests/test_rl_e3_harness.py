@@ -593,12 +593,24 @@ def test_pull_packed_copies_verifies_and_releases(tmp_path):
     pack_states.pack(work, _merge, _load)
     released = []
 
+    import shutil as _sh
+
+    class FakeFS:
+        def _local(self, path):
+            return str(path).replace("/work/e3", str(work))
+
+        def read_text(self, path):
+            return open(self._local(path)).read()
+
+        def copy_to_local(self, remote, local):
+            _sh.copyfile(self._local(remote), local)
+
+        def write_text(self, data, path):
+            assert path == modal_run.PULLED_FLAG
+            released.append(path)
+
     class FakeSandbox:
-        def open(self, path, mode="r"):
-            if path == modal_run.PULLED_FLAG:
-                released.append(path)
-                return open(tmp_path / "pulled", mode)
-            return open(str(path).replace("/work/e3", str(work)), mode)
+        filesystem = FakeFS()
 
     import io
 

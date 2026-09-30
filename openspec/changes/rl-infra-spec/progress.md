@@ -603,3 +603,11 @@
 - 正式运行尚无判据结论：C1 v6 第 1 次（weight_version 漏项，已修）、第 2 次（比较口径，已修；不追认）、第 3 次（用户暂停）。
 - **恢复步骤**：合并最新 integ-decl → 用新代码提交重新生成 run 目录并重跑本地 dry-run → 从 C1 开始按 plan-v6 执行（C1 → c1-unsafe → C2 → C3 各行）。
 - 费用：B2 累计 ≤ $10.88。所有 E2 app 均为 stopped/0，本地无残留进程。
+
+### INFRA-E3 A8 第 2 次（2026-09-30，ap-0DAExDbwwbCaxfDQ0dIIRC，H100!:2，代码 a016f7f，plan-v6）
+- 11:45:15–12:31:49Z，≤$6.14；dry、gen、A1、A2、B1、B1p、B2、RT 全部 rc=0；GPU 型号与 pin 断言通过（`gpus.txt`、`runtime_manifest.json`）。
+- 容器内 compare 失败：`step` 不在 scalars 中（TE FusedAdam 在 Megatron DistOpt 下把 step 放在参数组 `hyper` 里），`torch.as_tensor(None)` 报错。数据兜底生效：`pack_states` 产出 15 个汇总状态（1.64 GiB）；本地 `pull_packed` 用的旧 `Sandbox.open` 接口被 Modal 拒绝（"legacy Sandbox filesystem API is no longer supported"），随即用新 `sb.filesystem` 接口从另一进程拉取（`pull_now.py`），15/15 sha256 校验通过后释放容器；`modal_run.pull_packed` 已改用新接口。
+- 离线 compare（修正 step 读取位置：先 scalars，再参数组 `hyper.step`；并把 hyper 纳入 G1 逐位比较——这两处是字段位置修正，不改判据与容差；容器内与离线结论因容器内失败无法对比，如实记录）：`evidence/infra-e3/a8-run2/RESULT_offline.json`。G1、G2、G3、G5、G6 通过；**G4 未通过** → **no-go**（按 plan-v6 预注册规则）。详见 tasks 4.6 条目。
+- 诊断（不改结论）：从同一 cut 出发，DP1 与 DP2 的步 3 梯度相对 L2 差约 0.83%，约 90% 元素不同，而逐样本 loss 逐位相同——差异在梯度计算/归约路径（可能与 bf16 梯度缓冲或 DistOpt reduce-scatter 的精度有关，待查），不在状态重分片（G1 逐位通过）。C1 与 C2 在 adapter/主参数/动量上都不同（逐字段摘要），与此一致。
+- 4.6 未勾选：结论为 no-go，但容器内 compare 未产出、compare 在运行后做了字段位置修正，是否按"合法否定结论"勾选由主 agent 决定。packed 状态保存在 `/home/michael/work/infra-e3-gpu/b3a8r/out/work/packed/`（未入库，1.64 GiB）。
+- B3 合计 ≤$11.63。A9 以 A8=go 为前提，按规则不运行。

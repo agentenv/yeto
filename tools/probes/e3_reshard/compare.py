@@ -75,6 +75,14 @@ def _flat(state: dict, key: str):
     return torch.cat([state["optimizer"][n]["tensors"][key].double().reshape(-1) for n in sorted(state["optimizer"])])
 
 
+def _step(entry: dict):
+    """Adam step of one parameter: a scalar state (torch Adam) or the param-group ``step`` (TE FusedAdam
+    under Megatron DistOpt keeps it in the group -> ``hyper``; A8 run 2)."""
+    if "step" in entry["scalars"]:
+        return entry["scalars"]["step"]
+    return entry["hyper"].get("step")
+
+
 def bitwise_problems(a: dict, b: dict) -> list[str]:
     import torch
 
@@ -92,6 +100,10 @@ def bitwise_problems(a: dict, b: dict) -> list[str]:
         for k in ea["scalars"]:
             if not torch.equal(torch.as_tensor(ea["scalars"][k]), torch.as_tensor(eb["scalars"][k])):
                 out.append(f"{n}.{k} (scalar)")
+        if _step(ea) is None or not torch.equal(torch.as_tensor(_step(ea)), torch.as_tensor(_step(eb))):
+            out.append(f"{n}.step {_step(ea)} != {_step(eb)}")
+        if ea["hyper"] != eb["hyper"]:
+            out.append(f"{n}.hyper")
     if a["scheduler"] != b["scheduler"]:
         out.append("scheduler")
     if a.get("counters") != b.get("counters"):
@@ -251,8 +263,8 @@ def judge(work: Path, *, gbs: int, mbs: int, merge: Callable, load: Callable = _
         for name, ea in (after_ref["optimizer"].items() if states_ok else ()):
             import torch
 
-            if not torch.equal(torch.as_tensor(ea["scalars"].get("step")),
-                               torch.as_tensor(after_new["optimizer"][name]["scalars"].get("step"))):
+            if _step(ea) is None or not torch.equal(torch.as_tensor(_step(ea)),
+                                                     torch.as_tensor(_step(after_new["optimizer"][name]))):
                 problems.append(f"step differs for {name}")
                 break
         if states_ok and after_ref["scheduler"] != after_new["scheduler"]:
