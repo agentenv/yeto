@@ -1097,6 +1097,22 @@ class IslandDriver:
                 f"restored trainer holds {restored}, the cut holds {cut_policy_hash}",
             )
         rollout_id = self.published_version
+        if self._rollout_colocated():
+            # Colocated: the engines share the GPUs and still hold exactly this
+            # policy (checked above: restored == cut == published), resident since
+            # the last publish. Publishing again would ask SGLang to resume weights
+            # that were never offloaded (KeyError 'weights', scheduler exit), so the
+            # engines are left as they are; only the trainer was rebuilt.
+            members = frozenset(self.rollout.members())
+            self.emit(
+                "rl_trainer_rebuilt",
+                policy_version=rollout_id,
+                republished=False,
+                republish_skipped="colocated: engines already hold the published policy",
+                **{"rl/policy_token": self.expected_token,
+                   "sync/publication_members": sorted(members)},
+            )
+            return result
         result_pub = self.publisher.publish(state)
         manifest = result_pub.manifest
         if (manifest.target_policy_version != rollout_id
@@ -1114,6 +1130,13 @@ class IslandDriver:
                "sync/publication_members": sorted(result_pub.members)},
         )
         return result
+
+    def _rollout_colocated(self) -> bool:
+        describe = getattr(self.placement, "describe", None)
+        kind = getattr(describe(), "kind", None) if callable(describe) else None
+        if kind is not None:
+            return kind == "colocated"
+        return self.execution_mode == "colocated-serial"
 
     def run(self) -> TrainableState:
         self.handshake()
