@@ -208,3 +208,7 @@
 
 ### 下一步
 - 本地有卡后按 `local-gpu-plan.md` L-2.3 → L-1.7 顺序执行；L-5.1 等 E1 本地通过。
+
+### 追加（2026-09-30 INFRA-A）：审查修复与工具等待计数
+- 审查 H1/M1/M2/L1–L4 已修复（215e1b8）；driver/entry 补丁换为 `patches/infra-a-driver-2.3-eval-overlap-v2.patch`（取代 v1）。
+- 应 INFRA-E1 请求新增 `yeto/rl/engine/tool_wait.py`（瞬时在途工具等待计数与 drain 判定），不需要改 driver/rollout，因此没有补丁；E1 对接时用的接口：`board_actor(learner_id)`、`read_tool_wait(handle)`、`drain_blockers(router_in_flight, snapshot)`；生产侧用 `async_tool_wait_scope(handle, trajectory_id)`。
