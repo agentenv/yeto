@@ -165,10 +165,13 @@ class TrainerGroup(Protocol):
     # E2 (optional; advertised via EngineCapabilities.port_verbs, not part of
     # the R0 protocol so R0 fakes stay conforming). Types: yeto.rl.engine.cut,
     # miles_adapter.trainer.CutContext (rl-infra-spec 4.2, cut-audit.md):
-    # def layout(self) -> dict[str, int]: ...
+    # def layout(self) -> dict[str, int]: ...          # from args
+    # def actual_layout(self) -> dict[str, int]: ...   # read back from the ranks
     # def save_cut(self, *, epoch: int, context: CutContext) -> str: ...  # cut id
     # def restore_cut(self, cut_id: str, *, epoch: int, root: str,
     #                 expect: RestoreExpectation, shared_filesystem: bool = True) -> CutManifest: ...
+    #   restore_cut is only for a freshly built trainer; any exception from it
+    #   means RECOVERY_REQUIRED (never resume on that trainer).
     # Same-shape rebuild (4.3) is miles_adapter.trainer_rebuild.rebuild_same_shape
     # over a SwappableActor: the driver keeps its port objects (no rebind) and
     # re-publishes through IslandDriver.rebuild_trainer (4.4).
