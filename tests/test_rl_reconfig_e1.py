@@ -887,3 +887,27 @@ def test_reconfiguration_event_has_no_eval_due_without_overlap(tmp_path):
     _run_with_request(driver, ctl, at=2)
     recon = [e for e in _events(tmp_path) if e["event"] == "rl_reconfiguration"]
     assert recon and "eval_due" not in recon[0]
+
+
+def test_build_elastic_and_journal_expand_user_paths(tmp_path, monkeypatch):
+    """Integ-s2 finding 5: '~' in --rl-elastic-state-dir/resources/attestation
+    resolves to $HOME, never a literal './~' directory."""
+    from yeto.rl.engine.journal import Journal, read_epochs, read_journal
+    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "res.json").write_text(json.dumps(
+        {"configs": {"c0": {"trainer": 1, "rollout": 1}}, "edges": []}))
+    (tmp_path / "att.json").write_text("{}")
+    wiring = build_elastic(state_dir="~/st", resources="~/res.json", attestation="~/att.json",
+                           profile=_profile(), initial_config="c0", runtime_fingerprint=FP,
+                           declared_cells=("a",))
+    assert wiring.controller.state_dir == tmp_path / "st"
+    assert (tmp_path / "st" / "reconfig").is_dir() and not (tmp_path / "~").exists()
+    wiring.controller.journal.close()
+    with Journal("~/j") as journal:
+        assert journal.dir == tmp_path / "j"
+    assert read_journal("~/st/reconfig") == read_journal(tmp_path / "st" / "reconfig")
+    assert read_epochs("~/st/reconfig") == read_epochs(tmp_path / "st" / "reconfig")
+    assert not (tmp_path / "~").exists()

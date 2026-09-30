@@ -53,13 +53,13 @@ def build_elastic(
     from ..ledger import BatchLedger
 
     if not isinstance(resources, dict):
-        resources = json.loads(Path(resources).read_text(encoding="utf-8"))
+        resources = json.loads(Path(resources).expanduser().read_text(encoding="utf-8"))
     configs = parse_configs(resources)
-    state = Path(state_dir)
+    state = Path(state_dir).expanduser()
     controller = IslandController(
         state_dir=state,
         configs=configs,
-        attestation=load_attestation(Path(attestation) if attestation else None),
+        attestation=load_attestation(Path(attestation).expanduser() if attestation else None),
         profile=profile,
         initial_config=initial_config,
         runtime_fingerprint=runtime_fingerprint,

@@ -183,7 +183,7 @@ class IslandController:
     ) -> None:
         if initial_config not in configs:
             raise Rejected(f"initial config {initial_config!r} is unknown")
-        self.state_dir = Path(state_dir)
+        self.state_dir = Path(state_dir).expanduser()
         self.configs = dict(configs)
         self.attestation = attestation
         self.profile = profile
@@ -846,7 +846,7 @@ class CommandInbox:
     """
 
     def __init__(self, directory: str | Path) -> None:
-        self.dir = Path(directory)
+        self.dir = Path(directory).expanduser()
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def submit(self, request_id: str, verb: str, body: Mapping[str, Any]) -> Path:
@@ -901,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("status")
     st.add_argument("request_id", nargs="?")
     args = parser.parse_args(argv)
-    state = Path(args.state_dir)
+    state = Path(args.state_dir).expanduser()
     inbox = CommandInbox(state / "inbox")
     if args.verb == "request":
         inbox.submit(args.request_id, "request", request_body(args.target, args.expected_epoch,
