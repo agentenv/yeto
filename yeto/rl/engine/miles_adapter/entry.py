@@ -149,10 +149,17 @@ MILES_DECLARED: dict[str, str] = {
 # text in arguments.py -- no loss_hub/backends file; without rollout_cells /
 # deferred cells the startup path starts the same cells (evidence
 # openspec/changes/rl-infra-spec/evidence/2026-09-30-img-2f23a0f).
+# fb04d6ff / e3a11ab3 = 2f23a0fc + M5, same basis: `git diff --stat
+# 2f23a0fc..e3a11ab3
+# -- miles` touches only megatron_utils/lora/dp_invariant_state.py, reached
+# only with --lora-dp-invariant-state (default off); default training/loss
+# path unchanged (evidence .../2026-09-30-img-e3a11ab).
 _PINS_0AF62F4D_PLUS = frozenset({
     "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
     "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
     "2f23a0fca9b80f6a7300da401703c343014b03c0",
+    "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",
+    "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:

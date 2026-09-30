@@ -78,6 +78,8 @@ FORK_FLAGS = frozenset({VARIANT_FLAG, *PARAM_FLAGS.values()})
 FORK_COMMITS: frozenset[str] = frozenset({
     "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
     "2f23a0fca9b80f6a7300da401703c343014b03c0",  # 5c1b49eb + F-R1 (placement/worker files only)
+    "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",  # 2f23a0fc + M5 (LoRA dp_invariant_state.py only)
+    "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",  # fb04d6ff + M5 error text/docstring/tests
 })
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}
