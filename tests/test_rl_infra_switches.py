@@ -110,6 +110,7 @@ def test_launcher_forwards_switches(monkeypatch, tmp_path):
     args = _cli(("--rl-overlap-eval", "--rl-elastic", "--rl-elastic-resources", str(resources),
                  "--rl-elastic-attestation", str(attestation),
                  "--rl-elastic-initial-config", "c0", "--rl-elastic-cells", "a,b"))
+    args.rl_placement, args.eval_interval = "fixed-partition", 5
     launcher._check_ports_infra_switches(args, "ports")
     prelude, flags = launcher._ports_infra_flags(args)
     assert flags == (" --rl-overlap-eval --rl-elastic --rl-elastic-resources "
@@ -134,3 +135,69 @@ def test_launcher_refuses_incomplete_elastic(extra, message):
         launcher._check_ports_infra_switches(_cli(extra), "ports")
     with pytest.raises(ValueError, match="only applies to --rl-engine ports"):
         launcher._check_ports_infra_switches(_cli(("--rl-overlap-eval",)), "legacy")
+
+
+def _elastic_files(tmp_path, attestation="{}"):
+    resources = tmp_path / "res.json"
+    resources.write_text(json.dumps({"configs": {"c0": {"trainer": 1, "rollout": 1}}, "edges": []}))
+    att = tmp_path / "att.json"
+    att.write_text(attestation)
+    return str(resources), str(att)
+
+
+def _partitioned(args, **extra):
+    args.rl_placement = "fixed-partition"
+    for k, v in extra.items():
+        setattr(args, k, v)
+    return args
+
+
+@pytest.mark.parametrize("attrs, message", [
+    ({"rl_placement": "colocated", "eval_interval": 5}, "fixed-partition"),
+    ({"rl_placement": "fixed-partition", "eval_interval": None}, "--eval-interval"),
+    ({"rl_placement": "fixed-partition", "eval_interval": 5, "eval_uses_snapshots": True},
+     "--eval-uses-snapshots"),
+])
+def test_launcher_refuses_overlap_eval_preconditions_locally(attrs, message):
+    """Integ-s2 finding 3: same check as the island profile, before provisioning."""
+    from yeto.rl.engine.execution_profile import ProfileError
+
+    args = _cli(("--rl-overlap-eval",))
+    for k, v in attrs.items():
+        setattr(args, k, v)
+    with pytest.raises(ProfileError, match=message):
+        launcher._check_ports_infra_switches(args, "ports")
+
+
+def test_launcher_and_island_share_the_overlap_eval_check():
+    source = inspect.getsource(launcher._check_ports_infra_switches)
+    assert "check_overlap_eval(" in source and "check_elastic_placement(" in source
+    assert "check_overlap_eval(" in inspect.getsource(entry)
+
+
+def _elastic_cli(res, *extra):
+    return _cli(("--rl-elastic", "--rl-elastic-resources", res,
+                 "--rl-elastic-cells", "a", *extra))
+
+
+def test_launcher_refuses_colocated_elastic(tmp_path):
+    from yeto.rl.engine.execution_profile import ProfileError
+
+    res, _ = _elastic_files(tmp_path)
+    args = _elastic_cli(res, "--rl-elastic-initial-config", "c0")
+    with pytest.raises(ProfileError, match="fixed-partition"):
+        launcher._check_ports_infra_switches(args, "ports")
+    launcher._check_ports_infra_switches(_partitioned(args), "ports")
+
+
+def test_launcher_refuses_unknown_initial_config_and_bad_attestation(tmp_path):
+    from yeto.rl.elastic_benchmark.manifest import ManifestError
+
+    res, att = _elastic_files(tmp_path, attestation=json.dumps({"execution_modes": ["bogus"]}))
+    args = _partitioned(_elastic_cli(res, "--rl-elastic-initial-config", "nope"))
+    with pytest.raises(ValueError, match="not a manifest config"):
+        launcher._check_ports_infra_switches(args, "ports")
+    args = _partitioned(_elastic_cli(res, "--rl-elastic-initial-config", "c0",
+                                     "--rl-elastic-attestation", att))
+    with pytest.raises(ManifestError):
+        launcher._check_ports_infra_switches(args, "ports")

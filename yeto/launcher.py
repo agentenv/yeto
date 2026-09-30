@@ -932,8 +932,19 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     """``--rl-overlap-eval`` / ``--rl-elastic`` (rl-infra-spec 2.3 / 3.x): opt-in,
     ports-only; the elastic manifest is read here so a bad file fails locally."""
 
-    if getattr(args, "rl_overlap_eval", False) and rl_engine != "ports":
-        raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
+    from .rl.engine.execution_profile import check_elastic_placement, check_overlap_eval
+
+    placement = getattr(args, "rl_placement", "colocated") or "colocated"
+    if getattr(args, "rl_overlap_eval", False):
+        if rl_engine != "ports":
+            raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
+        # Same check the island's execution profile applies, run before any
+        # resource is provisioned.
+        check_overlap_eval(
+            placement_kind=placement,
+            eval_uses_snapshots=bool(getattr(args, "eval_uses_snapshots", False)),
+            eval_interval=getattr(args, "eval_interval", None),
+        )
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS if getattr(args, name, None)]
     if not getattr(args, "rl_elastic", False):
         if given:
@@ -945,18 +956,26 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                if name != "rl_elastic_attestation" and not getattr(args, name, None)]
     if missing:
         raise ValueError("--rl-elastic needs " + ", ".join(missing))
+    check_elastic_placement(placement)
     cells = [c.strip() for c in args.rl_elastic_cells.split(",") if c.strip()]
     if not cells or any(not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", c) for c in cells):
         raise ValueError(f"--rl-elastic-cells: bad cell ids {args.rl_elastic_cells!r}")
-    args.rl_elastic_resources_json = json.dumps(
-        json.loads(Path(args.rl_elastic_resources).expanduser().read_text(encoding="utf-8")),
-        sort_keys=True, separators=(",", ":"),
-    )
+    from .rl.elastic_benchmark.capabilities import load_attestation, parse_configs
+
+    resources = json.loads(Path(args.rl_elastic_resources).expanduser().read_text(encoding="utf-8"))
+    configs = parse_configs(resources)  # the island's build_elastic parses the same way
+    if args.rl_elastic_initial_config not in configs:
+        raise ValueError(f"--rl-elastic-initial-config {args.rl_elastic_initial_config!r} "
+                         f"is not a manifest config ({sorted(configs)})")
+    args.rl_elastic_resources_json = json.dumps(resources, sort_keys=True, separators=(",", ":"))
     attestation = getattr(args, "rl_elastic_attestation", None)
-    args.rl_elastic_attestation_json = None if not attestation else json.dumps(
-        json.loads(Path(attestation).expanduser().read_text(encoding="utf-8")),
-        sort_keys=True, separators=(",", ":"),
-    )
+    args.rl_elastic_attestation_json = None
+    if attestation:
+        path = Path(attestation).expanduser()
+        load_attestation(path)  # malformed attestation fails locally
+        args.rl_elastic_attestation_json = json.dumps(
+            json.loads(path.read_text(encoding="utf-8")), sort_keys=True, separators=(",", ":"),
+        )
 
 
 def _ports_infra_flags(args) -> tuple[str, str]:

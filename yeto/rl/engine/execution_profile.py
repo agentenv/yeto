@@ -74,6 +74,30 @@ class ProfileError(ValueError):
     """The execution profile is malformed or asks for an uncertified contract."""
 
 
+def check_overlap_eval(*, placement_kind: str, eval_uses_snapshots: bool,
+                       eval_interval: Any) -> None:
+    """Preconditions of eval overlap (task 2.3); shared by the island
+    (miles_adapter.entry) and the launcher's local pre-provisioning check."""
+
+    if placement_kind != "fixed-partition":
+        raise ProfileError("eval overlap (2.3) needs a fixed-partition placement")
+    if eval_uses_snapshots:
+        # Miles would fire the eval and return; its end could then cross the
+        # next publication, which the 2.3 join guard cannot see.
+        raise ProfileError("eval overlap (2.3) is refused with --eval-uses-snapshots")
+    if not eval_interval:
+        raise ProfileError("eval overlap (2.3) needs --eval-interval")
+
+
+def check_elastic_placement(placement_kind: str) -> None:
+    """``--rl-elastic`` (3.x) needs a partitioned island: the controller refuses
+    every rollout reconfiguration on a colocated-serial profile."""
+
+    if placement_kind != "fixed-partition":
+        raise ProfileError("--rl-elastic needs a fixed-partition placement (colocated "
+                           "has no rollout reconfiguration)")
+
+
 def _is_sha256_hex(value: Any) -> bool:
     return (
         isinstance(value, str)

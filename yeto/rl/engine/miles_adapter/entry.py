@@ -278,21 +278,18 @@ def execution_profile_for(
     partitioned run is refused; a colocated (R0) run binds to the runtime spec
     and records that the hash source was the runtime.
     """
-    from ..execution_profile import ExecutionProfile, ProfileError
+    from ..execution_profile import ExecutionProfile, ProfileError, check_overlap_eval
 
     from ..overlap import IMPLEMENTED_OVERLAP
 
     mode = "colocated-serial" if launch.placement.kind == "colocated" else "partitioned-serial"
     overlap = frozenset()
     if getattr(miles_args, "yeto_rl_overlap_eval", False):
-        if mode == "colocated-serial":
-            raise ProfileError("eval overlap (2.3) needs a fixed-partition placement")
-        if getattr(miles_args, "eval_uses_snapshots", False):
-            # Miles would fire the eval and return; its end could then cross the
-            # next publication, which the 2.3 join guard cannot see.
-            raise ProfileError("eval overlap (2.3) is refused with --eval-uses-snapshots")
-        if not getattr(miles_args, "eval_interval", None):
-            raise ProfileError("eval overlap (2.3) needs --eval-interval")
+        check_overlap_eval(
+            placement_kind="colocated" if mode == "colocated-serial" else "fixed-partition",
+            eval_uses_snapshots=bool(getattr(miles_args, "eval_uses_snapshots", False)),
+            eval_interval=getattr(miles_args, "eval_interval", None),
+        )
         mode, overlap = "partitioned-overlap", IMPLEMENTED_OVERLAP
     if expected_sha256 is None:
         if mode != "colocated-serial":
