@@ -29,8 +29,8 @@ MILES_COMMIT = "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"
 ARMS = ("A1", "A2", "B1", "B1p", "B2", "RT")
 # plan-v3: GPU, expected nvidia-smi name, hard timeout (s), whether determinism env is mandatory
 PROFILES = {
-    "dev-gather": {"gpu": "A10G:2", "expect": "NVIDIA A10G", "timeout": 5400, "deterministic": False},
-    "a8": {"gpu": "H100!:2", "expect": "NVIDIA H100 80GB HBM3", "timeout": 7200, "deterministic": True},
+    "dev-gather": {"gpu": "A10G:2", "expect": ("NVIDIA A10G", "NVIDIA A10"), "timeout": 5400, "deterministic": False},
+    "a8": {"gpu": "H100!:2", "expect": ("NVIDIA H100 80GB HBM3",), "timeout": 7200, "deterministic": True},
 }
 # plan-v3 §0 profile: every dropout 0 (Megatron defaults hidden/attention to 0.1); A8 adds deterministic mode.
 # balance_data: the ports translation (miles_adapter/config.py) always emits --balance-data, which the
@@ -55,7 +55,10 @@ def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = 
         f"mkdir -p {work}",
         # GPU name assertion before anything else (plan-v3 §0)
         f"nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | tee {work}/gpus.txt",
-        f"n=$(grep -c . {work}/gpus.txt); bad=$(grep -vc '^{p['expect']},' {work}/gpus.txt || true)",
+        # DEV-GATHER (debug, no cross-model bitwise comparison) accepts A10G or A10 (main agent ruling);
+        # A8 stays strict. The actual name and driver are in gpus.txt.
+        "n=$(grep -c . {w}/gpus.txt); bad=$(grep -vcE '^({names}),' {w}/gpus.txt || true)".format(
+            w=work, names="|".join(p["expect"])),
         f'if [ "$n" != 2 ] || [ "$bad" != 0 ]; then echo "GPU assertion failed"; exit 3; fi',
         f"test \"$(git --git-dir=/root/miles/.git rev-parse HEAD)\" = {MILES_COMMIT} || {{ echo 'miles pin mismatch'; exit 4; }}",
         f"PYTHONPATH=/root/miles:/yeto python -m yeto.rl.engine.runtime_manifest --image {IMAGE} --out {work}/runtime_manifest.json",

@@ -220,7 +220,8 @@ def test_container_script_asserts_before_running_arms():
     assert order == sorted(order)
     assert "NCCL_ALGO=Ring" in script and "NVIDIA H100 80GB HBM3" in script
     dev = modal_run.container_script("dev-gather")
-    assert "NCCL_ALGO" not in dev and "NVIDIA A10G" in dev
+    assert "NCCL_ALGO" not in dev and "^(NVIDIA A10G|NVIDIA A10)," in dev
+    assert "^(NVIDIA H100 80GB HBM3)," in script
     assert modal_run.PROFILES["a8"]["gpu"] == "H100!:2"
 
 

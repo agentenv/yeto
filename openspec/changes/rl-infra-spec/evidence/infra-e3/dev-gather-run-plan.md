@@ -22,3 +22,9 @@
 - 其他默认项：本地 dry-run 在不加覆盖时只拒绝 `--balance-data` 与 hidden/attention dropout（Megatron 默认 0.1），均已由 profile 覆盖；本地 dry-run 结果 `problems=[]`。
 - 代码：yeto 0083a8d（上传快照 `git archive` + gsm8k_reward.py，源码树 sha256 f422d383…）。其余（资源、上限 $3.3、90 min、停止条件、回收）同上。
 - 线程数 >3000 时不启动。
+
+## 第 3 次运行（2026-09-30，运行前追加；主 agent 裁定）
+
+- 第 2 次（ap-XcOATnHhKi0AKP508tXkBZ，≤$0.02）在 GPU 名断言处停止：`A10G:2` 报 `NVIDIA A10`。裁定：DEV-GATHER 为调试、不做跨型号逐位比较，断言接受 `NVIDIA A10G` 或 `NVIDIA A10`，证据记录实际型号与驱动（`gpus.txt`）；**A8 的 `H100!` 断言保持严格**（只接受 `NVIDIA H100 80GB HBM3`）。
+- `--balance-data`：主 agent 裁定生产翻译层在启用 trainer 变 DP 边（`--rl-elastic` 且配置了 trainer_edges）时不输出 `--balance-data`（归 INFRA-E1 实现）；harness 的 `balance_data=false` 覆盖即与该生产配置一致，默认路径与其余 elastic 路径不变。
+- 其余（上限 $3.3、90 min、停止条件、回收、台账、线程 <3000 才启动）同上。
