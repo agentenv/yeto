@@ -468,3 +468,8 @@
 - CPU 测试 `tests/test_rl_e3_harness.py`（11）：假后端跑完整 arm 序列判 go；B1p 不确定→不可判定；分片缺 `micro_batch_indices`→G2 失败/no-go；恢复状态被改→G1 失败；arm 出错记录并停 trainer；探针包装透传与记录；容器脚本断言顺序；learner 参数提取；dry 阶段拒绝 dropout>0。只证协议与判定逻辑。
 - 尚未在 GPU 上验证（由 DEV-GATHER 先暴露）：`--save/--load-debug-rollout-data` 与 `debug_rollout_only/train_only` 在 parse 之后设置是否足够；源码树哈希（上传目录与 dry-run 时的树需一致）；奖励函数文件在容器内的位置；同一 Ray 集群上多个 driver 进程依次创建/释放 placement group。
 - 测试：全量 68 failed, 3048 passed, 49 skipped, 26 errors；失败/错误 id 94 个与 /tmp/integ-s2-base.ids（第二列）完全相同。云资源：无；$0。
+
+### INFRA-E3 DEV-GATHER（B3，调试，不计 task）
+- 第 1 次（ap-7XaksVC7xRWXm1UBcRk2Ob，04:56:34–05:00:13Z，≤$0.30）：容器内 dry 阶段被拒——ports 翻译固定输出 `--balance-data`；本地当时只生成了 learner 命令行，没构造 Miles argv。修复 0083a8d/ffca676：`local_dry.py` 与容器第一步执行相同的 argv 构造与检查，`modal_run` 本地不通过就不创建 Sandbox，任何退出路径都 stop app；profile 覆盖 `balance_data=false`。
+- 第 2 次（ap-XcOATnHhKi0AKP508tXkBZ，05:50:28–05:50:36Z，≤$0.02，代码 ffca676，本地 dry-run problems=[]）：容器第一步 GPU 名断言失败——`gpu="A10G:2"` 的 nvidia-smi 报 `NVIDIA A10`×2（驱动 580.95.05），计划期望 `NVIDIA A10G`；按停止条件立即结束，未进入 dry/gen/arm。app 由 harness 自行 stop，`modal app list` 核实 stopped/0，watchdog 已停。证据 `evidence/infra-e3/dev-gather-run2/`。
+- 待决定：期望名改为 Modal 实际报告的 `NVIDIA A10`（或改用 L4/L40S），由主 agent 批准后第 3 次运行。
