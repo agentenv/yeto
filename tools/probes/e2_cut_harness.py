@@ -213,6 +213,14 @@ echo $! > $R/puller.pid
 {trigger}
 (
 export HOME=$R/home YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto
+# private image pull credentials for the launcher (never printed)
+eval "$(/usr/bin/python3 - <<'PY'
+import base64, json, shlex
+a = json.load(open("/home/michael/.docker/config.json"))["auths"]["ghcr.io"]["auth"]
+u, t = base64.b64decode(a).decode().split(":", 1)
+print(f"export SKYPILOT_DOCKER_USERNAME={{shlex.quote(u)}} SKYPILOT_DOCKER_PASSWORD={{shlex.quote(t)}} SKYPILOT_DOCKER_SERVER=ghcr.io")
+PY
+)"
 cd $R/yeto
 date -u +%FT%TZ > $R/start_utc.txt
 eval "timeout {run.hard_s} {HEAD_PY} -m yeto.cli $(cat $R/args.txt)" > $R/launch.log 2>&1
