@@ -43,6 +43,8 @@ RESERVED_PORT_VERBS = frozenset(
     {
         "RolloutPool.add_engines",
         "RolloutPool.remove_engines",
+        "RolloutPool.drain",
+        "Publisher.publish_members",
         "TrainerGroup.save_cut",
         "TrainerGroup.restore_cut",
         "Placement.reconfigure",
