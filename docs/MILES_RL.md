@@ -58,7 +58,12 @@ The following remain outside this boundary:
 - RDA, IsoLoCo, HeLoCo, delta correction, or broadcast blending;
 - optimizer-moment federation;
 - Miles' experimental fault-tolerant actor path;
-- a new dashboard, controller, storage system, or generic recovery framework.
+- a new dashboard, a cross-island controller, a storage system, or a generic
+  recovery framework. An island-local, yeto-side reconfiguration controller is
+  allowed (rl-infra-spec design D1): it drives the island's own port verbs
+  (rollout pool resize, `TrainerGroup.save_cut`/`restore_cut`/same-shape
+  rebuild) at safe points and journals them; it does not control other islands
+  and is not a general recovery framework.
 
 Local PPO and CyberGym-specific features are separate from this integration.
 Miles custom generation and reward callables can still use existing tool or

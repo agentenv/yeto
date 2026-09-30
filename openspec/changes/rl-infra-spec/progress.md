@@ -276,3 +276,45 @@
 - M4：`rebase(start)` 把 rid<start 且停在 `optimizer_applied` 的批次提升为 `outer_recorded`（`recovered: true`）。
 - L1：`engine_discarded` 进入 `_replay`（`batch()`、`cut_summary()` 可见）。L2：缺 `group_index` 时 `group_record` 明确报错（fail closed，所有路径）。L5：3.4a 完成记录注明 `publish_members` 命名。L6：E2/4.4 接口保留。
 - 全量：68 failed / 2732 passed / 49 skipped / 26 errors，失败 id 集合与 ef2d6b0 基线相同（94）。
+
+## INFRA-E2（2026-09-30，4.1–4.5；分支 `infra-e2`，worktree `/home/michael/work/infra-e2`，基于 integ-decl ef2d6b0）
+
+### task 状态（五选一，均未勾选）
+- 4.1：已实现（缺状态拒绝的部分 CPU 通过）。依赖 3.1 未勾选。审计见 `cut-audit.md`。
+- 4.1b：已实现（`docs/MILES_RL.md`），待评审。
+- 4.2：CPU 通过。依赖 3.6 未完成；GPU 待本地验证。
+- 4.3：已实现（同形 rebuild 与 restore 编排）；X3 GPU 待本地验证。
+- 4.4：未完成（driver.py/entry.py 不归 E2；补丁与接口请求已交）。
+- 4.5：未完成（rebuild/restore 失败分支已有 CPU 测试；其余依赖 4.4、3.8 与 GPU）。
+
+### 关键结论
+- E2 profile：bf16 LoRA，走 yeto 自己的 cut 插件，复用 fork-M5 的命名 optimizer 状态（含 FP32 master、moments）与 RNG 采集；不开 `--lora-dp-invariant-state`，也不改默认 checkpoint 参数。拒绝的配置：fp16、precision-aware、DistOpt 多实例、CP>1、EP>1、非 LoRA 可训练参数。沿用已知限制：TP/PP 集体导出与 DistOpt 分片主参数不能同时使用。
+- F5：Miles ports 路径上 `carried_over` 恒为 0。超采样多出的完成组和在飞被 abort 的组都被引擎丢弃（游标已前移，不复用），建议 3.6 为它们单列终态（由 E1 决定）。
+- 同形重建的前提是 `args.load is None`（否则 `create_training_models` 会调用 `rollout_executor.load` 回卷游标），且 `start_rollout_id` 已设置。
+
+### 测试
+- 全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider`：68 failed / 26 errors / 2721 passed / 49 skipped。失败 id 集合（94 个）与 ef2d6b0 基线（68 failed / 26 errors / 2668 passed）按 id 完全相同。新增 53 个测试全部通过。
+- 首轮全量曾新增 1 个失败：`test_provenance::test_production_tree_has_no_unsafe_torch_load...`，原因是 cut 分片用了 `weights_only=False`。已修复：NumPy RNG 编码为张量，加载改为 `weights_only=True`。
+
+### 证据与计划
+- `cut-audit.md`；`evidence/infra-e2/4.2-4.5/plan.md`（待本地 GPU 验证，判据已预先固定）。
+- 云资源：无；费用 $0；没有启动任何 GPU 或云资源。
+
+### 交给其他写入者
+- `/home/michael/work/infra-drafts/patches/infra-e2-ports.patch`（E1：ports.py `TrainerGroup` 的 E2 签名注释定稿）。
+- `/home/michael/work/infra-drafts/patches/infra-e2-entry-swappable-actor.patch`（entry.py：用 `SwappableActor` 包装 actor）。
+- 接口请求（`cut-audit.md` §5）：`RolloutPool.data_cursor()`、buffer 长度、3.6 终态与 `ready_unconsumed/carried_over` 计数、4.4 driver 重建后重发且不重复 initialize。
+- 待合入：ALGO-2b 的 `infra-drafts/patches/algo-2b-trainer.patch` 可以在 infra-e2 上干净应用（`git apply --check` 通过）；它依赖 ALGO-2b 的 spec 字段，E2 未应用，由主 agent 在集成时合入。
+
+### 下一步
+1. E1 定稿 ports 签名，提供 data_cursor 与账本计数后，driver 实现 4.4（重建 → restore → 重发 → 校验）。
+2. 本地 GPU 到位后按 plan 依次跑 G-4.2 → G-4.3（DP1、DP2+DistOpt）→ G-4.4 → G-4.5。
+
+### INFRA-E2 审查修复（2026-09-30，"需修复"结论）
+- H1：重建前提改为检查 `args.requested_load is None`。原因是 bridge 模式下 `args.load` 等于 ref_load，`start_rollout_id` 等于 0。重建前后各读一次 `data_cursor()`（E1 接口未就绪时用 `DataCursorSource` 协议占位），不一致即判 RECOVERY_REQUIRED；该检查覆盖 `generate_rollout.load`。`cut-audit.md` §2 已更正。
+- H2：写入前断言 scheduler `num_steps==0`（`restore_cut` 只用于新建 trainer），并预检超参；测试替身改为 Megatron 的累加语义；新增"在线 trainer 就地恢复被拒绝"的测试。
+- H3：`SwappableActor.dispose()` 在调用时解析当前 target。已确认 EvalDispatcher 只保存代理对象，没有缓存方法。
+- M1：swap 之后出现任何异常都判 RECOVERY_REQUIRED。M2：`shared_filesystem=False` 且 DistOpt、DP>1 时拒绝。M3：写分片前先做 context 检查，并拒绝 TP/PP+DistOpt。M4：新版计划 `evidence/infra-e2/4.2-4.5/plan-v2.md`（v1 保留，并标注已被取代）。
+- L1：`has_optimizer_state` 要求每个 (tp,pp) 覆盖全部 adapter 名；重建后的布局从 rank 读回（`actual_layout`）。L3：yeto ports 引擎不读 `args.start_rollout_id`。L2：已写入 plan-v2 §3，待 GPU 确认。
+- 补丁：`infra-e2-ports-v2.patch`、`infra-e2-entry-swappable-actor-v2.patch`；v1 已改名为 `*.v1-OBSOLETE.patch`。
+- task 状态不变：4.1 已实现；4.1b 已实现；4.2 CPU 通过；4.3 已实现；4.4、4.5 未完成。均未勾选。
