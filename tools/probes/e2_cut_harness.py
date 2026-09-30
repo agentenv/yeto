@@ -43,6 +43,8 @@ STATE_DIR = "~/yeto-rl/elastic-state"
 MODAL = "/tmp/modal-venv/bin/modal"
 INWATCH = Path(__file__).resolve().parent / "e2_inwatch.py"
 GPU_NAME = "NVIDIA H100 80GB HBM3"
+STALL_S = 20 * 60  # progress watchdog: no new tape event for 20 min (image pull + load included)
+ERROR_LINES = 40  # Traceback / RayTaskError / 5xx lines in the mirrored container log
 HEAD_PY = "/home/michael/work/gpu-head/venv/bin/python"
 
 
@@ -59,6 +61,8 @@ def common_args(model: str, *, gpu: str, prefix: str) -> list[str]:
         "--rollout-max-response-len", "384", "--seq-len", "1024", "--inner-lr", "1e-5",
         "--seed", "1234", "--apply-chat-template-kwargs", '{"enable_thinking": false}',
         "--trust-remote-code", "--rl-deterministic-trainer",
+        # no Modal re-run after a learner exit; Modal-side hard stop = plan-v3 §0 90 min + 5
+        "--modal-retries", "0", "--modal-timeout-s", "5700",
     ]
 
 
@@ -223,6 +227,14 @@ except Exception: d=[]
       fi
     fi
     timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf - --exclude=trainer_*.pt e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts inwatch.log 2>/dev/null | base64 -w0" > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/state.tgz.b64
+    # progress watchdog: no new tape event for STALL_S, or too many error lines -> evidence above, then stop
+    now=$(date +%%s); lines=$(wc -l < $R/pulled/rl-island-0.jsonl 2>/dev/null || echo 0)
+    if [ "$lines" != "$(cat $R/pulled/.lines 2>/dev/null)" ]; then echo $lines > $R/pulled/.lines; echo $now > $R/pulled/.progress; fi
+    [ -s $R/pulled/.progress ] || echo $now > $R/pulled/.progress
+    errs=$(grep -cE " 5[0-9][0-9] |Traceback|RayTaskError" $R/launch.log 2>/dev/null || echo 0)
+    if [ ! -f $R/pulled/stall_stop.txt ] && { [ $((now - $(cat $R/pulled/.progress))) -gt %(stall)d ] || [ "$errs" -gt %(errs)d ]; }; then
+      echo "$(date -u +%%FT%%TZ) stall_or_errors lines=$lines errs=$errs" > $R/pulled/stall_stop.txt; $M app stop -y $APP >> $R/pulled/stall_stop.txt 2>&1
+    fi
     # the learner exited (Modal would retry the island and bill again): evidence is pulled above -> stop
     if grep -q "exited with" $R/launch.log 2>/dev/null && [ ! -f $R/pulled/exit_stop.txt ]; then
       date -u +%%FT%%TZ > $R/pulled/exit_stop.txt; $M app stop -y $APP >> $R/pulled/exit_stop.txt 2>&1
@@ -260,7 +272,8 @@ def write_plan(root: Path, prefix: str, *, yeto_sha: str, source_repo: Path) -> 
                 "model_revision": MODELS[run.model], "criteria": run.criteria, "blocked": run.blocked,
                 "hard_timeout_s": run.hard_s, "rebuild_trigger": run.rebuild_trigger}
         (rdir / "spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
-        fills = {"modal": MODAL, "miles": MILES_COMMIT, "gpu": GPU_NAME, "inwatch": INWATCH}
+        fills = {"modal": MODAL, "miles": MILES_COMMIT, "gpu": GPU_NAME, "inwatch": INWATCH,
+                 "stall": STALL_S, "errs": ERROR_LINES}
         (rdir / "puller.sh").write_text(PULLER % fills, encoding="utf-8")
         (rdir / "puller.sh").chmod(0o755)
         if run.rebuild_trigger:

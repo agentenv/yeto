@@ -74,6 +74,8 @@ def test_run_scripts_parse_and_carry_the_strict_guards(tmp_path, monkeypatch):
         assert subprocess.run(["bash", "-n", str(d / "puller.sh")]).returncode == 0, d
         assert tool.GPU_NAME in puller and tool.MILES_COMMIT in puller and "2f23a0f-9f29303" in puller
         assert "guard.fail" in puller and "app stop -y" in puller and "puller.sh" in script
+        assert "stall_stop.txt" in puller and str(tool.STALL_S) in puller
+        assert "--modal-retries 0" in (d / "args.txt").read_text()
         args = (d / "args.txt").read_text()
         assert "--rl-elastic-cells" not in args
         if json.loads((d / "spec.json").read_text())["rebuild_trigger"]:
