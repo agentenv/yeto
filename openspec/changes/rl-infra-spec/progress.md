@@ -487,3 +487,8 @@
 - 12（79b1e18）：`--rl-test-inject-rebuild-fail` 让 fork 的 `rebuild_training_models` 第一次在 `create_training_models` 阶段失败，走 fork 真实的 TrainerRebuildError 路径，结果为 REBUILD_OLD。**运行前更正** plan v2 §3 第 4 条：REBUILD_OLD 时 `generation` 仍为 1，因为只有重建成功才会 swap。
 - 13：**未完成**。F-R1 尚未提交（miles-fr1 HEAD 仍为 5c1b49eb，工作区有 12 个未提交文件），pool_gpus 入口接线等它合入。
 - 全量：68F/3055P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b2.ids`）；validate strict 通过。
+
+### INFRA-E1 第 14 项与两项裁定（2026-09-30）
+- 14：新增 `--rl-print-attestation-fingerprint`（launcher → learner）。learner 在 `build_ports_launch` 与 `verify_ports_algorithm` 之后调用 `print_attestation_fingerprint`，用 `ports_runtime_fingerprint(launch)` 打印一行 JSON（runtime_fingerprint、learner_id、miles_argv）后返回。`run_ports_island` 用的是同一个函数和同一个 launch 对象；该开关只属于 learner，不进入被哈希的 Miles argv。CPU 上运行仍需要 Miles 镜像（parse_miles_args/run_plugin 检查）和模型快照下载，不需要 Ray 和 GPU。测试 `tests/test_rl_attestation_fingerprint.py`。
+- 裁定记录：第 8 项以 learner 磁带中的 `rl_pull_resend` 为准；第 12 项的"运行前更正"已在 plan v2 §3 第 4 条原位标注，保留了原文。
+- 全量：68F/3058P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b3.ids`）；validate strict 通过。
