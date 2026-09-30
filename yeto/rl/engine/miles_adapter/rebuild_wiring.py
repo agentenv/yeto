@@ -52,8 +52,12 @@ def make_trainer_rebuilder(
     rebuild_same_shape: Callable[..., Any],
     ref_model: Mapping[str, Any] | None = None,
     shared_filesystem: bool = True,
+    preconditions: Callable[[], list[str]] | None = None,
 ) -> Callable[..., Mapping[str, Any]]:
-    """``rebuild_same_shape(*, restore) -> RebuildResult`` is a closure over
+    """``preconditions()`` (e.g. ``trainer_rebuild.rebuild_preconditions(args)``)
+    is checked before anything is written: problems -> RebuildRefused.
+
+    ``rebuild_same_shape(*, restore) -> RebuildResult`` is a closure over
     ``trainer_rebuild.rebuild_same_shape`` with the island's args, rollout
     executor, :class:`SwappableActor`, runner and data-cursor source."""
 
@@ -64,6 +68,9 @@ def make_trainer_rebuilder(
     identity = _algorithm_identity(algorithm, ref_model=ref_model)
 
     def rebuilder(driver: Any, *, epoch: int, cut_id: str) -> Mapping[str, Any]:
+        problems = list(preconditions()) if preconditions is not None else []
+        if problems:
+            raise RebuildRefused("same-shape trainer rebuild refused: " + "; ".join(problems))
         state = driver.published_state
         if state is None or driver.published_version is None:
             raise RebuildRefused("no published policy to cut")

@@ -151,6 +151,10 @@ class DriverError(RuntimeError):
     """The island loop cannot continue safely."""
 
 
+class RebuildNotStarted(DriverError):
+    """4.4: the trainer rebuild was refused before ``rebuild()`` ran (trainer untouched)."""
+
+
 class PublicationError(DriverError):
     """A publication was incomplete or did not match the requested policy."""
 
@@ -1072,12 +1076,12 @@ class IslandDriver:
         """
         state = self.published_state
         if state is None or self.published_version is None:
-            raise DriverError("trainer rebuild before any publication")
+            raise RebuildNotStarted("trainer rebuild before any publication")
         if not self.at_safe_point:
-            raise DriverError("trainer rebuild outside a safe point")
+            raise RebuildNotStarted("trainer rebuild outside a safe point")
         published_hash = state.policy_tensor_hash()
         if cut_policy_hash != published_hash:
-            raise DriverError(
+            raise RebuildNotStarted(
                 f"cut policy {cut_policy_hash} is not the published policy {published_hash}"
             )
         self.phase("rebuild", rollout_id=self.published_version)

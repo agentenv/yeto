@@ -498,10 +498,14 @@ def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model
     """4.4: give the controller a same-shape trainer rebuilder when the actor is
     the swappable proxy (a rebuild still has to be requested explicitly)."""
     from .rebuild_wiring import make_trainer_rebuilder
-    from .trainer_rebuild import SwappableActor, rebuild_same_shape
+    from .trainer_rebuild import SwappableActor, rebuild_preconditions, rebuild_same_shape
 
     if not isinstance(actor_model, SwappableActor) or not hasattr(elastic.controller,
                                                                   "trainer_rebuilder"):
+        return
+    if rebuild_preconditions(miles_args):
+        # review F3: not a same-shape rebuild path (e.g. --load given): leave the
+        # rebuilder unwired, so a request is rejected at plan time
         return
     ref_load = getattr(miles_args, "ref_load", None)
     elastic.controller.trainer_rebuilder = make_trainer_rebuilder(
@@ -518,6 +522,7 @@ def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model
         ),
         ref_model=(None if not ref_load
                    else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
+        preconditions=lambda: rebuild_preconditions(miles_args),
     )
 
 

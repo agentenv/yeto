@@ -347,3 +347,52 @@ def test_entry_wires_the_rebuilder_only_for_a_swappable_actor(tmp_path):
     assert ctl.trainer_rebuilder is None
     entry._wire_trainer_rebuild(driver, actor_model=SwappableActor(RankGroup([])), **kw)
     assert callable(ctl.trainer_rebuilder)
+
+
+# ---------------------------------------------------------------- review F3
+def test_driver_refusals_before_rebuild_cancel_instead_of_recovery(tmp_path):
+    def wrong_hash(engine, log):
+        def rebuilder(driver, *, epoch, cut_id):
+            return driver.rebuild_trainer(lambda: log.append("touched"), cut_policy_hash="not-it")
+        return rebuilder
+
+    driver, ctl, engine, trained, log = _island(tmp_path, rebuilder=wrong_hash)
+    _at(driver, 1, lambda: ctl.request_trainer_rebuild("rb", 0, 60))
+    driver.run()
+    status = ctl.status("rb")
+    assert status["phase"] == CANCELLED and "not the published policy" in status["error"]
+    assert log == [] and not ctl.recovery_required and len(trained) == 4
+
+
+def test_rebuild_preconditions_refuse_before_any_write(tmp_path):
+    rank, actor = _trained_actor()
+    trainer = MilesTrainerGroup(args=ARGS, actor_model=actor, learner_id=0, learner_generation=0,
+                                parameter_layout_hash=lambda: "L", runner=LoopRunner())
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import rebuild_preconditions
+
+    args = SimpleNamespace(**{**vars(ARGS), "requested_load": "/ckpt"})
+    rebuilder = make_trainer_rebuilder(
+        trainer=trainer, rollout=_Cursor(), ledger=_Ledger(),
+        algorithm=SimpleNamespace(sha256=lambda: "a" * 64, to_legacy_runtime_attrs=lambda: {}),
+        backend_fingerprint="fp", cut_root=str(tmp_path / "cuts"), global_batch_size=GBS,
+        rebuild_same_shape=lambda **_: pytest.fail("must not rebuild"),
+        preconditions=lambda: rebuild_preconditions(args))
+    driver = _Driver("h")
+    with pytest.raises(RebuildRefused, match="--load"):
+        rebuilder(driver, epoch=0, cut_id="rb-0-pre")
+    assert not (tmp_path / "cuts").exists() and driver.calls == []
+
+
+def test_entry_leaves_the_rebuilder_unwired_when_preconditions_fail(tmp_path):
+    from yeto.rl.engine.miles_adapter import entry
+
+    driver, ctl, *_ = _island(tmp_path)
+    ctl.trainer_rebuilder = None
+    entry._wire_trainer_rebuild(
+        driver, elastic=SimpleNamespace(controller=ctl, ledger=None),
+        miles_args=SimpleNamespace(global_batch_size=GBS, ref_load=None, requested_load="/ckpt"),
+        algorithm=SimpleNamespace(sha256=lambda: "a" * 64), actor_model=SwappableActor(RankGroup([])),
+        rollout_executor="ex", runner=LoopRunner(), base_model_revision="r")
+    assert ctl.trainer_rebuilder is None
+    with pytest.raises(Rejected, match="no trainer rebuilder"):
+        ctl.request_trainer_rebuild("rb", 0, 60)
