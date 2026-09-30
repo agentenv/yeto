@@ -36,6 +36,16 @@ keeps the R0 behaviour byte-for-byte (execution mode label
 * ``partitioned-overlap`` is refused: no legal train/inference overlap has been
   certified (task 2.3).
 
+Reconfiguration (rl-infra-spec 3.1-3.7) is opt-in (``controller=``): the
+loop offers the :class:`~yeto.rl.engine.controller.IslandController` one safe
+point per round boundary -- after the round's publication was acknowledged
+and before the next generation (every optimizer step returned, no gradient
+accumulation open, no batch in flight, outer boundary returned non-stop). The
+controller runs at most one transaction there; while it runs, admission of new
+generations is fenced. ``ledger=`` records every batch
+``prepared -> optimizer_applied -> outer_recorded`` durably (3.6). Without
+either, the loop and its event tape are unchanged.
+
 Observation (task 1.7) is opt-in (``observe=True``): it adds
 ``rl_timeline_span`` / ``rl_readiness`` / ``rl_round_labels`` events tagged with
 the profile contract hash, config epoch and weight transport. Off, the event
@@ -329,6 +339,8 @@ class IslandDriver:
         observe: bool = False,
         config_epoch: int = 0,
         clock: Callable[[], float] = time.monotonic,
+        controller: Any = None,
+        ledger: Any = None,
     ) -> None:
         self.learner_id = int(learner_id)
         self.rollout = rollout
@@ -358,6 +370,10 @@ class IslandDriver:
         self.trained_version: int | None = None
         self._open_span: tuple[str, float, int | None] | None = None
         self.fault_injection = load_fault_injection()
+        self.controller = controller
+        self.ledger = ledger
+        self.published_state: TrainableState | None = None
+        self.at_safe_point = False
 
     # -- events ----------------------------------------------------------
     def emit(self, event: str, **fields: Any) -> None:
@@ -413,7 +429,9 @@ class IslandDriver:
             epoch=self.config_epoch,
         )
 
-    def _snapshot(self, rollout_id: int, **fields: Any) -> ReadinessSnapshot:
+    def _snapshot(
+        self, rollout_id: int, *, safe_point: bool = True, **fields: Any
+    ) -> ReadinessSnapshot:
         trained = self.trained_version if self.trained_version is not None else rollout_id
         published = self.published_version if self.published_version is not None else -1
         snap = ReadinessSnapshot(
@@ -422,7 +440,7 @@ class IslandDriver:
             trained_policy_version=trained,
             published_policy_version=published,
             publication_complete=self.expected_token is not None,
-            driver_safe_point=True,
+            driver_safe_point=safe_point,
             config_epoch=self.config_epoch,
             **fields,
         )
@@ -560,6 +578,7 @@ class IslandDriver:
             )
         self.expected_token = policy_token(rollout_id, expected_hash)
         self.published_version = rollout_id
+        self.published_state = state
         self.sync.published(self, rollout_id=rollout_id, policy_hash=expected_hash)
         self.emit(
             "rl_publication",
@@ -577,6 +596,9 @@ class IslandDriver:
             raise PublicationError(
                 f"rollout {rollout_id} has no complete publication manifest"
             )
+        if self.controller is not None and not self.controller.admission_open:
+            # 3.3 admission fence: no new batch while a reconfiguration holds it.
+            raise DriverError(f"generation of rollout {rollout_id} refused: admission fenced")
         if self.colocated:
             self.phase("offload", rollout_id=rollout_id)
             self.trainer.offload()
@@ -766,9 +788,21 @@ class IslandDriver:
         )
 
     def run_round(self, rollout_id: int) -> SyncBoundary:
+        self.at_safe_point = False
         started = time.monotonic()
         batch = self._generate(rollout_id)
         rollout_seconds = time.monotonic() - started
+        if self.ledger is not None:
+            self.ledger.prepare(batch, policy_token=self.expected_token)
+        try:
+            return self._train_round(rollout_id, batch, rollout_seconds)
+        except BaseException as error:
+            if self.ledger is not None and self.ledger.state(rollout_id) == "prepared":
+                self.ledger.discard(rollout_id, error=f"{type(error).__name__}: {error}")
+            raise
+
+    def _train_round(self, rollout_id: int, batch: RolloutBatchHandle,
+                     rollout_seconds: float) -> SyncBoundary:
         if self.progress is not None:
             self.progress.after_generate(
                 rollout_id=rollout_id,
@@ -801,6 +835,10 @@ class IslandDriver:
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         self.trained_version = rollout_id + 1
+        if self.ledger is not None:
+            self.ledger.optimizer_applied(
+                rollout_id, input_batch_hash=getattr(receipt, "input_batch_hash", None)
+            )
         # Per-round accounting of this island (rl-algo-grpo-knobs 7.2,
         # rl-algo-seq-and-adv): what was trained, masked and counted.
         self.emit(
@@ -841,16 +879,82 @@ class IslandDriver:
         require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)
         boundary = self.sync.boundary(self, rollout_id=rollout_id, stats=stats)
+        if self.ledger is not None:
+            self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
         self.publish(boundary.state, rollout_id=rollout_id + 1)
         self._close_span()
         self.rounds_completed += 1
         return boundary
+
+    # -- reconfiguration safe point (3.1) -------------------------------------
+    def safe_point_snapshot(self, rollout_id: int) -> ReadinessSnapshot:
+        """The island at a round boundary (design D4, serial safe point).
+
+        Reached only between ``publish`` of rollout ``rollout_id`` and its
+        generation: the previous optimizer step returned (no gradient
+        accumulation open), its batch was consumed, the outer boundary returned
+        a non-stop result and every member acknowledged the policy. Engine
+        in-flight counts come from the rollout's optional ``trajectory_load``
+        probe; without it the serial boundary itself proves that no request is
+        active (``generate`` returned).
+        """
+        probe = getattr(self.trainer, "grad_accumulation_open", None)
+        grad_open = bool(probe()) if callable(probe) else False
+        load_probe = getattr(self.rollout, "trajectory_load", None)
+        load = load_probe() if callable(load_probe) else None
+        load = dict(load or {})
+        unconsumed = self.ledger.unconsumed() if self.ledger is not None else []
+        return ReadinessSnapshot(
+            rollout_id=rollout_id,
+            optimizer_step=self.rounds_completed,
+            trained_policy_version=(
+                self.trained_version if self.trained_version is not None else rollout_id
+            ),
+            published_policy_version=(
+                self.published_version if self.published_version is not None else -1
+            ),
+            publication_complete=self.expected_token is not None,
+            active_requests=int(load.get("active_requests", 0)),
+            tool_wait=int(load.get("tool_wait", 0)),
+            inflight_batches=len(unconsumed),
+            grad_accumulation_open=grad_open,
+            driver_safe_point=self.at_safe_point,
+            config_epoch=self.config_epoch,
+        )
+
+    def safe_point(self, rollout_id: int) -> str | None:
+        """Offer the controller the round-boundary safe point; returns its result phase."""
+        self.at_safe_point = True
+        if self.controller is None:
+            return None
+        poll = getattr(self.controller, "poll_commands", None)
+        if callable(poll):
+            poll()
+        if not self.controller.has_pending() and not self.controller.recovery_required:
+            return None
+        epoch_before = self.config_epoch
+        self.phase("reconfigure", rollout_id=rollout_id, config_epoch=epoch_before)
+        from .controller import RecoveryRequired
+
+        try:
+            result = self.controller.run_at_safe_point(self, self.safe_point_snapshot(rollout_id))
+        except RecoveryRequired as error:
+            self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
+                      error=str(error), config_epoch=self.config_epoch)
+            raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
+        if result is not None:
+            self.emit("rl_reconfiguration", rollout_id=rollout_id, result=result,
+                      config_epoch_from=epoch_before, config_epoch=self.config_epoch,
+                      members=sorted(self.rollout.members()))
+        return result
 
     def run(self) -> TrainableState:
         self.handshake()
         try:
             try:
                 start = self.sync.start(self)
+                if self.ledger is not None:
+                    self.ledger.rebase(start.rollout_id)
                 state = start.state
                 self.publish(state, rollout_id=start.rollout_id)
                 self._maybe_eval(start.rollout_id, force=start.rollout_id == 0)
@@ -859,6 +963,7 @@ class IslandDriver:
                 while not finished:
                     if self.max_rollouts is not None and rollout_id >= self.max_rollouts:
                         raise DriverError("run reached max_rollouts without a stop")
+                    self.safe_point(rollout_id)
                     boundary = self.run_round(rollout_id)
                     state = boundary.state
                     rollout_id += 1
