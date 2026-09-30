@@ -1,0 +1,246 @@
+"""Group / batch / update ledger (rl-infra-spec 3.6, design D3, alignment A2/F5).
+
+The ledger records, durably and per rollout, what happened to every group the
+driver saw, so a retry, a partial group, a publish failure or a restart can
+neither train a batch twice nor lose one silently:
+
+``prepared`` (generated, complete, policy-checked) -> ``optimizer_applied``
+(the trainer's optimizer step for that batch returned) -> ``outer_recorded``
+(the sync boundary for that round returned; the batch is part of the island's
+outer progress). Terminal states besides ``outer_recorded``:
+
+* ``filtered`` -- the algorithm intentionally dropped samples/groups this round
+  (data cursor advanced, never trained). Recorded with the reason and the
+  mechanism; never counted as lost nor as consumed (A2).
+* ``superseded`` -- a batch whose optimizer step was applied but whose round
+  is not in the authoritative restart cut (the learner restarted from an
+  earlier outer state, so that update no longer exists); its groups may be
+  generated and trained again. A restart below an ``outer_recorded`` batch is
+  refused (commit uncertainty is never replayed automatically, D7-8).
+* ``discarded`` -- a prepared batch that was not trained because the round
+  failed before the optimizer step (e.g. a refused train gate); recorded with
+  the error so the gap is explicit, never silent.
+
+Non-terminal: ``carried_over`` -- a leftover group the engine keeps for a
+later round (F5). It must later be consumed (``prepared`` in a later round) or
+become ``filtered``; :meth:`BatchLedger.open_carried_over` lists what is left
+and a cut treats it as unconsumed. The Miles engine does not report
+carried-over groups yet (``RolloutBatchHandle.carried_over is None``, audited
+in 4.1); the ledger then records ``carried_over_reported: false`` instead of
+guessing.
+
+Storage is the same fsync'd JSONL writer as the reconfiguration journal (one
+record per transition) so the ledger survives a learner crash; "in memory it
+was once submitted" is never used as the dedup proof (D3).
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .journal import Journal
+
+LEDGER_DIR = "ledger"
+STATES = ("prepared", "optimizer_applied", "outer_recorded")
+TERMINAL = frozenset({"outer_recorded", "filtered", "discarded", "superseded"})
+
+
+class LedgerError(RuntimeError):
+    """The requested transition would consume twice or skip a state."""
+
+
+def _batch_hash(group_ids: Iterable[str], sample_ids: Iterable[str]) -> str:
+    digest = hashlib.sha256(b"yeto-rl-batch-v1\0")
+    for gid in sorted(group_ids):
+        digest.update(gid.encode() + b"\0")
+    digest.update(b"\1")
+    for sid in sorted(sample_ids):
+        digest.update(sid.encode() + b"\0")
+    return digest.hexdigest()
+
+
+@dataclass
+class _Batch:
+    rollout_id: int
+    attempt: int
+    batch_hash: str
+    group_ids: tuple[str, ...]
+    policy_token: str
+    state: str
+    filtered: dict[str, Any] = field(default_factory=dict)
+
+
+class BatchLedger:
+    def __init__(self, state_dir: str | Path) -> None:
+        self._journal = Journal(Path(state_dir) / LEDGER_DIR)
+        self._batches: dict[int, _Batch] = {}
+        self._consumed_groups: dict[str, int] = {}
+        self._carried: dict[str, dict[str, Any]] = {}
+        for record in self._journal.records:
+            self._replay(record)
+
+    def close(self) -> None:
+        self._journal.close()
+
+    # -- replay ----------------------------------------------------------------
+    def _replay(self, r: Mapping[str, Any]) -> None:
+        kind = r["kind"]
+        rid = int(r.get("rollout_id", -1))
+        if kind == "prepared":
+            self._batches[rid] = _Batch(
+                rid, int(r["attempt"]), r["batch_hash"], tuple(r["group_ids"]),
+                r["policy_token"], "prepared",
+            )
+            for gid in r["group_ids"]:
+                self._carried.pop(gid, None)
+        elif kind == "superseded":
+            batch = self._batches[rid]
+            batch.state = "superseded"
+            for gid in batch.group_ids:
+                self._consumed_groups.pop(gid, None)
+        elif kind in ("optimizer_applied", "outer_recorded", "discarded"):
+            self._batches[rid].state = kind
+            if kind == "optimizer_applied":
+                for gid in self._batches[rid].group_ids:
+                    self._consumed_groups[gid] = rid
+        elif kind == "filtered":
+            if rid in self._batches:
+                self._batches[rid].filtered = dict(r.get("detail") or {})
+            for gid in r.get("group_ids") or ():
+                self._carried.pop(gid, None)
+        elif kind == "carried_over":
+            for gid in r["group_ids"]:
+                self._carried[gid] = {"rollout_id": rid, "policy_token": r["policy_token"]}
+
+    # -- queries -----------------------------------------------------------------
+    def state(self, rollout_id: int) -> str | None:
+        batch = self._batches.get(rollout_id)
+        return batch.state if batch is not None else None
+
+    def batch(self, rollout_id: int) -> Mapping[str, Any] | None:
+        b = self._batches.get(rollout_id)
+        if b is None:
+            return None
+        return {
+            "rollout_id": b.rollout_id, "attempt": b.attempt, "batch_hash": b.batch_hash,
+            "group_ids": b.group_ids, "policy_token": b.policy_token, "state": b.state,
+            "filtered": dict(b.filtered),
+        }
+
+    def open_carried_over(self) -> dict[str, dict[str, Any]]:
+        return dict(self._carried)
+
+    def unconsumed(self) -> list[int]:
+        """Prepared batches whose optimizer step is not recorded (cut: unconsumed)."""
+        return sorted(r for r, b in self._batches.items() if b.state == "prepared")
+
+    # -- transitions -------------------------------------------------------------
+    def prepare(self, batch: Any, *, policy_token: str) -> str:
+        """Record a generated batch; refuse a batch whose groups were already trained."""
+        group_ids = tuple(g.group_id for g in batch.groups)
+        sample_ids = tuple(f"{g.group_id}/{s}" for g in batch.groups for s in g.sample_ids)
+        rid = int(batch.rollout_id)
+        batch_hash = _batch_hash(group_ids, sample_ids)
+        twice = sorted(g for g in group_ids if g in self._consumed_groups)
+        if twice:
+            raise LedgerError(
+                f"rollout {rid}: groups {twice} were already trained in rollout "
+                f"{self._consumed_groups[twice[0]]}"
+            )
+        previous = self._batches.get(rid)
+        if previous is not None and previous.state not in ("prepared", "discarded", "superseded"):
+            raise LedgerError(
+                f"rollout {rid} is already {previous.state}; it is not generated again"
+            )
+        attempt = 0 if previous is None else previous.attempt + 1
+        self._journal.append(
+            "prepared", rollout_id=rid, attempt=attempt, batch_hash=batch_hash,
+            group_ids=list(group_ids), policy_token=policy_token,
+            samples=len(sample_ids),
+        )
+        self._replay(self._journal.records[-1])
+        filtered = getattr(batch, "filtered", None)
+        filtered_samples = [getattr(g, "filtered_samples", None) for g in batch.groups]
+        detail: dict[str, Any] = {}
+        if filtered is not None:
+            detail["groups"] = int(filtered)
+            detail["mechanism"] = "rollout_meta_hook.record_trained_groups"
+            detail["reason"] = "generated groups not trained this round (dynamic filter / over-sampling)"
+        if any(c is not None for c in filtered_samples):
+            detail["samples"] = sum(int(c or 0) for c in filtered_samples)
+            detail["sample_mechanism"] = "spec sample filter (rl-algo-grpo-knobs D7)"
+        if detail:
+            self._journal.append("filtered", rollout_id=rid, attempt=attempt, detail=detail)
+            self._replay(self._journal.records[-1])
+        carried = getattr(batch, "carried_over", None)
+        self._journal.append(
+            "carried_over_report", rollout_id=rid, attempt=attempt,
+            carried_over_reported=carried is not None,
+            carried_over=None if carried is None else int(carried),
+        )
+        return batch_hash
+
+    def _advance(self, rollout_id: int, to: str, **fields: Any) -> None:
+        batch = self._batches.get(rollout_id)
+        if batch is None:
+            raise LedgerError(f"rollout {rollout_id} was never prepared")
+        order = {"prepared": 0, "optimizer_applied": 1, "outer_recorded": 2}
+        if batch.state == to:
+            return  # idempotent re-record after a lost acknowledgement
+        if batch.state not in order or order[to] != order[batch.state] + 1:
+            raise LedgerError(f"rollout {rollout_id}: {batch.state} -> {to} is not allowed")
+        self._journal.append(to, rollout_id=rollout_id, attempt=batch.attempt,
+                             batch_hash=batch.batch_hash, **fields)
+        self._replay(self._journal.records[-1])
+
+    def optimizer_applied(self, rollout_id: int, **fields: Any) -> None:
+        self._advance(rollout_id, "optimizer_applied", **fields)
+
+    def outer_recorded(self, rollout_id: int, **fields: Any) -> None:
+        self._advance(rollout_id, "outer_recorded", **fields)
+
+    def discard(self, rollout_id: int, *, error: str) -> None:
+        batch = self._batches.get(rollout_id)
+        if batch is None or batch.state != "prepared":
+            return
+        self._journal.append("discarded", rollout_id=rollout_id, attempt=batch.attempt, error=error)
+        self._replay(self._journal.records[-1])
+
+    def rebase(self, start_rollout_id: int) -> list[int]:
+        """Align with the authoritative restart point (``SyncStart.rollout_id``)."""
+        ahead = sorted(r for r, b in self._batches.items() if r >= start_rollout_id)
+        recorded = [r for r in ahead if self._batches[r].state == "outer_recorded"]
+        if recorded:
+            raise LedgerError(
+                f"restart at rollout {start_rollout_id} is behind outer-recorded rollouts "
+                f"{recorded}; refusing to train them again"
+            )
+        superseded = []
+        for rid in ahead:
+            batch = self._batches[rid]
+            if batch.state == "optimizer_applied":
+                self._journal.append("superseded", rollout_id=rid, attempt=batch.attempt,
+                                     restart_rollout_id=start_rollout_id)
+                self._replay(self._journal.records[-1])
+                superseded.append(rid)
+            elif batch.state == "prepared":
+                self.discard(rid, error=f"restart at rollout {start_rollout_id}")
+        return superseded
+
+    def carried_over(self, rollout_id: int, group_ids: Iterable[str], *, policy_token: str) -> None:
+        self._journal.append("carried_over", rollout_id=rollout_id,
+                             group_ids=sorted(group_ids), policy_token=policy_token)
+        self._replay(self._journal.records[-1])
+
+    def filter_carried(self, group_ids: Iterable[str], *, reason: str, mechanism: str) -> None:
+        ids = sorted(group_ids)
+        unknown = [g for g in ids if g not in self._carried]
+        if unknown:
+            raise LedgerError(f"groups {unknown} are not carried over")
+        self._journal.append("filtered", rollout_id=-1, group_ids=ids,
+                             detail={"reason": reason, "mechanism": mechanism})
+        self._replay(self._journal.records[-1])
