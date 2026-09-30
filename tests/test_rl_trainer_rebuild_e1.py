@@ -728,3 +728,51 @@ def test_colocated_rebuild_skips_republish_and_later_rounds_do_not_go_backwards(
     driver.safe_point = safe_point
     driver.run()  # the next rounds' publishes continue at before+1, ..., never backwards
     assert publisher.engine_version == 4  # 1 initial + 3 rounds
+
+
+class RayWorkerHandle:
+    """Miles fork e3a11ab3 ``RayWorkerHandle``: every attribute name becomes a
+    remote-call coroutine (so ``data_source`` is NOT None); the Ray actor
+    handle is ``_actor_handle``."""
+
+    def __init__(self, actor_handle):
+        self._actor_handle = actor_handle
+
+    def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+
+        async def call(*args, **kwargs):
+            raise AssertionError(f"remote method {name!r} must not be used for the cursor")
+
+        return call
+
+
+def test_live_cursor_unwraps_the_miles_ray_worker_handle(caplog):
+    import asyncio
+    import logging
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+
+    source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
+                             get_buffer_length=lambda: 0)
+    executor = SimpleNamespace(data_source=source)
+
+    def pool(handle):
+        return MilesRolloutPool(inference_controller=None, rollout_executor=handle, metadata=None,
+                                expected_policy=lambda: (0, "h"),
+                                runner=SimpleNamespace(run=asyncio.run))
+
+    wrapped = RayWorkerHandle(ActorHandle(executor))
+    assert callable(wrapped.data_source)  # why the old attribute read went wrong
+    live = pool(wrapped)
+    assert live.data_cursor()["sample_offset"] == 8
+    source.sample_offset = 20
+    assert live.live_data_cursor()[0]["sample_offset"] == 20
+    with caplog.at_level(logging.WARNING, logger="yeto.rl.engine.miles_adapter.rollout"):
+        dead = pool(RayWorkerHandle(ActorHandle(executor, fail=True)))
+        assert dead.live_data_cursor() == (None, None) and dead.data_cursor() is None
+        assert "__ray_call__ in the executor actor failed" in caplog.text
+        caplog.clear()
+        assert pool(object()).live_data_cursor() == (None, None)
+        assert "neither a local executor nor a Ray actor" in caplog.text
