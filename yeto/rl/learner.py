@@ -179,6 +179,9 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-pause-margin", type=float, default=None)
+    # controller D4 timeouts (defaults: controller.Timeouts, T_drain 120 s, T_recovery 900 s)
+    parser.add_argument("--rl-elastic-drain-timeout-s", type=float, default=None)
+    parser.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None)
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -299,9 +302,12 @@ _ELASTIC_COMPANIONS = (
     ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
     ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
     ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
+    ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
+    ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
 )
 _ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s",
-                  "rl_elastic_pause_margin")
+                  "rl_elastic_pause_margin", "rl_elastic_drain_timeout_s",
+                  "rl_elastic_recovery_timeout_s")
 # --rl-elastic-cells is optional: without it the island lists the fork's
 # declared cells (InferenceController.describe_cells, fork F-R1) at compose time.
 _ELASTIC_REQUIRED = ("rl_elastic_resources", "rl_elastic_state_dir",

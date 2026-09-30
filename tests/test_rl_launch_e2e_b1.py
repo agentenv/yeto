@@ -565,3 +565,51 @@ def test_elastic_wiring_refuses_missing_fork_verb_preconditions():
                                                  offload_rollout=True), profile=None,
                                  fingerprint="f")
     entry.check_elastic_miles_args(SimpleNamespace(use_miles_router=True))
+
+
+# ---------------------------------------------------------------- controller timeouts (E1-C, E1-D 4)
+def test_drain_and_recovery_timeouts_reach_the_controller(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from yeto.rl import learner
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import entry
+
+    res = tmp_path / "res.json"
+    res.write_text(json.dumps({"configs": {"c0": {"trainer": 1, "rollout": 1}}, "edges": []}))
+    cli = BASE + ("--rl-elastic", "--rl-elastic-resources", str(res),
+                  "--rl-elastic-initial-config", "c0", "--rl-elastic-cells", "a")
+    profile = ExecutionProfile(name="t", execution_mode="partitioned-serial",
+                               outer_protocol="none").bind_algorithm(AlgorithmSpec())
+
+    def controller(extra, home):
+        args, _ = learner_from_run(island_run(cli + extra, monkeypatch), home)
+        args.rl_elastic_resources = str(res)
+        args.rl_elastic_state_dir = str(home / "state")
+        miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
+        learner.apply_ports_infra_switches(args, miles_args, {})
+        return entry.elastic_wiring_for(miles_args, profile=profile, fingerprint="f").controller
+
+    ctl = controller(("--rl-elastic-drain-timeout-s", "5", "--rl-elastic-recovery-timeout-s", "60"),
+                     tmp_path / "a")
+    assert (ctl.timeouts.drain, ctl.timeouts.recovery) == (5.0, 60.0)
+    assert ctl.timeouts.safe_point == 600.0  # others keep their defaults
+    ctl.close()
+    default = controller((), tmp_path / "b")
+    assert (default.timeouts.drain, default.timeouts.recovery) == (120.0, 900.0)
+    default.close()
+    assert "--rl-elastic-drain-timeout-s" not in island_run(cli, monkeypatch)
+
+
+def test_timeouts_need_elastic_and_positive_values():
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    with pytest.raises(ValueError, match="need --rl-elastic"):
+        launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "5")), "ports")
+    with pytest.raises(ValueError, match="must be positive"):
+        launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "0")), "ports")

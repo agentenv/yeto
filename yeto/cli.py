@@ -321,6 +321,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic, TEST ONLY (watchdog fault injection): block up to S "
                     "seconds before the island's first member update_weights, failing as soon "
                     "as a target engine dies; off by default")
+    rl.add_argument("--rl-elastic-drain-timeout-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic: controller T_drain (default 120)")
+    rl.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic: controller T_recovery, the REBUILD_OLD budget beyond the "
+                    "transaction deadline (default 900)")
     rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                     help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
                     "X6 cross-quorum runs only)")
