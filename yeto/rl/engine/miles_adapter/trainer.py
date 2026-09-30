@@ -419,6 +419,9 @@ class MilesTrainerGroup:
                 self._actor.run_plugin(SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": cut_id})
             )
         ]
+        refused = [s["refused"] for s in summaries if "refused" in s]
+        if refused:
+            raise CutError("rank refused the cut: " + "; ".join(sorted(set(refused))))
         expected = trainer_workers(self._args)
         if len(summaries) != expected:
             raise TrainStepError(f"expected {expected} cut shards (one per rank), got {len(summaries)}")
@@ -522,6 +525,11 @@ class MilesTrainerGroup:
                 )
             )
         ]
+        refused = [r["refused"] for r in results if "refused" in r]
+        if refused:
+            # every rank refused before writing, or some ranks wrote: the
+            # caller treats any restore_cut error as RECOVERY_REQUIRED either way
+            raise CutError("rank refused the restore: " + "; ".join(sorted(set(refused))))
         saved = {s["path"]: s for s in manifest.rank_summaries}
         if len(results) != len(saved) or {r["path"] for r in results} != set(saved):
             raise CutError(f"restored shards {sorted(r['path'] for r in results)} != cut {sorted(saved)}")

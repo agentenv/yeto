@@ -222,7 +222,11 @@ except Exception: d=[]
         date -u +%%FT%%TZ > $R/pulled/guard.fail; $M app stop -y $APP > $R/guard_stop.out 2>&1
       fi
     fi
-    timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf - e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts/*/manifest.json inwatch.log 2>/dev/null | base64 -w0" > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/state.tgz.b64
+    timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf - --exclude=trainer_*.pt e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts inwatch.log 2>/dev/null | base64 -w0" > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/state.tgz.b64
+    # the learner exited (Modal would retry the island and bill again): evidence is pulled above -> stop
+    if grep -q "exited with" $R/launch.log 2>/dev/null && [ ! -f $R/pulled/exit_stop.txt ]; then
+      date -u +%%FT%%TZ > $R/pulled/exit_stop.txt; $M app stop -y $APP >> $R/pulled/exit_stop.txt 2>&1
+    fi
   done
   sleep 10
 done

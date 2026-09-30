@@ -283,10 +283,22 @@ def shard_name(coord: Mapping[str, int]) -> str:
     return f"trainer_tp{coord['tp']}_pp{coord['pp']}_dp{coord['dp']}.pt"
 
 
+REFUSED = "refused"
+
+
 def save_cut_shard(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
-    """Write this rank's shard (tmp + fsync + rename) and return its summary."""
-    with trainer_resident(actor):
-        return _save(actor, directory=directory, cut_id=cut_id)
+    """Write this rank's shard (tmp + fsync + rename) and return its summary.
+
+    A refusal (unsupported configuration, not at a step boundary, ...) is
+    RETURNED as ``{"refused": reason}`` instead of raised: Miles marks a cell
+    errored on any ``run_plugin`` exception (GPU run 2026-09-30, C1), which
+    would turn a clean "no cut" into a dead trainer.
+    """
+    try:
+        with trainer_resident(actor):
+            return _save(actor, directory=directory, cut_id=cut_id)
+    except CutPluginError as error:
+        return {REFUSED: str(error)}
 
 
 def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
@@ -404,8 +416,16 @@ def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, An
     """Verify and load this rank's shard; return the post-restore summary (identical digests expected)."""
     install_grad_norm_recorder()  # a rebuilt trainer process has no recorder yet
     _inject_restore_sleep(actor)
-    with trainer_resident(actor):
-        return _restore(actor, directory=directory, files=files, cut_id=cut_id)
+    progress = {"written": False}
+    try:
+        with trainer_resident(actor):
+            return _restore(actor, directory=directory, files=files, cut_id=cut_id, progress=progress)
+    except Exception as error:  # noqa: BLE001
+        if progress["written"]:
+            raise  # state partly written: the trainer is unusable (RECOVERY_REQUIRED)
+        # Refused before any write: the trainer is untouched; return instead of
+        # raising so Miles does not mark the cell errored (see save_cut_shard).
+        return {REFUSED: f"{type(error).__name__}: {error}"}
 
 
 def _inject_restore_sleep(actor: Any) -> None:
@@ -427,7 +447,9 @@ def _inject_restore_kill(coord: Mapping[str, int]) -> None:
         cut_injection.kill_now("restore_cut after the adapter write")
 
 
-def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
+def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str,
+             progress: dict[str, bool] | None = None) -> dict[str, Any]:
+    progress = progress if progress is not None else {"written": False}
     import torch
 
     backend = _backend(actor)
@@ -461,6 +483,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     # Validate against the rebuilt optimizer and scheduler before any write.
     merged = backend.check_optimizer(actor.optimizer, named, states)
     check_scheduler(actor.opt_param_scheduler, shard["scheduler"])
+    progress["written"] = True
     with torch.no_grad():
         for n, p in named:
             p.data.copy_(adapter[n].to(device=p.device))
