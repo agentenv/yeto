@@ -611,3 +611,4 @@
 - 诊断（不改结论）：从同一 cut 出发，DP1 与 DP2 的步 3 梯度相对 L2 差约 0.83%，约 90% 元素不同，而逐样本 loss 逐位相同——差异在梯度计算/归约路径（可能与 bf16 梯度缓冲或 DistOpt reduce-scatter 的精度有关，待查），不在状态重分片（G1 逐位通过）。C1 与 C2 在 adapter/主参数/动量上都不同（逐字段摘要），与此一致。
 - 4.6 未勾选：结论为 no-go，但容器内 compare 未产出、compare 在运行后做了字段位置修正，是否按"合法否定结论"勾选由主 agent 决定。packed 状态保存在 `/home/michael/work/infra-e3-gpu/b3a8r/out/work/packed/`（未入库，1.64 GiB）。
 - B3 合计 ≤$11.63。A9 以 A8=go 为前提，按规则不运行。
+- G4 静态排查（`evidence/infra-e3/a8-run2/g4-analysis.md`）：梯度缓冲与 DistOpt reduce-scatter 为 fp32（`grad_reduce_in_fp32`），缩放因子均为 2 的幂，loss 归一化数学与数值等价；取回状态显示 DP1 与 DP2 的步 3 梯度差异在最后一层为 0、向输入端逐层增大到约 1.5%，与参数种类/bucket 无关，逐元素中位 0.7%（bf16 量级）——逐样本反向传播在两种 DP 进程配置下不逐位相同，属 c) 当前 bf16 profile 下不可避免的跨 DP 数值差异，非重分片缺陷。4.6 按合法否定结论（no-go）的完成记录草稿写在该文件末尾，未勾选，待主 agent 确认。
