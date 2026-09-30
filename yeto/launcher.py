@@ -3269,12 +3269,33 @@ def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
 from .rl.event_echo import TapeCollector as EventCollector  # noqa: E402  (no-sync tapes)
 
 
+def wait_for_tapes(collectors: dict, names, threads, limit: float, *,
+                   clock=time.monotonic, sleep=time.sleep, poll: float = 0.2) -> str:
+    """Bounded, event-based wait before the tapes are judged complete.
+
+    Returns ``"finalized"`` as soon as every expected island's collector holds its
+    ``rl_learner_finalized`` record, ``"streams_ended"`` when every log stream
+    ended (nothing more can arrive), else ``"deadline"`` after ``limit`` s.
+    """
+    deadline = clock() + limit
+    while True:
+        if set(collectors) >= set(names) and all(c.finalized for c in collectors.values()):
+            return "finalized"
+        if not any(t.is_alive() for t in threads):
+            return "streams_ended"
+        if clock() >= deadline:
+            return "deadline"
+        sleep(poll)
+
+
 def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
     """Stream a Modal island's container logs (the Modal twin of _tail)."""
     while True:
         try:
             for line in modal_ops.stream_logs(call_id):
-                print(f"[{prefix}] {str(line).rstrip()}", flush=True)
+                # a Modal log entry may hold several lines: prefix each one
+                for part in str(line).rstrip("\n").split("\n"):
+                    print(f"[{prefix}] {part.rstrip()}", flush=True)
                 if collector is not None:
                     collector.feed(line)
             return 0
@@ -4521,9 +4542,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             if echo_names:
                 # The island's last events (finalization) must be on disk before
                 # teardown: the log streams end when the island exits; bounded wait.
-                deadline = time.monotonic() + limit
-                for thread in tail_threads:
-                    thread.join(max(0.0, deadline - time.monotonic()))
+                wait_for_tapes(event_collectors, echo_names, tail_threads, limit)
                 # Fail closed: stop writing (a stream still alive after the bounded
                 # wait can no longer touch the tape) and mark unfinalized tapes.
                 for name, collector in event_collectors.items():
