@@ -228,6 +228,26 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports fixed partition: reserved standby GPUs never started by any role",
     )
     rl.add_argument(
+        "--rl-overlap-eval",
+        action="store_true",
+        help="ports fixed partition: run eval overlapped with train/outer sync "
+        "(rl-infra-spec 2.3; needs --eval-interval); off by default",
+    )
+    rl.add_argument(
+        "--rl-elastic",
+        action="store_true",
+        help="ports: enable the E1 elastic rollout controller (rl-infra-spec 3.x); "
+        "needs --rl-elastic-resources/-initial-config/-cells; off by default",
+    )
+    rl.add_argument("--rl-elastic-resources", default=None, metavar="PATH",
+                    help="--rl-elastic: resources manifest JSON (configs/edges)")
+    rl.add_argument("--rl-elastic-attestation", default=None, metavar="PATH",
+                    help="--rl-elastic: capability attestation JSON")
+    rl.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME",
+                    help="--rl-elastic: initial config id in the manifest")
+    rl.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
+                    help="--rl-elastic: rollout cell ids the fork declares at startup")
+    rl.add_argument(
         "--dry-run",
         action="store_true",
         help=(

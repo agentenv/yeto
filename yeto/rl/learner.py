@@ -147,6 +147,16 @@ def parse_args(argv=None):
         "--rl-placement", choices=["colocated", "fixed-partition"], default="colocated"
     )
     parser.add_argument("--rl-standby-gpus", type=int, default=0)
+    # rl-infra-spec 2.3 / 3.x (ports only, off by default; the default island
+    # and its Miles argv are unchanged): eval||train overlap and the E1
+    # elastic rollout controller.
+    parser.add_argument("--rl-overlap-eval", action="store_true")
+    parser.add_argument("--rl-elastic", action="store_true")
+    parser.add_argument("--rl-elastic-resources", default=None, metavar="PATH")
+    parser.add_argument("--rl-elastic-attestation", default=None, metavar="PATH")
+    parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
+    parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
+    parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -223,6 +233,7 @@ def parse_args(argv=None):
         except ValueError as error:
             parser.error(str(error))
     try:
+        _check_ports_infra_switches(args)
         _check_single_island_no_sync(args)
         _check_ports_algorithm_options(
             args, outer_sync=not getattr(args, "rl_single_island_no_sync", False)
@@ -255,6 +266,64 @@ def build_ports_launch(args, run_config, extra_argv=()):
         ),
     )
     return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv))
+
+
+_ELASTIC_COMPANIONS = (
+    ("rl_elastic_resources", "--rl-elastic-resources"),
+    ("rl_elastic_attestation", "--rl-elastic-attestation"),
+    ("rl_elastic_state_dir", "--rl-elastic-state-dir"),
+    ("rl_elastic_initial_config", "--rl-elastic-initial-config"),
+    ("rl_elastic_cells", "--rl-elastic-cells"),
+)
+_ELASTIC_REQUIRED = ("rl_elastic_resources", "rl_elastic_state_dir",
+                     "rl_elastic_initial_config", "rl_elastic_cells")
+
+
+def _check_ports_infra_switches(args) -> None:
+    """``--rl-overlap-eval`` / ``--rl-elastic``: explicit and ports-only."""
+
+    ports = getattr(args, "rl_engine", "ports") == "ports"
+    if getattr(args, "rl_overlap_eval", False) and not ports:
+        raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
+    given = [flag for name, flag in _ELASTIC_COMPANIONS if getattr(args, name, None)]
+    if not getattr(args, "rl_elastic", False):
+        if given:
+            raise ValueError(", ".join(given) + " need --rl-elastic")
+        return
+    if not ports:
+        raise ValueError("--rl-elastic only applies to --rl-engine ports")
+    missing = [flag for name, flag in _ELASTIC_COMPANIONS
+               if name in _ELASTIC_REQUIRED and not getattr(args, name, None)]
+    if missing:
+        raise ValueError("--rl-elastic needs " + ", ".join(missing))
+    if not _elastic_cells(args.rl_elastic_cells):
+        raise ValueError("--rl-elastic-cells names no cell")
+
+
+def _elastic_cells(value: str | None) -> tuple[str, ...]:
+    return tuple(c.strip() for c in (value or "").split(",") if c.strip())
+
+
+def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
+    """Carry the opt-in 2.3/3.x switches onto ``miles_args`` before any rollout
+    process starts. Without them nothing is set (default path unchanged)."""
+
+    if getattr(args, "rl_overlap_eval", False):
+        miles_args.yeto_rl_overlap_eval = True
+    if not getattr(args, "rl_elastic", False):
+        return
+    miles_args.yeto_rl_elastic = {
+        "resources": args.rl_elastic_resources,
+        "attestation": getattr(args, "rl_elastic_attestation", None),
+        "state_dir": args.rl_elastic_state_dir,
+        "initial_config": args.rl_elastic_initial_config,
+        "declared_cells": _elastic_cells(args.rl_elastic_cells),
+    }
+    # M1: rollout metadata carries data_cursor/buffer_length only when asked.
+    from .engine.miles_adapter.rollout_meta_hook import ELASTIC_METADATA_ENV
+
+    miles_args.yeto_rl_elastic_metadata = True
+    (os.environ if environ is None else environ)[ELASTIC_METADATA_ENV] = "1"
 
 
 def _check_single_island_no_sync(args) -> None:
@@ -2321,6 +2390,7 @@ def _run_ports(
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
     miles_args.yeto_rl_engine = "ports"
+    apply_ports_infra_switches(args, miles_args)
     run_ports_island(
         miles_args,
         launch,

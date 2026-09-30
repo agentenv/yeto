@@ -563,6 +563,27 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
     return address
 
 
+def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
+    """``miles_args.yeto_rl_elastic`` (learner ``--rl-elastic``) -> ElasticWiring.
+
+    None when the switch is off: the island is then composed exactly as before.
+    """
+    config = getattr(miles_args, "yeto_rl_elastic", None)
+    if not config:
+        return None
+    from .elastic_wiring import build_elastic
+
+    return build_elastic(
+        state_dir=config["state_dir"],
+        resources=config["resources"],
+        attestation=config.get("attestation"),
+        profile=profile,
+        initial_config=config["initial_config"],
+        runtime_fingerprint=fingerprint,
+        declared_cells=tuple(config["declared_cells"]),
+    )
+
+
 def run_ports_island(
     miles_args: Any,
     launch: Any,
@@ -584,9 +605,10 @@ def run_ports_island(
     require_run_plugin()  # before any upstream component or model exists
     from ..overlap import loop_eval_starter
 
+    fingerprint = runtime_fingerprint(launch, MILES_NEXT_COMMIT)
     capabilities = with_partitioned_serial(
         miles_capabilities(
-            runtime_fingerprint(launch, MILES_NEXT_COMMIT),
+            fingerprint,
             unverified_mechanisms=getattr(miles_args, "yeto_rl_unverified_mechanisms", ()),
         )
     )
@@ -598,6 +620,8 @@ def run_ports_island(
         expected_sha256=expected_algorithm_sha256(miles_args),
     )
     preflight(profile, algorithm, capabilities)  # A1: before any GPU process
+    # E1 (3.x), opt-in: a bad manifest/attestation fails here, before Ray.
+    elastic = elastic_wiring_for(miles_args, profile=profile, fingerprint=fingerprint)
     connect_island_ray()
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
@@ -678,6 +702,7 @@ def run_ports_island(
                 if profile.execution_mode == "partitioned-overlap"
                 else None
             ),
+            elastic=elastic,
         )
         return driver.run()
     except BaseException as exc:

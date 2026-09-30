@@ -848,6 +848,7 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
     ):
         raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
+    _check_ports_infra_switches(args, rl_engine)
     steps = getattr(args, "rl_optimizer_steps", 1)
     if steps is None:
         steps = 1
@@ -918,6 +919,72 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
     args.rl_expected_algorithm_sha256 = spec.sha256()
 
 
+_ELASTIC_LAUNCH_FLAGS = (
+    ("rl_elastic_resources", "--rl-elastic-resources"),
+    ("rl_elastic_attestation", "--rl-elastic-attestation"),
+    ("rl_elastic_initial_config", "--rl-elastic-initial-config"),
+    ("rl_elastic_cells", "--rl-elastic-cells"),
+)
+ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
+
+
+def _check_ports_infra_switches(args, rl_engine: str) -> None:
+    """``--rl-overlap-eval`` / ``--rl-elastic`` (rl-infra-spec 2.3 / 3.x): opt-in,
+    ports-only; the elastic manifest is read here so a bad file fails locally."""
+
+    if getattr(args, "rl_overlap_eval", False) and rl_engine != "ports":
+        raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
+    given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS if getattr(args, name, None)]
+    if not getattr(args, "rl_elastic", False):
+        if given:
+            raise ValueError(", ".join(given) + " need --rl-elastic")
+        return
+    if rl_engine != "ports":
+        raise ValueError("--rl-elastic only applies to --rl-engine ports")
+    missing = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS
+               if name != "rl_elastic_attestation" and not getattr(args, name, None)]
+    if missing:
+        raise ValueError("--rl-elastic needs " + ", ".join(missing))
+    cells = [c.strip() for c in args.rl_elastic_cells.split(",") if c.strip()]
+    if not cells or any(not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", c) for c in cells):
+        raise ValueError(f"--rl-elastic-cells: bad cell ids {args.rl_elastic_cells!r}")
+    args.rl_elastic_resources_json = json.dumps(
+        json.loads(Path(args.rl_elastic_resources).expanduser().read_text(encoding="utf-8")),
+        sort_keys=True, separators=(",", ":"),
+    )
+    attestation = getattr(args, "rl_elastic_attestation", None)
+    args.rl_elastic_attestation_json = None if not attestation else json.dumps(
+        json.loads(Path(attestation).expanduser().read_text(encoding="utf-8")),
+        sort_keys=True, separators=(",", ":"),
+    )
+
+
+def _ports_infra_flags(args) -> tuple[str, str]:
+    """(prelude, learner flags) for the opt-in 2.3/3.x switches; ("", "") by default."""
+
+    prelude, flags = "", ""
+    if getattr(args, "rl_overlap_eval", False):
+        flags += " --rl-overlap-eval"
+    if getattr(args, "rl_elastic", False):
+        prelude += (
+            "mkdir -p ~/yeto-rl && printf '%s' "
+            f"{shlex.quote(args.rl_elastic_resources_json)} > ~/yeto-rl/elastic_resources.json\n"
+        )
+        flags += (
+            " --rl-elastic --rl-elastic-resources ~/yeto-rl/elastic_resources.json"
+            f" --rl-elastic-state-dir {ELASTIC_ISLAND_STATE_DIR}"
+            f" --rl-elastic-initial-config {shlex.quote(args.rl_elastic_initial_config)}"
+            f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
+        )
+        if getattr(args, "rl_elastic_attestation_json", None):
+            prelude += (
+                "printf '%s' "
+                f"{shlex.quote(args.rl_elastic_attestation_json)} > ~/yeto-rl/elastic_attestation.json\n"
+            )
+            flags += " --rl-elastic-attestation ~/yeto-rl/elastic_attestation.json"
+    return prelude, flags
+
+
 def _ports_algorithm_flags(args) -> tuple[str, str]:
     """(run prelude, learner flags) carrying the algorithm to a ports island."""
 
@@ -945,7 +1012,8 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
     allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
     for name in allowed:
         flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
-    return prelude, flags
+    infra_prelude, infra_flags = _ports_infra_flags(args)
+    return prelude + infra_prelude, flags + infra_flags
 
 
 def _prepare_rl_args(
