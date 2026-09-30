@@ -173,3 +173,12 @@ def test_plan_file_is_optional_and_validated(tmp_path):
         e2_harness.load_plan({}, repo_root=tmp_path)
     with pytest.raises(e2_harness.HarnessFailed, match="does not exist"):
         e2_harness.load_plan({e2_harness.PLAN_ENV: str(tmp_path / "none.json")})
+
+
+def test_plan_lora_dropout_must_match_the_ranks(tmp_path, determinism):
+    ctx = _ctx(tmp_path)
+    ctx.plan = {**ctx.plan, "lora_dropout": 0.05}
+    for r in ctx.actor.target.ranks:
+        r.args.lora_dropout = 0.0
+    with pytest.raises(e2_harness.EnvironmentBlocked, match="dropout"):
+        e2_harness.run_harness(ctx)

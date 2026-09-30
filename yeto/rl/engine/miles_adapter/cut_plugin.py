@@ -636,12 +636,14 @@ def train_parallel_config(actor: Any) -> dict[str, Any]:
 # E2 GPU harness read-outs (plan-v3): no writes, no randomness consumed.
 # --------------------------------------------------------------------------
 
+# plan-v3 §0 (= launcher --rl-deterministic-trainer, entry.DETERMINISM_ENV).
 DETERMINISM_ENV = {
     "NCCL_ALGO": "Ring",
-    "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     "NVIDIA_TF32_OVERRIDE": "0",
 }
+# Recorded, not required: Megatron --deterministic-mode applies its own default.
+DETERMINISM_INFO_ENV = ("NVTE_ALLOW_NONDETERMINISTIC_ALGO",)
 STATE_SUMMARY = f"{_MODULE}.state_summary"
 RANK_DETERMINISM = f"{_MODULE}.rank_determinism"
 
@@ -650,10 +652,12 @@ def rank_determinism(actor: Any) -> dict[str, Any]:
     """What this rank actually runs with (plan-v3 §0: all must hold, else environment-blocked)."""
     env = {k: os.environ.get(k) for k in DETERMINISM_ENV}
     return {
+        "info_env": {k: os.environ.get(k) for k in DETERMINISM_INFO_ENV},
         "coord": _backend(actor).coord(),
         "env": env,
         "env_ok": env == DETERMINISM_ENV,
         "deterministic_mode": bool(getattr(actor.args, "deterministic_mode", False)),
+        "lora_dropout": getattr(actor.args, "lora_dropout", None),
     }
 
 

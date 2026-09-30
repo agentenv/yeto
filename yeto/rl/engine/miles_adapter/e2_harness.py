@@ -171,6 +171,12 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
         rec.write()
         raise EnvironmentBlocked("determinism settings not in effect on every rank (plan-v3 §0)")
     rec.criterion("determinism_settings", True)
+    want = plan.get("lora_dropout")
+    if want is not None and any(d.get("lora_dropout") != want for d in det):
+        rec.criterion("configuration", False, lora_dropout=[d.get("lora_dropout") for d in det],
+                      expected=want)
+        rec.write()
+        raise EnvironmentBlocked(f"LoRA dropout on the ranks is not the plan's {want}")
     layout = trainer.actual_layout()
     rec.step("layout", layout=layout)
     if layout["dp"] != plan["expected_dp"]:
