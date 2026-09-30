@@ -157,12 +157,19 @@ def inject_rebuild_failures(rebuild: Callable[..., Awaitable[Any]], module: Any,
     return wrapped
 
 
-def _inject_cursor_shift(args: Any, cursor: Mapping[str, int]) -> str | None:
+def _inject_cursor_shift(args: Any, cursor: Mapping[str, int], rollout: Any = None) -> str | None:
     from . import cut_injection
 
     groups = cut_injection.cursor_shift()
     if groups is None:
         return None
+    # The row only means something when the cursor is read LIVE after the
+    # rebuild (MilesRolloutPool.live_data_cursor); a cached last-batch cursor
+    # would let the rewind pass unseen -> refuse instead of passing vacuously.
+    live = getattr(rollout, "live_data_cursor", None)
+    if not callable(live) or live()[0] is None:
+        raise cut_injection.InjectionConfigError(
+            f"{cut_injection.CURSOR_SHIFT_ENV}: the rollout data cursor is not readable live")
     return cut_injection.write_shifted_dataset_state(args, cursor, groups)
 
 
@@ -204,7 +211,7 @@ def rebuild_same_shape(
     rebuild = rebuild or _default_rebuild()
     manager = worker_manager if worker_manager is not None else _default_worker_manager()
     attempts: list[dict[str, Any]] = []
-    shifted = _inject_cursor_shift(args, cursor)
+    shifted = _inject_cursor_shift(args, cursor, rollout)
     if shifted is not None:
         attempts.append({"attempt": -1, "stage": "test_inject_cursor_shift", "path": shifted})
     view = None
