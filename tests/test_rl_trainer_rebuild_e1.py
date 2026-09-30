@@ -424,7 +424,7 @@ def test_round_trained_event_carries_the_data_cursor_only_when_reported(tmp_path
 def test_injected_rebuild_failure_takes_the_fork_path_to_rebuild_old(tmp_path):
     import types
 
-    from yeto.rl.engine.miles_adapter.entry import injected_rebuild_failure
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import inject_rebuild_failures
 
     fresh = [RankGroup([make_rank(9)]), RankGroup([make_rank(8)])]
     calls = []
@@ -463,7 +463,7 @@ def test_injected_rebuild_failure_takes_the_fork_path_to_rebuild_old(tmp_path):
         rebuild_same_shape=lambda *, restore: rebuild_same_shape(
             trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
             worker_manager="wm", rollout=_Cursor(), restore=restore,
-            rebuild=injected_rebuild_failure(fork)))
+            rebuild=inject_rebuild_failures(fork.rebuild_training_models, fork, 1)))
     out = rebuilder(_Driver("h"), epoch=0, cut_id="rb-0-inj")
     assert out["outcome"] == "REBUILD_OLD" and out["generation"] == 1
     assert calls == ["create"]  # the first create was the injected failure
@@ -485,3 +485,29 @@ def test_rebuild_fail_switch_is_exported_only_when_given(tmp_path, monkeypatch):
     assert "YETO_RL_TEST_INJECT_REBUILD_FAIL" not in island_run(base, monkeypatch)
     assert "export YETO_RL_TEST_INJECT_REBUILD_FAIL=1\n" in island_run(
         base + ("--rl-test-inject-rebuild-fail",), monkeypatch)
+
+
+def test_live_data_cursor_reads_the_executor_data_source_now():
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+
+    source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
+                             get_buffer_length=lambda: 0)
+    pool = MilesRolloutPool(inference_controller=None,
+                            rollout_executor=SimpleNamespace(data_source=source), metadata=None,
+                            expected_policy=lambda: (0, "h"), runner=SimpleNamespace(run=asyncio.run))
+    pool._last_cursor = {"sample_offset": 4, "epoch_id": 0, "sample_group_index": 4,
+                         "sample_index": 32}
+    assert pool.live_data_cursor() == ({"sample_offset": 8, "epoch_id": 0,
+                                        "sample_group_index": 8, "sample_index": 64}, 0)
+    source.sample_offset = 12  # e.g. rollout_executor.load moved it during a rebuild
+    assert pool.data_cursor()["sample_offset"] == 12
+    # unreachable data source (e.g. a remote executor): the last batch's cursor
+    remote = MilesRolloutPool(inference_controller=None, rollout_executor=object(), metadata=None,
+                              expected_policy=lambda: (0, "h"),
+                              runner=SimpleNamespace(run=asyncio.run))
+    remote._last_cursor = {"sample_offset": 4, "epoch_id": 0, "sample_group_index": 4,
+                           "sample_index": 32}
+    assert remote.live_data_cursor() == (None, None)
+    assert remote.data_cursor()["sample_offset"] == 4

@@ -406,3 +406,115 @@ def test_determinism_is_off_by_default(tmp_path, monkeypatch):
     (base,), kwargs = _captured_args()
     assert "--deterministic-mode" not in mc.translate_run_config(
         rc.resolve_rl_run_config(base, **kwargs), AlgorithmSpec()).argv
+
+
+# ---------------------------------------------------------------- --balance-data vs trainer edges
+def _argv_from(args_ns):
+    import argparse
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    (base,), kwargs = _captured_args()
+    keys = ("rl_elastic", "rl_elastic_trainer_edges")
+    merged = argparse.Namespace(**{**vars(base), "rl_placement": "fixed-partition",
+                                   "rollout_num_gpus": 1,
+                                   **{k: getattr(args_ns, k) for k in keys}})
+    return mc.translate_run_config(rc.resolve_rl_run_config(merged, **kwargs), AlgorithmSpec()).argv
+
+
+def test_trainer_edges_drop_balance_data_only(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl import learner
+
+    edges, _ = learner_from_run(island_run(BASE + _elastic(tmp_path) + (
+        "--rl-elastic-trainer-edges",), monkeypatch), tmp_path / "a")
+    plain, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "b")
+    default, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "c")
+    assert edges.rl_elastic_trainer_edges and not plain.rl_elastic_trainer_edges
+    with_edges, elastic_only, off = _argv_from(edges), _argv_from(plain), _argv_from(default)
+    assert "--balance-data" not in with_edges
+    assert "--balance-data" in elastic_only and elastic_only == off  # byte-identical otherwise
+    assert [a for a in elastic_only if a != "--balance-data"] == list(with_edges)
+    miles_args = SimpleNamespace(yeto_rl_learner_id=0)
+    learner.apply_ports_infra_switches(edges, miles_args, {})
+    assert miles_args.yeto_rl_elastic["trainer_edges"] is True
+
+
+def test_trainer_edges_need_elastic():
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    with pytest.raises(ValueError, match="need --rl-elastic"):
+        launcher._check_ports_infra_switches(_cli(("--rl-elastic-trainer-edges",)), "ports")
+
+
+# ---------------------------------------------------------------- E2 cut injections (patch v1)
+def test_cut_injections_rank_zero_reaches_the_island_and_ray_workers(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+
+    run = island_run(BASE + _elastic(tmp_path) + (
+        "--rl-test-inject-cut-save-kill-rank", "0", "--rl-test-inject-cut-restore-sleep", "1:30",
+        "--rl-test-inject-rebuild-fail"), monkeypatch)
+    _, env = learner_from_run(run, tmp_path / "home")
+    assert env["YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"] == "0"  # rank 0 is not False
+    assert env["YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"] == "1:30"
+    assert env["YETO_RL_TEST_INJECT_REBUILD_FAIL"] == "1"  # one shared rebuild-fail variable
+    seen = {}
+    ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
+    connect_island_ray(environ={"RAY_ADDRESS": "1.2.3.4:6379", **env}, ray_module=ray)
+    forwarded = seen["runtime_env"]["env_vars"]
+    assert forwarded["YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"] == "0"
+    assert forwarded["YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"] == "1:30"
+    assert "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK" not in island_run(BASE + _elastic(tmp_path),
+                                                                        monkeypatch)
+
+
+# ---------------------------------------------------------------- --rl-lora-dropout
+def test_lora_dropout_reaches_the_miles_argv_and_default_stays_zero(tmp_path, monkeypatch):
+    import argparse
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    args, _ = learner_from_run(island_run(BASE + ("--rl-lora-dropout", "0.05"), monkeypatch),
+                               tmp_path / "a")
+    assert args.rl_lora_dropout == 0.05
+    (base,), kwargs = _captured_args()
+
+    def argv(**extra):
+        ns = argparse.Namespace(**{**vars(base), "rl_engine": "ports", "parameter_mode": "lora",
+                                   **extra})
+        return mc.translate_run_config(rc.resolve_rl_run_config(ns, **kwargs), AlgorithmSpec()).argv
+
+    if getattr(base, "parameter_mode", "lora") != "lora":
+        import pytest
+
+        pytest.skip("captured base run is not LoRA")
+    on, off = argv(rl_lora_dropout=args.rl_lora_dropout), argv()
+    assert on[on.index("--lora-dropout") + 1] == "0.05"
+    assert off[off.index("--lora-dropout") + 1] == "0"
+    assert [a if a != "0.05" else "0" for a in on] == list(off)
+    default, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "b")
+    assert default.rl_lora_dropout is None
+
+
+def test_lora_dropout_range_is_checked():
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    with pytest.raises(ValueError, match="--rl-lora-dropout"):
+        launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "1.0")), "ports")
+    with pytest.raises(ValueError, match="--rl-lora-dropout"):
+        launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "0.05")), "legacy")

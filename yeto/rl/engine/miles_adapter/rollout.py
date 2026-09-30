@@ -374,8 +374,28 @@ class MilesRolloutPool:
         self._gpus_per_engine = gpus_per_engine
         self._bind_seq = 0
 
+    def live_data_cursor(self) -> tuple[dict[str, int] | None, int | None]:
+        """The data source position NOW (and its reuse-buffer length), read from
+        the rollout executor's data source -- not the last batch's cached value.
+        Catches a cursor moved outside generation (e.g. ``rollout_executor.load``
+        during a trainer rebuild; E2 G-4.5). (None, None) when the executor's
+        data source is not reachable from this process (unknown, never guessed)."""
+        from .rollout_meta_hook import data_cursor as read_cursor
+
+        source = getattr(self._executor, "data_source", None)
+        if source is None:
+            return None, None
+        try:
+            return read_cursor(source)
+        except Exception:  # noqa: BLE001 - unknown
+            return None, None
+
     def data_cursor(self) -> dict[str, int] | None:
-        """4.2: data cursor after the last generated batch (None = unknown)."""
+        """4.2/4.4: the live data cursor when readable, else the cursor after the
+        last generated batch (None = unknown)."""
+        live, _ = self.live_data_cursor()
+        if live is not None:
+            return dict(live)
         return None if self._last_cursor is None else dict(self._last_cursor)
 
     def generate(self, rollout_id: int) -> RolloutBatchHandle:
