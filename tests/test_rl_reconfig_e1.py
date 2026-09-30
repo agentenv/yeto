@@ -231,7 +231,8 @@ class _StaticPlacement:
         return PlacementDescription("fixed-partition", ("g0", "g1", "g2", "g3"), ("g4", "g5"))
 
 
-def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, inbox=False):
+def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, inbox=False,
+           driver_kw=None):
     engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, step_delta=1.0,
                         placement_kind="fixed-partition")
     fork = ForkMembership(engine, declared=[f"engine:c{i}" for i in range(4)],
@@ -264,9 +265,9 @@ def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, in
     driver = IslandDriver(
         learner_id=0, rollout=pool, trainer=engine.trainer, policy_state=engine.policy_state,
         publisher=publisher, placement=ElasticFakePlacement(),
-        capabilities=fake_capabilities(execution_modes=MODES), algorithm=AlgorithmSpec(),
+        algorithm=AlgorithmSpec(),
         sync=LocalOnlySync(rounds), events=EventTape(tmp_path / "events.jsonl", 0),
-        profile=_profile(), controller=ctl, ledger=led,
+        **{"capabilities": fake_capabilities(execution_modes=MODES), "profile": _profile(), "controller": ctl, "ledger": led, **(driver_kw or {})},
     )
     return driver, ctl, fork, pool, publisher, trained, clock
 
@@ -842,3 +843,47 @@ def test_missing_group_index_fails_closed():
     for args in (SimpleNamespace(), SimpleNamespace(yeto_rl_elastic_metadata=True)):
         with pytest.raises(RuntimeError, match="group_index"):
             group_record(args, [sample])
+
+
+def test_reconfiguration_event_records_the_scheduled_eval_under_overlap(tmp_path):
+    """Integ-s2 finding 4: elastic + eval overlap -- the rl_reconfiguration event
+    carries ``eval_due`` (an eval scheduled but not started yet)."""
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+    from yeto.rl.engine.overlap import IMPLEMENTED_OVERLAP
+
+    profile = ExecutionProfile(name="t-overlap", execution_mode="partitioned-overlap",
+                               outer_protocol="none",
+                               allowed_overlap=IMPLEMENTED_OVERLAP).bind_algorithm(AlgorithmSpec())
+
+    class Handle:
+        begin = end = None
+
+        def __init__(self, rid):
+            self.rid = rid
+
+        def cancel(self):
+            pass
+
+        def result(self):
+            return {"score": float(self.rid)}
+
+    driver, ctl, *_ = _setup(tmp_path, driver_kw={
+        "profile": profile, "evaluate": lambda rid: {"score": 0.0}, "eval_interval": 1,
+        "evaluate_start": Handle,
+        "capabilities": fake_capabilities(execution_modes=set(MODES) | {"partitioned-overlap"}),
+    })
+    _run_with_request(driver, ctl, at=2)
+    recon = [e for e in _events(tmp_path) if e["event"] == "rl_reconfiguration"]
+    assert [e["result"] for e in recon] == [SUCCEEDED]
+    assert "eval_due" in recon[0]
+    # the eval of v2 was scheduled at round 2 and starts after the next generation
+    assert recon[0]["eval_due"] == 2
+    starts = [e["policy_version"] for e in _events(tmp_path) if e["event"] == "rl_eval_overlap_start"]
+    assert 2 in starts  # it did start, after the reconfiguration
+
+
+def test_reconfiguration_event_has_no_eval_due_without_overlap(tmp_path):
+    driver, ctl, *_ = _setup(tmp_path)
+    _run_with_request(driver, ctl, at=2)
+    recon = [e for e in _events(tmp_path) if e["event"] == "rl_reconfiguration"]
+    assert recon and "eval_due" not in recon[0]

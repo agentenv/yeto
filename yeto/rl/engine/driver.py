@@ -998,16 +998,22 @@ class IslandDriver:
         self.phase("reconfigure", rollout_id=rollout_id, config_epoch=epoch_before)
         from .controller import RecoveryRequired
 
+        # 2.3 + 3.x: an eval scheduled but not yet started (it starts after the
+        # next generation, on whatever rollout members the reconfiguration leaves).
+        eval_due = (
+            {"eval_due": None if self.eval_overlap.due is None else self.eval_overlap.due[0]}
+            if self.eval_overlap is not None else {}
+        )
         try:
             result = self.controller.run_at_safe_point(self, self.safe_point_snapshot(rollout_id))
         except RecoveryRequired as error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
-                      error=str(error), config_epoch=self.config_epoch)
+                      error=str(error), config_epoch=self.config_epoch, **eval_due)
             raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
         if result is not None:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result=result,
                       config_epoch_from=epoch_before, config_epoch=self.config_epoch,
-                      members=sorted(self.rollout.members()))
+                      members=sorted(self.rollout.members()), **eval_due)
         return result
 
     # -- same-shape trainer rebuild (4.4) --------------------------------------
