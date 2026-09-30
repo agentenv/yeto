@@ -797,6 +797,7 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
     config = getattr(miles_args, "yeto_rl_elastic", None)
     if not config:
         return None
+    check_elastic_miles_args(miles_args)
     from .elastic_wiring import LazyBoardActor, build_elastic
 
     return build_elastic(
@@ -819,6 +820,21 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
            if config.get("trainer_edges") else {}),
     )
+
+
+def check_elastic_miles_args(miles_args: Any) -> None:
+    """Miles preconditions of the fork verbs the E1 controller uses, refused before
+    Ray: cordon / drain_cells / admit_cells / cordoned update_weights need the
+    Miles router; member publication needs a resident partitioned rollout."""
+    problems = []
+    if not getattr(miles_args, "use_miles_router", False):
+        problems.append("--use-miles-router (fork cordon/drain/admit_cordoned need the Miles router)")
+    if getattr(miles_args, "colocate", False):
+        problems.append("no --colocate (elastic needs a fixed partition)")
+    if getattr(miles_args, "offload_rollout", False):
+        problems.append("no rollout offload (member publication needs resident engines)")
+    if problems:
+        raise ValueError("--rl-elastic needs " + "; ".join(problems))
 
 
 def manifest_pool_gpus(resources: Any) -> tuple[str, ...]:

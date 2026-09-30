@@ -543,6 +543,8 @@
 - 镜像内 CPU preflight（B2 批准，app ap-AOEKeEOxdqbPDpGJNSPQyD，≤$0.02，已 stopped）：learner 在 import transformer_engine 时因缺 libcuda 失败，没有得到 Bridge/Miles parse 的结论；runtime manifest 的 commits 与当时的 pin 一致。需要 GPU 容器（例如 T4），待批准。证据：`preflight-cpu-20260930/`。
 - 测试：全量 68 failed / 26 errors / 3092 passed，失败 id（94 个）与 integ-decl 9d2029d 基线（3058 passed）一致。
 - 裁定（2026-09-30）：F-R1 绑定只在内存对 E1-D ⑤⑥⑦ 的影响按 (c) 处理，调整用例安排、原判据不变，写入 plan v2 §7.1；已提交配置≠启动配置时重启 → RECOVERY_REQUIRED 记为已知限制，不作为本轮判据；A9 f5 与 E3 plan-v3 一致。
+- F-E1 重跑的发布失败（`admit_cordoned needs the Miles router`）：`--rl-elastic` 下 Miles argv 固定加 `--use-miles-router`（RLRunConfig.use_miles_router），默认 argv 不变；`elastic_wiring_for` 在 Ray 之前调用 `check_elastic_miles_args`，拒绝缺 Miles router、colocate、rollout offload 的情况。已排查 elastic 路径用到的 fork 动词：cordon/uncordon/drain_cells/get_inflight/admit_cells/cordoned `start_update_weights` 依赖 Miles router；start/stop_cells/describe_cells 依赖可按需启停的 RayWorkerProvider（不支持时 fork 抛 NotImplementedError，事务按失败处理）；check_weights 无额外前提。A4/A5/A6b 的基线须同样带 `--rl-elastic`，写入 plan v2 §8。
+- 全量：68F/3095P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b5.ids`）。
 ## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
 - 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
 - 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。
