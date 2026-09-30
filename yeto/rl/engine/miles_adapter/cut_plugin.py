@@ -307,7 +307,20 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
     if os.path.exists(final):
         raise CutPluginError(f"cut shard {final} already exists (cuts are immutable)")
     tmp = final + ".tmp"
+    from . import cut_injection
+
+    kill = cut_injection.is_rank(coord, cut_injection.save_kill_rank())
     with open(tmp, "wb") as fh:
+        if kill:  # test-only (G-4.5): die with a half-written temp file
+            import io
+
+            buffer = io.BytesIO()
+            torch.save(to_safe(shard), buffer)
+            data = buffer.getvalue()
+            fh.write(data[: len(data) // 2])
+            fh.flush()
+            os.fsync(fh.fileno())
+            cut_injection.kill_now(f"save_cut shard {name} half written")
         torch.save(to_safe(shard), fh)
         fh.flush()
         os.fsync(fh.fileno())
@@ -390,8 +403,28 @@ RANK_COORDS = f"{_MODULE}.rank_coords"
 def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
     """Verify and load this rank's shard; return the post-restore summary (identical digests expected)."""
     install_grad_norm_recorder()  # a rebuilt trainer process has no recorder yet
+    _inject_restore_sleep(actor)
     with trainer_resident(actor):
         return _restore(actor, directory=directory, files=files, cut_id=cut_id)
+
+
+def _inject_restore_sleep(actor: Any) -> None:
+    """Test-only (G-4.5): one rank sleeps before the restore."""
+    from . import cut_injection
+
+    target = cut_injection.restore_sleep()
+    if target is not None and cut_injection.is_rank(_backend(actor).coord(), target[0]):
+        import time
+
+        time.sleep(target[1])
+
+
+def _inject_restore_kill(coord: Mapping[str, int]) -> None:
+    """Test-only (G-4.5): die after the adapter write, before the optimizer."""
+    from . import cut_injection
+
+    if cut_injection.is_rank(coord, cut_injection.restore_kill_rank()):
+        cut_injection.kill_now("restore_cut after the adapter write")
 
 
 def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
@@ -431,6 +464,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     with torch.no_grad():
         for n, p in named:
             p.data.copy_(adapter[n].to(device=p.device))
+        _inject_restore_kill(coord)
         backend.load_optimizer(actor.optimizer, named, merged)
     actor.opt_param_scheduler.load_state_dict(shard["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
@@ -596,3 +630,82 @@ TRAIN_PARALLEL_CONFIG = f"{_MODULE}.train_parallel_config"
 def train_parallel_config(actor: Any) -> dict[str, Any]:
     """The config the rank advertised to the rollout side (Megatron actor ``train_parallel_config``)."""
     return dict(getattr(actor, "train_parallel_config", None) or {})
+
+
+# --------------------------------------------------------------------------
+# E2 GPU harness read-outs (plan-v3): no writes, no randomness consumed.
+# --------------------------------------------------------------------------
+
+# plan-v3 §0 (= launcher --rl-deterministic-trainer, entry.DETERMINISM_ENV).
+DETERMINISM_ENV = {
+    "NCCL_ALGO": "Ring",
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    "NVIDIA_TF32_OVERRIDE": "0",
+}
+# Recorded, not required: Megatron --deterministic-mode applies its own default.
+DETERMINISM_INFO_ENV = ("NVTE_ALLOW_NONDETERMINISTIC_ALGO",)
+STATE_SUMMARY = f"{_MODULE}.state_summary"
+RANK_DETERMINISM = f"{_MODULE}.rank_determinism"
+
+
+def rank_determinism(actor: Any) -> dict[str, Any]:
+    """What this rank actually runs with (plan-v3 §0: all must hold, else environment-blocked)."""
+    env = {k: os.environ.get(k) for k in DETERMINISM_ENV}
+    return {
+        "info_env": {k: os.environ.get(k) for k in DETERMINISM_INFO_ENV},
+        "coord": _backend(actor).coord(),
+        "env": env,
+        "env_ok": env == DETERMINISM_ENV,
+        "deterministic_mode": bool(getattr(actor.args, "deterministic_mode", False)),
+        "lora_dropout": getattr(actor.args, "lora_dropout", None),
+    }
+
+
+def state_summary(actor: Any) -> dict[str, Any]:
+    """Digests of this rank's full trainer state for the bitwise arm comparison.
+
+    ``tensors``: sha256 per adapter tensor and per optimizer entry/state key
+    (diagnostics when the overall digest differs); ``moments_nonzero``: number
+    of optimizer entries whose ``exp_avg`` has a non-zero element;
+    ``bf16_master_mismatch``: adapter model copies that differ from their FP32
+    master cast to the model dtype over the owned range (plan-v3 §3 L2).
+    """
+    with trainer_resident(actor):
+        return _state_summary(actor)
+
+
+def _state_summary(actor: Any) -> dict[str, Any]:
+    import torch
+
+    backend = _backend(actor)
+    named = _adapters(actor, backend)
+    with torch.no_grad():
+        snap = _snapshot(actor, backend, named)
+    rng = backend.capture_rng()
+    tensors = {f"adapter/{n}": state_digest(t) for n, t in snap["adapter"].items()}
+    entries = (snap["optimizer_named"] or {}).get("entries", {})
+    moments_nonzero, mismatch = 0, []
+    by_name = dict(named)
+    for name, entry in sorted(entries.items()):
+        tensors[f"optimizer/{name}"] = state_digest(entry)
+        flat = entry.get("tensors") if "tensors" in entry else entry.get("state")
+        exp_avg = (flat or {}).get("exp_avg")
+        if exp_avg is not None and bool(torch.count_nonzero(exp_avg)):
+            moments_nonzero += 1
+        master = (flat or {}).get("param", entry.get("param"))
+        model = by_name.get(name)
+        if master is not None and model is not None and model.dtype != torch.float32:
+            start, end = int(entry.get("start", 0)), int(entry.get("end", model.numel()))
+            copy = model.detach().reshape(-1)[start:end].to("cpu")
+            if not torch.equal(copy, master.reshape(-1).to(model.dtype).to("cpu")):
+                mismatch.append(name)
+    return {
+        "coord": backend.coord(),
+        "state_digest": state_digest(snap),
+        "rng_digest": state_digest(rng),
+        "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
+        "tensors": tensors,
+        "optimizer_entries": len(entries),
+        "moments_nonzero": moments_nonzero,
+        "bf16_master_mismatch": mismatch,
+    }
