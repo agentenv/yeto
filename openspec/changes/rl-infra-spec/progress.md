@@ -603,3 +603,23 @@
 - 正式运行尚无判据结论：C1 v6 第 1 次（weight_version 漏项，已修）、第 2 次（比较口径，已修；不追认）、第 3 次（用户暂停）。
 - **恢复步骤**：合并最新 integ-decl → 用新代码提交重新生成 run 目录并重跑本地 dry-run → 从 C1 开始按 plan-v6 执行（C1 → c1-unsafe → C2 → C3 各行）。
 - 费用：B2 累计 ≤ $10.88。所有 E2 app 均为 stopped/0，本地无残留进程。
+
+### INFRA-E2 E2 合租结果（2026-09-30，plan-v6，代码 a016f7f，镜像 2cc5cc52）
+| run | 结果 | 费用 |
+|---|---|---|
+| C1（T1R1，DP1） | 通过 20/20 | ≤$1.70 |
+| c1-unsafe（诊断，不计判据） | 20/20：fork M5 修复在真实 DistOpt 上生效 | ≤$1.71 |
+| C2（T2R1，DP2 DistOpt） | 通过 21/21（含 G-4.2(f)） | ≤$2.17 |
+| C3-B1 基线 | 完成 | ≤$2.37 |
+| C3-rebuild（RESTORED） | G-4.4 12/13 直接通过；manifest 拉取被截断 | ≤$2.77 |
+| C3-rebuild-old（REBUILD_OLD） | 19/19 | ≤$2.37 |
+| G-4.5 第1行 | 通过（74 s 内 RECOVERY_REQUIRED） | ≤$2.37 |
+| G-4.5 第2行 | 不满足原文：注入没有造成故障，495 s 后成功 | ≤$3.56 |
+| G-4.5 第3行 | 通过（1.9 s 内 RECOVERY_REQUIRED，无 manifest） | ≤$2.17 |
+| G-4.5 第5行 | 阻塞：实时游标不可用 | ≤$2.57 |
+| G-4.5 第6行 | 未运行（费用逼近 $40 先报告；CAS 之后 kill 对同形重建不存在） | — |
+- B2 累计 ≤ $34.64。所有 app stopped/0，本地无残留进程。
+- 发现：
+  1. E1 `live_data_cursor` 在真实 Miles 上返回 None（rollout executor 是 Ray actor handle），生产中重建前后的游标比对因此退回缓存值；
+  2. REBUILDING_TRAINER 没有 deadline 强制；
+  3. `modal container exec` 输出上限 8 KiB，工具已改为分块拉取。
