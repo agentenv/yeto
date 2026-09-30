@@ -237,6 +237,21 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="ports, TEST ONLY: every training trajectory waits S seconds on a fake "
                     "tool call (needs --custom-generate-function-path "
                     "yeto.rl.tool_wait_workload.generate); off by default")
+    rl.add_argument("--rl-elastic-state-dir", default=None, metavar="ISLAND_PATH",
+                    help="--rl-elastic: controller journal/ledger/cut dir ON THE ISLAND (e.g. a "
+                    "persistent volume mount); default ~/yeto-rl/elastic-state")
+    rl.add_argument("--rl-elastic-restart-attempts", type=int, default=None, metavar="N",
+                    help="--rl-elastic: re-run the learner in place (same args and state dir) "
+                    "after a non-zero exit, at most N times; off by default")
+    rl.add_argument("--rl-test-inject-weight-override", default=None, metavar="ISLAND_PATH",
+                    help="--rl-elastic, TEST ONLY (3.5 E1-B): reload one new engine from this "
+                    "same-architecture checkpoint after the first member update_weights")
+    rl.add_argument("--rl-test-inject-stop-failures", type=int, default=None, metavar="N",
+                    help="--rl-elastic, TEST ONLY (3.7 E1-D ③④): the next N fork stop_cells fail "
+                    "inside the fork after deregistration (incomplete)")
+    rl.add_argument("--rl-test-kill-learner-at", default=None, metavar="PHASE",
+                    help="--rl-elastic, TEST ONLY (3.7 E1-D ⑤⑥): hard-kill the learner once when a "
+                    "transaction journals PHASE (needs --rl-elastic-restart-attempts)")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",

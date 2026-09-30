@@ -258,3 +258,61 @@ def test_workload_generate_delays_train_samples_only(monkeypatch):
     inp.evaluation = True
     asyncio.run(w.generate(inp))
     assert calls == [("tool", 5.0), ("gen", False), ("gen", True)]
+
+
+# ---------------------------------------------------------------- items 5/6: injections, restart
+def test_injection_and_restart_switches_reach_the_island(tmp_path, monkeypatch):
+    run = island_run(BASE + _elastic(tmp_path) + (
+        "--rl-elastic-state-dir", "/vol/elastic", "--rl-elastic-restart-attempts", "2",
+        "--rl-test-inject-weight-override", "/vol/other-ckpt",
+        "--rl-test-inject-stop-failures", "1", "--rl-test-kill-learner-at", "COMMITTED"),
+        monkeypatch)
+    assert "yeto_rl_restart_loop python3 -m yeto.rl.learner" in run
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert args.rl_elastic_state_dir == "/vol/elastic"
+    assert env["YETO_RL_TEST_INJECT_WEIGHT_OVERRIDE_PATH"] == "/vol/other-ckpt"
+    assert env["YETO_RL_TEST_INJECT_STOP_FAILURES"] == "1"
+    assert env["YETO_RL_TEST_KILL_LEARNER_AT"] == "COMMITTED"
+    assert env["YETO_RL_RESTART_ATTEMPTS"] == "2"
+
+
+def test_default_run_has_no_injection_and_no_restart_loop(tmp_path, monkeypatch):
+    run = island_run(BASE + _elastic(tmp_path), monkeypatch)
+    assert "yeto_rl_restart_loop" not in run and "YETO_RL_TEST_" not in run
+    args, _ = learner_from_run(run, tmp_path / "home")
+    assert args.rl_elastic_state_dir == "~/yeto-rl/elastic-state" or args.rl_elastic_state_dir.endswith(
+        "yeto-rl/elastic-state")
+
+
+def test_restart_loop_reruns_the_same_command_until_success(tmp_path):
+    import subprocess
+
+    from yeto.launcher import RESTART_LOOP_FN
+
+    counter = tmp_path / "n"
+    script = (RESTART_LOOP_FN + f"yeto_rl_restart_loop bash -c 'echo x >> {counter}; "
+              f"[ $(wc -l < {counter}) -ge 3 ]'\n")
+    ok = subprocess.run(["bash", "-c", script], env={"PATH": "/usr/bin:/bin",
+                                                    "YETO_RL_RESTART_ATTEMPTS": "2"})
+    assert ok.returncode == 0 and counter.read_text().count("x") == 3
+    counter.unlink()
+    capped = subprocess.run(["bash", "-c", script], env={"PATH": "/usr/bin:/bin",
+                                                        "YETO_RL_RESTART_ATTEMPTS": "1"})
+    assert capped.returncode != 0 and counter.read_text().count("x") == 2
+
+
+def test_injection_switches_are_refused_without_elastic_or_restart():
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    for extra in (("--rl-test-inject-stop-failures", "1"), ("--rl-elastic-state-dir", "/v"),
+                  ("--rl-test-inject-weight-override", "/c")):
+        with pytest.raises(ValueError, match="need --rl-elastic"):
+            launcher._check_ports_infra_switches(_cli(extra), "ports")
+    with pytest.raises(ValueError, match="needs --rl-elastic-restart-attempts"):
+        launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "COMMITTED")),
+                                             "ports")
+    with pytest.raises(ValueError, match="must be one of"):
+        launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "NOPE")), "ports")
