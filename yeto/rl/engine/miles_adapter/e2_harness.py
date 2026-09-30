@@ -281,7 +281,9 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
                                   expect=expect, layout=layout)
                 return restore()
 
-            before_cursor = dict(driver.rollout.data_cursor())
+            from .trainer_rebuild import live_cursor
+
+            before_cursor = live_cursor(driver.rollout, "before the rebuild")
             def rebuild() -> Any:
                 return rebuild_same_shape(
                     trainer, args=ctx.miles_args, rollout_executor=ctx.rollout_executor,
@@ -300,7 +302,7 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
             rec.criterion("G-4.3 restored policy hash == cut", restored_hash == manifest.progress.policy_hash,
                           restored=restored_hash, cut=manifest.progress.policy_hash)
             rec.criterion("G-4.3 data cursor unchanged across rebuild",
-                          dict(driver.rollout.data_cursor()) == before_cursor)
+                          live_cursor(driver.rollout, "after the rebuild") == before_cursor)
             rec.criterion("G-4.3 layout unchanged across rebuild", trainer.actual_layout() == layout)
             pre_b = _summaries(ctx)
             rec.criterion("G-4.3(1) restored state/RNG == cut before step 3",

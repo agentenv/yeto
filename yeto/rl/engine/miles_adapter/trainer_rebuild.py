@@ -94,6 +94,15 @@ class SwappableActor:
         setattr(self._target, name, value)
 
 
+def live_cursor(rollout: Any, when: str) -> dict[str, int]:
+    """The rollout data cursor, read live (INFRA-E1 f707dc3: ``data_cursor()`` is None
+    when it cannot be read). Unknown -> fail closed, never compared."""
+    cursor = rollout.data_cursor()
+    if cursor is None:
+        raise RuntimeError(f"rollout data cursor unknown {when} (live read failed); refusing to compare")
+    return dict(cursor)
+
+
 def rebuild_preconditions(args: Any) -> list[str]:
     out = []
     if getattr(args, "requested_load", None) is not None:
@@ -207,7 +216,7 @@ def rebuild_same_shape(
     if problems:
         raise RuntimeError("same-shape trainer rebuild refused: " + "; ".join(problems))
     layout = trainer.actual_layout()
-    cursor = dict(rollout.data_cursor())
+    cursor = live_cursor(rollout, 'before the rebuild')
     rebuild = rebuild or _default_rebuild()
     manager = worker_manager if worker_manager is not None else _default_worker_manager()
     attempts: list[dict[str, Any]] = []
@@ -244,7 +253,7 @@ def rebuild_same_shape(
             if critic is not None:
                 raise RuntimeError("rebuilt trainer has a critic (ports engine drives none)")
             generation = actor.swap(new_actor)
-            after = dict(rollout.data_cursor())
+            after = live_cursor(rollout, 'after the rebuild')
             if after != cursor:
                 raise RuntimeError(f"data cursor changed across the trainer rebuild: {cursor} -> {after}")
             now = trainer.actual_layout()
@@ -338,7 +347,7 @@ def rebuild_resharded(
         problems = rebuild_preconditions(args)
         if problems:
             raise RuntimeError("trainer rebuild refused: " + "; ".join(problems))
-    cursor = dict(rollout.data_cursor())
+    cursor = live_cursor(rollout, 'before the rebuild')
     rebuild = rebuild or _default_rebuild()
     manager = worker_manager if worker_manager is not None else _default_worker_manager()
     attempts: list[dict[str, Any]] = []
@@ -350,7 +359,7 @@ def rebuild_resharded(
             raise RecoveryRequired("rebuilt trainer has a critic (ports engine drives none)", attempts=attempts)
         generation = actor.swap(new_actor)
         trainer.rebind_args(args)
-        after = dict(rollout.data_cursor())
+        after = live_cursor(rollout, 'after the rebuild')
         if after != cursor:
             raise RecoveryRequired(f"data cursor changed across the trainer rebuild: {cursor} -> {after}",
                                    attempts=attempts)
