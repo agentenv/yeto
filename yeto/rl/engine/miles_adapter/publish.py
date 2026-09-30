@@ -85,22 +85,71 @@ def injected_update_block(environ: Any = None) -> float | None:
     return value
 
 
-async def _ray_cells_alive(cells: list[str]) -> bool:
-    """Every worker actor of ``cells`` answers (fork RayWorkerManager, exact generation)."""
-    import ray
-    from miles.utils.workers.ray_worker_manager import RayWorkerManager
+class InjectedBlockProbeError(RuntimeError):
+    """The liveness probe of the injected block failed for a reason other than a
+    dead/replaced target worker: NOT evidence of a kill (review M2)."""
 
-    manager = RayWorkerManager.get_handle()
-    try:
-        for cell in cells:
-            for info in await manager.get_worker_infos.remote(cell):
-                handle = await manager.get_actor_handle.remote(
-                    info.name, expected_generation=info.generation)
-                await asyncio.wait_for(handle.__ray_ready__.remote(), timeout=10)
-    except (ray.exceptions.RayActorError, asyncio.TimeoutError, AssertionError,
-            ray.exceptions.RayTaskError):
-        return False
-    return True
+
+class RayTargetLiveness:
+    """Liveness of the target generation for the injected block (review M2).
+
+    ``snapshot(cells)`` records each target worker's (name, generation) when the
+    block starts; ``status()`` then reports ``"alive"`` or ``"dead: <why>"``:
+    a cell with no workers (stopped), a changed worker set / generation
+    (restarted by the health monitor) or a killed actor all count as the
+    target generation being dead. Any other error raises
+    :class:`InjectedBlockProbeError` (logged, reported separately).
+    """
+
+    def __init__(self, *, manager: Any = None, ray_module: Any = None) -> None:
+        self._manager = manager
+        self._ray = ray_module
+        self.targets: dict[str, list[tuple[str, int]]] = {}
+
+    def _deps(self) -> tuple[Any, Any]:
+        if self._ray is None:
+            import ray
+
+            self._ray = ray
+        if self._manager is None:
+            from miles.utils.workers.ray_worker_manager import RayWorkerManager
+
+            self._manager = RayWorkerManager.get_handle()
+        return self._manager, self._ray
+
+    async def snapshot(self, cells: list[str]) -> None:
+        manager, _ = self._deps()
+        self.targets = {c: sorted((i.name, int(i.generation))
+                                  for i in await manager.get_worker_infos.remote(c))
+                        for c in cells}
+        empty = [c for c, t in self.targets.items() if not t]
+        if empty:
+            raise InjectedBlockProbeError(f"target cells {empty} have no workers at block start")
+
+    async def status(self) -> str:
+        manager, ray = self._deps()
+        actor_died = getattr(getattr(ray, "exceptions", None), "RayActorError", ())
+        try:
+            for cell, targets in self.targets.items():
+                now = sorted((i.name, int(i.generation))
+                             for i in await manager.get_worker_infos.remote(cell))
+                if not now:
+                    return f"dead: cell {cell} has no workers (stopped)"
+                if now != targets:
+                    return f"dead: cell {cell} workers/generation changed {targets} -> {now}"
+                for name, generation in targets:
+                    handle = await manager.get_actor_handle.remote(
+                        name, expected_generation=generation)
+                    await asyncio.wait_for(handle.__ray_ready__.remote(), timeout=10)
+        except actor_died as exc:  # type: ignore[misc]
+            return f"dead: actor died ({type(exc).__name__})"
+        except Exception as exc:  # noqa: BLE001 - not a kill: report it as such
+            import sys
+
+            print(f"[yeto] TEST INJECTION probe error (not a kill): {exc!r}", file=sys.stderr,
+                  flush=True)
+            raise InjectedBlockProbeError(f"liveness probe failed: {exc!r}") from exc
+        return "alive"
 
 
 def payload_digest(state: TrainableState) -> tuple[str, int]:
@@ -174,7 +223,7 @@ class MilesPublisher:
         # Test-only block before the FIRST member update_weights (INJECT_UPDATE_BLOCK_ENV).
         self._inject_block = injected_update_block()
         self.injected_blocks: list[float] = []
-        self.liveness_probe: Callable[[list[str]], Any] | None = None  # async cells -> bool
+        self.liveness_probe: Any = None  # RayTargetLiveness-like (snapshot/status)
         self.block_poll_s = 1.0
 
     def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
@@ -363,13 +412,15 @@ class MilesPublisher:
         self.injected_blocks.append(seconds)
         print(f"[yeto] TEST INJECTION {INJECT_UPDATE_BLOCK_ENV}: blocking {seconds}s before "
               f"update_weights({cells})", file=sys.stderr, flush=True)
-        probe = self.liveness_probe or _ray_cells_alive
+        probe = self.liveness_probe or RayTargetLiveness()
+        await probe.snapshot(cells)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + seconds
         while loop.time() < deadline:
             await asyncio.sleep(min(self.block_poll_s, max(0.0, deadline - loop.time())))
-            if not await probe(cells):
-                raise RuntimeError(f"target engine of {cells} died during the injected block")
+            state = await probe.status()
+            if state != "alive":
+                raise RuntimeError(f"target engine of {cells} {state} during the injected block")
 
     async def _publish_members(
         self, token: str, cells: list[str], epoch: int
