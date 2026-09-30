@@ -240,16 +240,20 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
     rec.criterion("G-4.2(g) live restore refused, state unchanged", g_ok and g_unchanged,
                   error=g_err, unchanged=g_unchanged)
 
-    # 4. G-4.3 arm A on the live trainer. No re-publication in either arm: the
-    # frozen batch needs no rollout, and on a colocated island a second
-    # publish of an already loaded policy makes SGLang fail (resume of
-    # non-offloaded weights; GPU C1 2026-09-30).
+    # 4. G-4.3 arm A on the live trainer. The two arms are symmetric per layout:
+    # fixed-partition (production elastic layout) -> arm A re-publishes the
+    # same policy and arm B goes through driver.rebuild_trainer (which
+    # re-publishes); colocated -> no re-publication in either arm (a second
+    # publish of loaded weights fails in SGLang; GPU C1 attempt 2) and arm B
+    # calls rebuild_same_shape directly.
+    colocated = bool(getattr(driver, "colocated", False))
+    if not colocated:
+        driver.publisher.publish(driver.published_state)
     pre_a = _summaries(ctx)
     rec.criterion("G-4.3 arm A pre-step state == cut",
                   {k: (v["state_digest"], v["rng_digest"]) for k, v in pre_a.items()}
                   == {k: (v["state_digest"], v["rng_digest"]) for k, v in saved.items()})
     batch = driver._generate(rid)  # the frozen batch B3 (same policy token)
-    colocated = bool(getattr(driver, "colocated", False))
     with trainer.retained_payloads():
         try:
             if colocated:  # _generate offloaded the trainer (driver order: onload, train)
@@ -265,13 +269,18 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
                 return restore()
 
             before_cursor = dict(driver.rollout.data_cursor())
-            # rebuild_same_shape directly (not driver.rebuild_trainer): no
-            # re-publication, see arm A; the restored policy is checked below.
-            result = rebuild_same_shape(
-                trainer, args=ctx.miles_args, rollout_executor=ctx.rollout_executor,
-                actor=ctx.actor, run=ctx.runner.run, restore=restore_with_rejections,
-                rollout=driver.rollout, worker_manager=ctx.worker_manager, rebuild=ctx.rebuild,
-            )
+            def rebuild() -> Any:
+                return rebuild_same_shape(
+                    trainer, args=ctx.miles_args, rollout_executor=ctx.rollout_executor,
+                    actor=ctx.actor, run=ctx.runner.run, restore=restore_with_rejections,
+                    rollout=driver.rollout, worker_manager=ctx.worker_manager, rebuild=ctx.rebuild,
+                )
+
+            if colocated:
+                result = rebuild()  # no re-publication (see arm A)
+            else:  # production path: restore, policy-hash check, re-publication to every member
+                driver.at_safe_point = True
+                result = driver.rebuild_trainer(rebuild, cut_policy_hash=manifest.progress.policy_hash)
             rec.step("rebuilt", outcome=result.outcome, generation=result.generation,
                      attempts=result.attempts)
             restored_hash = driver.policy_state.export().policy_tensor_hash()

@@ -15,11 +15,11 @@ sys.modules["e2_cut_harness"] = tool  # dataclasses resolve the module
 spec.loader.exec_module(tool)
 
 
-def test_pin_check_is_against_plan_v4(tmp_path):
+def test_pin_check_is_against_plan_v5(tmp_path):
     init = tmp_path / "yeto" / "rl" / "__init__.py"
     init.parent.mkdir(parents=True)
     init.write_text(f'MILES_NEXT_COMMIT = "{tool.MILES_COMMIT}"\nX = "{tool.IMAGE_DIGEST.split(":")[1]}"\n')
-    assert tool.PLAN_VERSION == "plan-v4" and tool.check_pins(tmp_path) == []
+    assert tool.PLAN_VERSION == "plan-v5" and tool.check_pins(tmp_path) == []
     init.write_text('MILES_NEXT_COMMIT = "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"\n')
     assert len(tool.check_pins(tmp_path)) == 2
 
@@ -43,6 +43,8 @@ def test_dry_run_writes_every_run_in_plan_order(tmp_path, monkeypatch):
         assert "--modal-gpu-exact" in args and "--rl-deterministic-trainer" in args
         if run["config"] in ("C1", "C2", "C3"):
             assert args[args.index("--rl-lora-dropout") + 1] == "0.05"
+            assert args[args.index("--rl-placement") + 1] == "fixed-partition"
+            assert args[args.index("--rl-rollout-gpus") + 1] == "1"
         script = (d / "run.sh").read_text()
         assert tool.GUARD in script and "app stop -y" in script  # guard + watchdog
         if run["config"] == "C3":

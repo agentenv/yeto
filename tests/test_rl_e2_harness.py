@@ -131,8 +131,23 @@ def _ctx(tmp_path, *, fresh_rank=_rank):
         backend_fingerprint="fp", plan=plan, rebuild=rebuild, worker_manager="wm")
 
 
-def test_full_sequence_passes_on_the_cpu_fake(tmp_path, determinism):
-    results = e2_harness.run_harness(_ctx(tmp_path))
+@pytest.mark.parametrize("colocated", [True, False])
+def test_full_sequence_passes_on_the_cpu_fake(tmp_path, determinism, colocated):
+    ctx = _ctx(tmp_path)
+    ctx.driver.colocated = colocated
+    published = []
+    if not colocated:  # fixed-partition: both arms re-publish (arm A directly, arm B via rebuild_trainer)
+        ctx.driver.publisher = SimpleNamespace(publish=published.append)
+
+        def rebuild_trainer(rebuild, *, cut_policy_hash):
+            assert cut_policy_hash == ctx.driver.published_state.policy_tensor_hash()
+            result = rebuild()
+            ctx.driver.publisher.publish(ctx.driver.published_state)
+            return result
+
+        ctx.driver.rebuild_trainer = rebuild_trainer
+    results = e2_harness.run_harness(ctx)
+    assert len(published) == (0 if colocated else 2)
     assert results["pass"]
     names = set(results["criteria"])
     for case in "abcdeg":
