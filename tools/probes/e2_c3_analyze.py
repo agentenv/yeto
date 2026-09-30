@@ -157,9 +157,15 @@ def analyze_fault(run: Path, *, bound_s: float = 600.0) -> dict:
     end = next((j for j in phases if j.get("phase") in ("RECOVERY_REQUIRED", "SUCCEEDED", "REBUILT_OLD",
                                                           "CANCELLED")), None)
     c("rebuild reached REBUILDING_TRAINER", start is not None)
+    # the pulled journal can lag the learner's exit: the tape's rl_reconfiguration result
+    # (echoed live) is the other source of the terminal state
+    recon = [e for e in r["events"] if e.get("event") == "rl_reconfiguration" and e.get("result")]
+    if end is None and recon:
+        end = {"phase": recon[-1]["result"], "wall_time": recon[-1].get("time_unix"),
+               "error": recon[-1].get("error"), "source": "tape rl_reconfiguration"}
     terminal = (end or {}).get("phase")
     c("terminal RECOVERY_REQUIRED (or a successful REBUILD_OLD)", terminal in ("RECOVERY_REQUIRED", "SUCCEEDED"),
-      terminal=terminal, error=(end or {}).get("error"))
+      terminal=terminal, error=str((end or {}).get("error"))[:300], source=(end or {}).get("source", "journal"))
     if start and end:
         took = float(end["wall_time"]) - float(start["wall_time"])
         c(f"bounded (<= {bound_s:.0f} s)", took <= bound_s, seconds=round(took, 1))
