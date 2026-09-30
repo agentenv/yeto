@@ -126,13 +126,23 @@ MILES_DECLARED: dict[str, str] = {
 
 # Declarations whose evidence holds only for specific Miles pins (exact
 # commits; a new pin must be re-verified before it is added here).
+# 5c1b49eb = 0af62f4d + the 2b loss variants: carried over by code diff, not
+# by a rerun -- `git diff 0af62f4d..5c1b49eb -- miles` touches only
+# loss_hub/{losses,math_utils}.py and arguments.py; with the default
+# --policy-loss-variant policy_loss the loss path calls the same
+# compute_policy_loss with the same arguments, need_full_log_probs is
+# unchanged, and the new flags only add parser entries/validation.
+_PINS_0AF62F4D_PLUS = frozenset({
+    "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
+    "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
+})
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
     # grad_norm bit-identical to the baseline)
-    "loss_aggregations:token": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
-    "features:over_sampling": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
-    "features:overlong_filter": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
-    "features:clip_higher": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+    "loss_aggregations:token": _PINS_0AF62F4D_PLUS,
+    "features:over_sampling": _PINS_0AF62F4D_PLUS,
+    "features:overlong_filter": _PINS_0AF62F4D_PLUS,
+    "features:clip_higher": _PINS_0AF62F4D_PLUS,
 }
 
 

@@ -73,9 +73,9 @@ PARAM_FLAGS = {
 FORK_FLAGS = frozenset({VARIANT_FLAG, *PARAM_FLAGS.values()})
 
 # Miles commits (full SHA) whose parser/loss implement --policy-loss-variant.
-# Empty until the fork branch is reviewed, fast-forwarded into yeto/ports and
-# the pin/image are rebuilt by Agent IMG (design Migration Plan, tasks 4.3).
-FORK_COMMITS: frozenset[str] = frozenset()
+# yeto/ports 5c1b49eb (fast-forward of 0af62f4d with the 2b loss variants);
+# image ghcr.io/michaellchung/yeto-miles-ports:5c1b49e-9f29303 (Agent IMG).
+FORK_COMMITS: frozenset[str] = frozenset({"5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"})
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}
 

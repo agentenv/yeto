@@ -1,0 +1,9 @@
+miles from /tmp/img-verify-5c1b/root/miles/miles/utils/arguments.py
+git HEAD 5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba
+defaults policy_loss 1.0 1.05 0.4 0.4
+OK ['--policy-loss-variant', 'cispo'] cispo 1.0 1.05 0.4 0.4
+OK ['--policy-loss-variant', 'sapo', '--sapo-tau-pos', '0.9', '--sapo-tau-neg', '1.2'] sapo 0.9 1.2 0.4 0.4
+OK ['--policy-loss-variant', 'gmpo', '--gmpo-log-clip-low', '0.3', '--gmpo-log-clip-high', '0.5'] gmpo 1.0 1.05 0.3 0.5
+rejected as expected ['--policy-loss-variant', 'gmpo', '--calculate-per-token-loss'] -> --policy-loss-variant gmpo cannot be combined with --calculate-per-token-loss
+rejected as expected ['--policy-loss-variant', 'sapo', '--sapo-tau-pos', '0'] -> --sapo-tau-pos must be finite and > 0, got 0.0
+argparse rejects bogus variant

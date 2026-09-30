@@ -399,7 +399,8 @@ def test_single_island_allowance_admits_variant_on_miles_capabilities():
         check_unverified_allowance(["losses:cispo"], islands=1, outer_sync=True)
 
 
-def test_dry_run_reports_expressible_not_opened():
+def test_dry_run_reports_expressible_not_opened(monkeypatch):
+    monkeypatch.setattr(lv, "FORK_COMMITS", frozenset())  # a pin without the fork commit
     result = af.dry_run(["--dry-run", "--extra",
                          "--policy-loss-variant cispo --eps-clip 0.2 --eps-clip-high 0.28"])
     assert result["verdict"] == "rejected"
@@ -419,6 +420,10 @@ def test_dry_run_reports_expressible_not_opened():
 
 @pytest.mark.parametrize("variant", lv.VARIANTS)
 def test_variant_refused_until_the_pin_has_the_fork_commit(variant, monkeypatch):
+    # the real pin (5c1b49eb) carries the fork commit: open
+    assert lv.pinned_miles_commit() in lv.FORK_COMMITS
+    assert not any("[loss_variants]" in p for p in alg.launch_problems(spec(variant), RUN))
+    monkeypatch.setattr(lv, "FORK_COMMITS", frozenset())  # a pin without it: refused
     problems = alg.launch_problems(spec(variant), RUN)
     assert any("[loss_variants]" in p and "Expressible but not opened" in p for p in problems)
     monkeypatch.setattr(lv, "FORK_COMMITS", frozenset({lv.pinned_miles_commit()}))
