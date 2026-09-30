@@ -325,3 +325,8 @@
 - Modal L40S 无容量，F-E1、F-E2 改用 Modal A10G，卡数不变（F-E1 3×A10G）。单价按 Modal A10G $1.10/GPU·h（运行前未核实当日价）。
 - F-E1 第四次：代码 037d4f5（合并 integ-decl aaebc90），镜像仍为 db815884…（F-E1 不涉及 cut）。dry-run（fe1r/test_fe1r_dryrun.py，卡改 3xa10g）1 passed。先取指纹（watchdog 20 min），再正式运行（第 1 轮 train up、第 3 轮 train down，watchdog 25 min）；最坏 3×1.10×45/60 = $2.5。判据同 §9.9：up 与 down 都 SUCCEEDED、成员为 fork cell id、旧成员不变。
 - F-E2 等新镜像 pin 合入后再跑（A10G，卡数 3）。
+
+### 9.13 A2 第三次（三 arm 同 SHA）与 F-E1 第四次（主 agent 裁定；判据不变）
+- 代码 37155d8（合并 integ-decl b2fe5dd：launcher 磁带按行切分修复；镜像 pin `sha256:2cc5cc52…`，Miles e3a11ab3）。dry-run：a2/test_a2_dryrun.py 3 passed，fe1r/test_fe1r_dryrun.py 1 passed（pin 与 commit 从代码读取核对）。
+- A2：S、O、OD 全部在 37155d8 重跑（不复用 S2），配置同 §9.11 A2 重跑（含 `--rl-deterministic-trainer`），前缀 `infra-v2-b1-a2{s,o,od}-20260930-3`，每 arm 最坏 $6.6。
+- F-E1：3×A10G，037d4f5 上取得的指纹因镜像 pin 变化作废，在 37155d8 上重取（`infra-v2-b1-fe1r5fp-…`）后正式运行（`infra-v2-b1-fe1r5-…`）；最坏 $2.5。与 A2 并行（互不共享端口/资源）。

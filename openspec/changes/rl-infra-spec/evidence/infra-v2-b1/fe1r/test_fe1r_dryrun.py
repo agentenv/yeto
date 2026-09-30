@@ -12,7 +12,8 @@ sys.path.insert(0, str(REPO / "tests"))
 from rl_e2e_launch import island_run, learner_from_run  # noqa: E402
 
 RES = Path(__file__).with_name("resources-3.json")
-DIGEST = "sha256:db81588406e157baa6a579f6378484b890371065abcc51eacd5a9650b5820cbf"
+from yeto.rl import MILES_NEXT_IMAGE as _IMG
+DIGEST = _IMG.split("@", 1)[1]
 
 
 def _provider():
@@ -29,7 +30,7 @@ def test_fe1r(tmp_path, monkeypatch):
     from yeto.rl import MILES_NEXT_COMMIT, MILES_NEXT_IMAGE, learner
     from yeto.rl.engine.run_config import resolve_rl_run_config
 
-    assert MILES_NEXT_IMAGE.endswith(DIGEST) and MILES_NEXT_COMMIT.startswith("2f23a0fc")
+    assert MILES_NEXT_IMAGE.endswith(DIGEST) and MILES_NEXT_COMMIT.startswith("e3a11ab3")
     cli = ("--gpu", "modal:3xa10g", "--total-steps", "6", "--seed", "17",
            "--rl-single-island-no-sync", "--controller", "local",
            "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1", "--rl-standby-gpus", "1",
