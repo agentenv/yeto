@@ -501,3 +501,21 @@ def policy_token_for(rid):
     from yeto.rl.engine.miles_adapter.rollout import policy_token
 
     return policy_token(rid, "a" * 64)
+
+
+def test_arm_args_carry_every_parse_derivation_of_debug_train_only():
+    """DEV-GATHER run 6: with --load-debug-rollout-data Miles parse also zeroes rollout_num_gpus and
+    starts_inference_engines; setting only debug_train_only left engine cells beyond the placement group."""
+    miles_backend = importlib.import_module("miles_backend")
+    assert miles_backend.ARM_PARSE_DERIVED == {"debug_train_only": True, "rollout_num_gpus": 0,
+                                               "starts_inference_engines": False}
+    backend = miles_backend.MilesBackend.__new__(miles_backend.MilesBackend)
+    backend.base_args = SimpleNamespace(rollout_num_gpus=2, starts_inference_engines=True, colocate=True,
+                                        actor_num_gpus_per_node=2)
+    backend.frozen_template, backend.algorithm, backend.runner = "/f/{rollout_id}", _spec(), LoopRunner()
+    seen = {}
+    backend._open = lambda a, *, trainer: (seen.update(vars(a)), (None, SimpleNamespace()))[1]
+    backend.start_arm(1)
+    assert seen["rollout_num_gpus"] == 0 and seen["starts_inference_engines"] is False
+    assert seen["debug_train_only"] is True and seen["actor_num_gpus_per_node"] == 1
+    assert backend.base_args.rollout_num_gpus == 2  # the launcher's args are not mutated

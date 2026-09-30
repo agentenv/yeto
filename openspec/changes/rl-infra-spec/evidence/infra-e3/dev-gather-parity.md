@@ -15,6 +15,7 @@
 | A7 | `init_orchestration_script` + Disposer | 是 | 是 | — |
 | A8 | `create_rollout_components` | 是 | 是（debug_train_only：无引擎） | arm 只重放冻结数据 |
 | A9 | `create_training_models` | 是（启动时 trainer 大小：共置需每个引擎旁有 trainer rank，run 4） | 是（arm 的 DP） | — |
+| A9b | parse 派生字段（`--load-debug-rollout-data` → `debug_train_only`、`rollout_num_gpus=0`、`starts_inference_engines=False`；`world_size = nodes × gpus`） | — | **是**（run 6 缺 `rollout_num_gpus`/`starts_inference_engines`，arm 仍声明引擎 cell，已补；`world_size` 同步） | harness 在 parse 后改 DP，须同时设置 parse 会派生的字段；生产 `resized_args` 同样补 `world_size` |
 | A10 | `SwappableActor` 包装、`EvalDispatcher` | 否 | 否 | 不做重建换 handle、不做 eval |
 | A11 | `RayMetadataSink()`（命名 actor `yeto_rollout_meta`） | **是**（run 5 缺项，已补） | 否 | arm 不生成 rollout，钩子不运行 |
 | A12 | `compose_island`：`MilesPolicyState`、`MilesRolloutPool`、`MilesTrainerGroup`、`MilesPublisher`、placement、sync、事件磁带 | **是**：同一 PolicyState/RolloutPool/TrainerGroup/Publisher 类（run 6 起） | TrainerGroup 是（cut/restore/offload/onload） | 不构造 IslandDriver/sync/placement：不跑外层协议与安全点 |

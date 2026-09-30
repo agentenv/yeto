@@ -25,6 +25,12 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+# What Miles parse_args derives from --load-debug-rollout-data (fork 2f23a0fc arguments.py:3563-3568,
+# 3692-3694); set after parse they must be set together, otherwise the colocated rollout GPUs still
+# declare engine cells beyond the trainer-only placement group (DEV-GATHER run 6, IndexError in
+# RayWorkerManager.init -> _CellManager.bundles).
+ARM_PARSE_DERIVED = {"debug_train_only": True, "rollout_num_gpus": 0, "starts_inference_engines": False}
+
 SCHEDULE = {"cp_size": 1, "vpp_size": 1, "microbatch_group_size_per_vp_stage": 1}
 
 
@@ -146,8 +152,8 @@ class MilesBackend:
     def start_arm(self, dp: int) -> None:
         from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
 
-        args = self._args(actor_num_gpus_per_node=int(dp), load_debug_rollout_data=self.frozen_template,
-                          debug_train_only=True, save_debug_rollout_data=None)
+        args = self._args(actor_num_gpus_per_node=int(dp), world_size=int(dp), **ARM_PARSE_DERIVED,
+                          load_debug_rollout_data=self.frozen_template, save_debug_rollout_data=None)
         _, actor = self._open(args, trainer=True)
         self.trainer = MilesTrainerGroup(args=args, actor_model=actor, learner_id=0, learner_generation=0,
                                          parameter_layout_hash=lambda: "e3-harness", runner=self.runner,
