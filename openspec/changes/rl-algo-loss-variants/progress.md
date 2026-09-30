@@ -121,3 +121,7 @@
 
 ## 2026-09-30 ALGO-2b-T4：4.4 完整 parse_args 补跑计划（运行前提交）
 用户 2026-09-30 批准 Modal T4 补跑，单独记账，上限 $2。计划、判据、硬超时见 `evidence/2026-09-30-t4-parse/plan.md`（判据：CISPO/SAPO/GMPO 的 yeto 生成 argv 通过完整 parse_args + validate_parsed_args；应拒绝组合被拒；镜像 miles = 5c1b49eb；函数 timeout 840s + 本地 timeout 900 + 独立 watchdog 1080s；预计 < $0.30）。
+
+### ALGO-2b-T4 结果（2026-09-30）
+- 4.4 已勾（GPU 容器内完整 parse_args 通过；无训练、无权重）。run1 失败（`modal run` 在容器内 import 驱动脚本，读凭据文件 FileNotFoundError）；run2 被 run1 的前缀 watchdog 误停；两次均在修复后才重跑。run3 PASS：三个变体通过完整 parse_args + validate_parsed_args，8 个拒绝组合全部被拒，miles HEAD 5c1b49eb，T4。
+- 云资源：app ap-z00PQUsU90bkkq0UVMqKq4、ap-EEOUsOKydYiZAicXEClFyy、ap-CwXDZTPSL1AoyMskEPagWU（algo2b-t4-parse，owner ALGO-2b-T4，用途 4.4 解析）均 stopped；watchdog 已退出。费用：已入账 $0.0701，run3 估约 $0.03，合计约 $0.10（单独记账，上限 $2）。证据 `evidence/2026-09-30-t4-parse/`。
