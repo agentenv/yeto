@@ -243,9 +243,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-elastic-restart-attempts", type=int, default=None, metavar="N",
                     help="--rl-elastic: re-run the learner in place (same args and state dir) "
                     "after a non-zero exit, at most N times; off by default")
-    rl.add_argument("--rl-test-inject-weight-override", default=None, metavar="ISLAND_PATH",
-                    help="--rl-elastic, TEST ONLY (3.5 E1-B): reload one new engine from this "
-                    "same-architecture checkpoint after the first member update_weights")
+    rl.add_argument("--rl-test-inject-lora-perturb", type=float, default=None, metavar="EPS",
+                    help="--rl-elastic, TEST ONLY (3.5 E1-B): the first member update ships the "
+                    "LoRA adapter + EPS (trainer restored right after), so check_weights must "
+                    "refuse the new engines")
     rl.add_argument("--rl-test-inject-stop-failures", type=int, default=None, metavar="N",
                     help="--rl-elastic, TEST ONLY (3.7 E1-D ③④): the next N fork stop_cells fail "
                     "inside the fork after deregistration (incomplete)")

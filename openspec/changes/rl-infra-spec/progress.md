@@ -618,3 +618,7 @@
   - 测试用模拟的 ActorHandle 复现"无 data_source 属性"的路径：经 `__ray_call__` 读到实时值；actor 调用失败时为未知；游标在重建期间于 actor 内被改动，`rebuild_same_shape` 判 RECOVERY_REQUIRED（G-4.5 第 5 行的 CPU 协议检查）。
   - **依赖**：Ray 的 `ActorHandle.__ray_call__`（Ray 2.x 为所有 actor 提供）。本机 yeto-venv 没有 ray，无法在真实 handle 上验证；若镜像内的 Ray 不支持它，读取会失败并判为未知（不会静默使用旧值），那时需要 fork 增加只读方法 `RolloutExecutor.get_data_cursor()`（新 M 项需求）。
   - 全量：68F/3172P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b11.ids`）。
+- A4 Nebius 发现两项（不上卡）：
+  1. E1-A (c) 的审计缺口（a30fa5f）：扩容事务确实经 `Publisher.publish_members`（3.4a/3.5 的成员限定发布）把当前已发布的 policy（v2）装进新 cell，之前只在 journal 里记 `weight_admission`，磁带上没有。现在每次 `publish_members`（VERIFYING，以及 REBUILD_OLD 重启旧 cell）都会向磁带写一条 `rl_member_publication`：policy_version、token、payload/manifest 哈希、这次接收的成员 `sync/publication_members`、发布后的在役集合 `sync/serving_members`。它在下一轮 generate 之前出现，因此"第 3 轮生成所用的 v2 发布成员 = 4"可以在磁带上审计。判据文字不改；E1-A 需重跑后才能判 (c)。E3 trainer 边里的 `publish_members` 在 E3 文件中，这次未改。
+  2. E1-B 注入无效：用 base 模型快照重载新 engine 不改变 LoRA 适配器，而校验只覆盖 LoRA 权重。现改为 `--rl-test-inject-lora-perturb EPS`（取代并删除 `--rl-test-inject-weight-override`）：本进程第一次成员限定的 update_weights 把 trainer 的 LoRA 适配器临时加 EPS，发给新 engine 后立即精确恢复 trainer（恢复后核对 policy hash）。新 engine 因此持有不同的 LoRA 权重，check_weights 读回必然与发布参照不同，新 engine 不会被放行，事务走 REBUILD_OLD。CPU 测试覆盖：注入后校验失败、trainer 恢复、只注入一次；不注入时同一流程正常放行；`lora_perturber` 恢复前后 policy hash 一致。`evidence/infra-e1/plan.md` E1-B 的注入方法描述随之变更，判据不变。
+  - 全量：68F/3176P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b12.ids`）。

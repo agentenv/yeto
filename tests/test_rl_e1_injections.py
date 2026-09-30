@@ -98,38 +98,107 @@ def test_stop_failure_injection_goes_through_the_fork_provider(monkeypatch):
     assert calls == [("deregister", ("c1",)), ("deregister", ("c1",)), ("provider_stop", ("c1",))]
 
 
-def test_weight_override_runs_after_update_before_check_weights(monkeypatch):
-    from yeto.rl.engine.miles_adapter.publish import (
-        INJECT_WEIGHT_OVERRIDE_ENV,
-        MilesPublisher,
-        PublicationError,
-    )
+def _perturb_publisher(monkeypatch, eps):
+    from yeto.rl.engine.miles_adapter.publish import INJECT_LORA_PERTURB_ENV, MilesPublisher
 
-    order = []
+    if eps is None:
+        monkeypatch.delenv(INJECT_LORA_PERTURB_ENV, raising=False)
+    else:
+        monkeypatch.setenv(INJECT_LORA_PERTURB_ENV, str(eps))
+    world = {"trainer": 1.0, "engine": {}, "order": []}
 
-    class Controller:
+    class Engine:
+        def __init__(self, cell):
+            self.cell, self.version = cell, None
+
+        async def update_weight_version(self, token):
+            self.version = token
+
+        async def get_weight_version(self):
+            return self.version
+
+    class Controller:  # the fork's member-publication surface
         async def wait_cells_tracked(self, cells, timeout_seconds):
-            order.append("tracked")
+            world["order"].append("tracked")
 
-        async def start_update_weights(self, **_):
-            raise AssertionError("stop the test after the override")
+        async def start_update_weights(self, members, expected_epoch):
+            self.engines = [Engine(c) for c in members]
+            return SimpleNamespace(rollout_engines=self.engines,
+                                   snapshot_cell_id_to_hashes={c: "h" for c in members})
 
-    async def update_weights(*a, **k):
-        order.append("update_weights")
+        async def end_update_weights(self, **_):
+            pass
 
-    monkeypatch.setenv(INJECT_WEIGHT_OVERRIDE_ENV, "/vol/other-ckpt")
+        async def abort_update_weights(self):
+            pass
+
+        async def check_weights(self, action):
+            # every engine reports a checksum of the LoRA weights it holds
+            return [{"w": repr(v)} for v in world["engine"].values()]
+
+        async def admit_cells(self, cells, **_):
+            world["order"].append("admit")
+
+        async def start_commit_weight_version(self, **_):
+            pass
+
+        async def end_commit_weight_version(self):
+            pass
+
+    async def update_weights(*a, members, **k):
+        world["order"].append(("update_weights", world["trainer"]))
+        for c in members:
+            world["engine"][c] = world["trainer"]  # the member receives the trainer's LoRA
+
     pub = MilesPublisher(args=SimpleNamespace(), actor_model=None, rollout_executor=None,
-                         inference_controller=Controller(), update_weights=update_weights)
+                         inference_controller=Controller(), update_weights=update_weights,
+                         flatten_checksums=lambda raw: list(raw))
+    pub._reference = ("tok", {"w": repr(1.0)})  # read-back reference of the published policy
+    pub.last_engine_checksums = {}
 
-    async def injector(cell, path):
-        order.append(("override", cell, path))
+    def perturb(scale):
+        world["order"].append(("perturb", scale))
+        world["trainer"] = 1.0 if scale is None else 1.0 + scale
 
-    pub.weight_override_injector = injector
-    with pytest.raises(AssertionError, match="stop the test"):
-        asyncio.run(pub._publish_members("t", ["c3", "c2"], 1))
-    assert order == ["tracked", "update_weights", ("override", "c2", "/vol/other-ckpt")]
-    order.clear()
-    with pytest.raises(AssertionError):
-        asyncio.run(pub._publish_members("t", ["c3"], 2))
-    assert order == ["tracked", "update_weights"]  # once per process
-    del PublicationError
+    pub.perturb_trainer = perturb
+    return pub, world
+
+
+def test_lora_perturbation_makes_check_weights_refuse_the_new_engines(monkeypatch):
+    from yeto.rl.engine.miles_adapter.publish import PublicationError
+
+    pub, world = _perturb_publisher(monkeypatch, 0.01)
+    with pytest.raises(PublicationError, match="read-back differs"):
+        asyncio.run(pub._publish_members("tok", ["c2"], 1))
+    assert world["order"] == ["tracked", ("perturb", 0.01), ("update_weights", 1.01),
+                              ("perturb", None)]  # never admitted
+    assert world["trainer"] == 1.0  # the trainer holds the published policy again
+    # only once per process: after REBUILD_OLD stops c2, the next member
+    # publication is clean and admitted
+    world["engine"].pop("c2")
+    asyncio.run(pub._publish_members("tok", ["c3"], 2))
+    assert world["order"][-1] == "admit"
+
+
+def test_without_the_injection_the_same_publication_is_admitted(monkeypatch):
+    pub, world = _perturb_publisher(monkeypatch, None)
+    asyncio.run(pub._publish_members("tok", ["c2"], 1))
+    assert world["order"] == ["tracked", ("update_weights", 1.0), "admit"]
+
+
+def test_lora_perturber_restores_the_trainer_exactly():
+    import torch
+
+    from yeto.rl.engine.miles_adapter.entry import lora_perturber
+    from yeto.rl.engine.fake import FakeEngine
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.ones(1, 2)})
+    driver = SimpleNamespace(policy_state=engine.policy_state, local_step=0)
+    before = engine.policy_state.export().policy_tensor_hash()
+    perturb = lora_perturber(driver)
+    perturb(0.5)
+    assert engine.policy_state.export().policy_tensor_hash() != before
+    assert torch.equal(engine.tensors["base_model.model.layer.lora_A.weight"],
+                       torch.full((1, 2), 1.5))
+    perturb(None)
+    assert engine.policy_state.export().policy_tensor_hash() == before

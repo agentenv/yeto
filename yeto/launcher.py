@@ -958,8 +958,8 @@ _ELASTIC_TEST_FLAGS = (
 # (attr, flag, env) of the test-only switches exported into the island run
 # command; each needs --rl-elastic, all are off by default.
 _ELASTIC_TEST_EXPORTS = (
-    ("rl_test_inject_weight_override", "--rl-test-inject-weight-override",
-     "YETO_RL_TEST_INJECT_WEIGHT_OVERRIDE_PATH"),
+    ("rl_test_inject_lora_perturb", "--rl-test-inject-lora-perturb",
+     "YETO_RL_TEST_INJECT_LORA_PERTURB"),
     ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures",
      "YETO_RL_TEST_INJECT_STOP_FAILURES"),
     ("rl_test_kill_learner_at", "--rl-test-kill-learner-at", "YETO_RL_TEST_KILL_LEARNER_AT"),
