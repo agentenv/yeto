@@ -459,7 +459,14 @@ def compose_island(
             driver.placement, pool_gpus=elastic.pool_gpus,
             epoch=elastic.controller.journal.epochs.config_epoch,
         )
-        driver.config_epoch = elastic.controller.journal.epochs.config_epoch
+        epochs = elastic.controller.journal.epochs
+        driver.config_epoch = epochs.config_epoch
+        if epochs.config_epoch > 0:
+            # restart after a commit: the journal's config is authoritative
+            committed = elastic.controller.configs[epochs.config_id].placement or {}
+            if committed.get("rollout"):
+                driver.placement.restore_committed(tuple(committed["rollout"]),
+                                                   epoch=epochs.config_epoch)
         elastic.controller.open(driver.rollout)
     holder["driver"] = driver
     return driver

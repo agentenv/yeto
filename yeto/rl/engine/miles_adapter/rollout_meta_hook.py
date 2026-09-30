@@ -165,6 +165,20 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
     samples = _flat(group)
     indices = [getattr(s, "index", None) for s in samples]
     group_index = getattr(samples[0], "group_index", None) if samples else None
+    if group_index is None and elastic_metadata_enabled(args):
+        # the ledger (3.6) dedups on group ids across rollouts; a sample index
+        # fallback is not unique over the run, so fail closed
+        raise RuntimeError(
+            "rollout sample without group_index: the batch ledger needs the data "
+            "source's monotonic sample_group_index as group id"
+        )
+    if group_index is None:
+        # the 3.6 ledger keys groups on Miles' monotonic sample_group_index;
+        # a sample index is not a group identity (fail closed)
+        raise RuntimeError(
+            f"rollout group without group_index (sample indices {indices}); "
+            "the yeto ledger needs Miles' data-source group_index"
+        )
     versions: set[str] = set()
     for s in samples:
         versions |= _versions(s)
@@ -177,7 +191,7 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
     rewards = [_reward(args, s) for s in samples]
     finite = [r for r in rewards if math.isfinite(r)]
     return {
-        "group_id": f"g{group_index if group_index is not None else indices[0]}",
+        "group_id": f"g{group_index}",
         "sample_ids": [f"s{i}" for i in indices],
         "policy_token": token,
         "reward_mean": statistics.fmean(finite) if finite else math.nan,
@@ -402,16 +416,33 @@ def data_cursor(data_source: Any) -> tuple[dict[str, int] | None, int | None]:
     return (known if len(known) == len(_CURSOR_FIELDS) else None), length
 
 
+ELASTIC_METADATA_ENV = "YETO_RL_ELASTIC_METADATA"
+
+
+def elastic_metadata_enabled(args: Any) -> bool:
+    """Report data cursor/buffer length only when E1/E2 (ledger, cut) is on.
+
+    Off by default so the default metadata (and ``carried_over=None``) is
+    unchanged. Set ``args.yeto_rl_elastic_metadata`` or the environment
+    variable in the rollout process before it starts.
+    """
+    import os
+
+    return bool(getattr(args, "yeto_rl_elastic_metadata", False)) or os.environ.get(
+        ELASTIC_METADATA_ENV) == "1"
+
+
 def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = None) -> None:
     """``--rollout-all-samples-process-path`` hook."""
 
     try:
         payload = build_metadata(args, all_samples)
-        cursor, buffer_length = data_cursor(data_source)
-        if cursor is not None:
-            payload["data_cursor"] = cursor
-        if buffer_length is not None:
-            payload["buffer_length"] = buffer_length
+        if elastic_metadata_enabled(args):
+            cursor, buffer_length = data_cursor(data_source)
+            if cursor is not None:
+                payload["data_cursor"] = cursor
+            if buffer_length is not None:
+                payload["buffer_length"] = buffer_length
         submitted = submitted_groups(args, data_source)
         if submitted is not None:
             generated = payload["completed"] + payload["filtered"]

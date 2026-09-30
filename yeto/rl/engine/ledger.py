@@ -90,6 +90,7 @@ class BatchLedger:
         self._consumed_groups: dict[str, int] = {}
         self._carried: dict[str, dict[str, Any]] = {}
         self._last_report: dict[str, Any] = {}
+        self._engine_discarded: dict[int, int] = {}
         for record in self._journal.records:
             self._replay(record)
 
@@ -122,6 +123,8 @@ class BatchLedger:
                 self._batches[rid].filtered = dict(r.get("detail") or {})
             for gid in r.get("group_ids") or ():
                 self._carried.pop(gid, None)
+        elif kind == "engine_discarded":
+            self._engine_discarded[rid] = int(r["groups"])
         elif kind == "carried_over_report":
             self._last_report = {"carried_over": r.get("carried_over"),
                                  "buffer_length": r.get("buffer_length")}
@@ -142,6 +145,7 @@ class BatchLedger:
             "rollout_id": b.rollout_id, "attempt": b.attempt, "batch_hash": b.batch_hash,
             "group_ids": b.group_ids, "policy_token": b.policy_token, "state": b.state,
             "filtered": dict(b.filtered),
+            "engine_discarded": self._engine_discarded.get(b.rollout_id, 0),
         }
 
     def open_carried_over(self) -> dict[str, dict[str, Any]]:
@@ -156,6 +160,7 @@ class BatchLedger:
             "ready_unconsumed_group_ids": sorted(ready),
             "carried_over": len(self._carried),
             "carried_over_group_ids": sorted(self._carried),
+            "engine_discarded_groups": sum(self._engine_discarded.values()),
             "engine_carried_over": report.get("carried_over"),
             "engine_buffer_length": report.get("buffer_length"),
             "last_rollout_id": max(self._batches) if self._batches else None,
@@ -267,6 +272,12 @@ class BatchLedger:
                 superseded.append(rid)
             elif batch.state == "prepared":
                 self.discard(rid, error=f"restart at rollout {start_rollout_id}")
+        # Below the restart point every applied update is part of the
+        # authoritative state the outer sync restarted from: record it.
+        for rid in sorted(r for r, b in self._batches.items() if r < start_rollout_id):
+            if self._batches[rid].state == "optimizer_applied":
+                self._advance(rid, "outer_recorded", recovered=True,
+                              restart_rollout_id=start_rollout_id)
         return superseded
 
     def carried_over(self, rollout_id: int, group_ids: Iterable[str], *, policy_token: str) -> None:

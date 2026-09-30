@@ -37,7 +37,14 @@ def build_elastic(
     declared_cells: Sequence[str],
     pool_gpus: Sequence[str] | None = None,
     timeouts: Any = None,
+    on_watchdog: Any = None,
 ) -> ElasticWiring:
+    """``on_watchdog(tx_id, phase)`` runs on the watchdog thread when the absolute
+    transaction deadline passes while a step is still blocked. It is the only
+    hook that can act on a blocked step (e.g. kill the target generation's
+    SGLang processes by PID group); none is wired by default, so a blocked
+    engine call is NOT bounded by the deadline (rl-infra-spec 3.7 limitation).
+    """
     from yeto.rl.elastic_benchmark.capabilities import load_attestation, parse_configs
 
     from ..controller import CommandInbox, IslandController, Timeouts
@@ -56,6 +63,7 @@ def build_elastic(
         runtime_fingerprint=runtime_fingerprint,
         timeouts=timeouts or Timeouts(),
         inbox=CommandInbox(state / "inbox"),
+        on_watchdog=on_watchdog,
     )
     return ElasticWiring(
         controller=controller,

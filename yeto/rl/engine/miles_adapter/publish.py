@@ -299,14 +299,16 @@ class MilesPublisher:
         self._runner.run(self._commit_version(token, epoch))
 
     async def _commit_version(self, token: str, epoch: int) -> None:
+        # fork context_lock: start_commit_weight_version is @acquires_lock -- on
+        # failure it has already released the lock itself, so end (which
+        # releases) is called only after a successful start.
         try:
             await self._controller.start_commit_weight_version(
                 weight_version=token, expected_epoch=epoch
             )
         except Exception as exc:
             raise PublicationError(f"serving engines do not all report {token}: {exc}") from exc
-        finally:
-            await self._controller.end_commit_weight_version()
+        await self._controller.end_commit_weight_version()
 
     async def _publish_members(
         self, token: str, cells: list[str], epoch: int

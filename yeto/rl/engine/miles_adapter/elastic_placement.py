@@ -34,6 +34,13 @@ class ElasticPlacement:
     def describe(self) -> PlacementDescription:
         return self._current
 
+    def restore_committed(self, rollout_gpus: tuple[str, ...], *, epoch: int) -> PlacementDescription:
+        """After a learner restart: adopt the committed config's rollout GPUs (journal authority)."""
+        if epoch < self.epoch:
+            raise PlacementPlanError(f"committed epoch {epoch} is behind {self.epoch}")
+        self.epoch = epoch - 1
+        return self.reconfigure(replace(self._current, rollout_gpus=tuple(rollout_gpus)), epoch=epoch)
+
     def reconfigure(self, plan: PlacementDescription, *, epoch: int) -> PlacementDescription:
         current = self._current
         if epoch != self.epoch + 1:

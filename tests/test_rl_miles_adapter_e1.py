@@ -108,11 +108,22 @@ class ForkController:
     async def admit_cells(self, cell_ids, *, expected_epoch, expected_weight_version):
         self.log.append(("admit_cells", tuple(cell_ids), expected_epoch, expected_weight_version))
 
+    # fork context_lock semantics: @acquires_lock releases on its own failure;
+    # @releases_lock asserts the lock is held.
+    lock_held = False
+    commit_fails = False
+
     async def start_commit_weight_version(self, *, weight_version, expected_epoch, model_id=None):
         self.log.append(("start_commit_weight_version", weight_version, expected_epoch))
+        assert not self.lock_held
+        if self.commit_fails:
+            raise RuntimeError("serving engines report another version")
+        self.lock_held = True
 
     async def end_commit_weight_version(self):
         self.log.append(("end_commit_weight_version",))
+        assert self.lock_held, "releasing a lock that is not held"
+        self.lock_held = False
 
 
 def flatten(raw):
@@ -359,7 +370,7 @@ def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
             return {"epoch": 0, "incomplete": None}
 
     controller, actor = Ctl(), _Actor()
-    rollout_args = SimpleNamespace(n_samples_per_prompt=2)
+    rollout_args = SimpleNamespace(n_samples_per_prompt=2, yeto_rl_elastic_metadata=True)
     source = SimpleNamespace(sample_offset=0, epoch_id=0, sample_group_index=0, sample_index=0,
                              buffer=[])
 
@@ -388,7 +399,8 @@ def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
                                "T1R2S0": {"trainer": 1, "rollout": 2}},
                    "edges": [{"source": "T1R1S1", "target": "T1R2S0", "kind": "rollout-only"}]},
         attestation=None, profile=profile, initial_config="T1R1S1", runtime_fingerprint=fp,
-        declared_cells=["c0", "c1"], pool_gpus=["g0", "g1", "g2"])
+        declared_cells=["c0", "c1"], pool_gpus=["g0", "g1", "g2"], on_watchdog=print)
+    assert elastic.controller._on_watchdog is print
     runner = LoopRunner()
     driver = compose_island(
         miles_args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True,
@@ -422,3 +434,46 @@ def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
         elastic.controller.plan("T1R2S0", 0, deadline_s=60)
     elastic.controller.close()
     elastic.ledger.close()
+
+
+def test_failed_commit_check_does_not_release_a_lock_it_does_not_hold():
+    ctl = ForkController()
+    pub, _, _ = make(ctl)
+    ctl.commit_fails = True
+    with pytest.raises(PublicationError, match="do not all report"):
+        pub.verify_serving_policy(epoch=0, token_rollout_id=1, state=state(1))
+    assert ("end_commit_weight_version",) not in ctl.log and not ctl.lock_held
+    ctl.commit_fails = False
+    pub.verify_serving_policy(epoch=0, token_rollout_id=1, state=state(1))
+    assert ctl.log[-1] == ("end_commit_weight_version",) and not ctl.lock_held
+
+
+def test_default_metadata_is_unchanged_without_elastic(tmp_path, monkeypatch):
+    """M1: data cursor / buffer length only when E1/E2 is on; default carried_over stays None."""
+    import json as _json
+
+    from tests.test_rl_miles_adapter_rollout import Call, Sample, Span
+    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource, handle_from_metadata
+
+    monkeypatch.delenv(hook.ELASTIC_METADATA_ENV, raising=False)
+    source = SimpleNamespace(sample_offset=4, epoch_id=0, sample_group_index=2, sample_index=4,
+                             buffer=[])
+    outs = {}
+    for enabled in (False, True):
+        sink = tmp_path / f"s{enabled}"
+        monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{sink}")
+        args = SimpleNamespace(n_samples_per_prompt=2, yeto_rl_elastic_metadata=enabled)
+        groups = [[Sample(index=i, group_index=0, rollout_id=0, reward=float(i),
+                          weight_versions=[Call([Span("yeto:0:" + "a" * 64)])]) for i in range(2)]]
+        hook.record_trained_groups(args, groups)
+        hook.extract_rollout_metadata(args, groups, source)
+        outs[enabled] = DirMetadataSource(sink).take(0)
+    assert "data_cursor" not in outs[False] and "buffer_length" not in outs[False]
+    extra = {k: v for k, v in outs[True].items() if k not in outs[False]}
+    assert set(extra) == {"data_cursor", "buffer_length"}
+    assert _json.dumps({k: v for k, v in outs[True].items() if k not in extra}, sort_keys=True) \
+        == _json.dumps(outs[False], sort_keys=True)
+    h = handle_from_metadata(outs[False], rollout_id=0, policy_version=0, policy_hash="a",
+                             data_pack=None)
+    assert h.carried_over is None and h.data_cursor is None and h.buffer_length is None
