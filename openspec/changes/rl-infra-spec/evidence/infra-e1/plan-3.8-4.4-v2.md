@@ -71,3 +71,8 @@ fork `yeto/ports` 2f23a0fc（F-R1）的 cell 绑定（`rebind_cell`/`unbind_cell
 - **⑦**：同样只在 epoch 0 上做，即首个事务之前、已提交配置等于启动配置时重启 learner（fork 随之重启，epoch 归 0）。journal 的 epoch 为 0，`restore_membership_state` 对账后事务可以继续。
 - **已知限制，不作为本轮判据**：已提交配置不等于启动配置时重启，island 转 RECOVERY_REQUIRED（fork 回到启动形状，与 journal 成员不一致）。这是 G11"首版重启回启动形状"的设计语义，记录在此，本轮不测。
 - **A9 f5**：以设计语义为预期，即 RECOVERY_REQUIRED 加 `trainer_recovery_hint`（`restore_old`，指向该 cut）。已与 `evidence/infra-e3/plan-v3.md` 第 99 行 f5 的写法核对，一致。
+
+## 8. `--rl-elastic` 强制启用 Miles router（2026-09-30，运行前）
+
+F-E1 重跑（`evidence/infra-v2-b1/fe1r/`）暴露：fork 的 cordon、drain_cells、admit_cells 以及 cordoned update_weights 都要求 `--use-miles-router`（`server_cell._assert_cordonable`、`inference_controller.start_update_weights`）。自提交 ae42dcf 起，`--rl-elastic` 的 Miles argv 固定带 `--use-miles-router`，默认 argv 不变。岛启动前另做一次检查（`check_elastic_miles_args`），缺少 Miles router、colocate、rollout offload 三种情况直接拒绝。
+**对判据的影响（执行要求，不改判据）**：用 Miles router 与用 SGLang router 的运行不是同一配置。凡是拿切换运行和基线逐轮比对 sample id 的用例（A4 E1-A 的固定基线、A5 的基线、A6b 的 B1），基线运行也必须带 `--rl-elastic`（resources 与切换运行相同，不发请求），这样两边都走 Miles router。
