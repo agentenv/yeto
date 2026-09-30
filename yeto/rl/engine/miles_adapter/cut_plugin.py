@@ -89,6 +89,8 @@ class MilesCutBackend:
         return dp_invariant_state
 
     def export_optimizer(self, optimizer: Any, named: list) -> Any:
+        if _UNSAFE_STATE_READS[0]:  # diagnostic only: verify the fork fix without the yeto guard
+            return self._dps().export_named_optimizer_state(optimizer, named)
         with side_effect_free_state(optimizer):
             return self._dps().export_named_optimizer_state(optimizer, named)
 
@@ -164,6 +166,20 @@ def side_effect_free_state(optimizer: Any):
         for state, keys in before:
             for key in [k for k in state.keys() if k not in keys and not state[k]]:
                 del state[key]
+
+
+# Per rank process; False = default (side-effect-free reads). Only the E2 diagnostic
+# sub-run turns it on (plugin below), to check the fork-M5 fix on a real DistOpt.
+_UNSAFE_STATE_READS = [False]
+SET_UNSAFE_STATE_READS = "yeto.rl.engine.miles_adapter.cut_plugin.set_unsafe_state_reads"
+
+
+def set_unsafe_state_reads(actor: Any, *, enabled: bool) -> dict[str, Any]:
+    """Diagnostic switch (E2 plan-v6 C1 sub-run): read optimizer state WITHOUT the
+    side-effect-free guard in this rank process."""
+    del actor
+    _UNSAFE_STATE_READS[0] = bool(enabled)
+    return {"unsafe_state_reads": _UNSAFE_STATE_READS[0]}
 
 
 def _backend(actor: Any) -> Any:

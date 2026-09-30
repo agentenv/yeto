@@ -215,3 +215,17 @@ def test_failed_rebuild_records_the_attempts(tmp_path, determinism):
     crit = json.loads((tmp_path / "C1" / "results.json").read_text())["criteria"]["harness_completed"]
     assert [a["stage"] for a in crit["attempts"]] == ["start_pools", "start_pools"]
     assert "in use by running cell" in crit["attempts"][0]["error"]
+
+
+def test_diagnostic_sub_run_turns_the_read_guard_off(tmp_path, determinism):
+    from yeto.rl.engine.miles_adapter import cut_plugin as cp
+
+    ctx = _ctx(tmp_path)
+    ctx.plan = {**ctx.plan, "unsafe_state_reads": True}
+    try:
+        e2_harness.run_harness(ctx)
+        assert cp._UNSAFE_STATE_READS[0] is True
+        steps = (tmp_path / "C1" / "steps.jsonl").read_text()
+        assert "diagnostic_unsafe_state_reads" in steps
+    finally:
+        cp._UNSAFE_STATE_READS[0] = False

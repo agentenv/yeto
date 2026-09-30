@@ -174,6 +174,11 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
         rec.write()
         raise EnvironmentBlocked("determinism settings not in effect on every rank (plan-v3 §0)")
     rec.criterion("determinism_settings", True)
+    if plan.get("unsafe_state_reads"):  # diagnostic sub-run only (plan-v6): no yeto read guard
+        from .cut_plugin import SET_UNSAFE_STATE_READS
+
+        flags = [dict(r) for r in ctx.runner.run(ctx.actor.run_plugin(SET_UNSAFE_STATE_READS, {"enabled": True}))]
+        rec.step("diagnostic_unsafe_state_reads", ranks=flags)
     want = plan.get("lora_dropout")
     if want is not None and any(d.get("lora_dropout") != want for d in det):
         rec.criterion("configuration", False, lora_dropout=[d.get("lora_dropout") for d in det],
