@@ -1,5 +1,7 @@
 # INFRA-E1 待 GPU 验证计划：3.8（X6，对应 A5）与 4.4（对应 A6b）
 
+> **已被取代（2026-09-30）**：由 `plan-3.8-4.4-v2.md` 取代。判据的唯一来源是集成分支上的 `gpu-plan-v2.md` §2–§3。本文件仅作记录保留，不得据此执行。
+
 状态：**未执行**。本文件在任何运行之前提交。判据、容差、seed 数和比较口径在此固定，执行后不得修改。编号与 `gpu-plan.md` §3 的 A5、A6b 对齐；PLAN-V2（`/home/michael/work/gpu-plan-v2`，由主 agent 另写 `gpu-plan-v2.md`）把这两项排进批次时，以本文件的判据为准。若 PLAN-V2 的机器/时长/费用与本文件不同，以 PLAN-V2 为准，**判据不变**。
 执行时在 `evidence/infra-e1/<A5|A6b>/<run>/` 存放：原始日志、两岛事件磁带、syncer 事件磁带、controller journal（`reconfig/journal.jsonl`、`epochs.json`）、ledger、cut manifest、GPU 断言输出和无残留证明。
 

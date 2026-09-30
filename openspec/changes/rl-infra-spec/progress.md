@@ -375,3 +375,13 @@
 - 3.7：阻塞在旧成员集上的调用仍不受截止时间约束；fork health monitor 对被杀 cell 的行为未知。
 - head 两跳（fleet head 模式）下，`--rl-eval-data` 与 `--rl-elastic-resources` 一样，只内联到岛的运行命令，没有另行处理 head 上的暂存。
 - 待批准：无新增。
+
+### INFRA-E1 第二轮审查修复（2026-09-30，结论"需修复"）
+- F1：新执行说明 `evidence/infra-e1/plan-3.8-4.4-v2.md`，以集成分支 `gpu-plan-v2.md` §2–§3 为唯一判据来源，只补充开关、前置条件、E1 观测点与已知限制。v1 `plan-3.8-4.4.md` 保留，并标注"已被取代"。删去了两条不可达的判据："最终 policy hash 等于 B0"与"syncer base 等于 B0"。A6b 的 `progress.local_step` 写成确定值 3。需要主 agent 知悉、gpu-plan-v2 可能需要补充的两点：(a) A5 quorum 用例要让 150 s 延迟通过 pause 审计，必须带 `--rl-elastic-pause-margin 2.0`，deadline 设 230 s，否则请求会在 plan 阶段被拒；(b) "start_cells 前注入 150 s"的注入点尚未实现，执行前须先补上并提交。
+- F2（5946ffd）：watchdog 的判定与终止、`tx.phase` 变更、commit CAS 前的复查共用一把锁。watchdog 已触发时，事务走 REBUILD_OLD；提交开始后，watchdog 不再终止任何 cell。新增 2 个测试。
+- F3（e477bcb）：driver 新增 `RebuildNotStarted`（无发布、不在安全点、cut hash 不符），rebuilder 在写 cut 之前检查 `rebuild_preconditions(miles_args)`，这两类拒绝都判 CANCELLED。前提不满足时 entry 不接线 rebuilder，请求在 plan 阶段即被拒。新增 3 个测试。
+- F4：已写入 v2 §4 第 4 条（被杀 cell 所在 bundle 的 GPU 上 `nvidia-smi --query-compute-apps` 为空）。tasks 4.4、4.5 已写明 `REBUILDING_TRAINER` 阶段不受 deadline 强制终止的限制。
+- F5：v2 §3 第 3 条：重建后下一轮的 `trained_sample_ids_sha256` 与数据游标须与 B1 相等。
+- F6（500555a）：内联 eval 数据上限改为 96 KiB，并加测试。
+- 全量：68 failed / 2943 passed / 49 skipped / 26 errors，失败 id 共 94 个，与 `/tmp/integ-s2-base.ids` 相同（`/tmp/infra-e1-r2b.ids`）。validate strict 通过。
+- E3 吸收工作暂停在本地分支 `infra-e1-e3wip`（430f49f，未推送，未完成）。
