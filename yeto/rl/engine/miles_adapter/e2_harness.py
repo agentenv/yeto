@@ -255,9 +255,17 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
     if not colocated:
         driver.publisher.publish(driver.published_state)
     pre_a = _summaries(ctx)
+    # Compare the TRAINING state (a re-publication advances only weight_version);
+    # the counter itself is checked explicitly: cut + number of re-publications.
+    republished = 0 if colocated else 1
     rec.criterion("G-4.3 arm A pre-step state == cut",
-                  {k: (v["state_digest"], v["rng_digest"]) for k, v in pre_a.items()}
-                  == {k: (v["state_digest"], v["rng_digest"]) for k, v in saved.items()})
+                  {k: (v["train_state_digest"], v["rng_digest"]) for k, v in pre_a.items()}
+                  == {k: (v.get("train_state_digest"), v["rng_digest"]) for k, v in saved.items()})
+    rec.criterion("G-4.3 arm A weight_version == cut + re-publications",
+                  all(_advanced(saved[k].get("weight_version"), v.get("weight_version"), republished)
+                      for k, v in pre_a.items()),
+                  cut={k: v.get("weight_version") for k, v in saved.items()},
+                  now={k: v.get("weight_version") for k, v in pre_a.items()})
     batch = driver._generate(rid)  # the frozen batch B3 (same policy token)
     with trainer.retained_payloads():
         try:
@@ -296,8 +304,13 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
             rec.criterion("G-4.3 layout unchanged across rebuild", trainer.actual_layout() == layout)
             pre_b = _summaries(ctx)
             rec.criterion("G-4.3(1) restored state/RNG == cut before step 3",
-                          {k: (v["state_digest"], v["rng_digest"]) for k, v in pre_b.items()}
-                          == {k: (v["state_digest"], v["rng_digest"]) for k, v in saved.items()})
+                          {k: (v["train_state_digest"], v["rng_digest"]) for k, v in pre_b.items()}
+                          == {k: (v.get("train_state_digest"), v["rng_digest"]) for k, v in saved.items()})
+            rec.criterion("G-4.3 arm B weight_version == cut + re-publications",
+                          all(_advanced(saved[k].get("weight_version"), v.get("weight_version"), republished)
+                              for k, v in pre_b.items()),
+                          cut={k: v.get("weight_version") for k, v in saved.items()},
+                          now={k: v.get("weight_version") for k, v in pre_b.items()})
             rec.criterion("G-4.3(1) scheduler not double-counted",
                           all(v["scheduler_samples"] == manifest.progress.scheduler_samples
                               for v in pre_b.values()))
@@ -311,6 +324,13 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
         finally:
             trainer.release_payload(batch)
     _compare_arms(rec, post_a, post_b, grad_a, grad_b, manifest.progress.scheduler_samples + gbs)
+
+
+def _advanced(cut: int | None, now: int | None, publications: int) -> bool:
+    """weight_version after ``publications`` re-publications of the cut (None = no counter)."""
+    if cut is None or now is None:
+        return cut is None and now is None
+    return now == cut + publications
 
 
 def _compare_arms(rec: _Recorder, post_a, post_b, grad_a, grad_b, samples: int) -> None:

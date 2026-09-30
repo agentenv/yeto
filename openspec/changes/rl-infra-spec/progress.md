@@ -597,3 +597,9 @@
 - 已完成：4.6 重分片（CPU 通过）、4.7 yeto 侧（已实现）、A8/DEV-GATHER harness（DEV-GATHER 第 7 次 6 个 arm 跑通）、数据兜底与离线 compare、审查小修与 L-2（weight_version 跨 DP 连续），plan-v6 与 `a8-run-plan.md` 已在运行前提交。
 - 下一步：经主 agent 重新批准后，**A8 从头重跑**：用 `/home/michael/work/infra-e3-gpu/b3a8/go.sh`（快照为 517f745，learner 参数已生成、本地 dry-run 通过）或按 `a8-run-plan.md` 重建快照；台账先记一行，线程 <3000。A9 仍受 F-R1 布局与 A8=go 约束。
 - B3 合计 ≤$5.49。
+### INFRA-E2 暂停点（2026-09-30 约 10:00Z，用户下班暂停）
+- 分支 infra-e2，已合并 integ-decl 4dcc52b；代码中包含 e5a1b04（harness 比较不含发布计数、weight_version 另设判据、puller 单独拉取结果），plan-v6 已追加判据实现更正。
+- 已完成：plan-v6 的 pin（镜像 2cc5cc52 / Miles e3a11ab3）；本地 dry-run 24/24；T4 镜像内 preflight 通过。
+- 正式运行尚无判据结论：C1 v6 第 1 次（weight_version 漏项，已修）、第 2 次（比较口径，已修；不追认）、第 3 次（用户暂停）。
+- **恢复步骤**：合并最新 integ-decl → 用新代码提交重新生成 run 目录并重跑本地 dry-run → 从 C1 开始按 plan-v6 执行（C1 → c1-unsafe → C2 → C3 各行）。
+- 费用：B2 累计 ≤ $10.88。所有 E2 app 均为 stopped/0，本地无残留进程。
