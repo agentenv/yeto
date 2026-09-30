@@ -803,8 +803,8 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
             raise CutPluginError("cut shard lacks optimizer state or RNG")
     first = shards[0]
     for shard in shards[1:]:
-        for key in ("adapter", "scheduler", "megatron_counters"):
-            if state_digest(shard[key]) != state_digest(first[key]):
+        for key in ("adapter", "scheduler", "megatron_counters", "miles_counters"):
+            if state_digest(shard.get(key)) != state_digest(first.get(key)):
                 raise CutPluginError(f"DP shards disagree on the replicated {key}")
     dp_changes = int(coord["dp_size"]) != source_dp
     if dp_changes and rng_policy != "keep_on_dp_change":
