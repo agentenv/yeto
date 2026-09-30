@@ -29,10 +29,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PLAN_VERSION = "plan-v3"
-IMAGE_DIGEST = "sha256:17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef"
+PLAN_VERSION = "plan-v4"
+IMAGE_DIGEST = "sha256:db81588406e157baa6a579f6378484b890371065abcc51eacd5a9650b5820cbf"
 IMAGE = f"ghcr.io/michaellchung/yeto-miles-ports@{IMAGE_DIGEST}"
-MILES_COMMIT = "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"
+MILES_COMMIT = "2f23a0fca9b80f6a7300da401703c343014b03c0"
 MODELS = {
     "Qwen/Qwen3-0.6B": "c1899de289a04d12100db370d81485cdf75e47ca",
     "Qwen/Qwen3-1.7B": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
@@ -97,9 +97,9 @@ def plan_runs() -> list[Run]:
     g43 = ["G-4.3(1)", "G-4.3(2)", "G-4.3(3)", "G-4.3(4)", "L2"]
     runs = [
         Run("c1", "C1", "modal:1xh100", "Qwen/Qwen3-0.6B", g42 + g43,
-            extra=["--total-steps", "6"], harness=_harness("C1", 1)),
+            extra=["--total-steps", "6", "--rl-lora-dropout", "0.05"], harness=_harness("C1", 1)),
         Run("c2", "C2", "modal:2xh100", "Qwen/Qwen3-0.6B", g42 + ["G-4.2(f)"] + g43,
-            extra=["--total-steps", "6"], harness=_harness("C2", 2)),
+            extra=["--total-steps", "6", "--rl-lora-dropout", "0.05"], harness=_harness("C2", 2)),
         Run("c3-b1", "C3", "modal:3xh100", "Qwen/Qwen3-1.7B", ["G-4.4 baseline"], extra=_elastic_c3([])),
         Run("c3-rb", "C3", "modal:3xh100", "Qwen/Qwen3-1.7B", ["G-4.4"], extra=_elastic_c3([]),
             rebuild_trigger=True),
@@ -114,8 +114,7 @@ def plan_runs() -> list[Run]:
             extra=_elastic_c3(["--rl-test-inject-cut-save-kill-rank", "1"]), rebuild_trigger=True),
         Run("c3-f5", "C3", "modal:3xh100", "Qwen/Qwen3-1.7B", ["G-4.5 row5"],
             extra=_elastic_c3(["--rl-test-inject-rebuild-cursor-shift", "1"]), rebuild_trigger=True,
-            blocked="E1 data_cursor() is the last batch's cursor, not a live read: a rewind "
-                    "during the rebuild is not visible before the next generate"),
+        ),
         Run("c3-f6a", "C3", "modal:3xh100", "Qwen/Qwen3-1.7B", ["G-4.5 row6 before CAS"],
             extra=_elastic_c3(["--rl-test-kill-learner-at", "REBUILDING_TRAINER",
                                "--rl-elastic-restart-attempts", "1"]), rebuild_trigger=True),

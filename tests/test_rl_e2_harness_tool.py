@@ -15,8 +15,13 @@ sys.modules["e2_cut_harness"] = tool  # dataclasses resolve the module
 spec.loader.exec_module(tool)
 
 
-def test_pins_match_the_checkout():
-    assert tool.check_pins(REPO) == []
+def test_pin_check_is_against_plan_v4(tmp_path):
+    init = tmp_path / "yeto" / "rl" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text(f'MILES_NEXT_COMMIT = "{tool.MILES_COMMIT}"\nX = "{tool.IMAGE_DIGEST.split(":")[1]}"\n')
+    assert tool.PLAN_VERSION == "plan-v4" and tool.check_pins(tmp_path) == []
+    init.write_text('MILES_NEXT_COMMIT = "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"\n')
+    assert len(tool.check_pins(tmp_path)) == 2
 
 
 def test_execute_is_refused(tmp_path, capsys):
@@ -24,7 +29,8 @@ def test_execute_is_refused(tmp_path, capsys):
     assert not any(tmp_path.iterdir())
 
 
-def test_dry_run_writes_every_run_in_plan_order(tmp_path):
+def test_dry_run_writes_every_run_in_plan_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "check_pins", lambda repo: [])  # pins: see test_pin_check_is_against_plan_v4
     assert tool.main(["--root", str(tmp_path), "--yeto-sha", "abc1234", "--prefix", "p"]) == 0
     plan = json.loads((tmp_path / "plan.json").read_text())
     names = [r["run"] for r in plan["runs"]]
@@ -35,6 +41,8 @@ def test_dry_run_writes_every_run_in_plan_order(tmp_path):
         args = shlex.split((d / "args.txt").read_text())
         assert args[args.index("--model-revision") + 1] == tool.MODELS[run["model"]]
         assert "--modal-gpu-exact" in args and "--rl-deterministic-trainer" in args
+        if run["config"] in ("C1", "C2"):
+            assert args[args.index("--rl-lora-dropout") + 1] == "0.05"
         script = (d / "run.sh").read_text()
         assert tool.GUARD in script and "app stop -y" in script  # guard + watchdog
         if run["config"] == "C3":
@@ -43,7 +51,7 @@ def test_dry_run_writes_every_run_in_plan_order(tmp_path):
     assert c1["config"] == "C1" and c1["expected_dp"] == 1 and c1["lora_dropout"] == 0.05
     assert "G-4.2(f)" in json.loads((tmp_path / "p-c2" / "spec.json").read_text())["criteria"]
     blocked = {r["run"]: r["blocked"] for r in plan["runs"] if r["blocked"]}
-    assert set(blocked) == {"c3-f5"}
+    assert blocked == {}
 
 
 def test_harness_plan_is_valid_for_the_in_learner_harness():

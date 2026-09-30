@@ -132,3 +132,18 @@ def test_state_summary_and_determinism_readouts(monkeypatch):
     assert d["env_ok"] and d["deterministic_mode"]
     monkeypatch.setenv("NCCL_ALGO", "Tree")
     assert not cut_plugin.rank_determinism(rank)["env_ok"]
+
+
+def test_cursor_shift_refused_without_a_live_cursor(tmp_path, monkeypatch):
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import _inject_cursor_shift
+
+    monkeypatch.setenv(ci.CURSOR_SHIFT_ENV, "1")
+    args = SimpleNamespace(load=str(tmp_path), start_rollout_id=0)
+    cursor = {"sample_offset": 8, "epoch_id": 0, "sample_group_index": 8, "sample_index": 64}
+    cached_only = SimpleNamespace(live_data_cursor=lambda: (None, None))
+    with pytest.raises(ci.InjectionConfigError, match="live"):
+        _inject_cursor_shift(args, cursor, cached_only)
+    with pytest.raises(ci.InjectionConfigError, match="live"):
+        _inject_cursor_shift(args, cursor, SimpleNamespace())
+    live = SimpleNamespace(live_data_cursor=lambda: (dict(cursor), 0))
+    assert _inject_cursor_shift(args, cursor, live).endswith("global_dataset_state_dict_-1.pt")
