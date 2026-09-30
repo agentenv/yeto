@@ -19,7 +19,7 @@
 FROM docker.io/radixark/miles@sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c
 
 ARG MILES_REPOSITORY=https://github.com/michaellchung/miles
-ARG MILES_COMMIT=2f23a0fca9b80f6a7300da401703c343014b03c0
+ARG MILES_COMMIT=e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841
 ARG SGLANG_REPOSITORY=https://github.com/michaellchung/sglang
 ARG SGLANG_COMMIT=9f29303bef1eea38eb613e5f454a52db1326422d
 # setuptools-scm version of SGLANG_COMMIT (describe v0.5.20-67-g9f29303);

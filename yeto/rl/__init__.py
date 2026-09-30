@@ -32,8 +32,10 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # loss variants: --policy-loss-variant {policy_loss,cispo,sapo,gmpo},
 # --sapo-tau-{pos,neg}, --gmpo-log-clip-{low,high}; plus (2f23a0fc) F-R1:
 # placement map rollout_cells, deferred/unbound cells, describe_cells,
-# public slice_pg_info, bundle-free check before any cell starts.
-MILES_NEXT_COMMIT = "2f23a0fca9b80f6a7300da401703c343014b03c0"
+# public slice_pg_info, bundle-free check before any cell starts; plus
+# (fb04d6ff) M5: LoRA DP-invariant restore no longer drops DistOpt exp_avg/exp_avg_sq,
+# and (e3a11ab3) its cross-optimizer error text/docstring and tests.
+MILES_NEXT_COMMIT = "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -56,10 +58,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PRIVATE (ghcr.io/michaellchung): launches pass registry
 # credentials via SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} (ports only; use
 # a read:packages-only token).
-# Tag 2f23a0f-9f29303; linux/amd64 only.
+# Tag e3a11ab-9f29303; linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "db81588406e157baa6a579f6378484b890371065abcc51eacd5a9650b5820cbf"
+    "2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Where MILES_NEXT_IMAGE installed the SGLang fork (editable).
