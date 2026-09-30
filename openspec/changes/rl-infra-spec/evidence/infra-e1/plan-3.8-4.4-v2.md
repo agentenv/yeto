@@ -26,7 +26,7 @@ v1（`plan-3.8-4.4.md`）的拓扑（2×8 卡、8 轮）、"最终 policy hash �
   1. journal 依次为 `VALIDATING → WAIT_SAFE → REBUILDING_TRAINER → SUCCEEDED`；cut manifest 中 `progress.local_step = 3`（第 3 轮安全点之前已完成 3 次 optimizer step，每轮 1 步），`outer.settled = true`，`ledger.carried_over = 0`，`ledger.ready_unconsumed = 0`。
   2. `rl_driver_start` 只有 1 条；`rl_trainer_rebuilt` 1 条，其 `policy_version = 3`、`sync/publication_members` 为全部成员。
   3. **样本一致（替代数值比较）**：重建后下一轮（rollout 3，即重建后的第 1 轮）的 `trained_sample_ids_sha256` 与不重建基线 B1 的同一轮相等；该轮开始前 rollout 进程的数据游标 `{sample_offset, epoch_id, sample_group_index, sample_index}` 与 B1 相等。这两条都是精确相等。重建前后的 grad_norm/loss 只记录，不作判据。
-  4. `SwappableActor.generation` 在 RESTORED 时为 1，在 REBUILD_OLD 时为 2。
+  4. `SwappableActor.generation` 为 1（**运行前更正，2026-09-30**：原写"REBUILD_OLD 时为 2"不可能成立，因为 `rebuild_same_shape` 只在重建成功时 swap 一次，失败的那次尝试不会 swap）。RESTORED 与 REBUILD_OLD 靠 journal 中 `rebuild.outcome` 和 `rebuild.attempts` 区分：REBUILD_OLD 时 `attempts` 的 stage 依次为 `create_training_models`、`done`。REBUILD_OLD 路径用 `--rl-test-inject-rebuild-fail` 触发，它让 fork 中 `create_training_models` 的第一次调用失败。
 - 已知限制（不放宽判据）：`REBUILDING_TRAINER` 阶段**没有** deadline 强制终止。默认 watchdog 只杀 rollout 事务在 INITIALIZING/VERIFYING 阶段新启动的 cell，trainer 重建阻塞时只会写 journal；超时由 E2 plan-v2 G-4.5 的各项和外层硬超时覆盖。
 
 ## 4. watchdog 默认动作（与 A4 E1-D 同批执行；判据为 `evidence/infra-e1/plan.md` E1-D 的补充，运行前固定）

@@ -257,6 +257,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "CUBLAS_WORKSPACE_CONFIG=:4096:8, NVIDIA_TF32_OVERRIDE=0 on the learner and "
                     "every Ray worker (E2 plan-v2 §0); off by default. SGLang deterministic "
                     "inference is --sglang-deterministic-inference (on by default)")
+    rl.add_argument("--rl-test-inject-rebuild-fail", action="store_true",
+                    help="--rl-elastic, TEST ONLY (4.4 REBUILD_OLD): the first same-shape trainer "
+                    "rebuild fails in the fork at create_training_models")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",

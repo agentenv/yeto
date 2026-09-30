@@ -960,6 +960,8 @@ _ELASTIC_TEST_EXPORTS = (
     ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures",
      "YETO_RL_TEST_INJECT_STOP_FAILURES"),
     ("rl_test_kill_learner_at", "--rl-test-kill-learner-at", "YETO_RL_TEST_KILL_LEARNER_AT"),
+    ("rl_test_inject_rebuild_fail", "--rl-test-inject-rebuild-fail",
+     "YETO_RL_TEST_INJECT_REBUILD_FAIL"),
 )
 KILL_PHASES = ("QUIESCING", "TRANSFERRING", "INITIALIZING", "VERIFYING", "COMMITTED",
                "RESUMING", "REBUILDING_TRAINER")
@@ -1086,7 +1088,7 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
             raise ValueError(f"{flag} must be positive")
     given += [flag for name, flag in _ELASTIC_TEST_FLAGS if getattr(args, name, None) is not None]
     given += [flag for name, flag, _ in _ELASTIC_TEST_EXPORTS
-              if getattr(args, name, None) is not None and flag not in given]
+              if getattr(args, name, None) not in (None, False) and flag not in given]
     if getattr(args, "rl_elastic_state_dir", None) is not None:
         given.append("--rl-elastic-state-dir")
     kill_at = getattr(args, "rl_test_kill_learner_at", None)
@@ -1204,7 +1206,9 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             prelude += f"export {INJECT_START_DELAY_ENV}={float(delay)!r}\n"
         for name, _flag, env in _ELASTIC_TEST_EXPORTS:
             value = getattr(args, name, None)
-            if value is not None:
+            if value is True:
+                value = 1
+            if value not in (None, False):
                 prelude += f"export {env}={shlex.quote(str(value))}\n"
         attempts = getattr(args, "rl_elastic_restart_attempts", None)
         if attempts:

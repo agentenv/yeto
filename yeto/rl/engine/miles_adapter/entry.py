@@ -534,6 +534,8 @@ def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model
         rebuild_same_shape=lambda *, restore: rebuild_same_shape(
             driver.trainer, args=miles_args, rollout_executor=rollout_executor,
             actor=actor_model, run=runner.run, restore=restore, rollout=driver.rollout,
+            **({"rebuild": injected_rebuild_failure()} if os.environ.get(INJECT_REBUILD_FAIL_ENV)
+               else {}),
         ),
         ref_model=(None if not ref_load
                    else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
@@ -547,6 +549,42 @@ def _role_map(request: Any) -> dict[str, Any] | None:
     if pm is None:
         pm = getattr(request, "placement_map", None)
     return None if pm is None else {k: v for k, v in pm.items() if k in ("trainer", "rollout", "standby")}
+
+
+# TEST ONLY (A6b / G-4.5, 4.4 REBUILD_OLD path): the first same-shape rebuild of
+# the process fails inside the fork at stage ``create_training_models`` (the
+# fork then stops the trainer pools and raises TrainerRebuildError);
+# rebuild_same_shape rebuilds once more from the same cut -> outcome REBUILD_OLD.
+INJECT_REBUILD_FAIL_ENV = "YETO_RL_TEST_INJECT_REBUILD_FAIL"
+
+
+def injected_rebuild_failure(module: Any = None) -> Any:
+    """The fork's ``rebuild_training_models`` whose FIRST call hits a failing
+    ``create_training_models`` (patched in the fork module for that one call)."""
+    if module is None:
+        import miles.ray.placement_group as module
+    state = {"armed": True}
+
+    async def rebuild(*args: Any, **kwargs: Any) -> Any:
+        if not state["armed"]:
+            return await module.rebuild_training_models(*args, **kwargs)
+        state["armed"] = False
+        real = module.create_training_models
+
+        async def failing(*_a: Any, **_k: Any) -> Any:
+            import sys
+
+            print(f"[yeto] TEST INJECTION {INJECT_REBUILD_FAIL_ENV}: create_training_models fails",
+                  file=sys.stderr, flush=True)
+            raise RuntimeError("injected create_training_models failure (test)")
+
+        module.create_training_models = failing
+        try:
+            return await module.rebuild_training_models(*args, **kwargs)
+        finally:
+            module.create_training_models = real
+
+    return rebuild
 
 
 def _startup_views(manager: Any, runner: Any) -> dict[str, Any]:
