@@ -342,3 +342,21 @@ def test_digest_mismatch_names_the_differing_components(tmp_path, monkeypatch):
     monkeypatch.setattr(cut_plugin, "_snapshot", skewed)
     with pytest.raises(CutError, match="scheduler/lr0"):
         _trainer(RankGroup([make_rank(1)])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+def test_rank_diff_reports_leaf_values(tmp_path, monkeypatch):
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    from yeto.rl.engine.miles_adapter import cut_plugin
+
+    fresh = make_rank(1)
+    real_load = fresh._yeto_cut_backend.load_optimizer
+
+    def lossy(optimizer, named, merged):  # e.g. a loader that drops exp_avg_sq precision
+        real_load(optimizer, named, merged)
+        for p in optimizer.state:
+            optimizer.state[p]["exp_avg_sq"].mul_(1.0001)
+
+    fresh._yeto_cut_backend.load_optimizer = lossy
+    with pytest.raises(CutError, match="value:exp_avg_sq"):
+        _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())

@@ -276,6 +276,38 @@ def component_digests(value: Any, *, depth: int = 5, prefix: str = "") -> dict[s
     return out
 
 
+def state_diff(saved: Any, now: Any, *, path: str = "", out: list | None = None, limit: int = 400) -> list:
+    """Leaf-level differences between two snapshots: (path, kind, detail) -- dtype/shape
+    or max |a-b| for tensors, repr for others. Used when a restore does not reproduce the cut."""
+    import torch
+
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(saved, Mapping) and isinstance(now, Mapping):
+        for key in sorted(set(saved) | set(now), key=repr):
+            if key not in saved or key not in now:
+                out.append((f"{path}/{key}", "missing", "saved" if key not in saved else "restored"))
+                continue
+            state_diff(saved[key], now[key], path=f"{path}/{key}", out=out, limit=limit)
+        return out
+    if isinstance(saved, torch.Tensor) and isinstance(now, torch.Tensor):
+        a, b = saved.detach().cpu(), now.detach().cpu()
+        if a.dtype != b.dtype or a.shape != b.shape:
+            out.append((path, "meta", f"{a.dtype}{tuple(a.shape)} vs {b.dtype}{tuple(b.shape)}"))
+        elif not torch.equal(a, b):
+            d = (a.double() - b.double()).abs()
+            out.append((path, "value", f"max={d.max().item():.3e} n={int((d > 0).sum())}/{d.numel()}"))
+        return out
+    if isinstance(saved, (list, tuple)) and isinstance(now, (list, tuple)) and len(saved) == len(now):
+        for i, (a, b) in enumerate(zip(saved, now)):
+            state_diff(a, b, path=f"{path}[{i}]", out=out, limit=limit)
+        return out
+    if state_digest(saved) != state_digest(now):
+        out.append((path, "other", f"{saved!r:.80} vs {now!r:.80}"))
+    return out
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
@@ -523,6 +555,14 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         "rng_digest": state_digest(rng_now),
         "components": component_digests({"state": snap, "rng": rng_now}),
     }
+    saved_snap = {k: shard.get(k) for k in snap}
+    if state_digest(saved_snap) != summary["state_digest"]:
+        diffs = state_diff(saved_snap, snap)
+        kinds: dict[str, int] = {}
+        for p_, kind, _ in diffs:
+            leaf = p_.rsplit("/", 1)[-1]
+            kinds[f"{kind}:{leaf}"] = kinds.get(f"{kind}:{leaf}", 0) + 1
+        summary["diff"] = {"count": len(diffs), "by_leaf": kinds, "first": diffs[:30]}
     return summary
 
 
