@@ -20,7 +20,8 @@ HELDOUT = Path(__file__).with_name("heldout-gsm8k-test-first32.jsonl")
 COMMON = ("--gpu", "modal:2xh100", "--modal-gpu-exact", "--total-steps", "3", "--seed", "17",
           "--rl-sync-preset", "strict-avg",  # eval needs the external policy boundary (no-sync refuses eval)
           "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
-          "--rl-observe-timeline",
+          "--rl-observe-timeline", "--rl-deterministic-trainer",
+          "--modal-retries", "0", "--modal-timeout-s", "3000",
           "--rl-eval-interval", "1", "--rl-eval-data", str(HELDOUT),
           "--rl-eval-dataset-name", "gsm8k-test32", "--rl-eval-samples-per-prompt", "1",
           "--rl-eval-temperature", "0", "--rl-eval-max-response-len", "384")
