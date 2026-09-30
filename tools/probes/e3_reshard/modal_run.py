@@ -47,6 +47,8 @@ def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = 
            f'bash -c "python {shim} --work {work} {sets} %s -- $(cat {flags_file})"')
     lines = [
         "set -euo pipefail",
+        "cd /yeto",  # the reward module (gsm8k_reward.py) is imported from the working directory
+        "export LEARNER_ID=0",  # the dry-run learner line reads $LEARNER_ID
         f"mkdir -p {work}",
         # GPU name assertion before anything else (plan-v3 §0)
         f"nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | tee {work}/gpus.txt",
