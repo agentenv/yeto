@@ -456,3 +456,12 @@
 - L2：`_wire_trainer_edges` 在 `rebuild_preconditions(miles_args)` 不满足时不接线 trainer 边，请求在 plan 阶段即被拒；有测试。
 - L3：**F-R1 未解决前不得认证 role-transfer 的 trainer→rollout 边**（plan v2 §6）。启动期的 bind 能力检查不可行（fork 没有可读接口），也未实现。
 - pool_gpus 入口：按主 agent 安排，等 F-R1 在 fork 实现后再做。
+
+## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
+- 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
+- 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。
+- task 状态：3.3、3.4、3.5、3.7 未完成（等待代码；3.7 ⑤⑥ 环境阻塞）；2.3（A2）未完成（等待代码：launcher 不转发 eval temperature，贪心 eval 无法设置）；1.7（A2+）未完成（等待代码：observe 无 launcher 入口、无工具负载）。本批未勾选任何 task。
+- 费用：≤$2.91（f0 $0.42、fe1fp $1.56、fe1 $0.93、nsmoke $0），全部 Modal L40S。本批预算 $127（v2 8 卡档 $170 按 2.95/3.95 折算）。资源：Modal app ap-4WHOoo6jjpVNP3CkJ8DT1p / ap-M16C4QJ9WiiU1KPdPyWua2 / ap-F4XpsACPevWqjbkXVjcuyC 均 stopped/0 tasks；sky 无集群、nebius 无实例；本地进程已清理。
+- 其他发现：Nebius H100 SkyPilot 目录价 $3.85/GPU·h（非 v2 所写 $2.95），与 Modal H100! $3.95 基本持平，且 Nebius 只有 1/8 卡规格；attestation 指纹无离线计算入口，需先跑同参数运行取 `rl_driver_start.runtime_fingerprint`。
+- 需要的代码修复（交代码负责人）：(1) F-R1 fork 声明停止 cell + yeto 把声明 cell id 传给 fork 并与在役成员名统一；(2) launcher 转发 `--eval-temperature`（A2）；(3) observe 开关与工具负载/tool_wait_board 接线（A2+、A4b）；(4) E1-B 权重覆盖注入、E1-D ③④ stop_cells 半失败注入、⑦ fork 重启入口；(5) 可选：sky 0.13 私有镜像登录序列化、Nebius 不用 spot。
+- 下一步：以上 (1) 合入并重建镜像后，先重跑 F-E1（≈$1–3），通过再按 §9.3/§9.6 跑 E1-A 基线、E1-A、watchdog 用例（Modal H100!:8，最坏合计 ≈$95）。
