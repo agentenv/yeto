@@ -956,6 +956,14 @@ _EVAL_LAUNCH_FLAGS = (
     ("rl_eval_dataset_name", "--rl-eval-dataset-name"),
     ("rl_eval_samples_per_prompt", "--rl-eval-samples-per-prompt"),
 )
+# optional eval knobs: launcher flag attr -> learner flag (forwarded when given)
+_EVAL_OPTIONAL_FLAGS = (
+    ("rl_eval_temperature", "--eval-temperature"),
+    ("rl_eval_top_p", "--eval-top-p"),
+    ("rl_eval_max_prompt_len", "--eval-max-prompt-len"),
+    ("rl_eval_max_response_len", "--eval-max-response-len"),
+    ("rl_eval_max_context_len", "--eval-max-context-len"),
+)
 EVAL_ISLAND_DATA_PATH = "~/yeto-rl/eval-heldout.jsonl"
 EVAL_INLINE_MAX_BYTES = 96 * 1024  # shipped inline in the run command (ARG_MAX headroom)
 
@@ -970,6 +978,8 @@ def _check_ports_eval(args, rl_engine: str) -> int | None:
 
     interval = getattr(args, "rl_eval_interval", None)
     given = [flag for name, flag in _EVAL_LAUNCH_FLAGS if getattr(args, name, None) is not None]
+    given += ["--rl-" + flag[2:] for name, flag in _EVAL_OPTIONAL_FLAGS
+              if getattr(args, name, None) is not None]
     args.rl_eval_data_text = None
     if interval is None:
         if given:
@@ -1029,8 +1039,12 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         # learner never sets it), so that one stays with the island's check.
         check_overlap_eval(placement_kind=placement, eval_interval=eval_interval,
                            eval_uses_snapshots=UNKNOWN)
+    if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
+        raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
              if getattr(args, name, None) is not None]
+    if getattr(args, "rl_elastic_tool_wait_board", False):
+        given.append("--rl-elastic-tool-wait-board")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
@@ -1084,8 +1098,14 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             f" --eval-dataset-name {shlex.quote(args.rl_eval_dataset_name)}"
             f" --eval-samples-per-prompt {int(args.rl_eval_samples_per_prompt)}"
         )
+        for name, flag in _EVAL_OPTIONAL_FLAGS:
+            value = getattr(args, name, None)
+            if value is not None:
+                flags += f" {flag} {value!r}"
     if getattr(args, "rl_overlap_eval", False):
         flags += " --rl-overlap-eval"
+    if getattr(args, "rl_observe_timeline", False):
+        flags += " --rl-observe-timeline"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -1097,6 +1117,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             f" --rl-elastic-initial-config {shlex.quote(args.rl_elastic_initial_config)}"
             f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
         )
+        if getattr(args, "rl_elastic_tool_wait_board", False):
+            flags += " --rl-elastic-tool-wait-board"
         for name, flag in _ELASTIC_PAUSE_FLAGS:
             value = getattr(args, name, None)
             if value is not None:

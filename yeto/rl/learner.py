@@ -151,6 +151,11 @@ def parse_args(argv=None):
     # and its Miles argv are unchanged): eval||train overlap and the E1
     # elastic rollout controller.
     parser.add_argument("--rl-overlap-eval", action="store_true")
+    # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
+    parser.add_argument("--rl-observe-timeline", action="store_true")
+    # 3.3 X5: wire the island's ToolWaitBoard actor into the elastic pool (needs a
+    # rollout workload that records tool waits, e.g. yeto.rl.tool_wait_workload).
+    parser.add_argument("--rl-elastic-tool-wait-board", action="store_true")
     parser.add_argument("--rl-elastic", action="store_true")
     parser.add_argument("--rl-elastic-resources", default=None, metavar="PATH")
     parser.add_argument("--rl-elastic-attestation", default=None, metavar="PATH")
@@ -295,6 +300,10 @@ def _check_ports_infra_switches(args) -> None:
     if getattr(args, "rl_overlap_eval", False) and not ports:
         raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_COMPANIONS if getattr(args, name, None) is not None]
+    if getattr(args, "rl_elastic_tool_wait_board", False):
+        given.append("--rl-elastic-tool-wait-board")
+    if getattr(args, "rl_observe_timeline", False) and not ports:
+        raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -323,6 +332,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
+    if getattr(args, "rl_observe_timeline", False):
+        miles_args.yeto_rl_observe_timeline = True
     if not getattr(args, "rl_elastic", False):
         return
     miles_args.yeto_rl_elastic = {
@@ -332,6 +343,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         "initial_config": args.rl_elastic_initial_config,
         "declared_cells": _elastic_cells(args.rl_elastic_cells),
     }
+    if getattr(args, "rl_elastic_tool_wait_board", False):
+        miles_args.yeto_rl_elastic["tool_wait_board"] = True
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
             miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))

@@ -32,7 +32,7 @@
 - [ ] 4.1 在 `michaellchung/miles` 的 `yeto/ports` 上实现：`math_utils.py` 增加 CISPO、SAPO 的逐 token 函数和 GMPO 的序列级函数（CP 全收集方式仿照 `compute_gspo_kl`）；`losses.py` 在 pg_loss 处按 `--policy-loss-variant` 分支；`arguments.py` 增加 variant 与变体参数，默认值保持原行为。验证：fork 上的 diff 只涉及这三个文件和测试；默认参数下原有 fork 测试全部通过。
 - [ ] 4.2 在 fork 上补 CPU 测试：逐元素比对参考公式（正负优势、越界、全 mask、GMPO 模拟 CP 切分），以及与 TIS、IcePop 的组合；验证 variant 缺省时 `compute_policy_loss` 路径逐元素不变。验证：fork 测试命令和结果记录在 progress.md。
 - [x] 4.3 经用户确认后，把提交 push 到 `michaellchung/miles` `yeto/ports`（不开任何 PR），更新 yeto 中的 `MILES_NEXT_COMMIT` pin，并按现有流程重建镜像。验证：pin 指向新提交；镜像 tag 与 digest 记录在 progress.md；`git remote -v` 与 push 目标只包含 michaellchung/miles。
-- [ ] 4.4 yeto 侧翻译：在映射表中登记 `--policy-loss-variant` 与变体参数（含吸收与冲突检测），并把 fork 提交号写入来源记录。验证：翻译、吸收、冲突单测；在 miles-next-venv（安装新 pin）中用 upstream `parse_args` 解析生成的 argv 通过；来源记录测试确认包含提交号。
+- [x] 4.4 yeto 侧翻译：在映射表中登记 `--policy-loss-variant` 与变体参数（含吸收与冲突检测），并把 fork 提交号写入来源记录。验证：翻译、吸收、冲突单测；在 miles-next-venv（安装新 pin）中用 upstream `parse_args` 解析生成的 argv 通过；来源记录测试确认包含提交号。
 
 ## 5. 开放声明与文档（路线实现完成后执行）
 
@@ -65,3 +65,8 @@
 - 4.3：pin `MILES_NEXT_COMMIT` = 5c1b49eb（IMG，cbf3d22）；镜像 tag 5c1b49e-9f29303，digest sha256:17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef；fork 仓库 `git remote -v` 只有 michaellchung/miles，`yeto/ports` = 5c1b49eb；未开任何 PR（用户 2026-09-30 同意路线 B 与 fork 提交）。
 - 5.2：`docs/MILES_RL.md` 的 "Policy-loss variants" 小节；三条示例命令按顺序执行，输出与注释一致（`evidence/2026-09-30-dryrun/dryrun.json`）。
 - 4.4 未勾：yeto 侧映射、吸收、冲突与来源记录（miles_commit=5c1b49eb）的单测都已通过；在 miles-next-venv 中以镜像内的 /root/miles（5c1b49eb）运行了 Miles 自己的参数 provider + `validate_policy_loss_variant_args`，全部通过（`evidence/2026-09-30-parse-5c1b49e/`）。但没有跑完整的 upstream `parse_args`（其中 Megatron 那一半需要 CUDA 容器，本机无 docker、无 GPU），不满足原文，由主 agent 决定是否按 §7b.7 的口径另行补跑。
+
+### 完成记录（4.4，ALGO-2b-T4，2026-09-30）
+- 在钉住镜像 `ghcr.io/michaellchung/yeto-miles-ports@sha256:17d428a2…`（/root/miles HEAD = 5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba，Megatron = 镜像自带 /root/Megatron-LM）的 Modal T4 容器内，对 yeto `translate_run_config` 为 CISPO、SAPO、GMPO 生成的完整 argv（原文见 result.json）运行完整 upstream `parse_args`（Miles + Megatron 两半，含 Miles validate_args）+ yeto `validate_parsed_args`：三者通过，解析值与期望精确相等。应拒绝组合全部被拒：yeto 侧 3 项（gmpo+token、cispo+default 聚合、cispo 缺 eps），Miles 完整 parse_args 侧 5 项（GMPO+`--calculate-per-token-loss`、SAPO+`--advantage-estimator gspo`、CISPO+`--eps-clip-c`、`--sapo-tau-pos 0`、`--gmpo-log-clip-low -0.1`，均为 fork 的 AssertionError）。
+- 环境差异（按 rl-infra-spec alignment §7b 第 7 条口径）：原文写 "miles-next-venv（安装新 pin）"，该 venv 缺 `megatron.training`；改在钉住镜像中跑完整 parse_args，比原文更严格，视为满足原文意图。翻译、吸收、冲突与来源记录（miles_commit=5c1b49eb）单测见前一条完成记录（本轮复跑 `tests/test_rl_loss_variants_spec.py` 100 passed）。
+- 证据：`evidence/2026-09-30-t4-parse/`（plan.md、result.json、run3.log、teardown_proof.txt、billing）。
