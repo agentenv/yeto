@@ -3231,6 +3231,13 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         volume_name=volume_name,
         volume_mount=volume_mount,
         workdir=str(REPO_ROOT),
+        # Opt-in overrides (default: Modal runner defaults, 10 retries / 24 h).
+        # Acceptance runs pass --modal-retries 0 so a learner exit is final
+        # (no re-run billing) and --modal-timeout-s as the Modal-side hard stop.
+        **({"retries": int(args.modal_retries)}
+           if getattr(args, "modal_retries", None) is not None else {}),
+        **({"timeout_s": int(args.modal_timeout_s)}
+           if getattr(args, "modal_timeout_s", None) is not None else {}),
     )
 
 

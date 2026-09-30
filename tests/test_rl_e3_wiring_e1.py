@@ -304,11 +304,11 @@ def test_pool_gpus_reach_build_elastic_only_with_trainer_edges(monkeypatch):
     monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
     base = {"resources": {"gpus": [{"uuid": "u0"}, {"uuid": "u1"}], "configs": {}},
             "attestation": None, "state_dir": "/s", "initial_config": "c0", "declared_cells": ()}
-    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=dict(base)), profile="P",
+    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=dict(base), use_miles_router=True), profile="P",
                              fingerprint="F")
     assert "pool_gpus" not in seen
     seen.clear()
-    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic={**base, "trainer_edges": True}),
+    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic={**base, "trainer_edges": True}, use_miles_router=True),
                              profile="P", fingerprint="F")
     assert seen["pool_gpus"] == ("u0", "u1")
 
