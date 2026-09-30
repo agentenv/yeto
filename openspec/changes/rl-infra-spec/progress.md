@@ -325,3 +325,17 @@
 - 状态：报告已实现；无 task 勾选；GPU 相关全部"待本地 GPU 验证"。
 - 待用户决定：见报告 §4.2（卡型号/台数、A′ vs B/C、放开 H200 钉死、harness 路径能否作验收证据、逐位验收改同机型自比、私有镜像拉取方式）。
 - 分支 local-cluster（worktree /home/michael/work/local-cluster）。测试：未运行（仅文档）。
+
+## 集成 integ-s2（2026-09-30，主 agent）
+- 分支 integ-s2（worktree /home/michael/work/integ-s2），基于 origin/integ-decl 0727a31；修复由子 agent FIX-S2 完成，推送 integ-s2，等主 agent 核对后快进 integ-decl。
+- 合并内容与 SHA：infra-e1 d33d541；infra-e2 df28780；algo-2b e9a8d19；local-cluster 0d4c9e8；infra-e2-ports-v2 注释补齐 0ae6f30；infra-e2-entry-swappable-actor-v2 补丁 f7f0ce6；algo-2b-trainer 补丁（GMPO 收集 pg_clipfrac）de31115；开关接线 0727a31。
+- 新增 CLI 开关（都是可选，默认关闭，默认命令不变）：launcher/learner `--rl-overlap-eval`（2.3）；`--rl-elastic`，配套 `--rl-elastic-resources`、`--rl-elastic-attestation`、`--rl-elastic-initial-config`、`--rl-elastic-cells`（learner 还有 `--rl-elastic-state-dir`；launcher 固定用 `~/yeto-rl/elastic-state`）。
+- 本次修复（集成审查结论）：
+  1. 中：默认 GRPO 不取走 `_STEP_LOSSES`，列表无界增长，save_cut 报 "per-step records not drained"。改为每轮 train 成功后无条件取走，只在 GSPO/corrections/GMPO 时用于指标（e368f4e，8d03c65 更新组合根测试替身）。新增测试：GRPO 跑多轮后列表为空，且 save_cut 的 drain 检查通过；GSPO/GMPO 的 clip_fraction 不变。
+  2. 低：`YETO_RL_ELASTIC_METADATA` 只在 driver 进程可见。现在 `connect_island_ray` 在开关打开时把它放进 job 级 runtime_env.env_vars（0791db8）。更正：0727a31 提交说明写的是"run_ports_island 之前设置环境变量"，实际只覆盖 driver，Ray worker 拿不到，本提交已修正。
+  3. 低：launcher 本地 `_check_ports_infra_switches` 在开资源之前完成以下检查：overlap 需要 fixed-partition 和 eval-interval，且不能与 eval-uses-snapshots 同用（与 entry 共用 `execution_profile.check_overlap_eval`）；elastic 拒绝 colocated（`check_elastic_placement`）；initial-config 必须在 manifest `parse_configs` 结果中；attestation 用 `load_attestation` 解析（7139080）。注意：launcher 目前不暴露 `--eval-interval`，所以经 launcher 的 `--rl-overlap-eval` 一律在本地被拒。这不是新限制，以前是开资源后在岛上被拒。
+  4. 低：elastic 与 overlap 同时开启时，`rl_reconfiguration` 事件带 `eval_due`，表示已排期但未启动的 eval；有组合测试（36f4a9a）。
+  5. build_elastic、journal、ledger、inbox 的路径统一做 expanduser，有测试（本节之前的最后一个代码提交）。
+- 测试：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE` 结果为 68 failed, 2904 passed, 49 skipped, 26 errors。失败和错误的 id 共 94 个，按 id 前缀规范化后与 /tmp/integ-s2-base.ids（修复前基线）完全一致，没有新增失败，都是已知环境性失败。`openspec validate rl-infra-spec --strict` 通过。
+- 仍存限制：3.7 watchdog 默认没有接 kill（`on_watchdog` 默认未接线，阻塞的引擎调用不受截止时间约束）；H2 限制见 E1 记录。GPU 验收均未进行，task 勾选状态不变。
+- 云资源：无；费用 $0。
