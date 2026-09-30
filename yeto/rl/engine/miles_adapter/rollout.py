@@ -7,6 +7,15 @@ dereferenced here). The yeto-visible metadata comes from
 :mod:`.rollout_meta_hook`, extracted in the rollout process and delivered via
 a small sink. ``require_policy_tokens`` implements the pre-training identity
 check (spec: mismatching groups are rejected before training).
+
+E1 membership verbs (rl-infra-spec 3.4, :class:`~..ports.ElasticRolloutPool`)
+map yeto member ids (``engine:<cell>``) onto the fork's explicit membership
+API (fork M2/M3, michaellchung/miles ``yeto/ports`` 0af62f4d):
+``InferenceController.start_cells/stop_cells(expected_epoch)``,
+``wait_cells_tracked``, ``drain_cells``/``uncordon_cells``,
+``get_membership_status`` and ``restore_membership_state``. Only cells declared
+at startup can be started (``declared_cells``); the epoch passed in is the
+yeto journal's expected fork epoch (3.3a: the journal is the authority).
 """
 
 from __future__ import annotations
@@ -53,8 +62,25 @@ def policy_token(rollout_id: int, policy_hash: str) -> str:
     return policy_snapshot_token(rollout_id, policy_hash)
 
 
+MEMBER_PREFIX = "engine:"
+
+
 def member_id(cell_id: Any) -> str:
-    return f"engine:{cell_id}"
+    return f"{MEMBER_PREFIX}{cell_id}"
+
+
+def cell_of(member: str) -> str:
+    if not isinstance(member, str) or not member.startswith(MEMBER_PREFIX):
+        raise ValueError(f"{member!r} is not a rollout member id")
+    return member[len(MEMBER_PREFIX):]
+
+
+def cells_of(members: Any) -> list[str]:
+    return sorted(cell_of(m) for m in members)
+
+
+class MembershipPlanError(RuntimeError):
+    """The pool cannot provide the requested engines."""
 
 
 async def running_members(controller: Any) -> frozenset[str]:
@@ -283,8 +309,13 @@ class MilesRolloutPool:
         expected_policy: Callable[[], tuple[int, str]],
         runner: LoopRunner | None = None,
         args: Any = None,
+        declared_cells: Any = None,
+        track_timeout_s: float = 600.0,
     ) -> None:
         self._args = args
+        # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
+        self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
+        self._track_timeout_s = float(track_timeout_s)
         self._controller = inference_controller
         self._executor = rollout_executor
         self._metadata = metadata
@@ -365,6 +396,81 @@ class MilesRolloutPool:
 
     def members(self) -> frozenset[str]:
         return self._run(running_members(self._controller))
+
+    # -- E1 membership verbs (3.4) ---------------------------------------------
+    def _require_declared(self) -> tuple[str, ...]:
+        if not self._declared:
+            raise MembershipPlanError("no declared rollout cells: E1 membership verbs are off")
+        return self._declared
+
+    def plan_add(self, count: int) -> frozenset[str]:
+        declared = self._require_declared()
+        if count < 1:
+            raise MembershipPlanError(f"add_engines needs a positive count, got {count}")
+        tracked = set(self._run(self._controller.get_cell_statuses()) or {})
+        free = [c for c in declared if c not in tracked]
+        if len(free) < count:
+            raise MembershipPlanError(
+                f"{count} engines requested, only {len(free)} declared cells are stopped: {free}"
+            )
+        return frozenset(member_id(c) for c in free[:count])
+
+    def add_engines(
+        self, count: int, *, epoch: int, members: frozenset[str] | None = None
+    ) -> frozenset[str]:
+        """Start ``count`` declared cells and wait until the servers track them.
+
+        The cells take no traffic until a member publication admits them (3.5).
+        Returns the started members. A timeout while waiting for tracking leaves
+        the fork epoch committed (the caller's journal sees ``epoch + 1``).
+        """
+        chosen = frozenset(members) if members is not None else self.plan_add(count)
+        if len(chosen) != count:
+            raise MembershipPlanError(f"{len(chosen)} members named for {count} engines")
+        cells = cells_of(chosen)
+        unknown = sorted(set(cells) - set(self._require_declared()))
+        if unknown:
+            raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        self._run(self._controller.start_cells(cells, expected_epoch=epoch))
+        self._run(self._controller.wait_cells_tracked(cells, timeout_seconds=self._track_timeout_s))
+        return chosen
+
+    def remove_engines(self, members: frozenset[str], *, epoch: int) -> frozenset[str]:
+        """Deregister and stop ``members`` (drain them first); returns the remaining members."""
+        self._run(self._controller.stop_cells(cells_of(members), expected_epoch=epoch))
+        return self.members()
+
+    def drain(self, members: frozenset[str], deadline: float) -> bool:
+        """Cordon ``members`` and wait for zero in-flight requests until ``deadline`` (wall clock).
+
+        False at the deadline; nothing is aborted, members stay cordoned
+        (:meth:`undrain` cancels). The router counts engine requests only; a
+        trajectory waiting on a tool is counted by yeto (3.3), not here.
+        """
+        timeout = max(0.0, float(deadline) - time.time())
+        return bool(self._run(self._controller.drain_cells(cells_of(members),
+                                                           timeout_seconds=timeout)))
+
+    def undrain(self, members: frozenset[str]) -> None:
+        self._run(self._controller.uncordon_cells(cells_of(members)))
+
+    def membership_status(self) -> dict[str, Any]:
+        status = dict(self._run(self._controller.get_membership_status()))
+        incomplete = status.get("incomplete")
+        if incomplete:
+            status["incomplete"] = [incomplete[0], [member_id(c) for c in incomplete[1]]]
+        return status
+
+    def restore_membership(
+        self, *, epoch: int, incomplete: Any, last_op: Any, expected_current_epoch: int
+    ) -> dict[str, Any]:
+        def cells(value: Any) -> Any:
+            return None if value is None else [value[0], cells_of(value[1])]
+
+        return dict(self._run(self._controller.restore_membership_state(
+            epoch=epoch, incomplete=cells(incomplete), last_op=cells(last_op),
+            expected_current_epoch=expected_current_epoch,
+        )))
 
 
 def _release(data_pack: Any) -> None:
