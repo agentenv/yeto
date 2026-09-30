@@ -10,3 +10,12 @@
 - **其余不变**：plan-v5 的配置（C1/C2 fixed-partition，C1 H100!×2、C2 H100!×3，C3 H100!×3）、运行顺序、确定性要求、dropout 0.05、费用表与执行规则（`--modal-retries 0` 即不 relaunch；进度看门狗；B2 累计接近 $40 时停下）。
 - **yeto 侧防御**：`MilesCutBackend.export_optimizer` 包在 `side_effect_free_state` 中，只删除本次读取新建的空 state 条目，从不吞异常。fork 修复后，如果出现键不匹配之类的报错，照常向上抛出并判 RECOVERY_REQUIRED（CPU 测试 `test_side_effect_free_state_never_swallows_errors`、`test_a_fixed_fork_setter_error_reaches_restore_cut`）。
 - **运行前检查**：用新 pin 重跑本地 dry-run（22 项）和镜像内 T4 learner preflight（c1/c2/c3-rb），全部通过后才启动 C1。
+
+## 判据实现更正（运行前，主 agent 裁定，2026-09-30）
+- **判据文字不变**："训练状态 == cut"，即 G-4.3 arm A 训练前、以及 G-4.3(1) 恢复后第 3 步前两处。
+- **原实现**：比较每个 rank 的 `state_digest`。自 f898516 起，它包含 Miles 发布计数 `miles_counters.weight_version`。
+- **更正后的实现**：比较 `train_state_digest`（adapter、优化器命名状态、scheduler、Megatron 计数，**不含**发布计数）与 RNG 摘要。
+- **理由**：发布计数不是训练状态。fixed-partition 下两个 arm 在训练前都按设计重新发布一次（arm A 直接发布，arm B 经 `driver.rebuild_trainer`），计数必然 +1；原实现会让这两处在训练状态完全一致时也判不等。
+- **新增更严的独立判据**：`weight_version == cut + 重新发布次数`，两个 arm 各一条（fixed-partition 为 +1，共置为 +0）。计数缺失时，只有两边都缺失才判通过。
+- `restore_cut` 自身的恢复后自检不变：恢复刚完成、尚未重新发布时，仍比较包含计数的完整 `state_digest`。
+- C1 第 2 次（`gpu-c1-v6-attempt2/`）的结果不追认任何判据；全部判据在重跑中重新得出。
