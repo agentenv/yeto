@@ -245,8 +245,13 @@ class MilesTrainerGroup:
                     getattr(getattr(self._spec, "loss", None), "policy_loss_variant", None)
                     in CLIPFRAC_LOSS_VARIANTS
                 )
+                # Drain the per-step loss records every successful round, even
+                # when no mechanism consumes them: otherwise they accumulate
+                # without bound and a later save_cut refuses the cut as "not
+                # drained" (integ-s2 review finding 1).
+                step_losses = self._step_losses()
                 if estimator in CLIPFRAC_MASKED_ESTIMATORS or corrections or clipfrac_variant:
-                    self.last_step_losses = self._step_losses()
+                    self.last_step_losses = step_losses
                     round_metrics = mean_step_metrics(self.last_step_losses)
                     if self.last_masked_fraction is None and corrections:
                         self.last_masked_fraction = correction_masked_fraction(
