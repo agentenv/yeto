@@ -142,9 +142,16 @@ MILES_DECLARED: dict[str, str] = {
 # --policy-loss-variant policy_loss the loss path calls the same
 # compute_policy_loss with the same arguments, need_full_log_probs is
 # unchanged, and the new flags only add parser entries/validation.
+# 2f23a0fc = 5c1b49eb + F-R1, same basis: `git diff --stat 5c1b49eb..2f23a0fc
+# -- miles` touches only miles/ray/{placement_group,rollout/inference_controller,
+# specs/inference}.py, miles/utils/workers/* and the --yeto-placement-map help
+# text in arguments.py -- no loss_hub/backends file; without rollout_cells /
+# deferred cells the startup path starts the same cells (evidence
+# openspec/changes/rl-infra-spec/evidence/2026-09-30-img-2f23a0f).
 _PINS_0AF62F4D_PLUS = frozenset({
     "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
     "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
+    "2f23a0fca9b80f6a7300da401703c343014b03c0",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
