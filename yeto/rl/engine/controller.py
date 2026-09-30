@@ -995,6 +995,8 @@ class IslandController:
                 self._record("weight_admission", tx_id=tx.tx_id, members=sorted(added),
                              policy_token=cut["policy_token"],
                              manifest_hash=result.manifest.target_manifest_hash)
+                self._emit_member_publication(driver, tx, result, token_rollout,
+                                              phase=VERIFYING)
             else:
                 self._phase(tx, VERIFYING)
             self._check_deadline(tx, "verify")
@@ -1214,6 +1216,32 @@ class IslandController:
                 return False
             self._sleep(self.timeouts.retry_interval)
 
+    def _emit_member_publication(self, driver: Any, tx: _Tx, result: Any, rollout_id: Any, *,
+                                 phase: str) -> None:
+        """Tape record of a member-scoped publication (3.4a/3.5 ``publish_members``):
+        the already-published policy loaded into ``members`` (new or restarted
+        engines) at a reconfiguration, so the engines serving the next generation
+        are auditable on the tape before the next full ``rl_publication``."""
+        emit = getattr(driver, "emit", None)
+        if not callable(emit):
+            return
+        manifest = result.manifest
+        serving = sorted(frozenset(self._pool.members()) | frozenset(result.members))
+        emit(
+            "rl_member_publication",
+            policy_version=rollout_id,
+            tx_id=tx.tx_id,
+            phase=phase,
+            **{
+                "rl/policy_token": getattr(driver, "expected_token", None),
+                "sync/publication_payload_bytes": manifest.payload_bytes,
+                "sync/publication_payload_hash": manifest.payload_hash,
+                "sync/publication_manifest_hash": manifest.target_manifest_hash,
+                "sync/publication_members": sorted(result.members),
+                "sync/serving_members": serving,
+            },
+        )
+
     def _rebuild_old(self, tx: _Tx, driver: Any, old_members: frozenset[str], error: str) -> str:
         """E1 failure path (D5): restore the old engine count and republish the same policy."""
         pool = self._pool
@@ -1237,6 +1265,8 @@ class IslandController:
                     token_rollout_id=driver.published_version)
                 if frozenset(result.members) != missing:
                     raise TransactionFailed(REBUILD_OLD, "old engines did not acknowledge")
+                self._emit_member_publication(driver, tx, result, driver.published_version,
+                                              phase=REBUILD_OLD)
             still = tx.removed & frozenset(pool.members())
             if still:
                 pool.undrain(still)

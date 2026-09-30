@@ -645,3 +645,7 @@
 - C3-rebuild 补跑（e2z）：磁带侧判据与首跑一致；manifest 和 journal 仍未拉回（整包分块拉取过慢）。工具已改为只拉小文件（214ba19）。
 - G-4.5 第 5 行重跑（e2z，f707dc3）：仍阻塞。实时游标读不到，CutSource 拒绝写 cut（CANCELLED）。原因：executor 是 RayWorkerHandle 包装，E1 的 `_is_ray_handle` 没有解包 `_actor_handle`。
 - B2 累计 ≤ $45.70。所有 app stopped/0，无残留进程。
+- A4 Nebius 发现两项（不上卡）：
+  1. E1-A (c) 的审计缺口（a30fa5f）：扩容事务确实经 `Publisher.publish_members`（3.4a/3.5 的成员限定发布）把当前已发布的 policy（v2）装进新 cell，之前只在 journal 里记 `weight_admission`，磁带上没有。现在每次 `publish_members`（VERIFYING，以及 REBUILD_OLD 重启旧 cell）都会向磁带写一条 `rl_member_publication`：policy_version、token、payload/manifest 哈希、这次接收的成员 `sync/publication_members`、发布后的在役集合 `sync/serving_members`。它在下一轮 generate 之前出现，因此"第 3 轮生成所用的 v2 发布成员 = 4"可以在磁带上审计。判据文字不改；E1-A 需重跑后才能判 (c)。E3 trainer 边里的 `publish_members` 在 E3 文件中，这次未改。
+  2. E1-B 注入无效：用 base 模型快照重载新 engine 不改变 LoRA 适配器，而校验只覆盖 LoRA 权重。现改为 `--rl-test-inject-lora-perturb EPS`（取代并删除 `--rl-test-inject-weight-override`）：本进程第一次成员限定的 update_weights 把 trainer 的 LoRA 适配器临时加 EPS，发给新 engine 后立即精确恢复 trainer（恢复后核对 policy hash）。新 engine 因此持有不同的 LoRA 权重，check_weights 读回必然与发布参照不同，新 engine 不会被放行，事务走 REBUILD_OLD。CPU 测试覆盖：注入后校验失败、trainer 恢复、只注入一次；不注入时同一流程正常放行；`lora_perturber` 恢复前后 policy hash 一致。`evidence/infra-e1/plan.md` E1-B 的注入方法描述随之变更，判据不变。
+  - 全量：68F/3176P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b12.ids`）。
