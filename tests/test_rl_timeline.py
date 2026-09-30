@@ -34,3 +34,28 @@ def test_tool_wait_is_not_gpu_saturation():
     assert classify_load(LoadSample(20, 8, 0, 0, 8)) == "rollout-saturated"
     assert classify_load(LoadSample(0, 2, 0, 3, 8)) == "long-tail"
     assert classify_load(LoadSample(0, 0, 0, 3, 8)) == "rollout-idle"
+
+
+def test_transition_cost_distribution_and_predeclared_bottleneck_rule():
+    from yeto.rl.engine.timeline import (
+        MIN_SAMPLES_PER_EDGE,
+        select_bottleneck,
+        transition_cost_distribution,
+    )
+
+    rows = [("T4R2S2", "T4R4S0", {"drain": 2.0, "init": 10.0 + i, "publish": 3.0,
+                                  "background_restore": 50.0})
+            for i in range(MIN_SAMPLES_PER_EDGE)]
+    rows += [("T4R4S0", "T4R2S2", {"drain": 8.0, "init": 1.0, "publish": 1.0})
+             for _ in range(MIN_SAMPLES_PER_EDGE)]
+    dist = transition_cost_distribution(rows)
+    fwd = dist[("T4R2S2", "T4R4S0")]
+    assert fwd["n"] == 3 and fwd["phases"]["init"]["p50"] == 11.0
+    assert fwd["phases"]["blocking_total"]["max"] == 17.0  # background not billed as blocking
+    choice = select_bottleneck(dist)
+    # init share: (11/16 + 1/10)/2 = 0.39; drain: (2/16 + 8/10)/2 = 0.46
+    assert choice["status"] == "selected" and choice["phase"] == "drain"
+    assert select_bottleneck(transition_cost_distribution(rows[:2]))["status"] == "insufficient"
+    assert select_bottleneck({})["status"] == "insufficient"
+    with pytest.raises(ValueError, match="unknown"):
+        transition_cost_distribution([("a", "b", {"magic": 1.0})])

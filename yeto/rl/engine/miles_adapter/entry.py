@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -224,7 +225,9 @@ def with_partitioned_serial(capabilities: EngineCapabilities) -> EngineCapabilit
     return dataclasses.replace(
         capabilities,
         placements=capabilities.placements | {"fixed-partition"},
-        execution_modes=capabilities.execution_modes | {"partitioned-serial"},
+        # partitioned-overlap = eval||train/outer_sync only (2.3, overlap.py).
+        execution_modes=capabilities.execution_modes
+        | {"partitioned-serial", "partitioned-overlap"},
         partitioned_driver=True,
     )
 
@@ -268,7 +271,8 @@ def execution_profile_for(
     """The run's :class:`ExecutionProfile`, bound to the EXTERNAL algorithm hash.
 
     colocated placement -> ``colocated-serial``; fixed partition ->
-    ``partitioned-serial`` (no overlap is certified, task 2.3). The profile is
+    ``partitioned-serial``, or ``partitioned-overlap`` (eval||train/outer_sync
+    only, task 2.3) when ``yeto_rl_overlap_eval`` is set. The profile is
     bound to ``expected_sha256`` (launcher-provided); :func:`preflight` then
     compares it with the runtime ``AlgorithmSpec``. Without an external hash a
     partitioned run is refused; a colocated (R0) run binds to the runtime spec
@@ -276,7 +280,20 @@ def execution_profile_for(
     """
     from ..execution_profile import ExecutionProfile, ProfileError
 
+    from ..overlap import IMPLEMENTED_OVERLAP
+
     mode = "colocated-serial" if launch.placement.kind == "colocated" else "partitioned-serial"
+    overlap = frozenset()
+    if getattr(miles_args, "yeto_rl_overlap_eval", False):
+        if mode == "colocated-serial":
+            raise ProfileError("eval overlap (2.3) needs a fixed-partition placement")
+        if getattr(miles_args, "eval_uses_snapshots", False):
+            # Miles would fire the eval and return; its end could then cross the
+            # next publication, which the 2.3 join guard cannot see.
+            raise ProfileError("eval overlap (2.3) is refused with --eval-uses-snapshots")
+        if not getattr(miles_args, "eval_interval", None):
+            raise ProfileError("eval overlap (2.3) needs --eval-interval")
+        mode, overlap = "partitioned-overlap", IMPLEMENTED_OVERLAP
     if expected_sha256 is None:
         if mode != "colocated-serial":
             raise ProfileError(
@@ -293,6 +310,7 @@ def execution_profile_for(
         groups_per_batch=int(miles_args.rollout_batch_size),
         samples_per_group=int(miles_args.n_samples_per_prompt),
         optimizer_steps_per_round=int(getattr(miles_args, "num_steps_per_rollout", 1) or 1),
+        allowed_overlap=overlap,
         algorithm_spec_sha256=expected_sha256,
         extra={"algorithm_hash_source": source},
     )
@@ -360,8 +378,17 @@ def compose_island(
     placement: Any = None,
     profile: Any = None,
     observe: bool = False,
+    elastic: Any = None,
+    evaluate_start: Callable[[int], Any] | None = None,
 ):
-    """Wire the adapter ports into an ``IslandDriver`` (no upstream imports)."""
+    """Wire the adapter ports into an ``IslandDriver`` (no upstream imports).
+
+    ``elastic`` (:class:`.elastic_wiring.ElasticWiring`, rl-infra-spec 3.x):
+    declared rollout cells for the E1 membership verbs, the reconfiguration
+    controller and the batch ledger. The controller reconciles the fork's
+    membership epoch with its journal before the driver runs. None keeps the
+    island unchanged.
+    """
 
     from yeto.rl.core import parse_policy_snapshot_token
 
@@ -396,6 +423,13 @@ def compose_island(
             expected_policy=expected_policy,
             runner=runner,
             args=miles_args,
+            **(
+                {"declared_cells": elastic.declared_cells,
+                 "track_timeout_s": elastic.track_timeout_s,
+                 "tool_wait_board": elastic.tool_wait_board}
+                if elastic is not None
+                else {}
+            ),
         ),
         trainer=MilesTrainerGroup(
             args=miles_args,
@@ -432,7 +466,29 @@ def compose_island(
         eval_interval=eval_interval,
         profile=profile,
         observe=observe,
+        **(
+            {"controller": elastic.controller, "ledger": elastic.ledger}
+            if elastic is not None
+            else {}
+        ),
+        **({"evaluate_start": evaluate_start} if evaluate_start is not None else {}),
     )
+    if elastic is not None:
+        from .elastic_placement import ElasticPlacement
+
+        driver.placement = ElasticPlacement(
+            driver.placement, pool_gpus=elastic.pool_gpus,
+            epoch=elastic.controller.journal.epochs.config_epoch,
+        )
+        epochs = elastic.controller.journal.epochs
+        driver.config_epoch = epochs.config_epoch
+        if epochs.config_epoch > 0:
+            # restart after a commit: the journal's config is authoritative
+            committed = elastic.controller.configs[epochs.config_id].placement or {}
+            if committed.get("rollout"):
+                driver.placement.restore_committed(tuple(committed["rollout"]),
+                                                   epoch=epochs.config_epoch)
+        elastic.controller.open(driver.rollout)
     holder["driver"] = driver
     return driver
 
@@ -526,6 +582,8 @@ def run_ports_island(
     from .state import require_run_plugin
 
     require_run_plugin()  # before any upstream component or model exists
+    from ..overlap import loop_eval_starter
+
     capabilities = with_partitioned_serial(
         miles_capabilities(
             runtime_fingerprint(launch, MILES_NEXT_COMMIT),
@@ -607,6 +665,11 @@ def run_ports_island(
             eval_interval=getattr(miles_args, "eval_interval", None),
             profile=profile,
             observe=bool(getattr(miles_args, "yeto_rl_observe_timeline", False)),
+            evaluate_start=(
+                loop_eval_starter(runner, evaluate, time.monotonic)
+                if profile.execution_mode == "partitioned-overlap"
+                else None
+            ),
         )
         return driver.run()
     except BaseException as exc:
