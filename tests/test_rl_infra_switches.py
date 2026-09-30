@@ -335,3 +335,66 @@ def test_launcher_refuses_an_eval_file_over_the_inline_cap(tmp_path):
     assert launcher.EVAL_INLINE_MAX_BYTES == 96 * 1024
     with pytest.raises(ValueError, match="larger than"):
         launcher._check_ports_infra_switches(_cli(_eval_flags(heldout)), "ports")
+
+
+# ---------------------------------------------------------------- test-only start delay (A5)
+def test_start_delay_injection_is_off_by_default_and_exported_when_given(tmp_path, monkeypatch):
+    from yeto.rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
+
+    args = _cli()
+    assert args.rl_test_inject_start_delay_s is None
+    _prepare_rl_args(args)
+    assert INJECT_START_DELAY_ENV not in _island_task(args, monkeypatch).run
+    resources, _ = _elastic_files(tmp_path)
+    args = _cli(("--rl-placement", "fixed-partition", "--rl-elastic",
+                 "--rl-elastic-resources", resources, "--rl-elastic-initial-config", "c0",
+                 "--rl-elastic-cells", "a", "--rl-test-inject-start-delay-s", "150"))
+    launcher._check_ports_infra_switches(args, "ports")
+    prelude, _ = launcher._ports_infra_flags(args)
+    assert f"export {INJECT_START_DELAY_ENV}=150.0\n" in prelude
+    with pytest.raises(ValueError, match="need --rl-elastic"):
+        launcher._check_ports_infra_switches(_cli(("--rl-test-inject-start-delay-s", "150")), "ports")
+    with pytest.raises(ValueError, match="positive"):
+        launcher._check_ports_infra_switches(_cli(("--rl-test-inject-start-delay-s", "0")), "ports")
+
+
+def test_pool_sleeps_once_before_the_first_start_cells(monkeypatch):
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.rollout import (
+        INJECT_START_DELAY_ENV,
+        MilesRolloutPool,
+        injected_start_delay,
+    )
+
+    calls = []
+
+    class Controller:
+        async def start_cells(self, cells, expected_epoch):
+            calls.append(("start", tuple(cells)))
+
+        async def wait_cells_tracked(self, cells, timeout_seconds):
+            calls.append(("tracked", tuple(cells)))
+
+    def pool():
+        return MilesRolloutPool(inference_controller=Controller(), rollout_executor=None,
+                                metadata=None, expected_policy=lambda: (0, "h"),
+                                runner=SimpleNamespace(run=asyncio.run),
+                                declared_cells=("c0", "c1", "c2"))
+
+    monkeypatch.delenv(INJECT_START_DELAY_ENV, raising=False)
+    plain = pool()
+    plain._sleep = lambda s: calls.append(("sleep", s))
+    plain.add_engines(1, epoch=0, members=frozenset({"engine:c1"}))
+    assert calls == [("start", ("c1",)), ("tracked", ("c1",))]  # default: no sleep
+    calls.clear()
+    monkeypatch.setenv(INJECT_START_DELAY_ENV, "150")
+    injected = pool()
+    injected._sleep = lambda s: calls.append(("sleep", s))
+    injected.add_engines(1, epoch=0, members=frozenset({"engine:c1"}))
+    injected.add_engines(1, epoch=1, members=frozenset({"engine:c2"}))
+    assert calls == [("sleep", 150.0), ("start", ("c1",)), ("tracked", ("c1",)),
+                     ("start", ("c2",)), ("tracked", ("c2",))]  # once, before the first start
+    assert injected.injected_start_delays == [150.0]
+    with pytest.raises(ValueError, match="positive"):
+        injected_start_delay({INJECT_START_DELAY_ENV: "-1"})
