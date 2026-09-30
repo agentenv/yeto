@@ -266,6 +266,17 @@ def _resume_if_exists(checkpoint: str) -> str:
     return f"$(test -f {checkpoint} && echo --resume)"
 
 
+def _syncer_quorum_timeout(args) -> str:
+    """``--rl-elastic-quorum-timeout-s`` (3.8): the syncer's --quorum-timeout-s,
+    the same value the island's pause budget uses; "" by default (syncer 900 s)."""
+    value = getattr(args, "rl_elastic_quorum_timeout_s", None)
+    if value is None or not getattr(args, "rl_elastic", False):
+        return ""
+    if float(value) != int(value):
+        raise ValueError("--rl-elastic-quorum-timeout-s must be whole seconds (syncer u64)")
+    return f" --quorum-timeout-s {int(value)}"
+
+
 def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
@@ -285,6 +296,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
             f" --sync-interval-steps {args.sync_interval_steps}"
             f" --delta-correction {args.delta_correction}"
             f" --total-steps {total_steps}"
+            f"{_syncer_quorum_timeout(args)}"
             f" --outer-lr {args.outer_lr}"
             f" --outer-momentum {args.outer_momentum}"
             " --max-base-lag 0 --learner-weight equal"
@@ -925,7 +937,69 @@ _ELASTIC_LAUNCH_FLAGS = (
     ("rl_elastic_initial_config", "--rl-elastic-initial-config"),
     ("rl_elastic_cells", "--rl-elastic-cells"),
 )
+# 3.8 strict pause budget: forwarded to the learner; the quorum timeout also
+# goes to the syncer so both sides use the same value.
+_ELASTIC_PAUSE_FLAGS = (
+    ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
+    ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
+    ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
+)
 ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
+_EVAL_LAUNCH_FLAGS = (
+    ("rl_eval_data", "--rl-eval-data"),
+    ("rl_eval_dataset_name", "--rl-eval-dataset-name"),
+    ("rl_eval_samples_per_prompt", "--rl-eval-samples-per-prompt"),
+)
+EVAL_ISLAND_DATA_PATH = "~/yeto-rl/eval-heldout.jsonl"
+EVAL_INLINE_MAX_BYTES = 96 * 1024  # shipped inline in the run command (ARG_MAX headroom)
+
+
+def _check_ports_eval(args, rl_engine: str) -> int | None:
+    """``--rl-eval-*``: the launcher's ONE eval source (ports LoRA heldout eval).
+
+    Returns the eval interval (None when eval is off) — the same value the
+    learner receives as ``--eval-interval`` — and stages the heldout bytes and
+    their SHA256 on ``args`` for :func:`_ports_infra_flags`.
+    """
+
+    interval = getattr(args, "rl_eval_interval", None)
+    given = [flag for name, flag in _EVAL_LAUNCH_FLAGS if getattr(args, name, None) is not None]
+    args.rl_eval_data_text = None
+    if interval is None:
+        if given:
+            raise ValueError(", ".join(given) + " need --rl-eval-interval")
+        return None
+    if rl_engine != "ports":
+        raise ValueError("--rl-eval-interval only applies to --rl-engine ports")
+    if type(interval) is not int or interval <= 0:
+        raise ValueError(f"--rl-eval-interval must be a positive int (got {interval!r})")
+    missing = [flag for name, flag in _EVAL_LAUNCH_FLAGS if getattr(args, name, None) is None]
+    if missing:
+        raise ValueError("--rl-eval-interval needs " + ", ".join(missing))
+    samples = args.rl_eval_samples_per_prompt
+    if type(samples) is not int or samples <= 0:
+        raise ValueError("--rl-eval-samples-per-prompt must be a positive int")
+    source = Path(args.rl_eval_data).expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("--rl-eval-data must be one regular local file")
+    data = getattr(args, "data", None)
+    if isinstance(data, str) and Path(data).expanduser().exists() and (
+        Path(data).expanduser().resolve() == source.resolve()
+    ):
+        raise ValueError("--rl-eval-data must be a heldout file distinct from --data")
+    raw = source.read_bytes()
+    if len(raw) > EVAL_INLINE_MAX_BYTES:
+        raise ValueError(f"--rl-eval-data is larger than {EVAL_INLINE_MAX_BYTES} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise ValueError("--rl-eval-data is not UTF-8") from error
+    rows = [line for line in text.splitlines() if line.strip()]
+    if not rows or len(rows) != len(text.splitlines()):
+        raise ValueError("--rl-eval-data must be non-empty JSONL without blank rows")
+    args.rl_eval_data_text = text
+    args.rl_eval_data_sha256 = hashlib.sha256(raw).hexdigest()
+    return interval
 
 
 def _check_ports_infra_switches(args, rl_engine: str) -> None:
@@ -934,18 +1008,27 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
 
     from .rl.engine.execution_profile import check_elastic_placement, check_overlap_eval
 
+    from .rl.engine.execution_profile import UNKNOWN
+
     placement = getattr(args, "rl_placement", "colocated") or "colocated"
+    eval_interval = _check_ports_eval(args, rl_engine)
     if getattr(args, "rl_overlap_eval", False):
         if rl_engine != "ports":
             raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
         # Same check the island's execution profile applies, run before any
-        # resource is provisioned, on the values the launcher really has:
-        # --rl-placement is forwarded verbatim to the learner (the island's
-        # launch.placement.kind). The launcher has no eval configuration (no
-        # --eval-interval / --eval-uses-snapshots, no run-config file, no Miles
-        # argv passthrough), so those two are left to the island's check.
-        check_overlap_eval(placement_kind=placement)
-    given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS if getattr(args, name, None)]
+        # resource is provisioned, on the values the launcher really forwards:
+        # --rl-placement is the island's launch.placement.kind and
+        # --rl-eval-interval is the learner's --eval-interval (-> Miles
+        # eval_interval). --eval-uses-snapshots has no launcher source (the
+        # learner never sets it), so that one stays with the island's check.
+        check_overlap_eval(placement_kind=placement, eval_interval=eval_interval,
+                           eval_uses_snapshots=UNKNOWN)
+    given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
+             if getattr(args, name, None) is not None]
+    for name, flag in _ELASTIC_PAUSE_FLAGS:
+        value = getattr(args, name, None)
+        if value is not None and not value > 0:
+            raise ValueError(f"{flag} must be positive")
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -982,6 +1065,18 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     """(prelude, learner flags) for the opt-in 2.3/3.x switches; ("", "") by default."""
 
     prelude, flags = "", ""
+    if getattr(args, "rl_eval_interval", None) is not None:
+        prelude += (
+            "mkdir -p ~/yeto-rl && printf '%s' "
+            f"{shlex.quote(args.rl_eval_data_text)} > {EVAL_ISLAND_DATA_PATH}\n"
+        )
+        flags += (
+            f" --eval-interval {int(args.rl_eval_interval)}"
+            f" --eval-data {EVAL_ISLAND_DATA_PATH}"
+            f" --eval-data-sha256 {args.rl_eval_data_sha256}"
+            f" --eval-dataset-name {shlex.quote(args.rl_eval_dataset_name)}"
+            f" --eval-samples-per-prompt {int(args.rl_eval_samples_per_prompt)}"
+        )
     if getattr(args, "rl_overlap_eval", False):
         flags += " --rl-overlap-eval"
     if getattr(args, "rl_elastic", False):
@@ -995,6 +1090,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             f" --rl-elastic-initial-config {shlex.quote(args.rl_elastic_initial_config)}"
             f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
         )
+        for name, flag in _ELASTIC_PAUSE_FLAGS:
+            value = getattr(args, name, None)
+            if value is not None:
+                flags += f" {flag} {value!r}"
         if getattr(args, "rl_elastic_attestation_json", None):
             prelude += (
                 "printf '%s' "

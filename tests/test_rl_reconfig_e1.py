@@ -232,7 +232,7 @@ class _StaticPlacement:
 
 
 def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, inbox=False,
-           driver_kw=None):
+           driver_kw=None, sync_factory=None, outer="none", learner_id=0):
     engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, step_delta=1.0,
                         placement_kind="fixed-partition")
     fork = ForkMembership(engine, declared=[f"engine:c{i}" for i in range(4)],
@@ -247,7 +247,7 @@ def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, in
     clock = {"t": 1000.0}
     ctl = IslandController(
         state_dir=tmp_path / "state", configs=configs, attestation=_attestation(),
-        profile=_profile(), initial_config="T4R2S2", runtime_fingerprint=FP,
+        profile=_profile(outer=outer), initial_config="T4R2S2", runtime_fingerprint=FP,
         wall_clock=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
         inbox=CommandInbox(tmp_path / "state" / "inbox") if inbox else None,
         **(controller_kw or {}),
@@ -263,11 +263,14 @@ def _setup(tmp_path, *, rounds=4, load=None, ledger=True, controller_kw=None, in
 
     engine.trainer.train_step = train_step
     driver = IslandDriver(
-        learner_id=0, rollout=pool, trainer=engine.trainer, policy_state=engine.policy_state,
-        publisher=publisher, placement=ElasticFakePlacement(),
+        learner_id=learner_id, rollout=pool, trainer=engine.trainer,
+        policy_state=engine.policy_state, publisher=publisher, placement=ElasticFakePlacement(),
         algorithm=AlgorithmSpec(),
-        sync=LocalOnlySync(rounds), events=EventTape(tmp_path / "events.jsonl", 0),
-        **{"capabilities": fake_capabilities(execution_modes=MODES), "profile": _profile(), "controller": ctl, "ledger": led, **(driver_kw or {})},
+        sync=sync_factory(engine) if sync_factory else LocalOnlySync(rounds),
+        events=EventTape(tmp_path / "events.jsonl", learner_id),
+        **{"capabilities": fake_capabilities(execution_modes=MODES),
+           "profile": _profile(outer=outer), "controller": ctl, "ledger": led,
+           **(driver_kw or {})},
     )
     return driver, ctl, fork, pool, publisher, trained, clock
 
@@ -911,3 +914,164 @@ def test_build_elastic_and_journal_expand_user_paths(tmp_path, monkeypatch):
     assert read_journal("~/st/reconfig") == read_journal(tmp_path / "st" / "reconfig")
     assert read_epochs("~/st/reconfig") == read_epochs(tmp_path / "st" / "reconfig")
     assert not (tmp_path / "~").exists()
+
+
+class _FakeRay:
+    """ray.get/ray.kill over plain values (the manager's methods are sync fakes)."""
+
+    def __init__(self, on_kill):
+        self.on_kill = on_kill
+        self.killed = []
+
+    def get(self, value, timeout=None):
+        return value
+
+    def kill(self, handle, no_restart=False):
+        self.killed.append((handle, no_restart))
+        self.on_kill(handle)
+
+
+class _Remote:
+    def __init__(self, fn):
+        self.remote = fn
+
+
+class _FakeManager:
+    def __init__(self):
+        from types import SimpleNamespace
+
+        self.infos = {c: [SimpleNamespace(name=f"{c}/w0", generation=3)]
+                      for c in ("engine:c2", "engine:c3")}
+        self.get_worker_infos = _Remote(lambda cell: self.infos[cell])
+        self.get_actor_handle = _Remote(
+            lambda name, expected_generation: f"handle:{name}@{expected_generation}")
+
+
+def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    gate, dead = threading.Event(), []
+    fake_ray = _FakeRay(lambda handle: (dead.append(handle), gate.set()))
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=_FakeManager(), ray_module=fake_ray))
+    slow = publisher.publish_members
+
+    def publish_members(*a, **k):
+        gate.wait(5)  # blocked on the new engines until they are killed
+        if dead:
+            raise RuntimeError("engine actor died")
+        return slow(*a, **k)
+
+    publisher.publish_members = publish_members
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.2)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    started = __import__("time").monotonic()
+    driver.run()
+    assert __import__("time").monotonic() - started < 4  # not the 5 s gate: the kill unblocked it
+    assert ctl.status("r")["phase"] == REBUILT_OLD
+    assert sorted(h for h, _ in fake_ray.killed) == ["handle:engine:c2/w0@3", "handle:engine:c3/w0@3"]
+    assert all(no_restart for _, no_restart in fake_ray.killed)
+    records = read_journal(tmp_path / "state/reconfig")
+    action = next(r for r in records if r["kind"] == "watchdog_action")
+    assert [k["cell"] for k in action["killed"]] == ["engine:c2", "engine:c3"]
+    assert next(r for r in records if r["kind"] == "watchdog")["target_cells"] == [
+        "engine:c2", "engine:c3"]
+    # old members were never touched
+    assert set(driver.rollout.members()) == {"engine:c0", "engine:c1"}
+
+
+def test_watchdog_outside_start_verify_kills_nothing(tmp_path):
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, *_ = _setup(tmp_path)
+    fake_ray = _FakeRay(lambda h: None)
+    handler = kill_target_generation(ctl, manager=_FakeManager(), ray_module=fake_ray)
+    handler("tx-none", "QUIESCING")
+    assert fake_ray.killed == []
+    action = [r for r in read_journal(tmp_path / "state/reconfig") if r["kind"] == "watchdog_action"]
+    assert action and action[0]["killed"] == []
+
+
+def test_build_elastic_wires_the_default_watchdog_action(tmp_path):
+    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+
+    res = tmp_path / "res.json"
+    res.write_text(json.dumps({"configs": {"T4R2S2": {"trainer": 4, "rollout": 2, "standby": 2}},
+                               "edges": []}))
+    kw = dict(resources=res, attestation=None, profile=_profile(), initial_config="T4R2S2",
+              runtime_fingerprint=FP, declared_cells=("c0",))
+    w = build_elastic(state_dir=tmp_path / "a", **kw)
+    assert w.controller._on_watchdog is not None
+    w.controller.close()
+    off = build_elastic(state_dir=tmp_path / "b", on_watchdog=None, **kw)
+    assert off.controller._on_watchdog is None
+    off.controller.close()
+    with pytest.raises(ValueError, match="unknown watchdog action"):
+        build_elastic(state_dir=tmp_path / "c", on_watchdog="nope", **kw)
+
+
+def test_watchdog_firing_after_the_last_verify_prevents_the_commit(tmp_path):
+    """Review F2: the deadline passes after the last _check_deadline but before
+    the CAS (a slow verify_serving_policy); the new cells may have been killed,
+    so the transaction must not commit."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    fake_ray = _FakeRay(lambda handle: None)
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=_FakeManager(), ray_module=fake_ray))
+    fired = ctl._watchdog_fired
+
+    def verify_serving_policy(**_):
+        assert fired.wait(5)  # returns normally, but only after the watchdog fired
+
+    publisher.verify_serving_policy = verify_serving_policy
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.3)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    driver.run()
+    assert ctl.status("r")["phase"] == REBUILT_OLD
+    assert "watchdog fired before the commit point" in (ctl.status("r")["error"] or "")
+    assert read_epochs(tmp_path / "state/reconfig").config_epoch == 0
+    assert set(driver.rollout.members()) == {"engine:c0", "engine:c1"}
+
+
+def test_watchdog_after_the_commit_point_kills_nothing(tmp_path):
+    driver, ctl, *_ = _setup(tmp_path)
+    killed = []
+    ctl.set_on_watchdog(lambda tx, phase: killed.append(phase))
+    ctl._wall = __import__("time").time
+    orig_cas = ctl.journal.compare_and_swap
+
+    def slow_cas(**kw):
+        out = orig_cas(**kw)
+        if kw["new"].config_epoch == 1:
+            __import__("time").sleep(0.6)  # the deadline passes right after the commit
+        return out
+
+    ctl.journal.compare_and_swap = slow_cas
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.3)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    driver.run()
+    assert ctl.status("r")["phase"] == SUCCEEDED and killed == []
+    notes = [r.get("note", "") for r in read_journal(tmp_path / "state/reconfig")
+             if r["kind"] == "watchdog"]
+    assert notes and "after the commit point" in notes[0]

@@ -157,6 +157,10 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
     parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
     parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
+    # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
+    parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
+    parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
+    parser.add_argument("--rl-elastic-pause-margin", type=float, default=None)
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -274,7 +278,12 @@ _ELASTIC_COMPANIONS = (
     ("rl_elastic_state_dir", "--rl-elastic-state-dir"),
     ("rl_elastic_initial_config", "--rl-elastic-initial-config"),
     ("rl_elastic_cells", "--rl-elastic-cells"),
+    ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
+    ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
+    ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
 )
+_ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s",
+                  "rl_elastic_pause_margin")
 _ELASTIC_REQUIRED = ("rl_elastic_resources", "rl_elastic_state_dir",
                      "rl_elastic_initial_config", "rl_elastic_cells")
 
@@ -285,7 +294,7 @@ def _check_ports_infra_switches(args) -> None:
     ports = getattr(args, "rl_engine", "ports") == "ports"
     if getattr(args, "rl_overlap_eval", False) and not ports:
         raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
-    given = [flag for name, flag in _ELASTIC_COMPANIONS if getattr(args, name, None)]
+    given = [flag for name, flag in _ELASTIC_COMPANIONS if getattr(args, name, None) is not None]
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -298,6 +307,10 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-elastic needs " + ", ".join(missing))
     if not _elastic_cells(args.rl_elastic_cells):
         raise ValueError("--rl-elastic-cells names no cell")
+    for name in _ELASTIC_PAUSE:
+        value = getattr(args, name, None)
+        if value is not None and not value > 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive")
 
 
 def _elastic_cells(value: str | None) -> tuple[str, ...]:
@@ -319,6 +332,9 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         "initial_config": args.rl_elastic_initial_config,
         "declared_cells": _elastic_cells(args.rl_elastic_cells),
     }
+    for name in _ELASTIC_PAUSE:
+        if getattr(args, name, None) is not None:
+            miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))
     # M1: rollout metadata carries data_cursor/buffer_length only when asked.
     # The attribute covers the driver process; the env var reaches Ray workers
     # (where the metadata hook runs) through connect_island_ray's job-level
@@ -1672,21 +1688,29 @@ def _verify_eval_dataset_identity(args) -> Path | None:
         and getattr(args, "parameter_mode", None) == "full"
         and getattr(args, "sync_preset", None) == "dense-full"
     )
-    if not eval_only and not dense_train_eval:
+    from .engine.run_config import ports_training_eval
+
+    ports_train_eval = ports_training_eval(
+        args, parameter_mode=getattr(args, "parameter_mode", None)
+    )
+    if not eval_only and not dense_train_eval and not ports_train_eval:
         raise ValueError(
-            "evaluation configuration requires --eval-only or dense full mode"
+            "evaluation configuration requires --eval-only, dense full mode "
+            "or the ports LoRA engine"
         )
     expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise ValueError("evaluation dataset requires an immutable SHA256")
     source_value = args.data if eval_only else getattr(args, "eval_data", None)
     if not isinstance(source_value, str) or not source_value:
-        raise ValueError("dense full evaluation requires --eval-data")
+        raise ValueError("training-time evaluation requires --eval-data")
     source = Path(source_value).expanduser()
     if source.is_symlink() or not source.is_file():
         raise ValueError("evaluation requires one regular local dataset file")
-    if dense_train_eval and source.resolve() == Path(args.data).expanduser().resolve():
-        raise ValueError("dense full evaluation must use a distinct heldout dataset")
+    if (dense_train_eval or ports_train_eval) and (
+        source.resolve() == Path(args.data).expanduser().resolve()
+    ):
+        raise ValueError("training-time evaluation must use a distinct heldout dataset")
     from ..provenance import file_sha256
 
     actual = file_sha256(source)

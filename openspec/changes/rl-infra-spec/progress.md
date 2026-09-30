@@ -347,3 +347,49 @@
 - 复用不重跑：A1（1.2 已勾）、A3（2.4 合法否定结论）、2.1/2.2/2.3 X9 guard 已有 GPU 证据。
 - 待用户确认：A4 4 卡代替原文 8 卡（实质改变验收）；A2+（L-1.7）；可选 Nebius；未分配 $25 的动用授权。
 - 状态：仅规划；未启动任何资源，费用 $0；无 task 勾选变化。4.8：未完成（用户决定暂缓）。
+
+## 2026-09-30（Agent INFRA-E1 第二轮：launcher eval 接线、3.8、4.4、H2；分支 `infra-e1`）
+
+### 分支与状态
+- worktree `/home/michael/work/infra-e1`，基于 integ-decl 65ca03b。提交：f79e016（launcher eval）、533afdc（3.8）、d397cf3（4.4）、2b67145（H2 watchdog）、4d8ec81（计划与 tasks 进展），以及本条目所在的提交。已普通推送 `origin infra-e1`。未启动任何 GPU 或云资源，费用 $0。
+
+### task 状态（五选一）
+- launcher eval 接线（非 task，A2/L-2.3 前置）：**已实现 + CPU 通过**。
+- 3.8：**已实现 + CPU 通过，未勾选**（X6 需两岛 GPU；依赖 3.7、2.4 未勾选）。
+- 4.4：**已实现 + CPU 通过，未勾选**（依赖 4.3；需 GPU A6b）。
+- 3.7（H2）：**已实现 + CPU 通过，未勾选**。默认 watchdog 会杀掉目标 generation；限制仍在，见 tasks 3.7。
+- 4.5：未完成（新增两条 CPU 覆盖）。
+
+### 关键改动
+- launcher 新增 `--rl-eval-interval/-data/-dataset-name/-samples-per-prompt`，转发为 learner 的 `--eval-*`。heldout 文件内联进运行命令（≤1 MiB），岛上按 SHA256 校验。learner 的 `_verify_eval_dataset_identity` 与 `run_config._resolve_eval` 共用 `ports_training_eval()`：ports LoRA 允许训练期 heldout eval（必须是与 `--data` 不同的文件），legacy LoRA 仍然拒绝。launcher 本地的 overlap 检查改用它实际转发的同一个 interval。**此前的真实缺口**：不止 launcher，直接启动的 learner 在 ports LoRA 上带 `--eval-interval` 也会被 `_resolve_eval` 拒绝（"restricted to dense full mode"），所以 2.3 的 overlap eval 以前在任何入口都起不来。
+- 3.8：`SyncSession.outer_phase`（strict、decoupled）；`IslandController.run_at_safe_point(..., outer_phase=)` 重新做 pause 决定并写入 journal；`enter_finalization`；暂停预算的输入沿 launcher → learner → build_elastic 传递，同时传给 syncer 的 `--quorum-timeout-s`。
+- 4.4：`IslandController.request_trainer_rebuild`、`REBUILDING_TRAINER`、`RebuildRefused`；`miles_adapter/rebuild_wiring.py`；driver 新增 `local_step`；`entry._wire_trainer_rebuild`。
+- H2：`elastic_wiring.kill_target_generation`（默认启用，`on_watchdog=None` 可关闭）；controller 的 journal 追加加了线程锁。
+
+### 写入范围说明
+- 本轮改了 `yeto/cli.py`（launch 新参数）、`yeto/rl/learner.py`（eval 身份校验与 elastic 暂停参数）、`yeto/rl/engine/run_config.py`（`_resolve_eval` 的 ports 分支）、`bridges.py`（`outer_phase`）。这些都属于 launcher/learner 的 INFRA 接线，没有其他写入者，在此声明。trainer.py、state_plugin.py 未改，没有交给 E3 的补丁。
+
+### 测试
+- 全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`：68 failed / 2937 passed / 49 skipped / 26 errors。失败与错误的 id 按第二列去重共 94 个，与 `/tmp/integ-s2-base.ids` 完全相同，没有新增（`/tmp/infra-e1-r2.ids`）。
+- 新增和修改的测试：`tests/test_rl_infra_switches.py`（eval 与暂停参数，+9）、`tests/test_rl_reconfig_x6.py`（10）、`tests/test_rl_trainer_rebuild_e1.py`（10）、`tests/test_rl_reconfig_e1.py`（watchdog，+3）。
+- `openspec validate rl-infra-spec --strict`：valid。
+- fake 只证明协议，不作为 3.8、4.4、3.7 的验收证据。
+
+### GPU 计划
+- `evidence/infra-e1/plan-3.8-4.4.md`：A5（X6-a..e）、A6b（4.4）、§3 watchdog。判据在运行前固定。X6-b 与 §3 需要的故障注入点**尚未实现**，执行前须先补上并提交。
+
+### 已知限制与阻塞
+- 4.4：`MilesRolloutPool.data_cursor()` 返回缓存值，不在 rollout 进程内实时读取；重建前后的游标比对因此检查不到 `rollout_executor.load` 的回卷。
+- 3.7：阻塞在旧成员集上的调用仍不受截止时间约束；fork health monitor 对被杀 cell 的行为未知。
+- head 两跳（fleet head 模式）下，`--rl-eval-data` 与 `--rl-elastic-resources` 一样，只内联到岛的运行命令，没有另行处理 head 上的暂存。
+- 待批准：无新增。
+
+### INFRA-E1 第二轮审查修复（2026-09-30，结论"需修复"）
+- F1：新执行说明 `evidence/infra-e1/plan-3.8-4.4-v2.md`，以集成分支 `gpu-plan-v2.md` §2–§3 为唯一判据来源，只补充开关、前置条件、E1 观测点与已知限制。v1 `plan-3.8-4.4.md` 保留，并标注"已被取代"。删去了两条不可达的判据："最终 policy hash 等于 B0"与"syncer base 等于 B0"。A6b 的 `progress.local_step` 写成确定值 3。需要主 agent 知悉、gpu-plan-v2 可能需要补充的两点：(a) A5 quorum 用例要让 150 s 延迟通过 pause 审计，必须带 `--rl-elastic-pause-margin 2.0`，deadline 设 230 s，否则请求会在 plan 阶段被拒；(b) "start_cells 前注入 150 s"的注入点尚未实现，执行前须先补上并提交。
+- F2（5946ffd）：watchdog 的判定与终止、`tx.phase` 变更、commit CAS 前的复查共用一把锁。watchdog 已触发时，事务走 REBUILD_OLD；提交开始后，watchdog 不再终止任何 cell。新增 2 个测试。
+- F3（e477bcb）：driver 新增 `RebuildNotStarted`（无发布、不在安全点、cut hash 不符），rebuilder 在写 cut 之前检查 `rebuild_preconditions(miles_args)`，这两类拒绝都判 CANCELLED。前提不满足时 entry 不接线 rebuilder，请求在 plan 阶段即被拒。新增 3 个测试。
+- F4：已写入 v2 §4 第 4 条（被杀 cell 所在 bundle 的 GPU 上 `nvidia-smi --query-compute-apps` 为空）。tasks 4.4、4.5 已写明 `REBUILDING_TRAINER` 阶段不受 deadline 强制终止的限制。
+- F5：v2 §3 第 3 条：重建后下一轮的 `trained_sample_ids_sha256` 与数据游标须与 B1 相等。
+- F6（500555a）：内联 eval 数据上限改为 96 KiB，并加测试。
+- 全量：68 failed / 2943 passed / 49 skipped / 26 errors，失败 id 共 94 个，与 `/tmp/integ-s2-base.ids` 相同（`/tmp/infra-e1-r2b.ids`）。validate strict 通过。
+- E3 吸收工作暂停在本地分支 `infra-e1-e3wip`（430f49f，未推送，未完成）。

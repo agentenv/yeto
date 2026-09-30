@@ -34,6 +34,7 @@ from yeto.rl.core import (
     policy_tensor_hash,
 )
 
+from .pause_audit import PAUSABLE_PHASE
 from .driver import IslandDriver, SyncBoundary, SyncStart
 from .trainable_state import TrainableState
 
@@ -236,6 +237,19 @@ class StrictAvgSync:
 
     def published(self, driver, *, rollout_id, policy_hash) -> None:
         pass
+
+    def outer_phase(self, driver, *, rollout_id: int) -> str:
+        """3.8: pausable only while the next PULL permit is held and the syncer
+        has not started finalizing (pause_audit.md: strict row)."""
+        client = getattr(self.bridge, "client", None)
+        finalizing = getattr(client, "finalizing", None)
+        if finalizing is not None and finalizing.is_set():
+            return "finalizing"
+        if self.current is None:
+            return "in-boundary"
+        if self.permit is None:
+            return "stop-round"
+        return PAUSABLE_PHASE
 
     def finish(self, driver) -> None:
         if self.bridge is None or self.current is None:
@@ -448,6 +462,13 @@ class DecoupledSync:
             stats=stats,
             final_payload_bytes_received=self.bridge.final_payload_bytes_received,
         )
+
+    def outer_phase(self, driver, *, rollout_id: int) -> str:
+        # Decoupled is not pause-certified (pause_audit); report finalization
+        # anyway so the veto reason is the precise one.
+        if self.bridge is not None and self.bridge.finalizing:
+            return "finalizing"
+        return PAUSABLE_PHASE
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         # Decoupled: final once the syncer's final cut is known (finalizing),
