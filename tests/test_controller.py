@@ -317,3 +317,43 @@ def test_non_fixed_roster_abandon_keeps_the_fleet_running():
     ctl = make_controller(ops, {"l0": 1, "l1": 2}, recover_timeout=0)
     codes = ctl.run()  # SFT: no exception, l0 abandoned, l1 finishes
     assert ctl.learners["l0"]["state"] == "abandoned" and codes["l1"] == "JobStatus.SUCCEEDED"
+
+
+# ---------------------------------------------------------------- no launcher relaunch
+def _parsed(extra):
+    from yeto.cli import parse_args as parse_cli
+
+    return parse_cli(["--gpu", "modal:1xh100", "--model", "org/model", "--data", "org/data",
+                      "--training-mode", "rl", "--total-steps", "3", "--rollout-batch-size", "4",
+                      "--n-samples-per-prompt", "2", "--rollout-max-response-len", "128",
+                      "--local-rl-rounds-per-sync", "1", "--reward-function", "pkg.reward:score",
+                      *extra])
+
+
+def test_modal_retries_zero_or_no_island_relaunch_disables_the_launcher_relaunch():
+    from yeto.launcher import effective_recover_timeout
+
+    assert effective_recover_timeout(_parsed(())) == 1200  # default unchanged
+    assert effective_recover_timeout(_parsed(("--modal-retries", "3"))) == 1200
+    assert effective_recover_timeout(_parsed(("--modal-retries", "0"))) == 0
+    assert effective_recover_timeout(_parsed(("--no-island-relaunch",))) == 0
+    assert effective_recover_timeout(_parsed(("--recover-timeout", "60"))) == 60
+    # the controller built with that budget never relaunches a failed island
+    ops = FakeOps()
+    ops.status_seq["l0"] = [RUNNING, FAILED]
+    ops.relaunch_results["l0"] = [101]
+    ctl = make_controller(ops, {"l0": 1},
+                          recover_timeout=effective_recover_timeout(_parsed(("--modal-retries", "0"))))
+    try:
+        ctl.run()
+    except RuntimeError:
+        pass  # all learners gone
+    assert ops.relaunch_calls == [] and "l0" in ops.down_calls
+
+
+def test_launch_uses_the_effective_budget():
+    import inspect
+
+    from yeto import launcher
+
+    assert "recover_timeout=effective_recover_timeout(args)" in inspect.getsource(launcher)

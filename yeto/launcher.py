@@ -3696,6 +3696,20 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     return confirmed
 
 
+def effective_recover_timeout(args) -> float:
+    """The fleet controller's learner relaunch budget.
+
+    ``--no-island-relaunch`` or ``--modal-retries 0`` (a learner exit is final,
+    e.g. acceptance runs) -> 0: a failed island is torn down, never relaunched
+    by the launcher, so no second paid container can start before the app
+    stops. Otherwise ``--recover-timeout`` unchanged (all clouds share this
+    loop: sky islands relaunch through the same FleetController).
+    """
+    if getattr(args, "no_island_relaunch", False) or getattr(args, "modal_retries", None) == 0:
+        return 0
+    return args.recover_timeout
+
+
 class FleetController:
     """Supervises the syncer + learner fleet after the initial launch.
 
@@ -4486,7 +4500,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
             sky_ops=RoutingOps(SkySDKOps(), modal_island_ops),
             poll_interval=args.controller_poll,
-            recover_timeout=args.recover_timeout,
+            recover_timeout=effective_recover_timeout(args),
             on_relaunch=spawn_tail,
             syncer_probe=local_syncer.probe if head_mode else None,
             syncer_restart=local_syncer.restart if head_mode else None,
