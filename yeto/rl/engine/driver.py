@@ -943,6 +943,10 @@ class IslandDriver:
             submitted_groups=getattr(batch, "submitted_groups", None),
             aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
+            # rl-infra-spec 4.4/A6b: the rollout data cursor after this batch (only
+            # when the rollout reports it, i.e. --rl-elastic metadata; else absent)
+            **({"data_cursor": dict(batch.data_cursor)}
+               if getattr(batch, "data_cursor", None) else {}),
         )
         self.local_step += (
             int(self.profile.optimizer_steps_per_round) if self.profile is not None else 1

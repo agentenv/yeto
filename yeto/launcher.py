@@ -949,6 +949,38 @@ _ELASTIC_PAUSE_FLAGS = (
 _ELASTIC_TEST_FLAGS = (
     ("rl_test_inject_start_delay_s", "--rl-test-inject-start-delay-s"),
     ("rl_test_inject_update_weights_block_s", "--rl-test-inject-update-weights-block-s"),
+    ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures"),
+    ("rl_elastic_restart_attempts", "--rl-elastic-restart-attempts"),
+)
+# (attr, flag, env) of the test-only switches exported into the island run
+# command; each needs --rl-elastic, all are off by default.
+_ELASTIC_TEST_EXPORTS = (
+    ("rl_test_inject_weight_override", "--rl-test-inject-weight-override",
+     "YETO_RL_TEST_INJECT_WEIGHT_OVERRIDE_PATH"),
+    ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures",
+     "YETO_RL_TEST_INJECT_STOP_FAILURES"),
+    ("rl_test_kill_learner_at", "--rl-test-kill-learner-at", "YETO_RL_TEST_KILL_LEARNER_AT"),
+    ("rl_test_inject_rebuild_fail", "--rl-test-inject-rebuild-fail",
+     "YETO_RL_TEST_INJECT_REBUILD_FAIL"),
+)
+KILL_PHASES = ("QUIESCING", "TRANSFERRING", "INITIALIZING", "VERIFYING", "COMMITTED",
+               "RESUMING", "REBUILDING_TRAINER")
+# In-place learner restarts (E1-D ⑤⑥⑦): the learner command runs in a loop that
+# re-executes it with the same arguments (same --rl-elastic-state-dir) after a
+# non-zero exit, at most N times. The Ray head stays up; the old driver's job
+# (fork controller, engines, trainer) dies with it, so the fork restarts at
+# membership epoch 0 and the journal reconciles it.
+RESTART_LOOP_FN = (
+    "yeto_rl_restart_loop() {\n"
+    "  local attempt=0 rc=0\n"
+    "  while :; do\n"
+    "    \"$@\" && return 0\n"
+    "    rc=$?\n"
+    "    attempt=$((attempt + 1))\n"
+    "    if [ \"$attempt\" -gt \"$YETO_RL_RESTART_ATTEMPTS\" ]; then return $rc; fi\n"
+    "    echo \"[yeto] learner exited $rc; in-place restart $attempt/$YETO_RL_RESTART_ATTEMPTS\" >&2\n"
+    "  done\n"
+    "}\n"
 )
 ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
 _EVAL_LAUNCH_FLAGS = (
@@ -1027,6 +1059,7 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     from .rl.engine.execution_profile import UNKNOWN
 
     placement = getattr(args, "rl_placement", "colocated") or "colocated"
+    _check_test_tool_delay(args, rl_engine)
     eval_interval = _check_ports_eval(args, rl_engine)
     if getattr(args, "rl_overlap_eval", False):
         if rl_engine != "ports":
@@ -1041,15 +1074,28 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                            eval_uses_snapshots=UNKNOWN)
     if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
+        raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
              if getattr(args, name, None) is not None]
     if getattr(args, "rl_elastic_tool_wait_board", False):
         given.append("--rl-elastic-tool-wait-board")
+    if getattr(args, "rl_elastic_declare_cells", False):
+        given.append("--rl-elastic-declare-cells")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
             raise ValueError(f"{flag} must be positive")
     given += [flag for name, flag in _ELASTIC_TEST_FLAGS if getattr(args, name, None) is not None]
+    given += [flag for name, flag, _ in _ELASTIC_TEST_EXPORTS
+              if getattr(args, name, None) not in (None, False) and flag not in given]
+    if getattr(args, "rl_elastic_state_dir", None) is not None:
+        given.append("--rl-elastic-state-dir")
+    kill_at = getattr(args, "rl_test_kill_learner_at", None)
+    if kill_at is not None and kill_at not in KILL_PHASES:
+        raise ValueError(f"--rl-test-kill-learner-at must be one of {list(KILL_PHASES)}")
+    if kill_at is not None and not getattr(args, "rl_elastic_restart_attempts", None):
+        raise ValueError("--rl-test-kill-learner-at needs --rl-elastic-restart-attempts")
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -1057,13 +1103,17 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     if rl_engine != "ports":
         raise ValueError("--rl-elastic only applies to --rl-engine ports")
     missing = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS
-               if name != "rl_elastic_attestation" and not getattr(args, name, None)]
+               if name not in ("rl_elastic_attestation", "rl_elastic_cells")
+               and not getattr(args, name, None)]
     if missing:
         raise ValueError("--rl-elastic needs " + ", ".join(missing))
     check_elastic_placement(placement)
-    cells = [c.strip() for c in args.rl_elastic_cells.split(",") if c.strip()]
-    if not cells or any(not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", c) for c in cells):
-        raise ValueError(f"--rl-elastic-cells: bad cell ids {args.rl_elastic_cells!r}")
+    if args.rl_elastic_cells is not None:
+        cells = [c.strip() for c in args.rl_elastic_cells.split(",") if c.strip()]
+        if not cells or any(not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", c) for c in cells):
+            raise ValueError(f"--rl-elastic-cells: bad cell ids {args.rl_elastic_cells!r}")
+    if getattr(args, "rl_elastic_declare_cells", False) and args.rl_elastic_cells is None:
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
     from .rl.elastic_benchmark.capabilities import load_attestation, parse_configs
 
     resources = json.loads(Path(args.rl_elastic_resources).expanduser().read_text(encoding="utf-8"))
@@ -1082,10 +1132,29 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         )
 
 
+def _check_test_tool_delay(args, rl_engine: str) -> None:
+    """``--rl-test-tool-delay-s`` (TEST ONLY): the tool-wait workload's delay."""
+    from .rl.tool_wait_workload import GENERATE_PATH
+
+    delay = getattr(args, "rl_test_tool_delay_s", None)
+    if delay is None:
+        return
+    if rl_engine != "ports":
+        raise ValueError("--rl-test-tool-delay-s only applies to --rl-engine ports")
+    if not delay > 0:
+        raise ValueError("--rl-test-tool-delay-s must be positive")
+    if getattr(args, "custom_generate_function_path", None) != GENERATE_PATH:
+        raise ValueError(f"--rl-test-tool-delay-s needs --custom-generate-function-path {GENERATE_PATH}")
+
+
 def _ports_infra_flags(args) -> tuple[str, str]:
     """(prelude, learner flags) for the opt-in 2.3/3.x switches; ("", "") by default."""
 
     prelude, flags = "", ""
+    if getattr(args, "rl_test_tool_delay_s", None) is not None:
+        from .rl.tool_wait_workload import TOOL_DELAY_ENV
+
+        prelude += f"export {TOOL_DELAY_ENV}={float(args.rl_test_tool_delay_s)!r}\n"
     if getattr(args, "rl_eval_interval", None) is not None:
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -1106,17 +1175,24 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-overlap-eval"
     if getattr(args, "rl_observe_timeline", False):
         flags += " --rl-observe-timeline"
+    if getattr(args, "rl_deterministic_trainer", False):
+        flags += " --rl-deterministic-trainer"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
             f"{shlex.quote(args.rl_elastic_resources_json)} > ~/yeto-rl/elastic_resources.json\n"
         )
+        state_dir = (shlex.quote(args.rl_elastic_state_dir)
+                     if getattr(args, "rl_elastic_state_dir", None) else ELASTIC_ISLAND_STATE_DIR)
         flags += (
             " --rl-elastic --rl-elastic-resources ~/yeto-rl/elastic_resources.json"
-            f" --rl-elastic-state-dir {ELASTIC_ISLAND_STATE_DIR}"
+            f" --rl-elastic-state-dir {state_dir}"
             f" --rl-elastic-initial-config {shlex.quote(args.rl_elastic_initial_config)}"
-            f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
         )
+        if args.rl_elastic_cells is not None:
+            flags += f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
+        if getattr(args, "rl_elastic_declare_cells", False):
+            flags += " --rl-elastic-declare-cells"
         if getattr(args, "rl_elastic_tool_wait_board", False):
             flags += " --rl-elastic-tool-wait-board"
         for name, flag in _ELASTIC_PAUSE_FLAGS:
@@ -1128,6 +1204,16 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             from .rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
 
             prelude += f"export {INJECT_START_DELAY_ENV}={float(delay)!r}\n"
+        for name, _flag, env in _ELASTIC_TEST_EXPORTS:
+            value = getattr(args, name, None)
+            if value is True:
+                value = 1
+            if value not in (None, False):
+                prelude += f"export {env}={shlex.quote(str(value))}\n"
+        attempts = getattr(args, "rl_elastic_restart_attempts", None)
+        if attempts:
+            prelude += f"export YETO_RL_RESTART_ATTEMPTS={int(attempts)}\n" + RESTART_LOOP_FN
+            args.rl_learner_launch_prefix = "yeto_rl_restart_loop "
         block = getattr(args, "rl_test_inject_update_weights_block_s", None)
         if block is not None:
             from .rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV
@@ -2348,7 +2434,7 @@ def make_miles_island_task(
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir"
             "${PYTHONPATH:+:$PYTHONPATH} "
-            f"python3 -m yeto.rl.learner{flags}\n"
+            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}\n"
             "else\n"
             '  until ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"; '
             "do sleep 2; done\n"

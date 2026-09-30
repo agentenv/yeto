@@ -104,3 +104,305 @@ def test_defaults_set_neither_observe_nor_board(tmp_path, monkeypatch):
     monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
     entry.elastic_wiring_for(miles_args, profile="P", fingerprint="F")
     assert "tool_wait_board" not in seen
+
+
+# ---------------------------------------------------------------- item 1: fork cells (F-R1 prep)
+def test_declared_cells_travel_from_the_cli_to_the_fork_rollout_cells(tmp_path, monkeypatch):
+    import argparse
+    import json
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    elastic = _elastic(tmp_path)[:-2] + ("--rl-elastic-cells", "r0,r1,r2",
+                                         "--rl-elastic-declare-cells")
+    run = island_run(("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
+                      "--gpu", "aws:3xa100@us-east-1", "--rl-standby-gpus", "1") + elastic,
+                     monkeypatch)
+    args, _ = learner_from_run(run, tmp_path / "home")
+    assert args.rl_elastic_declare_cells and args.rl_elastic_cells == "r0,r1,r2"
+    (base,), kwargs = _captured_args()
+    merged = argparse.Namespace(**{**vars(base), "rl_placement": "fixed-partition",
+                                   "rollout_num_gpus": 1, "rl_standby_gpus": 1,
+                                   "rl_elastic_declare_cells": True,
+                                   "rl_elastic_cells": args.rl_elastic_cells})
+    argv = mc.translate_run_config(rc.resolve_rl_run_config(merged, **kwargs), AlgorithmSpec()).argv
+    pm = json.loads(argv[argv.index("--yeto-placement-map") + 1])
+    # the FR1 interface: {"rollout_cells": [{"name", "bundles", "start"}]}; nothing else extra
+    assert set(pm) == {"trainer", "rollout", "standby", "rollout_cells"}
+    assert pm["rollout_cells"] == [
+        {"name": "r0", "bundles": pm["rollout"], "start": True},
+        {"name": "r1", "bundles": pm["standby"], "start": False},
+        {"name": "r2", "bundles": [], "start": False},
+    ]
+
+
+def test_default_run_declares_no_cells_and_keeps_the_placement_map(tmp_path, monkeypatch):
+    import argparse
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    args, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "h")
+    assert not args.rl_elastic_declare_cells
+    (base,), kwargs = _captured_args()
+    part = argparse.Namespace(**{**vars(base), "rl_placement": "fixed-partition",
+                                 "rollout_num_gpus": 1})
+    before = mc.translate_run_config(rc.resolve_rl_run_config(part, **kwargs), AlgorithmSpec()).argv
+    part.rl_elastic_cells = "a"  # names alone (no declare) change nothing
+    after = mc.translate_run_config(rc.resolve_rl_run_config(part, **kwargs), AlgorithmSpec()).argv
+    assert before == after and "--yeto-placement-map" not in after
+
+
+def test_declared_cells_resolve_yeto_names_through_the_fork_alias():
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    from yeto.rl.engine.miles_adapter.entry import resolve_declared_cells
+
+    runner = SimpleNamespace(run=asyncio.run)
+    cells = {"inference-engine-all-0-0-00000": {"alias": "r0"},
+             "inference-engine-all-0-0-00001": {"alias": "r1"}}
+
+    class Fork:
+        async def describe_cells(self):
+            return cells
+
+    assert resolve_declared_cells(Fork(), runner) == tuple(sorted(cells))
+    assert resolve_declared_cells(Fork(), runner, ("r1", "r0")) == (
+        "inference-engine-all-0-0-00001", "inference-engine-all-0-0-00000")
+    assert resolve_declared_cells(Fork(), runner, ("inference-engine-all-0-0-00001",)) == (
+        "inference-engine-all-0-0-00001",)
+    with pytest.raises(ValueError, match=r"\['c0'\] are not cells the fork declares"):
+        resolve_declared_cells(Fork(), runner, ("c0",))
+    with pytest.raises(ValueError, match="--rl-elastic-cells is required"):
+        resolve_declared_cells(object(), runner, ())
+    assert resolve_declared_cells(object(), runner, ("x",)) == ("x",)
+
+
+def test_declare_cells_needs_names(tmp_path):
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    res = tmp_path / "r.json"
+    res.write_text('{"configs": {"c0": {"trainer": 1, "rollout": 1}}, "edges": []}')
+    with pytest.raises(ValueError, match="needs --rl-elastic-cells"):
+        launcher._check_ports_infra_switches(_cli((
+            "--rl-placement", "fixed-partition", "--rl-elastic", "--rl-elastic-resources", str(res),
+            "--rl-elastic-initial-config", "c0", "--rl-elastic-declare-cells")), "ports")
+
+
+# ---------------------------------------------------------------- item 4: tool-wait workload
+TOOL = ("--custom-generate-function-path", "yeto.rl.tool_wait_workload.generate",
+        "--rl-test-tool-delay-s", "30")
+
+
+def test_tool_workload_reaches_the_learner_and_every_ray_worker(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.tool_wait_workload import TOOL_DELAY_ENV, tool_delay_s
+
+    run = island_run(BASE + TOOL, monkeypatch)
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert args.custom_generate_function_path == "yeto.rl.tool_wait_workload.generate"
+    assert env[TOOL_DELAY_ENV] == "30.0" and tool_delay_s(env) == 30.0
+    seen = {}
+    ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
+    connect_island_ray(environ={"RAY_ADDRESS": "10.0.0.1:6379", **env}, ray_module=ray)
+    assert seen["runtime_env"]["env_vars"][TOOL_DELAY_ENV] == "30.0"
+
+
+def test_tool_delay_needs_the_workload_generate(tmp_path, monkeypatch):
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    with pytest.raises(ValueError, match="needs --custom-generate-function-path"):
+        launcher._check_ports_infra_switches(_cli(("--rl-test-tool-delay-s", "30")), "ports")
+    run = island_run(BASE, monkeypatch)
+    assert "YETO_RL_TEST_TOOL_DELAY_S" not in run
+
+
+def test_tool_call_is_counted_on_the_board_and_in_non_generation_time():
+    import asyncio
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.tool_wait import ToolWaitBoard, read_tool_wait
+    from yeto.rl.tool_wait_workload import tool_call
+
+    board = ToolWaitBoard()
+    sample = SimpleNamespace(group_index=3, index=1, non_generation_time=0.5)
+    during = []
+
+    async def sleep(seconds):
+        during.append((seconds, read_tool_wait(board).in_flight))
+
+    clock = iter([10.0, 40.0])
+    waited = asyncio.run(tool_call(sample, delay=30.0, board=board, sleep=sleep,
+                                   clock=lambda: next(clock)))
+    assert during == [(30.0, 1)] and waited == 30.0
+    assert read_tool_wait(board).in_flight == 0 and sample.non_generation_time == 30.5
+
+
+def test_workload_generate_delays_train_samples_only(monkeypatch):
+    import asyncio
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    from yeto.rl import tool_wait_workload as w
+
+    calls = []
+
+    async def stock(args, sample, params, evaluation=False):
+        calls.append(("gen", evaluation))
+        return sample
+
+    monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout",
+                        types.SimpleNamespace(generate=stock))
+    monkeypatch.setitem(sys.modules, "miles.rollout.base_types",
+                        types.SimpleNamespace(GenerateFnOutput=lambda samples: ("out", samples)))
+
+    async def fake_call(sample, *, delay, board):
+        calls.append(("tool", delay))
+
+    monkeypatch.setattr(w, "tool_call", fake_call)
+    monkeypatch.setattr(w, "_board", lambda lid: "B")
+    monkeypatch.setenv(w.TOOL_DELAY_ENV, "5")
+    inp = SimpleNamespace(args=SimpleNamespace(yeto_rl_learner_id=0), sample="S",
+                          sampling_params={}, evaluation=False)
+    assert asyncio.run(w.generate(inp)) == ("out", "S")
+    inp.evaluation = True
+    asyncio.run(w.generate(inp))
+    assert calls == [("tool", 5.0), ("gen", False), ("gen", True)]
+
+
+# ---------------------------------------------------------------- items 5/6: injections, restart
+def test_injection_and_restart_switches_reach_the_island(tmp_path, monkeypatch):
+    run = island_run(BASE + _elastic(tmp_path) + (
+        "--rl-elastic-state-dir", "/vol/elastic", "--rl-elastic-restart-attempts", "2",
+        "--rl-test-inject-weight-override", "/vol/other-ckpt",
+        "--rl-test-inject-stop-failures", "1", "--rl-test-kill-learner-at", "COMMITTED"),
+        monkeypatch)
+    assert "yeto_rl_restart_loop python3 -m yeto.rl.learner" in run
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert args.rl_elastic_state_dir == "/vol/elastic"
+    assert env["YETO_RL_TEST_INJECT_WEIGHT_OVERRIDE_PATH"] == "/vol/other-ckpt"
+    assert env["YETO_RL_TEST_INJECT_STOP_FAILURES"] == "1"
+    assert env["YETO_RL_TEST_KILL_LEARNER_AT"] == "COMMITTED"
+    assert env["YETO_RL_RESTART_ATTEMPTS"] == "2"
+
+
+def test_default_run_has_no_injection_and_no_restart_loop(tmp_path, monkeypatch):
+    run = island_run(BASE + _elastic(tmp_path), monkeypatch)
+    assert "yeto_rl_restart_loop" not in run and "YETO_RL_TEST_" not in run
+    args, _ = learner_from_run(run, tmp_path / "home")
+    assert args.rl_elastic_state_dir == "~/yeto-rl/elastic-state" or args.rl_elastic_state_dir.endswith(
+        "yeto-rl/elastic-state")
+
+
+def test_restart_loop_reruns_the_same_command_until_success(tmp_path):
+    import subprocess
+
+    from yeto.launcher import RESTART_LOOP_FN
+
+    counter = tmp_path / "n"
+    script = (RESTART_LOOP_FN + f"yeto_rl_restart_loop bash -c 'echo x >> {counter}; "
+              f"[ $(wc -l < {counter}) -ge 3 ]'\n")
+    ok = subprocess.run(["bash", "-c", script], env={"PATH": "/usr/bin:/bin",
+                                                    "YETO_RL_RESTART_ATTEMPTS": "2"})
+    assert ok.returncode == 0 and counter.read_text().count("x") == 3
+    counter.unlink()
+    capped = subprocess.run(["bash", "-c", script], env={"PATH": "/usr/bin:/bin",
+                                                        "YETO_RL_RESTART_ATTEMPTS": "1"})
+    assert capped.returncode != 0 and counter.read_text().count("x") == 2
+
+
+def test_injection_switches_are_refused_without_elastic_or_restart():
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    for extra in (("--rl-test-inject-stop-failures", "1"), ("--rl-elastic-state-dir", "/v"),
+                  ("--rl-test-inject-weight-override", "/c")):
+        with pytest.raises(ValueError, match="need --rl-elastic"):
+            launcher._check_ports_infra_switches(_cli(extra), "ports")
+    with pytest.raises(ValueError, match="needs --rl-elastic-restart-attempts"):
+        launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "COMMITTED")),
+                                             "ports")
+    with pytest.raises(ValueError, match="must be one of"):
+        launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "NOPE")), "ports")
+
+
+# ---------------------------------------------------------------- item 7: A5 as two 3-GPU islands
+def test_a5_three_plus_three_islands_launch_with_standby_and_elastic(tmp_path, monkeypatch):
+    run = island_run(("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
+                      "--rl-standby-gpus", "1",
+                      "--gpu", "aws:3xa100@us-east-1,aws:3xa100@us-west-2")
+                     + _elastic(tmp_path)[:-2]
+                     + ("--rl-elastic-cells", "r0,r1", "--rl-elastic-declare-cells",
+                        "--rl-elastic-quorum-timeout-s", "120", "--rl-elastic-pause-margin", "2.0",
+                        "--rl-test-inject-start-delay-s", "150"), monkeypatch)
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert (args.actor_num_gpus_per_node, args.rollout_num_gpus, args.rl_standby_gpus) == (1, 1, 1)
+    assert args.rl_elastic and args.rl_elastic_declare_cells and args.rl_elastic_cells == "r0,r1"
+    assert (args.rl_elastic_quorum_timeout_s, args.rl_elastic_pause_margin) == (120.0, 2.0)
+    assert env["YETO_RL_TEST_INJECT_START_DELAY_S"] == "150.0"
+
+
+# ---------------------------------------------------------------- item 10: determinism
+def test_deterministic_trainer_reaches_miles_argv_env_and_ray_workers(tmp_path, monkeypatch):
+    import argparse
+    from types import SimpleNamespace
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl import learner
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.engine.miles_adapter.entry import DETERMINISM_ENV, connect_island_ray
+
+    args, _ = learner_from_run(island_run(BASE + ("--rl-deterministic-trainer",), monkeypatch),
+                               tmp_path / "home")
+    assert args.rl_deterministic_trainer
+    environ = {}
+    learner.apply_ports_infra_switches(args, SimpleNamespace(), environ)
+    assert environ == DETERMINISM_ENV
+    (base,), kwargs = _captured_args()
+    merged = argparse.Namespace(**{**vars(base), "rl_deterministic_trainer": True})
+    argv = mc.translate_run_config(rc.resolve_rl_run_config(merged, **kwargs), AlgorithmSpec()).argv
+    assert "--deterministic-mode" in argv
+    seen = {}
+    ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
+    connect_island_ray(environ={"RAY_ADDRESS": "1.2.3.4:6379", **environ}, ray_module=ray)
+    for key, value in DETERMINISM_ENV.items():
+        assert seen["runtime_env"]["env_vars"][key] == value
+
+
+def test_determinism_is_off_by_default(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl import learner
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    args, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "home")
+    environ = {}
+    learner.apply_ports_infra_switches(args, SimpleNamespace(), environ)
+    assert environ == {}
+    (base,), kwargs = _captured_args()
+    assert "--deterministic-mode" not in mc.translate_run_config(
+        rc.resolve_rl_run_config(base, **kwargs), AlgorithmSpec()).argv

@@ -457,6 +457,36 @@
 - L3：**F-R1 未解决前不得认证 role-transfer 的 trainer→rollout 边**（plan v2 §6）。启动期的 bind 能力检查不可行（fork 没有可读接口），也未实现。
 - pool_gpus 入口：按主 agent 安排，等 F-R1 在 fork 实现后再做。
 
+### INFRA-E1：第 1 批 GPU 冒烟发现的集成缺口（2026-09-30；已合并 integ-decl f6938d9）
+每项都有端到端测试：真实 `yeto launch` CLI 生成岛运行命令 → 临时 HOME 下执行岛上的 prelude → 真实 `learner.parse_args` 解析。测试辅助在 `tests/rl_e2e_launch.py`，用例在 `tests/test_rl_launch_e2e_b1.py`、`tests/test_rl_e1_injections.py`。
+1. **7c6cd90，经本条后续提交改正（F-R1 的 yeto 侧准备）**：按主 agent 裁定，以 FR1 的 `rollout_cells` 为唯一接口，`--rl-elastic-deferred-cells`/`deferred_rollout_cells` **已作废删除**。
+   - 新开关 `--rl-elastic-declare-cells`：把 `--rl-elastic-cells` 的 yeto 名字写进 `--yeto-placement-map` 的 `"rollout_cells": [{name, bundles, start}]`。
+   - 布局按名字顺序：先在 rollout 角色的连续 bundle 上声明启动的 cell，再在 standby 上声明停止但已绑定的 cell，其余为停止且未绑定（`bundles=[]`）。
+   - fork 保留自己的 cell id，并在 `describe_cells` 中报告 `alias`。组装时 `resolve_declared_cells` 按 alias 把 yeto 名字映射成 fork cell id，此后 E1 动词与 journal 使用 fork cell id；未知名字一律拒绝。
+   - 不带该开关时行为不变（旧 fork 可用，名字即 fork cell id）。
+   - pool_gpus 入口等 F-R1 合入后再接。
+2. **601d0f1**：新增 `--rl-eval-temperature/-top-p/-max-prompt-len/-max-response-len/-max-context-len`，转发为 learner 的 `--eval-*`。A2 贪心 eval 用 `--rl-eval-temperature 0`。
+3. **6838fe9**：新增 `--rl-observe-timeline`，经 `miles_args.yeto_rl_observe_timeline` 传到 entry 的 observe。新增 `--rl-elastic-tool-wait-board`，弹性接线用岛上具名的 ToolWaitBoard actor，在 Ray 连上之后才创建。
+4. **b90c18d**：测试负载 `yeto.rl.tool_wait_workload.generate`，经 Miles 支持的 `--custom-generate-function-path` 接入，配合 `--rl-test-tool-delay-s S`。每条训练轨迹先在 board 上登记一次假工具等待，时长计入 `non_generation_time`；环境变量由 `connect_island_ray` 转发到所有 Ray worker。A2+ 用这组参数；A4b 另加 `--rl-elastic-tool-wait-board`。
+5. **fea44cc**：注入开关，均仅供测试、需 `--rl-elastic`、默认关闭。
+   - `--rl-test-inject-weight-override ISLAND_PATH`（E1-B）：经 SGLang `/update_weights_from_disk` 把一个新 engine 换成另一个同架构 checkpoint。**运行前须确认** `check_weights` 的 checksum 覆盖被替换的张量，否则该注入无效，按环境阻塞处理。
+   - `--rl-test-inject-stop-failures N`（E1-D ③④）：让 fork 自身的 engine provider 在 stop 时抛错，走 fork 真实的 incomplete 路径。
+   - `--rl-test-kill-learner-at PHASE`（E1-D ⑤ 用 COMMITTED，⑥ 用 QUIESCING）：在事务写入该 phase 后立即 `os._exit`，每个 state dir 只杀一次。
+   - E1-D ⑦ 的 fork 重启：learner 原地重启时旧 Ray job 随之结束，fork 的 InferenceController 以 epoch 0 重建，与 ⑤⑥ 用同一个入口。
+6. **fea44cc**：`--rl-elastic-state-dir ISLAND_PATH` 可指向持久卷（Modal volume 挂载点）。`--rl-elastic-restart-attempts N` 让岛运行命令用 bash 循环，以相同参数和 state dir 原地重启 learner。**Modal 注意**：这需要 Modal island 执行的是同一段 run 脚本；若 Modal runner 自己拼 learner 命令，要在 runner 里套同样的循环。未在 Modal 上验证。
+7. sky 0.13 私有镜像登录报 `asdict() should be called on dataclass instances`，**已定位，未修；主 agent 决定暂缓（不再用 Nebius）**。原因：launcher 在 Resources 中传入 `DockerLoginConfig` 对象；sky 0.13 客户端/服务端之间把 Task 序列化成 YAML 再读回时，`Resources.from_yaml_config` 直接 `config.pop('_docker_login_config')`，得到的是 dict，没有转回 dataclass；下一次 `to_yaml_config` 调用 `dataclasses.asdict(dict)` 就报错（`sky/resources.py:2654` 与 `:2755`）。可选方案：(a) 在 yeto 侧给 sky 打补丁，读回时把 dict 包成 DockerLoginConfig；(b) 改用 `SKYPILOT_DOCKER_*` 环境变量（`task.py:198`），但 0.13 会把它导出到所有 setup/run 进程，launcher 原本正是为此回避它；(c) 升级 sky 或向上游报告。待主 agent/用户决定。Nebius 不使用 spot，已知悉。
+- 全量：68F/3046P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b1.ids`）。
+
+### INFRA-E1：就绪审计 7–13 项（2026-09-30）
+- cell 接口对齐 FR1（032878d）：见上一节第 1 条的更正。
+- 7（0f0bcf3）：A5 按两岛各 3 卡 T1R1S1 做端到端检查，elastic/declare-cells/quorum/margin/start-delay 各开关都能到达岛上的 learner。launcher 不支持按岛分别配置。
+- 8（0f0bcf3）：`StrictRlBridge` 收到同一 step 的第二个 PULL（fixed roster 下 quorum 超时后的重发）时，向 learner 的 JSONL 磁带追加一条 `rl_pull_resend`（global_step、round_attempt、fragment_id、pulls_received）。兼容性：没有重发时磁带不变；仓库内没有任何磁带消费者会拒绝未知事件。Rust syncer 磁带未改：本机没有 cargo，无法编译测试；A5 判据取证位置请以 learner 磁带为准（主 agent 裁定）。
+- 9（888d177）：`scripts/idle_flow_probe.py`，本机 listener 加 Modal CPU 客户端，在 60/180/350/600/900/1200/1800 s 各空闲点检查连接存活，输出 `idle_flow_timeout_s`。本地测试通过，未在 Modal 上运行。
+- 10（9e73c9b）：`--rl-deterministic-trainer` 给 Miles argv 加 `--deterministic-mode`，并在 learner 与所有 Ray worker 上设 `NCCL_ALGO=Ring`、`CUBLAS_WORKSPACE_CONFIG=:4096:8`、`NVIDIA_TF32_OVERRIDE=0`。SGLang 确定性推理沿用 `--sglang-deterministic-inference`（默认开）。默认不变。
+- 11（8f316a0）：`rl_round_trained` 事件在 batch 带数据游标时（elastic 元数据开启）附带 `data_cursor`。
+- 12（79b1e18）：`--rl-test-inject-rebuild-fail` 让 fork 的 `rebuild_training_models` 第一次在 `create_training_models` 阶段失败，走 fork 真实的 TrainerRebuildError 路径，结果为 REBUILD_OLD。**运行前更正** plan v2 §3 第 4 条：REBUILD_OLD 时 `generation` 仍为 1，因为只有重建成功才会 swap。
+- 13：**未完成**。F-R1 尚未提交（miles-fr1 HEAD 仍为 5c1b49eb，工作区有 12 个未提交文件），pool_gpus 入口接线等它合入。
+- 全量：68F/3055P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b2.ids`）；validate strict 通过。
 ## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
 - 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
 - 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。

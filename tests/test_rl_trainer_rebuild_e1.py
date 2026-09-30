@@ -396,3 +396,92 @@ def test_entry_leaves_the_rebuilder_unwired_when_preconditions_fail(tmp_path):
     assert ctl.trainer_rebuilder is None
     with pytest.raises(Rejected, match="no trainer rebuilder"):
         ctl.request_trainer_rebuild("rb", 0, 60)
+
+
+def test_round_trained_event_carries_the_data_cursor_only_when_reported(tmp_path):
+    import dataclasses
+
+    driver, ctl, engine, trained, log = _island(tmp_path / "a")
+    driver.run()
+    assert all("data_cursor" not in e for e in _events(tmp_path / "a")
+               if e["event"] == "rl_round_trained")
+    driver, ctl, engine, trained, log = _island(tmp_path / "b")
+    real = driver.rollout.generate
+
+    def generate(rollout_id):
+        batch = real(rollout_id)
+        return dataclasses.replace(batch, data_cursor={"sample_offset": 4 * (rollout_id + 1),
+                                                       "epoch_id": 0, "sample_group_index": 0,
+                                                       "sample_index": 0})
+
+    driver.rollout.generate = generate
+    driver.run()
+    cursors = [e["data_cursor"]["sample_offset"] for e in _events(tmp_path / "b")
+               if e["event"] == "rl_round_trained"]
+    assert cursors == [4, 8, 12, 16]
+
+
+def test_injected_rebuild_failure_takes_the_fork_path_to_rebuild_old(tmp_path):
+    import types
+
+    from yeto.rl.engine.miles_adapter.entry import injected_rebuild_failure
+
+    fresh = [RankGroup([make_rank(9)]), RankGroup([make_rank(8)])]
+    calls = []
+
+    class TrainerRebuildError(RuntimeError):
+        def __init__(self, stage):
+            super().__init__(stage)
+            self.stage, self.cleanup_error, self.previous_view, self.view_restored = (
+                stage, None, None, True)
+
+    fork = types.SimpleNamespace()
+
+    async def create_training_models(args, executor):
+        calls.append("create")
+        return fresh.pop(0), None
+
+    async def rebuild_training_models(args, executor, *, old_handles, worker_manager,
+                                      trainer_pg_view):  # the fork's contract
+        await old_handles["actor"].dispose()
+        try:
+            return await fork.create_training_models(args, executor)
+        except BaseException as exc:
+            raise TrainerRebuildError("create_training_models") from exc
+
+    fork.create_training_models = create_training_models
+    fork.rebuild_training_models = rebuild_training_models
+    rank, actor = _trained_actor()
+    trainer = MilesTrainerGroup(args=ARGS, actor_model=actor, learner_id=0, learner_generation=0,
+                                parameter_layout_hash=lambda: "L", runner=LoopRunner())
+    from yeto.rl.engine.miles_adapter.rebuild_wiring import CutSource  # noqa: F401
+
+    rebuilder = make_trainer_rebuilder(
+        trainer=trainer, rollout=_Cursor(), ledger=_Ledger(),
+        algorithm=SimpleNamespace(sha256=lambda: "a" * 64, to_legacy_runtime_attrs=lambda: {}),
+        backend_fingerprint="fp", cut_root=str(tmp_path / "cuts"), global_batch_size=GBS,
+        rebuild_same_shape=lambda *, restore: rebuild_same_shape(
+            trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
+            worker_manager="wm", rollout=_Cursor(), restore=restore,
+            rebuild=injected_rebuild_failure(fork)))
+    out = rebuilder(_Driver("h"), epoch=0, cut_id="rb-0-inj")
+    assert out["outcome"] == "REBUILD_OLD" and out["generation"] == 1
+    assert calls == ["create"]  # the first create was the injected failure
+    assert fork.create_training_models is create_training_models  # restored
+    assert [a["stage"] for a in out["attempts"]] == ["create_training_models", "done"]
+
+
+def test_rebuild_fail_switch_is_exported_only_when_given(tmp_path, monkeypatch):
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from rl_e2e_launch import island_run
+    import json
+
+    res = tmp_path / "r.json"
+    res.write_text(json.dumps({"configs": {"c0": {"trainer": 1, "rollout": 1}}, "edges": []}))
+    base = ("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1", "--gpu",
+            "aws:2xa100@us-east-1", "--rl-elastic", "--rl-elastic-resources", str(res),
+            "--rl-elastic-initial-config", "c0")
+    assert "YETO_RL_TEST_INJECT_REBUILD_FAIL" not in island_run(base, monkeypatch)
+    assert "export YETO_RL_TEST_INJECT_REBUILD_FAIL=1\n" in island_run(
+        base + ("--rl-test-inject-rebuild-fail",), monkeypatch)

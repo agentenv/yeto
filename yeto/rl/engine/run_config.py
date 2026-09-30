@@ -149,6 +149,9 @@ class ParallelLayout:
     # rl-infra-spec 2.1: reserved standby GPUs of a fixed partition (never
     # started by any role); a non-zero value needs the fork-M1 placement map.
     standby_gpus: int = 0
+    # rl-infra-spec 3.x/4.7 (fork F-R1): yeto names of the rollout engine cells
+    # declared to the fork (placement map "rollout_cells"); () = fork default.
+    rollout_cell_names: tuple[str, ...] = ()
 
     @property
     def colocated(self) -> bool:
@@ -366,6 +369,9 @@ class RLRunConfig:
     agent: AgentConfig
     yeto_policy_sync: bool
     distributed_timeout_minutes: int
+    # E2 plan-v2 §0 (A6/A6b/A8): Megatron --deterministic-mode; the matching
+    # NCCL/cuBLAS/TF32 environment is set by the learner (--rl-deterministic-trainer).
+    deterministic_trainer: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -721,6 +727,7 @@ def resolve_rl_run_config(
             visible_gpus_per_node=visible_gpus_per_node,
             uneven_pipeline_layers=uneven_pipeline_layers,
             standby_gpus=standby_gpus,
+            rollout_cell_names=_rollout_cell_names(args, dedicated_rollout_gpus),
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
@@ -809,7 +816,20 @@ def resolve_rl_run_config(
         ),
         yeto_policy_sync=yeto_policy_sync,
         distributed_timeout_minutes=getattr(args, "rl_distributed_timeout_minutes", 10),
+        deterministic_trainer=bool(getattr(args, "rl_deterministic_trainer", False)),
     )
+
+
+def _rollout_cell_names(args, dedicated_rollout_gpus) -> tuple[str, ...]:
+    if not getattr(args, "rl_elastic_declare_cells", False):
+        return ()
+    if dedicated_rollout_gpus is None:
+        raise ValueError("--rl-elastic-declare-cells needs --rl-placement fixed-partition")
+    names = tuple(c.strip() for c in (getattr(args, "rl_elastic_cells", None) or "").split(",")
+                  if c.strip())
+    if not names:
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the cell names)")
+    return names
 
 
 def ports_training_eval(args, *, parameter_mode: str | None) -> bool:

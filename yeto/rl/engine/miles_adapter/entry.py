@@ -431,7 +431,8 @@ def compose_island(
             runner=runner,
             args=miles_args,
             **(
-                {"declared_cells": elastic.declared_cells,
+                {"declared_cells": resolve_declared_cells(
+                    inference_controller, runner, elastic.declared_cells),
                  "track_timeout_s": elastic.track_timeout_s,
                  "tool_wait_board": elastic.tool_wait_board}
                 if elastic is not None
@@ -533,11 +534,57 @@ def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model
         rebuild_same_shape=lambda *, restore: rebuild_same_shape(
             driver.trainer, args=miles_args, rollout_executor=rollout_executor,
             actor=actor_model, run=runner.run, restore=restore, rollout=driver.rollout,
+            **({"rebuild": injected_rebuild_failure()} if os.environ.get(INJECT_REBUILD_FAIL_ENV)
+               else {}),
         ),
         ref_model=(None if not ref_load
                    else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
         preconditions=lambda: rebuild_preconditions(miles_args),
     )
+
+
+def _role_map(request: Any) -> dict[str, Any] | None:
+    """The role -> logical bundle part of the ``--yeto-placement-map`` Miles got."""
+    pm = getattr(request, "placement_map_arg", None)
+    if pm is None:
+        pm = getattr(request, "placement_map", None)
+    return None if pm is None else {k: v for k, v in pm.items() if k in ("trainer", "rollout", "standby")}
+
+
+# TEST ONLY (A6b / G-4.5, 4.4 REBUILD_OLD path): the first same-shape rebuild of
+# the process fails inside the fork at stage ``create_training_models`` (the
+# fork then stops the trainer pools and raises TrainerRebuildError);
+# rebuild_same_shape rebuilds once more from the same cut -> outcome REBUILD_OLD.
+INJECT_REBUILD_FAIL_ENV = "YETO_RL_TEST_INJECT_REBUILD_FAIL"
+
+
+def injected_rebuild_failure(module: Any = None) -> Any:
+    """The fork's ``rebuild_training_models`` whose FIRST call hits a failing
+    ``create_training_models`` (patched in the fork module for that one call)."""
+    if module is None:
+        import miles.ray.placement_group as module
+    state = {"armed": True}
+
+    async def rebuild(*args: Any, **kwargs: Any) -> Any:
+        if not state["armed"]:
+            return await module.rebuild_training_models(*args, **kwargs)
+        state["armed"] = False
+        real = module.create_training_models
+
+        async def failing(*_a: Any, **_k: Any) -> Any:
+            import sys
+
+            print(f"[yeto] TEST INJECTION {INJECT_REBUILD_FAIL_ENV}: create_training_models fails",
+                  file=sys.stderr, flush=True)
+            raise RuntimeError("injected create_training_models failure (test)")
+
+        module.create_training_models = failing
+        try:
+            return await module.rebuild_training_models(*args, **kwargs)
+        finally:
+            module.create_training_models = real
+
+    return rebuild
 
 
 def _startup_views(manager: Any, runner: Any) -> dict[str, Any]:
@@ -588,7 +635,7 @@ def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor
     views = _startup_views(manager, runner)
     try:
         bundles = StartupBundles(pool_gpus=elastic.pool_gpus, views=views,
-                                 placement_map=launch.placement.placement_map)
+                                 placement_map=_role_map(launch.placement))
     except Exception:  # noqa: BLE001 - no usable map: leave trainer edges refused
         return False
     pool = driver.rollout
@@ -694,12 +741,64 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
         env_vars["PYTHONPATH"] = environ["PYTHONPATH"]
     from .rollout_meta_hook import ELASTIC_METADATA_ENV
 
+    from yeto.rl.tool_wait_workload import TOOL_DELAY_ENV
+
+    for key, value in DETERMINISM_ENV.items():  # --rl-deterministic-trainer set them
+        if environ.get(key) == value:
+            env_vars[key] = value
+
+    if environ.get(TOOL_DELAY_ENV):  # test tool-wait workload runs in Ray workers
+        env_vars[TOOL_DELAY_ENV] = environ[TOOL_DELAY_ENV]
     if environ.get(ELASTIC_METADATA_ENV) == "1":
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
         # inherit the raylet's environment, not the driver's.
         env_vars[ELASTIC_METADATA_ENV] = "1"
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
+
+
+# E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode).
+DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                   "NVIDIA_TF32_OVERRIDE": "0"}
+
+
+def resolve_declared_cells(inference_controller: Any, runner: Any,
+                           explicit: Any = ()) -> tuple[str, ...]:
+    """The fork cell ids the E1 verbs manage.
+
+    With a fork that lists its declared cells (``describe_cells``, F-R1), each
+    explicit ``--rl-elastic-cells`` name is resolved to the fork cell id: by the
+    ``alias`` the fork reports (the yeto name declared in placement map
+    ``rollout_cells``), else by the cell id itself; an unknown name is refused.
+    Without explicit names every declared cell is managed. A fork without
+    ``describe_cells`` needs explicit names, taken as its cell ids.
+    """
+    explicit = tuple(str(c) for c in (explicit or ()))
+    describe = getattr(inference_controller, "describe_cells", None)
+    if not callable(describe):
+        if not explicit:
+            raise ValueError("--rl-elastic-cells is required: this Miles fork cannot list its "
+                             "declared cells (describe_cells, F-R1)")
+        return explicit
+    cells = dict(runner.run(_awaitable(describe())) or {})
+    if not cells:
+        raise ValueError("the fork declares no rollout cells")
+    if not explicit:
+        return tuple(sorted(cells))
+    by_alias = {str(d.get("alias")): cid for cid, d in cells.items()
+                if isinstance(d, dict) and d.get("alias")}
+    out, unknown = [], []
+    for name in explicit:
+        cid = by_alias.get(name) or (name if name in cells else None)
+        (out.append(cid) if cid else unknown.append(name))
+    if unknown:
+        raise ValueError(f"--rl-elastic-cells {unknown} are not cells the fork declares "
+                         f"(aliases {sorted(by_alias)}, ids {sorted(cells)})")
+    return tuple(out)
+
+
+async def _awaitable(value: Any) -> Any:
+    return await value if hasattr(value, "__await__") else value
 
 
 def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):

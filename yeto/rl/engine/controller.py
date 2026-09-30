@@ -92,6 +92,9 @@ TERMINAL = frozenset({SUCCEEDED, CANCELLED, REBUILT_OLD, RECOVERY_REQUIRED})
 # Phases after which the old engine set can no longer simply be resumed.
 DESTRUCTIVE = frozenset({TRANSFERRING, INITIALIZING, VERIFYING, REBUILD_OLD, REBUILDING_TRAINER})
 TRAINER_REBUILD = "trainer-rebuild"
+# Test-only learner kill at a phase (plan.md E1-D ⑤ COMMITTED, ⑥ QUIESCING).
+KILL_AT_ENV = "YETO_RL_TEST_KILL_LEARNER_AT"
+KILL_EXIT_CODE = 86
 
 E1_EDGE_KINDS = frozenset({"rollout-only"})
 
@@ -244,6 +247,9 @@ class IslandController:
         # trainer is touched; any other exception is RECOVERY_REQUIRED.
         self.trainer_rebuilder = trainer_rebuilder
         self._record_lock = threading.RLock()
+        import os as _os
+
+        self._exit = _os._exit  # test seam for KILL_AT_ENV
         # Serializes "watchdog decides + kills" with "phase change" and with the
         # last check before the commit CAS (review F2): once the watchdog fired
         # the transaction cannot commit; once the commit began it cannot kill.
@@ -301,6 +307,25 @@ class IslandController:
         with self._record_lock:
             return self.journal.append(kind, **fields)
 
+    def _maybe_test_kill(self, phase: str) -> None:
+        """TEST ONLY (plan.md E1-D ⑤⑥): ``YETO_RL_TEST_KILL_LEARNER_AT=<PHASE>``
+        hard-kills the learner (``os._exit``) right after a transaction journals PHASE, once
+        per state dir (marker file), so the restarted learner goes on."""
+        import os
+
+        wanted = os.environ.get(KILL_AT_ENV)
+        if not wanted or wanted != phase:
+            return
+        marker = self.state_dir / f"test-killed-at-{phase}"
+        if marker.exists():
+            return
+        marker.write_text("killed\n", encoding="utf-8")
+        import sys
+
+        print(f"[yeto] TEST INJECTION {KILL_AT_ENV}={phase}: killing the learner",
+              file=sys.stderr, flush=True)
+        self._exit(KILL_EXIT_CODE)
+
     def watchdog_target_cells(self) -> list[str]:
         """The target generation a fired watchdog may kill (3.7/H2): cells this
         transaction is starting/verifying. Never old members, never a drain."""
@@ -330,6 +355,7 @@ class IslandController:
         self._record("phase", tx_id=tx.tx_id, request_id=tx.request_id, phase=phase,
                      config_epoch=self.journal.epochs.config_epoch,
                      fork_epoch=self._fork_epoch, **fields)
+        self._maybe_test_kill(phase)
 
     # ------------------------------------------------------------------ startup
     def open(self, pool: ElasticRolloutPool) -> IslandStatus:
