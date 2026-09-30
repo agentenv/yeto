@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_profile import ExecutionProfile, ReadinessSnapshot, quiescent_cut_blockers
+from .driver import RebuildNotStarted
 from .journal import EpochState, Journal, read_epochs, read_journal
 from .pause_audit import DEFAULT_MARGIN, DEFAULT_QUORUM_TIMEOUT_S, PAUSABLE_PHASE, pause_decision
 from .ports import ElasticRolloutPool, MemberPublisher, PlacementDescription, ReconfigurablePlacement
@@ -222,6 +223,11 @@ class IslandController:
         # trainer is touched; any other exception is RECOVERY_REQUIRED.
         self.trainer_rebuilder = trainer_rebuilder
         self._record_lock = threading.RLock()
+        # Serializes "watchdog decides + kills" with "phase change" and with the
+        # last check before the commit CAS (review F2): once the watchdog fired
+        # the transaction cannot commit; once the commit began it cannot kill.
+        self._watchdog_lock = threading.RLock()
+        self._committing = False
         self.journal = Journal(self.state_dir / "reconfig", wall_clock=wall_clock)
         if self.journal.epochs.config_id is None:
             self.journal.compare_and_swap(
@@ -285,7 +291,8 @@ class IslandController:
         self._on_watchdog = handler
 
     def _phase(self, tx: _Tx, phase: str, **fields: Any) -> None:
-        tx.phase = phase
+        with self._watchdog_lock:  # the watchdog reads tx.phase under this lock
+            tx.phase = phase
         self._record("phase", tx_id=tx.tx_id, request_id=tx.request_id, phase=phase,
                      config_epoch=self.journal.epochs.config_epoch,
                      fork_epoch=self._fork_epoch, **fields)
@@ -564,7 +571,8 @@ class IslandController:
         try:
             result = dict(self.trainer_rebuilder(driver, epoch=epochs.config_epoch, cut_id=cut_id)
                           or {})
-        except RebuildRefused as exc:
+        except (RebuildRefused, RebuildNotStarted) as exc:
+            # review F3: every refusal raised before the trainer is touched
             self._finish(tx, CANCELLED, error=f"trainer rebuild refused: {exc}")
             return CANCELLED
         except BaseException as exc:  # noqa: BLE001 - trainer state unknown
@@ -619,17 +627,24 @@ class IslandController:
 
     def _arm_watchdog(self, tx: _Tx) -> threading.Timer:
         self._watchdog_fired.clear()
+        self._committing = False
 
         def fire() -> None:
-            self._watchdog_fired.set()
-            self._record("watchdog", tx_id=tx.tx_id, phase=tx.phase,
-                         target_cells=self.watchdog_target_cells(),
-                         note="absolute transaction deadline passed while a step was running")
-            if self._on_watchdog is not None:
-                try:
-                    self._on_watchdog(tx.tx_id, tx.phase)
-                except Exception as exc:  # noqa: BLE001 - journaled; the step result decides
-                    self._record("watchdog_action", tx_id=tx.tx_id, error=repr(exc))
+            with self._watchdog_lock:
+                if self._committing or self._tx is not tx:
+                    self._record("watchdog", tx_id=tx.tx_id, phase=tx.phase, target_cells=[],
+                                 note="deadline passed after the commit point; nothing killed")
+                    return
+                self._watchdog_fired.set()
+                phase = tx.phase
+                self._record("watchdog", tx_id=tx.tx_id, phase=phase,
+                             target_cells=self.watchdog_target_cells(),
+                             note="absolute transaction deadline passed while a step was running")
+                if self._on_watchdog is not None:
+                    try:
+                        self._on_watchdog(tx.tx_id, phase)
+                    except Exception as exc:  # noqa: BLE001 - journaled; the step result decides
+                        self._record("watchdog_action", tx_id=tx.tx_id, error=repr(exc))
 
         timer = threading.Timer(max(0.0, self._remaining(tx)), fire)
         timer.daemon = True
@@ -889,13 +904,22 @@ class IslandController:
         except Exception as exc:  # noqa: BLE001 - any engine failure: restore the old set
             return self._rebuild_old(tx, driver, old_members, f"{type(exc).__name__}: {exc}")
         # ---- COMMITTED: the single commit point is the durable CAS ----
-        epochs = self.journal.epochs
-        new_epoch = epochs.config_epoch + 1
-        self.journal.compare_and_swap(
-            expected_config_epoch=epochs.config_epoch,
-            new=EpochState(new_epoch, plan.target, self._fork_epoch,
-                           tuple(sorted(target_members)), tx.tx_id),
-        )
+        # Review F2: re-check the watchdog under its lock; a fired watchdog may
+        # have killed the new cells after the last verify, so never commit then.
+        with self._watchdog_lock:
+            fired = self._watchdog_fired.is_set()
+            if not fired:
+                self._committing = True
+                epochs = self.journal.epochs
+                new_epoch = epochs.config_epoch + 1
+                self.journal.compare_and_swap(
+                    expected_config_epoch=epochs.config_epoch,
+                    new=EpochState(new_epoch, plan.target, self._fork_epoch,
+                                   tuple(sorted(target_members)), tx.tx_id),
+                )
+        if fired:
+            return self._rebuild_old(tx, driver, old_members,
+                                     "watchdog fired before the commit point")
         self._phase(tx, COMMITTED, members=sorted(target_members))
         # ---- RESUMING ----
         self._phase(tx, RESUMING)

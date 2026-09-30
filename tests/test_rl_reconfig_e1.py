@@ -1015,3 +1015,63 @@ def test_build_elastic_wires_the_default_watchdog_action(tmp_path):
     off.controller.close()
     with pytest.raises(ValueError, match="unknown watchdog action"):
         build_elastic(state_dir=tmp_path / "c", on_watchdog="nope", **kw)
+
+
+def test_watchdog_firing_after_the_last_verify_prevents_the_commit(tmp_path):
+    """Review F2: the deadline passes after the last _check_deadline but before
+    the CAS (a slow verify_serving_policy); the new cells may have been killed,
+    so the transaction must not commit."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    fake_ray = _FakeRay(lambda handle: None)
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=_FakeManager(), ray_module=fake_ray))
+    fired = ctl._watchdog_fired
+
+    def verify_serving_policy(**_):
+        assert fired.wait(5)  # returns normally, but only after the watchdog fired
+
+    publisher.verify_serving_policy = verify_serving_policy
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.3)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    driver.run()
+    assert ctl.status("r")["phase"] == REBUILT_OLD
+    assert "watchdog fired before the commit point" in (ctl.status("r")["error"] or "")
+    assert read_epochs(tmp_path / "state/reconfig").config_epoch == 0
+    assert set(driver.rollout.members()) == {"engine:c0", "engine:c1"}
+
+
+def test_watchdog_after_the_commit_point_kills_nothing(tmp_path):
+    driver, ctl, *_ = _setup(tmp_path)
+    killed = []
+    ctl.set_on_watchdog(lambda tx, phase: killed.append(phase))
+    ctl._wall = __import__("time").time
+    orig_cas = ctl.journal.compare_and_swap
+
+    def slow_cas(**kw):
+        out = orig_cas(**kw)
+        if kw["new"].config_epoch == 1:
+            __import__("time").sleep(0.6)  # the deadline passes right after the commit
+        return out
+
+    ctl.journal.compare_and_swap = slow_cas
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.3)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    driver.run()
+    assert ctl.status("r")["phase"] == SUCCEEDED and killed == []
+    notes = [r.get("note", "") for r in read_journal(tmp_path / "state/reconfig")
+             if r["kind"] == "watchdog"]
+    assert notes and "after the commit point" in notes[0]
