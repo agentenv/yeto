@@ -628,6 +628,14 @@ def run_ports_island(
         actor, critic = await create_training_models(miles_args, executor)
         if critic is not None:
             raise RuntimeError("the ports engine does not drive a critic")
+        # rl-infra-spec 4.3/4.4: one swappable handle shared by trainer,
+        # policy state, publisher and the eval dispatcher (EvalDispatcher keeps
+        # self.actor_model and resolves methods per call, so the proxy is
+        # enough); the disposer gets the proxy, whose async dispose() resolves
+        # the CURRENT target (Disposer.add binds item.dispose when added).
+        from .trainer_rebuild import SwappableActor
+
+        actor = SwappableActor(actor)
         disposer.add(actor)
         dispatcher = EvalDispatcher(miles_args, actor, executor)
         disposer.add(dispatcher.drain)
