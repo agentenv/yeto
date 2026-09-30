@@ -456,3 +456,15 @@
 - L2：`_wire_trainer_edges` 在 `rebuild_preconditions(miles_args)` 不满足时不接线 trainer 边，请求在 plan 阶段即被拒；有测试。
 - L3：**F-R1 未解决前不得认证 role-transfer 的 trainer→rollout 边**（plan v2 §6）。启动期的 bind 能力检查不可行（fork 没有可读接口），也未实现。
 - pool_gpus 入口：按主 agent 安排，等 F-R1 在 fork 实现后再做。
+
+### INFRA-E3 A8/DEV-GATHER harness（2026-09-30；合并 origin/integ-decl b90c18d 后；未起任何 GPU/云资源）
+- `tools/probes/e3_reshard/`：
+  - `harness.py`：plan-v3 §2.1 的 arm 序列（A1、A2、B1、B1p、B2、RT），每个 arm 是一个新 trainer；cut 经 `MilesTrainerGroup.save_cut/restore_cut_resharded`；证据写入 `<work>/arms/<ARM>/events.jsonl`（fsync）与各 rank 的状态文件。
+  - `miles_backend.py`：每个 arm 在独立 driver 进程里 `create_rollout_components` + `create_training_models`（`actor_num_gpus_per_node=dp`），冻结数据用 Miles 自带的 `--save-debug-rollout-data`（生成阶段，`debug_rollout_only`，基座策略）与 `--load-debug-rollout-data`（arm 阶段，`debug_train_only`）重放；`RolloutExecutor.get` 因此在 fork object store 里走生产上的 `split_train_data_by_dp`，按新 trainer 公布的 `train_parallel_config` 分派。
+  - `learner_shim.py`：用 learner 自己的参数管线（模型/数据下载、run config→Miles argv→`parse_args`），只把 `entry.run_ports_island` 换成 harness 阶段，因此**不需要改 driver/entry/launcher，没有补丁**；`--phase dry` 在任何 GPU 进程之前记录 miles_args 与 DP1↔2 的拒绝检查（有拒绝即退出）。
+  - `compare.py`：G1–G6 与 go/no-go/不可判定，容差为 plan-v3 的常量；容器内用 fork-M5 `merge_named_optimizer_states`。
+  - `modal_run.py`：DEV-GATHER（`A10G:2`，90 min）/A8（`H100!:2`，120 min，确定性环境变量）；容器内先断言 GPU 名、Miles pin、生成 runtime manifest，再 dry→gen→6 个 arm→compare→打包证据；app/sandbox id 写 `resources.txt` 供独立 watchdog。`build_flags.py` 从 `yeto launch ... --rl-single-island-no-sync --controller local --dry-run` 取 learner 参数。
+- rank 内回读插件 `yeto/rl/engine/miles_adapter/e3_probe.py`：包装 fork `process_rollout_data`（实际分片的 `partition`、是否带 `micro_batch_indices`/`num_rollouts`）、`loss_function`（`num_microbatches`、`num_rollouts`、`intra_dp_cp` 大小）、`get_loss_function`（未缩放的逐 micro batch loss，float hex）；`rank_info`（坐标、`torch/cuda initial_seed`、Megatron tracker 摘要、RNG 摘要、公布的 schedule 配置、dropout）；`dump_state`（adapter、按名 optimizer 状态、scheduler）。
+- CPU 测试 `tests/test_rl_e3_harness.py`（11）：假后端跑完整 arm 序列判 go；B1p 不确定→不可判定；分片缺 `micro_batch_indices`→G2 失败/no-go；恢复状态被改→G1 失败；arm 出错记录并停 trainer；探针包装透传与记录；容器脚本断言顺序；learner 参数提取；dry 阶段拒绝 dropout>0。只证协议与判定逻辑。
+- 尚未在 GPU 上验证（由 DEV-GATHER 先暴露）：`--save/--load-debug-rollout-data` 与 `debug_rollout_only/train_only` 在 parse 之后设置是否足够；源码树哈希（上传目录与 dry-run 时的树需一致）；奖励函数文件在容器内的位置；同一 Ray 集群上多个 driver 进程依次创建/释放 placement group。
+- 测试：全量 68 failed, 3048 passed, 49 skipped, 26 errors；失败/错误 id 94 个与 /tmp/integ-s2-base.ids（第二列）完全相同。云资源：无；$0。
