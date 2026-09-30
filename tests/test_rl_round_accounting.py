@@ -251,9 +251,19 @@ def test_router_inflight_probe_and_driver_sampler(tmp_path):
                             args=SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=3000))
     seen = []
     body = {"inflight": {"http://a": 3, "http://b": 1}, "cordoned": ["http://b"]}
-    assert pool.load_sample(http_get=lambda url: seen.append(url) or body) == {
-        "active_requests": 4, "workers": 2, "cordoned": 1}
-    assert seen == ["http://10.0.0.1:3000/worker_inflight"]
+
+    def router_only(url):
+        seen.append(url)
+        if url.endswith("/worker_inflight"):
+            return body
+        raise OSError("engine endpoint not served")
+
+    # router fields as before; engine-side fields unknown (never guessed as 0)
+    assert pool.load_sample(http_get=router_only) == {
+        "active_requests": 4, "workers": 2, "cordoned": 1, "running_requests": None,
+        "queued_requests": None, "engine_capacity": None, "tool_wait_trajectories": None,
+        "ready_groups": None, "load_class": "unknown"}
+    assert seen[0] == "http://10.0.0.1:3000/worker_inflight"
 
     def missing(url):
         raise OSError("404")
