@@ -545,3 +545,110 @@ def test_colocated_rebuild_does_not_republish_the_resident_policy(tmp_path):
     assert log and log[-1][0] == "restored"
     rebuilt = [e for e in _events(tmp_path) if e["event"] == "rl_trainer_rebuilt"]
     assert rebuilt[0]["republished"] is False and "colocated" in rebuilt[0]["republish_skipped"]
+
+
+# ---------------------------------------------------------------- weight version across a rebuild
+class _VersionedPublish:
+    """Models Miles: the trainer's weight_updater.weight_version goes +1 per
+    publish; the rollout executor refuses a version that goes backwards."""
+
+    def __init__(self, engine, publisher):
+        self.engine, self.inner = engine, publisher
+        engine.trainer_weight_version = 0
+        self.engine_version = 0
+
+    def publish(self, state):
+        self.engine.trainer_weight_version += 1
+        new = self.engine.trainer_weight_version
+        if new < self.engine_version:
+            from yeto.rl.engine.driver import PublicationError
+
+            raise PublicationError(f"Engine weight version went backwards: {self.engine_version} -> {new}")
+        self.engine_version = new
+        return self.inner.publish(state)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def _versioned_rebuild(engine, log, *, carry_version=True):
+    """Same-shape rebuild: a fresh trainer starts its counter at 0; the E2 cut
+    (infra-e2 f898516) restores it."""
+    inner = _fake_rebuild(engine, log)
+
+    def rebuilder(driver, *, epoch, cut_id):
+        saved_version = engine.trainer_weight_version
+        orig = driver.rebuild_trainer
+
+        def rebuild_trainer(rebuild, *, cut_policy_hash):
+            def wrapped():
+                engine.trainer_weight_version = 0  # fresh trainer
+                out = rebuild()
+                if carry_version:
+                    engine.trainer_weight_version = saved_version  # restore_cut
+                return out
+            return orig(wrapped, cut_policy_hash=cut_policy_hash)
+
+        driver.rebuild_trainer = rebuild_trainer
+        try:
+            return inner(driver, epoch=epoch, cut_id=cut_id)
+        finally:
+            driver.rebuild_trainer = orig
+
+    return rebuilder
+
+
+def test_fixed_partition_rebuild_republishes_without_going_backwards(tmp_path):
+    driver, ctl, engine, trained, log = _island(tmp_path)
+    publisher = _VersionedPublish(engine, driver.publisher)
+    driver.publisher = publisher
+    ctl.trainer_rebuilder = _versioned_rebuild(engine, log)
+    _at(driver, 2, lambda: ctl.request_trainer_rebuild("rb", 0, 60))
+    driver.run()
+    assert ctl.status("rb")["phase"] == SUCCEEDED
+    # 1 initial + 4 rounds + 1 re-publication after the rebuild, never backwards
+    assert publisher.engine_version == 6
+
+
+def test_fixed_partition_rebuild_without_the_counter_is_refused(tmp_path):
+    driver, ctl, engine, trained, log = _island(tmp_path)
+    publisher = _VersionedPublish(engine, driver.publisher)
+    driver.publisher = publisher
+    ctl.trainer_rebuilder = _versioned_rebuild(engine, log, carry_version=False)
+    _at(driver, 2, lambda: ctl.request_trainer_rebuild("rb", 0, 60))
+    with pytest.raises(DriverError, match="RECOVERY_REQUIRED"):
+        driver.run()
+    assert "went backwards" in ctl.recovery_required
+
+
+def test_colocated_rebuild_skips_republish_and_later_rounds_do_not_go_backwards(tmp_path):
+    import torch
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0)
+    publisher = _VersionedPublish(engine, engine.publisher)
+    driver = IslandDriver(
+        learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+        policy_state=engine.policy_state, publisher=publisher, placement=engine.placement,
+        algorithm=AlgorithmSpec(), sync=LocalOnlySync(3),
+        events=EventTape(tmp_path / "events.jsonl", 0), capabilities=fake_capabilities())
+    log = []
+    orig = driver.safe_point
+
+    def safe_point(rid):
+        out = orig(rid)
+        if rid == 1:
+            before = publisher.engine_version
+            _versioned_rebuild(engine, log)(driver, epoch=0, cut_id="rb")
+            assert publisher.engine_version == before  # no re-publication
+            assert engine.trainer_weight_version == before  # counter restored by the cut
+        return out
+
+    driver.safe_point = safe_point
+    driver.run()  # the next rounds' publishes continue at before+1, ..., never backwards
+    assert publisher.engine_version == 4  # 1 initial + 3 rounds
