@@ -603,6 +603,26 @@
 - 正式运行尚无判据结论：C1 v6 第 1 次（weight_version 漏项，已修）、第 2 次（比较口径，已修；不追认）、第 3 次（用户暂停）。
 - **恢复步骤**：合并最新 integ-decl → 用新代码提交重新生成 run 目录并重跑本地 dry-run → 从 C1 开始按 plan-v6 执行（C1 → c1-unsafe → C2 → C3 各行）。
 - 费用：B2 累计 ≤ $10.88。所有 E2 app 均为 stopped/0，本地无残留进程。
+
+### INFRA-E2 E2 合租结果（2026-09-30，plan-v6，代码 a016f7f，镜像 2cc5cc52）
+| run | 结果 | 费用 |
+|---|---|---|
+| C1（T1R1，DP1） | 通过 20/20 | ≤$1.70 |
+| c1-unsafe（诊断，不计判据） | 20/20：fork M5 修复在真实 DistOpt 上生效 | ≤$1.71 |
+| C2（T2R1，DP2 DistOpt） | 通过 21/21（含 G-4.2(f)） | ≤$2.17 |
+| C3-B1 基线 | 完成 | ≤$2.37 |
+| C3-rebuild（RESTORED） | G-4.4 12/13 直接通过；manifest 拉取被截断 | ≤$2.77 |
+| C3-rebuild-old（REBUILD_OLD） | 19/19 | ≤$2.37 |
+| G-4.5 第1行 | 通过（74 s 内 RECOVERY_REQUIRED） | ≤$2.37 |
+| G-4.5 第2行 | 不满足原文：注入没有造成故障，495 s 后成功 | ≤$3.56 |
+| G-4.5 第3行 | 通过（1.9 s 内 RECOVERY_REQUIRED，无 manifest） | ≤$2.17 |
+| G-4.5 第5行 | 阻塞：实时游标不可用 | ≤$2.57 |
+| G-4.5 第6行 | 未运行（费用逼近 $40 先报告；CAS 之后 kill 对同形重建不存在） | — |
+- B2 累计 ≤ $34.64。所有 app stopped/0，本地无残留进程。
+- 发现：
+  1. E1 `live_data_cursor` 在真实 Miles 上返回 None（rollout executor 是 Ray actor handle），生产中重建前后的游标比对因此退回缓存值；
+  2. REBUILDING_TRAINER 没有 deadline 强制；
+  3. `modal container exec` 输出上限 8 KiB，工具已改为分块拉取。
 - 新增 `--rl-elastic-drain-timeout-s` 与 `--rl-elastic-recovery-timeout-s`（launcher → learner → `build_elastic(timeouts=...)` → controller 的 `Timeouts.drain`/`recovery`；需带 `--rl-elastic`，数值须为正；不给时沿用 120/900，默认 argv 不变）。E1-C 用 T_drain=5；E1-D ④ 用较小的 T_recovery（配合 `--rl-test-inject-stop-failures N`，N 要大于 T_recovery 内按 1 s 间隔能发生的重试次数）。已按"写了具体数值"排查 gpu-plan-v2 §9.14（gpu-b1 工作区版本）、`evidence/infra-e1/plan.md` E1-A…E1-E、plan-3.8-4.4-v2 §1–§8：请求 deadline（controller CLI `--deadline-s`）、quorum/margin/idle、start delay、update_weights block、tool delay、stop failures、kill-at、restart attempts 都已有入口；缺入口的只有 T_drain 与 T_recovery，本次补齐。E1-A (d)(e) 的 router/nvidia-smi 采样属于运行工具，不是参数。端到端测试从真实 CLI 一直到 controller 实际使用的值。
 - 全量：68F/3169P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b9.ids`）。
 
@@ -618,8 +638,35 @@
   - 测试用模拟的 ActorHandle 复现"无 data_source 属性"的路径：经 `__ray_call__` 读到实时值；actor 调用失败时为未知；游标在重建期间于 actor 内被改动，`rebuild_same_shape` 判 RECOVERY_REQUIRED（G-4.5 第 5 行的 CPU 协议检查）。
   - **依赖**：Ray 的 `ActorHandle.__ray_call__`（Ray 2.x 为所有 actor 提供）。本机 yeto-venv 没有 ray，无法在真实 handle 上验证；若镜像内的 Ray 不支持它，读取会失败并判为未知（不会静默使用旧值），那时需要 fork 增加只读方法 `RolloutExecutor.get_data_cursor()`（新 M 项需求）。
   - 全量：68F/3172P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b11.ids`）。
+
+### INFRA-E2 追加运行（2026-09-30 下午）
+- G-4.5 第 6a 行：通过（`gpu-v6-c3-f6a/`）。kill 发生在 REBUILDING_TRAINER，写 cut 之前。原地重启后 journal 对账判 RECOVERY_REQUIRED（"learner restarted after release, before commit"），重启的 learner 账本拒绝重训 rollout 0–2，无重复消费。
+- 第 6b 行：同形重建不适用（状态机没有 COMMITTED 阶段）。第 2 行按主 agent 裁定记为不通过，"REBUILDING_TRAINER 无 deadline 强制"写入 4.5 已知限制。
+- C3-rebuild 补跑（e2z）：磁带侧判据与首跑一致；manifest 和 journal 仍未拉回（整包分块拉取过慢）。工具已改为只拉小文件（214ba19）。
+- G-4.5 第 5 行重跑（e2z，f707dc3）：仍阻塞。实时游标读不到，CutSource 拒绝写 cut（CANCELLED）。原因：executor 是 RayWorkerHandle 包装，E1 的 `_is_ray_handle` 没有解包 `_actor_handle`。
+- B2 累计 ≤ $45.70。所有 app stopped/0，无残留进程。
 - A4 Nebius 发现两项（不上卡）：
   1. E1-A (c) 的审计缺口（a30fa5f）：扩容事务确实经 `Publisher.publish_members`（3.4a/3.5 的成员限定发布）把当前已发布的 policy（v2）装进新 cell，之前只在 journal 里记 `weight_admission`，磁带上没有。现在每次 `publish_members`（VERIFYING，以及 REBUILD_OLD 重启旧 cell）都会向磁带写一条 `rl_member_publication`：policy_version、token、payload/manifest 哈希、这次接收的成员 `sync/publication_members`、发布后的在役集合 `sync/serving_members`。它在下一轮 generate 之前出现，因此"第 3 轮生成所用的 v2 发布成员 = 4"可以在磁带上审计。判据文字不改；E1-A 需重跑后才能判 (c)。E3 trainer 边里的 `publish_members` 在 E3 文件中，这次未改。
   2. E1-B 注入无效：用 base 模型快照重载新 engine 不改变 LoRA 适配器，而校验只覆盖 LoRA 权重。现改为 `--rl-test-inject-lora-perturb EPS`（取代并删除 `--rl-test-inject-weight-override`）：本进程第一次成员限定的 update_weights 把 trainer 的 LoRA 适配器临时加 EPS，发给新 engine 后立即精确恢复 trainer（恢复后核对 policy hash）。新 engine 因此持有不同的 LoRA 权重，check_weights 读回必然与发布参照不同，新 engine 不会被放行，事务走 REBUILD_OLD。CPU 测试覆盖：注入后校验失败、trainer 恢复、只注入一次；不注入时同一流程正常放行；`lora_perturber` 恢复前后 policy hash 一致。`evidence/infra-e1/plan.md` E1-B 的注入方法描述随之变更，判据不变。
   - 全量：68F/3176P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b12.ids`）。
 - 实时游标第二次修复（E2 第 5 行重跑仍读不到）：fork e3a11ab3 交给 driver 的 rollout executor 是 `RayWorkerHandle`，它的 `__getattr__` 会把任何属性名（包括 `data_source`）变成远程调用协程，真正的 Ray 句柄在实例属性 `_actor_handle` 上。旧代码读到 `data_source` 是一个函数，类型名也不是 ActorHandle，结果没走 `__ray_call__`，也没有日志。现在只看实例属性：有 `_actor_handle` 就解包，经 `_actor_handle.__ray_call__` 在 actor 内读取；裸 ActorHandle 同样处理；本地 executor 直接读。识别失败、没有 `__ray_call__`、actor 调用失败、数据源报告的游标不完整，都打一条 WARNING 说明原因并返回未知。测试新增模拟 `RayWorkerHandle`（`__getattr__` 对任意名字返回协程，内含 `_actor_handle` 替身）：能读到实时值，actor 中改动后能读到新值，失败和无法识别时报未知并有日志。全量 68F/3177P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b13.ids`）。
+
+### INFRA-E2 交接点（2026-09-30 15:10Z，交给新 session）
+- 分支 infra-e2，HEAD 见本提交；已合并 integ-decl 058b00e（E1 RayWorkerHandle 解包修复）。镜像 2cc5cc52，Miles e3a11ab3。计划 `evidence/infra-e2/4.2-4.5/plan-v6.md`（含判据实现更正）。
+- **4.2**：G-4.2 在 C1、C2 上全部通过（`gpu-v6-c1/`、`gpu-v6-c2/`）。原文验收已满足；依赖 4.1、3.6、4.2a 未勾，因此未勾。
+- **4.3**：X3 在 C1、C2 上两个 arm 逐位一致，已满足；依赖未勾，因此未勾。
+- **4.4**：G-4.4 在 RESTORED（`gpu-v6-c3-rb/`）与 REBUILD_OLD（`gpu-v6-c3-rbold/`）两条路径都通过；manifest 字段来源为 rbold（同一保存路径，见 README）。依赖未勾，因此未勾。
+- **4.5 / G-4.5**：
+  - 第 1、3、6a 行通过；第 4 行由 C3-rebuild-old 覆盖。
+  - 第 2 行不通过：该故障模式在当前设计中不存在，已知限制为 REBUILDING_TRAINER 无 deadline。
+  - 第 6b 行不适用：没有 COMMITTED 阶段。
+  - **第 5 行待跑**：在 058b00e 上的运行（app ap-AeM99hituVOMdEHpcYV08Q）因交接在重建前被停止，游标尚未被读取。
+  - **4.5 未完成。**
+- **下一步（第 5 行，约 $2.2，已获批）**：
+  1. `cd /home/michael/work/infra-e2 && git fetch origin && git merge origin/integ-decl`
+  2. 重新生成：`cp /tmp/gsm8k_reward.py . && /tmp/yeto-venv/bin/python tools/probes/e2_cut_harness.py --root /tmp/e2gen --prefix <新前缀> --yeto-sha <HEAD> --launcher-dry-run && rm gsm8k_reward.py`（24 项须 rc=0）。
+  3. 把 `/tmp/e2gen/<前缀>-c3-f5/` 复制到 `/home/michael/work/infra-e2-gpu/`，路径做 sed 替换（参照 `launch_q.sh`/`finish_q.sh`/`cost_q.sh`）。
+  4. `YETO_E2_GPU_APPROVED=1 bash run.sh`（台账先记一行）。puller 一旦看到 "live data cursor unknown" 就 stop，届时回报 WARNING 的原因。
+  5. 结果分析：`tools/probes/e2_c3_analyze.py <run dir> --fault`。
+- run 目录：`/home/michael/work/infra-e2-gpu/`（本轮 e2y/e2z/e2q 前缀）；证据：`openspec/changes/rl-infra-spec/evidence/infra-e2/4.2-4.5/gpu-v6-*`。
+- 费用：B2 累计 ≤ $47.48。所有 E2 app 都已 stopped/0，无残留进程。
