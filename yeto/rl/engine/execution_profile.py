@@ -78,7 +78,7 @@ UNKNOWN = object()  # a precondition whose value the caller has no source for
 
 
 def check_overlap_eval(*, placement_kind: Any, eval_uses_snapshots: Any = UNKNOWN,
-                       eval_interval: Any = UNKNOWN, eval_temperature: Any = UNKNOWN) -> None:
+                       eval_interval: Any = UNKNOWN) -> None:
     """Preconditions of eval overlap (task 2.3); shared by the island
     (miles_adapter.entry) and the launcher's local pre-provisioning check.
 
@@ -95,15 +95,6 @@ def check_overlap_eval(*, placement_kind: Any, eval_uses_snapshots: Any = UNKNOW
         raise ProfileError("eval overlap (2.3) is refused with --eval-uses-snapshots")
     if eval_interval is not UNKNOWN and not eval_interval:
         raise ProfileError("eval overlap (2.3) needs --eval-interval")
-    if eval_temperature is not UNKNOWN and not (
-        isinstance(eval_temperature, (int, float)) and 0 <= eval_temperature < 1e-6
-    ):
-        # A sampled eval draws from the engine's global sampler RNG; moving it
-        # after generation would change what training generation samples. A
-        # greedy eval (SGLang argmax) draws nothing (A2 criterion 5).
-        raise ProfileError(
-            f"eval overlap (2.3) needs a greedy eval (temperature 0), got {eval_temperature!r}"
-        )
 
 
 def check_elastic_placement(placement_kind: str) -> None:

@@ -317,7 +317,6 @@ def execution_profile_for(
             placement_kind="colocated" if mode == "colocated-serial" else "fixed-partition",
             eval_uses_snapshots=bool(getattr(miles_args, "eval_uses_snapshots", False)),
             eval_interval=getattr(miles_args, "eval_interval", None),
-            eval_temperature=effective_eval_temperature(miles_args),
         )
         mode, overlap = "partitioned-overlap", IMPLEMENTED_OVERLAP
     if expected_sha256 is None:
@@ -340,12 +339,6 @@ def execution_profile_for(
         algorithm_spec_sha256=expected_sha256,
         extra={"algorithm_hash_source": source},
     )
-
-
-def effective_eval_temperature(miles_args: Any) -> Any:
-    """Miles' eval temperature: ``--eval-temperature``, else the rollout one."""
-    value = getattr(miles_args, "eval_temperature", None)
-    return getattr(miles_args, "rollout_temperature", 1.0) if value is None else value
 
 
 def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
@@ -480,11 +473,6 @@ def compose_island(
             expected_policy=expected_policy,
             runner=runner,
             args=miles_args,
-            # 2.3 (A2 criterion 5): with evaluation configured, training
-            # generation always starts from a flushed prefix cache, so eval
-            # timing (serial before generate / overlapped after it) cannot
-            # change what training generation computes.
-            isolate_eval_cache=bool(evaluate is not None and eval_interval),
             load_tool_wait=load_tool_wait_source(miles_args, elastic),
             **(
                 {"declared_cells": resolve_declared_cells(
@@ -784,8 +772,12 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
 
 
 # E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode).
+# NVTE_ALLOW_NONDETERMINISTIC_ALGO=0: Megatron's --deterministic-mode only
+# setdefaults it in the process that validates the args, while Transformer
+# Engine reads it in each trainer rank (Ray worker); set it here so it reaches
+# every rank through connect_island_ray (A2 follow-up, local-gpu-plan L-2.3).
 DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                   "NVIDIA_TF32_OVERRIDE": "0"}
+                   "NVIDIA_TF32_OVERRIDE": "0", "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0"}
 
 
 def resolve_declared_cells(inference_controller: Any, runner: Any,

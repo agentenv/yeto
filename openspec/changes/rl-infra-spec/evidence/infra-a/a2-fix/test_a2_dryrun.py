@@ -1,6 +1,5 @@
-"""(INFRA-A a2-fix copy of gpu-b1 evidence/infra-v2-b1/a2/test_a2_dryrun.py: miles_args now
-carries eval_temperature from the ev config, as the island's Miles namespace does; the
-overlap profile refuses a non-greedy eval since the A2 fix.)
+"""(INFRA-A a2-fix copy of gpu-b1 evidence/infra-v2-b1/a2/test_a2_dryrun.py; miles_args also
+carries eval_temperature as the island's Miles namespace does.)
 
 A2 (L-2.3) local end-to-end dry-run: real launch argv -> island run -> learner -> profile.
 

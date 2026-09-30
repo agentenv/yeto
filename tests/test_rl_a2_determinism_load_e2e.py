@@ -1,4 +1,4 @@
-"""A2 fix (2.3 criterion 5: eval/training generation isolation) and A2+ (1.7 load
+"""A2 follow-up (trainer determinism switch reaches every rank) and A2+ (1.7 load
 samples with queued/capacity/tool-wait), end to end on CPU:
 
 real ``yeto launch`` CLI -> island learner args -> miles_args -> ports entry
@@ -28,14 +28,6 @@ ROUTER = ("10.0.0.1", 3000)
 ENGINES = ("http://10.0.0.2:30000", "http://10.0.0.3:30000")
 
 
-def _eval_cli(tmp_path, temperature="0"):
-    heldout = tmp_path / "heldout.jsonl"
-    heldout.write_text('{"prompt": "q", "label": "a"}\n')
-    return ("--rl-eval-interval", "1", "--rl-eval-data", str(heldout),
-            "--rl-eval-dataset-name", "held", "--rl-eval-samples-per-prompt", "1",
-            "--rl-eval-temperature", temperature)
-
-
 def _miles_args(args):
     """The island's miles_args fields this path reads (as Miles' parser names them)."""
     from yeto.rl import learner
@@ -57,7 +49,6 @@ class _Http:
 
     def __init__(self, log, load=(0, 0), capacity=8):
         self.log, self.load, self.capacity = log, load, capacity
-        self.flush_status = []
 
     def get(self, url):
         if url == f"http://{ROUTER[0]}:{ROUTER[1]}/worker_inflight":
@@ -71,9 +62,6 @@ class _Http:
             return {"internal_states": [{"effective_max_running_requests_per_dp": self.capacity}]}
         raise OSError(url)
 
-    def flush(self, url, headers):
-        self.log.append(("flush", url.rsplit("/", 1)[0]))
-        return self.flush_status.pop(0) if self.flush_status else 200
 
 
 def _island(tmp_path, monkeypatch, miles_args, http, *, observe=False, profile=None,
@@ -98,7 +86,6 @@ def _island(tmp_path, monkeypatch, miles_args, http, *, observe=False, profile=N
     sink = tmp_path / "sink"
     monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{sink}")
     monkeypatch.setattr(rollout_mod, "_http_get_json", lambda url, timeout_s=2.0: http.get(url))
-    monkeypatch.setattr(rollout_mod, "_http_flush", http.flush)
     controller, actor = _Controller(), _Actor()
     original_prepare = controller.prepare_rollout
 
@@ -156,84 +143,22 @@ def _learner(tmp_path, monkeypatch, *cli):
     return args
 
 
-# ------------------------------------------------------------------ A2 / 2.3 criterion 5
-def test_cli_eval_run_flushes_every_engine_before_each_training_generation(
-        tmp_path, monkeypatch, capsys):
-    args = _learner(tmp_path, monkeypatch, *_eval_cli(tmp_path))
-    assert args.eval_interval == 1 and args.eval_temperature == 0.0
-    miles_args = _miles_args(args)
-    log = []
-    driver, runner = _island(tmp_path, monkeypatch, miles_args, _Http(log))
-    driver.run()
-    runner.close()
-    # serial: eval(v_r) -> flush(all engines) -> prepare_rollout(r)
-    for r in (0, 1):
-        i = log.index(("prepare", r))
-        assert log[i - 2:i] == [("flush", ENGINES[0]), ("flush", ENGINES[1])]
-        assert log.index(("eval", r)) < i - 2
-    lines = [json.loads(line.split(" ", 1)[1]) for line in capsys.readouterr().out.splitlines()
-             if line.startswith("YETO_RL_EVAL_CACHE_FLUSH ")]
-    assert [x["rollout_id"] for x in lines] == [0, 1]
-    assert all(x["engines"] == list(ENGINES) for x in lines)
+# ------------------------------------------------------------------ A2 follow-up: trainer determinism
+def test_cli_deterministic_trainer_reaches_every_ray_worker_with_the_te_switch(
+        tmp_path, monkeypatch):
+    from yeto.rl import learner
+    from yeto.rl.engine.miles_adapter.entry import DETERMINISM_ENV, connect_island_ray
 
-
-def test_cli_overlap_run_is_isolated_too_and_needs_a_greedy_eval(tmp_path, monkeypatch):
-    from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.execution_profile import ProfileError
-    from yeto.rl.engine.miles_adapter import entry
-
-    args = _learner(tmp_path, monkeypatch, *_eval_cli(tmp_path), "--rl-overlap-eval")
-    miles_args = _miles_args(args)
-    assert miles_args.yeto_rl_overlap_eval is True
-    spec = AlgorithmSpec()
-    launch = SimpleNamespace(placement=SimpleNamespace(kind="fixed-partition"))
-    profile = entry.execution_profile_for(miles_args, launch, spec, yeto_policy_sync=False,
-                                          expected_sha256=spec.sha256())
-    assert profile.execution_mode == "partitioned-overlap"
-    log = []
-    driver, runner = _island(tmp_path / "o", monkeypatch, miles_args, _Http(log))
-    assert driver.rollout._isolate_eval_cache
-    driver.run()
-    runner.close()
-    assert [e for e in log if e[0] == "prepare"] == [("prepare", 0), ("prepare", 1)]
-    for r in (0, 1):
-        i = log.index(("prepare", r))
-        assert log[i - 2:i] == [("flush", ENGINES[0]), ("flush", ENGINES[1])]
-    # a sampled eval would draw from the engines' sampler RNG: refused
-    hot = _learner(tmp_path / "hot", monkeypatch,
-                   *_eval_cli(tmp_path, "0.7"), "--rl-overlap-eval")
-    with pytest.raises(ProfileError, match="greedy eval"):
-        entry.execution_profile_for(_miles_args(hot), launch, spec, yeto_policy_sync=False,
-                                    expected_sha256=spec.sha256())
-
-
-def test_default_run_without_eval_never_flushes(tmp_path, monkeypatch):
-    args = _learner(tmp_path, monkeypatch)
-    assert args.eval_interval is None
-    log = []
-    driver, runner = _island(tmp_path, monkeypatch, _miles_args(args), _Http(log))
-    assert not driver.rollout._isolate_eval_cache
-    driver.run()
-    runner.close()
-    assert not [e for e in log if e[0] == "flush"]
-
-
-def test_busy_engine_is_retried_then_the_run_fails_closed(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter.rollout import EvalIsolationError
-
-    args = _learner(tmp_path, monkeypatch, *_eval_cli(tmp_path))
-    log = []
-    http = _Http(log)
-    http.flush_status = [400, 200]  # first engine busy once, then flushed
-    driver, runner = _island(tmp_path, monkeypatch, _miles_args(args), http)
-    driver.rollout._sleep = lambda s: None
-    driver.run()
-    assert sum(1 for e in log if e == ("flush", ENGINES[0])) == 3  # 2 for r0 + 1 for r1
-    pool = driver.rollout
-    pool._http_flush = lambda url, headers: 400
-    with pytest.raises(EvalIsolationError, match="refused 3 times"):
-        pool.flush_engine_caches(9, attempts=3)
-    runner.close()
+    args = _learner(tmp_path, monkeypatch, "--rl-deterministic-trainer")
+    environ = {}
+    learner.apply_ports_infra_switches(args, SimpleNamespace(yeto_rl_learner_id=0), environ)
+    assert environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] == "0"
+    assert environ == DETERMINISM_ENV
+    seen = {}
+    ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
+    connect_island_ray(environ={"RAY_ADDRESS": "10.0.0.1:6379", **environ}, ray_module=ray)
+    workers = seen["runtime_env"]["env_vars"]
+    assert {k: workers[k] for k in DETERMINISM_ENV} == DETERMINISM_ENV
 
 
 # ------------------------------------------------------------------ A2+ / 1.7 load samples

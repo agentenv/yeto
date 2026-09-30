@@ -323,23 +323,6 @@ def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _http_flush(url: str, headers: dict[str, str], timeout_s: float = 30.0) -> int:
-    """GET ``url`` (SGLang ``/flush_cache``); the HTTP status (400 = engine busy)."""
-    import urllib.error
-    import urllib.request
-
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
-            return int(response.status)
-    except urllib.error.HTTPError as error:
-        return int(error.code)
-
-
-class EvalIsolationError(RuntimeError):
-    """The rollout engines' prefix cache could not be reset before training generation."""
-
-
 # 1.7 load attribution: what the tool-wait count is when no board is wired.
 # ``stock``: Miles' own generate (no custom generate function) makes no tool
 # calls, so 0 is known; any other custom generate without a board is unknown.
@@ -392,7 +375,6 @@ class MilesRolloutPool:
         worker_manager: Any = None,
         bundles: Any = None,
         gpus_per_engine: int | None = None,
-        isolate_eval_cache: bool = False,
         load_tool_wait: Any = None,
     ) -> None:
         # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
@@ -401,14 +383,7 @@ class MilesRolloutPool:
         # 1.7 load samples read tool waits from ``load_tool_wait`` (a board,
         # TOOL_WAIT_NO_BOARD_STOCK, or None = unknown); default: the drain board.
         self._load_tool_wait = load_tool_wait if load_tool_wait is not None else tool_wait_board
-        # 2.3 (A2 criterion 5): reset every engine's prefix cache before each
-        # training generation, so an eval's cached prompts (before generate in
-        # serial, after it in overlap) never change what training generation
-        # computes. Set by the entry when evaluation is configured.
-        self._isolate_eval_cache = bool(isolate_eval_cache)
         self._capacity: dict[str, int] = {}
-        self.cache_flushes: list[dict[str, Any]] = []
-        self._http_flush = _http_flush
         self._args = args
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
@@ -467,8 +442,6 @@ class MilesRolloutPool:
         setter = getattr(self._metadata, "set_policy_token", None)
         if setter is not None:  # rollout-side group-reuse filter reads it
             setter(policy_token(policy_version, policy_hash))
-        if self._isolate_eval_cache:
-            self.flush_engine_caches(rollout_id)
         self._run(self._controller.prepare_rollout(rollout_id))
         data_pack = self._run(self._executor.get(rollout_id))
         self._offload_after_rollout()
@@ -501,42 +474,6 @@ class MilesRolloutPool:
         if not isinstance(inflight, dict):
             return None
         return {"inflight": inflight, "cordoned": data.get("cordoned") or ()}
-
-    def flush_engine_caches(self, rollout_id: int, *, http_get: Callable[[str], Any] | None = None,
-                            attempts: int = 30, retry_s: float = 1.0) -> list[str]:
-        """2.3: ``/flush_cache`` on every rollout engine; fail closed.
-
-        Engine URLs come from the fork-M3 router (every registered worker,
-        cordoned ones included). SGLang refuses (HTTP 400) while requests are
-        running or waiting; before a training generation none should be, so a
-        few retries cover a just-finished eval, then the run stops rather than
-        generating on an un-isolated cache.
-        """
-        router = self._router_inflight(http_get or _http_get_json)
-        if router is None or not router["inflight"]:
-            raise EvalIsolationError(
-                f"rollout {rollout_id}: engine URLs unknown (router /worker_inflight); "
-                "cannot reset the prefix cache before training generation"
-            )
-        key = getattr(self._args, "sglang_api_key", None)
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
-        urls = sorted(router["inflight"])
-        for url in urls:
-            for attempt in range(attempts):
-                status = self._http_flush(url.rstrip("/") + "/flush_cache", headers)
-                if status == 200:
-                    break
-                if attempt + 1 < attempts:
-                    self._sleep(retry_s)
-            else:
-                raise EvalIsolationError(
-                    f"rollout {rollout_id}: {url}/flush_cache refused {attempts} times "
-                    f"(last HTTP {status})"
-                )
-        record = {"rollout_id": rollout_id, "engines": urls}
-        self.cache_flushes.append(record)
-        print("YETO_RL_EVAL_CACHE_FLUSH " + json.dumps(record, sort_keys=True), flush=True)
-        return urls
 
     def _tool_wait_count(self) -> int | None:
         source = self._load_tool_wait

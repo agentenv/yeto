@@ -72,3 +72,45 @@
 - 修复（代码，已提交）：配置了 eval 时，每次训练 generate 之前对所有 rollout engine 调 SGLang `/flush_cache`（URL 取自 fork-M3 router `/worker_inflight`；忙时重试，最终失败即中止运行，不在未隔离的 cache 上生成）。S 与 O 的训练 generate 因此都从同一个刚 flush 的引擎状态开始，与 eval 的有无和时序无关。stdout 打印 `YETO_RL_EVAL_CACHE_FLUSH {"rollout_id", "engines"}` 作为证据。overlap 另外要求 eval 为贪心（temperature 0，缺省则取 rollout temperature 并拒绝），因为带采样的 eval 会消耗引擎 RNG，而本修复不隔离 RNG。
 - 对默认路径的影响：不配置 eval 的运行完全不变（不 flush）。配置了 eval 的 serial 运行每轮 generate 前多一次 flush：prefix cache 只影响性能，不改变采样分布；但生成文本的具体数值会与修复前的运行不同，所以修复前运行的 token 不能与修复后的运行逐位比较。既有判据都是同一批次内各 arm 之间的比较，不受影响。
 - 重跑 A2 的前提：同一计划、同一判据、三个 arm 用修复后的同一 SHA。已知残余风险（事先登记）：多 engine 时 router 的负载均衡状态也会受 eval 请求影响，A2 为单 engine（T1R1），不涉及。
+
+### L-2.3 追加：更正上一节的原因分析；运行前补充（2026-09-30 INFRA-A；判定条件未改）
+
+- **更正**：上一节（"A2 判据 5 未通过后的代码修复"）把原因归于 radix cache / KV 分配器残留，这是**错误**的；该节原文保留。更早登记的 L3(a)（"eval 改变 SGLang 采样 RNG 消耗顺序"）同样不成立。依据（独立审查 C1，证据见 gpu-b1 `evidence/infra-v2-b1/a2/{S,O}/launch.log.gz` 与 `evidence/infra-a/2.2-2.3/round3-r3b/`、`round4-r4b/`）：
+  - S、O、r3b、r4b 四次运行第 0 轮的 `rollout/rollout_log_probs`、`rollout/log_probs`、`response_len` 逐位相同。S 在 generate(0) 之前跑过 eval，生成结果却与 O 一样，说明 eval 没有改变训练生成。这与 ports 路径默认开启 `--sglang-enable-deterministic-inference`（每请求固定采样种子）一致。
+  - 分叉只出现在训练步：ppo_kl、train_rollout_logprob_abs_diff、grad_norm（S 0.4499274790，O 0.4496529400）不同，trainer 前向本身就已不同。
+  - 按 v1 token，这些运行分成两组，且与有无 eval 无关：3660f9f 组为 S、r3a、r3b、r4a；e5362df 组为 O、OD、r4b。r3b 与 r4b 都是无 eval 的 partitioned 运行，却落在不同组。
+  - 结论：trainer 侧逐次运行不确定。A2 所用的 11911b8 没有 `--rl-deterministic-trainer`。
+- **处理**：flush 机制（ffbbc79）已撤销。它还会让默认 router（没有 `/worker_inflight`）下配置了 eval 的运行全部中止（审查 H1）。overlap 的"贪心 eval"限制一并撤回。
+- **运行前补充（配置，不改判据）**：重跑 A2 时三个 arm 都加 `--rl-deterministic-trainer`，即 Megatron `--deterministic-mode` 加上 `NCCL_ALGO=Ring`、`CUBLAS_WORKSPACE_CONFIG=:4096:8`、`NVIDIA_TF32_OVERRIDE=0`，并新增 `NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`。
+  - 新增最后一项的原因：Megatron 0.19 的 `apply_determinism_to_args` 只在校验参数的那个进程里 setdefault 这个变量，而 Transformer Engine 在各 trainer rank（Ray worker）里读取它，缺省为 1。现在由 `entry.DETERMINISM_ENV` 经 `connect_island_ray` 下发到所有 Ray worker。
+  - 注意：镜像内的 Megatron 版本未在本地核对；本地参照的是 `/tmp/review-miles-venv` 中的 megatron-core 0.19.2。
+- **排查项**：
+  - LoRA dropout：A2 没有传 `--rl-lora-dropout`，缺省 0.0（`run_config._lora_dropout`），不产生 dropout RNG。
+  - TE / flash-attn：Megatron 注释称 TE 的 FlashAttention 在受支持配置下是确定性的；TE DotProductAttention 在 deterministic_mode 下若 `NVTE_ALLOW_NONDETERMINISTIC_ALGO` 不为 0 会直接报错。本次补上该变量后，不会出现"开关打开但 TE 静默走非确定算法"的情况。
+  - `torch.use_deterministic_algorithms(True)` 同样只在校验参数的进程里调用；各 rank 是否生效未验证，由下面的确认实验检验。
+  - 其他未排除的来源：cuBLAS 算法选择随机器而异（不同物理 H100 或驱动）。
+
+### L-D0 trainer 确定性确认实验（不计入任何 task；待主 agent 批准，未上卡）
+
+- 目的：确认 `--rl-deterministic-trainer` 能让相同配置的两次运行逐位一致，这是重跑 A2 的前提。
+- 代码：本节所在提交（infra-a），镜像为运行当日 integ-decl 的 `MILES_NEXT_IMAGE` digest（记录到证据目录）。
+- 配置：Modal `H100!:2`（`--modal-gpu-exact`，运行前断言 `nvidia-smi` 为 H100 80GB HBM3），T1R1 fixed-partition，Qwen3-0.6B LoRA r16，gsm8k（与 A2 相同的 model/data revision），`--total-steps 3 --seed 17`，strict-avg 单岛加本机 head（同 A2），不配置 eval，`--rl-deterministic-trainer`，`--rl-observe-timeline`。两次运行 D1、D2 参数完全相同，只有前缀不同（`infra-a-d0-{1,2}-<UTC 日期>`），依次运行。
+- 记录：每次运行的 GPU UUID、驱动版本、镜像 digest；launch.log 中确定性变量在各 rank 的实际值（`NVTE_ALLOW_NONDETERMINISTIC_ALGO` 等），缺失即记为"环境未确认"。
+- 判据（事先固定）：
+  1. D1、D2 均 rc=0，无 `rl_strict_failure`。
+  2. D1 与 D2 的 `rl_publication` 中 v1/v2/v3 的 `rl/policy_token` 逐位相同。
+  3. 辅助记录（不作判定）：逐轮 grad_norm、ppo_kl、train_rollout_logprob_abs_diff 是否逐位相同。
+- 结论规则：判据 1、2 都满足，则确定性开关可用，按原判据重跑 A2（三个 arm 都加该开关）。判据 2 不满足，则记为"当前确定性开关不足以让 trainer 逐次运行一致"；不重跑 A2，下一步按辅助记录定位（前向或反向）后另行计划。不对同一失败重复启动。
+- 费用：预计每次约 15 min（含镜像拉取与预热）× 2×H100! × $3.95/GPU·h ≈ $1.98，两次约 $3.95。硬超时为外层 30 min，另加独立 watchdog 35 min 执行 `modal app stop`；最坏 2×2×35/60×3.95 ≈ **$9.2**。
+- 回收：结束后拉取磁带与 launch.log，`modal app stop -y` 并用 `modal app list` 核实 0 tasks。
+
+### L-1.7 追加：运行前补充（2026-09-30 INFRA-A；判定条件未改）
+
+- A2+ 各次运行必须带 `--rl-elastic`（及其必需参数 `--rl-elastic-resources`/`--rl-elastic-initial-config`；run_config 只在该开关下设置 `use_miles_router`）。原因：`rl_load_sample` 的全部字段都依赖 fork-M3 Miles router 的 `/worker_inflight`，默认的 Rust sglang_router 没有这个端点，此时 `load_sample()` 返回 None，不会发任何样本事件。W-tool 还需 `--custom-generate-function-path yeto.rl.tool_wait_workload.generate --rl-test-tool-delay-s 5`，工具等待才会计入 ToolWaitBoard。
+- 字段来源：
+  - `running_requests`、`queued_requests`：SGLang `/get_load`；
+  - `engine_capacity`：SGLang `/server_info` 的 `effective_max_running_requests_per_dp`；
+  - `tool_wait_trajectories`：ToolWaitBoard，stock generate 记 0，其他自定义 generate 记 None；
+  - `load_class`：`classify_load` 的结果，任一输入未知则为 `"unknown"`；
+  - `ready_groups`：rollout 中途不可观测，记 None。
+- 已知缺口（审查 L1 同类问题，本节不修）：`/get_load` 每个 DP rank 一项，代码已对所有 rank 求和；`engine_capacity` 在 `internal_states` 缺失时只能退回单个 `max_running_requests`。
