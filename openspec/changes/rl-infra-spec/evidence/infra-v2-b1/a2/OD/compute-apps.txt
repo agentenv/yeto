@@ -1,0 +1,299 @@
+2026-09-30T06:14:30Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:14:44Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:14:58Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:15:13Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:15:27Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:15:41Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:15:55Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:16:09Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:16:24Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:16:38Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:16:52Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:17:07Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:17:21Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:17:35Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:17:50Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:18:04Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:18:24Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:18:38Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:18:53Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:19:07Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 692 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 682 MiB
+2026-09-30T06:19:21Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 33754 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 33744 MiB
+2026-09-30T06:19:36Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 33882 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 33872 MiB
+2026-09-30T06:19:50Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34390 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34380 MiB
+2026-09-30T06:20:05Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34462 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34452 MiB
+2026-09-30T06:20:19Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34514 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34504 MiB
+2026-09-30T06:20:33Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34560 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34550 MiB
+2026-09-30T06:20:47Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34644 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34634 MiB
+2026-09-30T06:21:01Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34804 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34794 MiB
+2026-09-30T06:21:17Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34572 MiB, 9 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34534 MiB
+2026-09-30T06:21:31Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34678 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34668 MiB
+2026-09-30T06:21:45Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34682 MiB, 0 %
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34672 MiB
+2026-09-30T06:21:59Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 526 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 518 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:22:13Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3118 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3110 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:22:28Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3118 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3110 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:22:42Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3118 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3110 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:22:56Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3118 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3110 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:23:10Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3118 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3110 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:23:24Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3118 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3110 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:23:40Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3118 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3110 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:23:54Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3118 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3110 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:24:08Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3158 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3148 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:24:22Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3158 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 34702 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3148 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 34692 MiB
+2026-09-30T06:24:36Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 3888 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35540 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 3878 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35530 MiB
+2026-09-30T06:24:51Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4039 MiB, 2 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 4028 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:25:05Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 5761 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 5750 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:25:19Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 6075 MiB, 29 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 6064 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:25:33Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 7603 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 7592 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:25:47Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 7603 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 7592 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:26:02Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 7603 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 7592 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:26:16Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 7603 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 7592 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:26:30Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 7603 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 7592 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:26:44Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 7603 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 7592 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:26:58Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 7603 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35610 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 7592 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35600 MiB
+2026-09-30T06:27:13Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 8109 MiB, 35 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 8098 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:27:27Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:27:41Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:27:55Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:28:09Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:28:24Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:28:38Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:28:52Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 34 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:29:06Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:29:20Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:29:35Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:29:49Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:30:03Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 4 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:30:17Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:30:31Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 9015 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 35600 MiB, 0 %
+GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 1, /bin/dumb-init, 9004 MiB
+GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 1, /bin/dumb-init, 35590 MiB
+2026-09-30T06:30:46Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:31:00Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %
+2026-09-30T06:31:15Z
+0, GPU-2794556e-fd1d-a4d4-81b0-2544d97cebaf, 4 MiB, 0 %
+1, GPU-68ae4503-bcca-5fa1-ffb6-319a49f47baa, 4 MiB, 0 %

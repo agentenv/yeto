@@ -1,0 +1,1 @@
+--total-steps 6 --rl-placement fixed-partition --rl-rollout-gpus 1 --rl-standby-gpus 1 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-3r.json --rl-elastic-initial-config T1R1S1

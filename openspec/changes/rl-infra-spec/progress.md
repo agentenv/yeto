@@ -686,3 +686,45 @@
 - 已知遗留：E3 trainer 边经 `publish_members` 给新成员重发时，不写 `rl_member_publication` 记录（E1 路径有）；因 A8=no-go，A9 不运行，列为已知遗留，若将来重开 trainer 边需补。
 - 其余遗留：F-R1 相关的 A9 拓扑前提（plan-v4/v6）；L-3/L-4 已知限制。
 - 状态：B3 合计 ≤$11.63；无运行中的 Modal app、无残留进程。
+
+## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
+- 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
+- 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。
+- task 状态：3.3、3.4、3.5、3.7 未完成（等待代码；3.7 ⑤⑥ 环境阻塞）；2.3（A2）未完成（等待代码：launcher 不转发 eval temperature，贪心 eval 无法设置）；1.7（A2+）未完成（等待代码：observe 无 launcher 入口、无工具负载）。本批未勾选任何 task。
+- 费用：≤$2.91（f0 $0.42、fe1fp $1.56、fe1 $0.93、nsmoke $0），全部 Modal L40S。本批预算 $127（v2 8 卡档 $170 按 2.95/3.95 折算）。资源：Modal app ap-4WHOoo6jjpVNP3CkJ8DT1p / ap-M16C4QJ9WiiU1KPdPyWua2 / ap-F4XpsACPevWqjbkXVjcuyC 均 stopped/0 tasks；sky 无集群、nebius 无实例；本地进程已清理。
+- 其他发现：Nebius H100 SkyPilot 目录价 $3.85/GPU·h（非 v2 所写 $2.95），与 Modal H100! $3.95 基本持平，且 Nebius 只有 1/8 卡规格；attestation 指纹无离线计算入口，需先跑同参数运行取 `rl_driver_start.runtime_fingerprint`。
+- 需要的代码修复（交代码负责人）：(1) F-R1 fork 声明停止 cell + yeto 把声明 cell id 传给 fork 并与在役成员名统一；(2) launcher 转发 `--eval-temperature`（A2）；(3) observe 开关与工具负载/tool_wait_board 接线（A2+、A4b）；(4) E1-B 权重覆盖注入、E1-D ③④ stop_cells 半失败注入、⑦ fork 重启入口；(5) 可选：sky 0.13 私有镜像登录序列化、Nebius 不用 spot。
+- 下一步：以上 (1) 合入并重建镜像后，先重跑 F-E1（≈$1–3），通过再按 §9.3/§9.6 跑 E1-A 基线、E1-A、watchdog 用例（Modal H100!:8，最坏合计 ≈$95）。
+
+## GPU-B1 续（2026-09-30 05:37–07:05Z）
+- A2（L-2.3）：S/O/OD 三 arm 在 Modal H100!:2 完成（代码 11911b8）。判据 1、2、3、4、6 通过；**判据 5 硬条件未通过**（S 与 O 自 v1 起 policy token 不同，样本身份与奖励相同；与事先登记的 L3(a) RNG 消耗顺序差异一致）→ 2.3 未完成，不勾选。证据 `evidence/infra-v2-b1/a2/RESULT.md`。费用 ≤$6.98。
+- A2+（L-1.7）：本地核查不通，等待代码（`rl_load_sample` 无 tool-wait/queued/capacity 字段，classify_load 无法计算）。见 gpu-plan-v2 §9.8。
+- F-E1 重跑（F-R1 镜像 db815884）：新 cell 按 fork id 启动成功；发布阶段因缺 `--use-miles-router` 失败 → REBUILT_OLD；down 未执行。缺口：launcher 无 `--use-miles-router` 入口。证据 `evidence/infra-v2-b1/fe1r/RESULT.md`。费用 ≤$2.92。
+- F-E2：本地 dry-run 通过（`evidence/infra-v2-b1/fe2/`），未上卡（F-E1 失败即停；后续须合并 3f88c1d 并带 `--modal-retries 0 --modal-timeout-s`）。
+- 本批累计 ≤$12.99；所有 infra-v2-b1-* Modal app stopped/0；本地进程已清理。
+
+## GPU-B1 续 2（2026-09-30 07:05–09:00Z）
+- F-E2、F-E1 第三次：Modal L40S 无容量（`modal app logs`：waiting to be scheduled on a GPU_L40S worker），均未起容器，≈$0；F-E2 由进度看门狗 20 min 停止。未得观察项。
+- L-D0：D1、D2 rc=0，v1–v3 token 逐位相同 → 通过（`evidence/infra-v2-b1/ld0/RESULT.md`），≤$4.21。
+- A2 重跑（加 --rl-deterministic-trainer）：S2 rc=0；O2 训练完整且判据 2/3/5/6 通过（S2 与 O2 token 与 eval 分数全同），但 launcher 因磁带最后一条 `rl_learner_finalized` 收集竞态返回 rc=3 → 判据 1 不满足，链条停止，OD2 未跑。2.3 仍未完成；需 launcher 修复磁带完整性判定。≤$5.15（`evidence/infra-v2-b1/a2/rerun2/RESULT.md`）。
+- hrun/mrun 已加 `--modal-retries 0 --modal-timeout-s <硬超时+5min>` 与 20 min 进度看门狗。
+
+## GPU-B1 暂停点（2026-09-30 09:59Z，用户下班暂停）
+- F-E1 第四次（3×A10G，代码 37155d8，镜像 2cc5cc52/Miles e3a11ab3）：**通过**——up/down 均 SUCCEEDED、fork cell id、旧成员不变（`evidence/infra-v2-b1/fe1r4/RESULT.md`）。
+- A2 第三次（代码 37155d8，三 arm 同 SHA，含 --rl-deterministic-trainer）：S3 rc=0、O3 rc=0；S3 对 O3 判据 2、3、5、6 通过（`evidence/infra-v2-b1/a2/rerun3/partial-analysis-S-O.json`）；**OD3 在运行中按用户指示停止（rc=143）**，判据 1（OD）、3（OD）、4 未评估 → 2.3 仍未完成。
+- 继续点：在同一 SHA 37155d8（或主 agent 指定的新 SHA；若换 SHA 则三 arm 全重跑）补跑 OD3，然后用 `a2/analyze_a2.py rerun3/S rerun3/O rerun3/OD` 判定。之后按主 agent 批准执行 A4（8 卡 H100，代码合并 integ-decl 4dcc52b；先写 §9 A4 计划、8 卡 dry-run、调度探测、`--rl-print-attestation-fingerprint` 取指纹）。F-E2 等新镜像（已是 2cc5cc52，可在 A10G 上跑）。
+- 本批累计 ≤$33.60（上界）。所有 infra-v2-b1-* Modal app stopped/0；本地 launcher/syncer/watchdog/puller 已终止。
+
+## GPU-B1 恢复后（2026-09-30 11:42Z–）
+- A2 OD 补跑（同 SHA 37155d8）rc=0；三 arm 判据 1–6 全部通过（`evidence/infra-v2-b1/a2/rerun3/RESULT.md`）。**1.4 勾选**（X9 满足，依赖 1.2 已勾）；**2.3 GPU 验收通过但未勾选**（依赖 1.7、2.2 未勾）。
+- A4：计划 gpu-plan-v2 §9.14 已提交，8 卡 dry-run 9 passed。调度探测：8×H100! 10 分钟以上未调度，Modal 报"workspace concurrency limits reached (… at 10 gpus)"——工作区 GPU 并发上限 10，其他 agent 正占用 → A4 暂停，待主 agent 协调 GPU 配额/时段。
+- A5 执行计划 gpu-plan-v2 §9.15 与 A4 用例费用表 §9.16 已提交（不上卡）；A5 两岛本地 dry-run 4 passed。A4 暂停，等用户决定范围/预算。
+- A4（Nebius 8×H100，代码 47efd25）：E1-A 基线+切换完成——(a)(b)(d)(e)(f)(g)+E1-E 通过，(c) 按事件 policy_version 口径未通过（成员变化在 v2 发布后生效，发布事件晚一轮体现）→ 3.4 不勾。E1-B：注入执行但 LoRA 下无效（up SUCCEEDED，应 REBUILT_OLD）→ 3.5 未完成，失败即停；本 agent 的 router 采样端口与 probe 解释器需修正。其余 A4 用例未跑。累计 ≤$77.13。
+
+## GPU-B1 交接点（2026-09-30 15:10Z）
+- 完成：A2（L-2.3）三 arm 同 SHA 判据全过 → 1.4 已勾，2.3 GPU 通过待依赖；F-E1（A10G）通过；L-D0 通过；Nebius 冒烟通过。
+- A4：E1-A (c) 未通过（3.4 未勾），E1-B 注入无效（3.5 未完成），watchdog 未完成（自检失败后修复、重跑被交接中止），E1-D/E1-C 未跑。A5 仅计划与 dry-run。F-E2、A2+ 未跑。
+- 继续方式与脚本路径见 gpu-plan-v2 §9.19。
+- 运行脚本（本机，非仓库）：`/home/michael/work/gpu-b1-runs/`：`n2run.sh`（Nebius no-sync 岛，含 autostop/watchdog/20 min 进度看门狗/ssh puller）、`n2inwatch.sh`+`inwatch.py`（容器内按磁带相位写 inbox，同时启动 `router_sampler.py`）、`router_sampler.py`（节点 IP 自动发现 Miles router、0.5 s 采样 /worker_inflight，2 s 采样 compute-apps）、`run_probe.sh`+`fork_probe.py`（用 learner 同一解释器/环境调用 fork：membership、weight versions、cell statuses、stale ACK、旧 epoch）、`selfcheck.sh`（首个 generate 后自检采样器与探针，不可用即 nstop）、`after_term.sh`（事务终态后探针+停机）、`nstop.sh`（拉证据、sky down、nebius API 核实）、`arun.sh`/`mrun.sh`/`hrun.sh`（Modal 版）。参数：`cfg/a4-args.txt`、`cfg/resources-8.json`、`cfg/attestation-8.json`（指纹 2d0a00f4，仅对代码 47efd25 的 argv 有效）。注意：`router_sampler.py` 与 `run_probe.sh` 的修复（节点 IP、`[y]eto.rl.learner`）尚未在真机上验证过。
+- 资源：Modal 本 agent app 全部 stopped；Nebius 实例 0；sky 无集群；本地进程已停。累计 ≤$92.58。
+- 交接停止补充：A4 watchdog 重跑实际 ≤$5.39（14:57:48–15:08:18），台账已标“交接停止”。Nebius 遗留孤儿安全组 vpcsecuritygroup-e00a60g9g8z4kdhc83 已由主 agent 记入交接文档，本 agent 未处理。
