@@ -630,3 +630,7 @@
 - A2 第三次（代码 37155d8，三 arm 同 SHA，含 --rl-deterministic-trainer）：S3 rc=0、O3 rc=0；S3 对 O3 判据 2、3、5、6 通过（`evidence/infra-v2-b1/a2/rerun3/partial-analysis-S-O.json`）；**OD3 在运行中按用户指示停止（rc=143）**，判据 1（OD）、3（OD）、4 未评估 → 2.3 仍未完成。
 - 继续点：在同一 SHA 37155d8（或主 agent 指定的新 SHA；若换 SHA 则三 arm 全重跑）补跑 OD3，然后用 `a2/analyze_a2.py rerun3/S rerun3/O rerun3/OD` 判定。之后按主 agent 批准执行 A4（8 卡 H100，代码合并 integ-decl 4dcc52b；先写 §9 A4 计划、8 卡 dry-run、调度探测、`--rl-print-attestation-fingerprint` 取指纹）。F-E2 等新镜像（已是 2cc5cc52，可在 A10G 上跑）。
 - 本批累计 ≤$33.60（上界）。所有 infra-v2-b1-* Modal app stopped/0；本地 launcher/syncer/watchdog/puller 已终止。
+
+## GPU-B1 恢复后（2026-09-30 11:42Z–）
+- A2 OD 补跑（同 SHA 37155d8）rc=0；三 arm 判据 1–6 全部通过（`evidence/infra-v2-b1/a2/rerun3/RESULT.md`）。**1.4 勾选**（X9 满足，依赖 1.2 已勾）；**2.3 GPU 验收通过但未勾选**（依赖 1.7、2.2 未勾）。
+- A4：计划 gpu-plan-v2 §9.14 已提交，8 卡 dry-run 9 passed。调度探测：8×H100! 10 分钟以上未调度，Modal 报"workspace concurrency limits reached (… at 10 gpus)"——工作区 GPU 并发上限 10，其他 agent 正占用 → A4 暂停，待主 agent 协调 GPU 配额/时段。
