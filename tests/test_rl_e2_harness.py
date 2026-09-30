@@ -68,8 +68,11 @@ class Driver:
         self.published_state = self.published_version = None
         self.expected_token = "t"
         self.sync = SimpleNamespace(start=lambda d: SimpleNamespace(rollout_id=0, state=State(0)))
-        self.publisher = SimpleNamespace(publish=lambda state: None)
+        self.publisher = SimpleNamespace(
+            publish=lambda state: (_ for _ in ()).throw(AssertionError("no re-publication")))
         self.rounds_completed = 0
+        self.colocated = True  # MilesTrainerGroup.onload is a no-op without offload_train
+        self.policy_state = SimpleNamespace(export=lambda: self.published_state)
 
     def handshake(self):
         pass
@@ -93,9 +96,8 @@ class Driver:
         self.local_step += 1
         self.publish(State(rid + 1), rollout_id=rid + 1)
 
-    def rebuild_trainer(self, rebuild, *, cut_policy_hash):
-        assert cut_policy_hash == self.published_state.policy_tensor_hash()
-        return rebuild()
+    def rebuild_trainer(self, rebuild, *, cut_policy_hash):  # must not be used by the harness
+        raise AssertionError("the harness must not re-publish through driver.rebuild_trainer")
 
 
 @pytest.fixture

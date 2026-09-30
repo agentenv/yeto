@@ -14,9 +14,9 @@ Sequence (plan-v3 §1; one learner run per configuration C1/C2):
 1. handshake, start, publish; two normal rounds (``driver.run_round``);
 2. at the safe point: ``save_cut`` (cut C0);
 3. G-4.2 (g): ``restore_cut`` on the live trainer -> must be refused, state unchanged;
-4. G-4.3 arm A: re-publish the same policy, generate the frozen batch B3,
-   train B3 on the live trainer (refs retained), read back every rank's summary;
-5. ``driver.rebuild_trainer`` -> ``rebuild_same_shape`` whose ``restore``:
+4. G-4.3 arm A: generate the frozen batch B3, train B3 on the live trainer
+   (refs retained; no re-publication in either arm), read back every rank's summary;
+5. ``rebuild_same_shape`` whose ``restore``:
    G-4.2 (a)-(f) on the freshly built trainer (each refused, state unchanged),
    then the valid restore of C0 (digests checked by ``restore_cut``);
 6. G-4.3 arm B: train B3 on the rebuilt trainer, read back, compare with arm A
@@ -237,16 +237,20 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
     rec.criterion("G-4.2(g) live restore refused, state unchanged", g_ok and g_unchanged,
                   error=g_err, unchanged=g_unchanged)
 
-    # 4. G-4.3 arm A on the live trainer
-    state = driver.published_state
-    driver.publisher.publish(state)  # symmetric with the rebuild's re-publication
+    # 4. G-4.3 arm A on the live trainer. No re-publication in either arm: the
+    # frozen batch needs no rollout, and on a colocated island a second
+    # publish of an already loaded policy makes SGLang fail (resume of
+    # non-offloaded weights; GPU C1 2026-09-30).
     pre_a = _summaries(ctx)
     rec.criterion("G-4.3 arm A pre-step state == cut",
                   {k: (v["state_digest"], v["rng_digest"]) for k, v in pre_a.items()}
                   == {k: (v["state_digest"], v["rng_digest"]) for k, v in saved.items()})
     batch = driver._generate(rid)  # the frozen batch B3 (same policy token)
+    colocated = bool(getattr(driver, "colocated", False))
     with trainer.retained_payloads():
         try:
+            if colocated:  # _generate offloaded the trainer (driver order: onload, train)
+                trainer.onload()
             trainer.train_step(batch)
             grad_a = trainer.last_grad_norm
             post_a = _summaries(ctx)
@@ -258,16 +262,18 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
                 return restore()
 
             before_cursor = dict(driver.rollout.data_cursor())
-            result = driver.rebuild_trainer(
-                lambda: rebuild_same_shape(
-                    trainer, args=ctx.miles_args, rollout_executor=ctx.rollout_executor,
-                    actor=ctx.actor, run=ctx.runner.run, restore=restore_with_rejections,
-                    rollout=driver.rollout, worker_manager=ctx.worker_manager, rebuild=ctx.rebuild,
-                ),
-                cut_policy_hash=manifest.progress.policy_hash,
+            # rebuild_same_shape directly (not driver.rebuild_trainer): no
+            # re-publication, see arm A; the restored policy is checked below.
+            result = rebuild_same_shape(
+                trainer, args=ctx.miles_args, rollout_executor=ctx.rollout_executor,
+                actor=ctx.actor, run=ctx.runner.run, restore=restore_with_rejections,
+                rollout=driver.rollout, worker_manager=ctx.worker_manager, rebuild=ctx.rebuild,
             )
             rec.step("rebuilt", outcome=result.outcome, generation=result.generation,
                      attempts=result.attempts)
+            restored_hash = driver.policy_state.export().policy_tensor_hash()
+            rec.criterion("G-4.3 restored policy hash == cut", restored_hash == manifest.progress.policy_hash,
+                          restored=restored_hash, cut=manifest.progress.policy_hash)
             rec.criterion("G-4.3 data cursor unchanged across rebuild",
                           dict(driver.rollout.data_cursor()) == before_cursor)
             rec.criterion("G-4.3 layout unchanged across rebuild", trainer.actual_layout() == layout)
@@ -280,6 +286,8 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
                               for v in pre_b.values()))
 
             # 6. arm B on the rebuilt trainer
+            if colocated:
+                trainer.onload()
             trainer.train_step(batch)
             grad_b = trainer.last_grad_norm
             post_b = _summaries(ctx)
