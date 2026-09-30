@@ -1,4 +1,4 @@
-"""Miles backend of the E3 harness (GPU container only; fork 5c1b49eb, image 5c1b49e-9f29303).
+"""Miles backend of the E3 harness (GPU container only; Miles pin and image from yeto/rl/__init__.py).
 
 Every arm is a fresh trainer in a fresh driver process: ``create_rollout_components``
 + ``create_training_models`` with ``actor_num_gpus_per_node = dp`` and the

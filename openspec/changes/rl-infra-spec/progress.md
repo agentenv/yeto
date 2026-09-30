@@ -583,3 +583,10 @@
 - **L5 已知限制**：`save_cut` 时如果部分 rank 拒绝，已经成功的 rank 会在 cut 目录留下分片。没有 manifest 时 cut 视为不存在，恢复不会使用这些分片，但它们不会被自动清理；同一 cut_id 再次保存会因分片已存在而被拒。调用方应换用新的 cut_id，或手动清理。
 - A2 rerun2 退出码 3 的原因与修复（上一代码提交）：一条 Modal 日志条目同时带了 `rl_learner_finalized` 记录和下一行 `[rl] learner 0 finalized`。收集器把整条条目当作一行解析，JSON 失败，这条记录被当作"格式损坏"丢弃，磁带因此没有 finalized 记录。现在收集器按换行切分每个条目；某条目末尾不完整、尚不能解析成记录的一段先暂存，与下一条目拼接（确实损坏的计为丢弃，后面的记录照常保留，关闭时再判一次）。Modal 日志的每一行都带岛名前缀。判定磁带完整之前的等待改为按事件返回：全部岛收到 finalized，或全部日志流结束，或到达有界时限。退出码语义不变。测试 `tests/test_rl_tape_collector_stream.py` 覆盖多行条目、跨条目半行、真损坏行、关闭时判定、最后事件晚到。
 - 全量：68F/3127P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b7.ids`）。
+
+### INFRA-E3 A8 前准备（2026-09-30；不上卡）
+- A8 数据兜底：`pack_states.py`（容器退出前把每个 (arm, tag) 的 rank 状态合并为 `packed/*.pt` + `index.json` 逐字段摘要）、`modal_run.pull_packed`（经 Sandbox 文件接口拷出并校验 sha256 后才释放容器）、`compare.py --offline`（事件 + packed 即可算 G1–G6；缺状态时报告 `incomplete`，不给判定）。DEV-GATHER 第 7 次事件的离线演练：`evidence/infra-e3/dev-gather-run7/offline_drill_RESULT.json`（G2/G3/G4/G5/G6 的事件部分可算且通过，G1 与状态比较部分 unavailable）。
+- G1 口径（plan-v5/v6）：只比较同一 cut 的源状态与恢复后状态；compare 补比 Megatron 计数与 weight_version（v3 已列，之前漏比）。C1/C2 摘要差异：两条不同 DP 的训练，FP32 主参数/动量可在末位不同而 bf16 副本相同，故 loss/grad_norm 逐位相同；G1/G4 不跨 cut 比较，不会误判；A8 的逐字段摘要会记录具体字段。
+- 审查"小修后可合入"：M-A 合并 integ-decl b2fe5dd（Miles e3a11ab3、镜像 e3a11ab-9f29303 @sha256:2cc5cc52…、`side_effect_free_state`），harness/测试从 `yeto/rl/__init__.py` 读 pin，plan-v6；重分片恢复自检要求状态键与 cut 一致（防 exp_avg/exp_avg_sq 静默丢失）；L-1 批次守卫在 `restore_cut` 与回到非目标布局的 `rebind_args` 时清除，加测试；world_size 单独测试。
+- 已知限制（审查 L-3/L-4）：重分片路径的错误类型没有与同形路径的 "refused"（拒绝且未写入）语义对齐——部分错误在写入后抛出，调用方一律按 RECOVERY_REQUIRED 处理；`resized_args` 只改 trainer 大小与 `world_size`，不更新共置模式下由 trainer 大小派生的 `rollout_num_gpus`（共置 profile 不支持 trainer 变 DP 边，4.7 用 fixed-partition）。
+- 待办：E2 f898516 进入集成分支后，把 `miles_counters` 加入 `_restore_resharded` 的 DP 复制一致性校验，并补"变 DP 后重发版本连续"测试。

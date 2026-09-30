@@ -1,4 +1,14 @@
-> **已被 `plan-v6.md` 取代**（新 pin 与恢复自检；判据不变）。保留供追溯。
+# E3 待验证计划 v6：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v5.md；运行前提交，判据与容差不变）
+
+与 v5 的差别（独立审查"小修后可合入"的 M-A、L-1）：
+- **pin 更新**：Miles `e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841`（含 fork-M5 lazy-state 修复），镜像 `ghcr.io/michaellchung/yeto-miles-ports@sha256:2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff`（tag e3a11ab-9f29303）；同时合入 yeto 侧规避 `cut_plugin.side_effect_free_state`（读取优化器状态不创建空条目，否则 exp_avg/exp_avg_sq 会静默不恢复，E2 已在 H100 上实证）。harness 与测试一律从 `yeto/rl/__init__.py` 读取 pin，不再写死；容器内仍断言 `/root/miles` 的提交等于该 pin。旧 pin（5c1b49eb、2f23a0fc）的镜像**不得**用于 A8。
+- **重分片恢复自检加强**：恢复后重新导出的每个参数的状态键（param、exp_avg、exp_avg_sq、step）必须与 cut 完全一致，缺任何一个即拒绝（此前只比较导出里存在的键）。
+- **批次守卫复位**：`restore_cut`（同形）与 `rebind_args` 回到非目标布局时清除 DP 变化批次守卫（回滚后不再误拒训练）。
+- 其余（数据兜底、G1 口径、G1–G6 判据、容差、go/no-go、费用上限 $15.8）同 v5。
+
+以下保留 v5 全文。
+
+---
 
 # E3 待验证计划 v5：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v4.md；运行前提交，判据与容差不放宽）
 

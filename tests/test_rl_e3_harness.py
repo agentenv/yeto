@@ -225,7 +225,11 @@ def test_container_script_asserts_before_running_arms():
     assert modal_run.PROFILES["a8"]["gpu"] == "H100!:2"
     # per-phase stall and server-error watchdogs, not only the Sandbox timeout
     assert f"-gt {modal_run.STALL_MINUTES * 60} ]" in dev and "503 Service Unavailable" in dev
-    assert modal_run.MILES_COMMIT.startswith("2f23a0f") and "db81588406e1" in modal_run.IMAGE
+    # pins come from yeto/rl/__init__.py (never hard-coded in the harness or here)
+    from yeto.rl import MILES_NEXT_COMMIT, MILES_NEXT_IMAGE
+
+    assert modal_run.MILES_COMMIT == MILES_NEXT_COMMIT
+    assert "docker:" + modal_run.IMAGE == MILES_NEXT_IMAGE
 
 
 def test_stall_watchdog_kills_a_silent_phase(tmp_path):
