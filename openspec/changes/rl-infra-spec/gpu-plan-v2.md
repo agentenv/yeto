@@ -310,3 +310,4 @@
 - 判据（主 agent 指定，冻结）：up 与 down 两个事务 journal 终态都为 `SUCCEEDED`；journal 中成员使用 fork cell id；旧成员（c0 对应的 fork cell）全程不变。另须在容器启动日志/manifest 中确认实际镜像 digest = db815884…、镜像内 miles HEAD = 2f23a0fc，不一致即停。
 - 预算：两次合计 ≤ $3（硬超时 (a) 20 min、(b) 40 min；最坏 3×1.95×(25+45)/60 = $6.8 超过 $3 → 两次运行的实际停止由本 agent 在达到判据后立即执行，若累计实际费用将超 $3 即停止并回报）。失败即停并回报 journal。
 - 9.9 补充（F-E1 重跑启动前）：指纹运行实际 ≤$1.17（指纹 `sha256:88ef2727…`；manifest 镜像内 miles = 2f23a0fc，launcher 拉取 digest = db815884…）。为守住 $3，F-E1 改为第 1 轮 train 时 up、第 3 轮 train 时 down，两事务终态出现后立即停止；watchdog 18 min（最坏 3×1.95×18/60 = $1.76，累计 ≤ $2.93）。判据不变。
+- 9.8 补充（F-E2 启动前，判据不变）：代码 ec249ef（合并 integ-decl 3f88c1d）；运行带 `--modal-retries 0 --modal-timeout-s 2700`（外层硬超时 40 min + 5 min），并加进度看门狗（20 分钟无新事件即拉证据后 `modal app stop`）。按 F-R1 后的约定，不再传 `--rl-elastic-cells c0`（未 declare 时该名字会被岛上拒绝），改为缺省"fork 声明的全部 cell"；launcher dry-run rc=0（3 卡）。
