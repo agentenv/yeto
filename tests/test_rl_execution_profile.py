@@ -44,10 +44,13 @@ def test_dependency_table_distinguishes_the_three_modes():
     over = {
         r["task"]: r
         for r in dependency_table(
-            _profile("partitioned-overlap", allowed_overlap={("reward", "checkpoint")},
-                     max_inflight_batches=2)
+            _profile("partitioned-overlap", allowed_overlap={("reward", "checkpoint")})
         )
     }
+    # 2.3: at age 0 a second batch can never be in flight (queue bound).
+    with pytest.raises(ProfileError, match="exactly one batch"):
+        _profile("partitioned-overlap", allowed_overlap={("reward", "checkpoint")},
+                 max_inflight_batches=2)
     # Same algorithm dependencies in every mode.
     for table in (serial, part, over):
         assert table["generate"]["depends_on_previous_round"] == ["publish[r-1]"]
