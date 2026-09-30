@@ -318,3 +318,10 @@
 - L1：`has_optimizer_state` 要求每个 (tp,pp) 覆盖全部 adapter 名；重建后的布局从 rank 读回（`actual_layout`）。L3：yeto ports 引擎不读 `args.start_rollout_id`。L2：已写入 plan-v2 §3，待 GPU 确认。
 - 补丁：`infra-e2-ports-v2.patch`、`infra-e2-entry-swappable-actor-v2.patch`；v1 已改名为 `*.v1-OBSOLETE.patch`。
 - task 状态不变：4.1 已实现；4.1b 已实现；4.2 CPU 通过；4.3 已实现；4.4、4.5 未完成。均未勾选。
+
+## LOCAL-CLUSTER 调查（2026-09-30）
+- 交付：`openspec/changes/rl-infra-spec/local-cluster-investigation.md`（只读调查，无代码改动，无云资源，无集群启动，未改 ~/.sky）。
+- 结论：head（FleetController+LocalSyncer）已可在自有机器常驻（`run_local_head.py` 已证），缺正式 CLI 入口；岛可经 ssh_harness（钉 H200）或 SkyPilot 0.13 的 ssh node pool（k3s+GPU Operator）/kubernetes。推荐 A′（本机 head 正式化 + ssh_harness 泛化，3–5 人日）先行，B（sky ssh 池）按需，暂不做常驻服务端 D。
+- 状态：报告已实现；无 task 勾选；GPU 相关全部"待本地 GPU 验证"。
+- 待用户决定：见报告 §4.2（卡型号/台数、A′ vs B/C、放开 H200 钉死、harness 路径能否作验收证据、逐位验收改同机型自比、私有镜像拉取方式）。
+- 分支 local-cluster（worktree /home/michael/work/local-cluster）。测试：未运行（仅文档）。
