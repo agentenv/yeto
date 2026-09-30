@@ -555,9 +555,12 @@ def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor
     not in the tree, or when the startup views cannot be read. Returns whether
     the edges were wired. Attested trainer edges are still required per edge.
     """
-    from .trainer_rebuild import SwappableActor
+    from .trainer_rebuild import SwappableActor, rebuild_preconditions
 
     controller = elastic.controller
+    if rebuild_preconditions(miles_args):
+        # review L2: a trainer edge rebuilds the trainer; not possible on this run
+        return False
     if (not isinstance(actor_model, SwappableActor) or elastic.pool_gpus is None
             or not callable(getattr(controller, "set_trainer_edges", None))):
         return False

@@ -163,7 +163,7 @@ def test_failed_commit_cas_without_a_durable_commit_hints_restore_old(tmp_path):
     with pytest.raises(RecoveryRequired, match="commit CAS failed"):
         ctl._commit(tx, "T4R4S0", {"engine:c0"}, cut_id="tx-1-cut")
     hint = [r for r in read_journal(tmp_path / "reconfig") if r["kind"] == "trainer_recovery_hint"]
-    assert hint[0]["action"] == "restore_old" and hint[0]["cut_id"] == "tx-1-cut"
+    assert hint[0]["action"] == "restore_old" and hint[0]["committed"] is False and hint[0]["cut_id"] == "tx-1-cut"
     assert hint[0]["config"] == "T4R2S2" and ctl.recovery_required
 
 
@@ -226,3 +226,35 @@ def test_trainer_edges_wiring_builds_miles_trainer_ops(tmp_path):
     assert (ctx["args"], ctx["global_batch_size"], ctx["micro_batch_size"]) == ("ARGS", 16, 2)
     assert ctx["ops"].view_for(("g1",)).pg_reordered_bundle_indices == [11]
     assert pool.member_gpus() == {"engine:c0": ("g2",)}
+
+
+def test_failed_commit_cas_with_unreadable_epochs_is_unknown(tmp_path, monkeypatch):
+    import yeto.rl.engine.controller as cmod
+
+    ctl = _ctl(tmp_path)
+    tx = _tx()
+    ctl._tx = tx
+
+    def conflict(**_):
+        raise EpochConflict("x")
+
+    ctl.journal.compare_and_swap = conflict
+    monkeypatch.setattr(cmod, "read_epochs", lambda *_: (_ for _ in ()).throw(OSError("gone")))
+    with pytest.raises(RecoveryRequired):
+        ctl._commit(tx, "T4R4S0", {"engine:c0"}, cut_id="tx-1-cut")
+    hint = [r for r in read_journal(tmp_path / "reconfig") if r["kind"] == "trainer_recovery_hint"][0]
+    assert hint["action"] == "recovery_required" and hint["committed"] is None
+
+
+def test_trainer_edges_are_not_wired_when_rebuild_preconditions_fail(tmp_path):
+    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor
+
+    ctl = _ctl(tmp_path)
+    ok = entry._wire_trainer_edges(
+        SimpleNamespace(rollout=None), elastic=SimpleNamespace(controller=ctl, ledger=None,
+                                                               pool_gpus=("g0",)),
+        miles_args=SimpleNamespace(global_batch_size=16, requested_load="/ckpt"), launch=None,
+        algorithm=None, actor_model=SwappableActor(SimpleNamespace(run_plugin=lambda *a: None)),
+        rollout_executor=None, runner=None, base_model_revision="r", manager=FakeManager())
+    assert ok is False and ctl._trainer_edges is None

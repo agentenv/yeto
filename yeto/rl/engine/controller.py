@@ -1030,8 +1030,9 @@ class IslandController:
         the new members/trainer running with the commit durable or not: never a
         silent continue -> RECOVERY_REQUIRED. For a trainer edge (``cut_id``)
         the recovery hint is decided from the durable epochs file (E3 v3):
-        ``last_tx_id == tx`` -> the commit is durable -> ``restore_target``;
-        otherwise ``restore_old`` from the cut."""
+        ``last_tx_id == tx`` -> ``restore_target`` (committed=True); another
+        tx -> ``restore_old`` (committed=False); epochs unreadable ->
+        ``recovery_required`` (committed=None)."""
         epochs = self.journal.epochs
         new_epoch = epochs.config_epoch + 1
         try:
@@ -1044,14 +1045,16 @@ class IslandController:
             if cut_id is not None:
                 try:
                     durable = read_epochs(self.state_dir / "reconfig")
-                except Exception as read_exc:  # noqa: BLE001 - unknown: old is the safe default
+                except Exception as read_exc:  # noqa: BLE001 - unknown: no restore hint
                     durable, why = None, f"epochs unreadable: {read_exc!r}"
                 else:
                     why = f"durable last_tx_id={durable.last_tx_id}"
-                committed = durable is not None and durable.last_tx_id == tx.tx_id
-                self._record("trainer_recovery_hint", tx_id=tx.tx_id,
-                             action="restore_target" if committed else "restore_old",
-                             cut_id=cut_id, cut_epoch=epochs.config_epoch,
+                # three states (E3 v3): durable commit / not committed / unknown
+                committed = None if durable is None else durable.last_tx_id == tx.tx_id
+                action = ("recovery_required" if committed is None
+                          else "restore_target" if committed else "restore_old")
+                self._record("trainer_recovery_hint", tx_id=tx.tx_id, action=action,
+                             committed=committed, cut_id=cut_id, cut_epoch=epochs.config_epoch,
                              config=target if committed else epochs.config_id,
                              reason=f"commit CAS failed: {exc!r}; {why}")
             self._enter_recovery(tx.tx_id, f"commit CAS failed: {exc!r}")
@@ -1147,7 +1150,8 @@ class IslandController:
 
     def _trainer_record(self, tx: _Tx, kind: str, **fields: Any) -> None:
         if kind == "phase":
-            tx.phase = fields["phase"]  # the fork mirror and cancel() read the current phase
+            with self._watchdog_lock:  # the watchdog reads tx.phase under this lock
+                tx.phase = fields["phase"]  # the fork mirror and cancel() read the current phase
             fields.setdefault("config_epoch", self.journal.epochs.config_epoch)
             fields.setdefault("fork_epoch", self._fork_epoch)
         self._record(kind, request_id=tx.request_id, **fields)

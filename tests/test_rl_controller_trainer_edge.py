@@ -85,3 +85,65 @@ def test_controller_rebuilds_old_on_failure(tmp_path):
     epochs = read_epochs(tmp_path / "state" / "reconfig")
     assert (epochs.config_epoch, epochs.config_id) == (0, "T2R2")
     assert ops.trainer.actual_layout()["dp"] == 2
+
+
+def test_commit_cas_failure_enters_recovery_with_restore_old_hint(tmp_path, monkeypatch):
+    import pytest
+
+    from yeto.rl.engine.controller import RecoveryRequired
+    from yeto.rl.engine.journal import EpochConflict, read_journal
+
+    ranks, actor, ops, built = _world_trainer(2, tmp_path)
+    pool = PoolWithStatus({"e0", "e1"})
+    ctl = _controller(tmp_path, ops)
+    ctl.open(pool)
+    ctl.request("r1", "T1R3", 0, deadline_s=600)
+    real = ctl.journal.compare_and_swap
+
+    def cas(**kw):
+        if kw["new"].config_id == "T1R3":
+            raise EpochConflict("epochs file changed behind the single writer")
+        return real(**kw)
+
+    monkeypatch.setattr(ctl.journal, "compare_and_swap", cas)
+    with pytest.raises(RecoveryRequired):
+        ctl.run_at_safe_point(_driver(pool), _snapshot())
+    hints = [r for r in read_journal(tmp_path / "state" / "reconfig") if r["kind"] == "trainer_recovery_hint"]
+    assert hints and hints[-1]["action"] == "restore_old" and hints[-1]["cut_epoch"] == 0
+    assert read_epochs(tmp_path / "state" / "reconfig").config_id == "T2R2"
+
+
+def test_commit_failing_after_the_epochs_were_written_hints_restore_target(tmp_path, monkeypatch):
+    """Review M1: os.replace succeeded, the directory fsync raised -> the commit is durable."""
+    import pytest
+
+    from yeto.rl.engine import journal as journal_mod
+    from yeto.rl.engine.controller import RecoveryRequired
+    from yeto.rl.engine.journal import read_journal
+
+    ranks, actor, ops, built = _world_trainer(2, tmp_path)
+    pool = PoolWithStatus({"e0", "e1"})
+    ctl = _controller(tmp_path, ops)
+    ctl.open(pool)
+    ctl.request("r1", "T1R3", 0, deadline_s=600)
+    real = journal_mod._fsync_dir
+    armed = {"on": False}
+    real_cas = ctl.journal.compare_and_swap
+
+    def cas(**kw):
+        armed["on"] = kw["new"].config_id == "T1R3"
+        return real_cas(**kw)
+
+    def fsync_dir(path):
+        if armed["on"]:
+            raise OSError("fsync failed")
+        return real(path)
+
+    monkeypatch.setattr(ctl.journal, "compare_and_swap", cas)
+    monkeypatch.setattr(journal_mod, "_fsync_dir", fsync_dir)
+    with pytest.raises(RecoveryRequired):
+        ctl.run_at_safe_point(_driver(pool), _snapshot())
+    monkeypatch.setattr(journal_mod, "_fsync_dir", real)
+    hints = [r for r in read_journal(tmp_path / "state" / "reconfig") if r["kind"] == "trainer_recovery_hint"]
+    assert hints[-1]["action"] == "restore_target" and hints[-1]["committed"] is True
+    assert read_epochs(tmp_path / "state" / "reconfig").config_id == "T1R3"
