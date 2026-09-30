@@ -89,6 +89,8 @@ class MilesCutBackend:
         return dp_invariant_state
 
     def export_optimizer(self, optimizer: Any, named: list) -> Any:
+        if _UNSAFE_STATE_READS[0]:  # diagnostic only: verify the fork fix without the yeto guard
+            return self._dps().export_named_optimizer_state(optimizer, named)
         with side_effect_free_state(optimizer):
             return self._dps().export_named_optimizer_state(optimizer, named)
 
@@ -164,6 +166,20 @@ def side_effect_free_state(optimizer: Any):
         for state, keys in before:
             for key in [k for k in state.keys() if k not in keys and not state[k]]:
                 del state[key]
+
+
+# Per rank process; False = default (side-effect-free reads). Only the E2 diagnostic
+# sub-run turns it on (plugin below), to check the fork-M5 fix on a real DistOpt.
+_UNSAFE_STATE_READS = [False]
+SET_UNSAFE_STATE_READS = "yeto.rl.engine.miles_adapter.cut_plugin.set_unsafe_state_reads"
+
+
+def set_unsafe_state_reads(actor: Any, *, enabled: bool) -> dict[str, Any]:
+    """Diagnostic switch (E2 plan-v6 C1 sub-run): read optimizer state WITHOUT the
+    side-effect-free guard in this rank process."""
+    del actor
+    _UNSAFE_STATE_READS[0] = bool(enabled)
+    return {"unsafe_state_reads": _UNSAFE_STATE_READS[0]}
 
 
 def _backend(actor: Any) -> Any:
@@ -409,12 +425,34 @@ def optimizer_diff(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> 
     return out
 
 
+def miles_counters(actor: Any) -> dict[str, int]:
+    """Miles trainer-process counters a rebuilt trainer must continue from.
+
+    ``weight_updater.weight_version``: every ``update_weights`` increments it and
+    the rollout executor refuses a version that goes backwards, so a rebuilt
+    trainer starting at 0 fails its first re-publication ("Engine weight version
+    went backwards: 4 -> 1"; GPU C1 plan-v6, 2026-09-30). Absent attribute -> {}.
+    """
+    updater = getattr(actor, "weight_updater", None)
+    version = getattr(updater, "weight_version", None)
+    return {} if version is None else {"weight_version": int(version)}
+
+
+def set_miles_counters(actor: Any, counters: Mapping[str, int]) -> None:
+    if "weight_version" in counters:
+        updater = getattr(actor, "weight_updater", None)
+        if updater is None:
+            raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
+        updater.weight_version = int(counters["weight_version"])
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
         "optimizer_named": backend.export_optimizer(actor.optimizer, named),
         "scheduler": actor.opt_param_scheduler.state_dict(),
         "megatron_counters": backend.megatron_counters(),
+        "miles_counters": miles_counters(actor),
     }
 
 
@@ -632,6 +670,8 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     # Validate against the rebuilt optimizer and scheduler before any write.
     merged = backend.check_optimizer(actor.optimizer, named, states)
     check_scheduler(actor.opt_param_scheduler, shard["scheduler"])
+    if "weight_version" in (shard.get("miles_counters") or {}) and getattr(actor, "weight_updater", None) is None:
+        raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
     progress["written"] = True
     with torch.no_grad():
         for n, p in named:
@@ -647,6 +687,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
     backend.set_megatron_counters(shard.get("megatron_counters") or {})
+    set_miles_counters(actor, shard.get("miles_counters") or {})
     backuper = getattr(actor, "weights_backuper", None)
     if backuper is not None:  # colocated update_weights reads the CPU backup
         backuper.backup("actor")
@@ -779,6 +820,8 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
             raise CutPluginError(f"adapter {n!r} shape/dtype differs from the rebuilt trainer")
     merged = backend.check_optimizer(actor.optimizer, named, [s["optimizer_named"] for s in shards])
     check_scheduler(actor.opt_param_scheduler, first["scheduler"])
+    if "weight_version" in (first.get("miles_counters") or {}) and getattr(actor, "weight_updater", None) is None:
+        raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
     # ---- writes ----
     with torch.no_grad():
         for n, p in named:
@@ -788,6 +831,7 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(first["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
     backend.set_megatron_counters(first.get("megatron_counters") or {})
+    set_miles_counters(actor, first.get("miles_counters") or {})  # same counter on the resharded (E3) path
     backuper = getattr(actor, "weights_backuper", None)
     if backuper is not None:
         backuper.backup("actor")

@@ -15,11 +15,11 @@ sys.modules["e2_cut_harness"] = tool  # dataclasses resolve the module
 spec.loader.exec_module(tool)
 
 
-def test_pin_check_is_against_plan_v5(tmp_path):
+def test_pin_check_is_against_plan_v6(tmp_path):
     init = tmp_path / "yeto" / "rl" / "__init__.py"
     init.parent.mkdir(parents=True)
     init.write_text(f'MILES_NEXT_COMMIT = "{tool.MILES_COMMIT}"\nX = "{tool.IMAGE_DIGEST.split(":")[1]}"\n')
-    assert tool.PLAN_VERSION == "plan-v5" and tool.check_pins(tmp_path) == []
+    assert tool.PLAN_VERSION == "plan-v6" and tool.check_pins(tmp_path) == []
     init.write_text('MILES_NEXT_COMMIT = "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"\n')
     assert len(tool.check_pins(tmp_path)) == 2
 
@@ -34,7 +34,7 @@ def test_dry_run_writes_every_run_in_plan_order(tmp_path, monkeypatch):
     assert tool.main(["--root", str(tmp_path), "--yeto-sha", "abc1234", "--prefix", "p"]) == 0
     plan = json.loads((tmp_path / "plan.json").read_text())
     names = [r["run"] for r in plan["runs"]]
-    assert names[:4] == ["c1", "c2", "c3-b1", "c3-rb"]
+    assert names[:5] == ["c1", "c1-unsafe", "c2", "c3-b1", "c3-rb"]
     assert plan["miles_commit"] == tool.MILES_COMMIT and tool.IMAGE_DIGEST in plan["image"]
     for run in plan["runs"]:
         d = Path(run["dir"])
@@ -74,7 +74,7 @@ def test_run_scripts_parse_and_carry_the_strict_guards(tmp_path, monkeypatch):
         assert subprocess.run(["bash", "-n", str(d / "run.sh")]).returncode == 0, d
         puller = (d / "puller.sh").read_text()
         assert subprocess.run(["bash", "-n", str(d / "puller.sh")]).returncode == 0, d
-        assert tool.GPU_NAME in puller and tool.MILES_COMMIT in puller and "2f23a0f-9f29303" in puller
+        assert tool.GPU_NAME in puller and tool.MILES_COMMIT in puller and tool.IMAGE_TAG in puller
         assert "guard.fail" in puller and "app stop -y" in puller and "puller.sh" in script
         assert "stall_stop.txt" in puller and str(tool.STALL_S) in puller
         assert "--modal-retries 0" in (d / "args.txt").read_text()

@@ -281,3 +281,20 @@ def test_miles_backend_export_leaves_no_empty_state_entries(monkeypatch):
         export_named_optimizer_state=export_named_optimizer_state))
     out = backend.export_optimizer(distopt, [("w", main)])
     assert list(out["entries"]) == ["w"] and not inner.state
+
+
+def test_weight_version_counter_is_carried_by_the_cut(tmp_path):
+    """GPU C1 plan-v6: a rebuilt trainer restarted its update_weights counter at 0 and the
+    rollout executor refused the re-publication (version went backwards)."""
+    rank = make_rank(0)
+    rank.weight_updater = SimpleNamespace(weight_version=3)
+    train_step(rank, _batches(1)[0])
+    s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    fresh = make_rank(4)
+    fresh.weight_updater = SimpleNamespace(weight_version=0)
+    r = restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")
+    assert "refused" not in r and fresh.weight_updater.weight_version == 3
+    assert r["state_digest"] == s["state_digest"]  # the counter is part of the verified state
+    no_updater = make_rank(5)
+    assert "weight_updater" in restore_cut_shard(no_updater, directory=str(tmp_path), files=[s],
+                                                 cut_id="c1")["refused"]
