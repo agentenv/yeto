@@ -61,3 +61,13 @@ fork `yeto/ports` 2f23a0fc（F-R1）的 cell 绑定（`rebind_cell`/`unbind_cell
 - **A9（4.7）**：role-transfer 靠 `bind_members` 做的绑定在重启后丢失；A9 f5（kill learner）因此只能以 RECOVERY_REQUIRED 结束，与 E3 plan 的写法一致。
 
 结论：在 G11 获批并实现"按 journal 重放提交的成员"之前，⑤⑥⑦ 只有在被杀事务之前的已提交配置等于启动配置时，才能得到原判据的结果；否则按原判据应判"未通过（设计限制）"。请主 agent 在运行前从 (a)/(b)/(c) 中选定。
+
+### 7.1 裁定与用例安排（主 agent 裁定，2026-09-30，运行前）
+
+主 agent 选 **(c)**。上文 (a)/(b)/(c) 与评估原文保留不改。`evidence/infra-e1/plan.md` E1-D ⑤⑥⑦ 的原判据（包括"成员 = journal 成员"）**保持不变**，只调整用例的安排，使被杀事务之前的已提交配置等于启动配置：
+
+- **⑤**：先 up 并提交（T1R1S1→T1R2S0，epoch 0→1）；再发 down（T1R2S0→T1R1S1），带 `--rl-test-kill-learner-at COMMITTED`，在 down 的 COMMITTED 处杀掉 learner。杀的是第二个事务，而"只杀一次"按 state dir 计，所以 up 事务写入 COMMITTED 时不能触发。做法：先不带 kill 开关跑 up；up 提交后用 `--rl-elastic-restart-attempts` 与同一 state dir 重启，这次才带 `YETO_RL_TEST_KILL_LEARNER_AT=COMMITTED`，然后发 down。也可以为该开关加"第 N 次命中才杀"的计数；未实现，需要时另提。重启后 journal 中 down 为 SUCCEEDED（`recovered_after_restart`），已提交配置 = T1R1S1 = 启动配置，fork 重启后的在役成员等于 journal 成员。
+- **⑥**：在首个事务（epoch 0 的 up）的 QUIESCING 处杀（`--rl-test-kill-learner-at QUIESCING`）。重启后请求为 CANCELLED，成员等于启动形状，也等于 journal 成员。
+- **⑦**：同样只在 epoch 0 上做，即首个事务之前、已提交配置等于启动配置时重启 learner（fork 随之重启，epoch 归 0）。journal 的 epoch 为 0，`restore_membership_state` 对账后事务可以继续。
+- **已知限制，不作为本轮判据**：已提交配置不等于启动配置时重启，island 转 RECOVERY_REQUIRED（fork 回到启动形状，与 journal 成员不一致）。这是 G11"首版重启回启动形状"的设计语义，记录在此，本轮不测。
+- **A9 f5**：以设计语义为预期，即 RECOVERY_REQUIRED 加 `trainer_recovery_hint`（`restore_old`，指向该 cut）。已与 `evidence/infra-e3/plan-v3.md` 第 99 行 f5 的写法核对，一致。
