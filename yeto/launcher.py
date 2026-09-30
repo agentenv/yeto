@@ -951,7 +951,7 @@ _EVAL_LAUNCH_FLAGS = (
     ("rl_eval_samples_per_prompt", "--rl-eval-samples-per-prompt"),
 )
 EVAL_ISLAND_DATA_PATH = "~/yeto-rl/eval-heldout.jsonl"
-EVAL_INLINE_MAX_BYTES = 1 << 20  # shipped inline in the run command
+EVAL_INLINE_MAX_BYTES = 96 * 1024  # shipped inline in the run command (ARG_MAX headroom)
 
 
 def _check_ports_eval(args, rl_engine: str) -> int | None:

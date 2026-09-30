@@ -327,3 +327,11 @@ def test_default_syncer_command_has_no_quorum_timeout():
     with pytest.raises(ValueError, match="need --rl-elastic"):
         launcher._check_ports_infra_switches(
             _cli(("--rl-elastic-quorum-timeout-s", "120")), "ports")
+
+
+def test_launcher_refuses_an_eval_file_over_the_inline_cap(tmp_path):
+    row = '{"prompt": "' + "x" * 1000 + '"}\n'
+    heldout = _heldout(tmp_path, row * (launcher.EVAL_INLINE_MAX_BYTES // len(row) + 1))
+    assert launcher.EVAL_INLINE_MAX_BYTES == 96 * 1024
+    with pytest.raises(ValueError, match="larger than"):
+        launcher._check_ports_infra_switches(_cli(_eval_flags(heldout)), "ports")
