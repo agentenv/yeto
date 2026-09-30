@@ -644,3 +644,4 @@
 - A2 OD 补跑（同 SHA 37155d8）rc=0；三 arm 判据 1–6 全部通过（`evidence/infra-v2-b1/a2/rerun3/RESULT.md`）。**1.4 勾选**（X9 满足，依赖 1.2 已勾）；**2.3 GPU 验收通过但未勾选**（依赖 1.7、2.2 未勾）。
 - A4：计划 gpu-plan-v2 §9.14 已提交，8 卡 dry-run 9 passed。调度探测：8×H100! 10 分钟以上未调度，Modal 报"workspace concurrency limits reached (… at 10 gpus)"——工作区 GPU 并发上限 10，其他 agent 正占用 → A4 暂停，待主 agent 协调 GPU 配额/时段。
 - A5 执行计划 gpu-plan-v2 §9.15 与 A4 用例费用表 §9.16 已提交（不上卡）；A5 两岛本地 dry-run 4 passed。A4 暂停，等用户决定范围/预算。
+- A4（Nebius 8×H100，代码 47efd25）：E1-A 基线+切换完成——(a)(b)(d)(e)(f)(g)+E1-E 通过，(c) 按事件 policy_version 口径未通过（成员变化在 v2 发布后生效，发布事件晚一轮体现）→ 3.4 不勾。E1-B：注入执行但 LoRA 下无效（up SUCCEEDED，应 REBUILT_OLD）→ 3.5 未完成，失败即停；本 agent 的 router 采样端口与 probe 解释器需修正。其余 A4 用例未跑。累计 ≤$77.13。
