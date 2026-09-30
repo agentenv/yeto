@@ -208,3 +208,18 @@ def test_refusal_is_returned_but_a_failure_after_writing_raises(tmp_path, monkey
     fresh._yeto_cut_backend.load_optimizer = boom
     with pytest.raises(RuntimeError, match="load failed"):
         restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")
+
+
+def test_side_effect_free_state_removes_entries_created_by_a_read():
+    from collections import defaultdict
+
+    from yeto.rl.engine.miles_adapter.cut_plugin import side_effect_free_state
+
+    inner = SimpleNamespace(state=defaultdict(dict))
+    inner.state["kept"] = {"exp_avg": 1}
+    leaf = SimpleNamespace(optimizer=inner)  # Megatron wrapper -> torch optimizer
+    chained = SimpleNamespace(chained_optimizers=[leaf])
+    with side_effect_free_state(chained):
+        inner.state["new-empty"]
+        inner.state["new-filled"]["x"] = 1
+    assert set(inner.state) == {"kept", "new-filled"}

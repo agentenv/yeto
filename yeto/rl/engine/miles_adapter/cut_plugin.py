@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from .state_plugin import (
@@ -86,7 +87,8 @@ class MilesCutBackend:
         return dp_invariant_state
 
     def export_optimizer(self, optimizer: Any, named: list) -> Any:
-        return self._dps().export_named_optimizer_state(optimizer, named)
+        with side_effect_free_state(optimizer):
+            return self._dps().export_named_optimizer_state(optimizer, named)
 
     def check_optimizer(self, optimizer: Any, named: list, states: list) -> Any:
         """Merge the DP shards of one (tp, pp) (DistOpt ranges) and validate against ``optimizer``."""
@@ -121,6 +123,45 @@ class MilesCutBackend:
         margs = get_args()
         for key, value in counters.items():
             setattr(margs, key, int(value))
+
+
+def _state_dicts(optimizer: Any) -> list[Any]:
+    """The per-parameter ``state`` mappings under an optimizer (ChainedOptimizer members,
+    Megatron wrappers' inner torch optimizer)."""
+    out, seen = [], set()
+    stack = [optimizer]
+    while stack:
+        obj = stack.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        stack.extend(getattr(obj, "chained_optimizers", None) or ())
+        stack.append(getattr(obj, "optimizer", None))
+        state = getattr(obj, "state", None)
+        if isinstance(state, Mapping):
+            out.append(state)
+    return out
+
+
+@contextmanager
+def side_effect_free_state(optimizer: Any):
+    """Reading optimizer state must not create state entries.
+
+    Megatron's ``_get_main_param_and_optimizer_states`` indexes the torch
+    optimizer's ``state`` defaultdict, which creates an empty entry per main
+    param on a freshly built optimizer; fork-M5's loader then sees a non-empty
+    state, skips ``_init_optimizer_states_with_dummy_values`` and its setter
+    copies only keys that exist -> exp_avg/exp_avg_sq silently not restored
+    (GPU C1 diagnostic 2, 2026-09-30). Entries created during the read that are
+    still empty are removed afterwards.
+    """
+    before = [(state, set(state.keys())) for state in _state_dicts(optimizer)]
+    try:
+        yield
+    finally:
+        for state, keys in before:
+            for key in [k for k in state.keys() if k not in keys and not state[k]]:
+                del state[key]
 
 
 def _backend(actor: Any) -> Any:

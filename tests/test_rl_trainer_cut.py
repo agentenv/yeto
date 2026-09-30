@@ -393,3 +393,28 @@ def test_optimizer_diff_splits_load_from_later_changes(tmp_path, where):
         assert "'state:exp_avg': {'differ': 2" in cut_to_load
     else:
         assert "'state:exp_avg_sq': {'differ': 2" in load_to_re.split("; rank diff")[0]
+
+
+@pytest.mark.parametrize("side_effect_free", [False, True])
+def test_reading_a_fresh_optimizer_must_not_break_the_restore(tmp_path, side_effect_free):
+    """GPU C1 diagnostic 2: a state read before the restore created empty entries, the
+    fork-M5 loader skipped its init and dropped exp_avg/exp_avg_sq. Unfixed: restore_cut
+    fails closed naming them; with side-effect-free reads: bitwise restore."""
+    from tests.rl_cut_fakes import LazyStateDistOptBackend
+
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    fresh = make_rank(1)
+    fresh._yeto_cut_backend = LazyStateDistOptBackend(side_effect_free=side_effect_free)
+    group = RankGroup([fresh])
+    from yeto.rl.engine.miles_adapter.cut_plugin import state_summary
+
+    state_summary(fresh)  # e.g. the harness' "state unchanged" read on the fresh trainer
+    trainer = _trainer(group)
+    if side_effect_free:
+        trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+        for p_saved, p_now in zip(rank.optimizer.param_groups[0]["params"], fresh.optimizer.param_groups[0]["params"]):
+            assert torch.equal(rank.optimizer.state[p_saved]["exp_avg"], fresh.optimizer.state[p_now]["exp_avg"])
+    else:
+        with pytest.raises(CutError, match="missing:exp_avg"):
+            trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
