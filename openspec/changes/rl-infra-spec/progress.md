@@ -603,6 +603,8 @@
 - 正式运行尚无判据结论：C1 v6 第 1 次（weight_version 漏项，已修）、第 2 次（比较口径，已修；不追认）、第 3 次（用户暂停）。
 - **恢复步骤**：合并最新 integ-decl → 用新代码提交重新生成 run 目录并重跑本地 dry-run → 从 C1 开始按 plan-v6 执行（C1 → c1-unsafe → C2 → C3 各行）。
 - 费用：B2 累计 ≤ $10.88。所有 E2 app 均为 stopped/0，本地无残留进程。
+- 新增 `--rl-elastic-drain-timeout-s` 与 `--rl-elastic-recovery-timeout-s`（launcher → learner → `build_elastic(timeouts=...)` → controller 的 `Timeouts.drain`/`recovery`；需带 `--rl-elastic`，数值须为正；不给时沿用 120/900，默认 argv 不变）。E1-C 用 T_drain=5；E1-D ④ 用较小的 T_recovery（配合 `--rl-test-inject-stop-failures N`，N 要大于 T_recovery 内按 1 s 间隔能发生的重试次数）。已按"写了具体数值"排查 gpu-plan-v2 §9.14（gpu-b1 工作区版本）、`evidence/infra-e1/plan.md` E1-A…E1-E、plan-3.8-4.4-v2 §1–§8：请求 deadline（controller CLI `--deadline-s`）、quorum/margin/idle、start delay、update_weights block、tool delay、stop failures、kill-at、restart attempts 都已有入口；缺入口的只有 T_drain 与 T_recovery，本次补齐。E1-A (d)(e) 的 router/nvidia-smi 采样属于运行工具，不是参数。端到端测试从真实 CLI 一直到 controller 实际使用的值。
+- 全量：68F/3169P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b9.ids`）。
 ## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
 - 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
 - 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。

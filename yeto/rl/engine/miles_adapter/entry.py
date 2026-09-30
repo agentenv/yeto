@@ -856,7 +856,22 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         # with trainer edges; every other elastic run keeps the described pool.
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
            if config.get("trainer_edges") else {}),
+        **_elastic_timeouts(config),
     )
+
+
+def _elastic_timeouts(config: Any) -> dict:
+    """``--rl-elastic-drain-timeout-s`` / ``-recovery-timeout-s`` -> controller
+    ``Timeouts`` (only when given; otherwise build_elastic's defaults)."""
+    given = {k: float(config[f"{k}_timeout_s"]) for k in ("drain", "recovery")
+             if config.get(f"{k}_timeout_s") is not None}
+    if not given:
+        return {}
+    from dataclasses import replace
+
+    from ..controller import Timeouts
+
+    return {"timeouts": replace(Timeouts(), **given)}
 
 
 def check_elastic_miles_args(miles_args: Any) -> None:
