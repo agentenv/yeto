@@ -337,3 +337,13 @@ def test_server_error_watchdog_kills_a_retrying_phase(tmp_path):
                           capture_output=True, text=True, timeout=60)
     assert "SERVER-ERRORS" in (tmp_path / "progress.log").read_text()
     assert "NOT-REACHED" not in proc.stdout
+
+
+def test_generation_keeps_the_colocated_trainer_size():
+    """DEV-GATHER run 4: a DP=1 trainer beside 2 colocated engines is refused by Miles' LoRA weight sync."""
+    import ast
+
+    src = (TOOLS / "miles_backend.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef) and n.name == "generate_frozen")
+    calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "_args"]
+    assert calls and all("actor_num_gpus_per_node" not in [k.arg for k in c.keywords] for c in calls)

@@ -9,7 +9,7 @@ with the train_parallel_config the new trainer advertised (so the scheduled
 split is exercised inside the fork's object store; the rank probe reads the
 shard back). ``generate_frozen`` writes the frozen rollouts once with
 ``--save-debug-rollout-data``, following upstream ``train.py``'s start-up
-order exactly (create rollout components -> create the DP=1 trainer ->
+order exactly (create rollout components -> create the trainer (launcher size, colocated) ->
 ``update_weights`` -> ``onload_kv`` when rollout is offloaded -> per rollout
 ``prepare_rollout`` + ``get``), no training step, so the samples come from
 the base policy. DEV-GATHER run 3 (B3) hung here: the earlier version set
@@ -89,8 +89,10 @@ class MilesBackend:
     def generate_frozen(self, count: int, progress=None) -> None:
         from miles.ray.placement_group import update_weights
 
-        args = self._args(actor_num_gpus_per_node=1, save_debug_rollout_data=self.frozen_template,
-                          load_debug_rollout_data=None)
+        # Keep the launcher's trainer size: in the colocated profile every engine shares a GPU with a
+        # trainer rank; a DP=1 trainer next to 2 engines is a "hybrid colocated+distributed" deployment
+        # whose LoRA weight sync Miles refuses (DEV-GATHER run 4, cuda_ipc.py:98).
+        args = self._args(save_debug_rollout_data=self.frozen_template, load_debug_rollout_data=None)
         executor, actor = self._open(args, trainer=True)
         try:
             if progress is not None:
