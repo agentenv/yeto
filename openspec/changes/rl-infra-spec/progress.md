@@ -186,3 +186,25 @@
 4. INFRA-E2：4.1 cut 状态审计（含 A3 算法状态与 Miles 超采样余量回收行为；已知：partial_rollout 关闭时在飞中被中止的组被丢弃，不回收）。
 5. 已知限制：TP/PP 集体导出与 DistOpt 分片主参数的组合仍拒绝；precision-aware optimizer 拒绝。
 6. 测试基线：`/tmp/integ-full.txt` 中的 94 个失败 id（环境性）；每次合入按 id 对比。
+
+## 2026-09-30（Agent INFRA-A，分支 `infra-a`，基于 ef2d6b0；GPU/云暂停，未起任何付费资源）
+
+### task 状态（五选一）
+- 2.3：**CPU 通过**（age 0 下 eval‖train/outer_sync 重叠 + guard）；X9 overlap 实验待本地 GPU（`local-gpu-plan.md` L-2.3）。未勾选。
+- 1.4：CPU 通过（新增 age 0 在途 batch=1、eval_in_flight 阻塞 cut）；X9 待 L-2.3。未勾选。
+- 1.5、1.6、2.1、2.2、2.4：状态不变（CPU 通过 / GPU 证据齐备 / 合法否定结论），依赖链卡在 1.4 与 2.3 的 GPU 验收，未勾选。
+- 1.7：未完成（CPU 部分完成；GPU 验证计划 L-1.7）。
+- 5.1：未完成（测量与选择规则已实现 + CPU 通过；依赖 3.8；计划 L-5.1）。
+
+### 提交与补丁
+- 134a438：`yeto/rl/engine/overlap.py`、`execution_profile.py`（age 0 在途 batch=1、`eval_in_flight`）、`tests/test_rl_overlap.py`、`tests/test_rl_execution_profile.py`。
+- d3629d3：`timeline.transition_cost_distribution`/`select_bottleneck`（5.1）。
+- 本节提交：`local-gpu-plan.md`（INFRA-A 部分）、tasks.md 进展。
+- 补丁（driver.py 归 INFRA-E1，未直接提交）：`/home/michael/work/infra-drafts/patches/infra-a-driver-2.3-eval-overlap.patch`，内容为 driver.py（DRIVER_MODES 加 partitioned-overlap、`evaluate_start` 参数、generate 前后与 publish 前的三个钩子、`_maybe_eval(defer=)`）、entry.py（`yeto_rl_overlap_eval` → partitioned-overlap profile、`loop_eval_starter` 接线、能力声明加 partitioned-overlap）与 `tests/test_rl_driver_overlap.py`。基于 ef2d6b0，需要 134a438 的 overlap.py；在临时 worktree 上 apply 后相关测试 52 passed。
+
+### 待批准 / 待协调
+- 主 agent 协调合入上述补丁（INFRA-E1 拥有 driver.py）。
+- learner/launcher CLI 暴露 `--rl-overlap-eval`（→ `miles_args.yeto_rl_overlap_eval`），不属于 INFRA-A 写入范围。
+
+### 下一步
+- 本地有卡后按 `local-gpu-plan.md` L-2.3 → L-1.7 顺序执行；L-5.1 等 E1 本地通过。
