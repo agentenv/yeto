@@ -41,6 +41,8 @@ DATA = ("zhuzilin/gsm8k", "0cbd9f31d91ac21a7613dcbc7fef992adac459ae")
 HARNESS_PLAN_FILE = "yeto-rl-e2-harness.json"
 STATE_DIR = "~/yeto-rl/elastic-state"
 MODAL = "/tmp/modal-venv/bin/modal"
+INWATCH = Path(__file__).resolve().parent / "e2_inwatch.py"
+GPU_NAME = "NVIDIA H100 80GB HBM3"
 HEAD_PY = "/home/michael/work/gpu-head/venv/bin/python"
 
 
@@ -73,6 +75,10 @@ class Run:
     blocked: str | None = None  # why it cannot produce evidence yet (still generated)
     hard_s: int = 5400  # plan-v3 §0: 90 min
 
+    @property
+    def gpus(self) -> int:
+        return int(self.gpu.split(":", 1)[1].split("x", 1)[0])
+
     def args(self, prefix: str) -> list[str]:
         return common_args(self.model, gpu=self.gpu, prefix=f"{prefix}-{self.name}") + self.extra
 
@@ -87,7 +93,6 @@ def _elastic_c3(extra: list[str]) -> list[str]:
     return [
         "--total-steps", "6", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
         "--rl-elastic", "--rl-elastic-resources", "{RESOURCES}", "--rl-elastic-initial-config", "T2R1S0",
-        "--rl-elastic-cells", "c0",
         # plan-v2 §0: C3 = Qwen3-1.7B, otherwise as C2 (LoRA dropout 0.05 included)
         "--rl-lora-dropout", "0.05", *extra,
     ]
@@ -158,17 +163,13 @@ def run_script(run: Run, rdir: Path, *, yeto_sha: str, source_repo: Path) -> str
     trigger = ""
     if run.rebuild_trigger:
         trigger = f"""
-# controller rebuild-trainer once two rounds are on the tape (G-4.4 / G-4.5)
+# in-container trigger: rebuild request during round 2 train -> processed at the safe point before round 3
 setsid nohup bash -c '
-until [ -f $R/rc.txt ]; do
-  n=$(grep -c "\\"rl_round_trained\\"" $R/pulled/rl-island-0.jsonl 2>/dev/null || echo 0)
-  if [ "$n" -ge 2 ] && [ ! -f $R/rebuild.sent ]; then
-    c=$(cat $R/pulled/container_id.txt)
-    HOME=$R/home timeout 1200 {MODAL} container exec $c -- sh -c "cd ~/sky_workdir && PYTHONPATH=~/miles:~/sglang/python:. python3 -m yeto.rl.engine.controller --state-dir {STATE_DIR} rebuild-trainer rb1 --expected-epoch 0 --deadline-s 900" > $R/rebuild.out 2>&1
-    touch $R/rebuild.sent
-  fi
-  sleep 10
-done' > $R/trigger.log 2>&1 &
+export HOME=$R/home
+until [ -s $R/pulled/container_id.txt ] && [ -s $R/pulled/guard.ok ]; do [ -f $R/rc.txt ] && exit 1; sleep 5; done
+c=$(cat $R/pulled/container_id.txt); b64=$(base64 -w0 {INWATCH})
+timeout 120 {MODAL} container exec $c -- sh -c "mkdir -p ~/yeto-rl && echo $b64 | base64 -d > ~/yeto-rl/e2_inwatch.py && nohup python3 ~/yeto-rl/e2_inwatch.py train 2 rb1 0 900 > ~/yeto-rl/inwatch.out 2>&1 & sleep 2; ps -eo pid,args | grep [e]2_inwatch" > $R/inwatch-arm.txt 2>&1
+echo "armed rc=$? $(date -u +%FT%TZ)" >> $R/inwatch-arm.txt' > $R/trigger.log 2>&1 &
 """
     pull_extra = ("timeout 120 $M container exec $c -- sh -c 'cd ~/yeto-rl && tar czf - e2-harness 2>/dev/null | base64 -w0' > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/e2-harness.tgz.b64\n"
                   if run.harness else
@@ -195,6 +196,15 @@ except Exception: d=[]
     echo $c > $R/pulled/container_id.txt
     timeout 60 $M container exec $c -- sh -c "cat /root/yeto-output/rl-island-0.jsonl 2>/dev/null" > $R/pulled/.t && [ -s $R/pulled/.t ] && mv $R/pulled/.t $R/pulled/rl-island-0.jsonl
     [ -s $R/pulled/gpu.txt ] || timeout 60 $M container exec $c -- sh -c "nvidia-smi --query-gpu=index,uuid,name,driver_version --format=csv,noheader" > $R/pulled/gpu.txt
+    if [ -s $R/pulled/gpu.txt ] && [ ! -f $R/pulled/guard.ok ] && [ ! -f $R/pulled/guard.fail ]; then
+      timeout 60 $M container exec $c -- sh -c "git --git-dir=/root/miles/.git rev-parse HEAD; cat /opt/yeto/image-manifest.json" > $R/pulled/image.txt
+      n=$(grep -c "{GPU_NAME}" $R/pulled/gpu.txt); total=$(grep -c . $R/pulled/gpu.txt)
+      if [ "$n" = "{run.gpus}" ] && [ "$total" = "{run.gpus}" ] && grep -q "^{MILES_COMMIT}$" $R/pulled/image.txt && grep -q "2f23a0f-9f29303" $R/pulled/image.txt; then
+        date -u +%FT%TZ > $R/pulled/guard.ok
+      else
+        date -u +%FT%TZ > $R/pulled/guard.fail; $M app stop -y {app} > $R/guard_stop.out 2>&1
+      fi
+    fi
     {pull_extra.strip()}
   done
   sleep 10

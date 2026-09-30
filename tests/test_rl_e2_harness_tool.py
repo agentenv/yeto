@@ -60,3 +60,19 @@ def test_harness_plan_is_valid_for_the_in_learner_harness():
     for run in tool.plan_runs():
         if run.harness:
             assert plan_problems(run.harness) == []
+
+
+def test_run_scripts_parse_and_carry_the_strict_guards(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(tool, "check_pins", lambda repo: [])
+    assert tool.main(["--root", str(tmp_path), "--yeto-sha", "abc1234", "--prefix", "p"]) == 0
+    for d in sorted(tmp_path.glob("p-*")):
+        script = (d / "run.sh").read_text()
+        assert subprocess.run(["bash", "-n", str(d / "run.sh")]).returncode == 0, d
+        assert tool.GPU_NAME in script and tool.MILES_COMMIT in script and "2f23a0f-9f29303" in script
+        assert "guard.fail" in script and "app stop -y" in script
+        args = (d / "args.txt").read_text()
+        assert "--rl-elastic-cells" not in args
+        if json.loads((d / "spec.json").read_text())["rebuild_trigger"]:
+            assert "e2_inwatch.py train 2 rb1 0 900" in script
