@@ -1,0 +1,62 @@
+{
+ "cispo": {
+  "argv": [
+   "--advantage-estimator",
+   "grpo",
+   "--eps-clip",
+   "0.2",
+   "--eps-clip-high",
+   "0.28",
+   "--calculate-per-token-loss",
+   "--policy-loss-variant",
+   "cispo"
+  ],
+  "yeto_rejections": [],
+  "sha256": "df42720f692e4493426b05573e03bad0836b75cd2d9b1dd9f522b05a1d0dd3f9"
+ },
+ "sapo": {
+  "argv": [
+   "--advantage-estimator",
+   "grpo",
+   "--policy-loss-variant",
+   "sapo",
+   "--sapo-tau-pos",
+   "0.9",
+   "--sapo-tau-neg",
+   "1.2"
+  ],
+  "yeto_rejections": [],
+  "sha256": "d5b5b3c77c07e8b9a4b94348b95478ada3e4206a4bb6a8a5cea03000d5398ff4"
+ },
+ "gmpo": {
+  "argv": [
+   "--advantage-estimator",
+   "grpo",
+   "--policy-loss-variant",
+   "gmpo",
+   "--gmpo-log-clip-low",
+   "0.3",
+   "--gmpo-log-clip-high",
+   "0.5"
+  ],
+  "yeto_rejections": [],
+  "sha256": "a383dafba9eb04d5dcc346c5850046c75429e0345ce4f50d70ff54cea35f0a0d"
+ },
+ "gmpo_token_REJECTED_BY_YETO": {
+  "argv": [
+   "--advantage-estimator",
+   "grpo",
+   "--calculate-per-token-loss",
+   "--policy-loss-variant",
+   "gmpo",
+   "--gmpo-log-clip-low",
+   "0.4",
+   "--gmpo-log-clip-high",
+   "0.4"
+  ],
+  "yeto_rejections": [
+   "[loss_variant_gmpo_per_token] loss.policy_loss_variant='gmpo' with loss.aggregation='token' (--calculate-per-token-loss): GMPO's loss is sequence-level; the Miles fork refuses it. Use loss.aggregation='default'"
+  ],
+  "sha256": "ec2fbc058bebb4967d03147ef3cad21499f002b71134833f40d263a4d08ee7c8"
+ }
+}

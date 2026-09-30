@@ -88,3 +88,33 @@
 - 中4：CISPO 必须显式给出 `loss.eps_clip` 与 `loss.eps_clip_high`（新拒绝 `loss_variant_cispo_clip`），两者进入哈希与 argv。
 - 低5：GMPO CP 检查加注释（调用方目前硬编码 CP=1，属防护）。低6：dry-run 输出 `launch_warnings`（跑 launch_problems，CP=1），会显示 pin 检查。
 - 5.1 完成记录已注明：仅能力检查层面放行，真实启动仍被 pin 检查阻止。
+
+## 2026-09-30（ALGO-2b 第三轮：新 pin 5c1b49eb）
+
+基于 integ-decl cbf3d22（IMG 已把 pin 更新为 fork 5c1b49eb，并已填写 `FORK_COMMITS`）。
+
+- GMPO 梯度判定改读 fork 新指标：`loss_variants.gmpo_clip_fraction(step_losses)` = Σgmpo_clip_num / Σgmpo_clip_den。缺失、非有限、负数、num>den 或分母为 0 时返回 None（此时退回 GRPO 判定）。`gmpo_gradient_rule` 读 `TrainStepMetrics.clip_fraction`。trainer 取数路径以补丁交付：`/home/michael/work/infra-drafts/patches/algo-2b-trainer-v2.patch`（基于 cbf3d22，`trainer.py` 归 INFRA-E3）。补丁内容：GMPO 下 `step_metrics().clip_fraction` 用 num/den，其余情况不变，仍为 pg_clipfrac 均值；同时补丁修改了 `tests/test_rl_miles_adapter_trainer_publish.py` 的一个用例，让它在 GMPO 下记录 num/den。已在临时 worktree 上 apply，trainer 与 cut 测试 41 通过，梯度、seq_adv、mismatch 与本 change 的测试 293 通过。design D5 已更正（此前写的"fork 的 pg_clipfrac 同口径"不成立）。
+- 新增拒绝：GMPO + `loss.aggregation="token"`（与 fork 一致）；CISPO 必须 `loss.aggregation="token"`。决定依据：spec "CISPO 数值契约"要求按 token 归一，而论文按组内总 token 数归一、Miles 默认按样本均值聚合。
+- 2.1 三方核对：论文原文逐式通过 WebFetch 读 arxiv.org HTML；差异记录在参考实现注释中：CISPO 论文基本不设下界（ε_low 取很大值），yeto 取 `loss.eps_clip`，想贴近论文可设 ≥1；CISPO 论文按组内 token 数归一，Miles 按 batch token 数；SAPO 论文是逐序列均值，与 Miles 默认聚合一致；A=0 时论文用 τ_neg，但该项为 0，不影响。
+- 4.4 解析（未含 Megatron 那一半）：见 `evidence/2026-09-30-parse-5c1b49e/README.md`；`tests/test_rl_algorithm_flags_upstream.py` 在同一环境中 20 项通过。
+- 测试：全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE` 结果为 68 failed / 2924 passed / 49 skipped / 26 errors；失败 id 集合与 `/tmp/integ-s2-base.ids` 第二列（94 条）diff 为空。本 change 的测试 100 项。`openspec validate rl-algo-loss-variants --strict` valid。
+- 任务：新勾 2.1、4.3、5.2（7.1 重跑，仍一致）；4.4 未勾（原因见 tasks 完成记录）；第 6 组未做（GPU：用户只批 rl-infra-spec 的 A1–A9）。
+
+### 待本地 GPU 验证计划（修订版，取代上文旧计划；判据事先固定）
+在 FORK-2b 草稿基础上修改：提交改为 5c1b49eb，GMPO 判据改为读 num/den，并删去"IcePop 未覆盖"一项。
+- 环境：pin/镜像 5c1b49e-9f29303（sha256:17d428a2…）；trainer v2 补丁已合入；Qwen2.5-0.5B LoRA，单岛 colocated-serial，`num_steps_per_rollout=2`，3 轮，seed 17，只跑一次，不挑 seed；运行前记录 `nvidia-smi --query-gpu=name,driver_version`。
+- 6.2 G1：每个变体用 `--rl-single-island-no-sync --rl-allow-unverified-mechanism losses:<v>`，CP=1；CISPO 另带 `--eps-clip 0.2 --eps-clip-high 0.28 --calculate-per-token-loss`。以下全部满足才算通过：
+  (a) 每轮 loss、grad_norm 有限；
+  (b) 没有零梯度误报；
+  (c) `rl_engine_selected` 的 `miles_commit` = 5c1b49eb，`rl/algorithm_spec` 含变体名与参数；
+  (d) 与同 seed 的默认 GRPO 对照，第 1 轮第 2 个 optimizer step 的 pg_loss 或 grad_norm 不相等；
+  (e) 仅 GMPO：每步 loss dict 都有 `gmpo_clip_num`、`gmpo_clip_den`，0 ≤ num ≤ den 且 den > 0；driver 事件里的 `clip_fraction` 等于 Σnum/Σden（容差 1e-6）；
+  (f) 仅 CISPO：`pg_clipfrac` 有限。
+  任一项不满足即判失败，只有找出并修复原因后才重跑。通过后，在 `entry.MILES_DECLARED` 声明该变体并附证据路径。
+- 组合冒烟（每个变体 + TIS）：已声明的 `corrections:tis`，判据同 (a)(b)(c)；GMPO 另查 (e)，且 num/den 使用 TIS 后的最终 mask（与 fork 的 IcePop/TIS CPU 测试对应）。
+- 6.3 CISPO 两岛 strict-avg（1+1 卡，3 轮，要求 6.2 通过并已正式声明，不带放行参数）：两岛 `algorithm_spec_sha256` 相同，每轮外层平均后的 canonical LoRA 哈希两岛相同。
+- 6.4：本地卡上没有云资源；记录所有进程已退出。GMPO 在 CP>1 下不在本计划内，保持启动前拒绝。
+
+### 待批准 / 交接
+- trainer v2 补丁请在 INFRA-E3 空档合入；v1 已在 cbf3d22 中。
+- 4.4 是否可按 §7b.7 的口径（钉住镜像 + 完整 parse_args，需要 CUDA 容器）补跑，由主 agent 决定。

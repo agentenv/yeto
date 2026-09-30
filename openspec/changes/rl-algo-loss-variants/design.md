@@ -55,7 +55,7 @@
 - `sapo_tau_pos`（默认 1.0）、`sapo_tau_neg`（默认 1.05）；
 - `gmpo_log_clip_low`、`gmpo_log_clip_high`（默认均为 0.4）。
 
-CISPO 复用 `eps_clip`/`eps_clip_high` 作为 ε_l/ε_h，且两者必须显式给出（进入哈希与 argv；2026-09-30 审查修正）。变体参数只在 variant 与之匹配时才进入规范化。variant 不匹配时如果设置了这些参数，按"无效字段"拒绝，以免同一语义出现两种哈希。
+CISPO 复用 `eps_clip`/`eps_clip_high` 作为 ε_l/ε_h，且两者必须显式给出（进入哈希与 argv；2026-09-30 审查修正）。CISPO 论文（MiniMax-M1 式 4）按组内总 token 数归一，而 Miles 默认按样本均值聚合，因此 CISPO 要求 `loss.aggregation="token"`（`--calculate-per-token-loss`），否则启动前拒绝；GMPO 与 `--calculate-per-token-loss` 组合启动前拒绝（与 fork 一致）；SAPO 论文为逐序列均值，即 Miles 默认聚合。变体参数只在 variant 与之匹配时才进入规范化。variant 不匹配时如果设置了这些参数，按"无效字段"拒绝，以免同一语义出现两种哈希。
 
 翻译规则分路线：
 - 路线 B：翻译为 `--policy-loss-variant` 及对应参数（实际参数名以 fork 提交为准），映射表同时登记吸收规则。
@@ -83,7 +83,7 @@ TIS、IcePop 与变体组合是允许的，但它们要等 `rl-algo-mismatch-cor
 ### D5. expects_gradient
 
 - CISPO、SAPO：存在有效 token 且 Â 不全为零时，期望非零梯度。组内 reward 方差判定保持 GRPO 语义。
-- GMPO：在上面的判定之外再加一条：如果引擎报告的 GMPO clip 比例为 1，允许零梯度。clip 比例定义为：有效且 Â≠0 的 token 中 log 空间截断生效的比例（Â=0 token 与 padding 不计入；fork 的 pg_clipfrac 同口径）。该比例经 `TrainStepMetrics.clip_fraction` 传递，不走 `masked_fraction`（开 corrections 时后者承载修正 mask）。读不到 clip 比例时，退回 GRPO 判定（保守做法：可能误报失败，但不会漏报）。
+- GMPO：在上面的判定之外再加一条：如果引擎报告的 GMPO clip 比例为 1，允许零梯度。clip 比例定义为本轮全局比例 Σgmpo_clip_num / Σgmpo_clip_den：fork（5c1b49eb）在同一最终 loss mask 下报告截断生效的 token 数与 Â≠0 的 token 数（Â 全 0 序列两者都不计入；只有比值有意义，micro-batch 平均与 CP 重复计入不影响比值）。fork 的 `pg_clipfrac` 另为逐序列均值口径，**与此不同**，规则不读它（2026-09-30 更正：此前写的“fork 的 pg_clipfrac 同口径”不成立）。该比例经 `TrainStepMetrics.clip_fraction` 传递，不走 `masked_fraction`（开 corrections 时后者承载修正 mask）。读不到 clip 比例时，退回 GRPO 判定（保守做法：可能误报失败，但不会漏报）。
 - 任何变体下，grad_norm 非有限都判为失败。
 
 ### D6. 外层同步

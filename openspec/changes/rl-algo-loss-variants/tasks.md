@@ -14,7 +14,7 @@
 
 ## 2. 参考公式与 spec 字段（与路线无关）
 
-- [ ] 2.1 新建 `tests/rl_loss_variant_reference.py`，用独立的 torch 小张量写出 CISPO、SAPO、GMPO 的参考实现（design D3），在注释中写明论文出处和公式编号，且不 import 被测代码。验证：自检用例用手算值核对 3–5 个元素。
+- [x] 2.1 新建 `tests/rl_loss_variant_reference.py`，用独立的 torch 小张量写出 CISPO、SAPO、GMPO 的参考实现（design D3），在注释中写明论文出处和公式编号，且不 import 被测代码。验证：自检用例用手算值核对 3–5 个元素。
 - [x] 2.2 在 `yeto/rl/engine/algorithm.py` 的 `loss` 组中加入变体参数（design D2）：校验、默认值、"只在匹配的 variant 下进入规范化"、不匹配时拒绝。验证：新增 `tests/test_rl_loss_variants_spec.py`，覆盖默认哈希不变（P0 golden 用例不改就能通过）、每个变体的哈希不同、非法 τ/δ 报错并指明字段、参数与 variant 不匹配被拒。
 - [x] 2.3 实现拒绝规则（design D4）：变体与 GSPO 组合、变体与 dual-clip 组合。验证：参数化单测，都在 fake 组合根中、在创建 GPU 进程之前失败，报错中给出替代方案。
 - [x] 2.4 实现各变体的 `expects_gradient` 判定（design D5）。验证：单测覆盖 CISPO 全部越界仍期望梯度、SAPO 同 CISPO、GMPO 在 clip 比例为 1 时允许零梯度、GMPO 读不到 clip 比例时退回 GRPO 判定、任何变体下 grad_norm 非有限都判失败。
@@ -31,13 +31,13 @@
 
 - [ ] 4.1 在 `michaellchung/miles` 的 `yeto/ports` 上实现：`math_utils.py` 增加 CISPO、SAPO 的逐 token 函数和 GMPO 的序列级函数（CP 全收集方式仿照 `compute_gspo_kl`）；`losses.py` 在 pg_loss 处按 `--policy-loss-variant` 分支；`arguments.py` 增加 variant 与变体参数，默认值保持原行为。验证：fork 上的 diff 只涉及这三个文件和测试；默认参数下原有 fork 测试全部通过。
 - [ ] 4.2 在 fork 上补 CPU 测试：逐元素比对参考公式（正负优势、越界、全 mask、GMPO 模拟 CP 切分），以及与 TIS、IcePop 的组合；验证 variant 缺省时 `compute_policy_loss` 路径逐元素不变。验证：fork 测试命令和结果记录在 progress.md。
-- [ ] 4.3 经用户确认后，把提交 push 到 `michaellchung/miles` `yeto/ports`（不开任何 PR），更新 yeto 中的 `MILES_NEXT_COMMIT` pin，并按现有流程重建镜像。验证：pin 指向新提交；镜像 tag 与 digest 记录在 progress.md；`git remote -v` 与 push 目标只包含 michaellchung/miles。
+- [x] 4.3 经用户确认后，把提交 push 到 `michaellchung/miles` `yeto/ports`（不开任何 PR），更新 yeto 中的 `MILES_NEXT_COMMIT` pin，并按现有流程重建镜像。验证：pin 指向新提交；镜像 tag 与 digest 记录在 progress.md；`git remote -v` 与 push 目标只包含 michaellchung/miles。
 - [ ] 4.4 yeto 侧翻译：在映射表中登记 `--policy-loss-variant` 与变体参数（含吸收与冲突检测），并把 fork 提交号写入来源记录。验证：翻译、吸收、冲突单测；在 miles-next-venv（安装新 pin）中用 upstream `parse_args` 解析生成的 argv 通过；来源记录测试确认包含提交号。
 
 ## 5. 开放声明与文档（路线实现完成后执行）
 
 - [x] 5.1 fake engine 声明 `cispo`、`sapo`、`gmpo`，供 CPU 测试使用；Miles adapter 暂不声明，第 6 组 G1 使用 P0 的 `--rl-allow-unverified-mechanism` 放行。验证：单测确认 adapter 未放行时拒绝、单岛放行时可以启动；默认 GRPO 不受影响（`tests/test_rl_argv_snapshot.py` 不改就能通过）。
-- [ ] 5.2 更新 `docs/MILES_RL.md`：写明变体的公式、参数、默认值、拒绝规则、所选路线及其升级注意事项（路线 A 的守护测试，或路线 B 的 pin 更新），并注明外层同步的正交性和"未做效果 A/B"。验证：文档中的示例命令用 `--dry-run` 执行，结果与描述一致。
+- [x] 5.2 更新 `docs/MILES_RL.md`：写明变体的公式、参数、默认值、拒绝规则、所选路线及其升级注意事项（路线 A 的守护测试，或路线 B 的 pin 更新），并注明外层同步的正交性和"未做效果 A/B"。验证：文档中的示例命令用 `--dry-run` 执行，结果与描述一致。
 
 ## 6. GPU 验证（需用户批准卡数与预算后执行）
 
@@ -59,3 +59,9 @@
 - 1.1 / 1.2 / 1.3 / 2.2–2.5 / 5.1 / 7.1–7.3：核对结果、证据与命令见 `progress.md` 的 2026-09-30 ALGO-2b 条目。
 - 未勾选：2.1（参考实现与手算自检已完成，但离线无法核对论文公式编号，原文要求写明公式编号）；第 3 组（路线 A，未选）；4.1/4.2（FORK-2b 负责）；4.3/4.4（需 fork 审查、快进 yeto/ports、IMG 更新 pin 后才能做）；5.2（文档与 dry-run 已写并核对，但所选路线的 pin/提交号尚未落地）；第 6 组（GPU 暂停，见 progress.md 的"待本地 GPU 验证"计划）。
 - 5.1 注：仅在能力检查层面放行（fake 声明、`--rl-allow-unverified-mechanism` 单岛放行通过 capability check）；真实 Miles 启动仍被 `[loss_variants]` pin 检查阻止，直到 `FORK_COMMITS` 含钉住的提交。
+
+### 完成记录（ALGO-2b 第三轮，2026-09-30，基于 integ-decl cbf3d22，pin = fork 5c1b49eb）
+- 2.1：三方都已核对。论文 CISPO（arXiv:2506.13585，式 4–5）、SAPO（arXiv:2511.20347v2，式 5–6）、GMPO（arXiv:2507.20673v3，式 4），逐式记录在 `tests/rl_loss_variant_reference.py` 注释中，差异也写在那里；GMPO 由主 agent 按官方代码 callsys/GMPO `train_zero_math_gmpo.py:675-688` 逐行核对；fork 5c1b49eb 与参考实现一致。手算自检见 `tests/test_rl_loss_variants_spec.py::test_reference_*`。
+- 4.3：pin `MILES_NEXT_COMMIT` = 5c1b49eb（IMG，cbf3d22）；镜像 tag 5c1b49e-9f29303，digest sha256:17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef；fork 仓库 `git remote -v` 只有 michaellchung/miles，`yeto/ports` = 5c1b49eb；未开任何 PR（用户 2026-09-30 同意路线 B 与 fork 提交）。
+- 5.2：`docs/MILES_RL.md` 的 "Policy-loss variants" 小节；三条示例命令按顺序执行，输出与注释一致（`evidence/2026-09-30-dryrun/dryrun.json`）。
+- 4.4 未勾：yeto 侧映射、吸收、冲突与来源记录（miles_commit=5c1b49eb）的单测都已通过；在 miles-next-venv 中以镜像内的 /root/miles（5c1b49eb）运行了 Miles 自己的参数 provider + `validate_policy_loss_variant_args`，全部通过（`evidence/2026-09-30-parse-5c1b49e/`）。但没有跑完整的 upstream `parse_args`（其中 Megatron 那一半需要 CUDA 容器，本机无 docker、无 GPU），不满足原文，由主 agent 决定是否按 §7b.7 的口径另行补跑。
