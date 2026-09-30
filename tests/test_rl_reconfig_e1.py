@@ -1075,3 +1075,30 @@ def test_watchdog_after_the_commit_point_kills_nothing(tmp_path):
     notes = [r.get("note", "") for r in read_journal(tmp_path / "state/reconfig")
              if r["kind"] == "watchdog"]
     assert notes and "after the commit point" in notes[0]
+
+
+def test_member_publication_is_on_the_tape_before_the_next_generation(tmp_path):
+    """A4 E1-A (c) audit gap: the new engines get the published policy through
+    publish_members at the up transaction; the tape records it, so the members
+    serving the next generation are auditable before the next rl_publication."""
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    _run_with_request(driver, ctl, at=1, rid="up")
+    ev = _events(tmp_path)
+    kinds = [e["event"] for e in ev]
+    i = kinds.index("rl_member_publication")
+    member_pub = ev[i]
+    assert member_pub["policy_version"] == 1
+    assert member_pub["sync/publication_members"] == ["engine:c2", "engine:c3"]
+    assert member_pub["sync/serving_members"] == [f"engine:c{k}" for k in range(4)]
+    assert member_pub["rl/policy_token"] == next(
+        e for e in ev if e["event"] == "rl_publication" and e["policy_version"] == 1)["rl/policy_token"]
+    # it comes before rollout 1's generation
+    gen1 = next(j for j, e in enumerate(ev) if e["event"] == "rl_driver_phase"
+                and e.get("phase") == "generate" and e.get("rollout_id") == 1)
+    assert i < gen1
+
+
+def test_no_member_publication_event_without_a_reconfiguration(tmp_path):
+    driver, *_ = _setup(tmp_path)
+    driver.run()
+    assert "rl_member_publication" not in {e["event"] for e in _events(tmp_path)}

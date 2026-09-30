@@ -612,6 +612,16 @@
 - 本机 head 的可达性：公网 IP 185.189.44.160 直接配在 bond0 上（无 NAT）；A2 等 Modal 运行中外部岛已连通 29400（syncer 日志里有来自外部 peer 的连接），说明入站可达；本机防火墙规则无 root 权限无法读取（未确认）。keepalive：learner socket 仍无 SO_KEEPALIVE，但没有 NAT 时不存在空闲流被丢的问题；到 Nebius 的路径是否有中间 NAT 未测，可用 `scripts/idle_flow_probe.py` 在 Nebius 侧测。
 - Nebius 配额（`nebius quotas quota-allowance list`，只读，eu-north1）：`vpc.ipv4-address.public.count` 当前使用 0，接口未返回上限（此前记录为 3）；单节点 8 卡岛需要 1 个公网 IPv4，head 在本机，够用。`vpc.allocation.count` 当前使用 4，上限未返回，可能成为限制，需要在控制台确认；`compute.instance.gpu.h100` 当前使用 0，上限未返回；`compute.gpucluster.count` 使用 1。
 - 全量：68F/3170P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b10.ids`）。
+- 实时游标（响应 E2 在 H100 上的发现：真实 Miles 的 rollout executor 是 Ray actor handle，上没有 `data_source` 属性，`live_data_cursor()` 返回 None 并退回缓存，4.4 的前后比对实际不生效）：
+  - 改为在 executor 所在的 actor 进程内读取：通过 Ray 的 `__ray_call__` 执行 `read_executor_cursor(executor)`，用 rollout_meta_hook 的字段规则读取 data_source 的游标与 buffer 长度；本地 executor 对象仍直接读取。
+  - `data_cursor()` **只返回实时值**，读不到时为 None（未知），不再退回缓存；缓存值改由 `last_batch_data_cursor()` 提供。需要实时值的调用方因此 fail closed：CutSource 在写 cut 前判 RebuildRefused；`rebuild_same_shape` 在 swap 之后读到 None 或游标变化时判 RECOVERY_REQUIRED；E2 harness 的比对在未知时报错。
+  - 测试用模拟的 ActorHandle 复现"无 data_source 属性"的路径：经 `__ray_call__` 读到实时值；actor 调用失败时为未知；游标在重建期间于 actor 内被改动，`rebuild_same_shape` 判 RECOVERY_REQUIRED（G-4.5 第 5 行的 CPU 协议检查）。
+  - **依赖**：Ray 的 `ActorHandle.__ray_call__`（Ray 2.x 为所有 actor 提供）。本机 yeto-venv 没有 ray，无法在真实 handle 上验证；若镜像内的 Ray 不支持它，读取会失败并判为未知（不会静默使用旧值），那时需要 fork 增加只读方法 `RolloutExecutor.get_data_cursor()`（新 M 项需求）。
+  - 全量：68F/3172P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b11.ids`）。
+- A4 Nebius 发现两项（不上卡）：
+  1. E1-A (c) 的审计缺口（a30fa5f）：扩容事务确实经 `Publisher.publish_members`（3.4a/3.5 的成员限定发布）把当前已发布的 policy（v2）装进新 cell，之前只在 journal 里记 `weight_admission`，磁带上没有。现在每次 `publish_members`（VERIFYING，以及 REBUILD_OLD 重启旧 cell）都会向磁带写一条 `rl_member_publication`：policy_version、token、payload/manifest 哈希、这次接收的成员 `sync/publication_members`、发布后的在役集合 `sync/serving_members`。它在下一轮 generate 之前出现，因此"第 3 轮生成所用的 v2 发布成员 = 4"可以在磁带上审计。判据文字不改；E1-A 需重跑后才能判 (c)。E3 trainer 边里的 `publish_members` 在 E3 文件中，这次未改。
+  2. E1-B 注入无效：用 base 模型快照重载新 engine 不改变 LoRA 适配器，而校验只覆盖 LoRA 权重。现改为 `--rl-test-inject-lora-perturb EPS`（取代并删除 `--rl-test-inject-weight-override`）：本进程第一次成员限定的 update_weights 把 trainer 的 LoRA 适配器临时加 EPS，发给新 engine 后立即精确恢复 trainer（恢复后核对 policy hash）。新 engine 因此持有不同的 LoRA 权重，check_weights 读回必然与发布参照不同，新 engine 不会被放行，事务走 REBUILD_OLD。CPU 测试覆盖：注入后校验失败、trainer 恢复、只注入一次；不注入时同一流程正常放行；`lora_perturber` 恢复前后 policy hash 一致。`evidence/infra-e1/plan.md` E1-B 的注入方法描述随之变更，判据不变。
+  - 全量：68F/3176P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b12.ids`）。
 ## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
 - 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
 - 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。

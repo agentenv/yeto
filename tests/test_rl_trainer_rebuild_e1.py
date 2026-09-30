@@ -503,14 +503,90 @@ def test_live_data_cursor_reads_the_executor_data_source_now():
                                         "sample_group_index": 8, "sample_index": 64}, 0)
     source.sample_offset = 12  # e.g. rollout_executor.load moved it during a rebuild
     assert pool.data_cursor()["sample_offset"] == 12
-    # unreachable data source (e.g. a remote executor): the last batch's cursor
+    # unreachable data source: unknown, NOT the cached value (fail closed)
     remote = MilesRolloutPool(inference_controller=None, rollout_executor=object(), metadata=None,
                               expected_policy=lambda: (0, "h"),
                               runner=SimpleNamespace(run=asyncio.run))
     remote._last_cursor = {"sample_offset": 4, "epoch_id": 0, "sample_group_index": 4,
                            "sample_index": 32}
     assert remote.live_data_cursor() == (None, None)
-    assert remote.data_cursor()["sample_offset"] == 4
+    assert remote.data_cursor() is None
+    assert remote.last_batch_data_cursor()["sample_offset"] == 4
+
+
+class ActorHandle:  # the name Ray's handle type has
+    """A Ray actor handle over a RolloutExecutor: no data_source attribute here;
+    ``__ray_call__.remote(fn)`` runs fn(executor) in the actor (an ObjectRef)."""
+
+    def __init__(self, executor, fail=False):
+        self._executor, self._fail = executor, fail
+
+        class _Call:
+            @staticmethod
+            def remote(fn, *args):
+                async def ref():
+                    if fail:
+                        raise RuntimeError("actor died")
+                    return fn(executor, *args)
+                return ref()
+
+        self.__ray_call__ = _Call()
+
+
+def test_live_cursor_is_read_inside_the_executor_actor():
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+
+    source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
+                             get_buffer_length=lambda: 0)
+    executor = SimpleNamespace(data_source=source)
+
+    def pool(handle):
+        p = MilesRolloutPool(inference_controller=None, rollout_executor=handle, metadata=None,
+                             expected_policy=lambda: (0, "h"),
+                             runner=SimpleNamespace(run=asyncio.run))
+        p._last_cursor = {"sample_offset": 4, "epoch_id": 0, "sample_group_index": 4,
+                          "sample_index": 32}
+        return p
+
+    handle = ActorHandle(executor)
+    assert not hasattr(handle, "data_source")  # E2's H100 finding: the old read got None
+    live = pool(handle)
+    assert live.data_cursor()["sample_offset"] == 8
+    source.sample_offset = 16  # moved in the actor (rollout_executor.load during a rebuild)
+    assert live.live_data_cursor() == ({"sample_offset": 16, "epoch_id": 0,
+                                        "sample_group_index": 8, "sample_index": 64}, 0)
+    dead = pool(ActorHandle(executor, fail=True))
+    assert dead.live_data_cursor() == (None, None) and dead.data_cursor() is None
+
+
+def test_same_shape_rebuild_sees_a_cursor_moved_in_the_actor(tmp_path):
+    """G-4.5 row 5 through the live read: the cursor moves during the rebuild."""
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import RecoveryRequired
+
+    source = SimpleNamespace(sample_offset=4, epoch_id=0, sample_group_index=4, sample_index=32,
+                             get_buffer_length=lambda: 0)
+    pool = MilesRolloutPool(inference_controller=None,
+                            rollout_executor=ActorHandle(SimpleNamespace(data_source=source)),
+                            metadata=None, expected_policy=lambda: (0, "h"),
+                            runner=SimpleNamespace(run=asyncio.run))
+    rank, actor = _trained_actor()
+    trainer = MilesTrainerGroup(args=ARGS, actor_model=actor, learner_id=0, learner_generation=0,
+                                parameter_layout_hash=lambda: "L", runner=LoopRunner())
+
+    async def fork_rebuild(args, executor, *, old_handles, worker_manager, trainer_pg_view):
+        await old_handles["actor"].dispose()
+        source.sample_offset = 12  # create_training_models -> rollout_executor.load rewound it
+        return RankGroup([make_rank(9)]), None
+
+    with pytest.raises(RecoveryRequired, match="data cursor changed"):
+        rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor,
+                           run=LoopRunner().run, worker_manager="wm", rollout=pool,
+                           rebuild=fork_rebuild, restore=lambda: None)
 
 
 def test_colocated_rebuild_does_not_republish_the_resident_policy(tmp_path):

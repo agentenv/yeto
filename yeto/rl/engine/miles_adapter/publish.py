@@ -71,11 +71,13 @@ class PublicationError(RuntimeError):
 # ``MilesPublisher._injected_block``). Unset (default) = no effect. Set by the
 # launcher's ``--rl-test-inject-update-weights-block-s``.
 INJECT_UPDATE_BLOCK_ENV = "YETO_RL_TEST_INJECT_UPDATE_WEIGHTS_BLOCK_S"
-# Test-only (plan.md E1-B, 3.5): after the FIRST member update_weights of the
-# process, reload ONE new engine (lowest cell id) from this checkpoint path via
-# SGLang's /update_weights_from_disk, so its weights differ from the published
-# policy; check_weights must then refuse to admit the new members.
-INJECT_WEIGHT_OVERRIDE_ENV = "YETO_RL_TEST_INJECT_WEIGHT_OVERRIDE_PATH"
+# Test-only (plan.md E1-B, 3.5): the FIRST member update_weights of the process
+# ships a LoRA adapter perturbed by this amount (the trainer's adapter is
+# perturbed for that one member-scoped update and restored right after), so the
+# new engines hold different LoRA weights than the published policy and
+# check_weights must refuse to admit them. (A base-checkpoint reload did not
+# change the LoRA weights the checksum covers: A4 E1-B on Nebius.)
+INJECT_LORA_PERTURB_ENV = "YETO_RL_TEST_INJECT_LORA_PERTURB"
 
 
 def injected_update_block(environ: Any = None) -> float | None:
@@ -88,32 +90,6 @@ def injected_update_block(environ: Any = None) -> float | None:
     if not value > 0:
         raise ValueError(f"{INJECT_UPDATE_BLOCK_ENV} must be a positive number of seconds")
     return value
-
-
-async def _override_engine_weights(cell: str, model_path: str) -> None:
-    """POST /update_weights_from_disk to every worker of ``cell`` (SGLang server API)."""
-    import json as _json
-    import urllib.request
-
-    from miles.utils.workers.ray_worker_manager import RayWorkerManager
-
-    manager = RayWorkerManager.get_handle()
-    infos = await manager.get_worker_infos.remote(cell)
-    if not infos:
-        raise RuntimeError(f"weight override injection: cell {cell} has no workers")
-    for info in infos:
-        addr = info.self_addrs.get("primary")
-        if addr is None:
-            continue
-        host = str(addr.host).strip("[]")
-        request = urllib.request.Request(
-            f"http://{host}:{addr.port}/update_weights_from_disk",
-            data=_json.dumps({"model_path": model_path}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST")
-        body = await asyncio.to_thread(lambda: urllib.request.urlopen(request, timeout=600).read())
-        answer = _json.loads(body or b"{}")
-        if answer.get("success") is False:
-            raise RuntimeError(f"weight override injection refused by {info.name}: {answer}")
 
 
 class InjectedBlockProbeError(RuntimeError):
@@ -258,9 +234,12 @@ class MilesPublisher:
         self.block_poll_s = 1.0
         import os
 
-        self._inject_override = os.environ.get(INJECT_WEIGHT_OVERRIDE_ENV) or None
-        self.injected_overrides: list[tuple[str, str]] = []
-        self.weight_override_injector: Any = None  # async (cell, path) -> None
+        raw = os.environ.get(INJECT_LORA_PERTURB_ENV)
+        self._inject_perturb = float(raw) if raw else None
+        self.injected_perturbations: list[tuple[tuple[str, ...], float]] = []
+        # (scale | None) -> None: perturb the trainer's LoRA adapter by ``scale``,
+        # or restore it exactly (None); wired by compose_island
+        self.perturb_trainer: Any = None
 
     def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
         tensor_hash = state.policy_tensor_hash()
@@ -466,22 +445,28 @@ class MilesPublisher:
             await self._controller.wait_cells_tracked(cells, timeout_seconds=self.track_timeout_s)
             if self._inject_block is not None and not self.injected_blocks:
                 await self._injected_block(cells, self._inject_block)
-            await update_weights(
-                self._args, self._actor, self._executor, self._controller,
-                members=cells, expected_epoch=epoch, admit_cordoned=True,
-            )
+            perturb = self._inject_perturb is not None and not self.injected_perturbations
+            if perturb:
+                if self.perturb_trainer is None:
+                    raise RuntimeError("LoRA perturbation injection has no trainer hook")
+                import sys
+
+                print(f"[yeto] TEST INJECTION {INJECT_LORA_PERTURB_ENV}: member update of "
+                      f"{cells} ships a LoRA adapter perturbed by {self._inject_perturb}",
+                      file=sys.stderr, flush=True)
+                self.injected_perturbations.append((tuple(cells), self._inject_perturb))
+                self.perturb_trainer(self._inject_perturb)
+            try:
+                await update_weights(
+                    self._args, self._actor, self._executor, self._controller,
+                    members=cells, expected_epoch=epoch, admit_cordoned=True,
+                )
+            finally:
+                if perturb:
+                    self.perturb_trainer(None)  # the trainer holds the published policy again
         except Exception as exc:
             raise PublicationError(f"member update_weights failed: {exc}",
                                    frozenset(member_id(c) for c in cells)) from exc
-        if self._inject_override and not self.injected_overrides:
-            target = sorted(cells)[0]
-            self.injected_overrides.append((target, self._inject_override))
-            import sys
-
-            print(f"[yeto] TEST INJECTION {INJECT_WEIGHT_OVERRIDE_ENV}: reloading {target} from "
-                  f"{self._inject_override}", file=sys.stderr, flush=True)
-            inject = self.weight_override_injector or _override_engine_weights
-            await inject(target, self._inject_override)  # an injection failure is loud
 
         info = await self._controller.start_update_weights(members=cells, expected_epoch=epoch)
         ok = False

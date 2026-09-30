@@ -535,6 +535,8 @@ def compose_island(
     if elastic is not None:
         from .elastic_placement import ElasticPlacement
 
+        driver.publisher.perturb_trainer = lora_perturber(driver)  # TEST injection hook only
+
         driver.placement = ElasticPlacement(
             driver.placement, pool_gpus=elastic.pool_gpus,
             epoch=elastic.controller.journal.epochs.config_epoch,
@@ -601,6 +603,31 @@ def _role_map(request: Any) -> dict[str, Any] | None:
     if pm is None:
         pm = getattr(request, "placement_map", None)
     return None if pm is None else {k: v for k, v in pm.items() if k in ("trainer", "rollout", "standby")}
+
+
+def lora_perturber(driver: Any) -> Callable[[float | None], None]:
+    """TEST ONLY (``YETO_RL_TEST_INJECT_LORA_PERTURB``, 3.5 E1-B): ``perturb(eps)``
+    applies the published LoRA adapter + eps to the trainer (optimizer state and
+    local step preserved); ``perturb(None)`` applies the saved original back
+    exactly. Used around one member-scoped update_weights."""
+    from dataclasses import replace
+
+    saved: dict[str, Any] = {}
+
+    def perturb(scale: float | None) -> None:
+        if scale is not None:
+            state = driver.policy_state.export()
+            saved["state"] = state
+            tensors = {name: value + float(scale) for name, value in state.tensors.items()}
+            driver.policy_state.apply(replace(state, tensors=tensors, _lora=None),
+                                      optimizer="preserve", local_step=int(driver.local_step))
+        else:
+            state = saved.pop("state")
+            driver.policy_state.apply(state, optimizer="preserve", local_step=int(driver.local_step))
+            if driver.policy_state.export().policy_tensor_hash() != state.policy_tensor_hash():
+                raise RuntimeError("LoRA perturbation injection: trainer not restored exactly")
+
+    return perturb
 
 
 def _startup_views(manager: Any, runner: Any) -> dict[str, Any]:
