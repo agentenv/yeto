@@ -563,3 +563,9 @@
 - F-E1 重跑（F-R1 镜像 db815884）：新 cell 按 fork id 启动成功；发布阶段因缺 `--use-miles-router` 失败 → REBUILT_OLD；down 未执行。缺口：launcher 无 `--use-miles-router` 入口。证据 `evidence/infra-v2-b1/fe1r/RESULT.md`。费用 ≤$2.92。
 - F-E2：本地 dry-run 通过（`evidence/infra-v2-b1/fe2/`），未上卡（F-E1 失败即停；后续须合并 3f88c1d 并带 `--modal-retries 0 --modal-timeout-s`）。
 - 本批累计 ≤$12.99；所有 infra-v2-b1-* Modal app stopped/0；本地进程已清理。
+
+## GPU-B1 续 2（2026-09-30 07:05–09:00Z）
+- F-E2、F-E1 第三次：Modal L40S 无容量（`modal app logs`：waiting to be scheduled on a GPU_L40S worker），均未起容器，≈$0；F-E2 由进度看门狗 20 min 停止。未得观察项。
+- L-D0：D1、D2 rc=0，v1–v3 token 逐位相同 → 通过（`evidence/infra-v2-b1/ld0/RESULT.md`），≤$4.21。
+- A2 重跑（加 --rl-deterministic-trainer）：S2 rc=0；O2 训练完整且判据 2/3/5/6 通过（S2 与 O2 token 与 eval 分数全同），但 launcher 因磁带最后一条 `rl_learner_finalized` 收集竞态返回 rc=3 → 判据 1 不满足，链条停止，OD2 未跑。2.3 仍未完成；需 launcher 修复磁带完整性判定。≤$5.15（`evidence/infra-v2-b1/a2/rerun2/RESULT.md`）。
+- hrun/mrun 已加 `--modal-retries 0 --modal-timeout-s <硬超时+5min>` 与 20 min 进度看门狗。
