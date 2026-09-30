@@ -655,3 +655,10 @@
 - A4：计划 gpu-plan-v2 §9.14 已提交，8 卡 dry-run 9 passed。调度探测：8×H100! 10 分钟以上未调度，Modal 报"workspace concurrency limits reached (… at 10 gpus)"——工作区 GPU 并发上限 10，其他 agent 正占用 → A4 暂停，待主 agent 协调 GPU 配额/时段。
 - A5 执行计划 gpu-plan-v2 §9.15 与 A4 用例费用表 §9.16 已提交（不上卡）；A5 两岛本地 dry-run 4 passed。A4 暂停，等用户决定范围/预算。
 - A4（Nebius 8×H100，代码 47efd25）：E1-A 基线+切换完成——(a)(b)(d)(e)(f)(g)+E1-E 通过，(c) 按事件 policy_version 口径未通过（成员变化在 v2 发布后生效，发布事件晚一轮体现）→ 3.4 不勾。E1-B：注入执行但 LoRA 下无效（up SUCCEEDED，应 REBUILT_OLD）→ 3.5 未完成，失败即停；本 agent 的 router 采样端口与 probe 解释器需修正。其余 A4 用例未跑。累计 ≤$77.13。
+
+## GPU-B1 交接点（2026-09-30 15:10Z）
+- 完成：A2（L-2.3）三 arm 同 SHA 判据全过 → 1.4 已勾，2.3 GPU 通过待依赖；F-E1（A10G）通过；L-D0 通过；Nebius 冒烟通过。
+- A4：E1-A (c) 未通过（3.4 未勾），E1-B 注入无效（3.5 未完成），watchdog 未完成（自检失败后修复、重跑被交接中止），E1-D/E1-C 未跑。A5 仅计划与 dry-run。F-E2、A2+ 未跑。
+- 继续方式与脚本路径见 gpu-plan-v2 §9.19。
+- 运行脚本（本机，非仓库）：`/home/michael/work/gpu-b1-runs/`：`n2run.sh`（Nebius no-sync 岛，含 autostop/watchdog/20 min 进度看门狗/ssh puller）、`n2inwatch.sh`+`inwatch.py`（容器内按磁带相位写 inbox，同时启动 `router_sampler.py`）、`router_sampler.py`（节点 IP 自动发现 Miles router、0.5 s 采样 /worker_inflight，2 s 采样 compute-apps）、`run_probe.sh`+`fork_probe.py`（用 learner 同一解释器/环境调用 fork：membership、weight versions、cell statuses、stale ACK、旧 epoch）、`selfcheck.sh`（首个 generate 后自检采样器与探针，不可用即 nstop）、`after_term.sh`（事务终态后探针+停机）、`nstop.sh`（拉证据、sky down、nebius API 核实）、`arun.sh`/`mrun.sh`/`hrun.sh`（Modal 版）。参数：`cfg/a4-args.txt`、`cfg/resources-8.json`、`cfg/attestation-8.json`（指纹 2d0a00f4，仅对代码 47efd25 的 argv 有效）。注意：`router_sampler.py` 与 `run_probe.sh` 的修复（节点 IP、`[y]eto.rl.learner`）尚未在真机上验证过。
+- 资源：Modal 本 agent app 全部 stopped；Nebius 实例 0；sky 无集群；本地进程已停。累计 ≤$92.58。
