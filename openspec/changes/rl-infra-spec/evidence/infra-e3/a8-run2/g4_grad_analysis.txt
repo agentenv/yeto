@@ -1,0 +1,22 @@
+params 392 numel 10092544
+hyper A1 vs B1 s3 lr/step: 6.25e-06 6.25e-06 3 3
+per-param grad rel: min 5.56e-06 median 0.00644 max 0.0196
+mlp.linear_fc1.adapter.adapter_gate.linear_in.weight                   median 0.00496 max 0.0161
+mlp.linear_fc1.adapter.adapter_gate.linear_out.weight                  median 0.00635 max 0.0146
+mlp.linear_fc1.adapter.adapter_up.linear_in.weight                     median 0.00595 max 0.0144
+mlp.linear_fc1.adapter.adapter_up.linear_out.weight                    median 0.00618 max 0.0137
+mlp.linear_fc2.adapter.linear_in.weight                                median 0.00572 max 0.0151
+mlp.linear_fc2.adapter.linear_out.weight                               median 0.00653 max 0.0147
+self_attention.linear_proj.adapter.linear_in.weight                    median 0.00591 max 0.0165
+self_attention.linear_proj.adapter.linear_out.weight                   median 0.00622 max 0.0144
+self_attention.linear_qkv.adapter.adapter_k.linear_in.weight           median 0.0071 max 0.0196
+self_attention.linear_qkv.adapter.adapter_k.linear_out.weight          median 0.00818 max 0.0148
+self_attention.linear_qkv.adapter.adapter_q.linear_in.weight           median 0.00773 max 0.0188
+self_attention.linear_qkv.adapter.adapter_q.linear_out.weight          median 0.00746 max 0.0151
+self_attention.linear_qkv.adapter.adapter_v.linear_in.weight           median 0.00502 max 0.0177
+self_attention.linear_qkv.adapter.adapter_v.linear_out.weight          median 0.00635 max 0.0142
+by layer median: {0: 0.0148, 1: 0.0133, 2: 0.0126, 3: 0.0117, 4: 0.0127, 5: 0.0117, 6: 0.011, 7: 0.0099, 8: 0.0096, 9: 0.0095, 10: 0.0082, 11: 0.0077, 12: 0.0076, 13: 0.0065, 14: 0.0058, 15: 0.0057, 16: 0.0056, 17: 0.005, 18: 0.0048, 19: 0.0044, 20: 0.0041, 21: 0.0038, 22: 0.0037, 23: 0.0031, 24: 0.0026, 25: 0.0017, 26: 0.0006, 27: 0.0}
+elementwise |diff|/|g| quantiles [0.00707834679633379, 0.0489654503762722, 0.49367260932922363]
+bf16 eps 2^-8 = 0.00390625  fp32 eps 1.1920928955078125e-07
+A2(DP2) vs B2(DP1) grad rel 0.008271163898227652
+A1(DP1) vs B2(DP1) different start; skip

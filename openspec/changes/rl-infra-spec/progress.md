@@ -670,3 +670,19 @@
   5. 结果分析：`tools/probes/e2_c3_analyze.py <run dir> --fault`。
 - run 目录：`/home/michael/work/infra-e2-gpu/`（本轮 e2y/e2z/e2q 前缀）；证据：`openspec/changes/rl-infra-spec/evidence/infra-e2/4.2-4.5/gpu-v6-*`。
 - 费用：B2 累计 ≤ $47.48。所有 E2 app 都已 stopped/0，无残留进程。
+
+### INFRA-E3 A8 第 2 次（2026-09-30，ap-0DAExDbwwbCaxfDQ0dIIRC，H100!:2，代码 a016f7f，plan-v6）
+- 11:45:15–12:31:49Z，≤$6.14；dry、gen、A1、A2、B1、B1p、B2、RT 全部 rc=0；GPU 型号与 pin 断言通过（`gpus.txt`、`runtime_manifest.json`）。
+- 容器内 compare 失败：`step` 不在 scalars 中（TE FusedAdam 在 Megatron DistOpt 下把 step 放在参数组 `hyper` 里），`torch.as_tensor(None)` 报错。数据兜底生效：`pack_states` 产出 15 个汇总状态（1.64 GiB）；本地 `pull_packed` 用的旧 `Sandbox.open` 接口被 Modal 拒绝（"legacy Sandbox filesystem API is no longer supported"），随即用新 `sb.filesystem` 接口从另一进程拉取（`pull_now.py`），15/15 sha256 校验通过后释放容器；`modal_run.pull_packed` 已改用新接口。
+- 离线 compare（修正 step 读取位置：先 scalars，再参数组 `hyper.step`；并把 hyper 纳入 G1 逐位比较——这两处是字段位置修正，不改判据与容差；容器内与离线结论因容器内失败无法对比，如实记录）：`evidence/infra-e3/a8-run2/RESULT_offline.json`。G1、G2、G3、G5、G6 通过；**G4 未通过** → **no-go**（按 plan-v6 预注册规则）。详见 tasks 4.6 条目。
+- 诊断（不改结论）：从同一 cut 出发，DP1 与 DP2 的步 3 梯度相对 L2 差约 0.83%，约 90% 元素不同，而逐样本 loss 逐位相同——差异在梯度计算/归约路径（可能与 bf16 梯度缓冲或 DistOpt reduce-scatter 的精度有关，待查），不在状态重分片（G1 逐位通过）。C1 与 C2 在 adapter/主参数/动量上都不同（逐字段摘要），与此一致。
+- 4.6 未勾选：结论为 no-go，但容器内 compare 未产出、compare 在运行后做了字段位置修正，是否按"合法否定结论"勾选由主 agent 决定。packed 状态保存在 `/home/michael/work/infra-e3-gpu/b3a8r/out/work/packed/`（未入库，1.64 GiB）。
+- B3 合计 ≤$11.63。A9 以 A8=go 为前提，按规则不运行。
+- G4 静态排查（`evidence/infra-e3/a8-run2/g4-analysis.md`）：梯度缓冲与 DistOpt reduce-scatter 为 fp32（`grad_reduce_in_fp32`），缩放因子均为 2 的幂，loss 归一化数学与数值等价；取回状态显示 DP1 与 DP2 的步 3 梯度差异在最后一层为 0、向输入端逐层增大到约 1.5%，与参数种类/bucket 无关，逐元素中位 0.7%（bf16 量级）——逐样本反向传播在两种 DP 进程配置下不逐位相同，属 c) 当前 bf16 profile 下不可避免的跨 DP 数值差异，非重分片缺陷。4.6 按合法否定结论（no-go）的完成记录草稿写在该文件末尾，未勾选，待主 agent 确认。
+
+### INFRA-E3 交接点（2026-09-30，移交新 session；不再启动任何运行）
+- A8 结论：G1/G2/G3/G5/G6 通过，G4 未通过 → no-go；排查结论为 c 类（bf16 profile 下 DP1 与 DP2 逐样本反向传播不逐位相同，误差随反传深度累积，非重分片缺陷）。建议 4.6 按合法否定结论交付；完成记录草稿在 `evidence/infra-e3/a8-run2/g4-analysis.md` 末尾，**未勾选，待用户确认**。可选复核：从 C1 同形恢复的 DP1 arm（约 $4，不改结论）。
+- 取回的汇总状态（15 个 packed 文件，1.64 GiB，未入库）：`/home/michael/work/infra-e3-gpu/b3a8r/out/work/packed/`（含 index.json、pull 报告）；离线重算：`python tools/probes/e3_reshard/compare.py /home/michael/work/infra-e3-gpu/b3a8r/out/work --offline`。
+- 已知遗留：E3 trainer 边经 `publish_members` 给新成员重发时，不写 `rl_member_publication` 记录（E1 路径有）；因 A8=no-go，A9 不运行，列为已知遗留，若将来重开 trainer 边需补。
+- 其余遗留：F-R1 相关的 A9 拓扑前提（plan-v4/v6）；L-3/L-4 已知限制。
+- 状态：B3 合计 ≤$11.63；无运行中的 Modal app、无残留进程。
