@@ -1,6 +1,15 @@
-> **已被 `plan-v3.md` 取代**（复审：A9 GPU 判据、生产守卫、controller v3）。保留供追溯。
+# E3 待验证计划 v3：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan-v2.md；判据运行前固定，事后不改）
 
-# E3 待验证计划 v2：A8（4.6 X4）与 A9（4.7）（INFRA-E3，2026-09-30；取代 plan.md；判据运行前固定，事后不改）
+与 v2 的差别（复审，A8 部分判据不变，复审结论"A8 可按 plan-v2 执行"仍成立）：
+- A9 判据新增：trainer→rollout 方向新 engine 所在 GPU 必须等于 moved GPU（§3.2）。
+- 生产守卫：DP 变化后每批在训练前经 `reshard.batch_guard_problems` 检查（各 rank 公布完整 `train_parallel_config` 且 dp 等于计划、批次被两侧 scheduled 路径接受），否则拒绝；`--indep-dp`、`--multimodal-keys` 写入前拒绝。A8 的 arm 若触发该守卫即判环境阻塞（说明未走 scheduled 分支）。
+- controller 补丁改为 v3（提交 CAS 失败时读回 epochs 判断是否已提交）。
+
+以下保留 v2 全文，仅在上述位置修改。
+
+---
+
+
 
 与 v1 的差别（独立审查"需修复"）：
 - H1：生产路径是 rollout 侧调度 `split_train_data_by_dp_scheduled_raw`/`dp_schedule.build_dp_schedule`（GBS 按 rollout 计、先打包再按 micro batch k→rank k%dp 分派、loss 以 `num_rollouts` 归一），不是 round-robin。A8 的每个 arm 改走 `split_train_data_by_dp` 的真实分派；G2、G4 按此重写；拒绝 `--balance-data`/`--balance-by-flops`/部分步/vpp>1。
@@ -15,7 +24,7 @@
 
 ## 0. 通用前提（固定）
 
-- 代码：yeto `infra-e3`（运行时 SHA 写入 RESULT），加上 `infra-drafts/patches/infra-e3-controller-v2.patch`、`infra-e3-elastic-wiring.patch`（A9 需要；A8 不需要）。Miles fork `yeto/ports`=`5c1b49eb`；镜像须含该提交（IMG 负责重建，运行前生成 1.1 runtime manifest 并核对 digest）。不满足则不运行。
+- 代码：yeto `infra-e3`（运行时 SHA 写入 RESULT），加上 `infra-drafts/patches/infra-e3-controller-v3.patch`、`infra-e3-elastic-wiring.patch`（A9 需要；A8 不需要）。Miles fork `yeto/ports`=`5c1b49eb`；镜像须含该提交（IMG 负责重建，运行前生成 1.1 runtime manifest 并核对 digest）。不满足则不运行。
 - 模型与 profile P-E3：Qwen3-0.6B，LoRA r=16、alpha=32、**lora_dropout=0、`--hidden-dropout 0`、`--attention-dropout 0`**，bf16，DistributedOptimizer（Miles 对 Adam 的默认），TP=PP=CP=EP=1，GBS=16，micro batch=1，`num_steps_per_rollout=1`，默认 GRPO spec（运行前记录 `algorithm_spec_sha256`），`--seed 1234 --rollout-seed 42`，不开 `--data-parallel-random-init`、`--balance-data`、`--balance-by-flops`、动态 batch、`--allow-partial-train-step`、vpp。GRPO 下每个 rollout 1 条样本，GBS=16 个 rollout。
   - 为什么全部 dropout=0：DP 变化时新 rank 使用 fresh RNG（`keep_on_dp_change`），dropout>0 会让下一步比较混入 RNG 差异，容差就没有意义。**因此 go 结论只覆盖 dropout=0 的 profile**；dropout>0 的变 DP 边需单独认证，在此之前拒绝（写入 attestation 说明）。
 - 确定性（A8 必须全部生效；任一项不可用即判环境阻塞、不运行，也不降级）：Megatron `--deterministic-mode`；`NCCL_ALGO=Ring`、`CUBLAS_WORKSPACE_CONFIG=:4096:8`、`NVIDIA_TF32_OVERRIDE=0`。
@@ -93,6 +102,7 @@
 ### 3.2 判据（全部预先固定）
 
 - 每次 SUCCEEDED：config epoch 恰好 +1；`epochs.json` 的成员等于目标 engine 集；trainer `actual_layout()` 的 DP 等于目标；重建后首次发布前 trainer 导出的 policy hash 等于 cut 中的 hash，新 engine ACK 同一 hash；数据游标在事务前后相同；账本无重复消费、`ready_unconsumed=0`；optimizer 步数不多不少（事务期间 `optimizer_applied` 不变，之后每 round +1）；scheduler `num_steps` 等于 local_step×GBS。
+- trainer→rollout 方向：新 engine 所在 GPU 集合必须**等于** plan 的 `moved_gpus`（运行时从 fork `get_cell_bundles`/`get_worker_infos` 读回 GPU，经 M1 bundle 映射换成 GPU id；E1 的 `bind_members` 若提供绑定结果则再核一次）；rollout→trainer 方向：被摘除的 engine 正是 `member_gpus` 中服务于 `moved_gpus` 的那些，trainer 新 GPU 集合等于目标 placement。
 - 每次 REBUILT_OLD / CANCELLED：config epoch 不变；成员与 trainer 布局回到事务前；policy hash 不变；之后 1 个 round 正常。
 - RECOVERY_REQUIRED：不再调用 `train_step`/`generate`；journal 记录完整。
 - batch 语义：每个 round 消费的组数等于 GBS/组大小，DP1 与 DP2 下 sample id 集合的切分符合 `sample_mapping`。
@@ -114,8 +124,8 @@
 
 ## 5. 接口请求（给 INFRA-E1；补丁基于 65ca03b）
 
-- `infra-drafts/patches/infra-e3-controller-v2.patch`（v1 已改名 `infra-e3-controller.v1-OBSOLETE.patch`；controller.py、elastic_placement.py，新测试 `tests/test_rl_controller_trainer_edge.py`）：
-  - `IslandController(..., trainer_edges=None)`：为 None 时 trainer 边照旧拒绝（原 E1 测试的 "not E1" 文案保留）；否则 `plan()` 把只含 `trainer-dp`/`role-transfer` 的边交给 `trainer_transition.plan_trainer_edge`（无副作用），`Plan` 新增可选字段 `trainer`；`_execute` 对 trainer 边调用 `_execute_trainer`：`TrainerTransition.run()` 返回 READY_TO_COMMIT 后由 controller 做唯一的 epoch CAS（COMMITTED→RESUMING→SUCCEEDED），CANCELLED/REBUILT_OLD/RECOVERY_REQUIRED 按原语义收尾；**v2**：提交 CAS 失败时按 E1 同语义 `_enter_recovery`，并写 `trainer_recovery_hint`（restore_old，含 cut_epoch）；`plan` 把 pool 的 `member_gpus()` 交给 `plan_trainer_edge`，按 moved GPU 选要摘除的 engine；transition 的 phase 记录经 `_trainer_record` 同步 `tx.phase`。
+- `infra-drafts/patches/infra-e3-controller-v3.patch`（v1、v2 已改名 `*.v1-OBSOLETE.patch`/`*.v2-OBSOLETE.patch`；controller.py、elastic_placement.py，新测试 `tests/test_rl_controller_trainer_edge.py`）：
+  - `IslandController(..., trainer_edges=None)`：为 None 时 trainer 边照旧拒绝（原 E1 测试的 "not E1" 文案保留）；否则 `plan()` 把只含 `trainer-dp`/`role-transfer` 的边交给 `trainer_transition.plan_trainer_edge`（无副作用），`Plan` 新增可选字段 `trainer`；`_execute` 对 trainer 边调用 `_execute_trainer`：`TrainerTransition.run()` 返回 READY_TO_COMMIT 后由 controller 做唯一的 epoch CAS（COMMITTED→RESUMING→SUCCEEDED），CANCELLED/REBUILT_OLD/RECOVERY_REQUIRED 按原语义收尾；**v3**：提交 CAS 失败时按 E1 同语义 `_enter_recovery`；先读回 epochs，`last_tx_id` 为本事务（写入后才抛错）则 hint 为 restore_target，否则 restore_old，读不回则 recovery_required；`plan` 把 pool 的 `member_gpus()` 交给 `plan_trainer_edge`，按 moved GPU 选要摘除的 engine；transition 的 phase 记录经 `_trainer_record` 同步 `tx.phase`。
   - 重启时对未提交的破坏性 trainer 事务仍判 RECOVERY_REQUIRED（与 E1 相同），额外写 `trainer_recovery_hint`（`trainer_transition.recovery_decision`）。
   - `ElasticPlacement.reconfigure_trainer(plan, epoch)`：记录已提交的 trainer GPU 变化（嵌套集合）。
   - 在 65ca03b 上 `git apply --check` 通过；**在 infra-e1 当前 HEAD 533afdc 上 controller.py 第 180 行附近冲突**，需要 E1 按上下文手工合入（逻辑独立，冲突只在 `__init__` 参数区）。
