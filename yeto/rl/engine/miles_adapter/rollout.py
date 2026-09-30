@@ -102,6 +102,22 @@ def injected_start_delay(environ: Any = None) -> float | None:
     return value
 
 
+def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | None]:
+    """Runs INSIDE the rollout executor actor (``__ray_call__``): its data
+    source's current cursor and buffer length (rollout_meta_hook rules)."""
+    from .rollout_meta_hook import data_cursor as read_cursor
+
+    return read_cursor(getattr(executor, "data_source", None))
+
+
+def _is_ray_handle(obj: Any) -> bool:
+    return type(obj).__name__ == "ActorHandle"
+
+
+async def _awaited(value: Any) -> Any:
+    return await value if hasattr(value, "__await__") else value
+
+
 class MembershipPlanError(RuntimeError):
     """The pool cannot provide the requested engines."""
 
@@ -414,27 +430,44 @@ class MilesRolloutPool:
         self._bind_seq = 0
 
     def live_data_cursor(self) -> tuple[dict[str, int] | None, int | None]:
-        """The data source position NOW (and its reuse-buffer length), read from
-        the rollout executor's data source -- not the last batch's cached value.
-        Catches a cursor moved outside generation (e.g. ``rollout_executor.load``
-        during a trainer rebuild; E2 G-4.5). (None, None) when the executor's
-        data source is not reachable from this process (unknown, never guessed)."""
+        """The data source position NOW (and its reuse-buffer length), read inside
+        the rollout executor's process -- not the last batch's cached value.
+        Catches a cursor moved outside generation (``rollout_executor.load``
+        during a trainer rebuild; E2 G-4.5 row 5).
+
+        On real Miles the executor is a Ray actor handle (no ``data_source``
+        attribute here): the read runs in the actor via Ray's
+        ``__ray_call__`` (``read_executor_cursor``). A local executor object is
+        read directly. Anything else, or any failure: ``(None, None)`` =
+        unknown -- never the cached value (callers needing the live position
+        fail closed on None)."""
         from .rollout_meta_hook import data_cursor as read_cursor
 
         source = getattr(self._executor, "data_source", None)
-        if source is None:
+        if source is not None and not _is_ray_handle(self._executor):
+            try:
+                return read_cursor(source)
+            except Exception:  # noqa: BLE001 - unknown
+                return None, None
+        ray_call = getattr(self._executor, "__ray_call__", None)
+        remote = getattr(ray_call, "remote", None)
+        if not callable(remote):
             return None, None
         try:
-            return read_cursor(source)
+            cursor, length = self._run(_awaited(remote(read_executor_cursor)))
         except Exception:  # noqa: BLE001 - unknown
             return None, None
+        return (None if cursor is None else dict(cursor)), length
 
     def data_cursor(self) -> dict[str, int] | None:
-        """4.2/4.4: the live data cursor when readable, else the cursor after the
-        last generated batch (None = unknown)."""
+        """4.2/4.4: the LIVE data cursor, None when it cannot be read (unknown;
+        the cut / same-shape rebuild then refuse instead of comparing a stale
+        value). The last generated batch's cursor is ``last_batch_data_cursor``."""
         live, _ = self.live_data_cursor()
-        if live is not None:
-            return dict(live)
+        return None if live is None else dict(live)
+
+    def last_batch_data_cursor(self) -> dict[str, int] | None:
+        """The cursor the rollout metadata reported after the last batch (cache)."""
         return None if self._last_cursor is None else dict(self._last_cursor)
 
     def generate(self, rollout_id: int) -> RolloutBatchHandle:

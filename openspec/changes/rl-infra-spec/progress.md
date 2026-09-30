@@ -623,3 +623,18 @@
   1. E1 `live_data_cursor` 在真实 Miles 上返回 None（rollout executor 是 Ray actor handle），生产中重建前后的游标比对因此退回缓存值；
   2. REBUILDING_TRAINER 没有 deadline 强制；
   3. `modal container exec` 输出上限 8 KiB，工具已改为分块拉取。
+- 新增 `--rl-elastic-drain-timeout-s` 与 `--rl-elastic-recovery-timeout-s`（launcher → learner → `build_elastic(timeouts=...)` → controller 的 `Timeouts.drain`/`recovery`；需带 `--rl-elastic`，数值须为正；不给时沿用 120/900，默认 argv 不变）。E1-C 用 T_drain=5；E1-D ④ 用较小的 T_recovery（配合 `--rl-test-inject-stop-failures N`，N 要大于 T_recovery 内按 1 s 间隔能发生的重试次数）。已按"写了具体数值"排查 gpu-plan-v2 §9.14（gpu-b1 工作区版本）、`evidence/infra-e1/plan.md` E1-A…E1-E、plan-3.8-4.4-v2 §1–§8：请求 deadline（controller CLI `--deadline-s`）、quorum/margin/idle、start delay、update_weights block、tool delay、stop failures、kill-at、restart attempts 都已有入口；缺入口的只有 T_drain 与 T_recovery，本次补齐。E1-A (d)(e) 的 router/nvidia-smi 采样属于运行工具，不是参数。端到端测试从真实 CLI 一直到 controller 实际使用的值。
+- 全量：68F/3169P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b9.ids`）。
+
+### INFRA-E1：Nebius 发射路径（2026-09-30，未起付费资源）
+- 私有镜像登录（B1 nsmoke 的 `asdict() should be called on dataclass instances`）：已在已安装的 sky 0.13 上复现。Resources 里的 DockerLoginConfig 第一次 dump 正常；API 服务端 load 后得到 dict，再 dump 时报错（`sky/resources.py:2654`/`:2755`）。服务端的 load 发生在 sky API server 进程内，yeto 侧无法在"读回"时把 dict 包回去，因此采用"避免这条往返路径"：登录三元组改放 task **secrets**（SkyPilot 支持的形式，每次 Task load 都由 `task._with_docker_login_config` 重新生成 DockerLoginConfig），Resources 不再带 `_docker_login_config`。SkyPilot 会把 secrets 导出到 setup/run，所以两段脚本开头都先 `unset SKYPILOT_DOCKER_*`；token 仍只需 read:packages。没有改 `~/.sky`，也没有改 sky 安装。测试（需要 sky，yeto-venv 下跳过；借用 gpu-head venv 的 site-packages 跑通）：旧写法两次 YAML 往返后报 asdict 错（复现），新写法往返三次仍是 DockerLoginConfig。无登录时的 task 不变。
+- spot：launcher 已有 `--on-demand`（默认仍为 spot，未改）；加了测试证明 RL 岛 `use_spot=False` 且不挂 spot checkpoint 存储。Nebius 验收运行请带 `--on-demand`。
+- 本机 head 的可达性：公网 IP 185.189.44.160 直接配在 bond0 上（无 NAT）；A2 等 Modal 运行中外部岛已连通 29400（syncer 日志里有来自外部 peer 的连接），说明入站可达；本机防火墙规则无 root 权限无法读取（未确认）。keepalive：learner socket 仍无 SO_KEEPALIVE，但没有 NAT 时不存在空闲流被丢的问题；到 Nebius 的路径是否有中间 NAT 未测，可用 `scripts/idle_flow_probe.py` 在 Nebius 侧测。
+- Nebius 配额（`nebius quotas quota-allowance list`，只读，eu-north1）：`vpc.ipv4-address.public.count` 当前使用 0，接口未返回上限（此前记录为 3）；单节点 8 卡岛需要 1 个公网 IPv4，head 在本机，够用。`vpc.allocation.count` 当前使用 4，上限未返回，可能成为限制，需要在控制台确认；`compute.instance.gpu.h100` 当前使用 0，上限未返回；`compute.gpucluster.count` 使用 1。
+- 全量：68F/3170P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b10.ids`）。
+- 实时游标（响应 E2 在 H100 上的发现：真实 Miles 的 rollout executor 是 Ray actor handle，上没有 `data_source` 属性，`live_data_cursor()` 返回 None 并退回缓存，4.4 的前后比对实际不生效）：
+  - 改为在 executor 所在的 actor 进程内读取：通过 Ray 的 `__ray_call__` 执行 `read_executor_cursor(executor)`，用 rollout_meta_hook 的字段规则读取 data_source 的游标与 buffer 长度；本地 executor 对象仍直接读取。
+  - `data_cursor()` **只返回实时值**，读不到时为 None（未知），不再退回缓存；缓存值改由 `last_batch_data_cursor()` 提供。需要实时值的调用方因此 fail closed：CutSource 在写 cut 前判 RebuildRefused；`rebuild_same_shape` 在 swap 之后读到 None 或游标变化时判 RECOVERY_REQUIRED；E2 harness 的比对在未知时报错。
+  - 测试用模拟的 ActorHandle 复现"无 data_source 属性"的路径：经 `__ray_call__` 读到实时值；actor 调用失败时为未知；游标在重建期间于 actor 内被改动，`rebuild_same_shape` 判 RECOVERY_REQUIRED（G-4.5 第 5 行的 CPU 协议检查）。
+  - **依赖**：Ray 的 `ActorHandle.__ray_call__`（Ray 2.x 为所有 actor 提供）。本机 yeto-venv 没有 ray，无法在真实 handle 上验证；若镜像内的 Ray 不支持它，读取会失败并判为未知（不会静默使用旧值），那时需要 fork 增加只读方法 `RolloutExecutor.get_data_cursor()`（新 M 项需求）。
+  - 全量：68F/3172P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b11.ids`）。

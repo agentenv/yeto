@@ -943,6 +943,9 @@ _ELASTIC_PAUSE_FLAGS = (
     ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
     ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
     ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
+    # controller D4 timeouts T_drain / T_recovery (plan.md E1-C, E1-D 4)
+    ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
+    ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
 )
 # Test-only fault injection for GPU acceptance runs (gpu-plan-v2 A5 quorum case):
 # exported into the island run command; off unless given.
@@ -2021,6 +2024,11 @@ def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
     return stem[: 63 - len(suffix)].rstrip("-") + suffix
 
 
+DOCKER_LOGIN_UNSET = (
+    "unset SKYPILOT_DOCKER_USERNAME SKYPILOT_DOCKER_PASSWORD SKYPILOT_DOCKER_SERVER\n"
+)
+
+
 def _sky_docker_login_config(login: dict[str, str]):
     """SkyPilot's DockerLoginConfig for a SKYPILOT_DOCKER_* triple."""
     from sky.provision.docker_utils import DockerLoginConfig
@@ -2406,21 +2414,26 @@ def make_miles_island_task(
         "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
     # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): the
-    # SKYPILOT_DOCKER_* login goes only into the resources'
-    # docker_login_config, which SkyPilot uses for `docker login` at
-    # provisioning.  Not task envs/secrets: SkyPilot 0.13 exports both into
-    # every setup/run process.  Ports engine only (legacy is unchanged); use
-    # a token with read:packages only.
+    # SKYPILOT_DOCKER_* login goes into the task SECRETS, SkyPilot's supported
+    # form: every Task load re-derives the DockerLoginConfig from them
+    # (sky/task.py _with_docker_login_config). A DockerLoginConfig placed in
+    # Resources does not survive sky 0.13's YAML round trip (Resources.
+    # from_yaml_config keeps a dict, the next to_yaml_config calls
+    # dataclasses.asdict on it: "asdict() should be called on dataclass
+    # instances"; B1 nsmoke). SkyPilot exports secrets into setup/run, so both
+    # scripts unset them first. Ports engine only; read:packages token only.
     registry_login = (
         registry_credentials(args.rl_image, os.environ)
         if getattr(args, "rl_engine", "ports") == "ports"
         else None
     )
+    login_unset = DOCKER_LOGIN_UNSET if registry_login else ""
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
-        setup="\n".join(setup_steps),
+        setup=login_unset + "\n".join(setup_steps),
+        **({"secrets": dict(registry_login)} if registry_login else {}),
         run=(
-            f"{HF_TOKEN_ENV}\n"
+            f"{login_unset}{HF_TOKEN_ENV}\n"
             "set -e\n"
             "cd ~/sky_workdir\n"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
@@ -2478,8 +2491,6 @@ def make_miles_island_task(
         "disk_size": args.disk_size,
     }
     resources["image_id"] = args.rl_image
-    if registry_login:
-        resources["_docker_login_config"] = _sky_docker_login_config(registry_login)
     if spec.num_nodes > 1:
         resources["network_tier"] = "best"
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
