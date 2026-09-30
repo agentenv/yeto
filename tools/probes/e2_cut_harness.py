@@ -244,6 +244,7 @@ except Exception: d=[]
       fi
     fi
     # small harness results pulled on their own (a tar of a changing tree can come back truncated)
+    timeout 60 $M container exec $c -- sh -c "cat ~/yeto-rl/elastic-state/cuts/*/manifest.json 2>/dev/null" > $R/pulled/.m && [ -s $R/pulled/.m ] && mv $R/pulled/.m $R/pulled/cut-manifest.json
     for f in results.json steps.jsonl; do
       timeout 60 $M container exec $c -- sh -c "cat ~/yeto-rl/e2-harness/*/$f 2>/dev/null" > $R/pulled/.r && [ -s $R/pulled/.r ] && mv $R/pulled/.r $R/pulled/harness-$f
     done
