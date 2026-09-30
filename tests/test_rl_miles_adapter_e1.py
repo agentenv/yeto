@@ -228,3 +228,197 @@ def test_member_publish_needs_a_verified_reference_of_the_same_policy():
     pub._args = SimpleNamespace(offload_rollout=True)
     with pytest.raises(PublicationError, match="partitioned"):
         pub.publish_members(state(1), frozenset({"engine:c2"}), epoch=0)
+
+
+# ---------------------------------------------------------------- data cursor / ledger / 4.4 / entry
+def test_hook_reports_data_cursor_and_buffer_length():
+    from yeto.rl.engine.miles_adapter.rollout import handle_from_metadata
+    from yeto.rl.engine.miles_adapter.rollout_meta_hook import METADATA_SCHEMA, data_cursor
+
+    src = SimpleNamespace(sample_offset=12, epoch_id=0, sample_group_index=3, sample_index=24,
+                          buffer=[], get_buffer_length=lambda: 0)
+    cursor, length = data_cursor(src)
+    assert cursor == {"sample_offset": 12, "epoch_id": 0, "sample_group_index": 3,
+                      "sample_index": 24} and length == 0
+    assert data_cursor(SimpleNamespace(sample_offset=1)) == (None, None)
+    assert data_cursor(None) == (None, None)
+    payload = {"schema": METADATA_SCHEMA, "rollout_id": 1, "completed": 1, "aborted": 0,
+               "groups": [{"group_id": "g", "sample_ids": ["s"], "policy_token": "t",
+                           "reward_mean": 0.0, "reward_std": 0.0, "token_count": 1}],
+               "data_cursor": cursor, "buffer_length": 0}
+    h = handle_from_metadata(payload, rollout_id=1, policy_version=1, policy_hash="h",
+                             data_pack=None)
+    assert h.carried_over == 0 and h.data_cursor == cursor and h.buffer_length == 0
+    del payload["buffer_length"]
+    h = handle_from_metadata(payload, rollout_id=1, policy_version=1, policy_hash="h",
+                             data_pack=None)
+    assert h.carried_over is None
+
+
+def test_ledger_engine_discarded_and_cut_summary(tmp_path):
+    from yeto.rl.engine.journal import read_journal
+    from yeto.rl.engine.ledger import BatchLedger
+
+    g = SimpleNamespace(group_id="g0", sample_ids=("s0",), filtered_samples=None)
+    batch = SimpleNamespace(rollout_id=0, groups=(g,), filtered=2, carried_over=0,
+                            buffer_length=0, aborted_in_flight_groups=3)
+    led = BatchLedger(tmp_path)
+    led.prepare(batch, policy_token="t")
+    summary = led.cut_summary()
+    assert summary["ready_unconsumed"] == 1 and summary["ready_unconsumed_group_ids"] == ["g0"]
+    assert summary["engine_carried_over"] == 0 and summary["carried_over"] == 0
+    led.optimizer_applied(0)
+    led.close()
+    led = BatchLedger(tmp_path)  # replayed from disk
+    assert led.cut_summary()["ready_unconsumed"] == 0
+    assert led.cut_summary()["engine_buffer_length"] == 0
+    kinds = {r["kind"]: r for r in read_journal(tmp_path / "ledger")}
+    assert kinds["engine_discarded"]["groups"] == 3 and kinds["filtered"]["detail"]["groups"] == 2
+    led.close()
+
+
+def test_driver_rebuild_trainer_republishes_without_outer_effects(tmp_path):
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.driver import DriverError, EventTape, IslandDriver
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={f"{PREFIX}.lora_A.weight": torch.zeros(1, 2)},
+                        placement_kind="fixed-partition")
+    calls = []
+
+    class Sync:
+        def start(self, d):
+            from yeto.rl.engine.driver import SyncStart
+            return SyncStart(d.export_local(), 0)
+
+        def boundary(self, d, *, rollout_id, stats):
+            from yeto.rl.engine.driver import SyncBoundary
+            return SyncBoundary(d.export_local(), stop=rollout_id >= 1)
+
+        def published(self, d, *, rollout_id, policy_hash):
+            calls.append(("published", rollout_id))
+
+        def finish(self, d):
+            pass
+
+        def close(self):
+            pass
+
+    driver = IslandDriver(
+        learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+        policy_state=engine.policy_state, publisher=engine.publisher,
+        placement=engine.placement, capabilities=fake_capabilities(),
+        algorithm=AlgorithmSpec(), sync=Sync(), events=EventTape(tmp_path / "e.jsonl", 0))
+    rebuilt = []
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        out = orig(rollout_id)
+        if rollout_id == 1:
+            h = driver.published_state.policy_tensor_hash()
+            with pytest.raises(DriverError, match="not the published"):
+                driver.rebuild_trainer(lambda: None, cut_policy_hash="0" * 64)
+            driver.rebuild_trainer(lambda: rebuilt.append(1), cut_policy_hash=h)
+        return out
+
+    driver.safe_point = safe_point
+    driver.handshake()
+    driver.run()
+    assert rebuilt == [1]
+    assert calls == [("published", 0), ("published", 1), ("published", 2)]  # no extra outer call
+    import json as _json
+    ev = [_json.loads(x) for x in (tmp_path / "e.jsonl").read_text().splitlines()]
+    assert [e["policy_version"] for e in ev if e["event"] == "rl_trainer_rebuilt"] == [1]
+    driver.at_safe_point = False
+    with pytest.raises(DriverError, match="safe point"):
+        driver.rebuild_trainer(lambda: None, cut_policy_hash="x")
+
+
+def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
+    from tests.test_rl_engine_selection import NAME as SEL_NAME, _Actor, _Controller
+    from tests.test_rl_miles_adapter_rollout import Call, Sample, Span
+    from yeto.rl.core import canonical_state
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+    from yeto.rl.engine.journal import read_journal
+    from yeto.rl.engine.miles_adapter import LoopRunner
+    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+    from yeto.rl.engine.miles_adapter.elastic_placement import ElasticPlacement
+    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+    from yeto.rl.engine.miles_adapter.entry import compose_island, miles_capabilities
+    from yeto.rl.engine.miles_adapter.placement import MilesPlacement, PlacementRequest
+    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+
+    sink = tmp_path / "sink"
+    monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{sink}")
+
+    class Ctl(_Controller):
+        async def get_membership_status(self):
+            return {"epoch": 0, "incomplete": None}
+
+    controller, actor = Ctl(), _Actor()
+    rollout_args = SimpleNamespace(n_samples_per_prompt=2)
+    source = SimpleNamespace(sample_offset=0, epoch_id=0, sample_group_index=0, sample_index=0,
+                             buffer=[])
+
+    class Executor:
+        async def get(self, rollout_id):
+            token = controller.engine.version
+            # Miles group_index is the data source's monotonic sample_group_index
+            groups = [[Sample(index=100 * rollout_id + 10 * g + i,
+                              group_index=10 * rollout_id + g, rollout_id=rollout_id,
+                              reward=float(i), weight_versions=[Call([Span(token)])])
+                       for i in range(2)] for g in range(2)]
+            source.sample_offset += 2
+            hook.record_trained_groups(rollout_args, groups)
+            hook.extract_rollout_metadata(rollout_args, groups, source)
+            return SimpleNamespace(sample_indices=[s.index for g in groups for s in g])
+
+    async def update_weights(*a, **k):
+        pass
+
+    fp = "sha256:" + "0" * 64
+    profile = ExecutionProfile(name="p", execution_mode="partitioned-serial",
+                               outer_protocol="none").bind_algorithm(AlgorithmSpec())
+    elastic = build_elastic(
+        state_dir=tmp_path / "state",
+        resources={"configs": {"T1R1S1": {"trainer": 1, "rollout": 1, "standby": 1},
+                               "T1R2S0": {"trainer": 1, "rollout": 2}},
+                   "edges": [{"source": "T1R1S1", "target": "T1R2S0", "kind": "rollout-only"}]},
+        attestation=None, profile=profile, initial_config="T1R1S1", runtime_fingerprint=fp,
+        declared_cells=["c0", "c1"], pool_gpus=["g0", "g1", "g2"])
+    runner = LoopRunner()
+    driver = compose_island(
+        miles_args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True,
+                                   offload_rollout=False),
+        launch=SimpleNamespace(placement=PlacementRequest("colocated", 1, 1, 1)),
+        algorithm=AlgorithmSpec(), inference_controller=controller, rollout_executor=Executor(),
+        actor_model=actor, learner_id=0, base_model_revision="0" * 40,
+        lora_config_hash="1" * 64,
+        layout_hash=canonical_state(0, {SEL_NAME: torch.zeros(2, 4)},
+                                    base_model_revision="0" * 40,
+                                    lora_config_hash="1" * 64).layout_hash,
+        sync=LocalOnlySync(2), progress=None, metadata=DirMetadataSource(sink),
+        capabilities=miles_capabilities(fp), runner=runner,
+        events=EventTape(tmp_path / "events.jsonl", 0), update_weights=update_weights,
+        release_refs=lambda args, pack: None, flatten_checksums=lambda raw: [{"w": "x"} for _ in raw],
+        placement=MilesPlacement(PlacementRequest("colocated", 1, 1, 1),
+                                 {"actor": (None, [0], [0]), "rollout": (None, [0], [0])},
+                                 logical=True),
+        elastic=elastic,
+    )
+    assert isinstance(driver.placement, ElasticPlacement)
+    assert driver.controller is elastic.controller and driver.ledger is elastic.ledger
+    assert elastic.controller.inspect().members == ("engine:c0",)
+    driver.run()
+    runner.close()
+    assert driver.rollout.data_cursor()["sample_offset"] == 4
+    kinds = [r["kind"] for r in read_journal(tmp_path / "state/ledger")]
+    assert kinds.count("outer_recorded") == 2
+    # no attestation: every transition is refused (fail closed)
+    with pytest.raises(Exception, match="attestation"):
+        elastic.controller.plan("T1R2S0", 0, deadline_s=60)
+    elastic.controller.close()
+    elastic.ledger.close()

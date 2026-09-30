@@ -948,6 +948,57 @@ class IslandDriver:
                       members=sorted(self.rollout.members()))
         return result
 
+    # -- same-shape trainer rebuild (4.4) --------------------------------------
+    def rebuild_trainer(self, rebuild: Callable[[], Any], *, cut_policy_hash: str) -> Any:
+        """Replace the trainer behind the ports and re-publish the same policy (4.4).
+
+        Called at a safe point. ``rebuild`` swaps the handle behind the
+        adapter's ``SwappableActor`` and restores the cut (e.g. a closure over
+        ``miles_adapter.trainer_rebuild.rebuild_same_shape``); the port objects
+        stay, so there is no rebind, no ``initialize`` and no
+        ``after_local_train`` (the sync session is not called). Before and
+        after, the trainer's policy hash must equal the cut's
+        ``progress.policy_hash`` and the currently published policy; the
+        re-publication goes through the same publisher/member check as
+        :meth:`publish` but does not notify the sync session (no outer effect).
+        """
+        state = self.published_state
+        if state is None or self.published_version is None:
+            raise DriverError("trainer rebuild before any publication")
+        if not self.at_safe_point:
+            raise DriverError("trainer rebuild outside a safe point")
+        published_hash = state.policy_tensor_hash()
+        if cut_policy_hash != published_hash:
+            raise DriverError(
+                f"cut policy {cut_policy_hash} is not the published policy {published_hash}"
+            )
+        self.phase("rebuild", rollout_id=self.published_version)
+        result = rebuild()
+        restored = self.policy_state.export().policy_tensor_hash()
+        if restored != cut_policy_hash:
+            raise StrictRlInvariantError(
+                "policy_hash_mismatch_after_rebuild",
+                f"restored trainer holds {restored}, the cut holds {cut_policy_hash}",
+            )
+        rollout_id = self.published_version
+        result_pub = self.publisher.publish(state)
+        manifest = result_pub.manifest
+        if (manifest.target_policy_version != rollout_id
+                or manifest.target_policy_hash != cut_policy_hash):
+            raise PublicationError("re-publication after rebuild acknowledged another policy")
+        members = frozenset(self.rollout.members())
+        if not members or result_pub.members != members:
+            raise PublicationError(
+                f"partial re-publication after rebuild; missing {sorted(members - result_pub.members)}"
+            )
+        self.emit(
+            "rl_trainer_rebuilt",
+            policy_version=rollout_id,
+            **{"rl/policy_token": self.expected_token,
+               "sync/publication_members": sorted(result_pub.members)},
+        )
+        return result
+
     def run(self) -> TrainableState:
         self.handshake()
         try:

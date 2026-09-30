@@ -360,8 +360,16 @@ def compose_island(
     placement: Any = None,
     profile: Any = None,
     observe: bool = False,
+    elastic: Any = None,
 ):
-    """Wire the adapter ports into an ``IslandDriver`` (no upstream imports)."""
+    """Wire the adapter ports into an ``IslandDriver`` (no upstream imports).
+
+    ``elastic`` (:class:`.elastic_wiring.ElasticWiring`, rl-infra-spec 3.x):
+    declared rollout cells for the E1 membership verbs, the reconfiguration
+    controller and the batch ledger. The controller reconciles the fork's
+    membership epoch with its journal before the driver runs. None keeps the
+    island unchanged.
+    """
 
     from yeto.rl.core import parse_policy_snapshot_token
 
@@ -396,6 +404,12 @@ def compose_island(
             expected_policy=expected_policy,
             runner=runner,
             args=miles_args,
+            **(
+                {"declared_cells": elastic.declared_cells,
+                 "track_timeout_s": elastic.track_timeout_s}
+                if elastic is not None
+                else {}
+            ),
         ),
         trainer=MilesTrainerGroup(
             args=miles_args,
@@ -432,7 +446,21 @@ def compose_island(
         eval_interval=eval_interval,
         profile=profile,
         observe=observe,
+        **(
+            {"controller": elastic.controller, "ledger": elastic.ledger}
+            if elastic is not None
+            else {}
+        ),
     )
+    if elastic is not None:
+        from .elastic_placement import ElasticPlacement
+
+        driver.placement = ElasticPlacement(
+            driver.placement, pool_gpus=elastic.pool_gpus,
+            epoch=elastic.controller.journal.epochs.config_epoch,
+        )
+        driver.config_epoch = elastic.controller.journal.epochs.config_epoch
+        elastic.controller.open(driver.rollout)
     holder["driver"] = driver
     return driver
 
