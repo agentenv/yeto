@@ -390,8 +390,13 @@ class MilesTrainerGroup:
 
     def rebind_args(self, args: Any) -> None:
         """Follow the Miles args of the rebuilt trainer (4.6/4.7: another DP size / bundle set)."""
-        trainer_layout(args)  # validates world % (tp*pp*cp)
+        layout = trainer_layout(args)  # validates world % (tp*pp*cp)
         self._args = args
+        plan = getattr(self, "_reshard_plan", None)
+        if plan is not None and layout != dict(plan.target):
+            # back on another layout (e.g. REBUILD_OLD / restore_source): the DP-change batch guard
+            # of the abandoned target no longer applies (review L-1); restore_cut_resharded sets it again.
+            self._reshard_plan = None
 
     def save_cut(self, *, epoch: int, context: "CutContext") -> str:
         """Write every rank's shard, then commit the manifest; returns the cut id.
@@ -454,7 +459,8 @@ class MilesTrainerGroup:
             ),
             rank_summaries=tuple(
                 {k: s[k] for k in ("path", "scheduler_samples", "has_optimizer_state", "has_rng",
-                                   "state_digest", "rng_digest", "components") if k in s}
+                                   "state_digest", "rng_digest", "components", "train_state_digest",
+                                   "weight_version") if k in s}
                 for s in summaries
             ),
         )
@@ -506,6 +512,8 @@ class MilesTrainerGroup:
         """
         from ..cut import CutError, cut_dir, verify_cut
         from .cut_plugin import RESTORE_CUT_SHARD
+
+        self._reshard_plan = None  # exact same-shape restore: no DP change to guard (review L-1)
 
         manifest = verify_cut(root, cut_id, expect, check_files=shared_filesystem)
         if manifest.epoch > epoch:

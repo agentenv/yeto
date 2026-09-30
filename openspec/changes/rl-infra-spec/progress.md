@@ -457,6 +457,22 @@
 - L3：**F-R1 未解决前不得认证 role-transfer 的 trainer→rollout 边**（plan v2 §6）。启动期的 bind 能力检查不可行（fork 没有可读接口），也未实现。
 - pool_gpus 入口：按主 agent 安排，等 F-R1 在 fork 实现后再做。
 
+### INFRA-E3 A8/DEV-GATHER harness（2026-09-30；合并 origin/integ-decl b90c18d 后；未起任何 GPU/云资源）
+- `tools/probes/e3_reshard/`：
+  - `harness.py`：plan-v3 §2.1 的 arm 序列（A1、A2、B1、B1p、B2、RT），每个 arm 是一个新 trainer；cut 经 `MilesTrainerGroup.save_cut/restore_cut_resharded`；证据写入 `<work>/arms/<ARM>/events.jsonl`（fsync）与各 rank 的状态文件。
+  - `miles_backend.py`：每个 arm 在独立 driver 进程里 `create_rollout_components` + `create_training_models`（`actor_num_gpus_per_node=dp`），冻结数据用 Miles 自带的 `--save-debug-rollout-data`（生成阶段，`debug_rollout_only`，基座策略）与 `--load-debug-rollout-data`（arm 阶段，`debug_train_only`）重放；`RolloutExecutor.get` 因此在 fork object store 里走生产上的 `split_train_data_by_dp`，按新 trainer 公布的 `train_parallel_config` 分派。
+  - `learner_shim.py`：用 learner 自己的参数管线（模型/数据下载、run config→Miles argv→`parse_args`），只把 `entry.run_ports_island` 换成 harness 阶段，因此**不需要改 driver/entry/launcher，没有补丁**；`--phase dry` 在任何 GPU 进程之前记录 miles_args 与 DP1↔2 的拒绝检查（有拒绝即退出）。
+  - `compare.py`：G1–G6 与 go/no-go/不可判定，容差为 plan-v3 的常量；容器内用 fork-M5 `merge_named_optimizer_states`。
+  - `modal_run.py`：DEV-GATHER（`A10G:2`，90 min）/A8（`H100!:2`，120 min，确定性环境变量）；容器内先断言 GPU 名、Miles pin、生成 runtime manifest，再 dry→gen→6 个 arm→compare→打包证据；app/sandbox id 写 `resources.txt` 供独立 watchdog。`build_flags.py` 从 `yeto launch ... --rl-single-island-no-sync --controller local --dry-run` 取 learner 参数。
+- rank 内回读插件 `yeto/rl/engine/miles_adapter/e3_probe.py`：包装 fork `process_rollout_data`（实际分片的 `partition`、是否带 `micro_batch_indices`/`num_rollouts`）、`loss_function`（`num_microbatches`、`num_rollouts`、`intra_dp_cp` 大小）、`get_loss_function`（未缩放的逐 micro batch loss，float hex）；`rank_info`（坐标、`torch/cuda initial_seed`、Megatron tracker 摘要、RNG 摘要、公布的 schedule 配置、dropout）；`dump_state`（adapter、按名 optimizer 状态、scheduler）。
+- CPU 测试 `tests/test_rl_e3_harness.py`（11）：假后端跑完整 arm 序列判 go；B1p 不确定→不可判定；分片缺 `micro_batch_indices`→G2 失败/no-go；恢复状态被改→G1 失败；arm 出错记录并停 trainer；探针包装透传与记录；容器脚本断言顺序；learner 参数提取；dry 阶段拒绝 dropout>0。只证协议与判定逻辑。
+- 尚未在 GPU 上验证（由 DEV-GATHER 先暴露）：`--save/--load-debug-rollout-data` 与 `debug_rollout_only/train_only` 在 parse 之后设置是否足够；源码树哈希（上传目录与 dry-run 时的树需一致）；奖励函数文件在容器内的位置；同一 Ray 集群上多个 driver 进程依次创建/释放 placement group。
+- 测试：全量 68 failed, 3048 passed, 49 skipped, 26 errors；失败/错误 id 94 个与 /tmp/integ-s2-base.ids（第二列）完全相同。云资源：无；$0。
+
+### INFRA-E3 DEV-GATHER（B3，调试，不计 task）
+- 第 1 次（ap-7XaksVC7xRWXm1UBcRk2Ob，04:56:34–05:00:13Z，≤$0.30）：容器内 dry 阶段被拒——ports 翻译固定输出 `--balance-data`；本地当时只生成了 learner 命令行，没构造 Miles argv。修复 0083a8d/ffca676：`local_dry.py` 与容器第一步执行相同的 argv 构造与检查，`modal_run` 本地不通过就不创建 Sandbox，任何退出路径都 stop app；profile 覆盖 `balance_data=false`。
+- 第 2 次（ap-XcOATnHhKi0AKP508tXkBZ，05:50:28–05:50:36Z，≤$0.02，代码 ffca676，本地 dry-run problems=[]）：容器第一步 GPU 名断言失败——`gpu="A10G:2"` 的 nvidia-smi 报 `NVIDIA A10`×2（驱动 580.95.05），计划期望 `NVIDIA A10G`；按停止条件立即结束，未进入 dry/gen/arm。app 由 harness 自行 stop，`modal app list` 核实 stopped/0，watchdog 已停。证据 `evidence/infra-e3/dev-gather-run2/`。
+- 待决定：期望名改为 Modal 实际报告的 `NVIDIA A10`（或改用 L4/L40S），由主 agent 批准后第 3 次运行。
 ### INFRA-E2 GPU harness 与注入（2026-09-30，仅 dry-run；未启动任何 GPU/云资源）
 - 容器内 harness：`miles_adapter/e2_harness.py`。snapshot 根目录有 `yeto-rl-e2-harness.json` 时代替 `driver.run()`，依次执行：逐 rank 确定性读回、G-4.2 (a)–(g)、G-4.3 冻结 batch 的双 arm 逐位比较、L2。CPU 伪岛测试覆盖通过、RNG 丢失、确定性缺失、dropout 不符四种情形。
 - 主机侧：`tools/probes/e2_cut_harness.py`，按 plan-v3 顺序生成 11 个 run 目录。`run.sh` 带 `YETO_E2_GPU_APPROVED` 守卫、watchdog、puller 与 rebuild 触发器；工具本身拒绝 `--execute`。本地两级检查为 launcher `--dry-run` 与 learner preflight（与容器内 learner 在 GPU 之前的检查相同，并翻译出 Miles argv）。
@@ -543,11 +559,21 @@
 - 镜像内 CPU preflight（B2 批准，app ap-AOEKeEOxdqbPDpGJNSPQyD，≤$0.02，已 stopped）：learner 在 import transformer_engine 时因缺 libcuda 失败，没有得到 Bridge/Miles parse 的结论；runtime manifest 的 commits 与当时的 pin 一致。需要 GPU 容器（例如 T4），待批准。证据：`preflight-cpu-20260930/`。
 - 测试：全量 68 failed / 26 errors / 3092 passed，失败 id（94 个）与 integ-decl 9d2029d 基线（3058 passed）一致。
 - 裁定（2026-09-30）：F-R1 绑定只在内存对 E1-D ⑤⑥⑦ 的影响按 (c) 处理，调整用例安排、原判据不变，写入 plan v2 §7.1；已提交配置≠启动配置时重启 → RECOVERY_REQUIRED 记为已知限制，不作为本轮判据；A9 f5 与 E3 plan-v3 一致。
+- 第 3 次（ap-tBFGEHdjRX37cYsbKSWrFu，05:52:49–06:50:39Z，≤$2.12，代码 c1c888e）：GPU 断言（接受 A10G/A10）通过，dry 通过，**生成冻结数据阶段卡住**：共置的 SGLang 引擎对 /generate 返回 400/503，rollout executor 反复重试（stdout 尾部 3094 行 "request failed with server error"），无进展约 58 分钟，主 agent 手动 stop（已核实 stopped/0）。本地 launch.log 为空（旧实现只在结束时读 stdout）。原因：gen 阶段在 parse 之后置 `debug_rollout_only`，没有按上游 train.py 先建 trainer、`update_weights`、`onload_kv`、`prepare_rollout`，引擎没有可服务的权重/KV。证据 `evidence/infra-e3/dev-gather-run3/`（只保留到 stdout 尾部）。
+- 修复（未重跑，等批）：gen 阶段按 train.py 顺序执行；每个 arm 训练后 offload；容器内逐阶段看门狗（20 分钟无进展或 >200 行 5xx 即杀并失败）、任何退出都打包证据；本地实时镜像到 `container.log`、25 分钟无输出终止 Sandbox；pin 改读 `yeto/rl/__init__.py`（2f23a0fc / db815884…）；harness argv 改走生产 trainer 边翻译（`trainer_dp_edges=True`，无 `--balance-data`），A8 用 `--rl-deterministic-trainer`。计划 `plan-v4.md`（判据不变）。
+- 合入 INFRA-E1 补丁 `infra-e1-e3-unbind-after-stop.patch`（rollout→trainer 停 cell 后 `unbind_members`，回退先绑回原 GPU），新增测试；A9 拓扑核对写入 plan-v4。
+- 测试：全量 68 failed, 3109 passed, 49 skipped, 26 errors，失败 id 与基线完全相同。B3 合计 ≤$2.44。
+- 第 4 次（ap-q62BauAxLAz4YVsVoCPXVR，07:00:22–07:07:39Z，≤$0.27，代码 4da0393）：GPU 断言与 dry 通过；gen 阶段按上游顺序建好组件与引擎（`gen components up`），`update_weights` 抛 `NotImplementedError: LoRA weight sync is not supported for hybrid colocated+distributed deployments`（`cuda_ipc.py:98`）：gen 把 trainer 设成 DP1，而共置 profile 有 2 个引擎，一个引擎旁没有 trainer rank。阶段失败即停，本地实时镜像与证据包完整（`evidence/infra-e3/dev-gather-run4/`，含首个错误全文 `first_error.txt` 与 gen 全日志）；app 由 harness stop 并核实。修复：gen 保持启动时的 trainer 大小（冻结数据与 DP 无关）；加测试。未重跑，等批。B3 合计 ≤$2.71。
 - F-E1 重跑的发布失败（`admit_cordoned needs the Miles router`）：`--rl-elastic` 下 Miles argv 固定加 `--use-miles-router`（RLRunConfig.use_miles_router），默认 argv 不变；`elastic_wiring_for` 在 Ray 之前调用 `check_elastic_miles_args`，拒绝缺 Miles router、colocate、rollout offload 的情况。已排查 elastic 路径用到的 fork 动词：cordon/uncordon/drain_cells/get_inflight/admit_cells/cordoned `start_update_weights` 依赖 Miles router；start/stop_cells/describe_cells 依赖可按需启停的 RayWorkerProvider（不支持时 fork 抛 NotImplementedError，事务按失败处理）；check_weights 无额外前提。A4/A5/A6b 的基线须同样带 `--rl-elastic`，写入 plan v2 §8。
 - 全量：68F/3095P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b5.ids`）。
+- 第 5 次（ap-7SF7SE2V6wYtBwv8dhHyeh，07:11:31–07:18:46Z，≤$0.27，代码 7e70371）：dry 通过；gen 建好组件（07:16:33）并完成 `update_weights`（07:17:58，第 4 次问题已解决）；首次 `executor.get` 时 ports argv 装入的 yeto rollout 元数据 hook 查找命名 actor `yeto_rollout_meta` 失败（`rollout_meta_hook.py:331`）——harness 绕过了 driver，没有建 `RayMetadataSink` 与策略 token。修复：gen 阶段与生产 driver 一样建 sink、每个 rollout 设 token 并取走元数据；加测试。证据 `evidence/infra-e3/dev-gather-run5/`（首个错误全文与 gen 全日志）。未重跑，等批。B3 合计 ≤$2.98。
+- 静态对照（上卡前）：`evidence/infra-e3/dev-gather-parity.md`，把 run_ports_island/compose_island/IslandDriver 的启动与每轮步骤逐项与 harness gen/arm 比对；gen 改为直接使用生产 MilesPolicyState/MilesPublisher/MilesRolloutPool 与 trainer offload/onload，按 driver 顺序；arm 训练前 onload；本地 dry-run 导入 argv 中每个钩子并在 fork pin 中核对 miles.* 可调用对象。
+- 第 6 次（ap-5hfi4fZkEvzCxkdiLpigmu，07:27:43–07:43:14Z，≤$0.57，代码 f74b49e）：dry 通过；**gen 通过**（07:40–07:41 8 个冻结 rollout 落盘，每个 2 组，发布 token 0–7）；A1 在 trainer 启动时失败：`RayWorkerManager.init` → `_CellManager.bundles` IndexError——arm 在 parse 后只置 `debug_train_only`，没有同时置 parse 会派生的 `rollout_num_gpus=0`、`starts_inference_engines=False`，共置参数仍声明 2 个引擎 cell 而 trainer-only 放置组只有 1 个 bundle。修复：arm 一并设置这些派生字段与 `world_size`；生产 `resized_args` 同步设置 `world_size`；对照表补 A9b 行；加测试。未重跑，等批。证据 `evidence/infra-e3/dev-gather-run6/`。B3 合计 ≤$3.55。
 - 02f6c5b：launcher 新增 `--no-island-relaunch`；`--modal-retries 0` 隐含此开关。fleet controller 的 learner 重启预算因此为 0，失败的岛直接拆除，不会再起第二个付费容器；syncer 照旧会被恢复。默认仍按 `--recover-timeout`。sky 岛走同一个 FleetController 循环，同样可以用 `--no-island-relaunch` 或 `--recover-timeout 0` 关闭。
 - 下一提交（4.4）：共置岛上 `rebuild_trainer` 在 restored == cut == published 校验通过后不再重发（引擎一直持有该 policy，重发会让 SGLang 去恢复并未 offload 的权重，报 KeyError 'weights'）；`rl_trainer_rebuilt` 记 `republished=false`。fixed-partition 不变，判据不变。
 - 全量：68F/3104P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b6.ids`）。
+- 第 7 次（ap-Zsi9SFmbZkg1dHeMijgdGz，07:47:48–08:33:49Z，≤$1.69，代码 61b40da = 8f40ee2 + integ-decl a382490）：dry、gen、**6 个 arm 全部 rc=0**（每个 arm 从新建 trainer 到结束约 3–4 分钟，镜像拉取约 19 分钟）；compare 程序出错（读分片 `partition` 键，fork 的 scheduled 分片只有 `sample_indices`；且容器脚本只把最后一条命令的 stderr 并入，回溯未进日志）。修复：compare 用 `sample_indices`；容器脚本 `exec 2>&1` 并打印 RESULT.json；加测试。事件级复核（`evidence/infra-e3/dev-gather-run7/event_analysis.txt`）：G2 两组均无问题（分片带 `micro_batch_indices`/`num_rollouts=16`，归一化与预测一致，样本集合与 micro batch 组成一致）；B1 与 B1p 的步 3 逐样本 loss、grad_norm、恢复后 RNG 摘要逐位相等；A1/B1、A2/B2 步 3 逐样本 loss 逐位相等、grad_norm 相对差 0，步 3–8 loss 与 grad_norm 相同；RT 恢复的 gathered 摘要与 B1 相同（1→2→1 往返无损）；新 rank RNG 均为 fresh、种子 1234 可复现。G1 全量逐位与 G4 的更新量/动量比较需要容器内的状态文件（未打包），本次未判；DEV-GATHER 为调试，不作 go/no-go。B3 合计 ≤$5.24。
+- 知会 E2 f898516（cut 携带 Miles `weight_updater.weight_version`，同形与重分片恢复均恢复它）：E3 harness 的 arm 不发布权重（debug_train_only、无引擎），DEV-GATHER/A8 不受影响；trainer_transition 在重建+重分片恢复后经 `publish_members` 重发，依赖该修复，合入 integ-decl 后在 E3 侧补测试核对。
 
 ### INFRA-E2 审查低严重度项（2026-09-30，合入 35f52ea 后）
 - L1：恢复后"加载后立即读取"的完整导出改为可选，需设 `YETO_RL_CUT_RESTORE_DIAGNOSTICS=1`。默认只在摘要不一致时报告 cut 与重新导出之间的差异；这两份数据都已在内存里，不多做一次导出。
@@ -557,6 +583,26 @@
 - **L5 已知限制**：`save_cut` 时如果部分 rank 拒绝，已经成功的 rank 会在 cut 目录留下分片。没有 manifest 时 cut 视为不存在，恢复不会使用这些分片，但它们不会被自动清理；同一 cut_id 再次保存会因分片已存在而被拒。调用方应换用新的 cut_id，或手动清理。
 - A2 rerun2 退出码 3 的原因与修复（上一代码提交）：一条 Modal 日志条目同时带了 `rl_learner_finalized` 记录和下一行 `[rl] learner 0 finalized`。收集器把整条条目当作一行解析，JSON 失败，这条记录被当作"格式损坏"丢弃，磁带因此没有 finalized 记录。现在收集器按换行切分每个条目；某条目末尾不完整、尚不能解析成记录的一段先暂存，与下一条目拼接（确实损坏的计为丢弃，后面的记录照常保留，关闭时再判一次）。Modal 日志的每一行都带岛名前缀。判定磁带完整之前的等待改为按事件返回：全部岛收到 finalized，或全部日志流结束，或到达有界时限。退出码语义不变。测试 `tests/test_rl_tape_collector_stream.py` 覆盖多行条目、跨条目半行、真损坏行、关闭时判定、最后事件晚到。
 - 全量：68F/3127P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b7.ids`）。
+- 4.4 重建后权重版本不回退（响应 E2 在 H100 上的发现，infra-e2 f898516 尚未合入 integ-decl）：已核对 driver 路径。`driver.rebuild_trainer` 本身不处理 Miles 的 `weight_updater.weight_version`，依赖 `rebuild_same_shape` 中的 `restore_cut` 把该计数恢复为 cut 中的值（E2 修复）；恢复之后，fixed-partition 的重发和共置岛之后各轮的发布都从恢复值继续加一。新增 3 个 CPU 测试，用 fake 模拟 Miles 的"版本回退即拒绝"：fixed-partition 重建后重发不回退；不恢复计数时重发被拒并转 RECOVERY_REQUIRED（反例）；共置岛跳过重发，之后各轮不回退。E2 修复合入后，用真实的 `restore_cut` 路径再对齐一次；不需要上卡。全量 68F/3130P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b8.ids`）。
+
+### INFRA-E3 A8 前准备（2026-09-30；不上卡）
+- A8 数据兜底：`pack_states.py`（容器退出前把每个 (arm, tag) 的 rank 状态合并为 `packed/*.pt` + `index.json` 逐字段摘要）、`modal_run.pull_packed`（经 Sandbox 文件接口拷出并校验 sha256 后才释放容器）、`compare.py --offline`（事件 + packed 即可算 G1–G6；缺状态时报告 `incomplete`，不给判定）。DEV-GATHER 第 7 次事件的离线演练：`evidence/infra-e3/dev-gather-run7/offline_drill_RESULT.json`（G2/G3/G4/G5/G6 的事件部分可算且通过，G1 与状态比较部分 unavailable）。
+- G1 口径（plan-v5/v6）：只比较同一 cut 的源状态与恢复后状态；compare 补比 Megatron 计数与 weight_version（v3 已列，之前漏比）。C1/C2 摘要差异：两条不同 DP 的训练，FP32 主参数/动量可在末位不同而 bf16 副本相同，故 loss/grad_norm 逐位相同；G1/G4 不跨 cut 比较，不会误判；A8 的逐字段摘要会记录具体字段。
+- 审查"小修后可合入"：M-A 合并 integ-decl b2fe5dd（Miles e3a11ab3、镜像 e3a11ab-9f29303 @sha256:2cc5cc52…、`side_effect_free_state`），harness/测试从 `yeto/rl/__init__.py` 读 pin，plan-v6；重分片恢复自检要求状态键与 cut 一致（防 exp_avg/exp_avg_sq 静默丢失）；L-1 批次守卫在 `restore_cut` 与回到非目标布局的 `rebind_args` 时清除，加测试；world_size 单独测试。
+- 已知限制（审查 L-3/L-4）：重分片路径的错误类型没有与同形路径的 "refused"（拒绝且未写入）语义对齐——部分错误在写入后抛出，调用方一律按 RECOVERY_REQUIRED 处理；`resized_args` 只改 trainer 大小与 `world_size`，不更新共置模式下由 trainer 大小派生的 `rollout_num_gpus`（共置 profile 不支持 trainer 变 DP 边，4.7 用 fixed-partition）。
+- 待办：E2 f898516 进入集成分支后，把 `miles_counters` 加入 `_restore_resharded` 的 DP 复制一致性校验，并补"变 DP 后重发版本连续"测试。
+
+### INFRA-E3 暂停点（2026-09-30 约 09:58Z，用户下班，暂停一切工作）
+- A8 第 1 次（ap-w6NmaMWQraIIiPmFqzCfmo，代码 517f745，Modal H100!:2）09:55:43 启动，约 1.5 分钟后在拉镜像阶段按主 agent 指令手动 stop（已核实 stopped/0，watchdog 与启动脚本已停），未进入任何阶段、无结论，费用 ≤$0.25。证据 `evidence/infra-e3/a8-attempt1-paused/`。
+- 已完成：4.6 重分片（CPU 通过）、4.7 yeto 侧（已实现）、A8/DEV-GATHER harness（DEV-GATHER 第 7 次 6 个 arm 跑通）、数据兜底与离线 compare、审查小修与 L-2（weight_version 跨 DP 连续），plan-v6 与 `a8-run-plan.md` 已在运行前提交。
+- 下一步：经主 agent 重新批准后，**A8 从头重跑**：用 `/home/michael/work/infra-e3-gpu/b3a8/go.sh`（快照为 517f745，learner 参数已生成、本地 dry-run 通过）或按 `a8-run-plan.md` 重建快照；台账先记一行，线程 <3000。A9 仍受 F-R1 布局与 A8=go 约束。
+- B3 合计 ≤$5.49。
+### INFRA-E2 暂停点（2026-09-30 约 10:00Z，用户下班暂停）
+- 分支 infra-e2，已合并 integ-decl 4dcc52b；代码中包含 e5a1b04（harness 比较不含发布计数、weight_version 另设判据、puller 单独拉取结果），plan-v6 已追加判据实现更正。
+- 已完成：plan-v6 的 pin（镜像 2cc5cc52 / Miles e3a11ab3）；本地 dry-run 24/24；T4 镜像内 preflight 通过。
+- 正式运行尚无判据结论：C1 v6 第 1 次（weight_version 漏项，已修）、第 2 次（比较口径，已修；不追认）、第 3 次（用户暂停）。
+- **恢复步骤**：合并最新 integ-decl → 用新代码提交重新生成 run 目录并重跑本地 dry-run → 从 C1 开始按 plan-v6 执行（C1 → c1-unsafe → C2 → C3 各行）。
+- 费用：B2 累计 ≤ $10.88。所有 E2 app 均为 stopped/0，本地无残留进程。
 ## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
 - 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
 - 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。

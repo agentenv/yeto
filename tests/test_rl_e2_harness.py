@@ -109,6 +109,7 @@ def determinism(monkeypatch):
 def _rank(seed):
     rank = make_rank(seed)
     rank.args.deterministic_mode = True
+    rank.weight_updater = SimpleNamespace(weight_version=0)
     return rank
 
 
@@ -146,8 +147,16 @@ def test_full_sequence_passes_on_the_cpu_fake(tmp_path, determinism, colocated):
             return result
 
         ctx.driver.rebuild_trainer = rebuild_trainer
+    if not colocated:  # a publication advances the Miles weight_version counter
+        def publish(state):
+            published.append(state)
+            for r in ctx.actor.target.ranks:
+                r.weight_updater.weight_version += 1
+
+        ctx.driver.publisher = SimpleNamespace(publish=publish)
     results = e2_harness.run_harness(ctx)
     assert len(published) == (0 if colocated else 2)
+    assert results["criteria"]["G-4.3 arm A weight_version == cut + re-publications"]["pass"]
     assert results["pass"]
     names = set(results["criteria"])
     for case in "abcdeg":
@@ -215,3 +224,17 @@ def test_failed_rebuild_records_the_attempts(tmp_path, determinism):
     crit = json.loads((tmp_path / "C1" / "results.json").read_text())["criteria"]["harness_completed"]
     assert [a["stage"] for a in crit["attempts"]] == ["start_pools", "start_pools"]
     assert "in use by running cell" in crit["attempts"][0]["error"]
+
+
+def test_diagnostic_sub_run_turns_the_read_guard_off(tmp_path, determinism):
+    from yeto.rl.engine.miles_adapter import cut_plugin as cp
+
+    ctx = _ctx(tmp_path)
+    ctx.plan = {**ctx.plan, "unsafe_state_reads": True}
+    try:
+        e2_harness.run_harness(ctx)
+        assert cp._UNSAFE_STATE_READS[0] is True
+        steps = (tmp_path / "C1" / "steps.jsonl").read_text()
+        assert "diagnostic_unsafe_state_reads" in steps
+    finally:
+        cp._UNSAFE_STATE_READS[0] = False

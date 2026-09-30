@@ -29,10 +29,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PLAN_VERSION = "plan-v5"
-IMAGE_DIGEST = "sha256:db81588406e157baa6a579f6378484b890371065abcc51eacd5a9650b5820cbf"
+PLAN_VERSION = "plan-v6"
+IMAGE_DIGEST = "sha256:2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff"
 IMAGE = f"ghcr.io/michaellchung/yeto-miles-ports@{IMAGE_DIGEST}"
-MILES_COMMIT = "2f23a0fca9b80f6a7300da401703c343014b03c0"
+MILES_COMMIT = "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841"
+IMAGE_TAG = "e3a11ab-9f29303"
 MODELS = {
     "Qwen/Qwen3-0.6B": "c1899de289a04d12100db370d81485cdf75e47ca",
     "Qwen/Qwen3-1.7B": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
@@ -115,6 +116,12 @@ def plan_runs() -> list[Run]:
         Run("c1", "C1", "modal:2xh100", "Qwen/Qwen3-0.6B", g42 + g43,
             extra=["--total-steps", "6", "--rl-lora-dropout", "0.05", *FIXED_PARTITION],
             harness=_harness("C1", 1)),
+        # plan-v6 diagnostic sub-run (not a criterion): C1 without the yeto read guard, to
+        # check the fork-M5 fix (e3a11ab3) on a real DistOpt; the rebuilt trainer's
+        # optimizer is read before the restore, which dropped exp_avg* before the fix
+        Run("c1-unsafe", "C1", "modal:2xh100", "Qwen/Qwen3-0.6B", ["diagnostic: fork-M5 fix without yeto guard"],
+            extra=["--total-steps", "6", "--rl-lora-dropout", "0.05", *FIXED_PARTITION],
+            harness={**_harness("C1", 1), "unsafe_state_reads": True}),
         Run("c2", "C2", "modal:3xh100", "Qwen/Qwen3-0.6B", g42 + ["G-4.2(f)"] + g43,
             extra=["--total-steps", "6", "--rl-lora-dropout", "0.05", *FIXED_PARTITION],
             harness=_harness("C2", 2)),
@@ -230,12 +237,16 @@ except Exception: d=[]
       tries=$(( $(cat $R/pulled/.guard_tries 2>/dev/null || echo 0) + 1 )); echo $tries > $R/pulled/.guard_tries
       if [ ! -s $R/pulled/image.txt ] && [ "$tries" -lt 12 ]; then
         :  # exec not answered yet (container still starting): retry next loop, never judge on empty output
-      elif [ "$n" = "$NG" ] && [ "$total" = "$NG" ] && grep -q "^$MC$" $R/pulled/image.txt && grep -q "2f23a0f-9f29303" $R/pulled/image.txt; then
+      elif [ "$n" = "$NG" ] && [ "$total" = "$NG" ] && grep -q "^$MC$" $R/pulled/image.txt && grep -q "%(tag)s" $R/pulled/image.txt; then
         date -u +%%FT%%TZ > $R/pulled/guard.ok
       else
         date -u +%%FT%%TZ > $R/pulled/guard.fail; $M app stop -y $APP > $R/guard_stop.out 2>&1
       fi
     fi
+    # small harness results pulled on their own (a tar of a changing tree can come back truncated)
+    for f in results.json steps.jsonl; do
+      timeout 60 $M container exec $c -- sh -c "cat ~/yeto-rl/e2-harness/*/$f 2>/dev/null" > $R/pulled/.r && [ -s $R/pulled/.r ] && mv $R/pulled/.r $R/pulled/harness-$f
+    done
     timeout 120 $M container exec $c -- sh -c "cd ~/yeto-rl 2>/dev/null && tar czf - --exclude=trainer_*.pt e2-harness elastic-state/reconfig elastic-state/ledger elastic-state/cuts inwatch.log 2>/dev/null | base64 -w0" > $R/pulled/.h && [ -s $R/pulled/.h ] && mv $R/pulled/.h $R/pulled/state.tgz.b64
     # progress watchdog: no new tape event for STALL_S, or too many error lines -> evidence above, then stop
     now=$(date +%%s); lines=$(wc -l < $R/pulled/rl-island-0.jsonl 2>/dev/null || echo 0)
@@ -282,7 +293,7 @@ def write_plan(root: Path, prefix: str, *, yeto_sha: str, source_repo: Path) -> 
                 "model_revision": MODELS[run.model], "criteria": run.criteria, "blocked": run.blocked,
                 "hard_timeout_s": run.hard_s, "rebuild_trigger": run.rebuild_trigger}
         (rdir / "spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
-        fills = {"modal": MODAL, "miles": MILES_COMMIT, "gpu": GPU_NAME, "inwatch": INWATCH,
+        fills = {"modal": MODAL, "miles": MILES_COMMIT, "gpu": GPU_NAME, "inwatch": INWATCH, "tag": IMAGE_TAG,
                  "stall": STALL_S, "errs": ERROR_LINES}
         (rdir / "puller.sh").write_text(PULLER % fills, encoding="utf-8")
         (rdir / "puller.sh").chmod(0o755)

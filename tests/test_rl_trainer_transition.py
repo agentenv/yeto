@@ -141,6 +141,9 @@ class Pool:
     def plan_add(self, n):
         return frozenset(f"e{len(self._members) + i}" for i in range(n))
 
+    def unbind_members(self, members):
+        self.log.append(("unbind", sorted(members)))
+
     def bind_members(self, members, gpus):
         self.log.append(("bind", sorted(members), list(gpus)))
 
@@ -327,3 +330,17 @@ def test_slice_pg_info_signature_is_checked():
         check_slice_pg_info(None)
     with pytest.raises(RuntimeError, match="signature"):
         check_slice_pg_info(lambda view, positions: view)
+
+
+def test_rollout_to_trainer_unbinds_stopped_cells_and_rebinds_them_on_rollback(tmp_path):
+    """E1 patch infra-e1-e3-unbind-after-stop: drain -> stop -> unbind -> trainer M6; rollback binds back."""
+    ranks, actor, ops, built = _world_trainer(1, tmp_path, fail=lambda n, i: n == 2)
+    ops.trainer.rebind_args(ranks[0].args)
+    pool = Pool({"e0", "e1", "e2"})
+    tr, records = _transition(_plan("T1R3", "T2R2", args=default_args(1), member_gpus=GPUS3), ops, pool)
+    result = tr.run()
+    assert result.phase == "REBUILT_OLD" and pool.members() == {"e0", "e1", "e2"}
+    assert pool.log[:2] == [("stop", ["e0"]), ("unbind", ["e0"])]
+    assert ("bind", ["e0"], ["g1"]) in pool.log
+    assert pool.log.index(("bind", ["e0"], ["g1"])) < pool.log.index(("start", ["e0"]))
+    assert any(r["kind"] == "engines_unbound" for r in records)
