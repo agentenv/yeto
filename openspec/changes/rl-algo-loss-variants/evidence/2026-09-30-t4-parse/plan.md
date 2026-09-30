@@ -20,3 +20,10 @@
 - 修复：改为 Modal Sandbox 驱动（与 rl-algo-seq-and-adv g1_sbx.py 同法，脚本只在本地执行），`Sandbox.create(..., gpu="T4", timeout=840)`；判据、镜像、资源、上限不变；本地 `timeout 900` 与独立 watchdog（1080 秒）照旧。
 
 ## 第 2 次运行计划：同上，只换驱动方式。
+
+## 第 2 次运行结论（app ap-EEOUsOKydYiZAicXEClFyy，sandbox sb-BLgdzo9VB4AZYVBpRxm8oM，未产出结果）
+- 镜像拉取成功；`nvidia-smi` = Tesla T4 (580.95.05)；/root/miles HEAD = 5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba。
+- 解析进行中 sandbox 被 SIGKILL（returncode 137），04:11:55 app stopped。原因：第 1 次运行时启动的 watchdog 按前缀匹配，1080 秒到期时把第 2 次的 app 当作残留停掉了（/tmp/algo2b-t4-watchdog.log：`watchdog stop ap-EEOUsOKydYiZAicXEClFyy`）。是回收脚本的设计缺陷，与被测代码无关。
+- 修复：watchdog 只停止"本 watchdog 启动之后创建"的 algo2b-t4-* app；每次运行只保留一个 watchdog（第 2 次的 watchdog 已 kill）。
+
+## 第 3 次运行计划：与第 2 次相同（Sandbox，T4，timeout 840，本地 timeout 900，watchdog 1080 秒），判据不变。
