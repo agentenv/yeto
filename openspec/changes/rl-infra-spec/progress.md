@@ -591,3 +591,10 @@
 - 审查"小修后可合入"：M-A 合并 integ-decl b2fe5dd（Miles e3a11ab3、镜像 e3a11ab-9f29303 @sha256:2cc5cc52…、`side_effect_free_state`），harness/测试从 `yeto/rl/__init__.py` 读 pin，plan-v6；重分片恢复自检要求状态键与 cut 一致（防 exp_avg/exp_avg_sq 静默丢失）；L-1 批次守卫在 `restore_cut` 与回到非目标布局的 `rebind_args` 时清除，加测试；world_size 单独测试。
 - 已知限制（审查 L-3/L-4）：重分片路径的错误类型没有与同形路径的 "refused"（拒绝且未写入）语义对齐——部分错误在写入后抛出，调用方一律按 RECOVERY_REQUIRED 处理；`resized_args` 只改 trainer 大小与 `world_size`，不更新共置模式下由 trainer 大小派生的 `rollout_num_gpus`（共置 profile 不支持 trainer 变 DP 边，4.7 用 fixed-partition）。
 - 待办：E2 f898516 进入集成分支后，把 `miles_counters` 加入 `_restore_resharded` 的 DP 复制一致性校验，并补"变 DP 后重发版本连续"测试。
+
+### INFRA-E2 暂停点（2026-09-30 约 10:00Z，用户下班暂停）
+- 分支 infra-e2，已合并 integ-decl 4dcc52b；代码中包含 e5a1b04（harness 比较不含发布计数、weight_version 另设判据、puller 单独拉取结果），plan-v6 已追加判据实现更正。
+- 已完成：plan-v6 的 pin（镜像 2cc5cc52 / Miles e3a11ab3）；本地 dry-run 24/24；T4 镜像内 preflight 通过。
+- 正式运行尚无判据结论：C1 v6 第 1 次（weight_version 漏项，已修）、第 2 次（比较口径，已修；不追认）、第 3 次（用户暂停）。
+- **恢复步骤**：合并最新 integ-decl → 用新代码提交重新生成 run 目录并重跑本地 dry-run → 从 C1 开始按 plan-v6 执行（C1 → c1-unsafe → C2 → C3 各行）。
+- 费用：B2 累计 ≤ $10.88。所有 E2 app 均为 stopped/0，本地无残留进程。
