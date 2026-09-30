@@ -112,9 +112,9 @@ def main(ds, do, dd):
     hard = bool(es) and es == eo
     sc = []
     for v in sorted(set(S["scores"]) & set(O["scores"])):
-        ks = [k for k in S["scores"][v] if k.startswith("eval/") and k.count("/") == 1 and "-" not in k]
+        ks = ["eval/gsm8k-test32"]  # mean reward of the N=32 greedy eval set (Miles log line)
         for k in ks:
-            if k in O["scores"][v]:
+            if k in O["scores"][v] and k in S["scores"][v]:
                 sc.append({"v": v, "key": k, "S": S["scores"][v][k], "O": O["scores"][v][k],
                            "ok": abs(S["scores"][v][k] - O["scores"][v][k]) <= 2 / N_EVAL + 1e-12})
     res["5"] = {"S_points": es, "O_points": eo, "hard": hard, "scores": sc,
