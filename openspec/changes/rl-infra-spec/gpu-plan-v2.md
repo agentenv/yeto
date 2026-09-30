@@ -330,3 +330,19 @@
 - 代码 37155d8（合并 integ-decl b2fe5dd：launcher 磁带按行切分修复；镜像 pin `sha256:2cc5cc52…`，Miles e3a11ab3）。dry-run：a2/test_a2_dryrun.py 3 passed，fe1r/test_fe1r_dryrun.py 1 passed（pin 与 commit 从代码读取核对）。
 - A2：S、O、OD 全部在 37155d8 重跑（不复用 S2），配置同 §9.11 A2 重跑（含 `--rl-deterministic-trainer`），前缀 `infra-v2-b1-a2{s,o,od}-20260930-3`，每 arm 最坏 $6.6。
 - F-E1：3×A10G，037d4f5 上取得的指纹因镜像 pin 变化作废，在 37155d8 上重取（`infra-v2-b1-fe1r5fp-…`）后正式运行（`infra-v2-b1-fe1r5-…`）；最坏 $2.5。与 A2 并行（互不共享端口/资源）。
+
+### 9.14 A4 / A4b 执行计划（主 agent 批准；运行前提交；判据以 §3、§8.7、`evidence/infra-e1/plan.md` E1-A…E1-E、`evidence/infra-e1/plan-3.8-4.4-v2.md` §4/§6/§7.1/§8 为准，不放宽）
+
+- 代码：d613130（合并 integ-decl a016f7f），镜像 = 该提交 `MILES_NEXT_IMAGE`（运行前 manifest 核对）。本批预算按主 agent：B1 $170；已花 ≤$33.6（+A2 OD 补跑）。
+- 公共配置：Modal `H100!:8`（`--modal-gpu-exact`），`--rl-single-island-no-sync --controller local`，T4R2S2（trainer G0–G3，rollout G4–G5，standby G6–G7），`--rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3`（c0/c1 在 G4/G5 启动，c2/c3 在 G6/G7 声明不启动），resources `a4/resources-8.json`（T4R2S2、T4R4S0、双向 rollout-only 边），`--total-steps 12 --seed 17`，`--rl-observe-timeline`，`--modal-retries 0 --modal-timeout-s <硬超时+300>`，进度看门狗 20 min。所有用例（含基线）都带 `--rl-elastic`（§8 Miles router 一致）且 Miles argv 相同 → 共用一个 attestation 指纹。
+- 本地 8 卡 dry-run：`evidence/infra-v2-b1/a4/test_a4_dryrun.py` 9 passed（rollout_cells、`--use-miles-router`、declare-cells、各用例注入开关/restart loop 到达岛上环境）。
+- 顺序、费用（8×$3.95 = $31.6/h）、硬超时：
+  1. **调度探测 + 指纹**（`a4fp`）：同公共配置加 `--rl-print-attestation-fingerprint`，learner 打印指纹后退出（Ray/GPU 之前）；兼作 8 卡 H100 调度探测：10 分钟内无容器即停止回报。硬超时 20 min，最坏 $10.5。（主 agent 要求"CPU 容器取指纹"：launcher 无 CPU 岛入口，指纹运行在同一次调度探测中完成，不再单独开 H100。）
+  2. **E1-A 基线**（`a4base`）：无请求，12 轮。硬超时 45 min，最坏 $23.7。
+  3. **E1-A 切换 + E1-E 旁证**（`a4x2`）：第 2 轮 train 时（第 3 轮前）up→T4R4S0，第 7 轮 train 时（第 8 轮前）down，deadline 各 600 s；up 生效后再提交一次相同 request_id（幂等核对）；采样 router `/worker_inflight`、`nvidia-smi` compute-apps（E1-A (d)(e)）。硬超时 45 min，最坏 $23.7。判据 E1-A (a)–(g)、E1-E。
+  4. **E1-B**（`a4e1b`）：`--rl-test-inject-weight-override <岛上 base 模型快照路径>`，第 2 轮 train 时 up；判据 E1-B (a)–(d)（(c)(d) 用容器内脚本调用 router/fork）。硬超时 30 min，最坏 $15.8。
+  5. **E1-D ③**（`a4d3`）：先 up 成功，再 down 时 `--rl-test-inject-stop-failures 1`；④（`a4d4`）：`--rl-test-inject-stop-failures` 足以超过 T_recovery。各硬超时 30 min，最坏各 $15.8。①② 以容器内触发器在 `fork_op start issued` / `VERIFYING` 时 kill 新 cell 的 SGLang 进程（同一次运行按事务顺序，`a4d12`）。
+  6. **E1-D ⑤⑥⑦**（按 §7.1 裁定 (c)）：⑤ 先 up（无 kill）→ 以同一 state dir 重启并带 `--rl-test-kill-learner-at COMMITTED` 发 down；⑥ epoch 0 的 up 在 QUIESCING kill；⑦ 首个事务前 kill learner（容器内 kill，restart loop 重启）后发 up。各硬超时 30 min。
+  7. **watchdog 用例**（`a4wd`，§8.7(2)）：`--rl-test-inject-update-weights-block-s 600`，up deadline 120 s。硬超时 25 min，最坏 $13.2。
+  8. **E1-C / A4b**：`Timeouts.drain`（T_drain）在 launcher/learner 无配置入口（默认 120 s），E1-C 要求 T_drain=5 s + 工具等待 30 s，按原参数不可执行 → **等待代码/裁定**，不运行。
+- 门控：每次启动前 本批已花 + 本次最坏 ≤ $170；预计全部执行（不含 E1-C）最坏约 $200 > 余额，按顺序执行并在余额不足时停止回报（优先 1–4，其次 7、5、6）。失败即停。

@@ -1,0 +1,52 @@
+{
+ "argv_has_miles_router": true,
+ "placement_map": {
+  "rollout": [
+   4,
+   5
+  ],
+  "rollout_cells": [
+   {
+    "bundles": [
+     4
+    ],
+    "name": "c0",
+    "start": true
+   },
+   {
+    "bundles": [
+     5
+    ],
+    "name": "c1",
+    "start": true
+   },
+   {
+    "bundles": [
+     6
+    ],
+    "name": "c2",
+    "start": false
+   },
+   {
+    "bundles": [
+     7
+    ],
+    "name": "c3",
+    "start": false
+   }
+  ],
+  "standby": [
+   6,
+   7
+  ],
+  "trainer": [
+   0,
+   1,
+   2,
+   3
+  ]
+ },
+ "env": {
+  "YETO_RL_TEST_KILL_LEARNER_AT": "COMMITTED"
+ }
+}
