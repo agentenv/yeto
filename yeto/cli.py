@@ -264,6 +264,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-inject-rebuild-fail", action="store_true",
                     help="--rl-elastic, TEST ONLY (4.4 REBUILD_OLD): the first same-shape trainer "
                     "rebuild fails in the fork at create_training_models")
+    rl.add_argument("--rl-test-inject-cut-save-kill-rank", type=int, default=None, metavar="RANK",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank exits while "
+                    "writing its save_cut shard")
+    rl.add_argument("--rl-test-inject-cut-restore-kill-rank", type=int, default=None, metavar="RANK",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank exits during "
+                    "restore_cut (after the adapter write)")
+    rl.add_argument("--rl-test-inject-cut-restore-sleep", default=None, metavar="RANK:SECONDS",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank sleeps before "
+                    "restore_cut")
+    rl.add_argument("--rl-test-inject-rebuild-cursor-shift", type=int, default=None, metavar="GROUPS",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): before a trainer rebuild, place a "
+                    "dataset state advanced by GROUPS where rollout_executor.load reads it")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",

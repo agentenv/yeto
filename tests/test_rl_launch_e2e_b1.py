@@ -452,3 +452,26 @@ def test_trainer_edges_need_elastic():
 
     with pytest.raises(ValueError, match="need --rl-elastic"):
         launcher._check_ports_infra_switches(_cli(("--rl-elastic-trainer-edges",)), "ports")
+
+
+# ---------------------------------------------------------------- E2 cut injections (patch v1)
+def test_cut_injections_rank_zero_reaches_the_island_and_ray_workers(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+
+    run = island_run(BASE + _elastic(tmp_path) + (
+        "--rl-test-inject-cut-save-kill-rank", "0", "--rl-test-inject-cut-restore-sleep", "1:30",
+        "--rl-test-inject-rebuild-fail"), monkeypatch)
+    _, env = learner_from_run(run, tmp_path / "home")
+    assert env["YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"] == "0"  # rank 0 is not False
+    assert env["YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"] == "1:30"
+    assert env["YETO_RL_TEST_INJECT_REBUILD_FAIL"] == "1"  # one shared rebuild-fail variable
+    seen = {}
+    ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
+    connect_island_ray(environ={"RAY_ADDRESS": "1.2.3.4:6379", **env}, ray_module=ray)
+    forwarded = seen["runtime_env"]["env_vars"]
+    assert forwarded["YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"] == "0"
+    assert forwarded["YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"] == "1:30"
+    assert "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK" not in island_run(BASE + _elastic(tmp_path),
+                                                                        monkeypatch)

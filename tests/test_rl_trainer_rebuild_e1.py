@@ -424,7 +424,7 @@ def test_round_trained_event_carries_the_data_cursor_only_when_reported(tmp_path
 def test_injected_rebuild_failure_takes_the_fork_path_to_rebuild_old(tmp_path):
     import types
 
-    from yeto.rl.engine.miles_adapter.entry import injected_rebuild_failure
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import inject_rebuild_failures
 
     fresh = [RankGroup([make_rank(9)]), RankGroup([make_rank(8)])]
     calls = []
@@ -463,7 +463,7 @@ def test_injected_rebuild_failure_takes_the_fork_path_to_rebuild_old(tmp_path):
         rebuild_same_shape=lambda *, restore: rebuild_same_shape(
             trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
             worker_manager="wm", rollout=_Cursor(), restore=restore,
-            rebuild=injected_rebuild_failure(fork)))
+            rebuild=inject_rebuild_failures(fork.rebuild_training_models, fork, 1)))
     out = rebuilder(_Driver("h"), epoch=0, cut_id="rb-0-inj")
     assert out["outcome"] == "REBUILD_OLD" and out["generation"] == 1
     assert calls == ["create"]  # the first create was the injected failure

@@ -962,6 +962,15 @@ _ELASTIC_TEST_EXPORTS = (
     ("rl_test_kill_learner_at", "--rl-test-kill-learner-at", "YETO_RL_TEST_KILL_LEARNER_AT"),
     ("rl_test_inject_rebuild_fail", "--rl-test-inject-rebuild-fail",
      "YETO_RL_TEST_INJECT_REBUILD_FAIL"),
+    # E2 G-4.5 (plan-v3), read by miles_adapter.cut_injection
+    ("rl_test_inject_cut_save_kill_rank", "--rl-test-inject-cut-save-kill-rank",
+     "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"),
+    ("rl_test_inject_cut_restore_kill_rank", "--rl-test-inject-cut-restore-kill-rank",
+     "YETO_RL_TEST_INJECT_CUT_RESTORE_KILL_RANK"),
+    ("rl_test_inject_cut_restore_sleep", "--rl-test-inject-cut-restore-sleep",
+     "YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"),
+    ("rl_test_inject_rebuild_cursor_shift", "--rl-test-inject-rebuild-cursor-shift",
+     "YETO_RL_TEST_INJECT_REBUILD_CURSOR_SHIFT"),
 )
 KILL_PHASES = ("QUIESCING", "TRANSFERRING", "INITIALIZING", "VERIFYING", "COMMITTED",
                "RESUMING", "REBUILDING_TRAINER")
@@ -1090,7 +1099,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
             raise ValueError(f"{flag} must be positive")
     given += [flag for name, flag in _ELASTIC_TEST_FLAGS if getattr(args, name, None) is not None]
     given += [flag for name, flag, _ in _ELASTIC_TEST_EXPORTS
-              if getattr(args, name, None) not in (None, False) and flag not in given]
+              if getattr(args, name, None) is not None and getattr(args, name) is not False
+              and flag not in given]  # rank 0 is a valid value (E2 cut injections)
     if getattr(args, "rl_elastic_state_dir", None) is not None:
         given.append("--rl-elastic-state-dir")
     kill_at = getattr(args, "rl_test_kill_learner_at", None)
@@ -1214,7 +1224,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             value = getattr(args, name, None)
             if value is True:
                 value = 1
-            if value not in (None, False):
+            if value is not None and value is not False:  # rank 0 is valid
                 prelude += f"export {env}={shlex.quote(str(value))}\n"
         attempts = getattr(args, "rl_elastic_restart_attempts", None)
         if attempts:
