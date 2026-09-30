@@ -84,13 +84,15 @@ def main(argv: list[str]) -> int:  # pragma: no cover - needs Modal credentials 
 
     profile, out, flags, app_name, repo = argv[0], Path(argv[1]), Path(argv[2]), argv[3], Path(argv[4])
     out.mkdir(parents=True, exist_ok=True)
-    sys.path.insert(0, str(HERE))
-    from local_dry import local_dry
-
-    dry = local_dry(profile, flags.read_text())  # identical check as the container's first step
-    (out / "local_dry.json").write_text(json.dumps(dry, indent=1, sort_keys=True, default=repr))
-    if dry["problems"]:
-        print("local dry-run refused; no Sandbox started:", dry["problems"])
+    # Identical check as the container's first step, run with the yeto environment
+    # (E3_DRY_PYTHON; the Modal client venv has no yeto dependencies) on the uploaded snapshot.
+    dry_python = os.environ.get("E3_DRY_PYTHON", sys.executable)
+    proc = subprocess.run([dry_python, str(repo / "tools/probes/e3_reshard/local_dry.py"), profile, str(flags),
+                           str(out / "local_dry.json")], cwd=repo, env={**os.environ, "PYTHONPATH": str(repo)},
+                          capture_output=True, text=True)
+    (out / "local_dry.log").write_text(proc.stdout + proc.stderr)
+    if proc.returncode != 0:
+        print("local dry-run refused or failed; no Sandbox started (see local_dry.log)")
         return 2
     p = PROFILES[profile]
     auth = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
