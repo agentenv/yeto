@@ -1,0 +1,86 @@
+# Implementation tasks
+
+标记：`[Y]` 仅改 yeto 自有新文件；`[IR-n]` 需要修改 INFRA 所有的文件，以 design D11 的接口请求形式提出，得到 INFRA owner 同意后才能执行；`[阻塞: …]` 被 rl-infra-spec 阻塞，括号内写明解除条件；`[GPU]` 需要 GPU，执行前按第 9 组的判据和费用上限获批。全部任务不修改 fork Miles/SGLang。
+
+## 1. A 路径配置透传（IR-1）
+
+- [ ] 1.1 [IR-1] `miles_adapter/config.py`：放开 `agent.custom_agent_function_path`、`agent.agent_max_seq_len`，映射到 `--custom-agent-function-path` / `--max-seq-len`；仅当 `custom_generate_function_path` 为 `miles.rollout.generate_hub.agentic_tool_call.generate` 时允许；更正 332–337 行的拒绝理由；`tito_allowed_append_roles` 继续拒绝，理由改为“由 `--tito-model` 模板决定”。验收：CPU 单测，覆盖透传、缺少 agentic_tool_call 时拒绝、理由文本三种情况。
+- [ ] 1.2 [IR-1] 启用 session server 时同时请求 partial rollout，启动失败，错误信息引用上游 `arguments.py:3240` 的互斥规则。验收：CPU 单测。
+- [ ] 1.3 [Y] 用 fork pin 的上游 `agentic_tool_call.add_arguments` 解析 1.1 生成的参数，确认参数被识别、没有未知参数。验收：CPU 测试（只 import 解析器，不起 Ray）。
+
+## 2. agent 包与 preflight 入库
+
+- [ ] 2.1 [Y] 定位 legacy `yeto_miles_secrlenv` 与 `codex_openenv_*_agent_function` 源码（agentenv/miles examples、镜像内 site-packages）；找到就搬到 `yeto/rl/harness/codex/`，找不到就按 `tests/test_secrlenv_codex_harness.py` 重写，并在 progress 中标“重写”。验收：原测试文件的全部用例迁到新包后在 CPU 上通过。
+- [ ] 2.2 [Y] 把 `_preflight_codex_harness`、`_verify_live_codex_app_server_schema`、`tbench_direct_preflight.validate_hmac_key_source` 抽到 `yeto/rl/harness/codex/preflight.py`，legacy 同名函数改为转调。验收：legacy 与新入口对同一组篡改输入（二进制 sha、schema、工具面、密钥权限）给出相同失败；CPU 单测。
+- [ ] 2.3 [IR-1] ports `entry.py` 在模型分配前调用 2.2 的 preflight。验收：CPU 单测，preflight 失败时不触发 placement / 分配调用。
+
+## 3. tool-wait 与在途计数
+
+- [ ] 3.1 [Y] agent 函数内，把每次“模型返回→下一次请求”的区间包进 `async_tool_wait_scope(board_actor(learner_id), trajectory_id)`，模式同 `tool_wait_workload.py`。验收：CPU 测试用 fake bridge 驱动 3 轮，board 的 enter/exit 次数为 3，结束后计数归零；异常路径同样归零。
+- [ ] 3.2 [IR-2] `drain_blockers` 与 `MilesRolloutPool` 的 drain probe 加入 `harness_in_flight`、`env_live`，未知值 fail closed；1.7 load sample 带上这两个字段。验收：CPU 单测覆盖“active=0 但 tool_wait>0 / env_live>0 时未排空”。
+- [ ] 3.3 [阻塞: rl-infra-spec 1.7 勾选、3.3b fork-M3 合入] X5 drain 场景下 agentic 轨迹的 GPU 验收：在 3.3 X5 实验里加一条 agentic workload，验证 drain 期间旧路由保留到轨迹结束。解除条件：infra 3.3 进入 GPU 验收阶段；本任务并入其实验，不单独开卡。
+
+## 4. 网关核心库（进程内，A 与 B 共用）
+
+- [ ] 4.1 [Y] 从 bridge 抽出 `yeto/rl/harness/gateway/`：Responses（SSE）、Chat、Messages 三入口的请求/响应转换，统一调用 Session Server 的 chat 路由；采样签名字段不可覆盖；不支持的形态显式拒绝。验收：迁入的 legacy 用例（reasoning 往返、whitespace、length 边界、畸形帧、响应上限）CPU 通过，新增 Messages 与 Chat 的往返用例。
+- [ ] 4.2 [Y] 前缀哈希链与多 chain：延续、分叉回滚、断链另起三种路径，`chain_break_reason` 枚举，禁止修补后沿用旧 chain。验收：CPU 单测覆盖 spec 中“正常多轮 / 重试分叉 / 历史改写”三个场景，并做属性测试（随机追加序列下 chain 数与期望一致）。
+- [ ] 4.3 [Y] mask/logprob 对齐断言与每次生成的 `policy_version` 记录；age 0 下版本漂移使轨迹作废。验收：CPU 单测覆盖 logprob 缺失、长度不等、mask=1 位置非生成、版本漂移四种情况，全部作废且不记 0 奖励。
+- [ ] 4.4 [IR-3] driver 在 age 0 配置下把目标 `policy_version` 传给 rollout。验收：CPU 单测。
+- [ ] 4.5 [IR-4] 1.7 指标 schema 登记 `tito_session_mismatch`、`tito_chain_breaks{reason}`、`policy_age_violation`、`harness_in_flight`、`env_live`，带 profile/epoch 标签。验收：CPU 单测，关闭观测时兼容旧路径。
+
+## 5. reasoning 与模板一致性
+
+- [ ] 5.1 [Y] 每个受支持的 tito_model 声明 `keeps_history_reasoning`，并加一个离线测试：用 fork 的 `chat_template_verify.py` 渲染多轮带 think 的历史，比对声明。验收：CPU 测试，覆盖 legacy 用到的 Qwen3.5 / Qwen3.8 profile 与一个 Qwen3 模板。
+- [ ] 5.2 [Y] 网关在 `keeps_history_reasoning=false` 时按模板原因另起 chain，且 reasoning 生成段 mask=1。验收：CPU 单测，检查 mask 与断链原因计数。
+
+## 6. 奖励契约与信任分层
+
+- [ ] 6.1 [Y] 奖励函数、父进程 `verified_outcome`、`trajectory_evidence` 三个验签点在 ports 路径上都生效。验收：CPU 测试，篡改 reward / 增删字段 / 错误密钥三种情况在三处都被拒收。
+- [ ] 6.2 [Y] 失败分类：基础设施错误不签名，标 aborted，不进训练；策略边界与答错签名，奖励 0。验收：CPU 单测，沿用 legacy 的 precreate 503 / 基础设施重试超时用例。
+- [ ] 6.3 [Y] 在 design D7 基础上补一张可信层/不可信层边界清单（密钥位置、verifier 资产注入时机、进程与网络边界），写进 `yeto/rl/harness/README` 段落或 docs/MILES_RL.md 对应节。验收：文档评审；CPU 测试断言 agent 子进程环境中没有密钥变量。
+
+## 7. 长轨迹与分段预留
+
+- [ ] 7.1 [Y] 超时 / `max_seq_len` 按策略边界截断并签名；sample metadata 带 `trajectory_id`、`segment_id=0`、`segment_boundary_reason=null`、`reward_scope=trajectory`；配置 `reward_scope=segment` 时启动失败。验收：CPU 单测。
+- [ ] 7.2 [Y] 网关上下文拼接走 `ContextProvider`，默认为恒等映射。验收：CPU 单测证明恒等实现不改变 token 序列。
+
+## 8. 沙箱代理接口（只预留）
+
+- [ ] 8.1 [Y] `SandboxBroker` Protocol（acquire/heartbeat/exec/copy_in/copy_out/verify/destroy/describe）、租约与错误类型。验收：类型检查与 CPU 单测。
+- [ ] 8.2 [Y] 环境注册表 schema 与校验：digest 锁定、规格、超时、verifier_ref、网络策略（默认拒绝出网）、扣留资产。验收：CPU 单测，可变 tag、缺项、默认放行出网三种情况都拒绝。
+- [ ] 8.3 [Y] 本地 fake broker：以 describe 返回 gone 为销毁确认，维护 `env_live`；心跳超时判为基础设施错误。选择远程后端时启动失败。验收：CPU 单测覆盖 spec 全部场景，并接入 3.2 的 drain 计数测试。
+- [ ] 8.4 [Y] A 路径适配：把现有 OpenEnv/Daytona 调用包成 `SandboxBroker`，不改变行为。验收：2.1 迁入的 driver / home cleanup / 进程组回收用例仍然通过。
+
+## 9. GPU 验证（便宜卡，逐项获批）
+
+- [ ] 9.1 [GPU] A 路径冒烟：ports + agentic_tool_call + Codex，在 Terminal-Bench 小子集上跑 1 个 rollout 步 + 1 个训练步。判据：
+  - preflight 通过；
+  - 每条轨迹的 sample 满足 4.3 的断言；
+  - HMAC 验签通过；
+  - tool_wait 计数在轨迹结束后归零；
+  - 奖励分布非全空；
+  - TIS 比值统计出现在指标中。
+  资源：单卡 H100 或更便宜卡、小模型（与 legacy 相同的 Qwen3.5 小档位 LoRA），费用上限 $30，超出即停。任务子集规模在执行前确定（design Open Questions）。
+- [ ] 9.2 [GPU] 多轮 TITO 一致性：在 9.1 同一环境中，对每个受支持的 tito_model 跑 ≥20 条多轮轨迹。判据：
+  - 保留历史 reasoning 的模板：断链率 = 0，`tito_session_mismatch` = 0；
+  - 丢弃历史 reasoning 的模板：断链原因只出现 `template_drops_reasoning`；
+  - 所有 chain 的 logprob 与 trainer 重算 logprob 的差异落在 TIS 截断范围内的比例 ≥99%。
+  费用上限 $20，可与 9.1 在同一租期内完成。
+- [ ] 9.3 [阻塞: rl-infra-spec 异步契约与 age>0 支持] age 0 下长尾轨迹对整轮时延的影响测量。解除条件：infra 给出异步契约，或用户批准在 age 0 下单独测量。本 change 不为其开卡。
+
+## 10. B 网关进程外壳
+
+- [ ] 10.1 [Y] 在第 4 组的库外加 HTTP 服务：`/sessions/{id}/v1/responses|chat/completions|messages`，会话 token 鉴权，撤销后返回 410。验收：CPU 集成测试，fake Session Server 加 fake harness 跑三入口。
+- [ ] 10.2 [Y] 由网关按会话上报 tool-wait 与 `harness_in_flight`（与 3.1 同一计数口径）。验收：CPU 测试，进程内模式与外壳模式的计数序列相同。
+- [ ] 10.3 [Y] 用 `codex exec` 加 fake 推理端点做一次本地 CPU 回放，验证黑盒 Codex 经外壳网关时单 chain、无 mismatch（不需要 GPU）。验收：测试通过，记录 Codex 版本与请求形态摘要。
+
+## 11. 后续 change（本 change 不做，仅登记）
+
+- [ ] 11.1 在 progress 中登记以下后续 change 的范围与依赖：
+  - 真实沙箱后端（每轨迹一 Pod、404 销毁、默认拒绝出网）；
+  - 租约队列与远程 worker；
+  - CompactionRL（分段奖励、上下文替换）；
+  - partial / 续跑（依赖 infra 异步契约，且受上游 session server 互斥约束）；
+  - 多 harness 首批认证（OpenHands / mini-swe-agent / Claude Code 风格）；
+  - `apply_patch` freeform 工具。
+  验收：progress 条目评审通过。
