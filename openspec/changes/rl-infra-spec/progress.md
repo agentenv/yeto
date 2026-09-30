@@ -186,3 +186,10 @@
 4. INFRA-E2：4.1 cut 状态审计（含 A3 算法状态与 Miles 超采样余量回收行为；已知：partial_rollout 关闭时在飞中被中止的组被丢弃，不回收）。
 5. 已知限制：TP/PP 集体导出与 DistOpt 分片主参数的组合仍拒绝；precision-aware optimizer 拒绝。
 6. 测试基线：`/tmp/integ-full.txt` 中的 94 个失败 id（环境性）；每次合入按 id 对比。
+
+## LOCAL-CLUSTER 调查（2026-09-30）
+- 交付：`openspec/changes/rl-infra-spec/local-cluster-investigation.md`（只读调查，无代码改动，无云资源，无集群启动，未改 ~/.sky）。
+- 结论：head（FleetController+LocalSyncer）已可在自有机器常驻（`run_local_head.py` 已证），缺正式 CLI 入口；岛可经 ssh_harness（钉 H200）或 SkyPilot 0.13 的 ssh node pool（k3s+GPU Operator）/kubernetes。推荐 A′（本机 head 正式化 + ssh_harness 泛化，3–5 人日）先行，B（sky ssh 池）按需，暂不做常驻服务端 D。
+- 状态：报告已实现；无 task 勾选；GPU 相关全部"待本地 GPU 验证"。
+- 待用户决定：见报告 §4.2（卡型号/台数、A′ vs B/C、放开 H200 钉死、harness 路径能否作验收证据、逐位验收改同机型自比、私有镜像拉取方式）。
+- 分支 local-cluster（worktree /home/michael/work/local-cluster）。测试：未运行（仅文档）。
