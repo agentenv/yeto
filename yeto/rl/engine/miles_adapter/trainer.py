@@ -90,6 +90,10 @@ def masked_fraction(outputs: Any) -> float | None:
 # Estimators whose masked fraction comes from the per-step clip fraction
 # (rl-algo-seq-and-adv D2: GSPO clips whole sequences).
 CLIPFRAC_MASKED_ESTIMATORS = frozenset({"gspo"})
+# Policy-loss variants whose gradient rule reads the clip fraction
+# (rl-algo-loss-variants D5: GMPO, share of A != 0 tokens clipped in log space).
+# CISPO keeps gradients on clipped tokens and SAPO never clips: not listed.
+CLIPFRAC_LOSS_VARIANTS = frozenset({"gmpo"})
 
 
 def clipfrac_masked_fraction(step_losses: list[dict[str, Any]]) -> float | None:
@@ -234,7 +238,14 @@ class MilesTrainerGroup:
                 estimator = getattr(self._spec, "advantage_estimator", self._algorithm)
                 # Clip fraction / mismatch diagnostics are collected when a
                 # mechanism needs them (R0 GRPO keeps its RPC set unchanged).
-                if estimator in CLIPFRAC_MASKED_ESTIMATORS or corrections:
+                # rl-algo-loss-variants D5: GMPO needs pg_clipfrac, passed as
+                # TrainStepMetrics.clip_fraction (never as masked_fraction,
+                # which corrections may fill with their own mask).
+                clipfrac_variant = (
+                    getattr(getattr(self._spec, "loss", None), "policy_loss_variant", None)
+                    in CLIPFRAC_LOSS_VARIANTS
+                )
+                if estimator in CLIPFRAC_MASKED_ESTIMATORS or corrections or clipfrac_variant:
                     self.last_step_losses = self._step_losses()
                     round_metrics = mean_step_metrics(self.last_step_losses)
                     if self.last_masked_fraction is None and corrections:
