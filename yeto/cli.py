@@ -931,6 +931,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="keep retrying learner provisioning until capacity is found",
     )
     infra.add_argument(
+        "--no-island-relaunch",
+        action="store_true",
+        help="never relaunch a failed island (any cloud): the fleet controller tears it "
+        "down on its first failure (same as --recover-timeout 0); implied by "
+        "--modal-retries 0. The syncer is still recovered",
+    )
+    infra.add_argument(
         "--recover-timeout",
         type=int,
         default=1200,
