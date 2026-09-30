@@ -59,7 +59,7 @@ MILES_NEXT_BASE_IMAGE = (
 # Tag 2f23a0f-9f29303; linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef"
+    "db81588406e157baa6a579f6378484b890371065abcc51eacd5a9650b5820cbf"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Where MILES_NEXT_IMAGE installed the SGLang fork (editable).
