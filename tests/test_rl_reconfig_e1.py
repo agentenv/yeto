@@ -914,3 +914,104 @@ def test_build_elastic_and_journal_expand_user_paths(tmp_path, monkeypatch):
     assert read_journal("~/st/reconfig") == read_journal(tmp_path / "st" / "reconfig")
     assert read_epochs("~/st/reconfig") == read_epochs(tmp_path / "st" / "reconfig")
     assert not (tmp_path / "~").exists()
+
+
+class _FakeRay:
+    """ray.get/ray.kill over plain values (the manager's methods are sync fakes)."""
+
+    def __init__(self, on_kill):
+        self.on_kill = on_kill
+        self.killed = []
+
+    def get(self, value, timeout=None):
+        return value
+
+    def kill(self, handle, no_restart=False):
+        self.killed.append((handle, no_restart))
+        self.on_kill(handle)
+
+
+class _Remote:
+    def __init__(self, fn):
+        self.remote = fn
+
+
+class _FakeManager:
+    def __init__(self):
+        from types import SimpleNamespace
+
+        self.infos = {c: [SimpleNamespace(name=f"{c}/w0", generation=3)]
+                      for c in ("engine:c2", "engine:c3")}
+        self.get_worker_infos = _Remote(lambda cell: self.infos[cell])
+        self.get_actor_handle = _Remote(
+            lambda name, expected_generation: f"handle:{name}@{expected_generation}")
+
+
+def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    gate, dead = threading.Event(), []
+    fake_ray = _FakeRay(lambda handle: (dead.append(handle), gate.set()))
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=_FakeManager(), ray_module=fake_ray))
+    slow = publisher.publish_members
+
+    def publish_members(*a, **k):
+        gate.wait(5)  # blocked on the new engines until they are killed
+        if dead:
+            raise RuntimeError("engine actor died")
+        return slow(*a, **k)
+
+    publisher.publish_members = publish_members
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.2)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    started = __import__("time").monotonic()
+    driver.run()
+    assert __import__("time").monotonic() - started < 4  # not the 5 s gate: the kill unblocked it
+    assert ctl.status("r")["phase"] == REBUILT_OLD
+    assert sorted(h for h, _ in fake_ray.killed) == ["handle:engine:c2/w0@3", "handle:engine:c3/w0@3"]
+    assert all(no_restart for _, no_restart in fake_ray.killed)
+    records = read_journal(tmp_path / "state/reconfig")
+    action = next(r for r in records if r["kind"] == "watchdog_action")
+    assert [k["cell"] for k in action["killed"]] == ["engine:c2", "engine:c3"]
+    assert next(r for r in records if r["kind"] == "watchdog")["target_cells"] == [
+        "engine:c2", "engine:c3"]
+    # old members were never touched
+    assert set(driver.rollout.members()) == {"engine:c0", "engine:c1"}
+
+
+def test_watchdog_outside_start_verify_kills_nothing(tmp_path):
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, *_ = _setup(tmp_path)
+    fake_ray = _FakeRay(lambda h: None)
+    handler = kill_target_generation(ctl, manager=_FakeManager(), ray_module=fake_ray)
+    handler("tx-none", "QUIESCING")
+    assert fake_ray.killed == []
+    action = [r for r in read_journal(tmp_path / "state/reconfig") if r["kind"] == "watchdog_action"]
+    assert action and action[0]["killed"] == []
+
+
+def test_build_elastic_wires_the_default_watchdog_action(tmp_path):
+    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+
+    res = tmp_path / "res.json"
+    res.write_text(json.dumps({"configs": {"T4R2S2": {"trainer": 4, "rollout": 2, "standby": 2}},
+                               "edges": []}))
+    kw = dict(resources=res, attestation=None, profile=_profile(), initial_config="T4R2S2",
+              runtime_fingerprint=FP, declared_cells=("c0",))
+    w = build_elastic(state_dir=tmp_path / "a", **kw)
+    assert w.controller._on_watchdog is not None
+    w.controller.close()
+    off = build_elastic(state_dir=tmp_path / "b", on_watchdog=None, **kw)
+    assert off.controller._on_watchdog is None
+    off.controller.close()
+    with pytest.raises(ValueError, match="unknown watchdog action"):
+        build_elastic(state_dir=tmp_path / "c", on_watchdog="nope", **kw)

@@ -221,6 +221,7 @@ class IslandController:
         # ``IslandDriver.rebuild_trainer``). Raises RebuildRefused before the
         # trainer is touched; any other exception is RECOVERY_REQUIRED.
         self.trainer_rebuilder = trainer_rebuilder
+        self._record_lock = threading.RLock()
         self.journal = Journal(self.state_dir / "reconfig", wall_clock=wall_clock)
         if self.journal.epochs.config_id is None:
             self.journal.compare_and_swap(
@@ -265,7 +266,23 @@ class IslandController:
         self._open_after_restart = list(open_txs)
 
     def _record(self, kind: str, **fields: Any) -> dict[str, Any]:
-        return self.journal.append(kind, **fields)
+        # the watchdog thread journals too: serialize appends within the process
+        with self._record_lock:
+            return self.journal.append(kind, **fields)
+
+    def watchdog_target_cells(self) -> list[str]:
+        """The target generation a fired watchdog may kill (3.7/H2): cells this
+        transaction is starting/verifying. Never old members, never a drain."""
+        tx = self._tx
+        if tx is None or tx.phase not in (INITIALIZING, VERIFYING):
+            return []
+        return sorted(tx.added)
+
+    def record_watchdog_action(self, tx_id: str, **fields: Any) -> None:
+        self._record("watchdog_action", tx_id=tx_id, **fields)
+
+    def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
+        self._on_watchdog = handler
 
     def _phase(self, tx: _Tx, phase: str, **fields: Any) -> None:
         tx.phase = phase
@@ -606,9 +623,13 @@ class IslandController:
         def fire() -> None:
             self._watchdog_fired.set()
             self._record("watchdog", tx_id=tx.tx_id, phase=tx.phase,
+                         target_cells=self.watchdog_target_cells(),
                          note="absolute transaction deadline passed while a step was running")
             if self._on_watchdog is not None:
-                self._on_watchdog(tx.tx_id, tx.phase)
+                try:
+                    self._on_watchdog(tx.tx_id, tx.phase)
+                except Exception as exc:  # noqa: BLE001 - journaled; the step result decides
+                    self._record("watchdog_action", tx_id=tx.tx_id, error=repr(exc))
 
         timer = threading.Timer(max(0.0, self._remaining(tx)), fire)
         timer.daemon = True
