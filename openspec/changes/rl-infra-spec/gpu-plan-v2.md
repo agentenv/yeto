@@ -302,3 +302,10 @@
 - **F-E2 冒烟**（不计入任何 task，不产生验收证据）：目的：在 E2 harness 前，经 launcher 走 elastic 路径发一次 4.4 `rebuild-trainer`，暴露真实路径问题。配置：Modal 3×L40S，0.6B LoRA，T2R1S0（trainer DP2 + 1 rollout），`--rl-single-island-no-sync --controller local --rl-placement fixed-partition --rl-rollout-gpus 1 --rl-elastic --rl-elastic-resources fe2/resources-T2R1S0.json --rl-elastic-initial-config T2R1S0 --rl-elastic-cells c0`，4 轮；第 2 轮 train 期间由容器内触发器写入 `rb1.rebuild.json`（`--expected-epoch 0 --deadline-s 900`）。本地 dry-run：`evidence/infra-v2-b1/fe2/test_fe2_dryrun.py` 1 passed（argv DP2/rollout 1、无 `--load`、rebuild 前置条件为空、partitioned-serial、真实 controller 接受 rebuild 请求）。
   - 观察项：事务终态是否 `SUCCEEDED`；是否出现 `rl_trainer_rebuilt` 事件；`<state>/cuts` 下是否有 cut 落盘（结束前拉取 manifest）。
   - 停止条件：事务到达任一终态且再完成 1 轮后停止；或出现 Python 异常/RECOVERY_REQUIRED 即拉证据停止；硬超时 外层 40 min / watchdog 45 min，最坏 3×1.95×45/60 = **$4.4**。前缀 `infra-v2-b1-fe2-20260930-1`，代码 = 本提交的合并基线。
+
+### 9.9 F-E1 重跑（F-R1；主 agent 2026-09-30 指示；合并 integ-decl e052dc8 后，运行前）
+
+- 代码 1a5ccd5（= 合并 e052dc8），镜像 `sha256:db815884…`（miles 2f23a0fc，含 F-R1）。本地 dry-run `evidence/infra-v2-b1/fe1r/test_fe1r_dryrun.py` 1 passed：pin digest/commit 正确；`--rl-elastic-declare-cells --rl-elastic-cells c0,c1` 生成 placement map `rollout_cells = [{c0, bundles [1], start true}, {c1, bundles [2], start false}]`（先 rollout 启动 cell，再 standby 停止 cell）。
+- 运行：(a) 指纹运行 `infra-v2-b1-fe1rfp-20260930-1`，3×L40S，同参数无 attestation，取 `rl_driver_start.runtime_fingerprint` 后立即停止；(b) F-E1 `infra-v2-b1-fe1r-20260930-1`，3×L40S，T1R1S1↔T1R2S0，6 轮，第 2 轮 train 时 up（deadline 600 s），第 4 轮 train 时 down，容器内触发器提交。
+- 判据（主 agent 指定，冻结）：up 与 down 两个事务 journal 终态都为 `SUCCEEDED`；journal 中成员使用 fork cell id；旧成员（c0 对应的 fork cell）全程不变。另须在容器启动日志/manifest 中确认实际镜像 digest = db815884…、镜像内 miles HEAD = 2f23a0fc，不一致即停。
+- 预算：两次合计 ≤ $3（硬超时 (a) 20 min、(b) 40 min；最坏 3×1.95×(25+45)/60 = $6.8 超过 $3 → 两次运行的实际停止由本 agent 在达到判据后立即执行，若累计实际费用将超 $3 即停止并回报）。失败即停并回报 journal。

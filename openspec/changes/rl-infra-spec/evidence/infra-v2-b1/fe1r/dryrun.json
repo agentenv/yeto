@@ -1,0 +1,31 @@
+{
+ "placement_map": {
+  "rollout": [
+   1
+  ],
+  "rollout_cells": [
+   {
+    "bundles": [
+     1
+    ],
+    "name": "c0",
+    "start": true
+   },
+   {
+    "bundles": [
+     2
+    ],
+    "name": "c1",
+    "start": false
+   }
+  ],
+  "standby": [
+   2
+  ],
+  "trainer": [
+   0
+  ]
+ },
+ "image": "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:db81588406e157baa6a579f6378484b890371065abcc51eacd5a9650b5820cbf",
+ "miles": "2f23a0fca9b80f6a7300da401703c343014b03c0"
+}
