@@ -285,6 +285,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic: the rollout cells to manage: yeto names declared to the fork "
                     "with --rl-elastic-declare-cells (F-R1), else the fork's own cell ids; "
                     "default: every cell the fork declares (needs describe_cells, F-R1)")
+    rl.add_argument("--rl-elastic-trainer-edges", action="store_true",
+                    help="--rl-elastic: enable trainer DP-change / role-transfer edges (4.7): "
+                    "drops --balance-data (refused by the DP certification) and wires the "
+                    "trainer ops and pool GPU ids; off by default")
     rl.add_argument("--rl-elastic-declare-cells", action="store_true",
                     help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
                     "rollout engine cells (placement map rollout_cells: started on the rollout "

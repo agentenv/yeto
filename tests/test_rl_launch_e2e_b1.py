@@ -406,3 +406,49 @@ def test_determinism_is_off_by_default(tmp_path, monkeypatch):
     (base,), kwargs = _captured_args()
     assert "--deterministic-mode" not in mc.translate_run_config(
         rc.resolve_rl_run_config(base, **kwargs), AlgorithmSpec()).argv
+
+
+# ---------------------------------------------------------------- --balance-data vs trainer edges
+def _argv_from(args_ns):
+    import argparse
+
+    from test_rl_argv_snapshot import _captured_args
+    from yeto.rl.engine import run_config as rc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    (base,), kwargs = _captured_args()
+    keys = ("rl_elastic", "rl_elastic_trainer_edges")
+    merged = argparse.Namespace(**{**vars(base), "rl_placement": "fixed-partition",
+                                   "rollout_num_gpus": 1,
+                                   **{k: getattr(args_ns, k) for k in keys}})
+    return mc.translate_run_config(rc.resolve_rl_run_config(merged, **kwargs), AlgorithmSpec()).argv
+
+
+def test_trainer_edges_drop_balance_data_only(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl import learner
+
+    edges, _ = learner_from_run(island_run(BASE + _elastic(tmp_path) + (
+        "--rl-elastic-trainer-edges",), monkeypatch), tmp_path / "a")
+    plain, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "b")
+    default, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "c")
+    assert edges.rl_elastic_trainer_edges and not plain.rl_elastic_trainer_edges
+    with_edges, elastic_only, off = _argv_from(edges), _argv_from(plain), _argv_from(default)
+    assert "--balance-data" not in with_edges
+    assert "--balance-data" in elastic_only and elastic_only == off  # byte-identical otherwise
+    assert [a for a in elastic_only if a != "--balance-data"] == list(with_edges)
+    miles_args = SimpleNamespace(yeto_rl_learner_id=0)
+    learner.apply_ports_infra_switches(edges, miles_args, {})
+    assert miles_args.yeto_rl_elastic["trainer_edges"] is True
+
+
+def test_trainer_edges_need_elastic():
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    with pytest.raises(ValueError, match="need --rl-elastic"):
+        launcher._check_ports_infra_switches(_cli(("--rl-elastic-trainer-edges",)), "ports")

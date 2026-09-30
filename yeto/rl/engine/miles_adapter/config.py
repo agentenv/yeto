@@ -347,6 +347,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "yeto_policy_sync": _ok,
     "distributed_timeout_minutes": _ok,
     "deterministic_trainer": _ok,
+    "trainer_dp_edges": _ok,
 }
 
 
@@ -623,7 +624,9 @@ def translate_run_config(
         "--over-sampling-batch-size", str(batch.over_sampling_batch_size),
         "--num-steps-per-rollout", str(batch.optimizer_steps),
         "--global-batch-size", str(batch.global_batch),
-        "--balance-data",
+        # E3 DP certification refuses --balance-data (reshard.reshard_problems):
+        # dropped only when trainer DP-change edges are enabled.
+        *(() if getattr(config, "trainer_dp_edges", False) else ("--balance-data",)),
         "--rollout-max-context-len", str(batch.seq_len),
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
         # D3: metadata is extracted inside the rollout process
