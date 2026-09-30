@@ -108,10 +108,16 @@ def _shards(train_event: dict) -> list[dict]:
     return [r for rank in train_event["probe"] for r in rank if r["kind"] == "shard"]
 
 
+def _ids(shard: dict) -> list[int]:
+    """Sample ids of a shard. The fork's scheduled shard carries ``sample_indices`` (global ids) and no
+    ``partition`` key (DEV-GATHER run 7); positions are ranks within the step's sorted ids."""
+    return list(shard.get("partition") or shard.get("sample_indices") or [])
+
+
 def _micro_batches(shards: list[dict]) -> set[tuple[int, ...]]:
     out = set()
     for s in shards:
-        part = s["partition"]
+        part = _ids(s)
         for mb in s.get("micro_batch_indices") or []:
             out.add(tuple(sorted(part[i] for i in mb)))
     return out
@@ -131,9 +137,11 @@ def g2(work: Path, a: str, b: str, *, gbs: int, mbs: int, dp: dict[str, int]) ->
                 out.append(f"{arm}: shard without micro_batch_indices/num_rollouts (unscheduled split)")
             elif s["num_rollouts"] != [gbs] and s["num_rollouts"] != gbs:
                 out.append(f"{arm}: num_rollouts {s['num_rollouts']} != {gbs}")
-        n = sum(len(s["partition"]) for s in shards)
-        predicted = scheduled_partitions(list(range(n)), dp=dp[arm], global_batch_size=gbs, micro_batch_size=mbs)
-        actual = sorted((s["partition"] for s in shards), key=lambda p: p[:1])
+        ids = sorted(i for s in shards for i in _ids(s))
+        pos = {sid: k for k, sid in enumerate(ids)}
+        predicted = scheduled_partitions(list(range(len(ids))), dp=dp[arm], global_batch_size=gbs,
+                                         micro_batch_size=mbs) if ids else {"partitions": []}
+        actual = sorted(([pos[i] for i in _ids(s)] for s in shards), key=lambda p: p[:1])
         if sorted(predicted["partitions"], key=lambda p: p[:1]) != actual:
             out.append(f"{arm}: rank partitions differ from the scheduled prediction")
         for rank in t["probe"]:
@@ -145,7 +153,7 @@ def g2(work: Path, a: str, b: str, *, gbs: int, mbs: int, dp: dict[str, int]) ->
                         out.append(f"{arm}: normalizer {got} != {want}")
                         break
     sa, sb = _shards(ta), _shards(tb)
-    if sorted(i for s in sa for i in s["partition"]) != sorted(i for s in sb for i in s["partition"]):
+    if sorted(i for s in sa for i in _ids(s)) != sorted(i for s in sb for i in _ids(s)):
         out.append("consumed sample sets differ")
     if _micro_batches(sa) != _micro_batches(sb):
         out.append("micro-batch composition differs")

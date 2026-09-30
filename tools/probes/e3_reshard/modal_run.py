@@ -67,6 +67,7 @@ def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = 
            f'bash -c "python {shim} --work {work} {sets} $2 -- $(cat {flags_file})"')
     lines = [
         "set -uo pipefail",
+        "exec 2>&1",  # every command's stderr into the mirrored stream (run 7 lost compare's traceback)
         "cd /yeto",  # the reward module (gsm8k_reward.py) is imported from the working directory
         "export LEARNER_ID=0",  # the dry-run learner line reads $LEARNER_ID
         f"mkdir -p {work}/logs",
@@ -117,6 +118,7 @@ def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = 
         'progress "compare start"',
         f"PYTHONPATH=/root/miles:/yeto python /yeto/tools/probes/e3_reshard/compare.py {work} "
         f"|| progress compare-failed",
+        f"cat {work}/RESULT.json 2>/dev/null || true",
     ]
     return "\n".join(lines)
 
@@ -165,7 +167,7 @@ def _run(app, image, profile, p, out):  # pragma: no cover - needs Modal
     import modal
 
     # 2>&1: one stream, mirrored line by line into <out>/container.log while it runs.
-    sb = modal.Sandbox.create("bash", "-c", container_script(profile) + " 2>&1", app=app, image=image,
+    sb = modal.Sandbox.create("bash", "-c", container_script(profile), app=app, image=image,
                               gpu=p["gpu"], cpu=8.0, memory=65536, timeout=p["timeout"])
     (out / "resources.txt").open("a").write(
         f"{app.app_id} {sb.object_id} {profile} {time.strftime('%FT%TZ', time.gmtime())}\n")

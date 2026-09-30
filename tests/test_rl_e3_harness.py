@@ -519,3 +519,25 @@ def test_arm_args_carry_every_parse_derivation_of_debug_train_only():
     assert seen["rollout_num_gpus"] == 0 and seen["starts_inference_engines"] is False
     assert seen["debug_train_only"] is True and seen["actor_num_gpus_per_node"] == 1
     assert backend.base_args.rollout_num_gpus == 2  # the launcher's args are not mutated
+
+
+def test_g2_reads_the_fork_shard_sample_indices(tmp_path):
+    """DEV-GATHER run 7: the fork's scheduled shard carries sample_indices, not partition."""
+    harness.run_all(lambda arm: FakeBackend(), tmp_path)
+    for arm in ("A1", "B1"):
+        path = tmp_path / "arms" / arm / "events.jsonl"
+        lines = [json.loads(x) for x in path.read_text().splitlines()]
+        for e in lines:
+            for rank in e.get("probe") or []:
+                for r in rank:
+                    if r.get("kind") == "shard":
+                        r["sample_indices"] = [100 + i for i in r.pop("partition")]
+        path.write_text("\n".join(json.dumps(e) for e in lines) + "\n")
+    dp = {"A1": 1, "A2": 2, "B1": 2, "B1p": 2, "B2": 1, "RT": 1}
+    assert compare.g2(tmp_path, "A1", "B1", gbs=GBS, mbs=MBS, dp=dp) == []
+
+
+def test_container_script_merges_stderr():
+    modal_run = importlib.import_module("modal_run")
+    script = modal_run.container_script("dev-gather")
+    assert script.splitlines()[1] == "exec 2>&1" and "RESULT.json" in script
