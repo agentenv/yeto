@@ -186,3 +186,36 @@
 4. INFRA-E2：4.1 cut 状态审计（含 A3 算法状态与 Miles 超采样余量回收行为；已知：partial_rollout 关闭时在飞中被中止的组被丢弃，不回收）。
 5. 已知限制：TP/PP 集体导出与 DistOpt 分片主参数的组合仍拒绝；precision-aware optimizer 拒绝。
 6. 测试基线：`/tmp/integ-full.txt` 中的 94 个失败 id（环境性）；每次合入按 id 对比。
+
+## INFRA-E2（2026-09-30，4.1–4.5；分支 `infra-e2`，worktree `/home/michael/work/infra-e2`，基于 integ-decl ef2d6b0）
+
+### task 状态（五选一，均未勾选）
+- 4.1：已实现（缺状态拒绝的部分 CPU 通过）。依赖 3.1 未勾选。审计见 `cut-audit.md`。
+- 4.1b：已实现（`docs/MILES_RL.md`），待评审。
+- 4.2：CPU 通过。依赖 3.6 未完成；GPU 待本地验证。
+- 4.3：已实现（同形 rebuild 与 restore 编排）；X3 GPU 待本地验证。
+- 4.4：未完成（driver.py/entry.py 不归 E2；补丁与接口请求已交）。
+- 4.5：未完成（rebuild/restore 失败分支已有 CPU 测试；其余依赖 4.4、3.8 与 GPU）。
+
+### 关键结论
+- E2 profile：bf16 LoRA，走 yeto 自己的 cut 插件，复用 fork-M5 的命名 optimizer 状态（含 FP32 master、moments）与 RNG 采集；不开 `--lora-dp-invariant-state`，也不改默认 checkpoint 参数。拒绝的配置：fp16、precision-aware、DistOpt 多实例、CP>1、EP>1、非 LoRA 可训练参数。沿用已知限制：TP/PP 集体导出与 DistOpt 分片主参数不能同时使用。
+- F5：Miles ports 路径上 `carried_over` 恒为 0。超采样多出的完成组和在飞被 abort 的组都被引擎丢弃（游标已前移，不复用），建议 3.6 为它们单列终态（由 E1 决定）。
+- 同形重建的前提是 `args.load is None`（否则 `create_training_models` 会调用 `rollout_executor.load` 回卷游标），且 `start_rollout_id` 已设置。
+
+### 测试
+- 全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider`：68 failed / 26 errors / 2721 passed / 49 skipped。失败 id 集合（94 个）与 ef2d6b0 基线（68 failed / 26 errors / 2668 passed）按 id 完全相同。新增 53 个测试全部通过。
+- 首轮全量曾新增 1 个失败：`test_provenance::test_production_tree_has_no_unsafe_torch_load...`，原因是 cut 分片用了 `weights_only=False`。已修复：NumPy RNG 编码为张量，加载改为 `weights_only=True`。
+
+### 证据与计划
+- `cut-audit.md`；`evidence/infra-e2/4.2-4.5/plan.md`（待本地 GPU 验证，判据已预先固定）。
+- 云资源：无；费用 $0；没有启动任何 GPU 或云资源。
+
+### 交给其他写入者
+- `/home/michael/work/infra-drafts/patches/infra-e2-ports.patch`（E1：ports.py `TrainerGroup` 的 E2 签名注释定稿）。
+- `/home/michael/work/infra-drafts/patches/infra-e2-entry-swappable-actor.patch`（entry.py：用 `SwappableActor` 包装 actor）。
+- 接口请求（`cut-audit.md` §5）：`RolloutPool.data_cursor()`、buffer 长度、3.6 终态与 `ready_unconsumed/carried_over` 计数、4.4 driver 重建后重发且不重复 initialize。
+- 待合入：ALGO-2b 的 `infra-drafts/patches/algo-2b-trainer.patch` 可以在 infra-e2 上干净应用（`git apply --check` 通过）；它依赖 ALGO-2b 的 spec 字段，E2 未应用，由主 agent 在集成时合入。
+
+### 下一步
+1. E1 定稿 ports 签名，提供 data_cursor 与账本计数后，driver 实现 4.4（重建 → restore → 重发 → 校验）。
+2. 本地 GPU 到位后按 plan 依次跑 G-4.2 → G-4.3（DP1、DP2+DistOpt）→ G-4.4 → G-4.5。
