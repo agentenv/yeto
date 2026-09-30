@@ -398,3 +398,165 @@ def test_pool_sleeps_once_before_the_first_start_cells(monkeypatch):
     assert injected.injected_start_delays == [150.0]
     with pytest.raises(ValueError, match="positive"):
         injected_start_delay({INJECT_START_DELAY_ENV: "-1"})
+
+
+# ---------------------------------------------------------------- test-only update_weights block (§4)
+def _publisher(monkeypatch, value):
+    from yeto.rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV, MilesPublisher
+
+    if value is None:
+        monkeypatch.delenv(INJECT_UPDATE_BLOCK_ENV, raising=False)
+    else:
+        monkeypatch.setenv(INJECT_UPDATE_BLOCK_ENV, value)
+    order = []
+
+    class Controller:
+        async def wait_cells_tracked(self, cells, timeout_seconds):
+            order.append("tracked")
+
+    async def update_weights(*a, **k):
+        order.append("update_weights")
+        raise RuntimeError("stop here")
+
+    pub = MilesPublisher(args=SimpleNamespace(), actor_model=None, rollout_executor=None,
+                         inference_controller=Controller(), update_weights=update_weights)
+    pub.block_poll_s = 0.01
+    return pub, order
+
+
+def test_update_weights_block_is_off_by_default(monkeypatch):
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.publish import PublicationError
+
+    pub, order = _publisher(monkeypatch, None)
+    with pytest.raises(PublicationError, match="stop here"):
+        asyncio.run(pub._publish_members("t", ["c2"], 1))
+    assert order == ["tracked", "update_weights"] and pub.injected_blocks == []
+
+
+def test_update_weights_block_fails_when_the_target_dies_and_applies_once(monkeypatch):
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.publish import PublicationError
+
+    pub, order = _publisher(monkeypatch, "30")
+    polls = []
+
+    class Probe:
+        async def snapshot(self, cells):
+            polls.append(tuple(cells))
+
+        async def status(self):
+            polls.append("s")
+            return "alive" if len(polls) < 3 else "dead: actor died (RayActorError)"
+
+    pub.liveness_probe = Probe()
+    with pytest.raises(PublicationError, match="dead: actor died"):
+        asyncio.run(pub._publish_members("t", ["c2"], 1))
+    assert order == ["tracked"] and pub.injected_blocks == [30.0] and len(polls) == 3
+    # second member publication of the process: no block
+    with pytest.raises(PublicationError, match="stop here"):
+        asyncio.run(pub._publish_members("t", ["c3"], 2))
+    assert order == ["tracked", "tracked", "update_weights"]
+
+
+def test_update_weights_block_times_out_into_the_real_call(monkeypatch):
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.publish import PublicationError
+
+    pub, order = _publisher(monkeypatch, "0.05")
+
+    class Alive:
+        async def snapshot(self, cells):
+            pass
+
+        async def status(self):
+            return "alive"
+
+    pub.liveness_probe = Alive()
+    with pytest.raises(PublicationError, match="stop here"):
+        asyncio.run(pub._publish_members("t", ["c2"], 1))
+    assert order == ["tracked", "update_weights"]
+
+
+def test_launcher_exports_the_update_weights_block_only_when_given(tmp_path, monkeypatch):
+    from yeto.rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV
+
+    args = _cli()
+    _prepare_rl_args(args)
+    assert INJECT_UPDATE_BLOCK_ENV not in _island_task(args, monkeypatch).run
+    resources, _ = _elastic_files(tmp_path)
+    args = _cli(("--rl-placement", "fixed-partition", "--rl-elastic",
+                 "--rl-elastic-resources", resources, "--rl-elastic-initial-config", "c0",
+                 "--rl-elastic-cells", "a", "--rl-test-inject-update-weights-block-s", "600"))
+    launcher._check_ports_infra_switches(args, "ports")
+    prelude, _ = launcher._ports_infra_flags(args)
+    assert f"export {INJECT_UPDATE_BLOCK_ENV}=600.0\n" in prelude
+    with pytest.raises(ValueError, match="need --rl-elastic"):
+        launcher._check_ports_infra_switches(
+            _cli(("--rl-test-inject-update-weights-block-s", "600")), "ports")
+
+
+
+class _Ref:
+    def __init__(self, fn):
+        self.fn = fn
+
+    def remote(self, *a, **k):
+        async def call():
+            return self.fn(*a, **k)
+        return call()
+
+
+class _RayMod:
+    class exceptions:
+        class RayActorError(Exception):
+            pass
+
+
+def _liveness(infos_seq, ready=lambda: None):
+    from yeto.rl.engine.miles_adapter.publish import RayTargetLiveness
+
+    seq = list(infos_seq)
+    info = lambda n, g: SimpleNamespace(name=n, generation=g)  # noqa: E731
+    handle = SimpleNamespace(__ray_ready__=_Ref(lambda: ready()))
+    manager = SimpleNamespace(
+        get_worker_infos=_Ref(lambda cell: [info(*x) for x in (seq.pop(0) if len(seq) > 1 else seq[0])]),
+        get_actor_handle=_Ref(lambda name, expected_generation: handle))
+    return RayTargetLiveness(manager=manager, ray_module=_RayMod)
+
+
+@pytest.mark.parametrize("later, expect", [
+    ([], "no workers"),                     # the cell was stopped
+    ([("w0", 4)], "generation changed"),    # the health monitor restarted it
+    ([("w0", 3)], "alive"),
+])
+def test_liveness_probe_judges_the_recorded_target_generation(later, expect):
+    import asyncio
+
+    probe = _liveness([[("w0", 3)], later])
+    asyncio.run(probe.snapshot(["c2"]))
+    assert expect in asyncio.run(probe.status())
+
+
+def test_liveness_probe_reports_killed_and_unknown_errors_differently():
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.publish import InjectedBlockProbeError
+
+    def killed():
+        raise _RayMod.exceptions.RayActorError("dead")
+
+    probe = _liveness([[("w0", 3)]], ready=killed)
+    asyncio.run(probe.snapshot(["c2"]))
+    assert asyncio.run(probe.status()).startswith("dead: actor died")
+
+    def weird():
+        raise ConnectionError("gcs unreachable")
+
+    probe = _liveness([[("w0", 3)]], ready=weird)
+    asyncio.run(probe.snapshot(["c2"]))
+    with pytest.raises(InjectedBlockProbeError, match="gcs unreachable"):
+        asyncio.run(probe.status())
