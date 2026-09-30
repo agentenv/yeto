@@ -177,7 +177,8 @@ def make_world(dp_size, *, seed=0, args=None):
 def default_args(dp_size):
     return SimpleNamespace(fp16=False, bf16=False, global_batch_size=GBS, micro_batch_size=MBS,
                            actor_num_nodes=1, actor_num_gpus_per_node=dp_size, num_steps_per_rollout=1,
-                           use_distributed_optimizer=True, seed=1234)
+                           use_distributed_optimizer=True, seed=1234,
+                           lora_dropout=0.0, hidden_dropout=0.0, attention_dropout=0.0)
 
 
 def train_step(ranks, batch):

@@ -47,6 +47,9 @@ def _attestation(hashes=(SHA,), kind="role-transfer"):
     })
 
 
+GPUS3 = {"e0": ["g1"], "e1": ["g3"], "e2": ["g2"]}
+
+
 def _spec(estimator="grpo"):
     return SimpleNamespace(loss=SimpleNamespace(aggregation="default", reducer=None, custom_loss=None),
                            advantage=SimpleNamespace(estimator=estimator, whiten=False), sha256=lambda: SHA)
@@ -64,8 +67,19 @@ def test_plan_role_transfer_both_directions():
     p = _plan()
     assert p.direction == "trainer_to_rollout" and p.moved_gpus == ("g1",) and p.add_engines == 1
     assert p.reshard.source["dp"] == 2 and p.reshard.target["dp"] == 1
-    q = _plan("T1R3", "T2R2")
-    assert q.direction == "rollout_to_trainer" and q.remove_engines == 1
+    q = _plan("T1R3", "T2R2", member_gpus=GPUS3)
+    assert q.direction == "rollout_to_trainer" and q.remove_engines == 1 and q.remove_members == ("e0",)
+
+
+def test_removed_engine_is_chosen_by_gpu_not_by_name():
+    # name order (e0 < e1 < e2) disagrees with GPU order: g1 is served by e0, not by the last name
+    assert _plan("T1R3", "T2R2", member_gpus=GPUS3).remove_members == ("e0",)
+    with pytest.raises(TrainerEdgeRejected, match="member->GPU"):
+        _plan("T1R3", "T2R2")
+    with pytest.raises(TrainerEdgeRejected, match="not served"):
+        _plan("T1R3", "T2R2", member_gpus={"e0": ["g2"], "e1": ["g3"]})
+    with pytest.raises(TrainerEdgeRejected, match="straddles"):
+        _plan("T1R3", "T2R2", member_gpus={"e0": ["g1", "g2"], "e1": ["g3"]})
 
 
 @pytest.mark.parametrize(
@@ -108,6 +122,9 @@ class Pool:
 
     def members(self):
         return frozenset(self._members)
+
+    def member_gpus(self):
+        return {m: GPUS3.get(m, [f"x-{m}"]) for m in self._members}
 
     def drain(self, members, deadline):
         self.drained |= set(members)
@@ -215,10 +232,10 @@ def test_rollout_to_trainer_transfer_drains_and_stops_first(tmp_path):
     ranks, actor, ops, built = _world_trainer(1, tmp_path)
     ops.trainer.rebind_args(ranks[0].args)
     pool = Pool({"e0", "e1", "e2"})
-    tr, records = _transition(_plan("T1R3", "T2R2", args=default_args(1)), ops, pool)
+    tr, records = _transition(_plan("T1R3", "T2R2", args=default_args(1), member_gpus=GPUS3), ops, pool)
     result = tr.run()
-    assert result.phase == READY_TO_COMMIT and result.target_members == {"e0", "e1"}
-    assert pool.log[0] == ("stop", ["e2"]) and built == [("ok", 2, ("g0", "g1"))]
+    assert result.phase == READY_TO_COMMIT and result.target_members == {"e1", "e2"}
+    assert pool.log[0] == ("stop", ["e0"]) and built == [("ok", 2, ("g0", "g1"))]
     assert records[0]["phase"] == "QUIESCING"
 
 
@@ -269,10 +286,44 @@ def test_recovery_decision_after_controller_crash():
     assert recovery_decision(base, "T2R2", None)["action"] == "resume_old"
     cut = base + [{"kind": "trainer_cut", "tx_id": "t", "cut_id": "c"},
                   {"kind": "phase", "tx_id": "t", "phase": "TRANSFERRING", "edge": "role-transfer"}]
+    assert recovery_decision(cut, "T1R3", "t")["action"] == "recovery_required"  # no cut_epoch
+    cut = base + [{"kind": "trainer_cut", "tx_id": "t", "cut_id": "c", "cut_epoch": 3},
+                  {"kind": "phase", "tx_id": "t", "phase": "TRANSFERRING", "edge": "role-transfer"}]
     assert recovery_decision(cut, "T2R2", "older")["action"] == "restore_old"
     assert recovery_decision(cut, "T1R3", "t") == {"action": "restore_target", "tx_id": "t", "cut_id": "c",
-                                                   "config": "T1R3"}
+                                                   "cut_epoch": 3, "config": "T1R3"}
     lost = base + [{"kind": "phase", "tx_id": "t", "phase": "TRANSFERRING", "edge": "role-transfer"}]
     assert recovery_decision(lost, "T2R2", None)["action"] == "recovery_required"
     done = cut + [{"kind": "phase", "tx_id": "t", "phase": "SUCCEEDED", "edge": "role-transfer"}]
     assert recovery_decision(done, "T1R3", "t")["action"] == "none"
+
+
+def test_moved_engines_changing_after_planning_cancels(tmp_path):
+    ranks, actor, ops, built = _world_trainer(1, tmp_path)
+    ops.trainer.rebind_args(ranks[0].args)
+    pool = Pool({"e0", "e1", "e2"})
+    plan = _plan("T1R3", "T2R2", args=default_args(1), member_gpus={"e0": ["g3"], "e1": ["g1"], "e2": ["g2"]})
+    tr, _ = _transition(plan, ops, pool)
+    assert tr.run().phase == "CANCELLED" and built == [] and pool.drained == set()
+
+
+def test_restore_source_needs_no_prior_save_cut_in_this_process(tmp_path):
+    """Review M4: a restarted controller restores with the journal's cut_epoch."""
+    ranks, actor, ops, built = _world_trainer(2, tmp_path)
+    ops.save_cut(epoch=3, cut_id="c-restart")
+    fresh = MilesTrainerOps(**{**ops.__dict__})
+    result = fresh.restore_source(_plan(), "c-restart", epoch=3)
+    assert result.outcome == "RESTORED" and fresh.trainer.actual_layout()["dp"] == 2
+
+
+def test_slice_pg_info_signature_is_checked():
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import check_slice_pg_info
+
+    def _slice_pg_info(info, indices):
+        return info
+
+    assert check_slice_pg_info(_slice_pg_info) is _slice_pg_info
+    with pytest.raises(RuntimeError, match="missing"):
+        check_slice_pg_info(None)
+    with pytest.raises(RuntimeError, match="signature"):
+        check_slice_pg_info(lambda view, positions: view)

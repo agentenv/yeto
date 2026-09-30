@@ -3,7 +3,7 @@
 The E1 :class:`~yeto.rl.engine.controller.IslandController` owns the
 transaction, the journal and the epochs; it hands ``trainer-dp`` and
 ``role-transfer`` edges to this module (interface in
-``infra-drafts/patches/infra-e3-controller.patch``):
+``infra-drafts/patches/infra-e3-controller-v2.patch``):
 
 * :func:`plan_trainer_edge` -- pure validation, called from
   ``IslandController.plan``: the edge must be certified in the attestation
@@ -68,6 +68,8 @@ class TrainerEdgePlan:
     algorithm_spec_sha256: str
     source_trainer_gpus: tuple[str, ...] = ()
     target_trainer_gpus: tuple[str, ...] = ()
+    # rollout->trainer: the engines that serve on moved_gpus (from the pool's member->GPU map)
+    remove_members: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {"source": self.source, "target": self.target, "kind": self.kind,
@@ -76,7 +78,8 @@ class TrainerEdgePlan:
                 "add_engines": self.add_engines, "remove_engines": self.remove_engines,
                 "algorithm_spec_sha256": self.algorithm_spec_sha256,
                 "source_trainer_gpus": list(self.source_trainer_gpus),
-                "target_trainer_gpus": list(self.target_trainer_gpus)}
+                "target_trainer_gpus": list(self.target_trainer_gpus),
+                "remove_members": list(self.remove_members)}
 
 
 def _layout(cfg: Any) -> dict[str, int]:
@@ -96,8 +99,14 @@ def plan_trainer_edge(
     args: Any,
     global_batch_size: int,
     micro_batch_size: int,
+    member_gpus: Mapping[str, Any] | None = None,
 ) -> TrainerEdgePlan:
-    """Validate a trainer edge; raise :class:`TrainerEdgeRejected` with every problem."""
+    """Validate a trainer edge; raise :class:`TrainerEdgeRejected` with every problem.
+
+    ``member_gpus`` (serving engine member -> its GPU ids, from the pool) is
+    required when engines must be removed: the removed engines are exactly
+    those serving on the moved GPUs, never chosen by name order.
+    """
     problems: list[str] = []
     if source not in configs or target not in configs:
         raise TrainerEdgeRejected(f"unknown config in {source}->{target}")
@@ -141,6 +150,15 @@ def plan_trainer_edge(
             problems.append(f"placement moves {len(moved)} GPUs, the trainer changes by {abs(d_trainer)}")
         if not (set(src_t) <= set(dst_t) or set(dst_t) <= set(src_t)):
             problems.append("trainer GPU sets must be nested (the kept GPUs stay trainer GPUs)")
+    remove_members: tuple[str, ...] = ()
+    n_remove = max(0, -d_rollout) // engine_gpus
+    if n_remove:
+        remove_members, problem = members_on_gpus(member_gpus, moved)
+        if problem:
+            problems.append(problem)
+        elif len(remove_members) != n_remove:
+            problems.append(f"{len(remove_members)} engines serve on the moved GPUs {list(moved)}, "
+                            f"the edge removes {n_remove}")
     reshard = ReshardPlan(_layout(src), _layout(dst), int(global_batch_size), int(micro_batch_size))
     problems += reshard_problems(reshard, args=args, spec=spec, spec_sha256=sha, certified=certified)
     if problems:
@@ -150,7 +168,28 @@ def plan_trainer_edge(
         reshard=reshard, direction=direction, moved_gpus=moved,
         add_engines=max(0, d_rollout) // engine_gpus, remove_engines=max(0, -d_rollout) // engine_gpus,
         algorithm_spec_sha256=str(sha), source_trainer_gpus=src_t, target_trainer_gpus=dst_t,
+        remove_members=remove_members,
     )
+
+
+def members_on_gpus(member_gpus: Mapping[str, Any] | None, gpus: tuple[str, ...]) -> tuple[tuple[str, ...], str | None]:
+    """Engines whose GPUs lie in ``gpus``; an engine straddling them and other GPUs is refused."""
+    if member_gpus is None:
+        return (), "the pool reports no member->GPU map; engines to remove cannot be chosen"
+    wanted = set(gpus)
+    chosen, covered = [], set()
+    for member, owned in sorted(member_gpus.items()):
+        owned = set(owned or ())
+        if not owned:
+            return (), f"engine {member} reports no GPU"
+        if owned <= wanted:
+            chosen.append(member)
+            covered |= owned
+        elif owned & wanted:
+            return (), f"engine {member} straddles moved and kept GPUs"
+    if covered != wanted:
+        return (), f"moved GPUs {sorted(wanted - covered)} are not served by any engine"
+    return tuple(chosen), None
 
 
 # --------------------------------------------------------------------------
@@ -163,9 +202,9 @@ class TrainerOps(Protocol):
 
     def save_cut(self, *, epoch: int, cut_id: str) -> str: ...  # quiescent cut at the current layout
     # rebuild on the target (fallback: old shape from the same cut); returns RebuildResult-like
-    def resize(self, plan: TrainerEdgePlan, cut_id: str) -> Any: ...
+    def resize(self, plan: TrainerEdgePlan, cut_id: str, *, epoch: int) -> Any: ...
     # rebuild the SOURCE layout on the source bundles and restore the cut exactly (no further fallback)
-    def restore_source(self, plan: TrainerEdgePlan, cut_id: str) -> Any: ...
+    def restore_source(self, plan: TrainerEdgePlan, cut_id: str, *, epoch: int) -> Any: ...
     def policy_hash(self) -> str: ...  # hash of the policy the trainer exports now
     def actual_layout(self) -> Mapping[str, int]: ...
     def data_cursor(self) -> Mapping[str, int]: ...
@@ -219,7 +258,12 @@ class TrainerTransition:
         cursor = dict(self.trainer.data_cursor())
         removed: frozenset[str] = frozenset()
         if plan.remove_engines:
-            removed = frozenset(sorted(old_members)[-plan.remove_engines:])
+            removed = frozenset(plan.remove_members)
+            current = getattr(self.pool, "member_gpus", None)
+            again, problem = members_on_gpus(current() if callable(current) else None, plan.moved_gpus)
+            if problem or frozenset(again) != removed or not removed <= old_members:
+                return TransitionResult("CANCELLED", error="engines on the moved GPUs changed since planning: "
+                                                           f"{problem or sorted(again)} vs {sorted(removed)}")
             self._phase("QUIESCING", remove=sorted(removed), moved_gpus=list(plan.moved_gpus))
             if not self.pool.drain(removed, self.drain_deadline):
                 self.pool.undrain(removed)
@@ -232,7 +276,7 @@ class TrainerTransition:
             if removed:
                 self.pool.undrain(removed)
             return TransitionResult("CANCELLED", error=f"save_cut failed: {exc}")
-        self._record("trainer_cut", tx_id=self.tx_id, cut_id=cut_id, policy_hash=cut_hash,
+        self._record("trainer_cut", tx_id=self.tx_id, cut_id=cut_id, cut_epoch=self.epoch, policy_hash=cut_hash,
                      layout=dict(plan.reshard.source), data_cursor=cursor)
         # ---- TRANSFERRING (destructive) ----
         self._phase("TRANSFERRING", rollback_boundary="trainer_dispose", cut_id=cut_id)
@@ -240,7 +284,7 @@ class TrainerTransition:
         try:
             if removed:
                 self._fork_call("stop", removed, lambda e: self.pool.remove_engines(removed, epoch=e))
-            result = self.trainer.resize(plan, cut_id)
+            result = self.trainer.resize(plan, cut_id, epoch=self.epoch)
             self._record("trainer_rebuilt", tx_id=self.tx_id, outcome=result.outcome,
                          attempts=list(getattr(result, "attempts", ())))
             if result.outcome == "REBUILD_OLD":
@@ -300,7 +344,7 @@ class TrainerTransition:
         try:
             if added and frozenset(self.pool.members()) & added:
                 self._fork_call("stop", added, lambda e: self.pool.remove_engines(added, epoch=e))
-            back = self.trainer.restore_source(self.plan, cut_id)
+            back = self.trainer.restore_source(self.plan, cut_id, epoch=self.epoch)
             if back.outcome not in ("RESTORED", "REBUILD_OLD"):  # both: source shape running
                 raise TrainerTransitionFailed("REBUILD_OLD", f"old trainer shape not restored: {back.outcome}")
         except Exception as exc:  # noqa: BLE001
@@ -350,6 +394,15 @@ def recovery_decision(records: list[Mapping[str, Any]], committed_config: str | 
       (no training ran after the cut: training resumes only after SUCCEEDED);
     * anything that does not fit (cut missing after a destructive phase) ->
       ``recovery_required``.
+
+    Boundaries: this is a HINT, not an automatic recovery. It assumes the journal
+    is complete up to the crash (records are fsynced before each step) and that
+    no training ran on the new layout (true: training resumes only after
+    SUCCEEDED). It does not reconcile the outer protocol (D5: if accepted
+    PUSH/BCAST and the cut cannot be matched uniquely, the whole run recovers
+    globally), does not check that the cut files still exist, and does not
+    undo a half-done fork start/stop (E1 journal replay owns that). ``cut_epoch``
+    is the config epoch the cut was saved at; restore with it.
     """
     terminal = {"SUCCEEDED", "CANCELLED", "REBUILT_OLD", "RECOVERY_REQUIRED"}
     txs: dict[str, dict[str, Any]] = {}
@@ -377,6 +430,9 @@ def recovery_decision(records: list[Mapping[str, Any]], committed_config: str | 
             return {"action": "recovery_required", "tx_id": tx, "reason": "destructive phase without a cut"}
         return {"action": "resume_old", "tx_id": tx}
     cut_id = info["cut"]["cut_id"]
-    if committed_tx == tx:
-        return {"action": "restore_target", "tx_id": tx, "cut_id": cut_id, "config": committed_config}
-    return {"action": "restore_old", "tx_id": tx, "cut_id": cut_id, "config": committed_config}
+    cut_epoch = info["cut"].get("cut_epoch")
+    if cut_epoch is None:
+        return {"action": "recovery_required", "tx_id": tx, "reason": "trainer_cut record lacks cut_epoch"}
+    action = "restore_target" if committed_tx == tx else "restore_old"
+    return {"action": action, "tx_id": tx, "cut_id": cut_id, "cut_epoch": int(cut_epoch),
+            "config": committed_config}

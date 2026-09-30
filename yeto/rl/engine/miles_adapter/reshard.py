@@ -11,13 +11,19 @@ Everything a DP edge needs to be refused for is refused by
 before ``save_cut``) and again before any rank writes on restore:
 
 * layout: world must be ``tp*pp*cp*dp``; only DP (and so world) may change;
-* batch semantics (D7.4): GBS divisible by ``dp * micro_batch_size`` in BOTH
-  layouts (Miles computes ``global_batch_size // dp_size``: a floor division
-  would silently drop samples); dynamic batch sizes are not certified here;
-* loss normalization (A4): only the default sample-mean aggregation, for which
-  Miles scales every micro-batch loss by ``num_microbatches / GBS * dp`` and
-  Megatron averages over micro-batches and DP, i.e. every sample weighs
-  ``1/GBS`` at any DP (:func:`sample_weight`). Token-level aggregation
+* batch semantics (D7.4): the production path is the rollout-side schedule
+  (fork ``dp_schedule.build_dp_schedule``: GBS counts rollouts, pack first,
+  distribute micro-batch k to rank k % dp), modelled by
+  :func:`scheduled_partitions`; GBS/mbs must be a multiple of dp in BOTH
+  layouts; dynamic batch, partial steps, --balance-data/--balance-by-flops
+  and vpp>1 are refused (their packing/assignment depends on dp);
+* dropout: with a DP change every dropout must be 0 (fresh RNG on new ranks);
+* loss normalization (A4): only the default sample-mean aggregation. The
+  fork scales a micro-batch by ``num_microbatches / num_rollouts * dp``
+  (:func:`miles_microbatch_loss_scale`); with Megatron's ``1/num_microbatches``
+  and the DP average the weight is ``1/num_rollouts`` at any DP. CPU only
+  recomputes this arithmetic; the evidence that the engine does it is A8 G2.
+  Token-level aggregation
   (``--calculate-per-token-loss``), the Dr.GRPO constant denominator,
   ``--normalize-advantages`` (DP all-reduce whitening), custom reducers/losses,
   sequence-level variants (GSPO/GMPO) and multi-LoRA are refused until
@@ -88,7 +94,17 @@ def layout_problems(source: Mapping[str, int], target: Mapping[str, int]) -> lis
     return out
 
 
+DROPOUT_ARGS = ("lora_dropout", "hidden_dropout", "attention_dropout")
+
+
 def batch_problems(plan: ReshardPlan, args: Any = None) -> list[str]:
+    """Batch-semantics refusals. GBS counts ROLLOUTS (fork ``build_dp_schedule``).
+
+    Static precondition (one sample per rollout, the GRPO ports path): the
+    per-step micro-batch count ``GBS / mbs`` must be a multiple of dp in both
+    layouts (the fork asserts it at run time; refused here before any write).
+    Rollouts with several samples are checked per batch by :func:`step_problems`.
+    """
     out = []
     gbs, mbs = int(plan.global_batch_size), int(plan.micro_batch_size)
     if gbs <= 0 or mbs <= 0:
@@ -96,22 +112,34 @@ def batch_problems(plan: ReshardPlan, args: Any = None) -> list[str]:
     for name, lay in (("source", plan.source), ("target", plan.target)):
         dp = int(lay["dp"])
         if gbs % (dp * mbs):
-            out.append(f"{name}: global batch {gbs} is not divisible by dp {dp} x micro batch {mbs} "
-                       "(Miles floor-divides and would drop samples)")
+            out.append(f"{name}: {gbs} rollouts/step are not divisible by dp {dp} x micro batch {mbs} "
+                       "(fork static schedule asserts step_size % (dp*mbs) == 0)")
     if args is not None:
         if int(getattr(args, "global_batch_size", gbs) or gbs) != gbs:
             out.append("args.global_batch_size differs from the plan")
         if int(getattr(args, "micro_batch_size", mbs) or mbs) != mbs:
             out.append("args.micro_batch_size differs from the plan")
-        for flag in ("use_dynamic_batch_size", "use_dynamic_global_batch_size"):
+        for flag in ("use_dynamic_batch_size", "use_dynamic_global_batch_size", "allow_partial_train_step",
+                     "balance_data", "balance_by_flops"):
             if getattr(args, flag, False):
-                out.append(f"--{flag.replace('_', '-')} is not certified for a DP change")
+                out.append(f"--{flag.replace('_', '-')} is not certified for a DP change "
+                           "(packing/assignment depends on dp)")
+        if int(getattr(args, "virtual_pipeline_model_parallel_size", 1) or 1) > 1:
+            out.append("virtual pipeline (vpp>1) changes the DP alignment; not certified")
         if getattr(args, "calculate_per_token_loss", False):
             out.append("--calculate-per-token-loss (token-level normalization) is not certified (A4)")
         if getattr(args, "normalize_advantages", False):
             out.append("--normalize-advantages whitens within the DP group (A4)")
         if getattr(args, "multi_lora", False) or int(getattr(args, "multi_lora_n_adapters", 0) or 0) > 1:
             out.append("multi-LoRA is not certified for a DP change")
+        if plan.dp_changes:
+            # New ranks keep fresh RNG (keep_on_dp_change): any dropout makes the next step
+            # depend on RNG that the cut does not carry. Missing = unknown (Megatron's
+            # hidden/attention dropout default is 0.1) -> refused.
+            for name in DROPOUT_ARGS:
+                value = getattr(args, name, None)
+                if value is None or float(value) != 0.0:
+                    out.append(f"{name}={value!r}: a DP change is certified only with every dropout = 0")
     return out
 
 
@@ -187,48 +215,105 @@ def require_reshard(plan: ReshardPlan, **kwargs: Any) -> None:
 # --------------------------------------------------------------------------
 
 
-def sample_weight(*, global_batch_size: int, micro_batch_size: int, dp: int) -> Fraction:
-    """Gradient weight of one sample under Miles' default sample-mean loss.
+def miles_microbatch_loss_scale(*, num_microbatches: int, num_rollouts: int, dp: int, cp: int = 1) -> Fraction:
+    """Factor fork ``training_utils/loss.py:loss_function`` multiplies a micro-batch's summed sample means by.
 
-    Miles ``loss_function``: ``loss * num_microbatches / GBS * dp`` per
-    micro-batch (sum of per-sample means); Megatron divides the accumulated
-    loss by ``num_microbatches`` and the DP gradient reduction averages over
-    ``dp`` ranks. ``num_microbatches = GBS / (dp * mbs)``.
+    ``apply_megatron_loss_scaling`` branch, not per-token:
+    ``loss * num_microbatches / loss_normalizer * loss_parallel_size`` with
+    ``loss_normalizer = num_rollouts`` and ``loss_parallel_size = intra_dp_cp.size``.
     """
-    nmb = Fraction(global_batch_size, dp * micro_batch_size)
-    if nmb.denominator != 1:
-        raise ReshardRefused(f"GBS {global_batch_size} is not divisible by dp {dp} x mbs {micro_batch_size}")
-    return nmb / global_batch_size * dp / nmb / dp
+    return Fraction(num_microbatches, num_rollouts) * (dp * cp)
+
+
+def sample_weight(*, num_rollouts: int, num_microbatches: int, dp: int, cp: int = 1) -> Fraction:
+    """Gradient weight of one sample mean: Miles scale, then Megatron's ``1/num_microbatches``
+    (forward_backward_func) and the DP(xCP) gradient average ``1/(dp*cp)``.
+
+    The Megatron factors are an assumption about Megatron core (not re-read
+    here); CPU only checks the arithmetic -- GPU evidence is A8 G2.
+    """
+    scale = miles_microbatch_loss_scale(num_microbatches=num_microbatches, num_rollouts=num_rollouts, dp=dp, cp=cp)
+    return scale / num_microbatches / (dp * cp)
 
 
 def loss_normalization_problems(plan: ReshardPlan) -> list[str]:
+    """Recompute the per-sample weight on both layouts with the fork's formula (one sample per rollout)."""
     gbs, mbs = plan.global_batch_size, plan.micro_batch_size
-    try:
-        before = sample_weight(global_batch_size=gbs, micro_batch_size=mbs, dp=int(plan.source["dp"]))
-        after = sample_weight(global_batch_size=gbs, micro_batch_size=mbs, dp=int(plan.target["dp"]))
-    except ReshardRefused as exc:
-        return [str(exc)]
-    if before != after or before != Fraction(1, gbs):
-        return [f"per-sample loss weight changes {before} -> {after} (expected 1/{gbs})"]
+    weights = {}
+    for name, lay in (("source", plan.source), ("target", plan.target)):
+        dp, cp = int(lay["dp"]), int(lay.get("cp", 1))
+        if gbs % (dp * mbs):
+            return []  # reported by batch_problems
+        nmb = gbs // mbs // dp
+        weights[name] = sample_weight(num_rollouts=gbs, num_microbatches=nmb, dp=dp, cp=cp)
+    if weights["source"] != weights["target"]:
+        return [f"per-sample loss weight changes {weights['source']} -> {weights['target']}"]
     return []
 
 
-def dp_partitions(num_samples: int, dp: int) -> list[list[int]]:
-    """Miles ``split_train_data_by_dp_raw`` without ``--balance-data``: round-robin."""
-    return [list(range(i, num_samples, dp)) for i in range(dp)]
+def scheduled_partitions(rollout_indices: list[int], *, dp: int, global_batch_size: int,
+                         micro_batch_size: int) -> dict[str, Any]:
+    """Model of fork ``dp_schedule.build_dp_schedule`` on the certified path
+    (static micro-batches, no --balance-data/--balance-by-flops, vpp=1).
+
+    Rollouts are taken in first-appearance order, ``global_batch_size`` per
+    step (trailing rollouts dropped -- independent of dp); a step's samples
+    are chunked into micro-batches of ``micro_batch_size`` in order; micro-batch
+    k goes to rank ``k % dp``. Returns per-rank sample positions, per-step
+    micro-batch composition, ``num_microbatches`` and ``num_rollouts``.
+    """
+    by_rollout: dict[int, list[int]] = {}
+    for pos, rid in enumerate(rollout_indices):
+        by_rollout.setdefault(rid, []).append(pos)
+    rids = list(by_rollout)
+    steps = len(rids) // global_batch_size
+    if steps < 1:
+        raise ReshardRefused(f"{len(rids)} rollouts < global batch {global_batch_size}")
+    partitions: list[list[int]] = [[] for _ in range(dp)]
+    step_micro_batches, num_microbatches = [], []
+    for step in range(steps):
+        picked = rids[step * global_batch_size:(step + 1) * global_batch_size]
+        samples = [p for rid in picked for p in by_rollout[rid]]
+        mbs = [samples[i:i + micro_batch_size] for i in range(0, len(samples), micro_batch_size)]
+        if len(mbs) % dp:
+            raise ReshardRefused(f"step {step}: {len(mbs)} micro-batches not a multiple of dp {dp}")
+        step_micro_batches.append(mbs)
+        num_microbatches.append(len(mbs) // dp)
+        for k, mb in enumerate(mbs):
+            partitions[k % dp].extend(mb)
+    return {"partitions": partitions, "micro_batches": step_micro_batches,
+            "num_microbatches": num_microbatches, "num_rollouts": [global_batch_size] * steps}
 
 
-def sample_mapping(num_samples: int, source_dp: int, target_dp: int,
-                   partition=dp_partitions) -> dict[str, Any]:
-    """Which rank consumes which sample before/after; the consumed SET must be identical."""
-    before, after = partition(num_samples, source_dp), partition(num_samples, target_dp)
-    flat_before = sorted(i for p in before for i in p)
-    flat_after = sorted(i for p in after for i in p)
+def sample_mapping(rollout_indices: list[int], *, source_dp: int, target_dp: int, global_batch_size: int,
+                   micro_batch_size: int) -> dict[str, Any]:
+    """Before/after assignment; per step the consumed sample set, the micro-batch composition and
+    ``num_rollouts`` must be identical (only the rank assignment may differ)."""
+    before = scheduled_partitions(rollout_indices, dp=source_dp, global_batch_size=global_batch_size,
+                                  micro_batch_size=micro_batch_size)
+    after = scheduled_partitions(rollout_indices, dp=target_dp, global_batch_size=global_batch_size,
+                                 micro_batch_size=micro_batch_size)
     problems = []
-    for name, flat in (("source", flat_before), ("target", flat_after)):
-        if flat != list(range(num_samples)):
-            problems.append(f"{name} partition does not consume every sample exactly once")
+    if before["micro_batches"] != after["micro_batches"]:
+        problems.append("micro-batch composition differs between the layouts")
+    if before["num_rollouts"] != after["num_rollouts"]:
+        problems.append("num_rollouts (loss normalizer) differs between the layouts")
+    for name, sched in (("source", before), ("target", after)):
+        flat = sorted(p for part in sched["partitions"] for p in part)
+        want = sorted(p for step in sched["micro_batches"] for mb in step for p in mb)
+        if flat != want or len(set(flat)) != len(flat):
+            problems.append(f"{name}: ranks do not consume every scheduled sample exactly once")
     return {"source": before, "target": after, "problems": problems}
+
+
+def step_problems(rollout_indices: list[int], plan: ReshardPlan) -> list[str]:
+    """Per-batch check (harness / A8): the scheduled path must accept the batch on BOTH layouts."""
+    try:
+        return sample_mapping(rollout_indices, source_dp=int(plan.source["dp"]), target_dp=int(plan.target["dp"]),
+                              global_batch_size=plan.global_batch_size,
+                              micro_batch_size=plan.micro_batch_size)["problems"]
+    except ReshardRefused as exc:
+        return [str(exc)]
 
 
 # --------------------------------------------------------------------------

@@ -233,9 +233,22 @@ def trainer_view(startup_view: Any, bundle_positions: tuple[int, ...]) -> Any:
     evidence/infra-e3/plan.md): positions index the startup view's
     reordered bundle list.
     """
-    from miles.ray.placement_group import _slice_pg_info
+    from miles.ray import placement_group
 
-    return _slice_pg_info(startup_view, tuple(bundle_positions))
+    fn = check_slice_pg_info(getattr(placement_group, "_slice_pg_info", None))
+    return fn(startup_view, tuple(bundle_positions))
+
+
+def check_slice_pg_info(fn: Any) -> Callable[..., Any]:
+    """Fail loudly (not silently) if the fork renames/changes the private ``_slice_pg_info(info, indices)``."""
+    import inspect
+
+    if not callable(fn):
+        raise RuntimeError("fork miles.ray.placement_group._slice_pg_info is missing (fork gap F-R2)")
+    params = list(inspect.signature(fn).parameters)
+    if params != ["info", "indices"]:
+        raise RuntimeError(f"fork _slice_pg_info signature changed: {params} (expected ['info', 'indices'])")
+    return fn
 
 
 def rebuild_resharded(

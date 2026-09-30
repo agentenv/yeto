@@ -35,7 +35,6 @@ class MilesTrainerOps:
     rebuild: Any = None
 
     def save_cut(self, *, epoch: int, cut_id: str) -> str:
-        self._epoch = int(epoch)
         return self.trainer.save_cut(epoch=epoch, context=self.context_for(cut_id))
 
     def data_cursor(self) -> Mapping[str, int]:
@@ -47,29 +46,31 @@ class MilesTrainerOps:
     def policy_hash(self) -> str:
         return self.policy_hash_fn()
 
-    def _restore_exact(self, cut_id: str, layout: Mapping[str, int]):
-        return lambda: self.trainer.restore_cut(cut_id, epoch=self._epoch, root=self.root,
+    def _restore_exact(self, cut_id: str, layout: Mapping[str, int], epoch: int):
+        return lambda: self.trainer.restore_cut(cut_id, epoch=epoch, root=self.root,
                                                 expect=self.expect_for(layout))
 
-    def resize(self, plan: Any, cut_id: str) -> Any:
+    # ``epoch`` is the config epoch the cut was saved at (journal ``trainer_cut.cut_epoch``),
+    # so a restarted controller can call these without a prior save_cut in this process.
+    def resize(self, plan: Any, cut_id: str, *, epoch: int) -> Any:
         old_args = self.trainer._args
         new_args = resized_args(old_args, int(plan.reshard.target["world"]))
         return rebuild_resharded(
             self.trainer, old_args=old_args, new_args=new_args, rollout_executor=self.rollout_executor,
             actor=self.actor, run=self.run, rollout=self.rollout,
             restore_new=lambda: self.trainer.restore_cut_resharded(
-                cut_id, epoch=self._epoch, root=self.root, expect=self.expect_for(plan.reshard.source),
+                cut_id, epoch=epoch, root=self.root, expect=self.expect_for(plan.reshard.source),
                 plan=plan.reshard, certified=self.certified_for(plan)),
-            restore_old=self._restore_exact(cut_id, plan.reshard.source),
+            restore_old=self._restore_exact(cut_id, plan.reshard.source, epoch),
             new_layout=plan.reshard.target, old_layout=plan.reshard.source,
             new_view=self.view_for(plan.target_trainer_gpus), old_view=self.view_for(plan.source_trainer_gpus),
             worker_manager=self.worker_manager, rebuild=self.rebuild,
         )
 
-    def restore_source(self, plan: Any, cut_id: str) -> Any:
+    def restore_source(self, plan: Any, cut_id: str, *, epoch: int) -> Any:
         current = self.trainer._args
         old_args = resized_args(current, int(plan.reshard.source["world"]))
-        restore = self._restore_exact(cut_id, plan.reshard.source)
+        restore = self._restore_exact(cut_id, plan.reshard.source, epoch)
         view = self.view_for(plan.source_trainer_gpus)
         # No further fallback: new == old shape; a failure raises RecoveryRequired.
         return rebuild_resharded(

@@ -24,8 +24,11 @@ from yeto.rl.engine.miles_adapter.reshard import (
     algorithm_problems,
     reshard_problems,
     rng_mapping,
+    miles_microbatch_loss_scale,
     sample_mapping,
     sample_weight,
+    scheduled_partitions,
+    step_problems,
 )
 from yeto.rl.engine.miles_adapter.trainer import CutContext, MilesTrainerGroup
 
@@ -187,11 +190,39 @@ def test_layout_and_batch_refusals():
     assert algorithm_problems(None)
 
 
-def test_loss_weight_and_sample_mapping_are_dp_invariant():
+def test_loss_weight_recomputed_with_the_fork_scale_is_dp_invariant():
+    # fork loss_function: loss * num_microbatches / num_rollouts * dp (apply_megatron_loss_scaling)
+    assert miles_microbatch_loss_scale(num_microbatches=8, num_rollouts=16, dp=2) == Fraction(1)
     for dp in (1, 2, 4):
-        assert sample_weight(global_batch_size=16, micro_batch_size=2, dp=dp) == Fraction(1, 16)
-    m = sample_mapping(8, 1, 2)
-    assert m["problems"] == [] and m["target"] == [[0, 2, 4, 6], [1, 3, 5, 7]]
+        nmb = 16 // 2 // dp
+        assert sample_weight(num_rollouts=16, num_microbatches=nmb, dp=dp) == Fraction(1, 16)
+
+
+def test_scheduled_path_keeps_steps_and_micro_batches_and_changes_only_ranks():
+    # multi-sample rollouts (repeated rollout id); 4 rollouts/step, mbs=1; rollout 8 is trailing -> dropped
+    rids = [0, 0, 1, 2, 2, 3, 4, 5, 6, 6, 7, 7, 8]
+    m = sample_mapping(rids, source_dp=1, target_dp=2, global_batch_size=4, micro_batch_size=1)
+    assert m["problems"] == []
+    assert m["source"]["num_rollouts"] == m["target"]["num_rollouts"] == [4, 4]
+    assert m["source"]["num_microbatches"] == [6, 6] and m["target"]["num_microbatches"] == [3, 3]
+    assert m["target"]["partitions"] == [[0, 2, 4, 6, 8, 10], [1, 3, 5, 7, 9, 11]]
+    assert m["source"]["partitions"] == [list(range(12))]
+
+
+def test_step_problems_reports_odd_micro_batch_counts():
+    rids = [0, 1, 1, 2, 3]  # step of 4 rollouts has 5 samples -> 5 micro-batches, not a multiple of dp 2
+    assert step_problems(rids, _plan(1, 2))
+    assert step_problems([0, 1, 2, 3], _plan(1, 2)) == []
+
+
+def test_balance_data_and_dropout_are_refused_for_a_dp_change():
+    args = SimpleNamespace(**{**vars(default_args(2)), "balance_data": True})
+    assert any("balance-data" in x for x in reshard_problems(_plan(1, 2), args=args, spec=_spec()))
+    for name, value in (("lora_dropout", 0.05), ("hidden_dropout", None), ("attention_dropout", 0.1)):
+        a = SimpleNamespace(**{**vars(default_args(2)), name: value})
+        assert any(name in x for x in reshard_problems(_plan(1, 2), args=a, spec=_spec())), name
+    a = SimpleNamespace(**{**vars(default_args(2)), "lora_dropout": 0.05})
+    assert not any("dropout" in x for x in reshard_problems(_plan(2, 2), args=a, spec=_spec()))
 
 
 def test_rng_mapping_records_fresh_seed_derivation():
