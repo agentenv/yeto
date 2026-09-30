@@ -33,26 +33,51 @@ def frozen_template(work: Path) -> str:
     return str(Path(work) / "frozen" / "rollout_{rollout_id}.pt")
 
 
-def phase_summary(miles_args, launch, algorithm) -> dict:
-    """What the dry phase records (and what every phase checks first)."""
+PARITY_KEYS = ("balance_data", "balance_by_flops", "use_dynamic_batch_size", "use_dynamic_global_batch_size",
+               "allow_partial_train_step", "calculate_per_token_loss", "normalize_advantages", "indep_dp",
+               "multimodal_keys", "lora_dropout", "hidden_dropout", "attention_dropout", "global_batch_size",
+               "micro_batch_size", "fp16", "virtual_pipeline_model_parallel_size")
+
+
+def argv_check(argv, algorithm, overrides) -> dict:
+    """THE pre-GPU check; run identically by ``local_dry.py`` and by every container phase."""
+    from yeto.rl.engine.miles_adapter.reshard import argv_profile, argv_reshard_problems
+
+    profile = argv_profile(argv, overrides)
+    return {"algorithm_spec_sha256": algorithm.sha256(), "overrides": dict(overrides),
+            "argv_profile": {k: getattr(profile, k, None) for k in PARITY_KEYS},
+            "argv_reshard_problems": argv_reshard_problems(argv, algorithm, overrides)}
+
+
+def phase_summary(miles_args, launch, algorithm, overrides=None) -> dict:
+    """Container: the argv check (same as local) plus the check on the parsed args and their agreement."""
     from yeto.rl.engine.miles_adapter.reshard import ReshardPlan, reshard_problems
 
+    overrides = dict(overrides or {})
+    summary = argv_check(list(getattr(launch, "argv", ())), algorithm, overrides)
     gbs = int(miles_args.global_batch_size)
     mbs = int(getattr(miles_args, "micro_batch_size", 1) or 1)
     layout = lambda dp: {"world": dp, "tp": 1, "pp": 1, "cp": 1, "ep": 1, "dp": dp}  # noqa: E731
-    problems = {}
+    parsed = {}
     for src, dst in ((1, 2), (2, 1)):
         args = argparse.Namespace(**{**vars(miles_args), "actor_num_gpus_per_node": dst})
-        problems[f"{src}->{dst}"] = reshard_problems(ReshardPlan(layout(src), layout(dst), gbs, mbs),
-                                                     args=args, spec=algorithm)
-    keys = ("global_batch_size", "micro_batch_size", "num_steps_per_rollout", "rollout_batch_size",
-            "n_samples_per_prompt", "lora_rank", "lora_dropout", "hidden_dropout", "attention_dropout",
-            "use_distributed_optimizer", "bf16", "fp16", "seed", "rollout_seed", "tensor_model_parallel_size",
-            "pipeline_model_parallel_size", "context_parallel_size", "expert_model_parallel_size",
-            "balance_data", "use_dynamic_batch_size", "calculate_per_token_loss", "deterministic_mode")
-    return {"algorithm_spec_sha256": algorithm.sha256(),
-            "args": {k: getattr(miles_args, k, None) for k in keys},
-            "reshard_problems": problems, "argv": list(getattr(launch, "argv", ()))}
+        parsed[f"{src}->{dst}"] = reshard_problems(ReshardPlan(layout(src), layout(dst), gbs, mbs),
+                                                   args=args, spec=algorithm)
+    summary["parsed_reshard_problems"] = parsed
+    summary["parsed_profile"] = {k: getattr(miles_args, k, None) for k in PARITY_KEYS}
+    summary["parity_mismatch"] = sorted(
+        k for k in PARITY_KEYS
+        if summary["argv_profile"].get(k) != summary["parsed_profile"].get(k)
+        and not (summary["argv_profile"].get(k) in (None, False, 0) and summary["parsed_profile"].get(k) in (None, False, 0)))
+    summary["argv"] = list(getattr(launch, "argv", ()))
+    return summary
+
+
+def summary_problems(summary: dict) -> list[str]:
+    out = [f"argv {e}: {p}" for e, ps in summary["argv_reshard_problems"].items() for p in ps]
+    out += [f"parsed {e}: {p}" for e, ps in summary.get("parsed_reshard_problems", {}).items() for p in ps]
+    out += [f"argv/parsed disagree on {k}" for k in summary.get("parity_mismatch", [])]
+    return out
 
 
 def parse_overrides(items: list[str]) -> dict:
@@ -73,12 +98,12 @@ def make_phase(ns):
         overrides = parse_overrides(getattr(ns, "set", None) or [])
         for key, value in overrides.items():
             setattr(miles_args, key, value)
-        summary = phase_summary(miles_args, launch, algorithm)
-        summary["overrides"] = overrides
+        summary = phase_summary(miles_args, launch, algorithm, overrides)
         (work / f"miles_args.{ns.phase}{'.' + ns.arm if ns.arm else ''}.json").write_text(
             json.dumps(summary, indent=1, sort_keys=True, default=repr))
-        if any(summary["reshard_problems"].values()):
-            raise SystemExit(f"E3 profile refused before any GPU process: {summary['reshard_problems']}")
+        problems = summary_problems(summary)
+        if problems:
+            raise SystemExit(f"E3 profile refused before any GPU process: {problems}")
         if ns.phase == "dry":
             return None
         from miles_backend import MilesBackend

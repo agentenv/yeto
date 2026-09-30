@@ -233,17 +233,49 @@ def test_learner_flags_are_taken_from_the_dry_run_plan():
         build_flags.learner_flags({"island_requests": [{"learner_command": "python3 -m yeto.rl.learner --x"}]})
 
 
+ARGV = ["--global-batch-size", str(GBS), "--micro-batch-size", "1", "--lora-dropout", "0"]
+ZERO = {"hidden_dropout": 0.0, "attention_dropout": 0.0, "lora_dropout": 0.0}
+
+
 def test_shim_dry_phase_refuses_a_profile_with_dropout(tmp_path):
     shim = importlib.import_module("learner_shim")
-    ns = SimpleNamespace(work=str(tmp_path), phase="dry", arm=None)
+    ns = SimpleNamespace(work=str(tmp_path), phase="dry", arm=None, set=[])
+    launch = SimpleNamespace(argv=ARGV)
     args = SimpleNamespace(**{**vars(default_args(1)), "lora_dropout": 0.05})
-    launch = SimpleNamespace(argv=["--x"])
     with pytest.raises(SystemExit, match="refused"):
         shim.make_phase(ns)(args, launch, _spec())
-    ok = SimpleNamespace(**vars(default_args(1)))
-    assert shim.make_phase(ns)(ok, launch, _spec()) is None
+    ns.set = [f"{k}=0.0" for k in ZERO]
+    assert shim.make_phase(ns)(SimpleNamespace(**vars(default_args(1))), launch, _spec()) is None
     summary = json.loads((tmp_path / "miles_args.dry.json").read_text())
-    assert summary["reshard_problems"] == {"1->2": [], "2->1": []}
+    assert summary["argv_reshard_problems"] == summary["parsed_reshard_problems"] == {"1->2": [], "2->1": []}
+    assert summary["parity_mismatch"] == []
+
+
+def test_argv_and_parsed_disagreement_is_refused(tmp_path):
+    shim = importlib.import_module("learner_shim")
+    parsed = SimpleNamespace(**{**vars(default_args(1)), "balance_data": True})
+    summary = shim.phase_summary(parsed, SimpleNamespace(argv=ARGV), _spec(), ZERO)
+    assert "balance_data" in summary["parity_mismatch"]
+    assert any("disagree on balance_data" in p for p in shim.summary_problems(summary))
+
+
+FLAGS = (Path(__file__).resolve().parent / "data_e3_learner_flags.txt").read_text()
+
+
+def test_local_dry_run_reproduces_the_container_refusal_and_passes_with_the_profile(monkeypatch):
+    local_dry = importlib.import_module("local_dry")
+    modal_run = importlib.import_module("modal_run")
+    launch = local_dry.build_launch(FLAGS)
+    assert "--balance-data" in launch.argv  # hard-coded by the ports translation
+    shim = importlib.import_module("learner_shim")
+    old = shim.argv_check(list(launch.argv), launch.algorithm,
+                          shim.parse_overrides([o for o in modal_run.OVERRIDES["dev-gather"]
+                                                if not o.startswith("balance_data")]))
+    assert any("balance-data" in p for p in shim.summary_problems(old))  # the first DEV-GATHER refusal
+    summary = local_dry.local_dry("dev-gather", FLAGS)
+    assert summary["problems"] == [], summary["problems"]
+    assert summary["argv_profile"]["balance_data"] is False and summary["argv_profile"]["global_batch_size"] == 16
+    assert local_dry.local_dry("a8", FLAGS)["problems"] == []
 
 
 def test_profile_overrides_are_applied_and_recorded(tmp_path):
@@ -253,7 +285,8 @@ def test_profile_overrides_are_applied_and_recorded(tmp_path):
     assert "--set deterministic_mode=true" in modal_run.container_script("a8")
     assert shim.parse_overrides(["hidden_dropout=0.0", "deterministic_mode=true"]) == {
         "hidden_dropout": 0.0, "deterministic_mode": True}
-    ns = SimpleNamespace(work=str(tmp_path), phase="dry", arm=None, set=["lora_dropout=0.0"])
+    ns = SimpleNamespace(work=str(tmp_path), phase="dry", arm=None,
+                         set=["lora_dropout=0.0", "hidden_dropout=0.0", "attention_dropout=0.0"])
     args = SimpleNamespace(**{**vars(default_args(1)), "lora_dropout": 0.05})
-    assert shim.make_phase(ns)(args, SimpleNamespace(argv=[]), _spec()) is None
-    assert json.loads((tmp_path / "miles_args.dry.json").read_text())["overrides"] == {"lora_dropout": 0.0}
+    assert shim.make_phase(ns)(args, SimpleNamespace(argv=ARGV), _spec()) is None
+    assert json.loads((tmp_path / "miles_args.dry.json").read_text())["overrides"]["lora_dropout"] == 0.0

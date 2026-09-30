@@ -33,7 +33,10 @@ PROFILES = {
     "a8": {"gpu": "H100!:2", "expect": "NVIDIA H100 80GB HBM3", "timeout": 7200, "deterministic": True},
 }
 # plan-v3 §0 profile: every dropout 0 (Megatron defaults hidden/attention to 0.1); A8 adds deterministic mode.
-OVERRIDES = {"dev-gather": ["lora_dropout=0.0", "hidden_dropout=0.0", "attention_dropout=0.0"]}
+# balance_data: the ports translation (miles_adapter/config.py) always emits --balance-data, which the
+# first-round DP certification refuses (review H1); the harness profile turns it off.
+OVERRIDES = {"dev-gather": ["lora_dropout=0.0", "hidden_dropout=0.0", "attention_dropout=0.0",
+                            "balance_data=false"]}
 OVERRIDES["a8"] = OVERRIDES["dev-gather"] + ["deterministic_mode=true"]
 DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "NVIDIA_TF32_OVERRIDE": "0"}
 
@@ -77,8 +80,18 @@ def main(argv: list[str]) -> int:  # pragma: no cover - needs Modal credentials 
 
     import modal
 
+    import subprocess
+
     profile, out, flags, app_name, repo = argv[0], Path(argv[1]), Path(argv[2]), argv[3], Path(argv[4])
     out.mkdir(parents=True, exist_ok=True)
+    sys.path.insert(0, str(HERE))
+    from local_dry import local_dry
+
+    dry = local_dry(profile, flags.read_text())  # identical check as the container's first step
+    (out / "local_dry.json").write_text(json.dumps(dry, indent=1, sort_keys=True, default=repr))
+    if dry["problems"]:
+        print("local dry-run refused; no Sandbox started:", dry["problems"])
+        return 2
     p = PROFILES[profile]
     auth = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
     user, token = base64.b64decode(auth).decode().split(":", 1)
@@ -87,6 +100,20 @@ def main(argv: list[str]) -> int:  # pragma: no cover - needs Modal credentials 
              .add_local_dir(str(repo), "/yeto", copy=False, ignore=[".git", "**/__pycache__", "openspec/**"])
              .add_local_file(str(flags), "/work/learner_flags.txt", copy=False))
     app = modal.App.lookup(app_name, create_if_missing=True)
+    try:
+        return _run(app, image, profile, p, out)
+    finally:
+        # Stop the app on every exit path (not only by the watchdog), then list it.
+        subprocess.run([str(Path(sys.executable).with_name("modal")), "app", "stop", "-y", app.app_id],
+                       check=False)
+        (out / "app_stopped.txt").write_text(f"{app.app_id} {time.strftime('%FT%TZ', time.gmtime())}\n")
+
+
+def _run(app, image, profile, p, out):  # pragma: no cover - needs Modal
+    import base64
+
+    import modal
+
     sb = modal.Sandbox.create("bash", "-c", container_script(profile), app=app, image=image, gpu=p["gpu"],
                               cpu=8.0, memory=65536, timeout=p["timeout"])
     (out / "resources.txt").open("a").write(
