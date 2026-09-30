@@ -366,3 +366,14 @@
 - F-R1（fork 新需求，与 G6 相邻）：阻塞 A9/4.7 GPU。
 - PLAN-V2 需采纳本计划的缩小规模（A8 2×H100!、A9 4×L40S T2R2↔T1R3、DEV-GATHER 用 A10G）。
 - dropout>0 的变 DP 边不在首轮认证范围（plan.md §0）。
+
+### INFRA-E3 审查修复（2026-09-30，"需修复"结论）
+- H1：`reshard.py` 改按 fork scheduled 路径建模（`scheduled_partitions`/`sample_mapping`/`step_problems`，GBS 按 rollout 计、`num_rollouts` 归一）；删除 round-robin 假设；拒绝 `--balance-data`、`--balance-by-flops`、动态 batch、部分步、vpp>1。A8 arm 改走 `split_train_data_by_dp` 真实分派（plan-v2）。
+- H2：rollout→trainer 要摘除的 engine 由 pool 的成员→GPU 映射按 `moved_gpus` 选出（`members_on_gpus`），选不出、跨界或数量不符在 plan 阶段拒绝，执行前再核一次（变化则 CANCELLED）；新增"成员名顺序与 GPU 顺序不一致"测试。
+- M1：DP 变化时 `lora_dropout`/`hidden_dropout`/`attention_dropout` 任一非 0 或未知即拒绝。M2：loss 权重按 fork `loss_function` 缩放参数化复算；CPU 只验证算术，归一化证据交 A8 G2（tasks 4.6 已改述）。
+- M3：`infra-e3-controller-v2.patch`（v1 改名 `.v1-OBSOLETE`）：提交 CAS 失败 → `_enter_recovery` + `trainer_recovery_hint`（restore_old，含 cut_epoch），有测试。
+- M4：`resize/restore_source` 显式接收 cut epoch；`trainer_cut` 记录 `cut_epoch`，`recovery_decision` 的提示带 epoch 并写明边界；新增"重启后无 save_cut 也能 restore_source"测试。
+- L1：yeto 侧替身（`tests/rl_reshard_fakes.py`）自带简化的合并逻辑，**不证明** fork-M5 的区间重叠/覆盖检测；那部分依赖 fork 自己的 CPU 单测与 GPU 验证。L2：reshard 文档措辞已改。L3：`trainer_view` 调用前检查 `_slice_pg_info` 存在且签名为 `(info, indices)`（miles 在 CPU 环境不可 import，故在调用时而非模块 import 时检查），有签名测试。L4：plan-v2 写明 G3 第二次仍不可判定即 no-go。
+- F-R1：已从源码核实（`RayWorkerManager.init` 对全部已声明 cell 执行 `start_cells`；cell 只能绑本 pool 视图），需求写入 plan-v2 §4。
+- 测试：全量 68 failed, 2937 passed, 49 skipped, 26 errors；失败/错误 id 94 个与 /tmp/integ-s2-base.ids（第二列）完全相同。v2 补丁临时应用后 controller 级 + E1 reconfig 测试 38 passed，随后撤回。openspec validate --strict 通过。
+- 状态不变：4.2a 未完成；4.6 CPU 通过；4.6a 未完成；4.7 已实现（yeto 侧，CPU 通过）；均未勾选。
