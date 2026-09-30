@@ -395,3 +395,11 @@
   - 新增：`MilesRolloutPool.bind_members/member_gpus/members_on_gpus`、`miles_adapter/bundles.StartupBundles`、`rebuild_wiring.CutSource`、`entry._wire_trainer_edges`（构造 `MilesTrainerOps`；需要 `ElasticWiring.pool_gpus`）、`IslandController.set_trainer_edges`。
   - **依赖**：在真实 fork 上，`bind_members` 依赖 fork 缺口 F-R1（启动时无法声明位于 rollout 视图之外的停止 cell）。`pool_gpus` 目前没有由 learner 或 launcher 传入（`build_elastic` 默认 None），因此生产路径上 trainer 边不会被接线，需要另行接线或由主 agent 决定。
 - 测试：与 origin/infra-e3（71207b7）临时合并后，相关测试 133 通过；合并后全量 68F/2994P/49S/26E，失败 id 94 个，与基线相同。infra-e1 本身全量 68F/2960P/51S/26E，失败 id 94 个（`/tmp/infra-e1-r2d.ids`），与 `/tmp/integ-s2-base.ids` 相同。validate strict 通过。
+
+### INFRA-E1 第三轮审查修复（2026-09-30，结论"小修后可合入"）
+- M1：`_commit` 恢复为 v3 的三态语义，trainer_recovery_hint 增加 `committed` 字段：True 对应 restore_target，False 对应 restore_old，epochs 不可读时为 None 并对应 recovery_required。v3 补丁中 `tests/test_rl_controller_trainer_edge.py` 的两条端到端 CAS 失败用例已原样补回（infra-e3 集成之前由 importorskip 跳过），另加 unreadable 用例。
+- M2：注入阻塞的存活探测改为 `RayTargetLiveness`：阻塞开始时记录 (name, generation)，之后 worker 列表为空、generation 变化或 actor 死亡都判为死亡；其他异常单独以 `InjectedBlockProbeError` 报出，不算作被 kill。三种情形都有测试。
+- L1：`_trainer_record` 修改 tx.phase 时持 `_watchdog_lock`；watchdog 在 trainer 边与 rollout 边上的差异写入 plan v2 §6。
+- L2：`_wire_trainer_edges` 在 `rebuild_preconditions(miles_args)` 不满足时不接线 trainer 边，请求在 plan 阶段即被拒；有测试。
+- L3：**F-R1 未解决前不得认证 role-transfer 的 trainer→rollout 边**（plan v2 §6）。启动期的 bind 能力检查不可行（fork 没有可读接口），也未实现。
+- pool_gpus 入口：按主 agent 安排，等 F-R1 在 fork 实现后再做。

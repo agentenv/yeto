@@ -42,3 +42,9 @@ v1（`plan-3.8-4.4.md`）的拓扑（2×8 卡、8 轮）、"最终 policy hash �
 ## 5. 与 CPU 测试的关系
 
 `tests/test_rl_reconfig_x6.py`、`tests/test_rl_trainer_rebuild_e1.py`、`tests/test_rl_reconfig_e1.py` 中的 watchdog 测试都使用 fake，只证明 yeto 侧协议，**不作为**上述任何一项的验收证据。
+
+## 6. 第三轮审查补充（2026-09-30，运行前固定）
+
+- §4 探测的口径（审查 M2）：阻塞开始时记录每个目标 worker 的 (name, generation)。之后出现以下任一情况即判定"目标 generation 已死"：worker 列表为空（cell 已停止）、name 或 generation 变化（被 health monitor 以新 generation 拉起）、actor 已死（RayActorError）。其他探测异常一律写入 stderr，并以 "liveness probe failed" 报出，**不算作被 kill**；RESULT 中若出现这类报错，§4 判据 2 判为未通过。
+- watchdog 在两类边上的行为不同（审查 L1）：rollout 边在 watchdog 触发后走 REBUILD_OLD，并恢复旧成员。trainer 边（E3，4.7）的 TrainerTransition 执行期间不检查 watchdog，只在提交前复查一次；若已触发，则**不提交**，转 RECOVERY_REQUIRED，并写 `trainer_recovery_hint`（action=restore_old）。这时 trainer 已经换成目标形状，只能人工或按 hint 恢复。
+- F-R1（审查 L3）：fork 缺口 F-R1 解决之前，**不得认证任何需要在释放出的 trainer GPU 上启动 engine 的 trainer 边**（role-transfer，trainer→rollout 方向），因为 `bind_members` 在真实 fork 上无 cell 可绑。启动期的能力检查没有实现：yeto 侧没有办法从 fork 读出"是否存在可重绑的停止 cell"，只能靠该边真正执行时 `bind_members`/`rebind_cell` 失败，事务再走 REBUILT_OLD。
