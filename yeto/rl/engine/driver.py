@@ -376,6 +376,9 @@ class IslandDriver:
         self.expected_token: str | None = None
         self.published_version: int | None = None
         self.rounds_completed = 0
+        # Optimizer steps the trainer's scheduler has counted (4.2/4.4 cut
+        # progress): set by every apply, advanced by every trained round.
+        self.local_step = 0
         self.profile = profile
         self.observe = bool(observe)
         self.config_epoch = int(config_epoch)
@@ -549,6 +552,7 @@ class IslandDriver:
         self.phase("apply", policy_version=state.policy_version, optimizer=optimizer)
         started = time.monotonic()
         self.policy_state.apply(state, optimizer=optimizer, local_step=local_step)
+        self.local_step = int(local_step)
         applied = self.policy_state.export()
         expected = state.policy_tensor_hash()
         if applied.policy_tensor_hash() != expected:
@@ -935,6 +939,9 @@ class IslandDriver:
             submitted_groups=getattr(batch, "submitted_groups", None),
             aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
+        )
+        self.local_step += (
+            int(self.profile.optimizer_steps_per_round) if self.profile is not None else 1
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         if self.observe:

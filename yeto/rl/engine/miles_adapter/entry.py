@@ -486,8 +486,39 @@ def compose_island(
                 driver.placement.restore_committed(tuple(committed["rollout"]),
                                                    epoch=epochs.config_epoch)
         elastic.controller.open(driver.rollout)
+        _wire_trainer_rebuild(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
+                              actor_model=actor_model, rollout_executor=rollout_executor,
+                              runner=runner, base_model_revision=base_model_revision)
     holder["driver"] = driver
     return driver
+
+
+def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model,
+                          rollout_executor, runner, base_model_revision) -> None:
+    """4.4: give the controller a same-shape trainer rebuilder when the actor is
+    the swappable proxy (a rebuild still has to be requested explicitly)."""
+    from .rebuild_wiring import make_trainer_rebuilder
+    from .trainer_rebuild import SwappableActor, rebuild_same_shape
+
+    if not isinstance(actor_model, SwappableActor) or not hasattr(elastic.controller,
+                                                                  "trainer_rebuilder"):
+        return
+    ref_load = getattr(miles_args, "ref_load", None)
+    elastic.controller.trainer_rebuilder = make_trainer_rebuilder(
+        trainer=driver.trainer,
+        rollout=driver.rollout,
+        ledger=elastic.ledger,
+        algorithm=algorithm,
+        backend_fingerprint=elastic.controller.runtime_fingerprint or "",
+        cut_root=str(elastic.controller.state_dir / "cuts"),
+        global_batch_size=int(miles_args.global_batch_size),
+        rebuild_same_shape=lambda *, restore: rebuild_same_shape(
+            driver.trainer, args=miles_args, rollout_executor=rollout_executor,
+            actor=actor_model, run=runner.run, restore=restore, rollout=driver.rollout,
+        ),
+        ref_model=(None if not ref_load
+                   else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
+    )
 
 
 def selection_event(

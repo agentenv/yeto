@@ -64,9 +64,14 @@ CANCELLED = "CANCELLED"
 REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+# 4.4: same-shape trainer rebuild behind the ports (cut saved, trainer being
+# disposed/rebuilt/restored). A restart that finds it cannot tell whether the
+# trainer was restored: RECOVERY_REQUIRED (4.5).
+REBUILDING_TRAINER = "REBUILDING_TRAINER"
 TERMINAL = frozenset({SUCCEEDED, CANCELLED, REBUILT_OLD, RECOVERY_REQUIRED})
 # Phases after which the old engine set can no longer simply be resumed.
-DESTRUCTIVE = frozenset({TRANSFERRING, INITIALIZING, VERIFYING, REBUILD_OLD})
+DESTRUCTIVE = frozenset({TRANSFERRING, INITIALIZING, VERIFYING, REBUILD_OLD, REBUILDING_TRAINER})
+TRAINER_REBUILD = "trainer-rebuild"
 
 E1_EDGE_KINDS = frozenset({"rollout-only"})
 
@@ -83,6 +88,11 @@ class TransactionFailed(RuntimeError):
 
 class RecoveryRequired(RuntimeError):
     """The island is in RECOVERY_REQUIRED: stop consuming data (D4)."""
+
+
+class RebuildRefused(RuntimeError):
+    """A trainer rebuild was refused BEFORE the trainer was touched (e.g. the
+    cut could not be saved): the transaction is CANCELLED, training goes on."""
 
 
 @dataclass(frozen=True)
@@ -121,6 +131,11 @@ class Plan:
 
 def request_body(target: str, expected_epoch: int, deadline_s: float) -> dict[str, Any]:
     return {"target": str(target), "expected_config_epoch": int(expected_epoch),
+            "deadline_s": float(deadline_s)}
+
+
+def rebuild_request_body(expected_epoch: int, deadline_s: float) -> dict[str, Any]:
+    return {"kind": TRAINER_REBUILD, "expected_config_epoch": int(expected_epoch),
             "deadline_s": float(deadline_s)}
 
 
@@ -181,6 +196,7 @@ class IslandController:
         sleep: Callable[[float], None] = time.sleep,
         on_watchdog: Callable[[str, str], None] | None = None,
         inbox: "CommandInbox | None" = None,
+        trainer_rebuilder: Callable[..., Mapping[str, Any]] | None = None,
     ) -> None:
         if initial_config not in configs:
             raise Rejected(f"initial config {initial_config!r} is unknown")
@@ -200,6 +216,11 @@ class IslandController:
         self._sleep = sleep
         self._on_watchdog = on_watchdog
         self.inbox = inbox
+        # 4.4: ``trainer_rebuilder(driver, *, epoch, cut_id) -> Mapping`` saves the
+        # cut, rebuilds the trainer behind the ports and restores it (via
+        # ``IslandDriver.rebuild_trainer``). Raises RebuildRefused before the
+        # trainer is touched; any other exception is RECOVERY_REQUIRED.
+        self.trainer_rebuilder = trainer_rebuilder
         self.journal = Journal(self.state_dir / "reconfig", wall_clock=wall_clock)
         if self.journal.epochs.config_id is None:
             self.journal.compare_and_swap(
@@ -450,6 +471,96 @@ class IslandController:
         self._phase(self._tx, VALIDATING, plan=asdict(plan))
         return self.status(request_id)
 
+    def rebuild_plan(self, expected_epoch: int, *, deadline_s: float) -> Plan:
+        """4.4: a same-shape trainer rebuild at the current config (no edge, no
+        membership change); refused like any pause the audit does not allow."""
+        body = rebuild_request_body(expected_epoch, deadline_s)
+        epochs = self.journal.epochs
+        if self.recovery_required:
+            raise Rejected(f"island is RECOVERY_REQUIRED: {self.recovery_required}")
+        if self.trainer_rebuilder is None:
+            raise Rejected("no trainer rebuilder is wired on this island")
+        if expected_epoch != epochs.config_epoch:
+            raise Rejected(f"expected config epoch {expected_epoch}, current is {epochs.config_epoch}")
+        if self.profile is None or self.profile.execution_mode == "colocated-serial":
+            raise Rejected("trainer rebuild needs a partitioned profile")
+        current = self.configs[epochs.config_id]
+        engines = current.rollout // current.rollout_engine_gpus
+        pause_s = float(deadline_s)
+        decision = self._pause_decision(PAUSABLE_PHASE, pause_s)
+        if not decision.allowed:
+            raise Rejected(f"pause not allowed: {decision.reason}")
+        return Plan(
+            request_body_hash=body_hash(body), source=epochs.config_id, target=epochs.config_id,
+            kind=TRAINER_REBUILD, expected_config_epoch=expected_epoch, source_engines=engines,
+            target_engines=engines, expected_pause_s=pause_s, pause_budget_s=decision.budget_s,
+            profile_hash=self.profile.contract_hash,
+        )
+
+    def request_trainer_rebuild(self, request_id: str, expected_epoch: int,
+                                deadline_s: float) -> dict[str, Any]:
+        """Journal a trainer-rebuild request (idempotent by request id + body)."""
+        if not request_id or not isinstance(request_id, str):
+            raise Rejected("request_id must be a non-empty string")
+        body = rebuild_request_body(expected_epoch, deadline_s)
+        digest = body_hash(body)
+        known = self._by_request.get(request_id)
+        if known is not None:
+            if known["body_hash"] != digest:
+                raise Rejected(f"request {request_id!r} was already used with another body")
+            return self.status(request_id)
+        if self.finalizing is not None:
+            raise Rejected("finalization refuses reconfiguration "
+                           f"(finalizing since rollout {self.finalizing})")
+        if self._tx is not None:
+            raise Rejected(f"transaction {self._tx.tx_id} is in progress (one per island)")
+        if not deadline_s or deadline_s <= 0:
+            raise Rejected("deadline_s must be positive")
+        plan = self.rebuild_plan(expected_epoch, deadline_s=deadline_s)
+        tx_id = f"tx-{self.journal.epochs.config_epoch}-{digest[:12]}-{request_id}"
+        deadline_wall = self._wall() + float(deadline_s)
+        self._record("request", request_id=request_id, tx_id=tx_id, body=body, body_hash=digest,
+                     plan=asdict(plan), deadline_wall=deadline_wall)
+        self._by_request[request_id] = {"tx_id": tx_id, "body": body, "body_hash": digest,
+                                        "plan": asdict(plan), "deadline_wall": deadline_wall}
+        self._tx = _Tx(tx_id, request_id, body, plan, deadline_wall)
+        self._phase(self._tx, VALIDATING, plan=asdict(plan))
+        return self.status(request_id)
+
+    def _execute_trainer_rebuild(self, tx: _Tx, driver: Any, snapshot: ReadinessSnapshot) -> str:
+        epochs = self.journal.epochs
+        cut_id = f"rb-{epochs.config_epoch}-{tx.plan.request_body_hash[:12]}"
+        unconsumed = [] if driver.ledger is None else driver.ledger.unconsumed()
+        if driver.published_state is None or unconsumed:
+            self._finish(tx, CANCELLED, error="no published policy or unconsumed batches at the cut")
+            return CANCELLED
+        self.admission_open = False
+        self._phase(tx, REBUILDING_TRAINER, cut_id=cut_id, rollout_id=snapshot.rollout_id,
+                    optimizer_step=snapshot.optimizer_step,
+                    published_version=driver.published_version,
+                    policy_hash=driver.published_state.policy_tensor_hash())
+        try:
+            self._check_deadline(tx, "trainer rebuild")
+        except TransactionFailed as exc:  # nothing touched yet
+            self._finish(tx, CANCELLED, error=str(exc))
+            return CANCELLED
+        try:
+            result = dict(self.trainer_rebuilder(driver, epoch=epochs.config_epoch, cut_id=cut_id)
+                          or {})
+        except RebuildRefused as exc:
+            self._finish(tx, CANCELLED, error=f"trainer rebuild refused: {exc}")
+            return CANCELLED
+        except BaseException as exc:  # noqa: BLE001 - trainer state unknown
+            self._enter_recovery(tx.tx_id, f"trainer rebuild failed: {exc!r}")
+            self._tx = None
+            raise RecoveryRequired(self.recovery_required) from exc
+        if self._watchdog_fired.is_set():
+            # the rebuild returned after the absolute deadline: outcome is
+            # correct but late; journal it (4.5 bounded recovery is the caller's)
+            result["late"] = True
+        self._finish(tx, SUCCEEDED, rebuild=result, cut_id=cut_id)
+        return SUCCEEDED
+
     def cancel(self, request_id: str) -> str:
         """``cancelled`` / ``recovery_started`` / ``already_committed`` / ``unknown`` (D4)."""
         known = self._by_request.get(request_id)
@@ -523,8 +634,12 @@ class IslandController:
             return CANCELLED
         # VALIDATING again at the safe point: epochs/profile may have moved.
         try:
-            self.plan(tx.plan.target, tx.plan.expected_config_epoch,
-                      deadline_s=float(tx.body["deadline_s"]))
+            if tx.plan.kind == TRAINER_REBUILD:
+                self.rebuild_plan(tx.plan.expected_config_epoch,
+                                  deadline_s=float(tx.body["deadline_s"]))
+            else:
+                self.plan(tx.plan.target, tx.plan.expected_config_epoch,
+                          deadline_s=float(tx.body["deadline_s"]))
         except Rejected as exc:
             self._finish(tx, CANCELLED, error=f"revalidation failed: {exc}")
             return CANCELLED
@@ -556,6 +671,8 @@ class IslandController:
             return WAIT_SAFE
         timer = self._arm_watchdog(tx)
         try:
+            if tx.plan.kind == TRAINER_REBUILD:
+                return self._execute_trainer_rebuild(tx, driver, snapshot)
             return self._execute(tx, driver, snapshot)
         finally:
             timer.cancel()
@@ -870,7 +987,8 @@ def request_status(records: Any, request_id: str) -> dict[str, Any]:
         "request_id": request_id,
         "known": True,
         "tx_id": request["tx_id"],
-        "target": request["body"]["target"],
+        "target": request["body"].get("target"),
+        "kind": request["body"].get("kind", "rollout-only"),
         "phase": last["phase"] if last else VALIDATING,
         "terminal": bool(last and last["phase"] in TERMINAL),
         "config_epoch": last["config_epoch"] if last else None,
@@ -881,8 +999,9 @@ def request_status(records: Any, request_id: str) -> dict[str, Any]:
 class CommandInbox:
     """Restricted command files (D4 manual entry): ``<dir>/<request_id>.<verb>.json``.
 
-    Verbs: ``request`` (``{"target", "expected_config_epoch", "deadline_s"}``) and
-    ``cancel`` (``{}``). The learner polls at safe points; answers are written
+    Verbs: ``request`` (``{"target", "expected_config_epoch", "deadline_s"}``),
+    ``rebuild`` (4.4 same-shape trainer rebuild: ``{"kind", "expected_config_epoch",
+    "deadline_s"}``) and ``cancel`` (``{}``). The learner polls at safe points; answers are written
     as ``<request_id>.status.json`` (atomic rename). Files are consumed.
     """
 
@@ -891,7 +1010,7 @@ class CommandInbox:
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def submit(self, request_id: str, verb: str, body: Mapping[str, Any]) -> Path:
-        if verb not in ("request", "cancel") or "/" in request_id or not request_id:
+        if verb not in ("request", "cancel", "rebuild") or "/" in request_id or not request_id:
             raise ValueError("bad command")
         path = self.dir / f"{request_id}.{verb}.json"
         tmp = path.with_suffix(".tmp")
@@ -901,7 +1020,8 @@ class CommandInbox:
 
     def poll(self, controller: IslandController) -> list[dict[str, Any]]:
         answers = []
-        for path in sorted(self.dir.glob("*.request.json")) + sorted(self.dir.glob("*.cancel.json")):
+        for path in (sorted(self.dir.glob("*.request.json")) + sorted(self.dir.glob("*.rebuild.json"))
+                     + sorted(self.dir.glob("*.cancel.json"))):
             request_id, verb = path.name[: -len(".json")].rsplit(".", 1)
             try:
                 body = json.loads(path.read_text(encoding="utf-8"))
@@ -909,6 +1029,9 @@ class CommandInbox:
                     answer = controller.request(request_id, body["target"],
                                                 int(body["expected_config_epoch"]),
                                                 float(body["deadline_s"]))
+                elif verb == "rebuild":
+                    answer = controller.request_trainer_rebuild(
+                        request_id, int(body["expected_config_epoch"]), float(body["deadline_s"]))
                 else:
                     answer = {"request_id": request_id, "cancel": controller.cancel(request_id)}
             except (Rejected, KeyError, ValueError, TypeError) as exc:
@@ -937,6 +1060,10 @@ def main(argv: list[str] | None = None) -> int:
     req.add_argument("--target", required=True)
     req.add_argument("--expected-epoch", type=int, required=True)
     req.add_argument("--deadline-s", type=float, required=True)
+    reb = sub.add_parser("rebuild-trainer")
+    reb.add_argument("request_id")
+    reb.add_argument("--expected-epoch", type=int, required=True)
+    reb.add_argument("--deadline-s", type=float, required=True)
     can = sub.add_parser("cancel")
     can.add_argument("request_id")
     st = sub.add_parser("status")
@@ -947,6 +1074,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.verb == "request":
         inbox.submit(args.request_id, "request", request_body(args.target, args.expected_epoch,
                                                               args.deadline_s))
+    elif args.verb == "rebuild-trainer":
+        inbox.submit(args.request_id, "rebuild",
+                      rebuild_request_body(args.expected_epoch, args.deadline_s))
     elif args.verb == "cancel":
         inbox.submit(args.request_id, "cancel", {})
     else:
