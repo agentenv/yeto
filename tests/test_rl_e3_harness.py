@@ -244,3 +244,16 @@ def test_shim_dry_phase_refuses_a_profile_with_dropout(tmp_path):
     assert shim.make_phase(ns)(ok, launch, _spec()) is None
     summary = json.loads((tmp_path / "miles_args.dry.json").read_text())
     assert summary["reshard_problems"] == {"1->2": [], "2->1": []}
+
+
+def test_profile_overrides_are_applied_and_recorded(tmp_path):
+    shim = importlib.import_module("learner_shim")
+    modal_run = importlib.import_module("modal_run")
+    assert "--set hidden_dropout=0.0" in modal_run.container_script("dev-gather")
+    assert "--set deterministic_mode=true" in modal_run.container_script("a8")
+    assert shim.parse_overrides(["hidden_dropout=0.0", "deterministic_mode=true"]) == {
+        "hidden_dropout": 0.0, "deterministic_mode": True}
+    ns = SimpleNamespace(work=str(tmp_path), phase="dry", arm=None, set=["lora_dropout=0.0"])
+    args = SimpleNamespace(**{**vars(default_args(1)), "lora_dropout": 0.05})
+    assert shim.make_phase(ns)(args, SimpleNamespace(argv=[]), _spec()) is None
+    assert json.loads((tmp_path / "miles_args.dry.json").read_text())["overrides"] == {"lora_dropout": 0.0}

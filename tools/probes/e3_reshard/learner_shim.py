@@ -55,12 +55,26 @@ def phase_summary(miles_args, launch, algorithm) -> dict:
             "reshard_problems": problems, "argv": list(getattr(launch, "argv", ()))}
 
 
+def parse_overrides(items: list[str]) -> dict:
+    out = {}
+    for item in items:
+        key, _, raw = item.partition("=")
+        if not key or not raw:
+            raise SystemExit(f"--set needs ARG=JSON, got {item!r}")
+        out[key] = json.loads(raw)
+    return out
+
+
 def make_phase(ns):
     work = Path(ns.work)
 
     def run_ports_island(miles_args, launch, algorithm, **_kw):
         work.mkdir(parents=True, exist_ok=True)
+        overrides = parse_overrides(getattr(ns, "set", None) or [])
+        for key, value in overrides.items():
+            setattr(miles_args, key, value)
         summary = phase_summary(miles_args, launch, algorithm)
+        summary["overrides"] = overrides
         (work / f"miles_args.{ns.phase}{'.' + ns.arm if ns.arm else ''}.json").write_text(
             json.dumps(summary, indent=1, sort_keys=True, default=repr))
         if any(summary["reshard_problems"].values()):
@@ -95,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--phase", choices=("dry", "gen", "arm"), required=True)
     ap.add_argument("--work", required=True)
     ap.add_argument("--arm")
+    ap.add_argument("--set", action="append", default=[], metavar="ARG=JSON",
+                    help="profile override applied to miles_args after parse (plan-v3 §0: dropouts 0, "
+                         "deterministic mode); recorded in miles_args.*.json")
     ns = ap.parse_args(argv[:split])
     if ns.phase == "arm" and not ns.arm:
         raise SystemExit("--phase arm needs --arm")

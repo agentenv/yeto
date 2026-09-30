@@ -3,7 +3,7 @@
 NOT run by tests or by INFRA-E3 (no GPU was started). Usage, only after the
 plan and this code are committed and the main agent approves the run:
 
-    python modal_run.py {dev-gather|a8} <outdir> <learner_flags.txt>
+    python modal_run.py {dev-gather|a8} <outdir> <learner_flags.txt> <app-name> <frozen repo snapshot>
 
 ``learner_flags.txt``: the flags of the ``python3 -m yeto.rl.learner`` line of
 ``yeto launch ... --rl-single-island-no-sync --controller local --dry-run``
@@ -32,6 +32,9 @@ PROFILES = {
     "dev-gather": {"gpu": "A10G:2", "expect": "NVIDIA A10G", "timeout": 5400, "deterministic": False},
     "a8": {"gpu": "H100!:2", "expect": "NVIDIA H100 80GB HBM3", "timeout": 7200, "deterministic": True},
 }
+# plan-v3 §0 profile: every dropout 0 (Megatron defaults hidden/attention to 0.1); A8 adds deterministic mode.
+OVERRIDES = {"dev-gather": ["lora_dropout=0.0", "hidden_dropout=0.0", "attention_dropout=0.0"]}
+OVERRIDES["a8"] = OVERRIDES["dev-gather"] + ["deterministic_mode=true"]
 DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "NVIDIA_TF32_OVERRIDE": "0"}
 
 
@@ -39,8 +42,9 @@ def container_script(profile: str, *, work: str = "/work/e3", flags_file: str = 
     p = PROFILES[profile]
     env = " ".join(f"{k}={shlex.quote(v)}" for k, v in DETERMINISM_ENV.items()) if p["deterministic"] else ""
     shim = "/yeto/tools/probes/e3_reshard/learner_shim.py"
+    sets = " ".join(f"--set {o}" for o in OVERRIDES[profile])
     run = (f'env {env} PYTHONPATH=/root/miles:/sgl-workspace/sglang/python:/yeto:${{PYTHONPATH}} '
-           f'bash -c "python {shim} --work {work} %s -- $(cat {flags_file})"')
+           f'bash -c "python {shim} --work {work} {sets} %s -- $(cat {flags_file})"')
     lines = [
         "set -euo pipefail",
         f"mkdir -p {work}",
@@ -71,16 +75,16 @@ def main(argv: list[str]) -> int:  # pragma: no cover - needs Modal credentials 
 
     import modal
 
-    profile, out, flags = argv[0], Path(argv[1]), Path(argv[2])
+    profile, out, flags, app_name, repo = argv[0], Path(argv[1]), Path(argv[2]), argv[3], Path(argv[4])
     out.mkdir(parents=True, exist_ok=True)
     p = PROFILES[profile]
     auth = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
     user, token = base64.b64decode(auth).decode().split(":", 1)
     secret = modal.Secret.from_dict({"REGISTRY_USERNAME": user, "REGISTRY_PASSWORD": token})
     image = (modal.Image.from_registry(IMAGE, secret=secret).entrypoint([])
-             .add_local_dir(str(REPO), "/yeto", copy=False, ignore=[".git", "**/__pycache__", "openspec/**"])
+             .add_local_dir(str(repo), "/yeto", copy=False, ignore=[".git", "**/__pycache__", "openspec/**"])
              .add_local_file(str(flags), "/work/learner_flags.txt", copy=False))
-    app = modal.App.lookup(f"infra-e3-{profile}", create_if_missing=True)
+    app = modal.App.lookup(app_name, create_if_missing=True)
     sb = modal.Sandbox.create("bash", "-c", container_script(profile), app=app, image=image, gpu=p["gpu"],
                               cpu=8.0, memory=65536, timeout=p["timeout"])
     (out / "resources.txt").open("a").write(
