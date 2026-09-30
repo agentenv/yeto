@@ -634,3 +634,4 @@
 ## GPU-B1 恢复后（2026-09-30 11:42Z–）
 - A2 OD 补跑（同 SHA 37155d8）rc=0；三 arm 判据 1–6 全部通过（`evidence/infra-v2-b1/a2/rerun3/RESULT.md`）。**1.4 勾选**（X9 满足，依赖 1.2 已勾）；**2.3 GPU 验收通过但未勾选**（依赖 1.7、2.2 未勾）。
 - A4：计划 gpu-plan-v2 §9.14 已提交，8 卡 dry-run 9 passed。调度探测：8×H100! 10 分钟以上未调度，Modal 报"workspace concurrency limits reached (… at 10 gpus)"——工作区 GPU 并发上限 10，其他 agent 正占用 → A4 暂停，待主 agent 协调 GPU 配额/时段。
+- A5 执行计划 gpu-plan-v2 §9.15 与 A4 用例费用表 §9.16 已提交（不上卡）；A5 两岛本地 dry-run 4 passed。A4 暂停，等用户决定范围/预算。

@@ -346,3 +346,40 @@
   7. **watchdog 用例**（`a4wd`，§8.7(2)）：`--rl-test-inject-update-weights-block-s 600`，up deadline 120 s。硬超时 25 min，最坏 $13.2。
   8. **E1-C / A4b**：`Timeouts.drain`（T_drain）在 launcher/learner 无配置入口（默认 120 s），E1-C 要求 T_drain=5 s + 工具等待 30 s，按原参数不可执行 → **等待代码/裁定**，不运行。
 - 门控：每次启动前 本批已花 + 本次最坏 ≤ $170；预计全部执行（不含 E1-C）最坏约 $200 > 余额，按顺序执行并在余额不足时停止回报（优先 1–4，其次 7、5、6）。失败即停。
+
+### 9.15 A5（3.8 X6）执行计划（运行前提交，未上卡；判据 = §3 A5 第 1–5 条 + §8.7(1) + `evidence/infra-e1/plan-3.8-4.4-v2.md` §1、§2、§8，不放宽）
+
+- 拓扑（主 agent 裁定：launcher 的 elastic/placement 参数对所有岛全局生效，异构岛不可表达）：两岛各 3 卡 `H100!:3`，均为 T1R1S1（`--rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1`：c0 在 G1 启动，c1 在 G2 声明不启动），strict-avg，本机 head（`run_local_head.py`，`SYNCER_PUBLIC_IP`），6 轮，seed 17。只有岛0 收到切换请求；岛1 全程 T1R1S1。基线同样两岛 3+3、带 `--rl-elastic`（§8 Miles router 一致），不发请求。
+- 本地端到端 dry-run：`evidence/infra-v2-b1/a5/test_a5_dryrun.py` 4 passed——两岛运行命令经 prelude + `learner.parse_args`：rollout_cells、`--use-miles-router`、declare-cells 到达两岛；quorum 用例两岛 learner 收到 `--rl-elastic-quorum-timeout-s 120 --rl-elastic-pause-margin 2.0`，`YETO_RL_TEST_INJECT_START_DELAY_S=150.0` 导出，syncer 命令带 `--quorum-timeout-s 120`（非 quorum 用例不带）；指纹开关到达。
+- 用例、卡、费用（H100! $3.95/GPU·h，6 卡 = $23.7/h）：
+
+| 序 | 用例 | 前置/操作 | 期望 | 硬超时（外层 / watchdog） | 最坏 |
+|---|---|---|---|---|---|
+| 0a | 指纹 | 与正式运行同参数 + `--rl-print-attestation-fingerprint`，在 Modal CPU 容器（同镜像）执行 learner 命令，Ray/GPU 之前退出；三种参数组合（基线/切换、quorum）各取一次 | ≈$0.1 | 15 min | <$0.5 |
+| 0b | 空闲流探测（§3 A5 第 4 条） | Modal CPU 函数对本机 `SYNCER_PUBLIC_IP:29400` 建 TCP 连接，60/180/350/600 s 空闲后检查；工具待写（约 30 行） | ≈$0.05 | 35 min | <$0.2 |
+| 1 | 基线 B | 两岛 3+3，无请求，6 轮 | 0.45 h，$10.7 | 60 / 65 min | $25.7 |
+| 2 | 切换 + finalization | 岛0 第 2 轮 train 时 up（第 3 轮前），第 4 轮 train 时 down（第 5 轮前），第 6 轮 train 时再发 up（finalization 应拒绝/取消） | 0.5 h，$11.9 | 60 / 65 min | $25.7 |
+| 3 | quorum | 同 2 的 up，岛0 带 quorum/pause-margin/start-delay，up deadline 230 s；0b 测得 150 s 内会丢流则本用例判环境阻塞、不运行 | 0.5 h，$11.9 | 60 / 65 min | $25.7 |
+|  | **合计** |  | ≈$35 | | **≈$77.6** |
+
+- 可勾选：3.8（全部满足后；并解开 4.5 的依赖）。报告写明"仅完成 rollout 能力"。
+
+### 9.16 A4 / A4b 用例费用与可勾选 task 对照（供用户取舍；8×H100! = $31.6/h；判据见 §9.14）
+
+| 用例 | 用途 | 期望 | 最坏（硬超时） | 通过后可勾 |
+|---|---|---|---|---|
+| 调度探测 + 指纹（CPU 容器取指纹可替代，≈$0.1） | 前置 | $4 | $10.5（20 min） | — |
+| E1-A 基线（12 轮） | 3.4 必需 | $14 | $23.7（45 min） | 与下一行合起来：**3.4** |
+| E1-A 切换 + E1-E 旁证 | 3.4 必需 | $15 | $23.7（45 min） | **3.4**（3.1/3.2/3.6 仅旁证） |
+| E1-B 权重覆盖 + 迟到 ACK/旧 epoch | 3.5 | $8 | $15.8（30 min） | **3.5** |
+| watchdog 用例（§8.7(2)） | 3.7 的一部分 | $6 | $13.2（25 min） | 3.7 需与下面全部一起 |
+| E1-D ①② kill 新 SGLang（启动/发布中） | 3.7 | $8 | $15.8 | 〃 |
+| E1-D ③ stop 半失败后重试成功 | 3.7 | $8 | $15.8 | 〃 |
+| E1-D ④ stop 持续失败超过 T_recovery（900 s） | 3.7 | $12 | $21.1（40 min） | 〃 |
+| E1-D ⑤ down COMMITTED 后 kill learner（裁定 (c)） | 3.7 | $8 | $15.8 | 〃 |
+| E1-D ⑥ epoch 0 up QUIESCING kill | 3.7 | $8 | $15.8 | 〃 |
+| E1-D ⑦ 首个事务前重启 learner/fork | 3.7 | $8 | $15.8 | 〃 |
+| E1-C / A4b 工具等待 drain（T_drain 入口待 INFRA-E1） | 3.3 | $8 | $15.8 | **3.3** |
+
+- 分组合计（最坏）：只做 3.4 ≈ $58（含探测，用 CPU 指纹则 $47.4）；+3.5 ≈ $74；+3.7 全部 ≈ $187；+3.3 ≈ $203。期望费用约为最坏的 55–60%。
+- 可降费选项（需用户/主 agent 决定，不影响判据）：E1-D 各项轮数压到 4 轮、硬超时 25 min（每项最坏 $13.2）；①②③ 合并为一次运行（按事务顺序），约省 $31；④ 可与 ③ 分开但共享一次 up 前缀。
