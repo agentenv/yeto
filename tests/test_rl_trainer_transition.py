@@ -124,6 +124,9 @@ class Pool:
     def plan_add(self, n):
         return frozenset(f"e{len(self._members) + i}" for i in range(n))
 
+    def bind_members(self, members, gpus):
+        self.log.append(("bind", sorted(members), list(gpus)))
+
     def add_engines(self, n, *, epoch, members):
         if self.fail_start:
             raise RuntimeError("engine start failed")
@@ -200,6 +203,7 @@ def test_trainer_to_rollout_transfer_reshards_and_starts_an_engine(tmp_path):
     result = tr.run()
     assert result.phase == READY_TO_COMMIT and result.target_members == {"e0", "e1", "e2"}
     assert built == [("ok", 1, ("g0",))] and ops.trainer.actual_layout()["dp"] == 1
+    assert pool.log == [("bind", ["e2"], ["g1"]), ("start", ["e2"])]
     before, after = gathered(ranks), gathered(actor.target.ranks)
     for n in before:
         assert torch.equal(before[n]["tensors"]["exp_avg"], after[n]["tensors"]["exp_avg"])

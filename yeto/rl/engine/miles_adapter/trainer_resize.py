@@ -6,7 +6,7 @@ driver-supplied :class:`CutContext`; ``resize`` -> :func:`rebuild_resharded`
 restore, one fallback to the old shape); ``restore_source`` -> the same
 rebuild in the source shape with an exact restore. The driver/entry
 (INFRA-E1) supplies the callables below; see
-``infra-drafts/patches/infra-e3-entry-trainer-ops.patch``.
+the interface request in ``evidence/infra-e3/plan.md`` §5 (no entry patch yet).
 """
 
 from __future__ import annotations

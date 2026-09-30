@@ -255,6 +255,14 @@ class TrainerTransition:
                 if len(added) != plan.add_engines or added & old_members:
                     raise TrainerTransitionFailed("INITIALIZING", f"pool offers {sorted(added)}")
                 self._record("add_intent", tx_id=self.tx_id, members=sorted(added))
+                bind = getattr(self.pool, "bind_members", None)
+                if plan.kind == "role-transfer":
+                    # The new engines run on the GPUs the trainer released: bind the stopped,
+                    # startup-declared cells to them first (fork-M6 set_pg_view + rebind_cell;
+                    # E1 pool verb, see evidence/infra-e3/plan.md section 5).
+                    if not callable(bind):
+                        raise TrainerTransitionFailed("INITIALIZING", "pool cannot bind engines to freed GPUs")
+                    bind(added, plan.moved_gpus)
                 self._fork_call("start", added,
                                 lambda e: self.pool.add_engines(plan.add_engines, epoch=e, members=added))
             # ---- VERIFYING ----
