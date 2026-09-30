@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from .state_plugin import (
@@ -45,6 +46,8 @@ _MODULE = "yeto.rl.engine.miles_adapter.cut_plugin"
 SAVE_CUT_SHARD = f"{_MODULE}.save_cut_shard"
 RESTORE_CUT_SHARD = f"{_MODULE}.restore_cut_shard"
 SHARD_SCHEMA = "yeto.cut_shard/v1"
+# Opt-in: read the optimizer back right after the load and report where a mismatch arises.
+RESTORE_DIAGNOSTICS_ENV = "YETO_RL_CUT_RESTORE_DIAGNOSTICS"
 
 
 class CutPluginError(StatePluginError):
@@ -86,7 +89,8 @@ class MilesCutBackend:
         return dp_invariant_state
 
     def export_optimizer(self, optimizer: Any, named: list) -> Any:
-        return self._dps().export_named_optimizer_state(optimizer, named)
+        with side_effect_free_state(optimizer):
+            return self._dps().export_named_optimizer_state(optimizer, named)
 
     def check_optimizer(self, optimizer: Any, named: list, states: list) -> Any:
         """Merge the DP shards of one (tp, pp) (DistOpt ranges) and validate against ``optimizer``."""
@@ -121,6 +125,45 @@ class MilesCutBackend:
         margs = get_args()
         for key, value in counters.items():
             setattr(margs, key, int(value))
+
+
+def _state_dicts(optimizer: Any) -> list[Any]:
+    """The per-parameter ``state`` mappings under an optimizer (ChainedOptimizer members,
+    Megatron wrappers' inner torch optimizer)."""
+    out, seen = [], set()
+    stack = [optimizer]
+    while stack:
+        obj = stack.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        stack.extend(getattr(obj, "chained_optimizers", None) or ())
+        stack.append(getattr(obj, "optimizer", None))
+        state = getattr(obj, "state", None)
+        if isinstance(state, Mapping):
+            out.append(state)
+    return out
+
+
+@contextmanager
+def side_effect_free_state(optimizer: Any):
+    """Reading optimizer state must not create state entries.
+
+    Megatron's ``_get_main_param_and_optimizer_states`` indexes the torch
+    optimizer's ``state`` defaultdict, which creates an empty entry per main
+    param on a freshly built optimizer; fork-M5's loader then sees a non-empty
+    state, skips ``_init_optimizer_states_with_dummy_values`` and its setter
+    copies only keys that exist -> exp_avg/exp_avg_sq silently not restored
+    (GPU C1 diagnostic 2, 2026-09-30). Entries created during the read that are
+    still empty are removed afterwards.
+    """
+    before = [(state, set(state.keys())) for state in _state_dicts(optimizer)]
+    try:
+        yield
+    finally:
+        for state, keys in before:
+            for key in [k for k in state.keys() if k not in keys and not state[k]]:
+                del state[key]
 
 
 def _backend(actor: Any) -> Any:
@@ -265,6 +308,107 @@ def _sha256(path: str) -> str:
     return sha256_file(path)
 
 
+def component_digests(value: Any, *, depth: int = 5, prefix: str = "") -> dict[str, str]:
+    """Digest per nested component (mapping keys up to ``depth``) -- names what differs
+    when an overall state digest does not match (GPU C1 attempt 4)."""
+    if depth <= 0 or not isinstance(value, Mapping):
+        return {prefix or ".": state_digest(value)}
+    out: dict[str, str] = {}
+    for key in sorted(value, key=repr):
+        out.update(component_digests(value[key], depth=depth - 1, prefix=f"{prefix}/{key}"))
+    return out
+
+
+def state_diff(saved: Any, now: Any, *, path: str = "", out: list | None = None, limit: int = 400) -> list:
+    """Leaf-level differences between two snapshots: (path, kind, detail) -- dtype/shape
+    or max |a-b| for tensors, repr for others. Used when a restore does not reproduce the cut."""
+    import torch
+
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(saved, Mapping) and isinstance(now, Mapping):
+        for key in sorted(set(saved) | set(now), key=repr):
+            if key not in saved or key not in now:
+                out.append((f"{path}/{key}", "missing", "saved" if key not in saved else "restored"))
+                continue
+            state_diff(saved[key], now[key], path=f"{path}/{key}", out=out, limit=limit)
+        return out
+    if isinstance(saved, torch.Tensor) and isinstance(now, torch.Tensor):
+        a, b = saved.detach().cpu(), now.detach().cpu()
+        if a.dtype != b.dtype or a.shape != b.shape:
+            out.append((path, "meta", f"{a.dtype}{tuple(a.shape)} vs {b.dtype}{tuple(b.shape)}"))
+        elif not torch.equal(a, b):
+            d = (a.double() - b.double()).abs()
+            out.append((path, "value", f"max={d.max().item():.3e} n={int((d > 0).sum())}/{d.numel()}"))
+        return out
+    if isinstance(saved, (list, tuple)) and isinstance(now, (list, tuple)) and len(saved) == len(now):
+        for i, (a, b) in enumerate(zip(saved, now)):
+            state_diff(a, b, path=f"{path}[{i}]", out=out, limit=limit)
+        return out
+    if state_digest(saved) != state_digest(now):
+        out.append((path, "other", f"{saved!r:.80} vs {now!r:.80}"))
+    return out
+
+
+def _entry_tensors(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Tensors of one optimizer entry: top-level ones and one level of groups (fork-M5
+    ``tensors``/``scalars``; other formats' ``state``), ``hyper`` excluded."""
+    import torch
+
+    out = {}
+    for key, value in entry.items():
+        if isinstance(value, torch.Tensor):
+            out[key] = value
+        elif isinstance(value, Mapping) and key != "hyper":
+            out.update({f"{key}:{k}": v for k, v in value.items() if isinstance(v, torch.Tensor)})
+    return out
+
+
+def optimizer_diff(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Per optimizer-state key (param / exp_avg / exp_avg_sq / scalars / hyper) between two
+    name-keyed optimizer states (fork-M5 format): entries that differ, max |a-b|, max
+    relative diff, dtype pairs, and range/shape mismatches (DistOpt [start, end))."""
+    import torch
+
+    out: dict[str, Any] = {"entries": 0, "keys": {}, "ranges": 0, "missing": []}
+    ea = (a or {}).get("entries", {})
+    eb = (b or {}).get("entries", {})
+    out["missing"] = sorted(set(ea) ^ set(eb))[:10]
+    for name in sorted(set(ea) & set(eb)):
+        x, y = ea[name], eb[name]
+        out["entries"] += 1
+        if any(x.get(k) != y.get(k) for k in ("start", "end", "numel")) or tuple(x.get("shape", ())) != tuple(
+                y.get("shape", ())):
+            out["ranges"] += 1
+        fx, fy = _entry_tensors(x), _entry_tensors(y)
+        for key in sorted(set(fx) | set(fy)):
+            stat = out["keys"].setdefault(key, {"differ": 0, "max_abs": 0.0, "max_rel": 0.0,
+                                                "dtypes": set()})
+            u, v = fx.get(key), fy.get(key)
+            if u is None or v is None:
+                stat["differ"] += 1
+                stat["dtypes"].add("missing")
+                continue
+            u, v = u.detach().cpu(), v.detach().cpu()
+            stat["dtypes"].add(f"{u.dtype}->{v.dtype}")
+            if u.shape != v.shape:
+                stat["differ"] += 1
+                continue
+            if not torch.equal(u, v):
+                stat["differ"] += 1
+                d = (u.double() - v.double()).abs()
+                stat["max_abs"] = max(stat["max_abs"], float(d.max()))
+                denom = u.double().abs().clamp_min(1e-30)
+                stat["max_rel"] = max(stat["max_rel"], float((d / denom).max()))
+        if x.get("hyper") != y.get("hyper"):
+            out["keys"].setdefault("hyper", {"differ": 0})["differ"] += 1
+    for stat in out["keys"].values():
+        if "dtypes" in stat:
+            stat["dtypes"] = sorted(stat["dtypes"])
+    return out
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
@@ -283,10 +427,23 @@ def shard_name(coord: Mapping[str, int]) -> str:
     return f"trainer_tp{coord['tp']}_pp{coord['pp']}_dp{coord['dp']}.pt"
 
 
+REFUSED = "refused"  # key of a "nothing written" result (reason text)
+REFUSAL_KIND = "refusal_kind"  # "refused" (deliberate) | "failed_before_write"
+
+
 def save_cut_shard(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
-    """Write this rank's shard (tmp + fsync + rename) and return its summary."""
-    with trainer_resident(actor):
-        return _save(actor, directory=directory, cut_id=cut_id)
+    """Write this rank's shard (tmp + fsync + rename) and return its summary.
+
+    A refusal (unsupported configuration, not at a step boundary, ...) is
+    RETURNED as ``{"refused": reason}`` instead of raised: Miles marks a cell
+    errored on any ``run_plugin`` exception (GPU run 2026-09-30, C1), which
+    would turn a clean "no cut" into a dead trainer.
+    """
+    try:
+        with trainer_resident(actor):
+            return _save(actor, directory=directory, cut_id=cut_id)
+    except CutPluginError as error:
+        return {REFUSED: str(error), REFUSAL_KIND: "refused"}
 
 
 def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
@@ -335,6 +492,7 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "has_rng": rng is not None,
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng),
+        "components": component_digests({"state": snap, "rng": rng}),
         "adapter_tensors": len(named),
         "adapter_names": sorted(n for n, _ in named),
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
@@ -404,8 +562,19 @@ def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, An
     """Verify and load this rank's shard; return the post-restore summary (identical digests expected)."""
     install_grad_norm_recorder()  # a rebuilt trainer process has no recorder yet
     _inject_restore_sleep(actor)
-    with trainer_resident(actor):
-        return _restore(actor, directory=directory, files=files, cut_id=cut_id)
+    progress = {"written": False}
+    try:
+        with trainer_resident(actor):
+            return _restore(actor, directory=directory, files=files, cut_id=cut_id, progress=progress)
+    except Exception as error:  # noqa: BLE001
+        if progress["written"]:
+            raise  # state partly written: the trainer is unusable (RECOVERY_REQUIRED)
+        # Nothing written: the trainer is untouched; return instead of raising so
+        # Miles does not mark the cell errored (see save_cut_shard). A deliberate
+        # refusal (CutPluginError) and any other failure before the first write
+        # are told apart by REFUSAL_KIND; the trainer side raises CutError for both.
+        kind = "refused" if isinstance(error, CutPluginError) else "failed_before_write"
+        return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: kind}
 
 
 def _inject_restore_sleep(actor: Any) -> None:
@@ -427,7 +596,9 @@ def _inject_restore_kill(coord: Mapping[str, int]) -> None:
         cut_injection.kill_now("restore_cut after the adapter write")
 
 
-def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
+def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str,
+             progress: dict[str, bool] | None = None) -> dict[str, Any]:
+    progress = progress if progress is not None else {"written": False}
     import torch
 
     backend = _backend(actor)
@@ -461,11 +632,17 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     # Validate against the rebuilt optimizer and scheduler before any write.
     merged = backend.check_optimizer(actor.optimizer, named, states)
     check_scheduler(actor.opt_param_scheduler, shard["scheduler"])
+    progress["written"] = True
     with torch.no_grad():
         for n, p in named:
             p.data.copy_(adapter[n].to(device=p.device))
         _inject_restore_kill(coord)
         backend.load_optimizer(actor.optimizer, named, merged)
+        # Opt-in diagnostics (a full optimizer export costs time and host memory on a
+        # large model): the state read right after the load, to split "the load wrote
+        # something else" from "changed afterwards" (GPU C1 diagnostic 2).
+        after_load = (backend.export_optimizer(actor.optimizer, named)
+                      if os.environ.get(RESTORE_DIAGNOSTICS_ENV) == "1" else None)
     actor.opt_param_scheduler.load_state_dict(shard["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
@@ -486,7 +663,22 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng_now),
+        "components": component_digests({"state": snap, "rng": rng_now}),
     }
+    saved_snap = {k: shard.get(k) for k in snap}
+    if state_digest(saved_snap) != summary["state_digest"]:
+        # cut vs final re-export: free (both already in memory); the after-load split
+        # only with the opt-in diagnostics
+        summary["optimizer_cut_vs_reexport"] = optimizer_diff(shard.get("optimizer_named"), snap["optimizer_named"])
+        if after_load is not None:
+            summary["optimizer_cut_vs_after_load"] = optimizer_diff(shard.get("optimizer_named"), after_load)
+            summary["optimizer_after_load_vs_reexport"] = optimizer_diff(after_load, snap["optimizer_named"])
+        diffs = state_diff(saved_snap, snap)
+        kinds: dict[str, int] = {}
+        for p_, kind, _ in diffs:
+            leaf = p_.rsplit("/", 1)[-1]
+            kinds[f"{kind}:{leaf}"] = kinds.get(f"{kind}:{leaf}", 0) + 1
+        summary["diff"] = {"count": len(diffs), "by_leaf": kinds, "first": diffs[:30]}
     return summary
 
 

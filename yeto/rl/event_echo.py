@@ -83,6 +83,7 @@ def echo_record(record: dict) -> None:
 
 
 FINALIZED_EVENT = "rl_learner_finalized"
+MAX_PENDING_CHARS = 1 << 20  # bound on a held, unterminated tape line
 REQUIRED_KEYS = ("island_id", "time_unix", "event")
 INVALID = object()  # prefix present but not a tape record (e.g. truncated line)
 
@@ -124,6 +125,10 @@ class TapeCollector:
             )
         self._seen: set[str] = set()
         self._lock = threading.Lock()
+        # A log stream chunk is not a line: Modal log entries may carry several
+        # lines, or end in the middle of one. The unterminated tail of a chunk
+        # that is not yet a record waits here for the rest.
+        self._pending = ""
         self.count = 0
         self.discarded = 0
         self.finalized = False
@@ -133,29 +138,56 @@ class TapeCollector:
     def incomplete_marker(self) -> Path:
         return self.path.with_name(self.path.name + ".incomplete")
 
-    def feed(self, line) -> None:
-        raw = parse_line(line)
-        if raw is None:
-            return
+    def feed(self, chunk) -> None:
+        """Feed one log-stream chunk: split it into lines, join a line cut across
+        chunks, and record every echoed tape record."""
         with self._lock:
             if self.closed:
                 return  # after teardown nothing is written any more
-            if raw is INVALID:
-                self.discarded += 1
-                return
-            if raw in self._seen:
-                return
-            self._seen.add(raw)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(raw + "\n")
-            self.count += 1
-            if json.loads(raw).get("event") == FINALIZED_EVENT:
-                self.finalized = True
+            segments = str(chunk).split("\n")
+            complete, tail = segments[:-1], segments[-1]
+            if self._pending:
+                pending, self._pending = self._pending, ""
+                first = complete[0] if complete else tail
+                joined = pending + first
+                if parse_line(joined) not in (None, INVALID):
+                    if complete:
+                        complete[0] = joined
+                    else:
+                        tail = joined
+                else:
+                    self._record_line(pending)  # the held tail was not a cut record
+            for segment in complete:
+                self._record_line(segment)
+            if tail:
+                if parse_line(tail) is INVALID:
+                    self._pending = tail[-MAX_PENDING_CHARS:] if len(tail) > MAX_PENDING_CHARS else tail
+                else:
+                    self._record_line(tail)
+
+    def _record_line(self, line: str) -> None:
+        raw = parse_line(line)
+        if raw is None:
+            return
+        if raw is INVALID:
+            self.discarded += 1
+            return
+        if raw in self._seen:
+            return
+        self._seen.add(raw)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(raw + "\n")
+        self.count += 1
+        if json.loads(raw).get("event") == FINALIZED_EVENT:
+            self.finalized = True
 
     def close(self) -> bool:
         """Stop writing; mark an unfinalized tape incomplete. True if complete."""
 
         with self._lock:
+            if self._pending:  # a cut record that never got its rest
+                pending, self._pending = self._pending, ""
+                self._record_line(pending)
             self.closed = True
             if not self.finalized:
                 self.incomplete_marker.write_text(

@@ -574,3 +574,12 @@
 - 全量：68F/3104P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b6.ids`）。
 - 第 7 次（ap-Zsi9SFmbZkg1dHeMijgdGz，07:47:48–08:33:49Z，≤$1.69，代码 61b40da = 8f40ee2 + integ-decl a382490）：dry、gen、**6 个 arm 全部 rc=0**（每个 arm 从新建 trainer 到结束约 3–4 分钟，镜像拉取约 19 分钟）；compare 程序出错（读分片 `partition` 键，fork 的 scheduled 分片只有 `sample_indices`；且容器脚本只把最后一条命令的 stderr 并入，回溯未进日志）。修复：compare 用 `sample_indices`；容器脚本 `exec 2>&1` 并打印 RESULT.json；加测试。事件级复核（`evidence/infra-e3/dev-gather-run7/event_analysis.txt`）：G2 两组均无问题（分片带 `micro_batch_indices`/`num_rollouts=16`，归一化与预测一致，样本集合与 micro batch 组成一致）；B1 与 B1p 的步 3 逐样本 loss、grad_norm、恢复后 RNG 摘要逐位相等；A1/B1、A2/B2 步 3 逐样本 loss 逐位相等、grad_norm 相对差 0，步 3–8 loss 与 grad_norm 相同；RT 恢复的 gathered 摘要与 B1 相同（1→2→1 往返无损）；新 rank RNG 均为 fresh、种子 1234 可复现。G1 全量逐位与 G4 的更新量/动量比较需要容器内的状态文件（未打包），本次未判；DEV-GATHER 为调试，不作 go/no-go。B3 合计 ≤$5.24。
 - 知会 E2 f898516（cut 携带 Miles `weight_updater.weight_version`，同形与重分片恢复均恢复它）：E3 harness 的 arm 不发布权重（debug_train_only、无引擎），DEV-GATHER/A8 不受影响；trainer_transition 在重建+重分片恢复后经 `publish_members` 重发，依赖该修复，合入 integ-decl 后在 E3 侧补测试核对。
+
+### INFRA-E2 审查低严重度项（2026-09-30，合入 35f52ea 后）
+- L1：恢复后"加载后立即读取"的完整导出改为可选，需设 `YETO_RL_CUT_RESTORE_DIAGNOSTICS=1`。默认只在摘要不一致时报告 cut 与重新导出之间的差异；这两份数据都已在内存里，不多做一次导出。
+- L2：写入前的结果带上 `refusal_kind`，区分 `refused`（有意拒绝）与 `failed_before_write`（写入前出错）。trainer 侧对两者都抛 `CutError`，行为不变。
+- L3：删去 `optimizer_diff` 中的死代码。
+- L4：新增替身测试，直接调用 `MilesCutBackend.export_optimizer`，并用 defaultdict 模拟 state。
+- **L5 已知限制**：`save_cut` 时如果部分 rank 拒绝，已经成功的 rank 会在 cut 目录留下分片。没有 manifest 时 cut 视为不存在，恢复不会使用这些分片，但它们不会被自动清理；同一 cut_id 再次保存会因分片已存在而被拒。调用方应换用新的 cut_id，或手动清理。
+- A2 rerun2 退出码 3 的原因与修复（上一代码提交）：一条 Modal 日志条目同时带了 `rl_learner_finalized` 记录和下一行 `[rl] learner 0 finalized`。收集器把整条条目当作一行解析，JSON 失败，这条记录被当作"格式损坏"丢弃，磁带因此没有 finalized 记录。现在收集器按换行切分每个条目；某条目末尾不完整、尚不能解析成记录的一段先暂存，与下一条目拼接（确实损坏的计为丢弃，后面的记录照常保留，关闭时再判一次）。Modal 日志的每一行都带岛名前缀。判定磁带完整之前的等待改为按事件返回：全部岛收到 finalized，或全部日志流结束，或到达有界时限。退出码语义不变。测试 `tests/test_rl_tape_collector_stream.py` 覆盖多行条目、跨条目半行、真损坏行、关闭时判定、最后事件晚到。
+- 全量：68F/3127P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b7.ids`）。

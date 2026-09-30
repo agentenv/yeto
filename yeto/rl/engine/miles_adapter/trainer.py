@@ -419,6 +419,9 @@ class MilesTrainerGroup:
                 self._actor.run_plugin(SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": cut_id})
             )
         ]
+        refused = [f"[{s.get('refusal_kind', 'refused')}] {s['refused']}" for s in summaries if "refused" in s]
+        if refused:
+            raise CutError("rank refused the cut: " + "; ".join(sorted(set(refused))))
         expected = trainer_workers(self._args)
         if len(summaries) != expected:
             raise TrainStepError(f"expected {expected} cut shards (one per rank), got {len(summaries)}")
@@ -451,7 +454,7 @@ class MilesTrainerGroup:
             ),
             rank_summaries=tuple(
                 {k: s[k] for k in ("path", "scheduler_samples", "has_optimizer_state", "has_rng",
-                                   "state_digest", "rng_digest")}
+                                   "state_digest", "rng_digest", "components") if k in s}
                 for s in summaries
             ),
         )
@@ -522,6 +525,11 @@ class MilesTrainerGroup:
                 )
             )
         ]
+        refused = [f"[{r.get('refusal_kind', 'refused')}] {r['refused']}" for r in results if "refused" in r]
+        if refused:
+            # every rank refused before writing, or some ranks wrote: the
+            # caller treats any restore_cut error as RECOVERY_REQUIRED either way
+            raise CutError("rank refused the restore: " + "; ".join(sorted(set(refused))))
         saved = {s["path"]: s for s in manifest.rank_summaries}
         if len(results) != len(saved) or {r["path"] for r in results} != set(saved):
             raise CutError(f"restored shards {sorted(r['path'] for r in results)} != cut {sorted(saved)}")
@@ -529,7 +537,14 @@ class MilesTrainerGroup:
             s = saved[r["path"]]
             for key in ("scheduler_samples", "state_digest", "rng_digest"):
                 if r[key] != s[key]:
-                    raise CutError(f"{r['path']}: restored {key} differs from the cut")
+                    saved_c, now_c = s.get("components") or {}, r.get("components") or {}
+                    differ = sorted(k for k in set(saved_c) | set(now_c) if saved_c.get(k) != now_c.get(k))
+                    raise CutError(f"{r['path']}: restored {key} differs from the cut; "
+                                   f"cut->reexport {r.get('optimizer_cut_vs_reexport')}; "
+                                   f"cut->after_load {r.get('optimizer_cut_vs_after_load')}; "
+                                   f"after_load->reexport {r.get('optimizer_after_load_vs_reexport')}; "
+                                   f"rank diff {r.get('diff')}; "
+                                   f"differing components ({len(differ)}): {differ[:40]}")
         return manifest
 
     def restore_cut_resharded(self, cut_id: str, *, epoch: int, root: str, expect: Any, plan: Any,
