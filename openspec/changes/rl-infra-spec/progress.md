@@ -457,6 +457,21 @@
 - L3：**F-R1 未解决前不得认证 role-transfer 的 trainer→rollout 边**（plan v2 §6）。启动期的 bind 能力检查不可行（fork 没有可读接口），也未实现。
 - pool_gpus 入口：按主 agent 安排，等 F-R1 在 fork 实现后再做。
 
+### INFRA-E2 GPU harness 与注入（2026-09-30，仅 dry-run；未启动任何 GPU/云资源）
+- 容器内 harness：`miles_adapter/e2_harness.py`。snapshot 根目录有 `yeto-rl-e2-harness.json` 时代替 `driver.run()`，依次执行：逐 rank 确定性读回、G-4.2 (a)–(g)、G-4.3 冻结 batch 的双 arm 逐位比较、L2。CPU 伪岛测试覆盖通过、RNG 丢失、确定性缺失、dropout 不符四种情形。
+- 主机侧：`tools/probes/e2_cut_harness.py`，按 plan-v3 顺序生成 11 个 run 目录。`run.sh` 带 `YETO_E2_GPU_APPROVED` 守卫、watchdog、puller 与 rebuild 触发器；工具本身拒绝 `--execute`。本地两级检查为 launcher `--dry-run` 与 learner preflight（与容器内 learner 在 GPU 之前的检查相同，并翻译出 Miles argv）。
+- 本地 dry-run 结果（`evidence/infra-e2/4.2-4.5/dry-run-20260930.md`）：11 个 run 的 launcher dry-run 全部 rc=0。C3 九个 run 的 preflight rc=0；C1/C2 的 preflight rc=1，原因是 ports 路径 `--lora-dropout` 固定为 0，而计划要求 0.05。这条阻塞已在本地暴露，判据未改。
+- A7 注入开关（`miles_adapter/cut_injection.py`，默认关闭）：
+  - save 途中 kill rank；
+  - restore 途中 kill rank；
+  - restore 前 sleep；
+  - rebuild 在 fork 的 `create_training_models` 处失败；
+  - rebuild 前写入偏移的数据集游标文件；
+  - 第 6 项（CAS 前后 kill controller）使用 E1 的 `--rl-test-kill-learner-at` 加 restart loop，在同一容器内重启。
+- plan-v3：镜像 17d428a2…（5c1b49e-9f29303）、Miles 5c1b49eb、Qwen3-0.6B c1899de…、Qwen3-1.7B 70d244cc…；判据沿用 plan-v2 原文。
+- 阻塞：① LoRA dropout 0.05 无法表达（需要 config 翻译开关，或由主 agent 裁定）；② G-4.5 第 5 行需要 E1 提供实时 `data_cursor`；③ E1 需合入补丁 `infra-e2-e1-harness-injections-v1.patch`。
+- 测试：全量 68 failed / 26 errors / 3059 passed。失败 id（94 个）与 integ-decl b90c18d 基线（3037 passed）按 id 相同。
+
 ### INFRA-E1：第 1 批 GPU 冒烟发现的集成缺口（2026-09-30；已合并 integ-decl f6938d9）
 每项都有端到端测试：真实 `yeto launch` CLI 生成岛运行命令 → 临时 HOME 下执行岛上的 prelude → 真实 `learner.parse_args` 解析。测试辅助在 `tests/rl_e2e_launch.py`，用例在 `tests/test_rl_launch_e2e_b1.py`、`tests/test_rl_e1_injections.py`。
 1. **7c6cd90，经本条后续提交改正（F-R1 的 yeto 侧准备）**：按主 agent 裁定，以 FR1 的 `rollout_cells` 为唯一接口，`--rl-elastic-deferred-cells`/`deferred_rollout_cells` **已作废删除**。
@@ -487,6 +502,47 @@
 - 12（79b1e18）：`--rl-test-inject-rebuild-fail` 让 fork 的 `rebuild_training_models` 第一次在 `create_training_models` 阶段失败，走 fork 真实的 TrainerRebuildError 路径，结果为 REBUILD_OLD。**运行前更正** plan v2 §3 第 4 条：REBUILD_OLD 时 `generation` 仍为 1，因为只有重建成功才会 swap。
 - 13：**未完成**。F-R1 尚未提交（miles-fr1 HEAD 仍为 5c1b49eb，工作区有 12 个未提交文件），pool_gpus 入口接线等它合入。
 - 全量：68F/3055P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b2.ids`）；validate strict 通过。
+
+### INFRA-E1 第 14 项与两项裁定（2026-09-30）
+- 14：新增 `--rl-print-attestation-fingerprint`（launcher → learner）。learner 在 `build_ports_launch` 与 `verify_ports_algorithm` 之后调用 `print_attestation_fingerprint`，用 `ports_runtime_fingerprint(launch)` 打印一行 JSON（runtime_fingerprint、learner_id、miles_argv）后返回。`run_ports_island` 用的是同一个函数和同一个 launch 对象；该开关只属于 learner，不进入被哈希的 Miles argv。CPU 上运行仍需要 Miles 镜像（parse_miles_args/run_plugin 检查）和模型快照下载，不需要 Ray 和 GPU。测试 `tests/test_rl_attestation_fingerprint.py`。
+- 裁定记录：第 8 项以 learner 磁带中的 `rl_pull_resend` 为准；第 12 项的"运行前更正"已在 plan v2 §3 第 4 条原位标注，保留了原文。
+- 全量：68F/3058P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b3.ids`）；validate strict 通过。
+### INFRA-E2 GPU harness 与注入（2026-09-30，仅 dry-run；未启动任何 GPU/云资源）
+- 容器内 harness：`miles_adapter/e2_harness.py`。snapshot 根目录有 `yeto-rl-e2-harness.json` 时代替 `driver.run()`，依次执行：逐 rank 确定性读回、G-4.2 (a)–(g)、G-4.3 冻结 batch 的双 arm 逐位比较、L2。CPU 伪岛测试覆盖通过、RNG 丢失、确定性缺失、dropout 不符四种情形。
+- 主机侧：`tools/probes/e2_cut_harness.py`，按 plan-v3 顺序生成 11 个 run 目录。`run.sh` 带 `YETO_E2_GPU_APPROVED` 守卫、watchdog、puller 与 rebuild 触发器；工具本身拒绝 `--execute`。本地两级检查为 launcher `--dry-run` 与 learner preflight（与容器内 learner 在 GPU 之前的检查相同，并翻译出 Miles argv）。
+- 本地 dry-run 结果（`evidence/infra-e2/4.2-4.5/dry-run-20260930.md`）：11 个 run 的 launcher dry-run 全部 rc=0。C3 九个 run 的 preflight rc=0；C1/C2 的 preflight rc=1，原因是 ports 路径 `--lora-dropout` 固定为 0，而计划要求 0.05。这条阻塞已在本地暴露，判据未改。
+- A7 注入开关（`miles_adapter/cut_injection.py`，默认关闭）：
+  - save 途中 kill rank；
+  - restore 途中 kill rank；
+  - restore 前 sleep；
+  - rebuild 在 fork 的 `create_training_models` 处失败；
+  - rebuild 前写入偏移的数据集游标文件；
+  - 第 6 项（CAS 前后 kill controller）使用 E1 的 `--rl-test-kill-learner-at` 加 restart loop，在同一容器内重启。
+- plan-v3：镜像 17d428a2…（5c1b49e-9f29303）、Miles 5c1b49eb、Qwen3-0.6B c1899de…、Qwen3-1.7B 70d244cc…；判据沿用 plan-v2 原文。
+- 阻塞：① LoRA dropout 0.05 无法表达（需要 config 翻译开关，或由主 agent 裁定）；② G-4.5 第 5 行需要 E1 提供实时 `data_cursor`；③ E1 需合入补丁 `infra-e2-e1-harness-injections-v1.patch`。
+- 测试：全量 68 failed / 26 errors / 3059 passed。失败 id（94 个）与 integ-decl b90c18d 基线（3037 passed）按 id 相同。
+
+### INFRA-E1：主 agent 队列 ①–⑤（2026-09-30）
+- ① c51735e：`--rl-elastic-trainer-edges`。只有开启它时才去掉 `--balance-data`，其余 argv 逐字节不变（有 e2e 测试）。
+- ② 0860a14：应用 INFRA-E2 harness/注入补丁 v1（先合并 origin/infra-e2 ad26f2d）；rebuild-fail 只保留 E2 的一份实现，rank 0 不再被当作未设置。
+- ③ b2a8e3c：`--rl-lora-dropout`，默认值 0 时 argv 不变；canonical/导出配置仍是 dropout 0；E3 的 DP 边照旧拒绝 dropout>0。
+- ④ d8245c5：`live_data_cursor()` 实时读 executor 的 data_source；`data_cursor()` 优先用实时值，读不到时退回上一 batch 的缓存。
+- ⑤（本节提交）F-R1 接线：
+  - `--rl-elastic-trainer-edges` 时，从 manifest 的 `resources.gpus`（按逻辑 bundle 顺序）得到 `pool_gpus`，并接线 trainer 边；其他 elastic 路径不传 pool_gpus。
+  - `member_gpus` 改用 fork `describe_cells` 的 bundles。
+  - 新增 `unbind_members`。
+  - `trainer_view` 优先用公开的 `slice_pg_info`，私有名留作兜底。
+  - 按 FR1 的调用顺序核对：正向 `bind_members`→`add_engines`（start_cells/wait_cells_tracked）→`publish_members`（cordoned 发布→check_weights→admit_cells）一致。反向缺 `unbind_cell`，给 E3 出了补丁 `infra-drafts/patches/infra-e1-e3-unbind-after-stop.patch`：stop 之后调用 `unbind_members`，REBUILD_OLD 时先把原 GPU 绑回再 start。已在本地套用验证，E3 测试 20 个通过，**未提交**（trainer_transition.py 归 E3）。
+  - F-R1 的绑定只在内存，对 E1-D ⑤⑥⑦ 与 A9 f5 的影响写入 plan v2 §7，需主 agent 在运行前从 (a)/(b)/(c) 中选定。
+- 全量：68F/3091P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b4.ids`）；validate strict 通过。
+
+### INFRA-E2 plan-v4 与镜像内 CPU preflight（2026-09-30）
+- 合并 origin/integ-decl 9d2029d 与 origin/infra-e1（含 d8245c5 `live_data_cursor`、`--rl-lora-dropout`，以及已合入的 E2 注入/harness 补丁）。
+- plan-v4：镜像 db815884（2f23a0f-9f29303），Miles 2f23a0fc；判据文字不变。工具的 pin 校验改为对应 plan-v4；C1/C2 使用 `--rl-lora-dropout 0.05`；G-4.5 第 5 行已解除阻塞，但要求实时游标可读，否则拒绝。
+- **pin 缺陷（上报）**：integ-decl 9d2029d 的 `MILES_NEXT_IMAGE` digest 仍是 17d428a2，只改了 commit 和注释。工具在真实检出上 rc=3。在模拟修正后的检出上，11 个 run 共 22 项本地检查全部 rc=0（`dry-run-v4-20260930.md`）。
+- 镜像内 CPU preflight（B2 批准，app ap-AOEKeEOxdqbPDpGJNSPQyD，≤$0.02，已 stopped）：learner 在 import transformer_engine 时因缺 libcuda 失败，没有得到 Bridge/Miles parse 的结论；runtime manifest 的 commits 与当时的 pin 一致。需要 GPU 容器（例如 T4），待批准。证据：`preflight-cpu-20260930/`。
+- 测试：全量 68 failed / 26 errors / 3092 passed，失败 id（94 个）与 integ-decl 9d2029d 基线（3058 passed）一致。
+- 裁定（2026-09-30）：F-R1 绑定只在内存对 E1-D ⑤⑥⑦ 的影响按 (c) 处理，调整用例安排、原判据不变，写入 plan v2 §7.1；已提交配置≠启动配置时重启 → RECOVERY_REQUIRED 记为已知限制，不作为本轮判据；A9 f5 与 E3 plan-v3 一致。
 ## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
 - 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
 - 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。

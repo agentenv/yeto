@@ -252,6 +252,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-kill-learner-at", default=None, metavar="PHASE",
                     help="--rl-elastic, TEST ONLY (3.7 E1-D ⑤⑥): hard-kill the learner once when a "
                     "transaction journals PHASE (needs --rl-elastic-restart-attempts)")
+    rl.add_argument("--rl-print-attestation-fingerprint", action="store_true",
+                    help="ports: each island learner builds its Miles argv exactly as a real run, "
+                    "prints the attestation runtime_fingerprint as one JSON line and exits "
+                    "before Ray/GPU work (run it on CPU with the same flags as the real run)")
+    rl.add_argument("--rl-lora-dropout", type=float, default=None, metavar="P",
+                    help="ports LoRA: training-time LoRA dropout (default 0). Trainer DP-change "
+                    "edges refuse dropout > 0; same-shape rebuild restores its RNG")
     rl.add_argument("--rl-deterministic-trainer", action="store_true",
                     help="ports: Megatron --deterministic-mode plus NCCL_ALGO=Ring, "
                     "CUBLAS_WORKSPACE_CONFIG=:4096:8, NVIDIA_TF32_OVERRIDE=0 on the learner and "
@@ -260,6 +267,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-inject-rebuild-fail", action="store_true",
                     help="--rl-elastic, TEST ONLY (4.4 REBUILD_OLD): the first same-shape trainer "
                     "rebuild fails in the fork at create_training_models")
+    rl.add_argument("--rl-test-inject-cut-save-kill-rank", type=int, default=None, metavar="RANK",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank exits while "
+                    "writing its save_cut shard")
+    rl.add_argument("--rl-test-inject-cut-restore-kill-rank", type=int, default=None, metavar="RANK",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank exits during "
+                    "restore_cut (after the adapter write)")
+    rl.add_argument("--rl-test-inject-cut-restore-sleep", default=None, metavar="RANK:SECONDS",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank sleeps before "
+                    "restore_cut")
+    rl.add_argument("--rl-test-inject-rebuild-cursor-shift", type=int, default=None, metavar="GROUPS",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): before a trainer rebuild, place a "
+                    "dataset state advanced by GROUPS where rollout_executor.load reads it")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
@@ -281,6 +300,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic: the rollout cells to manage: yeto names declared to the fork "
                     "with --rl-elastic-declare-cells (F-R1), else the fork's own cell ids; "
                     "default: every cell the fork declares (needs describe_cells, F-R1)")
+    rl.add_argument("--rl-elastic-trainer-edges", action="store_true",
+                    help="--rl-elastic: enable trainer DP-change / role-transfer edges (4.7): "
+                    "drops --balance-data (refused by the DP certification) and wires the "
+                    "trainer ops and pool GPU ids; off by default")
     rl.add_argument("--rl-elastic-declare-cells", action="store_true",
                     help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
                     "rollout engine cells (placement map rollout_cells: started on the rollout "

@@ -21,6 +21,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -369,6 +370,23 @@ class MilesTrainerGroup:
 
     def layout(self) -> dict[str, int]:
         return trainer_layout(self._args)
+
+    @contextmanager
+    def retained_payloads(self):
+        """E2 harness (plan-v3 G-4.3): train the SAME frozen batch in two arms.
+
+        Inside the block ``train_step`` does not release the rollout refs; the
+        caller releases them once with :meth:`release_payload` afterwards.
+        """
+        release = self._release
+        self._release = lambda _args, _payload: None
+        try:
+            yield
+        finally:
+            self._release = release
+
+    def release_payload(self, batch: RolloutBatchHandle) -> None:
+        self._release(self._args, batch.payload)
 
     def rebind_args(self, args: Any) -> None:
         """Follow the Miles args of the rebuilt trainer (4.6/4.7: another DP size / bundle set)."""

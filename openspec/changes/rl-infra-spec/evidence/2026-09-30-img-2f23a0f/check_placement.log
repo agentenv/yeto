@@ -1,0 +1,13 @@
+miles from /tmp/img-verify-2f23a0f/root/miles/miles/ray/placement_group.py
+git HEAD 2f23a0fca9b80f6a7300da401703c343014b03c0
+OK PlacementMap(trainer=(0, 1), rollout=(2, 3), standby=(4, 5), rollout_cells=(RolloutCellDecl(name='r0', bundles=(2,), start=True), RolloutCellDecl(name='r1', bundles=(3,), start=True), RolloutCellDecl(name='s0', bundles=(4, 5), start=False), RolloutCellDecl(name='u0', bundles=(), start=False)))
+  binding r0 ('rollout', 0)
+  binding r1 ('rollout', 1)
+  binding s0 ('standby', 0)
+  binding u0 None
+rejected as expected: started unbound -> rollout cell 'x' starts at startup but names no bundles
+rejected as expected: stopped before started -> placement map rollout cells must list the cells started at startup before the stopped ones, got [('a', False), ('b', Tru
+rejected as expected: dup name -> placement map rollout cells repeat names ['a']
+rejected as expected: trainer bundle -> rollout cell 'a' bundles [0] are not in the rollout or standby role
+rejected as expected: unknown key -> a rollout cell is {'name', 'bundles', 'start'}, got {'name': 'a', 'bundles': [2], 'gpu': 1}
+no-cells map: ()

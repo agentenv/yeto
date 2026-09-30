@@ -258,3 +258,84 @@ def test_trainer_edges_are_not_wired_when_rebuild_preconditions_fail(tmp_path):
         algorithm=None, actor_model=SwappableActor(SimpleNamespace(run_plugin=lambda *a: None)),
         rollout_executor=None, runner=None, base_model_revision="r", manager=FakeManager())
     assert ok is False and ctl._trainer_edges is None
+
+
+# ---------------------------------------------------------------- F-R1 (fork 2f23a0fc) wiring
+def test_member_gpus_uses_the_fork_describe_cells_bundles():
+    m = FakeManager()
+    pool = _pool(m, running=("c0", "c1"))
+
+    async def describe_cells():
+        return {"c0": {"bundles": [12], "alias": "r0"}, "c1": {"bundles": [13], "alias": "r1"},
+                "c2": {"bundles": [], "alias": "r2"}}
+
+    pool._controller.describe_cells = describe_cells
+    m.get_cell_bundles = None  # the old per-cell manager read is not used
+    assert pool.member_gpus() == {"engine:c0": ("g2",), "engine:c1": ("g3",)}
+
+
+def test_unbind_members_calls_the_fork_unbind_cell():
+    m = FakeManager()
+    m.unbind_cell = _Remote(lambda cell: m.calls.append(("unbind", cell)))
+    _pool(m).unbind_members(frozenset({"engine:c2", "engine:c1"}))
+    assert m.calls == [("unbind", "c1"), ("unbind", "c2")]
+
+
+def test_manifest_pool_gpus_is_the_ordered_uuid_list(tmp_path):
+    import json
+
+    import pytest as _pytest
+
+    from yeto.rl.engine.miles_adapter.entry import manifest_pool_gpus
+
+    res = {"gpus": [{"uuid": "GPU-a"}, {"uuid": "GPU-b"}, {"uuid": "GPU-c"}]}
+    assert manifest_pool_gpus(res) == ("GPU-a", "GPU-b", "GPU-c")
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(res))
+    assert manifest_pool_gpus(str(path)) == ("GPU-a", "GPU-b", "GPU-c")
+    with _pytest.raises(ValueError, match="resources.gpus"):
+        manifest_pool_gpus({"configs": {}})
+
+
+def test_pool_gpus_reach_build_elastic_only_with_trainer_edges(monkeypatch):
+    from yeto.rl.engine.miles_adapter import elastic_wiring, entry
+
+    seen = {}
+    monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
+    base = {"resources": {"gpus": [{"uuid": "u0"}, {"uuid": "u1"}], "configs": {}},
+            "attestation": None, "state_dir": "/s", "initial_config": "c0", "declared_cells": ()}
+    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=dict(base)), profile="P",
+                             fingerprint="F")
+    assert "pool_gpus" not in seen
+    seen.clear()
+    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic={**base, "trainer_edges": True}),
+                             profile="P", fingerprint="F")
+    assert seen["pool_gpus"] == ("u0", "u1")
+
+
+def test_trainer_view_prefers_the_public_slice_pg_info(monkeypatch):
+    import sys
+    import types
+
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import trainer_view
+
+    calls = []
+    pg = types.ModuleType("miles.ray.placement_group")
+
+    def slice_pg_info(info, indices):
+        calls.append(("public", tuple(indices)))
+        return "V"
+
+    def _slice_pg_info(info, indices):
+        calls.append(("private", tuple(indices)))
+        return "P"
+
+    pg.slice_pg_info, pg._slice_pg_info = slice_pg_info, _slice_pg_info
+    ray_mod = types.ModuleType("miles.ray")
+    ray_mod.placement_group = pg
+    monkeypatch.setitem(sys.modules, "miles", types.ModuleType("miles"))
+    monkeypatch.setitem(sys.modules, "miles.ray", ray_mod)
+    monkeypatch.setitem(sys.modules, "miles.ray.placement_group", pg)
+    assert trainer_view("S", (1, 2)) == "V" and calls == [("public", (1, 2))]
+    del pg.slice_pg_info
+    assert trainer_view("S", (0,)) == "P"

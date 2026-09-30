@@ -962,6 +962,15 @@ _ELASTIC_TEST_EXPORTS = (
     ("rl_test_kill_learner_at", "--rl-test-kill-learner-at", "YETO_RL_TEST_KILL_LEARNER_AT"),
     ("rl_test_inject_rebuild_fail", "--rl-test-inject-rebuild-fail",
      "YETO_RL_TEST_INJECT_REBUILD_FAIL"),
+    # E2 G-4.5 (plan-v3), read by miles_adapter.cut_injection
+    ("rl_test_inject_cut_save_kill_rank", "--rl-test-inject-cut-save-kill-rank",
+     "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"),
+    ("rl_test_inject_cut_restore_kill_rank", "--rl-test-inject-cut-restore-kill-rank",
+     "YETO_RL_TEST_INJECT_CUT_RESTORE_KILL_RANK"),
+    ("rl_test_inject_cut_restore_sleep", "--rl-test-inject-cut-restore-sleep",
+     "YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"),
+    ("rl_test_inject_rebuild_cursor_shift", "--rl-test-inject-rebuild-cursor-shift",
+     "YETO_RL_TEST_INJECT_REBUILD_CURSOR_SHIFT"),
 )
 KILL_PHASES = ("QUIESCING", "TRANSFERRING", "INITIALIZING", "VERIFYING", "COMMITTED",
                "RESUMING", "REBUILDING_TRAINER")
@@ -1074,12 +1083,17 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                            eval_uses_snapshots=UNKNOWN)
     if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    dropout = getattr(args, "rl_lora_dropout", None)
+    if dropout is not None and (rl_engine != "ports" or not 0.0 <= dropout < 1.0):
+        raise ValueError("--rl-lora-dropout needs --rl-engine ports and a value in [0, 1)")
     if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
         raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
              if getattr(args, name, None) is not None]
     if getattr(args, "rl_elastic_tool_wait_board", False):
         given.append("--rl-elastic-tool-wait-board")
+    if getattr(args, "rl_elastic_trainer_edges", False):
+        given.append("--rl-elastic-trainer-edges")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
@@ -1088,7 +1102,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
             raise ValueError(f"{flag} must be positive")
     given += [flag for name, flag in _ELASTIC_TEST_FLAGS if getattr(args, name, None) is not None]
     given += [flag for name, flag, _ in _ELASTIC_TEST_EXPORTS
-              if getattr(args, name, None) not in (None, False) and flag not in given]
+              if getattr(args, name, None) is not None and getattr(args, name) is not False
+              and flag not in given]  # rank 0 is a valid value (E2 cut injections)
     if getattr(args, "rl_elastic_state_dir", None) is not None:
         given.append("--rl-elastic-state-dir")
     kill_at = getattr(args, "rl_test_kill_learner_at", None)
@@ -1177,6 +1192,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_deterministic_trainer", False):
         flags += " --rl-deterministic-trainer"
+    if getattr(args, "rl_lora_dropout", None) is not None:
+        flags += f" --rl-lora-dropout {float(args.rl_lora_dropout)!r}"
+    if getattr(args, "rl_print_attestation_fingerprint", False):
+        flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -1195,6 +1214,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             flags += " --rl-elastic-declare-cells"
         if getattr(args, "rl_elastic_tool_wait_board", False):
             flags += " --rl-elastic-tool-wait-board"
+        if getattr(args, "rl_elastic_trainer_edges", False):
+            flags += " --rl-elastic-trainer-edges"
         for name, flag in _ELASTIC_PAUSE_FLAGS:
             value = getattr(args, name, None)
             if value is not None:
@@ -1208,7 +1229,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             value = getattr(args, name, None)
             if value is True:
                 value = 1
-            if value not in (None, False):
+            if value is not None and value is not False:  # rank 0 is valid
                 prelude += f"export {env}={shlex.quote(str(value))}\n"
         attempts = getattr(args, "rl_elastic_restart_attempts", None)
         if attempts:
