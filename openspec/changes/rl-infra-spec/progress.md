@@ -385,3 +385,13 @@
 - F6（500555a）：内联 eval 数据上限改为 96 KiB，并加测试。
 - 全量：68 failed / 2943 passed / 49 skipped / 26 errors，失败 id 共 94 个，与 `/tmp/integ-s2-base.ids` 相同（`/tmp/infra-e1-r2b.ids`）。validate strict 通过。
 - E3 吸收工作暂停在本地分支 `infra-e1-e3wip`（430f49f，未推送，未完成）。
+
+### INFRA-E1 追加（2026-09-30）：测试注入点与 E3 接口吸收
+- A5 用的 `start_cells` 前延迟注入：9a5f181。开关为 launcher `--rl-test-inject-start-delay-s`，也可直接设环境变量 `YETO_RL_TEST_INJECT_START_DELAY_S`。只在本进程第一次 start_cells 时生效；默认关闭。
+- §4 watchdog 用的 `update_weights` 阻塞注入：d0970ba。开关为 launcher `--rl-test-inject-update-weights-block-s`，也可直接设 `YETO_RL_TEST_INJECT_UPDATE_WEIGHTS_BLOCK_S`。阻塞在 yeto 侧模拟：每秒探测一次目标 worker actor 是否存活，actor 死亡后立即报错。默认关闭。执行说明见 `evidence/infra-e1/plan-3.8-4.4-v2.md` §1、§4。
+- E3 接口（7e381d7）：按 controller-v3 语义手工合入 `infra-e3-controller` 补丁与 `infra-e3-elastic-wiring` 补丁。
+  - 提交点只有一个，即 `_commit`，rollout 边与 trainer 边共用。CAS 失败一律转 RECOVERY_REQUIRED；trainer 边会额外按 durable epochs 写 `trainer_recovery_hint`：`last_tx_id == tx` 时为 `restore_target`，否则为 `restore_old`。F2 的 watchdog 复查也覆盖 trainer 边。
+  - 对 `trainer_transition` 的 import 加了保护：infra-e3 集成之前，trainer 边一律拒绝。E3 的 `tests/test_rl_controller_trainer_edge.py` 加了 importorskip。
+  - 新增：`MilesRolloutPool.bind_members/member_gpus/members_on_gpus`、`miles_adapter/bundles.StartupBundles`、`rebuild_wiring.CutSource`、`entry._wire_trainer_edges`（构造 `MilesTrainerOps`；需要 `ElasticWiring.pool_gpus`）、`IslandController.set_trainer_edges`。
+  - **依赖**：在真实 fork 上，`bind_members` 依赖 fork 缺口 F-R1（启动时无法声明位于 rollout 视图之外的停止 cell）。`pool_gpus` 目前没有由 learner 或 launcher 传入（`build_elastic` 默认 None），因此生产路径上 trainer 边不会被接线，需要另行接线或由主 agent 决定。
+- 测试：与 origin/infra-e3（71207b7）临时合并后，相关测试 133 通过；合并后全量 68F/2994P/49S/26E，失败 id 94 个，与基线相同。infra-e1 本身全量 68F/2960P/51S/26E，失败 id 94 个（`/tmp/infra-e1-r2d.ids`），与 `/tmp/integ-s2-base.ids` 相同。validate strict 通过。
