@@ -21,6 +21,7 @@ yeto journal's expected fork epoch (3.3a: the journal is the authority).
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -35,6 +36,8 @@ from .rollout_meta_hook import (
     ROUND_META_SCHEMA,
     put_policy_token,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RolloutMetadataError(RuntimeError):
@@ -112,6 +115,23 @@ def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | No
 
 def _is_ray_handle(obj: Any) -> bool:
     return type(obj).__name__ == "ActorHandle"
+
+
+def _executor_target(executor: Any) -> tuple[str, Any]:
+    """("ray", actor handle) | ("local", data source) | ("unknown", None).
+
+    Only instance attributes are looked at: Miles' ``RayWorkerHandle.__getattr__``
+    answers ANY name (``data_source`` included) with a remote-call coroutine."""
+    attrs = getattr(executor, "__dict__", None) or {}
+    inner = attrs.get("_actor_handle")
+    if inner is not None:  # miles.utils.workers.ray_worker_handle.RayWorkerHandle
+        return "ray", inner
+    if _is_ray_handle(executor):
+        return "ray", executor
+    source = attrs.get("data_source")
+    if source is not None:
+        return "local", source
+    return "unknown", None
 
 
 async def _awaited(value: Any) -> Any:
@@ -435,28 +455,40 @@ class MilesRolloutPool:
         Catches a cursor moved outside generation (``rollout_executor.load``
         during a trainer rebuild; E2 G-4.5 row 5).
 
-        On real Miles the executor is a Ray actor handle (no ``data_source``
-        attribute here): the read runs in the actor via Ray's
-        ``__ray_call__`` (``read_executor_cursor``). A local executor object is
-        read directly. Anything else, or any failure: ``(None, None)`` =
-        unknown -- never the cached value (callers needing the live position
-        fail closed on None)."""
+        Miles (fork e3a11ab3) hands the driver a ``RayWorkerHandle`` whose
+        ``__getattr__`` turns every name into a remote method call; the Ray
+        actor handle is its ``_actor_handle``. The read runs in that actor via
+        Ray's ``__ray_call__`` (``read_executor_cursor``). A bare Ray
+        ``ActorHandle`` is used the same way; a local executor object is read
+        directly. Anything else, or any failure: ``(None, None)`` = unknown
+        (logged with the reason) -- never the cached value."""
         from .rollout_meta_hook import data_cursor as read_cursor
 
-        source = getattr(self._executor, "data_source", None)
-        if source is not None and not _is_ray_handle(self._executor):
+        kind, target = _executor_target(self._executor)
+        if kind == "local":
             try:
-                return read_cursor(source)
-            except Exception:  # noqa: BLE001 - unknown
+                return read_cursor(target)
+            except Exception as exc:  # noqa: BLE001 - unknown
+                logger.warning("live data cursor: local read failed: %r", exc)
                 return None, None
-        ray_call = getattr(self._executor, "__ray_call__", None)
-        remote = getattr(ray_call, "remote", None)
+        if kind != "ray":
+            logger.warning("live data cursor unknown: rollout executor %s is neither a local "
+                           "executor nor a Ray actor (handle)", type(self._executor).__name__)
+            return None, None
+        remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
         if not callable(remote):
+            logger.warning("live data cursor unknown: Ray actor handle %s has no __ray_call__",
+                           type(target).__name__)
             return None, None
         try:
             cursor, length = self._run(_awaited(remote(read_executor_cursor)))
-        except Exception:  # noqa: BLE001 - unknown
+        except Exception as exc:  # noqa: BLE001 - unknown
+            logger.warning("live data cursor unknown: __ray_call__ in the executor actor "
+                           "failed: %r", exc)
             return None, None
+        if cursor is None:
+            logger.warning("live data cursor unknown: the executor's data source reports no "
+                           "complete cursor")
         return (None if cursor is None else dict(cursor)), length
 
     def data_cursor(self) -> dict[str, int] | None:
