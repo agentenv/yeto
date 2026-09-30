@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
@@ -605,26 +605,40 @@ def _role_map(request: Any) -> dict[str, Any] | None:
     return None if pm is None else {k: v for k, v in pm.items() if k in ("trainer", "rollout", "standby")}
 
 
-def lora_perturber(driver: Any) -> Callable[[float | None], None]:
-    """TEST ONLY (``YETO_RL_TEST_INJECT_LORA_PERTURB``, 3.5 E1-B): ``perturb(eps)``
+def lora_perturber(driver: Any) -> Callable[[float | None], Awaitable[None]]:
+    """TEST ONLY (``YETO_RL_TEST_INJECT_LORA_PERTURB``, 3.5 E1-B): ``await perturb(eps)``
     applies the published LoRA adapter + eps to the trainer (optimizer state and
-    local step preserved); ``perturb(None)`` applies the saved original back
-    exactly. Used around one member-scoped update_weights."""
+    local step preserved); ``await perturb(None)`` applies the saved original back
+    exactly. Used around one member-scoped update_weights. It is a coroutine
+    because the publisher calls it inside its running event loop, where the
+    synchronous ``policy_state.export/apply`` (``LoopRunner.run_until_complete``)
+    raise "This event loop is already running"; it uses the async
+    ``aexport``/``aapply`` when the policy state has them."""
     from dataclasses import replace
 
     saved: dict[str, Any] = {}
+    ps = driver.policy_state
 
-    def perturb(scale: float | None) -> None:
+    async def _export() -> Any:
+        return await ps.aexport() if hasattr(ps, "aexport") else ps.export()
+
+    async def _apply(state: Any) -> None:
+        kw = {"optimizer": "preserve", "local_step": int(driver.local_step)}
+        if hasattr(ps, "aapply"):
+            await ps.aapply(state, **kw)
+        else:
+            ps.apply(state, **kw)
+
+    async def perturb(scale: float | None) -> None:
         if scale is not None:
-            state = driver.policy_state.export()
+            state = await _export()
             saved["state"] = state
             tensors = {name: value + float(scale) for name, value in state.tensors.items()}
-            driver.policy_state.apply(replace(state, tensors=tensors, _lora=None),
-                                      optimizer="preserve", local_step=int(driver.local_step))
+            await _apply(replace(state, tensors=tensors, _lora=None))
         else:
             state = saved.pop("state")
-            driver.policy_state.apply(state, optimizer="preserve", local_step=int(driver.local_step))
-            if driver.policy_state.export().policy_tensor_hash() != state.policy_tensor_hash():
+            await _apply(state)
+            if (await _export()).policy_tensor_hash() != state.policy_tensor_hash():
                 raise RuntimeError("LoRA perturbation injection: trainer not restored exactly")
 
     return perturb

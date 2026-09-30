@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from collections.abc import Callable
 from typing import Any
@@ -196,6 +197,12 @@ def _default_flatten() -> Callable[[Any], list[dict[str, Any]]]:
     from miles.utils.audit_utils.checksum_utils import flatten_inference_engine_checksums
 
     return flatten_inference_engine_checksums
+
+
+async def _maybe_await(value: Any) -> Any:
+    """The trainer hook may be sync (tests, fakes) or a coroutine (real Miles
+    policy state, which must not block the running loop)."""
+    return await value if inspect.isawaitable(value) else value
 
 
 class MilesPublisher:
@@ -455,7 +462,7 @@ class MilesPublisher:
                       f"{cells} ships a LoRA adapter perturbed by {self._inject_perturb}",
                       file=sys.stderr, flush=True)
                 self.injected_perturbations.append((tuple(cells), self._inject_perturb))
-                self.perturb_trainer(self._inject_perturb)
+                await _maybe_await(self.perturb_trainer(self._inject_perturb))
             try:
                 await update_weights(
                     self._args, self._actor, self._executor, self._controller,
@@ -463,7 +470,7 @@ class MilesPublisher:
                 )
             finally:
                 if perturb:
-                    self.perturb_trainer(None)  # the trainer holds the published policy again
+                    await _maybe_await(self.perturb_trainer(None))  # the trainer holds the published policy again
         except Exception as exc:
             raise PublicationError(f"member update_weights failed: {exc}",
                                    frozenset(member_id(c) for c in cells)) from exc
