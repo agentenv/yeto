@@ -223,3 +223,38 @@ def test_side_effect_free_state_removes_entries_created_by_a_read():
         inner.state["new-empty"]
         inner.state["new-filled"]["x"] = 1
     assert set(inner.state) == {"kept", "new-filled"}
+
+
+def test_side_effect_free_state_never_swallows_errors():
+    """Defence in depth only: an exception raised by the read (e.g. a fixed fork-M5 refusing
+    missing/extra keys) propagates unchanged; only empty entries created by the read go."""
+    from collections import defaultdict
+
+    from yeto.rl.engine.miles_adapter.cut_plugin import side_effect_free_state
+
+    inner = SimpleNamespace(state=defaultdict(dict))
+
+    class ForkError(RuntimeError):
+        pass
+
+    with pytest.raises(ForkError, match="lacks exp_avg"):
+        with side_effect_free_state(SimpleNamespace(optimizer=inner)):
+            inner.state["p"]
+            raise ForkError("saved state of 'p' lacks exp_avg")
+    assert not inner.state
+
+
+def test_a_fixed_fork_setter_error_reaches_restore_cut(tmp_path):
+    """After the fork fix, a key mismatch raises inside load (after writes began) and the
+    restore fails -- not masked by the read wrapper."""
+    rank = make_rank(0)
+    train_step(rank, _batches(1)[0])
+    s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    fresh = make_rank(4)
+
+    def strict_load(optimizer, named, merged):
+        raise ValueError("saved state has keys the destination lacks: ['exp_avg']")
+
+    fresh._yeto_cut_backend.load_optimizer = strict_load
+    with pytest.raises(ValueError, match="destination lacks"):
+        restore_cut_shard(fresh, directory=str(tmp_path), files=[s], cut_id="c1")
