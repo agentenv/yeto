@@ -87,7 +87,9 @@ def _elastic_c3(extra: list[str]) -> list[str]:
     return [
         "--total-steps", "6", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1",
         "--rl-elastic", "--rl-elastic-resources", "{RESOURCES}", "--rl-elastic-initial-config", "T2R1S0",
-        "--rl-elastic-cells", "c0", *extra,
+        "--rl-elastic-cells", "c0",
+        # plan-v2 §0: C3 = Qwen3-1.7B, otherwise as C2 (LoRA dropout 0.05 included)
+        "--rl-lora-dropout", "0.05", *extra,
     ]
 
 

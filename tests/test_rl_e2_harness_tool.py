@@ -41,7 +41,7 @@ def test_dry_run_writes_every_run_in_plan_order(tmp_path, monkeypatch):
         args = shlex.split((d / "args.txt").read_text())
         assert args[args.index("--model-revision") + 1] == tool.MODELS[run["model"]]
         assert "--modal-gpu-exact" in args and "--rl-deterministic-trainer" in args
-        if run["config"] in ("C1", "C2"):
+        if run["config"] in ("C1", "C2", "C3"):
             assert args[args.index("--rl-lora-dropout") + 1] == "0.05"
         script = (d / "run.sh").read_text()
         assert tool.GUARD in script and "app stop -y" in script  # guard + watchdog
