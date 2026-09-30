@@ -186,3 +186,48 @@
 4. INFRA-E2：4.1 cut 状态审计（含 A3 算法状态与 Miles 超采样余量回收行为；已知：partial_rollout 关闭时在飞中被中止的组被丢弃，不回收）。
 5. 已知限制：TP/PP 集体导出与 DistOpt 分片主参数的组合仍拒绝；precision-aware optimizer 拒绝。
 6. 测试基线：`/tmp/integ-full.txt` 中的 94 个失败 id（环境性）；每次合入按 id 对比。
+
+## 2026-09-30（Agent INFRA-E1，3.x CPU 部分，分支 `infra-e1`）
+
+### 分支与状态
+- 分支 `infra-e1`，worktree `/home/michael/work/infra-e1`，基于 integ-decl ef2d6b0；提交 3a8b8f5、6145c06、04e0b93、16ea216、f4ec49d 及本条目所在文档提交；已普通推送 `origin infra-e1`。无云资源、无费用；未启动任何 GPU。
+- 本机 fork 参照：/home/michael/work/miles-elastic `origin/yeto/ports` = 0af62f4d（只读）。
+
+### task 状态（五选一）
+- 3.4a：CPU 通过，已勾选（纯 Y 任务，验收不需要 GPU）。
+- 3.1、3.2、3.6：已实现 + CPU 通过，未勾选（依赖 2.2/1.5/1.6/3.5 未勾选）。
+- 3.3、3.4、3.5、3.7：已实现 + CPU 通过，未勾选（验收需 GPU；计划 `evidence/infra-e1/plan.md` 已事先固定判据）。
+- 3.3a/3.3b/3.5a：fork 任务，yeto 侧接线已完成，勾选归 fork/GPU 验收。
+- 3.8：未完成（依赖 3.7、2.4；两小岛 strict 属后续）。
+
+### 关键代码
+- `yeto/rl/engine/journal.py`：fsync WAL + `epochs.json` CAS（单写者 flock）。
+- `yeto/rl/engine/controller.py`：`IslandController`（D4 状态机、plan/request/status/cancel/inspect、fork epoch 对账、fence+drain、REBUILD_OLD、watchdog、CommandInbox/CLI）。只接受 attestation 认证的 `rollout-only` 边与 partitioned profile，pause 许可取自 `pause_audit.pause_decision`。
+- `yeto/rl/engine/ledger.py`：group/batch/update 账本。
+- `yeto/rl/engine/driver.py`：`controller=`/`ledger=` 可选参数；不传时事件磁带不变（R0 磁带测试通过）。
+- `yeto/rl/engine/ports.py`：E1 可选协议；`capabilities.py` `RESERVED_PORT_VERBS` 加两项。
+- `miles_adapter/rollout.py`（成员动词）、`publish.py`（`publish_members`、`verify_serving_policy`）、新文件 `elastic_placement.py`。
+
+### 测试
+- 全量 `OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider`：ef2d6b0 基线 68 failed / 2668 passed / 49 skipped / 26 errors；infra-e1 68 failed / 2700 passed / 49 skipped / 26 errors。失败+错误 id 去重后两边均为 94 个且集合完全相同（`/tmp/infra-e1-base.ids`、`/tmp/infra-e1-new.ids`）。新增 `tests/test_rl_reconfig_e1.py`（26）与 `tests/test_rl_miles_adapter_e1.py`（6）。
+- `openspec validate rl-infra-spec --strict`：valid。
+- 说明：这些 CPU 测试的 fake 只模拟 fork 协议（epoch CAS、incomplete、cordon/admission），不作为 3.3/3.4/3.5/3.7 的验收证据。
+
+### 接口请求（需主 agent 协调，不在本 agent 写入范围）
+1. **entry.py 接线**（INFRA 其余部分 / 主 agent 指定写入者）：构造 `MilesRolloutPool(declared_cells=<fork 启动时声明的 rollout cell id>)`、`ElasticPlacement(MilesPlacement, pool_gpus=...)`、`IslandController(state_dir=<岛持久 state>/..., configs, attestation, profile, initial_config, runtime_fingerprint, inbox=CommandInbox(...))` 与 `BatchLedger(state_dir)`，传给 `IslandDriver(controller=, ledger=)`；需 `--use-miles-router`。fork 的 InferenceController 没有列出已声明 cell 的公开方法（`list_declared_cell_ids` 只在 provider 上），接线时从 M1 映射/启动参数得到，或请 fork 负责人加一个 `@lock_exempt` 只读方法（新 M 项，需批准）。
+2. **capabilities.py**（原 ALGO-CAP 文件）：本 agent 只在 `RESERVED_PORT_VERBS` 增加两项（3.4a 原文要求），单独提交 3a8b8f5，可单独审阅/回退。
+3. **publish.py** 不在派发列出的文件中，但 3.5 必须改它，且无其他写入者；已改并在此声明。
+4. **INFRA-E2**：cut 需要读取 `BatchLedger.unconsumed()/open_carried_over()` 与 journal `epochs.json`（config_epoch、成员）做 A3/4.2 对账；carried_over 实际范围待 4.1 审计后，在 `rollout_meta_hook`/`RolloutBatchHandle.carried_over` 报告后接入 ledger。
+5. **INFRA-A**：`rollout.trajectory_load()`（active 请求 + tool-wait 计数）尚无 Miles 实现；1.7 的 tool-wait 仅有秒数。E1-C 需要一个在途 tool-wait 计数探针（可复用 1.7 采样线程）。
+
+### 已知限制
+- member publish 会让 trainer 内部整数 weight version 前进，而 executor 的整数版本只在下一次全量发布时更新（仅 fully-async 过滤使用，本 change 不用）。
+- `check_weights` 返回值不带 cell id，payload 读回按“所有可寻址 engine 的 checksum 与上次同 token 全量发布的参照逐一相同”判定；异构 engine 形状 fail closed。
+- watchdog 不能中断阻塞中的 Python 调用：到期只记 journal、回调 `on_watchdog`，调用返回后按失败处理（REBUILD_OLD 或 RECOVERY_REQUIRED）；进程级终止由 `on_watchdog` 接线提供（待 entry 接线）。
+
+### 待批准
+- 无新增。fork 增加只读 `list_declared_cell_ids` 属于新 M 项，如需要按 G6 同类另批（可用启动参数替代，不阻塞）。
+
+### 下一步（可直接执行）
+1. 主 agent 指派 entry.py 接线（接口请求 1），之后执行 `evidence/infra-e1/plan.md`（需自有 GPU）。
+2. 独立审查本分支 5 个代码提交。
