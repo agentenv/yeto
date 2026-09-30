@@ -360,3 +360,36 @@ def test_rank_diff_reports_leaf_values(tmp_path, monkeypatch):
     fresh._yeto_cut_backend.load_optimizer = lossy
     with pytest.raises(CutError, match="value:exp_avg_sq"):
         _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+@pytest.mark.parametrize("where", ["load", "after"])
+def test_optimizer_diff_splits_load_from_later_changes(tmp_path, where):
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    fresh = make_rank(1)
+    backend = fresh._yeto_cut_backend
+    real_load, real_export = backend.load_optimizer, backend.export_optimizer
+    exports = []
+
+    def load(optimizer, named, merged):
+        real_load(optimizer, named, merged)
+        if where == "load":
+            for p in optimizer.state:
+                optimizer.state[p]["exp_avg"].mul_(2)
+
+    def export(optimizer, named):
+        exports.append(1)
+        if where == "after" and len(exports) == 2:  # the final re-export sees a later change
+            for p in optimizer.state:
+                optimizer.state[p]["exp_avg_sq"].mul_(3)
+        return real_export(optimizer, named)
+
+    backend.load_optimizer, backend.export_optimizer = load, export
+    with pytest.raises(CutError) as info:
+        _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+    msg = str(info.value)
+    cut_to_load, load_to_re = msg.split("cut->after_load ")[1].split("; after_load->reexport ")
+    if where == "load":
+        assert "'state:exp_avg': {'differ': 2" in cut_to_load
+    else:
+        assert "'state:exp_avg_sq': {'differ': 2" in load_to_re.split("; rank diff")[0]

@@ -540,6 +540,8 @@ class MilesTrainerGroup:
                     saved_c, now_c = s.get("components") or {}, r.get("components") or {}
                     differ = sorted(k for k in set(saved_c) | set(now_c) if saved_c.get(k) != now_c.get(k))
                     raise CutError(f"{r['path']}: restored {key} differs from the cut; "
+                                   f"cut->after_load {r.get('optimizer_cut_vs_after_load')}; "
+                                   f"after_load->reexport {r.get('optimizer_after_load_vs_reexport')}; "
                                    f"rank diff {r.get('diff')}; "
                                    f"differing components ({len(differ)}): {differ[:40]}")
         return manifest

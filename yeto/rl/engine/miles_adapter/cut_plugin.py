@@ -308,6 +308,65 @@ def state_diff(saved: Any, now: Any, *, path: str = "", out: list | None = None,
     return out
 
 
+def _entry_tensors(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Tensors of one optimizer entry: top-level ones and one level of groups (fork-M5
+    ``tensors``/``scalars``; other formats' ``state``), ``hyper`` excluded."""
+    import torch
+
+    out = {}
+    for key, value in entry.items():
+        if isinstance(value, torch.Tensor):
+            out[key] = value
+        elif isinstance(value, Mapping) and key != "hyper":
+            out.update({f"{key}:{k}": v for k, v in value.items() if isinstance(v, torch.Tensor)})
+    return out
+
+
+def optimizer_diff(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Per optimizer-state key (param / exp_avg / exp_avg_sq / scalars / hyper) between two
+    name-keyed optimizer states (fork-M5 format): entries that differ, max |a-b|, max
+    relative diff, dtype pairs, and range/shape mismatches (DistOpt [start, end))."""
+    import torch
+
+    out: dict[str, Any] = {"entries": 0, "keys": {}, "ranges": 0, "missing": []}
+    ea = (a or {}).get("entries", {})
+    eb = (b or {}).get("entries", {})
+    out["missing"] = sorted(set(ea) ^ set(eb))[:10]
+    for name in sorted(set(ea) & set(eb)):
+        x, y = ea[name], eb[name]
+        out["entries"] += 1
+        if any(x.get(k) != y.get(k) for k in ("start", "end", "numel")) or tuple(x.get("shape", ())) != tuple(
+                y.get("shape", ())):
+            out["ranges"] += 1
+        fx, fy = _entry_tensors(x), _entry_tensors(y)
+        for key in sorted(set(fx) | set(fy)):
+            if True:
+                stat = out["keys"].setdefault(key, {"differ": 0, "max_abs": 0.0, "max_rel": 0.0,
+                                                    "dtypes": set()})
+                u, v = fx.get(key), fy.get(key)
+                if u is None or v is None:
+                    stat["differ"] += 1
+                    stat["dtypes"].add("missing")
+                    continue
+                u, v = u.detach().cpu(), v.detach().cpu()
+                stat["dtypes"].add(f"{u.dtype}->{v.dtype}")
+                if u.shape != v.shape:
+                    stat["differ"] += 1
+                    continue
+                if not torch.equal(u, v):
+                    stat["differ"] += 1
+                    d = (u.double() - v.double()).abs()
+                    stat["max_abs"] = max(stat["max_abs"], float(d.max()))
+                    denom = u.double().abs().clamp_min(1e-30)
+                    stat["max_rel"] = max(stat["max_rel"], float((d / denom).max()))
+        if x.get("hyper") != y.get("hyper"):
+            out["keys"].setdefault("hyper", {"differ": 0})["differ"] += 1
+    for stat in out["keys"].values():
+        if "dtypes" in stat:
+            stat["dtypes"] = sorted(stat["dtypes"])
+    return out
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
@@ -533,6 +592,9 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
             p.data.copy_(adapter[n].to(device=p.device))
         _inject_restore_kill(coord)
         backend.load_optimizer(actor.optimizer, named, merged)
+        # diagnostics: optimizer state read back right after the load (fork-M5 export
+        # format), to split "load wrote something else" from "changed afterwards"
+        after_load = backend.export_optimizer(actor.optimizer, named)
     actor.opt_param_scheduler.load_state_dict(shard["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
@@ -557,6 +619,8 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     }
     saved_snap = {k: shard.get(k) for k in snap}
     if state_digest(saved_snap) != summary["state_digest"]:
+        summary["optimizer_cut_vs_after_load"] = optimizer_diff(shard.get("optimizer_named"), after_load)
+        summary["optimizer_after_load_vs_reexport"] = optimizer_diff(after_load, snap["optimizer_named"])
         diffs = state_diff(saved_snap, snap)
         kinds: dict[str, int] = {}
         for p_, kind, _ in diffs:
