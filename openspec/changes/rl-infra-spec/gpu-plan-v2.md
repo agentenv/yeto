@@ -173,3 +173,28 @@
 - A10 暂缓。
 - F 阶段只保留 F0 和 F-E1。
 - v1 的 A1–A9 为 $1,500 以上，v2 的期望费用约 $154（4 卡档）。
+
+## 8. 2026-09-30 用户决定与修订（主 agent 维护，INTEG 代笔；本节为修订，不改 §3 任何判据文字）
+
+### 8.1 用户决定（2026-09-30）
+- A4 按 3.4 原文 **8 卡 T4R2S2↔T4R4S0** 实测（即 §2.1 的"8 卡原文版本"，直接使用 `evidence/infra-e1/plan.md` 原判据，不做 4 卡换算）。
+- 加跑 A2+（L-1.7）。
+- 非逐位比较项改用 Nebius：先做一次路径验证冒烟，不通则退回 Modal。逐位项（A6/A8 等）仍用 Modal `H100!`。
+- 超预算前停下，报告并阐述进度。
+- 未分配余额不得动用。
+
+### 8.2 A5 修订（INFRA-E1 提出，运行前）
+- quorum 用例（§3 A5 第 2 条）须带 `--rl-elastic-pause-margin 2.0`，up 请求 deadline 设 230 s；否则 `--quorum-timeout-s 120` 下默认暂停预算 60 s，150 s 注入延迟会在 plan 阶段被 pause 审计拒绝，第 2 条无从执行。详见 `evidence/infra-e1/plan-3.8-4.4-v2.md` §1 第 5 条。
+- "`start_cells` 前注入 150 s"的注入点由 INFRA-E1 实现，开关名待补；该注入点合入集成分支前，A5 quorum 用例不得运行。
+
+### 8.3 A8/A9 规模（计划口径，采纳 INFRA-E3 `evidence/infra-e3/plan-v2.md`）
+- A8：2×H100!，上限 $15.8。
+- A9：4×L40S，T2R2↔T1R3，上限 $27.3；仅在 A8 为 go 且 fork 需求 F-R1 获批后运行。
+- DEV-GATHER：A10G，上限 $3.3。
+- 注意：E3 分支尚在复审、未合入集成分支；此处仅记录计划口径，判据以 E3 plan-v2 合入后的文本为准。§2 表中 A8/A9/DEV-GATHER 的旧配置与费用被本条取代（§3 A9 判据中的"3 卡 T2R1↔T1R2"拓扑文字未改动，差异待主 agent 裁定）。
+
+### 8.4 A9 前置
+- fork 需求 F-R1（启动时可声明不启动、延迟绑定的停止 cell）待用户批准；主 agent 建议待 A8 结果后再定。
+
+### 8.5 变 DP 认证范围
+- 变 DP 认证仅覆盖 dropout=0（`lora_dropout=hidden_dropout=attention_dropout=0`，代码在 DP 变化时拒绝非 0 或未知），待用户确认。
