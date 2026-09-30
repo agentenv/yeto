@@ -231,7 +231,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--rl-overlap-eval",
         action="store_true",
         help="ports fixed partition: run eval overlapped with train/outer sync "
-        "(rl-infra-spec 2.3; needs --eval-interval); off by default",
+        "(rl-infra-spec 2.3; needs --rl-eval-interval); off by default",
     )
     rl.add_argument(
         "--rl-elastic",
@@ -247,6 +247,17 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic: initial config id in the manifest")
     rl.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
                     help="--rl-elastic: rollout cell ids the fork declares at startup")
+    # Ports LoRA training-time heldout eval (forwarded to the learner's
+    # --eval-*; the file is shipped inline and checked by SHA256 there).
+    rl.add_argument("--rl-eval-interval", type=int, default=None, metavar="N",
+                    help="ports: heldout eval every N rollouts (learner --eval-interval); "
+                    "needs --rl-eval-data/-dataset-name/-samples-per-prompt; off by default")
+    rl.add_argument("--rl-eval-data", default=None, metavar="PATH",
+                    help="--rl-eval-interval: local heldout prompt JSONL (distinct from --data)")
+    rl.add_argument("--rl-eval-dataset-name", default=None, metavar="NAME",
+                    help="--rl-eval-interval: eval dataset name")
+    rl.add_argument("--rl-eval-samples-per-prompt", type=int, default=None, metavar="N",
+                    help="--rl-eval-interval: samples per eval prompt")
     rl.add_argument(
         "--dry-run",
         action="store_true",

@@ -1672,21 +1672,29 @@ def _verify_eval_dataset_identity(args) -> Path | None:
         and getattr(args, "parameter_mode", None) == "full"
         and getattr(args, "sync_preset", None) == "dense-full"
     )
-    if not eval_only and not dense_train_eval:
+    from .engine.run_config import ports_training_eval
+
+    ports_train_eval = ports_training_eval(
+        args, parameter_mode=getattr(args, "parameter_mode", None)
+    )
+    if not eval_only and not dense_train_eval and not ports_train_eval:
         raise ValueError(
-            "evaluation configuration requires --eval-only or dense full mode"
+            "evaluation configuration requires --eval-only, dense full mode "
+            "or the ports LoRA engine"
         )
     expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise ValueError("evaluation dataset requires an immutable SHA256")
     source_value = args.data if eval_only else getattr(args, "eval_data", None)
     if not isinstance(source_value, str) or not source_value:
-        raise ValueError("dense full evaluation requires --eval-data")
+        raise ValueError("training-time evaluation requires --eval-data")
     source = Path(source_value).expanduser()
     if source.is_symlink() or not source.is_file():
         raise ValueError("evaluation requires one regular local dataset file")
-    if dense_train_eval and source.resolve() == Path(args.data).expanduser().resolve():
-        raise ValueError("dense full evaluation must use a distinct heldout dataset")
+    if (dense_train_eval or ports_train_eval) and (
+        source.resolve() == Path(args.data).expanduser().resolve()
+    ):
+        raise ValueError("training-time evaluation must use a distinct heldout dataset")
     from ..provenance import file_sha256
 
     actual = file_sha256(source)
