@@ -944,6 +944,11 @@ _ELASTIC_PAUSE_FLAGS = (
     ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
     ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
 )
+# Test-only fault injection for GPU acceptance runs (gpu-plan-v2 A5 quorum case):
+# exported into the island run command; off unless given.
+_ELASTIC_TEST_FLAGS = (
+    ("rl_test_inject_start_delay_s", "--rl-test-inject-start-delay-s"),
+)
 ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
 _EVAL_LAUNCH_FLAGS = (
     ("rl_eval_data", "--rl-eval-data"),
@@ -1025,10 +1030,11 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                            eval_uses_snapshots=UNKNOWN)
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
              if getattr(args, name, None) is not None]
-    for name, flag in _ELASTIC_PAUSE_FLAGS:
+    for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
             raise ValueError(f"{flag} must be positive")
+    given += [flag for name, flag in _ELASTIC_TEST_FLAGS if getattr(args, name, None) is not None]
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -1094,6 +1100,11 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             value = getattr(args, name, None)
             if value is not None:
                 flags += f" {flag} {value!r}"
+        delay = getattr(args, "rl_test_inject_start_delay_s", None)
+        if delay is not None:
+            from .rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
+
+            prelude += f"export {INJECT_START_DELAY_ENV}={float(delay)!r}\n"
         if getattr(args, "rl_elastic_attestation_json", None):
             prelude += (
                 "printf '%s' "

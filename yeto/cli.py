@@ -252,6 +252,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "pause budget input (default: syncer default 900)")
     rl.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None, metavar="S",
                     help="--rl-elastic: measured network idle-flow timeout capping the pause")
+    rl.add_argument("--rl-test-inject-start-delay-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (GPU acceptance fault injection): sleep S "
+                    "seconds before the island's first fork start_cells; off by default")
     rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                     help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
                     "X6 cross-quorum runs only)")
