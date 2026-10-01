@@ -9,8 +9,8 @@ R=$1; P=$2; ATT=${3:-}; B=${BDIR:-/home/michael/work/gpu-b1-runs}; NSTOP=${NSTOP
 CL=$(cat $R/cluster.txt); DL=${STARTUP_DEADLINE_S:-1800}; t0=$(date +%s)
 mark() { echo "{\"reason\":\"$2\",\"ts\":\"$(date -u +%FT%TZ)\"}" > $R/$1; echo "$1: $2" >> $R/selfcheck.txt; }
 until grep -q '"phase":"generate"' $R/pulled/rl-island-0.jsonl 2>/dev/null; do
-  if [ -f $R/rc.txt ]; then mark startup_failed "launch_ended_before_first_generate ($(cat $R/rc.txt))"; $NSTOP $P >> $R/selfcheck.txt 2>&1; exit 1; fi
-  if [ $(( $(date +%s) - t0 )) -ge $DL ]; then mark startup_failed "no_generate_within_${DL}s"; $NSTOP $P >> $R/selfcheck.txt 2>&1; exit 1; fi
+  if [ -f $R/rc.txt ]; then mark startup_failed "launch_ended_before_first_generate ($(cat $R/rc.txt))"; $NSTOP $P >> $R/selfcheck.txt 2>&1; echo $? > $R/cleanup_rc.txt; exit 1; fi
+  if [ $(( $(date +%s) - t0 )) -ge $DL ]; then mark startup_failed "no_generate_within_${DL}s"; $NSTOP $P >> $R/selfcheck.txt 2>&1; echo $? > $R/cleanup_rc.txt; exit 1; fi
   sleep ${SC_POLL_S:-10}
 done
 sleep ${SC_SETTLE_S:-20}
@@ -32,5 +32,5 @@ grep -q '"router"' $R/selfcheck.txt || bad="$bad router_sampler_unusable"
 grep -q '"inflight"' $R/selfcheck.txt || bad="$bad router_no_inflight"
 if grep -q '"probe_attested": false' $R/selfcheck_probe.txt; then bad="$bad probe_not_attested(wrong_ray)"
 elif ! grep -q '"probe_attested": true' $R/selfcheck_probe.txt; then echo 'probe_failed=1 (non-fatal; retried live by the after-hook)' >> $R/selfcheck.txt; fi
-if [ -n "$bad" ]; then mark startup_failed "selfcheck_tool:$bad"; $NSTOP $P >> $R/selfcheck.txt 2>&1; exit 1; fi
+if [ -n "$bad" ]; then mark startup_failed "selfcheck_tool:$bad"; $NSTOP $P >> $R/selfcheck.txt 2>&1; echo $? > $R/cleanup_rc.txt; exit 1; fi
 echo "selfcheck ok=1 $(date -u +%FT%TZ)" >> $R/selfcheck.txt

@@ -744,3 +744,10 @@
   - **watchdog 重跑**：只改实验参数，deadline 120 s → 240 s（Nebius 上 start_cells ≈143 s，+~100 s margin；阻塞注入在 update_weights 前，需先让 start 完成）：`a4go.sh a4wd-<日期>-N 4 1500 1980 cfg/attestation-s4.json '[["train",1,"wd-up",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":240}]]' '<after_term.sh {R} {P} 1 60>' --rl-test-inject-update-weights-block-s 600`；判据 plan-3.8-4.4-v2 §4 第 1–5 条 + §6（`analyze_wd.py`）不变；事务 deadline 改为 240 s 要在 gpu-plan-v2 §9.21 运行前提交（watchdog 触发应在 start 完成之后、REBUILT_OLD ≤60 s，预估 $7，最坏 $13.2）。
   - **E1-D** 按 §9.20 原计划（D123 合并 5 轮 35 min；D4 4 轮；D5 4 轮；D6 3 轮；D7 5 轮；硬超时、注入器 `dkill.py`/`dctl.py`、期望终态均见 §9.20），代码换 446da8a；每项先看 selfcheck，失败即停；全批累计 >$90 停下汇报（上限 $120）。
   - 之后 E1-C/A4b（`--rl-elastic-drain-timeout-s 5`）；全部结束后再做 id 对比与 `openspec validate --strict`。本次 CPU 准备已合入 integ-s3/integ-decl。
+
+
+## 2026-10-01 A4/A4b 4 卡 L40S 批（会话 4）：冒烟开通失败，停下
+- 代码 b19b781 已合入 gpu-b1（普通 merge）；§9.22 代码 SHA 改为 b19b781，`a4go4.sh` 的 e1b/a4b 改为传 `--rl-test-hold-before-check-s 10` / `--rl-test-inject-tool-wait-s 30`（提交 39294c1，已推送）。
+- 冒烟 infra-v2-b1-a4sm-20261001-1：Nebius eu-north1 4×L40S 实例创建后 ~5.5 min 一直 STOPPED/Reconciling，未到 RUNNING，sky 判开通失败。T_start 未测得，UP_DEADLINE_S 未填；E1-A/E1-B/watchdog/E1-D/A4b 均"未运行"。费用 ≤$0.92 / $45。证据与 cleanup 详情：evidence/infra-v2-b1/a4-4card/RESULT.md。
+- 发现并修复 cleanup 并发互杀缺陷（selfcheck 与最终守卫同时调 cleanup_run）：flock + selfcheck 写 cleanup_rc.txt，未真机验证。
+- 待用户/主 agent 决定：同平台稍后重试 / 确认 L40S 配额容量 / 其他平台。历史（8×H100 批）失败事实不变。

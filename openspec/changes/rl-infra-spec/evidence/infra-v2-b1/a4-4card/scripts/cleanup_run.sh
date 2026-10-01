@@ -104,6 +104,8 @@ phase3() {  # two checks CHECK_GAP_S apart; sets BAD=1 on any residue/unverified
   done
 }
 
+# serialize concurrent callers (selfcheck and the final guard may both call nstop): a second caller waits, then re-verifies
+exec 9>"$RUNS_BASE/.cleanup-$P.lock"; flock 9
 BAD=0
 phase1 || BAD=1
 phase2
