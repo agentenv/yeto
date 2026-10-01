@@ -799,63 +799,11 @@ def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
 
 
 def _preflight_codex_openenv_adapter(args, profile_name: str) -> None:
-    """Attest the isolated OpenEnv wrapper inside the pinned Miles source."""
+    """Attest the in-tree OpenEnv adapter (forwarded to harness.codex.preflight)."""
 
-    from . import CODEX_OPENENV_AGENT_MODULES, CODEX_OPENENV_IDENTITY_ENV
+    from yeto.rl.harness.codex.preflight import forward_legacy_openenv_preflight
 
-    if profile_name != "qwen35_08b":
-        raise ValueError(
-            "the Codex OpenEnv adapter requires backend profile qwen35_08b"
-        )
-    adapter_dir = (
-        Path(args.miles_root).expanduser().resolve()
-        / "examples"
-        / "experimental"
-        / "openenv"
-    )
-    for name in CODEX_OPENENV_AGENT_MODULES:
-        source = adapter_dir / name
-        if source.is_symlink() or not source.is_file():
-            raise ValueError("the Codex OpenEnv adapter source is incomplete")
-    adapter_root = str(adapter_dir)
-    if adapter_root not in sys.path:
-        sys.path.insert(0, adapter_root)
-    try:
-        openenv_adapter = importlib.import_module("codex_openenv_agent_function")
-        subprocess_adapter = importlib.import_module(
-            "codex_openenv_subprocess_agent_function"
-        )
-        openenv_identity = openenv_adapter.codex_openenv_harness_identity()
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
-        raise ValueError("cannot attest the Codex OpenEnv adapter") from exc
-    for module in (openenv_adapter, subprocess_adapter):
-        module_file = getattr(module, "__file__", None)
-        if not isinstance(module_file, str):
-            raise ValueError("the Codex OpenEnv adapter has no source identity")
-        source = Path(module_file)
-        if source.is_symlink() or source.resolve().parent != adapter_dir:
-            raise ValueError("the Codex OpenEnv adapter resolved outside pinned Miles")
-    if not callable(getattr(subprocess_adapter, "run", None)):
-        raise ValueError("the Codex OpenEnv subprocess entrypoint is missing")
-    if openenv_adapter._OPENENV_IDENTITY_ENV != CODEX_OPENENV_IDENTITY_ENV:
-        raise ValueError("the Codex OpenEnv launch identity drifted")
-    expected_openenv_identity = {
-        name.removeprefix("YETO_CODEX_OPENENV_").lower(): value
-        for name, value in CODEX_OPENENV_IDENTITY_ENV.items()
-        if name.endswith("_SHA256")
-    }
-    if openenv_identity != expected_openenv_identity:
-        raise ValueError("the Codex OpenEnv surface identity drifted")
-    openenv_env_mismatched = [
-        name
-        for name, expected in CODEX_OPENENV_IDENTITY_ENV.items()
-        if os.getenv(name) != expected
-    ]
-    if openenv_env_mismatched:
-        raise ValueError(
-            "Codex OpenEnv container environment drifted: "
-            + ", ".join(openenv_env_mismatched)
-        )
+    forward_legacy_openenv_preflight(args, profile_name)
 
 
 def _preflight_codex_harness(args) -> None:
