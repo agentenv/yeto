@@ -279,13 +279,30 @@ def judge_wd(journal, tape, known, gpu_samples=None, probe_after=None, gpu_relea
     if t_old is None:
         res["checks"]["old_member_pids_unchanged"] = False; res["checks"]["target_gpus_released"] = False
         return _finish(res, term)
+    # Observation window: [REBUILT_OLD, REBUILT_OLD + gpu_release_s], cut short only by an ORDERLY end of the run
+    # (every old-member process disappears in the same sample and stays gone = the learner finished its rounds).
+    # A window shorter than 10 s is no observation; any old pid vanishing while others stay is a changed old set.
+    old_set = {(u, p) for u, p in pre if u in old_gpus}
+    t_eval, t_end = t_old + gpu_release_s, None
+    tail = [s for s in gpu_samples if s.get("t", 0) >= t_old]
+    for s in tail:
+        now = {(a[0], a[1]) for a in (s.get("apps") or []) if len(a) >= 2 and a[0] in old_gpus}
+        if not now and old_set:
+            t_end = s["t"]; break
+    if t_end is not None and t_end < t_eval:
+        before_end = [s for s in tail if s["t"] < t_end]
+        t_eval = before_end[-1]["t"] if before_end else t_old
+        res["gpus"]["run_ended_at"] = round(t_end - t_old, 1)
     last = max(s.get("t", 0) for s in gpu_samples)
-    if last < t_old + gpu_release_s:
-        return _invalid(res, "gpu samples end %.0fs after REBUILT_OLD (< %.0fs): release not observed" % (last - t_old, gpu_release_s), "evidence_missing")
-    after = _apps_at(gpu_samples, t_old + gpu_release_s, before=True)
-    res["checks"]["old_member_pids_unchanged"] = {(u, p) for u, p in pre if u in old_gpus} == {(u, p) for u, p in after if u in old_gpus}
-    res["checks"]["target_gpus_released"] = not {u for u, _ in after if u in target_gpus}
-    res["gpus"]["after_pids"] = sorted(after)
+    if min(last, t_eval) < t_old + 10:
+        return _invalid(res, "gpu samples cover only %.0fs after REBUILT_OLD (< 10 s): release not observed" % (min(last, t_eval) - t_old), "evidence_missing")
+    after = _apps_at(gpu_samples, t_eval, before=True)
+    res["checks"]["old_member_pids_unchanged"] = old_set == {(u, p) for u, p in after if u in old_gpus}
+    # released at the evaluation point AND never busy again until the samples end (a target process that
+    # outlives the learner is still not released)
+    later_busy = {a[0] for s in gpu_samples if s.get("t", 0) >= t_eval for a in (s.get("apps") or []) if len(a) >= 2 and a[0] in target_gpus}
+    res["checks"]["target_gpus_released"] = not later_busy
+    res["gpus"]["after_pids"] = sorted(after); res["gpus"]["evaluated_at"] = round(t_eval - t_old, 1)
     # (5) the fork did not restart the killed cells (status probe after the terminal state)
     if probe_after is None:
         return _invalid(res, "fork status probe after the terminal state missing: (5) not observed", "evidence_missing")

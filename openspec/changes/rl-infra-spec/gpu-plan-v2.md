@@ -543,3 +543,4 @@
   - d123 / d4：E1-D ①②③ / ④，判据原文；dkill 日志为命中证据。
   - e1a：E1-A 回归（基线不重跑：基线在 b19b781 已通过，代码差异只在成员发布路径）；判读 e1a_c（§9.23 口径）+ `lora_readback_never_blind`。
 - 停止规则：任一项出现 lora_unverifiable → 链停（chain8 规则）；其他 FAIL 不阻断后续独立项；n2run 启动失败/线程超限 → 停。清理：chain 结束 cleanup_run.sh（进程→sky down→Nebius 正确 project 两次复查）；台账 `infra-drafts/gpu-spend.md`。
+- **运行中修正（09:40Z，判据不变）**：wd/e1b 的 4 轮运行在终态后约 50 s 即正常结束，终态后的 fork 探针（wd (5)、E1-B (b)(c)(d)）在等待 90/30 s 后连不上已关闭的 Ray → 这两项判 INVALID(evidence_missing)，(1)–(4) / (a) 等已为 true 的检查项保留为原始证据。修正：探针钩子等待改为 0 s；wd/e1b/a4b/a4bu 改为 6 轮（`cfg/attestation-8-6.json` = sha256:172652ea…，本机按同一路径重算）；a4b 已按 4 轮启动不受影响。wd、e1b 需用修正后的设置补跑一次（链尾或第二条链，预算门控不变）。

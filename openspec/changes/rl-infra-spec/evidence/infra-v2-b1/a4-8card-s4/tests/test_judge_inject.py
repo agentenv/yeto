@@ -145,7 +145,14 @@ class WD(unittest.TestCase):
 
     def test_gpu_evidence(self):
         r = self.wd(gpu=wd_gpu(release_after=False)); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["target_gpus_released"])
-        r = self.wd(gpu=[g for g in wd_gpu() if g["t"] <= 1050.0]); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing"))   # <60 s after REBUILT_OLD
+        r = self.wd(gpu=[g for g in wd_gpu() if g["t"] <= 1025.0]); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing"))   # <10 s after REBUILT_OLD
+        # orderly run end 30 s after REBUILT_OLD (all old pids vanish together): evaluated just before the end, target GPUs empty -> PASS
+        g = [x for x in wd_gpu() if x["t"] <= 1030.0] + [gs(t, []) for t in (1050.0, 1080.0, 1100.0)]
+        r = self.wd(gpu=g); self.assertEqual(r["verdict"], "PASS", r); self.assertEqual(r["gpus"]["run_ended_at"], 30.0)
+        g = [x for x in wd_gpu() if x["t"] <= 1030.0] + [gs(t, [(6, 300)]) for t in (1050.0, 1080.0, 1100.0)]   # ended but a target process survived
+        r = self.wd(gpu=g); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["target_gpus_released"])
+        g = [x for x in wd_gpu() if x["t"] <= 1030.0] + [gs(t, [(0, 100), (1, 101), (2, 102), (3, 103), (4, 200)]) for t in (1050.0, 1080.0, 1100.0)]   # one old member died, others stayed
+        r = self.wd(gpu=g); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["old_member_pids_unchanged"])
         r = self.wd(gpu=None if False else []); self.assertEqual(r["verdict"], "INVALID_TEST")
         g = wd_gpu(); g[-2] = gs(1080.0, [(0, 100), (1, 999), (2, 102), (3, 103), (4, 200), (5, 201)])   # an old member restarted (new pid) by +60 s
         r = self.wd(gpu=g); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["old_member_pids_unchanged"])

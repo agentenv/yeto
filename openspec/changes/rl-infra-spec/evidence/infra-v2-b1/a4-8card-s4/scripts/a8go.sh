@@ -13,13 +13,13 @@ case $C in
   smoke) STEPS=3; ATTN=3; TRIG="[$(UPB 0 up1 900),$(DNB 1 dn1 900)]";;
   base)  STEPS=12; ATTN=12; TRIG="[]";;
   e1a)   STEPS=12; ATTN=12; TRIG="[$(UPB 1 up1 600),$(UPB 4 up1 600),$(DNB 6 dn1 600)]"; JUDGE="e1a_c --expect-members 2,2,4,4,4,4,4,2,2,2,2,2";;   # old 8-card scheme: up@train rid1 (round 3), same-id repeat @rid4, down@rid6 (round 8)
-  e1b)   EX="--rl-test-inject-lora-perturb 0.01 --rl-test-hold-before-check-s ${HOLD_S:-10}"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="e1b"; HOOK="1 30 e1b";;
+  e1b)   EX="--rl-test-inject-lora-perturb 0.01 --rl-test-hold-before-check-s ${HOLD_S:-10}"; TRIG="[$(UPB 1 up1 600)]"; STEPS=${STEPS_E1B:-6}; ATTN=$STEPS; JUDGE="e1b"; HOOK="1 0 e1b";;
   wd)    [ -n "${UP_DEADLINE_S:-}" ] || { echo "wd needs UP_DEADLINE_S (>=1.5x measured start_cells + margin, written in gpu-plan 9.22 before the run)"; exit 5; }
-         EX="--rl-test-inject-update-weights-block-s 600"; TRIG="[$(UPB 1 up1 $UP)]"; JUDGE="wd"; HOOK="1 90";;
-  a4b)   EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30"; ATTN=4
-         TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4b"; HOOK="2 60";;
-  a4bu)  EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30 --rl-test-inject-undrain-fail 1"; ATTN=4
-         TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4bu"; HOOK="2 30";;
+         EX="--rl-test-inject-update-weights-block-s 600"; TRIG="[$(UPB 1 up1 $UP)]"; STEPS=${STEPS_WD:-6}; ATTN=$STEPS; JUDGE="wd"; HOOK="1 0";;   # 4-round run ends ~90 s after REBUILT_OLD: probe early; GPU release is judged from the sampler
+  a4b)   EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30"; STEPS=6; ATTN=6
+         TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4b"; HOOK="2 0";;
+  a4bu)  EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30 --rl-test-inject-undrain-fail 1"; STEPS=6; ATTN=6
+         TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4bu"; HOOK="2 0";;
   d123)  STEPS=5; ATTN=5; EX="--rl-test-inject-stop-failures 1"
          # standby cells on G6/G7 (c2/c3): kill target GPU 6. up1 ep0->1, dn1 ep1->2, up2 at ep2 (killed -> REBUILT_OLD, stays 2), up3 at ep2
          TRIG="[$(UPB 0 up1 600),$(DNB 1 dn1 600),$(req train 2 up2 T4R4S0 2 600),$(req train 3 up3 T4R4S0 2 600)]"
