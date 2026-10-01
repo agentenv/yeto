@@ -1,6 +1,6 @@
 #!/bin/bash
 # usage: a8go.sh <case> <prefix> <hard_s> <wd_s>        8x H100 on Nebius eu-north1, T4R2S2 <-> T4R4S0 (trainer G0-3, rollout c0,c1 on G4,G5, standby G6/G7 = c2/c3)
-# cases: smoke | base | e1a | e1b | wd | a4b | a4bu | d123 | d4 | d5 | d6 | d7      (DRY=1: print the launch args + triggers, start nothing)
+# cases: smoke | base | e1a | e1b | wd | a4b | a4bu | d123 | d2 | d4 | d5 | d6 | d7      (DRY=1: print the launch args + triggers, start nothing)
 # After-hooks (probe_after_term.sh, chain-safe): e1b -> status/stale/oldepoch probes; wd/a4b/a4bu/d123/d4 -> status probe + gpu samples >=90 s after the terminal state.
 # Starts n2run (launch, --no-island-relaunch --modal-retries 0) + n2inwatch (triggers + router sampler) + selfcheck (+GPU assert 4xL40S, markers) + case helpers + final guard (nstop -> cleanup_run.sh, judge).
 # Required env for some cases:  UP_DEADLINE_S (wd: measured, see gpu-plan 9.22 step 2) | (e1b/a4b pass --rl-test-hold-before-check-s ${HOLD_S:-10} / --rl-test-inject-tool-wait-s 30 directly)
@@ -24,7 +24,10 @@ case $C in
          # standby cells on G6/G7 (c2/c3): kill target GPU 6. up1 ep0->1, dn1 ep1->2, up2 at ep2 (killed -> REBUILT_OLD, stays 2), up3 at ep2
          TRIG="[$(UPB 0 up1 600),$(DNB 1 dn1 600),$(req train 2 up2 T4R4S0 2 600),$(req train 3 up3 T4R4S0 2 600)]"
          ARMS+=("dkill.py|[{\"name\":\"d1\",\"tx\":\"up2\",\"when\":{\"kind\":\"fork_op\",\"op\":\"start\",\"status\":\"issued\"},\"gpu\":6,\"mode\":\"when_proc_appears\",\"min_age_s\":10},{\"name\":\"d2\",\"tx\":\"up3\",\"when\":{\"kind\":\"phase\",\"phase\":\"VERIFYING\"},\"gpu\":6,\"mode\":\"immediate\"}]"); JUDGE="d123"; HOOK="4 30";;
-  d4)    EX="--rl-test-inject-stop-failures 100000 --rl-elastic-recovery-timeout-s 120"; TRIG="[$(UPB 0 up1 600),$(DNB 1 dn1 600)]"; JUDGE="d4"; HOOK="2 30";;
+  d2)    EX=""; TRIG="[$(UPB 0 up1 600)]"; JUDGE="d2"; HOOK="1 0"   # E1-D 2 alone: kill the new engine on GPU6 the moment up1 journals VERIFYING -> REBUILT_OLD
+         ARMS+=("dkill.py|[{\"name\":\"d2\",\"tx\":\"up1\",\"when\":{\"kind\":\"phase\",\"phase\":\"VERIFYING\"},\"gpu\":6,\"mode\":\"immediate\"}]");;
+  d4)    [ "${SHA}" = a65c650 ] && { echo "d4 refused on a65c650: --rl-test-inject-stop-failures does not reach the fork actor there (d123 chain 2: 'function' object has no attribute 'stop_cells'); needs the fixed SHA"; exit 65; }
+         EX="--rl-test-inject-stop-failures 100000 --rl-elastic-recovery-timeout-s 120"; TRIG="[$(UPB 0 up1 600),$(DNB 1 dn1 600)]"; JUDGE="d4"; HOOK="2 30";;
   d5)    EX="--rl-elastic-restart-attempts 1 --rl-test-kill-learner-at COMMITTED"; TRIG="[$(UPB 0 up1 600),$(DNB 1 dn1 600)]"; ARMS+=("dctl.py|marker|up1");;
   d6)    STEPS=3; ATTN=3; EX="--rl-elastic-restart-attempts 1 --rl-test-kill-learner-at QUIESCING"; TRIG="[$(UPB 0 up1 600)]";;
   d7)    STEPS=5; ATTN=5; EX="--rl-elastic-restart-attempts 1"; TRIG="[]"; ARMS+=("dctl.py|kill_then_up|up1|{\"target\":\"T4R4S0\",\"expected_config_epoch\":0,\"deadline_s\":600}");;

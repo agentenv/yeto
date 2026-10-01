@@ -235,6 +235,14 @@ class D(unittest.TestCase):
         r = J.judge_d123(j[:4] + [tx("INITIALIZING", "up3")], [], set(), k)   # up3 submitted, run ended before its terminal
         self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing")); self.assertTrue(r["checks"]["up2_REBUILT_OLD"])
 
+    def test_d2(self):
+        j = [tx("VERIFYING", "up1", wall_time=100.0), tx("REBUILT_OLD", "up1", wall_time=130.0)]
+        k = [{"event": "kill", "rule": "d2", "gpu": 6, "res": {"300": "killed"}, "wall": 100.5}]
+        self.assertEqual(J.judge_d2(j, [], set(), k)["verdict"], "PASS")
+        self.assertEqual(J.judge_d2(j, [], set(), [])["verdict"], "INVALID_TEST")
+        self.assertEqual(J.judge_d2([tx("VERIFYING", "up1", wall_time=100.0), tx("SUCCEEDED", "up1")], [], set(), k)["verdict"], "FAIL")
+        self.assertEqual(J.judge_d2([tx("VERIFYING", "up1", wall_time=100.0)], [], set(), k)["verdict"], "INVALID_TEST")
+
     def test_d4(self):
         j = [tx("SUCCEEDED", "up1"), {"kind": "fork_op", "op": "stop", "status": "incomplete", "tx_id": "dn1"}, tx("RECOVERY_REQUIRED", "dn1", wall_time=50.0)]
         t = [{"event": "rl_reconfiguration", "result": "RECOVERY_REQUIRED"}]

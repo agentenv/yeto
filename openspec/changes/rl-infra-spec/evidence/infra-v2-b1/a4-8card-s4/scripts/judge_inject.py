@@ -411,6 +411,22 @@ def judge_d123(journal, tape, known, dkill_log=None):
     return _finish(res, term)
 
 
+def judge_d2(journal, tape, known, dkill_log=None):
+    """E1-D 2 alone: the new engine is killed while up1 is VERIFYING (publish_members) -> REBUILT_OLD, old members kept."""
+    res = {"case": "d2", "checks": {}, "invalid_reasons": []}
+    kills = [k for k in (dkill_log or []) if k.get("event") == "kill" and k.get("rule") == "d2" and any(v == "killed" for v in (k.get("res") or {}).values())]
+    res["dkill"] = kills
+    if not kills:
+        return _invalid(res, "dkill log shows no d2 kill: 2 not injected", "evidence_missing")
+    t_ver = next((r.get("wall_time") for r in phases(journal) if r.get("request_id") == "up1" and r.get("phase") == "VERIFYING"), None)
+    res["checks"]["killed_during_verifying"] = t_ver is not None and any(k.get("wall", 0) >= t_ver - 1 for k in kills)
+    term = _tx_terminal(journal, "up1")
+    if not term:
+        return _invalid(res, "up1 never reached a terminal phase (run ended first): not observed", "evidence_missing")
+    res["checks"]["up1_REBUILT_OLD"] = term == ["REBUILT_OLD"]
+    return _finish(res, term)
+
+
 def judge_d4(journal, tape, known):
     """E1-D ④: stop keeps failing past T_recovery -> RECOVERY_REQUIRED, driver ends, no data consumed after."""
     res = {"case": "d4", "checks": {}, "invalid_reasons": []}
@@ -494,6 +510,7 @@ def main(argv):
     elif a.case == "a4b": res = judge_a4b(journal, tape, known, "cancel", probes["after"], samples)
     elif a.case == "a4bu": res = judge_a4b(journal, tape, known, "recovery")
     elif a.case == "d123": res = judge_d123(journal, tape, known, jl(a.dkill_log))
+    elif a.case == "d2": res = judge_d2(journal, tape, known, jl(a.dkill_log))
     elif a.case == "d4": res = judge_d4(journal, tape, known)
     elif a.case == "e1a_c": res = judge_e1a_c(journal, tape, [int(x) for x in a.expect_members.split(",")])
     else: raise SystemExit("unknown case " + a.case)
