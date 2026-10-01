@@ -7,7 +7,7 @@ mkdir -p $T/bin $T/b; cp $B/chain8.sh $T/b/; cp $B/scan_run.py $T/b/ 2>/dev/null
 cat > $T/bin/a8go <<'S'
 #!/bin/bash
 # stub a8go: args case prefix hard wd; env RUN_ROOT; records, then (async) finishes the item
-echo "$1 $2 $3 $4 KEEP=$KEEP SHARED=$SHARED CP=$CLUSTER_PREFIX RUN_ROOT=$RUN_ROOT" >> $STUBLOG/a8go.log
+echo "$1 $2 $3 $4 SHA=${SHA:-none} KEEP=$KEEP SHARED=$SHARED CP=$CLUSTER_PREFIX RUN_ROOT=$RUN_ROOT" >> $STUBLOG/a8go.log
 R=$RUN_ROOT/$2; mkdir -p $R
 [ -f $STUBDIR/n2abort_$1 ] && { echo "abort: 3008 user threads" > $R.n2run.out; exit 0; }
 [ -f $STUBDIR/a8go_fail_$1 ] && { echo boom; exit 5; }
@@ -39,9 +39,11 @@ run() { # name expected_rc spent items...   (env from caller)
 SETUP="" THREADS=2000 run normal 0 20 wd:60 a4b:60 d4:60
 [ "$(cut -d' ' -f1 $T/log/a8go.log | tr '\n' ' ')" = "wd a4b d4 " ] && ok "normal: item order" || bad "normal order: $(cat $T/log/a8go.log)"
 [ "$(grep -c . $T/log/reset.log)" = 2 ] && ok "normal: reset before every reused item (2), not before the cold start" || bad "normal: reset calls $(grep -c . $T/log/reset.log)"
-grep -q 'KEEP=1 SHARED=1 CP=infra-v2-test-chain-normal' $T/log/a8go.log && ok "normal: chain env passed" || bad "normal: env"
+grep -q 'SHA=none KEEP=1 SHARED=1 CP=infra-v2-test-chain-normal' $T/log/a8go.log && ok "normal: chain env passed" || bad "normal: env"
 grep -q 'infra-v2-test-chain-normal-wd ' $T/log/a8go.log && ok "normal: item prefix = <CP>-<case>" || bad "item prefix"
 [ -f $T/b/infra-v2-test-chain-normal/chain_rc.txt ] && ok "normal: chain_rc written" || bad "chain_rc"
+SETUP="" run shaitem 0 1 wd:60:aaa111 a4b:60 d4:60:bbb222
+[ "$(grep -c "SHA=aaa111" $T/log/a8go.log)" = 1 ] && [ "$(grep -c "SHA=bbb222" $T/log/a8go.log)" = 1 ] && [ "$(grep -c "SHA=none" $T/log/a8go.log)" = 1 ] && ok "per-item SHA passed only to the items that name one" || bad "item sha: $(cat $T/log/a8go.log)"
 SETUP="" run budget 0 99.9 wd:600 a4b:600
 [ ! -s $T/log/a8go.log ] && ok "budget: nothing started when spent+worst > cap" || bad "budget started"
 grep -c not_run_budget $T/b/infra-v2-test-chain-budget/items.jsonl | grep -q 2 && ok "budget: both items marked not_run_budget" || bad "budget marks"

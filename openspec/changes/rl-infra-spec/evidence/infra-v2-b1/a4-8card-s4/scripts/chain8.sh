@@ -1,5 +1,5 @@
 #!/bin/bash
-# usage: chain8.sh <chain prefix CP> <spent_before_usd> <case:hard_s> [<case:hard_s> ...]      (gpu-plan-v2 9.23: several A4 items on ONE kept 8xH100 sky cluster)
+# usage: chain8.sh <chain prefix CP> <spent_before_usd> <case:hard_s[:sha]> [<case:hard_s[:sha]> ...]      (gpu-plan-v2 9.23: several A4 items on ONE kept 8xH100 sky cluster)
 # env: CAP_USD (100)  PRICE_PER_MIN (0.5133)  UP_DEADLINE_S (240; wd)  + test hooks: A8GO RESET SKY CLEANUP NSTOP_ITEM THREAD_CMD POLL_S CHAIN_WD_S
 # Flow: first item cold-starts the cluster (a8go.sh with CLUSTER_PREFIX=CP KEEP=1 SHARED=1); every later item: gate -> cancel leftover job -> reset_island.sh (must verify a fresh island) -> a8go.sh.
 # Gate before each item:  spent_before + cost of the chain so far (wall since the chain started x price) + this item's worst case (hard_s x price)  <=  CAP_USD, else the item and the rest are "not run (budget)".
@@ -17,14 +17,15 @@ finish() {
   echo "$FINAL_RC" > $CHAIN/chain_rc.txt
 }
 trap 'log "signal"; finish; exit 130' INT TERM; trap 'finish' EXIT
-sumhard=0; for it in "${ITEMS[@]}"; do sumhard=$((sumhard + ${it#*:})); done
+sumhard=0; for it in "${ITEMS[@]}"; do h=${it#*:}; h=${h%%:*}; sumhard=$((sumhard + h)); done
 WD_S=${CHAIN_WD_S:-$((sumhard + 1500))}
 setsid nohup bash -c "sleep $WD_S; HOME=/home/michael $SKY down -y $CL > $CHAIN/chain_watchdog.out 2>&1; touch $CHAIN/CHAIN_WD_FIRED" > /dev/null 2>&1 & WDPID=$!
 log "chain $CP start spent_before=\$$SPENT cap=\$$CAP items=${ITEMS[*]} chain watchdog ${WD_S}s"
 cost_now() { python3 -c "import sys;print(round($SPENT + ($(date +%s) - $T0)/60*$PPM, 2))"; }
 first=1
 for it in "${ITEMS[@]}"; do
-  case=${it%%:*}; hard=${it#*:}; P=$CP-$case; R=$CHAIN/items/$P
+  case=${it%%:*}; rest=${it#*:}; hard=${rest%%:*}; isha=""; [ "$rest" != "$hard" ] && isha=${rest#*:}   # optional 3rd field = code SHA for this item (same image digest only: each item syncs its own `git archive <sha>` workdir)
+  P=$CP-$case; R=$CHAIN/items/$P
   worst=$(python3 -c "print(round($hard/60*$PPM,2))"); now=$(cost_now)
   if ! python3 -c "import sys;sys.exit(0 if $now + $worst <= $CAP else 1)"; then log "$case: NOT RUN (budget): spent_so_far=\$$now worst=\$$worst cap=\$$CAP"; echo "{\"item\":\"$case\",\"status\":\"not_run_budget\",\"spent_so_far\":$now,\"worst\":$worst}" >> $CHAIN/items.jsonl; continue; fi
   if [ $first = 1 ]; then
@@ -38,7 +39,7 @@ for it in "${ITEMS[@]}"; do
   fi
   log "$case: start (hard ${hard}s, worst \$$worst, spent_so_far \$$now)"
   rm -f $R/item_done
-  RUN_ROOT=$CHAIN/items CLUSTER_PREFIX=$CP KEEP=1 SHARED=1 NSTOP=$NSTOP_ITEM CHAIN_DIR=$CHAIN UP_DEADLINE_S=${UP_DEADLINE_S:-240} $A8GO $case $P $hard $((hard + 120)) > $CHAIN/start-$case.out 2>&1
+  env ${isha:+SHA=$isha} RUN_ROOT=$CHAIN/items CLUSTER_PREFIX=$CP KEEP=1 SHARED=1 NSTOP=$NSTOP_ITEM CHAIN_DIR=$CHAIN UP_DEADLINE_S=${UP_DEADLINE_S:-240} $A8GO $case $P $hard $((hard + 120)) > $CHAIN/start-$case.out 2>&1
   src=$?; if [ $src != 0 ]; then log "$case: a8go failed to start (rc=$src): $(tail -2 $CHAIN/start-$case.out | tr '\n' ' ')"; FINAL_RC=8; break; fi
   tw=$(date +%s)
   until [ -f $R/item_done ] || [ -f $CHAIN/ABORT ] || [ -f $CHAIN/CHAIN_WD_FIRED ] || grep -qs '^abort:' $R.n2run.out || [ $(( $(date +%s) - tw )) -gt $((hard + ${ITEM_GRACE_S:-900})) ]; do sleep $POLL_S; done
