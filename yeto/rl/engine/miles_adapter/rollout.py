@@ -123,6 +123,28 @@ def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | No
     return read_cursor(getattr(executor, "data_source", None))
 
 
+def arm_stop_failure_in_controller(controller: Any) -> str:
+    """Runs INSIDE the fork InferenceController actor (``__ray_call__``), test only
+    (E1-D ③④): the engine provider's next ``stop_cells`` raises once, so the fork
+    takes its real half-failure path (membership ``incomplete``, reason
+    ``stop_failed``). Returns the provider class name as the arming receipt."""
+    provider = getattr(controller, "_engine_provider", None)
+    if provider is None:
+        raise RuntimeError("stop failure injection: the fork controller has no _engine_provider")
+    real = provider.stop_cells
+
+    async def failing_stop(*args: Any, **kwargs: Any) -> Any:
+        provider.stop_cells = real  # one shot
+        import sys
+
+        print("[yeto] TEST INJECTION YETO_RL_TEST_INJECT_STOP_FAILURES: provider stop_cells fails "
+              "(inside the fork controller actor)", file=sys.stderr, flush=True)
+        raise RuntimeError("injected provider stop failure (test)")
+
+    provider.stop_cells = failing_stop
+    return type(provider).__name__
+
+
 def _is_ray_handle(obj: Any) -> bool:
     return type(obj).__name__ == "ActorHandle"
 
@@ -827,9 +849,31 @@ class MilesRolloutPool:
 
     def _arm_stop_failure(self) -> None:
         """TEST ONLY: make the fork's engine provider fail this stop once (the fork
-        then marks the membership ``incomplete``, its real half-failure path)."""
+        then marks the membership ``incomplete``, its real half-failure path).
+
+        The real controller is a Ray actor (behind Miles' ``RayWorkerHandle``): the
+        provider only exists inside it, so the arming runs there via ``__ray_call__``
+        (GPU d123, chain 2: reading ``_engine_provider`` through the handle returned a
+        remote-call function and the stop failed with AttributeError instead of the
+        fork's incomplete path). In-process controllers (tests) are patched directly."""
+        kind, target = _executor_target(self._controller)
+        import sys
+
+        if kind == "ray":
+            remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
+            if not callable(remote):
+                raise MembershipPlanError("stop failure injection: the fork controller handle has no __ray_call__")
+            receipt = self._run(_awaited(remote(arm_stop_failure_in_controller)))
+            self._stop_failures_left -= 1
+            self.injected_stop_failures += 1
+            print(f"[yeto] TEST INJECTION {INJECT_STOP_FAILURES_ENV}: armed inside the fork controller "
+                  f"actor (provider {receipt}); its next stop_cells fails once", file=sys.stderr, flush=True)
+            if self.event_sink is not None:
+                self.event_sink("test_injection", kind="stop_failure", applied=True, where="fork_actor",
+                                provider=str(receipt), remaining=self._stop_failures_left)
+            return
         provider = getattr(self._controller, "_engine_provider", None)
-        if provider is None:
+        if provider is None or not hasattr(provider, "stop_cells"):
             raise MembershipPlanError("stop failure injection: the fork has no engine provider")
         real = provider.stop_cells
         pool = self
