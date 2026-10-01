@@ -47,6 +47,10 @@ for it in "${ITEMS[@]}"; do
   if [ -f $CHAIN/ABORT ]; then log "$case: ABORT: $(cat $CHAIN/ABORT)"; FINAL_RC=6; break; fi
   if [ -f $CHAIN/CHAIN_WD_FIRED ]; then log "$case: chain watchdog fired"; FINAL_RC=7; break; fi
   python3 $B/scan_run.py $R > $R/scan.out 2>&1
+  # new-image first-use rule (gpu-plan 9.23): a LoRA admission refused as lora_unverifiable (read-back carries no adapter keys) => stop at once, do not run later items
+  lu=""; for f in $R/pulled/rl-island-0.final.jsonl $R/launch.log; do grep -qs 'lora_unverifiable' $f && lu="$lu $f"; done
+  rm -rf $R/.jx; mkdir -p $R/.jx; b=$R/pulled/elastic-state-final.b64; [ -s $b ] && base64 -d $b 2>/dev/null | tar xz -C $R/.jx 2>/dev/null; grep -qs 'lora_unverifiable' $R/.jx/elastic-state/reconfig/journal.jsonl && lu="$lu journal"
+  if [ -n "$lu" ]; then log "$case: LORA_UNVERIFIABLE seen in:$lu -> chain stops and releases the cluster (report; do not continue)"; echo "{\"item\":\"$case\",\"status\":\"lora_unverifiable\"}" >> $CHAIN/items.jsonl; FINAL_RC=11; break; fi
   echo "{\"item\":\"$case\",\"status\":\"ran\",\"rc\":\"$(cat $R/rc.txt 2>/dev/null)\",\"spent_so_far\":$(cost_now)}" >> $CHAIN/items.jsonl
   log "$case: done $(cat $R/rc.txt 2>/dev/null) spent_so_far=\$$(cost_now)"
   first=0

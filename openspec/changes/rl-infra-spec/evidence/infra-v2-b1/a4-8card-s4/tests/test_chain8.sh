@@ -11,7 +11,7 @@ echo "$1 $2 $3 $4 KEEP=$KEEP SHARED=$SHARED CP=$CLUSTER_PREFIX RUN_ROOT=$RUN_ROO
 R=$RUN_ROOT/$2; mkdir -p $R
 [ -f $STUBDIR/n2abort_$1 ] && { echo "abort: 3008 user threads" > $R.n2run.out; exit 0; }
 [ -f $STUBDIR/a8go_fail_$1 ] && { echo boom; exit 5; }
-( sleep 1; [ -f $STUBDIR/abort_$1 ] && echo '{"reason":"startup_failed"}' > $CHAIN_DIR/ABORT || { echo rc=0 > $R/rc.txt; touch $R/item_done; } ) &
+( sleep 1; [ -f $STUBDIR/lu_$1 ] && { mkdir -p $R/pulled; echo '{"cause":"lora_unverifiable"}' > $R/pulled/rl-island-0.final.jsonl; }; [ -f $STUBDIR/abort_$1 ] && echo '{"reason":"startup_failed"}' > $CHAIN_DIR/ABORT || { echo rc=0 > $R/rc.txt; touch $R/item_done; } ) &
 exit 0
 S
 cat > $T/bin/reset <<'S'
@@ -53,5 +53,7 @@ THREADS=3100 SETUP="" run threads_cold 3 0 wd:60
 [ ! -s $T/log/a8go.log ] && ok "threads: no cold start at >=3000" || bad "threads cold start"
 SETUP="a8go_fail_a4b" run a8gofail 8 0 wd:60 a4b:60
 SETUP="n2abort_a4b" run n2abort 10 0 wd:60 a4b:60
+SETUP="lu_e1b" run lora_unv 11 0 wd:60 e1b:60 a4b:60
+[ "$(cut -d' ' -f1 $T/log/a8go.log | tr '\n' ' ')" = "wd e1b " ] && ok "lora_unverifiable: no item after e1b" || bad "lora_unv order: $(cat $T/log/a8go.log)"
 CLEANUP_RC=2 SETUP="" run cleanup_rc2 2 0 wd:60
 [ "$fail" = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; exit 1; }

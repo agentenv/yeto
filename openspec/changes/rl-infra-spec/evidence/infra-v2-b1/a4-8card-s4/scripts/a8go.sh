@@ -4,7 +4,7 @@
 # Starts n2run (launch, --no-island-relaunch --modal-retries 0) + n2inwatch (triggers + router sampler) + selfcheck (+GPU assert 4xL40S, markers) + case helpers + final guard (nstop -> cleanup_run.sh, judge).
 # Required env for some cases:  UP_DEADLINE_S (wd: measured, see gpu-plan 9.22 step 2) | (e1b/a4b pass --rl-test-hold-before-check-s ${HOLD_S:-10} / --rl-test-inject-tool-wait-s 30 directly)
 # Request time: a request submitted at "train" of rollout k executes before generate k+1 (= before round k+2).
-C=$1; P=$2; HARD=$3; WD=$4; SHA=${SHA:-b19b781}; B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P
+C=$1; P=$2; HARD=$3; WD=$4; SHA=${SHA:-6f6dcb9}; B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P
 UP=${UP_DEADLINE_S:-600}; EX=""; STEPS=4; ATTN=4; JUDGE=""; ARMS=()
 req() { printf '["%s",%s,"%s",{"target":"%s","expected_config_epoch":%s,"deadline_s":%s}]' "$1" "$2" "$3" "$4" "$5" "$6"; }   # phase rid id target epoch deadline
 UPB() { req train $1 $2 T4R4S0 0 ${3:-$UP}; }; DNB() { req train $1 $2 T4R2S2 1 ${3:-600}; }
