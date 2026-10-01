@@ -253,9 +253,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "stays S seconds after end_update_weights and before check_weights/"
                     "admit_cells (observation window); needs another --rl-test-* injection")
     rl.add_argument("--rl-test-inject-tool-wait-s", type=float, default=None, metavar="S",
-                    help="--rl-elastic, TEST ONLY (A4b): the first drain counts an artificial "
-                    "tool wait for S seconds (drain timeout -> CANCELLED -> undrain); needs "
+                    help="--rl-elastic, TEST ONLY (A4b): every drain executes an artificial tool "
+                    "that waits S seconds (drain timeout -> CANCELLED -> undrain); a drain "
+                    "while it still waits is journaled, not re-armed; needs "
                     "--rl-elastic-tool-wait-board")
+    rl.add_argument("--rl-test-tool-side-effect-log", action="store_true", default=False,
+                    help="--rl-elastic, TEST ONLY (A4bc / 3.3 X5): journal every execution of "
+                    "the injected tool (--rl-test-inject-tool-wait-s) in <elastic state dir>/"
+                    "side_effects.jsonl, one tool_side_effect record per (trajectory, tool call) "
+                    "before the wait starts; the judge proves a drain-timeout cancel never "
+                    "replays a tool call")
     rl.add_argument("--rl-test-inject-undrain-fail", type=int, default=None, metavar="N",
                     help="--rl-elastic, TEST ONLY (A4b / E1-C): the next N undrain calls fail "
                     "inside the adapter, so a drain timeout cannot restore the old routing "

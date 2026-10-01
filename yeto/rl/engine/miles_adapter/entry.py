@@ -383,6 +383,17 @@ def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
     return None
 
 
+def side_effect_log_kwargs(elastic: Any) -> dict[str, Any]:
+    """3.3 X5 evidence switch (YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG, launcher
+    --rl-test-tool-side-effect-log): the pool journals every execution of the
+    injected tool in ``<elastic state dir>/side_effects.jsonl``."""
+    from .rollout import SIDE_EFFECT_LOG_FILE, side_effect_log_enabled
+
+    if elastic is None or not side_effect_log_enabled():
+        return {}
+    return {"side_effect_log": Path(elastic.controller.state_dir) / SIDE_EFFECT_LOG_FILE}
+
+
 def harness_source(miles_args: Any, elastic: Any = None) -> Any:
     """IR-2: where the drain probe / load sample read harness counts from.
 
@@ -583,7 +594,8 @@ def compose_island(
                 {"declared_cells": resolve_declared_cells(
                     inference_controller, runner, elastic.declared_cells),
                  "track_timeout_s": elastic.track_timeout_s,
-                 "tool_wait_board": elastic.tool_wait_board}
+                 "tool_wait_board": elastic.tool_wait_board,
+                 **side_effect_log_kwargs(elastic)}
                 if elastic is not None
                 else {}
             ),

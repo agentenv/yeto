@@ -22,12 +22,20 @@ Pieces:
   (``allow_new_session``) the drain closes first. ``drain_blockers`` takes the
   harness snapshot as a third input; ``None`` is unknown and fails closed.
 
-Pure except :func:`board_actor` (lazy ``ray`` import).
+* :class:`ToolSideEffectLog` (3.3 X5 "no replay" evidence) - append-only
+  jsonl of every tool execution (one ``tool_side_effect`` record per
+  (trajectory, tool call) *before* the tool wait starts, one ``tool_complete``
+  after). A drain timeout that cancels a transaction must not produce a
+  second ``tool_side_effect`` for a pair already recorded.
+
+Pure except :func:`board_actor` (lazy ``ray`` import) and the side-effect log file.
 """
 
 from __future__ import annotations
 
 import inspect
+import json
+import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -95,6 +103,93 @@ class ToolWaitBoard:
             )
 
 
+SIDE_EFFECT_KIND = "tool_side_effect"
+TOOL_COMPLETE_KIND = "tool_complete"
+
+
+class ToolSideEffectLog:
+    """Append-only journal of external tool side effects (3.3 X5 evidence).
+
+    ``record(trajectory_id, tool_call_id)`` appends one line ``{"kind":
+    "tool_side_effect", "seq": n, "trajectory_id", "tool_call_id",
+    "wall_time", "monotonic", ...}`` *before* the tool runs; ``complete``
+    appends the matching ``tool_complete`` line. ``seq`` is monotonic across
+    process restarts (continues from the lines already in the file). Writes
+    are line-atomic (single ``write`` + flush + fsync under a lock), so a
+    reader never sees a torn record. Thread-safe.
+    """
+
+    def __init__(self, path: str | os.PathLike[str], clock: Callable[[], float] = time.time,
+                 monotonic: Callable[[], float] = time.monotonic) -> None:
+        self.path = os.path.expanduser(os.fspath(path))
+        self._clock, self._mono = clock, monotonic
+        self._lock = threading.Lock()
+        self._seq = 0
+        for rec in read_side_effects(self.path):
+            self._seq = max(self._seq, int(rec.get("seq") or 0))
+
+    @property
+    def seq(self) -> int:
+        return self._seq
+
+    def _append(self, kind: str, trajectory_id: str, tool_call_id: str, extra: Mapping[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._seq += 1
+            rec = {"kind": kind, "seq": self._seq, "trajectory_id": str(trajectory_id),
+                   "tool_call_id": str(tool_call_id), "wall_time": float(self._clock()),
+                   "monotonic": float(self._mono()), "pid": os.getpid(), **dict(extra)}
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            line = json.dumps(rec, sort_keys=True, default=str) + "\n"
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:  # pragma: no cover - fsync unsupported
+                    pass
+            return rec
+
+    def record(self, trajectory_id: str, tool_call_id: str, **extra: Any) -> dict[str, Any]:
+        """The tool is about to execute (its external side effect happens now)."""
+        return self._append(SIDE_EFFECT_KIND, trajectory_id, tool_call_id, extra)
+
+    def complete(self, trajectory_id: str, tool_call_id: str, **extra: Any) -> dict[str, Any]:
+        """The tool returned (its wait ended) - informational, never a second side effect."""
+        return self._append(TOOL_COMPLETE_KIND, trajectory_id, tool_call_id, extra)
+
+    def records(self) -> list[dict[str, Any]]:
+        return read_side_effects(self.path)
+
+
+def read_side_effects(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
+    """Every parsable record of a side-effect log (missing file = empty)."""
+    p = os.path.expanduser(os.fspath(path))
+    if not os.path.exists(p):
+        return []
+    out: list[dict[str, Any]] = []
+    with open(p, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except ValueError:  # torn trailing line: ignore
+                continue
+    return out
+
+
+def side_effect_duplicates(records: Iterable[Mapping[str, Any]]) -> list[tuple[str, str]]:
+    """(trajectory_id, tool_call_id) pairs with more than one ``tool_side_effect`` record."""
+    seen: dict[tuple[str, str], int] = {}
+    for r in records:
+        if r.get("kind") != SIDE_EFFECT_KIND:
+            continue
+        key = (str(r.get("trajectory_id")), str(r.get("tool_call_id")))
+        seen[key] = seen.get(key, 0) + 1
+    return sorted(k for k, n in seen.items() if n > 1)
+
+
 def _call(target: Any, method: str, *args: Any) -> Any:
     """``board.method(*args)`` for a local board, ``handle.method.remote(*args)`` for an actor."""
     fn = getattr(target, method)
@@ -111,17 +206,29 @@ def _resolve(value: Any) -> Any:
 
 
 @contextmanager
-def tool_wait_scope(board: Any, trajectory_id: str):
-    """Sync scope: the trajectory counts as tool-waiting inside the ``with`` body."""
+def tool_wait_scope(board: Any, trajectory_id: str, side_effects: ToolSideEffectLog | None = None,
+                    tool_call_id: str | None = None):
+    """Sync scope: the trajectory counts as tool-waiting inside the ``with`` body.
+
+    With ``side_effects`` the tool execution is journaled (``tool_side_effect``
+    before the board entry, ``tool_complete`` after the exit).
+    """
+    call_id = tool_call_id if tool_call_id is not None else trajectory_id
+    if side_effects is not None:
+        side_effects.record(trajectory_id, call_id)
     _resolve(_call(board, "enter", trajectory_id))
     try:
         yield
     finally:
         _resolve(_call(board, "exit", trajectory_id))
+        if side_effects is not None:
+            side_effects.complete(trajectory_id, call_id)
 
 
 @asynccontextmanager
-async def async_tool_wait_scope(board: Any, trajectory_id: str):
+async def async_tool_wait_scope(board: Any, trajectory_id: str,
+                                side_effects: ToolSideEffectLog | None = None,
+                                tool_call_id: str | None = None):
     """Async scope for generate functions running on an event loop."""
 
     async def call(method: str) -> None:
@@ -129,11 +236,16 @@ async def async_tool_wait_scope(board: Any, trajectory_id: str):
         if inspect.isawaitable(value):  # ray ObjectRef is awaitable
             await value
 
+    call_id = tool_call_id if tool_call_id is not None else trajectory_id
+    if side_effects is not None:
+        side_effects.record(trajectory_id, call_id)
     await call("enter")
     try:
         yield
     finally:
         await call("exit")
+        if side_effects is not None:
+            side_effects.complete(trajectory_id, call_id)
 
 
 def read_tool_wait(board: Any) -> ToolWaitSnapshot:
