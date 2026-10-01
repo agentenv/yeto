@@ -40,8 +40,9 @@ MILES_NEXT_COMMIT = "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841"
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
 SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
-# yeto/ports: the ported agentenv/sglang patches (see sglang-patch-port.md).
-SGLANG_NEXT_COMMIT = "9f29303bef1eea38eb613e5f454a52db1326422d"
+# yeto/lora-checksum (a1240c530 = 9f29303 + WeightChecker checksum covers LoRA adapter A/B);
+# yeto/ports 9f29303: the ported agentenv/sglang patches (see sglang-patch-port.md).
+SGLANG_NEXT_COMMIT = "a1240c530d406b5d0f252511f8e0a9a93b6a079d"
 MILES_LEGACY_PINS = MilesRevisionPins(MILES_REPOSITORY, MILES_COMMIT)
 MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
 # radixark/miles:dev multi-arch index (upstream docker/Dockerfile at
@@ -58,10 +59,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PRIVATE (ghcr.io/michaellchung): launches pass registry
 # credentials via SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} (ports only; use
 # a read:packages-only token).
-# Tag e3a11ab-9f29303; linux/amd64 only.
+# Tag e3a11ab-a1240c5; linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff"
+    "12fcd9e583d63287d6814dfc87158364a0e370a22795462d19962a2857e53069"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Where MILES_NEXT_IMAGE installed the SGLang fork (editable).
