@@ -1,0 +1,2 @@
+68 failed, 3234 passed, 51 skipped, 30 warnings, 26 errors in 93.27s (0:01:33)
+unique FAILED+ERROR ids: 94 == /tmp/integ-s2-base.ids col 2; new 0; gone 0

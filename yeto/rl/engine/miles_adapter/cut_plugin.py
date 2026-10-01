@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from .state_plugin import (
@@ -45,6 +46,8 @@ _MODULE = "yeto.rl.engine.miles_adapter.cut_plugin"
 SAVE_CUT_SHARD = f"{_MODULE}.save_cut_shard"
 RESTORE_CUT_SHARD = f"{_MODULE}.restore_cut_shard"
 SHARD_SCHEMA = "yeto.cut_shard/v1"
+# Opt-in: read the optimizer back right after the load and report where a mismatch arises.
+RESTORE_DIAGNOSTICS_ENV = "YETO_RL_CUT_RESTORE_DIAGNOSTICS"
 
 
 class CutPluginError(StatePluginError):
@@ -86,7 +89,10 @@ class MilesCutBackend:
         return dp_invariant_state
 
     def export_optimizer(self, optimizer: Any, named: list) -> Any:
-        return self._dps().export_named_optimizer_state(optimizer, named)
+        if _UNSAFE_STATE_READS[0]:  # diagnostic only: verify the fork fix without the yeto guard
+            return self._dps().export_named_optimizer_state(optimizer, named)
+        with side_effect_free_state(optimizer):
+            return self._dps().export_named_optimizer_state(optimizer, named)
 
     def check_optimizer(self, optimizer: Any, named: list, states: list) -> Any:
         """Merge the DP shards of one (tp, pp) (DistOpt ranges) and validate against ``optimizer``."""
@@ -121,6 +127,59 @@ class MilesCutBackend:
         margs = get_args()
         for key, value in counters.items():
             setattr(margs, key, int(value))
+
+
+def _state_dicts(optimizer: Any) -> list[Any]:
+    """The per-parameter ``state`` mappings under an optimizer (ChainedOptimizer members,
+    Megatron wrappers' inner torch optimizer)."""
+    out, seen = [], set()
+    stack = [optimizer]
+    while stack:
+        obj = stack.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        stack.extend(getattr(obj, "chained_optimizers", None) or ())
+        stack.append(getattr(obj, "optimizer", None))
+        state = getattr(obj, "state", None)
+        if isinstance(state, Mapping):
+            out.append(state)
+    return out
+
+
+@contextmanager
+def side_effect_free_state(optimizer: Any):
+    """Reading optimizer state must not create state entries.
+
+    Megatron's ``_get_main_param_and_optimizer_states`` indexes the torch
+    optimizer's ``state`` defaultdict, which creates an empty entry per main
+    param on a freshly built optimizer; fork-M5's loader then sees a non-empty
+    state, skips ``_init_optimizer_states_with_dummy_values`` and its setter
+    copies only keys that exist -> exp_avg/exp_avg_sq silently not restored
+    (GPU C1 diagnostic 2, 2026-09-30). Entries created during the read that are
+    still empty are removed afterwards.
+    """
+    before = [(state, set(state.keys())) for state in _state_dicts(optimizer)]
+    try:
+        yield
+    finally:
+        for state, keys in before:
+            for key in [k for k in state.keys() if k not in keys and not state[k]]:
+                del state[key]
+
+
+# Per rank process; False = default (side-effect-free reads). Only the E2 diagnostic
+# sub-run turns it on (plugin below), to check the fork-M5 fix on a real DistOpt.
+_UNSAFE_STATE_READS = [False]
+SET_UNSAFE_STATE_READS = "yeto.rl.engine.miles_adapter.cut_plugin.set_unsafe_state_reads"
+
+
+def set_unsafe_state_reads(actor: Any, *, enabled: bool) -> dict[str, Any]:
+    """Diagnostic switch (E2 plan-v6 C1 sub-run): read optimizer state WITHOUT the
+    side-effect-free guard in this rank process."""
+    del actor
+    _UNSAFE_STATE_READS[0] = bool(enabled)
+    return {"unsafe_state_reads": _UNSAFE_STATE_READS[0]}
 
 
 def _backend(actor: Any) -> Any:
@@ -265,12 +324,142 @@ def _sha256(path: str) -> str:
     return sha256_file(path)
 
 
+def component_digests(value: Any, *, depth: int = 5, prefix: str = "") -> dict[str, str]:
+    """Digest per nested component (mapping keys up to ``depth``) -- names what differs
+    when an overall state digest does not match (GPU C1 attempt 4)."""
+    if depth <= 0 or not isinstance(value, Mapping):
+        return {prefix or ".": state_digest(value)}
+    out: dict[str, str] = {}
+    for key in sorted(value, key=repr):
+        out.update(component_digests(value[key], depth=depth - 1, prefix=f"{prefix}/{key}"))
+    return out
+
+
+def state_diff(saved: Any, now: Any, *, path: str = "", out: list | None = None, limit: int = 400) -> list:
+    """Leaf-level differences between two snapshots: (path, kind, detail) -- dtype/shape
+    or max |a-b| for tensors, repr for others. Used when a restore does not reproduce the cut."""
+    import torch
+
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(saved, Mapping) and isinstance(now, Mapping):
+        for key in sorted(set(saved) | set(now), key=repr):
+            if key not in saved or key not in now:
+                out.append((f"{path}/{key}", "missing", "saved" if key not in saved else "restored"))
+                continue
+            state_diff(saved[key], now[key], path=f"{path}/{key}", out=out, limit=limit)
+        return out
+    if isinstance(saved, torch.Tensor) and isinstance(now, torch.Tensor):
+        a, b = saved.detach().cpu(), now.detach().cpu()
+        if a.dtype != b.dtype or a.shape != b.shape:
+            out.append((path, "meta", f"{a.dtype}{tuple(a.shape)} vs {b.dtype}{tuple(b.shape)}"))
+        elif not torch.equal(a, b):
+            d = (a.double() - b.double()).abs()
+            out.append((path, "value", f"max={d.max().item():.3e} n={int((d > 0).sum())}/{d.numel()}"))
+        return out
+    if isinstance(saved, (list, tuple)) and isinstance(now, (list, tuple)) and len(saved) == len(now):
+        for i, (a, b) in enumerate(zip(saved, now)):
+            state_diff(a, b, path=f"{path}[{i}]", out=out, limit=limit)
+        return out
+    if state_digest(saved) != state_digest(now):
+        out.append((path, "other", f"{saved!r:.80} vs {now!r:.80}"))
+    return out
+
+
+def _entry_tensors(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Tensors of one optimizer entry: top-level ones and one level of groups (fork-M5
+    ``tensors``/``scalars``; other formats' ``state``), ``hyper`` excluded."""
+    import torch
+
+    out = {}
+    for key, value in entry.items():
+        if isinstance(value, torch.Tensor):
+            out[key] = value
+        elif isinstance(value, Mapping) and key != "hyper":
+            out.update({f"{key}:{k}": v for k, v in value.items() if isinstance(v, torch.Tensor)})
+    return out
+
+
+def optimizer_diff(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Per optimizer-state key (param / exp_avg / exp_avg_sq / scalars / hyper) between two
+    name-keyed optimizer states (fork-M5 format): entries that differ, max |a-b|, max
+    relative diff, dtype pairs, and range/shape mismatches (DistOpt [start, end))."""
+    import torch
+
+    out: dict[str, Any] = {"entries": 0, "keys": {}, "ranges": 0, "missing": []}
+    ea = (a or {}).get("entries", {})
+    eb = (b or {}).get("entries", {})
+    out["missing"] = sorted(set(ea) ^ set(eb))[:10]
+    for name in sorted(set(ea) & set(eb)):
+        x, y = ea[name], eb[name]
+        out["entries"] += 1
+        if any(x.get(k) != y.get(k) for k in ("start", "end", "numel")) or tuple(x.get("shape", ())) != tuple(
+                y.get("shape", ())):
+            out["ranges"] += 1
+        fx, fy = _entry_tensors(x), _entry_tensors(y)
+        for key in sorted(set(fx) | set(fy)):
+            stat = out["keys"].setdefault(key, {"differ": 0, "max_abs": 0.0, "max_rel": 0.0,
+                                                "dtypes": set()})
+            u, v = fx.get(key), fy.get(key)
+            if u is None or v is None:
+                stat["differ"] += 1
+                stat["dtypes"].add("missing")
+                continue
+            u, v = u.detach().cpu(), v.detach().cpu()
+            stat["dtypes"].add(f"{u.dtype}->{v.dtype}")
+            if u.shape != v.shape:
+                stat["differ"] += 1
+                continue
+            if not torch.equal(u, v):
+                stat["differ"] += 1
+                d = (u.double() - v.double()).abs()
+                stat["max_abs"] = max(stat["max_abs"], float(d.max()))
+                denom = u.double().abs().clamp_min(1e-30)
+                stat["max_rel"] = max(stat["max_rel"], float((d / denom).max()))
+        if x.get("hyper") != y.get("hyper"):
+            out["keys"].setdefault("hyper", {"differ": 0})["differ"] += 1
+    for stat in out["keys"].values():
+        if "dtypes" in stat:
+            stat["dtypes"] = sorted(stat["dtypes"])
+    return out
+
+
+def miles_counters(actor: Any) -> dict[str, int]:
+    """Miles trainer-process counters a rebuilt trainer must continue from.
+
+    ``weight_updater.weight_version``: every ``update_weights`` increments it and
+    the rollout executor refuses a version that goes backwards, so a rebuilt
+    trainer starting at 0 fails its first re-publication ("Engine weight version
+    went backwards: 4 -> 1"; GPU C1 plan-v6, 2026-09-30). Absent attribute -> {}.
+    """
+    updater = getattr(actor, "weight_updater", None)
+    version = getattr(updater, "weight_version", None)
+    return {} if version is None else {"weight_version": int(version)}
+
+
+def set_miles_counters(actor: Any, counters: Mapping[str, int]) -> None:
+    if "weight_version" in counters:
+        updater = getattr(actor, "weight_updater", None)
+        if updater is None:
+            raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
+        updater.weight_version = int(counters["weight_version"])
+
+
+def train_state_digest(snap: Mapping[str, Any]) -> str:
+    """Digest of the training state WITHOUT the publication counter (``miles_counters``):
+    a re-publication legitimately advances ``weight_version`` without touching the
+    trainable state (E2 harness pre-step comparisons)."""
+    return state_digest({k: v for k, v in snap.items() if k != "miles_counters"})
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
         "optimizer_named": backend.export_optimizer(actor.optimizer, named),
         "scheduler": actor.opt_param_scheduler.state_dict(),
         "megatron_counters": backend.megatron_counters(),
+        "miles_counters": miles_counters(actor),
     }
 
 
@@ -283,10 +472,23 @@ def shard_name(coord: Mapping[str, int]) -> str:
     return f"trainer_tp{coord['tp']}_pp{coord['pp']}_dp{coord['dp']}.pt"
 
 
+REFUSED = "refused"  # key of a "nothing written" result (reason text)
+REFUSAL_KIND = "refusal_kind"  # "refused" (deliberate) | "failed_before_write"
+
+
 def save_cut_shard(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
-    """Write this rank's shard (tmp + fsync + rename) and return its summary."""
-    with trainer_resident(actor):
-        return _save(actor, directory=directory, cut_id=cut_id)
+    """Write this rank's shard (tmp + fsync + rename) and return its summary.
+
+    A refusal (unsupported configuration, not at a step boundary, ...) is
+    RETURNED as ``{"refused": reason}`` instead of raised: Miles marks a cell
+    errored on any ``run_plugin`` exception (GPU run 2026-09-30, C1), which
+    would turn a clean "no cut" into a dead trainer.
+    """
+    try:
+        with trainer_resident(actor):
+            return _save(actor, directory=directory, cut_id=cut_id)
+    except CutPluginError as error:
+        return {REFUSED: str(error), REFUSAL_KIND: "refused"}
 
 
 def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
@@ -307,7 +509,20 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
     if os.path.exists(final):
         raise CutPluginError(f"cut shard {final} already exists (cuts are immutable)")
     tmp = final + ".tmp"
+    from . import cut_injection
+
+    kill = cut_injection.is_rank(coord, cut_injection.save_kill_rank())
     with open(tmp, "wb") as fh:
+        if kill:  # test-only (G-4.5): die with a half-written temp file
+            import io
+
+            buffer = io.BytesIO()
+            torch.save(to_safe(shard), buffer)
+            data = buffer.getvalue()
+            fh.write(data[: len(data) // 2])
+            fh.flush()
+            os.fsync(fh.fileno())
+            cut_injection.kill_now(f"save_cut shard {name} half written")
         torch.save(to_safe(shard), fh)
         fh.flush()
         os.fsync(fh.fileno())
@@ -321,7 +536,10 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "has_optimizer_state": snap["optimizer_named"] is not None,
         "has_rng": rng is not None,
         "state_digest": state_digest(snap),
+        "train_state_digest": train_state_digest(snap),
+        "weight_version": (snap.get("miles_counters") or {}).get("weight_version"),
         "rng_digest": state_digest(rng),
+        "components": component_digests({"state": snap, "rng": rng}),
         "adapter_tensors": len(named),
         "adapter_names": sorted(n for n, _ in named),
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
@@ -390,11 +608,44 @@ RANK_COORDS = f"{_MODULE}.rank_coords"
 def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
     """Verify and load this rank's shard; return the post-restore summary (identical digests expected)."""
     install_grad_norm_recorder()  # a rebuilt trainer process has no recorder yet
-    with trainer_resident(actor):
-        return _restore(actor, directory=directory, files=files, cut_id=cut_id)
+    _inject_restore_sleep(actor)
+    progress = {"written": False}
+    try:
+        with trainer_resident(actor):
+            return _restore(actor, directory=directory, files=files, cut_id=cut_id, progress=progress)
+    except Exception as error:  # noqa: BLE001
+        if progress["written"]:
+            raise  # state partly written: the trainer is unusable (RECOVERY_REQUIRED)
+        # Nothing written: the trainer is untouched; return instead of raising so
+        # Miles does not mark the cell errored (see save_cut_shard). A deliberate
+        # refusal (CutPluginError) and any other failure before the first write
+        # are told apart by REFUSAL_KIND; the trainer side raises CutError for both.
+        kind = "refused" if isinstance(error, CutPluginError) else "failed_before_write"
+        return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: kind}
 
 
-def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
+def _inject_restore_sleep(actor: Any) -> None:
+    """Test-only (G-4.5): one rank sleeps before the restore."""
+    from . import cut_injection
+
+    target = cut_injection.restore_sleep()
+    if target is not None and cut_injection.is_rank(_backend(actor).coord(), target[0]):
+        import time
+
+        time.sleep(target[1])
+
+
+def _inject_restore_kill(coord: Mapping[str, int]) -> None:
+    """Test-only (G-4.5): die after the adapter write, before the optimizer."""
+    from . import cut_injection
+
+    if cut_injection.is_rank(coord, cut_injection.restore_kill_rank()):
+        cut_injection.kill_now("restore_cut after the adapter write")
+
+
+def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str,
+             progress: dict[str, bool] | None = None) -> dict[str, Any]:
+    progress = progress if progress is not None else {"written": False}
     import torch
 
     backend = _backend(actor)
@@ -428,14 +679,24 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     # Validate against the rebuilt optimizer and scheduler before any write.
     merged = backend.check_optimizer(actor.optimizer, named, states)
     check_scheduler(actor.opt_param_scheduler, shard["scheduler"])
+    if "weight_version" in (shard.get("miles_counters") or {}) and getattr(actor, "weight_updater", None) is None:
+        raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
+    progress["written"] = True
     with torch.no_grad():
         for n, p in named:
             p.data.copy_(adapter[n].to(device=p.device))
+        _inject_restore_kill(coord)
         backend.load_optimizer(actor.optimizer, named, merged)
+        # Opt-in diagnostics (a full optimizer export costs time and host memory on a
+        # large model): the state read right after the load, to split "the load wrote
+        # something else" from "changed afterwards" (GPU C1 diagnostic 2).
+        after_load = (backend.export_optimizer(actor.optimizer, named)
+                      if os.environ.get(RESTORE_DIAGNOSTICS_ENV) == "1" else None)
     actor.opt_param_scheduler.load_state_dict(shard["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
     backend.set_megatron_counters(shard.get("megatron_counters") or {})
+    set_miles_counters(actor, shard.get("miles_counters") or {})
     backuper = getattr(actor, "weights_backuper", None)
     if backuper is not None:  # colocated update_weights reads the CPU backup
         backuper.backup("actor")
@@ -452,7 +713,22 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng_now),
+        "components": component_digests({"state": snap, "rng": rng_now}),
     }
+    saved_snap = {k: shard.get(k) for k in snap}
+    if state_digest(saved_snap) != summary["state_digest"]:
+        # cut vs final re-export: free (both already in memory); the after-load split
+        # only with the opt-in diagnostics
+        summary["optimizer_cut_vs_reexport"] = optimizer_diff(shard.get("optimizer_named"), snap["optimizer_named"])
+        if after_load is not None:
+            summary["optimizer_cut_vs_after_load"] = optimizer_diff(shard.get("optimizer_named"), after_load)
+            summary["optimizer_after_load_vs_reexport"] = optimizer_diff(after_load, snap["optimizer_named"])
+        diffs = state_diff(saved_snap, snap)
+        kinds: dict[str, int] = {}
+        for p_, kind, _ in diffs:
+            leaf = p_.rsplit("/", 1)[-1]
+            kinds[f"{kind}:{leaf}"] = kinds.get(f"{kind}:{leaf}", 0) + 1
+        summary["diff"] = {"count": len(diffs), "by_leaf": kinds, "first": diffs[:30]}
     return summary
 
 
@@ -479,6 +755,11 @@ def _slice_check(export: Mapping[str, Any], merged: Mapping[str, Any]) -> list[s
             out.append(f"{name}: not in the cut")
             continue
         start, end = int(entry["start"]), int(entry["end"])
+        if set(entry["tensors"]) != set(full["tensors"]) or set(entry["scalars"]) != set(full["scalars"]):
+            # e.g. exp_avg/exp_avg_sq silently not restored (lazy optimizer state, GPU C1 diagnostic 2)
+            out.append(f"{name}: restored state keys {sorted(entry['tensors'])}+{sorted(entry['scalars'])} "
+                       f"!= cut {sorted(full['tensors'])}+{sorted(full['scalars'])}")
+            continue
         for key, piece in entry["tensors"].items():
             want = full["tensors"][key][start:end]
             if not torch.equal(piece.reshape(-1).to(want.dtype), want):
@@ -531,8 +812,8 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
             raise CutPluginError("cut shard lacks optimizer state or RNG")
     first = shards[0]
     for shard in shards[1:]:
-        for key in ("adapter", "scheduler", "megatron_counters"):
-            if state_digest(shard[key]) != state_digest(first[key]):
+        for key in ("adapter", "scheduler", "megatron_counters", "miles_counters"):
+            if state_digest(shard.get(key)) != state_digest(first.get(key)):
                 raise CutPluginError(f"DP shards disagree on the replicated {key}")
     dp_changes = int(coord["dp_size"]) != source_dp
     if dp_changes and rng_policy != "keep_on_dp_change":
@@ -553,6 +834,8 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
             raise CutPluginError(f"adapter {n!r} shape/dtype differs from the rebuilt trainer")
     merged = backend.check_optimizer(actor.optimizer, named, [s["optimizer_named"] for s in shards])
     check_scheduler(actor.opt_param_scheduler, first["scheduler"])
+    if "weight_version" in (first.get("miles_counters") or {}) and getattr(actor, "weight_updater", None) is None:
+        raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
     # ---- writes ----
     with torch.no_grad():
         for n, p in named:
@@ -562,6 +845,7 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(first["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
     backend.set_megatron_counters(first.get("megatron_counters") or {})
+    set_miles_counters(actor, first.get("miles_counters") or {})  # same counter on the resharded (E3) path
     backuper = getattr(actor, "weights_backuper", None)
     if backuper is not None:
         backuper.backup("actor")
@@ -596,3 +880,84 @@ TRAIN_PARALLEL_CONFIG = f"{_MODULE}.train_parallel_config"
 def train_parallel_config(actor: Any) -> dict[str, Any]:
     """The config the rank advertised to the rollout side (Megatron actor ``train_parallel_config``)."""
     return dict(getattr(actor, "train_parallel_config", None) or {})
+
+
+# --------------------------------------------------------------------------
+# E2 GPU harness read-outs (plan-v3): no writes, no randomness consumed.
+# --------------------------------------------------------------------------
+
+# plan-v3 §0 (= launcher --rl-deterministic-trainer, entry.DETERMINISM_ENV).
+DETERMINISM_ENV = {
+    "NCCL_ALGO": "Ring",
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    "NVIDIA_TF32_OVERRIDE": "0",
+}
+# Recorded, not required: Megatron --deterministic-mode applies its own default.
+DETERMINISM_INFO_ENV = ("NVTE_ALLOW_NONDETERMINISTIC_ALGO",)
+STATE_SUMMARY = f"{_MODULE}.state_summary"
+RANK_DETERMINISM = f"{_MODULE}.rank_determinism"
+
+
+def rank_determinism(actor: Any) -> dict[str, Any]:
+    """What this rank actually runs with (plan-v3 §0: all must hold, else environment-blocked)."""
+    env = {k: os.environ.get(k) for k in DETERMINISM_ENV}
+    return {
+        "info_env": {k: os.environ.get(k) for k in DETERMINISM_INFO_ENV},
+        "coord": _backend(actor).coord(),
+        "env": env,
+        "env_ok": env == DETERMINISM_ENV,
+        "deterministic_mode": bool(getattr(actor.args, "deterministic_mode", False)),
+        "lora_dropout": getattr(actor.args, "lora_dropout", None),
+    }
+
+
+def state_summary(actor: Any) -> dict[str, Any]:
+    """Digests of this rank's full trainer state for the bitwise arm comparison.
+
+    ``tensors``: sha256 per adapter tensor and per optimizer entry/state key
+    (diagnostics when the overall digest differs); ``moments_nonzero``: number
+    of optimizer entries whose ``exp_avg`` has a non-zero element;
+    ``bf16_master_mismatch``: adapter model copies that differ from their FP32
+    master cast to the model dtype over the owned range (plan-v3 §3 L2).
+    """
+    with trainer_resident(actor):
+        return _state_summary(actor)
+
+
+def _state_summary(actor: Any) -> dict[str, Any]:
+    import torch
+
+    backend = _backend(actor)
+    named = _adapters(actor, backend)
+    with torch.no_grad():
+        snap = _snapshot(actor, backend, named)
+    rng = backend.capture_rng()
+    tensors = {f"adapter/{n}": state_digest(t) for n, t in snap["adapter"].items()}
+    entries = (snap["optimizer_named"] or {}).get("entries", {})
+    moments_nonzero, mismatch = 0, []
+    by_name = dict(named)
+    for name, entry in sorted(entries.items()):
+        tensors[f"optimizer/{name}"] = state_digest(entry)
+        flat = entry.get("tensors") if "tensors" in entry else entry.get("state")
+        exp_avg = (flat or {}).get("exp_avg")
+        if exp_avg is not None and bool(torch.count_nonzero(exp_avg)):
+            moments_nonzero += 1
+        master = (flat or {}).get("param", entry.get("param"))
+        model = by_name.get(name)
+        if master is not None and model is not None and model.dtype != torch.float32:
+            start, end = int(entry.get("start", 0)), int(entry.get("end", model.numel()))
+            copy = model.detach().reshape(-1)[start:end].to("cpu")
+            if not torch.equal(copy, master.reshape(-1).to(model.dtype).to("cpu")):
+                mismatch.append(name)
+    return {
+        "coord": backend.coord(),
+        "state_digest": state_digest(snap),
+        "train_state_digest": train_state_digest(snap),
+        "weight_version": (snap.get("miles_counters") or {}).get("weight_version"),
+        "rng_digest": state_digest(rng),
+        "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
+        "tensors": tensors,
+        "optimizer_entries": len(entries),
+        "moments_nonzero": moments_nonzero,
+        "bf16_master_mismatch": mismatch,
+    }

@@ -426,7 +426,9 @@ def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
     assert elastic.controller.inspect().members == ("engine:c0",)
     driver.run()
     runner.close()
-    assert driver.rollout.data_cursor()["sample_offset"] == 4
+    # metadata cursor of the last batch (the stub executor has no live data source)
+    assert driver.rollout.last_batch_data_cursor()["sample_offset"] == 4
+    assert driver.rollout.data_cursor() is None  # live position unknown: never the cache
     kinds = [r["kind"] for r in read_journal(tmp_path / "state/ledger")]
     assert kinds.count("outer_recorded") == 2
     # no attestation: every transition is refused (fail closed)

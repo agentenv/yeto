@@ -87,6 +87,7 @@ from .overlap import EvalOverlap, EvalStarter, overlap_refusal
 from .ports import (
     Placement,
     PolicyState,
+    PublicationCause,
     Publisher,
     RolloutBatchHandle,
     RolloutPool,
@@ -157,6 +158,12 @@ class RebuildNotStarted(DriverError):
 
 class PublicationError(DriverError):
     """A publication was incomplete or did not match the requested policy."""
+
+    def __init__(self, message: str = "", *, cause: PublicationCause = PublicationCause.OTHER,
+                 engine_ids: Any = ()) -> None:
+        super().__init__(message)
+        self.cause = PublicationCause(cause)
+        self.engine_ids = tuple(sorted(str(e) for e in engine_ids))
 
 
 class PolicyIdentityError(DriverError):
@@ -943,6 +950,10 @@ class IslandDriver:
             submitted_groups=getattr(batch, "submitted_groups", None),
             aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
+            # rl-infra-spec 4.4/A6b: the rollout data cursor after this batch (only
+            # when the rollout reports it, i.e. --rl-elastic metadata; else absent)
+            **({"data_cursor": dict(batch.data_cursor)}
+               if getattr(batch, "data_cursor", None) else {}),
         )
         self.local_step += (
             int(self.profile.optimizer_steps_per_round) if self.profile is not None else 1
@@ -1055,9 +1066,14 @@ class IslandDriver:
                       error=str(error), config_epoch=self.config_epoch, **eval_due)
             raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
         if result is not None:
+            # the reason of a refusal (REBUILT_OLD: structured publication cause + the
+            # disagreeing engine ids) rides on the tape record
+            outcome = getattr(self.controller, "last_outcome", None) or {}
+            why = ({k: outcome[k] for k in ("error", "cause", "inconsistent_engines")
+                    if k in outcome} if outcome.get("phase") == result else {})
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result=result,
                       config_epoch_from=epoch_before, config_epoch=self.config_epoch,
-                      members=sorted(self.rollout.members()), **eval_due)
+                      members=sorted(self.rollout.members()), **why, **eval_due)
         return result
 
     # -- same-shape trainer rebuild (4.4) --------------------------------------
@@ -1093,6 +1109,22 @@ class IslandDriver:
                 f"restored trainer holds {restored}, the cut holds {cut_policy_hash}",
             )
         rollout_id = self.published_version
+        if self._rollout_colocated():
+            # Colocated: the engines share the GPUs and still hold exactly this
+            # policy (checked above: restored == cut == published), resident since
+            # the last publish. Publishing again would ask SGLang to resume weights
+            # that were never offloaded (KeyError 'weights', scheduler exit), so the
+            # engines are left as they are; only the trainer was rebuilt.
+            members = frozenset(self.rollout.members())
+            self.emit(
+                "rl_trainer_rebuilt",
+                policy_version=rollout_id,
+                republished=False,
+                republish_skipped="colocated: engines already hold the published policy",
+                **{"rl/policy_token": self.expected_token,
+                   "sync/publication_members": sorted(members)},
+            )
+            return result
         result_pub = self.publisher.publish(state)
         manifest = result_pub.manifest
         if (manifest.target_policy_version != rollout_id
@@ -1110,6 +1142,13 @@ class IslandDriver:
                "sync/publication_members": sorted(result_pub.members)},
         )
         return result
+
+    def _rollout_colocated(self) -> bool:
+        describe = getattr(self.placement, "describe", None)
+        kind = getattr(describe(), "kind", None) if callable(describe) else None
+        if kind is not None:
+            return kind == "colocated"
+        return self.execution_mode == "colocated-serial"
 
     def run(self) -> TrainableState:
         self.handshake()

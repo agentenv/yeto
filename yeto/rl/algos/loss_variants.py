@@ -75,7 +75,12 @@ FORK_FLAGS = frozenset({VARIANT_FLAG, *PARAM_FLAGS.values()})
 # Miles commits (full SHA) whose parser/loss implement --policy-loss-variant.
 # yeto/ports 5c1b49eb (fast-forward of 0af62f4d with the 2b loss variants);
 # image ghcr.io/michaellchung/yeto-miles-ports:5c1b49e-9f29303 (Agent IMG).
-FORK_COMMITS: frozenset[str] = frozenset({"5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"})
+FORK_COMMITS: frozenset[str] = frozenset({
+    "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
+    "2f23a0fca9b80f6a7300da401703c343014b03c0",  # 5c1b49eb + F-R1 (placement/worker files only)
+    "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",  # 2f23a0fc + M5 (LoRA dp_invariant_state.py only)
+    "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",  # fb04d6ff + M5 error text/docstring/tests
+})
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}
 

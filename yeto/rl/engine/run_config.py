@@ -149,6 +149,9 @@ class ParallelLayout:
     # rl-infra-spec 2.1: reserved standby GPUs of a fixed partition (never
     # started by any role); a non-zero value needs the fork-M1 placement map.
     standby_gpus: int = 0
+    # rl-infra-spec 3.x/4.7 (fork F-R1): yeto names of the rollout engine cells
+    # declared to the fork (placement map "rollout_cells"); () = fork default.
+    rollout_cell_names: tuple[str, ...] = ()
 
     @property
     def colocated(self) -> bool:
@@ -162,6 +165,9 @@ class TrainableConfig:
     lora_targets: str  # preset name, e.g. "attention"
     target_modules: tuple[str, ...]  # engine-resolved module names
     expert_full_count: int
+    # Training-time LoRA dropout (ports only; --rl-lora-dropout). The exported
+    # adapter / canonical LoRA config keep dropout 0 (inference is unaffected).
+    lora_dropout: float = 0.0
 
     @property
     def routed_expert_lora(self) -> bool:
@@ -366,6 +372,16 @@ class RLRunConfig:
     agent: AgentConfig
     yeto_policy_sync: bool
     distributed_timeout_minutes: int
+    # E2 plan-v2 §0 (A6/A6b/A8): Megatron --deterministic-mode; the matching
+    # NCCL/cuBLAS/TF32 environment is set by the learner (--rl-deterministic-trainer).
+    deterministic_trainer: bool = False
+    # rl-infra-spec 4.7 (E3): trainer DP-change edges enabled
+    # (--rl-elastic-trainer-edges); the first certified DP profile refuses
+    # --balance-data, so the translation drops it only then.
+    trainer_dp_edges: bool = False
+    # 3.x (--rl-elastic): the fork's cordon / drain / cordoned admission need the
+    # Miles router (fork server_cell._assert_cordonable, admit_cordoned).
+    use_miles_router: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -721,10 +737,12 @@ def resolve_rl_run_config(
             visible_gpus_per_node=visible_gpus_per_node,
             uneven_pipeline_layers=uneven_pipeline_layers,
             standby_gpus=standby_gpus,
+            rollout_cell_names=_rollout_cell_names(args, dedicated_rollout_gpus),
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
             lora_rank=args.lora_r,
+            lora_dropout=_lora_dropout(args, parameter_mode),
             lora_targets=args.lora_targets,
             target_modules=tuple(target_modules),
             expert_full_count=expert_full_count,
@@ -809,7 +827,35 @@ def resolve_rl_run_config(
         ),
         yeto_policy_sync=yeto_policy_sync,
         distributed_timeout_minutes=getattr(args, "rl_distributed_timeout_minutes", 10),
+        deterministic_trainer=bool(getattr(args, "rl_deterministic_trainer", False)),
+        use_miles_router=bool(getattr(args, "rl_elastic", False)),
+        trainer_dp_edges=bool(getattr(args, "rl_elastic", False)
+                              and getattr(args, "rl_elastic_trainer_edges", False)),
     )
+
+
+def _rollout_cell_names(args, dedicated_rollout_gpus) -> tuple[str, ...]:
+    if not getattr(args, "rl_elastic_declare_cells", False):
+        return ()
+    if dedicated_rollout_gpus is None:
+        raise ValueError("--rl-elastic-declare-cells needs --rl-placement fixed-partition")
+    names = tuple(c.strip() for c in (getattr(args, "rl_elastic_cells", None) or "").split(",")
+                  if c.strip())
+    if not names:
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the cell names)")
+    return names
+
+
+def _lora_dropout(args, parameter_mode: str) -> float:
+    value = getattr(args, "rl_lora_dropout", None)
+    if value is None:
+        return 0.0
+    value = float(value)
+    if not 0.0 <= value < 1.0:
+        raise ValueError("--rl-lora-dropout must be in [0, 1)")
+    if getattr(args, "rl_engine", "ports") != "ports" or parameter_mode != "lora":
+        raise ValueError("--rl-lora-dropout only applies to the ports LoRA engine")
+    return value
 
 
 def ports_training_eval(args, *, parameter_mode: str | None) -> bool:

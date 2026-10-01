@@ -21,6 +21,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -370,10 +371,32 @@ class MilesTrainerGroup:
     def layout(self) -> dict[str, int]:
         return trainer_layout(self._args)
 
+    @contextmanager
+    def retained_payloads(self):
+        """E2 harness (plan-v3 G-4.3): train the SAME frozen batch in two arms.
+
+        Inside the block ``train_step`` does not release the rollout refs; the
+        caller releases them once with :meth:`release_payload` afterwards.
+        """
+        release = self._release
+        self._release = lambda _args, _payload: None
+        try:
+            yield
+        finally:
+            self._release = release
+
+    def release_payload(self, batch: RolloutBatchHandle) -> None:
+        self._release(self._args, batch.payload)
+
     def rebind_args(self, args: Any) -> None:
         """Follow the Miles args of the rebuilt trainer (4.6/4.7: another DP size / bundle set)."""
-        trainer_layout(args)  # validates world % (tp*pp*cp)
+        layout = trainer_layout(args)  # validates world % (tp*pp*cp)
         self._args = args
+        plan = getattr(self, "_reshard_plan", None)
+        if plan is not None and layout != dict(plan.target):
+            # back on another layout (e.g. REBUILD_OLD / restore_source): the DP-change batch guard
+            # of the abandoned target no longer applies (review L-1); restore_cut_resharded sets it again.
+            self._reshard_plan = None
 
     def save_cut(self, *, epoch: int, context: "CutContext") -> str:
         """Write every rank's shard, then commit the manifest; returns the cut id.
@@ -401,6 +424,9 @@ class MilesTrainerGroup:
                 self._actor.run_plugin(SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": cut_id})
             )
         ]
+        refused = [f"[{s.get('refusal_kind', 'refused')}] {s['refused']}" for s in summaries if "refused" in s]
+        if refused:
+            raise CutError("rank refused the cut: " + "; ".join(sorted(set(refused))))
         expected = trainer_workers(self._args)
         if len(summaries) != expected:
             raise TrainStepError(f"expected {expected} cut shards (one per rank), got {len(summaries)}")
@@ -433,7 +459,8 @@ class MilesTrainerGroup:
             ),
             rank_summaries=tuple(
                 {k: s[k] for k in ("path", "scheduler_samples", "has_optimizer_state", "has_rng",
-                                   "state_digest", "rng_digest")}
+                                   "state_digest", "rng_digest", "components", "train_state_digest",
+                                   "weight_version") if k in s}
                 for s in summaries
             ),
         )
@@ -486,6 +513,8 @@ class MilesTrainerGroup:
         from ..cut import CutError, cut_dir, verify_cut
         from .cut_plugin import RESTORE_CUT_SHARD
 
+        self._reshard_plan = None  # exact same-shape restore: no DP change to guard (review L-1)
+
         manifest = verify_cut(root, cut_id, expect, check_files=shared_filesystem)
         if manifest.epoch > epoch:
             raise CutError(f"cut epoch {manifest.epoch} is newer than the restoring epoch {epoch}")
@@ -504,6 +533,11 @@ class MilesTrainerGroup:
                 )
             )
         ]
+        refused = [f"[{r.get('refusal_kind', 'refused')}] {r['refused']}" for r in results if "refused" in r]
+        if refused:
+            # every rank refused before writing, or some ranks wrote: the
+            # caller treats any restore_cut error as RECOVERY_REQUIRED either way
+            raise CutError("rank refused the restore: " + "; ".join(sorted(set(refused))))
         saved = {s["path"]: s for s in manifest.rank_summaries}
         if len(results) != len(saved) or {r["path"] for r in results} != set(saved):
             raise CutError(f"restored shards {sorted(r['path'] for r in results)} != cut {sorted(saved)}")
@@ -511,7 +545,14 @@ class MilesTrainerGroup:
             s = saved[r["path"]]
             for key in ("scheduler_samples", "state_digest", "rng_digest"):
                 if r[key] != s[key]:
-                    raise CutError(f"{r['path']}: restored {key} differs from the cut")
+                    saved_c, now_c = s.get("components") or {}, r.get("components") or {}
+                    differ = sorted(k for k in set(saved_c) | set(now_c) if saved_c.get(k) != now_c.get(k))
+                    raise CutError(f"{r['path']}: restored {key} differs from the cut; "
+                                   f"cut->reexport {r.get('optimizer_cut_vs_reexport')}; "
+                                   f"cut->after_load {r.get('optimizer_cut_vs_after_load')}; "
+                                   f"after_load->reexport {r.get('optimizer_after_load_vs_reexport')}; "
+                                   f"rank diff {r.get('diff')}; "
+                                   f"differing components ({len(differ)}): {differ[:40]}")
         return manifest
 
     def restore_cut_resharded(self, cut_id: str, *, epoch: int, root: str, expect: Any, plan: Any,

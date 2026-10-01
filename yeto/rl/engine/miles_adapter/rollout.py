@@ -21,6 +21,7 @@ yeto journal's expected fork epoch (3.3a: the journal is the authority).
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -35,6 +36,8 @@ from .rollout_meta_hook import (
     ROUND_META_SCHEMA,
     put_policy_token,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RolloutMetadataError(RuntimeError):
@@ -84,6 +87,20 @@ def cells_of(members: Any) -> list[str]:
 # Unset (default) = no effect. Set by the launcher's
 # ``--rl-test-inject-start-delay-s`` (exported in the island run command).
 INJECT_START_DELAY_ENV = "YETO_RL_TEST_INJECT_START_DELAY_S"
+# Test-only (plan.md E1-D ③④, 3.7): the next N fork ``stop_cells`` calls fail
+# inside the fork AFTER deregistration (its engine provider's stop raises), so
+# the fork records ``incomplete``. Unset (default) = no effect.
+INJECT_STOP_FAILURES_ENV = "YETO_RL_TEST_INJECT_STOP_FAILURES"
+# Test-only (A4b): during the FIRST drain of the process an artificial tool-wait
+# entry is put on the ToolWaitBoard and removed again after this many seconds. Longer
+# than the drain budget it makes the drain time out -> CANCELLED -> undrain, with no
+# request touched (the entry is not a request). Unset (default) = no effect.
+INJECT_TOOL_WAIT_ENV = "YETO_RL_TEST_INJECT_TOOL_WAIT_S"
+# Test-only (A4b / E1-C variant): the next N ``undrain`` calls fail inside the
+# adapter (as a fork uncordon failure would), so a drain timeout cannot restore
+# the old routing and the controller must end in RECOVERY_REQUIRED, never CANCELLED.
+INJECT_UNDRAIN_FAIL_ENV = "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"
+INJECTED_TOOL_WAIT_ID = "yeto-test-injected-tool-wait"
 
 
 def injected_start_delay(environ: Any = None) -> float | None:
@@ -96,6 +113,61 @@ def injected_start_delay(environ: Any = None) -> float | None:
     if not value > 0:
         raise ValueError(f"{INJECT_START_DELAY_ENV} must be a positive number of seconds")
     return value
+
+
+def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | None]:
+    """Runs INSIDE the rollout executor actor (``__ray_call__``): its data
+    source's current cursor and buffer length (rollout_meta_hook rules)."""
+    from .rollout_meta_hook import data_cursor as read_cursor
+
+    return read_cursor(getattr(executor, "data_source", None))
+
+
+def arm_stop_failure_in_controller(controller: Any) -> str:
+    """Runs INSIDE the fork InferenceController actor (``__ray_call__``), test only
+    (E1-D ③④): the engine provider's next ``stop_cells`` raises once, so the fork
+    takes its real half-failure path (membership ``incomplete``, reason
+    ``stop_failed``). Returns the provider class name as the arming receipt."""
+    provider = getattr(controller, "_engine_provider", None)
+    if provider is None:
+        raise RuntimeError("stop failure injection: the fork controller has no _engine_provider")
+    real = provider.stop_cells
+
+    async def failing_stop(*args: Any, **kwargs: Any) -> Any:
+        provider.stop_cells = real  # one shot
+        import sys
+
+        print("[yeto] TEST INJECTION YETO_RL_TEST_INJECT_STOP_FAILURES: provider stop_cells fails "
+              "(inside the fork controller actor)", file=sys.stderr, flush=True)
+        raise RuntimeError("injected provider stop failure (test)")
+
+    provider.stop_cells = failing_stop
+    return type(provider).__name__
+
+
+def _is_ray_handle(obj: Any) -> bool:
+    return type(obj).__name__ == "ActorHandle"
+
+
+def _executor_target(executor: Any) -> tuple[str, Any]:
+    """("ray", actor handle) | ("local", data source) | ("unknown", None).
+
+    Only instance attributes are looked at: Miles' ``RayWorkerHandle.__getattr__``
+    answers ANY name (``data_source`` included) with a remote-call coroutine."""
+    attrs = getattr(executor, "__dict__", None) or {}
+    inner = attrs.get("_actor_handle")
+    if inner is not None:  # miles.utils.workers.ray_worker_handle.RayWorkerHandle
+        return "ray", inner
+    if _is_ray_handle(executor):
+        return "ray", executor
+    source = attrs.get("data_source")
+    if source is not None:
+        return "local", source
+    return "unknown", None
+
+
+async def _awaited(value: Any) -> Any:
+    return await value if hasattr(value, "__await__") else value
 
 
 class MembershipPlanError(RuntimeError):
@@ -319,6 +391,40 @@ def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
         return json.loads(response.read().decode("utf-8"))
 
 
+# 1.7 load attribution: what the tool-wait count is when no board is wired.
+# ``stock``: Miles' own generate (no custom generate function) makes no tool
+# calls, so 0 is known; any other custom generate without a board is unknown.
+TOOL_WAIT_NO_BOARD_STOCK = "stock-generate"
+
+
+def _engine_load(entries: Any) -> tuple[int, int] | None:
+    """SGLang ``/get_load`` (one entry per DP rank) -> (running, waiting)."""
+    if not isinstance(entries, list) or not entries:
+        return None
+    running = waiting = 0
+    for entry in entries:
+        if not isinstance(entry, dict) or "num_reqs" not in entry or "num_waiting_reqs" not in entry:
+            return None
+        total, queued = int(entry["num_reqs"]), int(entry["num_waiting_reqs"])
+        running += total - queued
+        waiting += queued
+    return running, waiting
+
+
+def _engine_capacity(info: Any) -> int | None:
+    """SGLang ``/server_info``: concurrent requests the engine admits (sum over DP ranks)."""
+    if not isinstance(info, dict):
+        return None
+    states = info.get("internal_states")
+    if isinstance(states, list) and states:
+        values = [s.get("effective_max_running_requests_per_dp") for s in states
+                  if isinstance(s, dict)]
+        if values and all(isinstance(v, int) and v > 0 for v in values):
+            return int(sum(values))
+    value = info.get("max_running_requests")
+    return int(value) if isinstance(value, int) and value > 0 else None
+
+
 class MilesRolloutPool:
     """``RolloutPool`` port. ``expected_policy`` returns the published (version, hash)."""
 
@@ -337,10 +443,15 @@ class MilesRolloutPool:
         worker_manager: Any = None,
         bundles: Any = None,
         gpus_per_engine: int | None = None,
+        load_tool_wait: Any = None,
     ) -> None:
         # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
         # tool-wait count, so trajectory_load() is unknown (None).
         self._tool_wait_board = tool_wait_board
+        # 1.7 load samples read tool waits from ``load_tool_wait`` (a board,
+        # TOOL_WAIT_NO_BOARD_STOCK, or None = unknown); default: the drain board.
+        self._load_tool_wait = load_tool_wait if load_tool_wait is not None else tool_wait_board
+        self._capacity: dict[str, int] = {}
         self._args = args
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
@@ -355,6 +466,21 @@ class MilesRolloutPool:
         self._inject_start_delay = injected_start_delay()
         self.injected_start_delays: list[float] = []
         self._sleep = time.sleep
+        import os
+
+        self._stop_failures_left = int(os.environ.get(INJECT_STOP_FAILURES_ENV) or 0)
+        if self._stop_failures_left < 0:
+            raise ValueError(f"{INJECT_STOP_FAILURES_ENV} must be >= 0")
+        self.injected_stop_failures = 0
+        raw_uf = os.environ.get(INJECT_UNDRAIN_FAIL_ENV)
+        self._inject_undrain_fail = int(raw_uf) if raw_uf else 0
+        self.injected_undrain_failures: list[frozenset[str]] = []
+        raw_tw = os.environ.get(INJECT_TOOL_WAIT_ENV)
+        self._inject_tool_wait = float(raw_tw) if raw_tw else None
+        if self._inject_tool_wait is not None and not self._inject_tool_wait > 0:
+            raise ValueError(f"{INJECT_TOOL_WAIT_ENV} must be a positive number of seconds")
+        self.injected_tool_waits: list[float] = []
+        self.event_sink: Callable[..., None] | None = None  # test_injection record sink
         # E3 role transfer (4.7): fork RayWorkerManager handle (None = the named
         # actor, looked up on first use), the startup bundle map
         # (bundles.StartupBundles: pool GPU ids <-> startup PG bundles) and
@@ -364,8 +490,57 @@ class MilesRolloutPool:
         self._gpus_per_engine = gpus_per_engine
         self._bind_seq = 0
 
+    def live_data_cursor(self) -> tuple[dict[str, int] | None, int | None]:
+        """The data source position NOW (and its reuse-buffer length), read inside
+        the rollout executor's process -- not the last batch's cached value.
+        Catches a cursor moved outside generation (``rollout_executor.load``
+        during a trainer rebuild; E2 G-4.5 row 5).
+
+        Miles (fork e3a11ab3) hands the driver a ``RayWorkerHandle`` whose
+        ``__getattr__`` turns every name into a remote method call; the Ray
+        actor handle is its ``_actor_handle``. The read runs in that actor via
+        Ray's ``__ray_call__`` (``read_executor_cursor``). A bare Ray
+        ``ActorHandle`` is used the same way; a local executor object is read
+        directly. Anything else, or any failure: ``(None, None)`` = unknown
+        (logged with the reason) -- never the cached value."""
+        from .rollout_meta_hook import data_cursor as read_cursor
+
+        kind, target = _executor_target(self._executor)
+        if kind == "local":
+            try:
+                return read_cursor(target)
+            except Exception as exc:  # noqa: BLE001 - unknown
+                logger.warning("live data cursor: local read failed: %r", exc)
+                return None, None
+        if kind != "ray":
+            logger.warning("live data cursor unknown: rollout executor %s is neither a local "
+                           "executor nor a Ray actor (handle)", type(self._executor).__name__)
+            return None, None
+        remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
+        if not callable(remote):
+            logger.warning("live data cursor unknown: Ray actor handle %s has no __ray_call__",
+                           type(target).__name__)
+            return None, None
+        try:
+            cursor, length = self._run(_awaited(remote(read_executor_cursor)))
+        except Exception as exc:  # noqa: BLE001 - unknown
+            logger.warning("live data cursor unknown: __ray_call__ in the executor actor "
+                           "failed: %r", exc)
+            return None, None
+        if cursor is None:
+            logger.warning("live data cursor unknown: the executor's data source reports no "
+                           "complete cursor")
+        return (None if cursor is None else dict(cursor)), length
+
     def data_cursor(self) -> dict[str, int] | None:
-        """4.2: data cursor after the last generated batch (None = unknown)."""
+        """4.2/4.4: the LIVE data cursor, None when it cannot be read (unknown;
+        the cut / same-shape rebuild then refuse instead of comparing a stale
+        value). The last generated batch's cursor is ``last_batch_data_cursor``."""
+        live, _ = self.live_data_cursor()
+        return None if live is None else dict(live)
+
+    def last_batch_data_cursor(self) -> dict[str, int] | None:
+        """The cursor the rollout metadata reported after the last batch (cache)."""
         return None if self._last_cursor is None else dict(self._last_cursor)
 
     def generate(self, rollout_id: int) -> RolloutBatchHandle:
@@ -391,30 +566,102 @@ class MilesRolloutPool:
         self._last_cursor = dict(handle.data_cursor) if handle.data_cursor else None
         return handle
 
-    def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, int] | None:
-        """rl-infra-spec 1.7: engine in-flight counts from the fork-M3 router.
-
-        ``GET /worker_inflight`` -> ``{"inflight": {worker_url: n}, "cordoned": [...]}``.
-        None when the router address is unknown or the router lacks the
-        endpoint (stock Miles without M3): unknown, never reported as 0.
-        """
+    def _router_inflight(self, http_get: Callable[[str], Any]) -> dict[str, Any] | None:
         args = self._args
         ip = getattr(args, "sglang_router_ip", None)
         port = getattr(args, "sglang_router_port", None)
         if not ip or not port:
             return None
         try:
-            data = (http_get or _http_get_json)(f"http://{ip}:{port}/worker_inflight")
+            data = http_get(f"http://{ip}:{port}/worker_inflight")
         except Exception:  # noqa: BLE001 - observation only; absent endpoint = unknown
             return None
         inflight = data.get("inflight") if isinstance(data, dict) else None
         if not isinstance(inflight, dict):
             return None
-        return {
+        return {"inflight": inflight, "cordoned": data.get("cordoned") or ()}
+
+    def _tool_wait_count(self) -> int | None:
+        source = self._load_tool_wait
+        if source is None:
+            return None
+        if source == TOOL_WAIT_NO_BOARD_STOCK:
+            return 0
+        from ..tool_wait import read_tool_wait
+
+        try:
+            return int(read_tool_wait(source).in_flight)
+        except Exception:  # noqa: BLE001 - observation only: unknown
+            return None
+
+    def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, Any] | None:
+        """rl-infra-spec 1.7: one load sample for ``timeline.classify_load``.
+
+        * ``active_requests``/``workers``/``cordoned``: fork-M3 router
+          ``GET /worker_inflight`` (E1's drain reads ``active_requests``);
+        * ``running_requests``/``queued_requests``: sum over engines of SGLang
+          ``GET /get_load`` (``num_reqs - num_waiting_reqs`` / ``num_waiting_reqs``);
+        * ``engine_capacity``: sum over engines of SGLang ``/server_info``
+          ``effective_max_running_requests_per_dp`` (read once per engine);
+        * ``tool_wait_trajectories``: the ToolWaitBoard count (0 for stock
+          generate, None = unknown);
+        * ``load_class``: ``classify_load`` of the above, ``"unknown"`` if any
+          input is unknown. ``ready_groups`` is not observable mid-rollout: None.
+
+        None when the router is unknown (stock Miles without M3): unknown,
+        never reported as 0. A failing engine endpoint makes its field None.
+        """
+        get = http_get or _http_get_json
+        router = self._router_inflight(get)
+        if router is None:
+            return None
+        inflight = router["inflight"]
+        sample: dict[str, Any] = {
             "active_requests": int(sum(int(v) for v in inflight.values())),
             "workers": len(inflight),
-            "cordoned": len(data.get("cordoned") or ()),
+            "cordoned": len(router["cordoned"]),
         }
+        running: int | None = 0
+        queued: int | None = 0
+        capacity: int | None = 0
+        for url in sorted(inflight):
+            base = url.rstrip("/")
+            try:
+                load = _engine_load(get(base + "/get_load"))
+            except Exception:  # noqa: BLE001
+                load = None
+            if load is None:
+                running = queued = None
+            elif running is not None:
+                running += load[0]
+                queued += load[1]
+            if url not in self._capacity:
+                try:
+                    cap = _engine_capacity(get(base + "/server_info"))
+                except Exception:  # noqa: BLE001
+                    cap = None
+                if cap is not None:
+                    self._capacity[url] = cap
+            cap = self._capacity.get(url)
+            capacity = None if cap is None or capacity is None else capacity + cap
+        tool = self._tool_wait_count()
+        sample.update(
+            running_requests=running,
+            queued_requests=queued,
+            engine_capacity=capacity or None,
+            tool_wait_trajectories=tool,
+            ready_groups=None,
+        )
+        from ..timeline import LoadSample, classify_load
+
+        known = None not in (running, queued, sample["engine_capacity"], tool)
+        sample["load_class"] = (
+            classify_load(LoadSample(queued_requests=queued, active_requests=running,
+                                     tool_wait_trajectories=tool, ready_groups=0,
+                                     engine_capacity=sample["engine_capacity"]))
+            if known else "unknown"
+        )
+        return sample
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""
@@ -509,12 +756,22 @@ class MilesRolloutPool:
         unknown = sorted(set(cells) - set(declared))
         if unknown:
             raise MembershipPlanError(f"cells {unknown} were not declared at startup")
-        manager = self._manager()
+        describe = getattr(self._controller, "describe_cells", None)
+        if callable(describe):
+            # fork F-R1: the controller reports each declared cell's bundles
+            # (reordered bundle indices of the startup placement group)
+            described = dict(self._run(describe()) or {})
+            missing = sorted(set(cells) - set(described))
+            if missing:
+                raise MembershipPlanError(f"the fork does not describe cells {missing}")
+            bundles = {c: list(described[c].get("bundles") or []) for c in cells}
+        else:
+            manager = self._manager()
 
-        async def read() -> dict[str, list[int]]:
-            return {c: list(await manager.get_cell_bundles.remote(c)) for c in cells}
+            async def read() -> dict[str, list[int]]:
+                return {c: list(await manager.get_cell_bundles.remote(c)) for c in cells}
 
-        bundles = self._run(read())
+            bundles = self._run(read())
         return {member_id(c): self._bundles.gpus_for_bundles(b) for c, b in sorted(bundles.items())}
 
     def members_on_gpus(self, gpus: Any, members: Any = None) -> frozenset[str]:
@@ -566,10 +823,72 @@ class MilesRolloutPool:
         self._run(bind())
         return view
 
+    def unbind_members(self, members: frozenset[str]) -> None:
+        """Return stopped deferred cells to unbound (fork F-R1 ``unbind_cell``), so
+        their bundles are free for a growing trainer (4.7 rollout->trainer, after
+        ``remove_engines``). Only cells declared stopped (``start: false``) can be
+        unbound; a startup-started cell keeps its bundles (the fork asserts)."""
+        cells = sorted(cells_of(frozenset(members)))
+        unknown = sorted(set(cells) - set(self._require_declared()))
+        if unknown:
+            raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        manager = self._manager()
+
+        async def unbind() -> None:
+            for cell in cells:
+                await manager.unbind_cell.remote(cell)
+
+        self._run(unbind())
+
     def remove_engines(self, members: frozenset[str], *, epoch: int) -> frozenset[str]:
         """Deregister and stop ``members`` (drain them first); returns the remaining members."""
+        if self._stop_failures_left > 0:
+            self._arm_stop_failure()
         self._run(self._controller.stop_cells(cells_of(members), expected_epoch=epoch))
         return self.members()
+
+    def _arm_stop_failure(self) -> None:
+        """TEST ONLY: make the fork's engine provider fail this stop once (the fork
+        then marks the membership ``incomplete``, its real half-failure path).
+
+        The real controller is a Ray actor (behind Miles' ``RayWorkerHandle``): the
+        provider only exists inside it, so the arming runs there via ``__ray_call__``
+        (GPU d123, chain 2: reading ``_engine_provider`` through the handle returned a
+        remote-call function and the stop failed with AttributeError instead of the
+        fork's incomplete path). In-process controllers (tests) are patched directly."""
+        kind, target = _executor_target(self._controller)
+        import sys
+
+        if kind == "ray":
+            remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
+            if not callable(remote):
+                raise MembershipPlanError("stop failure injection: the fork controller handle has no __ray_call__")
+            receipt = self._run(_awaited(remote(arm_stop_failure_in_controller)))
+            self._stop_failures_left -= 1
+            self.injected_stop_failures += 1
+            print(f"[yeto] TEST INJECTION {INJECT_STOP_FAILURES_ENV}: armed inside the fork controller "
+                  f"actor (provider {receipt}); its next stop_cells fails once", file=sys.stderr, flush=True)
+            if self.event_sink is not None:
+                self.event_sink("test_injection", kind="stop_failure", applied=True, where="fork_actor",
+                                provider=str(receipt), remaining=self._stop_failures_left)
+            return
+        provider = getattr(self._controller, "_engine_provider", None)
+        if provider is None or not hasattr(provider, "stop_cells"):
+            raise MembershipPlanError("stop failure injection: the fork has no engine provider")
+        real = provider.stop_cells
+        pool = self
+
+        async def failing_stop(*args: Any, **kwargs: Any) -> Any:
+            provider.stop_cells = real  # one shot
+            pool._stop_failures_left -= 1
+            pool.injected_stop_failures += 1
+            import sys
+
+            print(f"[yeto] TEST INJECTION {INJECT_STOP_FAILURES_ENV}: provider stop_cells fails",
+                  file=sys.stderr, flush=True)
+            raise RuntimeError("injected provider stop failure (test)")
+
+        provider.stop_cells = failing_stop
 
     def drain(self, members: frozenset[str], deadline: float) -> bool:
         """Cordon ``members`` and wait for zero in-flight requests until ``deadline`` (wall clock).
@@ -578,11 +897,64 @@ class MilesRolloutPool:
         (:meth:`undrain` cancels). The router counts engine requests only; a
         trajectory waiting on a tool is counted by yeto (3.3), not here.
         """
+        self._maybe_inject_tool_wait(members)
         timeout = max(0.0, float(deadline) - time.time())
         return bool(self._run(self._controller.drain_cells(cells_of(members),
                                                            timeout_seconds=timeout)))
 
+    def _maybe_inject_tool_wait(self, members: frozenset[str]) -> None:
+        """TEST ONLY (INJECT_TOOL_WAIT_ENV): count one artificial trajectory as waiting on
+        a tool for N seconds, so the drain's tool-wait condition holds that long."""
+        if self._inject_tool_wait is None or self.injected_tool_waits:
+            return
+        import sys
+        import threading
+
+        from ..tool_wait import _call, _resolve
+
+        seconds = self._inject_tool_wait
+        self.injected_tool_waits.append(seconds)
+        applied, error = False, None
+        if self._tool_wait_board is None:
+            error = "no ToolWaitBoard"
+        else:
+            try:
+                _resolve(_call(self._tool_wait_board, "enter", INJECTED_TOOL_WAIT_ID))
+                applied = True
+            except Exception as exc:  # noqa: BLE001 - recorded: applied=false
+                error = repr(exc)
+        print(f"[yeto] TEST INJECTION {INJECT_TOOL_WAIT_ENV}: tool-wait entry for {seconds}s "
+              f"during the drain of {sorted(members)} (applied={applied})",
+              file=sys.stderr, flush=True)
+        if self.event_sink is not None:
+            self.event_sink("test_injection", kind="tool_wait",
+                            target_members=sorted(members), seconds=seconds, applied=applied,
+                            **({"error": error} if error else {}))
+        if applied:
+            board = self._tool_wait_board
+
+            def release() -> None:
+                try:
+                    _resolve(_call(board, "exit", INJECTED_TOOL_WAIT_ID))
+                except Exception:  # noqa: BLE001 - board gone with the run
+                    pass
+
+            timer = threading.Timer(seconds, release)
+            timer.daemon = True
+            timer.start()
+
     def undrain(self, members: frozenset[str]) -> None:
+        if self._inject_undrain_fail > 0:
+            import sys
+
+            self._inject_undrain_fail -= 1
+            self.injected_undrain_failures.append(frozenset(members))
+            print(f"[yeto] TEST INJECTION {INJECT_UNDRAIN_FAIL_ENV}: undrain of {sorted(members)} "
+                  "fails (the cordoned members stay cordoned)", file=sys.stderr, flush=True)
+            if self.event_sink is not None:
+                self.event_sink("test_injection", kind="undrain_fail",
+                                target_members=sorted(members), applied=True)
+            raise RuntimeError("injected undrain failure: uncordon not performed")
         self._run(self._controller.uncordon_cells(cells_of(members)))
 
     def trajectory_load(self) -> dict[str, Any] | None:

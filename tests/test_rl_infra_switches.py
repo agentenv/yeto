@@ -86,7 +86,7 @@ def test_entry_builds_elastic_wiring_from_miles_args(monkeypatch):
 
     seen = {}
     monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
-    miles_args = SimpleNamespace(yeto_rl_elastic={
+    miles_args = SimpleNamespace(use_miles_router=True, yeto_rl_elastic={
         "resources": "/r.json", "attestation": "/a.json", "state_dir": "/s",
         "initial_config": "c0", "declared_cells": ("x",)})
     assert entry.elastic_wiring_for(miles_args, profile="P", fingerprint="F") == "W"

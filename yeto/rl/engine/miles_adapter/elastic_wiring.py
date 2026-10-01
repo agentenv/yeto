@@ -127,12 +127,29 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
             from miles.utils.workers.ray_worker_manager import RayWorkerManager
 
             mgr = RayWorkerManager.get_handle()
-        killed, errors = [], []
-        for cell in cells:
+        from .rollout import cell_of
+
+        killed, errors, skipped = [], [], []
+        for member in cells:
+            # the controller speaks member ids ("engine:<cell>"); the fork's
+            # RayWorkerManager is keyed by the bare cell id (GPU a4s3/a4s4: the
+            # prefixed id matched nothing and nothing was killed)
             try:
+                cell = cell_of(member)
                 infos = ray_mod.get(mgr.get_worker_infos.remote(cell), timeout=timeout_s)
             except Exception as exc:  # noqa: BLE001
-                errors.append({"cell": cell, "error": repr(exc)})
+                # the fork does not know the id (declared/mapped wrongly): distinguishable
+                errors.append({"cell": member, "fork_cell": cell, "kind": "unknown_target",
+                               "error": repr(exc)})
+                continue
+            if not infos:
+                # the cell exists but has no live worker actors (its engine already died /
+                # was never registered, e.g. killed during start_cells - GPU d123 chain 3):
+                # nothing to kill, and nothing keeps the step alive on our side either, so
+                # this is journaled distinctly but is NOT an unresolved target (the fork call
+                # fails or returns on its own and the transaction goes to REBUILD_OLD)
+                skipped.append({"cell": member, "fork_cell": cell, "kind": "no_workers",
+                                "note": "cell has no live worker actors (not started or already stopped)"})
                 continue
             for info in infos:
                 try:
@@ -141,10 +158,38 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
                         timeout=timeout_s,
                     )
                     ray_mod.kill(handle, no_restart=True)
-                    killed.append({"cell": cell, "worker": info.name,
+                    killed.append({"cell": member, "fork_cell": cell, "worker": info.name,
                                    "generation": info.generation})
                 except Exception as exc:  # noqa: BLE001
-                    errors.append({"cell": cell, "worker": info.name, "error": repr(exc)})
-        controller.record_watchdog_action(tx_id, phase=phase, killed=killed, errors=errors)
+                    errors.append({"cell": member, "fork_cell": cell, "worker": info.name,
+                                   "kind": "kill_failed", "error": repr(exc)})
+        controller.record_watchdog_action(tx_id, phase=phase, killed=killed, errors=errors,
+                                          skipped=skipped)
+        if errors:
+            # a target the watchdog could not kill keeps the blocked step alive and its
+            # engines unmanaged: do not wait silently, the island needs recovery
+            controller.watchdog_unresolved(tx_id, phase, errors)
 
     return on_watchdog
+
+
+class LazyBoardActor:
+    """The island's named ``ToolWaitBoard`` actor, looked up/created on first use
+    (``tool_wait.board_actor``): the elastic wiring is built before Ray is
+    connected. Attribute access forwards to the actor handle, so
+    ``tool_wait.read_tool_wait`` works on it unchanged."""
+
+    def __init__(self, learner_id: int, *, factory: Any = None) -> None:
+        self.learner_id = int(learner_id)
+        self._factory = factory
+        self._handle = None
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if self._handle is None:
+            factory = self._factory
+            if factory is None:
+                from ..tool_wait import board_actor as factory
+            self._handle = factory(self.learner_id)
+        return getattr(self._handle, name)

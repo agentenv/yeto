@@ -254,8 +254,10 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.visible_gpus_per_node": _ok,
     "parallel.uneven_pipeline_layers": _ok,
     "parallel.standby_gpus": _ok,
+    "parallel.rollout_cell_names": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
+    "trainable.lora_dropout": _ok,
     "trainable.lora_targets": _check_lora_targets,
     "trainable.target_modules": _ok,
     "trainable.expert_full_count": _check_expert_full,
@@ -345,6 +347,9 @@ LEAF_POLICY: dict[str, _Check] = {
     # The driver owns the loop and the outer sync; no Miles callback needed.
     "yeto_policy_sync": _ok,
     "distributed_timeout_minutes": _ok,
+    "deterministic_trainer": _ok,
+    "trainer_dp_edges": _ok,
+    "use_miles_router": _ok,
 }
 
 
@@ -412,6 +417,7 @@ def placement_request(config) -> PlacementRequest:
         rollout_gpus=int(parallel.dedicated_rollout_gpus),
         gpus_per_engine=parallel.rollout_num_gpus_per_engine,
         standby_gpus=int(getattr(parallel, "standby_gpus", 0) or 0),
+        rollout_cell_names=tuple(getattr(parallel, "rollout_cell_names", ()) or ()),
     )
 
 
@@ -531,11 +537,11 @@ def translate_run_config(
             # upstream protocol.py:73-89: only broadcast (or colocate CUDA IPC)
             # supports LoRA; p2p/disk-delta assert no LoRA.
             placement_values += ["--update-weight-transfer-mode", "broadcast"]
-        if request.placement_map is not None:
+        if request.placement_map_arg is not None:
             # fork-M1 (--yeto-placement-map): explicit role -> bundle map.
             placement_values += [
                 "--yeto-placement-map",
-                json.dumps(request.placement_map, sort_keys=True, separators=(",", ":")),
+                json.dumps(request.placement_map_arg, sort_keys=True, separators=(",", ":")),
             ]
 
     model_recipe_values: list[str] = []
@@ -579,7 +585,9 @@ def translate_run_config(
         # LoRA (upstream miles/utils/lora/arguments.py)
         "--lora-rank", str(trainable.lora_rank),
         "--lora-alpha", str(trainable.lora_rank),
-        "--lora-dropout", "0",
+        # "0" (default argv unchanged) unless --rl-lora-dropout
+        "--lora-dropout", (format(trainable.lora_dropout, "g")
+                           if getattr(trainable, "lora_dropout", 0.0) else "0"),
         "--lora-type", "canonical_lora",
         "--target-modules", ",".join(trainable.target_modules),
         # upstream applies the LoRA base CPU backup only under colocate
@@ -620,7 +628,9 @@ def translate_run_config(
         "--over-sampling-batch-size", str(batch.over_sampling_batch_size),
         "--num-steps-per-rollout", str(batch.optimizer_steps),
         "--global-batch-size", str(batch.global_batch),
-        "--balance-data",
+        # E3 DP certification refuses --balance-data (reshard.reshard_problems):
+        # dropped only when trainer DP-change edges are enabled.
+        *(() if getattr(config, "trainer_dp_edges", False) else ("--balance-data",)),
         "--rollout-max-context-len", str(batch.seq_len),
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
         # D3: metadata is extracted inside the rollout process
@@ -695,6 +705,11 @@ def translate_run_config(
     if parallel.tensor_parallel > 1:
         values.append("--sequence-parallel")
     values.extend(("--distributed-timeout-minutes", str(config.distributed_timeout_minutes)))
+    if getattr(config, "use_miles_router", False):
+        # --rl-elastic: fork cordon/drain/admit_cordoned need the Miles router
+        values.append("--use-miles-router")
+    if getattr(config, "deterministic_trainer", False):
+        values.append("--deterministic-mode")  # Megatron deterministic kernels (E2 plan-v2 §0)
     if config.data.chat_template_kwargs:
         values.extend(
             (

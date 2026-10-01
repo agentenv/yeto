@@ -943,18 +943,79 @@ _ELASTIC_PAUSE_FLAGS = (
     ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
     ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
     ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
+    # controller D4 timeouts T_drain / T_recovery (plan.md E1-C, E1-D 4)
+    ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
+    ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
 )
 # Test-only fault injection for GPU acceptance runs (gpu-plan-v2 A5 quorum case):
 # exported into the island run command; off unless given.
 _ELASTIC_TEST_FLAGS = (
     ("rl_test_inject_start_delay_s", "--rl-test-inject-start-delay-s"),
     ("rl_test_inject_update_weights_block_s", "--rl-test-inject-update-weights-block-s"),
+    ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures"),
+    ("rl_test_hold_before_check_s", "--rl-test-hold-before-check-s"),
+    ("rl_test_inject_tool_wait_s", "--rl-test-inject-tool-wait-s"),
+    ("rl_test_inject_undrain_fail", "--rl-test-inject-undrain-fail"),
+    ("rl_elastic_restart_attempts", "--rl-elastic-restart-attempts"),
+)
+# (attr, flag, env) of the test-only switches exported into the island run
+# command; each needs --rl-elastic, all are off by default.
+_ELASTIC_TEST_EXPORTS = (
+    ("rl_test_hold_before_check_s", "--rl-test-hold-before-check-s",
+     "YETO_RL_TEST_HOLD_BEFORE_CHECK_S"),
+    ("rl_test_inject_tool_wait_s", "--rl-test-inject-tool-wait-s",
+     "YETO_RL_TEST_INJECT_TOOL_WAIT_S"),
+    ("rl_test_inject_undrain_fail", "--rl-test-inject-undrain-fail",
+     "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"),
+    ("rl_test_inject_lora_perturb", "--rl-test-inject-lora-perturb",
+     "YETO_RL_TEST_INJECT_LORA_PERTURB"),
+    ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures",
+     "YETO_RL_TEST_INJECT_STOP_FAILURES"),
+    ("rl_test_kill_learner_at", "--rl-test-kill-learner-at", "YETO_RL_TEST_KILL_LEARNER_AT"),
+    ("rl_test_inject_rebuild_fail", "--rl-test-inject-rebuild-fail",
+     "YETO_RL_TEST_INJECT_REBUILD_FAIL"),
+    # E2 G-4.5 (plan-v3), read by miles_adapter.cut_injection
+    ("rl_test_inject_cut_save_kill_rank", "--rl-test-inject-cut-save-kill-rank",
+     "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"),
+    ("rl_test_inject_cut_restore_kill_rank", "--rl-test-inject-cut-restore-kill-rank",
+     "YETO_RL_TEST_INJECT_CUT_RESTORE_KILL_RANK"),
+    ("rl_test_inject_cut_restore_sleep", "--rl-test-inject-cut-restore-sleep",
+     "YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"),
+    ("rl_test_inject_rebuild_cursor_shift", "--rl-test-inject-rebuild-cursor-shift",
+     "YETO_RL_TEST_INJECT_REBUILD_CURSOR_SHIFT"),
+)
+KILL_PHASES = ("QUIESCING", "TRANSFERRING", "INITIALIZING", "VERIFYING", "COMMITTED",
+               "RESUMING", "REBUILDING_TRAINER")
+# In-place learner restarts (E1-D ⑤⑥⑦): the learner command runs in a loop that
+# re-executes it with the same arguments (same --rl-elastic-state-dir) after a
+# non-zero exit, at most N times. The Ray head stays up; the old driver's job
+# (fork controller, engines, trainer) dies with it, so the fork restarts at
+# membership epoch 0 and the journal reconciles it.
+RESTART_LOOP_FN = (
+    "yeto_rl_restart_loop() {\n"
+    "  local attempt=0 rc=0\n"
+    "  while :; do\n"
+    "    \"$@\" && return 0\n"
+    "    rc=$?\n"
+    "    attempt=$((attempt + 1))\n"
+    "    if [ \"$attempt\" -gt \"$YETO_RL_RESTART_ATTEMPTS\" ]; then return $rc; fi\n"
+    "    echo \"[yeto] learner exited $rc; in-place restart $attempt/$YETO_RL_RESTART_ATTEMPTS\" >&2\n"
+    "  done\n"
+    "}\n"
 )
 ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
 _EVAL_LAUNCH_FLAGS = (
     ("rl_eval_data", "--rl-eval-data"),
     ("rl_eval_dataset_name", "--rl-eval-dataset-name"),
     ("rl_eval_samples_per_prompt", "--rl-eval-samples-per-prompt"),
+)
+# optional eval knobs: launcher flag attr -> learner flag (forwarded when given)
+_EVAL_OPTIONAL_FLAGS = (
+    ("rl_eval_temperature", "--eval-temperature"),
+    ("rl_eval_top_p", "--eval-top-p"),
+    ("rl_eval_max_prompt_len", "--eval-max-prompt-len"),
+    ("rl_eval_max_response_len", "--eval-max-response-len"),
+    ("rl_eval_max_context_len", "--eval-max-context-len"),
 )
 EVAL_ISLAND_DATA_PATH = "~/yeto-rl/eval-heldout.jsonl"
 EVAL_INLINE_MAX_BYTES = 96 * 1024  # shipped inline in the run command (ARG_MAX headroom)
@@ -970,6 +1031,8 @@ def _check_ports_eval(args, rl_engine: str) -> int | None:
 
     interval = getattr(args, "rl_eval_interval", None)
     given = [flag for name, flag in _EVAL_LAUNCH_FLAGS if getattr(args, name, None) is not None]
+    given += ["--rl-" + flag[2:] for name, flag in _EVAL_OPTIONAL_FLAGS
+              if getattr(args, name, None) is not None]
     args.rl_eval_data_text = None
     if interval is None:
         if given:
@@ -1017,6 +1080,7 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     from .rl.engine.execution_profile import UNKNOWN
 
     placement = getattr(args, "rl_placement", "colocated") or "colocated"
+    _check_test_tool_delay(args, rl_engine)
     eval_interval = _check_ports_eval(args, rl_engine)
     if getattr(args, "rl_overlap_eval", False):
         if rl_engine != "ports":
@@ -1029,13 +1093,44 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         # learner never sets it), so that one stays with the island's check.
         check_overlap_eval(placement_kind=placement, eval_interval=eval_interval,
                            eval_uses_snapshots=UNKNOWN)
+    if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
+        raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    dropout = getattr(args, "rl_lora_dropout", None)
+    if dropout is not None and (rl_engine != "ports" or not 0.0 <= dropout < 1.0):
+        raise ValueError("--rl-lora-dropout needs --rl-engine ports and a value in [0, 1)")
+    if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
+        raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
              if getattr(args, name, None) is not None]
+    if getattr(args, "rl_elastic_tool_wait_board", False):
+        given.append("--rl-elastic-tool-wait-board")
+    if getattr(args, "rl_elastic_trainer_edges", False):
+        given.append("--rl-elastic-trainer-edges")
+    if getattr(args, "rl_elastic_declare_cells", False):
+        given.append("--rl-elastic-declare-cells")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
             raise ValueError(f"{flag} must be positive")
     given += [flag for name, flag in _ELASTIC_TEST_FLAGS if getattr(args, name, None) is not None]
+    given += [flag for name, flag, _ in _ELASTIC_TEST_EXPORTS
+              if getattr(args, name, None) is not None and getattr(args, name) is not False
+              and flag not in given]  # rank 0 is a valid value (E2 cut injections)
+    if getattr(args, "rl_elastic_state_dir", None) is not None:
+        given.append("--rl-elastic-state-dir")
+    if getattr(args, "rl_test_hold_before_check_s", None) is not None and not any(
+            getattr(args, n, None) not in (None, False)
+            for n, _f, e in _ELASTIC_TEST_EXPORTS if n != "rl_test_hold_before_check_s"):
+        raise ValueError("--rl-test-hold-before-check-s only acts together with another "
+                         "--rl-test-* injection (test-injection mode)")
+    if (getattr(args, "rl_test_inject_tool_wait_s", None) is not None
+            and not getattr(args, "rl_elastic_tool_wait_board", False)):
+        raise ValueError("--rl-test-inject-tool-wait-s needs --rl-elastic-tool-wait-board")
+    kill_at = getattr(args, "rl_test_kill_learner_at", None)
+    if kill_at is not None and kill_at not in KILL_PHASES:
+        raise ValueError(f"--rl-test-kill-learner-at must be one of {list(KILL_PHASES)}")
+    if kill_at is not None and not getattr(args, "rl_elastic_restart_attempts", None):
+        raise ValueError("--rl-test-kill-learner-at needs --rl-elastic-restart-attempts")
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -1043,13 +1138,17 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     if rl_engine != "ports":
         raise ValueError("--rl-elastic only applies to --rl-engine ports")
     missing = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS
-               if name != "rl_elastic_attestation" and not getattr(args, name, None)]
+               if name not in ("rl_elastic_attestation", "rl_elastic_cells")
+               and not getattr(args, name, None)]
     if missing:
         raise ValueError("--rl-elastic needs " + ", ".join(missing))
     check_elastic_placement(placement)
-    cells = [c.strip() for c in args.rl_elastic_cells.split(",") if c.strip()]
-    if not cells or any(not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", c) for c in cells):
-        raise ValueError(f"--rl-elastic-cells: bad cell ids {args.rl_elastic_cells!r}")
+    if args.rl_elastic_cells is not None:
+        cells = [c.strip() for c in args.rl_elastic_cells.split(",") if c.strip()]
+        if not cells or any(not re.fullmatch(r"[A-Za-z0-9_.:@+-]+", c) for c in cells):
+            raise ValueError(f"--rl-elastic-cells: bad cell ids {args.rl_elastic_cells!r}")
+    if getattr(args, "rl_elastic_declare_cells", False) and args.rl_elastic_cells is None:
+        raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
     from .rl.elastic_benchmark.capabilities import load_attestation, parse_configs
 
     resources = json.loads(Path(args.rl_elastic_resources).expanduser().read_text(encoding="utf-8"))
@@ -1068,10 +1167,29 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         )
 
 
+def _check_test_tool_delay(args, rl_engine: str) -> None:
+    """``--rl-test-tool-delay-s`` (TEST ONLY): the tool-wait workload's delay."""
+    from .rl.tool_wait_workload import GENERATE_PATH
+
+    delay = getattr(args, "rl_test_tool_delay_s", None)
+    if delay is None:
+        return
+    if rl_engine != "ports":
+        raise ValueError("--rl-test-tool-delay-s only applies to --rl-engine ports")
+    if not delay > 0:
+        raise ValueError("--rl-test-tool-delay-s must be positive")
+    if getattr(args, "custom_generate_function_path", None) != GENERATE_PATH:
+        raise ValueError(f"--rl-test-tool-delay-s needs --custom-generate-function-path {GENERATE_PATH}")
+
+
 def _ports_infra_flags(args) -> tuple[str, str]:
     """(prelude, learner flags) for the opt-in 2.3/3.x switches; ("", "") by default."""
 
     prelude, flags = "", ""
+    if getattr(args, "rl_test_tool_delay_s", None) is not None:
+        from .rl.tool_wait_workload import TOOL_DELAY_ENV
+
+        prelude += f"export {TOOL_DELAY_ENV}={float(args.rl_test_tool_delay_s)!r}\n"
     if getattr(args, "rl_eval_interval", None) is not None:
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -1084,19 +1202,40 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             f" --eval-dataset-name {shlex.quote(args.rl_eval_dataset_name)}"
             f" --eval-samples-per-prompt {int(args.rl_eval_samples_per_prompt)}"
         )
+        for name, flag in _EVAL_OPTIONAL_FLAGS:
+            value = getattr(args, name, None)
+            if value is not None:
+                flags += f" {flag} {value!r}"
     if getattr(args, "rl_overlap_eval", False):
         flags += " --rl-overlap-eval"
+    if getattr(args, "rl_observe_timeline", False):
+        flags += " --rl-observe-timeline"
+    if getattr(args, "rl_deterministic_trainer", False):
+        flags += " --rl-deterministic-trainer"
+    if getattr(args, "rl_lora_dropout", None) is not None:
+        flags += f" --rl-lora-dropout {float(args.rl_lora_dropout)!r}"
+    if getattr(args, "rl_print_attestation_fingerprint", False):
+        flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
             f"{shlex.quote(args.rl_elastic_resources_json)} > ~/yeto-rl/elastic_resources.json\n"
         )
+        state_dir = (shlex.quote(args.rl_elastic_state_dir)
+                     if getattr(args, "rl_elastic_state_dir", None) else ELASTIC_ISLAND_STATE_DIR)
         flags += (
             " --rl-elastic --rl-elastic-resources ~/yeto-rl/elastic_resources.json"
-            f" --rl-elastic-state-dir {ELASTIC_ISLAND_STATE_DIR}"
+            f" --rl-elastic-state-dir {state_dir}"
             f" --rl-elastic-initial-config {shlex.quote(args.rl_elastic_initial_config)}"
-            f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
         )
+        if args.rl_elastic_cells is not None:
+            flags += f" --rl-elastic-cells {shlex.quote(args.rl_elastic_cells)}"
+        if getattr(args, "rl_elastic_declare_cells", False):
+            flags += " --rl-elastic-declare-cells"
+        if getattr(args, "rl_elastic_tool_wait_board", False):
+            flags += " --rl-elastic-tool-wait-board"
+        if getattr(args, "rl_elastic_trainer_edges", False):
+            flags += " --rl-elastic-trainer-edges"
         for name, flag in _ELASTIC_PAUSE_FLAGS:
             value = getattr(args, name, None)
             if value is not None:
@@ -1106,6 +1245,16 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             from .rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
 
             prelude += f"export {INJECT_START_DELAY_ENV}={float(delay)!r}\n"
+        for name, _flag, env in _ELASTIC_TEST_EXPORTS:
+            value = getattr(args, name, None)
+            if value is True:
+                value = 1
+            if value is not None and value is not False:  # rank 0 is valid
+                prelude += f"export {env}={shlex.quote(str(value))}\n"
+        attempts = getattr(args, "rl_elastic_restart_attempts", None)
+        if attempts:
+            prelude += f"export YETO_RL_RESTART_ATTEMPTS={int(attempts)}\n" + RESTART_LOOP_FN
+            args.rl_learner_launch_prefix = "yeto_rl_restart_loop "
         block = getattr(args, "rl_test_inject_update_weights_block_s", None)
         if block is not None:
             from .rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV
@@ -1892,6 +2041,11 @@ def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
     return stem[: 63 - len(suffix)].rstrip("-") + suffix
 
 
+DOCKER_LOGIN_UNSET = (
+    "unset SKYPILOT_DOCKER_USERNAME SKYPILOT_DOCKER_PASSWORD SKYPILOT_DOCKER_SERVER\n"
+)
+
+
 def _sky_docker_login_config(login: dict[str, str]):
     """SkyPilot's DockerLoginConfig for a SKYPILOT_DOCKER_* triple."""
     from sky.provision.docker_utils import DockerLoginConfig
@@ -2277,21 +2431,26 @@ def make_miles_island_task(
         "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
     # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): the
-    # SKYPILOT_DOCKER_* login goes only into the resources'
-    # docker_login_config, which SkyPilot uses for `docker login` at
-    # provisioning.  Not task envs/secrets: SkyPilot 0.13 exports both into
-    # every setup/run process.  Ports engine only (legacy is unchanged); use
-    # a token with read:packages only.
+    # SKYPILOT_DOCKER_* login goes into the task SECRETS, SkyPilot's supported
+    # form: every Task load re-derives the DockerLoginConfig from them
+    # (sky/task.py _with_docker_login_config). A DockerLoginConfig placed in
+    # Resources does not survive sky 0.13's YAML round trip (Resources.
+    # from_yaml_config keeps a dict, the next to_yaml_config calls
+    # dataclasses.asdict on it: "asdict() should be called on dataclass
+    # instances"; B1 nsmoke). SkyPilot exports secrets into setup/run, so both
+    # scripts unset them first. Ports engine only; read:packages token only.
     registry_login = (
         registry_credentials(args.rl_image, os.environ)
         if getattr(args, "rl_engine", "ports") == "ports"
         else None
     )
+    login_unset = DOCKER_LOGIN_UNSET if registry_login else ""
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
-        setup="\n".join(setup_steps),
+        setup=login_unset + "\n".join(setup_steps),
+        **({"secrets": dict(registry_login)} if registry_login else {}),
         run=(
-            f"{HF_TOKEN_ENV}\n"
+            f"{login_unset}{HF_TOKEN_ENV}\n"
             "set -e\n"
             "cd ~/sky_workdir\n"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
@@ -2326,7 +2485,7 @@ def make_miles_island_task(
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir"
             "${PYTHONPATH:+:$PYTHONPATH} "
-            f"python3 -m yeto.rl.learner{flags}\n"
+            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}\n"
             "else\n"
             '  until ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"; '
             "do sleep 2; done\n"
@@ -2349,8 +2508,6 @@ def make_miles_island_task(
         "disk_size": args.disk_size,
     }
     resources["image_id"] = args.rl_image
-    if registry_login:
-        resources["_docker_login_config"] = _sky_docker_login_config(registry_login)
     if spec.num_nodes > 1:
         resources["network_tier"] = "best"
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
@@ -3102,6 +3259,19 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         volume_name=volume_name,
         volume_mount=volume_mount,
         workdir=str(REPO_ROOT),
+        # Opt-in overrides (default: Modal runner defaults, 10 retries / 24 h).
+        # Acceptance runs pass --modal-retries 0 so a learner exit is final
+        # (no re-run billing) and --modal-timeout-s as the Modal-side hard stop.
+        # --no-island-relaunch ("a failed island is never relaunched") forces the
+        # platform retries to 0 too: Modal's own retry re-runs a failed island
+        # container by itself (up to 10 times) and would silently undo the flag --
+        # a second paid container, replaying from the last checkpoint, that the
+        # launcher neither tracks nor tears down. Wins over an explicit --modal-retries N.
+        **({"retries": 0} if getattr(args, "no_island_relaunch", False)
+           else {"retries": int(args.modal_retries)}
+           if getattr(args, "modal_retries", None) is not None else {}),
+        **({"timeout_s": int(args.modal_timeout_s)}
+           if getattr(args, "modal_timeout_s", None) is not None else {}),
     )
 
 
@@ -3133,12 +3303,33 @@ def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
 from .rl.event_echo import TapeCollector as EventCollector  # noqa: E402  (no-sync tapes)
 
 
+def wait_for_tapes(collectors: dict, names, threads, limit: float, *,
+                   clock=time.monotonic, sleep=time.sleep, poll: float = 0.2) -> str:
+    """Bounded, event-based wait before the tapes are judged complete.
+
+    Returns ``"finalized"`` as soon as every expected island's collector holds its
+    ``rl_learner_finalized`` record, ``"streams_ended"`` when every log stream
+    ended (nothing more can arrive), else ``"deadline"`` after ``limit`` s.
+    """
+    deadline = clock() + limit
+    while True:
+        if set(collectors) >= set(names) and all(c.finalized for c in collectors.values()):
+            return "finalized"
+        if not any(t.is_alive() for t in threads):
+            return "streams_ended"
+        if clock() >= deadline:
+            return "deadline"
+        sleep(poll)
+
+
 def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
     """Stream a Modal island's container logs (the Modal twin of _tail)."""
     while True:
         try:
             for line in modal_ops.stream_logs(call_id):
-                print(f"[{prefix}] {str(line).rstrip()}", flush=True)
+                # a Modal log entry may hold several lines: prefix each one
+                for part in str(line).rstrip("\n").split("\n"):
+                    print(f"[{prefix}] {part.rstrip()}", flush=True)
                 if collector is not None:
                     collector.feed(line)
             return 0
@@ -3560,6 +3751,20 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     return confirmed
 
 
+def effective_recover_timeout(args) -> float:
+    """The fleet controller's learner relaunch budget.
+
+    ``--no-island-relaunch`` or ``--modal-retries 0`` (a learner exit is final,
+    e.g. acceptance runs) -> 0: a failed island is torn down, never relaunched
+    by the launcher, so no second paid container can start before the app
+    stops. Otherwise ``--recover-timeout`` unchanged (all clouds share this
+    loop: sky islands relaunch through the same FleetController).
+    """
+    if getattr(args, "no_island_relaunch", False) or getattr(args, "modal_retries", None) == 0:
+        return 0
+    return args.recover_timeout
+
+
 class FleetController:
     """Supervises the syncer + learner fleet after the initial launch.
 
@@ -3612,6 +3817,7 @@ class FleetController:
         finalized_probe=None,
         progress_probe=None,
         stall_timeout: float = 0.0,
+        stop_flag=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -3619,6 +3825,9 @@ class FleetController:
         `on_relaunch(name, new_job_id)` is called after every successful
         cluster relaunch (production spawns a new log tail)."""
         self.ops = sky_ops
+        # Path of the run's STOP flag file (``runs.stop_flag_path``; ``yeto stop-run``
+        # writes it): once it exists no island is relaunched any more.
+        self.stop_flag = stop_flag
         self.poll_interval = poll_interval
         self.recover_timeout = recover_timeout
         self.on_relaunch = on_relaunch
@@ -3917,7 +4126,19 @@ class FleetController:
                 self._abandon(rec, elapsed)
                 return
         if rec["attempt"] is None:
+            if self._stop_requested(rec, "recovery"):
+                if not is_syncer:  # the syncer is never abandoned; it just is not relaunched
+                    self._abandon(rec, elapsed, reason="STOP flag")
+                return
             rec["attempt"] = self._start_relaunch(rec)
+
+    def _stop_requested(self, rec, where: str) -> bool:
+        flag = self.stop_flag
+        if flag is None or not os.path.exists(flag):
+            return False
+        print(f"[launcher] {rec['name']}: STOP flag {flag} present; not relaunching "
+              f"({where} ends here)", file=sys.stderr)
+        return True
 
     def _start_relaunch(self, rec) -> _RelaunchAttempt:
         attempt = _RelaunchAttempt()
@@ -3925,6 +4146,9 @@ class FleetController:
 
         def _run():
             try:
+                if self._stop_requested(rec, "relaunch"):  # set after the check in the poll loop
+                    attempt.result = None
+                    return
                 attempt.result = self.ops.relaunch(task, name)
             except Exception as e:
                 print(f"[launcher] relaunch of {name} raised: {e}", file=sys.stderr)
@@ -3942,9 +4166,10 @@ class FleetController:
         thread.start()
         return attempt
 
-    def _abandon(self, rec, elapsed: float) -> None:
+    def _abandon(self, rec, elapsed: float, reason: str | None = None) -> None:
         rec["state"] = ABANDONED
-        rec["exit"] = f"ABANDONED after {elapsed:.0f}s"
+        rec["exit"] = (f"ABANDONED ({reason}) after {elapsed:.0f}s" if reason
+                       else f"ABANDONED after {elapsed:.0f}s")
         attempt = rec.get("attempt")
         if attempt is not None and attempt.thread is not None and not attempt.finished:
             # let an in-flight relaunch finish (bounded) so its cluster is torn
@@ -3958,7 +4183,8 @@ class FleetController:
         self._down(rec["name"])
         if self.fixed_roster:
             message = (
-                f"fixed-roster learner {rec['name']} could not recover "
+                f"fixed-roster learner {rec['name']} could not recover"
+                f"{' (' + reason + ')' if reason else ''} "
                 f"({rec.get('failures', 0)} failure(s) in the window, "
                 f"{elapsed:.0f}s recovering; timeout {self.recover_timeout}s)"
             )
@@ -4343,6 +4569,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
 
+        from . import runs
         from .modal_runner import RoutingOps
 
         controller = FleetController(
@@ -4350,11 +4577,12 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
             sky_ops=RoutingOps(SkySDKOps(), modal_island_ops),
             poll_interval=args.controller_poll,
-            recover_timeout=args.recover_timeout,
+            recover_timeout=effective_recover_timeout(args),
             on_relaunch=spawn_tail,
             syncer_probe=local_syncer.probe if head_mode else None,
             syncer_restart=local_syncer.restart if head_mode else None,
             fixed_roster=getattr(args, "training_mode", "sft") == "rl",
+            stop_flag=runs.stop_flag_path(args.cluster_prefix),
             finalized_probe=(
                 (lambda name: name in event_collectors and event_collectors[name].finalized)
                 if echo_names else None
@@ -4371,9 +4599,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             if echo_names:
                 # The island's last events (finalization) must be on disk before
                 # teardown: the log streams end when the island exits; bounded wait.
-                deadline = time.monotonic() + limit
-                for thread in tail_threads:
-                    thread.join(max(0.0, deadline - time.monotonic()))
+                wait_for_tapes(event_collectors, echo_names, tail_threads, limit)
                 # Fail closed: stop writing (a stream still alive after the bounded
                 # wait can no longer touch the tape) and mark unfinalized tapes.
                 for name, collector in event_collectors.items():

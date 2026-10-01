@@ -388,3 +388,58 @@ def batch_guard_problems(plan: ReshardPlan, *, rank_configs: list[Mapping[str, A
     else:
         out += step_problems(list(rollout_indices), plan)
     return out
+
+
+# --------------------------------------------------------------------------
+# Argv-level profile (identical check locally and in the container)
+# --------------------------------------------------------------------------
+
+# Upstream parse defaults of the fields the checks above read (fork 5c1b49eb:
+# Megatron hidden/attention dropout 0.1, Miles micro batch 1, store_true flags False).
+ARGV_DEFAULTS: dict[str, Any] = {
+    "hidden_dropout": 0.1, "attention_dropout": 0.1, "lora_dropout": 0.0, "micro_batch_size": 1,
+    "global_batch_size": None, "virtual_pipeline_model_parallel_size": None, "multimodal_keys": None,
+    "multi_lora_n_adapters": 0, "num_distributed_optimizer_instances": 1,
+    "tensor_model_parallel_size": 1, "pipeline_model_parallel_size": 1, "context_parallel_size": 1,
+    "expert_model_parallel_size": 1,
+}
+ARGV_FLAGS = ("balance_data", "balance_by_flops", "use_dynamic_batch_size", "use_dynamic_global_batch_size",
+              "allow_partial_train_step", "calculate_per_token_loss", "normalize_advantages", "multi_lora",
+              "indep_dp", "fp16", "bf16", "use_precision_aware_optimizer", "use_distributed_optimizer")
+
+
+def argv_profile(argv: Iterable[str], overrides: Mapping[str, Any] | None = None) -> Any:
+    """The reshard-relevant Miles args as the argv sets them (defaults as upstream parse), plus overrides."""
+    from types import SimpleNamespace
+
+    values: dict[str, Any] = dict(ARGV_DEFAULTS)
+    values.update({flag: False for flag in ARGV_FLAGS})
+    tokens = list(argv)
+    for i, token in enumerate(tokens):
+        if not token.startswith("--"):
+            continue
+        name, _, inline = token[2:].partition("=")
+        key = name.replace("-", "_")
+        if key.startswith("no_") and key[3:] in ARGV_FLAGS:
+            values[key[3:]] = False
+        elif key in ARGV_FLAGS:
+            values[key] = True
+        elif key in ARGV_DEFAULTS:
+            raw = inline or (tokens[i + 1] if i + 1 < len(tokens) else None)
+            try:
+                values[key] = float(raw) if "dropout" in key else int(raw)
+            except (TypeError, ValueError):
+                values[key] = raw
+    values.update(dict(overrides or {}))
+    return SimpleNamespace(**values)
+
+
+def argv_reshard_problems(argv: Iterable[str], algorithm: Any, overrides: Mapping[str, Any] | None = None,
+                          dps: tuple[tuple[int, int], ...] = ((1, 2), (2, 1))) -> dict[str, list[str]]:
+    """``reshard_problems`` for each DP edge of the harness, from the Miles argv alone."""
+    args = argv_profile(argv, overrides)
+    gbs = int(args.global_batch_size or 0)
+    mbs = int(args.micro_batch_size or 1)
+    lay = lambda dp: {"world": dp, "tp": 1, "pp": 1, "cp": 1, "ep": 1, "dp": dp}  # noqa: E731
+    return {f"{s}->{d}": reshard_problems(ReshardPlan(lay(s), lay(d), gbs, mbs), args=args, spec=algorithm)
+            for s, d in dps}

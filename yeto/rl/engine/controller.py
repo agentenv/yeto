@@ -92,6 +92,9 @@ TERMINAL = frozenset({SUCCEEDED, CANCELLED, REBUILT_OLD, RECOVERY_REQUIRED})
 # Phases after which the old engine set can no longer simply be resumed.
 DESTRUCTIVE = frozenset({TRANSFERRING, INITIALIZING, VERIFYING, REBUILD_OLD, REBUILDING_TRAINER})
 TRAINER_REBUILD = "trainer-rebuild"
+# Test-only learner kill at a phase (plan.md E1-D ⑤ COMMITTED, ⑥ QUIESCING).
+KILL_AT_ENV = "YETO_RL_TEST_KILL_LEARNER_AT"
+KILL_EXIT_CODE = 86
 
 E1_EDGE_KINDS = frozenset({"rollout-only"})
 
@@ -148,6 +151,14 @@ class Plan:
     @property
     def remove(self) -> int:
         return max(0, self.source_engines - self.target_engines)
+
+
+def _failure_detail(exc: BaseException) -> dict[str, Any]:
+    """Publication cause + disagreeing engine ids of a failed step (``other`` when the
+    exception is not a structured PublicationError)."""
+    cause = getattr(exc, "cause", None)
+    return {"cause": getattr(cause, "value", cause) or "other",
+            "inconsistent_engines": list(getattr(exc, "engine_ids", ()) or ())}
 
 
 def request_body(target: str, expected_epoch: int, deadline_s: float) -> dict[str, Any]:
@@ -244,6 +255,9 @@ class IslandController:
         # trainer is touched; any other exception is RECOVERY_REQUIRED.
         self.trainer_rebuilder = trainer_rebuilder
         self._record_lock = threading.RLock()
+        import os as _os
+
+        self._exit = _os._exit  # test seam for KILL_AT_ENV
         # Serializes "watchdog decides + kills" with "phase change" and with the
         # last check before the commit CAS (review F2): once the watchdog fired
         # the transaction cannot commit; once the commit began it cannot kill.
@@ -265,6 +279,7 @@ class IslandController:
         self._last_op: tuple[str, tuple[str, ...]] | None = None
         self._pending_retry: tuple[str, tuple[str, ...]] | None = None
         self.admission_open = True
+        self.last_outcome: dict[str, Any] | None = None
         self.recovery_required: str | None = None
         self._watchdog_fired = threading.Event()
         self._replay()
@@ -301,6 +316,25 @@ class IslandController:
         with self._record_lock:
             return self.journal.append(kind, **fields)
 
+    def _maybe_test_kill(self, phase: str) -> None:
+        """TEST ONLY (plan.md E1-D ⑤⑥): ``YETO_RL_TEST_KILL_LEARNER_AT=<PHASE>``
+        hard-kills the learner (``os._exit``) right after a transaction journals PHASE, once
+        per state dir (marker file), so the restarted learner goes on."""
+        import os
+
+        wanted = os.environ.get(KILL_AT_ENV)
+        if not wanted or wanted != phase:
+            return
+        marker = self.state_dir / f"test-killed-at-{phase}"
+        if marker.exists():
+            return
+        marker.write_text("killed\n", encoding="utf-8")
+        import sys
+
+        print(f"[yeto] TEST INJECTION {KILL_AT_ENV}={phase}: killing the learner",
+              file=sys.stderr, flush=True)
+        self._exit(KILL_EXIT_CODE)
+
     def watchdog_target_cells(self) -> list[str]:
         """The target generation a fired watchdog may kill (3.7/H2): cells this
         transaction is starting/verifying. Never old members, never a drain."""
@@ -314,8 +348,62 @@ class IslandController:
                        if r["kind"] == "add_intent" and r.get("tx_id") == tx.tx_id), None)
         return sorted(intent["members"]) if intent else []
 
+    def record_test_event(self, driver: Any, event: str, **fields: Any) -> None:
+        """TEST ONLY: a structured record of a test injection (``test_injection``) or
+        hold (``test_hold``) on BOTH the journal and the driver's tape, tagged with the
+        running transaction (id, phase) and a ``ts``. The journal's own record kind is
+        ``event``, so the injection's ``kind`` is stored as ``injection_kind`` there."""
+        tx = self._tx
+        full = {"ts": time.time(), "tx_id": None if tx is None else tx.tx_id,
+                "phase": None if tx is None else tx.phase, **fields}
+        journal_fields = dict(full)
+        if "kind" in journal_fields:
+            journal_fields["injection_kind"] = journal_fields.pop("kind")
+        self._record(event, **journal_fields)
+        emit = getattr(driver, "emit", None)
+        if callable(emit):
+            emit(event, **full)
+
+    def _block_state(self, tx_id: str) -> str:
+        """``not_reached`` / ``blocked`` / ``released`` of this transaction's injected
+        update_weights block, from its ``test_injection`` records."""
+        last = None
+        for r in self.journal.records:
+            if (r["kind"] == "test_injection" and r.get("injection_kind") == "block_update"
+                    and r.get("tx_id") == tx_id):
+                last = r
+        if last is None or not last.get("applied"):
+            return "not_reached"
+        return "released" if last.get("released_ts") is not None else "blocked"
+
+    def _watchdog_classification(self, tx: _Tx, phase: str) -> dict[str, Any]:
+        """Which situation a fired watchdog was in (the deadline itself is unchanged):
+        ``INJECTION_NOT_REACHED`` (still INITIALIZING, or the block was never reached),
+        ``FIRED_ON_BLOCKED_UPDATE`` (stuck at the injected block) or
+        ``FIRED_AFTER_BLOCK_RELEASED`` (the block ended, the real update was running)."""
+        state = self._block_state(tx.tx_id)
+        reached = state != "not_reached"
+        if phase == INITIALIZING or not reached:
+            cls = "INJECTION_NOT_REACHED"
+        elif state == "blocked":
+            cls = "FIRED_ON_BLOCKED_UPDATE"
+        else:
+            cls = "FIRED_AFTER_BLOCK_RELEASED"
+        return {"injection_reached": reached, "classification": cls}
+
     def record_watchdog_action(self, tx_id: str, **fields: Any) -> None:
         self._record("watchdog_action", tx_id=tx_id, **fields)
+
+    def watchdog_unresolved(self, tx_id: str, phase: str, errors: Any) -> None:
+        """The watchdog action could not kill (all of) the target generation. The step
+        stays blocked on engines nobody manages, so the old-set rebuild cannot be
+        trusted: enter RECOVERY_REQUIRED at once (admission closed, the learner stops
+        consuming); the blocked step's own ``_rebuild_old`` then re-raises it."""
+        tx = self._tx
+        if tx is None or tx.tx_id != tx_id or self.recovery_required:
+            return
+        self._enter_recovery(tx_id, f"watchdog could not kill the target generation in {phase}: "
+                                    f"{list(errors)[:2]!r}")
 
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler
@@ -330,6 +418,7 @@ class IslandController:
         self._record("phase", tx_id=tx.tx_id, request_id=tx.request_id, phase=phase,
                      config_epoch=self.journal.epochs.config_epoch,
                      fork_epoch=self._fork_epoch, **fields)
+        self._maybe_test_kill(phase)
 
     # ------------------------------------------------------------------ startup
     def open(self, pool: ElasticRolloutPool) -> IslandStatus:
@@ -694,6 +783,9 @@ class IslandController:
         return self._tx is not None
 
     def _finish(self, tx: _Tx, phase: str, **fields: Any) -> None:
+        # what the driver puts on the tape's rl_reconfiguration (error / cause / engines)
+        self.last_outcome = {"tx_id": tx.tx_id, "phase": phase, **{
+            k: v for k, v in fields.items() if k in ("error", "cause", "inconsistent_engines")}}
         self._phase(tx, phase, **fields)
         self._tx = None
         self.admission_open = self.recovery_required is None
@@ -717,13 +809,15 @@ class IslandController:
             with self._watchdog_lock:
                 if self._committing or self._tx is not tx:
                     self._record("watchdog", tx_id=tx.tx_id, phase=tx.phase, target_cells=[],
-                                 note="deadline passed after the commit point; nothing killed")
+                                 note="deadline passed after the commit point; nothing killed",
+                                 **self._watchdog_classification(tx, tx.phase))
                     return
                 self._watchdog_fired.set()
                 phase = tx.phase
                 self._record("watchdog", tx_id=tx.tx_id, phase=phase,
                              target_cells=self.watchdog_target_cells(),
-                             note="absolute transaction deadline passed while a step was running")
+                             note="absolute transaction deadline passed while a step was running",
+                             **self._watchdog_classification(tx, phase))
                 if self._on_watchdog is not None:
                     try:
                         self._on_watchdog(tx.tx_id, phase)
@@ -918,7 +1012,14 @@ class IslandController:
                 try:
                     pool.undrain(removed)
                 except Exception as undo:  # noqa: BLE001
+                    # The cancel is only safe if the cordoned members serve again: with
+                    # them still cordoned the old routing is NOT restored, so reopening
+                    # admission would run the fleet short. Never CANCELLED here.
                     self._record("undrain_failed", tx_id=tx.tx_id, error=str(undo))
+                    self._enter_recovery(
+                        tx.tx_id, f"{exc}; undrain of {sorted(removed)} failed: {undo!r}")
+                    self._tx = None
+                    raise RecoveryRequired(self.recovery_required) from undo
             self._finish(tx, CANCELLED, error=str(exc))
             return CANCELLED
         # ---- destructive part ----
@@ -969,6 +1070,8 @@ class IslandController:
                 self._record("weight_admission", tx_id=tx.tx_id, members=sorted(added),
                              policy_token=cut["policy_token"],
                              manifest_hash=result.manifest.target_manifest_hash)
+                self._emit_member_publication(driver, tx, result, token_rollout,
+                                              phase=VERIFYING)
             else:
                 self._phase(tx, VERIFYING)
             self._check_deadline(tx, "verify")
@@ -984,11 +1087,12 @@ class IslandController:
             if tx.cancel_requested:
                 raise TransactionFailed(VERIFYING, "cancelled by request")
         except TransactionFailed as exc:
-            return self._rebuild_old(tx, driver, old_members, str(exc))
+            return self._rebuild_old(tx, driver, old_members, str(exc), **_failure_detail(exc))
         except RecoveryRequired:
             raise
         except Exception as exc:  # noqa: BLE001 - any engine failure: restore the old set
-            return self._rebuild_old(tx, driver, old_members, f"{type(exc).__name__}: {exc}")
+            return self._rebuild_old(tx, driver, old_members, f"{type(exc).__name__}: {exc}",
+                                     **_failure_detail(exc))
         # ---- COMMITTED: the single commit point is the durable CAS ----
         # Review F2: re-check the watchdog under its lock; a fired watchdog may
         # have killed the new cells after the last verify, so never commit then.
@@ -1001,6 +1105,8 @@ class IslandController:
             return self._rebuild_old(tx, driver, old_members,
                                      "watchdog fired before the commit point")
         self._phase(tx, COMMITTED, members=sorted(target_members))
+        self._emit_membership(driver, tx, new_epoch, target_members,
+                              kind="up" if plan.add else "down", rollout_id=snapshot.rollout_id)
         # ---- RESUMING ----
         self._phase(tx, RESUMING)
         placement = driver.placement
@@ -1188,13 +1294,55 @@ class IslandController:
                 return False
             self._sleep(self.timeouts.retry_interval)
 
-    def _rebuild_old(self, tx: _Tx, driver: Any, old_members: frozenset[str], error: str) -> str:
-        """E1 failure path (D5): restore the old engine count and republish the same policy."""
+    def _emit_member_publication(self, driver: Any, tx: _Tx, result: Any, rollout_id: Any, *,
+                                 phase: str) -> None:
+        """Tape record of a member-scoped publication (3.4a/3.5 ``publish_members``):
+        the already-published policy loaded into ``members`` (new or restarted
+        engines) at a reconfiguration, so the engines serving the next generation
+        are auditable on the tape before the next full ``rl_publication``."""
+        emit = getattr(driver, "emit", None)
+        if not callable(emit):
+            return
+        manifest = result.manifest
+        serving = sorted(frozenset(self._pool.members()) | frozenset(result.members))
+        emit(
+            "rl_member_publication",
+            policy_version=rollout_id,
+            tx_id=tx.tx_id,
+            phase=phase,
+            **{
+                "rl/policy_token": getattr(driver, "expected_token", None),
+                "sync/publication_payload_bytes": manifest.payload_bytes,
+                "sync/publication_payload_hash": manifest.payload_hash,
+                "sync/publication_manifest_hash": manifest.target_manifest_hash,
+                "sync/publication_members": sorted(result.members),
+                "sync/serving_members": serving,
+            },
+        )
+
+    def _emit_membership(self, driver: Any, tx: _Tx, config_epoch: int, members: Any, *,
+                         kind: str, rollout_id: int) -> None:
+        """Tape record of a committed scale-up/-down: the membership the next generation
+        (rollout ``rollout_id``, generated right after this safe point) is served by.
+        Carries no payload: it is NOT a publication (``rl_member_publication`` is only
+        written when a member publication really ran)."""
+        emit = getattr(driver, "emit", None)
+        if callable(emit):
+            emit("rl_membership", config_epoch=config_epoch, members=sorted(members),
+                 tx_id=tx.tx_id, kind=kind, round=rollout_id)
+
+    def _rebuild_old(self, tx: _Tx, driver: Any, old_members: frozenset[str], error: str, *,
+                     cause: str = "other", inconsistent_engines: Any = ()) -> str:
+        """E1 failure path (D5): restore the old engine count and republish the same policy.
+
+        ``cause`` / ``inconsistent_engines`` (publication cause enum, disagreeing engine ids)
+        go on the REBUILD_OLD and REBUILT_OLD journal records."""
         pool = self._pool
         if self.recovery_required:
             self._tx = None
             raise RecoveryRequired(self.recovery_required)
-        self._phase(tx, REBUILD_OLD, error=error)
+        detail = {"cause": cause, "inconsistent_engines": sorted(inconsistent_engines)}
+        self._phase(tx, REBUILD_OLD, error=error, **detail)
         try:
             self._retry_incomplete(tx, recovery=True)
             if tx.extra.get("started"):
@@ -1211,6 +1359,8 @@ class IslandController:
                     token_rollout_id=driver.published_version)
                 if frozenset(result.members) != missing:
                     raise TransactionFailed(REBUILD_OLD, "old engines did not acknowledge")
+                self._emit_member_publication(driver, tx, result, driver.published_version,
+                                              phase=REBUILD_OLD)
             still = tx.removed & frozenset(pool.members())
             if still:
                 pool.undrain(still)
@@ -1223,7 +1373,7 @@ class IslandController:
             self._tx = None
             raise RecoveryRequired(self.recovery_required) from exc
         self._sync_fork_mirror()
-        self._finish(tx, REBUILT_OLD, error=error)
+        self._finish(tx, REBUILT_OLD, error=error, **detail)
         return REBUILT_OLD
 
 
