@@ -183,6 +183,52 @@ def _must_be_false(reason: str) -> _Check:
     return check
 
 
+# IR-1: the only upstream generate function that reads the agent flags.
+AGENTIC_TOOL_CALL_GENERATE = "miles.rollout.generate_hub.agentic_tool_call.generate"
+# IR-1 (codex-harness 7.1): reward is attributed per trajectory; a per-segment
+# scope would make sibling segments pose as independent GRPO samples.
+HARNESS_REWARD_SCOPES = ("trajectory",)
+# Upstream rule the session-server / partial-rollout exclusion quotes.
+SESSION_SERVER_PARTIAL_ROLLOUT_RULE = (
+    'miles/utils/arguments.py:3240 "--use-session-server does not support --partial-rollout"'
+)
+
+
+def _requires_agentic_generate(flag: str) -> _Check:
+    def check(value, config):
+        if value is None:
+            return None
+        if config.agent.custom_generate_function_path != AGENTIC_TOOL_CALL_GENERATE:
+            return (
+                f"{flag} requires custom_generate_function_path={AGENTIC_TOOL_CALL_GENERATE} "
+                f"(got {config.agent.custom_generate_function_path!r})"
+            )
+        return None
+
+    return check
+
+
+def check_session_server_partial_rollout(use_session_server: Any, partial_rollout: Any) -> None:
+    """IR-1: the session server and partial rollout are mutually exclusive upstream."""
+    if use_session_server and partial_rollout:
+        raise UnmappedConfigError(
+            "agent.use_session_server",
+            f"--use-session-server with --partial-rollout is refused upstream: "
+            f"{SESSION_SERVER_PARTIAL_ROLLOUT_RULE}",
+        )
+
+
+def check_harness_reward_scope(scope: Any) -> None:
+    """IR-1 (codex-harness 7.1): only ``trajectory`` (or unset) starts."""
+    if scope is None:
+        return
+    if str(scope) not in HARNESS_REWARD_SCOPES:
+        raise MilesConfigError(
+            f"harness reward_scope={scope!r} is not supported; segments share the "
+            f"trajectory reward (allowed: {', '.join(HARNESS_REWARD_SCOPES)})"
+        )
+
+
 def _check_parameter_mode(value, _config):
     return None if value == "lora" else "only the LoRA parameter layout is implemented"
 
@@ -329,12 +375,13 @@ LEAF_POLICY: dict[str, _Check] = {
         "upstream Miles has no --train-master-base-port (fork-only port isolation, task 1.4b)"
     ),
     "agent.custom_generate_function_path": _ok,
-    "agent.custom_agent_function_path": _must_be_none(
-        "upstream Miles has no --custom-agent-function-path"
+    # IR-1: upstream agentic_tool_call.generate owns --custom-agent-function-path
+    # and --max-seq-len (miles/rollout/generate_hub/agentic_tool_call.py
+    # add_arguments); any other generate function has no reader for them.
+    "agent.custom_agent_function_path": _requires_agentic_generate(
+        "--custom-agent-function-path"
     ),
-    "agent.agent_max_seq_len": _must_be_none(
-        "--max-seq-len only accompanies the fork-only custom agent function"
-    ),
+    "agent.agent_max_seq_len": _requires_agentic_generate("--max-seq-len"),
     "agent.dynamic_sampling_filter_path": _ok,  # reconciled with AlgorithmSpec
     "agent.use_rollout_routing_replay": _ok,
     "agent.use_session_server": _ok,
@@ -342,7 +389,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "agent.session_server_port": _ok,
     "agent.tito_model": _ok,
     "agent.tito_allowed_append_roles": _must_be_none(
-        "upstream Miles has no --tito-allowed-append-roles"
+        "upstream Miles has no --tito-allowed-append-roles; the append roles are "
+        "decided by the --tito-model template (allowed_append_roles)"
     ),
     # The driver owns the loop and the outer sync; no Miles callback needed.
     "yeto_policy_sync": _ok,
@@ -745,6 +793,10 @@ def translate_run_config(
         values.append("--use-rollout-routing-replay")
     if agent.custom_generate_function_path:
         values.extend(("--custom-generate-function-path", agent.custom_generate_function_path))
+    if agent.custom_agent_function_path:  # IR-1 (leaf policy proved agentic generate)
+        values.extend(("--custom-agent-function-path", agent.custom_agent_function_path))
+    if agent.agent_max_seq_len is not None:
+        values.extend(("--max-seq-len", str(int(agent.agent_max_seq_len))))
     if agent.use_session_server:
         values.append("--use-session-server")
         if agent.session_server_ip:
@@ -801,6 +853,9 @@ def translate_run_config(
             values.extend((f"--{name.replace('_', '-')}", str(value)))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
+    # IR-1: the final argv never pairs the session server with partial rollout
+    # (also re-checked on the parsed namespace by validate_parsed_args).
+    check_session_server_partial_rollout(agent.use_session_server, "--partial-rollout" in values)
 
     return MilesLaunchArgs(
         argv=tuple(values),
@@ -843,6 +898,11 @@ def validate_parsed_args(
             f"Miles normalized the arguments into fault-tolerance mode ({enabled}); "
             "the ports engine refuses FT semantics"
         )
+    # IR-1: Miles normalization may set either flag; refuse the pair here too.
+    check_session_server_partial_rollout(
+        getattr(args, "use_session_server", False), getattr(args, "partial_rollout", False)
+    )
+    check_harness_reward_scope(getattr(args, "yeto_harness_reward_scope", None))
     counter = num_cells or _upstream_num_cells
     cells = counter(args)
     if cells != 1:

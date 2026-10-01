@@ -381,6 +381,9 @@ def handle_from_metadata(
         nonzero_advantages=(
             int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
         ),
+        policy_age_violation=(
+            int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
+        ),
     )
 
 
@@ -395,6 +398,9 @@ def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
 # ``stock``: Miles' own generate (no custom generate function) makes no tool
 # calls, so 0 is known; any other custom generate without a board is unknown.
 TOOL_WAIT_NO_BOARD_STOCK = "stock-generate"
+# IR-2: the island runs no agent harness (no custom agent function): harness
+# counts are known zeros (tool_wait.HARNESS_ZERO), never "unknown".
+HARNESS_NOT_AGENTIC = "not-agentic"
 
 
 def _engine_load(entries: Any) -> tuple[int, int] | None:
@@ -444,10 +450,15 @@ class MilesRolloutPool:
         bundles: Any = None,
         gpus_per_engine: int | None = None,
         load_tool_wait: Any = None,
+        harness: Any = None,
     ) -> None:
         # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
         # tool-wait count, so trajectory_load() is unknown (None).
         self._tool_wait_board = tool_wait_board
+        # IR-2: harness board (tool_wait.HarnessBoard, local or actor handle),
+        # HARNESS_NOT_AGENTIC for islands without a harness (explicit zeros),
+        # or None = unknown (fails the drain closed).
+        self._harness = harness
         # 1.7 load samples read tool waits from ``load_tool_wait`` (a board,
         # TOOL_WAIT_NO_BOARD_STOCK, or None = unknown); default: the drain board.
         self._load_tool_wait = load_tool_wait if load_tool_wait is not None else tool_wait_board
@@ -543,11 +554,23 @@ class MilesRolloutPool:
         """The cursor the rollout metadata reported after the last batch (cache)."""
         return None if self._last_cursor is None else dict(self._last_cursor)
 
-    def generate(self, rollout_id: int) -> RolloutBatchHandle:
+    def generate(
+        self, rollout_id: int, *, expected_policy_version: str | None = None
+    ) -> RolloutBatchHandle:
         policy_version, policy_hash = self._expected_policy()
+        token = policy_token(policy_version, policy_hash)
+        if expected_policy_version is not None and expected_policy_version != token:
+            # IR-3: the driver's target token and the published policy this
+            # pool serves must be the same object; refuse before any sampling.
+            from ..driver import PolicyIdentityError  # driver never imports the adapter
+
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: driver expects {expected_policy_version}, "
+                f"the pool serves {token}"
+            )
         setter = getattr(self._metadata, "set_policy_token", None)
-        if setter is not None:  # rollout-side group-reuse filter reads it
-            setter(policy_token(policy_version, policy_hash))
+        if setter is not None:  # rollout-side group-reuse filter + agentic generate read it
+            setter(token)
         self._run(self._controller.prepare_rollout(rollout_id))
         data_pack = self._run(self._executor.get(rollout_id))
         self._offload_after_rollout()
@@ -652,16 +675,49 @@ class MilesRolloutPool:
             tool_wait_trajectories=tool,
             ready_groups=None,
         )
+        harness = self._harness_snapshot()  # IR-2/IR-4; None = unknown
+        sample.update(
+            harness_in_flight=None if harness is None else int(harness.in_flight),
+            env_live=None if harness is None else int(harness.env_live),
+            tito_session_mismatch=None if harness is None else int(harness.tito_session_mismatch),
+            tito_chain_breaks=None if harness is None else dict(harness.tito_chain_breaks),
+            policy_age_violation=None if harness is None else int(harness.policy_age_violation),
+        )
         from ..timeline import LoadSample, classify_load
 
         known = None not in (running, queued, sample["engine_capacity"], tool)
         sample["load_class"] = (
             classify_load(LoadSample(queued_requests=queued, active_requests=running,
                                      tool_wait_trajectories=tool, ready_groups=0,
-                                     engine_capacity=sample["engine_capacity"]))
+                                     engine_capacity=sample["engine_capacity"],
+                                     harness_in_flight=sample["harness_in_flight"] or 0,
+                                     env_live=sample["env_live"] or 0))
             if known else "unknown"
         )
         return sample
+
+    def _harness_snapshot(self):
+        """IR-2: the harness snapshot (explicit zeros without a harness; None = unknown)."""
+        source = self._harness
+        if source is None:
+            return None
+        from ..tool_wait import HARNESS_ZERO, read_harness
+
+        if source == HARNESS_NOT_AGENTIC:
+            return HARNESS_ZERO
+        try:
+            return read_harness(source)
+        except Exception:  # noqa: BLE001 - unknown: fail closed
+            return None
+
+    def _harness_admission(self, method: str, members: frozenset[str]) -> None:
+        """IR-2: close/open harness admission to ``members`` (no-op without a board)."""
+        source = self._harness
+        if source is None or source == HARNESS_NOT_AGENTIC:
+            return
+        from ..tool_wait import _call, _resolve
+
+        _resolve(_call(source, method, sorted(members)))
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""
@@ -897,6 +953,9 @@ class MilesRolloutPool:
         (:meth:`undrain` cancels). The router counts engine requests only; a
         trajectory waiting on a tool is counted by yeto (3.3), not here.
         """
+        # IR-2: harness admission closes BEFORE the router cordon, so no new
+        # session can target a draining member while its engines quiesce.
+        self._harness_admission("close_admission", members)
         self._maybe_inject_tool_wait(members)
         timeout = max(0.0, float(deadline) - time.time())
         return bool(self._run(self._controller.drain_cells(cells_of(members),
@@ -956,6 +1015,7 @@ class MilesRolloutPool:
                                 target_members=sorted(members), applied=True)
             raise RuntimeError("injected undrain failure: uncordon not performed")
         self._run(self._controller.uncordon_cells(cells_of(members)))
+        self._harness_admission("open_admission", members)  # IR-2: after the uncordon
 
     def trajectory_load(self) -> dict[str, Any] | None:
         """3.3 drain probe: router in-flight + in-flight tool waits (``tool_wait.drain_blockers``).
@@ -974,10 +1034,14 @@ class MilesRolloutPool:
             snap = read_tool_wait(self._tool_wait_board)
         except Exception:  # noqa: BLE001 - unknown: fail closed below
             snap = None
+        harness = self._harness_snapshot()  # IR-2: None = unknown (fail closed)
         return {
             "active_requests": active,
             "tool_wait": None if snap is None else int(snap.in_flight),
-            "blockers": drain_blockers(active, snap),
+            "harness_in_flight": None if harness is None else int(harness.in_flight),
+            "env_live": None if harness is None else int(harness.env_live),
+            "env_live_deadline": None if harness is None else harness.latest_lease_deadline,
+            "blockers": drain_blockers(active, snap, harness),
         }
 
     def member_states(self) -> dict[str, dict[str, Any]] | None:

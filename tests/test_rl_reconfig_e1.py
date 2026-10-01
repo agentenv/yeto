@@ -795,12 +795,13 @@ def test_safe_point_with_a_deferred_eval_in_flight_does_not_drain(tmp_path):
 
 
 def test_tool_wait_board_feeds_the_drain_and_unknown_fails_closed(tmp_path):
-    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.engine.miles_adapter.rollout import HARNESS_NOT_AGENTIC, MilesRolloutPool
     from yeto.rl.engine.tool_wait import ToolWaitBoard
 
     board = ToolWaitBoard()
     pool = MilesRolloutPool(inference_controller=object(), rollout_executor=object(), metadata=None,
-                            expected_policy=lambda: (0, "h"), tool_wait_board=board)
+                            expected_policy=lambda: (0, "h"), tool_wait_board=board,
+                            harness=HARNESS_NOT_AGENTIC)  # IR-2: known zeros
     assert "router in-flight count unknown" in pool.trajectory_load()["blockers"]
     pool.load_sample = lambda: {"active_requests": 0, "workers": 2, "cordoned": 0}
     board.enter("t1")

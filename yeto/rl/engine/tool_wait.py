@@ -16,6 +16,11 @@ Pieces:
   the actor handle.
 * :func:`read_tool_wait` + :func:`drain_blockers` - the reader side used by the
   drain (INFRA-E1): fail closed when either count is unknown.
+* :class:`HarnessBoard` / :class:`HarnessSnapshot` (IR-2, codex-harness
+  R-IR): harness sessions in flight, live sandbox leases (idle ones included,
+  each with a hard deadline) and the per-island admission switch
+  (``allow_new_session``) the drain closes first. ``drain_blockers`` takes the
+  harness snapshot as a third input; ``None`` is unknown and fails closed.
 
 Pure except :func:`board_actor` (lazy ``ray`` import).
 """
@@ -25,12 +30,13 @@ from __future__ import annotations
 import inspect
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 BOARD_ACTOR_PREFIX = "yeto-rl-tool-wait"
+HARNESS_BOARD_ACTOR_PREFIX = "yeto-rl-harness"
 
 
 class ToolWaitError(RuntimeError):
@@ -135,10 +141,199 @@ def read_tool_wait(board: Any) -> ToolWaitSnapshot:
     return _resolve(_call(board, "snapshot"))
 
 
+# -- IR-2: harness sessions / sandbox leases / admission --------------------
+
+TITO_CHAIN_BREAK_REASONS = (
+    "retry_fork", "history_rewrite", "template_drops_reasoning", "compaction_window",
+)
+
+
+@dataclass(frozen=True)
+class HarnessSnapshot:
+    """Instantaneous harness state of one island (R-IR-2).
+
+    ``env_live`` counts every live sandbox lease, idle ones included; each
+    lease carries a hard deadline, so a drain waiting on ``env_live`` is
+    bounded by ``latest_lease_deadline`` (expired leases are force-released
+    by :meth:`HarnessBoard.snapshot` and counted in ``leases_expired_total``,
+    an infrastructure error, never a reward).
+    """
+
+    in_flight: int  # harness sessions currently open
+    env_live: int  # sandbox leases alive (busy or idle)
+    generation: int  # bumps on every change
+    latest_lease_deadline: float | None = None  # monotonic clock; None = no lease
+    leases_expired_total: int = 0
+    tito_session_mismatch: int = 0
+    tito_chain_breaks: Mapping[str, int] = field(default_factory=dict)
+    policy_age_violation: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tito_chain_breaks", dict(self.tito_chain_breaks))
+
+
+# Explicit "this island runs no harness" value: the pool passes
+# HARNESS_ZERO for stock / non-agentic profiles instead of None (unknown).
+HARNESS_ZERO = HarnessSnapshot(in_flight=0, env_live=0, generation=0)
+
+
+class HarnessAdmissionError(RuntimeError):
+    """A session was opened while admission to its member was closed."""
+
+
+class HarnessBoard:
+    """Thread-safe harness state + admission switch of one island.
+
+    Admission: ``close_admission(members)`` (drain, first step) makes
+    ``allow_new_session(member)`` False for those members; the agent/gateway
+    calls it before ``POST /sessions`` and, on False, re-targets a non-drained
+    member or waits for ``open_admission``. ``enter_session`` enforces it
+    (fail closed) so a caller that skipped the check cannot slip in.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._sessions: dict[str, str | None] = {}  # session id -> member
+        self._leases: dict[str, float] = {}  # lease id -> hard deadline
+        self._closed: set[str] = set()
+        self._generation = 0
+        self._expired = 0
+        self._session_mismatch = 0
+        self._chain_breaks: dict[str, int] = {}
+        self._policy_age = 0
+
+    # admission ------------------------------------------------------------
+    def allow_new_session(self, member: str | None = None) -> bool:
+        with self._lock:
+            return member not in self._closed and "*" not in self._closed
+
+    def close_admission(self, members: Iterable[str] | None = None) -> None:
+        with self._lock:
+            self._closed |= {"*"} if members is None else {str(m) for m in members}
+            self._generation += 1
+
+    def open_admission(self, members: Iterable[str] | None = None) -> None:
+        with self._lock:
+            if members is None:
+                self._closed.clear()
+            else:
+                self._closed -= {str(m) for m in members}
+            self._generation += 1
+
+    # sessions -------------------------------------------------------------
+    def enter_session(self, session_id: str, member: str | None = None) -> int:
+        with self._lock:
+            if member in self._closed or "*" in self._closed:
+                raise HarnessAdmissionError(
+                    f"session {session_id!r}: admission to member {member!r} is closed (drain)"
+                )
+            if session_id in self._sessions:
+                raise ToolWaitError(f"harness session {session_id!r} already open")
+            self._sessions[session_id] = member
+            self._generation += 1
+            return self._generation
+
+    def exit_session(self, session_id: str) -> int:
+        with self._lock:
+            if session_id not in self._sessions:
+                raise ToolWaitError(f"harness session {session_id!r} is not open")
+            del self._sessions[session_id]
+            self._generation += 1
+            return self._generation
+
+    # sandbox leases (idle included; hard deadline each) --------------------
+    def lease_acquired(self, lease_id: str, *, deadline: float) -> int:
+        with self._lock:
+            if lease_id in self._leases:
+                raise ToolWaitError(f"sandbox lease {lease_id!r} already live")
+            self._leases[lease_id] = float(deadline)
+            self._generation += 1
+            return self._generation
+
+    def lease_released(self, lease_id: str) -> int:
+        with self._lock:
+            if self._leases.pop(lease_id, None) is None:
+                raise ToolWaitError(f"sandbox lease {lease_id!r} is not live")
+            self._generation += 1
+            return self._generation
+
+    def expire_leases(self) -> tuple[str, ...]:
+        """Force-release leases past their hard deadline (infrastructure error)."""
+        with self._lock:
+            return self._expire_locked()
+
+    def _expire_locked(self) -> tuple[str, ...]:
+        now = self._clock()
+        dead = tuple(sorted(k for k, d in self._leases.items() if d <= now))
+        for k in dead:
+            del self._leases[k]
+        if dead:
+            self._expired += len(dead)
+            self._generation += 1
+        return dead
+
+    # counters (IR-4) -------------------------------------------------------
+    def record_session_mismatch(self, n: int = 1) -> None:
+        with self._lock:
+            self._session_mismatch += int(n)
+            self._generation += 1
+
+    def record_chain_break(self, reason: str, n: int = 1) -> None:
+        if reason not in TITO_CHAIN_BREAK_REASONS:
+            raise ValueError(f"unknown tito chain break reason {reason!r}")
+        with self._lock:
+            self._chain_breaks[reason] = self._chain_breaks.get(reason, 0) + int(n)
+            self._generation += 1
+
+    def record_policy_age_violation(self, n: int = 1) -> None:
+        with self._lock:
+            self._policy_age += int(n)
+            self._generation += 1
+
+    def snapshot(self) -> HarnessSnapshot:
+        with self._lock:
+            self._expire_locked()
+            return HarnessSnapshot(
+                in_flight=len(self._sessions),
+                env_live=len(self._leases),
+                generation=self._generation,
+                latest_lease_deadline=max(self._leases.values()) if self._leases else None,
+                leases_expired_total=self._expired,
+                tito_session_mismatch=self._session_mismatch,
+                tito_chain_breaks=dict(self._chain_breaks),
+                policy_age_violation=self._policy_age,
+            )
+
+
+def read_harness(board: Any) -> HarnessSnapshot:
+    """Snapshot from a local harness board or an actor handle (blocking)."""
+    return _resolve(_call(board, "snapshot"))
+
+
+def harness_board_actor(learner_id: int, *, namespace: str | None = None) -> Any:
+    """The island's named ``HarnessBoard`` actor (created on first use)."""
+    import ray
+
+    cls = ray.remote(num_cpus=0, max_concurrency=64)(HarnessBoard)
+    return cls.options(
+        name=f"{HARNESS_BOARD_ACTOR_PREFIX}-{int(learner_id)}",
+        namespace=namespace,
+        get_if_exists=True,
+    ).remote()
+
+
 def drain_blockers(
-    router_in_flight: int | None, tool_wait: ToolWaitSnapshot | None
+    router_in_flight: int | None,
+    tool_wait: ToolWaitSnapshot | None,
+    harness: HarnessSnapshot | None,
 ) -> list[str]:
-    """3.3 X5 drain condition; empty = drained. Unknown counts fail closed."""
+    """3.3 X5 drain condition; empty = drained. Unknown counts fail closed.
+
+    ``harness`` (IR-2): None = unknown -> blocker; a non-agentic island passes
+    :data:`HARNESS_ZERO` explicitly. ``env_live`` counts idle sandboxes too; it
+    is bounded by the leases' hard deadlines (see :class:`HarnessSnapshot`).
+    """
     out = []
     if router_in_flight is None:
         out.append("router in-flight count unknown")
@@ -148,6 +343,13 @@ def drain_blockers(
         out.append("tool-wait count unknown")
     elif tool_wait.in_flight > 0:
         out.append(f"{tool_wait.in_flight} trajectories waiting on tools")
+    if harness is None:
+        out.append("harness counts unknown")
+    else:
+        if harness.in_flight > 0:
+            out.append(f"{harness.in_flight} harness sessions in flight")
+        if harness.env_live > 0:
+            out.append(f"{harness.env_live} sandboxes live")
     return out
 
 

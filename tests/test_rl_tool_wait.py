@@ -12,6 +12,7 @@ from yeto.rl.engine.tool_wait import (
     ToolWaitBoard,
     ToolWaitError,
     async_tool_wait_scope,
+    HARNESS_ZERO,
     drain_blockers,
     read_tool_wait,
     tool_wait_scope,
@@ -81,13 +82,14 @@ def test_thread_safe_under_concurrent_tools():
 
 def test_drain_needs_zero_requests_and_zero_tool_waits_and_fails_closed():
     board = ToolWaitBoard()
-    assert drain_blockers(0, board.snapshot()) == []
+    assert drain_blockers(0, board.snapshot(), HARNESS_ZERO) == []
     board.enter("t")
     # X5: active requests 0 but a trajectory waits on a tool -> not drained
-    assert drain_blockers(0, board.snapshot()) == ["1 trajectories waiting on tools"]
-    assert "3 engine requests" in drain_blockers(3, board.snapshot())[0]
-    assert drain_blockers(None, None) == ["router in-flight count unknown",
-                                          "tool-wait count unknown"]
+    assert drain_blockers(0, board.snapshot(), HARNESS_ZERO) == ["1 trajectories waiting on tools"]
+    assert "3 engine requests" in drain_blockers(3, board.snapshot(), HARNESS_ZERO)[0]
+    assert drain_blockers(None, None, None) == ["router in-flight count unknown",
+                                                "tool-wait count unknown",
+                                                "harness counts unknown"]
     # the same count feeds the 1.7 load attribution
     sample = LoadSample(queued_requests=0, active_requests=0,
                         tool_wait_trajectories=board.snapshot().in_flight,
