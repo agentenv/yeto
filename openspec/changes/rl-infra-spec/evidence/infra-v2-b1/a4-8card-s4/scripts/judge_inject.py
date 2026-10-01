@@ -679,5 +679,107 @@ def main(argv):
     print(json.dumps(res, default=str)); return EXIT[res["verdict"]]
 
 
+
+# ---------------------------------------------------------------------------------------------------------
+# A27 (chain 6r1/6r2 d2): the new engine SIGKILLed during VERIFYING must be *discovered* (fork workers_lost /
+# publisher target_workers_lost), the transaction must go REBUILD_OLD -> REBUILT_OLD, the old members must be
+# serving the same version with no cordoned residue on the router, and training must continue afterwards
+# (>= 2 further rounds trained and >= 2 further publications with increasing policy_version). A bare
+# PublicationError (REBUILT_OLD without the continuation) is not a pass. Appended only; judge_d2 keeps its
+# original checks and the new ones are added to the same result (verdict = all checks true).
+A27_MIN_ROUNDS_AFTER = 2
+_A27_EXTRA = {"probe_after": None, "router_samples": None}
+
+
+def _a27_terminal_time(journal, request_id="up1"):
+    for r in phases(journal):
+        if r.get("request_id") == request_id and r.get("phase") == "REBUILT_OLD":
+            return r.get("wall_time")
+    return None
+
+
+def judge_d2_a27(res, journal, tape, known, probe_after=None, router_samples=None):
+    """Add the A27 recovery checks to a judge_d2 result (see the block comment above)."""
+    if res.get("verdict") == "INVALID_TEST":
+        return res
+    ph = [r for r in phases(journal) if r.get("request_id") == "up1"]
+    seq = [r.get("phase") for r in ph]
+    res["a27_phases"] = seq
+    # (1) discovery: the publisher's watch (target_workers_lost) or the watchdog's workers_lost skip
+    lost = named(journal, "target_workers_lost")
+    wd_lost = [e for r in named(journal, "watchdog_action") for e in (r.get("skipped") or [])
+               if e.get("kind") == "workers_lost"]
+    res["a27_discovery"] = {"target_workers_lost": [r.get("lost_members") for r in lost],
+                            "watchdog_workers_lost": [e.get("cell") for e in wd_lost]}
+    res["checks"]["a27_workers_lost_recorded"] = bool(lost) or bool(wd_lost)
+    # (2) REBUILD_OLD -> REBUILT_OLD, nothing else terminal
+    res["checks"]["a27_rebuild_old_then_rebuilt_old"] = ("REBUILD_OLD" in seq and seq[-1] == "REBUILT_OLD"
+                                                        and "RECOVERY_REQUIRED" not in seq)
+    t_old = _a27_terminal_time(journal)
+    targets = set()
+    for r in named(journal, "add_intent"):
+        targets |= set(r.get("members") or [])
+    tcells = [t.split(":", 1)[1] if ":" in t else t for t in sorted(targets)]
+    # (3) old members recovered: fork status probe after the terminal state
+    if probe_after is None:
+        return _invalid(res, "fork status probe after the terminal state missing: old-member recovery not observed",
+                        "evidence_missing")
+    statuses = probe_after.get("cell_statuses") or {}
+    vers = probe_after.get("versions") or {}
+    serving = {k: v for k, v in vers.items() if k not in tcells}
+    res["a27_probe_after"] = {"membership": probe_after.get("membership"), "versions": vers,
+                              "target_statuses": {c: statuses.get(c) for c in tcells}}
+    res["checks"]["a27_old_members_same_version"] = len(serving) >= 1 and len(set(serving.values())) == 1
+    res["checks"]["a27_targets_not_serving"] = bool(statuses) and all(
+        c not in statuses or "Serving" not in str(statuses[c]) for c in tcells)
+    # (4) router: no cordoned residue after the terminal state (last >= 3 samples)
+    data = [x for x in (router_samples or []) if isinstance(x.get("data"), dict)
+            and (t_old is None or x.get("t", 0) >= t_old)]
+    if len(data) < 3:
+        return _invalid(res, "fewer than 3 router samples after REBUILT_OLD: cordon residue not observed",
+                        "evidence_missing")
+    res["a27_router_tail"] = [x["data"].get("cordoned") for x in data[-3:]]
+    res["checks"]["a27_router_no_cordoned_residue"] = all(not x["data"].get("cordoned") for x in data[-3:])
+    # (5) training continues: >= A27_MIN_ROUNDS_AFTER rounds trained and publications with increasing versions
+    after = [e for e in tape if t_old is not None and e.get("time_unix", 0) >= t_old]
+    rounds = sorted({e.get("rollout_id") for e in after if e.get("event") == "rl_round_trained"
+                     if e.get("rollout_id") is not None})
+    pubs = [e.get("policy_version") for e in after if e.get("event") == "rl_publication"]
+    syncs = [e for e in after if e.get("event") == "rl_driver_phase" and e.get("phase") == "sync"]
+    res["a27_after_terminal"] = {"rounds_trained": rounds, "publication_versions": pubs, "syncs": len(syncs)}
+    res["checks"]["a27_training_continued"] = (
+        len(rounds) >= A27_MIN_ROUNDS_AFTER and len(pubs) >= A27_MIN_ROUNDS_AFTER
+        and all(b > a for a, b in zip(pubs, pubs[1:])) and len(syncs) >= A27_MIN_ROUNDS_AFTER)
+    res["verdict"] = "PASS" if all(v is True for v in res["checks"].values()) else "FAIL"
+    if res["verdict"] == "FAIL":
+        res["marker"] = "recovery_failed"
+    return res
+
+
+_judge_d2_base = judge_d2
+
+
+def judge_d2(journal, tape, known, dkill_log=None, probe_after=None, router_samples=None):  # noqa: F811
+    res = _judge_d2_base(journal, tape, known, dkill_log)
+    return judge_d2_a27(res, journal, tape, known,
+                        probe_after if probe_after is not None else _A27_EXTRA["probe_after"],
+                        router_samples if router_samples is not None else _A27_EXTRA["router_samples"])
+
+
+_main_base = main
+
+
+def main(argv):  # noqa: F811
+    """Stash --probe-after / --router-samples for the appended judge_d2 (main's d2 dispatch passes neither)."""
+    import argparse
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--probe-after"); ap.add_argument("--router-samples")
+    a, _ = ap.parse_known_args(argv)
+    _A27_EXTRA["probe_after"] = load_probe(a.probe_after)
+    _A27_EXTRA["router_samples"] = ([json.loads(l) for l in open(a.router_samples) if l.strip()]
+                                    if a.router_samples and os.path.exists(a.router_samples) else None)
+    return _main_base(argv)
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
