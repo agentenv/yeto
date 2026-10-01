@@ -1,0 +1,7 @@
+== identity
+miles HEAD e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841
+sglang HEAD a1240c530d406b5d0f252511f8e0a9a93b6a079d
+image-manifest tag/miles/sglang: e3a11ab-a1240c5 e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841 a1240c530d406b5d0f252511f8e0a9a93b6a079d 0.5.21.dev68+ga1240c5
+== import (extracted /root/miles + /sgl-workspace/sglang/python, miles-next-venv)
+/tmp/img-verify-lora/sgl-workspace/sglang/python/sglang/__init__.py
+['/tmp/img-verify-lora/root/miles/miles']

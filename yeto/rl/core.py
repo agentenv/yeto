@@ -31,6 +31,27 @@ class StrictRlInvariantError(RuntimeError):
         self.metric = metric
 
 
+def require_nonzero_learning_rate(stats: "LocalRoundStats", *, final_round: bool) -> None:
+    """Fail a non-final local round whose optimizer steps applied LR 0.
+
+    The island keeps training after a non-final round, so a zero LR there means
+    the schedule decayed to 0 mid-run and the round would commit a zero update
+    (fix-decoupled-lr-schedule).  Final round: strict ``local_round_id >=
+    global_rounds``; decoupled once the final cut is known.  ``applied_lr is
+    None`` means the engine did not report it (fakes only).
+    """
+
+    if final_round or stats.applied_lr is None or stats.applied_lr != 0.0:
+        return
+    raise StrictRlInvariantError(
+        "zero_lr_before_final_round",
+        f"local round {stats.local_round_id} (global policy "
+        f"{stats.base_policy_version}) applied learning rate "
+        f"{stats.applied_lr!r} (per step {list(stats.applied_lrs or ())}) although "
+        "the island keeps training; the round's local state was not submitted",
+    )
+
+
 @dataclass(frozen=True, order=True)
 class CanonicalTensorSpec:
     name: str
@@ -551,8 +572,27 @@ class LocalRoundStats:
     # advantages are all zero legitimately produces no gradient; one that has
     # nonzero advantages and still reports ``grad_norm == 0.0`` did not train.
     nonzero_advantage_count: int | None = None
+    # Learning rate the round's optimizer steps actually applied (read inside
+    # the step, before the scheduler advances; ``lr`` above is Miles' logged
+    # post-step value).  ``applied_lr`` is the minimum over ``applied_lrs``.
+    applied_lr: float | None = None
+    applied_lrs: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
+        if self.applied_lrs is not None:
+            object.__setattr__(
+                self, "applied_lrs", tuple(float(v) for v in self.applied_lrs)
+            )
+            if not self.applied_lrs or any(
+                not math.isfinite(v) or v < 0 for v in self.applied_lrs
+            ):
+                raise ValueError("applied_lrs must be non-empty finite non-negative values")
+            if self.applied_lr != min(self.applied_lrs):
+                raise ValueError("applied_lr must be the minimum of applied_lrs")
+        if self.applied_lr is not None and (
+            not math.isfinite(self.applied_lr) or self.applied_lr < 0
+        ):
+            raise ValueError("applied_lr must be finite and non-negative when present")
         for name in (
             "island_id",
             "local_round_id",

@@ -284,6 +284,7 @@ class StrictRlBridge:
         self._terminal_manifest: FinalManifest | None = None
         self._terminal_policy: CanonicalLoraState | None = None
         self.permits: dict[int, PullRequest] = {}
+        self._pulls_seen: dict[int, int] = {}  # global step -> PULLs received
         self.pushed_step: int | None = None
 
     def run(self) -> CanonicalLoraState:
@@ -416,6 +417,19 @@ class StrictRlBridge:
             current_version = (
                 self.current_version if self.current_version is not None else -1
             )
+            seen = self._pulls_seen.get(permit.global_step, 0) + 1
+            self._pulls_seen[permit.global_step] = seen
+            if seen > 1:
+                # The fixed-roster syncer re-sends the same PULL after a quorum
+                # timeout (server.rs, only a warn! log there): tape it here so
+                # the resend is on the learner's JSONL tape (3.8 X6 / A5).
+                self._append_event({
+                    "event": "rl_pull_resend",
+                    "global_step": int(permit.global_step),
+                    "round_attempt": int(permit.round_attempt),
+                    "fragment_id": int(permit.fragment_id),
+                    "pulls_received": seen,
+                })
             if permit.global_step <= current_version:
                 continue
             previous = self.permits.get(permit.global_step)
@@ -823,7 +837,6 @@ class StrictRlBridge:
             "time_unix": time.time(),
             **event,
         }
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
-            )
+        from .event_echo import append_record
+
+        append_record(path, event)  # echoed when YETO_RL_ECHO_EVENTS=1

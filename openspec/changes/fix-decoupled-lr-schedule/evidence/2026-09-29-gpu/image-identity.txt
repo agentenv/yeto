@@ -1,0 +1,18 @@
+# 1.2 / GPU run image identity (2026-09-29)
+sandbox 'p' (parse-args + strict2-ports + dec-ports) image = sbx.py ports_image():
+5:    MILES_BASE = "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"; MILES = "ae475060fa670145aef75d678809039ae999cb97"
+7:    SGL = "e1b57eb8e7749235c987cc6b1b2824ce3265369b"
+22:    IMG = "radixark/miles@sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d"
+23:    MILES = "0394715083c91182b5eb0c526eeee4196ac694b9"; SGL = "9f29303bef1eea38eb613e5f454a52db1326422d"
+
+yeto MILES_NEXT_IMAGE at cab3799:
+docker:docker.io/radixark/miles@sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d
+MILES_NEXT_COMMIT 0394715083c91182b5eb0c526eeee4196ac694b9
+SGLANG_NEXT_COMMIT 9f29303bef1eea38eb613e5f454a52db1326422d
+
+in-sandbox checkouts recorded at teardown (env-p.txt, lines after nvidia-smi): miles, sglang HEAD:
+0394715083c91182b5eb0c526eeee4196ac694b9
+9f29303bef1eea38eb613e5f454a52db1326422d
+legacy sandbox 'l' (env-l.txt):
+ae475060fa670145aef75d678809039ae999cb97
+e1b57eb8e7749235c987cc6b1b2824ce3265369b
