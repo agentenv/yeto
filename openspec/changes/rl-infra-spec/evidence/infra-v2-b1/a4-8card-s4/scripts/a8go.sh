@@ -4,7 +4,7 @@
 # Starts n2run (launch, --no-island-relaunch --modal-retries 0) + n2inwatch (triggers + router sampler) + selfcheck (+GPU assert 4xL40S, markers) + case helpers + final guard (nstop -> cleanup_run.sh, judge).
 # Required env for some cases:  UP_DEADLINE_S (wd: measured, see gpu-plan 9.22 step 2) | (e1b/a4b pass --rl-test-hold-before-check-s ${HOLD_S:-10} / --rl-test-inject-tool-wait-s 30 directly)
 # Request time: a request submitted at "train" of rollout k executes before generate k+1 (= before round k+2).
-C=$1; P=$2; HARD=$3; WD=$4; SHA=${SHA:-b19b781}; B=/home/michael/work/gpu-b1-runs; R=$B/$P
+C=$1; P=$2; HARD=$3; WD=$4; SHA=${SHA:-b19b781}; B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P
 UP=${UP_DEADLINE_S:-600}; EX=""; STEPS=4; ATTN=4; JUDGE=""; ARMS=()
 req() { printf '["%s",%s,"%s",{"target":"%s","expected_config_epoch":%s,"deadline_s":%s}]' "$1" "$2" "$3" "$4" "$5" "$6"; }   # phase rid id target epoch deadline
 UPB() { req train $1 $2 T4R4S0 0 ${3:-$UP}; }; DNB() { req train $1 $2 T4R2S2 1 ${3:-600}; }
@@ -30,12 +30,12 @@ esac
 ATT=$B/cfg/attestation-8-$ATTN.json; [ -f $ATT ] || { echo "missing $ATT (mkatt8.sh)"; exit 6; }
 COMMON="--total-steps $STEPS --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources $B/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation $ATT"
 if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 n2run.sh $P 8 $HARD $WD $COMMON $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; exit 0; fi
-SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 setsid nohup $B/n2run.sh $P 8 $HARD $WD $COMMON $EX > $B/$P.n2run.out 2>&1 &
+SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 setsid nohup $B/n2run.sh $P 8 $HARD $WD $COMMON $EX > $R.n2run.out 2>&1 &
 sleep 10
 setsid nohup $B/n2inwatch.sh $R "$TRIG" > /dev/null 2>&1 &
 EXPECT_GPU_NAME=H100 EXPECT_GPU_N=8 setsid nohup $B/selfcheck.sh $R $P $ATT > /dev/null 2>&1 &
 setsid nohup $B/diag_pull.sh $R > /dev/null 2>&1 &
 for a in "${ARMS[@]}"; do IFS='|' read -ra parts <<< "$a"; setsid nohup $B/n2arm.sh $R "${parts[@]}" > /dev/null 2>&1 & done   # "script|arg1|arg2" (args must not contain |)
 # final guard: when the launcher ended (or STOP), pull + cleanup (idempotent), then judge from the pulled journal/tape
-setsid nohup bash -c "until [ -f $R/rc.txt ] || [ -f $R/startup_failed ]; do sleep 15; done; sleep 20; $B/nstop.sh $P > $R/final_stop.txt 2>&1; echo \$? > $R/cleanup_rc.txt; [ -n '$JUDGE' ] && $B/judge_after.sh $R $JUDGE > $R/judge.out 2>&1" > /dev/null 2>&1 &
+setsid nohup bash -c "until [ -f $R/rc.txt ] || [ -f $R/startup_failed ]; do sleep 15; done; sleep 20; ${NSTOP:-$B/nstop.sh} $P > $R/final_stop.txt 2>&1; echo \$? > $R/cleanup_rc.txt; [ -n '$JUDGE' ] && $B/judge_after.sh $R $JUDGE > $R/judge.out 2>&1; touch $R/item_done" > /dev/null 2>&1 &
 echo started $P $C

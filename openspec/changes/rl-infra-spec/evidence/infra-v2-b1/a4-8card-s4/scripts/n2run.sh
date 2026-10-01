@@ -3,16 +3,21 @@
 set -u
 T=$(ps -u michael -L -o pid= | wc -l); if [ "$T" -ge 3000 ]; then echo "abort: $T user threads"; exit 3; fi
 P=$1; NG=$2; HARD=$3; WD=$4; shift 4; EXTRA="$*"
-B=/home/michael/work/gpu-b1-runs; R=$B/$P; SKY=/home/michael/work/gpu-head/venv/bin/sky
+B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P; SKY=/home/michael/work/gpu-head/venv/bin/sky
+# chain mode (chain8.sh, gpu-plan 9.23 cluster reuse): RUN_ROOT = chain items dir, CLUSTER_PREFIX = the shared cluster/run name, KEEP=1 keeps the cluster after the job,
+# SHARED=1 drops the per-run `sky down` watchdog (the chain has its own, cluster-level one). Defaults = the original single-run behaviour.
+CP=${CLUSTER_PREFIX:-$P}
 mkdir -p $R/home $R/runs $R/pulled $R/yeto
 for d in .sky .nebius .ssh; do ln -sfn /home/michael/$d $R/home/$d; done
 git -C /home/michael/work/gpu-b1 archive ${SHA:-47efd25} | tar x -C $R/yeto
 cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/
 touch $R/yeto/yeto-rl-echo-events; echo ${SHA:-47efd25} > $R/yeto_sha.txt
-echo "launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu ${GPU_SPEC:-nebius:${NG}xh100@eu-north1} --cluster-prefix $P --no-island-relaunch --modal-retries 0 --model Qwen/Qwen3-0.6B --model-revision c1899de289a04d12100db370d81485cdf75e47ca --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function gsm8k_reward:score --tuning lora --lora-r 16 --lora-targets all-linear --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code $EXTRA" > $R/args.txt
-CL=$P-l0-eu-north1; echo $CL > $R/cluster.txt
+echo "launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu ${GPU_SPEC:-nebius:${NG}xh100@eu-north1} --cluster-prefix $CP ${KEEP:+--keep} --no-island-relaunch --modal-retries 0 --model Qwen/Qwen3-0.6B --model-revision c1899de289a04d12100db370d81485cdf75e47ca --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function gsm8k_reward:score --tuning lora --lora-r 16 --lora-targets all-linear --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code $EXTRA" > $R/args.txt
+CL=$CP-l0-eu-north1; echo $CL > $R/cluster.txt
+if [ "${SHARED:-0}" != 1 ]; then
 setsid nohup bash -c "sleep $WD; HOME=/home/michael $SKY down -y $CL > $R/watchdog.out 2>&1" >/dev/null 2>&1 &
 echo $! > $R/watchdog.pid
+fi
 setsid nohup bash -c "
 export HOME=/home/michael
 as=0; lastsz=x; lastt=\$(date +%s)
