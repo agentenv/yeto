@@ -654,7 +654,9 @@ def test_lost_fork_answer_is_completed_from_the_fork_on_restart(tmp_path):
 
 
 def test_restart_mid_transaction(tmp_path):
-    """3.7: before release -> CANCELLED; after release -> RECOVERY_REQUIRED; after CAS -> SUCCEEDED."""
+    """3.7: before release -> CANCELLED; after release -> REBUILT_OLD (the committed = old
+    members are rebuilt by the restart recovery, D1 of recovery-design.md; was
+    RECOVERY_REQUIRED before the recovery existed); after CAS -> SUCCEEDED."""
     for case in ("before", "after_release", "after_commit"):
         d = tmp_path / case
         engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, placement_kind="fixed-partition")
@@ -673,9 +675,13 @@ def test_restart_mid_transaction(tmp_path):
         ctl.close()
         ctl = _controller(d)
         ctl.open(pool)
-        expected = {"before": CANCELLED, "after_release": RECOVERY_REQUIRED,
+        expected = {"before": CANCELLED, "after_release": REBUILT_OLD,
                     "after_commit": SUCCEEDED}[case]
         assert ctl.status("r")["phase"] == expected, case
+        if case == "after_release":
+            last = ctl.journal.records[-1]
+            assert last["kind"] == "phase" and last.get("recovered_after_restart") is True
+            assert ctl.inspect().health == "RUNNING"  # members already equal the committed set
         ctl.close()
 
 

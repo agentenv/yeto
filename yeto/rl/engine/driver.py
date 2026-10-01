@@ -634,6 +634,38 @@ class IslandDriver:
             },
         )
 
+    def _refuse_if_recovery_required(self) -> None:
+        """3.7 (recovery-design.md F13): an island that opened in RECOVERY_REQUIRED
+        (restart recovery impossible or failed) never publishes, generates or
+        trains; the run fails before the first publication."""
+        error = getattr(self.controller, "recovery_required", None) if self.controller else None
+        if error:
+            self.emit("rl_reconfiguration", rollout_id=None, result="RECOVERY_REQUIRED",
+                      error=str(error), config_epoch=self.config_epoch)
+            raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+
+    def _confirm_recovery(self, rollout_id: int) -> None:
+        """3.7 restart recovery: after the first full publication covered the
+        rebuilt members, the controller verifies them (members, policy token,
+        router admission, trainer layout, ledger) and reopens admission; a failed
+        verification is RECOVERY_REQUIRED and ends the run (nothing consumed)."""
+        confirm = getattr(self.controller, "confirm_recovery", None) if self.controller else None
+        if not callable(confirm):
+            return
+        from .controller import RecoveryRequired
+
+        pending = getattr(self.controller, "recovery_pending", None)
+        try:
+            confirm(self)
+        except RecoveryRequired as error:
+            self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
+                      error=str(error), config_epoch=self.config_epoch)
+            raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
+        if pending is not None:
+            self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERED",
+                      recovery_id=pending.get("recovery_id"), config_epoch=self.config_epoch,
+                      members=sorted(self.rollout.members()))
+
     def _generate(self, rollout_id: int) -> RolloutBatchHandle:
         if self.published_version != rollout_id or self.expected_token is None:
             raise PublicationError(
@@ -1152,6 +1184,7 @@ class IslandDriver:
 
     def run(self) -> TrainableState:
         self.handshake()
+        self._refuse_if_recovery_required()
         try:
             try:
                 start = self.sync.start(self)
@@ -1159,6 +1192,7 @@ class IslandDriver:
                     self.ledger.rebase(start.rollout_id)
                 state = start.state
                 self.publish(state, rollout_id=start.rollout_id)
+                self._confirm_recovery(start.rollout_id)
                 self._maybe_eval(start.rollout_id, force=start.rollout_id == 0,
                                  defer=not start.finished)
                 rollout_id = start.rollout_id

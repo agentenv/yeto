@@ -213,6 +213,7 @@
 - **G4 运行中云扩缩与节点追加**：包括按 ID 释放资源。这属于实际的云扩缩实现，按 BRIEF 需要另批。
 - **G6 运行中增删 bundle/cell**：需要新的 Miles fork M 项（现有 M1–M6 只支持启动时预声明的 bundle/cell），需要另批。
 - **G11 fixed-roster 重启与扩缩后的池形状**：首版重启时恢复到启动时的池形状；在支持按新形状重建之前，不启用扩池。需要确认该约定。
+  - 2026-10-01 用户裁定（E1-D §7 选 (b)，SESSION6 §7.3）：learner 重启后按 journal（`epochs.json`）恢复已提交的 rollout 成员，不再"回启动形状"；fork 仍按启动参数声明 cell，由 yeto 在 `open()` 差分启停并在首次发布后校验放行（`evidence/infra-e1/recovery-design.md`，INFRA-E1 分支 infra-e1-recovery）。保留部分：提交配置的 trainer 形状不等于启动形状（trainer-dp/role-transfer 提交）时仍回启动形状并 RECOVERY_REQUIRED + `trainer_recovery_hint`；扩池不启用。
 
 ## 7b 追加（2026-09-30）
 - 2026-09-30 用户：2b 选路线 B；暂停 GPU 验证，待自有卡本地验证；同意 INFRA 按阶段拆分并行（INFRA-E1: 3.x；INFRA-E2: 4.1–4.5；INFRA-A: 2.3/1.4/1.7/5.1；DEV-GATHER 延后）。

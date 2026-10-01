@@ -946,6 +946,8 @@ _ELASTIC_PAUSE_FLAGS = (
     # controller D4 timeouts T_drain / T_recovery (plan.md E1-C, E1-D 4)
     ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
     ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
+    # 3.7 restart recovery budget (recovery-design.md §3)
+    ("rl_elastic_max_recovery_attempts", "--rl-elastic-max-recovery-attempts"),
 )
 # Test-only fault injection for GPU acceptance runs (gpu-plan-v2 A5 quorum case):
 # exported into the island run command; off unless given.

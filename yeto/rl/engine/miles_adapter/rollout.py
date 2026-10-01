@@ -980,6 +980,22 @@ class MilesRolloutPool:
             "blockers": drain_blockers(active, snap),
         }
 
+    def member_states(self) -> dict[str, dict[str, Any]] | None:
+        """Per declared member (fork F-R1 ``describe_cells``): ``state`` (unbound /
+        stopped / running), ``tracked``, ``serving``, ``awaiting_admission``. Used by
+        the restart recovery (3.7) to refuse unbound targets and to verify router
+        admission before release. None on a fork without ``describe_cells``."""
+        describe = getattr(self._controller, "describe_cells", None)
+        if not callable(describe):
+            return None
+        described = dict(self._run(describe()) or {})
+        return {
+            member_id(c): {"state": d.get("state"), "tracked": bool(d.get("tracked")),
+                           "serving": bool(d.get("serving")),
+                           "awaiting_admission": bool(d.get("awaiting_admission"))}
+            for c, d in described.items() if isinstance(d, dict)
+        }
+
     def membership_status(self) -> dict[str, Any]:
         status = dict(self._run(self._controller.get_membership_status()))
         incomplete = status.get("incomplete")

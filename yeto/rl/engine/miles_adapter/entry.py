@@ -898,6 +898,9 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         # 3.8 pause-budget inputs, only when the learner was given them.
         **{k: config[k] for k in ("quorum_timeout_s", "idle_flow_timeout_s", "pause_margin")
            if config.get(k) is not None},
+        # 3.7 restart recovery budget (--rl-elastic-max-recovery-attempts)
+        **({"max_recovery_attempts": int(config["max_recovery_attempts"])}
+           if config.get("max_recovery_attempts") is not None else {}),
         # 4.7: pool GPU ids (manifest resources.gpus, in logical-bundle order), only
         # with trainer edges; every other elastic run keeps the described pool.
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
