@@ -10,6 +10,7 @@ evidence/infra-e1/plan.md).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -941,8 +942,15 @@ class _FakeManager:
         from types import SimpleNamespace
 
         self.infos = {c: [SimpleNamespace(name=f"{c}/w0", generation=3)]
-                      for c in ("engine:c2", "engine:c3")}
-        self.get_worker_infos = _Remote(lambda cell: self.infos[cell])
+                      for c in ("c2", "c3")}
+
+        def get_worker_infos(cell):  # the fork's lookup: bare cell ids only, else AssertionError
+            matches = self.infos.get(cell, [])
+            assert matches, \
+                f"cell_id={cell!r} matches=[]"
+            return matches
+
+        self.get_worker_infos = _Remote(get_worker_infos)
         self.get_actor_handle = _Remote(
             lambda name, expected_generation: f"handle:{name}@{expected_generation}")
 
@@ -976,7 +984,7 @@ def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
     driver.run()
     assert __import__("time").monotonic() - started < 4  # not the 5 s gate: the kill unblocked it
     assert ctl.status("r")["phase"] == REBUILT_OLD
-    assert sorted(h for h, _ in fake_ray.killed) == ["handle:engine:c2/w0@3", "handle:engine:c3/w0@3"]
+    assert sorted(h for h, _ in fake_ray.killed) == ["handle:c2/w0@3", "handle:c3/w0@3"]
     assert all(no_restart for _, no_restart in fake_ray.killed)
     records = read_journal(tmp_path / "state/reconfig")
     action = next(r for r in records if r["kind"] == "watchdog_action")
@@ -985,6 +993,42 @@ def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
         "engine:c2", "engine:c3"]
     # old members were never touched
     assert set(driver.rollout.members()) == {"engine:c0", "engine:c1"}
+
+
+def test_watchdog_unmappable_target_enters_recovery_required_not_silent_wait(tmp_path):
+    """GPU a4s3/a4s4 regression: a manager that cannot resolve the targets (fork-style
+    lookup, real ``engine:`` member ids) must not leave the island waiting silently."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    manager = _FakeManager()
+    manager.infos.clear()  # nothing resolvable
+    fake_ray = _FakeRay(lambda handle: None)
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=manager, ray_module=fake_ray))
+    gate = threading.Event()
+    slow = publisher.publish_members
+
+    def publish_members(*a, **k):
+        gate.wait(1.5)
+        return slow(*a, **k)
+
+    publisher.publish_members = publish_members
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.2)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    with contextlib.suppress(Exception):
+        driver.run()
+    records = read_journal(tmp_path / "state/reconfig")
+    action = next(r for r in records if r["kind"] == "watchdog_action")
+    assert action["killed"] == [] and "matches=[]" in action["errors"][0]["error"]
+    assert ctl.recovery_required and "could not kill" in ctl.recovery_required
+    assert not ctl.admission_open
 
 
 def test_watchdog_outside_start_verify_kills_nothing(tmp_path):
