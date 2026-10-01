@@ -26,6 +26,7 @@ first=1
 for it in "${ITEMS[@]}"; do
   case=${it%%:*}; rest=${it#*:}; hard=${rest%%:*}; isha=""; [ "$rest" != "$hard" ] && isha=${rest#*:}   # optional 3rd field = code SHA for this item (same image digest only: each item syncs its own `git archive <sha>` workdir)
   P=$CP-$case; R=$CHAIN/items/$P
+  [ -s $CHAIN/cap.txt ] && CAP=$(cat $CHAIN/cap.txt)   # the user may raise/lower the cap while the chain runs (echo 120 > <chain>/cap.txt)
   worst=$(python3 -c "print(round($hard/60*$PPM,2))"); now=$(cost_now)
   if ! python3 -c "import sys;sys.exit(0 if $now + $worst <= $CAP else 1)"; then log "$case: NOT RUN (budget): spent_so_far=\$$now worst=\$$worst cap=\$$CAP"; echo "{\"item\":\"$case\",\"status\":\"not_run_budget\",\"spent_so_far\":$now,\"worst\":$worst}" >> $CHAIN/items.jsonl; continue; fi
   if [ $first = 1 ]; then
