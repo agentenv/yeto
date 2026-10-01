@@ -7,6 +7,15 @@ dereferenced here). The yeto-visible metadata comes from
 :mod:`.rollout_meta_hook`, extracted in the rollout process and delivered via
 a small sink. ``require_policy_tokens`` implements the pre-training identity
 check (spec: mismatching groups are rejected before training).
+
+E1 membership verbs (rl-infra-spec 3.4, :class:`~..ports.ElasticRolloutPool`)
+map yeto member ids (``engine:<cell>``) onto the fork's explicit membership
+API (fork M2/M3, michaellchung/miles ``yeto/ports`` 0af62f4d):
+``InferenceController.start_cells/stop_cells(expected_epoch)``,
+``wait_cells_tracked``, ``drain_cells``/``uncordon_cells``,
+``get_membership_status`` and ``restore_membership_state``. Only cells declared
+at startup can be started (``declared_cells``); the epoch passed in is the
+yeto journal's expected fork epoch (3.3a: the journal is the authority).
 """
 
 from __future__ import annotations
@@ -20,7 +29,12 @@ from typing import Any, Protocol
 
 from ..ports import GroupMetadata, RolloutBatchHandle
 from . import LoopRunner
-from .rollout_meta_hook import DEFAULT_SINK_ACTOR, METADATA_SCHEMA, put_policy_token
+from .rollout_meta_hook import (
+    DEFAULT_SINK_ACTOR,
+    METADATA_SCHEMA,
+    ROUND_META_SCHEMA,
+    put_policy_token,
+)
 
 
 class RolloutMetadataError(RuntimeError):
@@ -48,8 +62,44 @@ def policy_token(rollout_id: int, policy_hash: str) -> str:
     return policy_snapshot_token(rollout_id, policy_hash)
 
 
+MEMBER_PREFIX = "engine:"
+
+
 def member_id(cell_id: Any) -> str:
-    return f"engine:{cell_id}"
+    return f"{MEMBER_PREFIX}{cell_id}"
+
+
+def cell_of(member: str) -> str:
+    if not isinstance(member, str) or not member.startswith(MEMBER_PREFIX):
+        raise ValueError(f"{member!r} is not a rollout member id")
+    return member[len(MEMBER_PREFIX):]
+
+
+def cells_of(members: Any) -> list[str]:
+    return sorted(cell_of(m) for m in members)
+
+
+# Test-only fault injection (rl-infra-spec 3.8 X6 quorum case, gpu-plan-v2 A5):
+# sleep this many seconds before the FIRST fork ``start_cells`` of the process.
+# Unset (default) = no effect. Set by the launcher's
+# ``--rl-test-inject-start-delay-s`` (exported in the island run command).
+INJECT_START_DELAY_ENV = "YETO_RL_TEST_INJECT_START_DELAY_S"
+
+
+def injected_start_delay(environ: Any = None) -> float | None:
+    import os
+
+    raw = (os.environ if environ is None else environ).get(INJECT_START_DELAY_ENV)
+    if raw in (None, ""):
+        return None
+    value = float(raw)
+    if not value > 0:
+        raise ValueError(f"{INJECT_START_DELAY_ENV} must be a positive number of seconds")
+    return value
+
+
+class MembershipPlanError(RuntimeError):
+    """The pool cannot provide the requested engines."""
 
 
 async def running_members(controller: Any) -> frozenset[str]:
@@ -101,8 +151,34 @@ class DirMetadataSource:
             if path.exists():
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 path.unlink()
-                return payload
+                extra = []
+                round_path = self.directory / f"round-{rollout_id}.json"
+                if round_path.exists():
+                    extra.append(json.loads(round_path.read_text(encoding="utf-8")))
+                    round_path.unlink()
+                return merge_round_metadata(payload, extra, rollout_id)
         raise RolloutMetadataError(f"no rollout metadata for rollout {rollout_id} in {self.directory}")
+
+
+def merge_round_metadata(
+    payload: dict[str, Any], records: list[dict[str, Any]], rollout_id: int
+) -> dict[str, Any]:
+    """Attach per-round counters reported after the all-samples hook (same rollout only)."""
+
+    merged = dict(payload)
+    for record in records:
+        if record.get("rollout_id") != rollout_id:
+            raise RolloutMetadataError(
+                f"per-round metadata for rollout {record.get('rollout_id')} "
+                f"arrived with rollout {rollout_id}"
+            )
+        for key, value in record.items():
+            if key in ("schema", "rollout_id"):
+                continue
+            if key in merged:
+                raise RolloutMetadataError(f"per-round metadata {key} reported twice")
+            merged[key] = value
+    return merged
 
 
 def _sink_actor_class():
@@ -151,13 +227,15 @@ class RayMetadataSink:
     def take(self, rollout_id: int) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_s
         while True:
-            items = self._ray.get(self._actor.take_all.remote())
+            items = [json.loads(i) for i in self._ray.get(self._actor.take_all.remote())]
+            main = [i for i in items if i.get("schema") != ROUND_META_SCHEMA]
+            extra = [i for i in items if i.get("schema") == ROUND_META_SCHEMA]
             if items:
-                if len(items) != 1:
+                if len(main) != 1:
                     raise RolloutMetadataError(
-                        f"expected one metadata record for rollout {rollout_id}, got {len(items)}"
+                        f"expected one metadata record for rollout {rollout_id}, got {len(main)}"
                     )
-                return json.loads(items[0])
+                return merge_round_metadata(main[0], extra, rollout_id)
             if time.monotonic() > deadline:
                 raise RolloutMetadataError(f"no rollout metadata for rollout {rollout_id}")
             time.sleep(0.05)
@@ -193,6 +271,9 @@ def handle_from_metadata(
             reward_mean=_number(g["reward_mean"]),
             reward_std=_number(g["reward_std"]),
             token_count=int(g["token_count"]),
+            filtered_samples=(
+                int(g["filtered_samples"]) if g.get("filtered_samples") is not None else None
+            ),
         )
         for g in payload["groups"]
     )
@@ -213,7 +294,29 @@ def handle_from_metadata(
         completed=int(payload["completed"]),
         aborted=int(payload["aborted"]),
         payload=data_pack,
+        # rollout_meta_hook: trained-group filter drops (terminal). Carried-over
+        # leftovers (cut-audit §3): the ports path forbids partial rollout, so the
+        # only reuse is the data buffer; a reported empty buffer means 0.
+        filtered=int(payload["filtered"]) if "filtered" in payload else None,
+        carried_over=0 if payload.get("buffer_length") == 0 else None,
+        data_cursor=payload.get("data_cursor"),
+        buffer_length=payload.get("buffer_length"),
+        submitted_groups=payload.get("submitted_groups"),
+        aborted_in_flight_groups=payload.get("aborted_in_flight_groups"),
+        tool_wait_seconds=(
+            float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
+        ),
+        nonzero_advantages=(
+            int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
+        ),
     )
+
+
+def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
+    import urllib.request
+
+    with urllib.request.urlopen(url, timeout=timeout_s) as response:  # noqa: S310 - router URL
+        return json.loads(response.read().decode("utf-8"))
 
 
 class MilesRolloutPool:
@@ -228,13 +331,42 @@ class MilesRolloutPool:
         expected_policy: Callable[[], tuple[int, str]],
         runner: LoopRunner | None = None,
         args: Any = None,
+        declared_cells: Any = None,
+        track_timeout_s: float = 600.0,
+        tool_wait_board: Any = None,
+        worker_manager: Any = None,
+        bundles: Any = None,
+        gpus_per_engine: int | None = None,
     ) -> None:
+        # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
+        # tool-wait count, so trajectory_load() is unknown (None).
+        self._tool_wait_board = tool_wait_board
         self._args = args
+        # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
+        self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
+        self._track_timeout_s = float(track_timeout_s)
         self._controller = inference_controller
         self._executor = rollout_executor
         self._metadata = metadata
         self._expected_policy = expected_policy
         self._run = (runner or LoopRunner()).run
+        self._last_cursor: dict[str, int] | None = None
+        # test-only start delay (INJECT_START_DELAY_ENV); applied once per process
+        self._inject_start_delay = injected_start_delay()
+        self.injected_start_delays: list[float] = []
+        self._sleep = time.sleep
+        # E3 role transfer (4.7): fork RayWorkerManager handle (None = the named
+        # actor, looked up on first use), the startup bundle map
+        # (bundles.StartupBundles: pool GPU ids <-> startup PG bundles) and
+        # GPUs per engine.
+        self._worker_manager = worker_manager
+        self._bundles = bundles
+        self._gpus_per_engine = gpus_per_engine
+        self._bind_seq = 0
+
+    def data_cursor(self) -> dict[str, int] | None:
+        """4.2: data cursor after the last generated batch (None = unknown)."""
+        return None if self._last_cursor is None else dict(self._last_cursor)
 
     def generate(self, rollout_id: int) -> RolloutBatchHandle:
         policy_version, policy_hash = self._expected_policy()
@@ -246,7 +378,7 @@ class MilesRolloutPool:
         self._offload_after_rollout()
         try:
             payload = self._metadata.take(rollout_id)
-            return handle_from_metadata(
+            handle = handle_from_metadata(
                 payload,
                 rollout_id=rollout_id,
                 policy_version=policy_version,
@@ -256,6 +388,33 @@ class MilesRolloutPool:
         except BaseException:
             _release(data_pack)
             raise
+        self._last_cursor = dict(handle.data_cursor) if handle.data_cursor else None
+        return handle
+
+    def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, int] | None:
+        """rl-infra-spec 1.7: engine in-flight counts from the fork-M3 router.
+
+        ``GET /worker_inflight`` -> ``{"inflight": {worker_url: n}, "cordoned": [...]}``.
+        None when the router address is unknown or the router lacks the
+        endpoint (stock Miles without M3): unknown, never reported as 0.
+        """
+        args = self._args
+        ip = getattr(args, "sglang_router_ip", None)
+        port = getattr(args, "sglang_router_port", None)
+        if not ip or not port:
+            return None
+        try:
+            data = (http_get or _http_get_json)(f"http://{ip}:{port}/worker_inflight")
+        except Exception:  # noqa: BLE001 - observation only; absent endpoint = unknown
+            return None
+        inflight = data.get("inflight") if isinstance(data, dict) else None
+        if not isinstance(inflight, dict):
+            return None
+        return {
+            "active_requests": int(sum(int(v) for v in inflight.values())),
+            "workers": len(inflight),
+            "cordoned": len(data.get("cordoned") or ()),
+        }
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""
@@ -285,6 +444,187 @@ class MilesRolloutPool:
 
     def members(self) -> frozenset[str]:
         return self._run(running_members(self._controller))
+
+    # -- E1 membership verbs (3.4) ---------------------------------------------
+    def _require_declared(self) -> tuple[str, ...]:
+        if not self._declared:
+            raise MembershipPlanError("no declared rollout cells: E1 membership verbs are off")
+        return self._declared
+
+    def plan_add(self, count: int) -> frozenset[str]:
+        declared = self._require_declared()
+        if count < 1:
+            raise MembershipPlanError(f"add_engines needs a positive count, got {count}")
+        tracked = set(self._run(self._controller.get_cell_statuses()) or {})
+        free = [c for c in declared if c not in tracked]
+        if len(free) < count:
+            raise MembershipPlanError(
+                f"{count} engines requested, only {len(free)} declared cells are stopped: {free}"
+            )
+        return frozenset(member_id(c) for c in free[:count])
+
+    def add_engines(
+        self, count: int, *, epoch: int, members: frozenset[str] | None = None
+    ) -> frozenset[str]:
+        """Start ``count`` declared cells and wait until the servers track them.
+
+        The cells take no traffic until a member publication admits them (3.5).
+        Returns the started members. A timeout while waiting for tracking leaves
+        the fork epoch committed (the caller's journal sees ``epoch + 1``).
+        """
+        chosen = frozenset(members) if members is not None else self.plan_add(count)
+        if len(chosen) != count:
+            raise MembershipPlanError(f"{len(chosen)} members named for {count} engines")
+        cells = cells_of(chosen)
+        unknown = sorted(set(cells) - set(self._require_declared()))
+        if unknown:
+            raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        if self._inject_start_delay is not None and not self.injected_start_delays:
+            import sys
+
+            print(f"[yeto] TEST INJECTION {INJECT_START_DELAY_ENV}: sleeping "
+                  f"{self._inject_start_delay}s before start_cells({cells})", file=sys.stderr, flush=True)
+            self.injected_start_delays.append(self._inject_start_delay)
+            self._sleep(self._inject_start_delay)
+        self._run(self._controller.start_cells(cells, expected_epoch=epoch))
+        self._run(self._controller.wait_cells_tracked(cells, timeout_seconds=self._track_timeout_s))
+        return chosen
+
+    def _manager(self) -> Any:
+        if self._worker_manager is None:
+            from miles.utils.workers.ray_worker_manager import RayWorkerManager
+
+            self._worker_manager = RayWorkerManager.get_handle()
+        return self._worker_manager
+
+    def member_gpus(self, members: Any = None) -> dict[str, tuple[str, ...]]:
+        """Pool GPU ids each member (declared cell) is bound to now (E3 H2: choose
+        the members to remove by the GPUs a transfer moves). Read from the fork's
+        ``RayWorkerManager.get_cell_bundles`` and mapped back through the startup
+        bundle map; ``members`` None = the serving members."""
+        declared = self._require_declared()
+        if self._bundles is None:
+            raise MembershipPlanError("no GPU -> bundle view mapping: cannot report member GPUs")
+        cells = cells_of(self.members() if members is None else frozenset(members))
+        unknown = sorted(set(cells) - set(declared))
+        if unknown:
+            raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        manager = self._manager()
+
+        async def read() -> dict[str, list[int]]:
+            return {c: list(await manager.get_cell_bundles.remote(c)) for c in cells}
+
+        bundles = self._run(read())
+        return {member_id(c): self._bundles.gpus_for_bundles(b) for c, b in sorted(bundles.items())}
+
+    def members_on_gpus(self, gpus: Any, members: Any = None) -> frozenset[str]:
+        """Members whose GPUs all lie in ``gpus`` (and none elsewhere)."""
+        wanted = {str(g) for g in gpus}
+        return frozenset(m for m, owned in self.member_gpus(members).items()
+                         if owned and set(owned) <= wanted)
+
+    def bind_members(self, members: frozenset[str], gpus: tuple[str, ...]) -> str:
+        """Bind stopped declared cells to the GPUs a trainer released (E3 role transfer, 4.7).
+
+        Points a fresh placement-group view (fork-M6 ``set_pg_view``) at the
+        startup bundles of ``gpus`` and rebinds each cell (``rebind_cell``) to
+        consecutive slots of it, in sorted member order, so the next
+        ``add_engines`` starts them there. Returns the view name.
+
+        Depends on fork gap F-R1: the fork (M1) cannot declare at startup a
+        stopped rollout cell whose default binding lies outside the rollout
+        view, so on the real fork there may be no such cell to bind yet.
+        """
+        declared = self._require_declared()
+        cells = sorted(cells_of(frozenset(members)))
+        unknown = sorted(set(cells) - set(declared))
+        if unknown:
+            raise MembershipPlanError(f"cells {unknown} were not declared at startup")
+        if not cells:
+            raise MembershipPlanError("bind_members needs at least one member")
+        per = int(self._gpus_per_engine or getattr(self._args, "rollout_num_gpus_per_engine", 1) or 1)
+        gpus = tuple(str(g) for g in gpus)
+        if len(gpus) != per * len(cells) or len(set(gpus)) != len(gpus):
+            raise MembershipPlanError(
+                f"{len(cells)} engines x {per} GPUs need {per * len(cells)} distinct GPUs, got {list(gpus)}")
+        if self._bundles is None:
+            raise MembershipPlanError("no GPU -> bundle view mapping: cannot bind engines to GPUs")
+        tracked = set(self._run(self._controller.get_cell_statuses()) or {})
+        running = sorted(set(cells) & tracked)
+        if running:
+            raise MembershipPlanError(f"cells {running} are running; only stopped cells can be bound")
+        info = self._bundles.view_for(gpus)
+        manager = self._manager()
+        self._bind_seq += 1
+        view = f"yeto-rollout-bind-{self._bind_seq}-{'-'.join(cells)}"
+
+        async def bind() -> None:
+            await manager.set_pg_view.remote(view, info)
+            for i, cell in enumerate(cells):
+                await manager.rebind_cell.remote(cell, pg_name=view, pg_slot_offset=i * per)
+
+        self._run(bind())
+        return view
+
+    def remove_engines(self, members: frozenset[str], *, epoch: int) -> frozenset[str]:
+        """Deregister and stop ``members`` (drain them first); returns the remaining members."""
+        self._run(self._controller.stop_cells(cells_of(members), expected_epoch=epoch))
+        return self.members()
+
+    def drain(self, members: frozenset[str], deadline: float) -> bool:
+        """Cordon ``members`` and wait for zero in-flight requests until ``deadline`` (wall clock).
+
+        False at the deadline; nothing is aborted, members stay cordoned
+        (:meth:`undrain` cancels). The router counts engine requests only; a
+        trajectory waiting on a tool is counted by yeto (3.3), not here.
+        """
+        timeout = max(0.0, float(deadline) - time.time())
+        return bool(self._run(self._controller.drain_cells(cells_of(members),
+                                                           timeout_seconds=timeout)))
+
+    def undrain(self, members: frozenset[str]) -> None:
+        self._run(self._controller.uncordon_cells(cells_of(members)))
+
+    def trajectory_load(self) -> dict[str, Any] | None:
+        """3.3 drain probe: router in-flight + in-flight tool waits (``tool_wait.drain_blockers``).
+
+        None without a tool-wait board (the controller then relies on the
+        serial round boundary only). Unknown counts are reported as blockers
+        (fail closed).
+        """
+        if self._tool_wait_board is None:
+            return None
+        from ..tool_wait import drain_blockers, read_tool_wait
+
+        sample = self.load_sample()
+        active = None if sample is None else int(sample["active_requests"])
+        try:
+            snap = read_tool_wait(self._tool_wait_board)
+        except Exception:  # noqa: BLE001 - unknown: fail closed below
+            snap = None
+        return {
+            "active_requests": active,
+            "tool_wait": None if snap is None else int(snap.in_flight),
+            "blockers": drain_blockers(active, snap),
+        }
+
+    def membership_status(self) -> dict[str, Any]:
+        status = dict(self._run(self._controller.get_membership_status()))
+        incomplete = status.get("incomplete")
+        if incomplete:
+            status["incomplete"] = [incomplete[0], [member_id(c) for c in incomplete[1]]]
+        return status
+
+    def restore_membership(
+        self, *, epoch: int, incomplete: Any, last_op: Any, expected_current_epoch: int
+    ) -> dict[str, Any]:
+        def cells(value: Any) -> Any:
+            return None if value is None else [value[0], cells_of(value[1])]
+
+        return dict(self._run(self._controller.restore_membership_state(
+            epoch=epoch, incomplete=cells(incomplete), last_op=cells(last_op),
+            expected_current_epoch=expected_current_epoch,
+        )))
 
 
 def _release(data_pack: Any) -> None:

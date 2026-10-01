@@ -198,6 +198,128 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-algorithm-spec",
+        default=None,
+        metavar="PATH",
+        help=(
+            "AlgorithmSpec JSON (v1 or v2) for --rl-engine ports; the launcher "
+            "sends each island its canonical form and expected hash"
+        ),
+    )
+    rl.add_argument(
+        "--rl-placement",
+        choices=["colocated", "fixed-partition"],
+        default="colocated",
+        help="ports: colocated (default) or a LoRA fixed partition (rl-infra-spec 2.1)",
+    )
+    rl.add_argument(
+        "--rl-rollout-gpus",
+        dest="rollout_num_gpus",
+        type=int,
+        default=None,
+        help="ports fixed partition: dedicated rollout GPUs per island node (rl-infra-spec 2.1). "
+        "Note: on `launch`, a bare --rollout-num-gpus is an argparse abbreviation of "
+        "--rollout-num-gpus-per-engine, not this option",
+    )
+    rl.add_argument(
+        "--rl-standby-gpus",
+        type=int,
+        default=0,
+        help="ports fixed partition: reserved standby GPUs never started by any role",
+    )
+    rl.add_argument(
+        "--rl-overlap-eval",
+        action="store_true",
+        help="ports fixed partition: run eval overlapped with train/outer sync "
+        "(rl-infra-spec 2.3; needs --rl-eval-interval); off by default",
+    )
+    rl.add_argument(
+        "--rl-elastic",
+        action="store_true",
+        help="ports: enable the E1 elastic rollout controller (rl-infra-spec 3.x); "
+        "needs --rl-elastic-resources/-initial-config/-cells; off by default",
+    )
+    rl.add_argument("--rl-elastic-resources", default=None, metavar="PATH",
+                    help="--rl-elastic: resources manifest JSON (configs/edges)")
+    rl.add_argument("--rl-elastic-attestation", default=None, metavar="PATH",
+                    help="--rl-elastic: capability attestation JSON")
+    rl.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME",
+                    help="--rl-elastic: initial config id in the manifest")
+    rl.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
+                    help="--rl-elastic: rollout cell ids the fork declares at startup")
+    rl.add_argument("--rl-elastic-quorum-timeout-s", type=int, default=None, metavar="S",
+                    help="--rl-elastic: syncer --quorum-timeout-s, also the island's strict "
+                    "pause budget input (default: syncer default 900)")
+    rl.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic: measured network idle-flow timeout capping the pause")
+    rl.add_argument("--rl-test-inject-start-delay-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (GPU acceptance fault injection): sleep S "
+                    "seconds before the island's first fork start_cells; off by default")
+    rl.add_argument("--rl-test-inject-update-weights-block-s", type=float, default=None,
+                    metavar="S",
+                    help="--rl-elastic, TEST ONLY (watchdog fault injection): block up to S "
+                    "seconds before the island's first member update_weights, failing as soon "
+                    "as a target engine dies; off by default")
+    rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
+                    help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
+                    "X6 cross-quorum runs only)")
+    # Ports LoRA training-time heldout eval (forwarded to the learner's
+    # --eval-*; the file is shipped inline and checked by SHA256 there).
+    rl.add_argument("--rl-eval-interval", type=int, default=None, metavar="N",
+                    help="ports: heldout eval every N rollouts (learner --eval-interval); "
+                    "needs --rl-eval-data/-dataset-name/-samples-per-prompt; off by default")
+    rl.add_argument("--rl-eval-data", default=None, metavar="PATH",
+                    help="--rl-eval-interval: local heldout prompt JSONL (distinct from --data)")
+    rl.add_argument("--rl-eval-dataset-name", default=None, metavar="NAME",
+                    help="--rl-eval-interval: eval dataset name")
+    rl.add_argument("--rl-eval-samples-per-prompt", type=int, default=None, metavar="N",
+                    help="--rl-eval-interval: samples per eval prompt")
+    rl.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "validate the launch (arguments, provenance, ports algorithm and "
+            "capability checks) and print the resource request, algorithm hash "
+            "and learner command as JSON; creates no cloud resource"
+        ),
+    )
+    rl.add_argument(
+        "--rl-stall-timeout",
+        type=float,
+        default=None,
+        help=(
+            "ports RL: stop the run (exit 6) when no island event arrives for this many "
+            "seconds and not every island finalized (default 900; 0 disables)"
+        ),
+    )
+    rl.add_argument(
+        "--rl-optimizer-steps",
+        type=int,
+        default=1,
+        help=(
+            "ports: optimizer steps per RL round (default 1); must divide "
+            "rollout-batch-size * n-samples-per-prompt"
+        ),
+    )
+    rl.add_argument(
+        "--rl-single-island-no-sync",
+        action="store_true",
+        help=(
+            "ports only: launch exactly one island with no syncer and no outer "
+            "sync (the G1 smoke entry for --rl-allow-unverified-mechanism)"
+        ),
+    )
+    rl.add_argument(
+        "--rl-allow-unverified-mechanism",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "ports single-island smoke only: admit an expressible but "
+            "undeclared mechanism (recorded in events and provenance)"
+        ),
+    )
+    rl.add_argument(
         "--rl-offload-train",
         action="store_true",
         help=(
@@ -665,6 +787,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         dest="spot",
         action="store_false",
         help="use on-demand instances for learners instead of spot",
+    )
+    infra.add_argument(
+        "--modal-gpu-exact",
+        action="store_true",
+        help="Modal islands: request the exact GPU type (H100! -- Modal otherwise "
+        "may upgrade H100 to H200) and fail at container start unless "
+        "nvidia-smi reports it; use for bitwise comparisons",
     )
     infra.add_argument("--disk-size", type=int, default=512, help="learner disk (GB)")
     infra.add_argument(
@@ -1214,6 +1343,22 @@ def cmd_launch(args) -> int:
     except (ImportError, OSError, PermissionError, ValueError) as exc:
         print(f"[yeto] provenance validation failed: {exc}", file=sys.stderr)
         return 1
+    if getattr(args, "rl_single_island_no_sync", False) and (
+        getattr(args, "controller", "local") == "head"
+    ):
+        print("[yeto] --rl-single-island-no-sync has no syncer; use --controller local",
+              file=sys.stderr)
+        return 1
+    if getattr(args, "dry_run", False):
+        from .launcher import dry_run_plan
+
+        try:
+            plan = dry_run_plan(args)
+        except ValueError as exc:
+            print(f"[yeto] dry run rejected: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
     if getattr(args, "controller", "local") == "head":
         return cmd_launch_head(args)
 

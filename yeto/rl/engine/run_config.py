@@ -146,6 +146,9 @@ class ParallelLayout:
     visible_gpus_per_node: int
     # Uneven pipeline split: (first, last) stage layer counts, else None.
     uneven_pipeline_layers: tuple[int, int] | None
+    # rl-infra-spec 2.1: reserved standby GPUs of a fixed partition (never
+    # started by any role); a non-zero value needs the fork-M1 placement map.
+    standby_gpus: int = 0
 
     @property
     def colocated(self) -> bool:
@@ -213,6 +216,88 @@ class AlgorithmConfig:
     lr: Any
     seed: int
     rollout_seed: int
+    # Explicit learning-rate schedule (never Miles' implicit default, which
+    # derives its horizon from ``--num-rollout`` = global rounds).  ``None``
+    # (eval-only) emits no schedule flags.
+    lr_schedule: "LrSchedule | None" = None
+
+
+LR_DECAY_STYLES = frozenset({"linear", "constant"})
+
+
+@dataclass(frozen=True)
+class LrSchedule:
+    """Per-island optimizer LR schedule, in local optimizer steps.
+
+    strict-avg: every island runs exactly ``global_rounds * optimizer_steps``
+    local steps, so linear decay over that horizon is well defined (and is
+    what Miles' implicit default already produced).  decoupled: islands run
+    until the syncer stops them, so the local step count is not known up
+    front and any finite linear horizon can reach zero mid-run; the LR is
+    held constant.
+    """
+
+    decay_style: str
+    decay_iters: int
+
+    def __post_init__(self) -> None:
+        if self.decay_style not in LR_DECAY_STYLES:
+            raise ValueError(f"unsupported LR decay style {self.decay_style!r}")
+        if type(self.decay_iters) is not int or self.decay_iters < 1:
+            raise ValueError("LR decay horizon must be a positive step count")
+
+
+LR_SCHEDULE_FLAGS = ("--lr-decay-style", "--lr-decay-iters", "--lr-warmup-iters", "--min-lr")
+
+
+def lr_schedule_argv(schedule: "LrSchedule | None") -> tuple[str, ...]:
+    """Miles/Megatron flags for ``schedule``; shared verbatim by both engines."""
+
+    if schedule is None:
+        return ()
+    return (
+        "--lr-decay-style", schedule.decay_style,
+        "--lr-decay-iters", str(schedule.decay_iters),
+        "--lr-warmup-iters", "0",
+        "--min-lr", "0",
+    )
+
+
+def resolve_lr_schedule(
+    *,
+    sync_preset: str,
+    eval_only: bool,
+    global_rounds: int,
+    optimizer_steps: int,
+    rollout_batch_size: int,
+    n_samples_per_prompt: int,
+    global_batch: int,
+) -> LrSchedule | None:
+    """The island's LR schedule, decided by the sync mode (design D1-D3).
+
+    Both engine translations (legacy ``_legacy_miles_argv`` and ports
+    ``translate_run_config``) emit exactly this schedule.
+    """
+
+    if eval_only:
+        return None
+    horizon = global_rounds * optimizer_steps
+    if sync_preset == "decoupled":
+        # Run-until-stop: the local step count is unknown up front.
+        # decay_iters only satisfies Megatron's ``lr_decay_steps > 0``; a
+        # constant schedule never reads it.
+        return LrSchedule("constant", horizon)
+    # strict-avg / dense-full: one local round (optimizer_steps steps) per
+    # global round.  The explicit linear horizon equals Miles' implicit
+    # ``num_rollout * rollout_batch_size * n_samples / global_batch`` only
+    # when every round is exactly ``optimizer_steps`` optimizer steps.
+    if rollout_batch_size * n_samples_per_prompt != global_batch * optimizer_steps:
+        raise ValueError(
+            "strict LR schedule requires rollout_batch_size * n_samples_per_prompt "
+            f"== global_batch * optimizer_steps (got {rollout_batch_size} * "
+            f"{n_samples_per_prompt} != {global_batch} * {optimizer_steps})"
+        )
+    return LrSchedule("linear", horizon)
 
 
 @dataclass(frozen=True)
@@ -340,6 +425,9 @@ def resolve_rl_run_config(
     """
 
     parameter_mode = getattr(args, "parameter_mode", "lora")
+    if parameter_mode == "full" and int(getattr(args, "rl_standby_gpus", 0) or 0):
+        # review F7: never drop a standby request silently
+        raise ValueError("--rl-standby-gpus is not supported for full-parameter mode")
     if parameter_mode not in PARAMETER_MODES:
         raise ValueError("unsupported RL parameter mode")
     if parameter_mode == "full":
@@ -447,8 +535,35 @@ def resolve_rl_run_config(
             raise ValueError("pinned Qwen3.5 requires TP1 SGLang inference engines")
         dedicated_rollout_gpus = rollout_gpus
         visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus
+    elif getattr(args, "rl_placement", "colocated") == "fixed-partition":
+        # rl-infra-spec 2.1: a LoRA fixed partition (ports engine only; the
+        # legacy CLI never sets rl_placement, so its layout is unchanged).
+        rollout_gpus = getattr(args, "rollout_num_gpus", None)
+        per_engine = getattr(args, "rollout_num_gpus_per_engine", 1)
+        if (
+            args.actor_num_nodes != 1
+            or type(rollout_gpus) is not int
+            or rollout_gpus < 1
+            or rollout_gpus % per_engine
+        ):
+            raise ValueError(
+                "a LoRA fixed partition needs one node and --rollout-num-gpus as a "
+                "positive multiple of --rollout-num-gpus-per-engine"
+            )
+        dedicated_rollout_gpus = rollout_gpus
+        standby_gpus = int(getattr(args, "rl_standby_gpus", 0) or 0)
+        if standby_gpus < 0:
+            raise ValueError("--rl-standby-gpus must be non-negative")
+        visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus + standby_gpus
     else:
         visible_gpus_per_node = args.actor_num_gpus_per_node
+    requested_standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
+    if dedicated_rollout_gpus is None:
+        if requested_standby:
+            raise ValueError("--rl-standby-gpus needs --rl-placement fixed-partition")
+        standby_gpus = 0
+    elif parameter_mode == "full":
+        standby_gpus = 0
 
     ref_load = _resolve_ref_load(args, model_path)
     global_batch = args.groups_per_round * args.samples_per_group // args.optimizer_steps
@@ -605,6 +720,7 @@ def resolve_rl_run_config(
             dedicated_rollout_gpus=dedicated_rollout_gpus,
             visible_gpus_per_node=visible_gpus_per_node,
             uneven_pipeline_layers=uneven_pipeline_layers,
+            standby_gpus=standby_gpus,
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
@@ -640,6 +756,15 @@ def resolve_rl_run_config(
             advantage_estimator="grpo",
             reward_function=args.reward_function,
             lr=args.inner_lr,
+            lr_schedule=resolve_lr_schedule(
+                sync_preset=getattr(args, "sync_preset", "strict-avg"),
+                eval_only=bool(getattr(args, "eval_only", False)),
+                global_rounds=args.global_rounds,
+                optimizer_steps=args.optimizer_steps,
+                rollout_batch_size=args.groups_per_round,
+                n_samples_per_prompt=args.samples_per_group,
+                global_batch=global_batch,
+            ),
             seed=args.seed,
             rollout_seed=getattr(args, "rollout_seed", args.seed + args.learner_id),
         ),
@@ -687,6 +812,20 @@ def resolve_rl_run_config(
     )
 
 
+def ports_training_eval(args, *, parameter_mode: str | None) -> bool:
+    """Training-time heldout eval on a ports LoRA island (not eval-only, not dense).
+
+    Shared by the learner's dataset-identity check and :func:`_resolve_eval`
+    so both accept exactly the same runs.
+    """
+
+    return (
+        not getattr(args, "eval_only", False)
+        and getattr(args, "rl_engine", "ports") == "ports"
+        and parameter_mode != "full"
+    )
+
+
 def _resolve_eval(
     args,
     *,
@@ -708,6 +847,7 @@ def _resolve_eval(
         and parameter_mode == "full"
         and getattr(args, "sync_preset", None) == "dense-full"
     )
+    ports_train_eval = ports_training_eval(args, parameter_mode=parameter_mode)
     if eval_only:
         if eval_interval != 1:
             raise ValueError("SSH evaluation must be one separate eval-only run")
@@ -721,8 +861,17 @@ def _resolve_eval(
         if eval_prompt_path is None:
             raise ValueError("dense full evaluation requires heldout prompt data")
         selected = eval_prompt_path
+    elif ports_train_eval:
+        # Ports LoRA island (rl-infra-spec 2.3 / launcher wiring): Miles runs
+        # the heldout eval every ``interval`` rollouts through the driver's
+        # evaluate port; a distinct heldout split is mandatory.
+        if eval_prompt_path is None:
+            raise ValueError("ports training-time evaluation requires heldout prompt data")
+        selected = eval_prompt_path
     else:
-        raise ValueError("training-time evaluation is restricted to dense full mode")
+        raise ValueError(
+            "training-time evaluation is restricted to dense full mode or the ports LoRA engine"
+        )
     eval_name = getattr(args, "eval_dataset_name", None)
     eval_samples = getattr(args, "eval_samples_per_prompt", None)
     if not eval_name or not isinstance(eval_samples, int) or eval_samples <= 0:

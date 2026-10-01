@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -61,7 +62,7 @@ def make_config(*, colocated: bool = True, with_eval: bool = False, with_moe: bo
         ),
         algorithm=rc.AlgorithmConfig(
             advantage_estimator="grpo", reward_function="yeto.rl.rewards:math", lr=1e-5,
-            seed=1, rollout_seed=2,
+            seed=1, rollout_seed=2, lr_schedule=rc.LrSchedule("linear", 3),
         ),
         eval=rc.EvalConfig(interval=2, dataset_name="math", prompt_path="/data/e.jsonl",
                            samples_per_prompt=1, temperature=0.0) if with_eval else None,
@@ -113,12 +114,35 @@ def test_colocated_translation_core_flags():
 
 
 def test_fixed_partition_translation():
-    launch = mc.translate_run_config(make_config(colocated=False), AlgorithmSpec())
+    # rl-infra-spec 2.1: a LoRA fixed partition keeps the trainer resident
+    # (NCCL broadcast publish every round); offload_train is refused below.
+    cfg = sub(make_config(colocated=False), "serving", offload_train=False)
+    launch = mc.translate_run_config(cfg, AlgorithmSpec())
     argv = list(launch.argv)
     assert "--colocate" not in argv
     assert flag_value(argv, "--rollout-num-gpus") == "2"
     assert launch.placement.kind == "fixed-partition"
     assert launch.placement.expected_layout() == (4, 2)
+    assert flag_value(argv, "--update-weight-transfer-mode") == "broadcast"
+    assert "--lora-base-cpu-backup" not in argv
+    assert "--yeto-placement-map" not in argv  # no standby: upstream offset layout
+
+
+def test_lora_fixed_partition_refuses_trainer_offload_and_emits_standby_map():
+    with pytest.raises(mc.MilesConfigError, match="resident"):
+        mc.translate_run_config(make_config(colocated=False), AlgorithmSpec())
+    cfg = sub(make_config(colocated=False), "serving", offload_train=False)
+    cfg = sub(cfg, "parallel", standby_gpus=2, visible_gpus_per_node=6)
+    launch = mc.translate_run_config(cfg, AlgorithmSpec())
+    argv = list(launch.argv)
+    assert json.loads(flag_value(argv, "--yeto-placement-map")) == {
+        "trainer": [0, 1], "rollout": [2, 3], "standby": [4, 5]
+    }
+    assert launch.placement.standby_gpus == 2
+    # colocated argv is unchanged by the partition work
+    colocated = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--lora-base-cpu-backup" in colocated
+    assert "--update-weight-transfer-mode" not in colocated
 
 
 def test_colocated_forces_offload_train():
@@ -220,7 +244,7 @@ def test_unknown_config_field_rejected_by_name():
 def test_leaf_policy_matches_run_config_fields():
     cfg = make_config(with_eval=True, with_moe=True)
     leaves = {path for path, _ in mc.iter_config_leaves(cfg)}
-    leaves |= {"eval", "geometry.moe"}  # the None variants
+    leaves |= {"eval", "geometry.moe", "algorithm.lr_schedule"}  # the None variants
     assert leaves == set(mc.LEAF_POLICY)
 
 
@@ -312,6 +336,9 @@ def test_upstream_parse_args_accepts_translation(tmp_path, colocated):
         make_config(colocated=colocated), hf_checkpoint=str(tmp_path), ref_load=str(tmp_path)
     )
     cfg = sub(cfg, "data", prompt_path=str(tmp_path / "p.jsonl"))
+    if not colocated:
+        # LoRA fixed partition keeps the trainer resident (config.py guard).
+        cfg = sub(cfg, "serving", offload_train=False)
     # HF target names avoid the Megatron-Bridge round trip parse_args needs for Megatron names.
     cfg = sub(cfg, "trainable", target_modules=("q_proj", "k_proj", "v_proj", "o_proj"))
     spec = AlgorithmSpec(
@@ -322,3 +349,143 @@ def test_upstream_parse_args_accepts_translation(tmp_path, colocated):
     assert args.colocate is colocated and not args.indep_dp and not args.ft_components
     assert args.rollout_all_samples_process_path == mc.ROLLOUT_META_HOOK_PATH
     assert args.yeto_rl_dynamic_sampling_max_replacements == 2
+
+
+# --- LR schedule (head decoupled attempt4: implicit linear decay hit 0) -----
+
+
+def _upstream_lr(argv, step):
+    """LR Megatron applies at optimizer step ``step`` (0-based).
+
+    Transcribes miles/backends/megatron_utils/model.py (upstream :80-106,
+    legacy fork :85-105) and megatron.core OptimizerParamScheduler.get_lr: the
+    scheduler counts samples (``global_batch`` per step) and is stepped after
+    each optimizer step, so step ``k`` trains with ``get_lr`` at
+    ``num_steps = k * global_batch``.
+    """
+
+    def value(flag, default=None):
+        return flag_value(argv, flag) if flag in argv else default
+
+    max_lr = float(value("--lr"))
+    gbs = int(value("--global-batch-size"))
+    train_iters = (
+        int(value("--num-rollout")) * int(value("--rollout-batch-size"))
+        * int(value("--n-samples-per-prompt")) // gbs
+    )
+    decay_steps = int(value("--lr-decay-iters", train_iters)) * gbs
+    warmup_steps = int(value("--lr-warmup-iters", 0)) * gbs
+    style = value("--lr-decay-style", "linear")
+    min_lr = float(value("--min-lr", 0.0))
+    assert decay_steps > 0  # Megatron: lr_decay_steps > 0
+    num_steps = step * gbs
+    if warmup_steps > 0 and num_steps <= warmup_steps:
+        return max_lr * num_steps / warmup_steps
+    if style == "constant":
+        return max_lr
+    if num_steps > decay_steps:
+        return min_lr
+    assert style == "linear"
+    ratio = (num_steps - warmup_steps) / (decay_steps - warmup_steps)
+    return min_lr + (1.0 - ratio) * (max_lr - min_lr)
+
+
+def _schedule_args(**kw):
+    base = dict(
+        global_rounds=4, optimizer_steps=1, sync_preset="strict-avg", eval_only=False,
+        rollout_batch_size=4, n_samples_per_prompt=4,
+    )
+    base.update(kw)
+    base.setdefault(
+        "global_batch",
+        base["rollout_batch_size"] * base["n_samples_per_prompt"] // base["optimizer_steps"],
+    )
+    return base
+
+
+def test_decoupled_lr_is_explicitly_constant_past_global_rounds():
+    # Head attempt4: 4 global rounds, 12 local rounds per island.
+    schedule = rc.resolve_lr_schedule(**_schedule_args(sync_preset="decoupled"))
+    cfg = make_config(batch=dataclasses.replace(make_config().batch, global_rounds=4))
+    cfg = sub(cfg, "algorithm", lr_schedule=schedule)
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    assert flag_value(argv, "--lr-decay-style") == "constant"
+    assert flag_value(argv, "--num-rollout") == "4"
+    local_rounds_upper = 1000  # decoupled local rounds are not bounded by global_rounds
+    total = 4 * cfg.batch.optimizer_steps
+    assert all(
+        _upstream_lr(argv, s) == 1e-5 for s in range(total + local_rounds_upper)
+    )
+
+
+def test_implicit_default_would_decay_decoupled_to_zero():
+    # Regression witness for the pre-fix argv (no schedule flags).
+    cfg = sub(make_config(), "algorithm", lr_schedule=None)
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    assert "--lr-decay-style" not in argv
+    total = cfg.batch.global_rounds * cfg.batch.optimizer_steps
+    assert _upstream_lr(argv, total - 1) > 0.0
+    # Pre-fix: from local step global_rounds * optimizer_steps on, the LR is 0
+    # (head attempt4: 4 global rounds, 12 local rounds per island).
+    assert all(_upstream_lr(argv, s) == 0.0 for s in range(total, total + 12))
+
+
+@pytest.mark.parametrize("optimizer_steps", [1, 2])
+def test_strict_lr_schedule_matches_previous_implicit_default(optimizer_steps):
+    batch = dataclasses.replace(
+        make_config().batch, optimizer_steps=optimizer_steps,
+        global_batch=16 // optimizer_steps,
+    )
+    implicit = list(mc.translate_run_config(
+        sub(make_config(batch=batch), "algorithm", lr_schedule=None), AlgorithmSpec()
+    ).argv)
+    schedule = rc.resolve_lr_schedule(
+        **_schedule_args(global_rounds=batch.global_rounds, optimizer_steps=optimizer_steps)
+    )
+    assert schedule == rc.LrSchedule("linear", batch.global_rounds * optimizer_steps)
+    explicit = list(mc.translate_run_config(
+        sub(make_config(batch=batch), "algorithm", lr_schedule=schedule), AlgorithmSpec()
+    ).argv)
+    total = batch.global_rounds * optimizer_steps
+    for step in range(total + 3):
+        assert _upstream_lr(explicit, step) == _upstream_lr(implicit, step)
+    # every strict step trains with a nonzero LR (the last one included)
+    assert all(_upstream_lr(explicit, s) > 0 for s in range(total))
+    assert _upstream_lr(explicit, total - 1) > 0
+
+
+def test_eval_only_emits_no_lr_schedule():
+    assert rc.resolve_lr_schedule(**_schedule_args(eval_only=True)) is None
+    with pytest.raises(ValueError):
+        rc.LrSchedule("cosine", 4)
+    with pytest.raises(ValueError):
+        rc.LrSchedule("linear", 0)
+
+
+@pytest.mark.parametrize("preset", ["strict-avg", "dense-full"])
+def test_strict_lr_schedule_is_linear_over_rounds_times_steps(preset):
+    assert rc.resolve_lr_schedule(
+        **_schedule_args(sync_preset=preset, global_rounds=3, optimizer_steps=2)
+    ) == rc.LrSchedule("linear", 6)
+    assert rc.resolve_lr_schedule(
+        **_schedule_args(sync_preset="decoupled", global_rounds=3, optimizer_steps=2)
+    ) == rc.LrSchedule("constant", 6)
+
+
+def test_strict_lr_schedule_rejects_rounds_that_are_not_optimizer_steps():
+    # 4*3 samples do not split into 2 optimizer steps of 5: Miles' implicit
+    # horizon would differ from global_rounds * optimizer_steps.
+    with pytest.raises(ValueError, match="global_batch \\* optimizer_steps"):
+        rc.resolve_lr_schedule(**_schedule_args(
+            n_samples_per_prompt=3, optimizer_steps=2, global_batch=5,
+        ))
+    # decoupled never derives a horizon from the batch shape
+    assert rc.resolve_lr_schedule(**_schedule_args(
+        sync_preset="decoupled", n_samples_per_prompt=3, optimizer_steps=2, global_batch=5,
+    )).decay_style == "constant"
+
+
+def test_lr_schedule_flags_are_adapter_owned():
+    for flag in rc.LR_SCHEDULE_FLAGS:
+        with pytest.raises(mc.MilesConfigError):
+            mc.check_extra_argv((flag, "1"))

@@ -485,6 +485,10 @@ class _Actor:
             return [{"ok": True}, {"ok": True}]
         if fn_path == state_plugin.GRAD_NORM:
             return [self.norm]
+        if fn_path == state_plugin.APPLIED_LRS:
+            return [[1e-5]]
+        if fn_path == state_plugin.STEP_LOSSES:
+            return [[]]
         raise AssertionError(fn_path)
 
     async def train(self, rollout_id, pack):
@@ -612,3 +616,10 @@ def test_run_miles_ports_never_starts_the_legacy_external_router(monkeypatch):
     args = rl_learner.parse_args(_learner_argv(("--rl-engine", "ports")))
     with pytest.raises(PolicyStateError, match="run_plugin"):  # got past the router
         rl_learner.run_miles(args, model_path="/x", prompt_path="/x")
+
+
+def test_explicit_fixed_partition_is_a_ports_combination():
+    # rl-infra-spec 2.1: allowed only when placement is requested explicitly
+    assert ports_rejections(placement="fixed-partition", rollout_num_gpus=2) == []
+    assert "needs --rollout-num-gpus" in " ".join(ports_rejections(placement="fixed-partition"))
+    assert ports_rejections(placement="elastic")

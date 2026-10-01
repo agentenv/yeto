@@ -1,0 +1,104 @@
+warning: method `start_pool` is never used
+   --> src/iso_worker.rs:116:12
+    |
+108 | impl IsoBackendConfig {
+    | --------------------- method in this implementation
+...
+116 |     pub fn start_pool(&self, devices: Vec<String>, queue_capacity: usize) -> Result<IsoBackend> {
+    |            ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `start_pool` and `flatten` are never used
+   --> src/iso_worker.rs:158:12
+    |
+134 | impl IsoBackend {
+    | --------------- associated items in this implementation
+...
+158 |     pub fn start_pool(
+    |            ^^^^^^^^^^
+...
+182 |     pub fn flatten(&mut self, matrix: &mut [f32], rows: usize, cols: usize) -> Result<()> {
+    |            ^^^^^^^
+
+warning: associated function `start` is never used
+   --> src/iso_worker.rs:518:8
+    |
+517 | impl TorchIsoPool {
+    | ----------------- associated function in this implementation
+518 |     fn start(python: PathBuf, devices: Vec<String>, queue_capacity: usize) -> Result<Self> {
+    |        ^^^^^
+
+warning: function `merge_iso` is never used
+   --> src/merge.rs:105:8
+    |
+105 | pub fn merge_iso(deltas: &[&[f32]], weights: &[f64], rows: usize, cols: usize, out: &mut [f32]) {
+    |        ^^^^^^^^^
+
+warning: function `next_committable_round` is never used
+    --> src/server.rs:2768:4
+     |
+2768 | fn next_committable_round(rounds: &[Round], now: Instant) -> Option<usize> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fragment_available` is never used
+    --> src/server.rs:2776:4
+     |
+2776 | fn fragment_available(rounds: &[Round], fragment_id: usize) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `broadcast_updated_fragment` is never used
+    --> src/server.rs:3463:10
+     |
+3463 | async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: usize) -> Result<()> {
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `fid`, `base_version`, and `finish_inline` are never used
+   --> src/state.rs:190:12
+    |
+189 | impl PreparedMerge {
+    | ------------------ methods in this implementation
+190 |     pub fn fid(&self) -> usize {
+    |            ^^^
+...
+194 |     pub fn base_version(&self) -> u64 {
+    |            ^^^^^^^^^^^^
+...
+241 |     fn finish_inline(self) -> Result<ComputedMerge> {
+    |        ^^^^^^^^^^^^^
+
+warning: associated items `new_with_layout_fingerprint` and `merge_and_step` are never used
+   --> src/state.rs:259:12
+    |
+253 | impl GlobalState {
+    | ---------------- associated items in this implementation
+...
+259 |     pub fn new_with_layout_fingerprint(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+589 |     pub fn merge_and_step(
+    |            ^^^^^^^^^^^^^^
+
+yeto-federated-m2: 2 island(s) x 1 GPU, 4 groups/round
+PLAN_JSON {"arms": [{"benchmark_islands": 2, "fragments": 1, "gpus_per_island": 1, "groups_per_gpu_per_round": 4.0, "groups_per_round": 4, "islands": 2, "kind": "federated", "local_horizon": 1, "name": "yeto-federated-m2", "pipeline": 1, "prompt_groups": 24, "total_gpus": 2, "trajectories": 192}], "expert_parallel": 1, "fairness": {"paired_prompt_streams": true, "same_expert_parallel": true, "same_per_rank_batch": true, "same_pipeline_parallel": true, "same_prompt_groups": true, "same_total_gpus": true, "same_trajectories": true}, "model": "Qwen/Qwen3-0.6B", "pipeline_parallel": 1, "seeds": [17]}
+RL_ENGINE ports
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 10 files:  60%|██████    | 6/10 [00:00<00:00, 52.54it/s]Fetching 10 files: 100%|██████████| 10/10 [00:05<00:00,  1.97it/s]
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 200 examples [00:00, 77314.36 examples/s]
+[rl-benchmark] running yeto-federated-m2 seed=17
+# Miles RL LM benchmark: Qwen/Qwen3-0.6B
+
+Rounds: 3; seeds: 17; held-out prompts: 8; samples/prompt: 1
+
+## Quality
+
+| arm | M | runs | reward | pass@1 | delta vs native | delta vs single | delta vs strict |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| yeto-federated-m2 | 2 | 1 | 0.7500 +/- 0.0000 | 0.7500 | - | - | - |
+
+## Systems
+
+| arm | GPUs | train s | artifact-ready s | eval s | traj/s | action tok/s | active GPU-s | active % | util avg/min % | GPU-h | cost | hook s | final s | H | PULL-to-PUSH s | BCAST queue s | sync ms | filter generated | filter dropped | replacements | fragment payload MB | KL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| yeto-federated-m2 | 2 | 804.8 | 813.2 | 121.6 | 0.24 | 59.2 | 174.8 | 0.109 | 4.4/4.4 | 0.481 | - | 0.00 | 0.00 | - | - | - | 162659.33 | 0.0 | 0.0 | 0.0 | - | - |
+

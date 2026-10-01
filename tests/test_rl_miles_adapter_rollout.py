@@ -67,7 +67,7 @@ def group(gi, rewards, token=TOKEN, status=Status.COMPLETED):
 def run_hooks(args, kept, filtered, sink):
     hook.record_trained_groups(args, kept)
     all_samples = sorted(kept + filtered, key=lambda g: g[0].index)
-    hook.put_to_sink(hook.build_metadata(args, all_samples), sink)
+    hook.put_to_sink(hook.build_metadata(args, all_samples, sink), sink)
     for attr in ("_yeto_trained_group_keys", "_yeto_bounded_filter_state"):
         setattr(args, attr, None)
 
@@ -230,3 +230,146 @@ def test_ports_argv_installs_the_buffer_filter():
 
     assert "--buffer-filter-path" in mc.ADAPTER_OWNED_FLAGS
     assert mc.POLICY_BUFFER_FILTER_PATH.endswith("rollout_meta_hook.policy_buffer_filter")
+
+
+def test_filtered_count_comes_from_metadata_not_aborted():
+    """alignment A2/F5: filtered (terminal) is read from the hook metadata;
+    carried_over is not tracked yet and stays None (never inferred)."""
+    g = {"group_id": "g0", "sample_ids": ["s0"], "policy_token": "t", "reward_mean": 0.0,
+         "reward_std": 0.0, "token_count": 1}
+    payload = {"schema": hook.METADATA_SCHEMA, "rollout_id": 3, "groups": [g], "completed": 1,
+               "aborted": 2, "filtered": 5}
+    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
+    assert (h.aborted, h.filtered, h.carried_over) == (2, 5, None)
+    payload.pop("filtered")
+    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
+    assert h.filtered is None
+
+
+def test_round_counters_align_end_to_end_through_the_pool(tmp_path):
+    """R2 end to end (no per-round injection into handles): the executor runs the
+    real hooks in the rollout-process order -- trained-groups filter, all-samples
+    hook, then a reward-postprocess dispatcher reporting its own count -- and each
+    MilesRolloutPool.generate(r) handle carries round r's count."""
+
+    counts = {3: 24, 4: 16, 5: 24}
+
+    class DispatchingExecutor(FakeExecutor):
+        async def get(self, rollout_id):
+            for g in self.kept:
+                for s in g:
+                    s.rollout_id = rollout_id
+            result = await super().get(rollout_id)
+            nonzero = counts[rollout_id]  # computed during reward post-processing
+            hook.record_round_metadata(self.args, self.kept, sink=self.sink,
+                                       nonzero_advantages=nonzero)
+            return result
+
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    executor = DispatchingExecutor(SimpleNamespace(), f"dir:{tmp_path}", kept, [])
+    versions = iter([3, 4, 5])
+    current = {}
+
+    def expected():
+        return current["v"], H
+
+    p = MilesRolloutPool(inference_controller=FakeController(), rollout_executor=executor,
+                         metadata=DirMetadataSource(tmp_path), expected_policy=expected)
+    seen = {}
+    for rid in (3, 4, 5):
+        current["v"] = next(versions)
+        seen[rid] = p.generate(rid).nonzero_advantages
+    assert seen == counts
+
+
+def test_dynamic_filter_round_stats_come_from_the_all_samples_metadata(tmp_path):
+    """1b gap: rl_local_round dynamic_filter_* stayed 0 on ports. Real hook path: 2 groups
+    trained, 2 generated groups dropped by the filter -> generated 4, dropped 2."""
+    from yeto.rl.engine.driver import IslandDriver, TrainStepMetrics
+
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    dropped = [group(2, [1.0, 1.0]), group(3, [0.0, 0.0])]
+    _, p = pool(tmp_path, kept, dropped)
+    handle = p.generate(3)
+    assert handle.filtered == 2
+    stats = IslandDriver._stats(SimpleNamespace(learner_id=0), 3, handle,
+                                TrainStepMetrics(grad_norm=1.0), 1.0, 1.0)
+    assert (stats.dynamic_filter_generated_groups, stats.dynamic_filter_dropped_groups,
+            stats.dynamic_filter_replacement_attempts) == (4, 2, 2)
+
+
+def test_dynamic_filter_source_is_labelled_on_the_round_event(tmp_path):
+    import json
+
+    import torch
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0)
+    import dataclasses
+
+    original = engine.rollout.generate
+    engine.rollout.generate = lambda r: dataclasses.replace(original(r), filtered=1)
+    IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+                 policy_state=engine.policy_state, publisher=engine.publisher,
+                 placement=engine.placement, capabilities=fake_capabilities(),
+                 algorithm=AlgorithmSpec(), sync=LocalOnlySync(1),
+                 events=EventTape(tmp_path / "e.jsonl", 0)).run()
+    (ev,) = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()
+             if '"rl_round_trained"' in l]
+    assert ev["dynamic_filter_source"]["replacement_attempts"] == "proxy_filtered"
+
+
+def test_tool_wait_seconds_are_summed_from_all_generated_samples(tmp_path):
+    """rl-infra-spec 1.7: tool waiting comes from Miles Sample.non_generation_time and is
+    carried separately from generation time (not GPU saturation)."""
+    from yeto.rl.engine.driver import IslandDriver, TrainStepMetrics
+
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    dropped = [group(2, [1.0, 1.0])]
+    for i, s in enumerate(s for g in kept + dropped for s in g):
+        s.non_generation_time = 0.5 * i
+    _, p = pool(tmp_path, kept, dropped)
+    handle = p.generate(3)
+    assert handle.tool_wait_seconds == pytest.approx(sum(0.5 * i for i in range(6)))
+    stats = IslandDriver._stats(SimpleNamespace(learner_id=0), 3, handle,
+                                TrainStepMetrics(grad_norm=1.0), 1.0, 1.0)
+    assert stats.tool_wait_seconds == pytest.approx(7.5)
+
+
+def test_over_sampling_submitted_and_aborted_in_flight_groups(tmp_path):
+    """1b g1d: generated (completed all_samples groups) is not what over-sampling submits.
+    Miles draws over_sampling_batch_size prompts per submission and aborts the in-flight
+    ones when the batch fills; the data-source offset advance counts what was drawn."""
+    args = SimpleNamespace()
+    source = SimpleNamespace(sample_offset=0)
+    assert hook.submitted_groups(args, source.__dict__ and source) is None  # first rollout
+    source.sample_offset = 8  # one submission of over_sampling_batch_size=8
+    assert hook.submitted_groups(args, source) == 8
+    source.sample_offset = 3  # epoch wrap-around: unknown
+    assert hook.submitted_groups(args, source) is None
+    buffered = SimpleNamespace(sample_offset=5, buffer=[["g"]])
+    assert hook.submitted_groups(args, buffered) is None
+
+    sink = f"dir:{tmp_path}"
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    dropped = [group(2, [1.0, 1.0])]
+    args = SimpleNamespace()
+    args._yeto_data_source_offset = 0
+    hook.record_trained_groups(args, kept)
+    import os
+
+    os.environ[hook.META_SINK_ENV] = sink
+    try:
+        hook.extract_rollout_metadata(args, sorted(kept + dropped, key=lambda g: g[0].index),
+                                      SimpleNamespace(sample_offset=8))
+    finally:
+        os.environ.pop(hook.META_SINK_ENV)
+    payload = json.loads((tmp_path / "rollout-3.json").read_text())
+    assert (payload["submitted_groups"], payload["aborted_in_flight_groups"]) == (8, 5)
+    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
+    assert (h.submitted_groups, h.aborted_in_flight_groups) == (8, 5)
