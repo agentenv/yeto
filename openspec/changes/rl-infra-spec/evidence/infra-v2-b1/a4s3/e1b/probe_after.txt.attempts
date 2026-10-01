@@ -1,0 +1,41 @@
+=== attempt 1 failed 17:53:08
+:52:50,444 W 38537 38537] gcs_client.cc:210: Failed to get cluster ID from GCS server: TimedOut: Timed out while waiting for GCS to become available.
+[2026-09-30 17:52:56,448 W 38537 38537] rpc_client.h:153: Failed to connect to GCS at address 10.0.0.36:6379 within 5 seconds.
+Traceback (most recent call last):
+  File "/root/yeto-rl/fork_probe.py", line 11, in <module>
+    mgr = ray.get_actor("ray_worker_manager", namespace=ns)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/ray/_private/auto_init_hook.py", line 22, in auto_init_wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/ray/_private/client_mode_hook.py", line 134, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/ray/_private/worker.py", line 3446, in get_actor
+    return worker.core_worker.get_named_actor_handle(name, namespace or "")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "python/ray/_raylet.pyx", line 4542, in ray._raylet.CoreWorker.get_named_actor_handle
+  File "python/ray/includes/common.pxi", line 109, in ray._raylet.check_status
+ValueError: Failed to look up actor with name 'ray_worker_manager'. This could because 1. You are trying to look up a named actor you didn't create. 2. The named actor died. 3. You did not use a namespace matching the namespace of the actor.
+=== attempt 2 failed 17:53:33
+RAY_ADDRESS=10.0.0.36:6379
+EXE=/opt/sglang/bin/python3 candidates= /root/.local/share/uv/python/cpython-3.10.21-linux-x86_64-gnu/bin/python3.10 /opt/sglang/bin/python3 /opt/sglang/bin/python3 /usr/bin/python3
+/bin/python3
+/usr/bin/python
+/bin/python
+Traceback (most recent call last):
+  File "/root/yeto-rl/fork_probe.py", line 11, in <module>
+    mgr = ray.get_actor("ray_worker_manager", namespace=ns)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/ray/_private/auto_init_hook.py", line 22, in auto_init_wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/ray/_private/client_mode_hook.py", line 134, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/sglang/lib/python3.12/site-packages/ray/_private/worker.py", line 3446, in get_actor
+    return worker.core_worker.get_named_actor_handle(name, namespace or "")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "python/ray/_raylet.pyx", line 4542, in ray._raylet.CoreWorker.get_named_actor_handle
+  File "python/ray/includes/common.pxi", line 109, in ray._raylet.check_status
+ValueError: Failed to look up actor with name 'ray_worker_manager'. This could because 1. You are trying to look up a named actor you didn't create. 2. The named actor died. 3. You did not use a namespace matching the namespace of the actor.

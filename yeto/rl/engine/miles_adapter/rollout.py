@@ -91,6 +91,16 @@ INJECT_START_DELAY_ENV = "YETO_RL_TEST_INJECT_START_DELAY_S"
 # inside the fork AFTER deregistration (its engine provider's stop raises), so
 # the fork records ``incomplete``. Unset (default) = no effect.
 INJECT_STOP_FAILURES_ENV = "YETO_RL_TEST_INJECT_STOP_FAILURES"
+# Test-only (A4b): during the FIRST drain of the process an artificial tool-wait
+# entry is put on the ToolWaitBoard and removed again after this many seconds. Longer
+# than the drain budget it makes the drain time out -> CANCELLED -> undrain, with no
+# request touched (the entry is not a request). Unset (default) = no effect.
+INJECT_TOOL_WAIT_ENV = "YETO_RL_TEST_INJECT_TOOL_WAIT_S"
+# Test-only (A4b / E1-C variant): the next N ``undrain`` calls fail inside the
+# adapter (as a fork uncordon failure would), so a drain timeout cannot restore
+# the old routing and the controller must end in RECOVERY_REQUIRED, never CANCELLED.
+INJECT_UNDRAIN_FAIL_ENV = "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"
+INJECTED_TOOL_WAIT_ID = "yeto-test-injected-tool-wait"
 
 
 def injected_start_delay(environ: Any = None) -> float | None:
@@ -111,6 +121,28 @@ def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | No
     from .rollout_meta_hook import data_cursor as read_cursor
 
     return read_cursor(getattr(executor, "data_source", None))
+
+
+def arm_stop_failure_in_controller(controller: Any) -> str:
+    """Runs INSIDE the fork InferenceController actor (``__ray_call__``), test only
+    (E1-D ③④): the engine provider's next ``stop_cells`` raises once, so the fork
+    takes its real half-failure path (membership ``incomplete``, reason
+    ``stop_failed``). Returns the provider class name as the arming receipt."""
+    provider = getattr(controller, "_engine_provider", None)
+    if provider is None:
+        raise RuntimeError("stop failure injection: the fork controller has no _engine_provider")
+    real = provider.stop_cells
+
+    async def failing_stop(*args: Any, **kwargs: Any) -> Any:
+        provider.stop_cells = real  # one shot
+        import sys
+
+        print("[yeto] TEST INJECTION YETO_RL_TEST_INJECT_STOP_FAILURES: provider stop_cells fails "
+              "(inside the fork controller actor)", file=sys.stderr, flush=True)
+        raise RuntimeError("injected provider stop failure (test)")
+
+    provider.stop_cells = failing_stop
+    return type(provider).__name__
 
 
 def _is_ray_handle(obj: Any) -> bool:
@@ -349,6 +381,9 @@ def handle_from_metadata(
         nonzero_advantages=(
             int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
         ),
+        policy_age_violation=(
+            int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
+        ),
     )
 
 
@@ -363,6 +398,9 @@ def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
 # ``stock``: Miles' own generate (no custom generate function) makes no tool
 # calls, so 0 is known; any other custom generate without a board is unknown.
 TOOL_WAIT_NO_BOARD_STOCK = "stock-generate"
+# IR-2: the island runs no agent harness (no custom agent function): harness
+# counts are known zeros (tool_wait.HARNESS_ZERO), never "unknown".
+HARNESS_NOT_AGENTIC = "not-agentic"
 
 
 def _engine_load(entries: Any) -> tuple[int, int] | None:
@@ -412,10 +450,15 @@ class MilesRolloutPool:
         bundles: Any = None,
         gpus_per_engine: int | None = None,
         load_tool_wait: Any = None,
+        harness: Any = None,
     ) -> None:
         # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
         # tool-wait count, so trajectory_load() is unknown (None).
         self._tool_wait_board = tool_wait_board
+        # IR-2: harness board (tool_wait.HarnessBoard, local or actor handle),
+        # HARNESS_NOT_AGENTIC for islands without a harness (explicit zeros),
+        # or None = unknown (fails the drain closed).
+        self._harness = harness
         # 1.7 load samples read tool waits from ``load_tool_wait`` (a board,
         # TOOL_WAIT_NO_BOARD_STOCK, or None = unknown); default: the drain board.
         self._load_tool_wait = load_tool_wait if load_tool_wait is not None else tool_wait_board
@@ -440,6 +483,15 @@ class MilesRolloutPool:
         if self._stop_failures_left < 0:
             raise ValueError(f"{INJECT_STOP_FAILURES_ENV} must be >= 0")
         self.injected_stop_failures = 0
+        raw_uf = os.environ.get(INJECT_UNDRAIN_FAIL_ENV)
+        self._inject_undrain_fail = int(raw_uf) if raw_uf else 0
+        self.injected_undrain_failures: list[frozenset[str]] = []
+        raw_tw = os.environ.get(INJECT_TOOL_WAIT_ENV)
+        self._inject_tool_wait = float(raw_tw) if raw_tw else None
+        if self._inject_tool_wait is not None and not self._inject_tool_wait > 0:
+            raise ValueError(f"{INJECT_TOOL_WAIT_ENV} must be a positive number of seconds")
+        self.injected_tool_waits: list[float] = []
+        self.event_sink: Callable[..., None] | None = None  # test_injection record sink
         # E3 role transfer (4.7): fork RayWorkerManager handle (None = the named
         # actor, looked up on first use), the startup bundle map
         # (bundles.StartupBundles: pool GPU ids <-> startup PG bundles) and
@@ -502,11 +554,23 @@ class MilesRolloutPool:
         """The cursor the rollout metadata reported after the last batch (cache)."""
         return None if self._last_cursor is None else dict(self._last_cursor)
 
-    def generate(self, rollout_id: int) -> RolloutBatchHandle:
+    def generate(
+        self, rollout_id: int, *, expected_policy_version: str | None = None
+    ) -> RolloutBatchHandle:
         policy_version, policy_hash = self._expected_policy()
+        token = policy_token(policy_version, policy_hash)
+        if expected_policy_version is not None and expected_policy_version != token:
+            # IR-3: the driver's target token and the published policy this
+            # pool serves must be the same object; refuse before any sampling.
+            from ..driver import PolicyIdentityError  # driver never imports the adapter
+
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: driver expects {expected_policy_version}, "
+                f"the pool serves {token}"
+            )
         setter = getattr(self._metadata, "set_policy_token", None)
-        if setter is not None:  # rollout-side group-reuse filter reads it
-            setter(policy_token(policy_version, policy_hash))
+        if setter is not None:  # rollout-side group-reuse filter + agentic generate read it
+            setter(token)
         self._run(self._controller.prepare_rollout(rollout_id))
         data_pack = self._run(self._executor.get(rollout_id))
         self._offload_after_rollout()
@@ -611,16 +675,49 @@ class MilesRolloutPool:
             tool_wait_trajectories=tool,
             ready_groups=None,
         )
+        harness = self._harness_snapshot()  # IR-2/IR-4; None = unknown
+        sample.update(
+            harness_in_flight=None if harness is None else int(harness.in_flight),
+            env_live=None if harness is None else int(harness.env_live),
+            tito_session_mismatch=None if harness is None else int(harness.tito_session_mismatch),
+            tito_chain_breaks=None if harness is None else dict(harness.tito_chain_breaks),
+            policy_age_violation=None if harness is None else int(harness.policy_age_violation),
+        )
         from ..timeline import LoadSample, classify_load
 
         known = None not in (running, queued, sample["engine_capacity"], tool)
         sample["load_class"] = (
             classify_load(LoadSample(queued_requests=queued, active_requests=running,
                                      tool_wait_trajectories=tool, ready_groups=0,
-                                     engine_capacity=sample["engine_capacity"]))
+                                     engine_capacity=sample["engine_capacity"],
+                                     harness_in_flight=sample["harness_in_flight"] or 0,
+                                     env_live=sample["env_live"] or 0))
             if known else "unknown"
         )
         return sample
+
+    def _harness_snapshot(self):
+        """IR-2: the harness snapshot (explicit zeros without a harness; None = unknown)."""
+        source = self._harness
+        if source is None:
+            return None
+        from ..tool_wait import HARNESS_ZERO, read_harness
+
+        if source == HARNESS_NOT_AGENTIC:
+            return HARNESS_ZERO
+        try:
+            return read_harness(source)
+        except Exception:  # noqa: BLE001 - unknown: fail closed
+            return None
+
+    def _harness_admission(self, method: str, members: frozenset[str]) -> None:
+        """IR-2: close/open harness admission to ``members`` (no-op without a board)."""
+        source = self._harness
+        if source is None or source == HARNESS_NOT_AGENTIC:
+            return
+        from ..tool_wait import _call, _resolve
+
+        _resolve(_call(source, method, sorted(members)))
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""
@@ -808,9 +905,31 @@ class MilesRolloutPool:
 
     def _arm_stop_failure(self) -> None:
         """TEST ONLY: make the fork's engine provider fail this stop once (the fork
-        then marks the membership ``incomplete``, its real half-failure path)."""
+        then marks the membership ``incomplete``, its real half-failure path).
+
+        The real controller is a Ray actor (behind Miles' ``RayWorkerHandle``): the
+        provider only exists inside it, so the arming runs there via ``__ray_call__``
+        (GPU d123, chain 2: reading ``_engine_provider`` through the handle returned a
+        remote-call function and the stop failed with AttributeError instead of the
+        fork's incomplete path). In-process controllers (tests) are patched directly."""
+        kind, target = _executor_target(self._controller)
+        import sys
+
+        if kind == "ray":
+            remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
+            if not callable(remote):
+                raise MembershipPlanError("stop failure injection: the fork controller handle has no __ray_call__")
+            receipt = self._run(_awaited(remote(arm_stop_failure_in_controller)))
+            self._stop_failures_left -= 1
+            self.injected_stop_failures += 1
+            print(f"[yeto] TEST INJECTION {INJECT_STOP_FAILURES_ENV}: armed inside the fork controller "
+                  f"actor (provider {receipt}); its next stop_cells fails once", file=sys.stderr, flush=True)
+            if self.event_sink is not None:
+                self.event_sink("test_injection", kind="stop_failure", applied=True, where="fork_actor",
+                                provider=str(receipt), remaining=self._stop_failures_left)
+            return
         provider = getattr(self._controller, "_engine_provider", None)
-        if provider is None:
+        if provider is None or not hasattr(provider, "stop_cells"):
             raise MembershipPlanError("stop failure injection: the fork has no engine provider")
         real = provider.stop_cells
         pool = self
@@ -834,12 +953,69 @@ class MilesRolloutPool:
         (:meth:`undrain` cancels). The router counts engine requests only; a
         trajectory waiting on a tool is counted by yeto (3.3), not here.
         """
+        # IR-2: harness admission closes BEFORE the router cordon, so no new
+        # session can target a draining member while its engines quiesce.
+        self._harness_admission("close_admission", members)
+        self._maybe_inject_tool_wait(members)
         timeout = max(0.0, float(deadline) - time.time())
         return bool(self._run(self._controller.drain_cells(cells_of(members),
                                                            timeout_seconds=timeout)))
 
+    def _maybe_inject_tool_wait(self, members: frozenset[str]) -> None:
+        """TEST ONLY (INJECT_TOOL_WAIT_ENV): count one artificial trajectory as waiting on
+        a tool for N seconds, so the drain's tool-wait condition holds that long."""
+        if self._inject_tool_wait is None or self.injected_tool_waits:
+            return
+        import sys
+        import threading
+
+        from ..tool_wait import _call, _resolve
+
+        seconds = self._inject_tool_wait
+        self.injected_tool_waits.append(seconds)
+        applied, error = False, None
+        if self._tool_wait_board is None:
+            error = "no ToolWaitBoard"
+        else:
+            try:
+                _resolve(_call(self._tool_wait_board, "enter", INJECTED_TOOL_WAIT_ID))
+                applied = True
+            except Exception as exc:  # noqa: BLE001 - recorded: applied=false
+                error = repr(exc)
+        print(f"[yeto] TEST INJECTION {INJECT_TOOL_WAIT_ENV}: tool-wait entry for {seconds}s "
+              f"during the drain of {sorted(members)} (applied={applied})",
+              file=sys.stderr, flush=True)
+        if self.event_sink is not None:
+            self.event_sink("test_injection", kind="tool_wait",
+                            target_members=sorted(members), seconds=seconds, applied=applied,
+                            **({"error": error} if error else {}))
+        if applied:
+            board = self._tool_wait_board
+
+            def release() -> None:
+                try:
+                    _resolve(_call(board, "exit", INJECTED_TOOL_WAIT_ID))
+                except Exception:  # noqa: BLE001 - board gone with the run
+                    pass
+
+            timer = threading.Timer(seconds, release)
+            timer.daemon = True
+            timer.start()
+
     def undrain(self, members: frozenset[str]) -> None:
+        if self._inject_undrain_fail > 0:
+            import sys
+
+            self._inject_undrain_fail -= 1
+            self.injected_undrain_failures.append(frozenset(members))
+            print(f"[yeto] TEST INJECTION {INJECT_UNDRAIN_FAIL_ENV}: undrain of {sorted(members)} "
+                  "fails (the cordoned members stay cordoned)", file=sys.stderr, flush=True)
+            if self.event_sink is not None:
+                self.event_sink("test_injection", kind="undrain_fail",
+                                target_members=sorted(members), applied=True)
+            raise RuntimeError("injected undrain failure: uncordon not performed")
         self._run(self._controller.uncordon_cells(cells_of(members)))
+        self._harness_admission("open_admission", members)  # IR-2: after the uncordon
 
     def trajectory_load(self) -> dict[str, Any] | None:
         """3.3 drain probe: router in-flight + in-flight tool waits (``tool_wait.drain_blockers``).
@@ -858,10 +1034,30 @@ class MilesRolloutPool:
             snap = read_tool_wait(self._tool_wait_board)
         except Exception:  # noqa: BLE001 - unknown: fail closed below
             snap = None
+        harness = self._harness_snapshot()  # IR-2: None = unknown (fail closed)
         return {
             "active_requests": active,
             "tool_wait": None if snap is None else int(snap.in_flight),
-            "blockers": drain_blockers(active, snap),
+            "harness_in_flight": None if harness is None else int(harness.in_flight),
+            "env_live": None if harness is None else int(harness.env_live),
+            "env_live_deadline": None if harness is None else harness.latest_lease_deadline,
+            "blockers": drain_blockers(active, snap, harness),
+        }
+
+    def member_states(self) -> dict[str, dict[str, Any]] | None:
+        """Per declared member (fork F-R1 ``describe_cells``): ``state`` (unbound /
+        stopped / running), ``tracked``, ``serving``, ``awaiting_admission``. Used by
+        the restart recovery (3.7) to refuse unbound targets and to verify router
+        admission before release. None on a fork without ``describe_cells``."""
+        describe = getattr(self._controller, "describe_cells", None)
+        if not callable(describe):
+            return None
+        described = dict(self._run(describe()) or {})
+        return {
+            member_id(c): {"state": d.get("state"), "tracked": bool(d.get("tracked")),
+                           "serving": bool(d.get("serving")),
+                           "awaiting_admission": bool(d.get("awaiting_admission"))}
+            for c, d in described.items() if isinstance(d, dict)
         }
 
     def membership_status(self) -> dict[str, Any]:

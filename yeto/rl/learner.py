@@ -182,6 +182,8 @@ def parse_args(argv=None):
     # controller D4 timeouts (defaults: controller.Timeouts, T_drain 120 s, T_recovery 900 s)
     parser.add_argument("--rl-elastic-drain-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None)
+    # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
+    parser.add_argument("--rl-elastic-max-recovery-attempts", type=int, default=None)
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -304,6 +306,7 @@ _ELASTIC_COMPANIONS = (
     ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
     ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
     ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
+    ("rl_elastic_max_recovery_attempts", "--rl-elastic-max-recovery-attempts"),
 )
 _ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s",
                   "rl_elastic_pause_margin", "rl_elastic_drain_timeout_s",
@@ -343,7 +346,7 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-elastic-cells names no cell")
     if getattr(args, "rl_elastic_declare_cells", False) and not _elastic_cells(args.rl_elastic_cells):
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
-    for name in _ELASTIC_PAUSE:
+    for name in _ELASTIC_PAUSE + ("rl_elastic_max_recovery_attempts",):
         value = getattr(args, name, None)
         if value is not None and not value > 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
@@ -381,6 +384,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
             miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))
+    if getattr(args, "rl_elastic_max_recovery_attempts", None) is not None:
+        miles_args.yeto_rl_elastic["max_recovery_attempts"] = int(args.rl_elastic_max_recovery_attempts)
     # M1: rollout metadata carries data_cursor/buffer_length only when asked.
     # The attribute covers the driver process; the env var reaches Ray workers
     # (where the metadata hook runs) through connect_island_ray's job-level

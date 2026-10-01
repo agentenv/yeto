@@ -408,8 +408,8 @@ def test_round_trained_event_carries_the_data_cursor_only_when_reported(tmp_path
     driver, ctl, engine, trained, log = _island(tmp_path / "b")
     real = driver.rollout.generate
 
-    def generate(rollout_id):
-        batch = real(rollout_id)
+    def generate(rollout_id, **kw):
+        batch = real(rollout_id, **kw)
         return dataclasses.replace(batch, data_cursor={"sample_offset": 4 * (rollout_id + 1),
                                                        "epoch_id": 0, "sample_group_index": 0,
                                                        "sample_index": 0})

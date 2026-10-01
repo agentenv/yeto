@@ -456,3 +456,19 @@ def test_failure_before_any_write_is_told_apart_from_a_refusal(tmp_path):
         _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
     with pytest.raises(CutError, match=r"\[refused\] .*freshly built"):
         _trainer(RankGroup([rank])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+def test_unknown_live_cursor_fails_closed(tmp_path):
+    """INFRA-E1 f707dc3: data_cursor() is None when the live read fails -> no comparison."""
+    _, _, actor, trainer = _setup(tmp_path)
+
+    class Unknown:
+        def data_cursor(self):
+            return None
+
+    async def rebuild(args, executor, **kw):
+        raise AssertionError("nothing may be disposed when the cursor is unknown")
+
+    with pytest.raises(RuntimeError, match="cursor unknown before the rebuild"):
+        rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
+                           worker_manager="wm", rollout=Unknown(), rebuild=rebuild, restore=lambda: None)

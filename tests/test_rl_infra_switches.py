@@ -96,9 +96,11 @@ def test_entry_builds_elastic_wiring_from_miles_args(monkeypatch):
 
 
 def test_run_ports_island_wires_elastic_before_ray_and_into_compose():
+    stage = inspect.getsource(entry.preflight_stage)  # IR-1: pre-Ray checks live here
+    built = stage.index("elastic = elastic_wiring_for(")
+    assert stage.index("preflight(") < built < stage.index("hook(miles_args, launch)")
     source = inspect.getsource(entry.run_ports_island)
-    built = source.index("elastic = elastic_wiring_for(")
-    assert source.index("preflight(") < built < source.index("connect_island_ray()")
+    assert source.index("preflight_stage(") < source.index("connect_island_ray()")
     assert "elastic=elastic," in source[source.index("compose_island("):]
     ports = inspect.getsource(learner._run_ports)
     assert ports.index("apply_ports_infra_switches(") < ports.index("run_ports_island(")

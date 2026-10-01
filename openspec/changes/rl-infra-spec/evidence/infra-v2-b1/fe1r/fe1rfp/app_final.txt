@@ -1,0 +1,1 @@
+app: [('stopped', '0', 'ap-Ie74LuNjw5bYL92viIg6hO')]

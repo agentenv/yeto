@@ -177,34 +177,31 @@ def main(argv: list[str]) -> int:  # pragma: no cover - needs Modal credentials 
         (out / "app_stopped.txt").write_text(f"{app.app_id} {time.strftime('%FT%TZ', time.gmtime())}\n")
 
 
-def pull_packed(sb, dest: Path, *, touch, log, work: str = "/work/e3", chunk: int = 8 << 20) -> dict:
-    """Copy <work>/packed/* out of the running Sandbox, verify sha256, then release the container."""
+def pull_packed(sb, dest: Path, *, touch, log, work: str = "/work/e3") -> dict:
+    """Copy <work>/packed/* out of the running Sandbox (Modal filesystem API), verify sha256, release.
+
+    A8 run 2: the legacy ``Sandbox.open`` API is refused by Modal ("legacy Sandbox filesystem API is no
+    longer supported"); ``sb.filesystem`` (read_text / copy_to_local / write_text) is used instead.
+    """
     import hashlib
     import json as _json
 
     dest.mkdir(parents=True, exist_ok=True)
     report = {"ok": [], "bad": []}
+    fs = sb.filesystem
     try:
-        with sb.open(f"{work}/packed/index.json", "r") as fh:
-            index = _json.loads(fh.read())
+        index = _json.loads(fs.read_text(f"{work}/packed/index.json"))
         (dest / "index.json").write_text(_json.dumps(index, indent=1, sort_keys=True))
         for name, meta in sorted(index["files"].items()):
-            digest = hashlib.sha256()
-            with sb.open(f"{work}/packed/{name}", "rb") as src, open(dest / name, "wb") as dst:
-                while True:
-                    block = src.read(chunk)
-                    if not block:
-                        break
-                    dst.write(block)
-                    digest.update(block)
-                    touch()
-            (report["ok"] if digest.hexdigest() == meta["sha256"] else report["bad"]).append(name)
+            fs.copy_to_local(f"{work}/packed/{name}", str(dest / name))
+            touch()
+            digest = hashlib.sha256((dest / name).read_bytes()).hexdigest()
+            (report["ok"] if digest == meta["sha256"] else report["bad"]).append(name)
     except Exception as exc:  # noqa: BLE001 - report, never leave the container waiting
         report["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         try:
-            with sb.open(PULLED_FLAG, "w") as fh:
-                fh.write("pulled\n")
+            fs.write_text("pulled\n", PULLED_FLAG)
         except Exception as exc:  # noqa: BLE001
             report["release_error"] = repr(exc)
     (dest / "pull_report.json").write_text(_json.dumps(report, indent=1))

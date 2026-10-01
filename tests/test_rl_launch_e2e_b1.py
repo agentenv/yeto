@@ -292,12 +292,14 @@ def test_injection_and_restart_switches_reach_the_island(tmp_path, monkeypatch):
     run = island_run(BASE + _elastic(tmp_path) + (
         "--rl-elastic-state-dir", "/vol/elastic", "--rl-elastic-restart-attempts", "2",
         "--rl-test-inject-lora-perturb", "0.01",
-        "--rl-test-inject-stop-failures", "1", "--rl-test-kill-learner-at", "COMMITTED"),
+        "--rl-test-inject-stop-failures", "1", "--rl-test-kill-learner-at", "COMMITTED",
+        "--rl-test-inject-undrain-fail", "1"),
         monkeypatch)
     assert "yeto_rl_restart_loop python3 -m yeto.rl.learner" in run
     args, env = learner_from_run(run, tmp_path / "home")
     assert args.rl_elastic_state_dir == "/vol/elastic"
     assert env["YETO_RL_TEST_INJECT_LORA_PERTURB"] == "0.01"
+    assert env["YETO_RL_TEST_INJECT_UNDRAIN_FAIL"] == "1"
     assert env["YETO_RL_TEST_INJECT_STOP_FAILURES"] == "1"
     assert env["YETO_RL_TEST_KILL_LEARNER_AT"] == "COMMITTED"
     assert env["YETO_RL_RESTART_ATTEMPTS"] == "2"
@@ -335,7 +337,7 @@ def test_injection_switches_are_refused_without_elastic_or_restart():
     from yeto import launcher
 
     for extra in (("--rl-test-inject-stop-failures", "1"), ("--rl-elastic-state-dir", "/v"),
-                  ("--rl-test-inject-lora-perturb", "0.01")):
+                  ("--rl-test-inject-lora-perturb", "0.01"), ("--rl-test-inject-undrain-fail", "1")):
         with pytest.raises(ValueError, match="need --rl-elastic"):
             launcher._check_ports_infra_switches(_cli(extra), "ports")
     with pytest.raises(ValueError, match="needs --rl-elastic-restart-attempts"):
@@ -613,3 +615,34 @@ def test_timeouts_need_elastic_and_positive_values():
         launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "5")), "ports")
     with pytest.raises(ValueError, match="must be positive"):
         launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "0")), "ports")
+
+
+def test_hold_and_tool_wait_switches_reach_the_island(tmp_path, monkeypatch):
+    run = island_run(BASE + _elastic(tmp_path) + (
+        "--rl-elastic-tool-wait-board", "--rl-test-inject-lora-perturb", "0.01",
+        "--rl-test-hold-before-check-s", "45", "--rl-test-inject-tool-wait-s", "30"), monkeypatch)
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert env["YETO_RL_TEST_HOLD_BEFORE_CHECK_S"] == "45.0"
+    assert env["YETO_RL_TEST_INJECT_TOOL_WAIT_S"] == "30.0"
+
+
+def test_hold_and_tool_wait_switch_validation(tmp_path):
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    for extra in (("--rl-test-hold-before-check-s", "5", "--rl-test-inject-lora-perturb", "0.01"),
+                  ("--rl-test-inject-tool-wait-s", "5", "--rl-elastic-tool-wait-board")):
+        with pytest.raises(ValueError, match="need --rl-elastic"):
+            launcher._check_ports_infra_switches(_cli(extra), "ports")
+    with pytest.raises(ValueError, match="must be positive"):
+        launcher._check_ports_infra_switches(
+            _cli(_elastic(tmp_path) + ("--rl-elastic-tool-wait-board",
+                                       "--rl-test-inject-tool-wait-s", "0")), "ports")
+    with pytest.raises(ValueError, match="needs --rl-elastic-tool-wait-board"):
+        launcher._check_ports_infra_switches(
+            _cli(_elastic(tmp_path) + ("--rl-test-inject-tool-wait-s", "5")), "ports")
+    with pytest.raises(ValueError, match="another --rl-test"):
+        launcher._check_ports_infra_switches(
+            _cli(_elastic(tmp_path) + ("--rl-test-hold-before-check-s", "5")), "ports")

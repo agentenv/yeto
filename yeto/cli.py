@@ -43,6 +43,7 @@ SUBCOMMANDS = (
     "status",
     "logs",
     "down",
+    "stop-run",
     "_worker",
     "_head",
 )
@@ -247,6 +248,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic, TEST ONLY (3.5 E1-B): the first member update ships the "
                     "LoRA adapter + EPS (trainer restored right after), so check_weights must "
                     "refuse the new engines")
+    rl.add_argument("--rl-test-hold-before-check-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (A4 E1-B (a)): the first member publication "
+                    "stays S seconds after end_update_weights and before check_weights/"
+                    "admit_cells (observation window); needs another --rl-test-* injection")
+    rl.add_argument("--rl-test-inject-tool-wait-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (A4b): the first drain counts an artificial "
+                    "tool wait for S seconds (drain timeout -> CANCELLED -> undrain); needs "
+                    "--rl-elastic-tool-wait-board")
+    rl.add_argument("--rl-test-inject-undrain-fail", type=int, default=None, metavar="N",
+                    help="--rl-elastic, TEST ONLY (A4b / E1-C): the next N undrain calls fail "
+                    "inside the adapter, so a drain timeout cannot restore the old routing "
+                    "and the island must end in RECOVERY_REQUIRED (never CANCELLED)")
     rl.add_argument("--rl-test-inject-stop-failures", type=int, default=None, metavar="N",
                     help="--rl-elastic, TEST ONLY (3.7 E1-D ③④): the next N fork stop_cells fail "
                     "inside the fork after deregistration (incomplete)")
@@ -327,6 +340,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None, metavar="S",
                     help="--rl-elastic: controller T_recovery, the REBUILD_OLD budget beyond the "
                     "transaction deadline (default 900)")
+    rl.add_argument("--rl-elastic-max-recovery-attempts", type=int, default=None, metavar="N",
+                    help="--rl-elastic: consecutive learner-restart recoveries of the committed "
+                    "membership that may stay unverified before the island is RECOVERY_REQUIRED "
+                    "(default 3)")
     rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                     help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
                     "X6 cross-quorum runs only)")
@@ -1243,6 +1260,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     down = sub.add_parser("down", help="stop a run's worker and tear down its clusters")
     down.add_argument("run", help="run name (its --cluster-prefix)")
+
+    stop_run = sub.add_parser(
+        "stop-run",
+        help="forbid relaunching islands of a run (writes <run dir>/STOP; stops/tears down nothing)")
+    stop_run.add_argument("run", help="run name (its --cluster-prefix)")
 
     # Internal: the detached background worker `launch` spawns.
     worker = sub.add_parser("_worker")
@@ -2340,6 +2362,9 @@ def main(argv=None) -> int:
         return cmd_logs(args)
     if args.command == "down":
         return cmd_down(args)
+    if args.command == "stop-run":
+        print(f"[yeto] STOP flag written: {runs.request_stop(args.run)}")
+        return 0
     if args.command == "_worker":
         return cmd_worker(args.run)
     if args.command == "_head":

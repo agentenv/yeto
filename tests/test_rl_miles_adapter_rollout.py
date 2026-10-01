@@ -313,7 +313,7 @@ def test_dynamic_filter_source_is_labelled_on_the_round_event(tmp_path):
     import dataclasses
 
     original = engine.rollout.generate
-    engine.rollout.generate = lambda r: dataclasses.replace(original(r), filtered=1)
+    engine.rollout.generate = lambda r, **kw: dataclasses.replace(original(r, **kw), filtered=1)
     IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
                  policy_state=engine.policy_state, publisher=engine.publisher,
                  placement=engine.placement, capabilities=fake_capabilities(),

@@ -603,6 +603,26 @@
 - 正式运行尚无判据结论：C1 v6 第 1 次（weight_version 漏项，已修）、第 2 次（比较口径，已修；不追认）、第 3 次（用户暂停）。
 - **恢复步骤**：合并最新 integ-decl → 用新代码提交重新生成 run 目录并重跑本地 dry-run → 从 C1 开始按 plan-v6 执行（C1 → c1-unsafe → C2 → C3 各行）。
 - 费用：B2 累计 ≤ $10.88。所有 E2 app 均为 stopped/0，本地无残留进程。
+
+### INFRA-E2 E2 合租结果（2026-09-30，plan-v6，代码 a016f7f，镜像 2cc5cc52）
+| run | 结果 | 费用 |
+|---|---|---|
+| C1（T1R1，DP1） | 通过 20/20 | ≤$1.70 |
+| c1-unsafe（诊断，不计判据） | 20/20：fork M5 修复在真实 DistOpt 上生效 | ≤$1.71 |
+| C2（T2R1，DP2 DistOpt） | 通过 21/21（含 G-4.2(f)） | ≤$2.17 |
+| C3-B1 基线 | 完成 | ≤$2.37 |
+| C3-rebuild（RESTORED） | G-4.4 12/13 直接通过；manifest 拉取被截断 | ≤$2.77 |
+| C3-rebuild-old（REBUILD_OLD） | 19/19 | ≤$2.37 |
+| G-4.5 第1行 | 通过（74 s 内 RECOVERY_REQUIRED） | ≤$2.37 |
+| G-4.5 第2行 | 不满足原文：注入没有造成故障，495 s 后成功 | ≤$3.56 |
+| G-4.5 第3行 | 通过（1.9 s 内 RECOVERY_REQUIRED，无 manifest） | ≤$2.17 |
+| G-4.5 第5行 | 阻塞：实时游标不可用 | ≤$2.57 |
+| G-4.5 第6行 | 未运行（费用逼近 $40 先报告；CAS 之后 kill 对同形重建不存在） | — |
+- B2 累计 ≤ $34.64。所有 app stopped/0，本地无残留进程。
+- 发现：
+  1. E1 `live_data_cursor` 在真实 Miles 上返回 None（rollout executor 是 Ray actor handle），生产中重建前后的游标比对因此退回缓存值；
+  2. REBUILDING_TRAINER 没有 deadline 强制；
+  3. `modal container exec` 输出上限 8 KiB，工具已改为分块拉取。
 - 新增 `--rl-elastic-drain-timeout-s` 与 `--rl-elastic-recovery-timeout-s`（launcher → learner → `build_elastic(timeouts=...)` → controller 的 `Timeouts.drain`/`recovery`；需带 `--rl-elastic`，数值须为正；不给时沿用 120/900，默认 argv 不变）。E1-C 用 T_drain=5；E1-D ④ 用较小的 T_recovery（配合 `--rl-test-inject-stop-failures N`，N 要大于 T_recovery 内按 1 s 间隔能发生的重试次数）。已按"写了具体数值"排查 gpu-plan-v2 §9.14（gpu-b1 工作区版本）、`evidence/infra-e1/plan.md` E1-A…E1-E、plan-3.8-4.4-v2 §1–§8：请求 deadline（controller CLI `--deadline-s`）、quorum/margin/idle、start delay、update_weights block、tool delay、stop failures、kill-at、restart attempts 都已有入口；缺入口的只有 T_drain 与 T_recovery，本次补齐。E1-A (d)(e) 的 router/nvidia-smi 采样属于运行工具，不是参数。端到端测试从真实 CLI 一直到 controller 实际使用的值。
 - 全量：68F/3169P/49S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b9.ids`）。
 
@@ -618,8 +638,109 @@
   - 测试用模拟的 ActorHandle 复现"无 data_source 属性"的路径：经 `__ray_call__` 读到实时值；actor 调用失败时为未知；游标在重建期间于 actor 内被改动，`rebuild_same_shape` 判 RECOVERY_REQUIRED（G-4.5 第 5 行的 CPU 协议检查）。
   - **依赖**：Ray 的 `ActorHandle.__ray_call__`（Ray 2.x 为所有 actor 提供）。本机 yeto-venv 没有 ray，无法在真实 handle 上验证；若镜像内的 Ray 不支持它，读取会失败并判为未知（不会静默使用旧值），那时需要 fork 增加只读方法 `RolloutExecutor.get_data_cursor()`（新 M 项需求）。
   - 全量：68F/3172P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b11.ids`）。
+
+### INFRA-E2 追加运行（2026-09-30 下午）
+- G-4.5 第 6a 行：通过（`gpu-v6-c3-f6a/`）。kill 发生在 REBUILDING_TRAINER，写 cut 之前。原地重启后 journal 对账判 RECOVERY_REQUIRED（"learner restarted after release, before commit"），重启的 learner 账本拒绝重训 rollout 0–2，无重复消费。
+- 第 6b 行：同形重建不适用（状态机没有 COMMITTED 阶段）。第 2 行按主 agent 裁定记为不通过，"REBUILDING_TRAINER 无 deadline 强制"写入 4.5 已知限制。
+- C3-rebuild 补跑（e2z）：磁带侧判据与首跑一致；manifest 和 journal 仍未拉回（整包分块拉取过慢）。工具已改为只拉小文件（214ba19）。
+- G-4.5 第 5 行重跑（e2z，f707dc3）：仍阻塞。实时游标读不到，CutSource 拒绝写 cut（CANCELLED）。原因：executor 是 RayWorkerHandle 包装，E1 的 `_is_ray_handle` 没有解包 `_actor_handle`。
+- B2 累计 ≤ $45.70。所有 app stopped/0，无残留进程。
 - A4 Nebius 发现两项（不上卡）：
   1. E1-A (c) 的审计缺口（a30fa5f）：扩容事务确实经 `Publisher.publish_members`（3.4a/3.5 的成员限定发布）把当前已发布的 policy（v2）装进新 cell，之前只在 journal 里记 `weight_admission`，磁带上没有。现在每次 `publish_members`（VERIFYING，以及 REBUILD_OLD 重启旧 cell）都会向磁带写一条 `rl_member_publication`：policy_version、token、payload/manifest 哈希、这次接收的成员 `sync/publication_members`、发布后的在役集合 `sync/serving_members`。它在下一轮 generate 之前出现，因此"第 3 轮生成所用的 v2 发布成员 = 4"可以在磁带上审计。判据文字不改；E1-A 需重跑后才能判 (c)。E3 trainer 边里的 `publish_members` 在 E3 文件中，这次未改。
   2. E1-B 注入无效：用 base 模型快照重载新 engine 不改变 LoRA 适配器，而校验只覆盖 LoRA 权重。现改为 `--rl-test-inject-lora-perturb EPS`（取代并删除 `--rl-test-inject-weight-override`）：本进程第一次成员限定的 update_weights 把 trainer 的 LoRA 适配器临时加 EPS，发给新 engine 后立即精确恢复 trainer（恢复后核对 policy hash）。新 engine 因此持有不同的 LoRA 权重，check_weights 读回必然与发布参照不同，新 engine 不会被放行，事务走 REBUILD_OLD。CPU 测试覆盖：注入后校验失败、trainer 恢复、只注入一次；不注入时同一流程正常放行；`lora_perturber` 恢复前后 policy hash 一致。`evidence/infra-e1/plan.md` E1-B 的注入方法描述随之变更，判据不变。
   - 全量：68F/3176P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b12.ids`）。
 - 实时游标第二次修复（E2 第 5 行重跑仍读不到）：fork e3a11ab3 交给 driver 的 rollout executor 是 `RayWorkerHandle`，它的 `__getattr__` 会把任何属性名（包括 `data_source`）变成远程调用协程，真正的 Ray 句柄在实例属性 `_actor_handle` 上。旧代码读到 `data_source` 是一个函数，类型名也不是 ActorHandle，结果没走 `__ray_call__`，也没有日志。现在只看实例属性：有 `_actor_handle` 就解包，经 `_actor_handle.__ray_call__` 在 actor 内读取；裸 ActorHandle 同样处理；本地 executor 直接读。识别失败、没有 `__ray_call__`、actor 调用失败、数据源报告的游标不完整，都打一条 WARNING 说明原因并返回未知。测试新增模拟 `RayWorkerHandle`（`__getattr__` 对任意名字返回协程，内含 `_actor_handle` 替身）：能读到实时值，actor 中改动后能读到新值，失败和无法识别时报未知并有日志。全量 68F/3177P/51S/26E，失败 id 94 个，与基线相同（`/tmp/infra-e1-b13.ids`）。
+
+### INFRA-E2 交接点（2026-09-30 15:10Z，交给新 session）
+- 分支 infra-e2，HEAD 见本提交；已合并 integ-decl 058b00e（E1 RayWorkerHandle 解包修复）。镜像 2cc5cc52，Miles e3a11ab3。计划 `evidence/infra-e2/4.2-4.5/plan-v6.md`（含判据实现更正）。
+- **4.2**：G-4.2 在 C1、C2 上全部通过（`gpu-v6-c1/`、`gpu-v6-c2/`）。原文验收已满足；依赖 4.1、3.6、4.2a 未勾，因此未勾。
+- **4.3**：X3 在 C1、C2 上两个 arm 逐位一致，已满足；依赖未勾，因此未勾。
+- **4.4**：G-4.4 在 RESTORED（`gpu-v6-c3-rb/`）与 REBUILD_OLD（`gpu-v6-c3-rbold/`）两条路径都通过；manifest 字段来源为 rbold（同一保存路径，见 README）。依赖未勾，因此未勾。
+- **4.5 / G-4.5**：
+  - 第 1、3、6a 行通过；第 4 行由 C3-rebuild-old 覆盖。
+  - 第 2 行不通过：该故障模式在当前设计中不存在，已知限制为 REBUILDING_TRAINER 无 deadline。
+  - 第 6b 行不适用：没有 COMMITTED 阶段。
+  - **第 5 行通过（会话 3 重跑，2026-09-30 15:46–15:59Z，bbc830c，app ap-CNAZjvRxXnZJ2gARBpQikV，H100!:3，retries=0，GPU 名称由 puller 断言 guard.ok）**：实时游标可读（cut rb-0-cf5ecb1130c6 已写出，重建前后游标比对得到 `sample_offset 6→7`）；journal REBUILDING_TRAINER → RECOVERY_REQUIRED（76 s，≤600 s），无 restore 阶段（未调用 restore）；`optimizer_applied` 仅 rollout 0/1/2 各一次；游标 2/4/6 不回卷；重建后无消费。`e2_c3_analyze --fault` 全部判据 pass。证据 `evidence/infra-e2/4.2-4.5/gpu-v6-c3-f5-e2r/`（g45.json）。费用 ≤$2.57（13 min × 3 H100!），app 已 stopped/0，watchdog 已终止。launcher rc=4 为 RECOVERY_REQUIRED 的预期退出。
+  - **4.5 GPU 侧 G-4.5 各行**：1/3/5/6a 通过，4 由 C3-rebuild-old 覆盖，2 不通过（该故障模式不存在，已知限制），6b 不适用；4.5 因依赖（3.1、3.6、4.1、4.2a）未勾。
+- **下一步（第 5 行，约 $2.2，已获批）**：
+  1. `cd /home/michael/work/infra-e2 && git fetch origin && git merge origin/integ-decl`
+  2. 重新生成：`cp /tmp/gsm8k_reward.py . && /tmp/yeto-venv/bin/python tools/probes/e2_cut_harness.py --root /tmp/e2gen --prefix <新前缀> --yeto-sha <HEAD> --launcher-dry-run && rm gsm8k_reward.py`（24 项须 rc=0）。
+  3. 把 `/tmp/e2gen/<前缀>-c3-f5/` 复制到 `/home/michael/work/infra-e2-gpu/`，路径做 sed 替换（参照 `launch_q.sh`/`finish_q.sh`/`cost_q.sh`）。
+  4. `YETO_E2_GPU_APPROVED=1 bash run.sh`（台账先记一行）。puller 一旦看到 "live data cursor unknown" 就 stop，届时回报 WARNING 的原因。
+  5. 结果分析：`tools/probes/e2_c3_analyze.py <run dir> --fault`。
+- run 目录：`/home/michael/work/infra-e2-gpu/`（本轮 e2y/e2z/e2q 前缀）；证据：`openspec/changes/rl-infra-spec/evidence/infra-e2/4.2-4.5/gpu-v6-*`。
+- 费用：B2 累计 ≤ $47.48。所有 E2 app 都已 stopped/0，无残留进程。
+
+### INFRA-E3 A8 第 2 次（2026-09-30，ap-0DAExDbwwbCaxfDQ0dIIRC，H100!:2，代码 a016f7f，plan-v6）
+- 11:45:15–12:31:49Z，≤$6.14；dry、gen、A1、A2、B1、B1p、B2、RT 全部 rc=0；GPU 型号与 pin 断言通过（`gpus.txt`、`runtime_manifest.json`）。
+- 容器内 compare 失败：`step` 不在 scalars 中（TE FusedAdam 在 Megatron DistOpt 下把 step 放在参数组 `hyper` 里），`torch.as_tensor(None)` 报错。数据兜底生效：`pack_states` 产出 15 个汇总状态（1.64 GiB）；本地 `pull_packed` 用的旧 `Sandbox.open` 接口被 Modal 拒绝（"legacy Sandbox filesystem API is no longer supported"），随即用新 `sb.filesystem` 接口从另一进程拉取（`pull_now.py`），15/15 sha256 校验通过后释放容器；`modal_run.pull_packed` 已改用新接口。
+- 离线 compare（修正 step 读取位置：先 scalars，再参数组 `hyper.step`；并把 hyper 纳入 G1 逐位比较——这两处是字段位置修正，不改判据与容差；容器内与离线结论因容器内失败无法对比，如实记录）：`evidence/infra-e3/a8-run2/RESULT_offline.json`。G1、G2、G3、G5、G6 通过；**G4 未通过** → **no-go**（按 plan-v6 预注册规则）。详见 tasks 4.6 条目。
+- 诊断（不改结论）：从同一 cut 出发，DP1 与 DP2 的步 3 梯度相对 L2 差约 0.83%，约 90% 元素不同，而逐样本 loss 逐位相同——差异在梯度计算/归约路径（可能与 bf16 梯度缓冲或 DistOpt reduce-scatter 的精度有关，待查），不在状态重分片（G1 逐位通过）。C1 与 C2 在 adapter/主参数/动量上都不同（逐字段摘要），与此一致。
+- 4.6 未勾选：结论为 no-go，但容器内 compare 未产出、compare 在运行后做了字段位置修正，是否按"合法否定结论"勾选由主 agent 决定。packed 状态保存在 `/home/michael/work/infra-e3-gpu/b3a8r/out/work/packed/`（未入库，1.64 GiB）。
+- B3 合计 ≤$11.63。A9 以 A8=go 为前提，按规则不运行。
+- G4 静态排查（`evidence/infra-e3/a8-run2/g4-analysis.md`）：梯度缓冲与 DistOpt reduce-scatter 为 fp32（`grad_reduce_in_fp32`），缩放因子均为 2 的幂，loss 归一化数学与数值等价；取回状态显示 DP1 与 DP2 的步 3 梯度差异在最后一层为 0、向输入端逐层增大到约 1.5%，与参数种类/bucket 无关，逐元素中位 0.7%（bf16 量级）——逐样本反向传播在两种 DP 进程配置下不逐位相同，属 c) 当前 bf16 profile 下不可避免的跨 DP 数值差异，非重分片缺陷。4.6 按合法否定结论（no-go）的完成记录草稿写在该文件末尾，未勾选，待主 agent 确认。
+
+### INFRA-E3 交接点（2026-09-30，移交新 session；不再启动任何运行）
+- A8 结论：G1/G2/G3/G5/G6 通过，G4 未通过 → no-go；排查结论为 c 类（bf16 profile 下 DP1 与 DP2 逐样本反向传播不逐位相同，误差随反传深度累积，非重分片缺陷）。建议 4.6 按合法否定结论交付；完成记录草稿在 `evidence/infra-e3/a8-run2/g4-analysis.md` 末尾，**未勾选，待用户确认**。可选复核：从 C1 同形恢复的 DP1 arm（约 $4，不改结论）。
+- 取回的汇总状态（15 个 packed 文件，1.64 GiB，未入库）：`/home/michael/work/infra-e3-gpu/b3a8r/out/work/packed/`（含 index.json、pull 报告）；离线重算：`python tools/probes/e3_reshard/compare.py /home/michael/work/infra-e3-gpu/b3a8r/out/work --offline`。
+- 已知遗留：E3 trainer 边经 `publish_members` 给新成员重发时，不写 `rl_member_publication` 记录（E1 路径有）；因 A8=no-go，A9 不运行，列为已知遗留，若将来重开 trainer 边需补。
+- 其余遗留：F-R1 相关的 A9 拓扑前提（plan-v4/v6）；L-3/L-4 已知限制。
+- 状态：B3 合计 ≤$11.63；无运行中的 Modal app、无残留进程。
+
+## GPU-B1 第 1 批 GPU 验收执行（2026-09-30）
+- 分支/worktree：`gpu-b1` @ /home/michael/work/gpu-b1（基于 a303cbb，运行中先后合并 integ-decl 15d88bd、a5123ca → 724fc7b）；已普通推送。计划：`gpu-plan-v2.md` §9（判据运行前提交，未修改）。证据：`evidence/infra-v2-b1/`（RESULT.md 逐项）。台账：`infra-drafts/gpu-spend.md`。
+- 结果：Nebius 路径冒烟**不通**（launcher→sky 0.13 客户端 `asdict()` 报错，未开通 VM，退回 Modal）；F0 **通过**（门）；F-E1 暴露**代码缺陷**：`--rl-elastic-cells` 未传给 fork，fork 只声明已启动的 `inference-engine-all-0-0-00000`，up 事务 `start_cells(['c0'])` KeyError → REBUILT_OLD。据此停止本批其余 GPU 运行。
+- task 状态：3.3、3.4、3.5、3.7 未完成（等待代码；3.7 ⑤⑥ 环境阻塞）；2.3（A2）未完成（等待代码：launcher 不转发 eval temperature，贪心 eval 无法设置）；1.7（A2+）未完成（等待代码：observe 无 launcher 入口、无工具负载）。本批未勾选任何 task。
+- 费用：≤$2.91（f0 $0.42、fe1fp $1.56、fe1 $0.93、nsmoke $0），全部 Modal L40S。本批预算 $127（v2 8 卡档 $170 按 2.95/3.95 折算）。资源：Modal app ap-4WHOoo6jjpVNP3CkJ8DT1p / ap-M16C4QJ9WiiU1KPdPyWua2 / ap-F4XpsACPevWqjbkXVjcuyC 均 stopped/0 tasks；sky 无集群、nebius 无实例；本地进程已清理。
+- 其他发现：Nebius H100 SkyPilot 目录价 $3.85/GPU·h（非 v2 所写 $2.95），与 Modal H100! $3.95 基本持平，且 Nebius 只有 1/8 卡规格；attestation 指纹无离线计算入口，需先跑同参数运行取 `rl_driver_start.runtime_fingerprint`。
+- 需要的代码修复（交代码负责人）：(1) F-R1 fork 声明停止 cell + yeto 把声明 cell id 传给 fork 并与在役成员名统一；(2) launcher 转发 `--eval-temperature`（A2）；(3) observe 开关与工具负载/tool_wait_board 接线（A2+、A4b）；(4) E1-B 权重覆盖注入、E1-D ③④ stop_cells 半失败注入、⑦ fork 重启入口；(5) 可选：sky 0.13 私有镜像登录序列化、Nebius 不用 spot。
+- 下一步：以上 (1) 合入并重建镜像后，先重跑 F-E1（≈$1–3），通过再按 §9.3/§9.6 跑 E1-A 基线、E1-A、watchdog 用例（Modal H100!:8，最坏合计 ≈$95）。
+
+## GPU-B1 续（2026-09-30 05:37–07:05Z）
+- A2（L-2.3）：S/O/OD 三 arm 在 Modal H100!:2 完成（代码 11911b8）。判据 1、2、3、4、6 通过；**判据 5 硬条件未通过**（S 与 O 自 v1 起 policy token 不同，样本身份与奖励相同；与事先登记的 L3(a) RNG 消耗顺序差异一致）→ 2.3 未完成，不勾选。证据 `evidence/infra-v2-b1/a2/RESULT.md`。费用 ≤$6.98。
+- A2+（L-1.7）：本地核查不通，等待代码（`rl_load_sample` 无 tool-wait/queued/capacity 字段，classify_load 无法计算）。见 gpu-plan-v2 §9.8。
+- F-E1 重跑（F-R1 镜像 db815884）：新 cell 按 fork id 启动成功；发布阶段因缺 `--use-miles-router` 失败 → REBUILT_OLD；down 未执行。缺口：launcher 无 `--use-miles-router` 入口。证据 `evidence/infra-v2-b1/fe1r/RESULT.md`。费用 ≤$2.92。
+- F-E2：本地 dry-run 通过（`evidence/infra-v2-b1/fe2/`），未上卡（F-E1 失败即停；后续须合并 3f88c1d 并带 `--modal-retries 0 --modal-timeout-s`）。
+- 本批累计 ≤$12.99；所有 infra-v2-b1-* Modal app stopped/0；本地进程已清理。
+
+## GPU-B1 续 2（2026-09-30 07:05–09:00Z）
+- F-E2、F-E1 第三次：Modal L40S 无容量（`modal app logs`：waiting to be scheduled on a GPU_L40S worker），均未起容器，≈$0；F-E2 由进度看门狗 20 min 停止。未得观察项。
+- L-D0：D1、D2 rc=0，v1–v3 token 逐位相同 → 通过（`evidence/infra-v2-b1/ld0/RESULT.md`），≤$4.21。
+- A2 重跑（加 --rl-deterministic-trainer）：S2 rc=0；O2 训练完整且判据 2/3/5/6 通过（S2 与 O2 token 与 eval 分数全同），但 launcher 因磁带最后一条 `rl_learner_finalized` 收集竞态返回 rc=3 → 判据 1 不满足，链条停止，OD2 未跑。2.3 仍未完成；需 launcher 修复磁带完整性判定。≤$5.15（`evidence/infra-v2-b1/a2/rerun2/RESULT.md`）。
+- hrun/mrun 已加 `--modal-retries 0 --modal-timeout-s <硬超时+5min>` 与 20 min 进度看门狗。
+
+## GPU-B1 暂停点（2026-09-30 09:59Z，用户下班暂停）
+- F-E1 第四次（3×A10G，代码 37155d8，镜像 2cc5cc52/Miles e3a11ab3）：**通过**——up/down 均 SUCCEEDED、fork cell id、旧成员不变（`evidence/infra-v2-b1/fe1r4/RESULT.md`）。
+- A2 第三次（代码 37155d8，三 arm 同 SHA，含 --rl-deterministic-trainer）：S3 rc=0、O3 rc=0；S3 对 O3 判据 2、3、5、6 通过（`evidence/infra-v2-b1/a2/rerun3/partial-analysis-S-O.json`）；**OD3 在运行中按用户指示停止（rc=143）**，判据 1（OD）、3（OD）、4 未评估 → 2.3 仍未完成。
+- 继续点：在同一 SHA 37155d8（或主 agent 指定的新 SHA；若换 SHA 则三 arm 全重跑）补跑 OD3，然后用 `a2/analyze_a2.py rerun3/S rerun3/O rerun3/OD` 判定。之后按主 agent 批准执行 A4（8 卡 H100，代码合并 integ-decl 4dcc52b；先写 §9 A4 计划、8 卡 dry-run、调度探测、`--rl-print-attestation-fingerprint` 取指纹）。F-E2 等新镜像（已是 2cc5cc52，可在 A10G 上跑）。
+- 本批累计 ≤$33.60（上界）。所有 infra-v2-b1-* Modal app stopped/0；本地 launcher/syncer/watchdog/puller 已终止。
+
+## GPU-B1 恢复后（2026-09-30 11:42Z–）
+- A2 OD 补跑（同 SHA 37155d8）rc=0；三 arm 判据 1–6 全部通过（`evidence/infra-v2-b1/a2/rerun3/RESULT.md`）。**1.4 勾选**（X9 满足，依赖 1.2 已勾）；**2.3 GPU 验收通过但未勾选**（依赖 1.7、2.2 未勾）。
+- A4：计划 gpu-plan-v2 §9.14 已提交，8 卡 dry-run 9 passed。调度探测：8×H100! 10 分钟以上未调度，Modal 报"workspace concurrency limits reached (… at 10 gpus)"——工作区 GPU 并发上限 10，其他 agent 正占用 → A4 暂停，待主 agent 协调 GPU 配额/时段。
+- A5 执行计划 gpu-plan-v2 §9.15 与 A4 用例费用表 §9.16 已提交（不上卡）；A5 两岛本地 dry-run 4 passed。A4 暂停，等用户决定范围/预算。
+- A4（Nebius 8×H100，代码 47efd25）：E1-A 基线+切换完成——(a)(b)(d)(e)(f)(g)+E1-E 通过，(c) 按事件 policy_version 口径未通过（成员变化在 v2 发布后生效，发布事件晚一轮体现）→ 3.4 不勾。E1-B：注入执行但 LoRA 下无效（up SUCCEEDED，应 REBUILT_OLD）→ 3.5 未完成，失败即停；本 agent 的 router 采样端口与 probe 解释器需修正。其余 A4 用例未跑。累计 ≤$77.13。
+
+## GPU-B1 交接点（2026-09-30 15:10Z）
+- 完成：A2（L-2.3）三 arm 同 SHA 判据全过 → 1.4 已勾，2.3 GPU 通过待依赖；F-E1（A10G）通过；L-D0 通过；Nebius 冒烟通过。
+- A4：E1-A (c) 未通过（3.4 未勾），E1-B 注入无效（3.5 未完成），watchdog 未完成（自检失败后修复、重跑被交接中止），E1-D/E1-C 未跑。A5 仅计划与 dry-run。F-E2、A2+ 未跑。
+- 继续方式与脚本路径见 gpu-plan-v2 §9.19。
+- 运行脚本（本机，非仓库）：`/home/michael/work/gpu-b1-runs/`：`n2run.sh`（Nebius no-sync 岛，含 autostop/watchdog/20 min 进度看门狗/ssh puller）、`n2inwatch.sh`+`inwatch.py`（容器内按磁带相位写 inbox，同时启动 `router_sampler.py`）、`router_sampler.py`（节点 IP 自动发现 Miles router、0.5 s 采样 /worker_inflight，2 s 采样 compute-apps）、`run_probe.sh`+`fork_probe.py`（用 learner 同一解释器/环境调用 fork：membership、weight versions、cell statuses、stale ACK、旧 epoch）、`selfcheck.sh`（首个 generate 后自检采样器与探针，不可用即 nstop）、`after_term.sh`（事务终态后探针+停机）、`nstop.sh`（拉证据、sky down、nebius API 核实）、`arun.sh`/`mrun.sh`/`hrun.sh`（Modal 版）。参数：`cfg/a4-args.txt`、`cfg/resources-8.json`、`cfg/attestation-8.json`（指纹 2d0a00f4，仅对代码 47efd25 的 argv 有效）。注意：`router_sampler.py` 与 `run_probe.sh` 的修复（节点 IP、`[y]eto.rl.learner`）尚未在真机上验证过。
+- 资源：Modal 本 agent app 全部 stopped；Nebius 实例 0；sky 无集群；本地进程已停。累计 ≤$92.58。
+- 交接停止补充：A4 watchdog 重跑实际 ≤$5.39（14:57:48–15:08:18），台账已标“交接停止”。Nebius 遗留孤儿安全组 vpcsecuritygroup-e00a60g9g8z4kdhc83 已由主 agent 记入交接文档，本 agent 未处理。
+
+## GPU-B1 会话 3：A4 续跑（停在代码缺陷 / 待裁定处）
+- 分支 gpu-b1 已与 origin/integ-decl（9a06c4b）合并（快进）；运行用 `git archive 9a06c4b`。计划 gpu-plan-v2 §9.20；证据与 RESULT：`evidence/infra-v2-b1/a4s3/`（`RESULT.md`、`e1b/`、`watchdog/`、`tools/`）。
+- 步骤 1 指纹：本机重建、在 47efd25 上复现真机 2d0a00f4…；9a06c4b 12 轮仍为 2d0a00f4…（argv 未变）；3/4/5 轮另有值；真机 `rl_driver_start` 两次核对一致。
+- 步骤 2 E1-A：**未上卡，待裁定**（§9.18 口径下 down 无成员发布事件 → (c) 必然未通过；需给 down 补事件或改口径）。
+- 步骤 3 E1-B：**不通过，yeto 代码缺陷**：`--rl-test-inject-lora-perturb` 的钩子在 async `_publish_members` 内同步调用 `perturb_trainer`，报 "This event loop is already running"，随后 driver "Fatal async misuse" 中止；REBUILT_OLD 的原因不是 check_weights 拒绝。需 INFRA 修（放 executor/改 await），再跑（约 $13）。
+- 步骤 4 watchdog：**判据 1 未通过，待裁定**：Nebius 上 start_cells ≈143 s > deadline 120 s，watchdog 触发时无目标进程可杀。重跑需把 deadline 设为 ≥ 启动时间+margin（改参数，需裁定）。
+- 步骤 5、6（E1-D ①–⑦、E1-C/A4b）：未跑；注入器 `dkill.py`/`dctl.py`、after-hook 已备好（tools/）。
+- 工具修复：探针（解释器无 ray；`ray.init("auto")` 连到 SkyPilot 的 Ray 2.9.3，改用 learner 的 RAY_ADDRESS + 能 import ray 的 /opt/sglang python）、selfcheck 增加指纹比对且探针失败非致命、nstop 杀 `_worker` 残留并拉 dkill/dctl/gpu_samples 日志。
+- 费用：本批（会话 3）≤$85.44（含孤儿实例事故 ≤$40.86，见 RESULT.md；运行本身 ≤$44.58：E1-B 两次 selfcheck 停止 $9.70+$9.71、watchdog $12.21、E1-B 第三次 $12.96）；全局按主 agent 口径约 $152+$44.6。云资源：收尾时发现并删除了首次 E1-B 的孤儿实例（launcher `_worker` 重新开通，RUNNING 16:40–18:00）；之后 sky 无集群、eu-north1 project（project-e00eqrj3pr00622zrgdeyc）下无本批实例、本地无残留。**注意：此前 nstop/台账的 nebius 核验用默认 project，口径无效。**
+- 下一步（2026-09-30 CPU 准备完成，均未上卡；运行代码 = `446da8a` 的 `yeto/`，gpu-b1 已合入，`n2run.sh`/`a4go.sh` 里的 `SHA=9a06c4b` 改为 `446da8a`；argv 未变，attestation 指纹沿用 `cfg/attestation-e1b.json`、`-s4.json` 等，selfcheck 仍会比对）：
+  - **E1-B 缺陷已修**（446da8a：perturber 改为协程，经新增的 `MilesPolicyState.aexport/aapply` 在运行中的事件循环里 await；回归测试 `tests/test_rl_e1_injections.py::test_lora_perturbation_inside_the_running_loop_with_real_policy_state`，在真实 MilesPolicyState + 异步 actor 上复现）。可直接重跑 E1-B：`a4go.sh a4e1b-<日期>-N 12 1800 1980 cfg/attestation-e1b.json '[["train",1,"b-up",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":600}]]' '<after_term.sh {R} {P} 1 <等待秒>>' --rl-test-inject-lora-perturb 0.01`（硬超时 30 min/看门狗 33 min，预估 $8–10，判据 infra-e1/plan.md E1-B (a)–(d)，终态后探针）。
+  - **E1-A (c)：代码不改，待主 agent 裁定读取口径**。理由：down 事务（`_execute` 的 `plan.remove` 分支）只 `remove_engines`，不向任何成员下发权重，`publish_members` 根本不被调用；补写的 `rl_member_publication` 会带上不存在的 payload/manifest 哈希与"发布成员"，是对磁带的虚构，违背 §9.18 里该事件"记录一次真实的成员限定发布"的语义（97d2ca5 的 up 与 REBUILD_OLD 才是真实发布）。down 之后的服务成员已由 `rl_reconfig` 的 SUCCEEDED 记录（config_epoch_to、members）与 ledger 体现。因此 (c) 在 §9.18 口径下仍必然判未通过；重跑 E1-A 前需裁定：(ii) 读取口径改为"down 之后取事务 SUCCEEDED 记录的成员数"（需改 §9.18，运行前提交、判据文字不改），或接受 (c) 按原口径未通过。未裁定前不上卡（约 $25）。
+  - **watchdog 重跑**：只改实验参数，deadline 120 s → 240 s（Nebius 上 start_cells ≈143 s，+~100 s margin；阻塞注入在 update_weights 前，需先让 start 完成）：`a4go.sh a4wd-<日期>-N 4 1500 1980 cfg/attestation-s4.json '[["train",1,"wd-up",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":240}]]' '<after_term.sh {R} {P} 1 60>' --rl-test-inject-update-weights-block-s 600`；判据 plan-3.8-4.4-v2 §4 第 1–5 条 + §6（`analyze_wd.py`）不变；事务 deadline 改为 240 s 要在 gpu-plan-v2 §9.21 运行前提交（watchdog 触发应在 start 完成之后、REBUILT_OLD ≤60 s，预估 $7，最坏 $13.2）。
+  - **E1-D** 按 §9.20 原计划（D123 合并 5 轮 35 min；D4 4 轮；D5 4 轮；D6 3 轮；D7 5 轮；硬超时、注入器 `dkill.py`/`dctl.py`、期望终态均见 §9.20），代码换 446da8a；每项先看 selfcheck，失败即停；全批累计 >$90 停下汇报（上限 $120）。
+  - 之后 E1-C/A4b（`--rl-elastic-drain-timeout-s 5`）；全部结束后再做 id 对比与 `openspec validate --strict`。本次 CPU 准备已合入 integ-s3/integ-decl。

@@ -1,0 +1,1 @@
+0, GPU-c7214e07-3fc8-fafd-e9c8-d694d530d15f, NVIDIA L40S

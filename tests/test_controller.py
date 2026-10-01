@@ -98,9 +98,11 @@ class FakeOps:
         assert self.sleeps < 500, "controller poll loop did not terminate"
 
 
-def make_controller(ops, learners, recover_timeout=100, poll=30, on_relaunch=None):
+def make_controller(ops, learners, recover_timeout=100, poll=30, on_relaunch=None,
+                    stop_flag=None):
     ops.status_seq.setdefault(SYNCER, [RUNNING])
     return FleetController(
+        stop_flag=stop_flag,
         learners={name: (f"task-{name}", job_id) for name, job_id in learners.items()},
         syncer=(SYNCER, "task-syncer", 1),
         sky_ops=ops,
@@ -357,3 +359,70 @@ def test_launch_uses_the_effective_budget():
     from yeto import launcher
 
     assert "recover_timeout=effective_recover_timeout(args)" in inspect.getsource(launcher)
+
+
+def test_stop_flag_prevents_the_relaunch(tmp_path):
+    """STOP is set, then the cluster disappears: the island is not relaunched."""
+    flag = tmp_path / "STOP"
+    flag.write_text("stop\n")
+    ops = FakeOps()
+    ops.status_seq["l0"] = [RUNNING]
+    ops.up["l0"] = False  # preempted / gone
+    ops.relaunch_results["l0"] = [101]  # would succeed if it were tried
+    ctl = make_controller(ops, {"l0": 1}, stop_flag=flag)
+    with pytest.raises(RuntimeError):
+        ctl.run()  # all learners gone
+    assert ops.relaunch_calls == []
+    assert "l0" in ops.down_calls
+    assert "STOP flag" in ctl.learners["l0"]["exit"]
+
+
+def test_stop_flag_written_after_the_poll_check_still_prevents_the_relaunch(tmp_path):
+    """The flag appears between the recovery decision and the relaunch call itself."""
+    flag = tmp_path / "STOP"
+    ops = FakeOps()
+    ops.status_seq["l0"] = [RUNNING]
+    ops.up["l0"] = False
+    ops.relaunch_results["l0"] = [101]
+    ctl = make_controller(ops, {"l0": 1}, stop_flag=flag)
+    real = ctl._stop_requested
+    calls = []
+
+    def stop_requested(rec, where):
+        calls.append(where)
+        if where == "recovery":  # first check passes; the flag lands before the relaunch runs
+            flag.write_text("stop\n")
+            return False
+        return real(rec, where)
+
+    ctl._stop_requested = stop_requested
+    with pytest.raises(RuntimeError):
+        ctl.run()
+    assert "relaunch" in calls and ops.relaunch_calls == []
+
+
+def test_without_the_flag_the_island_is_relaunched(tmp_path):
+    ops = FakeOps()
+    ops.status_seq["l0"] = [RUNNING]
+    ops.up["l0"] = False
+    ops.relaunch_results["l0"] = [101]
+    ops.after_relaunch["l0"] = [RUNNING, SUCCEEDED]
+    ctl = make_controller(ops, {"l0": 1}, stop_flag=tmp_path / "STOP")
+    ctl.run()
+    assert ops.relaunch_calls == ["l0"]
+
+
+def test_stop_run_cli_only_writes_the_flag(tmp_path, monkeypatch, capsys):
+    from yeto import cli, runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path)
+    assert cli.main(["stop-run", "myrun"]) == 0
+    assert runs.stop_flag_path("myrun") == tmp_path / "myrun" / "STOP"
+    assert (tmp_path / "myrun" / "STOP").exists()
+    assert not (tmp_path / "myrun" / "meta.json").exists()  # nothing else touched
+    # the launcher wires the same path into the fleet controller
+    import inspect
+
+    from yeto import launcher
+
+    assert "stop_flag=runs.stop_flag_path(args.cluster_prefix)" in inspect.getsource(launcher)

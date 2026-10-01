@@ -45,6 +45,19 @@ def run_dir(name: str) -> Path:
     return RUNS_DIR / name
 
 
+def stop_flag_path(name: str) -> Path:
+    """``<run_dir>/STOP``: while it exists the fleet controller relaunches no island
+    (``yeto stop-run`` writes it; it does not stop or tear down anything itself)."""
+    return run_dir(name) / "STOP"
+
+
+def request_stop(name: str) -> Path:
+    path = stop_flag_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"stop requested at {time.time():.3f}\n", encoding="utf-8")
+    return path
+
+
 def log_path(name: str) -> Path:
     return run_dir(name) / "launcher.log"
 

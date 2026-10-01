@@ -73,6 +73,23 @@ def test_build_inputs_match_the_pins():
     subprocess.run(["bash", "-n", str(REPO / "scripts/build_miles_ports_image.sh")], check=True)
 
 
+def test_commits_and_digest_are_pinned_together_with_the_build_record():
+    """Commit pins, tag, Dockerfile ARGs and the image digest move together:
+    the latest build record must name exactly the pinned commits and digest."""
+    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-01-lora-checksum"
+    record = json.loads((record_dir / "build-record.json").read_text())
+    assert record["miles_commit"] == rl.MILES_NEXT_COMMIT
+    assert record["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
+    assert record["digest"] == rl.MILES_NEXT_IMAGE.split("@")[1]
+    short = f"{rl.MILES_NEXT_COMMIT[:7]}-{rl.SGLANG_NEXT_COMMIT[:7]}"
+    assert record["tag"].endswith(f":{short}")
+    manifest = json.loads((record_dir / "image-manifest.json").read_text())
+    assert manifest["miles"]["commit"] == rl.MILES_NEXT_COMMIT
+    assert manifest["sglang"]["commit"] == rl.SGLANG_NEXT_COMMIT
+    dockerfile = (REPO / "docker/miles-ports/Dockerfile").read_text()
+    assert f"ARG SGLANG_VERSION={record['sglang_version']}" in dockerfile
+
+
 # --------------------------------------------------------- source setup
 
 LEGACY_SETUP_SHA256 = "1166134dbe978365d349f5e8f1851be7ccf7599c62dd28b01e88a64901425985"

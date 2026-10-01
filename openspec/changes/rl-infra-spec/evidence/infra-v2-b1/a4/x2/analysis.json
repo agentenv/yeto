@@ -1,0 +1,165 @@
+{
+ "a": {
+  "terminal": {
+   "a4up": "SUCCEEDED",
+   "a4down": "SUCCEEDED"
+  },
+  "final_epoch": 2,
+  "requests": [
+   [
+    "a4up",
+    {
+     "deadline_s": 600.0,
+     "expected_config_epoch": 0,
+     "target": "T4R4S0"
+    }
+   ],
+   [
+    "a4down",
+    {
+     "deadline_s": 600.0,
+     "expected_config_epoch": 1,
+     "target": "T4R2S2"
+    }
+   ]
+  ],
+  "pass": true
+ },
+ "b": {
+  "rounds_base": 12,
+  "rounds_switch": 12,
+  "differ": [],
+  "one_step_each": true,
+  "pass": true
+ },
+ "c": {
+  "members_per_round": {
+   "0": 2,
+   "1": 2,
+   "2": 2,
+   "3": 4,
+   "4": 4,
+   "5": 4,
+   "6": 4,
+   "7": 4,
+   "8": 2,
+   "9": 2,
+   "10": 2,
+   "11": 2
+  },
+  "expected": {
+   "0": 2,
+   "1": 2,
+   "2": 4,
+   "3": 4,
+   "4": 4,
+   "5": 4,
+   "6": 4,
+   "7": 2,
+   "8": 2,
+   "9": 2,
+   "10": 2,
+   "11": 2
+  },
+  "pass": false
+ },
+ "d": {
+  "trainer_uuids": [
+   "GPU-7a7f5a41-d543-a506-b72e-6152d270baf7",
+   "GPU-7c304fee-31ab-781f-a2d3-f4695b97029c",
+   "GPU-c16d02ab-1731-9e54-5ab9-98faf702501e",
+   "GPU-f4a6bb05-78bc-6f9e-1ce6-8cbc5e63b9e2"
+  ],
+  "samples_with_trainer": 16,
+  "distinct_trainer_pid_sets": 1,
+  "pass": true
+ },
+ "e": {
+  "pool": [
+   "GPU-27be2bc9-d5f7-f472-d6bf-a5f9d935bebb",
+   "GPU-3842b04c-2940-7976-4dc0-41b3309ab41e",
+   "GPU-7a7f5a41-d543-a506-b72e-6152d270baf7",
+   "GPU-7c304fee-31ab-781f-a2d3-f4695b97029c",
+   "GPU-a8cbd02b-e4be-9a23-63a1-7f528075a03f",
+   "GPU-b4bb0b9a-9b9a-072d-9b90-9bf563edd6a8",
+   "GPU-c16d02ab-1731-9e54-5ab9-98faf702501e",
+   "GPU-f4a6bb05-78bc-6f9e-1ce6-8cbc5e63b9e2"
+  ],
+  "apps_outside_pool": [],
+  "samples": 39,
+  "pass": true
+ },
+ "f": {
+  "down_sequence": [
+   [
+    "request",
+    null
+   ],
+   [
+    "phase",
+    "VALIDATING"
+   ],
+   [
+    "phase",
+    "WAIT_SAFE"
+   ],
+   [
+    "phase",
+    "QUIESCING"
+   ],
+   [
+    "phase",
+    "TRANSFERRING"
+   ],
+   [
+    "fork_op",
+    "stop"
+   ],
+   [
+    "fork_op",
+    "stop"
+   ],
+   [
+    "phase",
+    "VERIFYING"
+   ],
+   [
+    "phase",
+    "COMMITTED"
+   ],
+   [
+    "phase",
+    "RESUMING"
+   ],
+   [
+    "phase",
+    "SUCCEEDED"
+   ]
+  ],
+  "pass": true
+ },
+ "g": {
+  "wall": [
+   "2026-09-30T13:39:33Z",
+   "2026-09-30T14:04:43Z"
+  ],
+  "note": "GPU-hours = 8 x wall (standby G6/G7 counted)",
+  "pass": true
+ },
+ "E1-E": {
+  "wait_safe_boundaries": [
+   [
+    "a4up",
+    2
+   ],
+   [
+    "a4down",
+    7
+   ]
+  ],
+  "inbox_status_files": [
+   "a4down.status.json",
+   "a4up.status.json"
+  ]
+ }
+}
