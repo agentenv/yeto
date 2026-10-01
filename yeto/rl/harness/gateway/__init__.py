@@ -4,10 +4,10 @@ In-process library; the HTTP shell (task 10.x) wraps ``core.Gateway`` later.
 """
 from .chains import ChainBreakReason, ChainRegistry, Locate, LocateKind, SessionMismatch
 from .context import ContextProvider, IdentityContextProvider
-from .core import Gateway, GatewayConfig, GatewayError, SamplingOverrideError, TrajectoryInvalid, UnsupportedShape
+from .core import AdmissionClosed, Gateway, GatewayConfig, GatewayError, SamplingOverrideError, TrajectoryInvalid, UnsupportedShape
 
 __all__ = [
     "ChainBreakReason", "ChainRegistry", "Locate", "LocateKind", "SessionMismatch",
     "ContextProvider", "IdentityContextProvider",
-    "Gateway", "GatewayConfig", "GatewayError", "SamplingOverrideError", "TrajectoryInvalid", "UnsupportedShape",
+    "AdmissionClosed", "Gateway", "GatewayConfig", "GatewayError", "SamplingOverrideError", "TrajectoryInvalid", "UnsupportedShape",
 ]

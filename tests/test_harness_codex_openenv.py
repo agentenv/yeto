@@ -8,6 +8,11 @@ legacy suite (tests/test_secrlenv_codex_harness.py):
 4. mask / token / logprob alignment;
 5. sibling segments share one reward and count once;
 6. compaction enabled -> preflight fails closed.
+
+Stage 4 (IR-1..IR-4 landed, INFRA 8347351): the agent entry is driven through
+the real ``tool_wait.HarnessBoard`` (leases / sessions / admission),
+``rollout_meta_hook.expected_policy_version`` (IR-3), ``entry.preflight_stage``
+with the ``(miles_args, launch)`` hook (IR-1) and the 1.7 schema names (IR-4).
 """
 
 from __future__ import annotations
@@ -27,6 +32,11 @@ import pytest
 
 import test_secrlenv_codex_harness as legacy_tests
 from yeto.rl import tbench_outcome
+from yeto.rl.engine.algorithm import AlgorithmSpec
+from yeto.rl.engine.miles_adapter import entry, rollout_meta_hook
+from yeto.rl.engine.miles_adapter.config import MilesConfigError
+from yeto.rl.engine.timeline import HARNESS_METRIC_KEYS, LOAD_SAMPLE_SCHEMA
+from yeto.rl.engine.tool_wait import HARNESS_ZERO, HarnessBoard, HarnessSnapshot, ToolWaitBoard, drain_blockers
 from yeto.rl.harness.codex import (
     alignment,
     codex_harness_agent as harness,
@@ -176,18 +186,20 @@ def test_responses_tool_call_round_trip_is_append_only_on_the_miles_wire(monkeyp
 
 # ---------------------------------------------------------------- subprocess entry: signing, tool-wait, cleanup (2)
 
-def _configure(monkeypatch, env: FakeTerminalEnvironment, **kw) -> tuple[_Provider, _Board]:
+def _configure(monkeypatch, env: FakeTerminalEnvironment, harness_board: Any = None, **kw) -> tuple[_Provider, _Board]:
     monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
     monkeypatch.setenv("YETO_CODEX_OPENENV_ALLOW_SCRIPTED_DRIVER", "1")
     provider = _Provider(env, **kw)
     board = _Board()
-    subprocess_agent.configure(provider=provider, tool_wait_board=board)
+    subprocess_agent.configure(provider=provider, tool_wait_board=board, harness_board=harness_board, member="m0")
     return provider, board
 
 
 def _metadata(**extra) -> dict[str, Any]:
+    # IR-3: the driver's target token travels in the prompt metadata (or the sink).
     return {"task_id": "fix-git", "trajectory_id": "traj-1", "prompt": "fix the repo",
-            "codex_openenv_driver": "scripted", "script": ["git status", "git checkout -- ."], **extra}
+            "codex_openenv_driver": "scripted", "script": ["git status", "git checkout -- ."],
+            "expected_policy_version": "pv-7", **extra}
 
 
 def test_subprocess_run_scrubs_key_relays_tool_wait_and_signs(monkeypatch):
@@ -258,6 +270,198 @@ def test_rollout_cancellation_kills_worker_and_releases_everything(monkeypatch):
     _run(scenario())
     assert terminated and terminated[0] is not None  # worker reaped
     assert board.open == 0 and provider.destroyed == 1 and env.evaluations == 0
+
+
+# ---------------------------------------------------------------- IR-2/IR-3: HarnessBoard, admission, policy token source
+
+def test_subprocess_run_counts_sessions_and_leases_on_the_harness_board_and_drains_to_zero(monkeypatch):
+    import time
+
+    hb = HarnessBoard()  # monotonic clock, as the island actor
+    env = FakeTerminalEnvironment(passed=True)
+    provider, _board = _configure(monkeypatch, env, harness_board=hb, deadline=30.0)
+    seen: list[HarnessSnapshot] = []
+
+    async def scenario() -> dict[str, Any]:
+        task = asyncio.create_task(subprocess_agent.run("http://miles", "p", {}, _metadata(hang_seconds=0.5)))
+        while not (hb.snapshot().env_live and hb.snapshot().in_flight):
+            await asyncio.sleep(0.02)
+        seen.append((hb.snapshot(), time.monotonic()))
+        return await task
+
+    result = _run(scenario())
+    busy, at = seen[0]
+    # the lease carries its hard deadline (acquire time + provider deadline): drain waits are bounded
+    assert busy.in_flight == 1 and busy.env_live == 1 and busy.latest_lease_deadline == pytest.approx(at + 30.0, abs=5.0)
+    # drain probe (IR-2, three-arg): a live sandbox / open session blocks even with router=0, tool_wait=0
+    idle_tools = ToolWaitBoard().snapshot()
+    assert drain_blockers(0, idle_tools, busy) == ["1 harness sessions in flight", "1 sandboxes live"]
+    assert drain_blockers(0, idle_tools, None) == ["harness counts unknown"]
+    assert drain_blockers(0, idle_tools, HARNESS_ZERO) == []
+    done = hb.snapshot()
+    assert done.in_flight == 0 and done.env_live == 0 and done.leases_expired_total == 0
+    assert drain_blockers(0, idle_tools, done) == [] and provider.destroyed == 1
+    assert tbench_outcome.MAC_KEY in result and result["expected_policy_version"] == "pv-7"
+
+
+def test_subprocess_run_refuses_new_session_when_admission_is_closed(monkeypatch):
+    hb = HarnessBoard()
+    env = FakeTerminalEnvironment(passed=True)
+    provider, _board = _configure(monkeypatch, env, harness_board=hb)
+    hb.close_admission(["m0"])  # drain of our member, first step of MilesRolloutPool.drain
+    assert hb.allow_new_session("m0") is False
+    result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    assert result[tbench_reward.INFRASTRUCTURE_KEY] == subprocess_agent.ADMISSION_CLOSED
+    assert tbench_outcome.MAC_KEY not in result and provider.runner is None  # nothing acquired
+    assert hb.snapshot() == HarnessSnapshot(0, 0, hb.snapshot().generation)
+    hb.open_admission(["m0"])
+    result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    assert tbench_outcome.MAC_KEY in result and hb.snapshot().in_flight == 0 and hb.snapshot().env_live == 0
+
+
+def test_subprocess_cancellation_releases_board_lease_and_session(monkeypatch):
+    hb = HarnessBoard()
+    env = FakeTerminalEnvironment(passed=True)
+    provider, board = _configure(monkeypatch, env, harness_board=hb)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(subprocess_agent.run("http://miles", "p", {}, _metadata(hang_seconds=30)))
+        while not board.events:
+            await asyncio.sleep(0.05)
+        assert hb.snapshot().in_flight == 1 and hb.snapshot().env_live == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+    snap = hb.snapshot()
+    assert snap.in_flight == 0 and snap.env_live == 0 and provider.destroyed == 1 and board.open == 0
+
+
+def test_subprocess_policy_token_comes_from_metadata_or_driver_sink_and_missing_refuses(monkeypatch, tmp_path):
+    env = FakeTerminalEnvironment(passed=True)
+    _configure(monkeypatch, env)
+    monkeypatch.setenv(rollout_meta_hook.META_SINK_ENV, f"dir:{tmp_path}")
+    md = _metadata()
+    del md["expected_policy_version"]
+    # nothing published by the driver -> refuse before any environment is acquired
+    with pytest.raises(subprocess_agent.PolicyVersionMissing, match="expected_policy_version missing"):
+        _run(subprocess_agent.run("http://miles", "p", {}, dict(md)))
+    assert env.evaluations == 0
+    rollout_meta_hook.put_policy_token("yeto:3:abc")  # what MilesRolloutPool.generate publishes
+    result = _run(subprocess_agent.run("http://miles", "p", {}, dict(md)))
+    assert result["expected_policy_version"] == "yeto:3:abc"
+    result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))  # metadata wins over the sink
+    assert result["expected_policy_version"] == "pv-7"
+
+
+def test_generate_wrapper_refuses_without_policy_token_and_reads_sink(monkeypatch, tmp_path):
+    monkeypatch.setenv(rollout_meta_hook.META_SINK_ENV, f"dir:{tmp_path}")
+    calls = []
+
+    async def upstream(_input):
+        calls.append(1)
+        return SimpleNamespace(samples=[_sample([1, 2, 3], [0, 1, 1], [-0.1, -0.2], 2, [("yeto:3:abc", 1, 3)])])
+
+    inp = SimpleNamespace(sample=SimpleNamespace(group_index=1, index=2, metadata={}))
+    with pytest.raises(generate_wrapper.PolicyVersionMissing):
+        _run(generate_wrapper.generate(inp, upstream=upstream))
+    assert calls == []
+    rollout_meta_hook.put_policy_token("yeto:3:abc")
+    out = _run(generate_wrapper.generate(inp, upstream=upstream))
+    s = out.samples[0]
+    assert s.status is None and s.metadata["expected_policy_version"] == "yeto:3:abc"
+    assert rollout_meta_hook.harness_counters([[s]]) == {}
+    rollout_meta_hook.put_policy_token("yeto:4:def")
+    out = _run(generate_wrapper.generate(inp, upstream=upstream))
+    s = out.samples[0]
+    assert s.status == "ABORTED" and rollout_meta_hook.harness_counters([[s]]) == {"policy_age_violation": 1}
+
+
+# ---------------------------------------------------------------- IR-1: preflight hook before any allocation; 7.1 reward_scope
+
+def _island_args(**over) -> SimpleNamespace:
+    base = dict(
+        yeto_harness_preflight=preflight.HARNESS_PREFLIGHT_SPEC,
+        custom_agent_function_path=preflight.EXPECTED_AGENT_FUNCTION,
+        yeto_harness_reward_scope=None,
+        yeto_harness_environment_provider="test_harness_codex_openenv:_provider_factory",
+        yeto_rl_learner_id=0,
+    )
+    return SimpleNamespace(**{**base, **over})
+
+
+def _provider_factory(miles_args):
+    return _Provider(FakeTerminalEnvironment(passed=True))
+
+
+def _stage(monkeypatch):
+    """Stub the A1 contract pieces so entry.preflight_stage runs without Miles (as test_rl_ir_harness)."""
+    monkeypatch.setattr(entry, "ports_runtime_fingerprint", lambda launch: "fp")
+    monkeypatch.setattr(entry, "miles_capabilities", lambda fp, unverified_mechanisms=(): "caps")
+    monkeypatch.setattr(entry, "with_partitioned_serial", lambda caps: caps)
+    monkeypatch.setattr(entry, "execution_profile_for", lambda *a, **k: "profile")
+    monkeypatch.setattr(entry, "expected_algorithm_sha256", lambda a: None)
+    monkeypatch.setattr(entry, "preflight", lambda profile, algorithm, caps: None)
+    monkeypatch.setattr(entry, "elastic_wiring_for", lambda a, profile, fingerprint: None)
+    allocations = []
+    monkeypatch.setattr(entry, "connect_island_ray", lambda *a, **k: allocations.append("ray"))
+    monkeypatch.setattr(entry, "resolve_harness_preflight",
+                        lambda a, environ=None: preflight.harness_preflight if a.yeto_harness_preflight else None)
+    return allocations
+
+
+def test_entry_preflight_stage_runs_codex_preflight_before_allocation_and_installs_boards(monkeypatch, tmp_path):
+    allocations = _stage(monkeypatch)
+    for name, value in _good_env().items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("YETO_CODEX_OPENENV_ALLOW_SCRIPTED_DRIVER", raising=False)
+    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
+    attested = []
+    monkeypatch.setattr(preflight, "preflight_codex_openenv",
+                        lambda env=None, **kw: attested.append(env.get("YETO_CODEX_OPENENV_MODEL_REVISION")) or {})
+    subprocess_agent.configure(provider=None)
+    # the real spec resolves through entry.resolve_harness_preflight (module:callable)
+    assert entry.resolve_harness_preflight(SimpleNamespace(yeto_harness_preflight=preflight.HARNESS_PREFLIGHT_SPEC)) is preflight.harness_preflight
+
+    # failure (compaction on) -> no Ray connect / placement / allocation, no provider installed
+    monkeypatch.setenv("YETO_CODEX_COMPACTION_ENABLED", "1")
+    monkeypatch.setattr(preflight, "preflight_codex_openenv", lambda env=None, **kw: preflight.assert_compaction_disabled(env))
+    with pytest.raises(preflight.PreflightError, match="incompatible"):
+        entry.preflight_stage(_island_args(), "launch", AlgorithmSpec(), yeto_policy_sync=False)
+    assert allocations == [] and subprocess_agent.configured()["provider"] is None
+    monkeypatch.delenv("YETO_CODEX_COMPACTION_ENABLED")
+
+    # 7.1: reward_scope=segment fails at startup through the same hook (and in validate_parsed_args)
+    with pytest.raises(MilesConfigError, match="reward_scope='segment'"):
+        entry.preflight_stage(_island_args(yeto_harness_reward_scope="segment"), "launch", AlgorithmSpec(), yeto_policy_sync=False)
+    assert allocations == [] and subprocess_agent.configured()["provider"] is None
+
+    # wrong agent function / no provider -> fail closed
+    with pytest.raises(preflight.PreflightError, match="expects"):
+        entry.preflight_stage(_island_args(custom_agent_function_path="x.run"), "launch", AlgorithmSpec(), yeto_policy_sync=False)
+    with pytest.raises(preflight.PreflightError, match="no environment provider"):
+        preflight.harness_preflight(_island_args(yeto_harness_environment_provider=None), "launch", env=_good_env())
+
+    # success: provider + island boards installed (lazy actors named like entry.harness_source uses)
+    monkeypatch.setattr(preflight, "preflight_codex_openenv", lambda env=None, **kw: attested.append("ok") or {})
+    assert entry.preflight_stage(_island_args(yeto_rl_learner_id=3), "launch", AlgorithmSpec(), yeto_policy_sync=False) == ("fp", "caps", "profile", None)
+    installed = subprocess_agent.configured()
+    assert isinstance(installed["provider"], _Provider) and attested[-1] == "ok"
+    assert installed["tool_wait_board"].learner_id == 3 and installed["harness_board"].learner_id == 3
+    from yeto.rl.engine.tool_wait import harness_board_actor
+
+    assert installed["harness_board"]._factory is harness_board_actor and installed["tool_wait_board"]._factory is None
+    assert allocations == []  # preflight_stage never connects; run_ports_island does after it returns
+    subprocess_agent.configure(provider=None)
+
+
+def test_ir4_schema_names_match_the_harness_payload_keys():
+    # IR-4 as implemented: counters are registered without a *_total suffix (kind=counter carries the semantics).
+    assert set(HARNESS_METRIC_KEYS) == {"harness_in_flight", "env_live", "tito_session_mismatch", "tito_chain_breaks", "policy_age_violation"}
+    assert all(not k.endswith("_total") for k in LOAD_SAMPLE_SCHEMA)
+    assert LOAD_SAMPLE_SCHEMA["policy_age_violation"][0] == "counter" and LOAD_SAMPLE_SCHEMA["env_live"][0] == "gauge"
+    assert generate_wrapper.POLICY_AGE_KEY == "policy_age_violation" == rollout_meta_hook.POLICY_AGE_VIOLATION_KEY
 
 
 # ---------------------------------------------------------------- reward verification at three points (3)

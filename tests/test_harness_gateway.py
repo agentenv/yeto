@@ -9,7 +9,9 @@ from typing import Any
 
 import pytest
 
+from yeto.rl.engine.tool_wait import HarnessBoard
 from yeto.rl.harness.gateway import (
+    AdmissionClosed,
     ChainBreakReason,
     ChainRegistry,
     Gateway,
@@ -236,3 +238,43 @@ def test_identity_context_provider_leaves_messages_untouched_and_is_default():
     gw, backend = gateway([{"role": "assistant", "content": "a"}], context_provider=Recording())
     run(gw.handle("chat", {"messages": [U]}, trajectory_id="t"))
     assert Recording.seen == [("t", 0, [U])] and backend.calls[0][1] == [U]
+
+
+# ---------------------------------------------------------------- IR-2/IR-4: HarnessBoard admission + counter mirroring
+
+def test_gateway_mirrors_counters_and_sessions_on_the_harness_board_and_honours_admission():
+    hb = HarnessBoard()
+    gw, backend = gateway([tool_reply("c1", "exec", "{}"), {"role": "assistant", "content": "done"}], harness_board=hb, member="m0")
+    first = [{"role": "user", "content": "hi"}]
+    run(gw.handle("chat", {"messages": first}, trajectory_id="t"))
+    assert hb.snapshot().in_flight == 1  # one open backend session
+    # retry fork (the generated tool call is replaced) -> second chain = second session; reason reaches the board
+    run(gw.handle("chat", {"messages": first + [{"role": "user", "content": "again"}]}, trajectory_id="t"))
+    snap = hb.snapshot()
+    assert snap.in_flight == 2 and snap.tito_chain_breaks == {"retry_fork": 1}
+    # history rewrite (prompt itself differs) -> third chain
+    run(gw.handle("chat", {"messages": [{"role": "user", "content": "other"}]}, trajectory_id="t"))
+    snap = hb.snapshot()
+    assert snap.in_flight == 3 and snap.tito_chain_breaks == {"retry_fork": 1, "history_rewrite": 1}
+    assert gw.snapshot("t")["tito_chain_breaks"] == snap.tito_chain_breaks  # registry and board agree
+    gw.close("t")
+    assert hb.snapshot().in_flight == 0
+
+    # session mismatch (disallowed appended role) is counted on the board
+    gw2, _ = gateway([{"role": "assistant", "content": "a"}], harness_board=hb, member="m0")
+    run(gw2.handle("chat", {"messages": first}, trajectory_id="u"))
+    with pytest.raises(TrajectoryInvalid, match="tito_session_mismatch"):
+        run(gw2.handle("chat", {"messages": first + [{"role": "assistant", "content": "a"}, {"role": "system", "content": "y"}]}, trajectory_id="u"))
+    assert hb.snapshot().tito_session_mismatch == 1
+    gw2.close("u")  # (the fake backend reuses session ids per instance; the board refuses a duplicate open id)
+    assert hb.snapshot().in_flight == 0
+
+    # drain closed admission: a new session is refused (not invalidated); reopening lets it through
+    hb.close_admission(["m0"])
+    gw3, backend3 = gateway([], harness_board=hb, member="m0")
+    with pytest.raises(AdmissionClosed):
+        run(gw3.handle("chat", {"messages": first}, trajectory_id="v"))
+    assert backend3.sessions == [] and gw3.snapshot("v")["invalidated"] is None
+    hb.open_admission(["m0"])
+    run(gw3.handle("chat", {"messages": first}, trajectory_id="v"))
+    assert backend3.sessions == ["s0"]

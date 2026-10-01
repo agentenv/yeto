@@ -12,12 +12,12 @@
 
 - [x] 2.1 [Y] 定位 legacy `yeto_miles_secrlenv` 与 `codex_openenv_*_agent_function` 源码（agentenv/miles examples、镜像内 site-packages）；找到就搬到 `yeto/rl/harness/codex/`，找不到就按 `tests/test_secrlenv_codex_harness.py` 重写，并在 progress 中标“重写”。验收：原测试文件的全部用例迁到新包后在 CPU 上通过。 **完成记录（已实现 / CPU 通过：legacy 包从 5bfc011 搬入 `yeto/rl/harness/codex/`（出处与 sha256 见 `pins.py`），`codex_openenv_*` 三模块重写；原 34 用例改 import 后 30 通过 + 4 skip（需 Codex 0.145.0 二进制）；证据 CODEX-PROGRESS §阶段 2）**
 - [ ] 2.2 [Y] 把 `_preflight_codex_harness`、`_verify_live_codex_app_server_schema`、`tbench_direct_preflight.validate_hmac_key_source` 抽到 `yeto/rl/harness/codex/preflight.py`，legacy 同名函数改为转调。验收：legacy 与新入口对同一组篡改输入（二进制 sha、schema、工具面、密钥权限）给出相同失败；CPU 单测。 **部分完成（新入口 `preflight.preflight_codex_openenv` 已实现 / CPU 通过；legacy 转调以可注入的 `preflight.forward_legacy_openenv_preflight` 提供（同一组输入给出与 legacy 相同的 ValueError 类别），legacy 文件改一行与 `yeto/rl/__init__.py` pin 更新由主 agent 另派 IMG，字段与新 sha 见 `preflight.required_pin_updates()` 与 CODEX-PROGRESS §阶段 3；未勾选）**
-- [ ] 2.3 [IR-1] ports `entry.py` 在模型分配前调用 2.2 的 preflight。验收：CPU 单测，preflight 失败时不触发 placement / 分配调用。
+- [x] 2.3 [IR-1] ports `entry.py` 在模型分配前调用 2.2 的 preflight。验收：CPU 单测，preflight 失败时不触发 placement / 分配调用。 **完成记录（已实现 / CPU 通过：INFRA `entry.preflight_stage` 的 `(miles_args, launch)` 钩子（偏差 1，接受）在 `connect_island_ray` 前运行；harness 侧 `codex.preflight.harness_preflight`（`HARNESS_PREFLIGHT_SPEC` 经 `YETO_HARNESS_PREFLIGHT`/`miles_args.yeto_harness_preflight` 解析）做 reward_scope/agent 函数/compaction/身份/密钥检查并安装 provider 与岛内 boards；失败时 allocator/Ray 调用数 0。`tests/test_rl_ir_harness.py::test_ir1_harness_preflight_*`、`tests/test_harness_codex_openenv.py::test_entry_preflight_stage_runs_codex_preflight_before_allocation_and_installs_boards`）**
 
 ## 3. tool-wait 与在途计数
 
 - [x] 3.1 [Y] agent 函数内，把每次“模型返回→下一次请求”的区间包进 `async_tool_wait_scope(board_actor(learner_id), trajectory_id)`，模式同 `tool_wait_workload.py`。验收：CPU 测试用 fake bridge 驱动 3 轮，board 的 enter/exit 次数为 3，结束后计数归零；异常路径同样归零。 **完成记录（已实现 / CPU 通过：每次工具执行一个 tool-wait 区间（进程内 `_ToolWaitEnvironment`；子进程经 worker 事件转发到 board），3 次工具→3 对 enter/exit，取消路径归零；`tests/test_harness_codex_openenv.py`）**
-- [ ] 3.2 [IR-2] `drain_blockers` 与 `MilesRolloutPool` 的 drain probe 加入 `harness_in_flight`、`env_live`，未知值 fail closed；1.7 load sample 带上这两个字段。验收：CPU 单测覆盖“active=0 但 tool_wait>0 / env_live>0 时未排空”。
+- [x] 3.2 [IR-2] `drain_blockers` 与 `MilesRolloutPool` 的 drain probe 加入 `harness_in_flight`、`env_live`，未知值 fail closed；1.7 load sample 带上这两个字段。验收：CPU 单测覆盖“active=0 但 tool_wait>0 / env_live>0 时未排空”。 **完成记录（已实现 / CPU 通过：INFRA 三参 `drain_blockers(router, tool_wait, harness: HarnessSnapshot)`、`HarnessBoard`（准入/会话/带硬 deadline 的租约）、pool drain 先关准入、LoadSample 新字段；harness 侧 agent 入口与网关调 `allow_new_session`/`enter_session`/`exit_session`/`lease_acquired(deadline=)`/`lease_released`，取消路径归零，准入关闭 → ABORTED 不计 0 奖励。`test_rl_ir_harness.py::test_ir2_*`、`test_harness_codex_openenv.py::test_subprocess_run_counts_sessions_and_leases_on_the_harness_board_and_drains_to_zero`/`*_refuses_new_session_when_admission_is_closed`/`*_cancellation_releases_board_lease_and_session`、`test_harness_gateway.py::test_gateway_mirrors_counters_*`。8.3 的 fake broker 接入待 8.x）**
 - [ ] 3.3 [阻塞: rl-infra-spec 1.7 勾选、3.3b fork-M3 合入] X5 drain 场景下 agentic 轨迹的 GPU 验收：在 3.3 X5 实验里加一条 agentic workload，验证 drain 期间旧路由保留到轨迹结束。解除条件：infra 3.3 进入 GPU 验收阶段；本任务并入其实验，不单独开卡。
 
 ## 4. 网关核心库（进程内，A 与 B 共用）
@@ -25,8 +25,8 @@
 - [x] 4.1 [Y] 从 bridge 抽出 `yeto/rl/harness/gateway/`：Responses（SSE）、Chat、Messages 三入口的请求/响应转换，统一调用 Session Server 的 chat 路由；采样签名字段不可覆盖；不支持的形态显式拒绝。验收：迁入的 legacy 用例（reasoning 往返、whitespace、length 边界、畸形帧、响应上限）CPU 通过，新增 Messages 与 Chat 的往返用例。 **完成记录（已实现 / CPU 通过：`yeto/rl/harness/gateway/{translate,core}.py` 三入口→canonical chat→SessionBackend；签名采样字段不可覆盖；store:true/parallel_tool_calls/summary/非 function 工具/compaction 项/未知块一律拒绝；`tests/test_harness_gateway.py`。注：legacy bridge 的 SSE 解析用例留在 `codex_harness_agent`（进程内 A 路径仍用 legacy bridge），网关 HTTP 外壳为 10.x）**
 - [x] 4.2 [Y] 前缀哈希链与多 chain：延续、分叉回滚、断链另起三种路径，`chain_break_reason` 枚举，禁止修补后沿用旧 chain。验收：CPU 单测覆盖 spec 中“正常多轮 / 重试分叉 / 历史改写”三个场景，并做属性测试（随机追加序列下 chain 数与期望一致）。 **完成记录（已实现 / CPU 通过：`gateway/chains.py` 前缀哈希链（h_k=H(h_{k-1}‖canonical(msg_k))）；延续 / 分叉另起（retry_fork，旧 chain 不动）/ 断链另起（history_rewrite、template_drops_reasoning、compaction_window）；禁止修补：不允许角色→`tito_session_mismatch` 并作废；`max_chains=1` 首批断言；属性测试 60 轮随机序列 chain 数与断链计数一致、每个生成事件恰在一条 chain）**
 - [x] 4.3 [Y] mask/logprob 对齐断言与每次生成的 `policy_version` 记录；age 0 下版本漂移使轨迹作废。验收：CPU 单测覆盖 logprob 缺失、长度不等、mask=1 位置非生成、版本漂移四种情况，全部作废且不记 0 奖励。 **完成记录（已实现 / CPU 通过：`alignment.py` 断言 + `codex_openenv_generate.py` 的 policy version 校验；logprob 缺失/长度不等/mask=1 非生成/版本漂移四种情况作废（ABORTED，无 0 奖励））**
-- [ ] 4.4 [IR-3] driver 在 age 0 配置下把目标 `policy_version` 传给 rollout。验收：CPU 单测。
-- [ ] 4.5 [IR-4] 1.7 指标 schema 登记 `tito_session_mismatch`、`tito_chain_breaks{reason}`、`policy_age_violation`、`harness_in_flight`、`env_live`，带 profile/epoch 标签。验收：CPU 单测，关闭观测时兼容旧路径。
+- [x] 4.4 [IR-3] driver 在 age 0 配置下把目标 `policy_version` 传给 rollout。验收：CPU 单测。 **完成记录（已实现 / CPU 通过：INFRA `RolloutPool.generate(rollout_id, *, expected_policy_version)` + `MilesRolloutPool` 经 sink 发布 token，`rollout_meta_hook.expected_policy_version(sample)` 读取、`harness_counters` 聚合 → driver `PolicyIdentityError`；harness 侧 `codex_openenv_generate` 与子进程入口改用该函数，缺 token 时 `PolicyVersionMissing` 拒绝生成，漂移 → `policy_age_violation=1`/ABORTED。`test_rl_ir_harness.py::test_ir3_*`、`test_harness_codex_openenv.py::test_subprocess_policy_token_comes_from_metadata_or_driver_sink_and_missing_refuses`/`test_generate_wrapper_refuses_without_policy_token_and_reads_sink`。GPU 下 Publisher token == SGLang weight_version 的实际核验留 9.x）**
+- [x] 4.5 [IR-4] 1.7 指标 schema 登记 `tito_session_mismatch`、`tito_chain_breaks{reason}`、`policy_age_violation`、`harness_in_flight`、`env_live`，带 profile/epoch 标签。验收：CPU 单测，关闭观测时兼容旧路径。 **完成记录（已实现 / CPU 通过：INFRA `timeline.LOAD_SAMPLE_SCHEMA`/`HARNESS_METRIC_KEYS`/`TITO_CHAIN_BREAK_REASONS`/`validate_load_sample`，标签 `profile_hash`/`epoch`，计数名无 `_total` 后缀（偏差 3，接受，design R-IR 已修订）；关闭观测时不发出 `rl_load_sample`。harness 侧网关把 `tito_session_mismatch`/`tito_chain_breaks{reason}` 镜像到 `HarnessBoard`，生成包装把 `policy_age_violation` 写入 sample.metadata。`test_rl_ir_harness.py::test_ir4_*`、`test_harness_codex_openenv.py::test_ir4_schema_names_match_the_harness_payload_keys`）**
 
 ## 5. reasoning 与模板一致性
 
@@ -41,7 +41,7 @@
 
 ## 7. 长轨迹与分段预留
 
-- [ ] 7.1 [Y] 超时 / `max_seq_len` 按策略边界截断并签名；sample metadata 带 `trajectory_id`、`segment_id=0`、`segment_boundary_reason=null`、`reward_scope=trajectory`；配置 `reward_scope=segment` 时启动失败。验收：CPU 单测。
+- [x] 7.1 [Y] 超时 / `max_seq_len` 按策略边界截断并签名；sample metadata 带 `trajectory_id`、`segment_id=0`、`segment_boundary_reason=null`、`reward_scope=trajectory`；配置 `reward_scope=segment` 时启动失败。验收：CPU 单测。 **完成记录（已实现 / CPU 通过：超时/`max_seq_len` 作为策略边界签名 reward 0（阶段 2，`*_signed_policy_boundaries`）；`trajectory_fields` 给出 `trajectory_id`/`segment_id=0`/`segment_boundary_reason=null`/`reward_scope=trajectory`；`reward_scope=segment` 由 INFRA `config.check_harness_reward_scope(miles_args.yeto_harness_reward_scope)` 在 `validate_parsed_args` 拒绝，并在 `harness_preflight` 再检查（偏差 2：未进 `RLRunConfig` 叶子）。`test_rl_ir_harness.py::test_ir1_reward_scope_segment_fails_at_startup`、`test_harness_codex_openenv.py::test_entry_preflight_stage_*`）**
 - [x] 7.2 [Y] 网关上下文拼接走 `ContextProvider`，默认为恒等映射。验收：CPU 单测证明恒等实现不改变 token 序列。 **完成记录（已实现 / CPU 通过：`gateway/context.py` `ContextProvider`/`IdentityContextProvider`，网关发送前经过 provider，默认恒等（测试断言发送消息与请求逐项相等））**
 
 ## 8. 沙箱代理接口（只预留）
@@ -88,5 +88,5 @@
 ## 待批准修订（阶段 1 检查点，2026-10-01）
 
 - 2.1：legacy 源码已在 yeto 历史 `5bfc011:yeto_miles_secrlenv/` 找到（sha256 与 `yeto/rl/__init__.py` pin 一致），改为"搬运 + 出处注记 + 重算 SHA"；`codex_openenv_*` 三模块未找到，按已知接口重写。新增验收：Responses 工具调用的 TITO 前缀复用、rollout 级取消清理（进程组/HOME/session/lease/计数归零）、三处 reward 验签、mask 与 token/logprob 对齐、兄弟段共享奖励且基线按 rollout 计一次、compaction 开启时 preflight fail closed。见 design R-CTX / R-D5a。
-- 3.2 / 4.4 / 4.5：签名与验收以 design R-IR 为准。
+- 3.2 / 4.4 / 4.5：签名与验收以 design R-IR 为准（2026-10-01 按 INFRA 实现修订：钩子 `(miles_args, launch)`、`reward_scope` 走 `miles_args`、计数名无 `_total`）。
 - 9.1 / 9.2：任务子集、模型、费用、通过/停机条件以 design R-TB / R-GPU 为准。

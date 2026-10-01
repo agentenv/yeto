@@ -1,6 +1,18 @@
 """Ports-path preflight for the Codex Terminal-Bench harness (design D3, R-CTX, R-D5a).
 
-Runs before model allocation (IR-1 hook) and fails closed on:
+``harness_preflight(miles_args, launch)`` is the IR-1 hook (INFRA signature
+``entry.HarnessPreflight = Callable[[miles_args, launch], None]``): ports
+``entry.preflight_stage`` calls it before ``connect_island_ray`` / placement /
+model allocation, resolved from ``miles_args.yeto_harness_preflight`` or
+``YETO_HARNESS_PREFLIGHT`` (= ``HARNESS_PREFLIGHT_SPEC``).  It fails closed on:
+- ``reward_scope`` other than ``trajectory`` (task 7.1; IR-1
+  ``config.check_harness_reward_scope`` on ``miles_args.yeto_harness_reward_scope``);
+- an agent function other than this package's ``CODEX_OPENENV_AGENT``;
+- no environment provider (``miles_args.yeto_harness_environment_provider`` or
+  ``YETO_HARNESS_ENVIRONMENT_PROVIDER`` = ``module:callable`` returning an
+  ``EnvironmentProvider``), then installs it together with the island's
+  ``ToolWaitBoard`` / ``HarnessBoard`` actors (same names ``entry.harness_source`` uses);
+and, through ``preflight_codex_openenv``, on:
 - legacy trainable compaction being enabled: the fork pin's session server does
   not know the ``X-Miles-Compaction-*`` headers and would silently roll back
   window 0 (R-D5a), so ``YETO_CODEX_COMPACTION_ENABLED`` must be unset/false;
@@ -13,11 +25,13 @@ Runs before model allocation (IR-1 hook) and fails closed on:
 
 from __future__ import annotations
 
+import importlib
 import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.engine.miles_adapter.config import check_harness_reward_scope
 from yeto.rl.tbench_outcome import validate_hmac_key_source
 
 from . import codex_harness_agent as harness
@@ -84,6 +98,76 @@ def preflight_codex_openenv(
         "identity": adapter.codex_openenv_harness_identity(),
         "compaction": "disabled",
     }
+
+
+# ---------------------------------------------------------------------------
+# IR-1 hook: (miles_args, launch) -> None, run by entry.preflight_stage
+
+HARNESS_PREFLIGHT_SPEC = "yeto.rl.harness.codex.preflight:harness_preflight"
+ENVIRONMENT_PROVIDER_ENV = "YETO_HARNESS_ENVIRONMENT_PROVIDER"
+EXPECTED_AGENT_FUNCTION = "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run"
+
+
+def _load_dotted(spec: Any, what: str) -> Any:
+    if callable(spec):
+        return spec
+    module, sep, name = str(spec).partition(":")
+    if not sep:
+        module, _, name = module.rpartition(".")
+    if not module or not name:
+        raise PreflightError(f"{what} {spec!r} is not module:callable")
+    try:
+        target = getattr(importlib.import_module(module), name)
+    except (ImportError, AttributeError) as exc:
+        raise PreflightError(f"{what} {spec!r} cannot be imported: {exc}") from exc
+    if not callable(target):
+        raise PreflightError(f"{what} {spec!r} is not callable")
+    return target
+
+
+def resolve_environment_provider(miles_args: Any, env: Mapping[str, str]) -> Any:
+    """The sandbox provider factory for this island (fail closed when absent)."""
+    spec = getattr(miles_args, "yeto_harness_environment_provider", None) or env.get(ENVIRONMENT_PROVIDER_ENV)
+    if not spec:
+        raise PreflightError(
+            f"no environment provider: set miles_args.yeto_harness_environment_provider or {ENVIRONMENT_PROVIDER_ENV}"
+        )
+    factory = _load_dotted(spec, "environment provider")
+    provider = factory(miles_args) if not hasattr(factory, "acquire") else factory
+    if not hasattr(provider, "acquire"):
+        raise PreflightError(f"environment provider {spec!r} has no acquire()")
+    return provider
+
+
+def island_boards(miles_args: Any) -> tuple[Any, Any]:
+    """``(tool_wait_board, harness_board)``: the island's named actors, looked up lazily."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import LazyBoardActor
+    from yeto.rl.engine.tool_wait import harness_board_actor
+
+    learner_id = int(getattr(miles_args, "yeto_rl_learner_id", 0) or 0)
+    return LazyBoardActor(learner_id), LazyBoardActor(learner_id, factory=harness_board_actor)
+
+
+def harness_preflight(miles_args: Any, launch: Any, *, env: Mapping[str, str] | None = None) -> None:
+    """IR-1 hook body. Raises ``PreflightError``/``MilesConfigError`` before any allocation."""
+    del launch  # identity / binary / key checks do not depend on the launch args
+    env = os.environ if env is None else env
+    # 7.1: a per-segment reward scope must not start (IR-1 path, same check as validate_parsed_args).
+    check_harness_reward_scope(getattr(miles_args, "yeto_harness_reward_scope", None))
+    agent = getattr(miles_args, "custom_agent_function_path", None)
+    if agent != EXPECTED_AGENT_FUNCTION:
+        raise PreflightError(f"custom_agent_function_path={agent!r}; the Codex harness preflight expects {EXPECTED_AGENT_FUNCTION}")
+    preflight_codex_openenv(env)
+    provider = resolve_environment_provider(miles_args, env)
+    from . import codex_openenv_subprocess_agent_function as subprocess_agent
+
+    tool_wait_board, harness_board = island_boards(miles_args)
+    subprocess_agent.configure(
+        provider=provider,
+        tool_wait_board=tool_wait_board,
+        harness_board=harness_board,
+        member=getattr(miles_args, "yeto_rl_member_id", None),
+    )
 
 
 # ---------------------------------------------------------------------------

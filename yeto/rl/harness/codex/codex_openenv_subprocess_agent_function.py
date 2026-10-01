@@ -8,9 +8,17 @@ signs the outcome (D7), and guarantees cleanup on cancellation/timeouts:
 worker process group, environment lease, tool-wait scope.
 
 Environment provisioning is injected (``EnvironmentProvider``) so the sandbox
-backend (D9) and the CPU fake share one code path.  Nothing here touches
-INFRA-owned files; the ToolWaitBoard handle is passed in by the caller/pool
-(IR stub: see CODEX-PROGRESS "等 IR 合入后要替换的桩").
+backend (D9) and the CPU fake share one code path.  The boards are installed
+by the IR-1 preflight hook (``preflight.harness_preflight``): the island's
+``ToolWaitBoard`` (3.1) and ``HarnessBoard`` (IR-2) actors.  IR-2 wiring here:
+``allow_new_session`` before any environment is acquired (drain closes
+admission; fail closed -> infrastructure ABORTED, never a 0 reward),
+``enter_session``/``exit_session`` around the worker, ``lease_acquired``
+(with the hard deadline) / ``lease_released`` around the environment lease so
+``env_live`` counts idle sandboxes too.  IR-3: the target policy token comes
+from ``rollout_meta_hook.expected_policy_version`` (prompt metadata first,
+else the driver's token in the metadata sink); a missing token refuses the
+trajectory before any environment is acquired.
 """
 
 from __future__ import annotations
@@ -20,10 +28,14 @@ import json
 import os
 import signal
 import sys
+import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Protocol
 
+from yeto.rl.engine.miles_adapter import rollout_meta_hook
 from yeto.rl.engine.tool_wait import _call as _board_call
+from yeto.rl.engine.tool_wait import _resolve as _board_resolve
 
 from . import codex_openenv_agent_function as adapter
 from .environment import TerminalEnvironment, TrustedVerifier
@@ -50,13 +62,56 @@ class EnvironmentProvider(Protocol):
 
 _provider: EnvironmentProvider | None = None
 _tool_wait_board: Any = None
+_harness_board: Any = None
+_member: str | None = None
+
+ADMISSION_CLOSED = "harness_admission_closed"
+POLICY_VERSION_MISSING = "expected_policy_version missing"
 
 
-def configure(*, provider: EnvironmentProvider | None, tool_wait_board: Any = None) -> None:
-    """Install the environment provider and (optional) ToolWaitBoard handle."""
-    global _provider, _tool_wait_board
+class PolicyVersionMissing(RuntimeError):
+    """IR-3: the driver published no target policy token for this rollout (refuse)."""
+
+
+def configure(
+    *,
+    provider: EnvironmentProvider | None,
+    tool_wait_board: Any = None,
+    harness_board: Any = None,
+    member: str | None = None,
+) -> None:
+    """Install the environment provider and the island boards.
+
+    ``tool_wait_board``: ``ToolWaitBoard`` (local or actor handle, 3.1).
+    ``harness_board``: ``HarnessBoard`` (local or actor handle, IR-2); None
+    means the island reports "harness counts unknown" and stays undrainable.
+    ``member``: the rollout member this process targets (admission key).
+    """
+    global _provider, _tool_wait_board, _harness_board, _member
     _provider = provider
     _tool_wait_board = tool_wait_board
+    _harness_board = harness_board
+    _member = member
+
+
+def configured() -> dict[str, Any]:
+    return {"provider": _provider, "tool_wait_board": _tool_wait_board, "harness_board": _harness_board,
+            "member": _member}
+
+
+def _board_kwcall(target: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+    """Like ``tool_wait._call`` but forwards keyword arguments (``lease_acquired(deadline=)``)."""
+    fn = getattr(target, method)
+    remote = getattr(fn, "remote", None)
+    return _board_resolve(remote(*args, **kwargs) if callable(remote) else fn(*args, **kwargs))
+
+
+def resolve_expected_policy_version(metadata: dict[str, Any]) -> str | None:
+    """IR-3 target token: prompt metadata first, else the driver token in the sink."""
+    try:
+        return rollout_meta_hook.expected_policy_version(SimpleNamespace(metadata=metadata))
+    except Exception:  # noqa: BLE001 - no sink reachable == no token published
+        return None
 
 
 def scrubbed_environment(base: dict[str, str] | None = None) -> dict[str, str]:
@@ -139,13 +194,26 @@ async def run(
     trajectory_id = str(metadata.get("trajectory_id") or sample_id)
     episode_id = adapter.new_episode_id()
     fields = adapter.trajectory_fields(trajectory_id)
-    expected_version = metadata.get("expected_policy_version")
+    expected_version = resolve_expected_policy_version(metadata)
+    if expected_version is None:  # IR-3: refuse before any environment exists
+        raise PolicyVersionMissing(f"{POLICY_VERSION_MISSING} for trajectory {trajectory_id!r}")
+    board = _harness_board
+    if board is not None and not _board_kwcall(board, "allow_new_session", _member):
+        # IR-2: admission closed (drain of this member) -> infrastructure, not a reward.
+        return {**adapter.infrastructure_metadata(ADMISSION_CLOSED, episode_id=None), **fields}
     lease: EnvironmentLease | None = None
+    session_open = lease_open = False
     try:
+        if board is not None:
+            _board_kwcall(board, "enter_session", trajectory_id, _member)
+            session_open = True
         try:
             lease = await _provider.acquire(task_id, trajectory_id)
         except Exception as exc:  # noqa: BLE001 - provisioning failures are infrastructure
             return {**adapter.infrastructure_metadata(f"acquire: {type(exc).__name__}: {exc}", episode_id=None), **fields}
+        if board is not None:
+            _board_kwcall(board, "lease_acquired", trajectory_id, deadline=time.monotonic() + lease.deadline_seconds)
+            lease_open = True
         job = {
             "base_url": base_url,
             "prompt": metadata.get("prompt") if isinstance(metadata.get("prompt"), str) else str(prompt),
@@ -166,11 +234,18 @@ async def run(
         except adapter.harness.CodexHarnessError as exc:
             return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id), **fields}
         signed = await adapter.finish_trusted(untrusted, lease.verifier, task_id=task_id, sample_id=sample_id)
-        if expected_version is not None:
-            signed["expected_policy_version"] = expected_version
+        signed["expected_policy_version"] = expected_version
         return {**signed, **fields}
     finally:
-        if lease is not None:
-            await lease.destroy()
-            if await lease.describe() != "gone":
-                raise RuntimeError(f"environment for {trajectory_id} was not confirmed destroyed")
+        try:
+            if lease is not None:
+                await lease.destroy()
+                if await lease.describe() != "gone":
+                    # Not confirmed gone: keep the lease on the board; it is
+                    # force-released at its hard deadline (leases_expired_total).
+                    raise RuntimeError(f"environment for {trajectory_id} was not confirmed destroyed")
+                if lease_open:
+                    _board_kwcall(board, "lease_released", trajectory_id)
+        finally:
+            if session_open:
+                _board_kwcall(board, "exit_session", trajectory_id)
