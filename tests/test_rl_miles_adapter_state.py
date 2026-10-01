@@ -304,3 +304,37 @@ def test_grad_norm_prefers_recorded_train_step_value(monkeypatch):
     assert sp.grad_norm(actor) == 0.5
     assert sp._STEP_GRAD_NORMS == []
     assert sp.grad_norm(actor) == 0.0
+
+
+def test_recorder_captures_the_lr_the_step_applies_not_the_advanced_one(monkeypatch):
+    """fix-decoupled-lr-schedule D4: read param_groups before the scheduler steps."""
+
+    import sys
+    import types
+
+    from yeto.rl.engine.miles_adapter import state_plugin as sp
+
+    optimizer = SimpleNamespace(param_groups=[{"lr": 1e-5}])
+
+    def train_one_step(args, rollout_id, step_id, data_iterator, model, optimizer,
+                       opt_param_scheduler, num_microbatches, num_rollouts=None,
+                       witness_info=None, attempt=0):
+        optimizer.param_groups[0]["lr"] = max(0.0, optimizer.param_groups[0]["lr"] - 5e-6)
+        return {}, 0.3, "NORMAL"  # upstream: optimizer.step(), then scheduler.step()
+
+    model_mod = types.ModuleType("miles.backends.megatron_utils.model")
+    model_mod.train_one_step = train_one_step
+    for name in ("miles", "miles.backends", "miles.backends.megatron_utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "miles.backends.megatron_utils.model", model_mod)
+    sys.modules["miles.backends.megatron_utils"].model = model_mod
+    monkeypatch.setattr(sp, "_RECORDER_INSTALLED", False)
+    monkeypatch.setattr(sp, "_STEP_APPLIED_LRS", [])
+    monkeypatch.setattr(sp, "_STEP_GRAD_NORMS", [])
+    assert sp.install_grad_norm_recorder()
+    for step in range(3):
+        model_mod.train_one_step(None, 0, step, None, [], optimizer, None, 1)
+    # Logged post-step values would be 5e-6, 0, 0; the applied ones are:
+    assert sp.applied_lrs(None) == [1e-5, 5e-6, 0.0]
+    assert sp.applied_lrs(None) == []
+    assert sp._STEP_GRAD_NORMS == [0.3, 0.3, 0.3]

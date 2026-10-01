@@ -1537,3 +1537,46 @@ def test_legacy_worker_payload_passes_the_engine_explicitly(tmp_path):
             syncer="127.0.0.1:30000", reward_sha256="c" * 64,
         )
         assert payload["arguments"]["rl_engine"] == engine
+
+
+def test_learner_budget_override_is_decoupled_only_and_not_below_global_rounds():
+    assert benchmark.local_rounds(_args()) == 3
+    assert benchmark.local_rounds(_args(learner_budget_steps=None)) == 3
+    ok = _args(learner_budget_steps=6, arms="decoupled")
+    benchmark.validate_workload(ok)
+    assert benchmark.local_rounds(ok) == 6
+    with pytest.raises(ValueError, match=">= --global-rounds"):
+        benchmark.validate_workload(_args(learner_budget_steps=2, arms="decoupled"))
+    for arms in ("federated", "federated,decoupled", None):
+        with pytest.raises(ValueError, match="requires --arms decoupled"):
+            benchmark.validate_workload(_args(learner_budget_steps=6, arms=arms))
+
+
+def test_learner_budget_override_reaches_syncer_and_worker_but_not_lr_horizon(tmp_path):
+    arm = benchmark.select_arms(
+        "2", 1, 1, kinds=("decoupled",), fragments=4, pipeline=2, local_horizon=2
+    )[0]
+    cutoff = benchmark.syncer_command(arm, 29400, tmp_path, rounds=4, budget_steps=12)
+    assert cutoff[cutoff.index("--total-steps") + 1] == "16"
+    assert cutoff[cutoff.index("--learner-budget-steps") + 1] == "12"
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model", "org/model", "--model-revision", "a" * 40,
+            "--data", "org/data", "--data-revision", "b" * 40,
+            "--reward-function", "pkg.reward:score", "--global-rounds", "4",
+            "--learner-budget-steps", "12", "--arms", "decoupled",
+            "--fragments", "4", "--pipeline", "2", "--local-horizon", "2",
+        ]
+    )
+    args._active_seed = 17
+    prompt = tmp_path / "prompts.jsonl"
+    prompt.write_text("{}\n", encoding="utf-8")
+    worker = benchmark.worker_specs(arm, prompt, (prompt, prompt))[0]
+    values = benchmark.worker_payload(
+        args, worker, arm=arm, run_dir=tmp_path, model_path=tmp_path / "model",
+        syncer="127.0.0.1:29400", reward_sha256="c" * 64,
+    )["arguments"]
+    assert values["learner_budget_steps"] == 12
+    assert values["total_fragment_steps"] == 16
+    # The LR horizon (num-rollout / decay iters) stays global_rounds.
+    assert values["global_rounds"] == 4

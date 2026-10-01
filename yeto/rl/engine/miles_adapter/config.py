@@ -29,9 +29,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..algorithm import (
+    AlgorithmSpecError,
     BOUNDED_NONZERO_STD_FILTER,
     STOCK_NONZERO_STD_FILTER,
     AlgorithmSpec,
+)
+from ..run_config import LR_SCHEDULE_FLAGS
+from .algorithm_flags import (
+    OBJECTIVE_FLAGS,
+    absorb_extra_argv,
+    algorithm_argv,
+    mapped_flags,
+    objective_flags,
 )
 from .placement import PlacementRequest, check_placement_not_rewritten
 
@@ -92,6 +101,17 @@ ADAPTER_OWNED_FLAGS = frozenset(
         "--trainer-controller-addrs",
         "--eval-num-gpus",
         "--external-policy-sync-path",  # legacy fork only; the driver owns sync
+        # rl-infra-spec 2.1 (fixed partition): the transfer mode and the
+        # fork-M1 role->bundle map are decided by the placement translation.
+        "--update-weight-transfer-mode",
+        "--yeto-placement-map",
+        # LR schedule is decided by RLRunConfig.algorithm.lr_schedule
+        # (legacy rejects the same LR_SCHEDULE_FLAGS in learner.py).
+        *LR_SCHEDULE_FLAGS,
+        # Every objective-changing algorithm flag (rl-algorithm-capabilities
+        # D3): mapped ones only enter through absorption into AlgorithmSpec,
+        # unmapped ones are refused.
+        *OBJECTIVE_FLAGS,
     }
 )
 # Parsed-namespace attributes that must stay off (post-normalization check).
@@ -132,6 +152,10 @@ class MilesLaunchArgs:
     # Attributes to set on the parsed namespace (read by yeto code running in
     # Miles processes, e.g. the bounded dynamic-sampling filter).
     runtime_attrs: Mapping[str, Any] = field(default_factory=dict)
+    # The spec after absorbing mapped extra-argv flags (its sha256 is
+    # ``algorithm_sha256``) and the absorbed flags ({flag: argv value}).
+    algorithm: AlgorithmSpec | None = None
+    absorbed_flags: Mapping[str, Any] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -229,6 +253,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.dedicated_rollout_gpus": _ok,
     "parallel.visible_gpus_per_node": _ok,
     "parallel.uneven_pipeline_layers": _ok,
+    "parallel.standby_gpus": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
     "trainable.lora_targets": _check_lora_targets,
@@ -261,6 +286,9 @@ LEAF_POLICY: dict[str, _Check] = {
     "algorithm.advantage_estimator": _ok,  # cross-checked against AlgorithmSpec
     "algorithm.reward_function": _ok,
     "algorithm.lr": _ok,
+    "algorithm.lr_schedule": _ok,
+    "algorithm.lr_schedule.decay_style": _ok,
+    "algorithm.lr_schedule.decay_iters": _ok,
     "algorithm.seed": _ok,
     "algorithm.rollout_seed": _ok,
     "eval": _ok,
@@ -383,6 +411,7 @@ def placement_request(config) -> PlacementRequest:
         trainer_gpus=trainer,
         rollout_gpus=int(parallel.dedicated_rollout_gpus),
         gpus_per_engine=parallel.rollout_num_gpus_per_engine,
+        standby_gpus=int(getattr(parallel, "standby_gpus", 0) or 0),
     )
 
 
@@ -402,11 +431,34 @@ def reject_fault_tolerance_flags(tokens: Sequence[str]) -> None:
             )
 
 
-def check_extra_argv(extra_argv: Sequence[str]) -> None:
+def check_extra_argv(extra_argv: Sequence[str], algorithm: AlgorithmSpec | None = None):
+    """Refuse FT/adapter-owned flags; absorb mapped algorithm flags.
+
+    Mapped algorithm flags (``algorithm_flags.MAPPINGS``) are absorbed into
+    ``algorithm`` (conflicts raise, naming flag and both values); other
+    objective-changing flags are refused as not yet in the algorithm spec.
+    With ``algorithm`` returns ``(spec, remaining_argv, absorbed)``.
+    """
+
     reject_fault_tolerance_flags(extra_argv)
+    mapped = mapped_flags()
+    unmapped_objective = objective_flags() - mapped
     for flag in _flags(extra_argv):
+        if flag in mapped:
+            continue
+        if flag in unmapped_objective:
+            raise MilesConfigError(
+                f"{flag} changes the training objective but is not part of the algorithm "
+                "spec yet; it cannot be passed through extra argv"
+            )
         if flag in ADAPTER_OWNED_FLAGS:
             raise MilesConfigError(f"{flag} is owned by the ports adapter and cannot be overridden")
+    if algorithm is None:
+        return None
+    try:
+        return absorb_extra_argv(algorithm, extra_argv)
+    except AlgorithmSpecError as exc:
+        raise MilesConfigError(str(exc)) from exc
 
 
 def translate_run_config(
@@ -421,6 +473,27 @@ def translate_run_config(
     if not isinstance(algorithm, AlgorithmSpec):
         raise TypeError("algorithm must be an AlgorithmSpec")
     check_config_mapped(config)
+    algorithm, extra_argv, absorbed = check_extra_argv(extra_argv, algorithm)
+    problems = algorithm.rejections()
+    if problems:
+        raise MilesConfigError("algorithm spec rejected: " + "; ".join(problems))
+    from ..algorithm import launch_problems
+
+    problems = launch_problems(algorithm, {
+        "rollout_batch_size": config.batch.groups_per_round,
+        "rollout_max_response_len": config.batch.rollout_max_response_len,
+        "context_parallel_size": 1,  # ports emits --context-parallel-size 1
+        "multi_lora": any(t.split("=", 1)[0] == "--multi-lora" for t in extra_argv),
+    })
+    if problems:
+        raise MilesConfigError("algorithm spec rejected for this run: " + "; ".join(problems))
+    requested_over = algorithm.sampling.over_sampling_batch_size
+    if requested_over is not None and requested_over != config.batch.over_sampling_batch_size:
+        raise UnmappedConfigError(
+            "batch.over_sampling_batch_size",
+            f"{config.batch.over_sampling_batch_size!r} disagrees with AlgorithmSpec "
+            f"sampling.over_sampling_batch_size {requested_over!r}",
+        )
     if config.algorithm.advantage_estimator != algorithm.advantage_estimator:
         raise UnmappedConfigError(
             "algorithm.advantage_estimator",
@@ -428,9 +501,8 @@ def translate_run_config(
             f"{algorithm.advantage_estimator!r}",
         )
     dynamic_filter = _algorithm_filter(config, algorithm)
-    check_extra_argv(extra_argv)
 
-    from ..run_config import RECIPE_QWEN3_5
+    from ..run_config import RECIPE_QWEN3_5, lr_schedule_argv
 
     geometry = config.geometry
     parallel = config.parallel
@@ -446,6 +518,25 @@ def translate_run_config(
         placement_values = ["--colocate"]
     else:
         placement_values = ["--rollout-num-gpus", str(request.rollout_gpus)]
+        if trainable.parameter_mode == "lora":
+            if serving.offload_train:
+                # Conservative choice of this change, NOT an upstream
+                # constraint: upstream train.py:139-151 also offloads outside
+                # colocate. Refused until a partitioned GPU run shows that a
+                # per-round onload + NCCL broadcast publish is safe/cheap.
+                raise MilesConfigError(
+                    "a LoRA fixed partition publishes over NCCL broadcast every round; "
+                    "the trainer must stay resident (no offload_train)"
+                )
+            # upstream protocol.py:73-89: only broadcast (or colocate CUDA IPC)
+            # supports LoRA; p2p/disk-delta assert no LoRA.
+            placement_values += ["--update-weight-transfer-mode", "broadcast"]
+        if request.placement_map is not None:
+            # fork-M1 (--yeto-placement-map): explicit role -> bundle map.
+            placement_values += [
+                "--yeto-placement-map",
+                json.dumps(request.placement_map, sort_keys=True, separators=(",", ":")),
+            ]
 
     model_recipe_values: list[str] = []
     if recipe.name == RECIPE_QWEN3_5:
@@ -491,7 +582,13 @@ def translate_run_config(
         "--lora-dropout", "0",
         "--lora-type", "canonical_lora",
         "--target-modules", ",".join(trainable.target_modules),
-        "--lora-base-cpu-backup",
+        # upstream applies the LoRA base CPU backup only under colocate
+        # (utils/lora/utils.py:39-41); a LoRA fixed partition drops it.
+        *(
+            []
+            if request.kind != "colocated" and trainable.parameter_mode == "lora"
+            else ["--lora-base-cpu-backup"]
+        ),
         "--sglang-max-lora-rank", str(trainable.lora_rank),
         # placement
         "--actor-num-nodes", str(parallel.actor_num_nodes),
@@ -547,10 +644,16 @@ def translate_run_config(
         "--seed", str(config.algorithm.seed),
         "--pin-rollout-manager-to-head",
     ]
+    # Explicit LR schedule: Miles' default horizon is --num-rollout (global
+    # rounds), which under decoupled is not the island's local step count.
+    values.extend(lr_schedule_argv(config.algorithm.lr_schedule))
     if algorithm.kl_coef is not None:
         values.extend(("--kl-coef", str(algorithm.kl_coef)))
     if dynamic_filter is not None:
         values.extend(("--dynamic-sampling-filter-path", dynamic_filter))
+    # Non-default AlgorithmSpec v2 fields (empty for every v1 spec, so the
+    # default GRPO argv is byte-identical to R0).
+    values.extend(algorithm_argv(algorithm))
 
     evaluation = config.eval
     if evaluation is not None:
@@ -689,6 +792,8 @@ def translate_run_config(
         placement=request,
         algorithm_sha256=algorithm.sha256(),
         runtime_attrs=dict(algorithm.to_legacy_runtime_attrs()),
+        algorithm=algorithm,
+        absorbed_flags=dict(absorbed),
     )
 
 

@@ -20,7 +20,12 @@ from typing import Any, Protocol
 
 from ..ports import GroupMetadata, RolloutBatchHandle
 from . import LoopRunner
-from .rollout_meta_hook import DEFAULT_SINK_ACTOR, METADATA_SCHEMA, put_policy_token
+from .rollout_meta_hook import (
+    DEFAULT_SINK_ACTOR,
+    METADATA_SCHEMA,
+    ROUND_META_SCHEMA,
+    put_policy_token,
+)
 
 
 class RolloutMetadataError(RuntimeError):
@@ -101,8 +106,34 @@ class DirMetadataSource:
             if path.exists():
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 path.unlink()
-                return payload
+                extra = []
+                round_path = self.directory / f"round-{rollout_id}.json"
+                if round_path.exists():
+                    extra.append(json.loads(round_path.read_text(encoding="utf-8")))
+                    round_path.unlink()
+                return merge_round_metadata(payload, extra, rollout_id)
         raise RolloutMetadataError(f"no rollout metadata for rollout {rollout_id} in {self.directory}")
+
+
+def merge_round_metadata(
+    payload: dict[str, Any], records: list[dict[str, Any]], rollout_id: int
+) -> dict[str, Any]:
+    """Attach per-round counters reported after the all-samples hook (same rollout only)."""
+
+    merged = dict(payload)
+    for record in records:
+        if record.get("rollout_id") != rollout_id:
+            raise RolloutMetadataError(
+                f"per-round metadata for rollout {record.get('rollout_id')} "
+                f"arrived with rollout {rollout_id}"
+            )
+        for key, value in record.items():
+            if key in ("schema", "rollout_id"):
+                continue
+            if key in merged:
+                raise RolloutMetadataError(f"per-round metadata {key} reported twice")
+            merged[key] = value
+    return merged
 
 
 def _sink_actor_class():
@@ -151,13 +182,15 @@ class RayMetadataSink:
     def take(self, rollout_id: int) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_s
         while True:
-            items = self._ray.get(self._actor.take_all.remote())
+            items = [json.loads(i) for i in self._ray.get(self._actor.take_all.remote())]
+            main = [i for i in items if i.get("schema") != ROUND_META_SCHEMA]
+            extra = [i for i in items if i.get("schema") == ROUND_META_SCHEMA]
             if items:
-                if len(items) != 1:
+                if len(main) != 1:
                     raise RolloutMetadataError(
-                        f"expected one metadata record for rollout {rollout_id}, got {len(items)}"
+                        f"expected one metadata record for rollout {rollout_id}, got {len(main)}"
                     )
-                return json.loads(items[0])
+                return merge_round_metadata(main[0], extra, rollout_id)
             if time.monotonic() > deadline:
                 raise RolloutMetadataError(f"no rollout metadata for rollout {rollout_id}")
             time.sleep(0.05)
@@ -193,6 +226,9 @@ def handle_from_metadata(
             reward_mean=_number(g["reward_mean"]),
             reward_std=_number(g["reward_std"]),
             token_count=int(g["token_count"]),
+            filtered_samples=(
+                int(g["filtered_samples"]) if g.get("filtered_samples") is not None else None
+            ),
         )
         for g in payload["groups"]
     )
@@ -213,7 +249,26 @@ def handle_from_metadata(
         completed=int(payload["completed"]),
         aborted=int(payload["aborted"]),
         payload=data_pack,
+        # rollout_meta_hook: trained-group filter drops (terminal). Carried-over
+        # leftovers are not tracked until 3.6/4.1 audit the Miles buffer.
+        filtered=int(payload["filtered"]) if "filtered" in payload else None,
+        carried_over=None,
+        submitted_groups=payload.get("submitted_groups"),
+        aborted_in_flight_groups=payload.get("aborted_in_flight_groups"),
+        tool_wait_seconds=(
+            float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
+        ),
+        nonzero_advantages=(
+            int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
+        ),
     )
+
+
+def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
+    import urllib.request
+
+    with urllib.request.urlopen(url, timeout=timeout_s) as response:  # noqa: S310 - router URL
+        return json.loads(response.read().decode("utf-8"))
 
 
 class MilesRolloutPool:
@@ -256,6 +311,31 @@ class MilesRolloutPool:
         except BaseException:
             _release(data_pack)
             raise
+
+    def load_sample(self, *, http_get: Callable[[str], Any] | None = None) -> dict[str, int] | None:
+        """rl-infra-spec 1.7: engine in-flight counts from the fork-M3 router.
+
+        ``GET /worker_inflight`` -> ``{"inflight": {worker_url: n}, "cordoned": [...]}``.
+        None when the router address is unknown or the router lacks the
+        endpoint (stock Miles without M3): unknown, never reported as 0.
+        """
+        args = self._args
+        ip = getattr(args, "sglang_router_ip", None)
+        port = getattr(args, "sglang_router_port", None)
+        if not ip or not port:
+            return None
+        try:
+            data = (http_get or _http_get_json)(f"http://{ip}:{port}/worker_inflight")
+        except Exception:  # noqa: BLE001 - observation only; absent endpoint = unknown
+            return None
+        inflight = data.get("inflight") if isinstance(data, dict) else None
+        if not isinstance(inflight, dict):
+            return None
+        return {
+            "active_requests": int(sum(int(v) for v in inflight.values())),
+            "workers": len(inflight),
+            "cordoned": len(data.get("cordoned") or ()),
+        }
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""

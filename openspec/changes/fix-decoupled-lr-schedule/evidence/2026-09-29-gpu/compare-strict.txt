@@ -1,0 +1,6 @@
+island 0: logged pre [6.666666666666668e-05, 3.333333333333334e-05, 0.0] post [6.666666666666668e-05, 3.333333333333334e-05, 0.0] identical=True
+island 0: applied pre(derived) [0.0001, 6.666666666666668e-05, 3.333333333333334e-05] post(applied_lrs) [0.0001, 6.666666666666668e-05, 3.333333333333334e-05] bitwise_equal=True last>0=True
+island 1: logged pre [6.666666666666668e-05, 3.333333333333334e-05, 0.0] post [6.666666666666668e-05, 3.333333333333334e-05, 0.0] identical=True
+island 1: applied pre(derived) [0.0001, 6.666666666666668e-05, 3.333333333333334e-05] post(applied_lrs) [0.0001, 6.666666666666668e-05, 3.333333333333334e-05] bitwise_equal=True last>0=True
+post-fix rc 0 (a zero-LR invariant trip fails the round => rc!=0)
+PASS
