@@ -102,7 +102,7 @@ extra = glob.glob(R + "/pulled/diag/pyspy-*.txt") + glob.glob(R + "/home/sky_log
 files = [R + "/" + s for s in SRC] + extra
 PAT = re.compile(r"WARNING|\bWARN\b|\bERROR\b|Traceback|Exception|FATAL|Fatal|Error\b|error:|timed out|timeout|Timeout|retry|retrying|OOM|out of memory|Xid|NVRM|segfault|SIGKILL|SIGQUIT|crashed|did not exit|failed|Failed|unavailable|refused|Killed|denied", re.I)
 # lines that are routine, not anomalies
-SKIP = re.compile(r"^\s*$|Permanently added|INFO:|\"event\"|retry_timeout|--modal-retries|no-island-relaunch|YETO_RL_EVENT")
+SKIP = re.compile(r"^\s*$|Permanently added|INFO:|\"event\"|retry_timeout|--modal-retries|no-island-relaunch|YETO_RL_EVENT|\s\.{5,}\s|server_args=|\[WeightChecker\]|process_trampoline|Streaming logs|calc_ft")
 def norm(l):
     l = ANSI.sub("", l)
     l = re.sub(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ ", "", l)
@@ -114,6 +114,11 @@ def norm(l):
     l = re.sub(r"\d+(\.\d+)?", "N", l)
     return l.strip()[:200]
 CLS = [  # (regex on normalised line, class, short reason) -- heuristic only; the reviewer confirms
+    (r"freeze_gc|MaxRetryError|NewConnectionError|ConnectionError|ConnectionRefusedError|During handling of the above|direct cause of the following|^raise |^File \"|^Traceback|Traceback \(most recent", "upstream", "post-warmup freeze_gc / HTTP call racing engine teardown (Miles/SGLang); verify against the injection timeline"),
+    (r"retry_utils.*(wait_init_expected_num_cells|retry_until_deadline)", "platform", "engine start wait (expected during start_cells; sleeps until the new SGLang engines answer)"),
+    (r"ft op=check errored|decision=no_retry", "upstream", "Miles FT check, survivors normal (benign)"),
+    (r"could not confirm termination|leaving the head up", "product", "launcher teardown could not confirm cluster termination (launcher/yeto teardown path) -- check cleanup evidence"),
+    (r"Cluster\(s\) failed|sky down --purge", "platform", "sky autostop/status against an already-removed cluster"),
     (r"unauthenticated requests to the HF Hub|HF_TOKEN", "platform", "HF Hub unauthenticated warning (env)"),
     (r"muse_glimmer|qwen3_vl|megatron-bridge|trust_remote_code=True allows|Inferring the appropriate argparse|FutureWarning|DeprecationWarning|UserWarning", "upstream", "Miles/Megatron/HF import-time warning"),
     (r"user_agent_prefix", "platform", "sky/nebius SDK FutureWarning"),

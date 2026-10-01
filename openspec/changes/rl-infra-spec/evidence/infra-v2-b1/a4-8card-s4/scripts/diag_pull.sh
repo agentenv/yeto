@@ -11,7 +11,7 @@ until [ -s $R/pulled/gpu.txt ]; do [ -f $R/rc.txt ] || [ -f $R/startup_failed ] 
 n=0; lastsz=x; lastt=$(date +%s); spied=0
 while [ ! -f $R/rc.txt ] && [ ! -f $R/startup_failed ]; do
   { echo "=== $(date -u +%FT%TZ)"; timeout 60 $S 'nvidia-smi; echo ---ps; ps -eo pid,ppid,etime,stat,args --no-headers | cut -c1-220; echo ---mem; free -m; df -h / /tmp 2>/dev/null | head -4; echo ---threads; ps -eLf | wc -l' ; } >> $D/snap.txt 2>> $D/diag.err
-  timeout 60 $S '(dmesg -T 2>&1 || dmesg 2>&1) | grep -iE "oom|out of memory|xid|killed process|segfault|nvrm" | tail -50; echo "dmesg-rc-check: $(dmesg 2>&1 | head -1 | cut -c1-120)"' > $D/dmesg.txt 2>> $D/diag.err
+  { echo "=== $(date -u +%FT%TZ)"; timeout 60 $S '(dmesg -T 2>&1 || dmesg 2>&1) | grep -iE "oom|out of memory|xid|killed process|segfault|nvrm" | tail -50; echo "dmesg-first-line: $(dmesg 2>&1 | head -1 | cut -c1-120)"'; } > $D/.dm 2>> $D/diag.err; [ "$(wc -l < $D/.dm)" -gt 1 ] && mv $D/.dm $D/dmesg.txt   # keep the last non-failed answer
   if [ $((n % 4)) = 0 ]; then
     timeout 120 $S 'cd /tmp/ray/session_latest/logs 2>/dev/null && tar czf - . 2>/dev/null | head -c 26214400 | base64 -w0' > $D/.rl 2>> $D/diag.err && [ -s $D/.rl ] && mv $D/.rl $D/raylogs.tgz.b64
   fi

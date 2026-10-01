@@ -155,30 +155,40 @@ def judge_a4b(journal, tape, known):
     return res
 
 
-def judge_e1a_c(journal, tape, expect):
-    """E1-A (c), re-based on rl_membership per round + retained rl_publication check (after the shrink, the next full publication has 1 member)."""
+def judge_e1a_c(journal, tape, expect, initial_members=None, round_is_rollout_id=True):
+    """E1-A (c), re-based on rl_membership per round + retained rl_publication check (after the shrink, the next full publication has expect[-1] members).
+
+    Units (erratum, gpu-plan-v2 9.23): the emitted rl_membership.round is a 0-based rollout_id (the first rollout that uses the membership), the plan's round r is
+    1-based with rollout_id = r-1 (9.18).  So the members serving round r are those of the last event with round <= r-1.  Before any event the members are the
+    initial config's (initial_members; default = members of the first rl_publication on the tape, else expect[0]).
+    round_is_rollout_id=False reproduces the first (buggy) reading `round <= r`, kept only so the regression test can show that it fails on real data."""
     res = {"case": "e1a_c", "checks": {}}
     mem = [r for r in named(tape, "rl_membership") if r.get("round") is not None and r.get("members") is not None]
     if not mem:
         res["verdict"] = "INVALID_TEST"; res["invalid_reasons"] = ["no rl_membership events with round/members on the tape"]; return res
     mem.sort(key=lambda r: (r["round"], r.get("config_epoch", 0)))
+    if initial_members is None:
+        p0 = next((p for p in tape if p.get("event") == "rl_publication"), None)
+        pm = (p0 or {}).get("sync/publication_members", (p0 or {}).get("publication_members"))
+        initial_members = (len(pm) if isinstance(pm, (list, tuple)) else pm) if p0 is not None and pm is not None else expect[0]
     got = []
     for rnd in range(1, len(expect) + 1):
-        cur = [r for r in mem if r["round"] <= rnd]
-        got.append(len(cur[-1]["members"]) if cur else None)
-    res["members_per_round"] = got; res["expected"] = expect
+        lim = rnd - 1 if round_is_rollout_id else rnd
+        cur = [r for r in mem if r["round"] <= lim]
+        got.append(len(cur[-1]["members"]) if cur else (initial_members if round_is_rollout_id else None))
+    res["members_per_round"] = got; res["expected"] = expect; res["initial_members"] = initial_members; res["round_is_rollout_id"] = round_is_rollout_id
     res["checks"]["members_per_round_equal"] = got == expect
     downs = [r for r in mem if r.get("kind") == "down"]
-    pubs = [r for r in tape if r.get("event") == "rl_publication"]
     ok = False
+    final_n = expect[-1]
     if downs:
         i_down = tape.index(downs[-1]) if downs[-1] in tape else None
         after = [p for p in (tape[i_down + 1:] if i_down is not None else []) if p.get("event") == "rl_publication"]
         if after:
             pm = after[0].get("sync/publication_members", after[0].get("publication_members"))
             res["first_publication_after_down_members"] = pm
-            ok = (len(pm) if isinstance(pm, (list, tuple)) else pm) == 1
-    res["checks"]["publication_after_down_is_1_member"] = ok
+            ok = (len(pm) if isinstance(pm, (list, tuple)) else pm) == final_n
+    res["checks"]["publication_after_down_has_final_member_count"] = ok; res["final_member_count"] = final_n
     res["verdict"] = "PASS" if all(res["checks"].values()) else "FAIL"
     return res
 

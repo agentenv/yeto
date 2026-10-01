@@ -26,6 +26,7 @@ while [ ! -f $R/rc.txt ]; do
     timeout 60 \$S 'date -u +%FT%TZ; ps -eo pid,args --no-headers | grep -E \"ray::|sglang|scheduler|yeto.rl.learner\" | grep -v grep | cut -c1-160' >> $R/pulled/ps.txt 2>/dev/null
     timeout 60 \$S 'cat ~/yeto-rl/inwatch.log 2>/dev/null' > $R/pulled/inwatch.log 2>/dev/null
     timeout 60 \$S 'cd ~/yeto-rl 2>/dev/null && tar czf - --exclude=cuts elastic-state | base64 -w0' > $R/pulled/.st 2>/dev/null && [ -s $R/pulled/.st ] && mv $R/pulled/.st $R/pulled/elastic-state.tgz.b64
+    timeout 60 \$S 'cd ~/yeto-rl 2>/dev/null && tar czf - router_samples.jsonl gpu_samples.jsonl sampler.out inwatch.log inwatch.out dkill.log dctl.log 2>/dev/null | base64 -w0' > $R/pulled/.sm 2>/dev/null && [ -s $R/pulled/.sm ] && mv $R/pulled/.sm $R/pulled/samplers.tgz.b64
   fi
   sz=\$(stat -c %s $R/pulled/rl-island-0.jsonl 2>/dev/null || echo 0); now=\$(date +%s)
   if [ \"\$sz\" != \"\$lastsz\" ]; then lastsz=\$sz; lastt=\$now; fi

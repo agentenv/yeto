@@ -74,14 +74,25 @@ class T(unittest.TestCase):
         self.assertEqual(J.judge_a4b([ph("SUCCEEDED")], [t], set())["verdict"], "FAIL")
 
     def test_e1a_c(self):
-        mem = lambda rnd, n, k: {"event": "rl_membership", "round": rnd, "members": ["m%d" % i for i in range(n)], "kind": k, "config_epoch": 0, "tx_id": "t"}
-        tape = [mem(1, 1, "init"), mem(3, 3, "up"), {"event": "rl_publication", "sync/publication_members": ["m0", "m1", "m2"]},
-                mem(5, 1, "down"), {"event": "rl_publication", "sync/publication_members": ["m0"]}]
+        # synthetic, rollout_id units: up serves rollout 2 (= round 3), down serves rollout 4 (= round 5); 4-card counts [1,1,3,3,1,1]
+        mem = lambda rid, n, k: {"event": "rl_membership", "round": rid, "members": ["m%d" % i for i in range(n)], "kind": k, "config_epoch": 0, "tx_id": "t"}
+        tape = [{"event": "rl_publication", "sync/publication_members": ["m0"]}, mem(2, 3, "up"), {"event": "rl_publication", "sync/publication_members": ["m0", "m1", "m2"]},
+                mem(4, 1, "down"), {"event": "rl_publication", "sync/publication_members": ["m0"]}]
         r = J.judge_e1a_c([], tape, [1, 1, 3, 3, 1, 1]); self.assertEqual(r["verdict"], "PASS", r)
         r = J.judge_e1a_c([], tape, [1, 1, 3, 3, 3, 1]); self.assertEqual(r["verdict"], "FAIL")
         tape[-1]["sync/publication_members"] = ["m0", "m1", "m2"]
-        r = J.judge_e1a_c([], tape, [1, 1, 3, 3, 1, 1]); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["publication_after_down_is_1_member"])
+        r = J.judge_e1a_c([], tape, [1, 1, 3, 3, 1, 1]); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["publication_after_down_has_final_member_count"])
         self.assertEqual(J.judge_e1a_c([], [], [1])["verdict"], "INVALID_TEST")
+
+    def test_e1a_c_real_8card_tape(self):
+        """real tape fragment of infra-v2-b1-a8e1a-20261001-1 (8xH100, 12 rounds): up -> rl_membership.round=2, down -> round=7 (0-based rollout ids)."""
+        fx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "a8e1a_tape_fragment.jsonl")
+        tape = [json.loads(l) for l in open(fx) if l.strip()]
+        exp = [2, 2, 4, 4, 4, 4, 4, 2, 2, 2, 2, 2]
+        r = J.judge_e1a_c([], tape, exp); self.assertEqual(r["verdict"], "PASS", r); self.assertEqual(r["members_per_round"], exp)
+        old = J.judge_e1a_c([], tape, exp, round_is_rollout_id=False)   # the first reading (`round <= r`, no initial members): fails on the same data
+        self.assertEqual(old["verdict"], "FAIL"); self.assertEqual(old["members_per_round"], [None, 4, 4, 4, 4, 4, 2, 2, 2, 2, 2, 2])
+        bad = J.judge_e1a_c([], tape, [2, 2, 2, 4, 4, 4, 4, 2, 2, 2, 2, 2]); self.assertEqual(bad["verdict"], "FAIL")   # a genuinely wrong sequence is still caught
 
     def test_cli_writes_marker(self):
         d = tempfile.mkdtemp(); jp, tp = os.path.join(d, "j.jsonl"), os.path.join(d, "t.jsonl")
