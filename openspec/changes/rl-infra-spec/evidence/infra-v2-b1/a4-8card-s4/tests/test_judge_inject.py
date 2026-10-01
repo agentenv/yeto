@@ -195,6 +195,18 @@ class A4B(unittest.TestCase):
         r = J.judge_a4b([DT, {"kind": "undrain_failed", "tx_id": "dn", "error": "x"}, dn("RECOVERY_REQUIRED")], [TW], set(), "cancel", PA4)
         self.assertEqual((r["verdict"], r["marker"]), ("FAIL", "recovery_failed"))
         bad = dict(PA4, cell_statuses=dict(PA4["cell_statuses"], c3="Cordoned")); self.assertEqual(J.judge_a4b(j, [TW], set(), "cancel", bad)["verdict"], "FAIL")
+        # router sampler as the restoration evidence (no probe): cordoned during the drain, empty after CANCELLED, served again
+        jc = [DT, dn("CANCELLED", wall_time=100.0)]
+        def rs(t, cord, busy): return {"t": t, "data": {"inflight": {"http://a": 1, "http://b": busy}, "cordoned": cord}}
+        good = [rs(96.0, ["http://b"], 0), rs(97.0, ["http://b"], 0), rs(101.0, [], 0), rs(102.0, [], 2), rs(103.0, [], 0)]
+        r = J.judge_a4b(jc, [TW], set(), "cancel", None, good); self.assertEqual(r["verdict"], "PASS", r)
+        still = good[:2] + [rs(t, ["http://b"], 0) for t in (101.0, 102.0, 103.0)]
+        r = J.judge_a4b(jc, [TW], set(), "cancel", None, still); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["routing_restored"])
+        never_busy = good[:3] + [rs(102.0, [], 0), rs(103.0, [], 0)]
+        self.assertEqual(J.judge_a4b(jc, [TW], set(), "cancel", None, never_busy)["verdict"], "FAIL")
+        self.assertEqual(J.judge_a4b(jc, [TW], set(), "cancel", None, good[:3])["verdict"], "INVALID_TEST")   # <3 samples after
+        self.assertEqual(J.judge_a4b(jc, [TW], set(), "cancel", None, [rs(t, [], 0) for t in (96.0, 101.0, 102.0, 103.0)])["verdict"], "INVALID_TEST")   # never saw the cordon
+        self.assertEqual(J.judge_a4b(jc, [TW], set(), "cancel", bad, good)["verdict"], "FAIL")   # probe contradicts the router
 
     def test_recovery_variant(self):
         uf = {"event": "test_injection", "kind": "undrain_fail", "applied": True, "target_members": ["engine:c3"]}

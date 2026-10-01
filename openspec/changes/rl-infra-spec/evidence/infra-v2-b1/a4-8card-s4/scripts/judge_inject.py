@@ -314,7 +314,7 @@ def judge_wd(journal, tape, known, gpu_samples=None, probe_after=None, gpu_relea
 
 
 # ----------------------------------------------------------------------------------------------- A4b
-def judge_a4b(journal, tape, known, variant="cancel", probe_after=None):
+def judge_a4b(journal, tape, known, variant="cancel", probe_after=None, router_samples=None):
     """E1-C (c) via the tool-wait injection. variant 'cancel': drain timeout -> undrain -> CANCELLED, routing restored.
     variant 'recovery' (a4bu): undrain fails -> RECOVERY_REQUIRED, never CANCELLED."""
     res = {"case": "a4b" if variant == "cancel" else "a4bu", "checks": {}, "invalid_reasons": []}
@@ -336,14 +336,31 @@ def judge_a4b(journal, tape, known, variant="cancel", probe_after=None):
     if variant == "cancel":
         res["checks"]["terminal_CANCELLED"] = "CANCELLED" in term and "SUCCEEDED" not in term and "RECOVERY_REQUIRED" not in term
         res["checks"]["no_undrain_failure"] = not [r for r in named(journal, "undrain_failed") if r.get("tx_id") == tx]
-        if probe_after is None:
-            return _invalid(res, "fork status probe after the terminal state missing: routing restoration not observed", "evidence_missing")
-        statuses = probe_after.get("cell_statuses") or {}
-        res["probe_after"] = {"membership": probe_after.get("membership"), "statuses": statuses}
-        drained = sorted(set(m.split(":", 1)[1] for d in dt for m in (d.get("target_members") or [])))
-        mem = (probe_after.get("membership") or {}).get("members") or []
-        res["checks"]["members_unchanged_all_serving"] = bool(statuses) and all("Serving" in str(v) for v in statuses.values()) and (
-            not mem or len(mem) == len([v for v in statuses.values() if "Serving" in str(v)]))
+        # routing restored after CANCELLED: from the router sampler (cordoned list empty at the end, the cordoned
+        # engines serve requests again) and/or the fork status probe (every cell Serving)
+        t_cancel = next((r.get("wall_time") for r in ph if r.get("phase") == "CANCELLED"), None)
+        restored = None
+        if router_samples and t_cancel is not None:
+            win = [x for x in router_samples if x.get("data") and x["t"] >= t_cancel - 6]
+            cord = [tuple(sorted(x["data"].get("cordoned") or [])) for x in win if x["t"] < t_cancel]
+            was_cordoned = sorted({u for c in cord for u in c})
+            post = [x for x in win if x["t"] >= t_cancel]
+            served_again = {u for x in post for u, n in x["data"].get("inflight", {}).items() if u in was_cordoned and n}
+            res["router"] = {"cordoned_during_drain": was_cordoned, "post_samples": len(post),
+                             "final_cordoned": sorted(post[-1]["data"].get("cordoned") or []) if post else None,
+                             "served_again": sorted(served_again)}
+            if was_cordoned and len(post) >= 3:
+                restored = not res["router"]["final_cordoned"] and set(served_again) == set(was_cordoned)
+        if probe_after is not None:
+            statuses = probe_after.get("cell_statuses") or {}
+            res["probe_after"] = {"membership": probe_after.get("membership"), "statuses": statuses}
+            mem = (probe_after.get("membership") or {}).get("members") or []
+            p_ok = bool(statuses) and all("Serving" in str(v) for v in statuses.values()) and (
+                not mem or len(mem) == len([v for v in statuses.values() if "Serving" in str(v)]))
+            restored = p_ok if restored is None else (restored and p_ok)
+        if restored is None:
+            return _invalid(res, "neither router samples (cordon list before/after CANCELLED) nor the fork status probe observed the routing restoration", "evidence_missing")
+        res["checks"]["routing_restored"] = restored
         return _finish(res, term)
     # recovery variant
     uf = [r for r in named(journal, "undrain_failed") if r.get("tx_id") == tx]
@@ -467,7 +484,7 @@ def main(argv):
     probes = {"after": load_probe(a.probe_after), "stale": load_probe(a.probe_stale), "oldepoch": load_probe(a.probe_oldepoch)}
     if a.case == "e1b": res = judge_e1b(journal, tape, known, samples, probes)
     elif a.case == "wd": res = judge_wd(journal, tape, known, jl(a.gpu_samples), probes["after"])
-    elif a.case == "a4b": res = judge_a4b(journal, tape, known, "cancel", probes["after"])
+    elif a.case == "a4b": res = judge_a4b(journal, tape, known, "cancel", probes["after"], samples)
     elif a.case == "a4bu": res = judge_a4b(journal, tape, known, "recovery")
     elif a.case == "d123": res = judge_d123(journal, tape, known, jl(a.dkill_log))
     elif a.case == "d4": res = judge_d4(journal, tape, known)

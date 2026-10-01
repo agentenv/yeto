@@ -23,7 +23,7 @@ export HOME=/home/michael
 as=0; lastsz=x; lastt=\$(date +%s)
 while [ ! -f $R/rc.txt ]; do
   if timeout 60 $SKY status $CL 2>/dev/null | grep -q ' UP \| INIT '; then
-    [ \$as = 1 ] || { timeout 120 $SKY autostop -y -i 10 --down $CL > $R/autostop.out 2>&1 && as=1; }
+    [ \$as = 1 ] || [ \"${SHARED:-0}\" = 1 ] || { timeout 120 $SKY autostop -y -i 10 --down $CL > $R/autostop.out 2>&1 && as=1; }   # chain mode: the chain-level watchdog/cleanup owns the cluster
     S='ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 $CL'
     timeout 60 \$S 'cat ~/yeto-output/rl-island-0.jsonl 2>/dev/null' > $R/pulled/.tmp 2>/dev/null && [ -s $R/pulled/.tmp ] && mv $R/pulled/.tmp $R/pulled/rl-island-0.jsonl
     [ -s $R/pulled/gpu.txt ] || timeout 60 \$S 'nvidia-smi --query-gpu=index,uuid,name,driver_version --format=csv,noheader' > $R/pulled/gpu.txt 2>/dev/null
