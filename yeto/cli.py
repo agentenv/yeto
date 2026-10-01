@@ -43,6 +43,7 @@ SUBCOMMANDS = (
     "status",
     "logs",
     "down",
+    "stop-run",
     "_worker",
     "_head",
 )
@@ -1244,6 +1245,11 @@ def build_parser() -> argparse.ArgumentParser:
     down = sub.add_parser("down", help="stop a run's worker and tear down its clusters")
     down.add_argument("run", help="run name (its --cluster-prefix)")
 
+    stop_run = sub.add_parser(
+        "stop-run",
+        help="forbid relaunching islands of a run (writes <run dir>/STOP; stops/tears down nothing)")
+    stop_run.add_argument("run", help="run name (its --cluster-prefix)")
+
     # Internal: the detached background worker `launch` spawns.
     worker = sub.add_parser("_worker")
     worker.add_argument("run")
@@ -2340,6 +2346,9 @@ def main(argv=None) -> int:
         return cmd_logs(args)
     if args.command == "down":
         return cmd_down(args)
+    if args.command == "stop-run":
+        print(f"[yeto] STOP flag written: {runs.request_stop(args.run)}")
+        return 0
     if args.command == "_worker":
         return cmd_worker(args.run)
     if args.command == "_head":

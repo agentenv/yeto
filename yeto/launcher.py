@@ -3245,7 +3245,13 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         # Opt-in overrides (default: Modal runner defaults, 10 retries / 24 h).
         # Acceptance runs pass --modal-retries 0 so a learner exit is final
         # (no re-run billing) and --modal-timeout-s as the Modal-side hard stop.
-        **({"retries": int(args.modal_retries)}
+        # --no-island-relaunch ("a failed island is never relaunched") forces the
+        # platform retries to 0 too: Modal's own retry re-runs a failed island
+        # container by itself (up to 10 times) and would silently undo the flag --
+        # a second paid container, replaying from the last checkpoint, that the
+        # launcher neither tracks nor tears down. Wins over an explicit --modal-retries N.
+        **({"retries": 0} if getattr(args, "no_island_relaunch", False)
+           else {"retries": int(args.modal_retries)}
            if getattr(args, "modal_retries", None) is not None else {}),
         **({"timeout_s": int(args.modal_timeout_s)}
            if getattr(args, "modal_timeout_s", None) is not None else {}),
@@ -3794,6 +3800,7 @@ class FleetController:
         finalized_probe=None,
         progress_probe=None,
         stall_timeout: float = 0.0,
+        stop_flag=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -3801,6 +3808,9 @@ class FleetController:
         `on_relaunch(name, new_job_id)` is called after every successful
         cluster relaunch (production spawns a new log tail)."""
         self.ops = sky_ops
+        # Path of the run's STOP flag file (``runs.stop_flag_path``; ``yeto stop-run``
+        # writes it): once it exists no island is relaunched any more.
+        self.stop_flag = stop_flag
         self.poll_interval = poll_interval
         self.recover_timeout = recover_timeout
         self.on_relaunch = on_relaunch
@@ -4099,7 +4109,19 @@ class FleetController:
                 self._abandon(rec, elapsed)
                 return
         if rec["attempt"] is None:
+            if self._stop_requested(rec, "recovery"):
+                if not is_syncer:  # the syncer is never abandoned; it just is not relaunched
+                    self._abandon(rec, elapsed, reason="STOP flag")
+                return
             rec["attempt"] = self._start_relaunch(rec)
+
+    def _stop_requested(self, rec, where: str) -> bool:
+        flag = self.stop_flag
+        if flag is None or not os.path.exists(flag):
+            return False
+        print(f"[launcher] {rec['name']}: STOP flag {flag} present; not relaunching "
+              f"({where} ends here)", file=sys.stderr)
+        return True
 
     def _start_relaunch(self, rec) -> _RelaunchAttempt:
         attempt = _RelaunchAttempt()
@@ -4107,6 +4129,9 @@ class FleetController:
 
         def _run():
             try:
+                if self._stop_requested(rec, "relaunch"):  # set after the check in the poll loop
+                    attempt.result = None
+                    return
                 attempt.result = self.ops.relaunch(task, name)
             except Exception as e:
                 print(f"[launcher] relaunch of {name} raised: {e}", file=sys.stderr)
@@ -4124,9 +4149,10 @@ class FleetController:
         thread.start()
         return attempt
 
-    def _abandon(self, rec, elapsed: float) -> None:
+    def _abandon(self, rec, elapsed: float, reason: str | None = None) -> None:
         rec["state"] = ABANDONED
-        rec["exit"] = f"ABANDONED after {elapsed:.0f}s"
+        rec["exit"] = (f"ABANDONED ({reason}) after {elapsed:.0f}s" if reason
+                       else f"ABANDONED after {elapsed:.0f}s")
         attempt = rec.get("attempt")
         if attempt is not None and attempt.thread is not None and not attempt.finished:
             # let an in-flight relaunch finish (bounded) so its cluster is torn
@@ -4140,7 +4166,8 @@ class FleetController:
         self._down(rec["name"])
         if self.fixed_roster:
             message = (
-                f"fixed-roster learner {rec['name']} could not recover "
+                f"fixed-roster learner {rec['name']} could not recover"
+                f"{' (' + reason + ')' if reason else ''} "
                 f"({rec.get('failures', 0)} failure(s) in the window, "
                 f"{elapsed:.0f}s recovering; timeout {self.recover_timeout}s)"
             )
@@ -4525,6 +4552,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
 
+        from . import runs
         from .modal_runner import RoutingOps
 
         controller = FleetController(
@@ -4537,6 +4565,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             syncer_probe=local_syncer.probe if head_mode else None,
             syncer_restart=local_syncer.restart if head_mode else None,
             fixed_roster=getattr(args, "training_mode", "sft") == "rl",
+            stop_flag=runs.stop_flag_path(args.cluster_prefix),
             finalized_probe=(
                 (lambda name: name in event_collectors and event_collectors[name].finalized)
                 if echo_names else None

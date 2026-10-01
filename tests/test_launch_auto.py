@@ -319,3 +319,10 @@ def test_modal_retries_and_timeout_are_opt_in(tmp_path, monkeypatch):
                   "--modal-retries", "0", "--modal-timeout-s", "5400"])
     cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:5000")
     assert cfg.retries == 0 and cfg.timeout_s == 5400
+    # --no-island-relaunch means a failed island is never re-run: the platform's own
+    # retries (default 10, an untracked second paid container) are off too, even
+    # against an explicit --modal-retries N
+    for extra in ([], ["--modal-retries", "5"]):
+        args = _args(["--gpu", "modal:1xh100", "--cluster-prefix", "run",
+                      "--no-island-relaunch", *extra])
+        assert build_modal_island_config(args, spec, 0, task, "1.2.3.4:5000").retries == 0
