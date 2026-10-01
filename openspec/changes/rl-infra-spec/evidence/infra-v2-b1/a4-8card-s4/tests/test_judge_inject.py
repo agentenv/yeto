@@ -223,6 +223,81 @@ class A4B(unittest.TestCase):
 def tx(p, rid, **k): return {"kind": "phase", "phase": p, "request_id": rid, "tx_id": rid, **k}
 
 
+def d4_journal():
+    """2026-10-02 ruling shape: dn1 requested at t=100 with deadline 600, REBUILD_OLD at 700 (bounded to 820), island + request
+    RECOVERY_REQUIRED at 790 (<= 600 + 120)."""
+    return [tx("SUCCEEDED", "up1"),
+            {"kind": "request", "request_id": "dn1", "tx_id": "dn1", "wall_time": 100.0, "deadline_wall": 700.0, "body": {"deadline_s": 600.0}},
+            {"kind": "fork_op", "op": "stop", "status": "incomplete", "tx_id": "dn1", "wall_time": 101.0},
+            tx("REBUILD_OLD", "dn1", wall_time=700.0, cause="stop_retry_deadline", deadline_wall=700.0, recovery_deadline_wall=820.0),
+            {"kind": "phase", "phase": "RECOVERY_REQUIRED", "tx_id": "dn1", "request_id": None, "scope": "island", "seq": 9,
+             "wall_time": 790.0, "error": "rebuild of the old engine set failed", "cause": "rebuild_old_failed", "config_epoch": 1, "fork_epoch": 1},
+            tx("RECOVERY_REQUIRED", "dn1", wall_time=790.0, scope="request", seq=10, island_record_seq=9, error="rebuild of the old engine set failed",
+               cause="rebuild_old_failed", config_epoch=1, fork_epoch=1, deadline_wall=700.0, recovery_deadline_wall=820.0)]
+
+
+TID = "yeto-test-injected-tool-wait"
+CID = TID + ":drain:engine:c3"
+TWC = dict(TW, side_effect_log=True, tool_call_id=CID, attempt=1)
+
+
+def se(kind, t, seq, tid=TID, cid=CID, **k): return {"kind": kind, "seq": seq, "trajectory_id": tid, "tool_call_id": cid, "wall_time": t, **k}
+def a4bc_journal(t_req=90.0, t_cancel=100.0): return [{"kind": "request", "tx_id": "dn", "request_id": "dn1", "wall_time": t_req}, DT, dn("CANCELLED", wall_time=t_cancel)]
+SE_OK = [se("tool_side_effect", 95.0, 1, attempt=1), se("tool_complete", 125.0, 2, attempt=1)]
+
+
+class A4BC(unittest.TestCase):
+    """a4bc = a4b + the tool side-effect journal: exactly one tool_side_effect per (trajectory, tool call) inside the cancelled
+    transaction, none repeated after CANCELLED (3.3 X5 (b)); no_stop + CANCELLED alone is INVALID, not PASS."""
+    def j(self, side_effects, journal=None, tape=None, probe=PA4):
+        return J.judge_a4bc(journal if journal is not None else a4bc_journal(), [TWC] if tape is None else tape, set(), side_effects, probe)
+
+    def test_pass_and_each_check(self):
+        r = self.j(SE_OK); self.assertEqual((r["case"], r["verdict"]), ("a4bc", "PASS"), r)
+        self.assertEqual(r["side_effects"]["in_tx_pairs"], {f"{TID}|{CID}": 1}); self.assertEqual(r["side_effects"]["tool_complete_pairs"], {f"{TID}|{CID}": 1})
+        self.assertTrue(all(r["checks"][k] for k in ("one_side_effect_per_call_in_tx", "no_replay_after_cancel", "no_duplicate_pairs", "injection_matches_journal", "seq_monotonic", "no_stop_issued", "terminal_CANCELLED", "routing_restored")))
+        # replay after the cancel: the same pair executed again -> FAIL
+        r = self.j(SE_OK + [se("tool_side_effect", 101.0, 3, attempt=2)]); self.assertEqual(r["verdict"], "FAIL")
+        self.assertFalse(r["checks"]["no_replay_after_cancel"]); self.assertFalse(r["checks"]["no_duplicate_pairs"]); self.assertEqual(r["side_effects"]["replayed_after_cancel"], [f"{TID}|{CID}"])
+        # replay inside the transaction (a second execution before CANCELLED) -> FAIL
+        r = self.j([se("tool_side_effect", 95.0, 1), se("tool_side_effect", 97.0, 2)]); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["one_side_effect_per_call_in_tx"])
+        # new ids after the cancel (new rollouts) are allowed and listed
+        r = self.j(SE_OK + [se("tool_side_effect", 130.0, 3, tid="traj-9", cid="call-9")]); self.assertEqual(r["verdict"], "PASS", r)
+        self.assertEqual(r["side_effects"]["new_pairs_after_cancel"], ["traj-9|call-9"])
+        # missing/empty journal, injection without the switch, no record inside the tx -> INVALID (never PASS on empty evidence)
+        r = self.j(None); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing"))
+        self.assertEqual(self.j([])["verdict"], "INVALID_TEST")
+        r = self.j(SE_OK, tape=[TW]); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "injection_not_reached"))
+        r = self.j([se("tool_side_effect", 50.0, 1)]); self.assertEqual(r["verdict"], "INVALID_TEST")   # executed before the request: clocks disagree / not this drain
+        r = self.j(SE_OK, journal=[DT, dn("CANCELLED", wall_time=100.0)]); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing"))   # no request record
+        # the a4b part still decides: no probe/samples -> INVALID; a stop -> FAIL; RECOVERY_REQUIRED -> recovery_failed
+        self.assertEqual(self.j(SE_OK, probe=None)["verdict"], "INVALID_TEST")
+        r = self.j(SE_OK, journal=a4bc_journal() + [{"kind": "fork_op", "op": "stop", "tx_id": "dn"}]); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["no_stop_issued"])
+        r = self.j(SE_OK, journal=[a4bc_journal()[0], DT, {"kind": "undrain_failed", "tx_id": "dn", "error": "x"}, dn("RECOVERY_REQUIRED")]); self.assertEqual((r["verdict"], r["marker"]), ("FAIL", "recovery_failed"))
+        # injection tool_call_id not in the journal, non-monotonic seq -> FAIL
+        r = self.j(SE_OK, tape=[dict(TWC, tool_call_id="other")]); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["injection_matches_journal"])
+        r = self.j([se("tool_side_effect", 95.0, 2), se("tool_complete", 125.0, 1)]); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["seq_monotonic"])
+
+    def test_replay_chain1_a4b_real_journal_with_synthetic_side_effects(self):
+        """Chain 1 a4b (infra-v2-b1-a4s5-20261001-1-a4b, 8xH100): real journal / tape fragment / router samples. On its own it is
+        INVALID for a4bc (the run had no side-effect journal: no_stop + CANCELLED cannot prove no replay); with the journal
+        switch in the injection record and a synthetic side_effects.jsonl aligned to the real wall clock it decides PASS/FAIL."""
+        jr, tape, rs = jl("a4s5_1_a4b_journal.jsonl"), jl("a4s5_1_a4b_tape_fragment.jsonl"), jl("a4s5_1_a4b_router_samples.jsonl")
+        r = J.judge_a4bc(jr, tape, set(), [], None, rs); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "injection_not_reached"), r["invalid_reasons"])
+        inj = next(e for e in tape if e.get("event") == "test_injection"); members = inj["target_members"]
+        cid = f"{TID}:drain:{','.join(sorted(members))}"
+        tape2 = [dict(e, side_effect_log=True, tool_call_id=cid, attempt=1) if e is inj else e for e in tape]
+        t_inj = inj["ts"]; t_cancel = next(x["wall_time"] for x in jr if x.get("phase") == "CANCELLED"); self.assertLess(t_inj, t_cancel)
+        good = [se("tool_side_effect", t_inj - 0.002, 1, cid=cid, attempt=1, seconds=30.0, target_members=members), se("tool_complete", t_inj + 30.0, 2, cid=cid, attempt=1)]
+        r = J.judge_a4bc(jr, tape2, set(), good, None, rs); self.assertEqual(r["verdict"], "PASS", r)
+        self.assertEqual(r["side_effects"]["in_tx_pairs"], {f"{TID}|{cid}": 1}); self.assertEqual(r["side_effects"]["t_cancel"], t_cancel)
+        r = J.judge_a4bc(jr, tape2, set(), [], None, rs); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing"))
+        replay = good + [se("tool_side_effect", t_cancel + 0.5, 3, cid=cid, attempt=2, target_members=members)]
+        r = J.judge_a4bc(jr, tape2, set(), replay, None, rs); self.assertEqual(r["verdict"], "FAIL"); self.assertEqual(r["side_effects"]["replayed_after_cancel"], [f"{TID}|{cid}"])
+        later = good + [se("tool_side_effect", t_cancel + 20.0, 3, tid="traj-r3-0", cid="tool-7")]
+        r = J.judge_a4bc(jr, tape2, set(), later, None, rs); self.assertEqual(r["verdict"], "PASS"); self.assertEqual(r["side_effects"]["new_pairs_after_cancel"], ["traj-r3-0|tool-7"])
+
+
 class D(unittest.TestCase):
     def test_d123(self):
         j = [tx("SUCCEEDED", "up1"), {"kind": "fork_op", "op": "stop", "status": "incomplete", "tx_id": "dn1"}, tx("SUCCEEDED", "dn1"), tx("REBUILT_OLD", "up2"), tx("REBUILT_OLD", "up3")]
@@ -244,12 +319,43 @@ class D(unittest.TestCase):
         self.assertEqual(J.judge_d2([tx("VERIFYING", "up1", wall_time=100.0)], [], set(), k)["verdict"], "INVALID_TEST")
 
     def test_d4(self):
-        j = [tx("SUCCEEDED", "up1"), {"kind": "fork_op", "op": "stop", "status": "incomplete", "tx_id": "dn1"}, tx("RECOVERY_REQUIRED", "dn1", wall_time=50.0)]
+        # 2026-10-02 ruling: request-level + island-level RECOVERY_REQUIRED, <= 1 REBUILD_OLD, deadline + recovery_timeout bound
+        j = d4_journal()
         t = [{"event": "rl_reconfiguration", "result": "RECOVERY_REQUIRED"}]
-        self.assertEqual(J.judge_d4(j, t, set())["verdict"], "PASS")
-        self.assertEqual(J.judge_d4(j, t + [{"event": "rl_batch_prepared", "ts": 60.0}], set())["verdict"], "FAIL")
+        r = J.judge_d4(j, t, set(), recovery_timeout_s=120.0)
+        self.assertEqual(r["verdict"], "PASS", r)
+        self.assertEqual(J.judge_d4(j, t + [{"event": "rl_batch_prepared", "ts": 800.0}], set(), recovery_timeout_s=120.0)["verdict"], "FAIL")
+        self.assertEqual(J.judge_d4(j, t, set(), ledger=[{"kind": "prepared", "wall_time": 800.0}], recovery_timeout_s=120.0)["verdict"], "FAIL")
         self.assertEqual(J.judge_d4([j[0], tx("SUCCEEDED", "dn1")], t, set())["verdict"], "INVALID_TEST")
-        self.assertEqual(J.judge_d4(j, [], set())["verdict"], "FAIL")
+        self.assertEqual(J.judge_d4(j, [], set(), recovery_timeout_s=120.0)["verdict"], "FAIL")
+        # no request-level terminal (pre-fix controller) -> FAIL on dn1_RECOVERY_REQUIRED only
+        r = J.judge_d4([x for x in j if not (x.get("phase") == "RECOVERY_REQUIRED" and x.get("request_id"))], t, set(), recovery_timeout_s=120.0)
+        self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["dn1_RECOVERY_REQUIRED"]); self.assertFalse(r["checks"]["island_record_consistent"])
+        # a second REBUILD_OLD, a reset deadline, or running past deadline + recovery_timeout + margin all fail
+        extra = dict(j[3]); self.assertEqual(J.judge_d4(j[:4] + [extra] + j[4:], t, set(), recovery_timeout_s=120.0)["checks"]["at_most_one_REBUILD_OLD"], False)
+        reset = [dict(x, deadline_wall=5000.0) if x.get("phase") == "REBUILD_OLD" else x for x in j]
+        self.assertFalse(J.judge_d4(reset, t, set(), recovery_timeout_s=120.0)["checks"]["deadline_not_reset"])
+        late = [dict(x, wall_time=900.0) if x.get("phase") == "RECOVERY_REQUIRED" else x for x in j]
+        self.assertFalse(J.judge_d4(late, t, set(), recovery_timeout_s=120.0)["checks"]["within_time_limit"])
+        # recovery_timeout from REBUILD_OLD.recovery_deadline_wall when not given
+        self.assertEqual(J.judge_d4(j, t, set())["time"]["recovery_timeout_s"], 120.0)
+
+    def test_d4_replay_chain_6r2(self):
+        """Real journal of chain 6r2 d4 (pre-fix controller): island-level RECOVERY_REQUIRED only -> FAIL on the request-level
+        terminal; everything else (one REBUILD_OLD, 721 s <= 600 + 120 + 60, no prepared after) holds. With the request-level
+        record the fixed controller writes appended (synthetic), the same run PASSes."""
+        j, t, l = jl("a4s6_6r2_d4_journal.jsonl"), jl("a4s6_6r2_d4_tape.jsonl"), jl("a4s6_6r2_d4_ledger.jsonl")
+        r = J.judge_d4(j, t, set(), l, recovery_timeout_s=120.0)
+        self.assertEqual((r["verdict"], r["marker"]), ("FAIL", "recovery_failed"))
+        self.assertEqual({k for k, v in r["checks"].items() if v is not True}, {"dn1_RECOVERY_REQUIRED", "island_record_consistent"})
+        self.assertTrue(700 < r["time"]["elapsed_s"] < 780)
+        isl = next(x for x in j if x.get("phase") == "RECOVERY_REQUIRED")
+        fixed = j + [dict(isl, seq=isl["seq"] + 1, request_id="dn1", scope="request", cause="rebuild_old_failed", island_record_seq=isl["seq"])]
+        r = J.judge_d4(fixed, t, set(), l, recovery_timeout_s=120.0)
+        self.assertEqual(r["verdict"], "PASS", r)
+        # the ledger of that run: anything prepared after the recovery time would fail it
+        r = J.judge_d4(fixed, t, set(), l + [{"kind": "prepared", "wall_time": isl["wall_time"] + 5}], recovery_timeout_s=120.0)
+        self.assertEqual(r["verdict"], "FAIL")
 
 
 # ----------------------------------------------------------------------------------------------- E1-A (c)

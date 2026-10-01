@@ -4,7 +4,8 @@ in-container samplers/probes (never from the terminal state alone).
 usage: judge_inject.py <case> <journal.jsonl|elastic-state dir> <tape.jsonl> [--router-samples F] [--gpu-samples F]
                        [--probe-after F] [--probe-stale F] [--probe-oldepoch F] [--dkill-log F] [--expect-members 1,1,3,3,1,1]
                        [--cells c0,c1,c2] [--out judgment.json] [--marker-dir DIR]
-cases: e1a_c | e1b | wd | a4b | a4bu | d123 | d4 | r5 | r6 | r7 | r5c   (r*: E1-D ⑤⑥⑦ with the 3.7 restart recovery, recovery-design.md §10.4)
+cases: e1a_c | e1b | wd | a4b | a4bu | a4bc | d123 | d4 | r5 | r6 | r7 | r5c   (r*: E1-D ⑤⑥⑦ with the 3.7 restart recovery, recovery-design.md §10.4)
+  a4bc = a4b + --side-effects F (3.3 X5 (b): the tool side-effect journal, no replay after the cancel)
 verdicts (exit code): PASS 0 | FAIL 1 | INVALID_TEST 4.
   INVALID_TEST = the test could not observe what it claims to judge: the injection target does not exist, the injection
   was not applied/reached, a required sampler/probe output is missing, the sampled window is too short, or the engines
@@ -20,8 +21,11 @@ Event names/fields (infra-e1 interface; tape: {"event":..}, journal: {"kind":..}
   test_hold       stage=start|end (two records; the end record has start_ts, end_ts)
   journal watchdog: wall_time, target_cells, classification in {INJECTION_NOT_REACHED, FIRED_AFTER_BLOCK_RELEASED (both INVALID), FIRED_ON_BLOCKED_UPDATE}
   journal watchdog_action: killed[{cell,worker,generation}], errors[{cell,kind,error}]
-  journal phase REBUILD_OLD / REBUILT_OLD: cause (payload_mismatch, lora_unverifiable, ...), inconsistent_engines
+  journal phase REBUILD_OLD / REBUILT_OLD: cause (payload_mismatch, lora_unverifiable, stop_retry_deadline, ...), inconsistent_engines,
+                deadline_wall, recovery_deadline_wall (= deadline_wall + T_recovery; 2026-10-02 ruling)
+  journal phase RECOVERY_REQUIRED: scope=island (request_id=None) AND scope=request (request_id, cause, island_record_seq)
   journal drain_timeout: active_requests tool_wait blockers;  undrain_failed: error
+  side_effects.jsonl (a4bc): kind=tool_side_effect|tool_complete seq trajectory_id tool_call_id wall_time attempt
 """
 import json, os, sys
 from pathlib import Path
@@ -378,6 +382,59 @@ def judge_a4b(journal, tape, known, variant="cancel", probe_after=None, router_s
     return res
 
 
+def judge_a4bc(journal, tape, known, side_effects, probe_after=None, router_samples=None):
+    """3.3 X5 (b): a4b + the tool side-effect journal (tool_wait.ToolSideEffectLog, written by the injected tool
+    *before* its wait starts). PASS needs the a4b verdict AND: the injection ran with the journal switched on; inside the
+    cancelled transaction (request .. CANCELLED) every (trajectory_id, tool_call_id) has exactly one tool_side_effect
+    record (>= 1 pair); after CANCELLED no tool_side_effect repeats a pair of that transaction (new pairs = new rollouts
+    are allowed and listed); no pair is duplicated anywhere in the journal. tool_complete is informational (the island may
+    end before the 30 s wait does). no_stop + CANCELLED alone never prove "no replay" (SESSION6 §10)."""
+    res = judge_a4b(journal, tape, known, "cancel", probe_after, router_samples)
+    res["case"] = "a4bc"
+    if res["verdict"] == "INVALID_TEST":
+        return res
+    inj = [e for e in named(tape, "test_injection") + named(journal, "test_injection")
+           if ikind(e) == "tool_wait" and e.get("applied") is True]
+    if not any(e.get("side_effect_log") is True for e in inj):
+        return _invalid(res, "the tool-wait injection ran without the side-effect journal (--rl-test-tool-side-effect-log not in effect)")
+    recs = [r for r in (side_effects or []) if isinstance(r, dict)]
+    if not recs:
+        return _invalid(res, "side_effects.jsonl missing or empty: a replay of the tool call is not observable", "evidence_missing")
+    tx = named(journal, "drain_timeout")[-1].get("tx_id")
+    ph = [r for r in phases(journal) if tx is None or r.get("tx_id") == tx]
+    t_cancel = next((r.get("wall_time") for r in ph if r.get("phase") == "CANCELLED"), None)
+    t_req = next((r.get("wall_time") for r in named(journal, "request") if r.get("tx_id") == tx), None)
+    if t_cancel is None or t_req is None:
+        return _invalid(res, "request/CANCELLED wall_time of the cancelled transaction missing from the journal", "evidence_missing")
+    se = [r for r in recs if r.get("kind") == "tool_side_effect"]
+    def pair(r): return (str(r.get("trajectory_id")), str(r.get("tool_call_id")))
+    def count(rs):
+        out = {}
+        for r in rs: out[pair(r)] = out.get(pair(r), 0) + 1
+        return out
+    in_tx = count(r for r in se if t_req <= float(r.get("wall_time", -1)) < t_cancel)
+    after = [r for r in se if float(r.get("wall_time", -1)) >= t_cancel]
+    replayed = sorted(p for p in count(after) if p in in_tx)
+    new_after = sorted(p for p in count(after) if p not in in_tx)
+    dup_all = sorted(p for p, n in count(se).items() if n > 1)
+    inj_ids = sorted({e.get("tool_call_id") for e in inj if e.get("tool_call_id")})
+    completes = count(r for r in recs if r.get("kind") == "tool_complete")
+    res["side_effects"] = {"records": len(recs), "tool_side_effect": len(se), "in_tx_pairs": {f"{a}|{b}": n for (a, b), n in in_tx.items()},
+                          "replayed_after_cancel": [f"{a}|{b}" for a, b in replayed], "new_pairs_after_cancel": [f"{a}|{b}" for a, b in new_after],
+                          "duplicate_pairs": [f"{a}|{b}" for a, b in dup_all], "injection_tool_call_ids": inj_ids,
+                          "tool_complete_pairs": {f"{a}|{b}": n for (a, b), n in completes.items()},
+                          "t_request": t_req, "t_cancel": t_cancel, "seq_monotonic": [r.get("seq") for r in recs] == sorted(r.get("seq") for r in recs)}
+    if not in_tx:
+        return _invalid(res, "no tool_side_effect record inside the cancelled transaction: the injected tool never executed (or clocks disagree)")
+    res["checks"]["one_side_effect_per_call_in_tx"] = all(n == 1 for n in in_tx.values())
+    res["checks"]["no_replay_after_cancel"] = not replayed
+    res["checks"]["no_duplicate_pairs"] = not dup_all
+    res["checks"]["injection_matches_journal"] = bool(inj_ids) and set(inj_ids) <= {b for _a, b in in_tx}
+    res["checks"]["seq_monotonic"] = res["side_effects"]["seq_monotonic"]
+    res["verdict"] = "PASS" if all(v is True for v in res["checks"].values()) else "FAIL"
+    return res
+
+
 # ----------------------------------------------------------------------------------------------- E1-D
 def _tx_terminal(journal, request_id):
     return [r["phase"] for r in phases(journal) if r.get("request_id") == request_id and r.get("phase") in TERMINAL]
@@ -427,19 +484,61 @@ def judge_d2(journal, tape, known, dkill_log=None):
     return _finish(res, term)
 
 
-def judge_d4(journal, tape, known):
-    """E1-D ④: stop keeps failing past T_recovery -> RECOVERY_REQUIRED, driver ends, no data consumed after."""
+def _d4_times(e):
+    return e.get("time_unix") or e.get("ts") or e.get("wall_time") or 0
+
+
+def judge_d4(journal, tape, known, ledger=None, recovery_timeout_s=None, margin_s=60.0):
+    """E1-D ④: stop keeps failing past the deadline -> RECOVERY_REQUIRED, driver ends, no data consumed after.
+
+    Revision (2026-10-02 user ruling, chain 6r2 d4 FAIL): the original checks were
+        up1_SUCCEEDED, dn1_RECOVERY_REQUIRED (request-level terminal), driver_reported_recovery, no_prepared_after_recovery
+    and 6r2 failed only on dn1_RECOVERY_REQUIRED: the journal had the island-level RECOVERY_REQUIRED (request_id=None)
+    but no request-level terminal for dn1, and the path went through REBUILD_OLD. Ruling (i): the controller now writes
+    the request-level terminal too (scope=request, cause, island_record_seq); one bounded REBUILD_OLD after the deadline
+    is allowed; the overall limit is deadline_s + recovery_timeout (the deadline is never reset). Checks now:
+      up1_SUCCEEDED; dn1_RECOVERY_REQUIRED (request-level, exactly one); island_record_consistent (island-level record on
+      the same tx with the same error/epochs); at_most_one_REBUILD_OLD; deadline_not_reset (REBUILD_OLD.deadline_wall ==
+      request.deadline_wall when journaled); within_time_limit (request -> request-level RECOVERY_REQUIRED <= deadline_s +
+      recovery_timeout + margin; recovery_timeout from --recovery-timeout-s, else REBUILD_OLD.recovery_deadline_wall, else
+      the code default 900); driver_reported_recovery; no_prepared_after_recovery (tape rl_batch_prepared/ledger_prepared
+      and ledger prepared/optimizer_applied after the RECOVERY_REQUIRED time)."""
     res = {"case": "d4", "checks": {}, "invalid_reasons": []}
     inc = [r for r in journal if r.get("kind") in ("incomplete", "stop_incomplete") or (r.get("kind") == "fork_op" and r.get("status") == "incomplete")]
     if not inc:
         return _invalid(res, "no incomplete stop recorded: the stop-failure injection was not reached")
     res["checks"]["up1_SUCCEEDED"] = _tx_terminal(journal, "up1") == ["SUCCEEDED"]
+    req = next((r for r in journal if r.get("kind") == "request" and r.get("request_id") == "dn1"), None)
+    tx_id = req.get("tx_id") if req else "dn1"
     res["checks"]["dn1_RECOVERY_REQUIRED"] = _tx_terminal(journal, "dn1") == ["RECOVERY_REQUIRED"]
+    rq = [r for r in phases(journal) if r.get("request_id") == "dn1" and r.get("phase") == "RECOVERY_REQUIRED"]
+    isl = [r for r in phases(journal) if r.get("tx_id") == tx_id and r.get("request_id") is None and r.get("phase") == "RECOVERY_REQUIRED"]
+    res["checks"]["island_record_consistent"] = bool(isl) and bool(rq) and all(
+        i.get("error") == rq[0].get("error") and i.get("config_epoch") == rq[0].get("config_epoch")
+        and i.get("fork_epoch") == rq[0].get("fork_epoch") for i in isl[-1:])
+    rebuilds = [r for r in phases(journal) if r.get("tx_id") == tx_id and r.get("phase") == "REBUILD_OLD"]
+    res["checks"]["at_most_one_REBUILD_OLD"] = len(rebuilds) <= 1
+    res["checks"]["deadline_not_reset"] = all(req is None or r.get("deadline_wall") in (None, req.get("deadline_wall")) for r in rebuilds)
+    deadline_s = float((req or {}).get("body", {}).get("deadline_s") or 0.0)
+    if recovery_timeout_s is None:
+        rb = rebuilds[0] if rebuilds else {}
+        if rb.get("recovery_deadline_wall") is not None and rb.get("deadline_wall") is not None:
+            recovery_timeout_s = float(rb["recovery_deadline_wall"]) - float(rb["deadline_wall"])
+        else:
+            recovery_timeout_s = 900.0
+    t_rec_rq = rq[0].get("wall_time") if rq else None
+    t_rec_isl = isl[0].get("wall_time") if isl else None
+    t_rec = min(t for t in (t_rec_rq, t_rec_isl) if t is not None) if (rq or isl) else None
+    t_end = t_rec_rq if t_rec_rq is not None else t_rec_isl
+    res["time"] = {"deadline_s": deadline_s, "recovery_timeout_s": recovery_timeout_s, "margin_s": margin_s,
+                   "request_wall": (req or {}).get("wall_time"), "recovery_required_wall": t_end,
+                   "elapsed_s": None if not (req and t_end) else t_end - req["wall_time"]}
+    res["checks"]["within_time_limit"] = bool(req and t_end) and (t_end - req["wall_time"]) <= deadline_s + recovery_timeout_s + margin_s
     rec = [e for e in named(tape, "rl_reconfiguration") if e.get("result") == "RECOVERY_REQUIRED"]
     res["checks"]["driver_reported_recovery"] = bool(rec)
-    t_rec = next((r.get("wall_time") for r in phases(journal) if r.get("phase") == "RECOVERY_REQUIRED"), None)
-    prepared_after = [e for e in tape if e.get("event") in ("rl_batch_prepared", "ledger_prepared") and t_rec is not None and (e.get("ts") or e.get("wall_time") or 0) > t_rec]
-    res["checks"]["no_prepared_after_recovery"] = not prepared_after
+    prepared_after = [e for e in tape if e.get("event") in ("rl_batch_prepared", "ledger_prepared") and t_rec is not None and _d4_times(e) > t_rec]
+    prepared_after += [r for r in (ledger or []) if r.get("kind") in ("prepared", "optimizer_applied") and t_rec is not None and _d4_times(r) > t_rec]
+    res["checks"]["no_prepared_after_recovery"] = t_rec is not None and not prepared_after
     res["verdict"] = "PASS" if all(v is True for v in res["checks"].values()) else "FAIL"
     if res["verdict"] == "FAIL": res["marker"] = "recovery_failed"
     return res
@@ -651,7 +750,9 @@ def main(argv):
     ap.add_argument("--router-samples"); ap.add_argument("--gpu-samples"); ap.add_argument("--probe-after"); ap.add_argument("--probe-stale")
     ap.add_argument("--probe-oldepoch"); ap.add_argument("--dkill-log"); ap.add_argument("--expect-members"); ap.add_argument("--cells", default="")
     ap.add_argument("--out"); ap.add_argument("--marker-dir")
-    ap.add_argument("--launch-log"); ap.add_argument("--ledger")   # r5/r6/r7/r5c: restart-loop line, ledger journal
+    ap.add_argument("--launch-log"); ap.add_argument("--ledger")   # r5/r6/r7/r5c/d4: restart-loop line, ledger journal
+    ap.add_argument("--recovery-timeout-s", type=float); ap.add_argument("--margin-s", type=float, default=60.0)   # d4 (2026-10-02 ruling)
+    ap.add_argument("--side-effects")   # a4bc: elastic-state/side_effects.jsonl (tool_wait.ToolSideEffectLog)
     a = ap.parse_args(argv)
     journal, tape = load(a.journal), load(a.tape)
     known = set(filter(None, a.cells.split(",")))
@@ -665,9 +766,10 @@ def main(argv):
     elif a.case == "wd": res = judge_wd(journal, tape, known, jl(a.gpu_samples), probes["after"])
     elif a.case == "a4b": res = judge_a4b(journal, tape, known, "cancel", probes["after"], samples)
     elif a.case == "a4bu": res = judge_a4b(journal, tape, known, "recovery")
+    elif a.case == "a4bc": res = judge_a4bc(journal, tape, known, jl(a.side_effects), probes["after"], samples)
     elif a.case == "d123": res = judge_d123(journal, tape, known, jl(a.dkill_log))
     elif a.case == "d2": res = judge_d2(journal, tape, known, jl(a.dkill_log))
-    elif a.case == "d4": res = judge_d4(journal, tape, known)
+    elif a.case == "d4": res = judge_d4(journal, tape, known, load(a.ledger) if a.ledger else None, a.recovery_timeout_s, a.margin_s)
     elif a.case == "e1a_c": res = judge_e1a_c(journal, tape, [int(x) for x in a.expect_members.split(",")])
     elif a.case in ("r5", "r6", "r7", "r5c"):
         ll = open(a.launch_log).read().splitlines() if a.launch_log and os.path.exists(a.launch_log) else None
