@@ -40,6 +40,8 @@ EXPECT_GPU_NAME=H100 EXPECT_GPU_N=8 setsid nohup $B/selfcheck.sh $R $P $ATT > /d
 setsid nohup $B/diag_pull.sh $R > /dev/null 2>&1 &
 for a in "${ARMS[@]}"; do IFS='|' read -ra parts <<< "$a"; setsid nohup $B/n2arm.sh $R "${parts[@]}" > /dev/null 2>&1 & done   # "script|arg1|arg2" (args must not contain |)
 [ -n "$HOOK" ] && setsid nohup $B/probe_after_term.sh $R $P $HOOK > $R.hook.out 2>&1 &
+# in-container terminal-state probe (seconds after the terminal phase; the host-side hook above is only the fallback):
+if [ -n "$HOOK" ]; then set -- $HOOK; setsid nohup bash -c "until [ -s $R/pulled/gpu.txt ]; do [ -f $R/rc.txt ] && exit 1; sleep 10; done; CL=\$(cat $R/cluster.txt); for f in fork_probe.py probe_remote.sh; do b=\$(base64 -w0 $B/\$f); HOME=/home/michael timeout 60 ssh -o StrictHostKeyChecking=no \$CL \"mkdir -p ~/yeto-rl && echo \$b | base64 -d > ~/yeto-rl/\$f\"; done; $B/n2arm.sh $R term_probe.py $1 ${3:-}" > $R.termprobe.out 2>&1 & fi
 # final guard: when the launcher ended (or STOP), pull + cleanup (idempotent), then judge from the pulled journal/tape
 setsid nohup bash -c "until [ -f $R/rc.txt ] || [ -f $R/startup_failed ]; do sleep 15; done; sleep 20; ${NSTOP:-$B/nstop.sh} $P > $R/final_stop.txt 2>&1; echo \$? > $R/cleanup_rc.txt; [ -n '$JUDGE' ] && $B/judge_after.sh $R $JUDGE > $R/judge.out 2>&1; touch $R/item_done" > /dev/null 2>&1 &
 echo started $P $C

@@ -7,6 +7,8 @@ b=$R/pulled/elastic-state-final.b64; [ -s $b ] || b=$R/pulled/elastic-state.tgz.
 base64 -d $b 2>/dev/null | tar xz -C $R/.j 2>/dev/null
 T=$R/pulled/rl-island-0.final.jsonl; [ -s $T ] || T=$R/pulled/rl-island-0.jsonl
 G=$R/pulled/gpu_samples.jsonl; [ -s $G ] || G=$R/gpu_samples.after.jsonl
+# probes: the in-container term_probe.py output (pulled/) first, else the host-side hook's files
+for p in after stale oldepoch; do f=$R/pulled/probe_$p.txt; grep -qs '"probe_attested": true' $f || f=$R/probe_$p.txt; eval P_$p=$f; done
 python3 $B/judge_inject.py $C $R/.j/elastic-state/reconfig/journal.jsonl $T --router-samples $R/pulled/router_samples.jsonl \
-  --gpu-samples $G --probe-after $R/probe_after.txt --probe-stale $R/probe_stale.txt --probe-oldepoch $R/probe_oldepoch.txt \
+  --gpu-samples $G --probe-after $P_after --probe-stale $P_stale --probe-oldepoch $P_oldepoch \
   --dkill-log $R/pulled/dkill.log --out $R/judgment.json --marker-dir $R "$@"

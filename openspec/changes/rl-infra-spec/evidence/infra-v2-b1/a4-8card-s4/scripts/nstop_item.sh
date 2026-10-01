@@ -8,7 +8,7 @@ mkdir -p $R/pulled/diag
 if [ -n "$CL" ]; then
   S="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 $CL"
   timeout 120 $S 'cd ~/yeto-rl && tar czf - --exclude=cuts elastic-state | base64 -w0' > $R/pulled/.esf 2>/dev/null; [ -s $R/pulled/.esf ] && mv $R/pulled/.esf $R/pulled/elastic-state-final.b64
-  for f in yeto-output/rl-island-0.jsonl:rl-island-0.final.jsonl yeto-rl/router_samples.jsonl:router_samples.jsonl yeto-rl/inwatch.log:inwatch.final.log yeto-rl/dkill.log:dkill.log yeto-rl/dctl.log:dctl.log yeto-rl/gpu_samples.jsonl:gpu_samples.jsonl yeto-rl/sampler.out:sampler.out; do
+  for f in yeto-output/rl-island-0.jsonl:rl-island-0.final.jsonl yeto-rl/router_samples.jsonl:router_samples.jsonl yeto-rl/inwatch.log:inwatch.final.log yeto-rl/dkill.log:dkill.log yeto-rl/dctl.log:dctl.log yeto-rl/gpu_samples.jsonl:gpu_samples.jsonl yeto-rl/sampler.out:sampler.out yeto-rl/probe_after.txt:probe_after.txt yeto-rl/probe_stale.txt:probe_stale.txt yeto-rl/probe_oldepoch.txt:probe_oldepoch.txt yeto-rl/term_probe.log:term_probe.log; do
     timeout 120 $S "cat ~/${f%%:*} 2>/dev/null" > $R/pulled/.t 2>/dev/null; [ -s $R/pulled/.t ] && mv $R/pulled/.t $R/pulled/${f##*:}
   done
   timeout 60 $S 'date -u +%FT%TZ; nvidia-smi; ps -eo pid,ppid,etime,stat,args --no-headers | cut -c1-200' > $R/pulled/diag/final_snapshot.txt 2>/dev/null
