@@ -21,10 +21,10 @@ FROM docker.io/radixark/miles@sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d
 ARG MILES_REPOSITORY=https://github.com/michaellchung/miles
 ARG MILES_COMMIT=e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841
 ARG SGLANG_REPOSITORY=https://github.com/michaellchung/sglang
-ARG SGLANG_COMMIT=9f29303bef1eea38eb613e5f454a52db1326422d
-# setuptools-scm version of SGLANG_COMMIT (describe v0.5.20-67-g9f29303);
+ARG SGLANG_COMMIT=a1240c530d406b5d0f252511f8e0a9a93b6a079d
+# setuptools-scm version of SGLANG_COMMIT (describe v0.5.20-68-ga1240c5);
 # pinned because the one-commit clone has no tags to describe.
-ARG SGLANG_VERSION=0.5.21.dev67+g9f29303
+ARG SGLANG_VERSION=0.5.21.dev68+ga1240c5
 
 # Miles fork -> /root/miles (same path the base installed editable).
 RUN rm -rf /root/miles \

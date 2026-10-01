@@ -1,0 +1,11 @@
+layer /tmp/img-build-lora/layer.tar: 13894 entries
+layer.tar sha256=f29ab113979b6c68a101fb19ec168cf0166a5c4fc550645944bc27a70b8f936a
+2026/10/01 07:08:32 ghcr.io/michaellchung/yeto-miles-ports:e3a11ab-a1240c5: digest: sha256:8fc4153233ecb97757ad4468002d093e2f178db54f4f990521731ece45aefe44 size: 18043
+2026/10/01 07:08:41 ghcr.io/michaellchung/yeto-miles-ports:e3a11ab-a1240c5: digest: sha256:12fcd9e583d63287d6814dfc87158364a0e370a22795462d19962a2857e53069 size: 18043
+pushed ghcr.io/michaellchung/yeto-miles-ports:e3a11ab-a1240c5@sha256:12fcd9e583d63287d6814dfc87158364a0e370a22795462d19962a2857e53069
+out=/tmp/img-build-lora
+
+real	1m1.634s
+user	0m43.446s
+sys	0m34.938s
+blob lines: existing=209 pushed=3
