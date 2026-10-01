@@ -2,9 +2,9 @@
 # usage: a4go4.sh <case> <prefix> <hard_s> <wd_s>        4x L40S on Nebius eu-north1, T1R1S2 <-> T1R3S0 (trainer G0, rollout c0 on G1, standby G2/G3 = c1/c2)
 # cases: smoke | base | e1a | e1b | wd | a4b | d123 | d4 | d5 | d6 | d7      (DRY=1: print the launch args + triggers, start nothing)
 # Starts n2run (launch, --no-island-relaunch --modal-retries 0) + n2inwatch (triggers + router sampler) + selfcheck (+GPU assert 4xL40S, markers) + case helpers + final guard (nstop -> cleanup_run.sh, judge).
-# Required env for some cases:  UP_DEADLINE_S (wd: measured, see gpu-plan 9.22 step 2) | HOLD_FLAG (e1b: the launch flag exporting YETO_RL_TEST_HOLD_BEFORE_CHECK_S) | TOOLWAIT_FLAG (a4b: flag exporting YETO_RL_TEST_INJECT_TOOL_WAIT_S)
+# Required env for some cases:  UP_DEADLINE_S (wd: measured, see gpu-plan 9.22 step 2) | (e1b/a4b pass --rl-test-hold-before-check-s ${HOLD_S:-10} / --rl-test-inject-tool-wait-s 30 directly)
 # Request time: a request submitted at "train" of rollout k executes before generate k+1 (= before round k+2).
-C=$1; P=$2; HARD=$3; WD=$4; SHA=${SHA:-f84ed4b}; B=/home/michael/work/gpu-b1-runs; R=$B/$P
+C=$1; P=$2; HARD=$3; WD=$4; SHA=${SHA:-b19b781}; B=/home/michael/work/gpu-b1-runs; R=$B/$P
 UP=${UP_DEADLINE_S:-600}; EX=""; STEPS=4; ATTN=4; JUDGE=""; ARMS=()
 req() { printf '["%s",%s,"%s",{"target":"%s","expected_config_epoch":%s,"deadline_s":%s}]' "$1" "$2" "$3" "$4" "$5" "$6"; }   # phase rid id target epoch deadline
 UPB() { req train $1 $2 T1R3S0 0 ${3:-$UP}; }; DNB() { req train $1 $2 T1R1S2 1 ${3:-600}; }
@@ -12,12 +12,10 @@ case $C in
   smoke) STEPS=3; ATTN=3; TRIG="[$(UPB 0 up1 900),$(DNB 1 dn1 900)]";;
   base)  STEPS=6; ATTN=6; TRIG="[]";;
   e1a)   STEPS=6; ATTN=6; TRIG="[$(UPB 1 up1 600),$(UPB 2 up1 600),$(DNB 3 dn1 600)]"; JUDGE="e1a_c --expect-members 1,1,3,3,1,1";;
-  e1b)   [ -n "${HOLD_FLAG:-}" ] || { echo "e1b needs HOLD_FLAG (launch flag for YETO_RL_TEST_HOLD_BEFORE_CHECK_S; not exported by the launcher at f84ed4b)"; exit 5; }
-         EX="--rl-test-inject-lora-perturb 0.01 $HOLD_FLAG"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="e1b";;
+  e1b)   EX="--rl-test-inject-lora-perturb 0.01 --rl-test-hold-before-check-s ${HOLD_S:-10}"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="e1b";;
   wd)    [ -n "${UP_DEADLINE_S:-}" ] || { echo "wd needs UP_DEADLINE_S (>=1.5x measured start_cells + margin, written in gpu-plan 9.22 before the run)"; exit 5; }
          EX="--rl-test-inject-update-weights-block-s 600"; TRIG="[$(UPB 1 up1 $UP)]"; JUDGE="wd";;
-  a4b)   [ -n "${TOOLWAIT_FLAG:-}" ] || { echo "a4b needs TOOLWAIT_FLAG (launch flag for YETO_RL_TEST_INJECT_TOOL_WAIT_S; not exported by the launcher at f84ed4b)"; exit 5; }
-         EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 $TOOLWAIT_FLAG"; ATTN=a4b
+  a4b)   EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30"; ATTN=a4b
          TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T1R1S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4b";;
   d123)  STEPS=5; ATTN=e1d5; EX="--rl-test-inject-stop-failures 1"
          # up1 ep0->1, dn1 ep1->2, up2 at ep2 (killed -> REBUILT_OLD, stays 2), up3 at ep2
