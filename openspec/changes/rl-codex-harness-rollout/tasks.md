@@ -10,13 +10,13 @@
 
 ## 2. agent 包与 preflight 入库
 
-- [ ] 2.1 [Y] 定位 legacy `yeto_miles_secrlenv` 与 `codex_openenv_*_agent_function` 源码（agentenv/miles examples、镜像内 site-packages）；找到就搬到 `yeto/rl/harness/codex/`，找不到就按 `tests/test_secrlenv_codex_harness.py` 重写，并在 progress 中标“重写”。验收：原测试文件的全部用例迁到新包后在 CPU 上通过。
+- [x] 2.1 [Y] 定位 legacy `yeto_miles_secrlenv` 与 `codex_openenv_*_agent_function` 源码（agentenv/miles examples、镜像内 site-packages）；找到就搬到 `yeto/rl/harness/codex/`，找不到就按 `tests/test_secrlenv_codex_harness.py` 重写，并在 progress 中标“重写”。验收：原测试文件的全部用例迁到新包后在 CPU 上通过。 **完成记录（已实现 / CPU 通过：legacy 包从 5bfc011 搬入 `yeto/rl/harness/codex/`（出处与 sha256 见 `pins.py`），`codex_openenv_*` 三模块重写；原 34 用例改 import 后 30 通过 + 4 skip（需 Codex 0.145.0 二进制）；证据 CODEX-PROGRESS §阶段 2）**
 - [ ] 2.2 [Y] 把 `_preflight_codex_harness`、`_verify_live_codex_app_server_schema`、`tbench_direct_preflight.validate_hmac_key_source` 抽到 `yeto/rl/harness/codex/preflight.py`，legacy 同名函数改为转调。验收：legacy 与新入口对同一组篡改输入（二进制 sha、schema、工具面、密钥权限）给出相同失败；CPU 单测。
 - [ ] 2.3 [IR-1] ports `entry.py` 在模型分配前调用 2.2 的 preflight。验收：CPU 单测，preflight 失败时不触发 placement / 分配调用。
 
 ## 3. tool-wait 与在途计数
 
-- [ ] 3.1 [Y] agent 函数内，把每次“模型返回→下一次请求”的区间包进 `async_tool_wait_scope(board_actor(learner_id), trajectory_id)`，模式同 `tool_wait_workload.py`。验收：CPU 测试用 fake bridge 驱动 3 轮，board 的 enter/exit 次数为 3，结束后计数归零；异常路径同样归零。
+- [x] 3.1 [Y] agent 函数内，把每次“模型返回→下一次请求”的区间包进 `async_tool_wait_scope(board_actor(learner_id), trajectory_id)`，模式同 `tool_wait_workload.py`。验收：CPU 测试用 fake bridge 驱动 3 轮，board 的 enter/exit 次数为 3，结束后计数归零；异常路径同样归零。 **完成记录（已实现 / CPU 通过：每次工具执行一个 tool-wait 区间（进程内 `_ToolWaitEnvironment`；子进程经 worker 事件转发到 board），3 次工具→3 对 enter/exit，取消路径归零；`tests/test_harness_codex_openenv.py`）**
 - [ ] 3.2 [IR-2] `drain_blockers` 与 `MilesRolloutPool` 的 drain probe 加入 `harness_in_flight`、`env_live`，未知值 fail closed；1.7 load sample 带上这两个字段。验收：CPU 单测覆盖“active=0 但 tool_wait>0 / env_live>0 时未排空”。
 - [ ] 3.3 [阻塞: rl-infra-spec 1.7 勾选、3.3b fork-M3 合入] X5 drain 场景下 agentic 轨迹的 GPU 验收：在 3.3 X5 实验里加一条 agentic workload，验证 drain 期间旧路由保留到轨迹结束。解除条件：infra 3.3 进入 GPU 验收阶段；本任务并入其实验，不单独开卡。
 
@@ -24,7 +24,7 @@
 
 - [ ] 4.1 [Y] 从 bridge 抽出 `yeto/rl/harness/gateway/`：Responses（SSE）、Chat、Messages 三入口的请求/响应转换，统一调用 Session Server 的 chat 路由；采样签名字段不可覆盖；不支持的形态显式拒绝。验收：迁入的 legacy 用例（reasoning 往返、whitespace、length 边界、畸形帧、响应上限）CPU 通过，新增 Messages 与 Chat 的往返用例。
 - [ ] 4.2 [Y] 前缀哈希链与多 chain：延续、分叉回滚、断链另起三种路径，`chain_break_reason` 枚举，禁止修补后沿用旧 chain。验收：CPU 单测覆盖 spec 中“正常多轮 / 重试分叉 / 历史改写”三个场景，并做属性测试（随机追加序列下 chain 数与期望一致）。
-- [ ] 4.3 [Y] mask/logprob 对齐断言与每次生成的 `policy_version` 记录；age 0 下版本漂移使轨迹作废。验收：CPU 单测覆盖 logprob 缺失、长度不等、mask=1 位置非生成、版本漂移四种情况，全部作废且不记 0 奖励。
+- [x] 4.3 [Y] mask/logprob 对齐断言与每次生成的 `policy_version` 记录；age 0 下版本漂移使轨迹作废。验收：CPU 单测覆盖 logprob 缺失、长度不等、mask=1 位置非生成、版本漂移四种情况，全部作废且不记 0 奖励。 **完成记录（已实现 / CPU 通过：`alignment.py` 断言 + `codex_openenv_generate.py` 的 policy version 校验；logprob 缺失/长度不等/mask=1 非生成/版本漂移四种情况作废（ABORTED，无 0 奖励））**
 - [ ] 4.4 [IR-3] driver 在 age 0 配置下把目标 `policy_version` 传给 rollout。验收：CPU 单测。
 - [ ] 4.5 [IR-4] 1.7 指标 schema 登记 `tito_session_mismatch`、`tito_chain_breaks{reason}`、`policy_age_violation`、`harness_in_flight`、`env_live`，带 profile/epoch 标签。验收：CPU 单测，关闭观测时兼容旧路径。
 
@@ -35,8 +35,8 @@
 
 ## 6. 奖励契约与信任分层
 
-- [ ] 6.1 [Y] 奖励函数、父进程 `verified_outcome`、`trajectory_evidence` 三个验签点在 ports 路径上都生效。验收：CPU 测试，篡改 reward / 增删字段 / 错误密钥三种情况在三处都被拒收。
-- [ ] 6.2 [Y] 失败分类：基础设施错误不签名，标 aborted，不进训练；策略边界与答错签名，奖励 0。验收：CPU 单测，沿用 legacy 的 precreate 503 / 基础设施重试超时用例。
+- [x] 6.1 [Y] 奖励函数、父进程 `verified_outcome`、`trajectory_evidence` 三个验签点在 ports 路径上都生效。验收：CPU 测试，篡改 reward / 增删字段 / 错误密钥三种情况在三处都被拒收。 **完成记录（已实现 / CPU 通过：`tbench_reward.reward_func`、父进程 `verified_outcome`、`trajectory_evidence._verified_outcome` 三处对篡改 reward/增字段/错密钥拒收）**
+- [x] 6.2 [Y] 失败分类：基础设施错误不签名，标 aborted，不进训练；策略边界与答错签名，奖励 0。验收：CPU 单测，沿用 legacy 的 precreate 503 / 基础设施重试超时用例。 **完成记录（已实现 / CPU 通过：基础设施错误未签名+ABORTED；超时/答错签名 reward 0；legacy precreate 503 / 重试超时用例随搬运套件通过）**
 - [ ] 6.3 [Y] 在 design D7 基础上补一张可信层/不可信层边界清单（密钥位置、verifier 资产注入时机、进程与网络边界），写进 `yeto/rl/harness/README` 段落或 docs/MILES_RL.md 对应节。验收：文档评审；CPU 测试断言 agent 子进程环境中没有密钥变量。
 
 ## 7. 长轨迹与分段预留

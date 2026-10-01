@@ -169,16 +169,16 @@ agentic profile 默认开启截断重要性采样，吸收引擎的数值差异�
 
 ---
 
-## 待批准修订提案（阶段 1 检查点，2026-10-01；未获批准前不改上文 Decisions）
+## 修订提案（阶段 1 检查点，2026-10-01；主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4；下文各段以 R-* 为准，覆盖对应 Decisions）
 
 依据与查找记录见 `/home/michael/work/infra-drafts/CODEX-PROGRESS.md`。以下每段均标"待批准"。
 
-### R-CTX. 更正 Context 中的"未核实"（待批准）
+### R-CTX. 更正 Context 中的"未核实"（主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4）
 - legacy `yeto_miles_secrlenv` 源码**已找到**：yeto 仓库提交 `5bfc011`（亦即 merge `e7e3066` 的第一父 `95dd529`）中的 `yeto_miles_secrlenv/{__init__,agent,client,codex_harness_agent,generate,reward}.py`；三份文件的 sha256 与 `yeto/rl/__init__.py` 当前 pin 的 `SECRLENV_AGENT_SHA256` / `SECRLENV_GENERATE_SHA256` / `CODEX_HARNESS_AGENT_SHA256` 逐字节相同。该目录在 merge `e7e3066`（2026-08-27）被静默丢弃，现有 `tests/test_secrlenv_codex_harness.py` 与之配套（仅多一处 importorskip）。D3 与 Risks 中"找不到则重写"的分支作废，改为"搬运并标注出处"。
 - `codex_openenv_agent_function.py` / `codex_openenv_subprocess_agent_function.py` / `codex_openenv_agent_worker.py`（legacy 自 `<miles_root>/examples/experimental/openenv/` 加载）在本机所有 git ref、tar/bundle、pip 缓存中**均不存在**，fork pin `e3a11ab3` 的该目录也没有；来源应为 `agentenv/miles` 私有副本。此三模块按 `yeto/rl/learner.py:804–835`、`yeto/rl/tbench_direct_preflight.py:60–75`、`tests/test_rl_codex_schema.py` 约定的接口重写（标"重写"），除非用户提供副本。
 - pin 镜像内 site-packages 未能检查（docker socket 无权限）。
 
-### R-D5a. 多 chain 的训练归属（替换 D5a；待批准）
+### R-D5a. 多 chain 的训练归属（替换 D5a；主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4）
 
 **真实 trace（按上游 `agentic_tool_call` + 上游 session server + legacy bridge 的实际代码路径构造；任务 `fix-git`，3 轮）**
 
@@ -201,12 +201,12 @@ agentic profile 默认开启截断重要性采样，吸收引擎的数值差异�
 - **首批断言**：Codex 路径每条轨迹 chain 数恒为 1（compaction 关闭、重试被拒）；GPU 9.2 把 `chains_total==1` 作为硬判据，多 chain 代码路径只在 CPU 用 fake harness 验收。
 - 原 D5a 中"奖励归属见 D9"是笔误（D9 是沙箱代理）；归属规则以本段为准。
 
-### R-D9. 沙箱代理接口补充（待批准）
+### R-D9. 沙箱代理接口补充（主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4）
 - `acquire(env_id, trajectory_id, deadline)` 的 `deadline` 为硬上限：到期未 `destroy` 由 broker 强制销毁并返回 `InfraError(lease_expired)`，对应 sample `ABORTED`。
 - `env_live` 定义：已 `acquire` 且 `describe` 尚未返回 gone 的 lease 数，**包含空闲（已分配但当前不在执行工具）的环境**；不包含未绑定轨迹的预热池（首批无预热池，若后续引入另设 `env_idle_pool`，不进 drain 条件）。
 - 因每个 lease 都有 deadline，drain 的最长等待 = min(drain deadline, 最晚 lease deadline)，不会永久等待。
 
-### R-IR. 对 INFRA 的接口请求精确化（由 INFRA-E1 实现，本 change 只做接入验收；待批准）
+### R-IR. 对 INFRA 的接口请求精确化（由 INFRA-E1 实现，本 change 只做接入验收；主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4）
 
 **IR-1 `miles_adapter/config.py` / `entry.py`**
 - 字段：`agent.custom_agent_function_path: str | None`、`agent.agent_max_seq_len: int | None` → 生成 `--custom-agent-function-path <path>`、`--max-seq-len <int>`，仅当 `custom_generate_function_path == "miles.rollout.generate_hub.agentic_tool_call.generate"`；否则抛配置错误，消息须包含 `requires custom_generate_function_path=miles.rollout.generate_hub.agentic_tool_call.generate`。
@@ -232,7 +232,7 @@ agentic profile 默认开启截断重要性采样，吸收引擎的数值差异�
 - 登记：`harness_in_flight`（gauge）、`env_live`（gauge）、`tito_session_mismatch_total`、`tito_chain_breaks_total{reason}`、`policy_age_violation_total`，标签 `profile`、`epoch`；`reason ∈ {retry_fork, history_rewrite, template_drops_reasoning, compaction_window}`。
 - 验收（CPU）：关闭观测时字段缺省、旧路径快照不变；开启时字段存在且类型正确。
 
-### R-TB. Terminal-Bench 任务子集（待批准）
+### R-TB. Terminal-Bench 任务子集（主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4）
 - 数据集：`harbor-framework/terminal-bench-2`（原 `laude-institute/terminal-bench-2`，GitHub 301）main @ commit `2fd12b88aafdd04a52c298e3940bcb189f9766d6`（2026-04-30）。任务目录在仓库根（89 个）。数据生成沿用 pin 内 `examples/experimental/openenv/make_tbench2_data.py --tasks_dir <checkout>`。
 - 子集（6 个，固定）：`fix-git`（legacy 测试已用）、`regex-log`、`sqlite-db-truncate`、`log-summary-date-ranges`、`openssl-selfsigned-cert`、`git-multibranch`。全部为多轮 shell 工具任务，verifier 对修改后的工作目录打分。
 - 覆盖矩阵：
@@ -244,11 +244,11 @@ agentic profile 默认开启截断重要性采样，吸收引擎的数值差异�
   - 一次有效训练更新：≥1 个组通过 `apply_reward_nonzero_std_filter`（组内奖励 std>0），一次优化器 step 的 grad norm>0，LoRA 权重 checksum 变化，发布的 policy version 递增。若 N=4 组内无任何 pass，则记"合法否定结论：qwen35_08b 在该子集无正奖励"，训练更新判据改由主 agent 裁定（备选：换 legacy 的 Qwen3.8 profile，费用需重估）。
 - 模型：legacy attested profile `qwen35_08b`（`Qwen/Qwen3.5-0.8B@2fc06364715b967f1860aea9cf38778875588b17`）LoRA。
 
-### R-SCOPE. 首批范围（待批准）
+### R-SCOPE. 首批范围（主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4）
 - 接原版 Codex 二进制（黑盒），由 legacy `_AppServerDriver` 经 app-server 协议 v2 驱动，模型端点为进程内 `_ResponsesBridge`。不接白盒 codex-agent。
 - 固定版本（沿用 `yeto/rl/__init__.py`）：`codex-cli 0.145.0`；`@openai/codex@0.145.0-linux-x64`，target `x86_64-unknown-linux-musl`；二进制 sha256 `a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14`（310,730,800 B）；npm tarball sha256 `11239480f8e3efd1430f23bbe91c1a397856b8bbe6185ccbaee2382d25e03df2`；package manifest sha256 `8da5349aa5a4242f5e11c5ca8ff4a16d8f9f912cb8accebea4def94edbf30aee`；app-server schema v2 sha256 `f2415ee36b3c9fa16617c800910cd65b8086ce7c7fecee3dac5f7089eb5973b9`。获取：`npm pack` 该包后校验 tarball sha256，解出二进制校验 sha256 与大小，放到容器路径 `/opt/yeto/codex/codex-x86_64-unknown-linux-musl`；preflight 在线校验 `codex --version` 与 app-server schema。
 
-### R-GPU. 冒烟预算（待批准；合计 ≤ $50，同一租期）
+### R-GPU. 冒烟预算（主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4；合计 ≤ $50，同一租期）
 - 资源：1×H100（Nebius，≈$2.95/GPU·h，SkyPilot `--down` + autostop + 独立 watchdog 按实例 ID 终止；需要 docker 跑 TB2 任务容器，Modal serverless 不满足）；或 1×L40S（Modal ≈$1.95/h）仅当 TB2 容器可在 Modal 沙箱内运行——待确认，默认前者。费用按租期 wall time 计，含镜像拉取、预热、空闲。
 - 9.1 A 路径冒烟（≤ $30 ≈ 10 h 上限，计划 6 h）：目标 = 1 个 rollout 步（6 任务 × n=4）+ 1 个训练步。通过条件 = preflight 通过；每条 sample 满足 4.3 断言；HMAC 三处验签通过；`tool_wait`/`env_live` 结束后归零；R-TB 覆盖矩阵全部出现；≥1 个非零 std 组且一次有效更新（或记录合法否定结论）。停机条件 = 费用达 $30、租期达 10 h、preflight 失败、任一对齐断言失败（立即停、拉日志）。
 - 9.2 多轮 TITO 一致性（≤ $20 ≈ 6.5 h 上限，计划 3 h，与 9.1 同租期顺序执行）：目标 = `qwen35_08b` ≥20 条多轮轨迹。通过条件 = `chains_total==1` 全部成立；`tito_session_mismatch==0`；`tito_chain_breaks` 全零；trainer 重算 logprob 与 rollout logprob 差异落入 TIS 截断范围的比例 ≥99%。停机条件 = 费用达 $20、租期总计达 16.5 h、断链率>0（停并记录原因）。

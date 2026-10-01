@@ -18,13 +18,9 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-pytest.importorskip(
-    "yeto_miles_secrlenv",
-    reason="the SecRLEnv Codex harness is an optional external integration",
-)
 
-from yeto_miles_secrlenv import codex_harness_agent as harness
-from yeto_miles_secrlenv import reward as secrlenv_reward
+from yeto.rl.harness.codex import codex_harness_agent as harness
+from yeto.rl.harness.codex import reward as secrlenv_reward
 
 
 def test_stock_codex_qwen38_adapter_process_binds_exact_xhigh_profile():
@@ -35,7 +31,7 @@ def test_stock_codex_qwen38_adapter_process_binds_exact_xhigh_profile():
             sys.executable,
             "-c",
             """
-from yeto_miles_secrlenv import codex_harness_agent as adapter
+from yeto.rl.harness.codex import codex_harness_agent as adapter
 assert adapter.BACKEND_MODEL == "qwen38"
 assert adapter.BACKEND_REASONING_EFFORT == "xhigh"
 assert adapter.BACKEND_CHAT_TEMPLATE_KWARGS == {
@@ -62,7 +58,7 @@ def test_stock_codex_qwen35_adapter_process_binds_exact_fixed_profile():
             sys.executable,
             "-c",
             """
-from yeto_miles_secrlenv import codex_harness_agent as adapter
+from yeto.rl.harness.codex import codex_harness_agent as adapter
 assert adapter.BACKEND_MODEL == "qwen35"
 assert adapter.BACKEND_REASONING_EFFORT == "xhigh"
 assert adapter.BACKEND_CHAT_TEMPLATE_KWARGS == {"clear_thinking": False}
