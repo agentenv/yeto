@@ -37,6 +37,11 @@ class PlacementRequest:
     # fork F-R1: yeto names of the rollout engine cells declared to the fork
     # (placement map "rollout_cells"); needs a Miles fork with F-R1.
     rollout_cell_names: tuple[str, ...] = ()
+    # rl-multinode-island D3-D5: GPUs per island node (None = single node, no
+    # node rules) and the trainer parallel sizes the node rules need.
+    gpus_per_node: int | None = None
+    model_parallel: int = 1
+    expert_parallel: int = 1
 
     def __post_init__(self) -> None:
         if self.kind not in ("colocated", "fixed-partition"):
@@ -67,6 +72,59 @@ class PlacementRequest:
                 self.bundle_map, trainer=self.trainer_gpus, rollout=self.rollout_gpus,
                 standby=self.standby_gpus,
             ))
+        for name in ("model_parallel", "expert_parallel"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"placement {name} must be a positive int")
+        if self.gpus_per_node is not None:
+            self._check_nodes()
+
+    @property
+    def topology(self):
+        """``Topology`` of the island, or None on a single node."""
+        if self.gpus_per_node is None:
+            return None
+        from yeto.rl.engine.multinode import Topology
+
+        return Topology(max(1, -(-self.total_gpus // self.gpus_per_node)), self.gpus_per_node)
+
+    def _check_nodes(self) -> None:
+        from yeto.rl.engine.multinode import Topology, TopologyError, node_placement_rejection
+
+        g = self.gpus_per_node
+        if isinstance(g, bool) or not isinstance(g, int) or g < 1:
+            raise ValueError("gpus_per_node must be a positive int")
+        if self.total_gpus % g:
+            raise ValueError(f"{self.total_gpus} island GPUs are not whole {g}-GPU nodes")
+        topology = Topology(self.total_gpus // g, g)
+        roles = self.role_bundles()
+        per = self.gpus_per_engine
+        rollout = list(roles["rollout"])
+        try:
+            slots = {
+                "trainer": [topology.slot_of(b) for b in roles["trainer"]],
+                "rollout": [[topology.slot_of(b) for b in rollout[i:i + per]]
+                            for i in range(0, len(rollout), per)],
+                "standby": [topology.slot_of(b) for b in roles["standby"]],
+            }
+        except TopologyError as exc:
+            raise ValueError(str(exc)) from None
+        if self.kind == "colocated":
+            slots["rollout"] = []  # the same GPUs as the trainer; the trainer rule covers them
+        reason = node_placement_rejection(slots, model_parallel=self.model_parallel,
+                                          expert_parallel=self.expert_parallel, gpus_per_engine=per)
+        if reason:
+            raise ValueError(reason)
+
+    def trainer_shape(self) -> tuple[int, int]:
+        """``(actor_num_nodes, actor_num_gpus_per_node)`` the trainer bundles occupy
+        (single node: ``(1, trainer_gpus)``)."""
+        topology = self.topology
+        if topology is None:
+            return 1, self.trainer_gpus
+        from yeto.rl.engine.multinode import rectangular_trainer
+
+        return rectangular_trainer([topology.slot_of(b) for b in self.role_bundles()["trainer"]])
 
     @property
     def total_gpus(self) -> int:
@@ -110,9 +168,13 @@ class PlacementRequest:
             t, r = self.trainer_gpus, self.rollout_gpus
             pm = {"trainer": list(range(t)), "rollout": list(range(t, t + r)), "standby": []}
         g = self.gpus_per_engine
-        runs = [(list(pm["rollout"][i:i + g]), True) for i in range(0, len(pm["rollout"]), g)]
-        standby = list(pm.get("standby", []))
-        runs += [(standby[i:i + g], False) for i in range(0, len(standby) - g + 1, g)]
+        from yeto.rl.engine.multinode import chunk_by_node
+
+        topology = self.topology
+        started, _rest = chunk_by_node(pm["rollout"], topology, g)
+        runs = [(list(run), True) for run in started]
+        standby_runs, _rest = chunk_by_node(list(pm.get("standby", [])), topology, g)
+        runs += [(list(run), False) for run in standby_runs]
         cells = []
         for index, name in enumerate(self.rollout_cell_names):
             bundles, start = runs[index] if index < len(runs) else ([], False)

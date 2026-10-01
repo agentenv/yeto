@@ -866,6 +866,10 @@ class MilesRolloutPool:
         running = sorted(set(cells) & tracked)
         if running:
             raise MembershipPlanError(f"cells {running} are running; only stopped cells can be bound")
+        for i, cell in enumerate(cells):  # rl-multinode-island D7: a cell never spans nodes
+            run = gpus[i * per:(i + 1) * per]
+            if not self._bundles.same_node(run):
+                raise MembershipPlanError(f"cell {cell} target GPUs {list(run)} span nodes")
         info = self._bundles.view_for(gpus)
         manager = self._manager()
         self._bind_seq += 1

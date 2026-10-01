@@ -228,7 +228,58 @@ def rl_actor_gpus_per_node(args, spec) -> int:
     standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
     if rollout < 1:
         raise ValueError("--rl-placement fixed-partition needs --rollout-num-gpus >= 1")
-    return spec.gpus_per_node - rollout - standby
+    if spec.num_nodes == 1:
+        return spec.gpus_per_node - rollout - standby
+    return rl_trainer_shape(args, spec)[1]
+
+
+def rl_trainer_shape(args, spec) -> tuple[int, int]:
+    """``(actor_num_nodes, actor_num_gpus_per_node)`` of the island's trainer
+    (rl-multinode-island D5). Colocated: every GPU. Fixed partition: the island
+    total minus ``--rl-rollout-gpus`` and ``--rl-standby-gpus`` (island totals),
+    laid out as the leading logical bundles; it must occupy the same number of
+    GPUs on every node it uses (Miles' rectangle) and keep every TP*PP group
+    on one node."""
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        return spec.num_nodes, spec.gpus_per_node
+    rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
+    standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
+    if rollout < 1:
+        raise ValueError("--rl-placement fixed-partition needs --rollout-num-gpus >= 1")
+    trainer = spec.total_gpus - rollout - standby
+    if trainer < 1:
+        raise ValueError(
+            "--rl-placement fixed-partition needs --rl-rollout-gpus + --rl-standby-gpus "
+            f"< island GPUs ({spec.total_gpus})"
+        )
+    from .rl.engine.multinode import Topology, TopologyError, rectangular_trainer
+
+    topology = Topology(spec.num_nodes, spec.gpus_per_node)
+    try:
+        return rectangular_trainer([topology.slot_of(b) for b in range(trainer)])
+    except TopologyError as exc:
+        raise ValueError(f"--rl-placement fixed-partition on {spec}: {exc}") from None
+
+
+def rl_min_nodes(args, spec) -> int:
+    """Minimum learner nodes (rl-multinode-island D8): one trainer model-parallel
+    replica + one rollout engine + standby, or ``--rl-min-nodes-per-learner``
+    when that is larger."""
+    from .rl.engine.multinode import TopologyError, min_nodes
+
+    explicit = int(getattr(args, "rl_min_nodes_per_learner", 0) or 0)
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        return max(1, explicit)
+    tp = int(getattr(args, "tensor_parallel", 1) or 1)
+    pp = int(getattr(args, "pipeline_parallel", 1) or 1)
+    engine = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
+    try:
+        derived = min_nodes(trainer_min_gpus=tp * pp, rollout_min_gpus=engine,
+                            standby_gpus=int(getattr(args, "rl_standby_gpus", 0) or 0),
+                            gpus_per_node=spec.gpus_per_node)
+    except TopologyError as exc:
+        raise ValueError(f"recipe parallelism does not fit {spec}: {exc}") from None
+    return max(derived, explicit)
 
 
 def build_syncer_binary() -> Path:
@@ -1632,15 +1683,21 @@ def _prepare_rl_args(
         if getattr(args, "rl_placement", "colocated") == "fixed-partition":
             # rl-infra-spec 2.1: the node's GPUs are trainer + rollout + standby;
             # parallel-size checks below apply to the trainer part.
-            actor = rl_actor_gpus_per_node(args, spec)
-            if spec.num_nodes != 1 or actor < 1:
+            if spec.num_nodes == 1 and rl_actor_gpus_per_node(args, spec) < 1:
                 raise ValueError(
                     "--rl-placement fixed-partition needs one node with "
                     "--rollout-num-gpus + --rl-standby-gpus < GPUs per node"
                 )
             if int(args.rollout_num_gpus) % args.rollout_num_gpus_per_engine:
                 raise ValueError("--rollout-num-gpus must be a multiple of --rollout-num-gpus-per-engine")
-            spec = dataclasses.replace(spec, gpus_per_node=actor)
+            from .gpu_spec import require_min_nodes
+
+            require_min_nodes(spec, rl_min_nodes(args, spec))
+            actor_nodes, actor = rl_trainer_shape(args, spec)
+            if spec.num_nodes > 1 and model_parallel > spec.gpus_per_node:
+                raise ValueError("RL TP*PP must fit one node (rl-multinode-island: no cross-node "
+                                 "model-parallel group)")
+            spec = dataclasses.replace(spec, num_nodes=actor_nodes, gpus_per_node=actor)
         if spec.total_gpus % model_parallel:
             raise ValueError(
                 "RL TP*PP must divide every island GPU world size"
@@ -2217,9 +2274,10 @@ def make_miles_island_task(
         f" --rollout-max-response-len {args.rollout_max_response_len}"
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
-        f" --actor-num-nodes {spec.num_nodes}"
-        f" --actor-num-gpus-per-node {rl_actor_gpus_per_node(args, spec)}"
-        f" --tensor-parallel {args.tensor_parallel}"
+        f" --actor-num-nodes {rl_trainer_shape(args, spec)[0]}"
+        f" --actor-num-gpus-per-node {rl_trainer_shape(args, spec)[1]}"
+        + (f" --rl-island-gpus-per-node {spec.gpus_per_node}" if spec.num_nodes > 1 else "")
+        + f" --tensor-parallel {args.tensor_parallel}"
         f" --pipeline-parallel {args.pipeline_parallel}"
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"

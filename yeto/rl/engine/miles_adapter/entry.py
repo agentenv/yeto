@@ -786,7 +786,9 @@ def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor
     views = _startup_views(manager, runner)
     try:
         bundles = StartupBundles(pool_gpus=elastic.pool_gpus, views=views,
-                                 placement_map=_role_map(launch.placement))
+                                 placement_map=_role_map(launch.placement),
+                                 gpus_per_node=getattr(launch.placement, "gpus_per_node", None),
+                                 node_resolver=_ray_bundle_node)
     except Exception:  # noqa: BLE001 - no usable map: leave trainer edges refused
         return False
     pool = driver.rollout
@@ -1025,6 +1027,16 @@ def check_elastic_miles_args(miles_args: Any) -> None:
         problems.append("no rollout offload (member publication needs resident engines)")
     if problems:
         raise ValueError("--rl-elastic needs " + "; ".join(problems))
+
+
+def _ray_bundle_node(pg: Any, bundle: int) -> Any:
+    """rl-multinode-island D3/Q6: the Ray node id hosting ``bundle`` of ``pg``
+    (``ray.util.placement_group_table``), the runtime source of the node-block
+    assertion; raises when Ray cannot tell (fail closed)."""
+    import ray
+
+    table = ray.util.placement_group_table(pg)
+    return table["bundles_to_node_id"][bundle]
 
 
 def manifest_pool_gpus(resources: Any) -> tuple[str, ...]:

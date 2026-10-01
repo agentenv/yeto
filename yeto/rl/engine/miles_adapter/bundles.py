@@ -30,13 +30,44 @@ class BundleMapError(RuntimeError):
     pass
 
 
+def _node_id(node_ids: Any, gpu: str, position: int, info: Any, index: int,
+             node_resolver: Any = None, bundle: int | None = None) -> Any:
+    if isinstance(node_ids, Mapping):
+        if gpu in node_ids:
+            return node_ids[gpu]
+    elif node_ids is not None:
+        seq = list(node_ids)
+        if position < len(seq):
+            return seq[position]
+    nodes = getattr(info, "pg_reordered_node_ids", None)
+    if nodes is not None and index < len(nodes):
+        return nodes[index]
+    if node_resolver is not None and bundle is not None:
+        try:
+            return node_resolver(info.pg, bundle)
+        except Exception as exc:  # noqa: BLE001 - fail closed with the cause
+            raise BundleMapError(f"cannot resolve the node of bundle {bundle} for GPU {gpu!r}: {exc}") from exc
+    raise BundleMapError(f"no node id for GPU {gpu!r} (logical bundle {position}); a multi-node "
+                         "island needs node ids per bundle")
+
+
 class StartupBundles:
     def __init__(self, *, pool_gpus: Sequence[str], views: Mapping[str, Any],
-                 placement_map: Mapping[str, Sequence[int]] | None) -> None:
+                 placement_map: Mapping[str, Sequence[int]] | None,
+                 gpus_per_node: int | None = None,
+                 node_ids: Mapping[str, Any] | Sequence[Any] | None = None,
+                 node_resolver: Any = None) -> None:
+        """``gpus_per_node`` (rl-multinode-island D3) turns on the node-block
+        assertion: the node of every logical position comes from ``node_ids``
+        (per pool GPU id, or per logical position) or else from the view's
+        ``pg_reordered_node_ids``; missing -> ``BundleMapError`` (fail closed)."""
         self.pool_gpus = tuple(str(g) for g in pool_gpus)
         if len(set(self.pool_gpus)) != len(self.pool_gpus):
             raise BundleMapError(f"pool GPU ids repeat: {self.pool_gpus}")
         self._entry: dict[str, tuple[Any, Any, int, int]] = {}  # gpu -> (info type, pg, bundle, gpu id)
+        self.gpus_per_node = gpus_per_node
+        self._node: dict[str, Any] = {}
+        nodes_seq: list[Any] = []
         for p, gpu in enumerate(self.pool_gpus):
             if placement_map is None:
                 role, index = "trainer", p
@@ -53,7 +84,32 @@ class StartupBundles:
             if index >= len(bundles):
                 raise BundleMapError(f"{gpu}: position {index} outside the {role} view ({len(bundles)})")
             self._entry[gpu] = (type(info), info.pg, bundles[index], gpus[index])
+            if gpus_per_node is not None:
+                node = _node_id(node_ids, gpu, p, info, index, node_resolver, bundles[index])
+                self._node[gpu] = node
+                nodes_seq.append(node)
         self._by_bundle = {e[2]: g for g, e in self._entry.items()}
+        if gpus_per_node is not None:
+            from yeto.rl.engine.multinode import TopologyError, assert_node_blocks
+
+            try:
+                self.node_blocks = assert_node_blocks(nodes_seq, gpus_per_node)
+            except TopologyError as exc:
+                raise BundleMapError(f"placement group is not node-blocked: {exc}") from None
+        else:
+            self.node_blocks = None
+
+    def node_of(self, gpu: str) -> Any:
+        """Node id of a pool GPU; ``BundleMapError`` without node information."""
+        if gpu not in self._node:
+            raise BundleMapError(f"no node information for GPU {gpu!r}")
+        return self._node[gpu]
+
+    def same_node(self, gpus: Sequence[str]) -> bool:
+        """True when all ``gpus`` share a node, or when there is no topology (single node)."""
+        if self.gpus_per_node is None:
+            return True
+        return len({self.node_of(str(g)) for g in gpus}) <= 1
 
     def view_for(self, gpus: Sequence[str]) -> Any:
         gpus = [str(g) for g in gpus]
