@@ -423,3 +423,49 @@
 ### 9.21 A4 watchdog 重跑参数（运行前提交，2026-10-01，用户批准）
 - up 事务 deadline 由 120 s 改为 **240 s**（Nebius 8×H100 上 `start_cells` ≈143 s，原 deadline 短于 engine 启动，阻塞注入从未被执行到；见 `evidence/infra-v2-b1/a4s3/RESULT.md` 步骤 4）。其余判据（plan-3.8-4.4-v2 §4 (1)–(5)）不变。
 - GPU 重跑暂停，待用户分析后另行批准。
+
+### 9.22 A4 / A4b 4 卡 L40S 批（T1R1S2↔T1R3S0；运行前登记，2026-10-01；本节提交时未起任何 GPU 或云资源）
+- **平台：Nebius eu-north1 on-demand 4×L40S**（SkyPilot `nebius:4xl40s@eu-north1`，实例型号 `gpu-l40s-d_4gpu-128vcpu-768gb`，$9.138/h，只读 `sky show-gpus --cloud nebius` 于 2026-10-01 核对；同时有 1/2/4 卡档）。选 Nebius 而不选 Modal L40S（$1.95×4 = $7.8/h，便宜约 $1.3/h）的理由：现有的 ssh、容器内采样器、探针、puller、journal 拉取脚本（`gpu-b1-runs/`）全部可直接复用，不必另写 Modal 路径；Modal 路径需要把探针内嵌进 run script、state dir 迁到持久卷、router 采样改走 127.0.0.1，这些都是尚未验证的新代码。**未确认项**：Nebius L40S 的配额数值查不到（quota-allowance 只列出名称，无 limit），首次开通在冒烟时才能确认；开通失败属于"新的基础设施阻塞"，直接停下回报，不自动切 Modal。
+- **拓扑**（按 §2.1 4 卡档换算，只换卡号和成员数，判定逻辑不变）：池 = 4 张 UUID；trainer = G0，rollout c0 在 G1，standby = G2/G3；启动时声明 cell c0、c1、c2，只启动 c0（`cfg/cells-4.json`、`cfg/resources-4.json`）；up = T1R1S2→T1R3S0（启动 c1、c2），down 反向。模型 Qwen3-0.6B LoRA r16，seed 17，其余参数同 a4-args。E1-A 为 6 轮（第 1–2 轮 R1，第 3–4 轮 R3，第 5–6 轮 R1；up 在第 2 轮 train 时提交，down 在第 4 轮 train 时提交）。
+- **代码**：SHA **f84ed4b**（integ-decl，含 infra-e1 的 A4 可观测性修复：`test_injection`/`test_hold`/`rl_membership`、watchdog `injection_reached`/`classification`、REBUILD_OLD `cause`、tool-wait 注入）。运行用 `git archive f84ed4b`；各用例 attestation 指纹用本机重建（`mkatt4.sh`，`cfg/attestation-4-*.json`），岛上 `rl_driver_start.runtime_fingerprint` 与之不符则 selfcheck 立即停止（判 startup_failed）。
+- **脚本与留档**：运行脚本在 `/home/michael/work/gpu-b1-runs/`，副本、配置、CPU 测试与输出在 `evidence/infra-v2-b1/a4-4card/`（`scripts/ cfg/ tests/ test-output.txt`）。入口 `a4go4.sh <case> <prefix> <hard_s> <wd_s>`，case = smoke|base|e1a|e1b|wd|a4b|d123|d4|d5|d6|d7。本批新增/改动（均有 CPU 桩测试，全部通过）：
+  - `cleanup_run.sh <prefix>`（唯一的释放路径）：四阶段 = 停进程（写 `<run_dir>/STOP` 并调用 `yeto stop-run`，按进程组杀 worker/launch/watchdog/puller/selfcheck/after-hook，等待消失）→ 释放（`sky down` 按集群名、`modal app stop -y`）→ 间隔 60 s 复查两次（Nebius API `--parent-id project-e00eqrj3pr00622zrgdeyc`、region eu-north1、名字前缀 `<prefix>-`；Modal `app list --json`；`sky status`）→ 任何残留或无法核实即退出码 2。project id 集中在脚本顶部一个变量。只匹配本轮前缀（锚定，`…-3` 不会命中 `…-30`），其他实例（如现存 `rlf-h200-pilot-03`）不碰。`nstop.sh` 改为"拉证据 + 调用 cleanup_run.sh"。
+  - 所有 launch 加 `--no-island-relaunch --modal-retries 0`（原因：外部 `sky down` 后 launcher 的 `_worker` 在 recover-timeout 1200 s 内同名重拉集群，造成孤儿实例）。
+  - `fork_probe.py` 自证：断言 ray 版本 ≠ 2.9.3、GCS 地址以 `:6379` 结尾且等于所请求的地址、Miles actor `ray_worker_manager` 及其 namespace 存在，三项写入输出 JSON 的 `attest`，不通过则退出码 3，`probe_attested=false`。`router_sampler.py` 同时尝试 `hostname -I` 与 127.0.0.1。
+  - `selfcheck.sh` 分别写出 `startup_failed`（启动未到首个 generate、GPU 断言 4×L40S 不符、采样器/探针不可用或探针未通过自证、指纹不符）；`judge_inject.py`（`judge_after.sh` 调用）读 journal 与磁带的结构化事件，写出 `injection_not_reached`、`recovery_failed`。目标不存在或 `applied=false` 或 watchdog 未命中阻塞点 → **INVALID_TEST（测试无效）**，既不是产品通过也不是产品失败，不计入任何 task。
+  - **launcher 缺口（运行前必须解除）**：`YETO_RL_TEST_HOLD_BEFORE_CHECK_S` 与 `YETO_RL_TEST_INJECT_TOOL_WAIT_S` 在 f84ed4b 没有 CLI 开关，也不在 `_ELASTIC_TEST_EXPORTS` 里，到不了岛上。在补齐前，E1-B 与 A4b 不启动（`a4go4.sh` 对这两个 case 要求 `HOLD_FLAG` / `TOOLWAIT_FLAG`，没有则退出码 5）。smoke、E1-A、watchdog、E1-D 不受影响。
+- **顺序**（每次只有一个实验；每次启动前在 `infra-drafts/gpu-spend.md` 记一行，结束补实际）：
+  1. **冒烟兼测量**（`smoke`，3 轮：第 1 轮 train 后 up、第 2 轮 train 后 down）：一次 up/down，实测 `start_cells` 耗时（journal 中 `fork_op start issued`→VERIFYING 的墙钟）、整个 up 事务耗时、镜像拉取与开通时间；核对 4×L40S 与指纹；结束后运行 `cleanup_run.sh` 并核对退出码 0（Nebius API、sky、本地进程两次复查）。冒烟不产生任何验收结论。
+  2. **按实测值定 watchdog deadline**：规则 = `UP_DEADLINE_S ≥ ceil(1.5 × 实测 start_cells) + 60 s`，且不低于 §9.21 的 240 s。**实测值与 deadline 取值在冒烟后填入下方并单独提交，之后才允许启动 watchdog。** 填写位：`T_start(实测)=__ s；UP_DEADLINE_S=__ s`（待填）。
+  3. **E1-A**（含基线）：`base`（6 轮，无请求）→ `e1a`（6 轮，up@第 2 轮 train、同一 request_id 重复提交 @第 3 轮 train、down@第 4 轮 train，deadline 各 600 s；router `/worker_inflight` 与 `nvidia-smi` 采样）。
+  4. **E1-B**：`--rl-test-inject-lora-perturb 0.01`，4 轮，第 2 轮 train 后 up（deadline 600 s）；`HOLD_FLAG` 就绪后才跑。
+  5. **watchdog**：`--rl-test-inject-update-weights-block-s 600`，4 轮，第 2 轮 train 后 up，deadline = 步骤 2 的取值。
+  6. **E1-D**（按 §9.20 的映射，standby 在 G2/G3）：`d123`（①②③ 合并，5 轮）→ `d4` → `d5` → `d6` → `d7`；判据 = plan.md E1-D 原文 + §7.1 (c)，不变。
+  7. **A4b（E1-C）**：`--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5` + `YETO_RL_TEST_INJECT_TOOL_WAIT_S=30`（经 `TOOLWAIT_FLAG`），4 轮，up 后在 rollout 进行中提交 down。
+- **判据口径调整（运行前固定；每条列出原判据、与产品语义的冲突、保留的等价检查；除此之外的判据文字一律不改）**：
+  1. **E1-A (c)**。原判据（§9.18 口径）：第 r 轮"发布成员"取该轮 generate 之前最后一条 `rl_publication`/`rl_member_publication`，8 卡为第 3–7 轮 4 个、其余 2 个。冲突：产品语义下 down 事务不产生 `rl_publication`，缩容后到下一次全量发布之前，磁带上没有任何事件体现缩容，按旧口径第 8 轮必然判未通过（已在 §9.20 用 CPU 证明）。新口径：按 `rl_membership`（`config_epoch/members/tx_id/kind/round`）逐轮读成员数——第 r 轮的成员数取 `round ≤ r` 的最后一条事件的 `len(members)`；4 卡预期序列 `[1,1,3,3,1,1]`，精确相等。**同时保留** `rl_publication` 检查：缩容事务之后的下一次全量发布的 `sync/publication_members` 恰为 1 个成员。两项都满足才算 (c) 通过（`judge_inject.py e1a_c`）。(a)(b)(d)(e)(f)(g) 与 E1-E 不变。
+  2. **E1-B (b)**。原判据：终态 `REBUILT_OLD`。冲突：任何原因导致的重建都会得到 `REBUILT_OLD`，注入没有施加时（上次 LoRA 注入无效）会误判。新口径：要求 REBUILD_OLD/REBUILT_OLD 记录的 `cause=payload_mismatch`，**且**存在 `test_injection.applied=true`、目标成员存在；否则判 **测试无效**（`injection_not_reached`），不判通过也不判失败。终态为 `RECOVERY_REQUIRED` 或无终态则判失败并写 `recovery_failed`。(b) 其余内容（被注入 cell 从未出现在非 cordon 路由、`stop_cells` 回收、旧成员同一 policy token）、(c)(d) 不变。
+  3. **E1-B (a)**。原判据：`admit_cells` 前后各采样 router，新 cell 在 cordon 列表中且 in-flight=0。冲突：`end_update_weights` 到 `admit_cells` 之间只有毫秒级，0.5 s 采样几乎采不到。新口径：只在 `test_hold` 窗口内采样——窗口取 `stage=end` 那条记录的 `[start_ts, end_ts]`；窗口内至少 3 个样本；窗口内出现的新 worker URL 全程 in-flight=0。没有完成的 `test_hold` 或样本不足判测试无效；有请求被路由到新 cell 判失败。检查谓词本身不变。
+  4. **watchdog**。原判据：plan-3.8-4.4-v2 §4 (1)–(5)。冲突：此前 deadline 短于 engine 启动，watchdog 在注入点之前触发，只看终态会把"未执行到注入"当作产品结果。新口径：先要求 journal 的 watchdog 记录 `classification=FIRED_ON_BLOCKED_UPDATE`、`injection_reached=true`，且存在 `test_injection(kind=block_update, applied=true)` 带 `reached_ts`；`INJECTION_NOT_REACHED` 与 `FIRED_AFTER_BLOCK_RELEASED` 一律判测试无效。在有效的前提下，(1)–(5) 与 `analyze_wd.py` 不变。
+  5. **A4b（E1-C）**。原判据：`T_drain=5s`、真实工具等待 30 s，终态 `CANCELLED`，cordon 的 cell 被 uncordon，外部工具调用计数无重复。冲突：launcher/learner 无真实工具负载的配置入口。新口径：用 `YETO_RL_TEST_INJECT_TOOL_WAIT_S=30` 在首次 drain 时放一个人工 tool-wait 条目（不是请求），配 `--rl-elastic-drain-timeout-s 5`。保留：(a) QUIESCING 的 rollout_id 为请求后的下一边界；(b) 终态 `CANCELLED`、被 cordon 的 cell uncordon、路由成员不变；(c) ledger 无重复消费（"外部工具调用无重复"由"没有任何请求被触及、ledger 无重复"等价替代）。没有 `test_injection(kind=tool_wait, applied=true)` 判测试无效。
+- **费用（Nebius 4×L40S $9.138/h = $0.152/min；GPU·h 按整机 wall，含开通、拉镜像与回收；上界 = 硬超时 × 单价）**：
+
+  | 步骤 | 预计时长 | 预计费用 | 硬超时 | 最坏费用 |
+  |---|---|---|---|---|
+  | 1 smoke | 25 min | $3.8 | 40 min | $6.1 |
+  | 3a base | 24 min | $3.7 | 35 min | $5.3 |
+  | 3b e1a | 32 min | $4.9 | 50 min | $7.6 |
+  | 4 e1b | 26 min | $4.0 | 40 min | $6.1 |
+  | 5 wd | 20 min | $3.0 | 30 min | $4.6 |
+  | 6a d123 | 38 min | $5.8 | 55 min | $8.4 |
+  | 6b d4 | 29 min | $4.4 | 40 min | $6.1 |
+  | 6c d5 | 29 min | $4.4 | 40 min | $6.1 |
+  | 6d d6 | 20 min | $3.0 | 30 min | $4.6 |
+  | 6e d7 | 28 min | $4.3 | 40 min | $6.1 |
+  | 7 a4b | 26 min | $4.0 | 40 min | $6.1 |
+  | 合计 | | 约 $41.3 | | $67.1 |
+
+  时长依据：Nebius 8×H100 的 watchdog 重跑 10.5 min 实测约 $5.39（§9.19），`start_cells` ≈143 s（§9.21）；开通与拉镜像按 7 min，L40S 每轮按 2.5 min（比 H100 的 75–110 s 保守），每个事务按 3–5 min。**本批费用上限 $45。** 门控：每次启动前，`本批已实际花费 + 本次最坏费用 + 尚未运行的 A4b 最坏费用（$6.1，仅在 A4b 前置条件满足时预留）≤ $45`，否则不启动该项，按"未完成"如实报告（E1-D 的后几项最先让出，顺序 d123→d4→d5→d6→d7）。预计总额只比上限低约 $4，**没有重跑余量**。
+- **回收与硬超时**：沿用 n2run 的机制（外层 `timeout <硬超时>`、`sleep <wd_s>; sky down` 独立 watchdog、autostop 10 min、20 min 无新事件的进度看门狗），并在每次运行结束后由 `a4go4.sh` 的最终守卫执行 `nstop.sh`（拉证据）→ `cleanup_run.sh`（两次复查，退出码 0 才算无残留）；`cleanup_rc.txt` 与 `cleanup.out` 进入留档。启动前检查用户线程数 < 3000（n2run 已有）。孤儿安全组 `vpcsecuritygroup-e00a60g9g8z4kdhc83` 为上一批遗留，本批不处理。
+- **规则**：遇到新的基础设施阻塞（开通/配额失败、launcher 缺口、探针自证不通过、cleanup 退出码 ≠ 0 且原因不明等）就停下报告，不原样重跑；测试无效（INVALID_TEST）只有在提出原因并修复后才重跑；所有用例每项 1 个 seed，无数值容差，判据文字以 §3、§8.7 与上述调整为准。
+- **状态**：已登记，未运行。冒烟后需要填写的位置：步骤 2 的 `T_start` 与 `UP_DEADLINE_S`（填入后单独提交）。
