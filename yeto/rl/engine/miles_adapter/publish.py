@@ -235,6 +235,18 @@ def _default_update_weights() -> Callable[..., Any]:
     return update_weights
 
 
+def lora_keys(body: dict[str, Any]) -> dict[str, Any]:
+    """The adapter A/B entries of one engine's flattened checksum body. The patched
+    sglang WeightChecker emits ``lora:<adapter>:<module>:<layer>:A|B``; the Miles
+    flatten prefixes ``rank{r}/``. The stock checksum covers only base weights."""
+    return {k: v for k, v in body.items() if k.startswith("lora:") or "/lora:" in k}
+
+
+def lora_mode(args: Any) -> bool:
+    """Mirror of miles.utils.lora.utils.is_lora_enabled (not importable on CPU)."""
+    return (getattr(args, "lora_rank", 0) or 0) > 0 or getattr(args, "lora_adapter_path", None) is not None
+
+
 def _default_flatten() -> Callable[[Any], list[dict[str, Any]]]:
     from miles.utils.audit_utils.checksum_utils import flatten_inference_engine_checksums
 
@@ -632,11 +644,26 @@ class MilesPublisher:
                     f"{len(bodies)} engines reported checksums; expected up to {expected_engines}",
                     cause=PublicationCause.PAYLOAD_MISMATCH,
                 )
+            if lora_mode(self._args):
+                # fail closed: without adapter keys in BOTH the reference and every body, a
+                # perturbed adapter is indistinguishable from the published one
+                ref_lora = lora_keys(reference)
+                blind = [i for i, body in enumerate(bodies) if not lora_keys(body)]
+                if not ref_lora or blind:
+                    raise PublicationError(
+                        "LoRA mode but the engine read-back carries no adapter (lora:*) checksums "
+                        f"({'reference' if not ref_lora else 'engines'} blind); the adapter cannot be "
+                        "verified, new members are not admitted",
+                        cause=PublicationCause.LORA_UNVERIFIABLE,
+                        engine_ids=[f"engine{i}" for i in (blind or range(len(bodies)))],
+                    )
             bad = [i for i, body in enumerate(bodies) if dict(sorted(body.items())) != reference]
             if bad:
+                lora_bad = sorted({i for i in bad if lora_keys(bodies[i]) != lora_keys(reference)})
                 raise PublicationError(
-                    f"payload read-back differs from the published policy on {len(bad)} engines; "
-                    "new members are not admitted",
+                    f"payload read-back differs from the published policy on {len(bad)} engines"
+                    + (f" (adapter A/B differs on {len(lora_bad)})" if lora_bad else "")
+                    + "; new members are not admitted",
                     cause=PublicationCause.PAYLOAD_MISMATCH,
                     engine_ids=[f"engine{i}" for i in bad],  # index in the check_weights read-back
                 )

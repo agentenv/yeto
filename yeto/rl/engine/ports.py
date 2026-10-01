@@ -30,6 +30,7 @@ class PublicationCause(str, Enum):
     PAYLOAD_MISMATCH = "payload_mismatch"  # engine read-back differs from the published payload
     TOKEN_MISMATCH = "token_mismatch"  # an engine does not report the policy token
     UPDATE_FAILED = "update_failed"  # update_weights / update_weight_version raised
+    LORA_UNVERIFIABLE = "lora_unverifiable"  # LoRA mode but the read-back has no adapter keys
     OTHER = "other"
 
 
