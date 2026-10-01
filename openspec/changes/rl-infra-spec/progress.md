@@ -744,3 +744,22 @@
   - **watchdog 重跑**：只改实验参数，deadline 120 s → 240 s（Nebius 上 start_cells ≈143 s，+~100 s margin；阻塞注入在 update_weights 前，需先让 start 完成）：`a4go.sh a4wd-<日期>-N 4 1500 1980 cfg/attestation-s4.json '[["train",1,"wd-up",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":240}]]' '<after_term.sh {R} {P} 1 60>' --rl-test-inject-update-weights-block-s 600`；判据 plan-3.8-4.4-v2 §4 第 1–5 条 + §6（`analyze_wd.py`）不变；事务 deadline 改为 240 s 要在 gpu-plan-v2 §9.21 运行前提交（watchdog 触发应在 start 完成之后、REBUILT_OLD ≤60 s，预估 $7，最坏 $13.2）。
   - **E1-D** 按 §9.20 原计划（D123 合并 5 轮 35 min；D4 4 轮；D5 4 轮；D6 3 轮；D7 5 轮；硬超时、注入器 `dkill.py`/`dctl.py`、期望终态均见 §9.20），代码换 446da8a；每项先看 selfcheck，失败即停；全批累计 >$90 停下汇报（上限 $120）。
   - 之后 E1-C/A4b（`--rl-elastic-drain-timeout-s 5`）；全部结束后再做 id 对比与 `openspec validate --strict`。本次 CPU 准备已合入 integ-s3/integ-decl。
+
+
+## 2026-10-01 A4/A4b 4 卡 L40S 批（会话 4）：冒烟开通失败，停下
+- 代码 b19b781 已合入 gpu-b1（普通 merge）；§9.22 代码 SHA 改为 b19b781，`a4go4.sh` 的 e1b/a4b 改为传 `--rl-test-hold-before-check-s 10` / `--rl-test-inject-tool-wait-s 30`（提交 39294c1，已推送）。
+- 冒烟 infra-v2-b1-a4sm-20261001-1：Nebius eu-north1 4×L40S 实例创建后 ~5.5 min 一直 STOPPED/Reconciling，未到 RUNNING，sky 判开通失败。T_start 未测得，UP_DEADLINE_S 未填；E1-A/E1-B/watchdog/E1-D/A4b 均"未运行"。费用 ≤$0.92 / $45。证据与 cleanup 详情：evidence/infra-v2-b1/a4-4card/RESULT.md。
+- 发现并修复 cleanup 并发互杀缺陷（selfcheck 与最终守卫同时调 cleanup_run）：flock + selfcheck 写 cleanup_rc.txt，未真机验证。
+- 待用户/主 agent 决定：同平台稍后重试 / 确认 L40S 配额容量 / 其他平台。历史（8×H100 批）失败事实不变。
+
+## 2026-10-01 A4/A4b 8 卡 H100 批（会话 4，用户改用 Nebius 8×H100；代码 b19b781；计划 gpu-plan-v2 §9.23）——中间状态
+- 分支 gpu-b1（普通 push，最新含本节）；已合入 origin/integ-decl 到 d1cc74e（tasks.md 勾选，非 yeto 变化）；**尚未合入 integ**（按主 agent 指示批末一起合）。证据与 RESULT：`evidence/infra-v2-b1/a4-8card-s4/`（`RESULT.md`、`runs/{smoke,base,e1a,e1b,e1b-attempt2-provision-failed,chain-aborted}/`、`scripts/ cfg/ tests/`）。
+- 完成：冒烟（up 144.3 s，start_cells 142.4 s，≤160 s）；E1-A 基线+切换 **通过**（(c) 首次判读 FAIL 为 judge 单位缺陷，勘误+回归测试先提交再重判）；E1-B **不通过**（注入已应用，终态 SUCCEEDED；疑读回校验不覆盖 LoRA adapter）。
+- 未运行：watchdog、A4b、E1-D d123/d4/d5/d6/d7——主 agent 通知 integ-decl 已到 06a754bf（LoRA 准入 fail-closed，需重建镜像 sglang a1240c530，用户已批准、进行中）；之后在新 SHA+新镜像上重取 attestation 指纹、重核各开关 argv，按 wd → A4b → E1-D → E1-B（验证修复）运行，用复用链，本批剩余预算 $40。
+- 工具/缺陷（均有 CPU 回归测试）：cleanup 闭环（nstop 的 tee 被前缀扫描杀死 → rc 141，已修）、周期性拉取采样小文件包、judge_inject 单位勘误、`scan_run.py`/`diag_pull.sh`/`save8.sh`、集群复用链 `chain8.sh`/`reset_island.sh`/`nstop_item.sh`（真机未验证）。
+- 费用 ≤$60.0（含主 agent 误叫停的链启动 $5.7）；云资源：无（nebius 仅他人实例，sky 无集群；各 run cleanup 退出码 0）。
+- 下一步：等主 agent 给新 SHA；`mkatt8.sh` 在新 SHA 上重取 3/4/5/12 轮指纹并核各开关；`chain8.sh <CP> 60.0 wd:1920 a4b:1200 d123:1800 d4:1200 e1b:1200 ...`（门控逐项）。
+
+### 更新（链 #2，2026-10-01 08:10Z）
+- 代码 6f6dcb9 + 新镜像 sha256:12fcd9e5…（gpu-b1 合并为 a9c1afc）；指纹重取（不变）。链 #2 跑了 wd：**不通过**（kill 路径 id 前缀缺陷，killed=[]；a4s3 的 matches=[] 是同一缺陷）；首次 LoRA 准入即 LORA_UNVERIFIABLE（adapter 惰性加载，新引擎读回只有 226 张量无 lora 键）→ 按规则停链；E1-B 新 SHA 验证、A4b、E1-D 未运行（等待两个修复）。
+- 费用 ≤$77.4（剩 ≈$22.6）；云资源无；cleanup 退出码 0。证据：`evidence/infra-v2-b1/a4-8card-s4/runs/chain2-wd/`，RESULT.md "链 #2"一节。
