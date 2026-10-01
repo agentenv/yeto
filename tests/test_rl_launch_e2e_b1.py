@@ -624,6 +624,25 @@ def test_hold_and_tool_wait_switches_reach_the_island(tmp_path, monkeypatch):
     args, env = learner_from_run(run, tmp_path / "home")
     assert env["YETO_RL_TEST_HOLD_BEFORE_CHECK_S"] == "45.0"
     assert env["YETO_RL_TEST_INJECT_TOOL_WAIT_S"] == "30.0"
+    assert "YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG" not in env
+
+
+def test_tool_side_effect_log_switch_reaches_the_island(tmp_path, monkeypatch):
+    """A4bc (3.3 X5): --rl-test-tool-side-effect-log -> YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG=1."""
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    run = island_run(BASE + _elastic(tmp_path) + (
+        "--rl-elastic-tool-wait-board", "--rl-test-inject-tool-wait-s", "30",
+        "--rl-test-tool-side-effect-log"), monkeypatch)
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert env["YETO_RL_TEST_INJECT_TOOL_WAIT_S"] == "30.0"
+    assert env["YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG"] == "1"
+    with pytest.raises(ValueError, match="needs --rl-test-inject-tool-wait-s"):
+        launcher._check_ports_infra_switches(
+            _cli(("--rl-elastic", "--rl-elastic-tool-wait-board", "--rl-test-tool-side-effect-log")), "ports")
 
 
 def test_hold_and_tool_wait_switch_validation(tmp_path):

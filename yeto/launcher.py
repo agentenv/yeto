@@ -969,6 +969,9 @@ _ELASTIC_TEST_EXPORTS = (
      "YETO_RL_TEST_INJECT_TOOL_WAIT_S"),
     ("rl_test_inject_undrain_fail", "--rl-test-inject-undrain-fail",
      "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"),
+    # A4bc / 3.3 X5: side-effect journal of the injected tool (store_true -> "1")
+    ("rl_test_tool_side_effect_log", "--rl-test-tool-side-effect-log",
+     "YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG"),
     ("rl_test_inject_lora_perturb", "--rl-test-inject-lora-perturb",
      "YETO_RL_TEST_INJECT_LORA_PERTURB"),
     ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures",
@@ -1128,6 +1131,10 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     if (getattr(args, "rl_test_inject_tool_wait_s", None) is not None
             and not getattr(args, "rl_elastic_tool_wait_board", False)):
         raise ValueError("--rl-test-inject-tool-wait-s needs --rl-elastic-tool-wait-board")
+    if (getattr(args, "rl_test_tool_side_effect_log", False)
+            and getattr(args, "rl_test_inject_tool_wait_s", None) is None):
+        raise ValueError("--rl-test-tool-side-effect-log needs --rl-test-inject-tool-wait-s "
+                         "(the injected tool is the journaled tool)")
     kill_at = getattr(args, "rl_test_kill_learner_at", None)
     if kill_at is not None and kill_at not in KILL_PHASES:
         raise ValueError(f"--rl-test-kill-learner-at must be one of {list(KILL_PHASES)}")
