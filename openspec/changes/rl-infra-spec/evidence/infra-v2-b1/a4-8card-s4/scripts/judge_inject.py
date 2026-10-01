@@ -4,7 +4,7 @@ in-container samplers/probes (never from the terminal state alone).
 usage: judge_inject.py <case> <journal.jsonl|elastic-state dir> <tape.jsonl> [--router-samples F] [--gpu-samples F]
                        [--probe-after F] [--probe-stale F] [--probe-oldepoch F] [--dkill-log F] [--expect-members 1,1,3,3,1,1]
                        [--cells c0,c1,c2] [--out judgment.json] [--marker-dir DIR]
-cases: e1a_c | e1b | wd | a4b | a4bu | d123 | d4
+cases: e1a_c | e1b | wd | a4b | a4bu | d123 | d4 | r5 | r6 | r7 | r5c   (r*: E1-D ⑤⑥⑦ with the 3.7 restart recovery, recovery-design.md §10.4)
 verdicts (exit code): PASS 0 | FAIL 1 | INVALID_TEST 4.
   INVALID_TEST = the test could not observe what it claims to judge: the injection target does not exist, the injection
   was not applied/reached, a required sampler/probe output is missing, the sampled window is too short, or the engines
@@ -445,6 +445,161 @@ def judge_d4(journal, tape, known):
     return res
 
 
+
+# ----------------------------------------------------------------------------------------------- E1-D ⑤⑥⑦ (restart recovery, recovery-design.md §10.4)
+def _driver_start_times(tape):
+    return [e.get("time_unix") or e.get("ts") or 0 for e in named(tape, "rl_driver_start")]
+
+
+def _restarted(tape, launch_log):
+    """The learner process was restarted in place: a second rl_driver_start on the tape, or the restart loop's line."""
+    starts = len(named(tape, "rl_driver_start"))
+    loop = any("in-place restart" in l for l in (launch_log or []))
+    return starts >= 2 or loop, {"driver_starts": starts, "restart_loop_line": loop}
+
+
+def _after_restart(tape):
+    """tape records after the second rl_driver_start (the restarted learner)."""
+    idx = [i for i, e in enumerate(tape) if e.get("event") == "rl_driver_start"]
+    return tape[idx[1]:] if len(idx) >= 2 else []
+
+
+def _identity(tape):
+    """Trainer identity across the restart: the first publication of the restarted learner carries the same policy
+    token the run published for that policy version before (same version -> same hash). (None, why) when unobservable."""
+    after = _after_restart(tape)
+    pubs_after = named(after, "rl_publication")
+    if not pubs_after:
+        return None, "no publication after the restart"
+    first = pubs_after[0]; v = first.get("policy_version"); tok = first.get("rl/policy_token")
+    before = tape[: len(tape) - len(after)]
+    earlier = [e.get("rl/policy_token") for e in named(before, "rl_publication") if e.get("policy_version") == v]
+    if not earlier:
+        return None, "no earlier publication of policy version %s to compare" % v
+    return tok == earlier[-1], {"version": v, "token_after": tok, "token_before": earlier[-1]}
+
+
+def _ledger_duplicates(ledger):
+    """rollout ids recorded as outer_recorded more than once = trained/consumed twice."""
+    seen = {}
+    for r in ledger or []:
+        if r.get("kind") == "outer_recorded":
+            seen[r.get("rollout_id")] = seen.get(r.get("rollout_id"), 0) + 1
+    return sorted(k for k, n in seen.items() if n > 1)
+
+
+def _rounds_after(tape, since=None):
+    """train phases of the restarted learner (optionally only after time `since`)."""
+    after = _after_restart(tape)
+    return [e for e in named(after, "rl_driver_phase") if e.get("phase") == "train"
+            and (since is None or (e.get("time_unix") or e.get("ts") or 0) >= since)]
+
+
+def _recovery_records(journal):
+    return [r for r in journal if r.get("kind") == "recovery"]
+
+
+def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, probe_after=None, min_rounds_after=3, up="up1", down="dn1"):
+    """r5: up1 killed at COMMITTED -> restart -> committed members rebuilt (recovery verified), up1 SUCCEEDED(recovered).
+    r7: up1 SUCCEEDED, then the learner is killed in steady state (fork epoch back to 0 vs journal 1) -> restart ->
+        reconcile restore_membership_state + recovery verified -> dn1 SUCCEEDED afterwards (transactions go on).
+    r6: up1 killed at QUIESCING -> restart -> CANCELLED, no recovery, rounds go on.
+    r5c (regression of ruling (c)): up1 SUCCEEDED, dn1 killed at COMMITTED -> restart finds the startup shape ->
+        dn1 SUCCEEDED(recovered), no recovery record.
+    All: the learner really restarted (else INVALID), trainer identity across the restart, no rollout consumed twice,
+    >= min_rounds_after train rounds after the restart/recovery."""
+    res = {"case": case, "checks": {}, "invalid_reasons": []}
+    restarted, how = _restarted(tape, launch_log); res["restart"] = how
+    if not restarted:
+        return _invalid(res, "the learner was never restarted (no second rl_driver_start, no restart-loop line): kill not applied", "evidence_missing")
+    recs = _recovery_records(journal); res["recovery"] = [{k: r.get(k) for k in ("tx_id", "status", "attempt", "error")} for r in recs]
+    four = sorted(known) if len(known) == 4 else None
+    def tx_ok(rid, expect, recovered=None):
+        term = _tx_terminal(journal, rid)
+        if not term:
+            return None
+        ok = term == [expect]
+        if recovered is not None:
+            last = [r for r in phases(journal) if r.get("request_id") == rid and r.get("phase") == expect][-1]
+            ok = ok and (last.get("recovered_after_restart") is True) == recovered
+        return ok
+    if case in ("r5", "r7", "r5c"):
+        v = tx_ok(up, "SUCCEEDED", recovered=(case == "r5"))
+        if v is None:
+            return _invalid(res, up + " never reached a terminal phase (run ended first): not observed", "evidence_missing")
+        res["checks"][up + "_SUCCEEDED" + ("_recovered_after_restart" if case == "r5" else "")] = v
+    if case == "r5":
+        res["checks"]["killed_at_COMMITTED"] = any(r.get("request_id") == up and r.get("phase") == "COMMITTED" for r in phases(journal))
+    if case == "r6":
+        v = tx_ok(up, "CANCELLED")
+        if v is None:
+            return _invalid(res, up + " never reached a terminal phase (run ended first): not observed", "evidence_missing")
+        res["checks"][up + "_CANCELLED"] = v
+        res["checks"]["killed_at_QUIESCING"] = any(r.get("request_id") == up and r.get("phase") == "QUIESCING" for r in phases(journal))
+        res["checks"]["no_recovery"] = not recs
+        res["checks"]["no_fork_op_after_restart"] = not any(r.get("kind") == "fork_op" and str(r.get("tx_id", "")).startswith("rec-") for r in journal)
+    if case in ("r7", "r5c"):
+        v = tx_ok(down, "SUCCEEDED", recovered=(case == "r5c"))
+        if v is None:
+            return _invalid(res, down + " never reached a terminal phase (run ended first): not observed", "evidence_missing")
+        res["checks"][down + "_SUCCEEDED" + ("_recovered_after_restart" if case == "r5c" else "_after_recovery")] = v
+    if case == "r5c":
+        res["checks"]["no_recovery"] = not recs
+        pubs = named(_after_restart(tape), "rl_publication")
+        res["checks"]["startup_shape_after_restart"] = bool(pubs) and len(pubs[0].get("sync/publication_members") or []) == 2
+    t_verified = None
+    if case in ("r5", "r7"):
+        statuses = [r.get("status") for r in recs]
+        res["checks"]["recovery_sequence"] = statuses == ["planned", "membership_restored", "verified"]
+        ver = next((r for r in recs if r.get("status") == "verified"), None)
+        if ver is None:
+            if any(r.get("status") == "failed" for r in recs) or "RECOVERY_REQUIRED" in [r.get("phase") for r in phases(journal)]:
+                res["checks"]["recovery_verified"] = False
+            else:
+                return _invalid(res, "no recovery verified/failed record: the recovery was not observed to finish", "evidence_missing")
+        else:
+            t_verified = ver.get("wall_time")
+            c = ver.get("checks") or {}
+            res["verified_checks"] = c
+            res["checks"]["recovery_verified"] = True
+            res["checks"]["policy_token_verified"] = c.get("policy_token") == "verified"
+            res["checks"]["router_all_admitted"] = isinstance(c.get("router"), dict) and c["router"].get("not_admitted") == []
+            tl = c.get("trainer_layout")
+            res["checks"]["trainer_layout_world_4"] = isinstance(tl, dict) and tl.get("world") == 4
+            res["checks"]["no_unconsumed_batches"] = c.get("unconsumed_batches") == []
+            res["checks"]["verified_members_are_the_committed_4"] = four is not None and sorted(ver.get("members") or []) == four
+        rec_ev = [e for e in named(tape, "rl_reconfiguration") if e.get("result") == "RECOVERED"]
+        res["checks"]["tape_RECOVERED"] = bool(rec_ev) and (four is None or sorted(rec_ev[-1].get("members") or []) == four)
+        fork_ops = [r for r in journal if r.get("kind") == "fork_op" and str(r.get("tx_id", "")).startswith("rec-")]
+        res["checks"]["recovery_started_the_missing_cells"] = any(r.get("op") == "start" and r.get("status") == "done" for r in fork_ops)
+        if probe_after is not None:
+            st = (probe_after.get("cell_statuses") or {})
+            res["probe_after"] = {"membership": probe_after.get("membership"), "cell_statuses": st}
+            res["checks"]["probe_fork_epoch_matches_verified"] = ver is not None and (probe_after.get("membership") or {}).get("epoch") == ver.get("fork_epoch")
+            res["checks"]["probe_all_4_cells_running"] = sum(1 for v in st.values() if "Running" in str(v)) == 4
+        else:
+            res["probe_after"] = "missing (file evidence only)"
+    if case == "r7":
+        rc = [r for r in journal if r.get("kind") == "reconcile" and r.get("action") == "restore_membership_state"]
+        res["checks"]["reconcile_restore_membership_state_epoch_1"] = any(int(r.get("epoch", -1)) == 1 for r in rc)
+    rounds = _rounds_after(tape, t_verified)
+    res["rounds_after"] = len(rounds)
+    res["checks"]["rounds_after_restart_ge_%d" % min_rounds_after] = len(rounds) >= min_rounds_after
+    ident, detail = _identity(tape); res["identity"] = detail
+    if ident is None:
+        return _invalid(res, "trainer identity across the restart not observable: %s" % detail, "evidence_missing")
+    res["checks"]["trainer_identity_same_policy_hash"] = ident
+    if ledger is None:
+        return _invalid(res, "ledger journal missing: duplicate consumption not observable", "evidence_missing")
+    dup = _ledger_duplicates(ledger); res["ledger_duplicates"] = dup
+    res["checks"]["no_rollout_consumed_twice"] = not dup
+    term = [r["phase"] for r in phases(journal) if r.get("phase") in TERMINAL]
+    if "RECOVERY_REQUIRED" in term:
+        res["checks"]["no_RECOVERY_REQUIRED"] = False
+    res["verdict"] = "PASS" if all(v is True for v in res["checks"].values()) else "FAIL"
+    if res["verdict"] == "FAIL": res["marker"] = "recovery_failed"
+    return res
+
 # ----------------------------------------------------------------------------------------------- E1-A (c)
 def judge_e1a_c(journal, tape, expect, initial_members=None, round_is_rollout_id=True):
     """E1-A (c), re-based on rl_membership per round + retained rl_publication check (after the shrink, the next full publication has expect[-1] members).
@@ -496,6 +651,7 @@ def main(argv):
     ap.add_argument("--router-samples"); ap.add_argument("--gpu-samples"); ap.add_argument("--probe-after"); ap.add_argument("--probe-stale")
     ap.add_argument("--probe-oldepoch"); ap.add_argument("--dkill-log"); ap.add_argument("--expect-members"); ap.add_argument("--cells", default="")
     ap.add_argument("--out"); ap.add_argument("--marker-dir")
+    ap.add_argument("--launch-log"); ap.add_argument("--ledger")   # r5/r6/r7/r5c: restart-loop line, ledger journal
     a = ap.parse_args(argv)
     journal, tape = load(a.journal), load(a.tape)
     known = set(filter(None, a.cells.split(",")))
@@ -513,6 +669,9 @@ def main(argv):
     elif a.case == "d2": res = judge_d2(journal, tape, known, jl(a.dkill_log))
     elif a.case == "d4": res = judge_d4(journal, tape, known)
     elif a.case == "e1a_c": res = judge_e1a_c(journal, tape, [int(x) for x in a.expect_members.split(",")])
+    elif a.case in ("r5", "r6", "r7", "r5c"):
+        ll = open(a.launch_log).read().splitlines() if a.launch_log and os.path.exists(a.launch_log) else None
+        res = judge_recovery(a.case, journal, tape, known, load(a.ledger) if a.ledger else None, ll, probes["after"])
     else: raise SystemExit("unknown case " + a.case)
     if a.out: Path(a.out).write_text(json.dumps(res, indent=1, default=str))
     if a.marker_dir and res.get("marker"):

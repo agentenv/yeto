@@ -291,5 +291,114 @@ class CLI(unittest.TestCase):
         open(pf, "w").write(json.dumps({"probe_attested": False}) + "\n"); self.assertIsNone(J.load_probe(pf))
 
 
+
+
+
+# ----------------------------------------------------------------------------------------------- E1-D ⑤⑥⑦ restart recovery (r5/r6/r7/r5c)
+C4 = ["engine:c0", "engine:c1", "engine:c2", "engine:c3"]
+
+
+def rec(status, **k): return {"kind": "recovery", "tx_id": "rec-1-1-abc", "status": status, **k}
+def start(t): return {"event": "rl_driver_start", "time_unix": t}
+def pub(v, tok, members, t): return {"event": "rl_publication", "policy_version": v, "rl/policy_token": tok, "sync/publication_members": members, "time_unix": t}
+def train(t): return {"event": "rl_driver_phase", "phase": "train", "time_unix": t}
+VER_OK = {"members": C4, "fork_epoch": 2, "policy_token": "verified", "router": {"not_admitted": []}, "trainer_layout": {"world": 4, "tp": 1, "pp": 1, "cp": 1, "ep": 1, "dp": 4}, "unconsumed_batches": [], "published_version": 1}
+LEDGER_OK = [{"kind": "prepared", "rollout_id": 0}, {"kind": "outer_recorded", "rollout_id": 0}, {"kind": "prepared", "rollout_id": 1}, {"kind": "outer_recorded", "rollout_id": 1}]
+
+
+def r5_journal(verified=True, seq_ok=True):
+    j = [tx("VALIDATING", "up1"), tx("QUIESCING", "up1"), tx("INITIALIZING", "up1"), tx("VERIFYING", "up1"), tx("COMMITTED", "up1", wall_time=50.0),
+         tx("SUCCEEDED", "up1", recovered_after_restart=True, wall_time=100.0),
+         rec("planned", attempt=1, target=C4, actual=C4[:2], start=C4[2:], stop=[], wall_time=101.0),
+         {"kind": "fork_op", "tx_id": "rec-1-1-abc", "op": "start", "status": "issued", "cells": C4[2:]},
+         {"kind": "fork_op", "tx_id": "rec-1-1-abc", "op": "start", "status": "done", "cells": C4[2:], "result_fork_epoch": 2},
+         rec("membership_restored", members=C4, fork_epoch=2, wall_time=130.0)]
+    if verified: j.append(rec("verified", members=C4, fork_epoch=2, checks=VER_OK, wall_time=140.0))
+    if not seq_ok: j.insert(6, rec("superseded"))
+    return j
+
+
+def r5_tape(restart=True, same_hash=True, rounds=3, recovered=True):
+    t = [start(1.0), pub(0, "yeto:0:h0", C4[:2], 2.0), train(10.0), pub(1, "yeto:1:h1", C4[:2], 20.0), train(30.0)]
+    if restart:
+        t += [start(110.0), pub(1, "yeto:1:h1" if same_hash else "yeto:1:other", C4, 139.0)]
+        if recovered: t.append({"event": "rl_reconfiguration", "result": "RECOVERED", "members": C4, "time_unix": 140.0})
+        t += [train(150.0 + 10 * i) for i in range(rounds)]
+    return t
+
+
+class Recovery(unittest.TestCase):
+    def test_r5_pass_and_each_check(self):
+        r = J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "PASS", r)
+        self.assertEqual(J.judge_recovery("r5", r5_journal(), r5_tape(restart=False), set(C4), LEDGER_OK)["verdict"], "INVALID_TEST")   # kill not applied
+        self.assertEqual(J.judge_recovery("r5", r5_journal(), r5_tape(restart=False), set(C4), LEDGER_OK, ["[yeto] learner exited 86; in-place restart 1/2"])["verdict"], "INVALID_TEST")   # loop line but no second driver start: identity unobservable
+        r = J.judge_recovery("r5", r5_journal(verified=False), r5_tape(), set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "INVALID_TEST")   # recovery never finished
+        r = J.judge_recovery("r5", r5_journal(verified=False) + [rec("failed", errors=["x"]), {"kind": "phase", "phase": "RECOVERY_REQUIRED", "tx_id": "rec-1-1-abc"}], r5_tape(recovered=False), set(C4), LEDGER_OK)
+        self.assertEqual((r["verdict"], r["marker"]), ("FAIL", "recovery_failed"))
+        r = J.judge_recovery("r5", r5_journal(seq_ok=False), r5_tape(), set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["recovery_sequence"])
+        r = J.judge_recovery("r5", r5_journal(), r5_tape(same_hash=False), set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["trainer_identity_same_policy_hash"])
+        r = J.judge_recovery("r5", r5_journal(), r5_tape(rounds=2), set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["rounds_after_restart_ge_3"])
+        dup = LEDGER_OK + [{"kind": "outer_recorded", "rollout_id": 1}]
+        r = J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), dup); self.assertEqual(r["verdict"], "FAIL"); self.assertEqual(r["ledger_duplicates"], [1])
+        self.assertEqual(J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), None)["verdict"], "INVALID_TEST")   # ledger missing
+        for bad in ({"policy_token": "unavailable"}, {"router": "unavailable"}, {"trainer_layout": "unavailable"}, {"unconsumed_batches": [3]}):
+            j = r5_journal(verified=False) + [rec("verified", members=C4, fork_epoch=2, checks=dict(VER_OK, **bad), wall_time=140.0)]
+            self.assertEqual(J.judge_recovery("r5", j, r5_tape(), set(C4), LEDGER_OK)["verdict"], "FAIL", bad)
+        # tx SUCCEEDED but not marked recovered_after_restart (the commit happened after the restart: not ⑤)
+        j = r5_journal(); j[5] = tx("SUCCEEDED", "up1", wall_time=100.0)
+        r = J.judge_recovery("r5", j, r5_tape(), set(C4), LEDGER_OK); self.assertFalse(r["checks"]["up1_SUCCEEDED_recovered_after_restart"])
+        # probe: epoch must match the verified fork epoch and all 4 cells Running
+        good = {"probe_attested": True, "membership": {"epoch": 2}, "cell_statuses": {c: "phase='Running'" for c in ("c0", "c1", "c2", "c3")}}
+        self.assertEqual(J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), LEDGER_OK, None, good)["verdict"], "PASS")
+        self.assertEqual(J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), LEDGER_OK, None, dict(good, membership={"epoch": 1}))["verdict"], "FAIL")
+
+    def test_r7(self):
+        j = [tx("VALIDATING", "up1"), tx("COMMITTED", "up1"), tx("SUCCEEDED", "up1", wall_time=50.0),
+             {"kind": "reconcile", "action": "restore_membership_state", "epoch": 1}] + r5_journal()[6:] + \
+            [tx("VALIDATING", "dn1", wall_time=200.0), tx("SUCCEEDED", "dn1", wall_time=260.0)]
+        t = r5_tape(); t.append(pub(2, "yeto:2:h2", C4[:2], 270.0))
+        r = J.judge_recovery("r7", j, t, set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "PASS", r)
+        r = J.judge_recovery("r7", [x for x in j if x.get("kind") != "reconcile"], t, set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "FAIL")
+        r = J.judge_recovery("r7", j[:-1], t, set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "INVALID_TEST")   # dn1 never terminal
+
+    def test_r6(self):
+        j = [tx("VALIDATING", "up1"), tx("WAIT_SAFE", "up1"), tx("QUIESCING", "up1", wall_time=40.0), tx("CANCELLED", "up1", error="learner restarted before release", wall_time=100.0)]
+        t = r5_tape(recovered=False)
+        self.assertEqual(J.judge_recovery("r6", j, t, set(C4[:2]), LEDGER_OK)["verdict"], "PASS")
+        r = J.judge_recovery("r6", j + [rec("planned")], t, set(C4[:2]), LEDGER_OK); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["no_recovery"])
+        r = J.judge_recovery("r6", j[:3], t, set(C4[:2]), LEDGER_OK); self.assertEqual(r["verdict"], "INVALID_TEST")
+        r = J.judge_recovery("r6", j[:2] + [tx("CANCELLED", "up1")], t, set(C4[:2]), LEDGER_OK); self.assertFalse(r["checks"]["killed_at_QUIESCING"])
+
+    def test_r5c(self):
+        j = [tx("VALIDATING", "up1"), tx("SUCCEEDED", "up1"), tx("VALIDATING", "dn1"), tx("COMMITTED", "dn1"), tx("SUCCEEDED", "dn1", recovered_after_restart=True)]
+        t = [start(1.0), pub(0, "yeto:0:h0", C4[:2], 2.0), pub(1, "yeto:1:h1", C4, 20.0), train(30.0), start(110.0), pub(1, "yeto:1:h1", C4[:2], 139.0)] + [train(150.0 + 10 * i) for i in range(3)]
+        self.assertEqual(J.judge_recovery("r5c", j, t, set(C4), LEDGER_OK)["verdict"], "PASS")
+        r = J.judge_recovery("r5c", j + [rec("planned")], t, set(C4), LEDGER_OK); self.assertFalse(r["checks"]["no_recovery"])
+        t2 = list(t); t2[5] = pub(1, "yeto:1:h1", C4, 139.0)
+        r = J.judge_recovery("r5c", j, t2, set(C4), LEDGER_OK); self.assertFalse(r["checks"]["startup_shape_after_restart"])
+
+    def test_replay_cpu_r5(self):
+        """Replay of the CPU recovery test (tests/test_rl_reconfig_recovery.py::test_restart_after_commit_recovers_committed_members,
+        infra-e1-recovery 0e68962): journal + tape + ledger of a fake island whose up committed, learner restarted, members rebuilt.
+        Shape: the up committed and finished normally in the first process, then the learner restarted with the committed
+        config (not a kill at COMMITTED), the fake trainer has no actual_layout and the CPU restart ran without a ledger:
+        exactly those three §10.4 checks fail by design; everything else (recovery sequence, verified checks, RECOVERED,
+        identity, rounds, no duplicate consumption) passes on the real journal/tape."""
+        j, t, l = jl("cpu_r5_journal.jsonl"), jl("cpu_r5_tape.jsonl"), jl("cpu_r5_ledger.jsonl")
+        r = J.judge_recovery("r5", j, t, set(C4), l, up="up")   # the CPU test's request id
+        self.assertEqual(r["verdict"], "FAIL", r)
+        failed = sorted(k for k, v in r["checks"].items() if v is not True)
+        self.assertEqual(failed, ["no_unconsumed_batches", "trainer_layout_world_4", "up_SUCCEEDED_recovered_after_restart"], r["checks"])
+        self.assertTrue(r["checks"]["recovery_sequence"] and r["checks"]["tape_RECOVERED"] and r["checks"]["router_all_admitted"])
+        self.assertEqual(r["identity"]["version"], 0)   # LocalOnlySync restarts at 0: same initial policy hash
+        self.assertEqual(r["ledger_duplicates"], [])
+        # main() path with files
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("cpu_r5_journal.jsonl", "cpu_r5_tape.jsonl", "cpu_r5_ledger.jsonl"):
+                open(os.path.join(d, n), "w").write(open(os.path.join(FX, n)).read())
+            rc = J.main(["r5", os.path.join(d, "cpu_r5_journal.jsonl"), os.path.join(d, "cpu_r5_tape.jsonl"), "--ledger", os.path.join(d, "cpu_r5_ledger.jsonl"), "--out", os.path.join(d, "o.json"), "--marker-dir", d])
+            self.assertEqual(rc, 4); self.assertTrue(os.path.exists(os.path.join(d, "evidence_missing")))   # main() judges request id up1 (a8go's)
+
+
 if __name__ == "__main__":
     unittest.main()
