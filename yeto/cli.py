@@ -248,6 +248,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic, TEST ONLY (3.5 E1-B): the first member update ships the "
                     "LoRA adapter + EPS (trainer restored right after), so check_weights must "
                     "refuse the new engines")
+    rl.add_argument("--rl-test-hold-before-check-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (A4 E1-B (a)): the first member publication "
+                    "stays S seconds after end_update_weights and before check_weights/"
+                    "admit_cells (observation window); needs another --rl-test-* injection")
+    rl.add_argument("--rl-test-inject-tool-wait-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (A4b): the first drain counts an artificial "
+                    "tool wait for S seconds (drain timeout -> CANCELLED -> undrain); needs "
+                    "--rl-elastic-tool-wait-board")
     rl.add_argument("--rl-test-inject-stop-failures", type=int, default=None, metavar="N",
                     help="--rl-elastic, TEST ONLY (3.7 E1-D ③④): the next N fork stop_cells fail "
                     "inside the fork after deregistration (incomplete)")

@@ -613,3 +613,34 @@ def test_timeouts_need_elastic_and_positive_values():
         launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "5")), "ports")
     with pytest.raises(ValueError, match="must be positive"):
         launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "0")), "ports")
+
+
+def test_hold_and_tool_wait_switches_reach_the_island(tmp_path, monkeypatch):
+    run = island_run(BASE + _elastic(tmp_path) + (
+        "--rl-elastic-tool-wait-board", "--rl-test-inject-lora-perturb", "0.01",
+        "--rl-test-hold-before-check-s", "45", "--rl-test-inject-tool-wait-s", "30"), monkeypatch)
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert env["YETO_RL_TEST_HOLD_BEFORE_CHECK_S"] == "45.0"
+    assert env["YETO_RL_TEST_INJECT_TOOL_WAIT_S"] == "30.0"
+
+
+def test_hold_and_tool_wait_switch_validation(tmp_path):
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    for extra in (("--rl-test-hold-before-check-s", "5", "--rl-test-inject-lora-perturb", "0.01"),
+                  ("--rl-test-inject-tool-wait-s", "5", "--rl-elastic-tool-wait-board")):
+        with pytest.raises(ValueError, match="need --rl-elastic"):
+            launcher._check_ports_infra_switches(_cli(extra), "ports")
+    with pytest.raises(ValueError, match="must be positive"):
+        launcher._check_ports_infra_switches(
+            _cli(_elastic(tmp_path) + ("--rl-elastic-tool-wait-board",
+                                       "--rl-test-inject-tool-wait-s", "0")), "ports")
+    with pytest.raises(ValueError, match="needs --rl-elastic-tool-wait-board"):
+        launcher._check_ports_infra_switches(
+            _cli(_elastic(tmp_path) + ("--rl-test-inject-tool-wait-s", "5")), "ports")
+    with pytest.raises(ValueError, match="another --rl-test"):
+        launcher._check_ports_infra_switches(
+            _cli(_elastic(tmp_path) + ("--rl-test-hold-before-check-s", "5")), "ports")
