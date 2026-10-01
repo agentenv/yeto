@@ -394,6 +394,17 @@ class IslandController:
     def record_watchdog_action(self, tx_id: str, **fields: Any) -> None:
         self._record("watchdog_action", tx_id=tx_id, **fields)
 
+    def watchdog_unresolved(self, tx_id: str, phase: str, errors: Any) -> None:
+        """The watchdog action could not kill (all of) the target generation. The step
+        stays blocked on engines nobody manages, so the old-set rebuild cannot be
+        trusted: enter RECOVERY_REQUIRED at once (admission closed, the learner stops
+        consuming); the blocked step's own ``_rebuild_old`` then re-raises it."""
+        tx = self._tx
+        if tx is None or tx.tx_id != tx_id or self.recovery_required:
+            return
+        self._enter_recovery(tx_id, f"watchdog could not kill the target generation in {phase}: "
+                                    f"{list(errors)[:2]!r}")
+
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler
 

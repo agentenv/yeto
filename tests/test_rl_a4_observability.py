@@ -131,7 +131,7 @@ def test_perturbation_writes_an_applied_test_injection_record(monkeypatch):
     pub, world, records = _sinked(monkeypatch, 0.01)
     with pytest.raises(PublicationError):
         asyncio.run(pub._publish_members("tok", ["c2"], 1))
-    (event, f), = records
+    (event, f), = [r for r in records if r[0] == "test_injection"]  # member_engines is not an injection
     assert event == "test_injection" and f["kind"] == "lora_perturb" and f["applied"] is True
     assert f["target_members"] == ["engine:c2"] and f["scale"] == 0.01
 
@@ -248,14 +248,15 @@ def test_hold_sits_between_end_update_and_check_without_blocking_the_loop(monkey
     records.clear()
     world["engine"].pop("c2")
     asyncio.run(pub._publish_members("tok", ["c3"], 2))
-    assert not records
+    assert [e for e, _ in records if e in ("test_hold", "test_injection")] == []
 
 
 def test_hold_is_ignored_outside_test_injection_mode(monkeypatch, capsys):
     pub, world, records = _hold_publisher(monkeypatch, 5, injection_mode=False)
     started = time.monotonic()
     asyncio.run(pub._publish_members("tok", ["c2"], 1))
-    assert time.monotonic() - started < 2 and not records
+    assert time.monotonic() - started < 2
+    assert [e for e, _ in records if e in ("test_hold", "test_injection")] == []
     assert "ignored" in capsys.readouterr().err
 
 
@@ -406,6 +407,42 @@ def _real_pool(monkeypatch, seconds, board):
     records = []
     pool.event_sink = lambda event, **f: records.append((event, f))
     return pool, records
+
+
+def test_undrain_fail_injection_fails_the_next_n_undrains_and_records(monkeypatch):
+    from yeto.rl.engine.miles_adapter.rollout import INJECT_UNDRAIN_FAIL_ENV
+
+    monkeypatch.setenv(INJECT_UNDRAIN_FAIL_ENV, "1")
+    pool, records = _real_pool(monkeypatch, None, None)
+    calls = []
+
+    async def uncordon_cells(cells):
+        calls.append(sorted(cells))
+
+    pool._controller.uncordon_cells = uncordon_cells
+    with pytest.raises(RuntimeError, match="injected undrain failure"):
+        pool.undrain(frozenset({"engine:c1"}))
+    assert calls == [] and pool.injected_undrain_failures == [frozenset({"engine:c1"})]
+    (event, f), = records
+    assert event == "test_injection" and f["kind"] == "undrain_fail" and f["applied"] is True
+    assert f["target_members"] == ["engine:c1"]
+    pool.undrain(frozenset({"engine:c1"}))  # N exhausted: the real uncordon runs
+    assert calls == [["c1"]]
+
+
+def test_without_the_env_undrain_is_the_plain_uncordon(monkeypatch):
+    from yeto.rl.engine.miles_adapter.rollout import INJECT_UNDRAIN_FAIL_ENV
+
+    monkeypatch.delenv(INJECT_UNDRAIN_FAIL_ENV, raising=False)
+    pool, records = _real_pool(monkeypatch, None, None)
+    calls = []
+
+    async def uncordon_cells(cells):
+        calls.append(sorted(cells))
+
+    pool._controller.uncordon_cells = uncordon_cells
+    pool.undrain(frozenset({"engine:c0"}))
+    assert calls == [["c0"]] and records == []
 
 
 def test_tool_wait_injection_counts_on_the_board_for_n_seconds(monkeypatch):

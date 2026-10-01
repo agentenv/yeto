@@ -292,12 +292,14 @@ def test_injection_and_restart_switches_reach_the_island(tmp_path, monkeypatch):
     run = island_run(BASE + _elastic(tmp_path) + (
         "--rl-elastic-state-dir", "/vol/elastic", "--rl-elastic-restart-attempts", "2",
         "--rl-test-inject-lora-perturb", "0.01",
-        "--rl-test-inject-stop-failures", "1", "--rl-test-kill-learner-at", "COMMITTED"),
+        "--rl-test-inject-stop-failures", "1", "--rl-test-kill-learner-at", "COMMITTED",
+        "--rl-test-inject-undrain-fail", "1"),
         monkeypatch)
     assert "yeto_rl_restart_loop python3 -m yeto.rl.learner" in run
     args, env = learner_from_run(run, tmp_path / "home")
     assert args.rl_elastic_state_dir == "/vol/elastic"
     assert env["YETO_RL_TEST_INJECT_LORA_PERTURB"] == "0.01"
+    assert env["YETO_RL_TEST_INJECT_UNDRAIN_FAIL"] == "1"
     assert env["YETO_RL_TEST_INJECT_STOP_FAILURES"] == "1"
     assert env["YETO_RL_TEST_KILL_LEARNER_AT"] == "COMMITTED"
     assert env["YETO_RL_RESTART_ATTEMPTS"] == "2"
@@ -335,7 +337,7 @@ def test_injection_switches_are_refused_without_elastic_or_restart():
     from yeto import launcher
 
     for extra in (("--rl-test-inject-stop-failures", "1"), ("--rl-elastic-state-dir", "/v"),
-                  ("--rl-test-inject-lora-perturb", "0.01")):
+                  ("--rl-test-inject-lora-perturb", "0.01"), ("--rl-test-inject-undrain-fail", "1")):
         with pytest.raises(ValueError, match="need --rl-elastic"):
             launcher._check_ports_infra_switches(_cli(extra), "ports")
     with pytest.raises(ValueError, match="needs --rl-elastic-restart-attempts"):

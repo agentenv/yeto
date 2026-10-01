@@ -96,6 +96,10 @@ INJECT_STOP_FAILURES_ENV = "YETO_RL_TEST_INJECT_STOP_FAILURES"
 # than the drain budget it makes the drain time out -> CANCELLED -> undrain, with no
 # request touched (the entry is not a request). Unset (default) = no effect.
 INJECT_TOOL_WAIT_ENV = "YETO_RL_TEST_INJECT_TOOL_WAIT_S"
+# Test-only (A4b / E1-C variant): the next N ``undrain`` calls fail inside the
+# adapter (as a fork uncordon failure would), so a drain timeout cannot restore
+# the old routing and the controller must end in RECOVERY_REQUIRED, never CANCELLED.
+INJECT_UNDRAIN_FAIL_ENV = "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"
 INJECTED_TOOL_WAIT_ID = "yeto-test-injected-tool-wait"
 
 
@@ -446,6 +450,9 @@ class MilesRolloutPool:
         if self._stop_failures_left < 0:
             raise ValueError(f"{INJECT_STOP_FAILURES_ENV} must be >= 0")
         self.injected_stop_failures = 0
+        raw_uf = os.environ.get(INJECT_UNDRAIN_FAIL_ENV)
+        self._inject_undrain_fail = int(raw_uf) if raw_uf else 0
+        self.injected_undrain_failures: list[frozenset[str]] = []
         raw_tw = os.environ.get(INJECT_TOOL_WAIT_ENV)
         self._inject_tool_wait = float(raw_tw) if raw_tw else None
         if self._inject_tool_wait is not None and not self._inject_tool_wait > 0:
@@ -893,6 +900,17 @@ class MilesRolloutPool:
             timer.start()
 
     def undrain(self, members: frozenset[str]) -> None:
+        if self._inject_undrain_fail > 0:
+            import sys
+
+            self._inject_undrain_fail -= 1
+            self.injected_undrain_failures.append(frozenset(members))
+            print(f"[yeto] TEST INJECTION {INJECT_UNDRAIN_FAIL_ENV}: undrain of {sorted(members)} "
+                  "fails (the cordoned members stay cordoned)", file=sys.stderr, flush=True)
+            if self.event_sink is not None:
+                self.event_sink("test_injection", kind="undrain_fail",
+                                target_members=sorted(members), applied=True)
+            raise RuntimeError("injected undrain failure: uncordon not performed")
         self._run(self._controller.uncordon_cells(cells_of(members)))
 
     def trajectory_load(self) -> dict[str, Any] | None:

@@ -127,12 +127,27 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
             from miles.utils.workers.ray_worker_manager import RayWorkerManager
 
             mgr = RayWorkerManager.get_handle()
+        from .rollout import cell_of
+
         killed, errors = [], []
-        for cell in cells:
+        for member in cells:
+            # the controller speaks member ids ("engine:<cell>"); the fork's
+            # RayWorkerManager is keyed by the bare cell id (GPU a4s3/a4s4: the
+            # prefixed id matched nothing and nothing was killed)
             try:
+                cell = cell_of(member)
                 infos = ray_mod.get(mgr.get_worker_infos.remote(cell), timeout=timeout_s)
             except Exception as exc:  # noqa: BLE001
-                errors.append({"cell": cell, "error": repr(exc)})
+                # the fork does not know the id (declared/mapped wrongly): distinguishable
+                errors.append({"cell": member, "fork_cell": cell, "kind": "unknown_target",
+                               "error": repr(exc)})
+                continue
+            if not infos:
+                # the cell exists but has no live worker actors: nothing to kill means the
+                # blocked step cannot be released by this action -> not resolved (never a
+                # silent killed=[])
+                errors.append({"cell": member, "fork_cell": cell, "kind": "no_workers",
+                               "error": "cell has no live worker actors (not started or already stopped)"})
                 continue
             for info in infos:
                 try:
@@ -141,11 +156,16 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
                         timeout=timeout_s,
                     )
                     ray_mod.kill(handle, no_restart=True)
-                    killed.append({"cell": cell, "worker": info.name,
+                    killed.append({"cell": member, "fork_cell": cell, "worker": info.name,
                                    "generation": info.generation})
                 except Exception as exc:  # noqa: BLE001
-                    errors.append({"cell": cell, "worker": info.name, "error": repr(exc)})
+                    errors.append({"cell": member, "fork_cell": cell, "worker": info.name,
+                                   "kind": "kill_failed", "error": repr(exc)})
         controller.record_watchdog_action(tx_id, phase=phase, killed=killed, errors=errors)
+        if errors:
+            # a target the watchdog could not kill keeps the blocked step alive and its
+            # engines unmanaged: do not wait silently, the island needs recovery
+            controller.watchdog_unresolved(tx_id, phase, errors)
 
     return on_watchdog
 
