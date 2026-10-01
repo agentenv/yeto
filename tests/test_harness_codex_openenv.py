@@ -353,3 +353,24 @@ def test_alignment_contract_fails_closed():
     for match, sample in cases.items():
         with pytest.raises(alignment.AlignmentError, match=match):
             alignment.assert_sample_alignment(sample)
+
+
+# ---------------------------------------------------------------- 2.2 legacy forwarding / 6.3 boundary
+
+def test_legacy_preflight_forwarder_matches_legacy_failure_classes(monkeypatch):
+    env = dict(adapter._OPENENV_IDENTITY_ENV)
+    preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", env)
+    with pytest.raises(ValueError, match="requires backend profile"):
+        preflight.forward_legacy_openenv_preflight(None, "qwen35", env)
+    with pytest.raises(ValueError, match="environment drifted"):
+        preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", {k: v for k, v in env.items() if "MODEL_REVISION" not in k})
+    pins = preflight.required_pin_updates()
+    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "995e48f0e2817191314f19e794e25fd70e738aec5957213b51914f24d552f7b7"
+    assert pins["CODEX_OPENENV_AGENT"].endswith("codex_openenv_subprocess_agent_function.run")
+
+
+def test_scrubbed_environment_removes_every_reward_key_name():
+    base = {n: "x" for n in adapter.hmac_key_env_names()} | {"PATH": "/bin"}
+    assert subprocess_agent.scrubbed_environment(base) == {"PATH": "/bin"}
+    with pytest.raises(RuntimeError, match="leaked"):
+        adapter.assert_no_reward_key(base)

@@ -84,3 +84,62 @@ def preflight_codex_openenv(
         "identity": adapter.codex_openenv_harness_identity(),
         "compaction": "disabled",
     }
+
+
+# ---------------------------------------------------------------------------
+# Task 2.2: legacy preflight forwarding (injectable; legacy modules are not edited here)
+#
+# ``yeto/rl/learner.py::_preflight_codex_openenv_adapter`` and
+# ``yeto/rl/tbench_direct_preflight.py::_attest_adapter`` currently import the
+# adapter from ``<miles_root>/examples/experimental/openenv`` and compare it
+# against ``yeto.rl.CODEX_OPENENV_IDENTITY_ENV`` (image-line pins).  Once the
+# image line repoints those pins (see ``required_pin_updates``), the legacy
+# functions become one-liners calling ``forward_legacy_openenv_preflight``.
+
+def forward_legacy_openenv_preflight(args: Any, profile_name: str, env: Mapping[str, str] | None = None) -> None:
+    """Drop-in body for ``learner._preflight_codex_openenv_adapter(args, profile)``.
+
+    Same failure classes/messages as legacy so existing callers keep their
+    behaviour: ``ValueError`` with "requires backend profile", "identity drifted",
+    "environment drifted".
+    """
+    del args  # the adapter no longer lives under miles_root
+    if profile_name != adapter.BACKEND_PROFILE_NAME:
+        raise ValueError("the Codex OpenEnv adapter requires backend profile qwen35_08b")
+    live = adapter.codex_openenv_harness_identity()
+    expected = {
+        name.removeprefix("YETO_CODEX_OPENENV_").lower(): value
+        for name, value in adapter._OPENENV_IDENTITY_ENV.items()
+        if name.endswith("_SHA256")
+    }
+    if live != expected:
+        raise ValueError("the Codex OpenEnv surface identity drifted")
+    env = os.environ if env is None else env
+    mismatched = [name for name, value in adapter._OPENENV_IDENTITY_ENV.items() if env.get(name) != value]
+    if mismatched:
+        raise ValueError("Codex OpenEnv container environment drifted: " + ", ".join(mismatched))
+
+
+def required_pin_updates() -> dict[str, Any]:
+    """What ``yeto/rl/__init__.py`` (image line) must change to point at this package."""
+    import hashlib
+
+    here = Path(__file__).resolve().parent
+    sha = lambda name: hashlib.sha256((here / name).read_bytes()).hexdigest()  # noqa: E731
+    return {
+        "SECRLENV_AGENT_PATH": "yeto/rl/harness/codex/agent.py",
+        "SECRLENV_AGENT_SHA256": sha("agent.py"),
+        "SECRLENV_AGENT": "yeto.rl.harness.codex.agent.run",
+        "SECRLENV_REWARD": "yeto.rl.harness.codex.reward:reward_func",
+        "SECRLENV_GROUP_FILTER": "yeto.rl.harness.codex.reward.check_group",
+        "SECRLENV_GENERATE": "yeto.rl.harness.codex.generate.generate",
+        "SECRLENV_GENERATE_SHA256": sha("generate.py"),
+        "CODEX_HARNESS_AGENT": "yeto.rl.harness.codex.codex_harness_agent.run",
+        "CODEX_HARNESS_AGENT_PATH": "yeto/rl/harness/codex/codex_harness_agent.py",
+        "CODEX_HARNESS_AGENT_SHA256": sha("codex_harness_agent.py"),
+        "CODEX_OPENENV_AGENT": "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run",
+        "CODEX_OPENENV_AGENT_MODULES": (
+            "codex_openenv_subprocess_agent_function.py", "codex_openenv_agent_worker.py", "codex_openenv_agent_function.py",
+        ),
+        "CODEX_OPENENV_IDENTITY_ENV": dict(adapter._OPENENV_IDENTITY_ENV),
+    }
