@@ -129,7 +129,7 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
             mgr = RayWorkerManager.get_handle()
         from .rollout import cell_of
 
-        killed, errors = [], []
+        killed, errors, skipped = [], [], []
         for member in cells:
             # the controller speaks member ids ("engine:<cell>"); the fork's
             # RayWorkerManager is keyed by the bare cell id (GPU a4s3/a4s4: the
@@ -143,11 +143,13 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
                                "error": repr(exc)})
                 continue
             if not infos:
-                # the cell exists but has no live worker actors: nothing to kill means the
-                # blocked step cannot be released by this action -> not resolved (never a
-                # silent killed=[])
-                errors.append({"cell": member, "fork_cell": cell, "kind": "no_workers",
-                               "error": "cell has no live worker actors (not started or already stopped)"})
+                # the cell exists but has no live worker actors (its engine already died /
+                # was never registered, e.g. killed during start_cells - GPU d123 chain 3):
+                # nothing to kill, and nothing keeps the step alive on our side either, so
+                # this is journaled distinctly but is NOT an unresolved target (the fork call
+                # fails or returns on its own and the transaction goes to REBUILD_OLD)
+                skipped.append({"cell": member, "fork_cell": cell, "kind": "no_workers",
+                                "note": "cell has no live worker actors (not started or already stopped)"})
                 continue
             for info in infos:
                 try:
@@ -161,7 +163,8 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
                 except Exception as exc:  # noqa: BLE001
                     errors.append({"cell": member, "fork_cell": cell, "worker": info.name,
                                    "kind": "kill_failed", "error": repr(exc)})
-        controller.record_watchdog_action(tx_id, phase=phase, killed=killed, errors=errors)
+        controller.record_watchdog_action(tx_id, phase=phase, killed=killed, errors=errors,
+                                          skipped=skipped)
         if errors:
             # a target the watchdog could not kill keeps the blocked step alive and its
             # engines unmanaged: do not wait silently, the island needs recovery

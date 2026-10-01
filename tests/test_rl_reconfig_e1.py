@@ -1032,10 +1032,11 @@ def test_watchdog_unmappable_target_enters_recovery_required_not_silent_wait(tmp
     assert not ctl.admission_open
 
 
-def test_watchdog_target_without_live_workers_is_unresolved_not_silent(tmp_path):
-    """A cell the fork knows but with no live worker actors (not started yet / already
-    stopped) cannot release the blocked step by being killed: journaled as kind
-    ``no_workers`` and the island enters RECOVERY_REQUIRED (never a bare killed=[])."""
+def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path):
+    """A cell the fork knows but with no live worker actors (its engine died during
+    start_cells, GPU d123 chain 3) is journaled as ``skipped`` kind ``no_workers``; it is
+    not an unresolved target, so the transaction still ends REBUILT_OLD (not
+    RECOVERY_REQUIRED) once the blocked fork call returns."""
     from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
 
     driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
@@ -1068,8 +1069,10 @@ def test_watchdog_target_without_live_workers_is_unresolved_not_silent(tmp_path)
     records = read_journal(tmp_path / "state/reconfig")
     action = next(r for r in records if r["kind"] == "watchdog_action")
     assert [k["cell"] for k in action["killed"]] == ["engine:c2"]  # c2 had a worker: killed
-    assert [(e["cell"], e["kind"]) for e in action["errors"]] == [("engine:c3", "no_workers")]
-    assert ctl.recovery_required and "could not kill" in ctl.recovery_required
+    assert action["errors"] == []
+    assert [(e["cell"], e["kind"]) for e in action["skipped"]] == [("engine:c3", "no_workers")]
+    assert not ctl.recovery_required
+    assert ctl.status("r")["phase"] == REBUILT_OLD
 
 
 def test_watchdog_outside_start_verify_kills_nothing(tmp_path):
