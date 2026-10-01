@@ -419,3 +419,7 @@
   - 所有 D 项：learner/trainer 身份（PID、policy hash）与 ledger 无重复消费。
 - **E1-C/A4b（步骤 6）**：`--rl-elastic-drain-timeout-s 5`、④ 用 `--rl-elastic-recovery-timeout-s`（已并入 D4）；见后续小节。
 - 预算：B1 续跑预估 ≈ $8–10 + 7 + 14 + 8 + 9 + 8 + 10 + A4b ≈ 13 = 约 $80；累计 >$90 停下汇报。失败处理：脚本/环境小问题修好后重跑一次；yeto 代码实质缺陷或判据争议 → 停在安全点汇报。
+
+### 9.21 A4 watchdog 重跑参数（运行前提交，2026-10-01，用户批准）
+- up 事务 deadline 由 120 s 改为 **240 s**（Nebius 8×H100 上 `start_cells` ≈143 s，原 deadline 短于 engine 启动，阻塞注入从未被执行到；见 `evidence/infra-v2-b1/a4s3/RESULT.md` 步骤 4）。其余判据（plan-3.8-4.4-v2 §4 (1)–(5)）不变。
+- GPU 重跑暂停，待用户分析后另行批准。
