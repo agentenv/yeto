@@ -1,0 +1,2 @@
+# credential scan 2026-09-29T18:25:00Z: grep -rEn over evidence/ for token/key patterns
+hits: 0

@@ -1,0 +1,24 @@
+[
+ {
+  "object_id": "ap-EEOUsOKydYiZAicXEClFyy",
+  "description": "algo2b-t4-parse",
+  "environment": "main",
+  "interval_start": "2026-09-30T04:00:00",
+  "cost": "0.03859101"
+ },
+ {
+  "object_id": "ap-z00PQUsU90bkkq0UVMqKq4",
+  "description": "algo2b-t4-parse",
+  "environment": "main",
+  "interval_start": "2026-09-30T03:00:00",
+  "cost": "0.02774499"
+ },
+ {
+  "object_id": "ap-z00PQUsU90bkkq0UVMqKq4",
+  "description": "algo2b-t4-parse",
+  "environment": "main",
+  "interval_start": "2026-09-30T04:00:00",
+  "cost": "0.00375517"
+ }
+]
+total 0.07009117000000001

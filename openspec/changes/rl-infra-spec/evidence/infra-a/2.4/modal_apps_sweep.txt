@@ -1,0 +1,5 @@
+{'app_id': 'ap-cSy6saGaiWt0bDbfjkPB0s', 'description': 'yeto-infra-a-s5-c4-s29', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 23:02:22+00:00', 'stopped_at': '2026-09-29 23:25:23+00:00'}
+{'app_id': 'ap-41ajpTQ7hHMbeJMaFHNdy6', 'description': 'yeto-infra-a-s5-t1r3-s29', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 22:42:15+00:00', 'stopped_at': '2026-09-29 23:01:44+00:00'}
+{'app_id': 'ap-m91lFioTiCEWmKZdj6VzAz', 'description': 'yeto-infra-a-s5-t2r2-s29', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 21:54:23+00:00', 'stopped_at': '2026-09-29 22:42:01+00:00'}
+{'app_id': 'ap-ZkS65xtZJlEvFyNccKd8Hx', 'description': 'yeto-infra-a-s5-c4-s17', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 21:31:12+00:00', 'stopped_at': '2026-09-29 21:53:44+00:00'}
+{'app_id': 'ap-yON2TDa2BBL0k4Hd7om5pv', 'description': 'yeto-infra-a-s5-t1r3-s17', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 21:10:37+00:00', 'stopped_at': '2026-09-29 21:30:46+00:00'}

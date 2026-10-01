@@ -1,0 +1,2 @@
+{"configs":{"T1R1S1":{"trainer":1,"rollout":1,"standby":1,"rollout_engine_gpus":1},"T1R2S0":{"trainer":1,"rollout":2,"standby":0,"rollout_engine_gpus":1}},
+ "edges":[{"source":"T1R1S1","target":"T1R2S0","kind":"rollout-only"},{"source":"T1R2S0","target":"T1R1S1","kind":"rollout-only"}]}

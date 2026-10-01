@@ -1,0 +1,62 @@
+{
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "advantage": {
+    "estimator": "grpo",
+    "std_normalization": true,
+    "rewards_normalization": true,
+    "whiten": false,
+    "reward_postprocess": {
+      "path": "yeto.rl.algos.reward_pipeline.post_process",
+      "sha256": "cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162"
+    },
+    "reward_binary": true,
+    "transform": "maxrl"
+  },
+  "loss": {
+    "variant": "policy_loss",
+    "eps_clip": null,
+    "eps_clip_high": null,
+    "eps_clip_c": null,
+    "aggregation": "default",
+    "reducer": null,
+    "custom_loss": null
+  },
+  "kl": {
+    "placement": "none",
+    "coef": null,
+    "estimator": null,
+    "unbiased": false
+  },
+  "correction": {
+    "method": "none",
+    "tis_clip": null,
+    "tis_clip_low": null,
+    "opsm_delta": null,
+    "function": null,
+    "use_rollout_logprobs": false,
+    "mismatch_metrics": false
+  },
+  "sampling": {
+    "filter": null,
+    "max_replacements": null,
+    "over_sampling_batch_size": null,
+    "overlong_filter": false
+  },
+  "execution": {
+    "needs_critic": false,
+    "max_policy_staleness": 0,
+    "group_required": true,
+    "needs_rollout_logprobs": false
+  },
+  "entropy_coef": 0.0,
+  "plugins": [
+    {
+      "path": "yeto.rl.algos.reward_pipeline.grpo_default",
+      "sha256": "cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162"
+    },
+    {
+      "path": "yeto.rl.algos.seq_adv.gdpo",
+      "sha256": "2c710922aa44d7e0e6108450dc0fac6128063714385501c528def06c1ea4e656"
+    }
+  ]
+}

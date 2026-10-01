@@ -1,0 +1,1 @@
+2024685 bash -c sleep 2058; /tmp/modal-venv/bin/modal app stop -y yeto-algo2a-g3; pkill -f /tmp/algo2a/g3home/yeto-syncer

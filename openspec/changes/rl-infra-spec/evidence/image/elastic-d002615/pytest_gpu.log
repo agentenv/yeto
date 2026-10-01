@@ -1,0 +1,39 @@
+..........................s..F..................                         [100%]
+=================================== FAILURES ===================================
+_____________ test_upstream_parse_args_accepts_translation[False] ______________
+tests/test_rl_miles_adapter_config.py:344: in test_upstream_parse_args_accepts_translation
+    launch = mc.translate_run_config(cfg, spec)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+yeto/rl/engine/miles_adapter/config.py:527: in translate_run_config
+    raise MilesConfigError(
+E   yeto.rl.engine.miles_adapter.config.MilesConfigError: a LoRA fixed partition publishes over NCCL broadcast every round; the trainer must stay resident (no offload_train)
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+    from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[True]
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[True]
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[True]
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[True]
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[True]
+    action = action_class(**kwargs)
+
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[True]
+
+=========================== short test summary info ============================
+FAILED tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[False]
+SKIPPED [1] tests/test_rl_miles_adapter_config.py:301: upstream cell counter importable; covered by parse_args check
+
+rc 0
+terminated sb-t1GlvtiBBvlpmDbnCvZmOK

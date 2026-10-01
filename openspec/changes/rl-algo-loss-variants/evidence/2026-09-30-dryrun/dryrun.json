@@ -1,0 +1,248 @@
+{
+  "absorbed_flags": {
+    "--calculate-per-token-loss": true,
+    "--eps-clip": "0.2",
+    "--eps-clip-high": "0.28",
+    "--policy-loss-variant": "cispo"
+  },
+  "algorithm_spec": {
+    "advantage": {
+      "estimator": "grpo",
+      "reward_binary": false,
+      "reward_postprocess": null,
+      "rewards_normalization": true,
+      "std_normalization": true,
+      "whiten": false
+    },
+    "correction": {
+      "function": null,
+      "method": "none",
+      "mismatch_metrics": false,
+      "opsm_delta": null,
+      "tis_clip": null,
+      "tis_clip_low": null,
+      "use_rollout_logprobs": false
+    },
+    "entropy_coef": 0.0,
+    "execution": {
+      "group_required": true,
+      "max_policy_staleness": 0,
+      "needs_critic": false,
+      "needs_rollout_logprobs": false
+    },
+    "kl": {
+      "coef": null,
+      "estimator": null,
+      "placement": "none",
+      "unbiased": false
+    },
+    "loss": {
+      "aggregation": "token",
+      "custom_loss": null,
+      "eps_clip": 0.2,
+      "eps_clip_c": null,
+      "eps_clip_high": 0.28,
+      "policy_loss_variant": "cispo",
+      "reducer": null,
+      "variant": "policy_loss"
+    },
+    "plugins": [],
+    "sampling": {
+      "filter": null,
+      "max_replacements": null,
+      "over_sampling_batch_size": null,
+      "overlong_filter": false
+    },
+    "schema": "yeto-rl-algorithm-spec-v2"
+  },
+  "algorithm_spec_sha256": "df42720f692e4493426b05573e03bad0836b75cd2d9b1dd9f522b05a1d0dd3f9",
+  "error": "engine 'miles-upstream': losses mechanism 'cispo' not supported (supported: ['policy_loss']; expressible but not enabled on this engine)",
+  "launch_warnings": [],
+  "miles_argv": [
+    "--advantage-estimator",
+    "grpo",
+    "--eps-clip",
+    "0.2",
+    "--eps-clip-high",
+    "0.28",
+    "--calculate-per-token-loss",
+    "--policy-loss-variant",
+    "cispo"
+  ],
+  "remaining_extra_argv": [],
+  "required_mechanisms": [
+    "advantage_estimators:grpo",
+    "corrections:none",
+    "features:clip_higher",
+    "features:eps_clip",
+    "kl_placements:none",
+    "loss_aggregations:token",
+    "losses:cispo",
+    "losses:policy_loss"
+  ],
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "verdict": "rejected"
+}
+{
+  "absorbed_flags": {
+    "--policy-loss-variant": "sapo"
+  },
+  "algorithm_spec": {
+    "advantage": {
+      "estimator": "grpo",
+      "reward_binary": false,
+      "reward_postprocess": null,
+      "rewards_normalization": true,
+      "std_normalization": true,
+      "whiten": false
+    },
+    "correction": {
+      "function": null,
+      "method": "none",
+      "mismatch_metrics": false,
+      "opsm_delta": null,
+      "tis_clip": null,
+      "tis_clip_low": null,
+      "use_rollout_logprobs": false
+    },
+    "entropy_coef": 0.0,
+    "execution": {
+      "group_required": true,
+      "max_policy_staleness": 0,
+      "needs_critic": false,
+      "needs_rollout_logprobs": false
+    },
+    "kl": {
+      "coef": null,
+      "estimator": null,
+      "placement": "none",
+      "unbiased": false
+    },
+    "loss": {
+      "aggregation": "default",
+      "custom_loss": null,
+      "eps_clip": null,
+      "eps_clip_c": null,
+      "eps_clip_high": null,
+      "policy_loss_variant": "sapo",
+      "reducer": null,
+      "sapo_tau_neg": 1.05,
+      "sapo_tau_pos": 1.0,
+      "variant": "policy_loss"
+    },
+    "plugins": [],
+    "sampling": {
+      "filter": null,
+      "max_replacements": null,
+      "over_sampling_batch_size": null,
+      "overlong_filter": false
+    },
+    "schema": "yeto-rl-algorithm-spec-v2"
+  },
+  "algorithm_spec_sha256": "a67e4096f37c64d0d615451d9fe8bfb212260ab8e620ccab92188fb61a78b37b",
+  "launch_warnings": [],
+  "miles_argv": [
+    "--advantage-estimator",
+    "grpo",
+    "--policy-loss-variant",
+    "sapo",
+    "--sapo-tau-pos",
+    "1.0",
+    "--sapo-tau-neg",
+    "1.05"
+  ],
+  "remaining_extra_argv": [],
+  "required_mechanisms": [
+    "advantage_estimators:grpo",
+    "corrections:none",
+    "kl_placements:none",
+    "loss_aggregations:default",
+    "losses:policy_loss",
+    "losses:sapo"
+  ],
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "verdict": "accepted"
+}
+{
+  "absorbed_flags": {
+    "--policy-loss-variant": "gmpo",
+    "--sapo-tau-pos": "1.2"
+  },
+  "algorithm_spec": {
+    "advantage": {
+      "estimator": "grpo",
+      "reward_binary": false,
+      "reward_postprocess": null,
+      "rewards_normalization": true,
+      "std_normalization": true,
+      "whiten": false
+    },
+    "correction": {
+      "function": null,
+      "method": "none",
+      "mismatch_metrics": false,
+      "opsm_delta": null,
+      "tis_clip": null,
+      "tis_clip_low": null,
+      "use_rollout_logprobs": false
+    },
+    "entropy_coef": 0.0,
+    "execution": {
+      "group_required": true,
+      "max_policy_staleness": 0,
+      "needs_critic": false,
+      "needs_rollout_logprobs": false
+    },
+    "kl": {
+      "coef": null,
+      "estimator": null,
+      "placement": "none",
+      "unbiased": false
+    },
+    "loss": {
+      "aggregation": "default",
+      "custom_loss": null,
+      "eps_clip": null,
+      "eps_clip_c": null,
+      "eps_clip_high": null,
+      "gmpo_log_clip_high": 0.4,
+      "gmpo_log_clip_low": 0.4,
+      "policy_loss_variant": "gmpo",
+      "reducer": null,
+      "sapo_tau_pos": 1.2,
+      "variant": "policy_loss"
+    },
+    "plugins": [],
+    "sampling": {
+      "filter": null,
+      "max_replacements": null,
+      "over_sampling_batch_size": null,
+      "overlong_filter": false
+    },
+    "schema": "yeto-rl-algorithm-spec-v2"
+  },
+  "algorithm_spec_sha256": "8eed455b2eb316356b6be6cb795bd032995887c1bcc94002b65bf97efba24748",
+  "error": "engine 'miles-upstream': [loss_variant_params] ['loss.sapo_tau_pos'] only apply to their own loss.policy_loss_variant, got 'gmpo'; drop them or select that variant",
+  "launch_warnings": [],
+  "miles_argv": [
+    "--advantage-estimator",
+    "grpo",
+    "--policy-loss-variant",
+    "gmpo",
+    "--gmpo-log-clip-low",
+    "0.4",
+    "--gmpo-log-clip-high",
+    "0.4"
+  ],
+  "remaining_extra_argv": [],
+  "required_mechanisms": [
+    "advantage_estimators:grpo",
+    "corrections:none",
+    "kl_placements:none",
+    "loss_aggregations:default",
+    "losses:gmpo",
+    "losses:policy_loss"
+  ],
+  "schema": "yeto-rl-algorithm-spec-v2",
+  "verdict": "rejected"
+}

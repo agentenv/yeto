@@ -122,6 +122,7 @@ def test_duplicate_gpu_uuid_and_wrong_edge_shape_are_rejected():
 
 def test_uncertified_edges_block_without_downgrade():
     manifest = example_manifest()
+    manifest["identity"]["fingerprints"]["runtime"] = "sha256:runtime"
     manifest["matrix"]["arms"].append(
         {"name": "b1", "kind": "scheduled-rebuild", "config": "P422", "switch_plan": [{"at_update": 3, "target": "P44"}]}
     )
@@ -200,6 +201,18 @@ def test_dry_run_plan_lists_budget_and_never_imports_runtimes(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
+    # The example study leaves its runtime fingerprint unresolved: fail closed.
+    assert payload["counts"] == {"supported": 6, "unsupported": 0, "blocked_dependency": 42}
+    pinned = json.loads(study.read_text())
+    pinned["identity"]["fingerprints"]["runtime"] = "x"
+    pinned.pop("study_hash", None)
+    study.write_text(json.dumps(pinned))
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--study", str(study), "--capabilities", str(caps_path), "--json"],
+        capture_output=True, text=True, check=False, cwd=tmp_path,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
     assert payload["counts"] == {"supported": 30, "unsupported": 0, "blocked_dependency": 18}
     assert payload["budget"]["updates"] == 360
     assert any(i["status"] == "blocked_dependency" and i["arm"] == "auto" for i in payload["items"])
@@ -226,6 +239,7 @@ def test_cli_reports_manifest_errors_as_exit_2(tmp_path, capsys):
 
 def test_summary_is_incomplete_until_every_required_item_has_verified_evidence(tmp_path):
     manifest = example_manifest()
+    manifest["identity"]["fingerprints"]["runtime"] = "sha256:runtime"
     manifest["matrix"]["arms"] = [{"name": "default", "kind": "target-fixed-default", "config": "P44"}]
     manifest["matrix"]["scenarios"] = ["stable"]
     manifest["matrix"]["seeds"] = [17, 29]
@@ -244,6 +258,7 @@ def test_summary_is_incomplete_until_every_required_item_has_verified_evidence(t
 
 def test_benefit_needs_every_gate_and_negative_results_survive(tmp_path):
     manifest = example_manifest()
+    manifest["identity"]["fingerprints"]["runtime"] = "sha256:runtime"
     manifest["matrix"]["arms"] = [
         {"name": "b1", "kind": "scheduled-rebuild", "config": "P422", "switch_plan": [{"at_update": 3, "target": "P44"}]}
     ]

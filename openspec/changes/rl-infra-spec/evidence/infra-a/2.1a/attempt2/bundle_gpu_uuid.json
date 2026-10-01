@@ -1,0 +1,10 @@
+{
+  "source": "M1 log 'Creating placement group with 3 GPUs from explicit map PlacementMap(trainer=(0,), rollout=(1,), standby=(2,))' + bundle->(node,gpu) lines + container nvidia-smi",
+  "node": "172.20.0.114",
+  "roles": {
+    "trainer": [{"bundle": 0, "gpu_index": 0, "uuid": "GPU-4220101e-209d-0532-1062-c903c0af2424", "memory_used_mib_max": 9015, "compute_app_samples": 21}],
+    "rollout": [{"bundle": 1, "gpu_index": 1, "uuid": "GPU-1c9b9f8c-2c63-c94e-2fba-a61318501d13", "memory_used_mib_max": 35610, "compute_app_samples": 31}],
+    "standby": [{"bundle": 2, "gpu_index": 2, "uuid": "GPU-cdc75f6a-0103-ef9a-b8ca-eb05657f15df", "memory_used_mib_max": 4, "compute_app_samples": 0}]
+  },
+  "samples": 51
+}

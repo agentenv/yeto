@@ -17,7 +17,8 @@
 - 审查修复：publisher hash 统一为 `policy_tensor_hash`、trainer `step_metrics`、ports 在 pin 缺 `run_plugin` 时启动前拒绝、strict local_step、成员集合同源、非有限 reward 拒绝、token 单一 helper；`state_plugin.py` 改用 upstream `_get_hf_bridge`（yeto 源码不得出现 trust_remote_code=True）。
 
 ## 阻塞（需用户动作）
-1. git commit（yeto、miles fork、sglang fork）、创建 `michaellchung/sglang`、push、向 radixark/miles 提 run_plugin PR。之后把 `MILES_NEXT_COMMIT`/`SGLANG_NEXT_COMMIT` 固定到 fork 提交，并构建 `MILES_NEXT_IMAGE`。
+1. git commit（yeto、miles fork、sglang fork）、创建 `michaellchung/sglang`、push。之后把 `MILES_NEXT_COMMIT`/`SGLANG_NEXT_COMMIT` 固定到 fork 提交，并构建 `MILES_NEXT_IMAGE`。
+   - **作废（2026-09-29 用户指示）**：原计划“向 radixark/miles 提 run_plugin PR”取消。永不向 radixark/miles 或 sgl-project/sglang 提 PR；`run_plugin` 只保留在 `michaellchung/miles` 的 `yeto/ports` 分支。
 2. #64/#65/#59/#66/#62 以及 #61/#63（经 #67/#68）已在 main `e21a7ff`，R0 已在 `/home/michael/work/r0-integ` 整合；仍需关闭 #43（0.1）。全量 pytest：main 68 failed/26 errors，整合后失败集合相同，无新增。
 3. GPU 资源（付费）：3.2–3.5、4.x、1.4b 同机冒烟、6.2/6.3 等价性实验。
 4. 7.x 依赖 6.x 通过；rl-infra-spec E0–E3 以 R0 验收为前置，未开工。

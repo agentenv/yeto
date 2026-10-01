@@ -1,0 +1,56 @@
+{
+ "run": "gspo_s1",
+ "finalized": true,
+ "rl_round_trained": 3,
+ "errors": [],
+ "steps(clipfrac,grad_norm)": [
+  [
+   "0.0",
+   "0.48665371537208557"
+  ],
+  [
+   "0.0",
+   "0.46304529905319214"
+  ],
+  [
+   "0.0",
+   "0.2630704939365387"
+  ]
+ ],
+ "grad_norm_finite": true,
+ "unverified": [
+  "advantage_estimators:gspo",
+  "features:clip_higher",
+  "features:eps_clip"
+ ],
+ "outer_sync": false,
+ "round_fields": [
+  {
+   "rollout_id": 0,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": null
+  },
+  {
+   "rollout_id": 1,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": null
+  },
+  {
+   "rollout_id": 2,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": null
+  }
+ ],
+ "zero_grad_events": [],
+ "argv_gspo": true,
+ "argv_kl_coef": [
+  "0.0"
+ ],
+ "argv_normalize_advantages": [
+  "False"
+ ],
+ "transform_events": []
+}

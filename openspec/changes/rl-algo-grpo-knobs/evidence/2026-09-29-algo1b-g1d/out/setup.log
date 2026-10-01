@@ -1,0 +1,8 @@
+rows 7473
+0394715083c91182b5eb0c526eeee4196ac694b9
+9f29303bef1eea38eb613e5f454a52db1326422d
+GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-48ad06b2-0858-53a8-d4d8-6f7eecd4d10c)
+SETUP_OK
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Generating train split:   0%|          | 0/7473 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 7473/7473 [00:00<00:00, 344315.07 examples/s]
+Generating test split:   0%|          | 0/1319 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1319/1319 [00:00<00:00, 255686.42 examples/s]

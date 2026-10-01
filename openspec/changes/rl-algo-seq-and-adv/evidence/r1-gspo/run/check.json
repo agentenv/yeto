@@ -1,0 +1,44 @@
+{
+ "checks": {
+  "exit_code": "2",
+  "three_rounds": true,
+  "finalized": true,
+  "per_round_non_null_and_consistent": true
+ },
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "pg_clipfrac_steps": [
+    0.0,
+    0.1875
+   ],
+   "mean": 0.09375,
+   "clip_fraction": 0.09375,
+   "masked_fraction": 0.09375,
+   "ok": true
+  },
+  {
+   "rollout_id": 1,
+   "pg_clipfrac_steps": [
+    0.0,
+    0.5
+   ],
+   "mean": 0.25,
+   "clip_fraction": 0.25,
+   "masked_fraction": 0.25,
+   "ok": true
+  },
+  {
+   "rollout_id": 2,
+   "pg_clipfrac_steps": [
+    0.0,
+    0.5
+   ],
+   "mean": 0.25,
+   "clip_fraction": 0.25,
+   "masked_fraction": 0.25,
+   "ok": true
+  }
+ ],
+ "pass": true
+}

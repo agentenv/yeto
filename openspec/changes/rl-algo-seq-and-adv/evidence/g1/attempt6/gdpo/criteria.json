@@ -1,0 +1,71 @@
+{
+ "run": "gdpo",
+ "finalized": true,
+ "rl_round_trained": 3,
+ "errors": [],
+ "steps(clipfrac,grad_norm)": [
+  [
+   "0.0",
+   "0.7231293320655823"
+  ],
+  [
+   "0.0",
+   "0.4328318238258362"
+  ],
+  [
+   "0.0",
+   "0.4195510447025299"
+  ]
+ ],
+ "grad_norm_finite": true,
+ "unverified": [
+  "features:gdpo",
+  "reward_postprocessors:custom_reward_postprocess"
+ ],
+ "outer_sync": false,
+ "round_fields": [
+  {
+   "rollout_id": 0,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": 32
+  },
+  {
+   "rollout_id": 1,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": 24
+  },
+  {
+   "rollout_id": 2,
+   "masked_fraction": null,
+   "clip_fraction": null,
+   "nonzero_advantages": 32
+  }
+ ],
+ "zero_grad_events": [],
+ "argv_gspo": false,
+ "argv_kl_coef": [
+  "0.0"
+ ],
+ "argv_normalize_advantages": [
+  "False"
+ ],
+ "transform_events": [
+  [
+   "32",
+   "0",
+   "gdpo"
+  ],
+  [
+   "24",
+   "1",
+   "gdpo"
+  ],
+  [
+   "32",
+   "2",
+   "gdpo"
+  ]
+ ]
+}

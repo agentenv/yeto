@@ -1,0 +1,9 @@
+{
+ "mechanism": "overlong_penalty",
+ "algorithm_spec_sha256": "89be72472cddf7424f1096b5e2114434c9a3481fb2681c722e6b791adc191031",
+ "allow_unverified": [
+  "features:overlong_penalty",
+  "reward_postprocessors:custom_reward_postprocess"
+ ],
+ "rounds": 3
+}

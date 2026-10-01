@@ -1,0 +1,7 @@
+e3a11ab3:miles/backends/megatron_utils/checkpoint.py:148:                dp_invariant=getattr(args, "lora_dp_invariant_state", False),
+e3a11ab3:miles/backends/megatron_utils/lora/utils.py:216:        if getattr(args, "lora_dp_invariant_state", False):
+e3a11ab3:miles/utils/lora/arguments.py:76:        "--lora-dp-invariant-state",
+e3a11ab3:miles/utils/lora/arguments.py:183:        raise ValueError("--lora-dp-invariant-state cannot be used: " + "; ".join(problems))
+e3a11ab3:miles/utils/lora/arguments.py:187:    """Fail fast at argument parsing on configurations --lora-dp-invariant-state cannot save or load.
+e3a11ab3:miles/utils/lora/arguments.py:192:    if not getattr(args, "lora_dp_invariant_state", False):
+e3a11ab3:miles/utils/lora/arguments.py:195:        raise ValueError("--lora-dp-invariant-state needs LoRA training")

@@ -38,6 +38,7 @@ from .core import (
     parse_policy_snapshot_token,
     policy_hash,
     policy_tensor_hash,
+    require_nonzero_learning_rate,
 )
 from .decoupled import BroadcastBatch, BudgetConsolidation, FragmentSubmission
 
@@ -385,8 +386,9 @@ def _append_rl_event(args, event: dict[str, Any]) -> None:
         "time_unix": time.time(),
         **event,
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+    from .event_echo import append_record
+
+    append_record(path, event)  # echoed when YETO_RL_ECHO_EVENTS=1
     # The tape is the island's telemetry; W&B is a second reader of it, not
     # a second instrumentation pass. Writing the file first keeps the tape
     # authoritative when the network is not.
@@ -1796,6 +1798,7 @@ class MilesPolicySync:
             raise RuntimeError("Miles exported a negative train duration")
         metrics = self._rollout_metrics(rollout_id)
         group_size = self.args.n_samples_per_prompt
+        applied_lrs = self._applied_lrs(rollout_id)
         return LocalRoundStats(
             island_id=int(self.args.yeto_rl_learner_id),
             local_round_id=rollout_id + 1,
@@ -1838,7 +1841,23 @@ class MilesPolicySync:
                 metrics.get("rl/dynamic_filter/replacement_attempts", 0)
             ),
             nonzero_advantage_count=nonzero_advantage_count,
+            applied_lr=None if applied_lrs is None else min(applied_lrs),
+            applied_lrs=applied_lrs,
         )
+
+    def _applied_lrs(self, rollout_id: int) -> tuple[float, ...] | None:
+        """LRs the round's optimizer steps applied, from the before-train-step hook.
+
+        ``yeto.rl.applied_lr.before_train_step`` records them in the actor
+        (fork untouched); ``None`` only when the learner did not arm the hook.
+        """
+
+        from .applied_lr import APPLIED_LR_DIR_ATTR, collect
+
+        directory = getattr(self.args, APPLIED_LR_DIR_ATTR, None)
+        if not directory:
+            return None
+        return collect(directory, rollout_id, int(self.args.num_steps_per_rollout))
 
     def _nonzero_advantage_count(
         self, advantages: list[Any], expected_samples: int
@@ -1918,6 +1937,9 @@ class MilesPolicySync:
             try:
                 stats = self._round_stats(rollout_id, rollout_data, train_state)
                 _require_training_progress(stats)
+                require_nonzero_learning_rate(
+                    stats, final_round=stats.local_round_id >= self.args.num_rollout
+                )
                 self.bridge.submit_chunked_local_state(
                     self.permit,
                     self.current,
@@ -1937,6 +1959,9 @@ class MilesPolicySync:
             local = self._canonical_state(train_state)
             stats = self._round_stats(rollout_id, rollout_data, train_state)
             _require_training_progress(stats)
+            require_nonzero_learning_rate(
+                stats, final_round=stats.local_round_id >= self.args.num_rollout
+            )
             self.bridge.submit_local_state(self.permit, self.current, local, stats)
             release_base_before_commit()
         if not base_released:
@@ -2374,6 +2399,14 @@ class DecoupledMilesPolicySync(MilesPolicySync):
         local = self._canonical_at_progress(exported, next_rollout_id)
         stats = self._round_stats(rollout_id, rollout_data, exported)
         _require_training_progress(stats)
+        # Decoupled: the round is final once the syncer's final cut is known
+        # (finalizing) or it exhausts the optional step budget (design D4).
+        require_nonzero_learning_rate(
+            stats,
+            final_round=bool(self.bridge.finalizing)
+            or getattr(self.args, "yeto_rl_learner_budget_steps", None)
+            == self.optimizer_steps + 1,
+        )
         self.optimizer_steps += 1
         self.action_tokens += stats.action_tokens
         if self.optimizer_steps != next_rollout_id:

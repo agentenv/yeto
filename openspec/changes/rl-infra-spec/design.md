@@ -30,7 +30,7 @@
 | `partitioned-serial` | E0 分区/状态/映射基线 | trainer/rollout 卡组独立，算法有依赖时仍串行；分离本身不算性能成功 |
 | `partitioned-overlap` | 目标中有条件的重叠执行 | 只有运行 profile 明确允许、且就绪的任务才重叠；启用前必须完成依赖与版本契约验证 |
 
-`ExecutionProfile` 至少含 policy 对每条轨迹的绑定、batch/组就绪、允许的版本年龄、更新/发布/外层同步顺序、允许重叠的任务对、最大在途 batch/轨迹、缓冲容量和反压、quiescent cut 条件。执行模式及算法契约 hash 在一次运行中固定，不由自动控制临时改写。
+`ExecutionProfile` 至少含 policy 对每条轨迹的绑定、batch/组就绪、允许的版本年龄、更新/发布/外层同步顺序、允许重叠的任务对、最大在途 batch/轨迹、缓冲容量和反压、quiescent cut 条件。执行模式及算法契约 hash 在一次运行中固定，不由自动控制临时改写。算法契约 hash 即 `rl-algorithm-capabilities` 的 `AlgorithmSpec` 规范化哈希（`algorithm_spec_sha256`），不另设算法身份；profile 的允许版本年龄 `max_policy_age` 必须不大于 `AlgorithmSpec.execution.max_policy_staleness`，引擎能力 `execution.max_policy_staleness` 由已认证执行模式可产生的最大年龄决定。年龄大于 0 只能来自另立 change 认证的算法契约；本 change 的所有执行模式（含 `partitioned-overlap`）策略年龄均为 0。
 
 E0 默认交付 `partitioned-serial`，同时审计现有算法允许的重叠（例如独立 CPU 工作与不依赖它的 GPU 工作）。如果生成下一 batch 需要本次更新后的权重，明确保留 `update -> publish -> next rollout` 依赖，不启动旧版本 rollout。若只有引入 one-step-off-policy 等新契约才能获得流水线收益，则记录算法变更为独立后续设计，不擅自放宽本 change 的陈旧度约束；本阶段可以得出“该 profile 尚无可启用的并发路径”的有效结论。
 
@@ -113,7 +113,7 @@ E1先固定trainer，例如`T4R2S2 -> T4R4S0`（S为池内备用卡），验证r
 
 `generate_rollout`/reward/group 校验与现有 bridge 决定 `ready_for_train`；调度只在就绪任务中分配资源，不能用队列阈值提前截断 GRPO 组或改样本利用。配置 epoch 与权重版本不同：一次纯资源切换增加 epoch，但不制造新策略版本或 optimizer step。
 
-轨迹标识至少 `(run_id, learner_id, rollout_id, group_id, sample_id, attempt_id)`；每个 segment/token 请求绑定 policy token/hash 和 worker/config epoch。数据提交按 group_id 和既有 retry 语义去重；batch 消费清单持久记录 `prepared -> optimizer_applied -> outer_recorded`，与完整 checkpoint 的切点关联。内存里“曾经提交”不能作为 crash 后去重凭据。
+轨迹标识至少 `(run_id, learner_id, rollout_id, group_id, sample_id, attempt_id)`；每个 segment/token 请求绑定 policy token/hash 和 worker/config epoch。数据提交按 group_id 和既有 retry 语义去重；batch 消费清单持久记录 `prepared -> optimizer_applied -> outer_recorded`，与完整 checkpoint 的切点关联。内存里“曾经提交”不能作为 crash 后去重凭据。算法层按描述有意丢弃、数据游标已推进的样本/组记为显式终态 `filtered`，与“丢失”区分；可被后续轮复用的余量组记为非终态 `carried_over`，不属于终态，仍按未消费组进入 cut。
 
 ### D4. 安全点与显式协议
 
@@ -172,11 +172,11 @@ any failure -> CANCELLED / REBUILD_OLD / RECOVERY_REQUIRED
 |---|---|
 | trainer | 模型/adapter/可训练 expert、FP32 master、optimizer moments 与 step、参数组超参、LR scheduler/counters、loss scaler（若有）、backend 所需 precision/量化或 FP8 状态、reference/old-policy 副本或不可变重建引用 |
 | stochastic/progress | Python/NumPy/Torch CPU/CUDA/Megatron RNG、rollout seed/数据采样器状态、dataset cursor与分片、packing plan、rollout id、已消费 sample/group/batch、optimizer applied 计数 |
-| algorithm/outer | current base/snapshot、fragment versions、permit/attempt/已提交状态、optimizer-reset count、local horizon、budget/token 计数、policy hash、外层 session/contract identity |
+| algorithm/outer | current base/snapshot、fragment versions、permit/attempt/已提交状态、optimizer-reset count、local horizon、budget/token 计数、policy hash、外层 session/contract identity；`algorithm_spec_sha256`、插件 PluginRef 与 `yeto_algo_plugins` 哈希、ref 模型身份（KL 启用时） |
 | rollout | completed/aborted/retry 组及既有语义、session 路由版本、engine 权重身份；首版要求无活跃轨迹，KV 可丢弃重建，不能丢未结束工具状态 |
 | runtime | source/backend fingerprint、配置、GPU映射、checkpoint shard schema、checksum、tx/cut ID、是否已 commit epoch |
 
-RNG 跨 DP 不是简单复制每个旧 rank 状态到所有新 rank。同形恢复先要求对应 RNG 精确；不同 DP 需可解释的样本/种子映射与数值/学习行为验证。如果当前 backend 不能提供所需 RNG/optimizer 重分片就拒绝该边，不以“浮点允许差异”掩盖遗漏。
+RNG 跨 DP 不是简单复制每个旧 rank 状态到所有新 rank。同形恢复先要求对应 RNG 精确；不同 DP 需可解释的样本/种子映射与数值/学习行为验证。如果当前 backend 不能提供所需 RNG/optimizer 重分片就拒绝该边，不以“浮点允许差异”掩盖遗漏。变 DP 边的认证绑定算法描述哈希：loss 聚合/归一化（token 级、常数分母、DP 组内 advantage 白化）随 DP 变化的算法须单独认证。
 
 **直接恢复边界**：仅旧 worker 都仍存活、未改写权重/通信成员、没有破坏性 release 前允许 unquiesce。若已 offload 但进程/同形状态仍健康，允许既有 onload；失败升级为重建。**release 后**依靠已 fsync 的完整 cut、算法 journal、数据 ledger、不可变 base model 和 fingerprint；旧配置也必须从 cut 重建，不能称无成本回滚。CPU RAM 不能容纳双份：顺序导出分片到磁盘、验证完整 manifest、销毁旧进程、逐块恢复；磁盘/时间也不足就拒绝切换。
 
@@ -260,10 +260,22 @@ baseline 对比默认固定、测试范围内最佳固定、动态三组；相�
 
 本机8×H200/NV18/约2TiB RAM仅是一次只读观察，不定义支持范围，不因当时显存占用推迟方案或声称GPU空闲。CPU中转要按租用实例的NUMA、RAM/带宽测量；H20论文数据不可移用。备用容量、初始化重叠所需额外卡和云启动等待都计入实测成本。
 
+### D12. 岛间扩展（后续占位，范围延后，待用户审阅）
+
+出处：用户 2026-09-29 无人值守轮指示：F 只做单岛 7.1/7.2 设计，7.3 跨岛分配、多云、DiLoCo 成员变更留待以后，只写后续占位。本段只占位，不构成 7.3 的交付。
+
+- **延后原因**：首轮只有单岛、固定 DiLoCo 成员；跨岛分配和成员变更要改外层协议；在途云接入 change（`add-nebius-verda-modal-clouds`、fix-verda-provider）尚未合入；Verda 与 Modal 暂不能承载 head。
+- **前置条件**：E1 3.8（含 X6 两小岛 strict 暂停）通过；7.1/7.2 设计评审通过；fix-verda-provider 合入；用户批准在线云扩缩范围。
+- **后续 7.3 必须遵守的约束**（沿用原 7.3 验收要点）：
+  1. 不重复实现 provider 已有能力，跨岛分配与多云只调用现有云接入 change 的生命周期接口；
+  2. 不把容器或实例重启当作岛内切换，岛内切换仍走 D4 事务，跨岛或成员变化另走外层协议；
+  3. 不预设每次都需要全局 barrier，确需协调时单独设计协议并给出证据。
+- **与 7.1/7.2 设计的关系**：单岛 IslandStatus/pool epoch 与扩缩池顺序见 `f-design.md`；其中 `PauseAdvice`（§1.5，缺口 G3）是 7.3 实现的前置接口，在线云节点增减（缺口 G4/G6/G11）也须先解决，§3 已按上述三条约束限定单岛设计。
+
 ## Risks / Trade-offs
 
 - [rl-engine-ports 未完成或其等价性未通过] → 本 change 全部阶段以 R0 完成为前提；R0 未通过前只做 A 阶段的调查、计划与观测设计。
-- [端口动词需要 miles 新能力] → 优先用 upstream 已有机制（InferenceController、placement group）在 MilesAdapter 实现；确需改 miles 时在 `michaellchung/miles` 的 `yeto/ports` 分支加单独小提交并评估提交 upstream，避免重现旧 fork 膨胀。
+- [端口动词需要 miles 新能力] → 优先用 upstream 已有机制（InferenceController、placement group）在 MilesAdapter 实现；确需改 miles 时在 `michaellchung/miles` 的 `yeto/ports` 分支加单独小提交（永不向 radixark/miles 或 sgl-project/sglang 提 PR），避免重现旧 fork 膨胀。
 - [禁存 optimizer/RNG，adapter checkpoint 不完整] → 专用完整 cut；无法完成就只交付 E1，并明确 trainer 未完成。
 - [兼容共置已满池或目标profile依赖严格，调整未必获益] → 先测 baseline；允许“没有值得自动切换的边”结论。
 - [full/SAO 尚未迁移到 ports 路径，DP=1 硬限制] → 分开 profile，首版拒绝而非放松算法约束。
