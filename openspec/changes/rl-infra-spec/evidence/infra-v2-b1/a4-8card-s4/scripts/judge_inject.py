@@ -391,7 +391,7 @@ def judge_a4bc(journal, tape, known, side_effects, probe_after=None, router_samp
     end before the 30 s wait does). no_stop + CANCELLED alone never prove "no replay" (SESSION6 §10)."""
     res = judge_a4b(journal, tape, known, "cancel", probe_after, router_samples)
     res["case"] = "a4bc"
-    if res["verdict"] == "INVALID_TEST":
+    if res["verdict"] == "INVALID_TEST" or res.get("marker") == "recovery_failed":   # no CANCELLED: nothing to window the journal on
         return res
     inj = [e for e in named(tape, "test_injection") + named(journal, "test_injection")
            if ikind(e) == "tool_wait" and e.get("applied") is True]
@@ -881,6 +881,329 @@ def main(argv):  # noqa: F811
     _A27_EXTRA["router_samples"] = ([json.loads(l) for l in open(a.router_samples) if l.strip()]
                                     if a.router_samples and os.path.exists(a.router_samples) else None)
     return _main_base(argv)
+
+# ------------------------------------------------------------------------------------------------------- 3.6 ledger
+# T36-REVIEW §3.2 L1-L8 (2026-10-02). Appended only: the judges above keep their checks; the wrappers below add the
+# ledger checks to d4 / d2 / e1b / wd / r5-r6-r7-r5c and recompute the verdict. `ledger` None = not provided (CPU
+# synthetic tests: "not provided", no ledger checks); [] = the --ledger file is missing/empty -> INVALID(evidence_missing).
+# §5.1: judge_d4's old no_prepared_after_recovery read tape events the driver never emits (always True); L4 reads the
+# ledger. §5.2: _ledger_duplicates is group-level and attempt-aware now (L2).
+LEDGER_TRIPLE = ("prepared", "optimizer_applied", "outer_recorded")
+_LEDGER_EXTRA = {"ledger": None}
+
+
+def _lt(r):
+    return r.get("wall_time") or r.get("time_unix") or r.get("ts") or 0
+
+
+def _by_rollout(ledger):
+    by = {}
+    for r in ledger:
+        rid = r.get("rollout_id")
+        if rid is None or rid < 0:
+            continue
+        by.setdefault(rid, []).append(r)
+    return by
+
+
+def _complete_rounds(ledger):
+    """rollout_id -> time of the prepared of its last attempt, for rollouts whose last attempt reached outer_recorded."""
+    out = {}
+    for rid, recs in _by_rollout(ledger).items():
+        att = max(r.get("attempt") or 0 for r in recs)
+        last = [r for r in recs if (r.get("attempt") or 0) == att]
+        kinds = [r["kind"] for r in last]
+        if "prepared" in kinds and "optimizer_applied" in kinds and "outer_recorded" in kinds:
+            out[rid] = _lt(next(r for r in last if r["kind"] == "prepared"))
+    return out
+
+
+def ledger_L1_round_triples(ledger, tape):
+    """L1: per rollout the last attempt has exactly one prepared, optimizer_applied and outer_recorded; every earlier
+    attempt has one prepared, at most one optimizer_applied, no outer_recorded and ends with discarded/superseded;
+    attempts increase; seq strictly increasing; rollout ids contiguous 0..N-1; tape rl_round_trained count == number of
+    optimizer_applied (a superseded attempt was trained too). A trailing prepared with no train yet (process ended
+    between generate and train) is reported as `dangling_prepared` and left to L3."""
+    issues = []
+    seqs = [r.get("seq") for r in ledger if r.get("seq") is not None]
+    if seqs != sorted(seqs) or len(set(seqs)) != len(seqs):
+        issues.append("seq not strictly increasing")
+    by = _by_rollout(ledger)
+    rids = sorted(by)
+    dangling = None
+    for rid in rids:
+        recs = by[rid]
+        attempts = sorted({r.get("attempt") or 0 for r in recs})
+        if attempts != list(range(attempts[0], attempts[0] + len(attempts))):
+            issues.append("rollout %s: attempts %r not consecutive" % (rid, attempts))
+        for i, att in enumerate(attempts):
+            kinds = [r["kind"] for r in recs if (r.get("attempt") or 0) == att]
+            n = {k: kinds.count(k) for k in ("prepared", "optimizer_applied", "outer_recorded", "discarded", "superseded")}
+            last = i == len(attempts) - 1
+            if last and rid == rids[-1] and n["prepared"] == 1 and n["optimizer_applied"] == 0 and n["outer_recorded"] == 0 and n["discarded"] + n["superseded"] == 0:
+                dangling = rid
+                continue
+            if n["prepared"] != 1:
+                issues.append("rollout %s attempt %s: prepared x%d" % (rid, att, n["prepared"]))
+            if last:
+                if n["optimizer_applied"] != 1 or n["outer_recorded"] != 1:
+                    issues.append("rollout %s attempt %s: optimizer_applied x%d outer_recorded x%d" % (rid, att, n["optimizer_applied"], n["outer_recorded"]))
+            else:
+                if n["optimizer_applied"] > 1 or n["outer_recorded"] or kinds[-1] not in ("discarded", "superseded"):
+                    issues.append("rollout %s attempt %s: not closed by discarded/superseded (kinds %r)" % (rid, att, kinds))
+    complete = [rid for rid in rids if rid != dangling]
+    if complete != list(range(len(complete))):
+        issues.append("rollout ids not contiguous: %r" % complete[:12])
+    n_trained = len(named(tape, "rl_round_trained"))
+    n_applied = sum(1 for r in ledger if r.get("kind") == "optimizer_applied")
+    if n_trained and n_trained != n_applied:
+        issues.append("tape rl_round_trained=%d, ledger optimizer_applied=%d" % (n_trained, n_applied))
+    return not issues, {"rollouts": len(complete), "dangling_prepared": dangling, "tape_rounds_trained": n_trained,
+                        "optimizer_applied": n_applied, "issues": issues}
+
+
+def ledger_L2_group_reuse(ledger):
+    """L2: the group_ids of every consumed batch (prepared of the same rollout+attempt as an optimizer_applied) are
+    pairwise disjoint across rollouts, attempts and restarts. Returns (ok, {"duplicates": [group ids]})."""
+    prepared = {}
+    for r in ledger:
+        if r.get("kind") == "prepared":
+            prepared[(r.get("rollout_id"), r.get("attempt"))] = r.get("group_ids") or []
+    seen, dup = {}, set()
+    for r in ledger:
+        if r.get("kind") != "optimizer_applied":
+            continue
+        for g in prepared.get((r.get("rollout_id"), r.get("attempt")), []):
+            if g in seen and seen[g] != (r.get("rollout_id"), r.get("attempt")):
+                dup.add(g)
+            seen.setdefault(g, (r.get("rollout_id"), r.get("attempt")))
+    return not dup, {"duplicates": sorted(dup), "consumed_groups": len(seen)}
+
+
+def ledger_L3_continues_after(ledger, t, min_rounds_after):
+    """L3: >= min_rounds_after complete rollouts prepared after time t; the last rollout before t ended outer_recorded,
+    or its prepared was discarded/superseded later and its groups reappear in a later prepared (nothing lost)."""
+    if t is None:
+        return False, {"error": "terminal time unknown"}
+    complete = _complete_rounds(ledger)
+    after = sorted(rid for rid, tp in complete.items() if tp > t)
+    info = {"rounds_after": after, "min_rounds_after": min_rounds_after}
+    before = [r for r in ledger if _lt(r) <= t and r.get("rollout_id") is not None and r.get("rollout_id") >= 0]
+    ok_before = True
+    if before:
+        last = max(r["rollout_id"] for r in before)
+        kinds = [r["kind"] for r in before if r["rollout_id"] == last]
+        info["last_before"] = {"rollout_id": last, "kinds": kinds}
+        if "outer_recorded" not in kinds:
+            later = [r for r in ledger if r.get("rollout_id") == last and _lt(r) > t]
+            closed = any(r["kind"] in ("discarded", "superseded", "outer_recorded") for r in later)
+            groups = set()
+            for r in before:
+                if r["rollout_id"] == last and r["kind"] == "prepared":
+                    groups |= set(r.get("group_ids") or [])
+            reappear = set()
+            for r in ledger:
+                if r.get("kind") == "prepared" and _lt(r) > t:
+                    reappear |= set(r.get("group_ids") or [])
+            lost = sorted(groups - reappear)
+            info["last_before"]["closed_later"] = closed; info["last_before"]["groups_lost"] = lost
+            ok_before = closed and (not groups or not lost) if "optimizer_applied" not in kinds else closed
+    return len(after) >= min_rounds_after and ok_before, info
+
+
+def ledger_L4_silent_after(ledger, tape, t_rec):
+    """L4: after RECOVERY_REQUIRED (t_rec) the ledger has no record at all and the tape no rl_round_trained and no
+    rl_driver_phase train/publish."""
+    if t_rec is None:
+        return False, {"error": "RECOVERY_REQUIRED time unknown"}
+    led = [(r.get("kind"), r.get("rollout_id")) for r in ledger if _lt(r) > t_rec]
+    tp = [(e.get("event"), e.get("phase"), e.get("rollout_id")) for e in tape if _lt(e) > t_rec
+          and (e.get("event") == "rl_round_trained" or (e.get("event") == "rl_driver_phase" and e.get("phase") in ("train", "publish")))]
+    return not led and not tp, {"ledger_after": led[:10], "tape_after": tp[:10], "t_rec": t_rec}
+
+
+def ledger_L5_silent_during_transactions(ledger, journal, tape):
+    """L5: inside every transaction's destructive window (first TRANSFERRING/INITIALIZING/REBUILD_OLD record ->
+    terminal record) the ledger is silent (transactions run at a safe point); after a REBUILT_OLD the first ledger
+    record is a prepared."""
+    windows, noisy, first_after = [], [], []
+    for tx in {r.get("tx_id") for r in phases(journal) if r.get("request_id")}:
+        ph = [r for r in phases(journal) if r.get("tx_id") == tx]
+        start = next((r for r in ph if r.get("phase") in ("TRANSFERRING", "INITIALIZING", "REBUILD_OLD")), None)
+        term = next((r for r in ph if r.get("phase") in TERMINAL), None)
+        if start is None or term is None:
+            continue
+        if start.get("wall_time") is None or term.get("wall_time") is None:
+            continue  # synthetic records without times: no window to judge
+        t0, t1 = _lt(start), _lt(term)
+        windows.append({"tx_id": tx, "from": t0, "to": t1, "terminal": term.get("phase")})
+        noisy += [(r.get("kind"), r.get("rollout_id")) for r in ledger if t0 <= _lt(r) <= t1]
+        if term.get("phase") == "REBUILT_OLD":
+            nxt = next((r for r in ledger if _lt(r) > t1), None)
+            first_after.append(nxt.get("kind") if nxt else None)
+    ok = not noisy and all(k in (None, "prepared") for k in first_after)
+    return ok, {"windows": windows, "ledger_in_window": noisy[:10], "first_kind_after_rebuilt_old": first_after}
+
+
+def ledger_L6_restart_consistent(ledger, tape):
+    """L6 (r cases): after the second rl_driver_start, a leading superseded/discarded names the restart rollout
+    (restart_rollout_id or 'restart at rollout N') equal to the first rl_publication.policy_version after the restart;
+    the first prepared after the restart has that rollout_id; any outer_recorded before it is recovered=true."""
+    starts = sorted(_lt(e) for e in named(tape, "rl_driver_start"))
+    if len(starts) < 2:
+        return None, {"restarts": len(starts) - 1}
+    t_restart = starts[1]
+    pubs = [e.get("policy_version") for e in named(tape, "rl_publication") if _lt(e) >= t_restart]
+    after = [r for r in ledger if _lt(r) > t_restart]
+    info = {"t_restart": t_restart, "first_publication_version": pubs[0] if pubs else None,
+            "first_kinds_after": [r.get("kind") for r in after[:4]]}
+    if not pubs or not after:
+        return False, dict(info, error="no publication or no ledger record after the restart")
+    v = pubs[0]
+    ok = True
+    for r in after:
+        if r["kind"] == "prepared":
+            info["first_prepared_rollout_id"] = r.get("rollout_id")
+            ok = ok and r.get("rollout_id") == v
+            break
+        if r["kind"] in ("superseded", "discarded"):
+            rr = r.get("restart_rollout_id")
+            if rr is None and "restart at rollout" in str(r.get("error") or ""):
+                try: rr = int(str(r["error"]).rsplit(" ", 1)[1])
+                except Exception: rr = None
+            info.setdefault("restart_rollout_ids", []).append(rr)
+            ok = ok and rr == v
+        elif r["kind"] == "outer_recorded":
+            ok = ok and bool(r.get("recovered"))
+    return ok, info
+
+
+def ledger_L7_verified_unconsumed(journal):
+    """L7: every recovery `verified` record has checks.unconsumed_batches == []."""
+    ver = [r for r in journal if r.get("kind") == "recovery" and r.get("status") == "verified"]
+    if not ver:
+        return None, {"verified_records": 0}
+    bad = [r.get("tx_id") for r in ver if (r.get("checks") or {}).get("unconsumed_batches") not in ([], None) or "unconsumed_batches" not in (r.get("checks") or {})]
+    return not bad, {"verified_records": len(ver), "with_unconsumed_or_missing": bad}
+
+
+def ledger_L8_report_fields(ledger):
+    """L8: each prepared is followed by a carried_over_report of the same rollout/attempt; every filtered record names a
+    mechanism; sums of filtered.groups / engine_discarded.groups and carried_over_reported are recorded (not judged)."""
+    reports = {(r.get("rollout_id"), r.get("attempt")) for r in ledger if r.get("kind") == "carried_over_report"}
+    missing = [(r.get("rollout_id"), r.get("attempt")) for r in ledger if r.get("kind") == "prepared" and (r.get("rollout_id"), r.get("attempt")) not in reports]
+    filt = [r for r in ledger if r.get("kind") == "filtered"]
+    no_mech = [r.get("rollout_id") for r in filt if not (r.get("detail") or {}).get("mechanism")]
+    info = {"prepared_without_report": missing, "filtered_without_mechanism": no_mech,
+            "filtered_groups": sum(int((r.get("detail") or {}).get("groups") or 0) for r in filt),
+            "engine_discarded_groups": sum(int(r.get("groups") or 0) for r in ledger if r.get("kind") == "engine_discarded"),
+            "carried_over_reported_all": all(r.get("carried_over_reported") for r in ledger if r.get("kind") == "carried_over_report") if reports else None}
+    return not missing and not no_mech, info
+
+
+def ledger_checks(ledger, tape, journal, *, continues_after=None, min_rounds_after=0, silent_after=None,
+                  restart=False, verified=False, tx_windows=True):
+    """L1-L8 on one run. Returns {"checks": {name: bool}, "info": {...}}; checks that do not apply are left out."""
+    checks, info = {}, {}
+    def put(name, pair):
+        ok, detail = pair
+        info[name] = detail
+        if ok is not None:
+            checks[name] = bool(ok)
+    put("L1_round_triples", ledger_L1_round_triples(ledger, tape))
+    put("L2_no_group_reuse", ledger_L2_group_reuse(ledger))
+    if continues_after is not None or min_rounds_after:
+        put("L3_continues_after_terminal", ledger_L3_continues_after(ledger, continues_after, min_rounds_after))
+    if silent_after is not None:
+        put("L4_silent_after_recovery", ledger_L4_silent_after(ledger, tape, silent_after))
+    if tx_windows:
+        put("L5_silent_during_transactions", ledger_L5_silent_during_transactions(ledger, journal, tape))
+    if restart:
+        put("L6_restart_consistent", ledger_L6_restart_consistent(ledger, tape))
+    if verified:
+        put("L7_verified_unconsumed_empty", ledger_L7_verified_unconsumed(journal))
+    put("L8_report_fields", ledger_L8_report_fields(ledger))
+    return {"checks": checks, "info": info}
+
+
+def _ledger_duplicates(ledger):  # noqa: F811 - L2 (group-level, attempt-aware) replaces the rollout-level check
+    return ledger_L2_group_reuse(ledger or [])[1]["duplicates"]
+
+
+def _with_ledger(res, ledger, tape, journal, required=False, **kw):
+    """Merge ledger_checks into a judge result and recompute the verdict (INVALID results are left alone)."""
+    if res.get("verdict") == "INVALID_TEST":
+        return res
+    if ledger is None:
+        if required:
+            return _invalid(res, "ledger journal not provided: ledger evidence missing", "evidence_missing")
+        res["ledger"] = "not provided"; return res
+    if not ledger:
+        return _invalid(res, "ledger journal missing or empty (--ledger): ledger evidence missing", "evidence_missing")
+    lc = ledger_checks(ledger, tape, journal, **kw)
+    res["checks"].update(lc["checks"]); res["ledger"] = lc["info"]
+    res["verdict"] = "PASS" if all(v is True for v in res["checks"].values()) else "FAIL"
+    if res["verdict"] == "FAIL" and "marker" not in res:
+        res["marker"] = "recovery_failed"
+    return res
+
+
+def _terminal_time(journal, request_id, phase):
+    return next((r.get("wall_time") for r in phases(journal) if r.get("request_id") == request_id and r.get("phase") == phase), None)
+
+
+_judge_d4_base, _judge_d2_a27, _judge_e1b_base, _judge_wd_base, _judge_recovery_base = judge_d4, judge_d2, judge_e1b, judge_wd, judge_recovery
+
+
+def judge_d4(journal, tape, known, ledger=None, recovery_timeout_s=None, margin_s=60.0):  # noqa: F811
+    """d4 + L1/L2/L4/L8 (ledger required: it is the evidence that nothing was consumed after RECOVERY_REQUIRED)."""
+    res = _judge_d4_base(journal, tape, known, ledger, recovery_timeout_s, margin_s)
+    rec = [r.get("wall_time") for r in phases(journal) if r.get("phase") == "RECOVERY_REQUIRED" and r.get("wall_time") is not None]
+    return _with_ledger(res, ledger, tape, journal, required=True, silent_after=min(rec) if rec else None, tx_windows=False)
+
+
+def judge_d2(journal, tape, known, dkill_log=None, probe_after=None, router_samples=None, ledger=None):  # noqa: F811
+    """d2 + A27 + L1/L2/L3(>=2 complete rounds after REBUILT_OLD)/L5/L8. A27's own a27_training_continued (tape rounds /
+    publications) is kept as information; the continuation verdict is L3 (ledger triples), per T36-REVIEW §3.1."""
+    res = _judge_d2_a27(journal, tape, known, dkill_log, probe_after, router_samples)
+    if ledger is None: ledger = _LEDGER_EXTRA["ledger"]
+    if "a27_training_continued" in res.get("checks", {}) and ledger is not None:
+        res.setdefault("a27_after_terminal", {})["a27_training_continued"] = res["checks"].pop("a27_training_continued")
+    return _with_ledger(res, ledger, tape, journal, continues_after=_terminal_time(journal, "up1", "REBUILT_OLD"), min_rounds_after=A27_MIN_ROUNDS_AFTER)
+
+
+def judge_e1b(journal, tape, known, router_samples=None, probes=None, ledger=None):  # noqa: F811
+    res = _judge_e1b_base(journal, tape, known, router_samples, probes)
+    if ledger is None: ledger = _LEDGER_EXTRA["ledger"]
+    return _with_ledger(res, ledger, tape, journal, continues_after=_terminal_time(journal, "up1", "REBUILT_OLD"), min_rounds_after=2)
+
+
+def judge_wd(journal, tape, known, gpu_samples=None, probe_after=None, gpu_release_s=60.0, unblock_s=60.0, ledger=None):  # noqa: F811
+    res = _judge_wd_base(journal, tape, known, gpu_samples, probe_after, gpu_release_s, unblock_s)
+    if ledger is None: ledger = _LEDGER_EXTRA["ledger"]
+    return _with_ledger(res, ledger, tape, journal, continues_after=_terminal_time(journal, "up1", "REBUILT_OLD"), min_rounds_after=2)
+
+
+def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, probe_after=None, min_rounds_after=3, up="up1", down="dn1"):  # noqa: F811
+    """r5/r6/r7/r5c + L1/L2/L3(>= min_rounds_after after the recovery verified / terminal)/L5/L6/L7 (r5, r5c, r7)/L8."""
+    res = _judge_recovery_base(case, journal, tape, known, ledger, launch_log, probe_after, min_rounds_after, up, down)
+    ver = [r.get("wall_time") for r in journal if r.get("kind") == "recovery" and r.get("status") == "verified"]
+    t = max(ver) if ver else max([r.get("wall_time") or 0 for r in phases(journal) if r.get("phase") in TERMINAL] or [None])
+    return _with_ledger(res, ledger, tape, journal, continues_after=t, min_rounds_after=min_rounds_after, restart=True, verified=case in ("r5", "r5c", "r7"))
+
+
+_main_a27 = main
+
+
+def main(argv):  # noqa: F811
+    """Stash --ledger for the ledger-aware e1b / wd / d2 wrappers (the base dispatch passes it only to d4 and r*)."""
+    import argparse
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--ledger")
+    a, _ = ap.parse_known_args(argv)
+    _LEDGER_EXTRA["ledger"] = load(a.ledger) if a.ledger else None
+    return _main_a27(argv)
+
 
 
 if __name__ == "__main__":

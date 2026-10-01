@@ -311,34 +311,55 @@ class D(unittest.TestCase):
         self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing")); self.assertTrue(r["checks"]["up2_REBUILT_OLD"])
 
     def test_d2(self):
-        j = [tx("VERIFYING", "up1", wall_time=100.0), tx("REBUILT_OLD", "up1", wall_time=130.0)]
+        # 2026-10-02: judge_d2 = base + A27 (discovery, REBUILD_OLD->REBUILT_OLD, probe, router) + T36 ledger L1/L2/L3/L5/L8
+        j = [{"kind": "add_intent", "members": T, "tx_id": "up1"}, tx("INITIALIZING", "up1", wall_time=95.0), tx("VERIFYING", "up1", wall_time=100.0),
+             {"kind": "target_workers_lost", "tx_id": "up1", "lost_members": T}, tx("REBUILD_OLD", "up1", wall_time=101.0), tx("REBUILT_OLD", "up1", wall_time=130.0)]
         k = [{"event": "kill", "rule": "d2", "gpu": 6, "res": {"300": "killed"}, "wall": 100.5}]
-        self.assertEqual(J.judge_d2(j, [], set(), k)["verdict"], "PASS")
-        self.assertEqual(J.judge_d2(j, [], set(), [])["verdict"], "INVALID_TEST")
-        self.assertEqual(J.judge_d2([tx("VERIFYING", "up1", wall_time=100.0), tx("SUCCEEDED", "up1")], [], set(), k)["verdict"], "FAIL")
-        self.assertEqual(J.judge_d2([tx("VERIFYING", "up1", wall_time=100.0)], [], set(), k)["verdict"], "INVALID_TEST")
+        tape = [{"event": "rl_round_trained", "rollout_id": i, "time_unix": t} for i, t in ((0, 41.0), (1, 81.0), (2, 146.0), (3, 166.0))]
+        tape += [pub(v, "yeto:%d:h" % v, OLD, t) for v, t in ((1, 45.0), (2, 85.0), (3, 150.0), (4, 170.0))]
+        tape += [{"event": "rl_driver_phase", "phase": "sync", "time_unix": t} for t in (44.0, 84.0, 149.0, 169.0)]
+        probe = {"probe_attested": True, "cell_statuses": {"c0": "Serving", "c1": "Serving", "c2": "Stopped", "c3": "Stopped"}, "versions": {"c0": "v2", "c1": "v2"}}
+        samples = [{"t": 131.0 + i, "data": {"cordoned": []}} for i in range(3)]
+        led = ledger_rounds([], 0, 40.0, ["a", "b"]); ledger_rounds(led, 1, 80.0, ["c", "d"]); ledger_rounds(led, 2, 145.0, ["e", "f"]); ledger_rounds(led, 3, 165.0, ["g", "h"]); seqd(led)
+        r = J.judge_d2(j, tape, set(), k, probe, samples, led); self.assertEqual(r["verdict"], "PASS", r)
+        self.assertNotIn("a27_training_continued", r["checks"]); self.assertTrue(r["a27_after_terminal"]["a27_training_continued"])   # moved to info: L3 judges continuation
+        self.assertTrue(r["checks"]["L3_continues_after_terminal"] and r["checks"]["L5_silent_during_transactions"])
+        self.assertEqual(J.judge_d2(j, tape, set(), [], probe, samples, led)["verdict"], "INVALID_TEST")   # kill not applied
+        J._A27_EXTRA["probe_after"] = None   # (main() of an earlier test may have stashed one)
+        self.assertEqual(J.judge_d2(j, tape, set(), k, None, samples, led)["verdict"], "INVALID_TEST")   # no probe after the terminal state
+        self.assertEqual(J.judge_d2([j[0], tx("VERIFYING", "up1", wall_time=100.0), tx("SUCCEEDED", "up1")], tape, set(), k, probe, samples, led)["verdict"], "FAIL")
+        self.assertEqual(J.judge_d2([j[0], tx("VERIFYING", "up1", wall_time=100.0)], tape, set(), k, probe, samples, led)["verdict"], "INVALID_TEST")
+        r = J.judge_d2(j, tape, set(), k, probe, samples, led[:-4]); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["L3_continues_after_terminal"])   # only 1 round after
+        noisy = seqd(led + [L("prepared", 9, 120.0, group_ids=["z"])]); self.assertFalse(J.judge_d2(j, tape, set(), k, probe, samples, noisy)["checks"]["L5_silent_during_transactions"])
+        self.assertEqual(J.judge_d2(j, tape, set(), k, probe, samples, [])["verdict"], "INVALID_TEST")   # ledger file missing/empty
+        self.assertEqual(J.judge_d2(j, tape, set(), k, probe, samples)["ledger"], "not provided")
 
     def test_d4(self):
         # 2026-10-02 ruling: request-level + island-level RECOVERY_REQUIRED, <= 1 REBUILD_OLD, deadline + recovery_timeout bound
         j = d4_journal()
         t = [{"event": "rl_reconfiguration", "result": "RECOVERY_REQUIRED"}]
-        r = J.judge_d4(j, t, set(), recovery_timeout_s=120.0)
-        self.assertEqual(r["verdict"], "PASS", r)
-        self.assertEqual(J.judge_d4(j, t + [{"event": "rl_batch_prepared", "ts": 800.0}], set(), recovery_timeout_s=120.0)["verdict"], "FAIL")
-        self.assertEqual(J.judge_d4(j, t, set(), ledger=[{"kind": "prepared", "wall_time": 800.0}], recovery_timeout_s=120.0)["verdict"], "FAIL")
-        self.assertEqual(J.judge_d4([j[0], tx("SUCCEEDED", "dn1")], t, set())["verdict"], "INVALID_TEST")
-        self.assertEqual(J.judge_d4(j, [], set(), recovery_timeout_s=120.0)["verdict"], "FAIL")
+        led = seqd(ledger_rounds(ledger_rounds([], 0, 10.0, ["a", "b"]), 1, 60.0, ["c", "d"]))
+        r = J.judge_d4(j, t, set(), led, recovery_timeout_s=120.0)
+        self.assertEqual(r["verdict"], "PASS", r); self.assertTrue(r["checks"]["L4_silent_after_recovery"])
+        self.assertEqual(J.judge_d4(j, t, set(), recovery_timeout_s=120.0)["verdict"], "INVALID_TEST")   # ledger required (T36 §5.1)
+        self.assertEqual(J.judge_d4(j, t + [{"event": "rl_batch_prepared", "ts": 800.0}], set(), led, recovery_timeout_s=120.0)["verdict"], "FAIL")
+        r = J.judge_d4(j, t, set(), ledger=seqd(led + [L("prepared", 2, 800.0, group_ids=["e"])]), recovery_timeout_s=120.0)
+        self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["L4_silent_after_recovery"]); self.assertFalse(r["checks"]["no_prepared_after_recovery"])
+        r = J.judge_d4(j, t + [{"event": "rl_driver_phase", "phase": "train", "time_unix": 800.0}], set(), led, recovery_timeout_s=120.0)
+        self.assertFalse(r["checks"]["L4_silent_after_recovery"])   # trained after RECOVERY_REQUIRED
+        self.assertEqual(J.judge_d4([j[0], tx("SUCCEEDED", "dn1")], t, set(), led)["verdict"], "INVALID_TEST")
+        self.assertEqual(J.judge_d4(j, [], set(), led, recovery_timeout_s=120.0)["verdict"], "FAIL")
         # no request-level terminal (pre-fix controller) -> FAIL on dn1_RECOVERY_REQUIRED only
-        r = J.judge_d4([x for x in j if not (x.get("phase") == "RECOVERY_REQUIRED" and x.get("request_id"))], t, set(), recovery_timeout_s=120.0)
+        r = J.judge_d4([x for x in j if not (x.get("phase") == "RECOVERY_REQUIRED" and x.get("request_id"))], t, set(), led, recovery_timeout_s=120.0)
         self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["dn1_RECOVERY_REQUIRED"]); self.assertFalse(r["checks"]["island_record_consistent"])
         # a second REBUILD_OLD, a reset deadline, or running past deadline + recovery_timeout + margin all fail
-        extra = dict(j[3]); self.assertEqual(J.judge_d4(j[:4] + [extra] + j[4:], t, set(), recovery_timeout_s=120.0)["checks"]["at_most_one_REBUILD_OLD"], False)
+        extra = dict(j[3]); self.assertEqual(J.judge_d4(j[:4] + [extra] + j[4:], t, set(), led, recovery_timeout_s=120.0)["checks"]["at_most_one_REBUILD_OLD"], False)
         reset = [dict(x, deadline_wall=5000.0) if x.get("phase") == "REBUILD_OLD" else x for x in j]
-        self.assertFalse(J.judge_d4(reset, t, set(), recovery_timeout_s=120.0)["checks"]["deadline_not_reset"])
+        self.assertFalse(J.judge_d4(reset, t, set(), led, recovery_timeout_s=120.0)["checks"]["deadline_not_reset"])
         late = [dict(x, wall_time=900.0) if x.get("phase") == "RECOVERY_REQUIRED" else x for x in j]
-        self.assertFalse(J.judge_d4(late, t, set(), recovery_timeout_s=120.0)["checks"]["within_time_limit"])
+        self.assertFalse(J.judge_d4(late, t, set(), led, recovery_timeout_s=120.0)["checks"]["within_time_limit"])
         # recovery_timeout from REBUILD_OLD.recovery_deadline_wall when not given
-        self.assertEqual(J.judge_d4(j, t, set())["time"]["recovery_timeout_s"], 120.0)
+        self.assertEqual(J.judge_d4(j, t, set(), led)["time"]["recovery_timeout_s"], 120.0)
 
     def test_d4_replay_chain_6r2(self):
         """Real journal of chain 6r2 d4 (pre-fix controller): island-level RECOVERY_REQUIRED only -> FAIL on the request-level
@@ -395,6 +416,14 @@ class CLI(unittest.TestCase):
         pf = os.path.join(d, "p.txt"); open(pf, "w").write("noise\n" + json.dumps({"probe_attested": True, "x": 1}) + "\n")
         self.assertEqual(J.load_probe(pf)["x"], 1); self.assertIsNone(J.load_probe(os.path.join(d, "none")))
         open(pf, "w").write(json.dumps({"probe_attested": False}) + "\n"); self.assertIsNone(J.load_probe(pf))
+        # a4bc through the CLI: --side-effects file (judge_after.sh passes elastic-state/side_effects.jsonl); missing file -> INVALID (evidence_missing)
+        jp2, tp2, sp, pp = (os.path.join(d, n) for n in ("j2.jsonl", "t2.jsonl", "se.jsonl", "pa.txt"))
+        open(jp2, "w").write("".join(json.dumps(x) + "\n" for x in a4bc_journal())); open(tp2, "w").write(json.dumps(TWC) + "\n")
+        open(sp, "w").write("".join(json.dumps(x) + "\n" for x in SE_OK)); open(pp, "w").write(json.dumps(PA4) + "\n")
+        self.assertEqual(J.main(["a4bc", jp2, tp2, "--side-effects", sp, "--probe-after", pp, "--out", os.path.join(d, "o2.json")]), 0)
+        self.assertEqual(json.load(open(os.path.join(d, "o2.json")))["checks"]["no_replay_after_cancel"], True)
+        rc = J.main(["a4bc", jp2, tp2, "--side-effects", os.path.join(d, "absent.jsonl"), "--probe-after", pp, "--marker-dir", d])
+        self.assertEqual(rc, 4); self.assertTrue(os.path.exists(os.path.join(d, "evidence_missing")))
 
 
 
@@ -409,7 +438,32 @@ def start(t): return {"event": "rl_driver_start", "time_unix": t}
 def pub(v, tok, members, t): return {"event": "rl_publication", "policy_version": v, "rl/policy_token": tok, "sync/publication_members": members, "time_unix": t}
 def train(t): return {"event": "rl_driver_phase", "phase": "train", "time_unix": t}
 VER_OK = {"members": C4, "fork_epoch": 2, "policy_token": "verified", "router": {"not_admitted": []}, "trainer_layout": {"world": 4, "tp": 1, "pp": 1, "cp": 1, "ep": 1, "dp": 4}, "unconsumed_batches": [], "published_version": 1}
-LEDGER_OK = [{"kind": "prepared", "rollout_id": 0}, {"kind": "outer_recorded", "rollout_id": 0}, {"kind": "prepared", "rollout_id": 1}, {"kind": "outer_recorded", "rollout_id": 1}]
+def L(kind, rid, t, attempt=0, **k): return {"kind": kind, "rollout_id": rid, "attempt": attempt, "wall_time": t, **k}
+
+
+def ledger_rounds(recs, rid, t, groups, attempt=0, outer=True):
+    recs += [L("prepared", rid, t, attempt, group_ids=groups), L("carried_over_report", rid, t + 0.1, attempt, carried_over_reported=True),
+             L("optimizer_applied", rid, t + 1.0, attempt)] + ([L("outer_recorded", rid, t + 2.0, attempt)] if outer else [])
+    return recs
+
+
+def seqd(recs):
+    for i, r in enumerate(recs): r["seq"] = i + 1
+    return recs
+
+
+def ledger_ok():
+    """T36 L1-L8 shape for the r cases (restart at 110, restart publication version 1): rollouts 0 and 1 trained before the
+    kill, rollout 1 never outer_recorded -> superseded at the restart (restart_rollout_id 1), regenerated as attempt 1 with
+    new groups, then rollouts 2 and 3."""
+    recs = ledger_rounds([], 0, 5.0, ["r0-g0", "r0-g1"])
+    ledger_rounds(recs, 1, 25.0, ["r1-g0", "r1-g1"], outer=False)
+    recs.append(L("superseded", 1, 139.5, 0, restart_rollout_id=1))
+    ledger_rounds(recs, 1, 150.0, ["r1b-g0", "r1b-g1"], attempt=1); ledger_rounds(recs, 2, 160.0, ["r2-g0", "r2-g1"]); ledger_rounds(recs, 3, 170.0, ["r3-g0", "r3-g1"])
+    return seqd(recs)
+
+
+LEDGER_OK = ledger_ok()
 
 
 def r5_journal(verified=True, seq_ok=True):
@@ -444,8 +498,14 @@ class Recovery(unittest.TestCase):
         r = J.judge_recovery("r5", r5_journal(seq_ok=False), r5_tape(), set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["recovery_sequence"])
         r = J.judge_recovery("r5", r5_journal(), r5_tape(same_hash=False), set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["trainer_identity_same_policy_hash"])
         r = J.judge_recovery("r5", r5_journal(), r5_tape(rounds=2), set(C4), LEDGER_OK); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["rounds_after_restart_ge_3"])
-        dup = LEDGER_OK + [{"kind": "outer_recorded", "rollout_id": 1}]
-        r = J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), dup); self.assertEqual(r["verdict"], "FAIL"); self.assertEqual(r["ledger_duplicates"], [1])
+        dup = ledger_ok(); dup[-4]["group_ids"] = ["r0-g0", "r0-g1"]   # rollout 3 consumes rollout 0's groups again (L2, group-level)
+        r = J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), dup); self.assertEqual(r["verdict"], "FAIL"); self.assertEqual(r["ledger_duplicates"], ["r0-g0", "r0-g1"])
+        self.assertFalse(r["checks"]["L2_no_group_reuse"])
+        # L1: a second optimizer_applied for one attempt; L6: the restart record names another rollout; L3: too few rounds after
+        bad = ledger_ok() + [L("optimizer_applied", 3, 180.0)]; self.assertFalse(J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), seqd(bad))["checks"]["L1_round_triples"])
+        bad = ledger_ok(); bad[7]["restart_rollout_id"] = 2; self.assertFalse(J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), bad)["checks"]["L6_restart_consistent"])
+        self.assertFalse(J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), ledger_ok()[:-4])["checks"]["L3_continues_after_terminal"])
+        self.assertEqual(J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), [])["verdict"], "INVALID_TEST")   # --ledger file empty/missing
         self.assertEqual(J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), None)["verdict"], "INVALID_TEST")   # ledger missing
         for bad in ({"policy_token": "unavailable"}, {"router": "unavailable"}, {"trainer_layout": "unavailable"}, {"unconsumed_batches": [3]}):
             j = r5_journal(verified=False) + [rec("verified", members=C4, fork_epoch=2, checks=dict(VER_OK, **bad), wall_time=140.0)]
@@ -494,7 +554,12 @@ class Recovery(unittest.TestCase):
         r = J.judge_recovery("r5", j, t, set(C4), l, up="up")   # the CPU test's request id
         self.assertEqual(r["verdict"], "FAIL", r)
         failed = sorted(k for k, v in r["checks"].items() if v is not True)
-        self.assertEqual(failed, ["no_unconsumed_batches", "trainer_layout_world_4", "up_SUCCEEDED_recovered_after_restart"], r["checks"])
+        # 2026-10-02 T36 ledger checks: the restarted CPU process ran without a ledger, so L1 (tape 6 rounds trained vs 3
+        # optimizer_applied), L6 (no ledger record after the restart) and L7 (verified.checks has no unconsumed_batches)
+        # fail on this fixture by the same design as no_unconsumed_batches.
+        self.assertEqual(failed, ["L1_round_triples", "L6_restart_consistent", "L7_verified_unconsumed_empty",
+                                  "no_unconsumed_batches", "trainer_layout_world_4", "up_SUCCEEDED_recovered_after_restart"], r["checks"])
+        self.assertTrue(r["checks"]["L2_no_group_reuse"] and r["checks"]["L8_report_fields"] and r["checks"]["L3_continues_after_terminal"])
         self.assertTrue(r["checks"]["recovery_sequence"] and r["checks"]["tape_RECOVERED"] and r["checks"]["router_all_admitted"])
         self.assertEqual(r["identity"]["version"], 0)   # LocalOnlySync restarts at 0: same initial policy hash
         self.assertEqual(r["ledger_duplicates"], [])
