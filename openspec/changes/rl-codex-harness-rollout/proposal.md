@@ -72,3 +72,5 @@
   - 阻塞于 rl-infra-spec 的 1.7、3.3/3.3b 的 GPU 验收，以及 X5 drain；
   - 上游 `arguments.py:3240` 规定 session server 与 partial rollout 互斥，所以本 change 不支持 partial rollout。
 - GPU：只有 A 路径冒烟与多轮 TITO 一致性两项，使用便宜卡，每项事先定好判据与费用上限（见 tasks）。
+
+> 待批准修订（2026-10-01）：legacy `yeto_miles_secrlenv` 源码已找到（yeto `5bfc011`），"重写"改为"搬运"；`codex_openenv_*` 三模块需重写；legacy 可训练 compaction 与 fork pin 的 session server 不兼容，首批关闭。详见 design.md"待批准修订提案"与 `/home/michael/work/infra-drafts/CODEX-PROGRESS.md`。

@@ -84,3 +84,9 @@
   - 多 harness 首批认证（OpenHands / mini-swe-agent / Claude Code 风格）；
   - `apply_patch` freeform 工具。
   验收：progress 条目评审通过。
+
+## 待批准修订（阶段 1 检查点，2026-10-01）
+
+- 2.1：legacy 源码已在 yeto 历史 `5bfc011:yeto_miles_secrlenv/` 找到（sha256 与 `yeto/rl/__init__.py` pin 一致），改为"搬运 + 出处注记 + 重算 SHA"；`codex_openenv_*` 三模块未找到，按已知接口重写。新增验收：Responses 工具调用的 TITO 前缀复用、rollout 级取消清理（进程组/HOME/session/lease/计数归零）、三处 reward 验签、mask 与 token/logprob 对齐、兄弟段共享奖励且基线按 rollout 计一次、compaction 开启时 preflight fail closed。见 design R-CTX / R-D5a。
+- 3.2 / 4.4 / 4.5：签名与验收以 design R-IR 为准。
+- 9.1 / 9.2：任务子集、模型、费用、通过/停机条件以 design R-TB / R-GPU 为准。

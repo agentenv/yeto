@@ -166,3 +166,90 @@ agentic profile 默认开启截断重要性采样，吸收引擎的数值差异�
 ## Open Questions
 
 - 冒烟使用的 Terminal-Bench 任务子集与数量（不影响契约，GPU 任务执行前确定）。
+
+---
+
+## 待批准修订提案（阶段 1 检查点，2026-10-01；未获批准前不改上文 Decisions）
+
+依据与查找记录见 `/home/michael/work/infra-drafts/CODEX-PROGRESS.md`。以下每段均标"待批准"。
+
+### R-CTX. 更正 Context 中的"未核实"（待批准）
+- legacy `yeto_miles_secrlenv` 源码**已找到**：yeto 仓库提交 `5bfc011`（亦即 merge `e7e3066` 的第一父 `95dd529`）中的 `yeto_miles_secrlenv/{__init__,agent,client,codex_harness_agent,generate,reward}.py`；三份文件的 sha256 与 `yeto/rl/__init__.py` 当前 pin 的 `SECRLENV_AGENT_SHA256` / `SECRLENV_GENERATE_SHA256` / `CODEX_HARNESS_AGENT_SHA256` 逐字节相同。该目录在 merge `e7e3066`（2026-08-27）被静默丢弃，现有 `tests/test_secrlenv_codex_harness.py` 与之配套（仅多一处 importorskip）。D3 与 Risks 中"找不到则重写"的分支作废，改为"搬运并标注出处"。
+- `codex_openenv_agent_function.py` / `codex_openenv_subprocess_agent_function.py` / `codex_openenv_agent_worker.py`（legacy 自 `<miles_root>/examples/experimental/openenv/` 加载）在本机所有 git ref、tar/bundle、pip 缓存中**均不存在**，fork pin `e3a11ab3` 的该目录也没有；来源应为 `agentenv/miles` 私有副本。此三模块按 `yeto/rl/learner.py:804–835`、`yeto/rl/tbench_direct_preflight.py:60–75`、`tests/test_rl_codex_schema.py` 约定的接口重写（标"重写"），除非用户提供副本。
+- pin 镜像内 site-packages 未能检查（docker socket 无权限）。
+
+### R-D5a. 多 chain 的训练归属（替换 D5a；待批准）
+
+**真实 trace（按上游 `agentic_tool_call` + 上游 session server + legacy bridge 的实际代码路径构造；任务 `fix-git`，3 轮）**
+
+| 步 | 生成事件 / 系统动作 | chain / session | 训练数据 |
+|---|---|---|---|
+| E0 | `agentic_tool_call.generate`：tracer `POST /sessions` → 会话 S1；调用 `codex_harness_agent.run(…, metadata)`；bridge 起 `/v1/responses`，`_AppServerDriver` 启动 Codex 0.145.0，发送任务 prompt | S1 创建 | — |
+| E1 | Codex → `POST /v1/responses`（`store:false`，input=[user prompt]）。bridge 校验初始历史，构造 M1=[system BASE_INSTRUCTIONS, user prompt] → `POST S1/v1/chat/completions`（tools=`terminal.exec`/`submit`，logprobs）。session server：stored 空 → 模板渲染 P1 → SGLang 生成 **G1**（reasoning + `terminal.exec("git status")`），返回 `output_token_logprobs`、`weight_version`；record r1={input_ids=P1, output=G1}；`trajectory_token_ids`=P1‖G1 | S1 | G1：mask=1，logprob 有 |
+| E2 | bridge 把 G1 译为 Responses `reasoning` + `function_call`，SSE 返回；`expected_input` := history+output。Codex 在沙箱执行工具（本区间进入 `async_tool_wait_scope`）；Codex → 第 2 次请求 input = 上次 input + output items + `function_call_output`。bridge：`history == expected_input` 校验通过；M2 = M1 + assistant(G1) + tool(result)。session server：stored M1+assistant 是 M2 前缀，追加角色 `tool` ∈ `allowed_append_roles`；**TITO 复用 P1‖G1 的 token，不重新 tokenize**，只渲染 tool 段 T2；生成 **G2**；r2={input_ids=P1‖G1‖T2, output=G2} | S1 | T2：mask=0；G2：mask=1 |
+| E3 | 同 E2，G3 = `submit`；r3；bridge 置 terminal（之后任何采样 → 409） | S1 | T3：mask=0；G3：mask=1 |
+| E4 | driver 关闭 Codex（进程组回收、isolated HOME 清理）；可信层运行 verifier（`tests/test.sh`）→ `tbench_outcome` 字段集 {task_id, episode_id, status=completed, passed, reward∈{0,1}} + HMAC 写入 metadata | — | — |
+| E5 | `agentic_tool_call` 收集：`GET S1/samples` → `compute_samples_from_openai_records([r1,r2,r3], accumulated=P1‖G1‖T2‖G2‖T3‖G3)`：每 record 一个 per-turn Sample（`loss_mask=[1]*len(G_i)`、`rollout_log_probs`、`weight_versions` span），断言各轮 output 与累计序列对齐；`truncate_samples_by_total_tokens(max_seq_len)` 在 turn 边界截断；`merge_samples` → **一条 sample**：tokens=P1‖G1‖T2‖G2‖T3‖G3，mask=[0…0,1…1,0…0,1…1,0…0,1…1]，logprob 与 mask=1 位逐位对齐 | S1 → sample A | A |
+| E6 | `reward_func` → `_verified_outcome` 验签 → reward；`check_group` 认证组；`train_data_conversion`：按 `group_index` 分组、按 `rollout_id` 识别同一 rollout 的兄弟段，兄弟奖励必须相等，**基线对每个 rollout 只计一次** | — | A 带 reward r |
+
+**一次执行、上下文重组产生的片段（D5 情况 3）**：以 legacy compaction 为例，窗口 0 第 k 轮后，bridge 在 S1 追加 summary 指令采样 **Gs**（record r_s，mask=1，属于 chain 1），然后把下一请求的消息重建为 M' = [system, user(resume+summary), 保留的原子步]。
+- **源码确认的不兼容**：legacy 依赖 `X-Miles-Compaction-*` 请求头让 session server 开新窗口；fork pin `e3a11ab3` 的 session server 不认识这些头（`git grep` 为空）。在 pin 上 M' 的 stored 前缀只匹配到 `system`，匹配前缀内无生成 checkpoint → `linear_trajectory._rollback_to_checkpoint(-1)` **静默丢弃 r1…r_s**。因此：
+  - 首批 `YETO_CODEX_COMPACTION_ENABLED` 必须关闭，preflight 发现开启即 fail closed；超出 `max_seq_len` 按 D7/D8 策略边界处理。
+  - 网关的多 chain 实现为**另起 session**（`POST /sessions` → S2），绝不对旧 session 回滚；S1 收集为 sample A（G1…Gk, Gs），S2 收集为 sample B（重建上下文为 prompt，mask=0；G_{k+1}… mask=1）。
+- **归属规则**：A、B 属于同一 `trajectory_id`，设置相同 `group_index` 与 `rollout_id`（兄弟段），携带同一份签名 outcome → 共享最终奖励；每个生成事件恰好出现在一条 sample 的 mask=1 区间中（重建上下文里的历史文本是 prompt，mask=0），**不重复训练**；`train_data_conversion` 对该 rollout 只计一次基线，**不冒充独立 GRPO 样本**。metadata 增加 `chain_index`、`chains_total`、`chain_break_reason`，`reward_scope=trajectory`。
+- **真正独立分支**：定义为"拥有各自环境终态与各自 verifier outcome"的执行（例如 harness 在不同容器各跑一次）。它们是不同 `trajectory_id`、不同 `rollout_id`，各自归因、各算一个 GRPO 组成员。同一容器内的"重试分叉"（D5 情况 2）在 Codex 路径被 legacy bridge 的指纹去重与历史相等校验拒绝（协议违规 → 轨迹作废，不签名、不计 0 奖励）；对其他 harness 的处理留到首批之后，默认选项是"被放弃分支作为同一 trajectory 的兄弟段共享奖励"，但需单独批准。
+- **首批断言**：Codex 路径每条轨迹 chain 数恒为 1（compaction 关闭、重试被拒）；GPU 9.2 把 `chains_total==1` 作为硬判据，多 chain 代码路径只在 CPU 用 fake harness 验收。
+- 原 D5a 中"奖励归属见 D9"是笔误（D9 是沙箱代理）；归属规则以本段为准。
+
+### R-D9. 沙箱代理接口补充（待批准）
+- `acquire(env_id, trajectory_id, deadline)` 的 `deadline` 为硬上限：到期未 `destroy` 由 broker 强制销毁并返回 `InfraError(lease_expired)`，对应 sample `ABORTED`。
+- `env_live` 定义：已 `acquire` 且 `describe` 尚未返回 gone 的 lease 数，**包含空闲（已分配但当前不在执行工具）的环境**；不包含未绑定轨迹的预热池（首批无预热池，若后续引入另设 `env_idle_pool`，不进 drain 条件）。
+- 因每个 lease 都有 deadline，drain 的最长等待 = min(drain deadline, 最晚 lease deadline)，不会永久等待。
+
+### R-IR. 对 INFRA 的接口请求精确化（由 INFRA-E1 实现，本 change 只做接入验收；待批准）
+
+**IR-1 `miles_adapter/config.py` / `entry.py`**
+- 字段：`agent.custom_agent_function_path: str | None`、`agent.agent_max_seq_len: int | None` → 生成 `--custom-agent-function-path <path>`、`--max-seq-len <int>`，仅当 `custom_generate_function_path == "miles.rollout.generate_hub.agentic_tool_call.generate"`；否则抛配置错误，消息须包含 `requires custom_generate_function_path=miles.rollout.generate_hub.agentic_tool_call.generate`。
+- `agent.tito_allowed_append_roles` 继续拒绝，消息须包含 `decided by the --tito-model template (allowed_append_roles)`。
+- `use_session_server` 与 `partial_rollout` 同时为真 → 配置错误，消息引用 `miles/utils/arguments.py:3240 "--use-session-server does not support --partial-rollout"`。
+- `entry.py`：新增钩子 `preflight: Callable[[RunConfig], None] | None`，在 placement/分配之前调用；抛错则不发生任何 allocate 调用。
+- 验收（CPU）：透传生成正确 argv；缺 agentic_tool_call 时拒绝且消息匹配；三条拒绝理由文本；互斥；preflight 失败时 fake allocator 调用次数为 0。
+
+**IR-2 `tool_wait.drain_blockers` / `MilesRolloutPool` drain probe / 1.7 load sample**
+- 新类型：`HarnessSnapshot(in_flight: int, env_live: int, generation: int)`。
+- 新签名：`drain_blockers(router_in_flight: int | None, tool_wait: ToolWaitSnapshot | None, harness: HarnessSnapshot | None) -> list[str]`。`harness is None` → 追加 `"harness counts unknown"`（fail closed）；非 agentic profile 由 pool 传显式 `HarnessSnapshot(0, 0, 0)`，不是 None。`in_flight>0` → `"{n} harness sessions in flight"`；`env_live>0` → `"{n} sandboxes live"`。
+- 准入顺序：`ElasticRolloutPool.drain(members, deadline)` 先关闭 `members` 的准入（既有语义），再轮询 blockers 为空。harness 侧接口：`HarnessAdmission.allow_new_session(member: str) -> bool`，drain 中返回 False，agent/网关在 `POST /sessions` 前调用；被拒的轨迹在该 rollout 内改派非 drain 成员或等待 undrain。
+- `LoadSample` 新增字段 `harness_in_flight: int = 0`、`env_live: int = 0`；load payload 新增键 `harness_in_flight`、`env_live`、`tito_session_mismatch`、`tito_chain_breaks`（`dict[str,int]`）、`policy_age_violation`。`classify_load` 不变。
+- 验收（CPU）：active=0 ∧ tool_wait>0 未排空；active=0 ∧ tool_wait=0 ∧ env_live>0 未排空；harness=None 未排空；显式零快照时与旧行为一致；drain 后 `allow_new_session` 为 False 且不再创建会话。
+
+**IR-3 driver → rollout 的目标 policy version**
+- `RolloutPool.generate(rollout_id: int, *, expected_policy_version: str)`，值为既有 `policy_token(rollout_id, policy_hash)`（`driver.py:170`）。`MilesRolloutPool` 把它写入每个 prompt sample 的 metadata `expected_policy_version`，`agentic_tool_call` 原样传给 agent。
+- 实际值：session server 记录的每次生成 `weight_version(s)`（`samples/merge.py:83` 的 `WeightVersionsPerCall`），agent/网关汇总为 metadata `policy_versions_actual: list[str]`。
+- 校验：age 0 下 `set(policy_versions_actual) == {expected_policy_version}`；否则 metadata `policy_age_violation=1`，sample `ABORTED`，不签名、不计 0 奖励。前提（待 INFRA 确认）：Publisher 更新权重时把 SGLang `weight_version` 设为同一 policy token。
+- 验收（CPU）：fake pool/agent 下漂移 → ABORTED 且不进训练；一致 → 正常；缺 `expected_policy_version` → 配置错误。
+
+**IR-4 1.7 指标 schema**
+- 登记：`harness_in_flight`（gauge）、`env_live`（gauge）、`tito_session_mismatch_total`、`tito_chain_breaks_total{reason}`、`policy_age_violation_total`，标签 `profile`、`epoch`；`reason ∈ {retry_fork, history_rewrite, template_drops_reasoning, compaction_window}`。
+- 验收（CPU）：关闭观测时字段缺省、旧路径快照不变；开启时字段存在且类型正确。
+
+### R-TB. Terminal-Bench 任务子集（待批准）
+- 数据集：`harbor-framework/terminal-bench-2`（原 `laude-institute/terminal-bench-2`，GitHub 301）main @ commit `2fd12b88aafdd04a52c298e3940bcb189f9766d6`（2026-04-30）。任务目录在仓库根（89 个）。数据生成沿用 pin 内 `examples/experimental/openenv/make_tbench2_data.py --tasks_dir <checkout>`。
+- 子集（6 个，固定）：`fix-git`（legacy 测试已用）、`regex-log`、`sqlite-db-truncate`、`log-summary-date-ranges`、`openssl-selfsigned-cert`、`git-multibranch`。全部为多轮 shell 工具任务，verifier 对修改后的工作目录打分。
+- 覆盖矩阵：
+  - 多轮工具调用：全部任务；判据 每轨迹 ≥2 次 `terminal.exec`。
+  - 修改后 verifier 打分：`fix-git`、`sqlite-db-truncate`、`git-multibranch`（终态依赖修改）。
+  - 超时/取消/清理：对 1 条轨迹设 turn 预算=2 → `max_turns` 策略边界（签名，reward 0）；对 1 条轨迹注入 wall-clock 取消 → 进程组/HOME/session/lease 回收证据，`tool_wait`、`env_live` 归零；对 1 条轨迹注入沙箱创建失败 → `INFRASTRUCTURE_STATUS`，未签名，`ABORTED`。
+  - 任务失败 vs 基础设施失败：前者 `status ∈ {completed, timeout, max_turns, max_seq_len}` 且带 HMAC；后者 `status=infrastructure`、无 MAC、`ABORTED`、不进训练。
+  - 正奖励路径：(a) 用各任务自带 `solution/` 经同一 verifier + HMAC 链路产出 reward=1（基础设施级证明，不作训练数据）；(b) 模型生成至少 1 条 pass。负奖励路径：模型生成的失败轨迹。
+  - 一次有效训练更新：≥1 个组通过 `apply_reward_nonzero_std_filter`（组内奖励 std>0），一次优化器 step 的 grad norm>0，LoRA 权重 checksum 变化，发布的 policy version 递增。若 N=4 组内无任何 pass，则记"合法否定结论：qwen35_08b 在该子集无正奖励"，训练更新判据改由主 agent 裁定（备选：换 legacy 的 Qwen3.8 profile，费用需重估）。
+- 模型：legacy attested profile `qwen35_08b`（`Qwen/Qwen3.5-0.8B@2fc06364715b967f1860aea9cf38778875588b17`）LoRA。
+
+### R-SCOPE. 首批范围（待批准）
+- 接原版 Codex 二进制（黑盒），由 legacy `_AppServerDriver` 经 app-server 协议 v2 驱动，模型端点为进程内 `_ResponsesBridge`。不接白盒 codex-agent。
+- 固定版本（沿用 `yeto/rl/__init__.py`）：`codex-cli 0.145.0`；`@openai/codex@0.145.0-linux-x64`，target `x86_64-unknown-linux-musl`；二进制 sha256 `a2a05dafaa1acb002a45eaec0a462de5b13694fcfcd7bc43305f14781ce7be14`（310,730,800 B）；npm tarball sha256 `11239480f8e3efd1430f23bbe91c1a397856b8bbe6185ccbaee2382d25e03df2`；package manifest sha256 `8da5349aa5a4242f5e11c5ca8ff4a16d8f9f912cb8accebea4def94edbf30aee`；app-server schema v2 sha256 `f2415ee36b3c9fa16617c800910cd65b8086ce7c7fecee3dac5f7089eb5973b9`。获取：`npm pack` 该包后校验 tarball sha256，解出二进制校验 sha256 与大小，放到容器路径 `/opt/yeto/codex/codex-x86_64-unknown-linux-musl`；preflight 在线校验 `codex --version` 与 app-server schema。
+
+### R-GPU. 冒烟预算（待批准；合计 ≤ $50，同一租期）
+- 资源：1×H100（Nebius，≈$2.95/GPU·h，SkyPilot `--down` + autostop + 独立 watchdog 按实例 ID 终止；需要 docker 跑 TB2 任务容器，Modal serverless 不满足）；或 1×L40S（Modal ≈$1.95/h）仅当 TB2 容器可在 Modal 沙箱内运行——待确认，默认前者。费用按租期 wall time 计，含镜像拉取、预热、空闲。
+- 9.1 A 路径冒烟（≤ $30 ≈ 10 h 上限，计划 6 h）：目标 = 1 个 rollout 步（6 任务 × n=4）+ 1 个训练步。通过条件 = preflight 通过；每条 sample 满足 4.3 断言；HMAC 三处验签通过；`tool_wait`/`env_live` 结束后归零；R-TB 覆盖矩阵全部出现；≥1 个非零 std 组且一次有效更新（或记录合法否定结论）。停机条件 = 费用达 $30、租期达 10 h、preflight 失败、任一对齐断言失败（立即停、拉日志）。
+- 9.2 多轮 TITO 一致性（≤ $20 ≈ 6.5 h 上限，计划 3 h，与 9.1 同租期顺序执行）：目标 = `qwen35_08b` ≥20 条多轮轨迹。通过条件 = `chains_total==1` 全部成立；`tito_session_mismatch==0`；`tito_chain_breaks` 全零；trainer 重算 logprob 与 rollout logprob 差异落入 TIS 截断范围的比例 ≥99%。停机条件 = 费用达 $20、租期总计达 16.5 h、断链率>0（停并记录原因）。
+- 单价为估算，下单前核对当日价格；两项合计硬上限 $50，超出即 `sky down <cluster>` 并核实释放。
