@@ -41,7 +41,9 @@ CASES = {
 }
 # E1-D ⑤⑥⑦ with the 3.7 restart recovery, "方案 A" (recovery-design.md §10 / a8go_strict.sh): strict-avg single island, NO
 # --rl-single-island-no-sync (the island command carries `--syncer $SYNCER_ADDR`; the head syncer is the restart point).
-STRICT_BASE = tuple(a for a in BASE if a != "--rl-single-island-no-sync")
+# + the syncer quorum timeout: the strict pause budget is 0.5 x it (pause_audit); the default 900 -> 450 s rejected the 600 s
+# deadlines in the first s0 run ("pause not allowed: expected pause 600s exceeds budget 450s", a4s7-20261001-1-s0).
+STRICT_BASE = tuple(a for a in BASE if a != "--rl-single-island-no-sync") + ("--rl-elastic-quorum-timeout-s", "1800")
 EXR = ("--rl-elastic-restart-attempts", "2", "--rl-elastic-max-recovery-attempts", "3")
 STRICT_CASES = {
     "s0": (),
@@ -128,6 +130,7 @@ def test_strict_case(case, tmp_path, monkeypatch):
     run, args, env, argv = _strict_argv(case, tmp_path, monkeypatch)
     assert "--rl-single-island-no-sync" not in run and "--syncer $SYNCER_ADDR" in run
     assert args.syncer == "127.0.0.1:1" and not getattr(args, "rl_single_island_no_sync", False)
+    assert args.rl_elastic_quorum_timeout_s == 1800
     pm = json.loads(argv[argv.index("--yeto-placement-map") + 1])
     assert pm["trainer"] == [0, 1, 2, 3] and pm["rollout"] == [4, 5] and pm["standby"] == [6, 7]
     assert [(c["name"], c["start"]) for c in pm["rollout_cells"]] == [("c0", True), ("c1", True), ("c2", False), ("c3", False)]
@@ -166,3 +169,19 @@ def test_strict_fingerprint_equals_no_sync(tmp_path, monkeypatch):
     assert fp(STRICT_BASE, "b") == base
     if _has_recovery_flag():
         assert fp(STRICT_BASE + STRICT_CASES["r5"], "c") == base
+
+
+def test_strict_pause_budget_admits_600s_deadline():
+    """s0 root cause, reproduced on CPU: strict-avg pauses are audited against 0.5 x quorum timeout; the default (900 s)
+    rejects the 600 s request deadline, --rl-elastic-quorum-timeout-s 1800 admits it (budget 900 s)."""
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+    from yeto.rl.engine.pause_audit import DEFAULT_QUORUM_TIMEOUT_S, PAUSABLE_PHASE, pause_decision
+
+    profile = ExecutionProfile(name="t", execution_mode="partitioned-serial",
+                               outer_protocol="strict-avg").bind_algorithm(AlgorithmSpec())
+    old = pause_decision(profile, outer_phase=PAUSABLE_PHASE, expected_pause_s=600,
+                         quorum_timeout_s=DEFAULT_QUORUM_TIMEOUT_S)
+    assert not old.allowed and "exceeds budget 450s" in old.reason
+    new = pause_decision(profile, outer_phase=PAUSABLE_PHASE, expected_pause_s=600, quorum_timeout_s=1800)
+    assert new.allowed and new.budget_s == 900

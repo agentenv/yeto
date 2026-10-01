@@ -8,11 +8,16 @@
 # Existing a8go.sh cases are untouched: chain8.sh selects this script with A8GO=.../a8go_strict.sh (and RESET=.../reset_island_strict.sh).
 # Helpers as in a8go.sh: n2inwatch (triggers), selfcheck (8xH100 + fingerprint), diag_pull, arms (dctl.py), in-container term_probe (TPROBE), final guard
 # (nstop_item_strict.sh -> kills the host syncer tree, then NSTOP/nstop_item.sh; judge_after.sh <case>).
+# s0 (a4s7-20261001-1) lesson: strict-avg audits every pause against min(pause_margin x syncer --quorum-timeout-s, idle-flow) = 0.5 x 900 = 450 s by default;
+# a 600 s deadline is "pause not allowed: expected pause 600s exceeds budget 450s" (inbox status, no journal phase) -- no-sync has no outer budget, so a8go.sh
+# never hit it.  STRICT_EX below raises the syncer quorum timeout to 1800 s (budget 900 s >= the 600 s deadlines; also covers a ~300 s in-place learner restart
+# without the syncer giving up on the learner).  Not a Miles argv -> fingerprint unchanged (fp_local8_strict.py re-checked).
 # >=1 PUSH before every kill (restart point v>=1): r6/r5 up1@train rid1 (the up runs before generate 2: versions 0,1 already pushed); r7 kill after up1 SUCCEEDED
 # and the next generate; r5c dn1@train rid2 (killed at its COMMITTED).  Round ~15 s (8 cards, 0.6B), strict PUSH at every round boundary.
 C=$1; P=$2; HARD=$3; WD=$4; SHA=${SHA:?set SHA to the frozen code commit of this batch (must contain the 3.7 restart recovery, infra-e1-recovery >= 0e68962)}; B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P
 UP=${UP_DEADLINE_S:-600}; EX=""; STEPS=6; ATTN=6; JUDGE=""; ARMS=(); TPROBE=""
 EXR="--rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3"
+STRICT_EX="--rl-elastic-quorum-timeout-s ${QUORUM_TIMEOUT_S:-1800}"   # pause budget = 0.5 x this must be >= every request deadline_s (600)
 req() { printf '["%s",%s,"%s",{"target":"%s","expected_config_epoch":%s,"deadline_s":%s}]' "$1" "$2" "$3" "$4" "$5" "$6"; }   # phase rid id target epoch deadline
 UPB() { req train $1 $2 T4R4S0 0 ${3:-$UP}; }; DNB() { req train $1 $2 T4R2S2 1 ${3:-600}; }
 case $C in
@@ -27,8 +32,8 @@ case $C in
 esac
 ATT=$B/cfg/attestation-8-$ATTN.json; [ -f $ATT ] || { echo "missing $ATT (mkatt8.sh)"; exit 6; }
 COMMON="--total-steps $STEPS --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources $B/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation $ATT"
-if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 SYNCER_PUBLIC_IP=${SYNCER_PUBLIC_IP:-185.189.44.160}:${SYNCER_PORT:-29400} n2run_strict.sh $P 8 $HARD $WD $COMMON $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; echo "tprobe: ${TPROBE:-none}"; echo "judge: ${JUDGE:-manual}"; exit 0; fi
-SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 setsid nohup $B/n2run_strict.sh $P 8 $HARD $WD $COMMON $EX > $R.n2run.out 2>&1 &
+if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 SYNCER_PUBLIC_IP=${SYNCER_PUBLIC_IP:-185.189.44.160}:${SYNCER_PORT:-29400} n2run_strict.sh $P 8 $HARD $WD $COMMON $STRICT_EX $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; echo "tprobe: ${TPROBE:-none}"; echo "judge: ${JUDGE:-manual}"; exit 0; fi
+SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 setsid nohup $B/n2run_strict.sh $P 8 $HARD $WD $COMMON $STRICT_EX $EX > $R.n2run.out 2>&1 &
 sleep 10
 setsid nohup $B/n2inwatch.sh $R "$TRIG" > /dev/null 2>&1 &
 EXPECT_GPU_NAME=H100 EXPECT_GPU_N=8 NSTOP=$B/nstop_item_strict.sh NSTOP_INNER=${NSTOP:-$B/nstop.sh} setsid nohup $B/selfcheck.sh $R $P $ATT > /dev/null 2>&1 &

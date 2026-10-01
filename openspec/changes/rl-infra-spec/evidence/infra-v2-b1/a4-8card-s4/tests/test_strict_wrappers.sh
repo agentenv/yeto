@@ -15,6 +15,7 @@ grep -q -- "--rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3
 grep -q -- "--rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3\$" $T/dry.r7 && grep -q "dctl.py|kill_after_tx|up1|dn1|" $T/dry.r7 && grep -q "tprobe: 1 rec" $T/dry.r7 && ok "r7: EXR only, kill_after_tx arm, term_probe rec" || bad "r7"
 grep -q -- "--rl-test-kill-learner-at COMMITTED" $T/dry.r5 && grep -q "tprobe: 1 rec" $T/dry.r5 && grep -q "arms: none" $T/dry.r5 && ok "r5: kill at COMMITTED, probe rec, no arm" || bad "r5"
 grep -q -- "--rl-test-kill-learner-at COMMITTED" $T/dry.r5c && grep -q "dctl.py|marker|up1" $T/dry.r5c && grep -q '"dn1"' $T/dry.r5c && ok "r5c: marker arm + dn1 trigger" || bad "r5c"
+for c in s0 r6 r7 r5 r5c; do grep -q -- "--rl-elastic-quorum-timeout-s 1800 " $T/dry.$c || bad "$c lacks --rl-elastic-quorum-timeout-s 1800 (s0 lesson: 450 s default budget rejects 600 s deadlines)"; done; ok "every strict case raises the syncer quorum timeout (pause budget 900 s >= 600 s deadlines)"
 grep -q "attestation-8-6.json" $T/dry.r5 && ok "attestation-8-6 (fingerprint unchanged without no-sync)" || bad "attestation"
 SHA=x DRY=1 bash $B/a8go_strict.sh d2 p 1 1 >/dev/null 2>&1; [ $? = 64 ] && ok "existing a8go cases are not accepted here (rc 64)" || bad "unknown case rc"
 # --- n2run_strict preflight: busy port
