@@ -177,6 +177,10 @@ class ExecutionProfile:
                 "max_policy_age must be 0 under the on-policy contract "
                 f"(outer_protocol={self.outer_protocol!r} does not relax island staleness)"
             )
+        if self.max_policy_age == 0 and self.max_inflight_batches != 1:
+            # Age 0: generation of batch r+1 waits for the publication of the
+            # update trained on batch r, so a second batch can never be in flight.
+            raise ProfileError("max_policy_age 0 allows exactly one batch in flight")
         pairs = frozenset(_pair(*p) for p in self.allowed_overlap)
         object.__setattr__(self, "allowed_overlap", pairs)
         if self.execution_mode != "partitioned-overlap":
@@ -392,6 +396,7 @@ class ReadinessSnapshot:
     sync_phase: str = "idle"  # idle | waiting-permit | submitting | applying | finalizing
     driver_safe_point: bool = False
     config_epoch: int = 0
+    eval_in_flight: int = 0  # overlapped eval (overlap.py) still holding the rollout role
 
 
 class ReadinessError(RuntimeError):
@@ -463,6 +468,7 @@ def quiescent_cut_blockers(profile: ExecutionProfile, snap: ReadinessSnapshot) -
         (snap.outstanding_submissions > 0,
          f"{snap.outstanding_submissions} outer submissions outstanding"),
         (snap.sync_phase != "idle", f"outer sync phase {snap.sync_phase!r}"),
+        (snap.eval_in_flight > 0, f"{snap.eval_in_flight} overlapped evals in flight"),
     )
     out.extend(reason for failed, reason in checks if failed)
     return out
