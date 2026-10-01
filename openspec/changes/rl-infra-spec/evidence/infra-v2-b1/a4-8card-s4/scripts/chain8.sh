@@ -30,13 +30,13 @@ for it in "${ITEMS[@]}"; do
   worst=$(python3 -c "print(round($hard/60*$PPM,2))"); now=$(cost_now)
   if ! python3 -c "import sys;sys.exit(0 if $now + $worst <= $CAP else 1)"; then log "$case: NOT RUN (budget): spent_so_far=\$$now worst=\$$worst cap=\$$CAP"; echo "{\"item\":\"$case\",\"status\":\"not_run_budget\",\"spent_so_far\":$now,\"worst\":$worst}" >> $CHAIN/items.jsonl; continue; fi
   if [ $first = 1 ]; then
-    n=$(eval "$THREAD_CMD"); if [ "$n" -ge 3000 ]; then log "$case: user threads $n >= 3000 before the cold start: nothing provisioned, chain stops"; FINAL_RC=3; break; fi
+    n=$(eval "$THREAD_CMD"); if [ "$n" -ge ${THREAD_MAX:-3000} ]; then log "$case: user threads $n >= ${THREAD_MAX:-3000} before the cold start: nothing provisioned, chain stops"; FINAL_RC=3; break; fi
   else
     if ! $SKY status $CL 2>/dev/null | grep -q ' UP '; then log "$case: cluster $CL is not UP any more -> chain stops (no re-provisioning inside a chain)"; FINAL_RC=4; break; fi
     $SKY cancel -a -y $CL > $CHAIN/cancel-$case.out 2>&1
     if ! $RESET $CL $CHAIN/reset-$case.txt; then log "$case: island reset NOT CLEAN (see reset-$case.txt) -> chain stops and releases the cluster"; FINAL_RC=5; break; fi
     log "$case: island reset ok (fresh: no compute apps, GPU memory < 1.5 GiB each, state dirs removed)"
-    n=$(eval "$THREAD_CMD"); if [ "$n" -ge 3000 ]; then log "$case: user threads $n >= 3000: chain stops and releases the cluster (no idle waiting)"; FINAL_RC=3; break; fi
+    n=$(eval "$THREAD_CMD"); if [ "$n" -ge ${THREAD_MAX:-3000} ]; then log "$case: user threads $n >= ${THREAD_MAX:-3000}: chain stops and releases the cluster (no idle waiting)"; FINAL_RC=3; break; fi
   fi
   log "$case: start (hard ${hard}s, worst \$$worst, spent_so_far \$$now)"
   rm -f $R/item_done
