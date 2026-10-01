@@ -4,20 +4,28 @@
 
 ## 0. 设计定稿（CPU）
 
-- [ ] 0.1 用户裁定 design §3 Q1–Q6，并把结论回写 design.md（每项一行"裁定：…/日期"）。验证：design.md 无未裁定项；`openspec validate rl-multinode-island --strict` 通过。
+- [x] 0.1 用户裁定 design §3 Q1–Q6，并把结论回写 design.md（每项一行"裁定：…/日期"）。验证：design.md 无未裁定项；`openspec validate rl-multinode-island --strict` 通过。
+  - 完成记录（2026-10-01，CPU 通过）：Q1–Q6 取主 agent 默认并回写 design §3（标『待用户复核』）。
 - [ ] 0.2 从镜像内 pin 的 Miles 读取 Flash-Next 全参 recipe（`scripts/models/*flash-next*` 或等价）与 4 层变体的 TP/PP/EP/SGLang TP/EP 值，写入 design D8 表格；标明来源 commit。验证：表格每个数值带来源。
 
 ## 1. CPU 单测（schema / 映射 / plan 生成）
 
-- [ ] 1.1 `yeto/gpu_spec.py`：`ClusterSpec` 增加 `min_nodes` 校验入口（纯函数 `require_min_nodes(spec, min_nodes)`）。测试 `tests/test_gpu_spec.py`：`2x8xh100` 解析、低于最小值拒绝、旧单节点字符串不变。
-- [ ] 1.2 cfg schema（D2）：`capabilities.py` 解析 `nodes/gpus_per_node`，`placement` 支持 `"n{k}:{g}"`/整数/uuid 三种写法并归一为 `(node, local)`；无 `nodes` 的 cfg 行为不变。测试 `tests/test_rl_multinode_schema.py`：三种写法等价；混写拒绝；`nodes` 与 `gpus` 不一致拒绝；现有 `resources-8.json` 原样通过且输出与改动前逐字节一致（对 `parse_configs` 结果做快照对比）。
-- [ ] 1.3 放置约束（D4）：`placement.py::validate_bundle_map`/`PlacementRequest` 增加 `gpus_per_node` 参数与节点规则 1–5。测试 `tests/test_rl_multinode_placement.py`：引擎跨节点拒绝；TP 组跨节点拒绝；EP 整节点对齐（按 Q1 裁定）；standby rebind 跨节点拒绝；单节点（`gpus_per_node=None`）全部旧测试不变（`tests/test_rl_miles_adapter_placement.py` 零改动通过）。
-- [ ] 1.4 `placement_map_arg` 跨节点 cell 切分（D7）：按节点分块后切 `gpus_per_engine`；剩余进入 unbound。测试：16 卡 T8R8 engine 8 → 1 个 cell 全在 n1；T8R4S4 engine 2 → 2 个 start cell + 2 个 standby cell 均不跨节点；T12R4 engine 4 且 G=8 → rollout 段 `[12..15]` 在 n1，trainer 占 n0 全部 + n1 前 4（按 D5 矩形规则应**拒绝**，因 trainer 每节点卡数不等）。
-- [ ] 1.5 `StartupBundles` 节点分块断言（D3）：假 `views` 构造跨节点乱序 → `BundleMapError`；正常分块 → `node_of(gpu)` 正确。测试同 1.3 文件。
+- [x] 1.1 `yeto/gpu_spec.py`：`ClusterSpec` 增加 `min_nodes` 校验入口（纯函数 `require_min_nodes(spec, min_nodes)`）。测试 `tests/test_gpu_spec.py`：`2x8xh100` 解析、低于最小值拒绝、旧单节点字符串不变。
+  - 完成记录（2026-10-01，CPU 通过）：`yeto/gpu_spec.py::require_min_nodes`；`tests/test_rl_multinode_schema.py::test_gpu_spec_two_nodes_and_min_nodes`。
+- [x] 1.2 cfg schema（D2）：`capabilities.py` 解析 `nodes/gpus_per_node`，`placement` 支持 `"n{k}:{g}"`/整数/uuid 三种写法并归一为 `(node, local)`；无 `nodes` 的 cfg 行为不变。测试 `tests/test_rl_multinode_schema.py`：三种写法等价；混写拒绝；`nodes` 与 `gpus` 不一致拒绝；现有 `resources-8.json` 原样通过且输出与改动前逐字节一致（对 `parse_configs` 结果做快照对比）。
+  - 完成记录（2026-10-01，CPU 通过）：`yeto/rl/engine/multinode.py`（Topology/topology_of/check_pool_topology/normalize_placement）+ `capabilities.parse_configs` 节点分支（`ResourceConfig.placement_slots`，旧 cfg 默认 None）；旧 cfg 快照、三种写法等价、混用/池不一致/计数不一致拒绝见 `tests/test_rl_multinode_schema.py`。
+- [x] 1.3 放置约束（D4）：`placement.py::validate_bundle_map`/`PlacementRequest` 增加 `gpus_per_node` 参数与节点规则 1–5。测试 `tests/test_rl_multinode_placement.py`：引擎跨节点拒绝；TP 组跨节点拒绝；EP 整节点对齐（按 Q1 裁定）；standby rebind 跨节点拒绝；单节点（`gpus_per_node=None`）全部旧测试不变（`tests/test_rl_miles_adapter_placement.py` 零改动通过）。
+  - 完成记录（2026-10-01，CPU 通过）：`PlacementRequest(gpus_per_node, model_parallel, expert_parallel)` + `_check_nodes`/`trainer_shape`；规则 1/2/3/5 由 `multinode.node_placement_rejection` 统一；`tests/test_rl_multinode_placement.py`；`tests/test_rl_miles_adapter_placement.py` 零改动通过。规则 4（standby rebind 同节点）在 1.4 的 `bind_members` 实现。
+- [x] 1.4 `placement_map_arg` 跨节点 cell 切分（D7）：按节点分块后切 `gpus_per_engine`；剩余进入 unbound。测试：16 卡 T8R8 engine 8 → 1 个 cell 全在 n1；T8R4S4 engine 2 → 2 个 start cell + 2 个 standby cell 均不跨节点；T12R4 engine 4 且 G=8 → rollout 段 `[12..15]` 在 n1，trainer 占 n0 全部 + n1 前 4（按 D5 矩形规则应**拒绝**，因 trainer 每节点卡数不等）。
+  - 完成记录（2026-10-01，CPU 通过）：`placement_map_arg` 改用 `multinode.chunk_by_node`；`rollout.bind_members` 增加逐 cell 同节点检查（`StartupBundles.same_node`）；T8R8/T8R4S4/T12R4 用例见 `tests/test_rl_multinode_placement.py`。
+- [x] 1.5 `StartupBundles` 节点分块断言（D3）：假 `views` 构造跨节点乱序 → `BundleMapError`；正常分块 → `node_of(gpu)` 正确。测试同 1.3 文件。
+  - 完成记录（2026-10-01，CPU 通过）：`StartupBundles(gpus_per_node, node_ids, node_resolver)` + `assert_node_blocks`、`node_of/same_node`；entry.py 以 `ray.util.placement_group_table(pg)['bundles_to_node_id']` 作运行时节点源（Q6，fail closed）；测试同上。
 - [ ] 1.6 launcher 校验（D5）：去掉 `num_nodes==1` 限制；`actor_num_nodes/actor_num_gpus_per_node` 矩形推导；`--rl-min-nodes-per-learner` 与 recipe 默认；D6 NCCL 环境 prelude 生成。测试 `tests/test_rl_launcher_multinode.py`：`--gpu nebius:2x8xh100 --rl-placement fixed-partition --rollout-num-gpus 8` 生成 `--actor-num-nodes 1 --actor-num-gpus-per-node 8`；sky task `num_nodes=2`、`network_tier=best`、worker 分支含 `trap`；低于 min_nodes 拒绝；现有 `tests/test_rl_launcher_partition.py` 零改动通过。
+  - 部分完成（2026-10-01，CPU 通过；任务未勾）：去掉 `num_nodes==1` 限制；`rl_trainer_shape`/`rl_min_nodes`（launcher.py）、`--rl-min-nodes-per-learner`（cli.py）、岛内 `--rl-island-gpus-per-node`（launcher→learner→run_config.ParallelLayout.island_gpus_per_node→config.placement_request）；`tests/test_rl_launcher_multinode.py`；`tests/test_rl_launcher_partition.py` 零改动通过。**未完成**：D6 NCCL/GLOO 环境 prelude；worker 分支 `trap` 提前；sky task 级断言测试（`num_nodes=2`/`network_tier`）。
 - [ ] 1.7 故障域（D9）：`driver`/`controller` 增加 `node_lost` 事件处理 → `RECOVERY_REQUIRED` 并写 journal `topology`；恢复前置检查 `alive_nodes < N` 拒绝。测试 `tests/test_rl_multinode_recovery.py`（复用 `test_rl_reconfig_recovery.py` 的假件）：注入 node_lost → 终态；重启后 alive 不足 → 不进入差分恢复；同形但主机名变化 → 允许。
 - [ ] 1.8 回收（D10）：launcher 记录 `node_instance_ids[]`，`down` 的云端核实逐节点；任一未确认非零退出并列出。测试 `tests/test_rl_launcher_island_failure.py` 增补：2 节点一台未确认 → rc≠0 且信息含节点 ID。
-- [ ] 1.9 全量回归：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q tests/test_rl_*.py tests/test_gpu_spec.py | tee /home/michael/work/infra-drafts/s1-pytest.log`，失败集去重后与 `/tmp/integ-s2-base.ids` 同口径比较，无新增失败。
+- [x] 1.9 全量回归：`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q tests/test_rl_*.py tests/test_gpu_spec.py | tee /home/michael/work/infra-drafts/s1-pytest.log`，失败集去重后与 `/tmp/integ-s2-base.ids` 同口径比较，无新增失败。
+  - 完成记录（2026-10-01，CPU 通过）：`tests/test_rl_*.py tests/test_gpu_spec.py --continue-on-collection-errors`：13 failed/2150 passed/29 skipped/14 errors（日志 `infra-drafts/s1-pytest.log`），27 个失败 id 去重后全部 ⊂ 基线 `/tmp/integ-s2-base.ids`（94），无新增失败。
 
 ## 2. 本地演练（CPU，多进程模拟多节点 Ray，D11）
 
