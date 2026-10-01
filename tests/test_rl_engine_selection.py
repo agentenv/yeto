@@ -487,6 +487,8 @@ class _Actor:
             return [self.norm]
         if fn_path == state_plugin.APPLIED_LRS:
             return [[1e-5]]
+        if fn_path == state_plugin.STEP_LOSSES:
+            return [[]]
         raise AssertionError(fn_path)
 
     async def train(self, rollout_id, pack):

@@ -61,6 +61,9 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         corrections={"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
                      "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
         features={"mismatch_metrics", "rollout_logprobs_as_old"},
+        # rl-algo-loss-variants 5.1: the fake declares the policy-loss variants
+        # for CPU tests (the Miles adapter does not, GPU validation pending).
+        losses={"policy_loss", "cispo", "sapo", "gmpo"},
         # Mechanism dimensions: the R0 defaults (EngineCapabilities); execution
         # as the Miles adapter declares it (rl-algorithm-capabilities 3.4).
         execution=ExecutionCapabilities(

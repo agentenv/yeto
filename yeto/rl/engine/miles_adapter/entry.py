@@ -126,13 +126,23 @@ MILES_DECLARED: dict[str, str] = {
 
 # Declarations whose evidence holds only for specific Miles pins (exact
 # commits; a new pin must be re-verified before it is added here).
+# 5c1b49eb = 0af62f4d + the 2b loss variants: carried over by code diff, not
+# by a rerun -- `git diff 0af62f4d..5c1b49eb -- miles` touches only
+# loss_hub/{losses,math_utils}.py and arguments.py; with the default
+# --policy-loss-variant policy_loss the loss path calls the same
+# compute_policy_loss with the same arguments, need_full_log_probs is
+# unchanged, and the new flags only add parser entries/validation.
+_PINS_0AF62F4D_PLUS = frozenset({
+    "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
+    "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
+})
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
     # grad_norm bit-identical to the baseline)
-    "loss_aggregations:token": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
-    "features:over_sampling": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
-    "features:overlong_filter": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
-    "features:clip_higher": frozenset({"0af62f4d48ed6a5b185c257578d8f7e22312aa87"}),
+    "loss_aggregations:token": _PINS_0AF62F4D_PLUS,
+    "features:over_sampling": _PINS_0AF62F4D_PLUS,
+    "features:overlong_filter": _PINS_0AF62F4D_PLUS,
+    "features:clip_higher": _PINS_0AF62F4D_PLUS,
 }
 
 
@@ -278,21 +288,18 @@ def execution_profile_for(
     partitioned run is refused; a colocated (R0) run binds to the runtime spec
     and records that the hash source was the runtime.
     """
-    from ..execution_profile import ExecutionProfile, ProfileError
+    from ..execution_profile import ExecutionProfile, ProfileError, check_overlap_eval
 
     from ..overlap import IMPLEMENTED_OVERLAP
 
     mode = "colocated-serial" if launch.placement.kind == "colocated" else "partitioned-serial"
     overlap = frozenset()
     if getattr(miles_args, "yeto_rl_overlap_eval", False):
-        if mode == "colocated-serial":
-            raise ProfileError("eval overlap (2.3) needs a fixed-partition placement")
-        if getattr(miles_args, "eval_uses_snapshots", False):
-            # Miles would fire the eval and return; its end could then cross the
-            # next publication, which the 2.3 join guard cannot see.
-            raise ProfileError("eval overlap (2.3) is refused with --eval-uses-snapshots")
-        if not getattr(miles_args, "eval_interval", None):
-            raise ProfileError("eval overlap (2.3) needs --eval-interval")
+        check_overlap_eval(
+            placement_kind="colocated" if mode == "colocated-serial" else "fixed-partition",
+            eval_uses_snapshots=bool(getattr(miles_args, "eval_uses_snapshots", False)),
+            eval_interval=getattr(miles_args, "eval_interval", None),
+        )
         mode, overlap = "partitioned-overlap", IMPLEMENTED_OVERLAP
     if expected_sha256 is None:
         if mode != "colocated-serial":
@@ -489,8 +496,132 @@ def compose_island(
                 driver.placement.restore_committed(tuple(committed["rollout"]),
                                                    epoch=epochs.config_epoch)
         elastic.controller.open(driver.rollout)
+        _wire_trainer_rebuild(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
+                              actor_model=actor_model, rollout_executor=rollout_executor,
+                              runner=runner, base_model_revision=base_model_revision)
+        _wire_trainer_edges(driver, elastic=elastic, miles_args=miles_args, launch=launch,
+                            algorithm=algorithm, actor_model=actor_model,
+                            rollout_executor=rollout_executor, runner=runner,
+                            base_model_revision=base_model_revision)
     holder["driver"] = driver
     return driver
+
+
+def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model,
+                          rollout_executor, runner, base_model_revision) -> None:
+    """4.4: give the controller a same-shape trainer rebuilder when the actor is
+    the swappable proxy (a rebuild still has to be requested explicitly)."""
+    from .rebuild_wiring import make_trainer_rebuilder
+    from .trainer_rebuild import SwappableActor, rebuild_preconditions, rebuild_same_shape
+
+    if not isinstance(actor_model, SwappableActor) or not hasattr(elastic.controller,
+                                                                  "trainer_rebuilder"):
+        return
+    if rebuild_preconditions(miles_args):
+        # review F3: not a same-shape rebuild path (e.g. --load given): leave the
+        # rebuilder unwired, so a request is rejected at plan time
+        return
+    ref_load = getattr(miles_args, "ref_load", None)
+    elastic.controller.trainer_rebuilder = make_trainer_rebuilder(
+        trainer=driver.trainer,
+        rollout=driver.rollout,
+        ledger=elastic.ledger,
+        algorithm=algorithm,
+        backend_fingerprint=elastic.controller.runtime_fingerprint or "",
+        cut_root=str(elastic.controller.state_dir / "cuts"),
+        global_batch_size=int(miles_args.global_batch_size),
+        rebuild_same_shape=lambda *, restore: rebuild_same_shape(
+            driver.trainer, args=miles_args, rollout_executor=rollout_executor,
+            actor=actor_model, run=runner.run, restore=restore, rollout=driver.rollout,
+        ),
+        ref_model=(None if not ref_load
+                   else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
+        preconditions=lambda: rebuild_preconditions(miles_args),
+    )
+
+
+def _startup_views(manager: Any, runner: Any) -> dict[str, Any]:
+    """The fork's startup placement-group views, read once before any is re-pointed."""
+    views = {}
+    for name in ("actor", "rollout", "standby"):
+        try:
+            views[name] = runner.run(_await_ref(manager.get_pg_view.remote(name)))
+        except Exception:  # noqa: BLE001 - a role without a view (e.g. no standby)
+            continue
+    return views
+
+
+async def _await_ref(ref: Any) -> Any:
+    return await ref
+
+
+def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor_model,
+                        rollout_executor, runner, base_model_revision, manager=None) -> bool:
+    """E3 (4.7): the startup bundle map on the rollout pool (bind_members /
+    member_gpus) and ``MilesTrainerOps`` behind ``IslandController.trainer_edges``.
+
+    Skipped (trainer edges stay refused) without the SwappableActor proxy,
+    without pool GPU ids (``ElasticWiring.pool_gpus``), when E3's modules are
+    not in the tree, or when the startup views cannot be read. Returns whether
+    the edges were wired. Attested trainer edges are still required per edge.
+    """
+    from .trainer_rebuild import SwappableActor, rebuild_preconditions
+
+    controller = elastic.controller
+    if rebuild_preconditions(miles_args):
+        # review L2: a trainer edge rebuilds the trainer; not possible on this run
+        return False
+    if (not isinstance(actor_model, SwappableActor) or elastic.pool_gpus is None
+            or not callable(getattr(controller, "set_trainer_edges", None))):
+        return False
+    try:
+        from .trainer_resize import MilesTrainerOps
+    except ImportError:  # E3 not integrated in this tree
+        return False
+    from .bundles import StartupBundles
+    from .rebuild_wiring import CutSource
+
+    if manager is None:
+        from miles.utils.workers.ray_worker_manager import RayWorkerManager
+
+        manager = RayWorkerManager.get_handle()
+    views = _startup_views(manager, runner)
+    try:
+        bundles = StartupBundles(pool_gpus=elastic.pool_gpus, views=views,
+                                 placement_map=launch.placement.placement_map)
+    except Exception:  # noqa: BLE001 - no usable map: leave trainer edges refused
+        return False
+    pool = driver.rollout
+    pool._bundles = bundles
+    pool._worker_manager = manager
+    pool._gpus_per_engine = int(launch.placement.gpus_per_engine)
+    ref_load = getattr(miles_args, "ref_load", None)
+    source = CutSource(
+        driver=lambda: driver, trainer=driver.trainer, rollout=pool, ledger=elastic.ledger,
+        algorithm=algorithm, backend_fingerprint=controller.runtime_fingerprint or "",
+        cut_root=str(controller.state_dir / "cuts"),
+        global_batch_size=int(miles_args.global_batch_size),
+        ref_model=(None if not ref_load
+                   else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
+    )
+    ops = MilesTrainerOps(
+        trainer=driver.trainer, actor=actor_model, rollout_executor=rollout_executor,
+        run=runner.run, rollout=pool, root=source.cut_root, context_for=source.context,
+        expect_for=lambda layout: source.expectation(
+            layout, epoch=controller.journal.epochs.config_epoch),
+        view_for=bundles.view_for,
+        policy_hash_fn=lambda: driver.policy_state.export().policy_tensor_hash(),
+        certified_for=lambda plan: controller.attestation.algorithms_for(
+            (plan.source, plan.target, plan.kind)),
+        worker_manager=manager,
+    )
+    controller.set_trainer_edges(lambda: {
+        "spec": algorithm, "args": driver.trainer._args,
+        "global_batch_size": int(miles_args.global_batch_size),
+        "micro_batch_size": int(getattr(miles_args, "micro_batch_size", 1) or 1),
+        "ops": ops,
+    })
+    return True
 
 
 def selection_event(
@@ -538,7 +669,9 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
     "Found multiple active Ray instances".  A job-level ``runtime_env``
     ``env_vars`` entry is merged into every actor and task the job creates,
     so they resolve the same address as the driver.  ``PYTHONPATH`` travels
-    with it so actors import the pinned Miles checkout, not the image's.
+    with it so actors import the pinned Miles checkout, not the image's;
+    ``YETO_RL_ELASTIC_METADATA`` (only when ``--rl-elastic`` set it) so the
+    rollout metadata hook in the workers reports the data cursor.
     """
 
     environ = os.environ if environ is None else environ
@@ -559,8 +692,38 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
         env_vars[ECHO_ENV] = environ[ECHO_ENV]  # Ray workers echo their tape writes too
     if environ.get("PYTHONPATH"):
         env_vars["PYTHONPATH"] = environ["PYTHONPATH"]
+    from .rollout_meta_hook import ELASTIC_METADATA_ENV
+
+    if environ.get(ELASTIC_METADATA_ENV) == "1":
+        # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
+        # inherit the raylet's environment, not the driver's.
+        env_vars[ELASTIC_METADATA_ENV] = "1"
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
+
+
+def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
+    """``miles_args.yeto_rl_elastic`` (learner ``--rl-elastic``) -> ElasticWiring.
+
+    None when the switch is off: the island is then composed exactly as before.
+    """
+    config = getattr(miles_args, "yeto_rl_elastic", None)
+    if not config:
+        return None
+    from .elastic_wiring import build_elastic
+
+    return build_elastic(
+        state_dir=config["state_dir"],
+        resources=config["resources"],
+        attestation=config.get("attestation"),
+        profile=profile,
+        initial_config=config["initial_config"],
+        runtime_fingerprint=fingerprint,
+        declared_cells=tuple(config["declared_cells"]),
+        # 3.8 pause-budget inputs, only when the learner was given them.
+        **{k: config[k] for k in ("quorum_timeout_s", "idle_flow_timeout_s", "pause_margin")
+           if config.get(k) is not None},
+    )
 
 
 def run_ports_island(
@@ -584,9 +747,10 @@ def run_ports_island(
     require_run_plugin()  # before any upstream component or model exists
     from ..overlap import loop_eval_starter
 
+    fingerprint = runtime_fingerprint(launch, MILES_NEXT_COMMIT)
     capabilities = with_partitioned_serial(
         miles_capabilities(
-            runtime_fingerprint(launch, MILES_NEXT_COMMIT),
+            fingerprint,
             unverified_mechanisms=getattr(miles_args, "yeto_rl_unverified_mechanisms", ()),
         )
     )
@@ -598,6 +762,8 @@ def run_ports_island(
         expected_sha256=expected_algorithm_sha256(miles_args),
     )
     preflight(profile, algorithm, capabilities)  # A1: before any GPU process
+    # E1 (3.x), opt-in: a bad manifest/attestation fails here, before Ray.
+    elastic = elastic_wiring_for(miles_args, profile=profile, fingerprint=fingerprint)
     connect_island_ray()
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
@@ -628,6 +794,14 @@ def run_ports_island(
         actor, critic = await create_training_models(miles_args, executor)
         if critic is not None:
             raise RuntimeError("the ports engine does not drive a critic")
+        # rl-infra-spec 4.3/4.4: one swappable handle shared by trainer,
+        # policy state, publisher and the eval dispatcher (EvalDispatcher keeps
+        # self.actor_model and resolves methods per call, so the proxy is
+        # enough); the disposer gets the proxy, whose async dispose() resolves
+        # the CURRENT target (Disposer.add binds item.dispose when added).
+        from .trainer_rebuild import SwappableActor
+
+        actor = SwappableActor(actor)
         disposer.add(actor)
         dispatcher = EvalDispatcher(miles_args, actor, executor)
         disposer.add(dispatcher.drain)
@@ -670,6 +844,7 @@ def run_ports_island(
                 if profile.execution_mode == "partitioned-overlap"
                 else None
             ),
+            elastic=elastic,
         )
         return driver.run()
     except BaseException as exc:

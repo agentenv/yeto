@@ -41,6 +41,25 @@ class ElasticPlacement:
         self.epoch = epoch - 1
         return self.reconfigure(replace(self._current, rollout_gpus=tuple(rollout_gpus)), epoch=epoch)
 
+    def reconfigure_trainer(self, plan: PlacementDescription, *, epoch: int) -> PlacementDescription:
+        """E3 (4.7): record a committed trainer DP change / role transfer (nested trainer GPU sets)."""
+        current = self._current
+        if epoch != self.epoch + 1:
+            raise PlacementPlanError(f"placement epoch {epoch}, expected {self.epoch + 1}")
+        if plan.kind != current.kind or current.kind != "fixed-partition":
+            raise PlacementPlanError("trainer reconfiguration needs a fixed partition")
+        old, new = set(current.trainer_gpus), set(plan.trainer_gpus)
+        if not new or not (old <= new or new <= old):
+            raise PlacementPlanError("trainer GPU sets must be non-empty and nested")
+        rollout = tuple(plan.rollout_gpus)
+        if set(rollout) & new or set(rollout) - set(self._pool) or new - set(self._pool):
+            raise PlacementPlanError("trainer/rollout GPUs overlap or leave the pool")
+        standby = tuple(g for g in self._pool if g not in rollout and g not in new)
+        self._current = replace(plan, trainer_gpus=tuple(plan.trainer_gpus), rollout_gpus=rollout,
+                                extra={**dict(plan.extra), "standby_gpus": standby, "config_epoch": epoch})
+        self.epoch = epoch
+        return self._current
+
     def reconfigure(self, plan: PlacementDescription, *, epoch: int) -> PlacementDescription:
         current = self._current
         if epoch != self.epoch + 1:

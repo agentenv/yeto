@@ -122,3 +122,17 @@ def test_connect_island_ray_is_a_noop_without_address_and_refuses_late_pin():
     machine.initialized = True
     with pytest.raises(RuntimeError, match="RAY_ADDRESS"):
         connect_island_ray(environ={"RAY_ADDRESS": "10.0.0.7:6379"}, ray_module=machine)
+
+
+def test_connect_island_ray_forwards_elastic_metadata_env_only_when_on():
+    """Integ-s2 finding 2: Ray workers (where the rollout metadata hook runs)
+    inherit the raylet env, so the --rl-elastic switch must travel in runtime_env."""
+    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.engine.miles_adapter.rollout_meta_hook import ELASTIC_METADATA_ENV
+
+    on = _TwoRayMachine(raylet_env={})
+    connect_island_ray(environ={"RAY_ADDRESS": "a:6379", ELASTIC_METADATA_ENV: "1"}, ray_module=on)
+    assert on.init_calls[0][1]["env_vars"][ELASTIC_METADATA_ENV] == "1"
+    off = _TwoRayMachine(raylet_env={})
+    connect_island_ray(environ={"RAY_ADDRESS": "a:6379"}, ray_module=off)
+    assert ELASTIC_METADATA_ENV not in off.init_calls[0][1]["env_vars"]

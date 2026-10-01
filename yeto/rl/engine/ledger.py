@@ -85,7 +85,7 @@ class _Batch:
 
 class BatchLedger:
     def __init__(self, state_dir: str | Path) -> None:
-        self._journal = Journal(Path(state_dir) / LEDGER_DIR)
+        self._journal = Journal(Path(state_dir).expanduser() / LEDGER_DIR)
         self._batches: dict[int, _Batch] = {}
         self._consumed_groups: dict[str, int] = {}
         self._carried: dict[str, dict[str, Any]] = {}

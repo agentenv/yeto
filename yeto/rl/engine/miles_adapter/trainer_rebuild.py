@@ -208,3 +208,129 @@ def rebuild_same_shape(
         attempts.append({"attempt": attempt, "stage": "done", "generation": generation})
         return RebuildResult(outcome, generation, manifest, attempts)
     raise RecoveryRequired(f"trainer rebuild failed {max_attempts} times", attempts=attempts)
+
+
+# --------------------------------------------------------------------------
+# Rebuild at another DP size / bundle set (rl-infra-spec 4.6/4.7, fork-M6)
+# --------------------------------------------------------------------------
+
+
+def resized_args(args: Any, trainer_gpus: int) -> Any:
+    """A copy of the Miles args with the trainer on ``trainer_gpus`` GPUs of one node (TP/PP/CP/EP untouched)."""
+    import copy
+
+    if int(getattr(args, "actor_num_nodes", 1) or 1) != 1:
+        raise RuntimeError("trainer DP change is implemented for a single-node trainer only")
+    new = copy.copy(args)
+    new.actor_num_gpus_per_node = int(trainer_gpus)
+    return new
+
+
+def trainer_view(startup_view: Any, bundle_positions: tuple[int, ...]) -> Any:
+    """Slice of the startup placement group used as the trainer ("actor") view (M1 bundle map).
+
+    Uses the fork's ``_slice_pg_info`` (private; fork gap noted in
+    evidence/infra-e3/plan.md): positions index the startup view's
+    reordered bundle list.
+    """
+    from miles.ray import placement_group
+
+    fn = check_slice_pg_info(getattr(placement_group, "_slice_pg_info", None))
+    return fn(startup_view, tuple(bundle_positions))
+
+
+def check_slice_pg_info(fn: Any) -> Callable[..., Any]:
+    """Fail loudly (not silently) if the fork renames/changes the private ``_slice_pg_info(info, indices)``."""
+    import inspect
+
+    if not callable(fn):
+        raise RuntimeError("fork miles.ray.placement_group._slice_pg_info is missing (fork gap F-R2)")
+    params = list(inspect.signature(fn).parameters)
+    if params != ["info", "indices"]:
+        raise RuntimeError(f"fork _slice_pg_info signature changed: {params} (expected ['info', 'indices'])")
+    return fn
+
+
+def rebuild_resharded(
+    trainer: Any,
+    *,
+    old_args: Any,
+    new_args: Any,
+    rollout_executor: Any,
+    actor: SwappableActor,
+    run: Callable[[Awaitable[Any]], Any],
+    restore_new: Callable[[], Any],
+    restore_old: Callable[[], Any],
+    rollout: DataCursorSource,
+    new_layout: Mapping[str, int],
+    old_layout: Mapping[str, int],
+    new_view: Any = None,
+    old_view: Any = None,
+    trainer_id: str = "actor",
+    worker_manager: Any = None,
+    rebuild: Callable[..., Awaitable[tuple[Any, Any]]] | None = None,
+) -> RebuildResult:
+    """Dispose the trainer, rebuild it with ``new_args`` on ``new_view`` and restore the cut resharded.
+
+    The cut taken before this call stays authoritative, so any failure of
+    the new trainer (rebuild error without cleanup error, wrong layout,
+    refused or failed resharded restore) falls back ONCE to the old shape:
+    rebuild with ``old_args`` on ``old_view`` (or the fork's
+    ``previous_view``) and ``restore_old()`` (exact, same-shape) ->
+    ``REBUILD_OLD``. A cleanup error, a data-cursor change or a failed
+    fallback -> ``RECOVERY_REQUIRED``. ``trainer.rebind_args`` follows the
+    args of the handle that is actually running.
+    """
+    for args in (old_args, new_args):
+        problems = rebuild_preconditions(args)
+        if problems:
+            raise RuntimeError("trainer rebuild refused: " + "; ".join(problems))
+    cursor = dict(rollout.data_cursor())
+    rebuild = rebuild or _default_rebuild()
+    manager = worker_manager if worker_manager is not None else _default_worker_manager()
+    attempts: list[dict[str, Any]] = []
+
+    def _attempt(stage: str, args: Any, view: Any, layout: Mapping[str, int], restore: Callable[[], Any]):
+        new_actor, critic = run(rebuild(args, rollout_executor, old_handles={trainer_id: actor.target},
+                                        worker_manager=manager, trainer_pg_view=view))
+        if critic is not None:
+            raise RecoveryRequired("rebuilt trainer has a critic (ports engine drives none)", attempts=attempts)
+        generation = actor.swap(new_actor)
+        trainer.rebind_args(args)
+        after = dict(rollout.data_cursor())
+        if after != cursor:
+            raise RecoveryRequired(f"data cursor changed across the trainer rebuild: {cursor} -> {after}",
+                                   attempts=attempts)
+        now = trainer.actual_layout()
+        if now != dict(layout):
+            raise RuntimeError(f"{stage}: running layout {now} != expected {dict(layout)}")
+        return generation, restore()
+
+    fallback_view = old_view
+    try:
+        generation, manifest = _attempt("new", new_args, new_view, new_layout, restore_new)
+        attempts.append({"attempt": 0, "stage": "done", "generation": generation, "layout": dict(new_layout)})
+        return RebuildResult("RESTORED", generation, manifest, attempts)
+    except RecoveryRequired:
+        raise
+    except Exception as error:  # noqa: BLE001
+        entry: dict[str, Any] = {"attempt": 0, "stage": "new", "error": repr(error)}
+        if _is_rebuild_error(error):
+            entry.update(stage=error.stage, error=repr(error.__cause__ or error),
+                         cleanup_error=repr(error.cleanup_error) if error.cleanup_error else None)
+            if error.cleanup_error is not None:
+                attempts.append(entry)
+                raise RecoveryRequired("trainer pools could not be stopped after a failed rebuild",
+                                       attempts=attempts) from error
+            if fallback_view is None and error.previous_view is not None and not error.view_restored:
+                fallback_view = error.previous_view
+        attempts.append(entry)
+    try:
+        generation, manifest = _attempt("old", old_args, fallback_view, old_layout, restore_old)
+    except RecoveryRequired:
+        raise
+    except Exception as error:  # noqa: BLE001
+        attempts.append({"attempt": 1, "stage": "old", "error": repr(error)})
+        raise RecoveryRequired(f"rebuilding the old trainer shape failed: {error!r}", attempts=attempts) from error
+    attempts.append({"attempt": 1, "stage": "done", "generation": generation, "layout": dict(old_layout)})
+    return RebuildResult("REBUILD_OLD", generation, manifest, attempts)
