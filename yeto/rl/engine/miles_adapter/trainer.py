@@ -9,8 +9,10 @@ metadata only; ``base_policy_hash`` is the published ``policy_tensor_hash``
 (D5); the adapter never touches cells itself.
 
 ``step_metrics()`` is the driver's grad_norm source for the per-round
-gradient invariant. Only ``grad_norm`` is reported (read by the state plugin);
-loss/lr are not surfaced by upstream ``actor_model.train`` and stay ``None``.
+gradient invariant. ``grad_norm`` and ``applied_lrs`` (the LR each optimizer
+step applied, read before the scheduler advances) come from the state plugin;
+loss and Miles' logged post-step lr are not surfaced by upstream
+``actor_model.train`` and stay ``None``.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from yeto.rl.contracts import LocalStepReceipt
 from ..ports import RolloutBatchHandle
 from . import LoopRunner
 from .rollout import policy_token, require_policy_tokens
-from .state_plugin import GRAD_NORM
+from .state_plugin import APPLIED_LRS, GRAD_NORM
 
 
 class TrainStepError(RuntimeError):
@@ -54,6 +56,31 @@ def batch_hash(batch: RolloutBatchHandle) -> str:
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+MASKED_FRACTION_KEYS = ("masked_fraction", "train/masked_fraction")
+
+
+def masked_fraction(outputs: Any) -> float | None:
+    """Masked-token fraction from the train outputs' metrics, else None.
+
+    Upstream Miles does not report it by default; a masking mechanism's
+    change wires its metric to one of ``MASKED_FRACTION_KEYS``
+    (rl-algorithm-capabilities D6). Unknown (None) keeps the R0 rule.
+    """
+
+    values = []
+    for output in outputs or ():
+        metrics = getattr(output, "metrics", output)
+        if not isinstance(metrics, dict):
+            continue
+        for key in MASKED_FRACTION_KEYS:
+            if metrics.get(key) is not None:
+                values.append(float(metrics[key]))
+                break
+    if not values or any(not math.isfinite(v) for v in values):
+        return None
+    return min(values)  # conservative: fully masked only if every cell is
 
 
 def _outcome_ok(output: Any) -> bool:
@@ -91,18 +118,23 @@ class MilesTrainerGroup:
         self._check_tokens = check_policy_tokens
         self._run = (runner or LoopRunner()).run
         self.last_grad_norm: float | None = None
+        self.last_applied_lrs: tuple[float, ...] | None = None
+        self.last_masked_fraction: float | None = None
         self.last_outputs: list[Any] | None = None
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
         if batch.payload is None:
             raise TrainStepError("rollout batch handle carries no engine payload")
         self.last_grad_norm = None
+        self.last_applied_lrs = None
+        self.last_masked_fraction = None
         try:
             if self._check_tokens:  # spec: reject before training
                 require_policy_tokens(batch, policy_token(batch.rollout_id, batch.policy_hash))
             outputs = self._run(self._actor.train(batch.rollout_id, batch.payload))
             outputs = list(outputs or [])
             self.last_outputs = outputs
+            self.last_masked_fraction = masked_fraction(outputs)
             if len(outputs) != 1:
                 raise TrainStepError(
                     f"expected one train output from the single-cell group, got {len(outputs)}"
@@ -113,6 +145,7 @@ class MilesTrainerGroup:
                 if not norms or any(not math.isfinite(n) for n in norms):
                     raise TrainStepError(f"non-finite grad norm {norms}")
                 self.last_grad_norm = max(norms)
+                self.last_applied_lrs = self._applied_lrs()
         finally:
             self._release(self._args, batch.payload)
         steps = int(self._args.num_steps_per_rollout) if succeeded else 0
@@ -132,13 +165,28 @@ class MilesTrainerGroup:
             parameter_layout_hash=self._layout_hash(),
         )
 
+    def _applied_lrs(self) -> tuple[float, ...]:
+        per_rank = [list(v) for v in self._run(self._actor.run_plugin(APPLIED_LRS, {}))]
+        steps = int(self._args.num_steps_per_rollout)
+        if not per_rank or any(len(v) != steps for v in per_rank):
+            raise TrainStepError(
+                f"expected {steps} applied learning rates per rank, got {per_rank}"
+            )
+        if any(v != per_rank[0] for v in per_rank[1:]):
+            raise TrainStepError(f"ranks disagree on the applied learning rates {per_rank}")
+        return tuple(float(x) for x in per_rank[0])
+
     def step_metrics(self):
         """Telemetry of the last ``train_step`` (NaN grad_norm if it failed)."""
 
         from ..driver import TrainStepMetrics  # lazy: driver imports torch
 
         norm = self.last_grad_norm
-        return TrainStepMetrics(grad_norm=math.nan if norm is None else float(norm))
+        return TrainStepMetrics(
+            grad_norm=math.nan if norm is None else float(norm),
+            applied_lrs=self.last_applied_lrs,
+            masked_fraction=self.last_masked_fraction,
+        )
 
     def onload(self) -> None:
         # Upstream wake_up asserts --offload-train; without it the actor stays resident.

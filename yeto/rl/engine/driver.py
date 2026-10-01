@@ -19,6 +19,27 @@ The driver talks to the engine only through ``yeto.rl.engine.ports``. Outer
 synchronization is a :class:`SyncSession` (see ``bridges.py``). Island progress
 checkpoints never contain LoRA or optimizer state; restart applies the
 authoritative cut with an optimizer reset.
+
+Execution profiles (rl-infra-spec 1.4/2.2). With ``profile=None`` the driver
+keeps the R0 behaviour byte-for-byte (execution mode label
+``colocated-serial``, no extra events). With an :class:`ExecutionProfile`:
+
+* the profile's AlgorithmSpec binding is checked in :meth:`handshake`, before
+  any engine verb (alignment A1), and the placement kind must match the mode
+  (``colocated`` <-> ``colocated-serial``, ``fixed-partition`` <->
+  ``partitioned-*``);
+* ``partitioned-serial`` runs the same algorithm order on disjoint trainer and
+  rollout GPU groups: no offload/onload, one batch in flight, and readiness
+  (``generate_blockers``/``train_blockers``) is enforced from a
+  :class:`ReadinessSnapshot` before every generation and train step, on top of
+  the R0 per-group policy-token check;
+* ``partitioned-overlap`` is refused: no legal train/inference overlap has been
+  certified (task 2.3).
+
+Observation (task 1.7) is opt-in (``observe=True``): it adds
+``rl_timeline_span`` / ``rl_readiness`` / ``rl_round_labels`` events tagged with
+the profile contract hash, config epoch and weight transport. Off, the event
+tape is identical to the R0 driver's.
 """
 
 from __future__ import annotations
@@ -31,10 +52,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from yeto.rl.core import LocalRoundStats, StrictRlInvariantError
+from yeto.rl.core import (
+    LocalRoundStats,
+    StrictRlInvariantError,
+    require_nonzero_learning_rate,
+)
 
 from .algorithm import AlgorithmSpec
 from .capabilities import EngineCapabilities
+from .execution_profile import (
+    ExecutionProfile,
+    ProfileError,
+    ReadinessSnapshot,
+    check_algorithm_contract,
+    generate_blockers,
+    require,
+    train_blockers,
+)
 from .ports import (
     Placement,
     PolicyState,
@@ -46,6 +80,24 @@ from .ports import (
 from .trainable_state import TrainableState, require_supported_layout
 
 EXECUTION_MODE = "colocated-serial"
+# Modes the driver can run (partitioned-overlap: no certified overlap, 2.3).
+DRIVER_MODES = frozenset({"colocated-serial", "partitioned-serial"})
+_MODE_PLACEMENT = {"colocated-serial": "colocated", "partitioned-serial": "fixed-partition"}
+# Upstream weight transport by placement (miles protocol.py:73-89): colocate
+# uses CUDA IPC; a LoRA fixed partition must use NCCL broadcast.
+_DEFAULT_TRANSPORT = {"colocated": "cuda-ipc", "fixed-partition": "nccl-broadcast"}
+# Timeline role per driver phase (execution_profile.TASK_ROLE vocabulary).
+_PHASE_ROLE = {
+    "generate": "rollout",
+    "train": "trainer",
+    "sync": "trainer",
+    "apply": "trainer",
+    "publish": "trainer+rollout",
+    "eval": "rollout",
+    "offload": "trainer",
+    "onload": "trainer",
+}
+_PHASE_TASK = {"sync": "outer_sync"}
 
 
 class DriverError(RuntimeError):
@@ -88,6 +140,13 @@ class TrainStepMetrics:
     ess_ratio: float | None = None
     clip_fraction: float | None = None
     train_step: int | None = None
+    # LR each optimizer step of the round applied (read inside the step, before
+    # the scheduler advances; ``lr`` is the engine's logged post-step value).
+    applied_lrs: tuple[float, ...] | None = None
+    # Fraction of loss tokens a masking mechanism removed this round
+    # (rl-algorithm-capabilities D6); None when the engine does not report it,
+    # which keeps the stricter R0 gradient rule.
+    masked_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +176,11 @@ class SyncSession(Protocol):
     def finish(self, driver: "IslandDriver") -> None: ...
 
     def close(self) -> None: ...
+
+    # Optional: whether the round ``rollout_id`` is the island's last one
+    # (strict: local_round_id >= global_rounds; decoupled: the final cut is
+    # known).  Sessions without it are treated as non-final.
+    # def is_final_round(self, driver, *, rollout_id: int) -> bool: ...
 
 
 class ProgressStore(Protocol):
@@ -187,6 +251,10 @@ class IslandDriver:
         evaluate: Callable[[int], Mapping[str, float]] | None = None,
         eval_interval: int | None = None,
         max_rollouts: int | None = None,
+        profile: ExecutionProfile | None = None,
+        observe: bool = False,
+        config_epoch: int = 0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.learner_id = int(learner_id)
         self.rollout = rollout
@@ -207,25 +275,126 @@ class IslandDriver:
         self.expected_token: str | None = None
         self.published_version: int | None = None
         self.rounds_completed = 0
+        self.profile = profile
+        self.observe = bool(observe)
+        self.config_epoch = int(config_epoch)
+        self.clock = clock
+        self.execution_mode = profile.execution_mode if profile is not None else EXECUTION_MODE
+        self.weight_transport: str | None = None
+        self.trained_version: int | None = None
+        self._open_span: tuple[str, float, int | None] | None = None
 
     # -- events ----------------------------------------------------------
     def emit(self, event: str, **fields: Any) -> None:
         self.events.append({"event": event, **fields})
 
     def phase(self, name: str, **fields: Any) -> None:
+        if self.observe:
+            self._close_span()
+            self._open_span = (name, self.clock(), fields.get("rollout_id"))
         self.emit("rl_driver_phase", phase=name, **fields)
+
+    @property
+    def _gated(self) -> bool:
+        """Readiness gating runs only in partitioned modes.
+
+        colocated-serial keeps the R0 behaviour exactly (review F3: the train
+        gate would require a full rollout_batch_size of groups, which R0 does
+        not). In partitioned-serial the gate largely duplicates the R0 checks
+        (publication manifest, per-group token); it is kept as the hook that
+        partitioned-overlap will need, not as independent evidence (F4).
+        """
+        return self.profile is not None and self.execution_mode != "colocated-serial"
+
+    # -- observation (task 1.7; opt-in) ------------------------------------
+    @property
+    def profile_hash(self) -> str | None:
+        return self.profile.contract_hash if self.profile is not None else None
+
+    def _labels(self) -> dict[str, Any]:
+        return {
+            "profile_hash": self.profile_hash,
+            "config_epoch": self.config_epoch,
+            "execution_mode": self.execution_mode,
+            "weight_transport": self.weight_transport,
+        }
+
+    def _close_span(self) -> None:
+        if not self.observe or self._open_span is None:
+            return
+        name, start, rollout_id = self._open_span
+        self._open_span = None
+        if name not in _PHASE_ROLE:
+            return
+        self.emit(
+            "rl_timeline_span",
+            task=_PHASE_TASK.get(name, name),
+            role=_PHASE_ROLE[name],
+            kind="transfer" if name in ("publish", "offload", "onload") else "compute",
+            start=start,
+            end=self.clock(),
+            rollout_id=rollout_id,
+            profile_hash=self.profile_hash,
+            epoch=self.config_epoch,
+        )
+
+    def _snapshot(self, rollout_id: int, **fields: Any) -> ReadinessSnapshot:
+        trained = self.trained_version if self.trained_version is not None else rollout_id
+        published = self.published_version if self.published_version is not None else -1
+        snap = ReadinessSnapshot(
+            rollout_id=rollout_id,
+            optimizer_step=self.rounds_completed,
+            trained_policy_version=trained,
+            published_policy_version=published,
+            publication_complete=self.expected_token is not None,
+            driver_safe_point=True,
+            config_epoch=self.config_epoch,
+            **fields,
+        )
+        if self.observe:
+            self.emit(
+                "rl_readiness",
+                rollout_id=rollout_id,
+                trained_policy_version=snap.trained_policy_version,
+                published_policy_version=snap.published_policy_version,
+                ready_groups=len(snap.ready_group_ids),
+                inflight_batches=snap.inflight_batches,
+                profile_hash=self.profile_hash,
+                epoch=self.config_epoch,
+            )
+        return snap
 
     # -- startup -----------------------------------------------------------
     def handshake(self) -> None:
         """Capability check; runs before any engine verb is called."""
 
         require_supported_layout(self.layout, self.capabilities.parameter_layouts)
+        if self.profile is not None:
+            if self.execution_mode not in DRIVER_MODES:
+                raise DriverError(
+                    f"execution mode {self.execution_mode!r} is not runnable: no legal "
+                    "train/inference overlap is certified (rl-infra-spec 2.3)"
+                )
+            try:
+                check_algorithm_contract(self.profile, self.algorithm)
+            except ProfileError as error:
+                raise DriverError(f"execution profile rejected: {error}") from error
         description = self.placement.describe()
+        if self.profile is not None and description.kind != _MODE_PLACEMENT[self.execution_mode]:
+            raise DriverError(
+                f"{self.execution_mode} needs placement "
+                f"{_MODE_PLACEMENT[self.execution_mode]!r}, got {description.kind!r}"
+            )
         self.capabilities.check(
             layout=self.layout,
             placement=description.kind,
-            execution_mode=EXECUTION_MODE,
+            execution_mode=self.execution_mode,
             algorithm=self.algorithm,
+            **(
+                {"max_policy_age": self.profile.max_policy_age}
+                if self.profile is not None
+                else {}
+            ),
         )
         if not callable(getattr(self.trainer, "step_metrics", None)):
             raise DriverError(
@@ -233,9 +402,18 @@ class IslandDriver:
                 "gradient invariant cannot be checked"
             )
         self.colocated = description.kind == "colocated"
+        self.weight_transport = str(
+            description.extra.get("weight_transport")
+            or _DEFAULT_TRANSPORT.get(description.kind, "unknown")
+        )
+        extra_start: dict[str, Any] = {}
+        if self.profile is not None and self.observe:
+            # observe=False keeps rl_driver_start byte-identical to R0 (1.7).
+            extra_start = {"profile_hash": self.profile_hash, "config_epoch": self.config_epoch}
         self.emit(
             "rl_driver_start",
-            execution_mode=EXECUTION_MODE,
+            **extra_start,
+            execution_mode=self.execution_mode,
             placement=description.kind,
             **{"rl/algorithm_spec_sha256": self.algorithm.sha256()},
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
@@ -322,6 +500,11 @@ class IslandDriver:
         if self.colocated:
             self.phase("offload", rollout_id=rollout_id)
             self.trainer.offload()
+        if self._gated:
+            require(
+                generate_blockers(self.profile, self._snapshot(rollout_id)),
+                f"generation of rollout {rollout_id}",
+            )
         self.phase("generate", rollout_id=rollout_id, policy_version=rollout_id)
         batch = self.rollout.generate(rollout_id)
         if batch.rollout_id != rollout_id or batch.policy_version != rollout_id:
@@ -355,18 +538,26 @@ class IslandDriver:
     def _check_gradient(self, rollout_id: int, batch, receipt, metrics) -> None:
         if not receipt.optimizer_step_succeeded:
             raise RoundFailedError(f"rollout {rollout_id}: optimizer step failed")
-        # GRPO advantages are all zero iff every group has zero reward variance.
-        advantages_nonzero = any(g.reward_std > 0 for g in batch.groups)
         grad_norm = float(metrics.grad_norm)
         if not math.isfinite(grad_norm):
             raise StrictRlInvariantError(
                 "nonfinite_grad_norm", f"rollout {rollout_id}: grad_norm={grad_norm}"
             )
-        if advantages_nonzero and grad_norm == 0.0:
+        # Per-algorithm rule (rl-algorithm-capabilities D6); default GRPO:
+        # some group has non-zero reward variance, exactly as in R0.
+        expects_gradient = self.algorithm.expects_gradient(batch, metrics)
+        if expects_gradient and grad_norm == 0.0:
             raise StrictRlInvariantError(
                 "zero_grad_norm_with_nonzero_advantages",
                 f"rollout {rollout_id}: non-zero advantages produced grad_norm 0; "
                 "adapter gradients are not flowing",
+            )
+        if grad_norm == 0.0 and any(g.reward_std > 0 for g in batch.groups):
+            # A declared masking mechanism legitimately removed every token.
+            self.emit(
+                "rl_zero_gradient_masked",
+                rollout_id=rollout_id,
+                masked_fraction=metrics.masked_fraction,
             )
 
     def _stats(self, rollout_id, batch, metrics, rollout_seconds, train_seconds):
@@ -399,7 +590,32 @@ class IslandDriver:
             pg_loss=metrics.pg_loss,
             grad_norm=metrics.grad_norm,
             lr=metrics.lr,
+            applied_lr=None if not metrics.applied_lrs else min(metrics.applied_lrs),
+            applied_lrs=metrics.applied_lrs or None,
         )
+
+    def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
+        """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
+
+        values = {
+            "rl/clip_fraction": metrics.clip_fraction,
+            "rl/mean_kl": metrics.mean_kl,
+            "rl/ess_ratio": metrics.ess_ratio,
+            "rl/groups": len(batch.groups),
+            "rl/aborted_groups": int(batch.aborted),
+            # A2/F5: terminal filtered vs non-terminal carried_over; None when
+            # the engine does not report it (never inferred from aborted).
+            "rl/filtered_groups": batch.filtered,
+            "rl/carried_over_groups": batch.carried_over,
+        }
+        extra = getattr(self.trainer, "algorithm_metrics", None)
+        if callable(extra):
+            values.update({str(k): v for k, v in dict(extra() or {}).items()})
+        self.emit("rl_round_labels", rollout_id=rollout_id, **self._labels(), **values)
+
+    def _is_final_round(self, rollout_id: int) -> bool:
+        probe = getattr(self.sync, "is_final_round", None)
+        return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
 
     def _maybe_eval(self, rollout_id: int, *, force: bool = False) -> None:
         if self.evaluate is None or not self.eval_interval:
@@ -428,6 +644,21 @@ class IslandDriver:
         if self.colocated:
             self.phase("onload", rollout_id=rollout_id)
             self.trainer.onload()
+        if self._gated:
+            # Every group carries the published token (checked in _generate);
+            # the batch is one complete, single-policy batch.
+            snap = self._snapshot(
+                rollout_id,
+                ready_group_ids=tuple(g.group_id for g in batch.groups),
+                group_policy_versions={g.group_id: batch.policy_version for g in batch.groups},
+                inflight_batches=1,
+            )
+            # The batch size is the engine's (partial rollouts / filtering may
+            # yield fewer groups, as in R0); only policy identity is gated here.
+            blockers = [
+                b for b in train_blockers(self.profile, snap) if "complete groups ready" not in b
+            ]
+            require(blockers, f"train step of rollout {rollout_id}")
         self.phase("train", rollout_id=rollout_id)
         started = time.monotonic()
         receipt = self.trainer.train_step(batch)
@@ -435,10 +666,16 @@ class IslandDriver:
         raw = self.trainer.step_metrics()
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         self._check_gradient(rollout_id, batch, receipt, metrics)
+        self.trained_version = rollout_id + 1
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
+        if self.observe:
+            self._emit_round_labels(rollout_id, batch, metrics)
+        # Zero-LR invariant: a non-final round must not commit a zero update.
+        require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)
         boundary = self.sync.boundary(self, rollout_id=rollout_id, stats=stats)
         self.publish(boundary.state, rollout_id=rollout_id + 1)
+        self._close_span()
         self.rounds_completed += 1
         return boundary
 
@@ -461,6 +698,7 @@ class IslandDriver:
                     self._maybe_eval(rollout_id, force=boundary.stop)
                     finished = boundary.stop
                 self.phase("finish", rollout_id=rollout_id)
+                self._close_span()
                 self.sync.finish(self)
                 return state
             except StrictRlInvariantError as error:

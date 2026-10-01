@@ -68,6 +68,9 @@ class LocalOnlySync:
         state = _at_version(_lora(driver.export_local()), 0)
         return SyncStart(TrainableState.from_lora(state), 0)
 
+    def is_final_round(self, driver, *, rollout_id: int) -> bool:
+        return rollout_id + 1 >= self.num_rollout
+
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
         local = _at_version(_lora(driver.export_local()), rollout_id + 1)
         driver.emit("rl_local_round", **asdict(stats))
@@ -206,6 +209,11 @@ class StrictAvgSync:
         if not finished:
             self.permit = self.bridge.wait_for_round()
         return SyncStart(state, version, finished)
+
+    def is_final_round(self, driver, *, rollout_id: int) -> bool:
+        # Strict: local round ``rollout_id + 1`` is the last iff it reaches
+        # global_rounds (fix-decoupled-lr-schedule D4).
+        return rollout_id + 1 >= self.config.global_rounds
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
         if self.current is None or self.permit is None:
@@ -440,6 +448,14 @@ class DecoupledSync:
             stats=stats,
             final_payload_bytes_received=self.bridge.final_payload_bytes_received,
         )
+
+    def is_final_round(self, driver, *, rollout_id: int) -> bool:
+        # Decoupled: final once the syncer's final cut is known (finalizing),
+        # or this round exhausts the island's optional step budget (D4).
+        if self.bridge is not None and self.bridge.finalizing:
+            return True
+        budget = getattr(self.args, "yeto_rl_learner_budget_steps", None)
+        return budget is not None and budget == self.optimizer_steps + 1
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
         import time

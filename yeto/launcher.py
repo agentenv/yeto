@@ -809,6 +809,115 @@ def _rl_miles_function(
         raise ValueError(f"{flag} must be package.module.function")
 
 
+def _prepare_ports_algorithm(args, rl_engine: str) -> None:
+    """rl-algorithm-capabilities D8/D9/D11, before any cloud or GPU work.
+
+    ports: build the run's AlgorithmSpec once (``--rl-algorithm-spec`` or the
+    legacy CLI; the launcher has no extra Miles argv, so nothing is absorbed
+    here), refuse the rejection matrix, the registered launch checks, anything
+    the Miles adapter does not declare, and every unverified-mechanism
+    allowance (a launched run always has outer sync, design D11); keep the
+    canonical JSON + expected hash every island receives. An island whose
+    learner absorbs extra argv into a different hash is refused there
+    (``rl_algorithm_mismatch``). legacy: the ports-only options are refused.
+    """
+
+    from .rl.engine.algorithm import (
+        AlgorithmSpecError,
+        check_unverified_allowance,
+        launch_problems,
+        resolve_ports_algorithm,
+    )
+    from .rl.engine.capabilities import CapabilityMismatch
+
+    if rl_engine != "ports" and (
+        getattr(args, "rl_placement", "colocated") != "colocated"
+        or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
+    ):
+        raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
+    if rl_engine != "ports" and getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError("--rl-single-island-no-sync only applies to --rl-engine ports")
+    try:
+        spec = resolve_ports_algorithm(args, rl_engine=rl_engine)
+        if spec is None:
+            return
+        problems = spec.rejections()
+        # Run-configuration checks of the follow-up changes and the Miles
+        # adapter's declaration, before any cloud resource exists (the learner
+        # repeats both on the island).
+        problems += launch_problems(spec, {
+            "rollout_batch_size": getattr(args, "rollout_batch_size", None),
+            "rollout_max_response_len": getattr(args, "rollout_max_response_len", None),
+            "context_parallel_size": 1,  # ports emits --context-parallel-size 1
+            "multi_lora": False,
+        })
+        if problems:
+            raise AlgorithmSpecError("algorithm spec rejected: " + "; ".join(problems))
+        islands = (
+            len(parse_gpu_spec(args.gpu)) if getattr(args, "gpu", None) else 1
+        ) + max(0, getattr(args, "external_learners", 0) or 0)
+        no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
+        if no_sync and (islands != 1 or getattr(args, "rl_sync_preset", "strict-avg")
+                        != "strict-avg" or getattr(args, "rl_initial_adapter", None)):
+            raise AlgorithmSpecError(
+                "--rl-single-island-no-sync needs exactly one island (one --gpu entry, no "
+                "external learners), the default sync preset and no initial adapter"
+            )
+        args.rl_allow_unverified_mechanism = list(
+            check_unverified_allowance(
+                getattr(args, "rl_allow_unverified_mechanism", None) or (),
+                islands=islands,
+                outer_sync=not no_sync,  # a launched run has a syncer unless no-sync
+            )
+        )
+        from .rl.engine.miles_adapter.entry import miles_capabilities, with_partitioned_serial
+
+        partitioned = getattr(args, "rl_placement", "colocated") == "fixed-partition"
+        capabilities = miles_capabilities(
+            "sha256:" + "0" * 64, unverified_mechanisms=args.rl_allow_unverified_mechanism
+        )
+        if partitioned:
+            capabilities = with_partitioned_serial(capabilities)
+        capabilities.check(
+            layout="lora",
+            placement="fixed-partition" if partitioned else "colocated",
+            execution_mode="partitioned-serial" if partitioned else "colocated-serial",
+            algorithm=spec,
+        )
+    except (AlgorithmSpecError, CapabilityMismatch) as error:
+        raise ValueError(str(error)) from error
+    args.rl_algorithm_spec_json = spec.canonical_json()
+    args.rl_expected_algorithm_sha256 = spec.sha256()
+
+
+def _ports_algorithm_flags(args) -> tuple[str, str]:
+    """(run prelude, learner flags) carrying the algorithm to a ports island."""
+
+    if getattr(args, "rl_engine", "ports") != "ports":
+        return "", ""
+    expected = getattr(args, "rl_expected_algorithm_sha256", None)
+    if expected is None:
+        return "", ""
+    prelude = ""
+    flags = f" --rl-expected-algorithm-sha256 {expected}"
+    if getattr(args, "rl_algorithm_spec", None):
+        prelude = (
+            "mkdir -p ~/yeto-rl && printf '%s' "
+            f"{shlex.quote(args.rl_algorithm_spec_json)} > ~/yeto-rl/algorithm_spec.json\n"
+        )
+        flags += " --rl-algorithm-spec ~/yeto-rl/algorithm_spec.json"
+    # rl-infra-spec 2.1 placement options, forwarded only when non-default
+    # (the default argv is unchanged).
+    if getattr(args, "rl_placement", "colocated") != "colocated":
+        flags += f" --rl-placement {shlex.quote(args.rl_placement)}"
+    if getattr(args, "rl_standby_gpus", 0):
+        flags += f" --rl-standby-gpus {int(args.rl_standby_gpus)}"
+    allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
+    for name in allowed:
+        flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
+    return prelude, flags
+
+
 def _prepare_rl_args(
     args,
     *,
@@ -875,7 +984,9 @@ def _prepare_rl_args(
             lora_targets=getattr(args, "lora_targets", None),
             expert_full_count=getattr(args, "expert_full_count", 0) or 0,
             rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
+            placement=getattr(args, "rl_placement", "colocated"),
         )
+    _prepare_ports_algorithm(args, rl_engine)
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
     if args.tuning != "lora":
@@ -911,6 +1022,8 @@ def _prepare_rl_args(
         raise ValueError(
             "RL --dynamic-sampling-max-replacements must be non-negative"
         )
+    if not args.inner_lr > 0:
+        raise ValueError(f"RL requires --inner-lr > 0 (got {args.inner_lr})")
     if args.rl_sync_preset == "strict-avg":
         if args.local_rl_rounds_per_sync != 1:
             raise ValueError("RL v0 requires --local-rl-rounds-per-sync 1")
@@ -1534,6 +1647,13 @@ def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
     return stem[: 63 - len(suffix)].rstrip("-") + suffix
 
 
+def _sky_docker_login_config(login: dict[str, str]):
+    """SkyPilot's DockerLoginConfig for a SKYPILOT_DOCKER_* triple."""
+    from sky.provision.docker_utils import DockerLoginConfig
+
+    return DockerLoginConfig.from_env_vars(login)
+
+
 def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
     """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``."""
 
@@ -1543,6 +1663,7 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
         MILES_BUNDLE_SHA256,
         MILES_COMMIT,
         MILES_NEXT_COMMIT,
+        MILES_NEXT_IMAGE_SGLANG_ROOT,
         MILES_NEXT_REPOSITORY,
         MILES_PEFT_VERSION,
         MILES_REPOSITORY,
@@ -1562,21 +1683,48 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
                 f"git -C {path} remote set-url origin {repo}\n"
                 f'test "$(git -C {path} config --get remote.origin.url)" = '
                 f"{repo}\n"
+                # MILES_NEXT_IMAGE already has the pinned fork checked out
+                # at ~/miles (/root/miles); only fetch when it is not HEAD.
+                f'if [ "$(git -C {path} rev-parse HEAD 2>/dev/null)" != '
+                f"{commit} ]; then\n"
                 f"git -C {path} fetch --depth 1 origin {commit}\n"
                 f"git -C {path} checkout --detach {commit}\n"
+                "fi\n"
                 f'test "$(git -C {path} rev-parse HEAD)" = {commit}\n'
                 f'test "$(git -C {path} rev-parse --abbrev-ref HEAD)" = HEAD\n'
                 f'test -z "$(git -C {path} status --porcelain '
                 '--untracked-files=all)"\n'
             )
 
+        # MILES_NEXT_IMAGE ships the pinned SGLang fork installed editable
+        # at /sgl-workspace/sglang: ~/sglang (first on the island's
+        # PYTHONPATH) becomes a link to it.  Any other image, or an existing
+        # ~/sglang directory, gets the clone + install at ~/sglang as before.
+        image_root = shlex.quote(MILES_NEXT_IMAGE_SGLANG_ROOT)
+        sglang_in_image = (
+            f'{{ [ ! -e ~/sglang ] || [ "$(readlink ~/sglang)" = {image_root} ]; }} && '
+            f'[ "$(git -C {image_root} rev-parse HEAD 2>/dev/null)" = '
+            f"{SGLANG_NEXT_COMMIT} ] && "
+            f'[ "$(git -C {image_root} config --get remote.origin.url)" = '
+            f"{shlex.quote(SGLANG_NEXT_REPOSITORY)} ] && "
+            f'[ -z "$(git -C {image_root} status --porcelain '
+            '--untracked-files=all)" ] && '
+            "python3 -c 'import os, sys, sglang; sys.exit(0 if os.path.realpath("
+            f'sglang.__file__).startswith("{MILES_NEXT_IMAGE_SGLANG_ROOT}/python/'
+            "\") else 1)'"
+        )
         return (
             "set -e\n"
             + checkout("~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
             + "python3 -m pip install -q --no-deps -e ~/miles "
             f"'peft=={MILES_PEFT_VERSION}'",
-            checkout("~/sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT)
-            + "python3 -m pip install -q --no-deps -e ~/sglang/python",
+            f"if {sglang_in_image}; then\n"
+            f"ln -sfn {image_root} ~/sglang\n"
+            f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"
+            "else\n"
+            + checkout("~/sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT)
+            + "python3 -m pip install -q --no-deps -e ~/sglang/python\n"
+            "fi",
         )
     if rl_engine != "legacy":
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
@@ -1625,6 +1773,7 @@ def make_miles_island_task(
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
+    from .modal_runner import registry_credentials
     from .models import resolve
     from .provenance import is_local_reference
     from .rl import SIGNED_CODEX_AGENTS
@@ -1643,8 +1792,12 @@ def make_miles_island_task(
         f" --model {shlex.quote(args.model)}"
         f" --rl-model-recipe {shlex.quote(args.rl_model_recipe)}"
         f" --data {shlex.quote(learner_data_arg(args.data))}"
-        " --syncer $SYNCER_ADDR"
-        " --learner-id $LEARNER_ID"
+        + (
+            " --rl-single-island-no-sync"
+            if getattr(args, "rl_single_island_no_sync", False)
+            else " --syncer $SYNCER_ADDR"
+        )
+        + " --learner-id $LEARNER_ID"
         f" --reward-function {shlex.quote(args.reward_function)}"
         f" --reward-sha256 {shlex.quote(args.reward_sha256)}"
         f" --source-sha256 {shlex.quote(args.source_sha256)}"
@@ -1720,6 +1873,8 @@ def make_miles_island_task(
     # Always explicit: the learner's own default is ports, so a legacy run
     # must say so (and an older remote learner must not guess).
     flags += f" --rl-engine {getattr(args, 'rl_engine', 'ports')}"
+    algorithm_prelude, algorithm_flags = _ports_algorithm_flags(args)
+    flags += algorithm_flags
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
     for flag, name in (
@@ -1875,6 +2030,17 @@ def make_miles_island_task(
     island_pythonpath = (
         "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
+    # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): the
+    # SKYPILOT_DOCKER_* login goes only into the resources'
+    # docker_login_config, which SkyPilot uses for `docker login` at
+    # provisioning.  Not task envs/secrets: SkyPilot 0.13 exports both into
+    # every setup/run process.  Ports engine only (legacy is unchanged); use
+    # a token with read:packages only.
+    registry_login = (
+        registry_credentials(args.rl_image, os.environ)
+        if getattr(args, "rl_engine", "ports") == "ports"
+        else None
+    )
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
         setup="\n".join(setup_steps),
@@ -1910,6 +2076,7 @@ def make_miles_island_task(
             "  trap stop_miles_ray EXIT\n"
             # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.
+            f"{algorithm_prelude}"
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir"
             "${PYTHONPATH:+:$PYTHONPATH} "
@@ -1936,6 +2103,8 @@ def make_miles_island_task(
         "disk_size": args.disk_size,
     }
     resources["image_id"] = args.rl_image
+    if registry_login:
+        resources["_docker_login_config"] = _sky_docker_login_config(registry_login)
     if spec.num_nodes > 1:
         resources["network_tier"] = "best"
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
@@ -2679,6 +2848,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         run_script=str(getattr(task, "run", "") or ""),
         envs={k: str(v) for k, v in envs.items() if v is not None},
         region=spec.region,
+        gpu_exact=bool(getattr(args, "modal_gpu_exact", False)),
+        registry_login=rl and getattr(args, "rl_engine", "ports") == "ports",
         image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
         setup_script=str(getattr(task, "setup", "") or "") if rl else None,
         pip_requirements=requirements,
@@ -2686,6 +2857,17 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         volume_mount=volume_mount,
         workdir=str(REPO_ROOT),
     )
+
+
+def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
+    """--modal-gpu-exact only means something on Modal islands; refuse it
+    rather than silently launching unpinned learners elsewhere."""
+    if getattr(args, "modal_gpu_exact", False):
+        other = sorted({s.cloud for s in specs if s.cloud != "modal"})
+        if other:
+            raise ValueError(
+                f"--modal-gpu-exact applies only to Modal islands; --gpu also has {other}"
+            )
 
 
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
@@ -3443,8 +3625,18 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     """
     import sky
 
+    if getattr(args, "rl_single_island_no_sync", False) and (
+        getattr(args, "training_mode", "sft") != "rl"
+    ):
+        # Checked first: the flag must never turn an SFT launch syncer-less.
+        raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
     prepare_launch_args(args)
     head_mode = local_syncer is not None
+    # --rl-single-island-no-sync: one ports island, no syncer at all
+    # (validated in _prepare_ports_algorithm before any cloud work).
+    no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
+    if no_sync and head_mode:
+        raise ValueError("--rl-single-island-no-sync has no syncer; do not run it as a head")
     specs = parse_gpu_spec(args.gpu)
     # External learners (machines sky cannot provision — e.g. Macs running
     # yeto.mlx.learner) get the ids AFTER the cloud learners; the syncer
@@ -3452,13 +3644,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     # simply dial in with the printed join command.
     external = max(0, getattr(args, "external_learners", 0) or 0)
     num_learners = len(specs) + external
+    require_modal_for_gpu_exact(args, specs)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
-    syncer_cluster = None if head_mode else f"{prefix}-syncer"
+    syncer_cluster = None if head_mode or no_sync else f"{prefix}-syncer"
     learner_names = learner_cluster_names(prefix, specs)
     if on_clusters is not None:
         try:
-            on_clusters(([] if head_mode else [syncer_cluster]) + learner_names)
+            on_clusters(([] if syncer_cluster is None else [syncer_cluster]) + learner_names)
         except Exception as e:
             print(f"[launcher] on_clusters hook failed: {e}", file=sys.stderr)
     clusters: list[str] = []
@@ -3466,7 +3659,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
-        if head_mode:
+        if no_sync:
+            syncer_task = syncer_job = None
+            syncer_addr = "none"  # the island command carries no --syncer
+            print("[launcher] --rl-single-island-no-sync: no syncer, no outer sync")
+        elif head_mode:
             syncer_task = syncer_job = None
             syncer_addr = f"{os.environ['SYNCER_PUBLIC_IP']}:{SYNCER_PORT}"
             print(f"[launcher] syncer runs on this head node at {syncer_addr}")
@@ -3551,7 +3748,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         )
         modal_cfgs: dict[str, object] = {}
         modal_addr = None
-        if any(spec.cloud == "modal" for spec in specs):
+        if no_sync:
+            modal_addr = syncer_addr  # nothing to reach
+        elif any(spec.cloud == "modal" for spec in specs):
             from .modal_runner import resolve_syncer_for_modal
 
             # Fails BEFORE any Modal container starts when the syncer is
@@ -3627,7 +3826,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                 return
             threading.Thread(target=_tail, args=(name, job_id, label), daemon=True).start()
 
-        if not head_mode:
+        if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
@@ -3636,7 +3835,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
-            syncer=None if head_mode else (syncer_cluster, syncer_task, syncer_job),
+            syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
             sky_ops=RoutingOps(SkySDKOps(), modal_island_ops),
             poll_interval=args.controller_poll,
             recover_timeout=args.recover_timeout,
@@ -3662,7 +3861,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         sky_done = [n for n in done if n not in modal_cfgs]
         source = (
             syncer_cluster
-            if rl_mode and not head_mode
+            if rl_mode and syncer_cluster is not None
             else next((n for n in sky_done if "-l0-" in n), (sky_done or done)[0])
         )
         output = getattr(args, "output", None)
