@@ -1,0 +1,132 @@
+# 2026-09-29T23:03:36Z modal app list (algo1b*) after all runs
+[
+ {
+  "app_id": "ap-lDAlaL4WxLufiAhNVZhGEu",
+  "description": "algo1b-g1g",
+  "state": "deployed",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:56:58+00:00",
+  "stopped_at": null
+ },
+ {
+  "app_id": "ap-gvxyWVUOffXaHbVoyXge0X",
+  "description": "algo1b-g1h",
+  "state": "deployed",
+  "tasks": "0",
+  "created_at": "2026-09-29 22:20:42+00:00",
+  "stopped_at": null
+ },
+ {
+  "app_id": "ap-I5YJlti1ofApqIAmiBGm7l",
+  "description": "algo1b-g1i",
+  "state": "deployed",
+  "tasks": "0",
+  "created_at": "2026-09-29 22:36:06+00:00",
+  "stopped_at": null
+ },
+ {
+  "app_id": "ap-WUaTywrnL0llbfuYDPKLVW",
+  "description": "algo1b-g1j",
+  "state": "deployed",
+  "tasks": "0",
+  "created_at": "2026-09-29 22:55:02+00:00",
+  "stopped_at": null
+ },
+ {
+  "app_id": "ap-t2p5DGG51WZuVsjrU7DfPQ",
+  "description": "algo1b-g1j",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 22:35:59+00:00",
+  "stopped_at": "2026-09-29 22:55:00+00:00"
+ },
+ {
+  "app_id": "ap-LgLkeXDYs8isryHb6TR2M1",
+  "description": "algo1b-g1i",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 22:20:30+00:00",
+  "stopped_at": "2026-09-29 22:36:04+00:00"
+ },
+ {
+  "app_id": "ap-6tkGKIjFHgpQuIoOgLQG8j",
+  "description": "algo1b-g1h",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:56:54+00:00",
+  "stopped_at": "2026-09-29 22:20:41+00:00"
+ },
+ {
+  "app_id": "ap-hHliibaoBVIRW57MmZkaFA",
+  "description": "algo1b-g1g",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:32:42+00:00",
+  "stopped_at": "2026-09-29 21:56:56+00:00"
+ },
+ {
+  "app_id": "ap-vUshc1qaaYXVajfmknj2IU",
+  "description": "yeto-algo1b-g1f-token",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:23:27+00:00",
+  "stopped_at": "2026-09-29 21:32:23+00:00"
+ },
+ {
+  "app_id": "ap-MSafErEAcYlY96NMDH3eap",
+  "description": "yeto-algo1b-g1f-baseline",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:15:41+00:00",
+  "stopped_at": "2026-09-29 21:23:07+00:00"
+ },
+ {
+  "app_id": "ap-pJ7tW9dYa258W4e2KkTkCh",
+  "description": "yeto-algo1b-g1f-token",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:13:26+00:00",
+  "stopped_at": "2026-09-29 21:13:35+00:00"
+ },
+ {
+  "app_id": "ap-qrRaw0d3gAArTYrKTVWjLi",
+  "description": "yeto-algo1b-g1f-baseline",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:13:05+00:00",
+  "stopped_at": "2026-09-29 21:13:08+00:00"
+ },
+ {
+  "app_id": "ap-5717cmsvjAaWlZUxYD2orQ",
+  "description": "algo1b-g1e",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:11:52+00:00",
+  "stopped_at": "2026-09-29 21:12:07+00:00"
+ },
+ {
+  "app_id": "ap-6VpVXeOiF3eoNco7TcZq4i",
+  "description": "algo1b-g1d",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 21:11:51+00:00",
+  "stopped_at": "2026-09-29 21:12:06+00:00"
+ },
+ {
+  "app_id": "ap-AGyrPYRmCtKz4M471WBPzP",
+  "description": "algo1b-g1e",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 20:56:01+00:00",
+  "stopped_at": "2026-09-29 21:11:50+00:00"
+ },
+ {
+  "app_id": "ap-OzmdAG9SMTGyWJ3MKD7tlV",
+  "description": "algo1b-g1d",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 20:37:46+00:00",
+  "stopped_at": "2026-09-29 21:11:48+00:00"
+ }
+]
+not stopped: ['algo1b-g1g', 'algo1b-g1h', 'algo1b-g1i', 'algo1b-g1j']

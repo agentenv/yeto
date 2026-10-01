@@ -1,0 +1,12 @@
+/root/Megatron-LM/megatron/core/transformer/transformer_config.py:3249: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/work/yeto/scripts/benchmark_rl.py", line 676, in run_training_worker
+    run_miles(
+  File "/work/yeto/yeto/rl/learner.py", line 1871, in run_miles
+    ports_launch = translate_run_config(
+                   ^^^^^^^^^^^^^^^^^^^^^
+  File "/work/yeto/yeto/rl/engine/miles_adapter/config.py", line 479, in translate_run_config
+    raise MilesConfigError("algorithm spec rejected: " + "; ".join(problems))
+yeto.rl.engine.miles_adapter.config.MilesConfigError: algorithm spec rejected: [grpo_knobs_pipeline_plugins] plugins ['yeto.rl.algos.seq_adv.gdpo']: source hash differs from the current module source

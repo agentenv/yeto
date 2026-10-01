@@ -31,6 +31,11 @@
 每次运行 SHALL 在启动时固定一种执行模式：`serial-colocated`、`partitioned-serial` 或 `partitioned-overlap`。执行模式与算法契约哈希 MUST 在运行期间保持不变，MUST NOT 由自动控制改写。
 - `partitioned-overlap` MUST 只在对应算法契约已经认证允许的任务对之间重叠执行。
 - 当下一批生成依赖本轮更新后的权重时，MUST 在发布完成之后才开始生成。
+- 算法契约哈希 MUST 等于算法描述的规范化身份哈希；执行模式允许的策略年龄 MUST NOT 超过算法描述声明的最大策略陈旧度，不满足时 MUST 在创建 GPU 进程之前拒绝启动。
+
+#### Scenario: 执行模式年龄超出算法要求
+- **WHEN** 算法描述声明最大策略陈旧度为 0，而运行配置的执行 profile 允许策略年龄 1
+- **THEN** 在创建 GPU 进程之前拒绝启动
 
 #### Scenario: 分区串行不偷跑旧版本
 - **WHEN** 在 `partitioned-serial` 下，rollout 卡组空闲，而新策略尚未发布

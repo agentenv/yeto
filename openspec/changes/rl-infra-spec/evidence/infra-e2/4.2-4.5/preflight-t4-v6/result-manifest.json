@@ -1,0 +1,65 @@
+{
+  "commit_source": {
+    "miles": "git",
+    "sglang": "git"
+  },
+  "commits": {
+    "miles": "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",
+    "sglang": "9f29303bef1eea38eb613e5f454a52db1326422d"
+  },
+  "image": "ghcr.io/michaellchung/yeto-miles-ports@sha256:2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff",
+  "image_build_manifest": {
+    "base": {
+      "index_digest": "sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d",
+      "manifest_digest": "sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c",
+      "miles_commit": "9e4260de047a704208535c0e90c531929879ab40",
+      "platform": "linux/amd64",
+      "repository": "docker.io/radixark/miles",
+      "sglang_commit": "e5bba1f9c433da5352e521a8bb826bab960e7836"
+    },
+    "builder": "scripts/build_miles_ports_image.sh (crane append); docker/miles-ports/Dockerfile equivalent",
+    "image": "ghcr.io/michaellchung/yeto-miles-ports",
+    "miles": {
+      "commit": "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",
+      "install": "base's editable install (pip install -e /root/miles --no-deps) kept (same path); /root is on the base's sys.path, so without PYTHONPATH import miles is a namespace package over the /root/miles checkout -- yeto runs with PYTHONPATH=$HOME/miles (regular package)",
+      "path": "/root/miles",
+      "repository": "https://github.com/michaellchung/miles",
+      "upstream_commit": "9e4260de047a704208535c0e90c531929879ab40"
+    },
+    "pure_python_overlay": true,
+    "schema": 1,
+    "sglang": {
+      "commit": "9f29303bef1eea38eb613e5f454a52db1326422d",
+      "install": "pip install -e /sgl-workspace/sglang/python[all] --no-deps (base's editable install, same path)",
+      "path": "/sgl-workspace/sglang",
+      "repository": "https://github.com/michaellchung/sglang",
+      "upstream_commit": "571212b636baca45e10fa3b4da11a289123f3235",
+      "version": "0.5.21.dev67+g9f29303"
+    },
+    "tag": "e3a11ab-9f29303"
+  },
+  "import_paths": {
+    "miles": "/root/miles",
+    "sglang": "/sgl-workspace/sglang/python"
+  },
+  "interfaces": {
+    "fork_m1_placement_map": true,
+    "fork_m2_start_stop_cells": true,
+    "fork_m3_router_cordon": true,
+    "fork_m4_member_publish": true,
+    "fork_m6_rebuild_trainer": true,
+    "run_plugin": true
+  },
+  "python": "3.12.3",
+  "schema": "yeto-rl-runtime-manifest-v1",
+  "versions": {
+    "cuda": "13.0",
+    "megatron.core": "0.19.0+a84b10547",
+    "nccl": "2.29.7",
+    "peft": "0.18.1",
+    "ray": "2.58.0",
+    "sglang": "0.5.21.dev67+g9f29303",
+    "torch": "2.13.0+cu130",
+    "torch_memory_saver": "0.0.9.post1"
+  }
+}

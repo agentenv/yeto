@@ -1,0 +1,1 @@
+{'app_id': 'ap-UQci1TEv05999WORdVD3Aq', 'description': 'yeto-infra-a-dos1', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 20:01:09+00:00', 'stopped_at': '2026-09-29 20:27:41+00:00'}

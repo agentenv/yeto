@@ -1,0 +1,174 @@
+{
+ "criteria": {
+  "G-4.2(a) refused, state unchanged": {
+   "error": "CutError: cut 'e2-c1-c0' rejected: shard trainer_tp0_pp0_dp0.pt checksum mismatch",
+   "pass": true,
+   "unchanged": true
+  },
+  "G-4.2(b) refused, state unchanged": {
+   "error": "CutError: cut 'e2-c1-c0' rejected: shard trainer_tp0_pp0_dp0.pt is 141869360 bytes, manifest says 141870384 (truncated?)",
+   "pass": true,
+   "unchanged": true
+  },
+  "G-4.2(c) refused, state unchanged": {
+   "error": "CutError: cut 'e2-c1-c0' rejected: cut local_step 2 != driver local_step 3",
+   "pass": true,
+   "unchanged": true
+  },
+  "G-4.2(d) refused, state unchanged": {
+   "error": "CutError: cut 'e2-c1-c0' rejected: algorithm identity differs from the current run (spec/plugins/runtime attrs/ref model): cut {'algorithm_spec_sha256': '27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea', 'plugin_sha256': [], 'runtime_attrs_sha256': 'd33da832a10b39274e9f76901b6927ffc0801d8002ba42c2fae307a6b8dc0f41', 'ref_model': {'base_model_revision': 'c1899de289a04d12100db370d81485cdf75e47ca', 'ref_load': '/root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca'}} vs run {'algorithm_spec_sha256': '0000000000000000000000000000000000000000000000000000000000000000', 'plugin_sha256': [], 'runtime_attrs_sha256': 'd33da832a10b39274e9f76901b6927ffc0801d8002ba42c2fae307a6b8dc0f41', 'ref_model': {'base_model_revision': 'c1899de289a04d12100db370d81485cdf75e47ca', 'ref_load': '/root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca'}}",
+   "pass": true,
+   "unchanged": true
+  },
+  "G-4.2(e) refused, state unchanged": {
+   "error": "CutError: cut 'e2-c1-c0' rejected: algorithm identity differs from the current run (spec/plugins/runtime attrs/ref model): cut {'algorithm_spec_sha256': '27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea', 'plugin_sha256': [], 'runtime_attrs_sha256': 'd33da832a10b39274e9f76901b6927ffc0801d8002ba42c2fae307a6b8dc0f41', 'ref_model': {'base_model_revision': 'c1899de289a04d12100db370d81485cdf75e47ca', 'ref_load': '/root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca'}} vs run {'algorithm_spec_sha256': '27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea', 'plugin_sha256': ['yeto.rl.algos.e2_probe@0000000000000000000000000000000000000000000000000000000000000000'], 'runtime_attrs_sha256': 'd33da832a10b39274e9f76901b6927ffc0801d8002ba42c2fae307a6b8dc0f41', 'ref_model': {'base_model_revision': 'c1899de289a04d12100db370d81485cdf75e47ca', 'ref_load': '/root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca'}}",
+   "pass": true,
+   "unchanged": true
+  },
+  "G-4.2(g) live restore refused, state unchanged": {
+   "error": "CutError: rank refused the restore: [refused] CutPluginError: LR scheduler already at 32: restore_cut only restores into a freshly built trainer",
+   "pass": true,
+   "unchanged": true
+  },
+  "G-4.3 arm A pre-step state == cut": {
+   "pass": true
+  },
+  "determinism_settings": {
+   "pass": true
+  },
+  "harness_completed": {
+   "attempts": [],
+   "cause": "RayTaskError(AssertionError)(AssertionError('Engine weight version went backwards: 4 -> 1'))",
+   "error": "PublicationError: upstream update_weights failed: \u001b[36mray::RolloutExecutor.set_weight_version()\u001b[39m (pid=2987, ip=172.20.17.55, actor_id=d8bcef0a0470449595b3ff0e01000000, repr=<miles.ray.rollout.rollout_executor.RolloutExecutor object at 0x2b7bbd28a900>)\n  File \"/usr/lib/python3.12/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n           ^^^^^^^^^^^^^^^^^^^^^\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/ray/rollout/rollout_executor.py\", line 323, in set_weight_version\n    assert self.args.indep_dp, message\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: Engine weight version went backwards: 4 -> 1",
+   "pass": false
+  }
+ },
+ "pass": false,
+ "steps": [
+  {
+   "ranks": [
+    {
+     "coord": {
+      "cp_size": 1,
+      "dp": 0,
+      "dp_size": 1,
+      "ep_size": 1,
+      "global_rank": 0,
+      "pp": 0,
+      "pp_size": 1,
+      "tp": 0,
+      "tp_size": 1
+     },
+     "deterministic_mode": true,
+     "env": {
+      "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+      "NCCL_ALGO": "Ring",
+      "NVIDIA_TF32_OVERRIDE": "0"
+     },
+     "env_ok": true,
+     "info_env": {
+      "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0"
+     },
+     "lora_dropout": 0.05
+    }
+   ],
+   "step": "determinism",
+   "t": 1790760491.920082
+  },
+  {
+   "name": "determinism_settings",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790760491.9216874
+  },
+  {
+   "layout": {
+    "cp": 1,
+    "dp": 1,
+    "ep": 1,
+    "pp": 1,
+    "tp": 1,
+    "world": 1
+   },
+   "step": "layout",
+   "t": 1790760491.9285462
+  },
+  {
+   "local_step": 2,
+   "next_rollout_id": 2,
+   "step": "warmup_done",
+   "t": 1790760548.744387
+  },
+  {
+   "cut_id": "e2-c1-c0",
+   "files": [
+    {
+     "bytes": 141870384,
+     "coord": {
+      "cp_size": 1,
+      "dp": 0,
+      "dp_size": 1,
+      "ep_size": 1,
+      "global_rank": 0,
+      "pp": 0,
+      "pp_size": 1,
+      "tp": 0,
+      "tp_size": 1
+     },
+     "path": "trainer_tp0_pp0_dp0.pt",
+     "sha256": "dc1455b832a0babf876de22576ac08627f552eb07b3788e3f1faa2a92609cac4"
+    }
+   ],
+   "step": "cut_saved",
+   "t": 1790760550.9238586
+  },
+  {
+   "name": "G-4.2(g) live restore refused, state unchanged",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790760553.519548
+  },
+  {
+   "name": "G-4.3 arm A pre-step state == cut",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790760555.0517366
+  },
+  {
+   "name": "G-4.2(a) refused, state unchanged",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790760638.6248848
+  },
+  {
+   "name": "G-4.2(b) refused, state unchanged",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790760639.4529548
+  },
+  {
+   "name": "G-4.2(c) refused, state unchanged",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790760639.9849653
+  },
+  {
+   "name": "G-4.2(d) refused, state unchanged",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790760640.5157673
+  },
+  {
+   "name": "G-4.2(e) refused, state unchanged",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790760641.0516644
+  },
+  {
+   "name": "harness_completed",
+   "ok": false,
+   "step": "criterion",
+   "t": 1790760646.127067
+  }
+ ]
+}

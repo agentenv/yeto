@@ -1,0 +1,25 @@
+G2 A1_B1 []
+G2 A2_B2 []
+B1 restore digests {'tp0_pp0': '9c35555da15c9537ac9e30eea1b1bff696c4650718574250fe3aab6826e4f837'} rng ['fresh', 'fresh'] mapping ['fresh', 'fresh']
+B1p restore digests {'tp0_pp0': '9c35555da15c9537ac9e30eea1b1bff696c4650718574250fe3aab6826e4f837'} rng ['fresh', 'fresh'] mapping ['fresh', 'fresh']
+B2 restore digests {'tp0_pp0': '556b87071b586250adf0f478109c9d40852739bf8fe824e864322d7d29d6cf7e'} rng ['fresh'] mapping ['fresh']
+RT restore digests {'tp0_pp0': '9c35555da15c9537ac9e30eea1b1bff696c4650718574250fe3aab6826e4f837'} rng ['fresh'] mapping ['fresh']
+G1-partial RT==B1 (C1->2->1 roundtrip digest): True
+G3 B1 vs B1p restored rng digests: True
+G3 step3 losses equal: True grad_norm 0.3325594663619995 0.3325594663619995
+G4 A1/B1 step3: per-sample loss bitwise equal True (differ 0/16), grad_norm 0.3325594663619995 vs 0.3325594663619995 rel 0.000e+00
+  G6 step3: mean loss 3.72529e-09 vs 3.72529e-09; grad_norm 0.332559 vs 0.332559
+  G6 step4: mean loss -3.72529e-09 vs -3.72529e-09; grad_norm 0.486328 vs 0.486328
+  G6 step5: mean loss 0 vs 0; grad_norm 0 vs 0
+  G6 step6: mean loss 1.11759e-08 vs 1.11759e-08; grad_norm 0.607449 vs 0.607449
+  G6 step7: mean loss -5.58794e-09 vs -5.58794e-09; grad_norm 0.783196 vs 0.783196
+  G6 step8: mean loss -1.86265e-08 vs -1.86265e-08; grad_norm 0.330149 vs 0.330149
+G4 A2/B2 step3: per-sample loss bitwise equal True (differ 0/16), grad_norm 0.3325594663619995 vs 0.3325594663619995 rel 0.000e+00
+  G6 step3: mean loss 3.72529e-09 vs 3.72529e-09; grad_norm 0.332559 vs 0.332559
+  G6 step4: mean loss -3.72529e-09 vs -3.72529e-09; grad_norm 0.486328 vs 0.486328
+  G6 step5: mean loss 0 vs 0; grad_norm 0 vs 0
+  G6 step6: mean loss 1.11759e-08 vs 1.11759e-08; grad_norm 0.607449 vs 0.607449
+  G6 step7: mean loss -5.58794e-09 vs -5.58794e-09; grad_norm 0.783196 vs 0.783196
+  G6 step8: mean loss -1.86265e-08 vs -1.86265e-08; grad_norm 0.330149 vs 0.330149
+G5 seeds B1 [(1234, 1234, '40feebdb0a1f'), (1234, 1234, '40feebdb0a1f')]
+G5 seeds B1p [(1234, 1234, '40feebdb0a1f'), (1234, 1234, '40feebdb0a1f')]

@@ -1,0 +1,11 @@
+/tmp/algo2a/g3home/runs:
+algo2a-g3
+
+/tmp/algo2a/g3home/runs/algo2a-g3:
+events
+launcher.log
+meta.json
+
+/tmp/algo2a/g3home/runs/algo2a-g3/events:
+algo2a-g3-l0-modal.jsonl
+algo2a-g3-l1-modal.jsonl

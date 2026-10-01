@@ -1,0 +1,6 @@
+# yeto code each run mounted (live worktree /home/michael/work/algo-1b, add_local_dir copy=False)
+run1 16:41:09Z  HEAD 42e239aef8a912e40761f03f755913a1d2a477c1 (+ uncommitted edits of that minute: tests/test_rl_grpo_knobs*.py, examples/ in progress)
+run2 16:43:43Z  HEAD f8b79e93ca54ff96270efcd586fe8ed55a7b761b (clean)
+run3 16:47:10Z  HEAD 5897888bf20cd12a49cfbd208c03b045c4a10633 (clean)
+miles parser for parse runs: /home/michael/work/miles-next @ 0394715083c91182b5eb0c526eeee4196ac694b9 (= MILES_NEXT_COMMIT)
+run4 17:10:06Z  HEAD 2722cadfcffab51347cd08e1017d53437b10f1bd (clean)

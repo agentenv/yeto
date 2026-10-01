@@ -1,0 +1,29 @@
+{
+ "PASS_2_2": true,
+ "PASS_X9": true,
+ "applied_lrs_len_A_B": [
+  [
+   1,
+   1,
+   1
+  ],
+  [
+   1,
+   1,
+   1
+  ]
+ ],
+ "baseline_A": [],
+ "baseline_B": [],
+ "c1_B_partitioned_no_failure": true,
+ "c2_sample_ids_equal": true,
+ "c3_optimizer_timing": true,
+ "c4_publication": true,
+ "c5_injected": true,
+ "c6_no_generation_before_publication": true,
+ "c7_C_no_failure": true,
+ "rounds_A_B": [
+  3,
+  3
+ ]
+}

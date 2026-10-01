@@ -1,0 +1,29 @@
+{
+  "algorithm_spec": "{\"advantage_estimator\":\"grpo\",\"dynamic_sampling_filter\":null,\"dynamic_sampling_max_replacements\":null,\"kl_coef\":null,\"loss\":\"policy_loss\",\"schema\":\"yeto-rl-algorithm-spec-v1\"}",
+  "algorithm_spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+  "clusters": [
+    "infra-e2-g4-c3-b1-l0-modal"
+  ],
+  "controller": "local",
+  "dry_run": true,
+  "external_learners": 0,
+  "island_requests": [
+    {
+      "cloud": "modal",
+      "gpu": "H100",
+      "gpus_per_node": 3,
+      "learner_command": "RAY_ADDRESS=\"$MASTER_ADDR:6379\" PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} python3 -m yeto.rl.learner --model Qwen/Qwen3-1.7B --rl-model-recipe generic --data zhuzilin/gsm8k --rl-single-island-no-sync --rl-echo-events --learner-id $LEARNER_ID --reward-function gsm8k_reward:score --reward-sha256 743d433cc9dcacc518bf023bcef28b2e0ef46665b5363027e2150bee2d0ec375 --source-sha256 7ed6d2cf9394d035b9579f4fc90645a1f0360d6c8c5518494d017b6f0972ac47 --global-rounds 6 --sync-preset strict-avg --fragments 1 --pipeline 1 --local-horizon 1 --total-fragment-steps 6 --groups-per-round 2 --samples-per-group 8 --over-sampling-batch-size 2 --rl-distributed-timeout-minutes 10 --optimizer-steps 1 --rollout-max-response-len 384 --completed-groups-path '~/yeto-rl/island-checkpoint.pt' --event-tape ~/yeto-output/rl-island-0.jsonl --actor-num-nodes 1 --actor-num-gpus-per-node 2 --tensor-parallel 1 --pipeline-parallel 1 --rollout-num-gpus-per-engine 1 --sglang-mem-fraction-static 0.4 --lora-r 16 --lora-targets all-linear --inner-lr 1e-05 --seq-len 1024 --seed 1234 --wan-streams 4 --miles-root ~/miles --rl-engine ports --rl-expected-algorithm-sha256 27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea --rl-placement fixed-partition --rollout-num-gpus 1 --rl-deterministic-trainer --rl-lora-dropout 0.05 --rl-elastic --rl-elastic-resources ~/yeto-rl/elastic_resources.json --rl-elastic-state-dir ~/yeto-rl/elastic-state --rl-elastic-initial-config T2R1S0 --rl-elastic-cells c0 --apply-chat-template-kwargs '{\"enable_thinking\":false}' --model-revision 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --trust-remote-code",
+      "learner_id": 0,
+      "num_nodes": 1,
+      "region": null,
+      "total_gpus": 3
+    }
+  ],
+  "islands": 1,
+  "outer_sync": false,
+  "rl_engine": "ports",
+  "syncer": null,
+  "total_gpus": 3,
+  "training_mode": "rl",
+  "unverified_mechanisms": []
+}

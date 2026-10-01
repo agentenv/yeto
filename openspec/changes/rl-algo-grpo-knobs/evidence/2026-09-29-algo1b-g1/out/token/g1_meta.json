@@ -1,0 +1,8 @@
+{
+ "mechanism": "token",
+ "algorithm_spec_sha256": "c55f2f709dc78581751e0440c926d0314c2450330f1cfc5b1a518c9ee3806ca4",
+ "allow_unverified": [
+  "loss_aggregations:token"
+ ],
+ "rounds": 3
+}

@@ -1,0 +1,128 @@
+{
+ "per_seed_faster": {
+  "17": "t1r3",
+  "29": null
+ },
+ "runs": {
+  "c4-s17": {
+   "median_round_s": 109.65224266052246,
+   "mode": "colocated-serial",
+   "phase_s": {
+    "apply": 742.2,
+    "export_push": 4.2,
+    "generate": 56.9,
+    "offload": 13.3,
+    "onload": 5.9,
+    "publish": 122.8,
+    "sync": 0.0,
+    "train": 47.3,
+    "wait_global": 23.0
+   },
+   "pool_gpu_h": 1.5055555555555555,
+   "round_wall_s": [
+    131.18378472328186,
+    103.09777784347534,
+    109.65224266052246,
+    107.51662516593933,
+    109.65271067619324
+   ],
+   "rounds": 6,
+   "run_wall_h": 0.3763888888888889
+  },
+  "c4-s29": {
+   "median_round_s": 110.09405207633972,
+   "mode": "colocated-serial",
+   "phase_s": {
+    "apply": 689.7,
+    "export_push": 4.0,
+    "generate": 52.6,
+    "offload": 10.2,
+    "onload": 5.6,
+    "publish": 110.9,
+    "sync": 0.0,
+    "train": 50.2,
+    "wait_global": 83.1
+   },
+   "pool_gpu_h": 1.538888888888889,
+   "round_wall_s": [
+    133.16170167922974,
+    107.35352206230164,
+    105.35362529754639,
+    110.09405207633972,
+    113.45496892929077
+   ],
+   "rounds": 6,
+   "run_wall_h": 0.38472222222222224
+  },
+  "t1r3-s17": {
+   "median_round_s": 74.52662086486816,
+   "mode": "partitioned-serial",
+   "phase_s": {
+    "apply": 418.5,
+    "export_push": 4.7,
+    "generate": 18.3,
+    "publish": 11.8,
+    "sync": 0.0,
+    "train": 115.1,
+    "wait_global": 27.3
+   },
+   "pool_gpu_h": 1.3344444444444445,
+   "round_wall_s": [
+    82.90263819694519,
+    75.68120813369751,
+    74.52662086486816,
+    72.06433439254761,
+    72.53557085990906
+   ],
+   "rounds": 6,
+   "run_wall_h": 0.33361111111111114
+  },
+  "t1r3-s29": {
+   "median_round_s": 75.46055841445923,
+   "mode": "partitioned-serial",
+   "phase_s": {
+    "apply": 439.8,
+    "export_push": 6.0,
+    "generate": 20.3,
+    "publish": 12.2,
+    "sync": 0.0,
+    "train": 115.0,
+    "wait_global": 25.8
+   },
+   "pool_gpu_h": 1.3022222222222222,
+   "round_wall_s": [
+    86.74056911468506,
+    77.07990622520447,
+    74.86110520362854,
+    75.46055841445923,
+    74.81809139251709
+   ],
+   "rounds": 6,
+   "run_wall_h": 0.32555555555555554
+  },
+  "t2r2-s17": {
+   "median_round_s": 89.34655499458313,
+   "mode": "partitioned-serial",
+   "phase_s": {
+    "apply": 639.5,
+    "export_push": 5.9,
+    "generate": 23.3,
+    "publish": 15.1,
+    "sync": 0.0,
+    "train": 91.1,
+    "wait_global": 34.7
+   },
+   "pool_gpu_h": 1.7466666666666666,
+   "round_wall_s": [
+    111.08558392524719,
+    87.57327175140381,
+    90.0754668712616,
+    89.34655499458313,
+    87.03156042098999
+   ],
+   "rounds": 6,
+   "run_wall_h": 0.43666666666666665
+  }
+ },
+ "same_profile_faster": "no significant difference"
+}

@@ -1,0 +1,5 @@
+2026-09-29T17:51:12Z
+┃ App ID                    ┃ Description  ┃ State    ┃ Tasks ┃ Created at   ┃ S
+│ ap-5tiUOA6s1bvRGIbvp5ShxV │ algo2a-g1    │ stopped  │ 0     │ 2026-09-29   │ 2
+│ ap-q20m8GE1i2WpZcKRBMNj1K │ algo2a-g1    │ stopped  │ 0     │ 2026-09-29   │ 2
+watchdog (2177653/2177931) killed 2026-09-29T17:51:27Z; both algo2a-g1 apps stopped, 0 tasks

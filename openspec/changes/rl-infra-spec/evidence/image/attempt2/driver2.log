@@ -1,0 +1,91 @@
+sandbox sb-39ljVyIC1pSw4NlV18Qs5a ready after 1 s
+== gpu
+GPU 0: NVIDIA L40S (UUID: GPU-a5dd406e-a9fc-9239-7ac8-ddee460462cf)
+PASS gpu_is_l40s
+== manifest
+{
+  "base": {
+    "index_digest": "sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d",
+    "manifest_digest": "sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c",
+    "miles_commit": "9e4260de047a704208535c0e90c531929879ab40",
+    "platform": "linux/amd64",
+    "repository": "docker.io/radixark/miles",
+    "sglang_commit": "e5bba1f9c433da5352e521a8bb826bab960e7836"
+  },
+  "builder": "scripts/build_miles_ports_image.sh (crane append); docker/miles-ports/Dockerfile equivalent",
+  "image": "ghcr.io/michaellchung/yeto-miles-ports",
+  "miles": {
+    "commit": "0394715083c91182b5eb0c526eeee4196ac694b9",
+    "install": "pip install -e /root/miles --no-deps (base's editable install, same path)",
+    "path": "/root/miles",
+    "repository": "https://github.com/michaellchung/miles",
+    "upstream_commit": "9e4260de047a704208535c0e90c531929879ab40"
+  },
+  "pure_python_overlay": true,
+  "schema": 1,
+  "sglang": {
+    "commit": "9f29303bef1eea38eb613e5f454a52db1326422d",
+    "install": "pip install -e /sgl-workspace/sglang/python[all] --no-deps (base's editable install, same path)",
+    "path": "/sgl-workspace/sglang",
+    "repository": "https://github.com/michaellchung/sglang",
+    "upstream_commit": "571212b636baca45e10fa3b4da11a289123f3235",
+    "version": "0.5.21.dev67+g9f29303"
+  },
+  "tag": "0394715-9f29303"
+}PASS manifest_matches_pins
+== imports / metadata
+miles None 0.1.1
+sglang /sgl-workspace/sglang/python/sglang/__init__.py 0.5.21.dev67+g9f29303 0.5.21.dev67+g9f29303
+FAIL imports_point_at_forks
+/root/miles HEAD=0394715083c91182b5eb0c526eeee4196ac694b9 origin=https://github.com/michaellchung/miles
+PASS git_/root/miles
+/sgl-workspace/sglang HEAD=9f29303bef1eea38eb613e5f454a52db1326422d origin=https://github.com/michaellchung/sglang
+PASS git_/sgl-workspace/sglang
+== launcher ports setup in image
+PASS launcher_ports_setup
+++ git -C /root/miles rev-parse HEAD
++ '[' 0394715083c91182b5eb0c526eeee4196ac694b9 '!=' 0394715083c91182b5eb0c526eeee4196ac694b9 ']'
+++ git -C /root/miles rev-parse HEAD
++ test 0394715083c91182b5eb0c526eeee4196ac694b9 = 0394715083c91182b5eb0c526eeee4196ac694b9
+++ git -C /root/miles rev-parse --abbrev-ref HEAD
++ test HEAD = HEAD
+++ git -C /root/miles status --porcelain --untracked-files=all
++ test -z ''
++ python3 -m pip install -q --no-deps -e /root/miles peft==0.20.0
++ '[' '!' -e /root/sglang ']'
+++ git -C /sgl-workspace/sglang rev-parse HEAD
++ '[' 9f29303bef1eea38eb613e5f454a52db1326422d = 9f29303bef1eea38eb613e5f454a52db1326422d ']'
+++ git -C /sgl-workspace/sglang config --get remote.origin.url
++ '[' https://github.com/michaellchung/sglang = https://github.com/michaellchung/sglang ']'
+++ git -C /sgl-workspace/sglang status --porcelain --untracked-files=all
++ '[' -z '' ']'
++ python3 -c 'import os, sys, sglang; sys.exit(0 if os.path.realpath(sglang.__file__).startswith("/sgl-workspace/sglang/python/") else 1)'
++ ln -sfn /sgl-workspace/sglang /root/sglang
++ echo '[yeto-setup] image provides sglang 9f29303bef1eea38eb613e5f454a52db1326422d'
+[yeto-setup] image provides sglang 9f29303bef1eea38eb613e5f454a52db1326422d
+PASS setup_used_image_sglang
+PASS setup_skipped_miles_fetch
+/root/miles/miles/__init__.py /root/sglang/python/sglang/__init__.py
+PASS after_setup_still_fork
+== upstream parse_args tests (lr-fix set)
+imports ok
+    warnings.warn(
+
+tests/test_rl_miles_adapter_config.py: 10 warnings
+  /usr/lib/python3.12/argparse.py:1489: DeprecationWarning: 'type' is deprecated as of Python 3.12 and will be removed in Python 3.14.
+    action = action_class(**kwargs)
+
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[True]
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[False]
+  /root/Megatron-LM/megatron/core/_rank_utils.py:39: UserWarning: Could not determine rank from torch.distributed, RANK, or SLURM_PROCID. Defaulting to rank 0.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_rl_miles_adapter_config.py:277: upstream cell counter importable; covered by parse_args check
+31 passed, 1 skipped, 33 warnings in 29.55s
+PASS parse_args_tests
+fails=1
+smoke rc 1
+terminated sb-39ljVyIC1pSw4NlV18Qs5a total 190 s
+rc=1

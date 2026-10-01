@@ -1,0 +1,8 @@
+sandbox sb-aXbW4mpogxWfStDYFZ0ZPr
+
+
+Fetching 10 files:  60%|██████    | 6/10 [00:00<00:00, 53.32it/s]Fetching 10 files: 100%|██████████| 10/10 [00:07<00:00,  1.39it/s]
+G1_RESULT {"mechanism": "clip_sym", "rc": 1, "seconds": 56.9, "peak_gpu_mib": 4}
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+G1_RESULT {"mechanism": "clip_hi", "rc": 1, "seconds": 32.4, "peak_gpu_mib": 4}
+exit=0

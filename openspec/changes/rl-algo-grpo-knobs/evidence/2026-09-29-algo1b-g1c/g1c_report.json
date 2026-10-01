@@ -1,0 +1,129 @@
+{
+ "baseline": {
+  "present": true,
+  "mechanism": "baseline",
+  "rc": 0,
+  "seconds": 474.8,
+  "peak_gpu_mib": 38142,
+  "rounds": 3,
+  "round_train_seconds": [
+   35.618294546000016,
+   15.332769063,
+   16.291570367999952
+  ],
+  "round_rollout_seconds": [
+   16.94612756800001,
+   9.714461643999982,
+   8.955450492000011
+  ],
+  "bad_lines": [],
+  "train_steps": 3,
+  "metrics": {
+   "pg_loss": [
+    1.210719347000122e-08,
+    -1.862645149230957e-08,
+    -3.725290298461914e-09
+   ],
+   "grad_norm": [
+    0.6349465847015381,
+    0.4057203531265259,
+    0.27438727021217346
+   ]
+  },
+  "metrics_ok": true,
+  "extra": {},
+  "pass": true
+ },
+ "clip_higher": {
+  "present": false
+ },
+ "dual_clip": {
+  "present": false
+ },
+ "token": {
+  "present": true,
+  "mechanism": "token",
+  "rc": 0,
+  "seconds": 373.6,
+  "peak_gpu_mib": 36814,
+  "rounds": 3,
+  "round_train_seconds": [
+   21.431308152999918,
+   15.210879621999993,
+   16.082012007999992
+  ],
+  "round_rollout_seconds": [
+   12.927596488000063,
+   8.460226970000008,
+   9.23163634399998
+  ],
+  "bad_lines": [],
+  "train_steps": 3,
+  "metrics": {
+   "pg_clipfrac": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "pg_loss": [
+    0.03497289055867521,
+    0.006808160270657978,
+    0.002604513254127191
+   ]
+  },
+  "metrics_ok": true,
+  "extra": {},
+  "pass": true,
+  "paired_valid": true,
+  "step1_grad_norm": 0.6349465847015381,
+  "effective": false
+ },
+ "drgrpo": {
+  "present": false
+ },
+ "kl_k3": {
+  "present": false
+ },
+ "entropy": {
+  "present": false
+ },
+ "over_sampling": {
+  "present": false
+ },
+ "overlong_penalty": {
+  "present": false
+ },
+ "no_std": {
+  "present": true,
+  "mechanism": "no_std",
+  "rc": 0,
+  "seconds": 367.4,
+  "peak_gpu_mib": 38174,
+  "rounds": 3,
+  "round_train_seconds": [
+   21.02262659500002,
+   15.005592696999884,
+   15.798964591000185
+  ],
+  "round_rollout_seconds": [
+   13.290794174999974,
+   8.424743937999892,
+   8.724454593000019
+  ],
+  "bad_lines": [],
+  "train_steps": 3,
+  "metrics": {
+   "grad_norm": [
+    0.24280406534671783,
+    0.16263224184513092,
+    0.12409628182649612
+   ]
+  },
+  "metrics_ok": true,
+  "extra": {},
+  "pass": true,
+  "paired_valid": true,
+  "step1_grad_norm": 0.24280406534671783,
+  "effective": true
+ }
+}
