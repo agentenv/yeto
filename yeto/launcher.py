@@ -219,6 +219,23 @@ fi
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
 
 
+# rl-multinode-island D6: per-cloud NCCL/GLOO socket settings for a multi-node
+# island (values are the CPU-side best guess; GPU task G1 confirms them).
+MULTINODE_SOCKET_IFNAME = {"nebius": "eth0", "aws": "", "gcp": "", "ssh": ""}
+
+
+def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
+    """Shell exports every island node runs before Ray starts; "" on one node."""
+    if num_nodes <= 1:
+        return ""
+    lines = ["export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}",
+             "export NCCL_DEBUG=${NCCL_DEBUG:-WARN}"]
+    iface = MULTINODE_SOCKET_IFNAME.get(cloud, "")
+    if iface:
+        lines += [f"export NCCL_SOCKET_IFNAME={iface}", f"export GLOO_SOCKET_IFNAME={iface}"]
+    return "\n".join(lines) + "\n"
+
+
 def rl_actor_gpus_per_node(args, spec) -> int:
     """Trainer GPUs per node: all of them when colocated; under
     ``--rl-placement fixed-partition`` the rest after rollout and standby."""
@@ -2513,6 +2530,7 @@ def make_miles_island_task(
             f"{login_unset}{HF_TOKEN_ENV}\n"
             "set -e\n"
             "cd ~/sky_workdir\n"
+            f"{multinode_env_prelude(spec.cloud, spec.num_nodes)}"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
             # The island's Ray lives in its own temp dir so that cleanup can
             # target it by path.  A whole-machine `ray stop` would also kill
@@ -2547,9 +2565,16 @@ def make_miles_island_task(
             "${PYTHONPATH:+:$PYTHONPATH} "
             f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}\n"
             "else\n"
-            '  until ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"; '
-            "do sleep 2; done\n"
+            # rl-multinode-island D1: the trap is armed before the join loop so a
+            # worker killed while joining still cleans its Miles Ray; the join is
+            # bounded (head never came up -> the node exits non-zero instead of
+            # looping forever).
             "  trap stop_miles_ray EXIT\n"
+            "  for _ in $(seq 1 150); do "
+            'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR" && break; '
+            "sleep 2; done\n"
+            "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
+            "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"
             "  while ray status --address=\"$MASTER_ADDR:6379\" "
             ">/dev/null 2>&1; do sleep 5; done\n"
             "fi"
@@ -4314,7 +4339,7 @@ def _cloud_live_instances_probe(cluster: str):
 
 
 def terminate_and_verify(
-    sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep, down=None
+    sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep, down=None, num_nodes=1
 ) -> bool:
     """sky.down a cluster and CONFIRM at the cloud level that no instance
     survives, retrying the down while the cloud still reports live ones.
@@ -4336,6 +4361,9 @@ def terminate_and_verify(
     if probe == "auto":
         probe = _cloud_live_instances_probe(cluster)
     down = down or (lambda: sky.get(sky.down(cluster)))
+    if int(num_nodes or 1) > 1:
+        return _terminate_and_verify_nodes(cluster, probe=probe, attempts=attempts,
+                                           sleep_fn=sleep_fn, down=down, num_nodes=int(num_nodes))
 
     def _down():
         try:
@@ -4370,6 +4398,52 @@ def terminate_and_verify(
         return True
 
 
+def _terminate_and_verify_nodes(cluster, *, probe, attempts, sleep_fn, down, num_nodes) -> bool:
+    """rl-multinode-island D10: a multi-node island is confirmed gone only when the
+    cloud confirms EVERY node instance. The instance ids are captured before the
+    first down; no cloud probe, a failing probe or any instance still live after
+    the retries -> False, with the unconfirmed instance ids listed. sky.down's own
+    result is never trusted for more than one node."""
+    if probe is None:
+        print(f"[launcher] {cluster}: {num_nodes}-node island cannot be cloud-verified; "
+              "NOT confirmed down (check the cloud console)", file=sys.stderr)
+        return False
+    try:
+        before = list(probe())
+    except Exception as e:  # noqa: BLE001 - verification must not rely on sky's DB
+        print(f"[launcher] {cluster}: cloud probe before down failed ({e}); NOT confirmed",
+              file=sys.stderr)
+        return False
+    if len(before) != num_nodes:
+        print(f"[launcher] {cluster}: cloud shows {len(before)} instance(s) for a {num_nodes}-node "
+              f"island ({','.join(map(str, before))}); verifying what the cloud reports", file=sys.stderr)
+    live = before
+    for i in range(attempts + 1):
+        try:
+            down()
+        except Exception as e:  # noqa: BLE001
+            print(f"[launcher] sky.down({cluster}) error: {e}", file=sys.stderr)
+        try:
+            live = list(probe())
+        except Exception as e:  # noqa: BLE001
+            print(f"[launcher] {cluster}: cloud verify failed ({e}); NOT confirmed", file=sys.stderr)
+            return False
+        if not live:
+            for iid in before:
+                print(f"[launcher] {cluster}: node instance {iid} confirmed terminated")
+            if not before:
+                print(f"[launcher] {cluster}: cloud reports no instances (confirmed)")
+            return True
+        if i < attempts:
+            print(f"[launcher] {cluster}: {len(live)} node instance(s) still live "
+                  f"({','.join(map(str, live))}); retrying teardown ({i + 1}/{attempts})", file=sys.stderr)
+            sleep_fn(min(30, 5 * (i + 1)))
+    print(f"[launcher] {cluster}: UNCONFIRMED node instance(s) {','.join(map(str, live))} "
+          "still live after teardown; delete them in the cloud console or rerun `yeto down`",
+          file=sys.stderr)
+    return False
+
+
 def run(args, on_clusters=None, local_syncer=None) -> int:
     """Provision and supervise the fleet; returns the run's exit code.
 
@@ -4402,6 +4476,8 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     if no_sync and head_mode:
         raise ValueError("--rl-single-island-no-sync has no syncer; do not run it as a head")
     specs = parse_gpu_spec(args.gpu)
+    nodes_by_cluster = dict(zip(learner_cluster_names(args.cluster_prefix, specs),
+                                (s.num_nodes for s in specs)))  # rl-multinode-island D10
     no_sync_incomplete: list[str] = []
     # Islands whose tape travels over the log stream (no fetchable
     # ~/yeto-output): every Modal RL ports island, and a no-sync island.
@@ -4796,7 +4872,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     except Exception as e:  # noqa: BLE001 - app stop below is the backstop
                         print(f"[launcher] cancel of {name} failed: {e}", file=sys.stderr)
                     continue
-                if not terminate_and_verify(sky, name):
+                if not terminate_and_verify(sky, name, num_nodes=nodes_by_cluster.get(name, 1)):
                     unverified.append(name)
             if modal_ops is not None:
                 # Belt and braces: stop the whole per-run Modal app so no

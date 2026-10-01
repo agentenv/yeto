@@ -644,6 +644,19 @@ class IslandDriver:
                       error=str(error), config_epoch=self.config_epoch)
             raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
 
+    def _probe_nodes(self, rollout_id: int) -> None:
+        """rl-multinode-island D9: before each round ask the controller whether every
+        island node is still alive; a loss is RECOVERY_REQUIRED and ends the run
+        (no partial-node training or generation)."""
+        check = getattr(self.controller, "check_nodes", None) if self.controller else None
+        if not callable(check):
+            return
+        error = check()
+        if error:
+            self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
+                      error=str(error), config_epoch=self.config_epoch)
+            raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+
     def _confirm_recovery(self, rollout_id: int) -> None:
         """3.7 restart recovery: after the first full publication covered the
         rebuilt members, the controller verifies them (members, policy token,
@@ -912,6 +925,7 @@ class IslandDriver:
 
     def run_round(self, rollout_id: int) -> SyncBoundary:
         self.at_safe_point = False
+        self._probe_nodes(rollout_id)
         started = time.monotonic()
         batch = self._generate(rollout_id)
         rollout_seconds = time.monotonic() - started

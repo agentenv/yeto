@@ -643,6 +643,10 @@ def compose_island(
             if committed.get("rollout"):
                 driver.placement.restore_committed(tuple(committed["rollout"]),
                                                    epoch=epochs.config_epoch)
+        topology = getattr(launch.placement, "topology", None)
+        if topology is not None and callable(getattr(elastic.controller, "set_topology", None)):
+            # rl-multinode-island D9/Q6: node loss is observed through Ray, fail closed
+            elastic.controller.set_topology((topology.nodes, topology.gpus_per_node), _ray_alive_nodes)
         elastic.controller.open(driver.rollout)
         _wire_trainer_rebuild(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
                               actor_model=actor_model, rollout_executor=rollout_executor,
@@ -1027,6 +1031,14 @@ def check_elastic_miles_args(miles_args: Any) -> None:
         problems.append("no rollout offload (member publication needs resident engines)")
     if problems:
         raise ValueError("--rl-elastic needs " + "; ".join(problems))
+
+
+def _ray_alive_nodes() -> dict[str, int]:
+    """``{node_id: GPUs}`` of the alive Ray nodes (the controller's node probe)."""
+    import ray
+
+    return {n["NodeID"]: int((n.get("Resources") or {}).get("GPU", 0))
+            for n in ray.nodes() if n.get("Alive")}
 
 
 def _ray_bundle_node(pg: Any, bundle: int) -> Any:
