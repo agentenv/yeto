@@ -948,7 +948,7 @@ def _preflight_codex_harness(args) -> None:
     # it must not be required for the independent Terminal-Bench path.
     if args.custom_agent_function_path != CODEX_OPENENV_AGENT:
         try:
-            from yeto_miles_secrlenv import codex_harness_agent
+            from yeto.rl.harness.codex import codex_harness_agent
 
             live_identity = codex_harness_agent.codex_harness_identity()
         except (
@@ -2495,13 +2495,13 @@ def main(argv=None) -> None:
         load_function(args.custom_generate_function_path)
     if args.custom_agent_function_path:
         load_function(args.custom_agent_function_path)
-    from . import CODEX_HARNESS_AGENT
+    from . import CODEX_HARNESS_AGENT, SECRLENV_AGENT
 
     if args.custom_agent_function_path in {
-        "yeto_miles_secrlenv.agent.run",
+        SECRLENV_AGENT,
         CODEX_HARNESS_AGENT,
     }:
-        from yeto_miles_secrlenv.client import require_daemon_ready
+        from yeto.rl.harness.codex.client import require_daemon_ready
 
         require_daemon_ready()
         print("[rl] secrlenv episode daemon ready")

@@ -491,7 +491,7 @@ def _codex_adapter_source_path() -> Path:
     """Resolve the optional legacy adapter from its installed package."""
 
     try:
-        from yeto_miles_secrlenv import codex_harness_agent
+        from yeto.rl.harness.codex import codex_harness_agent
     except ImportError as exc:
         raise HarnessError("cannot attest the Yeto Codex harness adapter") from exc
     value = getattr(codex_harness_agent, "__file__", None)
@@ -507,7 +507,7 @@ def _codex_adapter_identity() -> dict[str, str]:
     """Read hashes derived by the live optional Codex adapter."""
 
     try:
-        from yeto_miles_secrlenv import codex_harness_agent
+        from yeto.rl.harness.codex import codex_harness_agent
 
         identity = codex_harness_agent.codex_harness_identity()
     except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:

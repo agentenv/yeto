@@ -1584,7 +1584,7 @@ def _prepare_rl_args(
             args.dynamic_sampling_filter_path = bounded_filter
         elif dynamic_filter not in {
             bounded_filter,
-            "yeto_miles_secrlenv.reward.check_group",
+            SECRLENV_GROUP_FILTER,
         }:
             raise ValueError(
                 "--dynamic-sampling-max-replacements is only supported with "

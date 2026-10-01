@@ -179,7 +179,7 @@ def _secrlenv_daemon_contract(run_id="acceptance"):
 def _enable_secrlenv_agent(plan):
     plan["remote_env_file"] = ".config/yeto/rl.env"
     plan["learner"].update(
-        custom_agent_function_path="yeto_miles_secrlenv.agent.run",
+        custom_agent_function_path="yeto.rl.harness.codex.agent.run",
         custom_generate_function_path=ssh_harness.SECRLENV_GENERATE,
         use_session_server=True,
         tito_model="org/model",
@@ -241,7 +241,7 @@ def test_secrlenv_plan_round_trip_requires_exact_replacement_contract():
 
 
 def _secrlenv_eval_plan(path: Path):
-    pytest.importorskip("yeto_miles_secrlenv")
+    pytest.importorskip("yeto.rl.harness.codex")
     plan = _local_data_plan(path)
     _enable_secrlenv_agent(plan)
     plan["learner"]["reward_function"] = ssh_harness.SECRLENV_REWARD
@@ -922,12 +922,12 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
 
 
 def test_prepare_wires_final_secrlenv_eval_and_same_dataset_sha(tmp_path, monkeypatch):
-    pytest.importorskip("yeto_miles_secrlenv")
+    pytest.importorskip("yeto.rl.harness.codex")
     prompts = tmp_path / "flaky100.jsonl"
     prompts.write_text('{"messages": []}\n', encoding="utf-8")
     learner = _plan()["learner"]
     learner.update(
-        custom_agent_function_path="yeto_miles_secrlenv.agent.run",
+        custom_agent_function_path="yeto.rl.harness.codex.agent.run",
         custom_generate_function_path=ssh_harness.SECRLENV_GENERATE,
         use_session_server=True,
         tito_model="org/model",
