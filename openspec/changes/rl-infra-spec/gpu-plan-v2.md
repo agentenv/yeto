@@ -469,3 +469,46 @@
 - **回收与硬超时**：沿用 n2run 的机制（外层 `timeout <硬超时>`、`sleep <wd_s>; sky down` 独立 watchdog、autostop 10 min、20 min 无新事件的进度看门狗），并在每次运行结束后由 `a4go4.sh` 的最终守卫执行 `nstop.sh`（拉证据）→ `cleanup_run.sh`（两次复查，退出码 0 才算无残留）；`cleanup_rc.txt` 与 `cleanup.out` 进入留档。启动前检查用户线程数 < 3000（n2run 已有）。孤儿安全组 `vpcsecuritygroup-e00a60g9g8z4kdhc83` 为上一批遗留，本批不处理。
 - **规则**：遇到新的基础设施阻塞（开通/配额失败、launcher 缺口、探针自证不通过、cleanup 退出码 ≠ 0 且原因不明等）就停下报告，不原样重跑；测试无效（INVALID_TEST）只有在提出原因并修复后才重跑；所有用例每项 1 个 seed，无数值容差，判据文字以 §3、§8.7 与上述调整为准。
 - **状态**：已登记，未运行。冒烟后需要填写的位置：步骤 2 的 `T_start` 与 `UP_DEADLINE_S`（填入后单独提交）。
+
+### 9.23 A4 / A4b 8 卡 H100 批（T4R2S2↔T4R4S0；运行前登记，2026-10-01；本节提交时未起任何 GPU 或云资源）
+- **背景**：§9.22 的 4×L40S 冒烟在 Nebius 开通阶段失败（实例创建后一直 STOPPED/Reconciling，从未 RUNNING，见 `evidence/infra-v2-b1/a4-4card/RESULT.md`）。**用户决定（2026-10-01）：改用 Nebius eu-north1 8×H100 on-demand，按旧的 8 卡原文方案跑 A4**。§9.22 的 4 卡拓扑与 L40S 档位作废（保留其记录），其判据口径调整五条沿用，按 8 卡档换算卡号与成员数。本节是运行前登记，判据文字之外一律不改。
+- **平台**：Nebius eu-north1 on-demand 8×H100（SkyPilot `nebius:8xh100@eu-north1`，$30.8/h = $0.513/min，同 §9.20；冒烟用 `nvidia-smi` 名称含 H100 且恰 8 张作断言，不符即 startup_failed）。同一时刻只跑一个实验。不用 head 模式。
+- **代码 SHA**：**b19b781**（origin/integ-decl；gpu-b1 已含它，`yeto/` 与 origin/integ-decl 无差异）。运行用 `git archive b19b781`。含 A4 可观测性修复（`test_injection`/`test_hold`/`rl_membership`、watchdog `classification`/`injection_reached`、REBUILD_OLD `cause`、tool-wait 注入）与两个开关 `--rl-test-hold-before-check-s 10`、`--rl-test-inject-tool-wait-s 30`。所有 launch 带 `--no-island-relaunch --modal-retries 0`。
+- **attestation 指纹（9a06c4b 之后的代码上重取，不依赖 GPU，本机经 CLI→learner→`build_ports_launch` 路径重建，`mkatt8.sh`/`fp_local8.py`，`cfg/attestation-8-<轮数>.json`）**：3 轮 `sha256:1c4ceeb1…`，4 轮 `sha256:210f27dc…`，5 轮 `sha256:c72f80da…`，12 轮 `sha256:2d0a00f4…`（与 47efd25 / 9a06c4b 上的值逐位相同，即 argv 自 9a06c4b 起未变）。已核对：各注入/重启开关（lora-perturb、hold、block-update、tool-wait、stop-failures、recovery-timeout、restart-attempts、kill-learner-at）都不改变 argv，故不改变指纹。岛上 `rl_driver_start.runtime_fingerprint` 与此不符则 selfcheck 立即停（startup_failed）。
+- **拓扑**（§2.1 的 8 卡档，旧原文方案）：池 = 8 张 UUID；trainer = G0–G3；rollout c0、c1 在 G4、G5（启动）；standby = G6、G7（c2、c3，声明但不启动）。up = T4R2S2→T4R4S0（启动 c2、c3），down 反向（`cfg/resources-8.json`，`--rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-initial-config T4R2S2`）。模型 Qwen3-0.6B LoRA r16，seed 17，其余同 `cfg/a4-args.txt`。入口 `a8go.sh <case> <prefix> <hard_s> <wd_s>`（由 a4go4.sh 改 8 卡，档名/卡号/断言/指纹换算，其余逻辑不变）。
+- **各用例（旧 8 卡原文方案；"第 k 轮 train 提交"= rollout_id k−1 的 train 相位，请求在 generate(k) 之前执行）**：
+  - E1-A 基线 `base`：12 轮，无请求。E1-A `e1a`：12 轮，train rid1（第 2 轮）提交 up→T4R4S0，train rid4（第 5 轮）重复提交同一 request_id，train rid6（第 7 轮）提交 down→T4R2S2，deadline 各 600 s；router `/worker_inflight`（0.5 s）与 nvidia-smi 采样。
+  - E1-B `e1b`：`--rl-test-inject-lora-perturb 0.01 --rl-test-hold-before-check-s 10`，**4 轮**（§9.20 为 12 轮；轮数不属于判据，事务在第 2 轮 train 后即终态，其后轮次只是空耗，为省钱缩到 4 轮，与 §9.22 一致），train rid1 up（deadline 600 s）。
+  - watchdog `wd`：`--rl-test-inject-update-weights-block-s 600`，4 轮，train rid1 up，**UP_DEADLINE_S = 240 s**（用户已批准，§9.21；Nebius 8×H100 `start_cells` 此前实测 142.6–147.3 s，见 a4s3/RESULT.md 与 a4nx2 journal）。**冒烟若实测 `start_cells` > 160 s：停下汇报，不启动 watchdog**。
+  - E1-D（§9.20）：`d123`（5 轮：up1 无注入 SUCCEEDED → down 带 `--rl-test-inject-stop-failures 1`（③）→ up2 在新 SGLang 进程于 **G6** 出现 ≥10 s 时 SIGKILL（①）→ up3 在 VERIFYING 记入 journal 时立即 SIGKILL（②））→ `d4`（4 轮，`--rl-test-inject-stop-failures 100000 --rl-elastic-recovery-timeout-s 120`）→ `d5`（4 轮，`--rl-elastic-restart-attempts 1 --rl-test-kill-learner-at COMMITTED`，marker 抑制 up 的 kill）→ `d6`（3 轮，`--rl-test-kill-learner-at QUIESCING`）→ `d7`（5 轮，`--rl-elastic-restart-attempts 1`，generate(1) 后 SIGKILL learner 再发 up）。判据 = infra-e1 plan.md E1-D 原文 + §7.1 (c)。
+  - A4b（E1-C）`a4b`：`--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30`，4 轮，up 后在 rollout 进行中提交 down。
+- **判据口径调整（沿用 §9.22 的五条，按 8 卡换算）**：
+  1. **E1-A (c)**：改读 `rl_membership`，第 r 轮成员数取 `round ≤ r` 的最后一条的 `len(members)`；12 轮预期序列 **`[2,2,4,4,4,4,4,2,2,2,2,2]`**（up 在第 3 轮起生效，down 在第 8 轮起生效），精确相等；**同时保留** `rl_publication` 检查：缩容事务之后的下一次全量发布的 `sync/publication_members` 恰为 2 个成员。两项都满足才通过（`judge_inject.py e1a_c`）。(a)(b)(d)(e)(f)(g) 与 E1-E 不变（用 `analyze_e1a.py`，池 8 卡、trainer G0–G3）。
+  2. **E1-B**：终态必须 `REBUILT_OLD` 且 `cause=payload_mismatch`，**且**存在 `test_injection.applied=true`、目标成员（c2、c3）存在；否则 **测试无效**；`RECOVERY_REQUIRED`/无终态判不通过。**(a)** 只在 `test_hold` 窗口（`stage=end` 记录的 `[start_ts,end_ts]`）内采样，窗口内 ≥3 个样本，新 worker URL 全程 in-flight=0；无完成的 hold 或样本不足判测试无效。(b)(c)(d) 其余内容不变。
+  3. **watchdog**：先要求 journal `classification=FIRED_ON_BLOCKED_UPDATE`、`injection_reached=true` 且有 `test_injection(kind=block_update, applied=true)` 带 `reached_ts`；`INJECTION_NOT_REACHED`/`FIRED_AFTER_BLOCK_RELEASED` 判测试无效；有效时 (1)–(5) 与 `analyze_wd.py` 不变。
+  4. **A4b**：用注入的 tool-wait 条目（不是请求）；保留 (a) QUIESCING 的 rollout_id 为请求后的下一边界，(b) 终态 CANCELLED、cordon 的 cell uncordon、路由成员不变，(c) ledger 无重复消费；无 `test_injection(kind=tool_wait, applied=true)` 判测试无效。
+  5. **判读四态**：每项只给 **通过 / 不通过 / 测试无效 / 未运行**。只有"因预期原因进入预期终态"才算通过（注入真实发生 + 终态原因与预期一致）；终态对但原因不对 = 测试无效或不通过，不算通过。每项 1 个 seed，无数值容差。
+- **顺序**：冒烟（一次 up/down，同时验证 cleanup 闭环）→ E1-A 基线 → E1-A → E1-B → watchdog → E1-D（d123→d4→d5→d6→d7）→ A4b。冒烟不产生验收结论。冒烟失败或遇到新的基础设施阻塞：先查根因，可以修一次小问题再试一次，不原样重跑。
+- **运行后填写位**：`T_start(实测，8×H100)=__ s`（冒烟填，仅用于核对 ≤160 s 的停止条件，UP_DEADLINE_S 固定 240 s）。
+- **额外错误采集（用户要求"充分利用这次测试，收集各种可能的错误"；每次运行都做，与判据无关）**：(1) 各阶段耗时（`n2run.sh` 现在写 `launch.ts.log` 行级 UTC 时间戳；`scan_run.py` 从其标记行、tape 的 `rl_driver_phase`、journal 的各 phase 与 fork_op 算：sky 开通、镜像/岛启动、首个 generate、每轮间隔、事务各相位、`start_cells`）；(2) router 采样（0.5 s `/worker_inflight`）与 nvidia-smi compute-apps（2 s）；(3) 岛上 learner/driver 的完整 stderr（launcher 流式日志 `launch.log` 全量保存，另每 ~3 min 拉 `/tmp/ray/session_latest/logs`，`diag_pull.sh`）；(4) 卡住（tape 240 s 无新事件）时 py-spy dump（岛上没有则尝试一次 `pip install py-spy`；ptrace 不可用则记录）；(5) 每 ~45 s 一次 nvidia-smi 全量与进程表快照；(6) dmesg 里 OOM/Xid（容器内通常无权读，记录"不可读"）；(7) sky 开通日志与 launcher 日志。运行结束后 `scan_run.py` 扫全部日志的 WARNING/ERROR/Traceback/超时/重试/OOM/Xid/SIGKILL 等，按模板归并，写 RESULT.md "观察到的异常"一节：每条来源、频率、是否影响判读、初步判断（产品/测试/平台）。不只记阻塞性错误。
+- **费用**（$0.513/min；上界 = 硬超时×单价，含开通、拉镜像与回收）。**重要的实测**：此前 8×H100 三次运行（a4nbase、a4nx2、a4wd-3）从 launch 到首个 generate 为 1050–1145 s（≈17.5–19 min，开通+拉镜像+Miles 初始化），整次运行 23.6–25.2 min（$12.1–$12.9）；因此**每次运行底价约 $11–12，与轮数关系不大**。下表时长按此估算：
+
+  | 步骤 | 预计时长 | 预计费用 | 硬超时 | 最坏费用 |
+  |---|---|---|---|---|
+  | 1 smoke（3 轮 up+down） | 22 min | $11.3 | 28 min | $14.4 |
+  | 2 base（12 轮） | 24 min | $12.3 | 32 min | $16.4 |
+  | 3 e1a（12 轮，2 事务） | 26 min | $13.3 | 40 min | $20.5 |
+  | 4 e1b（4 轮） | 24 min | $12.3 | 32 min | $16.4 |
+  | 5 wd（4 轮） | 23 min | $11.8 | 32 min | $16.4 |
+  | 6a d123（5 轮，4 事务） | 31 min | $15.9 | 45 min | $23.1 |
+  | 6b d4（4 轮） | 24 min | $12.3 | 32 min | $16.4 |
+  | 6c d5（4 轮） | 24 min | $12.3 | 32 min | $16.4 |
+  | 6d d6（3 轮） | 23 min | $11.8 | 28 min | $14.4 |
+  | 6e d7（5 轮） | 26 min | $13.3 | 35 min | $18.0 |
+  | 7 a4b（4 轮） | 25 min | $12.8 | 32 min | $16.4 |
+  | 合计 | | 约 $139 | | $189 |
+
+  **本批上限 $100**，因此**不可能全部跑完**（预计 6–7 项）。门控（每次启动前，记入 `infra-drafts/gpu-spend.md`）：`本批已实际花费 + 本次最坏费用 + 尚未运行的 A4b 最坏费用（$16.4；A4b 本身不重复预留）≤ $100`，否则跳过该项并标 **未运行（预算）**；被跳过后，后面更便宜且通过门控的项仍可运行；A4b 的预留保证它不被 E1-D 挤掉。按预计费用，预期顺序为 smoke → base → e1a → e1b → wd → d123（边缘）→ d4 → A4b，d5/d6/d7 极可能"未运行（预算）"。冒烟的实测耗时会修正上表后续估算。
+- **回收与硬超时**：沿用 n2run（外层 `timeout <硬超时>`、`sleep <wd_s>; sky down` 独立 watchdog（= 硬超时 + 120 s）、autostop 10 min、20 min 无新事件的进度看门狗）；每次运行结束由 `a8go.sh` 的最终守卫执行 `nstop.sh`（拉证据）→ `cleanup_run.sh`（含 flock 修复；两次复查 60 s 间隔；退出码 0 才算无残留）。最后用 `~/.nebius/bin/nebius --profile michael compute instance list --parent-id project-e00eqrj3pr00622zrgdeyc` 与 `sky status` 复查，不得有本轮前缀（`infra-v2-b1-a8*-20261001-*`）的实例；他人实例（rlf-*、cyberrl-*、yeto-rl84f-* 等）不碰；孤儿安全组 `vpcsecuritygroup-e00a60g9g8z4kdhc83` 为上一批遗留，不处理。启动前用户线程数 < 3000（n2run 已有）。
+- **规则**：新的基础设施阻塞 / 测试无效，先提出原因并修复后才重跑；禁止强推、禁止推 main、不提 PR、不改 tasks.md 勾选状态。
+- **状态**：已登记，未运行。
