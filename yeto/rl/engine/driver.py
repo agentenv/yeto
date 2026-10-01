@@ -912,6 +912,10 @@ class IslandDriver:
 
     def run_round(self, rollout_id: int) -> SyncBoundary:
         self.at_safe_point = False
+        # 2026-10-02 ruling (E1-D ④): an island in RECOVERY_REQUIRED never prepares or trains
+        # another batch; the safe point already raised, this guards the ledger path itself.
+        if self.controller is not None and getattr(self.controller, "recovery_required", None):
+            raise DriverError(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
         started = time.monotonic()
         batch = self._generate(rollout_id)
         rollout_seconds = time.monotonic() - started
