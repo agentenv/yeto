@@ -56,6 +56,11 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
+        # rl-algo-mismatch-correction 6.1: the fake declares every correction
+        # mechanism (OPSM per logprob source) for CPU tests.
+        corrections={"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
+                     "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
+        features={"mismatch_metrics", "rollout_logprobs_as_old"},
         # Mechanism dimensions: the R0 defaults (EngineCapabilities); execution
         # as the Miles adapter declares it (rl-algorithm-capabilities 3.4).
         execution=ExecutionCapabilities(
@@ -63,7 +68,11 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         ),
     )
     values.update(overrides)
-    return EngineCapabilities(**values)
+    # rl-algo-grpo-knobs 8.3: the fake declares what the Miles adapter declares for
+    # 1b (grpo_knobs.G1_DECLARED == the 1b part of MILES_DECLARED).
+    from yeto.rl.algos.grpo_knobs import merge_declared
+
+    return merge_declared(EngineCapabilities(**values))
 
 
 def _sha(data: bytes) -> str:

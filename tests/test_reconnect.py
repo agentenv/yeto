@@ -381,3 +381,30 @@ def test_max_reconnects_exhausted_fails_health_check():
     finally:
         client.close()
         listener.close()
+
+
+def test_syncer_sockets_use_tcp_keepalive():
+    """A silently dropped idle flow (NAT) must surface as a socket error, which
+    test_max_reconnects_exhausted_fails_health_check shows becomes a health failure
+    (rl-infra-spec 2.4 T2R2 s29 hung 30+ min on such a flow)."""
+    import socket as _socket
+
+    from yeto import protocol
+
+    listener = make_listener()
+    port = listener.getsockname()[1]
+    client = SyncerClient(("127.0.0.1", port), LEARNER_ID, make_layout(), dtype=DTYPE_F32,
+                          num_streams=1, connect_timeout=10, max_reconnects=0)
+    try:
+        client.start()
+        accept_group(listener, 1)
+        for sock in client._socks:
+            assert sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE) == 1
+            if hasattr(_socket, "TCP_KEEPIDLE"):
+                assert sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE) == protocol.TCP_KEEPIDLE_S
+                assert sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL) == protocol.TCP_KEEPINTVL_S
+                assert sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT) == protocol.TCP_KEEPCNT
+        assert protocol.TCP_KEEPIDLE_S + protocol.TCP_KEEPINTVL_S * protocol.TCP_KEEPCNT < 300
+    finally:
+        client.close()
+        listener.close()

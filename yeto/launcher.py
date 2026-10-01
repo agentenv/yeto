@@ -20,6 +20,7 @@ Flow:
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -216,6 +217,18 @@ fi
 
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
+
+
+def rl_actor_gpus_per_node(args, spec) -> int:
+    """Trainer GPUs per node: all of them when colocated; under
+    ``--rl-placement fixed-partition`` the rest after rollout and standby."""
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        return spec.gpus_per_node
+    rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
+    standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
+    if rollout < 1:
+        raise ValueError("--rl-placement fixed-partition needs --rollout-num-gpus >= 1")
+    return spec.gpus_per_node - rollout - standby
 
 
 def build_syncer_binary() -> Path:
@@ -835,6 +848,21 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
     ):
         raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
+    steps = getattr(args, "rl_optimizer_steps", 1)
+    if steps is None:
+        steps = 1
+    if type(steps) is not int or steps < 1:
+        raise ValueError(f"--rl-optimizer-steps must be a positive int (got {steps!r})")
+    if steps != 1:
+        if rl_engine != "ports":
+            raise ValueError("--rl-optimizer-steps > 1 only applies to --rl-engine ports")
+        samples = int(args.rollout_batch_size) * int(args.n_samples_per_prompt)
+        if samples % steps:
+            # run_config: rollout_batch_size * n_samples == global_batch * optimizer_steps
+            raise ValueError(
+                f"--rl-optimizer-steps {steps} must divide --rollout-batch-size * "
+                f"--n-samples-per-prompt ({samples}) into equal optimizer batches"
+            )
     if rl_engine != "ports" and getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-single-island-no-sync only applies to --rl-engine ports")
     try:
@@ -912,6 +940,8 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
         flags += f" --rl-placement {shlex.quote(args.rl_placement)}"
     if getattr(args, "rl_standby_gpus", 0):
         flags += f" --rl-standby-gpus {int(args.rl_standby_gpus)}"
+    if getattr(args, "rl_placement", "colocated") == "fixed-partition":
+        flags += f" --rollout-num-gpus {int(args.rollout_num_gpus)}"
     allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
     for name in allowed:
         flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
@@ -1245,6 +1275,18 @@ def _prepare_rl_args(
         if any(spec.total_gpus % args.expert_parallel for spec in specs):
             raise ValueError("RL expert parallelism must divide every island")
     for spec in specs:
+        if getattr(args, "rl_placement", "colocated") == "fixed-partition":
+            # rl-infra-spec 2.1: the node's GPUs are trainer + rollout + standby;
+            # parallel-size checks below apply to the trainer part.
+            actor = rl_actor_gpus_per_node(args, spec)
+            if spec.num_nodes != 1 or actor < 1:
+                raise ValueError(
+                    "--rl-placement fixed-partition needs one node with "
+                    "--rollout-num-gpus + --rl-standby-gpus < GPUs per node"
+                )
+            if int(args.rollout_num_gpus) % args.rollout_num_gpus_per_engine:
+                raise ValueError("--rollout-num-gpus must be a multiple of --rollout-num-gpus-per-engine")
+            spec = dataclasses.replace(spec, gpus_per_node=actor)
         if spec.total_gpus % model_parallel:
             raise ValueError(
                 "RL TP*PP must divide every island GPU world size"
@@ -1797,6 +1839,7 @@ def make_miles_island_task(
             if getattr(args, "rl_single_island_no_sync", False)
             else " --syncer $SYNCER_ADDR"
         )
+        + (" --rl-echo-events" if _echoes_events(args, spec) else "")
         + " --learner-id $LEARNER_ID"
         f" --reward-function {shlex.quote(args.reward_function)}"
         f" --reward-sha256 {shlex.quote(args.reward_sha256)}"
@@ -1811,12 +1854,12 @@ def make_miles_island_task(
         f" --samples-per-group {args.n_samples_per_prompt}"
         f" --over-sampling-batch-size {args.over_sampling_batch_size}"
         f" --rl-distributed-timeout-minutes {args.rl_distributed_timeout_minutes}"
-        " --optimizer-steps 1"
+        f" --optimizer-steps {int(getattr(args, 'rl_optimizer_steps', 1) or 1)}"
         f" --rollout-max-response-len {args.rollout_max_response_len}"
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
         f" --actor-num-nodes {spec.num_nodes}"
-        f" --actor-num-gpus-per-node {spec.gpus_per_node}"
+        f" --actor-num-gpus-per-node {rl_actor_gpus_per_node(args, spec)}"
         f" --tensor-parallel {args.tensor_parallel}"
         f" --pipeline-parallel {args.pipeline_parallel}"
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
@@ -2884,19 +2927,24 @@ def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
             )
 
 
-def _tail_modal(modal_ops, call_id: str, prefix: str) -> int:
+from .rl.event_echo import TapeCollector as EventCollector  # noqa: E402  (no-sync tapes)
+
+
+def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
     """Stream a Modal island's container logs (the Modal twin of _tail)."""
     while True:
         try:
             for line in modal_ops.stream_logs(call_id):
                 print(f"[{prefix}] {str(line).rstrip()}", flush=True)
+                if collector is not None:
+                    collector.feed(line)
             return 0
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
             time.sleep(5)
 
 
-def _tail(cluster: str, job_id: int, prefix: str) -> int:
+def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
     import sky
 
     while True:
@@ -2906,6 +2954,8 @@ def _tail(cluster: str, job_id: int, prefix: str) -> int:
                 if line is None:
                     break
                 print(f"[{prefix}] {line.rstrip()}", flush=True)
+                if collector is not None:
+                    collector.feed(line)
             return 0
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
@@ -3196,6 +3246,115 @@ class _RelaunchAttempt:
     def __init__(self):
         self.result = None  # new job id, or None if provisioning failed
         self.finished = False
+        self.thread = None
+
+
+# Fixed-roster RL islands: consecutive relaunches allowed within one recovery
+# window. A window closes (budget and count reset) once a relaunched island
+# has stayed healthy for RECOVERY_STABLE_S; the time budget counts only the
+# time spent recovering in the window.
+FIXED_ROSTER_MAX_RELAUNCHES = 2
+RECOVERY_STABLE_S = 300.0
+# How long a failed-looking island is given for its rl_learner_finalized record
+# to arrive over the log stream before recovery starts.
+FINALIZE_GRACE_S = 60.0
+# Bound on waiting for an in-flight relaunch before abandoning (so a late
+# sky.launch cannot re-create a cluster after teardown).
+RELAUNCH_JOIN_S = 120.0
+
+
+class RunStalled(RuntimeError):
+    """No island produced an event for the stall timeout (and not all finalized)."""
+
+
+# Exit code when the run stalled (no island event for --rl-stall-timeout).
+RUN_STALLED_EXIT = 6
+DEFAULT_RL_STALL_TIMEOUT_S = 900.0
+
+
+class FixedRosterIslandAbandoned(RuntimeError):
+    """A fixed-roster RL island could not be recovered: the run cannot finish."""
+# run() exit code when a fixed-roster island failed for good (distinct from
+# 2 = artifact not fetchable and 3 = incomplete event tape).
+ISLAND_FAILED_EXIT = 4
+FAILED_RUN_DRAIN_S = 20.0
+# Modal app not confirmed stopped (state stopped, 0 tasks) after teardown.
+TEARDOWN_UNVERIFIED_EXIT = 5
+MODAL_STOP_VERIFY_ATTEMPTS = 5
+MODAL_STOP_VERIFY_DELAY_S = 5.0
+
+
+def _list_modal_apps() -> list[dict]:
+    """Rows of ``modal app list --json`` (app_id, description, state, tasks,
+    created_at, stopped_at). Raises when the listing fails."""
+
+    import subprocess as _subprocess
+
+    proc = _subprocess.run(
+        [sys.executable, "-m", "modal", "app", "list", "--json"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"modal app list failed: {(proc.stdout + proc.stderr).strip() or proc.returncode}")
+    return json.loads(proc.stdout or "[]")
+
+
+def _created_unix(row) -> float | None:
+    from datetime import datetime
+
+    value = row.get("created_at")
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None = None) -> bool:
+    """After stop_app, confirm on the provider that nothing of this app runs.
+
+    ``modal app list`` can hold several rows with the same app name (earlier
+    runs). EVERY row with this name must be stopped with 0 tasks (bounded
+    retries); the rows created at/after this run's start are this run's app,
+    and their app ids are recorded in <run dir>/teardown.json.
+    """
+
+    from . import runs
+
+    checks, confirmed, ours = [], False, []
+    for attempt in range(MODAL_STOP_VERIFY_ATTEMPTS):
+        try:
+            rows = [r for r in _list_modal_apps() if r.get("description") == modal_ops.app_name]
+        except Exception as e:  # noqa: BLE001 - an unreadable listing is "unverified"
+            checks.append(f"error: {e}")
+        else:
+            ours = [r.get("app_id") for r in rows
+                    if run_started_unix is not None
+                    and (_created_unix(r) or 0) >= run_started_unix - 1]
+            summary = [{"app_id": r.get("app_id"), "state": str(r.get("state", "")).lower(),
+                        "tasks": r.get("tasks"), "created_at": r.get("created_at")}
+                       for r in rows]
+            checks.append(summary)
+            if all(s["state"] == "stopped" and int(s["tasks"] or 0) == 0 for s in summary):
+                confirmed = True  # also when no row is listed any more
+                break
+        if attempt + 1 < MODAL_STOP_VERIFY_ATTEMPTS:
+            time.sleep(MODAL_STOP_VERIFY_DELAY_S)
+    record = {"provider": "modal", "app": modal_ops.app_name, "this_run_app_ids": ours,
+              "confirmed_stopped": confirmed, "checks": checks}
+    try:
+        path = runs.run_dir(args.cluster_prefix) / "teardown.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[launcher] could not write the teardown record: {e}", file=sys.stderr)
+    if not confirmed:
+        print(f"[launcher] WARN: Modal app {modal_ops.app_name} not confirmed stopped after "
+              f"{len(checks)} check(s) (every row with this name must be stopped with 0 "
+              f"tasks; last: {checks[-1]}); stop it by hand: modal app stop "
+              f"{modal_ops.app_name} (exit {TEARDOWN_UNVERIFIED_EXIT})", file=sys.stderr)
+    return confirmed
 
 
 class FleetController:
@@ -3247,6 +3406,9 @@ class FleetController:
         syncer_probe=None,
         syncer_restart=None,
         fixed_roster: bool = False,
+        finalized_probe=None,
+        progress_probe=None,
+        stall_timeout: float = 0.0,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -3259,6 +3421,17 @@ class FleetController:
         self.on_relaunch = on_relaunch
         self.thread_cls = thread_cls
         self.fixed_roster = fixed_roster
+        # name -> bool: the island's tape already holds rl_learner_finalized
+        # (training complete); a non-zero exit after that is a shutdown-phase
+        # error, not an island failure.
+        self.finalized_probe = finalized_probe
+        # () -> int: events received from the islands so far (log echo). With
+        # stall_timeout > 0 a run with no new event for that long, and not every
+        # learner finalized, is stalled (e.g. a dead syncer connection).
+        self.progress_probe = progress_probe
+        self.stall_timeout = stall_timeout
+        self._progress = None
+        self._progress_at = None
         self.learners = {
             name: self._make_record(name, task, job_id)
             for name, (task, job_id) in learners.items()
@@ -3269,6 +3442,10 @@ class FleetController:
             self.syncer = None
             self.syncer_probe = syncer_probe
             self.syncer_restart = syncer_restart
+        elif syncer is None:
+            # --rl-single-island-no-sync: no syncer of any kind to supervise.
+            self.syncer = None
+            self.syncer_probe = self.syncer_restart = None
         else:
             syncer_name, syncer_task, syncer_job = syncer
             self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
@@ -3296,12 +3473,13 @@ class FleetController:
         while True:
             if self.syncer is not None:
                 self._poll(self.syncer, is_syncer=True)
-            else:
+            elif self.syncer_probe is not None:
                 self._poll_local_syncer()
             for rec in self.learners.values():
                 self._poll(rec, is_syncer=False)
             if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
                 break
+            self._check_stall()
             self.ops.sleep(self.poll_interval)
         exit_codes = {name: rec["exit"] for name, rec in self.learners.items()}
         print(f"[launcher] learner jobs finished: {exit_codes}")
@@ -3326,6 +3504,10 @@ class FleetController:
         reason = self.syncer_probe()
         if reason is None:
             return
+        if self._all_learners_finalized():
+            print(f"[launcher] syncer: {reason} after every learner finalized; "
+                  "not restarting", file=sys.stderr)
+            return
         if isinstance(reason, _RlStrictFailure):
             raise RuntimeError(f"strict RL syncer failed: {reason.reason}")
         print(
@@ -3345,11 +3527,33 @@ class FleetController:
         if rec["state"] == RUNNING:
             verdict, status = self._probe(rec)
             if verdict is None:
+                recovered_at = rec.get("recovered_at")
+                if recovered_at is not None and self.ops.now() - recovered_at >= RECOVERY_STABLE_S:
+                    # stable again: close the recovery window
+                    rec.pop("recovered_at", None)
+                    rec["failures"] = 0
+                    rec["recovering_s"] = 0.0
                 return  # healthy
             if verdict == "succeeded":
                 rec["state"] = DONE
                 rec["exit"] = str(status)
                 print(f"[launcher] {rec['name']} job finished: {status}")
+            elif is_syncer and self._all_learners_finalized():
+                rec["state"] = DONE  # training is over; nothing to recover
+                rec["exit"] = f"stopped after every learner finalized ({status})"
+                print(f"[launcher] syncer {verdict} after every learner finalized; "
+                      "not recovering", file=sys.stderr)
+            elif not is_syncer and self._finalized(rec):
+                # Training completed (rl_learner_finalized seen): an error while
+                # shutting down (e.g. KeyboardInterrupt in ray.shutdown after
+                # the syncer stopped) is neither a failure nor a reason to
+                # relaunch.
+                rec["state"] = DONE
+                rec["exit"] = f"SUCCEEDED (finalized; shutdown ended as {status})"
+                print(f"[launcher] WARN: {rec['name']} finalized, then {verdict}; "
+                      "counted as succeeded, no recovery", file=sys.stderr)
+            elif not is_syncer and self._await_finalized(rec):
+                return  # grace: the finalized record may still be in the log stream
             else:
                 strict_failure = self._strict_failure(rec)
                 if strict_failure is not None:
@@ -3359,6 +3563,50 @@ class FleetController:
                 self._enter_recovering(rec, verdict, is_syncer)
         elif rec["state"] == RECOVERING:
             self._drive_recovery(rec, is_syncer)
+
+    def _check_stall(self) -> None:
+        if self.progress_probe is None or self.stall_timeout <= 0:
+            return
+        try:
+            progress = int(self.progress_probe())
+        except Exception:
+            return
+        now = self.ops.now()
+        if progress == 0:
+            return  # islands still starting (image pull, model load): no clock yet
+        if self._progress is None or progress != self._progress:
+            self._progress, self._progress_at = progress, now
+            return
+        if now - self._progress_at >= self.stall_timeout and not self._all_learners_finalized():
+            message = (f"no island event for {now - self._progress_at:.0f}s "
+                       f"(stall timeout {self.stall_timeout:.0f}s, {progress} events so far)")
+            print(f"[launcher] ERROR: run stalled: {message}", file=sys.stderr)
+            raise RunStalled(message)
+
+    def _all_learners_finalized(self) -> bool:
+        return self.finalized_probe is not None and all(
+            r["state"] == DONE or self._finalized(r) for r in self.learners.values()
+        )
+
+    def _finalized(self, rec) -> bool:
+        if self.finalized_probe is None:
+            return False
+        try:
+            return bool(self.finalized_probe(rec["name"]))
+        except Exception:
+            return False
+
+    def _await_finalized(self, rec) -> bool:
+        """Hold a failure verdict for FINALIZE_GRACE_S while the log stream may
+        still deliver the island's rl_learner_finalized record."""
+
+        if self.finalized_probe is None:
+            return False
+        first = rec.setdefault("failure_seen_at", self.ops.now())
+        if self.ops.now() - first < FINALIZE_GRACE_S:
+            return True
+        rec.pop("failure_seen_at", None)
+        return False
 
     def _probe(self, rec):
         """Classify a running cluster: (None, status) if healthy,
@@ -3408,6 +3656,11 @@ class FleetController:
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
         rec["state"] = RECOVERING
         rec["failed_at"] = self.ops.now()
+        # Fixed-roster RL: the recovery budget is cumulative over relaunches
+        # (an island that fails again right after every relaunch must not be
+        # relaunched forever while the rest of the fleet waits on the syncer).
+        rec["failures"] = rec.get("failures", 0) + 1  # within this recovery window
+        rec.pop("recovered_at", None)
         print(
             f"[launcher] {rec['name']}: {reason}; starting recovery "
             f"(timeout {self.recover_timeout}s)",
@@ -3425,7 +3678,11 @@ class FleetController:
             if attempt.result is not None:
                 rec["job_id"] = attempt.result
                 rec["state"] = RUNNING
+                # time spent recovering counts toward the window's budget
+                rec["recovering_s"] = rec.get("recovering_s", 0.0) + (
+                    self.ops.now() - rec["failed_at"])
                 rec["failed_at"] = None
+                rec["recovered_at"] = self.ops.now()
                 print(
                     f"[launcher] {rec['name']} recovered: relaunched as job "
                     f"{attempt.result}"
@@ -3438,6 +3695,11 @@ class FleetController:
                 file=sys.stderr,
             )
         elapsed = self.ops.now() - rec["failed_at"]
+        if self.fixed_roster and not is_syncer:
+            elapsed += rec.get("recovering_s", 0.0)  # this window only
+            if rec.get("failures", 0) > FIXED_ROSTER_MAX_RELAUNCHES:
+                self._abandon(rec, elapsed)
+                return
         if self.recover_timeout <= 0 or elapsed > self.recover_timeout:
             if is_syncer:
                 # The syncer is never abandoned: without it no learner can
@@ -3473,20 +3735,32 @@ class FleetController:
                 self._down(name, force=True)
 
         thread = self.thread_cls(target=_run, daemon=True)
+        attempt.thread = thread
         thread.start()
         return attempt
 
     def _abandon(self, rec, elapsed: float) -> None:
         rec["state"] = ABANDONED
         rec["exit"] = f"ABANDONED after {elapsed:.0f}s"
+        attempt = rec.get("attempt")
+        if attempt is not None and attempt.thread is not None and not attempt.finished:
+            # let an in-flight relaunch finish (bounded) so its cluster is torn
+            # down here (the thread downs it when it sees ABANDONED), not left
+            # behind after the process exits
+            attempt.thread.join(RELAUNCH_JOIN_S)
+            if not attempt.finished:
+                print(f"[launcher] WARN: relaunch of {rec['name']} still in flight after "
+                      f"{RELAUNCH_JOIN_S:.0f}s; verify the provider for leftovers",
+                      file=sys.stderr)
         self._down(rec["name"])
         if self.fixed_roster:
             message = (
-                f"fixed-roster learner {rec['name']} could not recover within "
-                f"{self.recover_timeout}s"
+                f"fixed-roster learner {rec['name']} could not recover "
+                f"({rec.get('failures', 0)} failure(s) in the window, "
+                f"{elapsed:.0f}s recovering; timeout {self.recover_timeout}s)"
             )
             print(f"[launcher] ERROR: {message}", file=sys.stderr)
-            raise RuntimeError(message)
+            raise FixedRosterIslandAbandoned(message)
         remaining = sum(1 for r in self.learners.values() if r["state"] != ABANDONED)
         print(
             f"[launcher] LEARNER {rec['name']} ABANDONED after {elapsed:.0f}s "
@@ -3631,6 +3905,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         # Checked first: the flag must never turn an SFT launch syncer-less.
         raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
     prepare_launch_args(args)
+    _write_run_manifest(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
     # (validated in _prepare_ports_algorithm before any cloud work).
@@ -3638,6 +3913,22 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     if no_sync and head_mode:
         raise ValueError("--rl-single-island-no-sync has no syncer; do not run it as a head")
     specs = parse_gpu_spec(args.gpu)
+    no_sync_incomplete: list[str] = []
+    # Islands whose tape travels over the log stream (no fetchable
+    # ~/yeto-output): every Modal RL ports island, and a no-sync island.
+    echo_names = {
+        name for name, spec in zip(learner_cluster_names(args.cluster_prefix, specs), specs)
+        if _echoes_events(args, spec)
+    }
+    events_dir = _no_sync_events_dir(args) if echo_names else None
+    if echo_names:
+        # Refuse to mix runs in one tape, before anything is provisioned.
+        existing = sorted(str(p) for p in events_dir.glob("*.jsonl*")) if events_dir.exists() else []
+        if existing:
+            raise ValueError(
+                f"event tapes already exist for run {args.cluster_prefix!r}: {existing}; "
+                "use another --cluster-prefix or remove them"
+            )
     # External learners (machines sky cannot provision — e.g. Macs running
     # yeto.mlx.learner) get the ids AFTER the cloud learners; the syncer
     # counts them in --learners and its port is already public, so they
@@ -3656,6 +3947,8 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             print(f"[launcher] on_clusters hook failed: {e}", file=sys.stderr)
     clusters: list[str] = []
     controller = None
+    teardown_unverified = False
+    run_started_unix = time.time()  # Modal rows created after this are this run's app
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -3819,12 +4112,28 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         #    past --recover-timeout.
         def spawn_tail(name: str, job_id) -> None:
             label = "syncer" if name == syncer_cluster else name
+            collector = None
+            if name in echo_names:
+                # No syncer tape and (on Modal) no fetchable ~/yeto-output: the
+                # island echoes its tape into the log; rebuild it locally.
+                collector = event_collectors.get(name)
+                if collector is None:  # a relaunch keeps appending to the same tape
+                    collector = event_collectors[name] = EventCollector(
+                        events_dir / f"{name}.jsonl", fresh=False
+                    )
             if modal_ops is not None and name in modal_cfgs:
-                threading.Thread(
-                    target=_tail_modal, args=(modal_ops, job_id, label), daemon=True
-                ).start()
-                return
-            threading.Thread(target=_tail, args=(name, job_id, label), daemon=True).start()
+                thread = threading.Thread(
+                    target=_tail_modal, args=(modal_ops, job_id, label, collector), daemon=True
+                )
+            else:
+                thread = threading.Thread(
+                    target=_tail, args=(name, job_id, label, collector), daemon=True
+                )
+            thread.start()
+            tail_threads.append(thread)
+
+        tail_threads: list[threading.Thread] = []
+        event_collectors: dict[str, EventCollector] = {}
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
@@ -3843,9 +4152,75 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             syncer_probe=local_syncer.probe if head_mode else None,
             syncer_restart=local_syncer.restart if head_mode else None,
             fixed_roster=getattr(args, "training_mode", "sft") == "rl",
+            finalized_probe=(
+                (lambda name: name in event_collectors and event_collectors[name].finalized)
+                if echo_names else None
+            ),
+            progress_probe=(
+                (lambda: sum(c.count for c in list(event_collectors.values())))
+                if echo_names else None
+            ),
+            stall_timeout=float(
+                getattr(args, "rl_stall_timeout", None) or DEFAULT_RL_STALL_TIMEOUT_S
+            ) if getattr(args, "rl_stall_timeout", None) != 0 else 0.0,
         )
-        exit_codes = controller.run()
+        def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
+            if echo_names:
+                # The island's last events (finalization) must be on disk before
+                # teardown: the log streams end when the island exits; bounded wait.
+                deadline = time.monotonic() + limit
+                for thread in tail_threads:
+                    thread.join(max(0.0, deadline - time.monotonic()))
+                # Fail closed: stop writing (a stream still alive after the bounded
+                # wait can no longer touch the tape) and mark unfinalized tapes.
+                for name, collector in event_collectors.items():
+                    complete = collector.close()
+                    print(
+                        f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
+                        f"{collector.discarded} malformed prefixed line(s) discarded"
+                    )
+                    if not complete:
+                        no_sync_incomplete.append(name)
+                        print(
+                            f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
+                            f"record; marked {collector.incomplete_marker}",
+                            file=sys.stderr,
+                        )
+                for name in sorted(echo_names):
+                    if name not in event_collectors:  # never streamed: nothing received
+                        no_sync_incomplete.append(name)
+                        EventCollector(events_dir / f"{name}.jsonl", fresh=False).close()
+
+        try:
+            exit_codes = controller.run()
+        except RunStalled as error:
+            print(f"[launcher] ERROR: {error}; stopping the run (exit {RUN_STALLED_EXIT})",
+                  file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return RUN_STALLED_EXIT
+        except FixedRosterIslandAbandoned as error:
+            # A fixed-roster island failed for good: the run cannot finish.
+            # Secure the tapes (bounded), then the finally block tears every
+            # recorded resource down. Other controller errors (strict syncer /
+            # strict RL job failure, all learners abandoned, bugs) propagate.
+            print(f"[launcher] ERROR: {error}; stopping the run (exit "
+                  f"{ISLAND_FAILED_EXIT})", file=sys.stderr)
+            # surviving islands still stream (blocked on the syncer): short wait
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            if no_sync_incomplete:
+                print(f"[launcher] event tape incomplete for {no_sync_incomplete} "
+                      "(expected after an island failure)", file=sys.stderr)
+            return ISLAND_FAILED_EXIT
+        drain_tapes()
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
+        if no_sync_incomplete:
+            print(
+                f"[launcher] event tape incomplete for {no_sync_incomplete}; "
+                f"exit {NO_SYNC_INCOMPLETE_EXIT}",
+                file=sys.stderr,
+            )
+            if no_sync:  # nothing else to secure: no syncer checkpoint
+                return NO_SYNC_INCOMPLETE_EXIT
 
         # Secure the artifact BEFORE the finally block tears learners down:
         # fetch ~/yeto-output from the winning learner onto this machine
@@ -3873,6 +4248,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         os.makedirs(local_dest, exist_ok=True)
         if rl_mode and head_mode:
             print(f"[launcher] committed RL checkpoint retained at {local_dest}")
+        elif source in modal_cfgs and no_sync:
+            print(
+                f"[launcher] --rl-single-island-no-sync island ran on Modal ({source}); "
+                "its ~/yeto-output is not fetchable over ssh and there is no syncer "
+                "checkpoint -- use the streamed island log / event tape as the evidence",
+                file=sys.stderr,
+            )
+            return 2
         elif source in modal_cfgs:
             print(
                 f"[launcher] every successful learner ran on Modal ({source}); its "
@@ -3901,7 +4284,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                 print(f"[launcher] upload to {output} failed: {e}; the model "
                       f"remains at {local_dest}", file=sys.stderr)
                 return 2
-        return 1 if failed else 0
+        if failed:
+            return 1
+        # A synced run still fetches/delivers its checkpoint first, then
+        # fails closed on an incomplete island tape.
+        return NO_SYNC_INCOMPLETE_EXIT if no_sync_incomplete else 0
     finally:
         # Clusters the controller already tore down (abandoned learners, or
         # the syncer after a total loss) are skipped — even with --keep.
@@ -3929,6 +4316,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     modal_ops.stop_app()
                 except Exception as e:  # noqa: BLE001
                     print(f"[launcher] Modal app stop failed: {e}", file=sys.stderr)
+                if not _verify_modal_app_stopped(modal_ops, args,
+                                                 run_started_unix=run_started_unix):
+                    teardown_unverified = True
             if unverified:
                 # The head must NOT self-terminate: it is the only thing that
                 # can still reach these orphaned learner clusters via sky.
@@ -3962,3 +4352,115 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     f"head — tear it down with: yeto down {prefix}",
                     flush=True,
                 )
+        if teardown_unverified and sys.exc_info()[0] is None:
+            # the run's own outcome is secondary to a possibly still-running app
+            return TEARDOWN_UNVERIFIED_EXIT  # noqa: B012
+
+
+NO_SYNC_EVENT_DRAIN_S = 120.0
+# no-sync run whose island tape lacks rl_learner_finalized (differs from 2:
+# "artifact not fetchable").
+NO_SYNC_INCOMPLETE_EXIT = 3
+
+
+def _echoes_events(args, spec) -> bool:
+    """Whether this island's tape is echoed to its log and rebuilt locally."""
+
+    return (
+        getattr(args, "training_mode", "sft") == "rl"
+        and getattr(args, "rl_engine", "ports") == "ports"
+    )  # every ports RL island (sky too): rl_learner_finalized tells the launcher
+    # that a later non-zero exit is a shutdown error, not an island failure
+
+
+def _write_run_manifest(args) -> dict | None:
+    """Record the engine pins actually used (launch.log + <run dir>/run_manifest.json)."""
+
+    if getattr(args, "training_mode", "sft") != "rl":
+        return None
+    from . import rl as _rl
+    from . import runs
+
+    engine = getattr(args, "rl_engine", "ports")
+    manifest = {
+        "rl_engine": engine,
+        "rl_image": getattr(args, "rl_image", None),
+        "miles_commit": _rl.MILES_NEXT_COMMIT if engine == "ports" else _rl.MILES_COMMIT,
+        "sglang_commit": getattr(_rl, "SGLANG_NEXT_COMMIT", None) if engine == "ports" else None,
+        "source_sha256": getattr(args, "source_sha256", None),
+        "cluster_prefix": args.cluster_prefix,
+        "written_unix": time.time(),
+    }
+    print(f"[launcher] RL engine {engine}: image {manifest['rl_image']}, "
+          f"miles {manifest['miles_commit']}, sglang {manifest['sglang_commit']}", flush=True)
+    try:
+        path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[launcher] could not write the run manifest: {e}", file=sys.stderr)
+    return manifest
+
+
+def _no_sync_events_dir(args) -> Path:
+    """``<run dir>/events`` (yeto run registry), for --rl-single-island-no-sync."""
+
+    from . import runs
+
+    return runs.run_dir(args.cluster_prefix) / "events"
+
+
+def dry_run_plan(args) -> dict:
+    """``yeto launch --dry-run``: what a launch would request, creating nothing.
+
+    Runs on prepared args (``prepare_launch_args`` already validated the
+    request, including the ports algorithm/capability checks) and builds the
+    island tasks in memory only to read the learner command; no sky/Modal
+    call is made.
+    """
+
+    no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
+    rl = getattr(args, "training_mode", "sft") == "rl"
+    if no_sync and not rl:
+        raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
+    head = getattr(args, "controller", "local") == "head"
+    if no_sync and head:
+        raise ValueError("--rl-single-island-no-sync has no syncer; use --controller local")
+    specs = parse_gpu_spec(args.gpu)
+    external = max(0, getattr(args, "external_learners", 0) or 0)
+    islands = []
+    for learner_id, spec in enumerate(specs):
+        entry = {
+            "learner_id": learner_id,
+            "cloud": spec.cloud,
+            "region": spec.region,
+            "gpu": spec.gpu,
+            "num_nodes": spec.num_nodes,
+            "gpus_per_node": spec.gpus_per_node,
+            "total_gpus": spec.total_gpus,
+        }
+        if rl:
+            task = make_miles_island_task(
+                args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
+            )
+            entry["learner_command"] = next(
+                (line.strip() for line in task.run.splitlines() if "yeto.rl.learner" in line),
+                None,
+            )
+        islands.append(entry)
+    return {
+        "dry_run": True,
+        "training_mode": getattr(args, "training_mode", "sft"),
+        "rl_engine": getattr(args, "rl_engine", None) if rl else None,
+        "controller": "head" if head else "local",
+        "islands": len(specs) + external,
+        "external_learners": external,
+        "total_gpus": sum(s.total_gpus for s in specs),
+        "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
+        "outer_sync": not no_sync,
+        "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
+        "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),
+        "unverified_mechanisms": list(getattr(args, "rl_allow_unverified_mechanism", None) or ()),
+        "clusters": [] if not islands else learner_cluster_names(args.cluster_prefix, specs),
+        "island_requests": islands,
+    }

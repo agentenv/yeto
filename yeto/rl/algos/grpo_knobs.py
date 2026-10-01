@@ -196,6 +196,11 @@ def _reject_stage_params(s) -> str | None:
 def _reject_constant(s) -> str | None:
     constant = s.loss.aggregation == "constant"
     denominator = s.loss.constant_denominator
+    if s.loss.reducer is not None and s.loss.reducer.path != REDUCER_PATH:
+        return (
+            f"loss.reducer {s.loss.reducer.path!r}: the only pg_loss reducer on the ports path is "
+            f"the vendored Dr.GRPO reducer {REDUCER_PATH!r} (with loss.aggregation='constant')"
+        )
     if constant and denominator is None:
         return "loss.aggregation='constant' requires loss.constant_denominator (a finite number > 0)"
     if not constant and denominator is not None:
@@ -444,3 +449,65 @@ register_launch_check("grpo_knobs", _launch_check)
 register_island_check("grpo_knobs_ref_model", island_problems)
 register_gradient_rule("grpo_knobs_overlong_filter", overlong_gradient_rule,
                        mechanism="features:overlong_filter")
+
+
+# --------------------------------------------------------------------------
+# task 8.3: mechanisms whose single-GPU smoke (G1) passed
+# (openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1/g1_report.json).
+# overlong_filter is NOT declared (its hook wiring, 1b-hook.patch, is not merged
+# and it has no G1). Declaring means only "G1 passed", never "improves training".
+# --------------------------------------------------------------------------
+
+G1_EVIDENCE = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1"
+# integ-decl: the only allowed reducer is claimed by the constant-denominator
+# aggregation (P0 register_named_reducer), so declaring loss_aggregations:
+# constant admits it without the generic features:custom_pg_loss_reducer.
+from yeto.rl.engine.algorithm import register_named_reducer  # noqa: E402
+
+# Pinned to the reducer source the drgrpo G1 ran (evidence
+# 2026-09-29-algo1b-g1/out/drgrpo/algorithm_spec.json).
+REDUCER_SOURCE_SHA256 = "253856acaefbea8de936b03ea89bf5c50039719732f21709aa66358f9f78e4ed"
+register_named_reducer(REDUCER_PATH, mechanisms=("loss_aggregations:constant",),
+                       sha256=REDUCER_SOURCE_SHA256)
+
+G1_DECLARED: dict[str, dict[str, frozenset[str]]] = {
+    # G1 run -> mechanisms declared from it (dimension -> names); mirrors the 1b
+    # part of integ-decl MILES_DECLARED (5f56ff9). Only mechanisms shown to take
+    # effect on the GPU. dual_clip is NOT declared (no dual-branch metric).
+    # custom_pg_loss_reducer: P0 register_named_reducer (only the Dr.GRPO reducer).
+    "drgrpo": {"loss_aggregations": frozenset({"constant"})},  # g1 attempt2
+    "kl_k3": {"features": frozenset({"kl_loss_ref_model"}), "kl_placements": frozenset({"loss"})},
+    "entropy": {"features": frozenset({"entropy_bonus"})},
+    "overlong_penalty": {"features": frozenset({"overlong_penalty"}),
+                         "reward_postprocessors": frozenset({"custom_reward_postprocess"})},
+    "g1b_a_r1": {"features": frozenset({"eps_clip"})},  # clipfrac > 0 (window only)
+    "g1c_no_std": {"features": frozenset({"no_grpo_std_normalization"})},
+    # The next four are pinned to Miles 0af62f4d (integ-decl images):
+    "g1f_token": {"loss_aggregations": frozenset({"token"})},  # needs the LoRA-bridge fix
+    "g1h_over_sampling": {"features": frozenset({"over_sampling"})},
+    "g1i_overlong_filter": {"features": frozenset({"overlong_filter"})},
+    "g1j_clip_higher": {"features": frozenset({"clip_higher"})},  # run on 0394715, clip path unchanged
+}
+
+
+
+def declared_mechanisms() -> dict[str, frozenset[str]]:
+    """Union of G1_DECLARED per dimension (to merge into the engine declaration)."""
+
+    out: dict[str, set[str]] = {}
+    for dims in G1_DECLARED.values():
+        for dim, names in dims.items():
+            out.setdefault(dim, set()).update(names)
+    return {d: frozenset(n) for d, n in out.items()}
+
+
+def merge_declared(capabilities):
+    """``capabilities`` with the G1-declared mechanisms added (union per dimension)."""
+
+    import dataclasses
+
+    extra = declared_mechanisms()
+    if not extra:
+        return capabilities
+    return dataclasses.replace(capabilities, **{
+        dim: frozenset(getattr(capabilities, dim)) | names for dim, names in extra.items()})

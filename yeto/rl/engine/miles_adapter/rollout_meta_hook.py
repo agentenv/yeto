@@ -45,6 +45,57 @@ DEFAULT_SINK = f"ray:{DEFAULT_SINK_ACTOR}"
 METADATA_SCHEMA = "yeto-rollout-meta-v1"
 _TRAINED_ATTR = "_yeto_trained_group_keys"
 _BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
+# Per-round algorithm counters reported by rollout-side algorithm code AFTER
+# the all-samples hook ran (e.g. the rl-algo-seq-and-adv reward dispatcher's
+# non-zero advantage count, computed in reward post-processing). They travel
+# as a separate sink record keyed by rollout_id and are merged into that
+# rollout's metadata by the driver-side reader, so they are never attributed
+# to the next round.
+ROUND_META_SCHEMA = "yeto-rl-round-metadata-v1"
+ROUND_METADATA_KEYS = frozenset({"nonzero_advantages"})
+
+
+def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:
+    """The training round of the rollout being processed.
+
+    Authoritative source: the policy token the driver published for this
+    rollout (``yeto:<rollout_id>:<hash>``). ``Sample.rollout_id`` is NOT used
+    when a token exists: in multi-segment agentic rollouts it is a trajectory
+    key (Miles ``agentic_tool_call.py``), not the round. Without a token (unit
+    fixtures, legacy) the first sample's ``rollout_id`` is the fallback.
+    """
+    try:
+        token = current_policy_token(sink)
+    except ImportError:  # no Ray in this process (unit fixtures): no published token
+        token = None
+    if token:
+        from yeto.rl.core import parse_policy_snapshot_token
+
+        return parse_policy_snapshot_token(token)[0]
+    return next(
+        (s.rollout_id for s in samples if getattr(s, "rollout_id", None) is not None), None
+    )
+
+
+def record_round_metadata(
+    args: Any, samples_or_rollout_id: Any, *, sink: str | None = None, **counts: int
+) -> None:
+    """Rollout side: report this rollout's per-round counters (call once per rollout)."""
+
+    del args
+    unknown = sorted(set(counts) - ROUND_METADATA_KEYS)
+    if unknown:
+        raise RuntimeError(f"unknown per-round metadata keys {unknown}")
+    for key, value in counts.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"per-round metadata {key} must be a non-negative int")
+    if isinstance(samples_or_rollout_id, int) and not isinstance(samples_or_rollout_id, bool):
+        rollout_id = samples_or_rollout_id
+    else:
+        rollout_id = current_round_id(_flat(samples_or_rollout_id), sink)
+    if rollout_id is None:
+        raise RuntimeError("per-round metadata needs the rollout id")
+    put_to_sink({"schema": ROUND_META_SCHEMA, "rollout_id": int(rollout_id), **counts}, sink)
 POLICY_TOKEN_FILE = "policy-token"
 _REUSABLE_STATUSES = frozenset({"completed", "truncated"})
 
@@ -64,8 +115,21 @@ def _group_key(group: Sequence[Any]) -> tuple[Any, ...]:
 
 
 def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
-    """``--rollout-sample-filter-path`` hook: remember the kept groups (no-op filter)."""
+    """``--rollout-sample-filter-path`` hook: remember the kept groups.
 
+    Shared by rl-algo-grpo-knobs (sample filters, D7) and the rl-infra-spec
+    3.6 ledger (alignment A2/F5). Spec-selected sample filters run first
+    (``yeto.rl.algos.sample_filters``: overlong filter sets
+    ``remove_sample=True`` on truncated samples; default config: untouched).
+    Filtered samples are the ledger's terminal ``filtered``. Over-sampling
+    leaves no reusable remainder: Miles does not return surplus kept groups
+    to its buffer (``sglang_rollout.py:505-510``); only samples aborted under
+    ``--partial-rollout`` go back.
+    """
+
+    from yeto.rl.algos.sample_filters import apply_sample_filters
+
+    apply_sample_filters(args, data)
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
 
 
@@ -126,13 +190,20 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
     }
 
 
-def build_metadata(args: Any, all_samples: Iterable[Sequence[Any]]) -> dict[str, Any]:
+def build_metadata(
+    args: Any, all_samples: Iterable[Sequence[Any]], sink: str | None = None
+) -> dict[str, Any]:
     trained = getattr(args, _TRAINED_ATTR, None)
     if trained is None:
         raise RuntimeError(
             "rollout metadata hook ran without record_trained_groups; "
             "--rollout-sample-filter-path must be the yeto recorder"
         )
+    from yeto.rl.algos.sample_filters import group_filtered_samples, metadata_fields
+
+    extra = metadata_fields(args)
+    sample_filter_counts = extra.get("filtered_samples")
+    tool_wait = 0.0
     rollout_id = None
     groups, filtered, aborted = [], 0, 0
     for group in all_samples:
@@ -140,14 +211,15 @@ def build_metadata(args: Any, all_samples: Iterable[Sequence[Any]]) -> dict[str,
         if not samples:
             continue
         if rollout_id is None:
-            rollout_id = next(
-                (s.rollout_id for s in samples if getattr(s, "rollout_id", None) is not None),
-                None,
-            )
+            rollout_id = current_round_id(samples, sink)
         record = group_record(args, group)
+        tool_wait += sum(float(getattr(x, "non_generation_time", 0.0) or 0.0) for x in samples)
         aborted += int(record.pop("aborted"))
         key = tuple(record.pop("_key"))
         if key in trained:
+            if sample_filter_counts:
+                # terminal ledger state ``filtered`` (alignment A2/F5)
+                record["filtered_samples"] = group_filtered_samples(group)
             groups.append(record)
         else:
             filtered += 1
@@ -156,7 +228,7 @@ def build_metadata(args: Any, all_samples: Iterable[Sequence[Any]]) -> dict[str,
             f"trained groups ({len(trained)}) not all present in all_samples ({len(groups)} matched)"
         )
     groups.sort(key=lambda g: g["group_id"])
-    return {
+    payload = {
         "schema": METADATA_SCHEMA,
         "rollout_id": rollout_id,
         "groups": groups,
@@ -166,7 +238,14 @@ def build_metadata(args: Any, all_samples: Iterable[Sequence[Any]]) -> dict[str,
         "trained_sample_indices": sorted(
             int(i[1:]) for g in groups for i in g["sample_ids"] if i[1:].lstrip("-").isdigit()
         ),
+        **extra,
     }
+    if tool_wait > 0:
+        # 1.7: time trajectories spent outside generation (tool calls), summed
+        # over every generated sample (Miles Sample.non_generation_time).
+        # Absent when no sample reported any: the default key set is unchanged.
+        payload["tool_wait_seconds"] = tool_wait
+    return payload
 
 
 # --------------------------------------------------------------------------
@@ -195,7 +274,8 @@ def put_to_sink(payload: dict[str, Any], sink: str | None = None) -> None:
         directory = Path(target)
         directory.mkdir(parents=True, exist_ok=True)
         rid = payload.get("rollout_id")
-        name = f"rollout-{rid if rid is not None else 'latest'}.json"
+        prefix = "round" if payload.get("schema") == ROUND_META_SCHEMA else "rollout"
+        name = f"{prefix}-{rid if rid is not None else 'latest'}.json"
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(encoded)
@@ -271,15 +351,51 @@ def policy_buffer_filter(args: Any, _rollout_id: Any, buffer: list, num_samples:
     return selected
 
 
+_OFFSET_ATTR = "_yeto_data_source_offset"
+
+
+def submitted_groups(args: Any, data_source: Any) -> int | None:
+    """Prompt groups drawn from the data source this rollout (over-sampling included).
+
+    Miles ``generate_rollout`` submits ``over_sampling_batch_size`` groups at a
+    time and aborts the ones still in flight once enough are accepted; those
+    never reach ``all_samples``. The drawn count is the advance of the data
+    source's ``sample_offset`` since the previous rollout (first rollout:
+    unknown; an epoch wrap-around or a buffer source: unknown -> None).
+    """
+    source = getattr(data_source, "__self__", data_source)
+    offset = getattr(source, "sample_offset", None)
+    if not isinstance(offset, int) or getattr(source, "buffer", None):
+        setattr(args, _OFFSET_ATTR, offset if isinstance(offset, int) else None)
+        return None
+    previous = getattr(args, _OFFSET_ATTR, None)
+    setattr(args, _OFFSET_ATTR, offset)
+    if not isinstance(previous, int) or offset < previous:
+        return None
+    return offset - previous
+
+
 def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = None) -> None:
     """``--rollout-all-samples-process-path`` hook."""
 
     try:
-        put_to_sink(build_metadata(args, all_samples))
+        payload = build_metadata(args, all_samples)
+        submitted = submitted_groups(args, data_source)
+        if submitted is not None:
+            generated = payload["completed"] + payload["filtered"]
+            payload["submitted_groups"] = submitted
+            # submitted but not completed when the batch filled: aborted in
+            # flight (partial_rollout off -> their prompts are consumed, never
+            # trained: terminal, A2/F5 'filtered' with reason aborted_in_flight)
+            payload["aborted_in_flight_groups"] = max(0, submitted - generated)
+        put_to_sink(payload)
     finally:
         # Reset per-rollout state: the bounded filter keys its memo on
         # ``yeto_rl_policy_version`` which legacy advanced per round; here the
         # rollout boundary is the reset point.
+        from yeto.rl.algos.sample_filters import reset as _reset_sample_filters
+
+        _reset_sample_filters(args)
         for attr in (_TRAINED_ATTR, _BOUNDED_FILTER_STATE_ATTR):
             if hasattr(args, attr):
                 setattr(args, attr, None)

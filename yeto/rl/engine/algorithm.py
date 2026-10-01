@@ -101,6 +101,28 @@ def valid_masked_fraction(value: Any) -> float | None:
     return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
 
 
+# Settings an estimator requires (by the rejection matrix or upstream Miles)
+# are part of that estimator's mechanism, not separately declared features:
+# GSPO's explicit clip range (sequence_ratio_without_clip) and the rpp
+# family's advantage normalization (rpp_requires_whiten). Decision: main
+# agent, rl-infra-spec alignment §7b (may be overridden by the user).
+ESTIMATOR_COMPANIONS: dict[str, frozenset[tuple[str, str]]] = {
+    "gspo": frozenset({("features", "eps_clip"), ("features", "clip_higher")}),
+    "reinforce_plus_plus": frozenset({("features", "whiten_advantages")}),
+    "reinforce_plus_plus_baseline": frozenset({("features", "whiten_advantages")}),
+}
+
+
+# Same principle for corrections: mechanisms that make Miles set use_tis
+# already produce the mismatch metrics (losses.py:233/386: get_mismatch_metrics
+# or use_tis), so --get-mismatch-metrics changes nothing there and is claimed
+# by them. Main-agent decision, alignment §7b (may be overridden by the user).
+CORRECTION_COMPANIONS: dict[tuple[str, str], frozenset[tuple[str, str]]] = {
+    ("corrections", name): frozenset({("features", "mismatch_metrics")})
+    for name in ("tis", "icepop", "mis_mask", "mismatch_observe")
+}
+
+
 class AlgorithmSpecError(ValueError):
     """An algorithm description is malformed or unsupported."""
 
@@ -265,6 +287,10 @@ class FieldDef:
     default: Any
     parse: Callable[[str, Any], Any]  # (field path, raw) -> normalized value
     to_json: Callable[[Any], Any] = lambda value: value
+    # When it returns True for the group, the value is kept in the canonical
+    # JSON even if it equals the default (a semantic choice that must be
+    # explicit in the identity whenever it applies, e.g. OPSM's pi_old source).
+    always_emit: Callable[[Any], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -282,11 +308,16 @@ class MechanismDef:
 _FIELDS: dict[str, dict[str, FieldDef]] = {}
 _MECHANISMS: dict[tuple[str, str], MechanismDef] = {}
 _REJECTIONS: dict[str, Callable[["AlgorithmSpec"], str | None]] = {}
+# correction.function paths that have their own mechanism name (see
+# register_named_correction_function); they no longer require 'custom'.
+# path -> the corrections mechanisms that claim it (the path's own detectors)
+NAMED_CORRECTION_FUNCTIONS: dict[str, frozenset[str]] = {}
 
 
 def register_field(group: str, name: str, *, default: Any,
                    parse: Callable[[str, Any], Any],
-                   to_json: Callable[[Any], Any] | None = None) -> FieldDef:
+                   to_json: Callable[[Any], Any] | None = None,
+                   always_emit: Callable[[Any], bool] | None = None) -> FieldDef:
     if group not in _GROUPS:
         raise ValueError(f"unknown spec group {group!r}; one of {sorted(_GROUPS)}")
     core = {f.name for f in fields(_GROUPS[group])}
@@ -296,7 +327,8 @@ def register_field(group: str, name: str, *, default: Any,
         hash(default)
     except TypeError as exc:
         raise ValueError(f"field {group}.{name}: default must be hashable") from exc
-    definition = FieldDef(group, name, default, parse, to_json or (lambda value: value))
+    definition = FieldDef(group, name, default, parse, to_json or (lambda value: value),
+                          always_emit)
     _FIELDS.setdefault(group, {})[name] = definition
     return definition
 
@@ -337,6 +369,65 @@ def _owned_plugin(path: str) -> bool:
 
     module = path.rpartition(".")[0]
     return module in _PIPELINE_PLUGIN_MODULES or module in EXTENSION_MODULES
+
+
+def register_named_correction_function(path: str, *, mechanisms: Iterable[str]) -> None:
+    """``path`` is declared by its own correction mechanisms, not 'custom'.
+
+    The exemption from ``corrections:custom`` applies only while one of the
+    path's OWN mechanisms (``mechanisms``, corrections dimension) detects the
+    spec, so a named path can never escape the capability check through
+    another mechanism's detector; its source identity stays covered by the
+    PluginRef hash.
+    """
+
+    mechanisms = frozenset(mechanisms)
+    if not mechanisms:
+        raise ValueError(f"named correction function {path!r} needs its mechanism name(s)")
+
+    if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
+        raise ValueError(
+            f"named correction function {path!r} must be in {sorted(PLUGIN_NAMESPACES)} "
+            "(Miles built-ins such as icepop_function are named too; the source "
+            "hash of the PluginRef still pins them)"
+        )
+    NAMED_CORRECTION_FUNCTIONS[path] = NAMED_CORRECTION_FUNCTIONS.get(path, frozenset()) | mechanisms
+
+
+# reducer path -> (the "dimension:name" mechanisms that claim it, pinned
+# source sha256 or None)
+NAMED_REDUCERS: dict[str, tuple[frozenset[str], str | None]] = {}
+
+
+def register_named_reducer(path: str, *, mechanisms: Iterable[str],
+                           sha256: str | None = None) -> None:
+    """``path`` (a pg_loss reducer) is claimed by its own mechanisms.
+
+    While one of ``mechanisms`` detects a spec using this reducer -- and, when
+    ``sha256`` is given, the spec's PluginRef pins exactly that source (the
+    one the declaration's evidence ran) -- the generic
+    ``features:custom_pg_loss_reducer`` is not required. Any other reducer, or
+    another source of this one, still requires it.
+    """
+
+    mechanisms = frozenset(mechanisms)
+    if not mechanisms or any(":" not in m for m in mechanisms):
+        raise ValueError(f"named reducer {path!r} needs 'dimension:name' mechanism(s)")
+    if not any(path.startswith(prefix) for prefix in PLUGIN_NAMESPACES):
+        raise ValueError(f"named reducer {path!r} must be in {sorted(PLUGIN_NAMESPACES)}")
+    old, pinned = NAMED_REDUCERS.get(path, (frozenset(), None))
+    if pinned is not None and sha256 is not None and pinned != sha256:
+        raise ValueError(f"named reducer {path!r} already pinned to {pinned}")
+    NAMED_REDUCERS[path] = (old | mechanisms, sha256 or pinned)
+
+
+def _named_reducer_claimed(spec: "AlgorithmSpec") -> bool:
+    owners, pinned = NAMED_REDUCERS.get(spec.loss.reducer.path, (frozenset(), None))
+    if pinned is not None and spec.loss.reducer.sha256 != pinned:
+        return False
+    return any(
+        f"{m.dimension}:{m.name}" in owners and m.detect(spec) for m in registered_mechanisms()
+    )
 
 
 def register_rejection(name: str, check: Callable[["AlgorithmSpec"], str | None]) -> None:
@@ -511,8 +602,10 @@ class _Group:
                 f"unknown {self.GROUP} fields: {[f'{self.GROUP}.{u}' for u in unknown]}"
             )
         normalized = []
-        for name in sorted(raw):
-            value = definitions[name].parse(f"{self.GROUP}.{name}", raw[name])
+        for name in sorted(set(raw) | set(definitions)):
+            definition = definitions[name]
+            value = definition.parse(f"{self.GROUP}.{name}", raw[name]) if name in raw \
+                else definition.default
             try:
                 hash(value)
             except TypeError:
@@ -520,7 +613,8 @@ class _Group:
                     f"{self.GROUP}.{name}: the registered parser returned an unhashable "
                     f"{type(value).__name__} (return tuples / frozen values)"
                 ) from None
-            if value != definitions[name].default:
+            forced = definition.always_emit is not None and definition.always_emit(self)
+            if value != definition.default or forced:
                 normalized.append((name, value))
         object.__setattr__(self, "ext", tuple(normalized))
 
@@ -672,8 +766,11 @@ class CorrectionSpec(_Group):
             raise AlgorithmSpecError(
                 "correction.tis_clip/tis_clip_low require correction.method tis or custom"
             )
-        if self.method != "opsm" and self.opsm_delta is not None:
-            raise AlgorithmSpecError("correction.opsm_delta requires correction.method='opsm'")
+        if self.method == "none" and self.opsm_delta is not None:
+            raise AlgorithmSpecError(
+                "correction.opsm_delta requires correction.method 'opsm' (OPSM alone) or "
+                "'tis'/'custom' (OPSM combined with an importance-weighting correction)"
+            )
         if self.method == "opsm" and self.opsm_delta is None:
             raise AlgorithmSpecError("correction.opsm_delta is required for correction.method='opsm'")
         if self.method == "tis" and (self.tis_clip is None or self.tis_clip_low is None):
@@ -1002,11 +1099,19 @@ class AlgorithmSpec:
 
     # -- derived (design D4/D6) ----------------------------------------------
     def required_mechanisms(self) -> frozenset[tuple[str, str]]:
-        """(dimension, mechanism) pairs the engine must declare."""
+        """(dimension, mechanism) pairs the engine must declare.
 
-        return frozenset(
-            (m.dimension, m.name) for m in registered_mechanisms() if m.detect(self)
-        )
+        Settings an estimator mandates (:data:`ESTIMATOR_COMPANIONS`) are
+        claimed by that estimator's mechanism in this combination only; the
+        same setting under another estimator is its own mechanism.
+        """
+
+        required = {(m.dimension, m.name) for m in registered_mechanisms() if m.detect(self)}
+        required -= ESTIMATOR_COMPANIONS.get(self.advantage.estimator, frozenset())
+        for claimant, companions in CORRECTION_COMPANIONS.items():
+            if claimant in required:
+                required -= companions
+        return frozenset(required)
 
     def _mechanism_defs(self) -> list[MechanismDef]:
         return [m for m in registered_mechanisms() if m.detect(self)]
@@ -1146,9 +1251,23 @@ def _builtin_mechanisms() -> None:
     for placement in KL_PLACEMENTS:
         register_mechanism("kl_placements", placement, lambda s, p=placement: s.kl.placement == p)
     for method in CORRECTION_METHODS:
+        if method in ("opsm", "custom"):
+            continue
         register_mechanism(
             "corrections", method, lambda s, m=method: s.correction.method == m
         )
+    # OPSM alone (method='opsm') or combined with tis/custom (opsm_delta set).
+    register_mechanism("corrections", "opsm", lambda s: s.correction.opsm_delta is not None)
+    # A custom function that a follow-up change registered under its own
+    # mechanism name is declared under that name, not as generic 'custom'.
+    register_mechanism(
+        "corrections", "custom",
+        lambda s: s.correction.method == "custom"
+        and s.correction.function is not None
+        and not (
+            _named_correction_detected(s)
+        ),
+    )
     register_mechanism(
         "reward_postprocessors", "custom_reward_postprocess",
         lambda s: s.advantage.reward_postprocess is not None,
@@ -1161,7 +1280,8 @@ def _builtin_mechanisms() -> None:
         "eps_clip": lambda s: s.loss.eps_clip is not None,
         "clip_higher": lambda s: s.loss.eps_clip_high is not None,
         "dual_clip": lambda s: s.loss.eps_clip_c is not None,
-        "custom_pg_loss_reducer": lambda s: s.loss.reducer is not None,
+        "custom_pg_loss_reducer": lambda s: s.loss.reducer is not None
+        and not _named_reducer_claimed(s),
         "no_grpo_std_normalization": lambda s: not s.advantage.std_normalization,
         "no_rewards_normalization": lambda s: not s.advantage.rewards_normalization,
         "whiten_advantages": lambda s: s.advantage.whiten,
@@ -1179,6 +1299,20 @@ def _builtin_mechanisms() -> None:
     }
     for name, detect in features.items():
         register_mechanism("features", name, detect)
+
+
+_GENERIC_CORRECTIONS = frozenset(CORRECTION_METHODS) | {"opsm"}
+
+
+def _named_correction_detected(spec: "AlgorithmSpec") -> bool:
+    """One of the function path's own named mechanisms detects the spec."""
+
+    owners = NAMED_CORRECTION_FUNCTIONS.get(spec.correction.function.path, frozenset())
+    return any(
+        m.dimension == "corrections" and m.name in owners
+        and m.name not in _GENERIC_CORRECTIONS and m.detect(spec)
+        for m in registered_mechanisms()
+    )
 
 
 def _reject_reward_kl(s: AlgorithmSpec) -> str | None:

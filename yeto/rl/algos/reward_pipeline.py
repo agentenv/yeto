@@ -368,11 +368,28 @@ def _warn_fallback(args: Any, samples: Sequence[Any]) -> None:
 
 
 def emit_event(args: Any, event: dict[str, Any]) -> None:
+    """Warning log + event tape (when configured) + stdout echo.
+
+    Runs in the Miles rollout process (a Ray actor): on a no-sync Modal island
+    only stdout reaches the launcher, so every event is also printed as a
+    ``yeto.rl.event_echo`` record (``YETO_RL_EVENT <json>``, flushed).
+    """
+
+    import sys
+    import time
+
     logger.warning("%s", json.dumps(event, sort_keys=True))
-    if getattr(args, "yeto_rl_event_tape", None) and getattr(args, "yeto_rl_learner_id", None) is not None:
+    learner = getattr(args, "yeto_rl_learner_id", None)
+    if getattr(args, "yeto_rl_event_tape", None) and learner is not None:
         from yeto.rl.miles import _append_rl_event
 
-        _append_rl_event(args, event)
+        _append_rl_event(args, event)  # tape write; echoed by the writer when enabled
+        return
+    from yeto.rl.event_echo import format_record
+
+    record = {"island_id": int(learner) if learner is not None else None,
+              "time_unix": time.time(), **event}
+    print(format_record(record), file=sys.stdout, flush=True)
 
 
 # --------------------------------------------------------------------------

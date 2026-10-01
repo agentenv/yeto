@@ -266,6 +266,7 @@ def export_rl_checkpoint(
     rl_engine: str = "ports",
     algorithm_spec: Any = None,
     unverified_mechanisms: Sequence[str] = (),
+    event_tape_incomplete: bool = False,
 ) -> CanonicalLoraState:
     """Export the authoritative RL checkpoint as a PEFT adapter.
 
@@ -416,6 +417,8 @@ def export_rl_checkpoint(
         if algorithm is not None:
             provenance["algorithm_spec"] = algorithm.canonical_json()
             provenance["algorithm_spec_sha256"] = algorithm.sha256()
+        if event_tape_incomplete:
+            provenance["event_tape_incomplete"] = True
         if unverified_mechanisms:
             provenance["rl/unverified_mechanisms"] = sorted(set(unverified_mechanisms))
             provenance["contains_unverified_mechanisms"] = True
@@ -487,17 +490,31 @@ def parse_args(argv=None):
             "island tape's rl_engine_selected event (e.g. a --rl-single-island-no-sync run)"
         ),
     )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="with --rl-event-tape: accept an incomplete tape (provenance is marked)",
+    )
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args(argv)
 
 
-def algorithm_from_event_tape(path) -> tuple[str, tuple[str, ...]]:
+def algorithm_from_event_tape(path, *, allow_incomplete: bool = False) -> tuple[str, tuple[str, ...]]:
     """(canonical spec JSON, unverified mechanisms) of one island tape.
 
-    Every ``rl_engine_selected`` event must agree and match its hash.
+    Every ``rl_engine_selected`` event must agree and match its hash. A tape
+    without ``rl_learner_finalized`` (or with a ``.incomplete`` marker from
+    the launcher) is refused unless ``allow_incomplete``.
     """
 
     from .engine.algorithm import AlgorithmSpec
+    from .event_echo import tape_is_complete
+
+    if not allow_incomplete and not tape_is_complete(path):
+        raise ValueError(
+            f"event tape {path} is incomplete (no rl_learner_finalized record or an "
+            ".incomplete marker); pass --allow-incomplete to export it marked as such"
+        )
 
     seen = set()
     for line in Path(path).expanduser().read_text(encoding="utf-8").splitlines():
@@ -521,10 +538,17 @@ def main(argv=None) -> None:
         else None
     )
     unverified = list(args.rl_unverified_mechanism or ())
+    incomplete = False
     if args.rl_event_tape:
         if algorithm_spec is not None or unverified:
             raise SystemExit("--rl-event-tape replaces --rl-algorithm-spec/--rl-unverified-mechanism")
-        algorithm_spec, unverified = algorithm_from_event_tape(args.rl_event_tape)
+        algorithm_spec, unverified = algorithm_from_event_tape(
+            args.rl_event_tape, allow_incomplete=args.allow_incomplete
+        )
+        if args.allow_incomplete:
+            from .event_echo import tape_is_complete
+
+            incomplete = not tape_is_complete(args.rl_event_tape)
     state = export_rl_checkpoint(
         args.checkpoint,
         args.output_dir,
@@ -540,6 +564,7 @@ def main(argv=None) -> None:
         rl_engine=args.rl_engine,
         algorithm_spec=algorithm_spec,
         unverified_mechanisms=unverified,
+        **({"event_tape_incomplete": True} if incomplete else {}),
     )
     if args.sync_preset == "decoupled":
         print(
