@@ -759,3 +759,7 @@
 - 工具/缺陷（均有 CPU 回归测试）：cleanup 闭环（nstop 的 tee 被前缀扫描杀死 → rc 141，已修）、周期性拉取采样小文件包、judge_inject 单位勘误、`scan_run.py`/`diag_pull.sh`/`save8.sh`、集群复用链 `chain8.sh`/`reset_island.sh`/`nstop_item.sh`（真机未验证）。
 - 费用 ≤$60.0（含主 agent 误叫停的链启动 $5.7）；云资源：无（nebius 仅他人实例，sky 无集群；各 run cleanup 退出码 0）。
 - 下一步：等主 agent 给新 SHA；`mkatt8.sh` 在新 SHA 上重取 3/4/5/12 轮指纹并核各开关；`chain8.sh <CP> 60.0 wd:1920 a4b:1200 d123:1800 d4:1200 e1b:1200 ...`（门控逐项）。
+
+### 更新（链 #2，2026-10-01 08:10Z）
+- 代码 6f6dcb9 + 新镜像 sha256:12fcd9e5…（gpu-b1 合并为 a9c1afc）；指纹重取（不变）。链 #2 跑了 wd：**不通过**（kill 路径 id 前缀缺陷，killed=[]；a4s3 的 matches=[] 是同一缺陷）；首次 LoRA 准入即 LORA_UNVERIFIABLE（adapter 惰性加载，新引擎读回只有 226 张量无 lora 键）→ 按规则停链；E1-B 新 SHA 验证、A4b、E1-D 未运行（等待两个修复）。
+- 费用 ≤$77.4（剩 ≈$22.6）；云资源无；cleanup 退出码 0。证据：`evidence/infra-v2-b1/a4-8card-s4/runs/chain2-wd/`，RESULT.md "链 #2"一节。
