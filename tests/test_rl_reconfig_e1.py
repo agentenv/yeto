@@ -838,6 +838,7 @@ def test_engine_discarded_survives_replay(tmp_path):
     b = _B(0, ["g0"])
     b.aborted_in_flight_groups = 2
     led.prepare(b, policy_token="t")
+    assert led.cut_summary()["engine_discarded_groups"] == 2  # before any reopen (T36 fix)
     led.close()
     led = BatchLedger(tmp_path)
     assert led.batch(0)["engine_discarded"] == 2
