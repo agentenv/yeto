@@ -138,7 +138,16 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
                 cell = cell_of(member)
                 infos = ray_mod.get(mgr.get_worker_infos.remote(cell), timeout=timeout_s)
             except Exception as exc:  # noqa: BLE001
-                errors.append({"cell": member, "error": repr(exc)})
+                # the fork does not know the id (declared/mapped wrongly): distinguishable
+                errors.append({"cell": member, "fork_cell": cell, "kind": "unknown_target",
+                               "error": repr(exc)})
+                continue
+            if not infos:
+                # the cell exists but has no live worker actors: nothing to kill means the
+                # blocked step cannot be released by this action -> not resolved (never a
+                # silent killed=[])
+                errors.append({"cell": member, "fork_cell": cell, "kind": "no_workers",
+                               "error": "cell has no live worker actors (not started or already stopped)"})
                 continue
             for info in infos:
                 try:
@@ -150,7 +159,8 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
                     killed.append({"cell": member, "fork_cell": cell, "worker": info.name,
                                    "generation": info.generation})
                 except Exception as exc:  # noqa: BLE001
-                    errors.append({"cell": member, "worker": info.name, "error": repr(exc)})
+                    errors.append({"cell": member, "fork_cell": cell, "worker": info.name,
+                                   "kind": "kill_failed", "error": repr(exc)})
         controller.record_watchdog_action(tx_id, phase=phase, killed=killed, errors=errors)
         if errors:
             # a target the watchdog could not kill keeps the blocked step alive and its

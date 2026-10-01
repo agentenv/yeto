@@ -256,6 +256,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic, TEST ONLY (A4b): the first drain counts an artificial "
                     "tool wait for S seconds (drain timeout -> CANCELLED -> undrain); needs "
                     "--rl-elastic-tool-wait-board")
+    rl.add_argument("--rl-test-inject-undrain-fail", type=int, default=None, metavar="N",
+                    help="--rl-elastic, TEST ONLY (A4b / E1-C): the next N undrain calls fail "
+                    "inside the adapter, so a drain timeout cannot restore the old routing "
+                    "and the island must end in RECOVERY_REQUIRED (never CANCELLED)")
     rl.add_argument("--rl-test-inject-stop-failures", type=int, default=None, metavar="N",
                     help="--rl-elastic, TEST ONLY (3.7 E1-D ③④): the next N fork stop_cells fail "
                     "inside the fork after deregistration (incomplete)")

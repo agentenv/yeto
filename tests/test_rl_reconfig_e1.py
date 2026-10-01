@@ -1027,8 +1027,49 @@ def test_watchdog_unmappable_target_enters_recovery_required_not_silent_wait(tmp
     records = read_journal(tmp_path / "state/reconfig")
     action = next(r for r in records if r["kind"] == "watchdog_action")
     assert action["killed"] == [] and "matches=[]" in action["errors"][0]["error"]
+    assert action["errors"][0]["kind"] == "unknown_target"
     assert ctl.recovery_required and "could not kill" in ctl.recovery_required
     assert not ctl.admission_open
+
+
+def test_watchdog_target_without_live_workers_is_unresolved_not_silent(tmp_path):
+    """A cell the fork knows but with no live worker actors (not started yet / already
+    stopped) cannot release the blocked step by being killed: journaled as kind
+    ``no_workers`` and the island enters RECOVERY_REQUIRED (never a bare killed=[])."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    manager = _FakeManager()
+    infos = dict(manager.infos)
+    manager.get_worker_infos = _Remote(lambda cell: list(infos.get(cell, [])) if cell in ("c2", "c3")
+                                       else (_ for _ in ()).throw(AssertionError(f"cell_id={cell!r} matches=[]")))
+    infos["c3"] = []  # exists, no actors
+    fake_ray = _FakeRay(lambda handle: None)
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=manager, ray_module=fake_ray))
+    gate = threading.Event()
+    slow = publisher.publish_members
+
+    def publish_members(*a, **k):
+        gate.wait(1.5)
+        return slow(*a, **k)
+
+    publisher.publish_members = publish_members
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.2)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    with contextlib.suppress(Exception):
+        driver.run()
+    records = read_journal(tmp_path / "state/reconfig")
+    action = next(r for r in records if r["kind"] == "watchdog_action")
+    assert [k["cell"] for k in action["killed"]] == ["engine:c2"]  # c2 had a worker: killed
+    assert [(e["cell"], e["kind"]) for e in action["errors"]] == [("engine:c3", "no_workers")]
+    assert ctl.recovery_required and "could not kill" in ctl.recovery_required
 
 
 def test_watchdog_outside_start_verify_kills_nothing(tmp_path):

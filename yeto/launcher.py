@@ -955,6 +955,7 @@ _ELASTIC_TEST_FLAGS = (
     ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures"),
     ("rl_test_hold_before_check_s", "--rl-test-hold-before-check-s"),
     ("rl_test_inject_tool_wait_s", "--rl-test-inject-tool-wait-s"),
+    ("rl_test_inject_undrain_fail", "--rl-test-inject-undrain-fail"),
     ("rl_elastic_restart_attempts", "--rl-elastic-restart-attempts"),
 )
 # (attr, flag, env) of the test-only switches exported into the island run
@@ -964,6 +965,8 @@ _ELASTIC_TEST_EXPORTS = (
      "YETO_RL_TEST_HOLD_BEFORE_CHECK_S"),
     ("rl_test_inject_tool_wait_s", "--rl-test-inject-tool-wait-s",
      "YETO_RL_TEST_INJECT_TOOL_WAIT_S"),
+    ("rl_test_inject_undrain_fail", "--rl-test-inject-undrain-fail",
+     "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"),
     ("rl_test_inject_lora_perturb", "--rl-test-inject-lora-perturb",
      "YETO_RL_TEST_INJECT_LORA_PERTURB"),
     ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures",
