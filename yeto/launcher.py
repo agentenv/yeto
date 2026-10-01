@@ -953,11 +953,17 @@ _ELASTIC_TEST_FLAGS = (
     ("rl_test_inject_start_delay_s", "--rl-test-inject-start-delay-s"),
     ("rl_test_inject_update_weights_block_s", "--rl-test-inject-update-weights-block-s"),
     ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures"),
+    ("rl_test_hold_before_check_s", "--rl-test-hold-before-check-s"),
+    ("rl_test_inject_tool_wait_s", "--rl-test-inject-tool-wait-s"),
     ("rl_elastic_restart_attempts", "--rl-elastic-restart-attempts"),
 )
 # (attr, flag, env) of the test-only switches exported into the island run
 # command; each needs --rl-elastic, all are off by default.
 _ELASTIC_TEST_EXPORTS = (
+    ("rl_test_hold_before_check_s", "--rl-test-hold-before-check-s",
+     "YETO_RL_TEST_HOLD_BEFORE_CHECK_S"),
+    ("rl_test_inject_tool_wait_s", "--rl-test-inject-tool-wait-s",
+     "YETO_RL_TEST_INJECT_TOOL_WAIT_S"),
     ("rl_test_inject_lora_perturb", "--rl-test-inject-lora-perturb",
      "YETO_RL_TEST_INJECT_LORA_PERTURB"),
     ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures",
@@ -1109,6 +1115,14 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
               and flag not in given]  # rank 0 is a valid value (E2 cut injections)
     if getattr(args, "rl_elastic_state_dir", None) is not None:
         given.append("--rl-elastic-state-dir")
+    if getattr(args, "rl_test_hold_before_check_s", None) is not None and not any(
+            getattr(args, n, None) not in (None, False)
+            for n, _f, e in _ELASTIC_TEST_EXPORTS if n != "rl_test_hold_before_check_s"):
+        raise ValueError("--rl-test-hold-before-check-s only acts together with another "
+                         "--rl-test-* injection (test-injection mode)")
+    if (getattr(args, "rl_test_inject_tool_wait_s", None) is not None
+            and not getattr(args, "rl_elastic_tool_wait_board", False)):
+        raise ValueError("--rl-test-inject-tool-wait-s needs --rl-elastic-tool-wait-board")
     kill_at = getattr(args, "rl_test_kill_learner_at", None)
     if kill_at is not None and kill_at not in KILL_PHASES:
         raise ValueError(f"--rl-test-kill-learner-at must be one of {list(KILL_PHASES)}")
