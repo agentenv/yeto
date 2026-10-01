@@ -1,0 +1,26 @@
+SBX sb-nUoLZ5WApKx07nm7QdWRCN
+GPU 0: NVIDIA L40S (UUID: GPU-4da51e7a-070f-a795-ffbe-8cf6b54d032f)
+GPU 1: NVIDIA L40S (UUID: GPU-13bfa76f-9ebb-2457-2156-81e24c435e5f)
+GPU_OK
+target/release/yeto-syncer
+Traceback (most recent call last):
+  File "/tmp/lrfix/ctl/sbx.py", line 50, in <module>
+    sb = modal.Sandbox.from_id(sys.argv[2]); open(sys.argv[4], "wb").write(sb.filesystem.read_bytes(sys.argv[3]))
+                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/modal-venv/lib/python3.12/site-packages/modal/sandbox_fs.py", line 302, in read_bytes
+    with translate_exec_errors("read_bytes", remote_path):
+  File "/usr/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/tmp/modal-venv/lib/python3.12/site-packages/modal/_utils/sandbox_fs_utils.py", line 348, in translate_exec_errors
+    raise translate_exec_unexpected_error(operation, remote_path, exc) from None
+modal.exception.SandboxFilesystemError: An unexpected error occurred, please contact support@modal.com
+
+gzip: stdin: unexpected end of file
+tar: Child returned status 1
+tar: Error is not recoverable: exiting now
+cat: /tmp/lrfix/ev2/dec8-legacy/rc: No such file or directory
+copied dec8-legacy rc=
+ALLDONE
+TRAP
+terminated
+DOWN

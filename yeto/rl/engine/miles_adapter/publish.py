@@ -21,6 +21,27 @@ hash inside the policy token and the one ``IslandDriver.publish`` checks).
 (:func:`.rollout.running_members`), intersected with the cells covered by the
 update snapshot, so the driver's "every member acknowledged" check compares
 like with like.
+
+Member publication (rl-infra-spec 3.5, fork M4 + 3.5a mechanism (a)),
+:meth:`MilesPublisher.publish_members`:
+
+1. ``wait_cells_tracked`` for the new members (started by ``add_engines``);
+2. upstream ``update_weights(members=cells, expected_epoch, admit_cordoned=True)``:
+   only these engines load the payload; they become Serving *cordoned* (no
+   router traffic) and every other engine keeps its weights and version;
+3. under the update lock limited to the members, stamp the policy token and
+   read it back (as in the full path);
+4. payload read-back: ``check_weights(checksum)`` over every addressable engine
+   must equal, engine by engine, the per-engine checksum recorded by the last
+   full publication of the same token (the engines that already serve the
+   verified policy); no reference, a different shape or any difference fails
+   closed and the members are never admitted;
+5. ``admit_cells(cells, expected_epoch, expected_weight_version=token)``;
+6. ``start_commit_weight_version(token, expected_epoch)`` ...
+   ``end_commit_weight_version``: under one hold of the controller lock, every
+   Serving engine reports the token at that epoch. The executor's integer
+   weight version (fully-async staleness only) is left to the next full
+   publication.
 """
 
 from __future__ import annotations
@@ -36,7 +57,7 @@ from yeto.rl.contracts import InferencePublicationManifest
 from ..ports import PublicationResult
 from ..trainable_state import TrainableState
 from . import LoopRunner
-from .rollout import member_id, policy_token, running_members
+from .rollout import cells_of, member_id, policy_token, running_members
 
 
 class PublicationError(RuntimeError):
@@ -109,6 +130,10 @@ class MilesPublisher:
         self._runner = runner or LoopRunner()
         self.last_engine_checksums: dict[str, dict[str, Any]] | None = None
         self._published_once = False
+        # (token, per-engine checksum body) of the last full publication whose
+        # engines all reported the same body: the payload reference (3.5).
+        self._reference: tuple[str, dict[str, Any]] | None = None
+        self.track_timeout_s = 600.0
 
     def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
         tensor_hash = state.policy_tensor_hash()
@@ -122,6 +147,10 @@ class MilesPublisher:
         payload_hash, payload_bytes = payload_digest(state)
         members, checksums = self._runner.run(self._publish(token))
         self.last_engine_checksums = checksums
+        bodies = list((checksums or {}).values())
+        self._reference = (
+            (token, bodies[0]) if bodies and all(b == bodies[0] for b in bodies) else None
+        )
         manifest_hash = hashlib.sha256(
             json.dumps(
                 {
@@ -213,3 +242,140 @@ class MilesPublisher:
                 )
             checksums = {ids[i]: dict(sorted(b.items())) for i, b in enumerate(bodies)}
         return members, checksums
+
+
+    # -- member publication (3.5) ---------------------------------------------
+    def publish_members(
+        self,
+        state: TrainableState,
+        members: frozenset[str],
+        *,
+        epoch: int,
+        token_rollout_id: int | None = None,
+    ) -> PublicationResult:
+        if not members:
+            raise PublicationError("member publication needs at least one member")
+        if bool(getattr(self._args, "offload_rollout", False)):
+            raise PublicationError("member publication needs a partitioned rollout (no offload)")
+        tensor_hash = state.policy_tensor_hash()
+        if self._export is not None and self._export().policy_tensor_hash() != tensor_hash:
+            raise PublicationError("trainer weights differ from the state requested for publication")
+        token = policy_token(
+            state.policy_version if token_rollout_id is None else token_rollout_id, tensor_hash
+        )
+        if not self._verify_checksums:
+            raise PublicationError("member publication needs the payload read-back (checksums)")
+        if self._reference is None or self._reference[0] != token:
+            raise PublicationError(
+                f"no verified payload reference for {token}: publish it fully first"
+            )
+        payload_hash, payload_bytes = payload_digest(state)
+        cells = cells_of(members)
+        checksums = self._runner.run(self._publish_members(token, cells, epoch))
+        manifest_hash = hashlib.sha256(
+            json.dumps(
+                {"token": token, "policy_tensor_hash": tensor_hash, "payload_hash": payload_hash,
+                 "members": sorted(members), "epoch": epoch, "engine_checksums": checksums},
+                sort_keys=True, separators=(",", ":"), default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        manifest = InferencePublicationManifest(
+            publication_mode="full",
+            base_policy_version=None,
+            target_policy_version=state.policy_version,
+            target_policy_hash=tensor_hash,
+            target_manifest_hash=manifest_hash,
+            payload_hash=payload_hash,
+            payload_bytes=payload_bytes,
+            complete=True,
+        )
+        return PublicationResult(manifest=manifest, members=frozenset(members))
+
+    def verify_serving_policy(
+        self, *, epoch: int, token_rollout_id: int, state: TrainableState
+    ) -> None:
+        """Every Serving engine reports the policy token at ``epoch`` (locked check)."""
+        token = policy_token(token_rollout_id, state.policy_tensor_hash())
+        self._runner.run(self._commit_version(token, epoch))
+
+    async def _commit_version(self, token: str, epoch: int) -> None:
+        # fork context_lock: start_commit_weight_version is @acquires_lock -- on
+        # failure it has already released the lock itself, so end (which
+        # releases) is called only after a successful start.
+        try:
+            await self._controller.start_commit_weight_version(
+                weight_version=token, expected_epoch=epoch
+            )
+        except Exception as exc:
+            raise PublicationError(f"serving engines do not all report {token}: {exc}") from exc
+        await self._controller.end_commit_weight_version()
+
+    async def _publish_members(
+        self, token: str, cells: list[str], epoch: int
+    ) -> dict[str, Any] | None:
+        update_weights = self._update_weights or _default_update_weights()
+        try:
+            await self._controller.wait_cells_tracked(cells, timeout_seconds=self.track_timeout_s)
+            await update_weights(
+                self._args, self._actor, self._executor, self._controller,
+                members=cells, expected_epoch=epoch, admit_cordoned=True,
+            )
+        except Exception as exc:
+            raise PublicationError(f"member update_weights failed: {exc}",
+                                   frozenset(member_id(c) for c in cells)) from exc
+
+        info = await self._controller.start_update_weights(members=cells, expected_epoch=epoch)
+        ok = False
+        try:
+            engines = list(info.rollout_engines)
+            snapshot = sorted(info.snapshot_cell_id_to_hashes)
+            if snapshot != sorted(cells) or len(engines) != len(cells):
+                raise PublicationError(f"update lock covers {snapshot}, expected {sorted(cells)}")
+            ids = [_engine_id(e, i) for i, e in enumerate(engines)]
+            results = await asyncio.gather(
+                *(e.update_weight_version(token) for e in engines), return_exceptions=True
+            )
+            failed = {ids[i] for i, r in enumerate(results) if isinstance(r, BaseException)}
+            if not failed:
+                versions = await asyncio.gather(
+                    *(e.get_weight_version() for e in engines), return_exceptions=True
+                )
+                failed = {ids[i] for i, v in enumerate(versions)
+                          if isinstance(v, BaseException) or str(v) != token}
+            if failed:
+                raise PublicationError(f"members did not acknowledge {token}: {sorted(failed)}",
+                                       frozenset(failed))
+            ok = True
+        finally:
+            if ok:
+                await self._controller.end_update_weights(
+                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes
+                )
+            else:
+                await self._controller.abort_update_weights()
+
+        checksums = None
+        if self._verify_checksums:
+            raw = await self._controller.check_weights(action="checksum")
+            try:
+                bodies = (self._flatten or _default_flatten())(raw)
+            except AssertionError as exc:
+                raise PublicationError(f"engine weight checksum failed: {exc}") from exc
+            assert self._reference is not None
+            reference = self._reference[1]
+            expected_engines = len(self.last_engine_checksums or {}) + len(cells)
+            if len(bodies) < len(cells) or len(bodies) > expected_engines:
+                raise PublicationError(
+                    f"{len(bodies)} engines reported checksums; expected up to {expected_engines}"
+                )
+            bad = [i for i, body in enumerate(bodies) if dict(sorted(body.items())) != reference]
+            if bad:
+                raise PublicationError(
+                    f"payload read-back differs from the published policy on {len(bad)} engines; "
+                    "new members are not admitted"
+                )
+            checksums = {"engines": len(bodies), "reference_token": token}
+        await self._controller.admit_cells(cells, expected_epoch=epoch,
+                                           expected_weight_version=token)
+        await self._commit_version(token, epoch)
+        return checksums

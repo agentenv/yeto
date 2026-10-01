@@ -823,7 +823,6 @@ class StrictRlBridge:
             "time_unix": time.time(),
             **event,
         }
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
-            )
+        from .event_echo import append_record
+
+        append_record(path, event)  # echoed when YETO_RL_ECHO_EVENTS=1

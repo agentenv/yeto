@@ -33,7 +33,7 @@ from yeto.rl.core import CanonicalLoraState, canonical_state
 from yeto.tensor_io import apply_fragment, pack_fragment, pack_tensor, unpack_fragment
 
 from .algorithm import BOUNDED_NONZERO_STD_FILTER
-from .capabilities import EngineCapabilities
+from .capabilities import EngineCapabilities, ExecutionCapabilities
 from .driver import TrainStepMetrics, policy_token
 from .ports import (
     GroupMetadata,
@@ -56,9 +56,23 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         advantage_estimators={"grpo"},
         dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER},
         execution_modes={"colocated-serial"},
+        # rl-algo-mismatch-correction 6.1: the fake declares every correction
+        # mechanism (OPSM per logprob source) for CPU tests.
+        corrections={"none", "tis", "opsm", "custom", "mismatch_observe", "icepop",
+                     "opsm_trainer", "opsm_rollout", "mis", "mis_mask"},
+        features={"mismatch_metrics", "rollout_logprobs_as_old"},
+        # Mechanism dimensions: the R0 defaults (EngineCapabilities); execution
+        # as the Miles adapter declares it (rl-algorithm-capabilities 3.4).
+        execution=ExecutionCapabilities(
+            critic=False, max_policy_staleness=0, rollout_logprobs=True
+        ),
     )
     values.update(overrides)
-    return EngineCapabilities(**values)
+    # rl-algo-grpo-knobs 8.3: the fake declares what the Miles adapter declares for
+    # 1b (grpo_knobs.G1_DECLARED == the 1b part of MILES_DECLARED).
+    from yeto.rl.algos.grpo_knobs import merge_declared
+
+    return merge_declared(EngineCapabilities(**values))
 
 
 def _sha(data: bytes) -> str:
@@ -83,7 +97,14 @@ class FakeEngine:
     unacked_member_rounds: dict[int, str] = field(default_factory=dict)
     stale_token_rounds: set[int] = field(default_factory=set)
     constant_reward_rounds: set[int] = field(default_factory=set)
+    # Rounds whose trainer reports a masked-token fraction (design D6);
+    # others report none (TrainStepMetrics.masked_fraction stays unset).
+    masked_fraction_rounds: dict[int, float] = field(default_factory=dict)
     grad_norm_reported: bool = True
+    # Rounds whose optimizer step applies LR 0 (gradients flow, parameters
+    # do not move) -- the decayed-to-zero schedule of fix-decoupled-lr-schedule.
+    zero_lr_rounds: set[int] = field(default_factory=set)
+    lr: float = 1e-5
 
     def __post_init__(self) -> None:
         self.tensors = {k: v.detach().clone().float() for k, v in self.tensors.items()}
@@ -182,17 +203,26 @@ class FakeTrainerGroup:
             raise RuntimeError("train step on an offloaded trainer")
         zero = batch.rollout_id in e.zero_grad_rounds
         failed = batch.rollout_id in e.failed_step_rounds
+        applied_lr = 0.0 if batch.rollout_id in e.zero_lr_rounds else e.lr
         norm_sq = 0.0
         if not zero and not failed:
             for name in sorted(e.tensors):
                 delta = e.delta_for(name)
+                norm_sq += float(delta.pow(2).sum())
+                if applied_lr == 0.0:
+                    continue
                 e.tensors[name] = e.tensors[name] + delta
                 e.moments[name] = e.moments[name] + delta.abs()
-                norm_sq += float(delta.pow(2).sum())
             e.scheduler_step += 1
         e._last_metrics = TrainStepMetrics(
             grad_norm=norm_sq**0.5, loss=0.1, pg_loss=0.1, lr=1e-5,
             train_step=batch.rollout_id,
+            applied_lrs=None if failed else (applied_lr,),
+            **(
+                {"masked_fraction": e.masked_fraction_rounds[batch.rollout_id]}
+                if batch.rollout_id in e.masked_fraction_rounds
+                else {}
+            ),
         )
         tokens = sum(g.token_count for g in batch.groups)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
