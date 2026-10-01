@@ -1,7 +1,8 @@
 #!/bin/bash
 # usage: a8go.sh <case> <prefix> <hard_s> <wd_s>        8x H100 on Nebius eu-north1, T4R2S2 <-> T4R4S0 (trainer G0-3, rollout c0,c1 on G4,G5, standby G6/G7 = c2/c3)
-# cases: smoke | base | e1a | e1b | wd | a4b | a4bu | d123 | d2 | d4 | d5 | d6 | d7      (DRY=1: print the launch args + triggers, start nothing)
-# After-hooks (probe_after_term.sh, chain-safe): e1b -> status/stale/oldepoch probes; wd/a4b/a4bu/d123/d4 -> status probe + gpu samples >=90 s after the terminal state.
+# cases: smoke | base | e1a | e1b | wd | a4b | a4bu | a4bc | d123 | d2 | d4 | d5 | d6 | d7      (DRY=1: print the launch args + triggers, start nothing)
+# After-hooks (probe_after_term.sh, chain-safe): e1b -> status/stale/oldepoch probes; wd/a4b/a4bu/a4bc/d123/d4 -> status probe + gpu samples >=90 s after the terminal state.
+# a4bc = a4b + --rl-test-tool-side-effect-log (3.3 X5 (b), SESSION6 §10): the injected tool journals every execution in ~/yeto-rl/elastic-state/side_effects.jsonl; judge_a4bc = judge_a4b + exactly one tool_side_effect per (trajectory, tool call), none after CANCELLED.
 # Starts n2run (launch, --no-island-relaunch --modal-retries 0) + n2inwatch (triggers + router sampler) + selfcheck (+GPU assert 4xL40S, markers) + case helpers + final guard (nstop -> cleanup_run.sh, judge).
 # Required env for some cases:  UP_DEADLINE_S (wd: measured, see gpu-plan 9.22 step 2) | (e1b/a4b pass --rl-test-hold-before-check-s ${HOLD_S:-10} / --rl-test-inject-tool-wait-s 30 directly)
 # Request time: a request submitted at "train" of rollout k executes before generate k+1 (= before round k+2).
@@ -20,6 +21,8 @@ case $C in
          TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4b"; HOOK="2 0";;
   a4bu)  EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30 --rl-test-inject-undrain-fail 1"; STEPS=6; ATTN=6
          TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4bu"; HOOK="2 0";;
+  a4bc)  EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30 --rl-test-tool-side-effect-log"; STEPS=6; ATTN=6
+         TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4bc"; HOOK="2 0";;
   d123)  STEPS=5; ATTN=5; EX="--rl-test-inject-stop-failures 1"
          # standby cells on G6/G7 (c2/c3): kill target GPU 6. up1 ep0->1, dn1 ep1->2, up2 at ep2 (killed -> REBUILT_OLD, stays 2), up3 at ep2
          TRIG="[$(UPB 0 up1 600),$(DNB 1 dn1 600),$(req train 2 up2 T4R4S0 2 600),$(req train 3 up3 T4R4S0 2 600)]"
