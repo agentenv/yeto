@@ -87,6 +87,7 @@ from .overlap import EvalOverlap, EvalStarter, overlap_refusal
 from .ports import (
     Placement,
     PolicyState,
+    PublicationCause,
     Publisher,
     RolloutBatchHandle,
     RolloutPool,
@@ -157,6 +158,12 @@ class RebuildNotStarted(DriverError):
 
 class PublicationError(DriverError):
     """A publication was incomplete or did not match the requested policy."""
+
+    def __init__(self, message: str = "", *, cause: PublicationCause = PublicationCause.OTHER,
+                 engine_ids: Any = ()) -> None:
+        super().__init__(message)
+        self.cause = PublicationCause(cause)
+        self.engine_ids = tuple(sorted(str(e) for e in engine_ids))
 
 
 class PolicyIdentityError(DriverError):
@@ -1059,9 +1066,14 @@ class IslandDriver:
                       error=str(error), config_epoch=self.config_epoch, **eval_due)
             raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
         if result is not None:
+            # the reason of a refusal (REBUILT_OLD: structured publication cause + the
+            # disagreeing engine ids) rides on the tape record
+            outcome = getattr(self.controller, "last_outcome", None) or {}
+            why = ({k: outcome[k] for k in ("error", "cause", "inconsistent_engines")
+                    if k in outcome} if outcome.get("phase") == result else {})
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result=result,
                       config_epoch_from=epoch_before, config_epoch=self.config_epoch,
-                      members=sorted(self.rollout.members()), **eval_due)
+                      members=sorted(self.rollout.members()), **why, **eval_due)
         return result
 
     # -- same-shape trainer rebuild (4.4) --------------------------------------

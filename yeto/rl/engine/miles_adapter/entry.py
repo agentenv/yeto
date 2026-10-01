@@ -536,6 +536,11 @@ def compose_island(
         from .elastic_placement import ElasticPlacement
 
         driver.publisher.perturb_trainer = lora_perturber(driver)  # TEST injection hook only
+        # TEST injection records (test_injection / test_hold) -> journal + tape
+        driver.publisher.event_sink = (
+            lambda event, **f: elastic.controller.record_test_event(driver, event, **f))
+        if hasattr(driver.rollout, "event_sink"):
+            driver.rollout.event_sink = driver.publisher.event_sink
 
         driver.placement = ElasticPlacement(
             driver.placement, pool_gpus=elastic.pool_gpus,

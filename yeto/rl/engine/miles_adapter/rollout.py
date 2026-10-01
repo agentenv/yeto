@@ -91,6 +91,12 @@ INJECT_START_DELAY_ENV = "YETO_RL_TEST_INJECT_START_DELAY_S"
 # inside the fork AFTER deregistration (its engine provider's stop raises), so
 # the fork records ``incomplete``. Unset (default) = no effect.
 INJECT_STOP_FAILURES_ENV = "YETO_RL_TEST_INJECT_STOP_FAILURES"
+# Test-only (A4b): during the FIRST drain of the process an artificial tool-wait
+# entry is put on the ToolWaitBoard and removed again after this many seconds. Longer
+# than the drain budget it makes the drain time out -> CANCELLED -> undrain, with no
+# request touched (the entry is not a request). Unset (default) = no effect.
+INJECT_TOOL_WAIT_ENV = "YETO_RL_TEST_INJECT_TOOL_WAIT_S"
+INJECTED_TOOL_WAIT_ID = "yeto-test-injected-tool-wait"
 
 
 def injected_start_delay(environ: Any = None) -> float | None:
@@ -440,6 +446,12 @@ class MilesRolloutPool:
         if self._stop_failures_left < 0:
             raise ValueError(f"{INJECT_STOP_FAILURES_ENV} must be >= 0")
         self.injected_stop_failures = 0
+        raw_tw = os.environ.get(INJECT_TOOL_WAIT_ENV)
+        self._inject_tool_wait = float(raw_tw) if raw_tw else None
+        if self._inject_tool_wait is not None and not self._inject_tool_wait > 0:
+            raise ValueError(f"{INJECT_TOOL_WAIT_ENV} must be a positive number of seconds")
+        self.injected_tool_waits: list[float] = []
+        self.event_sink: Callable[..., None] | None = None  # test_injection record sink
         # E3 role transfer (4.7): fork RayWorkerManager handle (None = the named
         # actor, looked up on first use), the startup bundle map
         # (bundles.StartupBundles: pool GPU ids <-> startup PG bundles) and
@@ -834,9 +846,51 @@ class MilesRolloutPool:
         (:meth:`undrain` cancels). The router counts engine requests only; a
         trajectory waiting on a tool is counted by yeto (3.3), not here.
         """
+        self._maybe_inject_tool_wait(members)
         timeout = max(0.0, float(deadline) - time.time())
         return bool(self._run(self._controller.drain_cells(cells_of(members),
                                                            timeout_seconds=timeout)))
+
+    def _maybe_inject_tool_wait(self, members: frozenset[str]) -> None:
+        """TEST ONLY (INJECT_TOOL_WAIT_ENV): count one artificial trajectory as waiting on
+        a tool for N seconds, so the drain's tool-wait condition holds that long."""
+        if self._inject_tool_wait is None or self.injected_tool_waits:
+            return
+        import sys
+        import threading
+
+        from ..tool_wait import _call, _resolve
+
+        seconds = self._inject_tool_wait
+        self.injected_tool_waits.append(seconds)
+        applied, error = False, None
+        if self._tool_wait_board is None:
+            error = "no ToolWaitBoard"
+        else:
+            try:
+                _resolve(_call(self._tool_wait_board, "enter", INJECTED_TOOL_WAIT_ID))
+                applied = True
+            except Exception as exc:  # noqa: BLE001 - recorded: applied=false
+                error = repr(exc)
+        print(f"[yeto] TEST INJECTION {INJECT_TOOL_WAIT_ENV}: tool-wait entry for {seconds}s "
+              f"during the drain of {sorted(members)} (applied={applied})",
+              file=sys.stderr, flush=True)
+        if self.event_sink is not None:
+            self.event_sink("test_injection", kind="tool_wait",
+                            target_members=sorted(members), seconds=seconds, applied=applied,
+                            **({"error": error} if error else {}))
+        if applied:
+            board = self._tool_wait_board
+
+            def release() -> None:
+                try:
+                    _resolve(_call(board, "exit", INJECTED_TOOL_WAIT_ID))
+                except Exception:  # noqa: BLE001 - board gone with the run
+                    pass
+
+            timer = threading.Timer(seconds, release)
+            timer.daemon = True
+            timer.start()
 
     def undrain(self, members: frozenset[str]) -> None:
         self._run(self._controller.uncordon_cells(cells_of(members)))
