@@ -213,6 +213,10 @@ def handle_from_metadata(
         completed=int(payload["completed"]),
         aborted=int(payload["aborted"]),
         payload=data_pack,
+        # rollout_meta_hook: trained-group filter drops (terminal). Carried-over
+        # leftovers are not tracked until 3.6/4.1 audit the Miles buffer.
+        filtered=int(payload["filtered"]) if "filtered" in payload else None,
+        carried_over=None,
     )
 
 

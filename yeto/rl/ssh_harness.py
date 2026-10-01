@@ -4235,6 +4235,48 @@ def _event_path(artifacts: Path, learner_id: int) -> Path:
     )
 
 
+def _run_algorithm_provenance(
+    plan: dict[str, Any], artifacts: Path
+) -> tuple[str | None, tuple[str, ...]]:
+    """The ports run's algorithm for export (rl-algorithm-capabilities D9).
+
+    Taken from what the islands actually ran: every island's
+    ``rl_engine_selected`` events must carry one and the same canonical
+    AlgorithmSpec (whose hash matches the recorded one) and the same
+    unverified-mechanism allowances.  Legacy runs record none.
+    """
+
+    if plan.get("rl_engine", "legacy") != "ports":
+        return None, ()
+    from .engine.algorithm import AlgorithmSpec
+
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for learner_id in range(_learner_count(plan)):
+        events = [
+            event
+            for event in _json_lines(_event_path(artifacts, learner_id))
+            if event.get("event") == "rl_engine_selected"
+        ]
+        if not events:
+            raise HarnessError(
+                f"island {learner_id} recorded no rl_engine_selected event; "
+                "cannot export the run's algorithm"
+            )
+        for event in events:
+            spec = event.get("rl/algorithm_spec")
+            digest = event.get("rl/algorithm_spec_sha256")
+            if not isinstance(spec, str) or not isinstance(digest, str):
+                raise HarnessError(f"island {learner_id} algorithm event is incomplete")
+            if AlgorithmSpec.from_dict(json.loads(spec)).sha256() != digest:
+                raise HarnessError(f"island {learner_id} algorithm spec does not match its hash")
+            mechanisms = tuple(sorted(event.get("rl/unverified_mechanisms") or ()))
+            seen.add((spec, digest, mechanisms))
+    if len(seen) != 1:
+        raise HarnessError("islands disagree on the run's algorithm spec")
+    spec, _digest, mechanisms = seen.pop()
+    return spec, mechanisms
+
+
 def _verify_oracle(plan: dict[str, Any], checkpoint, artifacts: Path) -> str:
     rounds = plan["learner"]["global_rounds"]
     roster = list(range(_learner_count(plan)))
@@ -4757,6 +4799,7 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
     if export_dir:
         from .export import export_rl_checkpoint
 
+        algorithm_spec, unverified = _run_algorithm_provenance(plan, artifacts)
         export_rl_checkpoint(
             checkpoint_path,
             Path(export_dir).expanduser(),
@@ -4770,6 +4813,8 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
             pipeline=learner.get("pipeline", 1),
             local_horizon=learner.get("local_horizon", 1),
             rl_engine=plan.get("rl_engine", "legacy"),
+            algorithm_spec=algorithm_spec,
+            unverified_mechanisms=unverified,
         )
         print(f"exported standard PEFT adapter to {Path(export_dir).expanduser()}")
 

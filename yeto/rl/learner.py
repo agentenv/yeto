@@ -53,7 +53,17 @@ def parse_args(argv=None):
     parser.add_argument("--eval-max-prompt-len", type=int, default=None)
     parser.add_argument("--eval-max-response-len", type=int, default=None)
     parser.add_argument("--eval-max-context-len", type=int, default=None)
-    parser.add_argument("--syncer", required=True)
+    # Required unless --rl-single-island-no-sync (checked after parsing).
+    parser.add_argument("--syncer", default=None)
+    parser.add_argument(
+        "--rl-single-island-no-sync",
+        action="store_true",
+        help=(
+            "ports only: one island with no syncer and no outer sync (G1 smoke "
+            "entry for --rl-allow-unverified-mechanism, design D11); refused "
+            "with --syncer, several learners or a non-default sync preset"
+        ),
+    )
     parser.add_argument("--learner-id", type=int, required=True)
     parser.add_argument("--num-learners", type=int, default=1)
     parser.add_argument("--learner-generation", type=int, default=0)
@@ -123,6 +133,12 @@ def parse_args(argv=None):
     parser.add_argument("--expert-parallel", type=int, default=None)
     parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     parser.add_argument("--rollout-num-gpus", type=int, default=None)
+    # rl-infra-spec 2.1 (ports only): LoRA fixed partition + reserved standby
+    # GPUs, read by engine.run_config.resolve_rl_run_config.
+    parser.add_argument(
+        "--rl-placement", choices=["colocated", "fixed-partition"], default="colocated"
+    )
+    parser.add_argument("--rl-standby-gpus", type=int, default=0)
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -159,6 +175,24 @@ def parse_args(argv=None):
         default="ports",
         help="RL engine path (default ports); ports rejects unsupported combinations at startup",
     )
+    # rl-algorithm-capabilities D8/D9/D11 (ports only; refused on legacy).
+    parser.add_argument(
+        "--rl-algorithm-spec",
+        default=None,
+        help="AlgorithmSpec JSON (v1 or v2) for --rl-engine ports",
+    )
+    parser.add_argument(
+        "--rl-expected-algorithm-sha256",
+        default=None,
+        help="algorithm hash the launcher expects every island to build (ports)",
+    )
+    parser.add_argument(
+        "--rl-allow-unverified-mechanism",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="single-island smoke: admit an expressible but undeclared mechanism (ports)",
+    )
     parser.add_argument("--miles-source-sha256", default=None)
     parser.add_argument("--megatron-ref-load", default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -180,7 +214,163 @@ def parse_args(argv=None):
             _require_ports_supported(args)
         except ValueError as error:
             parser.error(str(error))
+    try:
+        _check_single_island_no_sync(args)
+        _check_ports_algorithm_options(
+            args, outer_sync=not getattr(args, "rl_single_island_no_sync", False)
+        )
+    except ValueError as error:
+        parser.error(str(error))
     return args
+
+
+def build_ports_launch(args, run_config, extra_argv=()):
+    """The ports learner's spec -> Miles argv step (design D8).
+
+    ``--rl-algorithm-spec`` (else the legacy CLI, as in R0), then the mapped
+    extra-argv flags are absorbed by the translation; the run config's
+    estimator follows the absorbed spec.
+    """
+
+    import dataclasses
+
+    from .engine.algorithm import resolve_ports_algorithm
+    from .engine.miles_adapter.algorithm_flags import absorb_extra_argv
+    from .engine.miles_adapter.config import translate_run_config
+
+    base_algorithm = resolve_ports_algorithm(args, rl_engine="ports")
+    absorbed, _, _ = absorb_extra_argv(base_algorithm, tuple(extra_argv))
+    run_config = dataclasses.replace(
+        run_config,
+        algorithm=dataclasses.replace(
+            run_config.algorithm, advantage_estimator=absorbed.advantage_estimator
+        ),
+    )
+    return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv))
+
+
+def _check_single_island_no_sync(args) -> None:
+    """``--rl-single-island-no-sync``: explicit, ports-only, one island, no syncer."""
+
+    if not getattr(args, "rl_single_island_no_sync", False):
+        if getattr(args, "syncer", None) is None:
+            raise ValueError("--syncer is required (unless --rl-single-island-no-sync)")
+        return
+    problems = []
+    if getattr(args, "rl_engine", "ports") != "ports":
+        problems.append("--rl-engine legacy")
+    if getattr(args, "syncer", None) is not None:
+        problems.append("--syncer")
+    if int(getattr(args, "num_learners", 1) or 1) != 1:
+        problems.append(f"--num-learners {args.num_learners}")
+    if int(getattr(args, "learner_id", 0)) != 0:
+        problems.append(f"--learner-id {args.learner_id}")
+    if getattr(args, "sync_preset", "strict-avg") != "strict-avg":
+        problems.append(f"--sync-preset {args.sync_preset}")
+    if getattr(args, "initial_adapter", None):
+        problems.append("--initial-adapter")
+    if problems:
+        raise ValueError(
+            "--rl-single-island-no-sync (one ports island, no syncer, no outer sync) "
+            "cannot be combined with: " + ", ".join(problems)
+        )
+
+
+def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
+    """Startup refusal of the ports algorithm options (D8/D11), before any work."""
+
+    from .engine.algorithm import check_unverified_allowance
+
+    rl_engine = getattr(args, "rl_engine", "ports")
+    if rl_engine != "ports" and (
+        getattr(args, "rl_placement", "colocated") != "colocated"
+        or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
+    ):
+        raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
+    if rl_engine != "ports":
+        from .engine.algorithm import resolve_ports_algorithm
+
+        resolve_ports_algorithm(args, rl_engine=rl_engine)  # raises if any is used
+        return
+    # D11 as written: any outer sync refuses the allowance. The learner CLI
+    # always joins a syncer (--syncer is required), so the island count it
+    # receives (--num-learners is not sent to Miles islands) is not relied on.
+    check_unverified_allowance(
+        getattr(args, "rl_allow_unverified_mechanism", None) or (),
+        islands=int(getattr(args, "num_learners", 1) or 1),
+        outer_sync=outer_sync,
+    )
+
+
+def _append_ports_event(args, miles_args, event: dict) -> None:
+    from .miles import _append_rl_event
+
+    miles_args.yeto_rl_event_tape = args.event_tape
+    miles_args.yeto_rl_learner_id = args.learner_id
+    _append_rl_event(miles_args, event)
+
+
+class AlgorithmMismatchError(RuntimeError):
+    """This island's algorithm hash differs from the launcher's expectation."""
+
+
+def verify_ports_algorithm(args, miles_args, launch) -> None:
+    """D9/D11: before the island joins outer sync (no bridge exists yet).
+
+    Plugins are re-hashed and imported; the island's algorithm hash is
+    compared with ``--rl-expected-algorithm-sha256`` (mismatch: event +
+    refusal; missing: warning event, for manually started islands);
+    absorbed flags and unverified allowances are recorded.
+    """
+
+    algorithm = launch.algorithm
+    algorithm.verify_plugins()
+    from .engine.algorithm import island_problems
+
+    problems = island_problems(algorithm, {
+        "base_model_revision": getattr(args, "model_revision", None),
+        "base_model": getattr(args, "model", None),
+        "ref_load_override": getattr(args, "megatron_ref_load", None),
+    })
+    if problems:
+        _append_ports_event(args, miles_args, {
+            "event": "rl_algorithm_island_rejected",
+            "rl/algorithm_spec_sha256": launch.algorithm_sha256,
+            "problems": problems,
+        })
+        raise AlgorithmMismatchError(
+            f"island {args.learner_id} algorithm spec rejected before joining outer sync: "
+            + "; ".join(problems)
+        )
+    actual = launch.algorithm_sha256
+    expected = getattr(args, "rl_expected_algorithm_sha256", None)
+    if expected is None:
+        _append_ports_event(args, miles_args, {
+            "event": "rl_algorithm_expected_hash_missing",
+            "level": "warning",
+            "rl/algorithm_spec_sha256": actual,
+        })
+    elif expected.lower() != actual:
+        _append_ports_event(args, miles_args, {
+            "event": "rl_algorithm_mismatch",
+            "rl/algorithm_spec_sha256": actual,
+            "rl/expected_algorithm_spec_sha256": expected.lower(),
+            "rl/algorithm_spec": algorithm.canonical_json(),
+        })
+        raise AlgorithmMismatchError(
+            f"island {args.learner_id} algorithm hash {actual} differs from the launcher's "
+            f"expected {expected.lower()}; refusing to join outer sync"
+        )
+    miles_args.yeto_rl_algorithm_absorbed_flags = dict(launch.absorbed_flags)
+    miles_args.yeto_rl_outer_sync = not getattr(args, "rl_single_island_no_sync", False)
+    # INFRA compares it with the runtime AlgorithmSpec before connect_island_ray
+    # (a partitioned run without it is refused there).
+    miles_args.yeto_rl_expected_algorithm_sha256 = (
+        expected.lower() if expected is not None else None
+    )
+    miles_args.yeto_rl_unverified_mechanisms = tuple(
+        sorted(set(getattr(args, "rl_allow_unverified_mechanism", None) or ()))
+    )
 
 
 def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
@@ -195,6 +385,7 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
         lora_targets=getattr(args, "lora_targets", None),
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
+        placement=getattr(args, "rl_placement", "colocated"),
         extra_argv=tuple(extra_argv),
     )
 
@@ -1515,6 +1706,7 @@ def run_miles(
     rl_engine = getattr(args, "rl_engine", "ports")
     if rl_engine not in ("legacy", "ports"):
         raise ValueError(f"unknown rl_engine {rl_engine!r}")
+    _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
         from .engine.miles_adapter.state import require_run_plugin
@@ -1671,8 +1863,7 @@ def run_miles(
     if rl_engine == "ports":
         # Same engine-agnostic RLRunConfig as legacy; only the translation
         # differs (design D8).
-        from .engine.algorithm import AlgorithmSpec
-        from .engine.miles_adapter.config import parse_miles_args, translate_run_config
+        from .engine.miles_adapter.config import parse_miles_args
         from .engine.run_config import resolve_rl_run_config
 
         run_config = resolve_rl_run_config(
@@ -1688,12 +1879,11 @@ def run_miles(
             target_modules=canonical_targets,
             yeto_policy_sync=yeto_policy_sync,
         )
-        ports_algorithm = AlgorithmSpec.from_legacy_args(args)
-        ports_launch = translate_run_config(
-            run_config, ports_algorithm, extra_argv=tuple(extra_argv)
-        )
+        ports_launch = build_ports_launch(args, run_config, extra_argv)
+        ports_algorithm = ports_launch.algorithm
         miles_argv = list(ports_launch.argv)
         miles_args = parse_miles_args(ports_launch)
+        verify_ports_algorithm(args, miles_args, ports_launch)
     else:
         miles_argv = build_miles_argv(
             args,
@@ -2183,6 +2373,8 @@ def main(argv=None) -> None:
         rollout_model_path=rollout_model_path,
         prompt_path=prompt_path,
         eval_prompt_path=eval_prompt_path,
+        # --rl-single-island-no-sync: LocalOnlySync, no syncer connection.
+        yeto_policy_sync=not getattr(args, "rl_single_island_no_sync", False),
     )
 
 
