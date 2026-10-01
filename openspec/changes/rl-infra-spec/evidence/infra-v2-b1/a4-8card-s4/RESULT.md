@@ -9,13 +9,15 @@
 | E1-A 基线 base | 完成（e1a 的比较基线） | 12 轮 rc=0 |
 | **E1-A（e1a）** | **通过** | (a)(b)(c)(d)(e)(f)(g)+E1-E 全部满足；(c) 首次判读 FAIL 为 judge 单位缺陷，勘误后重判（原始输出保留） |
 | **E1-B（e1b）** | **不通过** | 注入真实发生（applied=true），但终态 SUCCEEDED，无 payload_mismatch；疑为读回校验不覆盖 LoRA adapter（待代码确认），不重跑 |
-| watchdog | 未运行 | 见"阻塞" |
-| A4b | 未运行 | 同上 |
-| E1-D d123/d4/d5/d6/d7 | 未运行 | 同上 |
+| **watchdog（wd）** | **不通过**（有效运行） | 注入到达、FIRED_ON_BLOCKED_UPDATE 成立；判据 (1) 不通过：`watchdog_action.killed=[]`（kill 路径 id 前缀缺陷）；(2) watchdog→终态 520 s > 60 s |
+| A4b | 未运行 | 链在 wd 后因 LORA_UNVERIFIABLE 按规则停止 |
+| E1-D d123/d4/d5/d6/d7 | 未运行 | 同上；d5–d7 另按预算 |
 
 ## 阻塞与剩余
-- 主 agent 通知：integ-decl 已到 06a754bf，LoRA 成员读回校验改为 fail-closed，需要重建镜像（sglang a1240c530，用户已批准，进行中）并改 pin；之后统一在新 SHA + 新镜像上重取 attestation 指纹、重核各开关 argv，按 wd → A4b → E1-D → E1-B（验证修复，预期 PAYLOAD_MISMATCH → REBUILT_OLD）运行，用复用链，本批剩余预算按 $40。在此之前不上卡。
-- 费用：本批累计 ≤$60.0（含主 agent 误叫停的 $5.7，见"费用"），上限 $100。
+- **新代码 6f6dcb9 + 新镜像（sglang a1240c530）上第一次 LoRA 成员准入即被 fail-closed 拒绝（LORA_UNVERIFIABLE），所有需要"成功扩容"的项（E1-B 验证修复、A4b、E1-D）被挡住**；根因见下"链 #2"。
+- **watchdog kill 路径缺陷**（id 前缀）已由主 agent 另派 agent 修复；修复合入后 wd 才能在新 SHA 上重跑。
+- 费用：本批累计 ≤$77.4（含主 agent 误叫停的 $5.7 与链 #2 的 $17.4），上限 $100，剩余 ≈$22.6。
+- 在 sglang/yeto 修复（新引擎在读回前加载 adapter，或 checker 读已注册 adapter 张量）与 kill 路径修复合入之前不再上卡；之后建议只跑冷启动 E1-B（≈$12.5）+ 同集群复用一项 A4b 或 d123（≈$6–8.5）；wd 重跑放不下就写"下一批"。
 
 ## 冒烟 infra-v2-b1-a8sm-20261001-1（runs/smoke/）
 - 平台断言 8×H100 通过，指纹 `sha256:1c4ceeb1…` 与 rl_driver_start 一致，router 采样器与 fork 探针自检通过。
@@ -48,6 +50,17 @@
 - **(b) 不通过**：终态 `SUCCEEDED`（up 160.4 s，其中 start_cells 145.8 s + hold 10 s），**没有** REBUILD_OLD/REBUILT_OLD，`cause` 为空。`check_weights(action=checksum)` 照常运行（WeightChecker "checksum computed for 226 tensors"），放行了被扰动的 adapter。
 - **根因（后经 integ-decl 06a754b 的代码说明证实："The stock checksum covers only base weights"，LoRA 模式下 adapter 键需要打了 yeto/lora-checksum 补丁的 sglang a1240c530 才会输出）**：226 = 28 层×8 个融合张量 + embed + final norm，即 Qwen3-0.6B 的**基础权重**；被扰动的是 LoRA adapter（引擎经 `load_lora_adapter` 以流式张量加载，不在这 226 个被检张量里）。因此读回校验对 adapter 载荷不敏感：要么是"产品的载荷读回校验不覆盖 LoRA adapter"（与主 agent 通知的 06a754bf 改 fail-closed 一致），要么是"该注入在 LoRA 下对被检张量无效"。judge 的规则只区分"注入未发生/未施加=测试无效"与"施加了但终态不对=不通过"，故判**不通过**（产品缺陷：b19b781 的成员准入读回校验在 LoRA 模式下对 adapter 无感）；不原样重跑，06a754b + 新镜像到位后再验证（预期 PAYLOAD_MISMATCH → REBUILT_OLD）。注意：06a754b 改了成员准入路径，E1-A 的 up 事务也要走它——E1-A 在 b19b781 上的通过是针对 b19b781 的，是否需要在新 SHA 上重跑由主 agent 裁定（预算 $40 有限）。
 - 费用 ≤$12.4（06:29:36–06:53:40）。cleanup_rc=0。
+
+## 链 #2：wd（infra-v2-b1-a8ch-20261001-2，代码 6f6dcb9 + 新镜像 12fcd9e5，runs/chain2-wd/）——wd 不通过；链按规则停止
+- 启动校验：launcher 日志 "[launcher] RL engine ports: image …@sha256:12fcd9e583d63287d6814dfc87158364a0e370a22795462d19962a2857e53069, miles e3a11ab3…, sglang a1240c530…"；8×H100、指纹 `210f27dc…`、router 采样器与探针 selfcheck 通过。attestation 指纹在 6f6dcb9 上重取，3/4/5/12 轮与 b19b781 时相同，各开关 argv 逐一核对不变（§9.23）。
+- **注入与 watchdog（有效运行）**：up 于 07:52:49 提交（deadline 240 s）；`start_cells` 07:52:49→07:55:22 = 153 s（≤160 s）；`test_injection(kind=block_update, applied=true, reached_ts=07:55:22)`；watchdog 07:56:49 触发，journal `classification=FIRED_ON_BLOCKED_UPDATE`、`injection_reached=true`（先决条件满足，不是测试无效）。
+- **判据 (1) 不通过：`watchdog_action.killed=[]`**，errors：两个目标 cell 均 `AssertionError(cell_id='engine:inference-engine-all-0-0-00002' matches=[])`。根因：`kill_target_generation`（`elastic_wiring.py`）把 `watchdog_target_cells()` 返回的成员 id（带 `engine:` 前缀）直接传给 fork 的 `RayWorkerManager.get_worker_infos(cell)`，后者按不带前缀的 cell id 查，匹配为空，一个进程也没杀。产品缺陷（主 agent 已另派 agent 修）。
+- **a4s3 的"matches=[]"归因更正**：a4s3（`../a4s3/watchdog/…/journal.jsonl`）里 watchdog_action 的 errors 是**完全相同**的 `AssertionError(cell_id='engine:inference-engine-all-0-0-00002' matches=[])`；当时按"cell 尚不存在（start_cells 还在进行，deadline 120 s）"归因，现在在 VERIFYING（cell 肯定存在）仍是同一错误，所以应归因为同一个前缀缺陷（a4s3 因 cell 尚不存在，二者无法区分，但同一缺陷是更简单的解释）。
+- `analyze_wd.py`（`analysis_wd.json`，缺 `probe_after.txt` 因链流程没有 after-hook 探针，(5) 未评估）：(1) 否；(2) watchdog→终态 520 s（08:05:24−07:56:49）> 60 s，否；(3) 旧引擎 PID/epoch 未变，是；(4) 被停 cell 所在 GPU 终态后 ≤60 s 释放，是；(5) 未评估。
+- 终态：事务卡在被阻塞的 update_weights 直到注入自然结束（08:05:22），08:05:24 `REBUILD_OLD → REBUILT_OLD`，**cause=lora_unverifiable**（"LoRA mode but the engine read-back carries no adapter (lora:*) checksums (engines blind)"，inconsistent_engines=[engine2,engine3]，即新启动的两个）。这个终态不是 watchdog 引起的。
+- **lora_unverifiable 的根因（日志证据）**：老引擎（pid 23975/23976）首次 check 在 07:52:21 给 226 个张量，之后在首次被请求用到时才出现 "LoRA adapter …: loaded weights for target modules"（07:52:22），此后每次 check 都是 450 个张量（226 基础 + 224 个 lora A/B 键）；新引擎（pid 33532/33533）在 08:05:24 update_weights 之后立刻被 check，只给 226，且从未出现过 "loaded weights for target modules"。即 sglang 的 LoRA adapter 惰性加载到 GPU 池（首个使用该 adapter 的请求才加载），而读回校验发生在 admit 之前、新 cell 尚无请求，所以补丁后的 WeightChecker 在**任何新启动的 cell** 上读不到 lora 键 → 任何 LoRA 扩容都会被 fail-closed 拒绝（不止 wd）。修法方向：读回前让新引擎真正加载 adapter（带 lora_path 的最小生成/显式 load），或让 checker 读已注册的 adapter 张量而不是 GPU 池。
+- **LoRA 合法准入的覆盖缺口仍然开放**：d123 的 up1 本是用来证明"新校验会放行合法 adapter"的，现在不仅没有证明，反而说明合法 adapter 也会被拒（见上）；E1-A 在 b19b781 上的通过不能迁移到新 SHA（成员准入路径已变），新 SHA 上 E1-A 未重跑。
+- 链 stop：`chain8.sh` 的 lora_unverifiable 规则命中（chain_rc=11），e1b/a4b/d123/d4 未启动；cleanup_run 退出码 0（两次复查干净）。费用 ≤$17.4。
 
 ## 阶段耗时（launch 起算；证据：各 run 的 `scan.json`/`scan.md`、`launch.ts.log.gz`）
 | 阶段 | smoke | base | e1a | e1b(-3) |
@@ -111,8 +124,9 @@
 | a8e1a | 03:18:37–03:44:55 | ≤$13.5 | 26.3 min |
 | a8e1b-2（开通失败） | 06:20:16–06:27:00 | ≤$3.3 | 实例从未 RUNNING |
 | a8e1b-3 | 06:29:36–06:53:40 | ≤$12.4 | 24.1 min |
-| a8ch（链，主 agent 误叫停） | 07:03:53–07:15:02 | ≤$5.7 | 仅 wd 冷启动阶段 |
-| **合计** | | **≤$60.0** | 剩余 $40 |
+| a8ch-1（链，主 agent 误叫停） | 07:03:53–07:15:02 | ≤$5.7 | 仅 wd 冷启动阶段 |
+| a8ch-2（链 #2：wd） | 07:34:29–≈08:09 | ≤$17.4 | 新 SHA + 新镜像；wd 不通过；LORA_UNVERIFIABLE 停链 |
+| **合计** | | **≤$77.4** | 剩余 ≈$22.6 |
 
 ## cleanup 证据
 - smoke：自动 cleanup 退出码 141（缺陷，见上）；手动 `cleanup_run.sh` 退出码 0（`runs/smoke/cleanup_manual.out`）。base/e1a/e1b-3/e1b-2：`cleanup_rc.txt`=0，`cleanup.out` 四阶段齐全、两次复查（间隔 60 s）干净。链：见上。
