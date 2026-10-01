@@ -232,6 +232,8 @@ class D(unittest.TestCase):
         self.assertEqual(J.judge_d123(j, [], set(), k[:1])["verdict"], "FAIL")
         self.assertEqual(J.judge_d123([j[0], j[2], j[3], j[4]], [], set(), k)["verdict"], "FAIL")   # no incomplete stop
         self.assertEqual(J.judge_d123(j[:3] + [tx("SUCCEEDED", "up2"), j[4]], [], set(), k)["verdict"], "FAIL")
+        r = J.judge_d123(j[:4] + [tx("INITIALIZING", "up3")], [], set(), k)   # up3 submitted, run ended before its terminal
+        self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing")); self.assertTrue(r["checks"]["up2_REBUILT_OLD"])
 
     def test_d4(self):
         j = [tx("SUCCEEDED", "up1"), {"kind": "fork_op", "op": "stop", "status": "incomplete", "tx_id": "dn1"}, tx("RECOVERY_REQUIRED", "dn1", wall_time=50.0)]

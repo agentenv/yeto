@@ -402,6 +402,12 @@ def judge_d123(journal, tape, known, dkill_log=None):
     res["checks"]["up2_REBUILT_OLD"] = _tx_terminal(journal, "up2") == ["REBUILT_OLD"]
     res["checks"]["up3_REBUILT_OLD"] = _tx_terminal(journal, "up3") == ["REBUILT_OLD"]
     term = [r["phase"] for r in phases(journal) if r.get("phase") in TERMINAL]
+    # a transaction that was submitted but never reached a terminal phase before the run ended is not observed
+    not_observed = [rid for rid in ("up2", "up3") if not _tx_terminal(journal, rid)
+                    and any(r.get("request_id") == rid for r in phases(journal))]
+    if not_observed:
+        res["not_observed"] = not_observed
+        return _invalid(res, "transactions %s never reached a terminal phase (run ended first): not observed" % not_observed, "evidence_missing")
     return _finish(res, term)
 
 
