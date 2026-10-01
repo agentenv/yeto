@@ -1,1 +1,0 @@
-{"sha256": "5a8a5a9ff5abb317fc8159ab56c07293dc3bc99e084542880b6d32cc5a02b441", "allow": ["tis"], "argv": ["--use-tis", "--tis-clip", "2.0", "--tis-clip-low", "0.0"]}

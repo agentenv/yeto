@@ -1,7 +1,0 @@
-Fetching and parsing job queue...
-Fetching job queue for: yeto-hp929c-l1-eu-north1
-
-Job queue of current user on cluster yeto-hp929c-l1-eu-north1
-ID  NAME              USER    SUBMITTED    STARTED     DURATION  RESOURCES   STATUS      LOG                                        GIT COMMIT                                
-2   yeto-rl-island-1  ubuntu  41 secs ago  -           -         1x[H100:1]  SETTING_UP  ~/sky_logs/sky-2026-09-29-06-50-00-370386  923b3049a6dea345186adaa16da11d76693614b3  
-1   yeto-rl-island-1  ubuntu  10 mins ago  3 mins ago  1m 41s    1x[H100:1]  FAILED      ~/sky_logs/sky-2026-09-29-06-32-38-485817  923b3049a6dea345186adaa16da11d76693614b3  
