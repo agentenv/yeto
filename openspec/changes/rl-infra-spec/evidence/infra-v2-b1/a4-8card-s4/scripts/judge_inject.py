@@ -169,8 +169,9 @@ def judge_e1b(journal, tape, known, router_samples=None, probes=None):
     tcells = [t.split(":", 1)[1] for t in targets]
     res["probe_after"] = {"membership": after.get("membership"), "versions": after.get("versions"),
                           "target_statuses": {c: statuses.get(c) for c in tcells}}
+    # a stopped cell is deregistered from the fork controller (absent from get_cell_statuses) or reported non-Serving
     res["checks"]["b_injected_cells_not_serving"] = bool(statuses) and all(
-        c in statuses and "Serving" not in str(statuses[c]) for c in tcells)
+        c not in statuses or "Serving" not in str(statuses[c]) for c in tcells)
     vers = after.get("versions") or {}
     serving = {k: v for k, v in vers.items() if k not in tcells}
     res["checks"]["b_old_members_same_version"] = len(serving) >= 1 and len(set(serving.values())) == 1
@@ -309,7 +310,7 @@ def judge_wd(journal, tape, known, gpu_samples=None, probe_after=None, gpu_relea
     statuses = probe_after.get("cell_statuses") or {}
     tcells = [t.split(":", 1)[1] for t in targets]
     res["probe_after"] = {c: statuses.get(c) for c in tcells}
-    res["checks"]["killed_cells_not_serving"] = bool(statuses) and all(c in statuses and "Serving" not in str(statuses[c]) for c in tcells)
+    res["checks"]["killed_cells_not_serving"] = bool(statuses) and all(c not in statuses or "Serving" not in str(statuses[c]) for c in tcells)
     return _finish(res, term)
 
 

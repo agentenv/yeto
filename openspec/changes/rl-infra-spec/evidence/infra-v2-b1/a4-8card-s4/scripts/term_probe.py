@@ -22,10 +22,14 @@ while not done:
             if r.get("kind") == "phase" and r.get("phase") in ("SUCCEEDED", "REBUILT_OLD", "CANCELLED", "RECOVERY_REQUIRED"):
                 term += 1; L(event="terminal", n=term, phase=r.get("phase"))
                 if term >= N:
-                    time.sleep(2)
-                    probe("probe_after.txt", "status")
+                    # all probes in parallel: each needs ~20 s to start a Ray client and the run may end ~50 s after the terminal phase
+                    import threading
+                    jobs = [("probe_after.txt", ("status",))]
                     if MODE == "e1b":
-                        if url: probe("probe_stale.txt", "stale", url)
-                        probe("probe_oldepoch.txt", "oldepoch")
+                        if url: jobs.append(("probe_stale.txt", ("stale", url)))
+                        jobs.append(("probe_oldepoch.txt", ("oldepoch",)))
+                    ts = [threading.Thread(target=probe, args=(o, *a)) for o, a in jobs]
+                    for t in ts: t.start()
+                    for t in ts: t.join()
                     L(event="done"); done = True; break
     time.sleep(1)

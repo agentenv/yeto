@@ -80,6 +80,8 @@ class E1B(unittest.TestCase):
             p = probes(); p[key] = None
             self.assertEqual(self.e1b(p=p)["verdict"], "INVALID_TEST", key)
         r = self.e1b(p=probes(c2="Serving")); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["b_injected_cells_not_serving"])
+        absent = probes(); absent["after"]["cell_statuses"] = {"c0": "Serving", "c1": "Serving"}   # stopped cells deregistered = not serving
+        self.assertEqual(self.e1b(p=absent)["verdict"], "PASS")
         r = self.e1b(p=probes(versions={"c0": "v2", "c1": "v1"})); self.assertFalse(r["checks"]["b_old_members_same_version"])
         r = self.e1b(p=probes(stale_equal=False)); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["c_stale_ack_changes_nothing"])
         r = self.e1b(p=probes(refused=False)); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["d_old_epoch_refused"])
