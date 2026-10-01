@@ -1,0 +1,15 @@
+PASS miles_head: e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841
+PASS sglang_head: a1240c530d406b5d0f252511f8e0a9a93b6a079d
+PASS sglang_version: 0.5.21.dev68+ga1240c5
+PASS sglang_dist_info: 1
+PASS manifest_miles: e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841
+PASS manifest_sglang: a1240c530d406b5d0f252511f8e0a9a93b6a079d
+PASS miles_origin: https://github.com/michaellchung/miles
+PASS sglang_origin: https://github.com/michaellchung/sglang
+FAIL m3_lora_plugin_present: got  want yes
+FAIL qwen4exp_lora_hooks: got no want yes
+FAIL a27_workers_lost: got no want yes
+megatron_head: a84b105473eca9c9c6e49dbf1c8aa460c5cf796e
+PASS d2_hc_head_contraction: yes
+out=/tmp/img-m3a27/check-old
+exit=1
