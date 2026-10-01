@@ -1,6 +1,10 @@
 #!/bin/bash
 # usage: a8go_strict.sh <case> <prefix> <hard_s> <wd_s>     8x H100 on Nebius eu-north1, T4R2S2 <-> T4R4S0, STRICT-AVG single island with the head syncer on THIS host
-# cases: s0 | r6 | r7 | r5 | r5c      (DRY=1: print the launch args + triggers + arms, start nothing)
+# cases: chk | s0 | r6 | r7 | r5 | r5c      (DRY=1: print the launch args + triggers + arms, start nothing)
+# CHAIN DISPATCH (CHAIN8-PLAN.md, one A8GO per chain): every case NOT listed here (d2 a4bc d4 e1b wd ... = a8go.sh's) is exec'ed to a8go.sh unchanged, so a
+# single chain8 run mixes no-sync and strict items: `A8GO=$B/a8go_strict.sh RESET=$B/reset_island_strict.sh chain8.sh ... chk:900 s0:2400 d2:2100 ...`.
+# chk = chain-head self-check (chk_launch.py): provisions the SAME island cluster (make_miles_island_task resources/setup) and runs the image checks instead of
+# the learner (fork pin + workers_lost, Megatron hc_head_contraction, LoRA module import); fail -> <chain>/ABORT (chain8 stops + releases); ok -> rc 0, cluster kept.
 # E1-D ⑤⑥⑦ with the 3.7 restart recovery (recovery-design.md §10, E1D-RECOVERY-PROGRESS "方案 A"): the learner is killed and restarted IN PLACE by the island's
 # restart loop; the restart point is the syncer's current policy version (StrictAvgSync.start -> ledger.rebase(v)), so there is no --rl-single-island-no-sync here
 # (n2run_strict.sh; a no-sync island fails at rebase(0)).  Same COMMON as a8go.sh (fingerprint 172652ea... unchanged -> cfg/attestation-8-6.json, re-checked with
@@ -14,12 +18,20 @@
 # without the syncer giving up on the learner).  Not a Miles argv -> fingerprint unchanged (fp_local8_strict.py re-checked).
 # >=1 PUSH before every kill (restart point v>=1): r6/r5 up1@train rid1 (the up runs before generate 2: versions 0,1 already pushed); r7 kill after up1 SUCCEEDED
 # and the next generate; r5c dn1@train rid2 (killed at its COMMITTED).  Round ~15 s (8 cards, 0.6B), strict PUSH at every round boundary.
-C=$1; P=$2; HARD=$3; WD=$4; SHA=${SHA:?set SHA to the frozen code commit of this batch (must contain the 3.7 restart recovery, infra-e1-recovery >= 0e68962)}; B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P
+C=$1; P=$2; HARD=$3; WD=$4
+case $C in chk|s0|r6|r7|r5|r5c) ;; *) exec ${A8GO_INNER:-/home/michael/work/gpu-b1-runs/a8go.sh} "$@";; esac   # non-strict cases: a8go.sh, behaviour untouched
+SHA=${SHA:?set SHA to the frozen code commit of this batch (must contain the 3.7 restart recovery, infra-e1-recovery >= 0e68962)}; B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P
 UP=${UP_DEADLINE_S:-600}; EX=""; STEPS=6; ATTN=6; JUDGE=""; ARMS=(); TPROBE=""
 EXR="--rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3"
 STRICT_EX="--rl-elastic-quorum-timeout-s ${QUORUM_TIMEOUT_S:-1800}"   # pause budget = 0.5 x this must be >= every request deadline_s (600)
 req() { printf '["%s",%s,"%s",{"target":"%s","expected_config_epoch":%s,"deadline_s":%s}]' "$1" "$2" "$3" "$4" "$5" "$6"; }   # phase rid id target epoch deadline
 UPB() { req train $1 $2 T4R4S0 0 ${3:-$UP}; }; DNB() { req train $1 $2 T4R2S2 1 ${3:-600}; }
+if [ "$C" = chk ]; then
+  [ -f $B/chk_launch.py ] || { echo "missing $B/chk_launch.py"; exit 6; }
+  if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 chk_launch.sh $P 8 $HARD (no training, no attestation; checks: fork pin+workers_lost, hc_head_contraction, lora import; fail -> ABORT)"; echo "triggers=[]"; echo triggers-json-ok; echo "arms: none"; echo "tprobe: none"; echo "judge: chk_launch job status"; exit 0; fi
+  setsid nohup $B/chk_launch.sh $P 8 $HARD > $R.n2run.out 2>&1 &
+  echo started $P chk; exit 0
+fi
 case $C in
   s0)   TRIG="[$(UPB 1 up1 600),$(DNB 3 dn1 600)]";;   # smoke: strict island + --rl-elastic, no kill; judged by hand (progress file item 5: syncer line in launch.log, 6 rounds, up1/dn1 SUCCEEDED, publication versions 0..6, one outer_recorded per rollout, no lora_unverifiable)
   r6)   EX="$EXR --rl-test-kill-learner-at QUIESCING"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="r6";;                       # ⑥ up1 killed at QUIESCING -> restart -> CANCELLED, no recovery record, rounds go on

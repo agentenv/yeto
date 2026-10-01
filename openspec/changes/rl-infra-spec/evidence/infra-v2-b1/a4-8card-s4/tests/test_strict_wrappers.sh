@@ -6,7 +6,7 @@
 set -u
 B=$(cd "$(dirname "$0")/.." && pwd); [ -f $B/a8go_strict.sh ] || B=$B/scripts; T=$(mktemp -d); trap 'rm -rf $T' EXIT; fail=0
 ok() { echo "PASS $1"; }; bad() { echo "FAIL $1"; fail=1; }
-for f in a8go_strict.sh n2run_strict.sh nstop_item_strict.sh reset_island_strict.sh syncer_host_clean.sh; do bash -n $B/$f && ok "syntax $f" || bad "syntax $f"; done
+for f in a8go_strict.sh n2run_strict.sh nstop_item_strict.sh reset_island_strict.sh syncer_host_clean.sh chk_launch.sh; do bash -n $B/$f && ok "syntax $f" || bad "syntax $f"; done
 # --- a8go_strict DRY
 for c in s0 r6 r7 r5 r5c; do SHA=deadbee DRY=1 bash $B/a8go_strict.sh $c infra-v2-test-$c 2400 2520 > $T/dry.$c 2>&1 || bad "dry $c rc"; done
 grep -q "n2run_strict.sh infra-v2-test-s0 8 2400 2520 --total-steps 6 " $T/dry.s0 && ! grep -q "rl-elastic-restart-attempts\|kill-learner" $T/dry.s0 && ok "s0: strict runner, no kill/restart switches" || bad "s0 dry"
@@ -17,7 +17,20 @@ grep -q -- "--rl-test-kill-learner-at COMMITTED" $T/dry.r5 && grep -q "tprobe: 1
 grep -q -- "--rl-test-kill-learner-at COMMITTED" $T/dry.r5c && grep -q "dctl.py|marker|up1" $T/dry.r5c && grep -q '"dn1"' $T/dry.r5c && ok "r5c: marker arm + dn1 trigger" || bad "r5c"
 for c in s0 r6 r7 r5 r5c; do grep -q -- "--rl-elastic-quorum-timeout-s 1800 " $T/dry.$c || bad "$c lacks --rl-elastic-quorum-timeout-s 1800 (s0 lesson: 450 s default budget rejects 600 s deadlines)"; done; ok "every strict case raises the syncer quorum timeout (pause budget 900 s >= 600 s deadlines)"
 grep -q "attestation-8-6.json" $T/dry.r5 && ok "attestation-8-6 (fingerprint unchanged without no-sync)" || bad "attestation"
-SHA=x DRY=1 bash $B/a8go_strict.sh d2 p 1 1 >/dev/null 2>&1; [ $? = 64 ] && ok "existing a8go cases are not accepted here (rc 64)" || bad "unknown case rc"
+# --- chain dispatch: non-strict cases go to a8go.sh (A8GO_INNER stub records the call), strict/chk stay here
+printf '#!/bin/bash\necho "inner-a8go $*" >> $STUBLOG; exit 0\n' > $T/inner_a8go; chmod +x $T/inner_a8go; : > $T/log
+STUBLOG=$T/log A8GO_INNER=$T/inner_a8go SHA=x DRY=1 bash $B/a8go_strict.sh d2 pfx 2100 2220 >/dev/null 2>&1; rc=$?
+[ $rc = 0 ] && grep -q "inner-a8go d2 pfx 2100 2220" $T/log && ok "dispatch: d2 (non-strict) exec'ed to a8go.sh with the same argv" || bad "dispatch d2 rc=$rc $(cat $T/log)"
+: > $T/log; STUBLOG=$T/log A8GO_INNER=$T/inner_a8go SHA=x DRY=1 bash $B/a8go_strict.sh r6 pfx 1800 1920 >/dev/null 2>&1; [ ! -s $T/log ] && ok "dispatch: r6 handled here, not forwarded" || bad "dispatch r6 forwarded"
+STUBLOG=$T/log A8GO_INNER=/bin/false SHA=x DRY=1 bash $B/a8go_strict.sh nosuch p 1 1 >/dev/null 2>&1; [ $? != 0 ] && ok "dispatch: unknown case -> a8go.sh's own rc (non-zero)" || bad "unknown case rc"
+# --- chk: DRY line, no attestation/training; chk_launch.sh failure -> <chain>/ABORT + rc.txt + item_done; success -> no ABORT
+SHA=x DRY=1 bash $B/a8go_strict.sh chk pfx 900 1020 > $T/dry.chk 2>&1 && grep -q "chk_launch.sh pfx 8 900" $T/dry.chk && ! grep -q "attestation-8-\|--total-steps" $T/dry.chk && ok "chk DRY: chk_launch, no attestation/training args" || bad "chk dry: $(cat $T/dry.chk)"
+printf '#!/bin/bash\necho "[chk] FAIL fork pin"; exit 1\n' > $T/chk_fail.sh; printf '#!/bin/bash\necho CHK_OK; exit 0\n' > $T/chk_ok.sh
+mkdir -p $T/chain $T/rr3; SHA=$(git -C /home/michael/work/gpu-b1 rev-parse --short HEAD) RUN_ROOT=$T/rr3 CLUSTER_PREFIX=cpx CHAIN_DIR=$T/chain YETO_PY=/bin/bash CHK_PY_SCRIPT=$T/chk_fail.sh bash $B/chk_launch.sh cpx-chk 8 60 >/dev/null 2>&1
+[ -f $T/chain/ABORT ] && grep -q chk_failed $T/chain/ABORT && grep -q "fork pin" $T/chain/ABORT && [ "$(cat $T/rr3/cpx-chk/rc.txt)" = "rc=1" ] && [ -f $T/rr3/cpx-chk/item_done ] && [ "$(cat $T/rr3/cpx-chk/cluster.txt)" = cpx-l0-eu-north1 ] && ok "chk_launch.sh: failed check -> <chain>/ABORT with the FAIL line, rc.txt, item_done, cluster = chain cluster" || bad "chk fail path: $(cat $T/chain/ABORT 2>&1) $(cat $T/rr3/cpx-chk/rc.txt 2>&1)"
+rm -rf $T/chain/ABORT $T/rr3; mkdir -p $T/rr3; SHA=$(git -C /home/michael/work/gpu-b1 rev-parse --short HEAD) RUN_ROOT=$T/rr3 CLUSTER_PREFIX=cpx CHAIN_DIR=$T/chain YETO_PY=/bin/bash CHK_PY_SCRIPT=$T/chk_ok.sh bash $B/chk_launch.sh cpx-chk 8 60 >/dev/null 2>&1
+[ ! -f $T/chain/ABORT ] && [ "$(cat $T/rr3/cpx-chk/rc.txt)" = "rc=0" ] && [ -f $T/rr3/cpx-chk/item_done ] && grep -q -- "--rl-single-island-no-sync" $T/rr3/cpx-chk/args.txt && ok "chk_launch.sh: passing check -> rc 0, no ABORT (cluster kept for the chain)" || bad "chk ok path"
+python3 -c "import ast,sys; ast.parse(open('$B/chk_launch.py').read())" && ok "chk_launch.py parses" || bad "chk_launch.py syntax"
 # --- n2run_strict preflight: busy port
 mkdir -p $T/bin; cat > $T/bin/ss <<'S'
 #!/bin/bash
