@@ -47,6 +47,7 @@ Member publication (rl-infra-spec 3.5, fork M4 + 3.5a mechanism (a)),
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import time
 import inspect
@@ -135,6 +136,15 @@ def injected_update_block(environ: Any = None) -> float | None:
     return value
 
 
+class TargetWorkersLostError(RuntimeError):
+    """A27: a target engine's workers died while the member ``update_weights`` ran
+    (the fork's liveness scan tore its cell down). ``cells`` names the dead cell(s)."""
+
+    def __init__(self, message: str, cells: list[str]) -> None:
+        super().__init__(message)
+        self.cells = list(cells)
+
+
 class InjectedBlockProbeError(RuntimeError):
     """The liveness probe of the injected block failed for a reason other than a
     dead/replaced target worker: NOT evidence of a kill (review M2)."""
@@ -155,6 +165,7 @@ class RayTargetLiveness:
         self._manager = manager
         self._ray = ray_module
         self.targets: dict[str, list[tuple[str, int]]] = {}
+        self.dead_cell: str | None = None  # the cell the last "dead: ..." status was about
 
     def _deps(self) -> tuple[Any, Any]:
         if self._ray is None:
@@ -179,19 +190,23 @@ class RayTargetLiveness:
     async def status(self) -> str:
         manager, ray = self._deps()
         actor_died = getattr(getattr(ray, "exceptions", None), "RayActorError", ())
+        cell = None
         try:
             for cell, targets in self.targets.items():
                 now = sorted((i.name, int(i.generation))
                              for i in await manager.get_worker_infos.remote(cell))
                 if not now:
+                    self.dead_cell = cell
                     return f"dead: cell {cell} has no workers (stopped)"
                 if now != targets:
+                    self.dead_cell = cell
                     return f"dead: cell {cell} workers/generation changed {targets} -> {now}"
                 for name, generation in targets:
                     handle = await manager.get_actor_handle.remote(
                         name, expected_generation=generation)
                     await asyncio.wait_for(handle.__ray_ready__.remote(), timeout=10)
         except actor_died as exc:  # type: ignore[misc]
+            self.dead_cell = cell
             return f"dead: actor died ({type(exc).__name__})"
         except Exception as exc:  # noqa: BLE001 - not a kill: report it as such
             import sys
@@ -338,6 +353,14 @@ class MilesPublisher:
         self.holds: list[tuple[float, float]] = []
         self.liveness_probe: Any = None  # RayTargetLiveness-like (snapshot/status)
         self.block_poll_s = 1.0
+        # A27: the member update_weights is watched against the target cells' workers (fork
+        # RayWorkerManager, not behind the InferenceController lock the update holds); a dead
+        # target fails the publish (-> REBUILD_OLD) instead of waiting for the NCCL rendezvous.
+        self.watch_targets = True
+        self.target_watch_poll_s = 2.0
+        # how long a dead target's update_weights may still fail on its own (the fork's connect
+        # fails fast on a dead engine) before it is cancelled; see _update_weights_watching_targets
+        self.dead_target_grace_s = 30.0
         # LoRA mode: load the adapter into each fresh member's GPU pool before the
         # read-back (see default_lora_warmup); None = the default direct /generate.
         self.lora_warmup: Callable[[Any, str, float], Any] | None = None
@@ -538,6 +561,76 @@ class MilesPublisher:
             return
         self.event_sink(event, **fields)
 
+    async def _update_weights_watching_targets(self, update_weights: Callable[..., Any],
+                                               cells: list[str], epoch: int) -> Any:
+        """Run the member ``update_weights`` while watching the target cells' worker actors.
+
+        A27 (GPU 6r1/6r2 d2): a target engine SIGKILLed during VERIFYING never joins the
+        trainer's NCCL weight-update group; the fork's call then waits for the rendezvous (pg
+        timeout, 30 min by default) holding the InferenceController lock, so the watchdog's kill
+        of the other targets unblocks nothing and the run stalls. Here the targets are probed every
+        ``target_watch_poll_s`` through the fork's ``RayWorkerManager`` (a named actor, not behind
+        that lock). When one is dead the call gets ``dead_target_grace_s`` to fail on its own (with
+        the fork's bounded connect it does) and is cancelled otherwise; the fork's
+        ``placement_group.update_weights`` runs ``abort_update_weights`` on any BaseException,
+        CancelledError included, which releases the controller lock. A probe that cannot run
+        (no manager, older fork) leaves the call unwatched: the watch never invents a failure.
+        Residual race (documented): a cancel landing while the fork's ``start_update_weights``
+        is still acquiring the lock would leave that remote acquire running; the grace period
+        makes this window practically unreachable (the acquire is sub-second once the cells are
+        tracked, which ``wait_cells_tracked`` ensured before)."""
+        call = update_weights(
+            self._args, self._actor, self._executor, self._controller,
+            members=cells, expected_epoch=epoch, admit_cordoned=True,
+        )
+        if not self.watch_targets:
+            return await call
+        import sys
+
+        probe = self.liveness_probe or RayTargetLiveness()
+        try:
+            await probe.snapshot(cells)
+        except Exception as exc:  # noqa: BLE001 - unwatched, never a fabricated failure
+            print(f"[yeto] member update_weights of {cells} runs unwatched: target probe unavailable "
+                  f"({exc!r})", file=sys.stderr, flush=True)
+            return await call
+        task = asyncio.ensure_future(call)
+        dead: str | None = None
+        try:
+            while not task.done():
+                await asyncio.wait({task}, timeout=self.target_watch_poll_s)
+                if task.done():
+                    break
+                try:
+                    state = await probe.status()
+                except Exception as exc:  # noqa: BLE001 - stop watching, keep waiting
+                    print(f"[yeto] target probe failed; member update_weights of {cells} continues "
+                          f"unwatched ({exc!r})", file=sys.stderr, flush=True)
+                    return await task
+                if state != "alive":
+                    dead = state
+                    break
+            if dead is None:
+                return await task
+            lost = [c for c in [getattr(probe, "dead_cell", None)] if c]
+            print(f"[yeto] target engine of {cells} {dead} during member update_weights; waiting up to "
+                  f"{self.dead_target_grace_s}s for the call to fail, then cancelling it",
+                  file=sys.stderr, flush=True)
+            self._record("target_workers_lost", target_members=[member_id(c) for c in cells],
+                         lost_members=[member_id(c) for c in lost], state=dead, ts=time.time())
+            done, _ = await asyncio.wait({task}, timeout=self.dead_target_grace_s)
+            how = "the call failed on its own"
+            if not done:
+                task.cancel()
+                how = "the call was cancelled"
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            raise TargetWorkersLostError(
+                f"target engine of {cells} {dead} during member update_weights ({how})", lost)
+        finally:
+            if not task.done():
+                task.cancel()
+
     async def _injected_block(self, cells: list[str], seconds: float) -> None:
         """TEST ONLY (plan-3.8-4.4-v2 §4): stand in for an ``update_weights`` blocked
         on the new engines. Blocks up to ``seconds``; every ``block_poll_s`` it
@@ -652,13 +745,14 @@ class MilesPublisher:
                              target_members=[member_id(c) for c in cells],
                              scale=self._inject_perturb, applied=True)
             try:
-                await update_weights(
-                    self._args, self._actor, self._executor, self._controller,
-                    members=cells, expected_epoch=epoch, admit_cordoned=True,
-                )
+                await self._update_weights_watching_targets(update_weights, cells, epoch)
             finally:
                 if perturb:
                     await _maybe_await(self.perturb_trainer(None))  # the trainer holds the published policy again
+        except TargetWorkersLostError as exc:
+            lost = [member_id(c) for c in exc.cells] or [member_id(c) for c in cells]
+            raise PublicationError(f"member update_weights failed: {exc}", frozenset(lost),
+                                   cause=PublicationCause.UPDATE_FAILED, engine_ids=lost) from exc
         except Exception as exc:
             raise PublicationError(f"member update_weights failed: {exc}",
                                    frozenset(member_id(c) for c in cells),
