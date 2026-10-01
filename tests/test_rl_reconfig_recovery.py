@@ -576,3 +576,31 @@ def test_miles_pool_member_states_from_describe_cells():
     pool2 = MilesRolloutPool(inference_controller=object(), rollout_executor=object(), metadata=None,
                              expected_policy=lambda: (1, "h"), declared_cells=["c0"])
     assert pool2.member_states() is None
+
+
+# ------------------------------------------------------------- no-sync island restart (blocker found in phase 3)
+def test_no_sync_restart_hits_the_ledger_and_the_restart_loop_is_bounded(tmp_path):
+    """A ``--rl-single-island-no-sync`` island restarts through LocalOnlySync, i.e. at rollout 0 with a freshly
+    initialised policy: with the persisted ledger the restarted driver fails in ledger.rebase(0) (LedgerError:
+    outer-recorded rollouts behind the restart point) before publishing or generating -- every restart, so E1-D
+    ⑤⑥⑦ cannot run under no-sync (recovery-design.md; ruling: strict-avg + syncer). The learner's restart loop
+    (launcher RESTART_LOOP_FN) only bounds the retries: it returns the last exit code after N attempts and journals
+    no RECOVERY_REQUIRED (recorded here, not changed)."""
+    import subprocess
+    from yeto.launcher import RESTART_LOOP_FN
+    from yeto.rl.engine.ledger import LedgerError
+
+    clock = {"t": 1000.0}
+    driver, ctl, *_ = _island(tmp_path, clock=clock, ledger=BatchLedger(tmp_path / "state"))
+    driver.run(); ctl.close(); driver.ledger.close()
+    driver, ctl, fork, pool, publisher, engine = _island(tmp_path, clock=clock, ledger=BatchLedger(tmp_path / "state"))
+    with pytest.raises(LedgerError, match="behind outer-recorded rollouts"):
+        driver.run()
+    assert not [c for c in engine.calls if c[0] in ("publish", "generate")]
+    assert ctl.inspect().health == "RUNNING" and _recoveries(tmp_path) == []  # not a recovery problem: no RECOVERY_REQUIRED journaled
+    ctl.close()
+    script = RESTART_LOOP_FN + "n=0; yeto_rl_restart_loop sh -c 'exit 86'; echo rc=$? attempts=$(grep -c . $LOG)"
+    log = tmp_path / "loop.log"
+    out = subprocess.run(["bash", "-c", script], env={"YETO_RL_RESTART_ATTEMPTS": "2", "LOG": str(log), "PATH": "/usr/bin:/bin"},
+                         capture_output=True, text=True)
+    assert "rc=86" in out.stdout and out.stderr.count("in-place restart") == 2  # bounded: 1 + 2 attempts, then the exit code
