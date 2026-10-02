@@ -1198,6 +1198,46 @@ class IslandDriver:
             return kind == "colocated"
         return self.execution_mode == "colocated-serial"
 
+    def _restore_data_cursor(self, start_rollout_id: int) -> None:
+        """Restart (strict ``SyncStart.rollout_id`` = v > 0): seek the rollout data
+        source to the cursor recorded after rollout v-1 drew its prompts.
+
+        The trainer restarts from the syncer's authoritative policy and the
+        ledger rebases to v, but a restarted rollout process starts its data
+        source where a fresh run's would (Miles ``RolloutDataSource``: offset 0,
+        ``sample_group_index`` 0). Its group ids ARE that counter, so rollout v
+        would re-draw the groups trained in rollout 0 and ``ledger.prepare``
+        refuses them (GPU evidence a4s8-2r2 r6: ``groups ['g0'..'g3'] were
+        already trained in rollout 0`` on every restart attempt). Fail closed:
+        a recorded cursor the pool cannot seek to, a seek that does not land on
+        the recorded cursor, or no recorded cursor for a restart above 0 on a
+        pool that reports cursors -> DriverError (no silent re-training)."""
+        if start_rollout_id <= 0:
+            return
+        cursor = self.ledger.restart_cursor(start_rollout_id)
+        seek = getattr(self.rollout, "seek_data_cursor", None)
+        if cursor is None:
+            if callable(seek):
+                raise DriverError(
+                    f"restart at rollout {start_rollout_id}: the ledger holds no data cursor "
+                    f"for rollout {start_rollout_id - 1}; the data source cannot be resumed"
+                )
+            return  # pools without a seekable data source (fakes) report no cursor
+        if not callable(seek):
+            raise DriverError(
+                f"restart at rollout {start_rollout_id}: the ledger recorded data cursor "
+                f"{cursor} but the rollout pool cannot seek its data source"
+            )
+        landed = seek(cursor)
+        landed = None if landed is None else {k: int(v) for k, v in dict(landed).items()}
+        if landed != {k: int(v) for k, v in cursor.items()}:
+            raise DriverError(
+                f"restart at rollout {start_rollout_id}: data source seek to {cursor} "
+                f"landed on {landed}"
+            )
+        self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id,
+                  data_cursor=dict(landed))
+
     def run(self) -> TrainableState:
         self.handshake()
         self._refuse_if_recovery_required()
@@ -1206,6 +1246,7 @@ class IslandDriver:
                 start = self.sync.start(self)
                 if self.ledger is not None:
                     self.ledger.rebase(start.rollout_id)
+                    self._restore_data_cursor(start.rollout_id)
                 state = start.state
                 self.publish(state, rollout_id=start.rollout_id)
                 self._confirm_recovery(start.rollout_id)
