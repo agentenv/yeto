@@ -160,6 +160,15 @@
 
 每次失败的重试 MUST 使用新的 worker generation，而且整个事务受一个绝对 deadline 约束。
 
+**修订记录（2026-10-02 用户裁定，E1-D ④ 链 6r2）**——以上原文保留，补充 stop 半失败（3.3a `incomplete`）的时限与终态记录：
+- 释放后的 stop 重试超出事务 deadline 时，MUST 至多进行一次有界的 REBUILD_OLD；其预算为 `T_recovery`（`--rl-elastic-recovery-timeout-s`），事务 deadline MUST NOT 被重置或延长；REBUILD_OLD 内再失败 MUST 直接进入 RECOVERY_REQUIRED。整体恢复时限 = deadline + `T_recovery`。
+- 进入 RECOVERY_REQUIRED 时，日志 MUST 同时写岛级记录（`request_id=None`）和关联未终态请求的请求级终态记录（带 `cause` 与对岛级记录的引用），二者的 error 与 epoch MUST 一致。
+- RECOVERY_REQUIRED 期间与之后 MUST NOT 再 prepare 批次或训练。
+
+#### Scenario: stop 持续半失败（E1-D ④）
+- **WHEN** 释放后 stop 持续失败，重试到事务 deadline 仍未完成
+- **THEN** 事务进入一次 REBUILD_OLD，在 deadline + `T_recovery` 内结束；再失败则进入 RECOVERY_REQUIRED，岛级与请求级终态记录一致，之后不再 prepare 或训练
+
 #### Scenario: 控制器在提交后崩溃
 - **WHEN** 控制器在 epoch 提交后、恢复运行前崩溃，然后重启
 - **THEN** 根据日志判定为已提交，继续恢复目标配置，不回退、不重复训练

@@ -88,6 +88,10 @@ RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 # disposed/rebuilt/restored). A restart that finds it cannot tell whether the
 # trainer was restored: RECOVERY_REQUIRED (4.5).
 REBUILDING_TRAINER = "REBUILDING_TRAINER"
+# 3.7 restart recovery (evidence/infra-e1/recovery-design.md): pseudo phase of the
+# recovery pseudo-transaction (``rec-*``) whose fork_op records reuse the
+# transaction machinery; never a transaction phase.
+RECOVERING = "RECOVERING"
 TERMINAL = frozenset({SUCCEEDED, CANCELLED, REBUILT_OLD, RECOVERY_REQUIRED})
 # Phases after which the old engine set can no longer simply be resumed.
 DESTRUCTIVE = frozenset({TRANSFERRING, INITIALIZING, VERIFYING, REBUILD_OLD, REBUILDING_TRAINER})
@@ -104,9 +108,10 @@ class Rejected(ValueError):
 
 
 class TransactionFailed(RuntimeError):
-    def __init__(self, phase: str, message: str) -> None:
+    def __init__(self, phase: str, message: str, *, cause: str | None = None) -> None:
         super().__init__(f"{phase}: {message}")
         self.phase = phase
+        self.cause = cause  # failure class on the REBUILD_OLD record (None -> "other")
 
 
 class RecoveryRequired(RuntimeError):
@@ -206,6 +211,8 @@ class IslandStatus:
     admission_open: bool
     fork_incomplete: Any = None
     last_result: Mapping[str, Any] | None = None
+    recovery: Mapping[str, Any] | None = None  # 3.7 restart recovery awaiting confirm
+    incarnation: Mapping[str, Any] | None = None
 
 
 class IslandController:
@@ -230,11 +237,13 @@ class IslandController:
         inbox: "CommandInbox | None" = None,
         trainer_rebuilder: Callable[..., Mapping[str, Any]] | None = None,
         trainer_edges: Callable[[], Mapping[str, Any]] | None = None,
+        max_recovery_attempts: int = 3,
     ) -> None:
         if initial_config not in configs:
             raise Rejected(f"initial config {initial_config!r} is unknown")
         self.state_dir = Path(state_dir).expanduser()
         self.configs = dict(configs)
+        self.initial_config = initial_config
         self.attestation = attestation
         self.profile = profile
         self.runtime_fingerprint = runtime_fingerprint
@@ -281,6 +290,19 @@ class IslandController:
         self.admission_open = True
         self.last_outcome: dict[str, Any] | None = None
         self.recovery_required: str | None = None
+        # 3.7 restart recovery (recovery-design.md §3): the membership of the
+        # committed config was rebuilt at open() and awaits confirm_recovery()
+        # after the driver's first full publication; admission stays closed.
+        self.recovery_pending: dict[str, Any] | None = None
+        if int(max_recovery_attempts) < 1:
+            raise Rejected("max_recovery_attempts must be >= 1")
+        self.max_recovery_attempts = int(max_recovery_attempts)
+        self._recovery_unverified = 0  # consecutive planned recoveries never verified
+        self._recovery_open_id: str | None = None  # planned, not verified/failed/superseded
+        import uuid as _uuid
+
+        self.incarnation = {"pid": _os.getpid(), "id": _uuid.uuid4().hex[:12],
+                            "wall_time": self._wall()}
         self._watchdog_fired = threading.Event()
         self._replay()
 
@@ -308,6 +330,16 @@ class IslandController:
                 open_txs.pop(r["tx_id"], None)
                 if r["phase"] == RECOVERY_REQUIRED:
                     self.recovery_required = r.get("error") or "recovery required"
+            elif kind == "recovery":
+                status = r.get("status")
+                if status == "planned":
+                    self._recovery_unverified += 1
+                    self._recovery_open_id = r["tx_id"]
+                elif status == "verified":
+                    self._recovery_unverified = 0
+                    self._recovery_open_id = None
+                elif status in ("failed", "superseded"):
+                    self._recovery_open_id = None
         self._fork_epoch = max(self._fork_epoch, self.journal.epochs.fork_membership_epoch)
         self._open_after_restart = list(open_txs)
 
@@ -402,7 +434,8 @@ class IslandController:
         tx = self._tx
         if tx is None or tx.tx_id != tx_id or self.recovery_required:
             return
-        self._enter_recovery(tx_id, f"watchdog could not kill the target generation in {phase}: "
+        self._enter_recovery(tx_id, cause="watchdog_unresolved",
+                             error=f"watchdog could not kill the target generation in {phase}: "
                                     f"{list(errors)[:2]!r}")
 
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
@@ -458,6 +491,7 @@ class IslandController:
             self._enter_recovery(None, f"fork membership epoch {fork_epoch} disagrees with the "
                                        f"journal ({expected})")
         epochs = self.journal.epochs
+        rebuild_after_restart: list[tuple[str, str]] = []
         for tx_id in self._open_after_restart:
             request = next(r for r in self.journal.records
                            if r["kind"] == "request" and r["tx_id"] == tx_id)
@@ -471,6 +505,12 @@ class IslandController:
                 self._record("phase", tx_id=tx_id, request_id=request["request_id"],
                              phase=CANCELLED, config_epoch=epochs.config_epoch,
                              fork_epoch=self._fork_epoch, error="learner restarted before release")
+            elif (request["body"].get("kind", "rollout-only") == "rollout-only"
+                  and REBUILDING_TRAINER not in phases):
+                # 3.7 "release 后重建旧 rollout" (recovery-design.md §3.2, D1): the
+                # committed members are the old set; the recovery below rebuilds
+                # them and the transaction ends REBUILT_OLD.
+                rebuild_after_restart.append((tx_id, request["request_id"]))
             else:
                 # E3: the trainer was rebuilt from startup args; the hint names the cut
                 # a manual recovery would restore (trainer_transition.recovery_decision).
@@ -481,10 +521,12 @@ class IslandController:
                 self._enter_recovery(tx_id, "learner restarted after release, before commit")
         self._open_after_restart = []
         if self.recovery_required is None:
-            members = pool.members()
-            if frozenset(epochs.members) and members != frozenset(epochs.members):
-                self._enter_recovery(None, f"serving members {sorted(members)} differ from the "
-                                           f"committed members {sorted(epochs.members)}")
+            members = frozenset(pool.members())
+            committed = frozenset(epochs.members)
+            if committed and members != committed:
+                self._recover_membership(pool, committed, members, rebuild_after_restart)
+            elif committed:
+                self._finish_rebuilt_after_restart(rebuild_after_restart)
             elif not epochs.members:
                 self.journal.compare_and_swap(
                     expected_config_epoch=epochs.config_epoch,
@@ -493,12 +535,270 @@ class IslandController:
                 )
         return self.inspect()
 
-    def _enter_recovery(self, tx_id: str | None, error: str) -> None:
+    # ------------------------------------------------------------------ restart recovery (3.7)
+    def _finish_rebuilt_after_restart(self, txs: list[tuple[str, str]]) -> None:
+        epochs = self.journal.epochs
+        for tx_id, request_id in txs:
+            self._record("phase", tx_id=tx_id, request_id=request_id, phase=REBUILT_OLD,
+                         config_epoch=epochs.config_epoch, fork_epoch=self._fork_epoch,
+                         recovered_after_restart=True,
+                         error="learner restarted after release, before commit: the committed "
+                               "(old) members were rebuilt")
+
+    def _recovery_precondition(self, pool: ElasticRolloutPool, committed: frozenset[str],
+                               actual: frozenset[str]) -> str | None:
+        """Why the committed config cannot be recovered by rollout cell start/stop
+        (recovery-design.md §2): None when it can."""
+        epochs = self.journal.epochs
+        cfg = self.configs.get(epochs.config_id)
+        if cfg is None:
+            return f"committed config {epochs.config_id!r} is unknown"
+        initial = self.configs[self.initial_config]
+        if cfg.trainer != initial.trainer or cfg.dims != initial.dims:
+            return (f"committed config {cfg.name!r} has another trainer shape than the startup "
+                    f"config {initial.name!r}: the trainer was rebuilt from startup args")
+        if cfg.rollout_engine_gpus != initial.rollout_engine_gpus:
+            return f"committed config {cfg.name!r} changes the engine shape"
+        states = getattr(pool, "member_states", None)
+        if callable(states):
+            try:
+                described = dict(states() or {})
+            except Exception as exc:  # noqa: BLE001 - unknown cell state: do not act
+                return f"member states unavailable: {exc!r}"
+            unknown = sorted(committed - set(described))
+            if unknown:
+                return f"committed members {unknown} are not cells the fork declares"
+            unbound = sorted(m for m in committed - actual
+                             if (described[m] or {}).get("state") == "unbound")
+            if unbound:
+                return f"committed members {unbound} are bound to no bundle (role transfer binding lost)"
+        return None
+
+    def _recover_membership(self, pool: ElasticRolloutPool, committed: frozenset[str],
+                            actual: frozenset[str], rebuild_after_restart: list[tuple[str, str]]) -> None:
+        """Rebuild the committed rollout membership after a restart (recovery-design.md §3).
+
+        Difference-based (target = epochs.json members, never a replay of past
+        transactions), so a repeated run is idempotent. Fork calls go through
+        ``_fork_call`` under a ``rec-*`` pseudo transaction, so a crash in the
+        middle is replayed by ``_replay``/``open`` like any transaction's. Ends
+        with ``recovery_pending`` set and admission closed: the driver's first
+        full publication then covers the rebuilt members and
+        :meth:`confirm_recovery` verifies before admission reopens. Any
+        failure, timeout or spent budget is RECOVERY_REQUIRED (design (a))."""
+        epochs = self.journal.epochs
+        if self._recovery_open_id is not None:
+            self._record("recovery", tx_id=self._recovery_open_id, status="superseded",
+                         by=self.incarnation["id"])
+            self._recovery_open_id = None
+        if self._recovery_unverified >= self.max_recovery_attempts:
+            self._enter_recovery(None, f"recovery budget spent: {self._recovery_unverified} "
+                                       f"consecutive recoveries were never verified "
+                                       f"(max {self.max_recovery_attempts})")
+            return
+        why = self._recovery_precondition(pool, committed, actual)
+        if why is not None:
+            self._enter_recovery(None, f"serving members {sorted(actual)} differ from the committed "
+                                       f"members {sorted(committed)} and cannot be recovered: {why}")
+            return
+        rid = f"rec-{epochs.config_epoch}-{self._fork_epoch}-{self.incarnation['id']}"
+        deadline = self._wall() + self.timeouts.recovery
+        tx = _Tx(rid, "", {}, None, deadline, phase=RECOVERING)  # type: ignore[arg-type]
+        self._recovery_unverified += 1
+        self._recovery_open_id = rid
+        self._record("recovery", tx_id=rid, status="planned", attempt=self._recovery_unverified,
+                     incarnation=dict(self.incarnation), config_id=epochs.config_id,
+                     config_epoch=epochs.config_epoch, fork_epoch=self._fork_epoch,
+                     target=sorted(committed), actual=sorted(actual),
+                     stop=sorted(actual - committed), start=sorted(committed - actual),
+                     deadline_wall=deadline)
+        self.admission_open = False
+        self._watchdog_fired.clear()
+        try:
+            passes = 0
+            while True:
+                self._check_deadline(tx, "recovery")
+                # a half-failed op (fork ``incomplete``) is retried first, like in a transaction
+                self._retry_incomplete(tx, recovery=False)
+                now = frozenset(pool.members())
+                extra, missing = now - committed, committed - now
+                if not extra and not missing:
+                    break
+                passes += 1
+                if passes > 3:
+                    raise TransactionFailed(RECOVERING, f"members {sorted(now)} did not converge to "
+                                                        f"{sorted(committed)} after {passes - 1} passes")
+                try:
+                    if extra:
+                        self._fork_call(tx, "stop", extra,
+                                        lambda e, m=extra: pool.remove_engines(m, epoch=e))
+                    if missing:
+                        self._fork_call(tx, "start", missing,
+                                        lambda e, m=missing: pool.add_engines(len(m), epoch=e, members=m))
+                except TransactionFailed:
+                    raise
+                except Exception:  # noqa: BLE001
+                    if self.recovery_required or self._pending_retry is None:
+                        raise  # a plain failure (e.g. no resources): not retried
+                    # half failed: the fork accepts only the retry of that op (next pass)
+            self._check_deadline(tx, "recovery mirror")
+            self._sync_fork_mirror()
+        except Exception as exc:  # noqa: BLE001 - every failure is RECOVERY_REQUIRED
+            self._record("recovery", tx_id=rid, status="failed", error=str(exc),
+                         fork_epoch=self._fork_epoch)
+            self._recovery_open_id = None
+            if self.recovery_required is None:
+                self._enter_recovery(rid, f"membership recovery failed: {exc}")
+            return
+        self._record("recovery", tx_id=rid, status="membership_restored",
+                     fork_epoch=self._fork_epoch, members=sorted(committed))
+        self._finish_rebuilt_after_restart(rebuild_after_restart)
+        self.recovery_pending = {"recovery_id": rid, "members": committed, "deadline_wall": deadline,
+                                 "config_id": epochs.config_id, "config_epoch": epochs.config_epoch}
+
+    def confirm_recovery(self, driver: Any) -> None:
+        """Release after a restart recovery (recovery-design.md §4): called by the
+        driver right after its first full publication. Verifies the rollout cells
+        (members, fork epoch, every serving engine's policy token, router
+        admission) and the trainer side (layout read back from the ranks, no
+        unconsumed batches) before admission reopens; any failed check is
+        RECOVERY_REQUIRED and raises :class:`RecoveryRequired`."""
+        pending = self.recovery_pending
+        if pending is None:
+            return
+        if self.recovery_required:
+            raise RecoveryRequired(self.recovery_required)
+        rid = pending["recovery_id"]
+        target: frozenset[str] = pending["members"]
+        checks: dict[str, Any] = {}
+        failures: list[str] = []
+        pool = driver.rollout
+        if self._wall() > pending["deadline_wall"]:
+            failures.append("recovery ran past T_recovery before verification")
+        members = frozenset(pool.members())
+        checks["members"] = sorted(members)
+        if members != target:
+            failures.append(f"serving members {sorted(members)} differ from the committed "
+                            f"members {sorted(target)}")
+        try:
+            status = dict(pool.membership_status())
+        except Exception as exc:  # noqa: BLE001
+            status = {"epoch": None, "error": repr(exc)}
+        checks["fork_epoch"] = status.get("epoch")
+        if status.get("epoch") != self._fork_epoch or status.get("incomplete"):
+            failures.append(f"fork membership status {status} disagrees with the journal epoch "
+                            f"{self._fork_epoch}")
+        state = getattr(driver, "published_state", None)
+        version = getattr(driver, "published_version", None)
+        checks["published_version"] = version
+        if state is None or version is None:
+            failures.append("no published policy")
+        else:
+            verify = getattr(driver.publisher, "verify_serving_policy", None)
+            if callable(verify):
+                try:
+                    verify(epoch=self._fork_epoch, token_rollout_id=version, state=state)
+                    checks["policy_token"] = "verified"
+                except Exception as exc:  # noqa: BLE001
+                    checks["policy_token"] = "failed"
+                    failures.append(f"serving engines do not all report the published policy: {exc}")
+            else:
+                checks["policy_token"] = "unavailable"
+        states = getattr(pool, "member_states", None)
+        if callable(states):
+            try:
+                described = dict(states() or {})
+                not_admitted = sorted(m for m in target if not (described.get(m) or {}).get("serving")
+                                      or (described.get(m) or {}).get("awaiting_admission"))
+                checks["router"] = {"not_admitted": not_admitted}
+                if not_admitted:
+                    failures.append(f"members {not_admitted} are not serving/admitted at the router")
+            except Exception as exc:  # noqa: BLE001
+                checks["router"] = "failed"
+                failures.append(f"member states unavailable: {exc!r}")
+        else:
+            checks["router"] = "unavailable"
+        cfg = self.configs.get(self.journal.epochs.config_id)
+        layout_fn = getattr(getattr(driver, "trainer", None), "actual_layout", None)
+        if cfg is not None and callable(layout_fn):
+            try:
+                layout = dict(layout_fn())
+            except Exception as exc:  # noqa: BLE001
+                checks["trainer_layout"] = "failed"
+                failures.append(f"trainer layout unreadable: {exc!r}")
+            else:
+                checks["trainer_layout"] = layout
+                dims = cfg.dims
+                bad = {d: (layout.get(d), dims[d]) for d in ("tp", "pp", "cp", "ep")
+                       if d in layout and int(layout[d]) != int(dims[d])}
+                if "world" in layout and int(layout["world"]) != int(cfg.trainer):
+                    bad["world"] = (layout["world"], cfg.trainer)
+                if bad:
+                    failures.append(f"trainer layout {bad} (actual, committed) differs")
+        else:
+            checks["trainer_layout"] = "unavailable"
+        ledger = getattr(driver, "ledger", None)
+        if ledger is not None:
+            unconsumed = list(ledger.unconsumed())
+            checks["unconsumed_batches"] = unconsumed
+            if unconsumed:
+                failures.append(f"unconsumed batches {unconsumed} at the restart point")
+        if failures:
+            self._record("recovery", tx_id=rid, status="failed", checks=checks, errors=failures)
+            self._recovery_open_id = None
+            self.recovery_pending = None
+            self._enter_recovery(rid, "recovery verification failed: " + "; ".join(failures))
+            raise RecoveryRequired(self.recovery_required)
+        self._record("recovery", tx_id=rid, status="verified", checks=checks,
+                     fork_epoch=self._fork_epoch, members=sorted(target))
+        self._recovery_unverified = 0
+        self._recovery_open_id = None
+        self.recovery_pending = None
+        self.admission_open = True
+
+    def _enter_recovery(self, tx_id: str | None, error: str, *, cause: str = "other") -> None:
+        """Island-level RECOVERY_REQUIRED (``scope=island``, ``request_id=None``), plus a
+        request-level terminal record for the transaction's request when ``tx_id`` is a
+        request transaction that has no terminal record yet (``scope=request``,
+        ``request_id=<id>``, ``cause``, ``island_record_seq`` -> the island record).
+
+        Revision (2026-10-02 user ruling, E1-D ④ chain 6r2): the island record alone left the
+        request (dn1) without a terminal record of its own; both are written now, with the
+        same error/epochs, so the request's status, the journal replay and the GPU judge
+        agree on one terminal state. ``cause`` names the failure class
+        (``stop_retry_deadline``, ``rebuild_old_failed``, ``watchdog_unresolved``, ...)."""
         self.recovery_required = error
         self.admission_open = False
-        self._record("phase", tx_id=tx_id, request_id=None, phase=RECOVERY_REQUIRED,
-                     config_epoch=self.journal.epochs.config_epoch, fork_epoch=self._fork_epoch,
-                     error=error)
+        epochs = {"config_epoch": self.journal.epochs.config_epoch, "fork_epoch": self._fork_epoch}
+        island = self._record("phase", tx_id=tx_id, request_id=None, phase=RECOVERY_REQUIRED,
+                              scope="island", cause=cause, error=error, **epochs)
+        request_id = self._request_of(tx_id)
+        if request_id is None or self._has_terminal(tx_id):
+            return
+        tx = self._tx if self._tx is not None and self._tx.tx_id == tx_id else None
+        deadline_wall = (tx.deadline_wall if tx is not None
+                         else self._by_request.get(request_id, {}).get("deadline_wall"))
+        if tx is not None:
+            with self._watchdog_lock:
+                tx.phase = RECOVERY_REQUIRED
+        self.last_outcome = {"tx_id": tx_id, "phase": RECOVERY_REQUIRED, "error": error, "cause": cause}
+        self._record("phase", tx_id=tx_id, request_id=request_id, phase=RECOVERY_REQUIRED,
+                     scope="request", cause=cause, error=error,
+                     island_record_seq=island.get("seq"), deadline_wall=deadline_wall,
+                     recovery_deadline_wall=(None if deadline_wall is None
+                                             else deadline_wall + self.timeouts.recovery),
+                     **epochs)
+
+    def _request_of(self, tx_id: str | None) -> str | None:
+        if tx_id is None:
+            return None
+        if self._tx is not None and self._tx.tx_id == tx_id:
+            return self._tx.request_id
+        return next((rid for rid, r in self._by_request.items() if r["tx_id"] == tx_id), None)
+
+    def _has_terminal(self, tx_id: str) -> bool:
+        return any(r["kind"] == "phase" and r.get("tx_id") == tx_id and r.get("request_id") is not None
+                   and r["phase"] in TERMINAL for r in self.journal.records)
 
     # ------------------------------------------------------------------ queries
     def inspect(self) -> IslandStatus:
@@ -507,6 +807,7 @@ class IslandController:
         last = next((r for r in reversed(self.journal.records)
                      if r["kind"] == "phase" and r["phase"] in TERMINAL), None)
         health = ("RECOVERY_REQUIRED" if self.recovery_required
+                  else "RECOVERING" if self.recovery_pending is not None
                   else "RECONFIGURING" if tx is not None else "RUNNING")
         return IslandStatus(
             health=health, config_id=epochs.config_id, config_epoch=epochs.config_epoch,
@@ -515,6 +816,10 @@ class IslandController:
             tx_deadline=tx.deadline_wall if tx else None, admission_open=self.admission_open,
             fork_incomplete=list(self._pending_retry) if self._pending_retry else None,
             last_result=last,
+            recovery=None if self.recovery_pending is None else {
+                "recovery_id": self.recovery_pending["recovery_id"],
+                "members": sorted(self.recovery_pending["members"])},
+            incarnation=dict(self.incarnation),
         )
 
     def status(self, request_id: str) -> dict[str, Any]:
@@ -526,6 +831,9 @@ class IslandController:
         epochs = self.journal.epochs
         if self.recovery_required:
             raise Rejected(f"island is RECOVERY_REQUIRED: {self.recovery_required}")
+        if self.recovery_pending is not None:
+            raise Rejected(f"island is recovering ({self.recovery_pending['recovery_id']}): "
+                           "requests are refused until the recovery is verified")
         if expected_epoch != epochs.config_epoch:
             raise Rejected(f"expected config epoch {expected_epoch}, current is {epochs.config_epoch}")
         source = epochs.config_id
@@ -675,6 +983,8 @@ class IslandController:
         epochs = self.journal.epochs
         if self.recovery_required:
             raise Rejected(f"island is RECOVERY_REQUIRED: {self.recovery_required}")
+        if self.recovery_pending is not None:
+            raise Rejected("island is recovering: requests are refused until the recovery is verified")
         if self.trainer_rebuilder is None:
             raise Rejected("no trainer rebuilder is wired on this island")
         if expected_epoch != epochs.config_epoch:
@@ -780,7 +1090,7 @@ class IslandController:
         return self.inbox.poll(self) if self.inbox is not None else []
 
     def has_pending(self) -> bool:
-        return self._tx is not None
+        return self._tx is not None or self.recovery_pending is not None
 
     def _finish(self, tx: _Tx, phase: str, **fields: Any) -> None:
         # what the driver puts on the tape's rl_reconfiguration (error / cause / engines)
@@ -838,6 +1148,11 @@ class IslandController:
         phase cancels the request instead of pausing the fleet.
         """
         if self.recovery_required:
+            raise RecoveryRequired(self.recovery_required)
+        if self.recovery_pending is not None:
+            self._enter_recovery(self.recovery_pending["recovery_id"],
+                                 "safe point reached before the restart recovery was confirmed")
+            self.recovery_pending = None
             raise RecoveryRequired(self.recovery_required)
         tx = self._tx
         if tx is None:
@@ -949,7 +1264,8 @@ class IslandController:
         while self._pending_retry is not None:
             op, cells = self._pending_retry
             if self._remaining(tx, recovery=recovery) <= 0:
-                raise TransactionFailed(tx.phase, f"retry of {op} {list(cells)} ran past the deadline")
+                raise TransactionFailed(tx.phase, f"retry of {op} {list(cells)} ran past the deadline",
+                                        cause=f"{op}_retry_deadline")
             members = frozenset(cells)
             try:
                 if op == "stop":
@@ -1342,7 +1658,11 @@ class IslandController:
             self._tx = None
             raise RecoveryRequired(self.recovery_required)
         detail = {"cause": cause, "inconsistent_engines": sorted(inconsistent_engines)}
-        self._phase(tx, REBUILD_OLD, error=error, **detail)
+        # 2026-10-02 ruling (E1-D ④): exactly one bounded REBUILD_OLD after the transaction
+        # deadline; its limit is deadline_wall + T_recovery, the transaction deadline itself
+        # is never reset or extended, and a second failure is RECOVERY_REQUIRED at once.
+        self._phase(tx, REBUILD_OLD, error=error, deadline_wall=tx.deadline_wall,
+                    recovery_deadline_wall=tx.deadline_wall + self.timeouts.recovery, **detail)
         try:
             self._retry_incomplete(tx, recovery=True)
             if tx.extra.get("started"):
@@ -1369,7 +1689,8 @@ class IslandController:
             if self._remaining(tx, recovery=True) <= 0:
                 raise TransactionFailed(REBUILD_OLD, "recovery budget spent")
         except Exception as exc:  # noqa: BLE001
-            self._enter_recovery(tx.tx_id, f"rebuild of the old engine set failed: {exc}")
+            self._enter_recovery(tx.tx_id, f"rebuild of the old engine set failed: {exc}",
+                                 cause="rebuild_old_failed")
             self._tx = None
             raise RecoveryRequired(self.recovery_required) from exc
         self._sync_fork_mirror()

@@ -31,10 +31,16 @@ outer progress). Terminal states besides ``outer_recorded``:
 Non-terminal: ``carried_over`` -- a leftover group the engine keeps for a
 later round (F5). It must later be consumed (``prepared`` in a later round) or
 become ``filtered``; :meth:`BatchLedger.open_carried_over` lists what is left
-and a cut treats it as unconsumed. The Miles engine does not report
-carried-over groups yet (``RolloutBatchHandle.carried_over is None``, audited
-in 4.1); the ledger then records ``carried_over_reported: false`` instead of
-guessing.
+and a cut treats it as unconsumed. Under Miles this is a legal boundary, not
+a verified path: over-sampling surplus is never returned to the buffer (4.1
+audit, ``sglang_rollout.py:505-510``), so with ``--rl-elastic`` metadata the
+engine reports ``carried_over = 0`` (``buffer_length == 0`` ->
+``RolloutBatchHandle.carried_over = 0``) and every round records
+``carried_over_report: carried_over_reported=true, carried_over=0``; without
+that metadata it reports None and the ledger writes
+``carried_over_reported: false`` instead of guessing. :meth:`carried_over` /
+:meth:`filter_carried` have no production caller (unit-tested only); the first
+cut version requires ``carried_over == 0`` (``cut.py``).
 
 Storage is the same fsync'd JSONL writer as the reconfiguration journal (one
 record per transition) so the ledger survives a learner crash; "in memory it
@@ -217,6 +223,7 @@ class BatchLedger:
                 reason="aborted in flight when the batch filled (partial_rollout off)",
                 mechanism="miles generate_rollout abort",
             )
+            self._replay(self._journal.records[-1])  # visible to cut_summary() before a reopen
         carried = getattr(batch, "carried_over", None)
         self._journal.append(
             "carried_over_report", rollout_id=rid, attempt=attempt,

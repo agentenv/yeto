@@ -80,6 +80,10 @@ FORK_COMMITS: frozenset[str] = frozenset({
     "2f23a0fca9b80f6a7300da401703c343014b03c0",  # 5c1b49eb + F-R1 (placement/worker files only)
     "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",  # 2f23a0fc + M5 (LoRA dp_invariant_state.py only)
     "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",  # fb04d6ff + M5 error text/docstring/tests
+    # e3a11ab3 + M3 (Qwen3.8-Next LoRA layout) + A27 (worker loss / bounded
+    # weight-update group): `git diff --name-only e3a11ab38..1023269 -- miles`
+    # has no loss_hub file; arguments.py only adds parser entries.
+    "1023269412bf4e54a1d95c8d2deaee795871aa72",
 })
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}

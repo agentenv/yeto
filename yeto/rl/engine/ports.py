@@ -112,6 +112,9 @@ class RolloutBatchHandle:
     # ports path, cut-audit §3). None = not reported.
     data_cursor: Mapping[str, int] | None = field(default=None, compare=False)
     buffer_length: int | None = None
+    # IR-3: samples whose actual weight_version(s) differed from the driver's
+    # expected_policy_version (ABORTED on the rollout side). None = not reported.
+    policy_age_violation: int | None = None
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
@@ -135,7 +138,13 @@ class PlacementDescription:
 
 @runtime_checkable
 class RolloutPool(Protocol):
-    def generate(self, rollout_id: int) -> RolloutBatchHandle: ...
+    # IR-3: ``expected_policy_version`` is the driver's policy token
+    # (``driver.policy_token(rollout_id, policy_hash)``); the pool hands it to
+    # the rollout side so agentic generate code can compare it with the
+    # per-call ``weight_version`` the engines report (age 0: must be equal).
+    def generate(
+        self, rollout_id: int, *, expected_policy_version: str | None = None
+    ) -> RolloutBatchHandle: ...
     def abort(self) -> None: ...
     def members(self) -> frozenset[str]: ...
     # Optional (4.2): def data_cursor(self) -> Mapping[str, int] | None: ...

@@ -382,11 +382,21 @@ class RLRunConfig:
     # 3.x (--rl-elastic): the fork's cordon / drain / cordoned admission need the
     # Miles router (fork server_cell._assert_cordonable, admit_cordoned).
     use_miles_router: bool = False
+    # A27 (--rl-elastic): bound the fork's trainer<->engine weight-update group
+    # rendezvous (--update-weight-group-timeout-s) so a member dying mid-publish
+    # fails the publish (abort -> REBUILD_OLD) instead of stalling the run.
+    # None = flag not emitted (fork default: torch's process-group timeout).
+    update_weight_group_timeout_s: float | None = None
 
 
 # --------------------------------------------------------------------------
 # Resolution
 # --------------------------------------------------------------------------
+
+
+# A27: seconds the fork waits for the weight-update NCCL group during an
+# elastic member publish (needs Miles >= image-m3a27; older forks reject the flag).
+ELASTIC_UPDATE_WEIGHT_GROUP_TIMEOUT_S = 120.0
 
 
 def select_gdn_recipe(provider) -> GdnRecipe:
@@ -829,6 +839,9 @@ def resolve_rl_run_config(
         distributed_timeout_minutes=getattr(args, "rl_distributed_timeout_minutes", 10),
         deterministic_trainer=bool(getattr(args, "rl_deterministic_trainer", False)),
         use_miles_router=bool(getattr(args, "rl_elastic", False)),
+        update_weight_group_timeout_s=(
+            ELASTIC_UPDATE_WEIGHT_GROUP_TIMEOUT_S if getattr(args, "rl_elastic", False) else None
+        ),
         trainer_dp_edges=bool(getattr(args, "rl_elastic", False)
                               and getattr(args, "rl_elastic_trainer_edges", False)),
     )

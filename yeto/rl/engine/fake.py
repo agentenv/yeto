@@ -95,6 +95,10 @@ class FakeEngine:
     base_model_revision: str = MODEL_REVISION
     lora_config_hash: str = LORA_CONFIG_HASH
     calls: list[tuple] = field(default_factory=list)
+    # IR-3: the expected_policy_version each generate() call received, and the
+    # rounds whose samples drifted from it (rollout side reports ABORTED).
+    expected_policy_versions: list = field(default_factory=list)
+    policy_drift_rounds: set[int] = field(default_factory=set)
     zero_grad_rounds: set[int] = field(default_factory=set)
     failed_step_rounds: set[int] = field(default_factory=set)
     unacked_member_rounds: dict[int, str] = field(default_factory=dict)
@@ -147,9 +151,12 @@ class FakeRolloutPool:
     def __init__(self, engine: FakeEngine) -> None:
         self.engine = engine
 
-    def generate(self, rollout_id: int) -> RolloutBatchHandle:
+    def generate(
+        self, rollout_id: int, *, expected_policy_version: str | None = None
+    ) -> RolloutBatchHandle:
         e = self.engine
         e.calls.append(("generate", rollout_id))
+        e.expected_policy_versions.append(expected_policy_version)  # IR-3
         if e.engine_placement_colocated() and e.trainer_resident:
             raise RuntimeError("generation while the colocated trainer is resident")
         if e.published is None:
@@ -174,8 +181,13 @@ class FakeRolloutPool:
                     3 * e.samples_per_group,
                 )
             )
+        drifted = (
+            rollout_id in e.policy_drift_rounds
+            or (expected_policy_version is not None and expected_policy_version != token)
+        )
         return RolloutBatchHandle(
-            rollout_id, version, digest, tuple(groups), len(groups), 0, payload=object()
+            rollout_id, version, digest, tuple(groups), len(groups), 0, payload=object(),
+            policy_age_violation=(1 if drifted else None),
         )
 
     def abort(self) -> None:

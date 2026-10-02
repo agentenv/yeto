@@ -28,6 +28,7 @@ from typing import Any
 from ..algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
 from ..capabilities import R0_MECHANISMS, EngineCapabilities, ExecutionCapabilities
 from . import LoopRunner
+from .config import MilesConfigError
 
 ENGINE_NAME = "miles-upstream"
 
@@ -154,12 +155,21 @@ MILES_DECLARED: dict[str, str] = {
 # -- miles` touches only megatron_utils/lora/dp_invariant_state.py, reached
 # only with --lora-dp-invariant-state (default off); default training/loss
 # path unchanged (evidence .../2026-09-30-img-e3a11ab).
+# 1023269 = e3a11ab3 + M3 + A27 (image-m3a27), same basis: `git diff
+# --name-only e3a11ab38..1023269 -- miles miles_plugins` touches
+# megatron_utils/model.py (a new is_qwen3_8_next_model LoRA-injection branch
+# only), update_weight/hf_weight_iterator_direct.py, utils/lora/*,
+# miles_plugins/models/qwen3_8_next/lora.py, sglang_utils/sglang_api_client.py,
+# weight_update/protocols/broadcast.py, utils/workers/ray_worker_manager.py and
+# parser entries in arguments.py -- no loss_hub/training-loss file (evidence
+# .../evidence/ports-image/2026-10-02-m3a27).
 _PINS_0AF62F4D_PLUS = frozenset({
     "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
     "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
     "2f23a0fca9b80f6a7300da401703c343014b03c0",
     "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",
     "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",
+    "1023269412bf4e54a1d95c8d2deaee795871aa72",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
@@ -373,6 +383,104 @@ def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
     return None
 
 
+def side_effect_log_kwargs(elastic: Any) -> dict[str, Any]:
+    """3.3 X5 evidence switch (YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG, launcher
+    --rl-test-tool-side-effect-log): the pool journals every execution of the
+    injected tool in ``<elastic state dir>/side_effects.jsonl``."""
+    from .rollout import SIDE_EFFECT_LOG_FILE, side_effect_log_enabled
+
+    if elastic is None or not side_effect_log_enabled():
+        return {}
+    return {"side_effect_log": Path(elastic.controller.state_dir) / SIDE_EFFECT_LOG_FILE}
+
+
+def harness_source(miles_args: Any, elastic: Any = None) -> Any:
+    """IR-2: where the drain probe / load sample read harness counts from.
+
+    ``elastic.harness_board`` when wired; the island's named ``HarnessBoard``
+    actor when a custom agent function (agentic generate) is configured;
+    ``HARNESS_NOT_AGENTIC`` (explicit zeros) otherwise. Never None here: a
+    pool built with ``harness=None`` reports "harness counts unknown".
+    """
+    from .rollout import HARNESS_NOT_AGENTIC
+
+    board = getattr(elastic, "harness_board", None) if elastic is not None else None
+    if board is not None:
+        return board
+    if getattr(miles_args, "custom_agent_function_path", None):
+        from .elastic_wiring import LazyBoardActor
+        from ..tool_wait import harness_board_actor
+
+        return LazyBoardActor(int(getattr(miles_args, "yeto_rl_learner_id", 0) or 0),
+                              factory=harness_board_actor)
+    return HARNESS_NOT_AGENTIC
+
+
+# IR-1: harness preflight hook. Called by ``run_ports_island`` after the A1
+# contract preflight and BEFORE connect_island_ray / any placement or model
+# allocation; an exception aborts the island with zero allocate calls.
+HarnessPreflight = Callable[[Any, Any], None]  # (miles_args, launch) -> None
+HARNESS_PREFLIGHT_ENV = "YETO_HARNESS_PREFLIGHT"  # "module:callable" / "module.callable"
+
+
+def resolve_harness_preflight(miles_args: Any, environ: Any = None) -> HarnessPreflight | None:
+    """The hook from ``miles_args.yeto_harness_preflight`` or the environment (dotted path)."""
+    environ = os.environ if environ is None else environ
+    spec = getattr(miles_args, "yeto_harness_preflight", None) or environ.get(HARNESS_PREFLIGHT_ENV)
+    if not spec:
+        return None
+    if callable(spec):
+        return spec
+    import importlib
+
+    module, sep, name = str(spec).partition(":")
+    if not sep:
+        module, _, name = module.rpartition(".")
+    if not module or not name:
+        raise MilesConfigError(f"harness preflight {spec!r} is not module:callable")
+    hook = getattr(importlib.import_module(module), name)
+    if not callable(hook):
+        raise MilesConfigError(f"harness preflight {spec!r} is not callable")
+    return hook
+
+
+def preflight_stage(
+    miles_args: Any,
+    launch: Any,
+    algorithm: AlgorithmSpec,
+    *,
+    yeto_policy_sync: bool,
+    harness_preflight: HarnessPreflight | None = None,
+) -> tuple[str, EngineCapabilities, Any, Any]:
+    """Everything ``run_ports_island`` checks before Ray / placement / allocation.
+
+    Returns ``(fingerprint, capabilities, profile, elastic)``. The harness
+    preflight (IR-1) runs last, after the contract preflight and the elastic
+    wiring checks; a failure here means no allocate call ever happens.
+    """
+    fingerprint = ports_runtime_fingerprint(launch)
+    capabilities = with_partitioned_serial(
+        miles_capabilities(
+            fingerprint,
+            unverified_mechanisms=getattr(miles_args, "yeto_rl_unverified_mechanisms", ()),
+        )
+    )
+    profile = execution_profile_for(
+        miles_args,
+        launch,
+        algorithm,
+        yeto_policy_sync=yeto_policy_sync,
+        expected_sha256=expected_algorithm_sha256(miles_args),
+    )
+    preflight(profile, algorithm, capabilities)  # A1: before any GPU process
+    # E1 (3.x), opt-in: a bad manifest/attestation fails here, before Ray.
+    elastic = elastic_wiring_for(miles_args, profile=profile, fingerprint=fingerprint)
+    hook = harness_preflight if harness_preflight is not None else resolve_harness_preflight(miles_args)
+    if hook is not None:
+        hook(miles_args, launch)  # IR-1: harness preflight before placement/allocation
+    return fingerprint, capabilities, profile, elastic
+
+
 def preflight(profile: Any, algorithm: AlgorithmSpec, capabilities: EngineCapabilities) -> None:
     """A1: the launcher-bound profile agrees with the runtime AlgorithmSpec and the
     declared capabilities, before any GPU process exists (before connect_island_ray)."""
@@ -481,11 +589,13 @@ def compose_island(
             runner=runner,
             args=miles_args,
             load_tool_wait=load_tool_wait_source(miles_args, elastic),
+            harness=harness_source(miles_args, elastic),
             **(
                 {"declared_cells": resolve_declared_cells(
                     inference_controller, runner, elastic.declared_cells),
                  "track_timeout_s": elastic.track_timeout_s,
-                 "tool_wait_board": elastic.tool_wait_board}
+                 "tool_wait_board": elastic.tool_wait_board,
+                 **side_effect_log_kwargs(elastic)}
                 if elastic is not None
                 else {}
             ),
@@ -898,6 +1008,9 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         # 3.8 pause-budget inputs, only when the learner was given them.
         **{k: config[k] for k in ("quorum_timeout_s", "idle_flow_timeout_s", "pause_margin")
            if config.get(k) is not None},
+        # 3.7 restart recovery budget (--rl-elastic-max-recovery-attempts)
+        **({"max_recovery_attempts": int(config["max_recovery_attempts"])}
+           if config.get("max_recovery_attempts") is not None else {}),
         # 4.7: pool GPU ids (manifest resources.gpus, in logical-bundle order), only
         # with trainer edges; every other elastic run keeps the described pool.
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
@@ -957,8 +1070,13 @@ def run_ports_island(
     lora_config_hash: str,
     layout_hash: str,
     yeto_policy_sync: bool,
+    harness_preflight: HarnessPreflight | None = None,
 ):
-    """Run one ports-path island to completion on real upstream Miles."""
+    """Run one ports-path island to completion on real upstream Miles.
+
+    ``harness_preflight`` (IR-1): injectable hook run by :func:`preflight_stage`
+    before Ray is connected and before any placement/model allocation.
+    """
 
     from yeto.rl import MILES_NEXT_COMMIT
     from yeto.rl.miles import _append_rl_event
@@ -968,23 +1086,10 @@ def run_ports_island(
     require_run_plugin()  # before any upstream component or model exists
     from ..overlap import loop_eval_starter
 
-    fingerprint = ports_runtime_fingerprint(launch)
-    capabilities = with_partitioned_serial(
-        miles_capabilities(
-            fingerprint,
-            unverified_mechanisms=getattr(miles_args, "yeto_rl_unverified_mechanisms", ()),
-        )
-    )
-    profile = execution_profile_for(
-        miles_args,
-        launch,
-        algorithm,
-        yeto_policy_sync=yeto_policy_sync,
-        expected_sha256=expected_algorithm_sha256(miles_args),
-    )
-    preflight(profile, algorithm, capabilities)  # A1: before any GPU process
-    # E1 (3.x), opt-in: a bad manifest/attestation fails here, before Ray.
-    elastic = elastic_wiring_for(miles_args, profile=profile, fingerprint=fingerprint)
+    fingerprint, capabilities, profile, elastic = preflight_stage(
+        miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync,
+        harness_preflight=harness_preflight,
+    )  # contract preflight(...) + harness preflight: before connect_island_ray()
     from .e2_harness import load_plan as load_e2_harness_plan
 
     e2_plan = load_e2_harness_plan()  # TEST ONLY: None unless an E2 harness snapshot

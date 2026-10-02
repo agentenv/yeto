@@ -72,6 +72,16 @@ fork `yeto/ports` 2f23a0fc（F-R1）的 cell 绑定（`rebind_cell`/`unbind_cell
 - **已知限制，不作为本轮判据**：已提交配置不等于启动配置时重启，island 转 RECOVERY_REQUIRED（fork 回到启动形状，与 journal 成员不一致）。这是 G11"首版重启回启动形状"的设计语义，记录在此，本轮不测。
 - **A9 f5**：以设计语义为预期，即 RECOVERY_REQUIRED 加 `trainer_recovery_hint`（`restore_old`，指向该 cut）。已与 `evidence/infra-e3/plan-v3.md` 第 99 行 f5 的写法核对，一致。
 
+### 7.2 用户裁定 (b) 已实现（2026-10-01，INFRA-E1，CPU 通过；GPU 未跑）
+
+用户（SESSION6 §7.3）改选 **(b)**：实现"已提交成员配置的 learner 重启恢复"，(c) 保留为回归测试，恢复失败走 (a) 兜底。设计与失败矩阵见 `recovery-design.md`；实现在分支 infra-e1-recovery（controller `open()` 差分恢复 + `confirm_recovery` 放行；fork 不改）。对 ⑤⑥⑦ 的影响：
+
+- **⑤**：按 `plan.md` 原判据直接执行——up 提交（T4R2S2→T4R4S0）后在 COMMITTED 处 kill learner，重启后该请求 `SUCCEEDED(recovered_after_restart)`，fork 由恢复启动 c2/c3，首次发布后 `recovery verified`，成员 = journal 成员。§7.1 的"先 up 再在 down 的 COMMITTED kill"安排降为回归用例（期望：无 `recovery` 记录）。
+- **⑥**：不变（CANCELLED，无恢复）。
+- **⑦**：可在任意 epoch 做；journal epoch > 0 时重启对账 `restore_membership_state(epoch=journal 值, expected_current_epoch=0)` 后由恢复补齐成员。
+- 新增判据（运行前固定，补充不替代原判据）：恢复成功的运行，journal 顺序 `recovery planned → fork_op(rec-*) done… → recovery membership_restored → recovery verified`，tape 有 `rl_reconfiguration result=RECOVERED`，其后 ledger 新 `prepared` 的 policy token 等于重启发布的 token；恢复失败的运行必须 `recovery failed` + `RECOVERY_REQUIRED`，且 ledger 无新 `prepared`。
+- A9 f5（role-transfer 后 kill learner）：仍以 RECOVERY_REQUIRED + `trainer_recovery_hint` 为预期（trainer 形状不等于启动形状，恢复前置拒绝）。
+
 ## 8. `--rl-elastic` 强制启用 Miles router（2026-09-30，运行前）
 
 F-E1 重跑（`evidence/infra-v2-b1/fe1r/`）暴露：fork 的 cordon、drain_cells、admit_cells 以及 cordoned update_weights 都要求 `--use-miles-router`（`server_cell._assert_cordonable`、`inference_controller.start_update_weights`）。自提交 ae42dcf 起，`--rl-elastic` 的 Miles argv 固定带 `--use-miles-router`，默认 argv 不变。岛启动前另做一次检查（`check_elastic_miles_args`），缺少 Miles router、colocate、rollout offload 三种情况直接拒绝。

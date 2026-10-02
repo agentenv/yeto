@@ -101,6 +101,28 @@ INJECT_TOOL_WAIT_ENV = "YETO_RL_TEST_INJECT_TOOL_WAIT_S"
 # the old routing and the controller must end in RECOVERY_REQUIRED, never CANCELLED.
 INJECT_UNDRAIN_FAIL_ENV = "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"
 INJECTED_TOOL_WAIT_ID = "yeto-test-injected-tool-wait"
+# Test-only (A4bc / 3.3 X5 "no replay"): when set (any non-empty value; "1"
+# from the launcher), every execution of the injected tool is journaled in
+# ``<elastic state dir>/side_effects.jsonl`` (tool_wait.ToolSideEffectLog):
+# one ``tool_side_effect`` record *before* the tool wait starts, keyed by
+# (trajectory_id, tool_call_id). The judge requires exactly one record per
+# pair and none after the cancelled transaction's CANCELLED phase.
+SIDE_EFFECT_LOG_ENV = "YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG"
+SIDE_EFFECT_LOG_FILE = "side_effects.jsonl"
+
+
+def side_effect_log_enabled(environ: Any = None) -> bool:
+    import os
+
+    raw = (os.environ if environ is None else environ).get(SIDE_EFFECT_LOG_ENV)
+    return bool(raw) and str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+def injected_tool_call_id(members: frozenset[str]) -> str:
+    """Deterministic tool-call id of the injected tool for one drain of ``members``:
+    a replayed drain of the same members yields the *same* id (journaled twice =
+    replay), a drain of other members a different one."""
+    return f"{INJECTED_TOOL_WAIT_ID}:drain:{','.join(sorted(members))}"
 
 
 def injected_start_delay(environ: Any = None) -> float | None:
@@ -381,6 +403,9 @@ def handle_from_metadata(
         nonzero_advantages=(
             int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
         ),
+        policy_age_violation=(
+            int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
+        ),
     )
 
 
@@ -395,6 +420,9 @@ def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
 # ``stock``: Miles' own generate (no custom generate function) makes no tool
 # calls, so 0 is known; any other custom generate without a board is unknown.
 TOOL_WAIT_NO_BOARD_STOCK = "stock-generate"
+# IR-2: the island runs no agent harness (no custom agent function): harness
+# counts are known zeros (tool_wait.HARNESS_ZERO), never "unknown".
+HARNESS_NOT_AGENTIC = "not-agentic"
 
 
 def _engine_load(entries: Any) -> tuple[int, int] | None:
@@ -444,10 +472,22 @@ class MilesRolloutPool:
         bundles: Any = None,
         gpus_per_engine: int | None = None,
         load_tool_wait: Any = None,
+        harness: Any = None,
+        side_effect_log: Any = None,
     ) -> None:
+        # 3.3 X5 evidence: tool_wait.ToolSideEffectLog (or its path); None = off.
+        if side_effect_log is not None and not hasattr(side_effect_log, "record"):
+            from ..tool_wait import ToolSideEffectLog
+
+            side_effect_log = ToolSideEffectLog(side_effect_log)
+        self._side_effects = side_effect_log
         # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
         # tool-wait count, so trajectory_load() is unknown (None).
         self._tool_wait_board = tool_wait_board
+        # IR-2: harness board (tool_wait.HarnessBoard, local or actor handle),
+        # HARNESS_NOT_AGENTIC for islands without a harness (explicit zeros),
+        # or None = unknown (fails the drain closed).
+        self._harness = harness
         # 1.7 load samples read tool waits from ``load_tool_wait`` (a board,
         # TOOL_WAIT_NO_BOARD_STOCK, or None = unknown); default: the drain board.
         self._load_tool_wait = load_tool_wait if load_tool_wait is not None else tool_wait_board
@@ -543,11 +583,23 @@ class MilesRolloutPool:
         """The cursor the rollout metadata reported after the last batch (cache)."""
         return None if self._last_cursor is None else dict(self._last_cursor)
 
-    def generate(self, rollout_id: int) -> RolloutBatchHandle:
+    def generate(
+        self, rollout_id: int, *, expected_policy_version: str | None = None
+    ) -> RolloutBatchHandle:
         policy_version, policy_hash = self._expected_policy()
+        token = policy_token(policy_version, policy_hash)
+        if expected_policy_version is not None and expected_policy_version != token:
+            # IR-3: the driver's target token and the published policy this
+            # pool serves must be the same object; refuse before any sampling.
+            from ..driver import PolicyIdentityError  # driver never imports the adapter
+
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: driver expects {expected_policy_version}, "
+                f"the pool serves {token}"
+            )
         setter = getattr(self._metadata, "set_policy_token", None)
-        if setter is not None:  # rollout-side group-reuse filter reads it
-            setter(policy_token(policy_version, policy_hash))
+        if setter is not None:  # rollout-side group-reuse filter + agentic generate read it
+            setter(token)
         self._run(self._controller.prepare_rollout(rollout_id))
         data_pack = self._run(self._executor.get(rollout_id))
         self._offload_after_rollout()
@@ -652,16 +704,49 @@ class MilesRolloutPool:
             tool_wait_trajectories=tool,
             ready_groups=None,
         )
+        harness = self._harness_snapshot()  # IR-2/IR-4; None = unknown
+        sample.update(
+            harness_in_flight=None if harness is None else int(harness.in_flight),
+            env_live=None if harness is None else int(harness.env_live),
+            tito_session_mismatch=None if harness is None else int(harness.tito_session_mismatch),
+            tito_chain_breaks=None if harness is None else dict(harness.tito_chain_breaks),
+            policy_age_violation=None if harness is None else int(harness.policy_age_violation),
+        )
         from ..timeline import LoadSample, classify_load
 
         known = None not in (running, queued, sample["engine_capacity"], tool)
         sample["load_class"] = (
             classify_load(LoadSample(queued_requests=queued, active_requests=running,
                                      tool_wait_trajectories=tool, ready_groups=0,
-                                     engine_capacity=sample["engine_capacity"]))
+                                     engine_capacity=sample["engine_capacity"],
+                                     harness_in_flight=sample["harness_in_flight"] or 0,
+                                     env_live=sample["env_live"] or 0))
             if known else "unknown"
         )
         return sample
+
+    def _harness_snapshot(self):
+        """IR-2: the harness snapshot (explicit zeros without a harness; None = unknown)."""
+        source = self._harness
+        if source is None:
+            return None
+        from ..tool_wait import HARNESS_ZERO, read_harness
+
+        if source == HARNESS_NOT_AGENTIC:
+            return HARNESS_ZERO
+        try:
+            return read_harness(source)
+        except Exception:  # noqa: BLE001 - unknown: fail closed
+            return None
+
+    def _harness_admission(self, method: str, members: frozenset[str]) -> None:
+        """IR-2: close/open harness admission to ``members`` (no-op without a board)."""
+        source = self._harness
+        if source is None or source == HARNESS_NOT_AGENTIC:
+            return
+        from ..tool_wait import _call, _resolve
+
+        _resolve(_call(source, method, sorted(members)))
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""
@@ -897,6 +982,9 @@ class MilesRolloutPool:
         (:meth:`undrain` cancels). The router counts engine requests only; a
         trajectory waiting on a tool is counted by yeto (3.3), not here.
         """
+        # IR-2: harness admission closes BEFORE the router cordon, so no new
+        # session can target a draining member while its engines quiesce.
+        self._harness_admission("close_admission", members)
         self._maybe_inject_tool_wait(members)
         timeout = max(0.0, float(deadline) - time.time())
         return bool(self._run(self._controller.drain_cells(cells_of(members),
@@ -904,8 +992,15 @@ class MilesRolloutPool:
 
     def _maybe_inject_tool_wait(self, members: frozenset[str]) -> None:
         """TEST ONLY (INJECT_TOOL_WAIT_ENV): count one artificial trajectory as waiting on
-        a tool for N seconds, so the drain's tool-wait condition holds that long."""
-        if self._inject_tool_wait is None or self.injected_tool_waits:
+        a tool for N seconds, so the drain's tool-wait condition holds that long.
+
+        The injected tool *executes* on every drain call (its external side effect
+        = the ``tool_side_effect`` record written before the board entry, when a
+        side-effect log is configured). It is not re-armed while its previous
+        execution is still waiting: a second drain of the same members during
+        that wait is journaled (the replay evidence) but ``applied`` is False.
+        """
+        if self._inject_tool_wait is None:
             return
         import sys
         import threading
@@ -914,6 +1009,14 @@ class MilesRolloutPool:
 
         seconds = self._inject_tool_wait
         self.injected_tool_waits.append(seconds)
+        call_id = injected_tool_call_id(members)
+        attempt = len(self.injected_tool_waits)
+        if self._side_effects is not None:
+            try:
+                self._side_effects.record(INJECTED_TOOL_WAIT_ID, call_id, seconds=seconds,
+                                          target_members=sorted(members), attempt=attempt)
+            except Exception as exc:  # noqa: BLE001 - evidence must not break the drain
+                print(f"[yeto] side-effect log write failed: {exc!r}", file=sys.stderr, flush=True)
         applied, error = False, None
         if self._tool_wait_board is None:
             error = "no ToolWaitBoard"
@@ -924,20 +1027,28 @@ class MilesRolloutPool:
             except Exception as exc:  # noqa: BLE001 - recorded: applied=false
                 error = repr(exc)
         print(f"[yeto] TEST INJECTION {INJECT_TOOL_WAIT_ENV}: tool-wait entry for {seconds}s "
-              f"during the drain of {sorted(members)} (applied={applied})",
+              f"during the drain of {sorted(members)} (applied={applied}, attempt={attempt})",
               file=sys.stderr, flush=True)
         if self.event_sink is not None:
             self.event_sink("test_injection", kind="tool_wait",
                             target_members=sorted(members), seconds=seconds, applied=applied,
+                            tool_call_id=call_id, attempt=attempt,
+                            side_effect_log=self._side_effects is not None,
                             **({"error": error} if error else {}))
         if applied:
             board = self._tool_wait_board
+            side_effects = self._side_effects
 
             def release() -> None:
                 try:
                     _resolve(_call(board, "exit", INJECTED_TOOL_WAIT_ID))
                 except Exception:  # noqa: BLE001 - board gone with the run
                     pass
+                if side_effects is not None:
+                    try:
+                        side_effects.complete(INJECTED_TOOL_WAIT_ID, call_id, attempt=attempt)
+                    except Exception:  # noqa: BLE001
+                        pass
 
             timer = threading.Timer(seconds, release)
             timer.daemon = True
@@ -956,6 +1067,7 @@ class MilesRolloutPool:
                                 target_members=sorted(members), applied=True)
             raise RuntimeError("injected undrain failure: uncordon not performed")
         self._run(self._controller.uncordon_cells(cells_of(members)))
+        self._harness_admission("open_admission", members)  # IR-2: after the uncordon
 
     def trajectory_load(self) -> dict[str, Any] | None:
         """3.3 drain probe: router in-flight + in-flight tool waits (``tool_wait.drain_blockers``).
@@ -974,10 +1086,30 @@ class MilesRolloutPool:
             snap = read_tool_wait(self._tool_wait_board)
         except Exception:  # noqa: BLE001 - unknown: fail closed below
             snap = None
+        harness = self._harness_snapshot()  # IR-2: None = unknown (fail closed)
         return {
             "active_requests": active,
             "tool_wait": None if snap is None else int(snap.in_flight),
-            "blockers": drain_blockers(active, snap),
+            "harness_in_flight": None if harness is None else int(harness.in_flight),
+            "env_live": None if harness is None else int(harness.env_live),
+            "env_live_deadline": None if harness is None else harness.latest_lease_deadline,
+            "blockers": drain_blockers(active, snap, harness),
+        }
+
+    def member_states(self) -> dict[str, dict[str, Any]] | None:
+        """Per declared member (fork F-R1 ``describe_cells``): ``state`` (unbound /
+        stopped / running), ``tracked``, ``serving``, ``awaiting_admission``. Used by
+        the restart recovery (3.7) to refuse unbound targets and to verify router
+        admission before release. None on a fork without ``describe_cells``."""
+        describe = getattr(self._controller, "describe_cells", None)
+        if not callable(describe):
+            return None
+        described = dict(self._run(describe()) or {})
+        return {
+            member_id(c): {"state": d.get("state"), "tracked": bool(d.get("tracked")),
+                           "serving": bool(d.get("serving")),
+                           "awaiting_admission": bool(d.get("awaiting_admission"))}
+            for c, d in described.items() if isinstance(d, dict)
         }
 
     def membership_status(self) -> dict[str, Any]:

@@ -44,6 +44,7 @@ def build_elastic(
     idle_flow_timeout_s: float | None = None,
     pause_margin: float | None = None,
     trainer_edges: Any = None,
+    max_recovery_attempts: int | None = None,
 ) -> ElasticWiring:
     """``on_watchdog(tx_id, phase)`` runs on the watchdog thread when the absolute
     transaction deadline passes while a step is still blocked. Default
@@ -81,6 +82,8 @@ def build_elastic(
         inbox=CommandInbox(state / "inbox"),
         on_watchdog=None if isinstance(on_watchdog, str) else on_watchdog,
         trainer_edges=trainer_edges,
+        # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
+        **({} if max_recovery_attempts is None else {"max_recovery_attempts": int(max_recovery_attempts)}),
         # 3.8: the strict pause budget is min(margin x the syncer's
         # --quorum-timeout-s, measured idle-flow timeout); None keeps the
         # audited defaults (syncer default 900 s, margin 0.5).
@@ -147,9 +150,19 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
                 # was never registered, e.g. killed during start_cells - GPU d123 chain 3):
                 # nothing to kill, and nothing keeps the step alive on our side either, so
                 # this is journaled distinctly but is NOT an unresolved target (the fork call
-                # fails or returns on its own and the transaction goes to REBUILD_OLD)
-                skipped.append({"cell": member, "fork_cell": cell, "kind": "no_workers",
-                                "note": "cell has no live worker actors (not started or already stopped)"})
+                # fails or returns on its own and the transaction goes to REBUILD_OLD).
+                # A27 (GPU 6r1/6r2 d2): the fork's liveness scan tears a cell down when its
+                # workers die and reports it ``workers_lost`` (not ``stopped``); journal that
+                # distinctly so "its engine died under us" and "never started" are told apart.
+                lost = _lost_workers_of(mgr, ray_mod, cell, timeout_s)
+                if lost is not None:
+                    skipped.append({"cell": member, "fork_cell": cell, "kind": "workers_lost",
+                                    "lost_workers": lost,
+                                    "note": "the fork's liveness scan found the cell's workers dead "
+                                            "and tore the cell down; nothing left to kill"})
+                else:
+                    skipped.append({"cell": member, "fork_cell": cell, "kind": "no_workers",
+                                    "note": "cell has no live worker actors (not started or already stopped)"})
                 continue
             for info in infos:
                 try:
@@ -171,6 +184,23 @@ def kill_target_generation(controller: Any, *, manager: Any = None, ray_module: 
             controller.watchdog_unresolved(tx_id, phase, errors)
 
     return on_watchdog
+
+
+def _lost_workers_of(mgr: Any, ray_mod: Any, cell: str, timeout_s: float) -> list[str] | None:
+    """The worker names the fork's ``RayWorkerManager.describe_cells`` reports as lost for
+    ``cell`` (state ``workers_lost``), or None when the cell is in another state or the fork
+    cannot say (older fork without the state, or the lookup fails: never block the watchdog)."""
+    describe = getattr(mgr, "describe_cells", None)
+    if describe is None:
+        return None
+    try:
+        described = ray_mod.get(describe.remote(pool_ids=None), timeout=timeout_s) or {}
+    except Exception:  # noqa: BLE001 - classification only; the kill result stands on its own
+        return None
+    entry = described.get(cell) if isinstance(described, dict) else None
+    if not isinstance(entry, dict) or entry.get("state") != "workers_lost":
+        return None
+    return [str(w) for w in (entry.get("lost_workers") or [])]
 
 
 class LazyBoardActor:
