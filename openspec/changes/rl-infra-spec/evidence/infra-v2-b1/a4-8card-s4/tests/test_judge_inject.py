@@ -345,8 +345,15 @@ class D(unittest.TestCase):
         # launch log: old members killed after REBUILT_OLD / dead trainer is a FAIL even when the tape is otherwise fine
         ll = ["x REBUILT_OLD x", "rollout_server.py:132 - Killing server cell_id='http://10.0.0.1:20000'...", "NonRetryableError: Cannot recover when all cells are dead"]
         r = J.judge_d2(jb, tape, set(), k, probe, samples, led, launch_log=ll); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["a27_old_members_survived"])
-        self.assertEqual(r["a27_old_member_fate"], {"old_members_killed_after_terminal": ["http://10.0.0.1:20000"], "trainer_dead": True})
+        self.assertEqual(r["a27_old_member_fate"], {"old_members_killed_after_terminal": ["http://10.0.0.1:20000"], "trainer_dead": True, "finalization_wall": None, "killed_in_teardown_after_finalization": []})
         self.assertTrue(J.judge_d2(jb, tape, set(), k, probe, samples, led, launch_log=["x REBUILT_OLD x", "Killing server cell_id='c3'..."])["checks"]["a27_old_members_survived"])  # a target, not an old member
+        # A27B-2 (2r1 d2): a kill at/after the journal `finalization` is the learner's normal teardown, not a lost old member
+        jf = jb + [{"kind": "finalization", "rollout_id": 3, "wall_time": 180.0}]
+        llf = ["x REBUILT_OLD x", "[1970-01-01 00:03:01.000] Killing server cell_id='http://10.0.0.1:20000'...", "[1970-01-01 00:03:01.100] Cannot recover when all cells are dead"]
+        r = J.judge_d2(jf, tape, set(), k, probe, samples, led, launch_log=llf); self.assertEqual(r["verdict"], "PASS", r)
+        self.assertEqual(r["a27_old_member_fate"]["killed_in_teardown_after_finalization"], ["http://10.0.0.1:20000"]); self.assertFalse(r["a27_old_member_fate"]["trainer_dead"])
+        llk = ["x REBUILT_OLD x", "[1970-01-01 00:02:20.000] Killing server cell_id='http://10.0.0.1:20000'..."]   # before finalization: lost
+        self.assertFalse(J.judge_d2(jf, tape, set(), k, probe, samples, led, launch_log=llk)["checks"]["a27_old_members_survived"])
         # 1r5 d2 shape: no probe, no continuation, < 3 router samples after the terminal state -> FAIL (the failure is established), not INVALID
         r = J.judge_d2(jb, [e for e in tape if e["time_unix"] < 130.0], set(), k, None, samples[:1], led[:-8], launch_log=ll)
         self.assertEqual((r["verdict"], r["marker"]), ("FAIL", "recovery_failed")); self.assertFalse(r["checks"]["a27_old_members_same_version"])

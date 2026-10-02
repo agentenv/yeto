@@ -819,24 +819,57 @@ def _a27_members(v):
     return set(v or [])
 
 
-def _a27_old_member_fate(launch_log, old_cells, t_old):
-    """Launch-log facts after the terminal state: old member cells killed (rollout_server 'Killing server') and a dead
-    trainer ('Cannot recover when all cells are dead'); None when no launch log was given."""
+_A27_TS_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[.,](\d{1,6}))?")
+
+
+def _a27_line_time(line):
+    """Wall time (UTC epoch) of a launch-log line from its Ray/yeto `[YYYY-mm-dd HH:MM:SS.fff]` stamp, else None."""
+    m = _A27_TS_RE.search(line)
+    if not m:
+        return None
+    import calendar, time as _time
+    t = calendar.timegm(_time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+    return t + (float("0." + m.group(2)) if m.group(2) else 0.0)
+
+
+def _a27_finalization_time(journal, tape):
+    """End of the window in which a killed old member counts: the journal `finalization` record, else the tape's
+    rl_learner_finalized; None when the run never finalized (every later kill is then abnormal)."""
+    fin = named(journal, "finalization")
+    if fin:
+        return fin[-1].get("wall_time")
+    done = [e.get("time_unix") for e in (tape or []) if e.get("event") == "rl_learner_finalized"]
+    return done[-1] if done else None
+
+
+def _a27_old_member_fate(launch_log, old_cells, t_old, t_final=None):
+    """Launch-log facts between the terminal state and the run's finalization: old member cells killed
+    (rollout_server 'Killing server') and a dead trainer ('Cannot recover when all cells are dead'). Kills at or after
+    `t_final` are the learner's normal teardown (2r1 d2) and are listed separately; None when no launch log was given.
+    Lines without a time stamp inherit the last stamp seen (tracebacks)."""
     if launch_log is None:
         return None
-    killed, trainer_dead = [], False
+    killed, teardown, trainer_dead = [], [], False
     seen_terminal = t_old is None
+    last_t = None
     for l in launch_log:
+        t = _a27_line_time(l)
+        if t is not None:
+            last_t = t
         if not seen_terminal:
             seen_terminal = "REBUILT_OLD" in l
             if not seen_terminal:
                 continue
-        if "Cannot recover when all cells are dead" in l:
+        after_final = t_final is not None and last_t is not None and last_t >= t_final
+        if "Cannot recover when all cells are dead" in l and not after_final:
             trainer_dead = True
         m = re.search(r"Killing server cell_id='([^']+)'", l)
-        if m and m.group(1) in old_cells and m.group(1) not in killed:
-            killed.append(m.group(1))
-    return {"old_members_killed_after_terminal": killed, "trainer_dead": trainer_dead}
+        if m and m.group(1) in old_cells:
+            bucket = teardown if after_final else killed
+            if m.group(1) not in bucket:
+                bucket.append(m.group(1))
+    return {"old_members_killed_after_terminal": killed, "trainer_dead": trainer_dead,
+            "finalization_wall": t_final, "killed_in_teardown_after_finalization": teardown}
 
 
 def judge_d2_a27(res, journal, tape, known, probe_after=None, router_samples=None, launch_log=None):
@@ -887,7 +920,7 @@ def judge_d2_a27(res, journal, tape, known, probe_after=None, router_samples=Non
     old_pubs = [e for e in before if e.get("event") == "rl_publication"]
     old_members = (_a27_members(old_pubs[-1].get("sync/publication_members")) if old_pubs else set()) - targets
     old_cells = {m.split(":", 1)[1] if m.startswith("engine:") else m for m in old_members}
-    fate = _a27_old_member_fate(launch_log, old_cells, t_old)
+    fate = _a27_old_member_fate(launch_log, old_cells, t_old, _a27_finalization_time(journal, tape))
     if fate is not None:
         res["a27_old_member_fate"] = fate
         res["checks"]["a27_old_members_survived"] = not fate["old_members_killed_after_terminal"] and not fate["trainer_dead"]
