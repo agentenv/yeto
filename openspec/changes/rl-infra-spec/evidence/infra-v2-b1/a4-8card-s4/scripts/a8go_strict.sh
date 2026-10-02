@@ -1,6 +1,9 @@
 #!/bin/bash
 # usage: a8go_strict.sh <case> <prefix> <hard_s> <wd_s>     8x H100 on Nebius eu-north1, T4R2S2 <-> T4R4S0, STRICT-AVG single island with the head syncer on THIS host
 # cases: chk | s0 | r6 | r7 | r5 | r5c      (DRY=1: print the launch args + triggers + arms, start nothing)
+# GATE (user ruling 2026-10-02: judged cases stop the chain on a non-PASS): strict cases s0/r6/r7/r5/r5c write <chain>/ABORT (reason gate_<case>_<verdict>)
+# in their final guard BEFORE item_done; for the a8go.sh cases (d2, a4bc; d4 = chain tail, no gate) the same rule is applied by reset_island_strict.sh, which
+# chain8 runs after item_done and before the next item: it reads the previous item's judgment.json (GATED_CASES) and refuses the reset (chain stops + releases).
 # CHAIN DISPATCH (CHAIN8-PLAN.md, one A8GO per chain): every case NOT listed here (d2 a4bc d4 e1b wd ... = a8go.sh's) is exec'ed to a8go.sh unchanged, so a
 # single chain8 run mixes no-sync and strict items: `A8GO=$B/a8go_strict.sh RESET=$B/reset_island_strict.sh chain8.sh ... chk:900 s0:2400 d2:2100 ...`.
 # chk = chain-head self-check (chk_launch.py): provisions the SAME island cluster (make_miles_island_task resources/setup) and runs the image checks instead of
@@ -35,11 +38,11 @@ fi
 case $C in
   s0)   TRIG="[$(UPB 1 up1 600),$(DNB 3 dn1 600)]"; JUDGE="s0"; GATE=1   # smoke: strict island + --rl-elastic, no kill; judge_s0 (criteria fixed in E1D-RECOVERY-PROGRESS "s0 结果"); GATE: non-PASS -> <chain>/ABORT (chain8 does not stop on a judge FAIL by itself)
         JARGS="--epochs $R/.j/elastic-state/reconfig/epochs.json --inbox-dir $R/.j/elastic-state/inbox --syncer-log $R/pulled/yeto-syncer.log --rc-file $R/rc.txt --syncer-clean $R/syncer_clean.txt";;
-  r6)   EX="$EXR --rl-test-kill-learner-at QUIESCING"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="r6";;                       # ⑥ up1 killed at QUIESCING -> restart -> CANCELLED, no recovery record, rounds go on
-  r7)   EX="$EXR"; TRIG="[$(UPB 0 up1 600)]"; JUDGE="r7"; TPROBE="1 rec"                                               # ⑦ up1 SUCCEEDED, then kill in steady state (fork epoch 0 vs journal 1) -> restart -> recovery verified -> dn1 SUCCEEDED
+  r6)   EX="$EXR --rl-test-kill-learner-at QUIESCING"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="r6"; GATE=1;;                       # ⑥ up1 killed at QUIESCING -> restart -> CANCELLED, no recovery record, rounds go on
+  r7)   EX="$EXR"; TRIG="[$(UPB 0 up1 600)]"; JUDGE="r7"; TPROBE="1 rec"; GATE=1                                               # ⑦ up1 SUCCEEDED, then kill in steady state (fork epoch 0 vs journal 1) -> restart -> recovery verified -> dn1 SUCCEEDED
         ARMS+=("dctl.py|kill_after_tx|up1|dn1|{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}");;
-  r5)   EX="$EXR --rl-test-kill-learner-at COMMITTED"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="r5"; TPROBE="1 rec";;        # ⑤ up1 killed at COMMITTED -> restart -> recovery (c2,c3 restarted) verified -> up1 SUCCEEDED(recovered_after_restart)
-  r5c)  EX="$EXR --rl-test-kill-learner-at COMMITTED"; TRIG="[$(UPB 0 up1 600),$(DNB 2 dn1 600)]"; JUDGE="r5c"       # ⑤c ruling (c) regression: up1 ok (kill suppressed by the marker), dn1 killed at COMMITTED -> startup shape, no recovery record
+  r5)   EX="$EXR --rl-test-kill-learner-at COMMITTED"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="r5"; TPROBE="1 rec"; GATE=1;;        # ⑤ up1 killed at COMMITTED -> restart -> recovery (c2,c3 restarted) verified -> up1 SUCCEEDED(recovered_after_restart)
+  r5c)  EX="$EXR --rl-test-kill-learner-at COMMITTED"; TRIG="[$(UPB 0 up1 600),$(DNB 2 dn1 600)]"; JUDGE="r5c"; GATE=1       # ⑤c ruling (c) regression: up1 ok (kill suppressed by the marker), dn1 killed at COMMITTED -> startup shape, no recovery record
         ARMS+=("dctl.py|marker|up1");;
   *) echo "unknown case $C (a8go_strict.sh: s0 r6 r7 r5 r5c)"; exit 64;;
 esac

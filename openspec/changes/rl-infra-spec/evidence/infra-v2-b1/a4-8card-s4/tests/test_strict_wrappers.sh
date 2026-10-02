@@ -82,4 +82,20 @@ printf '#!/bin/bash\necho "reset $1" >> $STUBLOG; echo RESET_OK > $2; exit ${RES
 [ $rc = 1 ] && ok "reset_island_strict: inner NOT CLEAN propagated" || bad "reset inner rc=$rc"
 touch $T/st/busy; : > $T/log; STUBLOG=$T/log STUBDIR=$T/st PKILL=$T/bin/pkill PGREP=$T/bin/pgrep PATH=$T/bin:$PATH BDIR=$B RESET_INNER=$T/bin/rinner timeout 120 bash $B/reset_island_strict.sh clu $T/r3.log; rc=$?
 [ $rc = 1 ] && ! grep -q "reset clu" $T/log && grep -q SYNCER_PORT_HELD $T/r3.log && ok "reset_island_strict: port held -> rc 1, island reset not attempted" || bad "reset held rc=$rc $(cat $T/r3.log)"
+# --- gate: strict cases carry GATE=1 in DRY; reset_island_strict refuses the reset after a gated item whose judgment is not PASS (a8go.sh cases d2/a4bc too), passes otherwise
+for c in s0 r6 r7 r5 r5c; do grep -q "^gate: 1" $T/dry.$c || bad "$c has no GATE"; done; ok "gate: s0 r6 r7 r5 r5c write ABORT on a non-PASS judgment (final guard, before item_done)"
+GC=$T/gchain; rm -rf $GC; mkdir -p $GC/items; rm -f $T/st/busy
+: > $T/log; STUBLOG=$T/log STUBDIR=$T/st PKILL=$T/bin/pkill PGREP=$T/bin/pgrep PATH=$T/bin:$PATH BDIR=$B RESET_INNER=$T/bin/rinner bash $B/reset_island_strict.sh cpg-l0-eu-north1 $GC/reset-s0.txt; rc=$?
+[ $rc = 0 ] && grep -q "no items.jsonl" $GC/reset-s0.txt && ok "gate: no previous item -> reset proceeds" || bad "gate first rc=$rc"
+mkdir -p $GC/items/cpg-d2; echo '{"item":"d2","status":"ran","rc":"rc=0"}' > $GC/items.jsonl; echo '{"verdict":"FAIL"}' > $GC/items/cpg-d2/judgment.json
+: > $T/log; STUBLOG=$T/log STUBDIR=$T/st PKILL=$T/bin/pkill PGREP=$T/bin/pgrep PATH=$T/bin:$PATH BDIR=$B RESET_INNER=$T/bin/rinner bash $B/reset_island_strict.sh cpg-l0-eu-north1 $GC/reset-a4bc.txt; rc=$?
+[ $rc = 1 ] && grep -q gate_d2_FAIL $GC/ABORT && ! grep -q "reset cpg" $T/log && ok "gate: previous d2 FAIL -> ABORT(gate_d2_FAIL), reset refused, island untouched" || bad "gate d2 fail rc=$rc $(cat $GC/ABORT 2>&1)"
+rm -f $GC/ABORT; echo '{"verdict":"PASS"}' > $GC/items/cpg-d2/judgment.json
+: > $T/log; STUBLOG=$T/log STUBDIR=$T/st PKILL=$T/bin/pkill PGREP=$T/bin/pgrep PATH=$T/bin:$PATH BDIR=$B RESET_INNER=$T/bin/rinner bash $B/reset_island_strict.sh cpg-l0-eu-north1 $GC/reset-a4bc.txt; rc=$?
+[ $rc = 0 ] && [ ! -f $GC/ABORT ] && grep -q "reset cpg" $T/log && ok "gate: previous d2 PASS -> reset proceeds" || bad "gate d2 pass rc=$rc"
+rm $GC/items/cpg-d2/judgment.json; STUBLOG=$T/log STUBDIR=$T/st PKILL=$T/bin/pkill PGREP=$T/bin/pgrep PATH=$T/bin:$PATH BDIR=$B RESET_INNER=$T/bin/rinner bash $B/reset_island_strict.sh cpg-l0-eu-north1 $GC/reset-x.txt; rc=$?
+[ $rc = 1 ] && grep -q gate_d2_NO_JUDGMENT $GC/ABORT && ok "gate: missing judgment -> ABORT(gate_d2_NO_JUDGMENT)" || bad "gate no judgment rc=$rc"
+rm -f $GC/ABORT; echo '{"item":"chk","status":"ran","rc":"rc=0"}' >> $GC/items.jsonl
+STUBLOG=$T/log STUBDIR=$T/st PKILL=$T/bin/pkill PGREP=$T/bin/pgrep PATH=$T/bin:$PATH BDIR=$B RESET_INNER=$T/bin/rinner bash $B/reset_island_strict.sh cpg-l0-eu-north1 $GC/reset-y.txt; rc=$?
+[ $rc = 0 ] && [ ! -f $GC/ABORT ] && ok "gate: previous item not gated (chk/d4) -> reset proceeds" || bad "gate ungated rc=$rc"
 [ $fail = 0 ] && echo "ALL PASS" || { echo "SOME FAILED"; exit 1; }
