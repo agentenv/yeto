@@ -17,6 +17,8 @@ grep -q -- "--rl-test-kill-learner-at COMMITTED" $T/dry.r5 && grep -q "tprobe: 1
 grep -q -- "--rl-test-kill-learner-at COMMITTED" $T/dry.r5c && grep -q "dctl.py|marker|up1" $T/dry.r5c && grep -q '"dn1"' $T/dry.r5c && ok "r5c: marker arm + dn1 trigger" || bad "r5c"
 for c in s0 r6 r7 r5 r5c; do grep -q -- "--rl-elastic-quorum-timeout-s 1800 " $T/dry.$c || bad "$c lacks --rl-elastic-quorum-timeout-s 1800 (s0 lesson: 450 s default budget rejects 600 s deadlines)"; done; ok "every strict case raises the syncer quorum timeout (pause budget 900 s >= 600 s deadlines)"
 grep -q "attestation-8-6.json" $T/dry.r5 && ok "attestation-8-6 (fingerprint unchanged without no-sync)" || bad "attestation"
+touch $T/att.json; SHA=x DRY=1 ATTEST=$T/att.json bash $B/a8go_strict.sh r5 pfx 1 1 2>/dev/null | grep -q -- "--rl-elastic-attestation $T/att.json" && ok "ATTEST env selects another attestation file (chain 8 fingerprint at 2eb415f3)" || bad "ATTEST override"
+SHA=x DRY=1 ATTEST=$T/none.json bash $B/a8go_strict.sh r5 pfx 1 1 >/dev/null 2>&1; [ $? = 6 ] && ok "ATTEST pointing at a missing file -> rc 6 (nothing started)" || bad "ATTEST missing rc"
 # --- chain dispatch: non-strict cases go to a8go.sh (A8GO_INNER stub records the call), strict/chk stay here
 printf '#!/bin/bash\necho "inner-a8go $*" >> $STUBLOG; exit 0\n' > $T/inner_a8go; chmod +x $T/inner_a8go; : > $T/log
 STUBLOG=$T/log A8GO_INNER=$T/inner_a8go SHA=x DRY=1 bash $B/a8go_strict.sh d2 pfx 2100 2220 >/dev/null 2>&1; rc=$?

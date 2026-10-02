@@ -571,5 +571,88 @@ class Recovery(unittest.TestCase):
             self.assertEqual(rc, 4); self.assertTrue(os.path.exists(os.path.join(d, "evidence_missing")))   # main() judges request id up1 (a8go's)
 
 
-if __name__ == "__main__":
     unittest.main()
+
+
+# ----------------------------------------------------------------------------------------------- s0 (strict single island + head syncer smoke)
+def s0_pass_evidence(n_rounds=6, up_at=2, dn_at=4):
+    """Synthetic PASS: n rounds, up1 SUCCEEDED 0->1 before round up_at, dn1 SUCCEEDED 1->2 before round dn_at."""
+    t0 = 1000.0; tape = [{"event": "rl_driver_start", "time_unix": t0}, {"event": "rl_publication", "policy_version": None, "time_unix": t0 + 1}]
+    journal, ledger = [], []
+    for r in range(n_rounds):
+        t = t0 + 10 + 100 * r
+        if r == up_at:
+            tape.append({"event": "rl_reconfiguration", "result": "SUCCEEDED", "config_epoch_from": 0, "config_epoch": 1, "time_unix": t - 5})
+            journal.append({"kind": "phase", "phase": "SUCCEEDED", "request_id": "up1", "tx_id": "tx-up1", "config_epoch_to": 1, "wall_time": t - 5})
+        if r == dn_at:
+            tape.append({"event": "rl_reconfiguration", "result": "SUCCEEDED", "config_epoch_from": 1, "config_epoch": 2, "time_unix": t - 5})
+            journal.append({"kind": "phase", "phase": "SUCCEEDED", "request_id": "dn1", "tx_id": "tx-dn1", "config_epoch_to": 2, "wall_time": t - 5})
+        gids = [f"g{r}-{i}" for i in range(4)]
+        ledger += [{"kind": "prepared", "rollout_id": r, "attempt": 0, "group_ids": gids, "batch_hash": f"h{r}", "policy_token": f"yeto:{r}:tok", "wall_time": t},
+                   {"kind": "optimizer_applied", "rollout_id": r, "attempt": 0, "wall_time": t + 30, "group_ids": gids},
+                   {"kind": "outer_recorded", "rollout_id": r, "attempt": 0, "wall_time": t + 40}]
+        tape += [{"event": "rl_driver_phase", "phase": "train", "rollout_id": r, "time_unix": t + 20}, {"event": "rl_round_trained", "rollout_id": r, "time_unix": t + 30},
+                 {"event": "rl_publication", "policy_version": r + 1, "time_unix": t + 45}]
+    journal.append({"kind": "finalization", "rollout_id": n_rounds, "wall_time": t0 + 10 + 100 * n_rounds})
+    epochs = {"config_epoch": 2, "config_id": "T4R2S2", "members": ["engine:c0", "engine:c1"]}
+    syncer = ["INFO yeto_syncer::server: learner connected (layout: 1 fragments) learner_id=0", f"INFO yeto_syncer::server: training complete after {n_rounds} outer steps"]
+    return journal, tape, ledger, epochs, {}, syncer
+
+
+class S0(unittest.TestCase):
+    def test_replay_a4s7_s0_fails_on_missing_transactions(self):
+        """Real s0 (a4s7-20261001-1): clean 6-round run, but both requests were refused at the inbox (pause budget 450 s) -> FAIL, not INVALID."""
+        inbox = J.load_inbox_statuses(os.path.join(FX, "a4s7_s0_inbox"))
+        res = J.judge_s0(jl("a4s7_s0_journal.jsonl"), jl("a4s7_s0_tape.jsonl"), jl("a4s7_s0_ledger.jsonl"), json.load(open(os.path.join(FX, "a4s7_s0_epochs.json"))),
+                         inbox, open(os.path.join(FX, "a4s7_s0_syncer.log")).read().splitlines(), None,
+                         J._rc_from_file(os.path.join(FX, "a4s7_s0_rc.txt")), J._rc_from_file(os.path.join(FX, "a4s7_s0_syncer_clean.txt"), prefix=r"syncer_host_clean rc="))
+        self.assertEqual(res["verdict"], "FAIL"); self.assertEqual(res.get("marker"), "s0_failed")
+        c = res["checks"]
+        for k in ("rc_zero", "syncer_learner_connected", "syncer_training_complete", "publication_versions_contiguous", "rounds_trained",
+                  "outer_recorded_once_per_rollout", "no_lora_unverifiable", "syncer_clean_rc_zero", "L1_round_triples", "L2_no_group_reuse"):
+            self.assertTrue(c[k], k)
+        for k in ("up1_SUCCEEDED_once", "dn1_SUCCEEDED_once", "inbox_no_rejected", "epochs_config_epoch_2", "tape_two_reconfig_succeeded", "rounds_after_reconfig"):
+            self.assertFalse(c[k], k)
+        self.assertIn("exceeds budget 450s", res["inbox_rejected"]["up1"]); self.assertEqual(res["publications"], [0, 1, 2, 3, 4, 5, 6])
+
+    def test_synthetic_pass_and_single_failures(self):
+        j, t, l, e, ib, sl = s0_pass_evidence()
+        res = J.judge_s0(j, t, l, e, ib, sl, ["[launcher] syncer runs on this head node"], 0, 0)
+        self.assertEqual(res["verdict"], "PASS", res["checks"]); self.assertTrue(res["checks"]["L3_continues_after_terminal"])
+        self.assertEqual(J.judge_s0(j, t, l, e, ib, sl, None, 1, 0)["checks"]["rc_zero"], False)
+        self.assertEqual(J.judge_s0(j, t, l, e, ib, sl, None, 0, 1)["verdict"], "FAIL")
+        self.assertEqual(J.judge_s0(j, t, l, {"config_epoch": 1}, ib, sl, None, 0, 0)["checks"]["epochs_config_epoch_2"], False)
+        self.assertEqual(J.judge_s0(j, t, l, e, {"up1": {"rejected": "x", "request_id": "up1"}}, sl, None, 0, 0)["checks"]["inbox_no_rejected"], False)
+        self.assertEqual(J.judge_s0(j, t, l, e, ib, sl[:1], None, 0, 0)["checks"]["syncer_training_complete"], False)
+        # the dn1 too late: fewer than 2 rounds after the last reconfiguration
+        j2, t2, l2, e2, _, _ = s0_pass_evidence(n_rounds=6, dn_at=5)
+        self.assertEqual(J.judge_s0(j2, t2, l2, e2, ib, sl, None, 0, 0)["checks"]["rounds_after_reconfig"], False)
+        # a duplicated outer_recorded is both the s0 check and L1
+        bad = l + [{"kind": "outer_recorded", "rollout_id": 3, "attempt": 0, "wall_time": 9e9}]
+        r3 = J.judge_s0(j, t, bad, e, ib, sl, None, 0, 0); self.assertFalse(r3["checks"]["outer_recorded_once_per_rollout"]); self.assertFalse(r3["checks"]["L1_round_triples"])
+        self.assertEqual(J.judge_s0(j, t + [{"event": "x", "cause": "lora_unverifiable"}], l, e, ib, sl, None, 0, 0)["checks"]["no_lora_unverifiable"], False)
+
+    def test_missing_evidence_is_invalid(self):
+        j, t, l, e, ib, sl = s0_pass_evidence()
+        for args in ((j, [], l, e, ib, sl), (j, t, None, e, ib, sl), (j, t, l, None, ib, sl), (j, t, l, e, None, sl), (j, t, l, e, ib, None)):
+            r = J.judge_s0(*args, None, 0, 0); self.assertEqual(r["verdict"], "INVALID_TEST"); self.assertEqual(r["marker"], "evidence_missing")
+
+    def test_cli_s0_and_passthrough(self):
+        d = tempfile.mkdtemp(); j, t, l, e, ib, sl = s0_pass_evidence()
+        w = lambda n, rows: (open(os.path.join(d, n), "w").write("".join(json.dumps(x) + "\n" for x in rows)), os.path.join(d, n))[1]
+        jp, tp, lp = w("j.jsonl", j), w("t.jsonl", t), w("l.jsonl", l)
+        ep = os.path.join(d, "epochs.json"); json.dump(e, open(ep, "w")); ibd = os.path.join(d, "inbox"); os.mkdir(ibd)
+        sp = os.path.join(d, "syncer.log"); open(sp, "w").write("\n".join(sl) + "\n"); rp = os.path.join(d, "rc.txt"); open(rp, "w").write("rc=0\n")
+        cp = os.path.join(d, "clean.txt"); open(cp, "w").write("after: left=[] port_29400_held_by=[none]\nsyncer_host_clean rc=0\n")
+        base = ["s0", jp, tp, "--ledger", lp, "--epochs", ep, "--inbox-dir", ibd, "--syncer-log", sp, "--rc-file", rp, "--syncer-clean", cp, "--out", os.path.join(d, "o.json"), "--marker-dir", d]
+        self.assertEqual(J.main(base), 0); self.assertEqual(json.load(open(os.path.join(d, "o.json")))["verdict"], "PASS")
+        open(os.path.join(ibd, "up1.status.json"), "w").write(json.dumps({"rejected": "pause not allowed", "request_id": "up1"}))
+        self.assertEqual(J.main(base), 1); self.assertTrue(os.path.exists(os.path.join(d, "s0_failed")))
+        self.assertEqual(J.main(base[:12] + ["--syncer-log", os.path.join(d, "absent.log")] + base[14:]), 4); self.assertTrue(os.path.exists(os.path.join(d, "evidence_missing")))
+        # the s0-only flags are stripped for every other case (judge_after.sh may pass them through)
+        open(os.path.join(d, "e.jsonl"), "w").write(json.dumps(ADD) + "\n" + json.dumps(ph("SUCCEEDED")) + "\n"); open(os.path.join(d, "et.jsonl"), "w").write(json.dumps(inj(applied=False)) + "\n")
+        self.assertEqual(J.main(["e1b", os.path.join(d, "e.jsonl"), os.path.join(d, "et.jsonl"), "--epochs", ep, "--rc-file", rp, "--out", os.path.join(d, "o2.json")]), 4)
+
+
+if __name__ == "__main__":
+    unittest.main(argv=[sys.argv[0]])

@@ -36,7 +36,7 @@ case $C in
   d7)    STEPS=5; ATTN=5; EX="--rl-elastic-restart-attempts 1"; TRIG="[]"; ARMS+=("dctl.py|kill_then_up|up1|{\"target\":\"T4R4S0\",\"expected_config_epoch\":0,\"deadline_s\":600}");;
   *) echo "unknown case $C"; exit 64;;
 esac
-ATT=$B/cfg/attestation-8-$ATTN.json; [ -f $ATT ] || { echo "missing $ATT (mkatt8.sh)"; exit 6; }
+ATT=${ATTEST:-$B/cfg/attestation-8-$ATTN.json}; [ -f $ATT ] || { echo "missing $ATT (mkatt8.sh)"; exit 6; }   # ATTEST: attestation file for another code SHA (chain 8: cfg/attestation-8-6-71672312.json at 2eb415f3)
 COMMON="--total-steps $STEPS --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources $B/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation $ATT"
 if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 n2run.sh $P 8 $HARD $WD $COMMON $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; exit 0; fi
 SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 setsid nohup $B/n2run.sh $P 8 $HARD $WD $COMMON $EX > $R.n2run.out 2>&1 &

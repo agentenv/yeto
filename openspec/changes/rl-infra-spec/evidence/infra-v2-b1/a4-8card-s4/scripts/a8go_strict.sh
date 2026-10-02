@@ -21,7 +21,7 @@
 C=$1; P=$2; HARD=$3; WD=$4
 case $C in chk|s0|r6|r7|r5|r5c) ;; *) exec ${A8GO_INNER:-/home/michael/work/gpu-b1-runs/a8go.sh} "$@";; esac   # non-strict cases: a8go.sh, behaviour untouched
 SHA=${SHA:?set SHA to the frozen code commit of this batch (must contain the 3.7 restart recovery, infra-e1-recovery >= 0e68962)}; B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P
-UP=${UP_DEADLINE_S:-600}; EX=""; STEPS=6; ATTN=6; JUDGE=""; ARMS=(); TPROBE=""
+UP=${UP_DEADLINE_S:-600}; EX=""; STEPS=6; ATTN=6; JUDGE=""; JARGS=""; GATE=0; ARMS=(); TPROBE=""
 EXR="--rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3"
 STRICT_EX="--rl-elastic-quorum-timeout-s ${QUORUM_TIMEOUT_S:-1800}"   # pause budget = 0.5 x this must be >= every request deadline_s (600)
 req() { printf '["%s",%s,"%s",{"target":"%s","expected_config_epoch":%s,"deadline_s":%s}]' "$1" "$2" "$3" "$4" "$5" "$6"; }   # phase rid id target epoch deadline
@@ -33,7 +33,8 @@ if [ "$C" = chk ]; then
   echo started $P chk; exit 0
 fi
 case $C in
-  s0)   TRIG="[$(UPB 1 up1 600),$(DNB 3 dn1 600)]";;   # smoke: strict island + --rl-elastic, no kill; judged by hand (progress file item 5: syncer line in launch.log, 6 rounds, up1/dn1 SUCCEEDED, publication versions 0..6, one outer_recorded per rollout, no lora_unverifiable)
+  s0)   TRIG="[$(UPB 1 up1 600),$(DNB 3 dn1 600)]"; JUDGE="s0"; GATE=1   # smoke: strict island + --rl-elastic, no kill; judge_s0 (criteria fixed in E1D-RECOVERY-PROGRESS "s0 结果"); GATE: non-PASS -> <chain>/ABORT (chain8 does not stop on a judge FAIL by itself)
+        JARGS="--epochs $R/.j/elastic-state/reconfig/epochs.json --inbox-dir $R/.j/elastic-state/inbox --syncer-log $R/pulled/yeto-syncer.log --rc-file $R/rc.txt --syncer-clean $R/syncer_clean.txt";;
   r6)   EX="$EXR --rl-test-kill-learner-at QUIESCING"; TRIG="[$(UPB 1 up1 600)]"; JUDGE="r6";;                       # ⑥ up1 killed at QUIESCING -> restart -> CANCELLED, no recovery record, rounds go on
   r7)   EX="$EXR"; TRIG="[$(UPB 0 up1 600)]"; JUDGE="r7"; TPROBE="1 rec"                                               # ⑦ up1 SUCCEEDED, then kill in steady state (fork epoch 0 vs journal 1) -> restart -> recovery verified -> dn1 SUCCEEDED
         ARMS+=("dctl.py|kill_after_tx|up1|dn1|{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}");;
@@ -42,9 +43,9 @@ case $C in
         ARMS+=("dctl.py|marker|up1");;
   *) echo "unknown case $C (a8go_strict.sh: s0 r6 r7 r5 r5c)"; exit 64;;
 esac
-ATT=$B/cfg/attestation-8-$ATTN.json; [ -f $ATT ] || { echo "missing $ATT (mkatt8.sh)"; exit 6; }
+ATT=${ATTEST:-$B/cfg/attestation-8-$ATTN.json}; [ -f $ATT ] || { echo "missing $ATT (mkatt8.sh)"; exit 6; }   # ATTEST: attestation file for another code SHA (chain 8: cfg/attestation-8-6-71672312.json at 2eb415f3)
 COMMON="--total-steps $STEPS --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources $B/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation $ATT"
-if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 SYNCER_PUBLIC_IP=${SYNCER_PUBLIC_IP:-185.189.44.160}:${SYNCER_PORT:-29400} n2run_strict.sh $P 8 $HARD $WD $COMMON $STRICT_EX $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; echo "tprobe: ${TPROBE:-none}"; echo "judge: ${JUDGE:-manual}"; exit 0; fi
+if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 SYNCER_PUBLIC_IP=${SYNCER_PUBLIC_IP:-185.189.44.160}:${SYNCER_PORT:-29400} n2run_strict.sh $P 8 $HARD $WD $COMMON $STRICT_EX $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; echo "tprobe: ${TPROBE:-none}"; echo "judge: ${JUDGE:-manual}${JARGS:+ $JARGS}"; echo "gate: $GATE"; exit 0; fi
 SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 setsid nohup $B/n2run_strict.sh $P 8 $HARD $WD $COMMON $STRICT_EX $EX > $R.n2run.out 2>&1 &
 sleep 10
 setsid nohup $B/n2inwatch.sh $R "$TRIG" > /dev/null 2>&1 &
@@ -54,5 +55,5 @@ for a in "${ARMS[@]}"; do IFS='|' read -ra parts <<< "$a"; setsid nohup $B/n2arm
 # in-container terminal probe (mode rec: fires on the journal's `recovery verified`, ~2 s + ~20 s Ray client; the run then still lives >= 3 rounds ~45 s; main evidence = files)
 if [ -n "$TPROBE" ]; then set -- $TPROBE; setsid nohup bash -c "until [ -s $R/pulled/gpu.txt ]; do [ -f $R/rc.txt ] && exit 1; sleep 10; done; CL=\$(cat $R/cluster.txt); for f in fork_probe.py probe_remote.sh; do b=\$(base64 -w0 $B/\$f); HOME=/home/michael timeout 60 ssh -o StrictHostKeyChecking=no \$CL \"mkdir -p ~/yeto-rl && echo \$b | base64 -d > ~/yeto-rl/\$f\"; done; $B/n2arm.sh $R term_probe.py $1 ${2:-}" > $R.termprobe.out 2>&1 & fi
 # final guard: when the launcher ended (or STOP), kill the host syncer + pull (chain: nstop_item.sh, never releases; single run: nstop.sh -> cleanup_run.sh), then judge
-setsid nohup bash -c "until [ -f $R/rc.txt ] || [ -f $R/startup_failed ]; do sleep 15; done; sleep 20; NSTOP_INNER=${NSTOP:-$B/nstop.sh} $B/nstop_item_strict.sh $P > $R/final_stop.txt 2>&1; echo \$? > $R/cleanup_rc.txt; [ -n '$JUDGE' ] && $B/judge_after.sh $R $JUDGE > $R/judge.out 2>&1; touch $R/item_done" > /dev/null 2>&1 &
+setsid nohup bash -c "until [ -f $R/rc.txt ] || [ -f $R/startup_failed ]; do sleep 15; done; sleep 20; NSTOP_INNER=${NSTOP:-$B/nstop.sh} $B/nstop_item_strict.sh $P > $R/final_stop.txt 2>&1; echo \$? > $R/cleanup_rc.txt; [ -n '$JUDGE' ] && $B/judge_after.sh $R $JUDGE $JARGS > $R/judge.out 2>&1; if [ '$GATE' = 1 ] && [ -n '${CHAIN_DIR:-}' ]; then v=\$(python3 -c \"import json;print(json.load(open('$R/judgment.json')).get('verdict'))\" 2>/dev/null || echo NO_JUDGMENT); [ \"\$v\" = PASS ] || echo \"{\\\"item\\\":\\\"$P\\\",\\\"reason\\\":\\\"gate_${C}_\$v\\\",\\\"ts\\\":\\\"\$(date -u +%FT%TZ)\\\"}\" > ${CHAIN_DIR:-/dev/null}/ABORT; fi; touch $R/item_done" > /dev/null 2>&1 &
 echo started $P $C strict

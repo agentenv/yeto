@@ -27,7 +27,7 @@ Event names/fields (infra-e1 interface; tape: {"event":..}, journal: {"kind":..}
   journal drain_timeout: active_requests tool_wait blockers;  undrain_failed: error
   side_effects.jsonl (a4bc): kind=tool_side_effect|tool_complete seq trajectory_id tool_call_id wall_time attempt
 """
-import json, os, sys
+import json, os, re, sys
 from pathlib import Path
 
 TERMINAL = ("SUCCEEDED", "REBUILT_OLD", "CANCELLED", "RECOVERY_REQUIRED")
@@ -1208,3 +1208,110 @@ def main(argv):  # noqa: F811
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
+
+
+# ----------------------------------------------------------------------------------------------- s0 (strict-avg single island + head syncer smoke)
+# Appended only (2026-10-01). Criteria fixed in E1D-RECOVERY-PROGRESS.md "s0 结果" before the rerun: rc=0; syncer "learner connected" and
+# "training complete"; publication versions contiguous 0..N; journal up1/dn1 exactly one SUCCEEDED each, epochs 0->1->2; inbox without
+# a rejected status file; epochs.json config_epoch=2; tape two rl_reconfiguration SUCCEEDED; >= S0_MIN_ROUNDS_AFTER rounds trained after the
+# last reconfiguration; one outer_recorded per rollout; no lora_unverifiable; host syncer cleanup rc=0; ledger L1-L3.  Missing evidence ->
+# INVALID_TEST(evidence_missing).  The first s0 (a4s7-20261001-1) FAILs here: both requests were refused at the inbox (pause budget 450 s).
+S0_MIN_ROUNDS = 6
+S0_MIN_ROUNDS_AFTER = 2
+
+
+def judge_s0(journal, tape, ledger, epochs, inbox_statuses, syncer_log, launch_log=None, rc=None, syncer_clean_rc=None,
+             up="up1", down="dn1"):
+    res = {"case": "s0", "checks": {}, "invalid_reasons": []}
+    for name, val in (("tape", tape), ("journal", journal), ("ledger", ledger), ("epochs.json", epochs),
+                      ("inbox listing", inbox_statuses), ("syncer log", syncer_log)):
+        if val is None or (name == "tape" and not val):
+            return _invalid(res, f"{name} missing: s0 evidence missing", "evidence_missing")
+    if not any(e.get("event") == "rl_driver_start" for e in tape):
+        return _invalid(res, "tape has no rl_driver_start: the island never started", "evidence_missing")
+    c = res["checks"]
+    c["rc_zero"] = rc == 0; res["rc"] = rc
+    c["syncer_learner_connected"] = any("learner connected" in l for l in syncer_log)
+    c["syncer_training_complete"] = any("training complete" in l for l in syncer_log)
+    pubs = [e.get("policy_version") for e in tape if e.get("event") == "rl_publication"]
+    pubs = [0 if v is None and i == 0 else v for i, v in enumerate(pubs)]   # the initial publication carries no version
+    rounds = [e.get("rollout_id") for e in tape if e.get("event") == "rl_round_trained"]
+    res["publications"] = pubs; res["rounds_trained"] = rounds
+    c["publication_versions_contiguous"] = len(pubs) >= 2 and pubs == list(range(len(pubs)))
+    c["rounds_trained"] = len(rounds) >= S0_MIN_ROUNDS
+    for rid, epoch_to in ((up, 1), (down, 2)):
+        term = _tx_terminal(journal, rid)
+        rec = [r for r in phases(journal) if r.get("request_id") == rid and r.get("phase") == "SUCCEEDED"]
+        c[f"{rid}_SUCCEEDED_once"] = term == ["SUCCEEDED"]
+        c[f"{rid}_epoch_to_{epoch_to}"] = len(rec) == 1 and rec[0].get("config_epoch_to", rec[0].get("config_epoch")) == epoch_to
+    res["terminals"] = {rid: _tx_terminal(journal, rid) for rid in (up, down)}
+    rejected = {k: v.get("rejected") for k, v in inbox_statuses.items() if isinstance(v, dict) and v.get("rejected")}
+    res["inbox_rejected"] = rejected; c["inbox_no_rejected"] = not rejected
+    c["epochs_config_epoch_2"] = epochs.get("config_epoch") == 2; res["epochs"] = {k: epochs.get(k) for k in ("config_epoch", "config_id", "members")}
+    rcf = [e for e in tape if e.get("event") == "rl_reconfiguration"]
+    ok_rcf = [(e.get("config_epoch_from"), e.get("config_epoch")) for e in rcf if e.get("result") == "SUCCEEDED"]
+    res["reconfigurations"] = [(e.get("result"), e.get("config_epoch_from"), e.get("config_epoch")) for e in rcf]
+    c["tape_two_reconfig_succeeded"] = ok_rcf == [(0, 1), (1, 2)]
+    t_last = max([e.get("time_unix") or 0 for e in rcf if e.get("result") == "SUCCEEDED"] or [None])
+    after = [e for e in tape if t_last is not None and e.get("event") == "rl_round_trained" and (e.get("time_unix") or 0) > t_last]
+    c["rounds_after_reconfig"] = len(after) >= S0_MIN_ROUNDS_AFTER; res["rounds_after_reconfig"] = [e.get("rollout_id") for e in after]
+    orec = {}
+    for r in ledger:
+        if r.get("kind") == "outer_recorded": orec[r.get("rollout_id")] = orec.get(r.get("rollout_id"), 0) + 1
+    c["outer_recorded_once_per_rollout"] = bool(rounds) and sorted(orec) == sorted(set(rounds)) and all(n == 1 for n in orec.values())
+    res["outer_recorded"] = orec
+    texts = [json.dumps(tape, default=str), json.dumps(journal, default=str)] + ([ "\n".join(launch_log)] if launch_log else [])
+    c["no_lora_unverifiable"] = not any("lora_unverifiable" in t for t in texts)
+    c["syncer_clean_rc_zero"] = syncer_clean_rc == 0; res["syncer_clean_rc"] = syncer_clean_rc
+    lc = ledger_checks(ledger, tape, journal, continues_after=t_last, min_rounds_after=S0_MIN_ROUNDS_AFTER, tx_windows=False)
+    for k in ("L1_round_triples", "L2_no_group_reuse", "L3_continues_after_terminal"):
+        if k in lc["checks"]: c[k] = lc["checks"][k]
+    res["ledger"] = {k: lc["info"].get(k) for k in ("L1_round_triples", "L2_no_group_reuse", "L3_continues_after_terminal")}
+    res["verdict"] = "PASS" if all(v is True for v in c.values()) else "FAIL"
+    if res["verdict"] == "FAIL": res["marker"] = "s0_failed"
+    return res
+
+
+def load_inbox_statuses(d):
+    """{request_id: parsed <id>.status.json}; None when the inbox dir is not there (evidence missing); {} when empty."""
+    if not d or not os.path.isdir(d):
+        return None
+    out = {}
+    for n in sorted(os.listdir(d)):
+        if n.endswith(".status.json"):
+            try: out[n[:-len(".status.json")]] = json.load(open(os.path.join(d, n)))
+            except Exception as e: out[n[:-len(".status.json")]] = {"unparsable": str(e)}
+    return out
+
+
+def _rc_from_file(p, prefix="rc="):
+    """'rc=0' (rc.txt) or 'syncer_host_clean rc=0' (syncer_clean.txt) -> int, else None."""
+    if not p or not os.path.exists(p): return None
+    vals = re.findall(prefix + r"(\d+)", open(p).read())
+    return int(vals[-1]) if vals else None
+
+
+_main_ledger = main
+
+
+def main(argv):  # noqa: F811
+    """Case s0 with its own evidence flags; every other case is passed on unchanged (the s0-only flags are stripped)."""
+    import argparse
+    ap = argparse.ArgumentParser(add_help=False)
+    for f in ("--epochs", "--inbox-dir", "--syncer-log", "--rc-file", "--syncer-clean"): ap.add_argument(f)
+    a, rest = ap.parse_known_args(argv)
+    if not rest or rest[0] != "s0":
+        return _main_ledger(rest)
+    bp = argparse.ArgumentParser(add_help=False)
+    bp.add_argument("case"); bp.add_argument("journal"); bp.add_argument("tape")
+    for f in ("--ledger", "--launch-log", "--out", "--marker-dir"): bp.add_argument(f)
+    b, _ = bp.parse_known_args(rest)
+    def jl(p): return [json.loads(l) for l in open(p) if l.strip()] if p and os.path.exists(p) else None
+    def lines(p): return open(p).read().splitlines() if p and os.path.exists(p) else None
+    epochs = json.load(open(a.epochs)) if a.epochs and os.path.exists(a.epochs) else None
+    res = judge_s0(jl(b.journal), jl(b.tape), jl(b.ledger), epochs, load_inbox_statuses(a.inbox_dir), lines(a.syncer_log),
+                   lines(b.launch_log), _rc_from_file(a.rc_file), _rc_from_file(a.syncer_clean, prefix=r"syncer_host_clean rc="))
+    if b.out: Path(b.out).write_text(json.dumps(res, indent=1, default=str))
+    if b.marker_dir and res.get("marker"):
+        Path(b.marker_dir, res["marker"]).write_text(json.dumps({"case": "s0", "verdict": res["verdict"], "why": res.get("invalid_reasons") or [k for k, v in res["checks"].items() if v is not True]}))
+    print(json.dumps(res, default=str)); return EXIT[res["verdict"]]
