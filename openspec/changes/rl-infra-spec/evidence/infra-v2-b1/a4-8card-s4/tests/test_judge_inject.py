@@ -325,8 +325,31 @@ class D(unittest.TestCase):
         self.assertNotIn("a27_training_continued", r["checks"]); self.assertTrue(r["a27_after_terminal"]["a27_training_continued"])   # moved to info: L3 judges continuation
         self.assertTrue(r["checks"]["L3_continues_after_terminal"] and r["checks"]["L5_silent_during_transactions"])
         self.assertEqual(J.judge_d2(j, tape, set(), [], probe, samples, led)["verdict"], "INVALID_TEST")   # kill not applied
-        J._A27_EXTRA["probe_after"] = None   # (main() of an earlier test may have stashed one)
-        self.assertEqual(J.judge_d2(j, tape, set(), k, None, samples, led)["verdict"], "INVALID_TEST")   # no probe after the terminal state
+        self.assertEqual(r["a27_discovery"]["path"], ["workers_lost"]); self.assertTrue(r["checks"]["a27_failure_detected"])
+        J._A27_EXTRA["probe_after"] = None; J._A27_EXTRA["launch_log"] = None   # (main() of an earlier test may have stashed one)
+        # A27B (8/1r5 d2): no probe after the terminal state -> journal+tape fallback, not INVALID. Old members took every later
+        # publication and the targets were the inconsistent engines at REBUILT_OLD -> PASS; without that record -> FAIL.
+        jb = j[:-1] + [tx("REBUILT_OLD", "up1", wall_time=130.0, inconsistent_engines=T)]
+        r = J.judge_d2(jb, tape, set(), k, None, samples, led); self.assertEqual(r["verdict"], "PASS", r)
+        self.assertEqual(r["a27_probe_after"]["source"], "journal+tape (probe_after missing)")
+        self.assertEqual(J.judge_d2(j, tape, set(), k, None, samples, led)["verdict"], "FAIL")   # targets never marked inconsistent
+        bare = [dict(e, **{"sync/publication_members": None}) if e["event"] == "rl_publication" else e for e in tape]   # continues, but names no members: still INVALID
+        r = J.judge_d2(jb, bare, set(), k, None, samples, led); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "evidence_missing"))
+        # B path: the trainer's fail-fast connect is the REBUILD_OLD cause (no target_workers_lost record)
+        jB = [j[0], j[1], j[2], tx("REBUILD_OLD", "up1", wall_time=101.0, cause="update_failed",
+                                  error="PublicationError: ... RuntimeError: engine 0 failed to join weight update group miles-pp_0 ..."), jb[-1]]
+        r = J.judge_d2(jB, tape, set(), k, probe, samples, led); self.assertEqual(r["verdict"], "PASS", r)
+        self.assertEqual(r["a27_discovery"]["path"], ["fail_fast"]); self.assertEqual(r["a27_discovery"]["fail_fast"][0]["source"], "journal")
+        jN = [j[0], j[1], j[2], tx("REBUILD_OLD", "up1", wall_time=101.0, cause="update_failed", error="PublicationError: engine weight checksum failed"), jb[-1]]
+        r = J.judge_d2(jN, tape, set(), k, probe, samples, led); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["a27_failure_detected"])
+        # launch log: old members killed after REBUILT_OLD / dead trainer is a FAIL even when the tape is otherwise fine
+        ll = ["x REBUILT_OLD x", "rollout_server.py:132 - Killing server cell_id='http://10.0.0.1:20000'...", "NonRetryableError: Cannot recover when all cells are dead"]
+        r = J.judge_d2(jb, tape, set(), k, probe, samples, led, launch_log=ll); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["a27_old_members_survived"])
+        self.assertEqual(r["a27_old_member_fate"], {"old_members_killed_after_terminal": ["http://10.0.0.1:20000"], "trainer_dead": True})
+        self.assertTrue(J.judge_d2(jb, tape, set(), k, probe, samples, led, launch_log=["x REBUILT_OLD x", "Killing server cell_id='c3'..."])["checks"]["a27_old_members_survived"])  # a target, not an old member
+        # 1r5 d2 shape: no probe, no continuation, < 3 router samples after the terminal state -> FAIL (the failure is established), not INVALID
+        r = J.judge_d2(jb, [e for e in tape if e["time_unix"] < 130.0], set(), k, None, samples[:1], led[:-8], launch_log=ll)
+        self.assertEqual((r["verdict"], r["marker"]), ("FAIL", "recovery_failed")); self.assertFalse(r["checks"]["a27_old_members_same_version"])
         self.assertEqual(J.judge_d2([j[0], tx("VERIFYING", "up1", wall_time=100.0), tx("SUCCEEDED", "up1")], tape, set(), k, probe, samples, led)["verdict"], "FAIL")
         self.assertEqual(J.judge_d2([j[0], tx("VERIFYING", "up1", wall_time=100.0)], tape, set(), k, probe, samples, led)["verdict"], "INVALID_TEST")
         r = J.judge_d2(j, tape, set(), k, probe, samples, led[:-4]); self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["L3_continues_after_terminal"])   # only 1 round after

@@ -783,14 +783,26 @@ def main(argv):
 
 
 # ---------------------------------------------------------------------------------------------------------
-# A27 (chain 6r1/6r2 d2): the new engine SIGKILLed during VERIFYING must be *discovered* (fork workers_lost /
-# publisher target_workers_lost), the transaction must go REBUILD_OLD -> REBUILT_OLD, the old members must be
-# serving the same version with no cordoned residue on the router, and training must continue afterwards
-# (>= 2 further rounds trained and >= 2 further publications with increasing policy_version). A bare
-# PublicationError (REBUILT_OLD without the continuation) is not a pass. Appended only; judge_d2 keeps its
-# original checks and the new ones are added to the same result (verdict = all checks true).
+# A27 (chain 6r1/6r2 d2, revised after 8/1r5 d2): the new engine SIGKILLed during VERIFYING must be *discovered* by
+# either legitimate path -- C: fork workers_lost / publisher target_workers_lost / watchdog skipped[workers_lost]
+# in the journal; B: the trainer's fail-fast connect (RolloutEngineJoinError "failed to join weight update group")
+# surfacing as the REBUILD_OLD cause (journal phase record `cause=update_failed, error=...`, mirrored by the tape's
+# rl_reconfiguration). The transaction must go REBUILD_OLD -> REBUILT_OLD, the old members must be serving the same
+# version with no cordoned residue on the router, and training must continue afterwards (>= 2 further rounds
+# trained and >= 2 further publications with increasing policy_version). A bare PublicationError (REBUILT_OLD without
+# the continuation) is not a pass.
+# Evidence trade-off (1r5 d2 was judged INVALID although the island demonstrably died): a proven failure beats
+# missing evidence. When the post-terminal fork probe is missing, old-member recovery is read from the journal
+# (REBUILT_OLD lists the targets as inconsistent_engines) + the tape (>= A27_MIN_ROUNDS_AFTER rl_publication events
+# after REBUILT_OLD whose sync/publication_members are exactly the old members, i.e. every old member took every
+# later version) + the ledger (L3, added by the ledger wrapper); the launch log (when given) records old members
+# killed after the terminal state / a dead trainer. INVALID(evidence_missing) is kept only when neither the probe
+# nor that fallback can say anything *and* no failure is established. Appended only; judge_d2 keeps its original
+# checks and the new ones are added to the same result (verdict = all checks true).
 A27_MIN_ROUNDS_AFTER = 2
-_A27_EXTRA = {"probe_after": None, "router_samples": None}
+A27_FAIL_FAST_RE = re.compile(r"failed to join weight update group|RolloutEngineJoinError|ExternalFailureError"
+                              r"|update_weights failed on the rollout engine side")
+_A27_EXTRA = {"probe_after": None, "router_samples": None, "launch_log": None}
 
 
 def _a27_terminal_time(journal, request_id="up1"):
@@ -800,58 +812,124 @@ def _a27_terminal_time(journal, request_id="up1"):
     return None
 
 
-def judge_d2_a27(res, journal, tape, known, probe_after=None, router_samples=None):
+def _a27_members(v):
+    """sync/publication_members is a list in the tape; tolerate its str() form in older tapes."""
+    if isinstance(v, str):
+        return set(re.findall(r"engine:[\w\-]+", v))
+    return set(v or [])
+
+
+def _a27_old_member_fate(launch_log, old_cells, t_old):
+    """Launch-log facts after the terminal state: old member cells killed (rollout_server 'Killing server') and a dead
+    trainer ('Cannot recover when all cells are dead'); None when no launch log was given."""
+    if launch_log is None:
+        return None
+    killed, trainer_dead = [], False
+    seen_terminal = t_old is None
+    for l in launch_log:
+        if not seen_terminal:
+            seen_terminal = "REBUILT_OLD" in l
+            if not seen_terminal:
+                continue
+        if "Cannot recover when all cells are dead" in l:
+            trainer_dead = True
+        m = re.search(r"Killing server cell_id='([^']+)'", l)
+        if m and m.group(1) in old_cells and m.group(1) not in killed:
+            killed.append(m.group(1))
+    return {"old_members_killed_after_terminal": killed, "trainer_dead": trainer_dead}
+
+
+def judge_d2_a27(res, journal, tape, known, probe_after=None, router_samples=None, launch_log=None):
     """Add the A27 recovery checks to a judge_d2 result (see the block comment above)."""
     if res.get("verdict") == "INVALID_TEST":
         return res
     ph = [r for r in phases(journal) if r.get("request_id") == "up1"]
     seq = [r.get("phase") for r in ph]
     res["a27_phases"] = seq
-    # (1) discovery: the publisher's watch (target_workers_lost) or the watchdog's workers_lost skip
-    lost = named(journal, "target_workers_lost")
-    wd_lost = [e for r in named(journal, "watchdog_action") for e in (r.get("skipped") or [])
-               if e.get("kind") == "workers_lost"]
-    res["a27_discovery"] = {"target_workers_lost": [r.get("lost_members") for r in lost],
-                            "watchdog_workers_lost": [e.get("cell") for e in wd_lost]}
-    res["checks"]["a27_workers_lost_recorded"] = bool(lost) or bool(wd_lost)
-    # (2) REBUILD_OLD -> REBUILT_OLD, nothing else terminal
-    res["checks"]["a27_rebuild_old_then_rebuilt_old"] = ("REBUILD_OLD" in seq and seq[-1] == "REBUILT_OLD"
-                                                        and "RECOVERY_REQUIRED" not in seq)
-    t_old = _a27_terminal_time(journal)
     targets = set()
     for r in named(journal, "add_intent"):
         targets |= set(r.get("members") or [])
     tcells = [t.split(":", 1)[1] if ":" in t else t for t in sorted(targets)]
-    # (3) old members recovered: fork status probe after the terminal state
-    if probe_after is None:
-        return _invalid(res, "fork status probe after the terminal state missing: old-member recovery not observed",
-                        "evidence_missing")
-    statuses = probe_after.get("cell_statuses") or {}
-    vers = probe_after.get("versions") or {}
-    serving = {k: v for k, v in vers.items() if k not in tcells}
-    res["a27_probe_after"] = {"membership": probe_after.get("membership"), "versions": vers,
-                              "target_statuses": {c: statuses.get(c) for c in tcells}}
-    res["checks"]["a27_old_members_same_version"] = len(serving) >= 1 and len(set(serving.values())) == 1
-    res["checks"]["a27_targets_not_serving"] = bool(statuses) and all(
-        c not in statuses or "Serving" not in str(statuses[c]) for c in tcells)
-    # (4) router: no cordoned residue after the terminal state (last >= 3 samples)
-    data = [x for x in (router_samples or []) if isinstance(x.get("data"), dict)
-            and (t_old is None or x.get("t", 0) >= t_old)]
-    if len(data) < 3:
-        return _invalid(res, "fewer than 3 router samples after REBUILT_OLD: cordon residue not observed",
-                        "evidence_missing")
-    res["a27_router_tail"] = [x["data"].get("cordoned") for x in data[-3:]]
-    res["checks"]["a27_router_no_cordoned_residue"] = all(not x["data"].get("cordoned") for x in data[-3:])
+    # (1) discovery, either path. C: the publisher's watch (target_workers_lost) or the watchdog's workers_lost skip.
+    # B: the trainer's fail-fast connect is the REBUILD_OLD cause (journal phase record; the tape mirrors it).
+    lost = named(journal, "target_workers_lost")
+    wd_lost = [e for r in named(journal, "watchdog_action") for e in (r.get("skipped") or [])
+               if e.get("kind") == "workers_lost"]
+    rebuild = [r for r in ph if r.get("phase") == "REBUILD_OLD"]
+    tape_reconf = [e for e in (tape or []) if e.get("event") == "rl_reconfiguration"]
+    fail_fast = [{"source": src, "cause": r.get("cause"), "inconsistent_engines": r.get("inconsistent_engines"),
+                  "error": str(r.get("error"))[:200]}
+                 for src, rs in (("journal", rebuild), ("tape", tape_reconf)) for r in rs
+                 if r.get("cause") == "update_failed" and A27_FAIL_FAST_RE.search(str(r.get("error") or ""))]
+    res["a27_discovery"] = {"target_workers_lost": [r.get("lost_members") for r in lost],
+                            "watchdog_workers_lost": [e.get("cell") for e in wd_lost],
+                            "fail_fast": fail_fast,
+                            "path": [p for p, on in (("workers_lost", bool(lost) or bool(wd_lost)),
+                                                    ("fail_fast", bool(fail_fast))) if on]}
+    res["checks"]["a27_failure_detected"] = bool(lost) or bool(wd_lost) or bool(fail_fast)
+    # (2) REBUILD_OLD -> REBUILT_OLD, nothing else terminal
+    res["checks"]["a27_rebuild_old_then_rebuilt_old"] = ("REBUILD_OLD" in seq and seq[-1] == "REBUILT_OLD"
+                                                        and "RECOVERY_REQUIRED" not in seq)
+    t_old = _a27_terminal_time(journal)
     # (5) training continues: >= A27_MIN_ROUNDS_AFTER rounds trained and publications with increasing versions
     after = [e for e in tape if t_old is not None and e.get("time_unix", 0) >= t_old]
+    before = [e for e in tape if t_old is None or e.get("time_unix", 0) < t_old]
     rounds = sorted({e.get("rollout_id") for e in after if e.get("event") == "rl_round_trained"
                      if e.get("rollout_id") is not None})
-    pubs = [e.get("policy_version") for e in after if e.get("event") == "rl_publication"]
+    pubs_after = [e for e in after if e.get("event") == "rl_publication"]
+    pubs = [e.get("policy_version") for e in pubs_after]
     syncs = [e for e in after if e.get("event") == "rl_driver_phase" and e.get("phase") == "sync"]
     res["a27_after_terminal"] = {"rounds_trained": rounds, "publication_versions": pubs, "syncs": len(syncs)}
     res["checks"]["a27_training_continued"] = (
         len(rounds) >= A27_MIN_ROUNDS_AFTER and len(pubs) >= A27_MIN_ROUNDS_AFTER
         and all(b > a for a, b in zip(pubs, pubs[1:])) and len(syncs) >= A27_MIN_ROUNDS_AFTER)
+    # old members = the members of the last publication before up1's terminal state, minus the targets
+    old_pubs = [e for e in before if e.get("event") == "rl_publication"]
+    old_members = (_a27_members(old_pubs[-1].get("sync/publication_members")) if old_pubs else set()) - targets
+    old_cells = {m.split(":", 1)[1] if m.startswith("engine:") else m for m in old_members}
+    fate = _a27_old_member_fate(launch_log, old_cells, t_old)
+    if fate is not None:
+        res["a27_old_member_fate"] = fate
+        res["checks"]["a27_old_members_survived"] = not fate["old_members_killed_after_terminal"] and not fate["trainer_dead"]
+    failure_established = (res["checks"]["a27_training_continued"] is False
+                           or res["checks"].get("a27_old_members_survived") is False)
+    # (3) old members recovered: fork status probe after the terminal state, else the journal+tape fallback
+    if probe_after is not None:
+        statuses = probe_after.get("cell_statuses") or {}
+        vers = probe_after.get("versions") or {}
+        serving = {k: v for k, v in vers.items() if k not in tcells}
+        res["a27_probe_after"] = {"source": "probe_after", "membership": probe_after.get("membership"),
+                                  "versions": vers, "target_statuses": {c: statuses.get(c) for c in tcells}}
+        res["checks"]["a27_old_members_same_version"] = len(serving) >= 1 and len(set(serving.values())) == 1
+        res["checks"]["a27_targets_not_serving"] = bool(statuses) and all(
+            c not in statuses or "Serving" not in str(statuses[c]) for c in tcells)
+    else:
+        rebuilt = [r for r in ph if r.get("phase") == "REBUILT_OLD"]
+        inconsistent = set(rebuilt[-1].get("inconsistent_engines") or []) if rebuilt else set()
+        members_after = [sorted(_a27_members(e.get("sync/publication_members"))) for e in pubs_after]
+        res["a27_probe_after"] = {"source": "journal+tape (probe_after missing)", "old_members": sorted(old_members),
+                                  "rebuilt_old_inconsistent_engines": sorted(inconsistent),
+                                  "publication_members_after": members_after}
+        if not old_members and not failure_established:
+            return _invalid(res, "fork status probe after the terminal state missing and the tape names no old "
+                                 "members: old-member recovery not observed", "evidence_missing")
+        # every later version reached every old member and nobody else: same version on all old members
+        res["checks"]["a27_old_members_same_version"] = (
+            len(members_after) >= A27_MIN_ROUNDS_AFTER and all(set(m) == old_members for m in members_after))
+        # the targets were marked inconsistent at REBUILT_OLD and took part in no later publication
+        res["checks"]["a27_targets_not_serving"] = (bool(targets) and targets <= inconsistent
+                                                    and all(not (set(m) & targets) for m in members_after))
+    # (4) router: no cordoned residue after the terminal state (last >= 3 samples)
+    data = [x for x in (router_samples or []) if isinstance(x.get("data"), dict)
+            and (t_old is None or x.get("t", 0) >= t_old)]
+    if len(data) < 3:
+        if not failure_established:
+            return _invalid(res, "fewer than 3 router samples after REBUILT_OLD: cordon residue not observed",
+                            "evidence_missing")
+        res["a27_router_tail"] = {"samples_after_terminal": len(data), "note": "too few samples; the island failed before"}
+    else:
+        res["a27_router_tail"] = [x["data"].get("cordoned") for x in data[-3:]]
+        res["checks"]["a27_router_no_cordoned_residue"] = all(not x["data"].get("cordoned") for x in data[-3:])
     res["verdict"] = "PASS" if all(v is True for v in res["checks"].values()) else "FAIL"
     if res["verdict"] == "FAIL":
         res["marker"] = "recovery_failed"
@@ -861,11 +939,12 @@ def judge_d2_a27(res, journal, tape, known, probe_after=None, router_samples=Non
 _judge_d2_base = judge_d2
 
 
-def judge_d2(journal, tape, known, dkill_log=None, probe_after=None, router_samples=None):  # noqa: F811
+def judge_d2(journal, tape, known, dkill_log=None, probe_after=None, router_samples=None, launch_log=None):  # noqa: F811
     res = _judge_d2_base(journal, tape, known, dkill_log)
     return judge_d2_a27(res, journal, tape, known,
                         probe_after if probe_after is not None else _A27_EXTRA["probe_after"],
-                        router_samples if router_samples is not None else _A27_EXTRA["router_samples"])
+                        router_samples if router_samples is not None else _A27_EXTRA["router_samples"],
+                        launch_log if launch_log is not None else _A27_EXTRA["launch_log"])
 
 
 _main_base = main
@@ -875,9 +954,11 @@ def main(argv):  # noqa: F811
     """Stash --probe-after / --router-samples for the appended judge_d2 (main's d2 dispatch passes neither)."""
     import argparse
     ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--probe-after"); ap.add_argument("--router-samples")
+    ap.add_argument("--probe-after"); ap.add_argument("--router-samples"); ap.add_argument("--launch-log")
     a, _ = ap.parse_known_args(argv)
     _A27_EXTRA["probe_after"] = load_probe(a.probe_after)
+    _A27_EXTRA["launch_log"] = (open(a.launch_log, errors="replace").read().splitlines()
+                                if a.launch_log and os.path.exists(a.launch_log) else None)
     _A27_EXTRA["router_samples"] = ([json.loads(l) for l in open(a.router_samples) if l.strip()]
                                     if a.router_samples and os.path.exists(a.router_samples) else None)
     return _main_base(argv)
@@ -1162,10 +1243,10 @@ def judge_d4(journal, tape, known, ledger=None, recovery_timeout_s=None, margin_
     return _with_ledger(res, ledger, tape, journal, required=True, silent_after=min(rec) if rec else None, tx_windows=False)
 
 
-def judge_d2(journal, tape, known, dkill_log=None, probe_after=None, router_samples=None, ledger=None):  # noqa: F811
+def judge_d2(journal, tape, known, dkill_log=None, probe_after=None, router_samples=None, ledger=None, launch_log=None):  # noqa: F811
     """d2 + A27 + L1/L2/L3(>=2 complete rounds after REBUILT_OLD)/L5/L8. A27's own a27_training_continued (tape rounds /
     publications) is kept as information; the continuation verdict is L3 (ledger triples), per T36-REVIEW §3.1."""
-    res = _judge_d2_a27(journal, tape, known, dkill_log, probe_after, router_samples)
+    res = _judge_d2_a27(journal, tape, known, dkill_log, probe_after, router_samples, launch_log)
     if ledger is None: ledger = _LEDGER_EXTRA["ledger"]
     if "a27_training_continued" in res.get("checks", {}) and ledger is not None:
         res.setdefault("a27_after_terminal", {})["a27_training_continued"] = res["checks"].pop("a27_training_continued")
