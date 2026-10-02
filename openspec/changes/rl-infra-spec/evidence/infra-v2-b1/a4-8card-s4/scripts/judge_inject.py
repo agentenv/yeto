@@ -1206,10 +1206,6 @@ def main(argv):  # noqa: F811
 
 
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
-
-
 # ----------------------------------------------------------------------------------------------- s0 (strict-avg single island + head syncer smoke)
 # Appended only (2026-10-01). Criteria fixed in E1D-RECOVERY-PROGRESS.md "s0 结果" before the rerun: rc=0; syncer "learner connected" and
 # "training complete"; publication versions contiguous 0..N; journal up1/dn1 exactly one SUCCEEDED each, epochs 0->1->2; inbox without
@@ -1315,3 +1311,7 @@ def main(argv):  # noqa: F811
     if b.marker_dir and res.get("marker"):
         Path(b.marker_dir, res["marker"]).write_text(json.dumps({"case": "s0", "verdict": res["verdict"], "why": res.get("invalid_reasons") or [k for k, v in res["checks"].items() if v is not True]}))
     print(json.dumps(res, default=str)); return EXIT[res["verdict"]]
+
+# entry point: must stay last (later appended main() definitions shadow earlier ones)
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
