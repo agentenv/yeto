@@ -119,6 +119,19 @@ def expected_rank_trainable_4layer(lora_rank: int, lora_expert_rank: int, num_gp
     return stage0, stage1
 
 
+def ckpt_dir_for_gpus(num_gpus: int, base: str = "/root/ckpt") -> str:
+    """torch_dist parent directory for a conversion run on ``num_gpus`` GPUs.
+
+    torch_dist re-shards at load, but the manifest written next to it records the
+    training EP and ``expected_rank_trainable`` of the shape it was converted for, so
+    each shape converts into its own directory on a shared volume: 4 GPUs keep the
+    A-stage default ``/root/ckpt``, every other shape gets ``<base>/gpus<N>``.
+    """
+    if num_gpus not in (4, 8):
+        raise ValueError(f"the 4-layer layout is validated on 4 or 8 GPUs, got {num_gpus}")
+    return base if num_gpus == 4 else f"{base}/gpus{num_gpus}"
+
+
 def _moe_layer_freq(nlayers: int) -> str:
     # model_args_utils.moe_layer_freq(nlayers=nlayers, first_k_dense_replace=0)
     return "[" + ",".join(["1"] * nlayers) + "]"

@@ -288,6 +288,20 @@ def test_launch_script_dry_run_prints_rendered_steps():
     out4 = _run(["bash", str(LAUNCH_SH), "--dry-run", "--yeto-root", str(ROOT)], env={"YETO_Q38N_NUM_GPUS_PER_NODE": "4"})
     assert "4 GPUs" in out4 and "--nproc-per-node 4" in _run(
         ["bash", str(CONVERT_SH), "--dry-run", "--yeto-root", str(ROOT)], env={"YETO_Q38N_NUM_GPUS_PER_NODE": "4"})
+    # T2-B 8-GPU final acceptance: EP4 conversion goes to its own torch_dist directory
+    assert q.ckpt_dir_for_gpus(4) == "/root/ckpt" and q.ckpt_dir_for_gpus(8) == "/root/ckpt/gpus8"
+    with pytest.raises(ValueError):
+        q.ckpt_dir_for_gpus(6)
+    env8 = {"YETO_Q38N_NUM_GPUS_PER_NODE": "8", "YETO_Q38N_CKPT_DIR": q.ckpt_dir_for_gpus(8)}
+    out8 = _run(["bash", str(LAUNCH_SH), "--dry-run", "--yeto-root", str(ROOT)], env=env8)
+    assert "8 GPUs" in out8 and "--ckpt-dir /root/ckpt/gpus8" in out8
+    conv8 = _run(["bash", str(CONVERT_SH), "--dry-run", "--yeto-root", str(ROOT)], env=env8)
+    assert "--nproc-per-node 8" in conv8 and "--save /root/ckpt/gpus8/qwen3.8-flash-next-4layer_torch_dist" in conv8
+    m8 = q.Qwen38NextLoraProfile(num_gpus_per_node=8, ckpt_dir=q.ckpt_dir_for_gpus(8)).manifest()
+    assert m8["parallel"]["ep"] == 4 and m8["expected_rank_trainable"] == [17_074_176, 16_415_744]
+    # the Modal driver derives GPU count / ckpt dir from the same env knob
+    modal_py = (ROOT / "scripts" / "modal_qwen3_8_next_4layer_lora.py").read_text()
+    assert 'f"H100:{NUM_GPUS}"' in modal_py and "ckpt_dir_for_gpus(NUM_GPUS)" in modal_py
 
 
 # ------------------------------------------------------------- log judge

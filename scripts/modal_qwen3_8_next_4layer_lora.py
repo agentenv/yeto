@@ -1,4 +1,4 @@
-"""Run the Qwen3.8-Flash-Next-4layer native LoRA GRPO steps (M4 G0-G4) on Modal H100:4.
+"""Run the Qwen3.8-Flash-Next-4layer native LoRA GRPO steps (M4 G0-G4) on Modal H100:4 / H100:8.
 
     modal run scripts/modal_qwen3_8_next_4layer_lora.py --step g0|g1|g2|g3|g4|g4r|shell
         [--timeout SECONDS] [--cmd 'override bash command'] [--run-id ID]
@@ -8,7 +8,11 @@ ghcr credentials from ~/.docker/config.json as the registry secret, never export
 into the task), yeto's `yeto/` + `scripts/` mounted at /root/yeto, and one Volume
 holding HF weights / torch_dist / datasets / checkpoints / logs / compile caches
 so steps survive container turnover.  g0 and g1 are CPU-only (image checks,
-downloads); g2-g4r reserve H100:4 (`M4_GPU` overrides) with >=256 GiB RAM.  Every
+downloads); g2-g4r reserve H100:<YETO_Q38N_NUM_GPUS_PER_NODE> (default 4; `M4_GPU`
+overrides) with >=256 GiB RAM.  The 8-GPU final acceptance (T2-B, Miles' native
+TP2/PP2/EP4 layout) converts into its own torch_dist directory
+(`ckpt_dir_for_gpus`: /root/ckpt/gpus8) so the EP4 manifest / expected_rank_trainable
+never collide with the 4-GPU A-stage output on the shared Volume.  Every
 step runs under `timeout` (the launcher's own EXIT trap stops the ray job), the
 container's function timeout is a second ceiling, and `modal app stop <app>` is
 the external watchdog.  The GPU actually granted is logged at the top of every
@@ -21,9 +25,13 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import time
 
 import modal
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from yeto.rl.profiles.qwen3_8_next import ckpt_dir_for_gpus  # noqa: E402
 
 IMAGE = (
     "ghcr.io/michaellchung/yeto-miles-ports:c35702e-4e4148f"
@@ -31,8 +39,8 @@ IMAGE = (
 )
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.environ.get("M4_APP", "m4-q38n-" + time.strftime("%Y%m%d"))
-GPU = os.environ.get("M4_GPU", "H100:4")
 NUM_GPUS = int(os.environ.get("YETO_Q38N_NUM_GPUS_PER_NODE", "4"))
+GPU = os.environ.get("M4_GPU") or f"H100:{NUM_GPUS}"
 VOLUME = os.environ.get("M4_VOLUME", "m4-q38n-vol")
 YETO = "/root/yeto"
 LINKS = {  # container path -> volume path (Miles' defaults, see yeto.rl.profiles.qwen3_8_next)
@@ -59,7 +67,10 @@ vol = modal.Volume.from_name(VOLUME, create_if_missing=True)
 app = modal.App(APP, image=image)
 
 LAUNCH = f"bash {YETO}/scripts/run_qwen3_8_next_4layer_lora.sh --yeto-root {YETO}"
-COMMON_ENV = f"export YETO_Q38N_NUM_GPUS_PER_NODE={NUM_GPUS} PYTHONPATH={YETO}:/root/miles:/root/Megatron-LM; "
+CKPT_DIR = ckpt_dir_for_gpus(NUM_GPUS)  # 4 -> /root/ckpt (A-stage), 8 -> /root/ckpt/gpus8 (B-stage, EP4)
+TORCH_DIST = f"{CKPT_DIR}/qwen3.8-flash-next-4layer_torch_dist"
+COMMON_ENV = (f"export YETO_Q38N_NUM_GPUS_PER_NODE={NUM_GPUS} YETO_Q38N_CKPT_DIR={CKPT_DIR} "
+              f"PYTHONPATH={YETO}:/root/miles:/root/Megatron-LM; ")
 # extra train.py args for g3/g4/g4r (e.g. "--entropy-coef 0.01": the 4-layer slice earns
 # reward 0 on dapo-math, so without it GRPO advantages and LoRA B stay 0 — T2-S7 G3)
 EXTRA = os.environ.get("M4_EXTRA_TRAIN_ARGS", "")
@@ -80,8 +91,8 @@ STEPS: dict[str, tuple[str, int, bool]] = {  # name -> (command, default timeout
            "ls -la /root/datasets/aime-2024/ /root/datasets/dapo-math-17k/",
            1500, False),
     "g2": (f"bash {YETO}/scripts/convert_qwen3_8_next.sh --variant 4layer --yeto-root {YETO}; "
-           "cat /root/ckpt/qwen3.8-flash-next-4layer_torch_dist/latest_checkpointed_iteration.txt; "
-           "cat /root/ckpt/qwen3.8-flash-next-4layer_torch_dist/yeto-profile-manifest.json",
+           f"cat {TORCH_DIST}/latest_checkpointed_iteration.txt; "
+           f"cat {TORCH_DIST}/yeto-profile-manifest.json",
            1200, True),
     "g3": (f"YETO_Q38N_RUN_ID=$RUN_ID {LAUNCH} --skip-download --skip-convert --timeout 2700 -- "
            f"--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID {EXTRA}",
@@ -157,7 +168,8 @@ def main(step: str, timeout: int = 0, cmd: str = "", run_id: str = "", record: s
     timeout_s = timeout or default_timeout
     run_id = run_id or os.environ.get("M4_RUN_ID", "m4-q38n-g4")
     fn = run_gpu if needs_gpu else run_cpu
-    print(f"# app={APP} step={step} gpu={GPU if needs_gpu else 'none'} timeout={timeout_s}s run_id={run_id}", flush=True)
+    print(f"# app={APP} step={step} gpu={GPU if needs_gpu else 'none'} num_gpus={NUM_GPUS} ckpt_dir={CKPT_DIR} "
+          f"timeout={timeout_s}s run_id={run_id}", flush=True)
     res = fn.remote(step, command, timeout_s, run_id)
     res["cost_h"] = round(res["elapsed_s"] / 3600, 3)
     print(json.dumps(res))
