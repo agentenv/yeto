@@ -88,12 +88,15 @@ STEPS: dict[str, tuple[str, int, bool]] = {  # name -> (command, default timeout
            2700 + 300, True),
     "g4": (f"YETO_Q38N_RUN_ID=$RUN_ID YETO_Q38N_NUM_ROLLOUT=20 {LAUNCH} --skip-download --skip-convert --timeout 3000 -- "
            f"--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID {EVAL} {EXTRA}; "
-           "ls /root/shared_data/$RUN_ID/checkpoints/iter_0000010/adapter /root/shared_data/$RUN_ID/checkpoints/iter_0000020/adapter",
+           "ls /root/shared_data/$RUN_ID/checkpoints/iter_0000009/adapter /root/shared_data/$RUN_ID/checkpoints/iter_0000019/adapter",
            3000 + 300, True),
-    # F4: restart with a NEW run id and --lora-adapter-path (never --load on the LoRA dir)
-    "g4r": (f"YETO_Q38N_RUN_ID=$RUN_ID-restart YETO_Q38N_NUM_ROLLOUT=1 {LAUNCH} --skip-download --skip-convert --timeout 1800 -- "
+    # F4: restart with a NEW run id and --lora-adapter-path (never --load on the LoRA dir).
+    # Miles names checkpoints by the 0-based rollout id: save-interval 10 over 20 rounds
+    # writes iter_0000009 and iter_0000019 (T2-S7 G4).
+    "g4r": (f"export TENSORBOARD_DIR=/vol/tensorboard_log/m4-q38n/$RUN_ID-restart; "
+            f"YETO_Q38N_RUN_ID=$RUN_ID-restart YETO_Q38N_NUM_ROLLOUT=1 {LAUNCH} --skip-download --skip-convert --timeout 1800 -- "
             "--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID-restart "
-            f"--lora-adapter-path /root/shared_data/$RUN_ID/checkpoints/iter_0000010/adapter {EXTRA}",
+            f"--lora-adapter-path /root/shared_data/$RUN_ID/checkpoints/iter_0000009/adapter {EXTRA}",
             1800 + 300, True),
     "shell": ("bash -c \"$M4_SHELL\"", 600, False),
 }
