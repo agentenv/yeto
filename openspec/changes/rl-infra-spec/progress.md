@@ -749,3 +749,8 @@
 - 代码：`yeto/rl/profiles/qwen3_8_next.py`、`scripts/{run_qwen3_8_next_4layer_lora,convert_qwen3_8_next}.sh`、`scripts/judge_qwen3_8_next_lora_log.py`、`scripts/modal_qwen3_8_next_4layer_lora.py`（提交 b2403324 → 2641ad0a，CPU 单测 16/16，全量 = 基线 94 id）。
 - 执行：Modal app `m4-q38n-20261003`，G0–G5 全 PASS（G3/G4r 各定位修复后重跑 1 次），≈$28。证据 `evidence/m4-q38n/`（judge JSON、曲线 CSV、逐 rank trainable、adapter 检查、tensorboard、日志）。详细判读与偏离见 `/home/michael/work/infra-drafts/M4-PROGRESS.md §4–§5`、`T2-S7-PROGRESS.md §8`。
 - M3 验收 #1/#4/#5 过，#2 弱证据过（B≠0 需 `--entropy-coef 0.01`，4 层切片奖励恒 0），#3 间接过（strict loading + sha256 读回，未直接计数 54 键）。B 段 8×H100 终验待放行。
+
+## M4（T2-S7）B 段：8 卡终验，Modal H100:8（实给 H200:8，2026-10-03）
+- 代码：Modal 脚本 8 卡模式（`YETO_Q38N_NUM_GPUS_PER_NODE=8` → H100:8、EP4 torch_dist 分目录 `/root/ckpt/gpus8`，`ckpt_dir_for_gpus`；容器内不再重读 env，以参数传入）a07daadf → fa03fb05，单测 16/16，全量 = 基线 94 id。
+- 执行：app `m4-q38n-b-20261003`，G0/G1/G2/G3' 全 PASS（G0 两次 CPU 容器失败后修复，未占 GPU；G3' 一次通过）。8 rank trainable 精确 4×17,074,176 + 4×16,415,744（Miles 原生 TP2/PP2/EP4）、LORA-CHECK=0、5 轮有限、logprob_abs_diff 0.0102–0.0106 与 4 卡同量级。≈$14.3。证据 `evidence/m4-q38n/b-8gpu/`；详见 `infra-drafts/M4-PROGRESS.md §6`、`T2-S7-PROGRESS.md §9`。
+- 范围：8 卡只做 G0–G3'；ckpt/adapter 重启（G4/G4r）在 4 卡 A 段验证。
