@@ -82,6 +82,20 @@ def test_ir1_append_roles_rejected_with_template_reason():
         cfg.translate_run_config(c, AlgorithmSpec())
 
 
+def test_ir1_append_roles_accepted_for_signed_codex_agent_when_equal_to_profile():
+    from yeto.rl import CODEX_OPENENV_AGENT
+    c = sub(make_config(), "agent", use_session_server=True, tito_model="qwen35",
+            custom_generate_function_path=AGENTIC, custom_agent_function_path=CODEX_OPENENV_AGENT,
+            tito_allowed_append_roles=("tool", "user"))
+    stub = lambda _m: (None, None)  # noqa: E731 - no miles checkout in the CPU venv
+    launch = cfg.translate_run_config(c, AlgorithmSpec(), tito_parser_resolver=stub)
+    assert "--tito-allowed-append-roles" not in " ".join(map(str, launch.argv))
+    assert "--tito-model" in launch.argv
+    bad = sub(c, "agent", tito_allowed_append_roles=("tool",))
+    with pytest.raises(cfg.UnmappedConfigError, match="fixes the append roles"):
+        cfg.translate_run_config(bad, AlgorithmSpec(), tito_parser_resolver=stub)
+
+
 def test_ir1_session_server_and_partial_rollout_are_mutually_exclusive():
     with pytest.raises(cfg.UnmappedConfigError) as err:
         cfg.check_session_server_partial_rollout(True, True)

@@ -176,6 +176,40 @@ def _must_be_none(reason: str) -> _Check:
     return check
 
 
+def _stock_codex_append_roles_or_none(reason: str) -> _Check:
+    """Append roles are decided by the ``--tito-model`` template upstream, so
+    the option is refused -- except for a signed stock Codex agent, whose
+    launcher-side profile check (``validate_stock_codex_fields``) requires the
+    roles to be stated and equal to the profile's.  Those are accepted when they
+    match the profile and are NOT emitted to argv (the template decides)."""
+
+    def check(value, config):
+        if value is None:
+            return None
+        agent = getattr(config, "agent", None)
+        try:
+            from yeto.rl import SIGNED_CODEX_AGENTS
+            from yeto.rl.codex_backend import stock_codex_backend_profile
+        except ImportError:  # pragma: no cover - defensive
+            return reason
+        if getattr(agent, "custom_agent_function_path", None) not in SIGNED_CODEX_AGENTS:
+            return reason
+        if not getattr(agent, "tito_model", None):
+            return reason
+        try:
+            profile = stock_codex_backend_profile(str(agent.tito_model))
+        except (KeyError, ValueError):
+            return reason
+        if list(value) != list(profile["tito_allowed_append_roles"]):
+            return (
+                f"stock Codex profile {agent.tito_model!r} fixes the append roles to "
+                f"{profile['tito_allowed_append_roles']} (got {list(value)})"
+            )
+        return None
+
+    return check
+
+
 def _must_be_false(reason: str) -> _Check:
     def check(value, _config):
         return reason if value else None
@@ -388,7 +422,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "agent.session_server_ip": _ok,
     "agent.session_server_port": _ok,
     "agent.tito_model": _ok,
-    "agent.tito_allowed_append_roles": _must_be_none(
+    "agent.tito_allowed_append_roles": _stock_codex_append_roles_or_none(
         "upstream Miles has no --tito-allowed-append-roles; the append roles are "
         "decided by the --tito-model template (allowed_append_roles)"
     ),
