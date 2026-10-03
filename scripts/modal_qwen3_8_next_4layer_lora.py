@@ -67,8 +67,10 @@ LAUNCH = f"bash {YETO}/scripts/run_qwen3_8_next_4layer_lora.sh --yeto-root {YETO
 # re-imported inside the container where yeto lives under /root/yeto, not on sys.path)
 CKPT_DIR = "/root/ckpt" if NUM_GPUS == 4 else f"/root/ckpt/gpus{NUM_GPUS}"  # 8 -> gpus8 (B-stage, EP4)
 TORCH_DIST = f"{CKPT_DIR}/qwen3.8-flash-next-4layer_torch_dist"
-COMMON_ENV = (f"export YETO_Q38N_NUM_GPUS_PER_NODE={NUM_GPUS} YETO_Q38N_CKPT_DIR={CKPT_DIR} "
-              f"PYTHONPATH={YETO}:/root/miles:/root/Megatron-LM; ")
+# NUM_GPUS / CKPT_DIR / APP are read from the *local* environment and shipped to the container as
+# function arguments (`ctx`): the module is re-imported inside the container, where these env vars
+# are unset and would silently fall back to the 4-GPU defaults (B-stage G0 attempt 2).
+LOCAL_CTX = {"num_gpus": NUM_GPUS, "ckpt_dir": CKPT_DIR, "app": APP, "gpu": GPU}
 # extra train.py args for g3/g4/g4r (e.g. "--entropy-coef 0.01": the 4-layer slice earns
 # reward 0 on dapo-math, so without it GRPO advantages and LoRA B stay 0 — T2-S7 G3)
 EXTRA = os.environ.get("M4_EXTRA_TRAIN_ARGS", "")
@@ -115,7 +117,10 @@ STEPS: dict[str, tuple[str, int, bool]] = {  # name -> (command, default timeout
 }
 
 
-def _run(name: str, cmd: str, timeout_s: int, run_id: str) -> dict:
+def _run(name: str, cmd: str, timeout_s: int, run_id: str, ctx: dict) -> dict:
+    app_name, num_gpus, ckpt_dir = ctx["app"], ctx["num_gpus"], ctx["ckpt_dir"]
+    common_env = (f"export YETO_Q38N_NUM_GPUS_PER_NODE={num_gpus} YETO_Q38N_CKPT_DIR={ckpt_dir} "
+                  f"PYTHONPATH={YETO}:/root/miles:/root/Megatron-LM; ")
     for src, dst in LINKS.items():
         os.makedirs(dst, exist_ok=True)
         if os.path.islink(src):
@@ -128,10 +133,10 @@ def _run(name: str, cmd: str, timeout_s: int, run_id: str) -> dict:
     log = f"/vol/logs/{name}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.log"
     gpu = subprocess.run("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1",
                          shell=True, capture_output=True, text=True).stdout.strip()
-    header = f"# step={name} app={APP} run_id={run_id} start={time.strftime('%FT%TZ', time.gmtime())} timeout={timeout_s}s\n# gpu:\n{gpu}\n"
+    header = f"# step={name} app={app_name} num_gpus={num_gpus} ckpt_dir={ckpt_dir} run_id={run_id} start={time.strftime('%FT%TZ', time.gmtime())} timeout={timeout_s}s\n# gpu:\n{gpu}\n"
     print(header, flush=True)
     start = time.time()
-    full = (f"set -o pipefail; {COMMON_ENV} export RUN_ID={shlex.quote(run_id)}; "
+    full = (f"set -o pipefail; {common_env} export RUN_ID={shlex.quote(run_id)}; "
             f"timeout --signal=TERM --kill-after=90 {timeout_s} bash -c {shlex.quote(cmd)} 2>&1 | tee -a {log}")
     with open(log, "a") as fh:
         fh.write(header)
@@ -144,17 +149,18 @@ def _run(name: str, cmd: str, timeout_s: int, run_id: str) -> dict:
     if os.path.isdir("/tmp/ray/session_latest/logs"):  # per-rank worker logs (not folded by ray dedup)
         subprocess.run(["bash", "-c", f"tar czf {log[:-4]}-raylogs.tgz -C /tmp/ray/session_latest logs 2>/dev/null || true"])
     vol.commit()
-    return {"step": name, "rc": rc, "elapsed_s": elapsed, "gpu": gpu, "log": log, "app": APP, "run_id": run_id}
+    return {"step": name, "rc": rc, "elapsed_s": elapsed, "gpu": gpu, "log": log, "app": app_name,
+            "run_id": run_id, "num_gpus": num_gpus, "ckpt_dir": ckpt_dir, "requested_gpu": ctx["gpu"]}
 
 
 @app.function(cpu=4, memory=16 * 1024, timeout=1800, volumes={"/vol": vol}, retries=0)
-def run_cpu(name: str, cmd: str, timeout_s: int, run_id: str) -> dict:
-    return _run(name, cmd, timeout_s, run_id)
+def run_cpu(name: str, cmd: str, timeout_s: int, run_id: str, ctx: dict) -> dict:
+    return _run(name, cmd, timeout_s, run_id, ctx)
 
 
 @app.function(gpu=GPU, cpu=16, memory=256 * 1024, timeout=4200, volumes={"/vol": vol}, retries=0)
-def run_gpu(name: str, cmd: str, timeout_s: int, run_id: str) -> dict:
-    return _run(name, cmd, timeout_s, run_id)
+def run_gpu(name: str, cmd: str, timeout_s: int, run_id: str, ctx: dict) -> dict:
+    return _run(name, cmd, timeout_s, run_id, ctx)
 
 
 @app.local_entrypoint()
@@ -168,7 +174,7 @@ def main(step: str, timeout: int = 0, cmd: str = "", run_id: str = "", record: s
     fn = run_gpu if needs_gpu else run_cpu
     print(f"# app={APP} step={step} gpu={GPU if needs_gpu else 'none'} num_gpus={NUM_GPUS} ckpt_dir={CKPT_DIR} "
           f"timeout={timeout_s}s run_id={run_id}", flush=True)
-    res = fn.remote(step, command, timeout_s, run_id)
+    res = fn.remote(step, command, timeout_s, run_id, LOCAL_CTX)
     res["cost_h"] = round(res["elapsed_s"] / 3600, 3)
     print(json.dumps(res))
     if record:

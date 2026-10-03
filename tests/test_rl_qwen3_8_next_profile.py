@@ -302,6 +302,7 @@ def test_launch_script_dry_run_prints_rendered_steps():
     # the Modal driver derives GPU count / ckpt dir from the same env knob
     modal_py = (ROOT / "scripts" / "modal_qwen3_8_next_4layer_lora.py").read_text()
     assert 'f"H100:{NUM_GPUS}"' in modal_py and 'f"/root/ckpt/gpus{NUM_GPUS}"' in modal_py
+    assert "fn.remote(step, command, timeout_s, run_id, LOCAL_CTX)" in modal_py  # env shipped as args, not re-read in container
     assert "from yeto" not in modal_py  # re-imported in the container without yeto on sys.path (G0 attempt 1, A and B)
 
 
