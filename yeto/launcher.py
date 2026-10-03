@@ -2162,6 +2162,147 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
     return miles_setup, sglang_setup
 
 
+# --- Stock Codex run bundle (ports engine; design R-SCOPE / T3 G2) ---------------
+#
+# The legacy direct SSH harness freezes the attested Codex artifact into the run
+# bundle and ``--volume``-mounts it at /opt/yeto/codex (ssh_harness.py).  The
+# sky / Modal launch paths do the same from a local bundle directory
+# (``scripts/fetch_codex_bundle.py``): the launcher attests it with the same
+# ``_codex_harness_contract`` the SSH harness uses, mounts the directory at
+# ``CODEX_CONTAINER_DIR`` (sky file_mounts / Modal add_local_dir) and injects
+# the ``YETO_CODEX_*`` environment the container preflights check
+# (``yeto.rl.learner._preflight_codex_harness`` expected_env and
+# ``codex_harness_agent._attest_runtime``); every value comes from the contract.
+CODEX_BUNDLE_DIR_ENV = "YETO_CODEX_BUNDLE_DIR"
+CODEX_CONTAINER_DIR = "/opt/yeto/codex"
+CODEX_BUNDLE_FILES = (
+    "codex_harness_binary",
+    "codex_package_manifest",
+    "codex_app_server_schema",
+)
+# Harness hook / provider env the ports island preflight resolves
+# (entry.HARNESS_PREFLIGHT_ENV, preflight.ENVIRONMENT_PROVIDER_ENV); the
+# provider must come from the launching environment (no in-tree default).
+HARNESS_PREFLIGHT_ENV = "YETO_HARNESS_PREFLIGHT"
+HARNESS_ENVIRONMENT_PROVIDER_ENV = "YETO_HARNESS_ENVIRONMENT_PROVIDER"
+HARNESS_PASSTHROUGH_ENV = (
+    HARNESS_ENVIRONMENT_PROVIDER_ENV,
+    "TBENCH_REWARD_HMAC_KEY",
+)
+CODEX_COMPACTION_ENV = "YETO_CODEX_COMPACTION_ENABLED"
+
+
+def codex_bundle_paths(bundle_dir: str) -> dict[str, str]:
+    """The three attested files inside a fetched bundle dir, keyed like the SSH
+    harness CLI (``--codex-harness-binary`` ...)."""
+    from .rl import CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH, CODEX_CONTAINER_BINARY_PATH
+
+    root = Path(bundle_dir).expanduser()
+    return {
+        "codex_harness_binary": str(root / os.path.basename(CODEX_CONTAINER_BINARY_PATH)),
+        "codex_package_manifest": str(root / "codex-package.json"),
+        "codex_app_server_schema": str(
+            root / os.path.basename(CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH)
+        ),
+    }
+
+
+def codex_bundle_contract(args, bundle_dir: str) -> dict:
+    """Attest ``bundle_dir`` against the Yeto pins (same checks as the SSH harness)."""
+    from argparse import Namespace
+
+    from .rl.ssh_harness import HarnessError, _codex_harness_contract
+
+    if not os.path.isdir(os.path.expanduser(bundle_dir)):
+        raise ValueError(f"{CODEX_BUNDLE_DIR_ENV}={bundle_dir!r} is not a directory")
+    try:
+        return _codex_harness_contract(Namespace(**codex_bundle_paths(bundle_dir)), args)
+    except HarnessError as exc:
+        raise ValueError(f"Codex bundle {bundle_dir}: {exc}") from exc
+
+
+def codex_container_env(contract: dict) -> dict[str, str]:
+    """``YETO_CODEX_*`` for the island container, mirroring the SSH harness
+    ``codex_env`` template and the learner's expected_env, from the contract."""
+    from .rl.ssh_harness import _canonical_json, _plan_digest
+
+    backend = contract["backend"]
+    env = {
+        "YETO_CODEX_BINARY_PATH": contract["container_binary_path"],
+        "YETO_CODEX_BINARY_SHA256": contract["binary_sha256"],
+        "YETO_CODEX_BINARY_SIZE_BYTES": str(contract["binary_size_bytes"]),
+        "YETO_CODEX_VERSION": contract["cli_version"],
+        "YETO_CODEX_APP_SERVER_PROTOCOL_REVISION": contract["app_server_protocol_revision"],
+        "YETO_CODEX_APP_SERVER_SCHEMA_SHA256": contract["app_server_schema_sha256"],
+        "YETO_CODEX_BASE_INSTRUCTIONS_SHA256": contract["base_instructions_sha256"],
+        "YETO_CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256": contract["terminal_exec_tool_schema_sha256"],
+        "YETO_CODEX_SUBMIT_TOOL_SCHEMA_SHA256": contract["submit_tool_schema_sha256"],
+        "YETO_CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256": contract["dynamic_tools_schema_sha256"],
+        "YETO_CODEX_REASONING_EFFORT": contract["reasoning_effort"],
+        "YETO_CODEX_BACKEND_MAX_TOKENS": str(backend["max_tokens"]),
+        "YETO_CODEX_BACKEND_REASONING_EFFORT": backend["reasoning_effort"],
+        "YETO_CODEX_BACKEND_THINKING": backend["thinking"]["type"],
+        "YETO_CODEX_CHAT_TEMPLATE": backend["chat_template"],
+        "YETO_CODEX_CHAT_TEMPLATE_KWARGS": _canonical_json(backend["chat_template_kwargs"]),
+        "YETO_CODEX_TITO_ALLOWED_APPEND_ROLES": "tool,user",
+    }
+    env.update({str(k): str(v) for k, v in contract.get("openenv_identity_env", {}).items()})
+    env["YETO_CODEX_HARNESS_CONTRACT_SHA256"] = _plan_digest(contract)
+    return env
+
+
+def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[str, str]] | None:
+    """(learner flags, container envs, file_mounts) for a signed Codex agent on
+    the ports engine, or None when the run is not a Codex run.
+
+    Fails closed: no bundle dir, a bundle that does not match the pins, no
+    environment provider, or trainable compaction switched on in the launching
+    environment (R-D5a) all raise before any cloud resource is requested."""
+    from .rl import CODEX_OPENENV_AGENT, SIGNED_CODEX_AGENTS
+    from .rl.harness.codex.preflight import HARNESS_PREFLIGHT_SPEC, _FALSE
+
+    environ = os.environ if environ is None else environ
+    custom_agent = getattr(args, "custom_agent_function_path", None)
+    if custom_agent not in SIGNED_CODEX_AGENTS:
+        return None
+    if getattr(args, "rl_engine", "ports") != "ports":
+        raise ValueError(
+            "the signed Codex harness requires the direct SSH harness so its "
+            "Linux binary can be attested and frozen into the run bundle"
+        )
+    bundle_dir = getattr(args, "codex_bundle_dir", None) or environ.get(CODEX_BUNDLE_DIR_ENV)
+    if not bundle_dir:
+        raise ValueError(
+            f"the signed Codex harness on the ports engine needs {CODEX_BUNDLE_DIR_ENV} "
+            "(a bundle from scripts/fetch_codex_bundle.py) to mount at "
+            f"{CODEX_CONTAINER_DIR}"
+        )
+    if environ.get(CODEX_COMPACTION_ENV, "").strip().lower() not in _FALSE:
+        raise ValueError(
+            f"{CODEX_COMPACTION_ENV} is set in the launching environment; the fork pin "
+            "session server has no trainable compaction (R-D5a)"
+        )
+    contract = codex_bundle_contract(args, bundle_dir)
+    flags = f" --codex-harness-contract {shlex.quote(_json_compact(contract))}"
+    envs = codex_container_env(contract)
+    if custom_agent == CODEX_OPENENV_AGENT:
+        envs[HARNESS_PREFLIGHT_ENV] = environ.get(HARNESS_PREFLIGHT_ENV) or HARNESS_PREFLIGHT_SPEC
+        if not environ.get(HARNESS_ENVIRONMENT_PROVIDER_ENV):
+            raise ValueError(
+                f"{HARNESS_ENVIRONMENT_PROVIDER_ENV}=module:callable is required: the "
+                "Codex Terminal-Bench preflight fails closed without an environment provider"
+            )
+        for name in HARNESS_PASSTHROUGH_ENV:
+            if environ.get(name):
+                envs[name] = environ[name]
+    mounts = {CODEX_CONTAINER_DIR: str(Path(bundle_dir).expanduser().resolve())}
+    return flags, envs, mounts
+
+
+def _json_compact(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def make_miles_island_task(
     args,
     spec: ClusterSpec,
@@ -2177,17 +2318,12 @@ def make_miles_island_task(
     from .modal_runner import registry_credentials
     from .models import resolve
     from .provenance import is_local_reference
-    from .rl import SIGNED_CODEX_AGENTS
 
     if not getattr(args, "source_sha256", None) or not getattr(
         args, "reward_sha256", None
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
-    if getattr(args, "custom_agent_function_path", None) in SIGNED_CODEX_AGENTS:
-        raise ValueError(
-            "the signed Codex harness requires the direct SSH harness so its "
-            "Linux binary can be attested and frozen into the run bundle"
-        )
+    codex_launch = codex_harness_launch(args)  # None unless a signed Codex agent
 
     flags = (
         f" --model {shlex.quote(args.model)}"
@@ -2369,6 +2505,10 @@ def make_miles_island_task(
     local_token = os.path.expanduser(HF_TOKEN_PATH)
     if os.path.isfile(local_token):
         file_mounts[HF_TOKEN_PATH] = local_token
+    if codex_launch is not None:
+        codex_flags, codex_envs, codex_mounts = codex_launch
+        flags += codex_flags
+        file_mounts.update(codex_mounts)
     envs = {
         "SYNCER_ADDR": syncer_addr,
         "LEARNER_ID": str(learner_id),
@@ -2413,6 +2553,8 @@ def make_miles_island_task(
     for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
         if os.environ.get(name):
             envs[name] = os.environ[name]
+    if codex_launch is not None:
+        envs.update(codex_envs)
     if getattr(args, "wandb", False):
         # RL islands join the same fleet group as the syncer's tape run.
         envs["YETO_RUN_GROUP"] = args.cluster_prefix
@@ -3235,6 +3377,9 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     if rl and getattr(args, "spot", False):
         volume_name = _rl_checkpoint_storage_name(args.cluster_prefix, learner_id)
         volume_mount = _rl_checkpoint_mount(args.rl_completed_groups_path).replace("~", "/root", 1)
+    # Codex run bundle: the sky task mounts it at CODEX_CONTAINER_DIR; Modal
+    # mounts the same directory through the image (add_local_dir).
+    codex_dir = (dict(getattr(task, "file_mounts", None) or {})).get(CODEX_CONTAINER_DIR)
     requirements: tuple[str, ...] = ()
     if not rl:
         req_file = REPO_ROOT / "requirements.txt"
@@ -3260,6 +3405,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         pip_requirements=requirements,
         volume_name=volume_name,
         volume_mount=volume_mount,
+        codex_dir=codex_dir,
+        codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
         workdir=str(REPO_ROOT),
         # Opt-in overrides (default: Modal runner defaults, 10 retries / 24 h).
         # Acceptance runs pass --modal-retries 0 so a learner exit is final

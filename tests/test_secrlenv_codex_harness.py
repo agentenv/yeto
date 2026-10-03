@@ -1527,8 +1527,10 @@ def test_driver_prefers_policy_boundary_set_while_stdout_read_is_pending(monkeyp
 
 
 def _stock_codex_binary() -> Path:
-    binary_name = shutil.which("codex")
-    if binary_name is None:
+    # YETO_CODEX_BINARY_PATH (the fetched bundle's binary, see
+    # scripts/fetch_codex_bundle.py) wins over the PATH install.
+    binary_name = os.environ.get("YETO_CODEX_BINARY_PATH") or shutil.which("codex")
+    if not binary_name or not Path(binary_name).is_file():
         pytest.skip("stock Codex is not installed on this controller")
     version = subprocess.run(
         [binary_name, "--version"], capture_output=True, text=True, check=True

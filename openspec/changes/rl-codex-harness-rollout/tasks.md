@@ -4,9 +4,9 @@
 
 ## 1. A 路径配置透传（IR-1）
 
-- [ ] 1.1 [IR-1] `miles_adapter/config.py`：放开 `agent.custom_agent_function_path`、`agent.agent_max_seq_len`，映射到 `--custom-agent-function-path` / `--max-seq-len`；仅当 `custom_generate_function_path` 为 `miles.rollout.generate_hub.agentic_tool_call.generate` 时允许；更正 332–337 行的拒绝理由；`tito_allowed_append_roles` 继续拒绝，理由改为“由 `--tito-model` 模板决定”。验收：CPU 单测，覆盖透传、缺少 agentic_tool_call 时拒绝、理由文本三种情况。
-- [ ] 1.2 [IR-1] 启用 session server 时同时请求 partial rollout，启动失败，错误信息引用上游 `arguments.py:3240` 的互斥规则。验收：CPU 单测。
-- [ ] 1.3 [Y] 用 fork pin 的上游 `agentic_tool_call.add_arguments` 解析 1.1 生成的参数，确认参数被识别、没有未知参数。验收：CPU 测试（只 import 解析器，不起 Ray）。
+- [x] 1.1 [IR-1] `miles_adapter/config.py`：放开 `agent.custom_agent_function_path`、`agent.agent_max_seq_len`，映射到 `--custom-agent-function-path` / `--max-seq-len`；仅当 `custom_generate_function_path` 为 `miles.rollout.generate_hub.agentic_tool_call.generate` 时允许；更正 332–337 行的拒绝理由；`tito_allowed_append_roles` 继续拒绝，理由改为“由 `--tito-model` 模板决定”。验收：CPU 单测，覆盖透传、缺少 agentic_tool_call 时拒绝、理由文本三种情况。 完成记录（2026-10-03，T3-B）：`miles_adapter/config.py:378-394,796-799`；`tests/test_rl_ir_harness.py::test_ir1_agent_flags_pass_through_with_agentic_generate/need_agentic_generate/append_roles_rejected_with_template_reason`。
+- [x] 1.2 [IR-1] 启用 session server 时同时请求 partial rollout，启动失败，错误信息引用上游 `arguments.py:3240` 的互斥规则。验收：CPU 单测。 完成记录（2026-10-03，T3-B）：`config.py:191-220,858-861`；`tests/test_rl_ir_harness.py::test_ir1_session_server_and_partial_rollout_are_mutually_exclusive`（引用行 3240 = 上游 radixark 9e4260d；fork pin e3a11ab 同一断言在 `arguments.py:3307`）。
+- [x] 1.3 [Y] 用 fork pin 的上游 `agentic_tool_call.add_arguments` 解析 1.1 生成的参数，确认参数被识别、没有未知参数。验收：CPU 测试（只 import 解析器，不起 Ray）。 完成记录（2026-10-03，T3-B）：`tests/test_rl_agentic_tool_call_args.py`——从 fork pin checkout（HEAD==MILES_NEXT_COMMIT，本机 ~/work/miles-fr1）加载 `agentic_tool_call.generate.add_arguments`（stub 运行时依赖，不起 Ray），`--custom-agent-function-path`/`--max-seq-len` 被识别、无未知参数、`--agent-max-seq-len` 非上游参数。
 
 ## 2. agent 包与 preflight 入库
 

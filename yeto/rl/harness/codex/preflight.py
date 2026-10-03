@@ -166,8 +166,34 @@ def harness_preflight(miles_args: Any, launch: Any, *, env: Mapping[str, str] | 
         provider=provider,
         tool_wait_board=tool_wait_board,
         harness_board=harness_board,
-        member=getattr(miles_args, "yeto_rl_member_id", None),
+        member=resolve_member(miles_args, env),
     )
+
+
+MEMBER_CELL_ENV = "YETO_RL_CELL_ID"
+
+
+def resolve_member(miles_args: Any, env: Mapping[str, str] | None = None) -> str | None:
+    """The INFRA rollout member key this island's sessions are admitted under.
+
+    INFRA keys members as ``rollout.member_id(cell_id)`` (= ``engine:<cell_id>``,
+    ``MilesRolloutPool.members`` / ``close_admission``).  Sources, in order:
+    ``miles_args.yeto_rl_member_id`` (a full member key, or a bare cell id),
+    ``miles_args.yeto_rl_cell_id`` / ``YETO_RL_CELL_ID`` (a cell id).  None
+    (no source) keeps the global admission key, which single-island smoke
+    runs rely on.
+    """
+    from yeto.rl.engine.miles_adapter.rollout import MEMBER_PREFIX, member_id
+
+    env = os.environ if env is None else env
+    member = getattr(miles_args, "yeto_rl_member_id", None)
+    if member is not None and str(member) != "":
+        member = str(member)
+        return member if member.startswith(MEMBER_PREFIX) else member_id(member)
+    cell = getattr(miles_args, "yeto_rl_cell_id", None)
+    if cell is None or str(cell) == "":
+        cell = env.get(MEMBER_CELL_ENV) or None
+    return member_id(cell) if cell is not None else None
 
 
 # ---------------------------------------------------------------------------

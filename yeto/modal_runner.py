@@ -195,6 +195,12 @@ class ModalIslandConfig:
     retries: int = DEFAULT_RETRIES
     workdir: str = str(REPO_ROOT)
     python_version: str = "3.12"
+    # Stock Codex run bundle (ports engine, signed Codex agent): a local dir
+    # holding the attested binary / package manifest / app-server schema,
+    # mounted read-only at ``codex_mount`` (= ``/opt/yeto/codex``, the
+    # CODEX_CONTAINER_BINARY_PATH parent) the same way sky file_mounts does.
+    codex_dir: str | None = None
+    codex_mount: str | None = None
 
     @property
     def function_name(self) -> str:
@@ -223,6 +229,10 @@ class ModalIslandConfig:
                 )
         if (self.volume_name is None) != (self.volume_mount is None):
             raise ValueError("volume_name and volume_mount go together")
+        if (self.codex_dir is None) != (self.codex_mount is None):
+            raise ValueError("codex_dir and codex_mount go together")
+        if self.codex_dir is not None and not os.path.isdir(self.codex_dir):
+            raise ValueError(f"codex_dir {self.codex_dir} is not a directory")
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -382,14 +392,18 @@ class ModalOps:
             if cfg.pip_requirements:
                 image = image.pip_install(*cfg.pip_requirements)
         image = image.env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
-        # Must be the last step: Modal rejects any build step after an
-        # add_local_* with copy=False (the files are mounted at start-up).
-        return image.add_local_dir(
+        # add_local_* with copy=False must be the last steps: Modal rejects
+        # any build step after one (the files are mounted at start-up).
+        image = image.add_local_dir(
             cfg.workdir,
             CONTAINER_WORKDIR,
             copy=False,
             ignore=MODAL_WORKDIR_IGNORE,
         )
+        if cfg.codex_dir and cfg.codex_mount:
+            # Codex run bundle (sky: file_mounts[codex_mount] = codex_dir).
+            image = image.add_local_dir(cfg.codex_dir, cfg.codex_mount, copy=False)
+        return image
 
     def define(self, cfg: ModalIslandConfig):
         """Register the island's function on this run's app (idempotent
