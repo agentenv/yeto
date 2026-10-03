@@ -2452,6 +2452,13 @@ def make_miles_island_task(
             f"(nohup huggingface-cli download {shlex.quote(model)}{revision} "
             ">/tmp/hf-prefetch.log 2>&1 &) || true"
         )
+    worker_model_fetch = ""
+    if spec.num_nodes > 1 and not is_local_reference(model):
+        worker_model_fetch = (
+            f"  huggingface-cli download {shlex.quote(model)}{revision} "
+            ">/tmp/hf-prefetch-worker.log 2>&1 || { echo '[yeto-island] worker could not "
+            "fetch the model snapshot (see /tmp/hf-prefetch-worker.log)' >&2; exit 1; }\n"
+        )
     file_mounts = dict(learner_file_mounts(args.data))
     if getattr(args, "rl_initial_adapter", None) is not None:
         file_mounts[RL_INITIAL_ADAPTER_PATH] = os.path.expanduser(
@@ -2592,6 +2599,14 @@ def make_miles_island_task(
             # bounded (head never came up -> the node exits non-zero instead of
             # looping forever).
             "  trap stop_miles_ray EXIT\n"
+            # rl-multinode-island G1 (2026-10-03): the learner (head) resolves
+            # the model to its own HF-cache snapshot path and hands that path
+            # to the rollout engines; an engine on a worker node needs the
+            # same snapshot in the worker's cache.  The setup prefetch is a
+            # background download, so wait for it here (foreground, same
+            # revision, idempotent) before joining the Ray; a failed fetch
+            # ends this node non-zero instead of a later engine start error.
+            f"{worker_model_fetch}"
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR" && break; '
             "sleep 2; done\n"
