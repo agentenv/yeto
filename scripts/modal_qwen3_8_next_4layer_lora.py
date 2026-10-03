@@ -60,6 +60,9 @@ app = modal.App(APP, image=image)
 
 LAUNCH = f"bash {YETO}/scripts/run_qwen3_8_next_4layer_lora.sh --yeto-root {YETO}"
 COMMON_ENV = f"export YETO_Q38N_NUM_GPUS_PER_NODE={NUM_GPUS} PYTHONPATH={YETO}:/root/miles:/root/Megatron-LM; "
+# extra train.py args for g3/g4/g4r (e.g. "--entropy-coef 0.01": the 4-layer slice earns
+# reward 0 on dapo-math, so without it GRPO advantages and LoRA B stay 0 — T2-S7 G3)
+EXTRA = os.environ.get("M4_EXTRA_TRAIN_ARGS", "")
 EVAL = ("--eval-interval 5 --eval-prompt-data aime /root/datasets/aime-2024/aime-2024.jsonl "
         "--n-samples-per-eval-prompt 2 --eval-max-response-len 512")
 STEPS: dict[str, tuple[str, int, bool]] = {  # name -> (command, default timeout, needs gpu)
@@ -81,17 +84,17 @@ STEPS: dict[str, tuple[str, int, bool]] = {  # name -> (command, default timeout
            "cat /root/ckpt/qwen3.8-flash-next-4layer_torch_dist/yeto-profile-manifest.json",
            1200, True),
     "g3": (f"YETO_Q38N_RUN_ID=$RUN_ID {LAUNCH} --skip-download --skip-convert --timeout 2700 -- "
-           "--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID",
+           f"--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID {EXTRA}",
            2700 + 300, True),
-    "g4": (f"YETO_Q38N_RUN_ID=$RUN_ID YETO_Q38N_NUM_ROLLOUT=20 {LAUNCH} --skip-download --skip-convert --timeout 3600 -- "
-           f"--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID {EVAL}; "
+    "g4": (f"YETO_Q38N_RUN_ID=$RUN_ID YETO_Q38N_NUM_ROLLOUT=20 {LAUNCH} --skip-download --skip-convert --timeout 3000 -- "
+           f"--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID {EVAL} {EXTRA}; "
            "ls /root/shared_data/$RUN_ID/checkpoints/iter_0000010/adapter /root/shared_data/$RUN_ID/checkpoints/iter_0000020/adapter",
-           3600 + 300, True),
+           3000 + 300, True),
     # F4: restart with a NEW run id and --lora-adapter-path (never --load on the LoRA dir)
-    "g4r": (f"YETO_Q38N_RUN_ID=$RUN_ID-restart YETO_Q38N_NUM_ROLLOUT=1 {LAUNCH} --skip-download --skip-convert --timeout 1500 -- "
+    "g4r": (f"YETO_Q38N_RUN_ID=$RUN_ID-restart YETO_Q38N_NUM_ROLLOUT=1 {LAUNCH} --skip-download --skip-convert --timeout 1800 -- "
             "--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID-restart "
-            "--lora-adapter-path /root/shared_data/$RUN_ID/checkpoints/iter_0000010/adapter",
-            1500 + 300, True),
+            f"--lora-adapter-path /root/shared_data/$RUN_ID/checkpoints/iter_0000010/adapter {EXTRA}",
+            1800 + 300, True),
     "shell": ("bash -c \"$M4_SHELL\"", 600, False),
 }
 

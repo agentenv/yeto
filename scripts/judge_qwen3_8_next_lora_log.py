@@ -11,7 +11,10 @@ Checks (each reported PASS/FAIL, exit 0 only if all pass):
   lora_check     no `[LORA-CHECK]` / `end_weight_update failed` line, i.e. the
                  --check-lora-weight-equal name-set + sha256 read-back passed
                  (M3 #3/#4: 54 serving modules incl. zero-padded experts)
-  rollouts       `train <i>: {...}` lines == --rollouts
+  rollouts       `step <i>: {'train/...}` rounds == --rollouts
+  rewards        (info) rollout/rewards and truncated ratio per round, grad_norm
+                 == 0 everywhere is flagged: LoRA B stays 0 and the logprob
+                 check below is vacuous for the QSA de-interleave
   finite         train/loss, ppo_kl, grad_norm, train_rollout_logprob_abs_diff
                  present and finite in every round
   logprob_diff   rounds >= 2 of train_rollout_logprob_abs_diff within 10x of
@@ -33,7 +36,10 @@ from collections import Counter
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from yeto.rl.profiles.qwen3_8_next import expected_rank_trainable_4layer  # noqa: E402
 
-TRAIN_RE = re.compile(r"\btrain (\d+): (\{.*\})")
+# Miles logs the per-round train metrics as "step <i>: {...}" (log_utils.py:554 / model.py:856)
+# and older builds as "train <i>: {...}"; accept both, de-duplicating per round.
+TRAIN_RE = re.compile(r"\b(?:train|step) (\d+): (\{'train/.*\})")
+ROLLOUT_RE = re.compile(r"\brollout (\d+): (\{'rollout/.*\})")
 EVAL_RE = re.compile(r"\beval (\d+): (\{.*\})")
 REPEAT_RE = re.compile(r"\[repeated (\d+)x across cluster\]")
 TRAINABLE_RE = re.compile(r"native LoRA applied: rank=(\d+) expert_rank=(\d+) .*?trainable=(\d+)")
@@ -84,6 +90,15 @@ def judge(text: str, *, num_gpus: int, rollouts: int, rank: int, expert_rank: in
     finite = all(k in r and math.isfinite(r[k]) for r in rounds.values() for k in METRICS)
     res["finite"] = {"pass": bool(rounds) and finite,
                      "metrics": {str(i): {k: r.get(k) for k in METRICS} for i, r in sorted(rounds.items())}}
+    rewards = {int(m.group(1)): _parse_metrics(m.group(2)) for m in ROLLOUT_RE.finditer(text)}
+    grads = [rounds[i].get("train/grad_norm") for i in sorted(rounds)]
+    res["rewards"] = {
+        "pass": True,
+        "nonzero_grad_rounds": [i for i in sorted(rounds) if (rounds[i].get("train/grad_norm") or 0) > 0],
+        "all_grad_zero": bool(grads) and all((g or 0) == 0 for g in grads),
+        "rollout": {str(i): {k: r.get(k) for k in ("rollout/rewards", "rollout/truncated", "rollout/response_lengths")}
+                    for i, r in sorted(rewards.items())},
+    }
     diffs = [rounds[i].get("train/train_rollout_logprob_abs_diff") for i in sorted(rounds)]
     ok = bool(diffs) and all(d is not None and math.isfinite(d) for d in diffs)
     if ok and len(diffs) > 1:

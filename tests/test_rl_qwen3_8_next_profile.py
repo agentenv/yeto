@@ -303,8 +303,9 @@ def _fake_log(num_gpus: int = 4, rounds: int = 5, *, diff_jump: float = 1.0, lor
         lines.append(f"[rank] native LoRA applied: rank=32 expert_rank=8 alpha=64 trainable={s1}")
     for i in range(rounds):
         d = 0.01 if i == 0 else 0.012 * diff_jump
+        lines.append(f"[actor] rollout {i}: {{'rollout/response_lengths': 400.0, 'rollout/rewards': 0.25, 'rollout/truncated': 0.5}}")
         lines.append(
-            f"train {i}: {{'train/loss': 0.0{i}, 'train/ppo_kl': 1e-05, 'train/grad_norm': 0.5, "
+            f"[actor] step {i}: {{'train/loss': 0.0{i}, 'train/ppo_kl': 1e-05, 'train/grad_norm': 0.5, "
             f"'train/train_rollout_logprob_abs_diff': {d}, 'train/lr': 1e-06}}"
         )
         if i % 5 == 4:
@@ -324,6 +325,8 @@ def test_judge_accepts_a_conforming_log(tmp_path):
     j = json.loads((tmp_path / "j.json").read_text())
     assert j["trainable"]["seen"] == {"30833664": 2, "31492096": 2}
     assert j["eval"]["seen"] == [4] and j["adapter"]["pass"]
+    assert j["rewards"]["nonzero_grad_rounds"] == [0, 1, 2, 3, 4] and not j["rewards"]["all_grad_zero"]
+    assert j["rewards"]["rollout"]["0"]["rollout/rewards"] == 0.25
     folded = _fake_log(4, 5).splitlines()
     folded = [l for l in folded if "trainable=" not in l]
     s0, s1 = q.expected_rank_trainable_4layer(32, 8, 4)
