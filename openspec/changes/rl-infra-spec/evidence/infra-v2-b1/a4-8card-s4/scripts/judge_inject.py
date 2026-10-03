@@ -598,7 +598,8 @@ def _recovery_records(journal):
     return [r for r in journal if r.get("kind") == "recovery"]
 
 
-def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, probe_after=None, min_rounds_after=3, up="up1", down="dn1"):
+def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, probe_after=None, min_rounds_after=3, up="up1", down="dn1",
+                   trainer_world=4, committed_n=4):
     """r5: up1 killed at COMMITTED -> restart -> committed members rebuilt (recovery verified), up1 SUCCEEDED(recovered).
     r7: up1 SUCCEEDED, then the learner is killed in steady state (fork epoch back to 0 vs journal 1) -> restart ->
         reconcile restore_membership_state + recovery verified -> dn1 SUCCEEDED afterwards (transactions go on).
@@ -606,13 +607,17 @@ def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, pro
     r5c (regression of ruling (c)): up1 SUCCEEDED, dn1 killed at COMMITTED -> restart finds the startup shape ->
         dn1 SUCCEEDED(recovered), no recovery record.
     All: the learner really restarted (else INVALID), trainer identity across the restart, no rollout consumed twice,
-    >= min_rounds_after train rounds after the restart/recovery."""
-    res = {"case": case, "checks": {}, "invalid_reasons": []}
+    >= min_rounds_after train rounds after the restart/recovery.
+    Topology (gpu-plan-v2 9.22 rule "only the card numbers and member counts change, the decision logic does not"): trainer_world = the
+    trainer_layout.world the recovery must verify (8xH100 T4R2S2: 4; 4xL40S T1R1S2: 1), committed_n = the committed member count after
+    the up (8 cards: 4 = c0..c3; 4 cards: 3 = c0..c2).  The check names keep the 8-card wording (criteria text unchanged); the
+    effective values are recorded under res["topology"]."""
+    res = {"case": case, "checks": {}, "invalid_reasons": [], "topology": {"trainer_world": trainer_world, "committed_members": committed_n}}
     restarted, how = _restarted(tape, launch_log); res["restart"] = how
     if not restarted:
         return _invalid(res, "the learner was never restarted (no second rl_driver_start, no restart-loop line): kill not applied", "evidence_missing")
     recs = _recovery_records(journal); res["recovery"] = [{k: r.get(k) for k in ("tx_id", "status", "attempt", "error")} for r in recs]
-    four = sorted(known) if len(known) == 4 else None
+    four = sorted(known) if len(known) == committed_n else None   # the committed member set (None -> membership checks fail)
     def tx_ok(rid, expect, recovered=None):
         term = _tx_terminal(journal, rid)
         if not term:
@@ -664,7 +669,7 @@ def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, pro
             res["checks"]["policy_token_verified"] = c.get("policy_token") == "verified"
             res["checks"]["router_all_admitted"] = isinstance(c.get("router"), dict) and c["router"].get("not_admitted") == []
             tl = c.get("trainer_layout")
-            res["checks"]["trainer_layout_world_4"] = isinstance(tl, dict) and tl.get("world") == 4
+            res["checks"]["trainer_layout_world_4"] = isinstance(tl, dict) and tl.get("world") == trainer_world
             res["checks"]["no_unconsumed_batches"] = c.get("unconsumed_batches") == []
             res["checks"]["verified_members_are_the_committed_4"] = four is not None and sorted(ver.get("members") or []) == four
         rec_ev = [e for e in named(tape, "rl_reconfiguration") if e.get("result") == "RECOVERED"]
@@ -675,7 +680,7 @@ def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, pro
             st = (probe_after.get("cell_statuses") or {})
             res["probe_after"] = {"membership": probe_after.get("membership"), "cell_statuses": st}
             res["checks"]["probe_fork_epoch_matches_verified"] = ver is not None and (probe_after.get("membership") or {}).get("epoch") == ver.get("fork_epoch")
-            res["checks"]["probe_all_4_cells_running"] = sum(1 for v in st.values() if "Running" in str(v)) == 4
+            res["checks"]["probe_all_4_cells_running"] = sum(1 for v in st.values() if "Running" in str(v)) == committed_n
         else:
             res["probe_after"] = "missing (file evidence only)"
     if case == "r7":
@@ -753,6 +758,7 @@ def main(argv):
     ap.add_argument("--launch-log"); ap.add_argument("--ledger")   # r5/r6/r7/r5c/d4: restart-loop line, ledger journal
     ap.add_argument("--recovery-timeout-s", type=float); ap.add_argument("--margin-s", type=float, default=60.0)   # d4 (2026-10-02 ruling)
     ap.add_argument("--side-effects")   # a4bc: elastic-state/side_effects.jsonl (tool_wait.ToolSideEffectLog)
+    ap.add_argument("--trainer-world", type=int, default=4); ap.add_argument("--committed-members", type=int, default=4)   # r5/r7 topology (4xL40S: 1 / 3)
     a = ap.parse_args(argv)
     journal, tape = load(a.journal), load(a.tape)
     known = set(filter(None, a.cells.split(",")))
@@ -773,7 +779,7 @@ def main(argv):
     elif a.case == "e1a_c": res = judge_e1a_c(journal, tape, [int(x) for x in a.expect_members.split(",")])
     elif a.case in ("r5", "r6", "r7", "r5c"):
         ll = open(a.launch_log).read().splitlines() if a.launch_log and os.path.exists(a.launch_log) else None
-        res = judge_recovery(a.case, journal, tape, known, load(a.ledger) if a.ledger else None, ll, probes["after"])
+        res = judge_recovery(a.case, journal, tape, known, load(a.ledger) if a.ledger else None, ll, probes["after"], trainer_world=a.trainer_world, committed_n=a.committed_members)
     else: raise SystemExit("unknown case " + a.case)
     if a.out: Path(a.out).write_text(json.dumps(res, indent=1, default=str))
     if a.marker_dir and res.get("marker"):
@@ -1298,12 +1304,23 @@ def judge_wd(journal, tape, known, gpu_samples=None, probe_after=None, gpu_relea
     return _with_ledger(res, ledger, tape, journal, continues_after=_terminal_time(journal, "up1", "REBUILT_OLD"), min_rounds_after=2)
 
 
-def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, probe_after=None, min_rounds_after=3, up="up1", down="dn1"):  # noqa: F811
-    """r5/r6/r7/r5c + L1/L2/L3(>= min_rounds_after after the recovery verified / terminal)/L5/L6/L7 (r5, r5c, r7)/L8."""
-    res = _judge_recovery_base(case, journal, tape, known, ledger, launch_log, probe_after, min_rounds_after, up, down)
+_RC_EXTRA = {}   # main() (s0 layer) stashes the launcher rc from --rc-file here for the r cases (2026-10-03, SESSION6 §12 / T1-S7 §2.4)
+
+
+def judge_recovery(case, journal, tape, known, ledger=None, launch_log=None, probe_after=None, min_rounds_after=3, up="up1", down="dn1",  # noqa: F811
+                   trainer_world=4, committed_n=4, rc=None):
+    """r5/r6/r7/r5c + L1/L2/L3(>= min_rounds_after after the recovery verified / terminal)/L5/L6/L7 (r5, r5c, r7)/L8.
+    rc = the launcher's exit code (rc.txt): 124 = the item hit its hard timeout, so the evidence is truncated -> INVALID_TEST(hard_timeout),
+    never a product FAIL (chain 8 III -3r1 r6 lesson, A33).  The checks are still computed and kept for diagnosis."""
+    res = _judge_recovery_base(case, journal, tape, known, ledger, launch_log, probe_after, min_rounds_after, up, down, trainer_world, committed_n)
     ver = [r.get("wall_time") for r in journal if r.get("kind") == "recovery" and r.get("status") == "verified"]
     t = max(ver) if ver else max([r.get("wall_time") or 0 for r in phases(journal) if r.get("phase") in TERMINAL] or [None])
-    return _with_ledger(res, ledger, tape, journal, continues_after=t, min_rounds_after=min_rounds_after, restart=True, verified=case in ("r5", "r5c", "r7"))
+    res = _with_ledger(res, ledger, tape, journal, continues_after=t, min_rounds_after=min_rounds_after, restart=True, verified=case in ("r5", "r5c", "r7"))
+    if rc is None: rc = _RC_EXTRA.get("rc")
+    res["rc"] = rc
+    if rc == 124:
+        return _invalid(res, "launcher hit the hard timeout (rc=124): evidence truncated, not a product verdict", "hard_timeout")
+    return res
 
 
 _main_a27 = main
@@ -1411,6 +1428,7 @@ def main(argv):  # noqa: F811
     for f in ("--epochs", "--inbox-dir", "--syncer-log", "--rc-file", "--syncer-clean"): ap.add_argument(f)
     a, rest = ap.parse_known_args(argv)
     if not rest or rest[0] != "s0":
+        _RC_EXTRA["rc"] = _rc_from_file(a.rc_file) if rest and rest[0] in ("r5", "r6", "r7", "r5c") else None   # r cases: 124 -> INVALID_TEST(hard_timeout)
         return _main_ledger(rest)
     bp = argparse.ArgumentParser(add_help=False)
     bp.add_argument("case"); bp.add_argument("journal"); bp.add_argument("tape")
