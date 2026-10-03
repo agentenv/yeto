@@ -45,6 +45,12 @@ elif CASE == "g0":
               "gpu_is_L40S": "L40S" in gpu_names, "no_cuda_kernel_error": not re.search(r"no kernel image|sm_89|CUDA error|not compatible", launch)}
     verdict = "PASS" if all(checks.values()) else "FAIL"
 elif CASE == "g1":
+    # 30 min case window measured from the job start on the (cold-started) cluster; the launcher's own
+    # timeout (3600 s) covers the cold start too (2-node image pull + setup + model fetch took ~25-30 min).
+    tsl = read("launch.ts.log"); m = re.search(r"^(\S+) .*Job submitted", tsl, re.M)
+    end = read("end_utc.txt").strip()
+    case_s = (ts(end) - ts(m.group(1))) if (m and end) else None
+    notes.append(f"case_window_from_job_submit_s={case_s}")
     topo = [r for r in journal if r.get("kind") == "topology"]
     t0 = topo[0] if topo else {}
     alive = t0.get("alive") if isinstance(t0.get("alive"), list) else []
@@ -52,6 +58,7 @@ elif CASE == "g1":
               "alive_nodes_2": len(alive) == 2,
               "startup_bundles_ok": "not node-blocked" not in launch and "BundleMapError" not in launch and len(rounds_trained) >= 1,
               "learner_round_ge_1": len(rounds_trained) >= 1 and len(generates) >= 1,
+              "case_window_le_1800s": case_s is not None and case_s <= 1800,
               "launcher_rc_0": rc == 0}
     verdict = "PASS" if all(checks.values()) else "FAIL"
 elif CASE == "g2":
