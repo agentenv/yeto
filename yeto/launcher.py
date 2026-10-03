@@ -567,6 +567,11 @@ def prepare_launch_args(
     allow_remote_rl_model: bool = False,
 ) -> None:
     """Resolve immutable inputs and executable artifacts before cloud spend."""
+    # --rl-allow-local-data (ports) is honoured by every caller (CLI, worker,
+    # head second hop), not only the one that parsed the flag.
+    allow_local_rl_data = allow_local_rl_data or bool(
+        getattr(args, "rl_allow_local_data", False)
+    )
 
     from .provenance import (
         file_sha256,

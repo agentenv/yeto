@@ -1468,10 +1468,7 @@ def cmd_launch(args) -> int:
     try:
         from .launcher import prepare_launch_args
 
-        if getattr(args, "rl_allow_local_data", False):
-            prepare_launch_args(args, allow_local_rl_data=True)
-        else:
-            prepare_launch_args(args)
+        prepare_launch_args(args)
     except (ImportError, OSError, PermissionError, ValueError) as exc:
         print(f"[yeto] provenance validation failed: {exc}", file=sys.stderr)
         return 1
