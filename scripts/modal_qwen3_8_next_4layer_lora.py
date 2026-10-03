@@ -96,7 +96,11 @@ STEPS: dict[str, tuple[str, int, bool]] = {  # name -> (command, default timeout
     "g4r": (f"export TENSORBOARD_DIR=/vol/tensorboard_log/m4-q38n/$RUN_ID-restart; "
             f"YETO_Q38N_RUN_ID=$RUN_ID-restart YETO_Q38N_NUM_ROLLOUT=1 {LAUNCH} --skip-download --skip-convert --timeout 1800 -- "
             "--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID-restart "
-            f"--lora-adapter-path /root/shared_data/$RUN_ID/checkpoints/iter_0000009/adapter {EXTRA}",
+            # training_state_rank0.pt restores the OptimizerParamScheduler of the 20-round run
+            # (640 steps); a 1-round restart (32) trips Megatron's total-iteration assert
+            # unless the scheduler is rebuilt from the new args (G4r attempt 1).
+            f"--lora-adapter-path /root/shared_data/$RUN_ID/checkpoints/iter_0000009/adapter "
+            f"--override-opt_param-scheduler {EXTRA}",
             1800 + 300, True),
     "shell": ("bash -c \"$M4_SHELL\"", 600, False),
 }
