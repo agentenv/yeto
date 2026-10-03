@@ -744,3 +744,8 @@
   - **watchdog 重跑**：只改实验参数，deadline 120 s → 240 s（Nebius 上 start_cells ≈143 s，+~100 s margin；阻塞注入在 update_weights 前，需先让 start 完成）：`a4go.sh a4wd-<日期>-N 4 1500 1980 cfg/attestation-s4.json '[["train",1,"wd-up",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":240}]]' '<after_term.sh {R} {P} 1 60>' --rl-test-inject-update-weights-block-s 600`；判据 plan-3.8-4.4-v2 §4 第 1–5 条 + §6（`analyze_wd.py`）不变；事务 deadline 改为 240 s 要在 gpu-plan-v2 §9.21 运行前提交（watchdog 触发应在 start 完成之后、REBUILT_OLD ≤60 s，预估 $7，最坏 $13.2）。
   - **E1-D** 按 §9.20 原计划（D123 合并 5 轮 35 min；D4 4 轮；D5 4 轮；D6 3 轮；D7 5 轮；硬超时、注入器 `dkill.py`/`dctl.py`、期望终态均见 §9.20），代码换 446da8a；每项先看 selfcheck，失败即停；全批累计 >$90 停下汇报（上限 $120）。
   - 之后 E1-C/A4b（`--rl-elastic-drain-timeout-s 5`）；全部结束后再做 id 对比与 `openspec validate --strict`。本次 CPU 准备已合入 integ-s3/integ-decl。
+
+## M4（T2-S7）：Qwen3.8-Flash-Next-4layer qwen4_exp 原生 LoRA GRPO，Modal H100:4 A 段（2026-10-03）
+- 代码：`yeto/rl/profiles/qwen3_8_next.py`、`scripts/{run_qwen3_8_next_4layer_lora,convert_qwen3_8_next}.sh`、`scripts/judge_qwen3_8_next_lora_log.py`、`scripts/modal_qwen3_8_next_4layer_lora.py`（提交 b2403324 → 2641ad0a，CPU 单测 16/16，全量 = 基线 94 id）。
+- 执行：Modal app `m4-q38n-20261003`，G0–G5 全 PASS（G3/G4r 各定位修复后重跑 1 次），≈$28。证据 `evidence/m4-q38n/`（judge JSON、曲线 CSV、逐 rank trainable、adapter 检查、tensorboard、日志）。详细判读与偏离见 `/home/michael/work/infra-drafts/M4-PROGRESS.md §4–§5`、`T2-S7-PROGRESS.md §8`。
+- M3 验收 #1/#4/#5 过，#2 弱证据过（B≠0 需 `--entropy-coef 0.01`，4 层切片奖励恒 0），#3 间接过（strict loading + sha256 读回，未直接计数 54 键）。B 段 8×H100 终验待放行。
