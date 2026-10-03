@@ -112,13 +112,22 @@ class MilesPolicyState:
         (result,) = results
         if result.get("policy_version") != version:
             raise PolicyStateError("exported policy version mismatch")
-        lora = canonical_state_from_owned_tensors(
-            version,
-            result["tensors"],
-            base_model_revision=self._revision,
-            lora_config_hash=self._config_hash,
-            layout_hash=self._expected_layout_hash,
-        )
+        try:
+            lora = canonical_state_from_owned_tensors(
+                version,
+                result["tensors"],
+                base_model_revision=self._revision,
+                lora_config_hash=self._config_hash,
+                layout_hash=self._expected_layout_hash,
+            )
+        except ValueError as exc:
+            # Make a layout mismatch diagnosable from the island log: the
+            # predicted layout is printed by the learner at start-up.
+            raise ValueError(
+                f"{exc}: exported {len(result['tensors'])} tensors "
+                f"(expected layout hash {self._expected_layout_hash}): "
+                + _describe_tensors(result["tensors"])
+            ) from exc
         if self._expected_layout_hash is None:
             self._expected_layout_hash = lora.layout_hash
         return TrainableState.from_lora(lora)
@@ -160,3 +169,11 @@ class MilesPolicyState:
         if any(r != results[0] for r in results):
             raise PolicyStateError(f"ranks disagree on apply result: {results!r:.300}")
         self.policy_version = lora.policy_version
+
+
+def _describe_tensors(tensors: Any, limit: int = 400) -> str:
+    items = []
+    for name in sorted(tensors)[:limit]:
+        shape = tuple(int(d) for d in getattr(tensors[name], "shape", ()))
+        items.append(f"{name}{list(shape)}")
+    return ", ".join(items)

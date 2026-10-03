@@ -2440,6 +2440,11 @@ def _run_ports(
     lora_config_hash = canonical_lora_config_hash(
         rank=args.lora_r, target_modules=canonical_targets
     )
+    print(
+        f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
+        + ", ".join(f"{s.name}{list(s.shape)}" for s in specs[:400]),
+        flush=True,
+    )
     # The event tape and island identity are needed even without outer sync.
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
