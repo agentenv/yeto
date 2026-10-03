@@ -578,3 +578,39 @@ def test_scrubbed_environment_removes_every_reward_key_name():
     assert subprocess_agent.scrubbed_environment(base) == {"PATH": "/bin"}
     with pytest.raises(RuntimeError, match="leaked"):
         adapter.assert_no_reward_key(base)
+
+
+# ---------------------------------------------------------------- A-T3-4: rollout workers configure themselves
+
+def _worker_provider_factory(miles_args):
+    assert miles_args.yeto_rl_learner_id == 5
+    return _Provider(FakeTerminalEnvironment())
+
+
+def test_run_configures_the_rollout_worker_from_its_environment(monkeypatch):
+    """codex-smoke-20261003-6: every trajectory failed with "configure(provider=...) was not
+    called" because upstream Miles calls the agent function inside RolloutExecutor actors."""
+    subprocess_agent.configure(provider=None)
+    monkeypatch.delenv(preflight.ENVIRONMENT_PROVIDER_ENV, raising=False)
+    # no provider in the environment -> still fails closed, nothing installed
+    with pytest.raises(RuntimeError, match="configure\\(provider=...\\) was not called"):
+        asyncio.run(subprocess_agent.run("http://x", "p", metadata={"task_id": "fix-git", "trajectory_id": "t"}))
+    assert subprocess_agent.configured()["provider"] is None
+
+    monkeypatch.setenv(preflight.ENVIRONMENT_PROVIDER_ENV, f"{__name__}:_worker_provider_factory")
+    monkeypatch.setenv(preflight.LEARNER_ID_ENV, "5")
+    monkeypatch.setenv(preflight.MEMBER_CELL_ENV, "cell9")
+    assert preflight.configure_rollout_worker() is True
+    installed = subprocess_agent.configured()
+    assert isinstance(installed["provider"], _Provider)
+    assert installed["tool_wait_board"].learner_id == 5 and installed["harness_board"].learner_id == 5
+    assert installed["member"] == "engine:cell9"
+
+    # run() itself performs that configure when the module is still bare (and then
+    # refuses for IR-3 on the missing policy token, i.e. it got past the provider check)
+    subprocess_agent.configure(provider=None)
+    monkeypatch.setattr(subprocess_agent, "resolve_expected_policy_version", lambda metadata: None)
+    with pytest.raises(subprocess_agent.PolicyVersionMissing):
+        asyncio.run(subprocess_agent.run("http://x", "p", metadata={"task_id": "fix-git", "trajectory_id": "t"}))
+    assert isinstance(subprocess_agent.configured()["provider"], _Provider)
+    subprocess_agent.configure(provider=None)

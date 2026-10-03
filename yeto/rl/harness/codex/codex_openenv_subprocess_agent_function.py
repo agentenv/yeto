@@ -198,6 +198,12 @@ async def run(
 ) -> dict[str, Any] | None:
     metadata = dict(metadata or {})
     if _provider is None:
+        # Rollout workers are separate Ray actors: the driver's configure()
+        # never ran here, so build the same wiring from the forwarded env.
+        from .preflight import configure_rollout_worker
+
+        configure_rollout_worker()
+    if _provider is None:
         raise RuntimeError("codex_openenv_subprocess_agent_function.configure(provider=...) was not called")
     task_id, sample_id = adapter.task_identity(metadata)
     trajectory_id = str(metadata.get("trajectory_id") or sample_id)

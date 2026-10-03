@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from types import SimpleNamespace
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -171,6 +172,68 @@ def harness_preflight(miles_args: Any, launch: Any, *, env: Mapping[str, str] | 
 
 
 MEMBER_CELL_ENV = "YETO_RL_CELL_ID"
+LEARNER_ID_ENV = "YETO_RL_LEARNER_ID"
+# Harness env the island driver forwards into Ray's job runtime_env so the
+# rollout workers (which inherit the raylet's environment, not the driver's)
+# can self-configure (A-T3-4, codex-smoke-20261003-6).
+WORKER_PASSTHROUGH_ENV = (
+    ENVIRONMENT_PROVIDER_ENV,
+    "TBENCH_REWARD_HMAC_KEY",
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    "OPENENV_RUN_ID",
+    "SECRLENV_MAX_TURNS",
+    MEMBER_CELL_ENV,
+    LEARNER_ID_ENV,
+)
+WORKER_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_", "YETO_CODEX_")
+
+
+def worker_runtime_env(miles_args: Any, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Env vars every Ray actor of this island must see for the agent function to run."""
+    env = os.environ if env is None else env
+    forwarded = {
+        key: value
+        for key, value in env.items()
+        if value and (key in WORKER_PASSTHROUGH_ENV or key.startswith(WORKER_PASSTHROUGH_ENV_PREFIXES))
+    }
+    learner_id = getattr(miles_args, "yeto_rl_learner_id", None)
+    if learner_id is not None and str(learner_id) != "":
+        forwarded[LEARNER_ID_ENV] = str(int(learner_id))
+    cell = getattr(miles_args, "yeto_rl_cell_id", None)
+    if cell is not None and str(cell) != "":
+        forwarded[MEMBER_CELL_ENV] = str(cell)
+    return forwarded
+
+
+def configure_rollout_worker(env: Mapping[str, str] | None = None) -> bool:
+    """Install the provider and boards in a rollout worker from its environment.
+
+    ``harness_preflight`` configures the driver process only; upstream Miles
+    calls the agent function inside ``RolloutExecutor`` actors, where the
+    module globals start empty.  Returns False (configures nothing) when the
+    environment names no provider, so ``run`` keeps failing closed.
+    """
+    env = os.environ if env is None else env
+    if not env.get(ENVIRONMENT_PROVIDER_ENV):
+        return False
+    miles_args = SimpleNamespace(
+        yeto_harness_environment_provider=None,
+        yeto_rl_learner_id=int(env.get(LEARNER_ID_ENV) or 0),
+        yeto_rl_member_id=None,
+        yeto_rl_cell_id=None,
+    )
+    provider = resolve_environment_provider(miles_args, env)
+    from . import codex_openenv_subprocess_agent_function as subprocess_agent
+
+    tool_wait_board, harness_board = island_boards(miles_args)
+    subprocess_agent.configure(
+        provider=provider,
+        tool_wait_board=tool_wait_board,
+        harness_board=harness_board,
+        member=resolve_member(miles_args, env),
+    )
+    return True
 
 
 def resolve_member(miles_args: Any, env: Mapping[str, str] | None = None) -> str | None:
