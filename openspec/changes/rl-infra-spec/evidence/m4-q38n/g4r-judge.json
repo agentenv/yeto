@@ -1,0 +1,69 @@
+{
+  "trainable": {
+    "pass": true,
+    "expected": {
+      "31492096": 2,
+      "30833664": 2
+    },
+    "seen": {
+      "30833664": 1,
+      "31492096": 1
+    },
+    "dedup_repeats": 2,
+    "exact_count": false
+  },
+  "lora_check": {
+    "pass": true,
+    "lines": []
+  },
+  "rollouts": {
+    "pass": true,
+    "seen": [
+      0
+    ],
+    "expected": 1
+  },
+  "finite": {
+    "pass": true,
+    "metrics": {
+      "0": {
+        "train/loss": -0.1171913892030716,
+        "train/ppo_kl": 5.238689482212067e-10,
+        "train/grad_norm": 0.11453093588352203,
+        "train/train_rollout_logprob_abs_diff": 0.02434120513498783
+      }
+    }
+  },
+  "rewards": {
+    "pass": true,
+    "nonzero_grad_rounds": [
+      0
+    ],
+    "all_grad_zero": false,
+    "rollout": {
+      "0": {
+        "rollout/rewards": 0.0,
+        "rollout/truncated": 0.96875,
+        "rollout/response_lengths": 501.875
+      }
+    }
+  },
+  "logprob_diff": {
+    "pass": true,
+    "values": [
+      0.02434120513498783
+    ]
+  },
+  "load_keys": {
+    "pass": true,
+    "lines": []
+  },
+  "adapter": {
+    "pass": true,
+    "lines": [
+      "\u001b[36m(MegatronTrainRayActor pid=4305)\u001b[0m [2026-10-03 17:09:20.133 actor_cell00000_rank00001] checkpoint.py:152 - Successfully loaded LoRA adapter from /root/shared_data/m4-q38n-g4/checkpoints/iter_0000009/adapter",
+      "\u001b[36m(MegatronTrainRayActor pid=4329)\u001b[0m [2026-10-03 17:09:20.130 actor_cell00000_rank00003] checkpoint.py:152 - Successfully loaded LoRA adapter from /root/shared_data/m4-q38n-g4/checkpoints/iter_0000009/adapter\u001b[32m [repeated 3x across cluster]\u001b[0m"
+    ]
+  },
+  "verdict": "PASS"
+}

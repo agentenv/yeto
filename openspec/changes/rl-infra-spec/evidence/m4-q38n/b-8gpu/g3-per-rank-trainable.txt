@@ -1,0 +1,8 @@
+rank00000 trainable=17074176
+rank00001 trainable=17074176
+rank00002 trainable=17074176
+rank00003 trainable=17074176
+rank00004 trainable=16415744
+rank00005 trainable=16415744
+rank00006 trainable=16415744
+rank00007 trainable=16415744
