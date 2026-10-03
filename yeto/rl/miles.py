@@ -775,7 +775,7 @@ def _secrlenv_generate_with_cleanup(
     from miles.rollout import sglang_rollout
     from miles.utils.async_utils import run
 
-    from yeto_miles_secrlenv.reward import UntrustedOutcome
+    from yeto.rl.harness.codex.reward import UntrustedOutcome
 
     if evaluation:
         return sglang_rollout.generate_rollout(
@@ -805,7 +805,7 @@ def _secrlenv_generate_with_cleanup(
                     abort_task.cancel()
                     raise TimeoutError
                 await abort_task
-                from yeto_miles_secrlenv.agent import require_no_episode_residue
+                from yeto.rl.harness.codex.agent import require_no_episode_residue
 
                 require_no_episode_residue()
             except Exception:

@@ -136,3 +136,34 @@ def test_connect_island_ray_forwards_elastic_metadata_env_only_when_on():
     off = _TwoRayMachine(raylet_env={})
     connect_island_ray(environ={"RAY_ADDRESS": "a:6379"}, ray_module=off)
     assert ELASTIC_METADATA_ENV not in off.init_calls[0][1]["env_vars"]
+
+
+def test_connect_island_ray_forwards_codex_harness_env_and_learner_id_to_workers():
+    """A-T3-4 (codex-smoke-20261003-6): the agent function runs inside RolloutExecutor
+    actors and must self-configure from the job runtime_env, not the raylet env."""
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+
+    machine = _TwoRayMachine(raylet_env={})
+    environ = {
+        "RAY_ADDRESS": "a:6379",
+        "YETO_HARNESS_ENVIRONMENT_PROVIDER": "yeto.rl.harness.codex.tb2_provider:modal_provider",
+        "YETO_HARNESS_TB2_FAULT": "create_fail:2",
+        "YETO_CODEX_OPENENV_MODEL_REVISION": "abc",
+        "TBENCH_REWARD_HMAC_KEY": "k",
+        "MODAL_TOKEN_SECRET": "s",
+        "UNRELATED": "x",
+    }
+    connect_island_ray(environ=environ, ray_module=machine,
+                       miles_args=SimpleNamespace(yeto_rl_learner_id=3, yeto_rl_cell_id="c7"))
+    env_vars = machine.init_calls[0][1]["env_vars"]
+    for key in ("YETO_HARNESS_ENVIRONMENT_PROVIDER", "YETO_HARNESS_TB2_FAULT", "YETO_CODEX_OPENENV_MODEL_REVISION",
+                "TBENCH_REWARD_HMAC_KEY", "MODAL_TOKEN_SECRET"):
+        assert env_vars[key] == environ[key]
+    assert env_vars["YETO_RL_LEARNER_ID"] == "3" and env_vars["YETO_RL_CELL_ID"] == "c7"
+    assert "UNRELATED" not in env_vars
+    # without miles_args (legacy callers) nothing harness-specific is forwarded
+    bare = _TwoRayMachine(raylet_env={})
+    connect_island_ray(environ=environ, ray_module=bare)
+    assert "YETO_HARNESS_ENVIRONMENT_PROVIDER" not in bare.init_calls[0][1]["env_vars"]

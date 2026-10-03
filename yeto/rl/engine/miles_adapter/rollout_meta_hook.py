@@ -281,6 +281,29 @@ def expected_policy_version(sample: Any = None, sink: str | None = None) -> str 
     return current_policy_token(sink)
 
 
+def counter_value(value: Any) -> int:
+    """A per-sample counter as an int.
+
+    Upstream Miles' session server writes ``tito_session_mismatch`` into the
+    same sample-metadata key as a *list* of mismatch records
+    (``compute_session_mismatch`` -> ``list[dict]``, empty when the replayed
+    tokens match), while the harness bridge writes an int; both count
+    mismatches (A-T3-6, codex-smoke-20261003-10 failed the rollout on
+    ``int(list)``).  Dicts count their non-zero entries, None/"" count 0.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, (list, tuple, set)):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(1 for v in value.values() if v)
+    return int(value)
+
+
 def harness_counters(all_samples: Iterable[Sequence[Any]]) -> dict[str, Any]:
     """Sum the IR-3/IR-4 per-sample counters; only keys with a non-zero total."""
     age = mismatch = 0
@@ -290,8 +313,8 @@ def harness_counters(all_samples: Iterable[Sequence[Any]]) -> dict[str, Any]:
             meta = getattr(s, "metadata", None)
             if not isinstance(meta, dict):
                 continue
-            age += int(meta.get(POLICY_AGE_VIOLATION_KEY) or 0)
-            mismatch += int(meta.get(TITO_SESSION_MISMATCH_KEY) or 0)
+            age += counter_value(meta.get(POLICY_AGE_VIOLATION_KEY))
+            mismatch += counter_value(meta.get(TITO_SESSION_MISMATCH_KEY))
             for reason, n in (meta.get(TITO_CHAIN_BREAKS_KEY) or {}).items():
                 breaks[str(reason)] = breaks.get(str(reason), 0) + int(n or 0)
     out: dict[str, Any] = {}

@@ -54,54 +54,11 @@ def _direct_options(argv: list[str]) -> argparse.Namespace:
 
 
 def _attest_adapter(miles_root: Path) -> None:
-    adapter_dir = miles_root / "examples" / "experimental" / "openenv"
+    from yeto.rl.harness.codex.preflight import forward_legacy_openenv_preflight
+
     if miles_root.is_symlink() or not miles_root.is_dir():
         raise ValueError("the pinned Miles root is not a real directory")
-    for name in CODEX_OPENENV_AGENT_MODULES:
-        source = adapter_dir / name
-        if source.is_symlink() or not source.is_file():
-            raise ValueError("the Codex OpenEnv adapter source is incomplete")
-    adapter_root = str(adapter_dir)
-    if adapter_root not in sys.path:
-        sys.path.insert(0, adapter_root)
-    try:
-        adapter = importlib.import_module("codex_openenv_agent_function")
-        subprocess_adapter = importlib.import_module(
-            "codex_openenv_subprocess_agent_function"
-        )
-        identity = adapter.codex_openenv_harness_identity()
-        binary = adapter.stock._attest_runtime()
-    except (ImportError, AttributeError, OSError, TypeError, ValueError, RuntimeError) as error:
-        raise ValueError("cannot attest the Codex OpenEnv adapter") from error
-    for module in (adapter, subprocess_adapter):
-        module_file = getattr(module, "__file__", None)
-        if not isinstance(module_file, str):
-            raise TypeError("the Codex OpenEnv adapter has no source identity")
-        source = Path(module_file)
-        if source.is_symlink() or source.resolve().parent != adapter_dir.resolve():
-            raise ValueError("the Codex OpenEnv adapter resolved outside pinned Miles")
-    if not callable(getattr(subprocess_adapter, "run", None)):
-        raise TypeError("the Codex OpenEnv subprocess entrypoint is missing")
-    if adapter._OPENENV_IDENTITY_ENV != CODEX_OPENENV_IDENTITY_ENV:
-        raise ValueError("the Codex OpenEnv launch identity drifted")
-    expected_identity = {
-        name.removeprefix("YETO_CODEX_OPENENV_").lower(): value
-        for name, value in CODEX_OPENENV_IDENTITY_ENV.items()
-        if name.endswith("_SHA256")
-    }
-    if identity != expected_identity:
-        raise ValueError("the Codex OpenEnv surface identity drifted")
-    if (
-        adapter.stock._BACKEND_PROFILE.get("model_identifier")
-        != QWEN35_08B_MODEL
-        or adapter.stock._BACKEND_PROFILE.get("model_revision")
-        != QWEN35_08B_REVISION
-        or adapter.stock._BACKEND_PROFILE.get("tito_model") != "qwen35"
-        or adapter.stock.BACKEND_MODEL != "qwen35"
-    ):
-        raise ValueError("the Codex OpenEnv qwen35_08b profile drifted")
-    if not isinstance(binary, Path) or binary.is_symlink() or not binary.is_file():
-        raise ValueError("the attested stock Codex executable is unavailable")
+    forward_legacy_openenv_preflight(None, "qwen35_08b")
 
 
 def preflight_tbench_codex_streaming(

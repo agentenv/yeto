@@ -18,13 +18,9 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-pytest.importorskip(
-    "yeto_miles_secrlenv",
-    reason="the SecRLEnv Codex harness is an optional external integration",
-)
 
-from yeto_miles_secrlenv import codex_harness_agent as harness
-from yeto_miles_secrlenv import reward as secrlenv_reward
+from yeto.rl.harness.codex import codex_harness_agent as harness
+from yeto.rl.harness.codex import reward as secrlenv_reward
 
 
 def test_stock_codex_qwen38_adapter_process_binds_exact_xhigh_profile():
@@ -35,7 +31,7 @@ def test_stock_codex_qwen38_adapter_process_binds_exact_xhigh_profile():
             sys.executable,
             "-c",
             """
-from yeto_miles_secrlenv import codex_harness_agent as adapter
+from yeto.rl.harness.codex import codex_harness_agent as adapter
 assert adapter.BACKEND_MODEL == "qwen38"
 assert adapter.BACKEND_REASONING_EFFORT == "xhigh"
 assert adapter.BACKEND_CHAT_TEMPLATE_KWARGS == {
@@ -62,7 +58,7 @@ def test_stock_codex_qwen35_adapter_process_binds_exact_fixed_profile():
             sys.executable,
             "-c",
             """
-from yeto_miles_secrlenv import codex_harness_agent as adapter
+from yeto.rl.harness.codex import codex_harness_agent as adapter
 assert adapter.BACKEND_MODEL == "qwen35"
 assert adapter.BACKEND_REASONING_EFFORT == "xhigh"
 assert adapter.BACKEND_CHAT_TEMPLATE_KWARGS == {"clear_thinking": False}
@@ -1531,8 +1527,10 @@ def test_driver_prefers_policy_boundary_set_while_stdout_read_is_pending(monkeyp
 
 
 def _stock_codex_binary() -> Path:
-    binary_name = shutil.which("codex")
-    if binary_name is None:
+    # YETO_CODEX_BINARY_PATH (the fetched bundle's binary, see
+    # scripts/fetch_codex_bundle.py) wins over the PATH install.
+    binary_name = os.environ.get("YETO_CODEX_BINARY_PATH") or shutil.which("codex")
+    if not binary_name or not Path(binary_name).is_file():
         pytest.skip("stock Codex is not installed on this controller")
     version = subprocess.run(
         [binary_name, "--version"], capture_output=True, text=True, check=True

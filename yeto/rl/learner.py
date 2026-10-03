@@ -793,6 +793,15 @@ def _strict_json_file_semantics(path: Path) -> tuple[Any, ...]:
     return typed_semantics(value)
 
 
+def _canonical_schema_sha256(path: Path) -> str | None:
+    from ..provenance import canonical_json_sha256
+
+    try:
+        return canonical_json_sha256(path)
+    except (OSError, ValueError):
+        return None
+
+
 def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
     try:
         pinned_semantics = _strict_json_file_semantics(pinned)
@@ -804,63 +813,11 @@ def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
 
 
 def _preflight_codex_openenv_adapter(args, profile_name: str) -> None:
-    """Attest the isolated OpenEnv wrapper inside the pinned Miles source."""
+    """Attest the in-tree OpenEnv adapter (forwarded to harness.codex.preflight)."""
 
-    from . import CODEX_OPENENV_AGENT_MODULES, CODEX_OPENENV_IDENTITY_ENV
+    from yeto.rl.harness.codex.preflight import forward_legacy_openenv_preflight
 
-    if profile_name != "qwen35_08b":
-        raise ValueError(
-            "the Codex OpenEnv adapter requires backend profile qwen35_08b"
-        )
-    adapter_dir = (
-        Path(args.miles_root).expanduser().resolve()
-        / "examples"
-        / "experimental"
-        / "openenv"
-    )
-    for name in CODEX_OPENENV_AGENT_MODULES:
-        source = adapter_dir / name
-        if source.is_symlink() or not source.is_file():
-            raise ValueError("the Codex OpenEnv adapter source is incomplete")
-    adapter_root = str(adapter_dir)
-    if adapter_root not in sys.path:
-        sys.path.insert(0, adapter_root)
-    try:
-        openenv_adapter = importlib.import_module("codex_openenv_agent_function")
-        subprocess_adapter = importlib.import_module(
-            "codex_openenv_subprocess_agent_function"
-        )
-        openenv_identity = openenv_adapter.codex_openenv_harness_identity()
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
-        raise ValueError("cannot attest the Codex OpenEnv adapter") from exc
-    for module in (openenv_adapter, subprocess_adapter):
-        module_file = getattr(module, "__file__", None)
-        if not isinstance(module_file, str):
-            raise ValueError("the Codex OpenEnv adapter has no source identity")
-        source = Path(module_file)
-        if source.is_symlink() or source.resolve().parent != adapter_dir:
-            raise ValueError("the Codex OpenEnv adapter resolved outside pinned Miles")
-    if not callable(getattr(subprocess_adapter, "run", None)):
-        raise ValueError("the Codex OpenEnv subprocess entrypoint is missing")
-    if openenv_adapter._OPENENV_IDENTITY_ENV != CODEX_OPENENV_IDENTITY_ENV:
-        raise ValueError("the Codex OpenEnv launch identity drifted")
-    expected_openenv_identity = {
-        name.removeprefix("YETO_CODEX_OPENENV_").lower(): value
-        for name, value in CODEX_OPENENV_IDENTITY_ENV.items()
-        if name.endswith("_SHA256")
-    }
-    if openenv_identity != expected_openenv_identity:
-        raise ValueError("the Codex OpenEnv surface identity drifted")
-    openenv_env_mismatched = [
-        name
-        for name, expected in CODEX_OPENENV_IDENTITY_ENV.items()
-        if os.getenv(name) != expected
-    ]
-    if openenv_env_mismatched:
-        raise ValueError(
-            "Codex OpenEnv container environment drifted: "
-            + ", ".join(openenv_env_mismatched)
-        )
+    forward_legacy_openenv_preflight(args, profile_name)
 
 
 def _preflight_codex_harness(args) -> None:
@@ -1000,7 +957,7 @@ def _preflight_codex_harness(args) -> None:
     # it must not be required for the independent Terminal-Bench path.
     if args.custom_agent_function_path != CODEX_OPENENV_AGENT:
         try:
-            from yeto_miles_secrlenv import codex_harness_agent
+            from yeto.rl.harness.codex import codex_harness_agent
 
             live_identity = codex_harness_agent.codex_harness_identity()
         except (
@@ -1039,7 +996,7 @@ def _preflight_codex_harness(args) -> None:
         or file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256
         or schema.is_symlink()
         or not schema.is_file()
-        or file_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
+        or _canonical_schema_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
     ):
         raise ValueError("mounted stock Codex artifact does not match its Yeto pin")
     try:
@@ -1187,8 +1144,14 @@ def megatron_adapter_targets(
     *,
     standard_grouped_experts: bool = False,
     pipeline_parallel: int = 1,
+    attention_output_gate: bool = False,
 ) -> list[str]:
-    """Map the exact PEFT contract onto Bridge's Megatron module paths."""
+    """Map the exact PEFT contract onto Bridge's Megatron module paths.
+
+    ``attention_output_gate`` (the provider flag) fails closed on q/k/v: the
+    CanonicalLoRA split adapters are not gate-aware, so their export layout
+    cannot match PEFT's (see ``export.target_modules``).
+    """
 
     model_bridge = getattr(bridge, "_model_bridge", None)
     if model_bridge is None:
@@ -1222,6 +1185,11 @@ def megatron_adapter_targets(
         prefix, separator, leaf = megatron_module.rpartition(".")
         if not separator:
             raise ValueError(f"invalid Megatron adapter module {megatron_module!r}")
+        if leaf == "linear_qkv" and attention_output_gate:
+            raise ValueError(
+                f"PEFT module {module!r} cannot use canonical Megatron LoRA: "
+                "CanonicalLoRA split q/k/v adapters ignore attention_output_gate"
+            )
         if leaf in {"linear_qkv", "linear_fc1"}:
             hf_params = mapping.hf_param
             component = next(
@@ -2086,6 +2054,7 @@ def run_miles(
         model_bridge,
         standard_grouped_experts=clone_only_lora,
         pipeline_parallel=getattr(args, "pipeline_parallel", 1),
+        attention_output_gate=bool(getattr(provider, "attention_output_gate", False)),
     )
     ports_launch = ports_algorithm = None
     if rl_engine == "ports":
@@ -2483,6 +2452,11 @@ def _run_ports(
     lora_config_hash = canonical_lora_config_hash(
         rank=args.lora_r, target_modules=canonical_targets
     )
+    print(
+        f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
+        + ", ".join(f"{s.name}{list(s.shape)}" for s in specs[:400]),
+        flush=True,
+    )
     # The event tape and island identity are needed even without outer sync.
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
@@ -2547,13 +2521,13 @@ def main(argv=None) -> None:
         load_function(args.custom_generate_function_path)
     if args.custom_agent_function_path:
         load_function(args.custom_agent_function_path)
-    from . import CODEX_HARNESS_AGENT
+    from . import CODEX_HARNESS_AGENT, SECRLENV_AGENT
 
     if args.custom_agent_function_path in {
-        "yeto_miles_secrlenv.agent.run",
+        SECRLENV_AGENT,
         CODEX_HARNESS_AGENT,
     }:
-        from yeto_miles_secrlenv.client import require_daemon_ready
+        from yeto.rl.harness.codex.client import require_daemon_ready
 
         require_daemon_ready()
         print("[rl] secrlenv episode daemon ready")

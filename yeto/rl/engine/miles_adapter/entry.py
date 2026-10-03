@@ -880,7 +880,7 @@ def selection_event(
     return event
 
 
-def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
+def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str | None:
     """Connect the driver to the island's own Ray and pin every actor to it.
 
     A SkyPilot machine runs two Ray instances: the island's (6379, started by
@@ -935,6 +935,12 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
         # inherit the raylet's environment, not the driver's.
         env_vars[ELASTIC_METADATA_ENV] = "1"
+    if miles_args is not None:
+        # Codex harness: the agent function runs in RolloutExecutor actors and
+        # configures itself from this env (preflight.configure_rollout_worker).
+        from yeto.rl.harness.codex.preflight import worker_runtime_env
+
+        env_vars.update(worker_runtime_env(miles_args, environ))
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
 
@@ -1104,7 +1110,7 @@ def run_ports_island(
         # the harness cuts need the rollout data cursor (rollout-side metadata)
         miles_args.yeto_rl_elastic_metadata = True
         os.environ[ELASTIC_METADATA_ENV] = "1"
-    connect_island_ray()
+    connect_island_ray(miles_args=miles_args)
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
     from miles.ray.rollout.eval_dispatch import EvalDispatcher
