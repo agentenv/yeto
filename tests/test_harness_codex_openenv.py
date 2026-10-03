@@ -641,3 +641,41 @@ def test_repeated_provider_failures_tear_the_rollout_down_instead_of_resampling(
     for _ in range(5):
         assert tbench_reward.INFRASTRUCTURE_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
     subprocess_agent.configure(provider=None)
+
+
+def test_tool_wait_board_calls_are_awaited_in_order_and_never_fail_the_trajectory(monkeypatch):
+    """A-T3-7 (codex-smoke-20261003-11): the boards are max_concurrency actors, so
+    fire-and-forget exit/enter of successive tool calls raced; the agent now awaits each."""
+    env = FakeTerminalEnvironment(passed=True)
+
+    class _Ref:  # stands in for ray.ObjectRef
+        def __init__(self, value):
+            self.value = value
+
+    _Ref.__name__ = "ObjectRef"
+    order: list[tuple[str, str]] = []
+
+    class _RemoteBoard:
+        def __init__(self):
+            self.enter = SimpleNamespace(remote=lambda tid: order.append(("enter", tid)) or _Ref(1))
+            self.exit = SimpleNamespace(remote=lambda tid: order.append(("exit", tid)) or _Ref(2))
+
+    resolved: list[Any] = []
+    monkeypatch.setattr(subprocess_agent, "_board_resolve", lambda ref: resolved.append(ref) or ref.value)
+    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
+    monkeypatch.setenv("YETO_CODEX_OPENENV_ALLOW_SCRIPTED_DRIVER", "1")
+    subprocess_agent.configure(provider=_Provider(env), tool_wait_board=_RemoteBoard(), harness_board=None, member="m0")
+    result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    assert tbench_outcome.MAC_KEY in result
+    kinds = [k for k, _ in order]
+    assert kinds and kinds == ["enter", "exit"] * (len(kinds) // 2)  # strictly alternating, same trajectory
+    assert len(resolved) == len(order)  # every board call was awaited
+
+    class _FailingBoard:
+        def __init__(self):
+            self.enter = SimpleNamespace(remote=lambda tid: (_ for _ in ()).throw(RuntimeError("board down")))
+            self.exit = SimpleNamespace(remote=lambda tid: (_ for _ in ()).throw(RuntimeError("board down")))
+
+    subprocess_agent.configure(provider=_Provider(env), tool_wait_board=_FailingBoard(), harness_board=None, member="m0")
+    assert tbench_outcome.MAC_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    subprocess_agent.configure(provider=None)

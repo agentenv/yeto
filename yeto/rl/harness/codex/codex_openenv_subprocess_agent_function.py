@@ -148,6 +148,23 @@ def configured() -> dict[str, Any]:
             "member": _member}
 
 
+async def _board_await(target: Any, method: str, *args: Any) -> None:
+    """Call a board method and wait for it, so consecutive calls stay ordered.
+
+    The island boards are Ray actors with ``max_concurrency=64``: back-to-back
+    fire-and-forget ``exit``/``enter`` of one trajectory's successive tool
+    calls ran out of order ("already in a tool call" / "is not in a tool call",
+    A-T3-7, codex-smoke-20261003-11).  Board bookkeeping is telemetry, so its
+    errors are logged and never fail the trajectory.
+    """
+    try:
+        value = _board_call(target, method, *args)
+        if type(value).__name__ == "ObjectRef":
+            await asyncio.to_thread(_board_resolve, value)
+    except Exception as exc:  # noqa: BLE001 - never fail a trajectory on telemetry
+        print(f"[codex-harness] tool-wait board {method} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def _board_kwcall(target: Any, method: str, *args: Any, **kwargs: Any) -> Any:
     """Like ``tool_wait._call`` but forwards keyword arguments (``lease_acquired(deadline=)``)."""
     fn = getattr(target, method)
@@ -216,11 +233,11 @@ async def _drive_worker(
                 if event.get("phase") == "enter" and not in_tool:
                     in_tool = True
                     if board is not None:
-                        _board_call(board, "enter", trajectory_id)
+                        await _board_await(board, "enter", trajectory_id)
                 elif event.get("phase") == "exit" and in_tool:
                     in_tool = False
                     if board is not None:
-                        _board_call(board, "exit", trajectory_id)
+                        await _board_await(board, "exit", trajectory_id)
             elif kind == "result":
                 return event
             elif kind == "error":
@@ -230,7 +247,7 @@ async def _drive_worker(
                 raise error
     finally:
         if in_tool and board is not None:
-            _board_call(board, "exit", trajectory_id)
+            await _board_await(board, "exit", trajectory_id)
         await _terminate(process)
 
 
