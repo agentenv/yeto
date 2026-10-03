@@ -199,6 +199,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-allow-local-data",
+        action="store_true",
+        help=(
+            "ports engine: accept a local prompt file for --data (shipped to the "
+            "island via file mounts; provenance records source=local, no revision). "
+            "Default: RL requires a revision-pinned Hugging Face dataset"
+        ),
+    )
+    rl.add_argument(
         "--rl-algorithm-spec",
         default=None,
         metavar="PATH",
@@ -1459,7 +1468,10 @@ def cmd_launch(args) -> int:
     try:
         from .launcher import prepare_launch_args
 
-        prepare_launch_args(args)
+        if getattr(args, "rl_allow_local_data", False):
+            prepare_launch_args(args, allow_local_rl_data=True)
+        else:
+            prepare_launch_args(args)
     except (ImportError, OSError, PermissionError, ValueError) as exc:
         print(f"[yeto] provenance validation failed: {exc}", file=sys.stderr)
         return 1

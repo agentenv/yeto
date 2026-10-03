@@ -201,6 +201,9 @@ class ModalIslandConfig:
     # CODEX_CONTAINER_BINARY_PATH parent) the same way sky file_mounts does.
     codex_dir: str | None = None
     codex_mount: str | None = None
+    # Other sky file_mounts (container path -> local file or dir), mounted
+    # read-only at start-up like the workdir.
+    extra_mounts: dict[str, str] = field(default_factory=dict)
 
     @property
     def function_name(self) -> str:
@@ -233,6 +236,11 @@ class ModalIslandConfig:
             raise ValueError("codex_dir and codex_mount go together")
         if self.codex_dir is not None and not os.path.isdir(self.codex_dir):
             raise ValueError(f"codex_dir {self.codex_dir} is not a directory")
+        for target, source in self.extra_mounts.items():
+            if not target.startswith("/"):
+                raise ValueError(f"extra_mounts target {target} must be absolute")
+            if not os.path.exists(os.path.expanduser(source)):
+                raise ValueError(f"extra_mounts source {source} does not exist")
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -241,6 +249,7 @@ class ModalIslandConfig:
     def from_json(cls, text: str) -> "ModalIslandConfig":
         data = json.loads(text)
         data["pip_requirements"] = tuple(data.get("pip_requirements") or ())
+        data["extra_mounts"] = dict(data.get("extra_mounts") or {})
         return cls(**data)
 
 
@@ -403,6 +412,12 @@ class ModalOps:
         if cfg.codex_dir and cfg.codex_mount:
             # Codex run bundle (sky: file_mounts[codex_mount] = codex_dir).
             image = image.add_local_dir(cfg.codex_dir, cfg.codex_mount, copy=False)
+        for target, source in sorted(cfg.extra_mounts.items()):
+            source = os.path.expanduser(source)
+            if os.path.isdir(source):
+                image = image.add_local_dir(source, target, copy=False)
+            else:
+                image = image.add_local_file(source, target, copy=False)
         return image
 
     def define(self, cfg: ModalIslandConfig):

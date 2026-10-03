@@ -2188,7 +2188,14 @@ HARNESS_ENVIRONMENT_PROVIDER_ENV = "YETO_HARNESS_ENVIRONMENT_PROVIDER"
 HARNESS_PASSTHROUGH_ENV = (
     HARNESS_ENVIRONMENT_PROVIDER_ENV,
     "TBENCH_REWARD_HMAC_KEY",
+    # tb2_provider Modal Sandbox backend: the island creates task sandboxes
+    # itself, so it needs the Modal token; the TB2 knobs/faults ride along.
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    "OPENENV_RUN_ID",
+    "SECRLENV_MAX_TURNS",
 )
+HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
 CODEX_COMPACTION_ENV = "YETO_CODEX_COMPACTION_ENABLED"
 
 
@@ -2295,6 +2302,9 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
         for name in HARNESS_PASSTHROUGH_ENV:
             if environ.get(name):
                 envs[name] = environ[name]
+        for name, value in environ.items():
+            if name.startswith(HARNESS_PASSTHROUGH_ENV_PREFIXES) and value:
+                envs[name] = value
     mounts = {CODEX_CONTAINER_DIR: str(Path(bundle_dir).expanduser().resolve())}
     return flags, envs, mounts
 
@@ -3379,7 +3389,15 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         volume_mount = _rl_checkpoint_mount(args.rl_completed_groups_path).replace("~", "/root", 1)
     # Codex run bundle: the sky task mounts it at CODEX_CONTAINER_DIR; Modal
     # mounts the same directory through the image (add_local_dir).
-    codex_dir = (dict(getattr(task, "file_mounts", None) or {})).get(CODEX_CONTAINER_DIR)
+    all_mounts = dict(getattr(task, "file_mounts", None) or {})
+    codex_dir = all_mounts.get(CODEX_CONTAINER_DIR)
+    # Every other sky file_mount (local prompt file, initial adapter, HF token
+    # file) is mounted into the container the same way; `~` is /root in Modal.
+    extra_mounts = {
+        ("/root" + target[1:] if target.startswith("~") else target): str(source)
+        for target, source in all_mounts.items()
+        if target != CODEX_CONTAINER_DIR and not str(source).startswith(("s3://", "gs://", "r2://"))
+    }
     requirements: tuple[str, ...] = ()
     if not rl:
         req_file = REPO_ROOT / "requirements.txt"
@@ -3407,6 +3425,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         volume_mount=volume_mount,
         codex_dir=codex_dir,
         codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
+        extra_mounts=extra_mounts,
         workdir=str(REPO_ROOT),
         # Opt-in overrides (default: Modal runner defaults, 10 retries / 24 h).
         # Acceptance runs pass --modal-retries 0 so a learner exit is final

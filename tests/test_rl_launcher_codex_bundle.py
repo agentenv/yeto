@@ -256,3 +256,30 @@ def test_real_bundle_attests_against_the_pins():
         raise
     assert contract["binary_size_bytes"] == 310_730_800
     assert contract["openenv_identity_env"] == CODEX_OPENENV_IDENTITY_ENV
+
+
+def test_modal_island_mounts_local_data_and_passes_tb2_env(bundle, monkeypatch, tmp_path):
+    root, _ = bundle
+    data = tmp_path / "smoke.jsonl"
+    data.write_text('{"prompt": "x", "metadata": {"task_id": "fix-git"}}\n')
+    monkeypatch.setenv("MODAL_TOKEN_ID", "ak-test")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-test")
+    monkeypatch.setenv("YETO_HARNESS_TB2_TASKS_DIR", "/opt/yeto/codex/tb2-tasks")
+    monkeypatch.setenv("YETO_HARNESS_TB2_FAULT", "create_fail:2")
+    args = _codex_args()
+    args.data = str(data)
+    args.gpu = "modal:1xl40s"
+    args.rl_image = "docker:ghcr.io/x/miles@sha256:" + "c" * 64
+    spec = parse_gpu_spec(args.gpu)[0]
+    task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:29400")
+    assert cfg.extra_mounts == {"/root/yeto-data.jsonl": str(data)}
+    for name in ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "YETO_HARNESS_TB2_TASKS_DIR", "YETO_HARNESS_TB2_FAULT"):
+        assert cfg.envs[name] == os.environ[name]
+    assert mr.ModalIslandConfig.from_json(cfg.to_json()).extra_mounts == cfg.extra_mounts
+    state = fake_modal(monkeypatch)
+    monkeypatch.setattr(mr, "registry_credentials", lambda *_a, **_k: None)
+    mr.ModalOps("yeto-run").define(cfg)
+    (img,) = state["images"]
+    assert img.calls[-1][0] == "add_local_file"
+    assert img.calls[-1][1] == (str(data), "/root/yeto-data.jsonl") and img.calls[-1][2] == {"copy": False}
