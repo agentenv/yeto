@@ -122,6 +122,8 @@ def _run(name: str, cmd: str, timeout_s: int, run_id: str) -> dict:
     with open(log, "a") as fh:
         fh.write(trailer)
     print(trailer, flush=True)
+    if os.path.isdir("/tmp/ray/session_latest/logs"):  # per-rank worker logs (not folded by ray dedup)
+        subprocess.run(["bash", "-c", f"tar czf {log[:-4]}-raylogs.tgz -C /tmp/ray/session_latest logs 2>/dev/null || true"])
     vol.commit()
     return {"step": name, "rc": rc, "elapsed_s": elapsed, "gpu": gpu, "log": log, "app": APP, "run_id": run_id}
 

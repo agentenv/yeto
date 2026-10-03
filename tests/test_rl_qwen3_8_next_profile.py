@@ -214,6 +214,7 @@ def test_launch_command_snapshot_and_lora_flags():
     assert "--sglang-lora-strict-loading" in extra
     assert flags["--offload-train-target"] == "cpu"  # T2-S7 F5: never disk-offload in a container
     assert p.launcher_env()["MILES_SCRIPT_EXTERNAL_RAY"] == "1"
+    assert p.launcher_env()["RAY_DEDUP_LOGS"] == "0"
     assert _digest(cmd) == GOLDEN["launch_4layer"]
     with_extra = p.launcher_command(extra_args=["--num-rollout", "2"])
     assert shlex.split(with_extra[-1])[-2:] == ["--num-rollout", "2"]
@@ -323,6 +324,16 @@ def test_judge_accepts_a_conforming_log(tmp_path):
     j = json.loads((tmp_path / "j.json").read_text())
     assert j["trainable"]["seen"] == {"30833664": 2, "31492096": 2}
     assert j["eval"]["seen"] == [4] and j["adapter"]["pass"]
+    folded = _fake_log(4, 5).splitlines()
+    folded = [l for l in folded if "trainable=" not in l]
+    s0, s1 = q.expected_rank_trainable_4layer(32, 8, 4)
+    folded.insert(0, f"[rank] native LoRA applied: rank=32 expert_rank=8 alpha=64 trainable={s1}")
+    folded.insert(1, f"[rank] native LoRA applied: rank=32 expert_rank=8 alpha=64 trainable={s0} [repeated 3x across cluster]")
+    (tmp_path / "folded.log").write_text("\n".join(folded) + "\n")
+    out = _run([sys.executable, str(JUDGE_PY), str(tmp_path / "folded.log"), "--num-gpus", "4", "--json", str(tmp_path / "f.json")])
+    assert "verdict PASS" in out
+    fj = json.loads((tmp_path / "f.json").read_text())["trainable"]
+    assert fj["dedup_repeats"] == 2 and not fj["exact_count"]
     log8 = tmp_path / "g3-8.log"
     log8.write_text(_fake_log(8, 5))
     assert "verdict PASS" in _run([sys.executable, str(JUDGE_PY), str(log8), "--num-gpus", "8"])

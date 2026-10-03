@@ -35,6 +35,7 @@ from yeto.rl.profiles.qwen3_8_next import expected_rank_trainable_4layer  # noqa
 
 TRAIN_RE = re.compile(r"\btrain (\d+): (\{.*\})")
 EVAL_RE = re.compile(r"\beval (\d+): (\{.*\})")
+REPEAT_RE = re.compile(r"\[repeated (\d+)x across cluster\]")
 TRAINABLE_RE = re.compile(r"native LoRA applied: rank=(\d+) expert_rank=(\d+) .*?trainable=(\d+)")
 METRICS = ("train/loss", "train/ppo_kl", "train/grad_norm", "train/train_rollout_logprob_abs_diff")
 
@@ -53,12 +54,28 @@ def judge(text: str, *, num_gpus: int, rollouts: int, rank: int, expert_rank: in
           eval_min: int = 0, adapter_restart: bool = False) -> dict[str, object]:
     res: dict[str, object] = {}
     exp0, exp1 = expected_rank_trainable_4layer(rank, expert_rank, num_gpus)
-    seen = Counter(int(m.group(3)) for m in TRAINABLE_RE.finditer(text)
-                   if int(m.group(1)) == rank and int(m.group(2)) == expert_rank)
+    seen: Counter[int] = Counter()
+    repeats = 0  # ray's log dedup folds near-identical actor lines into "[repeated Nx across cluster]"
+    total = 0  # a folded line stands for N occurrences (itself included), a plain line for 1
+    for line in text.splitlines():
+        m = TRAINABLE_RE.search(line)
+        if m and int(m.group(1)) == rank and int(m.group(2)) == expert_rank:
+            seen[int(m.group(3))] += 1
+            r = REPEAT_RE.search(line)
+            n = int(r.group(1)) if r else 1
+            repeats += n - 1
+            total += n
+    expected = Counter({exp0: num_gpus // 2, exp1: num_gpus // 2})
+    exact = seen == expected and repeats == 0
+    # deduplicated log: the folded lines cannot be attributed, accept when the value
+    # set is exactly the expected pair and the folded total equals the rank count
+    folded_ok = repeats > 0 and set(seen) == set(expected) and total == num_gpus
     res["trainable"] = {
-        "pass": seen == Counter({exp0: num_gpus // 2, exp1: num_gpus // 2}),
+        "pass": exact or folded_ok,
         "expected": {str(exp0): num_gpus // 2, str(exp1): num_gpus // 2},
         "seen": {str(k): v for k, v in sorted(seen.items())},
+        "dedup_repeats": repeats,
+        "exact_count": exact,
     }
     bad = [l for l in text.splitlines() if "LORA-CHECK" in l or "end_weight_update failed" in l]
     res["lora_check"] = {"pass": not bad, "lines": bad[:5]}

@@ -358,6 +358,9 @@ class Qwen38NextLoraProfile:
     def launcher_env(self) -> dict[str, str]:
         return {
             "MILES_SCRIPT_EXTERNAL_RAY": "1",
+            # keep one `native LoRA applied ... trainable=` line per rank (ray folds
+            # near-identical actor lines into "[repeated Nx across cluster]")
+            "RAY_DEDUP_LOGS": "0",
             "CUDA_DEVICE_MAX_CONNECTIONS": "1",
             "PYTHONPATH": f"{self.miles_root}:{self.megatron_path}",
             "TRITON_CACHE_DIR": "/tmp/triton_cache",
