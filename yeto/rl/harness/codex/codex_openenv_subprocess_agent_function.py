@@ -70,6 +70,50 @@ _harness_board: Any = None
 _member: str | None = None
 
 ADMISSION_CLOSED = "harness_admission_closed"
+# Consecutive non-injected acquire failures before the island is torn down.
+# Each failure is reported as INFRASTRUCTURE (sample ABORTED); upstream
+# Miles then draws the next group forever (``generate_rollout`` has no
+# abort cap: codex-smoke-20261003-7 looped 17k samples in six minutes on a
+# broken provider), so after this many the worker raises
+# ``EnvironmentProviderOutage`` instead.
+PROVIDER_OUTAGE_THRESHOLD_ENV = "YETO_HARNESS_PROVIDER_OUTAGE_THRESHOLD"
+DEFAULT_PROVIDER_OUTAGE_THRESHOLD = 4
+_acquire_failures = 0
+
+
+class EnvironmentProviderOutage(BaseException):
+    """The environment provider failed repeatedly: stop the rollout, do not resample.
+
+    A ``BaseException`` on purpose: upstream Miles wraps the agent function and
+    each rollout task in ``except Exception`` and keeps generating, so only a
+    BaseException escapes ``generate_rollout`` and fails the island.
+    """
+
+
+def _provider_outage_threshold() -> int:
+    try:
+        return max(1, int(os.environ.get(PROVIDER_OUTAGE_THRESHOLD_ENV) or DEFAULT_PROVIDER_OUTAGE_THRESHOLD))
+    except ValueError:
+        return DEFAULT_PROVIDER_OUTAGE_THRESHOLD
+
+
+def _note_acquire_failure(exc: BaseException, trajectory_id: str) -> None:
+    """Count real provisioning failures; injected ones (fault tests) do not count."""
+    global _acquire_failures
+    if getattr(exc, "injected_fault", False):
+        return
+    _acquire_failures += 1
+    threshold = _provider_outage_threshold()
+    if _acquire_failures >= threshold:
+        raise EnvironmentProviderOutage(
+            f"environment provider failed {_acquire_failures} consecutive acquires "
+            f"(threshold {threshold}); last for {trajectory_id!r}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _note_acquire_success() -> None:
+    global _acquire_failures
+    _acquire_failures = 0
 POLICY_VERSION_MISSING = "expected_policy_version missing"
 
 
@@ -91,7 +135,8 @@ def configure(
     means the island reports "harness counts unknown" and stays undrainable.
     ``member``: the rollout member this process targets (admission key).
     """
-    global _provider, _tool_wait_board, _harness_board, _member
+    global _provider, _tool_wait_board, _harness_board, _member, _acquire_failures
+    _acquire_failures = 0
     _provider = provider
     _tool_wait_board = tool_wait_board
     _harness_board = harness_board
@@ -225,7 +270,9 @@ async def run(
         try:
             lease = await _provider.acquire(task_id, trajectory_id)
         except Exception as exc:  # noqa: BLE001 - provisioning failures are infrastructure
+            _note_acquire_failure(exc, trajectory_id)  # raises EnvironmentProviderOutage past the threshold
             return {**adapter.infrastructure_metadata(f"acquire: {type(exc).__name__}: {exc}", episode_id=None), **fields}
+        _note_acquire_success()
         if board is not None:
             _board_kwcall(board, "lease_acquired", trajectory_id, deadline=time.monotonic() + lease.deadline_seconds)
             lease_open = True

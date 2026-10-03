@@ -291,3 +291,24 @@ def test_learner_command_forwards_the_codex_reasoning_effort(bundle):
     task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
     assert " --codex-reasoning-effort xhigh" in task.run
     assert " --codex-backend-profile qwen35_08b" in task.run
+
+
+def test_island_setup_installs_the_modal_client_only_for_the_modal_sandbox_provider(bundle, monkeypatch):
+    """A-T3-5 (codex-smoke-20261003-7): rollout workers create task sandboxes with
+    the Modal client, which the ports image does not ship; `import modal` there
+    resolved Modal's dependency-less runtime mount and failed on every acquire."""
+    args = _codex_args()
+    spec = parse_gpu_spec(args.gpu)[0]
+    plain = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    assert L.MODAL_CLIENT_SETUP not in plain.setup  # local/other providers: untouched
+
+    monkeypatch.setenv(L.HARNESS_ENVIRONMENT_PROVIDER_ENV, L.MODAL_SANDBOX_PROVIDER)
+    task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    assert task.envs[L.HARNESS_ENVIRONMENT_PROVIDER_ENV] == L.MODAL_SANDBOX_PROVIDER
+    assert L.MODAL_CLIENT_SETUP in task.setup
+    assert "--no-deps" in L.MODAL_CLIENT_SETUP and "modal==1.5.5" in L.MODAL_CLIENT_SETUP
+    # the client install precedes the prefetch and fails the setup when unusable
+    assert task.setup.index(L.MODAL_CLIENT_SETUP) > task.setup.index("pip install -q --no-deps -e ~/miles")
+    assert "exit 1" in L.MODAL_CLIENT_SETUP
+    cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:29400")
+    assert L.MODAL_CLIENT_SETUP in cfg.setup_script

@@ -64,6 +64,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -521,6 +522,8 @@ def parse_faults(spec: str | None) -> tuple[FaultSpec, ...]:
 class InjectedCreateFailure(RuntimeError):
     """Raised by ``acquire`` when ``create_fail`` selects the trajectory."""
 
+    injected_fault = True  # not a provider outage (subprocess agent fail-fast counter)
+
 
 # ----------------------------------------------------------------------------- provider
 
@@ -662,9 +665,28 @@ def _provider(backend: SandboxBackend) -> Tb2EnvironmentProvider:
     )
 
 
+def require_modal_client() -> None:
+    """The Modal client must import in *this* interpreter (the island's python).
+
+    The ports image does not ship it; Modal mounts its own ``modal`` package
+    into Function containers without its dependencies, so a bare ``import
+    modal`` there fails only at first Sandbox use, inside every rollout
+    worker (A-T3-5, codex-smoke-20261003-7).  The launcher installs the client
+    in the island setup (``MODAL_CLIENT_SETUP``); this check makes the driver
+    preflight fail closed before any GPU work when that did not happen.
+    """
+    try:
+        import modal  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - ImportError or Modal's own re-raise
+        raise RuntimeError(
+            f"the Modal Sandbox backend needs an importable `modal` client in {sys.executable}: {exc}"
+        ) from exc
+
+
 def modal_provider(miles_args: Any = None) -> Tb2EnvironmentProvider:
     """``YETO_HARNESS_ENVIRONMENT_PROVIDER=yeto.rl.harness.codex.tb2_provider:modal_provider``."""
     del miles_args
+    require_modal_client()
     backend = ModalSandboxBackend(
         app_name=os.environ.get(MODAL_APP_ENV, DEFAULT_MODAL_APP),
         ttl_s=int(_env_float(SANDBOX_TTL_ENV, DEFAULT_SANDBOX_TTL_S) or DEFAULT_SANDBOX_TTL_S),

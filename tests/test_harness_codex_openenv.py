@@ -614,3 +614,30 @@ def test_run_configures_the_rollout_worker_from_its_environment(monkeypatch):
         asyncio.run(subprocess_agent.run("http://x", "p", metadata={"task_id": "fix-git", "trajectory_id": "t"}))
     assert isinstance(subprocess_agent.configured()["provider"], _Provider)
     subprocess_agent.configure(provider=None)
+
+
+def test_repeated_provider_failures_tear_the_rollout_down_instead_of_resampling(monkeypatch):
+    """A-T3-5: Miles has no abort cap (-7 looped 17k ABORTED samples); after the
+    threshold the worker raises a BaseException that escapes Miles' except Exception."""
+    env = FakeTerminalEnvironment(passed=True)
+    provider, _ = _configure(monkeypatch, env, fail=True)
+    monkeypatch.setenv(subprocess_agent.PROVIDER_OUTAGE_THRESHOLD_ENV, "3")
+    for _ in range(2):
+        result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+        assert tbench_reward.INFRASTRUCTURE_KEY in result
+    with pytest.raises(subprocess_agent.EnvironmentProviderOutage, match="3 consecutive"):
+        _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    assert not isinstance(subprocess_agent.EnvironmentProviderOutage("x"), Exception)
+
+    # a success resets the counter; injected create_fail faults never count
+    provider.fail = False
+    assert tbench_outcome.MAC_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    from yeto.rl.harness.codex.tb2_provider import InjectedCreateFailure
+
+    async def injected(task_id, trajectory_id):
+        raise InjectedCreateFailure("injected")
+
+    provider.acquire = injected
+    for _ in range(5):
+        assert tbench_reward.INFRASTRUCTURE_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    subprocess_agent.configure(provider=None)

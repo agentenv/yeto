@@ -2201,6 +2201,19 @@ HARNESS_PASSTHROUGH_ENV = (
     "SECRLENV_MAX_TURNS",
 )
 HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
+# tb2_provider's Modal Sandbox backend runs inside the island (rollout
+# workers create the task sandboxes), so the island python needs the Modal
+# client.  The ports image does not ship it; install it in setup without
+# touching the image's protobuf 7 (modal pins <7 but works; verified in-image
+# on ghcr 12fcd9e5: Sandbox create/exec/terminate, ray/sglang/miles import).
+MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.codex.tb2_provider:modal_provider"
+MODAL_CLIENT_SETUP = (
+    "python3 -c 'import modal' 2>/dev/null || python3 -m pip install -q --no-deps "
+    "'modal==1.5.5' 'grpclib>=0.4.7,<0.4.10' 'synchronicity~=0.12.5' cbor2 toml "
+    "types-certifi types-toml watchfiles\n"
+    "python3 -c 'import modal' || { echo '[yeto-setup] Modal client unusable in the "
+    "island python' >&2; exit 1; }"
+)
 CODEX_COMPACTION_ENV = "YETO_CODEX_COMPACTION_ENABLED"
 
 
@@ -2590,6 +2603,8 @@ def make_miles_island_task(
         )
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
+    if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) == MODAL_SANDBOX_PROVIDER:
+        setup_steps.append(MODAL_CLIENT_SETUP)
     setup_steps.append(prefetch)
     # Ports images (radixark/miles) ship their own Miles at /root/miles on
     # PYTHONPATH; the pinned fork checkout must shadow it.  Legacy unchanged.

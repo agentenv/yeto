@@ -265,6 +265,7 @@ def test_local_provider_factory_reads_env_and_resolves_through_preflight(monkeyp
     )
     assert isinstance(provider, tb2_provider.Tb2EnvironmentProvider)
     assert provider.lease_seconds == 120.0 and provider.faults[0].kind == "create_fail"
+    monkeypatch.setattr(tb2_provider, "require_modal_client", lambda: None)  # no client in the test venv
     modal = tb2_provider.modal_provider(None)
     assert isinstance(modal.backend, tb2_provider.ModalSandboxBackend) and modal.backend.app_name == tb2_provider.DEFAULT_MODAL_APP
 
@@ -413,3 +414,14 @@ def test_worker_error_event_carries_metrics(monkeypatch):
     event = json.loads(proc.stdout.strip().splitlines()[-1])
     assert proc.returncode == 1 and event["event"] == "error" and event["metrics"] == {"tito_chain_breaks": {"retry_fork": 1}}
     del boom
+
+
+def test_modal_provider_fails_closed_without_an_importable_modal_client(monkeypatch):
+    """A-T3-5 (codex-smoke-20261003-7): the ports image has no Modal client; the
+    driver preflight must refuse instead of every rollout worker failing at acquire."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "modal", None)  # import raises ImportError
+    with pytest.raises(RuntimeError, match="importable `modal` client"):
+        tb2_provider.modal_provider(None)
+    assert tb2_provider.InjectedCreateFailure.injected_fault is True
