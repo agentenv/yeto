@@ -3,7 +3,7 @@
 B=/home/michael/work/gpu-b1-runs; DEADLINE=$(( $(date +%s) + ${MAX_S:-43200} )); N=${START_N:-1}
 log(){ echo "[retry8 $(date -u +%FT%TZ)] $*"; }
 while [ $(date +%s) -lt $DEADLINE ]; do
-  CP=infra-v2-b1-a4s8-20261002-1r$N; log "attempt $N: $CP"
+  CP=${PREFIX:-infra-v2-b1-a4s8-20261002-1r}$N; log "attempt $N: $CP"
   (cd $B && SHA=${SHA:-2eb415f3} ATTEST=${ATTEST:-$B/cfg/attestation-8-6-71672312.json} A8GO=$B/a8go_strict.sh RESET=$B/reset_island_strict.sh CAP_USD=700 THREAD_MAX=3600 \
      ./chain8.sh $CP ${SPENT:-533} ${ITEMS:-d2:2400 a4bc:1500 r6:1800 r7:2400 r5:2400 d4:1500} > $B/chain8-$CP.nohup 2>&1 < /dev/null)
   log "attempt $N ended: $(tail -1 $B/$CP/chain.log)"
