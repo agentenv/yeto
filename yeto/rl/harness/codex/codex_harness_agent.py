@@ -824,6 +824,32 @@ def _tool_error(message: str) -> dict[str, str]:
     return {"error": compact}
 
 
+# G6(a): bridge rejections that are, in gateway terms, a session mismatch
+# (history is not the expected prefix) or a chain break (reason names from
+# ``yeto.rl.engine.timeline.TITO_CHAIN_BREAK_REASONS``).
+TITO_SESSION_MISMATCH_MESSAGES = frozenset(
+    {
+        "Codex mutated the initial task history",
+        "Codex truncated or mutated episode history",
+        "Codex supplied no explicit history",
+    }
+)
+TITO_SESSION_MISMATCH_KEY = "tito_session_mismatch"
+TITO_CHAIN_BREAKS_KEY = "tito_chain_breaks"
+TITO_CHAIN_BREAK_MESSAGES = {
+    "Codex retried a Responses sample": "retry_fork",
+    "Codex history compaction is forbidden": "compaction_window",
+}
+
+
+def tito_counters(metrics: Any) -> dict[str, Any]:
+    """The G6(a) counters recorded on a metrics object (zero when none)."""
+    return {
+        TITO_SESSION_MISMATCH_KEY: int(getattr(metrics, TITO_SESSION_MISMATCH_KEY, 0) or 0),
+        TITO_CHAIN_BREAKS_KEY: dict(getattr(metrics, TITO_CHAIN_BREAKS_KEY, {}) or {}),
+    }
+
+
 class _ResponsesBridge:
     def __init__(
         self,
@@ -1089,8 +1115,29 @@ class _ResponsesBridge:
                 failure = exc if isinstance(exc, CodexHarnessError) else CodexHarnessError(
                     "Codex Responses bridge rejected the request"
                 )
+                self._note_tito_rejection(failure)
                 self._fail(failure)
                 return web.json_response({"error": "protocol violation"}, status=400)
+
+    def _note_tito_rejection(self, failure: CodexHarnessError) -> None:
+        """G6(a): count a rejection the way the gateway would (9.2 judgement).
+
+        The bridge never forks a chain: a request whose history is not the
+        exact expected prefix is a session mismatch (``tito_session_mismatch``);
+        a byte-identical retry is a ``retry_fork`` chain break and a compaction
+        attempt a ``compaction_window`` one.  The trusted layer mirrors these
+        onto the HarnessBoard (``record_session_mismatch`` / ``record_chain_break``).
+        """
+        # ``AgentMetrics`` is sha-pinned legacy source, so the counters ride on
+        # the instance as extra attributes (read back by ``tito_counters``).
+        message = str(failure)
+        if message in TITO_SESSION_MISMATCH_MESSAGES:
+            setattr(self._metrics, TITO_SESSION_MISMATCH_KEY, getattr(self._metrics, TITO_SESSION_MISMATCH_KEY, 0) + 1)
+        reason = TITO_CHAIN_BREAK_MESSAGES.get(message)
+        if reason is not None:
+            breaks = dict(getattr(self._metrics, TITO_CHAIN_BREAKS_KEY, {}) or {})
+            breaks[reason] = breaks.get(reason, 0) + 1
+            setattr(self._metrics, TITO_CHAIN_BREAKS_KEY, breaks)
 
     def _compaction_headers(self) -> dict[str, str]:
         if not self._compaction_enabled or self._max_seq_len is None:

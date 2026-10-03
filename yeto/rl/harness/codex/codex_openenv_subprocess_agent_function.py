@@ -54,6 +54,10 @@ class EnvironmentLease:
     destroy: Callable[[], Awaitable[None]]
     describe: Callable[[], Awaitable[str]]  # "live" | "gone"
     deadline_seconds: float
+    # Extra environment for the worker process (e.g. a per-trajectory
+    # ``SECRLENV_MAX_TURNS`` turn budget injected by the provider); never a
+    # reward key (the worker refuses to start with one).
+    worker_env: dict[str, str] | None = None
 
 
 class EnvironmentProvider(Protocol):
@@ -137,7 +141,9 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
         waiter.cancel()
 
 
-async def _drive_worker(job: dict[str, Any], trajectory_id: str, board: Any) -> dict[str, Any]:
+async def _drive_worker(
+    job: dict[str, Any], trajectory_id: str, board: Any, worker_env: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Spawn the worker, relay tool-wait events, return its result event."""
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -146,7 +152,7 @@ async def _drive_worker(job: dict[str, Any], trajectory_id: str, board: Any) -> 
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL if os.getenv("YETO_CODEX_WORKER_STDERR") != "1" else None,
-        env=scrubbed_environment(),
+        env=scrubbed_environment({**os.environ, **{str(k): str(v) for k, v in (worker_env or {}).items()}}),
         start_new_session=True,
     )
     in_tool = False
@@ -173,7 +179,10 @@ async def _drive_worker(job: dict[str, Any], trajectory_id: str, board: Any) -> 
             elif kind == "result":
                 return event
             elif kind == "error":
-                raise adapter.harness.CodexHarnessError(str(event.get("reason")))
+                error = adapter.harness.CodexHarnessError(str(event.get("reason")))
+                if isinstance(event.get("metrics"), dict):
+                    error.metrics = event["metrics"]  # type: ignore[attr-defined]
+                raise error
     finally:
         if in_tool and board is not None:
             _board_call(board, "exit", trajectory_id)
@@ -227,15 +236,19 @@ async def run(
         }
         try:
             untrusted = await asyncio.wait_for(
-                _drive_worker(job, trajectory_id, _tool_wait_board), timeout=lease.deadline_seconds
+                _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)),
+                timeout=lease.deadline_seconds,
             )
         except asyncio.TimeoutError:
             untrusted = {"status": "timeout", "metrics": {"timed_out": 1}, "episode_id": episode_id}
         except adapter.harness.CodexHarnessError as exc:
-            return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id), **fields}
+            metrics = getattr(exc, "metrics", None)
+            tito = adapter.mirror_tito_counters(metrics, board)
+            return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id, metrics=metrics), **fields, **tito}
+        tito = adapter.mirror_tito_counters(untrusted.get("metrics"), board)
         signed = await adapter.finish_trusted(untrusted, lease.verifier, task_id=task_id, sample_id=sample_id)
         signed["expected_policy_version"] = expected_version
-        return {**signed, **fields}
+        return {**signed, **fields, **tito}
     finally:
         try:
             if lease is not None:

@@ -144,9 +144,18 @@ async def drive_untrusted(
     except asyncio.TimeoutError:
         metrics.timed_out = 1
         status = "timeout"
+    except harness.CodexHarnessError as exc:
+        # The rejection counters (G6a) must survive the failure: the trusted
+        # layer mirrors them onto the HarnessBoard before aborting the sample.
+        exc.metrics = _metrics_dict(metrics)  # type: ignore[attr-defined]
+        raise
     if status not in POLICY_STATUSES:
         raise harness.CodexHarnessError(f"Codex driver returned unknown status {status!r}")
-    return {"status": status, "metrics": asdict(metrics), "episode_id": job["episode_id"]}
+    return {"status": status, "metrics": _metrics_dict(metrics), "episode_id": job["episode_id"]}
+
+
+def _metrics_dict(metrics: legacy.AgentMetrics) -> dict[str, Any]:
+    return {**asdict(metrics), **harness.tito_counters(metrics)}
 
 
 async def finish_trusted(
@@ -195,6 +204,38 @@ def infrastructure_metadata(reason: str, *, episode_id: str | None, metrics: dic
     }
 
 
+TITO_SESSION_MISMATCH_KEY = harness.TITO_SESSION_MISMATCH_KEY
+TITO_CHAIN_BREAKS_KEY = harness.TITO_CHAIN_BREAKS_KEY
+
+
+def mirror_tito_counters(metrics: dict[str, Any] | None, harness_board: Any) -> dict[str, Any]:
+    """G6(a): replay the bridge's rejection counters onto the HarnessBoard.
+
+    Same method names and counter names as ``gateway/core.py`` so the 1.7 load
+    sample (``tito_session_mismatch`` / ``tito_chain_breaks``) reads the A path
+    too.  Returns the trajectory-field overrides: the bridge holds one chain and
+    never forks, so ``chains_total`` stays 1 and ``chain_break_reason`` names the
+    first break (the sample is infrastructure-aborted, never trained on).
+    """
+    metrics = metrics or {}
+    mismatches = int(metrics.get(TITO_SESSION_MISMATCH_KEY) or 0)
+    breaks = dict(metrics.get(TITO_CHAIN_BREAKS_KEY) or {})
+    if harness_board is not None:
+        if mismatches:
+            _board_call(harness_board, "record_session_mismatch", mismatches)
+        for reason, count in breaks.items():
+            if count:
+                _board_call(harness_board, "record_chain_break", reason, int(count))
+    first_break = next((reason for reason, count in breaks.items() if count), None)
+    return {"chain_break_reason": first_break}
+
+
+def _board_call(target: Any, method: str, *args: Any) -> Any:
+    fn = getattr(target, method)
+    remote = getattr(fn, "remote", None)
+    return remote(*args) if callable(remote) else fn(*args)
+
+
 def trajectory_fields(trajectory_id: str) -> dict[str, Any]:
     """D8 / R-D5a bookkeeping carried on every sample of the trajectory."""
     return {
@@ -229,6 +270,7 @@ async def run(
     environment: TerminalEnvironment | None = None,
     verifier: TrustedVerifier | None = None,
     tool_wait: ToolWaitEmitter | None = None,
+    harness_board: Any = None,
     **_kwargs: Any,
 ) -> dict[str, Any] | None:
     """In-process entry (both layers in one process; use the subprocess entry in training)."""
@@ -248,9 +290,16 @@ async def run(
     try:
         untrusted = await drive_untrusted(job, environment, tool_wait=tool_wait)
     except (harness.CodexHarnessError, legacy.EpisodeClientError, OSError) as exc:
-        return {**infrastructure_metadata(f"{type(exc).__name__}: {exc}", episode_id=episode_id), **trajectory_fields(trajectory_id)}
+        metrics = getattr(exc, "metrics", None)
+        tito = mirror_tito_counters(metrics, harness_board)
+        return {
+            **infrastructure_metadata(f"{type(exc).__name__}: {exc}", episode_id=episode_id, metrics=metrics),
+            **trajectory_fields(trajectory_id),
+            **tito,
+        }
+    tito = mirror_tito_counters(untrusted.get("metrics"), harness_board)
     signed = await finish_trusted(untrusted, verifier, task_id=task_id, sample_id=sample_id)
-    return {**signed, **trajectory_fields(trajectory_id)}
+    return {**signed, **trajectory_fields(trajectory_id), **tito}
 
 
 def hmac_key_env_names() -> tuple[str, ...]:

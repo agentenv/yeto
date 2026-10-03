@@ -65,7 +65,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("worker job must be a JSON object")
         result = asyncio.run(_main_async(job))
     except BaseException as exc:  # noqa: BLE001 - every failure is reported on the wire
-        _emit({"event": "error", "reason": f"{type(exc).__name__}: {exc}"})
+        event = {"event": "error", "reason": f"{type(exc).__name__}: {exc}"}
+        metrics = getattr(exc, "metrics", None)
+        if isinstance(metrics, dict):
+            event["metrics"] = metrics  # G6a: rejection counters reach the trusted layer
+        _emit(event)
         return 1
     _emit({"event": "result", **result})
     return 0

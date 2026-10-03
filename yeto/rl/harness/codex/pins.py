@@ -13,7 +13,7 @@ GENERATE_SHA256 = "1c79b0e678b8681b5bd6221b5a4bbc6adbe7a1413b688e248cb930eb3e456
 LEGACY_SOURCE_SHA256 = {
     "agent.py": "0f76c7fbd81135bc5b02cab2488629aaff1bb58dc59eae9228ca317583d90c26",
     "generate.py": "9e034d6b2e9fec642501ea4a638a8fe196819dacde614ce2903359fc54ea1713",
-    "codex_harness_agent.py": "995e48f0e2817191314f19e794e25fd70e738aec5957213b51914f24d552f7b7",
+    "codex_harness_agent.py": "e94ef09e0e743ed2237acc365ab11219aacc980b5e545d0e9b477229b9c27028",
 }
 LEGACY_SOURCE_COMMIT = "5bfc011"
 
