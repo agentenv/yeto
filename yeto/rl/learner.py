@@ -1144,8 +1144,14 @@ def megatron_adapter_targets(
     *,
     standard_grouped_experts: bool = False,
     pipeline_parallel: int = 1,
+    attention_output_gate: bool = False,
 ) -> list[str]:
-    """Map the exact PEFT contract onto Bridge's Megatron module paths."""
+    """Map the exact PEFT contract onto Bridge's Megatron module paths.
+
+    ``attention_output_gate`` (the provider flag) fails closed on q/k/v: the
+    CanonicalLoRA split adapters are not gate-aware, so their export layout
+    cannot match PEFT's (see ``export.target_modules``).
+    """
 
     model_bridge = getattr(bridge, "_model_bridge", None)
     if model_bridge is None:
@@ -1179,6 +1185,11 @@ def megatron_adapter_targets(
         prefix, separator, leaf = megatron_module.rpartition(".")
         if not separator:
             raise ValueError(f"invalid Megatron adapter module {megatron_module!r}")
+        if leaf == "linear_qkv" and attention_output_gate:
+            raise ValueError(
+                f"PEFT module {module!r} cannot use canonical Megatron LoRA: "
+                "CanonicalLoRA split q/k/v adapters ignore attention_output_gate"
+            )
         if leaf in {"linear_qkv", "linear_fc1"}:
             hf_params = mapping.hf_param
             component = next(
@@ -2043,6 +2054,7 @@ def run_miles(
         model_bridge,
         standard_grouped_experts=clone_only_lora,
         pipeline_parallel=getattr(args, "pipeline_parallel", 1),
+        attention_output_gate=bool(getattr(provider, "attention_output_gate", False)),
     )
     ports_launch = ports_algorithm = None
     if rl_engine == "ports":

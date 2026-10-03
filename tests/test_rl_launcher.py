@@ -2714,6 +2714,7 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
     assert captured["megatron_target_kwargs"] == {
         "pipeline_parallel": 2,
         "standard_grouped_experts": False,
+        "attention_output_gate": False,
     }
     assert miles_args.yeto_rl_expected_specs == tuple(
         sorted(attention_specs + expert_specs)
