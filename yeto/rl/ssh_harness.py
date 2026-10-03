@@ -532,7 +532,7 @@ def _codex_adapter_identity() -> dict[str, str]:
 def _codex_harness_contract(namespace, args) -> dict[str, Any]:
     """Attest the official Linux Codex artifact and the Yeto adapter surface."""
 
-    from ..provenance import file_sha256
+    from ..provenance import canonical_json_sha256, file_sha256
 
     binary_value = getattr(namespace, "codex_harness_binary", None)
     manifest_value = getattr(namespace, "codex_package_manifest", None)
@@ -563,7 +563,11 @@ def _codex_harness_contract(namespace, args) -> dict[str, Any]:
         raise HarnessError("Codex Linux binary SHA256 does not match its Yeto pin")
     if file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256:
         raise HarnessError("Codex package manifest SHA256 does not match its Yeto pin")
-    if file_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256:
+    try:
+        schema_sha = canonical_json_sha256(schema)
+    except ValueError:
+        schema_sha = None
+    if schema_sha != CODEX_APP_SERVER_SCHEMA_SHA256:
         raise HarnessError("Codex app-server schema SHA256 does not match its Yeto pin")
     openenv = (
         getattr(args, "custom_agent_function_path", None) == CODEX_OPENENV_AGENT

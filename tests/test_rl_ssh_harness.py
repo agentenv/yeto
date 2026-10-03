@@ -2333,14 +2333,18 @@ def test_codex_controller_artifacts_are_attested_before_plan_write(
     binary.write_bytes(b"stock-linux-codex")
     binary.chmod(0o555)
     manifest.write_bytes(b"signed-package-manifest")
-    schema.write_bytes(b"signed-v2-schema")
+    schema.write_bytes(b'{"b": 1, "a": [2]}')
     digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
     monkeypatch.setattr(
         ssh_harness, "CODEX_LINUX_BINARY_SIZE_BYTES", binary.stat().st_size
     )
     monkeypatch.setattr(ssh_harness, "CODEX_LINUX_BINARY_SHA256", digest(binary))
     monkeypatch.setattr(ssh_harness, "CODEX_PACKAGE_MANIFEST_SHA256", digest(manifest))
-    monkeypatch.setattr(ssh_harness, "CODEX_APP_SERVER_SCHEMA_SHA256", digest(schema))
+    from yeto.provenance import canonical_json_sha256
+
+    schema_digest = canonical_json_sha256(schema)
+    assert schema_digest != digest(schema)  # pin is canonical-form, not byte-form
+    monkeypatch.setattr(ssh_harness, "CODEX_APP_SERVER_SCHEMA_SHA256", schema_digest)
     namespace = SimpleNamespace(
         codex_harness_binary=str(binary),
         codex_package_manifest=str(manifest),
@@ -2360,7 +2364,7 @@ def test_codex_controller_artifacts_are_attested_before_plan_write(
 
     assert contract["controller_binary_path"] == str(binary)
     assert contract["binary_sha256"] == digest(binary)
-    assert contract["app_server_schema_sha256"] == digest(schema)
+    assert contract["app_server_schema_sha256"] == schema_digest
     assert contract["backend"]["reasoning_effort"] == "xhigh"
     assert contract["openenv_identity_env"] == rl_config.CODEX_OPENENV_IDENTITY_ENV
 

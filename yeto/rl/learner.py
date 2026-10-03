@@ -793,6 +793,15 @@ def _strict_json_file_semantics(path: Path) -> tuple[Any, ...]:
     return typed_semantics(value)
 
 
+def _canonical_schema_sha256(path: Path) -> str | None:
+    from ..provenance import canonical_json_sha256
+
+    try:
+        return canonical_json_sha256(path)
+    except (OSError, ValueError):
+        return None
+
+
 def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
     try:
         pinned_semantics = _strict_json_file_semantics(pinned)
@@ -987,7 +996,7 @@ def _preflight_codex_harness(args) -> None:
         or file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256
         or schema.is_symlink()
         or not schema.is_file()
-        or file_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
+        or _canonical_schema_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
     ):
         raise ValueError("mounted stock Codex artifact does not match its Yeto pin")
     try:

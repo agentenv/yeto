@@ -72,7 +72,8 @@
 
 - [ ] 10.1 [Y] 在第 4 组的库外加 HTTP 服务：`/sessions/{id}/v1/responses|chat/completions|messages`，会话 token 鉴权，撤销后返回 410。验收：CPU 集成测试，fake Session Server 加 fake harness 跑三入口。
 - [ ] 10.2 [Y] 由网关按会话上报 tool-wait 与 `harness_in_flight`（与 3.1 同一计数口径）。验收：CPU 测试，进程内模式与外壳模式的计数序列相同。
-- [ ] 10.3 [Y] 用 `codex exec` 加 fake 推理端点做一次本地 CPU 回放，验证黑盒 Codex 经外壳网关时单 chain、无 mismatch（不需要 GPU）。验收：测试通过，记录 Codex 版本与请求形态摘要。
+- [x] 10.3 [Y] 用 `codex exec` 加 fake 推理端点做一次本地 CPU 回放，验证黑盒 Codex 经外壳网关时单 chain、无 mismatch（不需要 GPU）。验收：测试通过，记录 Codex 版本与请求形态摘要。
+  完成记录（2026-10-03，缩减口径）：网关 HTTP 外壳 10.1/10.2 未做，回放走进程内 `_ResponsesBridge`（A 路径）而非外壳网关：真 Codex 0.145.0（sha a2a05daf…）+ fake Responses 端点 + `tb2_provider.LocalProcessBackend` 真实 relay/verifier，3 次采样、单 chain、`tito_session_mismatch==0`、reward=1；证据 `evidence/cpu-20261003/g8-codex-0145-replay.json`，测试 `tests/test_harness_codex_exec_replay.py`（需 `YETO_CODEX_BINARY_PATH`）。
 
 ## 11. 后续 change（本 change 不做，仅登记）
 

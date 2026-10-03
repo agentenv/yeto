@@ -49,7 +49,7 @@ LOGGER = logging.getLogger(__name__)
 
 CODEX_APP_SERVER_PROTOCOL_REVISION = "v2"
 CODEX_APP_SERVER_SCHEMA_SHA256 = (
-    "f2415ee36b3c9fa16617c800910cd65b8086ce7c7fecee3dac5f7089eb5973b9"
+    "a88d865c3ca41fc63672baf423e28b3bfdb85b989e1c95e6e268932daaac91a0"
 )
 CODEX_CLI_VERSION = "codex-cli 0.145.0"
 _BACKEND_PROFILE = stock_codex_backend_profile(
