@@ -87,6 +87,9 @@ class _Batch:
     policy_token: str
     state: str
     filtered: dict[str, Any] = field(default_factory=dict)
+    # rl-infra-spec 4.2 data cursor AFTER this batch drew its prompts (None =
+    # the rollout did not report one). Restart point for the data source.
+    data_cursor: dict[str, int] | None = None
 
 
 class BatchLedger:
@@ -108,9 +111,11 @@ class BatchLedger:
         kind = r["kind"]
         rid = int(r.get("rollout_id", -1))
         if kind == "prepared":
+            cursor = r.get("data_cursor")
             self._batches[rid] = _Batch(
                 rid, int(r["attempt"]), r["batch_hash"], tuple(r["group_ids"]),
                 r["policy_token"], "prepared",
+                data_cursor=({k: int(v) for k, v in cursor.items()} if cursor else None),
             )
             for gid in r["group_ids"]:
                 self._carried.pop(gid, None)
@@ -157,6 +162,24 @@ class BatchLedger:
     def open_carried_over(self) -> dict[str, dict[str, Any]]:
         return dict(self._carried)
 
+    def restart_cursor(self, start_rollout_id: int) -> dict[str, int] | None:
+        """The data cursor the rollout data source must resume from when the
+        run restarts at ``start_rollout_id`` (after ``rebase``): the cursor
+        recorded after rollout ``start_rollout_id - 1`` drew its prompts.
+
+        None when there is nothing to restore (restart at 0) or the record
+        carries no cursor (the caller decides whether that is acceptable).
+        Miles' group ids are its data source's monotonic ``sample_group_index``
+        which a restarted rollout process resets to 0: without seeking the
+        source back to this cursor the restarted run re-draws trained groups
+        and ``prepare`` refuses them (GPU evidence a4s8-2r2 r6)."""
+        if start_rollout_id <= 0:
+            return None
+        batch = self._batches.get(start_rollout_id - 1)
+        if batch is None or batch.state != "outer_recorded" or batch.data_cursor is None:
+            return None
+        return dict(batch.data_cursor)
+
     def cut_summary(self) -> dict[str, Any]:
         """``CutContext.ledger`` (4.2): what a cut must treat as unconsumed."""
         ready = [gid for r in self.unconsumed() for gid in self._batches[r].group_ids]
@@ -196,10 +219,13 @@ class BatchLedger:
                 f"rollout {rid} is already {previous.state}; it is not generated again"
             )
         attempt = 0 if previous is None else previous.attempt + 1
+        cursor = getattr(batch, "data_cursor", None)
         self._journal.append(
             "prepared", rollout_id=rid, attempt=attempt, batch_hash=batch_hash,
             group_ids=list(group_ids), policy_token=policy_token,
             samples=len(sample_ids),
+            # the data source position after this batch (restart point, 4.2/A6b)
+            **({"data_cursor": {k: int(v) for k, v in cursor.items()}} if cursor else {}),
         )
         self._replay(self._journal.records[-1])
         filtered = getattr(batch, "filtered", None)

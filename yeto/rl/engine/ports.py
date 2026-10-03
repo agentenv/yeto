@@ -149,6 +149,10 @@ class RolloutPool(Protocol):
     def members(self) -> frozenset[str]: ...
     # Optional (4.2): def data_cursor(self) -> Mapping[str, int] | None: ...
     #   the data cursor of the last generated batch (RolloutBatchHandle.data_cursor).
+    # Optional (restart, 3.6/3.7): def seek_data_cursor(self, cursor: Mapping[str, int])
+    #   -> Mapping[str, int]: move the data source to ``cursor`` (the ledger's
+    #   restart point) and return the cursor it now reports; a pool whose
+    #   batches carry ``data_cursor`` MUST implement it (driver fails closed).
     # E1 verbs (3.4/3.4a): see ElasticRolloutPool below.
 
 
