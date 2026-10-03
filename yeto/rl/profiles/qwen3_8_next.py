@@ -97,6 +97,28 @@ def expected_trainable_params_4layer(lora_rank: int, lora_expert_rank: int) -> i
     )
 
 
+def expected_rank_trainable_4layer(lora_rank: int, lora_expert_rank: int, num_gpus: int) -> tuple[int, int]:
+    """Per-rank ``trainable=`` values logged by ``apply_qwen3_8_next_lora`` (T2-S7 F2).
+
+    The trainer log sums the *local* ``model.parameters()`` of one rank under
+    the 4-layer layout TP2 / PP2 / EP=num_gpus/2 / ETP1: PP stage 0 holds
+    layers 0-1 (GDN, GDN), stage 1 holds layers 2-3 (GDN, QSA).  QSA keeps a
+    single ``qkv_lora_A`` (the HF export fans it out to q/k/v), TP2 halves
+    ``qkv_lora_B`` / ``o_lora_A`` / ``fc1_lora_B`` / ``fc2_lora_A``, GDN LoRA is
+    replicated, routed experts are sharded by EP only.  Returns (stage0, stage1).
+    """
+    if num_gpus not in (4, 8):
+        raise ValueError(f"the 4-layer layout is validated on 4 or 8 GPUs, got {num_gpus}")
+    r, r_e, ep = lora_rank, lora_expert_rank, num_gpus // 2
+    gdn = _GDN_PARAMS_PER_RANK * r
+    qsa = (2560 + 13312 // 2 + 6144 // 2 + 2560) * r  # qkv A | qkv B/2 | o A/2 | o B
+    shared = (2560 + 2 * 640 // 2 + 640 // 2 + 2560) * r  # fc1 A | fc1 B/2 | fc2 A/2 | fc2 B
+    experts = (512 // ep) * 7040 * r_e
+    stage0 = 2 * (gdn + shared + experts)
+    stage1 = gdn + qsa + 2 * (shared + experts)
+    return stage0, stage1
+
+
 def _moe_layer_freq(nlayers: int) -> str:
     # model_args_utils.moe_layer_freq(nlayers=nlayers, first_k_dense_replace=0)
     return "[" + ",".join(["1"] * nlayers) + "]"
@@ -159,6 +181,11 @@ class Qwen38NextLoraProfile:
     miles_root: str = "/root/miles"
     megatron_path: str = "/root/Megatron-LM"
     dataset: str = "zhuzilin/dapo-math-17k"
+    # held-out eval set (T2-S7 F5; Miles gemma recipe source, prompt/label keys)
+    eval_dataset: str = "zhuzilin/aime-2024"
+    # Miles' recipe defaults to disk offload; CI and this profile use cpu so the
+    # per-rank train state never hits the (small, slow) container disk.
+    offload_train_target: str = "cpu"
     # node shape (run_qwen3_8_next.py asserts 4 or 8 GPUs for the 4-layer layout)
     num_nodes: int = 1
     num_gpus_per_node: int = 8
@@ -172,7 +199,9 @@ class Qwen38NextLoraProfile:
     lora_alpha: int = 64
     lora_expert_rank: int = 8
     lora_dropout: float = 0.0
-    # run shape
+    # run shape; run_id (Miles --run-id) fixes <save_dir>/<run_id>/checkpoints so a
+    # restart can point --lora-adapter-path at a known iter (T2-S7 F4); "" = Miles default
+    run_id: str = ""
     num_rollout: int = 5
     rollout_max_response_len: int = 512
     save_interval: int = 10
@@ -242,6 +271,10 @@ class Qwen38NextLoraProfile:
                 "hf", "download", "--repo-type", "dataset", self.dataset,
                 "--local-dir", f"{self.data_dir}/{self.dataset.split('/')[1]}",
             ],
+            [
+                "hf", "download", "--repo-type", "dataset", self.eval_dataset,
+                "--local-dir", f"{self.data_dir}/{self.eval_dataset.split('/')[1]}",
+            ],
         ]
 
     def convert_command(
@@ -292,6 +325,7 @@ class Qwen38NextLoraProfile:
             "--sglang-lora-backend", "triton",
             "--sglang-lora-strict-loading",
             "--sglang-max-lora-rank", str(self.lora_rank),
+            "--offload-train-target", self.offload_train_target,
         ]
 
     def launcher_command(self, *, extra_args: Sequence[str] = ()) -> list[str]:
@@ -309,6 +343,7 @@ class Qwen38NextLoraProfile:
             "--megatron-path", self.megatron_path,
             "--num-rollout", str(self.num_rollout),
             "--rollout-max-response-len", str(self.rollout_max_response_len),
+            *(["--run-id", self.run_id] if self.run_id else []),
             # full-weight equality is meaningless under LoRA; the LoRA check is in extra args
             "--no-check-weight-update-equal",
             "--enable-r3" if self.enable_r3 else "--no-enable-r3",
@@ -341,6 +376,11 @@ class Qwen38NextLoraProfile:
             "torch_dist": self.torch_dist,
             "megatron_model_type": self.megatron_model_type,
             "parallel": self.parallel,
+            "expected_rank_trainable": list(
+                expected_rank_trainable_4layer(
+                    self.lora_rank, self.effective_expert_rank, self.num_nodes * self.num_gpus_per_node
+                )
+            ) if self.variant == "4layer" else None,
             "lora": {
                 "rank": self.lora_rank,
                 "alpha": self.lora_alpha,

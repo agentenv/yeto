@@ -29,7 +29,7 @@ MILES_CHECKOUT = Path(os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/
 #   YETO_Q38N_SNAPSHOT_PRINT=1 python -m pytest -q -s tests/test_rl_qwen3_8_next_profile.py
 GOLDEN = {
     "convert_4layer": "d1f016cb7f7d596f65c3b35339fbac965fea9d6f0452f42e3e1be328ca9bd833",
-    "launch_4layer": "2347fc20ffa56099a58cf707c5ab306bd116de9f5ee86f752cd90b41fdc0a101",
+    "launch_4layer": "dcebf0b88af82762fd45200826c5287715bb3daf1695ba6ec9552b85f51e2367",
 }
 
 
@@ -122,6 +122,19 @@ def test_expected_trainable_params_formula():
     )
 
 
+def test_expected_rank_trainable_matches_t2_review():
+    # T2-S7 §2.1: per-rank `trainable=` log values (single QSA A, TP2/PP2/EP=n/2)
+    assert q.expected_rank_trainable_4layer(32, 8, 4) == (31_492_096, 30_833_664)
+    assert q.expected_rank_trainable_4layer(32, 8, 8) == (17_074_176, 16_415_744)
+    # global single-A view = HF formula minus the two extra q/k/v A copies
+    s0, s1 = q.expected_rank_trainable_4layer(32, 8, 4)
+    assert q.expected_trainable_params_4layer(32, 8) - 2 * 2560 * 32 == 120_431_616
+    with pytest.raises(ValueError):
+        q.expected_rank_trainable_4layer(32, 8, 2)
+    m = q.Qwen38NextLoraProfile(num_gpus_per_node=4).manifest()
+    assert m["expected_rank_trainable"] == [s0, s1]
+
+
 # ------------------------------------------------------------ model args
 
 
@@ -198,16 +211,22 @@ def test_launch_command_snapshot_and_lora_flags():
     assert "--experts-shared-outer-loras" not in extra  # per-expert layout
     assert "--check-lora-weight-equal" in extra and "--lora-base-cpu-backup" in extra
     assert "--sglang-lora-strict-loading" in extra
+    assert flags["--offload-train-target"] == "cpu"  # T2-S7 F5: never disk-offload in a container
     assert p.launcher_env()["MILES_SCRIPT_EXTERNAL_RAY"] == "1"
     assert _digest(cmd) == GOLDEN["launch_4layer"]
     with_extra = p.launcher_command(extra_args=["--num-rollout", "2"])
     assert shlex.split(with_extra[-1])[-2:] == ["--num-rollout", "2"]
+    assert "--run-id" not in cmd
+    named = q.Qwen38NextLoraProfile(run_id="m4-q38n-g4").launcher_command()
+    assert named[named.index("--run-id") + 1] == "m4-q38n-g4"
 
 
 def test_download_commands_pin_revision():
     cmds = q.Qwen38NextLoraProfile().download_commands()
     assert cmds[1][:5] == ["hf", "download", q.HF_REPO_4LAYER, "--revision", q.HF_REVISION_4LAYER]
     assert cmds[2][-1] == "/root/datasets/dapo-math-17k"
+    assert cmds[3][:4] == ["hf", "download", "--repo-type", "dataset"]
+    assert cmds[3][4] == "zhuzilin/aime-2024" and cmds[3][-1] == "/root/datasets/aime-2024"
 
 
 # --------------------------------------------------------- shell launchers
@@ -257,6 +276,68 @@ def test_launch_script_dry_run_prints_rendered_steps():
     assert "hard timeout 1234s, 8 GPUs" in out
     assert f"{ROOT}/scripts/convert_qwen3_8_next.sh --variant 4layer" in out
     assert f"hf download {q.HF_REPO_4LAYER} --revision {q.HF_REVISION_4LAYER}" in out
+    assert "aime-2024" in out
     for script in (CONVERT_SH, LAUNCH_SH):
         assert os.access(script, os.X_OK)
         assert "set -euo pipefail" in script.read_text()
+    # T2-S7 F1: the hard timeout must reclaim the ray job, not just the launcher
+    text = LAUNCH_SH.read_text()
+    assert "trap cleanup EXIT INT TERM" in text and "ray job stop" in text and "ray stop --force" in text
+    out4 = _run(["bash", str(LAUNCH_SH), "--dry-run", "--yeto-root", str(ROOT)], env={"YETO_Q38N_NUM_GPUS_PER_NODE": "4"})
+    assert "4 GPUs" in out4 and "--nproc-per-node 4" in _run(
+        ["bash", str(CONVERT_SH), "--dry-run", "--yeto-root", str(ROOT)], env={"YETO_Q38N_NUM_GPUS_PER_NODE": "4"})
+
+
+# ------------------------------------------------------------- log judge
+
+JUDGE_PY = ROOT / "scripts" / "judge_qwen3_8_next_lora_log.py"
+
+
+def _fake_log(num_gpus: int = 4, rounds: int = 5, *, diff_jump: float = 1.0, lora_fail: bool = False) -> str:
+    s0, s1 = q.expected_rank_trainable_4layer(32, 8, num_gpus)
+    lines = []
+    for _ in range(num_gpus // 2):
+        lines.append(f"[rank] native LoRA applied: rank=32 expert_rank=8 alpha=64 trainable={s0}")
+        lines.append(f"[rank] native LoRA applied: rank=32 expert_rank=8 alpha=64 trainable={s1}")
+    for i in range(rounds):
+        d = 0.01 if i == 0 else 0.012 * diff_jump
+        lines.append(
+            f"train {i}: {{'train/loss': 0.0{i}, 'train/ppo_kl': 1e-05, 'train/grad_norm': 0.5, "
+            f"'train/train_rollout_logprob_abs_diff': {d}, 'train/lr': 1e-06}}"
+        )
+        if i % 5 == 4:
+            lines.append(f"eval {i}: {{'eval/aime/acc': 0.1, 'eval/aime/response_len': 400.0}}")
+    if lora_fail:
+        lines.append("[LORA-CHECK] mismatch for lora:adapter:gate_up_proj_moe:0:A")
+    lines.append("Successfully loaded LoRA adapter from /root/shared_data/x/checkpoints/iter_0000010/adapter")
+    return "\n".join(lines) + "\n"
+
+
+def test_judge_accepts_a_conforming_log(tmp_path):
+    log = tmp_path / "g3.log"
+    log.write_text(_fake_log(4, 5))
+    out = _run([sys.executable, str(JUDGE_PY), str(log), "--num-gpus", "4", "--rollouts", "5",
+                "--eval-min", "1", "--adapter-restart", "--json", str(tmp_path / "j.json")])
+    assert "verdict PASS" in out
+    j = json.loads((tmp_path / "j.json").read_text())
+    assert j["trainable"]["seen"] == {"30833664": 2, "31492096": 2}
+    assert j["eval"]["seen"] == [4] and j["adapter"]["pass"]
+    log8 = tmp_path / "g3-8.log"
+    log8.write_text(_fake_log(8, 5))
+    assert "verdict PASS" in _run([sys.executable, str(JUDGE_PY), str(log8), "--num-gpus", "8"])
+
+
+def test_judge_rejects_wrong_rank_count_lora_check_and_logprob_jump(tmp_path):
+    def run(text: str) -> dict:
+        log = tmp_path / "x.log"
+        log.write_text(text)
+        p = subprocess.run([sys.executable, str(JUDGE_PY), str(log), "--num-gpus", "4", "--json", str(tmp_path / "j.json")],
+                           capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(ROOT)})
+        assert p.returncode == 1, p.stdout
+        return json.loads((tmp_path / "j.json").read_text())
+
+    assert not run(_fake_log(8, 5))["trainable"]["pass"]  # 8-GPU values on a 4-GPU run
+    assert not run(_fake_log(4, 5, lora_fail=True))["lora_check"]["pass"]
+    assert not run(_fake_log(4, 5, diff_jump=50.0))["logprob_diff"]["pass"]
+    assert not run(_fake_log(4, 3))["rollouts"]["pass"]
+    assert not run(_fake_log(4, 5).replace("'train/loss': 0.01", "'train/loss': nan"))["finite"]["pass"]

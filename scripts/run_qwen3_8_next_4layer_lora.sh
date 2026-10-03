@@ -3,11 +3,12 @@
 #
 # Inside the pinned Miles image (MILES_NEXT_IMAGE rebuilt with the Miles
 # m3-qwen4exp-lora and sglang m3-qwen4exp-lora overlays) with yeto mounted:
-#   1. download the HF 4-layer slice (pinned revision) and DAPO-Math-17k;
+#   1. download the HF 4-layer slice (pinned revision), DAPO-Math-17k and aime-2024;
 #   2. convert HF -> torch_dist (scripts/convert_qwen3_8_next.sh, idempotent);
 #   3. start a local ray head (MILES_SCRIPT_EXTERNAL_RAY=1) and run
 #      Miles' scripts/run_qwen3_8_next.py with the M3 LoRA flags, under a hard
-#      `timeout` so a wedged run cannot hold the GPUs.
+#      `timeout` so a wedged run cannot hold the GPUs (an EXIT trap stops the
+#      ray job / sglang / ray head on timeout, error or signal).
 # Every step is rendered by yeto.rl.profiles.qwen3_8_next; --dry-run prints
 # the commands and exits.  Override fields with YETO_Q38N_<FIELD> (for example
 # YETO_Q38N_NUM_ROLLOUT=20 YETO_Q38N_LORA_EXPERT_RANK=16).
@@ -31,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     --timeout) HARD_TIMEOUT=$2; shift 2 ;;
     --yeto-root) YETO_ROOT=$2; shift 2 ;;
     --) shift; EXTRA=("$@"); break ;;
-    -h|--help) sed -n 2,16p "$0"; exit 0 ;;
+    -h|--help) sed -n 2,17p "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -66,5 +67,18 @@ fi
 if ! ray status >/dev/null 2>&1; then
   ray start --head --num-gpus "${NUM_GPUS}" --disable-usage-stats
 fi
+# T2-S7 F1: `timeout` only kills the launcher (`ray job submit` tails the job);
+# the ray job itself keeps the GPUs.  Reclaim on every exit path.
+cleanup() {
+  ray job list 2>/dev/null | grep -oE 'raysubmit_[A-Za-z0-9]+' | sort -u | xargs -r -n1 ray job stop >/dev/null 2>&1 || true
+  pkill -f sglang.launch_server 2>/dev/null || true
+  ray stop --force >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+set +e
 # shellcheck disable=SC2086
 env $(echo "$LAUNCH_ENV" | xargs) bash -c "cd '${MILES_ROOT}' && timeout --signal=TERM --kill-after=120 ${HARD_TIMEOUT} ${LAUNCH_CMD}"
+rc=$?
+set -e
+[[ $rc -eq 124 ]] && echo "# HARD TIMEOUT ${HARD_TIMEOUT}s (rc=124); reclaiming ray job" >&2
+exit $rc
