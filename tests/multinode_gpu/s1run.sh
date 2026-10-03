@@ -2,7 +2,7 @@
 # rl-multinode-island tasks §3 (GPU): one launch of the yeto launcher on Nebius, evidence pulled to RUN_ROOT/<prefix>.
 # usage: s1run.sh <case: g0|g12|g3> <prefix> <hard_s> [watchdog_s]
 #   g0  : 1 node x 1 L40S, --total-steps 1, no elastic (image/sm_89 probe: 1 train + 1 generate), launcher tears down.
-#   g12 : 2 nodes x 1 L40S, --total-steps 3, elastic cfg resources-2x1.json (trainer n0:0, rollout cell n1:0), --keep (G1 topology + G2 cross-node cell).
+#   g12 : 2 nodes x 1 L40S, --total-steps 2 (cold start ~15 min of the 30 min hard timeout), elastic cfg resources-2x1.json (trainer n0:0, rollout cell n1:0), --keep (G1 topology + G2 cross-node cell).
 #   g3  : same cluster, --total-steps 8, --rl-elastic-restart-attempts 1, NO --keep: s1kill.sh kills the worker's raylet after round 1 train
 #         -> node_lost/RECOVERY_REQUIRED (G3), the in-place restart is refused by the topology precheck, the launcher's teardown = G4 (per-node confirm lines).
 # env: CLUSTER_PREFIX (cluster name prefix when several runs share one cluster; default = prefix), SHA (git rev of infra-multinode to archive, default HEAD), RUN_ROOT (/home/michael/work/s1-runs), IMAGE (digest-pinned --rl-image), DRY=1 prints args only.
@@ -15,7 +15,7 @@ T=$(ps -u michael -L -o pid= | wc -l); if [ "$T" -ge ${THREAD_MAX:-2900} ]; then
 ELASTIC="--rl-placement fixed-partition --rl-rollout-gpus 1 --rl-elastic --rl-elastic-resources $D/resources-2x1.json --rl-elastic-initial-config T1R1S0 --rl-observe-timeline"
 case $C in
   g0)  GPU=nebius:1xl40s@eu-north1; STEPS=1; EX=""; KEEP=""; NODES=1;;
-  g12) GPU=nebius:2x1xl40s@eu-north1; STEPS=3; EX="$ELASTIC"; KEEP="--keep"; NODES=2;;
+  g12) GPU=nebius:2x1xl40s@eu-north1; STEPS=2; EX="$ELASTIC"; KEEP="--keep"; NODES=2;;
   g3)  GPU=nebius:2x1xl40s@eu-north1; STEPS=8; EX="$ELASTIC --rl-elastic-restart-attempts 1"; KEEP=""; NODES=2;;
   *) echo "unknown case $C"; exit 64;;
 esac

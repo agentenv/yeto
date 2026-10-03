@@ -155,3 +155,12 @@ def test_teardown_two_nodes_probe_failure_is_false():
         raise RuntimeError("cloud api down")
     assert launcher.terminate_and_verify(None, "isl", probe=boom, down=_Down(), sleep_fn=lambda s: None,
                                          num_nodes=2) is False
+
+
+def test_network_tier_best_only_where_the_cloud_honors_it():
+    # G1 (2026-10-03): Nebius rejects network_tier=best for anything but H100:8/H200:8
+    # ("Catalog does not contain any instances"), so a 2x1xL40S island asks for none.
+    assert launcher.multinode_network_tier("nebius", "H100", 8) == "best"
+    assert launcher.multinode_network_tier("nebius", "L40S", 1) is None
+    assert launcher.multinode_network_tier("nebius", "h100", 1) is None
+    assert launcher.multinode_network_tier("aws", "A10G", 1) == "best"

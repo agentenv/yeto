@@ -236,6 +236,22 @@ def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Clouds that accept sky's ``network_tier="best"`` only for some shapes: Nebius
+# offers the InfiniBand tier for H100:8 / H200:8 nodes only and REJECTS the
+# request for anything else ("Catalog does not contain any instances"), so a
+# 2x1xL40S island must not ask for it (G1 of rl-multinode-island: the D6
+# prelude already runs NCCL over TCP with NCCL_IB_DISABLE=1 there).
+NETWORK_TIER_BEST_SHAPES = {"nebius": {("H100", 8), ("H200", 8)}}
+
+
+def multinode_network_tier(cloud: str, gpu: str, gpus_per_node: int) -> str | None:
+    """``"best"`` for a multi-node island when the cloud can honor it, else None."""
+    shapes = NETWORK_TIER_BEST_SHAPES.get(cloud)
+    if shapes is not None and (gpu.upper(), int(gpus_per_node)) not in shapes:
+        return None
+    return "best"
+
+
 def rl_actor_gpus_per_node(args, spec) -> int:
     """Trainer GPUs per node: all of them when colocated; under
     ``--rl-placement fixed-partition`` the rest after rollout and standby."""
@@ -2594,7 +2610,9 @@ def make_miles_island_task(
     }
     resources["image_id"] = args.rl_image
     if spec.num_nodes > 1:
-        resources["network_tier"] = "best"
+        tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
+        if tier:
+            resources["network_tier"] = tier
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
         task.set_resources(sky.Resources(**resources))
     if args.spot:
@@ -3003,7 +3021,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # NCCL silently falls back to TCP — NCCL_DEBUG below makes the
         # chosen transport visible in the job logs (look for
         # "NET/OFI Selected Provider is efa").
-        resources_kwargs["network_tier"] = "best"
+        tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
+        if tier:
+            resources_kwargs["network_tier"] = tier
     if spec.cloud == "modal":
         # Not a sky cloud: build_modal_island_config reads only this task's
         # run script and envs; the Modal runner sizes the container itself.
