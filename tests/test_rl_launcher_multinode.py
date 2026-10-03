@@ -78,6 +78,8 @@ def test_two_node_island_task(monkeypatch):
     assert "export NCCL_SOCKET_IFNAME=eth0" in task.run
     head, _, worker = task.run.partition("\nelse\n")
     assert "ray start --head" in head
+    # G1 (2026-10-03): the dashboard/state API must be reachable from worker nodes
+    assert "--include-dashboard=true" in head and "--dashboard-host=0.0.0.0" in head
     assert worker.index("trap stop_miles_ray EXIT") < worker.index('ray start --address="$MASTER_ADDR:6379"')
     assert "worker could not join the Ray head" in worker
 

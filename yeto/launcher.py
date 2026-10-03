@@ -2571,7 +2571,13 @@ def make_miles_island_task(
             "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
             # Dashboard on: Miles' --pin-rollout-manager-to-head lists
             # nodes through Ray's state API, which the dashboard serves.
-            '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"\n'
+            # On a multi-node island the dashboard must listen on the node
+            # ip, not 127.0.0.1: Ray registers the dashboard address in GCS
+            # as given, and a Miles manager actor scheduled on a worker node
+            # then asks 127.0.0.1:8265 and fails (rl-multinode-island G1,
+            # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
+            '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
+            + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             "  trap stop_miles_ray EXIT\n"
             # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.
