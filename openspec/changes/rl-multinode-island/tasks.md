@@ -46,17 +46,21 @@
 - [x] 2.6 演练总结写入 `openspec/changes/rl-multinode-island/progress.md`（命令、日志路径、通过/失败）。
   - 完成记录（2026-10-03，CPU 通过）：见本节 blockquote 与 `openspec/changes/rl-multinode-island/progress.md`。
 
-## 3. GPU 验证（放最后；不勾；需主 agent 另批；预算 ≈$60 硬上限）
+## 3. GPU 验证（放最后；不勾；需主 agent 另批；轨上限 **$25**，H100 回退需重新放行）
 
-预先判据（运行前固定，不得事后修改）：
-- 规格：按 Q5 裁定，默认 nebius `2x1xH100`（若不可申请则 `2x2xH100`），模型 `Qwen3-0.6B` LoRA，`--rl-engine ports --rl-placement fixed-partition --rl-elastic`，cfg `nodes=2`。
-- 硬超时：每用例 ≤ 30 min（`timeout 1800` 包裹 + 独立 watchdog 按 cluster 名 down）；总链 ≤ 2 h；费用上限 $60（2×H100 ≈ $5–6/h × ≤2 h ≪ $60，余量给 2x2 规格）。
-- 唯一前缀 `s1mn-`；资源 ID/创建时间/owner 记录到 `infra-drafts/s1-gpu.md`。
+预先判据（运行前固定，不得事后修改；S7 审查 T4-S7-PROGRESS.md §6 改为最小配置）：
+- 规格：**nebius `2x1xl40s@eu-north1`**（2 节点 × 1×L40S，sm_89；节点 0 = trainer `n0:0`，节点 1 = rollout cell `n1:0`，cfg `tests/multinode_gpu/resources-2x1.json`，`nodes=2 gpus_per_node=1`，T1R1S0，无 standby），模型 `Qwen3-0.6B` LoRA，`--rl-engine ports --rl-placement fixed-partition --rl-rollout-gpus 1 --rl-elastic`，`--rl-single-island-no-sync --controller local`（不起 syncer、不占 29400）。镜像 `yeto-miles-ports@sha256:37ac689e…`（c35702e-4e4148f）。
+- 先行 **G0 探针**（单节点 `1xl40s`，`timeout 900`，`--total-steps 1`）：PASS = launcher rc 0 且 ≥1 次 train + ≥1 次 generate 且 GPU 名为 L40S 且无 kernel/sm_89 不兼容报错；FAIL = 换 A10G 探针一次，仍 FAIL → 停下回报（H100 回退需重新放行）。
+- 硬超时：每用例 ≤ 30 min（`timeout 1800` 包裹 + 独立 watchdog 按 cluster 名 `sky down`），G4 ≤ 15 min；总链 ≤ 2 h；G3 放链尾。
+- 唯一前缀 `s1-mn-`；脚本 `tests/multinode_gpu/`（s1run.sh / s1chain.sh / s1kill.sh / s1probe.sh / s1reset.sh / s1judge.py），运行目录 `/home/michael/work/s1-runs/`；资源 ID/创建时间/owner 记录到 `infra-drafts/s1-gpu.md`。
+- G3 判据以 journal 的 `node_lost` / `topology`（重启后 alive<2 → "recovery refused"）记录与 `rl_reconfiguration result=RECOVERY_REQUIRED error=node_lost:…` 为证；**no-sync 下重启的 `LedgerError` 不得当作通过**。60 s 判据：kill 时刻取 worker 时钟（`kill.txt`），`node_lost.wall_time − kill ≤ 60`；终态探针 `s1probe.sh` 在 head 容器内每 5 s 记 `ray status` 活节点数与 journal 尾行，kill 后采集窗口 ≥ 200 s（≥150 s）。
+- 2x1 的已知局限：无 standby GPU，E1 rollout-only up/down 边**不可验证**（需 2x2 以上），3.2 最多记 PARTIAL。
 
-- [ ] 3.1 G1 拓扑：岛起来后 `ray.nodes()` alive=2；`StartupBundles` 分块断言通过；journal `topology` 含 2 节点。**通过** = 三项全部成立且 learner 完成 ≥1 轮；**失败** = 任一不成立或超时。
-- [ ] 3.2 G2 跨节点 cell：trainer 在 n0，rollout cell 在 n1；E1 rollout-only 边 up/down 各 1 次成功（复用 A4 判据：旧 ACK 不污染、epoch 单调）。
-- [ ] 3.3 G3 节点失联：`sky` 上手工终止 n1 实例（或 `kill` 其 raylet）→ ≤ 60 s 内 `RECOVERY_REQUIRED` 落 journal，learner 非零退出，不出现"部分续跑"；restart loop 前置检查拒绝。放链尾（gpu-evidence-window-lesson：终态探针放容器内，采集窗口 ≥ 采集延迟）。
-- [ ] 3.4 G4 回收：`yeto down` 后云端核实 2 个实例均消失；输出含每节点确认行；sky 无集群；记录预估/实际费用与无残留证明。
+- [ ] 3.0 G0 探针（镜像在 sm_89 上能起、1 步 train + 1 次 generate）。
+- [ ] 3.1 G1 拓扑：岛起来后 journal `topology` 记录 `nodes=2 gpus_per_node=1` 且 `alive` 长度 2（= `ray.nodes()` alive=2）；`StartupBundles` 分块断言通过（fail closed：learner 进入 ≥1 轮即通过，launch.log 无 `not node-blocked`/`BundleMapError`）；learner 完成 ≥1 轮（train + generate）。**通过** = 全部成立且 launcher rc 0；**失败** = 任一不成立或超时。
+- [ ] 3.2 G2 跨节点 cell：trainer 在 n0（head 的 compute-apps 为 learner/ray 进程、无 sglang）、rollout cell 在 n1（worker1 的 compute-apps 含 sglang）；≥2 轮 train→generate（跨节点权重同步生效）；journal `config_epoch` 单调。E1 rollout-only 边 up/down 各 1 次：2x1 不可验证（记 PARTIAL，不勾）。
+- [ ] 3.3 G3 节点失联（链尾）：训练轮 ≥1 的 train 阶段 `pkill -f miles-ray/` 杀 n1 raylet → ≤ 60 s 内 journal `node_lost` + `rl_reconfiguration RECOVERY_REQUIRED(node_lost:…)`，learner 非零退出，`node_lost` 之后无 train/generate 事件（无部分续跑）；`--rl-elastic-restart-attempts 1` 原地重启后第二条 `topology` 记录 alive<2 且 "recovery refused"（前置检查拒绝）。
+- [ ] 3.4 G4 回收：g3 的 launcher（无 `--keep`）teardown 输出 2 行 `node instance <id> confirmed terminated`、无 `UNCONFIRMED`；`cleanup_run.sh`（RUNS_BASE=s1-runs）两次核清（nebius project `{}`、sky 无集群、本地无进程）；记录预估/实际费用。
 - [ ] 3.5 合法否定结论出口：若 G1 因 NCCL/网络环境（D6）失败且 2 次定因修复后仍失败，记录为"多节点需 IB/网络层另立项"，不勾 G2–G4。
 
 ## 4. 文档与收尾
