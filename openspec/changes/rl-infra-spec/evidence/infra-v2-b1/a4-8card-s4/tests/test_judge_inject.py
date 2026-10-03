@@ -438,6 +438,26 @@ class E1A(unittest.TestCase):
 
 
 class CLI(unittest.TestCase):
+    def test_cli_r5_committed_set_from_journal_when_tape_has_no_rl_membership(self):
+        """A34 (chain 8 IV infra-v2-b1-a4s8-20261003-5r1 r5, 8xH100): up1 killed at COMMITTED -> the first process never emitted
+        rl_membership and the recovery emits only rl_reconfiguration RECOVERED.  The CLI must take the committed set from the journal
+        COMMITTED record (members c0..c3), not only from add_intent (c2,c3) / tape rl_membership (absent)."""
+        d = tempfile.mkdtemp(); jp, tp, lp = (os.path.join(d, n) for n in ("j.jsonl", "t.jsonl", "l.jsonl"))
+        j = r5_journal(); j[4] = tx("COMMITTED", "up1", wall_time=50.0, members=C4)
+        j.insert(3, {"kind": "add_intent", "tx_id": "up1", "members": C4[2:]})
+        t = [e for e in r5_tape() if e.get("event") != "rl_membership"]
+        self.assertFalse(any(e.get("event") == "rl_membership" for e in t))
+        open(jp, "w").write("".join(json.dumps(x) + "\n" for x in j)); open(tp, "w").write("".join(json.dumps(x) + "\n" for x in t))
+        open(lp, "w").write("".join(json.dumps(x) + "\n" for x in LEDGER_OK))
+        out = os.path.join(d, "o.json")
+        rc = J.main(["r5", jp, tp, "--ledger", lp, "--marker-dir", d, "--out", out]); r = json.load(open(out))
+        self.assertEqual(r["verdict"], "PASS", r); self.assertTrue(r["checks"]["verified_members_are_the_committed_4"]); self.assertEqual(rc, 0)
+        # without the COMMITTED members the committed set is unknown -> the membership check fails (the -5r1 r5 verdict before A34)
+        j[5] = tx("COMMITTED", "up1", wall_time=50.0)
+        open(jp, "w").write("".join(json.dumps(x) + "\n" for x in j))
+        J.main(["r5", jp, tp, "--ledger", lp, "--marker-dir", d, "--out", out]); r = json.load(open(out))
+        self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["verified_members_are_the_committed_4"])
+
     def test_cli_writes_marker_and_reads_probes(self):
         d = tempfile.mkdtemp(); jp, tp = os.path.join(d, "j.jsonl"), os.path.join(d, "t.jsonl")
         open(jp, "w").write(json.dumps(ADD) + "\n" + json.dumps(ph("SUCCEEDED")) + "\n"); open(tp, "w").write(json.dumps(inj(applied=False)) + "\n")

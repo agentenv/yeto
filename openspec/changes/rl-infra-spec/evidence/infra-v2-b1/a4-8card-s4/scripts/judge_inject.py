@@ -764,6 +764,12 @@ def main(argv):
     known = set(filter(None, a.cells.split(",")))
     for r in named(journal, "add_intent"): known |= set(r.get("members") or [])
     for r in named(tape, "rl_membership"): known |= set(r.get("members") or [])
+    # A34 (chain 8 IV -5r1 r5, 2026-10-03): a tx killed at COMMITTED never reaches _emit_membership and the recovery re-emits only
+    # rl_reconfiguration RECOVERED -> the tape has NO rl_membership for that epoch, `known` stayed at the add_intent half (c2,c3) and
+    # verified_members_are_the_committed_4 was false on a correct recovery.  The committed set is authoritative in the journal's
+    # COMMITTED phase record (recovery-design 10.4 "重启后成员 ≠ journal 成员"), so it is part of `known` as well.
+    for r in phases(journal):
+        if r.get("phase") == "COMMITTED": known |= set(r.get("members") or [])
     def jl(p):
         return [json.loads(l) for l in open(p) if l.strip()] if p and os.path.exists(p) else None
     samples = jl(a.router_samples)
