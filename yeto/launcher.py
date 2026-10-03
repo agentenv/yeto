@@ -2454,10 +2454,18 @@ def make_miles_island_task(
         )
     worker_model_fetch = ""
     if spec.num_nodes > 1 and not is_local_reference(model):
+        # Same call and cache as the learner's own snapshot_download on the
+        # head (python3 of the image; `huggingface-cli` is not on the run
+        # shell's PATH there: s1-mn-20261003f), so the two nodes resolve the
+        # same snapshot directory.
+        fetch_py = (
+            "from huggingface_hub import snapshot_download; "
+            f"print(snapshot_download(repo_id={model!r}, revision={args.model_revision!r}))"
+        )
         worker_model_fetch = (
-            f"  huggingface-cli download {shlex.quote(model)}{revision} "
-            ">/tmp/hf-prefetch-worker.log 2>&1 || { echo '[yeto-island] worker could not "
-            "fetch the model snapshot (see /tmp/hf-prefetch-worker.log)' >&2; exit 1; }\n"
+            f"  python3 -c {shlex.quote(fetch_py)} >/tmp/hf-prefetch-worker.log 2>&1 "
+            "|| { echo '[yeto-island] worker could not fetch the model snapshot:' >&2; "
+            "tail -5 /tmp/hf-prefetch-worker.log >&2; exit 1; }\n"
         )
     file_mounts = dict(learner_file_mounts(args.data))
     if getattr(args, "rl_initial_adapter", None) is not None:
