@@ -434,3 +434,24 @@ def test_ir4_load_samples_carry_harness_fields_only_when_observing(tmp_path, obs
         assert isinstance(s["tito_chain_breaks"], dict) and s["policy_age_violation"] == 0
         assert s["profile_hash"] and "epoch" in s
         assert validate_load_sample({k: s[k] for k in LOAD_SAMPLE_SCHEMA if k in s}) == []
+
+
+def test_harness_counters_accept_upstream_mismatch_lists():
+    """A-T3-6 (codex-smoke-20261003-10): upstream Miles' session server stores
+    tito_session_mismatch as a list of mismatch records in the same metadata key."""
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter.rollout_meta_hook import counter_value, harness_counters
+
+    assert counter_value([{"position": 3}, {"position": 9}]) == 2 and counter_value([]) == 0
+    assert counter_value(None) == 0 and counter_value("") == 0 and counter_value(True) == 1 and counter_value(2) == 2
+    assert counter_value({"a": 1, "b": 0}) == 1
+    groups = [
+        [SimpleNamespace(metadata={"tito_session_mismatch": [{"position": 3}], "policy_age_violation": 1}),
+         SimpleNamespace(metadata={"tito_session_mismatch": [], "tito_chain_breaks": {"fork": 2}})],
+        [[SimpleNamespace(metadata={"tito_session_mismatch": 2})]],
+    ]
+    assert harness_counters(groups) == {
+        "policy_age_violation": 1, "tito_session_mismatch": 3, "tito_chain_breaks": {"fork": 2},
+    }
+    assert harness_counters([[SimpleNamespace(metadata={"tito_session_mismatch": []})]]) == {}

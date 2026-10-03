@@ -217,8 +217,10 @@ def mirror_tito_counters(metrics: dict[str, Any] | None, harness_board: Any) -> 
     never forks, so ``chains_total`` stays 1 and ``chain_break_reason`` names the
     first break (the sample is infrastructure-aborted, never trained on).
     """
+    from yeto.rl.engine.miles_adapter.rollout_meta_hook import counter_value
+
     metrics = metrics or {}
-    mismatches = int(metrics.get(TITO_SESSION_MISMATCH_KEY) or 0)
+    mismatches = counter_value(metrics.get(TITO_SESSION_MISMATCH_KEY))
     breaks = dict(metrics.get(TITO_CHAIN_BREAKS_KEY) or {})
     if harness_board is not None:
         if mismatches:
