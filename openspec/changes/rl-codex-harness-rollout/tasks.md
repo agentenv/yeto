@@ -53,7 +53,7 @@
 
 ## 9. GPU 验证（便宜卡，逐项获批）
 
-- [ ] 9.1 [GPU] A 路径冒烟：ports + agentic_tool_call + Codex，在 Terminal-Bench 小子集上跑 1 个 rollout 步 + 1 个训练步。判据：
+- [x] 9.1 [GPU] A 路径冒烟（2026-10-03 `codex-smoke-20261003-12`，Modal 1×H100，代码 56c34191：preflight 通过、24/24 轨迹、训练步 grad_norm 0.053、policy v1 发布、`clip_fraction`/`ess_ratio` 在指标中、奖励全 0 但非空；4.3 逐样断言与 tool_wait 归零未单独取证；evidence/gpu-20261003/）：ports + agentic_tool_call + Codex，在 Terminal-Bench 小子集上跑 1 个 rollout 步 + 1 个训练步。判据：
   - preflight 通过；
   - 每条轨迹的 sample 满足 4.3 的断言；
   - HMAC 验签通过；
@@ -61,7 +61,7 @@
   - 奖励分布非全空；
   - TIS 比值统计出现在指标中。
   资源：单卡 H100 或更便宜卡、小模型（与 legacy 相同的 Qwen3.5 小档位 LoRA），费用上限 $30，超出即停。任务子集规模在执行前确定（design Open Questions）。
-- [ ] 9.2 [GPU] 多轮 TITO 一致性：在 9.1 同一环境中，对每个受支持的 tito_model 跑 ≥20 条多轮轨迹。判据：
+- [ ] 9.2 [GPU] 多轮 TITO 一致性（部分：2026-10-03 同租期第 2 步 24 条多轮轨迹完成、grad_norm 0.099、policy v2；断链率/`tito_session_mismatch`/logprob-TIS 覆盖率三项判据无取证——round 记录不含 harness 计数，需把 `build_metadata` 载荷落 tape 后复判）：在 9.1 同一环境中，对每个受支持的 tito_model 跑 ≥20 条多轮轨迹。判据：
   - 保留历史 reasoning 的模板：断链率 = 0，`tito_session_mismatch` = 0；
   - 丢弃历史 reasoning 的模板：断链原因只出现 `template_drops_reasoning`；
   - 所有 chain 的 logprob 与 trainer 重算 logprob 的差异落在 TIS 截断范围内的比例 ≥99%。
