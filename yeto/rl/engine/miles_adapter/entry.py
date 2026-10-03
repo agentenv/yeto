@@ -788,12 +788,16 @@ def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor
 
         manager = RayWorkerManager.get_handle()
     views = _startup_views(manager, runner)
+    gpus_per_node = getattr(launch.placement, "gpus_per_node", None)
     try:
         bundles = StartupBundles(pool_gpus=elastic.pool_gpus, views=views,
                                  placement_map=_role_map(launch.placement),
-                                 gpus_per_node=getattr(launch.placement, "gpus_per_node", None),
-                                 node_resolver=_ray_bundle_node)
+                                 gpus_per_node=gpus_per_node,
+                                 node_resolver=_ray_bundle_node,
+                                 head_node=_ray_head_node()[0] if gpus_per_node is not None else None)
     except Exception:  # noqa: BLE001 - no usable map: leave trainer edges refused
+        if gpus_per_node is not None:
+            raise  # rl-multinode-island D3/Q6: a multi-node island fails closed, never silently
         return False
     pool = driver.rollout
     pool._bundles = bundles
@@ -1041,6 +1045,73 @@ def _ray_alive_nodes() -> dict[str, int]:
             for n in ray.nodes() if n.get("Alive")}
 
 
+def _ray_head_node(nodes: Any = None) -> tuple[Any, str]:
+    """``(node_id, ip)`` of the Ray head: the one alive node carrying Ray's
+    built-in ``node:__internal_head__`` resource (rl-multinode-island D3 head
+    pin). Exactly one such node, else ``RuntimeError`` (fail closed)."""
+    from yeto.rl.engine.multinode import HEAD_RESOURCE
+
+    if nodes is None:
+        import ray
+
+        nodes = ray.nodes()
+    heads = [n for n in nodes if n.get("Alive") and HEAD_RESOURCE in (n.get("Resources") or {})]
+    if len(heads) != 1:
+        raise RuntimeError(f"expected exactly one alive Ray head node ({HEAD_RESOURCE}), found {len(heads)}")
+    return heads[0]["NodeID"], str(heads[0].get("NodeManagerAddress"))
+
+
+def pin_placement_group_to_head(gpus_per_node: int, *, pg_module: Any = None, head: Any = None,
+                                table: Any = None) -> Any:
+    """rl-multinode-island D3 head pin (ruling 2026-10-03): make the fork's
+    startup placement group put logical node 0 (the trainer's block) on the Ray
+    head, and refuse startup when it did not.
+
+    Patches ``miles.ray.placement_group`` in the driver before the
+    ``RayWorkerManager`` is launched: ``placement_group`` (the Ray call) gets
+    :func:`head_pinned_bundles`, ``sort_key`` sorts the head's bundles first,
+    and ``_create_placement_group`` checks ``placement_group_table`` afterwards
+    (block 0 of the reordered bundles on the head node, else ``RuntimeError``).
+    Returns the head node id. ``pg_module``/``head``/``table`` are test seams."""
+    from yeto.rl.engine.multinode import assert_head_block, head_first_sort_key, head_pinned_bundles
+
+    if pg_module is None:
+        import importlib
+
+        pg_module = importlib.import_module("miles.ray.placement_group")
+    head_id, head_ip = head if head is not None else _ray_head_node()
+    ray_placement_group, base_key, base_create = (
+        pg_module.placement_group, pg_module.sort_key, pg_module._create_placement_group)
+    if getattr(base_create, "_yeto_head_pinned", None) is not None:
+        return base_create._yeto_head_pinned  # already installed (one PG per driver)
+
+    def pinned_placement_group(bundles, *args, **kwargs):
+        return ray_placement_group(head_pinned_bundles(len(bundles), gpus_per_node), *args, **kwargs)
+
+    def checked_create(num_gpus, *args, **kwargs):
+        info = base_create(num_gpus, *args, **kwargs)
+        pg, reordered = info[0], list(info[1])
+        if pg is None:
+            return info
+        if table is None:
+            import ray
+
+            node_of_bundle = ray.util.placement_group_table(pg)["bundles_to_node_id"]
+        else:
+            node_of_bundle = table(pg)
+        blocks = [node_of_bundle[b] for b in reordered[:gpus_per_node]]
+        if len(set(map(str, blocks))) != 1:
+            raise RuntimeError(f"D3 head pin: logical node 0 bundles span nodes {sorted(set(map(str, blocks)))}")
+        assert_head_block(blocks, head_id)
+        return info
+
+    checked_create._yeto_head_pinned = head_id
+    pg_module.placement_group = pinned_placement_group
+    pg_module.sort_key = head_first_sort_key(head_ip, base_key)
+    pg_module._create_placement_group = checked_create
+    return head_id
+
+
 def _ray_bundle_node(pg: Any, bundle: int) -> Any:
     """rl-multinode-island D3/Q6: the Ray node id hosting ``bundle`` of ``pg``
     (``ray.util.placement_group_table``), the runtime source of the node-block
@@ -1103,6 +1174,10 @@ def run_ports_island(
         miles_args.yeto_rl_elastic_metadata = True
         os.environ[ELASTIC_METADATA_ENV] = "1"
     connect_island_ray()
+    topology = getattr(launch.placement, "topology", None)
+    if topology is not None and topology.nodes > 1:
+        # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
+        pin_placement_group_to_head(topology.gpus_per_node)
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
     from miles.ray.rollout.eval_dispatch import EvalDispatcher

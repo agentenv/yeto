@@ -56,7 +56,8 @@ elif CASE == "g1":
     alive = t0.get("alive") if isinstance(t0.get("alive"), list) else []
     checks = {"topology_record_2x1": t0.get("nodes") == 2 and t0.get("gpus_per_node") == 1,
               "alive_nodes_2": len(alive) == 2,
-              "startup_bundles_ok": "not node-blocked" not in launch and "BundleMapError" not in launch and len(rounds_trained) >= 1,
+              # D3 fail closed: node blocks AND node 0 = Ray head (head pin, 2026-10-03 ruling); any refusal shows in the launch log
+              "startup_bundles_ok": not re.search(r"not node-blocked|BundleMapError|not the Ray head|D3 head pin|exactly one alive Ray head", launch) and len(rounds_trained) >= 1,
               "learner_round_ge_1": len(rounds_trained) >= 1 and len(generates) >= 1,
               "case_window_le_1800s": case_s is not None and case_s <= 1800,
               "launcher_rc_0": rc == 0}
@@ -64,7 +65,9 @@ elif CASE == "g1":
 elif CASE == "g2":
     head = read("pulled/apps-" + read("cluster.txt").strip() + ".txt"); worker = read("pulled/apps-" + read("cluster.txt").strip() + "-worker1.txt")
     checks = {"rollout_engine_on_n1": bool(re.search(r"sglang", worker)), "no_rollout_engine_on_n0": not re.search(r"sglang", head),
-              "trainer_on_n0": bool(re.search(r"yeto.rl.learner|ray::", head)),
+              # trainer = the MegatronTrainRayActor process (D3 head pin: bundle 0 on the head); `ray::` alone also matches RayWorkerManager
+              "trainer_on_n0": bool(re.search(r"MegatronTrainRayActor", head)),
+              "no_trainer_on_n1": not re.search(r"MegatronTrainRayActor", worker),
               "rounds_ge_2_cross_node_sync": len(rounds_trained) >= 2 and len(generates) >= 2,
               "config_epoch_monotonic": all(a.get("config_epoch", 0) <= b.get("config_epoch", 0) for a, b in zip(journal, journal[1:])) if journal else True,
               "e1_up_down_edge": None}

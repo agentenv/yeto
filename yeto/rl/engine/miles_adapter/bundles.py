@@ -56,11 +56,14 @@ class StartupBundles:
                  placement_map: Mapping[str, Sequence[int]] | None,
                  gpus_per_node: int | None = None,
                  node_ids: Mapping[str, Any] | Sequence[Any] | None = None,
-                 node_resolver: Any = None) -> None:
+                 node_resolver: Any = None, head_node: Any = None) -> None:
         """``gpus_per_node`` (rl-multinode-island D3) turns on the node-block
         assertion: the node of every logical position comes from ``node_ids``
         (per pool GPU id, or per logical position) or else from the view's
-        ``pg_reordered_node_ids``; missing -> ``BundleMapError`` (fail closed)."""
+        ``pg_reordered_node_ids``; missing -> ``BundleMapError`` (fail closed).
+        ``head_node`` (the Ray head's node id) is required as soon as the pool
+        spans more than one node: block 0 must be the head (D3 head pin), a
+        1-GPU-per-node island cannot make the block assertion alone tell."""
         self.pool_gpus = tuple(str(g) for g in pool_gpus)
         if len(set(self.pool_gpus)) != len(self.pool_gpus):
             raise BundleMapError(f"pool GPU ids repeat: {self.pool_gpus}")
@@ -90,14 +93,23 @@ class StartupBundles:
                 nodes_seq.append(node)
         self._by_bundle = {e[2]: g for g, e in self._entry.items()}
         if gpus_per_node is not None:
-            from yeto.rl.engine.multinode import TopologyError, assert_node_blocks
+            from yeto.rl.engine.multinode import TopologyError, assert_head_block, assert_node_blocks
 
             try:
                 self.node_blocks = assert_node_blocks(nodes_seq, gpus_per_node)
             except TopologyError as exc:
                 raise BundleMapError(f"placement group is not node-blocked: {exc}") from None
+            if head_node is None and len(self.node_blocks) > 1:
+                raise BundleMapError("multi-node island without the Ray head node id: cannot pin "
+                                     "logical node 0 to the head (D3)")
+            if head_node is not None:
+                try:
+                    assert_head_block(self.node_blocks, head_node)
+                except TopologyError as exc:
+                    raise BundleMapError(f"placement group node 0 is not the head: {exc}") from None
         else:
             self.node_blocks = None
+        self.head_node = head_node
 
     def node_of(self, gpu: str) -> Any:
         """Node id of a pool GPU; ``BundleMapError`` without node information."""

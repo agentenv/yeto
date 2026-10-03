@@ -3,7 +3,12 @@
 A logical bundle ``p`` of a ``gpus_per_node = G`` island lives on node
 ``p // G`` as local GPU ``p % G`` (design D3; Miles' PACK placement group
 sorted by (node, gpu) yields exactly this blocking, asserted at startup by
-``StartupBundles``). Everything here is a plain function so the launcher, the
+``StartupBundles``). Node 0 is the Ray head (D3 head pin, 2026-10-03 ruling):
+block 0 of the placement group requests a sliver of the head's node resource
+(:func:`head_pinned_bundles`), the fork's (node, gpu) sort puts the head first
+(:func:`head_first_sort_key`), and :func:`assert_head_block` rejects any other
+outcome at startup (fail closed; Miles' plain IP sort put the trainer on the
+worker in the 2x1 L40S run, run.log bundle lines of s1-mn-20261003g). Everything here is a plain function so the launcher, the
 resources-manifest parser and the placement port share one rule set.
 """
 
@@ -268,3 +273,45 @@ def assert_node_blocks(node_ids: Sequence[Any], gpus_per_node: int) -> tuple[Any
     if len(set(map(str, blocks))) != len(blocks):
         raise TopologyError(f"a node repeats across blocks: {blocks}")
     return tuple(blocks)
+
+
+HEAD_RESOURCE = "node:__internal_head__"  # Ray's built-in resource label present only on the head node
+HEAD_SHARE = 0.001  # per bundle; gpus_per_node * HEAD_SHARE must stay <= the label's quantity (1.0)
+
+
+def head_pinned_bundles(num_gpus: int, gpus_per_node: int, *, head_resource: str = HEAD_RESOURCE,
+                        share: float = HEAD_SHARE) -> list[dict[str, float]]:
+    """Startup placement-group bundles with logical block 0 pinned to the Ray
+    head: the first ``gpus_per_node`` bundles also request ``share`` of
+    ``head_resource`` so Ray cannot place them anywhere else (D3 head pin)."""
+    if gpus_per_node <= 0 or num_gpus <= 0 or num_gpus % gpus_per_node:
+        raise TopologyError(f"{num_gpus} GPUs are not whole {gpus_per_node}-GPU nodes")
+    if gpus_per_node * share > 1.0:
+        raise TopologyError(f"{gpus_per_node} bundles x {share} exceed the head label quantity 1.0")
+    bundles: list[dict[str, float]] = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
+    for bundle in bundles[:gpus_per_node]:
+        bundle[head_resource] = share
+    return bundles
+
+
+def head_first_sort_key(head_ip: Any, base_key: Any) -> Any:
+    """Wrap the fork's ``sort_key`` ((index, node_ip, gpu) -> key) so the head
+    node's bundles sort first, i.e. become logical node 0."""
+    head = str(head_ip)
+
+    def key(entry: Any) -> tuple[int, Any]:
+        _index, node, _gpu = entry
+        return (0 if str(node) == head else 1, base_key(entry))
+
+    return key
+
+
+def assert_head_block(node_blocks: Sequence[Any], head_node: Any) -> None:
+    """D3 head pin: logical node 0 (block 0 of :func:`assert_node_blocks`) must be
+    the Ray head node; anything else is a startup error (fail closed)."""
+    blocks = list(node_blocks)
+    if not blocks:
+        raise TopologyError("no node blocks")
+    if str(blocks[0]) != str(head_node):
+        raise TopologyError(f"logical node 0 is {blocks[0]!r}, not the Ray head {head_node!r} "
+                            "(D3: head = node 0 = trainer)")

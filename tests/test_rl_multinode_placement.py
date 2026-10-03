@@ -118,8 +118,9 @@ def _views(nodes):
 
 
 def test_startup_bundles_blocks_ok_and_node_of():
-    b = StartupBundles(pool_gpus=POOL, views=_views(["A", "A", "B", "B"]), placement_map=MAP, gpus_per_node=2)
-    assert b.node_blocks == ("A", "B")
+    b = StartupBundles(pool_gpus=POOL, views=_views(["A", "A", "B", "B"]), placement_map=MAP, gpus_per_node=2,
+                       head_node="A")
+    assert b.node_blocks == ("A", "B") and b.head_node == "A"
     assert b.node_of("g1") == "A" and b.node_of("g2") == "B"
     assert b.same_node(("g2", "g3")) and not b.same_node(("g1", "g2"))
 
@@ -145,9 +146,104 @@ def _no_nodes():
 def test_startup_bundles_node_resolver_and_single_node_untouched():
     views = {"actor": _Info(PG, [0, 1], [0, 1]), "rollout": _Info(PG, [2, 3], [0, 1])}
     resolver = lambda pg, bundle: {0: "A", 1: "A", 2: "B", 3: "B"}[bundle]  # noqa: E731
-    b = StartupBundles(pool_gpus=POOL, views=views, placement_map=MAP, gpus_per_node=2, node_resolver=resolver)
+    b = StartupBundles(pool_gpus=POOL, views=views, placement_map=MAP, gpus_per_node=2, node_resolver=resolver,
+                       head_node="A")
     assert b.node_blocks == ("A", "B")
     plain = StartupBundles(pool_gpus=POOL, views=views, placement_map=MAP)
     assert plain.node_blocks is None and plain.same_node(("g0", "g3"))
     with pytest.raises(BundleMapError, match="no node information"):
         plain.node_of("g0")
+
+
+# ---- D3 head pin (ruling 2026-10-03): node 0 = Ray head = trainer, fail closed
+
+def test_startup_bundles_head_pin_fails_closed():
+    views = _views(["A", "A", "B", "B"])
+    # 2x1 L40S finding (s1-mn-20261003g): the head's block was logical node 1 -> refused
+    with pytest.raises(BundleMapError, match="node 0 is not the head"):
+        StartupBundles(pool_gpus=POOL, views=views, placement_map=MAP, gpus_per_node=2, head_node="B")
+    # more than one node without a head id: the block assertion alone cannot tell -> refused
+    with pytest.raises(BundleMapError, match="without the Ray head node id"):
+        StartupBundles(pool_gpus=POOL, views=views, placement_map=MAP, gpus_per_node=2)
+    # one node per GPU (1 GPU/node): blocks are trivially fine, the head pin still decides
+    one = {"actor": _Info(PG, [0], [0], ["W"]), "rollout": _Info(PG, [1], [0], ["H"])}
+    with pytest.raises(BundleMapError, match="node 0 is not the head"):
+        StartupBundles(pool_gpus=("g0", "g1"), views=one, placement_map={"trainer": (0,), "rollout": (1,)},
+                       gpus_per_node=1, head_node="H")
+    ok = {"actor": _Info(PG, [1], [0], ["H"]), "rollout": _Info(PG, [0], [0], ["W"])}
+    b = StartupBundles(pool_gpus=("g0", "g1"), views=ok, placement_map={"trainer": (0,), "rollout": (1,)},
+                       gpus_per_node=1, head_node="H")
+    assert b.node_blocks == ("H", "W")
+    # single node island: a head id is optional and checked when given
+    single = StartupBundles(pool_gpus=POOL, views=_views(["A"] * 4), placement_map=MAP, gpus_per_node=4)
+    assert single.node_blocks == ("A",)
+
+
+def test_head_pinned_bundles_and_sort_key():
+    from yeto.rl.engine.multinode import (HEAD_RESOURCE, TopologyError, assert_head_block,
+                                          head_first_sort_key, head_pinned_bundles)
+
+    bundles = head_pinned_bundles(4, 2)
+    assert bundles[0] == bundles[1] == {"GPU": 1, "CPU": 1, HEAD_RESOURCE: 0.001}
+    assert bundles[2] == bundles[3] == {"GPU": 1, "CPU": 1}
+    assert head_pinned_bundles(2, 1)[1] == {"GPU": 1, "CPU": 1}
+    with pytest.raises(TopologyError):
+        head_pinned_bundles(3, 2)
+    with pytest.raises(TopologyError):
+        head_pinned_bundles(8, 8, share=0.5)
+    # the fork sorts by IP: worker 10.0.0.14 < head 10.0.0.22 put the trainer on the worker
+    base = lambda x: (list(map(int, x[1].split("."))), x[2])  # noqa: E731
+    infos = [(0, "10.0.0.22", 0), (1, "10.0.0.14", 0)]
+    assert sorted(infos, key=base)[0][1] == "10.0.0.14"
+    assert [i[1] for i in sorted(infos, key=head_first_sort_key("10.0.0.22", base))] == ["10.0.0.22", "10.0.0.14"]
+    assert_head_block(("H", "W"), "H")
+    with pytest.raises(TopologyError, match="not the Ray head"):
+        assert_head_block(("W", "H"), "H")
+
+
+def test_pin_placement_group_to_head_patches_fork_and_checks(monkeypatch):
+    import types
+
+    from yeto.rl.engine.miles_adapter.entry import _ray_head_node, pin_placement_group_to_head
+    from yeto.rl.engine.multinode import HEAD_RESOURCE
+
+    nodes = [{"NodeID": "W", "Alive": True, "NodeManagerAddress": "10.0.0.14", "Resources": {"GPU": 1}},
+             {"NodeID": "H", "Alive": True, "NodeManagerAddress": "10.0.0.22",
+              "Resources": {"GPU": 1, HEAD_RESOURCE: 1.0}},
+             {"NodeID": "D", "Alive": False, "NodeManagerAddress": "10.0.0.9",
+              "Resources": {HEAD_RESOURCE: 1.0}}]
+    assert _ray_head_node(nodes) == ("H", "10.0.0.22")
+    with pytest.raises(RuntimeError, match="exactly one alive Ray head"):
+        _ray_head_node(nodes[:1])
+
+    seen = {}
+    placement = {0: "H", 1: "W"}  # Ray's physical bundle -> node (bundle 0 = 10.0.0.22 = head)
+
+    def fake_ray_pg(bundles, strategy="PACK"):
+        seen["bundles"], seen["strategy"] = bundles, strategy
+        return "PG"
+
+    mod = types.SimpleNamespace(placement_group=fake_ray_pg,
+                                sort_key=lambda x: (list(map(int, x[1].split("."))), x[2]))
+
+    def create(num_gpus):
+        if num_gpus == 0:
+            return None, [], []
+        pg = mod.placement_group([{"GPU": 1, "CPU": 1}] * num_gpus, strategy="PACK")
+        infos = [(0, "10.0.0.22", 0), (1, "10.0.0.14", 0)]
+        order = [i[0] for i in sorted(infos, key=mod.sort_key)]
+        return pg, order, [0] * num_gpus
+
+    mod._create_placement_group = create
+    head = pin_placement_group_to_head(1, pg_module=mod, head=("H", "10.0.0.22"), table=lambda pg: placement)
+    assert head == "H"
+    pg, order, _ = mod._create_placement_group(2)
+    assert pg == "PG" and order == [0, 1] and seen["strategy"] == "PACK"
+    assert seen["bundles"] == [{"GPU": 1, "CPU": 1, HEAD_RESOURCE: 0.001}, {"GPU": 1, "CPU": 1}]
+    assert mod._create_placement_group(0) == (None, [], [])
+    # idempotent (one PG per driver)
+    assert pin_placement_group_to_head(1, pg_module=mod, head=("H", "10.0.0.22")) == "H"
+    # Ray ignored the pin (block 0 landed on the worker): startup is refused
+    placement.update({0: "W", 1: "H"})
+    with pytest.raises(Exception, match="not the Ray head"):
+        mod._create_placement_group(2)
