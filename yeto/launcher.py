@@ -2208,17 +2208,21 @@ HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
 # on ghcr 12fcd9e5: Sandbox create/exec/terminate, ray/sglang/miles import).
 MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.codex.tb2_provider:modal_provider"
 MODAL_CLIENT_SETUP = (
-    # Unconditional: in a Modal Function container `import modal` already
-    # succeeds in the setup shell through Modal's runtime mount (/pkg +
-    # /__modal/deps), which the island's own processes cannot see, so the
-    # client and its deps must live in the island python's site-packages.
-    "python3 -m pip install -q --no-deps "
+    # --ignore-installed: in a Modal Function container the setup shell
+    # already sees Modal's runtime copies (/pkg, /__modal/deps), so a plain
+    # install reports "already satisfied" and writes nothing into the island
+    # python's site-packages, which is all its own processes can import
+    # (codex-smoke-20261003-8/-9).
+    "python3 -m pip install -q --no-deps --ignore-installed "
     "'modal==1.5.5' 'grpclib>=0.4.7,<0.4.10' 'synchronicity~=0.12.5' cbor2 toml "
     "types-certifi types-toml watchfiles\n"
-    # Verify with the run script's PYTHONPATH (what the learner and Ray
-    # workers see), not the setup shell's.
+    # Verify the packages physically landed in site-packages and import under
+    # the run script's PYTHONPATH (what the learner and Ray workers see).
     'PYTHONPATH="$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH}" '
-    "python3 -c 'import modal, grpclib, synchronicity' "
+    "python3 -c 'import os, sys, sysconfig; import modal, grpclib, synchronicity; "
+    "sp = sysconfig.get_paths()[\"purelib\"]; "
+    "missing = [m for m in (\"modal\", \"grpclib\", \"synchronicity\") if not os.path.isdir(os.path.join(sp, m))]; "
+    "sys.exit(f\"not in {sp}: {missing}\" if missing else 0)' "
     "|| { echo '[yeto-setup] Modal client unusable in the island python' >&2; exit 1; }"
 )
 CODEX_COMPACTION_ENV = "YETO_CODEX_COMPACTION_ENABLED"

@@ -306,7 +306,8 @@ def test_island_setup_installs_the_modal_client_only_for_the_modal_sandbox_provi
     task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
     assert task.envs[L.HARNESS_ENVIRONMENT_PROVIDER_ENV] == L.MODAL_SANDBOX_PROVIDER
     assert L.MODAL_CLIENT_SETUP in task.setup
-    assert "--no-deps" in L.MODAL_CLIENT_SETUP and "modal==1.5.5" in L.MODAL_CLIENT_SETUP
+    assert "--no-deps --ignore-installed" in L.MODAL_CLIENT_SETUP and "modal==1.5.5" in L.MODAL_CLIENT_SETUP
+    assert 'sysconfig.get_paths()["purelib"]' in L.MODAL_CLIENT_SETUP  # must land in the island python itself
     # the check runs with the run script's PYTHONPATH, where Modal's own runtime mount is not enough
     assert "$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir" in L.MODAL_CLIENT_SETUP
     assert "import modal, grpclib, synchronicity" in L.MODAL_CLIENT_SETUP
