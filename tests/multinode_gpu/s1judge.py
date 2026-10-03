@@ -64,7 +64,8 @@ elif CASE == "g1":
     verdict = "PASS" if all(checks.values()) else "FAIL"
 elif CASE == "g2":
     head = read("pulled/apps-" + read("cluster.txt").strip() + ".txt"); worker = read("pulled/apps-" + read("cluster.txt").strip() + "-worker1.txt")
-    checks = {"rollout_engine_on_n1": bool(re.search(r"sglang", worker)), "no_rollout_engine_on_n0": not re.search(r"sglang", head),
+    # engine = the sglang::scheduler process; a bare "sglang" also matches /opt/sglang/bin/ray (probe) and build paths on the head
+    checks = {"rollout_engine_on_n1": bool(re.search(r"sglang::scheduler", worker)), "no_rollout_engine_on_n0": not re.search(r"sglang::", head),
               # trainer = the MegatronTrainRayActor process (D3 head pin: bundle 0 on the head); `ray::` alone also matches RayWorkerManager
               "trainer_on_n0": bool(re.search(r"MegatronTrainRayActor", head)),
               "no_trainer_on_n1": not re.search(r"MegatronTrainRayActor", worker),

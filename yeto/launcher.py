@@ -3486,6 +3486,40 @@ def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
             time.sleep(5)
 
 
+ECHO_TAPE_RECOVER_TIMEOUT_S = 180.0
+
+
+def _recover_echo_tape(cluster: str, collector, *, run=None, timeout: float = ECHO_TAPE_RECOVER_TIMEOUT_S) -> bool:
+    """A no-sync sky island whose echoed tape stayed incomplete: fetch the
+    island's own tape files (``~/yeto-output/rl-island-*.jsonl``, the source
+    the echo mirrors) over the ssh alias sky wrote and complete the local tape
+    from them. The S1 2x1 L40S runs (2026-10-03/04) showed ``sky.tail_logs``
+    delivering the setup lines but no run-phase line at all, so the stream
+    alone cannot be the only source. Returns whether the tape is finalized;
+    any fetch failure leaves it incomplete (fail closed) and is printed."""
+    import tempfile
+
+    run = run or subprocess.run
+    with tempfile.TemporaryDirectory(prefix="yeto-tape-") as tmp:
+        cmd = ["rsync", "-az", f"{cluster}:yeto-output/rl-island-*.jsonl", f"{tmp}/"]
+        try:
+            run(cmd, check=True, timeout=timeout, capture_output=True)
+        except Exception as e:  # noqa: BLE001 - subprocess/timeout: report, stay incomplete
+            print(f"[launcher] {cluster}: tape recovery fetch failed ({e})", file=sys.stderr)
+            return False
+        files = sorted(Path(tmp).glob("rl-island-*.jsonl"))
+        if not files:
+            print(f"[launcher] {cluster}: tape recovery found no rl-island-*.jsonl", file=sys.stderr)
+            return False
+        before = collector.count
+        complete = False
+        for f in files:
+            complete = collector.recover_from_file(f) or complete
+        print(f"[launcher] {cluster}: tape recovered from {[f.name for f in files]}: "
+              f"+{collector.count - before} record(s), finalized={complete}")
+        return complete
+
+
 def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
     import sky
 
@@ -4807,6 +4841,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                         f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
                         f"{collector.discarded} malformed prefixed line(s) discarded"
                     )
+                    if not complete and name not in modal_cfgs:
+                        # sky island: the tape file itself is reachable, complete from it
+                        complete = _recover_echo_tape(name, collector)
                     if not complete:
                         no_sync_incomplete.append(name)
                         print(
