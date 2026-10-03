@@ -2479,6 +2479,13 @@ def make_miles_island_task(
                 " --codex-backend-profile "
                 f"{shlex.quote(args.codex_backend_profile)}"
             )
+        if getattr(args, "codex_reasoning_effort", None):
+            # The learner's _preflight_codex_harness re-validates the stock
+            # profile (xhigh) and fails closed without it.
+            flags += (
+                " --codex-reasoning-effort "
+                f"{shlex.quote(args.codex_reasoning_effort)}"
+            )
         if getattr(args, "tito_allowed_append_roles", None):
             roles = " ".join(
                 shlex.quote(role) for role in args.tito_allowed_append_roles

@@ -283,3 +283,11 @@ def test_modal_island_mounts_local_data_and_passes_tb2_env(bundle, monkeypatch, 
     (img,) = state["images"]
     assert img.calls[-1][0] == "add_local_file"
     assert img.calls[-1][1] == (str(data), "/root/yeto-data.jsonl") and img.calls[-1][2] == {"copy": False}
+
+
+def test_learner_command_forwards_the_codex_reasoning_effort(bundle):
+    args = _codex_args()
+    spec = parse_gpu_spec(args.gpu)[0]
+    task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    assert " --codex-reasoning-effort xhigh" in task.run
+    assert " --codex-backend-profile qwen35_08b" in task.run
