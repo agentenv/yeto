@@ -52,7 +52,7 @@ def test_min_nodes_from_recipe_and_flag():
 def test_multinode_env_prelude():
     assert launcher.multinode_env_prelude("nebius", 1) == ""
     nebius = launcher.multinode_env_prelude("nebius", 2)
-    assert "NCCL_SOCKET_IFNAME=eth0" in nebius and "GLOO_SOCKET_IFNAME=eth0" in nebius
+    assert "/sys/class/net" in nebius and "GLOO_SOCKET_IFNAME=\"$YETO_IFACE\"" in nebius  # D6: detected on the node (Nebius NIC is network-interface-0)
     assert "NCCL_IB_DISABLE" in nebius
     assert "SOCKET_IFNAME" not in launcher.multinode_env_prelude("aws", 2)
 
@@ -75,7 +75,7 @@ def test_two_node_island_task(monkeypatch):
     task = launcher.make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
     assert task.num_nodes == 2 and task.resources.network_tier == "best"
     assert "--actor-num-nodes 1 --actor-num-gpus-per-node 8 --rl-island-gpus-per-node 8" in task.run
-    assert "export NCCL_SOCKET_IFNAME=eth0" in task.run
+    assert "/sys/class/net" in task.run and 'GLOO_SOCKET_IFNAME="$YETO_IFACE"' in task.run  # D6: detected on the node
     head, _, worker = task.run.partition("\nelse\n")
     assert "ray start --head" in head
     # G1 (2026-10-03): the dashboard/state API must be reachable from worker nodes

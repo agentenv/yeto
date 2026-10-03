@@ -221,7 +221,17 @@ GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180,
 
 # rl-multinode-island D6: per-cloud NCCL/GLOO socket settings for a multi-node
 # island (values are the CPU-side best guess; GPU task G1 confirms them).
-MULTINODE_SOCKET_IFNAME = {"nebius": "eth0", "aws": "", "gcp": "", "ssh": ""}
+# "auto": the first non-virtual interface that is up, resolved on the node
+# (G1 2026-10-03: a Nebius L40S node's NIC is "network-interface-0", shown
+# truncated as "network-interfa"; "eth0" made gloo fail with "Unable to find
+# address for: eth0" in the SGLang scheduler).  "" leaves NCCL/gloo to their
+# own detection.  NCCL_SOCKET_IFNAME in the environment always wins.
+MULTINODE_SOCKET_IFNAME = {"nebius": "auto", "aws": "", "gcp": "", "ssh": ""}
+_DETECT_IFACE = (
+    "YETO_IFACE=${NCCL_SOCKET_IFNAME:-$(for d in /sys/class/net/*; do n=$(basename \"$d\"); "
+    "case \"$n\" in lo|docker*|veth*|br-*|virbr*) continue;; esac; "
+    "[ \"$(cat \"$d/operstate\" 2>/dev/null)\" = up ] && { echo \"$n\"; break; }; done)}"
+)
 
 
 def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
@@ -231,7 +241,11 @@ def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
     lines = ["export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}",
              "export NCCL_DEBUG=${NCCL_DEBUG:-WARN}"]
     iface = MULTINODE_SOCKET_IFNAME.get(cloud, "")
-    if iface:
+    if iface == "auto":
+        lines += [_DETECT_IFACE,
+                  'echo "[yeto-island] socket interface: ${YETO_IFACE:-<none>}"',
+                  'export NCCL_SOCKET_IFNAME="$YETO_IFACE" GLOO_SOCKET_IFNAME="$YETO_IFACE"']
+    elif iface:
         lines += [f"export NCCL_SOCKET_IFNAME={iface}", f"export GLOO_SOCKET_IFNAME={iface}"]
     return "\n".join(lines) + "\n"
 

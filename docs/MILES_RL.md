@@ -482,8 +482,10 @@ performs no differential recovery. Same shape with other hostnames is fine.
 Rebuilding the island is a manual `yeto up` (design Q4 a).
 
 Operational notes: `NCCL_IB_DISABLE=1`, `NCCL_DEBUG=WARN` and (on nebius)
-`NCCL_SOCKET_IFNAME=GLOO_SOCKET_IFNAME=eth0` are exported on every node; set
-them in the environment to override. Journal records `topology` / `node_lost`
+`NCCL_SOCKET_IFNAME=GLOO_SOCKET_IFNAME=<first non-virtual interface that is
+up>` are exported on every node (a Nebius node's NIC is `network-interface-0`,
+not `eth0`; the job log prints `[yeto-island] socket interface: ...`); set them
+in the environment to override. Journal records `topology` / `node_lost`
 and the `rl_reconfiguration` event with `result=RECOVERY_REQUIRED` and an
 `error` starting with `node_lost:` are the evidence to collect before tearing
 down.

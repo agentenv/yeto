@@ -68,7 +68,7 @@
 - Modal：保持 `validate_modal_shape`；多容器岛同样走 D4。
 
 ### D6 Ray/NCCL 环境
-- rank0/worker 统一导出：`NCCL_SOCKET_IFNAME`（按云：nebius=`eth0`，aws/gcp 用默认探测），`NCCL_IB_DISABLE`（无 IB 时置 1），`GLOO_SOCKET_IFNAME`；由 launcher 根据 `spec.cloud` 选择，写入 run 脚本 prelude（与现有 `_ELASTIC_TEST_EXPORTS` 同一机制）。
+- rank0/worker 统一导出：`NCCL_SOCKET_IFNAME`（按云：nebius=节点上自动探测（第一个 up 的非虚拟接口；Nebius 实际为 `network-interface-0`，`eth0` 在 G1 实测使 gloo 失败），aws/gcp 用默认探测），`NCCL_IB_DISABLE`（无 IB 时置 1），`GLOO_SOCKET_IFNAME`；由 launcher 根据 `spec.cloud` 选择，写入 run 脚本 prelude（与现有 `_ELASTIC_TEST_EXPORTS` 同一机制）。
 - 这些值作为"待 GPU 验证确认"项，CPU 阶段只保证脚本生成正确。
 
 ### D7 弹性 cell 跨节点声明
