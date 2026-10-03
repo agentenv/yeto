@@ -29,7 +29,7 @@ MILES_CHECKOUT = Path(os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/
 #   YETO_Q38N_SNAPSHOT_PRINT=1 python -m pytest -q -s tests/test_rl_qwen3_8_next_profile.py
 GOLDEN = {
     "convert_4layer": "d1f016cb7f7d596f65c3b35339fbac965fea9d6f0452f42e3e1be328ca9bd833",
-    "launch_4layer": "dcebf0b88af82762fd45200826c5287715bb3daf1695ba6ec9552b85f51e2367",
+    "launch_4layer": "8366bddbe4f052a6af412845a581c347f08bbea01516038a3ec1700380528ac7",
 }
 
 
@@ -196,7 +196,8 @@ def test_launch_command_snapshot_and_lora_flags():
     p = q.Qwen38NextLoraProfile()
     cmd = p.launcher_command()
     _maybe_print("launch_4layer", cmd)
-    assert cmd[:3] == ["python3", "/root/miles/scripts/run_qwen3_8_next.py", "train"]
+    assert cmd[:2] == ["python3", "/root/miles/scripts/run_qwen3_8_next.py"]
+    assert "train" not in cmd  # single typer command is flattened; `train` is rejected (G3 attempt 1)
     assert "--no-check-weight-update-equal" in cmd
     assert "--no-skip-saving" in cmd and "--enable-r3" in cmd
     extra = shlex.split(cmd[cmd.index("--extra-args") + 1])

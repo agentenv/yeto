@@ -42,7 +42,9 @@ LINKS = {  # container path -> volume path (Miles' defaults, see yeto.rl.profile
 }
 
 
-def _registry_secret() -> modal.Secret:
+def _registry_secret() -> modal.Secret | None:
+    if not modal.is_local():  # the module is re-imported inside the container; the image is already built
+        return None
     auth = json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]["ghcr.io"]["auth"]
     user, token = base64.b64decode(auth).decode().split(":", 1)
     return modal.Secret.from_dict({"REGISTRY_USERNAME": user, "REGISTRY_PASSWORD": token})

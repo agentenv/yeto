@@ -331,8 +331,11 @@ class Qwen38NextLoraProfile:
     def launcher_command(self, *, extra_args: Sequence[str] = ()) -> list[str]:
         """``python scripts/run_qwen3_8_next.py train ...`` (needs MILES_SCRIPT_EXTERNAL_RAY=1)."""
         extra = [*self.lora_extra_args(), *extra_args]
+        # run_qwen3_8_next.py registers a single typer command, which typer
+        # flattens: passing the documented `train` word is rejected by the image
+        # ("Got unexpected extra argument(s) (train)", T2-S7 G3 attempt 1).
         cmd = [
-            "python3", f"{self.miles_root}/scripts/run_qwen3_8_next.py", "train",
+            "python3", f"{self.miles_root}/scripts/run_qwen3_8_next.py",
             "--model-name", self.model_name,
             "--num-nodes", str(self.num_nodes),
             "--num-gpus-per-node", str(self.num_gpus_per_node),
