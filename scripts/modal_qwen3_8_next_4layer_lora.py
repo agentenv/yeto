@@ -25,13 +25,9 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 import time
 
 import modal
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from yeto.rl.profiles.qwen3_8_next import ckpt_dir_for_gpus  # noqa: E402
 
 IMAGE = (
     "ghcr.io/michaellchung/yeto-miles-ports:c35702e-4e4148f"
@@ -67,7 +63,9 @@ vol = modal.Volume.from_name(VOLUME, create_if_missing=True)
 app = modal.App(APP, image=image)
 
 LAUNCH = f"bash {YETO}/scripts/run_qwen3_8_next_4layer_lora.sh --yeto-root {YETO}"
-CKPT_DIR = ckpt_dir_for_gpus(NUM_GPUS)  # 4 -> /root/ckpt (A-stage), 8 -> /root/ckpt/gpus8 (B-stage, EP4)
+# same mapping as yeto.rl.profiles.qwen3_8_next.ckpt_dir_for_gpus (not imported: this module is
+# re-imported inside the container where yeto lives under /root/yeto, not on sys.path)
+CKPT_DIR = "/root/ckpt" if NUM_GPUS == 4 else f"/root/ckpt/gpus{NUM_GPUS}"  # 8 -> gpus8 (B-stage, EP4)
 TORCH_DIST = f"{CKPT_DIR}/qwen3.8-flash-next-4layer_torch_dist"
 COMMON_ENV = (f"export YETO_Q38N_NUM_GPUS_PER_NODE={NUM_GPUS} YETO_Q38N_CKPT_DIR={CKPT_DIR} "
               f"PYTHONPATH={YETO}:/root/miles:/root/Megatron-LM; ")

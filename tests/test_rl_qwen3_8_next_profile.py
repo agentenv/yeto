@@ -301,7 +301,8 @@ def test_launch_script_dry_run_prints_rendered_steps():
     assert m8["parallel"]["ep"] == 4 and m8["expected_rank_trainable"] == [17_074_176, 16_415_744]
     # the Modal driver derives GPU count / ckpt dir from the same env knob
     modal_py = (ROOT / "scripts" / "modal_qwen3_8_next_4layer_lora.py").read_text()
-    assert 'f"H100:{NUM_GPUS}"' in modal_py and "ckpt_dir_for_gpus(NUM_GPUS)" in modal_py
+    assert 'f"H100:{NUM_GPUS}"' in modal_py and 'f"/root/ckpt/gpus{NUM_GPUS}"' in modal_py
+    assert "from yeto" not in modal_py  # re-imported in the container without yeto on sys.path (G0 attempt 1, A and B)
 
 
 # ------------------------------------------------------------- log judge
