@@ -307,6 +307,9 @@ def test_island_setup_installs_the_modal_client_only_for_the_modal_sandbox_provi
     assert task.envs[L.HARNESS_ENVIRONMENT_PROVIDER_ENV] == L.MODAL_SANDBOX_PROVIDER
     assert L.MODAL_CLIENT_SETUP in task.setup
     assert "--no-deps" in L.MODAL_CLIENT_SETUP and "modal==1.5.5" in L.MODAL_CLIENT_SETUP
+    # the check runs with the run script's PYTHONPATH, where Modal's own runtime mount is not enough
+    assert "$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir" in L.MODAL_CLIENT_SETUP
+    assert "import modal, grpclib, synchronicity" in L.MODAL_CLIENT_SETUP
     # the client install precedes the prefetch and fails the setup when unusable
     assert task.setup.index(L.MODAL_CLIENT_SETUP) > task.setup.index("pip install -q --no-deps -e ~/miles")
     assert "exit 1" in L.MODAL_CLIENT_SETUP

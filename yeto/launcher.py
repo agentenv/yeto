@@ -2208,11 +2208,18 @@ HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
 # on ghcr 12fcd9e5: Sandbox create/exec/terminate, ray/sglang/miles import).
 MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.codex.tb2_provider:modal_provider"
 MODAL_CLIENT_SETUP = (
-    "python3 -c 'import modal' 2>/dev/null || python3 -m pip install -q --no-deps "
+    # Unconditional: in a Modal Function container `import modal` already
+    # succeeds in the setup shell through Modal's runtime mount (/pkg +
+    # /__modal/deps), which the island's own processes cannot see, so the
+    # client and its deps must live in the island python's site-packages.
+    "python3 -m pip install -q --no-deps "
     "'modal==1.5.5' 'grpclib>=0.4.7,<0.4.10' 'synchronicity~=0.12.5' cbor2 toml "
     "types-certifi types-toml watchfiles\n"
-    "python3 -c 'import modal' || { echo '[yeto-setup] Modal client unusable in the "
-    "island python' >&2; exit 1; }"
+    # Verify with the run script's PYTHONPATH (what the learner and Ray
+    # workers see), not the setup shell's.
+    'PYTHONPATH="$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH}" '
+    "python3 -c 'import modal, grpclib, synchronicity' "
+    "|| { echo '[yeto-setup] Modal client unusable in the island python' >&2; exit 1; }"
 )
 CODEX_COMPACTION_ENV = "YETO_CODEX_COMPACTION_ENABLED"
 
