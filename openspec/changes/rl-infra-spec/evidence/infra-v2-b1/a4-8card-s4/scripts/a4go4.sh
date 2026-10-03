@@ -1,5 +1,5 @@
 #!/bin/bash
-# usage: a4go4.sh <case> <prefix> <hard_s> <wd_s>        4x L40S on Nebius eu-north1, T1R1S2 <-> T1R3S0 (trainer G0, rollout c0 on G1, standby G2/G3 = c1/c2)
+# usage: a4go4.sh <case> <prefix> <hard_s> <wd_s>        4x L40S on Nebius eu-north1, T1R1S2 <-> T1R3S0 (trainer G0, rollout c0 on G1, standby G2/G3 = c1/c2) GPU_SPEC / EXPECT_GPU_NAME overridable (default nebius:4xl40s@eu-north1 / L40S; e.g. aws:4xl4@us-east-1 / L4).
 # cases: smoke | base | e1a | e1b | wd | a4b | d123 | d4 | d5 | d6 | d7      (DRY=1: print the launch args + triggers, start nothing)
 # Starts n2run (launch, --no-island-relaunch --modal-retries 0) + n2inwatch (triggers + router sampler) + selfcheck (+GPU assert 4xL40S, markers) + case helpers + final guard (nstop -> cleanup_run.sh, judge).
 # CHAIN PROTOCOL (2026-10-03, chain 8 IV on 4xL40S; same as a8go.sh): RUN_ROOT (item dir root), CLUSTER_PREFIX/KEEP/SHARED (n2run.sh cluster reuse), NSTOP (nstop_item.sh: pull,
@@ -32,11 +32,11 @@ case $C in
 esac
 ATT=${ATTEST:-$B/cfg/attestation-4-$ATTN.json}; [ -f $ATT ] || { echo "missing $ATT (mkatt4.sh)"; exit 6; }   # ATTEST: attestation file for another code SHA (chain 8 IV: cfg/attestation-4-4-6e13c79d.json at 5cf4d902)
 COMMON="--total-steps $STEPS --rl-placement fixed-partition --rl-rollout-gpus 1 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2 --rl-elastic-resources $B/cfg/resources-4.json --rl-elastic-initial-config T1R1S2 --rl-observe-timeline --rl-elastic-attestation $ATT"
-if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:4xl40s@eu-north1 n2run.sh $P 4 $HARD $WD $COMMON $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; echo "judge: ${JUDGE:-manual}"; echo "hook: ${HOOK:-none}"; exit 0; fi
-SHA=$SHA GPU_SPEC=nebius:4xl40s@eu-north1 setsid nohup $B/n2run.sh $P 4 $HARD $WD $COMMON $EX > $R.n2run.out 2>&1 &
+if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=${GPU_SPEC:-nebius:4xl40s@eu-north1} n2run.sh $P 4 $HARD $WD $COMMON $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; echo "judge: ${JUDGE:-manual}"; echo "hook: ${HOOK:-none}"; exit 0; fi
+SHA=$SHA GPU_SPEC=${GPU_SPEC:-nebius:4xl40s@eu-north1} setsid nohup $B/n2run.sh $P 4 $HARD $WD $COMMON $EX > $R.n2run.out 2>&1 &
 sleep 10
 setsid nohup $B/n2inwatch.sh $R "$TRIG" > /dev/null 2>&1 &
-EXPECT_GPU_NAME=L40S EXPECT_GPU_N=4 setsid nohup $B/selfcheck.sh $R $P $ATT > /dev/null 2>&1 &
+EXPECT_GPU_NAME=${EXPECT_GPU_NAME:-L40S} EXPECT_GPU_N=4 setsid nohup $B/selfcheck.sh $R $P $ATT > /dev/null 2>&1 &
 setsid nohup $B/diag_pull.sh $R > /dev/null 2>&1 &
 for a in "${ARMS[@]}"; do IFS='|' read -ra parts <<< "$a"; setsid nohup $B/n2arm.sh $R "${parts[@]}" > /dev/null 2>&1 & done   # "script|arg1|arg2" (args must not contain |)
 [ -n "$HOOK" ] && setsid nohup $B/probe_after_term.sh $R $P $HOOK > $R.hook.out 2>&1 &

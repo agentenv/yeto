@@ -1,7 +1,7 @@
 #!/bin/bash
 # usage: a4go4_strict.sh <case> <prefix> <hard_s> <wd_s>    4x L40S on Nebius eu-north1, T1R1S2 <-> T1R3S0 (trainer G0, rollout c0 on G1, standby G2/G3 = c1/c2), STRICT-AVG
 # single island with the head syncer on THIS host.  = a8go_strict.sh parameterised for 4 cards (2026-10-03, chain 8 IV; PARALLEL-PLAN-S7 / T1-S7-PROGRESS 5.1):
-# NG=4, GPU_SPEC nebius:4xl40s@eu-north1, EXPECT L40S x4, cfg/resources-4.json, cells c0,c1,c2, --rl-rollout-gpus 1 --rl-standby-gpus 2, up = T1R1S2->T1R3S0 (starts c1,c2),
+# NG=4, GPU_SPEC nebius:4xl40s@eu-north1, EXPECT L40S x4, cfg/resources-4.json, cells c0,c1,c2, --rl-rollout-gpus 1 --rl-standby-gpus 2, up = T1R1S2->T1R3S0 (starts c1,c2), GPU_SPEC / EXPECT_GPU_NAME overridable (cloud fallback, e.g. GPU_SPEC=aws:4xl4@us-east-1 EXPECT_GPU_NAME=L4; fingerprint/attestation/resources-4 are GPU-model independent).
 # down = T1R3S0->T1R1S2, r7 kill_after_tx dn1 target T1R1S2, attestation-4-<N>[-<fp>] (fp_local4_strict.py / mkatt4.sh FP=fp_local4_strict.py), non-strict cases -> a4go4.sh.
 # Criteria conversion (gpu-plan-v2 9.22 rule: only card numbers and member counts change, the decision logic does not): judge r5/r7 get --trainer-world 1
 # --committed-members 3 (trainer is one rank; the committed set after up1 is c0,c1,c2; the recovery restarts c1,c2); every judged case gets --rc-file (rc=124 -> INVALID_TEST(hard_timeout)).
@@ -36,7 +36,7 @@ EXR="--rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3"
 STRICT_EX="--rl-elastic-quorum-timeout-s ${QUORUM_TIMEOUT_S:-1800}"   # pause budget = 0.5 x this must be >= every request deadline_s (600)
 req() { printf '["%s",%s,"%s",{"target":"%s","expected_config_epoch":%s,"deadline_s":%s}]' "$1" "$2" "$3" "$4" "$5" "$6"; }   # phase rid id target epoch deadline
 UPB() { req train $1 $2 T1R3S0 0 ${3:-$UP}; }; DNB() { req train $1 $2 T1R1S2 1 ${3:-600}; }
-NG=4; GPU_SPEC=nebius:4xl40s@eu-north1; TOPO_JARGS="--trainer-world 1 --committed-members 3"; RCJ="--rc-file $R/rc.txt"
+NG=4; GPU_SPEC=${GPU_SPEC:-nebius:4xl40s@eu-north1}; EXPECT_GPU_NAME=${EXPECT_GPU_NAME:-L40S}; TOPO_JARGS="--trainer-world 1 --committed-members 3"; RCJ="--rc-file $R/rc.txt"
 if [ "$C" = chk ]; then
   [ -f $B/chk_launch.py ] || { echo "missing $B/chk_launch.py"; exit 6; }
   if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=$GPU_SPEC chk_launch.sh $P $NG $HARD (no training, no attestation; checks: fork pin+workers_lost, hc_head_contraction, lora import; fail -> ABORT)"; echo "triggers=[]"; echo triggers-json-ok; echo "arms: none"; echo "tprobe: none"; echo "judge: chk_launch job status"; exit 0; fi
@@ -60,7 +60,7 @@ if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=$GPU_SPEC SYNCER_PUBLIC_IP=
 SHA=$SHA GPU_SPEC=$GPU_SPEC setsid nohup $B/n2run_strict.sh $P $NG $HARD $WD $COMMON $STRICT_EX $EX > $R.n2run.out 2>&1 &
 sleep 10
 setsid nohup $B/n2inwatch.sh $R "$TRIG" > /dev/null 2>&1 &
-EXPECT_GPU_NAME=L40S EXPECT_GPU_N=4 NSTOP=$B/nstop_item_strict.sh NSTOP_INNER=${NSTOP:-$B/nstop.sh} setsid nohup $B/selfcheck.sh $R $P $ATT > /dev/null 2>&1 &
+EXPECT_GPU_NAME=$EXPECT_GPU_NAME EXPECT_GPU_N=4 NSTOP=$B/nstop_item_strict.sh NSTOP_INNER=${NSTOP:-$B/nstop.sh} setsid nohup $B/selfcheck.sh $R $P $ATT > /dev/null 2>&1 &
 setsid nohup $B/diag_pull.sh $R > /dev/null 2>&1 &
 for a in "${ARMS[@]}"; do IFS='|' read -ra parts <<< "$a"; setsid nohup $B/n2arm.sh $R "${parts[@]}" > /dev/null 2>&1 & done   # "script|arg1|arg2" (args must not contain |)
 # in-container terminal probe (mode rec: fires on the journal's `recovery verified`, ~2 s + ~20 s Ray client; the run then still lives >= 3 rounds ~45 s; main evidence = files)

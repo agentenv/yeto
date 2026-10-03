@@ -1,6 +1,6 @@
 #!/bin/bash
 # Retry chain 8 (gated A4/E1-D chain on the new image) every 20 min while Nebius eu-north1 has no 8xH100 capacity. Stops at the first chain that gets past provisioning, or at the deadline.
-# env (all optional): PREFIX START_N SHA ATTEST ITEMS FIRST SPENT MAX_S + A8GO RESET CAP_USD PRICE_PER_MIN THREAD_MAX (chain 8 IV, 4xL40S: A8GO=a4go4_strict.sh PRICE_PER_MIN=0.1523).
+# env (all optional): PREFIX START_N SHA ATTEST ITEMS FIRST SPENT MAX_S + A8GO RESET CAP_USD PRICE_PER_MIN THREAD_MAX (chain 8 IV, 4xL40S: A8GO=a4go4_strict.sh PRICE_PER_MIN=0.1523). GPU_SPEC / EXPECT_GPU_NAME pass through to A8GO (cloud fallback, e.g. GPU_SPEC=aws:4xl4@us-east-1 EXPECT_GPU_NAME=L4 ITEMS="r6:4800 r7:4000 r5:4000 d4:2400" PRICE_PER_MIN=0.0767); capacity grep (ResourcesUnavailable/Failed to acquire resources) is cloud-agnostic.
 B=/home/michael/work/gpu-b1-runs; DEADLINE=$(( $(date +%s) + ${MAX_S:-43200} )); N=${START_N:-1}
 log(){ echo "[retry8 $(date -u +%FT%TZ)] $*"; }
 while [ $(date +%s) -lt $DEADLINE ]; do
