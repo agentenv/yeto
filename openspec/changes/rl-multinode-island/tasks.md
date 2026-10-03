@@ -31,14 +31,20 @@
 
 ## 2. 本地演练（CPU，多进程模拟多节点 Ray，D11）
 
-> 2026-10-01 主 agent 决定：§2 暂缓——本机线程数贴近 GPU 链守卫（ulimit 4096），本地 Ray 集群会打断在跑的链；等主 agent 通知后再做。
+> 2026-10-01 暂缓（线程守卫）；2026-10-02 GPU 链暂停后主 agent 放行；2026-10-03 完成。解释器：`/tmp/review-miles-venv/bin/python`（ray 2.58.0；yeto-venv 无 ray）。冒烟 `ray.init(num_cpus=4)` 5.8 s 通过。证据：`infra-drafts/s1-sim/`（summary.txt、各用例 .log、run1/ 为首轮含两处脚本缺陷的记录）。本机已知环境问题：driver 注册 Ray 偶发挂起（A27B 同源，`RegisterClient`），脚本按日志识别后在新进程重试（首轮 pg_blocks 重试 1 次）；该 venv 需先 import torch 再 import ray（numpy 双初始化）。
 
-- [ ] 2.1 演练脚本 `tests/multinode_sim/run_sim.sh`：单机起 2 个 Ray 进程（不同 `--temp-dir`，`--num-gpus=8`，资源标签 `yeto_node:0/1`），`YETO_MULTINODE_SIM=1`；输出到 `/home/michael/work/infra-drafts/s1-sim/`。验证：`ray status` 显示 2 节点 16 "GPU"。
-- [ ] 2.2 PG 分块演练：在 sim 上创建 16 bundle PACK PG，`StartupBundles` 断言通过，打印 `p → (node, local)` 表。验证：表与 D3 一致；日志落盘。
-- [ ] 2.3 cell 切分与 bind 演练：用 `ForkMembership` 假件声明 T8R8 cell，`bind_members` 跨节点目标被拒、同节点通过。验证：断言日志。
-- [ ] 2.4 故障注入演练：kill 第二个 Ray 进程 → driver 10 s 内发出 `node_lost` → `RECOVERY_REQUIRED`；重启 learner 假件 → 前置检查拒绝；重新拉起第二个 Ray 进程 → 前置检查通过并进入（假）差分恢复。验证：事件带时间戳落盘，顺序正确。
-- [ ] 2.5 回收演练：`down` 走假云 API，模拟一个节点"未确认" → rc≠0。
-- [ ] 2.6 演练总结写入 `openspec/changes/rl-multinode-island/progress.md`（命令、日志路径、通过/失败）。
+- [x] 2.1 演练脚本 `tests/multinode_sim/run_sim.sh`：单机起 2 个 Ray 进程（不同 `--temp-dir`，`--num-gpus=8`，资源标签 `yeto_node:0/1`），`YETO_MULTINODE_SIM=1`；输出到 `/home/michael/work/infra-drafts/s1-sim/`。验证：`ray status` 显示 2 节点 16 "GPU"。
+  - 完成记录（2026-10-03，CPU 通过）：`tests/multinode_sim/run_sim.sh`：head `--node-ip-address=127.0.0.1 --num-gpus=4 --resources yeto_node:0` + worker `yeto_node:1`，每用例 `timeout 300`，结束 `ray stop --force`；线程数 8351 → 9077（2 节点）→ 8352。
+- [x] 2.2 PG 分块演练：在 sim 上创建 16 bundle PACK PG，`StartupBundles` 断言通过，打印 `p → (node, local)` 表。验证：表与 D3 一致；日志落盘。
+  - 完成记录（2026-10-03，CPU 通过）：`sim.py pg_blocks`：16→8 bundle PACK PG，`placement_group_table.bundles_to_node_id` 作 node_resolver，`StartupBundles` 分块断言通过并打印 p→(node,local) 表；交错顺序被 `BundleMapError` 拒绝（fail closed）。
+- [x] 2.3 cell 切分与 bind 演练：用 `ForkMembership` 假件声明 T8R8 cell，`bind_members` 跨节点目标被拒、同节点通过。验证：断言日志。
+  - 完成记录（2026-10-03，CPU 通过）：`sim.py cells_bind`：T4R2S2 engine 2 → cells c0=[4,5] start / c1=[6,7] standby / c2 unbound，无跨节点；`bind_members(c1, p3,p4)` 跨节点被拒且 fork 零调用；`(p6,p7)` 同节点通过（view+rebind）。
+- [x] 2.4 故障注入演练：kill 第二个 Ray 进程 → driver 10 s 内发出 `node_lost` → `RECOVERY_REQUIRED`；重启 learner 假件 → 前置检查拒绝；重新拉起第二个 Ray 进程 → 前置检查通过并进入（假）差分恢复。验证：事件带时间戳落盘，顺序正确。
+  - 完成记录（2026-10-03，CPU 通过）：`sim.py node_loss`：真实 pkill worker Ray → `check_nodes` 0.7 s 内 `node_lost` → RECOVERY_REQUIRED（journal `node_lost` alive=1）；缺节点重启 → 前置检查拒绝、无 restore/start/stop；节点回来后同 state dir 仍 RECOVERY_REQUIRED（Q4 a 终态），新 state dir 2 节点 RUNNING。
+- [x] 2.5 回收演练：`down` 走假云 API，模拟一个节点"未确认" → rc≠0。
+  - 完成记录（2026-10-03，CPU 通过）：`sim.py teardown`：probe = 带 `yeto_node:1` 标签的存活 Ray 节点 id；down 杀 worker → 逐实例确认 True；down 不动 → UNCONFIRMED False。
+- [x] 2.6 演练总结写入 `openspec/changes/rl-multinode-island/progress.md`（命令、日志路径、通过/失败）。
+  - 完成记录（2026-10-03，CPU 通过）：见本节 blockquote 与 `openspec/changes/rl-multinode-island/progress.md`。
 
 ## 3. GPU 验证（放最后；不勾；需主 agent 另批；预算 ≈$60 硬上限）
 

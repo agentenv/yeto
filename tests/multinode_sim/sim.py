@@ -1,0 +1,264 @@
+"""rl-multinode-island tasks 2.2-2.5: local multi-process Ray rehearsal (CPU only).
+
+Two Ray nodes on one machine (``run_sim.sh``), each with 4 fake GPU slots and a
+``yeto_node:<k>`` resource label standing in for the node identity (same IP, so
+Miles' (ip, gpu) sort is emulated by sorting on the label). Cases:
+
+  pg_blocks   PACK placement group -> node-blocked logical bundles asserted
+  cells_bind  cells cut per node; bind_members refuses a cross-node target
+  node_loss   worker node killed -> RECOVERY_REQUIRED; restart refuses recovery
+              while the node is missing, recovers once it is back
+  teardown    per-instance teardown confirmation against the live Ray nodes
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch  # noqa: F401 - before ray: avoids numpy's double CPU-dispatcher init in this venv
+import ray
+
+ADDRESS = os.environ.get("YETO_SIM_ADDRESS", "127.0.0.1:6379")
+HEAD_DIR = os.environ.get("YETO_SIM_HEAD_DIR", "/tmp/yeto-s1-ray-h")
+WORKER_DIR = os.environ.get("YETO_SIM_WORKER_DIR", "/tmp/yeto-s1-ray-w")
+G = 4
+RAY_BIN = os.environ.get("YETO_SIM_RAY", "ray")
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+def labelled_nodes() -> dict[str, dict]:
+    """node id -> {label, gpus} for alive nodes carrying a yeto_node label."""
+    out = {}
+    for n in ray.nodes():
+        if not n.get("Alive"):
+            continue
+        res = n.get("Resources") or {}
+        labels = [k for k in res if k.startswith("yeto_node:")]
+        if labels:
+            out[n["NodeID"]] = {"label": labels[0], "gpus": int(res.get("GPU", 0))}
+    return out
+
+
+def probe() -> dict[str, int]:
+    """Same shape as entry._ray_alive_nodes, restricted to the simulated nodes."""
+    return {nid: info["gpus"] for nid, info in labelled_nodes().items()}
+
+
+def wait_nodes(n: int, timeout: float = 90) -> dict:
+    t = time.time()
+    while time.time() - t < timeout:
+        nodes = labelled_nodes()
+        if len(nodes) == n:
+            return nodes
+        time.sleep(1)
+    raise TimeoutError(f"expected {n} labelled nodes, have {labelled_nodes()}")
+
+
+def kill_worker():
+    subprocess.run(["pkill", "-f", WORKER_DIR + "/"], check=False)
+    for _ in range(10):
+        if subprocess.run(["pgrep", "-f", WORKER_DIR + "/"], capture_output=True).returncode:
+            return
+        time.sleep(1)
+    subprocess.run(["pkill", "-KILL", "-f", WORKER_DIR + "/"], check=False)
+
+
+def start_worker():
+    subprocess.run([RAY_BIN, "start", f"--address={ADDRESS}", f"--num-gpus={G}", "--num-cpus=4",
+                    '--resources={"yeto_node:1": 1}', f"--temp-dir={WORKER_DIR}"],
+                   check=True, capture_output=True, timeout=120)
+
+
+@dataclass
+class _Info:
+    """Stand-in for Miles' PlacementGroupInfo (positional (pg, bundles, gpus))."""
+    pg: object
+    pg_reordered_bundle_indices: list
+    pg_reordered_gpu_ids: list
+
+
+# ------------------------------------------------------------------ 2.2
+def startup_bundles(shuffle=False):
+    from yeto.rl.engine.miles_adapter.bundles import StartupBundles
+
+    pg = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * (2 * G), strategy="PACK")
+    ray.get(pg.ready(), timeout=120)
+    table = ray.util.placement_group_table(pg)
+    b2n = table["bundles_to_node_id"]
+    nodes = labelled_nodes()
+    # Miles sorts bundles by (node ip, gpu id); same ip here -> sort by label, bundle
+    order = sorted(range(2 * G), key=lambda b: (nodes[b2n[b]]["label"], b))
+    if shuffle:
+        order = order[::2] + order[1::2]
+    pool_gpus = tuple(f"p{i}" for i in range(2 * G))
+    view = _Info(pg, order, [b % G for b in order])
+    sb = StartupBundles(pool_gpus=pool_gpus, views={"actor": view}, placement_map=None,
+                        gpus_per_node=G,
+                        node_resolver=lambda pg_, b: ray.util.placement_group_table(pg_)["bundles_to_node_id"][b])
+    return pg, sb, table, nodes, order
+
+
+def case_pg_blocks():
+    from yeto.rl.engine.miles_adapter.bundles import BundleMapError
+    from yeto.rl.engine.multinode import Topology
+
+    pg, sb, table, nodes, order = startup_bundles()
+    topo = Topology(2, G)
+    log("placement group bundles_to_node_id:", {b: nodes[n]["label"] for b, n in table["bundles_to_node_id"].items()})
+    rows = []
+    for p, gpu in enumerate(sb.pool_gpus):
+        node, local = topo.slot_of(p)
+        rows.append((p, gpu, node, local, nodes[sb.node_of(gpu)]["label"], order[p]))
+        assert nodes[sb.node_of(gpu)]["label"] == f"yeto_node:{node}", rows[-1]
+    log("logical bundle p -> (node, local) [label, physical bundle]:")
+    for r in rows:
+        log(f"  p={r[0]} {r[1]} -> (n{r[2]}, gpu{r[3]})  {r[4]}  bundle#{r[5]}")
+    log("node_blocks:", [nodes[n]["label"] for n in sb.node_blocks])
+    ray.util.remove_placement_group(pg)
+    try:
+        startup_bundles(shuffle=True)
+    except BundleMapError as exc:
+        log("shuffled order rejected (fail closed):", exc)
+    else:
+        raise AssertionError("shuffled order was accepted")
+    log("PASS pg_blocks")
+
+
+# ------------------------------------------------------------------ 2.3
+def case_cells_bind():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import test_rl_e3_wiring_e1 as e3
+
+    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+    from yeto.rl.engine.miles_adapter.rollout import MembershipPlanError, MilesRolloutPool
+
+    req = PlacementRequest("fixed-partition", trainer_gpus=4, rollout_gpus=2, gpus_per_engine=2,
+                           standby_gpus=2, gpus_per_node=G, model_parallel=2,
+                           rollout_cell_names=("c0", "c1", "c2"))
+    pm = req.placement_map_arg
+    log("placement map:", json.dumps(pm))
+    for c in pm["rollout_cells"]:
+        assert len({b // G for b in c["bundles"]}) <= 1, c
+    assert pm["rollout_cells"][0]["bundles"] == [4, 5] and pm["rollout_cells"][1]["bundles"] == [6, 7]
+    pg, sb, table, nodes, order = startup_bundles()
+    manager = e3.FakeManager()
+    pool = MilesRolloutPool(
+        inference_controller=e3.FakeController(running=("c0",)), rollout_executor=None, metadata=None,
+        expected_policy=lambda: (0, "h"), runner=SimpleNamespace(run=asyncio.run),
+        declared_cells=("c0", "c1", "c2"), worker_manager=manager, bundles=sb, gpus_per_engine=2)
+    pool.members = lambda: frozenset({"engine:c0"})
+    try:
+        pool.bind_members(frozenset({"engine:c1"}), ("p3", "p4"))
+    except MembershipPlanError as exc:
+        log("cross-node bind refused:", exc)
+    else:
+        raise AssertionError("cross-node bind accepted")
+    assert not manager.calls
+    view = pool.bind_members(frozenset({"engine:c1"}), ("p6", "p7"))
+    log("same-node bind ok:", view, [c[0] for c in manager.calls])
+    assert [c[0] for c in manager.calls] == ["view", "rebind"]
+    ray.util.remove_placement_group(pg)
+    log("PASS cells_bind")
+
+
+# ------------------------------------------------------------------ 2.4
+def case_node_loss():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from test_rl_reconfig_recovery import _island
+
+    from yeto.rl.engine.journal import read_journal
+
+    tmp = Path(tempfile.mkdtemp(prefix="yeto-s1-sim-"))
+    kw = {"topology": (2, G), "node_probe": probe}
+    driver, ctl, fork, *_ = _island(tmp, controller_kw=kw)
+    assert ctl.check_nodes() is None, ctl.recovery_required
+    log("2 nodes alive, check_nodes -> None; topology record:",
+        [r for r in read_journal(tmp / "state/reconfig") if r["kind"] == "topology"][0]["alive"])
+    t0 = time.time()
+    kill_worker()
+    log("worker killed (pkill by temp dir)")
+    err = None
+    while time.time() - t0 < 120:
+        err = ctl.check_nodes()
+        if err:
+            break
+        time.sleep(1)
+    assert err and "node_lost" in err, err
+    log(f"node_lost detected after {time.time() - t0:.1f}s:", err)
+    assert ctl.inspect().health == "RECOVERY_REQUIRED" and not ctl.admission_open
+    lost = [r for r in read_journal(tmp / "state/reconfig") if r["kind"] == "node_lost"]
+    assert lost and len(lost[0]["alive"]) == 1, lost
+    ctl.close()
+    # restart while the node is still missing: no differential recovery
+    _d2, ctl2, fork2, *_ = _island(tmp, controller_kw=kw)
+    assert ctl2.inspect().health == "RECOVERY_REQUIRED", ctl2.inspect()
+    assert not [c for c in fork2.calls if c[0] in ("restore", "start", "stop")], fork2.calls
+    log("restart with 1/2 nodes: RECOVERY_REQUIRED without fork membership calls:", ctl2.recovery_required)
+    ctl2.close()
+    start_worker()
+    wait_nodes(2)
+    # Q4 a): RECOVERY_REQUIRED is a journal terminal state; the node coming back does
+    # not revive the island (manual rebuild), while a fresh island on the same two
+    # nodes (new node id for the worker) opens RUNNING.
+    _d3, ctl3, *_ = _island(tmp, controller_kw=kw)
+    assert ctl3.inspect().health == "RECOVERY_REQUIRED", ctl3.inspect()
+    log("worker back (new node id): the journal keeps RECOVERY_REQUIRED (manual rebuild, Q4 a)")
+    ctl3.close()
+    fresh = Path(tempfile.mkdtemp(prefix="yeto-s1-sim-fresh-"))
+    _d4, ctl4, *_ = _island(fresh, controller_kw=kw)
+    assert ctl4.inspect().health == "RUNNING" and ctl4.check_nodes() is None, ctl4.inspect()
+    log("fresh island on the rebuilt 2 nodes: RUNNING; alive =",
+        [v["label"] for v in labelled_nodes().values()])
+    ctl4.close()
+    log("PASS node_loss")
+
+
+# ------------------------------------------------------------------ 2.5
+def case_teardown():
+    from yeto.launcher import terminate_and_verify
+
+    worker_ids = lambda: [nid for nid, v in labelled_nodes().items() if v["label"] == "yeto_node:1"]  # noqa: E731
+    assert worker_ids()
+
+    def down_kills_worker():
+        kill_worker()
+        time.sleep(3)
+
+    ok = terminate_and_verify(None, "sim-island", probe=worker_ids, down=down_kills_worker,
+                              sleep_fn=lambda s: time.sleep(min(s, 5)), attempts=6, num_nodes=2)
+    log("down kills the node instance -> confirmed:", ok)
+    assert ok is True
+    start_worker()
+    wait_nodes(2)
+    ok = terminate_and_verify(None, "sim-island", probe=worker_ids, down=lambda: None,
+                              sleep_fn=lambda s: None, attempts=1, num_nodes=2)
+    log("down leaves the instance alive -> unconfirmed:", ok)
+    assert ok is False
+    log("PASS teardown")
+
+
+CASES = {"pg_blocks": case_pg_blocks, "cells_bind": case_cells_bind, "node_loss": case_node_loss,
+         "teardown": case_teardown}
+
+if __name__ == "__main__":
+    case = sys.argv[1]
+    ray.init(address=ADDRESS, include_dashboard=False, log_to_driver=False,
+             _temp_dir=HEAD_DIR, namespace=f"sim-{case}")
+    try:
+        nodes = wait_nodes(2)
+        log("nodes:", {v["label"]: v["gpus"] for v in nodes.values()})
+        CASES[case]()
+    finally:
+        ray.shutdown()
