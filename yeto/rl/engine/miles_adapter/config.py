@@ -511,6 +511,8 @@ def placement_request(config) -> PlacementRequest:
         expert_parallel=int(getattr(parallel, "expert_parallel", 1) or 1),
         node_parallel=int(parallel.tensor_parallel) * _cp,
         bundle_map=getattr(parallel, "bundle_map", None),
+        allow_cross_node_tp=bool(getattr(parallel, "allow_cross_node_tp", False)),
+        allow_cross_node_engine_tp=bool(getattr(parallel, "allow_cross_node_engine_tp", False)),
     )
     if request.topology is not None:
         # rl-multinode-island Q2: the trainer rectangle the placement rules derive

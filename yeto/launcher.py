@@ -311,6 +311,22 @@ def rl_trainer_shape(args, spec) -> tuple[int, int]:
         raise ValueError(f"--rl-placement fixed-partition on {spec}: {exc}") from None
 
 
+def rl_cross_node_switches(args) -> tuple[bool, bool]:
+    """``(allow_cross_node_tp, allow_cross_node_engine_tp)`` (ruling 2026-10-04 v2):
+    the CLI flags ``--rl-allow-cross-node-tp`` / ``--rl-allow-cross-node-engine-tp`` OR
+    the initial elastic cfg's ``parallel.allow_cross_node_*`` (set by
+    ``_check_ports_infra_switches``); either spelling lifts the default preference and
+    both are forwarded to the learner."""
+    cfg = getattr(args, "rl_elastic_initial_cfg_switches", None) or {}
+    return (bool(getattr(args, "rl_allow_cross_node_tp", False) or cfg.get("allow_cross_node_tp")),
+            bool(getattr(args, "rl_allow_cross_node_engine_tp", False) or cfg.get("allow_cross_node_engine_tp")))
+
+
+def rl_cross_node_flags(args) -> str:
+    tp, engine = rl_cross_node_switches(args)
+    return (" --rl-allow-cross-node-tp" if tp else "") + (" --rl-allow-cross-node-engine-tp" if engine else "")
+
+
 def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] | None:
     """Q2 (2026-10-04 ruling, mixed rollout/trainer nodes): the trainer shape and
     role -> logical bundle map derived from the ``--rl-elastic-initial-config``'s
@@ -354,7 +370,8 @@ def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] 
             gpus_per_engine=engine, standby_gpus=standby,
             gpus_per_node=spec.gpus_per_node if spec.num_nodes > 1 else None,
             model_parallel=tp * pp * cp, node_parallel=tp * cp, expert_parallel=ep,
-            bundle_map=bundle_map)
+            bundle_map=bundle_map, allow_cross_node_tp=rl_cross_node_switches(args)[0],
+            allow_cross_node_engine_tp=rl_cross_node_switches(args)[1])
         shape = request.trainer_shape()
     except ValueError as exc:
         raise ValueError(f"--rl-elastic-initial-config {name!r} placement on {spec}: {exc}") from None
@@ -403,9 +420,11 @@ def rl_min_nodes(args, spec) -> int:
         # cross nodes); only tp*cp must stay inside a node. EP shares ranks with
         # TP x DP (trainer_replica_gpus), it is not a further multiplier.
         replica = trainer_replica_gpus({"tp": tp, "cp": cp, "pp": pp, "ep": ep, "etp": etp})
+        cross_tp, cross_engine = rl_cross_node_switches(args)
         derived = min_nodes(trainer_min_gpus=replica, rollout_min_gpus=engine,
                             standby_gpus=int(getattr(args, "rl_standby_gpus", 0) or 0),
-                            gpus_per_node=spec.gpus_per_node, node_parallel=tp * cp)
+                            gpus_per_node=spec.gpus_per_node, node_parallel=tp * cp,
+                            allow_cross_node_tp=cross_tp, allow_cross_node_engine=cross_engine)
     except TopologyError as exc:
         raise ValueError(f"recipe parallelism does not fit {spec}: {exc}") from None
     return max(derived, explicit)
@@ -1385,6 +1404,10 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     # declares a topology; rl_island_layout derives the trainer shape from it.
     args.rl_elastic_initial_placement_slots = getattr(
         configs[args.rl_elastic_initial_config], "placement_slots", None)
+    # ruling 2026-10-04 v2: cfg parallel.allow_cross_node_* count like the CLI flags
+    args.rl_elastic_initial_cfg_switches = {
+        k: bool(getattr(configs[args.rl_elastic_initial_config], k, False))
+        for k in ("allow_cross_node_tp", "allow_cross_node_engine_tp")}
     attestation = getattr(args, "rl_elastic_attestation", None)
     args.rl_elastic_attestation_json = None
     if attestation:
@@ -1875,10 +1898,20 @@ def _prepare_rl_args(
             require_min_nodes(spec, rl_min_nodes(args, spec))
             actor_nodes, actor = rl_trainer_shape(args, spec)
             node_parallel = args.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
-            if spec.num_nodes > 1 and (node_parallel > spec.gpus_per_node
-                                       or spec.gpus_per_node % node_parallel):
+            cross_tp, cross_engine = rl_cross_node_switches(args)
+            if spec.num_nodes > 1 and not cross_tp and (node_parallel > spec.gpus_per_node
+                                                        or spec.gpus_per_node % node_parallel):
                 raise ValueError("RL TP*CP must fit and divide one node (rl-multinode-island Q1/Q3: "
-                                 "TP stays inside a node; EP/PP may span nodes)")
+                                 "TP stays inside a node by default; EP/PP may span nodes; "
+                                 "--rl-allow-cross-node-tp or cfg parallel.allow_cross_node_tp lifts it)")
+            if spec.num_nodes > 1 and cross_tp:
+                print("[launcher] WARNING: --rl-allow-cross-node-tp: the trainer TP*CP group "
+                      f"({node_parallel}) may span nodes (NCCL over the inter-node fabric); "
+                      "journaled as topology.layout.cross_node_tp=1")
+            if spec.num_nodes > 1 and cross_engine:
+                print("[launcher] WARNING: --rl-allow-cross-node-engine-tp: a rollout engine of "
+                      f"{args.rollout_num_gpus_per_engine} GPUs may span whole nodes (sglang "
+                      "nnodes>1; scales as one replica)")
             spec = dataclasses.replace(spec, num_nodes=actor_nodes, gpus_per_node=actor)
         if spec.total_gpus % model_parallel:
             raise ValueError(
@@ -2669,6 +2702,7 @@ def make_miles_island_task(
         f" --actor-num-gpus-per-node {rl_trainer_shape(args, spec)[1]}"
         + (f" --rl-island-gpus-per-node {spec.gpus_per_node}" if spec.num_nodes > 1 else "")
         + rl_island_bundle_map_flag(args, spec)
+        + (rl_cross_node_flags(args) if spec.num_nodes > 1 else "")
         + f" --tensor-parallel {args.tensor_parallel}"
         f" --pipeline-parallel {args.pipeline_parallel}"
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"

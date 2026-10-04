@@ -47,6 +47,13 @@ class PlacementRequest:
     model_parallel: int = 1
     expert_parallel: int = 1
     node_parallel: int | None = None
+    # Ruling 2026-10-04 v2: "TP stays inside a node" is the DEFAULT preference, not
+    # a hard limit. Explicit opt-ins (cfg ``parallel.allow_cross_node_tp`` /
+    # ``--rl-allow-cross-node-tp``; ``parallel.allow_cross_node_engine_tp`` /
+    # ``--rl-allow-cross-node-engine-tp``) let the trainer tp*cp group, or a rollout
+    # engine (sglang TP as whole-node replicas), span nodes.
+    allow_cross_node_tp: bool = False
+    allow_cross_node_engine_tp: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in ("colocated", "fixed-partition"):
@@ -125,7 +132,10 @@ class PlacementRequest:
         if self.kind == "colocated":
             slots["rollout"] = []  # the same GPUs as the trainer; the trainer rule covers them
         reason = node_placement_rejection(slots, node_parallel=self.in_node_parallel,
-                                          expert_parallel=self.expert_parallel, gpus_per_engine=per)
+                                          expert_parallel=self.expert_parallel, gpus_per_engine=per,
+                                          allow_cross_node_tp=bool(self.allow_cross_node_tp),
+                                          allow_cross_node_engine=bool(self.allow_cross_node_engine_tp),
+                                          gpus_per_node=g)
         if reason:
             raise ValueError(reason)
 
@@ -184,9 +194,10 @@ class PlacementRequest:
         from yeto.rl.engine.multinode import chunk_by_node
 
         topology = self.topology
-        started, _rest = chunk_by_node(pm["rollout"], topology, g)
+        cross = bool(self.allow_cross_node_engine_tp)
+        started, _rest = chunk_by_node(pm["rollout"], topology, g, allow_cross_node=cross)
         runs = [(list(run), True) for run in started]
-        standby_runs, _rest = chunk_by_node(list(pm.get("standby", [])), topology, g)
+        standby_runs, _rest = chunk_by_node(list(pm.get("standby", [])), topology, g, allow_cross_node=cross)
         runs += [(list(run), False) for run in standby_runs]
         cells = []
         for index, name in enumerate(self.rollout_cell_names):

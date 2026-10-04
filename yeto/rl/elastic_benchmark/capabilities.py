@@ -35,6 +35,9 @@ _ARM_EDGE_KINDS = {
 
 
 PARALLEL_DIMS = ("tp", "pp", "cp", "ep")
+# Ruling 2026-10-04 v2: boolean opt-ins under ``parallel`` that lift the default
+# "TP stays inside a node" preference (trainer tp*cp group / rollout engine TP).
+PARALLEL_SWITCHES = ("allow_cross_node_tp", "allow_cross_node_engine_tp")
 EDGE_RECOVERY = ("reinit-rollout", "cut-restore", "rebuild-old")
 CAPACITY_KEYS = ("gpu_mem_peak_gib", "cpu_rss_peak_gib", "pinned_gib", "object_store_gib", "disk_gib")
 
@@ -55,6 +58,9 @@ class ResourceConfig:
     placement_slots: dict[str, Any] | None = None
     gradient_accumulation_declared: int | None = None
     capacity: dict[str, float] | None = None
+    # Ruling 2026-10-04 v2: explicit cross-node TP opt-ins (cfg ``parallel.*``).
+    allow_cross_node_tp: bool = False
+    allow_cross_node_engine_tp: bool = False
 
     @property
     def total(self) -> int:
@@ -244,7 +250,10 @@ def _with_node_slots(config: ResourceConfig, topology, resources: dict[str, Any]
                             f"S{counts[2]} but declares T{config.trainer} R{config.rollout} S{config.standby}")
     reason = node_placement_rejection(slots, node_parallel=config.node_parallel,
                                       expert_parallel=config.dims["ep"],
-                                      gpus_per_engine=config.rollout_engine_gpus)
+                                      gpus_per_engine=config.rollout_engine_gpus,
+                                      allow_cross_node_tp=config.allow_cross_node_tp,
+                                      allow_cross_node_engine=config.allow_cross_node_engine_tp,
+                                      gpus_per_node=topology.gpus_per_node)
     if reason:
         raise ManifestError(f"config {config.name!r}: {reason}")
     return dataclasses.replace(config, placement_slots=slots)
@@ -252,9 +261,14 @@ def _with_node_slots(config: ResourceConfig, topology, resources: dict[str, Any]
 
 def _parse_config_extras(name: str, block: dict[str, Any]) -> dict[str, Any]:
     extras: dict[str, Any] = {}
-    parallel = block.get("parallel", {})
-    if not isinstance(parallel, dict) or set(parallel) - set(PARALLEL_DIMS):
-        raise ManifestError(f"config {name!r}.parallel keys must be among {PARALLEL_DIMS}")
+    parallel = dict(block.get("parallel", {})) if isinstance(block.get("parallel", {}), dict) else None
+    if parallel is None or set(parallel) - set(PARALLEL_DIMS) - set(PARALLEL_SWITCHES):
+        raise ManifestError(f"config {name!r}.parallel keys must be among {PARALLEL_DIMS + PARALLEL_SWITCHES}")
+    for switch in PARALLEL_SWITCHES:
+        value = parallel.pop(switch, False)
+        if not isinstance(value, bool):
+            raise ManifestError(f"config {name!r}.parallel.{switch} must be true/false")
+        extras[switch] = value
     for dim, size in parallel.items():
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ManifestError(f"config {name!r}.parallel.{dim} must be a positive integer")
@@ -263,6 +277,10 @@ def _parse_config_extras(name: str, block: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(engine, int) or isinstance(engine, bool) or engine < 1:
         raise ManifestError(f"config {name!r}.rollout_engine_gpus must be a positive integer")
     extras["rollout_engine_gpus"] = engine
+    if extras["allow_cross_node_engine_tp"] and int(block.get("rollout", 0) or 0) % engine:
+        # ruling 2026-10-04 v2: a cross-node TP engine scales as one whole replica
+        raise ManifestError(f"config {name!r}: rollout {block.get('rollout')} GPUs is not a whole "
+                            f"number of {engine}-GPU cross-node engine replicas")
     if "placement" in block:
         placement = block["placement"]
         if not isinstance(placement, dict) or set(placement) - {"trainer", "rollout", "standby"}:
@@ -330,13 +348,14 @@ def placement_rejection(config: ResourceConfig, pool: dict[str, dict[str, Any]])
     for engine in engines:
         if len(engine) != config.rollout_engine_gpus:
             return f"rollout engine {engine} does not have {config.rollout_engine_gpus} GPUs"
-        if len({pool[u].get("node") for u in engine}) > 1:
+        if len({pool[u].get("node") for u in engine}) > 1 and not config.allow_cross_node_engine_tp:
             return f"rollout engine {engine} spans nodes"
-    mp = config.node_parallel  # tp*cp stays in a node; EP/PP may span nodes
-    for start in range(0, len(trainer), mp):
-        group = trainer[start : start + mp]
-        if len({pool[u].get("node") for u in group}) > 1:
-            return f"trainer in-node (tp*cp) group {group} spans nodes"
+    mp = config.node_parallel  # tp*cp stays in a node by default; EP/PP may span nodes
+    if not config.allow_cross_node_tp:
+        for start in range(0, len(trainer), mp):
+            group = trainer[start : start + mp]
+            if len({pool[u].get("node") for u in group}) > 1:
+                return f"trainer in-node (tp*cp) group {group} spans nodes"
     return None
 
 

@@ -87,7 +87,8 @@ REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 STORE_MANIFEST = "STORE-MANIFEST.json"  # Q4 (C5): written last by sync_checkpoint_store
-LAYOUT_KEYS = ("tp", "pp", "cp", "ep", "trainer", "nodes", "gpus_per_node", "bundle_map")
+LAYOUT_KEYS = ("tp", "pp", "cp", "ep", "trainer", "nodes", "gpus_per_node", "bundle_map",
+               "cross_node_tp", "cross_node_engine_tp")
 # 4.4: same-shape trainer rebuild behind the ports (cut saved, trainer being
 # disposed/rebuilt/restored). A restart that finds it cannot tell whether the
 # trainer was restored: RECOVERY_REQUIRED (4.5).
@@ -173,6 +174,8 @@ def island_layout(cfg: Any, topology: tuple[int, int],
     layout["trainer"] = int(getattr(cfg, "trainer", 0) or 0)
     layout["nodes"], layout["gpus_per_node"] = int(topology[0]), int(topology[1])
     layout["bundle_map"] = None
+    layout["cross_node_tp"] = int(bool(getattr(cfg, "allow_cross_node_tp", False)))
+    layout["cross_node_engine_tp"] = int(bool(getattr(cfg, "allow_cross_node_engine_tp", False)))
     for key, value in dict(given or {}).items():
         if key not in LAYOUT_KEYS:
             raise Rejected(f"unknown layout key {key!r} (known: {LAYOUT_KEYS})")
@@ -629,7 +632,8 @@ class IslandController:
                 return tuple(tuple(str(u) for u in node) for node in r["uuids"])
         return None
 
-    def record_gpu_pool(self, result: Any, *, source: str, accept_rebind: bool) -> str | None:
+    def record_gpu_pool(self, result: Any, *, source: str, accept_rebind: bool,
+                        roles: Mapping[str, str] | None = None) -> str | None:
         """Startup precondition (Q6): journal one ``gpu_pool`` record for this incarnation
         (observed per-node uuids, what they were compared against, rebind + mapping,
         diffs, accepted) and, when the reconciliation refused the pool, close this
@@ -642,6 +646,7 @@ class IslandController:
                      uuids=[list(node) for node in result.observed], source=source,
                      accept_rebind=bool(accept_rebind), rebind=bool(result.rebind),
                      mapping=dict(result.mapping), diffs=list(result.diffs),
+                     roles=dict(roles or {}),  # 2026-10-04 v2: uuid -> role (one role per uuid)
                      accepted=bool(result.ok), error=result.error)
         if result.ok:
             self.sync_checkpoint_store("gpu_pool")
@@ -1164,6 +1169,11 @@ class IslandController:
             raise Rejected("rollout-only edge changes the trainer")
         if src.rollout_engine_gpus != dst.rollout_engine_gpus:
             raise Rejected("rollout-only edge changes the engine shape")
+        from .multinode import engine_replica_delta_rejection
+
+        why = engine_replica_delta_rejection(src.rollout, dst.rollout, src.rollout_engine_gpus)
+        if why is not None:  # ruling 2026-10-04 v2: scale by whole engine replicas only
+            raise Rejected(f"rollout-only edge {source}->{target}: {why}")
         if src.total != dst.total:
             raise Rejected("edge changes the pool size (pool changes are pool transactions)")
         if self.profile is None or self.profile.execution_mode == "colocated-serial":

@@ -180,7 +180,27 @@ def normalize_placement(placement: Mapping[str, Any], topology: Topology,
                     for engine in placement.get("rollout", ())],
         "standby": [resolve_slot(e, topology, pool) for e in placement.get("standby", ())],
     }
+    dup = placement_overlap(out)
+    if dup:
+        raise TopologyError(f"placement uses GPU {dup} more than once (mixed placement never "
+                            "overlaps: trainer, rollout and standby slots are exclusive)")
     return out
+
+
+def placement_overlap(slots: Mapping[str, Any]) -> str | None:
+    """Ruling 2026-10-04 v2 (mixed placement does not overlap by default): the first
+    ``n<k>:<g>`` slot that appears twice across trainer / rollout engines / standby,
+    or None when every slot is used once."""
+    seen: set[tuple[int, int]] = set()
+    flat: list[tuple[int, int]] = [tuple(s) for s in slots.get("trainer", ())]
+    for engine in slots.get("rollout", ()):
+        flat += [tuple(s) for s in engine]
+    flat += [tuple(s) for s in slots.get("standby", ())]
+    for slot in flat:
+        if slot in seen:
+            return f"n{slot[0]}:{slot[1]}"
+        seen.add(slot)
+    return None
 
 
 def spans_nodes(slots: Iterable[tuple[int, int]]) -> bool:
@@ -248,36 +268,90 @@ def leading_bundle_map(trainer: int, rollout: int, standby: int) -> dict[str, tu
             "standby": tuple(range(trainer + rollout, trainer + rollout + standby))}
 
 
+def engine_replica_rejection(engine: Sequence[tuple[int, int]], gpus_per_node: int | None) -> str | None:
+    """Ruling 2026-10-04 v2: a rollout engine whose TP spans nodes (sglang
+    ``nnodes = gpus_per_engine // num_gpus_per_node``, Miles ``specs/inference.py``)
+    is one replica made of WHOLE nodes: every node it touches contributes all its
+    ``gpus_per_node`` GPUs. Anything else (a node contributing a part) is refused;
+    None when the engine is legal (or stays on one node)."""
+    if not spans_nodes(engine):
+        return None
+    counts: dict[int, int] = {}
+    for node, _ in engine:
+        counts[node] = counts.get(node, 0) + 1
+    if gpus_per_node is None:
+        if len(set(counts.values())) != 1:
+            return (f"cross-node rollout engine {list(engine)} must take whole nodes, got "
+                    + ", ".join(f"n{n}:{c}" for n, c in sorted(counts.items())))
+        return None
+    bad = {n: c for n, c in counts.items() if c != gpus_per_node}
+    if bad:
+        return (f"cross-node rollout engine {list(engine)} must take whole {gpus_per_node}-GPU "
+                "nodes (one replica = all its nodes), got "
+                + ", ".join(f"n{n}:{c}" for n, c in sorted(bad.items())))
+    return None
+
+
+def engine_replica_delta_rejection(source_rollout: int, target_rollout: int,
+                                   engine_gpus: int) -> str | None:
+    """Ruling 2026-10-04 v2: a rollout up/down edge scales by WHOLE engine replicas
+    (all of a cross-node engine's nodes together); removing or adding one node of
+    an engine is refused. None when both sides are whole replicas."""
+    per = max(1, int(engine_gpus))
+    for name, value in (("source", source_rollout), ("target", target_rollout)):
+        if int(value) % per:
+            return (f"{name} rollout {value} GPUs is not a whole number of {per}-GPU engine "
+                    "replicas (a cross-node TP engine scales as one replica; a single node "
+                    "of it cannot be removed)")
+    return None
+
+
 def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | None = None,
                              model_parallel: int = 1, expert_parallel: int = 1,
-                             gpus_per_engine: int | None = None) -> str | None:
+                             gpus_per_engine: int | None = None,
+                             allow_cross_node_tp: bool = False,
+                             allow_cross_node_engine: bool = False,
+                             gpus_per_node: int | None = None) -> str | None:
     """Design D4 rules on a normalized placement; None when legal.
 
-    1. each rollout engine on one node; 2. each trainer in-node group
-    (``node_parallel`` = tp*cp consecutive trainer slots; ``model_parallel`` is
-    the pre-2026-10-04 spelling, used when ``node_parallel`` is None) on one
-    node and dividing the trainer GPUs on every node; 3. EP and PP groups MAY
-    span nodes (Q1/Q3 ruling) -- EP only needs ``tp*cp*ep`` to divide the
-    trainer GPUs; 5. the trainer occupies a rectangle (Miles derives local_rank
-    from RANK % gpus_per_node)."""
+    1. each rollout engine on one node -- the DEFAULT preference; with
+    ``allow_cross_node_engine`` (cfg ``parallel.allow_cross_node_engine_tp`` /
+    ``--rl-allow-cross-node-engine-tp``, ruling 2026-10-04 v2) an engine may span
+    nodes as one replica of whole nodes (:func:`engine_replica_rejection`);
+    2. each trainer in-node group (``node_parallel`` = tp*cp consecutive trainer
+    slots; ``model_parallel`` is the pre-2026-10-04 spelling, used when
+    ``node_parallel`` is None) on one node and dividing the trainer GPUs on every
+    node -- the DEFAULT preference; ``allow_cross_node_tp`` (cfg
+    ``parallel.allow_cross_node_tp`` / ``--rl-allow-cross-node-tp``) lifts both
+    (divisibility of the trainer total stays); 3. EP and PP groups MAY span nodes
+    (Q1/Q3 ruling) -- EP only needs ``tp*cp*ep`` to divide the trainer GPUs;
+    5. the trainer occupies a rectangle (Miles derives local_rank from
+    RANK % gpus_per_node)."""
     for engine in slots.get("rollout", ()):
         if gpus_per_engine is not None and len(engine) != gpus_per_engine:
             return f"rollout engine {engine} does not have {gpus_per_engine} GPUs"
         if spans_nodes(engine):
-            return f"rollout engine {engine} spans nodes"
+            if not allow_cross_node_engine:
+                return (f"rollout engine {engine} spans nodes (default: an engine stays on one "
+                        "node; allow_cross_node_engine_tp / --rl-allow-cross-node-engine-tp lifts it)")
+            why = engine_replica_rejection(engine, gpus_per_node)
+            if why:
+                return why
     trainer = list(slots.get("trainer", ()))
     np_ = max(1, int(model_parallel if node_parallel is None else node_parallel))
     if len(trainer) % np_:
         return f"trainer GPUs {len(trainer)} not divisible by in-node parallel tp*cp {np_}"
-    for start in range(0, len(trainer), np_):
-        group = trainer[start:start + np_]
-        if spans_nodes(group):
-            return f"trainer in-node (tp*cp) group {group} spans nodes"
+    if not allow_cross_node_tp:
+        for start in range(0, len(trainer), np_):
+            group = trainer[start:start + np_]
+            if spans_nodes(group):
+                return (f"trainer in-node (tp*cp) group {group} spans nodes (default: TP stays "
+                        "inside a node; allow_cross_node_tp / --rl-allow-cross-node-tp lifts it)")
     try:
         _nodes, per_node = rectangular_trainer(trainer) if trainer else (0, 0)
     except TopologyError as exc:
         return str(exc)
-    if trainer and per_node % np_:
+    if trainer and per_node % np_ and not allow_cross_node_tp:
         return (f"in-node parallel tp*cp {np_} does not divide the {per_node} trainer GPUs "
                 "on one node")
     ep = max(1, int(expert_parallel))
@@ -298,15 +372,31 @@ def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | N
 
 
 def chunk_by_node(bundles: Sequence[int], topology: Topology | None, per: int,
-                  ) -> tuple[list[list[int]], list[int]]:
+                  *, allow_cross_node: bool = False) -> tuple[list[list[int]], list[int]]:
     """Split a role's logical bundles into engine runs of ``per`` that never
     cross a node (design D7). Returns ``(runs, leftover)``; without a topology
-    this is the legacy consecutive split."""
+    this is the legacy consecutive split. With ``allow_cross_node`` (ruling
+    2026-10-04 v2) and ``per`` larger than a node, a run is ``per // gpus_per_node``
+    consecutive WHOLE nodes (each fully owned by this role); partial nodes stay
+    leftover."""
     bundles = list(bundles)
     if topology is None:
         runs = [bundles[i:i + per] for i in range(0, len(bundles) - per + 1, per)]
         rest = bundles[len(runs) * per:]
         return runs, rest
+    g = topology.gpus_per_node
+    if allow_cross_node and per > g:
+        if per % g:
+            raise TopologyError(f"cross-node engine of {per} GPUs is not whole {g}-GPU nodes")
+        by_node: dict[int, list[int]] = {}
+        for b in bundles:
+            by_node.setdefault(topology.node_of(b), []).append(b)
+        whole = [sorted(by_node[n]) for n in sorted(by_node)
+                 if {topology.slot_of(b)[1] for b in by_node[n]} == set(range(g))]
+        k = per // g
+        runs = [sum(whole[i:i + k], []) for i in range(0, len(whole) - k + 1, k)]
+        used = {b for run in runs for b in run}
+        return runs, [b for b in bundles if b not in used]
     runs: list[list[int]] = []
     rest: list[int] = []
     block: list[int] = []
@@ -326,7 +416,8 @@ def chunk_by_node(bundles: Sequence[int], topology: Topology | None, per: int,
 
 
 def min_nodes(*, trainer_min_gpus: int, rollout_min_gpus: int, standby_gpus: int,
-              gpus_per_node: int, node_parallel: int | None = None) -> int:
+              gpus_per_node: int, node_parallel: int | None = None,
+              allow_cross_node_tp: bool = False, allow_cross_node_engine: bool = False) -> int:
     """Design D8: the smallest island (whole nodes) that fits one trainer model
     replica (``trainer_min_gpus`` = :func:`trainer_replica_gpus`, which may span
     nodes when it exceeds a node: Q1/Q3 ruling), one rollout engine and the standby
@@ -341,9 +432,10 @@ def min_nodes(*, trainer_min_gpus: int, rollout_min_gpus: int, standby_gpus: int
     if node_parallel is not None:
         if isinstance(node_parallel, bool) or not isinstance(node_parallel, int) or node_parallel < 1:
             raise TopologyError("node_parallel must be a positive integer")
-        if node_parallel > gpus_per_node or gpus_per_node % node_parallel:
+        if not allow_cross_node_tp and (node_parallel > gpus_per_node or gpus_per_node % node_parallel):
             raise TopologyError(f"in-node parallel tp*cp {node_parallel} must fit and divide a "
-                                f"{gpus_per_node}-GPU node (TP stays inside a node)")
+                                f"{gpus_per_node}-GPU node (TP stays inside a node by default; "
+                                "--rl-allow-cross-node-tp lifts it)")
         if trainer_min_gpus % node_parallel:
             raise TopologyError(f"trainer replica {trainer_min_gpus} GPUs is not a multiple of "
                                 f"tp*cp {node_parallel}")
@@ -351,8 +443,13 @@ def min_nodes(*, trainer_min_gpus: int, rollout_min_gpus: int, standby_gpus: int
         raise TopologyError(f"trainer replica {trainer_min_gpus} GPUs is not a whole number "
                             f"of {gpus_per_node}-GPU nodes")
     if rollout_min_gpus > gpus_per_node:
-        raise TopologyError(f"rollout engine {rollout_min_gpus} GPUs does not fit a "
-                            f"{gpus_per_node}-GPU node")
+        if not allow_cross_node_engine:
+            raise TopologyError(f"rollout engine {rollout_min_gpus} GPUs does not fit a "
+                                f"{gpus_per_node}-GPU node (default: an engine stays on one node; "
+                                "--rl-allow-cross-node-engine-tp lifts it)")
+        if rollout_min_gpus % gpus_per_node:
+            raise TopologyError(f"cross-node rollout engine {rollout_min_gpus} GPUs is not a whole "
+                                f"number of {gpus_per_node}-GPU nodes")
     return max(1, math.ceil((trainer_min_gpus + rollout_min_gpus + standby_gpus) / gpus_per_node))
 
 
@@ -533,3 +630,71 @@ def merge_declared_pool(cfg: Sequence[Sequence[str | None]] | None,
     if len(cfg) != len(base) or any(len(c) != len(b) for c, b in zip(cfg, base)):
         return tuple(tuple(node) for node in cfg)  # shape changed: the cfg rules, shape check fails
     return tuple(tuple(c if c is not None else b for c, b in zip(cn, bn)) for cn, bn in zip(cfg, base))
+
+
+# ------------------------------------------------------------ UUID rebind safety (2026-10-04 v2)
+ROLE_NAMES = ("trainer", "rollout", "standby")
+
+
+def role_uuid_map(bundle_map: Mapping[str, Sequence[int]] | None, observed_flat: Sequence[str],
+                  *, counts: tuple[int, int, int] | None = None) -> dict[str, str]:
+    """uuid -> role for this incarnation: the role -> logical bundle map (None = the
+    leading layout of ``counts`` = (trainer, rollout, standby)) applied to the observed
+    pool in bundle order. Raises TopologyError when a bundle is outside the pool or a
+    uuid would get two roles (duplicate occupation)."""
+    if bundle_map is None:
+        if counts is None:
+            raise TopologyError("role_uuid_map needs a bundle map or role counts")
+        bundle_map = leading_bundle_map(*counts)
+    flat = [str(u) for u in observed_flat]
+    roles: dict[str, str] = {}
+    for role in ROLE_NAMES:
+        for b in bundle_map.get(role, ()):
+            if not 0 <= int(b) < len(flat):
+                raise TopologyError(f"{role} bundle {b} is outside the {len(flat)}-GPU pool")
+            uuid = flat[int(b)]
+            if uuid in roles and roles[uuid] != role:
+                raise TopologyError(f"GPU {uuid} would belong to both {roles[uuid]} and {role} "
+                                    "(role conflict after rebind)")
+            if uuid in roles:
+                raise TopologyError(f"GPU {uuid} occupied twice by {role}")
+            roles[uuid] = role
+    return roles
+
+
+def occupation_rejection(observed_flat: Sequence[str], roles: Mapping[str, str],
+                         other_islands: Mapping[str, Sequence[str]] | None = None) -> str | None:
+    """(a) duplicate occupation: every observed uuid is unique in the pool and none is
+    held by another active island (``other_islands``: island id -> uuids it binds);
+    (b) role conflict: every pool uuid has exactly one role. None when safe."""
+    flat = [str(u) for u in observed_flat]
+    if len(set(flat)) != len(flat):
+        dup = sorted({u for u in flat if flat.count(u) > 1})
+        return f"GPU uuid(s) {dup} appear more than once in the pool (duplicate occupation)"
+    for island, uuids in (other_islands or {}).items():
+        clash = sorted(set(flat) & {str(u) for u in uuids})
+        if clash:
+            return f"GPU uuid(s) {clash} are bound by another active island {island!r}"
+    missing = [u for u in flat if u not in roles]
+    if missing:
+        return f"GPU uuid(s) {missing} have no role after rebind"
+    extra = sorted(set(roles) - set(flat))
+    if extra:
+        return f"role map names uuid(s) {extra} outside the observed pool"
+    return None
+
+
+def stale_incarnation_rejection(baseline_flat: Sequence[str] | None, observed_flat: Sequence[str],
+                                live_incarnations: Mapping[str, str], mine: str) -> str | None:
+    """(c) stale re-entry: a uuid of the journal baseline that is still held by a live
+    process of an OLD incarnation (``live_incarnations``: uuid -> incarnation id of the
+    process marker found on its node, e.g. the ``yeto_rl_incarnation`` marker file / Ray
+    resource label) refuses this incarnation; the operator runs ``yeto down`` first.
+    None when no old incarnation still holds a baseline or observed GPU."""
+    pool = {str(u) for u in (baseline_flat or ())} | {str(u) for u in observed_flat}
+    stale = sorted((u, inc) for u, inc in live_incarnations.items()
+                   if str(u) in pool and str(inc) and str(inc) != str(mine))
+    if stale:
+        return ("old incarnation(s) still hold GPU(s) " + ", ".join(f"{u}@{inc}" for u, inc in stale)
+                + "; a new incarnation must not re-enter on them: run `yeto down` first")
+    return None
