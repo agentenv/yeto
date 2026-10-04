@@ -84,6 +84,9 @@ FORK_COMMITS: frozenset[str] = frozenset({
     # weight-update group): `git diff --name-only e3a11ab38..1023269 -- miles`
     # has no loss_hub file; arguments.py only adds parser entries.
     "1023269412bf4e54a1d95c8d2deaee795871aa72",
+    # c35702e = ab904f43a + fork-a27-worker-loss 857fc9592 (A27-2: actor/cell/group/
+    # updater/worker_handle external-failure handling); still no loss_hub file.
+    "c35702eefcf2862cee155e46870e6ad30568d2c6",
 })
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}

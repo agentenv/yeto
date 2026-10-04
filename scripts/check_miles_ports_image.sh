@@ -18,6 +18,7 @@ mkdir -p "$OUT/x"
   'root/miles/.git/config' \
   'root/miles/miles_plugins/models/qwen3_8_next/*.py' \
   'root/miles/miles/utils/workers/ray_worker_manager.py' \
+  'root/miles/miles/utils/workers/worker_handle.py' \
   'root/miles/miles/backends/training_utils/weight_update/protocols/broadcast.py' \
   'sgl-workspace/sglang/.git/HEAD' 'sgl-workspace/sglang/.git/refs/heads/*' 'sgl-workspace/sglang/.git/packed-refs' \
   'sgl-workspace/sglang/.git/config' \
@@ -44,6 +45,7 @@ chk sglang_origin "$(git config -f sgl-workspace/sglang/.git/config remote.origi
 chk m3_lora_plugin_present "$(test -f root/miles/miles_plugins/models/qwen3_8_next/lora.py && echo yes)" yes
 chk qwen4exp_lora_hooks "$(grep -c supported_lora_modules sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py | awk '{print ($1>0)?"yes":"no"}')" yes
 chk a27_workers_lost "$(grep -c workers_lost root/miles/miles/utils/workers/ray_worker_manager.py | awk '{print ($1>0)?"yes":"no"}')" yes
+chk a27b_external_failure_error "$(grep -c ExternalFailureError root/miles/miles/utils/workers/worker_handle.py | awk '{print ($1>0)?"yes":"no"}')" yes
 echo "megatron_head: $(resolve root/Megatron-LM 2>/dev/null || echo unknown)"
 chk d2_hc_head_contraction "$(grep -c hc_head_contraction root/Megatron-LM/megatron/core/transformer/transformer_block.py | awk '{print ($1>0)?"yes":"no"}')" yes
 echo "out=$OUT"; exit $fail
