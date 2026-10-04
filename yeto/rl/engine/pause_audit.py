@@ -106,8 +106,12 @@ def pause_decision(
     idle_flow_timeout_s: float | None = None,
     quorum_timeout_s: float = DEFAULT_QUORUM_TIMEOUT_S,
     margin: float = DEFAULT_MARGIN,
+    eval_in_flight: int = 0,
 ) -> PauseDecision:
     """May the island pause now for ``expected_pause_s``? Fail closed."""
+    if eval_in_flight:
+        # 2.3: an overlapped eval still holds the rollout role (overlap.py).
+        return PauseDecision(False, f"{eval_in_flight} overlapped evals in flight")
     if profile is None:
         return PauseDecision(False, "unknown profile: reconfiguration disabled")
     if profile.algorithm_spec_sha256 is None:
