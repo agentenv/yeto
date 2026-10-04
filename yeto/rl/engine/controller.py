@@ -87,6 +87,7 @@ REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 STORE_MANIFEST = "STORE-MANIFEST.json"  # Q4 (C5): written last by sync_checkpoint_store
+STORE_ROUND_CUTS = "round-cuts"  # M4: round cuts live in the store itself (miles_adapter.round_cut)
 LAYOUT_KEYS = ("tp", "pp", "cp", "ep", "trainer", "nodes", "gpus_per_node", "bundle_map",
                "cross_node_tp", "cross_node_engine_tp")
 # 4.4: same-shape trainer rebuild behind the ports (cut saved, trainer being
@@ -679,8 +680,8 @@ class IslandController:
         info = json.loads(manifest.read_text(encoding="utf-8"))
         self.state_dir.mkdir(parents=True, exist_ok=True)
         for child in store.iterdir():
-            if child.name == STORE_MANIFEST:
-                continue
+            if child.name in (STORE_MANIFEST, STORE_ROUND_CUTS):
+                continue  # round cuts are read in place from the store (M4)
             target = self.state_dir / child.name
             if child.is_dir():
                 shutil.copytree(child, target, dirs_exist_ok=True)
@@ -689,7 +690,7 @@ class IslandController:
         return {"restored_from": {k: info.get(k) for k in ("incarnation", "reason", "config_epoch",
                                                               "wall_time", "seq")}}
 
-    def sync_checkpoint_store(self, reason: str) -> bool:
+    def sync_checkpoint_store(self, reason: str, *, skip_if_recovery: bool = False) -> bool:
         """Copy the state dir (journal, epochs, cuts, ledger, inbox...) to the store and
         write ``STORE-MANIFEST.json`` last (a reader trusts the copy only with it). Runs
         under the record lock so no journal line is torn by a concurrent append. A
@@ -699,6 +700,8 @@ class IslandController:
         if store is None:
             return False
         with self._record_lock:
+            if skip_if_recovery and self.recovery_required:
+                return False  # M4 round cut: never carry a terminal island to the store
             info = {"incarnation": self.incarnation["id"], "reason": reason, "wall_time": self._wall(),
                     "config_epoch": self.journal.epochs.config_epoch,
                     "seq": int(self.journal.records[-1].get("seq", 0)) if self.journal.records else 0,
