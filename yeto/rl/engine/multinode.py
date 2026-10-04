@@ -174,6 +174,52 @@ def rectangular_trainer(slots: Sequence[tuple[int, int]]) -> tuple[int, int]:
     return len(counts), sizes.pop()
 
 
+def trainer_layout(slots: Mapping[str, Any], topology: Topology,
+                   ) -> tuple[int, int, dict[str, tuple[int, ...]]]:
+    """Q2 (2026-10-04 ruling: rollout and trainer may share a node on different
+    GPUs): ``(actor_num_nodes, actor_num_gpus_per_node, bundle_map)`` of a
+    normalized placement (``normalize_placement`` output). Miles' trainer rank
+    ``r`` lives on logical node ``r // per_node`` as local rank ``r % per_node``
+    (train_actor local_rank), so the trainer slots, in placement order, must be
+    a rectangle of consecutive per-node runs: every node it uses holds the same
+    number of trainer GPUs, each node's run is listed together and occupies a
+    contiguous ascending range of local GPUs. Anything else is refused
+    (TopologyError) with the offending node named. The bundle map lists each
+    role's logical bundles in placement order (rollout engine by engine)."""
+    trainer = [tuple(s) for s in slots.get("trainer", ())]
+    nodes, per_node = rectangular_trainer(trainer)
+    for start in range(0, len(trainer), per_node):
+        run = trainer[start:start + per_node]
+        node_ids = {node for node, _ in run}
+        if len(node_ids) != 1:
+            raise TopologyError(
+                f"trainer ranks {start}..{start + per_node - 1} must sit on one node, got "
+                + ", ".join(f"n{n}:{g}" for n, g in run))
+        gpus = [g for _, g in run]
+        if gpus != list(range(gpus[0], gpus[0] + per_node)):
+            raise TopologyError(
+                f"trainer GPUs on n{node_ids.pop()} must be one contiguous ascending run, got "
+                + ", ".join(f"n{n}:{g}" for n, g in run))
+    seen_nodes = [node for node, _ in trainer[::per_node]]
+    if len(set(seen_nodes)) != len(seen_nodes):
+        raise TopologyError("trainer runs on one node must be listed together: "
+                            + ", ".join(f"n{n}:{g}" for n, g in trainer))
+    bundle_map = {
+        "trainer": tuple(topology.bundle_of(n, g) for n, g in trainer),
+        "rollout": tuple(topology.bundle_of(n, g) for engine in slots.get("rollout", ())
+                         for n, g in engine),
+        "standby": tuple(topology.bundle_of(n, g) for n, g in slots.get("standby", ())),
+    }
+    return nodes, per_node, bundle_map
+
+
+def leading_bundle_map(trainer: int, rollout: int, standby: int) -> dict[str, tuple[int, ...]]:
+    """The upstream offset layout: trainer first, then rollout, then standby."""
+    return {"trainer": tuple(range(trainer)),
+            "rollout": tuple(range(trainer, trainer + rollout)),
+            "standby": tuple(range(trainer + rollout, trainer + rollout + standby))}
+
+
 def node_placement_rejection(slots: Mapping[str, Any], *, model_parallel: int = 1,
                              expert_parallel: int = 1, gpus_per_engine: int | None = None,
                              ) -> str | None:

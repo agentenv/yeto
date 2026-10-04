@@ -299,6 +299,9 @@ def rl_trainer_shape(args, spec) -> tuple[int, int]:
             "--rl-placement fixed-partition needs --rl-rollout-gpus + --rl-standby-gpus "
             f"< island GPUs ({spec.total_gpus})"
         )
+    layout = rl_island_layout(args, spec)
+    if layout is not None:
+        return layout[0], layout[1]
     from .rl.engine.multinode import Topology, TopologyError, rectangular_trainer
 
     topology = Topology(spec.num_nodes, spec.gpus_per_node)
@@ -306,6 +309,72 @@ def rl_trainer_shape(args, spec) -> tuple[int, int]:
         return rectangular_trainer([topology.slot_of(b) for b in range(trainer)])
     except TopologyError as exc:
         raise ValueError(f"--rl-placement fixed-partition on {spec}: {exc}") from None
+
+
+def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] | None:
+    """Q2 (2026-10-04 ruling, mixed rollout/trainer nodes): the trainer shape and
+    role -> logical bundle map derived from the ``--rl-elastic-initial-config``'s
+    explicit ``placement`` (``args.rl_elastic_initial_placement_slots``, set by
+    ``_check_ports_infra_switches``), or None when the manifest declares no
+    placement (the leading-bundle layout of :func:`rl_trainer_shape` stays).
+    The placement must match ``--gpu`` / ``--rl-rollout-gpus`` / ``--rl-standby-gpus``
+    (island totals), be a rectangle of contiguous per-node runs
+    (``multinode.trainer_layout``) and agree with ``PlacementRequest.trainer_shape``
+    (the learner-side rule set); any disagreement fails here, before any cloud work."""
+    slots = getattr(args, "rl_elastic_initial_placement_slots", None)
+    if slots is None or getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        return None
+    from .rl.engine.miles_adapter.placement import PlacementRequest
+    from .rl.engine.multinode import Topology, TopologyError, trainer_layout
+
+    rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
+    standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
+    name = getattr(args, "rl_elastic_initial_config", None)
+    counts = (len(slots["trainer"]), sum(len(e) for e in slots["rollout"]), len(slots["standby"]))
+    if counts[1] != rollout or counts[2] != standby or sum(counts) != spec.total_gpus:
+        raise ValueError(
+            f"--rl-elastic-initial-config {name!r} placement is T{counts[0]} R{counts[1]} "
+            f"S{counts[2]} but the launch asks for --rl-rollout-gpus {rollout} "
+            f"--rl-standby-gpus {standby} on {spec} ({spec.total_gpus} GPUs)")
+    topology = Topology(spec.num_nodes, spec.gpus_per_node)
+    try:
+        nodes, per_node, bundle_map = trainer_layout(slots, topology)
+    except TopologyError as exc:
+        raise ValueError(f"--rl-elastic-initial-config {name!r} placement on {spec}: {exc}") from None
+    engine = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
+    mp = int(getattr(args, "tensor_parallel", 1) or 1) * int(getattr(args, "pipeline_parallel", 1) or 1)
+    try:
+        request = PlacementRequest(
+            kind="fixed-partition", trainer_gpus=counts[0], rollout_gpus=rollout,
+            gpus_per_engine=engine, standby_gpus=standby,
+            gpus_per_node=spec.gpus_per_node if spec.num_nodes > 1 else None,
+            model_parallel=mp, bundle_map=bundle_map)
+        shape = request.trainer_shape()
+    except ValueError as exc:
+        raise ValueError(f"--rl-elastic-initial-config {name!r} placement on {spec}: {exc}") from None
+    if shape != (nodes, per_node):
+        raise ValueError(
+            f"--rl-elastic-initial-config {name!r}: launcher trainer shape {(nodes, per_node)} "
+            f"disagrees with PlacementRequest.trainer_shape {shape}")
+    return nodes, per_node, bundle_map
+
+
+def rl_island_bundle_map_flag(args, spec) -> str:
+    """`` --rl-island-bundle-map JSON`` for the learner when the cfg placement differs
+    from the leading-bundle layout; "" otherwise (single node and whole-node
+    trainer layouts are byte-identical to the pre-Q2 launcher)."""
+    layout = rl_island_layout(args, spec)
+    if layout is None:
+        return ""
+    from .rl.engine.multinode import leading_bundle_map
+
+    bundle_map = layout[2]
+    counts = tuple(len(bundle_map[r]) for r in ("trainer", "rollout", "standby"))
+    if bundle_map == leading_bundle_map(*counts):
+        return ""
+    payload = json.dumps({k: list(v) for k, v in bundle_map.items()}, sort_keys=True,
+                         separators=(",", ":"))
+    return f" --rl-island-bundle-map {shlex.quote(payload)}"
 
 
 def rl_min_nodes(args, spec) -> int:
@@ -1269,6 +1338,10 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         raise ValueError(f"--rl-elastic-initial-config {args.rl_elastic_initial_config!r} "
                          f"is not a manifest config ({sorted(configs)})")
     args.rl_elastic_resources_json = json.dumps(resources, sort_keys=True, separators=(",", ":"))
+    # Q2: the initial config's explicit (node, gpu) placement, when the manifest
+    # declares a topology; rl_island_layout derives the trainer shape from it.
+    args.rl_elastic_initial_placement_slots = getattr(
+        configs[args.rl_elastic_initial_config], "placement_slots", None)
     attestation = getattr(args, "rl_elastic_attestation", None)
     args.rl_elastic_attestation_json = None
     if attestation:
@@ -2545,6 +2618,7 @@ def make_miles_island_task(
         f" --actor-num-nodes {rl_trainer_shape(args, spec)[0]}"
         f" --actor-num-gpus-per-node {rl_trainer_shape(args, spec)[1]}"
         + (f" --rl-island-gpus-per-node {spec.gpus_per_node}" if spec.num_nodes > 1 else "")
+        + rl_island_bundle_map_flag(args, spec)
         + f" --tensor-parallel {args.tensor_parallel}"
         f" --pipeline-parallel {args.pipeline_parallel}"
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
