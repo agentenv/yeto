@@ -1218,6 +1218,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         given.append("--rl-elastic-tool-wait-board")
     if getattr(args, "rl_elastic_trainer_edges", False):
         given.append("--rl-elastic-trainer-edges")
+    if getattr(args, "rl_elastic_accept_rebind", False):
+        given.append("--rl-elastic-accept-rebind")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
@@ -1352,6 +1354,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             flags += " --rl-elastic-tool-wait-board"
         if getattr(args, "rl_elastic_trainer_edges", False):
             flags += " --rl-elastic-trainer-edges"
+        if getattr(args, "rl_elastic_accept_rebind", False):
+            flags += " --rl-elastic-accept-rebind"
         for name, flag in _ELASTIC_PAUSE_FLAGS:
             value = getattr(args, name, None)
             if value is not None:

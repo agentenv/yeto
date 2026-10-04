@@ -528,6 +528,40 @@ class IslandController:
         self._enter_recovery(None, f"node_lost: {why}; the island does not run on fewer nodes")
         return self.recovery_required
 
+    # ----------------------------------------------- GPU pool binding (Q6, 2026-10-04)
+    def gpu_pool_baseline(self) -> tuple[tuple[str, ...], ...] | None:
+        """Per-node GPU uuids bound by the last accepted ``gpu_pool`` journal record
+        (an earlier incarnation), or None when this island never journaled a pool."""
+        for r in reversed(self.journal.records):
+            if r.get("kind") == "gpu_pool" and r.get("accepted") and r.get("uuids"):
+                return tuple(tuple(str(u) for u in node) for node in r["uuids"])
+        return None
+
+    def record_gpu_pool(self, result: Any, *, source: str, accept_rebind: bool) -> str | None:
+        """Startup precondition (Q6): journal one ``gpu_pool`` record for this incarnation
+        (observed per-node uuids, what they were compared against, rebind + mapping,
+        diffs, accepted) and, when the reconciliation refused the pool, close this
+        incarnation (``recovery_required = "gpu_pool: ..."``, no journal phase record so a
+        restart with ``--rl-elastic-accept-rebind`` may bind the new pool) and return
+        why; None when accepted.
+        ``source`` names the declared side (``cfg`` / ``journal`` / ``cfg+journal`` /
+        ``none``)."""
+        self._record("gpu_pool", tx_id=None, incarnation=self.incarnation["id"],
+                     uuids=[list(node) for node in result.observed], source=source,
+                     accept_rebind=bool(accept_rebind), rebind=bool(result.rebind),
+                     mapping=dict(result.mapping), diffs=list(result.diffs),
+                     accepted=bool(result.ok), error=result.error)
+        if result.ok:
+            return None
+        # Fail closed for this incarnation (admission closed, the entry exits), but NOT
+        # a journal terminal: unlike node loss, a changed pool is bound by an explicit
+        # restart with --rl-elastic-accept-rebind (ruling 2026-10-04), which the replay
+        # of a RECOVERY_REQUIRED phase record would forbid forever.
+        self.recovery_required = (f"gpu_pool: {result.error}; this incarnation refuses to "
+                                  "start on an unreconciled GPU pool")
+        self.admission_open = False
+        return result.error
+
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler
 
