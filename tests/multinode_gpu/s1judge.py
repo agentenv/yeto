@@ -38,6 +38,42 @@ rounds_trained = sorted({e.get("rollout_id") for e in phases if e.get("phase") =
 generates = [e for e in phases if e.get("phase") == "generate"]
 gpu_names = " ".join(read("pulled/" + f) for f in os.listdir(os.path.join(R, "pulled")) if f.startswith("gpu-")) if os.path.isdir(os.path.join(R, "pulled")) else ""
 checks, notes = {}, []
+# ---- ruling 2026-10-04 v2 evidence helpers (field sources in comments; see MULTINODE-GAP-S8.md §8.6) ----
+local_rounds = sorted((e for e in events if e.get("event") == "rl_local_round"), key=lambda e: e.get("local_round_id", 0))
+publications = sorted((e for e in events if e.get("event") == "rl_publication"), key=lambda e: e.get("policy_version", -1))
+readiness = [e for e in events if e.get("event") == "rl_readiness"]
+spans = [e for e in events if e.get("event") == "rl_timeline_span"]
+
+def pub_hashes():  # rl_publication["sync/publication_payload_hash"] per policy_version (driver.publish)
+    return [(p.get("policy_version"), p.get("sync/publication_payload_hash")) for p in publications]
+
+def trainer_cross_node_evidence(head, worker):
+    """trainer-itself-across-nodes (EP/PP) evidence, distinct from cross-node weight sync (G2):
+    forward  = a train phase completed on a trainer whose MegatronTrainRayActor runs on BOTH nodes (apps-*.txt) and
+               rl_local_round.action_tokens > 0 (tokens went through the forward pass; a PP/EP collective that failed
+               would hang/raise before the round) -- Miles exposes no per-rank loss on the tape (rl_local_round.loss is
+               null), so a run.log/launch.log "lm loss"/"forward" line is a bonus note only;
+    backward = rl_local_round.grad_norm (driver TrainStepMetrics.grad_norm, the trainer's clipped global grad norm)
+               is a finite number > 0 for >= 1 round;
+    param_update = rl_publication payload hash changes between consecutive policy versions AND policy_version strictly
+               increases over >= 2 publications (driver.publish: sync/publication_payload_hash is the hash of the LoRA
+               weights pushed to the engines). rl_local_round.delta_l2_norm is hard-coded 0.0 by the driver
+               (driver.py rl_local_round emit) and is therefore NOT used."""
+    both = bool(re.search(r"MegatronTrainRayActor", head)) and bool(re.search(r"MegatronTrainRayActor", worker))
+    tokens = [e.get("action_tokens") or 0 for e in local_rounds]
+    grads = [e.get("grad_norm") for e in local_rounds if isinstance(e.get("grad_norm"), (int, float))]
+    hashes = pub_hashes()
+    versions = [v for v, _ in hashes if v is not None]
+    ev = {
+        "ep_pp_forward_on_both_nodes": both and len(rounds_trained) >= 1 and any(t > 0 for t in tokens),
+        "ep_pp_backward_grad_norm_gt_0": any(g > 0 and g == g for g in grads),
+        "ep_pp_param_update_hash_changes": (len(hashes) >= 2 and versions == sorted(set(versions))
+                                            and all(a[1] != b[1] for a, b in zip(hashes, hashes[1:]) if a[1] and b[1])
+                                            and len({h for _, h in hashes if h}) >= 2),
+    }
+    notes.append(f"grad_norms={grads[:4]} pub_hashes={[(v, (h or '')[:8]) for v, h in hashes][:4]} "
+                 f"loss_logged={bool(re.search(r'lm loss|forward', read('pulled/run.log')))} (delta_l2_norm unused: driver hard-codes 0.0)")
+    return ev
 
 if rc == 124 and not (CASE == "g0" and len(rounds_trained) >= 1 and len(generates) >= 1):
     verdict = "INVALID_TEST"; notes.append("hard_timeout (rc=124)")
@@ -127,9 +163,12 @@ elif CASE in ("m1", "m2"):
         "no_rollout_engine_on_worker": not re.search(r"sglang::scheduler", worker),
         # launch.log: D3/D4/Q6 fail-closed paths never fired
         "no_layout_or_pool_refusal": not re.search(r"BundleMapError|spans nodes|not node-blocked|not the Ray head|D3 head pin|gpu_pool:|disagrees with PlacementRequest", launch),
-        # tape rl_driver_phase: >= 2 rounds train + generate (cross-node PP/EP training and weight sync to the engine)
-        "rounds_ge_2": len(rounds_trained) >= 2 and len(generates) >= 2,
+        # tape rl_driver_phase: >= 2 rounds train + generate. This is the "trainer and rollout on different nodes,
+        # cross-node weight sync" criterion (already judged PASS in G2); listed separately from the EP/PP evidence below
+        "cross_node_weight_sync_rounds_ge_2": len(rounds_trained) >= 2 and len(generates) >= 2,
         "launcher_rc_0": rc == 0}
+    # ruling 2026-10-04 v2: "trainer itself across nodes (EP/PP)" needs forward / backward / parameter-update evidence
+    checks.update(trainer_cross_node_evidence(head, worker))
     if CASE == "m1":
         # run.log: Megatron argument dump (`pipeline_model_parallel_size .... 2`) or the learner's megatron flag
         checks["pp2_in_megatron_args"] = bool(re.search(r"pipeline[-_]model[-_]parallel[-_]size\W+2\b", run_log + " " + launch))
@@ -178,6 +217,42 @@ elif CASE == "m3":
         "train_continues_after_up": bool(up_done) and len(rounds_after(up_done[0].get("wall_time", 0))) >= 1,
         "train_continues_after_down": bool(dn_done) and len(rounds_after(dn_done[0].get("wall_time", 0))) >= 1,
         "launcher_rc_0": rc == 0}
+    # ---- ruling 2026-10-04 v2 additions ----
+    up_wall = up_done[0].get("wall_time", 0) if up_done else None
+    dn_wall = dn_done[0].get("wall_time", 0) if dn_done else None
+    # weight version sync: the first rl_publication after the up commit lists BOTH engines (sync/publication_members,
+    # driver.publish) under one policy_version, and the following rl_readiness has published_policy_version ==
+    # trained_policy_version (driver readiness snapshot) -> the new engine serves the same version as the existing one
+    pubs_after_up = [p for p in publications if up_wall and p.get("time_unix", 0) > up_wall]
+    ready_after_up = [r for r in readiness if up_wall and r.get("time_unix", 0) > up_wall]
+    checks["up_new_engine_same_policy_version"] = bool(pubs_after_up) and len(pubs_after_up[0].get("sync/publication_members") or []) >= 2 \
+        and bool(ready_after_up) and ready_after_up[0].get("published_policy_version") == ready_after_up[0].get("trained_policy_version")
+    # in-flight requests: no batch lost across the up/down transactions -- rl_local_round.completed_groups ==
+    # active_groups for every round, cancelled_groups never rises (driver rl_local_round: cancelled_groups = batch.aborted),
+    # and the trained rollout_ids (rl_driver_phase train) are contiguous
+    cancelled = [int(e.get("cancelled_groups") or 0) for e in local_rounds]
+    checks["inflight_no_batch_lost_across_edges"] = bool(local_rounds) and all(
+        (e.get("completed_groups") or 0) >= (e.get("active_groups") or 0) for e in local_rounds) \
+        and all(b <= a for a, b in zip(cancelled, cancelled[1:])) and max(cancelled or [0]) == 0 \
+        and rounds_trained == list(range(min(rounds_trained), max(rounds_trained) + 1)) if rounds_trained else False
+    # resource reclaim after down: in the LAST apps-<worker1>.txt snapshot taken after the down commit (blocks start with
+    # an ISO timestamp; rows = `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory` + ps) there is no
+    # sglang::scheduler and no compute-app row on the standby card n1:1 (its uuid = 2nd row of gpu-<worker1>.txt)
+    gpu_w1 = read(f"pulled/gpu-{cl}-worker1.txt").splitlines()
+    standby_uuid = next((m.group(1) for line in gpu_w1[1:] if (m := re.search(r"^\s*1,\s*(GPU-[0-9a-f-]{36})", line))), None)
+    blocks, cur = [], None
+    for line in worker.splitlines():
+        m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)$", line.strip())
+        if m:
+            cur = [ts(m.group(1)), []]; blocks.append(cur)
+        elif cur is not None:
+            cur[1].append(line)
+    after_dn = [b for b in blocks if dn_wall and b[0] > dn_wall + 5]
+    last = "\n".join(after_dn[-1][1]) if after_dn else None
+    checks["down_reclaims_worker_engine_and_gpu"] = last is not None and "sglang::scheduler" not in last \
+        and (standby_uuid is None or not re.search(re.escape(standby_uuid) + r"\s*,", last))
+    notes.append(f"standby_uuid={standby_uuid} snapshots_after_down={len(after_dn)} pub_members_after_up="
+                 f"{(pubs_after_up[0].get('sync/publication_members') if pubs_after_up else None)}")
     notes.append(f"inwatch_submitted={sorted(s for s in submitted if s)} requests={sorted(reqs)}")
     if not reqs and not (submitted & {"up1", "dn1"}):
         verdict = "INVALID_TEST"; notes.append("no E1 trigger was submitted (inwatch not armed or the run ended before train rid 1)")

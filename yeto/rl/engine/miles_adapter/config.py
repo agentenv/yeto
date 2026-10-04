@@ -337,6 +337,9 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.uneven_pipeline_layers": _ok,
     "parallel.standby_gpus": _ok,
     "parallel.rollout_cell_names": _ok,
+    # ruling 2026-10-04 v2: placement-only opt-ins consumed by yeto (PlacementRequest), no Miles flag
+    "parallel.allow_cross_node_tp": _ok,
+    "parallel.allow_cross_node_engine_tp": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
     "trainable.lora_dropout": _ok,
