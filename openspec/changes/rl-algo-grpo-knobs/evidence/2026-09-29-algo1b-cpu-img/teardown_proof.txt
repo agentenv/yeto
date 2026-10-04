@@ -1,0 +1,35 @@
+[
+ {
+  "app_id": "ap-DDeeL3wMFMu6QGwlotOr0y",
+  "description": "algo1b-cpu-img",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 17:10:08+00:00",
+  "stopped_at": "2026-09-29 17:13:26+00:00"
+ },
+ {
+  "app_id": "ap-IFjK3spr0lcOfFUfQIopEL",
+  "description": "algo1b-cpu-img",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 16:47:11+00:00",
+  "stopped_at": "2026-09-29 16:49:40+00:00"
+ },
+ {
+  "app_id": "ap-JyzgEPFHYfn7MQw5E9lrgP",
+  "description": "algo1b-cpu-img",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 16:43:44+00:00",
+  "stopped_at": "2026-09-29 16:46:26+00:00"
+ },
+ {
+  "app_id": "ap-NwnNkUKRNgnMPlraQLkxhp",
+  "description": "algo1b-cpu-img",
+  "state": "stopped",
+  "tasks": "0",
+  "created_at": "2026-09-29 16:41:10+00:00",
+  "stopped_at": "2026-09-29 16:42:50+00:00"
+ }
+]
+running algo1b: []

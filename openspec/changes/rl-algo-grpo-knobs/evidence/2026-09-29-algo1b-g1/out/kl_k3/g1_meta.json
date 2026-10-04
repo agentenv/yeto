@@ -1,0 +1,9 @@
+{
+ "mechanism": "kl_k3",
+ "algorithm_spec_sha256": "93906d92b24386e230c0315273f8c501f873d228b1f5b169b8ab9b7753d9d156",
+ "allow_unverified": [
+  "features:kl_loss_ref_model",
+  "kl_placements:loss"
+ ],
+ "rounds": 3
+}

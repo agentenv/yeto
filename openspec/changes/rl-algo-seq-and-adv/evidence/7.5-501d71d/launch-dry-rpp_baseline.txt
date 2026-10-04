@@ -1,0 +1,40 @@
+{
+  "algorithm_spec": "{\"advantage\":{\"estimator\":\"reinforce_plus_plus_baseline\",\"reward_binary\":false,\"reward_postprocess\":null,\"rewards_normalization\":true,\"std_normalization\":true,\"whiten\":true},\"correction\":{\"function\":null,\"method\":\"none\",\"mismatch_metrics\":false,\"opsm_delta\":null,\"tis_clip\":null,\"tis_clip_low\":null,\"use_rollout_logprobs\":false},\"entropy_coef\":0.0,\"execution\":{\"group_required\":true,\"max_policy_staleness\":0,\"needs_critic\":false,\"needs_rollout_logprobs\":false},\"kl\":{\"coef\":0.01,\"estimator\":null,\"placement\":\"reward\",\"unbiased\":false},\"loss\":{\"aggregation\":\"default\",\"custom_loss\":null,\"eps_clip\":null,\"eps_clip_c\":null,\"eps_clip_high\":null,\"reducer\":null,\"variant\":\"policy_loss\"},\"plugins\":[],\"sampling\":{\"filter\":null,\"max_replacements\":null,\"over_sampling_batch_size\":null,\"overlong_filter\":false},\"schema\":\"yeto-rl-algorithm-spec-v2\"}",
+  "algorithm_spec_sha256": "10d4954e64e7d46a431c45b5992585e9b8ade433e7d063cf13ed1f639942dfe5",
+  "clusters": [
+    "algo2a-decl-l0-modal",
+    "algo2a-decl-l1-modal"
+  ],
+  "controller": "head",
+  "dry_run": true,
+  "external_learners": 0,
+  "island_requests": [
+    {
+      "cloud": "modal",
+      "gpu": "H100",
+      "gpus_per_node": 1,
+      "learner_command": "RAY_ADDRESS=\"$MASTER_ADDR:6379\" PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} python3 -m yeto.rl.learner --model Qwen/Qwen3-0.6B --rl-model-recipe generic --data zhuzilin/gsm8k --syncer $SYNCER_ADDR --rl-echo-events --learner-id $LEARNER_ID --reward-function yeto.rl.algos.gdpo_reward:correctness_reward --reward-sha256 47e056b822078b50d034fbf2d0a11d608bbd2ca30cdecacf90031c0fc90b7b6a --source-sha256 68020540e5f7e806d183a3be41f15b7d275db178bbb5575ee16c1f8945bdb9c5 --global-rounds 3 --sync-preset strict-avg --fragments 1 --pipeline 1 --local-horizon 1 --total-fragment-steps 3 --groups-per-round 4 --samples-per-group 8 --over-sampling-batch-size 4 --rl-distributed-timeout-minutes 10 --optimizer-steps 1 --rollout-max-response-len 384 --completed-groups-path '~/yeto-rl/island-checkpoint.pt' --event-tape ~/yeto-output/rl-island-0.jsonl --actor-num-nodes 1 --actor-num-gpus-per-node 1 --tensor-parallel 1 --pipeline-parallel 1 --rollout-num-gpus-per-engine 1 --sglang-mem-fraction-static 0.4 --lora-r 16 --lora-targets all-linear --inner-lr 1e-05 --seq-len 1024 --seed 17 --wan-streams 4 --miles-root ~/miles --rl-engine ports --rl-expected-algorithm-sha256 10d4954e64e7d46a431c45b5992585e9b8ade433e7d063cf13ed1f639942dfe5 --rl-algorithm-spec ~/yeto-rl/algorithm_spec.json --apply-chat-template-kwargs '{\"enable_thinking\":false}' --model-revision c1899de289a04d12100db370d81485cdf75e47ca --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --trust-remote-code",
+      "learner_id": 0,
+      "num_nodes": 1,
+      "region": null,
+      "total_gpus": 1
+    },
+    {
+      "cloud": "modal",
+      "gpu": "H100",
+      "gpus_per_node": 1,
+      "learner_command": "RAY_ADDRESS=\"$MASTER_ADDR:6379\" PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} python3 -m yeto.rl.learner --model Qwen/Qwen3-0.6B --rl-model-recipe generic --data zhuzilin/gsm8k --syncer $SYNCER_ADDR --rl-echo-events --learner-id $LEARNER_ID --reward-function yeto.rl.algos.gdpo_reward:correctness_reward --reward-sha256 47e056b822078b50d034fbf2d0a11d608bbd2ca30cdecacf90031c0fc90b7b6a --source-sha256 68020540e5f7e806d183a3be41f15b7d275db178bbb5575ee16c1f8945bdb9c5 --global-rounds 3 --sync-preset strict-avg --fragments 1 --pipeline 1 --local-horizon 1 --total-fragment-steps 3 --groups-per-round 4 --samples-per-group 8 --over-sampling-batch-size 4 --rl-distributed-timeout-minutes 10 --optimizer-steps 1 --rollout-max-response-len 384 --completed-groups-path '~/yeto-rl/island-checkpoint.pt' --event-tape ~/yeto-output/rl-island-1.jsonl --actor-num-nodes 1 --actor-num-gpus-per-node 1 --tensor-parallel 1 --pipeline-parallel 1 --rollout-num-gpus-per-engine 1 --sglang-mem-fraction-static 0.4 --lora-r 16 --lora-targets all-linear --inner-lr 1e-05 --seq-len 1024 --seed 17 --wan-streams 4 --miles-root ~/miles --rl-engine ports --rl-expected-algorithm-sha256 10d4954e64e7d46a431c45b5992585e9b8ade433e7d063cf13ed1f639942dfe5 --rl-algorithm-spec ~/yeto-rl/algorithm_spec.json --apply-chat-template-kwargs '{\"enable_thinking\":false}' --model-revision c1899de289a04d12100db370d81485cdf75e47ca --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --trust-remote-code",
+      "learner_id": 1,
+      "num_nodes": 1,
+      "region": null,
+      "total_gpus": 1
+    }
+  ],
+  "islands": 2,
+  "outer_sync": true,
+  "rl_engine": "ports",
+  "syncer": "head VM",
+  "total_gpus": 2,
+  "training_mode": "rl",
+  "unverified_mechanisms": []
+}

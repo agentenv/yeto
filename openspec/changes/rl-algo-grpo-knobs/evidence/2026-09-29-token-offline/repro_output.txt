@@ -1,0 +1,4 @@
+grad_norm sample-mean : 0.12973899590092025
+grad_norm per-token   : 0.09616653586326328
+bitwise equal         : False
+equal-length control  : True

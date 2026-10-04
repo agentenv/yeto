@@ -1,0 +1,128 @@
+{
+ "algorithm": {
+  "algorithm_spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+  "plugin_sha256": [],
+  "ref_model": {
+   "base_model_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+   "ref_load": "/root/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
+  },
+  "runtime_attrs_sha256": "d33da832a10b39274e9f76901b6927ffc0801d8002ba42c2fae307a6b8dc0f41"
+ },
+ "cut_id": "rb-0-cf5ecb1130c6",
+ "data": {
+  "buffer_length": 0,
+  "epoch_id": 0,
+  "sample_group_index": 6,
+  "sample_index": 48,
+  "sample_offset": 6
+ },
+ "epoch": 0,
+ "files": [
+  {
+   "bytes": 139827143,
+   "coord": {
+    "cp_size": 1,
+    "dp": 0,
+    "dp_size": 2,
+    "ep_size": 1,
+    "global_rank": 0,
+    "pp": 0,
+    "pp_size": 1,
+    "tp": 0,
+    "tp_size": 1
+   },
+   "path": "trainer_tp0_pp0_dp0.pt",
+   "sha256": "ee58010f35c6904072cf59f83752877618a101df7a82e980cfa1a89322cab726"
+  },
+  {
+   "bytes": 139827015,
+   "coord": {
+    "cp_size": 1,
+    "dp": 1,
+    "dp_size": 2,
+    "ep_size": 1,
+    "global_rank": 1,
+    "pp": 0,
+    "pp_size": 1,
+    "tp": 0,
+    "tp_size": 1
+   },
+   "path": "trainer_tp0_pp0_dp1.pt",
+   "sha256": "8816a4290278a9255b6ef0a46f41c392edadcbeb741f85596c827e3bf861079b"
+  }
+ ],
+ "ledger": {
+  "carried_over": 0,
+  "carried_over_group_ids": [],
+  "engine_buffer_length": 0,
+  "engine_carried_over": 0,
+  "engine_discarded_groups": 0,
+  "last_rollout_id": 2,
+  "last_state": "outer_recorded",
+  "ready_unconsumed": 0,
+  "ready_unconsumed_group_ids": []
+ },
+ "manifest_sha256": "b4d5f82293b131e337a3ab52e2bf09a53978e3da69d939c790c4efb8f2e09c39",
+ "outer": {
+  "policy_token": "yeto:3:09f5875758115d1fd88c332c17baaed9e41866e11581172d055562f1182c7ec6",
+  "policy_version": 3,
+  "settled": true
+ },
+ "progress": {
+  "global_batch_size": 16,
+  "local_step": 3,
+  "next_rollout_id": 3,
+  "policy_hash": "09f5875758115d1fd88c332c17baaed9e41866e11581172d055562f1182c7ec6",
+  "policy_version": 3,
+  "scheduler_samples": 48
+ },
+ "rank_summaries": [
+  {
+   "components": {
+    "/rng/megatron_cuda_tracker/data-parallel-rng": "68178a69c870eb268b4d7da523f880cedce0296ec22c8413ca7ff10f1387fac2",
+    "/rng/megatron_cuda_tracker/expert-parallel-rng": "8209fcf9600650018ff7490d51f52b39e297d3bd89a99fe9c097a0e91ecc78b9",
+    "/rng/megatron_cuda_tracker/model-parallel-rng": "5e4404f3e82f25dcd16a1eb2ed8fd82de980cb0db3dee48eba04415bc3d25128",
+    "/rng/numpy": "80995a2e1475537414cd7141172001cf51d2be3c53ae02a3e694c1b3487e8523",
+    "/rng/python": "d5444a419da7b7eeaae5713154c32c22fa0a3fc8fc6c11198f04140fd654bb95",
+    "/rng/torch_cpu": "f8457c537aba3314a4e17b4e1c46e4b973f7f00d7f7b912a4af5d5ada4ca0b63",
+    "/rng/torch_cuda": "dc8397417860ba5d7a2c264bbd5e9e3d82a491b7f6012fcd87f955531422b05f",
+    "/state/adapter/module.module.decoder.layers.0.mlp.linear_fc1.adapter.adapter_gate.linear_in.weight": "18003d99cbfa6919ce7f2beb905bbd601ca53cf2ee372ffd4195447ffaba06de",
+    "/state/adapter/module.module.decoder.layers.0.mlp.linear_fc1.adapter.adapter_gate.linear_out.weight": "7447e7fc5ffe8b85f88d08b0d636df89db15fb2690f7e6b24550fbbcb2beb699",
+    "/state/adapter/module.module.decoder.layers.0.mlp.linear_fc1.adapter.adapter_up.linear_in.weight": "b8971a29eb785c281385abe3e3c149ae6615d90b0a0bd8a94ba89ae261c27273",
+    "/state/adapter/module.module.decoder.layers.0.mlp.linear_fc1.adapter.adapter_up.linear_out.weight": "a41cae570960cfd2006b5927a874453a7339394cd1e75d7b9fe7169a41cb0e53",
+    "/state/adapter/module.module.decoder.layers.0.mlp.linear_fc2.adapter.linear_in.weight": "a6925e277775914ceda2863dac8642be5966d65f8aa98f1269397e0bd3ab7215",
+    "/state/adapter/module.module.decoder.layers.0.mlp.linear_fc2.adapter.linear_out.weight": "440621b6e745573c91ca56b15da7f8a8486719fdb31d5bdbd912144cfc09e147",
+    "/state/adapter/module.module.decoder.layers.0.self_attention.linear_proj.adapter.linear_in.weight": "a7e600715c8f1d6c5a6a2911e08219d9f8b9b69c518eb64f5758c3f82ae1696a",
+    "/state/adapter/module.module.decoder.layers.0.self_attention.linear_proj.adapter.linear_out.weight": "eaaa8fa7017f7c36e9a39d72be8a85070d50c9ac36ffedb06f6ef19e365133e2",
+    "/state/adapter/module.module.decoder.layers.0.self_attention.linear_qkv.adapter.adapter_k.linear_in.weight": "d007183f42003a4dcf7b43a337b6d7a9fd71d7f4254495bbed9de76c28a13942",
+    "/state/adapter/module.module.decoder.layers.0.self_attention.linear_qkv.adapter.adapter_k.linear_out.weight": "58d0d82365c5d3ab0819b503469151754cd993091c183bc27cd0d9027fc0e285",
+    "/state/adapter/module.module.decoder.layers.0.self_attention.linear_qkv.adapter.adapter_q.linear_in.weight": "3f2f569981a1537208724d747c0817fecc1981bf4d2e7f559e0b4321b2a9b5de",
+    "/state/adapter/module.module.decoder.layers.0.self_attention.linear_qkv.adapter.adapter_q.linear_out.weight": "b5b5c052d7ee29a2ae21333c0eff65e49f9556f4f69d7cc406a609ba2dc01f91",
+    "/state/adapter/module.module.decoder.layers.0.self_attention.linear_qkv.adapter.adapter_v.linear_in.weight": "fb066edc6b71e800b10d6f36602d989b6d23a264af6f77f465c5506c7e6605d3",
+    "/state/adapter/module.module.decoder.layers.0.self_attention.linear_qkv.adapter.adapter_v.linear_out.weight": "285b424ba1f06919b955a7385393787b33656516fd5524a375f7011eafc136b8",
+    "/state/adapter/module.module.decoder.layers.1.mlp.linear_fc1.adapter.adapter_gate.linear_in.weight": "fae3287a6b54debafb1350d7aa25681432b94458b87d6b9d7056dbd85f0b7a73",
+    "/state/adapter/module.module.decoder.layers.1.mlp.linear_fc1.adapter.adapter_gate.linear_out.weight": "bf181b38c37c467955725930ab175e2564c4a97128fe58de1ada8f2a3ebe3d4c",
+    "/state/adapter/module.module.decoder.layers.1.mlp.linear_fc1.adapter.adapter_up.linear_in.weight": "2455e9fec98ba8fd64ce356e6a3bb4f6c9873ee1fb662f87c9aac7fd391def86",
+    "/state/adapter/module.module.decoder.layers.1.mlp.linear_fc1.adapter.adapter_up.linear_out.weight": "f2132da0068fe37084c88c230e56070815dcc3285618cf84204ef763d66e6db2",
+    "/state/adapter/module.module.decoder.layers.1.mlp.linear_fc2.adapter.linear_in.weight": "6816a267b8cbf43ccaa1264e6fcc820cecd589cf197297acefcc50e84dcd4fa9",
+    "/state/adapter/module.module.decoder.layers.1.mlp.linear_fc2.adapter.linear_out.weight": "0f80e24195dddbf9e693d1739ee69e4b374d36de78c008b1274bb87c86c4f837",
+    "/state/adapter/module.module.decoder.layers.1.self_attention.linear_proj.adapter.linear_in.weight": "683a97d13be4d1b1727e9e52a51d5587f161e2183da0af5f471a81151a89c808",
+    "/state/adapter/module.module.decoder.layers.1.self_attention.linear_proj.adapter.linear_out.weight": "45a52812cce64e20046976264604c6c624ef0c8dd64e5cee7a3dc4de464841eb",
+    "/state/adapter/module.module.decoder.layers.1.self_attention.linear_qkv.adapter.adapter_k.linear_in.weight": "e644081ebab645b4f0523056dd9831dd180a35b04f9f4451c658799d9e32ce10",
+    "/state/adapter/module.module.decoder.layers.1.self_attention.linear_qkv.adapter.adapter_k.linear_out.weight": "49d63cf93d2573ccc5276db1be03c2124fd1f45e9e0b30f5d971c4c8dfd00bd6",
+    "/state/adapter/module.module.decoder.layers.1.self_attention.linear_qkv.adapter.adapter_q.linear_in.weight": "773375607b98d4990228018740ef9a5dfe8cf8439e83e8f994d020bbfa5be206",
+    "/state/adapter/module.module.decoder.layers.1.self_attention.linear_qkv.adapter.adapter_q.linear_out.weight": "6f9c94cfd4dc5ccd961e96f4c74ea0a24b395d39d3d66a20880831e853e88375",
+    "/state/adapter/module.module.decoder.layers.1.self_attention.linear_qkv.adapter.adapter_v.linear_in.weight": "086f5125d27de46043b167bfbf1724ad488808003c01895d2d21bc4d6566fdee",
+    "/state/adapter/module.module.decoder.layers.1.self_attention.linear_qkv.adapter.adapter_v.linear_out.weight": "9f8baac3fd73382fa34f01f77ed150316ca684e3867b2a8b4f2837772ff001a9",
+    "/state/adapter/module.module.decoder.layers.10.mlp.linear_fc1.adapter.adapter_gate.linear_in.weight": "131447a54fc2ea613713fae48b02844290d79153960a84260af5381bfa357112",
+    "/state/adapter/module.module.decoder.layers.10.mlp.linear_fc1.adapter.adapter_gate.linear_out.weight": "ac05b9e39ca0ef7d29f942c8342e8b3c816a1b1df2b6a5efd6cca3f39f0f66c1",
+    "/state/adapter/module.module.decoder.layers.10.mlp.linear_fc1.adapter.adapter_up.linear_in.weight": "d9ed8083ff14896466c0e5a75f43d0c954a8fea2cab43a42cd4b7ad7a8f0727e",
+    "/state/adapter/module.module.decoder.layers.10.mlp.linear_fc1.adapter.adapter_up.linear_out.weight": "81264d4a104b592d42fb5ba349e5ef2e6fc74f6b8efdebf0e7e42c874c3769f2",
+    "/state/adapter/module.module.decoder.layers.10.mlp.linear_fc2.adapter.linear_in.weight": "ca479ecc1cfcc1a8f8157f68de5914c6f4a501168cd7a2d10d2d3175e720b7e5",
+    "/state/adapter/module.module.decoder.layers.10.mlp.linear_fc2.adapter.linear_out.weight": "8e631454451d60c924fe0b58be5ac78afd1b9ef914724bbfded973683cb51290",
+    "/state/adapter/module.module.decoder.layers.10.self_attention.linear_proj.adapter.linear_in.weight": "288223615951ebebfcc3b9a46b76df634d0ef7ad19e9488542ac6a1c0a549d25",
+    "/state/adapter/module.module.decoder.layers.10.self_attention.linear_proj.adapter.linear_out.weight": "37c6d42b03169a8eeac011aefd9e0373e1a74927c6b1a43100c6ef8de5f1e7d3",
+    "/state/adapter/module.module.decoder.layers.10.self_attention.linear_qkv.adapter.adapter_k.linear_in.weight": "e8b2423ff33f41644ca567eeed436bc1b63dcd2b1e98265cfeb161cdf649b826",
+    "/state/adapter/module.module.decoder.layers.10.self_attention.linear_qkv.adapter.adapter_k.linear_out.weight": "ee719cc26025e9781864a761bf3063c8c7bb24ff72c6f69fa1b9e7eeefe6fe92",
+    "/state/adapter/module.module.decoder.layers.10.self_attention.linear_qkv.adapter.adapter_q.linear_in.weight": "1146c50993412609b934148f41537188ce1a7191e083b84a522647fe4367b758",
+    "/state/adapter/module.module.decoder.layers.10.self_attention.linear_qkv.adapter.adapter_q.linear_out.weight": "d5d

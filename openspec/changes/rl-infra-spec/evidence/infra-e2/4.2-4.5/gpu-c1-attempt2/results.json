@@ -1,0 +1,108 @@
+{
+ "criteria": {
+  "G-4.2(g) live restore refused, state unchanged": {
+   "error": "CutError: rank refused the restore: CutPluginError: LR scheduler already at 32: restore_cut only restores into a freshly built trainer",
+   "pass": true,
+   "unchanged": true
+  },
+  "determinism_settings": {
+   "pass": true
+  },
+  "harness_completed": {
+   "error": "PublicationError: upstream update_weights failed: \u001b[36mray::InferenceController.onload_weights()\u001b[39m (pid=2567, ip=172.20.0.229, actor_id=c2bdf2a1e3cad09b73b77e6401000000, repr=<miles.ray.rollout.inference_controller.InferenceController object at 0x2b8b3a527860>)\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_transports/default.py\", line 394, in handle_async_request\n    resp = await self._pool.handle_async_request(req)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpcore/_async/connection_pool.py\", line 256, in handle_async_request\n    raise exc from None\n  File \"/opt/sglang/lib/python3.12/site-packages/httpcore/_async/connection_pool.py\", line 236, in handle_async_request\n    response = await connection.handle_async_request(\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpcore/_async/connection.py\", line 103, in handle_async_request\n    return await self._connection.handle_async_request(request)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpcore/_async/http11.py\", line 136, in handle_async_request\n    raise exc\n  File \"/opt/sglang/lib/python3.12/site-packages/httpcore/_async/http11.py\", line 106, in handle_async_request\n    ) = await self._receive_response_headers(**kwargs)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpcore/_async/http11.py\", line 177, in _receive_response_headers\n    event = await self._receive_event(timeout=timeout)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpcore/_async/http11.py\", line 231, in _receive_event\n    raise RemoteProtocolError(msg)\nhttpcore.RemoteProtocolError: Server disconnected without sending a response.\n\nThe above exception was the direct cause of the following exception:\n\n\u001b[36mray::InferenceController.onload_weights()\u001b[39m (pid=2567, ip=172.20.0.229, actor_id=c2bdf2a1e3cad09b73b77e6401000000, repr=<miles.ray.rollout.inference_controller.InferenceController object at 0x2b8b3a527860>)\n  File \"/usr/lib/python3.12/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/utils/context_lock.py\", line 155, in wrapper\n    return await fn(self, *args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/ray/rollout/inference_controller.py\", line 567, in onload_weights\n    await self._onload(tags=[GPU_MEMORY_TYPE_WEIGHTS])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/utils/context_lock.py\", line 205, in wrapper\n    return await fn(self, *args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/ray/rollout/inference_controller.py\", line 595, in _onload\n    await srv.onload(tags)\n  File \"/root/miles/miles/utils/context_lock.py\", line 205, in wrapper\n    return await fn(self, *args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/ray/rollout/rollout_server.py\", line 149, in onload\n    return await asyncio.gather(\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/ray/rollout/server_cell.py\", line 324, in onload\n    return await self.api_client.resume_memory_occupation(tags=tags)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/backends/sglang_utils/sglang_api_client.py\", line 291, in resume_memory_occupation\n    return await self._make_request(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miles/miles/backends/sglang_utils/sglang_api_client.py\", line 79, in _make_request\n    response = await GeneralHttpClientProvider.client().post(\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_client.py\", line 1859, in post\n    return await self.request(\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_client.py\", line 1540, in request\n    return await self.send(request, auth=auth, follow_redirects=follow_redirects)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_client.py\", line 1629, in send\n    response = await self._send_handling_auth(\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_client.py\", line 1657, in _send_handling_auth\n    response = await self._send_handling_redirects(\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_client.py\", line 1694, in _send_handling_redirects\n    response = await self._send_single_request(request)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_client.py\", line 1730, in _send_single_request\n    response = await transport.handle_async_request(request)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_transports/default.py\", line 393, in handle_async_request\n    with map_httpcore_exceptions():\n  File \"/usr/lib/python3.12/contextlib.py\", line 158, in __exit__\n    self.gen.throw(value)\n  File \"/opt/sglang/lib/python3.12/site-packages/httpx/_transports/default.py\", line 118, in map_httpcore_exceptions\n    raise mapped_exc(message) from exc\nhttpx.RemoteProtocolError: Server disconnected without sending a response.",
+   "pass": false
+  }
+ },
+ "pass": false,
+ "steps": [
+  {
+   "ranks": [
+    {
+     "coord": {
+      "cp_size": 1,
+      "dp": 0,
+      "dp_size": 1,
+      "ep_size": 1,
+      "global_rank": 0,
+      "pp": 0,
+      "pp_size": 1,
+      "tp": 0,
+      "tp_size": 1
+     },
+     "deterministic_mode": true,
+     "env": {
+      "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+      "NCCL_ALGO": "Ring",
+      "NVIDIA_TF32_OVERRIDE": "0"
+     },
+     "env_ok": true,
+     "info_env": {
+      "NVTE_ALLOW_NONDETERMINISTIC_ALGO": null
+     },
+     "lora_dropout": 0.05
+    }
+   ],
+   "step": "determinism",
+   "t": 1790752189.7738981
+  },
+  {
+   "name": "determinism_settings",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790752189.7748973
+  },
+  {
+   "layout": {
+    "cp": 1,
+    "dp": 1,
+    "ep": 1,
+    "pp": 1,
+    "tp": 1,
+    "world": 1
+   },
+   "step": "layout",
+   "t": 1790752189.7798915
+  },
+  {
+   "local_step": 2,
+   "next_rollout_id": 2,
+   "step": "warmup_done",
+   "t": 1790752366.6637168
+  },
+  {
+   "cut_id": "e2-c1-c0",
+   "files": [
+    {
+     "bytes": 141870129,
+     "coord": {
+      "cp_size": 1,
+      "dp": 0,
+      "dp_size": 1,
+      "ep_size": 1,
+      "global_rank": 0,
+      "pp": 0,
+      "pp_size": 1,
+      "tp": 0,
+      "tp_size": 1
+     },
+     "path": "trainer_tp0_pp0_dp0.pt",
+     "sha256": "e390869520c7d2dd5d65ce2796c40dec70c413cf1e05b1cc4c3b3c5a65a86add"
+    }
+   ],
+   "step": "cut_saved",
+   "t": 1790752368.3973124
+  },
+  {
+   "name": "G-4.2(g) live restore refused, state unchanged",
+   "ok": true,
+   "step": "criterion",
+   "t": 1790752370.1828282
+  },
+  {
+   "name": "harness_completed",
+   "ok": false,
+   "step": "criterion",
+   "t": 1790752375.848583
+  }
+ ]
+}

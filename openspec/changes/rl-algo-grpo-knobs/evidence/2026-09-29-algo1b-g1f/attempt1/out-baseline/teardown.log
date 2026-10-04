@@ -1,0 +1,10 @@
+[yeto] Modal app stop failed: modal app stop yeto-algo1b-g1f-baseline failed: ╭─ Error ──────────────────────────────────────────────────────────────────────╮
+│ No App with name 'yeto-algo1b-g1f-baseline' found in the 'main' environment. │
+╰──────────────────────────────────────────────────────────────────────────────╯
+[yeto] worker is not running
+[yeto] tearing down 1 cluster(s): algo1b-g1f-baseline-l0-modal
+[yeto] algo1b-g1f-baseline-l0-modal: stopped with the Modal app (Modal app yeto-algo1b-g1f-baseline: stopped, 0 tasks)
+[yeto] run 'algo1b-g1f-baseline' is down
+╭─ Error ──────────────────────────────────────────────────────────────────────╮
+│ No App with name 'yeto-algo1b-g1f-baseline' found in the 'main' environment. │
+╰──────────────────────────────────────────────────────────────────────────────╯

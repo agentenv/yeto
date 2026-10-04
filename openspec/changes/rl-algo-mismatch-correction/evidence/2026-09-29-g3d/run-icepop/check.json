@@ -1,0 +1,45 @@
+{
+ "criterion5_source": "tape",
+ "unparsable_tape_lines": [
+  0,
+  0
+ ],
+ "checks": {
+  "1_three_outer_steps_2_responders_no_stale": true,
+  "2_same_sha_no_unverified": true,
+  "3_publication_hashes_equal_v0_3": true,
+  "4_rounds_finite_no_failures": true,
+  "5_tis_metrics_each_step": true,
+  "1_rc_ok": true
+ },
+ "pass": true,
+ "publication_hashes": [
+  {
+   "0": "373abf70cb687c7dfe3b8391c678d27be175a19d0e847349c362ed042f7ba43f",
+   "1": "e078fda8d5b927423c853b1f21929c2dff6f175e9bced8e184e950d3d3815a44",
+   "2": "8acd9be81f016c6fe8586a88a492940439c6f2bdacd7cabfcf84a5d75d3528d5",
+   "3": "15cca3b8f08af554bfee65f5f7c7a7b96802eb5e684e756a7c433ed6173b463c"
+  },
+  {
+   "0": "373abf70cb687c7dfe3b8391c678d27be175a19d0e847349c362ed042f7ba43f",
+   "1": "e078fda8d5b927423c853b1f21929c2dff6f175e9bced8e184e950d3d3815a44",
+   "2": "8acd9be81f016c6fe8586a88a492940439c6f2bdacd7cabfcf84a5d75d3528d5",
+   "3": "15cca3b8f08af554bfee65f5f7c7a7b96802eb5e684e756a7c433ed6173b463c"
+  }
+ ],
+ "sha": "187ee5f627ff00f14fb3ad270cd9b5fe21d2279996cd395f3f29e0ce0ef89036",
+ "sync_steps": [
+  {
+   "sync/base_version": 0,
+   "sync/responders": 2
+  },
+  {
+   "sync/base_version": 1,
+   "sync/responders": 2
+  },
+  {
+   "sync/base_version": 2,
+   "sync/responders": 2
+  }
+ ]
+}

@@ -1,0 +1,50 @@
+{
+  "_note": "runtime_fingerprint here = sha256(attempt2/manifest.json) for identification; a run's fingerprint is entry.runtime_fingerprint(launch, MILES_NEXT_COMMIT) (per argv). Declaration, not #66 certification.",
+  "advantage_estimators": [
+    "grpo"
+  ],
+  "auto_controller": false,
+  "certified_edges": [],
+  "corrections": [
+    "none"
+  ],
+  "dynamic_sampling_filters": [
+    "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
+    "yeto.rl.filters.bounded_nonzero_reward_std"
+  ],
+  "engine": "miles-upstream",
+  "execution": {
+    "critic": false,
+    "max_policy_staleness": 0,
+    "rollout_logprobs": true
+  },
+  "execution_modes": [
+    "colocated-serial",
+    "partitioned-serial"
+  ],
+  "features": [],
+  "kl_placements": [
+    "none",
+    "reward"
+  ],
+  "loss_aggregations": [
+    "default"
+  ],
+  "losses": [
+    "policy_loss"
+  ],
+  "optimized_paths": [],
+  "parameter_layouts": [
+    "lora"
+  ],
+  "partitioned_driver": true,
+  "placements": [
+    "colocated",
+    "fixed-partition"
+  ],
+  "port_verbs": [],
+  "reward_postprocessors": [],
+  "runtime_fingerprint": "sha256:4ebf2ccaf53873acd05fb76042d354db66a4209a9b526f61b682833e7fead0ea",
+  "schema": "yeto-rl-engine-capabilities-v1",
+  "unverified_mechanisms": []
+}

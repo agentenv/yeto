@@ -1,0 +1,6 @@
+[yeto] worker is not running
+[yeto] tearing down 1 cluster(s): algo2a-g1-rpp-baseline-l0-modal
+[yeto] Modal app yeto-algo2a-g1-rpp-baseline: already stopped
+[yeto] algo2a-g1-rpp-baseline-l0-modal: stopped with the Modal app (Modal app yeto-algo2a-g1-rpp-baseline: stopped, 0 tasks)
+[yeto] run 'algo2a-g1-rpp-baseline' is down
+App is already stopped. (Stopped at 2026-09-29 19:00:52+00:00 by 'zhuang-6600').

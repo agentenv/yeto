@@ -1,0 +1,3 @@
+A sym clipfrac 0.4599609375 loss 0.009585031308233738
+B hi=10 clipfrac 0.2353515625 loss 0.008232206106185913
+fraction of tokens with A>0 and ratio>1.001 (only these differ): 0.224609375

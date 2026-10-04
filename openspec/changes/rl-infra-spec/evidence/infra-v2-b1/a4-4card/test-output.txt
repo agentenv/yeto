@@ -1,0 +1,29 @@
+== tests/test_cleanup.sh
+PASS teardown_ok (rc=0)
+PASS worker killed
+PASS longer-prefix process untouched
+PASS STOP flag written
+PASS no_residue (rc=0)
+PASS residue_stuck (rc=2)
+PASS relaunched_after_down (rc=2)
+PASS relaunch caught by the second check
+ALL PASS
+== tests/test_selfcheck.sh
+PASS ended_before_generate rc
+PASS ended marker
+PASS deadline rc
+PASS deadline marker
+PASS unattested probe rc
+PASS unattested marker
+PASS selfcheck never writes judge markers
+PASS gpu assert rc
+PASS gpu assert marker
+PASS gpu ok rc
+PASS no marker when ok
+ALL PASS
+== tests/test_fork_probe.py
+Ran 5 tests in 0.000s
+OK
+== tests/test_judge_inject.py
+Ran 12 tests in 0.005s
+OK

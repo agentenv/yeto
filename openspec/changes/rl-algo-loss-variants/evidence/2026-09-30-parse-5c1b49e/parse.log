@@ -1,0 +1,6 @@
+miles from /tmp/img-verify-5c1b/root/miles/miles/utils/arguments.py
+git HEAD 5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba
+cispo ['--advantage-estimator', 'grpo', '--eps-clip', '0.2', '--eps-clip-high', '0.28', '--calculate-per-token-loss', '--policy-loss-variant', 'cispo'] -> cispo 1.0 1.05 0.4 0.4 calculate_per_token_loss True eps 0.2 0.28 | accepted | yeto: accepted
+sapo ['--advantage-estimator', 'grpo', '--policy-loss-variant', 'sapo', '--sapo-tau-pos', '0.9', '--sapo-tau-neg', '1.2'] -> sapo 0.9 1.2 0.4 0.4 calculate_per_token_loss False eps 0.2 None | accepted | yeto: accepted
+gmpo ['--advantage-estimator', 'grpo', '--policy-loss-variant', 'gmpo', '--gmpo-log-clip-low', '0.3', '--gmpo-log-clip-high', '0.5'] -> gmpo 1.0 1.05 0.3 0.5 calculate_per_token_loss False eps 0.2 None | accepted | yeto: accepted
+gmpo_token_REJECTED_BY_YETO ['--advantage-estimator', 'grpo', '--calculate-per-token-loss', '--policy-loss-variant', 'gmpo', '--gmpo-log-clip-low', '0.4', '--gmpo-log-clip-high', '0.4'] -> gmpo 1.0 1.05 0.4 0.4 calculate_per_token_loss True eps 0.2 None | rejected: --policy-loss-variant gmpo cannot be combined with --calculate-per-token-loss | yeto: rejected

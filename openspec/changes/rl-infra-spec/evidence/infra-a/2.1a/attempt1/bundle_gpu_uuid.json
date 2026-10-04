@@ -1,0 +1,10 @@
+{
+  "source": "M1 log 'Creating placement group with 3 GPUs from explicit map PlacementMap(trainer=(0,), rollout=(1,), standby=(2,))' + bundle->(node,gpu) lines + container nvidia-smi --query-gpu=index,uuid,name",
+  "node": "172.20.24.54",
+  "roles": {
+    "trainer": [{"bundle": 0, "gpu_index": 0, "uuid": "GPU-8cd51325-8985-a239-c8e7-e687d11d431b"}],
+    "rollout": [{"bundle": 1, "gpu_index": 1, "uuid": "GPU-8b58803d-06b8-a67d-6220-8e4a54ba2af0"}],
+    "standby": [{"bundle": 2, "gpu_index": 2, "uuid": "GPU-1fa2c969-3529-7ff8-e658-06b6f1c534b3"}]
+  },
+  "gpu_model": "NVIDIA H100 80GB HBM3"
+}

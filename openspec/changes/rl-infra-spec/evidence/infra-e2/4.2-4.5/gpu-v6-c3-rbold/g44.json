@@ -1,0 +1,119 @@
+{
+ "criteria": {
+  "journal VALIDATING->WAIT_SAFE->REBUILDING_TRAINER->SUCCEEDED": {
+   "pass": true,
+   "phases": [
+    "VALIDATING",
+    "WAIT_SAFE",
+    "REBUILDING_TRAINER",
+    "SUCCEEDED"
+   ]
+  },
+  "rebuild outcome == REBUILD_OLD": {
+   "pass": true,
+   "outcome": "REBUILD_OLD"
+  },
+  "SwappableActor.generation == 1": {
+   "pass": true,
+   "generation": 1
+  },
+  "attempt stages create_training_models, done": {
+   "pass": true,
+   "stages": [
+    "create_training_models",
+    "done"
+   ]
+  },
+  "journal rebuild.local_step == 3": {
+   "pass": true,
+   "local_step": 3
+  },
+  "exactly one cut manifest": {
+   "pass": true,
+   "count": 1
+  },
+  "cut progress.local_step == 3": {
+   "pass": true,
+   "local_step": 3
+  },
+  "cut outer.settled": {
+   "pass": true
+  },
+  "cut ledger carried_over == 0 and ready_unconsumed == 0": {
+   "pass": true,
+   "ledger": {
+    "carried_over": 0,
+    "ready_unconsumed": 0
+   }
+  },
+  "rl_driver_start == 1 (no second initialize)": {
+   "pass": true,
+   "count": 1
+  },
+  "rl_trainer_rebuilt == 1": {
+   "pass": true,
+   "count": 1
+  },
+  "rl_trainer_rebuilt policy_version == 3": {
+   "pass": true,
+   "policy_version": 3
+  },
+  "re-publication to every member": {
+   "pass": true,
+   "rebuilt_members": [
+    "engine:inference-engine-all-0-0-00000"
+   ],
+   "members": [
+    "engine:inference-engine-all-0-0-00000"
+   ]
+  },
+  "re-published policy hash == cut policy hash": {
+   "pass": true,
+   "token": "yeto:3:09f5875758115d1fd88c332c17baaed9e41866e11581172d055562f1182c7ec6",
+   "cut": "09f5875758115d1fd88c332c17baaed9e41866e11581172d055562f1182c7ec6"
+  },
+  "rounds not replayed (rollout ids 0..5 once each)": {
+   "pass": true,
+   "rounds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+   ]
+  },
+  "round 3 trained_sample_ids_sha256 == B1": {
+   "pass": true,
+   "run": "69e849fc1333d363ba06a0f0c63bc14224be8b823e88d696308e3dc186e9b56e",
+   "b1": "69e849fc1333d363ba06a0f0c63bc14224be8b823e88d696308e3dc186e9b56e"
+  },
+  "data cursor before round 3 (after round 2) == B1": {
+   "pass": true,
+   "run": {
+    "epoch_id": 0,
+    "sample_group_index": 6,
+    "sample_index": 48,
+    "sample_offset": 6
+   },
+   "b1": {
+    "epoch_id": 0,
+    "sample_group_index": 6,
+    "sample_index": 48,
+    "sample_offset": 6
+   }
+  },
+  "optimizer_applied never twice (ledger)": {
+   "pass": true,
+   "rollout_ids": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "note": "pulled ledger can lag the last round; completeness is judged from the tape (rounds 0..5 once)"
+  }
+ },
+ "pass": true
+}

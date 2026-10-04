@@ -1,0 +1,145 @@
+{
+ "all_ok": true,
+ "cases": [
+  {
+   "case": "clip_higher",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "combo_dapo",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "combo_kl_tis_dual",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "constant_agg",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "custom_loss",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "custom_tis",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "default_grpo",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "dual_clip",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "entropy",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "eps_clip",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "gspo",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "kl_loss_k1",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "kl_loss_k2",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "kl_loss_k3",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "kl_loss_low_var_kl",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "kl_unbiased",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "no_reward_norm",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "no_std",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "opsm",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "reward_postprocess",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "rollout_logprobs",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "rpp_baseline",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "rpp_reward_kl",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "stock_filter_oversample",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "tis",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "token_agg",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "v1_kl0_bounded",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  },
+  {
+   "case": "whiten",
+   "argv_identical": true,
+   "remote_parse_ok": true
+  }
+ ]
+}

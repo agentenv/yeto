@@ -1,0 +1,19 @@
+{
+ "labels": {
+  "ai.sglang.build.commit": "94602c9c2b7cbdb8efd5c52802dac6a1c180089e",
+  "ai.sglang.build.url": "https://github.com/sgl-project/sglang/actions/runs/35322364074",
+  "ai.sglang.image.tag": "lmsysorg/sglang:v0.5.20",
+  "ai.yeto.miles.commit": "0394715083c91182b5eb0c526eeee4196ac694b9",
+  "ai.yeto.sglang.commit": "9f29303bef1eea38eb613e5f454a52db1326422d",
+  "com.nvidia.cudnn.version": "9.14.0.64-1",
+  "maintainer": "NVIDIA CORPORATION <cudatools@nvidia.com>",
+  "miles.image-inputs": "23bcb1234b0b9b9c46fb488a07072e3053f1ea38d4d9cbd5ec91c0499ad8b253",
+  "org.opencontainers.image.base.name": "docker.io/radixark/miles@sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d",
+  "org.opencontainers.image.revision": "0394715083c91182b5eb0c526eeee4196ac694b9",
+  "org.opencontainers.image.source": "https://github.com/michaellchung/miles",
+  "org.opencontainers.image.url": "https://github.com/sgl-project/sglang/actions/runs/35322364074",
+  "org.opencontainers.image.version": "lmsysorg/sglang:v0.5.20"
+ },
+ "n_layers": 113,
+ "last_diff_id": "sha256:ad121e247b8ca38bdd8f0d37cc398f7da798164e5bda3a835d8b8a4ba8ae557f"
+}
