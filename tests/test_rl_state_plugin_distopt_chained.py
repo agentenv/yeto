@@ -25,7 +25,7 @@ class _Range:
 
 
 class _Leaf:
-    def __init__(self, params, full_main, *, dp_rank, dp_size, group):
+    def __init__(self, params, full_main, *, dp_rank, dp_size, group, megatron_handles=False):
         sizes = [p.numel() for p in params]
         total = sum(sizes)
         shard = -(-total // dp_size)
@@ -36,6 +36,8 @@ class _Leaf:
             if e > s:
                 param_map[p] = {"param": _Range(s, e)}
                 self._mains[id(p)] = full_main[p].reshape(-1)[s:e].clone()
+                if megatron_handles:  # real Megatron: main_param is the owned FP32 shard
+                    p.main_param, p.main_param_sharded = self._mains[id(p)], True
             off += n
         self.gbuf_ranges = [{(torch.bfloat16, torch.float32): [{"param_map": param_map}]}]
         self.model_param_group_index_map = {p: (0, i) for i, p in enumerate(param_map)}
@@ -57,7 +59,7 @@ def _ref(params, seed):
     return {p: torch.randn(p.shape, generator=g, dtype=torch.float32) for p in params}
 
 
-def _world(zero=False):
+def _world(zero=False, megatron_handles=False):
     dense = _bf16(((3, 5), (7,), (2, 4)), 0)  # attention LoRA, replicated across EP ranks
     experts = [_bf16(((4, 3),), 10 + r) for r in range(2)]  # EP rank r's own expert params
     ref = {**_ref(dense, 1), **_ref(experts[0], 2), **_ref(experts[1], 3)}
@@ -65,8 +67,10 @@ def _world(zero=False):
         ref = {p: torch.zeros(p.shape) for p in ref}
     ranks = []
     for r in range(2):
-        d = _Leaf(dense, ref, dp_rank=r, dp_size=2, group=DENSE_GROUP)
-        e = _Leaf(experts[r], ref, dp_rank=0, dp_size=1, group=("expert-dp", (r,)))
+        d = _Leaf(dense, ref, dp_rank=r, dp_size=2, group=DENSE_GROUP, megatron_handles=megatron_handles)
+        e = _Leaf(
+            experts[r], ref, dp_rank=0, dp_size=1, group=("expert-dp", (r,)), megatron_handles=megatron_handles
+        )
         ranks.append((SimpleNamespace(chained_optimizers=[d, e]), dense + experts[r]))
     return ranks, ref
 
@@ -95,8 +99,10 @@ def _gather_all(ranks):
     return outs, seen
 
 
-def test_chained_export_gathers_full_masters_in_the_right_groups():
-    ranks, ref = _world()
+@pytest.mark.parametrize("megatron_handles", [False, True])
+def test_chained_export_gathers_full_masters_in_the_right_groups(megatron_handles):
+    ranks, ref = _world(megatron_handles=megatron_handles)
+    assert all(sp.needs_gather(opt, params) for opt, params in ranks)
     outs, seen = _gather_all(ranks)
     assert seen == [[DENSE_GROUP, ("expert-dp", (0,))], [DENSE_GROUP, ("expert-dp", (1,))]]
     for (opt, params), got in zip(ranks, outs, strict=True):
@@ -104,8 +110,9 @@ def test_chained_export_gathers_full_masters_in_the_right_groups():
             assert m.dtype == torch.float32 and torch.equal(m, ref[p])
 
 
-def test_chained_apply_then_export_roundtrips():
-    ranks, _ = _world(zero=True)
+@pytest.mark.parametrize("megatron_handles", [False, True])
+def test_chained_apply_then_export_roundtrips(megatron_handles):
+    ranks, _ = _world(zero=True, megatron_handles=megatron_handles)
     targets = {p: t for opt, params in ranks for p, t in _ref(params, 99).items()}
     for opt, params in ranks:
         assert sp.write_masters(opt, params, [targets[p] for p in params]) is True
@@ -153,3 +160,14 @@ def test_unsharded_masters_need_no_gather():
     ranks, _ = _world()
     assert not sp.needs_gather(ranks[0][0], [p])
     assert not sp.needs_gather(None, [p])
+
+
+def test_sharded_main_param_is_not_a_complete_master():
+    """M2 rerun: Megatron's DistributedOptimizer sets ``main_param`` to the owned FP32 shard."""
+    p = torch.nn.Parameter(torch.zeros(6, dtype=torch.bfloat16))
+    p.main_param, p.main_param_sharded = torch.ones(3), True
+    assert not sp.has_complete_master(p)
+    q = torch.nn.Parameter(torch.zeros(6, dtype=torch.bfloat16))
+    q.main_param = torch.ones(3)  # partial without the flag
+    assert not sp.has_complete_master(q)
+    assert sp.has_complete_master(torch.nn.Parameter(torch.zeros(2)))

@@ -78,6 +78,26 @@ def master_of(parameter: Any) -> Any:
     return main.view(parameter.shape)
 
 
+def has_complete_master(parameter: Any) -> bool:
+    """FP32 itself, or a ``main_param`` covering the whole parameter.
+
+    Megatron's DistributedOptimizer sets ``main_param`` to this rank's FP32
+    *shard* (``main_param_sharded=True``) on owned ranges and leaves it unset
+    elsewhere; both are DP-sharded masters, not complete ones.
+    """
+
+    import torch
+
+    if parameter.dtype == torch.float32:
+        return True
+    main = getattr(parameter, "main_param", None)
+    return (
+        main is not None
+        and not getattr(parameter, "main_param_sharded", False)
+        and main.numel() == parameter.numel()
+    )
+
+
 # --------------------------------------------------------------------------
 # DistributedOptimizer: DP-sharded FP32 masters (rl-infra-spec 2.4, decision (a))
 # --------------------------------------------------------------------------
@@ -168,11 +188,9 @@ def _dp_all_reduce_sum(leaf: Any, flat: Any) -> None:
 def needs_gather(optimizer: Any, parameters: Sequence[Any]) -> bool:
     """Whether some low-precision parameter's master lives only in DistributedOptimizer shards."""
 
-    import torch
-
     if optimizer is None or not any(_is_distributed(leaf) for leaf in _optimizer_leaves(optimizer)):
         return False
-    return any(getattr(p, "main_param", None) is None and p.dtype != torch.float32 for p in parameters)
+    return any(not has_complete_master(p) for p in parameters)
 
 
 def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=None, reduce=None) -> list[Any]:
@@ -189,7 +207,7 @@ def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=No
     out: list[Any] = []
     pending: dict[int, tuple[Any, list[tuple[int, Any]]]] = {}
     for i, param in enumerate(parameters):
-        if getattr(param, "main_param", None) is not None or param.dtype == torch.float32:
+        if has_complete_master(param):
             out.append(master_of(param))
             continue
         if not has_dist:
@@ -236,7 +254,7 @@ def write_masters(optimizer: Any, parameters: Sequence[Any], targets: Sequence[A
     has_dist, owned = distributed_ranges(optimizer)
     wrote_model = False
     for param, target in zip(parameters, targets, strict=True):
-        if getattr(param, "main_param", None) is not None or param.dtype == torch.float32:
+        if has_complete_master(param):
             master_of(param).copy_(target)
             continue
         if not has_dist:
