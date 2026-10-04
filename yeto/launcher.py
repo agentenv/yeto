@@ -2180,6 +2180,7 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
         MILES_BUNDLE_SHA256,
         MILES_COMMIT,
         MILES_NEXT_COMMIT,
+        MILES_NEXT_IMAGE_MANIFEST,
         MILES_NEXT_IMAGE_SGLANG_ROOT,
         MILES_NEXT_REPOSITORY,
         MILES_PEFT_VERSION,
@@ -2192,8 +2193,14 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
 
     if rl_engine == "ports":
 
-        def checkout(path: str, repository: str, commit: str) -> str:
+        def checkout(
+            path: str, repository: str, commit: str, refreshed_flag: str = ""
+        ) -> str:
             repo = shlex.quote(repository)
+            # ``refreshed_flag``: shell variable set to 1 when the checkout
+            # had to move to the pin (so the caller knows the image's
+            # install of it can no longer be trusted as-is).
+            mark = f"{refreshed_flag}=1\n" if refreshed_flag else ""
             return (
                 f"if [ ! -d {path}/.git ]; then git clone --no-checkout "
                 f"{repo} {path}; fi\n"
@@ -2206,7 +2213,8 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
                 f"{commit} ]; then\n"
                 f"git -C {path} fetch --depth 1 origin {commit}\n"
                 f"git -C {path} checkout --detach {commit}\n"
-                "fi\n"
+                + mark
+                + "fi\n"
                 f'test "$(git -C {path} rev-parse HEAD)" = {commit}\n'
                 f'test "$(git -C {path} rev-parse --abbrev-ref HEAD)" = HEAD\n'
                 f'test -z "$(git -C {path} status --porcelain '
@@ -2230,11 +2238,42 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
             f'sglang.__file__).startswith("{MILES_NEXT_IMAGE_SGLANG_ROOT}/python/'
             "\") else 1)'"
         )
+        # MILES_NEXT_IMAGE also ships the pinned Miles fork installed
+        # editable at /root/miles (= ~/miles) and records it in
+        # MILES_NEXT_IMAGE_MANIFEST.  When ~/miles was already at the pin
+        # (no fetch above) and the manifest names that commit at that path,
+        # the image's install is kept: the editable re-install is skipped
+        # and only a missing/other peft is (re)installed.  Any other image,
+        # a moved checkout, or a manifest mismatch gets the full install.
+        manifest = shlex.quote(MILES_NEXT_IMAGE_MANIFEST)
+        miles_in_image = (
+            '[ "$MILES_REFRESHED" = 0 ] && '
+            f"python3 -c 'import json, os, sys; "
+            f'm = json.load(open("{MILES_NEXT_IMAGE_MANIFEST}"))["miles"]; '
+            f'sys.exit(0 if m["commit"] == "{MILES_NEXT_COMMIT}" and '
+            'os.path.realpath(m["path"]) == '
+            "os.path.realpath(os.path.expanduser(\"~/miles\")) else 1)' "
+            "2>/dev/null"
+        )
+        peft_ok = (
+            "python3 -c 'import peft, sys; "
+            f"sys.exit(0 if peft.__version__ == \"{MILES_PEFT_VERSION}\" else 1)' "
+            "2>/dev/null"
+        )
         return (
             "set -e\n"
-            + checkout("~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
-            + "python3 -m pip install -q --no-deps -e ~/miles "
-            f"'peft=={MILES_PEFT_VERSION}'",
+            "MILES_REFRESHED=0\n"
+            + checkout(
+                "~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT, "MILES_REFRESHED"
+            )
+            + f"if {miles_in_image}; then\n"
+            f"echo \"[yeto-setup] image provides miles {MILES_NEXT_COMMIT} "
+            f'({manifest}); editable install kept"\n'
+            f"{peft_ok} || python3 -m pip install -q 'peft=={MILES_PEFT_VERSION}'\n"
+            "else\n"
+            "python3 -m pip install -q --no-deps -e ~/miles "
+            f"'peft=={MILES_PEFT_VERSION}'\n"
+            "fi",
             f"if {sglang_in_image}; then\n"
             f"ln -sfn {image_root} ~/sglang\n"
             f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"
