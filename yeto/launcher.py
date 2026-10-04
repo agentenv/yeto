@@ -3625,10 +3625,17 @@ class SkySDKOps:
             print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
             return None
 
+    def __init__(self, nodes_by_cluster=None):
+        # rl-multinode-island D10: the controller's failure-path teardown (job FAILED ->
+        # recovery refused -> _down) must verify EVERY node instance, like run()'s final
+        # teardown; without the mapping a cluster is treated as single-node.
+        self.nodes_by_cluster = dict(nodes_by_cluster or {})
+
     def down(self, cluster: str) -> None:
         import sky
 
-        terminate_and_verify(sky, cluster)
+        nodes = getattr(self, "nodes_by_cluster", None) or {}
+        terminate_and_verify(sky, cluster, num_nodes=nodes.get(cluster, 1))
 
     def now(self) -> float:
         return time.monotonic()
@@ -4805,10 +4812,13 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         from . import runs
         from .modal_runner import RoutingOps
 
+        sky_sdk_ops = SkySDKOps()
+        # rl-multinode-island D10: the failure-path teardown verifies every node instance
+        sky_sdk_ops.nodes_by_cluster = dict(nodes_by_cluster)
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
             syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
-            sky_ops=RoutingOps(SkySDKOps(), modal_island_ops),
+            sky_ops=RoutingOps(sky_sdk_ops, modal_island_ops),
             poll_interval=args.controller_poll,
             recover_timeout=effective_recover_timeout(args),
             on_relaunch=spawn_tail,

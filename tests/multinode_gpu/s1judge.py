@@ -76,7 +76,8 @@ elif CASE == "g2":
     verdict = "PARTIAL" if all(v for v in checks.values() if v is not None) else "FAIL"
 elif CASE == "g3":
     kill = read("kill.txt").splitlines()
-    kill_epoch = float(kill[1]) if len(kill) > 1 and re.match(r"^\d+\.\d+$", kill[1].strip()) else None
+    # the first epoch-looking line (ssh may print a known-hosts warning before the worker's `date +%s.%N`)
+    kill_epoch = next((float(l.strip()) for l in kill if re.match(r"^\d+\.\d+$", l.strip())), None)
     lost = [r for r in journal if r.get("kind") == "node_lost"]
     rr = [e for e in events if e.get("event") == "rl_reconfiguration" and e.get("result") == "RECOVERY_REQUIRED" and str(e.get("error", "")).startswith("node_lost")]
     lost_wall = lost[0].get("wall_time") if lost else None

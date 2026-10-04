@@ -169,3 +169,19 @@ def test_network_tier_best_only_where_the_cloud_honors_it():
     assert launcher.multinode_network_tier("nebius", "L40S", 1) is None
     assert launcher.multinode_network_tier("nebius", "h100", 1) is None
     assert launcher.multinode_network_tier("aws", "A10G", 1) == "best"
+
+
+def test_failure_path_teardown_verifies_every_node(monkeypatch):
+    """rl-multinode-island D10 (s1-mn-20261004d G4): FleetController._down -> SkySDKOps.down
+    must take the island's node count, not the single-node default."""
+    seen = {}
+
+    def fake_tv(sky, cluster, **kw):
+        seen[cluster] = kw.get("num_nodes")
+        return True
+
+    monkeypatch.setattr(launcher, "terminate_and_verify", fake_tv)
+    monkeypatch.setitem(__import__("sys").modules, "sky", object())
+    launcher.SkySDKOps(nodes_by_cluster={"isl-l0": 2}).down("isl-l0")
+    launcher.SkySDKOps().down("other")
+    assert seen == {"isl-l0": 2, "other": 1}
