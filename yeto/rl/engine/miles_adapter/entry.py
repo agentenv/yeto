@@ -658,9 +658,11 @@ def compose_island(
         if hasattr(driver.rollout, "event_sink"):
             driver.rollout.event_sink = driver.publisher.event_sink
 
+        _topo = getattr(launch.placement, "topology", None)
         driver.placement = ElasticPlacement(
             driver.placement, pool_gpus=elastic.pool_gpus,
             epoch=elastic.controller.journal.epochs.config_epoch,
+            gpus_per_node=getattr(_topo, "gpus_per_node", None),
         )
         epochs = elastic.controller.journal.epochs
         driver.config_epoch = epochs.config_epoch
