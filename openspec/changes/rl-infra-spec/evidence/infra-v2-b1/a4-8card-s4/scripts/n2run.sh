@@ -1,7 +1,7 @@
 #!/bin/bash
 # usage: n2run.sh <prefix> <ngpu> <hard_s> <watchdog_s> <launch args...>  (Nebius island, --controller local, no-sync)
 set -u
-T=$(ps -u michael -L -o pid= | wc -l); if [ "$T" -ge 3000 ]; then echo "abort: $T user threads"; exit 3; fi
+T=$(ps -u michael -L -o pid= | wc -l); if [ "$T" -ge ${THREAD_MAX:-3000} ]; then echo "abort: $T user threads (max ${THREAD_MAX:-3000})"; exit 3; fi
 P=$1; NG=$2; HARD=$3; WD=$4; shift 4; EXTRA="$*"
 B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P; SKY=/home/michael/work/gpu-head/venv/bin/sky
 # chain mode (chain8.sh, gpu-plan 9.23 cluster reuse): RUN_ROOT = chain items dir, CLUSTER_PREFIX = the shared cluster/run name, KEEP=1 keeps the cluster after the job,

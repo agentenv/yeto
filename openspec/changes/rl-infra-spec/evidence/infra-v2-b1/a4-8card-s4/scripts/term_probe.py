@@ -1,6 +1,7 @@
 # in-container: watch the island journal; at the N-th terminal phase run the fork probes locally (seconds, no ssh/pull
 # latency): status -> ~/yeto-rl/probe_after.txt; with mode e1b also stale <first member_engines url> -> probe_stale.txt
-# and oldepoch -> probe_oldepoch.txt.  usage: term_probe.py <n_terminal> [e1b]
+# and oldepoch -> probe_oldepoch.txt.  usage: term_probe.py <n_terminal> [e1b|rec]
+# mode rec (E1-D ⑤⑦, 3.7 restart recovery): count `recovery status=verified` records instead of terminal phases.
 import json, os, subprocess, sys, time
 N = int(sys.argv[1]); MODE = sys.argv[2] if len(sys.argv) > 2 else ""
 J = os.path.expanduser("~/yeto-rl/elastic-state/reconfig/journal.jsonl"); H = os.path.expanduser("~/yeto-rl")
@@ -19,8 +20,10 @@ while not done:
             try: r = json.loads(l)
             except Exception: continue
             if r.get("kind") == "member_engines" and r.get("engine_urls") and not url: url = sorted(r["engine_urls"])[0]
-            if r.get("kind") == "phase" and r.get("phase") in ("SUCCEEDED", "REBUILT_OLD", "CANCELLED", "RECOVERY_REQUIRED"):
-                term += 1; L(event="terminal", n=term, phase=r.get("phase"))
+            hit = (r.get("kind") == "recovery" and r.get("status") == "verified") if MODE == "rec" else (
+                r.get("kind") == "phase" and r.get("phase") in ("SUCCEEDED", "REBUILT_OLD", "CANCELLED", "RECOVERY_REQUIRED"))
+            if hit:
+                term += 1; L(event="terminal", n=term, phase=r.get("phase") or r.get("status"))
                 if term >= N:
                     # all probes in parallel: each needs ~20 s to start a Ray client and the run may end ~50 s after the terminal phase
                     import threading
