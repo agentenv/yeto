@@ -1190,3 +1190,32 @@ def test_pth_line_hook_works_when_executed_inside_a_function(tmp_path):
     r = subprocess.run([_sys.executable, "-c", prog], capture_output=True, text=True, cwd=tmp_path)
     assert r.returncode == 0, r.stderr
     assert "not applied" not in r.stderr, r.stderr
+
+
+def test_pth_hook_falls_back_past_an_old_installed_yeto(tmp_path):
+    # An installed yeto without sky_patches (gpu-head venv) must not block
+    # loading the hook's repo copy.
+    import subprocess
+    import sys as _sys
+
+    from yeto.sky_patches import pth_line
+
+    old = tmp_path / "old" / "yeto"
+    old.mkdir(parents=True)
+    (old / "__init__.py").write_text("")
+    line = pth_line(str(REPO)).splitlines()[1]
+    prog = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(tmp_path / 'old')!r})\n"
+        "import yeto\n"
+        "def addpackage(line):\n"
+        "    exec(line)\n"
+        f"addpackage({line!r})\n"
+        "hook = sys.meta_path[0]\n"
+        "hook.find_spec('sky.provision.verda.instance')\n"
+        "import yeto.sky_patches\n"
+        "print('ok')\n"
+    )
+    r = subprocess.run([_sys.executable, "-c", prog], capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 0 and "ok" in r.stdout, r.stderr
+    assert "No module named" not in r.stderr, r.stderr

@@ -88,7 +88,8 @@ _PTH_TAG = "# yeto-sky-patches repo="
 def pth_line(repo_dir: str) -> str:
     """`.pth` content: a lazy hook that does nothing until some process
     imports sky's Verda provisioner; only then is yeto imported (an
-    installed yeto first, else `repo_dir`) and the patch applied. Other
+    installed yeto first, else `repo_dir`; an older installed yeto without
+    sky_patches gets `repo_dir/yeto` appended to its package path) and the patch applied. Other
     Python processes of the environment never import yeto, and a missing
     or foreign yeto is skipped silently."""
     code = (
@@ -109,6 +110,9 @@ def pth_line(repo_dir: str) -> str:
         "                if not os.path.isfile(os.path.join(_R, 'yeto', 'sky_patches', '__init__.py')):\n"
         "                    return None\n"
         "                sys.path.append(_R)\n"
+        "                _y = sys.modules.get('yeto')\n"
+        "                if _y is not None and hasattr(_y, '__path__'):\n"
+        "                    _y.__path__.append(os.path.join(_R, 'yeto'))\n"
         "                import yeto.sky_patches as y\n"
         "            y.install()\n"
         "            return y._FINDER.find_spec(name, path, target)\n"
