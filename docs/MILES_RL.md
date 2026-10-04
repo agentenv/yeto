@@ -411,6 +411,97 @@ to a user message. `label`, `metadata`, and `tools` remain available to Miles
 and the reward callable. Existing custom generation, session-server, and TITO
 arguments are forwarded unchanged.
 
+## Multi-node islands
+
+An RL learner island may span several SkyPilot nodes (`rl-multinode-island`;
+ports engine, `--rl-placement fixed-partition` only). `--gpu cloud:NxGxgpu`
+asks for one N-node cluster of G GPUs per node per learner:
+
+```bash
+yeto launch --training-mode rl --rl-engine ports \
+  --gpu nebius:2x8xh100 \
+  --rl-placement fixed-partition --rl-rollout-gpus 8 --rollout-num-gpus-per-engine 8 \
+  --tensor-parallel 2 --pipeline-parallel 1 \
+  --rl-elastic --rl-elastic-resources cfg/resources-2x8.json --rl-elastic-initial-config T8R8S0 \
+  ...
+```
+
+### Topology and placement rules
+
+- Logical bundle `p` lives on node `p // G` as local GPU `p % G`. The learner
+  asserts this against the Miles placement group at startup
+  (`StartupBundles`, `ray.util.placement_group_table`) and refuses to train on
+  any other layout.
+- Ray head = node rank 0 = the learner process = trainer rank 0. Worker nodes
+  join the head's Ray (bounded join, cleanup trap armed before joining) and
+  leave when the head exits. There is no separate head node.
+- `--rl-rollout-gpus` / `--rl-standby-gpus` are **island totals**. The trainer
+  takes the leading `total - rollout - standby` bundles and must occupy the same
+  number of GPUs on every node it uses (Miles' `actor_num_nodes x
+  actor_num_gpus_per_node` rectangle); every TP*PP group, every rollout engine
+  and every standby-to-cell rebind stays on one node; EP groups fit inside one
+  node. Violations fail at `yeto launch` before any cloud resource is touched.
+- The island must have at least the recipe-derived minimum of nodes (one TP*PP
+  replica + one rollout engine + standby, rounded up to whole nodes);
+  `--rl-min-nodes-per-learner N` raises that floor. Qwen3.8-Flash-Next LoRA
+  (trainer 8 + SGLang TP8) needs 2 nodes; the 32-GPU full-parameter recipe 4.
+- The launcher forwards `--rl-island-gpus-per-node G` to the learner; a
+  single-node island sends nothing and keeps every pre-existing behaviour.
+
+### Resources cfg (`--rl-elastic-resources`)
+
+A legacy cfg (no `nodes`) is parsed exactly as before. A multi-node cfg adds
+`nodes`/`gpus_per_node`; `placement` entries may be `"n<k>:<g>"`, logical bundle
+integers or pool GPU uuids (one spelling per cfg):
+
+```json
+{"nodes": 2, "gpus_per_node": 8,
+ "configs": {"T8R8S0": {"trainer": 8, "rollout": 8, "standby": 0, "rollout_engine_gpus": 8,
+                        "parallel": {"tp": 2, "pp": 1},
+                        "placement": {"trainer": ["n0:0","n0:1","n0:2","n0:3","n0:4","n0:5","n0:6","n0:7"],
+                                      "rollout": [["n1:0","n1:1","n1:2","n1:3","n1:4","n1:5","n1:6","n1:7"]],
+                                      "standby": []}}},
+ "edges": []}
+```
+
+Every config must use all `nodes x gpus_per_node` GPUs; a resolved `gpus` pool
+must list exactly that many, each node's `index` running `0..G-1`. Cells
+declared with `--rl-elastic-cells` are cut per node (a run never straddles two
+nodes; leftovers stay unbound), and `bind_members` refuses a cross-node target.
+
+### Node failure domain
+
+The controller records the island `topology` in the reconfiguration journal
+and polls `ray.nodes()` before every round. Any node loss (fewer alive nodes
+than declared, or a node exposing another GPU count) is recorded as
+`node_lost` and the island enters `RECOVERY_REQUIRED`: the learner exits
+non-zero, nothing trains or generates on the surviving nodes. A restarted
+learner (E1-D recovery) checks the same topology **before** touching the fork's
+membership epoch; with a node still missing it stays `RECOVERY_REQUIRED` and
+performs no differential recovery. Same shape with other hostnames is fine.
+Rebuilding the island is a manual `yeto up` (design Q4 a).
+
+Operational notes: `NCCL_IB_DISABLE=1`, `NCCL_DEBUG=WARN` and (on nebius)
+`NCCL_SOCKET_IFNAME=GLOO_SOCKET_IFNAME=<first non-virtual interface that is
+up>` are exported on every node (a Nebius node's NIC is `network-interface-0`,
+not `eth0`; the job log prints `[yeto-island] socket interface: ...`); set them
+in the environment to override. Journal records `topology` / `node_lost`
+and the `rl_reconfiguration` event with `result=RECOVERY_REQUIRED` and an
+`error` starting with `node_lost:` are the evidence to collect before tearing
+down.
+
+### Teardown confirmation
+
+`yeto down` / the launcher's teardown confirm a multi-node island per node
+instance: the instance ids are captured from the cloud before `sky down`, and
+the island counts as released only when the cloud reports every one of them
+terminated (`node instance <id> confirmed terminated` lines). No cloud probe, a
+failing probe or an instance still alive after the retries prints `UNCONFIRMED
+node instance(s) <ids>`, the cluster is reported as not verified and the run's
+teardown exits non-zero; delete the listed instances in the cloud console or
+rerun `yeto down`. `sky down`'s own success is never trusted for more than one
+node.
+
 ## Checkpoint and Recovery
 
 The syncer checkpoint is the only authoritative global LoRA. In exact-base RL
