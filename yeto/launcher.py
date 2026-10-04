@@ -2615,6 +2615,31 @@ def _json_compact(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+# Per-node vCPU floor for RL (miles/ports) islands. Ray must fit every CPU
+# actor next to the GPU workers; on a 1-GPU island miles requests roughly:
+# InferenceController 1 + TrainerController 1 + RolloutExecutor 1 +
+# registration reporter 1 (inference deploys) + MegatronTrainRayActor 0.4/GPU
+# + RayWorkerManager helpers 0.2 each + CommandActor/router 0.001 each, i.e.
+# ~4+ CPUs before sglang's own processes. A 4-vCPU node (AWS g5.xlarge /
+# g6e.xlarge) left Ray with "Pending Demands: {'CPU': 1.0}" and the job hung
+# (aws-g0-20261004c). 8+ keeps headroom; Nebius' smallest L40S (8 vCPU) and
+# H100/H200 shapes (16/128 vCPU) already satisfy it, so they are unchanged.
+# Applies per node, so multi-node islands get the same floor. An explicit
+# --learner-cpus or --learner-instance-type wins. Pre-provisioned pools
+# (ssh/kubernetes) and Modal size themselves and are left untouched.
+RL_ISLAND_MIN_CPUS = "8+"
+
+
+def rl_island_cpus(args, cloud: str | None = None):
+    if getattr(args, "learner_cpus", None):
+        return args.learner_cpus
+    if getattr(args, "learner_instance_type", None):
+        return None
+    if cloud in ("ssh", "kubernetes", "modal"):
+        return None
+    return RL_ISLAND_MIN_CPUS
+
+
 def make_miles_island_task(
     args,
     spec: ClusterSpec,
@@ -3006,7 +3031,7 @@ def make_miles_island_task(
     resources = {
         "infra": f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud,
         "accelerators": spec.accelerators,
-        "cpus": args.learner_cpus,
+        "cpus": rl_island_cpus(args, spec.cloud),
         "instance_type": args.learner_instance_type,
         "use_spot": args.spot,
         "disk_size": args.disk_size,
