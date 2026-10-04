@@ -434,7 +434,7 @@ class MilesTrainerGroup:
         # optimizer state on at least one of its DP ranks (DistOpt ranges).
         covered: dict[tuple[int, int], tuple[set[str], set[str]]] = {}
         for s in summaries:
-            key = (s["coord"]["tp"], s["coord"]["pp"])
+            key = (s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0))
             adapters, optimized = covered.setdefault(key, (set(), set()))
             adapters.update(s.get("adapter_names") or ())
             optimized.update(s.get("optimizer_names") or ())
@@ -442,9 +442,9 @@ class MilesTrainerGroup:
             if not adapters or not adapters <= optimized:
                 missing = sorted(adapters - optimized)[:4]
                 for s in summaries:
-                    if (s["coord"]["tp"], s["coord"]["pp"]) == key:
+                    if (s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0)) == key:
                         s["has_optimizer_state"] = False
-                problems.append(f"tp{key[0]}/pp{key[1]}: no optimizer state for {missing or 'any adapter'}")
+                problems.append(f"tp{key[0]}/pp{key[1]}/ep{key[2]}: no optimizer state for {missing or 'any adapter'}")
         manifest = CutManifest(
             cut_id=cut_id,
             epoch=int(epoch),

@@ -48,6 +48,8 @@
   - 完成记录（2026-10-04，CPU 通过）：`tests/test_rl_multinode_round_cut.py`（5 用例：A 提交 cut→同步 store→空本地→B 从 store 恢复、权重/rollout_id/manifest 校验；无指针从 0；ledger 落后拒绝；RECOVERY_REQUIRED 后不同步；cut 失败不致命 + driver 安全点钩子）。Megatron 真机分片经 S3 MOUNT 写读未验（M4）。
 
 - [x] 1.18 M2 修复（EP>1 且 dense DP>1 + DistributedOptimizer，2026-10-04）：`state_plugin._collective_export` 在 `needs_gather` 时先用 `full_masters` 聚合完整 FP32 主参再交给 `masters_as_module_parameters(..., masters)`；`full_masters` 按参数所属 leaf（`_leaf_for`：owned 区间 → `buffers[].param_index_map`）分组，各自在该 leaf 的 `data_parallel_group` 内 all-reduce（dense→dense DP，expert→expert DP），取代"最后一个 leaf 的组"。导入 `write_masters` 本就逐 rank 写自己的分片并设 bf16 副本、无集合通信，无需改。测试 `tests/test_rl_state_plugin_distopt_chained.py`（5 例，CPU 通过）；全量失败集 == 基线。GPU M2 复跑未验。
+- [x] 1.19 cut 放开 TP/PP>1 + DistributedOptimizer 与 EP>1（同形，2026-10-04）：`cut_plugin.config_problems` 默认不再拒绝这两条（仍拒 CP>1、fp16、precision-aware、多 DistOpt 实例）；`reshard=True`（4.6 换 DP）仍拒 EP>1 与 TP/PP+DistOpt。恢复端对带区间的 fork-M5 分片走"本地同形"：只读本 rank 分片，先与重建优化器的逐参数 `(start,end,numel)` 比对（不同 → fail closed，写前），再以零填充补齐覆盖后交 fork-M5 check/load（只写本 rank 区间；dense/expert leaf 均适用、不读 peer → EP rank 同名专家参数不混）。coord 在 EP>1 时增 `ep/etp_size/edp/edp_size`（写入 manifest files.coord，同形校验）；trainer 覆盖检查按 (tp,pp,ep)。恢复后重发布依赖 1.18 聚合导出。
+  - 完成记录（2026-10-04，CPU 通过）：`tests/test_rl_cut_distopt_pp_ep.py`（PP2+DistOpt DP1/DP2、EP2 dense DP2/expert DP1，真 fork-M5 helper @c35702e：save→重建→restore→再导出与 `full_masters` 逐元素相等；EP/DP 布局变化、区间变化拒绝）；`test_rl_trainer_cut.py::test_pp2_distributed_optimizer_cut_is_no_longer_refused`（M1/M4 布局 save_cut/restore_cut 通过）；全量失败集 == 基线。真机（M4 PP2 DistOpt round cut、Flash-Next TP2 PP8 EP4 DP2）待验。
 
 ## 2. 本地演练（CPU，多进程模拟多节点 Ray，D11）
 
