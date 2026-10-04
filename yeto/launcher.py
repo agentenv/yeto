@@ -1309,7 +1309,11 @@ def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
         scheme, _, rest = value.partition("://")
         if not scheme.isalnum() or not rest.strip("/") or rest.startswith("/"):
             raise ValueError(f"--rl-checkpoint-store {value!r} is not a bucket URI (scheme://bucket[/prefix])")
-        return ELASTIC_CHECKPOINT_STORE_MOUNT, value.rstrip("/")
+        # sky Storage MOUNT only mounts a bucket root ("MOUNT mode does not support
+        # mounting specific files"): mount the bucket, use the prefix as a subdir.
+        bucket, _, prefix = rest.strip("/").partition("/")
+        path = ELASTIC_CHECKPOINT_STORE_MOUNT + (f"/{prefix.strip('/')}" if prefix.strip("/") else "")
+        return path, f"{scheme}://{bucket}"
     if not (value.startswith("/") or value.startswith("~/")) or ".." in PurePosixPath(value).parts:
         raise ValueError("--rl-checkpoint-store must be a bucket URI or an absolute / ~/ path on the island")
     return value.rstrip("/") or "/", None
@@ -3308,7 +3312,7 @@ def make_miles_island_task(
         # a warning: single-node and node0-local behavior is unchanged).
         store = rl_checkpoint_store_plan(args)
         if store is not None and store[1] is not None:
-            storage_mounts[store[0]] = sky.Storage(
+            storage_mounts[ELASTIC_CHECKPOINT_STORE_MOUNT] = sky.Storage(
                 source=store[1], mode=sky.StorageMode.MOUNT, persistent=True)
         elif store is None and spec.num_nodes > 1:
             print(NODE0_LOCAL_CHECKPOINT_WARNING, file=sys.stderr)
