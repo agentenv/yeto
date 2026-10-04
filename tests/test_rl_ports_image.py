@@ -73,6 +73,23 @@ def test_build_inputs_match_the_pins():
     subprocess.run(["bash", "-n", str(REPO / "scripts/build_miles_ports_image.sh")], check=True)
 
 
+def test_commits_and_digest_are_pinned_together_with_the_build_record():
+    """Commit pins, tag, Dockerfile ARGs and the image digest move together:
+    the latest build record must name exactly the pinned commits and digest."""
+    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-01-lora-checksum"
+    record = json.loads((record_dir / "build-record.json").read_text())
+    assert record["miles_commit"] == rl.MILES_NEXT_COMMIT
+    assert record["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
+    assert record["digest"] == rl.MILES_NEXT_IMAGE.split("@")[1]
+    short = f"{rl.MILES_NEXT_COMMIT[:7]}-{rl.SGLANG_NEXT_COMMIT[:7]}"
+    assert record["tag"].endswith(f":{short}")
+    manifest = json.loads((record_dir / "image-manifest.json").read_text())
+    assert manifest["miles"]["commit"] == rl.MILES_NEXT_COMMIT
+    assert manifest["sglang"]["commit"] == rl.SGLANG_NEXT_COMMIT
+    dockerfile = (REPO / "docker/miles-ports/Dockerfile").read_text()
+    assert f"ARG SGLANG_VERSION={record['sglang_version']}" in dockerfile
+
+
 # --------------------------------------------------------- source setup
 
 LEGACY_SETUP_SHA256 = "1166134dbe978365d349f5e8f1851be7ccf7599c62dd28b01e88a64901425985"
@@ -141,15 +158,18 @@ def _fake_login_config(monkeypatch):
     monkeypatch.setattr(launcher, "_sky_docker_login_config", lambda login: ("login", dict(login)))
 
 
-def test_sky_ports_task_logs_in_via_docker_login_config_only(monkeypatch, login):
-    _fake_login_config(monkeypatch)
+def test_sky_ports_task_logs_in_via_task_secrets(monkeypatch, login):
+    """sky 0.13 re-derives the DockerLoginConfig from the task secrets on every
+    load; a DockerLoginConfig in Resources breaks its YAML round trip (B1 nsmoke)."""
     args = _cli()
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert task.resources._docker_login_config == ("login", LOGIN)
-    # Neither envs nor secrets: SkyPilot exports both into setup/run.
-    assert not hasattr(task, "secrets")
+    assert task.secrets == LOGIN
+    assert not hasattr(task.resources, "_docker_login_config")
     assert not set(LOGIN) & set(task.envs)
+    # SkyPilot exports secrets into setup/run: both scripts drop them first
+    assert task.setup.startswith(launcher.DOCKER_LOGIN_UNSET)
+    assert task.run.startswith(launcher.DOCKER_LOGIN_UNSET)
     assert "not-a-real-token" not in json.dumps(task.envs) + task.setup + task.run
     assert task.resources.image_id == rl.MILES_NEXT_IMAGE
 
@@ -177,7 +197,6 @@ def _legacy_task_blob(monkeypatch):
     [LOGIN, {"SKYPILOT_DOCKER_SERVER": "ghcr.io"}, {**LOGIN, "SKYPILOT_DOCKER_SERVER": "docker.io"}],
 )
 def test_legacy_task_ignores_any_registry_login(monkeypatch, no_login, env):
-    _fake_login_config(monkeypatch)
     before = _legacy_task_blob(monkeypatch)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -185,7 +204,6 @@ def test_legacy_task_ignores_any_registry_login(monkeypatch, no_login, env):
 
 
 def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
-    _fake_login_config(monkeypatch)
     args = _cli()
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
@@ -350,3 +368,48 @@ def test_launcher_flag_reaches_the_modal_config(monkeypatch, no_login):
         args.cluster_prefix = "img-test"
         cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:5")
         assert cfg.gpu_request == expected
+
+
+def _sky_roundtrip(task_kwargs, resources_kwargs):
+    sky = pytest.importorskip("sky")
+    from sky.utils import dag_utils
+
+    t = sky.Task(name="x", run="echo", **task_kwargs)
+    t.set_resources(sky.Resources(infra="nebius", accelerators="H100:8",
+                                  image_id=rl.MILES_NEXT_IMAGE, **resources_kwargs))
+    with sky.Dag() as dag:
+        dag.add(t)
+    text = dag_utils.dump_chain_dag_to_yaml_str(dag)  # client
+    for _ in range(2):  # server load + dump, and once more
+        dag = dag_utils.load_chain_dag_from_yaml_str(text)
+        text = dag_utils.dump_chain_dag_to_yaml_str(dag)
+    return next(iter(dag.tasks[0].resources))
+
+
+def test_sky_resources_login_breaks_the_yaml_round_trip():
+    """The B1 nsmoke failure, reproduced on the installed sky (skipped without sky)."""
+    docker = pytest.importorskip("sky.provision.docker_utils")
+    config = docker.DockerLoginConfig(username="user", password="not-a-real-token", server="ghcr.io")
+    with pytest.raises(TypeError, match="asdict"):
+        _sky_roundtrip({}, {"_docker_login_config": config})
+
+
+def test_sky_secrets_login_survives_the_yaml_round_trip():
+    docker = pytest.importorskip("sky.provision.docker_utils")
+    r = _sky_roundtrip({"secrets": dict(LOGIN)}, {})
+    assert isinstance(r._docker_login_config, docker.DockerLoginConfig)
+    assert r._docker_login_config.server == "ghcr.io"
+
+
+def test_on_demand_islands_for_acceptance_runs(monkeypatch, no_login):
+    """Nebius acceptance runs: --on-demand gives use_spot=False and no spot
+    checkpoint storage; the default (spot) is unchanged."""
+    args = _cli(("--gpu", "nebius:1x8xH100@eu-north1", "--on-demand"))
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    assert task.resources.use_spot is False
+    assert "storage" not in task.calls
+    default = _cli(("--gpu", "nebius:1x8xH100@eu-north1"))
+    _prepare_rl_args(default)
+    spot = _island_task(default, monkeypatch)
+    assert spot.resources.use_spot is True and "storage" in spot.calls

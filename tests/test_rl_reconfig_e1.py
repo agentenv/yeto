@@ -10,6 +10,7 @@ evidence/infra-e1/plan.md).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -941,8 +942,15 @@ class _FakeManager:
         from types import SimpleNamespace
 
         self.infos = {c: [SimpleNamespace(name=f"{c}/w0", generation=3)]
-                      for c in ("engine:c2", "engine:c3")}
-        self.get_worker_infos = _Remote(lambda cell: self.infos[cell])
+                      for c in ("c2", "c3")}
+
+        def get_worker_infos(cell):  # the fork's lookup: bare cell ids only, else AssertionError
+            matches = self.infos.get(cell, [])
+            assert matches, \
+                f"cell_id={cell!r} matches=[]"
+            return matches
+
+        self.get_worker_infos = _Remote(get_worker_infos)
         self.get_actor_handle = _Remote(
             lambda name, expected_generation: f"handle:{name}@{expected_generation}")
 
@@ -976,7 +984,7 @@ def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
     driver.run()
     assert __import__("time").monotonic() - started < 4  # not the 5 s gate: the kill unblocked it
     assert ctl.status("r")["phase"] == REBUILT_OLD
-    assert sorted(h for h, _ in fake_ray.killed) == ["handle:engine:c2/w0@3", "handle:engine:c3/w0@3"]
+    assert sorted(h for h, _ in fake_ray.killed) == ["handle:c2/w0@3", "handle:c3/w0@3"]
     assert all(no_restart for _, no_restart in fake_ray.killed)
     records = read_journal(tmp_path / "state/reconfig")
     action = next(r for r in records if r["kind"] == "watchdog_action")
@@ -985,6 +993,86 @@ def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
         "engine:c2", "engine:c3"]
     # old members were never touched
     assert set(driver.rollout.members()) == {"engine:c0", "engine:c1"}
+
+
+def test_watchdog_unmappable_target_enters_recovery_required_not_silent_wait(tmp_path):
+    """GPU a4s3/a4s4 regression: a manager that cannot resolve the targets (fork-style
+    lookup, real ``engine:`` member ids) must not leave the island waiting silently."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    manager = _FakeManager()
+    manager.infos.clear()  # nothing resolvable
+    fake_ray = _FakeRay(lambda handle: None)
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=manager, ray_module=fake_ray))
+    gate = threading.Event()
+    slow = publisher.publish_members
+
+    def publish_members(*a, **k):
+        gate.wait(1.5)
+        return slow(*a, **k)
+
+    publisher.publish_members = publish_members
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.2)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    with contextlib.suppress(Exception):
+        driver.run()
+    records = read_journal(tmp_path / "state/reconfig")
+    action = next(r for r in records if r["kind"] == "watchdog_action")
+    assert action["killed"] == [] and "matches=[]" in action["errors"][0]["error"]
+    assert action["errors"][0]["kind"] == "unknown_target"
+    assert ctl.recovery_required and "could not kill" in ctl.recovery_required
+    assert not ctl.admission_open
+
+
+def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path):
+    """A cell the fork knows but with no live worker actors (its engine died during
+    start_cells, GPU d123 chain 3) is journaled as ``skipped`` kind ``no_workers``; it is
+    not an unresolved target, so the transaction still ends REBUILT_OLD (not
+    RECOVERY_REQUIRED) once the blocked fork call returns."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    manager = _FakeManager()
+    infos = dict(manager.infos)
+    manager.get_worker_infos = _Remote(lambda cell: list(infos.get(cell, [])) if cell in ("c2", "c3")
+                                       else (_ for _ in ()).throw(AssertionError(f"cell_id={cell!r} matches=[]")))
+    infos["c3"] = []  # exists, no actors
+    fake_ray = _FakeRay(lambda handle: None)
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=manager, ray_module=fake_ray))
+    gate = threading.Event()
+    slow = publisher.publish_members
+
+    def publish_members(*a, **k):
+        gate.wait(1.5)
+        return slow(*a, **k)
+
+    publisher.publish_members = publish_members
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.2)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    with contextlib.suppress(Exception):
+        driver.run()
+    records = read_journal(tmp_path / "state/reconfig")
+    action = next(r for r in records if r["kind"] == "watchdog_action")
+    assert [k["cell"] for k in action["killed"]] == ["engine:c2"]  # c2 had a worker: killed
+    assert action["errors"] == []
+    assert [(e["cell"], e["kind"]) for e in action["skipped"]] == [("engine:c3", "no_workers")]
+    assert not ctl.recovery_required
+    assert ctl.status("r")["phase"] == REBUILT_OLD
 
 
 def test_watchdog_outside_start_verify_kills_nothing(tmp_path):
@@ -1075,3 +1163,30 @@ def test_watchdog_after_the_commit_point_kills_nothing(tmp_path):
     notes = [r.get("note", "") for r in read_journal(tmp_path / "state/reconfig")
              if r["kind"] == "watchdog"]
     assert notes and "after the commit point" in notes[0]
+
+
+def test_member_publication_is_on_the_tape_before_the_next_generation(tmp_path):
+    """A4 E1-A (c) audit gap: the new engines get the published policy through
+    publish_members at the up transaction; the tape records it, so the members
+    serving the next generation are auditable before the next rl_publication."""
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    _run_with_request(driver, ctl, at=1, rid="up")
+    ev = _events(tmp_path)
+    kinds = [e["event"] for e in ev]
+    i = kinds.index("rl_member_publication")
+    member_pub = ev[i]
+    assert member_pub["policy_version"] == 1
+    assert member_pub["sync/publication_members"] == ["engine:c2", "engine:c3"]
+    assert member_pub["sync/serving_members"] == [f"engine:c{k}" for k in range(4)]
+    assert member_pub["rl/policy_token"] == next(
+        e for e in ev if e["event"] == "rl_publication" and e["policy_version"] == 1)["rl/policy_token"]
+    # it comes before rollout 1's generation
+    gen1 = next(j for j, e in enumerate(ev) if e["event"] == "rl_driver_phase"
+                and e.get("phase") == "generate" and e.get("rollout_id") == 1)
+    assert i < gen1
+
+
+def test_no_member_publication_event_without_a_reconfiguration(tmp_path):
+    driver, *_ = _setup(tmp_path)
+    driver.run()
+    assert "rl_member_publication" not in {e["event"] for e in _events(tmp_path)}

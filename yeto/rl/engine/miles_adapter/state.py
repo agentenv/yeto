@@ -12,6 +12,7 @@ kwargs/results and is therefore not supported by this port.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from ..trainable_state import LAYOUT_LORA, TrainableState, require_supported_layout
@@ -72,17 +73,40 @@ class MilesPolicyState:
         self._run = (runner or LoopRunner()).run
         self.policy_version = policy_version
 
-    def _plugin(self, path: str, kwargs: dict[str, Any]) -> list[Any]:
-        results = self._run(self._actor.run_plugin(path, kwargs))
+    @staticmethod
+    def _checked(path: str, results: Any) -> list[Any]:
         if not isinstance(results, list) or not results:
             raise PolicyStateError(f"run_plugin({path}) returned no per-rank results")
         return results
 
+    def _plugin(self, path: str, kwargs: dict[str, Any]) -> list[Any]:
+        return self._checked(path, self._run(self._actor.run_plugin(path, kwargs)))
+
+    async def _aplugin(self, path: str, kwargs: dict[str, Any]) -> list[Any]:
+        """``_plugin`` for callers already inside a running event loop (the sync
+        ``_run`` would raise "This event loop is already running")."""
+        value = self._actor.run_plugin(path, kwargs)
+        if inspect.isawaitable(value):
+            value = await value
+        return self._checked(path, value)
+
     def export(self, *, policy_version: int | None = None) -> TrainableState:
+        version = self._export_version(policy_version)
+        results = self._plugin(EXPORT_STATE, {"policy_version": version})
+        return self._export_result(version, results)
+
+    async def aexport(self, *, policy_version: int | None = None) -> TrainableState:
+        version = self._export_version(policy_version)
+        results = await self._aplugin(EXPORT_STATE, {"policy_version": version})
+        return self._export_result(version, results)
+
+    def _export_version(self, policy_version: int | None) -> int:
+        return self.policy_version if policy_version is None else int(policy_version)
+
+    def _export_result(self, version: int, results: list[Any]) -> TrainableState:
         from yeto.rl.core import canonical_state_from_owned_tensors
 
-        version = self.policy_version if policy_version is None else int(policy_version)
-        results = [r for r in self._plugin(EXPORT_STATE, {"policy_version": version}) if r is not None]
+        results = [r for r in results if r is not None]
         if len(results) != 1:
             raise PolicyStateError(f"expected exactly one main-rank export, got {len(results)}")
         (result,) = results
@@ -100,6 +124,14 @@ class MilesPolicyState:
         return TrainableState.from_lora(lora)
 
     def apply(self, state: TrainableState, *, optimizer: str, local_step: int) -> None:
+        path, kwargs, lora = self._apply_request(state, optimizer, local_step)
+        self._apply_result(lora, self._plugin(path, kwargs))
+
+    async def aapply(self, state: TrainableState, *, optimizer: str, local_step: int) -> None:
+        path, kwargs, lora = self._apply_request(state, optimizer, local_step)
+        self._apply_result(lora, await self._aplugin(path, kwargs))
+
+    def _apply_request(self, state: TrainableState, optimizer: str, local_step: int):
         if optimizer not in OPTIMIZER_MODES:
             raise ValueError(f"optimizer must be one of {OPTIMIZER_MODES}, got {optimizer!r}")
         if isinstance(local_step, bool) or not isinstance(local_step, int) or local_step < 0:
@@ -116,15 +148,15 @@ class MilesPolicyState:
             name: value.detach().to(device="cpu", dtype=torch.float32).contiguous()
             for name, value in sorted(lora.tensors.items())
         }
-        results = self._plugin(
-            APPLY_STATE,
-            {
-                "tensors": tensors,
-                "policy_version": lora.policy_version,
-                "local_step": local_step,
-                "optimizer": optimizer,
-            },
-        )
+        kwargs = {
+            "tensors": tensors,
+            "policy_version": lora.policy_version,
+            "local_step": local_step,
+            "optimizer": optimizer,
+        }
+        return APPLY_STATE, kwargs, lora
+
+    def _apply_result(self, lora: Any, results: list[Any]) -> None:
         if any(r != results[0] for r in results):
             raise PolicyStateError(f"ranks disagree on apply result: {results!r:.300}")
         self.policy_version = lora.policy_version

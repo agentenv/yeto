@@ -396,3 +396,383 @@ def test_entry_leaves_the_rebuilder_unwired_when_preconditions_fail(tmp_path):
     assert ctl.trainer_rebuilder is None
     with pytest.raises(Rejected, match="no trainer rebuilder"):
         ctl.request_trainer_rebuild("rb", 0, 60)
+
+
+def test_round_trained_event_carries_the_data_cursor_only_when_reported(tmp_path):
+    import dataclasses
+
+    driver, ctl, engine, trained, log = _island(tmp_path / "a")
+    driver.run()
+    assert all("data_cursor" not in e for e in _events(tmp_path / "a")
+               if e["event"] == "rl_round_trained")
+    driver, ctl, engine, trained, log = _island(tmp_path / "b")
+    real = driver.rollout.generate
+
+    def generate(rollout_id):
+        batch = real(rollout_id)
+        return dataclasses.replace(batch, data_cursor={"sample_offset": 4 * (rollout_id + 1),
+                                                       "epoch_id": 0, "sample_group_index": 0,
+                                                       "sample_index": 0})
+
+    driver.rollout.generate = generate
+    driver.run()
+    cursors = [e["data_cursor"]["sample_offset"] for e in _events(tmp_path / "b")
+               if e["event"] == "rl_round_trained"]
+    assert cursors == [4, 8, 12, 16]
+
+
+def test_injected_rebuild_failure_takes_the_fork_path_to_rebuild_old(tmp_path):
+    import types
+
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import inject_rebuild_failures
+
+    fresh = [RankGroup([make_rank(9)]), RankGroup([make_rank(8)])]
+    calls = []
+
+    class TrainerRebuildError(RuntimeError):
+        def __init__(self, stage):
+            super().__init__(stage)
+            self.stage, self.cleanup_error, self.previous_view, self.view_restored = (
+                stage, None, None, True)
+
+    fork = types.SimpleNamespace()
+
+    async def create_training_models(args, executor):
+        calls.append("create")
+        return fresh.pop(0), None
+
+    async def rebuild_training_models(args, executor, *, old_handles, worker_manager,
+                                      trainer_pg_view):  # the fork's contract
+        await old_handles["actor"].dispose()
+        try:
+            return await fork.create_training_models(args, executor)
+        except BaseException as exc:
+            raise TrainerRebuildError("create_training_models") from exc
+
+    fork.create_training_models = create_training_models
+    fork.rebuild_training_models = rebuild_training_models
+    rank, actor = _trained_actor()
+    trainer = MilesTrainerGroup(args=ARGS, actor_model=actor, learner_id=0, learner_generation=0,
+                                parameter_layout_hash=lambda: "L", runner=LoopRunner())
+    from yeto.rl.engine.miles_adapter.rebuild_wiring import CutSource  # noqa: F401
+
+    rebuilder = make_trainer_rebuilder(
+        trainer=trainer, rollout=_Cursor(), ledger=_Ledger(),
+        algorithm=SimpleNamespace(sha256=lambda: "a" * 64, to_legacy_runtime_attrs=lambda: {}),
+        backend_fingerprint="fp", cut_root=str(tmp_path / "cuts"), global_batch_size=GBS,
+        rebuild_same_shape=lambda *, restore: rebuild_same_shape(
+            trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
+            worker_manager="wm", rollout=_Cursor(), restore=restore,
+            rebuild=inject_rebuild_failures(fork.rebuild_training_models, fork, 1)))
+    out = rebuilder(_Driver("h"), epoch=0, cut_id="rb-0-inj")
+    assert out["outcome"] == "REBUILD_OLD" and out["generation"] == 1
+    assert calls == ["create"]  # the first create was the injected failure
+    assert fork.create_training_models is create_training_models  # restored
+    assert [a["stage"] for a in out["attempts"]] == ["create_training_models", "done"]
+
+
+def test_rebuild_fail_switch_is_exported_only_when_given(tmp_path, monkeypatch):
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from rl_e2e_launch import island_run
+    import json
+
+    res = tmp_path / "r.json"
+    res.write_text(json.dumps({"configs": {"c0": {"trainer": 1, "rollout": 1}}, "edges": []}))
+    base = ("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1", "--gpu",
+            "aws:2xa100@us-east-1", "--rl-elastic", "--rl-elastic-resources", str(res),
+            "--rl-elastic-initial-config", "c0")
+    assert "YETO_RL_TEST_INJECT_REBUILD_FAIL" not in island_run(base, monkeypatch)
+    assert "export YETO_RL_TEST_INJECT_REBUILD_FAIL=1\n" in island_run(
+        base + ("--rl-test-inject-rebuild-fail",), monkeypatch)
+
+
+def test_live_data_cursor_reads_the_executor_data_source_now():
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+
+    source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
+                             get_buffer_length=lambda: 0)
+    pool = MilesRolloutPool(inference_controller=None,
+                            rollout_executor=SimpleNamespace(data_source=source), metadata=None,
+                            expected_policy=lambda: (0, "h"), runner=SimpleNamespace(run=asyncio.run))
+    pool._last_cursor = {"sample_offset": 4, "epoch_id": 0, "sample_group_index": 4,
+                         "sample_index": 32}
+    assert pool.live_data_cursor() == ({"sample_offset": 8, "epoch_id": 0,
+                                        "sample_group_index": 8, "sample_index": 64}, 0)
+    source.sample_offset = 12  # e.g. rollout_executor.load moved it during a rebuild
+    assert pool.data_cursor()["sample_offset"] == 12
+    # unreachable data source: unknown, NOT the cached value (fail closed)
+    remote = MilesRolloutPool(inference_controller=None, rollout_executor=object(), metadata=None,
+                              expected_policy=lambda: (0, "h"),
+                              runner=SimpleNamespace(run=asyncio.run))
+    remote._last_cursor = {"sample_offset": 4, "epoch_id": 0, "sample_group_index": 4,
+                           "sample_index": 32}
+    assert remote.live_data_cursor() == (None, None)
+    assert remote.data_cursor() is None
+    assert remote.last_batch_data_cursor()["sample_offset"] == 4
+
+
+class ActorHandle:  # the name Ray's handle type has
+    """A Ray actor handle over a RolloutExecutor: no data_source attribute here;
+    ``__ray_call__.remote(fn)`` runs fn(executor) in the actor (an ObjectRef)."""
+
+    def __init__(self, executor, fail=False):
+        self._executor, self._fail = executor, fail
+
+        class _Call:
+            @staticmethod
+            def remote(fn, *args):
+                async def ref():
+                    if fail:
+                        raise RuntimeError("actor died")
+                    return fn(executor, *args)
+                return ref()
+
+        self.__ray_call__ = _Call()
+
+
+def test_live_cursor_is_read_inside_the_executor_actor():
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+
+    source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
+                             get_buffer_length=lambda: 0)
+    executor = SimpleNamespace(data_source=source)
+
+    def pool(handle):
+        p = MilesRolloutPool(inference_controller=None, rollout_executor=handle, metadata=None,
+                             expected_policy=lambda: (0, "h"),
+                             runner=SimpleNamespace(run=asyncio.run))
+        p._last_cursor = {"sample_offset": 4, "epoch_id": 0, "sample_group_index": 4,
+                          "sample_index": 32}
+        return p
+
+    handle = ActorHandle(executor)
+    assert not hasattr(handle, "data_source")  # E2's H100 finding: the old read got None
+    live = pool(handle)
+    assert live.data_cursor()["sample_offset"] == 8
+    source.sample_offset = 16  # moved in the actor (rollout_executor.load during a rebuild)
+    assert live.live_data_cursor() == ({"sample_offset": 16, "epoch_id": 0,
+                                        "sample_group_index": 8, "sample_index": 64}, 0)
+    dead = pool(ActorHandle(executor, fail=True))
+    assert dead.live_data_cursor() == (None, None) and dead.data_cursor() is None
+
+
+def test_same_shape_rebuild_sees_a_cursor_moved_in_the_actor(tmp_path):
+    """G-4.5 row 5 through the live read: the cursor moves during the rebuild."""
+    import asyncio
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.engine.miles_adapter.trainer_rebuild import RecoveryRequired
+
+    source = SimpleNamespace(sample_offset=4, epoch_id=0, sample_group_index=4, sample_index=32,
+                             get_buffer_length=lambda: 0)
+    pool = MilesRolloutPool(inference_controller=None,
+                            rollout_executor=ActorHandle(SimpleNamespace(data_source=source)),
+                            metadata=None, expected_policy=lambda: (0, "h"),
+                            runner=SimpleNamespace(run=asyncio.run))
+    rank, actor = _trained_actor()
+    trainer = MilesTrainerGroup(args=ARGS, actor_model=actor, learner_id=0, learner_generation=0,
+                                parameter_layout_hash=lambda: "L", runner=LoopRunner())
+
+    async def fork_rebuild(args, executor, *, old_handles, worker_manager, trainer_pg_view):
+        await old_handles["actor"].dispose()
+        source.sample_offset = 12  # create_training_models -> rollout_executor.load rewound it
+        return RankGroup([make_rank(9)]), None
+
+    with pytest.raises(RecoveryRequired, match="data cursor changed"):
+        rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor,
+                           run=LoopRunner().run, worker_manager="wm", rollout=pool,
+                           rebuild=fork_rebuild, restore=lambda: None)
+
+
+def test_colocated_rebuild_does_not_republish_the_resident_policy(tmp_path):
+    """E2 C1 attempt 2: on a colocated island a second publish of the policy the
+    engines already hold made SGLang resume non-offloaded weights (KeyError
+    'weights'). The rebuild still checks restored == cut == published."""
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": __import__("torch").zeros(1, 2)},
+                        step_delta=1.0)  # colocated
+    driver = IslandDriver(
+        learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+        policy_state=engine.policy_state, publisher=engine.publisher, placement=engine.placement,
+        algorithm=AlgorithmSpec(), sync=LocalOnlySync(3),
+        events=EventTape(tmp_path / "events.jsonl", 0), capabilities=fake_capabilities())
+    log = []
+    orig = driver.safe_point
+
+    def safe_point(rid):
+        out = orig(rid)
+        if rid == 1:
+            before = [c for c in engine.calls if c[0] == "publish"]
+            _fake_rebuild(engine, log)(driver, epoch=0, cut_id="rb")
+            assert [c for c in engine.calls if c[0] == "publish"] == before  # no republish
+        return out
+
+    driver.safe_point = safe_point
+    driver.run()
+    assert log and log[-1][0] == "restored"
+    rebuilt = [e for e in _events(tmp_path) if e["event"] == "rl_trainer_rebuilt"]
+    assert rebuilt[0]["republished"] is False and "colocated" in rebuilt[0]["republish_skipped"]
+
+
+# ---------------------------------------------------------------- weight version across a rebuild
+class _VersionedPublish:
+    """Models Miles: the trainer's weight_updater.weight_version goes +1 per
+    publish; the rollout executor refuses a version that goes backwards."""
+
+    def __init__(self, engine, publisher):
+        self.engine, self.inner = engine, publisher
+        engine.trainer_weight_version = 0
+        self.engine_version = 0
+
+    def publish(self, state):
+        self.engine.trainer_weight_version += 1
+        new = self.engine.trainer_weight_version
+        if new < self.engine_version:
+            from yeto.rl.engine.driver import PublicationError
+
+            raise PublicationError(f"Engine weight version went backwards: {self.engine_version} -> {new}")
+        self.engine_version = new
+        return self.inner.publish(state)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def _versioned_rebuild(engine, log, *, carry_version=True):
+    """Same-shape rebuild: a fresh trainer starts its counter at 0; the E2 cut
+    (infra-e2 f898516) restores it."""
+    inner = _fake_rebuild(engine, log)
+
+    def rebuilder(driver, *, epoch, cut_id):
+        saved_version = engine.trainer_weight_version
+        orig = driver.rebuild_trainer
+
+        def rebuild_trainer(rebuild, *, cut_policy_hash):
+            def wrapped():
+                engine.trainer_weight_version = 0  # fresh trainer
+                out = rebuild()
+                if carry_version:
+                    engine.trainer_weight_version = saved_version  # restore_cut
+                return out
+            return orig(wrapped, cut_policy_hash=cut_policy_hash)
+
+        driver.rebuild_trainer = rebuild_trainer
+        try:
+            return inner(driver, epoch=epoch, cut_id=cut_id)
+        finally:
+            driver.rebuild_trainer = orig
+
+    return rebuilder
+
+
+def test_fixed_partition_rebuild_republishes_without_going_backwards(tmp_path):
+    driver, ctl, engine, trained, log = _island(tmp_path)
+    publisher = _VersionedPublish(engine, driver.publisher)
+    driver.publisher = publisher
+    ctl.trainer_rebuilder = _versioned_rebuild(engine, log)
+    _at(driver, 2, lambda: ctl.request_trainer_rebuild("rb", 0, 60))
+    driver.run()
+    assert ctl.status("rb")["phase"] == SUCCEEDED
+    # 1 initial + 4 rounds + 1 re-publication after the rebuild, never backwards
+    assert publisher.engine_version == 6
+
+
+def test_fixed_partition_rebuild_without_the_counter_is_refused(tmp_path):
+    driver, ctl, engine, trained, log = _island(tmp_path)
+    publisher = _VersionedPublish(engine, driver.publisher)
+    driver.publisher = publisher
+    ctl.trainer_rebuilder = _versioned_rebuild(engine, log, carry_version=False)
+    _at(driver, 2, lambda: ctl.request_trainer_rebuild("rb", 0, 60))
+    with pytest.raises(DriverError, match="RECOVERY_REQUIRED"):
+        driver.run()
+    assert "went backwards" in ctl.recovery_required
+
+
+def test_colocated_rebuild_skips_republish_and_later_rounds_do_not_go_backwards(tmp_path):
+    import torch
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0)
+    publisher = _VersionedPublish(engine, engine.publisher)
+    driver = IslandDriver(
+        learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+        policy_state=engine.policy_state, publisher=publisher, placement=engine.placement,
+        algorithm=AlgorithmSpec(), sync=LocalOnlySync(3),
+        events=EventTape(tmp_path / "events.jsonl", 0), capabilities=fake_capabilities())
+    log = []
+    orig = driver.safe_point
+
+    def safe_point(rid):
+        out = orig(rid)
+        if rid == 1:
+            before = publisher.engine_version
+            _versioned_rebuild(engine, log)(driver, epoch=0, cut_id="rb")
+            assert publisher.engine_version == before  # no re-publication
+            assert engine.trainer_weight_version == before  # counter restored by the cut
+        return out
+
+    driver.safe_point = safe_point
+    driver.run()  # the next rounds' publishes continue at before+1, ..., never backwards
+    assert publisher.engine_version == 4  # 1 initial + 3 rounds
+
+
+class RayWorkerHandle:
+    """Miles fork e3a11ab3 ``RayWorkerHandle``: every attribute name becomes a
+    remote-call coroutine (so ``data_source`` is NOT None); the Ray actor
+    handle is ``_actor_handle``."""
+
+    def __init__(self, actor_handle):
+        self._actor_handle = actor_handle
+
+    def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+
+        async def call(*args, **kwargs):
+            raise AssertionError(f"remote method {name!r} must not be used for the cursor")
+
+        return call
+
+
+def test_live_cursor_unwraps_the_miles_ray_worker_handle(caplog):
+    import asyncio
+    import logging
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+
+    source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
+                             get_buffer_length=lambda: 0)
+    executor = SimpleNamespace(data_source=source)
+
+    def pool(handle):
+        return MilesRolloutPool(inference_controller=None, rollout_executor=handle, metadata=None,
+                                expected_policy=lambda: (0, "h"),
+                                runner=SimpleNamespace(run=asyncio.run))
+
+    wrapped = RayWorkerHandle(ActorHandle(executor))
+    assert callable(wrapped.data_source)  # why the old attribute read went wrong
+    live = pool(wrapped)
+    assert live.data_cursor()["sample_offset"] == 8
+    source.sample_offset = 20
+    assert live.live_data_cursor()[0]["sample_offset"] == 20
+    with caplog.at_level(logging.WARNING, logger="yeto.rl.engine.miles_adapter.rollout"):
+        dead = pool(RayWorkerHandle(ActorHandle(executor, fail=True)))
+        assert dead.live_data_cursor() == (None, None) and dead.data_cursor() is None
+        assert "__ray_call__ in the executor actor failed" in caplog.text
+        caplog.clear()
+        assert pool(object()).live_data_cursor() == (None, None)
+        assert "neither a local executor nor a Ray actor" in caplog.text

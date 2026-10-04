@@ -43,6 +43,7 @@ SUBCOMMANDS = (
     "status",
     "logs",
     "down",
+    "stop-run",
     "_worker",
     "_head",
 )
@@ -233,6 +234,70 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports fixed partition: run eval overlapped with train/outer sync "
         "(rl-infra-spec 2.3; needs --rl-eval-interval); off by default",
     )
+    rl.add_argument("--rl-test-tool-delay-s", type=float, default=None, metavar="S",
+                    help="ports, TEST ONLY: every training trajectory waits S seconds on a fake "
+                    "tool call (needs --custom-generate-function-path "
+                    "yeto.rl.tool_wait_workload.generate); off by default")
+    rl.add_argument("--rl-elastic-state-dir", default=None, metavar="ISLAND_PATH",
+                    help="--rl-elastic: controller journal/ledger/cut dir ON THE ISLAND (e.g. a "
+                    "persistent volume mount); default ~/yeto-rl/elastic-state")
+    rl.add_argument("--rl-elastic-restart-attempts", type=int, default=None, metavar="N",
+                    help="--rl-elastic: re-run the learner in place (same args and state dir) "
+                    "after a non-zero exit, at most N times; off by default")
+    rl.add_argument("--rl-test-inject-lora-perturb", type=float, default=None, metavar="EPS",
+                    help="--rl-elastic, TEST ONLY (3.5 E1-B): the first member update ships the "
+                    "LoRA adapter + EPS (trainer restored right after), so check_weights must "
+                    "refuse the new engines")
+    rl.add_argument("--rl-test-hold-before-check-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (A4 E1-B (a)): the first member publication "
+                    "stays S seconds after end_update_weights and before check_weights/"
+                    "admit_cells (observation window); needs another --rl-test-* injection")
+    rl.add_argument("--rl-test-inject-tool-wait-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (A4b): the first drain counts an artificial "
+                    "tool wait for S seconds (drain timeout -> CANCELLED -> undrain); needs "
+                    "--rl-elastic-tool-wait-board")
+    rl.add_argument("--rl-test-inject-undrain-fail", type=int, default=None, metavar="N",
+                    help="--rl-elastic, TEST ONLY (A4b / E1-C): the next N undrain calls fail "
+                    "inside the adapter, so a drain timeout cannot restore the old routing "
+                    "and the island must end in RECOVERY_REQUIRED (never CANCELLED)")
+    rl.add_argument("--rl-test-inject-stop-failures", type=int, default=None, metavar="N",
+                    help="--rl-elastic, TEST ONLY (3.7 E1-D ③④): the next N fork stop_cells fail "
+                    "inside the fork after deregistration (incomplete)")
+    rl.add_argument("--rl-test-kill-learner-at", default=None, metavar="PHASE",
+                    help="--rl-elastic, TEST ONLY (3.7 E1-D ⑤⑥): hard-kill the learner once when a "
+                    "transaction journals PHASE (needs --rl-elastic-restart-attempts)")
+    rl.add_argument("--rl-print-attestation-fingerprint", action="store_true",
+                    help="ports: each island learner builds its Miles argv exactly as a real run, "
+                    "prints the attestation runtime_fingerprint as one JSON line and exits "
+                    "before Ray/GPU work (run it on CPU with the same flags as the real run)")
+    rl.add_argument("--rl-lora-dropout", type=float, default=None, metavar="P",
+                    help="ports LoRA: training-time LoRA dropout (default 0). Trainer DP-change "
+                    "edges refuse dropout > 0; same-shape rebuild restores its RNG")
+    rl.add_argument("--rl-deterministic-trainer", action="store_true",
+                    help="ports: Megatron --deterministic-mode plus NCCL_ALGO=Ring, "
+                    "CUBLAS_WORKSPACE_CONFIG=:4096:8, NVIDIA_TF32_OVERRIDE=0 on the learner and "
+                    "every Ray worker (E2 plan-v2 §0); off by default. SGLang deterministic "
+                    "inference is --sglang-deterministic-inference (on by default)")
+    rl.add_argument("--rl-test-inject-rebuild-fail", action="store_true",
+                    help="--rl-elastic, TEST ONLY (4.4 REBUILD_OLD): the first same-shape trainer "
+                    "rebuild fails in the fork at create_training_models")
+    rl.add_argument("--rl-test-inject-cut-save-kill-rank", type=int, default=None, metavar="RANK",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank exits while "
+                    "writing its save_cut shard")
+    rl.add_argument("--rl-test-inject-cut-restore-kill-rank", type=int, default=None, metavar="RANK",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank exits during "
+                    "restore_cut (after the adapter write)")
+    rl.add_argument("--rl-test-inject-cut-restore-sleep", default=None, metavar="RANK:SECONDS",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank sleeps before "
+                    "restore_cut")
+    rl.add_argument("--rl-test-inject-rebuild-cursor-shift", type=int, default=None, metavar="GROUPS",
+                    help="--rl-elastic, TEST ONLY (E2 G-4.5): before a trainer rebuild, place a "
+                    "dataset state advanced by GROUPS where rollout_executor.load reads it")
+    rl.add_argument("--rl-observe-timeline", action="store_true",
+                    help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
+    rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
+                    help="--rl-elastic: feed the island's tool-wait board into the drain check "
+                    "(3.3; needs a workload that records tool waits)")
     rl.add_argument(
         "--rl-elastic",
         action="store_true",
@@ -246,7 +311,17 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME",
                     help="--rl-elastic: initial config id in the manifest")
     rl.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
-                    help="--rl-elastic: rollout cell ids the fork declares at startup")
+                    help="--rl-elastic: the rollout cells to manage: yeto names declared to the fork "
+                    "with --rl-elastic-declare-cells (F-R1), else the fork's own cell ids; "
+                    "default: every cell the fork declares (needs describe_cells, F-R1)")
+    rl.add_argument("--rl-elastic-trainer-edges", action="store_true",
+                    help="--rl-elastic: enable trainer DP-change / role-transfer edges (4.7): "
+                    "drops --balance-data (refused by the DP certification) and wires the "
+                    "trainer ops and pool GPU ids; off by default")
+    rl.add_argument("--rl-elastic-declare-cells", action="store_true",
+                    help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
+                    "rollout engine cells (placement map rollout_cells: started on the rollout "
+                    "GPUs, then stopped on standby GPUs, then stopped unbound; needs fork F-R1)")
     rl.add_argument("--rl-elastic-quorum-timeout-s", type=int, default=None, metavar="S",
                     help="--rl-elastic: syncer --quorum-timeout-s, also the island's strict "
                     "pause budget input (default: syncer default 900)")
@@ -260,6 +335,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic, TEST ONLY (watchdog fault injection): block up to S "
                     "seconds before the island's first member update_weights, failing as soon "
                     "as a target engine dies; off by default")
+    rl.add_argument("--rl-elastic-drain-timeout-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic: controller T_drain (default 120)")
+    rl.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic: controller T_recovery, the REBUILD_OLD budget beyond the "
+                    "transaction deadline (default 900)")
     rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                     help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
                     "X6 cross-quorum runs only)")
@@ -274,6 +354,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-eval-interval: eval dataset name")
     rl.add_argument("--rl-eval-samples-per-prompt", type=int, default=None, metavar="N",
                     help="--rl-eval-interval: samples per eval prompt")
+    # Optional eval sampling/length knobs, forwarded verbatim (learner --eval-*).
+    rl.add_argument("--rl-eval-temperature", type=float, default=None, metavar="T",
+                    help="--rl-eval-interval: eval sampling temperature (0 = greedy)")
+    rl.add_argument("--rl-eval-top-p", type=float, default=None, metavar="P",
+                    help="--rl-eval-interval: eval top-p")
+    rl.add_argument("--rl-eval-max-prompt-len", type=int, default=None, metavar="N")
+    rl.add_argument("--rl-eval-max-response-len", type=int, default=None, metavar="N")
+    rl.add_argument("--rl-eval-max-context-len", type=int, default=None, metavar="N")
     rl.add_argument(
         "--dry-run",
         action="store_true",
@@ -795,6 +883,22 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "may upgrade H100 to H200) and fail at container start unless "
         "nvidia-smi reports it; use for bitwise comparisons",
     )
+    infra.add_argument(
+        "--modal-retries",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Modal islands: function retries after a failed island (default: the Modal "
+        "runner's 10); acceptance runs use 0 so a learner exit is final",
+    )
+    infra.add_argument(
+        "--modal-timeout-s",
+        type=int,
+        default=None,
+        metavar="S",
+        help="Modal islands: function timeout in seconds (default: 24 h); the Modal-side "
+        "hard stop of a run",
+    )
     infra.add_argument("--disk-size", type=int, default=512, help="learner disk (GB)")
     infra.add_argument(
         "--learner-cpus",
@@ -844,6 +948,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--retry-until-up",
         action="store_true",
         help="keep retrying learner provisioning until capacity is found",
+    )
+    infra.add_argument(
+        "--no-island-relaunch",
+        action="store_true",
+        help="never relaunch a failed island (any cloud): the fleet controller tears it "
+        "down on its first failure (same as --recover-timeout 0); implied by "
+        "--modal-retries 0. The syncer is still recovered",
     )
     infra.add_argument(
         "--recover-timeout",
@@ -1145,6 +1256,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     down = sub.add_parser("down", help="stop a run's worker and tear down its clusters")
     down.add_argument("run", help="run name (its --cluster-prefix)")
+
+    stop_run = sub.add_parser(
+        "stop-run",
+        help="forbid relaunching islands of a run (writes <run dir>/STOP; stops/tears down nothing)")
+    stop_run.add_argument("run", help="run name (its --cluster-prefix)")
 
     # Internal: the detached background worker `launch` spawns.
     worker = sub.add_parser("_worker")
@@ -2242,6 +2358,9 @@ def main(argv=None) -> int:
         return cmd_logs(args)
     if args.command == "down":
         return cmd_down(args)
+    if args.command == "stop-run":
+        print(f"[yeto] STOP flag written: {runs.request_stop(args.run)}")
+        return 0
     if args.command == "_worker":
         return cmd_worker(args.run)
     if args.command == "_head":

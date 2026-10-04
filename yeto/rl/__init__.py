@@ -30,14 +30,19 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # --worker-dynamic-port-start, the elastic M1-M6 changes and the LoRA bridge
 # calculate_per_token_loss fix on top of the base, plus (5c1b49eb) the 2b
 # loss variants: --policy-loss-variant {policy_loss,cispo,sapo,gmpo},
-# --sapo-tau-{pos,neg}, --gmpo-log-clip-{low,high}.
-MILES_NEXT_COMMIT = "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba"
+# --sapo-tau-{pos,neg}, --gmpo-log-clip-{low,high}; plus (2f23a0fc) F-R1:
+# placement map rollout_cells, deferred/unbound cells, describe_cells,
+# public slice_pg_info, bundle-free check before any cell starts; plus
+# (fb04d6ff) M5: LoRA DP-invariant restore no longer drops DistOpt exp_avg/exp_avg_sq,
+# and (e3a11ab3) its cross-optimizer error text/docstring and tests.
+MILES_NEXT_COMMIT = "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
 SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
-# yeto/ports: the ported agentenv/sglang patches (see sglang-patch-port.md).
-SGLANG_NEXT_COMMIT = "9f29303bef1eea38eb613e5f454a52db1326422d"
+# yeto/lora-checksum (a1240c530 = 9f29303 + WeightChecker checksum covers LoRA adapter A/B);
+# yeto/ports 9f29303: the ported agentenv/sglang patches (see sglang-patch-port.md).
+SGLANG_NEXT_COMMIT = "a1240c530d406b5d0f252511f8e0a9a93b6a079d"
 MILES_LEGACY_PINS = MilesRevisionPins(MILES_REPOSITORY, MILES_COMMIT)
 MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
 # radixark/miles:dev multi-arch index (upstream docker/Dockerfile at
@@ -54,10 +59,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PRIVATE (ghcr.io/michaellchung): launches pass registry
 # credentials via SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} (ports only; use
 # a read:packages-only token).
-# Tag 5c1b49e-9f29303; linux/amd64 only.
+# Tag e3a11ab-a1240c5; linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "17d428a2e955a1d43525b59b8785bb786b8e48852fe00c6e3e90dad798f0bcef"
+    "12fcd9e583d63287d6814dfc87158364a0e370a22795462d19962a2857e53069"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Where MILES_NEXT_IMAGE installed the SGLang fork (editable).

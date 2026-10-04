@@ -323,3 +323,152 @@ def test_swappable_actor_forwards():
     assert proxy.ranks is b.ranks and proxy.generation == 1
     with pytest.raises(RuntimeError):
         proxy.swap(object())
+
+
+def test_digest_mismatch_names_the_differing_components(tmp_path, monkeypatch):
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    from yeto.rl.engine.miles_adapter import cut_plugin
+
+    real = cut_plugin._snapshot
+    calls = []
+
+    def skewed(actor, backend, named):
+        snap = real(actor, backend, named)
+        calls.append(1)
+        snap["scheduler"] = {**snap["scheduler"], "lr0": 999}
+        return snap
+
+    monkeypatch.setattr(cut_plugin, "_snapshot", skewed)
+    with pytest.raises(CutError, match="scheduler/lr0"):
+        _trainer(RankGroup([make_rank(1)])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+def test_rank_diff_reports_leaf_values(tmp_path, monkeypatch):
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    from yeto.rl.engine.miles_adapter import cut_plugin
+
+    fresh = make_rank(1)
+    real_load = fresh._yeto_cut_backend.load_optimizer
+
+    def lossy(optimizer, named, merged):  # e.g. a loader that drops exp_avg_sq precision
+        real_load(optimizer, named, merged)
+        for p in optimizer.state:
+            optimizer.state[p]["exp_avg_sq"].mul_(1.0001)
+
+    fresh._yeto_cut_backend.load_optimizer = lossy
+    with pytest.raises(CutError, match="value:exp_avg_sq"):
+        _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+@pytest.mark.parametrize("where", ["load", "after"])
+def test_optimizer_diff_splits_load_from_later_changes(tmp_path, where, monkeypatch):
+    from yeto.rl.engine.miles_adapter.cut_plugin import RESTORE_DIAGNOSTICS_ENV
+
+    monkeypatch.setenv(RESTORE_DIAGNOSTICS_ENV, "1")
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    fresh = make_rank(1)
+    backend = fresh._yeto_cut_backend
+    real_load, real_export = backend.load_optimizer, backend.export_optimizer
+    exports = []
+
+    def load(optimizer, named, merged):
+        real_load(optimizer, named, merged)
+        if where == "load":
+            for p in optimizer.state:
+                optimizer.state[p]["exp_avg"].mul_(2)
+
+    def export(optimizer, named):
+        exports.append(1)
+        if where == "after" and len(exports) == 2:  # the final re-export sees a later change
+            for p in optimizer.state:
+                optimizer.state[p]["exp_avg_sq"].mul_(3)
+        return real_export(optimizer, named)
+
+    backend.load_optimizer, backend.export_optimizer = load, export
+    with pytest.raises(CutError) as info:
+        _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+    msg = str(info.value)
+    cut_to_load, load_to_re = msg.split("cut->after_load ")[1].split("; after_load->reexport ")
+    if where == "load":
+        assert "'state:exp_avg': {'differ': 2" in cut_to_load
+    else:
+        assert "'state:exp_avg_sq': {'differ': 2" in load_to_re.split("; rank diff")[0]
+
+
+@pytest.mark.parametrize("side_effect_free", [False, True])
+def test_reading_a_fresh_optimizer_must_not_break_the_restore(tmp_path, side_effect_free):
+    """GPU C1 diagnostic 2: a state read before the restore created empty entries, the
+    fork-M5 loader skipped its init and dropped exp_avg/exp_avg_sq. Unfixed: restore_cut
+    fails closed naming them; with side-effect-free reads: bitwise restore."""
+    from tests.rl_cut_fakes import LazyStateDistOptBackend
+
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    fresh = make_rank(1)
+    fresh._yeto_cut_backend = LazyStateDistOptBackend(side_effect_free=side_effect_free)
+    group = RankGroup([fresh])
+    from yeto.rl.engine.miles_adapter.cut_plugin import state_summary
+
+    state_summary(fresh)  # e.g. the harness' "state unchanged" read on the fresh trainer
+    trainer = _trainer(group)
+    if side_effect_free:
+        trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+        for p_saved, p_now in zip(rank.optimizer.param_groups[0]["params"], fresh.optimizer.param_groups[0]["params"]):
+            assert torch.equal(rank.optimizer.state[p_saved]["exp_avg"], fresh.optimizer.state[p_now]["exp_avg"])
+    else:
+        with pytest.raises(CutError, match="missing:exp_avg"):
+            trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+def test_after_load_diagnostics_are_opt_in(tmp_path, monkeypatch):
+    from yeto.rl.engine.miles_adapter.cut_plugin import RESTORE_DIAGNOSTICS_ENV
+
+    monkeypatch.delenv(RESTORE_DIAGNOSTICS_ENV, raising=False)
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    fresh = make_rank(1)
+    backend = fresh._yeto_cut_backend
+    exports, real_load, real_export = [], backend.load_optimizer, backend.export_optimizer
+
+    def load(optimizer, named, merged):
+        real_load(optimizer, named, merged)
+        for p in optimizer.state:
+            optimizer.state[p]["exp_avg"].mul_(2)
+
+    backend.load_optimizer = load
+    backend.export_optimizer = lambda o, n: (exports.append(1), real_export(o, n))[1]
+    with pytest.raises(CutError) as info:
+        _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+    msg = str(info.value)
+    assert "cut->after_load None" in msg and "'state:exp_avg': {'differ': 2" in msg.split("cut->reexport ")[1]
+    assert len(exports) == 1  # only the final re-export, no extra after-load export
+
+
+def test_failure_before_any_write_is_told_apart_from_a_refusal(tmp_path):
+    rank = _trained_rank()
+    _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
+    fresh = make_rank(1)
+    fresh._yeto_cut_backend.check_optimizer = lambda *a: (_ for _ in ()).throw(KeyError("no such param"))
+    with pytest.raises(CutError, match=r"\[failed_before_write\] KeyError"):
+        _trainer(RankGroup([fresh])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+    with pytest.raises(CutError, match=r"\[refused\] .*freshly built"):
+        _trainer(RankGroup([rank])).restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+
+
+def test_unknown_live_cursor_fails_closed(tmp_path):
+    """INFRA-E1 f707dc3: data_cursor() is None when the live read fails -> no comparison."""
+    _, _, actor, trainer = _setup(tmp_path)
+
+    class Unknown:
+        def data_cursor(self):
+            return None
+
+    async def rebuild(args, executor, **kw):
+        raise AssertionError("nothing may be disposed when the cursor is unknown")
+
+    with pytest.raises(RuntimeError, match="cursor unknown before the rebuild"):
+        rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
+                           worker_manager="wm", rollout=Unknown(), rebuild=rebuild, restore=lambda: None)

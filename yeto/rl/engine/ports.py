@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
@@ -22,10 +23,22 @@ from .algorithm import AlgorithmSpec
 from .capabilities import EngineCapabilities
 from .trainable_state import TrainableState
 
+class PublicationCause(str, Enum):
+    """Why a (member) publication was refused (A4 E1-B): journaled in REBUILD_OLD /
+    REBUILT_OLD and on the tape's ``rl_reconfiguration`` error."""
+
+    PAYLOAD_MISMATCH = "payload_mismatch"  # engine read-back differs from the published payload
+    TOKEN_MISMATCH = "token_mismatch"  # an engine does not report the policy token
+    UPDATE_FAILED = "update_failed"  # update_weights / update_weight_version raised
+    LORA_UNVERIFIABLE = "lora_unverifiable"  # LoRA mode but the read-back has no adapter keys
+    OTHER = "other"
+
+
 OptimizerMode = Literal["preserve", "reset"]
 PlacementKind = Literal["colocated", "fixed-partition"]
 
 __all__ = [
+    "PublicationCause",
     "AlgorithmSpec",
     "EngineCapabilities",
     "GroupMetadata",

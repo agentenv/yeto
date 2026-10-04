@@ -291,3 +291,66 @@ def test_train_step_is_guarded_after_a_resharded_restore(tmp_path):
     with pytest.raises(TrainStepError, match="train_parallel_config lacks"):
         trainer.train_step(batch)  # fake ranks advertise no schedule config
     assert released == ["refs"]
+
+
+def test_batch_guard_is_dropped_when_the_trainer_goes_back_to_another_layout(tmp_path):
+    """Review L-1: after REBUILD_OLD / restore_source the target-DP batch guard must not stay armed."""
+    ranks = _trained(1)
+    _trainer(ranks).save_cut(epoch=1, context=_context(tmp_path, "c"))
+    new = make_world(2, seed=9)
+    trainer = _trainer(new)
+    trainer.restore_cut_resharded("c", epoch=1, root=str(tmp_path), expect=_expect(1), plan=_plan(1, 2),
+                                  certified=[SPEC_SHA])
+    assert trainer._reshard_plan is not None
+    trainer.rebind_args(default_args(2))  # still the target layout: guard kept
+    assert trainer._reshard_plan is not None
+    trainer.rebind_args(default_args(1))  # back to the source layout (rollback)
+    assert trainer._reshard_plan is None
+    fresh = make_world(1, seed=3)
+    back = _trainer(fresh)
+    back._reshard_plan = _plan(1, 2)
+    back.restore_cut("c", epoch=1, root=str(tmp_path), expect=_expect(1))  # exact same-shape restore
+    assert back._reshard_plan is None
+
+
+def test_restore_reports_missing_moment_keys():
+    """GPU C1 diagnostic 2: a restore that leaves exp_avg/exp_avg_sq out must be refused."""
+    from yeto.rl.engine.miles_adapter.cut_plugin import _slice_check
+
+    full = {"w": {"tensors": {"param": torch.zeros(2), "exp_avg": torch.zeros(2), "exp_avg_sq": torch.zeros(2)},
+                  "scalars": {"step": torch.tensor(2.0)}}}
+    export = {"entries": {"w": {"start": 0, "end": 2, "tensors": {"param": torch.zeros(2)},
+                                "scalars": {"step": torch.tensor(2.0)}}}}
+    assert any("state keys" in p for p in _slice_check(export, full))
+
+
+def _with_updaters(ranks, version):
+    for r in ranks:
+        r.weight_updater = SimpleNamespace(weight_version=version)
+    return ranks
+
+
+@pytest.mark.parametrize("src,dst", [(1, 2), (2, 1)])
+def test_weight_version_continues_across_a_dp_change(tmp_path, src, dst):
+    """Review L-2 / E2 f898516: a resharded trainer re-publishes from the saved weight version, not 0."""
+    ranks = _with_updaters(_trained(src), 4)
+    _trainer(ranks).save_cut(epoch=1, context=_context(tmp_path, "c"))
+    new = _with_updaters(make_world(dst, seed=9), 0)
+    _trainer(new).restore_cut_resharded("c", epoch=1, root=str(tmp_path), expect=_expect(src),
+                                        plan=_plan(src, dst), certified=[SPEC_SHA])
+    assert [r.weight_updater.weight_version for r in new] == [4] * dst
+    # the next update_weights increments from there: no "weight version went backwards"
+    new[0].weight_updater.weight_version += 1
+    assert new[0].weight_updater.weight_version == 5 > 4
+
+
+def test_dp_shards_must_agree_on_the_miles_counters(tmp_path):
+    ranks = _trained(2)
+    ranks[0].weight_updater = SimpleNamespace(weight_version=4)
+    ranks[1].weight_updater = SimpleNamespace(weight_version=3)  # would diverge after the change
+    _trainer(ranks).save_cut(epoch=1, context=_context(tmp_path, "c"))
+    new = _with_updaters(make_world(1, seed=9), 0)
+    with pytest.raises(Exception, match="miles_counters"):
+        _trainer(new).restore_cut_resharded("c", epoch=1, root=str(tmp_path), expect=_expect(2),
+                                            plan=_plan(2, 1), certified=[SPEC_SHA])
+    assert new[0].weight_updater.weight_version == 0  # refused before any write
