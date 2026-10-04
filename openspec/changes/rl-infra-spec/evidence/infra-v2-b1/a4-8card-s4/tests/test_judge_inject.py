@@ -438,6 +438,26 @@ class E1A(unittest.TestCase):
 
 
 class CLI(unittest.TestCase):
+    def test_cli_r5_committed_set_from_journal_when_tape_has_no_rl_membership(self):
+        """A34 (chain 8 IV infra-v2-b1-a4s8-20261003-5r1 r5, 8xH100): up1 killed at COMMITTED -> the first process never emitted
+        rl_membership and the recovery emits only rl_reconfiguration RECOVERED.  The CLI must take the committed set from the journal
+        COMMITTED record (members c0..c3), not only from add_intent (c2,c3) / tape rl_membership (absent)."""
+        d = tempfile.mkdtemp(); jp, tp, lp = (os.path.join(d, n) for n in ("j.jsonl", "t.jsonl", "l.jsonl"))
+        j = r5_journal(); j[4] = tx("COMMITTED", "up1", wall_time=50.0, members=C4)
+        j.insert(3, {"kind": "add_intent", "tx_id": "up1", "members": C4[2:]})
+        t = [e for e in r5_tape() if e.get("event") != "rl_membership"]
+        self.assertFalse(any(e.get("event") == "rl_membership" for e in t))
+        open(jp, "w").write("".join(json.dumps(x) + "\n" for x in j)); open(tp, "w").write("".join(json.dumps(x) + "\n" for x in t))
+        open(lp, "w").write("".join(json.dumps(x) + "\n" for x in LEDGER_OK))
+        out = os.path.join(d, "o.json")
+        rc = J.main(["r5", jp, tp, "--ledger", lp, "--marker-dir", d, "--out", out]); r = json.load(open(out))
+        self.assertEqual(r["verdict"], "PASS", r); self.assertTrue(r["checks"]["verified_members_are_the_committed_4"]); self.assertEqual(rc, 0)
+        # without the COMMITTED members the committed set is unknown -> the membership check fails (the -5r1 r5 verdict before A34)
+        j[5] = tx("COMMITTED", "up1", wall_time=50.0)
+        open(jp, "w").write("".join(json.dumps(x) + "\n" for x in j))
+        J.main(["r5", jp, tp, "--ledger", lp, "--marker-dir", d, "--out", out]); r = json.load(open(out))
+        self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["verified_members_are_the_committed_4"])
+
     def test_cli_writes_marker_and_reads_probes(self):
         d = tempfile.mkdtemp(); jp, tp = os.path.join(d, "j.jsonl"), os.path.join(d, "t.jsonl")
         open(jp, "w").write(json.dumps(ADD) + "\n" + json.dumps(ph("SUCCEEDED")) + "\n"); open(tp, "w").write(json.dumps(inj(applied=False)) + "\n")
@@ -573,6 +593,50 @@ class Recovery(unittest.TestCase):
         t2 = list(t); t2[5] = pub(1, "yeto:1:h1", C4, 139.0)
         r = J.judge_recovery("r5c", j, t2, set(C4), LEDGER_OK); self.assertFalse(r["checks"]["startup_shape_after_restart"])
 
+    def test_r5_4card_topology_and_hard_timeout(self):
+        """4xL40S T1R1S2<->T1R3S0 (chain 8 IV, 2026-10-03): the committed set after up1 is c0,c1,c2 (3 members, 1 missing-cell restart of c1,c2)
+        and the trainer is a single rank (world=1).  Same decision logic, only the member count / world change (gpu-plan-v2 9.22 rule);
+        the check names keep the 8-card wording.  Also: rc=124 (hard timeout) -> INVALID_TEST(hard_timeout), never FAIL."""
+        C3 = C4[:3]; V3 = dict(VER_OK, members=C3, trainer_layout={"world": 1, "tp": 1, "pp": 1, "cp": 1, "ep": 1, "dp": 1})
+        j = [tx("VALIDATING", "up1"), tx("QUIESCING", "up1"), tx("INITIALIZING", "up1"), tx("VERIFYING", "up1"), tx("COMMITTED", "up1", wall_time=50.0),
+             tx("SUCCEEDED", "up1", recovered_after_restart=True, wall_time=100.0),
+             rec("planned", attempt=1, target=C3, actual=C3[:1], start=C3[1:], stop=[], wall_time=101.0),
+             {"kind": "fork_op", "tx_id": "rec-1-1-abc", "op": "start", "status": "issued", "cells": C3[1:]},
+             {"kind": "fork_op", "tx_id": "rec-1-1-abc", "op": "start", "status": "done", "cells": C3[1:], "result_fork_epoch": 2},
+             rec("membership_restored", members=C3, fork_epoch=2, wall_time=130.0), rec("verified", members=C3, fork_epoch=2, checks=V3, wall_time=140.0)]
+        t = [start(1.0), pub(0, "yeto:0:h0", C3[:1], 2.0), train(10.0), pub(1, "yeto:1:h1", C3[:1], 20.0), train(30.0), start(110.0), pub(1, "yeto:1:h1", C3, 139.0),
+             {"event": "rl_reconfiguration", "result": "RECOVERED", "members": C3, "time_unix": 140.0}] + [train(150.0 + 10 * i) for i in range(3)]
+        probe = {"membership": {"epoch": 2}, "cell_statuses": {c: "Running" for c in C3}}
+        r = J.judge_recovery("r5", j, t, set(C3), LEDGER_OK, None, probe, trainer_world=1, committed_n=3)
+        self.assertEqual(r["verdict"], "PASS", r); self.assertEqual(r["topology"], {"trainer_world": 1, "committed_members": 3})
+        self.assertTrue(r["checks"]["trainer_layout_world_4"] and r["checks"]["verified_members_are_the_committed_4"] and r["checks"]["probe_all_4_cells_running"] and r["checks"]["tape_RECOVERED"])
+        r = J.judge_recovery("r5", j, t, set(C3), LEDGER_OK, None, probe)   # 8-card defaults on 4-card evidence: the three topology checks fail (the reviewer's warning)
+        self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["trainer_layout_world_4"] or r["checks"]["verified_members_are_the_committed_4"] or r["checks"]["probe_all_4_cells_running"])
+        r = J.judge_recovery("r5", r5_journal(), r5_tape(), set(C4), LEDGER_OK, None, None, trainer_world=1, committed_n=3)   # and the other way round
+        self.assertEqual(r["verdict"], "FAIL"); self.assertFalse(r["checks"]["trainer_layout_world_4"] or r["checks"]["verified_members_are_the_committed_4"])
+        # r7 on 4 cards: world 1 / 3 members with the reconcile record and dn1 afterwards
+        j7 = [tx("VALIDATING", "up1"), tx("QUIESCING", "up1"), tx("INITIALIZING", "up1"), tx("VERIFYING", "up1"), tx("COMMITTED", "up1", wall_time=50.0), tx("SUCCEEDED", "up1", wall_time=100.0),
+              {"kind": "reconcile", "action": "restore_membership_state", "epoch": 1}] + j[6:] + [tx("VALIDATING", "dn1", wall_time=150.0), tx("SUCCEEDED", "dn1", wall_time=160.0)]
+        r = J.judge_recovery("r7", j7, t, set(C3), LEDGER_OK, None, probe, trainer_world=1, committed_n=3); self.assertEqual(r["verdict"], "PASS", r)
+        # rc=124: hard timeout -> INVALID_TEST(hard_timeout) with the checks kept; rc=0 unchanged; a truncated run that would otherwise FAIL is INVALID too
+        r = J.judge_recovery("r5", j, t, set(C3), LEDGER_OK, None, probe, trainer_world=1, committed_n=3, rc=124)
+        self.assertEqual((r["verdict"], r["marker"], r["rc"]), ("INVALID_TEST", "hard_timeout", 124)); self.assertTrue(r["checks"]["recovery_verified"])
+        r = J.judge_recovery("r5", j, t, set(C3), LEDGER_OK, None, probe, trainer_world=1, committed_n=3, rc=0); self.assertEqual((r["verdict"], r["rc"]), ("PASS", 0))
+        r = J.judge_recovery("r6", r5_journal(), r5_tape(rounds=2), set(C4), LEDGER_OK, rc=124); self.assertEqual((r["verdict"], r["marker"]), ("INVALID_TEST", "hard_timeout"))
+        # CLI: --rc-file / --trainer-world / --committed-members reach judge_recovery through every main() layer
+        d = tempfile.mkdtemp()
+        def w(name, rows): p = os.path.join(d, name); open(p, "w").write("".join(json.dumps(x) + "\n" for x in rows)); return p
+        jp, tp, lp = w("j.jsonl", j), w("t.jsonl", t), w("l.jsonl", LEDGER_OK); out = os.path.join(d, "o.json")
+        cells = ["--cells", ",".join(C3)]   # (a real run derives `known` from the journal add_intent / tape rl_membership members; this fixture has neither)
+        self.assertEqual(J.main(["r5", jp, tp, "--ledger", lp, "--trainer-world", "1", "--committed-members", "3", "--out", out] + cells), 0)
+        self.assertEqual(json.load(open(out))["topology"], {"trainer_world": 1, "committed_members": 3})
+        self.assertEqual(J.main(["r5", jp, tp, "--ledger", lp, "--out", out] + cells), 1)   # 8-card defaults -> FAIL (exit 1)
+        rp = os.path.join(d, "rc.txt"); open(rp, "w").write("rc=124\n")
+        self.assertEqual(J.main(["r5", jp, tp, "--ledger", lp, "--trainer-world", "1", "--committed-members", "3", "--rc-file", rp, "--out", out, "--marker-dir", d] + cells), J.EXIT["INVALID_TEST"])
+        self.assertEqual(json.load(open(out))["marker"], "hard_timeout"); self.assertTrue(os.path.exists(os.path.join(d, "hard_timeout")))
+        open(rp, "w").write("rc=0\n"); self.assertEqual(J.main(["r5", jp, tp, "--ledger", lp, "--trainer-world", "1", "--committed-members", "3", "--rc-file", rp, "--out", out] + cells), 0)
+        J._RC_EXTRA.clear()
+
     def test_replay_cpu_r5(self):
         """Replay of the CPU recovery test (tests/test_rl_reconfig_recovery.py::test_restart_after_commit_recovers_committed_members,
         infra-e1-recovery 0e68962): journal + tape + ledger of a fake island whose up committed, learner restarted, members rebuilt.
@@ -601,7 +665,6 @@ class Recovery(unittest.TestCase):
             self.assertEqual(rc, 4); self.assertTrue(os.path.exists(os.path.join(d, "evidence_missing")))   # main() judges request id up1 (a8go's)
 
 
-    unittest.main()
 
 
 # ----------------------------------------------------------------------------------------------- s0 (strict single island + head syncer smoke)
@@ -678,7 +741,7 @@ class S0(unittest.TestCase):
         self.assertEqual(J.main(base), 0); self.assertEqual(json.load(open(os.path.join(d, "o.json")))["verdict"], "PASS")
         open(os.path.join(ibd, "up1.status.json"), "w").write(json.dumps({"rejected": "pause not allowed", "request_id": "up1"}))
         self.assertEqual(J.main(base), 1); self.assertTrue(os.path.exists(os.path.join(d, "s0_failed")))
-        self.assertEqual(J.main(base[:12] + ["--syncer-log", os.path.join(d, "absent.log")] + base[14:]), 4); self.assertTrue(os.path.exists(os.path.join(d, "evidence_missing")))
+        self.assertEqual(J.main(base[:9] + ["--syncer-log", os.path.join(d, "absent.log")] + base[11:]), 4)   # (slice fixed 2026-10-03: this class never ran before, see the removed class-level unittest.main()); self.assertTrue(os.path.exists(os.path.join(d, "evidence_missing")))
         # the s0-only flags are stripped for every other case (judge_after.sh may pass them through)
         open(os.path.join(d, "e.jsonl"), "w").write(json.dumps(ADD) + "\n" + json.dumps(ph("SUCCEEDED")) + "\n"); open(os.path.join(d, "et.jsonl"), "w").write(json.dumps(inj(applied=False)) + "\n")
         self.assertEqual(J.main(["e1b", os.path.join(d, "e.jsonl"), os.path.join(d, "et.jsonl"), "--epochs", ep, "--rc-file", rp, "--out", os.path.join(d, "o2.json")]), 4)

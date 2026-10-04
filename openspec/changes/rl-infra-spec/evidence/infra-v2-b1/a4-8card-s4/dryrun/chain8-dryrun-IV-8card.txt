@@ -1,0 +1,34 @@
+# chain 8 IV 8xH100 dryrun @ gpu-b1 8d315b57, 2026-10-03T21:16:29Z; a8go_strict.sh SHA=5cf4d902 ATTEST=attestation-8-6-b5046a61
+=== DRY r6
+SHA=5cf4d902 GPU_SPEC=nebius:8xh100@eu-north1 SYNCER_PUBLIC_IP=185.189.44.160:29400 n2run_strict.sh infra-v2-b1-a4s8-20261003-5r1-r6 8 3600 3720 --total-steps 6 --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation /home/michael/work/gpu-b1-runs/cfg/attestation-8-6-b5046a61.json --rl-elastic-quorum-timeout-s 1800 --rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3 --rl-test-kill-learner-at QUIESCING
+triggers=[["train",1,"up1",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":600}]]
+triggers-json-ok
+arms: none
+tprobe: none
+judge: r6 --rc-file /tmp/t1dry/items/infra-v2-b1-a4s8-20261003-5r1-r6/rc.txt
+gate: 1
+rc=0
+=== DRY r7
+SHA=5cf4d902 GPU_SPEC=nebius:8xh100@eu-north1 SYNCER_PUBLIC_IP=185.189.44.160:29400 n2run_strict.sh infra-v2-b1-a4s8-20261003-5r1-r7 8 3600 3720 --total-steps 6 --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation /home/michael/work/gpu-b1-runs/cfg/attestation-8-6-b5046a61.json --rl-elastic-quorum-timeout-s 1800 --rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3
+triggers=[["train",0,"up1",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":600}]]
+triggers-json-ok
+arms: dctl.py|kill_after_tx|up1|dn1|{"target":"T4R2S2","expected_config_epoch":1,"deadline_s":600}
+tprobe: 1 rec
+judge: r7 --rc-file /tmp/t1dry/items/infra-v2-b1-a4s8-20261003-5r1-r7/rc.txt
+gate: 1
+rc=0
+=== DRY r5
+SHA=5cf4d902 GPU_SPEC=nebius:8xh100@eu-north1 SYNCER_PUBLIC_IP=185.189.44.160:29400 n2run_strict.sh infra-v2-b1-a4s8-20261003-5r1-r5 8 3600 3720 --total-steps 6 --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation /home/michael/work/gpu-b1-runs/cfg/attestation-8-6-b5046a61.json --rl-elastic-quorum-timeout-s 1800 --rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3 --rl-test-kill-learner-at COMMITTED
+triggers=[["train",1,"up1",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":600}]]
+triggers-json-ok
+arms: none
+tprobe: 1 rec
+judge: r5 --rc-file /tmp/t1dry/items/infra-v2-b1-a4s8-20261003-5r1-r5/rc.txt
+gate: 1
+rc=0
+=== DRY d4
+SHA=5cf4d902 GPU_SPEC=nebius:8xh100@eu-north1 n2run.sh infra-v2-b1-a4s8-20261003-5r1-d4 8 3600 3720 --total-steps 4 --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation /home/michael/work/gpu-b1-runs/cfg/attestation-8-6-b5046a61.json --rl-test-inject-stop-failures 100000 --rl-elastic-recovery-timeout-s 120
+triggers=[["train",0,"up1",{"target":"T4R4S0","expected_config_epoch":0,"deadline_s":600}],["train",1,"dn1",{"target":"T4R2S2","expected_config_epoch":1,"deadline_s":600}]]
+triggers-json-ok
+arms: none
+rc=0

@@ -25,6 +25,12 @@ STUBLOG=$T/log A8GO_INNER=$T/inner_a8go SHA=x DRY=1 bash $B/a8go_strict.sh d2 pf
 [ $rc = 0 ] && grep -q "inner-a8go d2 pfx 2100 2220" $T/log && ok "dispatch: d2 (non-strict) exec'ed to a8go.sh with the same argv" || bad "dispatch d2 rc=$rc $(cat $T/log)"
 : > $T/log; STUBLOG=$T/log A8GO_INNER=$T/inner_a8go SHA=x DRY=1 bash $B/a8go_strict.sh r6 pfx 1800 1920 >/dev/null 2>&1; [ ! -s $T/log ] && ok "dispatch: r6 handled here, not forwarded" || bad "dispatch r6 forwarded"
 STUBLOG=$T/log A8GO_INNER=/bin/false SHA=x DRY=1 bash $B/a8go_strict.sh nosuch p 1 1 >/dev/null 2>&1; [ $? != 0 ] && ok "dispatch: unknown case -> a8go.sh's own rc (non-zero)" || bad "unknown case rc"
+# A35 (chain 8 IV -7r1 d4 startup_failed fingerprint_mismatch): the strict 6-round ATTEST must not leak into a8go.sh; d4 (4 rounds) gets ATTEST_NOSYNC
+printf '#!/bin/bash\necho "inner-att ${ATTEST:-unset}" >> $STUBLOG; exit 0\n' > $T/inner_att; chmod +x $T/inner_att; : > $T/log
+STUBLOG=$T/log A8GO_INNER=$T/inner_att SHA=x DRY=1 ATTEST=$T/strict.json ATTEST_NOSYNC=$T/nosync.json bash $B/a8go_strict.sh d4 pfx 1 1 >/dev/null 2>&1
+grep -q "inner-att $T/nosync.json" $T/log && ok "dispatch: a8go.sh gets ATTEST=ATTEST_NOSYNC (A35: d4 4-round fingerprint), not the strict one" || bad "dispatch attest: $(cat $T/log)"
+: > $T/log; STUBLOG=$T/log A8GO_INNER=$T/inner_att SHA=x DRY=1 ATTEST=$T/strict.json bash $B/a8go_strict.sh d4 pfx 1 1 >/dev/null 2>&1
+grep -q "inner-att unset" $T/log && ok "dispatch: without ATTEST_NOSYNC the strict ATTEST does not leak into a8go.sh (A35 regression)" || bad "dispatch attest leak: $(cat $T/log)"
 # --- chk: DRY line, no attestation/training; chk_launch.sh failure -> <chain>/ABORT + rc.txt + item_done; success -> no ABORT
 SHA=x DRY=1 bash $B/a8go_strict.sh chk pfx 900 1020 > $T/dry.chk 2>&1 && grep -q "chk_launch.sh pfx 8 900" $T/dry.chk && ! grep -q "attestation-8-\|--total-steps" $T/dry.chk && ok "chk DRY: chk_launch, no attestation/training args" || bad "chk dry: $(cat $T/dry.chk)"
 printf '#!/bin/bash\necho "[chk] FAIL fork pin"; exit 1\n' > $T/chk_fail.sh; printf '#!/bin/bash\necho CHK_OK; exit 0\n' > $T/chk_ok.sh
