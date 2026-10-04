@@ -427,6 +427,21 @@ def _argv_from(args_ns):
     return mc.translate_run_config(rc.resolve_rl_run_config(merged, **kwargs), AlgorithmSpec()).argv
 
 
+ELASTIC_ONLY_FLAGS = {"--use-miles-router": 0, "--update-weight-group-timeout-s": 1}
+
+
+def _without_elastic_flags(argv):
+    """argv minus the flags (and their values) that --rl-elastic alone adds."""
+    out, it = [], iter(list(argv))
+    for item in it:
+        if item in ELASTIC_ONLY_FLAGS:
+            for _ in range(ELASTIC_ONLY_FLAGS[item]):
+                next(it)
+            continue
+        out.append(item)
+    return out
+
+
 def test_trainer_edges_drop_balance_data_only(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -440,8 +455,9 @@ def test_trainer_edges_drop_balance_data_only(tmp_path, monkeypatch):
     with_edges, elastic_only, off = _argv_from(edges), _argv_from(plain), _argv_from(default)
     assert "--balance-data" not in with_edges
     assert "--balance-data" in elastic_only and "--balance-data" in off
-    # elastic adds only --use-miles-router; trainer edges only drop --balance-data
-    assert [a for a in elastic_only if a != "--use-miles-router"] == list(off)
+    # elastic adds only --use-miles-router and the bounded weight-update group
+    # timeout (A27); trainer edges only drop --balance-data
+    assert _without_elastic_flags(elastic_only) == list(off)
     assert [a for a in elastic_only if a != "--balance-data"] == list(with_edges)
     miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
     learner.apply_ports_infra_switches(edges, miles_args, {})
@@ -544,7 +560,11 @@ def test_elastic_runs_carry_use_miles_router_and_defaults_do_not(tmp_path, monke
 
     on, off = argv(elastic), argv(default)
     assert "--use-miles-router" in on and "--use-miles-router" not in off
-    assert [a for a in on if a != "--use-miles-router"] == list(off)
+    # A27: elastic bounds the fork's weight-update group rendezvous (120 s);
+    # non-elastic runs never pass the flag (older fork images reject it).
+    assert on[on.index("--update-weight-group-timeout-s") + 1] == "120"
+    assert "--update-weight-group-timeout-s" not in off
+    assert _without_elastic_flags(on) == list(off)
     plain = argparse.Namespace(**{**vars(base)})
     assert "--use-miles-router" not in mc.translate_run_config(
         rc.resolve_rl_run_config(plain, **kwargs), AlgorithmSpec()).argv
@@ -624,6 +644,25 @@ def test_hold_and_tool_wait_switches_reach_the_island(tmp_path, monkeypatch):
     args, env = learner_from_run(run, tmp_path / "home")
     assert env["YETO_RL_TEST_HOLD_BEFORE_CHECK_S"] == "45.0"
     assert env["YETO_RL_TEST_INJECT_TOOL_WAIT_S"] == "30.0"
+    assert "YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG" not in env
+
+
+def test_tool_side_effect_log_switch_reaches_the_island(tmp_path, monkeypatch):
+    """A4bc (3.3 X5): --rl-test-tool-side-effect-log -> YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG=1."""
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    run = island_run(BASE + _elastic(tmp_path) + (
+        "--rl-elastic-tool-wait-board", "--rl-test-inject-tool-wait-s", "30",
+        "--rl-test-tool-side-effect-log"), monkeypatch)
+    args, env = learner_from_run(run, tmp_path / "home")
+    assert env["YETO_RL_TEST_INJECT_TOOL_WAIT_S"] == "30.0"
+    assert env["YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG"] == "1"
+    with pytest.raises(ValueError, match="needs --rl-test-inject-tool-wait-s"):
+        launcher._check_ports_infra_switches(
+            _cli(("--rl-elastic", "--rl-elastic-tool-wait-board", "--rl-test-tool-side-effect-log")), "ports")
 
 
 def test_hold_and_tool_wait_switch_validation(tmp_path):

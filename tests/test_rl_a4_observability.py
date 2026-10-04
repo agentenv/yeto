@@ -463,9 +463,131 @@ def test_tool_wait_injection_counts_on_the_board_for_n_seconds(monkeypatch):
     while board.snapshot().in_flight and time.time() < deadline:
         time.sleep(0.05)
     assert pool.trajectory_load()["blockers"] == []
-    # one shot per process
+    # the injected tool executes on every drain (so a replayed drain is observable)
     pool.drain(frozenset({"engine:c1"}), time.time() + 30)
-    assert board.snapshot().in_flight == 0 and len(records) == 1
+    assert board.snapshot().in_flight == 1 and len(records) == 2
+    assert [f["attempt"] for _, f in records] == [1, 2]
+    assert records[0][1]["tool_call_id"] == records[1][1]["tool_call_id"]
+    assert records[0][1]["side_effect_log"] is False
+
+
+# ------------------------------------------- 5c. A4bc: side-effect journal, no replay (3.3 X5)
+def _side_effects(path):
+    from yeto.rl.engine.tool_wait import read_side_effects
+
+    return read_side_effects(path)
+
+
+def test_side_effect_log_records_each_injected_execution_once(monkeypatch, tmp_path):
+    from yeto.rl.engine.miles_adapter.rollout import INJECTED_TOOL_WAIT_ID, injected_tool_call_id
+    from yeto.rl.engine.tool_wait import ToolWaitBoard, side_effect_duplicates
+
+    board = ToolWaitBoard()
+    log = tmp_path / "elastic-state" / "side_effects.jsonl"
+    pool, records = _real_pool(monkeypatch, 0.3, board)
+    pool._side_effects = None
+    from yeto.rl.engine.tool_wait import ToolSideEffectLog
+
+    pool._side_effects = ToolSideEffectLog(log)
+    members = frozenset({"engine:c3"})
+    assert pool.drain(members, time.time() + 30) is True
+    recs = _side_effects(log)
+    assert [r["kind"] for r in recs] == ["tool_side_effect"]  # written BEFORE the wait
+    assert recs[0]["trajectory_id"] == INJECTED_TOOL_WAIT_ID
+    assert recs[0]["tool_call_id"] == injected_tool_call_id(members) == f"{INJECTED_TOOL_WAIT_ID}:drain:engine:c3"
+    assert recs[0]["seq"] == 1 and recs[0]["attempt"] == 1 and recs[0]["target_members"] == ["engine:c3"]
+    assert isinstance(recs[0]["wall_time"], float) and "monotonic" in recs[0]
+    assert records[0][1]["side_effect_log"] is True and records[0][1]["tool_call_id"] == recs[0]["tool_call_id"]
+    # the cancel path (drain timeout -> undrain) adds no execution
+    calls = []
+
+    async def uncordon_cells(cells):
+        calls.append(sorted(cells))
+
+    pool._controller.uncordon_cells = uncordon_cells
+    pool.undrain(members)
+    assert calls == [["c3"]]
+    deadline = time.time() + 5
+    while board.snapshot().in_flight and time.time() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.05)
+    recs = _side_effects(log)
+    assert [r["kind"] for r in recs] == ["tool_side_effect", "tool_complete"]
+    assert recs[1]["seq"] == 2 and recs[1]["tool_call_id"] == recs[0]["tool_call_id"]
+    assert side_effect_duplicates(recs) == []
+    # a replayed drain of the same members IS visible: a second record of the same pair
+    pool.drain(members, time.time() + 30)
+    recs = _side_effects(log)
+    assert side_effect_duplicates(recs) == [(INJECTED_TOOL_WAIT_ID, injected_tool_call_id(members))]
+    assert recs[-1]["attempt"] == 2 and records[-1][1]["applied"] is True
+    # a replay while the first execution is still waiting is journaled too (applied=False)
+    pool.drain(members, time.time() + 30)
+    assert _side_effects(log)[-1]["attempt"] == 3 and records[-1][1]["applied"] is False
+
+
+def test_pool_accepts_a_path_and_entry_wires_it_from_the_env(monkeypatch, tmp_path):
+    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.engine.miles_adapter.rollout import SIDE_EFFECT_LOG_ENV
+    from yeto.rl.engine.tool_wait import ToolSideEffectLog, ToolWaitBoard
+
+    pool, _ = _real_pool(monkeypatch, 1.0, ToolWaitBoard())
+    pool2, _ = _real_pool(monkeypatch, None, None)
+    assert pool._side_effects is None and pool2._side_effects is None
+    from yeto.rl.engine.miles_adapter.rollout import HARNESS_NOT_AGENTIC, MilesRolloutPool
+
+    p = MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
+                         expected_policy=lambda: (0, "h"), harness=HARNESS_NOT_AGENTIC,
+                         side_effect_log=tmp_path / "se.jsonl")
+    assert isinstance(p._side_effects, ToolSideEffectLog) and p._side_effects.path == str(tmp_path / "se.jsonl")
+    elastic = SimpleNamespace(controller=SimpleNamespace(state_dir=tmp_path / "st"))
+    monkeypatch.delenv(SIDE_EFFECT_LOG_ENV, raising=False)
+    assert entry.side_effect_log_kwargs(elastic) == {} and entry.side_effect_log_kwargs(None) == {}
+    monkeypatch.setenv(SIDE_EFFECT_LOG_ENV, "0")
+    assert entry.side_effect_log_kwargs(elastic) == {}
+    monkeypatch.setenv(SIDE_EFFECT_LOG_ENV, "1")
+    assert entry.side_effect_log_kwargs(elastic) == {"side_effect_log": tmp_path / "st" / "side_effects.jsonl"}
+    assert entry.side_effect_log_kwargs(None) == {}
+
+
+def test_drain_timeout_cancel_does_not_replay_the_tool_and_training_continues(tmp_path):
+    """3.3 X5 at the controller: the tool executes once during the drain of ``down``;
+    drain timeout -> CANCELLED -> undrain; no second execution of the same
+    (trajectory, tool call) after CANCELLED; the run finishes its rounds."""
+    from yeto.rl.engine.tool_wait import ToolSideEffectLog, side_effect_duplicates
+
+    log = ToolSideEffectLog(tmp_path / "state" / "side_effects.jsonl")
+    waiting = {"n": 0}
+
+    driver, ctl, fork, pool, *_ = _setup(tmp_path, rounds=6)
+    fake_undrain = pool.undrain
+
+    def drain(members, deadline):
+        # the "tool": its external call happens here, before the wait
+        log.record("traj-1", "call-1", target_members=sorted(members))
+        waiting["n"] += 1
+        fork.calls.append(("drain", tuple(sorted(members))))
+        fork.cordoned |= set(members)
+        return True  # router part drained; the tool wait (trajectory_load) blocks until the deadline
+
+    def undrain(members):
+        fake_undrain(members)
+        waiting["n"] -= 1
+        log.complete("traj-1", "call-1")
+
+    pool.drain, pool.undrain = drain, undrain
+    pool.load = lambda: {"active_requests": 0, "tool_wait": waiting["n"]}
+    _up_then_down(driver, ctl, pool)
+    assert ctl.status("down")["phase"] == CANCELLED and ctl.admission_open
+    recs = log.records()
+    assert [r["kind"] for r in recs] == ["tool_side_effect", "tool_complete"]
+    assert [r["seq"] for r in recs] == [1, 2] and side_effect_duplicates(recs) == []
+    calls = [c[0] for c in fork.calls]
+    assert calls.count("drain") == 1 and calls.count("undrain") == 1 and "stop" not in calls[calls.index("drain"):]
+    journal = read_journal(tmp_path / "state/reconfig")
+    assert len([r for r in journal if r.get("kind") == "phase" and r.get("phase") == CANCELLED]) == 1
+    assert [r for r in journal if r.get("kind") == "drain_timeout" and r.get("tool_wait") == 1]
+    rounds = [e for e in _events(tmp_path) if e["event"] == "rl_round_trained"]
+    assert len(rounds) >= 5  # training continued after the cancel
 
 
 def test_tool_wait_injection_without_a_board_is_applied_false(monkeypatch):
