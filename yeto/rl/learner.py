@@ -193,6 +193,9 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None)
     # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
     parser.add_argument("--rl-elastic-max-recovery-attempts", type=int, default=None)
+    # rl-multinode-island Q4 (C5): off-island copy of the state dir (journal/cuts/ledger),
+    # synced after every commit point and restored on an empty state dir (machine replaced)
+    parser.add_argument("--rl-elastic-checkpoint-store", default=None, metavar="PATH")
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -316,6 +319,7 @@ _ELASTIC_COMPANIONS = (
     ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
     ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
     ("rl_elastic_max_recovery_attempts", "--rl-elastic-max-recovery-attempts"),
+    ("rl_elastic_checkpoint_store", "--rl-elastic-checkpoint-store"),
 )
 _ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s",
                   "rl_elastic_pause_margin", "rl_elastic_drain_timeout_s",
@@ -394,6 +398,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_elastic["trainer_edges"] = True
     if getattr(args, "rl_elastic_accept_rebind", False):
         miles_args.yeto_rl_elastic["accept_rebind"] = True
+    if getattr(args, "rl_elastic_checkpoint_store", None):
+        miles_args.yeto_rl_elastic["checkpoint_store"] = str(args.rl_elastic_checkpoint_store)
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
             miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))

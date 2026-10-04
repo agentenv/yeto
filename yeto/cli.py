@@ -342,6 +342,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic: enable trainer DP-change / role-transfer edges (4.7): "
                     "drops --balance-data (refused by the DP certification) and wires the "
                     "trainer ops and pool GPU ids; off by default")
+    rl.add_argument("--rl-checkpoint-store", default=None, metavar="PATH|URI",
+                    help="--rl-elastic: off-island copy of the island state dir (journal, cuts, "
+                    "ledger) for a rebuild after node loss (rl-multinode-island Q4): a bucket "
+                    "URI (s3://, gs://, ...) mounted on the island, or a path already shared "
+                    "across machines (NFS, persistent volume). The learner syncs the state dir "
+                    "there after every commit point and restores from it when its state dir "
+                    "is empty (machine replaced). Without it the state stays on node0's local "
+                    "disk (warning on a multi-node island)")
     rl.add_argument("--rl-elastic-accept-rebind", action="store_true",
                     help="--rl-elastic, multi-node: accept a GPU uuid pool that differs from the "
                     "cfg / journal binding (machine replaced) and rebind; off by default the "
