@@ -216,7 +216,7 @@ fi
 """
 
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
-GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
+GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48, "RTX-PRO-6000": 96}
 
 
 # rl-multinode-island D6: per-cloud NCCL/GLOO socket settings for a multi-node
@@ -574,6 +574,76 @@ def syncer_tape_sidecar(args, num_learners: int, binary: str = "~/yeto-syncer") 
     return setup, run_prefix, envs
 
 
+# Clouds where sky cannot open ports (sky/clouds/verda.py: no OPEN_PORTS).
+# There the syncer's port is reachable because the platform has no
+# firewall; yeto closes everything but SSH and the syncer with ufw inside
+# the VM and proves reachability with an external TCP probe (design D7).
+NO_OPEN_PORTS_CLOUDS = frozenset({"verda"})
+PROBE_BANNER = b"yeto-probe"
+
+
+def syncer_cloud(args) -> str:
+    """Cloud of --syncer-region ('region' means AWS, else 'cloud/region')."""
+    region = getattr(args, "syncer_region", "") or ""
+    return region.split("/", 1)[0] if "/" in region else "aws"
+
+
+def syncer_ports(args) -> list[int] | None:
+    """`ports=` for the syncer/head resources; None where sky can't open them."""
+    return None if syncer_cloud(args) in NO_OPEN_PORTS_CLOUDS else [SYNCER_PORT]
+
+
+def ufw_setup(port: int = SYNCER_PORT) -> str:
+    """In-VM firewall for a public syncer on a cloud without security
+    groups: deny inbound except SSH and the syncer port."""
+    return (
+        'SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo\n'
+        "command -v ufw >/dev/null || { $SUDO apt-get update -qq && $SUDO apt-get install -y -qq ufw; }\n"
+        "$SUDO ufw default deny incoming\n"
+        "$SUDO ufw default allow outgoing\n"
+        "$SUDO ufw allow 22/tcp\n"
+        f"$SUDO ufw allow {int(port)}/tcp\n"
+        "$SUDO ufw --force enable\n"
+        "$SUDO ufw status verbose"
+    )
+
+
+def probe_listener_command(port: int = SYNCER_PORT, timeout_s: int = 300) -> str:
+    """A one-shot listener on the syncer port that greets the first
+    connection with PROBE_BANNER (used before the real syncer starts)."""
+    code = (
+        "import socket;s=socket.socket();"
+        "s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+        f"s.bind(('0.0.0.0',{int(port)}));s.listen(1);s.settimeout({int(timeout_s)});"
+        f"c,_=s.accept();c.sendall({PROBE_BANNER!r});c.close();s.close()"
+    )
+    return f'python3 -c "{code}"'
+
+
+def tcp_probe(host: str, port: int = SYNCER_PORT, *, expect: bytes | None = None, attempts: int = 20,
+              delay: float = 3.0, timeout: float = 5.0, connect=None, sleep=time.sleep) -> tuple[bool, str]:
+    """Connect from THIS machine (outside the cloud) to host:port.
+    With `expect`, the peer must send those bytes first. (ok, detail)."""
+    import socket
+
+    connect = connect or socket.create_connection
+    last = "not tried"
+    for i in range(max(1, attempts)):
+        try:
+            with connect((host, int(port)), timeout=timeout) as conn:
+                if expect is not None:
+                    conn.settimeout(timeout)
+                    got = conn.recv(len(expect))
+                    if got != expect:
+                        raise OSError(f"unexpected greeting {got!r}")
+            return True, f"{host}:{port} reachable (attempt {i + 1})"
+        except OSError as e:
+            last = f"{type(e).__name__}: {e}"
+        if i + 1 < attempts:
+            sleep(delay)
+    return False, f"{host}:{port} unreachable after {attempts} attempt(s): {last}"
+
+
 def make_syncer_task(args, num_learners: int):
     import platform
 
@@ -596,10 +666,12 @@ def make_syncer_task(args, num_learners: int):
                 infra=infra,
                 cpus="8+",
                 memory=f"{args.syncer_memory}+",
-                ports=[SYNCER_PORT],
+                ports=syncer_ports(args),
                 use_spot=False,
             )
         )
+        if syncer_ports(args) is None:
+            task.setup = ufw_setup() + "\n" + (task.setup or "")
         return task
 
     binary = build_syncer_binary()
@@ -623,10 +695,12 @@ def make_syncer_task(args, num_learners: int):
             infra=infra,
             cpus="8+",
             memory=f"{args.syncer_memory}+",
-            ports=[SYNCER_PORT],
+            ports=syncer_ports(args),
             use_spot=False,
         )
     )
+    if syncer_ports(args) is None:
+        task.setup = ufw_setup() + "\n" + (task.setup or "")
     return task
 
 
@@ -3710,6 +3784,18 @@ def run_diffusion_sample(args) -> int:
             terminate_and_verify(sky, cluster)
 
 
+def sky_cluster_name(name: str) -> str:
+    """Every cluster name yeto hands sky is lower case.
+
+    Verda hostnames are lower case, and sky 0.13's Verda status query
+    matches the *display* name against them (its query_instances takes
+    its arguments one slot off); an upper-case region such as FIN-03 in
+    the name then reads as "no instances", sky drops the record, and the
+    same-name relaunch that follows deletes the running node. Lower-case
+    names break that chain at the first link (design D1)."""
+    return name.lower()
+
+
 def learner_cluster_names(prefix: str, specs: list[ClusterSpec]) -> list[str]:
     """Deterministic learner cluster names for a run: computable from the
     launch args alone, so the CLI can record them before provisioning.
@@ -3719,7 +3805,9 @@ def learner_cluster_names(prefix: str, specs: list[ClusterSpec]) -> list[str]:
     from .modal_runner import modal_island_name
 
     return [
-        modal_island_name(prefix, m) if spec.cloud == "modal" else f"{prefix}-l{m}-{spec.region or spec.cloud}"
+        modal_island_name(prefix, m)
+        if spec.cloud == "modal"
+        else sky_cluster_name(f"{prefix}-l{m}-{spec.region or spec.cloud}")
         for m, spec in enumerate(specs)
     ]
 
@@ -4019,7 +4107,7 @@ class SkySDKOps:
         import sky
 
         nodes = getattr(self, "nodes_by_cluster", None) or {}
-        terminate_and_verify(sky, cluster, num_nodes=nodes.get(cluster, 1))
+        teardown_island(sky, cluster, num_nodes=nodes.get(cluster, 1))
 
     def now(self) -> float:
         return time.monotonic()
@@ -4214,6 +4302,8 @@ class _RelaunchAttempt:
         self.result = None  # new job id, or None if provisioning failed
         self.finished = False
         self.thread = None
+        self.blocked = None  # reason the relaunch was refused (instance alive)
+        self.name = None  # cluster name the relaunch used (may be a new one)
 
 
 # Fixed-roster RL islands: consecutive relaunches allowed within one recovery
@@ -4391,6 +4481,9 @@ class FleetController:
         progress_probe=None,
         stall_timeout: float = 0.0,
         stop_flag=None,
+        no_recover=(),
+        instance_guard=None,
+        on_rename=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -4436,6 +4529,15 @@ class FleetController:
             self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
             self.syncer_probe = self.syncer_restart = None
         self.downed_clusters: set = set()
+        # Learners whose recovery is disabled regardless of recover_timeout
+        # (Verda without the verified sky patch: a same-name relaunch there
+        # can delete the running node).
+        self.no_recover = set(no_recover)
+        # Cloud-side check before a relaunch (VerdaInstanceGuard): None, or
+        # an object whose check(name) returns ("alive", why) | ("gone", new
+        # name) | ("unknown", why) | None (not guarded).
+        self.instance_guard = instance_guard
+        self.on_rename = on_rename
 
     @staticmethod
     def _make_record(name, task, job_id):
@@ -4651,7 +4753,13 @@ class FleetController:
             f"(timeout {self.recover_timeout}s)",
             file=sys.stderr,
         )
-        if not is_syncer and self.recover_timeout <= 0:
+        if not is_syncer and (self.recover_timeout <= 0 or rec["name"] in self.no_recover):
+            if rec["name"] in self.no_recover:
+                print(
+                    f"[launcher] {rec['name']}: auto-recovery disabled for this island "
+                    "(sky Verda provisioner unpatched); not relaunching",
+                    file=sys.stderr,
+                )
             self._abandon(rec, 0.0)
             return
         self._drive_recovery(rec, is_syncer)
@@ -4660,6 +4768,22 @@ class FleetController:
         attempt = rec["attempt"]
         if attempt is not None and attempt.finished:
             rec["attempt"] = None
+            if attempt.blocked is not None and not is_syncer:
+                print(
+                    f"[launcher] {rec['name']}: NOT relaunching — {attempt.blocked}",
+                    file=sys.stderr,
+                )
+                self._abandon(rec, self.ops.now() - rec["failed_at"])
+                return
+            if attempt.result is not None and attempt.name and attempt.name != rec["name"]:
+                old = rec["name"]
+                rec["name"] = attempt.name
+                print(f"[launcher] {old} relaunched under a new cluster name: {attempt.name}")
+                if self.on_rename is not None:
+                    try:
+                        self.on_rename(old, attempt.name)
+                    except Exception as e:  # noqa: BLE001 - bookkeeping only
+                        print(f"[launcher] on_rename hook failed: {e}", file=sys.stderr)
             if attempt.result is not None:
                 rec["job_id"] = attempt.result
                 rec["state"] = RUNNING
@@ -4718,11 +4842,38 @@ class FleetController:
         name, task = rec["name"], rec["task"]
 
         def _run():
+            target = name
+            if self.instance_guard is not None:
+                try:
+                    verdict = self.instance_guard.check(name)
+                except Exception as e:  # noqa: BLE001
+                    verdict = ("unknown", f"instance check raised: {e}")
+                if verdict is not None:
+                    kind, detail = verdict
+                    if kind == "alive":
+                        attempt.blocked = detail
+                        attempt.finished = True
+                        return
+                    if kind == "unknown":
+                        # Could not tell whether the old node is gone: a
+                        # relaunch now could delete it. Try again next poll.
+                        print(f"[launcher] {name}: {detail}; relaunch deferred", file=sys.stderr)
+                        attempt.finished = True
+                        return
+                    target = detail  # "gone": relaunch under a fresh name
+            attempt.name = target
             try:
                 if self._stop_requested(rec, "relaunch"):  # set after the check in the poll loop
                     attempt.result = None
                     return
-                attempt.result = self.ops.relaunch(task, name)
+                attempt.result = self.ops.relaunch(task, target)
+                if attempt.result is not None and self.instance_guard is not None:
+                    after = getattr(self.instance_guard, "after_relaunch", None)
+                    if after is not None:
+                        try:
+                            after(target)
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[launcher] recording ids of {target} failed: {e}", file=sys.stderr)
             except Exception as e:
                 print(f"[launcher] relaunch of {name} raised: {e}", file=sys.stderr)
                 attempt.result = None
@@ -4732,7 +4883,7 @@ class FleetController:
                 # Abandoned while this attempt was in flight, but the
                 # relaunch re-provisioned the cluster anyway: tear it back
                 # down so nothing is left running unattended.
-                self._down(name, force=True)
+                self._down(target, force=True)
 
         thread = self.thread_cls(target=_run, daemon=True)
         attempt.thread = thread
@@ -4826,8 +4977,262 @@ def _cloud_live_instances_probe(cluster: str):
         return None
 
 
+# Diagnostics fetched before an island is torn down: (label, remote glob or
+# None for `sky logs`, local file name). Best effort, bounded.
+TEARDOWN_DIAG_DIR = "~/yeto-diag"
+TEARDOWN_DIAG_TIMEOUT_S = 120
+
+
+def teardown_diagnostic_commands(cluster: str, dest: str, head: bool = False) -> list[tuple[str, list[str], str | None]]:
+    """(label, argv, stdout file or None) for everything worth keeping
+    before `cluster` goes away: its job log and event tape(s); on the head
+    also sky's API server log and the cluster's recorded events."""
+    cmds: list[tuple[str, list[str], str | None]] = [
+        ("job_log", ["sky", "logs", cluster, "--no-follow"], os.path.join(dest, "job.log")),
+        (
+            "event_tape",
+            ["rsync", "-a", "-e", "ssh -o ConnectTimeout=20 -o BatchMode=yes",
+             f"{cluster}:~/yeto-output/*.jsonl", dest + "/"],
+            None,
+        ),
+    ]
+    if head:
+        cmds.append(("sky_server_log", ["cp", os.path.expanduser("~/.sky/api_server/server.log"), dest + "/"], None))
+        cmds.append(
+            (
+                "cluster_events",
+                ["python3", "-c",
+                 "import json,sys\n"
+                 "from sky import global_user_state as g\n"
+                 "f=getattr(g,'get_cluster_events',None)\n"
+                 "print(json.dumps(f(sys.argv[1], None) if f else 'unsupported', default=str, indent=1))",
+                 cluster],
+                os.path.join(dest, "cluster_events.json"),
+            )
+        )
+    return cmds
+
+
+def collect_teardown_diagnostics(
+    cluster: str, dest_root: str | None = None, *, head: bool = False,
+    run=subprocess.run, timeout: float = TEARDOWN_DIAG_TIMEOUT_S,
+) -> dict[str, str]:
+    """Best-effort pull of an island's logs before its teardown.
+
+    Never raises: every command gets `timeout` seconds and a failure or
+    timeout is only a warning, so the teardown that follows always runs.
+    Returns {label: "ok" | "timeout" | "failed: ..."}."""
+    dest = os.path.join(os.path.expanduser(dest_root or TEARDOWN_DIAG_DIR), cluster)
+    out: dict[str, str] = {}
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError as e:
+        print(f"[launcher] WARNING: no diagnostics dir for {cluster}: {e}", file=sys.stderr)
+        return {"dir": f"failed: {e}"}
+    for label, argv, stdout_file in teardown_diagnostic_commands(cluster, dest, head=head):
+        fh = None
+        try:
+            fh = open(stdout_file, "wb") if stdout_file else None
+            proc = run(argv, stdout=fh or subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, check=False)
+            code = getattr(proc, "returncode", 0)
+            out[label] = "ok" if code == 0 else f"failed: exit {code}"
+        except subprocess.TimeoutExpired:
+            out[label] = "timeout"
+        except Exception as e:  # noqa: BLE001 - diagnostics must never block teardown
+            out[label] = f"failed: {e}"
+        finally:
+            if fh is not None:
+                fh.close()
+        if out[label] != "ok":
+            print(f"[launcher] WARNING: {cluster}: could not fetch {label} before teardown ({out[label]})",
+                  file=sys.stderr)
+    print(f"[launcher] {cluster}: pre-teardown diagnostics in {dest}: {out}")
+    return out
+
+
+# Verda islands of this process's run: cluster name -> VerdaInstanceGuard
+# (holds their instance ids). terminate_and_verify proves their teardown
+# at Verda by id instead of trusting sky.
+VERDA_ISLANDS: dict = {}
+
+
+def _verda_teardown_check(cluster: str):
+    """Verda-by-id verification for a Verda island whose ids are on record;
+    None (sky's own cloud probe decides) when there are none — an empty id
+    set must never read as "confirmed gone"."""
+    guard = VERDA_ISLANDS.get(cluster)
+    if guard is None:
+        return None
+    ids = guard.ids.get(cluster)
+    if not ids:
+        print(f"[launcher] WARNING: {cluster}: no Verda instance ids on record; "
+              "falling back to sky's cloud probe", file=sys.stderr)
+        return None
+    from .verda_ops import verify_teardown
+
+    return lambda: verify_teardown(guard.api, ids, guard.on_cloud.get(cluster))
+
+
+def collect_diagnostics_parallel(clusters, *, head: bool = False, total_timeout: float = 300.0,
+                                 collect=None) -> dict:
+    """Pre-teardown diagnostics for every island at once, bounded in total:
+    islands still collecting after `total_timeout` are left behind (their
+    threads are daemons) and the teardown proceeds."""
+    if not clusters or os.environ.get("YETO_TEARDOWN_DIAG", "1") == "0":
+        return {}
+    collect = collect or collect_teardown_diagnostics
+    out: dict = {}
+
+    def one(c):
+        try:
+            out[c] = collect(c, head=head)
+        except Exception as e:  # noqa: BLE001
+            out[c] = {"error": str(e)}
+
+    threads = [threading.Thread(target=one, args=(c,), daemon=True) for c in clusters]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + total_timeout
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    late = [c for c in clusters if c not in out]
+    if late:
+        print(f"[launcher] WARNING: diagnostics still running for {late} after {total_timeout:.0f}s; "
+              "tearing down anyway", file=sys.stderr)
+    return out
+
+
+def prepare_verda_islands(names: list[str], on_instance_ids=None) -> dict:
+    """Per-run Verda setup on this machine: the full local sky catalog, the
+    patch status (unpatched -> no auto-recovery for these islands, D4) and
+    the instance-id guard used by recovery and teardown."""
+    from .shape.providers import write_verda_sky_catalog
+    from .sky_patches import verda as verda_patch
+    from .verda_ops import VerdaApi, VerdaInstanceGuard
+
+    try:
+        print(f"[launcher] verda: full sky catalog written to {write_verda_sky_catalog()}")
+    except Exception as e:  # noqa: BLE001 - sky's own catalog still works, just thinner
+        print(f"[launcher] WARNING: could not write the Verda sky catalog: {e}", file=sys.stderr)
+    ok, why = verda_patch.verified_for_current_sky()
+    pth_written = None
+    if ok and remote_sky_api_server():
+        # Provisioning runs in a server we cannot patch from here.
+        ok, why = False, f"sky API server is remote ({remote_sky_api_server()})"
+    if ok:
+        from .sky_patches import ensure_local_pth
+
+        try:
+            pth, fresh = ensure_local_pth(str(REPO_ROOT))
+            if fresh:
+                # A server already running keeps the unpatched code: treat
+                # the patch as not in effect for this run (2.5).
+                pth_written = pth
+                ok, why = False, (
+                    f"patch hook {pth} was only now installed; a sky API server started "
+                    "before it runs unpatched (install it persistently with "
+                    "`python -m yeto.sky_patches install`, then `sky api stop`)"
+                )
+        except OSError as e:
+            ok, why = False, f"cannot install the patch hook for sky's API server ({e})"
+    no_recover = set() if ok else set(names)
+    if not ok:
+        print(
+            f"[launcher] WARNING: sky's Verda provisioner is NOT patched ({why}); "
+            f"auto-recovery is disabled for {', '.join(names)} (recover_timeout=0) — "
+            "a same-name relaunch there can delete the running node",
+            file=sys.stderr,
+        )
+    guard = VerdaInstanceGuard(VerdaApi(), names, on_ids=on_instance_ids)
+    for n in names:
+        VERDA_ISLANDS[n] = guard
+    return {"guard": guard, "no_recover": no_recover, "pth_written": pth_written}
+
+
+def remote_sky_api_server() -> str | None:
+    """The sky API server endpoint when it is not on this machine, else None."""
+    endpoint = os.environ.get("SKYPILOT_API_SERVER_ENDPOINT")
+    try:
+        from sky.server import common as server_common
+
+        endpoint = server_common.get_server_url()
+        if server_common.is_api_server_local(endpoint):
+            return None
+        return endpoint
+    except Exception:  # noqa: BLE001 - sky absent or API drift: judge the env var
+        if not endpoint:
+            return None
+        from urllib.parse import urlparse
+
+        host = urlparse(endpoint).hostname or ""
+        return None if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"} else endpoint
+
+
+def verda_launch_candidates(spec, args, availability, demoted) -> list[dict]:
+    from .shape.providers import VerdaSignals, verda_any_of, verda_candidates
+
+    types = VerdaSignals(cache=None)._fetch_types()
+    per_node = spec.gpus_per_node
+    cands = verda_candidates(
+        spec.gpu, per_node, types, availability,
+        regions=[spec.region] if spec.region else None,
+        use_spot=bool(getattr(args, "spot", False)), demoted=demoted,
+    )
+    return verda_any_of(cands, spec.gpu, per_node)
+
+
+def launch_verda_island(sky, task, name: str, spec, args, *, sleep=None):
+    """Launch one Verda island over live-stock candidates (D5)."""
+    from .shape.providers import VerdaSignals, launch_with_verda_candidates
+
+    sig = VerdaSignals(cache=None, use_spot=bool(getattr(args, "spot", False)))
+    base = next(iter(task.resources))
+
+    def launch(cands):
+        task.set_resources([base.copy(**c) for c in cands])
+        print(f"[launcher] {name}: Verda candidates {[c['instance_type'] + '@' + c['infra'] for c in cands]}")
+        return sky.stream_and_get(sky.launch(task, cluster_name=name, retry_until_up=False))
+
+    return launch_with_verda_candidates(
+        launch,
+        sig._fetch_availability,
+        lambda avail, demoted: verda_launch_candidates(spec, args, avail, demoted),
+        sleep=sleep,
+    )
+
+
+def _rename_hook(clusters: list, on_clusters, fixed: list):
+    """FleetController on_rename: keep the teardown list, the Verda id guard
+    and the run registry on the island's new cluster name."""
+
+    def hook(old: str, new: str) -> None:
+        if old in clusters:
+            clusters[clusters.index(old)] = new
+        else:
+            clusters.append(new)
+        if old in VERDA_ISLANDS:
+            VERDA_ISLANDS[new] = VERDA_ISLANDS[old]
+        if on_clusters is not None:
+            on_clusters(fixed + [c for c in clusters if c not in fixed])
+
+    return hook
+
+
+def teardown_island(sky, cluster: str, *, head: bool = False, collect=collect_teardown_diagnostics,
+                    num_nodes: int = 1) -> bool:
+    """The launcher's teardown of one of its own clusters: diagnostics
+    first, then terminate_and_verify (Verda-verified for Verda islands)."""
+    if collect is not None and os.environ.get("YETO_TEARDOWN_DIAG", "1") != "0":
+        try:
+            collect(cluster, head=head)
+        except Exception as e:  # noqa: BLE001
+            print(f"[launcher] WARNING: diagnostics for {cluster} failed: {e}", file=sys.stderr)
+    return terminate_and_verify(sky, cluster, num_nodes=num_nodes, verda_check=_verda_teardown_check(cluster))
+
+
 def terminate_and_verify(
-    sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep, down=None, num_nodes=1
+    sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep, down=None, num_nodes=1,
+    verda_check=None,
 ) -> bool:
     """sky.down a cluster and CONFIRM at the cloud level that no instance
     survives, retrying the down while the cloud still reports live ones.
@@ -4845,7 +5250,29 @@ def terminate_and_verify(
     `down` overrides the sky.down call (the CLI routes it through its own
     patchable hook); `probe` is captured before the first down because
     sky.down deletes the record the probe is built from.
+
+    `verda_check` (Verda islands) replaces sky's probe with Verda's own
+    answer by instance id, including the OS volumes (trash included): it
+    returns (ok, remaining) and the teardown counts only when ok.
     """
+    if verda_check is not None:
+        try:
+            down = down or (lambda: sky.get(sky.down(cluster)))
+            down()
+        except Exception as e:
+            print(f"[launcher] sky.down({cluster}) error: {e}; verifying at Verda", file=sys.stderr)
+        try:
+            ok, remaining = verda_check()
+        except Exception as e:  # noqa: BLE001
+            ok, remaining = False, [f"Verda verification failed: {e}"]
+        if not ok:
+            print(
+                f"[launcher] {cluster}: teardown NOT complete at Verda; remaining: {remaining}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"[launcher] {cluster}: Verda confirms instances and volumes deleted")
+        return ok
     if probe == "auto":
         probe = _cloud_live_instances_probe(cluster)
     down = down or (lambda: sky.get(sky.down(cluster)))
@@ -4932,7 +5359,7 @@ def _terminate_and_verify_nodes(cluster, *, probe, attempts, sleep_fn, down, num
     return False
 
 
-def run(args, on_clusters=None, local_syncer=None) -> int:
+def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     """Provision and supervise the fleet; returns the run's exit code.
 
     `on_clusters`, if given, is called once with the full list of cluster
@@ -4947,6 +5374,10 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     (already started by the caller), and no separate syncer cluster is
     launched — learners connect to this host's public IP
     ($SYNCER_PUBLIC_IP, injected by the submitting CLI).
+
+    `on_instance_ids(cluster, ids)`, if given, receives the Verda instance
+    ids of each Verda island once it is up (the CLI saves them in the run
+    record; recovery and teardown are checked against them).
     """
     import sky
 
@@ -4955,6 +5386,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     ):
         # Checked first: the flag must never turn an SFT launch syncer-less.
         raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
+    from . import sky_patches
+
+    sky_patches.install()
     prepare_launch_args(args)
     _write_run_manifest(args)
     head_mode = local_syncer is not None
@@ -4991,7 +5425,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     require_modal_for_gpu_exact(args, specs)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
-    syncer_cluster = None if head_mode or no_sync else f"{prefix}-syncer"
+    syncer_cluster = None if head_mode or no_sync else sky_cluster_name(f"{prefix}-syncer")
     learner_names = learner_cluster_names(prefix, specs)
     if on_clusters is not None:
         try:
@@ -5002,6 +5436,8 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     controller = None
     teardown_unverified = False
     run_started_unix = time.time()  # Modal rows created after this are this run's app
+    verda_names = [n for n, sp in zip(learner_names, specs) if sp.cloud == "verda"]
+    verda = prepare_verda_islands(verda_names, on_instance_ids) if verda_names else None
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -5026,6 +5462,14 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             clusters.append(syncer_cluster)
             syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
             print(f"[launcher] syncer up at {syncer_addr}")
+            if syncer_ports(args) is None:
+                ok, detail = tcp_probe(str(syncer_handle.head_ip), SYNCER_PORT)
+                if not ok:
+                    raise RuntimeError(
+                        f"syncer port not reachable from outside {syncer_cloud(args)} ({detail}); "
+                        "no island was started"
+                    )
+                print(f"[launcher] syncer probe: {detail}")
 
         if external:
             for x in range(external):
@@ -5114,6 +5558,11 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                 continue
             tasks[name] = task
             print(f"[launcher] launching learner {m} on {spec} as {name}")
+            if spec.cloud == "verda":
+                # Launched in resolve(): live stock -> ordered any_of, with
+                # refresh + bounded backoff on capacity failures.
+                rids[name] = (m, ("verda", spec))
+                continue
             rids[name] = (
                 m,
                 sky.launch(task, cluster_name=name, retry_until_up=args.retry_until_up),
@@ -5124,7 +5573,13 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
 
         def resolve(name: str, m: int, rid) -> None:
             try:
-                results[name] = sky.stream_and_get(rid)
+                if isinstance(rid, tuple) and rid and rid[0] == "verda":
+                    results[name] = launch_verda_island(sky, tasks[name], name, rid[1], args)
+                    verda["guard"].record(
+                        name, getattr(results[name][1], "cluster_name_on_cloud", None)
+                    )
+                else:
+                    results[name] = sky.stream_and_get(rid)
             except Exception as e:
                 errors[name] = e
 
@@ -5221,6 +5676,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             stall_timeout=float(
                 getattr(args, "rl_stall_timeout", None) or DEFAULT_RL_STALL_TIMEOUT_S
             ) if getattr(args, "rl_stall_timeout", None) != 0 else 0.0,
+            no_recover=verda["no_recover"] if verda else (),
+            instance_guard=verda["guard"] if verda else None,
+            on_rename=_rename_hook(clusters, on_clusters, [] if head_mode else [syncer_cluster]),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -5349,6 +5807,10 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         # fails closed on an incomplete island tape.
         return NO_SYNC_INCOMPLETE_EXIT if no_sync_incomplete else 0
     finally:
+        if verda is not None and verda.get("pth_written"):
+            from .sky_patches import remove_local_pth
+
+            remove_local_pth(verda["pth_written"])
         # Clusters the controller already tore down (abandoned learners, or
         # the syncer after a total loss) are skipped — even with --keep.
         downed = controller.downed_clusters if controller is not None else set()
@@ -5357,6 +5819,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             print(f"[launcher] keeping clusters: {remaining}")
         else:
             unverified = []
+            collect_diagnostics_parallel(
+                [n for n in remaining if n not in modal_cfgs], head=head_mode
+            )
             for name in remaining:
                 print(f"[launcher] tearing down {name}")
                 if name in modal_cfgs:
@@ -5366,7 +5831,8 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     except Exception as e:  # noqa: BLE001 - app stop below is the backstop
                         print(f"[launcher] cancel of {name} failed: {e}", file=sys.stderr)
                     continue
-                if not terminate_and_verify(sky, name, num_nodes=nodes_by_cluster.get(name, 1)):
+                if not teardown_island(sky, name, head=head_mode, collect=None,
+                                       num_nodes=nodes_by_cluster.get(name, 1)):
                     unverified.append(name)
             if modal_ops is not None:
                 # Belt and braces: stop the whole per-run Modal app so no
@@ -5394,7 +5860,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
             # caller (cmd_head) self-terminates via the EC2 API after this
             # returns cleanly; otherwise the head stays up so the fetched
             # model and syncer checkpoint remain reachable.
-            head_cluster = f"{prefix}-head"
+            head_cluster = sky_cluster_name(f"{prefix}-head")
             if args.keep:
                 print(
                     f"[launcher] run finished; clusters left up: "
