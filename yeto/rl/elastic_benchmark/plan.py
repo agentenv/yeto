@@ -49,11 +49,14 @@ def build_plan(manifest: dict[str, Any], attestation: caps.Attestation, *, study
     resources, profile = manifest["resources"], manifest["profile"]
     configs = caps.parse_configs(resources)
     pool_size = caps.validate_pool(resources)
+    pool = caps.pool_gpus(resources)
+    fingerprint = manifest["identity"].get("fingerprints", {}).get("runtime")
     edges = caps.validate_edges(resources, configs)
     items = []
     for arm in manifest["matrix"]["arms"]:
         status, reason = caps.arm_status(
-            arm, profile=profile, configs=configs, edges=edges, attestation=attestation, pool_size=pool_size
+            arm, profile=profile, configs=configs, edges=edges, attestation=attestation, pool_size=pool_size,
+            pool=pool, runtime_fingerprint=fingerprint,
         )
         for key in _arm_keys(arm, manifest["matrix"]):
             budget = _item_budget(manifest, arm, key, configs)
@@ -61,7 +64,7 @@ def build_plan(manifest: dict[str, Any], attestation: caps.Attestation, *, study
     return StudyPlan(
         study_hash=study_hash,
         items=tuple(sorted(items, key=lambda item: item.key)),
-        config_table=caps.config_table(configs, profile=profile, pool_size=pool_size),
+        config_table=caps.config_table(configs, profile=profile, pool_size=pool_size, pool=pool),
         pool_size=pool_size,
         attested=attestation.runtime_fingerprint is not None,
     )

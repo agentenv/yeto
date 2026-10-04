@@ -58,6 +58,31 @@ def batch_hash(batch: RolloutBatchHandle) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+MASKED_FRACTION_KEYS = ("masked_fraction", "train/masked_fraction")
+
+
+def masked_fraction(outputs: Any) -> float | None:
+    """Masked-token fraction from the train outputs' metrics, else None.
+
+    Upstream Miles does not report it by default; a masking mechanism's
+    change wires its metric to one of ``MASKED_FRACTION_KEYS``
+    (rl-algorithm-capabilities D6). Unknown (None) keeps the R0 rule.
+    """
+
+    values = []
+    for output in outputs or ():
+        metrics = getattr(output, "metrics", output)
+        if not isinstance(metrics, dict):
+            continue
+        for key in MASKED_FRACTION_KEYS:
+            if metrics.get(key) is not None:
+                values.append(float(metrics[key]))
+                break
+    if not values or any(not math.isfinite(v) for v in values):
+        return None
+    return min(values)  # conservative: fully masked only if every cell is
+
+
 def _outcome_ok(output: Any) -> bool:
     outcome = getattr(output, "outcome", output)
     return str(getattr(outcome, "name", outcome)).lower() == "normal"
@@ -94,6 +119,7 @@ class MilesTrainerGroup:
         self._run = (runner or LoopRunner()).run
         self.last_grad_norm: float | None = None
         self.last_applied_lrs: tuple[float, ...] | None = None
+        self.last_masked_fraction: float | None = None
         self.last_outputs: list[Any] | None = None
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
@@ -101,12 +127,14 @@ class MilesTrainerGroup:
             raise TrainStepError("rollout batch handle carries no engine payload")
         self.last_grad_norm = None
         self.last_applied_lrs = None
+        self.last_masked_fraction = None
         try:
             if self._check_tokens:  # spec: reject before training
                 require_policy_tokens(batch, policy_token(batch.rollout_id, batch.policy_hash))
             outputs = self._run(self._actor.train(batch.rollout_id, batch.payload))
             outputs = list(outputs or [])
             self.last_outputs = outputs
+            self.last_masked_fraction = masked_fraction(outputs)
             if len(outputs) != 1:
                 raise TrainStepError(
                     f"expected one train output from the single-cell group, got {len(outputs)}"
@@ -157,6 +185,7 @@ class MilesTrainerGroup:
         return TrainStepMetrics(
             grad_norm=math.nan if norm is None else float(norm),
             applied_lrs=self.last_applied_lrs,
+            masked_fraction=self.last_masked_fraction,
         )
 
     def onload(self) -> None:

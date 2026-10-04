@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -113,12 +114,35 @@ def test_colocated_translation_core_flags():
 
 
 def test_fixed_partition_translation():
-    launch = mc.translate_run_config(make_config(colocated=False), AlgorithmSpec())
+    # rl-infra-spec 2.1: a LoRA fixed partition keeps the trainer resident
+    # (NCCL broadcast publish every round); offload_train is refused below.
+    cfg = sub(make_config(colocated=False), "serving", offload_train=False)
+    launch = mc.translate_run_config(cfg, AlgorithmSpec())
     argv = list(launch.argv)
     assert "--colocate" not in argv
     assert flag_value(argv, "--rollout-num-gpus") == "2"
     assert launch.placement.kind == "fixed-partition"
     assert launch.placement.expected_layout() == (4, 2)
+    assert flag_value(argv, "--update-weight-transfer-mode") == "broadcast"
+    assert "--lora-base-cpu-backup" not in argv
+    assert "--yeto-placement-map" not in argv  # no standby: upstream offset layout
+
+
+def test_lora_fixed_partition_refuses_trainer_offload_and_emits_standby_map():
+    with pytest.raises(mc.MilesConfigError, match="resident"):
+        mc.translate_run_config(make_config(colocated=False), AlgorithmSpec())
+    cfg = sub(make_config(colocated=False), "serving", offload_train=False)
+    cfg = sub(cfg, "parallel", standby_gpus=2, visible_gpus_per_node=6)
+    launch = mc.translate_run_config(cfg, AlgorithmSpec())
+    argv = list(launch.argv)
+    assert json.loads(flag_value(argv, "--yeto-placement-map")) == {
+        "trainer": [0, 1], "rollout": [2, 3], "standby": [4, 5]
+    }
+    assert launch.placement.standby_gpus == 2
+    # colocated argv is unchanged by the partition work
+    colocated = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--lora-base-cpu-backup" in colocated
+    assert "--update-weight-transfer-mode" not in colocated
 
 
 def test_colocated_forces_offload_train():

@@ -198,6 +198,45 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-algorithm-spec",
+        default=None,
+        metavar="PATH",
+        help=(
+            "AlgorithmSpec JSON (v1 or v2) for --rl-engine ports; the launcher "
+            "sends each island its canonical form and expected hash"
+        ),
+    )
+    rl.add_argument(
+        "--rl-placement",
+        choices=["colocated", "fixed-partition"],
+        default="colocated",
+        help="ports: colocated (default) or a LoRA fixed partition (rl-infra-spec 2.1)",
+    )
+    rl.add_argument(
+        "--rl-standby-gpus",
+        type=int,
+        default=0,
+        help="ports fixed partition: reserved standby GPUs never started by any role",
+    )
+    rl.add_argument(
+        "--rl-single-island-no-sync",
+        action="store_true",
+        help=(
+            "ports only: launch exactly one island with no syncer and no outer "
+            "sync (the G1 smoke entry for --rl-allow-unverified-mechanism)"
+        ),
+    )
+    rl.add_argument(
+        "--rl-allow-unverified-mechanism",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "ports single-island smoke only: admit an expressible but "
+            "undeclared mechanism (recorded in events and provenance)"
+        ),
+    )
+    rl.add_argument(
         "--rl-offload-train",
         action="store_true",
         help=(
@@ -665,6 +704,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         dest="spot",
         action="store_false",
         help="use on-demand instances for learners instead of spot",
+    )
+    infra.add_argument(
+        "--modal-gpu-exact",
+        action="store_true",
+        help="Modal islands: request the exact GPU type (H100! -- Modal otherwise "
+        "may upgrade H100 to H200) and fail at container start unless "
+        "nvidia-smi reports it; use for bitwise comparisons",
     )
     infra.add_argument("--disk-size", type=int, default=512, help="learner disk (GB)")
     infra.add_argument(
