@@ -9,6 +9,9 @@ Miles' (ip, gpu) sort is emulated by sorting on the label). Cases:
   node_loss   worker node killed -> RECOVERY_REQUIRED; restart refuses recovery
               while the node is missing, recovers once it is back
   teardown    per-instance teardown confirmation against the live Ray nodes
+  gpu_pool    Q6: a fake nvidia-smi per node (Ray task pinned to the node) -> baseline
+              bound, same pool accepted, replaced worker refused, accepted with
+              --rl-elastic-accept-rebind (old->new mapping journaled)
 """
 
 from __future__ import annotations
@@ -249,8 +252,88 @@ def case_teardown():
     log("PASS teardown")
 
 
+# ------------------------------------------------------------------ Q6 gpu_pool
+FAKE_SMI = """#!/usr/bin/env bash
+# fake nvidia-smi --query-gpu=index,uuid --format=csv,noheader: G rows, uuids from $YETO_SIM_GPU_TAG
+for i in $(seq 0 $((${YETO_SIM_G:-4} - 1))); do echo "$i, GPU-${YETO_SIM_GPU_TAG}-$i"; done
+"""
+
+
+def gpu_probe_with(tags: dict[str, str]):
+    """entry.reconcile_gpu_pool_preflight ``gpu_probe``: one Ray task per labelled node
+    (hard node affinity, like entry._ray_gpu_uuids), each running the fake nvidia-smi with
+    the node's tag (``{label: tag}``), rows in logical order (yeto_node:0 first)."""
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    smi = Path(tempfile.mkdtemp(prefix="yeto-s1-smi-")) / "nvidia-smi"
+    smi.write_text(FAKE_SMI)
+    smi.chmod(0o755)
+
+    @ray.remote(num_cpus=0)
+    def _smi(tag: str) -> list[tuple[int, str]]:
+        env = dict(os.environ, YETO_SIM_GPU_TAG=tag, YETO_SIM_G=str(G))
+        out = subprocess.run([str(smi), "--query-gpu=index,uuid", "--format=csv,noheader"],
+                             check=True, capture_output=True, text=True, timeout=60, env=env).stdout
+        return [(int(a.strip()), b.strip()) for a, b in
+                (line.split(",", 1) for line in out.splitlines() if line.strip())]
+
+    def probe(topology):
+        nodes = sorted(labelled_nodes().items(), key=lambda kv: kv[1]["label"])
+        assert len(nodes) == topology.nodes, nodes
+        refs = [_smi.options(scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=nid, soft=False))
+                .remote(tags[info["label"]]) for nid, info in nodes]
+        return [list(r) for r in ray.get(refs, timeout=120)]
+
+    return probe
+
+
+def case_gpu_pool():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from test_rl_reconfig_recovery import _ctl
+
+    from yeto.rl.engine.journal import read_journal
+    from yeto.rl.engine.miles_adapter import entry
+
+    tmp = Path(tempfile.mkdtemp(prefix="yeto-s1-sim-gpu-"))
+    topology = SimpleNamespace(nodes=2, gpus_per_node=G)
+    miles_args = SimpleNamespace(yeto_rl_event_tape=str(tmp / "events.jsonl"), yeto_rl_learner_id=0,
+                                 yeto_rl_elastic={"resources": {"nodes": 2, "gpus_per_node": G}})
+    pools = lambda: [r for r in read_journal(tmp / "state/reconfig") if r["kind"] == "gpu_pool"]  # noqa: E731
+    probe = gpu_probe_with({"yeto_node:0": "h", "yeto_node:1": "w"})
+    ctl = _ctl(tmp / "state", {"t": 1000.0})
+    res = entry.reconcile_gpu_pool_preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=probe)
+    assert res.ok and not res.rebind and pools()[-1]["source"] == "none", res
+    log("incarnation 1 (cfg without uuids): baseline bound =", pools()[-1]["uuids"])
+    ctl.close()
+    ctl = _ctl(tmp / "state", {"t": 1001.0})
+    res = entry.reconcile_gpu_pool_preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=probe)
+    assert res.ok and not res.rebind and pools()[-1]["source"] == "journal", res
+    log("incarnation 2 (same GPUs): accepted against the journal baseline")
+    ctl.close()
+    replaced = gpu_probe_with({"yeto_node:0": "h", "yeto_node:1": "w2"})  # the worker machine changed
+    ctl = _ctl(tmp / "state", {"t": 1002.0})
+    try:
+        entry.reconcile_gpu_pool_preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=replaced)
+    except RuntimeError as exc:
+        assert "gpu_pool" in str(exc) and "--rl-elastic-accept-rebind" in str(exc), exc
+        log("incarnation 3 (worker replaced): refused ->", str(exc)[:120])
+    else:
+        raise AssertionError("replaced worker GPUs were accepted without --rl-elastic-accept-rebind")
+    assert not pools()[-1]["accepted"] and len(pools()[-1]["diffs"]) == G
+    ctl.close()
+    ctl = _ctl(tmp / "state", {"t": 1003.0})
+    assert ctl.recovery_required is None, ctl.recovery_required  # restartable: not a journal terminal
+    miles_args.yeto_rl_elastic["accept_rebind"] = True
+    res = entry.reconcile_gpu_pool_preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=replaced)
+    assert res.ok and res.rebind and len(res.mapping) == G, res
+    assert pools()[-1]["rebind"] and pools()[-1]["uuids"][1][0] == "GPU-w2-0", pools()[-1]
+    log("incarnation 4 (--rl-elastic-accept-rebind): rebind journaled, mapping =", res.mapping)
+    ctl.close()
+    log("PASS gpu_pool")
+
+
 CASES = {"pg_blocks": case_pg_blocks, "cells_bind": case_cells_bind, "node_loss": case_node_loss,
-         "teardown": case_teardown}
+         "teardown": case_teardown, "gpu_pool": case_gpu_pool}
 
 if __name__ == "__main__":
     case = sys.argv[1]
