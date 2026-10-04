@@ -948,6 +948,7 @@ def test_launch_verda_island_sends_ordered_any_of(monkeypatch):
     fake_sky = SimpleNamespace(
         launch=lambda t, cluster_name, retry_until_up: sent.append((cluster_name, [r.kw for r in t.resources])) or "rid",
         stream_and_get=lambda rid: (3, None),
+        CLOUD_REGISTRY=SimpleNamespace(from_str=lambda c: c.upper()),
     )
     monkeypatch.setattr(providers.VerdaSignals, "_fetch_types", lambda self: TYPES)
     monkeypatch.setattr(providers.VerdaSignals, "_fetch_availability",
@@ -957,8 +958,21 @@ def test_launch_verda_island_sends_ordered_any_of(monkeypatch):
     assert got == (3, None)
     (name, res), = sent
     assert name == "r-l0-verda"
-    assert [(r["infra"], r["instance_type"], r["disk_size"]) for r in res] == [
-        ("verda/FIN-01", "1L40S.20V", 200), ("verda/FIN-03", "1L40S.20V", 200)]
+    assert [(r["cloud"], r["region"], r["instance_type"], r["disk_size"]) for r in res] == [
+        ("VERDA", "FIN-01", "1L40S.20V", 200), ("VERDA", "FIN-03", "1L40S.20V", 200)]
+    assert all("infra" not in r for r in res)
+
+
+def test_verda_copy_override_works_on_real_sky_resources():
+    # Regression: base.copy(infra=...) on a Resources that already has
+    # cloud/region raised "Cannot specify both infra and cloud, region, or zone".
+    sky = pytest.importorskip("sky")
+    import yeto.launcher as launcher
+
+    base = sky.Resources(infra="verda/FIN-01", accelerators="RTX6000Ada:1", disk_size=200)
+    r = base.copy(**launcher._verda_copy_override(
+        sky, {"infra": "verda/FIN-02", "instance_type": "1RTX6000ADA.10V", "accelerators": "RTX6000Ada:1"}))
+    assert (str(r.cloud), r.region, r.instance_type) == ("Verda", "FIN-02", "1RTX6000ADA.10V")
 
 
 # --- 5.1 Verda head / syncer: no ports, in-VM firewall, external probe ------------------

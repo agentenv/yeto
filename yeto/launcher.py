@@ -5322,6 +5322,21 @@ def verda_launch_candidates(spec, args, availability, demoted) -> list[dict]:
     return verda_any_of(cands, spec.gpu, per_node)
 
 
+def _verda_copy_override(sky, cand: dict) -> dict:
+    """Resources.copy() keeps the base's cloud/region; an `infra=` override
+    on top of those raises "Cannot specify both infra and cloud, region, or
+    zone". Translate the candidate's infra into explicit cloud/region/zone."""
+    out = dict(cand)
+    infra = out.pop("infra", None)
+    if infra:
+        cloud, _, rest = infra.partition("/")
+        region, _, zone = rest.partition("/")
+        out["cloud"] = sky.CLOUD_REGISTRY.from_str(cloud)
+        out["region"] = region or None
+        out["zone"] = zone or None
+    return out
+
+
 def launch_verda_island(sky, task, name: str, spec, args, *, sleep=None):
     """Launch one Verda island over live-stock candidates (D5)."""
     from .shape.providers import VerdaSignals, launch_with_verda_candidates
@@ -5330,7 +5345,7 @@ def launch_verda_island(sky, task, name: str, spec, args, *, sleep=None):
     base = next(iter(task.resources))
 
     def launch(cands):
-        task.set_resources([base.copy(**c) for c in cands])
+        task.set_resources([base.copy(**_verda_copy_override(sky, c)) for c in cands])
         print(f"[launcher] {name}: Verda candidates {[c['instance_type'] + '@' + c['infra'] for c in cands]}")
         return sky.stream_and_get(sky.launch(task, cluster_name=name, retry_until_up=False))
 
