@@ -11,7 +11,7 @@ import pytest
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
 from yeto.rl.engine.miles_adapter.publish import MilesPublisher, PublicationError
 from yeto.rl.engine.miles_adapter.rollout import PolicyTokenMismatch, policy_token
-from yeto.rl.engine.miles_adapter.state_plugin import APPLIED_LRS, GRAD_NORM
+from yeto.rl.engine.miles_adapter.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
 from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup, TrainStepError, batch_hash
 from yeto.rl.engine.ports import GroupMetadata, Publisher, RolloutBatchHandle, TrainerGroup
 
@@ -45,6 +45,8 @@ class FakeActorGroup:
         self.calls.append(("plugin", fn_path))
         if fn_path == APPLIED_LRS:
             return [list(v) for v in self.lrs]
+        if fn_path == STEP_LOSSES:
+            return [[], []]
         return [self.norm, self.norm]
 
     async def onload(self):
@@ -363,3 +365,74 @@ def test_one_output_per_worker_of_the_single_cell_at_dp2():
     )
     with pytest.raises(TrainStepError, match="expected 2 train outputs"):
         t3.train_step(handle())
+
+
+def _rank_actor_draining_state_plugin():
+    from yeto.rl.engine.miles_adapter import state_plugin
+
+    class RankActor(FakeActorGroup):
+        async def run_plugin(self, fn_path, kwargs=None):
+            if fn_path == STEP_LOSSES:
+                self.calls.append(("plugin", fn_path))
+                return [state_plugin.step_losses(None), []]
+            return await super().run_plugin(fn_path, kwargs)
+
+    return RankActor(lrs=((1e-5,), (1e-5,)))
+
+
+def test_default_grpo_drains_step_losses_every_round_so_save_cut_is_not_refused(tmp_path):
+    """Integ-s2 finding 1: default GRPO never consumed _STEP_LOSSES, so the list
+    grew per round and save_cut refused with "per-step records not drained"."""
+    from yeto.rl.engine.miles_adapter import cut_plugin, state_plugin
+
+    state_plugin._STEP_LOSSES.clear()
+    actor = _rank_actor_draining_state_plugin()
+    t = trainer(actor, [])
+    for _ in range(3):
+        state_plugin._record_step_losses(({"loss": 0.1, "pg_clipfrac": 0.2}, 0.9, "NORMAL"))
+        t.train_step(handle())
+        assert state_plugin._STEP_LOSSES == []
+    # GRPO metrics unchanged: nothing is reported from the drained records
+    assert t.last_step_losses is None and t.step_metrics().clip_fraction is None
+    assert t.algorithm_metrics() == {}
+    # the drain check of save_cut passes (it fails later, past the drain check,
+    # on the missing cut backend of this fake actor -- not on undrained records)
+    state_plugin._STEP_GRAD_NORMS.clear()
+    state_plugin._STEP_APPLIED_LRS.clear()
+    with pytest.raises(Exception) as err:
+        cut_plugin._save(SimpleNamespace(), directory=str(tmp_path), cut_id="c")
+    assert "not drained" not in str(err.value)
+
+
+@pytest.mark.parametrize("variant", ["gspo", "gmpo"])
+def test_gspo_and_gmpo_clip_fraction_unchanged_by_unconditional_drain(variant, monkeypatch):
+    import sys
+    import types
+
+    from yeto.rl.engine.algorithm import AdvantageSpec, AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import state_plugin
+    from yeto.rl.engine.miles_adapter.trainer import CLIPFRAC_LOSS_VARIANTS
+
+    fake = types.ModuleType("yeto.rl.algos.seq_adv")
+    fake.clipfrac_from_losses = lambda steps, tokens=None: steps[0]["pg_clipfrac"]
+    monkeypatch.setitem(sys.modules, "yeto.rl.algos.seq_adv", fake)
+    if variant == "gspo":
+        spec = AlgorithmSpec(advantage=AdvantageSpec(estimator="gspo"))
+    else:
+        spec = SimpleNamespace(
+            advantage_estimator="grpo", loss=SimpleNamespace(
+                policy_loss_variant=next(iter(CLIPFRAC_LOSS_VARIANTS))),
+        )
+    state_plugin._STEP_LOSSES.clear()
+    # GMPO reads the fork's global counts (1/4), GSPO pg_clipfrac (0.25): both 0.25
+    state_plugin._record_step_losses(({"loss": 0.1, "pg_clipfrac": 0.25, "gmpo_clip_num": 1.0,
+                                       "gmpo_clip_den": 4.0}, 0.9, "NORMAL"))
+    t = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
+        actor_model=_rank_actor_draining_state_plugin(), learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L, release_refs=lambda args, pack: None,
+        algorithm="grpo", spec=spec,
+    )
+    t.train_step(handle())
+    assert t.step_metrics().clip_fraction == 0.25
+    assert state_plugin._STEP_LOSSES == []

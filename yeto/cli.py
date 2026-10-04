@@ -228,6 +228,53 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="ports fixed partition: reserved standby GPUs never started by any role",
     )
     rl.add_argument(
+        "--rl-overlap-eval",
+        action="store_true",
+        help="ports fixed partition: run eval overlapped with train/outer sync "
+        "(rl-infra-spec 2.3; needs --rl-eval-interval); off by default",
+    )
+    rl.add_argument(
+        "--rl-elastic",
+        action="store_true",
+        help="ports: enable the E1 elastic rollout controller (rl-infra-spec 3.x); "
+        "needs --rl-elastic-resources/-initial-config/-cells; off by default",
+    )
+    rl.add_argument("--rl-elastic-resources", default=None, metavar="PATH",
+                    help="--rl-elastic: resources manifest JSON (configs/edges)")
+    rl.add_argument("--rl-elastic-attestation", default=None, metavar="PATH",
+                    help="--rl-elastic: capability attestation JSON")
+    rl.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME",
+                    help="--rl-elastic: initial config id in the manifest")
+    rl.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
+                    help="--rl-elastic: rollout cell ids the fork declares at startup")
+    rl.add_argument("--rl-elastic-quorum-timeout-s", type=int, default=None, metavar="S",
+                    help="--rl-elastic: syncer --quorum-timeout-s, also the island's strict "
+                    "pause budget input (default: syncer default 900)")
+    rl.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic: measured network idle-flow timeout capping the pause")
+    rl.add_argument("--rl-test-inject-start-delay-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic, TEST ONLY (GPU acceptance fault injection): sleep S "
+                    "seconds before the island's first fork start_cells; off by default")
+    rl.add_argument("--rl-test-inject-update-weights-block-s", type=float, default=None,
+                    metavar="S",
+                    help="--rl-elastic, TEST ONLY (watchdog fault injection): block up to S "
+                    "seconds before the island's first member update_weights, failing as soon "
+                    "as a target engine dies; off by default")
+    rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
+                    help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
+                    "X6 cross-quorum runs only)")
+    # Ports LoRA training-time heldout eval (forwarded to the learner's
+    # --eval-*; the file is shipped inline and checked by SHA256 there).
+    rl.add_argument("--rl-eval-interval", type=int, default=None, metavar="N",
+                    help="ports: heldout eval every N rollouts (learner --eval-interval); "
+                    "needs --rl-eval-data/-dataset-name/-samples-per-prompt; off by default")
+    rl.add_argument("--rl-eval-data", default=None, metavar="PATH",
+                    help="--rl-eval-interval: local heldout prompt JSONL (distinct from --data)")
+    rl.add_argument("--rl-eval-dataset-name", default=None, metavar="NAME",
+                    help="--rl-eval-interval: eval dataset name")
+    rl.add_argument("--rl-eval-samples-per-prompt", type=int, default=None, metavar="N",
+                    help="--rl-eval-interval: samples per eval prompt")
+    rl.add_argument(
         "--dry-run",
         action="store_true",
         help=(

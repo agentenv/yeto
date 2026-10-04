@@ -454,3 +454,145 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         "rng_digest": state_digest(rng_now),
     }
     return summary
+
+
+# --------------------------------------------------------------------------
+# DP resharding restore (rl-infra-spec 4.6 spike; E3)
+# --------------------------------------------------------------------------
+
+RESTORE_RESHARDED_SHARD = f"{_MODULE}.restore_resharded_shard"
+
+
+def _same_tp_pp(files: list[Mapping[str, Any]], coord: Mapping[str, int]) -> list[Mapping[str, Any]]:
+    return [f for f in files if (f.get("coord") or {}).get("tp") == coord["tp"]
+            and (f.get("coord") or {}).get("pp") == coord["pp"]]
+
+
+def _slice_check(export: Mapping[str, Any], merged: Mapping[str, Any]) -> list[str]:
+    """After a load, this rank's re-exported ranges must equal the merged (gathered) state."""
+    import torch
+
+    out = []
+    for name, entry in (export or {}).get("entries", {}).items():
+        full = merged.get(name)
+        if full is None:
+            out.append(f"{name}: not in the cut")
+            continue
+        start, end = int(entry["start"]), int(entry["end"])
+        for key, piece in entry["tensors"].items():
+            want = full["tensors"][key][start:end]
+            if not torch.equal(piece.reshape(-1).to(want.dtype), want):
+                out.append(f"{name}.{key}[{start}:{end}] differs from the cut")
+        for key, value in entry["scalars"].items():
+            if not torch.equal(torch.as_tensor(value), torch.as_tensor(full["scalars"][key])):
+                out.append(f"{name}.{key} (scalar) differs from the cut")
+    return out
+
+
+def restore_resharded_shard(
+    actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str,
+    source_dp: int, rng_policy: str = "keep_on_dp_change",
+) -> dict[str, Any]:
+    """Load a cut written at another DP size into this freshly built rank.
+
+    Every DP shard of this rank's (tp, pp) is read and verified; the adapter
+    model copy, the LR scheduler and the Megatron counters are DP-replicated
+    and must be identical in all of them. The named optimizer state (FP32
+    main, moments, step, hyper-parameters) is merged over the source DP ranks
+    (fork-M5 ``merge_named_optimizer_states``) and sliced to the range this
+    rank owns now. RNG: 'keep_on_dp_change' keeps the fresh RNG of this
+    process when DP changed (the caller records the seed mapping); with an
+    unchanged DP the saved RNG of the same coordinate is restored exactly.
+    Everything is validated before the first write.
+    """
+    install_grad_norm_recorder()
+    with trainer_resident(actor):
+        return _restore_resharded(actor, directory=directory, files=files, cut_id=cut_id,
+                                  source_dp=int(source_dp), rng_policy=rng_policy)
+
+
+def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy):
+    import torch
+
+    backend = _backend(actor)
+    coord = _require(actor, backend)
+    group = _same_tp_pp(files, coord)
+    if len(group) != source_dp:
+        raise CutPluginError(f"cut has {len(group)} DP shards for tp{coord['tp']}/pp{coord['pp']}, expected {source_dp}")
+    shards = [_load_verified(directory, entry, cut_id) for entry in group]
+    for shard in shards:
+        saved = shard["coord"]
+        for key in ("tp", "pp", "tp_size", "pp_size", "cp_size", "ep_size"):
+            if int(saved.get(key, 1)) != int(coord.get(key, 1)):
+                raise CutPluginError(f"shard {key}={saved.get(key)} != this rank {coord.get(key)} (only DP may change)")
+        if int(saved["dp_size"]) != source_dp:
+            raise CutPluginError(f"shard dp_size {saved['dp_size']} != source DP {source_dp}")
+        if shard["optimizer_named"] is None or shard["rng"] is None:
+            raise CutPluginError("cut shard lacks optimizer state or RNG")
+    first = shards[0]
+    for shard in shards[1:]:
+        for key in ("adapter", "scheduler", "megatron_counters"):
+            if state_digest(shard[key]) != state_digest(first[key]):
+                raise CutPluginError(f"DP shards disagree on the replicated {key}")
+    dp_changes = int(coord["dp_size"]) != source_dp
+    if dp_changes and rng_policy != "keep_on_dp_change":
+        raise CutPluginError(f"RNG policy {rng_policy!r} cannot change DP {source_dp} -> {coord['dp_size']}")
+    own_rng = None
+    if not dp_changes:
+        own = next((s for s in shards if int(s["coord"]["dp"]) == int(coord["dp"])), None)
+        if own is None:
+            raise CutPluginError("no shard for this DP rank although DP is unchanged")
+        own_rng = own["rng"]
+    named = _adapters(actor, backend)
+    adapter = first["adapter"]
+    names = {n for n, _ in named}
+    if set(adapter) != names:
+        raise CutPluginError(f"adapter names differ from the cut: {sorted(names ^ set(adapter))[:4]}")
+    for n, p in named:
+        if tuple(adapter[n].shape) != tuple(p.shape) or adapter[n].dtype != p.dtype:
+            raise CutPluginError(f"adapter {n!r} shape/dtype differs from the rebuilt trainer")
+    merged = backend.check_optimizer(actor.optimizer, named, [s["optimizer_named"] for s in shards])
+    check_scheduler(actor.opt_param_scheduler, first["scheduler"])
+    # ---- writes ----
+    with torch.no_grad():
+        for n, p in named:
+            p.data.copy_(adapter[n].to(device=p.device))
+        backend.load_optimizer(actor.optimizer, named, merged)
+    actor.opt_param_scheduler.load_state_dict(first["scheduler"])
+    if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(first["scheduler"]):
+        raise CutPluginError("LR scheduler progress after restore differs from the cut")
+    backend.set_megatron_counters(first.get("megatron_counters") or {})
+    backuper = getattr(actor, "weights_backuper", None)
+    if backuper is not None:
+        backuper.backup("actor")
+    if own_rng is not None:
+        backend.restore_rng(own_rng)
+    with torch.no_grad():
+        export = backend.export_optimizer(actor.optimizer, named)
+        adapters_now = {n: p.detach().to("cpu").clone() for n, p in named}
+    problems = _slice_check(export, merged)
+    if state_digest(adapters_now) != state_digest(adapter):
+        problems.append("adapter after restore differs from the cut")
+    if problems:
+        raise CutPluginError("resharded restore mismatch: " + "; ".join(problems[:4]))
+    return {
+        "coord": dict(coord),
+        "source_dp": source_dp,
+        "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
+        # identical on every rank of a (tp, pp): the gathered full state
+        "full_state_digest": state_digest({"adapter": adapter, "optimizer": merged,
+                                           "scheduler": first["scheduler"]}),
+        "rng": "restored" if own_rng is not None else "fresh",
+        "rng_digest": state_digest(backend.capture_rng()),
+        "optimizer_names": sorted(export.get("entries", {})),
+        "adapter_names": sorted(names),
+    }
+
+
+
+TRAIN_PARALLEL_CONFIG = f"{_MODULE}.train_parallel_config"
+
+
+def train_parallel_config(actor: Any) -> dict[str, Any]:
+    """The config the rank advertised to the rollout side (Megatron actor ``train_parallel_config``)."""
+    return dict(getattr(actor, "train_parallel_config", None) or {})

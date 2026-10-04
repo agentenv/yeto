@@ -118,14 +118,14 @@ def _parse_lines(data: bytes) -> tuple[list[dict[str, Any]], int]:
 
 
 def read_journal(state_dir: str | Path) -> list[dict[str, Any]]:
-    path = Path(state_dir) / JOURNAL_FILE
+    path = Path(state_dir).expanduser() / JOURNAL_FILE
     if not path.exists():
         return []
     return _parse_lines(path.read_bytes())[0]
 
 
 def read_epochs(state_dir: str | Path) -> EpochState:
-    path = Path(state_dir) / EPOCHS_FILE
+    path = Path(state_dir).expanduser() / EPOCHS_FILE
     if not path.exists():
         return EpochState()
     try:
@@ -139,7 +139,7 @@ class Journal:
     """Single-writer durable journal. Use as a context manager or call close()."""
 
     def __init__(self, state_dir: str | Path, *, wall_clock=time.time, clock=time.monotonic) -> None:
-        self.dir = Path(state_dir)
+        self.dir = Path(state_dir).expanduser()
         self.dir.mkdir(parents=True, exist_ok=True)
         self._wall = wall_clock
         self._clock = clock
