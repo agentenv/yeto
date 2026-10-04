@@ -1,0 +1,19 @@
+{
+  "step": "g1",
+  "reused_volume": "m4-q38n-vol",
+  "revision_pinned": {
+    "pass": true
+  },
+  "num_hidden_layers_4": {
+    "pass": true
+  },
+  "safetensors_11": {
+    "pass": true,
+    "seen": "11"
+  },
+  "aime_2024_jsonl": {
+    "pass": true
+  },
+  "elapsed_s": 8,
+  "verdict": "PASS"
+}
