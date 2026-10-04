@@ -301,7 +301,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-print-attestation-fingerprint", action="store_true",
                     help="ports: each island learner builds its Miles argv exactly as a real run, "
                     "prints the attestation runtime_fingerprint as one JSON line and exits "
-                    "before Ray/GPU work (run it on CPU with the same flags as the real run)")
+                    "before Ray/GPU work. NOTE: the launcher still provisions the island as declared, "
+                    "so pass CPU-only resources to avoid paying for GPUs")
     rl.add_argument("--rl-lora-dropout", type=float, default=None, metavar="P",
                     help="ports LoRA: training-time LoRA dropout (default 0). Trainer DP-change "
                     "edges refuse dropout > 0; same-shape rebuild restores its RNG")
