@@ -22,6 +22,7 @@ PEAK_TFLOPS_BF16: dict[str, float] = {
     "A10G": 125.0,
     "L40S": 362.0,
     "RTX-PRO-6000": 504.0,
+    "RTX-6000-Ada": 362.0,  # AD102, same dense bf16 class as L40S
     "A100": 312.0,
     "A100-80GB": 312.0,
     "H100": 989.0,

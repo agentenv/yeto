@@ -445,7 +445,7 @@ def test_launcher_run_skips_syncer_in_no_sync_mode():
     from yeto import launcher
 
     source = inspect.getsource(launcher.run)
-    assert 'syncer_cluster = None if head_mode or no_sync else f"{prefix}-syncer"' in source
+    assert 'syncer_cluster = None if head_mode or no_sync else sky_cluster_name(f"{prefix}-syncer")' in source
     assert "if no_sync:\n            syncer_task = syncer_job = None" in source
 
 

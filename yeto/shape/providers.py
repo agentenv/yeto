@@ -874,6 +874,7 @@ _VERDA_MODELS: dict[str, str] = {
     "A100 40GB": "A100",
     "L40S": "L40S",
     "RTX PRO 6000": "RTX-PRO-6000",
+    "RTX 6000 Ada": "RTX-6000-Ada",
 }
 
 
