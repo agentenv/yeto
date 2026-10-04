@@ -116,13 +116,19 @@
 ## 3. 待用户决策（主 agent 已取默认，待用户明早复核）
 - **Q1 EP 跨节点**：Flash-Next 512 专家，EP 组是否允许跨节点（D4 规则 3）？允许则需确认 Miles recipe 的 EP 值与节点对齐；不允许则 trainer 最少卡数上升。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：EP 不跨节点。
+  - **用户裁定 2026-10-04**：「一个 learner 包含多台节点，每节点多卡，允许 trainer 的 EP/PP 跨节点，默认 TP 留在节点内」→ EP 允许跨节点（推翻上行默认）；差距与改法见 infra-drafts/MULTINODE-GAP-S8.md §1.1。
 - **Q2 rollout 与 trainer 是否同节点混布**：16 卡 LoRA 最小配置建议 node0=trainer 8、node1=rollout 8（引擎 TP8 整节点）；若用户要 colocated（同卡训推），则多节点 colocated 另行设计（本 change 只做 fixed-partition 多节点，colocated 多节点仅保留参数校验）。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：多节点只做 fixed-partition（node0=trainer、node1=rollout TP8）。
+  - **用户裁定 2026-10-04**：「允许 rollout/trainer 同节点不同卡混布」→ 不再限定 node0=trainer/node1=rollout；bundle 粒度混布（非同卡 colocated）；见 MULTINODE-GAP-S8.md §1.2。
 - **Q3 PP 跨节点**：本 change 禁止（TP×PP 组同节点）。全参 32 卡若 recipe 用 PP>1 跨节点，需放开并补 NCCL 验证。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：PP 禁止跨节点。
+  - **用户裁定 2026-10-04**：「允许 trainer 的 EP/PP 跨节点，默认 TP 留在节点内」→ PP 允许跨节点（推翻上行默认）；节点内约束改为 TP(×CP) 组；见 MULTINODE-GAP-S8.md §1.1。
 - **Q4 节点失联后的自动重建**：方案 a）整岛 `RECOVERY_REQUIRED` 退出，由人工/外层 `yeto up` 重建（本 change 基线）；b）restart loop 等待 sky 自动恢复节点后重入恢复（需节点自愈检测，+1 天）。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：a) 整岛退出、人工重建。
+  - **用户裁定 2026-10-04**：「节点失联时停止受影响的训练通信组，从一致 checkpoint 重建，暂不支持原 rank 自动重入」→ 保留整岛退出 + 预检拒绝；补『从一致 checkpoint 重建』路径（换机 = 新 incarnation + --load）；见 MULTINODE-GAP-S8.md §1.3。
 - **Q5 GPU 验证规格**：2×1×H100（≈$5/h，验证 Ray/PG/cell/故障域）还是 2×8×H100（≈$62/h，顺带验 Flash-Next 4 层变体跨节点）？建议前者，后者并入 S2。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：2×1×H100。
+  - **用户裁定 2026-10-04**：「保留 2×1 基础验证，补充 trainer 自身跨节点的 EP、PP 测试；用明确预留 GPU 的 2×2 配置验证 rollout 弹性。G2 弹性边未测可标记为资源受限、继续保留 PARTIAL，不算功能失败，也不能算通过。真实多卡规格另验容量与性能。AWS 配额按实际实例 vCPU 总量及扩容余量计算，不固定为 48。」→ 测试矩阵与配额表见 MULTINODE-GAP-S8.md §3–§4。
 - **Q6 pool 解析**：岛内是否要求运行时解析 `resources.gpus`（nvidia-smi uuid）并与 cfg 对账？建议：多节点时必解析（fail closed），单节点保持可选。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：强制运行时解析 GPU 池并对账。
+  - **用户裁定 2026-10-04**：「强制运行时 GPU UUID 对账，允许换机后重新绑定」→ 现实现为 Ray node id 对账，无 UUID 对账（差距）；需运行时 nvidia-smi 采集 + journal `gpu_pool` + 形状一致时重绑定；见 MULTINODE-GAP-S8.md §1.4。
