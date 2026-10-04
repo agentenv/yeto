@@ -1142,6 +1142,9 @@ class IslandDriver:
     def safe_point(self, rollout_id: int) -> str | None:
         """Offer the controller the round-boundary safe point; returns its result phase."""
         self.at_safe_point = True
+        cut = getattr(self.sync, "at_safe_point", None)
+        if callable(cut):  # rl-multinode-island M4: round cut (LocalOnlySync + store)
+            cut(self, rollout_id=rollout_id)
         if self.controller is None:
             return None
         poll = getattr(self.controller, "poll_commands", None)

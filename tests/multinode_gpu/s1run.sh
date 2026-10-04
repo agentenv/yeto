@@ -10,6 +10,11 @@
 #   m3  : same cluster (CLUSTER_PREFIX=<m1 prefix>), --rl-elastic-declare-cells c0,c1, --total-steps 6, E1 rollout-only edges driven in-container by
 #         s1inwatch.py (chain 8 inbox mechanism): up1 at train rid 1 (T2R1S1 -> T2R2S0: standby n1:1 starts as cell c1), dn1 at train rid 3
 #         (back to T2R1S1); no --keep (KEEP_M3=1 keeps the cluster for m2).
+#   m4a : M4 island A: m1's 2x2 cfg + --rl-checkpoint-store "$STORE" (env, required) --total-steps 8 --rl-elastic-restart-attempts 0, no --keep;
+#         s1kill.sh (KILL_RID=2) kills the worker's island raylet once train of rollout 2 starts (rounds 0,1 trained, round cut r000002 in the store)
+#         -> node_lost/RECOVERY_REQUIRED, launcher teardown. The chain then confirms A's instances are gone (cleanup_run.sh).
+#   m4b : M4 island B: NEW prefix/cluster, same cfg + same STORE + --rl-elastic-accept-rebind, --total-steps M4B_STEPS (default 8 => >= 1 round after
+#         the resume at rollout 2): store restore, gpu_pool rebind, round-cut weight restore, rollout ids continue. Judge: s1judge.py m4 <A run> <B run>.
 #   m2  : 2 nodes x 2 L40S, MoE fzyzcjy/Qwen3-30B-A3B-5layer, --tuning lora --lora-targets attention (all-linear is refused with EP>1),
 #         --tensor-parallel 1 --pipeline-parallel 1 --expert-parallel 2 (EP2 across nodes: the 2 trainer ranks are n0:0 and n1:0), T2R1S1, --total-steps 2.
 # env: CLUSTER_PREFIX (cluster name prefix when several runs share one cluster; default = prefix), SHA (git rev of infra-multinode to archive, default HEAD), RUN_ROOT (/home/michael/work/s1-runs), IMAGE (digest-pinned --rl-image), DRY=1 prints args only.
@@ -36,6 +41,10 @@ case $C in
        TRIG="[$(req train 1 up1 T2R2S0 0 ${UP_DEADLINE_S:-600}),$(req train 3 dn1 T2R1S1 1 ${DN_DEADLINE_S:-600})]";;
   m2)  GPU=nebius:2x2xl40s@eu-north1; STEPS=2; MODEL="--model fzyzcjy/Qwen3-30B-A3B-5layer --model-revision 9c2ee37f22b7ef150675311b3d5e1c671838ffe1"; LORA="--tuning lora --lora-r 16 --lora-targets attention"
        PAR="--tensor-parallel 1 --pipeline-parallel 1 --expert-parallel 2"; EX="$ELASTIC22"; KEEP="${KEEP_M2:+--keep}"; NODES=2;;
+  m4a|m4b) [ -n "${STORE:-}" ] || { echo "abort: $C needs STORE=s3://<bucket>/<prefix> (the --rl-checkpoint-store bucket; same value for m4a and m4b)"; exit 66; }
+       GPU=nebius:2x2xl40s@eu-north1; PAR="--tensor-parallel 1 --pipeline-parallel 2"; KEEP=""; NODES=2
+       if [ $C = m4a ]; then STEPS=8; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-restart-attempts 0"
+       else STEPS=${M4B_STEPS:-8}; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-accept-rebind"; fi;;
   *) echo "unknown case $C"; exit 64;;
 esac
 ARGS="launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu $GPU --cluster-prefix $CP $KEEP --no-island-relaunch --modal-retries 0 --rl-image $IMAGE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function gsm8k_reward:score $LORA $PAR --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --total-steps $STEPS $EX"
@@ -43,6 +52,8 @@ CL=$CP-l0-eu-north1
 if [ "${DRY:-0}" = 1 ]; then echo "cluster=$CL nodes=$NODES case=$C"; echo "$ARGS"; [ -n "$TRIG" ] && { echo "triggers=$TRIG"; /usr/bin/python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; }; exit 0; fi
 mkdir -p $R/home $R/runs $R/pulled $R/yeto
 for d in .sky .nebius .ssh; do ln -sfn /home/michael/$d $R/home/$d; done
+# m4: the S3 checkpoint store is mounted on Nebius nodes with the static AWS keys sky uploads (~/.aws/credentials, SHARED_CREDENTIALS_FILE identity)
+case $C in m4*) ln -sfn /home/michael/.aws $R/home/.aws;; esac
 git -C $REPO archive ${SHA:-HEAD} | tar x -C $R/yeto
 cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/; touch $R/yeto/yeto-rl-echo-events
 # m3: the controller refuses every E1 request without a capability attestation ("no capability attestation: no transition is certified",
@@ -71,6 +82,7 @@ while [ ! -f $R/rc.txt ]; do
     timeout 60 \$S $CL 'cat ~/yeto-rl/elastic-state/reconfig/journal.jsonl 2>/dev/null' > $R/pulled/.j 2>/dev/null && [ -s $R/pulled/.j ] && mv $R/pulled/.j $R/pulled/journal.jsonl
     [ -s $R/triggers.json ] && timeout 60 \$S $CL 'tail -n +1 ~/yeto-rl/elastic-state/inbox/*.status.json 2>/dev/null' > $R/pulled/.st 2>/dev/null && [ -s $R/pulled/.st ] && mv $R/pulled/.st $R/pulled/inbox-status.txt
     timeout 60 \$S $CL 'cat ~/yeto-rl/s1probe.log 2>/dev/null' > $R/pulled/.p 2>/dev/null && [ -s $R/pulled/.p ] && mv $R/pulled/.p $R/pulled/s1probe.log
+    case $C in m4*) timeout 60 \$S $CL 'for f in STORE-MANIFEST.json round-cut.json; do echo \"== \$f\"; cat ~/yeto-checkpoint-store/\$f 2>/dev/null; echo; done; echo \"== round-cuts\"; ls ~/yeto-checkpoint-store/round-cuts 2>/dev/null' > $R/pulled/.s 2>/dev/null && [ -s $R/pulled/.s ] && mv $R/pulled/.s $R/pulled/store.txt;; esac
     timeout 90 \$S $CL 'tail -c 4000000 ~/sky_logs/*/run.log 2>/dev/null' > $R/pulled/.r 2>/dev/null && [ -s $R/pulled/.r ] && mv $R/pulled/.r $R/pulled/run.log   # the launcher streams only the setup; the job log stays on the head
     for n in $CL \$( [ $NODES = 2 ] && echo $CL-worker1 ); do
       [ -s $R/pulled/gpu-\$n.txt ] || timeout 60 \$S \$n 'hostname; nvidia-smi --query-gpu=index,uuid,name,driver_version --format=csv,noheader' > $R/pulled/gpu-\$n.txt 2>/dev/null
@@ -80,6 +92,7 @@ while [ ! -f $R/rc.txt ]; do
   sleep 10
 done" > $R/puller.log 2>&1 &
 echo $! > $R/puller.pid
+[ $C = m4a ] && { KILL_RID=2 setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }   # after rounds 0,1 (round cut at rid 2 exists)
 [ $C = g3 ] && { setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }
 (
 export HOME=$R/home YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto

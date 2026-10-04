@@ -137,6 +137,7 @@
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：a) 整岛退出、人工重建。
   - **用户裁定 2026-10-04**：「节点失联时停止受影响的训练通信组，从一致 checkpoint 重建，暂不支持原 rank 自动重入」→ 保留整岛退出 + 预检拒绝；补『从一致 checkpoint 重建』路径（换机 = 新 incarnation + --load）；见 MULTINODE-GAP-S8.md §1.3。
   - 实现（C5，2026-10-04，CPU 通过）：D9 新增三条（checkpoint store、layout 核对、换机流程）；`--rl-checkpoint-store`（cli→launcher `rl_checkpoint_store_plan`→learner `--rl-elastic-checkpoint-store`→`IslandController(checkpoint_store)`）；`controller.island_layout/layout_diff/layout_baseline/layout_rejection/sync_checkpoint_store/_restore_from_checkpoint_store`；`entry.island_layout_of`。换机不走 Megatron `--load`：恢复的是 journal + cuts（3.7 重启恢复路径），`--load` 仍未被 cut plugin 使用。GPU M4 未验。
+  - **M4 权重续接（2026-10-04）**：此前换机/原地重启在 `--rl-single-island-no-sync` 下都从 rollout 0、启动权重开始（`LocalOnlySync.start` 恒返回 0；cut 只在 4.4/E3 迁移时写，平时 `cuts/` 为空）——store 只续 journal。现：设 store 时每个轮界安全点写 round cut 到 `<store>/round-cuts`（所有节点可见，跨节点 rank 分片可被 driver 校验），state dir 指针 `round-cut.json` 随 ledger/journal 同步；启动时 `RoundCutCheckpoint.resume` 校验并加载 cut、恢复 local_step，从 `next_rollout_id` 续训，driver 再 `ledger.rebase` + `_restore_data_cursor`。有外层 syncer 的模式（strict/decoupled）权重以 syncer 为准，不接 round cut。
 - **Q5 GPU 验证规格**：2×1×H100（≈$5/h，验证 Ray/PG/cell/故障域）还是 2×8×H100（≈$62/h，顺带验 Flash-Next 4 层变体跨节点）？建议前者，后者并入 S2。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：2×1×H100。
   - **用户裁定 2026-10-04**：「保留 2×1 基础验证，补充 trainer 自身跨节点的 EP、PP 测试；用明确预留 GPU 的 2×2 配置验证 rollout 弹性。G2 弹性边未测可标记为资源受限、继续保留 PARTIAL，不算功能失败，也不能算通过。真实多卡规格另验容量与性能。AWS 配额按实际实例 vCPU 总量及扩容余量计算，不固定为 48。」→ 测试矩阵与配额表见 MULTINODE-GAP-S8.md §3–§4。
