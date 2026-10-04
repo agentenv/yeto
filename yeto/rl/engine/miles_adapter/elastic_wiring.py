@@ -45,6 +45,7 @@ def build_elastic(
     pause_margin: float | None = None,
     trainer_edges: Any = None,
     max_recovery_attempts: int | None = None,
+    checkpoint_store: str | Path | None = None,
 ) -> ElasticWiring:
     """``on_watchdog(tx_id, phase)`` runs on the watchdog thread when the absolute
     transaction deadline passes while a step is still blocked. Default
@@ -84,6 +85,8 @@ def build_elastic(
         trainer_edges=trainer_edges,
         # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
         **({} if max_recovery_attempts is None else {"max_recovery_attempts": int(max_recovery_attempts)}),
+        # rl-multinode-island Q4 (C5): --rl-elastic-checkpoint-store (None = node0-local)
+        **({} if not checkpoint_store else {"checkpoint_store": checkpoint_store}),
         # 3.8: the strict pause budget is min(margin x the syncer's
         # --quorum-timeout-s, measured idle-flow timeout); None keeps the
         # audited defaults (syncer default 900 s, margin 0.5).

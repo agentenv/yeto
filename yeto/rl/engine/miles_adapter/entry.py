@@ -672,7 +672,8 @@ def compose_island(
         topology = getattr(launch.placement, "topology", None)
         if topology is not None and callable(getattr(elastic.controller, "set_topology", None)):
             # rl-multinode-island D9/Q6: node loss is observed through Ray, fail closed
-            elastic.controller.set_topology((topology.nodes, topology.gpus_per_node), _ray_alive_nodes)
+            elastic.controller.set_topology((topology.nodes, topology.gpus_per_node), _ray_alive_nodes,
+                                            layout=island_layout_of(miles_args, topology, launch.placement))
         elastic.controller.open(driver.rollout)
         _wire_trainer_rebuild(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
                               actor_model=actor_model, rollout_executor=rollout_executor,
@@ -1032,6 +1033,8 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         # 3.7 restart recovery budget (--rl-elastic-max-recovery-attempts)
         **({"max_recovery_attempts": int(config["max_recovery_attempts"])}
            if config.get("max_recovery_attempts") is not None else {}),
+        # Q4 (C5): off-island copy of the state dir (--rl-elastic-checkpoint-store)
+        **({"checkpoint_store": config["checkpoint_store"]} if config.get("checkpoint_store") else {}),
         # 4.7: pool GPU ids (manifest resources.gpus, in logical-bundle order), only
         # with trainer edges; every other elastic run keeps the described pool.
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
@@ -1069,8 +1072,32 @@ def check_elastic_miles_args(miles_args: Any) -> None:
         raise ValueError("--rl-elastic needs " + "; ".join(problems))
 
 
+def island_layout_of(miles_args: Any, topology: Any, placement: Any = None) -> dict[str, Any]:
+    """The parallel layout this learner launches (rl-multinode-island Q4, C5): the
+    Megatron parallel sizes and actor shape from ``miles_args`` plus the role ->
+    logical bundle map of the placement request (None = leading-bundle layout).
+    Journaled with the ``topology`` record and compared against the baseline on a
+    rebuild: a cut written under another layout is not restorable without conversion."""
+    def size(name: str, default: int = 1) -> int:
+        return int(getattr(miles_args, name, None) or default)
+
+    nodes = size("actor_num_nodes", 1)
+    per = size("actor_num_gpus_per_node", 0)
+    layout: dict[str, Any] = {
+        "tp": size("tensor_model_parallel_size"), "pp": size("pipeline_model_parallel_size"),
+        "cp": size("context_parallel_size"), "ep": size("expert_model_parallel_size"),
+        "nodes": int(topology.nodes), "gpus_per_node": int(topology.gpus_per_node),
+    }
+    if per:
+        layout["trainer"] = nodes * per
+    bundle_map = getattr(placement, "bundle_map", None) if placement is not None else None
+    layout["bundle_map"] = None if bundle_map is None else {str(k): list(v) for k, v in bundle_map.items()}
+    return layout
+
+
 def refuse_partial_island_preflight(elastic: Any, topology: Any, miles_args: Any, *,
-                                    node_probe: Callable[[], Any] | None = None) -> None:
+                                    node_probe: Callable[[], Any] | None = None,
+                                    placement: Any = None) -> None:
     """Multi-node startup precondition (rl-multinode-island D9, tasks 3.3), run right
     after ``connect_island_ray()`` and before any Miles placement group exists: the
     controller writes its ``topology`` journal record from the live Ray node table and,
@@ -1083,7 +1110,8 @@ def refuse_partial_island_preflight(elastic: Any, topology: Any, miles_args: Any
     if not callable(getattr(controller, "refuse_partial_island", None)):
         return
     controller.set_topology((int(topology.nodes), int(topology.gpus_per_node)),
-                            node_probe or _ray_alive_nodes)
+                            node_probe or _ray_alive_nodes,
+                            layout=island_layout_of(miles_args, topology, placement))
     why = controller.refuse_partial_island()
     if why is None:
         return
@@ -1345,7 +1373,7 @@ def run_ports_island(
         # tasks 3.3: a restarted learner on a partial island (worker node DEAD in the GCS)
         # must fail closed here; a placement group asking for the dead node's GPUs
         # would stay PENDING forever
-        refuse_partial_island_preflight(elastic, topology, miles_args)
+        refuse_partial_island_preflight(elastic, topology, miles_args, placement=launch.placement)
         # Q6 (2026-10-04): runtime GPU uuid reconciliation, journal gpu_pool; a changed
         # pool is accepted only with --rl-elastic-accept-rebind (fail closed otherwise)
         reconcile_gpu_pool_preflight(elastic, topology, miles_args)
