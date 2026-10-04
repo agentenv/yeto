@@ -23,7 +23,7 @@
 # >=1 PUSH before every kill (restart point v>=1): r6/r5 up1@train rid1 (the up runs before generate 2: versions 0,1 already pushed); r7 kill after up1 SUCCEEDED
 # and the next generate; r5c dn1@train rid2 (killed at its COMMITTED).  Round ~15 s (8 cards, 0.6B), strict PUSH at every round boundary.
 C=$1; P=$2; HARD=$3; WD=$4
-case $C in chk|s0|r6|r7|r5|r5c) ;; *) exec ${A8GO_INNER:-/home/michael/work/gpu-b1-runs/a8go.sh} "$@";; esac   # non-strict cases: a8go.sh, behaviour untouched
+case $C in chk|s0|r6|r7|r5|r5c) ;; *) exec env ATTEST="${ATTEST_NOSYNC:-}" ${A8GO_INNER:-/home/michael/work/gpu-b1-runs/a8go.sh} "$@";; esac   # non-strict cases: a8go.sh, behaviour untouched EXCEPT its attestation = ATTEST_NOSYNC (A35: d4 is 4 rounds, its no-sync fingerprint differs from the strict 6-round one; chain 8 IV 8xH100: cfg/attestation-8-4-8239bf0a.json); unset -> a8go.sh default (same as a4go4_strict.sh)
 SHA=${SHA:?set SHA to the frozen code commit of this batch (must contain the 3.7 restart recovery, infra-e1-recovery >= 0e68962)}; B=/home/michael/work/gpu-b1-runs; R=${RUN_ROOT:-$B}/$P
 UP=${UP_DEADLINE_S:-600}; EX=""; STEPS=6; ATTN=6; JUDGE=""; JARGS=""; GATE=0; ARMS=(); TPROBE=""
 EXR="--rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3"
