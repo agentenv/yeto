@@ -62,6 +62,9 @@ def _strip(events):
 
 
 NEW_EVENTS = {"rl_timeline_span", "rl_readiness", "rl_round_labels"}
+# Always emitted since the 1b/2a request (not an observation event); the R0
+# comparison removes exactly this event and nothing else.
+ACCOUNTING_EVENTS = {"rl_round_trained"}
 
 
 R0_TAPE = json.loads(
@@ -77,7 +80,7 @@ def test_bound_profile_matches_the_recorded_r0_tape(tmp_path, observe):
     driver, _ = _driver(_engine(), tmp_path, profile=_profile("colocated-serial"),
                         observe=observe)
     driver.run()
-    events = _events(tmp_path / "events.jsonl")
+    events = [e for e in _events(tmp_path / "events.jsonl") if e["event"] not in ACCOUNTING_EVENTS]
     if observe:
         assert {e["event"] for e in events} >= {"rl_timeline_span", "rl_round_labels"}
         events = [e for e in events if e["event"] not in NEW_EVENTS]
@@ -88,11 +91,19 @@ def test_bound_profile_matches_the_recorded_r0_tape(tmp_path, observe):
 
 
 def test_profile_none_matches_the_recorded_r0_tape(tmp_path):
+    probe = _engine()
+    engine_groups, engine_samples = probe.groups, probe.samples_per_group
     for kind in ("colocated", "fixed-partition"):
         driver, _ = _driver(_engine(placement_kind=kind), tmp_path, f"{kind}.jsonl",
                             capabilities=fake_capabilities())
         driver.run()
-        assert _strip(_events(tmp_path / f"{kind}.jsonl")) == R0_TAPE[kind]
+        events = _events(tmp_path / f"{kind}.jsonl")
+        trained = [e for e in events if e["event"] in ACCOUNTING_EVENTS]
+        assert [(e["trained_groups"], e["trained_samples"]) for e in trained] == [
+            (engine_groups, engine_groups * engine_samples) for _ in range(3)
+        ]
+        events = [e for e in events if e["event"] not in ACCOUNTING_EVENTS]
+        assert _strip(events) == R0_TAPE[kind]
 
 
 def test_partitioned_serial_keeps_sample_ids_and_optimizer_order(tmp_path):
@@ -222,3 +233,52 @@ def test_fewer_groups_than_rollout_batch_size_still_trains(tmp_path, mode, kind)
     driver, trained = _driver(engine, tmp_path, profile=_profile(mode, groups_per_batch=100))
     driver.run()
     assert len(trained) == 3
+
+
+def test_publish_delay_injection_is_off_by_default_and_never_lets_generation_run_early(
+    tmp_path, monkeypatch
+):
+    from yeto.rl.engine import driver as drv
+
+    assert drv.load_fault_injection({}) == {} or (
+        __import__("pathlib").Path(drv.__file__).resolve().parents[3] / drv.FAULT_INJECTION_FILE
+    ).exists()
+    cfg = tmp_path / "fi.json"
+    cfg.write_text('{"publish_delay_s": 0.05}')
+    monkeypatch.setenv(drv.FAULT_INJECTION_ENV, str(cfg))
+    engine = _engine(placement_kind="fixed-partition")
+    driver, _ = _driver(engine, tmp_path, profile=_profile("partitioned-serial"))
+    driver.run()
+    events = _events(tmp_path / "events.jsonl")
+    kinds = [e["event"] for e in events]
+    assert kinds.count("rl_fault_injected") == 4  # initial + 3 rounds
+    # every generation of round r comes after the publication of policy r
+    order = [(e["event"], e.get("phase"), e.get("policy_version", e.get("rollout_id")))
+             for e in events if e["event"] in ("rl_publication", "rl_driver_phase")]
+    published = set()
+    for kind, phase, v in order:
+        if kind == "rl_publication":
+            published.add(v)
+        elif phase == "generate":
+            assert v in published
+    trained = [e for e in events if e["event"] == "rl_round_trained"]
+    assert all(len(e["trained_sample_ids_sha256"]) == 64 for e in trained)
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"drop_publish": 1}')
+    with pytest.raises(ValueError):
+        drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(bad)})
+
+
+def test_event_echo_is_off_by_default_and_prints_when_enabled(tmp_path, monkeypatch, capsys):
+    from yeto.rl.engine import driver as drv
+
+    monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")
+    tape = drv.EventTape(tmp_path / "t.jsonl", 0)
+    tape.append({"event": "x"})
+    assert "YETO_RL_EVENT" not in capsys.readouterr().out
+    monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "1")
+    tape.append({"event": "y"})
+    line = capsys.readouterr().out.strip()
+    assert line.startswith("YETO_RL_EVENT ") and json.loads(line.split(" ", 1)[1])["event"] == "y"
+    # exactly the tape line
+    assert line.split(" ", 1)[1] == (tmp_path / "t.jsonl").read_text().splitlines()[-1]

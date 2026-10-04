@@ -38,6 +38,9 @@ def _registered(group, name):
 KNOBS = _registered("advantage", "reward_shapers")
 DISPATCHER = (PluginRef.from_path("yeto.rl.algos.reward_pipeline.post_process")
               if KNOBS else REF)
+# With rl-algo-grpo-knobs the only pg_loss reducer is the Dr.GRPO one.
+REDUCER = (PluginRef.from_path("yeto.rl.algos.reducers.constant_denominator_reducer")
+           if _registered("loss", "constant_denominator") else REF)
 
 
 def complete(spec):
@@ -51,6 +54,10 @@ def complete(spec):
     if (spec.kl.placement == "loss" and _registered("kl", "ref_model")
             and spec.kl.ref_model is None):
         spec = spec.replace(kl=spec.kl.with_ext(ref_model=KL_REF))
+    if (spec.loss.reducer is not None and _registered("loss", "constant_denominator")
+            and spec.loss.aggregation != "constant"):
+        spec = spec.replace(loss=spec.loss.__class__.from_dict(
+            {**spec.loss.to_dict(), "aggregation": "constant", "constant_denominator": 1024}))
     if "yeto.rl.algos.grpo_knobs" in _extension_modules():
         # rl-algo-grpo-knobs F1: pipeline code modules pinned in spec.plugins
         from yeto.rl.algos.grpo_knobs import with_pipeline_plugins
@@ -186,7 +193,8 @@ CASES = [
     (dict(loss=LossSpec(eps_clip_high=0.28)), ["--eps-clip-high", "0.28"]),
     (dict(loss=LossSpec(eps_clip_c=3)), ["--eps-clip-c", "3.0"]),
     (dict(loss=LossSpec(aggregation="token")), ["--calculate-per-token-loss"]),
-    (dict(loss=LossSpec(reducer=REF)), ["--custom-pg-loss-reducer-function-path", REF.path]),
+    (dict(loss=LossSpec(reducer=REDUCER)),
+     ["--custom-pg-loss-reducer-function-path", REDUCER.path]),
     (dict(loss=LossSpec(variant="custom_loss", custom_loss=REF)),
      ["--loss-type", "custom_loss", "--custom-loss-function-path", REF.path]),
     (dict(advantage=AdvantageSpec(std_normalization=False)), ["--disable-grpo-std-normalization"]),
@@ -305,3 +313,11 @@ def test_v1_kl_coef_inputs(kl_coef, kl_flag, rejected):
 def test_reward_and_loss_kl_cannot_coexist():
     with pytest.raises(AlgorithmSpecError):
         KlSpec(placement="reward", coef=0.1, estimator="k1")
+
+
+def test_custom_config_path_refused():
+    with pytest.raises(mc.MilesConfigError, match="--custom-config-path"):
+        mc.check_extra_argv(["--custom-config-path", "x.yaml"])
+    with pytest.raises(mc.MilesConfigError, match="--custom-config-path"):
+        mc.translate_run_config(make_config(), AlgorithmSpec(),
+                                extra_argv=("--custom-config-path=x.yaml",))

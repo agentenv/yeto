@@ -791,3 +791,118 @@ def test_learner_binds_ref_source_and_override(tmp_path):
         verify(model="Qwen/Other", megatron_ref_load=None)
     with pytest.raises(rl_learner.AlgorithmMismatchError, match="--megatron-ref-load"):
         verify(model=REF["source"], megatron_ref_load="/ckpt/megatron")
+
+
+# ---------------------------------------------------------------- 8.3 declarations (1b-declare.patch)
+
+EXPECTED_1B_DECLARED = {
+    "loss_aggregations": {"constant", "token"},
+    "features": {"kl_loss_ref_model", "entropy_bonus", "overlong_penalty", "eps_clip",
+                 "no_grpo_std_normalization", "over_sampling", "overlong_filter", "clip_higher"},
+    "kl_placements": {"loss"},
+    "reward_postprocessors": {"custom_reward_postprocess"},
+}
+# 1b entries of integ-decl MILES_DECLARED (5f56ff9), checked for equality when present.
+FINAL_1B = {f"{d}:{n}" for d, names in EXPECTED_1B_DECLARED.items() for n in names}
+
+
+
+def test_declared_table_matches_final_declaration():
+    """G1_DECLARED == the 1b part of ALGO-CAP's final MILES_DECLARED (integ-decl d6be0f1);
+    custom_pg_loss_reducer is declared there separately, limited to the Dr.GRPO reducer."""
+
+    assert {d: set(n) for d, n in gk.declared_mechanisms().items()} == EXPECTED_1B_DECLARED
+    from yeto.rl.engine.miles_adapter import entry
+
+    final = getattr(entry, "MILES_DECLARED", None)
+    if final is not None:  # integrated branches: the 1b entries are exactly the declared ones
+        mine = {k for k in final if k.split(":", 1)[1] in {n for v in EXPECTED_1B_DECLARED.values() for n in v}}
+        assert mine == FINAL_1B
+
+
+def test_declared_caps_accept_1b_and_refuse_undeclared():
+    from yeto.rl.engine.miles_adapter.entry import miles_capabilities
+
+    caps = gk.merge_declared(miles_capabilities("sha256:" + "0" * 64))
+    for spec in (pipeline_spec(reward_shapers=[OVERLONG]), AlgorithmSpec(loss={"eps_clip": 0.2}),
+                 kl_spec(), AlgorithmSpec(entropy_coef=0.001)):
+        missing = [f"{d}:{n}" for d, n in spec.required_mechanisms() if n not in getattr(caps, d)]
+        assert missing == [], missing
+    for name in ("dual_clip",):
+        assert name not in gk.declared_mechanisms().get("features", frozenset())
+    # token withdrawn after review (grad_norm identical to the baseline)
+
+
+def test_only_the_drgrpo_reducer_is_accepted():
+    other = PluginRef.from_path("yeto.rl.algos.reducers.configured_denominator").to_dict()
+    for loss in ({"reducer": other}, {"aggregation": "constant", "constant_denominator": 10, "reducer": other}):
+        assert any("the only pg_loss reducer on the ports path" in p
+                   for p in AlgorithmSpec(loss=loss).rejections())
+    assert constant_spec().rejections() == []
+
+
+def test_emit_event_echoes_to_stdout(capsys):
+    from yeto.rl import event_echo
+
+    rp.emit_event(SimpleNamespace(yeto_rl_learner_id=0), {"event": "rl_reward_shaping", "samples": 2})
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out and out[-1].startswith(event_echo.PREFIX)
+    raw = event_echo.parse_line(out[-1])
+    assert raw not in (None, event_echo.INVALID)
+    record = json.loads(raw) if isinstance(raw, str) else raw
+    assert record["event"] == "rl_reward_shaping" and record["island_id"] == 0 and record["samples"] == 2
+
+
+# ---------------------------------------------------------------- 7.2 per-island trained counts (two fake islands)
+
+
+def test_two_islands_record_their_own_trained_counts(tmp_path):
+    import test_rl_engine_driver as td
+    from yeto.rl.engine.bridges import StrictAvgSync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.fake import fake_capabilities
+
+    syncer = td._strict_syncer(td._engine(), learners=2, rounds=2)
+    drivers, kept = [], {}
+    for island in (0, 1):
+        engine = td._engine(torch.tensor([1.0 + island, 3.0]))
+        original = engine.rollout.generate
+
+        def generate(rollout_id, _orig=original, _island=island):
+            batch = _orig(rollout_id)
+            # island 1: the dynamic filter dropped one group this round
+            groups = batch.groups[:-1] if _island == 1 else batch.groups
+            kept[(_island, rollout_id)] = (len(groups), sum(len(g.sample_ids) for g in groups))
+            return _dc.replace(batch, groups=groups, filtered=len(batch.groups) - len(groups))
+
+        engine.rollout.generate = generate
+        sync = StrictAvgSync(td._strict_config(tmp_path, engine, learner_id=island, rounds=2,
+                                               tape=f"b{island}.jsonl"),
+                             client_factory=lambda _b, i=island: syncer.client(i))
+        drivers.append(IslandDriver(
+            learner_id=island, rollout=engine.rollout, trainer=engine.trainer,
+            policy_state=engine.policy_state, publisher=engine.publisher,
+            placement=engine.placement, algorithm=AlgorithmSpec(), sync=sync,
+            events=EventTape(tmp_path / f"i{island}.jsonl", island), capabilities=fake_capabilities()))
+    _, errors = td._run_threads(drivers)
+    assert errors == {}
+    for island in (0, 1):
+        rounds = [json.loads(x) for x in (tmp_path / f"i{island}.jsonl").read_text().splitlines()
+                  if json.loads(x)["event"] == "rl_round_trained"]
+        assert rounds, "rl_round_trained missing"
+        for e in rounds:
+            assert (e["trained_groups"], e["trained_samples"]) == kept[(island, e["rollout_id"])]
+    g0 = {kept[(0, r)] for r in (0, 1) if (0, r) in kept}
+    g1 = {kept[(1, r)] for r in (0, 1) if (1, r) in kept}
+    assert g0 != g1  # the islands differ and each records its own
+
+
+def test_fake_engine_declares_the_1b_mechanisms():
+    from yeto.rl.engine.fake import fake_capabilities
+
+    caps = fake_capabilities()
+    if not EXPECTED_1B_DECLARED["features"] <= set(caps.features):
+        pytest.skip("needs infra-drafts/1b-fake-declare.patch (fake.py is ALGO-CAP's)")
+    for dim, names in EXPECTED_1B_DECLARED.items():
+        assert names <= set(getattr(caps, dim)), dim
+    assert "dual_clip" not in caps.features

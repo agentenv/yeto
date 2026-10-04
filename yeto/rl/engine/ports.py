@@ -50,6 +50,10 @@ class GroupMetadata:
     reward_mean: float
     reward_std: float
     token_count: int
+    # Samples of this kept group masked out of the loss by a spec-selected
+    # sample filter (rl-algo-grpo-knobs D7; ledger terminal state
+    # ``filtered``, alignment A2/F5). None: no sample filter configured.
+    filtered_samples: int | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,17 @@ class RolloutBatchHandle:
     # ``carried_over``). None = the engine does not report it (3.6/4.1).
     filtered: int | None = None
     carried_over: int | None = None
+    # Non-zero advantages counted by the rollout-side reward dispatcher
+    # (rl-algo-seq-and-adv R2); None = not reported. Read by per-algorithm
+    # gradient expectations (``gradient_expectation(batch, metrics)``).
+    nonzero_advantages: int | None = None
+    # rl-infra-spec 1.7: summed non-generation (tool) time of the rollout's
+    # samples; None = not reported.
+    tool_wait_seconds: float | None = None
+    # Groups drawn from the data source (over-sampling included) and those
+    # aborted in flight; None = unknown (see rollout_meta_hook.submitted_groups).
+    submitted_groups: int | None = None
+    aborted_in_flight_groups: int | None = None
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
