@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from test_rl_reconfig_recovery import _commit_four, _events, _island
+from test_rl_reconfig_recovery import _commit_four, _ctl, _events, _island
 
 from yeto.rl.engine.controller import Rejected
 from yeto.rl.engine.driver import DriverError
@@ -100,3 +100,71 @@ def test_single_node_island_has_no_node_checks(tmp_path):
     with pytest.raises(Rejected):
         ctl.set_topology((0, 4))
     ctl.close()
+
+
+def test_refuse_partial_island_records_topology_and_recovery(tmp_path):
+    """tasks 3.3: the startup precondition runs before any placement group exists."""
+    ctl = _ctl(tmp_path / "state", {"t": 1000.0}, topology=(2, 4), node_probe=_Nodes({"n0": 4}))
+    why = ctl.refuse_partial_island()
+    assert why == "1 of 2 island nodes alive (['n0'])"
+    assert ctl.inspect().health == "RECOVERY_REQUIRED" and not ctl.admission_open
+    assert "island topology: 1 of 2 island nodes alive" in ctl.recovery_required
+    assert "recovery refused on fewer nodes" in ctl.recovery_required
+    topo = _journal(tmp_path, "topology")
+    assert len(topo) == 1 and topo[0]["nodes"] == 2 and topo[0]["gpus_per_node"] == 4
+    assert topo[0]["alive"] == ["n0"] and topo[0]["incarnation"] == ctl.incarnation["id"]
+    phases = _journal(tmp_path, "phase")
+    assert phases[-1]["phase"] == "RECOVERY_REQUIRED" and "island topology" in phases[-1]["error"]
+    assert ctl.refuse_partial_island() == why  # idempotent terminal (second record, same why)
+    ctl.close()
+
+
+def test_refuse_partial_island_full_island_then_open_writes_topology_once(tmp_path):
+    nodes = _Nodes({"n0": 4, "n1": 4})
+    ctl = _ctl(tmp_path / "state", {"t": 1000.0}, topology=(2, 4), node_probe=nodes)
+    assert ctl.refuse_partial_island() is None
+    assert ctl.recovery_required is None and len(_journal(tmp_path, "topology")) == 1
+    from test_rl_reconfig_recovery import NAME, FakeEngine, Fork, Pool
+    import torch
+
+    engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, step_delta=1.0, placement_kind="fixed-partition")
+    pool = Pool(engine, Fork(engine, running=("engine:c0", "engine:c1")))
+    assert ctl.open(pool).health == "RUNNING"
+    assert len(_journal(tmp_path, "topology")) == 1  # open() does not repeat the preflight record
+    ctl.close()
+    # no topology -> no-op
+    ctl2 = _ctl(tmp_path / "two" / "state", {"t": 1000.0})
+    assert ctl2.refuse_partial_island() is None and not _journal(tmp_path / "two", "topology")
+    ctl2.close()
+
+
+def test_entry_preflight_refuses_partial_island_before_any_placement_group(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter import entry
+
+    ctl = _ctl(tmp_path / "state", {"t": 1000.0})
+    elastic = SimpleNamespace(controller=ctl)
+    topology = SimpleNamespace(nodes=2, gpus_per_node=1)
+    miles_args = SimpleNamespace(yeto_rl_event_tape=str(tmp_path / "events.jsonl"), yeto_rl_learner_id=0)
+    monkeypatch.setattr(entry, "_ray_alive_nodes", lambda: {"head": 1})  # worker DEAD in the GCS
+    pinned = []
+    monkeypatch.setattr(entry, "pin_placement_group_to_head", lambda *a, **k: pinned.append(a))
+    with pytest.raises(RuntimeError, match="island is RECOVERY_REQUIRED: island topology: 1 of 2"):
+        entry.refuse_partial_island_preflight(elastic, topology, miles_args)
+    assert not pinned and ctl.inspect().health == "RECOVERY_REQUIRED"
+    topo = _journal(tmp_path, "topology")
+    assert len(topo) == 1 and topo[0]["alive"] == ["head"]
+    ev = [e for e in _events(tmp_path) if e["event"] == "rl_reconfiguration"]
+    assert ev[-1]["result"] == "RECOVERY_REQUIRED" and "recovery refused on fewer nodes" in ev[-1]["error"]
+    ctl.close()
+    # full island: passes, no event, single-node / elastic None: no-op
+    ok = tmp_path / "ok"
+    ctl = _ctl(ok / "state", {"t": 1000.0})
+    monkeypatch.setattr(entry, "_ray_alive_nodes", lambda: {"head": 1, "w1": 1})
+    assert entry.refuse_partial_island_preflight(SimpleNamespace(controller=ctl), topology, miles_args) is None
+    assert ctl.recovery_required is None and len(_journal(ok, "topology")) == 1
+    assert len([e for e in _events(tmp_path) if e["event"] == "rl_reconfiguration"]) == 1  # no new event
+    ctl.close()
+    assert entry.refuse_partial_island_preflight(None, topology, miles_args) is None
+    assert entry.refuse_partial_island_preflight(elastic, SimpleNamespace(nodes=1, gpus_per_node=1), miles_args) is None

@@ -1037,6 +1037,41 @@ def check_elastic_miles_args(miles_args: Any) -> None:
         raise ValueError("--rl-elastic needs " + "; ".join(problems))
 
 
+def refuse_partial_island_preflight(elastic: Any, topology: Any, miles_args: Any, *,
+                                    node_probe: Callable[[], Any] | None = None) -> None:
+    """Multi-node startup precondition (rl-multinode-island D9, tasks 3.3), run right
+    after ``connect_island_ray()`` and before any Miles placement group exists: the
+    controller writes its ``topology`` journal record from the live Ray node table and,
+    with fewer alive nodes than declared, enters RECOVERY_REQUIRED; the learner then
+    emits ``rl_reconfiguration`` (RECOVERY_REQUIRED) on the tape and exits non-zero
+    instead of blocking on a PENDING placement group. No-op without elastic/topology."""
+    controller = getattr(elastic, "controller", None) if elastic is not None else None
+    if controller is None or topology is None or int(topology.nodes) <= 1:
+        return
+    if not callable(getattr(controller, "refuse_partial_island", None)):
+        return
+    controller.set_topology((int(topology.nodes), int(topology.gpus_per_node)),
+                            node_probe or _ray_alive_nodes)
+    why = controller.refuse_partial_island()
+    if why is None:
+        return
+    error = getattr(controller, "recovery_required", None) or f"island topology: {why}"
+    try:
+        from yeto.rl.miles import _append_rl_event
+
+        epochs = getattr(getattr(controller, "journal", None), "epochs", None)
+        _append_rl_event(miles_args, {
+            "event": "rl_reconfiguration", "rollout_id": None, "result": "RECOVERY_REQUIRED",
+            "error": str(error), "config_epoch": getattr(epochs, "config_epoch", None),
+        })
+    except Exception as exc:  # noqa: BLE001 - the tape must not mask the refusal
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "rl_reconfiguration (partial island) not written to the tape: %r", exc)
+    raise RuntimeError(f"island is RECOVERY_REQUIRED: {error}")
+
+
 def _ray_alive_nodes() -> dict[str, int]:
     """``{node_id: GPUs}`` of the alive Ray nodes (the controller's node probe)."""
     import ray
@@ -1176,6 +1211,10 @@ def run_ports_island(
     connect_island_ray()
     topology = getattr(launch.placement, "topology", None)
     if topology is not None and topology.nodes > 1:
+        # tasks 3.3: a restarted learner on a partial island (worker node DEAD in the GCS)
+        # must fail closed here; a placement group asking for the dead node's GPUs
+        # would stay PENDING forever
+        refuse_partial_island_preflight(elastic, topology, miles_args)
         # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
         pin_placement_group_to_head(topology.gpus_per_node)
 

@@ -401,6 +401,12 @@ class IslandDriver:
         self.fault_injection = load_fault_injection()
         self.controller = controller
         self.ledger = ledger
+        # Failure-path node-loss attribution (tasks 3.3): how long a failed
+        # round waits for the controller to confirm a lost node before the
+        # original error is re-raised; ``sleep`` is injectable for tests.
+        self.node_loss_grace_s = 60.0
+        self.node_loss_poll_s = 2.0
+        self.sleep: Callable[[float], None] = time.sleep
         self.published_state: TrainableState | None = None
         self.at_safe_point = False
         self.eval_overlap: EvalOverlap | None = None
@@ -656,6 +662,40 @@ class IslandDriver:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch)
             raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+
+    def _classify_failure(self, rollout_id: int | None, error: BaseException) -> None:
+        """Failure-path node-loss attribution (rl-multinode-island D9, tasks 3.3):
+        when a round/publication fails on a multi-node island, the first symptom
+        of a lost node is usually an engine error (e.g. no eligible rollout
+        engines), long before the GCS marks the node DEAD.  Poll
+        ``controller.check_nodes()`` for ``node_loss_grace_s``; a confirmed loss
+        is journaled by the controller and emitted as RECOVERY_REQUIRED, and the
+        run ends with ``DriverError`` chained to the original error.  If no node
+        loss is confirmed in the grace period the original error propagates.
+        Single-node islands / no controller never poll.  KeyboardInterrupt and
+        SystemExit are never attributed."""
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            return
+        if isinstance(error, DriverError) and "RECOVERY_REQUIRED" in str(error):
+            return  # already attributed by _probe_nodes/_classify_failure
+        check = getattr(self.controller, "check_nodes", None) if self.controller else None
+        if not callable(check) or not getattr(self.controller, "topology", None):
+            return
+        deadline = self.clock() + float(self.node_loss_grace_s)
+        while True:
+            try:
+                lost = check()
+            except Exception as probe_error:  # fail closed: probe failure counts as loss
+                lost = f"node probe failed: {probe_error!r}"
+            if lost:
+                self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
+                          error=str(lost), config_epoch=self.config_epoch,
+                          cause=f"{type(error).__name__}: {error}")
+                raise DriverError(f"island is RECOVERY_REQUIRED: {lost}") from error
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return
+            self.sleep(min(float(self.node_loss_poll_s), remaining))
 
     def _confirm_recovery(self, rollout_id: int) -> None:
         """3.7 restart recovery: after the first full publication covered the
@@ -936,6 +976,7 @@ class IslandDriver:
         except BaseException as error:
             if self.ledger is not None and self.ledger.state(rollout_id) == "prepared":
                 self.ledger.discard(rollout_id, error=f"{type(error).__name__}: {error}")
+            self._classify_failure(rollout_id, error)
             raise
 
     def _train_round(self, rollout_id: int, batch: RolloutBatchHandle,
@@ -1213,12 +1254,18 @@ class IslandDriver:
         self._refuse_if_recovery_required()
         try:
             try:
-                start = self.sync.start(self)
-                if self.ledger is not None:
-                    self.ledger.rebase(start.rollout_id)
-                state = start.state
-                self.publish(state, rollout_id=start.rollout_id)
-                self._confirm_recovery(start.rollout_id)
+                start = None
+                try:
+                    start = self.sync.start(self)
+                    if self.ledger is not None:
+                        self.ledger.rebase(start.rollout_id)
+                    state = start.state
+                    self.publish(state, rollout_id=start.rollout_id)
+                    self._confirm_recovery(start.rollout_id)
+                except BaseException as error:
+                    self._classify_failure(
+                        start.rollout_id if start is not None else None, error)
+                    raise
                 self._maybe_eval(start.rollout_id, force=start.rollout_id == 0,
                                  defer=not start.finished)
                 rollout_id = start.rollout_id
