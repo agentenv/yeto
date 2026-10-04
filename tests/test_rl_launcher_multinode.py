@@ -49,12 +49,17 @@ def test_min_nodes_from_recipe_and_flag():
         launcher.rl_min_nodes(_args(rollout_num_gpus_per_engine=16), spec)
     # Q1/Q3 ruling 2026-10-04: smallest replica tp*cp*ep*pp may span nodes
     (four,) = parse_gpu_spec("nebius:4x8xh100")
-    assert launcher.rl_min_nodes(_args(pipeline_parallel=2, expert_parallel=4), four) == 3  # 16 + 8
+    # EP shares ranks with TP x DP (etp = 1): tp2 pp2 ep4 -> 2*2*max(1, 4/2) = 8 trainer GPUs (+ engine 8)
+    assert launcher.rl_min_nodes(_args(pipeline_parallel=2, expert_parallel=4), four) == 2
+    assert launcher.rl_min_nodes(_args(pipeline_parallel=2, expert_parallel=8), four) == 3  # 16 + 8
+    assert launcher.rl_min_nodes(_args(tensor_parallel=1, expert_parallel=2, rollout_num_gpus_per_engine=1),
+                                 parse_gpu_spec("nebius:2x2xl40s")[0]) == 2  # M2: EP2 = 2 DP ranks (2 + engine 1 on 2-GPU nodes)
+    assert launcher.rl_min_nodes(_args(tensor_parallel=2, expert_parallel=2), spec) == 2  # ep <= tp: no extra GPU
     assert launcher.rl_min_nodes(_args(tensor_parallel=8, pipeline_parallel=2), four) == 3
     with pytest.raises(ValueError, match="TP stays inside a node"):
         launcher.rl_min_nodes(_args(tensor_parallel=16), four)
     with pytest.raises(ValueError, match="not a whole number"):
-        launcher.rl_min_nodes(_args(tensor_parallel=2, pipeline_parallel=3, expert_parallel=2), four)
+        launcher.rl_min_nodes(_args(tensor_parallel=2, pipeline_parallel=3, expert_parallel=4), four)  # replica 12
 
 
 # ---- 1.6 task level (D1/D6) and 1.8 teardown (D10)
@@ -238,6 +243,25 @@ def test_mixed_2x2_cfg_placement_drives_actor_shape_and_bundle_map(monkeypatch, 
     assert ("--actor-num-nodes 2 --actor-num-gpus-per-node 1 --rl-island-gpus-per-node 2"
             " --rl-island-bundle-map '{\"rollout\":[1],\"standby\":[3],\"trainer\":[0,2]}'") in task.run
     assert " --rollout-num-gpus 1" in task.run and " --rl-standby-gpus 1" in task.run
+
+
+def test_mixed_2x2_pp2_trainer_spans_nodes(monkeypatch, tmp_path):
+    """M1: --pipeline-parallel 2 on T2(n0:0,n1:0): the PP group spans the nodes (Q3), only
+    tp*cp = 1 must stay in-node; the cfg layout is accepted and the shape is 2 x 1."""
+    args, spec, task = _elastic_task(monkeypatch, tmp_path, "nebius:2x2xl40s",
+                                     _GPU_DIR / "resources-2x2.json", "T2R1S1", rollout=1, standby=1,
+                                     extra=("--pipeline-parallel", "2"))
+    assert launcher.rl_island_layout(args, spec)[:2] == (2, 1)
+    assert "--actor-num-nodes 2 --actor-num-gpus-per-node 1" in task.run and "--pipeline-parallel 2" in task.run
+    # M2: EP2 with tp1 pp1 -> the EP group = the two DP ranks on n0:0 / n1:0 (Q1)
+    args, spec, task = _elastic_task(monkeypatch, tmp_path, "nebius:2x2xl40s",
+                                     _GPU_DIR / "resources-2x2.json", "T2R1S1", rollout=1, standby=1,
+                                     extra=("--expert-parallel", "2"))
+    assert launcher.rl_island_layout(args, spec)[:2] == (2, 1) and "--expert-parallel 2" in task.run
+    # TP2 across n0:0 / n1:0 stays refused (TP inside a node)
+    with pytest.raises(ValueError, match=r"in-node \(tp\*cp\) group .* spans nodes"):
+        _elastic_task(monkeypatch, tmp_path, "nebius:2x2xl40s", _GPU_DIR / "resources-2x2.json", "T2R1S1",
+                      rollout=1, standby=1, extra=("--tensor-parallel", "2"))
 
 
 def test_mixed_2x2_bundle_map_round_trips_into_the_learner_placement(monkeypatch, tmp_path):

@@ -342,13 +342,19 @@ def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] 
     except TopologyError as exc:
         raise ValueError(f"--rl-elastic-initial-config {name!r} placement on {spec}: {exc}") from None
     engine = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
-    mp = int(getattr(args, "tensor_parallel", 1) or 1) * int(getattr(args, "pipeline_parallel", 1) or 1)
+    tp = int(getattr(args, "tensor_parallel", 1) or 1)
+    pp = int(getattr(args, "pipeline_parallel", 1) or 1)
+    cp = int(getattr(args, "context_parallel", 1) or 1)
+    ep = int(getattr(args, "expert_parallel", 1) or 1)
     try:
+        # Q1/Q3: only the in-node group tp*cp must stay on one node; PP and EP
+        # groups may span nodes (M1: T2 = n0:0 + n1:0 with --pipeline-parallel 2).
         request = PlacementRequest(
             kind="fixed-partition", trainer_gpus=counts[0], rollout_gpus=rollout,
             gpus_per_engine=engine, standby_gpus=standby,
             gpus_per_node=spec.gpus_per_node if spec.num_nodes > 1 else None,
-            model_parallel=mp, bundle_map=bundle_map)
+            model_parallel=tp * pp * cp, node_parallel=tp * cp, expert_parallel=ep,
+            bundle_map=bundle_map)
         shape = request.trainer_shape()
     except ValueError as exc:
         raise ValueError(f"--rl-elastic-initial-config {name!r} placement on {spec}: {exc}") from None
@@ -381,7 +387,7 @@ def rl_min_nodes(args, spec) -> int:
     """Minimum learner nodes (rl-multinode-island D8): one trainer model-parallel
     replica + one rollout engine + standby, or ``--rl-min-nodes-per-learner``
     when that is larger."""
-    from .rl.engine.multinode import TopologyError, min_nodes
+    from .rl.engine.multinode import TopologyError, min_nodes, trainer_replica_gpus
 
     explicit = int(getattr(args, "rl_min_nodes_per_learner", 0) or 0)
     if getattr(args, "rl_placement", "colocated") != "fixed-partition":
@@ -390,11 +396,14 @@ def rl_min_nodes(args, spec) -> int:
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)
     cp = int(getattr(args, "context_parallel", 1) or 1)
     ep = int(getattr(args, "expert_parallel", 1) or 1)
+    etp = int(getattr(args, "expert_tensor_parallel", 1) or 1)  # the learner pins --expert-tensor-parallel-size 1
     engine = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
     try:
-        # Q1/Q3 ruling 2026-10-04: the smallest replica tp*cp*ep*pp may span
-        # nodes (EP/PP cross nodes); only tp*cp must stay inside a node.
-        derived = min_nodes(trainer_min_gpus=tp * cp * ep * pp, rollout_min_gpus=engine,
+        # Q1/Q3 ruling 2026-10-04: the smallest replica may span nodes (EP/PP
+        # cross nodes); only tp*cp must stay inside a node. EP shares ranks with
+        # TP x DP (trainer_replica_gpus), it is not a further multiplier.
+        replica = trainer_replica_gpus({"tp": tp, "cp": cp, "pp": pp, "ep": ep, "etp": etp})
+        derived = min_nodes(trainer_min_gpus=replica, rollout_min_gpus=engine,
                             standby_gpus=int(getattr(args, "rl_standby_gpus", 0) or 0),
                             gpus_per_node=spec.gpus_per_node, node_parallel=tp * cp)
     except TopologyError as exc:
