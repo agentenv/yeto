@@ -1,4 +1,7 @@
 {"nodes":2,"gpus_per_node":2,
  "configs":{"T2R1S1":{"trainer":2,"rollout":1,"standby":1,"rollout_engine_gpus":1,
-                      "placement":{"trainer":["n0:0","n1:0"],"rollout":[["n0:1"]],"standby":["n1:1"]}}},
- "edges":[]}
+                      "placement":{"trainer":["n0:0","n1:0"],"rollout":[["n0:1"]],"standby":["n1:1"]}},
+            "T2R2S0":{"trainer":2,"rollout":2,"standby":0,"rollout_engine_gpus":1,
+                      "placement":{"trainer":["n0:0","n1:0"],"rollout":[["n0:1"],["n1:1"]],"standby":[]}}},
+ "edges":[{"source":"T2R1S1","target":"T2R2S0","kind":"rollout-only"},
+          {"source":"T2R2S0","target":"T2R1S1","kind":"rollout-only"}]}
