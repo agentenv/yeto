@@ -152,6 +152,9 @@ class ParallelLayout:
     # rl-infra-spec 3.x/4.7 (fork F-R1): yeto names of the rollout engine cells
     # declared to the fork (placement map "rollout_cells"); () = fork default.
     rollout_cell_names: tuple[str, ...] = ()
+    # rl-multinode-island: GPUs per island node on a multi-node island; None on
+    # a single node (every node rule off).
+    island_gpus_per_node: int | None = None
 
     @property
     def colocated(self) -> bool:
@@ -566,21 +569,28 @@ def resolve_rl_run_config(
         # legacy CLI never sets rl_placement, so its layout is unchanged).
         rollout_gpus = getattr(args, "rollout_num_gpus", None)
         per_engine = getattr(args, "rollout_num_gpus_per_engine", 1)
+        island_gpus_per_node = getattr(args, "rl_island_gpus_per_node", None)
         if (
-            args.actor_num_nodes != 1
+            (args.actor_num_nodes != 1 and island_gpus_per_node is None)
             or type(rollout_gpus) is not int
             or rollout_gpus < 1
             or rollout_gpus % per_engine
         ):
             raise ValueError(
-                "a LoRA fixed partition needs one node and --rollout-num-gpus as a "
-                "positive multiple of --rollout-num-gpus-per-engine"
+                "a LoRA fixed partition needs one node (or --rl-island-gpus-per-node on a "
+                "multi-node island) and --rollout-num-gpus as a positive multiple of "
+                "--rollout-num-gpus-per-engine"
             )
         dedicated_rollout_gpus = rollout_gpus
         standby_gpus = int(getattr(args, "rl_standby_gpus", 0) or 0)
         if standby_gpus < 0:
             raise ValueError("--rl-standby-gpus must be non-negative")
-        visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus + standby_gpus
+        if island_gpus_per_node is None:
+            visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus + standby_gpus
+        else:
+            # Multi-node island: every node exposes all its GPUs; the trainer
+            # rectangle, rollout and standby are laid out over the whole island.
+            visible_gpus_per_node = int(island_gpus_per_node)
     else:
         visible_gpus_per_node = args.actor_num_gpus_per_node
     requested_standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
@@ -748,6 +758,9 @@ def resolve_rl_run_config(
             uneven_pipeline_layers=uneven_pipeline_layers,
             standby_gpus=standby_gpus,
             rollout_cell_names=_rollout_cell_names(args, dedicated_rollout_gpus),
+            island_gpus_per_node=(int(getattr(args, "rl_island_gpus_per_node", None))
+                                  if getattr(args, "rl_island_gpus_per_node", None) is not None
+                                  and dedicated_rollout_gpus is not None else None),
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,

@@ -87,3 +87,48 @@ def test_wait_ends_when_streams_end_or_at_the_deadline(tmp_path):
     assert wait_for_tapes({"l0": c}, ["l0"], [t], limit=2, clock=lambda: next(clock),
                           sleep=lambda s: None) == "deadline"
     alive.set()
+
+
+def test_recover_from_the_island_tape_file_completes_a_closed_tape(tmp_path):
+    """S1 2x1 L40S (s1-mn-20261004a): the stream delivered no run-phase line; the island's
+    own ~/yeto-output/rl-island-0.jsonl holds the whole tape."""
+    c = TapeCollector(tmp_path / "t.jsonl")
+    c.feed(f"{PREFIX}{_rec('rl_driver_phase')}\n")
+    assert c.close() is False and c.incomplete_marker.exists()
+    island = tmp_path / "rl-island-0.jsonl"
+    island.write_text(_rec("rl_driver_phase") + "\n" + _rec("rl_round_trained") + "\n"
+                      + "not a record\n" + _rec(FINALIZED_EVENT) + "\n")
+    assert c.recover_from_file(island) is True
+    assert c.closed and c.count == 3 and c.discarded == 1 and not c.incomplete_marker.exists()
+    assert _tape(tmp_path / "t.jsonl") == ["rl_driver_phase", "rl_round_trained", FINALIZED_EVENT]
+    # a tape file without the finalized record stays incomplete (fail closed)
+    d = TapeCollector(tmp_path / "u.jsonl")
+    d.close()
+    partial = tmp_path / "rl-island-1.jsonl"
+    partial.write_text(_rec("rl_driver_phase") + "\n")
+    assert d.recover_from_file(partial) is False and d.incomplete_marker.exists()
+
+
+def test_launcher_recovers_echo_tape_over_rsync(tmp_path):
+    from pathlib import Path
+
+    from yeto.launcher import _recover_echo_tape
+
+    c = TapeCollector(tmp_path / "t.jsonl")
+    c.close()
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        Path(cmd[-1], "rl-island-0.jsonl").write_text(_rec("rl_driver_phase") + "\n" + _rec(FINALIZED_EVENT) + "\n")
+
+    assert _recover_echo_tape("isl-l0", c, run=fake_run) is True
+    assert seen["cmd"][:2] == ["rsync", "-az"] and seen["cmd"][2] == "isl-l0:yeto-output/rl-island-*.jsonl"
+    assert _tape(tmp_path / "t.jsonl") == ["rl_driver_phase", FINALIZED_EVENT]
+
+    def failing_run(cmd, **kw):
+        raise RuntimeError("ssh: no route")
+
+    e = TapeCollector(tmp_path / "e.jsonl")
+    e.close()
+    assert _recover_echo_tape("isl-l0", e, run=failing_run) is False and e.incomplete_marker.exists()

@@ -227,7 +227,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         dest="rollout_num_gpus",
         type=int,
         default=None,
-        help="ports fixed partition: dedicated rollout GPUs per island node (rl-infra-spec 2.1). "
+        help="ports fixed partition: dedicated rollout GPUs per island (rl-infra-spec 2.1; "
+        "on a multi-node island the island total, laid out after the trainer's nodes). "
         "Note: on `launch`, a bare --rollout-num-gpus is an argparse abbreviation of "
         "--rollout-num-gpus-per-engine, not this option",
     )
@@ -236,6 +237,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         help="ports fixed partition: reserved standby GPUs never started by any role",
+    )
+    rl.add_argument(
+        "--rl-min-nodes-per-learner",
+        type=int,
+        default=0,
+        help="rl-multinode-island: refuse a learner island with fewer nodes (0 = the "
+        "recipe-derived minimum: one TP*PP replica + one rollout engine + standby)",
     )
     rl.add_argument(
         "--rl-overlap-eval",

@@ -170,6 +170,9 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
     parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
     parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
+    # rl-multinode-island: GPUs per island node when the island spans nodes (the
+    # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
+    parser.add_argument("--rl-island-gpus-per-node", type=int, default=None)
     # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
     parser.add_argument("--rl-elastic-declare-cells", action="store_true")
     # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,

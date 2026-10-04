@@ -7,6 +7,8 @@ runtime has not attested is ``blocked_dependency``, never silently downgraded.
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +50,9 @@ class ResourceConfig:
     parallel: tuple[tuple[str, int], ...] = ()  # fixed TP/PP/CP/EP, default all 1
     rollout_engine_gpus: int = 1
     placement: dict[str, Any] | None = None  # explicit GPU uuids per role
+    # rl-multinode-island D2: the same placement as (node, local_gpu) slots when
+    # the manifest declares a node topology; None on a legacy single-node cfg.
+    placement_slots: dict[str, Any] | None = None
     gradient_accumulation_declared: int | None = None
     capacity: dict[str, float] | None = None
 
@@ -193,7 +198,49 @@ def parse_configs(resources: dict[str, Any]) -> dict[str, ResourceConfig]:
                 raise ManifestError(f"config {name!r}.{role} must be a non-negative integer")
             values[role] = count
         configs[name] = ResourceConfig(name, **values, **_parse_config_extras(name, block))
+    topology = _manifest_topology(resources)
+    if topology is not None:
+        configs = {name: _with_node_slots(cfg, topology, resources) for name, cfg in configs.items()}
     return configs
+
+
+def _manifest_topology(resources: dict[str, Any]):
+    """rl-multinode-island D2: ``Topology`` when ``nodes``/``gpus_per_node`` are
+    declared (pool checked against it), None for a legacy cfg (unchanged path)."""
+    from yeto.rl.engine.multinode import TopologyError, check_pool_topology, topology_of
+
+    try:
+        topology = topology_of(resources)
+        if topology is not None:
+            check_pool_topology(resources, topology)
+    except TopologyError as exc:
+        raise ManifestError(str(exc)) from None
+    return topology
+
+
+def _with_node_slots(config: ResourceConfig, topology, resources: dict[str, Any]) -> ResourceConfig:
+    from yeto.rl.engine.multinode import TopologyError, node_placement_rejection, normalize_placement
+
+    if config.total != topology.total:
+        raise ManifestError(f"config {config.name!r} uses {config.total} GPUs but the island is "
+                            f"{topology.nodes} x {topology.gpus_per_node} = {topology.total}")
+    if config.placement is None:
+        return config
+    pool = {g["uuid"]: g for g in resources.get("gpus") or [] if isinstance(g, dict)}
+    try:
+        slots = normalize_placement(config.placement, topology, pool)
+    except TopologyError as exc:
+        raise ManifestError(f"config {config.name!r}: {exc}") from None
+    counts = (len(slots["trainer"]), sum(len(e) for e in slots["rollout"]), len(slots["standby"]))
+    if counts != (config.trainer, config.rollout, config.standby):
+        raise ManifestError(f"config {config.name!r} placement maps T{counts[0]} R{counts[1]} "
+                            f"S{counts[2]} but declares T{config.trainer} R{config.rollout} S{config.standby}")
+    reason = node_placement_rejection(slots, model_parallel=config.model_parallel,
+                                      expert_parallel=config.dims["ep"],
+                                      gpus_per_engine=config.rollout_engine_gpus)
+    if reason:
+        raise ManifestError(f"config {config.name!r}: {reason}")
+    return dataclasses.replace(config, placement_slots=slots)
 
 
 def _parse_config_extras(name: str, block: dict[str, Any]) -> dict[str, Any]:
@@ -241,6 +288,13 @@ def placement_rejection(config: ResourceConfig, pool: dict[str, dict[str, Any]])
     """Illegal explicit GPU mapping, or None. Pure; the pool is the manifest's GPU list."""
     placement = config.placement
     if placement is None:
+        return None
+    if config.placement_slots is not None and not all(
+            isinstance(u, str) and u in pool
+            for u in list(placement.get("trainer", [])) + list(placement.get("standby", []))
+            + [u for e in placement.get("rollout", []) for u in e]):
+        # Multi-node slot/bundle spellings were already checked node-wise by
+        # parse_configs; there are no uuids to look up here.
         return None
     if not pool:
         return "explicit placement needs a resolved resources.gpus pool"

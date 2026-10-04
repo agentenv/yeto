@@ -219,6 +219,53 @@ fi
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48}
 
 
+# rl-multinode-island D6: per-cloud NCCL/GLOO socket settings for a multi-node
+# island (values are the CPU-side best guess; GPU task G1 confirms them).
+# "auto": the first non-virtual interface that is up, resolved on the node
+# (G1 2026-10-03: a Nebius L40S node's NIC is "network-interface-0", shown
+# truncated as "network-interfa"; "eth0" made gloo fail with "Unable to find
+# address for: eth0" in the SGLang scheduler).  "" leaves NCCL/gloo to their
+# own detection.  NCCL_SOCKET_IFNAME in the environment always wins.
+MULTINODE_SOCKET_IFNAME = {"nebius": "auto", "aws": "", "gcp": "", "ssh": ""}
+_DETECT_IFACE = (
+    "YETO_IFACE=${NCCL_SOCKET_IFNAME:-$(for d in /sys/class/net/*; do n=$(basename \"$d\"); "
+    "case \"$n\" in lo|docker*|veth*|br-*|virbr*) continue;; esac; "
+    "[ \"$(cat \"$d/operstate\" 2>/dev/null)\" = up ] && { echo \"$n\"; break; }; done)}"
+)
+
+
+def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
+    """Shell exports every island node runs before Ray starts; "" on one node."""
+    if num_nodes <= 1:
+        return ""
+    lines = ["export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}",
+             "export NCCL_DEBUG=${NCCL_DEBUG:-WARN}"]
+    iface = MULTINODE_SOCKET_IFNAME.get(cloud, "")
+    if iface == "auto":
+        lines += [_DETECT_IFACE,
+                  'echo "[yeto-island] socket interface: ${YETO_IFACE:-<none>}"',
+                  'export NCCL_SOCKET_IFNAME="$YETO_IFACE" GLOO_SOCKET_IFNAME="$YETO_IFACE"']
+    elif iface:
+        lines += [f"export NCCL_SOCKET_IFNAME={iface}", f"export GLOO_SOCKET_IFNAME={iface}"]
+    return "\n".join(lines) + "\n"
+
+
+# Clouds that accept sky's ``network_tier="best"`` only for some shapes: Nebius
+# offers the InfiniBand tier for H100:8 / H200:8 nodes only and REJECTS the
+# request for anything else ("Catalog does not contain any instances"), so a
+# 2x1xL40S island must not ask for it (G1 of rl-multinode-island: the D6
+# prelude already runs NCCL over TCP with NCCL_IB_DISABLE=1 there).
+NETWORK_TIER_BEST_SHAPES = {"nebius": {("H100", 8), ("H200", 8)}}
+
+
+def multinode_network_tier(cloud: str, gpu: str, gpus_per_node: int) -> str | None:
+    """``"best"`` for a multi-node island when the cloud can honor it, else None."""
+    shapes = NETWORK_TIER_BEST_SHAPES.get(cloud)
+    if shapes is not None and (gpu.upper(), int(gpus_per_node)) not in shapes:
+        return None
+    return "best"
+
+
 def rl_actor_gpus_per_node(args, spec) -> int:
     """Trainer GPUs per node: all of them when colocated; under
     ``--rl-placement fixed-partition`` the rest after rollout and standby."""
@@ -228,7 +275,58 @@ def rl_actor_gpus_per_node(args, spec) -> int:
     standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
     if rollout < 1:
         raise ValueError("--rl-placement fixed-partition needs --rollout-num-gpus >= 1")
-    return spec.gpus_per_node - rollout - standby
+    if spec.num_nodes == 1:
+        return spec.gpus_per_node - rollout - standby
+    return rl_trainer_shape(args, spec)[1]
+
+
+def rl_trainer_shape(args, spec) -> tuple[int, int]:
+    """``(actor_num_nodes, actor_num_gpus_per_node)`` of the island's trainer
+    (rl-multinode-island D5). Colocated: every GPU. Fixed partition: the island
+    total minus ``--rl-rollout-gpus`` and ``--rl-standby-gpus`` (island totals),
+    laid out as the leading logical bundles; it must occupy the same number of
+    GPUs on every node it uses (Miles' rectangle) and keep every TP*PP group
+    on one node."""
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        return spec.num_nodes, spec.gpus_per_node
+    rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
+    standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
+    if rollout < 1:
+        raise ValueError("--rl-placement fixed-partition needs --rollout-num-gpus >= 1")
+    trainer = spec.total_gpus - rollout - standby
+    if trainer < 1:
+        raise ValueError(
+            "--rl-placement fixed-partition needs --rl-rollout-gpus + --rl-standby-gpus "
+            f"< island GPUs ({spec.total_gpus})"
+        )
+    from .rl.engine.multinode import Topology, TopologyError, rectangular_trainer
+
+    topology = Topology(spec.num_nodes, spec.gpus_per_node)
+    try:
+        return rectangular_trainer([topology.slot_of(b) for b in range(trainer)])
+    except TopologyError as exc:
+        raise ValueError(f"--rl-placement fixed-partition on {spec}: {exc}") from None
+
+
+def rl_min_nodes(args, spec) -> int:
+    """Minimum learner nodes (rl-multinode-island D8): one trainer model-parallel
+    replica + one rollout engine + standby, or ``--rl-min-nodes-per-learner``
+    when that is larger."""
+    from .rl.engine.multinode import TopologyError, min_nodes
+
+    explicit = int(getattr(args, "rl_min_nodes_per_learner", 0) or 0)
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        return max(1, explicit)
+    tp = int(getattr(args, "tensor_parallel", 1) or 1)
+    pp = int(getattr(args, "pipeline_parallel", 1) or 1)
+    engine = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
+    try:
+        derived = min_nodes(trainer_min_gpus=tp * pp, rollout_min_gpus=engine,
+                            standby_gpus=int(getattr(args, "rl_standby_gpus", 0) or 0),
+                            gpus_per_node=spec.gpus_per_node)
+    except TopologyError as exc:
+        raise ValueError(f"recipe parallelism does not fit {spec}: {exc}") from None
+    return max(derived, explicit)
 
 
 def build_syncer_binary() -> Path:
@@ -1644,15 +1742,21 @@ def _prepare_rl_args(
         if getattr(args, "rl_placement", "colocated") == "fixed-partition":
             # rl-infra-spec 2.1: the node's GPUs are trainer + rollout + standby;
             # parallel-size checks below apply to the trainer part.
-            actor = rl_actor_gpus_per_node(args, spec)
-            if spec.num_nodes != 1 or actor < 1:
+            if spec.num_nodes == 1 and rl_actor_gpus_per_node(args, spec) < 1:
                 raise ValueError(
                     "--rl-placement fixed-partition needs one node with "
                     "--rollout-num-gpus + --rl-standby-gpus < GPUs per node"
                 )
             if int(args.rollout_num_gpus) % args.rollout_num_gpus_per_engine:
                 raise ValueError("--rollout-num-gpus must be a multiple of --rollout-num-gpus-per-engine")
-            spec = dataclasses.replace(spec, gpus_per_node=actor)
+            from .gpu_spec import require_min_nodes
+
+            require_min_nodes(spec, rl_min_nodes(args, spec))
+            actor_nodes, actor = rl_trainer_shape(args, spec)
+            if spec.num_nodes > 1 and model_parallel > spec.gpus_per_node:
+                raise ValueError("RL TP*PP must fit one node (rl-multinode-island: no cross-node "
+                                 "model-parallel group)")
+            spec = dataclasses.replace(spec, num_nodes=actor_nodes, gpus_per_node=actor)
         if spec.total_gpus % model_parallel:
             raise ValueError(
                 "RL TP*PP must divide every island GPU world size"
@@ -2399,9 +2503,10 @@ def make_miles_island_task(
         f" --rollout-max-response-len {args.rollout_max_response_len}"
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
-        f" --actor-num-nodes {spec.num_nodes}"
-        f" --actor-num-gpus-per-node {rl_actor_gpus_per_node(args, spec)}"
-        f" --tensor-parallel {args.tensor_parallel}"
+        f" --actor-num-nodes {rl_trainer_shape(args, spec)[0]}"
+        f" --actor-num-gpus-per-node {rl_trainer_shape(args, spec)[1]}"
+        + (f" --rl-island-gpus-per-node {spec.gpus_per_node}" if spec.num_nodes > 1 else "")
+        + f" --tensor-parallel {args.tensor_parallel}"
         f" --pipeline-parallel {args.pipeline_parallel}"
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
@@ -2550,6 +2655,21 @@ def make_miles_island_task(
             f"(nohup huggingface-cli download {shlex.quote(model)}{revision} "
             ">/tmp/hf-prefetch.log 2>&1 &) || true"
         )
+    worker_model_fetch = ""
+    if spec.num_nodes > 1 and not is_local_reference(model):
+        # Same call and cache as the learner's own snapshot_download on the
+        # head (python3 of the image; `huggingface-cli` is not on the run
+        # shell's PATH there: s1-mn-20261003f), so the two nodes resolve the
+        # same snapshot directory.
+        fetch_py = (
+            "from huggingface_hub import snapshot_download; "
+            f"print(snapshot_download(repo_id={model!r}, revision={args.model_revision!r}))"
+        )
+        worker_model_fetch = (
+            f"  python3 -c {shlex.quote(fetch_py)} >/tmp/hf-prefetch-worker.log 2>&1 "
+            "|| { echo '[yeto-island] worker could not fetch the model snapshot:' >&2; "
+            "tail -5 /tmp/hf-prefetch-worker.log >&2; exit 1; }\n"
+        )
     file_mounts = dict(learner_file_mounts(args.data))
     if getattr(args, "rl_initial_adapter", None) is not None:
         file_mounts[RL_INITIAL_ADAPTER_PATH] = os.path.expanduser(
@@ -2652,6 +2772,7 @@ def make_miles_island_task(
             f"{login_unset}{HF_TOKEN_ENV}\n"
             "set -e\n"
             "cd ~/sky_workdir\n"
+            f"{multinode_env_prelude(spec.cloud, spec.num_nodes)}"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
             # The island's Ray lives in its own temp dir so that cleanup can
             # target it by path.  A whole-machine `ray stop` would also kill
@@ -2676,7 +2797,13 @@ def make_miles_island_task(
             "  ray start --head --node-ip-address=\"$MASTER_ADDR\" "
             # Dashboard on: Miles' --pin-rollout-manager-to-head lists
             # nodes through Ray's state API, which the dashboard serves.
-            '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"\n'
+            # On a multi-node island the dashboard must listen on the node
+            # ip, not 127.0.0.1: Ray registers the dashboard address in GCS
+            # as given, and a Miles manager actor scheduled on a worker node
+            # then asks 127.0.0.1:8265 and fails (rl-multinode-island G1,
+            # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
+            '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
+            + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             "  trap stop_miles_ray EXIT\n"
             # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.
@@ -2686,9 +2813,24 @@ def make_miles_island_task(
             "${PYTHONPATH:+:$PYTHONPATH} "
             f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}\n"
             "else\n"
-            '  until ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"; '
-            "do sleep 2; done\n"
+            # rl-multinode-island D1: the trap is armed before the join loop so a
+            # worker killed while joining still cleans its Miles Ray; the join is
+            # bounded (head never came up -> the node exits non-zero instead of
+            # looping forever).
             "  trap stop_miles_ray EXIT\n"
+            # rl-multinode-island G1 (2026-10-03): the learner (head) resolves
+            # the model to its own HF-cache snapshot path and hands that path
+            # to the rollout engines; an engine on a worker node needs the
+            # same snapshot in the worker's cache.  The setup prefetch is a
+            # background download, so wait for it here (foreground, same
+            # revision, idempotent) before joining the Ray; a failed fetch
+            # ends this node non-zero instead of a later engine start error.
+            f"{worker_model_fetch}"
+            "  for _ in $(seq 1 150); do "
+            'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR" && break; '
+            "sleep 2; done\n"
+            "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
+            "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"
             "  while ray status --address=\"$MASTER_ADDR:6379\" "
             ">/dev/null 2>&1; do sleep 5; done\n"
             "fi"
@@ -2708,7 +2850,9 @@ def make_miles_island_task(
     }
     resources["image_id"] = args.rl_image
     if spec.num_nodes > 1:
-        resources["network_tier"] = "best"
+        tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
+        if tier:
+            resources["network_tier"] = tier
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
         task.set_resources(sky.Resources(**resources))
     if args.spot:
@@ -3117,7 +3261,9 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         # NCCL silently falls back to TCP — NCCL_DEBUG below makes the
         # chosen transport visible in the job logs (look for
         # "NET/OFI Selected Provider is efa").
-        resources_kwargs["network_tier"] = "best"
+        tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
+        if tier:
+            resources_kwargs["network_tier"] = tier
     if spec.cloud == "modal":
         # Not a sky cloud: build_modal_island_config reads only this task's
         # run script and envs; the Modal runner sizes the container itself.
@@ -3551,6 +3697,40 @@ def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
             time.sleep(5)
 
 
+ECHO_TAPE_RECOVER_TIMEOUT_S = 180.0
+
+
+def _recover_echo_tape(cluster: str, collector, *, run=None, timeout: float = ECHO_TAPE_RECOVER_TIMEOUT_S) -> bool:
+    """A no-sync sky island whose echoed tape stayed incomplete: fetch the
+    island's own tape files (``~/yeto-output/rl-island-*.jsonl``, the source
+    the echo mirrors) over the ssh alias sky wrote and complete the local tape
+    from them. The S1 2x1 L40S runs (2026-10-03/04) showed ``sky.tail_logs``
+    delivering the setup lines but no run-phase line at all, so the stream
+    alone cannot be the only source. Returns whether the tape is finalized;
+    any fetch failure leaves it incomplete (fail closed) and is printed."""
+    import tempfile
+
+    run = run or subprocess.run
+    with tempfile.TemporaryDirectory(prefix="yeto-tape-") as tmp:
+        cmd = ["rsync", "-az", f"{cluster}:yeto-output/rl-island-*.jsonl", f"{tmp}/"]
+        try:
+            run(cmd, check=True, timeout=timeout, capture_output=True)
+        except Exception as e:  # noqa: BLE001 - subprocess/timeout: report, stay incomplete
+            print(f"[launcher] {cluster}: tape recovery fetch failed ({e})", file=sys.stderr)
+            return False
+        files = sorted(Path(tmp).glob("rl-island-*.jsonl"))
+        if not files:
+            print(f"[launcher] {cluster}: tape recovery found no rl-island-*.jsonl", file=sys.stderr)
+            return False
+        before = collector.count
+        complete = False
+        for f in files:
+            complete = collector.recover_from_file(f) or complete
+        print(f"[launcher] {cluster}: tape recovered from {[f.name for f in files]}: "
+              f"+{collector.count - before} record(s), finalized={complete}")
+        return complete
+
+
 def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
     import sky
 
@@ -3656,10 +3836,17 @@ class SkySDKOps:
             print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
             return None
 
+    def __init__(self, nodes_by_cluster=None):
+        # rl-multinode-island D10: the controller's failure-path teardown (job FAILED ->
+        # recovery refused -> _down) must verify EVERY node instance, like run()'s final
+        # teardown; without the mapping a cluster is treated as single-node.
+        self.nodes_by_cluster = dict(nodes_by_cluster or {})
+
     def down(self, cluster: str) -> None:
         import sky
 
-        terminate_and_verify(sky, cluster)
+        nodes = getattr(self, "nodes_by_cluster", None) or {}
+        terminate_and_verify(sky, cluster, num_nodes=nodes.get(cluster, 1))
 
     def now(self) -> float:
         return time.monotonic()
@@ -4467,7 +4654,7 @@ def _cloud_live_instances_probe(cluster: str):
 
 
 def terminate_and_verify(
-    sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep, down=None
+    sky, cluster, *, probe="auto", attempts=4, sleep_fn=time.sleep, down=None, num_nodes=1
 ) -> bool:
     """sky.down a cluster and CONFIRM at the cloud level that no instance
     survives, retrying the down while the cloud still reports live ones.
@@ -4489,6 +4676,9 @@ def terminate_and_verify(
     if probe == "auto":
         probe = _cloud_live_instances_probe(cluster)
     down = down or (lambda: sky.get(sky.down(cluster)))
+    if int(num_nodes or 1) > 1:
+        return _terminate_and_verify_nodes(cluster, probe=probe, attempts=attempts,
+                                           sleep_fn=sleep_fn, down=down, num_nodes=int(num_nodes))
 
     def _down():
         try:
@@ -4523,6 +4713,52 @@ def terminate_and_verify(
         return True
 
 
+def _terminate_and_verify_nodes(cluster, *, probe, attempts, sleep_fn, down, num_nodes) -> bool:
+    """rl-multinode-island D10: a multi-node island is confirmed gone only when the
+    cloud confirms EVERY node instance. The instance ids are captured before the
+    first down; no cloud probe, a failing probe or any instance still live after
+    the retries -> False, with the unconfirmed instance ids listed. sky.down's own
+    result is never trusted for more than one node."""
+    if probe is None:
+        print(f"[launcher] {cluster}: {num_nodes}-node island cannot be cloud-verified; "
+              "NOT confirmed down (check the cloud console)", file=sys.stderr)
+        return False
+    try:
+        before = list(probe())
+    except Exception as e:  # noqa: BLE001 - verification must not rely on sky's DB
+        print(f"[launcher] {cluster}: cloud probe before down failed ({e}); NOT confirmed",
+              file=sys.stderr)
+        return False
+    if len(before) != num_nodes:
+        print(f"[launcher] {cluster}: cloud shows {len(before)} instance(s) for a {num_nodes}-node "
+              f"island ({','.join(map(str, before))}); verifying what the cloud reports", file=sys.stderr)
+    live = before
+    for i in range(attempts + 1):
+        try:
+            down()
+        except Exception as e:  # noqa: BLE001
+            print(f"[launcher] sky.down({cluster}) error: {e}", file=sys.stderr)
+        try:
+            live = list(probe())
+        except Exception as e:  # noqa: BLE001
+            print(f"[launcher] {cluster}: cloud verify failed ({e}); NOT confirmed", file=sys.stderr)
+            return False
+        if not live:
+            for iid in before:
+                print(f"[launcher] {cluster}: node instance {iid} confirmed terminated")
+            if not before:
+                print(f"[launcher] {cluster}: cloud reports no instances (confirmed)")
+            return True
+        if i < attempts:
+            print(f"[launcher] {cluster}: {len(live)} node instance(s) still live "
+                  f"({','.join(map(str, live))}); retrying teardown ({i + 1}/{attempts})", file=sys.stderr)
+            sleep_fn(min(30, 5 * (i + 1)))
+    print(f"[launcher] {cluster}: UNCONFIRMED node instance(s) {','.join(map(str, live))} "
+          "still live after teardown; delete them in the cloud console or rerun `yeto down`",
+          file=sys.stderr)
+    return False
+
+
 def run(args, on_clusters=None, local_syncer=None) -> int:
     """Provision and supervise the fleet; returns the run's exit code.
 
@@ -4555,6 +4791,8 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
     if no_sync and head_mode:
         raise ValueError("--rl-single-island-no-sync has no syncer; do not run it as a head")
     specs = parse_gpu_spec(args.gpu)
+    nodes_by_cluster = dict(zip(learner_cluster_names(args.cluster_prefix, specs),
+                                (s.num_nodes for s in specs)))  # rl-multinode-island D10
     no_sync_incomplete: list[str] = []
     # Islands whose tape travels over the log stream (no fetchable
     # ~/yeto-output): every Modal RL ports island, and a no-sync island.
@@ -4785,10 +5023,13 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
         from . import runs
         from .modal_runner import RoutingOps
 
+        sky_sdk_ops = SkySDKOps()
+        # rl-multinode-island D10: the failure-path teardown verifies every node instance
+        sky_sdk_ops.nodes_by_cluster = dict(nodes_by_cluster)
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
             syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
-            sky_ops=RoutingOps(SkySDKOps(), modal_island_ops),
+            sky_ops=RoutingOps(sky_sdk_ops, modal_island_ops),
             poll_interval=args.controller_poll,
             recover_timeout=effective_recover_timeout(args),
             on_relaunch=spawn_tail,
@@ -4821,6 +5062,9 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                         f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
                         f"{collector.discarded} malformed prefixed line(s) discarded"
                     )
+                    if not complete and name not in modal_cfgs:
+                        # sky island: the tape file itself is reachable, complete from it
+                        complete = _recover_echo_tape(name, collector)
                     if not complete:
                         no_sync_incomplete.append(name)
                         print(
@@ -4949,7 +5193,7 @@ def run(args, on_clusters=None, local_syncer=None) -> int:
                     except Exception as e:  # noqa: BLE001 - app stop below is the backstop
                         print(f"[launcher] cancel of {name} failed: {e}", file=sys.stderr)
                     continue
-                if not terminate_and_verify(sky, name):
+                if not terminate_and_verify(sky, name, num_nodes=nodes_by_cluster.get(name, 1)):
                     unverified.append(name)
             if modal_ops is not None:
                 # Belt and braces: stop the whole per-run Modal app so no

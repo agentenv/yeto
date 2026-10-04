@@ -238,6 +238,8 @@ class IslandController:
         trainer_rebuilder: Callable[..., Mapping[str, Any]] | None = None,
         trainer_edges: Callable[[], Mapping[str, Any]] | None = None,
         max_recovery_attempts: int = 3,
+        topology: tuple[int, int] | None = None,
+        node_probe: Callable[[], Any] | None = None,
     ) -> None:
         if initial_config not in configs:
             raise Rejected(f"initial config {initial_config!r} is unknown")
@@ -297,6 +299,12 @@ class IslandController:
         if int(max_recovery_attempts) < 1:
             raise Rejected("max_recovery_attempts must be >= 1")
         self.max_recovery_attempts = int(max_recovery_attempts)
+        # rl-multinode-island D9: (nodes, gpus_per_node) of the island and a probe
+        # returning the alive node ids (or {node_id: gpus} mapping). None = single node.
+        self.topology: tuple[int, int] | None = None
+        self._topology_checked = False
+        self._node_probe: Callable[[], Any] | None = None
+        self.set_topology(topology, node_probe)
         self._recovery_unverified = 0  # consecutive planned recoveries never verified
         self._recovery_open_id: str | None = None  # planned, not verified/failed/superseded
         import uuid as _uuid
@@ -438,6 +446,88 @@ class IslandController:
                              error=f"watchdog could not kill the target generation in {phase}: "
                                     f"{list(errors)[:2]!r}")
 
+    # ------------------------------------------------------------- node topology (D9)
+    def set_topology(self, topology: tuple[int, int] | None,
+                     node_probe: Callable[[], Any] | None = None) -> None:
+        if topology is not None:
+            nodes, per = int(topology[0]), int(topology[1])
+            if nodes < 1 or per < 1:
+                raise Rejected(f"topology {topology!r} must be (nodes >= 1, gpus_per_node >= 1)")
+            topology = (nodes, per)
+        if topology != getattr(self, "topology", None):
+            self._topology_checked = False  # refuse_partial_island() ran for this topology
+        self.topology = topology
+        self._node_probe = node_probe
+
+    def _alive_nodes(self) -> tuple[list[Any], dict[Any, int] | None]:
+        """``(alive node ids, {node: gpus} or None)`` from the probe (raises on failure)."""
+        alive = self._node_probe() if self._node_probe is not None else None
+        if alive is None:
+            return [], None
+        if isinstance(alive, Mapping):
+            return list(alive), {k: int(v) for k, v in alive.items()}
+        return list(alive), None
+
+    def topology_rejection(self) -> str | None:
+        """Why the island's alive nodes do not match its declared topology (None when
+        they do, or when there is no topology/probe): fewer alive nodes than declared,
+        or a node exposing another GPU count (same-shape rule, hostnames may change)."""
+        if self.topology is None or self._node_probe is None:
+            return None
+        nodes, per = self.topology
+        try:
+            alive, gpus = self._alive_nodes()
+        except Exception as exc:  # noqa: BLE001 - unknown node state: do not act
+            return f"node probe failed: {exc!r}"
+        if len(alive) < nodes:
+            return f"{len(alive)} of {nodes} island nodes alive ({sorted(map(str, alive))})"
+        if gpus is not None:
+            bad = {str(n): g for n, g in gpus.items() if g != per}
+            if bad:
+                return f"nodes {bad} do not expose {per} GPUs (topology {nodes}x{per})"
+        return None
+
+    def refuse_partial_island(self) -> str | None:
+        """Startup precondition (D9, tasks 3.3): one ``topology`` journal record (declared
+        nodes/gpus_per_node, alive nodes, incarnation); on a partial island enter
+        RECOVERY_REQUIRED and return why, else None. Runs once per incarnation: the entry
+        preflight calls it right after the Ray connect (before any placement group is
+        created, which would hang on a dead node) and :meth:`open` then skips it. No-op
+        (None) without a topology."""
+        if self.topology is None:
+            return None
+        self._topology_checked = True
+        try:
+            alive: Any = [str(n) for n in self._alive_nodes()[0]]
+        except Exception as exc:  # noqa: BLE001
+            alive = f"probe failed: {exc!r}"
+        self._record("topology", tx_id=None, nodes=self.topology[0], gpus_per_node=self.topology[1],
+                     alive=alive, incarnation=self.incarnation["id"])
+        why = self.topology_rejection()
+        if why is not None:
+            # D9: never touch the fork's membership epoch on a partial island; the
+            # restart precondition fails before any restore/start/stop call.
+            self._enter_recovery(None, f"island topology: {why}; recovery refused on fewer nodes")
+        return why
+
+    def check_nodes(self) -> str | None:
+        """Driver poll (D9): any node loss -> ``node_lost`` journal record and the
+        RECOVERY_REQUIRED terminal state (admission closed). Returns the error, or
+        None while every declared node is alive. Idempotent once entered."""
+        if self.recovery_required:
+            return self.recovery_required
+        why = self.topology_rejection()
+        if why is None:
+            return None
+        alive: Any = None
+        try:
+            alive = [str(n) for n in self._alive_nodes()[0]]
+        except Exception:  # noqa: BLE001
+            pass
+        self._record("node_lost", tx_id=None, topology=list(self.topology or ()), alive=alive, error=why)
+        self._enter_recovery(None, f"node_lost: {why}; the island does not run on fewer nodes")
+        return self.recovery_required
+
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler
 
@@ -457,6 +547,11 @@ class IslandController:
     def open(self, pool: ElasticRolloutPool) -> IslandStatus:
         """Reconcile the fork's membership mirror with the journal (f-design §1.3 rule 3)."""
         self._pool = pool
+        if self.topology is not None:
+            if not self._topology_checked:  # not already done by the entry preflight
+                self.refuse_partial_island()
+            if self.recovery_required:
+                return self.inspect()
         status = dict(pool.membership_status())
         fork_epoch = int(status.get("epoch", 0))
         expected = self._fork_epoch
@@ -550,6 +645,9 @@ class IslandController:
         """Why the committed config cannot be recovered by rollout cell start/stop
         (recovery-design.md §2): None when it can."""
         epochs = self.journal.epochs
+        topology_why = self.topology_rejection()  # D9: never recover onto fewer nodes
+        if topology_why is not None:
+            return f"island topology: {topology_why}"
         cfg = self.configs.get(epochs.config_id)
         if cfg is None:
             return f"committed config {epochs.config_id!r} is unknown"
@@ -675,6 +773,11 @@ class IslandController:
         pool = driver.rollout
         if self._wall() > pending["deadline_wall"]:
             failures.append("recovery ran past T_recovery before verification")
+        if self.topology is not None:
+            topology_why = self.topology_rejection()
+            checks["nodes"] = "ok" if topology_why is None else topology_why
+            if topology_why is not None:
+                failures.append(f"island topology: {topology_why}")
         members = frozenset(pool.members())
         checks["members"] = sorted(members)
         if members != target:
