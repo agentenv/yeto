@@ -158,7 +158,7 @@ def test_driver_reports_each_rounds_own_nonzero_advantages(tmp_path):
                         step_delta=1.0)
     counts = {0: 24, 1: 16, 2: 24}
     original = engine.rollout.generate
-    engine.rollout.generate = lambda r: dataclasses.replace(original(r), nonzero_advantages=counts[r])
+    engine.rollout.generate = lambda r, **kw: dataclasses.replace(original(r, **kw), nonzero_advantages=counts[r])
     IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
                  policy_state=engine.policy_state, publisher=engine.publisher,
                  placement=engine.placement, capabilities=fake_capabilities(),
@@ -217,7 +217,7 @@ def test_sample_filter_counts_reach_the_round_event(tmp_path):
                         step_delta=1.0)
     original = engine.rollout.generate
 
-    def gen(r):
+    def gen(r, **kw):
         b = original(r)
         groups = tuple(dataclasses.replace(g, filtered_samples=i) for i, g in enumerate(b.groups))
         return dataclasses.replace(b, groups=groups)
@@ -262,7 +262,10 @@ def test_router_inflight_probe_and_driver_sampler(tmp_path):
     assert pool.load_sample(http_get=router_only) == {
         "active_requests": 4, "workers": 2, "cordoned": 1, "running_requests": None,
         "queued_requests": None, "engine_capacity": None, "tool_wait_trajectories": None,
-        "ready_groups": None, "load_class": "unknown"}
+        "ready_groups": None, "load_class": "unknown",
+        # IR-2/IR-4: no harness source wired -> unknown (None), never 0
+        "harness_in_flight": None, "env_live": None, "tito_session_mismatch": None,
+        "tito_chain_breaks": None, "policy_age_violation": None}
     assert seen[0] == "http://10.0.0.1:3000/worker_inflight"
 
     def missing(url):
@@ -275,7 +278,7 @@ def test_router_inflight_probe_and_driver_sampler(tmp_path):
     engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
                         step_delta=1.0, placement_kind="fixed-partition")
     original = engine.rollout.generate
-    engine.rollout.generate = lambda r: (_time.sleep(0.12), original(r))[1]
+    engine.rollout.generate = lambda r, **kw: (_time.sleep(0.12), original(r, **kw))[1]
     engine.rollout.load_sample = lambda: {"active_requests": 2, "workers": 1, "cordoned": 0}
     profile = ExecutionProfile(name="p", execution_mode="partitioned-serial",
                                outer_protocol="none").bind_algorithm(AlgorithmSpec())

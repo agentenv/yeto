@@ -382,8 +382,8 @@ def test_nonfinite_reward_is_rejected_before_training(tmp_path):
     engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)})
     generate = engine.rollout.generate
 
-    def nan_generate(rollout_id):
-        batch = generate(rollout_id)
+    def nan_generate(rollout_id, **kw):
+        batch = generate(rollout_id, **kw)
         g = batch.groups[0]
         bad = GroupMetadata(g.group_id, g.sample_ids, g.policy_token, math.nan, math.nan, 3)
         return type(batch)(

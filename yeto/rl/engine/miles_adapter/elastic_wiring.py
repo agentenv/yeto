@@ -44,6 +44,7 @@ def build_elastic(
     idle_flow_timeout_s: float | None = None,
     pause_margin: float | None = None,
     trainer_edges: Any = None,
+    max_recovery_attempts: int | None = None,
 ) -> ElasticWiring:
     """``on_watchdog(tx_id, phase)`` runs on the watchdog thread when the absolute
     transaction deadline passes while a step is still blocked. Default
@@ -81,6 +82,8 @@ def build_elastic(
         inbox=CommandInbox(state / "inbox"),
         on_watchdog=None if isinstance(on_watchdog, str) else on_watchdog,
         trainer_edges=trainer_edges,
+        # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
+        **({} if max_recovery_attempts is None else {"max_recovery_attempts": int(max_recovery_attempts)}),
         # 3.8: the strict pause budget is min(margin x the syncer's
         # --quorum-timeout-s, measured idle-flow timeout); None keeps the
         # audited defaults (syncer default 900 s, margin 0.5).

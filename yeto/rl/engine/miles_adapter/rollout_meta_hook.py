@@ -210,6 +210,7 @@ def build_metadata(
 
     extra = metadata_fields(args)
     sample_filter_counts = extra.get("filtered_samples")
+    all_samples = list(all_samples)  # iterated twice (groups, then harness counters)
     tool_wait = 0.0
     rollout_id = None
     groups, filtered, aborted = [], 0, 0
@@ -252,7 +253,55 @@ def build_metadata(
         # over every generated sample (Miles Sample.non_generation_time).
         # Absent when no sample reported any: the default key set is unchanged.
         payload["tool_wait_seconds"] = tool_wait
+    harness = harness_counters(all_samples)
+    if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
+        payload.update(harness)
     return payload
+
+
+# IR-3/IR-4 sample-metadata keys written by agentic generate code (codex-harness
+# codex_openenv_generate): summed per rollout into the metadata payload.
+EXPECTED_POLICY_VERSION_KEY = "expected_policy_version"
+POLICY_AGE_VIOLATION_KEY = "policy_age_violation"
+TITO_SESSION_MISMATCH_KEY = "tito_session_mismatch"
+TITO_CHAIN_BREAKS_KEY = "tito_chain_breaks"
+
+
+def expected_policy_version(sample: Any = None, sink: str | None = None) -> str | None:
+    """Rollout side (IR-3): the driver's target policy token for this rollout.
+
+    The prompt sample's metadata ``expected_policy_version`` wins when the
+    data source carries it; otherwise the token the driver published through
+    the metadata sink (``MilesRolloutPool.generate`` -> ``set_policy_token``).
+    None = the driver did not publish one (agentic generate must refuse).
+    """
+    meta = getattr(sample, "metadata", None) if sample is not None else None
+    if isinstance(meta, dict) and meta.get(EXPECTED_POLICY_VERSION_KEY):
+        return str(meta[EXPECTED_POLICY_VERSION_KEY])
+    return current_policy_token(sink)
+
+
+def harness_counters(all_samples: Iterable[Sequence[Any]]) -> dict[str, Any]:
+    """Sum the IR-3/IR-4 per-sample counters; only keys with a non-zero total."""
+    age = mismatch = 0
+    breaks: dict[str, int] = {}
+    for group in all_samples:
+        for s in _flat(group):
+            meta = getattr(s, "metadata", None)
+            if not isinstance(meta, dict):
+                continue
+            age += int(meta.get(POLICY_AGE_VIOLATION_KEY) or 0)
+            mismatch += int(meta.get(TITO_SESSION_MISMATCH_KEY) or 0)
+            for reason, n in (meta.get(TITO_CHAIN_BREAKS_KEY) or {}).items():
+                breaks[str(reason)] = breaks.get(str(reason), 0) + int(n or 0)
+    out: dict[str, Any] = {}
+    if age:
+        out[POLICY_AGE_VIOLATION_KEY] = age
+    if mismatch:
+        out[TITO_SESSION_MISMATCH_KEY] = mismatch
+    if breaks:
+        out[TITO_CHAIN_BREAKS_KEY] = breaks
+    return out
 
 
 # --------------------------------------------------------------------------
