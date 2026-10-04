@@ -1,0 +1,41 @@
+imports ok
+.........................s...............................                [100%]
+=============================== warnings summary ===============================
+tests/test_rl_miles_adapter_config.py: 14 warnings
+    warnings.warn(
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+    warnings.warn(
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+  /opt/sglang/lib/python3.12/site-packages/transformer_engine/__init__.py:103: RuntimeWarning: Detected a Jax installation but could not find the shared object file for the Transformer Engine Jax extension library. If this is not intentional, please reinstall Transformer Engine with `pip install transformer_engine[jax]` or build from source with `NVTE_FRAMEWORK=jax`.
+    warnings.warn(
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+    from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast
+
+tests/test_rl_miles_adapter_config.py::test_default_cell_count_without_miles
+    warnings.warn(
+
+tests/test_rl_miles_adapter_config.py: 10 warnings
+    action = action_class(**kwargs)
+
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[True]
+tests/test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation[False]
+  /root/Megatron-LM/megatron/core/_rank_utils.py:39: UserWarning: Could not determine rank from torch.distributed, RANK, or SLURM_PROCID. Defaulting to rank 0.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_rl_miles_adapter_config.py:277: upstream cell counter importable; covered by parse_args check
+56 passed, 1 skipped, 33 warnings in 43.80s
+pytest_rc=0
+/opt/sglang/lib/python3.12/site-packages/transformer_engine/__init__.py:103: RuntimeWarning: Detected a Jax installation but could not find the shared object file for the Transformer Engine Jax extension library. If this is not intentional, please reinstall Transformer Engine with `pip install transformer_engine[jax]` or build from source with `NVTE_FRAMEWORK=jax`.
+  warnings.warn(
+WARNING:megatron.bridge.models.muse_glimmer:Muse Glimmer Hugging Face classes are unavailable with transformers 5.12.1. Upgrade transformers to a version that supports Muse Glimmer.
+WARNING:miles_plugins.models.qwen3_vl:megatron-bridge Qwen3VLModel lacks native CP-local vision-embed selection; CP runs with vision tokens will mis-place vision embeddings. Apply the matching Megatron-Bridge patch (radixark/Megatron-Bridge PR #9).

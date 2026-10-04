@@ -31,7 +31,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from yeto.rl.core import LocalRoundStats, StrictRlInvariantError
+from yeto.rl.core import (
+    LocalRoundStats,
+    StrictRlInvariantError,
+    require_nonzero_learning_rate,
+)
 
 from .algorithm import AlgorithmSpec
 from .capabilities import EngineCapabilities
@@ -88,6 +92,9 @@ class TrainStepMetrics:
     ess_ratio: float | None = None
     clip_fraction: float | None = None
     train_step: int | None = None
+    # LR each optimizer step of the round applied (read inside the step, before
+    # the scheduler advances; ``lr`` is the engine's logged post-step value).
+    applied_lrs: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +124,11 @@ class SyncSession(Protocol):
     def finish(self, driver: "IslandDriver") -> None: ...
 
     def close(self) -> None: ...
+
+    # Optional: whether the round ``rollout_id`` is the island's last one
+    # (strict: local_round_id >= global_rounds; decoupled: the final cut is
+    # known).  Sessions without it are treated as non-final.
+    # def is_final_round(self, driver, *, rollout_id: int) -> bool: ...
 
 
 class ProgressStore(Protocol):
@@ -399,7 +411,13 @@ class IslandDriver:
             pg_loss=metrics.pg_loss,
             grad_norm=metrics.grad_norm,
             lr=metrics.lr,
+            applied_lr=None if not metrics.applied_lrs else min(metrics.applied_lrs),
+            applied_lrs=metrics.applied_lrs or None,
         )
+
+    def _is_final_round(self, rollout_id: int) -> bool:
+        probe = getattr(self.sync, "is_final_round", None)
+        return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
 
     def _maybe_eval(self, rollout_id: int, *, force: bool = False) -> None:
         if self.evaluate is None or not self.eval_interval:
@@ -436,6 +454,8 @@ class IslandDriver:
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
+        # Zero-LR invariant: a non-final round must not commit a zero update.
+        require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)
         boundary = self.sync.boundary(self, rollout_id=rollout_id, stats=stats)
         self.publish(boundary.state, rollout_id=rollout_id + 1)

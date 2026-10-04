@@ -1676,9 +1676,6 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
         "--entropy-coef",
         "--kl-coef",
         "--optimizer",
-        "--min-lr",
-        "--lr-decay-style",
-        "--lr-warmup-iters",
         "--weight-decay",
         "--adam-beta1",
         "--adam-beta2",
@@ -1688,6 +1685,13 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
         "--hidden-dropout",
     ):
         assert recipe_flag not in argv
+    # The LR schedule is explicit (fix-decoupled-lr-schedule): strict-avg is
+    # linear over global_rounds * optimizer_steps, never Miles' implicit default.
+    schedule = argv[argv.index("--lr-decay-style") : argv.index("--lr-decay-style") + 8]
+    assert schedule == [
+        "--lr-decay-style", "linear", "--lr-decay-iters", "3",
+        "--lr-warmup-iters", "0", "--min-lr", "0",
+    ]
 
     eval_args = argparse.Namespace(
         **vars(args),
