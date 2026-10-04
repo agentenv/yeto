@@ -117,7 +117,10 @@ def pth_line(repo_dir: str) -> str:
         "            return None\n"
         "sys.meta_path.insert(0, _YetoLazy())\n"
     )
-    return f"{_PTH_TAG}{repo_dir}\nimport sys; exec({code!r})\n"
+    # site.addpackage exec()s .pth lines inside a function: without an
+    # explicit globals dict, _R lands in its locals and find_spec (looking it
+    # up as a global) fails with NameError, leaving sky unpatched.
+    return f"{_PTH_TAG}{repo_dir}\nimport sys; exec({code!r}, {{'__name__': '_yeto_pth'}})\n"
 
 
 def pth_repo(path: str) -> str | None:

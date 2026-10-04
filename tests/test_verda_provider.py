@@ -1165,3 +1165,28 @@ def test_probe_runs_while_the_listener_job_is_still_submitting(monkeypatch):
 
     monkeypatch.setattr(launcher, "tcp_probe", probe)
     assert cli._probe_head_port("vh-head", "203.0.113.5") is True
+
+
+def test_pth_line_hook_works_when_executed_inside_a_function(tmp_path):
+    # site.addpackage exec()s each .pth line in a function scope; the hook's
+    # class must still see _R (regression: NameError "_R is not defined").
+    import subprocess
+    import sys as _sys
+
+    from yeto.sky_patches import pth_line
+
+    line = pth_line("/nonexistent-yeto-repo").splitlines()[1]
+    prog = (
+        "import sys\n"
+        "def addpackage(line):\n"
+        "    exec(line)\n"
+        f"addpackage({line!r})\n"
+        "hook = sys.meta_path[0]\n"
+        "assert type(hook).__name__ == '_YetoLazy'\n"
+        "sys.modules.pop('yeto', None); sys.modules.pop('yeto.sky_patches', None)\n"
+        "sys.path[:] = [p for p in sys.path if 'yeto' not in p and p not in ('', '.')]\n"
+        "assert hook.find_spec('sky.provision.verda.instance') is None\n"
+    )
+    r = subprocess.run([_sys.executable, "-c", prog], capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "not applied" not in r.stderr, r.stderr
