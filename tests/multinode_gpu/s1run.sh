@@ -10,7 +10,7 @@
 #   m3  : same cluster (CLUSTER_PREFIX=<m1 prefix>), --rl-elastic-declare-cells c0,c1, --total-steps 6, E1 rollout-only edges driven in-container by
 #         s1inwatch.py (chain 8 inbox mechanism): up1 at train rid 1 (T2R1S1 -> T2R2S0: standby n1:1 starts as cell c1), dn1 at train rid 3
 #         (back to T2R1S1); no --keep (KEEP_M3=1 keeps the cluster for m2).
-#   m4a : M4 island A: m1's 2x2 cfg + --rl-checkpoint-store "$STORE" (env, required) --total-steps 8 --rl-elastic-restart-attempts 0, no --keep;
+#   m4a : M4 island A: m1's 2x2 cfg + --rl-checkpoint-store "$STORE" (env, required) --total-steps 8 (no --rl-elastic-restart-attempts: launcher rejects 0; absent = no restart loop), no --keep;
 #         s1kill.sh (KILL_RID=2) kills the worker's island raylet once train of rollout 2 starts (rounds 0,1 trained, round cut r000002 in the store)
 #         -> node_lost/RECOVERY_REQUIRED, launcher teardown. The chain then confirms A's instances are gone (cleanup_run.sh).
 #   m4b : M4 island B: NEW prefix/cluster, same cfg + same STORE + --rl-elastic-accept-rebind, --total-steps M4B_STEPS (default 8 => >= 1 round after
@@ -43,7 +43,7 @@ case $C in
        PAR="--tensor-parallel 1 --pipeline-parallel 1 --expert-parallel 2"; EX="$ELASTIC22"; KEEP="${KEEP_M2:+--keep}"; NODES=2;;
   m4a|m4b) [ -n "${STORE:-}" ] || { echo "abort: $C needs STORE=s3://<bucket>/<prefix> (the --rl-checkpoint-store bucket; same value for m4a and m4b)"; exit 66; }
        GPU=nebius:2x2xl40s@eu-north1; PAR="--tensor-parallel 1 --pipeline-parallel 2"; KEEP=""; NODES=2
-       if [ $C = m4a ]; then STEPS=8; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-restart-attempts 0"
+       if [ $C = m4a ]; then STEPS=8; EX="$ELASTIC22 --rl-checkpoint-store $STORE"
        else STEPS=${M4B_STEPS:-8}; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-accept-rebind"; fi;;
   *) echo "unknown case $C"; exit 64;;
 esac
