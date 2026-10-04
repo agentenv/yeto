@@ -28,6 +28,9 @@ _GPU_CANONICAL = {
     "a10g": "A10G",
     "l4": "L4",
     "l40s": "L40S",
+    # Verda (sky catalog names; sm_89 like L40S / Blackwell workstation)
+    "rtx-6000-ada": "RTX-6000-Ada",
+    "rtx-pro-6000": "RTX-PRO-6000",
     "h100": "H100",
     "h200": "H200",
     "b200": "B200",

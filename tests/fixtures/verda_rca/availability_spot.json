@@ -1,0 +1,42 @@
+[
+ {
+  "location_code": "FIN-01",
+  "availabilities": [
+   "1A100.22V",
+   "1A100.40S.22V",
+   "8L40S.160V",
+   "1A6000.10V",
+   "CPU.4V.16G",
+   "CPU.8V.32G",
+   "CPU.16V.64G",
+   "CPU.32V.128G"
+  ]
+ },
+ {
+  "location_code": "FIN-02",
+  "availabilities": [
+   "CPU.4V.16G",
+   "CPU.8V.32G",
+   "CPU.16V.64G",
+   "CPU.96V.384G",
+   "CPU.180V.720G"
+  ]
+ },
+ {
+  "location_code": "FIN-03",
+  "availabilities": [
+   "1H200.141S.44V",
+   "1A100.22V",
+   "CPU.4V.16G",
+   "CPU.8V.32G",
+   "CPU.16V.64G",
+   "CPU.32V.128G",
+   "CPU.64V.256G",
+   "CPU.180V.720G",
+   "CPU.360V.1440G",
+   "8B300.240V.CC",
+   "2B200.60V.CC",
+   "CPU.360V.1440G.CC"
+  ]
+ }
+]
