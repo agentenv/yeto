@@ -71,6 +71,13 @@ class ResourceConfig:
         return d["tp"] * d["pp"] * d["cp"]
 
     @property
+    def node_parallel(self) -> int:
+        # Q1/Q3 ruling 2026-10-04: the group that must stay inside a node is
+        # TP*CP; EP and PP groups may span nodes.
+        d = self.dims
+        return d["tp"] * d["cp"]
+
+    @property
     def data_parallel(self) -> int:
         return self.trainer // self.model_parallel
 
@@ -235,7 +242,7 @@ def _with_node_slots(config: ResourceConfig, topology, resources: dict[str, Any]
     if counts != (config.trainer, config.rollout, config.standby):
         raise ManifestError(f"config {config.name!r} placement maps T{counts[0]} R{counts[1]} "
                             f"S{counts[2]} but declares T{config.trainer} R{config.rollout} S{config.standby}")
-    reason = node_placement_rejection(slots, model_parallel=config.model_parallel,
+    reason = node_placement_rejection(slots, node_parallel=config.node_parallel,
                                       expert_parallel=config.dims["ep"],
                                       gpus_per_engine=config.rollout_engine_gpus)
     if reason:
@@ -325,11 +332,11 @@ def placement_rejection(config: ResourceConfig, pool: dict[str, dict[str, Any]])
             return f"rollout engine {engine} does not have {config.rollout_engine_gpus} GPUs"
         if len({pool[u].get("node") for u in engine}) > 1:
             return f"rollout engine {engine} spans nodes"
-    mp = config.model_parallel
+    mp = config.node_parallel  # tp*cp stays in a node; EP/PP may span nodes
     for start in range(0, len(trainer), mp):
         group = trainer[start : start + mp]
         if len({pool[u].get("node") for u in group}) > 1:
-            return f"trainer model-parallel group {group} spans nodes"
+            return f"trainer in-node (tp*cp) group {group} spans nodes"
     return None
 
 

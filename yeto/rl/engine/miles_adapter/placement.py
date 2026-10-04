@@ -39,9 +39,14 @@ class PlacementRequest:
     rollout_cell_names: tuple[str, ...] = ()
     # rl-multinode-island D3-D5: GPUs per island node (None = single node, no
     # node rules) and the trainer parallel sizes the node rules need.
+    # Q1/Q3 ruling 2026-10-04: the in-node group is ``node_parallel`` = tp*cp
+    # (TP stays inside a node); EP/PP groups may span nodes. ``model_parallel``
+    # is the dense world group tp*pp*cp kept for callers that still pass it; it
+    # doubles as the in-node group only when ``node_parallel`` is None.
     gpus_per_node: int | None = None
     model_parallel: int = 1
     expert_parallel: int = 1
+    node_parallel: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("colocated", "fixed-partition"):
@@ -72,12 +77,20 @@ class PlacementRequest:
                 self.bundle_map, trainer=self.trainer_gpus, rollout=self.rollout_gpus,
                 standby=self.standby_gpus,
             ))
-        for name in ("model_parallel", "expert_parallel"):
+        for name in ("model_parallel", "expert_parallel", "node_parallel"):
             value = getattr(self, name)
+            if value is None and name == "node_parallel":
+                continue
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"placement {name} must be a positive int")
         if self.gpus_per_node is not None:
             self._check_nodes()
+
+    @property
+    def in_node_parallel(self) -> int:
+        """Trainer group that must stay inside one node: ``node_parallel`` (tp*cp)
+        when given, else the legacy ``model_parallel``."""
+        return self.model_parallel if self.node_parallel is None else self.node_parallel
 
     @property
     def topology(self):
@@ -111,7 +124,7 @@ class PlacementRequest:
             raise ValueError(str(exc)) from None
         if self.kind == "colocated":
             slots["rollout"] = []  # the same GPUs as the trainer; the trainer rule covers them
-        reason = node_placement_rejection(slots, model_parallel=self.model_parallel,
+        reason = node_placement_rejection(slots, node_parallel=self.in_node_parallel,
                                           expert_parallel=self.expert_parallel, gpus_per_engine=per)
         if reason:
             raise ValueError(reason)
