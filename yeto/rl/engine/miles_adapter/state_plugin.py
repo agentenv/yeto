@@ -122,28 +122,72 @@ def distributed_ranges(optimizer: Any) -> tuple[bool, dict[int, tuple[Any, Any, 
     return found, owned
 
 
-def _dp_all_reduce_sum(optimizer: Any, flat: Any) -> None:
+def _leaf_members(leaf: Any) -> set[int]:
+    """ids of every model parameter this distributed leaf shards (owned here or not).
+
+    ``gbuf_ranges``/``model_param_group_index_map`` list only the locally owned
+    ranges; the grad buffers (``leaf.buffers[..].param_index_map``) list all.
+    """
+
+    members: set[int] = set()
+    for buffer in getattr(leaf, "buffers", None) or ():
+        members.update(id(p) for p in getattr(buffer, "param_index_map", {}) or {})
+    for gbuf_range_maps in getattr(leaf, "gbuf_ranges", None) or ():
+        for per_bucket in gbuf_range_maps.values():
+            for bucket_range_map in per_bucket:
+                members.update(id(p) for p in bucket_range_map["param_map"])
+    return members
+
+
+def _leaf_for(optimizer: Any, param: Any, owned: Mapping[int, tuple[Any, Any, int, int]]) -> Any:
+    """The distributed leaf (hence DP group) that shards ``param``.
+
+    ChainedOptimizer: dense params belong to the dense leaf (dense DP group),
+    expert params to the expert leaf (expert DP group).
+    """
+
+    if id(param) in owned:
+        return owned[id(param)][0]
+    leaves = [leaf for leaf in _optimizer_leaves(optimizer) if _is_distributed(leaf)]
+    hits = [leaf for leaf in leaves if id(param) in _leaf_members(leaf)]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits and len(leaves) == 1:
+        return leaves[0]
+    raise StatePluginError("cannot tell which distributed optimizer shards an adapter parameter")
+
+
+def _dp_all_reduce_sum(leaf: Any, flat: Any) -> None:
     import torch.distributed as dist
 
     if not (dist.is_available() and dist.is_initialized()):
         return
-    group = None
-    for leaf in _optimizer_leaves(optimizer):
-        group = getattr(leaf, "data_parallel_group", None) or group
-    dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=group)
+    dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=getattr(leaf, "data_parallel_group", None))
 
 
-def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=None) -> list[Any]:
+def needs_gather(optimizer: Any, parameters: Sequence[Any]) -> bool:
+    """Whether some low-precision parameter's master lives only in DistributedOptimizer shards."""
+
+    import torch
+
+    if optimizer is None or not any(_is_distributed(leaf) for leaf in _optimizer_leaves(optimizer)):
+        return False
+    return any(getattr(p, "main_param", None) is None and p.dtype != torch.float32 for p in parameters)
+
+
+def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=None, reduce=None) -> list[Any]:
     """FP32 masters in each parameter's shape; DP-sharded ones are gathered.
 
-    Collective over the DP group when any parameter is DP-sharded (every rank
-    must call it with the same parameters in the same order).
+    Collective over each owning leaf's DP group when any parameter is
+    DP-sharded (every rank must call it with the same parameters in the same
+    order). ``reduce(flat, leaf)`` / ``all_reduce_sum(flat)`` replace the
+    all-reduce (tests).
     """
     import torch
 
     has_dist, owned = distributed_ranges(optimizer)
     out: list[Any] = []
-    pending: list[tuple[int, Any]] = []
+    pending: dict[int, tuple[Any, list[tuple[int, Any]]]] = {}
     for i, param in enumerate(parameters):
         if getattr(param, "main_param", None) is not None or param.dtype == torch.float32:
             out.append(master_of(param))
@@ -153,18 +197,28 @@ def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=No
             continue
         full = torch.zeros(param.numel(), dtype=torch.float32, device=param.device)
         if id(param) in owned:
-            leaf, _, start, end = owned[id(param)]
+            _, _, start, end = owned[id(param)]
+            leaf = owned[id(param)][0]
             shard = leaf._get_main_param_and_optimizer_states(param)["param"]
             if shard.dtype != torch.float32 or shard.numel() != end - start:
                 raise StatePluginError("distributed-optimizer main shard does not match its range")
             full[start:end] = shard.detach().reshape(-1)
+        leaf = _leaf_for(optimizer, param, owned)
         out.append(full)
-        pending.append((i, full))
-    if pending:
-        flat = torch.cat([f for _, f in pending])
-        (all_reduce_sum or (lambda t: _dp_all_reduce_sum(optimizer, t)))(flat)
+        pending.setdefault(id(leaf), (leaf, []))[1].append((i, full))
+    # Leaf order is the same on every rank of a DP group, so the per-group
+    # collectives are issued in the same order.
+    order = {id(leaf): k for k, leaf in enumerate(_optimizer_leaves(optimizer))} if pending else {}
+    for _, (leaf, items) in sorted(pending.items(), key=lambda kv: order.get(kv[0], 0)):
+        flat = torch.cat([f for _, f in items])
+        if reduce is not None:
+            reduce(flat, leaf)
+        elif all_reduce_sum is not None:
+            all_reduce_sum(flat)
+        else:
+            _dp_all_reduce_sum(leaf, flat)
         offset = 0
-        for i, full in pending:
+        for i, full in items:
             n = full.numel()
             out[i] = flat[offset : offset + n].view(parameters[i].shape)
             offset += n
@@ -211,14 +265,15 @@ def parameter_owners(modules: Iterable[Any], parameters: Iterable[Any]) -> dict[
 
 
 @contextmanager
-def masters_as_module_parameters(modules: Sequence[Any], parameters: Sequence[Any]):
+def masters_as_module_parameters(modules: Sequence[Any], parameters: Sequence[Any], masters: Sequence[Any] | None = None):
     """Temporarily register FP32 masters as the module parameters.
 
     A fresh ``Parameter`` that shares the master's storage and has
     ``requires_grad=False`` replaces the entry in ``module._parameters``; the
     original Parameter object (with its grad-accumulation hooks and
     ``main_grad``) is untouched and restored on exit. ``Parameter.data`` is
-    never reassigned.
+    never reassigned. ``masters`` (e.g. gathered DistributedOptimizer shards,
+    see ``full_masters``) overrides ``master_of``.
     """
 
     import torch
@@ -226,8 +281,9 @@ def masters_as_module_parameters(modules: Sequence[Any], parameters: Sequence[An
     owners = parameter_owners(modules, parameters)
     swapped: list[tuple[Any, str, Any]] = []
     try:
-        for param in parameters:
-            master = master_of(param)
+        if masters is None:
+            masters = [master_of(p) for p in parameters]
+        for param, master in zip(parameters, masters, strict=True):
             if master.data_ptr() == param.data_ptr() and master.dtype == param.dtype:
                 continue  # already FP32 and self-mastered
             module, attr = owners[id(param)]
@@ -409,7 +465,12 @@ def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[s
     expected = {b.name for b in bindings}
     tensors: dict[str, Any] = {}
     names: set[str] = set()
-    with masters_as_module_parameters(actor.model, [b.parameter for b in bindings]):
+    params = [b.parameter for b in bindings]
+    opt = getattr(actor, "optimizer", None)
+    # DistributedOptimizer (e.g. EP>1 with dense DP>1): no main_param on the
+    # parameter; gather the full FP32 master within each owning leaf's DP group.
+    masters = full_masters(opt, params) if needs_gather(opt, params) else None
+    with masters_as_module_parameters(actor.model, params, masters):
         with megatron_bridge_utils.patch_megatron_model(actor.model):
             for item in bridge.export_adapter_weights(actor.model, cpu=False, show_progress=False):
                 name = _canonical(item[0])
