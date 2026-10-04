@@ -319,11 +319,15 @@ def rl_min_nodes(args, spec) -> int:
         return max(1, explicit)
     tp = int(getattr(args, "tensor_parallel", 1) or 1)
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)
+    cp = int(getattr(args, "context_parallel", 1) or 1)
+    ep = int(getattr(args, "expert_parallel", 1) or 1)
     engine = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
     try:
-        derived = min_nodes(trainer_min_gpus=tp * pp, rollout_min_gpus=engine,
+        # Q1/Q3 ruling 2026-10-04: the smallest replica tp*cp*ep*pp may span
+        # nodes (EP/PP cross nodes); only tp*cp must stay inside a node.
+        derived = min_nodes(trainer_min_gpus=tp * cp * ep * pp, rollout_min_gpus=engine,
                             standby_gpus=int(getattr(args, "rl_standby_gpus", 0) or 0),
-                            gpus_per_node=spec.gpus_per_node)
+                            gpus_per_node=spec.gpus_per_node, node_parallel=tp * cp)
     except TopologyError as exc:
         raise ValueError(f"recipe parallelism does not fit {spec}: {exc}") from None
     return max(derived, explicit)
@@ -1753,9 +1757,11 @@ def _prepare_rl_args(
 
             require_min_nodes(spec, rl_min_nodes(args, spec))
             actor_nodes, actor = rl_trainer_shape(args, spec)
-            if spec.num_nodes > 1 and model_parallel > spec.gpus_per_node:
-                raise ValueError("RL TP*PP must fit one node (rl-multinode-island: no cross-node "
-                                 "model-parallel group)")
+            node_parallel = args.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
+            if spec.num_nodes > 1 and (node_parallel > spec.gpus_per_node
+                                       or spec.gpus_per_node % node_parallel):
+                raise ValueError("RL TP*CP must fit and divide one node (rl-multinode-island Q1/Q3: "
+                                 "TP stays inside a node; EP/PP may span nodes)")
             spec = dataclasses.replace(spec, num_nodes=actor_nodes, gpus_per_node=actor)
         if spec.total_gpus % model_parallel:
             raise ValueError(

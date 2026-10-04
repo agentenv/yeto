@@ -495,6 +495,7 @@ def placement_request(config) -> PlacementRequest:
             rollout_gpus=trainer,
             gpus_per_engine=parallel.rollout_num_gpus_per_engine,
         )
+    _cp = int(getattr(parallel, "context_parallel", 1) or 1)
     return PlacementRequest(
         kind="fixed-partition",
         trainer_gpus=trainer,
@@ -503,8 +504,11 @@ def placement_request(config) -> PlacementRequest:
         standby_gpus=int(getattr(parallel, "standby_gpus", 0) or 0),
         rollout_cell_names=tuple(getattr(parallel, "rollout_cell_names", ()) or ()),
         gpus_per_node=getattr(parallel, "island_gpus_per_node", None),
-        model_parallel=int(parallel.tensor_parallel) * int(parallel.pipeline_parallel),
+        # Q1/Q3 ruling 2026-10-04: in-node group = tp*cp (TP stays in a node);
+        # EP/PP may span nodes. model_parallel keeps the dense world group.
+        model_parallel=int(parallel.tensor_parallel) * int(parallel.pipeline_parallel) * _cp,
         expert_parallel=int(getattr(parallel, "expert_parallel", 1) or 1),
+        node_parallel=int(parallel.tensor_parallel) * _cp,
     )
 
 

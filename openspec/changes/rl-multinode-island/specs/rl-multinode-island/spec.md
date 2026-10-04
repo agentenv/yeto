@@ -2,7 +2,7 @@
 
 ## Purpose
 
-把 yeto 的 RL learner island 从单节点 sky 集群扩展为 N 节点 sky 集群：以 (节点, GPU) 建模资源与放置，Ray head 固定在岛内 node0，弹性 cell 可跨节点声明但单个引擎/模型并行组不跨节点，任一节点失联进入 `RECOVERY_REQUIRED`，回收必须逐节点确认。单节点岛与旧资源 cfg 的行为保持不变。
+把 yeto 的 RL learner island 从单节点 sky 集群扩展为 N 节点 sky 集群：以 (节点, GPU) 建模资源与放置，Ray head 固定在岛内 node0，弹性 cell 可跨节点声明但单个引擎与 trainer 节点内组（`tp*cp`）不跨节点（EP/PP 允许跨节点），任一节点失联进入 `RECOVERY_REQUIRED`，回收必须逐节点确认。单节点岛与旧资源 cfg 的行为保持不变。
 
 ## ADDED Requirements
 
@@ -40,8 +40,8 @@ launcher SHALL 把 `--gpu cloud:NxGxgpu` 的一个条目解析为一个 N 节点
 - **WHEN** `get_pg_view` 返回的 bundle 节点序列不是按 `gpus_per_node` 整块分组
 - **THEN** `StartupBundles` 抛出 `BundleMapError`，learner 不进入训练
 
-### Requirement: 放置约束不允许引擎或模型并行组跨节点
-每个 rollout 引擎的 `gpus_per_engine` 张卡 MUST 位于同一节点；trainer 的每个 `tp*pp*cp` 模型并行组 MUST 位于同一节点；standby 卡 rebind 到 cell 的目标卡 MUST 与该 cell 其余卡同节点。trainer 占用的 (节点数 × 每节点卡数) MUST 为矩形。违反者 SHALL 在启动前（launcher）或解析时（cfg）被拒绝。
+### Requirement: 放置约束不允许引擎或 trainer 节点内组跨节点
+每个 rollout 引擎的 `gpus_per_engine` 张卡 MUST 位于同一节点；trainer 的每个节点内组（连续 `tp*cp` 个 trainer rank，TP 默认留在节点内）MUST 位于同一节点，且 `tp*cp` MUST ≤ `gpus_per_node` 并整除之；standby 卡 rebind 到 cell 的目标卡 MUST 与该 cell 其余卡同节点。trainer 占用的 (节点数 × 每节点卡数) MUST 为矩形。违反者 SHALL 在启动前（launcher）或解析时（cfg）被拒绝。
 
 #### Scenario: 引擎跨节点
 - **WHEN** `gpus_per_node=8, gpus_per_engine=4`，cell 声明 bundles `[6,7,8,9]`
@@ -55,6 +55,21 @@ launcher SHALL 把 `--gpu cloud:NxGxgpu` 的一个条目解析为一个 N 节点
 - **WHEN** 16 卡岛 `T8R8S0`，`rollout_engine_gpus=8`，`parallel tp=2 pp=1`
 - **THEN** trainer 映射为 n0 的 8 卡（`--actor-num-nodes 1 --actor-num-gpus-per-node 8`），rollout 一个 cell 映射为 n1 的 8 卡
 
+#### Scenario: TP 组跨节点被拒
+- **WHEN** 24 卡岛（3×8）`T16R8S0`，`parallel tp=16 pp=1`（或 `tp*cp` 不整除 8，例如 `tp=3`）
+- **THEN** 以 `ValueError`/`ManifestError` 拒绝，信息含 "in-node (tp*cp) group ... spans nodes"（或 "not divisible by ... tp*cp"）；launcher 侧 `tp*cp > gpus_per_node` 或不整除时拒绝，信息含 "RL TP*CP must fit and divide one node"
+
+### Requirement: trainer 的 EP 与 PP 组允许跨节点
+一个 learner 的 trainer MAY 占用多个节点、每节点多卡；其 EP 组与 PP 组 MAY 跨节点（用户裁定 2026-10-04）。放置校验 MUST NOT 对 EP 组施加节点对齐要求（仅要求 `tp*cp*ep` 整除 trainer 卡数），MUST NOT 对 PP 组施加节点规则；trainer 仍 MUST 满足矩形与 `tp*cp` 节点内规则。
+
+#### Scenario: 跨节点 PP
+- **WHEN** 24 卡岛（3×8）`T16R8S0`，`rollout_engine_gpus=8`，`parallel tp=8 pp=2`
+- **THEN** 接受；trainer 占 n0+n1（`--actor-num-nodes 2 --actor-num-gpus-per-node 8`），两个 PP stage 各在一个节点，rollout cell 在 n2
+
+#### Scenario: 跨节点 EP
+- **WHEN** 24 卡岛（3×8）`T16R8S0`，`parallel tp=2 pp=1 ep=8`
+- **THEN** 接受；EP 组由 8 个 TP 组构成、横跨 n0 与 n1；若 `tp*cp*ep` 不整除 trainer 卡数（如 `T8` 配 `tp=2 ep=8`）则拒绝，信息含 "expert parallel 8 needs trainer GPUs divisible by tp*cp*ep = 16"
+
 ### Requirement: 弹性 cell 可跨节点声明但每个 cell 不跨节点
 `--rl-elastic-declare-cells` 在多节点岛上 SHALL 可用。`placement_map_arg` 生成 `rollout_cells` 时 MUST 先按节点分块再按 `gpus_per_engine` 切分；跨节点剩余不足一个引擎的卡 MUST 进入 unbound。`bind_members` MUST 拒绝目标卡跨节点的绑定。
 
@@ -63,11 +78,15 @@ launcher SHALL 把 `--gpu cloud:NxGxgpu` 的一个条目解析为一个 N 节点
 - **THEN** 抛出 `MembershipPlanError`，fork 的 `set_pg_view`/`rebind_cell` 未被调用
 
 ### Requirement: 每个 learner 以 recipe 推导的最少节点起步
-launcher SHALL 按 recipe 的并行度（trainer `tp*pp*cp*ep` 最小副本 + rollout 引擎 `sglang.tp` + standby）推导每 learner 最少节点数；`--gpu` 低于最小值 MUST 拒绝；未显式给出节点数时默认取最小值。
+launcher SHALL 按 recipe 的并行度（trainer `tp*cp*ep*pp` 最小副本 + rollout 引擎 `sglang.tp` + standby）推导每 learner 最少节点数；最小副本 MAY 大于一个节点（EP/PP 跨节点），此时 MUST 为整节点倍数，且 `tp*cp` MUST ≤ `gpus_per_node` 并整除之；`--gpu` 低于最小值 MUST 拒绝；未显式给出节点数时默认取最小值。
 
 #### Scenario: 低于最少节点
 - **WHEN** recipe 要求 trainer 8 卡 + rollout 8 卡且 `gpus_per_node=8`，而 `--gpu` 给出 1 节点
 - **THEN** 启动前拒绝并给出"至少 2 节点"
+
+#### Scenario: 跨节点最小副本
+- **WHEN** recipe `tp=2 pp=2 ep=4`（最小副本 16 卡）+ rollout 引擎 8 卡，`gpus_per_node=8`
+- **THEN** 最少节点为 3；`tp=16` 则拒绝，信息含 "TP stays inside a node"；`tp=2 pp=3 ep=2`（12 卡）则拒绝，信息含 "not a whole number"
 
 ### Requirement: 任一节点失联进入 RECOVERY_REQUIRED
 岛内 driver SHALL 监测 Ray 节点存活。任一节点失联时，岛 MUST 进入 `RECOVERY_REQUIRED` 终态并以非零码退出，MUST NOT 以部分节点继续训练或 rollout。重启恢复前置检查 MUST 要求存活节点数等于声明节点数且拓扑同形（每节点卡数一致，主机名可变），否则拒绝进入成员差分恢复。

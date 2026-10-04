@@ -127,18 +127,40 @@ def test_node_rules_in_cfg():
     with pytest.raises(ManifestError, match="rollout engine .* spans nodes"):
         caps.parse_configs(_cfg(engine_spans))
     tp_spans = {"trainer": [7, 8] + list(range(6)), "rollout": [list(range(9, 16)) + [6]], "standby": []}
-    with pytest.raises(ManifestError, match="(model-parallel group .* spans nodes|rollout engine .* spans nodes)"):
+    with pytest.raises(ManifestError, match="(in-node .* group .* spans nodes|rollout engine .* spans nodes)"):
         caps.parse_configs(_cfg(tp_spans))
     counts = {"trainer": list(range(8)), "rollout": [list(range(8, 12))], "standby": list(range(12, 16))}
     with pytest.raises(ManifestError, match="maps T8 R4 S4 but declares T8 R8 S0"):
         caps.parse_configs(_cfg(counts))
 
 
-def test_ep_whole_node_alignment():
+def test_ep_and_pp_may_span_nodes_tp_stays_in_node():
+    # Q1/Q3 ruling 2026-10-04: EP/PP groups may cross nodes; tp*cp is the in-node group.
     good = _cfg({"trainer": list(range(8)), "rollout": [list(range(8, 16))], "standby": []})
     good["configs"]["T8R8S0"]["parallel"] = {"tp": 2, "pp": 1, "ep": 4}
     assert caps.parse_configs(good)["T8R8S0"].dims["ep"] == 4
+    assert caps.parse_configs(good)["T8R8S0"].node_parallel == 2
+    # ep=8 with tp=2 over 8 trainer GPUs: tp*cp*ep=16 does not divide 8 (not a node rule)
     bad = copy.deepcopy(good)
     bad["configs"]["T8R8S0"]["parallel"] = {"tp": 2, "pp": 1, "ep": 8}
-    with pytest.raises(ManifestError, match="expert parallel 8 must divide the 4"):
+    with pytest.raises(ManifestError, match="expert parallel 8 needs trainer GPUs divisible by"):
         caps.parse_configs(bad)
+    # trainer across both nodes (16 GPUs, T16R8 on 3x8): PP2 and EP8 cross nodes -> legal
+    base = _cfg({"trainer": list(range(16)), "rollout": [list(range(16, 24))], "standby": []}, nodes=3, gpus=_pool(3))
+    base["configs"]["T8R8S0"]["trainer"] = 16
+    pp2 = copy.deepcopy(base)
+    pp2["configs"]["T8R8S0"]["parallel"] = {"tp": 8, "pp": 2}
+    assert caps.parse_configs(pp2)["T8R8S0"].placement_slots["trainer"][8] == (1, 0)
+    ep8 = copy.deepcopy(base)
+    ep8["configs"]["T8R8S0"]["parallel"] = {"tp": 2, "pp": 1, "ep": 8}
+    assert caps.parse_configs(ep8)["T8R8S0"].node_parallel == 2
+    # tp=16 (> 8-GPU node): the TP group itself spans nodes -> refused
+    tp16 = copy.deepcopy(base)
+    tp16["configs"]["T8R8S0"]["parallel"] = {"tp": 16, "pp": 1}
+    with pytest.raises(ManifestError, match="in-node .* group .* spans nodes"):
+        caps.parse_configs(tp16)
+    # tp*cp=3 does not divide the trainer
+    tp3 = copy.deepcopy(good)
+    tp3["configs"]["T8R8S0"]["parallel"] = {"tp": 3, "pp": 1}
+    with pytest.raises(ManifestError, match="not divisible by (TP\\*PP\\*CP|in-node parallel tp\\*cp) 3"):
+        caps.parse_configs(tp3)

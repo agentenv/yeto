@@ -56,14 +56,14 @@
 ### D4 放置约束（节点感知）
 在 `PlacementRequest.__post_init__`/`validate_bundle_map`/`capabilities.placement_rejection` 统一执行：
 1. 每个 rollout 引擎（`gpus_per_engine` 张卡）同节点；
-2. trainer 的模型并行组 `tp*pp*cp` 同节点（Megatron TP 走 NVLink；PP 跨节点在本 change 不开放，待裁定 Q3）；
-3. EP：`ep` 组可跨节点，但要求 `ep % (gpus_per_node / (tp*pp*cp)) == 0` 或 `ep` 整除单节点内组数（整节点对齐）；
+2. trainer 的**节点内组 `tp*cp`** 同节点（用户裁定 2026-10-04，Q1/Q3：TP 默认留在节点内，Megatron TP 走 NVLink；rank 顺序 tp-cp-ep-dp-pp 使连续 `tp*cp` 个 trainer rank 构成 TP×CP 组）；`tp*cp` MUST ≤ `gpus_per_node` 且整除之。实现：`multinode.node_placement_rejection(node_parallel=tp*cp)`（旧参数名 `model_parallel` 仅在未给 `node_parallel` 时充当节点内组）；
+3. **EP 与 PP 允许跨节点**（用户裁定 2026-10-04，推翻 2026-10-01 的"EP 整节点对齐"与"PP 不跨节点"默认）：不再检查 EP 组与节点的对齐，仅要求 `tp*cp*ep` 整除 trainer 卡数；PP 组（步长 `world/pp`）天然跨节点，不设节点规则；
 4. standby 卡 rebind 到 cell 时目标卡同节点；
-5. 任一角色的 GPU 集合不要求整节点，但 **trainer 集合必须是整数个"模型并行组"且每组不跨节点**。
+5. 任一角色的 GPU 集合不要求整节点，但 **trainer 集合必须是整数个"节点内组 `tp*cp`"且每组不跨节点**，并占用矩形（每节点卡数相等；Miles 以 `RANK % gpus_per_node` 作 local_rank）。
 违反 → 启动前 `ValueError`（launcher 侧）或 `ManifestError`（cfg 侧），不进入 GPU。
 
 ### D5 launcher 校验与 `rl_actor_gpus_per_node` 的重定义
-- `fixed-partition` 去掉 `num_nodes == 1` 限制；trainer 卡数 = `total_gpus − rollout_num_gpus − standby`，要求能被 `tp*pp*cp` 整除且按 D4 可放置；`--actor-num-nodes/--actor-num-gpus-per-node` 的推导改为"trainer 占用的节点数与每节点卡数"——当 trainer 不是整节点时（例如 16 卡岛 T8R8：trainer 占 node0 全部 8 卡），`actor_num_nodes=1, actor_num_gpus_per_node=8`；当 trainer 跨节点且每节点占用数不等时拒绝（Miles `actor_num_nodes*actor_num_gpus_per_node` 必须是矩形）。
+- `fixed-partition` 去掉 `num_nodes == 1` 限制；trainer 卡数 = `total_gpus − rollout_num_gpus − standby`，要求能被 `tp*pp*cp` 整除且按 D4 可放置（多节点时另要求 `tp*cp` ≤ `gpus_per_node` 且整除之，launcher 拒绝信息 "RL TP*CP must fit and divide one node"）；`--actor-num-nodes/--actor-num-gpus-per-node` 的推导改为"trainer 占用的节点数与每节点卡数"——当 trainer 不是整节点时（例如 16 卡岛 T8R8：trainer 占 node0 全部 8 卡），`actor_num_nodes=1, actor_num_gpus_per_node=8`；当 trainer 跨节点且每节点占用数不等时拒绝（Miles `actor_num_nodes*actor_num_gpus_per_node` 必须是矩形）。
 - 新增 `--rl-min-nodes-per-learner`（默认由 recipe 推导，见 D8），`spec.num_nodes` 低于最小值即拒绝。
 - Modal：保持 `validate_modal_shape`；多容器岛同样走 D4。
 
@@ -79,7 +79,7 @@
 
 ### D8 Flash-Next recipe 并行度表达与"最少节点"
 - `parallel` 段新增 `ep`（已在 `PARALLEL_DIMS` 则沿用）与 `sglang: {tp, ep, dp}`；recipe 通过 `--rl-model-recipe` 给出默认值（LoRA：按 NEXT-WEEK-PLAN 的 TP2/PP1/EP?，SGLang TP8/EP8；精确值须对照 pin 的 Miles `scripts/models/*flash-next*` 核对——本机 `~/miles` 无该文件，待实现阶段从镜像内 Miles 读取）。
-- 最少节点推导：`min_nodes = ceil((trainer_min_gpus + rollout_min_gpus + standby) / gpus_per_node)`，其中 `trainer_min_gpus = tp*pp*cp*ep_lcm`（模型并行最小副本），`rollout_min_gpus = sglang.tp`。Flash-Next LoRA：trainer 8 + rollout 8 → 2 节点；全参按 32 卡 recipe → 4 节点。
+- 最少节点推导：`min_nodes = ceil((trainer_min_gpus + rollout_min_gpus + standby) / gpus_per_node)`，其中 `trainer_min_gpus = tp*cp*ep*pp`（模型并行最小副本；用户裁定 2026-10-04 后它可跨节点——大于一节点时须为整节点倍数，小于等于一节点时无整除要求；节点内组 `tp*cp` 另须 ≤ `gpus_per_node` 且整除之，`multinode.min_nodes(node_parallel=)`），`rollout_min_gpus = sglang.tp`。Flash-Next LoRA：trainer 8 + rollout 8 → 2 节点；全参按 32 卡 recipe → 4 节点。
 - "每 learner 先起最少节点"：launcher 默认 `num_nodes = min_nodes`，更大需显式 `--gpu N x`。
 
 ### D9 故障域与恢复语义
