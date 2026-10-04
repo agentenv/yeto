@@ -51,11 +51,37 @@ def _rl_model_from_config(config, *, trust_remote_code: bool):
     return factory._from_config(config)
 
 
+# Output projections only.  Megatron-Bridge's CanonicalLoRA sizes its split
+# ``linear_q`` adapter as ``kv_channels * num_attention_heads`` and ignores
+# ``attention_output_gate`` (Qwen3.5 / Qwen3.6 ``attn_output_gate``), whose
+# ``q_proj`` carries the gate in a 2x-wide output.  PEFT predicts
+# ``q_proj.lora_B[2 * heads * head_dim, r]`` while Megatron exports
+# ``[heads * head_dim, r]`` (A-T3-3, codex-smoke-20261003-5), and the split-QKV
+# wrapper's forward would add a narrower adapter output to the fused qkv.  The
+# wrapper also requires q, k and v together, so gated attention keeps LoRA off
+# the whole qkv projection and trains ``o_proj`` plus the GDN ``out_proj``.
+_GATED_ATTENTION_TARGETS = r".*\.(o_proj|out_proj)$"
+
+
+def attention_output_gated(config) -> bool:
+    """True for HF configs whose attention multiplies by a learned output gate."""
+
+    text = getattr(config, "text_config", None) or config
+    return bool(getattr(text, "attn_output_gate", False))
+
+
 def target_modules(choice: str, config) -> str:
-    """Reuse Yeto's model-driven public LoRA target semantics."""
+    """Reuse Yeto's model-driven public LoRA target semantics.
+
+    ``attention`` is narrowed to the output projections for gated-attention
+    models because the Megatron engine cannot represent LoRA on their q/k/v
+    (see ``_GATED_ATTENTION_TARGETS``).
+    """
 
     from ..learner import resolve_lora_targets
 
+    if choice == "attention" and attention_output_gated(config):
+        return _GATED_ATTENTION_TARGETS
     return resolve_lora_targets(choice, config)
 
 

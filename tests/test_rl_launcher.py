@@ -176,7 +176,7 @@ def test_signed_secrlenv_variance_filter_accepts_a_bounded_replacement_budget():
             "--over-sampling-batch-size",
             "8",
             "--dynamic-sampling-filter-path",
-            "yeto_miles_secrlenv.reward.check_group",
+            "yeto.rl.harness.codex.reward.check_group",
             "--dynamic-sampling-max-replacements",
             "4",
         ]
@@ -185,7 +185,7 @@ def test_signed_secrlenv_variance_filter_accepts_a_bounded_replacement_budget():
     _prepare_rl_args(args)
 
     assert args.dynamic_sampling_filter_path == (
-        "yeto_miles_secrlenv.reward.check_group"
+        "yeto.rl.harness.codex.reward.check_group"
     )
     assert args.dynamic_sampling_max_replacements == 4
 
@@ -198,7 +198,7 @@ def test_legacy_secrlenv_agent_auto_binds_exact_replacement_contract():
             "--custom-generate-function-path",
             SECRLENV_GENERATE,
             "--custom-agent-function-path",
-            "yeto_miles_secrlenv.agent.run",
+            "yeto.rl.harness.codex.agent.run",
             "--use-session-server",
             "--tito-model",
             "org/model",
@@ -221,7 +221,7 @@ def test_secrlenv_agent_rejects_the_unwrapped_miles_generator():
             "--custom-generate-function-path",
             "miles.rollout.generate_hub.agentic_tool_call.generate",
             "--custom-agent-function-path",
-            "yeto_miles_secrlenv.agent.run",
+            "yeto.rl.harness.codex.agent.run",
             "--use-session-server",
             "--tito-model",
             "org/model",
@@ -261,7 +261,7 @@ def test_secrlenv_agent_rejects_conflicting_replacement_contract(extra, match):
             "--custom-generate-function-path",
             SECRLENV_GENERATE,
             "--custom-agent-function-path",
-            "yeto_miles_secrlenv.agent.run",
+            "yeto.rl.harness.codex.agent.run",
             "--use-session-server",
             "--tito-model",
             "org/model",
@@ -508,7 +508,7 @@ def test_stock_codex_harness_requires_explicit_signed_xhigh_dsv4_contract():
             "--custom-generate-function-path",
             SECRLENV_GENERATE,
             "--custom-agent-function-path",
-            "yeto_miles_secrlenv.codex_harness_agent.run",
+            "yeto.rl.harness.codex.codex_harness_agent.run",
             "--reward-function",
             SECRLENV_REWARD,
             "--codex-reasoning-effort",
@@ -553,7 +553,7 @@ def test_stock_codex_harness_accepts_only_the_exact_qwen38_xhigh_profile():
             "--custom-generate-function-path",
             SECRLENV_GENERATE,
             "--custom-agent-function-path",
-            "yeto_miles_secrlenv.codex_harness_agent.run",
+            "yeto.rl.harness.codex.codex_harness_agent.run",
             "--reward-function",
             SECRLENV_REWARD,
             "--codex-reasoning-effort",
@@ -2714,6 +2714,7 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
     assert captured["megatron_target_kwargs"] == {
         "pipeline_parallel": 2,
         "standard_grouped_experts": False,
+        "attention_output_gate": False,
     }
     assert miles_args.yeto_rl_expected_specs == tuple(
         sorted(attention_specs + expert_specs)
