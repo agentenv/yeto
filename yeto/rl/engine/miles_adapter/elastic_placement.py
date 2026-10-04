@@ -11,6 +11,7 @@ Trainer DP changes / role transfer are E3 (4.7) and are refused here.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import Any
 
@@ -23,8 +24,9 @@ class PlacementPlanError(ValueError):
 
 class ElasticPlacement:
     def __init__(self, base: Placement, *, pool_gpus: tuple[str, ...] | None = None,
-                 epoch: int = 0) -> None:
+                 epoch: int = 0, gpus_per_node: int | None = None) -> None:
         self._base = base
+        self._gpus_per_node = int(gpus_per_node) if gpus_per_node else None
         self._current: PlacementDescription = base.describe()
         described = tuple(self._current.trainer_gpus) + tuple(self._current.rollout_gpus)
         standby = tuple(self._current.extra.get("standby_gpus", ()) or ())
@@ -34,12 +36,61 @@ class ElasticPlacement:
     def describe(self) -> PlacementDescription:
         return self._current
 
+    def resolve_gpus(self, spec: Any) -> tuple[str, ...]:
+        """Config placement spelling -> this placement's GPU ids.
+
+        Elastic configs (``resources.configs[*].placement``) list rollout GPUs per
+        engine (``[["n0:1"], ["n1:1"]]``) in one of the manifest spellings
+        (``n<k>:<g>`` slots, logical bundle ints, pool uuids), while the startup
+        description names GPUs ``bundle<b>`` / ``bundle<b>:gpu<g>`` (or pool uuids
+        with trainer edges). Nested engine lists are flattened in order; ids
+        already in the pool are kept; anything unresolvable is kept verbatim so the
+        pool checks below refuse it with a clear message (S8 M3: an unhashable
+        nested list reached ``set()`` after the commit -> RECOVERY_REQUIRED).
+        """
+        flat: list[Any] = []
+
+        def walk(x: Any) -> None:
+            if isinstance(x, (list, tuple)):
+                for y in x:
+                    walk(y)
+            else:
+                flat.append(x)
+
+        walk(spec)
+        return tuple(self._resolve_one(e) for e in flat)
+
+    def _bundle_id(self, b: int) -> Any:
+        for g in self._pool:
+            if g == f"bundle{b}" or (isinstance(g, str) and g.startswith(f"bundle{b}:")):
+                return g
+        if 0 <= b < len(self._pool) and not any(
+                isinstance(g, str) and g.startswith("bundle") for g in self._pool):
+            return self._pool[b]  # pool uuids in logical bundle order (manifest_pool_gpus)
+        return f"bundle{b}"
+
+    def _resolve_one(self, e: Any) -> Any:
+        if e in self._pool:
+            return e
+        if isinstance(e, bool):
+            return e
+        if isinstance(e, int):
+            return self._bundle_id(e)
+        if isinstance(e, str):
+            if e.isdigit():
+                return self._bundle_id(int(e))
+            m = re.fullmatch(r"n(\d+):(\d+)", e)
+            if m and self._gpus_per_node:
+                return self._bundle_id(int(m.group(1)) * self._gpus_per_node + int(m.group(2)))
+        return e
+
     def restore_committed(self, rollout_gpus: tuple[str, ...], *, epoch: int) -> PlacementDescription:
         """After a learner restart: adopt the committed config's rollout GPUs (journal authority)."""
         if epoch < self.epoch:
             raise PlacementPlanError(f"committed epoch {epoch} is behind {self.epoch}")
         self.epoch = epoch - 1
-        return self.reconfigure(replace(self._current, rollout_gpus=tuple(rollout_gpus)), epoch=epoch)
+        return self.reconfigure(replace(self._current, rollout_gpus=self.resolve_gpus(rollout_gpus)),
+                                epoch=epoch)
 
     def reconfigure_trainer(self, plan: PlacementDescription, *, epoch: int) -> PlacementDescription:
         """E3 (4.7): record a committed trainer DP change / role transfer (nested trainer GPU sets)."""
@@ -48,6 +99,8 @@ class ElasticPlacement:
             raise PlacementPlanError(f"placement epoch {epoch}, expected {self.epoch + 1}")
         if plan.kind != current.kind or current.kind != "fixed-partition":
             raise PlacementPlanError("trainer reconfiguration needs a fixed partition")
+        plan = replace(plan, trainer_gpus=self.resolve_gpus(plan.trainer_gpus),
+                       rollout_gpus=self.resolve_gpus(plan.rollout_gpus))
         old, new = set(current.trainer_gpus), set(plan.trainer_gpus)
         if not new or not (old <= new or new <= old):
             raise PlacementPlanError("trainer GPU sets must be non-empty and nested")
@@ -68,7 +121,7 @@ class ElasticPlacement:
             raise PlacementPlanError("E1 reconfigures only a fixed partition")
         if tuple(plan.trainer_gpus) != tuple(current.trainer_gpus):
             raise PlacementPlanError("E1 keeps the trainer GPUs (role transfer is E3)")
-        rollout = tuple(plan.rollout_gpus)
+        rollout = self.resolve_gpus(plan.rollout_gpus)
         if len(set(rollout)) != len(rollout):
             raise PlacementPlanError("duplicate rollout GPU")
         outside = sorted(set(rollout) - set(self._pool))
