@@ -281,9 +281,19 @@ def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | N
         return (f"in-node parallel tp*cp {np_} does not divide the {per_node} trainer GPUs "
                 "on one node")
     ep = max(1, int(expert_parallel))
-    if ep > 1 and trainer and len(trainer) % (np_ * ep):
-        return (f"expert parallel {ep} needs trainer GPUs divisible by tp*cp*ep = {np_ * ep}, "
-                f"got {len(trainer)} (EP groups may span nodes)")
+    if ep > 1 and trainer:
+        # Megatron carves the EP group out of the attention TP x DP ranks (expert
+        # tensor parallel 1): trainer GPUs / (cp*pp) must be a multiple of EP. The
+        # dense group tp*pp*cp is ``model_parallel`` and tp*cp is ``np_`` (cp*pp =
+        # model_parallel / tp; with tp unknown here cp is folded into np_, which is
+        # exact for cp=1 and conservative otherwise). Consistent with
+        # ``trainer_replica_gpus`` (D8 min_nodes); EP groups may span nodes.
+        mp = max(1, int(model_parallel))
+        pp = max(1, mp // np_)
+        attn_ranks = len(trainer) // pp
+        if len(trainer) % mp or attn_ranks % ep:
+            return (f"expert parallel {ep} needs trainer GPUs / pp ({len(trainer)} / {pp} = "
+                    f"{attn_ranks}) to be a multiple of ep (EP groups may span nodes)")
     return None
 
 
