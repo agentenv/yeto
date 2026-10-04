@@ -45,6 +45,15 @@ mkdir -p $R/home $R/runs $R/pulled $R/yeto
 for d in .sky .nebius .ssh; do ln -sfn /home/michael/$d $R/home/$d; done
 git -C $REPO archive ${SHA:-HEAD} | tar x -C $R/yeto
 cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/; touch $R/yeto/yeto-rl-echo-events
+# m3: the controller refuses every E1 request without a capability attestation ("no capability attestation: no transition is certified",
+# s8-m1m3-20261004a M3 FAIL: requests consumed but never journaled). Fingerprint = local reconstruction of the island Miles argv from the
+# snapshot (fp_local22.py; reproduced the real s8-m1m3-20261004a-m3 rl_driver_start value sha256:0d17e24b...), edges = resources-2x2.json.
+if [ $C = m3 ]; then
+  fp=$(/tmp/yeto-venv/bin/python $D/fp_local22.py $R/yeto 2>$R/fp_local22.err | python3 -c "import json,sys;print(json.load(sys.stdin)['fp'])" 2>/dev/null)
+  [ -n "$fp" ] || { echo "abort: m3 attestation fingerprint failed (see $R/fp_local22.err)"; exit 67; }
+  printf '{"runtime_fingerprint":"%s","execution_modes":["partitioned-serial"],"certified_edges":[{"source":"T2R1S1","target":"T2R2S0","kind":"rollout-only"},{"source":"T2R2S0","target":"T2R1S1","kind":"rollout-only"}]}' "$fp" > $R/attestation-m3.json
+  ARGS="$ARGS --rl-elastic-attestation $R/attestation-m3.json"
+fi
 git -C $REPO rev-parse ${SHA:-HEAD} > $R/yeto_sha.txt; echo "$ARGS" > $R/args.txt; echo $CL > $R/cluster.txt; echo $NODES > $R/nodes.txt; echo $C > $R/case.txt; [ -n "$TRIG" ] && echo "$TRIG" > $R/triggers.json
 # per-run watchdog: sky down by THIS cluster name only
 setsid nohup bash -c "sleep $WD; HOME=/home/michael $SKY down -y $CL > $R/watchdog.out 2>&1; touch $R/WATCHDOG_FIRED" >/dev/null 2>&1 &
@@ -60,6 +69,7 @@ while [ ! -f $R/rc.txt ]; do
     [ -s $R/triggers.json ] && timeout 60 \$S $CL 'cat ~/yeto-rl/inwatch.log 2>/dev/null' > $R/pulled/.iw 2>/dev/null && [ -s $R/pulled/.iw ] && mv $R/pulled/.iw $R/pulled/inwatch.log
     timeout 60 \$S $CL 'cat ~/yeto-output/rl-island-0.jsonl 2>/dev/null' > $R/pulled/.tmp 2>/dev/null && [ -s $R/pulled/.tmp ] && mv $R/pulled/.tmp $R/pulled/rl-island-0.jsonl
     timeout 60 \$S $CL 'cat ~/yeto-rl/elastic-state/reconfig/journal.jsonl 2>/dev/null' > $R/pulled/.j 2>/dev/null && [ -s $R/pulled/.j ] && mv $R/pulled/.j $R/pulled/journal.jsonl
+    [ -s $R/triggers.json ] && timeout 60 \$S $CL 'tail -n +1 ~/yeto-rl/elastic-state/inbox/*.status.json 2>/dev/null' > $R/pulled/.st 2>/dev/null && [ -s $R/pulled/.st ] && mv $R/pulled/.st $R/pulled/inbox-status.txt
     timeout 60 \$S $CL 'cat ~/yeto-rl/s1probe.log 2>/dev/null' > $R/pulled/.p 2>/dev/null && [ -s $R/pulled/.p ] && mv $R/pulled/.p $R/pulled/s1probe.log
     timeout 90 \$S $CL 'tail -c 4000000 ~/sky_logs/*/run.log 2>/dev/null' > $R/pulled/.r 2>/dev/null && [ -s $R/pulled/.r ] && mv $R/pulled/.r $R/pulled/run.log   # the launcher streams only the setup; the job log stays on the head
     for n in $CL \$( [ $NODES = 2 ] && echo $CL-worker1 ); do
