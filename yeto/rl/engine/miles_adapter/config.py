@@ -333,6 +333,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.dedicated_rollout_gpus": _ok,
     "parallel.visible_gpus_per_node": _ok,
     "parallel.island_gpus_per_node": _ok,
+    "parallel.bundle_map": _ok,
     "parallel.uneven_pipeline_layers": _ok,
     "parallel.standby_gpus": _ok,
     "parallel.rollout_cell_names": _ok,
@@ -496,7 +497,7 @@ def placement_request(config) -> PlacementRequest:
             gpus_per_engine=parallel.rollout_num_gpus_per_engine,
         )
     _cp = int(getattr(parallel, "context_parallel", 1) or 1)
-    return PlacementRequest(
+    request = PlacementRequest(
         kind="fixed-partition",
         trainer_gpus=trainer,
         rollout_gpus=int(parallel.dedicated_rollout_gpus),
@@ -509,7 +510,18 @@ def placement_request(config) -> PlacementRequest:
         model_parallel=int(parallel.tensor_parallel) * int(parallel.pipeline_parallel) * _cp,
         expert_parallel=int(getattr(parallel, "expert_parallel", 1) or 1),
         node_parallel=int(parallel.tensor_parallel) * _cp,
+        bundle_map=getattr(parallel, "bundle_map", None),
     )
+    if request.topology is not None:
+        # rl-multinode-island Q2: the trainer rectangle the placement rules derive
+        # must be the actor shape Miles is told (fail closed before any Ray work).
+        shape = request.trainer_shape()
+        told = (int(parallel.actor_num_nodes), int(parallel.actor_num_gpus_per_node))
+        if shape != told:
+            raise MilesConfigError(
+                f"placement trainer shape {shape} (nodes x GPUs per node) disagrees with "
+                f"--actor-num-nodes/--actor-num-gpus-per-node {told}")
+    return request
 
 
 def _flags(tokens: Sequence[str]) -> Iterator[str]:

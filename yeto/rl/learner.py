@@ -173,6 +173,10 @@ def parse_args(argv=None):
     # rl-multinode-island: GPUs per island node when the island spans nodes (the
     # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
     parser.add_argument("--rl-island-gpus-per-node", type=int, default=None)
+    # rl-multinode-island Q2 (mixed rollout/trainer nodes): the role -> logical
+    # bundle map derived by the launcher from the elastic cfg placement; None =
+    # the leading-bundle layout (trainer first, then rollout, then standby).
+    parser.add_argument("--rl-island-bundle-map", default=None, metavar="JSON")
     # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
     parser.add_argument("--rl-elastic-declare-cells", action="store_true")
     # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,

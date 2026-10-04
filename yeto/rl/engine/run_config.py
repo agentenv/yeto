@@ -23,6 +23,8 @@ Slots filled by merged PRs (see migration-ledger.md):
 
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -155,6 +157,10 @@ class ParallelLayout:
     # rl-multinode-island: GPUs per island node on a multi-node island; None on
     # a single node (every node rule off).
     island_gpus_per_node: int | None = None
+    # rl-multinode-island Q2: explicit role -> logical bundle map of a multi-node
+    # fixed partition whose trainer is not the leading bundles (the launcher
+    # derives it from the elastic cfg placement); None = leading layout.
+    bundle_map: dict[str, tuple[int, ...]] | None = None
 
     @property
     def colocated(self) -> bool:
@@ -761,6 +767,7 @@ def resolve_rl_run_config(
             island_gpus_per_node=(int(getattr(args, "rl_island_gpus_per_node", None))
                                   if getattr(args, "rl_island_gpus_per_node", None) is not None
                                   and dedicated_rollout_gpus is not None else None),
+            bundle_map=_island_bundle_map(args, dedicated_rollout_gpus),
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
@@ -858,6 +865,33 @@ def resolve_rl_run_config(
         trainer_dp_edges=bool(getattr(args, "rl_elastic", False)
                               and getattr(args, "rl_elastic_trainer_edges", False)),
     )
+
+
+def _island_bundle_map(args, dedicated_rollout_gpus) -> dict[str, tuple[int, ...]] | None:
+    """``--rl-island-bundle-map`` (Q2): JSON text or a dict; needs a multi-node
+    fixed partition (``--rl-island-gpus-per-node``). Validated against the role
+    sizes by ``PlacementRequest``."""
+    raw = getattr(args, "rl_island_bundle_map", None)
+    if raw is None:
+        return None
+    if dedicated_rollout_gpus is None or getattr(args, "rl_island_gpus_per_node", None) is None:
+        raise ValueError("--rl-island-bundle-map needs a multi-node fixed partition "
+                         "(--rl-placement fixed-partition and --rl-island-gpus-per-node)")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError(f"--rl-island-bundle-map is not JSON: {exc}") from None
+    if not isinstance(raw, dict) or set(raw) - {"trainer", "rollout", "standby"}:
+        raise ValueError("--rl-island-bundle-map must map trainer/rollout/standby to bundle lists")
+    out = {}
+    for role in ("trainer", "rollout", "standby"):
+        values = raw.get(role, [])
+        if not isinstance(values, (list, tuple)) or any(
+                isinstance(v, bool) or not isinstance(v, int) for v in values):
+            raise ValueError(f"--rl-island-bundle-map {role} must be a list of ints")
+        out[role] = tuple(values)
+    return out
 
 
 def _rollout_cell_names(args, dedicated_rollout_gpus) -> tuple[str, ...]:
