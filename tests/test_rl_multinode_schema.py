@@ -49,6 +49,17 @@ def test_gpu_spec_two_nodes_and_min_nodes():
         require_min_nodes(one, 0)
 
 
+def test_trainer_replica_gpus_ep_shares_ranks_with_dp():
+    # tp*cp*pp*max(1, ceil(ep*etp/tp)); etp defaults to 1
+    assert mn.trainer_replica_gpus({"tp": 1, "pp": 1, "ep": 2}) == 2          # M2: EP2 = 2 DP ranks
+    assert mn.trainer_replica_gpus({"tp": 1, "pp": 2}) == 2                    # M1: PP2
+    assert mn.trainer_replica_gpus({"tp": 2, "ep": 2}) == 2                    # EP inside the TP ranks
+    assert mn.trainer_replica_gpus({"tp": 2, "cp": 1, "pp": 2, "ep": 4}) == 8  # old tp*cp*ep*pp said 16
+    assert mn.trainer_replica_gpus({"tp": 2, "ep": 4, "etp": 2}) == 8
+    assert mn.trainer_replica_gpus({"tp": 4, "ep": 3}) == 4                    # ceil: never under-estimates
+    assert mn.trainer_replica_gpus({}) == 1
+
+
 def test_min_nodes_derivation():
     assert mn.min_nodes(trainer_min_gpus=2, rollout_min_gpus=8, standby_gpus=0, gpus_per_node=8) == 2
     assert mn.min_nodes(trainer_min_gpus=1, rollout_min_gpus=1, standby_gpus=0, gpus_per_node=8) == 1

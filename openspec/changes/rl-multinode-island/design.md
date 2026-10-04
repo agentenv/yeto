@@ -51,6 +51,7 @@
 ### D3 逻辑 bundle 的节点不变量
 - 定义：逻辑 bundle `p` 的节点 = `p // gpus_per_node`，本地卡 = `p % gpus_per_node`。
 - 依据：Miles `_create_placement_group` 的 PACK + 按 `(node_ip, gpu_id)` 排序；sky 的 `SKYPILOT_NODE_IPS` 顺序 = node rank。实现阶段在 `StartupBundles.__init__` 增加断言：`get_pg_view` 返回的 `(node_ip, gpu)` 序列按节点分块且块长 = `gpus_per_node`，否则 `BundleMapError`（fail closed，不猜）。
+- **混布（Q2 裁定 2026-10-04）**：块内各卡的角色由 bundle map 决定而不是整节点归属——同一节点块可同时含 trainer 卡与 rollout/standby 卡（2×2 `T2R1S1`：块 0 = `[trainer p0, rollout p1]`，块 1 = `[trainer p2, standby p3]`）；节点分块断言只看块的节点一致性与 head pin，不要求块内单一角色。
 - 注意 IP 排序 ≠ node rank 排序：PACK 排序按 IP 数值，sky node0 不一定 IP 最小。因此"node_index"以 **PG 排序后的块序号** 为准，并在 journal 里记录 `node_index → (sky_rank, ip, hostname)` 映射；Ray head 所在节点由 `ray.nodes()` 的 `is_head` 判定，不假设它是块 0。
 
 ### D4 放置约束（节点感知）
@@ -59,7 +60,7 @@
 2. trainer 的**节点内组 `tp*cp`** 同节点（用户裁定 2026-10-04，Q1/Q3：TP 默认留在节点内，Megatron TP 走 NVLink；rank 顺序 tp-cp-ep-dp-pp 使连续 `tp*cp` 个 trainer rank 构成 TP×CP 组）；`tp*cp` MUST ≤ `gpus_per_node` 且整除之。实现：`multinode.node_placement_rejection(node_parallel=tp*cp)`（旧参数名 `model_parallel` 仅在未给 `node_parallel` 时充当节点内组）；
 3. **EP 与 PP 允许跨节点**（用户裁定 2026-10-04，推翻 2026-10-01 的"EP 整节点对齐"与"PP 不跨节点"默认）：不再检查 EP 组与节点的对齐，仅要求 `tp*cp*ep` 整除 trainer 卡数；PP 组（步长 `world/pp`）天然跨节点，不设节点规则；
 4. standby 卡 rebind 到 cell 时目标卡同节点；
-5. 任一角色的 GPU 集合不要求整节点，但 **trainer 集合必须是整数个"节点内组 `tp*cp`"且每组不跨节点**，并占用矩形（每节点卡数相等；Miles 以 `RANK % gpus_per_node` 作 local_rank）。
+5. 任一角色的 GPU 集合不要求整节点（**允许 rollout/trainer 同节点不同卡混布**，Q2 裁定 2026-10-04），但 **trainer 集合必须是整数个"节点内组 `tp*cp`"且每组不跨节点**，并占用矩形（每节点卡数相等、每节点一段连续升序本地卡；Miles 以 `RANK % gpus_per_node` 作 local_rank）。混布时 trainer 形状与 bundle map 由 cfg `placement` 推导（`multinode.trainer_layout` → launcher `rl_island_layout` → `--actor-num-nodes/--actor-num-gpus-per-node` + `--rl-island-bundle-map`），并与 `PlacementRequest.trainer_shape()` 交叉核对。
 违反 → 启动前 `ValueError`（launcher 侧）或 `ManifestError`（cfg 侧），不进入 GPU。
 
 ### D5 launcher 校验与 `rl_actor_gpus_per_node` 的重定义

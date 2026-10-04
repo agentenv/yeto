@@ -55,6 +55,14 @@ launcher SHALL 把 `--gpu cloud:NxGxgpu` 的一个条目解析为一个 N 节点
 - **WHEN** 16 卡岛 `T8R8S0`，`rollout_engine_gpus=8`，`parallel tp=2 pp=1`
 - **THEN** trainer 映射为 n0 的 8 卡（`--actor-num-nodes 1 --actor-num-gpus-per-node 8`），rollout 一个 cell 映射为 n1 的 8 卡
 
+#### Scenario: 同节点混布（Q2 裁定 2026-10-04）
+- **WHEN** 2×2 岛 cfg `T2R1S1` 的 `placement` 为 trainer `["n0:0","n1:0"]`、rollout `[["n0:1"]]`、standby `["n1:1"]`，`--tensor-parallel 1 --pipeline-parallel 2 --rl-rollout-gpus 1 --rl-standby-gpus 1`
+- **THEN** 接受：rollout 引擎与 trainer rank 0 共用 n0 的不同卡；launcher 由 cfg placement 推出 `--actor-num-nodes 2 --actor-num-gpus-per-node 1` 并透传 `--rl-island-bundle-map {"trainer":[0,2],"rollout":[1],"standby":[3]}`；learner 侧 `PlacementRequest(bundle_map).trainer_shape()` 与之一致，否则启动前拒绝
+
+#### Scenario: 混布非矩形被拒
+- **WHEN** 2×2 岛 cfg 的 trainer 为 `["n0:0","n0:1","n1:0"]`（n0 两卡、n1 一卡）
+- **THEN** launcher 在任何云操作前以 `ValueError` 拒绝，信息含 "trainer GPUs per node must be equal"
+
 #### Scenario: TP 组跨节点被拒
 - **WHEN** 24 卡岛（3×8）`T16R8S0`，`parallel tp=16 pp=1`（或 `tp*cp` 不整除 8，例如 `tp=3`）
 - **THEN** 以 `ValueError`/`ManifestError` 拒绝，信息含 "in-node (tp*cp) group ... spans nodes"（或 "not divisible by ... tp*cp"）；launcher 侧 `tp*cp > gpus_per_node` 或不整除时拒绝，信息含 "RL TP*CP must fit and divide one node"
@@ -105,3 +113,14 @@ launcher SHALL 按 recipe 的并行度（trainer `tp*cp*ep*pp` 最小副本 + ro
 #### Scenario: 一个节点未确认
 - **WHEN** 2 节点岛 down 后云端仍能查到 node1 实例
 - **THEN** 命令非零退出，输出含 node1 实例 ID 与下一步
+
+### Requirement: 多节点岛在运行时对账 GPU UUID
+多节点岛启动时（拓扑预检之后、placement group 之前）系统 MUST 在每个节点上采集 `nvidia-smi --query-gpu=index,uuid` 并与声明的池（cfg `gpus[*].uuid` 和/或 journal 中上一化身的基线）逐卡比对，结果写入 journal `gpu_pool` 记录（incarnation、每节点 uuid、source、rebind、mapping、diffs、accepted）。形状不符 MUST 拒绝；uuid 不符默认 MUST 拒绝；仅当 `--rl-elastic-accept-rebind` 给出且形状一致时 MAY 接受并记录旧→新映射。首次无任何声明时 SHALL 把观测写入基线。单节点岛不采集、行为不变。
+
+#### Scenario: UUID 不符默认拒绝（Q6 裁定 2026-10-04）
+- **WHEN** journal 基线为 2×2 的 4 个 uuid，重启后 worker 被换机、其 2 个 uuid 不同，且未给 `--rl-elastic-accept-rebind`
+- **THEN** 启动以 `RuntimeError` 拒绝（信息含 "gpu_pool" 与 "--rl-elastic-accept-rebind"），journal 追加 `gpu_pool{accepted:false, diffs:[...]}`，不写 RECOVERY_REQUIRED 终态（允许带 flag 重启）
+
+#### Scenario: 带 accept-rebind 接受并记录
+- **WHEN** 同上，但给出 `--rl-elastic-accept-rebind`，节点数与每节点卡数一致
+- **THEN** 接受；journal `gpu_pool{accepted:true, rebind:true, mapping:{旧uuid:新uuid}}`，后续 placement 按新 uuid 绑定
