@@ -32,7 +32,8 @@ from .controller import Rejected
 class RecommendMode(str, enum.Enum):
     DISABLED = "disabled"
     MANUAL = "manual"
-    RECOMMEND = "recommend"  # auto is D2 (6.4/6.5), deliberately absent
+    RECOMMEND = "recommend"
+    AUTO = "auto"  # D2 6.4: driven only by ``auto.AutoController``; default off
 
 
 SERIAL = "serial"
@@ -87,12 +88,20 @@ def to_load_window(obj: Any) -> LoadWindow:
         val = get(name)
         if val is not None:
             kw[name] = val
+    # timeline.LoadSummary uses None for "no classifiable sample": no evidence of waiting
+    for name in ("tool_wait_fraction", "tail_wait_fraction"):
+        if name not in kw and _has(obj, name):
+            kw[name] = 0.0
     for need in ("epoch", "gpu_busy_fraction", "tool_wait_fraction",
                  "tail_wait_fraction", "publish_block_fraction"):
         if need not in kw:
             raise ValueError(f"load window lacks {need}")
     kw.setdefault("profile_hash", None)
     return LoadWindow(**kw)
+
+
+def _has(obj: Any, name: str) -> bool:
+    return name in obj if isinstance(obj, Mapping) else hasattr(obj, name)
 
 
 def attribute(w: LoadWindow, *, saturation: float = 0.85) -> dict[str, Any]:
@@ -210,6 +219,66 @@ def summarize(windows: Sequence[LoadWindow]) -> dict[str, Any]:
             "publish_block": mean("publish_block_fraction"), "dominant": dom}
 
 
+_EVALUATING = (RecommendMode.RECOMMEND, RecommendMode.AUTO)
+
+
+def candidate_edges_from_attestation(attestation: Any, configs: Mapping[str, Any], *,
+                                     source: str | None = None) -> list[CandidateEdge]:
+    """Candidate edges come ONLY from the attestation's certified set (a trainer
+    edge that is not certified can never be chosen).  ``configs`` maps a config
+    name to a ResourceConfig-like object (``rollout``, ``rollout_engine_gpus``)."""
+    out: dict[tuple[str, str], CandidateEdge] = {}
+    for edge in sorted(getattr(attestation, "certified_edges", ()) or ()):
+        src, dst = edge[0], edge[1]
+        if (source is not None and src != source) or src == dst:
+            continue
+        a, b = configs.get(src), configs.get(dst)
+        if a is None or b is None:
+            continue
+        n = lambda c: int(c.rollout) // max(1, int(getattr(c, "rollout_engine_gpus", 1) or 1))  # noqa: E731
+        out[(src, dst)] = CandidateEdge(src, dst, n(a), n(b))
+    return list(out.values())
+
+
+EDGE_COST_FIELDS = ("profile_hash", "source", "target", "cost_lower_s", "cost_upper_s",
+                    "recovery_upper_s", "n", "provenance")
+
+
+def edge_costs_from_table(table: Any) -> dict[tuple[str, str, str], EdgeCost]:
+    """5.7 cost table -> ``{(profile_hash, source, target): EdgeCost}``.
+
+    ``table`` is a path to a JSON file holding a list of
+    ``{profile_hash, source, target, cost_lower_s, cost_upper_s, recovery_upper_s, n,
+    provenance}`` rows, or that list itself.  A missing file / None gives ``{}``,
+    which makes every evaluation hold.  Rows with ``n < 1``, no provenance or
+    ``cost_lower_s > cost_upper_s`` are refused (ValueError)."""
+    import json
+    from pathlib import Path
+
+    if table is None:
+        return {}
+    if isinstance(table, (str, Path)):
+        path = Path(table).expanduser()
+        if not path.exists():
+            return {}
+        table = json.loads(path.read_text(encoding="utf-8"))
+    out: dict[tuple[str, str, str], EdgeCost] = {}
+    for row in table:
+        missing = [k for k in EDGE_COST_FIELDS if k not in row]
+        if missing:
+            raise ValueError(f"cost row lacks {missing}")
+        if int(row["n"]) < 1 or not row["provenance"]:
+            raise ValueError("cost row needs n >= 1 measurements and a provenance")
+        lo, hi = float(row["cost_lower_s"]), float(row["cost_upper_s"])
+        if lo > hi or lo < 0:
+            raise ValueError("cost row bounds are inconsistent")
+        key = (str(row["profile_hash"]), str(row["source"]), str(row["target"]))
+        if key in out:
+            raise ValueError(f"duplicate cost row {key}")
+        out[key] = EdgeCost(*key, lo, hi, float(row["recovery_upper_s"]))
+    return out
+
+
 @dataclass
 class Recommender:
     mode: RecommendMode = RecommendMode.DISABLED
@@ -242,7 +311,7 @@ class Recommender:
                   candidates: Iterable[CandidateEdge],
                   costs: Mapping[tuple[str, str, str], EdgeCost]) -> Recommendation | None:
         """Shadow evaluation.  Returns None unless mode is RECOMMEND.  Never executes."""
-        if self.mode is not RecommendMode.RECOMMEND:
+        if self.mode not in _EVALUATING:
             return None
         epochs = controller.journal.epochs
         source, epoch = epochs.config_id, int(epochs.config_epoch)
@@ -283,7 +352,7 @@ class Recommender:
                    costs: Mapping[tuple[str, str, str], EdgeCost], *, deadline_s: float) -> None:
         """6.3: raise ``Rejected`` with the reason if anything changed.  The
         target is never replaced and an expired recommendation is never renewed."""
-        if self.mode is not RecommendMode.RECOMMEND:
+        if self.mode not in _EVALUATING:
             raise Rejected(f"recommend mode is {self.mode.value}")
         if not rec.actionable:
             raise Rejected(f"recommendation is not actionable: {rec.rejection_reason}")
