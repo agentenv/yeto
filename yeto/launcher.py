@@ -3029,6 +3029,9 @@ def nebius_baked_image_id(image, cloud, region, baked=None):
         from yeto.rl import NEBIUS_BAKED_IMAGES as baked
     if cloud != "nebius" or not region or not isinstance(image, str):
         return image
+    if os.environ.get("YETO_NEBIUS_NO_BAKED_IMAGE"):  # diagnostic opt-out: stock VM image + docker pull
+        print(f"[launcher] nebius/{region}: YETO_NEBIUS_NO_BAKED_IMAGE set; using the stock VM image")
+        return image
     if not image.startswith("docker:") or "@sha256:" not in image:
         return image
     digest = "sha256:" + image.rsplit("@sha256:", 1)[1]
