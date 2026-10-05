@@ -167,11 +167,11 @@ def serve(paths: list[str], *, reducer: Reducer, host: str = "127.0.0.1", port: 
     stop = threading.Event()
     follow(state, stop, interval)
     print(f"[dashboard] {len(state.sources)} tape(s), {n} record(s); serving "
-          f"http://{host}:{srv.server_address[1]}/ (read-only, GET only)")
+          f"http://{host}:{srv.server_address[1]}/ (read-only, GET only)", flush=True)
     for s in state.sources:
-        print(f"[dashboard]   source {s}")
+        print(f"[dashboard]   source {s}", flush=True)
     print(f"[dashboard] from your laptop: {tunnel_hint(srv.server_address[1], head)}"
-          f"  then open http://127.0.0.1:{srv.server_address[1]}/")
+          f"  then open http://127.0.0.1:{srv.server_address[1]}/", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
