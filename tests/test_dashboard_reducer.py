@@ -132,3 +132,23 @@ def test_events_endpoint_filters_and_cursor():
     assert len(page["events"]) == 2 and page["more"]
     nxt = r.events_view(island="1", type="rl_fragment_push", after=page["cursor"], limit=2)
     assert len(nxt["events"]) == 1 and not nxt["more"]
+
+
+def test_ray_embed_per_island_kind():
+    r = Reducer()
+    for iid, name, cloud in ((0, "run-l0-modal", "modal"), (1, "run-l1-eu", "nebius"),
+                             (2, "lab", "local")):
+        r.feed({"event": "island_ready", "island": name, "island_id": iid, "cloud": cloud,
+                "gpu": "H100", "gpus": 8, "time_unix": T0})
+    r.feed({"event": "rl_local_round", "island_id": 3, "local_round_id": 1, "time_unix": T0})
+    r.feed({"event": "rl_resource_sample", "island_id": 0, "time_unix": T0,
+            "gpus": [{"index": 0, "util_pct": 80, "mem_used_mb": 40, "mem_total_mb": 80}]})
+    assert r.island_view("0")["ray_embed"]["mode"] == "none"
+    assert r.island_view("0")["card"]["gpu_util_pct"] == 80 and r.island_view("0")["card"]["mem_pct"] == 50
+    tun = r.island_view("1")["ray_embed"]
+    assert tun == {"mode": "tunnel", "port": 18266, "command": "ssh -L 18266:localhost:8265 run-l1-eu"}
+    assert r.island_view("2")["ray_embed"]["mode"] == "direct"
+    assert r.island_view("3")["ray_embed"]["mode"] == "unknown"
+    r.feed({"event": "rl_resource_sample", "island_id": 1, "time_unix": T0, "available": False})
+    assert r.island_view("1")["resource"]["available"] is False
+    assert r.island_view("1")["card"]["gpu_util_pct"] is None
