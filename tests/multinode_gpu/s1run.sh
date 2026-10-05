@@ -118,5 +118,11 @@ eval "timeout $HARD $PY -m yeto.cli $(cat $R/args.txt)" 2>&1 | tee $R/launch.log
 echo "rc=${PIPESTATUS[0]}" > $R/rc.txt.tmp; date -u +%FT%TZ > $R/end_utc.txt
 sleep 20; mv $R/rc.txt.tmp $R/rc.txt
 )
-[ $C = m5 ] && { timeout ${M5_POST_HARD:-1500} $D/s1m5post.sh $R > $R/m5post.out 2>&1; echo "m5post rc=$?" >> $R/m5post.out; }
+# provisioning never succeeded (capacity): no cluster exists -> skip the m5 post step (it would ssh into nothing for up to
+# M5_POST_HARD) and kill the per-run watchdog, which would otherwise `sky down` a later retry that reuses this cluster name
+if grep -qE "failed to provision|ResourcesUnavailableError" $R/launch.log; then
+  kill $(cat $R/watchdog.pid) 2>/dev/null; echo "provision failed: watchdog killed, post skipped" > $R/provision_failed.txt
+elif [ $C = m5 ]; then
+  timeout ${M5_POST_HARD:-1500} $D/s1m5post.sh $R > $R/m5post.out 2>&1; echo "m5post rc=$?" >> $R/m5post.out
+fi
 echo "done $P $(cat $R/rc.txt)"
