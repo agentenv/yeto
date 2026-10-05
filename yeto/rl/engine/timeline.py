@@ -337,7 +337,8 @@ def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> lis
         train = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
                  and e.get("kind") == "compute" and "trainer" in str(e.get("role")).split("+")]
         roll = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
-                and e.get("kind") == "compute" and "rollout" in str(e.get("role")).split("+")]
+                and e.get("kind") == "compute" and "rollout" in str(e.get("role")).split("+")
+                and e.get("task") != "eval"]  # eval generation is not training rollout load
         pub = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
                and e.get("kind") == "transfer" and e.get("task") == "publish"]
         transports = {e.get("weight_transport") for e in evs} - {None}

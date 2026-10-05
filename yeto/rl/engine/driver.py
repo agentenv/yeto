@@ -419,7 +419,11 @@ class IslandDriver:
 
     # -- events ----------------------------------------------------------
     def emit(self, event: str, **fields: Any) -> None:
-        self.events.append({"event": event, **fields})
+        record = {"event": event, **fields}
+        self.events.append(record)
+        feed = getattr(getattr(self, "elastic_hook", None), "feed", None)
+        if self.observe and callable(feed):
+            feed(record)  # D2: in-memory mirror, independent of the tape path
 
     def phase(self, name: str, **fields: Any) -> None:
         if self.observe:

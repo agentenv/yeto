@@ -153,6 +153,8 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    from .engine.miles_adapter.elastic_hook import add_recommend_arguments
+    add_recommend_arguments(parser)  # D2 elastic hook
     # ports LoRA training-time dropout (default 0 = unchanged argv)
     parser.add_argument("--rl-lora-dropout", type=float, default=None)
     # Print the attestation runtime_fingerprint (same Miles argv as the island)
@@ -348,6 +350,8 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-accept-rebind")
     if getattr(args, "rl_observe_timeline", False) and not ports:
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    from .engine.miles_adapter.elastic_hook import check_recommend_flags
+    check_recommend_flags(args)
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
     if not getattr(args, "rl_elastic", False):
@@ -382,6 +386,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_overlap_eval = True
     if getattr(args, "rl_observe_timeline", False):
         miles_args.yeto_rl_observe_timeline = True
+    from .engine.miles_adapter.elastic_hook import apply_recommend_flags
+    apply_recommend_flags(args, miles_args)
     if getattr(args, "rl_deterministic_trainer", False):
         from .engine.miles_adapter.entry import DETERMINISM_ENV
 
