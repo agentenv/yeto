@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import contextlib
 import os
 import re
 import shlex
@@ -2944,6 +2945,91 @@ def _json_compact(value) -> str:
 RL_ISLAND_MIN_CPUS = "8+"
 
 
+MODEL_STORE_MOUNT = "/mnt/yeto-models"
+
+
+def model_store_filesystem(uri, cloud, region):
+    """Nebius filesystem id for ``--model-store nebius-fs://<id>`` on a
+    ``nebius@region`` island, else None (with a WARNING when a store was
+    asked for but cannot be attached there)."""
+    if not uri:
+        return None
+    scheme, sep, fs_id = uri.partition("://")
+    if scheme != "nebius-fs" or not sep or not fs_id.startswith("computefilesystem-"):
+        raise ValueError(f"--model-store: expected nebius-fs://computefilesystem-..., got {uri!r}")
+    if cloud != "nebius" or not region:
+        print(f"[launcher] WARNING: --model-store {uri} needs a nebius@<region> island "
+              f"(got {cloud}@{region}); models download from the Hub")
+        return None
+    return fs_id.rstrip("/")
+
+
+def model_store_sky_config(fs_id, region):
+    """Client-side sky config override that attaches the store filesystem.
+    sky 0.13 reads Nebius filesystems only from config
+    (nebius.region_configs.<region>.filesystems, sky/clouds/nebius.py), and
+    mounts each one with virtiofs during node setup."""
+    from sky import skypilot_config
+
+    regional = dict(skypilot_config.get_nested(("nebius", "region_configs", region), {}) or {})
+    regional["filesystems"] = [
+        # READ_WRITE: Nebius rejects READ_ONLY filesystem attachments
+        # ("readOnly mode attachment is not supported for filesystems yet",
+        # 2026-10-05).  Nothing writes here: HF_HUB_CACHE points at the store
+        # only on a completed-marker hit, when every file is already cached.
+        {"filesystem_id": fs_id, "attach_mode": "READ_WRITE", "mount_path": MODEL_STORE_MOUNT}
+    ]
+    return {"nebius": {"region_configs": {region: regional}}}
+
+
+def model_store_env(model, revision, mount=MODEL_STORE_MOUNT):
+    """Shell: point HF_HUB_CACHE at the store when it holds a COMPLETED
+    snapshot of exactly ``model@revision`` (marker written by
+    scripts/populate_nebius_model_store.sh after a size check); otherwise
+    WARN and leave the Hub download path untouched.  Never fails."""
+    if not revision:
+        return (f"echo '[yeto-model-store] WARNING: no --model-revision; not using "
+                f"{mount}, downloading {model} from the Hub' >&2")
+    marker = f"{mount}/yeto-complete/{model.replace('/', '--')}@{revision}.json"
+    snap = f"{mount}/hub/models--{model.replace('/', '--')}/snapshots/{revision}"
+    return (
+        f"if [ -f {shlex.quote(marker)} ] && [ -d {shlex.quote(snap)} ]; then "
+        f"export HF_HUB_CACHE={mount}/hub YETO_MODEL_STORE_HIT=1; "
+        f"else echo '[yeto-model-store] WARNING: {mount} has no completed {model}@{revision}; "
+        "downloading from the Hub' >&2; fi"
+    )
+
+
+def nebius_baked_image_id(image, cloud, region, baked=None):
+    """``image_id`` for an RL island: the docker image alone, or on Nebius a
+    ``{region: computeimage-..., "docker": image}`` dict when a VM image with
+    exactly that docker digest pre-pulled was baked for ``region``
+    (``NEBIUS_BAKED_IMAGES``; COLDSTART-PLAN.md #3).  A region without an
+    explicit ``@region`` keeps the plain image: a region-keyed dict would pin
+    sky to the baked regions.  A baked entry for a *different* digest is never
+    used (it would add a non-default base disk and still pull everything); it
+    only produces a WARNING so the stale bake is noticed."""
+    if baked is None:
+        from yeto.rl import NEBIUS_BAKED_IMAGES as baked
+    if cloud != "nebius" or not region or not isinstance(image, str):
+        return image
+    if not image.startswith("docker:") or "@sha256:" not in image:
+        return image
+    digest = "sha256:" + image.rsplit("@sha256:", 1)[1]
+    vm_image = baked.get(digest, {}).get(region)
+    if vm_image:
+        print(f"[launcher] nebius/{region}: VM image {vm_image} has {digest[:19]} pre-pulled")
+        return {region: vm_image, "docker": image}
+    stale = sorted(d for d, regions in baked.items() if region in regions)
+    if stale:
+        print(
+            f"[launcher] WARNING: nebius/{region} has baked VM images only for "
+            f"{', '.join(d[:19] for d in stale)}, not {digest[:19]}; using the stock "
+            "image and a full docker pull (re-run scripts/bake_nebius_image.sh)"
+        )
+    return image
+
+
 def rl_island_cpus(args, cloud: str | None = None):
     if getattr(args, "learner_cpus", None):
         return args.learner_cpus
@@ -3248,6 +3334,12 @@ def make_miles_island_task(
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
     if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) == MODAL_SANDBOX_PROVIDER:
         setup_steps.append(MODAL_CLIENT_SETUP)
+    store_fs = model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
+    store_env = ""
+    if store_fs and not is_local_reference(model):
+        store_env = model_store_env(model, args.model_revision) + "\n"
+        setup_steps.append(store_env.rstrip("\n"))
+        prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
     setup_steps.append(prefetch)
     # Ports images (radixark/miles) ship their own Miles at /root/miles on
     # PYTHONPATH; the pinned fork checkout must shadow it.  Legacy unchanged.
@@ -3272,6 +3364,7 @@ def make_miles_island_task(
     setup_script = login_unset + "\n".join(setup_steps)
     run_script = (
             f"{login_unset}{HF_TOKEN_ENV}\n"
+            f"{store_env}"
             "set -e\n"
             "cd ~/sky_workdir\n"
             f"{multinode_env_prelude(spec.cloud, spec.num_nodes)}"
@@ -3367,7 +3460,7 @@ def make_miles_island_task(
         "disk_size": args.disk_size,
     }
     if not in_vm_docker:  # Verda: the VM image stays the cloud default; the container is ours
-        resources["image_id"] = args.rl_image
+        resources["image_id"] = nebius_baked_image_id(args.rl_image, spec.cloud, spec.region)
     if spec.num_nodes > 1 and getattr(args, "rl_island_network_tier", "auto") != "none":
         tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
         if tier:
@@ -5865,10 +5958,20 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 # refresh + bounded backoff on capacity failures.
                 rids[name] = (m, ("verda", spec))
                 continue
-            rids[name] = (
-                m,
-                sky.launch(task, cluster_name=name, retry_until_up=args.retry_until_up),
-            )
+            store_fs = (model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
+                        if getattr(args, "training_mode", "sft") == "rl" else None)
+            if store_fs:
+                from sky import skypilot_config
+
+                store_cfg = skypilot_config.override_skypilot_config(
+                    model_store_sky_config(store_fs, spec.region))
+            else:
+                store_cfg = contextlib.nullcontext()
+            with store_cfg:  # the request snapshots the client config at submit
+                rids[name] = (
+                    m,
+                    sky.launch(task, cluster_name=name, retry_until_up=args.retry_until_up),
+                )
 
         results = {}
         errors = {}
