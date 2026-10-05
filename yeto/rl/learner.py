@@ -162,6 +162,8 @@ def parse_args(argv=None):
     add_recommend_arguments(parser)  # D2 elastic hook
     # ports LoRA training-time dropout (default 0 = unchanged argv)
     parser.add_argument("--rl-lora-dropout", type=float, default=None)
+    # Flash-Next native recipe: routed-expert LoRA rank (default: profile's 8)
+    parser.add_argument("--rl-lora-expert-rank", type=int, default=None)
     # Print the attestation runtime_fingerprint (same Miles argv as the island)
     # and exit before Ray/GPU (ports only).
     parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
@@ -1306,8 +1308,17 @@ def _legacy_miles_argv(config) -> list[str]:
     from .engine.run_config import (
         RECIPE_DEEPSEEK_V4_FLASH,
         RECIPE_QWEN3_5,
+        RECIPE_QWEN3_8_NEXT,
         lr_schedule_argv,
     )
+
+    if config.model_recipe.name == RECIPE_QWEN3_8_NEXT:
+        # The native Flash-Next recipe (raw torch_dist, qwen4_exp provider, per-expert
+        # LoRA) exists only on the ports path; the legacy translation would fall
+        # through to the generic Bridge branch and silently train the wrong model.
+        raise ValueError(
+            "the Qwen3.8-Flash-Next recipe is ports-only; use --rl-engine ports"
+        )
 
     geometry = config.geometry
     parallel = config.parallel
