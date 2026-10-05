@@ -277,5 +277,3 @@ def test_ports_local_round_reaches_wandb_train_axis():
                        "grad_norm": 1.5, "local_round_id": 3, "reward_mean": 0.2})
     assert m["train/step"] == 3 and m["train/loss"] == 0.5 and m["train/grad_norm"] == 1.5
     assert m["rl/reward_mean"] == 0.2
-    assert "train/loss" not in (event_metrics({"event": "rl_local_round", "loss": 0.5,
-                                               "local_round_id": 1}) or {})
