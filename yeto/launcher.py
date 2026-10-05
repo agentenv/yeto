@@ -266,6 +266,46 @@ def multinode_network_tier(cloud: str, gpu: str, gpus_per_node: int) -> str | No
     return "best"
 
 
+def rl_island_spec(args, spec):
+    """The island view of ``spec`` under ``--rl-island-use-gpus-per-node M`` (m5 on
+    8-GPU machines: provision N physical GPUs per node, give the island only local
+    GPUs ``0..M-1``). Every island-side rule (trainer shape, layout, colocated
+    engine check, gpu_pool, learner ``--rl-island-gpus-per-node``) sees M; the sky
+    resources keep the physical ``spec``. Unset -> ``spec`` itself (no change)."""
+    m = getattr(args, "rl_island_use_gpus_per_node", None)
+    if m is None:
+        return spec
+    m = int(m)
+    if m < 1 or m > spec.gpus_per_node:
+        raise ValueError(f"--rl-island-use-gpus-per-node {m} must be in 1..{spec.gpus_per_node} "
+                         f"(physical GPUs per node of {spec})")
+    if spec.cloud == "modal":
+        raise ValueError("--rl-island-use-gpus-per-node is not supported on Modal islands")
+    if m == spec.gpus_per_node:
+        return spec
+    return dataclasses.replace(spec, gpus_per_node=m)
+
+
+def rl_island_gpu_env(args, spec) -> str:
+    """Shell exports pinning the island to local GPUs ``0..M-1`` (exported before
+    ``ray start`` so Ray, the learner, Miles actors and the sglang subprocesses all
+    inherit them); "" without ``--rl-island-use-gpus-per-node`` or when M equals the
+    physical count."""
+    island = rl_island_spec(args, spec)
+    if island is spec:
+        return ""
+    m = island.gpus_per_node
+    return (f"export CUDA_VISIBLE_DEVICES={','.join(str(i) for i in range(m))} "
+            f"YETO_ISLAND_USE_GPUS_PER_NODE={m}\n"
+            f'echo "[yeto-island] GPUs: physical {spec.gpus_per_node}/node, allocated {m}/node '
+            f'(CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"\n')
+
+
+def rl_island_ray_gpus(args, spec) -> str:
+    island = rl_island_spec(args, spec)
+    return "" if island is spec else f" --num-gpus={island.gpus_per_node}"
+
+
 def rl_actor_gpus_per_node(args, spec) -> int:
     """Trainer GPUs per node: all of them when colocated; under
     ``--rl-placement fixed-partition`` the rest after rollout and standby."""
@@ -1977,7 +2017,7 @@ def _prepare_rl_args(
             "--session-server-port requires one positive port or an increasing range"
         )
 
-    specs = parse_gpu_spec(args.gpu)
+    specs = [rl_island_spec(args, spec) for spec in parse_gpu_spec(args.gpu)]
     if getattr(args, "external_learners", 0):
         raise ValueError("RL v0 does not support external learner slots")
     if args.tensor_parallel <= 0 or args.pipeline_parallel <= 0:
@@ -2935,6 +2975,8 @@ def make_miles_island_task(
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
     codex_launch = codex_harness_launch(args)  # None unless a signed Codex agent
+    # --rl-island-use-gpus-per-node: island rules see M GPUs/node; resources stay physical.
+    island = rl_island_spec(args, spec)
 
     flags = (
         f" --model {shlex.quote(args.model)}"
@@ -2964,10 +3006,10 @@ def make_miles_island_task(
         f" --rollout-max-response-len {args.rollout_max_response_len}"
         f" --completed-groups-path {shlex.quote(args.rl_completed_groups_path)}"
         f" --event-tape ~/yeto-output/rl-island-{learner_id}.jsonl"
-        f" --actor-num-nodes {rl_trainer_shape(args, spec)[0]}"
-        f" --actor-num-gpus-per-node {rl_trainer_shape(args, spec)[1]}"
-        + (f" --rl-island-gpus-per-node {spec.gpus_per_node}" if spec.num_nodes > 1 else "")
-        + rl_island_bundle_map_flag(args, spec)
+        f" --actor-num-nodes {rl_trainer_shape(args, island)[0]}"
+        f" --actor-num-gpus-per-node {rl_trainer_shape(args, island)[1]}"
+        + (f" --rl-island-gpus-per-node {island.gpus_per_node}" if island.num_nodes > 1 else "")
+        + rl_island_bundle_map_flag(args, island)
         + (rl_cross_node_flags(args) if spec.num_nodes > 1 else "")
         + f" --tensor-parallel {args.tensor_parallel}"
         f" --pipeline-parallel {args.pipeline_parallel}"
@@ -3240,6 +3282,7 @@ def make_miles_island_task(
             # status refresh marks the cluster INIT and the head relaunches
             # it forever.  Ray processes carry their session dir on the
             # command line, so pkill by that path never touches sky's.
+            f"{rl_island_gpu_env(args, spec)}"
             'MILES_RAY_DIR="$HOME/miles-ray"\n'
             # Same escalation as `ray stop --force` (TERM, short grace, KILL)
             # but scoped to this dir: gcs_server, raylet and the autoscaler
@@ -3263,6 +3306,7 @@ def make_miles_island_task(
             # then asks 127.0.0.1:8265 and fails (rl-multinode-island G1,
             # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
+            + rl_island_ray_gpus(args, spec)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             "  trap stop_miles_ray EXIT\n"
             # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
@@ -3287,7 +3331,8 @@ def make_miles_island_task(
             # ends this node non-zero instead of a later engine start error.
             f"{worker_model_fetch}"
             "  for _ in $(seq 1 150); do "
-            'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR" && break; '
+            'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
+            f"{rl_island_ray_gpus(args, spec)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
             "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"
@@ -3323,7 +3368,7 @@ def make_miles_island_task(
     }
     if not in_vm_docker:  # Verda: the VM image stays the cloud default; the container is ours
         resources["image_id"] = args.rl_image
-    if spec.num_nodes > 1:
+    if spec.num_nodes > 1 and getattr(args, "rl_island_network_tier", "auto") != "none":
         tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
         if tier:
             resources["network_tier"] = tier
@@ -5809,7 +5854,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 modal_cfgs[name] = cfg
                 continue
             tasks[name] = task
-            print(f"[launcher] launching learner {m} on {spec} as {name}")
+            alloc = (rl_island_spec(args, spec) if getattr(args, "training_mode", "sft") == "rl"
+                     else spec)
+            print(f"[launcher] launching learner {m} on {spec} as {name}"
+                  + (f" (physical {spec.gpus_per_node} GPUs/node billed, island allocated "
+                     f"{alloc.gpus_per_node}/node = GPUs 0..{alloc.gpus_per_node - 1})"
+                     if alloc is not spec else ""))
             if spec.cloud == "verda":
                 # Launched in resolve(): live stock -> ordered any_of, with
                 # refresh + bounded backoff on capacity failures.
@@ -6216,6 +6266,8 @@ def dry_run_plan(args) -> dict:
             "gpus_per_node": spec.gpus_per_node,
             "total_gpus": spec.total_gpus,
         }
+        if rl and rl_island_spec(args, spec) is not spec:
+            entry["allocated_gpus_per_node"] = rl_island_spec(args, spec).gpus_per_node
         if rl:
             task = make_miles_island_task(
                 args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"

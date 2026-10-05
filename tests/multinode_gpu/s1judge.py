@@ -17,6 +17,9 @@ m5 (2x4 L40S colocated, ONE sglang TP8 rollout engine across both nodes, --rl-al
   (a1) rank map: pulled/m5ranks.jsonl (RL run) / m5ranks-gen.jsonl (generation-only server) rows {node, tp_rank, gpu_uuid}
        -> TP 0-3 on node 0 and 4-7 on node 1 (sglang node_rank = tp_rank // 4, multinode.sglang_tp_rank_map), 8 distinct
        uuids, each in that node's nvidia-smi uuid list (pulled/gpu-<node>.txt) and every GPU of both nodes used once;
+       With gpus_per_node.txt "<physical> <use>" (2x8xH100 machines, island = GPUs 0..3 of each node) the node uuid lists
+       are the allocated cards 0..use-1 only; (a1b) no compute app (puller apps-<node>.txt during the RL run, s1m5post
+       apps-post-<node>.txt during the generation-only servers) on an unallocated card, and >= 1 row on an allocated card;
   (a2) NCCL cross-node init: pulled/m5nccl.json ok (world 8, 2 nodes, all_reduce sum check) AND the RL run generated
        (a TP8 forward needs the cross-node TP all-reduce);
   (a3) generation: tp8 outputs non-empty; vs the single-node TP4 greedy reference (pulled/m5gen.json) >= 75% of prompts
@@ -371,13 +374,21 @@ elif CASE == "m4":
         verdict = "PASS" if all(checks.values()) else "FAIL"
 elif CASE == "m5":
     cl = read("cluster.txt").strip()
-    node_uuids = [re.findall(r"(GPU-[0-9a-f-]{36})", read(f"pulled/gpu-{n}.txt")) for n in (cl, cl + "-worker1")]
+    hosts = (cl, cl + "-worker1")
+    # gpus_per_node.txt = "<physical> <use>" (s1run.sh M5_USE_GPUS): the island owns local GPUs 0..use-1 of each node; the
+    # other cards are unallocated (must carry no process). Absent = every GPU of the node belongs to the island.
+    gpn = read("gpus_per_node.txt").split()
+    use = int(gpn[1]) if len(gpn) == 2 else None
+    smi_rows = [[(int(i), u) for i, u in re.findall(r"(?m)^\s*(\d+),\s*(GPU-[0-9a-f-]{36})", read(f"pulled/gpu-{n}.txt"))]
+                for n in hosts]
+    node_uuids = [[u for i, u in rows if use is None or i < use] for rows in smi_rows]
+    unalloc = {u for rows in smi_rows for i, u in rows if use is not None and i >= use}
 
     def rank_map_ok(rows):
         """latest row per tp_rank; (ok, detail) against the expected sglang node_rank layout."""
         last = {}
-        for r in rows:
-            if isinstance(r.get("tp_rank"), int):
+        for r in rows:  # a resolved uuid is never replaced by a later unresolved probe row
+            if isinstance(r.get("tp_rank"), int) and (r.get("gpu_uuid") or not (last.get(r["tp_rank"]) or {}).get("gpu_uuid")):
                 last[r["tp_rank"]] = r
         k = 4
         ok = sorted(last) == list(range(8))
@@ -387,6 +398,12 @@ elif CASE == "m5":
         ok = ok and all(len(u) == k for u in node_uuids) and set(uuids) == set(node_uuids[0]) | set(node_uuids[1])
         return ok, {t: (last[t].get("node"), (last[t].get("gpu_uuid") or "")[:12], last[t].get("method")) for t in sorted(last)}
 
+    # every compute-app row of the puller (RL run) and the post-step snapshots (generation-only servers): none may sit on
+    # an unallocated GPU; at least one row must sit on an allocated GPU (the snapshots saw the run at all)
+    app_rows = [m.groups() for n in hosts for f in (f"pulled/apps-{n}.txt", f"pulled/apps-post-{n}.txt")
+                for m in re.finditer(r"(?m)^(GPU-[0-9a-f-]{36}),\s*(\d+),\s*([^,]*)", read(f))]
+    on_unalloc = sorted({f"{u[:12]}:{name.strip()}" for u, _pid, name in app_rows if u in unalloc})
+    on_alloc = sum(1 for u, _pid, _name in app_rows if u in {x for node in node_uuids for x in node})
     rl_ok, rl_map = rank_map_ok(jsonl("m5ranks.jsonl"))
     gen_ok, gen_map = rank_map_ok(jsonl("m5ranks-gen.jsonl"))
     try:
@@ -411,6 +428,7 @@ elif CASE == "m5":
         "args_tp8_engine_cross_node_opt_in": "--rollout-num-gpus-per-engine 8" in read("args.txt")
                                               and "--rl-allow-cross-node-engine-tp" in read("args.txt"),
         "tp_ranks_0_7_match_gpu_uuids": rl_ok or gen_ok,
+        "no_process_on_unallocated_gpus": not on_unalloc and on_alloc > 0,
         "nccl_cross_node_init_ok": nccl.get("ok") is True and nccl.get("world") == 8 and nccl.get("nodes") == 2
                                    and len(generates) >= 1,
         "gen_nonempty": bool(outs) and all(bool(o) for o in outs),
@@ -423,6 +441,8 @@ elif CASE == "m5":
         "launcher_rc_0": rc == 0,
     }
     notes.append(f"rank_map rl={rl_ok} {rl_map} gen={gen_ok} {gen_map}")
+    notes.append(f"gpus_per_node physical={gpn[0] if gpn else None} use={use} unallocated={len(unalloc)} "
+                 f"app_rows_on_allocated={on_alloc} on_unallocated={on_unalloc[:8]}")
     notes.append(f"gen prefix{PREFIX} match={sum(same)}/{len(same)} nccl_init_s={nccl.get('init_s')} nccl_error={(nccl.get('error') or '')[-200:]}")
     span = {e.get("rollout_id"): (e.get("end") or 0) - (e.get("start") or 0)
             for e in spans if e.get("task") in ("generate", "rollout") and e.get("rollout_id") is not None}
