@@ -182,9 +182,9 @@
 
 边界：D1 = 6.1–6.3（shadow 归因、建议、人工触发前重验）；D2 = 6.4–6.7（默认关闭的自动模式、模式切换、四场景对比与综合验收）。D2 只有在 D1 验收通过且存在至少一条实测净收益边后才开工；若 2.4/5.7 得出“尚无净收益边”的合法否定结论，D2 按 6.4 原文不开工，系统保持 manual/recommend。
 
-- [ ] 6.1 [Y；依赖1.7,2.4,5.7] 实现shadow负载归因与收益预测，分别对应串行或已认证重叠时间线；验收X8：工具等待/长尾/发布阻塞可区分，不统一套max(R,T)，无净收益边保持当前配置。
-- [ ] 6.2 [Y；依赖6.1] 增加半自动建议：source/target、expected_epoch、profile hash、收益/成本区间、有效期与拒绝原因；验收：建议不自行执行，人工触发进入与手动相同事务。
-- [ ] 6.3 [Y+M；依赖6.2] 执行前重验建议有效期、epoch、profile、负载与pause guard；验收：批准过期或条件变化的建议明确拒绝，不静默续批或替换目标。
+- [x] 6.1 [Y；依赖1.7,2.4,5.7] 实现shadow负载归因与收益预测，分别对应串行或已认证重叠时间线；验收X8：工具等待/长尾/发布阻塞可区分，不统一套max(R,T)，无净收益边保持当前配置。（代码完成；收益预测以 5.7 数据为输入，当前为空则不出建议；`yeto/rl/engine/recommend.py`，`tests/test_rl_recommend.py`）
+- [x] 6.2 [Y；依赖6.1] 增加半自动建议：source/target、expected_epoch、profile hash、收益/成本区间、有效期与拒绝原因；验收：建议不自行执行，人工触发进入与手动相同事务。（`recommend.Recommendation`/`Recommender.approve` 复用 `controller.request`；`tests/test_rl_recommend.py`）
+- [x] 6.3 [Y+M；依赖6.2] 执行前重验建议有效期、epoch、profile、负载与pause guard；验收：批准过期或条件变化的建议明确拒绝，不静默续批或替换目标。（`Recommender.revalidate`；`tests/test_rl_recommend.py`）
 - [ ] 6.4 [Y；依赖6.3及至少一条实测净收益边] 实现默认关闭的auto模式、持续窗口、保守收益门槛、最短停留/cooldown/频率限制、失败停用；验收：振荡负载不抖动，trainer未认证边不可选，论文11步等数值不硬编码。
 - [ ] 6.5 [Y+M；依赖6.4] 实现disabled/manual/recommend/auto切换及兼容旧路径；验收：关闭auto不打断事务恢复，手动/半自动无绕过安全校验通道。
 - [ ] 6.6 [X；依赖6.5] 稳定/变化/长尾/工具等待四场景，对比兼容默认、同profile最佳固定、动态；验收：相同数据/更新预算，模式变化与resize收益分离，记录端到端、全池GPU-hours、有效吞吐、等待、首step与恢复开销，不预设提升比例。
