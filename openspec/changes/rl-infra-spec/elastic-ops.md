@@ -26,6 +26,21 @@ IslandDriver.safe_point(rollout_id)
 
 构造 driver 时传 `observe=True`（会多出 1.7 的 `rl_timeline_span`、`rl_load_sample`、`rl_round_labels` 事件）。observe=False 时 hook 什么也不做。
 
+## 2a. 启动参数（launcher → learner）
+
+```
+yeto launch ... --rl-engine ports --rl-elastic ... --rl-observe-timeline \
+    --rl-recommend-mode recommend \          # disabled(默认)/manual/recommend/auto
+    --rl-edge-costs-path /path/edge_costs.json \  # 5.7 成本表；缺失 → hold
+    --rl-elastic-window-s 300                  # 负载窗口秒数（默认 300）
+```
+
+* 透传路径与 `--rl-observe-timeline` 相同：`yeto/cli.py` → `launcher` 校验并拼进 learner 命令行 → `yeto.rl.learner.apply_ports_infra_switches` 写到 `miles_args.yeto_rl_recommend_mode / yeto_rl_edge_costs_path / yeto_rl_elastic_window_s` → `compose_island` 里由 `miles_adapter/elastic_hook.elastic_hook_for` 构造 `ElasticHook`。
+* 三个参数任一非默认时，都要求同时给 `--rl-elastic` 和 `--rl-observe-timeline`，否则 launcher（开机前）和 learner 都会拒绝。`disabled` 或不传参数时不构造 hook，事件序列与不传参数完全一致。
+* 构造 hook 时：configs 取 controller 的资源配置；Flash-Next full profile 的候选边再与 `flash_next_elastic_declaration()` 的声明边取交集，其它 profile 只用 attestation 认证过的边；`total_rounds` = `num_rollout`。
+* 启动时按 mode 调 `controller.set_recommend_mode`。`auto` 如果被拒（attestation 未声明 `auto_controller`），会记 warning 并退回 `recommend`（journal 里 `recommend_mode` 记录的 reason 为 `auto refused at startup: ...`）。重启时先恢复 journal 里最后一条 `auto_state`。
+* AutoPolicy 目前用默认值（k_windows=6、min_dwell/cooldown 1800s 等），没有 CLI 参数。
+
 ## 3. 切换模式
 
 模式：`disabled`（默认）/ `manual` / `recommend` / `auto`。切换写入 journal，重启后会 replay；切换不会打断进行中的事务或恢复。
@@ -81,6 +96,6 @@ AutoController 的 dwell、cooldown、切换历史和在途请求都写在 journ
 
 ## 7. 已知限制
 
-* hook 默认按增量方式读事件带的 JSONL 文件。如果事件带走 Miles 的 `_append_rl_event`（`EventTape(args=...)`），需要传 `events_source`。
-* learner/CLI 还没有 `--rl-edge-costs-path` / `--rl-elastic-window-s` 参数，hook 也还没有在 learner 里构造。RLRunConfig 字段已经预留（从 `args.rl_edge_costs_path` / `args.rl_elastic_window_s` 读取）。
-* `eval` 阶段的 rollout 计算量会计入 `rollout_busy_fraction`。
+* 事件来源：driver 每次 `emit` 都会把 observe 事件同步喂给 `hook.feed`（内存镜像），因此不依赖事件带文件路径（Miles `_append_rl_event` 路径同样适用）。没有被喂过事件时（例如单独使用 hook），才回退为增量读取 JSONL 文件或使用 `events_source`。只有经过 driver `emit` 的事件可见；Ray worker 直接写进事件带的记录不会进入 hook。
+* `eval` 阶段（span `task="eval"`）的 rollout 计算不计入 `rollout_busy_fraction`，但仍计入 GPU busy。
+* AutoPolicy 不可通过 CLI 调整。
