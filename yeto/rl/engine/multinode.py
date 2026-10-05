@@ -292,6 +292,51 @@ def engine_replica_rejection(engine: Sequence[tuple[int, int]], gpus_per_node: i
     return None
 
 
+def sglang_tp_rank_map(engine: Sequence[tuple[int, int]]) -> list[dict[str, int]]:
+    """Expected sglang TP rank -> (node, local GPU) map of one rollout engine whose
+    GPUs are ``engine`` (``(node, gpu)`` slots in bundle order), m5 / ruling
+    2026-10-04 v2. Mirrors sglang's multi-node launch (Miles ``specs/inference.py``:
+    ``nnodes = gpus_per_engine // num_gpus_per_node``, ``node_rank`` per node of the
+    engine, ``base_gpu_id`` = the engine's first local GPU on that node): node rank
+    ``r`` hosts the contiguous TP ranks ``r*k .. r*k+k-1`` (``k`` = GPUs per node of
+    the engine) on local GPUs ``base + (tp_rank % k)``. Refuses an engine that is not
+    whole equal per-node runs of consecutive GPUs (the only shape sglang can launch)."""
+    engine = [tuple(s) for s in engine]
+    if not engine:
+        raise TopologyError("empty rollout engine")
+    nodes: list[int] = []
+    per: dict[int, list[int]] = {}
+    for node, gpu in engine:
+        if node not in per:
+            if nodes and node in nodes:
+                raise TopologyError(f"engine {engine} revisits node n{node}")
+            nodes.append(node)
+            per[node] = []
+        elif nodes[-1] != node:
+            raise TopologyError(f"engine {engine} revisits node n{node}")
+        per[node].append(gpu)
+    k = len(per[nodes[0]])
+    out = []
+    for node_rank, node in enumerate(nodes):
+        gpus = per[node]
+        if len(gpus) != k or gpus != list(range(gpus[0], gpus[0] + k)):
+            raise TopologyError(f"engine {engine}: node n{node} must hold {k} consecutive GPUs")
+        for i, gpu in enumerate(gpus):
+            out.append({"tp_rank": node_rank * k + i, "node_rank": node_rank, "node": node, "gpu": gpu})
+    return out
+
+
+def colocated_engine_slots(trainer_gpus: int, gpus_per_engine: int,
+                           topology: Topology) -> list[list[tuple[int, int]]]:
+    """Rollout engines of a colocated placement: Miles carves the shared GPU set into
+    consecutive ``gpus_per_engine`` runs of logical bundles (engine i = bundles
+    ``i*g .. i*g+g-1``)."""
+    g = max(1, int(gpus_per_engine))
+    if trainer_gpus % g:
+        raise TopologyError(f"colocated GPUs {trainer_gpus} not a multiple of engine size {g}")
+    return [[topology.slot_of(b) for b in range(i, i + g)] for i in range(0, trainer_gpus, g)]
+
+
 def engine_replica_delta_rejection(source_rollout: int, target_rollout: int,
                                    engine_gpus: int) -> str | None:
     """Ruling 2026-10-04 v2: a rollout up/down edge scales by WHOLE engine replicas

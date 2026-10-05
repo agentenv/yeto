@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """rl-multinode-island tasks §3 judge (criteria fixed before the runs; see tasks.md §3).
-usage: s1judge.py <run dir> <g0|g1|g2|g3|g4|m1|m2|m3>  -> prints and writes <run dir>/judgment-<case>.json
+usage: s1judge.py <run dir> <g0|g1|g2|g3|g4|m1|m2|m3|m5>  -> prints and writes <run dir>/judgment-<case>.json
        s1judge.py <m4a run dir> m4 <m4b run dir>          -> writes <m4b run dir>/judgment-m4.json
 m4 (machine replacement, S8-MATRIX-READINESS.md §4; criteria fixed before the runs): A = 2x2 island with --rl-checkpoint-store,
   worker raylet killed at train rid>=2 -> node_lost; B = new cluster, same store, --rl-elastic-accept-rebind. PASS needs the
@@ -12,6 +12,20 @@ m1/m2/m3 (2x2 L40S, resources-2x2.json T2R1S1; criteria fixed before the runs, M
   pulled/rl-island-0.jsonl (tape: rl_driver_phase / rl_reconfiguration), pulled/apps-<node>.txt (nvidia-smi compute apps +
   ps snapshots every 10 s, head and worker1), pulled/gpu-<node>.txt (nvidia-smi index,uuid per node), pulled/run.log
   (sky job log: Megatron argument dump), launch.log (launcher stdout), rc.txt, pulled/inwatch.log (m3 trigger submissions).
+m5 (2x4 L40S colocated, ONE sglang TP8 rollout engine across both nodes, --rl-allow-cross-node-engine-tp; ruling 2026-10-04 v2;
+  criteria fixed before the run): verdict = correctness only; performance is reported in "perf" with NO threshold.
+  (a1) rank map: pulled/m5ranks.jsonl (RL run) / m5ranks-gen.jsonl (generation-only server) rows {node, tp_rank, gpu_uuid}
+       -> TP 0-3 on node 0 and 4-7 on node 1 (sglang node_rank = tp_rank // 4, multinode.sglang_tp_rank_map), 8 distinct
+       uuids, each in that node's nvidia-smi uuid list (pulled/gpu-<node>.txt) and every GPU of both nodes used once;
+  (a2) NCCL cross-node init: pulled/m5nccl.json ok (world 8, 2 nodes, all_reduce sum check) AND the RL run generated
+       (a TP8 forward needs the cross-node TP all-reduce);
+  (a3) generation: tp8 outputs non-empty; vs the single-node TP4 greedy reference (pulled/m5gen.json) >= 75% of prompts
+       share the first 16 output tokens (bf16 TP4 vs TP8 reduction order differs; exact equality is not required);
+  (a4) weight sync: every trained round has an rl_publication with policy_version == rollout_id, a non-empty member list
+       and a policy token (the publisher only acks when every engine's get_weight_version == token), policy versions
+       strictly increase, a generate follows each publication, and no "did not acknowledge"/token mismatch in the logs.
+  perf: RL generate tokens/s per round (rl_local_round.action_tokens / rl_timeline_span generate), generation-only
+       tokens/s TP8 (2 nodes) and TP4 (1 node), all_reduce latency/bus bandwidth per size.
 Verdicts: PASS | FAIL | PARTIAL (a sub-criterion is not verifiable on this spec, says which) | INVALID_TEST (no valid test: startup/timeout).
 """
 import json, os, re, sys, time
@@ -48,7 +62,7 @@ phases = [e for e in events if e.get("event") == "rl_driver_phase"]
 rounds_trained = sorted({e.get("rollout_id") for e in phases if e.get("phase") == "train"})
 generates = [e for e in phases if e.get("phase") == "generate"]
 gpu_names = " ".join(read("pulled/" + f) for f in os.listdir(os.path.join(R, "pulled")) if f.startswith("gpu-")) if os.path.isdir(os.path.join(R, "pulled")) else ""
-checks, notes = {}, []
+checks, notes, perf = {}, [], {}
 # ---- ruling 2026-10-04 v2 evidence helpers (field sources in comments; see MULTINODE-GAP-S8.md §8.6) ----
 local_rounds = sorted((e for e in events if e.get("event") == "rl_local_round"), key=lambda e: e.get("local_round_id", 0))
 publications = sorted((e for e in events if e.get("event") == "rl_publication"), key=lambda e: e.get("policy_version", -1))
@@ -355,10 +369,78 @@ elif CASE == "m4":
                                           "from A's round cut (journal-only restore)")
     else:
         verdict = "PASS" if all(checks.values()) else "FAIL"
+elif CASE == "m5":
+    cl = read("cluster.txt").strip()
+    node_uuids = [re.findall(r"(GPU-[0-9a-f-]{36})", read(f"pulled/gpu-{n}.txt")) for n in (cl, cl + "-worker1")]
+
+    def rank_map_ok(rows):
+        """latest row per tp_rank; (ok, detail) against the expected sglang node_rank layout."""
+        last = {}
+        for r in rows:
+            if isinstance(r.get("tp_rank"), int):
+                last[r["tp_rank"]] = r
+        k = 4
+        ok = sorted(last) == list(range(8))
+        uuids = [last[t].get("gpu_uuid") for t in sorted(last)]
+        ok = ok and all(uuids) and len(set(uuids)) == 8
+        ok = ok and all(last[t].get("node") == t // k and last[t].get("gpu_uuid") in node_uuids[t // k] for t in last)
+        ok = ok and all(len(u) == k for u in node_uuids) and set(uuids) == set(node_uuids[0]) | set(node_uuids[1])
+        return ok, {t: (last[t].get("node"), (last[t].get("gpu_uuid") or "")[:12], last[t].get("method")) for t in sorted(last)}
+
+    rl_ok, rl_map = rank_map_ok(jsonl("m5ranks.jsonl"))
+    gen_ok, gen_map = rank_map_ok(jsonl("m5ranks-gen.jsonl"))
+    try:
+        nccl = json.loads(read("pulled/m5nccl.json") or "{}")
+    except Exception:
+        nccl = {}
+    try:
+        gen = json.loads(read("pulled/m5gen.json") or "{}")
+    except Exception:
+        gen = {}
+    tp8, ref = gen.get("tp8") or {}, gen.get("ref") or {}
+    outs, routs = tp8.get("outputs") or [], ref.get("outputs") or []
+    PREFIX = 16
+    same = [bool(a) and bool(b) and list(a[:PREFIX]) == list(b[:PREFIX]) for a, b in zip(outs, routs)]
+    match_frac = (sum(same) / len(same)) if same and len(outs) == len(routs) else None
+    logs = launch + read("pulled/run.log")
+    trained = set(rounds_trained)
+    pubs = {p.get("policy_version"): p for p in publications}
+    gen_rids = [e.get("rollout_id") for e in generates]
+    versions = [p.get("policy_version") for p in publications]
+    checks = {
+        "args_tp8_engine_cross_node_opt_in": "--rollout-num-gpus-per-engine 8" in read("args.txt")
+                                              and "--rl-allow-cross-node-engine-tp" in read("args.txt"),
+        "tp_ranks_0_7_match_gpu_uuids": rl_ok or gen_ok,
+        "nccl_cross_node_init_ok": nccl.get("ok") is True and nccl.get("world") == 8 and nccl.get("nodes") == 2
+                                   and len(generates) >= 1,
+        "gen_nonempty": bool(outs) and all(bool(o) for o in outs),
+        "gen_matches_single_node_ref_within_tolerance": match_frac is not None and match_frac >= 0.75,
+        "weight_sync_policy_version_consistent": bool(trained) and all(
+            rid in pubs and pubs[rid].get("sync/publication_members") and pubs[rid].get("rl/policy_token")
+            and rid in gen_rids for rid in trained) and versions == sorted(set(versions)),
+        "no_engine_version_mismatch": not re.search(r"did not acknowledge|TOKEN_MISMATCH|token_mismatch", logs),
+        "rounds_ge_2": len(rounds_trained) >= 2 and len(generates) >= 2,
+        "launcher_rc_0": rc == 0,
+    }
+    notes.append(f"rank_map rl={rl_ok} {rl_map} gen={gen_ok} {gen_map}")
+    notes.append(f"gen prefix{PREFIX} match={sum(same)}/{len(same)} nccl_init_s={nccl.get('init_s')} nccl_error={(nccl.get('error') or '')[-200:]}")
+    span = {e.get("rollout_id"): (e.get("end") or 0) - (e.get("start") or 0)
+            for e in spans if e.get("task") in ("generate", "rollout") and e.get("rollout_id") is not None}
+    toks = {e.get("local_round_id", i): e.get("action_tokens") for i, e in enumerate(local_rounds)}  # local_round_id == rollout_id (single island)
+    perf = {"rl_generate_tokens_per_s": [round(toks[r] / span[r], 1) for r in sorted(span)
+                                         if toks.get(r) and span[r] > 0],
+            "gen_only_tp8_tokens_per_s": tp8.get("tokens_per_s"), "gen_only_ref_tp4_tokens_per_s": ref.get("tokens_per_s"),
+            "allreduce": nccl.get("results") or [], "nccl_init_s": nccl.get("init_s")}
+    if rc == 124 or (not rounds_trained and not outs):
+        verdict = "INVALID_TEST"; notes.append("no RL round and no generation-only output (startup/timeout)")
+    else:
+        verdict = "PASS" if all(checks.values()) else "FAIL"
 else:
     sys.exit("unknown case")
 out = {"case": CASE, "verdict": verdict, "checks": checks, "notes": notes, "rc": rc, "rounds_trained": rounds_trained, "n_generate": len(generates),
        "start_utc": read("start_utc.txt").strip(), "end_utc": read("end_utc.txt").strip(), "yeto_sha": read("yeto_sha.txt").strip()}
+if perf:
+    out["perf"] = perf
 json.dump(out, open(os.path.join(R, f"judgment-{CASE}.json"), "w"), indent=1)
 print(json.dumps(out))
 sys.exit(0 if verdict == "PASS" else 1)
