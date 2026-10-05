@@ -50,7 +50,7 @@ case $C in
   m4a|m4b) [ -n "${STORE:-}" ] || { echo "abort: $C needs STORE=s3://<bucket>/<prefix> (the --rl-checkpoint-store bucket; same value for m4a and m4b)"; exit 66; }
        GPU=nebius:2x2xl40s@eu-north1; PAR="--tensor-parallel 1 --pipeline-parallel 2"; KEEP=""; NODES=2
        if [ $C = m4a ]; then STEPS=8; EX="$ELASTIC22 --rl-checkpoint-store $STORE"
-       else STEPS=${M4B_STEPS:-8}; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-accept-rebind"; fi;;
+       else STEPS=${M4B_STEPS:-8}; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-accept-rebind${M4B_ITYPE:+ --learner-instance-type $M4B_ITYPE}"; fi;;
   m5)  GPU=nebius:2x4xl40s@eu-north1; STEPS=${M5_STEPS:-2}; PAR="--tensor-parallel 1 --pipeline-parallel 1"; KEEP="--keep"; NODES=2
        EX="--rollout-num-gpus-per-engine 8 --rl-allow-cross-node-engine-tp --rl-observe-timeline";;
   *) echo "unknown case $C"; exit 64;;
