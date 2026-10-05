@@ -1,0 +1,69 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Yeto 舰队看板</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#ffffff;--panel2:#eef1f5;--ink:#16202c;--muted:#5d6b7c;--line:#d9dee6;--accent:#2f6fdb;--ok:#1f8a5b;--warn:#b7791f;--bad:#c2413a;--i0:#2f6fdb;--i1:#d0772a;--i2:#1f8a5b;--i3:#8a4fc4;--chip:#e6ebf2;
+--sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;--mono:ui-monospace,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f141a;--panel:#171e27;--panel2:#1f2833;--ink:#e3e9f0;--muted:#94a3b5;--line:#2c3744;--accent:#6c9cf0;--ok:#4cc38a;--warn:#e0a948;--bad:#ef6b62;--i0:#6c9cf0;--i1:#f09a55;--i2:#4cc38a;--i3:#b48ae8;--chip:#243040}}
+:root[data-theme="dark"]{--bg:#0f141a;--panel:#171e27;--panel2:#1f2833;--ink:#e3e9f0;--muted:#94a3b5;--line:#2c3744;--accent:#6c9cf0;--ok:#4cc38a;--warn:#e0a948;--bad:#ef6b62;--i0:#6c9cf0;--i1:#f09a55;--i2:#4cc38a;--i3:#b48ae8;--chip:#243040}
+*{box-sizing:border-box}html,body{margin:0}body{background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans);overflow-x:hidden}
+.wrap{max-width:1400px;margin:0 auto;padding:12px 16px 40px}
+h1{font-size:18px;margin:0}h2{font-size:14px;margin:0 0 8px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.top{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:12px}
+.intent{font-size:13px;color:var(--muted);margin:4px 0 0}
+.chip{display:inline-block;padding:1px 8px;border-radius:10px;background:var(--chip);font-size:12px;color:var(--muted);white-space:nowrap}
+.chip.live{background:var(--ok);color:var(--panel)}.chip.off{background:var(--warn);color:var(--panel)}.chip.demo{border:1px dashed var(--muted);background:transparent}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
+.grid{display:grid;gap:12px}
+.scroll{overflow-x:auto;max-width:100%}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th{color:var(--muted);font-weight:500;position:sticky;top:0;background:var(--panel)}td:first-child,th:first-child{text-align:left}
+.num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.bar{height:8px;background:var(--panel2);border-radius:4px;overflow:hidden}.bar>i{display:block;height:100%}
+.ray{border:2px dashed var(--line);border-radius:8px;min-height:180px;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--muted);padding:12px;background:repeating-linear-gradient(45deg,transparent 0 10px,var(--panel2) 10px 11px)}
+.ray iframe{display:none}
+button,select{font:inherit;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer}
+.drill{display:none}.drill.open{display:block}
+svg text{fill:var(--muted);font:11px var(--mono)}svg .ax{stroke:var(--line)}
+.k{font-size:12px;color:var(--muted)}.v{font:600 20px var(--mono)}
+details>summary{cursor:pointer;color:var(--accent)}
+.layout{display:grid;gap:12px;grid-template-columns:minmax(0,1fr) 340px;margin-top:12px}
+@media (max-width:980px){.layout{grid-template-columns:minmax(0,1fr)}}
+.alerts{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.al{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--muted);border-radius:8px;padding:8px 10px;cursor:pointer;text-align:left;width:100%;min-width:0}
+.al:hover,.al:focus-visible{border-color:var(--accent)}.al.sel{outline:2px solid var(--accent)}
+.al .t{font-weight:600}.al .k{margin-top:2px}
+.sev{font:500 11px var(--mono);text-transform:uppercase;letter-spacing:.04em}
+.hc{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;cursor:pointer;margin-bottom:8px}
+.hc.sel{outline:2px solid var(--accent)}
+.hr{display:flex;justify-content:space-between;gap:8px;font-size:12px}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0}
+.tabs button{font-size:12px;padding:2px 8px}.tabs button[aria-pressed="true"]{background:var(--accent);color:var(--panel);border-color:var(--accent)}
+tr.hl td{background:var(--chip)}tr.miss td:nth-child(4){color:var(--warn)}
+.stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.topr{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center}
+
+.nd{color:var(--muted);font-style:italic;font-size:12px}.empty{padding:24px;text-align:center;color:var(--muted)}
+.cp{font-size:12px;padding:1px 8px;margin:2px 4px 2px 0}
+</style></head><body><div class="wrap">
+<div class="top"><div><h1 id="title">Syncer 总览</h1><p class="intent">先用告警与岛健康回答“哪里出问题”，再用叠加曲线与成本效率回答“训得好不好、花得值不值”。只读；所有操作仅提供“复制 CLI 命令”。</p></div><div class="topr" id="hdr"></div></div>
+<div class="alerts" id="alerts" aria-label="告警，按严重度排序"></div>
+<div class="layout">
+ <div style="min-width:0;align-content:start" class="grid">
+  <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center"><h2 style="margin:0">训练曲线（按岛叠加）</h2><div id="lg"></div></div>
+   <div class="tabs" id="tabs" role="group" aria-label="指标"></div>
+   <div id="big"></div>
+   <div class="k" id="cap">横轴 = 岛本地 round；竖虚线 = syncer round 边界（派生，按 step 近似对齐）；浅色带 = 该 round 有 missed；圆点 = 告警点，点击告警卡定位。</div></div>
+  <div id="drill" class="drill panel"></div>
+  <div class="panel"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Syncer round 表 <span class="chip">派生</span></h2><label class="k"><input type="checkbox" id="onlybad"> 仅异常 round</label></div><div id="rounds" style="max-height:340px;overflow:auto;margin-top:8px"></div></div>
+ </div>
+ <aside class="grid" style="align-content:start">
+  <div class="panel"><h2>岛健康</h2><div id="cards"></div></div>
+  <div class="panel"><h2>成本效率</h2><div id="eff"></div></div>
+ </aside>
+</div>
+<p class="k" id="foot">成本为价目表 × GPU 数 × 墙钟的估算，非账单。W&amp;B 仅作曲线归档，不是本页数据源。</p>
+</div>
+<!--YETO-DATA-->
+<!--YETO-APP-->
+</body></html>
