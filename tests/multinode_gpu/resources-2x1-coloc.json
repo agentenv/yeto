@@ -1,4 +1,0 @@
-{"nodes":2,"gpus_per_node":1,
- "configs":{"T2R2S0":{"trainer":2,"rollout":2,"standby":0,"rollout_engine_gpus":1,
-                      "placement":{"trainer":["n0:0","n1:0"],"rollout":[["n0:0"],["n1:0"]],"standby":[]}}},
- "edges":[]}

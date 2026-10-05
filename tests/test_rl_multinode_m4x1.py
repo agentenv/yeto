@@ -1,8 +1,9 @@
-"""M4 2x1 variant (m4a1/m4b1): 2 nodes x 1 GPU, colocated, trainer PP2 across the nodes.
+"""M4 2x1 variant (m4a1/m4b1): g3 topology (fixed-partition resources-2x1.json T1R1S0,
+trainer n0:0, rollout n1:0), TP1 PP1, + checkpoint store.
 
 CPU checks: s1run dry-run argv (A/B identical except --rl-elastic-accept-rebind and the
-instance type, steps 8, GPU spec switch), the launcher's current refusal of colocated
---rl-elastic (the product gap this case is blocked on) and the m4 judge's 2-uuid rule."""
+instance type, steps 8, GPU spec switch), the launcher's pre-provision validation accepts
+both argvs, and the m4 judge's 2-uuid rule."""
 
 from __future__ import annotations
 
@@ -37,8 +38,11 @@ def test_s1run_m4x1_argv_identical_except_rebind_and_itype():
     for argv in (a, b):
         assert argv[argv.index("--gpu") + 1] == "nebius:2x1xl40s@eu-north1"
         assert argv[argv.index("--total-steps") + 1] == "8"
-        assert argv.count("--learner-instance-type") == 1 and "--rl-placement" not in argv
-        assert "--pipeline-parallel" in argv and argv[argv.index("--pipeline-parallel") + 1] == "2"
+        assert argv.count("--learner-instance-type") == 1
+        assert argv[argv.index("--rl-placement") + 1] == "fixed-partition"
+        assert argv[argv.index("--rl-elastic-resources") + 1].endswith("/resources-2x1.json")
+        assert argv[argv.index("--rl-elastic-initial-config") + 1] == "T1R1S0"
+        assert argv[argv.index("--pipeline-parallel") + 1] == "1" and argv[argv.index("--tensor-parallel") + 1] == "1"
         assert argv[argv.index("--rl-checkpoint-store") + 1] == "s3://b/x"
     assert a[a.index("--learner-instance-type") + 1] == A_ITYPE
     assert b[b.index("--learner-instance-type") + 1] == B_ITYPE
@@ -58,13 +62,10 @@ def test_s1run_m4x1_h100_and_store_required():
     assert r.returncode == 66
 
 
-def test_launcher_still_refuses_colocated_elastic():
-    """Product gap (integ-decl 26ce93b7): the M4 chain lives in the --rl-elastic controller, which is
-    partition-only. Flip this test when a colocated recovery-only elastic mode lands."""
-    _, a = _dry("m4a1")
-    args = build_parser().parse_args(a)
-    with pytest.raises(ValueError, match="fixed-partition"):
-        launcher._check_ports_infra_switches(args, "ports")
+@pytest.mark.parametrize("case", ["m4a1", "m4b1"])
+def test_launcher_accepts_m4x1_argv(case):
+    _, argv = _dry(case, ITYPE=A_ITYPE, M4B_ITYPE=B_ITYPE)
+    launcher._check_ports_infra_switches(build_parser().parse_args(argv), "ports")
 
 
 def _u(i):

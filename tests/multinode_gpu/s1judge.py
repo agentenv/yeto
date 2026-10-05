@@ -324,7 +324,7 @@ elif CASE == "m4":
     b_pools = [r for r in b_own if r.get("kind") == "gpu_pool"]
     b_pool = b_pools[-1] if b_pools else {}
     b_uuids = [u for node in (b_pool.get("uuids") or []) for u in node]
-    # m4b1 (2x1 colocated: trainer PP2 and the rollout engines share the 2 GPUs) -> 2 uuids, 1 per node; m4b (2x2) -> 4
+    # m4b1 (2x1 fixed-partition, g3 topology: trainer n0:0, rollout n1:0) -> 2 uuids, 1 per node; m4b (2x2) -> 4
     b_case = (open(os.path.join(R, "case.txt")).read().strip() if os.path.exists(os.path.join(R, "case.txt")) else "m4b")
     n_gpus, per_node = (2, 1) if b_case == "m4b1" else (4, 2)
     b_seen = set(re.findall(r"(GPU-[0-9a-f-]{36})", gpu_names))
