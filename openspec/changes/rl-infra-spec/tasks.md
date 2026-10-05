@@ -185,8 +185,8 @@
 - [x] 6.1 [Y；依赖1.7,2.4,5.7] 实现shadow负载归因与收益预测，分别对应串行或已认证重叠时间线；验收X8：工具等待/长尾/发布阻塞可区分，不统一套max(R,T)，无净收益边保持当前配置。（代码完成；收益预测以 5.7 数据为输入，当前为空则不出建议；`yeto/rl/engine/recommend.py`，`tests/test_rl_recommend.py`）
 - [x] 6.2 [Y；依赖6.1] 增加半自动建议：source/target、expected_epoch、profile hash、收益/成本区间、有效期与拒绝原因；验收：建议不自行执行，人工触发进入与手动相同事务。（`recommend.Recommendation`/`Recommender.approve` 复用 `controller.request`；`tests/test_rl_recommend.py`）
 - [x] 6.3 [Y+M；依赖6.2] 执行前重验建议有效期、epoch、profile、负载与pause guard；验收：批准过期或条件变化的建议明确拒绝，不静默续批或替换目标。（`Recommender.revalidate`；`tests/test_rl_recommend.py`）
-- [ ] 6.4 [Y；依赖6.3及至少一条实测净收益边] 实现默认关闭的auto模式、持续窗口、保守收益门槛、最短停留/cooldown/频率限制、失败停用；验收：振荡负载不抖动，trainer未认证边不可选，论文11步等数值不硬编码。
-- [ ] 6.5 [Y+M；依赖6.4] 实现disabled/manual/recommend/auto切换及兼容旧路径；验收：关闭auto不打断事务恢复，手动/半自动无绕过安全校验通道。
+- [x] 6.4 [Y；依赖6.3及至少一条实测净收益边] 实现默认关闭的auto模式、持续窗口、保守收益门槛、最短停留/cooldown/频率限制、失败停用；验收：振荡负载不抖动，trainer未认证边不可选，论文11步等数值不硬编码。（代码完成；启用仍需 5.7 至少一条实测净收益边（待 d1-gpu）。`yeto/rl/engine/auto.py` `AutoPolicy`/`AutoController`：K 连续窗口取最小收益、`gain_lower·min(H,剩余预算) > cost_upper+recovery_upper+safety_margin`、dwell/cooldown/速率限制、tool-heavy/finalization/待决事务保持、失败回退 manual；候选边仅来自 `candidate_edges_from_attestation`，成本表 `edge_costs_from_table`（缺文件→空→保持）；`tests/test_rl_auto.py` 振荡负载 0 次切换、长周期交替≤max_switches）
+- [x] 6.5 [Y+M；依赖6.4] 实现disabled/manual/recommend/auto切换及兼容旧路径；验收：关闭auto不打断事务恢复，手动/半自动无绕过安全校验通道。（`RecommendMode.AUTO`；`IslandController.recommend_mode` 默认 disabled、`set_recommend_mode` 入 journal 并可 replay，`CommandInbox` `mode` 动词与 CLI `mode` 子命令；切换不触发 cancel；auto 经 revalidate+`controller.plan`+`controller.request`；`tests/test_rl_auto.py::test_mode_switch_does_not_interrupt_transaction` 用真实 IslandController 事务中切 disabled 仍 SUCCEEDED）
 - [ ] 6.6 [X；依赖6.5] 稳定/变化/长尾/工具等待四场景，对比兼容默认、同profile最佳固定、动态；验收：相同数据/更新预算，模式变化与resize收益分离，记录端到端、全池GPU-hours、有效吞吐、等待、首step与恢复开销，不预设提升比例。
 - [ ] 6.7 [X；依赖6.6] 综合故障、学习行为与部署回退验收；验收：sample/step/policy/roster正确或fail closed，学习符合预设标准，更新capability matrix/fork bundle/手册；未通过收益门槛保持manual/recommend。
 
