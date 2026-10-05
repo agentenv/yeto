@@ -16,8 +16,10 @@ from test_rl_launch_e2e_b1 import BASE, _elastic  # noqa: E402
 from test_rl_reconfig_e1 import _events  # noqa: E402
 from yeto.rl.engine.auto import AutoPolicy  # noqa: E402
 from yeto.rl.engine.controller import SUCCEEDED, read_journal  # noqa: E402
-from yeto.rl.engine.miles_adapter.elastic_hook import (check_recommend_flags,  # noqa: E402
-                                                       elastic_hook_for)
+from yeto.rl.engine.miles_adapter.elastic_hook import (TUNING,  # noqa: E402
+                                                       check_recommend_flags,
+                                                       elastic_hook_for,
+                                                       recommend_flags)
 from yeto.rl.engine.timeline import load_windows  # noqa: E402
 
 FLAGS = ("--rl-observe-timeline", "--rl-recommend-mode", "recommend",
@@ -32,8 +34,6 @@ def test_flags_reach_the_learner_and_miles_args(tmp_path, monkeypatch):
     args, _ = learner_from_run(run, tmp_path / "home")
     assert (args.rl_recommend_mode, args.rl_edge_costs_path, args.rl_elastic_window_s) == (
         "recommend", "/tmp/costs.json", 50.0)
-    learner._check_ports_infra_switches(args) if hasattr(learner, "_check_ports_infra_switches") \
-        else None
     ma = SimpleNamespace()
     learner.apply_ports_infra_switches(args, ma, {})
     assert (ma.yeto_rl_recommend_mode, ma.yeto_rl_edge_costs_path,
@@ -163,3 +163,54 @@ def test_disabled_is_event_identical_to_no_flags(tmp_path, mode):
     b, _, _ = setup(tmp_path / "b", hook=False, wall=Clock(10_000.0, 0.0))[:3]
     b.run()
     assert _shape(tmp_path / "a") == _shape(tmp_path / "b")
+
+
+# ---------------------------------------------------------------- tuning flags
+_GOOD = {"auto-k-windows": 4, "auto-safety-margin-s": 30.0, "auto-horizon-s": 900.0,
+         "auto-min-dwell-s": 60.0, "auto-cooldown-s": 90.0, "auto-max-switches": 3,
+         "auto-switch-window-s": 600.0, "recommend-ttl-s": 120.0, "recommend-min-windows": 2,
+         "recommend-efficiency-lower": 0.5}
+_ON = dict(rl_recommend_mode="auto", rl_elastic=True, rl_observe_timeline=True)
+
+
+def _ns(flag, v, **kw):
+    return SimpleNamespace(**{**_ON, **kw, "rl_" + flag.replace("-", "_"): v})
+
+
+@pytest.mark.parametrize("flag", [t[0] for t in TUNING])
+def test_tuning_flag_passthrough(flag):
+    args = _ns(flag, _GOOD[flag])
+    check_recommend_flags(args)
+    assert f" --rl-{flag} {_GOOD[flag]!r}" in recommend_flags(args)
+    assert f"--rl-{flag}" not in recommend_flags(SimpleNamespace(**_ON))  # default: absent
+
+
+@pytest.mark.parametrize("flag,bad", [
+    ("auto-k-windows", 0), ("auto-safety-margin-s", 0.0), ("auto-horizon-s", -1.0),
+    ("auto-min-dwell-s", 0.0), ("auto-cooldown-s", -5.0), ("auto-max-switches", 0),
+    ("auto-switch-window-s", 0.0), ("recommend-ttl-s", 0.0), ("recommend-min-windows", 0),
+    ("recommend-efficiency-lower", 0.0), ("recommend-efficiency-lower", 1.5),
+])
+def test_tuning_flag_rejects_bad_values(flag, bad):
+    with pytest.raises(ValueError, match=f"--rl-{flag}"):
+        check_recommend_flags(_ns(flag, bad))
+
+
+def test_tuning_flag_needs_recommend_mode():
+    with pytest.raises(ValueError, match="needs --rl-recommend-mode"):
+        check_recommend_flags(SimpleNamespace(rl_auto_k_windows=3, rl_elastic=True,
+                                              rl_observe_timeline=True))
+    check_recommend_flags(_ns("recommend-efficiency-lower", 1.0))  # upper bound inclusive
+
+
+def test_tuning_reaches_policy_and_recommender(tmp_path):
+    ma = SimpleNamespace(yeto_rl_recommend_mode="recommend", num_rollout=100)
+    for flag, v in _GOOD.items():
+        setattr(ma, "yeto_rl_" + flag.replace("-", "_"), v)
+    ctl = SimpleNamespace(configs={}, set_recommend_mode=lambda *a, **k: None)
+    hook = elastic_hook_for(ma, controller=ctl, profile=None, observe=True)
+    pol = hook.auto.policy
+    assert (pol.k_windows, pol.safety_margin_s, pol.horizon_s, pol.min_dwell_s, pol.cooldown_s,
+            pol.max_switches, pol.switch_window_s) == (4, 30.0, 900.0, 60.0, 90.0, 3, 600.0)
+    for r in (hook.recommender, hook.auto.recommender):
+        assert (r.ttl_s, r.min_windows, r.efficiency_lower) == (120.0, 2, 0.5)

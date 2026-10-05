@@ -58,19 +58,21 @@ def elastic_hook_for(miles_args: Any, *, controller: Any, profile: Any, observe:
     mode = recommend_mode_of(miles_args)
     if mode == "disabled" or not observe or controller is None:
         return None
-    from ..auto import AutoController
+    from ..auto import AutoController, AutoPolicy
     from ..elastic import ElasticHook
     from ..recommend import Recommender
 
     kw = {"clock": clock} if clock is not None else {}
+    rec_kw = {k: v for k, v in _tuning(miles_args, "recommend").items()}
+    pol_kw = _tuning(miles_args, "auto")
     window = getattr(miles_args, "yeto_rl_elastic_window_s", None) or DEFAULT_WINDOW_S
     hook = ElasticHook(
         dict(controller.configs), window_s=float(window),
         total_rounds=getattr(miles_args, "num_rollout", None),
         edge_costs_path=getattr(miles_args, "yeto_rl_edge_costs_path", None) or None,
         declared_edges=_declared_edges(profile, controller.configs),
-        recommender=Recommender(**kw),
-        auto=AutoController(Recommender(**kw), **kw),
+        recommender=Recommender(**rec_kw, **kw),
+        auto=AutoController(Recommender(**rec_kw, **kw), policy=AutoPolicy(**pol_kw), **kw),
     )
     applied = apply_recommend_mode(controller, mode)
     hook._restore(controller)  # restart: journaled auto_state before the first step
@@ -80,6 +82,30 @@ def elastic_hook_for(miles_args: Any, *, controller: Any, profile: Any, observe:
 
 
 RECOMMEND_MODE_CHOICES = ("disabled", "manual", "recommend", "auto")
+
+# (flag suffix, target, field, type); None on the CLI = keep the code default.
+TUNING = (
+    ("auto-k-windows", "auto", "k_windows", int),
+    ("auto-safety-margin-s", "auto", "safety_margin_s", float),
+    ("auto-horizon-s", "auto", "horizon_s", float),
+    ("auto-min-dwell-s", "auto", "min_dwell_s", float),
+    ("auto-cooldown-s", "auto", "cooldown_s", float),
+    ("auto-max-switches", "auto", "max_switches", int),
+    ("auto-switch-window-s", "auto", "switch_window_s", float),
+    ("recommend-ttl-s", "recommend", "ttl_s", float),
+    ("recommend-min-windows", "recommend", "min_windows", int),
+    ("recommend-efficiency-lower", "recommend", "efficiency_lower", float),
+)
+
+
+def _tuning(miles_args: Any, target: str) -> dict:
+    """Non-None tuning values for AutoPolicy ('auto') or Recommender ('recommend')."""
+    out = {}
+    for flag, tgt, field_, typ in TUNING:
+        v = getattr(miles_args, "yeto_rl_" + flag.replace("-", "_"), None)
+        if tgt == target and v is not None:
+            out[field_] = typ(v)
+    return out
 
 
 def check_recommend_flags(args: Any) -> None:
@@ -91,6 +117,24 @@ def check_recommend_flags(args: Any) -> None:
         raise ValueError(f"--rl-recommend-mode must be one of {RECOMMEND_MODE_CHOICES}")
     if window is not None and not window > 0:
         raise ValueError("--rl-elastic-window-s must be positive")
+    given = [f for f, *_ in TUNING if getattr(args, "rl_" + f.replace("-", "_"), None) is not None]
+    for flag, _t, _f, typ in TUNING:
+        v = getattr(args, "rl_" + flag.replace("-", "_"), None)
+        if v is None:
+            continue
+        if flag == "recommend-efficiency-lower":
+            if not 0 < v <= 1:
+                raise ValueError("--rl-recommend-efficiency-lower must be in (0, 1]")
+        elif flag in ("auto-k-windows", "recommend-min-windows"):
+            if v < 1:
+                raise ValueError(f"--rl-{flag} must be >= 1")
+        elif flag == "auto-max-switches":
+            if v < 1:
+                raise ValueError(f"--rl-{flag} must be >= 1")
+        elif not v > 0:
+            raise ValueError(f"--rl-{flag} must be positive")
+    if given and mode == "disabled":
+        raise ValueError(f"--rl-{given[0]} needs --rl-recommend-mode (manual/recommend/auto)")
     if mode == "disabled" and window is None and not costs:
         return
     needs = [f for f, on in (("--rl-elastic", getattr(args, "rl_elastic", False)),
@@ -113,6 +157,10 @@ def recommend_flags(args: Any) -> str:
         out += f" --rl-edge-costs-path {shlex.quote(str(args.rl_edge_costs_path))}"
     if getattr(args, "rl_elastic_window_s", None) is not None:
         out += f" --rl-elastic-window-s {float(args.rl_elastic_window_s)!r}"
+    for flag, _t, _f, typ in TUNING:
+        v = getattr(args, "rl_" + flag.replace("-", "_"), None)
+        if v is not None:
+            out += f" --rl-{flag} {typ(v)!r}"
     return out
 
 
@@ -124,6 +172,10 @@ def apply_recommend_flags(args: Any, miles_args: Any) -> None:
         miles_args.yeto_rl_edge_costs_path = str(args.rl_edge_costs_path)
     if getattr(args, "rl_elastic_window_s", None) is not None:
         miles_args.yeto_rl_elastic_window_s = float(args.rl_elastic_window_s)
+    for flag, _t, _f, typ in TUNING:
+        v = getattr(args, "rl_" + flag.replace("-", "_"), None)
+        if v is not None:
+            setattr(miles_args, "yeto_rl_" + flag.replace("-", "_"), typ(v))
 
 
 def add_recommend_arguments(parser: Any) -> None:
@@ -134,3 +186,6 @@ def add_recommend_arguments(parser: Any) -> None:
                         help="5.7 transition cost table for recommend/auto (missing -> hold)")
     parser.add_argument("--rl-elastic-window-s", type=float, default=None,
                         help=f"load window seconds (default {DEFAULT_WINDOW_S:g})")
+    for flag, _t, field_, typ in TUNING:
+        parser.add_argument(f"--rl-{flag}", type=typ, default=None,
+                            help=f"D2 tuning for {field_} (needs --rl-recommend-mode; default: code default)")

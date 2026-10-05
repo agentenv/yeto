@@ -33,13 +33,19 @@ yeto launch ... --rl-engine ports --rl-elastic ... --rl-observe-timeline \
     --rl-recommend-mode recommend \          # disabled(默认)/manual/recommend/auto
     --rl-edge-costs-path /path/edge_costs.json \  # 5.7 成本表；缺失 → hold
     --rl-elastic-window-s 300                  # 负载窗口秒数（默认 300）
+    # 以下调参均可选，缺省 = 代码默认值；必须与 --rl-recommend-mode 同用（非 disabled）
+    --rl-auto-k-windows 6 --rl-auto-safety-margin-s 120 --rl-auto-horizon-s 3600 \
+    --rl-auto-min-dwell-s 1800 --rl-auto-cooldown-s 1800 --rl-auto-max-switches 2 \
+    --rl-auto-switch-window-s 3600 \        # → AutoPolicy
+    --rl-recommend-ttl-s 300 --rl-recommend-min-windows 3 \
+    --rl-recommend-efficiency-lower 0.7      # → Recommender
 ```
 
 * 透传路径与 `--rl-observe-timeline` 相同：`yeto/cli.py` → `launcher` 校验并拼进 learner 命令行 → `yeto.rl.learner.apply_ports_infra_switches` 写到 `miles_args.yeto_rl_recommend_mode / yeto_rl_edge_costs_path / yeto_rl_elastic_window_s` → `compose_island` 里由 `miles_adapter/elastic_hook.elastic_hook_for` 构造 `ElasticHook`。
 * 三个参数任一非默认时，都要求同时给 `--rl-elastic` 和 `--rl-observe-timeline`，否则 launcher（开机前）和 learner 都会拒绝。`disabled` 或不传参数时不构造 hook，事件序列与不传参数完全一致。
 * 构造 hook 时：configs 取 controller 的资源配置；Flash-Next full profile 的候选边再与 `flash_next_elastic_declaration()` 的声明边取交集，其它 profile 只用 attestation 认证过的边；`total_rounds` = `num_rollout`。
 * 启动时按 mode 调 `controller.set_recommend_mode`。`auto` 如果被拒（attestation 未声明 `auto_controller`），会记 warning 并退回 `recommend`（journal 里 `recommend_mode` 记录的 reason 为 `auto refused at startup: ...`）。重启时先恢复 journal 里最后一条 `auto_state`。
-* AutoPolicy 目前用默认值（k_windows=6、min_dwell/cooldown 1800s 等），没有 CLI 参数。
+* 调参参数：`--rl-auto-*` 构造 `AutoPolicy`（k_windows、safety_margin_s、horizon_s、min_dwell_s、cooldown_s、max_switches、switch_window_s；deadline_s/fallback_mode 仍为默认），`--rl-recommend-*` 构造两处 `Recommender`（ttl_s、min_windows、efficiency_lower）。校验：时长/窗口为正数，k_windows、max_switches、min_windows ≥ 1，efficiency_lower ∈ (0,1]；不带 `--rl-recommend-mode`（或为 disabled）时给这些参数会被拒。不给则完全不拼进命令行。
 
 ## 3. 切换模式
 
