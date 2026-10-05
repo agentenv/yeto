@@ -441,12 +441,54 @@ def test_real_non_scalar_events_are_dropped(event):
     assert event_metrics(event) is None
 
 
-def test_the_legacy_real_rollout_round_keeps_only_reward():
+def test_the_legacy_real_rollout_round_keeps_train_curves_on_a_derived_step():
+    # fleet-dashboard 1.4: the bare ports-path names reach train/* and, with
+    # no train_step on the record, train/step falls back to local_round_id.
     round_event = next(e for e in REAL_EVENTS if e["event"] == "rl_local_round")
     assert event_metrics(round_event) == {
         "rl/reward_mean": round_event["rl/reward_mean"],
         STEP_KEY: round_event["base_policy_version"],
+        "train/ess_ratio": round_event["ess_ratio"],
+        "train/pg_clipfrac": round_event["clip_fraction"],
+        "train/train_rollout_kl": round_event["mean_kl"],
+        TRAIN_STEP_KEY: round_event["local_round_id"],
     }
+
+
+PORTS_LOCAL_ROUND = {  # trimmed from a real ports-engine tape (s9-m4x1, island 0)
+    "event": "rl_local_round", "island_id": 0, "local_round_id": 1, "base_policy_version": 0,
+    "grad_norm": 0.49641674757003784, "loss": None, "pg_loss": None, "lr": None,
+    "applied_lr": 1e-05, "mean_kl": None, "ess_ratio": None, "train_step": None,
+    "reward_mean": 0.9375, "reward_std": 0.24206145913796356, "action_tokens": 4253,
+}
+
+
+def test_ports_path_grad_norm_and_loss_are_not_dropped():
+    m = event_metrics(dict(PORTS_LOCAL_ROUND, loss=-0.12, train_step=3))
+    assert m["train/grad_norm"] == PORTS_LOCAL_ROUND["grad_norm"]
+    assert m["train/loss"] == -0.12
+    assert m["train/lr"] == 1e-05
+    assert m[TRAIN_STEP_KEY] == 3
+    assert m["rl/reward_mean"] == 0.9375
+    assert "train/pg_loss" not in m  # None stays absent, never 0
+
+
+def test_ports_path_without_train_step_uses_local_round():
+    m = event_metrics(PORTS_LOCAL_ROUND)
+    assert m["train/grad_norm"] == PORTS_LOCAL_ROUND["grad_norm"]
+    assert m[TRAIN_STEP_KEY] == 1
+
+
+def test_train_metrics_dict_is_expanded_under_train():
+    event = dict(PORTS_LOCAL_ROUND, train_step=5, train_metrics={
+        "kl_loss": 0.01, "entropy": 1.7, "ppo_kl": 0.002, "bad key": 1.0,
+        "nan": float("nan"), "listy": [1, 2], "flag": True})
+    m = event_metrics(event)
+    assert m["train/kl_loss"] == 0.01 and m["train/entropy"] == 1.7 and m["train/ppo_kl"] == 0.002
+    assert not {"train/bad key", "train/nan", "train/listy", "train/flag"} & set(m)
+    trained = event_metrics({"event": "rl_round_trained", "rollout_id": 4, "train_step": 5,
+                             "train_metrics": {"loss": 0.3}, "reward_mean": 0.5})
+    assert trained == {"train/loss": 0.3, TRAIN_STEP_KEY: 5}
 
 
 def test_eval_projects_only_reward_and_recognized_pass_rate():

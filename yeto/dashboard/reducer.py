@@ -137,7 +137,7 @@ def _new_island(iid: str) -> dict:
         "price_key": None, "first_ts": None, "last_event_ts": None, "last_heartbeat_ts": None,
         "heartbeat_seen": False, "round": None, "rollout_id": None, "policy_version": None,
         "phase": None, "finalized": False, "fleet_state": None, "ready_ts": None, "stop_ts": None,
-        "lost_ts": None, "points": {}, "nonfinite": [], "resource": None, "staleness": None,
+        "lost_ts": None, "open_ts": None, "closed_s": 0.0, "points": {}, "nonfinite": [], "resource": None, "staleness": None,
         "contribution": None, "reconfig": [], "cells": None, "cells_source": None,
         "transactions": {}, "tx_order": [], "recovery_required": [], "source_lost": None,
         "recent": deque(maxlen=50), "events_by_type": {},
@@ -395,15 +395,21 @@ class Reducer:
         if r.get("island") is not None:
             isl["name"] = r["island"]
         isl["fleet_state"] = event[len("island_"):]
-        if event in ("island_ready", "island_launch") and ts is not None and isl["ready_ts"] is None:
-            if event == "island_ready" or isl["ready_ts"] is None:
-                isl["ready_ts"] = ts
+        # wall clock accrues over ready -> lost/stop intervals (relaunches re-open one)
         if event == "island_ready" and ts is not None:
+            if isl["ready_ts"] is None:
+                isl["ready_ts"] = ts
+            if isl["open_ts"] is None:
+                isl["open_ts"] = ts
             isl["stop_ts"] = None
-        if event == "island_lost":
-            isl["lost_ts"] = ts
-        if event == "island_stop":
-            isl["stop_ts"] = ts
+        elif event in ("island_lost", "island_stop") and ts is not None:
+            if event == "island_lost":
+                isl["lost_ts"] = ts
+            else:
+                isl["stop_ts"] = ts
+            if isl["open_ts"] is not None:
+                isl["closed_s"] += max(0.0, ts - isl["open_ts"])
+                isl["open_ts"] = None
 
     def _feed_other(self, r: dict, iid: str | None, ts: float | None) -> None:
         if iid is not None:

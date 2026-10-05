@@ -40,11 +40,13 @@ def price_per_gpu_h(prices: dict, cloud: str | None, gpu: str | None,
 def island_cost(isl: dict, prices: dict, now: float) -> dict:
     unit = price_per_gpu_h(prices, isl.get("cloud"), isl.get("gpu"), isl.get("price_key"))
     gpus = isl.get("gpus")
-    start = isl.get("ready_ts")
-    end = isl.get("stop_ts") or (isl.get("lost_ts") if isl.get("fleet_state") == "lost" else None) or now
-    hours = max(0.0, (end - start) / 3600.0) if start is not None else None
+    if isl.get("ready_ts") is None:
+        hours = None
+    else:
+        open_s = max(0.0, now - isl["open_ts"]) if isl.get("open_ts") is not None else 0.0
+        hours = (isl.get("closed_s", 0.0) + open_s) / 3600.0
     rate = unit * gpus if unit is not None and isinstance(gpus, (int, float)) else None
-    running = isl.get("fleet_state") in ("ready", "launch")
+    running = isl.get("open_ts") is not None
     return {"id": isl["id"], "unit_usd_gpu_h": unit, "rate_usd_h": rate, "hours": hours,
             "cost_usd": rate * hours if rate is not None and hours is not None else None,
             "running": running, "local": (isl.get("cloud") or "").lower() in LOCAL_CLOUDS,
