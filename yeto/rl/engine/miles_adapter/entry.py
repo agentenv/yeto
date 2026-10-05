@@ -688,6 +688,11 @@ def compose_island(
                                 algorithm=algorithm, actor_model=actor_model,
                                 rollout_executor=rollout_executor, runner=runner,
                                 base_model_revision=base_model_revision)
+        # D2 (6.5): --rl-recommend-mode / --rl-edge-costs-path / --rl-elastic-window-s
+        from .elastic_hook import elastic_hook_for
+
+        driver.elastic_hook = elastic_hook_for(miles_args, controller=elastic.controller,
+                                               profile=profile, observe=observe)
     holder["driver"] = driver
     return driver
 

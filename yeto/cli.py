@@ -343,6 +343,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "dataset state advanced by GROUPS where rollout_executor.load reads it")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
+    from yeto.rl.engine.miles_adapter.elastic_hook import add_recommend_arguments
+    add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
                     help="--rl-elastic: feed the island's tool-wait board into the drain check "
                     "(3.3; needs a workload that records tool waits)")
