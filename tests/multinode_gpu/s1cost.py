@@ -91,6 +91,7 @@ def sweep(run):
     args = rd('args.txt')
     import re
     steps = int(re.search(r'--total-steps (\d+)', args).group(1)) if '--total-steps' in args else None
+    want = 'H200' if 'h200' in args.lower() else 'H100' if 'h100' in args.lower() else 'L40S'
     cfg = (re.search(r'--rl-elastic-initial-config (\S+)', args) or [None, None])[1]
     seed = (re.search(r'--seed (\d+)', args) or [None, None])[1]
     rounds, last = {}, None
@@ -109,7 +110,9 @@ def sweep(run):
     rr = any(r.get('phase') == 'RECOVERY_REQUIRED' for r in j) or any(e.get('result') == 'RECOVERY_REQUIRED' for e in isl)
     steady = [v for k, v in rounds.items() if k is not None and k >= 1]
     checks = {'rc0': 'rc=0' in rd('rc.txt'), 'rounds_eq_steps': steps is not None and len(trained) == steps,
-              'l40s': 'L40S' in gpu_txt and 'H100' not in gpu_txt, 'uuids_4_match_pool': len(uu) == 4 and pool_uu == uu,
+              # GPU model asserted from --gpu (L40S 2x2: all 4 physical; H200 1x8 alloc 4: pool = 4 of the 8 listed)
+              'gpu_model': want in gpu_txt and all(m not in gpu_txt for m in ('L40S', 'H100', 'H200') if m != want),
+              'uuids_4_in_pool': len(pool_uu) == 4 and pool_uu <= uu,
               'no_recovery_required': not rr}
     t0, t1 = rd('start_utc.txt').strip(), rd('end_utc.txt').strip()
     return dict(run=os.path.basename(run.rstrip('/')), config=cfg, seed=seed, valid=all(checks.values()), checks=checks,
