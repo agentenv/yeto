@@ -275,3 +275,27 @@ def test_disabled_hook_is_event_identical_to_legacy(tmp_path, observe):
     b.run()
     assert _strip(_events(tmp_path / "a")) == _strip(_events(tmp_path / "b"))
     assert h.decisions == []
+
+
+def test_train_heavy_load_does_not_inflate_resize_gain():
+    """gpu_busy_fraction includes trainer compute; only rollout compute scales."""
+    from yeto.rl.engine.recommend import SERIAL, CandidateEdge, predict_gain, to_load_window
+    from yeto.rl.engine.timeline import load_windows
+
+    lab = dict(profile_hash=PH, epoch=0)
+    evs = []
+    for i in range(3):
+        lo = i * W
+        evs.append({"event": "rl_timeline_span", "task": "generate", "role": "rollout",
+                    "kind": "compute", "start": lo, "end": lo + 0.2 * W, **lab})
+        evs.append({"event": "rl_timeline_span", "task": "train", "role": "trainer",
+                    "kind": "compute", "start": lo + 0.2 * W, "end": lo + 0.9 * W, **lab})
+    ws = load_windows(evs, W)
+    assert all(abs(w.gpu_busy_fraction - 0.9) < 1e-9 and abs(w.train_fraction - 0.7) < 1e-9
+               and abs(w.rollout_busy_fraction - 0.2) < 1e-9 for w in ws)
+    edge = CandidateEdge(SMALL, BIG, 1, 2)
+    g = predict_gain([to_load_window(w) for w in ws], edge, SERIAL, efficiency_lower=1.0)
+    assert abs(g.gain_upper - 0.1) < 1e-9  # 0.2 * (1 - 1/2), not 0.9 * (1 - 1/2)
+    # legacy windows without the field keep gpu_busy_fraction as the scalable share
+    legacy = dataclasses.replace(to_load_window(ws[0]), rollout_busy_fraction=None)
+    assert abs(predict_gain([legacy], edge, SERIAL, efficiency_lower=1.0).gain_upper - 0.45) < 1e-9

@@ -275,6 +275,9 @@ class LoadSummary:
     * ``weight_transport``: transport label of the window's events (None if absent).
     * ``train_fraction`` (added for 6.1/6.4, appended so positional use is
       unchanged): union of ``compute`` spans on the trainer role / window length.
+    * ``rollout_busy_fraction`` (appended, d2-wire): union of ``compute`` spans on
+      the rollout role / window length -- the only part a rollout resize scales
+      (``gpu_busy_fraction`` also contains trainer compute).
     """
 
     window_start: float
@@ -292,6 +295,7 @@ class LoadSummary:
     policy_age: int | None
     weight_transport: str | None = None
     train_fraction: float = 0.0
+    rollout_busy_fraction: float = 0.0
 
 
 def _clip_union(intervals: list[tuple[float, float]], lo: float, hi: float) -> float:
@@ -332,6 +336,8 @@ def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> lis
                and any(r in GPU_ROLES for r in str(e.get("role")).split("+"))]
         train = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
                  and e.get("kind") == "compute" and "trainer" in str(e.get("role")).split("+")]
+        roll = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
+                and e.get("kind") == "compute" and "rollout" in str(e.get("role")).split("+")]
         pub = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
                and e.get("kind") == "transfer" and e.get("task") == "publish"]
         transports = {e.get("weight_transport") for e in evs} - {None}
@@ -372,5 +378,6 @@ def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> lis
                 policy_age=max(ages) if ages else None,
                 weight_transport=next(iter(transports)) if len(transports) == 1 else None,
                 train_fraction=_clip_union(train, lo, hi) / window_s,
+                rollout_busy_fraction=_clip_union(roll, lo, hi) / window_s,
             ))
     return sorted(out, key=lambda w: (str(w.profile_hash), w.epoch, w.window_start))
