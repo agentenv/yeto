@@ -628,7 +628,7 @@ def translate_run_config(
         )
     dynamic_filter = _algorithm_filter(config, algorithm)
 
-    from ..run_config import RECIPE_QWEN3_5, lr_schedule_argv
+    from ..run_config import RECIPE_QWEN3_5, RECIPE_QWEN3_8_NEXT, lr_schedule_argv
 
     geometry = config.geometry
     parallel = config.parallel
@@ -927,6 +927,18 @@ def translate_run_config(
         values.append("--multi-latent-attention")
         for name, value in geometry.mla_dims:
             values.extend((f"--{name.replace('_', '-')}", str(value)))
+    if recipe.name == RECIPE_QWEN3_8_NEXT:
+        # G1: the native Flash-Next recipe replaces the Bridge-geometry model and
+        # LoRA flags with the launcher's (profiles/qwen3_8_next.py).
+        from yeto.rl.profiles import qwen3_8_next as q
+
+        variant = {n: v for v, n in q.NUM_LAYERS.items()}.get(geometry.num_layers)
+        if variant is None:
+            raise MilesConfigError(f"no Flash-Next variant has {geometry.num_layers} layers")
+        values = list(q.apply_ports_recipe(values, q.ports_recipe_argv(
+            variant, lora_rank=trainable.lora_rank,
+            lora_expert_rank=getattr(trainable, "lora_expert_rank", None),
+            lora_dropout=float(getattr(trainable, "lora_dropout", 0.0) or 0.0))))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     # IR-1: the final argv never pairs the session server with partial rollout
