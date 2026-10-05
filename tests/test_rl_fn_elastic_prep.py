@@ -123,3 +123,36 @@ def test_auto_without_e1_certification_only_holds(tmp_path):
     assert h.decisions and all(d["action"] == "hold" and d["candidates"] == [] for d in h.decisions)
     assert ctl.journal.epochs.config_epoch == 0
     assert "request" not in [r["kind"] for r in read_journal(tmp_path / "state/reconfig")]
+
+
+# ---------------------------------------------------------------- fnrun.sh argv (print-only)
+@pytest.mark.parametrize("case,config,rollout", [("fn32s", SMALL, 8), ("fn32b", BIG, 16)])
+def test_fnrun_argv_parses_and_shapes(monkeypatch, tmp_path, case, config, rollout):
+    import shlex
+    import subprocess
+    import sys
+    import types
+
+    from test_rl_launcher import _Resources, _Storage, _StorageMode, _Task
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.cli import parse_args
+    from yeto.launcher import _prepare_rl_args
+
+    out = subprocess.run(["bash", str(MANIFEST.parent / "fnrun.sh"), case], check=True,
+                         capture_output=True, text=True,
+                         env={"PATH": "/usr/bin:/bin", "COSTS": str(tmp_path / "c.json")}).stdout
+    argv = shlex.split(out.strip())
+    assert argv[0] == "launch" and "--rl-elastic-attestation" not in argv  # nothing certified by default
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
+        Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
+    args = parse_args(argv[1:] + ["--rl-elastic-state-dir", str(tmp_path / "state")])
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    spec = parse_gpu_spec(args.gpu)[0]
+    task = launcher.make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    assert launcher.rl_island_layout(args, spec)[:2] == (2, 8)
+    assert "--rl-recommend-mode recommend" in task.run
+    assert f"--rl-elastic-initial-config {config}" in task.run and f"--rollout-num-gpus {rollout}" in task.run
