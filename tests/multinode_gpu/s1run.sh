@@ -39,7 +39,7 @@ case $C in
   m1)  GPU=nebius:2x2xl40s@eu-north1; STEPS=2; PAR="--tensor-parallel 1 --pipeline-parallel 2"; EX="$ELASTIC22"; KEEP="--keep"; NODES=2;;
   m3)  GPU=nebius:2x2xl40s@eu-north1; STEPS=6; PAR="--tensor-parallel 1 --pipeline-parallel 2"; EX="$ELASTIC22 --rl-elastic-declare-cells --rl-elastic-cells c0,c1"; KEEP="${KEEP_M3:+--keep}"; NODES=2
        TRIG="[$(req train 1 up1 T2R2S0 0 ${UP_DEADLINE_S:-600}),$(req train 3 dn1 T2R1S1 1 ${DN_DEADLINE_S:-600})]";;
-  m2)  GPU=nebius:2x2xl40s@eu-north1; STEPS=2; MODEL="--model fzyzcjy/Qwen3-30B-A3B-5layer --model-revision 9c2ee37f22b7ef150675311b3d5e1c671838ffe1"; LORA="--tuning lora --lora-r 16 --lora-targets attention"
+  m2)  GPU=nebius:2x2xl40s@eu-north1; STEPS=2; MODEL="--model fzyzcjy/Qwen3-30B-A3B-5layer --model-revision 9c2ee37f22b7ef150675311b3d5e1c671838ffe1"; LORA="--tuning lora --lora-r 16 --lora-targets attention"; REWARD=length_reward:score
        PAR="--tensor-parallel 1 --pipeline-parallel 1 --expert-parallel 2"; EX="$ELASTIC22"; KEEP="${KEEP_M2:+--keep}"; NODES=2;;
   m4a|m4b) [ -n "${STORE:-}" ] || { echo "abort: $C needs STORE=s3://<bucket>/<prefix> (the --rl-checkpoint-store bucket; same value for m4a and m4b)"; exit 66; }
        GPU=nebius:2x2xl40s@eu-north1; PAR="--tensor-parallel 1 --pipeline-parallel 2"; KEEP=""; NODES=2
@@ -47,7 +47,7 @@ case $C in
        else STEPS=${M4B_STEPS:-8}; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-accept-rebind"; fi;;
   *) echo "unknown case $C"; exit 64;;
 esac
-ARGS="launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu $GPU --cluster-prefix $CP $KEEP --no-island-relaunch --modal-retries 0 --rl-image $IMAGE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function gsm8k_reward:score $LORA $PAR --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --total-steps $STEPS $EX"
+ARGS="launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu $GPU --cluster-prefix $CP $KEEP --no-island-relaunch --modal-retries 0 --rl-image $IMAGE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function ${REWARD:-gsm8k_reward:score} $LORA $PAR --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --total-steps $STEPS $EX"
 CL=$CP-l0-eu-north1
 if [ "${DRY:-0}" = 1 ]; then echo "cluster=$CL nodes=$NODES case=$C"; echo "$ARGS"; [ -n "$TRIG" ] && { echo "triggers=$TRIG"; /usr/bin/python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; }; exit 0; fi
 mkdir -p $R/home $R/runs $R/pulled $R/yeto
@@ -55,7 +55,7 @@ for d in .sky .nebius .ssh; do ln -sfn /home/michael/$d $R/home/$d; done
 # m4: the S3 checkpoint store is mounted on Nebius nodes with the static AWS keys sky uploads (~/.aws/credentials, SHARED_CREDENTIALS_FILE identity)
 case $C in m4*) ln -sfn /home/michael/.aws $R/home/.aws;; esac
 git -C $REPO archive ${SHA:-HEAD} | tar x -C $R/yeto
-cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/; touch $R/yeto/yeto-rl-echo-events
+cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/tests/multinode_gpu/length_reward.py $R/yeto/; touch $R/yeto/yeto-rl-echo-events
 # m3: the controller refuses every E1 request without a capability attestation ("no capability attestation: no transition is certified",
 # s8-m1m3-20261004a M3 FAIL: requests consumed but never journaled). Fingerprint = local reconstruction of the island Miles argv from the
 # snapshot (fp_local22.py; reproduced the real s8-m1m3-20261004a-m3 rl_driver_start value sha256:0d17e24b...), edges = resources-2x2.json.
