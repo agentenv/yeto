@@ -693,6 +693,10 @@ def compose_island(
 
         driver.elastic_hook = elastic_hook_for(miles_args, controller=elastic.controller,
                                                profile=profile, observe=observe)
+        # dashboard 5.1/5.2: controller cell-snapshot / reconfig-phase events; only when the
+        # observation path is on so the legacy (observe=False) tape stays byte-identical.
+        if observe:
+            elastic.controller.set_event_sink(driver.emit, journal=True)
     holder["driver"] = driver
     return driver
 
