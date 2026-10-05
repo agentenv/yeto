@@ -189,6 +189,70 @@ def summarize_tape(records: list[dict]) -> dict:
     }
 
 
+NO_DATA = "无数据"
+# (label, field paths) shown per island for learner tapes (fleet-dashboard 1.5);
+# a path "a.b" reads record["a"]["b"]. Missing/None renders as 无数据, never 0.
+TRAIN_FIELDS = (
+    ("train_step", ("train_step",)),
+    ("reward", ("reward_mean",)),
+    ("loss", ("loss", "train_metrics.loss")),
+    ("pg_loss", ("pg_loss", "train_metrics.pg_loss")),
+    ("grad_norm", ("grad_norm",)),
+    ("kl", ("mean_kl", "train_metrics.ppo_kl", "train_metrics.kl_loss")),
+    ("entropy", ("train_metrics.entropy",)),
+    ("clipfrac", ("clip_fraction", "train_metrics.pg_clipfrac")),
+    ("lr", ("lr", "applied_lr")),
+    ("adv_mean", ("adv_mean",)),
+    ("resp_len", ("resp_len_mean",)),
+    ("trunc", ("truncated_frac",)),
+    ("tok/s", ("tok_per_s",)),
+)
+
+
+def _field(record: dict, path: str):
+    cur = record
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def summarize_training(records: list[dict]) -> dict[str, dict]:
+    """Latest training fields per island from rl_local_round / rl_round_trained."""
+    latest: dict[str, dict] = {}
+    for rec in records:
+        if rec.get("event") not in ("rl_local_round", "rl_round_trained"):
+            continue
+        row = latest.setdefault(str(rec.get("island_id", "?")), {})
+        if rec["event"] == "rl_local_round" and rec.get("local_round_id") is not None:
+            row["round"] = rec["local_round_id"]
+        for label, paths in TRAIN_FIELDS:
+            for p in paths:
+                value = _field(rec, p)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    row[label] = value
+                    break
+    return latest
+
+
+def _fmt(value) -> str:
+    if value is None:
+        return NO_DATA
+    if isinstance(value, float):
+        return f"{value:.4g}"
+    return str(value)
+
+
+def render_training_summary(records: list[dict]) -> list[str]:
+    lines = []
+    for island, row in sorted(summarize_training(records).items()):
+        cells = [f"round={_fmt(row.get('round'))}"]
+        cells += [f"{label}={_fmt(row.get(label))}" for label, _ in TRAIN_FIELDS]
+        lines.append(f"TRAIN island={island} " + " ".join(cells))
+    return lines
+
+
 def render_tape_summary(path: str | Path) -> list[str]:
     records = load_tape(path)
     summary = summarize_tape(records)
@@ -216,4 +280,5 @@ def render_tape_summary(path: str | Path) -> list[str]:
             )
     if summary["recent_misses"]:
         lines.append("RECENT MISSES " + "; ".join(summary["recent_misses"]))
+    lines += render_training_summary(records)
     return lines

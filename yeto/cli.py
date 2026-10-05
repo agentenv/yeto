@@ -41,6 +41,7 @@ SUBCOMMANDS = (
     "rl",
     "sample-diffusion",
     "status",
+    "dashboard",
     "logs",
     "down",
     "stop-run",
@@ -1312,6 +1313,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="also summarize a syncer event tape JSONL file",
     )
 
+    from .dashboard.cli import add_parser as _add_dashboard_parser
+
+    _add_dashboard_parser(sub)
+
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
     logs.add_argument(
@@ -2492,6 +2497,10 @@ def main(argv=None) -> int:
         return cmd_sample_diffusion(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "dashboard":
+        from .dashboard.cli import main as dashboard_main
+
+        return dashboard_main(args)
     if args.command == "logs":
         return cmd_logs(args)
     if args.command == "down":
