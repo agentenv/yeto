@@ -81,7 +81,47 @@ def analyze(run):
     return rows
 
 
+def sweep(run):
+    """2.4 fixed-config run: validity (rc0, rounds == --total-steps, L40S x4 uuids, no RECOVERY_REQUIRED)
+    and per-round wall = generate+train+outer_sync of rid + the publish that follows it; median over rid>=1."""
+    pul = os.path.join(run, 'pulled')
+    rd = lambda n: open(os.path.join(run, n)).read() if os.path.exists(os.path.join(run, n)) else ''
+    isl = _load(os.path.join(pul, 'rl-island-0.jsonl')) if os.path.exists(os.path.join(pul, 'rl-island-0.jsonl')) else []
+    j = _load(os.path.join(pul, 'journal.jsonl')) if os.path.exists(os.path.join(pul, 'journal.jsonl')) else []
+    args = rd('args.txt')
+    import re
+    steps = int(re.search(r'--total-steps (\d+)', args).group(1)) if '--total-steps' in args else None
+    cfg = (re.search(r'--rl-elastic-initial-config (\S+)', args) or [None, None])[1]
+    seed = (re.search(r'--seed (\d+)', args) or [None, None])[1]
+    rounds, last = {}, None
+    for e in sorted((e for e in isl if e.get('event') == 'rl_timeline_span'), key=lambda e: e['start']):
+        rid = e.get('rollout_id')
+        if rid is None and e['task'] == 'publish':
+            if last is not None:
+                rounds[last] += e['end'] - e['start']
+            continue
+        rounds[rid] = rounds.get(rid, 0.0) + e['end'] - e['start']; last = rid
+    trained = {e.get('rollout_id') for e in isl if e.get('event') == 'rl_round_trained'}
+    gpu_txt = ''.join(open(os.path.join(pul, f)).read() for f in os.listdir(pul) if f.startswith('gpu-')) if os.path.isdir(pul) else ''
+    uu = set(re.findall(r'GPU-[0-9a-f-]{36}', gpu_txt))
+    pools = [r for r in j if r.get('kind') == 'gpu_pool']
+    pool_uu = set(pools[-1].get('roles', {})) if pools else set()
+    rr = any(r.get('phase') == 'RECOVERY_REQUIRED' for r in j) or any(e.get('result') == 'RECOVERY_REQUIRED' for e in isl)
+    steady = [v for k, v in rounds.items() if k is not None and k >= 1]
+    checks = {'rc0': 'rc=0' in rd('rc.txt'), 'rounds_eq_steps': steps is not None and len(trained) == steps,
+              'l40s': 'L40S' in gpu_txt and 'H100' not in gpu_txt, 'uuids_4_match_pool': len(uu) == 4 and pool_uu == uu,
+              'no_recovery_required': not rr}
+    t0, t1 = rd('start_utc.txt').strip(), rd('end_utc.txt').strip()
+    return dict(run=os.path.basename(run.rstrip('/')), config=cfg, seed=seed, valid=all(checks.values()), checks=checks,
+                median_round_s=round(statistics.median(steady), 3) if steady else None,
+                rounds_s={k: round(v, 3) for k, v in sorted(rounds.items())}, start_utc=t0, end_utc=t1)
+
+
 def main(argv):
+    if argv and argv[0] == 'sweep':
+        res = [sweep(r) for r in argv[1:] if not r.startswith('--')]
+        print(json.dumps(res, indent=1))
+        return 0
     out = None
     if '--json' in argv:
         i = argv.index('--json'); out = argv[i + 1]; argv = argv[:i] + argv[i + 2:]

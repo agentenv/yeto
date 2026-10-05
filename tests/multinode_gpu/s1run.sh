@@ -77,8 +77,8 @@ case $C in
          T1R3S0) PAR="--tensor-parallel 1 --pipeline-parallel 1"; EX="--rl-placement fixed-partition --rl-rollout-gpus 3 --rl-elastic --rl-elastic-resources $D/resources-2x2-t1r3.json --rl-elastic-initial-config T1R3S0 --rl-observe-timeline";;
          *) echo "abort: d1sweep needs D1_CFG=T2R1S1|T2R2S0|T1R3S0"; exit 69;;
        esac;;
-  d1e1) # D1-3 (tasks 5.1): m3 with 3 up/down pairs (up at train rid 1,5,9; dn at 3,7,11), 12 steps; cost via s1cost.py
-       GPU=nebius:2x2xl40s@eu-north1; STEPS=12; PAR="--tensor-parallel 1 --pipeline-parallel 2"; EX="$ELASTIC22 --rl-elastic-declare-cells --rl-elastic-cells c0,c1"; KEEP="${KEEP_M3:+--keep}"; NODES=2
+  d1e1) # D1-3 (tasks 5.1): m3 with 3 up/down pairs (up at train rid 1,5,9; dn at 3,7,11), 14 steps (dn3 safe point rid 12 needs >=1 later round; fingerprint gets the same --total-steps/--seed); cost via s1cost.py
+       GPU=nebius:2x2xl40s@eu-north1; STEPS=${D1E1_STEPS:-14}; PAR="--tensor-parallel 1 --pipeline-parallel 2"; EX="$ELASTIC22 --rl-elastic-declare-cells --rl-elastic-cells c0,c1"; KEEP="${KEEP_M3:+--keep}"; NODES=2
        TRIG="[$(req train 1 up1 T2R2S0 0 600),$(req train 3 dn1 T2R1S1 1 600),$(req train 5 up2 T2R2S0 2 600),$(req train 7 dn2 T2R1S1 3 600),$(req train 9 up3 T2R2S0 4 600),$(req train 11 dn3 T2R1S1 5 600)]";;
   *) echo "unknown case $C"; exit 64;;
 esac
@@ -95,7 +95,7 @@ cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/tests/multi
 # s8-m1m3-20261004a M3 FAIL: requests consumed but never journaled). Fingerprint = local reconstruction of the island Miles argv from the
 # snapshot (fp_local22.py; reproduced the real s8-m1m3-20261004a-m3 rl_driver_start value sha256:0d17e24b...), edges = resources-2x2.json.
 if [ $C = m3 ] || [ $C = d1e1 ]; then
-  fp=$(/tmp/yeto-venv/bin/python $D/fp_local22.py $R/yeto 2>$R/fp_local22.err | python3 -c "import json,sys;print(json.load(sys.stdin)['fp'])" 2>/dev/null)
+  fp=$(/tmp/yeto-venv/bin/python $D/fp_local22.py $R/yeto --total-steps $STEPS --seed ${SEED:-17} 2>$R/fp_local22.err | tail -1 | python3 -c "import json,sys;print(json.load(sys.stdin)['fp'])" 2>/dev/null)
   [ -n "$fp" ] || { echo "abort: m3 attestation fingerprint failed (see $R/fp_local22.err)"; exit 67; }
   printf '{"runtime_fingerprint":"%s","execution_modes":["partitioned-serial"],"certified_edges":[{"source":"T2R1S1","target":"T2R2S0","kind":"rollout-only"},{"source":"T2R2S0","target":"T2R1S1","kind":"rollout-only"}]}' "$fp" > $R/attestation-m3.json
   ARGS="$ARGS --rl-elastic-attestation $R/attestation-m3.json"
