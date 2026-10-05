@@ -324,6 +324,9 @@ elif CASE == "m4":
     b_pools = [r for r in b_own if r.get("kind") == "gpu_pool"]
     b_pool = b_pools[-1] if b_pools else {}
     b_uuids = [u for node in (b_pool.get("uuids") or []) for u in node]
+    # m4b1 (2x1 fixed-partition, g3 topology: trainer n0:0, rollout n1:0) -> 2 uuids, 1 per node; m4b (2x2) -> 4
+    b_case = (open(os.path.join(R, "case.txt")).read().strip() if os.path.exists(os.path.join(R, "case.txt")) else "m4b")
+    n_gpus, per_node = (2, 1) if b_case == "m4b1" else (4, 2)
     b_seen = set(re.findall(r"(GPU-[0-9a-f-]{36})", gpu_names))
     rc_rec = [r for r in b_own if r.get("kind") == "round_cut" and r.get("action") == "restore"]
     restored_ev = [e for e in events if e.get("event") == "rl_round_cut_restored"]
@@ -342,9 +345,10 @@ elif CASE == "m4":
         # same layout, accepted
         "b_layout_accepted_same_as_a": bool(b_topo) and b_topo[-1].get("layout_accepted") is True and bool(a_topo)
             and b_topo[-1].get("layout") == a_topo[-1].get("layout"),
-        # rebind: accepted, rebind=true, non-empty mapping; B's 4 uuids all differ from A's and are B's nvidia-smi uuids
+        # rebind: accepted, rebind=true, non-empty mapping; B's n_gpus uuids (per_node per node) all differ from A's and are B's nvidia-smi uuids
         "b_gpu_pool_rebind_accepted": b_pool.get("accepted") is True and b_pool.get("rebind") is True and bool(b_pool.get("mapping")),
-        "b_uuids_new_and_on_b_nodes": len(b_uuids) == 4 and not (set(b_uuids) & a_uuids) and set(b_uuids) <= b_seen
+        "b_uuids_new_and_on_b_nodes": len(b_uuids) == n_gpus and len(set(b_uuids)) == n_gpus
+            and all(len(node) == per_node for node in (b_pool.get("uuids") or [])) and not (set(b_uuids) & a_uuids) and set(b_uuids) <= b_seen
             and not (set(b_uuids) & set(re.findall(r"(GPU-[0-9a-f-]{36})", a_gpu))),
         # continuation: >= 1 train round after the resume, the first trained rid = resume rid > 0
         "b_trains_ge_1_round_after_resume": bool(rounds_trained) and (resume_rid is None or max(rounds_trained) >= resume_rid),
@@ -357,6 +361,7 @@ elif CASE == "m4":
             and min(rounds_trained) == resume_rid and (not a_trained or resume_rid <= max(a_trained) + 1),
     }
     checks.update(weights)
+    notes.append(f"b_case={b_case} expected_uuids={n_gpus} b_uuids={len(b_uuids)} a_uuids={len(a_uuids)}")
     notes.append(f"a_incarnation={a_inc} restored_from={restore.get('restored_from')} resume_rid={resume_rid} "
                  f"a_trained={a_trained} b_trained={rounds_trained} a_round_cuts={[e.get('cut_id') for e in a_cuts]}")
     notes.append("stale_incarnation_rejection: PARTIAL(sim) -- A is torn down before B starts, so no old incarnation can "

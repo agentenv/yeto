@@ -1,6 +1,6 @@
 #!/bin/bash
 # rl-multinode-island tasks §3 (GPU): one launch of the yeto launcher on Nebius, evidence pulled to RUN_ROOT/<prefix>.
-# usage: s1run.sh <case: g0|g12|g3|m1|m3|m2|m4a|m4b|m5> <prefix> <hard_s> [watchdog_s]
+# usage: s1run.sh <case: g0|g12|g3|m1|m3|m2|m4a|m4b|m4a1|m4b1|m5> <prefix> <hard_s> [watchdog_s]
 #   g0  : 1 node x 1 L40S, --total-steps 1, no elastic (image/sm_89 probe: 1 train + 1 generate), launcher tears down.
 #   g12 : 2 nodes x 1 L40S, --total-steps 2 (cold start ~15 min of the 30 min hard timeout), elastic cfg resources-2x1.json (trainer n0:0, rollout cell n1:0), --keep (G1 topology + G2 cross-node cell).
 #   g3  : same cluster, --total-steps 8, --rl-elastic-restart-attempts 1, NO --keep: s1kill.sh kills the worker's raylet after round 1 train
@@ -15,6 +15,11 @@
 #         -> node_lost/RECOVERY_REQUIRED, launcher teardown. The chain then confirms A's instances are gone (cleanup_run.sh).
 #   m4b : M4 island B: NEW prefix/cluster, same cfg + same STORE + --rl-elastic-accept-rebind, --total-steps M4B_STEPS (default 8 => >= 1 round after
 #         the resume at rollout 2): store restore, gpu_pool rebind, round-cut weight restore, rollout ids continue. Judge: s1judge.py m4 <A run> <B run>.
+#   m4a1/m4b1: M4 2x1 variant = g3 topology (fixed-partition, resources-2x1.json T1R1S0: trainer n0:0, rollout n1:0), TP1 PP1,
+#         2 nodes x 1 GPU (M4X1_GPU, default nebius:2x1xl40s@eu-north1; H100: nebius:2x1xh100@eu-north1) + --rl-checkpoint-store,
+#         steps 8 both; same chain as m4a/m4b (s1kill KILL_RID=2 kills the worker = rollout node; B: new cluster, restore, rebind,
+#         continue). A/B argv identical except B's --rl-elastic-accept-rebind and the instance type: ITYPE -> A (and B unless
+#         M4B_ITYPE), M4B_ITYPE -> B only. Judge: s1judge.py m4 <A> <B> (2 new uuids).
 #   m2  : 2 nodes x 2 L40S, MoE fzyzcjy/Qwen3-30B-A3B-5layer, --tuning lora --lora-targets attention (all-linear is refused with EP>1),
 #         --tensor-parallel 1 --pipeline-parallel 1 --expert-parallel 2 (EP2 across nodes: the 2 trainer ranks are n0:0 and n1:0), T2R1S1, --total-steps 2.
 #   m5  : 2 nodes x 4 L40S (nebius:2x4xl40s = gpu-l40s-d_4gpu-128vcpu-768gb), Qwen3-0.6B LoRA (16 q / 8 kv heads: TP8 = 1 kv head per rank),
@@ -51,6 +56,10 @@ case $C in
        GPU=nebius:2x2xl40s@eu-north1; PAR="--tensor-parallel 1 --pipeline-parallel 2"; KEEP=""; NODES=2
        if [ $C = m4a ]; then STEPS=8; EX="$ELASTIC22 --rl-checkpoint-store $STORE"
        else STEPS=${M4B_STEPS:-8}; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-accept-rebind${M4B_ITYPE:+ --learner-instance-type $M4B_ITYPE}"; fi;;
+  m4a1|m4b1) [ -n "${STORE:-}" ] || { echo "abort: $C needs STORE=s3://<bucket>/<prefix> (same value for m4a1 and m4b1)"; exit 66; }
+       GPU=${M4X1_GPU:-nebius:2x1xl40s@eu-north1}; PAR="--tensor-parallel 1 --pipeline-parallel 1"; KEEP=""; NODES=2; STEPS=8
+       EX="$ELASTIC --rl-checkpoint-store $STORE"
+       if [ $C = m4b1 ]; then EX="$EX --rl-elastic-accept-rebind"; [ -n "${M4B_ITYPE:-}" ] && ITYPE=$M4B_ITYPE; fi;;
   m5)  GPU=nebius:2x4xl40s@eu-north1; STEPS=${M5_STEPS:-2}; PAR="--tensor-parallel 1 --pipeline-parallel 1"; KEEP="--keep"; NODES=2
        EX="--rollout-num-gpus-per-engine 8 --rl-allow-cross-node-engine-tp --rl-observe-timeline";;
   *) echo "unknown case $C"; exit 64;;
@@ -102,7 +111,7 @@ while [ ! -f $R/rc.txt ]; do
   sleep 10
 done" > $R/puller.log 2>&1 &
 echo $! > $R/puller.pid
-[ $C = m4a ] && { KILL_RID=2 setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }   # after rounds 0,1 (round cut at rid 2 exists)
+case $C in m4a|m4a1) true;; *) false;; esac && { KILL_RID=2 setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }   # after rounds 0,1 (round cut at rid 2 exists)
 [ $C = g3 ] && { setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }
 (
 export HOME=$R/home YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto
