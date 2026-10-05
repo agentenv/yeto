@@ -29,13 +29,18 @@ def recommend_mode_of(miles_args: Any) -> str:
     return str(getattr(miles_args, "yeto_rl_recommend_mode", None) or "disabled")
 
 
-def _declared_edges(profile: Any, configs: Any):
+def _declared_edges(profile: Any, configs: Any, attestation: Any = None):
+    """Flash-Next declared edges kept only when the attestation certifies them with
+    the DECLARED kind (``rollout-only``): candidate selection itself is kind-blind,
+    so a ``trainer-dp`` certificate for the same (source, target) must not leak in."""
     from yeto.rl.profiles import qwen3_8_next as q
 
     if not str(getattr(profile, "name", None) or "").startswith(q.PROFILE_NAME_FULL):
         return None
     edges = q.flash_next_elastic_declaration()["declared_edges"]
-    return frozenset(e for e in edges if e[0] in configs and e[1] in configs)
+    certified = frozenset(getattr(attestation, "certified_edges", ()) or ())
+    return frozenset(e for e in edges if e[0] in configs and e[1] in configs
+                     and (e[0], e[1], q.ELASTIC_EDGE_KIND) in certified)
 
 
 def apply_recommend_mode(controller: Any, mode: str) -> str:
@@ -70,7 +75,8 @@ def elastic_hook_for(miles_args: Any, *, controller: Any, profile: Any, observe:
         dict(controller.configs), window_s=float(window),
         total_rounds=getattr(miles_args, "num_rollout", None),
         edge_costs_path=getattr(miles_args, "yeto_rl_edge_costs_path", None) or None,
-        declared_edges=_declared_edges(profile, controller.configs),
+        declared_edges=_declared_edges(profile, controller.configs,
+                                       getattr(controller, "attestation", None)),
         recommender=Recommender(**rec_kw, **kw),
         auto=AutoController(Recommender(**rec_kw, **kw), policy=AutoPolicy(**pol_kw), **kw),
     )
