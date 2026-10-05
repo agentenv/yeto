@@ -90,6 +90,15 @@ profile 由 `flash_next_execution_profile(AlgorithmSpec)` 给出（partitioned-s
 
 声明的边**不代表已认证**：只有同时出现在 attestation.certified_edges 里的边才能成为候选，`controller.plan` 也会再拒一次。
 
+## 5a. Flash-Next 真机清单（上卡前逐项打勾）
+
+* 资源文件 `tests/multinode_gpu/resources-fn-4x8.json`：配置名、形状和边与 `flash_next_elastic_declaration()` 一致（`tests/test_rl_fn_elastic_prep.py` 锁定）。trainer 放在 n0+n1（TP2 PP8 EP2），引擎（TP8）在 n2/n3；FN-T16R8S8 的 standby 是整个 n3。
+* 启动参数：`tests/multinode_gpu/fnrun.sh fn32s|fn32b`，只打印 argv。`--rl-rollout-gpus` / `--rl-standby-gpus` 必须与初始配置的 placement 一致，否则 launcher 在本地就拒绝。
+* 镜像与模型：用 `@eu-north1` 显式 region 才会启用烘焙镜像；`--model-store nebius-fs://computefilesystem-e00nm64w4cqpkqd0ch`（Flash-Next de4b8e4d 已在 FS 中）。
+* attestation：观察跑**不带** `--rl-elastic-attestation`，此时候选边为空、auto 被拒、hook 只 hold。FN 边只有经 E1 验收（两个方向各 n≥3 个 SUCCEEDED 事务，LoRA sha 与 logprob 连续）后，才能以 kind `rollout-only` 写进 `certified_edges`，并绑定 runtime_fingerprint。用其它 kind 认证同一对配置不会让 FN 声明边成为候选。
+* 未关闭的缺口：(1) ports 路径对 Flash-Next full 的 recipe/argv 未在真机验证，以往的 FN 真机走的是 `run_qwen3_8_next.py`，且是 4layer 模型；(2) 真实 Miles 路径的 profile 名是 `miles-lora-partitioned-serial`，所以 FN 声明边的交集不生效，只有 attestation 把关；(3) FN 的 attestation 指纹脚本尚未编写。
+* 计划与费用：`infra-drafts/FN-ELASTIC-GPU-PLAN.md`。
+
 ## 6. 启用 auto 的前置条件（全部满足才可开）
 
 1. D1 验收通过：recommend 模式在真实负载上输出的建议经人工复核是合理的。
