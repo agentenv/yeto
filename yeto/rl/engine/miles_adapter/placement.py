@@ -129,8 +129,10 @@ class PlacementRequest:
             }
         except TopologyError as exc:
             raise ValueError(str(exc)) from None
-        if self.kind == "colocated":
-            slots["rollout"] = []  # the same GPUs as the trainer; the trainer rule covers them
+        # colocated: the engines share the trainer's GPUs; m5 (ruling 2026-10-04 v2) checks
+        # them with the same engine rules (one node by default; a cross-node engine needs
+        # the opt-in and takes whole nodes) -- before, a colocated TP8 engine on 2x4 slipped
+        # through without --rl-allow-cross-node-engine-tp.
         reason = node_placement_rejection(slots, node_parallel=self.in_node_parallel,
                                           expert_parallel=self.expert_parallel, gpus_per_engine=per,
                                           allow_cross_node_tp=bool(self.allow_cross_node_tp),

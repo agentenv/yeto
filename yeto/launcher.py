@@ -322,6 +322,34 @@ def rl_cross_node_switches(args) -> tuple[bool, bool]:
             bool(getattr(args, "rl_allow_cross_node_engine_tp", False) or cfg.get("allow_cross_node_engine_tp")))
 
 
+def rl_colocated_engine_check(args, spec) -> list[dict[str, int]]:
+    """m5: node rules of a colocated multi-node island's rollout engines (ruling
+    2026-10-04 v2): engine i = logical bundles ``i*g .. i*g+g-1`` of the island; one
+    node by default, a cross-node engine only with ``--rl-allow-cross-node-engine-tp``
+    and as whole nodes. Returns the expected sglang TP rank map of engine 0 (the
+    m5 judge's rank -> GPU reconciliation reference); raises ValueError otherwise."""
+    from .rl.engine.multinode import (Topology, TopologyError, colocated_engine_slots,
+                                      node_placement_rejection, sglang_tp_rank_map)
+
+    g = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
+    topology = Topology(spec.num_nodes, spec.gpus_per_node)
+    _tp, cross_engine = rl_cross_node_switches(args)
+    try:
+        engines = colocated_engine_slots(topology.total, g, topology)
+    except TopologyError as exc:
+        raise ValueError(f"colocated rollout engines on {spec}: {exc}") from None
+    why = node_placement_rejection({"trainer": [], "rollout": engines, "standby": []},
+                                   gpus_per_engine=g, allow_cross_node_engine=cross_engine,
+                                   gpus_per_node=spec.gpus_per_node)
+    if why:
+        raise ValueError(f"colocated rollout engines on {spec}: {why}")
+    if cross_engine and g > spec.gpus_per_node:
+        print("[launcher] WARNING: --rl-allow-cross-node-engine-tp: a colocated rollout engine of "
+              f"{g} GPUs spans {g // spec.gpus_per_node} whole nodes (sglang nnodes>1; scales "
+              "as one replica)")
+    return sglang_tp_rank_map(engines[0])
+
+
 def rl_cross_node_flags(args) -> str:
     tp, engine = rl_cross_node_switches(args)
     return (" --rl-allow-cross-node-tp" if tp else "") + (" --rl-allow-cross-node-engine-tp" if engine else "")
@@ -1991,6 +2019,11 @@ def _prepare_rl_args(
                       f"{args.rollout_num_gpus_per_engine} GPUs may span whole nodes (sglang "
                       "nnodes>1; scales as one replica)")
             spec = dataclasses.replace(spec, num_nodes=actor_nodes, gpus_per_node=actor)
+        elif spec.num_nodes > 1:
+            # m5 (ruling 2026-10-04 v2): a colocated multi-node island carves its engines out
+            # of the whole island; an engine larger than a node (sglang nnodes>1) needs the
+            # explicit opt-in and must take whole nodes, before any cloud work.
+            rl_colocated_engine_check(args, spec)
         if spec.total_gpus % model_parallel:
             raise ValueError(
                 "RL TP*PP must divide every island GPU world size"

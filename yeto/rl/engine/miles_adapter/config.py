@@ -498,6 +498,15 @@ def placement_request(config) -> PlacementRequest:
             trainer_gpus=trainer,
             rollout_gpus=trainer,
             gpus_per_engine=parallel.rollout_num_gpus_per_engine,
+            # m5: a multi-node colocated island applies the node rules (engine opt-in /
+            # whole-node replicas, trainer tp*cp in-node) like a fixed partition
+            gpus_per_node=getattr(parallel, "island_gpus_per_node", None),
+            model_parallel=int(parallel.tensor_parallel) * int(parallel.pipeline_parallel)
+            * int(getattr(parallel, "context_parallel", 1) or 1),
+            node_parallel=int(parallel.tensor_parallel) * int(getattr(parallel, "context_parallel", 1) or 1),
+            expert_parallel=int(getattr(parallel, "expert_parallel", 1) or 1),
+            allow_cross_node_tp=bool(getattr(parallel, "allow_cross_node_tp", False)),
+            allow_cross_node_engine_tp=bool(getattr(parallel, "allow_cross_node_engine_tp", False)),
         )
     _cp = int(getattr(parallel, "context_parallel", 1) or 1)
     request = PlacementRequest(
