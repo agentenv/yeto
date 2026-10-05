@@ -434,6 +434,7 @@ def handle_from_metadata(
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),
+        batch_summary=payload.get("batch_summary"),
     )
 
 

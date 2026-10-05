@@ -1642,6 +1642,10 @@ def run_ports_island(
             ),
             elastic=elastic,
         )
+        # fleet-dashboard 2.1/2.2: opt-in heartbeat / resource sampler periods
+        driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
+        driver.resource_sample_interval_s = getattr(
+            miles_args, "yeto_rl_resource_sample_interval_s", None)
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness
 

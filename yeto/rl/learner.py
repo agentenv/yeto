@@ -153,6 +153,11 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat / rl_resource_sample
+    # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,
+    # else off (0 disables explicitly).
+    parser.add_argument("--rl-heartbeat-interval", type=float, default=None)
+    parser.add_argument("--rl-resource-sample-interval", type=float, default=None)
     from .engine.miles_adapter.elastic_hook import add_recommend_arguments
     add_recommend_arguments(parser)  # D2 elastic hook
     # ports LoRA training-time dropout (default 0 = unchanged argv)
@@ -384,8 +389,22 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
-    if getattr(args, "rl_observe_timeline", False):
+    observe = bool(getattr(args, "rl_observe_timeline", False))
+    if observe:
         miles_args.yeto_rl_observe_timeline = True
+    from .engine.telemetry import DEFAULT_HEARTBEAT_INTERVAL_S, DEFAULT_RESOURCE_INTERVAL_S
+
+    for flag, attr, default in (
+        ("rl_heartbeat_interval", "yeto_rl_heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S),
+        ("rl_resource_sample_interval", "yeto_rl_resource_sample_interval_s",
+         DEFAULT_RESOURCE_INTERVAL_S),
+    ):
+        value = getattr(args, flag, None)
+        value = (default if observe else None) if value is None else float(value)
+        if value:
+            if value < 0:
+                raise ValueError(f"--{flag.replace('_', '-')} must be >= 0")
+            setattr(miles_args, attr, value)
     from .engine.miles_adapter.elastic_hook import apply_recommend_flags
     apply_recommend_flags(args, miles_args)
     if getattr(args, "rl_deterministic_trainer", False):
@@ -2494,6 +2513,12 @@ def _run_ports(
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
     miles_args.yeto_rl_engine = "ports"
+    # fleet-dashboard 1.4: the ports EventTape tees into W&B (wandb_rl.tee)
+    # off the same namespace fields as run_miles.
+    miles_args.wandb = getattr(args, "wandb", False)
+    miles_args.wandb_project = getattr(args, "wandb_project", "yeto")
+    miles_args.wandb_entity = getattr(args, "wandb_entity", None)
+    miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
     apply_ports_infra_switches(args, miles_args)
     run_ports_island(
         miles_args,
