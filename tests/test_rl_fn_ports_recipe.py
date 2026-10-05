@@ -93,3 +93,11 @@ def test_apply_ports_recipe_drops_values_too():
     out = q.apply_ports_recipe(["train.py", "--num-layers", "4", "--swiglu", "--lora-type", "c", "--x", "1"],
                                ["--num-layers", "48"])
     assert out == ("train.py", "--swiglu", "--x", "1", "--num-layers", "48")
+
+
+def test_sglang_engine_shape_follows_engine_gpus():
+    cfg = _fn_config()
+    cfg = dataclasses.replace(cfg, parallel=dataclasses.replace(cfg.parallel, rollout_num_gpus_per_engine=8,
+                                                                dedicated_rollout_gpus=8))
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    assert flag_value(argv, "--sglang-tp-size") == "8" == flag_value(argv, "--sglang-ep-size")

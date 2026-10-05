@@ -939,6 +939,11 @@ def translate_run_config(
             variant, lora_rank=trainable.lora_rank,
             lora_expert_rank=getattr(trainable, "lora_expert_rank", None),
             lora_dropout=float(getattr(trainable, "lora_dropout", 0.0) or 0.0))))
+        # run_qwen3_8_next.py: each SGLang engine is TP=EP=engine GPUs (TP8/EP8 full)
+        engine = str(parallel.rollout_num_gpus_per_engine)
+        for flag in ("--sglang-tp-size", "--sglang-ep-size"):
+            if flag not in values:
+                values.extend((flag, engine))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     # IR-1: the final argv never pairs the session server with partial rollout
