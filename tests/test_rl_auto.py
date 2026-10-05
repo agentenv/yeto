@@ -256,6 +256,10 @@ def test_mode_switch_does_not_interrupt_transaction(tmp_path):
     driver, ctl, *_ = _setup(tmp_path, inbox=True)
     assert ctl.recommend_mode == "disabled"  # legacy default
     inbox = CommandInbox(tmp_path / "state" / "inbox")
+    with pytest.raises(Rejected, match="auto_controller"):  # d2-wire: capability gate
+        ctl.set_recommend_mode("auto")
+    import dataclasses
+    ctl.attestation = dataclasses.replace(ctl.attestation, auto_controller=True)
     ctl.set_recommend_mode("auto")
     ctl.request("m1", "T4R4S0", 0, 60)
     inbox.submit("sw", "mode", {"mode": "disabled"})
