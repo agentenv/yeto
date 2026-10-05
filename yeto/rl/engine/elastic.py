@@ -76,15 +76,25 @@ class ElasticHook:
     _buf: list[Mapping[str, Any]] = field(default_factory=list)
     _offset: int = 0
     _restored: bool = False
+    _fed: bool = False
 
     def __post_init__(self) -> None:
         if self.window_s <= 0:
             raise ValueError("window_s must be positive")
 
     # ---------------------------------------------------------------- inputs
+    def feed(self, event: Mapping[str, Any]) -> None:
+        """In-memory mirror of the driver's own emits (``IslandDriver.emit``): the
+        hook then never depends on the tape path (Miles ``_append_rl_event``)."""
+        self._fed = True
+        if event.get("event") in _OBSERVED:
+            self._buf.append(dict(event))
+
     def _events(self, driver: Any) -> list[Mapping[str, Any]]:
         if self.events_source is not None:
             return list(self.events_source())
+        if self._fed:
+            return list(self._buf)
         path = getattr(driver.events, "path", None)
         if path is None or not Path(path).exists():
             return list(self._buf)
