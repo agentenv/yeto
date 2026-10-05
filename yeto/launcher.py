@@ -1482,6 +1482,14 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     dropout = getattr(args, "rl_lora_dropout", None)
     if dropout is not None and (rl_engine != "ports" or not 0.0 <= dropout < 1.0):
         raise ValueError("--rl-lora-dropout needs --rl-engine ports and a value in [0, 1)")
+    expert_rank = getattr(args, "rl_lora_expert_rank", None)
+    if expert_rank is not None and (rl_engine != "ports" or expert_rank < 0):
+        raise ValueError("--rl-lora-expert-rank needs --rl-engine ports and a value >= 0")
+    ref_load = getattr(args, "rl_megatron_ref_load", None)
+    if ref_load is not None and (rl_engine != "ports" or not ref_load.startswith("/")
+                                 or any(c.isspace() for c in ref_load)):
+        raise ValueError("--rl-megatron-ref-load needs --rl-engine ports and an absolute path "
+                         "without whitespace")
     if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
         raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
@@ -1616,6 +1624,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-deterministic-trainer"
     if getattr(args, "rl_lora_dropout", None) is not None:
         flags += f" --rl-lora-dropout {float(args.rl_lora_dropout)!r}"
+    if getattr(args, "rl_lora_expert_rank", None) is not None:
+        flags += f" --rl-lora-expert-rank {int(args.rl_lora_expert_rank)}"
+    if getattr(args, "rl_megatron_ref_load", None) is not None:
+        flags += f" --megatron-ref-load {shlex.quote(args.rl_megatron_ref_load)}"
     if getattr(args, "rl_print_attestation_fingerprint", False):
         flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_elastic", False):
@@ -3293,6 +3305,10 @@ def make_miles_island_task(
         "CYBERGYM_AGENT_ID": args.cybergym_agent_id,
         "CYBERGYM_TIMEOUT": str(args.cybergym_timeout),
     }
+    from yeto.rl.profiles import qwen3_8_next as _fn
+    if str(args.model or "").rstrip("/").rsplit("/", 1)[-1] in _fn.MODEL_NAMES.values():
+        # run_qwen3_8_next.py extra_env_vars, exported before `ray start`
+        envs.update(_fn.PORTS_RUNTIME_ENV)
     if args.rl_model_recipe == "deepseek-v4-flash":
         envs.update(
             {

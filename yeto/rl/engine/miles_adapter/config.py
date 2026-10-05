@@ -343,6 +343,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
     "trainable.lora_dropout": _ok,
+    "trainable.lora_expert_rank": _ok,
     "trainable.lora_targets": _check_lora_targets,
     "trainable.target_modules": _ok,
     "trainable.expert_full_count": _check_expert_full,
@@ -937,7 +938,7 @@ def translate_run_config(
             raise MilesConfigError(f"no Flash-Next variant has {geometry.num_layers} layers")
         values = list(q.apply_ports_recipe(values, q.ports_recipe_argv(
             variant, lora_rank=trainable.lora_rank,
-            lora_expert_rank=getattr(trainable, "lora_expert_rank", None),
+            lora_expert_rank=trainable.lora_expert_rank,
             lora_dropout=float(getattr(trainable, "lora_dropout", 0.0) or 0.0))))
         # run_qwen3_8_next.py: each SGLang engine is TP=EP=engine GPUs (TP8/EP8 full)
         engine = str(parallel.rollout_num_gpus_per_engine)

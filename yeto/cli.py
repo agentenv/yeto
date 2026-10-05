@@ -322,6 +322,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-lora-dropout", type=float, default=None, metavar="P",
                     help="ports LoRA: training-time LoRA dropout (default 0). Trainer DP-change "
                     "edges refuse dropout > 0; same-shape rebuild restores its RNG")
+    rl.add_argument("--rl-lora-expert-rank", type=int, default=None, metavar="R",
+                    help="ports Qwen3.8-Flash-Next: routed-expert LoRA rank r_e (0 <= r_e <= "
+                    "--lora-r; default the profile's 8)")
+    rl.add_argument("--rl-megatron-ref-load", default=None, metavar="DIR",
+                    help="ports: absolute node-side Megatron torch_dist checkpoint for --ref-load "
+                    "(required by the Qwen3.8-Flash-Next raw recipe, e.g. "
+                    "/mnt/yeto-models/torch_dist/qwen3.8-flash-next_torch_dist)")
     rl.add_argument("--rl-deterministic-trainer", action="store_true",
                     help="ports: Megatron --deterministic-mode plus NCCL_ALGO=Ring, "
                     "CUBLAS_WORKSPACE_CONFIG=:4096:8, NVIDIA_TF32_OVERRIDE=0 on the learner and "
