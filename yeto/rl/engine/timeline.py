@@ -273,6 +273,8 @@ class LoadSummary:
       second in the window.
     * ``policy_age``: max ``rl_readiness.policy_age`` in the window, else None.
     * ``weight_transport``: transport label of the window's events (None if absent).
+    * ``train_fraction`` (added for 6.1/6.4, appended so positional use is
+      unchanged): union of ``compute`` spans on the trainer role / window length.
     """
 
     window_start: float
@@ -289,6 +291,7 @@ class LoadSummary:
     consume_rate: float
     policy_age: int | None
     weight_transport: str | None = None
+    train_fraction: float = 0.0
 
 
 def _clip_union(intervals: list[tuple[float, float]], lo: float, hi: float) -> float:
@@ -327,6 +330,8 @@ def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> lis
         gpu = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
                and e.get("kind") == "compute"
                and any(r in GPU_ROLES for r in str(e.get("role")).split("+"))]
+        train = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
+                 and e.get("kind") == "compute" and "trainer" in str(e.get("role")).split("+")]
         pub = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
                and e.get("kind") == "transfer" and e.get("task") == "publish"]
         transports = {e.get("weight_transport") for e in evs} - {None}
@@ -366,5 +371,6 @@ def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> lis
                 consume_rate=groups / window_s,
                 policy_age=max(ages) if ages else None,
                 weight_transport=next(iter(transports)) if len(transports) == 1 else None,
+                train_fraction=_clip_union(train, lo, hi) / window_s,
             ))
     return sorted(out, key=lambda w: (str(w.profile_hash), w.epoch, w.window_start))
