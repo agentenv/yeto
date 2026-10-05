@@ -135,6 +135,18 @@ def mean_step_metrics(step_losses: list[dict[str, Any]] | None) -> dict[str, flo
     return {k: sum(v) / len(v) for k, v in sums.items()}
 
 
+# Miles loss-dict KL keys, in preference order (first present wins).
+KL_METRIC_KEYS = ("mean_kl", "kl_loss", "kl", "ppo_kl", "train_rollout_kl")
+
+
+def _metric(round_metrics: dict[str, float], *names: str) -> float | None:
+    for name in names:
+        for key in (name, f"train/{name}"):
+            if key in round_metrics:
+                return round_metrics[key]
+    return None
+
+
 def mismatch_metrics(round_metrics: dict[str, float]) -> dict[str, float]:
     return {
         k: v for k, v in sorted(round_metrics.items())
@@ -199,6 +211,10 @@ class MilesTrainerGroup:
         self.last_masked_fraction: float | None = None
         self.last_step_losses: list[dict[str, Any]] | None = None
         self.last_outputs: list[Any] | None = None
+        # fleet-dashboard 1.1: every drained step-loss record of the last round
+        # (``last_step_losses`` stays gated on the mechanisms that consume it).
+        self.last_round_step_losses: list[dict[str, Any]] | None = None
+        self.optimizer_steps_total = 0
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
         if batch.payload is None:
@@ -207,6 +223,7 @@ class MilesTrainerGroup:
         self.last_applied_lrs = None
         self.last_masked_fraction = None
         self.last_step_losses = None
+        self.last_round_step_losses = None
         try:
             self._reshard_guard(batch)
             if self._check_tokens:  # spec: reject before training
@@ -252,6 +269,7 @@ class MilesTrainerGroup:
                 # without bound and a later save_cut refuses the cut as "not
                 # drained" (integ-s2 review finding 1).
                 step_losses = self._step_losses()
+                self.last_round_step_losses = step_losses
                 if estimator in CLIPFRAC_MASKED_ESTIMATORS or corrections or clipfrac_variant:
                     self.last_step_losses = step_losses
                     round_metrics = mean_step_metrics(self.last_step_losses)
@@ -269,6 +287,7 @@ class MilesTrainerGroup:
         finally:
             self._release(self._args, batch.payload)
         steps = int(self._args.num_steps_per_rollout) if succeeded else 0
+        self.optimizer_steps_total += steps
         return LocalStepReceipt(
             algorithm=self._algorithm,
             learner_id=self._learner_id,
@@ -317,6 +336,10 @@ class MilesTrainerGroup:
         steps = getattr(self, "last_step_losses", None)
         return mismatch_metrics(mean_step_metrics(steps)) if steps else {}
 
+    def round_metrics(self) -> dict[str, float]:
+        """1.1: per-key round mean of every Miles loss-dict scalar (empty if none)."""
+        return mean_step_metrics(getattr(self, "last_round_step_losses", None))
+
     def _step_losses(self) -> list[dict[str, Any]]:
         # Only the last pipeline stage records losses; take the first rank that did.
         per_rank = [list(v) for v in self._run(self._actor.run_plugin(STEP_LOSSES, {}))]
@@ -328,8 +351,16 @@ class MilesTrainerGroup:
         from ..driver import TrainStepMetrics  # lazy: driver imports torch
 
         norm = self.last_grad_norm
+        means = self.round_metrics()
+        lrs = getattr(self, "last_applied_lrs", None)
         return TrainStepMetrics(
             grad_norm=math.nan if norm is None else float(norm),
+            loss=_metric(means, "loss"),
+            pg_loss=_metric(means, "pg_loss"),
+            mean_kl=_metric(means, *KL_METRIC_KEYS),
+            ess_ratio=_metric(means, "ess_ratio"),
+            lr=float(lrs[-1]) if lrs else None,
+            train_step=getattr(self, "optimizer_steps_total", None) if norm is not None else None,
             applied_lrs=self.last_applied_lrs,
             masked_fraction=self.last_masked_fraction,
             clip_fraction=self._clip_fraction(),
