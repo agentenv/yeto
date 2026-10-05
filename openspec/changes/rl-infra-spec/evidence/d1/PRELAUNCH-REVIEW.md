@@ -27,3 +27,45 @@
 ## (e) 时长与费用
 - 历史参照：M1 冷启 18 min；暖启的 M3 用 8 min。本链共 7 次运行：18 + 5×8 + 10（d1e1）+ 清理 ≈ 75 min，约 $12。
 - 硬顶：每次 HARD 3000 s；预算守卫 3.5 h（$32），低于预登记上限 $37（含重跑 ≤$57）。
+
+---
+# S11 合并链复核（2026-10-05 第二版，代码 d1-gpu，已 merge integ-decl eb94f35c）——取代上面 L40S-only 链
+
+用户裁定：批准 H200；L40S 若有容量就优先用 L40S；阶段总额度 $300，**本链上限 $150**（链内预算守卫）；一次上机尽量多采数据；不得编造数据，没跑到的段在结果文件里写"未执行"。
+
+## SKU 与时价（`sky show-gpus H200 --cloud nebius`，2026-10-05 实查）
+| SKU | 时价（按需） |
+|---|---|
+| nebius eu-north1 `gpu-h200-sxm_8gpu-128vcpu-1600gb`（8×H200 141GB） | **$36.00/h** |
+| nebius eu-north1 2×`gpu-l40s-*_1gpu`（2×2 L40S） | $9.14/h（gpu-spend.md 既有 run） |
+
+## 链 `tests/multinode_gpu/s11h200chain.sh <prefix>`
+| 段 | 内容 | 集群 | 预计 |
+|---|---|---|---|
+| 1 sweep (2.4) | T2R1S1/T2R2S0 × seed 17/29，6 轮 | L40S `<P>-l`（PREFER_L40S=1）；首次 provision 失败**立即**回落 H200 `<P>-h`（不等待） | L40S 冷启 18 min + 3×8 min；H200 同量级 |
+| 2 e1 (5.1) | d1e1：3 对 up/down，14 轮，attestation 按本次 steps/seed/GPU/resources 重算 | 同上 | 约 10 min |
+| 2b lp | 岛停止后，用 sglang 跑基座模型的 teacher-forced logprob：tp1 分别在各张卡上、tp2、tp4（L40S 只用 head 的 2 卡：tp1×2 + tp2），输出 lp.json 与 lp-summary.json | 同上 | 约 10 min |
+| 2c T1R3S0 | seed 17/29 | 同上 | 2×8 min |
+| 3a fnboot | fnrun fn8s（--keep）：拉起挂载 FS 的 H200 `<P>-f`。torch_dist 尚不存在，learner 预期在 ref-load 检查处快速失败；若 torch_dist 已存在，这次就直接作为 fnA | H200 `<P>-f`（FS 只能在 provision 时挂上，所以不能复用 sweep 集群，sweep 集群先 down） | 冷启约 15 min + 失败约 5 min |
+| 3b fnprep | s11fnprep.sh：先 populate 4layer snapshot 到 FS 的 hub 布局并写 marker，再 convert 生成 torch_dist。df 闸门：populate 前要求剩余 ≥2.1×snapshot，convert 前 ≥1.1×snapshot；不满足即 FAIL 并跳过 fnA；不删除任何数据。耗时与 df 写入 fnprep.json | 同上 | 约 20–30 min |
+| 3c fna | fnrun fn8s，STEPS=6（链首先在本地用 fp_fn 按 steps 6 重算指纹并存档）；跑 judge_qwen3_8_next_lora_log.py；另存 lora.txt、torchdist-load.txt、terminal.txt（容器内 df 与显存） | 同上 | 约 30 min |
+
+费用估算：
+- **L40S 路径**：段 1–2c 约 85 min × $9.14 ≈ $13；段 3 约 80 min × $36 ≈ $48；合计约 **$61**。
+- **H200 回落路径**：段 1–2c 约 90 min × $36 ≈ $54，加段 3 $48，合计约 **$102**。
+- **最坏**：两条路径都被链内守卫封顶在 **$150**。守卫按"已花费（各集群 UP 墙钟 × 时价）+ 下一步估算 ≤ CAP"判断，不满足的步不再启动，结果文件中记为"未执行"。
+- 硬顶：每次运行 HARD 3000 s（fna 为 3600 s），每次运行都有 watchdog。
+
+## 复核项
+- **H200 资源文件** `resources-1x4-h200.json`：1 节点 4 卡；T2R1S1 为 trainer n0:0–1、rollout n0:2、standby n0:3；T2R2S0 为 rollout n0:2、n0:3；T1R3S0 为 trainer n0:0、rollout n0:1–3。launcher 参数加 `--rl-island-use-gpus-per-node 4 --rl-island-network-tier none`；后者避免 H200:8 默认 "best" 网络档去申请 IB 集群。
+- **单测** `tests/test_rl_multinode_h200.py`：三个配置的 island spec 都是 4 卡，trainer shape 为 (1,2)/(1,2)/(1,1)，`CUDA_VISIBLE_DEVICES=0,1,2,3`。全部相关测试共 161 passed（multinode_*、launcher_multinode、fn_align）。其中有一次运行出现 4 failed，重跑后全过，疑似并发运行 fp_fn 导致的不稳定，原因未查明。
+- **UUID 对账**：s1cost sweep 改为检查 gpu_pool 恰有 4 个 UUID，且都包含在 nvidia-smi 列出的 UUID 中（H200 会列出 8 个物理卡）；GPU 型号按 `--gpu` 断言。
+- **attestation 指纹**（d1e1，用 fp_local22 加额外参数重算）：L40S 6 步为 0d17e24b，与历史 M3 一致；H200 alloc4、14 步为 0c779f5b。**风险**：H200 指纹从未在真机上与运行时 rl_driver_start 的值对过。若不一致，e1 的请求会被拒绝，可从 journal 看出来，事后用 rl_driver_start 对照。
+- fn8s 指纹（fp_fn，steps 6，seed 17）为 abe7500d，仅作信息，fn8s 不做认证。
+- **fnboot 是有意的"预期失败"**：它的作用是拿到挂好 FS 的节点。它的 rc 非 0 不算失败，只看 fna。
+- `--rl-heartbeat-interval` 与 `--rl-resource-sample-interval` 只是 learner 参数，launcher 不转发。开了 `--rl-observe-timeline` 后默认值为 30 s / 60 s，因此不需要额外传参。另外 puller 每 10 s 拉一次 nvidia-smi 快照（gpu-*.txt、apps-*.txt）。
+- **每次运行保存的数据**：完整 pulled/（tape、journal、run.log、inwatch、gpu 与 apps 快照）、args.txt（argv）、yeto_sha、attestation-m3.json、sweep.json（有效性与每轮时长）、cost.json/tsv（e1）、coldstart.txt（launch 时间戳中的拉镜像、加载、ready 相关行）、perf.txt（tok/s 相关行）、dashboard.html（yeto dashboard export）、sky status -v（SKU 实况）、lp.json；fn 段另存 fnprep.json、lora.txt、torchdist-load.txt、judge-fn.out、terminal.txt。
+- **未覆盖**：
+  - logprob 对照的是基座模型在不同卡和 TP 形状下的数值差异，不是各配置训练后的策略；
+  - FN 阶段 A 测不到 full 模型的加载时间（见 FN-A-PRELAUNCH-REVIEW §1）；
+  - `--sglang-enable-deterministic-inference` 与 GDN 能否共存，只能在真机上看。

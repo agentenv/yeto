@@ -89,9 +89,13 @@ case $C in
            *) echo "abort: d1sweep needs D1_CFG=T2R1S1|T2R2S0|T1R3S0"; exit 69;;
          esac
        fi;;
+  fn8s) # S11 seg 3 (Flash-Next stage A, FN-A-PRELAUNCH-REVIEW.md): argv rendered by fnrun.sh fn8s (1x8 H200, 4layer, model store FS,
+       # torch_dist ref-load, colocated + offload, observe-timeline), STEPS (default 6), --keep (the chain downs the cluster).
+       GPU=nebius:1x8xh200@eu-north1; NODES=1; STEPS=${STEPS:-6}; KEEP="--keep"; EX="";;
   *) echo "unknown case $C"; exit 64;;
 esac
 ARGS="launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu $GPU --cluster-prefix $CP $KEEP --no-island-relaunch --modal-retries 0 --rl-image $IMAGE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function ${REWARD:-gsm8k_reward:score} $LORA $PAR --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed ${SEED:-17} --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --total-steps $STEPS $EX${ITYPE:+ --learner-instance-type $ITYPE}"
+[ $C = fn8s ] && ARGS="$(PREFIX=$CP STEPS=$STEPS IMAGE=$IMAGE bash $D/fnrun.sh fn8s) --keep --modal-retries 0"
 CL=$CP-l0-eu-north1
 if [ "${DRY:-0}" = 1 ]; then echo "cluster=$CL nodes=$NODES case=$C hard=$HARD wd=$WD${USE:+ gpus_per_node physical=$PHYS use=$USE}"; echo "$ARGS"; [ -n "$TRIG" ] && { echo "triggers=$TRIG"; /usr/bin/python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; }; exit 0; fi
 mkdir -p $R/home $R/runs $R/pulled $R/yeto

@@ -4,13 +4,13 @@
 #   seg 2 D1-3 e1 (5.1): d1e1, 3 up/down pairs, 14 rounds
 #   seg 2b lp: teacher-forced logprob of the base model on the island's GPUs / TP shapes (s11lp.sh)
 #   seg 2c T1R3S0 s17, s29 (sweep config with the most layout risk -> after the must-have data)
-#   seg 3 fnA (Flash-Next stage-A slice; FAILED-risk highest -> chain tail): FNA_CMD (env, from fn-align) or skipped.
+#   seg 3 fnboot -> fnprep -> fna (Flash-Next stage A, 4layer, own FS-attached H200 cluster <P>-f; highest FAILED risk -> chain tail)
 # Path: PREFER_L40S=1 (default) tries the first run on nebius 2x2 L40S eu-north1 ($9.14/h). Provision failure (provision_failed.txt)
 #   -> immediately falls back to nebius 1x8 H200 eu-north1 (gpu-h200-sxm_8gpu-128vcpu-1600gb, $36/h, island allocated GPUs 0-3) for
-#   segs 1-2c. fnA always runs on H200 (separate cluster when segs 1-2c ran on L40S; the L40S cluster is downed first).
+#   segs 1-2c. The fn segments always run on a separate FS-attached H200 cluster (sweep cluster downed first).
 # Clusters: <P>-l-l0-eu-north1 (L40S), <P>-h-l0-eu-north1 (H200). Exit: watchdogs killed, both clusters downed, cleanup_run.sh <P> x2.
 # Budget guard: spent = sum(cluster wall x rate); a step starts only if spent + its estimate <= CAP_USD.
-# usage: s11h200chain.sh <prefix>     env: PREFER_L40S (1), CAP_USD (150), FNA_CMD, FNA_EST_USD (70), HARD (3000)
+# usage: s11h200chain.sh <prefix>     env: PREFER_L40S (1), CAP_USD (150; stage total $300), FN_ENABLE (1), FNA_EST_USD (50), HARD (3000), HARD_FNBOOT, HARD_FNA
 set -u
 P=$1; D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd $D/../.. && pwd); B=${RUN_ROOT:-/home/michael/work/s1-runs}; export HOME=/home/michael
 SKY=/home/michael/work/gpu-head/venv/bin/sky; CAP=${CAP_USD:-150}; LOG=$B/$P.chain.log; mkdir -p $B
@@ -25,10 +25,10 @@ down() {  # down <cluster> <L|H>
 }
 finish() {
   for f in $B/$P-*/watchdog.pid; do [ -f "$f" ] && kill $(cat $f) 2>/dev/null; done
-  down $CLL L; down $CLH H
+  down $CLL L; down $CLH H; down $P-f-l0-eu-north1 H
   RUNS_BASE=$B /home/michael/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup1.out 2>&1; log "cleanup1 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup1.out | tail -1)"
   RUNS_BASE=$B /home/michael/work/gpu-b1-runs/cleanup_run.sh $P > $B/$P.cleanup2.out 2>&1; log "cleanup2 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup2.out | tail -1)"
-  timeout 120 $SKY status 2>/dev/null | grep -E "$CLL|$CLH" && log "WARNING: cluster still listed" || log "sky status: $CLL / $CLH gone"
+  timeout 120 $SKY status 2>/dev/null | grep -E "$CLL|$CLH|$P-f-l0" && log "WARNING: cluster still listed" || log "sky status: $CLL / $CLH gone"
   log "estimated spend \$$(spent) (cap \$$CAP)"
 }
 trap finish EXIT
@@ -78,12 +78,38 @@ if python3 -c "import sys;sys.exit(0 if $(spent)+$EST<=$CAP else 1)" && $D/s1res
   timeout 2400 $D/s11lp.sh $CL $B/$P-lp $( [ $H = 1 ] && echo 4 || echo 2 ) > $B/$P-lp.out 2>&1; log "lp $(tail -1 $B/$P-lp.out | cut -c1-300)"
 else log "lp skipped (budget or reset)"; fi
 sw c17 $EST T1R3S0 17; sw c29 $EST T1R3S0 29
-# seg 3: fnA (Flash-Next stage A) on H200 -- chain tail
-if [ -z "${FNA_CMD:-}" ]; then log "fnA: FNA_CMD not set (fn-align not merged) -> skipped"; exit 0; fi
-if [ $H = 0 ]; then down $CLL L; H=1; CL=$CLH; CP=$P-h; N=0; else $D/s1reset.sh $CL $B/$P-fna.reset.txt || { log "reset NOT CLEAN before fnA -> stop"; exit 3; }; fi
-s=$(spent); python3 -c "import sys;sys.exit(0 if $s+${FNA_EST_USD:-70}<=$CAP else 1)" || { log "budget guard: fnA est \$${FNA_EST_USD:-70} + \$$s > \$$CAP -> skip"; exit 4; }
-t0=$(date +%s)
-# FNA_CMD contract: runs one fnA launch on cluster prefix $CLUSTER_PREFIX (H200), writes evidence to $RUN_DIR (pulled/ like s1run), exits.
-env CLUSTER_PREFIX=$CP RUN_ROOT=$B RUN_DIR=$B/$P-fna CLUSTER=$CL bash -c "$FNA_CMD" > $B/$P-fna.out 2>&1; log "fnA rc=$?"
-[ $UP_H = 0 ] && UP_H=$t0
-[ -d $B/$P-fna/pulled ] && post $B/$P-fna
+# seg 3 (chain tail): Flash-Next stage A on its OWN H200 cluster <P>-f (the model store FS is attached only at provision time, so the
+# sweep cluster -- launched without --model-store -- cannot be reused). The sweep cluster is downed first.
+#   fnboot: fnrun fn8s launch (--keep) to provision the FS-attached node; with no torch_dist yet the learner refuses the ref-load
+#           (fail-fast, expected) -- if torch_dist already exists it simply IS the fnA run.
+#   fnprep: s11fnprep.sh (populate 4layer snapshot + convert torch_dist; df gates; never deletes) -> fnprep.json
+#   fna   : fnrun fn8s again (warm), STEPS=6; judge_qwen3_8_next_lora_log.py on run.log
+[ "${FN_ENABLE:-1}" = 1 ] || { log "fn segments disabled (FN_ENABLE=0)"; exit 0; }
+if [ $H = 1 ]; then down $CLH H; else down $CLL L; fi
+CLF=$P-f-l0-eu-north1; CL=$CLF; CP=$P-f; H=1; N=0; RATE_F=$RATE_H
+s=$(spent); python3 -c "import sys;sys.exit(0 if $s+${FNA_EST_USD:-50}<=$CAP else 1)" || { log "budget guard: fn est \$${FNA_EST_USD:-50} + \$$s > \$$CAP -> fn not executed"; exit 4; }
+(cd $REPO && /tmp/yeto-venv/bin/python $D/fp_fn.py $REPO fn8s --seed 17 --total-steps 6 > $B/$P-fp_fn8s.json 2>$B/$P-fp_fn8s.err); log "fp_fn fn8s steps6: $(tail -1 $B/$P-fp_fn8s.json | python3 -c 'import json,sys;print(json.load(sys.stdin).get("fp"))' 2>/dev/null)"
+fnrun() {  # fnrun <name> <hard>
+  local t0; t0=$(date +%s)
+  env STEPS=6 CLUSTER_PREFIX=$CP RUN_ROOT=$B $D/s1run.sh fn8s $P-$1 $2 $(( $2 + 600 )) > $B/$P-$1.out 2>&1
+  kill $(cat $B/$P-$1/watchdog.pid 2>/dev/null) 2>/dev/null
+  [ $UP_H = 0 ] && [ ! -f $B/$P-$1/provision_failed.txt ] && UP_H=$t0
+  post $B/$P-$1
+  grep -iE "lora|rank|expected_lora_keys|trainable" $B/$P-$1/pulled/run.log > $B/$P-$1/lora.txt 2>/dev/null
+  grep -iE "ref.load|torch_dist|load.*checkpoint|loaded" $B/$P-$1/pulled/run.log > $B/$P-$1/torchdist-load.txt 2>/dev/null
+  (cd $REPO && timeout 300 python3 scripts/judge_qwen3_8_next_lora_log.py $B/$P-$1/pulled/run.log > $B/$P-$1/judge-fn.out 2>&1; echo "judge rc=$?" >> $B/$P-$1/judge-fn.out)
+  timeout 120 ssh -o StrictHostKeyChecking=no $CL 'cat ~/yeto-rl/terminal.json 2>/dev/null; echo; df -h /mnt/yeto-models | tail -1; nvidia-smi --query-gpu=index,memory.used --format=csv' > $B/$P-$1/terminal.txt 2>&1
+  log "$1 $(cat $B/$P-$1/rc.txt 2>/dev/null) rounds=$(grep -c rl_round_trained $B/$P-$1/pulled/rl-island-0.jsonl 2>/dev/null) spent~\$$(spent)"
+}
+fnrun fnboot ${HARD_FNBOOT:-3000}
+[ -f $B/$P-fnboot/provision_failed.txt ] && { log "fn H200 provision failed -> fn not executed (capacity)"; exit 8; }
+if [ "$(grep -c rl_round_trained $B/$P-fnboot/pulled/rl-island-0.jsonl 2>/dev/null)" -ge 6 ]; then log "fnboot already trained 6 rounds (torch_dist existed) -> it is the fnA run"; exit 0; fi
+timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP ' || { log "fn cluster not UP after fnboot -> stop"; exit 2; }
+s=$(spent); python3 -c "import sys;sys.exit(0 if $s+30<=$CAP else 1)" || { log "budget guard before fnprep (\$$s) -> fnprep/fna not executed"; exit 4; }
+$D/s1reset.sh $CL $B/$P-fnprep.reset.txt || { log "reset NOT CLEAN before fnprep -> stop"; exit 3; }
+mkdir -p $B/$P-fnprep; git -C $REPO archive HEAD | (rm -rf $B/$P-fnprep/yeto && mkdir -p $B/$P-fnprep/yeto && tar x -C $B/$P-fnprep/yeto)
+$D/s11fnprep.sh $CL $B/$P-fnprep $B/$P-fnprep/yeto > $B/$P-fnprep.out 2>&1; log "fnprep $(tail -1 $B/$P-fnprep.out) $(cat $B/$P-fnprep/fnprep.json 2>/dev/null | tr -d '\n ' | cut -c1-300)"
+grep -q FNPREP_OK $B/$P-fnprep.out || { log "fnprep failed -> fnA not executed"; exit 6; }
+s=$(spent); python3 -c "import sys;sys.exit(0 if $s+25<=$CAP else 1)" || { log "budget guard before fna (\$$s) -> fnA not executed"; exit 4; }
+$D/s1reset.sh $CL $B/$P-fna.reset.txt || { log "reset NOT CLEAN before fna -> stop"; exit 3; }
+fnrun fna ${HARD_FNA:-3600}
