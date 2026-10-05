@@ -158,7 +158,8 @@ def _uuid(n, g):
     return f"GPU-{n:08x}-0000-0000-0000-{g:012x}"
 
 
-def _fake_m5_run(tmp, *, gen_ref=None, ranks=range(8), allreduce_ok=True):
+def _fake_m5_run(tmp, *, gen_ref=None, ranks=range(8), allreduce_ok=True, phys=4, use=None, gpu_name="NVIDIA L40S",
+                 rank_gpu=None, stray_apps=()):
     cl = "m5-l0-eu-north1"
     p = tmp / "pulled"
     p.mkdir(parents=True)
@@ -166,7 +167,12 @@ def _fake_m5_run(tmp, *, gen_ref=None, ranks=range(8), allreduce_ok=True):
     (tmp / "rc.txt").write_text("rc=0")
     (tmp / "args.txt").write_text("--rollout-num-gpus-per-engine 8 --rl-allow-cross-node-engine-tp")
     for n, name in enumerate((cl, cl + "-worker1")):
-        (p / f"gpu-{name}.txt").write_text(f"h{n}\n" + "".join(f"{g}, {_uuid(n, g)}, NVIDIA L40S, 570\n" for g in range(4)))
+        (p / f"gpu-{name}.txt").write_text(f"h{n}\n" + "".join(f"{g}, {_uuid(n, g)}, {gpu_name}, 570\n" for g in range(phys)))
+        apps = "2026-10-05T10:00:00Z\n" + "".join(f"{_uuid(n, g)}, {200 + g}, sglang::scheduler, 9000 MiB\n" for g in range(4))
+        apps += "".join(f"{_uuid(sn, sg)}, 300, {what}, 500 MiB\n" for sn, sg, what in stray_apps if sn == n)
+        (p / f"apps-{name}.txt").write_text(apps + "   201 sglang::scheduler_TP1\n")
+    if use is not None:
+        (tmp / "gpus_per_node.txt").write_text(f"{phys} {use}\n")
     events = []
     for rid in range(2):
         events += [{"event": "rl_publication", "policy_version": rid, "rl/policy_token": f"v{rid}",
@@ -179,7 +185,7 @@ def _fake_m5_run(tmp, *, gen_ref=None, ranks=range(8), allreduce_ok=True):
     (p / "rl-island-0.jsonl").write_text("\n".join(json.dumps(e) for e in events))
     rows = []
     for r in ranks:
-        n, g = divmod(r, 4)
+        n, g = (rank_gpu or {}).get(r, divmod(r, 4))
         rows.append({"node": n, "tp_rank": r, "pid": 100 + r, "gpu_uuid": _uuid(n, g), "title": f"sglang::scheduler_TP{r}"})
     (p / "m5ranks.jsonl").write_text("\n".join(json.dumps(x) for x in rows))
     nccl = {"ok": allreduce_ok, "world": 8, "nodes": 2, "results": [{"bytes": 1 << 20, "lat_us": 900.0, "busbw_gbps": 2.0}]}

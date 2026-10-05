@@ -60,13 +60,20 @@ case $C in
        GPU=${M4X1_GPU:-nebius:2x1xl40s@eu-north1}; PAR="--tensor-parallel 1 --pipeline-parallel 1"; KEEP=""; NODES=2; STEPS=8
        EX="$ELASTIC --rl-checkpoint-store $STORE"
        if [ $C = m4b1 ]; then EX="$EX --rl-elastic-accept-rebind"; [ -n "${M4B_ITYPE:-}" ] && ITYPE=$M4B_ITYPE; fi;;
-  m5)  GPU=nebius:2x4xl40s@eu-north1; STEPS=${M5_STEPS:-2}; PAR="--tensor-parallel 1 --pipeline-parallel 1"; KEEP="--keep"; NODES=2
-       EX="--rollout-num-gpus-per-engine 8 --rl-allow-cross-node-engine-tp --rl-observe-timeline";;
+  m5)  GPU=${M5_GPU:-nebius:2x4xl40s@eu-north1}; STEPS=${M5_STEPS:-2}; PAR="--tensor-parallel 1 --pipeline-parallel 1"; KEEP="--keep"; NODES=2
+       # M5_USE_GPUS=M: physical machines bigger than the test (e.g. M5_GPU=nebius:2x8xh100@eu-north1 M5_USE_GPUS=4): the island gets
+       # GPUs 0..M-1 per node; network tier none (no IB GPU cluster / fixed fabric: NCCL runs over TCP like the L40S runs)
+       case $GPU in *:2x*x*) ;; *) echo "abort: m5 needs a 2-node --gpu (got $GPU)"; exit 68;; esac
+       EX="--rollout-num-gpus-per-engine 8 --rl-allow-cross-node-engine-tp --rl-observe-timeline --rl-island-network-tier ${M5_NET_TIER:-none}${M5_USE_GPUS:+ --rl-island-use-gpus-per-node $M5_USE_GPUS}"
+       PHYS=$(echo "$GPU" | sed -E 's/^[a-z]+:2x([0-9]+)x.*/\1/'); USE=${M5_USE_GPUS:-$PHYS}
+       [ $(( 2 * USE )) = 8 ] || { echo "abort: m5 needs 4 island GPUs per node (TP8 = 2 x 4), got physical $PHYS use $USE"; exit 68; }
+       # watchdog must outlive the launcher AND the post step (it ssh-es into the kept cluster for up to M5_POST_HARD)
+       WD=${4:-$(( HARD + ${M5_POST_HARD:-1500} + 300 ))};;
   *) echo "unknown case $C"; exit 64;;
 esac
 ARGS="launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu $GPU --cluster-prefix $CP $KEEP --no-island-relaunch --modal-retries 0 --rl-image $IMAGE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function ${REWARD:-gsm8k_reward:score} $LORA $PAR --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --total-steps $STEPS $EX${ITYPE:+ --learner-instance-type $ITYPE}"
 CL=$CP-l0-eu-north1
-if [ "${DRY:-0}" = 1 ]; then echo "cluster=$CL nodes=$NODES case=$C"; echo "$ARGS"; [ -n "$TRIG" ] && { echo "triggers=$TRIG"; /usr/bin/python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; }; exit 0; fi
+if [ "${DRY:-0}" = 1 ]; then echo "cluster=$CL nodes=$NODES case=$C hard=$HARD wd=$WD${USE:+ gpus_per_node physical=$PHYS use=$USE}"; echo "$ARGS"; [ -n "$TRIG" ] && { echo "triggers=$TRIG"; /usr/bin/python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; }; exit 0; fi
 mkdir -p $R/home $R/runs $R/pulled $R/yeto
 for d in .sky .nebius .ssh; do ln -sfn /home/michael/$d $R/home/$d; done
 # m4: the S3 checkpoint store is mounted on Nebius nodes with the static AWS keys sky uploads (~/.aws/credentials, SHARED_CREDENTIALS_FILE identity)
@@ -82,7 +89,7 @@ if [ $C = m3 ]; then
   printf '{"runtime_fingerprint":"%s","execution_modes":["partitioned-serial"],"certified_edges":[{"source":"T2R1S1","target":"T2R2S0","kind":"rollout-only"},{"source":"T2R2S0","target":"T2R1S1","kind":"rollout-only"}]}' "$fp" > $R/attestation-m3.json
   ARGS="$ARGS --rl-elastic-attestation $R/attestation-m3.json"
 fi
-git -C $REPO rev-parse ${SHA:-HEAD} > $R/yeto_sha.txt; echo "$ARGS" > $R/args.txt; echo $CL > $R/cluster.txt; echo $NODES > $R/nodes.txt; echo $C > $R/case.txt; [ -n "$TRIG" ] && echo "$TRIG" > $R/triggers.json
+git -C $REPO rev-parse ${SHA:-HEAD} > $R/yeto_sha.txt; echo "$ARGS" > $R/args.txt; echo $CL > $R/cluster.txt; echo $NODES > $R/nodes.txt; echo $C > $R/case.txt; [ -n "${USE:-}" ] && printf '%s %s\n' "$PHYS" "$USE" > $R/gpus_per_node.txt; [ -n "$TRIG" ] && echo "$TRIG" > $R/triggers.json
 # per-run watchdog: sky down by THIS cluster name only
 setsid nohup bash -c "sleep $WD; HOME=/home/michael $SKY down -y $CL > $R/watchdog.out 2>&1; touch $R/WATCHDOG_FIRED" >/dev/null 2>&1 &
 echo $! > $R/watchdog.pid
