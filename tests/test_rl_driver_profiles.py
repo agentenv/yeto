@@ -282,3 +282,36 @@ def test_event_echo_is_off_by_default_and_prints_when_enabled(tmp_path, monkeypa
     assert line.startswith("YETO_RL_EVENT ") and json.loads(line.split(" ", 1)[1])["event"] == "y"
     # exactly the tape line
     assert line.split(" ", 1)[1] == (tmp_path / "t.jsonl").read_text().splitlines()[-1]
+
+
+def test_observed_events_carry_labels_and_feed_load_windows(tmp_path):
+    """1.7/A5: spans, readiness and round labels share profile/epoch/transport labels;
+    load_windows consumes them; observe=False yields no windows (old path)."""
+    from yeto.rl.engine.timeline import load_windows, summarize, Span
+
+    driver, _ = _driver(_engine(), tmp_path, profile=_profile("colocated-serial"), observe=True)
+    driver.run()
+    events = _events(tmp_path / "events.jsonl")
+    spans = [e for e in events if e["event"] == "rl_timeline_span"]
+    labels = [e for e in events if e["event"] == "rl_round_labels"]
+    ready = [e for e in events if e["event"] == "rl_readiness"]
+    ph = driver.profile_hash
+    assert spans and labels
+    driver._snapshot(0)  # readiness is emitted when the controller reads a snapshot
+    ready = [e for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_readiness"]
+    assert ready
+    assert all(e["profile_hash"] == ph and "weight_transport" in e for e in spans + ready)
+    assert all(e["profile_hash"] == ph and "rl/masked_fraction" in e and "t" in e for e in labels)
+    assert all(e["policy_age"] >= 0 and "t" in e for e in ready)
+    # serial: union accounting has no overlap to double bill
+    s = summarize(Span(e["task"], e["role"], e["kind"], e["start"], e["end"],
+                       e["profile_hash"], e["epoch"]) for e in spans)
+    assert s["overlap_s"] == pytest.approx(0.0, abs=1e-9)
+    ws = load_windows(events, 3600.0)
+    assert ws and all(w.profile_hash == ph for w in ws)
+    assert sum(w.consume_rate for w in ws) * 3600.0 == sum(e["rl/groups"] for e in labels)
+
+    driver2, _ = _driver(_engine(), tmp_path, name="off.jsonl",
+                         profile=_profile("colocated-serial"), observe=False)
+    driver2.run()
+    assert load_windows(_events(tmp_path / "off.jsonl"), 1.0) == []

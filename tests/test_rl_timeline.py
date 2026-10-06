@@ -59,3 +59,52 @@ def test_transition_cost_distribution_and_predeclared_bottleneck_rule():
     assert select_bottleneck({})["status"] == "insufficient"
     with pytest.raises(ValueError, match="unknown"):
         transition_cost_distribution([("a", "b", {"magic": 1.0})])
+
+
+# -- 1.7 load_windows / LoadSummary ------------------------------------------
+from yeto.rl.engine.timeline import LoadSummary, load_windows, validate_load_sample  # noqa: E402
+
+
+def _span(task, role, kind, a, b, epoch=0):
+    return {"event": "rl_timeline_span", "task": task, "role": role, "kind": kind,
+            "start": a, "end": b, "profile_hash": "sha256:p", "epoch": epoch,
+            "weight_transport": "nccl"}
+
+
+def _sample(t, q, a, tw, cap=8, epoch=0):
+    return {"event": "rl_load_sample", "t": t, "queued_requests": q, "running_requests": a,
+            "tool_wait_trajectories": tw, "engine_capacity": cap, "ready_groups": None,
+            "profile_hash": "sha256:p", "epoch": epoch, "weight_transport": "nccl"}
+
+
+def test_load_windows_separates_tool_wait_from_gpu_saturation():
+    evs = [_span("generate", "rollout", "compute", 0, 10),
+           _span("train", "trainer", "compute", 5, 10),   # overlapped: not double billed
+           _span("publish", "trainer+rollout", "transfer", 10, 12),
+           *[_sample(t, 20, 8, 0) for t in (1, 2, 3)],     # saturated
+           *[_sample(t, 0, 0, 4) for t in (11, 12, 13)],   # tool wait
+           {"event": "rl_readiness", "t": 12, "ready_groups": 2, "policy_age": 1,
+            "profile_hash": "sha256:p", "epoch": 0},
+           {"event": "rl_round_labels", "t": 15, "rl/groups": 4, "profile_hash": "sha256:p",
+            "config_epoch": 0, "rl/masked_fraction": 0.1}]
+    w0, w1 = load_windows(evs, 10.0)
+    assert isinstance(w0, LoadSummary) and (w0.window_start, w0.window_end) == (0, 10)
+    assert w0.gpu_busy_fraction == 1.0 and w0.tool_wait_fraction == 0.0
+    assert w0.queued == 20 and w0.active == 8 and w0.weight_transport == "nccl"
+    assert w1.gpu_busy_fraction == 0.0 and w1.tool_wait_fraction == 1.0
+    assert w1.publish_block_fraction == pytest.approx(0.2)
+    assert w1.policy_age == 1 and w1.ready_groups == 2 and w1.consume_rate == pytest.approx(0.4)
+    assert w0.policy_age is None and w0.ready_groups is None
+
+
+def test_load_windows_split_by_epoch_and_empty_when_unobserved():
+    evs = [_span("train", "trainer", "compute", 0, 4, 0), _span("train", "trainer", "compute", 0, 2, 1)]
+    ws = load_windows(evs, 4.0)
+    assert [(w.epoch, w.gpu_busy_fraction) for w in ws] == [(0, 1.0), (1, 0.5)]
+    assert load_windows([{"event": "rl_phase", "phase": "train"}], 1.0) == []
+    with pytest.raises(ValueError):
+        load_windows([], 0)
+
+
+def test_resource_peaks_in_load_schema():
+    assert validate_load_sample({"peak_gpu_mem_bytes": 10, "peak_cpu_rss_bytes": None}) == []

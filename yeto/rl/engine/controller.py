@@ -82,6 +82,7 @@ VERIFYING = "VERIFYING"
 COMMITTED = "COMMITTED"
 RESUMING = "RESUMING"
 SUCCEEDED = "SUCCEEDED"
+RECOMMEND_MODES = ("disabled", "manual", "recommend", "auto")
 CANCELLED = "CANCELLED"
 REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
@@ -301,6 +302,9 @@ class IslandController:
         self._sleep = sleep
         self._on_watchdog = on_watchdog
         self.inbox = inbox
+        # 6.5: disabled | manual | recommend | auto.  Default DISABLED keeps the
+        # pre-D1 behaviour; the mode never gates or bypasses ``plan``/``request``.
+        self.recommend_mode = RECOMMEND_MODES[0]
         # 4.4: ``trainer_rebuilder(driver, *, epoch, cut_id) -> Mapping`` saves the
         # cut, rebuilds the trainer behind the ports and restores it (via
         # ``IslandDriver.rebuild_trainer``). Raises RebuildRefused before the
@@ -379,6 +383,8 @@ class IslandController:
                                                      "body_hash": r["body_hash"], "plan": r["plan"],
                                                      "deadline_wall": r["deadline_wall"]}
                 open_txs[r["tx_id"]] = r
+            elif kind == "recommend_mode":
+                self.recommend_mode = r["mode"]
             elif kind == "fork_op":
                 if r["status"] == "done":
                     self._fork_epoch = int(r["result_fork_epoch"])
@@ -1403,6 +1409,18 @@ class IslandController:
         tx.cancel_requested = True  # acted on at the next step boundary of the executor
         return "recovery_started" if tx.phase in DESTRUCTIVE else "cancelled"
 
+    def set_recommend_mode(self, mode: str, *, reason: str = "") -> dict[str, Any]:
+        """6.5 runtime switch.  Only flips the policy flag: an in-flight
+        transaction or recovery is never cancelled or interrupted by it."""
+        mode = getattr(mode, "value", mode)
+        if mode not in RECOMMEND_MODES:
+            raise Rejected(f"unknown recommend mode {mode!r}")
+        previous, self.recommend_mode = self.recommend_mode, mode
+        if previous != mode:
+            self._record("recommend_mode", tx_id=None, previous=previous, mode=mode, reason=reason)
+        return {"mode": mode, "previous": previous,
+                "in_flight_tx": self._tx.tx_id if self._tx is not None else None}
+
     def poll_commands(self) -> list[dict[str, Any]]:
         return self.inbox.poll(self) if self.inbox is not None else []
 
@@ -2041,7 +2059,8 @@ class CommandInbox:
 
     Verbs: ``request`` (``{"target", "expected_config_epoch", "deadline_s"}``),
     ``rebuild`` (4.4 same-shape trainer rebuild: ``{"kind", "expected_config_epoch",
-    "deadline_s"}``) and ``cancel`` (``{}``). The learner polls at safe points; answers are written
+    "deadline_s"}``), ``cancel`` (``{}``) and ``mode`` (6.5: ``{"mode"}``, one of
+    disabled/manual/recommend/auto; never interrupts a transaction). The learner polls at safe points; answers are written
     as ``<request_id>.status.json`` (atomic rename). Files are consumed.
     """
 
@@ -2050,7 +2069,7 @@ class CommandInbox:
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def submit(self, request_id: str, verb: str, body: Mapping[str, Any]) -> Path:
-        if verb not in ("request", "cancel", "rebuild") or "/" in request_id or not request_id:
+        if verb not in ("request", "cancel", "rebuild", "mode") or "/" in request_id or not request_id:
             raise ValueError("bad command")
         path = self.dir / f"{request_id}.{verb}.json"
         tmp = path.with_suffix(".tmp")
@@ -2061,7 +2080,7 @@ class CommandInbox:
     def poll(self, controller: IslandController) -> list[dict[str, Any]]:
         answers = []
         for path in (sorted(self.dir.glob("*.request.json")) + sorted(self.dir.glob("*.rebuild.json"))
-                     + sorted(self.dir.glob("*.cancel.json"))):
+                     + sorted(self.dir.glob("*.cancel.json")) + sorted(self.dir.glob("*.mode.json"))):
             request_id, verb = path.name[: -len(".json")].rsplit(".", 1)
             try:
                 body = json.loads(path.read_text(encoding="utf-8"))
@@ -2072,6 +2091,10 @@ class CommandInbox:
                 elif verb == "rebuild":
                     answer = controller.request_trainer_rebuild(
                         request_id, int(body["expected_config_epoch"]), float(body["deadline_s"]))
+                elif verb == "mode":
+                    answer = {"request_id": request_id,
+                              **controller.set_recommend_mode(str(body["mode"]),
+                                                              reason=f"command {request_id}")}
                 else:
                     answer = {"request_id": request_id, "cancel": controller.cancel(request_id)}
             except (Rejected, KeyError, ValueError, TypeError) as exc:
@@ -2106,6 +2129,9 @@ def main(argv: list[str] | None = None) -> int:
     reb.add_argument("--deadline-s", type=float, required=True)
     can = sub.add_parser("cancel")
     can.add_argument("request_id")
+    md = sub.add_parser("mode")
+    md.add_argument("request_id")
+    md.add_argument("mode", choices=RECOMMEND_MODES)
     st = sub.add_parser("status")
     st.add_argument("request_id", nargs="?")
     args = parser.parse_args(argv)
@@ -2119,6 +2145,8 @@ def main(argv: list[str] | None = None) -> int:
                       rebuild_request_body(args.expected_epoch, args.deadline_s))
     elif args.verb == "cancel":
         inbox.submit(args.request_id, "cancel", {})
+    elif args.verb == "mode":
+        inbox.submit(args.request_id, "mode", {"mode": args.mode})
     else:
         records = read_journal(state / "reconfig")
         epochs = read_epochs(state / "reconfig")
