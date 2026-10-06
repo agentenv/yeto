@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 _SLOT_RE = re.compile(r"^n(?P<node>\d+):(?P<gpu>\d+)$")
@@ -198,6 +198,52 @@ def rectangular_trainer(slots: Sequence[tuple[int, int]]) -> tuple[int, int]:
     return len(counts), sizes.pop()
 
 
+def trainer_layout(slots: Mapping[str, Any], topology: Topology,
+                   ) -> tuple[int, int, dict[str, tuple[int, ...]]]:
+    """Q2 (2026-10-04 ruling: rollout and trainer may share a node on different
+    GPUs): ``(actor_num_nodes, actor_num_gpus_per_node, bundle_map)`` of a
+    normalized placement (``normalize_placement`` output). Miles' trainer rank
+    ``r`` lives on logical node ``r // per_node`` as local rank ``r % per_node``
+    (train_actor local_rank), so the trainer slots, in placement order, must be
+    a rectangle of consecutive per-node runs: every node it uses holds the same
+    number of trainer GPUs, each node's run is listed together and occupies a
+    contiguous ascending range of local GPUs. Anything else is refused
+    (TopologyError) with the offending node named. The bundle map lists each
+    role's logical bundles in placement order (rollout engine by engine)."""
+    trainer = [tuple(s) for s in slots.get("trainer", ())]
+    nodes, per_node = rectangular_trainer(trainer)
+    for start in range(0, len(trainer), per_node):
+        run = trainer[start:start + per_node]
+        node_ids = {node for node, _ in run}
+        if len(node_ids) != 1:
+            raise TopologyError(
+                f"trainer ranks {start}..{start + per_node - 1} must sit on one node, got "
+                + ", ".join(f"n{n}:{g}" for n, g in run))
+        gpus = [g for _, g in run]
+        if gpus != list(range(gpus[0], gpus[0] + per_node)):
+            raise TopologyError(
+                f"trainer GPUs on n{node_ids.pop()} must be one contiguous ascending run, got "
+                + ", ".join(f"n{n}:{g}" for n, g in run))
+    seen_nodes = [node for node, _ in trainer[::per_node]]
+    if len(set(seen_nodes)) != len(seen_nodes):
+        raise TopologyError("trainer runs on one node must be listed together: "
+                            + ", ".join(f"n{n}:{g}" for n, g in trainer))
+    bundle_map = {
+        "trainer": tuple(topology.bundle_of(n, g) for n, g in trainer),
+        "rollout": tuple(topology.bundle_of(n, g) for engine in slots.get("rollout", ())
+                         for n, g in engine),
+        "standby": tuple(topology.bundle_of(n, g) for n, g in slots.get("standby", ())),
+    }
+    return nodes, per_node, bundle_map
+
+
+def leading_bundle_map(trainer: int, rollout: int, standby: int) -> dict[str, tuple[int, ...]]:
+    """The upstream offset layout: trainer first, then rollout, then standby."""
+    return {"trainer": tuple(range(trainer)),
+            "rollout": tuple(range(trainer, trainer + rollout)),
+            "standby": tuple(range(trainer + rollout, trainer + rollout + standby))}
+
+
 def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | None = None,
                              model_parallel: int = 1, expert_parallel: int = 1,
                              gpus_per_engine: int | None = None) -> str | None:
@@ -354,3 +400,122 @@ def assert_head_block(node_blocks: Sequence[Any], head_node: Any) -> None:
     if str(blocks[0]) != str(head_node):
         raise TopologyError(f"logical node 0 is {blocks[0]!r}, not the Ray head {head_node!r} "
                             "(D3: head = node 0 = trainer)")
+
+
+# ------------------------------------------------------------ GPU UUID reconciliation (Q6)
+@dataclass(frozen=True)
+class ReconcileResult:
+    """Outcome of :func:`reconcile_gpu_pool` (rl-multinode-island Q6, ruling 2026-10-04).
+
+    ``observed`` is the runtime pool per logical node (uuid tuples, local index order)
+    and becomes the journal's binding baseline; ``rebind`` says the declared uuids were
+    replaced (``mapping`` old -> new, only with ``accept_rebind``); ``diffs`` lists every
+    slot whose uuid differs; ``error`` is why the pool is refused (None when accepted)."""
+
+    ok: bool
+    observed: tuple[tuple[str, ...], ...]
+    rebind: bool = False
+    mapping: dict[str, str] = field(default_factory=dict)
+    diffs: tuple[str, ...] = ()
+    error: str | None = None
+
+    @property
+    def flat(self) -> tuple[str, ...]:
+        """Observed uuids in logical bundle order (node-major)."""
+        return tuple(u for node in self.observed for u in node)
+
+
+def declared_gpu_pool(resources: Mapping[str, Any], topology: Topology) -> tuple[tuple[str | None, ...], ...]:
+    """cfg ``resources.gpus`` -> per-node uuid tuples (None for a slot the cfg does not
+    name, i.e. ``n{k}:{g}``/integer spellings or an empty pool). Shape follows the topology;
+    :func:`check_pool_topology` has already rejected pools of another shape."""
+    pool: list[list[str | None]] = [[None] * topology.gpus_per_node for _ in range(topology.nodes)]
+    for gpu in resources.get("gpus") or []:
+        uuid = gpu.get("uuid")
+        node, index = gpu.get("node"), gpu.get("index")
+        if not isinstance(uuid, str) or not uuid or node is None or index is None:
+            continue
+        try:
+            pool[int(node)][int(index)] = uuid
+        except (IndexError, ValueError, TypeError):
+            raise TopologyError(f"GPU {uuid!r} at n{node}:{index} outside the "
+                                f"{topology.nodes}x{topology.gpus_per_node} island") from None
+    return tuple(tuple(n) for n in pool)
+
+
+def observed_gpu_pool(probe: Sequence[Sequence[Any]], topology: Topology) -> tuple[tuple[str, ...], ...]:
+    """``nvidia-smi --query-gpu=index,uuid`` rows per logical node (``(index, uuid)`` pairs,
+    any order) -> per-node uuid tuples in local index order. Fail closed: missing node,
+    wrong card count, indices not 0..G-1, empty/duplicate uuids all raise."""
+    nodes = list(probe)
+    if len(nodes) != topology.nodes:
+        raise TopologyError(f"GPU probe covers {len(nodes)} nodes, topology has {topology.nodes}")
+    out: list[tuple[str, ...]] = []
+    seen: set[str] = set()
+    want = list(range(topology.gpus_per_node))
+    for k, rows in enumerate(nodes):
+        rows = list(rows or ())
+        if len(rows) != topology.gpus_per_node:
+            raise TopologyError(f"node {k} exposes {len(rows)} GPUs, topology says "
+                                f"{topology.gpus_per_node}")
+        by_index: dict[int, str] = {}
+        for row in rows:
+            index, uuid = row[0], row[1]
+            uuid = str(uuid).strip()
+            if not uuid or uuid in seen:
+                raise TopologyError(f"node {k} GPU {index!r}: empty or repeated uuid {uuid!r}")
+            seen.add(uuid)
+            by_index[int(index)] = uuid
+        if sorted(by_index) != want:
+            raise TopologyError(f"node {k} GPU indices {sorted(by_index)} are not 0..{topology.gpus_per_node - 1}")
+        out.append(tuple(by_index[i] for i in want))
+    return tuple(out)
+
+
+def reconcile_gpu_pool(declared: Sequence[Sequence[str | None]] | None,
+                       observed: Sequence[Sequence[str]], *, accept_rebind: bool) -> ReconcileResult:
+    """Q6 rule (pure): the runtime pool must have the declared shape (nodes x cards per
+    node); where ``declared`` names a uuid (cfg uuid spelling, or the journal's binding
+    baseline from an earlier incarnation) it must match slot by slot. A mismatch is
+    refused unless ``accept_rebind`` (``--rl-elastic-accept-rebind``), which accepts the
+    new pool and returns the old->new ``mapping``; with no declared uuid at all the
+    observed pool simply becomes the baseline (no rebind)."""
+    obs = tuple(tuple(str(u) for u in node) for node in observed)
+    if declared is None:
+        return ReconcileResult(ok=True, observed=obs)
+    dec = tuple(tuple(node) for node in declared)
+    if len(dec) != len(obs) or any(len(d) != len(o) for d, o in zip(dec, obs)):
+        return ReconcileResult(ok=False, observed=obs, error=(
+            f"gpu pool shape {[len(o) for o in obs]} differs from the declared "
+            f"{[len(d) for d in dec]} (nodes x gpus_per_node)"))
+    diffs: list[str] = []
+    mapping: dict[str, str] = {}
+    for k, (d_node, o_node) in enumerate(zip(dec, obs)):
+        for g, (d, o) in enumerate(zip(d_node, o_node)):
+            if d is not None and d != o:
+                diffs.append(f"n{k}:{g} declared {d} observed {o}")
+                mapping[d] = o
+    if not diffs:
+        return ReconcileResult(ok=True, observed=obs)
+    if not accept_rebind:
+        return ReconcileResult(ok=False, observed=obs, diffs=tuple(diffs), error=(
+            f"{len(diffs)} GPU uuid(s) differ from the binding ({'; '.join(diffs)}); restart "
+            "with --rl-elastic-accept-rebind to bind the new GPUs"))
+    return ReconcileResult(ok=True, observed=obs, rebind=True, mapping=mapping, diffs=tuple(diffs))
+
+
+def merge_declared_pool(cfg: Sequence[Sequence[str | None]] | None,
+                        baseline: Sequence[Sequence[str]] | None) -> tuple[tuple[str | None, ...], ...] | None:
+    """What this incarnation reconciles against: the cfg's uuid where it names one, else
+    the journal baseline from the previous incarnation; None when neither exists (first
+    run of a cfg without uuids: the observed pool is journaled as the baseline)."""
+    if baseline is None:
+        if cfg is None or not any(u is not None for node in cfg for u in node):
+            return None
+        return tuple(tuple(node) for node in cfg)
+    base = tuple(tuple(node) for node in baseline)
+    if cfg is None:
+        return base
+    if len(cfg) != len(base) or any(len(c) != len(b) for c, b in zip(cfg, base)):
+        return tuple(tuple(node) for node in cfg)  # shape changed: the cfg rules, shape check fails
+    return tuple(tuple(c if c is not None else b for c, b in zip(cn, bn)) for cn, bn in zip(cfg, base))

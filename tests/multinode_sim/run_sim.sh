@@ -26,7 +26,7 @@ echo "threads with 2 ray nodes: $(threads)" | tee -a "$OUT/summary.txt"
 rc_all=0
 # The driver's Ray registration hangs intermittently on this host (A27B-PROGRESS:
 # process_failed_pending_registration); a hang is a fresh-process retry, not a case failure.
-for case in ${CASES:-pg_blocks cells_bind node_loss teardown}; do
+for case in ${CASES:-pg_blocks cells_bind node_loss gpu_pool teardown}; do
   rc=1
   for attempt in 1 2 3; do
     timeout 300 "$PY" "$REPO/tests/multinode_sim/sim.py" "$case" >"$OUT/$case.log" 2>&1

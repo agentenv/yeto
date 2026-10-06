@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -193,3 +195,145 @@ def test_failure_path_teardown_verifies_every_node(monkeypatch):
     launcher.SkySDKOps(nodes_by_cluster={"isl-l0": 2}).down("isl-l0")
     launcher.SkySDKOps().down("other")
     assert seen == {"isl-l0": 2, "other": 1}
+
+
+# ---- Q2 (2026-10-04 ruling): rollout/trainer mixed on one node, trainer shape from the cfg placement
+
+_GPU_DIR = Path(__file__).resolve().parent / "multinode_gpu"
+
+
+def _elastic_task(monkeypatch, tmp_path, gpu, resources, config, *, rollout, standby=0, extra=()):
+    import sys
+    import types
+
+    from test_rl_launcher import _Resources, _Storage, _StorageMode, _Task, _args, _prepare_rl_args
+
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
+        Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
+    flags = ["--gpu", gpu, "--rl-engine", "ports", "--rl-placement", "fixed-partition",
+             "--rl-rollout-gpus", str(rollout), "--rollout-num-gpus-per-engine", "1",
+             "--tensor-parallel", "1", "--rl-elastic", "--rl-elastic-resources", str(resources),
+             "--rl-elastic-state-dir", str(tmp_path / "state"), "--rl-elastic-initial-config", config,
+             *extra]
+    if standby:
+        flags += ["--rl-standby-gpus", str(standby)]
+    args = _args(tuple(flags))
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    spec = parse_gpu_spec(args.gpu)[0]
+    return args, spec, launcher.make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+
+
+def test_mixed_2x2_cfg_placement_drives_actor_shape_and_bundle_map(monkeypatch, tmp_path):
+    """T2(n0:0,n1:0) R1(n0:1) S1(n1:1): trainer 2 nodes x 1 GPU, rollout shares n0 with the trainer."""
+    args, spec, task = _elastic_task(monkeypatch, tmp_path, "nebius:2x2xl40s",
+                                     _GPU_DIR / "resources-2x2.json", "T2R1S1", rollout=1, standby=1)
+    assert launcher.rl_trainer_shape(args, spec) == (2, 1)
+    assert launcher.rl_actor_gpus_per_node(args, spec) == 1
+    assert launcher.rl_island_layout(args, spec) == (2, 1, {"trainer": (0, 2), "rollout": (1,), "standby": (3,)})
+    assert task.num_nodes == 2
+    assert ("--actor-num-nodes 2 --actor-num-gpus-per-node 1 --rl-island-gpus-per-node 2"
+            " --rl-island-bundle-map '{\"rollout\":[1],\"standby\":[3],\"trainer\":[0,2]}'") in task.run
+    assert " --rollout-num-gpus 1" in task.run and " --rl-standby-gpus 1" in task.run
+
+
+def test_mixed_2x2_bundle_map_round_trips_into_the_learner_placement(monkeypatch, tmp_path):
+    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+
+    args, spec, _ = _elastic_task(monkeypatch, tmp_path, "nebius:2x2xl40s",
+                                  _GPU_DIR / "resources-2x2.json", "T2R1S1", rollout=1, standby=1)
+    bundle_map = launcher.rl_island_layout(args, spec)[2]
+    request = PlacementRequest("fixed-partition", trainer_gpus=2, rollout_gpus=1, gpus_per_engine=1,
+                               standby_gpus=1, gpus_per_node=2, model_parallel=1, bundle_map=bundle_map)
+    assert request.trainer_shape() == (2, 1)
+    assert request.placement_map_arg == {"trainer": [0, 2], "rollout": [1], "standby": [3]}
+
+
+def _write_cfg(tmp_path, name, *, nodes, gpus_per_node, trainer, rollout, standby, placement):
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps({
+        "nodes": nodes, "gpus_per_node": gpus_per_node,
+        "configs": {name: {"trainer": trainer, "rollout": rollout, "standby": standby,
+                           "rollout_engine_gpus": 1, "placement": placement}},
+        "edges": []}), encoding="utf-8")
+    return path
+
+
+def test_non_rectangular_cfg_placement_rejected_before_any_cloud_work(monkeypatch, tmp_path):
+    # n0 holds two trainer GPUs, n1 one: Miles cannot express it as nodes x gpus_per_node
+    path = _write_cfg(tmp_path, "T3R1S0", nodes=2, gpus_per_node=2, trainer=3, rollout=1, standby=0,
+                      placement={"trainer": ["n0:0", "n0:1", "n1:0"], "rollout": [["n1:1"]], "standby": []})
+    with pytest.raises(ValueError, match="GPUs per node must be equal"):
+        _elastic_task(monkeypatch, tmp_path, "nebius:2x2xl40s", path, "T3R1S0", rollout=1)
+
+
+def test_cfg_placement_must_match_launch_totals(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="placement is T2 R1 S1 but the launch asks for"):
+        _elastic_task(monkeypatch, tmp_path, "nebius:2x2xl40s", _GPU_DIR / "resources-2x2.json",
+                      "T2R1S1", rollout=2)  # --rl-rollout-gpus 2 disagrees with the cfg's R1
+
+
+def test_trainer_layout_rules():
+    from yeto.rl.engine import multinode as mn
+
+    topo = mn.Topology(2, 4)
+    slots = {"trainer": [(0, 1), (0, 2), (1, 1), (1, 2)], "rollout": [[(0, 0)], [(1, 0)]],
+             "standby": [(0, 3), (1, 3)]}
+    assert mn.trainer_layout(slots, topo) == (2, 2, {"trainer": (1, 2, 5, 6), "rollout": (0, 4),
+                                                   "standby": (3, 7)})
+    assert mn.leading_bundle_map(2, 1, 1) == {"trainer": (0, 1), "rollout": (2,), "standby": (3,)}
+    # a node's run must be contiguous local GPUs (local_rank = rank % per_node)
+    with pytest.raises(mn.TopologyError, match="contiguous ascending run"):
+        mn.trainer_layout({"trainer": [(0, 0), (0, 2), (1, 0), (1, 1)]}, topo)
+    # ranks of one node must be listed together
+    with pytest.raises(mn.TopologyError, match="must sit on one node"):
+        mn.trainer_layout({"trainer": [(0, 0), (1, 0), (0, 1), (1, 1)]}, topo)
+    with pytest.raises(mn.TopologyError, match="GPUs per node must be equal"):
+        mn.trainer_layout({"trainer": [(0, 0), (0, 1), (1, 0)]}, topo)
+
+
+def test_old_2x1_cfg_and_single_node_outputs_unchanged(monkeypatch, tmp_path):
+    """Snapshot: a whole-node trainer cfg (tests/multinode_gpu/resources-2x1.json) and a
+    single-node launch emit exactly what the pre-Q2 launcher did (no bundle map)."""
+    args, spec, task = _elastic_task(monkeypatch, tmp_path, "nebius:2x1xl40s",
+                                     _GPU_DIR / "resources-2x1.json", "T1R1S0", rollout=1)
+    assert args.rl_elastic_initial_placement_slots == {"trainer": [(0, 0)], "rollout": [[(1, 0)]], "standby": []}
+    assert launcher.rl_island_layout(args, spec) == (1, 1, {"trainer": (0,), "rollout": (1,), "standby": ()})
+    assert launcher.rl_island_bundle_map_flag(args, spec) == ""
+    assert "--actor-num-nodes 1 --actor-num-gpus-per-node 1 --rl-island-gpus-per-node 1 --tensor-parallel" in task.run
+    assert "--rl-island-bundle-map" not in task.run
+    # the same launch with the cfg placement ignored (= the pre-Q2 derivation) is byte-identical
+    args.rl_elastic_initial_placement_slots = None
+    legacy = launcher.make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    assert legacy.run == task.run
+
+    single = tmp_path / "single.json"
+    single.write_text(json.dumps({"configs": {"T2R2S0": {"trainer": 2, "rollout": 2}}, "edges": []}))
+    args, spec, task = _elastic_task(monkeypatch, tmp_path, "nebius:4xl40s", single, "T2R2S0", rollout=2)
+    assert args.rl_elastic_initial_placement_slots is None
+    assert launcher.rl_island_layout(args, spec) is None
+    assert "--actor-num-nodes 1 --actor-num-gpus-per-node 2 --tensor-parallel" in task.run
+    assert "--rl-island-bundle-map" not in task.run and "--rl-island-gpus-per-node" not in task.run
+
+
+def test_learner_parses_bundle_map_into_the_run_config_layout():
+    from yeto.rl import learner
+    from yeto.rl.engine.run_config import _island_bundle_map
+
+    payload = '{"rollout":[1],"standby":[3],"trainer":[0,2]}'
+    from test_rl_engine_selection import _learner_argv
+
+    parsed = learner.parse_args(_learner_argv(("--rl-island-gpus-per-node", "2",
+                                               "--rl-island-bundle-map", payload)))
+    assert parsed.rl_island_bundle_map == payload
+    assert _island_bundle_map(parsed, 1) == {"trainer": (0, 2), "rollout": (1,), "standby": (3,)}
+    assert _island_bundle_map(SimpleNamespace(rl_island_bundle_map=None), 1) is None
+    with pytest.raises(ValueError, match="needs a multi-node fixed partition"):
+        _island_bundle_map(SimpleNamespace(rl_island_bundle_map=payload, rl_island_gpus_per_node=None), 1)
+    with pytest.raises(ValueError, match="needs a multi-node fixed partition"):
+        _island_bundle_map(SimpleNamespace(rl_island_bundle_map=payload, rl_island_gpus_per_node=2), None)
+    with pytest.raises(ValueError, match="list of ints"):
+        _island_bundle_map(SimpleNamespace(rl_island_bundle_map='{"trainer":["a"]}', rl_island_gpus_per_node=2), 1)
