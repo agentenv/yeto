@@ -64,10 +64,29 @@ class LocalOnlySync:
         if num_rollout < 1:
             raise ValueError("num_rollout must be positive")
         self.num_rollout = num_rollout
+        # rl-multinode-island M4: miles_adapter.round_cut.RoundCutCheckpoint, wired when
+        # a checkpoint store is configured (resume from the newest round cut).
+        self.round_cuts: Any = None
 
     def start(self, driver: IslandDriver) -> SyncStart:
-        state = _at_version(_lora(driver.export_local()), 0)
-        return SyncStart(TrainableState.from_lora(state), 0)
+        resumed = self.round_cuts.resume(driver) if self.round_cuts is not None else None
+        rollout_id = 0 if resumed is None else int(resumed["next_rollout_id"])
+        state = _at_version(_lora(driver.export_local()), rollout_id)
+        return SyncStart(TrainableState.from_lora(state), rollout_id,
+                         finished=rollout_id >= self.num_rollout)
+
+    def at_safe_point(self, driver: IslandDriver, *, rollout_id: int) -> None:
+        """M4: keep a round cut at every safe point (a failed cut is reported, not fatal:
+        the previous pointer stays valid)."""
+        if self.round_cuts is None:
+            return
+        try:
+            info = self.round_cuts.save(driver, rollout_id=rollout_id)
+        except Exception as error:  # noqa: BLE001
+            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=False, error=repr(error)[:2000])
+            return
+        if info is not None:
+            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=True, **info)
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         return rollout_id + 1 >= self.num_rollout
