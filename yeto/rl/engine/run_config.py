@@ -400,6 +400,11 @@ class RLRunConfig:
     # fails the publish (abort -> REBUILD_OLD) instead of stalling the run.
     # None = flag not emitted (fork default: torch's process-group timeout).
     update_weight_group_timeout_s: float | None = None
+    # D1/D2 wiring (6.5, d2-wire): 5.7 per-(profile_hash, source, target) cost
+    # table read by ``elastic.ElasticHook`` (None = no costs -> recommend/auto hold),
+    # and the load-window length for ``timeline.load_windows`` (None = no hook).
+    edge_costs_path: str | None = None
+    elastic_window_s: float | None = None
 
 
 # --------------------------------------------------------------------------
@@ -871,6 +876,9 @@ def resolve_rl_run_config(
         ),
         trainer_dp_edges=bool(getattr(args, "rl_elastic", False)
                               and getattr(args, "rl_elastic_trainer_edges", False)),
+        edge_costs_path=getattr(args, "rl_edge_costs_path", None) or None,
+        elastic_window_s=(float(args.rl_elastic_window_s)
+                          if getattr(args, "rl_elastic_window_s", None) else None),
     )
 
 

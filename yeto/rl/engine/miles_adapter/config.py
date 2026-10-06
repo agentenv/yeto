@@ -438,6 +438,9 @@ LEAF_POLICY: dict[str, _Check] = {
     "trainer_dp_edges": _ok,
     "use_miles_router": _ok,
     "update_weight_group_timeout_s": _ok,
+    # d2-wire: read by the yeto-side ElasticHook only; no Miles option.
+    "edge_costs_path": _ok,
+    "elastic_window_s": _ok,
 }
 
 

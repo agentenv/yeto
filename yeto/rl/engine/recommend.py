@@ -60,6 +60,14 @@ class LoadWindow:
     consume_rate: float = 0.0
     policy_age: float = 0.0
     train_fraction: float | None = None  # needed by the overlap model only
+    # engine-scalable share: rollout-role compute only (timeline.LoadSummary fills
+    # it).  None = legacy windows whose gpu_busy_fraction already is rollout-only.
+    rollout_busy_fraction: float | None = None
+
+    @property
+    def scalable_busy(self) -> float:
+        return (self.gpu_busy_fraction if self.rollout_busy_fraction is None
+                else self.rollout_busy_fraction)
 
     @property
     def duration_s(self) -> float:
@@ -147,7 +155,9 @@ class EdgeGain:
 
 
 def _window_gain(w: LoadWindow, ratio: float, timeline: str) -> float | None:
-    busy = w.gpu_busy_fraction
+    # only rollout compute scales with the engine count; trainer compute inside
+    # gpu_busy_fraction must not be counted as resize gain
+    busy = w.scalable_busy
     new_busy = busy * ratio
     if timeline == SERIAL:
         return busy - new_busy
