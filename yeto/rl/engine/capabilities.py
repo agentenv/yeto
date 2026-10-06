@@ -193,14 +193,14 @@ class EngineCapabilities:
 
         from dataclasses import replace
 
-        from .algorithm import mechanism_names
+        from .algorithm import allowance_names
 
         names = frozenset(names)
-        unknown = sorted(names - mechanism_names())
+        unknown = sorted(names - allowance_names())
         if unknown:
             raise CapabilityMismatch(
                 f"unknown mechanism(s) {unknown} for --rl-allow-unverified-mechanism "
-                f"(known: {sorted(mechanism_names())})"
+                f"(known: {sorted(allowance_names())})"
             )
         return replace(self, unverified_mechanisms=self.unverified_mechanisms | names)
 
@@ -318,10 +318,19 @@ class EngineCapabilities:
             )
         execution = getattr(algorithm, "execution", None)
         if execution is not None and callable(required):
-            if execution.needs_critic and not self.execution.critic:
+            if (
+                execution.needs_critic
+                and not self.execution.critic
+                and "execution:critic" not in self.unverified_mechanisms
+            ):
+                # rl-algo-critic-family 2.4: the real reason, no engine hint (the
+                # legacy engine has no structured critic either: learner.py
+                # hard-codes --advantage-estimator grpo).
                 problems.append(
-                    "algorithm needs a critic, which this engine does not drive "
-                    "(critic algorithms are supported only by --rl-engine legacy)"
+                    f"algorithm needs a critic, which engine {self.engine!r} does not declare "
+                    "(execution.critic=false); a critic mechanism is declared only after its "
+                    "single-GPU G1 smoke passes -- before that a single-island run without "
+                    "outer sync may pass --rl-allow-unverified-mechanism execution:critic"
                 )
             if execution.needs_rollout_logprobs and not self.execution.rollout_logprobs:
                 problems.append("algorithm needs rollout logprobs, which this engine does not return")

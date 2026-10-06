@@ -233,15 +233,18 @@ def test_miles_accepts_each_declared_mechanism_and_rejects_dual_clip():
         _check(caps, _combine(CANDIDATES["features:dual_clip"]))
 
 
-def test_critic_rejected_pointing_to_legacy():
+def test_critic_rejected_with_the_real_reason():
+    # rl-algo-critic-family 2.4: the message names the undeclared critic and the
+    # G1 allowance, never "only legacy supports critics" (legacy has none).
     caps = fake_capabilities(advantage_estimators={"grpo", "ppo"})
     spec = AlgorithmSpec(advantage=AdvantageSpec(estimator="ppo"),
                          execution=ExecutionSpec(needs_critic=True))
-    with pytest.raises(CapabilityMismatch, match="critic.*--rl-engine legacy"):
+    with pytest.raises(CapabilityMismatch, match="critic.*execution:critic"):
         _check(caps, spec)
-    # without declaring the critic need, the rejection matrix still points to legacy
-    with pytest.raises(CapabilityMismatch, match="needs a critic.*--rl-engine legacy"):
+    # without declaring the critic need the rejection matrix refuses it, no legacy hint
+    with pytest.raises(CapabilityMismatch, match="needs a critic") as error:
         _check(caps, AlgorithmSpec(advantage=AdvantageSpec(estimator="ppo")))
+    assert "legacy" not in str(error.value)
 
 
 def test_staleness_requirement_not_met():

@@ -379,6 +379,10 @@ LEAF_POLICY: dict[str, _Check] = {
     "algorithm.lr_schedule.decay_iters": _ok,
     "algorithm.seed": _ok,
     "algorithm.rollout_seed": _ok,
+    # rl-algo-critic-family 2.4: translated with the AlgorithmSpec (critic_load_argv)
+    "algorithm.critic": _ok,
+    "algorithm.critic.critic_load": _ok,
+    "algorithm.critic.init_sha256": _ok,
     "eval": _ok,
     **{
         f"eval.{name}": _ok
@@ -588,6 +592,40 @@ def check_extra_argv(extra_argv: Sequence[str], algorithm: AlgorithmSpec | None 
         raise MilesConfigError(str(exc)) from exc
 
 
+def critic_load_argv(config: Any, algorithm: AlgorithmSpec) -> list[str]:
+    """rl-algo-critic-family D5: ``--critic-load`` of the ports main stage.
+
+    A copied critic with a warm-up (``critic.init='copy_actor_backbone'``,
+    ``warmup_steps > 0``) loads the warm-up stage product given by the run
+    config; without a warm-up Miles copies the actor checkpoint itself
+    (``critic_load`` defaults to ``--load``, arguments.py:3607-3608).
+    ``critic.init='load'`` is translated by the spec (``critic_argv``).
+    """
+
+    critic = getattr(config.algorithm, "critic", None)
+    given = critic is not None and critic.critic_load is not None
+    if not algorithm.execution.needs_critic:
+        if given:
+            raise MilesConfigError("algorithm.critic.critic_load is set but the algorithm has no critic")
+        return []
+    spec = algorithm.critic
+    if spec.init == "copy_actor_backbone" and spec.warmup_steps:
+        if not given:
+            raise MilesConfigError(
+                f"critic.warmup_steps={spec.warmup_steps}: the main stage loads the warm-up "
+                "stage product (run config algorithm.critic.critic_load); run the warm-up "
+                "stage first (rl-algo-critic-family design D5)"
+            )
+        return ["--critic-load", critic.critic_load]
+    if given:
+        raise MilesConfigError(
+            "algorithm.critic.critic_load is the warm-up product, used only with "
+            f"critic.init='copy_actor_backbone' and warmup_steps > 0 (spec: init={spec.init!r}, "
+            f"warmup_steps={spec.warmup_steps})"
+        )
+    return []
+
+
 def translate_run_config(
     config: Any,
     algorithm: AlgorithmSpec,
@@ -611,6 +649,11 @@ def translate_run_config(
         "rollout_max_response_len": config.batch.rollout_max_response_len,
         "context_parallel_size": 1,  # ports emits --context-parallel-size 1
         "multi_lora": any(t.split("=", 1)[0] == "--multi-lora" for t in extra_argv),
+        # rl-algo-critic-family 2.3: critic GPU counts / deploy-component / indep-dp
+        "extra_argv": tuple(extra_argv),
+        "actor_num_nodes": config.parallel.actor_num_nodes,
+        "actor_num_gpus_per_node": config.parallel.actor_num_gpus_per_node,
+        "elastic": bool(config.use_miles_router),  # set iff --rl-elastic (run_config)
     })
     if problems:
         raise MilesConfigError("algorithm spec rejected for this run: " + "; ".join(problems))
@@ -785,6 +828,7 @@ def translate_run_config(
     # Non-default AlgorithmSpec v2 fields (empty for every v1 spec, so the
     # default GRPO argv is byte-identical to R0).
     values.extend(algorithm_argv(algorithm))
+    values.extend(critic_load_argv(config, algorithm))
 
     evaluation = config.eval
     if evaluation is not None:

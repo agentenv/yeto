@@ -14,10 +14,10 @@
 
 ## 2. AlgorithmSpec critic 字段与翻译（CPU）
 
-- [ ] 2.1 在 `algorithm.py` 增加 advantage 组的 gamma/lambd/lambd_mode/alpha/gae_variant 与新 critic 组（含 `param_mode` 与预留的 lora 字段），仅在 needs_critic 时进入规范化（design D1、D9）。验证：新增 `tests/test_rl_critic_spec.py`：grpo golden 哈希不变、critic 字段改变哈希、非 critic 算法给 critic 字段被拒。
-- [ ] 2.2 v1 接受 ppo；`algorithm_flags.py` 把 `--gamma/--lambd/--value-clip/--num-critic-only-steps/--critic-load/--critic-lr` 移出 `_UNMAPPED`，做吸收与冲突检测。验证：翻译单测；miles-next-venv 中 upstream `parse_args` 解析生成 argv 通过。
-- [ ] 2.3 实现启动前拒绝：elastic/indep_dp、kl_coef≠0、critic GPU 数≠actor、`--deploy-component trainer`、decoupled 外层、`param_mode=lora`（design D2）。验证：参数化单测在 fake 组合根中、GPU 进程前失败。
-- [ ] 2.4 修正 `capabilities.py:321-324` 报错文案，`run_config.py` 增加 critic 字段。验证：单测断言文案不含"legacy"误导表述；`tests/test_rl_argv_snapshot.py` 不改即通过。
+- [x] 2.1 在 `algorithm.py` 增加 advantage 组的 gamma/lambd/lambd_mode/alpha/gae_variant 与新 critic 组（含 `param_mode` 与预留的 lora 字段），仅在 needs_critic 时进入规范化（design D1、D9）。验证：新增 `tests/test_rl_critic_spec.py`：grpo golden 哈希不变、critic 字段改变哈希、非 critic 算法给 critic 字段被拒。
+- [x] 2.2 v1 接受 ppo；`algorithm_flags.py` 把 `--gamma/--lambd/--value-clip/--num-critic-only-steps/--critic-load/--critic-lr` 移出 `_UNMAPPED`，做吸收与冲突检测。验证：翻译单测；miles-next-venv 中 upstream `parse_args` 解析生成 argv 通过。
+- [x] 2.3 实现启动前拒绝：elastic/indep_dp、kl_coef≠0、critic GPU 数≠actor、`--deploy-component trainer`、decoupled 外层、`param_mode=lora`（design D2）。验证：参数化单测在 fake 组合根中、GPU 进程前失败。
+- [x] 2.4 修正 `capabilities.py:321-324` 报错文案，`run_config.py` 增加 critic 字段。验证：单测断言文案不含"legacy"误导表述；`tests/test_rl_argv_snapshot.py` 不改即通过。
 
 ## 3. ports 单岛 colocated PPO
 

@@ -245,6 +245,42 @@ class AlgorithmConfig:
     # derives its horizon from ``--num-rollout`` = global rounds).  ``None``
     # (eval-only) emits no schedule flags.
     lr_schedule: "LrSchedule | None" = None
+    # rl-algo-critic-family 2.4/5.1: run-level critic state (None = no critic
+    # state given). The algorithm itself (gamma, value_clip, init ...) is the
+    # AlgorithmSpec; this carries only what one run resolves.
+    critic: "CriticRunConfig | None" = None
+
+
+@dataclass(frozen=True)
+class CriticRunConfig:
+    """Run-level critic inputs of the ports main stage (design D5).
+
+    ``critic_load``: the warm-up stage product (critic checkpoint directory)
+    the main stage loads with ``--critic-load``; ``init_sha256``: its content
+    hash (``critic_warmup.checkpoint_sha256``), recorded in receipts.
+    """
+
+    critic_load: str | None = None
+    init_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.critic_load is None) != (self.init_sha256 is None):
+            raise ValueError("critic run config needs critic_load and init_sha256 together")
+        if self.init_sha256 is not None and (
+            len(self.init_sha256) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.init_sha256)
+        ):
+            raise ValueError("critic init_sha256 must be a lowercase hex SHA256")
+
+
+def resolve_critic_run_config(args) -> "CriticRunConfig | None":
+    """``--rl-critic-load`` / ``--rl-critic-init-sha256`` (None when absent)."""
+
+    load = getattr(args, "rl_critic_load", None)
+    digest = getattr(args, "rl_critic_init_sha256", None)
+    if load is None and digest is None:
+        return None
+    return CriticRunConfig(critic_load=load, init_sha256=digest)
 
 
 LR_DECAY_STYLES = frozenset({"linear", "constant"})
@@ -883,6 +919,7 @@ def resolve_rl_run_config(
                 global_batch=global_batch,
             ),
             seed=args.seed,
+            critic=resolve_critic_run_config(args),
             rollout_seed=getattr(args, "rollout_seed", args.seed + args.learner_id),
         ),
         eval=eval_config,

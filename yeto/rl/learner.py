@@ -263,6 +263,11 @@ def parse_args(argv=None):
         metavar="NAME",
         help="single-island smoke: admit an expressible but undeclared mechanism (ports)",
     )
+    # rl-algo-critic-family D5: the critic warm-up stage product the main stage loads
+    parser.add_argument("--rl-critic-load", default=None, metavar="DIR",
+                        help="critic warm-up checkpoint (ports main stage --critic-load)")
+    parser.add_argument("--rl-critic-init-sha256", default=None, metavar="HEX",
+                        help="content SHA256 of --rl-critic-load (critic_warmup.checkpoint_sha256)")
     parser.add_argument("--miles-source-sha256", default=None)
     parser.add_argument("--megatron-ref-load", default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -585,6 +590,9 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
         "base_model_revision": getattr(args, "model_revision", None),
         "base_model": getattr(args, "model", None),
         "ref_load_override": getattr(args, "megatron_ref_load", None),
+        # rl-algo-critic-family 2.3 (critic run-level rejections)
+        "sync_preset": getattr(args, "sync_preset", "strict-avg"),
+        "elastic": bool(getattr(args, "rl_elastic", False)),
     })
     if problems:
         _append_ports_event(args, miles_args, {

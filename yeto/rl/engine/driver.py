@@ -557,6 +557,9 @@ class IslandDriver:
                 else {}
             ),
         )
+        critic_problems = self._critic_run_problems()
+        if critic_problems:
+            raise DriverError("algorithm spec rejected for this run: " + "; ".join(critic_problems))
         if not callable(getattr(self.trainer, "step_metrics", None)):
             raise DriverError(
                 "trainer group does not report grad_norm; the per-round "
@@ -1401,6 +1404,20 @@ class IslandDriver:
             )
         self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id,
                   data_cursor=dict(landed))
+
+    def _critic_run_problems(self) -> list[str]:
+        """rl-algo-critic-family 2.3: critic run-level rejections of the
+        composition root (before any engine verb)."""
+
+        execution = getattr(self.algorithm, "execution", None)
+        if execution is None or not execution.needs_critic:
+            return []
+        from yeto.rl.algos.critic import critic_run_problems
+
+        return critic_run_problems(self.algorithm, {
+            "elastic": self.elastic_hook is not None,
+            "sync_preset": getattr(self.sync, "OUTER_SYNC_KIND", None),
+        })
 
     def run(self) -> TrainableState:
         with self._telemetry_threads():

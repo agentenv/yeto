@@ -245,6 +245,8 @@ def test_leaf_policy_matches_run_config_fields():
     cfg = make_config(with_eval=True, with_moe=True)
     leaves = {path for path, _ in mc.iter_config_leaves(cfg)}
     leaves |= {"eval", "geometry.moe", "algorithm.lr_schedule"}  # the None variants
+    # rl-algo-critic-family 2.4: critic run config (None here) and its leaves
+    leaves |= {"algorithm.critic", "algorithm.critic.critic_load", "algorithm.critic.init_sha256"}
     assert leaves == set(mc.LEAF_POLICY)
 
 
