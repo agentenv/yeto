@@ -2075,50 +2075,74 @@ def run_miles(
 
         ensure_deepseek_v4_bridge()
 
-    from megatron.bridge import AutoBridge
+    from . import flash_next_provider as flash_next
 
-    model_bridge = AutoBridge.from_hf_pretrained(
-        model_path,
-        trust_remote_code=args.trust_remote_code,
-    )
-    provider = model_bridge.to_megatron_provider(load_weights=False)
-    provider.finalize()
-    attention_specs = () if dense_full else derive_peft_lora_specs(
-        model_path,
-        None,
-        rank=args.lora_r,
-        targets=args.lora_targets,
-        trust_remote_code=args.trust_remote_code,
-    )
-    specs = tuple(attention_specs)
-    if expert_full:
-        from transformers import AutoConfig
+    if flash_next.is_flash_next(args, model_path):
+        # try22: megatron.bridge AutoBridge cannot parse qwen4_exp (transformers
+        # 5.12.1 has no such model type).  Miles registers the HF alias and
+        # trains through its own plugin, so build a read-only provider view
+        # from the aliased AutoConfig instead (FN-IMAGE-PLAN option (c)).
+        if rl_engine != "ports":
+            raise ValueError("Qwen3.8-Flash-Next runs only on the ports engine")
+        if dense_full or expert_full or clone_only_lora:
+            raise ValueError("the Qwen3.8-Flash-Next recipe is native-LoRA only")
+        if yeto_policy_sync:
+            raise ValueError(
+                "Qwen3.8-Flash-Next needs --rl-single-island-no-sync: the Yeto "
+                "policy-sync LoRA layout contract is not derivable for qwen4_exp"
+            )
+        model_bridge = None
+        provider = flash_next.flash_next_provider(
+            args, model_path, trust_remote_code=args.trust_remote_code
+        )
+        attention_specs = specs = ()
+        canonical_targets = flash_next.target_modules()
+        miles_targets = []
+    else:
+        from megatron.bridge import AutoBridge
 
-        config = AutoConfig.from_pretrained(
+        model_bridge = AutoBridge.from_hf_pretrained(
             model_path,
             trust_remote_code=args.trust_remote_code,
         )
-        specs = tuple(
-            sorted(
-                specs
-                + expert_full_specs(
-                    config,
-                    expert_count=args.expert_full_count,
-                    expected_selection_sha256=args.expert_selection_sha256,
-                    expected_selection_contract_sha256=(
-                        args.expert_selection_contract_sha256
-                    ),
+        provider = model_bridge.to_megatron_provider(load_weights=False)
+        provider.finalize()
+        attention_specs = () if dense_full else derive_peft_lora_specs(
+            model_path,
+            None,
+            rank=args.lora_r,
+            targets=args.lora_targets,
+            trust_remote_code=args.trust_remote_code,
+        )
+        specs = tuple(attention_specs)
+        if expert_full:
+            from transformers import AutoConfig
+
+            config = AutoConfig.from_pretrained(
+                model_path,
+                trust_remote_code=args.trust_remote_code,
+            )
+            specs = tuple(
+                sorted(
+                    specs
+                    + expert_full_specs(
+                        config,
+                        expert_count=args.expert_full_count,
+                        expected_selection_sha256=args.expert_selection_sha256,
+                        expected_selection_contract_sha256=(
+                            args.expert_selection_contract_sha256
+                        ),
+                    )
                 )
             )
+        canonical_targets = [] if dense_full else adapter_targets(attention_specs)
+        miles_targets = [] if dense_full else megatron_adapter_targets(
+            attention_specs,
+            model_bridge,
+            standard_grouped_experts=clone_only_lora,
+            pipeline_parallel=getattr(args, "pipeline_parallel", 1),
+            attention_output_gate=bool(getattr(provider, "attention_output_gate", False)),
         )
-    canonical_targets = [] if dense_full else adapter_targets(attention_specs)
-    miles_targets = [] if dense_full else megatron_adapter_targets(
-        attention_specs,
-        model_bridge,
-        standard_grouped_experts=clone_only_lora,
-        pipeline_parallel=getattr(args, "pipeline_parallel", 1),
-        attention_output_gate=bool(getattr(provider, "attention_output_gate", False)),
-    )
     ports_launch = ports_algorithm = None
     if rl_engine == "ports":
         # Same engine-agnostic RLRunConfig as legacy; only the translation
