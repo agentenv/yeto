@@ -342,6 +342,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic: enable trainer DP-change / role-transfer edges (4.7): "
                     "drops --balance-data (refused by the DP certification) and wires the "
                     "trainer ops and pool GPU ids; off by default")
+    rl.add_argument("--rl-elastic-accept-rebind", action="store_true",
+                    help="--rl-elastic, multi-node: accept a GPU uuid pool that differs from the "
+                    "cfg / journal binding (machine replaced) and rebind; off by default the "
+                    "learner refuses to start on changed GPUs (Q6)")
     rl.add_argument("--rl-elastic-declare-cells", action="store_true",
                     help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
                     "rollout engine cells (placement map rollout_cells: started on the rollout "

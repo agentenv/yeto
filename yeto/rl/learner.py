@@ -173,11 +173,17 @@ def parse_args(argv=None):
     # rl-multinode-island: GPUs per island node when the island spans nodes (the
     # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
     parser.add_argument("--rl-island-gpus-per-node", type=int, default=None)
+    # rl-multinode-island Q2 (mixed rollout/trainer nodes): the role -> logical
+    # bundle map derived by the launcher from the elastic cfg placement; None =
+    # the leading-bundle layout (trainer first, then rollout, then standby).
+    parser.add_argument("--rl-island-bundle-map", default=None, metavar="JSON")
     # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
     parser.add_argument("--rl-elastic-declare-cells", action="store_true")
     # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,
     # wires MilesTrainerOps and the pool GPU ids)
     parser.add_argument("--rl-elastic-trainer-edges", action="store_true")
+    # rl-multinode-island Q6: accept a changed GPU uuid pool (rebind) at startup
+    parser.add_argument("--rl-elastic-accept-rebind", action="store_true")
     # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
@@ -331,6 +337,8 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-tool-wait-board")
     if getattr(args, "rl_elastic_trainer_edges", False):
         given.append("--rl-elastic-trainer-edges")
+    if getattr(args, "rl_elastic_accept_rebind", False):
+        given.append("--rl-elastic-accept-rebind")
     if getattr(args, "rl_observe_timeline", False) and not ports:
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
@@ -384,6 +392,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_elastic["tool_wait_board"] = True
     if getattr(args, "rl_elastic_trainer_edges", False):
         miles_args.yeto_rl_elastic["trainer_edges"] = True
+    if getattr(args, "rl_elastic_accept_rebind", False):
+        miles_args.yeto_rl_elastic["accept_rebind"] = True
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
             miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))

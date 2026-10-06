@@ -318,3 +318,41 @@ def test_pin_placement_group_to_head_patches_fork_and_checks(monkeypatch):
     placement.update({0: "W", 1: "H"})
     with pytest.raises(Exception, match="not the Ray head"):
         mod._create_placement_group(2)
+
+
+# ---- Q2 (2026-10-04 ruling): mixed rollout/trainer nodes via an explicit bundle map
+
+def test_mixed_2x2_bundle_map_legal_and_shape():
+    bm = {"trainer": (0, 2), "rollout": (1,), "standby": (3,)}
+    r = PlacementRequest("fixed-partition", trainer_gpus=2, rollout_gpus=1, gpus_per_engine=1,
+                         standby_gpus=1, gpus_per_node=2, model_parallel=1, bundle_map=bm)
+    assert r.trainer_shape() == (2, 1)
+    assert r.role_bundles() == bm
+
+
+def test_mixed_non_rectangular_bundle_map_rejected():
+    bm = {"trainer": (0, 1, 2), "rollout": (3,), "standby": ()}
+    with pytest.raises(ValueError, match="GPUs per node must be equal"):
+        PlacementRequest("fixed-partition", trainer_gpus=3, rollout_gpus=1, gpus_per_engine=1,
+                         gpus_per_node=2, model_parallel=1, bundle_map=bm)
+
+
+def test_placement_request_shape_must_match_actor_args():
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter import config as mc
+
+    def _cfg(nodes, per_node, bundle_map=None):
+        return SimpleNamespace(parallel=SimpleNamespace(
+            actor_num_nodes=nodes, actor_num_gpus_per_node=per_node, tensor_parallel=1,
+            pipeline_parallel=1, expert_parallel=1, rollout_num_gpus_per_engine=1,
+            dedicated_rollout_gpus=1, standby_gpus=1, rollout_cell_names=(), island_gpus_per_node=2,
+            bundle_map=bundle_map, colocated=False))
+
+    bm = {"trainer": (0, 2), "rollout": (1,), "standby": (3,)}
+    assert mc.placement_request(_cfg(2, 1, bm)).trainer_shape() == (2, 1)
+    with pytest.raises(mc.MilesConfigError, match=r"trainer shape \(2, 1\) .* disagrees .* \(1, 2\)"):
+        mc.placement_request(_cfg(1, 2, bm))
+    # leading layout: trainer = bundles 0,1 on n0 -> (1, 2); told (2, 1) is refused
+    with pytest.raises(mc.MilesConfigError, match="disagrees"):
+        mc.placement_request(_cfg(2, 1))

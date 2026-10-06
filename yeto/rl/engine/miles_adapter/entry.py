@@ -1112,6 +1112,105 @@ def _ray_alive_nodes() -> dict[str, int]:
             for n in ray.nodes() if n.get("Alive")}
 
 
+def reconcile_gpu_pool_preflight(elastic: Any, topology: Any, miles_args: Any, *,
+                                 resources: Any = None, accept_rebind: bool | None = None,
+                                 gpu_probe: Callable[[Any], Any] | None = None) -> Any:
+    """Multi-node GPU uuid reconciliation (rl-multinode-island Q6, ruling 2026-10-04),
+    run right after :func:`refuse_partial_island_preflight` and before any placement
+    group: ``nvidia-smi --query-gpu=index,uuid`` is collected on every island node (a
+    Ray task per node; an unreachable node fails closed), the pool is reconciled against
+    the cfg's uuids and/or the journal's binding baseline
+    (:func:`multinode.reconcile_gpu_pool`), and the controller journals ``gpu_pool``.
+    A refused pool -> tape ``rl_reconfiguration`` RECOVERY_REQUIRED + ``RuntimeError``.
+    A new pool is accepted (and becomes the baseline) only with
+    ``--rl-elastic-accept-rebind``. Single-node islands are untouched (None)."""
+    controller = getattr(elastic, "controller", None) if elastic is not None else None
+    if controller is None or topology is None or int(topology.nodes) <= 1:
+        return None
+    if not callable(getattr(controller, "record_gpu_pool", None)):
+        return None
+    from yeto.rl.engine import multinode as mn
+
+    config = getattr(miles_args, "yeto_rl_elastic", None) or {}
+    if resources is None:
+        resources = config.get("resources")
+    if accept_rebind is None:
+        accept_rebind = bool(config.get("accept_rebind", False))
+    topo = mn.Topology(int(topology.nodes), int(topology.gpus_per_node))
+
+    def refuse(error: str) -> None:
+        try:
+            from yeto.rl.miles import _append_rl_event
+
+            epochs = getattr(getattr(controller, "journal", None), "epochs", None)
+            _append_rl_event(miles_args, {
+                "event": "rl_reconfiguration", "rollout_id": None, "result": "RECOVERY_REQUIRED",
+                "error": str(error), "config_epoch": getattr(epochs, "config_epoch", None),
+            })
+        except Exception as exc:  # noqa: BLE001 - the tape must not mask the refusal
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "rl_reconfiguration (gpu_pool) not written to the tape: %r", exc)
+        raise RuntimeError(f"island is RECOVERY_REQUIRED: {error}")
+
+    try:
+        if resources is not None and not isinstance(resources, dict):
+            resources = json.loads(Path(resources).expanduser().read_text(encoding="utf-8"))
+        cfg_pool = mn.declared_gpu_pool(resources or {}, topo)
+        observed = mn.observed_gpu_pool((gpu_probe or _ray_gpu_uuids)(topo), topo)
+    except Exception as exc:  # noqa: BLE001 - probe/cfg failure: fail closed, journaled
+        error = f"gpu_pool: GPU probe failed: {exc}"
+        controller.record_gpu_pool(mn.ReconcileResult(ok=False, observed=(), error=str(exc)),
+                                   source="probe", accept_rebind=bool(accept_rebind))
+        refuse(getattr(controller, "recovery_required", None) or error)
+    baseline = controller.gpu_pool_baseline()
+    declared = mn.merge_declared_pool(cfg_pool, baseline)
+    cfg_named = any(u is not None for node in cfg_pool for u in node)
+    source = "+".join(n for n, on in (("cfg", cfg_named), ("journal", baseline is not None)) if on) or "none"
+    result = mn.reconcile_gpu_pool(declared, observed, accept_rebind=bool(accept_rebind))
+    why = controller.record_gpu_pool(result, source=source, accept_rebind=bool(accept_rebind))
+    if why is not None:
+        refuse(getattr(controller, "recovery_required", None) or f"gpu_pool: {why}")
+    return result
+
+
+def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
+    """``[(index, uuid), ...]`` per island node in logical order (Ray head first, D3,
+    then the workers by address/node id), each collected by a Ray task pinned to that
+    node (``NodeAffinitySchedulingStrategy``, hard). A node whose ``nvidia-smi`` count
+    disagrees with its Ray ``GPU`` resource, or a node that cannot run the task, raises
+    (fail closed)."""
+    import ray
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    nodes = [n for n in ray.nodes() if n.get("Alive")]
+    head_id, _ip = _ray_head_node(nodes)
+    order = sorted(nodes, key=lambda n: (0 if n["NodeID"] == head_id else 1,
+                                         str(n.get("NodeManagerAddress")), str(n["NodeID"])))
+    order = [n for n in order if n["NodeID"] == head_id or (n.get("Resources") or {}).get("GPU", 0)]
+    if len(order) != int(topology.nodes):
+        raise RuntimeError(f"{len(order)} alive Ray nodes with GPUs, topology has {topology.nodes}")
+
+    @ray.remote(num_cpus=0, num_gpus=0)
+    def _smi() -> list[tuple[int, str]]:
+        import subprocess
+
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+                             check=True, capture_output=True, text=True, timeout=60).stdout
+        return [(int(a.strip()), b.strip()) for a, b in
+                (line.split(",", 1) for line in out.splitlines() if line.strip())]
+
+    refs = [_smi.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+        node_id=n["NodeID"], soft=False)).remote() for n in order]
+    rows = ray.get(refs, timeout=120)
+    for n, got in zip(order, rows):
+        ray_gpus = int((n.get("Resources") or {}).get("GPU", 0))
+        if len(got) != ray_gpus:
+            raise RuntimeError(f"node {n['NodeID']} nvidia-smi lists {len(got)} GPUs, Ray exposes {ray_gpus}")
+    return [list(r) for r in rows]
+
+
 def _ray_head_node(nodes: Any = None) -> tuple[Any, str]:
     """``(node_id, ip)`` of the Ray head: the one alive node carrying Ray's
     built-in ``node:__internal_head__`` resource (rl-multinode-island D3 head
@@ -1247,6 +1346,9 @@ def run_ports_island(
         # must fail closed here; a placement group asking for the dead node's GPUs
         # would stay PENDING forever
         refuse_partial_island_preflight(elastic, topology, miles_args)
+        # Q6 (2026-10-04): runtime GPU uuid reconciliation, journal gpu_pool; a changed
+        # pool is accepted only with --rl-elastic-accept-rebind (fail closed otherwise)
+        reconcile_gpu_pool_preflight(elastic, topology, miles_args)
         # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
         pin_placement_group_to_head(topology.gpus_per_node)
 
