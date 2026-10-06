@@ -1,7 +1,7 @@
-"""Flash-Next (fnrun.sh fn32s / fn32b) variant of fp_local22.py: the ports-path Miles
+"""Flash-Next (fnrun.sh fn32s / fn32b / fn8s) variant of fp_local22.py: the ports-path Miles
 argv + attestation ``runtime_fingerprint`` for the 4x8 H200 cases, on CPU.
 
-usage: python fp_fn.py <repo> <fn32s|fn32b> [--seed N] [--total-steps N] [extra cli args]
+usage: python fp_fn.py <repo> <fn32s|fn32b|fn8s> [--seed N] [--total-steps N] [extra cli args]
 
 The fingerprint is the pinned Miles commit + the FULL Miles argv, so it changes
 with seed / total-steps / any flag: an E1 attestation is valid only for the exact
@@ -19,8 +19,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FN_SNAPSHOT = ("/root/.cache/huggingface/hub/models--Qwen--Qwen3.8-Flash-Next/snapshots/"
+# node-side --hf-checkpoint: the snapshot_download() path.  The full model is on the
+# model FS (HF_HUB_CACHE=/mnt/yeto-models/hub when its yeto-complete marker exists);
+# the 4-layer one only if it was populated there too (FN_4L_HUB overrides: set it to
+# /root/.cache/huggingface/hub when the run falls back to the Hub).
+FS_HUB = "/mnt/yeto-models/hub"
+FN_SNAPSHOT = (f"{FS_HUB}/models--Qwen--Qwen3.8-Flash-Next/snapshots/"
                "de4b8e4d43b917e7706784d8bb445c9af86a3540")
+FN_4L_SNAPSHOT = (f"{os.environ.get('FN_4L_HUB', FS_HUB)}/models--CharyZeng--Qwen3.8-Flash-Next-4layer/"
+                  "snapshots/d19a6b60c0df8f90faf92c7c592b37df2e15b060")
 
 
 def fnrun_cli(case: str, *, seed: int | None = None, total_steps: int | None = None,
@@ -39,13 +46,14 @@ def fnrun_cli(case: str, *, seed: int | None = None, total_steps: int | None = N
     return toks + list(extra)
 
 
-def fn_provider():
+def fn_provider(num_layers: int = 48):
     class Qwen4ExpModelProvider(SimpleNamespace):
         pass
 
-    # text_config of Qwen/Qwen3.8-Flash-Next (profiles/qwen3_8_next.model_args("full"))
+    # text_config of Qwen/Qwen3.8-Flash-Next (profiles/qwen3_8_next.model_args("full"));
+    # the 4-layer slice differs only in num_layers (model_args("4layer"))
     return Qwen4ExpModelProvider(
-        hidden_size=2560, num_attention_heads=24, num_layers=48, ffn_hidden_size=640,
+        hidden_size=2560, num_attention_heads=24, num_layers=num_layers, ffn_hidden_size=640,
         num_query_groups=2, kv_channels=256, multi_latent_attention=False, num_moe_experts=512,
         moe_ffn_hidden_size=640, moe_router_topk=10, moe_layer_freq=1,
         moe_shared_expert_intermediate_size=640, experimental_attention_variant="gated_delta_net",
@@ -66,20 +74,27 @@ def fn_fingerprint(repo: str, case: str, *, seed: int | None = None,
     from yeto.rl import learner
     from yeto.rl.engine.miles_adapter.entry import ports_runtime_fingerprint
     from yeto.rl.engine.run_config import resolve_rl_run_config
+    from yeto.rl.engine import run_config
     from yeto.rl.profiles import qwen3_8_next as q
 
+    small = case == "fn8s"
     mp = _m.MonkeyPatch()
     try:
         run = island_run(tuple(fnrun_cli(case, seed=seed, total_steps=total_steps, extra=extra)), mp)
         tmp = Path(tempfile.mkdtemp())
         args, _env = learner_from_run(run, tmp / "home")
+        # the torch_dist dir exists only on the node's model FS: keep the path verbatim
+        # (the node resolves the same absolute non-symlink path)
+        mp.setattr(run_config, "_resolve_ref_load",
+                   lambda a, model_path: a.megatron_ref_load or str(model_path))
+        rc = resolve_rl_run_config(
+            args, model_path=FN_4L_SNAPSHOT if small else FN_SNAPSHOT, rollout_model_path=None,
+            prompt_path="/root/yeto-rl/prompts.jsonl", eval_prompt_path=None,
+            provider=fn_provider(4 if small else 48),
+            target_modules=sorted({m.rsplit(".", 1)[-1] for m in q.LORA_TARGET_MODULES}),
+            yeto_policy_sync=False)
     finally:
         mp.undo()
-    rc = resolve_rl_run_config(
-        args, model_path=FN_SNAPSHOT, rollout_model_path=None,
-        prompt_path="/root/yeto-rl/prompts.jsonl", eval_prompt_path=None, provider=fn_provider(),
-        target_modules=sorted({m.rsplit(".", 1)[-1] for m in q.LORA_TARGET_MODULES}),
-        yeto_policy_sync=False)
     pl = learner.build_ports_launch(args, rc, ())
     return {"case": case, "recipe": rc.model_recipe.name, "fp": ports_runtime_fingerprint(pl),
             "argv": list(pl.argv)}

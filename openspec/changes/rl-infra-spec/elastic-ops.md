@@ -99,6 +99,47 @@ profile 由 `flash_next_execution_profile(AlgorithmSpec)` 给出（partitioned-s
 * 未关闭的缺口：(1) ports 路径对 Flash-Next full 的 recipe/argv 未在真机验证，以往的 FN 真机走的是 `run_qwen3_8_next.py`，且是 4layer 模型；(2) 真实 Miles 路径的 profile 名是 `miles-lora-partitioned-serial`，所以 FN 声明边的交集不生效，只有 attestation 把关；(3) FN 的 attestation 指纹脚本尚未编写。
 * 计划与费用：`infra-drafts/FN-ELASTIC-GPU-PLAN.md`。
 
+## 5b. Flash-Next 正式训练启动当天 checklist（fn-train）
+
+计划、费用口径与健康判据见 `infra-drafts/FN-TRAIN-PLAN.md`。参数见 `tests/multinode_gpu/fntrain.sh`（只打印，单测 `tests/test_rl_fn_train_args.py`）。**下面的启动命令由用户亲自执行。**
+
+**上卡前复核（全部打勾才启动）**
+1. 预算：用户已批准首跑上限，全局台账上限已上调。gpu-spend.md 已写好预登记。
+2. FS 已扩容（`nebius compute filesystem get --id computefilesystem-e00nm64w4cqpkqd0ch` 的 size ≥ 1024GiB）。full torch_dist 的 tracker 为 `release`（B0 PASS）。阶段 A PASS。
+3. 只读核对：`sky status` 无残留集群；`sky show-gpus H200 --cloud nebius` 价格仍为 $36/h（超过 $40/h 就停下来报告）；`sky check nebius` 显示 compute enabled。
+4. `IMAGE` 的 digest 与 `NEBIUS_BAKED_IMAGES[eu-north1]`（sha256:37ac689e…）一致。
+5. `PYTHONPATH=. /tmp/yeto-venv/bin/python -m pytest -q tests/test_rl_fn_train_args.py tests/test_rl_fn_align.py tests/test_rl_fn_elastic_prep.py` 全部通过。用 `fp_fn.py` 重算指纹，并写入预登记。
+6. AWS 凭证能写 `s3://yeto-rl-ckpt-ddde6f79/fn-train/`（`aws s3 ls s3://yeto-rl-ckpt-ddde6f79/`）。
+
+**预登记文本（模板）**：「首跑 `$RUN`：nebius 4×`gpu-h200-sxm_8gpu-128vcpu-1600gb` eu-north1 按需 $144/h，fn-train <sha>，`fntrain.sh print b`（FN-T16R16S0，recommend，无 attestation，WINDOW 1200，STEPS 200，LR 线性衰减地平线 200），checkpoint s3://yeto-rl-ckpt-ddde6f79/fn-train/$RUN。早门 = 第 5 轮，健康门 = 第 20 轮（判据见 FN-TRAIN-PLAN §3）。硬停 3.5 h，上限 $504。通过健康门后按计划 down，不在本次跑满 200 轮。同一根因失败不重跑。」
+
+**启动（用户执行）**
+```bash
+cd /home/michael/work/fn-train
+export RUN=fnt-20261006a IMAGE=<digest-pinned image> WINDOW=1200 STEPS=200
+SKY=/home/michael/work/gpu-head/venv/bin/sky; PY=/home/michael/work/gpu-head/venv/bin/python
+R=/home/michael/work/s1-runs/$RUN; CL=fnt-l0-eu-north1; mkdir -p $R/pulled
+bash tests/multinode_gpu/fntrain.sh print b > $R/args.txt; git rev-parse HEAD > $R/yeto_sha.txt
+# watchdog: 3.5 h 后只按本集群名 down
+setsid nohup bash -c "sleep 12600; $SKY down -y $CL > $R/watchdog.out 2>&1; touch $R/WATCHDOG_FIRED" >/dev/null 2>&1 & echo $! > $R/watchdog.pid
+# ghcr 凭证照 s1run.sh 导出 SKYPILOT_DOCKER_*，然后：
+nohup bash -c "$PY -m yeto.cli $(cat $R/args.txt) > $R/launch.log 2>&1; echo rc=\$? > $R/rc.txt" >/dev/null 2>&1 &
+```
+
+**监控**
+* 进度：`tail -f $R/launch.log`（provision 与 setup）；集群 UP 后执行 `ssh $CL 'tail -f ~/sky_logs/*/run.log' | grep -E --line-buffered "step [0-9]+:|Traceback|Error|OOM|LORA-CHECK|nan|unrecognized arguments"`。
+* dashboard：`yeto dashboard mirror --target $CL --remote ~/yeto-output/rl-island-0.jsonl --local ~/dash/$RUN/rl-island-0.jsonl --island 0 &`，再 `yeto dashboard serve --tapes ~/dash/$RUN --budget 300 --port 8787`。如果在远端开发机上，要从本地做隧道：`ssh -L 8787:127.0.0.1:8787 <devbox>`。
+* recommend：`ssh $CL 'grep -c rl_elastic_recommendation ~/yeto-output/rl-island-0.jsonl'`。预期每窗一条，action 为 hold，candidates 为空。
+* checkpoint：`aws s3 ls --recursive s3://yeto-rl-ckpt-ddde6f79/fn-train/$RUN/ | tail`。
+
+**中止条件（满足任一条立即 `sky down -y $CL`，不重试）**：任一 rank 报 argparse 未知参数；OOM；loss、grad_norm 或 logprob diff 出现 NaN/inf；出现 `[LORA-CHECK]` 或 `end_weight_update failed`；早门（第 5 轮）的任一项不满足；第 1 轮在启动后 2 h 内仍未完成；花费到达批准上限；容量阻塞（记 ≈$0，按计划 30 min 后最多重试 3 次）。
+
+**收尾**
+1. 达到健康门或中止后，先 pull：tape、journal、`~/sky_logs/*/run.log` 末尾、`nvidia-smi` 快照，存到 `$R/pulled/`；`aws s3 sync s3://yeto-rl-ckpt-ddde6f79/fn-train/$RUN $R/ckpt-manifest --exclude '*' --include '*.json'`（只拉清单，不拉权重）。
+2. `$SKY down -y $CL`；`kill $(cat $R/watchdog.pid)`。
+3. 执行 cleanup×2：`RUNS_BASE=/home/michael/work/s1-runs /home/michael/work/gpu-b1-runs/cleanup_run.sh fnt` 两次，都要 RESULT clean。确认 Nebius 控制台没有残留 VM 或盘。**FS 不删**（torch_dist 留给后续使用）。
+4. `yeto dashboard export --tapes $R/pulled -o $R/run.html --budget 300`；回填 gpu-spend.md（起止 UTC、时价、费用、PASS/FAIL、数据位置）。
+
 ## 6. 启用 auto 的前置条件（全部满足才可开）
 
 1. D1 验收通过：recommend 模式在真实负载上输出的建议经人工复核是合理的。
