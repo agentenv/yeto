@@ -44,7 +44,7 @@ finish() {
 }
 trap finish EXIT
 df_free=$(df -BG --output=avail / | tail -1 | tr -dc 0-9); [ "$df_free" -ge 50 ] || { log "abort: root disk ${df_free}G < 50G"; exit 9; }
-T=$(ps -u michael -L -o pid= | wc -l); [ "$T" -lt 2850 ] || { log "abort: $T threads"; exit 9; }
+T=$(ps -u michael -L -o pid= | wc -l); [ "$T" -lt ${THREAD_MAX:-2850} ] || { log "abort: $T threads"; exit 9; }
 log "start $P code $(git -C $REPO rev-parse --short HEAD) prefer_l40s=${PREFER_L40S:-1} cap=\$$CAP d1_gpu=$G ($(sku $G) \$$RATE_H/h) fn_gpu=$FG ($(sku $FG) \$$(rate $FG)/h)"
 H=0; CL=$CLL; CP=$P-l; export NODES=2; [ "${PREFER_L40S:-1}" = 1 ] || { H=1; CL=$CLH; CP=$P-h; export NODES=1; }
 N=0
