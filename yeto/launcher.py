@@ -1481,6 +1481,9 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                            eval_uses_snapshots=UNKNOWN)
     if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    sample_s = getattr(args, "rl_resource_sample_interval", None)
+    if sample_s is not None and (rl_engine != "ports" or sample_s < 0):
+        raise ValueError("--rl-resource-sample-interval needs --rl-engine ports and a value >= 0")
     from yeto.rl.engine.miles_adapter.elastic_hook import check_recommend_flags
     check_recommend_flags(args)
     dropout = getattr(args, "rl_lora_dropout", None)
@@ -1625,6 +1628,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-overlap-eval"
     if getattr(args, "rl_observe_timeline", False):
         flags += " --rl-observe-timeline"
+    if getattr(args, "rl_resource_sample_interval", None) is not None:
+        flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
     from yeto.rl.engine.miles_adapter.elastic_hook import recommend_flags
     flags += recommend_flags(args)
     if getattr(args, "rl_deterministic_trainer", False):

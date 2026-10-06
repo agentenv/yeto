@@ -27,6 +27,10 @@ echo "RUNTIME py=$PY python3=$(command -v python3) torchrun=$(command -v torchru
   PYTHONPATH=$MR:$MP $PY -c "import megatron.core, miles_plugins.models.qwen3_8_next.qwen3_8_next" > ~/preflight-import.log 2>&1 || { tail -15 ~/preflight-import.log; echo "FNPREP_FAIL preflight: import megatron.core / qwen3_8_next plugin"; exit 1; }
   echo "PREFLIGHT_OK"
 }
+# fnconv prerequisite (record only, never gates fnprep): full-model HF snapshot + yeto-complete marker
+FM=$FS/yeto-complete/Qwen--Qwen3.8-Flash-Next@de4b8e4d43b917e7706784d8bb445c9af86a3540.json
+FD=$FS/hub/models--Qwen--Qwen3.8-Flash-Next/snapshots/de4b8e4d43b917e7706784d8bb445c9af86a3540
+echo "FULL_SNAPSHOT marker=$([ -f $FM ] && echo yes || echo no) dir=$([ -d $FD ] && echo yes || echo no)"
 echo "DF0 $(df -B1 --output=size,used,avail $FS | tail -1)"; mountpoint -q $FS || { echo "FNPREP_FAIL $FS not mounted"; exit 1; }
 # FS capacity check (user expanded the FS 400->1024GiB, 10-06). df total < FS_MIN_G means the device grew but the filesystem did not:
 # ext4 -> resize2fs, xfs -> xfs_growfs (sudo, in this ssh context = where the FS is mounted); Nebius shared FS is virtiofs (host-
@@ -80,6 +84,6 @@ g = lambda k: (re.findall(rf"^{k} (.*)$", t, re.M) or [None])[-1]
 json.dump({"rc": rc, "ok": "FNPREP_OK" in t, "fail": g("FNPREP_FAIL"), "snapshot_bytes": g("SNAPSHOT_BYTES"), "populate_s": g("POPULATE_S"),
            "convert_s": g("CONVERT_S"), "df0": g("DF0"), "df1": g("DF1"), "df2": g("DF2"), "tracker": g("TRACKER"),
            "torchdist_bytes": g("TORCHDIST_BYTES"), "fstype": g("FSTYPE"),
-           "fs_size_g0": g("FS_SIZE_G0"), "fs_size_g1": g("FS_SIZE_G1")}, open(o + "/fnprep.json", "w"), indent=1)
+           "fs_size_g0": g("FS_SIZE_G0"), "fs_size_g1": g("FS_SIZE_G1"), "full_snapshot": g("FULL_SNAPSHOT")}, open(o + "/fnprep.json", "w"), indent=1)
 PY
 grep -q FNPREP_OK $O/fnprep-remote.log && echo FNPREP_OK || { echo "FNPREP_FAIL $(grep -o 'FNPREP_FAIL.*' $O/fnprep-remote.log | tail -1)"; exit 1; }
