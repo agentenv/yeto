@@ -2946,3 +2946,36 @@ def test_miles_island_forwards_dataset_column_flags(monkeypatch):
     task = island(("--rl-prompt-column", "problem", "--rl-label-column", "answer"))
     assert " --rl-prompt-column problem" in task.run and " --rl-label-column answer" in task.run
     assert "--rl-prompt-column" not in island(()).run
+
+
+@pytest.mark.parametrize(
+    "gpu, extra, want",
+    [
+        ("aws:1xa10g@us-west-2", (), "8+"),
+        ("nebius:1xl40s@eu-north1", (), "8+"),
+        ("nebius:2x8xh100@eu-north1", ("--rollout-batch-size", "16"), "8+"),
+        ("ssh:2x8xh200@island-0", ("--rollout-batch-size", "16"), None),
+        ("aws:1xa10g@us-west-2", ("--learner-cpus", "16+"), "16+"),
+        ("aws:1xa10g@us-west-2", ("--learner-instance-type", "g5.xlarge"), None),
+    ],
+)
+def test_miles_island_sets_a_per_node_vcpu_floor(monkeypatch, gpu, extra, want):
+    monkeypatch.setitem(
+        sys.modules,
+        "sky",
+        types.SimpleNamespace(
+            Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode
+        ),
+    )
+    args = _args(("--gpu", gpu, *extra))
+    args.model_revision = "c" * 40
+    args.data_revision = "d" * 40
+    args.source_sha256 = "e" * 64
+    args.reward_sha256 = "f" * 64
+    _prepare_rl_args(args)
+    from yeto.gpu_spec import parse_gpu_spec
+
+    spec = parse_gpu_spec(args.gpu)[0]
+    task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    assert task.resources.cpus == want
+    assert task.resources.accelerators == spec.accelerators

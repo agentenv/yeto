@@ -173,7 +173,7 @@ def test_entry_preflight_refuses_partial_island_before_any_placement_group(tmp_p
 # ------------------------------------------------- Q4 (C5): parallel layout baseline
 def _layout(**kw):
     base = {"tp": 1, "pp": 1, "cp": 1, "ep": 1, "trainer": 4, "nodes": 2, "gpus_per_node": 4,
-            "bundle_map": None}
+            "bundle_map": None, "cross_node_tp": 0, "cross_node_engine_tp": 0}
     base.update(kw)
     return base
 
@@ -258,7 +258,8 @@ def test_entry_layout_from_megatron_args_and_placement(tmp_path, monkeypatch):
     placement = SimpleNamespace(bundle_map={"trainer": (0, 2), "rollout": (1,), "standby": (3,)})
     assert entry.island_layout_of(miles_args, topology, placement) == {
         "tp": 1, "pp": 2, "cp": 1, "ep": 1, "nodes": 2, "gpus_per_node": 2, "trainer": 2,
-        "bundle_map": {"trainer": [0, 2], "rollout": [1], "standby": [3]}}
+        "bundle_map": {"trainer": [0, 2], "rollout": [1], "standby": [3]},
+        "cross_node_tp": 0, "cross_node_engine_tp": 0}
     assert entry.island_layout_of(SimpleNamespace(), topology)["bundle_map"] is None
     # preflight journals it; the next incarnation with PP1 is refused with the tape event
     ctl = _ctl(tmp_path / "state", {"t": 1000.0})

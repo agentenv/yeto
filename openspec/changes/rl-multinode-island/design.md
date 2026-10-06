@@ -52,16 +52,22 @@
 - 定义：逻辑 bundle `p` 的节点 = `p // gpus_per_node`，本地卡 = `p % gpus_per_node`。
 - 依据：Miles `_create_placement_group` 的 PACK + 按 `(node_ip, gpu_id)` 排序；sky 的 `SKYPILOT_NODE_IPS` 顺序 = node rank。实现阶段在 `StartupBundles.__init__` 增加断言：`get_pg_view` 返回的 `(node_ip, gpu)` 序列按节点分块且块长 = `gpus_per_node`，否则 `BundleMapError`（fail closed，不猜）。
 - **混布（Q2 裁定 2026-10-04）**：块内各卡的角色由 bundle map 决定而不是整节点归属——同一节点块可同时含 trainer 卡与 rollout/standby 卡（2×2 `T2R1S1`：块 0 = `[trainer p0, rollout p1]`，块 1 = `[trainer p2, standby p3]`）；节点分块断言只看块的节点一致性与 head pin，不要求块内单一角色。
+- **跨节点引擎块（v2 裁定）**：放行 `allow_cross_node_engine_tp` 时，一个引擎 cell 占用连续的整数个节点块（块序号连续、每块全部卡归该引擎）；块内角色仍由 bundle map 决定，断言不变。
 - 注意 IP 排序 ≠ node rank 排序：PACK 排序按 IP 数值，sky node0 不一定 IP 最小。因此"node_index"以 **PG 排序后的块序号** 为准，并在 journal 里记录 `node_index → (sky_rank, ip, hostname)` 映射；Ray head 所在节点由 `ray.nodes()` 的 `is_head` 判定，不假设它是块 0。
 
 ### D4 放置约束（节点感知）
 在 `PlacementRequest.__post_init__`/`validate_bundle_map`/`capabilities.placement_rejection` 统一执行：
-1. 每个 rollout 引擎（`gpus_per_engine` 张卡）同节点；
-2. trainer 的**节点内组 `tp*cp`** 同节点（用户裁定 2026-10-04，Q1/Q3：TP 默认留在节点内，Megatron TP 走 NVLink；rank 顺序 tp-cp-ep-dp-pp 使连续 `tp*cp` 个 trainer rank 构成 TP×CP 组）；`tp*cp` MUST ≤ `gpus_per_node` 且整除之。实现：`multinode.node_placement_rejection(node_parallel=tp*cp)`（旧参数名 `model_parallel` 仅在未给 `node_parallel` 时充当节点内组）；
+1. 每个 rollout 引擎（`gpus_per_engine` 张卡）同节点 —— **默认偏好，非硬限制（用户裁定 2026-10-04 v2）**：显式开关 cfg `parallel.allow_cross_node_engine_tp: true` 或 CLI `--rl-allow-cross-node-engine-tp` 放行后，引擎可跨节点，但 MUST 由**整节点**组成（每个触及的节点贡献全部 `gpus_per_node` 卡；`multinode.engine_replica_rejection`），与 Miles `sglang_engine._compute_server_args` 的 `nnodes = gpus_per_engine // num_gpus_per_node` 及 `specs/inference.py` 的 `engine % num_gpus_per_node == 0` 断言一致；
+2. trainer 的**节点内组 `tp*cp`** 同节点（用户裁定 2026-10-04，Q1/Q3：TP 默认留在节点内，Megatron TP 走 NVLink；rank 顺序 tp-cp-ep-dp-pp 使连续 `tp*cp` 个 trainer rank 构成 TP×CP 组）；默认 `tp*cp` MUST ≤ `gpus_per_node` 且整除之 —— **同样只是默认偏好（v2 裁定）**：cfg `parallel.allow_cross_node_tp: true` 或 CLI `--rl-allow-cross-node-tp`（launcher `rl_cross_node_switches` 取并集并透传 learner）放行后仅保留"trainer 总卡数被 `tp*cp` 整除"与矩形约束；放行时 launcher/entry 打 WARN，journal `topology.layout.cross_node_tp=1`（`cross_node_engine_tp` 同理，纳入 `LAYOUT_KEYS` 参与基线比对）。实现：`multinode.node_placement_rejection(node_parallel=tp*cp, allow_cross_node_tp=, allow_cross_node_engine=, gpus_per_node=)`（旧参数名 `model_parallel` 仅在未给 `node_parallel` 时充当节点内组）；
 3. **EP 与 PP 允许跨节点**（用户裁定 2026-10-04，推翻 2026-10-01 的"EP 整节点对齐"与"PP 不跨节点"默认）：不再检查 EP 组与节点的对齐，仅要求 `tp*cp*ep` 整除 trainer 卡数；PP 组（步长 `world/pp`）天然跨节点，不设节点规则；
 4. standby 卡 rebind 到 cell 时目标卡同节点；
-5. 任一角色的 GPU 集合不要求整节点（**允许 rollout/trainer 同节点不同卡混布**，Q2 裁定 2026-10-04），但 **trainer 集合必须是整数个"节点内组 `tp*cp`"且每组不跨节点**，并占用矩形（每节点卡数相等、每节点一段连续升序本地卡；Miles 以 `RANK % gpus_per_node` 作 local_rank）。混布时 trainer 形状与 bundle map 由 cfg `placement` 推导（`multinode.trainer_layout` → launcher `rl_island_layout` → `--actor-num-nodes/--actor-num-gpus-per-node` + `--rl-island-bundle-map`），并与 `PlacementRequest.trainer_shape()` 交叉核对。
+5. 任一角色的 GPU 集合不要求整节点（**允许 rollout/trainer 同节点不同卡混布**，Q2 裁定 2026-10-04；**默认不重叠占卡**：同一 `(node, gpu)` 槽位在 trainer/rollout/standby 中 MUST 只出现一次，`normalize_placement`/`placement_overlap` 拒绝，v2 裁定），但 **trainer 集合必须是整数个"节点内组 `tp*cp`"且每组不跨节点**，并占用矩形（每节点卡数相等、每节点一段连续升序本地卡；Miles 以 `RANK % gpus_per_node` 作 local_rank）。混布时 trainer 形状与 bundle map 由 cfg `placement` 推导（`multinode.trainer_layout` → launcher `rl_island_layout` → `--actor-num-nodes/--actor-num-gpus-per-node` + `--rl-island-bundle-map`），并与 `PlacementRequest.trainer_shape()` 交叉核对。
 违反 → 启动前 `ValueError`（launcher 侧）或 `ManifestError`（cfg 侧），不进入 GPU。
+
+#### D4a 跨节点 TP 引擎（sglang 多机）启动路径与网络校验项（v2 裁定，CPU 层）
+- Miles 侧已具备：learner 传 `--num-gpus-per-node <岛每节点卡数>`（`run_config.visible_gpus_per_node`），`--rollout-num-gpus-per-engine 8` 于 2×4 节点 → `nnodes=2`，`node_rank = worker_in_cell_index`，`dist_init_addr = <cell 首节点 ip>:<port>`（`miles/ray/specs/inference.py`）；`tp_size = gpus_per_engine`。未真机验证。
+- 校验项（GPU 阶段逐项报告正确性与性能）：GPU 分配——cell 的 bundle 恰为整节点块（`chunk_by_node(allow_cross_node=True)`，`bind_members` 同规则）；rank 映射——`node_rank` 与 bundle 节点序一致、`base_gpu_id` 为 0；网络——`NCCL_SOCKET_IFNAME`/`GLOO_SOCKET_IFNAME` 指向节点间网卡（D6 prelude）、`dist_init_addr` 端口与 `nccl_port` 在节点间可达（sky 集群内网，无需 open_ports）、必要时 `NCCL_IB_DISABLE=1`；性能——TP all-reduce 跨 RoCE/以太网相对节点内 NVLink 的 generate 吞吐比对单独报告，不计入正确性。
+- 扩缩容粒度：跨节点引擎按完整副本 up/down（`engine_replica_delta_rejection` 于 `controller.plan` + cfg `rollout % rollout_engine_gpus == 0`），不支持摘除其中一个节点。
 
 ### D5 launcher 校验与 `rl_actor_gpus_per_node` 的重定义
 - `fixed-partition` 去掉 `num_nodes == 1` 限制；trainer 卡数 = `total_gpus − rollout_num_gpus − standby`，要求能被 `tp*pp*cp` 整除且按 D4 可放置（多节点时另要求 `tp*cp` ≤ `gpus_per_node` 且整除之，launcher 拒绝信息 "RL TP*CP must fit and divide one node"）；`--actor-num-nodes/--actor-num-gpus-per-node` 的推导改为"trainer 占用的节点数与每节点卡数"——当 trainer 不是整节点时（例如 16 卡岛 T8R8：trainer 占 node0 全部 8 卡），`actor_num_nodes=1, actor_num_gpus_per_node=8`；当 trainer 跨节点且每节点占用数不等时拒绝（Miles `actor_num_nodes*actor_num_gpus_per_node` 必须是矩形）。
@@ -137,3 +143,10 @@
 - **Q6 pool 解析**：岛内是否要求运行时解析 `resources.gpus`（nvidia-smi uuid）并与 cfg 对账？建议：多节点时必解析（fail closed），单节点保持可选。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：强制运行时解析 GPU 池并对账。
   - **用户裁定 2026-10-04**：「强制运行时 GPU UUID 对账，允许换机后重新绑定」→ 现实现为 Ray node id 对账，无 UUID 对账（差距）；需运行时 nvidia-smi 采集 + journal `gpu_pool` + 形状一致时重绑定；见 MULTINODE-GAP-S8.md §1.4。
+
+### 3a. 用户裁定 2026-10-04 v2（原文摘录，覆盖上文 Q1/Q2/Q3/Q5/Q6 的"默认"措辞）
+> 一个 learner 可包含多台机器，每台多卡，允许 trainer 的 EP/PP 跨节点。"TP 优先留节点内"只是默认布局偏好，不是硬限制；trainer 与 rollout 分别配置并行度和节点布局。允许 Flash-Next recipe 中 SGLang TP8 跨两台四卡节点，校验 GPU 分配、rank 映射与网络连通性，并分别报告正确性和性能。跨节点 TP 引擎按完整副本扩缩容，不支持通过单独摘除其中一个节点实现缩容。
+> 允许 trainer 与 rollout 同节点、不同 GPU 混布，默认不重叠占卡。运行时强制解析 GPU UUID 并与资源分配对账；换机后允许重新绑定，但必须防止重复占用、角色冲突和旧进程误重入。训练节点失联时停止受影响的分布式训练组，从一致 checkpoint 重建，暂不支持原 rank 自动重入。
+> 验收必须区分"trainer 与 rollout 异节点、跨节点权重同步"和"trainer 自身 EP/PP 跨节点"，后者需分别验证前向、反向与参数更新。保留 2×1 基础测试，使用明确预留 GPU 的配置验证 rollout 上下线、权重版本同步、在途请求处理及资源回收。G2 未测弹性边可记为资源受限并保留 PARTIAL。
+
+- 实现（mn-r2，CPU 通过）：D4 规则 1/2 改为"默认偏好 + 显式放行"（开关 `allow_cross_node_tp` / `allow_cross_node_engine_tp`，cfg 与 CLI 二选一或并用）；D4a 多机引擎校验项；引擎副本粒度扩缩（`engine_replica_rejection`/`engine_replica_delta_rejection`）；混布槽位互斥（`placement_overlap`）；UUID 重绑定三防（`role_uuid_map`/`occupation_rejection`/`stale_incarnation_rejection`，journal `gpu_pool.roles`，节点上 `/tmp/yeto-rl-incarnation/<uuid>.json` 化身标记）；`s1judge.py` m1/m2 增前向/反向/参数更新三类证据并与跨节点权重同步分列，m3 增版本同步/在途请求/资源回收。差距表见 infra-drafts/MULTINODE-GAP-S8.md §8。

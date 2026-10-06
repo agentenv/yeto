@@ -245,6 +245,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="rl-multinode-island: refuse a learner island with fewer nodes (0 = the "
         "recipe-derived minimum: one TP*PP replica + one rollout engine + standby)",
     )
+    rl.add_argument("--rl-allow-cross-node-tp", action="store_true",
+                    help="rl-multinode-island (ruling 2026-10-04 v2): let the trainer TP*CP group "
+                    "span nodes (default: TP stays inside a node, refused otherwise); same as cfg "
+                    "parallel.allow_cross_node_tp; journaled as topology.layout.cross_node_tp")
+    rl.add_argument("--rl-allow-cross-node-engine-tp", action="store_true",
+                    help="rl-multinode-island (ruling 2026-10-04 v2): let a rollout engine's TP span "
+                    "nodes as whole-node replicas (e.g. SGLang TP8 over 2x4); an engine then scales "
+                    "up/down as one replica; same as cfg parallel.allow_cross_node_engine_tp")
     rl.add_argument(
         "--rl-overlap-eval",
         action="store_true",

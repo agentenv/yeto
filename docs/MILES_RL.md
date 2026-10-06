@@ -443,12 +443,25 @@ yeto launch --training-mode rl --rl-engine ports \
   ascending run per node (Miles' `actor_num_nodes x actor_num_gpus_per_node`
   rectangle; the launcher derives both flags and forwards
   `--rl-island-bundle-map` when the layout is not the leading one).
-- In-node groups: every **TP*CP** group of the trainer (consecutive trainer
-  ranks; `tp*cp` must fit and divide a node), every rollout engine and every
-  standby-to-cell rebind stays on one node. **EP and PP groups may span
-  nodes** (ruling 2026-10-04): a PP2 trainer on `n0:0 + n1:0` or an EP2 group
-  across the two nodes is legal; EP only needs `tp*cp*ep` to divide the
-  trainer GPUs.
+- In-node groups (the DEFAULT preference, ruling 2026-10-04 v2): every
+  **TP*CP** group of the trainer (consecutive trainer ranks; `tp*cp` must fit
+  and divide a node), every rollout engine and every standby-to-cell rebind
+  stays on one node. **EP and PP groups may span nodes**: a PP2 trainer on
+  `n0:0 + n1:0` or an EP2 group across the two nodes is legal; EP only needs
+  `tp*cp*ep` to divide the trainer GPUs.
+- Explicit cross-node TP opt-ins (trainer and rollout are configured
+  separately): `--rl-allow-cross-node-tp` (or cfg `parallel.allow_cross_node_tp:
+  true`) lets the trainer TP*CP group span nodes; `--rl-allow-cross-node-engine-tp`
+  (or `parallel.allow_cross_node_engine_tp: true`) lets a rollout engine span
+  nodes as **whole-node replicas** (SGLang TP8 over 2x4: Miles starts the
+  engine with `nnodes = gpus_per_engine // num_gpus_per_node`). Either spelling
+  is forwarded to the learner, the launcher and the learner WARN, and the
+  journal `topology.layout` records `cross_node_tp` / `cross_node_engine_tp`.
+  A cross-node engine scales up/down only as one replica (all its nodes
+  together); removing a single node of it is refused. GPU-side correctness and
+  performance of cross-node engine TP are reported separately (not yet run).
+- Mixed placement never overlaps: a `(node, gpu)` slot may appear once across
+  trainer / rollout / standby; a duplicate is refused at cfg parse time.
 - Rollout and trainer may share a node on different GPUs (mixed placement,
   ruling 2026-10-04), e.g. the 2x2 cfg `T2R1S1`: trainer `["n0:0","n1:0"]`,
   rollout `[["n0:1"]]`, standby `["n1:1"]`. Non-rectangular trainers
@@ -466,7 +479,12 @@ yeto launch --training-mode rl --rl-engine ports \
   journal baseline of the previous incarnation (`gpu_pool` journal record). A
   different shape or a different uuid refuses the start; a same-shape pool on
   replaced machines is accepted only with `--rl-elastic-accept-rebind`, which
-  journals the old -> new mapping.
+  journals the old -> new mapping. After acceptance three rebind-safety checks
+  run (ruling 2026-10-04 v2): no duplicate occupation (unique uuids, none bound
+  by another active island), one role per uuid (journal `gpu_pool.roles`), and
+  no stale re-entry (a uuid still held by a live process of an older
+  incarnation, per the node marker `/tmp/yeto-rl-incarnation/<uuid>.json`,
+  refuses the start: run `yeto down` first).
 - The launcher forwards `--rl-island-gpus-per-node G` to the learner; a
   single-node island sends nothing and keeps every pre-existing behaviour.
 

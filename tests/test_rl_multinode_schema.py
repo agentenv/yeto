@@ -77,10 +77,12 @@ def test_legacy_cfg_unchanged_snapshot():
     assert {n: dataclasses.asdict(c) for n, c in configs.items()} == {
         "T4R2S2": {"name": "T4R2S2", "trainer": 4, "rollout": 2, "standby": 2, "parallel": (),
                    "rollout_engine_gpus": 1, "placement": None, "placement_slots": None,
-                   "gradient_accumulation_declared": None, "capacity": None},
+                   "gradient_accumulation_declared": None, "capacity": None,
+                   "allow_cross_node_tp": False, "allow_cross_node_engine_tp": False},
         "T4R4S0": {"name": "T4R4S0", "trainer": 4, "rollout": 4, "standby": 0, "parallel": (),
                    "rollout_engine_gpus": 1, "placement": None, "placement_slots": None,
-                   "gradient_accumulation_declared": None, "capacity": None},
+                   "gradient_accumulation_declared": None, "capacity": None,
+                   "allow_cross_node_tp": False, "allow_cross_node_engine_tp": False},
     }
     assert mn.topology_of(LEGACY) is None
     assert caps.config_rejection(configs["T4R2S2"], profile={"parameter_mode": "lora", "global_batch": 8,

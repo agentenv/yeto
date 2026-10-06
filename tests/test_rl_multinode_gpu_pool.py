@@ -219,7 +219,7 @@ def test_main_calls_the_gpu_pool_preflight_right_after_the_partial_island_check(
 
     src = inspect.getsource(entry)
     i = src.index("        refuse_partial_island_preflight(elastic, topology, miles_args, placement=launch.placement)\n")
-    j = src.index("        reconcile_gpu_pool_preflight(elastic, topology, miles_args)\n")
+    j = src.index("        reconcile_gpu_pool_preflight(elastic, topology, miles_args, placement=launch.placement)\n")
     k = src.index("        pin_placement_group_to_head(topology.gpus_per_node)\n")
     assert i < j < k
 

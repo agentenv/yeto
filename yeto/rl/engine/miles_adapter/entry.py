@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from ..algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
@@ -1092,6 +1093,23 @@ def island_layout_of(miles_args: Any, topology: Any, placement: Any = None) -> d
         layout["trainer"] = nodes * per
     bundle_map = getattr(placement, "bundle_map", None) if placement is not None else None
     layout["bundle_map"] = None if bundle_map is None else {str(k): list(v) for k, v in bundle_map.items()}
+    # ruling 2026-10-04 v2: the explicit cross-node TP opt-ins are part of the layout
+    # (journal topology.layout.cross_node_tp / cross_node_engine_tp) and WARN at startup
+    cross_tp = bool(getattr(placement, "allow_cross_node_tp", False)
+                    or getattr(miles_args, "yeto_rl_allow_cross_node_tp", False))
+    cross_engine = bool(getattr(placement, "allow_cross_node_engine_tp", False)
+                        or getattr(miles_args, "yeto_rl_allow_cross_node_engine_tp", False))
+    layout["cross_node_tp"] = int(cross_tp)
+    layout["cross_node_engine_tp"] = int(cross_engine)
+    if cross_tp:
+        logging.getLogger(__name__).warning(
+            "cross_node_tp=1: the trainer TP*CP group (tp=%s cp=%s) may span nodes "
+            "(--rl-allow-cross-node-tp); NCCL TP collectives cross the inter-node fabric",
+            layout["tp"], layout["cp"])
+    if cross_engine:
+        logging.getLogger(__name__).warning(
+            "cross_node_engine_tp=1: rollout engines may span whole nodes (sglang nnodes>1, "
+            "--rl-allow-cross-node-engine-tp); engines scale as whole replicas")
     return layout
 
 
@@ -1140,9 +1158,16 @@ def _ray_alive_nodes() -> dict[str, int]:
             for n in ray.nodes() if n.get("Alive")}
 
 
+INCARNATION_MARKER_DIR = "/tmp/yeto-rl-incarnation"
+
+
 def reconcile_gpu_pool_preflight(elastic: Any, topology: Any, miles_args: Any, *,
                                  resources: Any = None, accept_rebind: bool | None = None,
-                                 gpu_probe: Callable[[Any], Any] | None = None) -> Any:
+                                 gpu_probe: Callable[[Any], Any] | None = None,
+                                 placement: Any = None,
+                                 incarnation_probe: Callable[[Any, Any], Mapping[str, str]] | None = None,
+                                 other_islands: Mapping[str, Any] | None = None,
+                                 marker_writer: Callable[[Any, Any, str], None] | None = None) -> Any:
     """Multi-node GPU uuid reconciliation (rl-multinode-island Q6, ruling 2026-10-04),
     run right after :func:`refuse_partial_island_preflight` and before any placement
     group: ``nvidia-smi --query-gpu=index,uuid`` is collected on every island node (a
@@ -1197,10 +1222,119 @@ def reconcile_gpu_pool_preflight(elastic: Any, topology: Any, miles_args: Any, *
     cfg_named = any(u is not None for node in cfg_pool for u in node)
     source = "+".join(n for n, on in (("cfg", cfg_named), ("journal", baseline is not None)) if on) or "none"
     result = mn.reconcile_gpu_pool(declared, observed, accept_rebind=bool(accept_rebind))
-    why = controller.record_gpu_pool(result, source=source, accept_rebind=bool(accept_rebind))
+    roles: dict[str, str] = {}
+    if result.ok:
+        # Ruling 2026-10-04 v2, rebind safety: (a) duplicate occupation, (b) role conflict,
+        # (c) stale re-entry of an older incarnation's processes on the same GPUs.
+        mine = str((getattr(controller, "incarnation", None) or {}).get("id", ""))
+        why3 = None
+        try:
+            if placement is not None:
+                counts = (int(getattr(placement, "trainer_gpus", 0) or 0),
+                          int(getattr(placement, "rollout_gpus", 0) or 0),
+                          int(getattr(placement, "standby_gpus", 0) or 0))
+                roles = mn.role_uuid_map(getattr(placement, "bundle_map", None), result.flat, counts=counts)
+            why3 = mn.occupation_rejection(result.flat, roles or {u: "unassigned" for u in result.flat},
+                                           other_islands)
+            if why3 is None:
+                live = (incarnation_probe or _ray_live_incarnations)(topo, result.flat)
+                why3 = mn.stale_incarnation_rejection(
+                    tuple(u for node in (baseline or ()) for u in node), result.flat, live, mine)
+        except Exception as exc:  # noqa: BLE001 - fail closed on an unknown state
+            why3 = f"rebind safety check failed: {exc}"
+        if why3 is not None:
+            result = mn.ReconcileResult(ok=False, observed=result.observed, rebind=result.rebind,
+                                        mapping=result.mapping, diffs=result.diffs, error=why3)
+    why = controller.record_gpu_pool(result, source=source, accept_rebind=bool(accept_rebind), roles=roles)
     if why is not None:
         refuse(getattr(controller, "recovery_required", None) or f"gpu_pool: {why}")
+    mine = str((getattr(controller, "incarnation", None) or {}).get("id", ""))
+    if mine:
+        try:  # mark every bound GPU with this incarnation (read back by the next incarnation's (c))
+            (marker_writer or _ray_write_incarnation_markers)(topo, result.observed, mine)
+        except Exception as exc:  # noqa: BLE001 - a missing marker only weakens the next check
+            logging.getLogger(__name__).warning("incarnation markers not written: %r", exc)
     return result
+
+
+def _marker_rows(uuids: Sequence[str], marker_dir: str = INCARNATION_MARKER_DIR) -> dict[str, str]:
+    """uuid -> incarnation id for every marker in ``marker_dir`` whose owning pid is alive."""
+    import os as _os
+
+    out: dict[str, str] = {}
+    for uuid in uuids:
+        path = Path(marker_dir) / f"{uuid}.json"
+        if not path.exists():
+            continue
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(info.get("pid", 0))
+            _os.kill(pid, 0)  # raises when the process is gone
+        except (OSError, ValueError, TypeError):
+            continue
+        out[uuid] = str(info.get("incarnation", ""))
+    return out
+
+
+def _write_markers(uuids: Sequence[str], incarnation: str, pid: int,
+                   marker_dir: str = INCARNATION_MARKER_DIR) -> None:
+    Path(marker_dir).mkdir(parents=True, exist_ok=True)
+    for uuid in uuids:
+        (Path(marker_dir) / f"{uuid}.json").write_text(
+            json.dumps({"incarnation": incarnation, "pid": int(pid)}), encoding="utf-8")
+
+
+def _ray_live_incarnations(topology: Any, observed_flat: Sequence[str]) -> dict[str, str]:
+    """(c) stale re-entry probe: per-node Ray tasks read the incarnation marker files
+    (``INCARNATION_MARKER_DIR/<uuid>.json``, written by :func:`_ray_write_incarnation_markers`)
+    and keep those whose recorded pid is still alive on that node. Without ``ray``
+    importable there is no Ray cluster (no old Ray process can hold a GPU): {}."""
+    try:
+        import ray
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+    except ImportError:
+        return {}
+
+    nodes = [n for n in ray.nodes() if n.get("Alive") and (n.get("Resources") or {}).get("GPU", 0)]
+
+    @ray.remote(num_cpus=0, num_gpus=0)
+    def _read(uuids: list[str]) -> dict[str, str]:
+        return _marker_rows(uuids)
+
+    refs = [_read.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+        node_id=n["NodeID"], soft=False)).remote(list(observed_flat)) for n in nodes]
+    live: dict[str, str] = {}
+    for rows in ray.get(refs, timeout=120):
+        live.update(rows)
+    return live
+
+
+def _ray_write_incarnation_markers(topology: Any, observed: Sequence[Sequence[str]], incarnation: str) -> None:
+    """Write this incarnation's marker for every bound GPU on its node (the learner pid on
+    the head stands for the whole incarnation: its Ray job owns every worker process)."""
+    import os as _os
+
+    try:
+        import ray
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+    except ImportError:
+        return
+    nodes = [n for n in ray.nodes() if n.get("Alive") and (n.get("Resources") or {}).get("GPU", 0)]
+    head_id, _ip = _ray_head_node(nodes)
+    order = sorted(nodes, key=lambda n: (0 if n["NodeID"] == head_id else 1,
+                                         str(n.get("NodeManagerAddress")), str(n["NodeID"])))
+    pid = _os.getpid()
+
+    @ray.remote(num_cpus=0, num_gpus=0)
+    def _write(uuids: list[str], inc: str, owner: int) -> None:
+        import os as _o
+
+        _write_markers(uuids, inc, _o.getppid() if owner < 0 else owner)
+
+    refs = [_write.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+        node_id=n["NodeID"], soft=False)).remote(list(uuids), incarnation, pid)
+            for n, uuids in zip(order, observed)]
+    ray.get(refs, timeout=120)
 
 
 def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
@@ -1376,7 +1510,7 @@ def run_ports_island(
         refuse_partial_island_preflight(elastic, topology, miles_args, placement=launch.placement)
         # Q6 (2026-10-04): runtime GPU uuid reconciliation, journal gpu_pool; a changed
         # pool is accepted only with --rl-elastic-accept-rebind (fail closed otherwise)
-        reconcile_gpu_pool_preflight(elastic, topology, miles_args)
+        reconcile_gpu_pool_preflight(elastic, topology, miles_args, placement=launch.placement)
         # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
         pin_placement_group_to_head(topology.gpus_per_node)
 
