@@ -32,8 +32,9 @@ FN_4L_SNAPSHOT = (f"{os.environ.get('FN_4L_HUB', FS_HUB)}/models--CharyZeng--Qwe
 
 def fnrun_cli(case: str, *, seed: int | None = None, total_steps: int | None = None,
               extra: tuple[str, ...] = ()) -> list[str]:
-    """fnrun.sh's launch tokens (no cloud call), minus ``launch``, with overrides."""
-    env = {k: v for k, v in os.environ.items() if k not in ("ATTEST", "COSTS", "IMAGE")}
+    """fnrun.sh's launch tokens (no cloud call), minus ``launch``, with overrides.
+    BOOT_ONLY is dropped: the fingerprint is always the training (fna) argv."""
+    env = {k: v for k, v in os.environ.items() if k not in ("ATTEST", "COSTS", "IMAGE", "BOOT_ONLY")}
     if total_steps is not None:
         env["STEPS"] = str(total_steps)
     out = subprocess.run(["bash", os.path.join(HERE, "fnrun.sh"), case], env=env, check=True,

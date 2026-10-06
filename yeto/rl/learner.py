@@ -167,6 +167,7 @@ def parse_args(argv=None):
     # Print the attestation runtime_fingerprint (same Miles argv as the island)
     # and exit before Ray/GPU (ports only).
     parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
+    parser.add_argument("--rl-boot-only", action="store_true")
     # E2 plan-v2 §0 determinism: Megatron --deterministic-mode + DETERMINISM_ENV
     # in the learner and every Ray worker; off by default.
     parser.add_argument("--rl-deterministic-trainer", action="store_true")
@@ -1946,6 +1947,52 @@ def print_attestation_fingerprint(args, ports_launch, out=None) -> bool:
     return True
 
 
+BOOT_ONLY_MARKER = "FN_BOOT_ONLY_OK"
+BOOT_ONLY_PATH = "~/yeto-rl/boot_only.json"
+
+
+def probe_ref_load(args, model_path) -> dict:
+    """``--rl-boot-only``: the --megatron-ref-load check result, recorded, never raised."""
+    from .engine.run_config import _resolve_ref_load
+
+    configured = getattr(args, "megatron_ref_load", None)
+    if configured is None:
+        return {"configured": None, "present": False, "reason": "not configured"}
+    try:
+        return {"configured": configured, "present": True,
+                "resolved": _resolve_ref_load(args, model_path), "reason": None}
+    except ValueError as exc:
+        return {"configured": configured, "present": False, "reason": str(exc)}
+
+
+def write_boot_only_marker(args, ports_launch, run_config, ref_probe, *,
+                           path=None, out=None) -> dict:
+    """``--rl-boot-only`` (S11 fnboot): every torch_dist-free check passed (provider
+    view, Miles argv built + parsed, algorithm verified); record it and return so the
+    learner exits 0 without training."""
+    from .engine.miles_adapter.entry import ports_runtime_fingerprint
+
+    present = bool(ref_probe and ref_probe["present"])
+    record = {
+        "event": "rl_boot_only",
+        "marker": BOOT_ONLY_MARKER,
+        "learner_id": getattr(args, "learner_id", None),
+        "model_recipe": getattr(getattr(run_config, "model_recipe", None), "name", None),
+        "ref_load": ref_probe,
+        "ref_load_present": present,
+        "miles_argc": len(ports_launch.argv),
+        "runtime_fingerprint": ports_runtime_fingerprint(ports_launch),
+    }
+    target = Path(os.path.expanduser(path or BOOT_ONLY_PATH))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    stream = out or sys.stdout
+    print(json.dumps(record, sort_keys=True), file=stream, flush=True)
+    print(f"{BOOT_ONLY_MARKER} ref_load_present={str(present).lower()} "
+          f"recipe={record['model_recipe']}", file=stream, flush=True)
+    return record
+
+
 def run_miles(
     args,
     *,
@@ -2150,6 +2197,8 @@ def run_miles(
         from .engine.miles_adapter.config import parse_miles_args
         from .engine.run_config import resolve_rl_run_config
 
+        boot_only = bool(getattr(args, "rl_boot_only", False))
+        ref_probe = probe_ref_load(args, model_path) if boot_only else None
         run_config = resolve_rl_run_config(
             args,
             model_path=model_path,
@@ -2162,6 +2211,9 @@ def run_miles(
             # mapping upstream.
             target_modules=canonical_targets,
             yeto_policy_sync=yeto_policy_sync,
+            # boot-only: the ref-load was probed (and recorded) above; a
+            # missing torch_dist must not stop the argv build.
+            verify_ref_load=not boot_only,
         )
         ports_launch = build_ports_launch(args, run_config, extra_argv)
         ports_algorithm = ports_launch.algorithm
@@ -2170,6 +2222,9 @@ def run_miles(
         verify_ports_algorithm(args, miles_args, ports_launch)
         if print_attestation_fingerprint(args, ports_launch):
             return  # CPU entry: nothing below (Ray, GPU, sync) runs
+        if boot_only:
+            write_boot_only_marker(args, ports_launch, run_config, ref_probe)
+            return  # boot-only: exit 0 before Ray/GPU work; no training
     else:
         miles_argv = build_miles_argv(
             args,

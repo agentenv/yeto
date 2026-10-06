@@ -1490,6 +1490,9 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                                  or any(c.isspace() for c in ref_load)):
         raise ValueError("--rl-megatron-ref-load needs --rl-engine ports and an absolute path "
                          "without whitespace")
+    if getattr(args, "rl_boot_only", False) and (
+            rl_engine != "ports" or not getattr(args, "rl_single_island_no_sync", False)):
+        raise ValueError("--rl-boot-only needs --rl-engine ports and --rl-single-island-no-sync")
     if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
         raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
@@ -1630,6 +1633,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += f" --megatron-ref-load {shlex.quote(args.rl_megatron_ref_load)}"
     if getattr(args, "rl_print_attestation_fingerprint", False):
         flags += " --rl-print-attestation-fingerprint"
+    if getattr(args, "rl_boot_only", False):
+        flags += " --rl-boot-only"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "

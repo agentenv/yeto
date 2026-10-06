@@ -12,7 +12,9 @@
 # mounted at /mnt/yeto-models; the learner refuses a missing/non-release dir.
 # env: IMAGE (digest-pinned --rl-image), ATTEST (attestation json; absent = nothing certified),
 #      COSTS (5.7 edge cost table; absent = recommend holds with "unknown transition cost"),
-#      STEPS (default 12), PREFIX (cluster prefix, default fn).
+#      STEPS (default 12), PREFIX (cluster prefix, default fn),
+#      BOOT_ONLY=1 (fn8s only: append --rl-boot-only -- S11 fnboot provisions the FS node, the learner
+#      checks everything torch_dist-free, writes FN_BOOT_ONLY_OK and exits 0 so --keep keeps the cluster).
 set -eu
 C=${1:?case}; D=$(cd "$(dirname "$0")" && pwd)
 STORE="--model-store nebius-fs://computefilesystem-e00nm64w4cqpkqd0ch"
@@ -28,7 +30,9 @@ case $C in
         GPU=nebius:1x8x${FN_GPU:-h200}@eu-north1   # FN_GPU=h100: 80GB, see infra-drafts/FN-A-PRELAUNCH-REVIEW.md "H100 变体"
         MODEL="--model CharyZeng/Qwen3.8-Flash-Next-4layer --model-revision d19a6b60c0df8f90faf92c7c592b37df2e15b060 --rl-megatron-ref-load $TD/qwen3.8-flash-next-4layer_torch_dist"
         PAR="--tensor-parallel 2 --pipeline-parallel 2 --expert-parallel 4 --rollout-num-gpus-per-engine 4"
-        EX="--rl-placement colocated --rl-offload-train --sglang-mem-fraction-static 0.7 --rl-observe-timeline";;
+        EX="--rl-placement colocated --rl-offload-train --sglang-mem-fraction-static 0.7 --rl-observe-timeline"
+        [ "${BOOT_ONLY:-0}" = 1 ] && EX="$EX --rl-boot-only";;
   *) echo "unknown case $C" >&2; exit 64;;
 esac
+[ "${BOOT_ONLY:-0}" = 1 ] && [ $C != fn8s ] && { echo "abort: BOOT_ONLY=1 only applies to fn8s" >&2; exit 64; }
 echo "launch --controller local --training-mode rl --rl-engine ports --rl-single-island-no-sync --on-demand --gpu $GPU --cluster-prefix ${PREFIX:-fn} --no-island-relaunch ${IMAGE:+--rl-image $IMAGE }$STORE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function gsm8k_reward:score $LORA $PAR --fragments 1 --pipeline 1 --rollout-batch-size 8 --n-samples-per-prompt 8 --rollout-max-response-len 1024 --seq-len 2048 --inner-lr 1e-5 --seed 17 --trust-remote-code --total-steps ${STEPS:-12} $EX"

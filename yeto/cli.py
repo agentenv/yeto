@@ -319,6 +319,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "prints the attestation runtime_fingerprint as one JSON line and exits "
                     "before Ray/GPU work. NOTE: the launcher still provisions the island as declared, "
                     "so pass CPU-only resources to avoid paying for GPUs")
+    rl.add_argument("--rl-boot-only", action="store_true",
+                    help="ports, single island no-sync: the learner runs every check that needs no "
+                    "torch_dist (model provider view, Miles argv build + parse, --rl-megatron-ref-load "
+                    "probe), writes ~/yeto-rl/boot_only.json + a FN_BOOT_ONLY_OK line and exits 0 "
+                    "WITHOUT training, so the job SUCCEEDS and --keep keeps the cluster (S11 fnboot)")
     rl.add_argument("--rl-lora-dropout", type=float, default=None, metavar="P",
                     help="ports LoRA: training-time LoRA dropout (default 0). Trainer DP-change "
                     "edges refuse dropout > 0; same-shape rebuild restores its RNG")

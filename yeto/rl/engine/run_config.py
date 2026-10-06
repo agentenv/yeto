@@ -493,6 +493,7 @@ def resolve_rl_run_config(
     provider,
     target_modules: list[str],
     yeto_policy_sync: bool = True,
+    verify_ref_load: bool = True,
 ) -> RLRunConfig:
     """Validate and resolve one RL run, independent of the engine.
 
@@ -650,7 +651,8 @@ def resolve_rl_run_config(
     elif parameter_mode == "full":
         standby_gpus = 0
 
-    ref_load = _resolve_ref_load(args, model_path)
+    ref_load = (_resolve_ref_load(args, model_path) if verify_ref_load
+                else (getattr(args, "megatron_ref_load", None) or str(model_path)))
     global_batch = args.groups_per_round * args.samples_per_group // args.optimizer_steps
     if global_batch % data_parallel:
         raise ValueError("Miles global batch must divide evenly across DP ranks")
