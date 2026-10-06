@@ -283,6 +283,13 @@ class EventTape:
         append_record(self.path, record)
 
 
+# fleet-dashboard 1.3: rollout batch summary keys copied into rl_round_trained.
+BATCH_SUMMARY_KEYS = (
+    "adv_mean", "adv_std", "resp_len_mean", "resp_len_p95", "truncated_frac",
+    "reward_p10", "reward_p50", "reward_p90",
+)
+
+
 def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
     return {
         "active_groups": float(len(batch.groups)),
@@ -426,6 +433,7 @@ class IslandDriver:
             feed(record)  # D2: in-memory mirror, independent of the tape path
 
     def phase(self, name: str, **fields: Any) -> None:
+        self._last_phase = (name, fields.get("rollout_id"))
         if self.observe:
             self._close_span()
             self._open_span = (name, self.clock(), fields.get("rollout_id"))
@@ -872,6 +880,22 @@ class IslandDriver:
             **_dynamic_filter_counts(batch),
         )
 
+    def _train_fields(self, batch, metrics, train_seconds: float) -> dict[str, Any]:
+        """fleet-dashboard 1.2/1.3: round training stats for ``rl_round_trained``."""
+        probe = getattr(self.trainer, "round_metrics", None)
+        train_metrics = dict(probe() or {}) if callable(probe) else {}
+        tokens = sum(int(g.token_count) for g in batch.groups)
+        fields: dict[str, Any] = {
+            "train_step": metrics.train_step,
+            "train_metrics": {str(k): float(v) for k, v in train_metrics.items()},
+            "step_seconds": float(train_seconds),
+            "tok_per_s": tokens / train_seconds if train_seconds > 0 else None,
+        }
+        summary = getattr(batch, "batch_summary", None) or {}
+        for key in BATCH_SUMMARY_KEYS:
+            fields[key] = summary.get(key)
+        return fields
+
     def _mismatch_fields(self) -> dict[str, Any]:
         """A5: mismatch metrics with profile/epoch/transport labels; nothing when absent."""
         probe = getattr(self.trainer, "algorithm_metrics", None)
@@ -881,6 +905,42 @@ class IslandDriver:
         return {"mismatch": values, **{f"label/{k}": v for k, v in self._labels().items()}}
 
     load_sample_interval_s = 5.0
+    # fleet-dashboard 2.1/2.2 (opt-in; None = not started, tape unchanged).
+    heartbeat_interval_s: float | None = None
+    resource_sample_interval_s: float | None = None
+    _resource_sampler: Any = None
+
+    def _heartbeat_state(self) -> dict[str, Any]:
+        span = getattr(self, "_last_phase", None) or (None, None)
+        return {
+            "phase": span[0],
+            "rollout_id": span[1],
+            "policy_version": self.published_version,
+            "trained_version": self.trained_version,
+            "rounds_completed": self.rounds_completed,
+            **self._labels(),
+        }
+
+    @contextmanager
+    def _telemetry_threads(self):
+        """2.1/2.2: heartbeat + resource sampler for the duration of ``run``."""
+        from .telemetry import HeartbeatThread, ResourceSampler
+
+        threads = []
+        try:
+            if self.heartbeat_interval_s:
+                threads.append(HeartbeatThread(
+                    self.emit, self._heartbeat_state, interval_s=self.heartbeat_interval_s,
+                    clock=self.clock).start())
+            if self.resource_sample_interval_s:
+                self._resource_sampler = ResourceSampler(
+                    self.emit, interval_s=self.resource_sample_interval_s, clock=self.clock,
+                    labels=self._labels)
+                threads.append(self._resource_sampler.start())
+            yield
+        finally:
+            for thread in threads:
+                thread.stop()
 
     @contextmanager
     def _load_sampler(self, rollout_id: int):
@@ -896,6 +956,13 @@ class IslandDriver:
         def loop() -> None:
             while not stop.wait(self.load_sample_interval_s):
                 sample = probe()
+                sampler = getattr(self, "_resource_sampler", None)
+                if sample is not None and sampler is not None:
+                    # 2.2: peaks come from the resource sampler's NVML probe
+                    sample = dict(sample)
+                    for key, value in sampler.take_peaks().items():
+                        if sample.get(key) is None:
+                            sample[key] = value
                 if sample is not None:
                     self.emit("rl_load_sample", rollout_id=rollout_id, **sample,
                               t=self.clock(), profile_hash=self.profile_hash,
@@ -1069,6 +1136,8 @@ class IslandDriver:
             submitted_groups=getattr(batch, "submitted_groups", None),
             aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
+            # fleet-dashboard 1.2/1.3 (optional fields, None when unreported)
+            **self._train_fields(batch, metrics, train_seconds),
             # rl-infra-spec 4.4/A6b: the rollout data cursor after this batch (only
             # when the rollout reports it, i.e. --rl-elastic metadata; else absent)
             **({"data_cursor": dict(batch.data_cursor)}
@@ -1317,6 +1386,10 @@ class IslandDriver:
                   data_cursor=dict(landed))
 
     def run(self) -> TrainableState:
+        with self._telemetry_threads():
+            return self._run()
+
+    def _run(self) -> TrainableState:
         self.handshake()
         self._refuse_if_recovery_required()
         try:

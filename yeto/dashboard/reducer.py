@@ -251,15 +251,9 @@ class Reducer:
                                                  "round": r.get("rollout_id"),
                                                  "error": r.get("error") or r.get("cause")})
         elif event == "rl_cell_snapshot":
-            cells = r.get("cells")
-            if isinstance(cells, list):
-                isl["cells"] = [{"cell": c.get("cell_id", c.get("id")), "role": c.get("role"),
-                                 "gpus": c.get("gpus"), "state": c.get("state", c.get("status"))}
-                                for c in cells if isinstance(c, dict)]
-                isl["cells_source"] = "rl_cell_snapshot"
+            self._cell_snapshot(isl, r)
         elif event == "rl_reconfig_phase":
-            self._tx_phase(isl, r.get("txn_id", r.get("tx_id")), r.get("phase"), ts,
-                           result=r.get("result"), error=r.get("error"))
+            self._reconfig_phase(isl, r, ts)
         elif event == "dashboard_source_lost":
             isl["source_lost"] = {"ts": ts, "error": r.get("error"), "recovered": False}
         elif event == "dashboard_source_restored":
@@ -322,7 +316,11 @@ class Reducer:
         self._touch(isl, None)
         kind = r.get("kind")
         tx = r.get("tx_id")
-        if kind == "request":
+        if kind == "rl_cell_snapshot":  # 5.1 controller event journaled (preferred source)
+            self._cell_snapshot(isl, r)
+        elif kind == "rl_reconfig_phase":  # 5.2
+            self._reconfig_phase(isl, r, ts)
+        elif kind == "request":
             body = r.get("body") if isinstance(r.get("body"), dict) else {}
             t = self._tx(isl, tx)
             t.update({"request_id": r.get("request_id"), "kind": body.get("kind", "rollout-only"),
@@ -331,6 +329,8 @@ class Reducer:
             phase = r.get("phase")
             if tx is None and r.get("scope") == "island":
                 tx = "island-%s" % r.get("seq")
+            if tx is not None and isl["transactions"].get(str(tx), {}).get("source") == "rl_reconfig_phase":
+                return  # rl_reconfig_phase events own this transaction
             self._tx_phase(isl, tx, phase, ts, error=r.get("error"), scope=r.get("scope"),
                            request_id=r.get("request_id"))
             if phase == "RECOVERY_REQUIRED":
@@ -348,6 +348,37 @@ class Reducer:
         elif tx is not None and kind in ("fork_op", "recovery", "watchdog_action", "drain_timeout"):
             t = self._tx(isl, tx)
             t["notes"].append({"ts": ts, "kind": kind})
+
+    def _cell_snapshot(self, isl: dict, r: dict) -> None:
+        cells = r.get("cells")
+        if not isinstance(cells, list):
+            return
+        isl["cells"] = [{"cell": c.get("cell_id", c.get("id")), "role": c.get("role"),
+                         "gpus": c.get("gpus"), "state": c.get("state", c.get("status")),
+                         **{k: c[k] for k in ("node", "gpu_uuid", "config", "epoch")
+                            if c.get(k) is not None}}
+                        for c in cells if isinstance(c, dict)]
+        if r.get("txn_id") is not None:
+            isl["cells_txn"] = r.get("txn_id")
+        isl["cells_source"] = "rl_cell_snapshot"
+
+    def _reconfig_phase(self, isl: dict, r: dict, ts: float | None) -> None:
+        tx = r.get("txn_id", r.get("tx_id"))
+        if tx is None:
+            return
+        ts = finite(r.get("t")) or ts
+        t = self._tx(isl, tx)
+        if t.get("source") != "rl_reconfig_phase":  # drop journal-derived phases once
+            t.update({"source": "rl_reconfig_phase", "phases": [], "result": None})
+        t["source_config"], t["target_config"] = r.get("source"), r.get("target")
+        t["expected_epoch"] = r.get("expected_epoch")
+        reason = r.get("reason") or r.get("error")
+        self._tx_phase(isl, tx, r.get("phase"), ts, result=r.get("result"), error=reason,
+                       request_id=r.get("request_id"))
+        if (r.get("result") or r.get("phase")) == "RECOVERY_REQUIRED" and not any(
+                a.get("tx_id") == str(tx) for a in isl["recovery_required"]):
+            isl["recovery_required"].append({"ts": ts, "source": "rl_reconfig_phase",
+                                             "tx_id": str(tx), "round": None, "error": reason})
 
     def _tx(self, isl: dict, tx: Any) -> dict:
         key = str(tx)

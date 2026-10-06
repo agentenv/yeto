@@ -197,6 +197,69 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
     }
 
 
+def _quantile(values: Sequence[float], q: float) -> float | None:
+    """Linear-interpolated quantile (numpy default); None when empty."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    pos = (len(ordered) - 1) * q
+    lo = math.floor(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+
+def _advantage(sample: Any) -> float | None:
+    for name in ("advantage", "advantages"):
+        value = getattr(sample, name, None)
+        if value is None:
+            value = (getattr(sample, "metadata", None) or {}).get(name)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = statistics.fmean(value) if value else None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+    return None
+
+
+def batch_summary(args: Any, samples: Sequence[Any]) -> dict[str, float | None]:
+    """fleet-dashboard 1.3: summary of the trained samples of one rollout.
+
+    Advantages are computed train-side by Miles; ``adv_*`` is filled only when
+    the samples carry an ``advantage`` value (else None, never inferred).
+    """
+    lengths = [
+        float(getattr(s, "effective_response_length", None) or getattr(s, "response_length", 0) or 0)
+        for s in samples
+    ]
+    rewards = [r for r in (_reward(args, s) for s in samples) if math.isfinite(r)]
+    advs = [a for a in (_advantage(s) for s in samples) if a is not None]
+    n = len(samples)
+    return {
+        "adv_mean": statistics.fmean(advs) if advs else None,
+        "adv_std": statistics.pstdev(advs) if advs else None,
+        "resp_len_mean": statistics.fmean(lengths) if lengths else None,
+        "resp_len_p95": _quantile(lengths, 0.95),
+        "truncated_frac": sum(_status(s) == "truncated" for s in samples) / n if n else None,
+        "reward_p10": _quantile(rewards, 0.10),
+        "reward_p50": _quantile(rewards, 0.50),
+        "reward_p90": _quantile(rewards, 0.90),
+    }
+
+
+BATCH_SUMMARY_ENV = "YETO_RL_BATCH_SUMMARY"
+
+
+def batch_summary_enabled(args: Any) -> bool:
+    """Opt-in (``--rl-observe-timeline`` sets ``args.yeto_rl_observe_timeline``,
+    or ``YETO_RL_BATCH_SUMMARY=1``): the default metadata key set is unchanged."""
+    return bool(getattr(args, "yeto_rl_observe_timeline", False)) or os.environ.get(
+        BATCH_SUMMARY_ENV) == "1"
+
+
 def build_metadata(
     args: Any, all_samples: Iterable[Sequence[Any]], sink: str | None = None
 ) -> dict[str, Any]:
@@ -214,6 +277,7 @@ def build_metadata(
     tool_wait = 0.0
     rollout_id = None
     groups, filtered, aborted = [], 0, 0
+    trained_samples: list[Any] = []
     for group in all_samples:
         samples = _flat(group)
         if not samples:
@@ -229,6 +293,7 @@ def build_metadata(
                 # terminal ledger state ``filtered`` (alignment A2/F5)
                 record["filtered_samples"] = group_filtered_samples(group)
             groups.append(record)
+            trained_samples.extend(samples)
         else:
             filtered += 1
     if len(groups) != len(trained):
@@ -253,6 +318,8 @@ def build_metadata(
         # over every generated sample (Miles Sample.non_generation_time).
         # Absent when no sample reported any: the default key set is unchanged.
         payload["tool_wait_seconds"] = tool_wait
+    if trained_samples and batch_summary_enabled(args):
+        payload["batch_summary"] = batch_summary(args, trained_samples)
     harness = harness_counters(all_samples)
     if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
         payload.update(harness)

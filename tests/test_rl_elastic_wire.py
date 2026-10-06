@@ -263,7 +263,7 @@ def test_auto_state_survives_restart(tmp_path):
 
 
 def _strip(evs):
-    return [{k: v for k, v in e.items() if k not in ("time_unix", "train_seconds", "rollout_seconds")} for e in evs]
+    return [{k: v for k, v in e.items() if k not in ("time_unix", "train_seconds", "rollout_seconds", "step_seconds", "tok_per_s")} for e in evs]
 
 
 @pytest.mark.parametrize("observe", [True, False])

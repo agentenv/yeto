@@ -365,6 +365,10 @@ class IslandController:
         self.incarnation = {"pid": _os.getpid(), "id": _uuid.uuid4().hex[:12],
                             "wall_time": self._wall()}
         self._watchdog_fired = threading.Event()
+        # dashboard 5.1/5.2: optional controller event outlet (off by default; replay
+        # never emits — only live transitions call _emit_ctrl_event).
+        self._event_sink: Callable[..., Any] | None = None
+        self._journal_events = False
         self._replay()
         if restored is not None:
             self._record("checkpoint_store", tx_id=None, action="restore", store=str(self.checkpoint_store),
@@ -628,6 +632,7 @@ class IslandController:
             pass
         self._record("node_lost", tx_id=None, topology=list(self.topology or ()), alive=alive, error=why)
         self._enter_recovery(None, f"node_lost: {why}; the island does not run on fewer nodes")
+        self._emit_cell_snapshot("node_lost")
         return self.recovery_required
 
     # ----------------------------------------------- GPU pool binding (Q6, 2026-10-04)
@@ -657,6 +662,7 @@ class IslandController:
                      accepted=bool(result.ok), error=result.error)
         if result.ok:
             self.sync_checkpoint_store("gpu_pool")
+            self._emit_cell_snapshot("gpu_pool:rebind" if result.rebind else "gpu_pool")
             return None
         # Fail closed for this incarnation (admission closed, the entry exits), but NOT
         # a journal terminal: unlike node loss, a changed pool is bound by an explicit
@@ -665,6 +671,7 @@ class IslandController:
         self.recovery_required = (f"gpu_pool: {result.error}; this incarnation refuses to "
                                   "start on an unreconciled GPU pool")
         self.admission_open = False
+        self._emit_cell_snapshot("gpu_pool:rejected")
         return result.error
 
     # ------------------------------------------------ checkpoint store (Q4, C5)
@@ -741,12 +748,68 @@ class IslandController:
         """E3 (4.7): wired by compose_island once the trainer/pool exist."""
         self._trainer_edges = provider
 
+    # ------------------------------------------- dashboard events (5.1 / 5.2)
+    def set_event_sink(self, sink: Callable[..., Any] | None, *, journal: bool = False) -> None:
+        """Wire the ``rl_cell_snapshot`` / ``rl_reconfig_phase`` outlet: ``sink(event,
+        **fields)`` (e.g. ``EventTape.emit``/``driver.emit``) and/or, with ``journal=True``,
+        one journal record of kind ``event`` per emission. Off by default."""
+        self._event_sink = sink
+        self._journal_events = bool(journal)
+
+    def _emit_ctrl_event(self, event: str, **fields: Any) -> None:
+        if self._journal_events:
+            self._record(event, **fields)
+        sink = self._event_sink
+        if sink is not None:
+            try:
+                sink(event, **fields)
+            except Exception:  # noqa: BLE001 - observability never fails a transaction
+                pass
+
+    def cell_snapshot(self) -> list[dict[str, Any]]:
+        """Cells of the committed config: one per accepted ``gpu_pool`` uuid (role,
+        node index, uuid) plus one per committed rollout member (engine id)."""
+        epochs = self.journal.epochs
+        state = "recovery_required" if self.recovery_required else "running"
+        common = {"config": epochs.config_id, "epoch": epochs.config_epoch}
+        cells: list[dict[str, Any]] = []
+        pool = next((r for r in reversed(self.journal.records)
+                     if r.get("kind") == "gpu_pool"), None)
+        if pool is not None:
+            roles = pool.get("roles") or {}
+            for node, uuids in enumerate(pool.get("uuids") or []):
+                for u in uuids:
+                    cells.append({"cell_id": str(u), "role": roles.get(u), "node": node,
+                                  "gpu_uuid": str(u), "gpus": 1,
+                                  "state": state if pool.get("accepted") else "rejected", **common})
+        for m in sorted(epochs.members or ()):
+            cells.append({"cell_id": str(m), "role": "rollout", "node": None, "gpu_uuid": None,
+                          "gpus": None, "state": state, **common})
+        return cells
+
+    def _emit_cell_snapshot(self, cause: str, tx_id: str | None = None) -> None:
+        if self._event_sink is None and not self._journal_events:
+            return
+        self._emit_ctrl_event("rl_cell_snapshot", tx_id=tx_id, txn_id=tx_id, cause=cause,
+                              t=self._wall(), cells=self.cell_snapshot())
+
     def _phase(self, tx: _Tx, phase: str, **fields: Any) -> None:
         with self._watchdog_lock:  # the watchdog reads tx.phase under this lock
             tx.phase = phase
         self._record("phase", tx_id=tx.tx_id, request_id=tx.request_id, phase=phase,
                      config_epoch=self.journal.epochs.config_epoch,
                      fork_epoch=self._fork_epoch, **fields)
+        if self._event_sink is not None or self._journal_events:
+            terminal = phase in TERMINAL or phase == COMMITTED
+            self._emit_ctrl_event(
+                "rl_reconfig_phase", tx_id=tx.tx_id, txn_id=tx.tx_id, request_id=tx.request_id,
+                source=tx.plan.source, target=tx.plan.target, phase=phase,
+                result=phase if terminal else None, t=self._wall(),
+                expected_epoch=tx.plan.expected_config_epoch,
+                config_epoch=self.journal.epochs.config_epoch,
+                reason=fields.get("error") or fields.get("reason"))
+            if phase in TERMINAL:
+                self._emit_cell_snapshot("tx_end:" + phase, tx.tx_id)
         if phase in (COMMITTED, SUCCEEDED):
             self.sync_checkpoint_store(phase)  # Q4 (C5): after the durable CAS / cut commit
         self._maybe_test_kill(phase)
