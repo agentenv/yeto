@@ -10,7 +10,9 @@ set -u
 C=$1; P=$2; HARD=$3; WD=${4:-$(( $3 + 300 ))}; CP=${CLUSTER_PREFIX:-$P}
 D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$D/../.." && pwd); B=${RUN_ROOT:-/home/michael/work/s1-runs}; R=$B/$P
 SKY=/home/michael/work/gpu-head/venv/bin/sky; PY=/home/michael/work/gpu-head/venv/bin/python
-IMAGE=${IMAGE:-docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9}
+# default --rl-image = the snapshot's own pin (yeto.rl.MILES_NEXT_IMAGE); a mismatch makes the sky setup take the slow clone+pip path (~8 min, s1-mn-20261004d)
+IMAGE=${IMAGE:-$(cd "$REPO" && PYTHONPATH=. /usr/bin/python3 -c "import yeto.rl as r; print(r.MILES_NEXT_IMAGE if r.MILES_NEXT_IMAGE.startswith('docker:') else 'docker:'+r.MILES_NEXT_IMAGE)" 2>/dev/null)}
+[ -n "$IMAGE" ] || { echo "abort: could not resolve MILES_NEXT_IMAGE from $REPO"; exit 65; }
 T=$(ps -u michael -L -o pid= | wc -l); if [ "$T" -ge ${THREAD_MAX:-2900} ]; then echo "abort: $T user threads (max ${THREAD_MAX:-2900})"; exit 3; fi
 ELASTIC="--rl-placement fixed-partition --rl-rollout-gpus 1 --rl-elastic --rl-elastic-resources $D/resources-2x1.json --rl-elastic-initial-config T1R1S0 --rl-observe-timeline"
 case $C in

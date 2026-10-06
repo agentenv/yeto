@@ -22,6 +22,30 @@ from typing import Any
 
 _SLOT_RE = re.compile(r"^n(?P<node>\d+):(?P<gpu>\d+)$")
 
+# Q1/Q3 user ruling 2026-10-04: one learner spans several nodes with several
+# GPUs each; the trainer's EP and PP groups MAY cross nodes, TP (x CP) stays
+# inside a node by default. The in-node group is therefore ``tp*cp`` (Megatron
+# rank order tp-cp-ep-dp-pp puts TP/CP innermost, so consecutive trainer ranks
+# form the TP*CP group), and only that group is checked against node borders.
+CROSS_NODE_DIMS: frozenset[str] = frozenset({"ep", "pp"})
+IN_NODE_DIMS: tuple[str, ...] = ("tp", "cp")
+
+
+def node_parallel_of(dims: Mapping[str, int]) -> int:
+    """Size of the in-node trainer group (``tp*cp``) from a parallel dims map."""
+    out = 1
+    for dim in IN_NODE_DIMS:
+        out *= max(1, int(dims.get(dim, 1) or 1))
+    return out
+
+
+def trainer_replica_gpus(dims: Mapping[str, int]) -> int:
+    """GPUs of the smallest trainer model replica: ``tp*cp*ep*pp`` (D8 min_nodes)."""
+    out = 1
+    for dim in ("tp", "cp", "ep", "pp"):
+        out *= max(1, int(dims.get(dim, 1) or 1))
+    return out
+
 
 class TopologyError(ValueError):
     """Illegal node topology or a placement entry that cannot be resolved."""
@@ -174,38 +198,42 @@ def rectangular_trainer(slots: Sequence[tuple[int, int]]) -> tuple[int, int]:
     return len(counts), sizes.pop()
 
 
-def node_placement_rejection(slots: Mapping[str, Any], *, model_parallel: int = 1,
-                             expert_parallel: int = 1, gpus_per_engine: int | None = None,
-                             ) -> str | None:
+def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | None = None,
+                             model_parallel: int = 1, expert_parallel: int = 1,
+                             gpus_per_engine: int | None = None) -> str | None:
     """Design D4 rules on a normalized placement; None when legal.
 
-    1. each rollout engine on one node; 2. each trainer model-parallel group
-    (tp*pp*cp consecutive trainer slots) on one node; 3. EP groups whole-node
-    aligned (Q1: EP does not span nodes -> an EP group of model-parallel groups
-    must fit inside one node); 5. the trainer occupies a rectangle."""
+    1. each rollout engine on one node; 2. each trainer in-node group
+    (``node_parallel`` = tp*cp consecutive trainer slots; ``model_parallel`` is
+    the pre-2026-10-04 spelling, used when ``node_parallel`` is None) on one
+    node and dividing the trainer GPUs on every node; 3. EP and PP groups MAY
+    span nodes (Q1/Q3 ruling) -- EP only needs ``tp*cp*ep`` to divide the
+    trainer GPUs; 5. the trainer occupies a rectangle (Miles derives local_rank
+    from RANK % gpus_per_node)."""
     for engine in slots.get("rollout", ()):
         if gpus_per_engine is not None and len(engine) != gpus_per_engine:
             return f"rollout engine {engine} does not have {gpus_per_engine} GPUs"
         if spans_nodes(engine):
             return f"rollout engine {engine} spans nodes"
     trainer = list(slots.get("trainer", ()))
-    mp = max(1, int(model_parallel))
-    if len(trainer) % mp:
-        return f"trainer GPUs {len(trainer)} not divisible by model parallel {mp}"
-    for start in range(0, len(trainer), mp):
-        group = trainer[start:start + mp]
+    np_ = max(1, int(model_parallel if node_parallel is None else node_parallel))
+    if len(trainer) % np_:
+        return f"trainer GPUs {len(trainer)} not divisible by in-node parallel tp*cp {np_}"
+    for start in range(0, len(trainer), np_):
+        group = trainer[start:start + np_]
         if spans_nodes(group):
-            return f"trainer model-parallel group {group} spans nodes"
+            return f"trainer in-node (tp*cp) group {group} spans nodes"
     try:
         _nodes, per_node = rectangular_trainer(trainer) if trainer else (0, 0)
     except TopologyError as exc:
         return str(exc)
+    if trainer and per_node % np_:
+        return (f"in-node parallel tp*cp {np_} does not divide the {per_node} trainer GPUs "
+                "on one node")
     ep = max(1, int(expert_parallel))
-    if ep > 1 and trainer:
-        groups_per_node = per_node // mp
-        if groups_per_node == 0 or groups_per_node % ep:
-            return (f"expert parallel {ep} must divide the {groups_per_node} model-parallel "
-                    "groups on one node (EP does not span nodes)")
+    if ep > 1 and trainer and len(trainer) % (np_ * ep):
+        return (f"expert parallel {ep} needs trainer GPUs divisible by tp*cp*ep = {np_ * ep}, "
+                f"got {len(trainer)} (EP groups may span nodes)")
     return None
 
 
@@ -238,16 +266,27 @@ def chunk_by_node(bundles: Sequence[int], topology: Topology | None, per: int,
 
 
 def min_nodes(*, trainer_min_gpus: int, rollout_min_gpus: int, standby_gpus: int,
-              gpus_per_node: int) -> int:
+              gpus_per_node: int, node_parallel: int | None = None) -> int:
     """Design D8: the smallest island (whole nodes) that fits one trainer model
-    replica, one rollout engine and the standby reservation, with the trainer
-    and the engine each on whole-node-aligned slots."""
+    replica (``trainer_min_gpus`` = tp*cp*ep*pp, which may span nodes when it
+    exceeds a node: Q1/Q3 ruling), one rollout engine and the standby
+    reservation. A replica larger than a node must be a whole number of nodes;
+    the in-node group ``node_parallel`` (tp*cp) must fit and divide a node."""
     for name, value in (("trainer_min_gpus", trainer_min_gpus), ("rollout_min_gpus", rollout_min_gpus),
                         ("gpus_per_node", gpus_per_node)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise TopologyError(f"{name} must be a positive integer")
     if standby_gpus < 0:
         raise TopologyError("standby_gpus must be non-negative")
+    if node_parallel is not None:
+        if isinstance(node_parallel, bool) or not isinstance(node_parallel, int) or node_parallel < 1:
+            raise TopologyError("node_parallel must be a positive integer")
+        if node_parallel > gpus_per_node or gpus_per_node % node_parallel:
+            raise TopologyError(f"in-node parallel tp*cp {node_parallel} must fit and divide a "
+                                f"{gpus_per_node}-GPU node (TP stays inside a node)")
+        if trainer_min_gpus % node_parallel:
+            raise TopologyError(f"trainer replica {trainer_min_gpus} GPUs is not a multiple of "
+                                f"tp*cp {node_parallel}")
     if trainer_min_gpus > gpus_per_node and trainer_min_gpus % gpus_per_node:
         raise TopologyError(f"trainer replica {trainer_min_gpus} GPUs is not a whole number "
                             f"of {gpus_per_node}-GPU nodes")

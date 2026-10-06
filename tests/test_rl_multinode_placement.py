@@ -35,8 +35,14 @@ def test_engine_spanning_nodes_rejected():
 def test_tp_group_spanning_nodes_rejected():
     # explicit map: trainer (7, 8) straddles n0/n1; checked before the rectangle rule
     bm = {"trainer": (7, 8, 9, 10), "rollout": tuple(range(7)) + tuple(range(11, 16)), "standby": ()}
-    with pytest.raises(ValueError, match="model-parallel group .* spans nodes"):
+    with pytest.raises(ValueError, match="in-node .* group .* spans nodes"):
         _req(trainer_gpus=4, rollout_gpus=12, gpus_per_engine=1, model_parallel=2, bundle_map=bm)
+    # Q1/Q3 ruling: node_parallel (tp*cp) is the in-node group; tp=16 > 8-GPU node -> refused
+    with pytest.raises(ValueError, match="in-node .* group .* spans nodes"):
+        _req(trainer_gpus=16, rollout_gpus=16, gpus_per_engine=8, node_parallel=16, model_parallel=16)
+    with pytest.raises(ValueError, match="in-node .* group .* spans nodes"):
+        PlacementRequest("colocated", trainer_gpus=16, rollout_gpus=16, gpus_per_engine=8,
+                         gpus_per_node=8, node_parallel=16)
 
 
 def test_trainer_not_rectangular_rejected():
@@ -44,10 +50,70 @@ def test_trainer_not_rectangular_rejected():
         _req(trainer_gpus=12, rollout_gpus=4, gpus_per_engine=4, model_parallel=2)
 
 
-def test_ep_alignment_in_request():
+def test_pp_group_spanning_nodes_legal():
+    # Q3 ruling 2026-10-04: PP may cross nodes. tp=2,pp=2 on a 2x8 island with a
+    # 16-GPU trainer: model_parallel (tp*pp*cp) = 4 is irrelevant to node rules;
+    # node_parallel = tp*cp = 2 fits a node.
+    r = _req(trainer_gpus=16, rollout_gpus=8, gpus_per_engine=8, gpus_per_node=8,
+             model_parallel=4, node_parallel=2)
+    assert r.trainer_shape() == (2, 8) and r.topology == mn.Topology(3, 8)
+    # tp=8,pp=2: each TP group fills a node, the PP group spans the two nodes
+    r = _req(trainer_gpus=16, rollout_gpus=8, gpus_per_engine=8, model_parallel=16, node_parallel=8)
+    assert r.trainer_shape() == (2, 8)
+    # legacy spelling (no node_parallel): model_parallel is still the in-node group
+    with pytest.raises(ValueError, match="spans nodes"):
+        _req(trainer_gpus=16, rollout_gpus=8, gpus_per_engine=8, model_parallel=16)
+
+
+def test_ep_group_spanning_nodes_legal():
+    # Q1 ruling 2026-10-04: EP may cross nodes. tp=2, ep=8 over 16 trainer GPUs on
+    # 2 nodes: the EP group (8 TP groups) spans both nodes and is legal.
+    r = _req(trainer_gpus=16, rollout_gpus=8, gpus_per_engine=8, node_parallel=2, expert_parallel=8)
+    assert r.trainer_shape() == (2, 8)
     assert _req(expert_parallel=4).trainer_shape() == (1, 8)
-    with pytest.raises(ValueError, match="expert parallel 8"):
+    # ep=8 with tp=2 on 8 trainer GPUs: not a node rule but tp*cp*ep=16 > 8 -> refused
+    with pytest.raises(ValueError, match=r"expert parallel 8 needs trainer GPUs divisible by tp\*cp\*ep = 16"):
         _req(expert_parallel=8)
+
+
+def test_tp_cp_not_dividing_node_rejected():
+    # node_parallel=3 on 8-GPU nodes: 9 trainer GPUs is divisible by 3 but a group
+    # (n0:6, n0:7, n1:0) straddles nodes; and per-node share 8 % 3 != 0
+    bm = {"trainer": tuple(range(9)), "rollout": tuple(range(9, 16)), "standby": ()}
+    with pytest.raises(ValueError, match="spans nodes|does not divide"):
+        _req(trainer_gpus=9, rollout_gpus=7, gpus_per_engine=1, node_parallel=3, bundle_map=bm)
+    with pytest.raises(ValueError, match=r"not divisible by in-node parallel tp\*cp 3"):
+        _req(trainer_gpus=8, rollout_gpus=8, gpus_per_engine=8, node_parallel=3)
+    # 2x4 island, trainer n0:0..2 + n1:0..2 (3 per node) with tp*cp=2: 6 % 2 == 0 but 3 % 2 != 0
+    bm = {"trainer": (0, 1, 2, 4, 5, 6), "rollout": (3, 7), "standby": ()}
+    with pytest.raises(ValueError, match="spans nodes|does not divide the 3 trainer GPUs"):
+        _req(trainer_gpus=6, rollout_gpus=2, gpus_per_engine=1, gpus_per_node=4, node_parallel=2,
+             bundle_map=bm)
+    slots = {"trainer": [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)], "rollout": [], "standby": []}
+    assert mn.node_placement_rejection(slots, node_parallel=1, expert_parallel=1) is None
+    # 3 trainer GPUs per node with tp*cp=2: some pair must straddle a node -> refused
+    # whatever the order (the per-node divisibility rule is the fallback)
+    assert "spans nodes" in mn.node_placement_rejection(slots, node_parallel=2, expert_parallel=1)
+    slots = {"trainer": [(0, 0), (0, 1), (1, 0), (1, 1), (0, 2), (1, 2)], "rollout": [], "standby": []}
+    assert mn.node_placement_rejection(slots, node_parallel=2, expert_parallel=1) is not None
+
+
+def test_min_nodes_uses_smallest_replica_tp_cp_ep_pp():
+    # tp2 cp1 ep4 pp2 = 16-GPU replica spanning two 8-GPU nodes + one 8-GPU engine -> 3 nodes
+    assert mn.min_nodes(trainer_min_gpus=16, rollout_min_gpus=8, standby_gpus=0, gpus_per_node=8,
+                        node_parallel=2) == 3
+    # the replica may be smaller than a node (tp2 pp1 ep1 -> 2 GPUs)
+    assert mn.min_nodes(trainer_min_gpus=2, rollout_min_gpus=8, standby_gpus=0, gpus_per_node=8,
+                        node_parallel=2) == 2
+    with pytest.raises(mn.TopologyError, match=r"tp\*cp 16 must fit and divide"):
+        mn.min_nodes(trainer_min_gpus=16, rollout_min_gpus=8, standby_gpus=0, gpus_per_node=8,
+                     node_parallel=16)
+    with pytest.raises(mn.TopologyError, match="must fit and divide"):
+        mn.min_nodes(trainer_min_gpus=6, rollout_min_gpus=1, standby_gpus=0, gpus_per_node=8,
+                     node_parallel=3)
+    with pytest.raises(mn.TopologyError, match="not a whole number"):
+        mn.min_nodes(trainer_min_gpus=12, rollout_min_gpus=1, standby_gpus=0, gpus_per_node=8,
+                     node_parallel=2)
 
 
 def test_island_not_whole_nodes_rejected():
@@ -59,9 +125,14 @@ def test_colocated_multinode_allowed_when_tp_fits_node():
     r = PlacementRequest("colocated", trainer_gpus=16, rollout_gpus=16, gpus_per_engine=8,
                          gpus_per_node=8, model_parallel=8)
     assert r.trainer_shape() == (2, 8)
+    # legacy spelling: model_parallel=16 alone is the in-node group -> refused
     with pytest.raises(ValueError, match="spans nodes"):
         PlacementRequest("colocated", trainer_gpus=16, rollout_gpus=16, gpus_per_engine=8,
                          gpus_per_node=8, model_parallel=16)
+    # new spelling: tp8 x pp2 (model_parallel 16, node_parallel 8) spans nodes via PP -> legal
+    r = PlacementRequest("colocated", trainer_gpus=16, rollout_gpus=16, gpus_per_engine=8,
+                         gpus_per_node=8, model_parallel=16, node_parallel=8)
+    assert r.trainer_shape() == (2, 8) and r.in_node_parallel == 8
 
 
 # ---- 1.4 cell chunking by node
