@@ -115,6 +115,9 @@ class RolloutBatchHandle:
     # IR-3: samples whose actual weight_version(s) differed from the driver's
     # expected_policy_version (ABORTED on the rollout side). None = not reported.
     policy_age_violation: int | None = None
+    # fleet-dashboard 1.3: trained-batch summary (adv_mean/adv_std,
+    # resp_len_mean/p95, truncated_frac, reward_p10/p50/p90); None = not reported.
+    batch_summary: Mapping[str, float | None] | None = field(default=None, compare=False)
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
@@ -149,6 +152,10 @@ class RolloutPool(Protocol):
     def members(self) -> frozenset[str]: ...
     # Optional (4.2): def data_cursor(self) -> Mapping[str, int] | None: ...
     #   the data cursor of the last generated batch (RolloutBatchHandle.data_cursor).
+    # Optional (restart, 3.6/3.7): def seek_data_cursor(self, cursor: Mapping[str, int])
+    #   -> Mapping[str, int]: move the data source to ``cursor`` (the ledger's
+    #   restart point) and return the cursor it now reports; a pool whose
+    #   batches carry ``data_cursor`` MUST implement it (driver fails closed).
     # E1 verbs (3.4/3.4a): see ElasticRolloutPool below.
 
 

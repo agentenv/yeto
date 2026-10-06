@@ -7,6 +7,8 @@ runtime has not attested is ``blocked_dependency``, never silently downgraded.
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,9 @@ _ARM_EDGE_KINDS = {
 
 
 PARALLEL_DIMS = ("tp", "pp", "cp", "ep")
+# Ruling 2026-10-04 v2: boolean opt-ins under ``parallel`` that lift the default
+# "TP stays inside a node" preference (trainer tp*cp group / rollout engine TP).
+PARALLEL_SWITCHES = ("allow_cross_node_tp", "allow_cross_node_engine_tp")
 EDGE_RECOVERY = ("reinit-rollout", "cut-restore", "rebuild-old")
 CAPACITY_KEYS = ("gpu_mem_peak_gib", "cpu_rss_peak_gib", "pinned_gib", "object_store_gib", "disk_gib")
 
@@ -48,8 +53,14 @@ class ResourceConfig:
     parallel: tuple[tuple[str, int], ...] = ()  # fixed TP/PP/CP/EP, default all 1
     rollout_engine_gpus: int = 1
     placement: dict[str, Any] | None = None  # explicit GPU uuids per role
+    # rl-multinode-island D2: the same placement as (node, local_gpu) slots when
+    # the manifest declares a node topology; None on a legacy single-node cfg.
+    placement_slots: dict[str, Any] | None = None
     gradient_accumulation_declared: int | None = None
     capacity: dict[str, float] | None = None
+    # Ruling 2026-10-04 v2: explicit cross-node TP opt-ins (cfg ``parallel.*``).
+    allow_cross_node_tp: bool = False
+    allow_cross_node_engine_tp: bool = False
 
     @property
     def total(self) -> int:
@@ -64,6 +75,13 @@ class ResourceConfig:
         # Dense world = TP*PP*CP*DP; EP is laid out inside that world, not multiplied.
         d = self.dims
         return d["tp"] * d["pp"] * d["cp"]
+
+    @property
+    def node_parallel(self) -> int:
+        # Q1/Q3 ruling 2026-10-04: the group that must stay inside a node is
+        # TP*CP; EP and PP groups may span nodes.
+        d = self.dims
+        return d["tp"] * d["cp"]
 
     @property
     def data_parallel(self) -> int:
@@ -193,14 +211,64 @@ def parse_configs(resources: dict[str, Any]) -> dict[str, ResourceConfig]:
                 raise ManifestError(f"config {name!r}.{role} must be a non-negative integer")
             values[role] = count
         configs[name] = ResourceConfig(name, **values, **_parse_config_extras(name, block))
+    topology = _manifest_topology(resources)
+    if topology is not None:
+        configs = {name: _with_node_slots(cfg, topology, resources) for name, cfg in configs.items()}
     return configs
+
+
+def _manifest_topology(resources: dict[str, Any]):
+    """rl-multinode-island D2: ``Topology`` when ``nodes``/``gpus_per_node`` are
+    declared (pool checked against it), None for a legacy cfg (unchanged path)."""
+    from yeto.rl.engine.multinode import TopologyError, check_pool_topology, topology_of
+
+    try:
+        topology = topology_of(resources)
+        if topology is not None:
+            check_pool_topology(resources, topology)
+    except TopologyError as exc:
+        raise ManifestError(str(exc)) from None
+    return topology
+
+
+def _with_node_slots(config: ResourceConfig, topology, resources: dict[str, Any]) -> ResourceConfig:
+    from yeto.rl.engine.multinode import TopologyError, node_placement_rejection, normalize_placement
+
+    if config.total != topology.total:
+        raise ManifestError(f"config {config.name!r} uses {config.total} GPUs but the island is "
+                            f"{topology.nodes} x {topology.gpus_per_node} = {topology.total}")
+    if config.placement is None:
+        return config
+    pool = {g["uuid"]: g for g in resources.get("gpus") or [] if isinstance(g, dict)}
+    try:
+        slots = normalize_placement(config.placement, topology, pool)
+    except TopologyError as exc:
+        raise ManifestError(f"config {config.name!r}: {exc}") from None
+    counts = (len(slots["trainer"]), sum(len(e) for e in slots["rollout"]), len(slots["standby"]))
+    if counts != (config.trainer, config.rollout, config.standby):
+        raise ManifestError(f"config {config.name!r} placement maps T{counts[0]} R{counts[1]} "
+                            f"S{counts[2]} but declares T{config.trainer} R{config.rollout} S{config.standby}")
+    reason = node_placement_rejection(slots, node_parallel=config.node_parallel,
+                                      expert_parallel=config.dims["ep"],
+                                      gpus_per_engine=config.rollout_engine_gpus,
+                                      allow_cross_node_tp=config.allow_cross_node_tp,
+                                      allow_cross_node_engine=config.allow_cross_node_engine_tp,
+                                      gpus_per_node=topology.gpus_per_node)
+    if reason:
+        raise ManifestError(f"config {config.name!r}: {reason}")
+    return dataclasses.replace(config, placement_slots=slots)
 
 
 def _parse_config_extras(name: str, block: dict[str, Any]) -> dict[str, Any]:
     extras: dict[str, Any] = {}
-    parallel = block.get("parallel", {})
-    if not isinstance(parallel, dict) or set(parallel) - set(PARALLEL_DIMS):
-        raise ManifestError(f"config {name!r}.parallel keys must be among {PARALLEL_DIMS}")
+    parallel = dict(block.get("parallel", {})) if isinstance(block.get("parallel", {}), dict) else None
+    if parallel is None or set(parallel) - set(PARALLEL_DIMS) - set(PARALLEL_SWITCHES):
+        raise ManifestError(f"config {name!r}.parallel keys must be among {PARALLEL_DIMS + PARALLEL_SWITCHES}")
+    for switch in PARALLEL_SWITCHES:
+        value = parallel.pop(switch, False)
+        if not isinstance(value, bool):
+            raise ManifestError(f"config {name!r}.parallel.{switch} must be true/false")
+        extras[switch] = value
     for dim, size in parallel.items():
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ManifestError(f"config {name!r}.parallel.{dim} must be a positive integer")
@@ -209,6 +277,10 @@ def _parse_config_extras(name: str, block: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(engine, int) or isinstance(engine, bool) or engine < 1:
         raise ManifestError(f"config {name!r}.rollout_engine_gpus must be a positive integer")
     extras["rollout_engine_gpus"] = engine
+    if extras["allow_cross_node_engine_tp"] and int(block.get("rollout", 0) or 0) % engine:
+        # ruling 2026-10-04 v2: a cross-node TP engine scales as one whole replica
+        raise ManifestError(f"config {name!r}: rollout {block.get('rollout')} GPUs is not a whole "
+                            f"number of {engine}-GPU cross-node engine replicas")
     if "placement" in block:
         placement = block["placement"]
         if not isinstance(placement, dict) or set(placement) - {"trainer", "rollout", "standby"}:
@@ -242,6 +314,13 @@ def placement_rejection(config: ResourceConfig, pool: dict[str, dict[str, Any]])
     placement = config.placement
     if placement is None:
         return None
+    if config.placement_slots is not None and not all(
+            isinstance(u, str) and u in pool
+            for u in list(placement.get("trainer", [])) + list(placement.get("standby", []))
+            + [u for e in placement.get("rollout", []) for u in e]):
+        # Multi-node slot/bundle spellings were already checked node-wise by
+        # parse_configs; there are no uuids to look up here.
+        return None
     if not pool:
         return "explicit placement needs a resolved resources.gpus pool"
     trainer = placement.get("trainer", [])
@@ -269,13 +348,14 @@ def placement_rejection(config: ResourceConfig, pool: dict[str, dict[str, Any]])
     for engine in engines:
         if len(engine) != config.rollout_engine_gpus:
             return f"rollout engine {engine} does not have {config.rollout_engine_gpus} GPUs"
-        if len({pool[u].get("node") for u in engine}) > 1:
+        if len({pool[u].get("node") for u in engine}) > 1 and not config.allow_cross_node_engine_tp:
             return f"rollout engine {engine} spans nodes"
-    mp = config.model_parallel
-    for start in range(0, len(trainer), mp):
-        group = trainer[start : start + mp]
-        if len({pool[u].get("node") for u in group}) > 1:
-            return f"trainer model-parallel group {group} spans nodes"
+    mp = config.node_parallel  # tp*cp stays in a node by default; EP/PP may span nodes
+    if not config.allow_cross_node_tp:
+        for start in range(0, len(trainer), mp):
+            group = trainer[start : start + mp]
+            if len({pool[u].get("node") for u in group}) > 1:
+                return f"trainer in-node (tp*cp) group {group} spans nodes"
     return None
 
 

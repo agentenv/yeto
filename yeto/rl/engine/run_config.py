@@ -23,6 +23,8 @@ Slots filled by merged PRs (see migration-ledger.md):
 
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,9 @@ PARAMETER_MODES = frozenset({"lora", "full"})
 RECIPE_GENERIC = "generic"
 RECIPE_QWEN3_5 = "qwen3_5"
 RECIPE_DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+# Qwen3.8-Flash-Next (qwen4_exp): GDN + QSA + 512-expert MoE through the native
+# Miles plugin (miles_plugins/models/qwen3_8_next), never the Qwen3.5 spec.
+RECIPE_QWEN3_8_NEXT = "qwen3_8_next"
 GATED_DELTA_NET = "gated_delta_net"
 
 
@@ -126,7 +131,7 @@ class GdnRecipe:
 
 @dataclass(frozen=True)
 class ModelRecipe:
-    name: str  # RECIPE_GENERIC | RECIPE_QWEN3_5 | RECIPE_DEEPSEEK_V4_FLASH
+    name: str  # RECIPE_GENERIC | RECIPE_QWEN3_5 | RECIPE_DEEPSEEK_V4_FLASH | RECIPE_QWEN3_8_NEXT
     provider_class: str
     training_attention_backend: str
     gdn: GdnRecipe
@@ -152,6 +157,17 @@ class ParallelLayout:
     # rl-infra-spec 3.x/4.7 (fork F-R1): yeto names of the rollout engine cells
     # declared to the fork (placement map "rollout_cells"); () = fork default.
     rollout_cell_names: tuple[str, ...] = ()
+    # rl-multinode-island: GPUs per island node on a multi-node island; None on
+    # a single node (every node rule off).
+    island_gpus_per_node: int | None = None
+    # rl-multinode-island Q2: explicit role -> logical bundle map of a multi-node
+    # fixed partition whose trainer is not the leading bundles (the launcher
+    # derives it from the elastic cfg placement); None = leading layout.
+    bundle_map: dict[str, tuple[int, ...]] | None = None
+    # ruling 2026-10-04 v2: explicit cross-node TP opt-ins (--rl-allow-cross-node-tp /
+    # --rl-allow-cross-node-engine-tp); default False = TP stays inside a node.
+    allow_cross_node_tp: bool = False
+    allow_cross_node_engine_tp: bool = False
 
     @property
     def colocated(self) -> bool:
@@ -168,6 +184,9 @@ class TrainableConfig:
     # Training-time LoRA dropout (ports only; --rl-lora-dropout). The exported
     # adapter / canonical LoRA config keep dropout 0 (inference is unaffected).
     lora_dropout: float = 0.0
+    # Routed-expert LoRA rank r_e (Flash-Next native recipe only; --rl-lora-expert-rank).
+    # None outside that recipe; the recipe defaults it to the profile's value.
+    lora_expert_rank: int | None = None
 
     @property
     def routed_expert_lora(self) -> bool:
@@ -382,11 +401,52 @@ class RLRunConfig:
     # 3.x (--rl-elastic): the fork's cordon / drain / cordoned admission need the
     # Miles router (fork server_cell._assert_cordonable, admit_cordoned).
     use_miles_router: bool = False
+    # A27 (--rl-elastic): bound the fork's trainer<->engine weight-update group
+    # rendezvous (--update-weight-group-timeout-s) so a member dying mid-publish
+    # fails the publish (abort -> REBUILD_OLD) instead of stalling the run.
+    # None = flag not emitted (fork default: torch's process-group timeout).
+    update_weight_group_timeout_s: float | None = None
+    # D1/D2 wiring (6.5, d2-wire): 5.7 per-(profile_hash, source, target) cost
+    # table read by ``elastic.ElasticHook`` (None = no costs -> recommend/auto hold),
+    # and the load-window length for ``timeline.load_windows`` (None = no hook).
+    edge_costs_path: str | None = None
+    elastic_window_s: float | None = None
 
 
 # --------------------------------------------------------------------------
 # Resolution
 # --------------------------------------------------------------------------
+
+
+# A27: seconds the fork waits for the weight-update NCCL group during an
+# elastic member publish (needs Miles >= image-m3a27; older forks reject the flag).
+ELASTIC_UPDATE_WEIGHT_GROUP_TIMEOUT_S = 120.0
+
+
+def qwen3_8_next_variant(args, provider) -> str | None:
+    """``"full"`` / ``"4layer"`` when the run is Qwen3.8-Flash-Next, else None.
+
+    Fingerprint, not name: the HF model id (any path whose basename is a known
+    Flash-Next repo) OR the provider shape (GDN + 512 routed experts + hidden
+    2560 + 48/4 layers).  Both GDN, so without this the Qwen3.5 spec would be
+    picked silently (G1)."""
+    from yeto.rl.profiles import qwen3_8_next as q
+
+    model = str(getattr(args, "model", None) or "").rstrip("/")
+    base = model.rsplit("/", 1)[-1]
+    for variant, name in q.MODEL_NAMES.items():
+        if base == name:
+            return variant
+    if (
+        _text(getattr(provider, "experimental_attention_variant", None)) == GATED_DELTA_NET
+        and getattr(provider, "num_moe_experts", None) == 512
+        and getattr(provider, "hidden_size", None) == 2560
+    ):
+        layers = getattr(provider, "num_layers", None)
+        for variant, n in q.NUM_LAYERS.items():
+            if layers == n:
+                return variant
+    return None
 
 
 def select_gdn_recipe(provider) -> GdnRecipe:
@@ -504,7 +564,9 @@ def resolve_rl_run_config(
         raise ValueError("EP>1 requires a MoE model")
     if actor_gpus % expert_parallel:
         raise ValueError("expert parallelism must divide Miles actor world size")
-    if is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
+    fn_variant = qwen3_8_next_variant(args, provider)
+    # the native Flash-Next plugin shards routed-expert LoRA by EP itself
+    if fn_variant is None and is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
         raise ValueError(
             "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
         )
@@ -556,21 +618,28 @@ def resolve_rl_run_config(
         # legacy CLI never sets rl_placement, so its layout is unchanged).
         rollout_gpus = getattr(args, "rollout_num_gpus", None)
         per_engine = getattr(args, "rollout_num_gpus_per_engine", 1)
+        island_gpus_per_node = getattr(args, "rl_island_gpus_per_node", None)
         if (
-            args.actor_num_nodes != 1
+            (args.actor_num_nodes != 1 and island_gpus_per_node is None)
             or type(rollout_gpus) is not int
             or rollout_gpus < 1
             or rollout_gpus % per_engine
         ):
             raise ValueError(
-                "a LoRA fixed partition needs one node and --rollout-num-gpus as a "
-                "positive multiple of --rollout-num-gpus-per-engine"
+                "a LoRA fixed partition needs one node (or --rl-island-gpus-per-node on a "
+                "multi-node island) and --rollout-num-gpus as a positive multiple of "
+                "--rollout-num-gpus-per-engine"
             )
         dedicated_rollout_gpus = rollout_gpus
         standby_gpus = int(getattr(args, "rl_standby_gpus", 0) or 0)
         if standby_gpus < 0:
             raise ValueError("--rl-standby-gpus must be non-negative")
-        visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus + standby_gpus
+        if island_gpus_per_node is None:
+            visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus + standby_gpus
+        else:
+            # Multi-node island: every node exposes all its GPUs; the trainer
+            # rectangle, rollout and standby are laid out over the whole island.
+            visible_gpus_per_node = int(island_gpus_per_node)
     else:
         visible_gpus_per_node = args.actor_num_gpus_per_node
     requested_standby = int(getattr(args, "rl_standby_gpus", 0) or 0)
@@ -606,6 +675,17 @@ def resolve_rl_run_config(
                 "DeepSeek V4 Flash recipe requires the 43-layer MoE/MLA provider"
             )
         recipe_name, attention_backend = RECIPE_DEEPSEEK_V4_FLASH, "flash"
+    elif fn_variant is not None:
+        if parameter_mode != "lora":
+            raise ValueError("the Qwen3.8-Flash-Next recipe is LoRA-only")
+        if getattr(args, "megatron_ref_load", None) is None:
+            # --megatron-to-hf-mode raw loads a Megatron torch_dist checkpoint, not
+            # the HF snapshot (run_qwen3_8_next.py: --ref-load <ckpt>/<type>_torch_dist).
+            raise ValueError(
+                "the Qwen3.8-Flash-Next recipe needs --megatron-ref-load "
+                "<dir>/<megatron_model_type>_torch_dist (raw mode cannot load the HF snapshot)"
+            )
+        recipe_name, attention_backend = RECIPE_QWEN3_8_NEXT, "flash"
     elif qwen35_recipe:
         recipe_name, attention_backend = RECIPE_QWEN3_5, "flash"
     else:
@@ -738,11 +818,19 @@ def resolve_rl_run_config(
             uneven_pipeline_layers=uneven_pipeline_layers,
             standby_gpus=standby_gpus,
             rollout_cell_names=_rollout_cell_names(args, dedicated_rollout_gpus),
+            island_gpus_per_node=(int(getattr(args, "rl_island_gpus_per_node", None))
+                                  if getattr(args, "rl_island_gpus_per_node", None) is not None
+                                  # m5: a multi-node colocated island keeps it too (node rules)
+                                  else None),
+            bundle_map=_island_bundle_map(args, dedicated_rollout_gpus),
+            allow_cross_node_tp=bool(getattr(args, "rl_allow_cross_node_tp", False)),
+            allow_cross_node_engine_tp=bool(getattr(args, "rl_allow_cross_node_engine_tp", False)),
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
             lora_rank=args.lora_r,
             lora_dropout=_lora_dropout(args, parameter_mode),
+            lora_expert_rank=_lora_expert_rank(args, recipe_name),
             lora_targets=args.lora_targets,
             target_modules=tuple(target_modules),
             expert_full_count=expert_full_count,
@@ -829,9 +917,42 @@ def resolve_rl_run_config(
         distributed_timeout_minutes=getattr(args, "rl_distributed_timeout_minutes", 10),
         deterministic_trainer=bool(getattr(args, "rl_deterministic_trainer", False)),
         use_miles_router=bool(getattr(args, "rl_elastic", False)),
+        update_weight_group_timeout_s=(
+            ELASTIC_UPDATE_WEIGHT_GROUP_TIMEOUT_S if getattr(args, "rl_elastic", False) else None
+        ),
         trainer_dp_edges=bool(getattr(args, "rl_elastic", False)
                               and getattr(args, "rl_elastic_trainer_edges", False)),
+        edge_costs_path=getattr(args, "rl_edge_costs_path", None) or None,
+        elastic_window_s=(float(args.rl_elastic_window_s)
+                          if getattr(args, "rl_elastic_window_s", None) else None),
     )
+
+
+def _island_bundle_map(args, dedicated_rollout_gpus) -> dict[str, tuple[int, ...]] | None:
+    """``--rl-island-bundle-map`` (Q2): JSON text or a dict; needs a multi-node
+    fixed partition (``--rl-island-gpus-per-node``). Validated against the role
+    sizes by ``PlacementRequest``."""
+    raw = getattr(args, "rl_island_bundle_map", None)
+    if raw is None:
+        return None
+    if dedicated_rollout_gpus is None or getattr(args, "rl_island_gpus_per_node", None) is None:
+        raise ValueError("--rl-island-bundle-map needs a multi-node fixed partition "
+                         "(--rl-placement fixed-partition and --rl-island-gpus-per-node)")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError(f"--rl-island-bundle-map is not JSON: {exc}") from None
+    if not isinstance(raw, dict) or set(raw) - {"trainer", "rollout", "standby"}:
+        raise ValueError("--rl-island-bundle-map must map trainer/rollout/standby to bundle lists")
+    out = {}
+    for role in ("trainer", "rollout", "standby"):
+        values = raw.get(role, [])
+        if not isinstance(values, (list, tuple)) or any(
+                isinstance(v, bool) or not isinstance(v, int) for v in values):
+            raise ValueError(f"--rl-island-bundle-map {role} must be a list of ints")
+        out[role] = tuple(values)
+    return out
 
 
 def _rollout_cell_names(args, dedicated_rollout_gpus) -> tuple[str, ...]:
@@ -844,6 +965,24 @@ def _rollout_cell_names(args, dedicated_rollout_gpus) -> tuple[str, ...]:
     if not names:
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the cell names)")
     return names
+
+
+def _lora_expert_rank(args, recipe_name: str) -> int | None:
+    value = getattr(args, "rl_lora_expert_rank", None)
+    if recipe_name != RECIPE_QWEN3_8_NEXT:
+        if value is not None:
+            raise ValueError("--rl-lora-expert-rank only applies to the Qwen3.8-Flash-Next recipe")
+        return None
+    if value is None:
+        from yeto.rl.profiles.qwen3_8_next import Qwen38NextLoraProfile
+
+        value = Qwen38NextLoraProfile.lora_expert_rank  # profile default (8)
+    value = int(value)
+    if not 0 <= value <= args.lora_r:
+        raise ValueError(
+            f"--rl-lora-expert-rank must satisfy 0 <= r_e <= --lora-r ({value} vs {args.lora_r})"
+        )
+    return value
 
 
 def _lora_dropout(args, parameter_mode: str) -> float:

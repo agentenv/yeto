@@ -763,3 +763,43 @@
 ### 更新（链 #2，2026-10-01 08:10Z）
 - 代码 6f6dcb9 + 新镜像 sha256:12fcd9e5…（gpu-b1 合并为 a9c1afc）；指纹重取（不变）。链 #2 跑了 wd：**不通过**（kill 路径 id 前缀缺陷，killed=[]；a4s3 的 matches=[] 是同一缺陷）；首次 LoRA 准入即 LORA_UNVERIFIABLE（adapter 惰性加载，新引擎读回只有 226 张量无 lora 键）→ 按规则停链；E1-B 新 SHA 验证、A4b、E1-D 未运行（等待两个修复）。
 - 费用 ≤$77.4（剩 ≈$22.6）；云资源无；cleanup 退出码 0。证据：`evidence/infra-v2-b1/a4-8card-s4/runs/chain2-wd/`，RESULT.md "链 #2"一节。
+
+## M4（T2-S7）：Qwen3.8-Flash-Next-4layer qwen4_exp 原生 LoRA GRPO，Modal H100:4 A 段（2026-10-03）
+- 代码：`yeto/rl/profiles/qwen3_8_next.py`、`scripts/{run_qwen3_8_next_4layer_lora,convert_qwen3_8_next}.sh`、`scripts/judge_qwen3_8_next_lora_log.py`、`scripts/modal_qwen3_8_next_4layer_lora.py`（提交 b2403324 → 2641ad0a，CPU 单测 16/16，全量 = 基线 94 id）。
+- 执行：Modal app `m4-q38n-20261003`，G0–G5 全 PASS（G3/G4r 各定位修复后重跑 1 次），≈$28。证据 `evidence/m4-q38n/`（judge JSON、曲线 CSV、逐 rank trainable、adapter 检查、tensorboard、日志）。详细判读与偏离见 `/home/michael/work/infra-drafts/M4-PROGRESS.md §4–§5`、`T2-S7-PROGRESS.md §8`。
+- M3 验收 #1/#4/#5 过，#2 弱证据过（B≠0 需 `--entropy-coef 0.01`，4 层切片奖励恒 0），#3 间接过（strict loading + sha256 读回，未直接计数 54 键）。B 段 8×H100 终验待放行。
+
+## M4（T2-S7）B 段：8 卡终验，Modal H100:8（实给 H200:8，2026-10-03）
+- 代码：Modal 脚本 8 卡模式（`YETO_Q38N_NUM_GPUS_PER_NODE=8` → H100:8、EP4 torch_dist 分目录 `/root/ckpt/gpus8`，`ckpt_dir_for_gpus`；容器内不再重读 env，以参数传入）a07daadf → fa03fb05，单测 16/16，全量 = 基线 94 id。
+- 执行：app `m4-q38n-b-20261003`，G0/G1/G2/G3' 全 PASS（G0 两次 CPU 容器失败后修复，未占 GPU；G3' 一次通过）。8 rank trainable 精确 4×17,074,176 + 4×16,415,744（Miles 原生 TP2/PP2/EP4）、LORA-CHECK=0、5 轮有限、logprob_abs_diff 0.0102–0.0106 与 4 卡同量级。≈$14.3。证据 `evidence/m4-q38n/b-8gpu/`；详见 `infra-drafts/M4-PROGRESS.md §6`、`T2-S7-PROGRESS.md §9`。
+- 范围：8 卡只做 G0–G3'；ckpt/adapter 重启（G4/G4r）在 4 卡 A 段验证。
+
+## S11（2026-10-05/06）：D1 实测、D2 CPU 实现、Flash-Next 接入
+交接：`/home/michael/work/infra-drafts/SESSION11-HANDOFF.md`。D1 合入 integ-decl 630dfccc。
+
+**已实现（CPU 验证）**
+- 1.7 时间线/负载采集（`timeline.LoadSummary`/`load_windows`；`tests/test_rl_timeline.py`）。GPU 资源峰值仅单点快照（见 2.4 局限）。
+- 6.1–6.3 `yeto/rl/engine/recommend.py`（归因、收益预测、建议、执行前重验、与手动同一事务入口；`tests/test_rl_recommend.py` 18 例）。
+- 6.4 `yeto/rl/engine/auto.py` AutoController（默认关闭、K 窗口、dwell/cooldown/频率、失败回退 manual；`tests/test_rl_auto.py` 14 例）。**启用前提未满足**（见下）→ 保持 manual/recommend。
+- 6.5 模式切换（`controller.recommend_mode` 经 journal 持久化可 replay、inbox `mode` 动词、CLI；切换不打断事务）。ElasticHook 接入 driver safe point（`miles_adapter/elastic_hook.py`，`--rl-recommend-mode` 等参数）。
+
+**H100 实测（已验证；Nebius 8×H100 单节点、岛分配 GPU0–3、Qwen3-0.6B LoRA partitioned-serial、同 profile_hash）**
+- 2.4（`evidence/d1/2.4-RESULT.md`，n=2 seed × 3 配置）：T2R1S1 vs T2R2S0 稳态差 ±1.5% 且随 seed 翻向，未达 10% 判据；T1R3S0 18.1 s/轮，比 T2 慢 ≈55%。**结论：尚无净收益边**。
+- 5.1（`evidence/d1/5.1-RESULT.md`，n=3）：up 边阻塞 146.5–149.7 s（init 占 98%）；dn 边 3.2–5.3 s。首要瓶颈 = 新 rollout engine 启动。
+- 5.7：成本/恢复上界发布到 `evidence/edge-costs.json`（n=3；recovery_upper 用首步额外开销替代，**失败恢复路径未测**）。回本 ≈818 轮（合并 mean Δ 0.223 s/轮，口径对切换最有利）。
+- 6.4 结论：无净收益边 → auto 不可启用（符合设计）。
+
+**部分完成 / 未做**
+- 6.6：CPU trace replay 完成（`evidence/d2-replay/REPLAY-RESULT.md`，n=1 与 n=3 成本两版；动态组四场景 0 次切换、等于默认固定，回本 663→818 轮）。**GPU 四场景未做**，6.6 不勾。
+- 6.7：未做（手册草稿 `elastic-ops.md`）。
+
+**真缺陷与修复**
+- E1 单节点 placement：try13 e1 COMMITTED 后 RECOVERY_REQUIRED "rollout GPUs n0:2,n0:3 outside the pool"——单节点无 `--rl-island-gpus-per-node` 时 `ElasticPlacement` 不把 `n0:<g>` 解析为 bundle g。修复 8443a8fd（`tests/test_rl_elastic_placement_resolve.py` 修前失败/修后过）；try15 e1 6/6 SUCCEEDED 验证。
+- 已知行为（未改）：launcher 在 job FAILED 时无视 `--keep` 拆集群；链改为重新 provision。
+
+**Flash-Next 接入（CPU）**
+- ports recipe 判定、profile 指纹识别（`profiles/qwen3_8_next.py`、fp_fn.py）、fnrun/fntrain 脚本、4×8 H200 资源声明、边类型过滤（`tests/test_rl_fn_*.py`）；计划 `infra-drafts/FN-ELASTIC-GPU-PLAN.md`、`FN-TRAIN-PLAN.md`。
+- B0-1 完成：模型共享 FS 扩容到 1024GiB（10-06 01:50Z）。
+- 阶段 A / fnconv（B0-2 full 转换）：H200 容量阻塞，**未执行**（$0）。正式首跑（4×8 H200）按用户裁定暂缓。
+
+**费用**：本阶段 ≈$68（try12 $11、try13 $29、try15 $28）；H200 尝试均容量阻塞 ≈$0。明细见 `infra-drafts/gpu-spend.md`。

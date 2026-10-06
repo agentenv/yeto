@@ -4,8 +4,10 @@ Legacy must be unchanged."""
 
 import hashlib
 import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -76,7 +78,7 @@ def test_build_inputs_match_the_pins():
 def test_commits_and_digest_are_pinned_together_with_the_build_record():
     """Commit pins, tag, Dockerfile ARGs and the image digest move together:
     the latest build record must name exactly the pinned commits and digest."""
-    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-01-lora-checksum"
+    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-02-m3a27b"
     record = json.loads((record_dir / "build-record.json").read_text())
     assert record["miles_commit"] == rl.MILES_NEXT_COMMIT
     assert record["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
@@ -114,6 +116,23 @@ def test_ports_setup_reuses_the_image_forks_and_still_verifies():
     assert guard < fetch < end
     assert end < miles.index(f'test "$(git -C ~/miles rev-parse HEAD)" = {c}')
     assert "status --porcelain --untracked-files=all" in miles
+    # A fetch marks the checkout as refreshed; the editable re-install is
+    # skipped only when nothing moved and the image manifest names the pin
+    # at ~/miles.  Identity checks precede the decision; peft stays pinned.
+    assert fetch < miles.index("MILES_REFRESHED=1\n") < end
+    assert miles.index("MILES_REFRESHED=0\n") < guard
+    decision = miles.index('if [ "$MILES_REFRESHED" = 0 ] && python3 -c ')
+    assert miles.index("status --porcelain --untracked-files=all") < decision
+    assert f'json.load(open("{rl.MILES_NEXT_IMAGE_MANIFEST}"))["miles"]' in miles
+    assert f'm["commit"] == "{c}"' in miles
+    reuse, fallback = miles[decision:].split("\nelse\n", 1)
+    assert f"[yeto-setup] image provides miles {c}" in reuse
+    assert f'peft.__version__ == "{rl.MILES_PEFT_VERSION}"' in reuse
+    assert f"pip install -q 'peft=={rl.MILES_PEFT_VERSION}'" in reuse
+    assert "pip install -q --no-deps -e ~/miles" not in reuse
+    assert fallback == (
+        f"python3 -m pip install -q --no-deps -e ~/miles 'peft=={rl.MILES_PEFT_VERSION}'\nfi"
+    )
     # SGLang: reuse /sgl-workspace/sglang only if it is exactly the pinned,
     # clean fork checkout that `import sglang` resolves to; else clone.
     s = rl.SGLANG_NEXT_COMMIT
@@ -413,3 +432,73 @@ def test_on_demand_islands_for_acceptance_runs(monkeypatch, no_login):
     _prepare_rl_args(default)
     spot = _island_task(default, monkeypatch)
     assert spot.resources.use_spot is True and "storage" in spot.calls
+
+
+def _run_ports_miles_setup(tmp_path, *, manifest: bool, peft_version: str):
+    """Run the ports miles_setup against a fake HOME whose ~/miles is a clean
+    detached checkout; the pin and manifest path are rewritten to the fake
+    ones, ``python3 -m pip`` is shimmed to log instead of installing."""
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = home / "miles"
+    git = ["git", "-C", str(repo)]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "README").write_text("x\n")
+    env_git = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    subprocess.run(git + ["add", "README"], check=True, env=env_git)
+    subprocess.run(git + ["commit", "-q", "-m", "pin"], check=True, env=env_git)
+    sha = subprocess.run(git + ["rev-parse", "HEAD"], check=True, text=True, capture_output=True).stdout.strip()
+    subprocess.run(git + ["checkout", "-q", "--detach", sha], check=True)
+    subprocess.run(git + ["remote", "add", "origin", rl.MILES_NEXT_REPOSITORY], check=True)
+    manifest_path = tmp_path / "image-manifest.json"
+    if manifest:
+        manifest_path.write_text(json.dumps({"miles": {"commit": sha, "path": str(repo)}}))
+    site = tmp_path / "site"
+    (site / "peft").mkdir(parents=True)
+    (site / "peft" / "__init__.py").write_text(f"__version__ = {peft_version!r}\n")
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    log = tmp_path / "pip.log"
+    (shim / "python3").write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = -m ] && [ "$2" = pip ]; then echo "$@" >> {log}; exit 0; fi\n'
+        f'exec {sys.executable} "$@"\n'
+    )
+    (shim / "python3").chmod(0o755)
+    miles, _ = launcher._miles_source_setup("ports")
+    script = miles.replace(rl.MILES_NEXT_COMMIT, sha).replace(
+        rl.MILES_NEXT_IMAGE_MANIFEST, str(manifest_path)
+    )
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{shim}:{os.environ['PATH']}",
+        "PYTHONPATH": str(site),
+    }
+    proc = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout, (log.read_text() if log.exists() else "")
+
+
+def test_ports_miles_setup_keeps_the_image_install_when_pins_match(tmp_path):
+    out, pip = _run_ports_miles_setup(tmp_path, manifest=True, peft_version=rl.MILES_PEFT_VERSION)
+    assert "[yeto-setup] image provides miles" in out
+    assert pip == ""
+
+
+def test_ports_miles_setup_reinstalls_only_peft_when_its_version_drifts(tmp_path):
+    out, pip = _run_ports_miles_setup(tmp_path, manifest=True, peft_version="0.0.1")
+    assert "[yeto-setup] image provides miles" in out
+    assert pip.splitlines() == [f"-m pip install -q peft=={rl.MILES_PEFT_VERSION}"]
+
+
+def test_ports_miles_setup_falls_back_to_the_editable_install_without_manifest(tmp_path):
+    out, pip = _run_ports_miles_setup(tmp_path, manifest=False, peft_version=rl.MILES_PEFT_VERSION)
+    assert "image provides miles" not in out
+    assert pip.splitlines() == [
+        f"-m pip install -q --no-deps -e {tmp_path / 'home' / 'miles'} peft=={rl.MILES_PEFT_VERSION}"
+    ]

@@ -1,0 +1,6 @@
+[chain 2026-10-04T00:05:09Z] chain infra-v2-b1-a4s8-20261003-7r1 start spent_before=$772.99 cap=$803.0 items=d4:3300 chain watchdog 4800s
+[chain 2026-10-04T00:05:10Z] d4: start (hard 3300s, worst $28.23, spent_so_far $773.0)
+[chain 2026-10-04T00:25:36Z] d4: ABORT: {"item":"infra-v2-b1-a4s8-20261003-7r1-d4","reason":"startup_failed","ts":"2026-10-04T00:25:30Z"}
+[chain 2026-10-04T00:25:36Z] chain loop ended (FINAL_RC=6); spent_estimate=$783.49
+[chain 2026-10-04T00:25:36Z] final cleanup_run.sh infra-v2-b1-a4s8-20261003-7r1
+[chain 2026-10-04T00:30:42Z] final cleanup rc=0

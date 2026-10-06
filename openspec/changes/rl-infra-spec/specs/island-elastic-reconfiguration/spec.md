@@ -160,6 +160,15 @@
 
 每次失败的重试 MUST 使用新的 worker generation，而且整个事务受一个绝对 deadline 约束。
 
+**修订记录（2026-10-02 用户裁定，E1-D ④ 链 6r2）**——以上原文保留，补充 stop 半失败（3.3a `incomplete`）的时限与终态记录：
+- 释放后的 stop 重试超出事务 deadline 时，MUST 至多进行一次有界的 REBUILD_OLD；其预算为 `T_recovery`（`--rl-elastic-recovery-timeout-s`），事务 deadline MUST NOT 被重置或延长；REBUILD_OLD 内再失败 MUST 直接进入 RECOVERY_REQUIRED。整体恢复时限 = deadline + `T_recovery`。
+- 进入 RECOVERY_REQUIRED 时，日志 MUST 同时写岛级记录（`request_id=None`）和关联未终态请求的请求级终态记录（带 `cause` 与对岛级记录的引用），二者的 error 与 epoch MUST 一致。
+- RECOVERY_REQUIRED 期间与之后 MUST NOT 再 prepare 批次或训练。
+
+#### Scenario: stop 持续半失败（E1-D ④）
+- **WHEN** 释放后 stop 持续失败，重试到事务 deadline 仍未完成
+- **THEN** 事务进入一次 REBUILD_OLD，在 deadline + `T_recovery` 内结束；再失败则进入 RECOVERY_REQUIRED，岛级与请求级终态记录一致，之后不再 prepare 或训练
+
 #### Scenario: 控制器在提交后崩溃
 - **WHEN** 控制器在 epoch 提交后、恢复运行前崩溃，然后重启
 - **THEN** 根据日志判定为已提交，继续恢复目标配置，不回退、不重复训练
@@ -221,6 +230,14 @@ GPU-hours MUST 按整个分配池计算，备用卡也 MUST 计入。
 - **WHEN** 人工批准时，建议已经超过有效期
 - **THEN** 执行被拒绝，并说明原因
 
+#### Scenario: 批准时 epoch 已变化
+- **WHEN** 人工批准时，岛的 config epoch 已不同于建议中的 expected_epoch
+- **THEN** 执行被拒绝（Rejected）并说明原因，不改投其他目标、不自动续批
+
+#### Scenario: 无成本表时保持当前配置
+- **WHEN** 成本表缺失，或其中没有当前 profile 对应的边
+- **THEN** 不产生切换建议，保持当前配置
+
 ### Requirement: 自动控制（D2）
 自动模式 SHALL 默认关闭。只有当前执行模式下至少有一条已认证、并且净收益可重复的边时，才 SHALL 允许开启。自动触发必须同时满足：
 - 持续失衡窗口；
@@ -238,3 +255,19 @@ GPU-hours MUST 按整个分配池计算，备用卡也 MUST 计入。
 #### Scenario: 没有净收益边
 - **WHEN** 基准测量显示当前模式下没有可重复净收益的边
 - **THEN** 自动模式无法开启，只提供手动和建议模式
+
+#### Scenario: auto 不可用于未声明能力的边
+- **WHEN** 某条边未在岛声明中出现，或未经认证（例如 trainer 边）
+- **THEN** 自动模式不把它作为候选，候选集合等于声明与认证的交集
+
+#### Scenario: 关闭自动模式不打断事务
+- **WHEN** 事务进行中，模式被切换为 disabled
+- **THEN** 该事务照常完成，模式变更写入 journal 并在重放后保持
+
+### Requirement: 单节点子集 GPU 的 placement 解析
+当岛只分配单节点上 M 张 GPU、且没有提供每节点 GPU 数拓扑时，控制器 SHALL 把 `n0:<g>` 槽位解析为逻辑 bundle g，并据此判断 rollout GPU 是否在池内。
+
+#### Scenario: 单节点分配 4 卡的 rollout 扩容
+- **WHEN** 单节点 8 卡机只分配 GPU 0–3，rollout 增加一个占用 `n0:2,n0:3` 的 engine
+- **THEN** 事务提交后正常 resume，不因 "outside the pool" 进入 RECOVERY_REQUIRED
+

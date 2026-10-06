@@ -803,3 +803,83 @@ def test_decoupled_zero_lr_after_the_final_cut_is_announced_is_not_a_failure(tmp
 
     final = _driver(engine, Finalizing(2), tmp_path).run()
     assert final.policy_version == 2
+
+
+# -- failure-path node-loss attribution (rl-multinode-island D9 / tasks 3.3) ------
+
+class _NodeController:
+    """Minimal multi-node controller: ``check_nodes`` returns the loss on the
+    ``lose_at``-th poll (None before), never returns via safe_point/finalization."""
+
+    admission_open = True
+    recovery_required = None
+
+    def __init__(self, topology=(2, 1), lose_at=None, lost="node_lost: n1 (1 of 2 alive)"):
+        self.topology = topology
+        self.lose_at = lose_at
+        self.lost = lost
+        self.polls = 0
+
+    def has_pending(self):
+        return False
+
+    def check_nodes(self):
+        self.polls += 1
+        if self.lose_at is not None and self.polls >= self.lose_at:
+            return self.lost
+        return None
+
+
+def _node_driver(engine, sync, tmp_path, ctl, *, grace=10.0):
+    now = [0.0]
+    slept = []
+
+    def clock():
+        return now[0]
+
+    def sleep(s):
+        slept.append(s)
+        now[0] += s
+
+    driver = _driver(engine, sync, tmp_path, controller=ctl, clock=clock)
+    driver.sleep = sleep
+    driver.node_loss_grace_s = grace
+    return driver, slept
+
+
+def test_failed_publication_is_attributed_to_node_loss_within_grace(tmp_path):
+    engine = _engine(unacked_member_rounds={1: "rollout-1"})  # publish of round 1 fails
+    ctl = _NodeController(lose_at=4)  # 1 probe before round 0 + 3 failure-path polls
+    driver, slept = _node_driver(engine, LocalOnlySync(3), tmp_path, ctl)
+    with pytest.raises(DriverError, match="RECOVERY_REQUIRED.*node_lost") as info:
+        driver.run()
+    assert isinstance(info.value.__cause__, PublicationError)
+    assert "rollout-1" in str(info.value.__cause__)
+    events = [e for e in _events(tmp_path / "events.jsonl")
+              if e["event"] == "rl_reconfiguration" and e["result"] == "RECOVERY_REQUIRED"]
+    assert len(events) == 1
+    assert events[0]["rollout_id"] == 0 and "node_lost" in events[0]["error"]  # v1 is published at the end of round 0
+    assert events[0]["cause"].startswith("PublicationError")
+    assert slept == [2.0, 2.0]  # polled at t=0, 2, 4 -> lost on the third failure poll
+    assert ("generate", 2) not in engine.calls
+
+
+def test_failed_publication_without_node_loss_raises_the_original_error(tmp_path):
+    engine = _engine(unacked_member_rounds={1: "rollout-1"})
+    ctl = _NodeController(lose_at=None)
+    driver, slept = _node_driver(engine, LocalOnlySync(3), tmp_path, ctl, grace=5.0)
+    with pytest.raises(PublicationError, match="rollout-1"):
+        driver.run()
+    assert slept == [2.0, 2.0, 1.0] and sum(slept) == 5.0  # bounded by the grace period
+    assert not [e for e in _events(tmp_path / "events.jsonl")
+                if e["event"] == "rl_reconfiguration"]
+
+
+def test_failure_on_single_node_island_never_polls_or_sleeps(tmp_path):
+    engine = _engine(unacked_member_rounds={1: "rollout-1"})
+    ctl = _NodeController(topology=None, lose_at=2)  # would report loss on any failure-path poll
+    driver, slept = _node_driver(engine, LocalOnlySync(3), tmp_path, ctl)
+    with pytest.raises(PublicationError, match="rollout-1"):
+        driver.run()
+    assert slept == []
+    assert ctl.polls == 1  # only the per-round _probe_nodes before round 0; no failure-path poll

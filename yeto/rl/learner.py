@@ -153,8 +153,17 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat / rl_resource_sample
+    # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,
+    # else off (0 disables explicitly).
+    parser.add_argument("--rl-heartbeat-interval", type=float, default=None)
+    parser.add_argument("--rl-resource-sample-interval", type=float, default=None)
+    from .engine.miles_adapter.elastic_hook import add_recommend_arguments
+    add_recommend_arguments(parser)  # D2 elastic hook
     # ports LoRA training-time dropout (default 0 = unchanged argv)
     parser.add_argument("--rl-lora-dropout", type=float, default=None)
+    # Flash-Next native recipe: routed-expert LoRA rank (default: profile's 8)
+    parser.add_argument("--rl-lora-expert-rank", type=int, default=None)
     # Print the attestation runtime_fingerprint (same Miles argv as the island)
     # and exit before Ray/GPU (ports only).
     parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
@@ -170,11 +179,23 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
     parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
     parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
+    # rl-multinode-island: GPUs per island node when the island spans nodes (the
+    # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
+    parser.add_argument("--rl-island-gpus-per-node", type=int, default=None)
+    # rl-multinode-island Q2 (mixed rollout/trainer nodes): the role -> logical
+    # bundle map derived by the launcher from the elastic cfg placement; None =
+    # the leading-bundle layout (trainer first, then rollout, then standby).
+    parser.add_argument("--rl-island-bundle-map", default=None, metavar="JSON")
+    # ruling 2026-10-04 v2: explicit cross-node TP opt-ins (default: TP stays in a node)
+    parser.add_argument("--rl-allow-cross-node-tp", action="store_true")
+    parser.add_argument("--rl-allow-cross-node-engine-tp", action="store_true")
     # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
     parser.add_argument("--rl-elastic-declare-cells", action="store_true")
     # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,
     # wires MilesTrainerOps and the pool GPU ids)
     parser.add_argument("--rl-elastic-trainer-edges", action="store_true")
+    # rl-multinode-island Q6: accept a changed GPU uuid pool (rebind) at startup
+    parser.add_argument("--rl-elastic-accept-rebind", action="store_true")
     # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
@@ -184,6 +205,9 @@ def parse_args(argv=None):
     parser.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None)
     # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
     parser.add_argument("--rl-elastic-max-recovery-attempts", type=int, default=None)
+    # rl-multinode-island Q4 (C5): off-island copy of the state dir (journal/cuts/ledger),
+    # synced after every commit point and restored on an empty state dir (machine replaced)
+    parser.add_argument("--rl-elastic-checkpoint-store", default=None, metavar="PATH")
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -307,6 +331,7 @@ _ELASTIC_COMPANIONS = (
     ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
     ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
     ("rl_elastic_max_recovery_attempts", "--rl-elastic-max-recovery-attempts"),
+    ("rl_elastic_checkpoint_store", "--rl-elastic-checkpoint-store"),
 )
 _ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s",
                   "rl_elastic_pause_margin", "rl_elastic_drain_timeout_s",
@@ -328,8 +353,12 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-tool-wait-board")
     if getattr(args, "rl_elastic_trainer_edges", False):
         given.append("--rl-elastic-trainer-edges")
+    if getattr(args, "rl_elastic_accept_rebind", False):
+        given.append("--rl-elastic-accept-rebind")
     if getattr(args, "rl_observe_timeline", False) and not ports:
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    from .engine.miles_adapter.elastic_hook import check_recommend_flags
+    check_recommend_flags(args)
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
     if not getattr(args, "rl_elastic", False):
@@ -362,12 +391,33 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
-    if getattr(args, "rl_observe_timeline", False):
+    observe = bool(getattr(args, "rl_observe_timeline", False))
+    if observe:
         miles_args.yeto_rl_observe_timeline = True
+    from .engine.telemetry import DEFAULT_HEARTBEAT_INTERVAL_S, DEFAULT_RESOURCE_INTERVAL_S
+
+    for flag, attr, default in (
+        ("rl_heartbeat_interval", "yeto_rl_heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S),
+        ("rl_resource_sample_interval", "yeto_rl_resource_sample_interval_s",
+         DEFAULT_RESOURCE_INTERVAL_S),
+    ):
+        value = getattr(args, flag, None)
+        value = (default if observe else None) if value is None else float(value)
+        if value:
+            if value < 0:
+                raise ValueError(f"--{flag.replace('_', '-')} must be >= 0")
+            setattr(miles_args, attr, value)
+    from .engine.miles_adapter.elastic_hook import apply_recommend_flags
+    apply_recommend_flags(args, miles_args)
     if getattr(args, "rl_deterministic_trainer", False):
         from .engine.miles_adapter.entry import DETERMINISM_ENV
 
         (os.environ if environ is None else environ).update(DETERMINISM_ENV)
+    # ruling 2026-10-04 v2: the rollout bind path (bind_members) reads the engine opt-in
+    if getattr(args, "rl_allow_cross_node_engine_tp", False):
+        miles_args.yeto_rl_allow_cross_node_engine_tp = True
+    if getattr(args, "rl_allow_cross_node_tp", False):
+        miles_args.yeto_rl_allow_cross_node_tp = True
     if not getattr(args, "rl_elastic", False):
         return
     miles_args.yeto_rl_elastic = {
@@ -381,6 +431,10 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_elastic["tool_wait_board"] = True
     if getattr(args, "rl_elastic_trainer_edges", False):
         miles_args.yeto_rl_elastic["trainer_edges"] = True
+    if getattr(args, "rl_elastic_accept_rebind", False):
+        miles_args.yeto_rl_elastic["accept_rebind"] = True
+    if getattr(args, "rl_elastic_checkpoint_store", None):
+        miles_args.yeto_rl_elastic["checkpoint_store"] = str(args.rl_elastic_checkpoint_store)
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
             miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))
@@ -793,6 +847,15 @@ def _strict_json_file_semantics(path: Path) -> tuple[Any, ...]:
     return typed_semantics(value)
 
 
+def _canonical_schema_sha256(path: Path) -> str | None:
+    from ..provenance import canonical_json_sha256
+
+    try:
+        return canonical_json_sha256(path)
+    except (OSError, ValueError):
+        return None
+
+
 def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
     try:
         pinned_semantics = _strict_json_file_semantics(pinned)
@@ -804,63 +867,11 @@ def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
 
 
 def _preflight_codex_openenv_adapter(args, profile_name: str) -> None:
-    """Attest the isolated OpenEnv wrapper inside the pinned Miles source."""
+    """Attest the in-tree OpenEnv adapter (forwarded to harness.codex.preflight)."""
 
-    from . import CODEX_OPENENV_AGENT_MODULES, CODEX_OPENENV_IDENTITY_ENV
+    from yeto.rl.harness.codex.preflight import forward_legacy_openenv_preflight
 
-    if profile_name != "qwen35_08b":
-        raise ValueError(
-            "the Codex OpenEnv adapter requires backend profile qwen35_08b"
-        )
-    adapter_dir = (
-        Path(args.miles_root).expanduser().resolve()
-        / "examples"
-        / "experimental"
-        / "openenv"
-    )
-    for name in CODEX_OPENENV_AGENT_MODULES:
-        source = adapter_dir / name
-        if source.is_symlink() or not source.is_file():
-            raise ValueError("the Codex OpenEnv adapter source is incomplete")
-    adapter_root = str(adapter_dir)
-    if adapter_root not in sys.path:
-        sys.path.insert(0, adapter_root)
-    try:
-        openenv_adapter = importlib.import_module("codex_openenv_agent_function")
-        subprocess_adapter = importlib.import_module(
-            "codex_openenv_subprocess_agent_function"
-        )
-        openenv_identity = openenv_adapter.codex_openenv_harness_identity()
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
-        raise ValueError("cannot attest the Codex OpenEnv adapter") from exc
-    for module in (openenv_adapter, subprocess_adapter):
-        module_file = getattr(module, "__file__", None)
-        if not isinstance(module_file, str):
-            raise ValueError("the Codex OpenEnv adapter has no source identity")
-        source = Path(module_file)
-        if source.is_symlink() or source.resolve().parent != adapter_dir:
-            raise ValueError("the Codex OpenEnv adapter resolved outside pinned Miles")
-    if not callable(getattr(subprocess_adapter, "run", None)):
-        raise ValueError("the Codex OpenEnv subprocess entrypoint is missing")
-    if openenv_adapter._OPENENV_IDENTITY_ENV != CODEX_OPENENV_IDENTITY_ENV:
-        raise ValueError("the Codex OpenEnv launch identity drifted")
-    expected_openenv_identity = {
-        name.removeprefix("YETO_CODEX_OPENENV_").lower(): value
-        for name, value in CODEX_OPENENV_IDENTITY_ENV.items()
-        if name.endswith("_SHA256")
-    }
-    if openenv_identity != expected_openenv_identity:
-        raise ValueError("the Codex OpenEnv surface identity drifted")
-    openenv_env_mismatched = [
-        name
-        for name, expected in CODEX_OPENENV_IDENTITY_ENV.items()
-        if os.getenv(name) != expected
-    ]
-    if openenv_env_mismatched:
-        raise ValueError(
-            "Codex OpenEnv container environment drifted: "
-            + ", ".join(openenv_env_mismatched)
-        )
+    forward_legacy_openenv_preflight(args, profile_name)
 
 
 def _preflight_codex_harness(args) -> None:
@@ -1000,7 +1011,7 @@ def _preflight_codex_harness(args) -> None:
     # it must not be required for the independent Terminal-Bench path.
     if args.custom_agent_function_path != CODEX_OPENENV_AGENT:
         try:
-            from yeto_miles_secrlenv import codex_harness_agent
+            from yeto.rl.harness.codex import codex_harness_agent
 
             live_identity = codex_harness_agent.codex_harness_identity()
         except (
@@ -1039,7 +1050,7 @@ def _preflight_codex_harness(args) -> None:
         or file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256
         or schema.is_symlink()
         or not schema.is_file()
-        or file_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
+        or _canonical_schema_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
     ):
         raise ValueError("mounted stock Codex artifact does not match its Yeto pin")
     try:
@@ -1187,8 +1198,14 @@ def megatron_adapter_targets(
     *,
     standard_grouped_experts: bool = False,
     pipeline_parallel: int = 1,
+    attention_output_gate: bool = False,
 ) -> list[str]:
-    """Map the exact PEFT contract onto Bridge's Megatron module paths."""
+    """Map the exact PEFT contract onto Bridge's Megatron module paths.
+
+    ``attention_output_gate`` (the provider flag) fails closed on q/k/v: the
+    CanonicalLoRA split adapters are not gate-aware, so their export layout
+    cannot match PEFT's (see ``export.target_modules``).
+    """
 
     model_bridge = getattr(bridge, "_model_bridge", None)
     if model_bridge is None:
@@ -1222,6 +1239,11 @@ def megatron_adapter_targets(
         prefix, separator, leaf = megatron_module.rpartition(".")
         if not separator:
             raise ValueError(f"invalid Megatron adapter module {megatron_module!r}")
+        if leaf == "linear_qkv" and attention_output_gate:
+            raise ValueError(
+                f"PEFT module {module!r} cannot use canonical Megatron LoRA: "
+                "CanonicalLoRA split q/k/v adapters ignore attention_output_gate"
+            )
         if leaf in {"linear_qkv", "linear_fc1"}:
             hf_params = mapping.hf_param
             component = next(
@@ -1286,8 +1308,17 @@ def _legacy_miles_argv(config) -> list[str]:
     from .engine.run_config import (
         RECIPE_DEEPSEEK_V4_FLASH,
         RECIPE_QWEN3_5,
+        RECIPE_QWEN3_8_NEXT,
         lr_schedule_argv,
     )
+
+    if config.model_recipe.name == RECIPE_QWEN3_8_NEXT:
+        # The native Flash-Next recipe (raw torch_dist, qwen4_exp provider, per-expert
+        # LoRA) exists only on the ports path; the legacy translation would fall
+        # through to the generic Bridge branch and silently train the wrong model.
+        raise ValueError(
+            "the Qwen3.8-Flash-Next recipe is ports-only; use --rl-engine ports"
+        )
 
     geometry = config.geometry
     parallel = config.parallel
@@ -2086,6 +2117,7 @@ def run_miles(
         model_bridge,
         standard_grouped_experts=clone_only_lora,
         pipeline_parallel=getattr(args, "pipeline_parallel", 1),
+        attention_output_gate=bool(getattr(provider, "attention_output_gate", False)),
     )
     ports_launch = ports_algorithm = None
     if rl_engine == "ports":
@@ -2483,10 +2515,21 @@ def _run_ports(
     lora_config_hash = canonical_lora_config_hash(
         rank=args.lora_r, target_modules=canonical_targets
     )
+    print(
+        f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
+        + ", ".join(f"{s.name}{list(s.shape)}" for s in specs[:400]),
+        flush=True,
+    )
     # The event tape and island identity are needed even without outer sync.
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
     miles_args.yeto_rl_engine = "ports"
+    # fleet-dashboard 1.4: the ports EventTape tees into W&B (wandb_rl.tee)
+    # off the same namespace fields as run_miles.
+    miles_args.wandb = getattr(args, "wandb", False)
+    miles_args.wandb_project = getattr(args, "wandb_project", "yeto")
+    miles_args.wandb_entity = getattr(args, "wandb_entity", None)
+    miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
     apply_ports_infra_switches(args, miles_args)
     run_ports_island(
         miles_args,
@@ -2547,13 +2590,13 @@ def main(argv=None) -> None:
         load_function(args.custom_generate_function_path)
     if args.custom_agent_function_path:
         load_function(args.custom_agent_function_path)
-    from . import CODEX_HARNESS_AGENT
+    from . import CODEX_HARNESS_AGENT, SECRLENV_AGENT
 
     if args.custom_agent_function_path in {
-        "yeto_miles_secrlenv.agent.run",
+        SECRLENV_AGENT,
         CODEX_HARNESS_AGENT,
     }:
-        from yeto_miles_secrlenv.client import require_daemon_ready
+        from yeto.rl.harness.codex.client import require_daemon_ready
 
         require_daemon_ready()
         print("[rl] secrlenv episode daemon ready")

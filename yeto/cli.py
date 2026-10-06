@@ -41,6 +41,7 @@ SUBCOMMANDS = (
     "rl",
     "sample-diffusion",
     "status",
+    "dashboard",
     "logs",
     "down",
     "stop-run",
@@ -199,6 +200,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-allow-local-data",
+        action="store_true",
+        help=(
+            "ports engine: accept a local prompt file for --data (shipped to the "
+            "island via file mounts; provenance records source=local, no revision). "
+            "Default: RL requires a revision-pinned Hugging Face dataset"
+        ),
+    )
+    rl.add_argument(
         "--rl-algorithm-spec",
         default=None,
         metavar="PATH",
@@ -218,7 +228,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         dest="rollout_num_gpus",
         type=int,
         default=None,
-        help="ports fixed partition: dedicated rollout GPUs per island node (rl-infra-spec 2.1). "
+        help="ports fixed partition: dedicated rollout GPUs per island (rl-infra-spec 2.1; "
+        "on a multi-node island the island total, laid out after the trainer's nodes). "
         "Note: on `launch`, a bare --rollout-num-gpus is an argparse abbreviation of "
         "--rollout-num-gpus-per-engine, not this option",
     )
@@ -228,6 +239,36 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default=0,
         help="ports fixed partition: reserved standby GPUs never started by any role",
     )
+    rl.add_argument(
+        "--rl-min-nodes-per-learner",
+        type=int,
+        default=0,
+        help="rl-multinode-island: refuse a learner island with fewer nodes (0 = the "
+        "recipe-derived minimum: one TP*PP replica + one rollout engine + standby)",
+    )
+    rl.add_argument("--rl-allow-cross-node-tp", action="store_true",
+                    help="rl-multinode-island (ruling 2026-10-04 v2): let the trainer TP*CP group "
+                    "span nodes (default: TP stays inside a node, refused otherwise); same as cfg "
+                    "parallel.allow_cross_node_tp; journaled as topology.layout.cross_node_tp")
+    rl.add_argument("--rl-allow-cross-node-engine-tp", action="store_true",
+                    help="rl-multinode-island (ruling 2026-10-04 v2): let a rollout engine's TP span "
+                    "nodes as whole-node replicas (e.g. SGLang TP8 over 2x4); an engine then scales "
+                    "up/down as one replica; same as cfg parallel.allow_cross_node_engine_tp")
+    rl.add_argument("--rl-island-use-gpus-per-node", type=int, default=None, metavar="M",
+                    help="rl-multinode-island: provision the --gpu machines (N GPUs/node, billed) but "
+                    "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "
+                    "--num-gpus=M, CUDA_VISIBLE_DEVICES=0..M-1, and every layout/placement/gpu_pool "
+                    "rule uses M (e.g. m5 TP8 over 2x4 on 2x8xH100 machines); unset = all N")
+    rl.add_argument("--model-store", default=None, metavar="URI",
+                    help="RL island: cloud-local pinned HF snapshots (COLDSTART-PLAN #4). "
+                    "nebius-fs://<computefilesystem-id> attaches that Nebius shared filesystem "
+                    "at /mnt/yeto-models on every node (needs nebius@<region>) and points "
+                    "HF_HUB_CACHE at it when it holds a completed --model@--model-revision "
+                    "(scripts/populate_nebius_model_store.sh); otherwise WARNING + Hub download")
+    rl.add_argument("--rl-island-network-tier", choices=("auto", "none"), default="auto",
+                    help="multi-node RL island: auto = ask sky for network_tier=best where the cloud "
+                    "honors it (Nebius H100:8/H200:8 -> InfiniBand GPU cluster on a fixed fabric); "
+                    "none = plain VMs (NCCL stays on TCP sockets, NCCL_IB_DISABLE=1 by default anyway)")
     rl.add_argument(
         "--rl-overlap-eval",
         action="store_true",
@@ -253,9 +294,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "stays S seconds after end_update_weights and before check_weights/"
                     "admit_cells (observation window); needs another --rl-test-* injection")
     rl.add_argument("--rl-test-inject-tool-wait-s", type=float, default=None, metavar="S",
-                    help="--rl-elastic, TEST ONLY (A4b): the first drain counts an artificial "
-                    "tool wait for S seconds (drain timeout -> CANCELLED -> undrain); needs "
+                    help="--rl-elastic, TEST ONLY (A4b): every drain executes an artificial tool "
+                    "that waits S seconds (drain timeout -> CANCELLED -> undrain); a drain "
+                    "while it still waits is journaled, not re-armed; needs "
                     "--rl-elastic-tool-wait-board")
+    rl.add_argument("--rl-test-tool-side-effect-log", action="store_true", default=False,
+                    help="--rl-elastic, TEST ONLY (A4bc / 3.3 X5): journal every execution of "
+                    "the injected tool (--rl-test-inject-tool-wait-s) in <elastic state dir>/"
+                    "side_effects.jsonl, one tool_side_effect record per (trajectory, tool call) "
+                    "before the wait starts; the judge proves a drain-timeout cancel never "
+                    "replays a tool call")
     rl.add_argument("--rl-test-inject-undrain-fail", type=int, default=None, metavar="N",
                     help="--rl-elastic, TEST ONLY (A4b / E1-C): the next N undrain calls fail "
                     "inside the adapter, so a drain timeout cannot restore the old routing "
@@ -269,10 +317,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-print-attestation-fingerprint", action="store_true",
                     help="ports: each island learner builds its Miles argv exactly as a real run, "
                     "prints the attestation runtime_fingerprint as one JSON line and exits "
-                    "before Ray/GPU work (run it on CPU with the same flags as the real run)")
+                    "before Ray/GPU work. NOTE: the launcher still provisions the island as declared, "
+                    "so pass CPU-only resources to avoid paying for GPUs")
     rl.add_argument("--rl-lora-dropout", type=float, default=None, metavar="P",
                     help="ports LoRA: training-time LoRA dropout (default 0). Trainer DP-change "
                     "edges refuse dropout > 0; same-shape rebuild restores its RNG")
+    rl.add_argument("--rl-lora-expert-rank", type=int, default=None, metavar="R",
+                    help="ports Qwen3.8-Flash-Next: routed-expert LoRA rank r_e (0 <= r_e <= "
+                    "--lora-r; default the profile's 8)")
+    rl.add_argument("--rl-megatron-ref-load", default=None, metavar="DIR",
+                    help="ports: absolute node-side Megatron torch_dist checkpoint for --ref-load "
+                    "(required by the Qwen3.8-Flash-Next raw recipe, e.g. "
+                    "/mnt/yeto-models/torch_dist/qwen3.8-flash-next_torch_dist)")
     rl.add_argument("--rl-deterministic-trainer", action="store_true",
                     help="ports: Megatron --deterministic-mode plus NCCL_ALGO=Ring, "
                     "CUBLAS_WORKSPACE_CONFIG=:4096:8, NVIDIA_TF32_OVERRIDE=0 on the learner and "
@@ -295,6 +351,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "dataset state advanced by GROUPS where rollout_executor.load reads it")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
+    from yeto.rl.engine.miles_adapter.elastic_hook import add_recommend_arguments
+    add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
                     help="--rl-elastic: feed the island's tool-wait board into the drain check "
                     "(3.3; needs a workload that records tool waits)")
@@ -318,6 +376,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic: enable trainer DP-change / role-transfer edges (4.7): "
                     "drops --balance-data (refused by the DP certification) and wires the "
                     "trainer ops and pool GPU ids; off by default")
+    rl.add_argument("--rl-checkpoint-store", default=None, metavar="PATH|URI",
+                    help="--rl-elastic: off-island copy of the island state dir (journal, cuts, "
+                    "ledger) for a rebuild after node loss (rl-multinode-island Q4): a bucket "
+                    "URI (s3://, gs://, ...) mounted on the island, or a path already shared "
+                    "across machines (NFS, persistent volume). The learner syncs the state dir "
+                    "there after every commit point and restores from it when its state dir "
+                    "is empty (machine replaced). Without it the state stays on node0's local "
+                    "disk (warning on a multi-node island)")
+    rl.add_argument("--rl-elastic-accept-rebind", action="store_true",
+                    help="--rl-elastic, multi-node: accept a GPU uuid pool that differs from the "
+                    "cfg / journal binding (machine replaced) and rebind; off by default the "
+                    "learner refuses to start on changed GPUs (Q6)")
     rl.add_argument("--rl-elastic-declare-cells", action="store_true",
                     help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
                     "rollout engine cells (placement map rollout_cells: started on the rollout "
@@ -1250,6 +1320,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="also summarize a syncer event tape JSONL file",
     )
 
+    from .dashboard.cli import add_parser as _add_dashboard_parser
+
+    _add_dashboard_parser(sub)
+
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
     logs.add_argument(
@@ -1523,10 +1597,13 @@ def cmd_sample_diffusion(args) -> int:
 # race them. Setup touches the marker only if every install succeeded; the
 # head job waits for it (bounded) before importing anything.
 HEAD_READY_MARKER = "~/.yeto_head_ready"
+# Pinned: yeto's runtime sky patches (yeto.sky_patches) are verified per
+# version, and the head must run the same sky the patches were checked on.
+HEAD_SKYPILOT_VERSION = "0.13.0"
 HEAD_SETUP_PIP = (
     # Every cloud a fleet can name (pyproject launcher extra) plus gcp for gs:// outputs;
     # without a cloud's extra, the head's sky reports that cloud as not enabled.
-    'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]>=0.12" && '
+    f'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]=={HEAD_SKYPILOT_VERSION}" && '
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
     "pip install -q cloudpickle transformers==5.13.0"
 )
@@ -1560,6 +1637,7 @@ def _make_head_task(args, extra_mounts: dict | None = None):
     uploads a non-Linux binary."""
     import sky
 
+    from . import launcher
     from .launcher import (
         HF_TOKEN_PATH,
         REPO_ROOT,
@@ -1597,6 +1675,17 @@ def _make_head_task(args, extra_mounts: dict | None = None):
     if getattr(args, "wandb", False):
         # The head tails the syncer's event tape into W&B (yeto.wandb_tape).
         head_pip += " && pip install -q wandb"
+    from .sky_patches import head_pth_command
+
+    # Load yeto's sky patches into every Python process on the head —
+    # including sky's API server, where provisioning actually runs.
+    head_pip += "\n" + head_pth_command()
+    if "verda" in fleet_clouds(args):
+        from .shape.providers import VERDA_HEAD_CATALOG_STEP
+
+        # Same full Verda catalog the submitter wrote (sky's hosted one
+        # is a stock snapshot).
+        head_pip += "\n" + VERDA_HEAD_CATALOG_STEP
     task = sky.Task(
         name="yeto-head",
         setup=(
@@ -1617,11 +1706,47 @@ def _make_head_task(args, extra_mounts: dict | None = None):
             infra=infra,
             cpus="8+",
             memory=f"{args.syncer_memory}+",
-            ports=[SYNCER_PORT],
+            ports=launcher.syncer_ports(args),
             use_spot=False,
         )
     )
+    if launcher.syncer_ports(args) is None:
+        # No security groups (Verda): firewall inside the VM, first thing.
+        task.setup = launcher.ufw_setup(SYNCER_PORT) + "\n" + task.setup
     return task
+
+
+PROBE_SUBMIT_JOIN_S = 30.0
+
+
+def _probe_head_port(cluster: str, head_ip: str) -> bool:
+    """Cloud without open_ports (Verda): before any island exists, prove
+    from this machine that the head's syncer port is reachable — a
+    one-shot listener job greets the probe (patched out in tests)."""
+    import sky
+
+    from . import launcher
+
+    listener = sky.Task(name="yeto-port-probe", run=launcher.probe_listener_command(launcher.SYNCER_PORT))
+    submit_error: list = []
+
+    def submit():
+        # Submitted in the background: whether stream_and_get returns at
+        # job submission or only when the listener exits (to be confirmed
+        # on a real head, 6.4), the probe below runs while it listens.
+        try:
+            sky.stream_and_get(sky.exec(listener, cluster_name=cluster))
+        except Exception as e:  # noqa: BLE001
+            submit_error.append(e)
+
+    t = threading.Thread(target=submit, daemon=True)
+    t.start()
+    ok, detail = launcher.tcp_probe(head_ip, launcher.SYNCER_PORT, expect=launcher.PROBE_BANNER)
+    t.join(PROBE_SUBMIT_JOIN_S)
+    if submit_error and not ok:
+        detail += f" (listener job failed: {submit_error[0]})"
+    print(f"[yeto] {cluster}: syncer port probe: {detail}", file=sys.stderr if not ok else sys.stdout)
+    return ok
 
 
 def _sky_launch_head(task, cluster: str):
@@ -1681,7 +1806,7 @@ def cmd_launch_head(args) -> int:
     from .gpu_spec import parse_gpu_spec
 
     name = args.cluster_prefix
-    head_cluster = f"{name}-head"
+    head_cluster = launcher.sky_cluster_name(f"{name}-head")
     specs = parse_gpu_spec(args.gpu)
     # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
     # pickle:<file> here, and the pickle is file-mounted onto the head.
@@ -1719,6 +1844,12 @@ def cmd_launch_head(args) -> int:
     print(f"[yeto] provisioning head cluster {head_cluster} in {args.syncer_region}")
     handle = _sky_launch_head(_make_head_task(args, data_mounts), head_cluster)
     head_ip = handle.head_ip
+    if launcher.syncer_ports(args) is None and not _probe_head_port(head_cluster, str(head_ip)):
+        print(f"[yeto] tearing down {head_cluster}: its syncer port is not reachable", file=sys.stderr)
+        if not _down_and_verify(head_cluster):
+            print(f"[yeto] {head_cluster}: NOT confirmed down — check the cloud console", file=sys.stderr)
+        runs.update_run(name, state=runs.FAILED, exit_code=1, finished_at=time.time())
+        return 1
     print(f"[yeto] head is up at {head_ip}; submitting the controller job")
 
     envs = {"SYNCER_PUBLIC_IP": str(head_ip)}
@@ -1806,7 +1937,7 @@ def cmd_head(payload: str) -> int:
         and delivery.is_remote(getattr(args, "output", None))
         and not getattr(args, "_teardown_incomplete", False)
     ):
-        delivery.self_terminate(f"{args.cluster_prefix}-head")
+        delivery.self_terminate(f"{args.cluster_prefix}-head".lower())
     return code
 
 
@@ -1827,10 +1958,25 @@ def cmd_worker(name: str) -> int:
     def record_clusters(names) -> None:
         runs.update_run(name, clusters=list(names))
 
+    def record_instance_ids(cluster, ids) -> None:
+        # Verda islands: the instance ids behind each cluster name, so a
+        # later recovery or `yeto down` can ask Verda by id.
+        meta = runs.load_run(name) or {}
+        known = dict(meta.get("verda_instance_ids") or {})
+        known[cluster] = list(ids)
+        runs.update_run(name, verda_instance_ids=known)
+
     from .launcher import run as launcher_run
 
     try:
-        code = launcher_run(args, on_clusters=record_clusters)
+        import inspect
+
+        extra = (
+            {"on_instance_ids": record_instance_ids}
+            if "on_instance_ids" in inspect.signature(launcher_run).parameters
+            else {}
+        )
+        code = launcher_run(args, on_clusters=record_clusters, **extra)
     except BaseException:
         import traceback
 
@@ -2358,6 +2504,10 @@ def main(argv=None) -> int:
         return cmd_sample_diffusion(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "dashboard":
+        from .dashboard.cli import main as dashboard_main
+
+        return dashboard_main(args)
     if args.command == "logs":
         return cmd_logs(args)
     if args.command == "down":

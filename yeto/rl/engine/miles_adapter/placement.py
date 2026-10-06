@@ -37,6 +37,23 @@ class PlacementRequest:
     # fork F-R1: yeto names of the rollout engine cells declared to the fork
     # (placement map "rollout_cells"); needs a Miles fork with F-R1.
     rollout_cell_names: tuple[str, ...] = ()
+    # rl-multinode-island D3-D5: GPUs per island node (None = single node, no
+    # node rules) and the trainer parallel sizes the node rules need.
+    # Q1/Q3 ruling 2026-10-04: the in-node group is ``node_parallel`` = tp*cp
+    # (TP stays inside a node); EP/PP groups may span nodes. ``model_parallel``
+    # is the dense world group tp*pp*cp kept for callers that still pass it; it
+    # doubles as the in-node group only when ``node_parallel`` is None.
+    gpus_per_node: int | None = None
+    model_parallel: int = 1
+    expert_parallel: int = 1
+    node_parallel: int | None = None
+    # Ruling 2026-10-04 v2: "TP stays inside a node" is the DEFAULT preference, not
+    # a hard limit. Explicit opt-ins (cfg ``parallel.allow_cross_node_tp`` /
+    # ``--rl-allow-cross-node-tp``; ``parallel.allow_cross_node_engine_tp`` /
+    # ``--rl-allow-cross-node-engine-tp``) let the trainer tp*cp group, or a rollout
+    # engine (sglang TP as whole-node replicas), span nodes.
+    allow_cross_node_tp: bool = False
+    allow_cross_node_engine_tp: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in ("colocated", "fixed-partition"):
@@ -67,6 +84,72 @@ class PlacementRequest:
                 self.bundle_map, trainer=self.trainer_gpus, rollout=self.rollout_gpus,
                 standby=self.standby_gpus,
             ))
+        for name in ("model_parallel", "expert_parallel", "node_parallel"):
+            value = getattr(self, name)
+            if value is None and name == "node_parallel":
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"placement {name} must be a positive int")
+        if self.gpus_per_node is not None:
+            self._check_nodes()
+
+    @property
+    def in_node_parallel(self) -> int:
+        """Trainer group that must stay inside one node: ``node_parallel`` (tp*cp)
+        when given, else the legacy ``model_parallel``."""
+        return self.model_parallel if self.node_parallel is None else self.node_parallel
+
+    @property
+    def topology(self):
+        """``Topology`` of the island, or None on a single node."""
+        if self.gpus_per_node is None:
+            return None
+        from yeto.rl.engine.multinode import Topology
+
+        return Topology(max(1, -(-self.total_gpus // self.gpus_per_node)), self.gpus_per_node)
+
+    def _check_nodes(self) -> None:
+        from yeto.rl.engine.multinode import Topology, TopologyError, node_placement_rejection
+
+        g = self.gpus_per_node
+        if isinstance(g, bool) or not isinstance(g, int) or g < 1:
+            raise ValueError("gpus_per_node must be a positive int")
+        if self.total_gpus % g:
+            raise ValueError(f"{self.total_gpus} island GPUs are not whole {g}-GPU nodes")
+        topology = Topology(self.total_gpus // g, g)
+        roles = self.role_bundles()
+        per = self.gpus_per_engine
+        rollout = list(roles["rollout"])
+        try:
+            slots = {
+                "trainer": [topology.slot_of(b) for b in roles["trainer"]],
+                "rollout": [[topology.slot_of(b) for b in rollout[i:i + per]]
+                            for i in range(0, len(rollout), per)],
+                "standby": [topology.slot_of(b) for b in roles["standby"]],
+            }
+        except TopologyError as exc:
+            raise ValueError(str(exc)) from None
+        # colocated: the engines share the trainer's GPUs; m5 (ruling 2026-10-04 v2) checks
+        # them with the same engine rules (one node by default; a cross-node engine needs
+        # the opt-in and takes whole nodes) -- before, a colocated TP8 engine on 2x4 slipped
+        # through without --rl-allow-cross-node-engine-tp.
+        reason = node_placement_rejection(slots, node_parallel=self.in_node_parallel,
+                                          expert_parallel=self.expert_parallel, gpus_per_engine=per,
+                                          allow_cross_node_tp=bool(self.allow_cross_node_tp),
+                                          allow_cross_node_engine=bool(self.allow_cross_node_engine_tp),
+                                          gpus_per_node=g)
+        if reason:
+            raise ValueError(reason)
+
+    def trainer_shape(self) -> tuple[int, int]:
+        """``(actor_num_nodes, actor_num_gpus_per_node)`` the trainer bundles occupy
+        (single node: ``(1, trainer_gpus)``)."""
+        topology = self.topology
+        if topology is None:
+            return 1, self.trainer_gpus
+        from yeto.rl.engine.multinode import rectangular_trainer
+
+        return rectangular_trainer([topology.slot_of(b) for b in self.role_bundles()["trainer"]])
 
     @property
     def total_gpus(self) -> int:
@@ -110,9 +193,14 @@ class PlacementRequest:
             t, r = self.trainer_gpus, self.rollout_gpus
             pm = {"trainer": list(range(t)), "rollout": list(range(t, t + r)), "standby": []}
         g = self.gpus_per_engine
-        runs = [(list(pm["rollout"][i:i + g]), True) for i in range(0, len(pm["rollout"]), g)]
-        standby = list(pm.get("standby", []))
-        runs += [(standby[i:i + g], False) for i in range(0, len(standby) - g + 1, g)]
+        from yeto.rl.engine.multinode import chunk_by_node
+
+        topology = self.topology
+        cross = bool(self.allow_cross_node_engine_tp)
+        started, _rest = chunk_by_node(pm["rollout"], topology, g, allow_cross_node=cross)
+        runs = [(list(run), True) for run in started]
+        standby_runs, _rest = chunk_by_node(list(pm.get("standby", [])), topology, g, allow_cross_node=cross)
+        runs += [(list(run), False) for run in standby_runs]
         cells = []
         for index, name in enumerate(self.rollout_cell_names):
             bundles, start = runs[index] if index < len(runs) else ([], False)

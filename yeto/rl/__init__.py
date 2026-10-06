@@ -35,14 +35,20 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # public slice_pg_info, bundle-free check before any cell starts; plus
 # (fb04d6ff) M5: LoRA DP-invariant restore no longer drops DistOpt exp_avg/exp_avg_sq,
 # and (e3a11ab3) its cross-optimizer error text/docstring and tests.
-MILES_NEXT_COMMIT = "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841"
+# image-m3a27b (c35702e = merge of m3-qwen4exp-lora ab904f43a [Qwen3.8-Next LoRA layout]
+# + fork-a27-worker-loss 857fc9592 [workers_lost cells, bounded weight-update group
+# rendezvous --update-weight-group-timeout-s; A27-2 ExternalFailureError /
+# RolloutEngineJoinError: an engine-side failure no longer kills the trainer]
+# on yeto/ports e3a11ab38).
+MILES_NEXT_COMMIT = "c35702eefcf2862cee155e46870e6ad30568d2c6"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
 SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
 # yeto/lora-checksum (a1240c530 = 9f29303 + WeightChecker checksum covers LoRA adapter A/B);
 # yeto/ports 9f29303: the ported agentenv/sglang patches (see sglang-patch-port.md).
-SGLANG_NEXT_COMMIT = "a1240c530d406b5d0f252511f8e0a9a93b6a079d"
+# m3-qwen4exp-lora (4e4148f1b = a1240c530 + Qwen4ExpForConditionalGeneration LoRA hooks).
+SGLANG_NEXT_COMMIT = "4e4148f1b4fe9f05973da0d1e5cfe237512d5155"
 MILES_LEGACY_PINS = MilesRevisionPins(MILES_REPOSITORY, MILES_COMMIT)
 MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
 # radixark/miles:dev multi-arch index (upstream docker/Dockerfile at
@@ -59,12 +65,26 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PRIVATE (ghcr.io/michaellchung): launches pass registry
 # credentials via SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} (ports only; use
 # a read:packages-only token).
-# Tag e3a11ab-a1240c5; linux/amd64 only.
+# Tag c35702e-4e4148f; linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "12fcd9e583d63287d6814dfc87158364a0e370a22795462d19962a2857e53069"
+    "37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
+# Nebius VM images whose /var/lib/docker already holds a docker image's
+# layers (scripts/bake_nebius_image.sh; COLDSTART-PLAN.md #3), keyed by that
+# image's digest, then region.  sky still runs `docker pull <digest>`, which
+# is then a no-op.  Only an exact digest match is used: a stale entry for an
+# older pin would just cost a full pull on top of a non-default base disk, so
+# the launcher warns and keeps the stock image instead.  Base disk: Nebius
+# public family ubuntu24.04-cuda13.0 (sky's own GPU default), so the NVIDIA
+# driver and container toolkit are unchanged.
+NEBIUS_BAKED_IMAGES: dict[str, dict[str, str]] = {
+    # MILES_NEXT_IMAGE c35702e-4e4148f; baked 2026-10-05 (cs2-bake.log).
+    "sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9": {
+        "eu-north1": "computeimage-e00xts577c333r08gv",
+    },
+}
 # Where MILES_NEXT_IMAGE installed the SGLang fork (editable).
 MILES_NEXT_IMAGE_SGLANG_ROOT = "/sgl-workspace/sglang"
 
@@ -81,26 +101,26 @@ def default_rl_image(rl_engine: str) -> str:
 
     return MILES_NEXT_IMAGE if rl_engine == "ports" else MILES_IMAGE
 
-SECRLENV_AGENT_PATH = "yeto_miles_secrlenv/agent.py"
+SECRLENV_AGENT_PATH = "yeto/rl/harness/codex/agent.py"
 SECRLENV_AGENT_SHA256 = (
-    "0f76c7fbd81135bc5b02cab2488629aaff1bb58dc59eae9228ca317583d90c26"
+    "fef958c32d27af124827b17369bb82557e96946c4b6f9b74c67f084a533f7c81"
 )
-SECRLENV_AGENT = "yeto_miles_secrlenv.agent.run"
-SECRLENV_REWARD = "yeto_miles_secrlenv.reward:reward_func"
-SECRLENV_GROUP_FILTER = "yeto_miles_secrlenv.reward.check_group"
-SECRLENV_GENERATE = "yeto_miles_secrlenv.generate.generate"
+SECRLENV_AGENT = "yeto.rl.harness.codex.agent.run"
+SECRLENV_REWARD = "yeto.rl.harness.codex.reward:reward_func"
+SECRLENV_GROUP_FILTER = "yeto.rl.harness.codex.reward.check_group"
+SECRLENV_GENERATE = "yeto.rl.harness.codex.generate.generate"
 SECRLENV_GENERATE_SHA256 = (
-    "9e034d6b2e9fec642501ea4a638a8fe196819dacde614ce2903359fc54ea1713"
+    "1c79b0e678b8681b5bd6221b5a4bbc6adbe7a1413b688e248cb930eb3e456cca"
 )
 SECRLENV_ZERO_VARIANCE_REPLACEMENTS = 0
 SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1
 
 # Stock Codex is part of the signed Yeto security-environment harness.  These
 # pins identify the official Linux artifact, not the controller's host binary.
-CODEX_HARNESS_AGENT = "yeto_miles_secrlenv.codex_harness_agent.run"
-CODEX_HARNESS_AGENT_PATH = "yeto_miles_secrlenv/codex_harness_agent.py"
+CODEX_HARNESS_AGENT = "yeto.rl.harness.codex.codex_harness_agent.run"
+CODEX_HARNESS_AGENT_PATH = "yeto/rl/harness/codex/codex_harness_agent.py"
 CODEX_HARNESS_AGENT_SHA256 = (
-    "995e48f0e2817191314f19e794e25fd70e738aec5957213b51914f24d552f7b7"
+    "94fa4c245b719d236ec1007b70d395adb12456b3ef04278592ae2d3c0d843947"
 )
 CODEX_BASE_INSTRUCTIONS_SHA256 = (
     "1c183656ca1319142cba9e76baa199b7ab59f770a51a76660622a087e74ba846"
@@ -129,7 +149,7 @@ CODEX_PACKAGE_MANIFEST_SHA256 = (
 )
 CODEX_APP_SERVER_PROTOCOL_REVISION = "v2"
 CODEX_APP_SERVER_SCHEMA_SHA256 = (
-    "f2415ee36b3c9fa16617c800910cd65b8086ce7c7fecee3dac5f7089eb5973b9"
+    "a88d865c3ca41fc63672baf423e28b3bfdb85b989e1c95e6e268932daaac91a0"
 )
 CODEX_CONTAINER_BINARY_PATH = "/opt/yeto/codex/codex-x86_64-unknown-linux-musl"
 CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH = (
@@ -139,7 +159,7 @@ CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH = (
 # Terminal-Bench uses a thin isolated-process wrapper around the same attested
 # stock Codex runtime.  It is intentionally not a SecRLEnv agent: its reward,
 # retry, and cleanup evidence contracts are Terminal-Bench-specific.
-CODEX_OPENENV_AGENT = "codex_openenv_subprocess_agent_function.run"
+CODEX_OPENENV_AGENT = "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run"
 CODEX_OPENENV_AGENT_MODULES = (
     "codex_openenv_subprocess_agent_function.py",
     "codex_openenv_agent_worker.py",
@@ -150,16 +170,16 @@ CODEX_OPENENV_IDENTITY_ENV = {
     "YETO_CODEX_OPENENV_MODEL_ID": "Qwen/Qwen3.5-0.8B",
     "YETO_CODEX_OPENENV_MODEL_REVISION": ("2fc06364715b967f1860aea9cf38778875588b17"),
     "YETO_CODEX_OPENENV_BASE_INSTRUCTIONS_SHA256": (
-        "49f65bcd88cfe5848f1fd448524dca097eec86b67900f3d212e2d5c8609346e2"
+        "1c183656ca1319142cba9e76baa199b7ab59f770a51a76660622a087e74ba846"
     ),
     "YETO_CODEX_OPENENV_TERMINAL_EXEC_TOOL_SCHEMA_SHA256": (
-        "7e21b8634834b5c24eaf07f10bcd47e3b0a3d75d153a379cec36ff7d0acedb7e"
+        "868dbbff9fe2f5a57573826cae1ae1f4ceac04eff8689a522d9af7ef1b589c5a"
     ),
     "YETO_CODEX_OPENENV_SUBMIT_TOOL_SCHEMA_SHA256": (
-        "c4df0e3dfae83fa3a05b142a6635a27838a4f268fd505fb95f1878d5d1646614"
+        "162980cf1de2346e6a246a739c10a31d0f5bd30c62b27c080887b298ecad1a6f"
     ),
     "YETO_CODEX_OPENENV_DYNAMIC_TOOLS_SCHEMA_SHA256": (
-        "c41c53ef0ded04efb790e74a48eaccc9489c3b39d24d01c81d7031dc11539187"
+        "06142f7664a668c11149b9410af6438423654ac7ee85fa382226bc7fbbf101af"
     ),
 }
 SIGNED_CODEX_AGENTS = frozenset((CODEX_HARNESS_AGENT, CODEX_OPENENV_AGENT))

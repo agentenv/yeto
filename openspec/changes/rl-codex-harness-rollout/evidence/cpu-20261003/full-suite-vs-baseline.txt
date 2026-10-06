@@ -1,0 +1,2 @@
+68 failed, 3370 passed, 40 skipped, 30 warnings, 26 errors in 107.75s (0:01:47)
+failure ids (normalized) vs /tmp/integ-s2-base.ids: 0 new, 0 gone (83 ids)

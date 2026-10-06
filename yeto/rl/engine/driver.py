@@ -283,6 +283,13 @@ class EventTape:
         append_record(self.path, record)
 
 
+# fleet-dashboard 1.3: rollout batch summary keys copied into rl_round_trained.
+BATCH_SUMMARY_KEYS = (
+    "adv_mean", "adv_std", "resp_len_mean", "resp_len_p95", "truncated_frac",
+    "reward_p10", "reward_p50", "reward_p90",
+)
+
+
 def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
     return {
         "active_groups": float(len(batch.groups)),
@@ -367,6 +374,7 @@ class IslandDriver:
         clock: Callable[[], float] = time.monotonic,
         controller: Any = None,
         ledger: Any = None,
+        elastic_hook: Any = None,
     ) -> None:
         self.learner_id = int(learner_id)
         self.rollout = rollout
@@ -401,6 +409,15 @@ class IslandDriver:
         self.fault_injection = load_fault_injection()
         self.controller = controller
         self.ledger = ledger
+        # D1/D2 wiring (6.5, d2-wire): optional ``elastic.ElasticHook``; None keeps
+        # the safe point exactly as before (no event, no read, no decision).
+        self.elastic_hook = elastic_hook
+        # Failure-path node-loss attribution (tasks 3.3): how long a failed
+        # round waits for the controller to confirm a lost node before the
+        # original error is re-raised; ``sleep`` is injectable for tests.
+        self.node_loss_grace_s = 60.0
+        self.node_loss_poll_s = 2.0
+        self.sleep: Callable[[float], None] = time.sleep
         self.published_state: TrainableState | None = None
         self.at_safe_point = False
         self.eval_overlap: EvalOverlap | None = None
@@ -409,9 +426,14 @@ class IslandDriver:
 
     # -- events ----------------------------------------------------------
     def emit(self, event: str, **fields: Any) -> None:
-        self.events.append({"event": event, **fields})
+        record = {"event": event, **fields}
+        self.events.append(record)
+        feed = getattr(getattr(self, "elastic_hook", None), "feed", None)
+        if self.observe and callable(feed):
+            feed(record)  # D2: in-memory mirror, independent of the tape path
 
     def phase(self, name: str, **fields: Any) -> None:
+        self._last_phase = (name, fields.get("rollout_id"))
         if self.observe:
             self._close_span()
             self._open_span = (name, self.clock(), fields.get("rollout_id"))
@@ -459,6 +481,7 @@ class IslandDriver:
             rollout_id=rollout_id,
             profile_hash=self.profile_hash,
             epoch=self.config_epoch,
+            weight_transport=self.weight_transport,
         )
 
     def _snapshot(
@@ -486,8 +509,11 @@ class IslandDriver:
                 ready_groups=len(snap.ready_group_ids),
                 inflight_batches=snap.inflight_batches,
                 **({"eval_in_flight": snap.eval_in_flight} if self.eval_overlap else {}),
+                policy_age=max(0, snap.trained_policy_version - snap.published_policy_version),
+                t=self.clock(),
                 profile_hash=self.profile_hash,
                 epoch=self.config_epoch,
+                weight_transport=self.weight_transport,
             )
         return snap
 
@@ -643,6 +669,53 @@ class IslandDriver:
             self.emit("rl_reconfiguration", rollout_id=None, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch)
             raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+
+    def _probe_nodes(self, rollout_id: int) -> None:
+        """rl-multinode-island D9: before each round ask the controller whether every
+        island node is still alive; a loss is RECOVERY_REQUIRED and ends the run
+        (no partial-node training or generation)."""
+        check = getattr(self.controller, "check_nodes", None) if self.controller else None
+        if not callable(check):
+            return
+        error = check()
+        if error:
+            self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
+                      error=str(error), config_epoch=self.config_epoch)
+            raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+
+    def _classify_failure(self, rollout_id: int | None, error: BaseException) -> None:
+        """Failure-path node-loss attribution (rl-multinode-island D9, tasks 3.3):
+        when a round/publication fails on a multi-node island, the first symptom
+        of a lost node is usually an engine error (e.g. no eligible rollout
+        engines), long before the GCS marks the node DEAD.  Poll
+        ``controller.check_nodes()`` for ``node_loss_grace_s``; a confirmed loss
+        is journaled by the controller and emitted as RECOVERY_REQUIRED, and the
+        run ends with ``DriverError`` chained to the original error.  If no node
+        loss is confirmed in the grace period the original error propagates.
+        Single-node islands / no controller never poll.  KeyboardInterrupt and
+        SystemExit are never attributed."""
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            return
+        if isinstance(error, DriverError) and "RECOVERY_REQUIRED" in str(error):
+            return  # already attributed by _probe_nodes/_classify_failure
+        check = getattr(self.controller, "check_nodes", None) if self.controller else None
+        if not callable(check) or not getattr(self.controller, "topology", None):
+            return
+        deadline = self.clock() + float(self.node_loss_grace_s)
+        while True:
+            try:
+                lost = check()
+            except Exception as probe_error:  # fail closed: probe failure counts as loss
+                lost = f"node probe failed: {probe_error!r}"
+            if lost:
+                self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
+                          error=str(lost), config_epoch=self.config_epoch,
+                          cause=f"{type(error).__name__}: {error}")
+                raise DriverError(f"island is RECOVERY_REQUIRED: {lost}") from error
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return
+            self.sleep(min(float(self.node_loss_poll_s), remaining))
 
     def _confirm_recovery(self, rollout_id: int) -> None:
         """3.7 restart recovery: after the first full publication covered the
@@ -807,6 +880,22 @@ class IslandDriver:
             **_dynamic_filter_counts(batch),
         )
 
+    def _train_fields(self, batch, metrics, train_seconds: float) -> dict[str, Any]:
+        """fleet-dashboard 1.2/1.3: round training stats for ``rl_round_trained``."""
+        probe = getattr(self.trainer, "round_metrics", None)
+        train_metrics = dict(probe() or {}) if callable(probe) else {}
+        tokens = sum(int(g.token_count) for g in batch.groups)
+        fields: dict[str, Any] = {
+            "train_step": metrics.train_step,
+            "train_metrics": {str(k): float(v) for k, v in train_metrics.items()},
+            "step_seconds": float(train_seconds),
+            "tok_per_s": tokens / train_seconds if train_seconds > 0 else None,
+        }
+        summary = getattr(batch, "batch_summary", None) or {}
+        for key in BATCH_SUMMARY_KEYS:
+            fields[key] = summary.get(key)
+        return fields
+
     def _mismatch_fields(self) -> dict[str, Any]:
         """A5: mismatch metrics with profile/epoch/transport labels; nothing when absent."""
         probe = getattr(self.trainer, "algorithm_metrics", None)
@@ -816,6 +905,42 @@ class IslandDriver:
         return {"mismatch": values, **{f"label/{k}": v for k, v in self._labels().items()}}
 
     load_sample_interval_s = 5.0
+    # fleet-dashboard 2.1/2.2 (opt-in; None = not started, tape unchanged).
+    heartbeat_interval_s: float | None = None
+    resource_sample_interval_s: float | None = None
+    _resource_sampler: Any = None
+
+    def _heartbeat_state(self) -> dict[str, Any]:
+        span = getattr(self, "_last_phase", None) or (None, None)
+        return {
+            "phase": span[0],
+            "rollout_id": span[1],
+            "policy_version": self.published_version,
+            "trained_version": self.trained_version,
+            "rounds_completed": self.rounds_completed,
+            **self._labels(),
+        }
+
+    @contextmanager
+    def _telemetry_threads(self):
+        """2.1/2.2: heartbeat + resource sampler for the duration of ``run``."""
+        from .telemetry import HeartbeatThread, ResourceSampler
+
+        threads = []
+        try:
+            if self.heartbeat_interval_s:
+                threads.append(HeartbeatThread(
+                    self.emit, self._heartbeat_state, interval_s=self.heartbeat_interval_s,
+                    clock=self.clock).start())
+            if self.resource_sample_interval_s:
+                self._resource_sampler = ResourceSampler(
+                    self.emit, interval_s=self.resource_sample_interval_s, clock=self.clock,
+                    labels=self._labels)
+                threads.append(self._resource_sampler.start())
+            yield
+        finally:
+            for thread in threads:
+                thread.stop()
 
     @contextmanager
     def _load_sampler(self, rollout_id: int):
@@ -831,9 +956,18 @@ class IslandDriver:
         def loop() -> None:
             while not stop.wait(self.load_sample_interval_s):
                 sample = probe()
+                sampler = getattr(self, "_resource_sampler", None)
+                if sample is not None and sampler is not None:
+                    # 2.2: peaks come from the resource sampler's NVML probe
+                    sample = dict(sample)
+                    for key, value in sampler.take_peaks().items():
+                        if sample.get(key) is None:
+                            sample[key] = value
                 if sample is not None:
                     self.emit("rl_load_sample", rollout_id=rollout_id, **sample,
-                              profile_hash=self.profile_hash, epoch=self.config_epoch)
+                              t=self.clock(), profile_hash=self.profile_hash,
+                              epoch=self.config_epoch,
+                              weight_transport=self.weight_transport)
 
         thread = threading.Thread(target=loop, name="yeto-load-sampler", daemon=True)
         thread.start()
@@ -848,6 +982,7 @@ class IslandDriver:
 
         values = {
             "rl/clip_fraction": metrics.clip_fraction,
+            "rl/masked_fraction": getattr(metrics, "masked_fraction", None),
             "rl/mean_kl": metrics.mean_kl,
             "rl/ess_ratio": metrics.ess_ratio,
             "rl/groups": len(batch.groups),
@@ -860,7 +995,8 @@ class IslandDriver:
         extra = getattr(self.trainer, "algorithm_metrics", None)
         if callable(extra):
             values.update({str(k): v for k, v in dict(extra() or {}).items()})
-        self.emit("rl_round_labels", rollout_id=rollout_id, **self._labels(), **values)
+        self.emit("rl_round_labels", rollout_id=rollout_id, t=self.clock(), **self._labels(),
+                  **values)
 
     def _is_final_round(self, rollout_id: int) -> bool:
         probe = getattr(self.sync, "is_final_round", None)
@@ -912,6 +1048,11 @@ class IslandDriver:
 
     def run_round(self, rollout_id: int) -> SyncBoundary:
         self.at_safe_point = False
+        # 2026-10-02 ruling (E1-D ④): an island in RECOVERY_REQUIRED never prepares or trains
+        # another batch; the safe point already raised, this guards the ledger path itself.
+        if self.controller is not None and getattr(self.controller, "recovery_required", None):
+            raise DriverError(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
+        self._probe_nodes(rollout_id)
         started = time.monotonic()
         batch = self._generate(rollout_id)
         rollout_seconds = time.monotonic() - started
@@ -922,6 +1063,7 @@ class IslandDriver:
         except BaseException as error:
             if self.ledger is not None and self.ledger.state(rollout_id) == "prepared":
                 self.ledger.discard(rollout_id, error=f"{type(error).__name__}: {error}")
+            self._classify_failure(rollout_id, error)
             raise
 
     def _train_round(self, rollout_id: int, batch: RolloutBatchHandle,
@@ -994,6 +1136,8 @@ class IslandDriver:
             submitted_groups=getattr(batch, "submitted_groups", None),
             aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
+            # fleet-dashboard 1.2/1.3 (optional fields, None when unreported)
+            **self._train_fields(batch, metrics, train_seconds),
             # rl-infra-spec 4.4/A6b: the rollout data cursor after this batch (only
             # when the rollout reports it, i.e. --rl-elastic metadata; else absent)
             **({"data_cursor": dict(batch.data_cursor)}
@@ -1083,11 +1227,18 @@ class IslandDriver:
     def safe_point(self, rollout_id: int) -> str | None:
         """Offer the controller the round-boundary safe point; returns its result phase."""
         self.at_safe_point = True
+        cut = getattr(self.sync, "at_safe_point", None)
+        if callable(cut):  # rl-multinode-island M4: round cut (LocalOnlySync + store)
+            cut(self, rollout_id=rollout_id)
         if self.controller is None:
             return None
         poll = getattr(self.controller, "poll_commands", None)
         if callable(poll):
             poll()
+        if self.elastic_hook is not None:
+            # recommend: record a suggestion; auto: AutoController.step -> the same
+            # controller.request entry, executed below in this very safe point.
+            self.elastic_hook.at_safe_point(self, rollout_id)
         if not self.controller.has_pending() and not self.controller.recovery_required:
             return None
         epoch_before = self.config_epoch
@@ -1194,17 +1345,68 @@ class IslandDriver:
             return kind == "colocated"
         return self.execution_mode == "colocated-serial"
 
+    def _restore_data_cursor(self, start_rollout_id: int) -> None:
+        """Restart (strict ``SyncStart.rollout_id`` = v > 0): seek the rollout data
+        source to the cursor recorded after rollout v-1 drew its prompts.
+
+        The trainer restarts from the syncer's authoritative policy and the
+        ledger rebases to v, but a restarted rollout process starts its data
+        source where a fresh run's would (Miles ``RolloutDataSource``: offset 0,
+        ``sample_group_index`` 0). Its group ids ARE that counter, so rollout v
+        would re-draw the groups trained in rollout 0 and ``ledger.prepare``
+        refuses them (GPU evidence a4s8-2r2 r6: ``groups ['g0'..'g3'] were
+        already trained in rollout 0`` on every restart attempt). Fail closed:
+        a recorded cursor the pool cannot seek to, a seek that does not land on
+        the recorded cursor, or no recorded cursor for a restart above 0 on a
+        pool that reports cursors -> DriverError (no silent re-training)."""
+        if start_rollout_id <= 0:
+            return
+        cursor = self.ledger.restart_cursor(start_rollout_id)
+        seek = getattr(self.rollout, "seek_data_cursor", None)
+        if cursor is None:
+            if callable(seek):
+                raise DriverError(
+                    f"restart at rollout {start_rollout_id}: the ledger holds no data cursor "
+                    f"for rollout {start_rollout_id - 1}; the data source cannot be resumed"
+                )
+            return  # pools without a seekable data source (fakes) report no cursor
+        if not callable(seek):
+            raise DriverError(
+                f"restart at rollout {start_rollout_id}: the ledger recorded data cursor "
+                f"{cursor} but the rollout pool cannot seek its data source"
+            )
+        landed = seek(cursor)
+        landed = None if landed is None else {k: int(v) for k, v in dict(landed).items()}
+        if landed != {k: int(v) for k, v in cursor.items()}:
+            raise DriverError(
+                f"restart at rollout {start_rollout_id}: data source seek to {cursor} "
+                f"landed on {landed}"
+            )
+        self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id,
+                  data_cursor=dict(landed))
+
     def run(self) -> TrainableState:
+        with self._telemetry_threads():
+            return self._run()
+
+    def _run(self) -> TrainableState:
         self.handshake()
         self._refuse_if_recovery_required()
         try:
             try:
-                start = self.sync.start(self)
-                if self.ledger is not None:
-                    self.ledger.rebase(start.rollout_id)
-                state = start.state
-                self.publish(state, rollout_id=start.rollout_id)
-                self._confirm_recovery(start.rollout_id)
+                start = None
+                try:
+                    start = self.sync.start(self)
+                    if self.ledger is not None:
+                        self.ledger.rebase(start.rollout_id)
+                        self._restore_data_cursor(start.rollout_id)
+                    state = start.state
+                    self.publish(state, rollout_id=start.rollout_id)
+                    self._confirm_recovery(start.rollout_id)
+                except BaseException as error:
+                    self._classify_failure(
+                        start.rollout_id if start is not None else None, error)
+                    raise
                 self._maybe_eval(start.rollout_id, force=start.rollout_id == 0,
                                  defer=not start.finished)
                 rollout_id = start.rollout_id

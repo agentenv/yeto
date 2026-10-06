@@ -1,0 +1,4 @@
+{"nodes":2,"gpus_per_node":2,
+ "configs":{"T1R3S0":{"trainer":1,"rollout":3,"standby":0,"rollout_engine_gpus":1,
+                      "placement":{"trainer":["n0:0"],"rollout":[["n0:1"],["n1:0"],["n1:1"]],"standby":[]}}},
+ "edges":[]}

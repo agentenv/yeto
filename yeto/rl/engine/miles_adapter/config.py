@@ -176,6 +176,40 @@ def _must_be_none(reason: str) -> _Check:
     return check
 
 
+def _stock_codex_append_roles_or_none(reason: str) -> _Check:
+    """Append roles are decided by the ``--tito-model`` template upstream, so
+    the option is refused -- except for a signed stock Codex agent, whose
+    launcher-side profile check (``validate_stock_codex_fields``) requires the
+    roles to be stated and equal to the profile's.  Those are accepted when they
+    match the profile and are NOT emitted to argv (the template decides)."""
+
+    def check(value, config):
+        if value is None:
+            return None
+        agent = getattr(config, "agent", None)
+        try:
+            from yeto.rl import SIGNED_CODEX_AGENTS
+            from yeto.rl.codex_backend import stock_codex_backend_profile
+        except ImportError:  # pragma: no cover - defensive
+            return reason
+        if getattr(agent, "custom_agent_function_path", None) not in SIGNED_CODEX_AGENTS:
+            return reason
+        if not getattr(agent, "tito_model", None):
+            return reason
+        try:
+            profile = stock_codex_backend_profile(str(agent.tito_model))
+        except (KeyError, ValueError):
+            return reason
+        if list(value) != list(profile["tito_allowed_append_roles"]):
+            return (
+                f"stock Codex profile {agent.tito_model!r} fixes the append roles to "
+                f"{profile['tito_allowed_append_roles']} (got {list(value)})"
+            )
+        return None
+
+    return check
+
+
 def _must_be_false(reason: str) -> _Check:
     def check(value, _config):
         return reason if value else None
@@ -298,12 +332,18 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.rollout_num_gpus_per_engine": _ok,
     "parallel.dedicated_rollout_gpus": _ok,
     "parallel.visible_gpus_per_node": _ok,
+    "parallel.island_gpus_per_node": _ok,
+    "parallel.bundle_map": _ok,
     "parallel.uneven_pipeline_layers": _ok,
     "parallel.standby_gpus": _ok,
     "parallel.rollout_cell_names": _ok,
+    # ruling 2026-10-04 v2: placement-only opt-ins consumed by yeto (PlacementRequest), no Miles flag
+    "parallel.allow_cross_node_tp": _ok,
+    "parallel.allow_cross_node_engine_tp": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
     "trainable.lora_dropout": _ok,
+    "trainable.lora_expert_rank": _ok,
     "trainable.lora_targets": _check_lora_targets,
     "trainable.target_modules": _ok,
     "trainable.expert_full_count": _check_expert_full,
@@ -388,7 +428,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "agent.session_server_ip": _ok,
     "agent.session_server_port": _ok,
     "agent.tito_model": _ok,
-    "agent.tito_allowed_append_roles": _must_be_none(
+    "agent.tito_allowed_append_roles": _stock_codex_append_roles_or_none(
         "upstream Miles has no --tito-allowed-append-roles; the append roles are "
         "decided by the --tito-model template (allowed_append_roles)"
     ),
@@ -398,6 +438,10 @@ LEAF_POLICY: dict[str, _Check] = {
     "deterministic_trainer": _ok,
     "trainer_dp_edges": _ok,
     "use_miles_router": _ok,
+    "update_weight_group_timeout_s": _ok,
+    # d2-wire: read by the yeto-side ElasticHook only; no Miles option.
+    "edge_costs_path": _ok,
+    "elastic_window_s": _ok,
 }
 
 
@@ -458,15 +502,44 @@ def placement_request(config) -> PlacementRequest:
             trainer_gpus=trainer,
             rollout_gpus=trainer,
             gpus_per_engine=parallel.rollout_num_gpus_per_engine,
+            # m5: a multi-node colocated island applies the node rules (engine opt-in /
+            # whole-node replicas, trainer tp*cp in-node) like a fixed partition
+            gpus_per_node=getattr(parallel, "island_gpus_per_node", None),
+            model_parallel=int(parallel.tensor_parallel) * int(parallel.pipeline_parallel)
+            * int(getattr(parallel, "context_parallel", 1) or 1),
+            node_parallel=int(parallel.tensor_parallel) * int(getattr(parallel, "context_parallel", 1) or 1),
+            expert_parallel=int(getattr(parallel, "expert_parallel", 1) or 1),
+            allow_cross_node_tp=bool(getattr(parallel, "allow_cross_node_tp", False)),
+            allow_cross_node_engine_tp=bool(getattr(parallel, "allow_cross_node_engine_tp", False)),
         )
-    return PlacementRequest(
+    _cp = int(getattr(parallel, "context_parallel", 1) or 1)
+    request = PlacementRequest(
         kind="fixed-partition",
         trainer_gpus=trainer,
         rollout_gpus=int(parallel.dedicated_rollout_gpus),
         gpus_per_engine=parallel.rollout_num_gpus_per_engine,
         standby_gpus=int(getattr(parallel, "standby_gpus", 0) or 0),
         rollout_cell_names=tuple(getattr(parallel, "rollout_cell_names", ()) or ()),
+        gpus_per_node=getattr(parallel, "island_gpus_per_node", None),
+        # Q1/Q3 ruling 2026-10-04: in-node group = tp*cp (TP stays in a node);
+        # EP/PP may span nodes. model_parallel keeps the dense world group.
+        model_parallel=int(parallel.tensor_parallel) * int(parallel.pipeline_parallel) * _cp,
+        expert_parallel=int(getattr(parallel, "expert_parallel", 1) or 1),
+        node_parallel=int(parallel.tensor_parallel) * _cp,
+        bundle_map=getattr(parallel, "bundle_map", None),
+        allow_cross_node_tp=bool(getattr(parallel, "allow_cross_node_tp", False)),
+        allow_cross_node_engine_tp=bool(getattr(parallel, "allow_cross_node_engine_tp", False)),
     )
+    if request.topology is not None:
+        # rl-multinode-island Q2: the trainer rectangle the placement rules derive
+        # must be the actor shape Miles is told (fail closed before any Ray work).
+        shape = request.trainer_shape()
+        told = (int(parallel.actor_num_nodes), int(parallel.actor_num_gpus_per_node))
+        if shape != told:
+            raise MilesConfigError(
+                f"placement trainer shape {shape} (nodes x GPUs per node) disagrees with "
+                f"--actor-num-nodes/--actor-num-gpus-per-node {told}")
+    return request
 
 
 def _flags(tokens: Sequence[str]) -> Iterator[str]:
@@ -556,7 +629,7 @@ def translate_run_config(
         )
     dynamic_filter = _algorithm_filter(config, algorithm)
 
-    from ..run_config import RECIPE_QWEN3_5, lr_schedule_argv
+    from ..run_config import RECIPE_QWEN3_5, RECIPE_QWEN3_8_NEXT, lr_schedule_argv
 
     geometry = config.geometry
     parallel = config.parallel
@@ -756,6 +829,10 @@ def translate_run_config(
     if getattr(config, "use_miles_router", False):
         # --rl-elastic: fork cordon/drain/admit_cordoned need the Miles router
         values.append("--use-miles-router")
+    timeout_s = getattr(config, "update_weight_group_timeout_s", None)
+    if timeout_s is not None:
+        # A27: bounded weight-update group rendezvous (fork image-m3a27+).
+        values.extend(("--update-weight-group-timeout-s", f"{float(timeout_s):g}"))
     if getattr(config, "deterministic_trainer", False):
         values.append("--deterministic-mode")  # Megatron deterministic kernels (E2 plan-v2 §0)
     if config.data.chat_template_kwargs:
@@ -851,6 +928,23 @@ def translate_run_config(
         values.append("--multi-latent-attention")
         for name, value in geometry.mla_dims:
             values.extend((f"--{name.replace('_', '-')}", str(value)))
+    if recipe.name == RECIPE_QWEN3_8_NEXT:
+        # G1: the native Flash-Next recipe replaces the Bridge-geometry model and
+        # LoRA flags with the launcher's (profiles/qwen3_8_next.py).
+        from yeto.rl.profiles import qwen3_8_next as q
+
+        variant = {n: v for v, n in q.NUM_LAYERS.items()}.get(geometry.num_layers)
+        if variant is None:
+            raise MilesConfigError(f"no Flash-Next variant has {geometry.num_layers} layers")
+        values = list(q.apply_ports_recipe(values, q.ports_recipe_argv(
+            variant, lora_rank=trainable.lora_rank,
+            lora_expert_rank=trainable.lora_expert_rank,
+            lora_dropout=float(getattr(trainable, "lora_dropout", 0.0) or 0.0))))
+        # run_qwen3_8_next.py: each SGLang engine is TP=EP=engine GPUs (TP8/EP8 full)
+        engine = str(parallel.rollout_num_gpus_per_engine)
+        for flag in ("--sglang-tp-size", "--sglang-ep-size"):
+            if flag not in values:
+                values.extend((flag, engine))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     # IR-1: the final argv never pairs the session server with partial rollout

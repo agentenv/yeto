@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import shutil
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -80,10 +82,15 @@ VERIFYING = "VERIFYING"
 COMMITTED = "COMMITTED"
 RESUMING = "RESUMING"
 SUCCEEDED = "SUCCEEDED"
+RECOMMEND_MODES = ("disabled", "manual", "recommend", "auto")
 CANCELLED = "CANCELLED"
 REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+STORE_MANIFEST = "STORE-MANIFEST.json"  # Q4 (C5): written last by sync_checkpoint_store
+STORE_ROUND_CUTS = "round-cuts"  # M4: round cuts live in the store itself (miles_adapter.round_cut)
+LAYOUT_KEYS = ("tp", "pp", "cp", "ep", "trainer", "nodes", "gpus_per_node", "bundle_map",
+               "cross_node_tp", "cross_node_engine_tp")
 # 4.4: same-shape trainer rebuild behind the ports (cut saved, trainer being
 # disposed/rebuilt/restored). A restart that finds it cannot tell whether the
 # trainer was restored: RECOVERY_REQUIRED (4.5).
@@ -108,9 +115,10 @@ class Rejected(ValueError):
 
 
 class TransactionFailed(RuntimeError):
-    def __init__(self, phase: str, message: str) -> None:
+    def __init__(self, phase: str, message: str, *, cause: str | None = None) -> None:
         super().__init__(f"{phase}: {message}")
         self.phase = phase
+        self.cause = cause  # failure class on the REBUILD_OLD record (None -> "other")
 
 
 class RecoveryRequired(RuntimeError):
@@ -155,6 +163,39 @@ class Plan:
     @property
     def remove(self) -> int:
         return max(0, self.source_engines - self.target_engines)
+
+
+def island_layout(cfg: Any, topology: tuple[int, int],
+                  given: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Normalized parallel layout of a multi-node island (Q4, C5): ``tp/pp/cp/ep``
+    (startup config dims), ``trainer`` GPUs, ``nodes`` x ``gpus_per_node`` and the
+    role -> logical bundle ``bundle_map`` (None = leading-bundle layout). ``given``
+    overrides any key (the entry passes the Megatron args / placement it launched)."""
+    dims = dict(getattr(cfg, "dims", {}) or {})
+    layout: dict[str, Any] = {d: int(dims.get(d, 1) or 1) for d in ("tp", "pp", "cp", "ep")}
+    layout["trainer"] = int(getattr(cfg, "trainer", 0) or 0)
+    layout["nodes"], layout["gpus_per_node"] = int(topology[0]), int(topology[1])
+    layout["bundle_map"] = None
+    layout["cross_node_tp"] = int(bool(getattr(cfg, "allow_cross_node_tp", False)))
+    layout["cross_node_engine_tp"] = int(bool(getattr(cfg, "allow_cross_node_engine_tp", False)))
+    for key, value in dict(given or {}).items():
+        if key not in LAYOUT_KEYS:
+            raise Rejected(f"unknown layout key {key!r} (known: {LAYOUT_KEYS})")
+        if key == "bundle_map":
+            layout[key] = (None if value is None
+                           else {str(k): [int(b) for b in v] for k, v in sorted(dict(value).items())})
+        else:
+            layout[key] = int(value)
+    return layout
+
+
+def layout_diff(base: Mapping[str, Any], now: Mapping[str, Any]) -> dict[str, tuple[Any, Any]]:
+    """``{key: (baseline, current)}`` for every LAYOUT_KEYS entry that differs."""
+    def norm(v: Any) -> Any:
+        if isinstance(v, Mapping):
+            return {str(k): [int(b) for b in vv] for k, vv in sorted(v.items())}
+        return None if v is None else int(v)
+    return {k: (base.get(k), now.get(k)) for k in LAYOUT_KEYS if norm(base.get(k)) != norm(now.get(k))}
 
 
 def _failure_detail(exc: BaseException) -> dict[str, Any]:
@@ -237,6 +278,10 @@ class IslandController:
         trainer_rebuilder: Callable[..., Mapping[str, Any]] | None = None,
         trainer_edges: Callable[[], Mapping[str, Any]] | None = None,
         max_recovery_attempts: int = 3,
+        topology: tuple[int, int] | None = None,
+        node_probe: Callable[[], Any] | None = None,
+        layout: Mapping[str, Any] | None = None,
+        checkpoint_store: str | Path | None = None,
     ) -> None:
         if initial_config not in configs:
             raise Rejected(f"initial config {initial_config!r} is unknown")
@@ -257,6 +302,9 @@ class IslandController:
         self._sleep = sleep
         self._on_watchdog = on_watchdog
         self.inbox = inbox
+        # 6.5: disabled | manual | recommend | auto.  Default DISABLED keeps the
+        # pre-D1 behaviour; the mode never gates or bypasses ``plan``/``request``.
+        self.recommend_mode = RECOMMEND_MODES[0]
         # 4.4: ``trainer_rebuilder(driver, *, epoch, cut_id) -> Mapping`` saves the
         # cut, rebuilds the trainer behind the ports and restores it (via
         # ``IslandDriver.rebuild_trainer``). Raises RebuildRefused before the
@@ -275,6 +323,14 @@ class IslandController:
         # {"spec", "args", "global_batch_size", "micro_batch_size", "ops"} where
         # ops is a trainer_transition.TrainerOps (miles_adapter.trainer_resize.MilesTrainerOps).
         self._trainer_edges = trainer_edges
+        # rl-multinode-island Q4 (C5): an off-island copy of the state dir (journal,
+        # epochs, cuts, ledger) kept by sync_checkpoint_store() after every commit
+        # point; a learner starting on an EMPTY state dir (machine replaced) restores
+        # it from there first. None = node0-local state only.
+        self.checkpoint_store = (Path(checkpoint_store).expanduser()
+                                 if checkpoint_store not in (None, "") else None)
+        self.last_store_sync: dict[str, Any] | None = None
+        restored = self._restore_from_checkpoint_store()
         self.journal = Journal(self.state_dir / "reconfig", wall_clock=wall_clock)
         if self.journal.epochs.config_id is None:
             self.journal.compare_and_swap(
@@ -296,6 +352,12 @@ class IslandController:
         if int(max_recovery_attempts) < 1:
             raise Rejected("max_recovery_attempts must be >= 1")
         self.max_recovery_attempts = int(max_recovery_attempts)
+        # rl-multinode-island D9: (nodes, gpus_per_node) of the island and a probe
+        # returning the alive node ids (or {node_id: gpus} mapping). None = single node.
+        self.topology: tuple[int, int] | None = None
+        self._topology_checked = False
+        self._node_probe: Callable[[], Any] | None = None
+        self.set_topology(topology, node_probe, layout=layout)
         self._recovery_unverified = 0  # consecutive planned recoveries never verified
         self._recovery_open_id: str | None = None  # planned, not verified/failed/superseded
         import uuid as _uuid
@@ -303,7 +365,14 @@ class IslandController:
         self.incarnation = {"pid": _os.getpid(), "id": _uuid.uuid4().hex[:12],
                             "wall_time": self._wall()}
         self._watchdog_fired = threading.Event()
+        # dashboard 5.1/5.2: optional controller event outlet (off by default; replay
+        # never emits — only live transitions call _emit_ctrl_event).
+        self._event_sink: Callable[..., Any] | None = None
+        self._journal_events = False
         self._replay()
+        if restored is not None:
+            self._record("checkpoint_store", tx_id=None, action="restore", store=str(self.checkpoint_store),
+                         incarnation=self.incarnation["id"], **restored)
 
     # ------------------------------------------------------------------ journal
     def close(self) -> None:
@@ -318,6 +387,8 @@ class IslandController:
                                                      "body_hash": r["body_hash"], "plan": r["plan"],
                                                      "deadline_wall": r["deadline_wall"]}
                 open_txs[r["tx_id"]] = r
+            elif kind == "recommend_mode":
+                self.recommend_mode = r["mode"]
             elif kind == "fork_op":
                 if r["status"] == "done":
                     self._fork_epoch = int(r["result_fork_epoch"])
@@ -433,8 +504,242 @@ class IslandController:
         tx = self._tx
         if tx is None or tx.tx_id != tx_id or self.recovery_required:
             return
-        self._enter_recovery(tx_id, f"watchdog could not kill the target generation in {phase}: "
+        self._enter_recovery(tx_id, cause="watchdog_unresolved",
+                             error=f"watchdog could not kill the target generation in {phase}: "
                                     f"{list(errors)[:2]!r}")
+
+    # ------------------------------------------------------------- node topology (D9)
+    def set_topology(self, topology: tuple[int, int] | None,
+                     node_probe: Callable[[], Any] | None = None, *,
+                     layout: Mapping[str, Any] | None = None) -> None:
+        if topology is not None:
+            nodes, per = int(topology[0]), int(topology[1])
+            if nodes < 1 or per < 1:
+                raise Rejected(f"topology {topology!r} must be (nodes >= 1, gpus_per_node >= 1)")
+            topology = (nodes, per)
+        if topology != getattr(self, "topology", None):
+            self._topology_checked = False  # refuse_partial_island() ran for this topology
+        self.topology = topology
+        self._node_probe = node_probe
+        # Q4 (C5): the island's parallel layout; defaults come from the startup config
+        self.layout: dict[str, Any] | None = None
+        if topology is not None:
+            self.layout = island_layout(self.configs[self.initial_config], topology, layout)
+
+    # ------------------------------------------------------ parallel layout (Q4, C5)
+    def layout_baseline(self) -> dict[str, Any] | None:
+        """The ``layout`` of the last ``topology`` record written by an EARLIER
+        incarnation (what the journal's cuts/epochs were produced with), or None."""
+        mine = self.incarnation["id"]
+        for r in reversed(self.journal.records):
+            if (r.get("kind") == "topology" and r.get("layout") and r.get("incarnation") != mine
+                    and r.get("layout_accepted", True)):  # a refused incarnation sets no baseline
+                return dict(r["layout"])
+        return None
+
+    def layout_rejection(self) -> str | None:
+        """Why this incarnation's layout (tp/pp/cp/ep, trainer shape, bundle map) differs
+        from the journal baseline (None when equal, or without topology/baseline). A
+        rebuild from a consistent checkpoint must be same-shape: a Megatron cut written
+        under another parallel layout is not restorable without conversion."""
+        if self.layout is None:
+            return None
+        base = self.layout_baseline()
+        if base is None:
+            return None
+        diff = layout_diff(base, self.layout)
+        if not diff:
+            return None
+        return "layout changed: " + ", ".join(f"{k} {b!r} -> {n!r}" for k, (b, n) in diff.items())
+
+    def _alive_nodes(self) -> tuple[list[Any], dict[Any, int] | None]:
+        """``(alive node ids, {node: gpus} or None)`` from the probe (raises on failure)."""
+        alive = self._node_probe() if self._node_probe is not None else None
+        if alive is None:
+            return [], None
+        if isinstance(alive, Mapping):
+            return list(alive), {k: int(v) for k, v in alive.items()}
+        return list(alive), None
+
+    def topology_rejection(self) -> str | None:
+        """Why the island's alive nodes do not match its declared topology (None when
+        they do, or when there is no topology/probe): fewer alive nodes than declared,
+        or a node exposing another GPU count (same-shape rule, hostnames may change)."""
+        if self.topology is None or self._node_probe is None:
+            return None
+        nodes, per = self.topology
+        try:
+            alive, gpus = self._alive_nodes()
+        except Exception as exc:  # noqa: BLE001 - unknown node state: do not act
+            return f"node probe failed: {exc!r}"
+        if len(alive) < nodes:
+            return f"{len(alive)} of {nodes} island nodes alive ({sorted(map(str, alive))})"
+        if gpus is not None:
+            bad = {str(n): g for n, g in gpus.items() if g != per}
+            if bad:
+                return f"nodes {bad} do not expose {per} GPUs (topology {nodes}x{per})"
+        return None
+
+    def refuse_partial_island(self) -> str | None:
+        """Startup precondition (D9, tasks 3.3): one ``topology`` journal record (declared
+        nodes/gpus_per_node, alive nodes, incarnation); on a partial island enter
+        RECOVERY_REQUIRED and return why, else None. Runs once per incarnation: the entry
+        preflight calls it right after the Ray connect (before any placement group is
+        created, which would hang on a dead node) and :meth:`open` then skips it. No-op
+        (None) without a topology."""
+        if self.topology is None:
+            return None
+        self._topology_checked = True
+        try:
+            alive: Any = [str(n) for n in self._alive_nodes()[0]]
+        except Exception as exc:  # noqa: BLE001
+            alive = f"probe failed: {exc!r}"
+        layout_why = self.layout_rejection()  # against the baseline BEFORE this record
+        self._record("topology", tx_id=None, nodes=self.topology[0], gpus_per_node=self.topology[1],
+                     alive=alive, incarnation=self.incarnation["id"], layout=self.layout,
+                     layout_accepted=layout_why is None, layout_error=layout_why)
+        why = self.topology_rejection()
+        if why is not None:
+            # D9: never touch the fork's membership epoch on a partial island; the
+            # restart precondition fails before any restore/start/stop call.
+            self._enter_recovery(None, f"island topology: {why}; recovery refused on fewer nodes")
+            return why
+        if layout_why is not None:
+            # Q4 (C5): fail closed for this incarnation (admission closed, the entry
+            # exits) but, like gpu_pool, NOT a journal terminal: the operator relaunches
+            # with the same cfg/recipe (same shape) and the island resumes; no flag
+            # overrides this, a rebuild must be same-shape.
+            self.recovery_required = (f"{layout_why}; a rebuild from this journal must keep "
+                                      "the parallel layout of the committed checkpoint")
+            self.admission_open = False
+            return layout_why
+        self.sync_checkpoint_store("topology")
+        return None
+
+    def check_nodes(self) -> str | None:
+        """Driver poll (D9): any node loss -> ``node_lost`` journal record and the
+        RECOVERY_REQUIRED terminal state (admission closed). Returns the error, or
+        None while every declared node is alive. Idempotent once entered."""
+        if self.recovery_required:
+            return self.recovery_required
+        why = self.topology_rejection()
+        if why is None:
+            return None
+        alive: Any = None
+        try:
+            alive = [str(n) for n in self._alive_nodes()[0]]
+        except Exception:  # noqa: BLE001
+            pass
+        self._record("node_lost", tx_id=None, topology=list(self.topology or ()), alive=alive, error=why)
+        self._enter_recovery(None, f"node_lost: {why}; the island does not run on fewer nodes")
+        self._emit_cell_snapshot("node_lost")
+        return self.recovery_required
+
+    # ----------------------------------------------- GPU pool binding (Q6, 2026-10-04)
+    def gpu_pool_baseline(self) -> tuple[tuple[str, ...], ...] | None:
+        """Per-node GPU uuids bound by the last accepted ``gpu_pool`` journal record
+        (an earlier incarnation), or None when this island never journaled a pool."""
+        for r in reversed(self.journal.records):
+            if r.get("kind") == "gpu_pool" and r.get("accepted") and r.get("uuids"):
+                return tuple(tuple(str(u) for u in node) for node in r["uuids"])
+        return None
+
+    def record_gpu_pool(self, result: Any, *, source: str, accept_rebind: bool,
+                        roles: Mapping[str, str] | None = None) -> str | None:
+        """Startup precondition (Q6): journal one ``gpu_pool`` record for this incarnation
+        (observed per-node uuids, what they were compared against, rebind + mapping,
+        diffs, accepted) and, when the reconciliation refused the pool, close this
+        incarnation (``recovery_required = "gpu_pool: ..."``, no journal phase record so a
+        restart with ``--rl-elastic-accept-rebind`` may bind the new pool) and return
+        why; None when accepted.
+        ``source`` names the declared side (``cfg`` / ``journal`` / ``cfg+journal`` /
+        ``none``)."""
+        self._record("gpu_pool", tx_id=None, incarnation=self.incarnation["id"],
+                     uuids=[list(node) for node in result.observed], source=source,
+                     accept_rebind=bool(accept_rebind), rebind=bool(result.rebind),
+                     mapping=dict(result.mapping), diffs=list(result.diffs),
+                     roles=dict(roles or {}),  # 2026-10-04 v2: uuid -> role (one role per uuid)
+                     accepted=bool(result.ok), error=result.error)
+        if result.ok:
+            self.sync_checkpoint_store("gpu_pool")
+            self._emit_cell_snapshot("gpu_pool:rebind" if result.rebind else "gpu_pool")
+            return None
+        # Fail closed for this incarnation (admission closed, the entry exits), but NOT
+        # a journal terminal: unlike node loss, a changed pool is bound by an explicit
+        # restart with --rl-elastic-accept-rebind (ruling 2026-10-04), which the replay
+        # of a RECOVERY_REQUIRED phase record would forbid forever.
+        self.recovery_required = (f"gpu_pool: {result.error}; this incarnation refuses to "
+                                  "start on an unreconciled GPU pool")
+        self.admission_open = False
+        self._emit_cell_snapshot("gpu_pool:rejected")
+        return result.error
+
+    # ------------------------------------------------ checkpoint store (Q4, C5)
+    def _restore_from_checkpoint_store(self) -> dict[str, Any] | None:
+        """Before the journal opens: with a store holding a complete copy
+        (``STORE-MANIFEST.json`` written last) and NO journal in the local state dir
+        (fresh machine), copy the store into the state dir. A local journal always
+        wins (an in-place restart is at least as new as its last sync; dropping
+        local records could hide a RECOVERY_REQUIRED terminal)."""
+        store = self.checkpoint_store
+        if store is None:
+            return None
+        local_journal = self.state_dir / "reconfig" / "journal.jsonl"
+        if local_journal.exists():
+            return None
+        manifest = store / STORE_MANIFEST
+        if not manifest.is_file():
+            return None
+        info = json.loads(manifest.read_text(encoding="utf-8"))
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        for child in store.iterdir():
+            if child.name in (STORE_MANIFEST, STORE_ROUND_CUTS):
+                continue  # round cuts are read in place from the store (M4)
+            target = self.state_dir / child.name
+            if child.is_dir():
+                shutil.copytree(child, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(child, target)
+        return {"restored_from": {k: info.get(k) for k in ("incarnation", "reason", "config_epoch",
+                                                              "wall_time", "seq")}}
+
+    def sync_checkpoint_store(self, reason: str, *, skip_if_recovery: bool = False) -> bool:
+        """Copy the state dir (journal, epochs, cuts, ledger, inbox...) to the store and
+        write ``STORE-MANIFEST.json`` last (a reader trusts the copy only with it). Runs
+        under the record lock so no journal line is torn by a concurrent append. A
+        failing sync is logged + remembered (``last_store_sync``), never fatal: the
+        store is a durability aid, the island's truth stays the local journal."""
+        store = self.checkpoint_store
+        if store is None:
+            return False
+        with self._record_lock:
+            if skip_if_recovery and self.recovery_required:
+                return False  # M4 round cut: never carry a terminal island to the store
+            info = {"incarnation": self.incarnation["id"], "reason": reason, "wall_time": self._wall(),
+                    "config_epoch": self.journal.epochs.config_epoch,
+                    "seq": int(self.journal.records[-1].get("seq", 0)) if self.journal.records else 0,
+                    "layout": self.layout, "state_dir": str(self.state_dir)}
+            try:
+                store.mkdir(parents=True, exist_ok=True)
+                for child in self.state_dir.iterdir():
+                    if child.name == STORE_MANIFEST:
+                        continue
+                    target = store / child.name
+                    if child.is_dir():
+                        shutil.copytree(child, target, dirs_exist_ok=True,
+                                        ignore=shutil.ignore_patterns("journal.lock"))
+                    elif child.name != "journal.lock":
+                        shutil.copy2(child, target)
+                tmp = store / (STORE_MANIFEST + ".tmp")
+                tmp.write_text(json.dumps(info, sort_keys=True), encoding="utf-8")
+                tmp.replace(store / STORE_MANIFEST)
+            except Exception as exc:  # noqa: BLE001 - never fail the commit on the copy
+                self.last_store_sync = {**info, "ok": False, "error": repr(exc)}
+                logging.getLogger(__name__).warning(
+                    "checkpoint store sync (%s) to %s failed: %r", reason, store, exc)
+                return False
+            self.last_store_sync = {**info, "ok": True}
+            return True
 
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler
@@ -443,18 +748,81 @@ class IslandController:
         """E3 (4.7): wired by compose_island once the trainer/pool exist."""
         self._trainer_edges = provider
 
+    # ------------------------------------------- dashboard events (5.1 / 5.2)
+    def set_event_sink(self, sink: Callable[..., Any] | None, *, journal: bool = False) -> None:
+        """Wire the ``rl_cell_snapshot`` / ``rl_reconfig_phase`` outlet: ``sink(event,
+        **fields)`` (e.g. ``EventTape.emit``/``driver.emit``) and/or, with ``journal=True``,
+        one journal record of kind ``event`` per emission. Off by default."""
+        self._event_sink = sink
+        self._journal_events = bool(journal)
+
+    def _emit_ctrl_event(self, event: str, **fields: Any) -> None:
+        if self._journal_events:
+            self._record(event, **fields)
+        sink = self._event_sink
+        if sink is not None:
+            try:
+                sink(event, **fields)
+            except Exception:  # noqa: BLE001 - observability never fails a transaction
+                pass
+
+    def cell_snapshot(self) -> list[dict[str, Any]]:
+        """Cells of the committed config: one per accepted ``gpu_pool`` uuid (role,
+        node index, uuid) plus one per committed rollout member (engine id)."""
+        epochs = self.journal.epochs
+        state = "recovery_required" if self.recovery_required else "running"
+        common = {"config": epochs.config_id, "epoch": epochs.config_epoch}
+        cells: list[dict[str, Any]] = []
+        pool = next((r for r in reversed(self.journal.records)
+                     if r.get("kind") == "gpu_pool"), None)
+        if pool is not None:
+            roles = pool.get("roles") or {}
+            for node, uuids in enumerate(pool.get("uuids") or []):
+                for u in uuids:
+                    cells.append({"cell_id": str(u), "role": roles.get(u), "node": node,
+                                  "gpu_uuid": str(u), "gpus": 1,
+                                  "state": state if pool.get("accepted") else "rejected", **common})
+        for m in sorted(epochs.members or ()):
+            cells.append({"cell_id": str(m), "role": "rollout", "node": None, "gpu_uuid": None,
+                          "gpus": None, "state": state, **common})
+        return cells
+
+    def _emit_cell_snapshot(self, cause: str, tx_id: str | None = None) -> None:
+        if self._event_sink is None and not self._journal_events:
+            return
+        self._emit_ctrl_event("rl_cell_snapshot", tx_id=tx_id, txn_id=tx_id, cause=cause,
+                              t=self._wall(), cells=self.cell_snapshot())
+
     def _phase(self, tx: _Tx, phase: str, **fields: Any) -> None:
         with self._watchdog_lock:  # the watchdog reads tx.phase under this lock
             tx.phase = phase
         self._record("phase", tx_id=tx.tx_id, request_id=tx.request_id, phase=phase,
                      config_epoch=self.journal.epochs.config_epoch,
                      fork_epoch=self._fork_epoch, **fields)
+        if self._event_sink is not None or self._journal_events:
+            terminal = phase in TERMINAL or phase == COMMITTED
+            self._emit_ctrl_event(
+                "rl_reconfig_phase", tx_id=tx.tx_id, txn_id=tx.tx_id, request_id=tx.request_id,
+                source=tx.plan.source, target=tx.plan.target, phase=phase,
+                result=phase if terminal else None, t=self._wall(),
+                expected_epoch=tx.plan.expected_config_epoch,
+                config_epoch=self.journal.epochs.config_epoch,
+                reason=fields.get("error") or fields.get("reason"))
+            if phase in TERMINAL:
+                self._emit_cell_snapshot("tx_end:" + phase, tx.tx_id)
+        if phase in (COMMITTED, SUCCEEDED):
+            self.sync_checkpoint_store(phase)  # Q4 (C5): after the durable CAS / cut commit
         self._maybe_test_kill(phase)
 
     # ------------------------------------------------------------------ startup
     def open(self, pool: ElasticRolloutPool) -> IslandStatus:
         """Reconcile the fork's membership mirror with the journal (f-design §1.3 rule 3)."""
         self._pool = pool
+        if self.topology is not None:
+            if not self._topology_checked:  # not already done by the entry preflight
+                self.refuse_partial_island()
+            if self.recovery_required:
+                return self.inspect()
         status = dict(pool.membership_status())
         fork_epoch = int(status.get("epoch", 0))
         expected = self._fork_epoch
@@ -548,6 +916,12 @@ class IslandController:
         """Why the committed config cannot be recovered by rollout cell start/stop
         (recovery-design.md §2): None when it can."""
         epochs = self.journal.epochs
+        topology_why = self.topology_rejection()  # D9: never recover onto fewer nodes
+        if topology_why is not None:
+            return f"island topology: {topology_why}"
+        layout_why = self.layout_rejection()  # Q4: never recover onto another layout
+        if layout_why is not None:
+            return layout_why
         cfg = self.configs.get(epochs.config_id)
         if cfg is None:
             return f"committed config {epochs.config_id!r} is unknown"
@@ -673,6 +1047,15 @@ class IslandController:
         pool = driver.rollout
         if self._wall() > pending["deadline_wall"]:
             failures.append("recovery ran past T_recovery before verification")
+        if self.topology is not None:
+            topology_why = self.topology_rejection()
+            checks["nodes"] = "ok" if topology_why is None else topology_why
+            if topology_why is not None:
+                failures.append(f"island topology: {topology_why}")
+            layout_why = self.layout_rejection()
+            checks["layout"] = "ok" if layout_why is None else layout_why
+            if layout_why is not None:
+                failures.append(layout_why)
         members = frozenset(pool.members())
         checks["members"] = sorted(members)
         if members != target:
@@ -754,12 +1137,49 @@ class IslandController:
         self.recovery_pending = None
         self.admission_open = True
 
-    def _enter_recovery(self, tx_id: str | None, error: str) -> None:
+    def _enter_recovery(self, tx_id: str | None, error: str, *, cause: str = "other") -> None:
+        """Island-level RECOVERY_REQUIRED (``scope=island``, ``request_id=None``), plus a
+        request-level terminal record for the transaction's request when ``tx_id`` is a
+        request transaction that has no terminal record yet (``scope=request``,
+        ``request_id=<id>``, ``cause``, ``island_record_seq`` -> the island record).
+
+        Revision (2026-10-02 user ruling, E1-D ④ chain 6r2): the island record alone left the
+        request (dn1) without a terminal record of its own; both are written now, with the
+        same error/epochs, so the request's status, the journal replay and the GPU judge
+        agree on one terminal state. ``cause`` names the failure class
+        (``stop_retry_deadline``, ``rebuild_old_failed``, ``watchdog_unresolved``, ...)."""
         self.recovery_required = error
         self.admission_open = False
-        self._record("phase", tx_id=tx_id, request_id=None, phase=RECOVERY_REQUIRED,
-                     config_epoch=self.journal.epochs.config_epoch, fork_epoch=self._fork_epoch,
-                     error=error)
+        epochs = {"config_epoch": self.journal.epochs.config_epoch, "fork_epoch": self._fork_epoch}
+        island = self._record("phase", tx_id=tx_id, request_id=None, phase=RECOVERY_REQUIRED,
+                              scope="island", cause=cause, error=error, **epochs)
+        request_id = self._request_of(tx_id)
+        if request_id is None or self._has_terminal(tx_id):
+            return
+        tx = self._tx if self._tx is not None and self._tx.tx_id == tx_id else None
+        deadline_wall = (tx.deadline_wall if tx is not None
+                         else self._by_request.get(request_id, {}).get("deadline_wall"))
+        if tx is not None:
+            with self._watchdog_lock:
+                tx.phase = RECOVERY_REQUIRED
+        self.last_outcome = {"tx_id": tx_id, "phase": RECOVERY_REQUIRED, "error": error, "cause": cause}
+        self._record("phase", tx_id=tx_id, request_id=request_id, phase=RECOVERY_REQUIRED,
+                     scope="request", cause=cause, error=error,
+                     island_record_seq=island.get("seq"), deadline_wall=deadline_wall,
+                     recovery_deadline_wall=(None if deadline_wall is None
+                                             else deadline_wall + self.timeouts.recovery),
+                     **epochs)
+
+    def _request_of(self, tx_id: str | None) -> str | None:
+        if tx_id is None:
+            return None
+        if self._tx is not None and self._tx.tx_id == tx_id:
+            return self._tx.request_id
+        return next((rid for rid, r in self._by_request.items() if r["tx_id"] == tx_id), None)
+
+    def _has_terminal(self, tx_id: str) -> bool:
+        return any(r["kind"] == "phase" and r.get("tx_id") == tx_id and r.get("request_id") is not None
+                   and r["phase"] in TERMINAL for r in self.journal.records)
 
     # ------------------------------------------------------------------ queries
     def inspect(self) -> IslandStatus:
@@ -821,6 +1241,11 @@ class IslandController:
             raise Rejected("rollout-only edge changes the trainer")
         if src.rollout_engine_gpus != dst.rollout_engine_gpus:
             raise Rejected("rollout-only edge changes the engine shape")
+        from .multinode import engine_replica_delta_rejection
+
+        why = engine_replica_delta_rejection(src.rollout, dst.rollout, src.rollout_engine_gpus)
+        if why is not None:  # ruling 2026-10-04 v2: scale by whole engine replicas only
+            raise Rejected(f"rollout-only edge {source}->{target}: {why}")
         if src.total != dst.total:
             raise Rejected("edge changes the pool size (pool changes are pool transactions)")
         if self.profile is None or self.profile.execution_mode == "colocated-serial":
@@ -1047,6 +1472,22 @@ class IslandController:
         tx.cancel_requested = True  # acted on at the next step boundary of the executor
         return "recovery_started" if tx.phase in DESTRUCTIVE else "cancelled"
 
+    def set_recommend_mode(self, mode: str, *, reason: str = "") -> dict[str, Any]:
+        """6.5 runtime switch.  Only flips the policy flag: an in-flight
+        transaction or recovery is never cancelled or interrupted by it."""
+        mode = getattr(mode, "value", mode)
+        if mode not in RECOMMEND_MODES:
+            raise Rejected(f"unknown recommend mode {mode!r}")
+        if mode == "auto" and not getattr(self.attestation, "auto_controller", False):
+            # D2: auto needs the runtime to declare capabilities.auto_controller
+            raise Rejected("auto mode refused: the capability attestation does not declare "
+                           "auto_controller")
+        previous, self.recommend_mode = self.recommend_mode, mode
+        if previous != mode:
+            self._record("recommend_mode", tx_id=None, previous=previous, mode=mode, reason=reason)
+        return {"mode": mode, "previous": previous,
+                "in_flight_tx": self._tx.tx_id if self._tx is not None else None}
+
     def poll_commands(self) -> list[dict[str, Any]]:
         return self.inbox.poll(self) if self.inbox is not None else []
 
@@ -1225,7 +1666,8 @@ class IslandController:
         while self._pending_retry is not None:
             op, cells = self._pending_retry
             if self._remaining(tx, recovery=recovery) <= 0:
-                raise TransactionFailed(tx.phase, f"retry of {op} {list(cells)} ran past the deadline")
+                raise TransactionFailed(tx.phase, f"retry of {op} {list(cells)} ran past the deadline",
+                                        cause=f"{op}_retry_deadline")
             members = frozenset(cells)
             try:
                 if op == "stop":
@@ -1618,7 +2060,11 @@ class IslandController:
             self._tx = None
             raise RecoveryRequired(self.recovery_required)
         detail = {"cause": cause, "inconsistent_engines": sorted(inconsistent_engines)}
-        self._phase(tx, REBUILD_OLD, error=error, **detail)
+        # 2026-10-02 ruling (E1-D ④): exactly one bounded REBUILD_OLD after the transaction
+        # deadline; its limit is deadline_wall + T_recovery, the transaction deadline itself
+        # is never reset or extended, and a second failure is RECOVERY_REQUIRED at once.
+        self._phase(tx, REBUILD_OLD, error=error, deadline_wall=tx.deadline_wall,
+                    recovery_deadline_wall=tx.deadline_wall + self.timeouts.recovery, **detail)
         try:
             self._retry_incomplete(tx, recovery=True)
             if tx.extra.get("started"):
@@ -1645,7 +2091,8 @@ class IslandController:
             if self._remaining(tx, recovery=True) <= 0:
                 raise TransactionFailed(REBUILD_OLD, "recovery budget spent")
         except Exception as exc:  # noqa: BLE001
-            self._enter_recovery(tx.tx_id, f"rebuild of the old engine set failed: {exc}")
+            self._enter_recovery(tx.tx_id, f"rebuild of the old engine set failed: {exc}",
+                                 cause="rebuild_old_failed")
             self._tx = None
             raise RecoveryRequired(self.recovery_required) from exc
         self._sync_fork_mirror()
@@ -1679,7 +2126,8 @@ class CommandInbox:
 
     Verbs: ``request`` (``{"target", "expected_config_epoch", "deadline_s"}``),
     ``rebuild`` (4.4 same-shape trainer rebuild: ``{"kind", "expected_config_epoch",
-    "deadline_s"}``) and ``cancel`` (``{}``). The learner polls at safe points; answers are written
+    "deadline_s"}``), ``cancel`` (``{}``) and ``mode`` (6.5: ``{"mode"}``, one of
+    disabled/manual/recommend/auto; never interrupts a transaction). The learner polls at safe points; answers are written
     as ``<request_id>.status.json`` (atomic rename). Files are consumed.
     """
 
@@ -1688,7 +2136,7 @@ class CommandInbox:
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def submit(self, request_id: str, verb: str, body: Mapping[str, Any]) -> Path:
-        if verb not in ("request", "cancel", "rebuild") or "/" in request_id or not request_id:
+        if verb not in ("request", "cancel", "rebuild", "mode") or "/" in request_id or not request_id:
             raise ValueError("bad command")
         path = self.dir / f"{request_id}.{verb}.json"
         tmp = path.with_suffix(".tmp")
@@ -1699,7 +2147,7 @@ class CommandInbox:
     def poll(self, controller: IslandController) -> list[dict[str, Any]]:
         answers = []
         for path in (sorted(self.dir.glob("*.request.json")) + sorted(self.dir.glob("*.rebuild.json"))
-                     + sorted(self.dir.glob("*.cancel.json"))):
+                     + sorted(self.dir.glob("*.cancel.json")) + sorted(self.dir.glob("*.mode.json"))):
             request_id, verb = path.name[: -len(".json")].rsplit(".", 1)
             try:
                 body = json.loads(path.read_text(encoding="utf-8"))
@@ -1710,6 +2158,10 @@ class CommandInbox:
                 elif verb == "rebuild":
                     answer = controller.request_trainer_rebuild(
                         request_id, int(body["expected_config_epoch"]), float(body["deadline_s"]))
+                elif verb == "mode":
+                    answer = {"request_id": request_id,
+                              **controller.set_recommend_mode(str(body["mode"]),
+                                                              reason=f"command {request_id}")}
                 else:
                     answer = {"request_id": request_id, "cancel": controller.cancel(request_id)}
             except (Rejected, KeyError, ValueError, TypeError) as exc:
@@ -1744,6 +2196,9 @@ def main(argv: list[str] | None = None) -> int:
     reb.add_argument("--deadline-s", type=float, required=True)
     can = sub.add_parser("cancel")
     can.add_argument("request_id")
+    md = sub.add_parser("mode")
+    md.add_argument("request_id")
+    md.add_argument("mode", choices=RECOMMEND_MODES)
     st = sub.add_parser("status")
     st.add_argument("request_id", nargs="?")
     args = parser.parse_args(argv)
@@ -1757,6 +2212,8 @@ def main(argv: list[str] | None = None) -> int:
                       rebuild_request_body(args.expected_epoch, args.deadline_s))
     elif args.verb == "cancel":
         inbox.submit(args.request_id, "cancel", {})
+    elif args.verb == "mode":
+        inbox.submit(args.request_id, "mode", {"mode": args.mode})
     else:
         records = read_journal(state / "reconfig")
         epochs = read_epochs(state / "reconfig")

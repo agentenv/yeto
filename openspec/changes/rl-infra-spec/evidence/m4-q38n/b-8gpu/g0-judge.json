@@ -1,0 +1,25 @@
+{
+  "step": "g0",
+  "num_gpus": 8,
+  "miles_head": {
+    "pass": true
+  },
+  "hc_head_contraction": {
+    "pass": true
+  },
+  "lora_plugin_import": {
+    "pass": true
+  },
+  "dry_run_8gpus": {
+    "pass": true
+  },
+  "manifest_ep4_trainable": {
+    "pass": true
+  },
+  "attempts": [
+    "attempt1: container re-import `from yeto` ModuleNotFoundError (7f5a53c7)",
+    "attempt2: container env fell back to 4 GPUs (fa03fb05)",
+    "attempt3: PASS"
+  ],
+  "verdict": "PASS"
+}

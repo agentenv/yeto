@@ -1,0 +1,40 @@
+# chain 8 dry-run IV 2026-10-03T15:46:56Z: 4xL40S Nebius eu-north1 (T1R1S2<->T1R3S0), SHA=5cf4d902 (git archive tree /tmp/repo-5cf4d902), image c35702e-4e4148f unchanged; A8GO=a4go4_strict.sh RESET=reset_island_strict.sh; ATTEST=cfg/attestation-4-6-0e7a78bb.json (strict r6/r7/r5: fp_local4_strict.py at 5cf4d902 = no-sync 6-step fp; EXR/kill/quorum flags do not change it), ATTEST_NOSYNC=cfg/attestation-4-4-6e13c79d.json (d4 via a4go4.sh; d4 flags do not change it); UP_DEADLINE_S=240; PRICE_PER_MIN=0.1523; ITEMS r6:3600 r7:3000 r5:3000 d4:1800 (T1-S7-PROGRESS 5.3); env below = exactly what chain8.sh exports per item
+### r6:3600
+SHA=5cf4d902 GPU_SPEC=nebius:4xl40s@eu-north1 SYNCER_PUBLIC_IP=185.189.44.160:29400 n2run_strict.sh infra-v2-b1-a4s4-dryIV-r6 4 3600 3720 --total-steps 6 --rl-placement fixed-partition --rl-rollout-gpus 1 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-4.json --rl-elastic-initial-config T1R1S2 --rl-observe-timeline --rl-elastic-attestation /home/michael/work/gpu-b1-runs/cfg/attestation-4-6-0e7a78bb.json --rl-elastic-quorum-timeout-s 1800 --rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3 --rl-test-kill-learner-at QUIESCING
+triggers=[["train",1,"up1",{"target":"T1R3S0","expected_config_epoch":0,"deadline_s":600}]]
+triggers-json-ok
+arms: none
+tprobe: none
+judge: r6 --rc-file /home/michael/work/gpu-b1-runs/infra-v2-b1-a4s4-dryIV/items/infra-v2-b1-a4s4-dryIV-r6/rc.txt
+gate: 1
+rc=0
+
+### r7:3000
+SHA=5cf4d902 GPU_SPEC=nebius:4xl40s@eu-north1 SYNCER_PUBLIC_IP=185.189.44.160:29400 n2run_strict.sh infra-v2-b1-a4s4-dryIV-r7 4 3000 3120 --total-steps 6 --rl-placement fixed-partition --rl-rollout-gpus 1 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-4.json --rl-elastic-initial-config T1R1S2 --rl-observe-timeline --rl-elastic-attestation /home/michael/work/gpu-b1-runs/cfg/attestation-4-6-0e7a78bb.json --rl-elastic-quorum-timeout-s 1800 --rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3
+triggers=[["train",0,"up1",{"target":"T1R3S0","expected_config_epoch":0,"deadline_s":600}]]
+triggers-json-ok
+arms: dctl.py|kill_after_tx|up1|dn1|{"target":"T1R1S2","expected_config_epoch":1,"deadline_s":600}
+tprobe: 1 rec
+judge: r7 --trainer-world 1 --committed-members 3 --rc-file /home/michael/work/gpu-b1-runs/infra-v2-b1-a4s4-dryIV/items/infra-v2-b1-a4s4-dryIV-r7/rc.txt
+gate: 1
+rc=0
+
+### r5:3000
+SHA=5cf4d902 GPU_SPEC=nebius:4xl40s@eu-north1 SYNCER_PUBLIC_IP=185.189.44.160:29400 n2run_strict.sh infra-v2-b1-a4s4-dryIV-r5 4 3000 3120 --total-steps 6 --rl-placement fixed-partition --rl-rollout-gpus 1 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-4.json --rl-elastic-initial-config T1R1S2 --rl-observe-timeline --rl-elastic-attestation /home/michael/work/gpu-b1-runs/cfg/attestation-4-6-0e7a78bb.json --rl-elastic-quorum-timeout-s 1800 --rl-elastic-restart-attempts 2 --rl-elastic-max-recovery-attempts 3 --rl-test-kill-learner-at COMMITTED
+triggers=[["train",1,"up1",{"target":"T1R3S0","expected_config_epoch":0,"deadline_s":600}]]
+triggers-json-ok
+arms: none
+tprobe: 1 rec
+judge: r5 --trainer-world 1 --committed-members 3 --rc-file /home/michael/work/gpu-b1-runs/infra-v2-b1-a4s4-dryIV/items/infra-v2-b1-a4s4-dryIV-r5/rc.txt
+gate: 1
+rc=0
+
+### d4:1800
+SHA=5cf4d902 GPU_SPEC=nebius:4xl40s@eu-north1 n2run.sh infra-v2-b1-a4s4-dryIV-d4 4 1800 1920 --total-steps 4 --rl-placement fixed-partition --rl-rollout-gpus 1 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2 --rl-elastic-resources /home/michael/work/gpu-b1-runs/cfg/resources-4.json --rl-elastic-initial-config T1R1S2 --rl-observe-timeline --rl-elastic-attestation /home/michael/work/gpu-b1-runs/cfg/attestation-4-4-6e13c79d.json --rl-test-inject-stop-failures 100000 --rl-elastic-recovery-timeout-s 120
+triggers=[["train",0,"up1",{"target":"T1R3S0","expected_config_epoch":0,"deadline_s":600}],["train",1,"dn1",{"target":"T1R1S2","expected_config_epoch":1,"deadline_s":600}]]
+triggers-json-ok
+arms: none
+judge: d4
+hook: 2 30
+rc=0
+

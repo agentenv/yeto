@@ -82,6 +82,20 @@ def test_ir1_append_roles_rejected_with_template_reason():
         cfg.translate_run_config(c, AlgorithmSpec())
 
 
+def test_ir1_append_roles_accepted_for_signed_codex_agent_when_equal_to_profile():
+    from yeto.rl import CODEX_OPENENV_AGENT
+    c = sub(make_config(), "agent", use_session_server=True, tito_model="qwen35",
+            custom_generate_function_path=AGENTIC, custom_agent_function_path=CODEX_OPENENV_AGENT,
+            tito_allowed_append_roles=("tool", "user"))
+    stub = lambda _m: (None, None)  # noqa: E731 - no miles checkout in the CPU venv
+    launch = cfg.translate_run_config(c, AlgorithmSpec(), tito_parser_resolver=stub)
+    assert "--tito-allowed-append-roles" not in " ".join(map(str, launch.argv))
+    assert "--tito-model" in launch.argv
+    bad = sub(c, "agent", tito_allowed_append_roles=("tool",))
+    with pytest.raises(cfg.UnmappedConfigError, match="fixes the append roles"):
+        cfg.translate_run_config(bad, AlgorithmSpec(), tito_parser_resolver=stub)
+
+
 def test_ir1_session_server_and_partial_rollout_are_mutually_exclusive():
     with pytest.raises(cfg.UnmappedConfigError) as err:
         cfg.check_session_server_partial_rollout(True, True)
@@ -420,3 +434,24 @@ def test_ir4_load_samples_carry_harness_fields_only_when_observing(tmp_path, obs
         assert isinstance(s["tito_chain_breaks"], dict) and s["policy_age_violation"] == 0
         assert s["profile_hash"] and "epoch" in s
         assert validate_load_sample({k: s[k] for k in LOAD_SAMPLE_SCHEMA if k in s}) == []
+
+
+def test_harness_counters_accept_upstream_mismatch_lists():
+    """A-T3-6 (codex-smoke-20261003-10): upstream Miles' session server stores
+    tito_session_mismatch as a list of mismatch records in the same metadata key."""
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter.rollout_meta_hook import counter_value, harness_counters
+
+    assert counter_value([{"position": 3}, {"position": 9}]) == 2 and counter_value([]) == 0
+    assert counter_value(None) == 0 and counter_value("") == 0 and counter_value(True) == 1 and counter_value(2) == 2
+    assert counter_value({"a": 1, "b": 0}) == 1
+    groups = [
+        [SimpleNamespace(metadata={"tito_session_mismatch": [{"position": 3}], "policy_age_violation": 1}),
+         SimpleNamespace(metadata={"tito_session_mismatch": [], "tito_chain_breaks": {"fork": 2}})],
+        [[SimpleNamespace(metadata={"tito_session_mismatch": 2})]],
+    ]
+    assert harness_counters(groups) == {
+        "policy_age_violation": 1, "tito_session_mismatch": 3, "tito_chain_breaks": {"fork": 2},
+    }
+    assert harness_counters([[SimpleNamespace(metadata={"tito_session_mismatch": []})]]) == {}

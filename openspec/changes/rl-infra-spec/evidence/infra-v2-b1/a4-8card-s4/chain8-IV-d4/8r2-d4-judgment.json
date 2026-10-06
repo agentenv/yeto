@@ -1,0 +1,52 @@
+{
+ "case": "d4",
+ "checks": {
+  "up1_SUCCEEDED": true,
+  "dn1_RECOVERY_REQUIRED": true,
+  "island_record_consistent": true,
+  "at_most_one_REBUILD_OLD": true,
+  "deadline_not_reset": true,
+  "within_time_limit": true,
+  "driver_reported_recovery": true,
+  "no_prepared_after_recovery": true,
+  "L1_round_triples": true,
+  "L2_no_group_reuse": true,
+  "L4_silent_after_recovery": true,
+  "L8_report_fields": true
+ },
+ "invalid_reasons": [],
+ "time": {
+  "deadline_s": 600.0,
+  "recovery_timeout_s": 120.0,
+  "margin_s": 60.0,
+  "request_wall": 1791078797.189857,
+  "recovery_required_wall": 1791079518.1079702,
+  "elapsed_s": 720.9181132316589
+ },
+ "verdict": "PASS",
+ "ledger": {
+  "L1_round_triples": {
+   "rollouts": 2,
+   "dangling_prepared": null,
+   "tape_rounds_trained": 2,
+   "optimizer_applied": 2,
+   "issues": []
+  },
+  "L2_no_group_reuse": {
+   "duplicates": [],
+   "consumed_groups": 8
+  },
+  "L4_silent_after_recovery": {
+   "ledger_after": [],
+   "tape_after": [],
+   "t_rec": 1791079518.104773
+  },
+  "L8_report_fields": {
+   "prepared_without_report": [],
+   "filtered_without_mechanism": [],
+   "filtered_groups": 0,
+   "engine_discarded_groups": 0,
+   "carried_over_reported_all": true
+  }
+ }
+}

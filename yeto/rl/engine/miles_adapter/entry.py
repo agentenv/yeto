@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from ..algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
@@ -155,12 +156,26 @@ MILES_DECLARED: dict[str, str] = {
 # -- miles` touches only megatron_utils/lora/dp_invariant_state.py, reached
 # only with --lora-dp-invariant-state (default off); default training/loss
 # path unchanged (evidence .../2026-09-30-img-e3a11ab).
+# 1023269 = e3a11ab3 + M3 + A27 (image-m3a27), same basis: `git diff
+# --name-only e3a11ab38..1023269 -- miles miles_plugins` touches
+# megatron_utils/model.py (a new is_qwen3_8_next_model LoRA-injection branch
+# only), update_weight/hf_weight_iterator_direct.py, utils/lora/*,
+# miles_plugins/models/qwen3_8_next/lora.py, sglang_utils/sglang_api_client.py,
+# weight_update/protocols/broadcast.py, utils/workers/ray_worker_manager.py and
+# parser entries in arguments.py -- no loss_hub/training-loss file (evidence
+# .../evidence/ports-image/2026-10-02-m3a27).
 _PINS_0AF62F4D_PLUS = frozenset({
     "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
     "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
     "2f23a0fca9b80f6a7300da401703c343014b03c0",
     "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",
     "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",
+    "1023269412bf4e54a1d95c8d2deaee795871aa72",
+    # c35702e = 1023269 + A27-2 (857fc9592): megatron_utils/actor.py, weight_update/
+    # updater.py + protocols/broadcast.py, ray/train/{cell,group}.py,
+    # utils/workers/worker_handle.py -- engine-failure propagation only, no loss path
+    # (evidence .../evidence/ports-image/2026-10-02-m3a27b).
+    "c35702eefcf2862cee155e46870e6ad30568d2c6",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
@@ -374,6 +389,17 @@ def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
     return None
 
 
+def side_effect_log_kwargs(elastic: Any) -> dict[str, Any]:
+    """3.3 X5 evidence switch (YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG, launcher
+    --rl-test-tool-side-effect-log): the pool journals every execution of the
+    injected tool in ``<elastic state dir>/side_effects.jsonl``."""
+    from .rollout import SIDE_EFFECT_LOG_FILE, side_effect_log_enabled
+
+    if elastic is None or not side_effect_log_enabled():
+        return {}
+    return {"side_effect_log": Path(elastic.controller.state_dir) / SIDE_EFFECT_LOG_FILE}
+
+
 def harness_source(miles_args: Any, elastic: Any = None) -> Any:
     """IR-2: where the drain probe / load sample read harness counts from.
 
@@ -574,7 +600,8 @@ def compose_island(
                 {"declared_cells": resolve_declared_cells(
                     inference_controller, runner, elastic.declared_cells),
                  "track_timeout_s": elastic.track_timeout_s,
-                 "tool_wait_board": elastic.tool_wait_board}
+                 "tool_wait_board": elastic.tool_wait_board,
+                 **side_effect_log_kwargs(elastic)}
                 if elastic is not None
                 else {}
             ),
@@ -631,9 +658,11 @@ def compose_island(
         if hasattr(driver.rollout, "event_sink"):
             driver.rollout.event_sink = driver.publisher.event_sink
 
+        _topo = getattr(launch.placement, "topology", None)
         driver.placement = ElasticPlacement(
             driver.placement, pool_gpus=elastic.pool_gpus,
             epoch=elastic.controller.journal.epochs.config_epoch,
+            gpus_per_node=getattr(_topo, "gpus_per_node", None),
         )
         epochs = elastic.controller.journal.epochs
         driver.config_epoch = epochs.config_epoch
@@ -643,17 +672,53 @@ def compose_island(
             if committed.get("rollout"):
                 driver.placement.restore_committed(tuple(committed["rollout"]),
                                                    epoch=epochs.config_epoch)
+        topology = getattr(launch.placement, "topology", None)
+        if topology is not None and callable(getattr(elastic.controller, "set_topology", None)):
+            # rl-multinode-island D9/Q6: node loss is observed through Ray, fail closed
+            elastic.controller.set_topology((topology.nodes, topology.gpus_per_node), _ray_alive_nodes,
+                                            layout=island_layout_of(miles_args, topology, launch.placement))
         elastic.controller.open(driver.rollout)
         _wire_trainer_rebuild(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
                               actor_model=actor_model, rollout_executor=rollout_executor,
                               runner=runner, base_model_revision=base_model_revision)
+        _wire_round_cuts(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
+                         base_model_revision=base_model_revision)
         if (getattr(miles_args, "yeto_rl_elastic", None) or {}).get("trainer_edges"):
             _wire_trainer_edges(driver, elastic=elastic, miles_args=miles_args, launch=launch,
                                 algorithm=algorithm, actor_model=actor_model,
                                 rollout_executor=rollout_executor, runner=runner,
                                 base_model_revision=base_model_revision)
+        # D2 (6.5): --rl-recommend-mode / --rl-edge-costs-path / --rl-elastic-window-s
+        from .elastic_hook import elastic_hook_for
+
+        driver.elastic_hook = elastic_hook_for(miles_args, controller=elastic.controller,
+                                               profile=profile, observe=observe)
+        # dashboard 5.1/5.2: controller cell-snapshot / reconfig-phase events; only when the
+        # observation path is on so the legacy (observe=False) tape stays byte-identical.
+        if observe:
+            elastic.controller.set_event_sink(driver.emit, journal=True)
     holder["driver"] = driver
     return driver
+
+
+def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revision) -> None:
+    """rl-multinode-island M4: with a checkpoint store and no outer syncer, keep a round
+    cut in the store at every safe point and resume from it (round_cut module doc)."""
+    from .rebuild_wiring import CutSource
+    from .round_cut import wire_round_cuts
+
+    controller = elastic.controller
+    if getattr(controller, "checkpoint_store", None) is None:
+        return
+    ref_load = getattr(miles_args, "ref_load", None)
+    source = CutSource(
+        driver=lambda: driver, trainer=driver.trainer, rollout=driver.rollout, ledger=elastic.ledger,
+        algorithm=algorithm, backend_fingerprint=controller.runtime_fingerprint or "",
+        cut_root="", global_batch_size=int(miles_args.global_batch_size),
+        ref_model=(None if not ref_load
+                   else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
+    )
+    wire_round_cuts(driver, controller=controller, source=source)
 
 
 def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model,
@@ -784,10 +849,16 @@ def _wire_trainer_edges(driver, *, elastic, miles_args, launch, algorithm, actor
 
         manager = RayWorkerManager.get_handle()
     views = _startup_views(manager, runner)
+    gpus_per_node = getattr(launch.placement, "gpus_per_node", None)
     try:
         bundles = StartupBundles(pool_gpus=elastic.pool_gpus, views=views,
-                                 placement_map=_role_map(launch.placement))
+                                 placement_map=_role_map(launch.placement),
+                                 gpus_per_node=gpus_per_node,
+                                 node_resolver=_ray_bundle_node,
+                                 head_node=_ray_head_node()[0] if gpus_per_node is not None else None)
     except Exception:  # noqa: BLE001 - no usable map: leave trainer edges refused
+        if gpus_per_node is not None:
+            raise  # rl-multinode-island D3/Q6: a multi-node island fails closed, never silently
         return False
     pool = driver.rollout
     pool._bundles = bundles
@@ -854,7 +925,7 @@ def selection_event(
     return event
 
 
-def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
+def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str | None:
     """Connect the driver to the island's own Ray and pin every actor to it.
 
     A SkyPilot machine runs two Ray instances: the island's (6379, started by
@@ -909,6 +980,12 @@ def connect_island_ray(*, environ=None, ray_module=None) -> str | None:
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
         # inherit the raylet's environment, not the driver's.
         env_vars[ELASTIC_METADATA_ENV] = "1"
+    if miles_args is not None:
+        # Codex harness: the agent function runs in RolloutExecutor actors and
+        # configures itself from this env (preflight.configure_rollout_worker).
+        from yeto.rl.harness.codex.preflight import worker_runtime_env
+
+        env_vars.update(worker_runtime_env(miles_args, environ))
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
 
@@ -990,6 +1067,8 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         # 3.7 restart recovery budget (--rl-elastic-max-recovery-attempts)
         **({"max_recovery_attempts": int(config["max_recovery_attempts"])}
            if config.get("max_recovery_attempts") is not None else {}),
+        # Q4 (C5): off-island copy of the state dir (--rl-elastic-checkpoint-store)
+        **({"checkpoint_store": config["checkpoint_store"]} if config.get("checkpoint_store") else {}),
         # 4.7: pool GPU ids (manifest resources.gpus, in logical-bundle order), only
         # with trainer edges; every other elastic run keeps the described pool.
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
@@ -1025,6 +1104,398 @@ def check_elastic_miles_args(miles_args: Any) -> None:
         problems.append("no rollout offload (member publication needs resident engines)")
     if problems:
         raise ValueError("--rl-elastic needs " + "; ".join(problems))
+
+
+def island_layout_of(miles_args: Any, topology: Any, placement: Any = None) -> dict[str, Any]:
+    """The parallel layout this learner launches (rl-multinode-island Q4, C5): the
+    Megatron parallel sizes and actor shape from ``miles_args`` plus the role ->
+    logical bundle map of the placement request (None = leading-bundle layout).
+    Journaled with the ``topology`` record and compared against the baseline on a
+    rebuild: a cut written under another layout is not restorable without conversion."""
+    def size(name: str, default: int = 1) -> int:
+        return int(getattr(miles_args, name, None) or default)
+
+    nodes = size("actor_num_nodes", 1)
+    per = size("actor_num_gpus_per_node", 0)
+    layout: dict[str, Any] = {
+        "tp": size("tensor_model_parallel_size"), "pp": size("pipeline_model_parallel_size"),
+        "cp": size("context_parallel_size"), "ep": size("expert_model_parallel_size"),
+        "nodes": int(topology.nodes), "gpus_per_node": int(topology.gpus_per_node),
+    }
+    if per:
+        layout["trainer"] = nodes * per
+    bundle_map = getattr(placement, "bundle_map", None) if placement is not None else None
+    layout["bundle_map"] = None if bundle_map is None else {str(k): list(v) for k, v in bundle_map.items()}
+    # ruling 2026-10-04 v2: the explicit cross-node TP opt-ins are part of the layout
+    # (journal topology.layout.cross_node_tp / cross_node_engine_tp) and WARN at startup
+    cross_tp = bool(getattr(placement, "allow_cross_node_tp", False)
+                    or getattr(miles_args, "yeto_rl_allow_cross_node_tp", False))
+    cross_engine = bool(getattr(placement, "allow_cross_node_engine_tp", False)
+                        or getattr(miles_args, "yeto_rl_allow_cross_node_engine_tp", False))
+    layout["cross_node_tp"] = int(cross_tp)
+    layout["cross_node_engine_tp"] = int(cross_engine)
+    if cross_tp:
+        logging.getLogger(__name__).warning(
+            "cross_node_tp=1: the trainer TP*CP group (tp=%s cp=%s) may span nodes "
+            "(--rl-allow-cross-node-tp); NCCL TP collectives cross the inter-node fabric",
+            layout["tp"], layout["cp"])
+    if cross_engine:
+        logging.getLogger(__name__).warning(
+            "cross_node_engine_tp=1: rollout engines may span whole nodes (sglang nnodes>1, "
+            "--rl-allow-cross-node-engine-tp); engines scale as whole replicas")
+    return layout
+
+
+def refuse_partial_island_preflight(elastic: Any, topology: Any, miles_args: Any, *,
+                                    node_probe: Callable[[], Any] | None = None,
+                                    placement: Any = None) -> None:
+    """Multi-node startup precondition (rl-multinode-island D9, tasks 3.3), run right
+    after ``connect_island_ray()`` and before any Miles placement group exists: the
+    controller writes its ``topology`` journal record from the live Ray node table and,
+    with fewer alive nodes than declared, enters RECOVERY_REQUIRED; the learner then
+    emits ``rl_reconfiguration`` (RECOVERY_REQUIRED) on the tape and exits non-zero
+    instead of blocking on a PENDING placement group. No-op without elastic/topology."""
+    controller = getattr(elastic, "controller", None) if elastic is not None else None
+    if controller is None or topology is None or int(topology.nodes) <= 1:
+        return
+    if not callable(getattr(controller, "refuse_partial_island", None)):
+        return
+    controller.set_topology((int(topology.nodes), int(topology.gpus_per_node)),
+                            node_probe or _ray_alive_nodes,
+                            layout=island_layout_of(miles_args, topology, placement))
+    why = controller.refuse_partial_island()
+    if why is None:
+        return
+    error = getattr(controller, "recovery_required", None) or f"island topology: {why}"
+    try:
+        from yeto.rl.miles import _append_rl_event
+
+        epochs = getattr(getattr(controller, "journal", None), "epochs", None)
+        _append_rl_event(miles_args, {
+            "event": "rl_reconfiguration", "rollout_id": None, "result": "RECOVERY_REQUIRED",
+            "error": str(error), "config_epoch": getattr(epochs, "config_epoch", None),
+        })
+    except Exception as exc:  # noqa: BLE001 - the tape must not mask the refusal
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "rl_reconfiguration (partial island) not written to the tape: %r", exc)
+    raise RuntimeError(f"island is RECOVERY_REQUIRED: {error}")
+
+
+def _ray_alive_nodes() -> dict[str, int]:
+    """``{node_id: GPUs}`` of the alive Ray nodes (the controller's node probe)."""
+    import ray
+
+    return {n["NodeID"]: int((n.get("Resources") or {}).get("GPU", 0))
+            for n in ray.nodes() if n.get("Alive")}
+
+
+INCARNATION_MARKER_DIR = "/tmp/yeto-rl-incarnation"
+
+
+def reconcile_gpu_pool_preflight(elastic: Any, topology: Any, miles_args: Any, *,
+                                 resources: Any = None, accept_rebind: bool | None = None,
+                                 gpu_probe: Callable[[Any], Any] | None = None,
+                                 placement: Any = None,
+                                 incarnation_probe: Callable[[Any, Any], Mapping[str, str]] | None = None,
+                                 other_islands: Mapping[str, Any] | None = None,
+                                 marker_writer: Callable[[Any, Any, str], None] | None = None) -> Any:
+    """Multi-node GPU uuid reconciliation (rl-multinode-island Q6, ruling 2026-10-04),
+    run right after :func:`refuse_partial_island_preflight` and before any placement
+    group: ``nvidia-smi --query-gpu=index,uuid`` is collected on every island node (a
+    Ray task per node; an unreachable node fails closed), the pool is reconciled against
+    the cfg's uuids and/or the journal's binding baseline
+    (:func:`multinode.reconcile_gpu_pool`), and the controller journals ``gpu_pool``.
+    A refused pool -> tape ``rl_reconfiguration`` RECOVERY_REQUIRED + ``RuntimeError``.
+    A new pool is accepted (and becomes the baseline) only with
+    ``--rl-elastic-accept-rebind``. Single-node islands are untouched (None)."""
+    controller = getattr(elastic, "controller", None) if elastic is not None else None
+    if controller is None or topology is None or int(topology.nodes) <= 1:
+        return None
+    if not callable(getattr(controller, "record_gpu_pool", None)):
+        return None
+    from yeto.rl.engine import multinode as mn
+
+    config = getattr(miles_args, "yeto_rl_elastic", None) or {}
+    if resources is None:
+        resources = config.get("resources")
+    if accept_rebind is None:
+        accept_rebind = bool(config.get("accept_rebind", False))
+    topo = mn.Topology(int(topology.nodes), int(topology.gpus_per_node))
+
+    def refuse(error: str) -> None:
+        try:
+            from yeto.rl.miles import _append_rl_event
+
+            epochs = getattr(getattr(controller, "journal", None), "epochs", None)
+            _append_rl_event(miles_args, {
+                "event": "rl_reconfiguration", "rollout_id": None, "result": "RECOVERY_REQUIRED",
+                "error": str(error), "config_epoch": getattr(epochs, "config_epoch", None),
+            })
+        except Exception as exc:  # noqa: BLE001 - the tape must not mask the refusal
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "rl_reconfiguration (gpu_pool) not written to the tape: %r", exc)
+        raise RuntimeError(f"island is RECOVERY_REQUIRED: {error}")
+
+    try:
+        if resources is not None and not isinstance(resources, dict):
+            resources = json.loads(Path(resources).expanduser().read_text(encoding="utf-8"))
+        cfg_pool = mn.declared_gpu_pool(resources or {}, topo)
+        observed = mn.observed_gpu_pool((gpu_probe or _ray_gpu_uuids)(topo), topo)
+    except Exception as exc:  # noqa: BLE001 - probe/cfg failure: fail closed, journaled
+        error = f"gpu_pool: GPU probe failed: {exc}"
+        controller.record_gpu_pool(mn.ReconcileResult(ok=False, observed=(), error=str(exc)),
+                                   source="probe", accept_rebind=bool(accept_rebind))
+        refuse(getattr(controller, "recovery_required", None) or error)
+    baseline = controller.gpu_pool_baseline()
+    declared = mn.merge_declared_pool(cfg_pool, baseline)
+    cfg_named = any(u is not None for node in cfg_pool for u in node)
+    source = "+".join(n for n, on in (("cfg", cfg_named), ("journal", baseline is not None)) if on) or "none"
+    result = mn.reconcile_gpu_pool(declared, observed, accept_rebind=bool(accept_rebind))
+    roles: dict[str, str] = {}
+    if result.ok:
+        # Ruling 2026-10-04 v2, rebind safety: (a) duplicate occupation, (b) role conflict,
+        # (c) stale re-entry of an older incarnation's processes on the same GPUs.
+        mine = str((getattr(controller, "incarnation", None) or {}).get("id", ""))
+        why3 = None
+        try:
+            if placement is not None:
+                counts = (int(getattr(placement, "trainer_gpus", 0) or 0),
+                          int(getattr(placement, "rollout_gpus", 0) or 0),
+                          int(getattr(placement, "standby_gpus", 0) or 0))
+                roles = mn.role_uuid_map(getattr(placement, "bundle_map", None), result.flat, counts=counts)
+            why3 = mn.occupation_rejection(result.flat, roles or {u: "unassigned" for u in result.flat},
+                                           other_islands)
+            if why3 is None:
+                live = (incarnation_probe or _ray_live_incarnations)(topo, result.flat)
+                why3 = mn.stale_incarnation_rejection(
+                    tuple(u for node in (baseline or ()) for u in node), result.flat, live, mine)
+        except Exception as exc:  # noqa: BLE001 - fail closed on an unknown state
+            why3 = f"rebind safety check failed: {exc}"
+        if why3 is not None:
+            result = mn.ReconcileResult(ok=False, observed=result.observed, rebind=result.rebind,
+                                        mapping=result.mapping, diffs=result.diffs, error=why3)
+    why = controller.record_gpu_pool(result, source=source, accept_rebind=bool(accept_rebind), roles=roles)
+    if why is not None:
+        refuse(getattr(controller, "recovery_required", None) or f"gpu_pool: {why}")
+    mine = str((getattr(controller, "incarnation", None) or {}).get("id", ""))
+    if mine:
+        try:  # mark every bound GPU with this incarnation (read back by the next incarnation's (c))
+            (marker_writer or _ray_write_incarnation_markers)(topo, result.observed, mine)
+        except Exception as exc:  # noqa: BLE001 - a missing marker only weakens the next check
+            logging.getLogger(__name__).warning("incarnation markers not written: %r", exc)
+    return result
+
+
+def _marker_rows(uuids: Sequence[str], marker_dir: str = INCARNATION_MARKER_DIR) -> dict[str, str]:
+    """uuid -> incarnation id for every marker in ``marker_dir`` whose owning pid is alive."""
+    import os as _os
+
+    out: dict[str, str] = {}
+    for uuid in uuids:
+        path = Path(marker_dir) / f"{uuid}.json"
+        if not path.exists():
+            continue
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(info.get("pid", 0))
+            _os.kill(pid, 0)  # raises when the process is gone
+        except (OSError, ValueError, TypeError):
+            continue
+        out[uuid] = str(info.get("incarnation", ""))
+    return out
+
+
+def _write_markers(uuids: Sequence[str], incarnation: str, pid: int,
+                   marker_dir: str = INCARNATION_MARKER_DIR) -> None:
+    Path(marker_dir).mkdir(parents=True, exist_ok=True)
+    for uuid in uuids:
+        (Path(marker_dir) / f"{uuid}.json").write_text(
+            json.dumps({"incarnation": incarnation, "pid": int(pid)}), encoding="utf-8")
+
+
+def _ray_live_incarnations(topology: Any, observed_flat: Sequence[str]) -> dict[str, str]:
+    """(c) stale re-entry probe: per-node Ray tasks read the incarnation marker files
+    (``INCARNATION_MARKER_DIR/<uuid>.json``, written by :func:`_ray_write_incarnation_markers`)
+    and keep those whose recorded pid is still alive on that node. Without ``ray``
+    importable there is no Ray cluster (no old Ray process can hold a GPU): {}."""
+    try:
+        import ray
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+    except ImportError:
+        return {}
+
+    nodes = [n for n in ray.nodes() if n.get("Alive") and (n.get("Resources") or {}).get("GPU", 0)]
+
+    @ray.remote(num_cpus=0, num_gpus=0)
+    def _read(uuids: list[str]) -> dict[str, str]:
+        return _marker_rows(uuids)
+
+    refs = [_read.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+        node_id=n["NodeID"], soft=False)).remote(list(observed_flat)) for n in nodes]
+    live: dict[str, str] = {}
+    for rows in ray.get(refs, timeout=120):
+        live.update(rows)
+    return live
+
+
+def _ray_write_incarnation_markers(topology: Any, observed: Sequence[Sequence[str]], incarnation: str) -> None:
+    """Write this incarnation's marker for every bound GPU on its node (the learner pid on
+    the head stands for the whole incarnation: its Ray job owns every worker process)."""
+    import os as _os
+
+    try:
+        import ray
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+    except ImportError:
+        return
+    nodes = [n for n in ray.nodes() if n.get("Alive") and (n.get("Resources") or {}).get("GPU", 0)]
+    head_id, _ip = _ray_head_node(nodes)
+    order = sorted(nodes, key=lambda n: (0 if n["NodeID"] == head_id else 1,
+                                         str(n.get("NodeManagerAddress")), str(n["NodeID"])))
+    pid = _os.getpid()
+
+    @ray.remote(num_cpus=0, num_gpus=0)
+    def _write(uuids: list[str], inc: str, owner: int) -> None:
+        import os as _o
+
+        _write_markers(uuids, inc, _o.getppid() if owner < 0 else owner)
+
+    refs = [_write.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+        node_id=n["NodeID"], soft=False)).remote(list(uuids), incarnation, pid)
+            for n, uuids in zip(order, observed)]
+    ray.get(refs, timeout=120)
+
+
+def island_smi_rows(out: str, use: str | None = None) -> list[tuple[int, str]]:
+    """``nvidia-smi --query-gpu=index,uuid`` csv -> ``[(index, uuid)]`` of the island's
+    GPUs. nvidia-smi ignores ``CUDA_VISIBLE_DEVICES`` and always lists every card of
+    the machine; under ``--rl-island-use-gpus-per-node M`` (the launcher exports
+    ``YETO_ISLAND_USE_GPUS_PER_NODE=M`` before ``ray start``, inherited by Ray workers)
+    only local GPUs ``0..M-1`` belong to the island, the rest are unallocated."""
+    import os
+
+    rows = [(int(a.strip()), b.strip()) for a, b in
+            (line.split(",", 1) for line in out.splitlines() if line.strip())]
+    use = os.environ.get("YETO_ISLAND_USE_GPUS_PER_NODE") if use is None else use
+    if use:
+        rows = [r for r in rows if r[0] < int(use)]
+    return rows
+
+
+def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
+    """``[(index, uuid), ...]`` per island node in logical order (Ray head first, D3,
+    then the workers by address/node id), each collected by a Ray task pinned to that
+    node (``NodeAffinitySchedulingStrategy``, hard). A node whose ``nvidia-smi`` count
+    disagrees with its Ray ``GPU`` resource, or a node that cannot run the task, raises
+    (fail closed)."""
+    import ray
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    nodes = [n for n in ray.nodes() if n.get("Alive")]
+    head_id, _ip = _ray_head_node(nodes)
+    order = sorted(nodes, key=lambda n: (0 if n["NodeID"] == head_id else 1,
+                                         str(n.get("NodeManagerAddress")), str(n["NodeID"])))
+    order = [n for n in order if n["NodeID"] == head_id or (n.get("Resources") or {}).get("GPU", 0)]
+    if len(order) != int(topology.nodes):
+        raise RuntimeError(f"{len(order)} alive Ray nodes with GPUs, topology has {topology.nodes}")
+
+    @ray.remote(num_cpus=0, num_gpus=0)
+    def _smi() -> list[tuple[int, str]]:
+        import subprocess
+
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+                             check=True, capture_output=True, text=True, timeout=60).stdout
+        return island_smi_rows(out)
+
+    refs = [_smi.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+        node_id=n["NodeID"], soft=False)).remote() for n in order]
+    rows = ray.get(refs, timeout=120)
+    for n, got in zip(order, rows):
+        ray_gpus = int((n.get("Resources") or {}).get("GPU", 0))
+        if len(got) != ray_gpus:
+            raise RuntimeError(f"node {n['NodeID']} nvidia-smi lists {len(got)} GPUs, Ray exposes {ray_gpus}")
+    return [list(r) for r in rows]
+
+
+def _ray_head_node(nodes: Any = None) -> tuple[Any, str]:
+    """``(node_id, ip)`` of the Ray head: the one alive node carrying Ray's
+    built-in ``node:__internal_head__`` resource (rl-multinode-island D3 head
+    pin). Exactly one such node, else ``RuntimeError`` (fail closed)."""
+    from yeto.rl.engine.multinode import HEAD_RESOURCE
+
+    if nodes is None:
+        import ray
+
+        nodes = ray.nodes()
+    heads = [n for n in nodes if n.get("Alive") and HEAD_RESOURCE in (n.get("Resources") or {})]
+    if len(heads) != 1:
+        raise RuntimeError(f"expected exactly one alive Ray head node ({HEAD_RESOURCE}), found {len(heads)}")
+    return heads[0]["NodeID"], str(heads[0].get("NodeManagerAddress"))
+
+
+def pin_placement_group_to_head(gpus_per_node: int, *, pg_module: Any = None, head: Any = None,
+                                table: Any = None) -> Any:
+    """rl-multinode-island D3 head pin (ruling 2026-10-03): make the fork's
+    startup placement group put logical node 0 (the trainer's block) on the Ray
+    head, and refuse startup when it did not.
+
+    Patches ``miles.ray.placement_group`` in the driver before the
+    ``RayWorkerManager`` is launched: ``placement_group`` (the Ray call) gets
+    :func:`head_pinned_bundles`, ``sort_key`` sorts the head's bundles first,
+    and ``_create_placement_group`` checks ``placement_group_table`` afterwards
+    (block 0 of the reordered bundles on the head node, else ``RuntimeError``).
+    Returns the head node id. ``pg_module``/``head``/``table`` are test seams."""
+    from yeto.rl.engine.multinode import assert_head_block, head_first_sort_key, head_pinned_bundles
+
+    if pg_module is None:
+        import importlib
+
+        pg_module = importlib.import_module("miles.ray.placement_group")
+    head_id, head_ip = head if head is not None else _ray_head_node()
+    ray_placement_group, base_key, base_create = (
+        pg_module.placement_group, pg_module.sort_key, pg_module._create_placement_group)
+    if getattr(base_create, "_yeto_head_pinned", None) is not None:
+        return base_create._yeto_head_pinned  # already installed (one PG per driver)
+
+    def pinned_placement_group(bundles, *args, **kwargs):
+        return ray_placement_group(head_pinned_bundles(len(bundles), gpus_per_node), *args, **kwargs)
+
+    def checked_create(num_gpus, *args, **kwargs):
+        info = base_create(num_gpus, *args, **kwargs)
+        pg, reordered = info[0], list(info[1])
+        if pg is None:
+            return info
+        if table is None:
+            import ray
+
+            node_of_bundle = ray.util.placement_group_table(pg)["bundles_to_node_id"]
+        else:
+            node_of_bundle = table(pg)
+        blocks = [node_of_bundle[b] for b in reordered[:gpus_per_node]]
+        if len(set(map(str, blocks))) != 1:
+            raise RuntimeError(f"D3 head pin: logical node 0 bundles span nodes {sorted(set(map(str, blocks)))}")
+        assert_head_block(blocks, head_id)
+        return info
+
+    checked_create._yeto_head_pinned = head_id
+    pg_module.placement_group = pinned_placement_group
+    pg_module.sort_key = head_first_sort_key(head_ip, base_key)
+    pg_module._create_placement_group = checked_create
+    return head_id
+
+
+def _ray_bundle_node(pg: Any, bundle: int) -> Any:
+    """rl-multinode-island D3/Q6: the Ray node id hosting ``bundle`` of ``pg``
+    (``ray.util.placement_group_table``), the runtime source of the node-block
+    assertion; raises when Ray cannot tell (fail closed)."""
+    import ray
+
+    table = ray.util.placement_group_table(pg)
+    return table["bundles_to_node_id"][bundle]
 
 
 def manifest_pool_gpus(resources: Any) -> tuple[str, ...]:
@@ -1078,7 +1549,18 @@ def run_ports_island(
         # the harness cuts need the rollout data cursor (rollout-side metadata)
         miles_args.yeto_rl_elastic_metadata = True
         os.environ[ELASTIC_METADATA_ENV] = "1"
-    connect_island_ray()
+    connect_island_ray(miles_args=miles_args)
+    topology = getattr(launch.placement, "topology", None)
+    if topology is not None and topology.nodes > 1:
+        # tasks 3.3: a restarted learner on a partial island (worker node DEAD in the GCS)
+        # must fail closed here; a placement group asking for the dead node's GPUs
+        # would stay PENDING forever
+        refuse_partial_island_preflight(elastic, topology, miles_args, placement=launch.placement)
+        # Q6 (2026-10-04): runtime GPU uuid reconciliation, journal gpu_pool; a changed
+        # pool is accepted only with --rl-elastic-accept-rebind (fail closed otherwise)
+        reconcile_gpu_pool_preflight(elastic, topology, miles_args, placement=launch.placement)
+        # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
+        pin_placement_group_to_head(topology.gpus_per_node)
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
     from miles.ray.rollout.eval_dispatch import EvalDispatcher
@@ -1160,6 +1642,10 @@ def run_ports_island(
             ),
             elastic=elastic,
         )
+        # fleet-dashboard 2.1/2.2: opt-in heartbeat / resource sampler periods
+        driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
+        driver.resource_sample_interval_s = getattr(
+            miles_args, "yeto_rl_resource_sample_interval_s", None)
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness
 

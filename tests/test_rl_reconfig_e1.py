@@ -838,6 +838,7 @@ def test_engine_discarded_survives_replay(tmp_path):
     b = _B(0, ["g0"])
     b.aborted_in_flight_groups = 2
     led.prepare(b, policy_token="t")
+    assert led.cut_summary()["engine_discarded_groups"] == 2  # before any reopen (T36 fix)
     led.close()
     led = BatchLedger(tmp_path)
     assert led.batch(0)["engine_discarded"] == 2
@@ -1080,6 +1081,83 @@ def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path):
     assert [(e["cell"], e["kind"]) for e in action["skipped"]] == [("engine:c3", "no_workers")]
     assert not ctl.recovery_required
     assert ctl.status("r")["phase"] == REBUILT_OLD
+
+
+def test_watchdog_target_whose_workers_died_is_journaled_as_workers_lost(tmp_path):
+    """A27 (GPU 6r1/6r2 d2): a target engine SIGKILLed during VERIFYING. The fork's liveness
+    scan tore its cell down and ``describe_cells`` reports it ``workers_lost``; the watchdog
+    journals that cell as ``skipped`` kind ``workers_lost`` (naming the dead workers) instead
+    of the generic ``no_workers``, kills the other target, and the transaction still ends
+    REBUILT_OLD once the blocked fork call returns."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+
+    driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
+    manager = _FakeManager()
+    infos = dict(manager.infos)
+    manager.get_worker_infos = _Remote(lambda cell: list(infos.get(cell, [])) if cell in ("c2", "c3")
+                                       else (_ for _ in ()).throw(AssertionError(f"cell_id={cell!r} matches=[]")))
+    infos["c3"] = []  # torn down by the fork's liveness scan
+    manager.describe_cells = _Remote(lambda pool_ids=None: {
+        "c2": {"state": "running", "lost_workers": None},
+        "c3": {"state": "workers_lost", "lost_workers": ["c3/w0"]},
+    })
+    fake_ray = _FakeRay(lambda handle: None)
+    ctl.set_on_watchdog(kill_target_generation(ctl, manager=manager, ray_module=fake_ray))
+    gate = threading.Event()
+    slow = publisher.publish_members
+
+    def publish_members(*a, **k):
+        gate.wait(1.5)
+        return slow(*a, **k)
+
+    publisher.publish_members = publish_members
+    ctl._wall = __import__("time").time
+    orig = driver.safe_point
+
+    def safe_point(rollout_id):
+        if rollout_id == 1:
+            ctl.request("r", "T4R4S0", 0, 0.2)
+        return orig(rollout_id)
+
+    driver.safe_point = safe_point
+    with contextlib.suppress(Exception):
+        driver.run()
+    records = read_journal(tmp_path / "state/reconfig")
+    action = next(r for r in records if r["kind"] == "watchdog_action")
+    assert [k["cell"] for k in action["killed"]] == ["engine:c2"]
+    assert action["errors"] == []
+    assert [(e["cell"], e["kind"], e["lost_workers"]) for e in action["skipped"]] == [
+        ("engine:c3", "workers_lost", ["c3/w0"])]
+    assert not ctl.recovery_required
+    assert ctl.status("r")["phase"] == REBUILT_OLD
+
+
+def test_watchdog_describe_failure_falls_back_to_no_workers(tmp_path):
+    """An older fork (no ``describe_cells``) or a failing lookup must not change the
+    kill result or block the watchdog: the generic ``no_workers`` classification stands."""
+    from yeto.rl.engine.miles_adapter.elastic_wiring import _lost_workers_of
+
+    class _Ray:
+        def get(self, ref, timeout=None):
+            raise TimeoutError("manager busy")
+
+    class _Mgr:
+        describe_cells = _Remote(lambda pool_ids=None: {})
+
+    assert _lost_workers_of(object(), _Ray(), "c3", 1.0) is None  # no describe_cells at all
+    assert _lost_workers_of(_Mgr(), _Ray(), "c3", 1.0) is None  # lookup fails
+
+    class _Ok:
+        def get(self, ref, timeout=None):
+            return ref
+
+    assert _lost_workers_of(
+        type("M", (), {"describe_cells": _Remote(lambda pool_ids=None: {"c3": {"state": "stopped"}})})(),
+        _Ok(), "c3", 1.0) is None
+    assert _lost_workers_of(
+        type("M", (), {"describe_cells": _Remote(
+            lambda pool_ids=None: {"c3": {"state": "workers_lost", "lost_workers": ["c3/w0", "c3/w1"]}})})(),
+        _Ok(), "c3", 1.0) == ["c3/w0", "c3/w1"]
 
 
 def test_watchdog_outside_start_verify_kills_nothing(tmp_path):

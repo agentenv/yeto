@@ -118,6 +118,9 @@ class _Image:
     def add_local_dir(self, *a, **k):
         return self._rec("add_local_dir", *a, **k)
 
+    def add_local_file(self, *a, **k):
+        return self._rec("add_local_file", *a, **k)
+
     def env(self, *a, **k):
         return self._rec("env", *a, **k)
 

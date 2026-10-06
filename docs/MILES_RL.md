@@ -411,6 +411,207 @@ to a user message. `label`, `metadata`, and `tools` remain available to Miles
 and the reward callable. Existing custom generation, session-server, and TITO
 arguments are forwarded unchanged.
 
+## Multi-node islands
+
+An RL learner island may span several SkyPilot nodes (`rl-multinode-island`;
+ports engine, `--rl-placement fixed-partition` only). `--gpu cloud:NxGxgpu`
+asks for one N-node cluster of G GPUs per node per learner:
+
+```bash
+yeto launch --training-mode rl --rl-engine ports \
+  --gpu nebius:2x8xh100 \
+  --rl-placement fixed-partition --rl-rollout-gpus 8 --rollout-num-gpus-per-engine 8 \
+  --tensor-parallel 2 --pipeline-parallel 1 \
+  --rl-elastic --rl-elastic-resources cfg/resources-2x8.json --rl-elastic-initial-config T8R8S0 \
+  ...
+```
+
+### Topology and placement rules
+
+- Logical bundle `p` lives on node `p // G` as local GPU `p % G`. The learner
+  asserts this against the Miles placement group at startup
+  (`StartupBundles`, `ray.util.placement_group_table`) and refuses to train on
+  any other layout.
+- Ray head = node rank 0 = the learner process = trainer rank 0. Worker nodes
+  join the head's Ray (bounded join, cleanup trap armed before joining) and
+  leave when the head exits. There is no separate head node.
+- `--rl-rollout-gpus` / `--rl-standby-gpus` are **island totals**. Without an
+  explicit cfg placement the trainer takes the leading `total - rollout -
+  standby` bundles; with one (`placement` in the initial config) the trainer
+  GPUs are exactly the listed `n<k>:<g>` slots. Either way the trainer must
+  occupy the same number of GPUs on every node it uses, as one contiguous
+  ascending run per node (Miles' `actor_num_nodes x actor_num_gpus_per_node`
+  rectangle; the launcher derives both flags and forwards
+  `--rl-island-bundle-map` when the layout is not the leading one).
+- In-node groups (the DEFAULT preference, ruling 2026-10-04 v2): every
+  **TP*CP** group of the trainer (consecutive trainer ranks; `tp*cp` must fit
+  and divide a node), every rollout engine and every standby-to-cell rebind
+  stays on one node. **EP and PP groups may span nodes**: a PP2 trainer on
+  `n0:0 + n1:0` or an EP2 group across the two nodes is legal; EP only needs
+  `tp*cp*ep` to divide the trainer GPUs.
+- Explicit cross-node TP opt-ins (trainer and rollout are configured
+  separately): `--rl-allow-cross-node-tp` (or cfg `parallel.allow_cross_node_tp:
+  true`) lets the trainer TP*CP group span nodes; `--rl-allow-cross-node-engine-tp`
+  (or `parallel.allow_cross_node_engine_tp: true`) lets a rollout engine span
+  nodes as **whole-node replicas** (SGLang TP8 over 2x4: Miles starts the
+  engine with `nnodes = gpus_per_engine // num_gpus_per_node`). Either spelling
+  is forwarded to the learner, the launcher and the learner WARN, and the
+  journal `topology.layout` records `cross_node_tp` / `cross_node_engine_tp`.
+  A cross-node engine scales up/down only as one replica (all its nodes
+  together); removing a single node of it is refused. GPU-side correctness and
+  performance of cross-node engine TP are reported separately (not yet run).
+- Mixed placement never overlaps: a `(node, gpu)` slot may appear once across
+  trainer / rollout / standby; a duplicate is refused at cfg parse time.
+- Rollout and trainer may share a node on different GPUs (mixed placement,
+  ruling 2026-10-04), e.g. the 2x2 cfg `T2R1S1`: trainer `["n0:0","n1:0"]`,
+  rollout `[["n0:1"]]`, standby `["n1:1"]`. Non-rectangular trainers
+  (`["n0:0","n0:1","n1:0"]`) are refused. Violations fail at `yeto launch`
+  before any cloud resource is touched.
+- The island must have at least the recipe-derived minimum of nodes (one
+  trainer replica `tp*cp*pp*max(1, ceil(ep*etp/tp))` -- EP shares ranks with
+  TP x DP, so it adds GPUs only beyond `tp` -- plus one rollout engine and the
+  standby reservation, rounded up to whole nodes); `--rl-min-nodes-per-learner N`
+  raises that floor. Qwen3.8-Flash-Next LoRA (trainer 8 + SGLang TP8) needs 2
+  nodes; the 32-GPU full-parameter recipe 4.
+- GPU UUID reconciliation (multi-node only, ruling 2026-10-04): after the
+  topology precheck the learner runs `nvidia-smi --query-gpu=index,uuid` on
+  every node and compares the pool with the cfg `gpus[*].uuid` and/or the
+  journal baseline of the previous incarnation (`gpu_pool` journal record). A
+  different shape or a different uuid refuses the start; a same-shape pool on
+  replaced machines is accepted only with `--rl-elastic-accept-rebind`, which
+  journals the old -> new mapping. After acceptance three rebind-safety checks
+  run (ruling 2026-10-04 v2): no duplicate occupation (unique uuids, none bound
+  by another active island), one role per uuid (journal `gpu_pool.roles`), and
+  no stale re-entry (a uuid still held by a live process of an older
+  incarnation, per the node marker `/tmp/yeto-rl-incarnation/<uuid>.json`,
+  refuses the start: run `yeto down` first).
+- The launcher forwards `--rl-island-gpus-per-node G` to the learner; a
+  single-node island sends nothing and keeps every pre-existing behaviour.
+
+### Resources cfg (`--rl-elastic-resources`)
+
+A legacy cfg (no `nodes`) is parsed exactly as before. A multi-node cfg adds
+`nodes`/`gpus_per_node`; `placement` entries may be `"n<k>:<g>"`, logical bundle
+integers or pool GPU uuids (one spelling per cfg):
+
+```json
+{"nodes": 2, "gpus_per_node": 8,
+ "configs": {"T8R8S0": {"trainer": 8, "rollout": 8, "standby": 0, "rollout_engine_gpus": 8,
+                        "parallel": {"tp": 2, "pp": 1},
+                        "placement": {"trainer": ["n0:0","n0:1","n0:2","n0:3","n0:4","n0:5","n0:6","n0:7"],
+                                      "rollout": [["n1:0","n1:1","n1:2","n1:3","n1:4","n1:5","n1:6","n1:7"]],
+                                      "standby": []}}},
+ "edges": []}
+```
+
+Every config must use all `nodes x gpus_per_node` GPUs; a resolved `gpus` pool
+must list exactly that many, each node's `index` running `0..G-1`. Cells
+declared with `--rl-elastic-cells` are cut per node (a run never straddles two
+nodes; leftovers stay unbound), and `bind_members` refuses a cross-node target.
+
+### Node failure domain
+
+The controller records the island `topology` in the reconfiguration journal
+and polls `ray.nodes()` before every round. Any node loss (fewer alive nodes
+than declared, or a node exposing another GPU count) is recorded as
+`node_lost` and the island enters `RECOVERY_REQUIRED`: the learner exits
+non-zero, nothing trains or generates on the surviving nodes. A restarted
+learner (E1-D recovery) checks the same topology **before** touching the fork's
+membership epoch; with a node still missing it stays `RECOVERY_REQUIRED` and
+performs no differential recovery. Same shape with other hostnames is fine.
+Rebuilding the island is a manual `yeto up` (design Q4 a).
+
+Operational notes: `NCCL_IB_DISABLE=1`, `NCCL_DEBUG=WARN` and (on nebius)
+`NCCL_SOCKET_IFNAME=GLOO_SOCKET_IFNAME=<first non-virtual interface that is
+up>` are exported on every node (a Nebius node's NIC is `network-interface-0`,
+not `eth0`; the job log prints `[yeto-island] socket interface: ...`); set them
+in the environment to override. Journal records `topology` / `node_lost`
+and the `rl_reconfiguration` event with `result=RECOVERY_REQUIRED` and an
+`error` starting with `node_lost:` are the evidence to collect before tearing
+down.
+
+### Node loss and rebuild (checkpoint store)
+
+Ruling (2026-10-04, design Q4): on node loss the island stops the affected
+training communication group (= the whole island, one learner has one trainer
+group), is rebuilt from a **consistent checkpoint** on a same-shape island, and
+there is **no automatic re-entry of the original ranks**: a surviving or
+returning node never rejoins the old job. The consistent checkpoint is the
+elastic state dir (`--rl-elastic-state-dir`, default `~/yeto-rl/elastic-state`:
+reconfiguration journal + `epochs.json`, trainer cuts, batch ledger, inbox),
+which lives on node0's local disk. Two things make it rebuildable elsewhere:
+
+- **`--rl-checkpoint-store <s3://…|gs://…|/shared/path>`** (needs
+  `--rl-elastic`): the controller copies the state dir to the store after every
+  commit point (`topology` baseline at startup, accepted `gpu_pool`, every
+  `COMMITTED` / `SUCCEEDED` phase record, i.e. after the durable CAS and the cut
+  manifest commit) and writes `STORE-MANIFEST.json` last, so a copy without it is
+  never trusted. A bucket URI is mounted on every island node at
+  `~/yeto-checkpoint-store` (sky Storage MOUNT, persistent) and the learner gets
+  `--rl-elastic-checkpoint-store` with that path; an absolute/`~/` path is passed
+  through as is (a share every replacement machine also mounts). A learner that
+  starts with an **empty** state dir (fresh machines) restores the store into it
+  first and journals `checkpoint_store action=restore`; a local journal always
+  wins over the store (an in-place restart is at least as new as its last sync,
+  and dropping local records could hide a `RECOVERY_REQUIRED` terminal). A
+  failed sync is logged and kept in `controller.last_store_sync`, it never fails
+  the commit. Without the flag a multi-node launch prints `[launcher] warning:
+  --rl-checkpoint-store not set: ... node0's local disk` and keeps the old
+  behavior (fail open); single-node islands are unchanged.
+- **Parallel layout baseline**: the `topology` journal record now carries
+  `layout` (`tp/pp/cp/ep`, trainer GPUs, `nodes` x `gpus_per_node`, the role ->
+  logical bundle `bundle_map`, None = leading-bundle layout) and
+  `layout_accepted`. Every later incarnation compares its layout against the last
+  accepted baseline; a difference is `RECOVERY_REQUIRED` with `layout changed:
+  pp 2 -> 1, …` before any fork membership call, in `_recovery_precondition`
+  and in `confirm_recovery` (`checks.layout`). A cut written under another
+  Megatron layout is not restorable without conversion, so a rebuild must be
+  same-shape; there is deliberately no override flag. Like `gpu_pool`, the
+  refusal is per incarnation (no journal terminal): relaunching with the
+  original recipe/cfg continues.
+
+Rebuild procedure after a node is lost (M4 in the GPU matrix):
+
+1. The driver poll records `node_lost`, the island enters `RECOVERY_REQUIRED`
+   and the learner exits non-zero; the restart loop's in-place retries are
+   refused by the partial-island preflight (`alive < N`). Collect the evidence
+   (journal `node_lost`, tape `rl_reconfiguration result=RECOVERY_REQUIRED`).
+2. `yeto down` the island (teardown confirms every node instance).
+3. `yeto launch` with the **same cfg, recipe and parallel flags** (same
+   `--rl-elastic-resources`, `--rl-elastic-initial-config`, `--tensor-parallel`
+   / `--pipeline-parallel` / `--expert-parallel`, `--rl-rollout-gpus`,
+   `--rl-standby-gpus`, same `--rl-checkpoint-store`) plus
+   `--rl-elastic-accept-rebind`: the new machines expose other GPU uuids, which
+   the Q6 reconciliation accepts only with that flag (`gpu_pool rebind=true`
+   with the old -> new mapping; shape must still match).
+4. Startup order on the new island: restore the state dir from the store
+   (`checkpoint_store restore`), `topology` record + layout check against the
+   restored baseline, `gpu_pool` reconciliation + rebind record, then the normal
+   restart recovery of the committed membership (`RECOVERING` ->
+   `confirm_recovery` after the first publication) and training continues from
+   the committed epoch / last cut.
+5. A layout or shape mismatch at step 4 is `RECOVERY_REQUIRED` again; fix the
+   launch flags, do not force it. A changed `--rl-elastic-state-dir` with an
+   already populated directory is an in-place restart, not a rebuild.
+
+Not supported: a node coming back under its old job (the journal keeps
+`RECOVERY_REQUIRED`), partial continuation on surviving nodes, rebuilding under
+another parallel layout, and Modal islands (no sky Storage mount; use a shared
+path there). Megatron `--save`/`--load` checkpoints are not managed by the
+store (the cut plugin never sets them).
+
+### Teardown confirmation
+
+`yeto down` / the launcher's teardown confirm a multi-node island per node
+instance: the instance ids are captured from the cloud before `sky down`, and
+the island counts as released only when the cloud reports every one of them
+terminated (`node instance <id> confirmed terminated` lines). No cloud probe, a
+failing probe or an instance still alive after the retries prints `UNCONFIRMED
+node instance(s) <ids>`, the cluster is reported as not verified and the run's
+teardown exits non-zero; delete the listed instances in the cloud console or
+rerun `yeto down`. `sky down`'s own success is never trusted for more than one
+node.
+
 ## Checkpoint and Recovery
 
 The syncer checkpoint is the only authoritative global LoRA. In exact-base RL

@@ -53,6 +53,20 @@ def file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_json_sha256(path: str | Path) -> str:
+    """sha256 of a JSON file in canonical form (``sort_keys=True, indent=2`` + newline).
+
+    Used for artifacts whose generator is not byte-stable (e.g. ``codex
+    app-server generate-json-schema``) but whose semantics are pinned.
+    """
+    import json
+
+    with Path(path).open(encoding="utf-8") as handle:
+        data = json.load(handle)
+    text = json.dumps(data, sort_keys=True, indent=2) + "\n"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def python_spec_path(spec: str, *, base_dir: str | Path | None = None) -> Path:
     """Locate the source selected by a ``module-or-file:factory`` spec."""
     target, separator, _factory = spec.partition(":")

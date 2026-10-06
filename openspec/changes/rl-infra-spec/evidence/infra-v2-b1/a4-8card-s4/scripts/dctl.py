@@ -1,4 +1,4 @@
-# in-container helper for E1-D (5)/(7): python3 dctl.py marker | kill_then_up '<json request body>' 
+# in-container helper for E1-D (5)/(7): python3 dctl.py marker <rid> | kill_then_up <rid> '<json body>' | kill_after_tx <done rid> <next rid> '<json body>'
 import json, os, signal, subprocess, sys, time
 mode = sys.argv[1]; H = os.path.expanduser("~/yeto-rl"); SD = H + "/elastic-state"; TAPE = os.path.expanduser("~/yeto-output/rl-island-0.jsonl")
 log = open(H + "/dctl.log", "a")
@@ -30,6 +30,31 @@ if mode == "kill_then_up":  # (7): SIGKILL the learner after generate(rollout_id
     n0 = sum(1 for e in tape() if e.get("event") == "rl_driver_start")
     while sum(1 for e in tape() if e.get("event") == "rl_driver_start") < 2: time.sleep(0.3)
     L(event="second_driver_start")
+    seen = len(tape())
+    while True:
+        ev = tape()
+        if any(e.get("event") == "rl_driver_phase" and e.get("phase") == "train" for e in ev[seen:]): break
+        time.sleep(0.3)
+    submit(rid, body)
+
+if mode == "kill_after_tx":  # r7 (3.7 restart recovery): after <done rid> SUCCEEDED and the next generate, SIGKILL the learner (fork epoch -> 0
+    # while the journal says 1); the restart loop restarts it, the restart recovery rebuilds the members; then submit <next rid>
+    done_rid, rid, body = sys.argv[2], sys.argv[3], json.loads(sys.argv[4])
+    while not any(r.get("kind") == "phase" and r.get("phase") == "SUCCEEDED" and r.get("request_id") == done_rid for r in journal()): time.sleep(0.3)
+    L(event="tx_succeeded", rid=done_rid); seen = len(tape())
+    while True:
+        ev = tape()
+        if any(e.get("event") == "rl_driver_phase" and e.get("phase") == "generate" for e in ev[seen:]): break
+        time.sleep(0.3)
+    pids = [p for p in subprocess.run(["pgrep", "-f", "[y]eto.rl.learner"], capture_output=True, text=True).stdout.split()
+            if "python" in (os.path.realpath(f"/proc/{p}/exe") if os.path.exists(f"/proc/{p}/exe") else "")]
+    L(event="learner_pids", pids=pids)
+    for p in pids: os.kill(int(p), signal.SIGKILL)
+    L(event="killed", pids=pids)
+    while sum(1 for e in tape() if e.get("event") == "rl_driver_start") < 2: time.sleep(0.3)
+    L(event="second_driver_start")
+    while not any(r.get("kind") == "recovery" and r.get("status") in ("verified", "failed") for r in journal()): time.sleep(0.3)
+    L(event="recovery_finished", status=[r.get("status") for r in journal() if r.get("kind") == "recovery"])
     seen = len(tape())
     while True:
         ev = tape()

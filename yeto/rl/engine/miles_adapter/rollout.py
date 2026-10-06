@@ -27,6 +27,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
+from collections.abc import Mapping
+from types import SimpleNamespace
 
 from ..ports import GroupMetadata, RolloutBatchHandle
 from . import LoopRunner
@@ -101,6 +103,28 @@ INJECT_TOOL_WAIT_ENV = "YETO_RL_TEST_INJECT_TOOL_WAIT_S"
 # the old routing and the controller must end in RECOVERY_REQUIRED, never CANCELLED.
 INJECT_UNDRAIN_FAIL_ENV = "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"
 INJECTED_TOOL_WAIT_ID = "yeto-test-injected-tool-wait"
+# Test-only (A4bc / 3.3 X5 "no replay"): when set (any non-empty value; "1"
+# from the launcher), every execution of the injected tool is journaled in
+# ``<elastic state dir>/side_effects.jsonl`` (tool_wait.ToolSideEffectLog):
+# one ``tool_side_effect`` record *before* the tool wait starts, keyed by
+# (trajectory_id, tool_call_id). The judge requires exactly one record per
+# pair and none after the cancelled transaction's CANCELLED phase.
+SIDE_EFFECT_LOG_ENV = "YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG"
+SIDE_EFFECT_LOG_FILE = "side_effects.jsonl"
+
+
+def side_effect_log_enabled(environ: Any = None) -> bool:
+    import os
+
+    raw = (os.environ if environ is None else environ).get(SIDE_EFFECT_LOG_ENV)
+    return bool(raw) and str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+def injected_tool_call_id(members: frozenset[str]) -> str:
+    """Deterministic tool-call id of the injected tool for one drain of ``members``:
+    a replayed drain of the same members yields the *same* id (journaled twice =
+    replay), a drain of other members a different one."""
+    return f"{INJECTED_TOOL_WAIT_ID}:drain:{','.join(sorted(members))}"
 
 
 def injected_start_delay(environ: Any = None) -> float | None:
@@ -121,6 +145,32 @@ def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | No
     from .rollout_meta_hook import data_cursor as read_cursor
 
     return read_cursor(getattr(executor, "data_source", None))
+
+
+def seek_executor_cursor(executor: Any, cursor: Mapping[str, int]) -> dict[str, int] | None:
+    """Runs INSIDE the rollout executor actor (``__ray_call__``): move its data
+    source to ``cursor`` the way Miles' ``RolloutDataSource.load`` would (the
+    same four fields; re-shuffle for the cursor's epoch when the source
+    shuffles per epoch) and return the cursor it reports afterwards."""
+    from .rollout_meta_hook import _CURSOR_FIELDS
+    from .rollout_meta_hook import data_cursor as read_cursor
+
+    source = getattr(executor, "data_source", None)
+    source = getattr(source, "__self__", source)
+    if source is None:
+        raise RuntimeError("data cursor seek: the rollout executor has no data_source")
+    missing = [f for f in _CURSOR_FIELDS if f not in cursor]
+    if missing:
+        raise RuntimeError(f"data cursor seek: cursor lacks {missing}")
+    previous_epoch = getattr(source, "epoch_id", None)
+    for name in _CURSOR_FIELDS:
+        setattr(source, name, int(cursor[name]))
+    args = getattr(source, "args", None)
+    dataset = getattr(source, "dataset", None)
+    if (dataset is not None and getattr(args, "rollout_shuffle", False)
+            and int(cursor["epoch_id"]) != previous_epoch):
+        dataset.shuffle(int(cursor["epoch_id"]))
+    return read_cursor(source)[0]
 
 
 def arm_stop_failure_in_controller(controller: Any) -> str:
@@ -384,6 +434,7 @@ def handle_from_metadata(
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),
+        batch_summary=payload.get("batch_summary"),
     )
 
 
@@ -451,7 +502,14 @@ class MilesRolloutPool:
         gpus_per_engine: int | None = None,
         load_tool_wait: Any = None,
         harness: Any = None,
+        side_effect_log: Any = None,
     ) -> None:
+        # 3.3 X5 evidence: tool_wait.ToolSideEffectLog (or its path); None = off.
+        if side_effect_log is not None and not hasattr(side_effect_log, "record"):
+            from ..tool_wait import ToolSideEffectLog
+
+            side_effect_log = ToolSideEffectLog(side_effect_log)
+        self._side_effects = side_effect_log
         # rl-infra-spec 1.7 ToolWaitBoard (local or actor handle); None = no
         # tool-wait count, so trajectory_load() is unknown (None).
         self._tool_wait_board = tool_wait_board
@@ -542,6 +600,26 @@ class MilesRolloutPool:
             logger.warning("live data cursor unknown: the executor's data source reports no "
                            "complete cursor")
         return (None if cursor is None else dict(cursor)), length
+
+    def seek_data_cursor(self, cursor: Mapping[str, int]) -> dict[str, int] | None:
+        """Restart (driver ``_restore_data_cursor``): move the executor's data
+        source to the ledger's restart cursor, inside the executor's process
+        (same targets as ``live_data_cursor``); returns the cursor read back
+        there, None = unknown (the driver then refuses to train)."""
+        wanted = {k: int(v) for k, v in dict(cursor).items()}
+        kind, target = _executor_target(self._executor)
+        if kind == "local":
+            return seek_executor_cursor(SimpleNamespace(data_source=target), wanted)
+        if kind != "ray":
+            raise RuntimeError("data cursor seek: rollout executor %s is neither a local "
+                               "executor nor a Ray actor (handle)" % type(self._executor).__name__)
+        remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
+        if not callable(remote):
+            raise RuntimeError("data cursor seek: Ray actor handle %s has no __ray_call__"
+                               % type(target).__name__)
+        landed = self._run(_awaited(remote(seek_executor_cursor, wanted)))
+        self._last_cursor = None if landed is None else dict(landed)
+        return None if landed is None else dict(landed)
 
     def data_cursor(self) -> dict[str, int] | None:
         """4.2/4.4: the LIVE data cursor, None when it cannot be read (unknown;
@@ -866,6 +944,23 @@ class MilesRolloutPool:
         running = sorted(set(cells) & tracked)
         if running:
             raise MembershipPlanError(f"cells {running} are running; only stopped cells can be bound")
+        cross = bool(getattr(self._args, "yeto_rl_allow_cross_node_engine_tp", False))
+        for i, cell in enumerate(cells):  # rl-multinode-island D7: a cell never spans nodes by default
+            run = gpus[i * per:(i + 1) * per]
+            if not self._bundles.same_node(run):
+                # ruling 2026-10-04 v2: with the explicit opt-in a cross-node engine is one
+                # replica of WHOLE nodes (every node contributes all its GPUs)
+                if not cross:
+                    raise MembershipPlanError(f"cell {cell} target GPUs {list(run)} span nodes "
+                                              "(--rl-allow-cross-node-engine-tp lifts the default)")
+                g = int(self._bundles.gpus_per_node or 0)
+                counts: dict = {}
+                for gpu in run:
+                    node = self._bundles.node_of(str(gpu))
+                    counts[node] = counts.get(node, 0) + 1
+                if g and any(c != g for c in counts.values()):
+                    raise MembershipPlanError(f"cell {cell} target GPUs {list(run)} do not take whole "
+                                              f"{g}-GPU nodes (one cross-node replica = all its nodes)")
         info = self._bundles.view_for(gpus)
         manager = self._manager()
         self._bind_seq += 1
@@ -963,8 +1058,15 @@ class MilesRolloutPool:
 
     def _maybe_inject_tool_wait(self, members: frozenset[str]) -> None:
         """TEST ONLY (INJECT_TOOL_WAIT_ENV): count one artificial trajectory as waiting on
-        a tool for N seconds, so the drain's tool-wait condition holds that long."""
-        if self._inject_tool_wait is None or self.injected_tool_waits:
+        a tool for N seconds, so the drain's tool-wait condition holds that long.
+
+        The injected tool *executes* on every drain call (its external side effect
+        = the ``tool_side_effect`` record written before the board entry, when a
+        side-effect log is configured). It is not re-armed while its previous
+        execution is still waiting: a second drain of the same members during
+        that wait is journaled (the replay evidence) but ``applied`` is False.
+        """
+        if self._inject_tool_wait is None:
             return
         import sys
         import threading
@@ -973,6 +1075,14 @@ class MilesRolloutPool:
 
         seconds = self._inject_tool_wait
         self.injected_tool_waits.append(seconds)
+        call_id = injected_tool_call_id(members)
+        attempt = len(self.injected_tool_waits)
+        if self._side_effects is not None:
+            try:
+                self._side_effects.record(INJECTED_TOOL_WAIT_ID, call_id, seconds=seconds,
+                                          target_members=sorted(members), attempt=attempt)
+            except Exception as exc:  # noqa: BLE001 - evidence must not break the drain
+                print(f"[yeto] side-effect log write failed: {exc!r}", file=sys.stderr, flush=True)
         applied, error = False, None
         if self._tool_wait_board is None:
             error = "no ToolWaitBoard"
@@ -983,20 +1093,28 @@ class MilesRolloutPool:
             except Exception as exc:  # noqa: BLE001 - recorded: applied=false
                 error = repr(exc)
         print(f"[yeto] TEST INJECTION {INJECT_TOOL_WAIT_ENV}: tool-wait entry for {seconds}s "
-              f"during the drain of {sorted(members)} (applied={applied})",
+              f"during the drain of {sorted(members)} (applied={applied}, attempt={attempt})",
               file=sys.stderr, flush=True)
         if self.event_sink is not None:
             self.event_sink("test_injection", kind="tool_wait",
                             target_members=sorted(members), seconds=seconds, applied=applied,
+                            tool_call_id=call_id, attempt=attempt,
+                            side_effect_log=self._side_effects is not None,
                             **({"error": error} if error else {}))
         if applied:
             board = self._tool_wait_board
+            side_effects = self._side_effects
 
             def release() -> None:
                 try:
                     _resolve(_call(board, "exit", INJECTED_TOOL_WAIT_ID))
                 except Exception:  # noqa: BLE001 - board gone with the run
                     pass
+                if side_effects is not None:
+                    try:
+                        side_effects.complete(INJECTED_TOOL_WAIT_ID, call_id, attempt=attempt)
+                    except Exception:  # noqa: BLE001
+                        pass
 
             timer = threading.Timer(seconds, release)
             timer.daemon = True

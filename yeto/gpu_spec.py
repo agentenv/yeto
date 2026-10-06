@@ -28,6 +28,9 @@ _GPU_CANONICAL = {
     "a10g": "A10G",
     "l4": "L4",
     "l40s": "L40S",
+    # Verda (sky catalog names; sm_89 like L40S / Blackwell workstation)
+    "rtx-6000-ada": "RTX-6000-Ada",
+    "rtx-pro-6000": "RTX-PRO-6000",
     "h100": "H100",
     "h200": "H200",
     "b200": "B200",
@@ -97,3 +100,16 @@ def parse_gpu_spec(spec: str) -> list[ClusterSpec]:
             )
         )
     return clusters
+
+
+def require_min_nodes(spec: ClusterSpec, min_nodes: int) -> ClusterSpec:
+    """rl-multinode-island D8: refuse a learner island smaller than the recipe's
+    minimum node count (pure; returns the spec unchanged)."""
+    if isinstance(min_nodes, bool) or not isinstance(min_nodes, int) or min_nodes < 1:
+        raise ValueError("min_nodes must be a positive int")
+    if spec.num_nodes < min_nodes:
+        raise ValueError(
+            f"{spec} has {spec.num_nodes} node(s); this recipe/partition needs at least "
+            f"{min_nodes} node(s) of {spec.gpus_per_node}x{spec.gpu}"
+        )
+    return spec
