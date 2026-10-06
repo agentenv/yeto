@@ -1,0 +1,7 @@
+[cleanup 11:25:38] phase 1: STOP flag + kill process groups
+[cleanup 11:25:38] phase 1 done: no process for s12-h100-20261006a left
+[cleanup 11:25:38] phase 2: release (sky down by cluster name, modal app stop)
+[cleanup 11:25:50] phase 2 settle waited 0s
+[cleanup 11:25:57] check 1: clean (nebius project-e00eqrj3pr00622zrgdeyc/eu-north1, modal, sky, procs)
+[cleanup 11:27:03] check 2: clean (nebius project-e00eqrj3pr00622zrgdeyc/eu-north1, modal, sky, procs)
+[cleanup 11:27:03] RESULT: clean twice -> exit 0

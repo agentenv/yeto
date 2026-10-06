@@ -1,0 +1,122 @@
+{
+  "trainable": {
+    "pass": false,
+    "expected": {
+      "17074176": 4,
+      "16415744": 4
+    },
+    "seen": {},
+    "dedup_repeats": 0,
+    "exact_count": false
+  },
+  "lora_check": {
+    "pass": true,
+    "lines": []
+  },
+  "rollouts": {
+    "pass": true,
+    "seen": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "expected": 6
+  },
+  "finite": {
+    "pass": true,
+    "metrics": {
+      "0": {
+        "train/loss": 0.0,
+        "train/ppo_kl": -1.000444171950221e-09,
+        "train/grad_norm": 0.0,
+        "train/train_rollout_logprob_abs_diff": 0.03606637567281723
+      },
+      "1": {
+        "train/loss": 0.0,
+        "train/ppo_kl": 0.0,
+        "train/grad_norm": 0.0,
+        "train/train_rollout_logprob_abs_diff": 0.03648190200328827
+      },
+      "2": {
+        "train/loss": 0.0,
+        "train/ppo_kl": 0.0,
+        "train/grad_norm": 0.0,
+        "train/train_rollout_logprob_abs_diff": 0.036156367510557175
+      },
+      "3": {
+        "train/loss": 0.0,
+        "train/ppo_kl": 0.0,
+        "train/grad_norm": 0.0,
+        "train/train_rollout_logprob_abs_diff": 0.03649664670228958
+      },
+      "4": {
+        "train/loss": 0.0,
+        "train/ppo_kl": 0.0,
+        "train/grad_norm": 0.0,
+        "train/train_rollout_logprob_abs_diff": 0.036261189728975296
+      },
+      "5": {
+        "train/loss": 0.0,
+        "train/ppo_kl": 0.0,
+        "train/grad_norm": 0.0,
+        "train/train_rollout_logprob_abs_diff": 0.0359635204076767
+      }
+    }
+  },
+  "rewards": {
+    "pass": true,
+    "nonzero_grad_rounds": [],
+    "all_grad_zero": true,
+    "rollout": {
+      "0": {
+        "rollout/rewards": 0.0,
+        "rollout/truncated": 0.953125,
+        "rollout/response_lengths": 1000.828125
+      },
+      "1": {
+        "rollout/rewards": 0.0,
+        "rollout/truncated": 0.96875,
+        "rollout/response_lengths": 1013.78125
+      },
+      "2": {
+        "rollout/rewards": 0.0,
+        "rollout/truncated": 1.0,
+        "rollout/response_lengths": 1024.0
+      },
+      "3": {
+        "rollout/rewards": 0.0,
+        "rollout/truncated": 0.984375,
+        "rollout/response_lengths": 1020.15625
+      },
+      "4": {
+        "rollout/rewards": 0.0,
+        "rollout/truncated": 0.96875,
+        "rollout/response_lengths": 999.953125
+      },
+      "5": {
+        "rollout/rewards": 0.0,
+        "rollout/truncated": 0.96875,
+        "rollout/response_lengths": 999.03125
+      }
+    }
+  },
+  "logprob_diff": {
+    "pass": true,
+    "values": [
+      0.03606637567281723,
+      0.03648190200328827,
+      0.036156367510557175,
+      0.03649664670228958,
+      0.036261189728975296,
+      0.0359635204076767
+    ]
+  },
+  "load_keys": {
+    "pass": true,
+    "lines": []
+  },
+  "verdict": "FAIL"
+}

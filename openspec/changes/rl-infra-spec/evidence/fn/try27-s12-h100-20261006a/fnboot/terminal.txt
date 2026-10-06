@@ -1,0 +1,12 @@
+Warning: Permanently added '[localhost]:10022' (ED25519) to the list of known hosts.
+
+filesystem-skypilot-1  1.0T  372G  653G  37% /mnt/yeto-models
+index, memory.used [MiB]
+0, 0 MiB
+1, 0 MiB
+2, 0 MiB
+3, 0 MiB
+4, 0 MiB
+5, 0 MiB
+6, 0 MiB
+7, 0 MiB

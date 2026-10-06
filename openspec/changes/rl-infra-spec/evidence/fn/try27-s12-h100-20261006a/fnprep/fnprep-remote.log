@@ -1,0 +1,16 @@
+Warning: Permanently added '[localhost]:10022' (ED25519) to the list of known hosts.
+RUNTIME py=/opt/sglang/bin/python python3=/opt/sglang/bin/python3 torchrun=/opt/sglang/bin/torchrun miles=/root/miles megatron=/root/Megatron-LM
+PREFLIGHT_OK
+DF0 1099511627776 399152648192 700358979584
+FSTYPE virtiofs filesystem-skypilot-1
+FS_SIZE_G0 1024
+SNAPSHOT_BYTES 30520078752
+POPULATE already complete
+POPULATE_S 0
+DF1 1099511627776 399152648192 700358979584
+CONVERT already release
+CONVERT_S 0
+DF2 1099511627776 399152648192 700358979584
+TRACKER release
+TORCHDIST_BYTES 23390890947	/mnt/yeto-models/torch_dist/qwen3.8-flash-next-4layer_torch_dist
+FNPREP_OK

@@ -1,0 +1,29 @@
+[chain 2026-10-06T10:53:57Z] start s12-h100-20261006a code 72be54c2 prefer_l40s=0 cap=$150 d1_gpu=h100 (gpu-h100-sxm_8gpu-128vcpu-1600gb $30.8/h) fn_gpu=h100 (gpu-h100-sxm_8gpu-128vcpu-1600gb $30.8/h)
+[chain 2026-10-06T10:53:57Z] START_AT=fn: segs 1-2c skipped (D1 data already valid in s11-h200-20261005m/o); straight to the fn cluster
+Cluster(s) not found: [1ms12-h100-20261006a-h-l0-eu-north1[0m.
+Cluster(s) not found (tip: see `sky status`).
+[chain 2026-10-06T10:54:00Z] sky down s12-h100-20261006a-h-l0-eu-north1 rc=0
+[chain 2026-10-06T10:54:00Z] fn SKU: gpu-h100-sxm_8gpu-128vcpu-1600gb $30.8/h
+[chain 2026-10-06T10:54:02Z] fp_fn fn8s steps6: sha256:f70d5baffa871590366c1eb4164ea682b9947a050d79a6c2f9fc306dd61517e3
+[chain 2026-10-06T11:08:15Z] fnboot rc=3 rounds= spent~$7.3
+[chain 2026-10-06T11:08:19Z] fnboot boot-only: marker='FN_BOOT_ONLY_OK ref_load_present=true' cluster_up=1
+[chain 2026-10-06T11:08:52Z] fnprep FNPREP_OK {"rc":0,"ok":true,"fail":null,"snapshot_bytes":"30520078752","populate_s":"0","convert_s":"0","df0":"1099511627776399152648192700358979584","df1":"1099511627776399152648192700358979584","df2":"1099511627776399152648192700358979584","tracker":"release","torchdist_bytes":"23390890947\t/mnt/yeto-models
+[chain 2026-10-06T11:21:52Z] fna rc=0 rounds=6 spent~$14.29
+[chain 2026-10-06T11:21:52Z] fnconv disabled (FN_CONV=0; default 0 on FN_GPU=h100: TP2 PP4 ~45GB/rank + HF-load peak unverified on 80GB)
+Cluster(s) not found: [1ms12-h100-20261006a-l-l0-eu-north1[0m.
+Cluster(s) not found (tip: see `sky status`).
+[chain 2026-10-06T11:21:55Z] sky down s12-h100-20261006a-l-l0-eu-north1 rc=0
+Cluster(s) not found: [1ms12-h100-20261006a-h-l0-eu-north1[0m.
+Cluster(s) not found (tip: see `sky status`).
+[chain 2026-10-06T11:21:58Z] sky down s12-h100-20261006a-h-l0-eu-north1 rc=0
+
+
+Failed to delete security group vpcsecuritygroup-e00h4qmbbs519gfaw2 after 6 attempts: Request error FAILED_PRECONDITION: SecurityGroup vpcsecuritygroup-e00h4qmbbs519gfaw2 is used by compute instances: computeinstance-e00qaqh66cs45p24y9; request_id: d2c6533c-3ae9-43f8-b5b3-be3d9566974a; trace_id: a162c767324746da9ce918cce9f4823b; Caused by errors: 1. SecurityGroupFailedPrecondition in service VPC API 2. SecurityGroupFailedPrecondition in service VPC API. Leaving as orphan; clean up manually if needed.
+
+Terminating cluster s12-h100-20261006a-f-l0-eu-north1...done.
+Terminating 1 cluster ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+[chain 2026-10-06T11:23:20Z] sky down s12-h100-20261006a-f-l0-eu-north1 rc=0
+[chain 2026-10-06T11:25:37Z] cleanup1 rc=0 RESULT: clean twice -> exit 0
+[chain 2026-10-06T11:27:03Z] cleanup2 rc=0 RESULT: clean twice -> exit 0
+[chain 2026-10-06T11:27:07Z] sky status: s12-h100-20261006a-l-l0-eu-north1 / s12-h100-20261006a-h-l0-eu-north1 gone
+[chain 2026-10-06T11:27:07Z] estimated spend $14.34 (cap $150)

@@ -1,0 +1,8 @@
+usage: judge_qwen3_8_next_lora_log.py [-h] --num-gpus NUM_GPUS
+                                      [--rollouts ROLLOUTS] [--rank RANK]
+                                      [--expert-rank EXPERT_RANK]
+                                      [--eval-min EVAL_MIN]
+                                      [--adapter-restart] [--json JSON]
+                                      log
+judge_qwen3_8_next_lora_log.py: error: the following arguments are required: --num-gpus
+judge rc=2
