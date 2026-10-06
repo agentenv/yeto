@@ -71,9 +71,11 @@ def test_ep_group_spanning_nodes_legal():
     r = _req(trainer_gpus=16, rollout_gpus=8, gpus_per_engine=8, node_parallel=2, expert_parallel=8)
     assert r.trainer_shape() == (2, 8)
     assert _req(expert_parallel=4).trainer_shape() == (1, 8)
-    # ep=8 with tp=2 on 8 trainer GPUs: not a node rule but tp*cp*ep=16 > 8 -> refused
-    with pytest.raises(ValueError, match=r"expert parallel 8 needs trainer GPUs divisible by tp\*cp\*ep = 16"):
-        _req(expert_parallel=8)
+    # ep=8 with tp=2 on 8 trainer GPUs is legal (one replica = tp*cp*pp*ceil(ep/tp) = 8);
+    # ep=16 on 8 GPUs is refused (not a node rule)
+    assert _req(expert_parallel=8).trainer_shape() == (1, 8)
+    with pytest.raises(ValueError, match=r"expert parallel 16 needs trainer GPUs / pp"):
+        _req(expert_parallel=16)
 
 
 def test_tp_cp_not_dividing_node_rejected():

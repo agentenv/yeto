@@ -49,6 +49,17 @@ def test_gpu_spec_two_nodes_and_min_nodes():
         require_min_nodes(one, 0)
 
 
+def test_trainer_replica_gpus_ep_shares_ranks_with_dp():
+    # tp*cp*pp*max(1, ceil(ep*etp/tp)); etp defaults to 1
+    assert mn.trainer_replica_gpus({"tp": 1, "pp": 1, "ep": 2}) == 2          # M2: EP2 = 2 DP ranks
+    assert mn.trainer_replica_gpus({"tp": 1, "pp": 2}) == 2                    # M1: PP2
+    assert mn.trainer_replica_gpus({"tp": 2, "ep": 2}) == 2                    # EP inside the TP ranks
+    assert mn.trainer_replica_gpus({"tp": 2, "cp": 1, "pp": 2, "ep": 4}) == 8  # old tp*cp*ep*pp said 16
+    assert mn.trainer_replica_gpus({"tp": 2, "ep": 4, "etp": 2}) == 8
+    assert mn.trainer_replica_gpus({"tp": 4, "ep": 3}) == 4                    # ceil: never under-estimates
+    assert mn.trainer_replica_gpus({}) == 1
+
+
 def test_min_nodes_derivation():
     assert mn.min_nodes(trainer_min_gpus=2, rollout_min_gpus=8, standby_gpus=0, gpus_per_node=8) == 2
     assert mn.min_nodes(trainer_min_gpus=1, rollout_min_gpus=1, standby_gpus=0, gpus_per_node=8) == 1
@@ -140,10 +151,14 @@ def test_ep_and_pp_may_span_nodes_tp_stays_in_node():
     good["configs"]["T8R8S0"]["parallel"] = {"tp": 2, "pp": 1, "ep": 4}
     assert caps.parse_configs(good)["T8R8S0"].dims["ep"] == 4
     assert caps.parse_configs(good)["T8R8S0"].node_parallel == 2
-    # ep=8 with tp=2 over 8 trainer GPUs: tp*cp*ep=16 does not divide 8 (not a node rule)
+    # ep=8 with tp=2 over 8 trainer GPUs is legal (EP is carved out of the 8 attention
+    # ranks; one replica = tp*cp*pp*ceil(ep/tp) = 8); ep=16 over 8 GPUs is not
+    ok8 = copy.deepcopy(good)
+    ok8["configs"]["T8R8S0"]["parallel"] = {"tp": 2, "pp": 1, "ep": 8}
+    assert caps.parse_configs(ok8)["T8R8S0"].dims["ep"] == 8
     bad = copy.deepcopy(good)
-    bad["configs"]["T8R8S0"]["parallel"] = {"tp": 2, "pp": 1, "ep": 8}
-    with pytest.raises(ManifestError, match="expert parallel 8 needs trainer GPUs divisible by"):
+    bad["configs"]["T8R8S0"]["parallel"] = {"tp": 2, "pp": 1, "ep": 16}
+    with pytest.raises(ManifestError, match="expert parallel 16 needs trainer GPUs / pp"):
         caps.parse_configs(bad)
     # trainer across both nodes (16 GPUs, T16R8 on 3x8): PP2 and EP8 cross nodes -> legal
     base = _cfg({"trainer": list(range(16)), "rollout": [list(range(16, 24))], "standby": []}, nodes=3, gpus=_pool(3))
