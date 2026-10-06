@@ -54,3 +54,6 @@ yeto-hunyuan3d-export-batch = "yeto.diffusion.hunyuan3d_export:main"
 
 [tool.setuptools.packages.find]
 include = ["yeto*"]
+
+[tool.setuptools.package-data]
+"yeto.dashboard" = ["*.json", "static/*"]

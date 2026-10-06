@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import Any
 
 from ..wandb_logger import NullRun, WandbRun, init
@@ -63,6 +64,26 @@ _METRIC_ALIASES = {
     "eval/pass_rate": ("rl/eval/pass_at_1",),
 }
 
+# Ports-engine rl_local_round records carry bare top-level names (driver
+# ``_stats``); they are read only from that event's top level, never from
+# payloads, and only when the namespaced alias is absent (fleet-dashboard 1.4).
+_BARE_LOCAL_ROUND_ALIASES = {
+    "train/loss": ("loss",),
+    "train/pg_loss": ("pg_loss",),
+    "train/grad_norm": ("grad_norm",),
+    "train/train_rollout_kl": ("mean_kl",),
+    "train/ess_ratio": ("ess_ratio",),
+    "train/pg_clipfrac": ("clip_fraction",),
+    "train/lr": ("lr", "applied_lr"),
+    "rl/reward_mean": ("reward_mean",),
+    "rl/pass_rate": ("pass_rate",),
+}
+# ``train_metrics{}`` (Miles loss dict round means, fleet-dashboard D4) keys
+# become ``train/<key>``: plain metric-name keys with finite scalar values only.
+_TRAIN_METRIC_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{0,63}$")
+_TRAIN_STEP_ALIASES = (TRAIN_STEP_KEY, "train_step")
+_derived_step_logged = False
+
 _TRAIN_OUTPUTS = frozenset(key for key in _METRIC_ALIASES if key.startswith("train/"))
 _RL_OUTPUTS = frozenset(key for key in _METRIC_ALIASES if key.startswith("rl/"))
 _EVAL_OUTPUTS = frozenset(key for key in _METRIC_ALIASES if key.startswith("eval/"))
@@ -97,8 +118,9 @@ def _non_negative_step(event: dict[str, Any], aliases: tuple[str, ...]) -> int |
 def event_metrics(event: dict[str, Any]) -> dict[str, Any] | None:
     """Project one event onto the explicit scalar-only W&B surface."""
 
+    global _derived_step_logged
     event_name = event.get("event")
-    if event_name not in {"rl_local_round", "rl_eval_result"}:
+    if event_name not in {"rl_local_round", "rl_eval_result", "rl_round_trained"}:
         return None
 
     metrics = {
@@ -106,6 +128,24 @@ def event_metrics(event: dict[str, Any]) -> dict[str, Any] | None:
         for output, aliases in _METRIC_ALIASES.items()
         if (value := _finite_scalar(event, aliases)) is not None
     }
+    train_extra: dict[str, float] = {}
+    if event_name in ("rl_local_round", "rl_round_trained"):
+        if event_name == "rl_local_round":
+            for output, aliases in _BARE_LOCAL_ROUND_ALIASES.items():
+                if output not in metrics:
+                    value = _finite_scalar(event, aliases)
+                    if value is not None:
+                        metrics[output] = value
+        tm = event.get("train_metrics")
+        if isinstance(tm, dict):
+            for key, raw in tm.items():
+                if not isinstance(key, str) or not _TRAIN_METRIC_KEY.match(key):
+                    continue
+                value = _finite_scalar({key: raw}, (key,))
+                if value is not None:
+                    train_extra[f"train/{key}"] = value
+    if event_name == "rl_round_trained":
+        metrics = {}
     for key in ("rl/pass_rate", "eval/pass_rate"):
         value = metrics.get(key)
         if value is not None and not 0.0 <= value <= 1.0:
@@ -116,11 +156,21 @@ def event_metrics(event: dict[str, Any]) -> dict[str, Any] | None:
     else:
         for key in _TRAIN_OUTPUTS | _RL_OUTPUTS:
             metrics.pop(key, None)
-    train_step = _non_negative_step(event, (TRAIN_STEP_KEY,))
+    train_step = _non_negative_step(event, _TRAIN_STEP_ALIASES)
+    if train_step is None and event_name == "rl_local_round":
+        # ports path: Miles' optimizer step is not reported yet; the learner's
+        # local round is the closest monotone axis (fleet-dashboard 1.4).
+        train_step = _non_negative_step(event, ("local_round_id",))
+        if train_step is not None and not _derived_step_logged:
+            _derived_step_logged = True
+            log.info("train/step derived from local_round_id (event has no train_step)")
+    for key, value in train_extra.items():
+        metrics.setdefault(key, value)
+    train_outputs = _TRAIN_OUTPUTS | set(train_extra)
     if train_step is None:
-        for key in _TRAIN_OUTPUTS:
+        for key in train_outputs:
             metrics.pop(key, None)
-    elif any(key in metrics for key in _TRAIN_OUTPUTS):
+    elif any(key in metrics for key in train_outputs):
         metrics[TRAIN_STEP_KEY] = train_step
 
     round_step = _non_negative_step(event, _STEP_KEYS)

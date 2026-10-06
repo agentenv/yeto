@@ -4863,6 +4863,7 @@ class FleetController:
         no_recover=(),
         instance_guard=None,
         on_rename=None,
+        fleet_log=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -4917,6 +4918,23 @@ class FleetController:
         # name) | ("unknown", why) | None (not guarded).
         self.instance_guard = instance_guard
         self.on_rename = on_rename
+        # dashboard.fleet.FleetLog (fleet-dashboard 2.3): island lifecycle and
+        # periodic cost_tick into the run's fleet.jsonl; best-effort, optional.
+        self.fleet_log = fleet_log
+
+    def _fleet(self, kind: str, name: str | None = None, *, force: bool = False, **fields) -> None:
+        if self.fleet_log is None:
+            return
+        try:
+            if kind == "cost_tick":
+                if force:
+                    self.fleet_log.cost_tick()
+                else:
+                    self.fleet_log.maybe_tick()
+            else:
+                self.fleet_log.event(kind, name, **fields)
+        except Exception as e:  # noqa: BLE001 - telemetry never breaks supervision
+            print(f"[launcher] fleet.jsonl: {e}", file=sys.stderr)
 
     @staticmethod
     def _make_record(name, task, job_id):
@@ -4936,7 +4954,10 @@ class FleetController:
         Returns {learner name: final status string}; raises RuntimeError
         (after downing the syncer) if every learner was abandoned.
         """
+        for name in self.learners:
+            self._fleet("island_ready", name, initial=True)
         while True:
+            self._fleet("cost_tick")
             if self.syncer is not None:
                 self._poll(self.syncer, is_syncer=True)
             elif self.syncer_probe is not None:
@@ -4948,6 +4969,10 @@ class FleetController:
             self._check_stall()
             self.ops.sleep(self.poll_interval)
         exit_codes = {name: rec["exit"] for name, rec in self.learners.items()}
+        for name, rec in self.learners.items():
+            if rec["state"] == DONE:
+                self._fleet("island_stop", name, reason=str(rec["exit"]))
+        self._fleet("cost_tick", force=True)
         print(f"[launcher] learner jobs finished: {exit_codes}")
         if not any(rec["state"] == DONE for rec in self.learners.values()):
             if self.syncer is not None:
@@ -5122,6 +5147,8 @@ class FleetController:
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
         rec["state"] = RECOVERING
         rec["failed_at"] = self.ops.now()
+        if not is_syncer:
+            self._fleet("island_lost", rec["name"], reason=str(reason))
         # Fixed-roster RL: the recovery budget is cumulative over relaunches
         # (an island that fails again right after every relaunch must not be
         # relaunched forever while the rest of the fleet waits on the syncer).
@@ -5175,6 +5202,8 @@ class FleetController:
                     f"[launcher] {rec['name']} recovered: relaunched as job "
                     f"{attempt.result}"
                 )
+                if not is_syncer:
+                    self._fleet("island_ready", rec["name"], relaunched=True)
                 if self.on_relaunch is not None:
                     self.on_relaunch(rec["name"], attempt.result)
                 return
@@ -5271,6 +5300,7 @@ class FleetController:
 
     def _abandon(self, rec, elapsed: float, reason: str | None = None) -> None:
         rec["state"] = ABANDONED
+        self._fleet("island_stop", rec["name"], reason=f"abandoned: {reason or ''}".strip())
         rec["exit"] = (f"ABANDONED ({reason}) after {elapsed:.0f}s" if reason
                        else f"ABANDONED after {elapsed:.0f}s")
         attempt = rec.get("attempt")
@@ -6088,6 +6118,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             no_recover=verda["no_recover"] if verda else (),
             instance_guard=verda["guard"] if verda else None,
             on_rename=_rename_hook(clusters, on_clusters, [] if head_mode else [syncer_cluster]),
+            fleet_log=_dashboard_fleet_log(args, tasks, results),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -6334,6 +6365,20 @@ def _write_run_manifest(args) -> dict | None:
     except OSError as e:
         print(f"[launcher] could not write the run manifest: {e}", file=sys.stderr)
     return manifest
+
+
+def _dashboard_fleet_log(args, tasks, results):
+    """fleet-dashboard 2.3: the run's ``fleet.jsonl`` writer, or None if it
+    cannot be built (never blocks a launch)."""
+    try:
+        from . import runs
+        from .dashboard.fleet import from_env
+
+        return from_env(runs.run_dir(args.cluster_prefix) / "fleet.jsonl",
+                        {name: tasks[name] for name in results})
+    except Exception as e:  # noqa: BLE001
+        print(f"[launcher] fleet.jsonl disabled: {e}", file=sys.stderr)
+        return None
 
 
 def _no_sync_events_dir(args) -> Path:
