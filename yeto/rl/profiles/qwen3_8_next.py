@@ -546,6 +546,38 @@ PORTS_PROVIDER_PATH = (
 PORTS_DROPPED_FLAGS = frozenset({"--lora-type", "--lora-base-cpu-backup"})
 
 
+# scripts/run_qwen3_8_next.py perf / serving / health flags the validated runs used
+# (perf_args, sglang_args, misc_args).  The ports renderer either omits these or
+# emits a different default; the recipe pins the historical values so the ports
+# argv matches what ran on GPUs (differences: infra-drafts/FN-A-PRELAUNCH-REVIEW.md).
+PORTS_RUNTIME_ARGS: tuple[str, ...] = (
+    "--recompute-granularity", "full",
+    "--recompute-method", "uniform",
+    "--recompute-num-layers", "1",
+    "--micro-batch-size", "1",
+    "--max-tokens-per-gpu", "8192",
+    "--train-memory-margin-bytes", str(3 * 1024**3),
+    "--update-weight-buffer-size", str(1 * 1024**3),
+    # the script sets no --attention-backend (Megatron default auto); the ports
+    # renderer would emit flash for the full-attention layers
+    "--attention-backend", "auto",
+    "--sglang-chunked-prefill-size", "8192",
+    "--sglang-disable-radix-cache",
+    "--router-health-success-threshold", "1",
+    "--router-health-check-interval-secs", "15",
+    "--router-health-failure-threshold", "40",
+    "--rollout-health-check-interval", "300",
+    "--rollout-health-check-timeout", "300",
+    "--distributed-timeout-minutes", "60",
+)
+# env the script exports into the Ray runtime env (extra_env_vars)
+PORTS_RUNTIME_ENV = {
+    "SGLANG_HEALTH_CHECK_TIMEOUT": "120",
+    "SGLANG_DISABLE_MULTIMEM_AG": "1",
+    "TORCHINDUCTOR_COMPILE_THREADS": "1",
+}
+
+
 def ports_recipe_argv(variant: str, *, lora_rank: int, lora_expert_rank: int | None = None,
                       lora_dropout: float = 0.0) -> tuple[str, ...]:
     """Model + native-LoRA flags for the ports path (fixed partition, no colocate)."""
@@ -576,6 +608,7 @@ def ports_recipe_argv(variant: str, *, lora_rank: int, lora_expert_rank: int | N
         "--sglang-max-lora-rank", str(lora_rank),
         "--sglang-linear-attn-prefill-backend", "flashinfer",
         "--sglang-moe-runner-backend", "triton",
+        *PORTS_RUNTIME_ARGS,
     )
 
 

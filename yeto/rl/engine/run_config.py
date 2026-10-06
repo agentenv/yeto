@@ -184,6 +184,9 @@ class TrainableConfig:
     # Training-time LoRA dropout (ports only; --rl-lora-dropout). The exported
     # adapter / canonical LoRA config keep dropout 0 (inference is unaffected).
     lora_dropout: float = 0.0
+    # Routed-expert LoRA rank r_e (Flash-Next native recipe only; --rl-lora-expert-rank).
+    # None outside that recipe; the recipe defaults it to the profile's value.
+    lora_expert_rank: int | None = None
 
     @property
     def routed_expert_lora(self) -> bool:
@@ -675,6 +678,13 @@ def resolve_rl_run_config(
     elif fn_variant is not None:
         if parameter_mode != "lora":
             raise ValueError("the Qwen3.8-Flash-Next recipe is LoRA-only")
+        if getattr(args, "megatron_ref_load", None) is None:
+            # --megatron-to-hf-mode raw loads a Megatron torch_dist checkpoint, not
+            # the HF snapshot (run_qwen3_8_next.py: --ref-load <ckpt>/<type>_torch_dist).
+            raise ValueError(
+                "the Qwen3.8-Flash-Next recipe needs --megatron-ref-load "
+                "<dir>/<megatron_model_type>_torch_dist (raw mode cannot load the HF snapshot)"
+            )
         recipe_name, attention_backend = RECIPE_QWEN3_8_NEXT, "flash"
     elif qwen35_recipe:
         recipe_name, attention_backend = RECIPE_QWEN3_5, "flash"
@@ -820,6 +830,7 @@ def resolve_rl_run_config(
             parameter_mode=parameter_mode,
             lora_rank=args.lora_r,
             lora_dropout=_lora_dropout(args, parameter_mode),
+            lora_expert_rank=_lora_expert_rank(args, recipe_name),
             lora_targets=args.lora_targets,
             target_modules=tuple(target_modules),
             expert_full_count=expert_full_count,
@@ -954,6 +965,24 @@ def _rollout_cell_names(args, dedicated_rollout_gpus) -> tuple[str, ...]:
     if not names:
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the cell names)")
     return names
+
+
+def _lora_expert_rank(args, recipe_name: str) -> int | None:
+    value = getattr(args, "rl_lora_expert_rank", None)
+    if recipe_name != RECIPE_QWEN3_8_NEXT:
+        if value is not None:
+            raise ValueError("--rl-lora-expert-rank only applies to the Qwen3.8-Flash-Next recipe")
+        return None
+    if value is None:
+        from yeto.rl.profiles.qwen3_8_next import Qwen38NextLoraProfile
+
+        value = Qwen38NextLoraProfile.lora_expert_rank  # profile default (8)
+    value = int(value)
+    if not 0 <= value <= args.lora_r:
+        raise ValueError(
+            f"--rl-lora-expert-rank must satisfy 0 <= r_e <= --lora-r ({value} vs {args.lora_r})"
+        )
+    return value
 
 
 def _lora_dropout(args, parameter_mode: str) -> float:
