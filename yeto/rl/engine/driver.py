@@ -367,6 +367,7 @@ class IslandDriver:
         clock: Callable[[], float] = time.monotonic,
         controller: Any = None,
         ledger: Any = None,
+        elastic_hook: Any = None,
     ) -> None:
         self.learner_id = int(learner_id)
         self.rollout = rollout
@@ -401,6 +402,9 @@ class IslandDriver:
         self.fault_injection = load_fault_injection()
         self.controller = controller
         self.ledger = ledger
+        # D1/D2 wiring (6.5, d2-wire): optional ``elastic.ElasticHook``; None keeps
+        # the safe point exactly as before (no event, no read, no decision).
+        self.elastic_hook = elastic_hook
         # Failure-path node-loss attribution (tasks 3.3): how long a failed
         # round waits for the controller to confirm a lost node before the
         # original error is re-raised; ``sleep`` is injectable for tests.
@@ -415,7 +419,11 @@ class IslandDriver:
 
     # -- events ----------------------------------------------------------
     def emit(self, event: str, **fields: Any) -> None:
-        self.events.append({"event": event, **fields})
+        record = {"event": event, **fields}
+        self.events.append(record)
+        feed = getattr(getattr(self, "elastic_hook", None), "feed", None)
+        if self.observe and callable(feed):
+            feed(record)  # D2: in-memory mirror, independent of the tape path
 
     def phase(self, name: str, **fields: Any) -> None:
         if self.observe:
@@ -1158,6 +1166,10 @@ class IslandDriver:
         poll = getattr(self.controller, "poll_commands", None)
         if callable(poll):
             poll()
+        if self.elastic_hook is not None:
+            # recommend: record a suggestion; auto: AutoController.step -> the same
+            # controller.request entry, executed below in this very safe point.
+            self.elastic_hook.at_safe_point(self, rollout_id)
         if not self.controller.has_pending() and not self.controller.recovery_required:
             return None
         epoch_before = self.config_epoch

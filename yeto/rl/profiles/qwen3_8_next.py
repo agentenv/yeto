@@ -472,3 +472,62 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---- D1/D2 elastic declaration (rl-infra-spec 6.5 wiring, d2-wire) ---------------
+# DATA ONLY.  Declares the candidate fixed configs and the rollout elastic edges
+# for the Flash-Next target shape (multi-node H200, native LoRA, MoE EP).  Nothing
+# here certifies anything: ``ElasticHook`` intersects ``declared_edges`` with the
+# runtime attestation's ``certified_edges`` and an uncertified edge is never
+# selectable (controller.plan refuses it as well).
+ELASTIC_EDGE_KIND = "rollout-only"
+
+
+def flash_next_execution_profile(algorithm: object | None = None, *,
+                                 execution_mode: str = "partitioned-serial"):
+    """The ExecutionProfile whose ``contract_hash`` keys windows, recommendations
+    and the 5.7 cost table rows for this model.  Bound to ``algorithm`` (an
+    ``AlgorithmSpec``) when given; the driver refuses an unbound profile."""
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+
+    profile = ExecutionProfile(name=f"{PROFILE_NAME_FULL}-elastic", execution_mode=execution_mode,
+                               outer_protocol="none")
+    return profile.bind_algorithm(algorithm) if algorithm is not None else profile
+
+
+PROFILE_NAME_FULL = "qwen3_8_next_full_lora"
+
+
+def flash_next_elastic_declaration(*, nodes: int = 4, gpus_per_node: int = 8,
+                                   trainer_gpus: int = 16, gpu: str = "H200") -> dict:
+    """Candidate fixed configs + declared rollout edges for the full model.
+
+    The trainer keeps the validated full-model layout (TP2 PP8 EP=trainer/PP, ETP1)
+    on ``trainer_gpus``; rollout engines are 8-GPU SGLang TP8/EP8 replicas; the
+    rest of the pool is standby.  Edges only add/remove whole engine replicas
+    (same trainer, same engine shape, same pool size), both directions.
+    """
+    from yeto.rl.elastic_benchmark.capabilities import ResourceConfig
+
+    total = nodes * gpus_per_node
+    engine = 8
+    pp, tp = 8, 2
+    if trainer_gpus % (tp * pp) or trainer_gpus >= total:
+        raise ValueError("trainer_gpus must be a multiple of TP*PP=16 and leave rollout GPUs")
+    parallel = (("tp", tp), ("pp", pp), ("cp", 1), ("ep", trainer_gpus // pp))
+    configs = {}
+    for engines in range(1, (total - trainer_gpus) // engine + 1):
+        rollout = engines * engine
+        standby = total - trainer_gpus - rollout
+        name = f"FN-T{trainer_gpus}R{rollout}S{standby}"
+        configs[name] = ResourceConfig(name, trainer_gpus, rollout, standby, parallel=parallel,
+                                       rollout_engine_gpus=engine)
+    names = list(configs)
+    edges = frozenset((a, b) for a, b in zip(names, names[1:])) | \
+        frozenset((b, a) for a, b in zip(names, names[1:]))
+    return {
+        "model": MODEL_NAMES["full"], "gpu": gpu, "nodes": nodes, "gpus_per_node": gpus_per_node,
+        "trainable": "lora", "moe_ep": trainer_gpus // pp, "rollout_engine_gpus": engine,
+        "configs": configs, "declared_edges": edges, "edge_kind": ELASTIC_EDGE_KIND,
+        "initial_config": names[0],
+    }

@@ -345,7 +345,8 @@ def test_driver_rebuild_trainer_republishes_without_outer_effects(tmp_path):
         driver.rebuild_trainer(lambda: None, cut_policy_hash="x")
 
 
-def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", [None, "recommend"])
+def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch, mode):
     from tests.test_rl_engine_selection import NAME as SEL_NAME, _Actor, _Controller
     from tests.test_rl_miles_adapter_rollout import Call, Sample, Span
     from yeto.rl.core import canonical_state
@@ -404,7 +405,9 @@ def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
     runner = LoopRunner()
     driver = compose_island(
         miles_args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True,
-                                   offload_rollout=False),
+                                   offload_rollout=False, num_rollout=2,
+                                   **({"yeto_rl_recommend_mode": mode} if mode else {})),
+        observe=mode is not None,
         launch=SimpleNamespace(placement=PlacementRequest("colocated", 1, 1, 1)),
         algorithm=AlgorithmSpec(), inference_controller=controller, rollout_executor=Executor(),
         actor_model=actor, learner_id=0, base_model_revision="0" * 40,
@@ -423,6 +426,9 @@ def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
     )
     assert isinstance(driver.placement, ElasticPlacement)
     assert driver.controller is elastic.controller and driver.ledger is elastic.ledger
+    # D2: --rl-recommend-mode builds the hook (None keeps the island unchanged)
+    assert (driver.elastic_hook is None) == (mode is None)
+    assert elastic.controller.recommend_mode == (mode or "disabled")
     assert elastic.controller.inspect().members == ("engine:c0",)
     driver.run()
     runner.close()
@@ -434,6 +440,9 @@ def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch):
     # no attestation: every transition is refused (fail closed)
     with pytest.raises(Exception, match="attestation"):
         elastic.controller.plan("T1R2S0", 0, deadline_s=60)
+    if mode:
+        assert any(e["event"] == "rl_elastic_recommendation" for e in map(
+            __import__("json").loads, (tmp_path / "events.jsonl").read_text().splitlines()))
     elastic.controller.close()
     elastic.ledger.close()
 

@@ -1415,6 +1415,10 @@ class IslandController:
         mode = getattr(mode, "value", mode)
         if mode not in RECOMMEND_MODES:
             raise Rejected(f"unknown recommend mode {mode!r}")
+        if mode == "auto" and not getattr(self.attestation, "auto_controller", False):
+            # D2: auto needs the runtime to declare capabilities.auto_controller
+            raise Rejected("auto mode refused: the capability attestation does not declare "
+                           "auto_controller")
         previous, self.recommend_mode = self.recommend_mode, mode
         if previous != mode:
             self._record("recommend_mode", tx_id=None, previous=previous, mode=mode, reason=reason)
