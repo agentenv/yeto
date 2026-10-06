@@ -69,3 +69,11 @@
   - logprob 对照的是基座模型在不同卡和 TP 形状下的数值差异，不是各配置训练后的策略；
   - FN 阶段 A 测不到 full 模型的加载时间（见 FN-A-PRELAUNCH-REVIEW §1）；
   - `--sglang-enable-deterministic-inference` 与 GDN 能否共存，只能在真机上看。
+
+## e1 单节点缺陷：现象/定因/修复/测试（S11 H100，run s11-h200-20261005m-e1）
+
+- **现象**：1×8 H100、岛分配 GPU 0–3（`--rl-island-use-gpus-per-node 4`，resources-1x4-h200.json）。sweep 四个 run 正常；e1 的 up1（T2R1S1→T2R2S0）wait_safe/drain/init/VERIFYING 均通过，COMMITTED 后 RESUMING 立即 RECOVERY_REQUIRED：`placement bookkeeping failed after commit: rollout GPUs ['n0:2', 'n0:3'] are outside the pool`，rc=4。随后 launcher 判定 job FAILED，即使带 `--keep` 也拆掉了集群；链在 c17 前报 "cluster not UP"，停止。
+- **定因**（类别 (c)，与 gpu_pool 对账、资源文件索引都无关）：`ElasticPlacement._resolve_one` 只有在 `gpus_per_node` 不为空时才把配置里写的 `n<k>:<g>` 槽位解析成 `bundle<b>`。单节点不传 `--rl-island-gpus-per-node`，`MilesPlacementSpec.topology` 为 None，entry.py 传进来的 `gpus_per_node=None`，于是 `n0:2`/`n0:3` 按原字符串保留，与 pool（`bundle0..3`）比对时被判为 pool 外。M3（2×2）有拓扑，所以能通过。CPU 回放的 sweep 不做 reconfigure，所以碰不到这条路径。
+- **修复**（8443a8fd）：没有拓扑时，岛只有一个节点，`n0:<g>` 直接解析为逻辑 bundle g；`n<k≥1>:<g>` 照旧原样保留，由 pool 检查拒绝。多节点路径不变。
+- **测试**：`tests/test_rl_elastic_placement_resolve.py::test_single_node_island_resolves_n0_slots_without_topology`，使用真实的 resources-1x4-h200.json 跑 up、down、restore_committed。修复前失败，修复后通过。
+- **链**（b64ef992）：`START_AT=e1` 跳过 sweep，由 e1 负责 provision。某个 run 失败、集群被 launcher 拆掉后，下一步先把已拆集群的费用计入，再重新 provision；lp 改在 c17 之后跑。
