@@ -24,7 +24,8 @@ OBS="--rl-observe-timeline --rl-recommend-mode recommend${COSTS:+ --rl-edge-cost
 case $C in
   fn32s) GPU=nebius:4x8xh200@eu-north1; EX="--rl-placement fixed-partition --rl-rollout-gpus 8 --rl-standby-gpus 8 --rl-elastic --rl-elastic-resources $D/resources-fn-4x8.json --rl-elastic-initial-config FN-T16R8S8 $OBS";;
   fn32b) GPU=nebius:4x8xh200@eu-north1; EX="--rl-placement fixed-partition --rl-rollout-gpus 16 --rl-elastic --rl-elastic-resources $D/resources-fn-4x8.json --rl-elastic-initial-config FN-T16R16S0 $OBS";;
-  fn8s) GPU=nebius:1x8xh200@eu-north1
+  fn8s) case ${FN_GPU:-h200} in h100|h200) ;; *) echo "abort: FN_GPU must be h100|h200" >&2; exit 64;; esac
+        GPU=nebius:1x8x${FN_GPU:-h200}@eu-north1   # FN_GPU=h100: 80GB, see infra-drafts/FN-A-PRELAUNCH-REVIEW.md "H100 变体"
         MODEL="--model CharyZeng/Qwen3.8-Flash-Next-4layer --model-revision d19a6b60c0df8f90faf92c7c592b37df2e15b060 --rl-megatron-ref-load $TD/qwen3.8-flash-next-4layer_torch_dist"
         PAR="--tensor-parallel 2 --pipeline-parallel 2 --expert-parallel 4 --rollout-num-gpus-per-engine 4"
         EX="--rl-placement colocated --rl-offload-train --sglang-mem-fraction-static 0.7 --rl-observe-timeline";;

@@ -4,9 +4,10 @@ import pytest
 from test_rl_launcher_multinode import _GPU_DIR, _elastic_task, launcher
 
 
+@pytest.mark.parametrize("gpu", ["nebius:8xh200", "nebius:8xh100"])  # D1_GPU=h100 reuses resources-1x4-h200.json
 @pytest.mark.parametrize("cfg,ro,sb,shape", [("T2R1S1", 1, 1, (1, 2)), ("T2R2S0", 2, 0, (1, 2)), ("T1R3S0", 3, 0, (1, 1))])
-def test_h200_single_node_alloc4(monkeypatch, tmp_path, cfg, ro, sb, shape):
-    a, s, t = _elastic_task(monkeypatch, tmp_path, "nebius:8xh200", _GPU_DIR / "resources-1x4-h200.json", cfg,
+def test_h200_single_node_alloc4(monkeypatch, tmp_path, gpu, cfg, ro, sb, shape):
+    a, s, t = _elastic_task(monkeypatch, tmp_path, gpu, _GPU_DIR / "resources-1x4-h200.json", cfg,
                             rollout=ro, standby=sb, extra=("--rl-island-use-gpus-per-node", "4"))
     island = launcher.rl_island_spec(a, s)
     assert island.gpus_per_node == 4 and s.gpus_per_node == 8
