@@ -19,10 +19,14 @@ One shard per rank holds (4.1 audit, ``cut-audit.md``):
   (``capture_rng_state``; restored exactly -- same-shape only);
 * Megatron global counters (``iteration``, ``consumed_train_samples``) when present.
 
-Same-shape only (E2): the shard coordinate (tp, pp, dp, dp_size) must match
-on restore. Refused like fork-M5: fp16 (loss-scaler state not saved),
-precision-aware optimizer, partial DistOpt instances, CP>1, EP>1, and a
-trainer without LoRA adapters. torch / miles are imported lazily.
+Same-shape only (E2): the shard coordinate (tp, pp, dp, sizes; with EP>1 also
+ep, etp_size, edp, edp_size) must match on restore, and a range-tagged
+(DistributedOptimizer) shard is written back only onto identical per-parameter
+ranges of the rebuilt optimizer -- no peer shard is read (TP/PP>1 and EP>1
+included). Refused like fork-M5: fp16 (loss-scaler state not saved),
+precision-aware optimizer, partial DistOpt instances, CP>1, and a trainer
+without LoRA adapters; the DP-resharding restore also refuses EP>1 and
+TP/PP>1 with DistOpt. torch / miles are imported lazily.
 """
 
 from __future__ import annotations
@@ -70,6 +74,7 @@ class MilesCutBackend:
             "tp": ps.tp.rank, "pp": ps.pp.rank, "dp": ps.intra_dp.rank, "dp_size": ps.intra_dp.size,
             "tp_size": ps.tp.size, "pp_size": ps.pp.size,
             "cp_size": ps.cp.size, "ep_size": ps.ep.size,
+            **_expert_coord(ps),
         }
 
     def named_parameters(self, model: Any) -> list[tuple[str, Any]]:
@@ -127,6 +132,21 @@ class MilesCutBackend:
         margs = get_args()
         for key, value in counters.items():
             setattr(margs, key, int(value))
+
+
+def _expert_coord(ps: Any) -> dict[str, int]:
+    """EP coordinates for the same-shape check (only when EP>1: older cuts stay comparable)."""
+    if int(ps.ep.size) <= 1:
+        return {}
+    out = {"ep": int(ps.ep.rank), "etp_size": int(ps.etp.size)}
+    try:
+        from megatron.core import parallel_state as mpu
+
+        out["edp"] = int(mpu.get_expert_data_parallel_rank())
+        out["edp_size"] = int(mpu.get_expert_data_parallel_world_size())
+    except (ImportError, AttributeError, AssertionError, RuntimeError):
+        pass
+    return out
 
 
 def _state_dicts(optimizer: Any) -> list[Any]:
@@ -191,8 +211,17 @@ def _backend(actor: Any) -> Any:
 # --------------------------------------------------------------------------
 
 
-def config_problems(args: Any, coord: Mapping[str, int] | None = None) -> list[str]:
-    """Configurations whose trainer state a cut cannot carry (mirrors fork-M5's parse-time check)."""
+def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshard: bool = False) -> list[str]:
+    """Configurations whose trainer state a cut cannot carry (mirrors fork-M5's parse-time check).
+
+    Same-shape cut (default): TP/PP>1 with DistributedOptimizer and EP>1 are
+    carried -- every rank saves and restores only its own optimizer ranges
+    (dense and expert DP shards alike) and the post-restore republish gathers
+    full FP32 masters per optimizer leaf (state_plugin._collective_export,
+    fdf43c9c). ``reshard=True`` (DP-changing restore, 4.6) merges the DP shards
+    of one (tp, pp) and stays restricted: no EP>1 (expert parameters of
+    different EP ranks share names), no TP/PP>1 with DistributedOptimizer.
+    """
     out = []
     if getattr(args, "fp16", False):
         out.append("--fp16 keeps a dynamic loss-scaler state that the cut does not carry")
@@ -204,29 +233,28 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None) -> list[s
     ep = int((coord or {}).get("ep_size") or getattr(args, "expert_model_parallel_size", 1) or 1)
     tp = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
     pp = int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
-    if (tp > 1 or pp > 1) and getattr(args, "use_distributed_optimizer", False):
-        # The post-restore republish (state_plugin._collective_export) cannot
-        # expose DP-sharded masters under TP/PP; refuse before saving.
-        out.append("TP/PP>1 together with DistributedOptimizer-sharded masters is not supported")
+    if reshard and (tp > 1 or pp > 1) and getattr(args, "use_distributed_optimizer", False):
+        out.append("DP resharding with TP/PP>1 and DistributedOptimizer-sharded masters is not supported "
+                   "(same-shape cuts are)")
     if cp > 1:
         out.append("CP>1 is not supported")
-    if ep > 1:
-        out.append("EP>1 is not supported")
+    if reshard and ep > 1:
+        out.append("DP resharding with EP>1 is not supported (same-shape cuts are)")
     return out
 
 
-def _require(actor: Any, backend: Any) -> dict[str, int]:
+def _require(actor: Any, backend: Any, *, reshard: bool = False) -> dict[str, int]:
     coord = backend.coord()
-    problems = config_problems(actor.args, coord)
+    problems = config_problems(actor.args, coord, reshard=reshard)
     if getattr(actor, "optimizer", None) is None:
         problems.append("the trainer has no optimizer")
     if getattr(actor, "opt_param_scheduler", None) is None:
         problems.append("the trainer has no LR scheduler")
-    if not problems and (coord.get("tp_size", 1) > 1 or coord.get("pp_size", 1) > 1):
+    if reshard and not problems and (coord.get("tp_size", 1) > 1 or coord.get("pp_size", 1) > 1):
         from .state_plugin import distributed_ranges
 
         if distributed_ranges(actor.optimizer)[0]:
-            problems.append("TP/PP>1 together with DistributedOptimizer-sharded masters is not supported")
+            problems.append("DP resharding with TP/PP>1 and DistributedOptimizer-sharded masters is not supported")
     if problems:
         raise CutPluginError("ReconfigurationCut unsupported: " + "; ".join(problems))
     return coord
@@ -561,6 +589,50 @@ def _load_verified(directory: str, entry: Mapping[str, Any], cut_id: str) -> dic
     return shard
 
 
+def _is_ranged(state: Any) -> bool:
+    entries = (state or {}).get("entries") if isinstance(state, Mapping) else None
+    return bool(entries) and all(isinstance(e, Mapping) and {"start", "end", "numel", "tensors"} <= set(e)
+                                 for e in entries.values())
+
+
+def optimizer_ranges(state: Any) -> dict[str, tuple[int, int, int]]:
+    """{name: (start, end, numel)} of a range-tagged (fork-M5) optimizer export."""
+    return {n: (int(e["start"]), int(e["end"]), int(e["numel"])) for n, e in (state or {}).get("entries", {}).items()}
+
+
+def range_problems(saved: Any, fresh: Any) -> list[str]:
+    """Saved per-rank optimizer ranges vs the rebuilt optimizer's (fail closed on any difference)."""
+    a, b = optimizer_ranges(saved), optimizer_ranges(fresh)
+    out = [f"{n}: missing in the {'cut' if n not in a else 'rebuilt optimizer'}" for n in sorted(set(a) ^ set(b))]
+    out += [f"{n}: cut range {a[n]} != rebuilt {b[n]}" for n in sorted(set(a) & set(b)) if a[n] != b[n]]
+    return out
+
+
+def local_states(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """This rank's shard plus zero fillers for the ranges other DP ranks own.
+
+    The fork-M5 merge requires full coverage; the fillers satisfy it and are
+    never written (the loader slices exactly this rank's ``[start, end)``).
+    """
+    import torch
+
+    fillers: list[dict[str, Any]] = []
+    for name, e in state["entries"].items():
+        start, end, numel = int(e["start"]), int(e["end"]), int(e["numel"])
+        for lo, hi in ((0, start), (end, numel)):
+            if hi <= lo:
+                continue
+            piece = {**e, "start": lo, "end": hi,
+                     "tensors": {k: torch.zeros(hi - lo, dtype=v.dtype) for k, v in e["tensors"].items()}}
+            for filler in fillers:
+                if name not in filler["entries"]:
+                    filler["entries"][name] = piece
+                    break
+            else:
+                fillers.append({**{k: v for k, v in state.items() if k != "entries"}, "entries": {name: piece}})
+    return [dict(state)] + fillers
+
+
 def _peer_entries(files: list[Mapping[str, Any]], coord: Mapping[str, int]) -> list[Mapping[str, Any]]:
     """Other DP ranks' shards of this rank's (tp, pp)."""
     own = shard_name(coord)
@@ -671,11 +743,20 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
             raise CutPluginError(f"adapter {n!r} shape/dtype differs from the rebuilt trainer")
     if shard["optimizer_named"] is None or shard["rng"] is None:
         raise CutPluginError("cut shard lacks optimizer state or RNG")
-    # A DistributedOptimizer rank owns only a range of each parameter; the
-    # fork-M5 merge needs every DP shard of this (tp, pp) (shared cut dir).
-    states = [shard["optimizer_named"]]
-    for peer in _peer_entries(files, coord):
-        states.append(_load_verified(directory, peer, cut_id)["optimizer_named"])
+    if _is_ranged(shard["optimizer_named"]):
+        # Same shape: this rank writes back exactly the ranges it saved (FP32 main and
+        # moment shards of every DistOpt leaf -- dense and expert DP groups alike); no
+        # peer shard is read, so EP ranks never mix their same-named expert params.
+        fresh = backend.export_optimizer(actor.optimizer, named)
+        problems = range_problems(shard["optimizer_named"], fresh)
+        if problems:
+            raise CutPluginError("optimizer shard ranges differ from the rebuilt trainer (same-shape restore "
+                                 "only): " + "; ".join(problems[:4]))
+        states = local_states(shard["optimizer_named"])
+    else:
+        states = [shard["optimizer_named"]]
+        for peer in _peer_entries(files, coord):
+            states.append(_load_verified(directory, peer, cut_id)["optimizer_named"])
     # Validate against the rebuilt optimizer and scheduler before any write.
     merged = backend.check_optimizer(actor.optimizer, named, states)
     check_scheduler(actor.opt_param_scheduler, shard["scheduler"])
@@ -796,7 +877,7 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
     import torch
 
     backend = _backend(actor)
-    coord = _require(actor, backend)
+    coord = _require(actor, backend, reshard=True)
     group = _same_tp_pp(files, coord)
     if len(group) != source_dp:
         raise CutPluginError(f"cut has {len(group)} DP shards for tp{coord['tp']}/pp{coord['pp']}, expected {source_dp}")

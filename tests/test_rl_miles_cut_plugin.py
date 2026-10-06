@@ -124,11 +124,16 @@ def test_non_lora_trainable_parameters_are_refused(tmp_path):
         (SimpleNamespace(use_precision_aware_optimizer=True), "precision-aware"),
         (SimpleNamespace(num_distributed_optimizer_instances=2), "instances"),
         (SimpleNamespace(context_parallel_size=2), "CP>1"),
-        (SimpleNamespace(expert_model_parallel_size=2), "EP>1"),
     ],
 )
 def test_unsupported_configurations(args, match):
     assert any(match in p for p in config_problems(args))
+
+
+def test_ep_is_carried_by_same_shape_cuts_but_not_by_resharding():
+    args = SimpleNamespace(expert_model_parallel_size=2, use_distributed_optimizer=True)
+    assert not config_problems(args)
+    assert any("EP>1" in p for p in config_problems(args, reshard=True))
 
 
 def test_unsupported_configuration_fails_before_writing(tmp_path):
@@ -181,9 +186,12 @@ def test_scheduler_hyper_parameter_mismatch_is_refused_before_any_write(tmp_path
         assert torch.equal(v, params(fresh)[n])
 
 
-def test_tp_pp_with_distributed_optimizer_is_refused():
+def test_tp_pp_with_distributed_optimizer_is_refused_only_for_resharding():
     args = SimpleNamespace(tensor_model_parallel_size=2, use_distributed_optimizer=True)
-    assert any("DistributedOptimizer" in p for p in config_problems(args))
+    assert not config_problems(args)
+    assert any("DistributedOptimizer" in p for p in config_problems(args, reshard=True))
+    m4 = SimpleNamespace(pipeline_model_parallel_size=2, use_distributed_optimizer=True)  # M1/M4: PP2 DistOpt DP1
+    assert not config_problems(m4)
     assert not config_problems(SimpleNamespace(tensor_model_parallel_size=2))
     assert not config_problems(SimpleNamespace(use_distributed_optimizer=True))
 

@@ -103,7 +103,10 @@ def test_checkpoint_store_plan_bucket_uri_and_shared_path():
     assert launcher.rl_checkpoint_store_plan(SimpleNamespace()) is None
     assert launcher.rl_checkpoint_store_plan(SimpleNamespace(rl_checkpoint_store=None)) is None
     assert launcher.rl_checkpoint_store_plan(SimpleNamespace(rl_checkpoint_store="s3://bkt/run1/")) == (
-        launcher.ELASTIC_CHECKPOINT_STORE_MOUNT, "s3://bkt/run1")
+        launcher.ELASTIC_CHECKPOINT_STORE_MOUNT + "/run1", "s3://bkt")
+    # sky MOUNT accepts only a bucket root: nested prefix becomes a subdir of the mount
+    assert launcher.rl_checkpoint_store_plan(SimpleNamespace(rl_checkpoint_store="s3://bkt/a/b")) == (
+        launcher.ELASTIC_CHECKPOINT_STORE_MOUNT + "/a/b", "s3://bkt")
     assert launcher.rl_checkpoint_store_plan(SimpleNamespace(rl_checkpoint_store="gs://bkt")) == (
         launcher.ELASTIC_CHECKPOINT_STORE_MOUNT, "gs://bkt")
     assert launcher.rl_checkpoint_store_plan(SimpleNamespace(rl_checkpoint_store="/mnt/shared/run1/")) == (
@@ -125,10 +128,10 @@ def _two_node_elastic(monkeypatch, tmp_path, *extra, gpu="nebius:2x2xl40s"):
 
 def test_bucket_store_is_mounted_on_the_island_and_the_learner_gets_the_mount_path(monkeypatch, tmp_path, capsys):
     args, _spec, task = _two_node_elastic(monkeypatch, tmp_path, "--rl-checkpoint-store", "s3://bkt/run1")
-    assert f" --rl-elastic-checkpoint-store '{launcher.ELASTIC_CHECKPOINT_STORE_MOUNT}'" in task.run
+    assert f" --rl-elastic-checkpoint-store '{launcher.ELASTIC_CHECKPOINT_STORE_MOUNT}/run1'" in task.run
     mount = task.storage_mounts[launcher.ELASTIC_CHECKPOINT_STORE_MOUNT]
     assert "~/yeto-rl" in task.storage_mounts  # the spot completed-groups mount is kept alongside
-    assert mount.source == "s3://bkt/run1" and mount.mode == "mount" and mount.persistent is True
+    assert mount.source == "s3://bkt" and mount.mode == "mount" and mount.persistent is True
     assert "warning: --rl-checkpoint-store not set" not in capsys.readouterr().err
 
 

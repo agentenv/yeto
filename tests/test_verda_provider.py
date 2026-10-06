@@ -1219,3 +1219,23 @@ def test_pth_hook_falls_back_past_an_old_installed_yeto(tmp_path):
     r = subprocess.run([_sys.executable, "-c", prog], capture_output=True, text=True, cwd=tmp_path)
     assert r.returncode == 0 and "ok" in r.stdout, r.stderr
     assert "No module named" not in r.stderr, r.stderr
+
+
+def test_launch_retry_handles_any_of_overrides_from_the_launcher():
+    # Regression (verda-g0-20261004b): the launcher's build returns
+    # verda_any_of dicts ("infra", no "region"); a capacity failure crashed
+    # the retry loop with KeyError 'region' instead of retrying.
+    launches, sleeps = [], []
+    build = lambda avail, demoted: verda_any_of(  # noqa: E731
+        verda_candidates("L40S", 1, TYPES, avail, demoted=demoted), "L40S", 1)
+
+    def launch(cands):
+        launches.append([c["infra"] for c in cands])
+        if len(launches) == 1:
+            raise RuntimeError("ResourcesUnavailableError: No capacity available")
+        return "ok"
+
+    got = launch_with_verda_candidates(launch, lambda: {"FIN-01": ["1L40S.20V"]}, build,
+                                       base_delay=30, sleep=sleeps.append)
+    assert got == "ok" and sleeps == [30]
+    assert launches == [["verda/FIN-01"], ["verda/FIN-01"]]
