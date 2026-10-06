@@ -1567,10 +1567,13 @@ def cmd_sample_diffusion(args) -> int:
 # race them. Setup touches the marker only if every install succeeded; the
 # head job waits for it (bounded) before importing anything.
 HEAD_READY_MARKER = "~/.yeto_head_ready"
+# Pinned: yeto's runtime sky patches (yeto.sky_patches) are verified per
+# version, and the head must run the same sky the patches were checked on.
+HEAD_SKYPILOT_VERSION = "0.13.0"
 HEAD_SETUP_PIP = (
     # Every cloud a fleet can name (pyproject launcher extra) plus gcp for gs:// outputs;
     # without a cloud's extra, the head's sky reports that cloud as not enabled.
-    'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]>=0.12" && '
+    f'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]=={HEAD_SKYPILOT_VERSION}" && '
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
     "pip install -q cloudpickle transformers==5.13.0"
 )
@@ -1604,6 +1607,7 @@ def _make_head_task(args, extra_mounts: dict | None = None):
     uploads a non-Linux binary."""
     import sky
 
+    from . import launcher
     from .launcher import (
         HF_TOKEN_PATH,
         REPO_ROOT,
@@ -1641,6 +1645,17 @@ def _make_head_task(args, extra_mounts: dict | None = None):
     if getattr(args, "wandb", False):
         # The head tails the syncer's event tape into W&B (yeto.wandb_tape).
         head_pip += " && pip install -q wandb"
+    from .sky_patches import head_pth_command
+
+    # Load yeto's sky patches into every Python process on the head —
+    # including sky's API server, where provisioning actually runs.
+    head_pip += "\n" + head_pth_command()
+    if "verda" in fleet_clouds(args):
+        from .shape.providers import VERDA_HEAD_CATALOG_STEP
+
+        # Same full Verda catalog the submitter wrote (sky's hosted one
+        # is a stock snapshot).
+        head_pip += "\n" + VERDA_HEAD_CATALOG_STEP
     task = sky.Task(
         name="yeto-head",
         setup=(
@@ -1661,11 +1676,47 @@ def _make_head_task(args, extra_mounts: dict | None = None):
             infra=infra,
             cpus="8+",
             memory=f"{args.syncer_memory}+",
-            ports=[SYNCER_PORT],
+            ports=launcher.syncer_ports(args),
             use_spot=False,
         )
     )
+    if launcher.syncer_ports(args) is None:
+        # No security groups (Verda): firewall inside the VM, first thing.
+        task.setup = launcher.ufw_setup(SYNCER_PORT) + "\n" + task.setup
     return task
+
+
+PROBE_SUBMIT_JOIN_S = 30.0
+
+
+def _probe_head_port(cluster: str, head_ip: str) -> bool:
+    """Cloud without open_ports (Verda): before any island exists, prove
+    from this machine that the head's syncer port is reachable — a
+    one-shot listener job greets the probe (patched out in tests)."""
+    import sky
+
+    from . import launcher
+
+    listener = sky.Task(name="yeto-port-probe", run=launcher.probe_listener_command(launcher.SYNCER_PORT))
+    submit_error: list = []
+
+    def submit():
+        # Submitted in the background: whether stream_and_get returns at
+        # job submission or only when the listener exits (to be confirmed
+        # on a real head, 6.4), the probe below runs while it listens.
+        try:
+            sky.stream_and_get(sky.exec(listener, cluster_name=cluster))
+        except Exception as e:  # noqa: BLE001
+            submit_error.append(e)
+
+    t = threading.Thread(target=submit, daemon=True)
+    t.start()
+    ok, detail = launcher.tcp_probe(head_ip, launcher.SYNCER_PORT, expect=launcher.PROBE_BANNER)
+    t.join(PROBE_SUBMIT_JOIN_S)
+    if submit_error and not ok:
+        detail += f" (listener job failed: {submit_error[0]})"
+    print(f"[yeto] {cluster}: syncer port probe: {detail}", file=sys.stderr if not ok else sys.stdout)
+    return ok
 
 
 def _sky_launch_head(task, cluster: str):
@@ -1725,7 +1776,7 @@ def cmd_launch_head(args) -> int:
     from .gpu_spec import parse_gpu_spec
 
     name = args.cluster_prefix
-    head_cluster = f"{name}-head"
+    head_cluster = launcher.sky_cluster_name(f"{name}-head")
     specs = parse_gpu_spec(args.gpu)
     # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
     # pickle:<file> here, and the pickle is file-mounted onto the head.
@@ -1763,6 +1814,12 @@ def cmd_launch_head(args) -> int:
     print(f"[yeto] provisioning head cluster {head_cluster} in {args.syncer_region}")
     handle = _sky_launch_head(_make_head_task(args, data_mounts), head_cluster)
     head_ip = handle.head_ip
+    if launcher.syncer_ports(args) is None and not _probe_head_port(head_cluster, str(head_ip)):
+        print(f"[yeto] tearing down {head_cluster}: its syncer port is not reachable", file=sys.stderr)
+        if not _down_and_verify(head_cluster):
+            print(f"[yeto] {head_cluster}: NOT confirmed down — check the cloud console", file=sys.stderr)
+        runs.update_run(name, state=runs.FAILED, exit_code=1, finished_at=time.time())
+        return 1
     print(f"[yeto] head is up at {head_ip}; submitting the controller job")
 
     envs = {"SYNCER_PUBLIC_IP": str(head_ip)}
@@ -1850,7 +1907,7 @@ def cmd_head(payload: str) -> int:
         and delivery.is_remote(getattr(args, "output", None))
         and not getattr(args, "_teardown_incomplete", False)
     ):
-        delivery.self_terminate(f"{args.cluster_prefix}-head")
+        delivery.self_terminate(f"{args.cluster_prefix}-head".lower())
     return code
 
 
@@ -1871,10 +1928,25 @@ def cmd_worker(name: str) -> int:
     def record_clusters(names) -> None:
         runs.update_run(name, clusters=list(names))
 
+    def record_instance_ids(cluster, ids) -> None:
+        # Verda islands: the instance ids behind each cluster name, so a
+        # later recovery or `yeto down` can ask Verda by id.
+        meta = runs.load_run(name) or {}
+        known = dict(meta.get("verda_instance_ids") or {})
+        known[cluster] = list(ids)
+        runs.update_run(name, verda_instance_ids=known)
+
     from .launcher import run as launcher_run
 
     try:
-        code = launcher_run(args, on_clusters=record_clusters)
+        import inspect
+
+        extra = (
+            {"on_instance_ids": record_instance_ids}
+            if "on_instance_ids" in inspect.signature(launcher_run).parameters
+            else {}
+        )
+        code = launcher_run(args, on_clusters=record_clusters, **extra)
     except BaseException:
         import traceback
 
