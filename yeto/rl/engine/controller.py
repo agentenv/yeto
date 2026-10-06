@@ -108,9 +108,10 @@ class Rejected(ValueError):
 
 
 class TransactionFailed(RuntimeError):
-    def __init__(self, phase: str, message: str) -> None:
+    def __init__(self, phase: str, message: str, *, cause: str | None = None) -> None:
         super().__init__(f"{phase}: {message}")
         self.phase = phase
+        self.cause = cause  # failure class on the REBUILD_OLD record (None -> "other")
 
 
 class RecoveryRequired(RuntimeError):
@@ -433,7 +434,8 @@ class IslandController:
         tx = self._tx
         if tx is None or tx.tx_id != tx_id or self.recovery_required:
             return
-        self._enter_recovery(tx_id, f"watchdog could not kill the target generation in {phase}: "
+        self._enter_recovery(tx_id, cause="watchdog_unresolved",
+                             error=f"watchdog could not kill the target generation in {phase}: "
                                     f"{list(errors)[:2]!r}")
 
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
@@ -754,12 +756,49 @@ class IslandController:
         self.recovery_pending = None
         self.admission_open = True
 
-    def _enter_recovery(self, tx_id: str | None, error: str) -> None:
+    def _enter_recovery(self, tx_id: str | None, error: str, *, cause: str = "other") -> None:
+        """Island-level RECOVERY_REQUIRED (``scope=island``, ``request_id=None``), plus a
+        request-level terminal record for the transaction's request when ``tx_id`` is a
+        request transaction that has no terminal record yet (``scope=request``,
+        ``request_id=<id>``, ``cause``, ``island_record_seq`` -> the island record).
+
+        Revision (2026-10-02 user ruling, E1-D ④ chain 6r2): the island record alone left the
+        request (dn1) without a terminal record of its own; both are written now, with the
+        same error/epochs, so the request's status, the journal replay and the GPU judge
+        agree on one terminal state. ``cause`` names the failure class
+        (``stop_retry_deadline``, ``rebuild_old_failed``, ``watchdog_unresolved``, ...)."""
         self.recovery_required = error
         self.admission_open = False
-        self._record("phase", tx_id=tx_id, request_id=None, phase=RECOVERY_REQUIRED,
-                     config_epoch=self.journal.epochs.config_epoch, fork_epoch=self._fork_epoch,
-                     error=error)
+        epochs = {"config_epoch": self.journal.epochs.config_epoch, "fork_epoch": self._fork_epoch}
+        island = self._record("phase", tx_id=tx_id, request_id=None, phase=RECOVERY_REQUIRED,
+                              scope="island", cause=cause, error=error, **epochs)
+        request_id = self._request_of(tx_id)
+        if request_id is None or self._has_terminal(tx_id):
+            return
+        tx = self._tx if self._tx is not None and self._tx.tx_id == tx_id else None
+        deadline_wall = (tx.deadline_wall if tx is not None
+                         else self._by_request.get(request_id, {}).get("deadline_wall"))
+        if tx is not None:
+            with self._watchdog_lock:
+                tx.phase = RECOVERY_REQUIRED
+        self.last_outcome = {"tx_id": tx_id, "phase": RECOVERY_REQUIRED, "error": error, "cause": cause}
+        self._record("phase", tx_id=tx_id, request_id=request_id, phase=RECOVERY_REQUIRED,
+                     scope="request", cause=cause, error=error,
+                     island_record_seq=island.get("seq"), deadline_wall=deadline_wall,
+                     recovery_deadline_wall=(None if deadline_wall is None
+                                             else deadline_wall + self.timeouts.recovery),
+                     **epochs)
+
+    def _request_of(self, tx_id: str | None) -> str | None:
+        if tx_id is None:
+            return None
+        if self._tx is not None and self._tx.tx_id == tx_id:
+            return self._tx.request_id
+        return next((rid for rid, r in self._by_request.items() if r["tx_id"] == tx_id), None)
+
+    def _has_terminal(self, tx_id: str) -> bool:
+        return any(r["kind"] == "phase" and r.get("tx_id") == tx_id and r.get("request_id") is not None
+                   and r["phase"] in TERMINAL for r in self.journal.records)
 
     # ------------------------------------------------------------------ queries
     def inspect(self) -> IslandStatus:
@@ -1225,7 +1264,8 @@ class IslandController:
         while self._pending_retry is not None:
             op, cells = self._pending_retry
             if self._remaining(tx, recovery=recovery) <= 0:
-                raise TransactionFailed(tx.phase, f"retry of {op} {list(cells)} ran past the deadline")
+                raise TransactionFailed(tx.phase, f"retry of {op} {list(cells)} ran past the deadline",
+                                        cause=f"{op}_retry_deadline")
             members = frozenset(cells)
             try:
                 if op == "stop":
@@ -1618,7 +1658,11 @@ class IslandController:
             self._tx = None
             raise RecoveryRequired(self.recovery_required)
         detail = {"cause": cause, "inconsistent_engines": sorted(inconsistent_engines)}
-        self._phase(tx, REBUILD_OLD, error=error, **detail)
+        # 2026-10-02 ruling (E1-D ④): exactly one bounded REBUILD_OLD after the transaction
+        # deadline; its limit is deadline_wall + T_recovery, the transaction deadline itself
+        # is never reset or extended, and a second failure is RECOVERY_REQUIRED at once.
+        self._phase(tx, REBUILD_OLD, error=error, deadline_wall=tx.deadline_wall,
+                    recovery_deadline_wall=tx.deadline_wall + self.timeouts.recovery, **detail)
         try:
             self._retry_incomplete(tx, recovery=True)
             if tx.extra.get("started"):
@@ -1645,7 +1689,8 @@ class IslandController:
             if self._remaining(tx, recovery=True) <= 0:
                 raise TransactionFailed(REBUILD_OLD, "recovery budget spent")
         except Exception as exc:  # noqa: BLE001
-            self._enter_recovery(tx.tx_id, f"rebuild of the old engine set failed: {exc}")
+            self._enter_recovery(tx.tx_id, f"rebuild of the old engine set failed: {exc}",
+                                 cause="rebuild_old_failed")
             self._tx = None
             raise RecoveryRequired(self.recovery_required) from exc
         self._sync_fork_mirror()
