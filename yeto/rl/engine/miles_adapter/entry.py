@@ -679,6 +679,8 @@ def compose_island(
         _wire_trainer_rebuild(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
                               actor_model=actor_model, rollout_executor=rollout_executor,
                               runner=runner, base_model_revision=base_model_revision)
+        _wire_round_cuts(driver, elastic=elastic, miles_args=miles_args, algorithm=algorithm,
+                         base_model_revision=base_model_revision)
         if (getattr(miles_args, "yeto_rl_elastic", None) or {}).get("trainer_edges"):
             _wire_trainer_edges(driver, elastic=elastic, miles_args=miles_args, launch=launch,
                                 algorithm=algorithm, actor_model=actor_model,
@@ -686,6 +688,26 @@ def compose_island(
                                 base_model_revision=base_model_revision)
     holder["driver"] = driver
     return driver
+
+
+def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revision) -> None:
+    """rl-multinode-island M4: with a checkpoint store and no outer syncer, keep a round
+    cut in the store at every safe point and resume from it (round_cut module doc)."""
+    from .rebuild_wiring import CutSource
+    from .round_cut import wire_round_cuts
+
+    controller = elastic.controller
+    if getattr(controller, "checkpoint_store", None) is None:
+        return
+    ref_load = getattr(miles_args, "ref_load", None)
+    source = CutSource(
+        driver=lambda: driver, trainer=driver.trainer, rollout=driver.rollout, ledger=elastic.ledger,
+        algorithm=algorithm, backend_fingerprint=controller.runtime_fingerprint or "",
+        cut_root="", global_batch_size=int(miles_args.global_batch_size),
+        ref_model=(None if not ref_load
+                   else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
+    )
+    wire_round_cuts(driver, controller=controller, source=source)
 
 
 def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model,

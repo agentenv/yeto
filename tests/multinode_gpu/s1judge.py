@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """rl-multinode-island tasks §3 judge (criteria fixed before the runs; see tasks.md §3).
 usage: s1judge.py <run dir> <g0|g1|g2|g3|g4|m1|m2|m3>  -> prints and writes <run dir>/judgment-<case>.json
+       s1judge.py <m4a run dir> m4 <m4b run dir>          -> writes <m4b run dir>/judgment-m4.json
+m4 (machine replacement, S8-MATRIX-READINESS.md §4; criteria fixed before the runs): A = 2x2 island with --rl-checkpoint-store,
+  worker raylet killed at train rid>=2 -> node_lost; B = new cluster, same store, --rl-elastic-accept-rebind. PASS needs the
+  policy weights continued (journal round_cut action=restore + tape rl_round_cut_restored, rollout ids continue, not 0);
+  journal-only restore = PARTIAL. Stale-incarnation rejection cannot occur naturally (A is torn down first): CPU/sim only,
+  recorded as a note (PARTIAL(sim) sub-item, does not by itself lower a PASS of the GPU criteria).
 m1/m2/m3 (2x2 L40S, resources-2x2.json T2R1S1; criteria fixed before the runs, MULTINODE-GAP-S8.md §3, tasks.md §3.6-3.8):
   evidence files = pulled/journal.jsonl (controller journal: topology/gpu_pool/request/phase/add_intent records),
   pulled/rl-island-0.jsonl (tape: rl_driver_phase / rl_reconfiguration), pulled/apps-<node>.txt (nvidia-smi compute apps +
@@ -11,6 +17,11 @@ Verdicts: PASS | FAIL | PARTIAL (a sub-criterion is not verifiable on this spec,
 import json, os, re, sys, time
 
 R, CASE = sys.argv[1], sys.argv[2]
+A_DIR = None
+if CASE == "m4":  # s1judge.py <A run dir> m4 <B run dir>: evidence = B (judgment written to B), A read for the cross-checks
+    if len(sys.argv) < 4:
+        sys.exit("usage: s1judge.py <m4a run dir> m4 <m4b run dir>")
+    A_DIR, R = R, sys.argv[3]
 
 def read(name):
     p = os.path.join(R, name)
@@ -259,6 +270,83 @@ elif CASE == "m3":
     elif "dn1" not in reqs and all(checks[k] for k in ("up_request_T2R1S1_to_T2R2S0", "up_committed_once", "up_adds_cell_c1",
                                                       "engine_seen_on_worker_during_up", "no_recovery_required", "train_continues_after_up")):
         verdict = "PARTIAL"; notes.append("down edge never requested (resource/time limited): up edge judged, down edge PARTIAL")
+    else:
+        verdict = "PASS" if all(checks.values()) else "FAIL"
+elif CASE == "m4":
+    def a_jsonl(name):
+        out = []
+        p = os.path.join(A_DIR, "pulled", name)
+        for line in (open(p, errors="replace").read().splitlines() if os.path.exists(p) else []):
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                pass
+        return out
+    a_journal, a_events = a_jsonl("journal.jsonl"), a_jsonl("rl-island-0.jsonl")
+    a_gpu = " ".join(open(os.path.join(A_DIR, "pulled", f), errors="replace").read()
+                     for f in (os.listdir(os.path.join(A_DIR, "pulled")) if os.path.isdir(os.path.join(A_DIR, "pulled")) else [])
+                     if f.startswith("gpu-"))
+    # --- A: node loss after >= 2 trained rounds, a round cut synced to the store
+    a_lost = [r for r in a_journal if r.get("kind") == "node_lost"]
+    a_rr = [e for e in a_events if e.get("event") == "rl_reconfiguration" and e.get("result") == "RECOVERY_REQUIRED"
+            and str(e.get("error", "")).startswith("node_lost")]
+    a_cuts = [e for e in a_events if e.get("event") == "rl_round_cut" and e.get("ok") is True]
+    a_cut_synced = [e for e in a_cuts if e.get("store_synced")]
+    a_pools = [r for r in a_journal if r.get("kind") == "gpu_pool" and r.get("accepted")]
+    a_uuids = {u for node in (a_pools[-1].get("uuids") or []) for u in node} if a_pools else set()
+    a_topo = [r for r in a_journal if r.get("kind") == "topology"]
+    a_inc = a_pools[-1].get("incarnation") if a_pools else None
+    # --- B: everything after its checkpoint_store restore record is B's own (the rest was copied from the store)
+    idx = next((i for i, r in enumerate(journal) if r.get("kind") == "checkpoint_store" and r.get("action") == "restore"), None)
+    restore = journal[idx] if idx is not None else {}
+    b_own = journal[idx + 1:] if idx is not None else []
+    b_topo = [r for r in b_own if r.get("kind") == "topology"]
+    b_pools = [r for r in b_own if r.get("kind") == "gpu_pool"]
+    b_pool = b_pools[-1] if b_pools else {}
+    b_uuids = [u for node in (b_pool.get("uuids") or []) for u in node]
+    b_seen = set(re.findall(r"(GPU-[0-9a-f-]{36})", gpu_names))
+    rc_rec = [r for r in b_own if r.get("kind") == "round_cut" and r.get("action") == "restore"]
+    restored_ev = [e for e in events if e.get("event") == "rl_round_cut_restored"]
+    resume_rid = restored_ev[0].get("rollout_id") if restored_ev else None
+    a_trained = sorted({e.get("rollout_id") for e in a_events if e.get("event") == "rl_driver_phase" and e.get("phase") == "train"})
+    b_rr = [e for e in events if e.get("event") == "rl_reconfiguration" and e.get("result") == "RECOVERY_REQUIRED"] + \
+           [r for r in b_own if r.get("kind") == "phase" and r.get("phase") == "RECOVERY_REQUIRED"]
+    checks = {
+        # A side
+        "a_node_lost_journal": bool(a_lost),
+        "a_rl_reconfiguration_RECOVERY_REQUIRED_node_lost": bool(a_rr),
+        "a_round_cut_synced_to_store": bool(a_cut_synced),
+        # B side: store restore from A's incarnation
+        "b_checkpoint_store_restore": idx is not None,
+        "b_restored_from_a_incarnation": a_inc is not None and (restore.get("restored_from") or {}).get("incarnation") == a_inc,
+        # same layout, accepted
+        "b_layout_accepted_same_as_a": bool(b_topo) and b_topo[-1].get("layout_accepted") is True and bool(a_topo)
+            and b_topo[-1].get("layout") == a_topo[-1].get("layout"),
+        # rebind: accepted, rebind=true, non-empty mapping; B's 4 uuids all differ from A's and are B's nvidia-smi uuids
+        "b_gpu_pool_rebind_accepted": b_pool.get("accepted") is True and b_pool.get("rebind") is True and bool(b_pool.get("mapping")),
+        "b_uuids_new_and_on_b_nodes": len(b_uuids) == 4 and not (set(b_uuids) & a_uuids) and set(b_uuids) <= b_seen
+            and not (set(b_uuids) & set(re.findall(r"(GPU-[0-9a-f-]{36})", a_gpu))),
+        # continuation: >= 1 train round after the resume, the first trained rid = resume rid > 0
+        "b_trains_ge_1_round_after_resume": bool(rounds_trained) and (resume_rid is None or max(rounds_trained) >= resume_rid),
+        "b_no_recovery_required": not b_rr,
+    }
+    weights = {
+        "weights_round_cut_restored": bool(rc_rec) and bool(restored_ev)
+            and rc_rec[0].get("cut_incarnation") == a_inc,
+        "weights_rollout_id_continues": resume_rid is not None and resume_rid > 0 and bool(rounds_trained)
+            and min(rounds_trained) == resume_rid and (not a_trained or resume_rid <= max(a_trained) + 1),
+    }
+    checks.update(weights)
+    notes.append(f"a_incarnation={a_inc} restored_from={restore.get('restored_from')} resume_rid={resume_rid} "
+                 f"a_trained={a_trained} b_trained={rounds_trained} a_round_cuts={[e.get('cut_id') for e in a_cuts]}")
+    notes.append("stale_incarnation_rejection: PARTIAL(sim) -- A is torn down before B starts, so no old incarnation can "
+                 "write; evidence = tests/multinode_sim gpu_pool 1b (CPU)")
+    base_ok = all(v for k, v in checks.items() if k not in weights)
+    if idx is None and not rounds_trained:
+        verdict = "INVALID_TEST"; notes.append("B never restored the store nor trained (startup/timeout)")
+    elif base_ok and not all(weights.values()):
+        verdict = "PARTIAL"; notes.append("journal/store restored and B trains, but the policy weights did not continue "
+                                          "from A's round cut (journal-only restore)")
     else:
         verdict = "PASS" if all(checks.values()) else "FAIL"
 else:
