@@ -14,7 +14,7 @@ mixed hardware families.
         ┌───────────────┤               ├───────────────┐
  ┌──────┴──────┐  ┌─────┴───────┐  ┌────┴────────┐
  │ learner 0   │  │ learner 1   │  │ learner 2   │   … one island per --gpu entry
- │ us-east-2   │  │ us-east-1   │  │ runpod:CA   │   (PyTorch, AdamW inner opt)
+ │ us-east-2   │  │ us-east-1   │  │ nebius:eu…  │   (PyTorch, AdamW inner opt)
  └─────────────┘  └─────────────┘  └─────────────┘
 ```
 
@@ -24,7 +24,7 @@ mixed hardware families.
 pip install "yeto[launcher] @ ."
 
 # pick the fleet yourself…
-yeto launch --gpu aws:8xa100@us-east-2,runpod:8xh100@CA \
+yeto launch --gpu aws:8xa100@us-east-2,nebius:8xh100@eu-north1 \
   --model qwen35-9b --data org/chat-traces
 
 # …or let the planner pick it (budget $/hr and/or a TFLOPs target)
@@ -34,18 +34,18 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
 ```
 
 - `--gpu` grammar: `cloud:[nodes x]<count>x<gpu>[@region]`, one entry per
-  learner island. Clouds: `aws`, `runpod`, `nebius`, `verda` (via SkyPilot)
+  learner island. Clouds: `aws`, `nebius`, `verda` (via SkyPilot)
   and `modal` (a Modal GPU container, not a VM; `modal:8xh100` runs
   unpinned, `modal:8xh100@us` pins a region at Modal's surcharge; multi-
   container islands need whole nodes, e.g. `modal:2x8xh100`).
 - Omitting `--gpu` invokes `yeto shape`: an exact solver maximizes effective
   TFLOPs under your budget (or minimizes cost to reach `--flops`), subject to
-  live spot quotas minus usage, spot placement scores, RunPod stock, and an
+  live spot quotas minus usage, spot placement scores, per-cloud capacity signals, and an
   FSDP memory model of the model. Run `yeto shape` directly to see the plan,
   rejected shapes with reasons, and the launch line without launching.
 - `yeto shape --clouds` picks the clouds to plan across (default: `aws` plus
-  every cloud whose credentials are on this machine — `runpod`, `nebius`,
-  `verda`, `modal`; AWS credentials are only required when `aws` is listed).
+  every cloud whose credentials are on this machine — `nebius`, `verda`,
+  `modal`; AWS credentials are only required when `aws` is listed).
   `--regions` takes `cloud:region` entries, e.g.
   `--regions aws:us-east-1,nebius:eu-north1,verda:FIN-03`; a bare region
   means `aws` (the old spelling), `cloud:all` lifts the limit for one cloud
@@ -53,7 +53,7 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
   AWS, which stays on its default US regions. A `modal:<region>` entry pins
   Modal containers to that area at Modal's region surcharge; leave it out to
   run unpinned at the base price. Credentials go where each cloud's own CLI
-  puts them (`~/.aws`, `~/.runpod`, `~/.nebius`, `~/.verda`, `~/.modal.toml`);
+  puts them (`~/.aws`, `~/.nebius`, `~/.verda`, `~/.modal.toml`);
   see docs/CLOUDS.md.
 - `--data`: HF dataset id, local path (jsonl/json/parquet or `save_to_disk`
   dir), or any sky-supported object-store URI — non-HF sources ship to
@@ -84,6 +84,53 @@ yeto status | logs <run> | down <run>   # runs detach; Ctrl-C never kills them
 - Learners default to spot; the head VM (syncer + fleet controller) is a
   small on-demand box whose checkpoint/resume absorbs preemptions. The
   submitting machine can disconnect after launch.
+
+## RL infrastructure (S8-S11)
+
+Everything below is for the Miles RL path (`--rl-engine ports`; see
+[docs/MILES_RL.md](docs/MILES_RL.md)). Verification level is stated per item:
+"CPU" means unit/simulation tests only, "GPU" means it ran on real hardware.
+
+- **Verda and Nebius providers.** Verda is wired into the planner and launcher
+  (capacity selection, in-cloud docker); Nebius supports a baked VM image and a
+  shared model filesystem (`scripts/bake_nebius_image.sh`,
+  `scripts/populate_nebius_model_store.sh`) to cut cold start. What was
+  verified per cloud is tracked in [docs/CLOUDS.md](docs/CLOUDS.md); the baked
+  image path has CPU tests but is not confirmed on GPU.
+- **Multi-node islands.** EP/PP may cross nodes (TP stays in-node by default,
+  cross-node TP is an explicit opt-in), elastic scaling happens in whole
+  replicas, GPU UUIDs are reconciled at runtime, and `--rl-checkpoint-store`
+  lets a restarted island resume from a round cut. GPU cases m1-m5 (including
+  SGLang TP8 across nodes) were run on small 2-node setups; see
+  [docs/MILES_RL.md](docs/MILES_RL.md).
+- **Elastic E1 (add/remove cards).** `--rl-elastic` with
+  `--rl-elastic-resources/-initial-config/-cells` lets a controller move GPUs
+  between rollout and training at safe points. Off by default. Edge costs
+  measured on real H100 (n=3): scale-up blocks ~147-150 s, scale-down ~3-5 s.
+- **D1 recommend / D2 auto.** `--rl-observe-timeline` records a timeline and
+  `LoadSummary`; `--rl-recommend-mode {disabled,manual,recommend,auto}` (default
+  `disabled`) with the `--rl-recommend-*` / `--rl-auto-*` tuning flags and
+  `--rl-edge-costs-path`. `recommend` only emits suggestions. **`auto` is not
+  enabled**: the real-hardware sweep found no net-benefit edge (round-time
+  differences within +/-1.5% and seed-dependent), and the controller refuses
+  `auto` unless the attestation declares it. D2 is CPU-validated (trace
+  replay); no GPU four-scenario run exists. Details and runbook:
+  [openspec/changes/rl-infra-spec/elastic-ops.md](openspec/changes/rl-infra-spec/elastic-ops.md).
+- **Fleet dashboard.** Read-only view over learner/syncer tapes, controller
+  journal and `fleet.jsonl`: `yeto dashboard serve` (loopback-only, GET-only),
+  `yeto dashboard export` (single self-contained HTML), and
+  `yeto dashboard mirror` (tail a remote tape over ssh). See
+  [docs/DASHBOARD.md](docs/DASHBOARD.md).
+- **Flash-Next (Qwen3.8-Flash-Next).** A `qwen3_8_next` ports recipe with
+  full-LoRA coverage of MoE/GDN/QSA layers, profile fingerprinting,
+  `--rl-megatron-ref-load` and `--rl-lora-expert-rank`. CPU-verified only: the
+  real Miles argument parser, full conversion and a formal 4x8 H200 training
+  run have not been done (blocked on capacity).
+- **Codex harness / Terminal-Bench.** Terminal-Bench 2.1 rollouts through the
+  Codex harness (`--codex-*` options, `yeto-codex-traces`); see
+  [docs/TBENCH21_SAO_QWEN35_08B_VALIDATION_20260826.md](docs/TBENCH21_SAO_QWEN35_08B_VALIDATION_20260826.md).
+  Moving the harness onto the ports engine is tracked in
+  `openspec/changes/rl-codex-harness-rollout`.
 
 ## Architecture
 
@@ -227,6 +274,10 @@ CyberGym reward integration used for real environment evaluation.
 single-island Yeto, and federated Yeto RL benchmark contract and runner.
 [docs/RL_SSH_ACCEPTANCE.md](docs/RL_SSH_ACCEPTANCE.md) — direct existing-host
 deployment, failure injection, artifact collection, and f32 AVG verification.
+[docs/CLOUDS.md](docs/CLOUDS.md) — per-cloud credentials, regions, signals,
+and what has been verified on real machines.
+[docs/DASHBOARD.md](docs/DASHBOARD.md) — the RL fleet dashboard (serve, export,
+mirror).
 [docs/WANDB.md](docs/WANDB.md) — opt-in W&B telemetry: the group/run topology
 for a fleet, the metric tables, the debugging map, and the failure policy.
 
