@@ -1337,7 +1337,10 @@ def launch_with_verda_candidates(
                     raise
                 msg = " ".join(str(exc).split())[:300]
                 for c in cands:
-                    key = (c["instance_type"], c["region"])
+                    # Candidates are sky.Resources overrides (verda_any_of):
+                    # the region lives in "infra" ("verda/FIN-01").
+                    region = c.get("region") or c["infra"].split("/", 1)[1]
+                    key = (c["instance_type"], region)
                     demoted[key] = demoted.get(key, 0) + 1
                     reasons[key] = f"attempt {attempt + 1}: {msg}"
         if attempt + 1 < max_attempts:

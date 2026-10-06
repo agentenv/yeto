@@ -203,7 +203,7 @@ def reshard_problems(
     out += batch_problems(plan, args)
     out += loss_normalization_problems(plan)
     if args is not None:
-        out += config_problems(args, {"cp_size": plan.target["cp"], "ep_size": plan.target["ep"]})
+        out += config_problems(args, {"cp_size": plan.target["cp"], "ep_size": plan.target["ep"]}, reshard=True)
     out += algorithm_problems(spec)
     if certified is not None:
         sha = spec_sha256 or (spec.sha256() if spec is not None and callable(getattr(spec, "sha256", None)) else None)

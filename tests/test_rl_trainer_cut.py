@@ -472,3 +472,26 @@ def test_unknown_live_cursor_fails_closed(tmp_path):
     with pytest.raises(RuntimeError, match="cursor unknown before the rebuild"):
         rebuild_same_shape(trainer, args=ARGS, rollout_executor="ex", actor=actor, run=LoopRunner().run,
                            worker_manager="wm", rollout=Unknown(), rebuild=rebuild, restore=lambda: None)
+
+
+def test_pp2_distributed_optimizer_cut_is_no_longer_refused(tmp_path):
+    """M1/M4 layout (PP2 + --use-distributed-optimizer, DP1): round cuts go through save_cut."""
+    ranks = [make_rank(i, coord={"global_rank": i, "tp": 0, "pp": i, "dp": 0, "dp_size": 1, "cp_size": 1,
+                                 "ep_size": 1, "tp_size": 1, "pp_size": 2}) for i in range(2)]
+    flags = {"use_distributed_optimizer": True, "pipeline_model_parallel_size": 2}
+    for r in ranks:
+        r.args = SimpleNamespace(fp16=False, bf16=True, global_batch_size=GBS, **flags)
+    args = SimpleNamespace(**{**ARGS.__dict__, "actor_num_gpus_per_node": 2, **flags})
+    t = MilesTrainerGroup(args=args, actor_model=RankGroup(ranks), learner_id=0, learner_generation=0,
+                          parameter_layout_hash=lambda: "L", runner=LoopRunner())
+    assert t.save_cut(epoch=1, context=_context(tmp_path, progress=CutProgress(0, 0, GBS, 0, 0, "h"))) == "cut-a"
+    fresh = [make_rank(5 + i, coord=r._yeto_cut_backend.coord()) for i, r in enumerate(ranks)]
+    for r in fresh:
+        r.args = ranks[0].args
+    t2 = MilesTrainerGroup(args=args, actor_model=RankGroup(fresh), learner_id=0, learner_generation=0,
+                           parameter_layout_hash=lambda: "L", runner=LoopRunner())
+    t2.restore_cut("cut-a", epoch=1, root=str(tmp_path),
+                   expect=_expect(layout={**LAYOUT, "world": 2, "pp": 2}, local_step=0, policy_version=0))
+    for a, b in zip(ranks, fresh, strict=True):
+        for n, v in params(a).items():
+            assert torch.equal(v, params(b)[n])

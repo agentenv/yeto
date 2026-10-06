@@ -207,6 +207,10 @@ elif CASE == "m3":
     up_done = phases_of("up1", "SUCCEEDED"); dn_done = phases_of("dn1", "SUCCEEDED")
     def rounds_after(wall):
         return sorted({e.get("rollout_id") for e in phases if e.get("phase") == "train" and e.get("time_unix", 0) > wall + 1})
+    _pm = re.findall(r'"rollout_cells":(\[.*?\]),"standby"', launch + read("pulled/run.log"))
+    _standby = [c["name"] for c in (json.loads(_pm[0]) if _pm else []) if not c.get("start")]
+    _started = sorted(set(re.findall(r"start_cells \['([^']+)'\] committed", launch + read("pulled/run.log"))))
+    _c1_ids = _started if _standby == ["c1"] and len(_started) == 1 else []
     checks = {
         # journal `request` (controller.request): plan.source/target/kind = the manifest edge; source_engines/target_engines = members 1 -> 2 -> 1
         "up_request_T2R1S1_to_T2R2S0": (plan("up1").get("source"), plan("up1").get("target"), plan("up1").get("kind")) == ("T2R1S1", "T2R2S0", "rollout-only"),
@@ -216,7 +220,9 @@ elif CASE == "m3":
         "up_committed_once": len(phases_of("up1", "COMMITTED")) == 1 and len(up_done) == 1,
         "down_committed_once": len(phases_of("dn1", "COMMITTED")) == 1 and len(dn_done) == 1,
         # journal `add_intent` (up edge): the added member is the standby cell c1 (bound to n1:1 by the placement map)
-        "up_adds_cell_c1": any(r.get("members") == ["engine:c1"] for r in journal if r.get("kind") == "add_intent" and r.get("request_id") == "up1") or any("c1" in json.dumps(r.get("members")) for r in journal if r.get("kind") == "add_intent"),
+        # members carry the fork cell id (entry.resolve_declared_cells maps alias c1 -> fork id); accept the alias, or the single
+        # cell id the controller started (start_cells) when the placement declares c1 as the only start=false cell
+        "up_adds_cell_c1": any(r.get("members") in (["engine:c1"], *[["engine:" + c] for c in _c1_ids]) for r in journal if r.get("kind") == "add_intent" and (r.get("request_id") == "up1" or str(r.get("tx_id", "")).endswith("-up1"))),
         # SUCCEEDED.config_epoch_to: 0 -> 1 (up) -> 2 (down)
         "config_epoch_1_then_2": (up_done[0].get("config_epoch_to") if up_done else None) == 1 and (dn_done[0].get("config_epoch_to") if dn_done else None) == 2,
         # apps-<worker1>.txt snapshots: an sglang::scheduler appeared on n1 while c1 was up (n1:1); no cross-node refusal anywhere
