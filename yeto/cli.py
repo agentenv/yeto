@@ -253,6 +253,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="rl-multinode-island (ruling 2026-10-04 v2): let a rollout engine's TP span "
                     "nodes as whole-node replicas (e.g. SGLang TP8 over 2x4); an engine then scales "
                     "up/down as one replica; same as cfg parallel.allow_cross_node_engine_tp")
+    rl.add_argument("--rl-island-use-gpus-per-node", type=int, default=None, metavar="M",
+                    help="rl-multinode-island: provision the --gpu machines (N GPUs/node, billed) but "
+                    "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "
+                    "--num-gpus=M, CUDA_VISIBLE_DEVICES=0..M-1, and every layout/placement/gpu_pool "
+                    "rule uses M (e.g. m5 TP8 over 2x4 on 2x8xH100 machines); unset = all N")
+    rl.add_argument("--rl-island-network-tier", choices=("auto", "none"), default="auto",
+                    help="multi-node RL island: auto = ask sky for network_tier=best where the cloud "
+                    "honors it (Nebius H100:8/H200:8 -> InfiniBand GPU cluster on a fixed fabric); "
+                    "none = plain VMs (NCCL stays on TCP sockets, NCCL_IB_DISABLE=1 by default anyway)")
     rl.add_argument(
         "--rl-overlap-eval",
         action="store_true",
