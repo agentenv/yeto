@@ -134,6 +134,7 @@ def test_builds_exact_full_suite_plan(tmp_path):
         assert island["runtime_contracts"]["critic_syncer_port"] == 29401
         assert island["openenv_agent_contract"] == {
             "custom_agent_function_path": (
+                "yeto.rl.harness.codex."
                 "codex_openenv_subprocess_agent_function.run"
             ),
             "custom_rm_path": "openenv_generate.reward_func",

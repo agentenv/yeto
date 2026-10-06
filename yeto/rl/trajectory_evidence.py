@@ -471,13 +471,13 @@ def _verified_outcome(
         for key in ("tbench_trusted_outcome", "tbench_trusted_outcome_hmac")
     ):
         raise ValueError("trajectory metadata mixes benchmark evidence kinds")
-    from yeto_miles_secrlenv.reward import (
+    from yeto.rl.harness.codex.reward import (
         CLEANUP_ERROR_STATUS,
         INFRASTRUCTURE_STATUS,
         MAC_KEY,
         _canonical,
     )
-    from yeto_miles_secrlenv.reward import (
+    from yeto.rl.harness.codex.reward import (
         _verified_outcome as verified_secrlenv_outcome,
     )
 
