@@ -33,6 +33,9 @@ PARAMETER_MODES = frozenset({"lora", "full"})
 RECIPE_GENERIC = "generic"
 RECIPE_QWEN3_5 = "qwen3_5"
 RECIPE_DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+# Qwen3.8-Flash-Next (qwen4_exp): GDN + QSA + 512-expert MoE through the native
+# Miles plugin (miles_plugins/models/qwen3_8_next), never the Qwen3.5 spec.
+RECIPE_QWEN3_8_NEXT = "qwen3_8_next"
 GATED_DELTA_NET = "gated_delta_net"
 
 
@@ -128,7 +131,7 @@ class GdnRecipe:
 
 @dataclass(frozen=True)
 class ModelRecipe:
-    name: str  # RECIPE_GENERIC | RECIPE_QWEN3_5 | RECIPE_DEEPSEEK_V4_FLASH
+    name: str  # RECIPE_GENERIC | RECIPE_QWEN3_5 | RECIPE_DEEPSEEK_V4_FLASH | RECIPE_QWEN3_8_NEXT
     provider_class: str
     training_attention_backend: str
     gdn: GdnRecipe
@@ -417,6 +420,32 @@ class RLRunConfig:
 ELASTIC_UPDATE_WEIGHT_GROUP_TIMEOUT_S = 120.0
 
 
+def qwen3_8_next_variant(args, provider) -> str | None:
+    """``"full"`` / ``"4layer"`` when the run is Qwen3.8-Flash-Next, else None.
+
+    Fingerprint, not name: the HF model id (any path whose basename is a known
+    Flash-Next repo) OR the provider shape (GDN + 512 routed experts + hidden
+    2560 + 48/4 layers).  Both GDN, so without this the Qwen3.5 spec would be
+    picked silently (G1)."""
+    from yeto.rl.profiles import qwen3_8_next as q
+
+    model = str(getattr(args, "model", None) or "").rstrip("/")
+    base = model.rsplit("/", 1)[-1]
+    for variant, name in q.MODEL_NAMES.items():
+        if base == name:
+            return variant
+    if (
+        _text(getattr(provider, "experimental_attention_variant", None)) == GATED_DELTA_NET
+        and getattr(provider, "num_moe_experts", None) == 512
+        and getattr(provider, "hidden_size", None) == 2560
+    ):
+        layers = getattr(provider, "num_layers", None)
+        for variant, n in q.NUM_LAYERS.items():
+            if layers == n:
+                return variant
+    return None
+
+
 def select_gdn_recipe(provider) -> GdnRecipe:
     return GdnRecipe(
         gated_delta_net=(
@@ -532,7 +561,9 @@ def resolve_rl_run_config(
         raise ValueError("EP>1 requires a MoE model")
     if actor_gpus % expert_parallel:
         raise ValueError("expert parallelism must divide Miles actor world size")
-    if is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
+    fn_variant = qwen3_8_next_variant(args, provider)
+    # the native Flash-Next plugin shards routed-expert LoRA by EP itself
+    if fn_variant is None and is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
         raise ValueError(
             "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
         )
@@ -641,6 +672,10 @@ def resolve_rl_run_config(
                 "DeepSeek V4 Flash recipe requires the 43-layer MoE/MLA provider"
             )
         recipe_name, attention_backend = RECIPE_DEEPSEEK_V4_FLASH, "flash"
+    elif fn_variant is not None:
+        if parameter_mode != "lora":
+            raise ValueError("the Qwen3.8-Flash-Next recipe is LoRA-only")
+        recipe_name, attention_backend = RECIPE_QWEN3_8_NEXT, "flash"
     elif qwen35_recipe:
         recipe_name, attention_backend = RECIPE_QWEN3_5, "flash"
     else:

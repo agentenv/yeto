@@ -232,15 +232,41 @@ def summarize(windows: Sequence[LoadWindow]) -> dict[str, Any]:
 _EVALUATING = (RecommendMode.RECOMMEND, RecommendMode.AUTO)
 
 
+# Kinds a candidate may have.  ``rollout-only`` (add/remove whole engines) is the
+# only kind the rollout policy may pick unconditionally; ``trainer-dp`` (DP
+# reshard) additionally needs the 4.6/4.7 certificate: an ``edge_algorithms``
+# entry for that edge (A4), matching ``algorithm_sha256`` when one is given.
+# Other kinds (role-transfer, standby-scale) are never candidates here.
+CANDIDATE_EDGE_KINDS = ("rollout-only", "trainer-dp")
+ALGORITHM_CERTIFIED_KINDS = frozenset({"trainer-dp"})
+
+
+def _edge_kind_allowed(attestation: Any, edge: tuple, kinds, algorithm_sha256: str | None) -> bool:
+    kind = edge[2] if len(edge) > 2 else None
+    if kind not in kinds:
+        return False
+    if kind in ALGORITHM_CERTIFIED_KINDS:
+        algorithms_for = getattr(attestation, "algorithms_for", None)
+        certified = frozenset(algorithms_for(tuple(edge)) if algorithms_for else ())
+        if not certified or (algorithm_sha256 is not None and algorithm_sha256 not in certified):
+            return False
+    return True
+
+
 def candidate_edges_from_attestation(attestation: Any, configs: Mapping[str, Any], *,
-                                     source: str | None = None) -> list[CandidateEdge]:
+                                     source: str | None = None,
+                                     kinds: tuple[str, ...] = CANDIDATE_EDGE_KINDS,
+                                     algorithm_sha256: str | None = None) -> list[CandidateEdge]:
     """Candidate edges come ONLY from the attestation's certified set (a trainer
-    edge that is not certified can never be chosen).  ``configs`` maps a config
-    name to a ResourceConfig-like object (``rollout``, ``rollout_engine_gpus``)."""
+    edge that is not certified can never be chosen), filtered by edge kind (see
+    ``CANDIDATE_EDGE_KINDS``).  ``configs`` maps a config name to a
+    ResourceConfig-like object (``rollout``, ``rollout_engine_gpus``)."""
     out: dict[tuple[str, str], CandidateEdge] = {}
     for edge in sorted(getattr(attestation, "certified_edges", ()) or ()):
         src, dst = edge[0], edge[1]
         if (source is not None and src != source) or src == dst:
+            continue
+        if not _edge_kind_allowed(attestation, edge, kinds, algorithm_sha256):
             continue
         a, b = configs.get(src), configs.get(dst)
         if a is None or b is None:

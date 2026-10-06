@@ -531,3 +531,69 @@ def flash_next_elastic_declaration(*, nodes: int = 4, gpus_per_node: int = 8,
         "configs": configs, "declared_edges": edges, "edge_kind": ELASTIC_EDGE_KIND,
         "initial_config": names[0],
     }
+
+
+# ---- ports path (``--rl-engine ports``) recipe --------------------------------
+# The ports adapter renders Miles argv from the Bridge provider geometry; for
+# Flash-Next that geometry misses the native spec / provider / MoE knobs, so the
+# ``qwen3_8_next`` recipe replaces every flag below with the launcher's values
+# (scripts/run_qwen3_8_next.py + ``model_args`` + ``lora_extra_args``).
+PORTS_MODEL_NAME = "qwen4_exp"
+PORTS_PROVIDER_PATH = (
+    "miles_plugins.models.qwen3_8_next.model_provider.get_qwen3_8_next_model_provider"
+)
+# Flags the generic renderer emits that the native recipe must not keep.
+PORTS_DROPPED_FLAGS = frozenset({"--lora-type", "--lora-base-cpu-backup"})
+
+
+def ports_recipe_argv(variant: str, *, lora_rank: int, lora_expert_rank: int | None = None,
+                      lora_dropout: float = 0.0) -> tuple[str, ...]:
+    """Model + native-LoRA flags for the ports path (fixed partition, no colocate)."""
+    if variant not in NUM_LAYERS:
+        raise ValueError(f"unknown Flash-Next variant {variant!r}")
+    r_e = lora_rank if lora_expert_rank is None else int(lora_expert_rank)
+    if not 0 <= r_e <= lora_rank:
+        raise ValueError(f"lora_expert_rank must satisfy 0 <= r_e <= lora_rank ({r_e} vs {lora_rank})")
+    return (
+        *model_args(variant),
+        "--model-name", PORTS_MODEL_NAME,
+        "--custom-model-provider-path", PORTS_PROVIDER_PATH,
+        "--qkv-format", "thd",
+        "--linear-attention-backend", "flashqla",
+        "--sequence-parallel",
+        "--attention-dropout", "0.0",
+        "--hidden-dropout", "0.0",
+        "--megatron-to-hf-mode", "raw",
+        "--lora-rank", str(lora_rank),
+        "--lora-alpha", str(lora_rank),
+        "--lora-dropout", format(lora_dropout, "g"),
+        "--lora-expert-rank", str(r_e),
+        "--target-modules", ",".join(LORA_TARGET_MODULES),
+        "--no-gradient-accumulation-fusion",
+        "--check-lora-weight-equal",
+        "--sglang-lora-backend", "triton",
+        "--sglang-lora-strict-loading",
+        "--sglang-max-lora-rank", str(lora_rank),
+        "--sglang-linear-attn-prefill-backend", "flashinfer",
+        "--sglang-moe-runner-backend", "triton",
+    )
+
+
+def _split_flags(argv: Sequence[str]) -> list[tuple[str, ...]]:
+    groups: list[list[str]] = []
+    for tok in argv:
+        if tok.startswith("--") or not groups:
+            groups.append([tok])
+        else:
+            groups[-1].append(tok)
+    return [tuple(g) for g in groups]
+
+
+def apply_ports_recipe(argv: Sequence[str], recipe_argv: Sequence[str]) -> tuple[str, ...]:
+    """Drop every flag (with its values) that ``recipe_argv`` sets or that the
+    native recipe forbids, then append ``recipe_argv``.  ``argv[0]`` (the
+    script) is kept in place."""
+    head, rest = argv[:1], argv[1:]
+    override = {g[0] for g in _split_flags(recipe_argv)} | PORTS_DROPPED_FLAGS
+    kept = [tok for g in _split_flags(rest) if g[0] not in override for tok in g]
+    return (*head, *kept, *recipe_argv)
