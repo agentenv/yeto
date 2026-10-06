@@ -1,7 +1,7 @@
-"""Flash-Next (fnrun.sh fn32s / fn32b / fn8s) variant of fp_local22.py: the ports-path Miles
+"""Flash-Next (fnrun.sh fn32s / fn32b / fn8s / fn8r) variant of fp_local22.py: the ports-path Miles
 argv + attestation ``runtime_fingerprint`` for the 4x8 H200 cases, on CPU.
 
-usage: python fp_fn.py <repo> <fn32s|fn32b|fn8s> [--seed N] [--total-steps N] [extra cli args]
+usage: python fp_fn.py <repo> <fn32s|fn32b|fn8s|fn8r> [--seed N] [--total-steps N] [extra cli args]
 
 The fingerprint is the pinned Miles commit + the FULL Miles argv, so it changes
 with seed / total-steps / any flag: an E1 attestation is valid only for the exact
@@ -78,7 +78,7 @@ def fn_fingerprint(repo: str, case: str, *, seed: int | None = None,
     from yeto.rl.engine import run_config
     from yeto.rl.profiles import qwen3_8_next as q
 
-    small = case == "fn8s"
+    small = case in ("fn8s", "fn8r")
     mp = _m.MonkeyPatch()
     try:
         run = island_run(tuple(fnrun_cli(case, seed=seed, total_steps=total_steps, extra=extra)), mp)
