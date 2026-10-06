@@ -1,0 +1,30 @@
+[
+ {
+  "location_code": "FIN-01",
+  "availabilities": [
+   "1A100.22V"
+  ]
+ },
+ {
+  "location_code": "FIN-02",
+  "availabilities": [
+   "CPU.4V.16G",
+   "CPU.8V.32G",
+   "CPU.16V.64G",
+   "CPU.96V.384G",
+   "CPU.180V.720G"
+  ]
+ },
+ {
+  "location_code": "FIN-03",
+  "availabilities": [
+   "1B200.30V",
+   "1H200.141S.44V",
+   "CPU.4V.16G",
+   "CPU.8V.32G",
+   "CPU.16V.64G",
+   "CPU.32V.128G",
+   "2B200.60V.CC"
+  ]
+ }
+]

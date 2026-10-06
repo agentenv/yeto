@@ -1,0 +1,5245 @@
+[
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "32 CPU",
+   "number_of_cores": 32
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x GB300 SXM6 288GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "288GB GPU RAM",
+   "size_in_gigabytes": 288
+  },
+  "id": "fb300f00-0000-4000-8000-fb300f000001",
+  "instance_type": "1GB300.32V",
+  "memory": {
+   "description": "225GB RAM",
+   "size_in_gigabytes": 225
+  },
+  "model": "GB300",
+  "name": "GB300 SXM6 288GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "9.720",
+  "spot_price": "4.860",
+  "dynamic_price": null,
+  "max_dynamic_price": "9.720",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": []
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "64 CPU",
+   "number_of_cores": 64
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x GB300 SXM6 288GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "576GB GPU RAM",
+   "size_in_gigabytes": 576
+  },
+  "id": "fb300f00-0000-4000-8000-fb300f000002",
+  "instance_type": "2GB300.64V",
+  "memory": {
+   "description": "450GB RAM",
+   "size_in_gigabytes": 450
+  },
+  "model": "GB300",
+  "name": "GB300 SXM6 288GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "19.44",
+  "spot_price": "9.720",
+  "dynamic_price": null,
+  "max_dynamic_price": "19.44",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": []
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "128 CPU",
+   "number_of_cores": 128
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x GB300 SXM6 288GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "1152GB GPU RAM",
+   "size_in_gigabytes": 1152
+  },
+  "id": "fb300f00-0000-4000-8000-fb300f000004",
+  "instance_type": "4GB300.128V",
+  "memory": {
+   "description": "900GB RAM",
+   "size_in_gigabytes": 900
+  },
+  "model": "GB300",
+  "name": "GB300 SXM6 288GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "38.88",
+  "spot_price": "19.44",
+  "dynamic_price": null,
+  "max_dynamic_price": "38.88",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": []
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "30 CPU",
+   "number_of_cores": 30
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x B300 SXM6 268GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "268GB GPU RAM",
+   "size_in_gigabytes": 268
+  },
+  "id": "b300b300-b300-4000-8000-b300b300b301",
+  "instance_type": "1B300.30V",
+  "memory": {
+   "description": "255GB RAM",
+   "size_in_gigabytes": 255
+  },
+  "model": "B300",
+  "name": "B300 SXM6 268GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "8.452",
+  "spot_price": "4.226",
+  "dynamic_price": null,
+  "max_dynamic_price": "8.452",
+  "serverless_price": "9.297",
+  "serverless_spot_price": "4.649",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "60 CPU",
+   "number_of_cores": 60
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x B300 SXM6 268GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "536GB GPU RAM",
+   "size_in_gigabytes": 536
+  },
+  "id": "b300b300-b300-4000-8000-b300b300b302",
+  "instance_type": "2B300.60V",
+  "memory": {
+   "description": "510GB RAM",
+   "size_in_gigabytes": 510
+  },
+  "model": "B300",
+  "name": "B300 SXM6 268GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "16.90",
+  "spot_price": "8.452",
+  "dynamic_price": null,
+  "max_dynamic_price": "16.90",
+  "serverless_price": "18.59",
+  "serverless_spot_price": "9.297",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "120 CPU",
+   "number_of_cores": 120
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x B300 SXM6 268GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "1072GB GPU RAM",
+   "size_in_gigabytes": 1072
+  },
+  "id": "b300b300-b300-4000-8000-b300b300b304",
+  "instance_type": "4B300.120V",
+  "memory": {
+   "description": "1020GB RAM",
+   "size_in_gigabytes": 1020
+  },
+  "model": "B300",
+  "name": "B300 SXM6 268GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "33.81",
+  "spot_price": "16.90",
+  "dynamic_price": null,
+  "max_dynamic_price": "33.81",
+  "serverless_price": "37.19",
+  "serverless_spot_price": "18.59",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "240 CPU",
+   "number_of_cores": 240
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x B300 SXM6 268GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "2144GB GPU RAM",
+   "size_in_gigabytes": 2144
+  },
+  "id": "b300b300-b300-4000-8000-b300b300b308",
+  "instance_type": "8B300.240V",
+  "memory": {
+   "description": "2040GB RAM",
+   "size_in_gigabytes": 2040
+  },
+  "model": "B300",
+  "name": "B300 SXM6 268GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "67.62",
+  "spot_price": "33.81",
+  "dynamic_price": null,
+  "max_dynamic_price": "67.62",
+  "serverless_price": "74.38",
+  "serverless_spot_price": "37.19",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "30 CPU",
+   "number_of_cores": 30
+  },
+  "deploy_warning": "Blackwell: Use \"Ubuntu 24.04 + CUDA 12.8 Open\" image type or install NVIDIA open drivers manually",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x B200 SXM6 180GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "180GB GPU RAM",
+   "size_in_gigabytes": 180
+  },
+  "id": "b200100a-5b01-447d-a68e-0b694079a4fb",
+  "instance_type": "1B200.30V",
+  "memory": {
+   "description": "170GB RAM",
+   "size_in_gigabytes": 170
+  },
+  "model": "B200",
+  "name": "B200 SXM6 180GB",
+  "p2p": null,
+  "price_per_hour": "6.850",
+  "spot_price": "3.425",
+  "dynamic_price": null,
+  "max_dynamic_price": "6.850",
+  "serverless_price": "7.535",
+  "serverless_spot_price": "3.768",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "60 CPU",
+   "number_of_cores": 60
+  },
+  "deploy_warning": "Blackwell: Use \"Ubuntu 24.04 + CUDA 12.8 Open\" image type or install NVIDIA open drivers manually",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x B200 SXM6 180GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "360GB GPU RAM",
+   "size_in_gigabytes": 360
+  },
+  "id": "b200200a-5b01-447d-a68e-0b694079a4fb",
+  "instance_type": "2B200.60V",
+  "memory": {
+   "description": "340GB RAM",
+   "size_in_gigabytes": 340
+  },
+  "model": "B200",
+  "name": "B200 SXM6 180GB",
+  "p2p": "900 GB/s",
+  "price_per_hour": "13.70",
+  "spot_price": "6.850",
+  "dynamic_price": null,
+  "max_dynamic_price": "13.70",
+  "serverless_price": "15.07",
+  "serverless_spot_price": "7.535",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "120 CPU",
+   "number_of_cores": 120
+  },
+  "deploy_warning": "Blackwell: Use \"Ubuntu 24.04 + CUDA 12.8 Open\" image type or install NVIDIA open drivers manually",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x B200 SXM6 180GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "720GB GPU RAM",
+   "size_in_gigabytes": 720
+  },
+  "id": "b200400a-5b01-447d-a68e-0b694079a4fb",
+  "instance_type": "4B200.120V",
+  "memory": {
+   "description": "680GB RAM",
+   "size_in_gigabytes": 680
+  },
+  "model": "B200",
+  "name": "B200 SXM6 180GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "27.40",
+  "spot_price": "13.70",
+  "dynamic_price": null,
+  "max_dynamic_price": "27.40",
+  "serverless_price": "30.14",
+  "serverless_spot_price": "15.07",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "240 CPU",
+   "number_of_cores": 240
+  },
+  "deploy_warning": "Blackwell: Use \"Ubuntu 24.04 + CUDA 12.8 Open\" image type or install NVIDIA open drivers manually",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x B200 SXM6 180GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "1440GB GPU RAM",
+   "size_in_gigabytes": 1440
+  },
+  "id": "b200800a-5b01-447d-a68e-0b694079a4fb",
+  "instance_type": "8B200.240V",
+  "memory": {
+   "description": "1360GB RAM",
+   "size_in_gigabytes": 1360
+  },
+  "model": "B200",
+  "name": "B200 SXM6 180GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "54.80",
+  "spot_price": "27.40",
+  "dynamic_price": null,
+  "max_dynamic_price": "54.80",
+  "serverless_price": "60.28",
+  "serverless_spot_price": "30.14",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "44 CPU",
+   "number_of_cores": 44
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x H200 SXM5 141GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "141GB GPU RAM",
+   "size_in_gigabytes": 141
+  },
+  "id": "70d00949-222b-402d-9228-02f33505cc87",
+  "instance_type": "1H200.141S.44V",
+  "memory": {
+   "description": "170GB RAM",
+   "size_in_gigabytes": 170
+  },
+  "model": "H200",
+  "name": "H200 SXM5 141GB",
+  "p2p": null,
+  "price_per_hour": "4.639",
+  "spot_price": "2.320",
+  "dynamic_price": null,
+  "max_dynamic_price": "4.639",
+  "serverless_price": "5.103",
+  "serverless_spot_price": "2.552",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "88 CPU",
+   "number_of_cores": 88
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x H200 SXM5 141GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "282GB GPU RAM",
+   "size_in_gigabytes": 282
+  },
+  "id": "cc3e7d54-a208-4eea-a845-8189a8874370",
+  "instance_type": "2H200.141S.88V",
+  "memory": {
+   "description": "340GB RAM",
+   "size_in_gigabytes": 340
+  },
+  "model": "H200",
+  "name": "H200 SXM5 141GB",
+  "p2p": "900 GB/s",
+  "price_per_hour": "9.278",
+  "spot_price": "4.639",
+  "dynamic_price": null,
+  "max_dynamic_price": "9.278",
+  "serverless_price": "10.21",
+  "serverless_spot_price": "5.103",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "176 CPU",
+   "number_of_cores": 176
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x H200 SXM5 141GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "564GB GPU RAM",
+   "size_in_gigabytes": 564
+  },
+  "id": "07d715c2-59c3-49c6-8ab3-c3b5e060dd17",
+  "instance_type": "4H200.141S.176V",
+  "memory": {
+   "description": "680GB RAM",
+   "size_in_gigabytes": 680
+  },
+  "model": "H200",
+  "name": "H200 SXM5 141GB",
+  "p2p": "900 GB/s",
+  "price_per_hour": "18.56",
+  "spot_price": "9.278",
+  "dynamic_price": null,
+  "max_dynamic_price": "18.56",
+  "serverless_price": "20.41",
+  "serverless_spot_price": "10.21",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "176 CPU",
+   "number_of_cores": 176
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x H200 SXM5 141GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "1128GB GPU RAM",
+   "size_in_gigabytes": 1128
+  },
+  "id": "ae4a1aae-550f-43e2-85b9-f6434235c575",
+  "instance_type": "8H200.141S.176V",
+  "memory": {
+   "description": "1360GB RAM",
+   "size_in_gigabytes": 1360
+  },
+  "model": "H200",
+  "name": "H200 SXM5 141GB",
+  "p2p": "900 GB/s",
+  "price_per_hour": "37.11",
+  "spot_price": "18.56",
+  "dynamic_price": null,
+  "max_dynamic_price": "37.11",
+  "serverless_price": "40.82",
+  "serverless_spot_price": "20.41",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "30 CPU",
+   "number_of_cores": 30
+  },
+  "deploy_warning": "H100: Use Nvidia driver 535 or higher for best performance",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x H100 SXM5 80GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "80GB GPU RAM",
+   "size_in_gigabytes": 80
+  },
+  "id": "c01dd00d-0000-480b-ae4e-d429115d055b",
+  "instance_type": "1H100.80S.30V",
+  "memory": {
+   "description": "120GB RAM",
+   "size_in_gigabytes": 120
+  },
+  "model": "H100",
+  "name": "H100 SXM5 80GB",
+  "p2p": null,
+  "price_per_hour": "3.555",
+  "spot_price": "1.778",
+  "dynamic_price": null,
+  "max_dynamic_price": "3.555",
+  "serverless_price": "3.911",
+  "serverless_spot_price": "1.955",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "32 CPU",
+   "number_of_cores": 32
+  },
+  "deploy_warning": "H100: Use Nvidia driver 535 or higher for best performance",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x H100 SXM5 80GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "80GB GPU RAM",
+   "size_in_gigabytes": 80
+  },
+  "id": "c21cfe7e-37ca-4515-b760-003e12d09471",
+  "instance_type": "1H100.80S.32V",
+  "memory": {
+   "description": "170GB RAM",
+   "size_in_gigabytes": 170
+  },
+  "model": "H100",
+  "name": "H100 SXM5 80GB",
+  "p2p": null,
+  "price_per_hour": "3.555",
+  "spot_price": "1.778",
+  "dynamic_price": null,
+  "max_dynamic_price": "3.555",
+  "serverless_price": "3.911",
+  "serverless_spot_price": "1.955",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "80 CPU",
+   "number_of_cores": 80
+  },
+  "deploy_warning": "H100: Use Nvidia driver 535 or higher for best performance",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x H100 SXM5 80GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "160GB GPU RAM",
+   "size_in_gigabytes": 160
+  },
+  "id": "a2aa7335-0a53-4d85-815f-c19aea7f61fe",
+  "instance_type": "2H100.80S.80V",
+  "memory": {
+   "description": "340GB RAM",
+   "size_in_gigabytes": 340
+  },
+  "model": "H100",
+  "name": "H100 SXM5 80GB",
+  "p2p": "900 GB/s",
+  "price_per_hour": "7.110",
+  "spot_price": "3.555",
+  "dynamic_price": null,
+  "max_dynamic_price": "7.110",
+  "serverless_price": "7.821",
+  "serverless_spot_price": "3.911",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "176 CPU",
+   "number_of_cores": 176
+  },
+  "deploy_warning": "H100: Use Nvidia driver 535 or higher for best performance",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x H100 SXM5 80GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "320GB GPU RAM",
+   "size_in_gigabytes": 320
+  },
+  "id": "c01dd00d-0002-748b-ae4e-d429115d055b",
+  "instance_type": "4H100.80S.176V",
+  "memory": {
+   "description": "680GB RAM",
+   "size_in_gigabytes": 680
+  },
+  "model": "H100",
+  "name": "H100 SXM5 80GB",
+  "p2p": "900 GB/s",
+  "price_per_hour": "14.22",
+  "spot_price": "7.110",
+  "dynamic_price": null,
+  "max_dynamic_price": "14.22",
+  "serverless_price": "15.64",
+  "serverless_spot_price": "7.821",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Gargantuan ML models",
+   "Multi-GPU training",
+   "FP64 HPC",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "176 CPU",
+   "number_of_cores": 176
+  },
+  "deploy_warning": "H100: Use Nvidia driver 535 or higher for best performance",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x H100 SXM5 80GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "640GB GPU RAM",
+   "size_in_gigabytes": 640
+  },
+  "id": "c01dd00d-0003-4972-ae4e-d429115d055b",
+  "instance_type": "8H100.80S.176V",
+  "memory": {
+   "description": "1360GB RAM",
+   "size_in_gigabytes": 1360
+  },
+  "model": "H100",
+  "name": "H100 SXM5 80GB",
+  "p2p": "900 GB/s",
+  "price_per_hour": "28.44",
+  "spot_price": "14.22",
+  "dynamic_price": null,
+  "max_dynamic_price": "28.44",
+  "serverless_price": "31.28",
+  "serverless_spot_price": "15.64",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Giant ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "22 CPU",
+   "number_of_cores": 22
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x A100 SXM4 80GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "80GB GPU RAM",
+   "size_in_gigabytes": 80
+  },
+  "id": "a0000000-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "1A100.22V",
+  "memory": {
+   "description": "120GB RAM",
+   "size_in_gigabytes": 120
+  },
+  "model": "A100 80GB",
+  "name": "A100 SXM4 80GB",
+  "p2p": null,
+  "price_per_hour": "1.797",
+  "spot_price": "0.8985",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.797",
+  "serverless_price": "1.977",
+  "serverless_spot_price": "0.9884",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-20.04",
+   "ubuntu-20.04-cuda-11.0",
+   "ubuntu-20.04-cuda-11.1",
+   "ubuntu-20.04-cuda-11.1-docker",
+   "ubuntu-20.04-cuda-11.2",
+   "ubuntu-20.04-cuda-11.4",
+   "ubuntu-20.04-cuda-11.4-docker",
+   "ubuntu-20.04-cuda-11.7",
+   "ubuntu-20.04-cuda-11.7-docker",
+   "ubuntu-20.04-cuda-12.4",
+   "ubuntu-20.04-cuda-12.4-docker",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Giant ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "44 CPU",
+   "number_of_cores": 44
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x A100 SXM4 80GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "160GB GPU RAM",
+   "size_in_gigabytes": 160
+  },
+  "id": "a0000001-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "2A100.44V",
+  "memory": {
+   "description": "240GB RAM",
+   "size_in_gigabytes": 240
+  },
+  "model": "A100 80GB",
+  "name": "A100 SXM4 80GB",
+  "p2p": "100 GB/s",
+  "price_per_hour": "3.594",
+  "spot_price": "1.797",
+  "dynamic_price": null,
+  "max_dynamic_price": "3.594",
+  "serverless_price": "3.953",
+  "serverless_spot_price": "1.977",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-20.04",
+   "ubuntu-20.04-cuda-11.0",
+   "ubuntu-20.04-cuda-11.1",
+   "ubuntu-20.04-cuda-11.1-docker",
+   "ubuntu-20.04-cuda-11.2",
+   "ubuntu-20.04-cuda-11.4",
+   "ubuntu-20.04-cuda-11.4-docker",
+   "ubuntu-20.04-cuda-11.7",
+   "ubuntu-20.04-cuda-11.7-docker",
+   "ubuntu-20.04-cuda-12.4",
+   "ubuntu-20.04-cuda-12.4-docker",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Giant ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "88 CPU",
+   "number_of_cores": 88
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x A100 SXM4 80GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "320GB GPU RAM",
+   "size_in_gigabytes": 320
+  },
+  "id": "a0000002-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "4A100.88V",
+  "memory": {
+   "description": "480GB RAM",
+   "size_in_gigabytes": 480
+  },
+  "model": "A100 80GB",
+  "name": "A100 SXM4 80GB",
+  "p2p": "300 GB/s",
+  "price_per_hour": "7.188",
+  "spot_price": "3.594",
+  "dynamic_price": null,
+  "max_dynamic_price": "7.188",
+  "serverless_price": "7.907",
+  "serverless_spot_price": "3.954",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-20.04",
+   "ubuntu-20.04-cuda-11.0",
+   "ubuntu-20.04-cuda-11.1",
+   "ubuntu-20.04-cuda-11.1-docker",
+   "ubuntu-20.04-cuda-11.2",
+   "ubuntu-20.04-cuda-11.4",
+   "ubuntu-20.04-cuda-11.4-docker",
+   "ubuntu-20.04-cuda-11.7",
+   "ubuntu-20.04-cuda-11.7-docker",
+   "ubuntu-20.04-cuda-12.4",
+   "ubuntu-20.04-cuda-12.4-docker",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Giant ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "176 CPU",
+   "number_of_cores": 176
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x A100 SXM4 80GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "640GB GPU RAM",
+   "size_in_gigabytes": 640
+  },
+  "id": "a0000003-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "8A100.176V",
+  "memory": {
+   "description": "960GB RAM",
+   "size_in_gigabytes": 960
+  },
+  "model": "A100 80GB",
+  "name": "A100 SXM4 80GB",
+  "p2p": "600 GB/s",
+  "price_per_hour": "14.38",
+  "spot_price": "7.188",
+  "dynamic_price": null,
+  "max_dynamic_price": "14.38",
+  "serverless_price": "15.81",
+  "serverless_spot_price": "7.907",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-20.04",
+   "ubuntu-20.04-cuda-11.0",
+   "ubuntu-20.04-cuda-11.1",
+   "ubuntu-20.04-cuda-11.1-docker",
+   "ubuntu-20.04-cuda-11.2",
+   "ubuntu-20.04-cuda-11.4",
+   "ubuntu-20.04-cuda-11.4-docker",
+   "ubuntu-20.04-cuda-11.7",
+   "ubuntu-20.04-cuda-11.7-docker",
+   "ubuntu-20.04-cuda-12.4",
+   "ubuntu-20.04-cuda-12.4-docker",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Giant ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "22 CPU",
+   "number_of_cores": 22
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x A100 SXM4 40GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "40GB GPU RAM",
+   "size_in_gigabytes": 40
+  },
+  "id": "a1000000-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "1A100.40S.22V",
+  "memory": {
+   "description": "120GB RAM",
+   "size_in_gigabytes": 120
+  },
+  "model": "A100 40GB",
+  "name": "A100 SXM4 40GB",
+  "p2p": null,
+  "price_per_hour": "1.288",
+  "spot_price": "0.6440",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.288",
+  "serverless_price": "1.417",
+  "serverless_spot_price": "0.7084",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-20.04",
+   "ubuntu-20.04-cuda-11.0",
+   "ubuntu-20.04-cuda-11.1",
+   "ubuntu-20.04-cuda-11.1-docker",
+   "ubuntu-20.04-cuda-11.2",
+   "ubuntu-20.04-cuda-11.4",
+   "ubuntu-20.04-cuda-11.4-docker",
+   "ubuntu-20.04-cuda-11.7",
+   "ubuntu-20.04-cuda-11.7-docker",
+   "ubuntu-20.04-cuda-12.4",
+   "ubuntu-20.04-cuda-12.4-docker",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Giant ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "176 CPU",
+   "number_of_cores": 176
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x A100 SXM4 40GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "320GB GPU RAM",
+   "size_in_gigabytes": 320
+  },
+  "id": "a1000003-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "8A100.40S.176V",
+  "memory": {
+   "description": "960GB RAM",
+   "size_in_gigabytes": 960
+  },
+  "model": "A100 40GB",
+  "name": "A100 SXM4 40GB",
+  "p2p": "600 GB/s",
+  "price_per_hour": "10.30",
+  "spot_price": "5.152",
+  "dynamic_price": null,
+  "max_dynamic_price": "10.30",
+  "serverless_price": "11.33",
+  "serverless_spot_price": "5.667",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-20.04",
+   "ubuntu-20.04-cuda-11.0",
+   "ubuntu-20.04-cuda-11.1",
+   "ubuntu-20.04-cuda-11.1-docker",
+   "ubuntu-20.04-cuda-11.2",
+   "ubuntu-20.04-cuda-11.4",
+   "ubuntu-20.04-cuda-11.4-docker",
+   "ubuntu-20.04-cuda-11.7",
+   "ubuntu-20.04-cuda-11.7-docker",
+   "ubuntu-20.04-cuda-12.4",
+   "ubuntu-20.04-cuda-12.4-docker",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Small ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "6 CPU",
+   "number_of_cores": 6
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x Tesla V100 16GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "16GB GPU RAM",
+   "size_in_gigabytes": 16
+  },
+  "id": "04cf5dc1-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "1V100.6V",
+  "memory": {
+   "description": "23GB RAM",
+   "size_in_gigabytes": 23
+  },
+  "model": "Tesla V100",
+  "name": "Tesla V100 16GB",
+  "p2p": null,
+  "price_per_hour": "0.1900",
+  "spot_price": "0.09500",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.1900",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "225GB NVME",
+   "size_in_gigabytes": 225
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "26.04.base",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "jupyter",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Small ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "10 CPU",
+   "number_of_cores": 10
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x Tesla V100 16GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "32GB GPU RAM",
+   "size_in_gigabytes": 32
+  },
+  "id": "03cf5dc1-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "2V100.10V",
+  "memory": {
+   "description": "45GB RAM",
+   "size_in_gigabytes": 45
+  },
+  "model": "Tesla V100",
+  "name": "Tesla V100 16GB",
+  "p2p": "NVLink up to 50GB/s",
+  "price_per_hour": "0.3800",
+  "spot_price": "0.1900",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.3800",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "450GB NVME",
+   "size_in_gigabytes": 450
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "26.04.base",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "jupyter",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Small ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "20 CPU",
+   "number_of_cores": 20
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x Tesla V100 16GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "64GB GPU RAM",
+   "size_in_gigabytes": 64
+  },
+  "id": "02cf5dc1-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "4V100.20V",
+  "memory": {
+   "description": "90GB RAM",
+   "size_in_gigabytes": 90
+  },
+  "model": "Tesla V100",
+  "name": "Tesla V100 16GB",
+  "p2p": "NVLink up to 50GB/s",
+  "price_per_hour": "0.7600",
+  "spot_price": "0.3800",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.7600",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "890GB NVME",
+   "size_in_gigabytes": 890
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "26.04.base",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "jupyter",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Small ML models",
+   "Multi-GPU training",
+   "FP64 calculations",
+   "NVLINK"
+  ],
+  "cpu": {
+   "description": "48 CPU",
+   "number_of_cores": 48
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x Tesla V100 16GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "128GB GPU RAM",
+   "size_in_gigabytes": 128
+  },
+  "id": "05cf5dc1-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "8V100.48V",
+  "memory": {
+   "description": "180GB RAM",
+   "size_in_gigabytes": 180
+  },
+  "model": "Tesla V100",
+  "name": "Tesla V100 16GB",
+  "p2p": "NVLink up to 50GB/s",
+  "price_per_hour": "1.520",
+  "spot_price": "0.7600",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.520",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "1800GB NVME",
+   "size_in_gigabytes": 1800
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "26.04.base",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "jupyter",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "30 CPU",
+   "number_of_cores": 30
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x RTX PRO 6000 96GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "96GB GPU RAM",
+   "size_in_gigabytes": 96
+  },
+  "id": "60006000-6000-47af-8ff6-600060006001",
+  "instance_type": "1RTXPRO6000.30V",
+  "memory": {
+   "description": "90GB RAM",
+   "size_in_gigabytes": 90
+  },
+  "model": "RTX PRO 6000",
+  "name": "RTX PRO 6000 96GB",
+  "p2p": null,
+  "price_per_hour": "1.964",
+  "spot_price": "0.9820",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.964",
+  "serverless_price": "2.160",
+  "serverless_spot_price": "1.080",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "60 CPU",
+   "number_of_cores": 60
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x RTX PRO 6000 96GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "192GB GPU RAM",
+   "size_in_gigabytes": 192
+  },
+  "id": "60006000-6000-47af-8ff6-600060006002",
+  "instance_type": "2RTXPRO6000.60V",
+  "memory": {
+   "description": "180GB RAM",
+   "size_in_gigabytes": 180
+  },
+  "model": "RTX PRO 6000",
+  "name": "RTX PRO 6000 96GB",
+  "p2p": "1597 GB/s",
+  "price_per_hour": "3.928",
+  "spot_price": "1.964",
+  "dynamic_price": null,
+  "max_dynamic_price": "3.928",
+  "serverless_price": "4.321",
+  "serverless_spot_price": "2.160",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "120 CPU",
+   "number_of_cores": 120
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x RTX PRO 6000 96GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "384GB GPU RAM",
+   "size_in_gigabytes": 384
+  },
+  "id": "60006000-6000-47af-8ff6-600060006003",
+  "instance_type": "4RTXPRO6000.120V",
+  "memory": {
+   "description": "360GB RAM",
+   "size_in_gigabytes": 360
+  },
+  "model": "RTX PRO 6000",
+  "name": "RTX PRO 6000 96GB",
+  "p2p": "1597 GB/s",
+  "price_per_hour": "7.856",
+  "spot_price": "3.928",
+  "dynamic_price": null,
+  "max_dynamic_price": "7.856",
+  "serverless_price": "8.642",
+  "serverless_spot_price": "4.321",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [],
+  "cpu": {
+   "description": "240 CPU",
+   "number_of_cores": 240
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x RTX PRO 6000 96GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "768GB GPU RAM",
+   "size_in_gigabytes": 768
+  },
+  "id": "60006000-6000-47af-8ff6-600060006004",
+  "instance_type": "8RTXPRO6000.240V",
+  "memory": {
+   "description": "720GB RAM",
+   "size_in_gigabytes": 720
+  },
+  "model": "RTX PRO 6000",
+  "name": "RTX PRO 6000 96GB",
+  "p2p": "1597 GB/s",
+  "price_per_hour": "15.71",
+  "spot_price": "7.856",
+  "dynamic_price": null,
+  "max_dynamic_price": "15.71",
+  "serverless_price": "17.28",
+  "serverless_spot_price": "8.642",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "32-16-8 bit operations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "20 CPU",
+   "number_of_cores": 20
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x L40S 48GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "48GB GPU RAM",
+   "size_in_gigabytes": 48
+  },
+  "id": "40000000-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "1L40S.20V",
+  "memory": {
+   "description": "60GB RAM",
+   "size_in_gigabytes": 60
+  },
+  "model": "L40S",
+  "name": "L40S 48GB",
+  "p2p": null,
+  "price_per_hour": "1.543",
+  "spot_price": "0.7715",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.543",
+  "serverless_price": "1.697",
+  "serverless_spot_price": "0.8487",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "32-16-8 bit operations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "40 CPU",
+   "number_of_cores": 40
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x L40S 48GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "96GB GPU RAM",
+   "size_in_gigabytes": 96
+  },
+  "id": "40000001-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "2L40S.40V",
+  "memory": {
+   "description": "120GB RAM",
+   "size_in_gigabytes": 120
+  },
+  "model": "L40S",
+  "name": "L40S 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "3.086",
+  "spot_price": "1.543",
+  "dynamic_price": null,
+  "max_dynamic_price": "3.086",
+  "serverless_price": "3.395",
+  "serverless_spot_price": "1.697",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "32-16-8 bit operations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "80 CPU",
+   "number_of_cores": 80
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x L40S 48GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "192GB GPU RAM",
+   "size_in_gigabytes": 192
+  },
+  "id": "40000002-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "4L40S.80V",
+  "memory": {
+   "description": "240GB RAM",
+   "size_in_gigabytes": 240
+  },
+  "model": "L40S",
+  "name": "L40S 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "6.172",
+  "spot_price": "3.086",
+  "dynamic_price": null,
+  "max_dynamic_price": "6.172",
+  "serverless_price": "6.789",
+  "serverless_spot_price": "3.395",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "32-16-8 bit operations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "160 CPU",
+   "number_of_cores": 160
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x L40S 48GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "384GB GPU RAM",
+   "size_in_gigabytes": 384
+  },
+  "id": "40000003-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "8L40S.160V",
+  "memory": {
+   "description": "480GB RAM",
+   "size_in_gigabytes": 480
+  },
+  "model": "L40S",
+  "name": "L40S 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "12.34",
+  "spot_price": "6.172",
+  "dynamic_price": null,
+  "max_dynamic_price": "12.34",
+  "serverless_price": "13.58",
+  "serverless_spot_price": "6.790",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "32-16-8 bit operations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "10 CPU",
+   "number_of_cores": 10
+  },
+  "deploy_warning": "RTX6000 Ada: Make sure your VM is running Nvidia driver 525.105.17 or newer",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x RTX 6000 Ada 48GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "48GB GPU RAM",
+   "size_in_gigabytes": 48
+  },
+  "id": "a6000ada-0000-4972-ae4e-d429115d055b",
+  "instance_type": "1RTX6000ADA.10V",
+  "memory": {
+   "description": "60GB RAM",
+   "size_in_gigabytes": 60
+  },
+  "model": "RTX 6000 Ada",
+  "name": "RTX 6000 Ada 48GB",
+  "p2p": null,
+  "price_per_hour": "1.160",
+  "spot_price": "0.5800",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.160",
+  "serverless_price": "1.276",
+  "serverless_spot_price": "0.6380",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "32-16-8 bit operations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "20 CPU",
+   "number_of_cores": 20
+  },
+  "deploy_warning": "RTX6000 Ada: Make sure your VM is running Nvidia driver 525.105.17 or newer",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x RTX 6000 Ada 48GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "96GB GPU RAM",
+   "size_in_gigabytes": 96
+  },
+  "id": "a6000ada-0001-4972-ae4e-d429115d055b",
+  "instance_type": "2RTX6000ADA.20V",
+  "memory": {
+   "description": "120GB RAM",
+   "size_in_gigabytes": 120
+  },
+  "model": "RTX 6000 Ada",
+  "name": "RTX 6000 Ada 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "2.320",
+  "spot_price": "1.160",
+  "dynamic_price": null,
+  "max_dynamic_price": "2.320",
+  "serverless_price": "2.552",
+  "serverless_spot_price": "1.276",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "32-16-8 bit operations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "40 CPU",
+   "number_of_cores": 40
+  },
+  "deploy_warning": "RTX6000 Ada: Make sure your VM is running Nvidia driver 525.105.17 or newer",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x RTX 6000 Ada 48GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "192GB GPU RAM",
+   "size_in_gigabytes": 192
+  },
+  "id": "a6000ada-0002-4972-ae4e-d429115d055b",
+  "instance_type": "4RTX6000ADA.40V",
+  "memory": {
+   "description": "240GB RAM",
+   "size_in_gigabytes": 240
+  },
+  "model": "RTX 6000 Ada",
+  "name": "RTX 6000 Ada 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "4.640",
+  "spot_price": "2.320",
+  "dynamic_price": null,
+  "max_dynamic_price": "4.640",
+  "serverless_price": "5.104",
+  "serverless_spot_price": "2.552",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "32-16-8 bit operations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "80 CPU",
+   "number_of_cores": 80
+  },
+  "deploy_warning": "RTX6000 Ada: Make sure your VM is running Nvidia driver 525.105.17 or newer",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x RTX 6000 Ada 48GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "384GB GPU RAM",
+   "size_in_gigabytes": 384
+  },
+  "id": "a6000ada-0003-4972-ae4e-d429115d055b",
+  "instance_type": "8RTX6000ADA.80V",
+  "memory": {
+   "description": "480GB RAM",
+   "size_in_gigabytes": 480
+  },
+  "model": "RTX 6000 Ada",
+  "name": "RTX 6000 Ada 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "9.280",
+  "spot_price": "4.640",
+  "dynamic_price": null,
+  "max_dynamic_price": "9.280",
+  "serverless_price": "10.21",
+  "serverless_spot_price": "5.104",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "FP32 calculations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "10 CPU",
+   "number_of_cores": 10
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x RTX A6000 48GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "48GB GPU RAM",
+   "size_in_gigabytes": 48
+  },
+  "id": "06cf5dc1-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "1A6000.10V",
+  "memory": {
+   "description": "60GB RAM",
+   "size_in_gigabytes": 60
+  },
+  "model": "RTX A6000",
+  "name": "RTX A6000 48GB",
+  "p2p": null,
+  "price_per_hour": "0.6400",
+  "spot_price": "0.3200",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.6400",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "FP32 calculations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "20 CPU",
+   "number_of_cores": 20
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x RTX A6000 48GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "96GB GPU RAM",
+   "size_in_gigabytes": 96
+  },
+  "id": "07cf5dc1-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "2A6000.20V",
+  "memory": {
+   "description": "120GB RAM",
+   "size_in_gigabytes": 120
+  },
+  "model": "RTX A6000",
+  "name": "RTX A6000 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "1.280",
+  "spot_price": "0.6400",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.280",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "FP32 calculations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "40 CPU",
+   "number_of_cores": 40
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x RTX A6000 48GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "192GB GPU RAM",
+   "size_in_gigabytes": 192
+  },
+  "id": "08cf5dc1-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "4A6000.40V",
+  "memory": {
+   "description": "240GB RAM",
+   "size_in_gigabytes": 240
+  },
+  "model": "RTX A6000",
+  "name": "RTX A6000 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "2.560",
+  "spot_price": "1.280",
+  "dynamic_price": null,
+  "max_dynamic_price": "2.560",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker"
+  ]
+ },
+ {
+  "best_for": [
+   "Large ML models",
+   "FP32 calculations",
+   "Single-GPU training"
+  ],
+  "cpu": {
+   "description": "80 CPU",
+   "number_of_cores": 80
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x RTX A6000 48GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "384GB GPU RAM",
+   "size_in_gigabytes": 384
+  },
+  "id": "09cf5dc1-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "8A6000.80V",
+  "memory": {
+   "description": "480GB RAM",
+   "size_in_gigabytes": 480
+  },
+  "model": "RTX A6000",
+  "name": "RTX A6000 48GB",
+  "p2p": "50GB/s",
+  "price_per_hour": "5.120",
+  "spot_price": "2.560",
+  "dynamic_price": null,
+  "max_dynamic_price": "5.120",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "24.04.kubernetes1.31.1.cuda12.9.qcow2",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "jupyter",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "4 CPU",
+   "number_of_cores": 4
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc00000-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.4V.16G",
+  "memory": {
+   "description": "16GB RAM",
+   "size_in_gigabytes": 16
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": null,
+  "price_per_hour": "0.04800",
+  "spot_price": "0.01920",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.04800",
+  "serverless_price": "0.05280",
+  "serverless_spot_price": "0.02110",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "8 CPU",
+   "number_of_cores": 8
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc00001-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.8V.32G",
+  "memory": {
+   "description": "32GB RAM",
+   "size_in_gigabytes": 32
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": null,
+  "price_per_hour": "0.09600",
+  "spot_price": "0.03840",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.09600",
+  "serverless_price": "0.1056",
+  "serverless_spot_price": "0.04220",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "16 CPU",
+   "number_of_cores": 16
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc00002-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.16V.64G",
+  "memory": {
+   "description": "64GB RAM",
+   "size_in_gigabytes": 64
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": null,
+  "price_per_hour": "0.1920",
+  "spot_price": "0.07680",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.1920",
+  "serverless_price": "0.2112",
+  "serverless_spot_price": "0.08440",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "32 CPU",
+   "number_of_cores": 32
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc00003-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.32V.128G",
+  "memory": {
+   "description": "128GB RAM",
+   "size_in_gigabytes": 128
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": null,
+  "price_per_hour": "0.3840",
+  "spot_price": "0.1536",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.3840",
+  "serverless_price": "0.4224",
+  "serverless_spot_price": "0.1688",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "64 CPU",
+   "number_of_cores": 64
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc00005-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.64V.256G",
+  "memory": {
+   "description": "256GB RAM",
+   "size_in_gigabytes": 256
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": null,
+  "price_per_hour": "0.7680",
+  "spot_price": "0.3072",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.7680",
+  "serverless_price": "0.8448",
+  "serverless_spot_price": "0.3376",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "96 CPU",
+   "number_of_cores": 96
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc00006-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.96V.384G",
+  "memory": {
+   "description": "384GB RAM",
+   "size_in_gigabytes": 384
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": null,
+  "price_per_hour": "1.152",
+  "spot_price": "0.4608",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.152",
+  "serverless_price": "1.267",
+  "serverless_spot_price": "0.5064",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "120 CPU",
+   "number_of_cores": 120
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc00007-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.120V.480G",
+  "memory": {
+   "description": "480GB RAM",
+   "size_in_gigabytes": 480
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": null,
+  "price_per_hour": "1.440",
+  "spot_price": "0.5760",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.440",
+  "serverless_price": "1.584",
+  "serverless_spot_price": "0.6330",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "180 CPU",
+   "number_of_cores": 180
+  },
+  "deploy_warning": "",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc10002-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.180V.720G",
+  "memory": {
+   "description": "720GB RAM",
+   "size_in_gigabytes": 720
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": "",
+  "price_per_hour": "2.160",
+  "spot_price": "0.8640",
+  "dynamic_price": null,
+  "max_dynamic_price": "2.160",
+  "serverless_price": "2.376",
+  "serverless_spot_price": "0.9495",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Genoa",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Running services",
+   "API server",
+   "Data transfers"
+  ],
+  "cpu": {
+   "description": "360 CPU",
+   "number_of_cores": 360
+  },
+  "deploy_warning": "",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "ccc10001-a5d2-4972-ae4e-d429115d055b",
+  "instance_type": "CPU.360V.1440G",
+  "memory": {
+   "description": "1440GB RAM",
+   "size_in_gigabytes": 1440
+  },
+  "model": "CPU Node",
+  "name": "AMD EPYC",
+  "p2p": "",
+  "price_per_hour": "4.320",
+  "spot_price": "1.728",
+  "dynamic_price": null,
+  "max_dynamic_price": "4.320",
+  "serverless_price": "4.752",
+  "serverless_spot_price": "1.899",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Genoa",
+  "supported_os": [
+   "24.04.base",
+   "24.04.cuda12.9",
+   "24.04.cuda12.9.docker",
+   "24.04.cuda13.0",
+   "24.04.cuda13.0.docker",
+   "24.04.cuda13.0.verda-gpuburn",
+   "24.04.cuda13.0.verda-gpureset",
+   "24.04.cuda13.1",
+   "24.04.cuda13.2",
+   "24.04.cuda13.2.docker",
+   "26.04.base",
+   "26.04.cuda12.9",
+   "26.04.cuda12.9.docker",
+   "26.04.cuda13.0",
+   "26.04.cuda13.0.docker",
+   "26.04.cuda13.1",
+   "26.04.cuda13.1.docker",
+   "26.04.cuda13.1.kubernetes-1.35.4",
+   "26.04.cuda13.2",
+   "26.04.cuda13.2.docker",
+   "26.04.cuda13.2.kubernetes-1.33.13",
+   "26.04.cuda13.2.kubernetes-1.34.9",
+   "26.04.cuda13.2.kubernetes-1.35.8",
+   "26.04.cuda13.2.kubernetes-1.36.4",
+   "26.04.cuda13.2.kubernetes-1.37.0",
+   "jupyter",
+   "jupyter.cuda.12.8",
+   "ubuntu-22.04",
+   "ubuntu-22.04-cuda-12.0",
+   "ubuntu-22.04-cuda-12.0-docker",
+   "ubuntu-22.04-cuda-12.1",
+   "ubuntu-22.04-cuda-12.1-docker",
+   "ubuntu-22.04-cuda-12.3",
+   "ubuntu-22.04-cuda-12.3-docker",
+   "ubuntu-22.04-cuda-12.4",
+   "ubuntu-22.04-cuda-12.4-cluster",
+   "ubuntu-22.04-cuda-12.4-docker",
+   "ubuntu-22.04-cuda-12.8-cluster",
+   "ubuntu-22.04-cuda-12.8-open",
+   "ubuntu-22.04-cuda-12.8-open-docker",
+   "ubuntu-22.04-cuda-13.0-open",
+   "ubuntu-22.04-cuda-13.0-open-docker",
+   "ubuntu-24.04",
+   "ubuntu-24.04-cuda-12.6",
+   "ubuntu-24.04-cuda-12.6-docker",
+   "ubuntu-24.04-cuda-12.8-open",
+   "ubuntu-24.04-cuda-12.8-open-docker",
+   "ubuntu-24.04-cuda-13.0-open",
+   "ubuntu-24.04-cuda-13.0-open-docker",
+   "ubuntu-26.04"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "30 CPU",
+   "number_of_cores": 30
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "1x RTX PRO 6000 CC 96GB",
+   "number_of_gpus": 1
+  },
+  "gpu_memory": {
+   "description": "96GB GPU RAM",
+   "size_in_gigabytes": 96
+  },
+  "id": "a7142910-939d-4f78-95e5-8614635f8bc1",
+  "instance_type": "1RTXPRO6000.30V.CC",
+  "memory": {
+   "description": "90GB RAM",
+   "size_in_gigabytes": 90
+  },
+  "model": "RTX PRO 6000 CC",
+  "name": "RTX PRO 6000 CC 96GB",
+  "p2p": null,
+  "price_per_hour": "2.003",
+  "spot_price": "1.002",
+  "dynamic_price": null,
+  "max_dynamic_price": "2.003",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "120 CPU",
+   "number_of_cores": 120
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x B300 CC SXM6 268GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "1072GB GPU RAM",
+   "size_in_gigabytes": 1072
+  },
+  "id": "a5e55451-8d42-4bdb-8de4-191b89ac1955",
+  "instance_type": "4B300.120V.CC",
+  "memory": {
+   "description": "1020GB RAM",
+   "size_in_gigabytes": 1020
+  },
+  "model": "B300 CC",
+  "name": "B300 CC SXM6 268GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "34.48",
+  "spot_price": "17.24",
+  "dynamic_price": null,
+  "max_dynamic_price": "34.48",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "240 CPU",
+   "number_of_cores": 240
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x B300 CC SXM6 268GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "2144GB GPU RAM",
+   "size_in_gigabytes": 2144
+  },
+  "id": "1a9c2f2e-50c7-47ee-8e93-d373b38eb20b",
+  "instance_type": "8B300.240V.CC",
+  "memory": {
+   "description": "2040GB RAM",
+   "size_in_gigabytes": 2040
+  },
+  "model": "B300 CC",
+  "name": "B300 CC SXM6 268GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "68.97",
+  "spot_price": "34.48",
+  "dynamic_price": null,
+  "max_dynamic_price": "68.97",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "60 CPU",
+   "number_of_cores": 60
+  },
+  "deploy_warning": "Blackwell: Use \"Ubuntu 24.04 + CUDA 12.8 Open\" image type or install NVIDIA open drivers manually",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "2x B200 CC SXM6 180GB",
+   "number_of_gpus": 2
+  },
+  "gpu_memory": {
+   "description": "360GB GPU RAM",
+   "size_in_gigabytes": 360
+  },
+  "id": "a2370eda-3447-4c86-81f9-bcf711ba3942",
+  "instance_type": "2B200.60V.CC",
+  "memory": {
+   "description": "340GB RAM",
+   "size_in_gigabytes": 340
+  },
+  "model": "B200 CC",
+  "name": "B200 CC SXM6 180GB",
+  "p2p": "900 GB/s",
+  "price_per_hour": "13.97",
+  "spot_price": "6.987",
+  "dynamic_price": null,
+  "max_dynamic_price": "13.97",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "120 CPU",
+   "number_of_cores": 120
+  },
+  "deploy_warning": "Blackwell: Use \"Ubuntu 24.04 + CUDA 12.8 Open\" image type or install NVIDIA open drivers manually",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "4x B200 CC SXM6 180GB",
+   "number_of_gpus": 4
+  },
+  "gpu_memory": {
+   "description": "720GB GPU RAM",
+   "size_in_gigabytes": 720
+  },
+  "id": "e6e7133a-4b93-47bf-85b3-6a295f2904b8",
+  "instance_type": "4B200.120V.CC",
+  "memory": {
+   "description": "680GB RAM",
+   "size_in_gigabytes": 680
+  },
+  "model": "B200 CC",
+  "name": "B200 CC SXM6 180GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "27.95",
+  "spot_price": "13.97",
+  "dynamic_price": null,
+  "max_dynamic_price": "27.95",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "240 CPU",
+   "number_of_cores": 240
+  },
+  "deploy_warning": "Blackwell: Use \"Ubuntu 24.04 + CUDA 12.8 Open\" image type or install NVIDIA open drivers manually",
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "8x B200 CC SXM6 180GB",
+   "number_of_gpus": 8
+  },
+  "gpu_memory": {
+   "description": "1440GB GPU RAM",
+   "size_in_gigabytes": 1440
+  },
+  "id": "f4d3a7d7-d1e5-48b3-88b6-eccb0c075d85",
+  "instance_type": "8B200.240V.CC",
+  "memory": {
+   "description": "1360GB RAM",
+   "size_in_gigabytes": 1360
+  },
+  "model": "B200 CC",
+  "name": "B200 CC SXM6 180GB",
+  "p2p": "1.8 TB/s",
+  "price_per_hour": "55.90",
+  "spot_price": "27.95",
+  "dynamic_price": null,
+  "max_dynamic_price": "55.90",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "NVIDIA",
+  "display_name": null,
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "4 CPU",
+   "number_of_cores": 4
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "a8af808f-b851-4432-84a2-98cc92b532b9",
+  "instance_type": "CPU.4V.16G.CC",
+  "memory": {
+   "description": "16GB RAM",
+   "size_in_gigabytes": 16
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "0.04896",
+  "spot_price": "0.01958",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.04896",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "8 CPU",
+   "number_of_cores": 8
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "34e5ab55-ebcf-44be-8107-c0432ddb4a2a",
+  "instance_type": "CPU.8V.32G.CC",
+  "memory": {
+   "description": "32GB RAM",
+   "size_in_gigabytes": 32
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "0.09792",
+  "spot_price": "0.03917",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.09792",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "16 CPU",
+   "number_of_cores": 16
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "7a136845-6230-4b24-8be9-7b5ec544e4ec",
+  "instance_type": "CPU.16V.64G.CC",
+  "memory": {
+   "description": "64GB RAM",
+   "size_in_gigabytes": 64
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "0.1958",
+  "spot_price": "0.07834",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.1958",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "32 CPU",
+   "number_of_cores": 32
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "792b4c0b-b627-44cb-b3d5-9c59e2025cd1",
+  "instance_type": "CPU.32V.128G.CC",
+  "memory": {
+   "description": "128GB RAM",
+   "size_in_gigabytes": 128
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "0.3917",
+  "spot_price": "0.1567",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.3917",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "64 CPU",
+   "number_of_cores": 64
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "0a28d75a-d1d3-446e-8539-550236725f8a",
+  "instance_type": "CPU.64V.256G.CC",
+  "memory": {
+   "description": "256GB RAM",
+   "size_in_gigabytes": 256
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "0.7834",
+  "spot_price": "0.3133",
+  "dynamic_price": null,
+  "max_dynamic_price": "0.7834",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "96 CPU",
+   "number_of_cores": 96
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "d05691d0-5c80-428d-bb62-1982b4d251cd",
+  "instance_type": "CPU.96V.384G.CC",
+  "memory": {
+   "description": "384GB RAM",
+   "size_in_gigabytes": 384
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "1.175",
+  "spot_price": "0.4700",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.175",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "120 CPU",
+   "number_of_cores": 120
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "b8925f32-f5d8-4a6f-bd79-0a8cf7fac24b",
+  "instance_type": "CPU.120V.480G.CC",
+  "memory": {
+   "description": "480GB RAM",
+   "size_in_gigabytes": 480
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "1.469",
+  "spot_price": "0.5875",
+  "dynamic_price": null,
+  "max_dynamic_price": "1.469",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Rome/Milan",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "180 CPU",
+   "number_of_cores": 180
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "878bf5be-854e-45c4-bba2-d6521c943df6",
+  "instance_type": "CPU.180V.720G.CC",
+  "memory": {
+   "description": "720GB RAM",
+   "size_in_gigabytes": 720
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "2.203",
+  "spot_price": "0.8813",
+  "dynamic_price": null,
+  "max_dynamic_price": "2.203",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Genoa",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ },
+ {
+  "best_for": [
+   "Confidential Computing",
+   "Secure Workloads"
+  ],
+  "cpu": {
+   "description": "360 CPU",
+   "number_of_cores": 360
+  },
+  "deploy_warning": null,
+  "description": "Dedicated Hardware Instance",
+  "gpu": {
+   "description": "",
+   "number_of_gpus": 0
+  },
+  "gpu_memory": {
+   "description": "",
+   "size_in_gigabytes": 0
+  },
+  "id": "49f64078-2e0b-4e87-9b86-fda0b27aec29",
+  "instance_type": "CPU.360V.1440G.CC",
+  "memory": {
+   "description": "1440GB RAM",
+   "size_in_gigabytes": 1440
+  },
+  "model": "CPU Node CC",
+  "name": "AMD EPYC CC",
+  "p2p": null,
+  "price_per_hour": "4.406",
+  "spot_price": "1.763",
+  "dynamic_price": null,
+  "max_dynamic_price": "4.406",
+  "serverless_price": "0",
+  "serverless_spot_price": "0",
+  "storage": {
+   "description": "dynamic"
+  },
+  "currency": "usd",
+  "manufacturer": "AMD",
+  "display_name": "Genoa",
+  "supported_os": [
+   "24.04.cuda13.2.cc",
+   "26.04.cuda13.2.cc"
+  ]
+ }
+]
