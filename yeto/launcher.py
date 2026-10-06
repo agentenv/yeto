@@ -235,6 +235,10 @@ _DETECT_IFACE = (
 )
 
 
+# Megatron-LM checkout inside the radixark/miles-based ports images.
+PORTS_MEGATRON_PATH = "/root/Megatron-LM"
+
+
 def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
     """Shell exports every island node runs before Ray starts; "" on one node."""
     if num_nodes <= 1:
@@ -3374,6 +3378,17 @@ def make_miles_island_task(
     island_pythonpath = (
         "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
+    # Ports images install Megatron-LM with `pip install -e .`, whose editable
+    # finder maps only megatron.core and megatron.training; megatron.
+    # post_training (imported by megatron.training.get_model whenever
+    # nvidia-modelopt is importable, i.e. every raw/native-provider run such
+    # as Flash-Next) is then unresolvable (S11 try25 fnA).  Miles' own
+    # launchers always put the checkout on PYTHONPATH; do the same, after
+    # our own sources so it shadows nothing of ours.  The driver's
+    # PYTHONPATH reaches every Ray actor through the job runtime_env.
+    island_megatron_path = (
+        f":{PORTS_MEGATRON_PATH}" if getattr(args, "rl_engine", "ports") == "ports" else ""
+    )
     # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): the
     # SKYPILOT_DOCKER_* login goes into the task SECRETS, SkyPilot's supported
     # form: every Task load re-derives the DockerLoginConfig from them
@@ -3434,7 +3449,7 @@ def make_miles_island_task(
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.
             f"{algorithm_prelude}"
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
-            f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir"
+            f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir{island_megatron_path}"
             "${PYTHONPATH:+:$PYTHONPATH} "
             f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}\n"
             "else\n"

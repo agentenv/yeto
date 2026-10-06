@@ -176,8 +176,8 @@ def test_ports_island_puts_the_pinned_miles_checkout_first(monkeypatch):
     ports_run = _island_task(ports, monkeypatch).run
     # The upstream image's /root/miles is on its PYTHONPATH; ours shadows it.
     assert (
-        "PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
-        in ports_run
+        "PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir:/root/Megatron-LM"
+        "${PYTHONPATH:+:$PYTHONPATH} " in ports_run
     )
     assert 'RAY_ADDRESS="$MASTER_ADDR:6379"' in ports_run
 
