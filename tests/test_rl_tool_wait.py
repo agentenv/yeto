@@ -119,3 +119,56 @@ def test_actor_handle_shape_is_supported():
     with tool_wait_scope(handle, "x"):
         assert read_tool_wait(handle).in_flight == 1
     assert read_tool_wait(handle).in_flight == 0
+
+
+# ------------------------------------------------ 3.3 X5 evidence: tool side-effect journal
+def test_side_effect_log_is_append_only_monotonic_and_restart_safe(tmp_path):
+    from yeto.rl.engine.tool_wait import ToolSideEffectLog, read_side_effects, side_effect_duplicates
+
+    path = tmp_path / "elastic-state" / "side_effects.jsonl"
+    log = ToolSideEffectLog(path, clock=lambda: 100.0, monotonic=lambda: 5.0)
+    assert log.records() == [] and log.seq == 0
+    r1 = log.record("t1", "c1", seconds=3.0)
+    r2 = log.complete("t1", "c1")
+    assert (r1["kind"], r1["seq"], r1["trajectory_id"], r1["tool_call_id"], r1["wall_time"], r1["seconds"]) == \
+        ("tool_side_effect", 1, "t1", "c1", 100.0, 3.0)
+    assert (r2["kind"], r2["seq"]) == ("tool_complete", 2)
+    assert [r["seq"] for r in read_side_effects(path)] == [1, 2]
+    # a restarted process continues the sequence
+    log2 = ToolSideEffectLog(path)
+    assert log2.seq == 2 and log2.record("t2", "c2")["seq"] == 3
+    recs = read_side_effects(path)
+    assert side_effect_duplicates(recs) == []
+    log2.record("t1", "c1")  # a replay
+    assert side_effect_duplicates(read_side_effects(path)) == [("t1", "c1")]
+    # a torn trailing line is ignored, the rest is read
+    with open(path, "a") as fh:
+        fh.write('{"kind": "tool_side_eff')
+    assert len(read_side_effects(path)) == 4
+    assert read_side_effects(tmp_path / "missing.jsonl") == []
+
+
+def test_scopes_journal_before_entering_and_complete_after_exit(tmp_path):
+    import asyncio
+
+    from yeto.rl.engine.tool_wait import ToolSideEffectLog, async_tool_wait_scope
+
+    board = ToolWaitBoard()
+    log = ToolSideEffectLog(tmp_path / "se.jsonl")
+    with tool_wait_scope(board, "t1", log, "call-a"):
+        recs = log.records()
+        assert [(r["kind"], r["tool_call_id"]) for r in recs] == [("tool_side_effect", "call-a")]
+        assert read_tool_wait(board).in_flight == 1
+    assert [r["kind"] for r in log.records()] == ["tool_side_effect", "tool_complete"]
+
+    async def run():
+        async with async_tool_wait_scope(board, "t2", log):  # call id defaults to the trajectory id
+            assert read_tool_wait(board).in_flight == 1
+            assert log.records()[-1]["tool_call_id"] == "t2"
+
+    asyncio.run(run())
+    assert [r["kind"] for r in log.records()][-2:] == ["tool_side_effect", "tool_complete"]
+    assert read_tool_wait(board).in_flight == 0
+    with tool_wait_scope(board, "t3"):  # no log: unchanged behaviour
+        pass
+    assert len(log.records()) == 4

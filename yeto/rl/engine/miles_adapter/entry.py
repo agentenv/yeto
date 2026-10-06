@@ -155,12 +155,21 @@ MILES_DECLARED: dict[str, str] = {
 # -- miles` touches only megatron_utils/lora/dp_invariant_state.py, reached
 # only with --lora-dp-invariant-state (default off); default training/loss
 # path unchanged (evidence .../2026-09-30-img-e3a11ab).
+# 1023269 = e3a11ab3 + M3 + A27 (image-m3a27), same basis: `git diff
+# --name-only e3a11ab38..1023269 -- miles miles_plugins` touches
+# megatron_utils/model.py (a new is_qwen3_8_next_model LoRA-injection branch
+# only), update_weight/hf_weight_iterator_direct.py, utils/lora/*,
+# miles_plugins/models/qwen3_8_next/lora.py, sglang_utils/sglang_api_client.py,
+# weight_update/protocols/broadcast.py, utils/workers/ray_worker_manager.py and
+# parser entries in arguments.py -- no loss_hub/training-loss file (evidence
+# .../evidence/ports-image/2026-10-02-m3a27).
 _PINS_0AF62F4D_PLUS = frozenset({
     "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
     "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
     "2f23a0fca9b80f6a7300da401703c343014b03c0",
     "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",
     "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",
+    "1023269412bf4e54a1d95c8d2deaee795871aa72",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
@@ -374,6 +383,17 @@ def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
     return None
 
 
+def side_effect_log_kwargs(elastic: Any) -> dict[str, Any]:
+    """3.3 X5 evidence switch (YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG, launcher
+    --rl-test-tool-side-effect-log): the pool journals every execution of the
+    injected tool in ``<elastic state dir>/side_effects.jsonl``."""
+    from .rollout import SIDE_EFFECT_LOG_FILE, side_effect_log_enabled
+
+    if elastic is None or not side_effect_log_enabled():
+        return {}
+    return {"side_effect_log": Path(elastic.controller.state_dir) / SIDE_EFFECT_LOG_FILE}
+
+
 def harness_source(miles_args: Any, elastic: Any = None) -> Any:
     """IR-2: where the drain probe / load sample read harness counts from.
 
@@ -574,7 +594,8 @@ def compose_island(
                 {"declared_cells": resolve_declared_cells(
                     inference_controller, runner, elastic.declared_cells),
                  "track_timeout_s": elastic.track_timeout_s,
-                 "tool_wait_board": elastic.tool_wait_board}
+                 "tool_wait_board": elastic.tool_wait_board,
+                 **side_effect_log_kwargs(elastic)}
                 if elastic is not None
                 else {}
             ),

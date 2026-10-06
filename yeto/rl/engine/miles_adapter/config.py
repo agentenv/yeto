@@ -398,6 +398,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "deterministic_trainer": _ok,
     "trainer_dp_edges": _ok,
     "use_miles_router": _ok,
+    "update_weight_group_timeout_s": _ok,
 }
 
 
@@ -756,6 +757,10 @@ def translate_run_config(
     if getattr(config, "use_miles_router", False):
         # --rl-elastic: fork cordon/drain/admit_cordoned need the Miles router
         values.append("--use-miles-router")
+    timeout_s = getattr(config, "update_weight_group_timeout_s", None)
+    if timeout_s is not None:
+        # A27: bounded weight-update group rendezvous (fork image-m3a27+).
+        values.extend(("--update-weight-group-timeout-s", f"{float(timeout_s):g}"))
     if getattr(config, "deterministic_trainer", False):
         values.append("--deterministic-mode")  # Megatron deterministic kernels (E2 plan-v2 §0)
     if config.data.chat_template_kwargs:
