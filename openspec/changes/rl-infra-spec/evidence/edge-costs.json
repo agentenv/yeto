@@ -1,0 +1,22 @@
+[
+ {
+  "profile_hash": "sha256:6039d75ff8514328f4edc2e2d341f2e20f230b299b905a69c6a463ea499e12f3",
+  "source": "T2R1S1",
+  "target": "T2R2S0",
+  "cost_lower_s": 146.544,
+  "cost_upper_s": 179.693,
+  "recovery_upper_s": 2.722,
+  "n": 3,
+  "provenance": "s11-h200-20261005o-e1 (Nebius 8xH100 eu-north1, single node, island allocated GPUs 0-3; Qwen3-0.6B LoRA partitioned-serial); blocking = journal SUCCEEDED txns ['up1', 'up2', 'up3']; cost_upper=max*1.2; recovery_upper=max(first_step_extra)*1.2 (first-step overhead only; failure-recovery path not measured on H100)"
+ },
+ {
+  "profile_hash": "sha256:6039d75ff8514328f4edc2e2d341f2e20f230b299b905a69c6a463ea499e12f3",
+  "source": "T2R2S0",
+  "target": "T2R1S1",
+  "cost_lower_s": 3.203,
+  "cost_upper_s": 6.365,
+  "recovery_upper_s": 1.746,
+  "n": 3,
+  "provenance": "s11-h200-20261005o-e1 (Nebius 8xH100 eu-north1, single node, island allocated GPUs 0-3; Qwen3-0.6B LoRA partitioned-serial); blocking = journal SUCCEEDED txns ['dn1', 'dn2', 'dn3']; cost_upper=max*1.2; recovery_upper=max(first_step_extra)*1.2 (first-step overhead only; failure-recovery path not measured on H100)"
+ }
+]

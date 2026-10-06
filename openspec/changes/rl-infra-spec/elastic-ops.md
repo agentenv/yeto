@@ -1,5 +1,10 @@
 # 弹性分配操作手册（草稿，6.7"手册"的一部分）
 
+## 现状（S11，2026-10-06）
+- **auto 不可启用**：H100 单节点实测（`evidence/d1/`）T2R1S1 vs T2R2S0 稳态差 ±1.5% 且随 seed 翻向；up 边阻塞 146.5–149.7 s（init 98%）、dn 3.2–5.3 s；回本 ≈818 轮。成本表 `evidence/edge-costs.json`（n=3）。无净收益边 → 只用 manual/recommend。CPU replay（`evidence/d2-replay/`）四场景动态 0 次切换。
+- **Flash-Next 前置清单**：B0-1 FS 扩容 1024GiB 完成；B0-2 full 转换（fnconv）与阶段 A 因 H200 容量阻塞**未执行**；正式首跑（4×8 H200）按用户裁定暂缓。
+- 本手册 §1–§5b 仍为草稿，6.7 验收未做。
+
 状态：d2-wire 分支。CPU 已验证；**未在 GPU 上验证，也没有任何一条实测净收益边**。默认行为不变：不传 `elastic_hook` 时 driver 与旧路径逐事件一致；`recommend_mode` 默认 `disabled`。
 
 ## 1. 组件与数据流
