@@ -11,7 +11,11 @@
 #   segs 1-2c. The fn segments always run on a separate FS-attached H200 cluster (sweep cluster downed first).
 # Clusters: <P>-l-l0-eu-north1 (L40S), <P>-h-l0-eu-north1 (H200). Exit: watchdogs killed, both clusters downed, cleanup_run.sh <P> x2.
 # Budget guard: spent = sum(cluster wall x rate); a step starts only if spent + its estimate <= CAP_USD.
-# usage: s11h200chain.sh <prefix>     env: PREFER_L40S (1), CAP_USD (150; stage total $300), FN_ENABLE (1), FNA_EST_USD (50), D1_GPU (h200|h100), FALLBACK_H200 (1), FN_GPU (h200|h100), FN_CONV (1; 0 when FN_GPU=h100), FNCONV_EST_USD (50), HARD (3000), HARD_FNBOOT, HARD_FNA
+# START_AT=e1: skip seg 1 (sweep already valid in an earlier chain); e1 is the first run and provisions the cluster
+#   (set PREFER_L40S=0 D1_GPU=h100 to stay on the H100 path). Then lp, c17/c29, fn as usual.
+# A failed run whose launcher tore the cluster down (job FAILED -> recovery teardown, even with --keep) no longer stops the chain:
+#   the next step re-provisions (cost of the dead cluster folded into ACC); lp runs after the re-provisioning c17 in that case.
+# usage: s11h200chain.sh <prefix>     env: START_AT (sweep|e1), PREFER_L40S (1), CAP_USD (150; stage total $300), FN_ENABLE (1), FNA_EST_USD (50), D1_GPU (h200|h100), FALLBACK_H200 (1), FN_GPU (h200|h100), FN_CONV (1; 0 when FN_GPU=h100), FNCONV_EST_USD (50), HARD (3000), HARD_FNBOOT, HARD_FNA
 set -u
 P=$1; D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd $D/../.. && pwd); B=${RUN_ROOT:-/home/michael/work/s1-runs}; export HOME=/home/michael
 SKY=/home/michael/work/gpu-head/venv/bin/sky; CAP=${CAP_USD:-150}; LOG=$B/$P.chain.log; mkdir -p $B
@@ -55,7 +59,12 @@ step() {  # step <name> <case> <est_usd> [env...]
   local name=$1 c=$2 est=$3; shift 3
   local s; s=$(spent); python3 -c "import sys;sys.exit(0 if $s+$est<=$CAP else 1)" || { log "budget guard: spent \$$s + est \$$est > \$$CAP -> skip $name and the rest"; exit 4; }
   if [ $N -gt 0 ]; then
-    timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP ' || { log "cluster $CL not UP before $name -> stop"; exit 2; }
+    if ! timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP '; then
+      log "cluster $CL not UP before $name (previous run's launcher tore it down) -> fold its cost, re-provision with $name"
+      if [ $H = 1 ]; then down $CL H; else down $CL L; fi; N=0
+    fi
+  fi
+  if [ $N -gt 0 ]; then
     $D/s1reset.sh $CL $B/$P-$name.reset.txt || { log "reset NOT CLEAN before $name -> stop"; exit 3; }
   fi
   local t0; t0=$(date +%s)
@@ -71,6 +80,8 @@ step() {  # step <name> <case> <est_usd> [env...]
 }
 EST=$( [ $H = 1 ] && hest $G || echo 3 )   # per warm run (8 min); first run adds cold start
 sw() { step $1 d1sweep $2 D1_CFG=$3 SEED=$4; }
+SA=${START_AT:-sweep}; case $SA in sweep|e1) ;; *) log "abort: START_AT must be sweep|e1 (got $SA)"; exit 64;; esac
+if [ $SA = sweep ]; then
 sw a17 $(( EST * 3 )) T2R1S1 17; rc=$?
 if [ $rc = 7 ] && [ $H = 0 ]; then
   log "L40S provision failed -> fallback to $G $(sku $G) \$$RATE_H/h ($CLH)"; H=1; CL=$CLH; CP=$P-h; EST=$(hest $G); export NODES=1
@@ -85,12 +96,21 @@ fi
 log "sweep SKU: $( [ $H = 1 ] && echo "$(sku $G) \$$RATE_H/h" || echo "L40S \$$RATE_L/h")"
 sw b17 $EST T2R2S0 17; sw a29 $EST T2R1S1 29; sw b29 $EST T2R2S0 29
 step e1 d1e1 $(( EST * 2 )) KEEP_M3=1
+else
+log "START_AT=e1: sweep skipped; e1 provisions $CL"
+step e1 d1e1 $(( EST * 4 )) KEEP_M3=1; rc=$?
+[ $rc = 7 ] && { log "e1 provision failed on $CL -> stop (capacity)"; exit 8; }
+fi
 python3 $D/s1cost.py $B/$P-e1 --json $B/$P-e1/cost.json > $B/$P-e1/cost.tsv 2>&1; log "e1 cost rows $(($(wc -l < $B/$P-e1/cost.tsv)-1)) inwatch=$(grep -c submitted $B/$P-e1/pulled/inwatch.log 2>/dev/null)"
-# seg 2b: lp on the same cluster, island stopped
+# seg 2b: lp on the same cluster, island stopped (if e1's launcher tore the cluster down, lp runs after c17 re-provisions it)
+lp() {
 if python3 -c "import sys;sys.exit(0 if $(spent)+$EST<=$CAP else 1)" && $D/s1reset.sh $CL $B/$P-lp.reset.txt; then
   timeout 2400 $D/s11lp.sh $CL $B/$P-lp $( [ $H = 1 ] && echo 4 || echo 2 ) > $B/$P-lp.out 2>&1; log "lp $(tail -1 $B/$P-lp.out | cut -c1-300)"
 else log "lp skipped (budget or reset)"; fi
-sw c17 $EST T1R3S0 17; sw c29 $EST T1R3S0 29
+}
+if timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP '; then lp; sw c17 $EST T1R3S0 17
+else log "cluster $CL not UP after e1 -> c17 re-provisions, lp after it"; sw c17 $(( EST * 3 )) T1R3S0 17; lp; fi
+sw c29 $EST T1R3S0 29
 # seg 3 (chain tail): Flash-Next stage A on its OWN H200 cluster <P>-f (the model store FS is attached only at provision time, so the
 # sweep cluster -- launched without --model-store -- cannot be reused). The sweep cluster is downed first.
 #   fnboot: fnrun fn8s launch (--keep) to provision the FS-attached node; with no torch_dist yet the learner refuses the ref-load
