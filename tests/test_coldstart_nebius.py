@@ -128,3 +128,12 @@ def test_island_task_model_store(monkeypatch):
     plain = _cli(["--gpu", "nebius:2x1xl40s@eu-north1"])
     _prepare_rl_args(plain)
     assert "yeto-model-store" not in _island_task(plain, monkeypatch).run
+
+
+def test_env_opt_out_keeps_plain_docker_image(monkeypatch):
+    from yeto.launcher import nebius_baked_image_id
+    img = "docker:ghcr.io/x/y@sha256:" + "a" * 64
+    baked = {"sha256:" + "a" * 64: {"eu-north1": "computeimage-test"}}
+    assert nebius_baked_image_id(img, "nebius", "eu-north1", baked=baked) != img
+    monkeypatch.setenv("YETO_NEBIUS_NO_BAKED_IMAGE", "1")
+    assert nebius_baked_image_id(img, "nebius", "eu-north1", baked=baked) == img
