@@ -4,13 +4,13 @@
 #   seg 2 D1-3 e1 (5.1): d1e1, 3 up/down pairs, 14 rounds
 #   seg 2b lp: teacher-forced logprob of the base model on the island's GPUs / TP shapes (s11lp.sh)
 #   seg 2c T1R3S0 s17, s29 (sweep config with the most layout risk -> after the must-have data)
-#   seg 3 fnboot -> fnprep -> fna (Flash-Next stage A, 4layer, own FS-attached H200 cluster <P>-f; highest FAILED risk -> chain tail)
+#   seg 3 fnboot -> fnprep -> fna -> fnconv (Flash-Next stage A, 4layer, own FS-attached H200 cluster <P>-f; highest FAILED risk -> chain tail)
 # Path: PREFER_L40S=1 (default) tries the first run on nebius 2x2 L40S eu-north1 ($9.14/h). Provision failure (provision_failed.txt)
 #   -> immediately falls back to nebius 1x8 H200 eu-north1 (gpu-h200-sxm_8gpu-128vcpu-1600gb, $36/h, island allocated GPUs 0-3) for
 #   segs 1-2c. The fn segments always run on a separate FS-attached H200 cluster (sweep cluster downed first).
 # Clusters: <P>-l-l0-eu-north1 (L40S), <P>-h-l0-eu-north1 (H200). Exit: watchdogs killed, both clusters downed, cleanup_run.sh <P> x2.
 # Budget guard: spent = sum(cluster wall x rate); a step starts only if spent + its estimate <= CAP_USD.
-# usage: s11h200chain.sh <prefix>     env: PREFER_L40S (1), CAP_USD (150; stage total $300), FN_ENABLE (1), FNA_EST_USD (50), HARD (3000), HARD_FNBOOT, HARD_FNA
+# usage: s11h200chain.sh <prefix>     env: PREFER_L40S (1), CAP_USD (150; stage total $300), FN_ENABLE (1), FNA_EST_USD (50), FN_CONV (1), FNCONV_EST_USD (50), HARD (3000), HARD_FNBOOT, HARD_FNA
 set -u
 P=$1; D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd $D/../.. && pwd); B=${RUN_ROOT:-/home/michael/work/s1-runs}; export HOME=/home/michael
 SKY=/home/michael/work/gpu-head/venv/bin/sky; CAP=${CAP_USD:-150}; LOG=$B/$P.chain.log; mkdir -p $B
@@ -84,6 +84,7 @@ sw c17 $EST T1R3S0 17; sw c29 $EST T1R3S0 29
 #           (fail-fast, expected) -- if torch_dist already exists it simply IS the fnA run.
 #   fnprep: s11fnprep.sh (populate 4layer snapshot + convert torch_dist; df gates; never deletes) -> fnprep.json
 #   fna   : fnrun fn8s again (warm), STEPS=6; judge_qwen3_8_next_lora_log.py on run.log
+#   fnconv: s11fnconv.sh (B0-2 full -> torch_dist, TP2 PP4 nproc 8; df/marker/no-retry gates) -> fnconv.json
 [ "${FN_ENABLE:-1}" = 1 ] || { log "fn segments disabled (FN_ENABLE=0)"; exit 0; }
 if [ $H = 1 ]; then down $CLH H; else down $CLL L; fi
 CLF=$P-f-l0-eu-north1; CL=$CLF; CP=$P-f; H=1; N=0; RATE_F=$RATE_H
@@ -113,3 +114,13 @@ grep -q FNPREP_OK $B/$P-fnprep.out || { log "fnprep failed -> fnA not executed";
 s=$(spent); python3 -c "import sys;sys.exit(0 if $s+25<=$CAP else 1)" || { log "budget guard before fna (\$$s) -> fnA not executed"; exit 4; }
 $D/s1reset.sh $CL $B/$P-fna.reset.txt || { log "reset NOT CLEAN before fna -> stop"; exit 3; }
 fnrun fna ${HARD_FNA:-3600}
+# seg 3d fnconv (B0-2, user-approved 10-06): full HF -> torch_dist on the same FS cluster, after fnA (chain tail; never re-run on failure:
+# a partial output dir makes s11fnconv.sh FAIL instead of retrying). Est $22-50 [speculative; conversion time never measured] -> guard
+# uses FNCONV_EST_USD (50) inside the same CAP. FN_CONV=0 skips. fnA failing does not block it (independent of the 4layer run).
+[ "${FN_CONV:-1}" = 1 ] || { log "fnconv disabled (FN_CONV=0)"; exit 0; }
+timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP ' || { log "fn cluster not UP before fnconv -> stop"; exit 2; }
+s=$(spent); python3 -c "import sys;sys.exit(0 if $s+${FNCONV_EST_USD:-50}<=$CAP else 1)" || { log "budget guard before fnconv (\$$s + \$${FNCONV_EST_USD:-50} > \$$CAP) -> fnconv not executed"; exit 4; }
+$D/s1reset.sh $CL $B/$P-fnconv.reset.txt || { log "reset NOT CLEAN before fnconv -> stop"; exit 3; }
+mkdir -p $B/$P-fnconv; tc=$(date +%s)
+$D/s11fnconv.sh $CL $B/$P-fnconv $B/$P-fnprep/yeto > $B/$P-fnconv.out 2>&1
+log "fnconv $(tail -1 $B/$P-fnconv.out) wall=$(( $(date +%s) - tc ))s spent~\$$(spent) $(tr -d '\n ' < $B/$P-fnconv/fnconv.json 2>/dev/null | cut -c1-400)"
