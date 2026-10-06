@@ -12,6 +12,11 @@ Miles' (ip, gpu) sort is emulated by sorting on the label). Cases:
   gpu_pool    Q6: a fake nvidia-smi per node (Ray task pinned to the node) -> baseline
               bound, same pool accepted, replaced worker refused, accepted with
               --rl-elastic-accept-rebind (old->new mapping journaled)
+  mixed_pp2   C7 (Q2/Q3): the 2x2 cfg tests/multinode_gpu/resources-2x2.json T2R1S1 ->
+              trainer_layout (PP2 trainer n0:0 + n1:0, rollout cell n0:1 on the
+              trainer's node, standby n1:1) -> PlacementRequest(bundle_map) ->
+              StartupBundles(placement_map) over a real 4-bundle PG pinned 2 per
+              node; TP2 across nodes and a non-rectangular trainer are refused
 """
 
 from __future__ import annotations
@@ -107,8 +112,10 @@ def startup_bundles(shuffle=False):
         order = order[::2] + order[1::2]
     pool_gpus = tuple(f"p{i}" for i in range(2 * G))
     view = _Info(pg, order, [b % G for b in order])
+    # D3 head pin (2026-10-03 ruling): a multi-node StartupBundles needs the Ray head's node id; block 0 must be it
+    head = next(nid for nid, v in nodes.items() if v["label"] == "yeto_node:0")
     sb = StartupBundles(pool_gpus=pool_gpus, views={"actor": view}, placement_map=None,
-                        gpus_per_node=G,
+                        gpus_per_node=G, head_node=head,
                         node_resolver=lambda pg_, b: ray.util.placement_group_table(pg_)["bundles_to_node_id"][b])
     return pg, sb, table, nodes, order
 
@@ -332,8 +339,76 @@ def case_gpu_pool():
     log("PASS gpu_pool")
 
 
+# ------------------------------------------------------------------ C7 mixed_pp2 (Q2 + Q3)
+def case_mixed_pp2():
+    from yeto.rl.elastic_benchmark.capabilities import parse_configs
+    from yeto.rl.engine.miles_adapter.bundles import ROLE_VIEWS, BundleMapError, StartupBundles
+    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+    from yeto.rl.engine.multinode import Topology, TopologyError, node_placement_rejection, trainer_layout
+
+    cfg_path = Path(__file__).resolve().parents[1] / "multinode_gpu" / "resources-2x2.json"
+    configs = parse_configs(json.loads(cfg_path.read_text()))
+    slots = configs["T2R1S1"].placement_slots
+    topo = Topology(2, 2)
+    log("cfg T2R1S1 placement slots:", slots)
+    # launcher side (rl_island_layout): shape + bundle map from the cfg placement
+    nodes_, per_node, bundle_map = trainer_layout(slots, topo)
+    assert (nodes_, per_node) == (2, 1), (nodes_, per_node)
+    assert bundle_map == {"trainer": (0, 2), "rollout": (1,), "standby": (3,)}, bundle_map
+    log("trainer_layout -> --actor-num-nodes 2 --actor-num-gpus-per-node 1, bundle map", bundle_map)
+    # learner side rule set: tp1 pp2 (node_parallel 1, dense group 2) accepts the cross-node PP trainer
+    req = PlacementRequest("fixed-partition", trainer_gpus=2, rollout_gpus=1, gpus_per_engine=1, standby_gpus=1,
+                           gpus_per_node=2, model_parallel=2, node_parallel=1, bundle_map=bundle_map,
+                           rollout_cell_names=("c0", "c1"))
+    assert req.trainer_shape() == (2, 1), req.trainer_shape()
+    pm = req.placement_map_arg
+    assert pm["rollout_cells"] == [{"name": "c0", "bundles": [1], "start": True},
+                                   {"name": "c1", "bundles": [3], "start": False}], pm
+    log("placement map (cells cut per node; c1 = standby n1:1 for the m3 up edge):", json.dumps(pm))
+    # EP2 with tp1 pp1 (M2) is accepted on the same slots; TP2 across n0:0/n1:0 is refused
+    assert node_placement_rejection(slots, node_parallel=1, expert_parallel=2, gpus_per_engine=1) is None
+    why = node_placement_rejection(slots, node_parallel=2, gpus_per_engine=1)
+    assert why and "spans nodes" in why, why
+    log("tp*cp = 2 on the same slots refused:", why)
+    try:
+        trainer_layout({"trainer": [(0, 0), (0, 1), (1, 0)], "rollout": [[(1, 1)]], "standby": []}, topo)
+    except TopologyError as exc:
+        log("non-rectangular T3 refused:", exc)
+    else:
+        raise AssertionError("non-rectangular trainer accepted")
+    # a real placement group: 4 bundles, two pinned to each simulated node by its label
+    pg = ray.util.placement_group([{"GPU": 1, "CPU": 1, "yeto_node:0": 0.01}] * 2
+                                  + [{"GPU": 1, "CPU": 1, "yeto_node:1": 0.01}] * 2, strategy="PACK")
+    ray.get(pg.ready(), timeout=120)
+    b2n = ray.util.placement_group_table(pg)["bundles_to_node_id"]
+    nodes = labelled_nodes()
+    order = sorted(range(4), key=lambda b: (nodes[b2n[b]]["label"], b))  # Miles' (ip, gpu) sort
+    head = next(nid for nid, v in nodes.items() if v["label"] == "yeto_node:0")
+    worker = next(nid for nid, v in nodes.items() if v["label"] == "yeto_node:1")
+    roles = {k: list(pm[k]) for k in ("trainer", "rollout", "standby")}
+    views = {ROLE_VIEWS[r]: _Info(pg, [order[p] for p in ps], [order[p] % 2 for p in ps]) for r, ps in roles.items()}
+    resolver = lambda pg_, b: ray.util.placement_group_table(pg_)["bundles_to_node_id"][b]  # noqa: E731
+    sb = StartupBundles(pool_gpus=tuple(f"p{i}" for i in range(4)), views=views, placement_map=roles,
+                        gpus_per_node=2, node_resolver=resolver, head_node=head)
+    table = {p: nodes[sb.node_of(f"p{p}")]["label"] for p in range(4)}
+    log("logical bundle -> node:", table)
+    assert [nodes[n]["label"] for n in sb.node_blocks] == ["yeto_node:0", "yeto_node:1"]
+    assert sb.node_of("p0") != sb.node_of("p2"), "PP stages must sit on two nodes"
+    assert sb.node_of("p0") == sb.node_of("p1"), "rollout cell c0 shares n0 with trainer rank 0 (Q2 mixed)"
+    assert not sb.same_node(["p1", "p3"]) and sb.same_node(["p2", "p3"])
+    try:
+        StartupBundles(pool_gpus=tuple(f"p{i}" for i in range(4)), views=views, placement_map=roles,
+                       gpus_per_node=2, node_resolver=resolver, head_node=worker)
+    except BundleMapError as exc:
+        log("block 0 != head refused (D3 head pin):", exc)
+    else:
+        raise AssertionError("head pin accepted the worker as node 0")
+    ray.util.remove_placement_group(pg)
+    log("PASS mixed_pp2")
+
+
 CASES = {"pg_blocks": case_pg_blocks, "cells_bind": case_cells_bind, "node_loss": case_node_loss,
-         "teardown": case_teardown, "gpu_pool": case_gpu_pool}
+         "teardown": case_teardown, "gpu_pool": case_gpu_pool, "mixed_pp2": case_mixed_pp2}
 
 if __name__ == "__main__":
     case = sys.argv[1]

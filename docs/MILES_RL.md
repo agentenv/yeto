@@ -435,16 +435,38 @@ yeto launch --training-mode rl --rl-engine ports \
 - Ray head = node rank 0 = the learner process = trainer rank 0. Worker nodes
   join the head's Ray (bounded join, cleanup trap armed before joining) and
   leave when the head exits. There is no separate head node.
-- `--rl-rollout-gpus` / `--rl-standby-gpus` are **island totals**. The trainer
-  takes the leading `total - rollout - standby` bundles and must occupy the same
-  number of GPUs on every node it uses (Miles' `actor_num_nodes x
-  actor_num_gpus_per_node` rectangle); every TP*PP group, every rollout engine
-  and every standby-to-cell rebind stays on one node; EP groups fit inside one
-  node. Violations fail at `yeto launch` before any cloud resource is touched.
-- The island must have at least the recipe-derived minimum of nodes (one TP*PP
-  replica + one rollout engine + standby, rounded up to whole nodes);
-  `--rl-min-nodes-per-learner N` raises that floor. Qwen3.8-Flash-Next LoRA
-  (trainer 8 + SGLang TP8) needs 2 nodes; the 32-GPU full-parameter recipe 4.
+- `--rl-rollout-gpus` / `--rl-standby-gpus` are **island totals**. Without an
+  explicit cfg placement the trainer takes the leading `total - rollout -
+  standby` bundles; with one (`placement` in the initial config) the trainer
+  GPUs are exactly the listed `n<k>:<g>` slots. Either way the trainer must
+  occupy the same number of GPUs on every node it uses, as one contiguous
+  ascending run per node (Miles' `actor_num_nodes x actor_num_gpus_per_node`
+  rectangle; the launcher derives both flags and forwards
+  `--rl-island-bundle-map` when the layout is not the leading one).
+- In-node groups: every **TP*CP** group of the trainer (consecutive trainer
+  ranks; `tp*cp` must fit and divide a node), every rollout engine and every
+  standby-to-cell rebind stays on one node. **EP and PP groups may span
+  nodes** (ruling 2026-10-04): a PP2 trainer on `n0:0 + n1:0` or an EP2 group
+  across the two nodes is legal; EP only needs `tp*cp*ep` to divide the
+  trainer GPUs.
+- Rollout and trainer may share a node on different GPUs (mixed placement,
+  ruling 2026-10-04), e.g. the 2x2 cfg `T2R1S1`: trainer `["n0:0","n1:0"]`,
+  rollout `[["n0:1"]]`, standby `["n1:1"]`. Non-rectangular trainers
+  (`["n0:0","n0:1","n1:0"]`) are refused. Violations fail at `yeto launch`
+  before any cloud resource is touched.
+- The island must have at least the recipe-derived minimum of nodes (one
+  trainer replica `tp*cp*pp*max(1, ceil(ep*etp/tp))` -- EP shares ranks with
+  TP x DP, so it adds GPUs only beyond `tp` -- plus one rollout engine and the
+  standby reservation, rounded up to whole nodes); `--rl-min-nodes-per-learner N`
+  raises that floor. Qwen3.8-Flash-Next LoRA (trainer 8 + SGLang TP8) needs 2
+  nodes; the 32-GPU full-parameter recipe 4.
+- GPU UUID reconciliation (multi-node only, ruling 2026-10-04): after the
+  topology precheck the learner runs `nvidia-smi --query-gpu=index,uuid` on
+  every node and compares the pool with the cfg `gpus[*].uuid` and/or the
+  journal baseline of the previous incarnation (`gpu_pool` journal record). A
+  different shape or a different uuid refuses the start; a same-shape pool on
+  replaced machines is accepted only with `--rl-elastic-accept-rebind`, which
+  journals the old -> new mapping.
 - The launcher forwards `--rl-island-gpus-per-node G` to the learner; a
   single-node island sends nothing and keeps every pre-existing behaviour.
 
