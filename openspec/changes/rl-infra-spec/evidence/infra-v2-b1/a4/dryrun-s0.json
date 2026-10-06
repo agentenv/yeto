@@ -1,0 +1,51 @@
+{
+ "strict": true,
+ "syncer_arg": "127.0.0.1:1",
+ "placement_map": {
+  "rollout": [
+   4,
+   5
+  ],
+  "rollout_cells": [
+   {
+    "bundles": [
+     4
+    ],
+    "name": "c0",
+    "start": true
+   },
+   {
+    "bundles": [
+     5
+    ],
+    "name": "c1",
+    "start": true
+   },
+   {
+    "bundles": [
+     6
+    ],
+    "name": "c2",
+    "start": false
+   },
+   {
+    "bundles": [
+     7
+    ],
+    "name": "c3",
+    "start": false
+   }
+  ],
+  "standby": [
+   6,
+   7
+  ],
+  "trainer": [
+   0,
+   1,
+   2,
+   3
+  ]
+ },
+ "env": {}
+}

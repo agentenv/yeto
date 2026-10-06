@@ -1,0 +1,5 @@
+{"pool_gpus": 4, "gpu": "L40S", "platform": "nebius:4xl40s@eu-north1",
+ "bundles": {"trainer": [0], "rollout": [1], "standby": [2, 3]},
+ "rollout_cells": [{"name": "c0", "bundles": [1], "start": true}, {"name": "c1", "bundles": [2], "start": false}, {"name": "c2", "bundles": [3], "start": false}],
+ "flags": "--rl-placement fixed-partition --rl-rollout-gpus 1 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2 --rl-elastic-initial-config T1R1S2",
+ "note": "trainer G0, rollout c0 on G1, standby G2/G3 (c1/c2 declared, not started); up = T1R1S2 -> T1R3S0 starts c1,c2; down returns them"}

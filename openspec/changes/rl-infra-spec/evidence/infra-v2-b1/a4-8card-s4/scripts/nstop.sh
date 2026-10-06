@@ -7,7 +7,7 @@ mkdir -p $R/pulled
 if [ -n "$CL" ]; then
   S="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 $CL"
   timeout 120 $S 'cd ~/yeto-rl && tar czf - --exclude=cuts elastic-state | base64 -w0' > $R/pulled/elastic-state-final.b64 2>/dev/null
-  for f in yeto-output/rl-island-0.jsonl:rl-island-0.final.jsonl yeto-rl/router_samples.jsonl:router_samples.jsonl yeto-rl/inwatch.log:inwatch.final.log yeto-rl/dkill.log:dkill.log yeto-rl/dctl.log:dctl.log yeto-rl/gpu_samples.jsonl:gpu_samples.jsonl yeto-rl/sampler.out:sampler.out; do
+  for f in yeto-output/rl-island-0.jsonl:rl-island-0.final.jsonl yeto-rl/router_samples.jsonl:router_samples.jsonl yeto-rl/inwatch.log:inwatch.final.log yeto-rl/dkill.log:dkill.log yeto-rl/dctl.log:dctl.log yeto-rl/gpu_samples.jsonl:gpu_samples.jsonl yeto-rl/sampler.out:sampler.out yeto-rl/elastic-state/side_effects.jsonl:side_effects.jsonl; do
     timeout 120 $S "cat ~/${f%%:*} 2>/dev/null" > $R/pulled/${f##*:} 2>/dev/null
   done
   # the island may already be gone (launcher tears it down after the job): fall back to the periodically pulled small-file bundle for anything the direct pull left empty

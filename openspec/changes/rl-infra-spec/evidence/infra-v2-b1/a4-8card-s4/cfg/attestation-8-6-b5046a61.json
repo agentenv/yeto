@@ -1,0 +1,1 @@
+{"runtime_fingerprint":"sha256:b5046a61e5fc2130f0bf615d7ee9cf37966396e7b6471cc35c37b6b28bdbb900","execution_modes":["partitioned-serial"],"certified_edges":[{"source":"T4R2S2","target":"T4R4S0","kind":"rollout-only"},{"source":"T4R4S0","target":"T4R2S2","kind":"rollout-only"}]}

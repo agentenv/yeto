@@ -1,7 +1,8 @@
 #!/bin/bash
 # usage: a8go.sh <case> <prefix> <hard_s> <wd_s>        8x H100 on Nebius eu-north1, T4R2S2 <-> T4R4S0 (trainer G0-3, rollout c0,c1 on G4,G5, standby G6/G7 = c2/c3)
-# cases: smoke | base | e1a | e1b | wd | a4b | a4bu | d123 | d2 | d4 | d5 | d6 | d7      (DRY=1: print the launch args + triggers, start nothing)
-# After-hooks (probe_after_term.sh, chain-safe): e1b -> status/stale/oldepoch probes; wd/a4b/a4bu/d123/d4 -> status probe + gpu samples >=90 s after the terminal state.
+# cases: smoke | base | e1a | e1b | wd | a4b | a4bu | a4bc | d123 | d2 | d4 | d5 | d6 | d7      (DRY=1: print the launch args + triggers, start nothing)
+# After-hooks (probe_after_term.sh, chain-safe): e1b -> status/stale/oldepoch probes; wd/a4b/a4bu/a4bc/d123/d4 -> status probe + gpu samples >=90 s after the terminal state.
+# a4bc = a4b + --rl-test-tool-side-effect-log (3.3 X5 (b), SESSION6 §10): the injected tool journals every execution in ~/yeto-rl/elastic-state/side_effects.jsonl; judge_a4bc = judge_a4b + exactly one tool_side_effect per (trajectory, tool call), none after CANCELLED.
 # Starts n2run (launch, --no-island-relaunch --modal-retries 0) + n2inwatch (triggers + router sampler) + selfcheck (+GPU assert 4xL40S, markers) + case helpers + final guard (nstop -> cleanup_run.sh, judge).
 # Required env for some cases:  UP_DEADLINE_S (wd: measured, see gpu-plan 9.22 step 2) | (e1b/a4b pass --rl-test-hold-before-check-s ${HOLD_S:-10} / --rl-test-inject-tool-wait-s 30 directly)
 # Request time: a request submitted at "train" of rollout k executes before generate k+1 (= before round k+2).
@@ -20,11 +21,13 @@ case $C in
          TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4b"; HOOK="2 0";;
   a4bu)  EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30 --rl-test-inject-undrain-fail 1"; STEPS=6; ATTN=6
          TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4bu"; HOOK="2 0";;
+  a4bc)  EX="--rl-elastic-tool-wait-board --rl-elastic-drain-timeout-s 5 --rl-test-inject-tool-wait-s 30 --rl-test-tool-side-effect-log"; STEPS=6; ATTN=6
+         TRIG="[$(UPB 0 up1 600),[\"generate\",2,\"dn1\",{\"target\":\"T4R2S2\",\"expected_config_epoch\":1,\"deadline_s\":600}]]"; JUDGE="a4bc"; HOOK="2 0";;
   d123)  STEPS=5; ATTN=5; EX="--rl-test-inject-stop-failures 1"
          # standby cells on G6/G7 (c2/c3): kill target GPU 6. up1 ep0->1, dn1 ep1->2, up2 at ep2 (killed -> REBUILT_OLD, stays 2), up3 at ep2
          TRIG="[$(UPB 0 up1 600),$(DNB 1 dn1 600),$(req train 2 up2 T4R4S0 2 600),$(req train 3 up3 T4R4S0 2 600)]"
          ARMS+=("dkill.py|[{\"name\":\"d1\",\"tx\":\"up2\",\"when\":{\"kind\":\"fork_op\",\"op\":\"start\",\"status\":\"issued\"},\"gpu\":6,\"mode\":\"when_proc_appears\",\"min_age_s\":10},{\"name\":\"d2\",\"tx\":\"up3\",\"when\":{\"kind\":\"phase\",\"phase\":\"VERIFYING\"},\"gpu\":6,\"mode\":\"immediate\"}]"); JUDGE="d123"; HOOK="4 30";;
-  d2)    EX=""; TRIG="[$(UPB 0 up1 600)]"; JUDGE="d2"; HOOK="1 0"   # E1-D 2 alone: kill the new engine on GPU6 the moment up1 journals VERIFYING -> REBUILT_OLD
+  d2)    EX=""; TRIG="[$(UPB 0 up1 $UP)]"; STEPS=${STEPS_D2:-6}; ATTN=$STEPS; JUDGE="d2"; HOOK="1 0"   # E1-D 2 alone: kill the new engine on GPU6 the moment up1 journals VERIFYING -> REBUILT_OLD
          ARMS+=("dkill.py|[{\"name\":\"d2\",\"tx\":\"up1\",\"when\":{\"kind\":\"phase\",\"phase\":\"VERIFYING\"},\"gpu\":6,\"mode\":\"immediate\"}]");;
   d4)    [ "${SHA}" = a65c650 ] && { echo "d4 refused on a65c650: --rl-test-inject-stop-failures does not reach the fork actor there (d123 chain 2: 'function' object has no attribute 'stop_cells'); needs the fixed SHA"; exit 65; }
          EX="--rl-test-inject-stop-failures 100000 --rl-elastic-recovery-timeout-s 120"; TRIG="[$(UPB 0 up1 600),$(DNB 1 dn1 600)]"; JUDGE="d4"; HOOK="2 30";;
@@ -33,7 +36,7 @@ case $C in
   d7)    STEPS=5; ATTN=5; EX="--rl-elastic-restart-attempts 1"; TRIG="[]"; ARMS+=("dctl.py|kill_then_up|up1|{\"target\":\"T4R4S0\",\"expected_config_epoch\":0,\"deadline_s\":600}");;
   *) echo "unknown case $C"; exit 64;;
 esac
-ATT=$B/cfg/attestation-8-$ATTN.json; [ -f $ATT ] || { echo "missing $ATT (mkatt8.sh)"; exit 6; }
+ATT=${ATTEST:-$B/cfg/attestation-8-$ATTN.json}; [ -f $ATT ] || { echo "missing $ATT (mkatt8.sh)"; exit 6; }   # ATTEST: attestation file for another code SHA (chain 8: cfg/attestation-8-6-71672312.json at 2eb415f3)
 COMMON="--total-steps $STEPS --rl-placement fixed-partition --rl-rollout-gpus 2 --rl-standby-gpus 2 --rl-elastic --rl-elastic-declare-cells --rl-elastic-cells c0,c1,c2,c3 --rl-elastic-resources $B/cfg/resources-8.json --rl-elastic-initial-config T4R2S2 --rl-observe-timeline --rl-elastic-attestation $ATT"
 if [ "${DRY:-0}" = 1 ]; then echo "SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 n2run.sh $P 8 $HARD $WD $COMMON $EX"; echo "triggers=$TRIG"; python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; printf 'arms: %s\n' "${ARMS[@]:-none}"; exit 0; fi
 SHA=$SHA GPU_SPEC=nebius:8xh100@eu-north1 setsid nohup $B/n2run.sh $P 8 $HARD $WD $COMMON $EX > $R.n2run.out 2>&1 &
