@@ -1361,6 +1361,22 @@ def _ray_write_incarnation_markers(topology: Any, observed: Sequence[Sequence[st
     ray.get(refs, timeout=120)
 
 
+def island_smi_rows(out: str, use: str | None = None) -> list[tuple[int, str]]:
+    """``nvidia-smi --query-gpu=index,uuid`` csv -> ``[(index, uuid)]`` of the island's
+    GPUs. nvidia-smi ignores ``CUDA_VISIBLE_DEVICES`` and always lists every card of
+    the machine; under ``--rl-island-use-gpus-per-node M`` (the launcher exports
+    ``YETO_ISLAND_USE_GPUS_PER_NODE=M`` before ``ray start``, inherited by Ray workers)
+    only local GPUs ``0..M-1`` belong to the island, the rest are unallocated."""
+    import os
+
+    rows = [(int(a.strip()), b.strip()) for a, b in
+            (line.split(",", 1) for line in out.splitlines() if line.strip())]
+    use = os.environ.get("YETO_ISLAND_USE_GPUS_PER_NODE") if use is None else use
+    if use:
+        rows = [r for r in rows if r[0] < int(use)]
+    return rows
+
+
 def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
     """``[(index, uuid), ...]`` per island node in logical order (Ray head first, D3,
     then the workers by address/node id), each collected by a Ray task pinned to that
@@ -1384,8 +1400,7 @@ def _ray_gpu_uuids(topology: Any) -> list[list[tuple[int, str]]]:
 
         out = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
                              check=True, capture_output=True, text=True, timeout=60).stdout
-        return [(int(a.strip()), b.strip()) for a, b in
-                (line.split(",", 1) for line in out.splitlines() if line.strip())]
+        return island_smi_rows(out)
 
     refs = [_smi.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
         node_id=n["NodeID"], soft=False)).remote() for n in order]

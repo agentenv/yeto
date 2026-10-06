@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """rl-multinode-island tasks §3 judge (criteria fixed before the runs; see tasks.md §3).
-usage: s1judge.py <run dir> <g0|g1|g2|g3|g4|m1|m2|m3>  -> prints and writes <run dir>/judgment-<case>.json
+usage: s1judge.py <run dir> <g0|g1|g2|g3|g4|m1|m2|m3|m5>  -> prints and writes <run dir>/judgment-<case>.json
        s1judge.py <m4a run dir> m4 <m4b run dir>          -> writes <m4b run dir>/judgment-m4.json
 m4 (machine replacement, S8-MATRIX-READINESS.md §4; criteria fixed before the runs): A = 2x2 island with --rl-checkpoint-store,
   worker raylet killed at train rid>=2 -> node_lost; B = new cluster, same store, --rl-elastic-accept-rebind. PASS needs the
@@ -12,6 +12,23 @@ m1/m2/m3 (2x2 L40S, resources-2x2.json T2R1S1; criteria fixed before the runs, M
   pulled/rl-island-0.jsonl (tape: rl_driver_phase / rl_reconfiguration), pulled/apps-<node>.txt (nvidia-smi compute apps +
   ps snapshots every 10 s, head and worker1), pulled/gpu-<node>.txt (nvidia-smi index,uuid per node), pulled/run.log
   (sky job log: Megatron argument dump), launch.log (launcher stdout), rc.txt, pulled/inwatch.log (m3 trigger submissions).
+m5 (2x4 L40S colocated, ONE sglang TP8 rollout engine across both nodes, --rl-allow-cross-node-engine-tp; ruling 2026-10-04 v2;
+  criteria fixed before the run): verdict = correctness only; performance is reported in "perf" with NO threshold.
+  (a1) rank map: pulled/m5ranks.jsonl (RL run) / m5ranks-gen.jsonl (generation-only server) rows {node, tp_rank, gpu_uuid}
+       -> TP 0-3 on node 0 and 4-7 on node 1 (sglang node_rank = tp_rank // 4, multinode.sglang_tp_rank_map), 8 distinct
+       uuids, each in that node's nvidia-smi uuid list (pulled/gpu-<node>.txt) and every GPU of both nodes used once;
+       With gpus_per_node.txt "<physical> <use>" (2x8xH100 machines, island = GPUs 0..3 of each node) the node uuid lists
+       are the allocated cards 0..use-1 only; (a1b) no compute app (puller apps-<node>.txt during the RL run, s1m5post
+       apps-post-<node>.txt during the generation-only servers) on an unallocated card, and >= 1 row on an allocated card;
+  (a2) NCCL cross-node init: pulled/m5nccl.json ok (world 8, 2 nodes, all_reduce sum check) AND the RL run generated
+       (a TP8 forward needs the cross-node TP all-reduce);
+  (a3) generation: tp8 outputs non-empty; vs the single-node TP4 greedy reference (pulled/m5gen.json) >= 75% of prompts
+       share the first 16 output tokens (bf16 TP4 vs TP8 reduction order differs; exact equality is not required);
+  (a4) weight sync: every trained round has an rl_publication with policy_version == rollout_id, a non-empty member list
+       and a policy token (the publisher only acks when every engine's get_weight_version == token), policy versions
+       strictly increase, a generate follows each publication, and no "did not acknowledge"/token mismatch in the logs.
+  perf: RL generate tokens/s per round (rl_local_round.action_tokens / rl_timeline_span generate), generation-only
+       tokens/s TP8 (2 nodes) and TP4 (1 node), all_reduce latency/bus bandwidth per size.
 Verdicts: PASS | FAIL | PARTIAL (a sub-criterion is not verifiable on this spec, says which) | INVALID_TEST (no valid test: startup/timeout).
 """
 import json, os, re, sys, time
@@ -48,7 +65,7 @@ phases = [e for e in events if e.get("event") == "rl_driver_phase"]
 rounds_trained = sorted({e.get("rollout_id") for e in phases if e.get("phase") == "train"})
 generates = [e for e in phases if e.get("phase") == "generate"]
 gpu_names = " ".join(read("pulled/" + f) for f in os.listdir(os.path.join(R, "pulled")) if f.startswith("gpu-")) if os.path.isdir(os.path.join(R, "pulled")) else ""
-checks, notes = {}, []
+checks, notes, perf = {}, [], {}
 # ---- ruling 2026-10-04 v2 evidence helpers (field sources in comments; see MULTINODE-GAP-S8.md §8.6) ----
 local_rounds = sorted((e for e in events if e.get("event") == "rl_local_round"), key=lambda e: e.get("local_round_id", 0))
 publications = sorted((e for e in events if e.get("event") == "rl_publication"), key=lambda e: e.get("policy_version", -1))
@@ -310,6 +327,9 @@ elif CASE == "m4":
     b_pools = [r for r in b_own if r.get("kind") == "gpu_pool"]
     b_pool = b_pools[-1] if b_pools else {}
     b_uuids = [u for node in (b_pool.get("uuids") or []) for u in node]
+    # m4b1 (2x1 fixed-partition, g3 topology: trainer n0:0, rollout n1:0) -> 2 uuids, 1 per node; m4b (2x2) -> 4
+    b_case = (open(os.path.join(R, "case.txt")).read().strip() if os.path.exists(os.path.join(R, "case.txt")) else "m4b")
+    n_gpus, per_node = (2, 1) if b_case == "m4b1" else (4, 2)
     b_seen = set(re.findall(r"(GPU-[0-9a-f-]{36})", gpu_names))
     rc_rec = [r for r in b_own if r.get("kind") == "round_cut" and r.get("action") == "restore"]
     restored_ev = [e for e in events if e.get("event") == "rl_round_cut_restored"]
@@ -328,9 +348,10 @@ elif CASE == "m4":
         # same layout, accepted
         "b_layout_accepted_same_as_a": bool(b_topo) and b_topo[-1].get("layout_accepted") is True and bool(a_topo)
             and b_topo[-1].get("layout") == a_topo[-1].get("layout"),
-        # rebind: accepted, rebind=true, non-empty mapping; B's 4 uuids all differ from A's and are B's nvidia-smi uuids
+        # rebind: accepted, rebind=true, non-empty mapping; B's n_gpus uuids (per_node per node) all differ from A's and are B's nvidia-smi uuids
         "b_gpu_pool_rebind_accepted": b_pool.get("accepted") is True and b_pool.get("rebind") is True and bool(b_pool.get("mapping")),
-        "b_uuids_new_and_on_b_nodes": len(b_uuids) == 4 and not (set(b_uuids) & a_uuids) and set(b_uuids) <= b_seen
+        "b_uuids_new_and_on_b_nodes": len(b_uuids) == n_gpus and len(set(b_uuids)) == n_gpus
+            and all(len(node) == per_node for node in (b_pool.get("uuids") or [])) and not (set(b_uuids) & a_uuids) and set(b_uuids) <= b_seen
             and not (set(b_uuids) & set(re.findall(r"(GPU-[0-9a-f-]{36})", a_gpu))),
         # continuation: >= 1 train round after the resume, the first trained rid = resume rid > 0
         "b_trains_ge_1_round_after_resume": bool(rounds_trained) and (resume_rid is None or max(rounds_trained) >= resume_rid),
@@ -343,6 +364,7 @@ elif CASE == "m4":
             and min(rounds_trained) == resume_rid and (not a_trained or resume_rid <= max(a_trained) + 1),
     }
     checks.update(weights)
+    notes.append(f"b_case={b_case} expected_uuids={n_gpus} b_uuids={len(b_uuids)} a_uuids={len(a_uuids)}")
     notes.append(f"a_incarnation={a_inc} restored_from={restore.get('restored_from')} resume_rid={resume_rid} "
                  f"a_trained={a_trained} b_trained={rounds_trained} a_round_cuts={[e.get('cut_id') for e in a_cuts]}")
     notes.append("stale_incarnation_rejection: PARTIAL(sim) -- A is torn down before B starts, so no old incarnation can "
@@ -355,10 +377,95 @@ elif CASE == "m4":
                                           "from A's round cut (journal-only restore)")
     else:
         verdict = "PASS" if all(checks.values()) else "FAIL"
+elif CASE == "m5":
+    cl = read("cluster.txt").strip()
+    hosts = (cl, cl + "-worker1")
+    # gpus_per_node.txt = "<physical> <use>" (s1run.sh M5_USE_GPUS): the island owns local GPUs 0..use-1 of each node; the
+    # other cards are unallocated (must carry no process). Absent = every GPU of the node belongs to the island.
+    gpn = read("gpus_per_node.txt").split()
+    use = int(gpn[1]) if len(gpn) == 2 else None
+    smi_rows = [[(int(i), u) for i, u in re.findall(r"(?m)^\s*(\d+),\s*(GPU-[0-9a-f-]{36})", read(f"pulled/gpu-{n}.txt"))]
+                for n in hosts]
+    node_uuids = [[u for i, u in rows if use is None or i < use] for rows in smi_rows]
+    unalloc = {u for rows in smi_rows for i, u in rows if use is not None and i >= use}
+
+    def rank_map_ok(rows):
+        """latest row per tp_rank; (ok, detail) against the expected sglang node_rank layout."""
+        last = {}
+        for r in rows:  # a resolved uuid is never replaced by a later unresolved probe row
+            if isinstance(r.get("tp_rank"), int) and (r.get("gpu_uuid") or not (last.get(r["tp_rank"]) or {}).get("gpu_uuid")):
+                last[r["tp_rank"]] = r
+        k = 4
+        ok = sorted(last) == list(range(8))
+        uuids = [last[t].get("gpu_uuid") for t in sorted(last)]
+        ok = ok and all(uuids) and len(set(uuids)) == 8
+        ok = ok and all(last[t].get("node") == t // k and last[t].get("gpu_uuid") in node_uuids[t // k] for t in last)
+        ok = ok and all(len(u) == k for u in node_uuids) and set(uuids) == set(node_uuids[0]) | set(node_uuids[1])
+        return ok, {t: (last[t].get("node"), (last[t].get("gpu_uuid") or "")[:12], last[t].get("method")) for t in sorted(last)}
+
+    # every compute-app row of the puller (RL run) and the post-step snapshots (generation-only servers): none may sit on
+    # an unallocated GPU; at least one row must sit on an allocated GPU (the snapshots saw the run at all)
+    app_rows = [m.groups() for n in hosts for f in (f"pulled/apps-{n}.txt", f"pulled/apps-post-{n}.txt")
+                for m in re.finditer(r"(?m)^(GPU-[0-9a-f-]{36}),\s*(\d+),\s*([^,]*)", read(f))]
+    on_unalloc = sorted({f"{u[:12]}:{name.strip()}" for u, _pid, name in app_rows if u in unalloc})
+    on_alloc = sum(1 for u, _pid, _name in app_rows if u in {x for node in node_uuids for x in node})
+    rl_ok, rl_map = rank_map_ok(jsonl("m5ranks.jsonl"))
+    gen_ok, gen_map = rank_map_ok(jsonl("m5ranks-gen.jsonl"))
+    try:
+        nccl = json.loads(read("pulled/m5nccl.json") or "{}")
+    except Exception:
+        nccl = {}
+    try:
+        gen = json.loads(read("pulled/m5gen.json") or "{}")
+    except Exception:
+        gen = {}
+    tp8, ref = gen.get("tp8") or {}, gen.get("ref") or {}
+    outs, routs = tp8.get("outputs") or [], ref.get("outputs") or []
+    PREFIX = 16
+    same = [bool(a) and bool(b) and list(a[:PREFIX]) == list(b[:PREFIX]) for a, b in zip(outs, routs)]
+    match_frac = (sum(same) / len(same)) if same and len(outs) == len(routs) else None
+    logs = launch + read("pulled/run.log")
+    trained = set(rounds_trained)
+    pubs = {p.get("policy_version"): p for p in publications}
+    gen_rids = [e.get("rollout_id") for e in generates]
+    versions = [p.get("policy_version") for p in publications]
+    checks = {
+        "args_tp8_engine_cross_node_opt_in": "--rollout-num-gpus-per-engine 8" in read("args.txt")
+                                              and "--rl-allow-cross-node-engine-tp" in read("args.txt"),
+        "tp_ranks_0_7_match_gpu_uuids": rl_ok or gen_ok,
+        "no_process_on_unallocated_gpus": not on_unalloc and on_alloc > 0,
+        "nccl_cross_node_init_ok": nccl.get("ok") is True and nccl.get("world") == 8 and nccl.get("nodes") == 2
+                                   and len(generates) >= 1,
+        "gen_nonempty": bool(outs) and all(bool(o) for o in outs),
+        "gen_matches_single_node_ref_within_tolerance": match_frac is not None and match_frac >= 0.75,
+        "weight_sync_policy_version_consistent": bool(trained) and all(
+            rid in pubs and pubs[rid].get("sync/publication_members") and pubs[rid].get("rl/policy_token")
+            and rid in gen_rids for rid in trained) and versions == sorted(set(versions)),
+        "no_engine_version_mismatch": not re.search(r"did not acknowledge|TOKEN_MISMATCH|token_mismatch", logs),
+        "rounds_ge_2": len(rounds_trained) >= 2 and len(generates) >= 2,
+        "launcher_rc_0": rc == 0,
+    }
+    notes.append(f"rank_map rl={rl_ok} {rl_map} gen={gen_ok} {gen_map}")
+    notes.append(f"gpus_per_node physical={gpn[0] if gpn else None} use={use} unallocated={len(unalloc)} "
+                 f"app_rows_on_allocated={on_alloc} on_unallocated={on_unalloc[:8]}")
+    notes.append(f"gen prefix{PREFIX} match={sum(same)}/{len(same)} nccl_init_s={nccl.get('init_s')} nccl_error={(nccl.get('error') or '')[-200:]}")
+    span = {e.get("rollout_id"): (e.get("end") or 0) - (e.get("start") or 0)
+            for e in spans if e.get("task") in ("generate", "rollout") and e.get("rollout_id") is not None}
+    toks = {e.get("local_round_id", i): e.get("action_tokens") for i, e in enumerate(local_rounds)}  # local_round_id == rollout_id (single island)
+    perf = {"rl_generate_tokens_per_s": [round(toks[r] / span[r], 1) for r in sorted(span)
+                                         if toks.get(r) and span[r] > 0],
+            "gen_only_tp8_tokens_per_s": tp8.get("tokens_per_s"), "gen_only_ref_tp4_tokens_per_s": ref.get("tokens_per_s"),
+            "allreduce": nccl.get("results") or [], "nccl_init_s": nccl.get("init_s")}
+    if rc == 124 or (not rounds_trained and not outs):
+        verdict = "INVALID_TEST"; notes.append("no RL round and no generation-only output (startup/timeout)")
+    else:
+        verdict = "PASS" if all(checks.values()) else "FAIL"
 else:
     sys.exit("unknown case")
 out = {"case": CASE, "verdict": verdict, "checks": checks, "notes": notes, "rc": rc, "rounds_trained": rounds_trained, "n_generate": len(generates),
        "start_utc": read("start_utc.txt").strip(), "end_utc": read("end_utc.txt").strip(), "yeto_sha": read("yeto_sha.txt").strip()}
+if perf:
+    out["perf"] = perf
 json.dump(out, open(os.path.join(R, f"judgment-{CASE}.json"), "w"), indent=1)
 print(json.dumps(out))
 sys.exit(0 if verdict == "PASS" else 1)

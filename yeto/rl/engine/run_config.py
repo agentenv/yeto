@@ -770,7 +770,8 @@ def resolve_rl_run_config(
             rollout_cell_names=_rollout_cell_names(args, dedicated_rollout_gpus),
             island_gpus_per_node=(int(getattr(args, "rl_island_gpus_per_node", None))
                                   if getattr(args, "rl_island_gpus_per_node", None) is not None
-                                  and dedicated_rollout_gpus is not None else None),
+                                  # m5: a multi-node colocated island keeps it too (node rules)
+                                  else None),
             bundle_map=_island_bundle_map(args, dedicated_rollout_gpus),
             allow_cross_node_tp=bool(getattr(args, "rl_allow_cross_node_tp", False)),
             allow_cross_node_engine_tp=bool(getattr(args, "rl_allow_cross_node_engine_tp", False)),

@@ -1,6 +1,6 @@
 #!/bin/bash
 # rl-multinode-island tasks §3 (GPU): one launch of the yeto launcher on Nebius, evidence pulled to RUN_ROOT/<prefix>.
-# usage: s1run.sh <case: g0|g12|g3|m1|m3|m2> <prefix> <hard_s> [watchdog_s]
+# usage: s1run.sh <case: g0|g12|g3|m1|m3|m2|m4a|m4b|m4a1|m4b1|m5> <prefix> <hard_s> [watchdog_s]
 #   g0  : 1 node x 1 L40S, --total-steps 1, no elastic (image/sm_89 probe: 1 train + 1 generate), launcher tears down.
 #   g12 : 2 nodes x 1 L40S, --total-steps 2 (cold start ~15 min of the 30 min hard timeout), elastic cfg resources-2x1.json (trainer n0:0, rollout cell n1:0), --keep (G1 topology + G2 cross-node cell).
 #   g3  : same cluster, --total-steps 8, --rl-elastic-restart-attempts 1, NO --keep: s1kill.sh kills the worker's raylet after round 1 train
@@ -15,8 +15,19 @@
 #         -> node_lost/RECOVERY_REQUIRED, launcher teardown. The chain then confirms A's instances are gone (cleanup_run.sh).
 #   m4b : M4 island B: NEW prefix/cluster, same cfg + same STORE + --rl-elastic-accept-rebind, --total-steps M4B_STEPS (default 8 => >= 1 round after
 #         the resume at rollout 2): store restore, gpu_pool rebind, round-cut weight restore, rollout ids continue. Judge: s1judge.py m4 <A run> <B run>.
+#   m4a1/m4b1: M4 2x1 variant = g3 topology (fixed-partition, resources-2x1.json T1R1S0: trainer n0:0, rollout n1:0), TP1 PP1,
+#         2 nodes x 1 GPU (M4X1_GPU, default nebius:2x1xl40s@eu-north1; H100: nebius:2x1xh100@eu-north1) + --rl-checkpoint-store,
+#         steps 8 both; same chain as m4a/m4b (s1kill KILL_RID=2 kills the worker = rollout node; B: new cluster, restore, rebind,
+#         continue). A/B argv identical except B's --rl-elastic-accept-rebind and the instance type: ITYPE -> A (and B unless
+#         M4B_ITYPE), M4B_ITYPE -> B only. Judge: s1judge.py m4 <A> <B> (2 new uuids).
 #   m2  : 2 nodes x 2 L40S, MoE fzyzcjy/Qwen3-30B-A3B-5layer, --tuning lora --lora-targets attention (all-linear is refused with EP>1),
 #         --tensor-parallel 1 --pipeline-parallel 1 --expert-parallel 2 (EP2 across nodes: the 2 trainer ranks are n0:0 and n1:0), T2R1S1, --total-steps 2.
+#   m5  : 2 nodes x 4 L40S (nebius:2x4xl40s = gpu-l40s-d_4gpu-128vcpu-768gb), Qwen3-0.6B LoRA (16 q / 8 kv heads: TP8 = 1 kv head per rank),
+#         COLOCATED (default placement): trainer DP8 (--actor-num-nodes 2 x 4, tp1 pp1) and ONE sglang TP8 rollout engine share all 8 GPUs;
+#         --rollout-num-gpus-per-engine 8 --rl-allow-cross-node-engine-tp (sglang nnodes=2, node_rank 0 = TP0-3 on n0, 1 = TP4-7 on n1),
+#         --total-steps 2, --keep; the puller snapshots sglang::scheduler_TP<r> -> GPU uuid per node (s1m5ranks.py -> pulled/m5ranks.jsonl);
+#         after the launcher returns, s1m5post.sh runs the cross-node NCCL all-reduce probe + generation-only TP8 (2 nodes) vs TP4 (head)
+#         greedy reference and tears the cluster down (KEEP_M5=1 keeps it). Judge: s1judge.py <run> m5 (correctness verdict; perf numbers only).
 # env: CLUSTER_PREFIX (cluster name prefix when several runs share one cluster; default = prefix), SHA (git rev of infra-multinode to archive, default HEAD), RUN_ROOT (/home/michael/work/s1-runs), IMAGE (digest-pinned --rl-image), DRY=1 prints args only.
 set -u
 C=$1; P=$2; HARD=$3; WD=${4:-$(( $3 + 300 ))}; CP=${CLUSTER_PREFIX:-$P}
@@ -44,12 +55,25 @@ case $C in
   m4a|m4b) [ -n "${STORE:-}" ] || { echo "abort: $C needs STORE=s3://<bucket>/<prefix> (the --rl-checkpoint-store bucket; same value for m4a and m4b)"; exit 66; }
        GPU=nebius:2x2xl40s@eu-north1; PAR="--tensor-parallel 1 --pipeline-parallel 2"; KEEP=""; NODES=2
        if [ $C = m4a ]; then STEPS=8; EX="$ELASTIC22 --rl-checkpoint-store $STORE"
-       else STEPS=${M4B_STEPS:-8}; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-accept-rebind"; fi;;
+       else STEPS=${M4B_STEPS:-8}; EX="$ELASTIC22 --rl-checkpoint-store $STORE --rl-elastic-accept-rebind${M4B_ITYPE:+ --learner-instance-type $M4B_ITYPE}"; fi;;
+  m4a1|m4b1) [ -n "${STORE:-}" ] || { echo "abort: $C needs STORE=s3://<bucket>/<prefix> (same value for m4a1 and m4b1)"; exit 66; }
+       GPU=${M4X1_GPU:-nebius:2x1xl40s@eu-north1}; PAR="--tensor-parallel 1 --pipeline-parallel 1"; KEEP=""; NODES=2; STEPS=8
+       EX="$ELASTIC --rl-checkpoint-store $STORE"
+       if [ $C = m4b1 ]; then EX="$EX --rl-elastic-accept-rebind"; [ -n "${M4B_ITYPE:-}" ] && ITYPE=$M4B_ITYPE; fi;;
+  m5)  GPU=${M5_GPU:-nebius:2x4xl40s@eu-north1}; STEPS=${M5_STEPS:-2}; PAR="--tensor-parallel 1 --pipeline-parallel 1"; KEEP="--keep"; NODES=2
+       # M5_USE_GPUS=M: physical machines bigger than the test (e.g. M5_GPU=nebius:2x8xh100@eu-north1 M5_USE_GPUS=4): the island gets
+       # GPUs 0..M-1 per node; network tier none (no IB GPU cluster / fixed fabric: NCCL runs over TCP like the L40S runs)
+       case $GPU in *:2x*x*) ;; *) echo "abort: m5 needs a 2-node --gpu (got $GPU)"; exit 68;; esac
+       EX="--rollout-num-gpus-per-engine 8 --rl-allow-cross-node-engine-tp --rl-observe-timeline --rl-island-network-tier ${M5_NET_TIER:-none}${M5_USE_GPUS:+ --rl-island-use-gpus-per-node $M5_USE_GPUS}"
+       PHYS=$(echo "$GPU" | sed -E 's/^[a-z]+:2x([0-9]+)x.*/\1/'); USE=${M5_USE_GPUS:-$PHYS}
+       [ $(( 2 * USE )) = 8 ] || { echo "abort: m5 needs 4 island GPUs per node (TP8 = 2 x 4), got physical $PHYS use $USE"; exit 68; }
+       # watchdog must outlive the launcher AND the post step (it ssh-es into the kept cluster for up to M5_POST_HARD)
+       WD=${4:-$(( HARD + ${M5_POST_HARD:-1500} + 300 ))};;
   *) echo "unknown case $C"; exit 64;;
 esac
-ARGS="launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu $GPU --cluster-prefix $CP $KEEP --no-island-relaunch --modal-retries 0 --rl-image $IMAGE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function ${REWARD:-gsm8k_reward:score} $LORA $PAR --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --total-steps $STEPS $EX"
+ARGS="launch --controller local --training-mode rl --rl-single-island-no-sync --on-demand --gpu $GPU --cluster-prefix $CP $KEEP --no-island-relaunch --modal-retries 0 --rl-image $IMAGE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function ${REWARD:-gsm8k_reward:score} $LORA $PAR --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --total-steps $STEPS $EX${ITYPE:+ --learner-instance-type $ITYPE}"
 CL=$CP-l0-eu-north1
-if [ "${DRY:-0}" = 1 ]; then echo "cluster=$CL nodes=$NODES case=$C"; echo "$ARGS"; [ -n "$TRIG" ] && { echo "triggers=$TRIG"; /usr/bin/python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; }; exit 0; fi
+if [ "${DRY:-0}" = 1 ]; then echo "cluster=$CL nodes=$NODES case=$C hard=$HARD wd=$WD${USE:+ gpus_per_node physical=$PHYS use=$USE}"; echo "$ARGS"; [ -n "$TRIG" ] && { echo "triggers=$TRIG"; /usr/bin/python3 -c "import json,sys;json.loads(sys.argv[1])" "$TRIG" && echo triggers-json-ok; }; exit 0; fi
 mkdir -p $R/home $R/runs $R/pulled $R/yeto
 for d in .sky .nebius .ssh; do ln -sfn /home/michael/$d $R/home/$d; done
 # m4: the S3 checkpoint store is mounted on Nebius nodes with the static AWS keys sky uploads (~/.aws/credentials, SHARED_CREDENTIALS_FILE identity)
@@ -65,10 +89,11 @@ if [ $C = m3 ]; then
   printf '{"runtime_fingerprint":"%s","execution_modes":["partitioned-serial"],"certified_edges":[{"source":"T2R1S1","target":"T2R2S0","kind":"rollout-only"},{"source":"T2R2S0","target":"T2R1S1","kind":"rollout-only"}]}' "$fp" > $R/attestation-m3.json
   ARGS="$ARGS --rl-elastic-attestation $R/attestation-m3.json"
 fi
-git -C $REPO rev-parse ${SHA:-HEAD} > $R/yeto_sha.txt; echo "$ARGS" > $R/args.txt; echo $CL > $R/cluster.txt; echo $NODES > $R/nodes.txt; echo $C > $R/case.txt; [ -n "$TRIG" ] && echo "$TRIG" > $R/triggers.json
+git -C $REPO rev-parse ${SHA:-HEAD} > $R/yeto_sha.txt; echo "$ARGS" > $R/args.txt; echo $CL > $R/cluster.txt; echo $NODES > $R/nodes.txt; echo $C > $R/case.txt; [ -n "${USE:-}" ] && printf '%s %s\n' "$PHYS" "$USE" > $R/gpus_per_node.txt; [ -n "$TRIG" ] && echo "$TRIG" > $R/triggers.json
 # per-run watchdog: sky down by THIS cluster name only
 setsid nohup bash -c "sleep $WD; HOME=/home/michael $SKY down -y $CL > $R/watchdog.out 2>&1; touch $R/WATCHDOG_FIRED" >/dev/null 2>&1 &
 echo $! > $R/watchdog.pid
+B5=$(base64 -w0 $D/s1m5ranks.py)   # m5 rank probe, piped into python3 on each node by the puller
 # puller (every 10 s while the launcher runs): events, journal, in-container probe log, per-node GPU/process snapshots
 setsid nohup bash -c "
 export HOME=/home/michael; armed=0; inarmed=0
@@ -84,6 +109,7 @@ while [ ! -f $R/rc.txt ]; do
     timeout 60 \$S $CL 'cat ~/yeto-rl/s1probe.log 2>/dev/null' > $R/pulled/.p 2>/dev/null && [ -s $R/pulled/.p ] && mv $R/pulled/.p $R/pulled/s1probe.log
     case $C in m4*) timeout 60 \$S $CL 'for f in STORE-MANIFEST.json round-cut.json; do echo \"== \$f\"; cat ~/yeto-checkpoint-store/\$f 2>/dev/null; echo; done; echo \"== round-cuts\"; ls ~/yeto-checkpoint-store/round-cuts 2>/dev/null' > $R/pulled/.s 2>/dev/null && [ -s $R/pulled/.s ] && mv $R/pulled/.s $R/pulled/store.txt;; esac
     timeout 90 \$S $CL 'tail -c 4000000 ~/sky_logs/*/run.log 2>/dev/null' > $R/pulled/.r 2>/dev/null && [ -s $R/pulled/.r ] && mv $R/pulled/.r $R/pulled/run.log   # the launcher streams only the setup; the job log stays on the head
+    [ $C = m5 ] && { k=0; for n in $CL $CL-worker1; do timeout 60 \$S \$n \"echo $B5 | base64 -d | python3 - \$k\" >> $R/pulled/m5ranks.jsonl 2>/dev/null; k=\$((k+1)); done; }
     for n in $CL \$( [ $NODES = 2 ] && echo $CL-worker1 ); do
       [ -s $R/pulled/gpu-\$n.txt ] || timeout 60 \$S \$n 'hostname; nvidia-smi --query-gpu=index,uuid,name,driver_version --format=csv,noheader' > $R/pulled/gpu-\$n.txt 2>/dev/null
       timeout 60 \$S \$n 'date -u +%FT%TZ; nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader; ps -eo pid,args --no-headers | grep -E \"ray::|sglang|yeto.rl.learner|raylet\" | grep -v grep | cut -c1-140' >> $R/pulled/apps-\$n.txt 2>/dev/null
@@ -92,7 +118,7 @@ while [ ! -f $R/rc.txt ]; do
   sleep 10
 done" > $R/puller.log 2>&1 &
 echo $! > $R/puller.pid
-[ $C = m4a ] && { KILL_RID=2 setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }   # after rounds 0,1 (round cut at rid 2 exists)
+case $C in m4a|m4a1) true;; *) false;; esac && { KILL_RID=2 setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }   # after rounds 0,1 (round cut at rid 2 exists)
 [ $C = g3 ] && { setsid nohup $D/s1kill.sh $R > $R/s1kill.out 2>&1 & echo $! > $R/s1kill.pid; }
 (
 export HOME=$R/home YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto
@@ -108,4 +134,11 @@ eval "timeout $HARD $PY -m yeto.cli $(cat $R/args.txt)" 2>&1 | tee $R/launch.log
 echo "rc=${PIPESTATUS[0]}" > $R/rc.txt.tmp; date -u +%FT%TZ > $R/end_utc.txt
 sleep 20; mv $R/rc.txt.tmp $R/rc.txt
 )
+# provisioning never succeeded (capacity): no cluster exists -> skip the m5 post step (it would ssh into nothing for up to
+# M5_POST_HARD) and kill the per-run watchdog, which would otherwise `sky down` a later retry that reuses this cluster name
+if grep -qE "failed to provision|ResourcesUnavailableError" $R/launch.log; then
+  kill $(cat $R/watchdog.pid) 2>/dev/null; echo "provision failed: watchdog killed, post skipped" > $R/provision_failed.txt
+elif [ $C = m5 ]; then
+  timeout ${M5_POST_HARD:-1500} $D/s1m5post.sh $R > $R/m5post.out 2>&1; echo "m5post rc=$?" >> $R/m5post.out
+fi
 echo "done $P $(cat $R/rc.txt)"
