@@ -465,6 +465,7 @@ class IslandDriver:
             rollout_id=rollout_id,
             profile_hash=self.profile_hash,
             epoch=self.config_epoch,
+            weight_transport=self.weight_transport,
         )
 
     def _snapshot(
@@ -492,8 +493,11 @@ class IslandDriver:
                 ready_groups=len(snap.ready_group_ids),
                 inflight_batches=snap.inflight_batches,
                 **({"eval_in_flight": snap.eval_in_flight} if self.eval_overlap else {}),
+                policy_age=max(0, snap.trained_policy_version - snap.published_policy_version),
+                t=self.clock(),
                 profile_hash=self.profile_hash,
                 epoch=self.config_epoch,
+                weight_transport=self.weight_transport,
             )
         return snap
 
@@ -886,7 +890,9 @@ class IslandDriver:
                 sample = probe()
                 if sample is not None:
                     self.emit("rl_load_sample", rollout_id=rollout_id, **sample,
-                              profile_hash=self.profile_hash, epoch=self.config_epoch)
+                              t=self.clock(), profile_hash=self.profile_hash,
+                              epoch=self.config_epoch,
+                              weight_transport=self.weight_transport)
 
         thread = threading.Thread(target=loop, name="yeto-load-sampler", daemon=True)
         thread.start()
@@ -901,6 +907,7 @@ class IslandDriver:
 
         values = {
             "rl/clip_fraction": metrics.clip_fraction,
+            "rl/masked_fraction": getattr(metrics, "masked_fraction", None),
             "rl/mean_kl": metrics.mean_kl,
             "rl/ess_ratio": metrics.ess_ratio,
             "rl/groups": len(batch.groups),
@@ -913,7 +920,8 @@ class IslandDriver:
         extra = getattr(self.trainer, "algorithm_metrics", None)
         if callable(extra):
             values.update({str(k): v for k, v in dict(extra() or {}).items()})
-        self.emit("rl_round_labels", rollout_id=rollout_id, **self._labels(), **values)
+        self.emit("rl_round_labels", rollout_id=rollout_id, t=self.clock(), **self._labels(),
+                  **values)
 
     def _is_final_round(self, rollout_id: int) -> bool:
         probe = getattr(self.sync, "is_final_round", None)

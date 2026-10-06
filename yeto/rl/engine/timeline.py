@@ -1,8 +1,8 @@
 """Profile/epoch-tagged execution timeline accounting (rl-infra-spec task 1.7, design D9).
 
-Pure accounting only. Emission from ``IslandDriver`` / the Miles adapter is not
-wired here (driver.py and miles_adapter are frozen until the lr-fix merge); a
-driver that never records spans keeps its old behaviour.
+Pure accounting. ``IslandDriver(observe=True)`` emits the tagged events
+(``rl_timeline_span``/``rl_readiness``/``rl_load_sample``/``rl_round_labels``);
+``load_windows`` turns them into ``LoadSummary`` rows. observe=False emits none.
 
 Two rules from the acceptance text:
 
@@ -120,6 +120,9 @@ LOAD_SAMPLE_SCHEMA: dict[str, tuple[str, type]] = {
     "tito_session_mismatch": ("counter", int),
     "tito_chain_breaks": ("counter", dict),
     "policy_age_violation": ("counter", int),
+    # 1.7 resource peaks (gauge since last sample; None when not probed)
+    "peak_gpu_mem_bytes": ("gauge", int),
+    "peak_cpu_rss_bytes": ("gauge", int),
 }
 HARNESS_METRIC_KEYS = (
     "harness_in_flight", "env_live", "tito_session_mismatch", "tito_chain_breaks",
@@ -244,3 +247,130 @@ def select_bottleneck(distribution: dict[tuple[str, str], dict[str, object]]) ->
     if len(winners) > 1:
         return {"status": "tie", "phases": winners, "mean_share": mean}
     return {"status": "selected", "phase": winners[0], "mean_share": mean}
+
+
+# -- task 1.7: stable read-only load summary (consumed by 6.1 shadow attribution) --
+GPU_ROLES = ("trainer", "rollout")
+
+
+@dataclass(frozen=True)
+class LoadSummary:
+    """One fixed window of observed load for one (profile_hash, epoch).
+
+    STABLE INTERFACE (rl-infra-spec 1.7 -> 6.1): field names do not change.
+
+    * ``window_start``/``window_end``: driver clock seconds, ``[start, end)``.
+    * ``gpu_busy_fraction``: union of ``compute`` spans on trainer/rollout
+      roles, clipped to the window, / window length (overlap never billed twice).
+    * ``publish_block_fraction``: union of ``transfer`` spans of task
+      ``publish`` / window length.
+    * ``tool_wait_fraction`` / ``tail_wait_fraction``: share of
+      ``rl_load_sample`` events in the window classified ``tool-wait`` /
+      ``long-tail`` by :func:`classify_load`; None when no classifiable sample.
+    * ``queued`` / ``active`` / ``ready_groups``: mean over samples (ready
+      groups from ``rl_readiness`` too); None when unobserved.
+    * ``consume_rate``: trained groups (``rl_round_labels`` ``rl/groups``) per
+      second in the window.
+    * ``policy_age``: max ``rl_readiness.policy_age`` in the window, else None.
+    * ``weight_transport``: transport label of the window's events (None if absent).
+    * ``train_fraction`` (added for 6.1/6.4, appended so positional use is
+      unchanged): union of ``compute`` spans on the trainer role / window length.
+    """
+
+    window_start: float
+    window_end: float
+    profile_hash: str | None
+    epoch: int
+    gpu_busy_fraction: float
+    tool_wait_fraction: float | None
+    tail_wait_fraction: float | None
+    publish_block_fraction: float
+    queued: float | None
+    active: float | None
+    ready_groups: float | None
+    consume_rate: float
+    policy_age: int | None
+    weight_transport: str | None = None
+    train_fraction: float = 0.0
+
+
+def _clip_union(intervals: list[tuple[float, float]], lo: float, hi: float) -> float:
+    return _union((max(s, lo), min(e, hi)) for s, e in intervals if e > lo and s < hi)
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> list[LoadSummary]:
+    """Bucket driver ``observe=True`` events into fixed windows per (profile, epoch).
+
+    Reads ``rl_timeline_span`` (start/end), and ``rl_load_sample`` /
+    ``rl_readiness`` / ``rl_round_labels`` (field ``t``); other events and
+    untimed ones are ignored, so observe=False (no such events) yields ``[]``.
+    Windows are aligned to the first timed event of each (profile, epoch).
+    """
+    if window_s <= 0:
+        raise ValueError("window_s must be positive")
+    by_key: dict[tuple[object, int], list[Mapping[str, object]]] = defaultdict(list)
+    for ev in events:
+        name = ev.get("event")
+        if name == "rl_timeline_span" or (
+            name in ("rl_load_sample", "rl_readiness") and ev.get("t") is not None
+        ):
+            by_key[(ev.get("profile_hash"), int(ev.get("epoch") or 0))].append(ev)
+        elif name == "rl_round_labels" and ev.get("t") is not None:
+            by_key[(ev.get("profile_hash"), int(ev.get("config_epoch") or 0))].append(ev)
+    out: list[LoadSummary] = []
+    for (profile, epoch), evs in by_key.items():
+        def times(ev):
+            return (ev["start"], ev["end"]) if ev["event"] == "rl_timeline_span" else (ev["t"], ev["t"])
+        t0 = min(times(e)[0] for e in evs)
+        t1 = max(times(e)[1] for e in evs)
+        gpu = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
+               and e.get("kind") == "compute"
+               and any(r in GPU_ROLES for r in str(e.get("role")).split("+"))]
+        train = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
+                 and e.get("kind") == "compute" and "trainer" in str(e.get("role")).split("+")]
+        pub = [(e["start"], e["end"]) for e in evs if e["event"] == "rl_timeline_span"
+               and e.get("kind") == "transfer" and e.get("task") == "publish"]
+        transports = {e.get("weight_transport") for e in evs} - {None}
+        n = max(1, int(-(-(t1 - t0) // window_s)))
+        for i in range(n):
+            lo, hi = t0 + i * window_s, t0 + (i + 1) * window_s
+            last = i == n - 1
+            inside = [e for e in evs if e["event"] != "rl_timeline_span"
+                      and (lo <= e["t"] < hi or (last and e["t"] == hi))]
+            samples = [e for e in inside if e["event"] == "rl_load_sample"]
+            classes = []
+            for s in samples:
+                q, a, c = s.get("queued_requests"), s.get("running_requests",
+                                                          s.get("active_requests")), s.get("engine_capacity")
+                tw = s.get("tool_wait_trajectories")
+                if None in (q, a, c, tw):
+                    continue
+                classes.append(classify_load(LoadSample(q, a, tw, s.get("ready_groups") or 0, c)))
+            ready = [float(e["ready_groups"]) for e in inside
+                     if e["event"] in ("rl_readiness", "rl_load_sample")
+                     and e.get("ready_groups") is not None]
+            ages = [int(e["policy_age"]) for e in inside
+                    if e["event"] == "rl_readiness" and e.get("policy_age") is not None]
+            groups = sum(int(e.get("rl/groups") or 0) for e in inside
+                         if e["event"] == "rl_round_labels")
+            out.append(LoadSummary(
+                window_start=lo, window_end=hi, profile_hash=profile, epoch=epoch,
+                gpu_busy_fraction=_clip_union(gpu, lo, hi) / window_s,
+                tool_wait_fraction=(classes.count("tool-wait") / len(classes)) if classes else None,
+                tail_wait_fraction=(classes.count("long-tail") / len(classes)) if classes else None,
+                publish_block_fraction=_clip_union(pub, lo, hi) / window_s,
+                queued=_mean([float(s["queued_requests"]) for s in samples
+                              if s.get("queued_requests") is not None]),
+                active=_mean([float(v) for s in samples if (v := s.get(
+                    "running_requests", s.get("active_requests"))) is not None]),
+                ready_groups=_mean(ready),
+                consume_rate=groups / window_s,
+                policy_age=max(ages) if ages else None,
+                weight_transport=next(iter(transports)) if len(transports) == 1 else None,
+                train_fraction=_clip_union(train, lo, hi) / window_s,
+            ))
+    return sorted(out, key=lambda w: (str(w.profile_hash), w.epoch, w.window_start))
