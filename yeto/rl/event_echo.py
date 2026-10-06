@@ -181,6 +181,26 @@ class TapeCollector:
         if json.loads(raw).get("event") == FINALIZED_EVENT:
             self.finalized = True
 
+    def recover_from_file(self, tape_file) -> bool:
+        """Complete the tape from the island's own tape file (raw tape lines, the
+        source the echo mirrors) when the log stream did not deliver the
+        records: every record not yet seen is appended in file order; an
+        incomplete marker is removed once the finalized record is in. Works on
+        a closed collector (it is closed again afterwards). True if finalized.
+        Lines that are not tape records count as discarded (fail closed)."""
+        text = Path(tape_file).read_text(encoding="utf-8")
+        with self._lock:
+            was_closed, self.closed = self.closed, False
+            try:
+                for line in text.splitlines():
+                    if line.strip():
+                        self._record_line(PREFIX + line)
+            finally:
+                self.closed = was_closed
+            if self.finalized and self.incomplete_marker.exists():
+                self.incomplete_marker.unlink()
+            return self.finalized
+
     def close(self) -> bool:
         """Stop writing; mark an unfinalized tape incomplete. True if complete."""
 
