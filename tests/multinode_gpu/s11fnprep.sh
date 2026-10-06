@@ -14,6 +14,19 @@ REPO=CharyZeng/Qwen3.8-Flash-Next-4layer; REV=d19a6b60c0df8f90faf92c7c592b37df2e
 OUT=$FS/torch_dist/qwen3.8-flash-next-4layer_torch_dist; SNAP=$FS/hub/models--CharyZeng--Qwen3.8-Flash-Next-4layer/snapshots/$REV
 MARK=$FS/yeto-complete/CharyZeng--Qwen3.8-Flash-Next-4layer@$REV.json
 PY=; for p in /opt/sglang/bin/python python3; do $p -c "import huggingface_hub" 2>/dev/null && { PY=$p; break; }; done
+# runtime preflight (try23: non-login ssh has no torchrun on PATH -> "torchrun: command not found"). Put the image venv first on
+# PATH, resolve Miles/Megatron roots, and fail fast (before any long step) if the converter cannot start.
+RT=$(dirname "$(command -v $PY)"); export PATH=$RT:$PATH
+MR=${YETO_Q38N_MILES_ROOT:-/root/miles}; MP=${YETO_Q38N_MEGATRON_PATH:-/root/Megatron-LM}
+[ -d "$MP/megatron" ] || MP=$($PY -c "import megatron,os;print(os.path.dirname(os.path.dirname(os.path.abspath(megatron.__file__))))" 2>/dev/null)
+export YETO_Q38N_MILES_ROOT=$MR YETO_Q38N_MEGATRON_PATH=$MP
+echo "RUNTIME py=$PY python3=$(command -v python3) torchrun=$(command -v torchrun) miles=$MR megatron=$MP"
+[ "${DRY:-0}" = 1 ] || {
+  command -v torchrun >/dev/null || { echo "FNPREP_FAIL preflight: no torchrun"; exit 1; }
+  [ -f $MR/tools/convert_hf_to_torch_dist.py ] || { echo "FNPREP_FAIL preflight: $MR/tools/convert_hf_to_torch_dist.py missing"; exit 1; }
+  PYTHONPATH=$MR:$MP $PY -c "import megatron.core, miles_plugins.models.qwen3_8_next.qwen3_8_next" > ~/preflight-import.log 2>&1 || { tail -15 ~/preflight-import.log; echo "FNPREP_FAIL preflight: import megatron.core / qwen3_8_next plugin"; exit 1; }
+  echo "PREFLIGHT_OK"
+}
 echo "DF0 $(df -B1 --output=size,used,avail $FS | tail -1)"; mountpoint -q $FS || { echo "FNPREP_FAIL $FS not mounted"; exit 1; }
 # FS capacity check (user expanded the FS 400->1024GiB, 10-06). df total < FS_MIN_G means the device grew but the filesystem did not:
 # ext4 -> resize2fs, xfs -> xfs_growfs (sudo, in this ssh context = where the FS is mounted); Nebius shared FS is virtiofs (host-
