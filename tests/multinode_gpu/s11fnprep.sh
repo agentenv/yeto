@@ -3,7 +3,7 @@
 #  (1) populate CharyZeng/Qwen3.8-Flash-Next-4layer@d19a6b60 into the FS hub layout + yeto-complete marker (same record as
 #      scripts/populate_nebius_model_store.sh), (2) scripts/convert_qwen3_8_next.sh --variant 4layer -> torch_dist.
 # Never deletes anything on the FS. df gate: free >= 2.1 x snapshot (snapshot + torch_dist of similar size) before (1),
-# free >= 1.1 x snapshot before (2); otherwise FNPREP_FAIL (the chain then skips fnA). Timings + df -> <outdir>/fnprep.json.
+# free >= 1.1 x snapshot before (2); FS total >= FS_MIN_G (1000) GiB (grow attempt for ext4/xfs); otherwise FNPREP_FAIL (the chain then skips fnA). Timings + df -> <outdir>/fnprep.json.
 # usage: s11fnprep.sh <cluster> <outdir> <yeto snapshot dir (git archive of the chain's HEAD)>
 set -u; CL=$1; O=$2; Y=$3; export HOME=/home/michael; mkdir -p $O
 S="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20"
@@ -15,6 +15,21 @@ OUT=$FS/torch_dist/qwen3.8-flash-next-4layer_torch_dist; SNAP=$FS/hub/models--Ch
 MARK=$FS/yeto-complete/CharyZeng--Qwen3.8-Flash-Next-4layer@$REV.json
 PY=; for p in /opt/sglang/bin/python python3; do $p -c "import huggingface_hub" 2>/dev/null && { PY=$p; break; }; done
 echo "DF0 $(df -B1 --output=size,used,avail $FS | tail -1)"; mountpoint -q $FS || { echo "FNPREP_FAIL $FS not mounted"; exit 1; }
+# FS capacity check (user expanded the FS 400->1024GiB, 10-06). df total < FS_MIN_G means the device grew but the filesystem did not:
+# ext4 -> resize2fs, xfs -> xfs_growfs (sudo, in this ssh context = where the FS is mounted); Nebius shared FS is virtiofs (host-
+# managed size, nothing to grow from the guest) -> FAIL. Never deletes; FAIL skips every later fn segment.
+FSTYPE=$(findmnt -no FSTYPE $FS 2>/dev/null); FSSRC=$(findmnt -no SOURCE $FS 2>/dev/null); echo "FSTYPE ${FSTYPE:-?} ${FSSRC:-?}"
+szg() { df -BG --output=size $FS | tail -1 | tr -dc 0-9; }
+G0=$(szg); echo "FS_SIZE_G0 $G0"
+if [ "$G0" -lt ${FS_MIN_G:-1000} ]; then
+  case "$FSTYPE" in
+    ext4) sudo -n resize2fs "$FSSRC" 2>&1 | tail -3 ;;
+    xfs)  sudo -n xfs_growfs $FS 2>&1 | tail -3 ;;
+    *)    echo "no guest-side grow for fstype ${FSTYPE:-?}" ;;
+  esac
+  G1=$(szg); echo "FS_SIZE_G1 $G1"
+  [ "$G1" -ge ${FS_MIN_G:-1000} ] || { echo "FNPREP_FAIL fs size ${G1}G < ${FS_MIN_G:-1000}G after grow attempt (fstype ${FSTYPE:-?})"; exit 1; }
+fi
 SIZE=$($PY -c "from huggingface_hub import HfApi;i=HfApi().model_info('$REPO',revision='$REV',files_metadata=True);print(sum(s.size or 0 for s in i.siblings))")
 echo "SNAPSHOT_BYTES $SIZE"
 avail() { df -B1 --output=avail $FS | tail -1 | tr -dc 0-9; }
@@ -51,6 +66,7 @@ o, rc = sys.argv[1], int(sys.argv[2]); t = open(o + "/fnprep-remote.log").read()
 g = lambda k: (re.findall(rf"^{k} (.*)$", t, re.M) or [None])[-1]
 json.dump({"rc": rc, "ok": "FNPREP_OK" in t, "fail": g("FNPREP_FAIL"), "snapshot_bytes": g("SNAPSHOT_BYTES"), "populate_s": g("POPULATE_S"),
            "convert_s": g("CONVERT_S"), "df0": g("DF0"), "df1": g("DF1"), "df2": g("DF2"), "tracker": g("TRACKER"),
-           "torchdist_bytes": g("TORCHDIST_BYTES")}, open(o + "/fnprep.json", "w"), indent=1)
+           "torchdist_bytes": g("TORCHDIST_BYTES"), "fstype": g("FSTYPE"),
+           "fs_size_g0": g("FS_SIZE_G0"), "fs_size_g1": g("FS_SIZE_G1")}, open(o + "/fnprep.json", "w"), indent=1)
 PY
 grep -q FNPREP_OK $O/fnprep-remote.log && echo FNPREP_OK || { echo "FNPREP_FAIL $(grep -o 'FNPREP_FAIL.*' $O/fnprep-remote.log | tail -1)"; exit 1; }

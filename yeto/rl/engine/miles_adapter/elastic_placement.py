@@ -82,6 +82,12 @@ class ElasticPlacement:
             m = re.fullmatch(r"n(\d+):(\d+)", e)
             if m and self._gpus_per_node:
                 return self._bundle_id(int(m.group(1)) * self._gpus_per_node + int(m.group(2)))
+            if m and int(m.group(1)) == 0:
+                # Single-node island (no --rl-island-gpus-per-node -> topology None, S11
+                # H100 e1): every slot is on node 0, so ``n0:<g>`` is logical bundle g.
+                # Before, it stayed verbatim and the post-commit bookkeeping refused it as
+                # "outside the pool" -> RECOVERY_REQUIRED.
+                return self._bundle_id(int(m.group(2)))
         return e
 
     def restore_committed(self, rollout_gpus: tuple[str, ...], *, epoch: int) -> PlacementDescription:

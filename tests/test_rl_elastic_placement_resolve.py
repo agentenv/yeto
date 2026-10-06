@@ -61,3 +61,23 @@ def test_unresolvable_or_overlapping_entries_are_refused_cleanly():
         q.reconfigure(PlacementDescription(cur.kind, cur.trainer_gpus, [["n0:1"], [1]], {}), epoch=1)
     with pytest.raises(PlacementPlanError, match="overlap"):
         q.reconfigure(PlacementDescription(cur.kind, cur.trainer_gpus, [["n1:0"]], {}), epoch=1)
+
+
+def test_single_node_island_resolves_n0_slots_without_topology():
+    """S11 H100 e1 regression: single node, 8 physical GPUs with 4 allocated
+    (--rl-island-use-gpus-per-node 4, no --rl-island-gpus-per-node -> topology None).
+    T2R1S1 -> T2R2S0 from resources-1x4-h200.json must pass the post-commit
+    bookkeeping instead of "rollout GPUs ['n0:2', 'n0:3'] are outside the pool"."""
+    import json
+    from pathlib import Path
+
+    res = json.loads((Path(__file__).parent / "multinode_gpu" / "resources-1x4-h200.json").read_text())
+    p = ElasticPlacement(_Base(["bundle0", "bundle1"], ["bundle2"], ["bundle3"]), gpus_per_node=None)
+    cur = p.describe()
+    up = res["configs"]["T2R2S0"]["placement"]["rollout"]
+    out = p.reconfigure(PlacementDescription(cur.kind, cur.trainer_gpus, up, dict(cur.extra)), epoch=1)
+    assert out.rollout_gpus == ("bundle2", "bundle3") and out.extra["standby_gpus"] == ()
+    down = res["configs"]["T2R1S1"]["placement"]["rollout"]
+    out = p.reconfigure(PlacementDescription(cur.kind, cur.trainer_gpus, down, dict(cur.extra)), epoch=2)
+    assert out.rollout_gpus == ("bundle2",) and out.extra["standby_gpus"] == ("bundle3",)
+    assert p.restore_committed(tuple(up), epoch=3).rollout_gpus == ("bundle2", "bundle3")
