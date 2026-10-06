@@ -95,18 +95,30 @@ def test_run_ports_predicted_layout_unchanged(monkeypatch):
 P = "model.language_model.layers."
 
 
-def _fake_chunks(rank=4, hidden=8, bump=0.0):
+def _layer_chunks(layer, kind, rank=4, hidden=8, bump=0.0):
+    """One layer as Miles exports it: attention (GDN 10 / QSA 8) + shared 6 + experts 4."""
     t = lambda *s: torch.full(s, 0.5 + bump, dtype=torch.bfloat16)  # noqa: E731
     a = t(rank, hidden)
-    gdn = [(f"{P}0.linear_attn.{n}.lora_{s}.weight", t(rank, hidden) if s == "A" else t(6, rank))
-           for n in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj") for s in "AB"]
-    qsa = [(f"{P}3.self_attn.{n}_proj.lora_A.weight", a) for n in "qkv"]
-    qsa += [(f"{P}3.self_attn.{n}_proj.lora_B.weight", t(6, rank)) for n in "qkv"]
-    qsa += [(f"{P}3.self_attn.o_proj.lora_A.weight", lambda: t(rank, hidden)),
-            (f"{P}3.self_attn.o_proj.lora_B.weight", t(hidden, rank))]
-    experts = [(f"{P}0.mlp.experts.gate_up_proj.lora_A.weight", t(3, rank, hidden)),
-               (f"{P}0.mlp.experts.down_proj.lora_B.weight", t(3, hidden, rank))]
-    return [gdn, [(n, v() if callable(v) else v) for n, v in qsa], experts]
+    if kind == "linear_attention":
+        attn = [(f"{P}{layer}.linear_attn.{n}.lora_{s}.weight", t(rank, hidden) if s == "A" else t(6, rank))
+                for n in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj") for s in "AB"]
+    else:
+        attn = [(f"{P}{layer}.self_attn.{n}_proj.lora_A.weight", a) for n in "qkv"]
+        attn += [(f"{P}{layer}.self_attn.{n}_proj.lora_B.weight", t(6, rank)) for n in "qkv"]
+        attn += [(f"{P}{layer}.self_attn.o_proj.lora_A.weight", t(rank, hidden)),
+                 (f"{P}{layer}.self_attn.o_proj.lora_B.weight", t(hidden, rank))]
+    shared = [(f"{P}{layer}.mlp.shared_expert.{n}_proj.lora_{s}.weight", t(rank, hidden) if s == "A" else t(hidden, rank))
+              for n in ("gate", "up", "down") for s in "AB"]
+    experts = [(f"{P}{layer}.mlp.experts.{n}.lora_{s}.weight", t(3, rank, hidden) if s == "A" else t(3, hidden, rank))
+               for n in ("gate_up_proj", "down_proj") for s in "AB"]
+    return [attn, shared, experts]
+
+
+LAYER_TYPES_4 = ("linear_attention",) * 3 + ("full_attention",)
+
+
+def _fake_chunks(rank=4, hidden=8, bump=0.0, layers=range(4)):
+    return [c for i in layers for c in _layer_chunks(i, LAYER_TYPES_4[i], rank, hidden, bump)]
 
 
 def _actor(main=True):
@@ -136,7 +148,7 @@ def test_native_export_validates_and_policy_state_learns_layout(capsys):
 
     out = sp._export_flash_next(_actor(), policy_version=0, exporter=lambda m: iter(_fake_chunks()))
     names = set(out["tensors"])
-    assert len(names) == 10 + 8 + 2 and all(n.startswith("base_model.model.model.language_model.")
+    assert len(names) == 78 and all(n.startswith("base_model.model.model.language_model.")
                                             for n in names)
     lora = canonical_state_from_owned_tensors(0, out["tensors"], base_model_revision="a" * 40,
                                               lora_config_hash="c" * 64)
@@ -149,7 +161,7 @@ def test_native_export_validates_and_policy_state_learns_layout(capsys):
         ps.layout_hash
     first = ps.export()
     assert ps.layout_hash == lora.layout_hash
-    assert "learned LoRA layout from first export: 20 tensors" in capsys.readouterr().out
+    assert "learned LoRA layout from first export: 78 tensors" in capsys.readouterr().out
     model.bump = 1.0  # trained values change, layout pinned
     assert ps.export().policy_tensor_hash() != first.policy_tensor_hash()
     model.run_plugin = lambda path, kw: [{"policy_version": 0, "tensors": {
@@ -179,3 +191,90 @@ def test_receipt_layout_reads_learned_hash_after_first_sync_start_export():
     src = inspect.getsource(entry)
     assert "parameter_layout_hash=lambda: policy_state.layout_hash" in src
     assert "parameter_layout_hash=lambda: layout_hash" not in src
+
+
+# --- PP gather of the native export (FN-A-RESULT 38 vs 78) -------------------
+
+
+def _stage_exporter(stage_layers):
+    return lambda m: iter(_fake_chunks(layers=stage_layers))
+
+
+def test_profile_expected_native_export_tensors():
+    from yeto.rl.profiles import qwen3_8_next as prof
+
+    assert prof.expected_native_export_tensors("4layer") == 78
+    # FN-A-RESULT: stage 1 (layers 2-3) 38, stage 0 (layers 0-1) 40.
+    assert prof.expected_native_export_tensors("4layer", LAYER_TYPES_4) == 40 + 38
+    assert prof.LAYER_TYPES["4layer"] == LAYER_TYPES_4
+    with pytest.raises(ValueError, match="not pinned"):
+        prof.expected_native_export_tensors("full")
+    with pytest.raises(ValueError, match="layer_types"):
+        prof.expected_native_export_tensors("4layer", LAYER_TYPES_4[:3])
+
+
+def test_native_export_gathers_all_pp_stages(capsys, monkeypatch):
+    """TP2 PP2 EP4: main rank (last stage) merges stage 0's 40 with its own 38."""
+    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.profiles import qwen3_8_next as prof
+
+    sent = {}
+
+    def gather_stage0(local, is_main):  # stage 0 peer: sends, gets nothing back
+        assert not is_main and local is not None
+        sent["stage0"] = local
+        return None
+
+    actor0 = _actor(False)
+    actor0.args.num_layers = 4
+    monkeypatch.setattr(sp, "_tp_ep_leader", lambda actor: True)  # stage-0 peer of the main rank
+    assert sp._export_flash_next(actor0, policy_version=0, exporter=_stage_exporter([0, 1]),
+                                 pp_gather=gather_stage0) is None
+    monkeypatch.undo()
+    assert len(sent["stage0"]) == 40
+
+    def gather_main(local, is_main):
+        assert is_main and len(local) == 38
+        return [sent["stage0"], local]
+
+    actor1 = _actor(True)
+    actor1.args.num_layers = 4
+    out = sp._export_flash_next(actor1, policy_version=3, exporter=_stage_exporter([2, 3]), pp_gather=gather_main)
+    assert len(out["tensors"]) == prof.expected_native_export_tensors("4layer") == 78
+    assert {sp._fn_layer(n) for n in out["tensors"]} == {0, 1, 2, 3}
+    assert "per-PP-stage tensors [40, 38], merged 78" in capsys.readouterr().out
+
+
+def _canon_stage(layers):
+    from yeto.rl.engine.miles_adapter import state_plugin as sp
+
+    return {sp._canonical(n): v for c in _fake_chunks(layers=layers) for n, v in c}
+
+
+def test_merge_pp_stage_exports_validates():
+    from yeto.rl.engine.miles_adapter import state_plugin as sp
+
+    s0, s1 = _canon_stage([0, 1]), _canon_stage([2, 3])
+    assert len(sp.merge_pp_stage_exports([s0, s1], num_layers=4)) == 78
+    # stage-local numbering (both stages say layers 0-1) is refused, not silently merged
+    with pytest.raises(sp.StatePluginError, match="overlap|global"):
+        sp.merge_pp_stage_exports([s0, _canon_stage([0, 1])], num_layers=4)
+    with pytest.raises(sp.StatePluginError, match="overlap|global"):
+        sp.merge_pp_stage_exports([s1, s0], num_layers=4)
+    # missing stage / layer (the pre-fix 38-tensor export)
+    with pytest.raises(sp.StatePluginError, match=r"missing layers \[0, 1\]"):
+        sp.merge_pp_stage_exports([s1], num_layers=4)
+    with pytest.raises(sp.StatePluginError, match="no LoRA tensors"):
+        sp.merge_pp_stage_exports([s0, {}], num_layers=4)
+    # duplicate across stages
+    dup = dict(s1)
+    dup[next(iter(s0))] = torch.zeros(1)
+    with pytest.raises(sp.StatePluginError, match="duplicate|overlap"):
+        sp.merge_pp_stage_exports([s0, dup], num_layers=4)
+    # incomplete layer
+    short = {k: v for k, v in s1.items() if "o_proj.lora_B" not in k}
+    with pytest.raises(sp.StatePluginError, match="layer 3 exported 17 tensors, expected 18"):
+        sp.merge_pp_stage_exports([s0, short], num_layers=4)
+    with pytest.raises(sp.StatePluginError, match="missing a stage"):
+        sp._export_flash_next(_actor(), policy_version=0, exporter=_stage_exporter([2, 3]),
+                              pp_gather=lambda local, is_main: [None, local])

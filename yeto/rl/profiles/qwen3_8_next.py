@@ -80,6 +80,29 @@ SGLANG_LORA_LEAVES = frozenset(
 )
 EXPECTED_LORA_KEYS_4LAYER = 54
 
+# HF tensors per layer from Miles c35702e ``export_qwen3_8_next_lora_hf_chunks``
+# (the trainer-side full-model export, gathered over PP by yeto): GDN 5
+# projections x A/B = 10, QSA q/k/v/o x A/B = 8, shared expert gate/up/down x
+# A/B = 6, routed experts gate_up/down x A/B = 4; every layer is MoE.
+NATIVE_EXPORT_TENSORS_PER_LAYER = {"linear_attention": 10 + 6 + 4, "full_attention": 8 + 6 + 4}
+# config.json layer_types for the 4-layer checkpoint (see the HF note above).
+LAYER_TYPES = {"4layer": ("linear_attention",) * 3 + ("full_attention",)}
+
+
+def expected_native_export_tensors(variant: str = "4layer", layer_types: Sequence[str] | None = None) -> int:
+    """Full-model (all PP stages) native LoRA export tensor count: 4layer -> 78.
+
+    The full variant's layer_types are not pinned here; pass them explicitly.
+    """
+
+    if layer_types is None:
+        if variant not in LAYER_TYPES:
+            raise ValueError(f"layer_types not pinned for variant {variant!r}; pass them explicitly")
+        layer_types = LAYER_TYPES[variant]
+    if len(layer_types) != NUM_LAYERS[variant]:
+        raise ValueError(f"{variant} has {NUM_LAYERS[variant]} layers, got {len(layer_types)} layer_types")
+    return sum(NATIVE_EXPORT_TENSORS_PER_LAYER[kind] for kind in layer_types)
+
 # M3 acceptance #1: trainable LoRA parameters for the 4-layer variant,
 # rank r (attention / shared / GDN) and r_e (routed experts).
 _GDN_PARAMS_PER_RANK = 35424  # per GDN layer, x3 layers

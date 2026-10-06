@@ -25,6 +25,7 @@ torch / megatron / miles are imported lazily; importing this module is cheap.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -462,22 +463,117 @@ def _flash_next_exporter() -> Callable[[Any], Iterable[Any]]:
     return export_qwen3_8_next_lora_hf_chunks
 
 
-def _export_flash_next(actor: Any, *, policy_version: int, exporter=None) -> dict[str, Any] | None:
+_FN_LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
+# Tensors per layer emitted by Miles c35702e ``export_qwen3_8_next_lora_hf_chunks``:
+# GDN attention 5 projections x A/B, QSA q/k/v/o x A/B, shared expert
+# gate/up/down x A/B, routed experts gate_up/down x A/B (every layer is MoE).
+_FN_ATTN_TENSORS = {"linear_attn": 10, "self_attn": 8}
+_FN_MLP_TENSORS = {"mlp.shared_expert": 6, "mlp.experts": 4}
+
+
+def _fn_layer(name: str) -> int:
+    match = _FN_LAYER_RE.search(name)
+    if match is None:
+        raise StatePluginError(f"Flash-Next LoRA tensor {name!r} has no layer index")
+    return int(match.group(1))
+
+
+def merge_pp_stage_exports(stages: Sequence[Mapping[str, Any]], *, num_layers: int | None = None) -> dict[str, Any]:
+    """Merge per-PP-stage Flash-Next exports (stage order) into one full-model dict.
+
+    Miles names adapters with Megatron's global ``layer_number - 1``, so names
+    are already global: nothing is renumbered.  Refuses duplicate names across
+    stages, overlapping / out-of-order stage layer ranges, missing layers and
+    layers whose tensor count is not GDN/QSA attention + shared + routed experts.
+    """
+
+    merged: dict[str, Any] = {}
+    previous_max = -1
+    for index, stage in enumerate(stages):
+        if not stage:
+            raise StatePluginError(f"Flash-Next PP stage {index} exported no LoRA tensors")
+        layers = {_fn_layer(name) for name in stage}
+        if min(layers) <= previous_max:
+            raise StatePluginError(
+                f"Flash-Next PP stage {index} layers {sorted(layers)} overlap or precede earlier stages "
+                f"(max {previous_max}); names must carry global layer indices")
+        previous_max = max(layers)
+        for name, value in stage.items():
+            if name in merged:
+                raise StatePluginError(f"duplicate Flash-Next LoRA tensor {name!r} across PP stages")
+            merged[name] = value
+    per_layer: dict[int, list[str]] = {}
+    for name in merged:
+        per_layer.setdefault(_fn_layer(name), []).append(name)
+    expected_layers = range(num_layers) if num_layers else range(max(per_layer) + 1)
+    missing = sorted(set(expected_layers) - set(per_layer))
+    extra = sorted(set(per_layer) - set(expected_layers))
+    if missing or extra:
+        raise StatePluginError(f"Flash-Next LoRA export missing layers {missing} / unexpected layers {extra}")
+    for layer, names in sorted(per_layer.items()):
+        attention = [kind for kind in _FN_ATTN_TENSORS if any(f".{kind}." in n for n in names)]
+        if len(attention) != 1:
+            raise StatePluginError(f"Flash-Next layer {layer} has attention kinds {attention}")
+        want = _FN_ATTN_TENSORS[attention[0]] + sum(_FN_MLP_TENSORS.values())
+        if len(names) != want:
+            raise StatePluginError(f"Flash-Next layer {layer} exported {len(names)} tensors, expected {want}")
+    return merged
+
+
+def _pp_gather_default(local: dict[str, Any] | None, is_main: bool) -> list[dict[str, Any] | None] | None:
+    """Gather each PP stage's export to the main rank over the PP group.
+
+    Only the PP group that contains the main rank carries tensors (one tiny
+    flag all-gather per group decides); others send ``None``.  Returns the
+    stage-ordered list on the main rank, ``None`` elsewhere.  Without PP (or
+    without torch.distributed) the local export is the whole model.
+    """
+
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()):
+        return [local] if is_main else None
+    from megatron.core import mpu
+
+    if mpu.get_pipeline_model_parallel_world_size() <= 1:
+        return [local] if is_main else None
+    group = mpu.get_pipeline_model_parallel_group()
+    size = dist.get_world_size(group)
+    flags: list[Any] = [None] * size
+    dist.all_gather_object(flags, (bool(is_main), dist.get_rank()), group=group)
+    mains = [rank for flag, rank in flags if flag]
+    if not mains:
+        return None
+    if len(mains) != 1:
+        raise StatePluginError(f"multiple Flash-Next main ranks in one PP group: {mains}")
+    gathered: list[Any] | None = [None] * size if is_main else None
+    dist.gather_object(local, gathered, dst=mains[0], group=group)
+    return gathered  # PP group ranks are in stage order
+
+
+def _export_flash_next(actor: Any, *, policy_version: int, exporter=None, pp_gather=None) -> dict[str, Any] | None:
     """Fingerprint export for the no-sync Flash-Next island (S11 try24 fix).
 
     Uses Miles' own collective HF export (every rank must call it: TP/EP
-    gathers). Names are Miles' SGLang adapter names (``model.language_model.
-    layers.N...lora_{A,B}.weight``, q/k/v share one A, expert tensors padded to
-    ``--lora-rank``) under the canonical prefix; values are the bf16 model
-    copies upcast to fp32. The layout is learned from the first export
-    (MilesPolicyState with ``expected_layout_hash=None``) and pinned after.
-    The state is never applied back (``apply_state`` refuses Flash-Next).
+    gathers inside one PP stage). Names are Miles' SGLang adapter names
+    (``model.language_model.layers.N...lora_{A,B}.weight`` with global N, q/k/v
+    share one A, expert tensors padded to ``--lora-rank``) under the canonical
+    prefix; values are the bf16 model copies upcast to fp32.  Miles only covers
+    the local PP stage, so every stage's export is gathered over the PP group
+    to the main rank (last stage) and merged into the full model.  The layout is
+    learned from the first export (MilesPolicyState with
+    ``expected_layout_hash=None``) and pinned after.  The state is never applied
+    back (``apply_state`` refuses Flash-Next).
     """
 
     import torch
 
     exporter = exporter or _flash_next_exporter()
-    retain = _is_main_rank(actor)
+    pp_gather = pp_gather or _pp_gather_default
+    is_main = _is_main_rank(actor)
+    # Miles' TP/EP gathers leave stage-complete tensors on every rank; keep
+    # them only on the main rank's PP peers (same TP/DP coordinates).
+    retain = is_main or _tp_ep_leader(actor)
     tensors: dict[str, Any] = {}
     with torch.no_grad():
         for chunk in exporter(actor.model):
@@ -492,12 +588,38 @@ def _export_flash_next(actor: Any, *, policy_version: int, exporter=None) -> dic
                 )
     if not tensors:
         raise StatePluginError("Flash-Next native LoRA export produced no tensors")
-    if not retain:
+    stages = pp_gather(tensors if retain else None, is_main)
+    if not is_main:
         return None
-    for name, value in tensors.items():
+    if not stages or any(stage is None for stage in stages):
+        raise StatePluginError("Flash-Next PP gather is missing a stage export")
+    num_layers = getattr(getattr(actor, "args", None), "num_layers", None)
+    merged = merge_pp_stage_exports(stages, num_layers=int(num_layers) if num_layers else None)
+    print(
+        "[rl] Flash-Next native LoRA export: per-PP-stage tensors "
+        f"{[len(stage) for stage in stages]}, merged {len(merged)}",
+        flush=True,
+    )
+    for name, value in merged.items():
         if not torch.isfinite(value).all().item():
             raise StatePluginError(f"{name!r} contains NaN or Inf")
-    return {"policy_version": int(policy_version), "tensors": dict(sorted(tensors.items()))}
+    return {"policy_version": int(policy_version), "tensors": dict(sorted(merged.items()))}
+
+
+def _tp_ep_leader(actor: Any) -> bool:
+    """Miles' main-rank test minus the last-stage clause: the main rank's PP peers."""
+
+    try:
+        import torch.distributed as dist
+        from megatron.core import mpu
+    except ImportError:  # pragma: no cover
+        return False
+    if not (dist.is_available() and dist.is_initialized()):
+        return False
+    return (
+        mpu.get_tensor_model_parallel_rank() == 0
+        and mpu.get_data_parallel_rank(with_context_parallel=True) == 0
+    )
 
 
 def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
