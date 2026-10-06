@@ -157,3 +157,16 @@
 3. 补 PP 汇总导出，或者至少在文档中注明"导出只覆盖最后一个 PP stage"（§3）。
 4. 如果要实质验证 LoRA 训练正确性：在 4-layer 上用简单奖励（§4 方案 a/b）再上卡一次，并把"grad_norm>0 且导出 hash 变化"加入判据。上卡前按惯例先复核并预登记。
 5. 再上卡时考虑把 resource sample 的采样间隔降到 ≤10 s，以便得到可信的显存峰值。
+
+## 附：零奖励信号根因核查（2026-10-06，主 agent，CPU）
+
+结论：**4layer 截断模型本身输出接近均匀分布的随机 token**，回答从不形成可判分的答案 → 8 个样本全 0 分 → GRPO 组内优势全 0 → loss、grad_norm 全 0。不是 yeto/Miles 管道或奖励函数的缺陷。
+
+证据：
+1. **每 token 平均对数概率 ≈ −12.0**（try27 run.log：`rollout/rollout_log_probs` 六轮 −11.987 … −12.002；训练侧重算 `rollout/log_probs` −11.989 … −12.004）。词表 248,320 的均匀分布为 ln(248320) = −12.42。采样温度 1.0 下，被采到的 token 平均概率约 1/16 万，与均匀随机几乎无差别。
+2. **两套独立实现给出同一分布**：SGLang（直接读 HF 权重）与 Megatron（读 Miles 转换的 torch_dist）对同一序列的 logprob 绝对差仅 ≈0.036。加载或转换出错不太可能让两边一致地错，因此这个近均匀分布就是这份权重的真实输出。
+3. **权重确为官方截取**：逐字节比对（只读 HTTP Range）显示 lm_head、embed_tokens、最终 hyper_connection_mixer（hc_norm / input_mix_weight_down / up）与官方 Qwen/Qwen3.8-Flash-Next@de4b8e4d 完全相同；前 4 层参数抽样亦相同（FN-4LAYER-PROVENANCE.md）。即"前 4 层 + 原输出头"，中间 44 层缺失，输出头接到的隐状态分布与训练时完全不同，logits 近乎平坦。
+4. **表现一致**：95–100% 样本写满 1024 token 未出 EOS；gsm8k 奖励取 `\boxed{}` 或末 200 字符最后一个数，与标准答案精确相等才给 1，随机文本命中概率可忽略 → rewards/raw_reward 六轮全 0，`zero_variance_group_ratio` = 1。
+5. **与 Miles 配方的差异不是原因**：本次温度 1.0（Miles 0.8）、未传 `thinking_mode`、gsm8k 精确匹配（Miles 用 dapo-math + `--rm-type math`），这些改变不了近均匀的输出分布。Miles 自己的 4layer CI 也只把 reward / grad_norm 作历史区间门，不要求学会任务。
+
+含义：4layer 只能验证"管道与数值"，不能验证"学会任务"。要在 4layer 上验证 LoRA 确有梯度，需要一个与文本质量无关、组内有方差的奖励（fn8r：按字符长度的连续奖励 + 128 token 上限）。真正的任务学习信号只能在完整 48 层模型上验证。
