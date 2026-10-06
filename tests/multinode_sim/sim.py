@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -307,20 +308,42 @@ def case_gpu_pool():
                                  yeto_rl_elastic={"resources": {"nodes": 2, "gpus_per_node": G}})
     pools = lambda: [r for r in read_journal(tmp / "state/reconfig") if r["kind"] == "gpu_pool"]  # noqa: E731
     probe = gpu_probe_with({"yeto_node:0": "h", "yeto_node:1": "w"})
+    # v2 ruling (c) stale re-entry: incarnation markers go to a private dir (never the shared default);
+    # the marker pid is this process, so markers stay "live" until removed (= `yeto down`)
+    mdir = str(tmp / "markers")
+    hooks = dict(incarnation_probe=lambda topo, flat: entry._marker_rows(flat, mdir),
+                 marker_writer=lambda topo, observed, inc: entry._write_markers(
+                     [u for node in observed for u in node], inc, os.getpid(), mdir))
+    _orig_preflight = entry.reconcile_gpu_pool_preflight
+
+    def preflight(*a, **kw):
+        return _orig_preflight(*a, **{**hooks, **kw})
     ctl = _ctl(tmp / "state", {"t": 1000.0})
-    res = entry.reconcile_gpu_pool_preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=probe)
+    res = preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=probe)
     assert res.ok and not res.rebind and pools()[-1]["source"] == "none", res
     log("incarnation 1 (cfg without uuids): baseline bound =", pools()[-1]["uuids"])
     ctl.close()
+    ctl = _ctl(tmp / "state", {"t": 1000.5})
+    try:
+        preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=probe)
+    except RuntimeError as exc:
+        assert "yeto down" in str(exc), exc
+        log("incarnation 1b (old incarnation still live): refused ->", str(exc)[:100])
+    else:
+        raise AssertionError("a new incarnation re-entered GPUs still held by a live old incarnation")
+    ctl.close()
+    shutil.rmtree(mdir)  # `yeto down`: the old incarnation's processes and markers are gone
     ctl = _ctl(tmp / "state", {"t": 1001.0})
-    res = entry.reconcile_gpu_pool_preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=probe)
+    res = preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=probe)
     assert res.ok and not res.rebind and pools()[-1]["source"] == "journal", res
     log("incarnation 2 (same GPUs): accepted against the journal baseline")
     ctl.close()
+    shutil.rmtree(mdir, ignore_errors=True)  # clean `yeto down` between incarnations
+    shutil.rmtree(mdir, ignore_errors=True)  # each incarnation is brought down before the next
     replaced = gpu_probe_with({"yeto_node:0": "h", "yeto_node:1": "w2"})  # the worker machine changed
     ctl = _ctl(tmp / "state", {"t": 1002.0})
     try:
-        entry.reconcile_gpu_pool_preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=replaced)
+        preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=replaced)
     except RuntimeError as exc:
         assert "gpu_pool" in str(exc) and "--rl-elastic-accept-rebind" in str(exc), exc
         log("incarnation 3 (worker replaced): refused ->", str(exc)[:120])
@@ -328,14 +351,18 @@ def case_gpu_pool():
         raise AssertionError("replaced worker GPUs were accepted without --rl-elastic-accept-rebind")
     assert not pools()[-1]["accepted"] and len(pools()[-1]["diffs"]) == G
     ctl.close()
+    shutil.rmtree(mdir, ignore_errors=True)  # clean `yeto down` between incarnations
+    shutil.rmtree(mdir, ignore_errors=True)  # each incarnation is brought down before the next
     ctl = _ctl(tmp / "state", {"t": 1003.0})
     assert ctl.recovery_required is None, ctl.recovery_required  # restartable: not a journal terminal
     miles_args.yeto_rl_elastic["accept_rebind"] = True
-    res = entry.reconcile_gpu_pool_preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=replaced)
+    res = preflight(SimpleNamespace(controller=ctl), topology, miles_args, gpu_probe=replaced)
     assert res.ok and res.rebind and len(res.mapping) == G, res
     assert pools()[-1]["rebind"] and pools()[-1]["uuids"][1][0] == "GPU-w2-0", pools()[-1]
     log("incarnation 4 (--rl-elastic-accept-rebind): rebind journaled, mapping =", res.mapping)
     ctl.close()
+    shutil.rmtree(mdir, ignore_errors=True)  # clean `yeto down` between incarnations
+    shutil.rmtree(mdir, ignore_errors=True)  # each incarnation is brought down before the next
     log("PASS gpu_pool")
 
 

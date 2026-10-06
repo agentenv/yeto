@@ -943,10 +943,23 @@ class MilesRolloutPool:
         running = sorted(set(cells) & tracked)
         if running:
             raise MembershipPlanError(f"cells {running} are running; only stopped cells can be bound")
-        for i, cell in enumerate(cells):  # rl-multinode-island D7: a cell never spans nodes
+        cross = bool(getattr(self._args, "yeto_rl_allow_cross_node_engine_tp", False))
+        for i, cell in enumerate(cells):  # rl-multinode-island D7: a cell never spans nodes by default
             run = gpus[i * per:(i + 1) * per]
             if not self._bundles.same_node(run):
-                raise MembershipPlanError(f"cell {cell} target GPUs {list(run)} span nodes")
+                # ruling 2026-10-04 v2: with the explicit opt-in a cross-node engine is one
+                # replica of WHOLE nodes (every node contributes all its GPUs)
+                if not cross:
+                    raise MembershipPlanError(f"cell {cell} target GPUs {list(run)} span nodes "
+                                              "(--rl-allow-cross-node-engine-tp lifts the default)")
+                g = int(self._bundles.gpus_per_node or 0)
+                counts: dict = {}
+                for gpu in run:
+                    node = self._bundles.node_of(str(gpu))
+                    counts[node] = counts.get(node, 0) + 1
+                if g and any(c != g for c in counts.values()):
+                    raise MembershipPlanError(f"cell {cell} target GPUs {list(run)} do not take whole "
+                                              f"{g}-GPU nodes (one cross-node replica = all its nodes)")
         info = self._bundles.view_for(gpus)
         manager = self._manager()
         self._bind_seq += 1

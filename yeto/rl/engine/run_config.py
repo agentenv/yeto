@@ -161,6 +161,10 @@ class ParallelLayout:
     # fixed partition whose trainer is not the leading bundles (the launcher
     # derives it from the elastic cfg placement); None = leading layout.
     bundle_map: dict[str, tuple[int, ...]] | None = None
+    # ruling 2026-10-04 v2: explicit cross-node TP opt-ins (--rl-allow-cross-node-tp /
+    # --rl-allow-cross-node-engine-tp); default False = TP stays inside a node.
+    allow_cross_node_tp: bool = False
+    allow_cross_node_engine_tp: bool = False
 
     @property
     def colocated(self) -> bool:
@@ -768,6 +772,8 @@ def resolve_rl_run_config(
                                   if getattr(args, "rl_island_gpus_per_node", None) is not None
                                   and dedicated_rollout_gpus is not None else None),
             bundle_map=_island_bundle_map(args, dedicated_rollout_gpus),
+            allow_cross_node_tp=bool(getattr(args, "rl_allow_cross_node_tp", False)),
+            allow_cross_node_engine_tp=bool(getattr(args, "rl_allow_cross_node_engine_tp", False)),
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,

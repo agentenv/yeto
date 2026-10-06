@@ -337,6 +337,9 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.uneven_pipeline_layers": _ok,
     "parallel.standby_gpus": _ok,
     "parallel.rollout_cell_names": _ok,
+    # ruling 2026-10-04 v2: placement-only opt-ins consumed by yeto (PlacementRequest), no Miles flag
+    "parallel.allow_cross_node_tp": _ok,
+    "parallel.allow_cross_node_engine_tp": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
     "trainable.lora_rank": _ok,
     "trainable.lora_dropout": _ok,
@@ -511,6 +514,8 @@ def placement_request(config) -> PlacementRequest:
         expert_parallel=int(getattr(parallel, "expert_parallel", 1) or 1),
         node_parallel=int(parallel.tensor_parallel) * _cp,
         bundle_map=getattr(parallel, "bundle_map", None),
+        allow_cross_node_tp=bool(getattr(parallel, "allow_cross_node_tp", False)),
+        allow_cross_node_engine_tp=bool(getattr(parallel, "allow_cross_node_engine_tp", False)),
     )
     if request.topology is not None:
         # rl-multinode-island Q2: the trainer rectangle the placement rules derive

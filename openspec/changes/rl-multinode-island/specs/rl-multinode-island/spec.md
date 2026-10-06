@@ -40,8 +40,8 @@ launcher SHALL 把 `--gpu cloud:NxGxgpu` 的一个条目解析为一个 N 节点
 - **WHEN** `get_pg_view` 返回的 bundle 节点序列不是按 `gpus_per_node` 整块分组
 - **THEN** `StartupBundles` 抛出 `BundleMapError`，learner 不进入训练
 
-### Requirement: 放置约束不允许引擎或 trainer 节点内组跨节点
-每个 rollout 引擎的 `gpus_per_engine` 张卡 MUST 位于同一节点；trainer 的每个节点内组（连续 `tp*cp` 个 trainer rank，TP 默认留在节点内）MUST 位于同一节点，且 `tp*cp` MUST ≤ `gpus_per_node` 并整除之；standby 卡 rebind 到 cell 的目标卡 MUST 与该 cell 其余卡同节点。trainer 占用的 (节点数 × 每节点卡数) MUST 为矩形。违反者 SHALL 在启动前（launcher）或解析时（cfg）被拒绝。
+### Requirement: 放置约束默认不允许引擎或 trainer 节点内组跨节点，可显式放行
+默认（无显式放行）每个 rollout 引擎的 `gpus_per_engine` 张卡 MUST 位于同一节点；trainer 的每个节点内组（连续 `tp*cp` 个 trainer rank，TP 默认留在节点内）MUST 位于同一节点，且 `tp*cp` MUST ≤ `gpus_per_node` 并整除之；standby 卡 rebind 到 cell 的目标卡 MUST 与该 cell 其余卡同节点。trainer 占用的 (节点数 × 每节点卡数) MUST 为矩形。违反者 SHALL 在启动前（launcher）或解析时（cfg）被拒绝。"TP 留节点内"只是默认偏好（用户裁定 2026-10-04 v2）：cfg `parallel.allow_cross_node_tp: true` 或 CLI `--rl-allow-cross-node-tp` MUST 放行 trainer `tp*cp` 组跨节点（保留整除与矩形约束）；cfg `parallel.allow_cross_node_engine_tp: true` 或 CLI `--rl-allow-cross-node-engine-tp` MUST 放行 rollout 引擎跨节点，且该引擎 MUST 由整节点组成。放行时系统 MUST 在启动日志 WARN 并在 journal `topology.layout` 记录 `cross_node_tp` / `cross_node_engine_tp`。同一 `(node, gpu)` 槽位 MUST NOT 在 trainer/rollout/standby 中出现两次（混布默认不重叠占卡）。
 
 #### Scenario: 引擎跨节点
 - **WHEN** `gpus_per_node=8, gpus_per_engine=4`，cell 声明 bundles `[6,7,8,9]`
@@ -66,6 +66,29 @@ launcher SHALL 把 `--gpu cloud:NxGxgpu` 的一个条目解析为一个 N 节点
 #### Scenario: TP 组跨节点被拒
 - **WHEN** 24 卡岛（3×8）`T16R8S0`，`parallel tp=16 pp=1`（或 `tp*cp` 不整除 8，例如 `tp=3`）
 - **THEN** 以 `ValueError`/`ManifestError` 拒绝，信息含 "in-node (tp*cp) group ... spans nodes"（或 "not divisible by ... tp*cp"）；launcher 侧 `tp*cp > gpus_per_node` 或不整除时拒绝，信息含 "RL TP*CP must fit and divide one node"
+
+#### Scenario: 显式放行 trainer TP 跨节点（v2 裁定）
+- **WHEN** 2×4 岛 `parallel tp=8`，cfg `parallel.allow_cross_node_tp: true`（或 `--rl-allow-cross-node-tp`）
+- **THEN** 接受，trainer 形状 2×4；launcher 输出 WARN；journal `topology.layout.cross_node_tp = 1`；不带开关时拒绝，信息含 "spans nodes" 与 "--rl-allow-cross-node-tp"
+
+#### Scenario: 显式放行 SGLang TP8 跨两台四卡节点
+- **WHEN** 4×4 岛 `T8R8S0`，`rollout_engine_gpus=8`，rollout 引擎 placement 为 n2 与 n3 的全部 8 卡，`parallel.allow_cross_node_engine_tp: true`
+- **THEN** 接受，`rollout_cells` 把该引擎切为一个 8 bundle 的整节点块 cell；learner 收到 `--rl-allow-cross-node-engine-tp`；同一引擎若只取 n2 的 4 卡 + n3 的 2 卡则拒绝，信息含 "whole 4-GPU nodes"
+
+#### Scenario: 混布槽位重复被拒
+- **WHEN** 2×2 岛 cfg 的 rollout 为 `[["n0:1"]]` 且 standby 为 `["n0:1"]`
+- **THEN** 以 `ManifestError` 拒绝，信息含 "n0:1 more than once"
+
+### Requirement: 跨节点 TP 引擎按完整副本扩缩容
+允许跨节点的 rollout 引擎 SHALL 作为一个整体副本（其全部节点的卡一起）上线或下线。rollout-only 边的源与目标 rollout 卡数 MUST 均为 `rollout_engine_gpus` 的整数倍；cfg 中放行跨节点引擎的 config 其 `rollout` MUST 为 `rollout_engine_gpus` 的整数倍；`bind_members` 的跨节点目标 MUST 为整节点块。系统 MUST NOT 支持通过单独摘除引擎的一个节点实现缩容。
+
+#### Scenario: 只摘一个节点被拒
+- **WHEN** 引擎 8 卡跨 2×4，请求从 rollout 8 卡到 rollout 4 卡的 rollout-only 边
+- **THEN** `plan()` 以 `Rejected` 拒绝，信息含 "single node of it cannot be removed"；cfg 解析时该目标 config 以 `ManifestError` 拒绝，信息含 "whole number of 8-GPU cross-node engine replicas"
+
+#### Scenario: 整副本上下线
+- **WHEN** rollout 8 → 16 卡（新增一个跨节点 8 卡引擎）
+- **THEN** 接受，plan 的 target_engines = source_engines + 1
 
 ### Requirement: trainer 的 EP 与 PP 组允许跨节点
 一个 learner 的 trainer MAY 占用多个节点、每节点多卡；其 EP 组与 PP 组 MAY 跨节点（用户裁定 2026-10-04）。放置校验 MUST NOT 对 EP 组施加节点对齐要求（仅要求 `tp*cp*ep` 整除 trainer 卡数），MUST NOT 对 PP 组施加节点规则；trainer 仍 MUST 满足矩形与 `tp*cp` 节点内规则。
@@ -124,3 +147,18 @@ launcher SHALL 按 recipe 的并行度（trainer `tp*cp*ep*pp` 最小副本 + ro
 #### Scenario: 带 accept-rebind 接受并记录
 - **WHEN** 同上，但给出 `--rl-elastic-accept-rebind`，节点数与每节点卡数一致
 - **THEN** 接受；journal `gpu_pool{accepted:true, rebind:true, mapping:{旧uuid:新uuid}}`，后续 placement 按新 uuid 绑定
+
+### Requirement: GPU UUID 重绑定防重复占用、角色冲突与旧进程误重入
+在 UUID 对账接受（含 `--rl-elastic-accept-rebind` 重绑定）之后、placement group 之前，系统 MUST 再做三项检查并把 uuid → 角色映射写入 journal `gpu_pool.roles`：(a) 重复占用——观测到的 uuid 在池内唯一，且不与另一活跃岛绑定的 uuid 重叠；(b) 角色冲突——按 bundle map（或 leading 布局）每个 uuid 恰属一个角色（trainer/rollout/standby）；(c) 旧进程误重入——journal 基线或观测池中的任一 uuid 若仍被旧化身的存活进程持有（节点上 `/tmp/yeto-rl-incarnation/<uuid>.json` 记录的化身 id 与 pid 存活），MUST 拒绝并要求先 `yeto down`。任一项失败 → journal `gpu_pool{accepted:false}` + tape `rl_reconfiguration RECOVERY_REQUIRED`，不写 journal 终态（允许处理后重启）。接受后系统 SHALL 在每个节点为所绑定的 uuid 写入本化身标记。
+
+#### Scenario: 旧化身仍占卡
+- **WHEN** 新化身启动，n1 的 uuid 标记文件记录的旧化身 pid 仍存活
+- **THEN** 启动以 `RuntimeError` 拒绝，信息含该 uuid、旧化身 id 与 "yeto down"；journal `gpu_pool.accepted=false`
+
+#### Scenario: 一卡两角色
+- **WHEN** bundle map 使 bundle 2 同时属于 trainer 与 rollout
+- **THEN** 拒绝，信息含 "both trainer and rollout"
+
+#### Scenario: 正常重绑定
+- **WHEN** 换机后 uuid 不同、带 `--rl-elastic-accept-rebind`，无旧化身存活，无重叠
+- **THEN** 接受；journal `gpu_pool.roles` 为 4 个 uuid 各一角色；各节点写入化身标记

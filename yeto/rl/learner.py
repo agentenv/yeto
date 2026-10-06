@@ -177,6 +177,9 @@ def parse_args(argv=None):
     # bundle map derived by the launcher from the elastic cfg placement; None =
     # the leading-bundle layout (trainer first, then rollout, then standby).
     parser.add_argument("--rl-island-bundle-map", default=None, metavar="JSON")
+    # ruling 2026-10-04 v2: explicit cross-node TP opt-ins (default: TP stays in a node)
+    parser.add_argument("--rl-allow-cross-node-tp", action="store_true")
+    parser.add_argument("--rl-allow-cross-node-engine-tp", action="store_true")
     # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
     parser.add_argument("--rl-elastic-declare-cells", action="store_true")
     # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,
@@ -383,6 +386,11 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         from .engine.miles_adapter.entry import DETERMINISM_ENV
 
         (os.environ if environ is None else environ).update(DETERMINISM_ENV)
+    # ruling 2026-10-04 v2: the rollout bind path (bind_members) reads the engine opt-in
+    if getattr(args, "rl_allow_cross_node_engine_tp", False):
+        miles_args.yeto_rl_allow_cross_node_engine_tp = True
+    if getattr(args, "rl_allow_cross_node_tp", False):
+        miles_args.yeto_rl_allow_cross_node_tp = True
     if not getattr(args, "rl_elastic", False):
         return
     miles_args.yeto_rl_elastic = {
