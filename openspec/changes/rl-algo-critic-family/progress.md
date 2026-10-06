@@ -60,3 +60,17 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 - upstream 解析：`evidence/upstream_parse_ppo.py`，`PYTHONPATH=/tmp/miles-c35702e`（`git archive c35702e`）+ `/home/michael/work/miles-next-venv`。该 venv 无 megatron-core，故用 FSDP 解析器解析、`miles_validate_args` 前把 train_backend 置为 megatron（shared PPO 块要求）。3 例（缺省、调参、critic-load）全部通过：`use_critic=True`、`num_critic_only_steps=0`、gamma/lambd/value_clip 与规格一致、`offload_train=True`、`kl_coef=0.0`。日志 `evidence/upstream_parse_ppo.log`。**未验证**：Megatron 解析器路径本身（venv 缺 megatron-core）。
 - 为反映有意的行为变化而修改的既有测试：`test_rl_algorithm_capabilities.py::test_critic_rejected_with_the_real_reason`（原断言 legacy 文案）、`test_rl_seq_adv.py`（`--lambd` 现已映射）、`test_rl_algorithm_spec_v2.py` / `test_rl_engine_algorithm.py`（v1 拒绝示例由 ppo 改为 gspo）、`test_rl_algorithm_flags.py`（允许的组加 critic）、`test_rl_miles_adapter_config.py`（叶子表加 critic run config）。
 - 全量回归（OMP/OPENBLAS/MKL 线程数=1，因本机用户线程数接近 4096 上限）：`68 failed, 3995 passed, 51 skipped, 26 errors`，失败集合规约后与基线完全相同（新增 0）。
+
+### 第 3 组 CPU 部分（3.1、3.2 已实现、CPU 已验证；3.3 GPU 未执行）
+
+实现：
+- `selection.py`：`--advantage-estimator ppo`（及 `use_critic` + ppo）不再路由到 legacy；`--use-critic`（legacy fork 专有）与其它非 GRPO 估计器经 extra argv 仍拒绝。
+- `entry.py`：`receipt_role_family` 对 ppo+needs_critic 返回 `"ppo"`（未声明 needs_critic 仍拒绝）；组合根保留 Miles 创建的 critic（与 spec 的 needs_critic 必须一致，否则启动失败），包成 `SwappableActor` 交给 disposer 与 `compose_island(critic_model=...)`。`entry.py:236` 与 `fake.py:70` 仍声明 `critic=False`（design D3：正式声明在 G1 之后）。
+- `trainer.py`：按 Miles `train.py:118-126` 顺序：安装 critic 记录器插件 → `critic.train` → 读 critic grad norm 与 step losses → `offload_train` 时 `critic.offload()` → `actor.train(..., external_data=critic_outputs)` → 释放 critic 输出（`remove_train_output_refs`）与 rollout 数据；critic 失败抛 `TrainStepError`，两类引用都释放。
+- `trainer_rebuild.py`：`rebuild_same_shape/rebuild_resharded` 增加可选 `critic` 句柄（旧句柄一并传给 Miles，重建后 `swap_critic`）；重建结果与句柄不一致时报错（elastic+critic 已在 2.3 拒绝，本轮不会走到）。
+- `contracts.py` `_ALGORITHMS` 增加 ppo；`local_learner.py` `_ROLES_BY_ALGORITHM["ppo"]={actor,critic}`，ppo 可用 role lane（`stream_role`），与 SAO 相同的双 layout 方式。
+- 指标（3.2）：`state_plugin.install_value_metrics_recorder` 在 critic 进程中包装 Miles `value_loss_function`，把 `explained_variance = 1 − Var(returns − values_old)/Var(returns)`（掩码后 token；returns 与 values 均由 Miles 计算，yeto 不做 GAE）加入 loss dict；`trainer.round_metrics()` 增加 `critic/value_loss`、`critic/value_clipfrac`、`critic/explained_variance`、`critic/grad_norm`，进入 `rl_round_trained.train_metrics`。fake 引擎新增 `critic=True` 模式（先 critic 后 actor，receipt 家族 ppo，报告两项指标）。
+
+验证（CPU）：`tests/test_rl_critic_ports.py` 14 项：未放行拒绝且提示 `execution:critic`、Miles 适配器未声明 critic；带 `advantage_estimators:ppo` + `execution:critic` 放行时 fake 单岛跑 2 轮，事件中每轮 `train_metrics` 含有限的 `critic/value_loss` 与 `critic/explained_variance`；两岛或有外层同步时放行被拒；dry-run argv 快照；receipt 家族；critic 句柄替换；Miles 训练器调用顺序（critic 先训练并 offload，actor 收到 external_data）、失败时释放；GRPO 训练器调用不变；EV 数值；ppo 角色表与 role lane 哈希。修改的既有测试：`test_rl_engine_selection.py`（ppo 不再路由 legacy，原 ppo 例改为 gspo，并新增 ppo 放行用例）、`test_rl_round_accounting.py`（ppo+needs_critic → "ppo"）；`local_learner` 报错文案保留原前缀 "require an SAO role"。
+
+**未验证（需 GPU G1，3.3）**：真实 Miles 下 critic 训练顺序与 offload 是否与 shared PPO 生命周期兼容；`external_data` 与 ports 单 cell 训练的配合；EV 在 Miles loss dict 中跨 micro-batch 的归约方式（按 micro-batch 计算，归约语义未核实）；critic 进程中 `train_one_step` 记录器是否生效。

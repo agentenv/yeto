@@ -112,6 +112,9 @@ class FakeEngine:
     # do not move) -- the decayed-to-zero schedule of fix-decoupled-lr-schedule.
     zero_lr_rounds: set[int] = field(default_factory=set)
     lr: float = 1e-5
+    # rl-algo-critic-family 3.2: a shared actor/critic trainer (receipt family
+    # "ppo"); the critic trains first each round and reports value metrics.
+    critic: bool = False
 
     def __post_init__(self) -> None:
         self.tensors = {k: v.detach().clone().float() for k, v in self.tensors.items()}
@@ -213,6 +216,15 @@ class FakeTrainerGroup:
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
         e = self.engine
+        self.critic_metrics = {}
+        if e.critic:
+            e.calls.append(("critic_train", batch.rollout_id))
+            # deterministic, finite stand-ins for Miles' value_loss and the
+            # state plugin's explained variance
+            self.critic_metrics = {
+                "critic/value_loss": 1.0 / (batch.rollout_id + 2),
+                "critic/explained_variance": 1.0 - 1.0 / (batch.rollout_id + 2),
+            }
         e.calls.append(("train", batch.rollout_id))
         if not e.trainer_resident:
             raise RuntimeError("train step on an offloaded trainer")
@@ -242,7 +254,7 @@ class FakeTrainerGroup:
         tokens = sum(g.token_count for g in batch.groups)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
         return LocalStepReceipt(
-            algorithm="grpo",
+            algorithm="ppo" if e.critic else "grpo",
             learner_id=0,
             learner_generation=0,
             base_policy_version=batch.policy_version,
@@ -257,6 +269,9 @@ class FakeTrainerGroup:
 
     def step_metrics(self) -> TrainStepMetrics:
         return self.engine._last_metrics
+
+    def round_metrics(self) -> dict[str, float]:
+        return dict(getattr(self, "critic_metrics", None) or {})
 
 
 class FakePolicyState:

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,255}\Z")
-_ALGORITHMS = frozenset({"grpo", "sao"})
+_ALGORITHMS = frozenset({"grpo", "sao", "ppo"})  # ppo: rl-algo-critic-family D4
 _TRAINER_EXCHANGE_MODES = frozenset({"dense", "pulseloco"})
 _INFERENCE_PUBLICATION_MODES = frozenset({"full", "pulsesync"})
 

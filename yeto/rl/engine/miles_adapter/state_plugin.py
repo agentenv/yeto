@@ -40,6 +40,9 @@ APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
 GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
 APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
 STEP_LOSSES = f"{_PLUGIN_MODULE}.step_losses"
+# rl-algo-critic-family 3.2: run in the critic's processes before its train.
+CRITIC_RECORDERS = f"{_PLUGIN_MODULE}.install_critic_recorders"
+EXPLAINED_VARIANCE_KEY = "explained_variance"
 
 
 class StatePluginError(RuntimeError):
@@ -879,6 +882,83 @@ def install_grad_norm_recorder() -> bool:
     megatron_model.train_one_step = train_one_step
     _RECORDER_INSTALLED = True
     return True
+
+
+_VALUE_METRICS_INSTALLED = False
+
+
+def explained_variance(returns: Any, values: Any, mask: Any = None) -> float | None:
+    """``1 - Var(returns - values) / Var(returns)`` over the (masked) tokens.
+
+    ``values`` are the critic's pre-update predictions (``batch["values"]``),
+    ``returns`` the GAE returns Miles computed (``batch["returns"]``); yeto
+    computes no return or advantage itself. None when Var(returns) is 0 or
+    there are fewer than two tokens.
+    """
+
+    import torch
+
+    returns = returns.detach().float().flatten()
+    values = values.detach().float().flatten()
+    if mask is not None:
+        keep = mask.detach().flatten().bool()
+        returns, values = returns[keep], values[keep]
+    if returns.numel() < 2:
+        return None
+    variance = torch.var(returns, unbiased=False)
+    if float(variance) == 0.0:
+        return None
+    return float(1.0 - torch.var(returns - values, unbiased=False) / variance)
+
+
+def install_value_metrics_recorder() -> bool:
+    """Wrap upstream ``value_loss_function`` to add explained variance (3.2).
+
+    The metric joins the loss dict Miles reports (next to ``value_loss`` and
+    ``value_clipfrac``), so it reaches ``train_one_step``'s result and the
+    step-loss records like every other loss-dict scalar. Per micro-batch;
+    how Miles reduces loss-dict scalars across micro-batches applies to it
+    unchanged (GPU G1 checks the value is finite).
+    """
+
+    global _VALUE_METRICS_INSTALLED
+    if _VALUE_METRICS_INSTALLED:
+        return True
+    try:
+        from miles.backends.training_utils.loss_hub import losses
+    except ImportError:
+        return False
+    original = getattr(losses, "value_loss_function", None)
+    if original is None:
+        return False
+
+    def value_loss_function(args, batch, logits, sum_of_sample_mean):
+        loss, reported = original(args, batch, logits, sum_of_sample_mean)
+        try:
+            import torch
+
+            masks = batch.get("loss_masks")
+            ev = explained_variance(
+                torch.cat(batch["returns"], dim=0),
+                torch.cat(batch["values"], dim=0),
+                torch.cat(masks, dim=0) if masks else None,
+            )
+            if ev is not None:
+                reported = {**reported, EXPLAINED_VARIANCE_KEY: torch.tensor(ev)}
+        except (KeyError, RuntimeError, TypeError, ValueError):
+            pass
+        return loss, reported
+
+    losses.value_loss_function = value_loss_function
+    _VALUE_METRICS_INSTALLED = True
+    return True
+
+
+def install_critic_recorders(actor: Any) -> bool:
+    """Plugin: the per-step recorders in a critic process (idempotent)."""
+
+    del actor
+    return install_grad_norm_recorder() and install_value_metrics_recorder()
 
 
 def _record_applied_lr(original: Any, args: tuple, kwargs: dict) -> float | None:

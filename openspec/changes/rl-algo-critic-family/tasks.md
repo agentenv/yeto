@@ -21,8 +21,8 @@
 
 ## 3. ports 单岛 colocated PPO
 
-- [ ] 3.1 放开 `entry.py:245-262` receipt family（新增 ppo family）、`entry.py:1590-1592`、`trainer_rebuild.py:253,358`，`selection.py:45,68` 不再把 ppo 路由到 legacy（design D3）。验证：fake engine 单测：未放行拒绝、带 `--rl-allow-unverified-mechanism` 单岛可启动；dry-run argv 快照含 `--advantage-estimator ppo` 与 critic 参数。
-- [ ] 3.2 `local_learner.py` 角色表增加 ppo→{actor,critic}；指标管线透传 value_loss 与 explained variance。验证：fake 运行的指标中出现这两项。
+- [x] 3.1 放开 `entry.py:245-262` receipt family（新增 ppo family）、`entry.py:1590-1592`、`trainer_rebuild.py:253,358`，`selection.py:45,68` 不再把 ppo 路由到 legacy（design D3）。验证：fake engine 单测：未放行拒绝、带 `--rl-allow-unverified-mechanism` 单岛可启动；dry-run argv 快照含 `--advantage-estimator ppo` 与 critic 参数。
+- [x] 3.2 `local_learner.py` 角色表增加 ppo→{actor,critic}；指标管线透传 value_loss 与 explained variance。验证：fake 运行的指标中出现这两项。
 - [ ] 3.3 GPU G1：PPO 1×H100 单岛 3 轮（0.5B 级小模型），对齐 Miles `test_qwen3_4B_ppo` 的指标项（value_loss、EV 有限；policy loss、grad_norm 有限）。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）。验证：运行 ID、指标摘要、GPU 名写入 progress.md；通过后 `entry.py:236`、`fake.py:70` 正式声明 critic=True。
 
 ## 4. critic 状态契约与两岛 G3

@@ -30,6 +30,13 @@ def test_supported_r0_combinations_pass():
         assert ports_rejections(sync_preset=preset, lora_targets="attention") == []
 
 
+def test_ppo_is_not_routed_to_legacy():
+    # rl-algo-critic-family 3.1: the critic is decided by the algorithm spec,
+    # the capability declaration and the critic rejections, not by routing.
+    assert ports_rejections(extra_argv=("--advantage-estimator", "ppo")) == []
+    assert ports_rejections(use_critic=True, advantage_estimator="ppo") == []
+
+
 @pytest.mark.parametrize(
     "kwargs, reason",
     [
@@ -42,7 +49,7 @@ def test_supported_r0_combinations_pass():
         (dict(expert_full_count=4), "DeepSeek V4"),
         (dict(use_critic=True), "critic"),
         (dict(extra_argv=("--use-critic",)), "critic"),
-        (dict(extra_argv=("--advantage-estimator", "ppo")), "critic"),
+        (dict(extra_argv=("--advantage-estimator", "gspo")), "non-GRPO"),
         (dict(rollout_num_gpus=4), "fixed partition"),
         (dict(extra_argv=("--rollout-num-gpus", "4")), "fixed partition"),
         (dict(model_kind="diffusion"), "causal"),
@@ -276,7 +283,7 @@ def test_learner_parser_rejects_unsupported_ports_runs(extra, capsys):
     "extra_argv, reason",
     [
         (("--use-critic",), "critic"),
-        (("--advantage-estimator", "ppo"), "critic"),
+        (("--advantage-estimator", "gspo"), "non-GRPO"),
         (("--sao-compaction",), "SAO"),
         (("--rollout-num-gpus", "4"), "fixed partition"),
     ],
