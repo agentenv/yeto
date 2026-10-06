@@ -319,11 +319,15 @@ def rl_min_nodes(args, spec) -> int:
         return max(1, explicit)
     tp = int(getattr(args, "tensor_parallel", 1) or 1)
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)
+    cp = int(getattr(args, "context_parallel", 1) or 1)
+    ep = int(getattr(args, "expert_parallel", 1) or 1)
     engine = int(getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
     try:
-        derived = min_nodes(trainer_min_gpus=tp * pp, rollout_min_gpus=engine,
+        # Q1/Q3 ruling 2026-10-04: the smallest replica tp*cp*ep*pp may span
+        # nodes (EP/PP cross nodes); only tp*cp must stay inside a node.
+        derived = min_nodes(trainer_min_gpus=tp * cp * ep * pp, rollout_min_gpus=engine,
                             standby_gpus=int(getattr(args, "rl_standby_gpus", 0) or 0),
-                            gpus_per_node=spec.gpus_per_node)
+                            gpus_per_node=spec.gpus_per_node, node_parallel=tp * cp)
     except TopologyError as exc:
         raise ValueError(f"recipe parallelism does not fit {spec}: {exc}") from None
     return max(derived, explicit)
@@ -1753,9 +1757,11 @@ def _prepare_rl_args(
 
             require_min_nodes(spec, rl_min_nodes(args, spec))
             actor_nodes, actor = rl_trainer_shape(args, spec)
-            if spec.num_nodes > 1 and model_parallel > spec.gpus_per_node:
-                raise ValueError("RL TP*PP must fit one node (rl-multinode-island: no cross-node "
-                                 "model-parallel group)")
+            node_parallel = args.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
+            if spec.num_nodes > 1 and (node_parallel > spec.gpus_per_node
+                                       or spec.gpus_per_node % node_parallel):
+                raise ValueError("RL TP*CP must fit and divide one node (rl-multinode-island Q1/Q3: "
+                                 "TP stays inside a node; EP/PP may span nodes)")
             spec = dataclasses.replace(spec, num_nodes=actor_nodes, gpus_per_node=actor)
         if spec.total_gpus % model_parallel:
             raise ValueError(
@@ -2180,6 +2186,7 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
         MILES_BUNDLE_SHA256,
         MILES_COMMIT,
         MILES_NEXT_COMMIT,
+        MILES_NEXT_IMAGE_MANIFEST,
         MILES_NEXT_IMAGE_SGLANG_ROOT,
         MILES_NEXT_REPOSITORY,
         MILES_PEFT_VERSION,
@@ -2192,8 +2199,14 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
 
     if rl_engine == "ports":
 
-        def checkout(path: str, repository: str, commit: str) -> str:
+        def checkout(
+            path: str, repository: str, commit: str, refreshed_flag: str = ""
+        ) -> str:
             repo = shlex.quote(repository)
+            # ``refreshed_flag``: shell variable set to 1 when the checkout
+            # had to move to the pin (so the caller knows the image's
+            # install of it can no longer be trusted as-is).
+            mark = f"{refreshed_flag}=1\n" if refreshed_flag else ""
             return (
                 f"if [ ! -d {path}/.git ]; then git clone --no-checkout "
                 f"{repo} {path}; fi\n"
@@ -2206,7 +2219,8 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
                 f"{commit} ]; then\n"
                 f"git -C {path} fetch --depth 1 origin {commit}\n"
                 f"git -C {path} checkout --detach {commit}\n"
-                "fi\n"
+                + mark
+                + "fi\n"
                 f'test "$(git -C {path} rev-parse HEAD)" = {commit}\n'
                 f'test "$(git -C {path} rev-parse --abbrev-ref HEAD)" = HEAD\n'
                 f'test -z "$(git -C {path} status --porcelain '
@@ -2230,11 +2244,42 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
             f'sglang.__file__).startswith("{MILES_NEXT_IMAGE_SGLANG_ROOT}/python/'
             "\") else 1)'"
         )
+        # MILES_NEXT_IMAGE also ships the pinned Miles fork installed
+        # editable at /root/miles (= ~/miles) and records it in
+        # MILES_NEXT_IMAGE_MANIFEST.  When ~/miles was already at the pin
+        # (no fetch above) and the manifest names that commit at that path,
+        # the image's install is kept: the editable re-install is skipped
+        # and only a missing/other peft is (re)installed.  Any other image,
+        # a moved checkout, or a manifest mismatch gets the full install.
+        manifest = shlex.quote(MILES_NEXT_IMAGE_MANIFEST)
+        miles_in_image = (
+            '[ "$MILES_REFRESHED" = 0 ] && '
+            f"python3 -c 'import json, os, sys; "
+            f'm = json.load(open("{MILES_NEXT_IMAGE_MANIFEST}"))["miles"]; '
+            f'sys.exit(0 if m["commit"] == "{MILES_NEXT_COMMIT}" and '
+            'os.path.realpath(m["path"]) == '
+            "os.path.realpath(os.path.expanduser(\"~/miles\")) else 1)' "
+            "2>/dev/null"
+        )
+        peft_ok = (
+            "python3 -c 'import peft, sys; "
+            f"sys.exit(0 if peft.__version__ == \"{MILES_PEFT_VERSION}\" else 1)' "
+            "2>/dev/null"
+        )
         return (
             "set -e\n"
-            + checkout("~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
-            + "python3 -m pip install -q --no-deps -e ~/miles "
-            f"'peft=={MILES_PEFT_VERSION}'",
+            "MILES_REFRESHED=0\n"
+            + checkout(
+                "~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT, "MILES_REFRESHED"
+            )
+            + f"if {miles_in_image}; then\n"
+            f"echo \"[yeto-setup] image provides miles {MILES_NEXT_COMMIT} "
+            f'({manifest}); editable install kept"\n'
+            f"{peft_ok} || python3 -m pip install -q 'peft=={MILES_PEFT_VERSION}'\n"
+            "else\n"
+            "python3 -m pip install -q --no-deps -e ~/miles "
+            f"'peft=={MILES_PEFT_VERSION}'\n"
+            "fi",
             f"if {sglang_in_image}; then\n"
             f"ln -sfn {image_root} ~/sglang\n"
             f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"

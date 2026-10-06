@@ -45,6 +45,14 @@ def test_min_nodes_from_recipe_and_flag():
     assert launcher.rl_min_nodes(SimpleNamespace(rl_placement="colocated", rl_min_nodes_per_learner=0), spec) == 1
     with pytest.raises(ValueError, match="does not fit"):
         launcher.rl_min_nodes(_args(rollout_num_gpus_per_engine=16), spec)
+    # Q1/Q3 ruling 2026-10-04: smallest replica tp*cp*ep*pp may span nodes
+    (four,) = parse_gpu_spec("nebius:4x8xh100")
+    assert launcher.rl_min_nodes(_args(pipeline_parallel=2, expert_parallel=4), four) == 3  # 16 + 8
+    assert launcher.rl_min_nodes(_args(tensor_parallel=8, pipeline_parallel=2), four) == 3
+    with pytest.raises(ValueError, match="TP stays inside a node"):
+        launcher.rl_min_nodes(_args(tensor_parallel=16), four)
+    with pytest.raises(ValueError, match="not a whole number"):
+        launcher.rl_min_nodes(_args(tensor_parallel=2, pipeline_parallel=3, expert_parallel=2), four)
 
 
 # ---- 1.6 task level (D1/D6) and 1.8 teardown (D10)
