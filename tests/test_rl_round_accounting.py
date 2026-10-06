@@ -293,3 +293,77 @@ def test_router_inflight_probe_and_driver_sampler(tmp_path):
     samples = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()
                if '"rl_load_sample"' in l]
     assert samples and all(s["active_requests"] == 2 and s["profile_hash"] for s in samples)
+
+
+def test_load_sample_gateway_workers_fallback_and_diag(caplog):
+    """fnA try27: use_miles_router=False -> sgl-model-gateway, no /worker_inflight.
+    Fall back to its GET /workers; when nothing works, log a reasoned, rate-limited warning."""
+    import logging
+
+    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+
+    pool = MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
+                            expected_policy=lambda: (0, H),
+                            args=SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=3000,
+                                                 use_miles_router=False))
+
+    def gateway(url):
+        if url.endswith("/workers"):
+            return {"workers": [{"url": "http://a", "load": 2, "is_healthy": True},
+                                {"url": "http://b", "load": 0}], "total": 2}
+        raise OSError("404 Not Found")
+
+    s = pool.load_sample(http_get=gateway)
+    assert (s["active_requests"], s["workers"], s["cordoned"]) == (2, 2, 0)
+
+    def missing(url):
+        raise OSError("404 Not Found")
+
+    with caplog.at_level(logging.WARNING, logger="yeto.rl.engine.miles_adapter.rollout"):
+        assert pool.load_sample(http_get=missing) is None
+        assert pool.load_sample(http_get=missing) is None  # same reason: rate-limited
+    msgs = [r.getMessage() for r in caplog.records if "load_sample unavailable" in r.getMessage()]
+    assert len(msgs) == 1
+    assert "/worker_inflight failed" in msgs[0] and "/workers failed" in msgs[0]
+    assert "use_miles_router=False" in msgs[0]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="yeto.rl.engine.miles_adapter.rollout"):
+        assert MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
+                                expected_policy=lambda: (0, H)).load_sample() is None
+    assert any("router address unknown" in r.getMessage() for r in caplog.records)
+
+
+def test_load_sampler_first_sample_before_interval_and_survives_probe_error():
+    """fnA try27: generate ~5 s == 5 s interval -> 0 samples. First sample now at
+    min(1 s, interval); a raising probe does not kill the sampler thread."""
+    import threading
+    import time as _time
+
+    from yeto.rl.engine.driver import IslandDriver
+
+    emitted = []
+    calls = []
+    done = threading.Event()
+
+    def probe():
+        calls.append(_time.monotonic())
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        done.set()
+        return {"active_requests": 1}
+
+    class _D(IslandDriver):
+        profile_hash = config_epoch = weight_transport = None
+
+    d = _D.__new__(_D)
+    d.observe = True
+    d.rollout = SimpleNamespace(load_sample=probe)
+    d.load_sample_interval_s = 0.2
+    d.load_sample_first_delay_s = 0.05
+    d.clock = _time.time
+    d.emit = lambda name, **kw: emitted.append((name, kw))
+    t0 = _time.monotonic()
+    with d._load_sampler(7):
+        assert done.wait(3.0)
+    assert calls[0] - t0 < 0.15  # first delay, not the full interval
+    assert emitted and emitted[0][0] == "rl_load_sample" and emitted[0][1]["rollout_id"] == 7

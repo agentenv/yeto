@@ -667,20 +667,63 @@ class MilesRolloutPool:
         self._last_cursor = dict(handle.data_cursor) if handle.data_cursor else None
         return handle
 
+    #: min seconds between two "load_sample unavailable" diagnostics
+    LOAD_DIAG_INTERVAL_S = 60.0
+
+    def _load_diag(self, reason: str) -> None:
+        """Rate-limited, reasoned log when the load probe yields nothing (fnA try27:
+        0 ``rl_load_sample`` with no trace of why)."""
+        now = time.monotonic()
+        last = getattr(self, "_load_diag_last", None)
+        if last is not None and last[0] == reason and now - last[1] < self.LOAD_DIAG_INTERVAL_S:
+            return
+        self._load_diag_last = (reason, now)
+        logger.warning("yeto load_sample unavailable: %s", reason)
+
     def _router_inflight(self, http_get: Callable[[str], Any]) -> dict[str, Any] | None:
+        """Per-engine in-flight counts from the router.
+
+        Miles router (``--use-miles-router``, fork M3): ``GET /worker_inflight``.
+        The stock sglang-router / sgl-model-gateway (Miles' default when
+        ``use_miles_router`` is False, e.g. non-elastic Flash-Next stage A) has no
+        such route; fall back to its ``GET /workers`` (``{"workers": [{"url",
+        "load", ...}]}``, ``load`` = router-side in-flight). No cordon there: 0.
+        """
         args = self._args
         ip = getattr(args, "sglang_router_ip", None)
         port = getattr(args, "sglang_router_port", None)
         if not ip or not port:
+            self._load_diag(f"router address unknown (sglang_router_ip={ip!r} "
+                            f"sglang_router_port={port!r})")
             return None
+        base = f"http://{ip}:{port}"
+        errors = []
         try:
-            data = http_get(f"http://{ip}:{port}/worker_inflight")
-        except Exception:  # noqa: BLE001 - observation only; absent endpoint = unknown
-            return None
-        inflight = data.get("inflight") if isinstance(data, dict) else None
-        if not isinstance(inflight, dict):
-            return None
-        return {"inflight": inflight, "cordoned": data.get("cordoned") or ()}
+            data = http_get(base + "/worker_inflight")
+        except Exception as exc:  # noqa: BLE001 - observation only; absent endpoint = unknown
+            errors.append(f"GET {base}/worker_inflight failed: {type(exc).__name__}: {exc}")
+        else:
+            inflight = data.get("inflight") if isinstance(data, dict) else None
+            if isinstance(inflight, dict):
+                return {"inflight": inflight, "cordoned": data.get("cordoned") or ()}
+            errors.append(f"GET {base}/worker_inflight: no 'inflight' dict ({type(data).__name__})")
+        try:
+            data = http_get(base + "/workers")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"GET {base}/workers failed: {type(exc).__name__}: {exc}")
+        else:
+            workers = data.get("workers") if isinstance(data, dict) else None
+            if isinstance(workers, list):
+                inflight = {}
+                for w in workers:
+                    if isinstance(w, dict) and w.get("url") and isinstance(w.get("load"), int):
+                        inflight[str(w["url"])] = int(w["load"])
+                if inflight:
+                    return {"inflight": inflight, "cordoned": ()}
+            errors.append(f"GET {base}/workers: no workers with url/load")
+        self._load_diag("; ".join(errors)
+                        + f" (use_miles_router={getattr(args, 'use_miles_router', None)!r})")
+        return None
 
     def _tool_wait_count(self) -> int | None:
         source = self._load_tool_wait
@@ -709,8 +752,8 @@ class MilesRolloutPool:
         * ``load_class``: ``classify_load`` of the above, ``"unknown"`` if any
           input is unknown. ``ready_groups`` is not observable mid-rollout: None.
 
-        None when the router is unknown (stock Miles without M3): unknown,
-        never reported as 0. A failing engine endpoint makes its field None.
+        None when the router (and its ``/workers`` fallback) is unknown: unknown,
+        never reported as 0; a rate-limited warning names the reason. A failing engine endpoint makes its field None.
         """
         get = http_get or _http_get_json
         router = self._router_inflight(get)

@@ -905,6 +905,10 @@ class IslandDriver:
         return {"mismatch": values, **{f"label/{k}": v for k, v in self._labels().items()}}
 
     load_sample_interval_s = 5.0
+    #: first load sample this many seconds into generate (None: min(1 s, interval)).
+    #: fnA try27: generate lasted ~5 s == interval, so a first sample at +interval
+    #: mostly landed after generate finished -> 0 rl_load_sample.
+    load_sample_first_delay_s: float | None = None
     # fleet-dashboard 2.1/2.2 (opt-in; None = not started, tape unchanged).
     heartbeat_interval_s: float | None = None
     resource_sample_interval_s: float | None = None
@@ -953,9 +957,22 @@ class IslandDriver:
 
         stop = threading.Event()
 
+        interval = self.load_sample_interval_s
+        first = self.load_sample_first_delay_s
+        first = min(1.0, interval) if first is None else first
+
         def loop() -> None:
-            while not stop.wait(self.load_sample_interval_s):
-                sample = probe()
+            delay = first
+            while not stop.wait(delay):
+                delay = interval
+                try:
+                    sample = probe()
+                except Exception as exc:  # noqa: BLE001 - observation must not kill the sampler
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "yeto load_sample probe raised %s: %s", type(exc).__name__, exc)
+                    continue
                 sampler = getattr(self, "_resource_sampler", None)
                 if sample is not None and sampler is not None:
                     # 2.2: peaks come from the resource sampler's NVML probe

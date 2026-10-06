@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Judge a Qwen3.8-Flash-Next-4layer native LoRA GRPO trainer log (M4 G3/G4, T2-S7 §4).
 
-    judge_qwen3_8_next_lora_log.py LOG --num-gpus 4 [--rollouts 5] [--rank 32]
-        [--expert-rank 8] [--eval-min 0] [--adapter-restart] [--json OUT]
+    judge_qwen3_8_next_lora_log.py LOG --num-gpus 4 --rank 32 --expert-rank 8 [--rollouts 5]
+        [--eval-min 0] [--adapter-restart] [--json OUT]
 
 Checks (each reported PASS/FAIL, exit 0 only if all pass):
   trainable      `native LoRA applied: ... trainable=N` shows exactly the two
@@ -63,9 +63,12 @@ def judge(text: str, *, num_gpus: int, rollouts: int, rank: int, expert_rank: in
     seen: Counter[int] = Counter()
     repeats = 0  # ray's log dedup folds near-identical actor lines into "[repeated Nx across cluster]"
     total = 0  # a folded line stands for N occurrences (itself included), a plain line for 1
+    other: Counter[str] = Counter()  # "rank=R expert_rank=E" of applied lines NOT matching --rank
     for line in text.splitlines():
         m = TRAINABLE_RE.search(line)
-        if m and int(m.group(1)) == rank and int(m.group(2)) == expert_rank:
+        if m and not (int(m.group(1)) == rank and int(m.group(2)) == expert_rank):
+            other[f"rank={m.group(1)} expert_rank={m.group(2)}"] += 1
+        elif m:
             seen[int(m.group(3))] += 1
             r = REPEAT_RE.search(line)
             n = int(r.group(1)) if r else 1
@@ -82,7 +85,14 @@ def judge(text: str, *, num_gpus: int, rollouts: int, rank: int, expert_rank: in
         "seen": {str(k): v for k, v in sorted(seen.items())},
         "dedup_repeats": repeats,
         "exact_count": exact,
+        "rank_mismatch": dict(sorted(other.items())),
     }
+    if other:
+        res["trainable"]["reason"] = (
+            f"{sum(other.values())} 'native LoRA applied' line(s) skipped: log has "
+            f"{', '.join(sorted(other))} but judge was given rank={rank} expert_rank={expert_rank}")
+    elif not seen:
+        res["trainable"]["reason"] = "no 'native LoRA applied' line in log"
     bad = [l for l in text.splitlines() if "LORA-CHECK" in l or "end_weight_update failed" in l]
     res["lora_check"] = {"pass": not bad, "lines": bad[:5]}
     rounds = {int(m.group(1)): _parse_metrics(m.group(2)) for m in TRAIN_RE.finditer(text)}
@@ -123,8 +133,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("log")
     ap.add_argument("--num-gpus", type=int, required=True)
     ap.add_argument("--rollouts", type=int, default=5)
-    ap.add_argument("--rank", type=int, default=32)
-    ap.add_argument("--expert-rank", type=int, default=8)
+    # no defaults: a silent rank default made fnA try27 judge FAIL with seen={} (rank 16 run)
+    ap.add_argument("--rank", type=int, required=True)
+    ap.add_argument("--expert-rank", type=int, required=True)
     ap.add_argument("--eval-min", type=int, default=0)
     ap.add_argument("--adapter-restart", action="store_true")
     ap.add_argument("--json", default=None)
@@ -136,7 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         open(a.json, "w").write(out + "\n")
     for k, v in res.items():
         if isinstance(v, dict):
-            print(f"{'PASS' if v['pass'] else 'FAIL'} {k}")
+            print(f"{'PASS' if v['pass'] else 'FAIL'} {k}"
+                  + (f": {v['reason']}" if not v["pass"] and v.get("reason") else ""))
     print(f"verdict {res['verdict']}")
     return 0 if res["verdict"] == "PASS" else 1
 
