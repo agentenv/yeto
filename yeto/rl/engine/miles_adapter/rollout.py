@@ -27,6 +27,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
+from collections.abc import Mapping
+from types import SimpleNamespace
 
 from ..ports import GroupMetadata, RolloutBatchHandle
 from . import LoopRunner
@@ -143,6 +145,32 @@ def read_executor_cursor(executor: Any) -> tuple[dict[str, int] | None, int | No
     from .rollout_meta_hook import data_cursor as read_cursor
 
     return read_cursor(getattr(executor, "data_source", None))
+
+
+def seek_executor_cursor(executor: Any, cursor: Mapping[str, int]) -> dict[str, int] | None:
+    """Runs INSIDE the rollout executor actor (``__ray_call__``): move its data
+    source to ``cursor`` the way Miles' ``RolloutDataSource.load`` would (the
+    same four fields; re-shuffle for the cursor's epoch when the source
+    shuffles per epoch) and return the cursor it reports afterwards."""
+    from .rollout_meta_hook import _CURSOR_FIELDS
+    from .rollout_meta_hook import data_cursor as read_cursor
+
+    source = getattr(executor, "data_source", None)
+    source = getattr(source, "__self__", source)
+    if source is None:
+        raise RuntimeError("data cursor seek: the rollout executor has no data_source")
+    missing = [f for f in _CURSOR_FIELDS if f not in cursor]
+    if missing:
+        raise RuntimeError(f"data cursor seek: cursor lacks {missing}")
+    previous_epoch = getattr(source, "epoch_id", None)
+    for name in _CURSOR_FIELDS:
+        setattr(source, name, int(cursor[name]))
+    args = getattr(source, "args", None)
+    dataset = getattr(source, "dataset", None)
+    if (dataset is not None and getattr(args, "rollout_shuffle", False)
+            and int(cursor["epoch_id"]) != previous_epoch):
+        dataset.shuffle(int(cursor["epoch_id"]))
+    return read_cursor(source)[0]
 
 
 def arm_stop_failure_in_controller(controller: Any) -> str:
@@ -571,6 +599,26 @@ class MilesRolloutPool:
             logger.warning("live data cursor unknown: the executor's data source reports no "
                            "complete cursor")
         return (None if cursor is None else dict(cursor)), length
+
+    def seek_data_cursor(self, cursor: Mapping[str, int]) -> dict[str, int] | None:
+        """Restart (driver ``_restore_data_cursor``): move the executor's data
+        source to the ledger's restart cursor, inside the executor's process
+        (same targets as ``live_data_cursor``); returns the cursor read back
+        there, None = unknown (the driver then refuses to train)."""
+        wanted = {k: int(v) for k, v in dict(cursor).items()}
+        kind, target = _executor_target(self._executor)
+        if kind == "local":
+            return seek_executor_cursor(SimpleNamespace(data_source=target), wanted)
+        if kind != "ray":
+            raise RuntimeError("data cursor seek: rollout executor %s is neither a local "
+                               "executor nor a Ray actor (handle)" % type(self._executor).__name__)
+        remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
+        if not callable(remote):
+            raise RuntimeError("data cursor seek: Ray actor handle %s has no __ray_call__"
+                               % type(target).__name__)
+        landed = self._run(_awaited(remote(seek_executor_cursor, wanted)))
+        self._last_cursor = None if landed is None else dict(landed)
+        return None if landed is None else dict(landed)
 
     def data_cursor(self) -> dict[str, int] | None:
         """4.2/4.4: the LIVE data cursor, None when it cannot be read (unknown;
