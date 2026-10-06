@@ -29,13 +29,30 @@ def recommend_mode_of(miles_args: Any) -> str:
     return str(getattr(miles_args, "yeto_rl_recommend_mode", None) or "disabled")
 
 
-def _declared_edges(profile: Any, configs: Any, attestation: Any = None):
+def is_flash_next_full(profile: Any, miles_args: Any = None) -> bool:
+    """G2: the real ports path names its profile ``miles-lora-partitioned-serial``,
+    so recognise Flash-Next full by the model fingerprint the qwen3_8_next recipe
+    renders into the parsed Miles args (model-name + native provider + 48 layers +
+    512 experts); the profile-name prefix is kept for the declared test profile."""
+    from yeto.rl.profiles import qwen3_8_next as q
+
+    if str(getattr(profile, "name", None) or "").startswith(q.PROFILE_NAME_FULL):
+        return True
+    if miles_args is None:
+        return False
+    return (getattr(miles_args, "model_name", None) == q.PORTS_MODEL_NAME
+            and getattr(miles_args, "custom_model_provider_path", None) == q.PORTS_PROVIDER_PATH
+            and getattr(miles_args, "num_layers", None) == q.NUM_LAYERS["full"]
+            and getattr(miles_args, "num_experts", None) == 512)
+
+
+def _declared_edges(profile: Any, configs: Any, attestation: Any = None, miles_args: Any = None):
     """Flash-Next declared edges kept only when the attestation certifies them with
     the DECLARED kind (``rollout-only``): candidate selection itself is kind-blind,
     so a ``trainer-dp`` certificate for the same (source, target) must not leak in."""
     from yeto.rl.profiles import qwen3_8_next as q
 
-    if not str(getattr(profile, "name", None) or "").startswith(q.PROFILE_NAME_FULL):
+    if not is_flash_next_full(profile, miles_args):
         return None
     edges = q.flash_next_elastic_declaration()["declared_edges"]
     certified = frozenset(getattr(attestation, "certified_edges", ()) or ())
@@ -76,7 +93,8 @@ def elastic_hook_for(miles_args: Any, *, controller: Any, profile: Any, observe:
         total_rounds=getattr(miles_args, "num_rollout", None),
         edge_costs_path=getattr(miles_args, "yeto_rl_edge_costs_path", None) or None,
         declared_edges=_declared_edges(profile, controller.configs,
-                                       getattr(controller, "attestation", None)),
+                                       getattr(controller, "attestation", None),
+                                       miles_args=miles_args),
         recommender=Recommender(**rec_kw, **kw),
         auto=AutoController(Recommender(**rec_kw, **kw), policy=AutoPolicy(**pol_kw), **kw),
     )
