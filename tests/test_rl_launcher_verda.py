@@ -90,7 +90,10 @@ def test_other_clouds_are_untouched_by_the_in_vm_path(monkeypatch, gpu):
     for attr in ("setup", "run", "envs", "secrets", "num_nodes", "file_mounts"):
         assert getattr(task, attr) == getattr(plain, attr), attr
     assert vars(task.resources) == vars(plain.resources)
-    assert task.resources.image_id == launcher.in_vm_docker_image(task.resources.image_id).join(["docker:", ""])
+    image = task.resources.image_id
+    if isinstance(image, dict):  # Nebius baked VM image (NEBIUS_BAKED_IMAGES): {region: vm, docker: image}
+        image = image["docker"]
+    assert image == launcher.in_vm_docker_image(image).join(["docker:", ""])
     for marker in ("docker run", "yeto-island/", "docker pull", "YETO_ISLAND", "in_vm", "--gpus all"):
         assert marker not in task.setup and marker not in task.run
 

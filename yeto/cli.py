@@ -258,6 +258,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "
                     "--num-gpus=M, CUDA_VISIBLE_DEVICES=0..M-1, and every layout/placement/gpu_pool "
                     "rule uses M (e.g. m5 TP8 over 2x4 on 2x8xH100 machines); unset = all N")
+    rl.add_argument("--model-store", default=None, metavar="URI",
+                    help="RL island: cloud-local pinned HF snapshots (COLDSTART-PLAN #4). "
+                    "nebius-fs://<computefilesystem-id> attaches that Nebius shared filesystem "
+                    "at /mnt/yeto-models on every node (needs nebius@<region>) and points "
+                    "HF_HUB_CACHE at it when it holds a completed --model@--model-revision "
+                    "(scripts/populate_nebius_model_store.sh); otherwise WARNING + Hub download")
     rl.add_argument("--rl-island-network-tier", choices=("auto", "none"), default="auto",
                     help="multi-node RL island: auto = ask sky for network_tier=best where the cloud "
                     "honors it (Nebius H100:8/H200:8 -> InfiniBand GPU cluster on a fixed fabric); "

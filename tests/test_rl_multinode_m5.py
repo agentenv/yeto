@@ -197,8 +197,16 @@ def _fake_m5_run(tmp, *, gen_ref=None, ranks=range(8), allreduce_ok=True, phys=4
     return tmp
 
 
-def _judge(run):
-    r = subprocess.run([sys.executable, str(GPU_DIR / "s1judge.py"), str(run), "m5"], capture_output=True, text=True)
+def _lp(run, delta=0.01, n=40):
+    # fake lp.json: tp4 reference vs tp8cross shifted by `delta` at every position (first position None as in sglang)
+    base = [None] + [-0.5] * n
+    (run / "lp.json").write_text(json.dumps({"tp4": [base] * 4, "tp8cross": [[None] + [-0.5 + delta] * n] * 4}))
+    return run / "lp.json"
+
+
+def _judge(run, delta=0.01, lp=True):
+    args = [str(_lp(run, delta))] if lp else []
+    r = subprocess.run([sys.executable, str(GPU_DIR / "s1judge.py"), str(run), "m5", *args], capture_output=True, text=True)
     return r.returncode, json.loads((run / "judgment-m5.json").read_text())
 
 
@@ -215,12 +223,27 @@ def test_judge_m5_fails_on_rank_map_gap(tmp_path):
     assert rc == 1 and j["verdict"] == "FAIL" and not j["checks"]["tp_ranks_0_7_match_gpu_uuids"]
 
 
-def test_judge_m5_generation_tolerance(tmp_path):
-    diverged = [[1, 2, 3, 4] * 8, [1, 2, 3, 4] * 8, [1, 2, 3, 4] * 8, [9] * 32]  # 3/4 prompts share the prefix
+def test_judge_m5_logprob_criterion(tmp_path):
+    # prefix agreement is information only: all prefixes diverge but logprob is close -> PASS, prefix recorded
+    diverged = [[9] * 32] * 4
     rc, j = _judge(_fake_m5_run(tmp_path, gen_ref=diverged))
-    assert j["checks"]["gen_matches_single_node_ref_within_tolerance"] is True
-    rc, j = _judge(_fake_m5_run(tmp_path / "b", gen_ref=[[9] * 32] * 4))
-    assert j["verdict"] == "FAIL" and j["checks"]["gen_matches_single_node_ref_within_tolerance"] is False
+    assert rc == 0 and j["verdict"] == "PASS" and j["checks"]["gen_logprob_within_tolerance_vs_tp4"] is True, j
+    assert j["info"]["gen_prefix16_match"] == "0/4" and j["info"]["gen_logprob"]["mean_abs"] < 0.05
+    # large systematic logprob offset -> FAIL
+    rc, j = _judge(_fake_m5_run(tmp_path / "b"), delta=0.4)
+    assert j["verdict"] == "FAIL" and j["checks"]["gen_logprob_within_tolerance_vs_tp4"] is False
+    # no logprob evidence -> FAIL (not silently passed)
+    rc, j = _judge(_fake_m5_run(tmp_path / "c"), lp=False)
+    assert j["verdict"] == "FAIL" and j["checks"]["gen_logprob_within_tolerance_vs_tp4"] is False
+
+
+def test_judge_m5_out_suffix_keeps_original(tmp_path):
+    run = _fake_m5_run(tmp_path)
+    (run / "judgment-m5.json").write_text('{"verdict": "FAIL"}')
+    r = subprocess.run([sys.executable, str(GPU_DIR / "s1judge.py"), str(run), "m5", str(_lp(run)), "-rejudge-logprob"], capture_output=True, text=True)
+    assert r.returncode == 0
+    assert json.loads((run / "judgment-m5.json").read_text()) == {"verdict": "FAIL"}
+    assert json.loads((run / "judgment-m5-rejudge-logprob.json").read_text())["verdict"] == "PASS"
 
 
 def test_judge_m5_nccl_failure(tmp_path):

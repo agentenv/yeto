@@ -21,7 +21,8 @@
 
 ## 4. 虚拟机内容器与规划器（C、E 块，在 `rl-engine-ports` 合入 main 之后）
 
-- [ ] 4.1 新增"虚拟机内容器"云集合；对 Verda 不设 `image_id`，改为 setup 中拉取固定 digest 镜像、run 中 `docker run --gpus all --network host`；环境变量经 0600 的 `--env-file` 传入；处理容器内外文件属主差异。验证：launcher 单测断言 Verda 任务无 `image_id`、命令被正确包装、日志中不出现环境变量值、属主处理步骤存在。
+- [x] 4.1 新增"虚拟机内容器"云集合；对 Verda 不设 `image_id`，改为 setup 中拉取固定 digest 镜像、run 中 `docker run --gpus all --network host`；环境变量经 0600 的 `--env-file` 传入；处理容器内外文件属主差异。验证：launcher 单测断言 Verda 任务无 `image_id`、命令被正确包装、日志中不出现环境变量值、属主处理步骤存在。
+  - 完成记录（2026-10-04，S8 verda-fix C 块）：`launcher.in_vm_docker_image/in_vm_docker_setup`（Verda 不设 image_id，VM 内拉固定 digest 并 docker run）、`_verda_copy_override`；修复 .pth exec 作用域、stale yeto 回退、503 后 `KeyError region`。真机：Verda G0（1×A100 FIN-01，`verda-g0-20261004c`，≈$0.5）功能检查全过（judge 仅 `gpu_is_L40S` 因卡型 FAIL）。
 - [ ] 4.2 规划器用"已验证容器镜像云 ∪ 虚拟机内容器云"判断容器需求；Verda 按按需价格计分，不进多节点与 spot 存储白名单；Verda spot 或需要对象存储的配置在启动前拒绝并说明原因。验证：plan 单测覆盖 Verda 容器岛可行、Verda spot 被拒、拒绝原因写入输出。
 - [ ] 4.3 更新 `docs/CLOUDS.md` 的 Verda 条目：凭据格式、地区列表、实际验证结果、head 放置建议。验证：文档中的命令在 `--dry-run` 下可执行。
 
@@ -32,6 +33,7 @@
 ## 6. 真机验收（单卡按需 A100 80GB 或 L40S，预算约 $15）
 
 - [ ] 6.1 按默认参数在 Verda 上起单卡 RL 岛（head 在 Nebius 或本机），岛在容器内完成 fork checkout 与校验并完成至少 1 轮同步；拆除后按 id 确认实例与卷都已删除。验证：证据目录含岛作业日志、事件磁带、拆除证明。
+  - 进度（2026-10-04）：单卡 G0 已在 Verda 真机跑通（controller 本机，1 次 train + 1 次 generate，容器内 fork checkout 校验通过）；本条要求的"≥1 轮同步"默认参数整轮运行尚未执行，保持未勾。另：sky 0.13 Verda 后端 `num_nodes>1` 直接 ValueError（`sky/clouds/verda.py`），多节点岛不可用。
 - [ ] 6.2 误删回归：先起一台 Verda 岛，再以同名触发一次容量不足的重拉，确认旧实例仍在运行；确认 head 上 SkyPilot API 服务进程已加载补丁。验证：Verda API 查询记录与 head 日志。
 - [ ] 6.3 恢复：手动删除岛实例，yeto 按 id 确认已消失后以新集群名重拉并继续训练。验证：launch 日志与 Verda API 记录。
 - [ ] 6.4 Verda head：在 Verda CPU 实例上起 head，外部探测 syncer 端口成功，ufw 拒绝其他端口；岛（Verda 或其他云）连上 syncer 完成至少 1 轮同步。验证：探测与同步日志、拆除证明。
