@@ -42,7 +42,7 @@ trap finish EXIT
 df_free=$(df -BG --output=avail / | tail -1 | tr -dc 0-9); [ "$df_free" -ge 50 ] || { log "abort: root disk ${df_free}G < 50G"; exit 9; }
 T=$(ps -u michael -L -o pid= | wc -l); [ "$T" -lt 2850 ] || { log "abort: $T threads"; exit 9; }
 log "start $P code $(git -C $REPO rev-parse --short HEAD) prefer_l40s=${PREFER_L40S:-1} cap=\$$CAP d1_gpu=$G ($(sku $G) \$$RATE_H/h) fn_gpu=$FG ($(sku $FG) \$$(rate $FG)/h)"
-H=0; CL=$CLL; CP=$P-l; [ "${PREFER_L40S:-1}" = 1 ] || { H=1; CL=$CLH; CP=$P-h; }
+H=0; CL=$CLL; CP=$P-l; export NODES=2; [ "${PREFER_L40S:-1}" = 1 ] || { H=1; CL=$CLH; CP=$P-h; export NODES=1; }
 N=0
 post() {  # per-run data capture (all local; cluster untouched)
   local R=$1
@@ -73,12 +73,12 @@ EST=$( [ $H = 1 ] && hest $G || echo 3 )   # per warm run (8 min); first run add
 sw() { step $1 d1sweep $2 D1_CFG=$3 SEED=$4; }
 sw a17 $(( EST * 3 )) T2R1S1 17; rc=$?
 if [ $rc = 7 ] && [ $H = 0 ]; then
-  log "L40S provision failed -> fallback to $G $(sku $G) \$$RATE_H/h ($CLH)"; H=1; CL=$CLH; CP=$P-h; EST=$(hest $G)
+  log "L40S provision failed -> fallback to $G $(sku $G) \$$RATE_H/h ($CLH)"; H=1; CL=$CLH; CP=$P-h; EST=$(hest $G); export NODES=1
   sw a17h $(( EST * 3 )) T2R1S1 17; rc=$?
 fi
 if [ $rc = 7 ] && [ $G = h100 ] && [ "${FALLBACK_H200:-1}" = 1 ]; then
   log "h100 provision failed -> sky down $CLH, fallback to h200 $(sku h200) \$36.0/h"; down $CLH H
-  G=h200; RATE_H=$(rate h200); H=1; CL=$CLH; CP=$P-h; EST=$(hest h200)
+  G=h200; RATE_H=$(rate h200); H=1; CL=$CLH; CP=$P-h; EST=$(hest h200); export NODES=1
   sw a17h2 $(( EST * 3 )) T2R1S1 17; rc=$?
 fi
 [ $rc = 7 ] && { log "$G provision failed too -> stop (capacity; report to main agent)"; exit 8; }
@@ -100,7 +100,7 @@ sw c17 $EST T1R3S0 17; sw c29 $EST T1R3S0 29
 #   fnconv: s11fnconv.sh (B0-2 full -> torch_dist, TP2 PP4 nproc 8; df/marker/no-retry gates) -> fnconv.json
 [ "${FN_ENABLE:-1}" = 1 ] || { log "fn segments disabled (FN_ENABLE=0)"; exit 0; }
 if [ $H = 1 ]; then down $CLH H; else down $CLL L; fi
-CLF=$P-f-l0-eu-north1; CL=$CLF; CP=$P-f; H=1; N=0; RATE_H=$(rate $FG); export FN_GPU=$FG   # sweep cluster already folded into ACC
+CLF=$P-f-l0-eu-north1; CL=$CLF; CP=$P-f; H=1; N=0; export NODES=1; RATE_H=$(rate $FG); export FN_GPU=$FG   # sweep cluster already folded into ACC
 log "fn SKU: $(sku $FG) \$$RATE_H/h"
 s=$(spent); python3 -c "import sys;sys.exit(0 if $s+${FNA_EST_USD:-50}<=$CAP else 1)" || { log "budget guard: fn est \$${FNA_EST_USD:-50} + \$$s > \$$CAP -> fn not executed"; exit 4; }
 (cd $REPO && /tmp/yeto-venv/bin/python $D/fp_fn.py $REPO fn8s --seed 17 --total-steps 6 > $B/$P-fp_fn8s.json 2>$B/$P-fp_fn8s.err); log "fp_fn fn8s steps6: $(tail -1 $B/$P-fp_fn8s.json | python3 -c 'import json,sys;print(json.load(sys.stdin).get("fp"))' 2>/dev/null)"

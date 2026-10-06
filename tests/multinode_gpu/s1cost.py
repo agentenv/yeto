@@ -110,13 +110,20 @@ def sweep(run):
     pool_uu = set(pools[-1].get('roles', {})) if pools else set()
     rr = any(r.get('phase') == 'RECOVERY_REQUIRED' for r in j) or any(e.get('result') == 'RECOVERY_REQUIRED' for e in isl)
     steady = [v for k, v in rounds.items() if k is not None and k >= 1]
+    # single-node (S11 8xH100/H200, island allocated GPUs 0-3): the controller only journals gpu_pool for >1 node
+    # (entry.reconcile_gpu_pool_preflight), so the allocation is checked from the NVML rl_resource_sample events instead:
+    # every GPU with >2000 MiB used must be one of indices 0-3 and at least one sample must show the island running.
+    single = '--rl-island-use-gpus-per-node' in rd('args.txt')
+    samples = [e for e in isl if e.get('event') == 'rl_resource_sample' and e.get('gpus')]
+    busy = {int(g['index']) for e in samples for g in e['gpus'] if (g.get('mem_used_mb') or 0) > 2000}
+    alloc_ok = None if not samples or not busy else busy <= {0, 1, 2, 3}
     checks = {'rc0': 'rc=0' in rd('rc.txt'), 'rounds_eq_steps': steps is not None and len(trained) == steps,
               # GPU model asserted from --gpu (L40S 2x2: all 4 physical; H200 1x8 alloc 4: pool = 4 of the 8 listed)
               'gpu_model': want in gpu_txt and all(m not in gpu_txt for m in ('L40S', 'H100', 'H200') if m != want),
-              'uuids_4_in_pool': len(pool_uu) == 4 and pool_uu <= uu,
+              **({'alloc_gpus_0_3_only': alloc_ok, 'nvml_samples': len(samples)} if single else {'uuids_4_in_pool': len(pool_uu) == 4 and pool_uu <= uu}),
               'no_recovery_required': not rr}
     t0, t1 = rd('start_utc.txt').strip(), rd('end_utc.txt').strip()
-    return dict(run=os.path.basename(run.rstrip('/')), config=cfg, seed=seed, valid=all(checks.values()), checks=checks,
+    return dict(run=os.path.basename(run.rstrip('/')), config=cfg, seed=seed, valid=all(v for k, v in checks.items() if k != 'nvml_samples' and v is not None), checks=checks,
                 median_round_s=round(statistics.median(steady), 3) if steady else None,
                 rounds_s={k: round(v, 3) for k, v in sorted(rounds.items())}, start_utc=t0, end_utc=t1)
 
