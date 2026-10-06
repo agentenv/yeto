@@ -490,6 +490,76 @@ and the `rl_reconfiguration` event with `result=RECOVERY_REQUIRED` and an
 `error` starting with `node_lost:` are the evidence to collect before tearing
 down.
 
+### Node loss and rebuild (checkpoint store)
+
+Ruling (2026-10-04, design Q4): on node loss the island stops the affected
+training communication group (= the whole island, one learner has one trainer
+group), is rebuilt from a **consistent checkpoint** on a same-shape island, and
+there is **no automatic re-entry of the original ranks**: a surviving or
+returning node never rejoins the old job. The consistent checkpoint is the
+elastic state dir (`--rl-elastic-state-dir`, default `~/yeto-rl/elastic-state`:
+reconfiguration journal + `epochs.json`, trainer cuts, batch ledger, inbox),
+which lives on node0's local disk. Two things make it rebuildable elsewhere:
+
+- **`--rl-checkpoint-store <s3://…|gs://…|/shared/path>`** (needs
+  `--rl-elastic`): the controller copies the state dir to the store after every
+  commit point (`topology` baseline at startup, accepted `gpu_pool`, every
+  `COMMITTED` / `SUCCEEDED` phase record, i.e. after the durable CAS and the cut
+  manifest commit) and writes `STORE-MANIFEST.json` last, so a copy without it is
+  never trusted. A bucket URI is mounted on every island node at
+  `~/yeto-checkpoint-store` (sky Storage MOUNT, persistent) and the learner gets
+  `--rl-elastic-checkpoint-store` with that path; an absolute/`~/` path is passed
+  through as is (a share every replacement machine also mounts). A learner that
+  starts with an **empty** state dir (fresh machines) restores the store into it
+  first and journals `checkpoint_store action=restore`; a local journal always
+  wins over the store (an in-place restart is at least as new as its last sync,
+  and dropping local records could hide a `RECOVERY_REQUIRED` terminal). A
+  failed sync is logged and kept in `controller.last_store_sync`, it never fails
+  the commit. Without the flag a multi-node launch prints `[launcher] warning:
+  --rl-checkpoint-store not set: ... node0's local disk` and keeps the old
+  behavior (fail open); single-node islands are unchanged.
+- **Parallel layout baseline**: the `topology` journal record now carries
+  `layout` (`tp/pp/cp/ep`, trainer GPUs, `nodes` x `gpus_per_node`, the role ->
+  logical bundle `bundle_map`, None = leading-bundle layout) and
+  `layout_accepted`. Every later incarnation compares its layout against the last
+  accepted baseline; a difference is `RECOVERY_REQUIRED` with `layout changed:
+  pp 2 -> 1, …` before any fork membership call, in `_recovery_precondition`
+  and in `confirm_recovery` (`checks.layout`). A cut written under another
+  Megatron layout is not restorable without conversion, so a rebuild must be
+  same-shape; there is deliberately no override flag. Like `gpu_pool`, the
+  refusal is per incarnation (no journal terminal): relaunching with the
+  original recipe/cfg continues.
+
+Rebuild procedure after a node is lost (M4 in the GPU matrix):
+
+1. The driver poll records `node_lost`, the island enters `RECOVERY_REQUIRED`
+   and the learner exits non-zero; the restart loop's in-place retries are
+   refused by the partial-island preflight (`alive < N`). Collect the evidence
+   (journal `node_lost`, tape `rl_reconfiguration result=RECOVERY_REQUIRED`).
+2. `yeto down` the island (teardown confirms every node instance).
+3. `yeto launch` with the **same cfg, recipe and parallel flags** (same
+   `--rl-elastic-resources`, `--rl-elastic-initial-config`, `--tensor-parallel`
+   / `--pipeline-parallel` / `--expert-parallel`, `--rl-rollout-gpus`,
+   `--rl-standby-gpus`, same `--rl-checkpoint-store`) plus
+   `--rl-elastic-accept-rebind`: the new machines expose other GPU uuids, which
+   the Q6 reconciliation accepts only with that flag (`gpu_pool rebind=true`
+   with the old -> new mapping; shape must still match).
+4. Startup order on the new island: restore the state dir from the store
+   (`checkpoint_store restore`), `topology` record + layout check against the
+   restored baseline, `gpu_pool` reconciliation + rebind record, then the normal
+   restart recovery of the committed membership (`RECOVERING` ->
+   `confirm_recovery` after the first publication) and training continues from
+   the committed epoch / last cut.
+5. A layout or shape mismatch at step 4 is `RECOVERY_REQUIRED` again; fix the
+   launch flags, do not force it. A changed `--rl-elastic-state-dir` with an
+   already populated directory is an in-place restart, not a rebuild.
+
+Not supported: a node coming back under its old job (the journal keeps
+`RECOVERY_REQUIRED`), partial continuation on surviving nodes, rebuilding under
+another parallel layout, and Modal islands (no sky Storage mount; use a shared
+path there). Megatron `--save`/`--load` checkpoints are not managed by the
+store (the cut plugin never sets them).
+
 ### Teardown confirmation
 
 `yeto down` / the launcher's teardown confirm a multi-node island per node

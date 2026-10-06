@@ -1185,6 +1185,32 @@ RESTART_LOOP_FN = (
     "}\n"
 )
 ELASTIC_ISLAND_STATE_DIR = "~/yeto-rl/elastic-state"
+# rl-multinode-island Q4 (C5): where a --rl-checkpoint-store bucket is mounted on the island
+ELASTIC_CHECKPOINT_STORE_MOUNT = "~/yeto-checkpoint-store"  # not under the spot ~/yeto-rl mount
+NODE0_LOCAL_CHECKPOINT_WARNING = (
+    "[launcher] warning: --rl-checkpoint-store not set: the island state dir (journal, cuts, "
+    "ledger) stays on node0's local disk; losing a node loses the consistent checkpoint and "
+    "the island cannot be rebuilt on other machines (rl-multinode-island Q4)"
+)
+
+
+def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
+    """``(path on the island, bucket URI or None)`` for ``--rl-checkpoint-store``:
+    a ``scheme://`` URI is mounted at :data:`ELASTIC_CHECKPOINT_STORE_MOUNT` (sky
+    Storage MOUNT, persistent); an absolute / ``~/`` path is used as is (a share
+    the replacement machine also mounts). None when the flag is not given."""
+    value = getattr(args, "rl_checkpoint_store", None)
+    if not value:
+        return None
+    value = str(value)
+    if "://" in value:
+        scheme, _, rest = value.partition("://")
+        if not scheme.isalnum() or not rest.strip("/") or rest.startswith("/"):
+            raise ValueError(f"--rl-checkpoint-store {value!r} is not a bucket URI (scheme://bucket[/prefix])")
+        return ELASTIC_CHECKPOINT_STORE_MOUNT, value.rstrip("/")
+    if not (value.startswith("/") or value.startswith("~/")) or ".." in PurePosixPath(value).parts:
+        raise ValueError("--rl-checkpoint-store must be a bucket URI or an absolute / ~/ path on the island")
+    return value.rstrip("/") or "/", None
 _EVAL_LAUNCH_FLAGS = (
     ("rl_eval_data", "--rl-eval-data"),
     ("rl_eval_dataset_name", "--rl-eval-dataset-name"),
@@ -1289,6 +1315,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         given.append("--rl-elastic-trainer-edges")
     if getattr(args, "rl_elastic_accept_rebind", False):
         given.append("--rl-elastic-accept-rebind")
+    if getattr(args, "rl_checkpoint_store", None):
+        given.append("--rl-checkpoint-store")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
@@ -1429,6 +1457,9 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             flags += " --rl-elastic-trainer-edges"
         if getattr(args, "rl_elastic_accept_rebind", False):
             flags += " --rl-elastic-accept-rebind"
+        store = rl_checkpoint_store_plan(args)
+        if store is not None:
+            flags += f" --rl-elastic-checkpoint-store {shlex.quote(store[0])}"
         for name, flag in _ELASTIC_PAUSE_FLAGS:
             value = getattr(args, name, None)
             if value is not None:
@@ -2978,18 +3009,28 @@ def make_miles_island_task(
             resources["network_tier"] = tier
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
         task.set_resources(sky.Resources(**resources))
+    storage_mounts = {}
     if args.spot:
         checkpoint_mount = _rl_checkpoint_mount(args.rl_completed_groups_path)
-        task.set_storage_mounts(
-            {
-                checkpoint_mount: sky.Storage(
-                    name=_rl_checkpoint_storage_name(args.cluster_prefix, learner_id),
-                    persistent=False,
-                    mode=sky.StorageMode.MOUNT,
-                    sync_on_reconstruction=True,
-                )
-            }
+        storage_mounts[checkpoint_mount] = sky.Storage(
+            name=_rl_checkpoint_storage_name(args.cluster_prefix, learner_id),
+            persistent=False,
+            mode=sky.StorageMode.MOUNT,
+            sync_on_reconstruction=True,
         )
+    if getattr(args, "rl_elastic", False):
+        # rl-multinode-island Q4 (C5): the consistent checkpoint (journal + cuts) must
+        # outlive node0 for a rebuild on other machines; a bucket URI is mounted on
+        # every island node, a shared path is left to the deployment (fail open with
+        # a warning: single-node and node0-local behavior is unchanged).
+        store = rl_checkpoint_store_plan(args)
+        if store is not None and store[1] is not None:
+            storage_mounts[store[0]] = sky.Storage(
+                source=store[1], mode=sky.StorageMode.MOUNT, persistent=True)
+        elif store is None and spec.num_nodes > 1:
+            print(NODE0_LOCAL_CHECKPOINT_WARNING, file=sys.stderr)
+    if storage_mounts:
+        task.set_storage_mounts(storage_mounts)
     return task
 
 
