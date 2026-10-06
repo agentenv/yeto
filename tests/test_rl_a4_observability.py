@@ -389,7 +389,9 @@ def test_drain_timeout_with_a_working_undrain_stays_cancelled(tmp_path):
 
 # ------------------------------------------------ 5b. A4b: tool-wait injection
 def _real_pool(monkeypatch, seconds, board):
-    from yeto.rl.engine.miles_adapter.rollout import INJECT_TOOL_WAIT_ENV, MilesRolloutPool
+    from yeto.rl.engine.miles_adapter.rollout import (
+        HARNESS_NOT_AGENTIC, INJECT_TOOL_WAIT_ENV, MilesRolloutPool,
+    )
 
     if seconds is None:
         monkeypatch.delenv(INJECT_TOOL_WAIT_ENV, raising=False)
@@ -402,6 +404,7 @@ def _real_pool(monkeypatch, seconds, board):
 
     pool = MilesRolloutPool(inference_controller=Fork(), rollout_executor=None, metadata=None,
                             expected_policy=lambda: (0, "h"), tool_wait_board=board,
+                            harness=HARNESS_NOT_AGENTIC,  # IR-2: explicit zeros, not unknown
                             runner=SimpleNamespace(run=asyncio.run), declared_cells=("c0", "c1"))
     pool.load_sample = lambda: {"active_requests": 0, "workers": 2, "cordoned": 0}
     records = []

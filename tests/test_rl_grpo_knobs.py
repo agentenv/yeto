@@ -729,8 +729,8 @@ def _overlong_driver(tmp_path, filtered_per_group, *, grad_nan=False):
     engine = td._engine(zero_grad_rounds={0})
     original = engine.rollout.generate
 
-    def generate(rollout_id):
-        batch = original(rollout_id)
+    def generate(rollout_id, **kw):
+        batch = original(rollout_id, **kw)
         cls = GroupMetadata if "filtered_samples" in {f.name for f in _dc.fields(GroupMetadata)} \
             else _FilteredGroup
         groups = tuple(cls(**{f.name: getattr(g, f.name) for f in _dc.fields(g)
@@ -868,8 +868,8 @@ def test_two_islands_record_their_own_trained_counts(tmp_path):
         engine = td._engine(torch.tensor([1.0 + island, 3.0]))
         original = engine.rollout.generate
 
-        def generate(rollout_id, _orig=original, _island=island):
-            batch = _orig(rollout_id)
+        def generate(rollout_id, _orig=original, _island=island, **kw):
+            batch = _orig(rollout_id, **kw)
             # island 1: the dynamic filter dropped one group this round
             groups = batch.groups[:-1] if _island == 1 else batch.groups
             kept[(_island, rollout_id)] = (len(groups), sum(len(g.sample_ids) for g in groups))

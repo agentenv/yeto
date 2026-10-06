@@ -16,7 +16,7 @@ Two rules from the acceptance text:
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 SPAN_KINDS = ("compute", "wait", "tool-wait", "transfer")
@@ -88,6 +88,66 @@ class LoadSample:
     tool_wait_trajectories: int
     ready_groups: int
     engine_capacity: int  # max concurrent requests the active engines accept
+    # IR-2 (codex-harness R-IR): harness sessions open / sandbox leases alive
+    # (idle included). Neither is a GPU gap; classify_load ignores both.
+    harness_in_flight: int = 0
+    env_live: int = 0
+
+
+# -- IR-4: 1.7 ``rl_load_sample`` metric schema -------------------------------
+# Every key the driver's load sampler may emit (``rl_load_sample`` events carry
+# the ``profile_hash``/``epoch`` labels; observe=False emits nothing, so the
+# old path is untouched). ``kind``: gauge = instantaneous, counter = cumulative
+# since island start. ``tito_chain_breaks`` is a {reason: count} map with
+# reasons restricted to TITO_CHAIN_BREAK_REASONS.
+LOAD_SAMPLE_LABELS = ("profile_hash", "epoch")
+TITO_CHAIN_BREAK_REASONS = (
+    "retry_fork", "history_rewrite", "template_drops_reasoning", "compaction_window",
+)
+LOAD_SAMPLE_SCHEMA: dict[str, tuple[str, type]] = {
+    "active_requests": ("gauge", int),
+    "workers": ("gauge", int),
+    "cordoned": ("gauge", int),
+    "running_requests": ("gauge", int),
+    "queued_requests": ("gauge", int),
+    "engine_capacity": ("gauge", int),
+    "tool_wait_trajectories": ("gauge", int),
+    "ready_groups": ("gauge", int),
+    "load_class": ("label", str),
+    # IR-4 harness metrics
+    "harness_in_flight": ("gauge", int),
+    "env_live": ("gauge", int),
+    "tito_session_mismatch": ("counter", int),
+    "tito_chain_breaks": ("counter", dict),
+    "policy_age_violation": ("counter", int),
+}
+HARNESS_METRIC_KEYS = (
+    "harness_in_flight", "env_live", "tito_session_mismatch", "tito_chain_breaks",
+    "policy_age_violation",
+)
+
+
+def validate_load_sample(sample: Mapping[str, object]) -> list[str]:
+    """Schema check of one load payload: unknown keys, wrong types and unknown
+    chain-break reasons are reported (None = unknown is accepted everywhere)."""
+    problems = []
+    for key, value in sample.items():
+        spec = LOAD_SAMPLE_SCHEMA.get(key)
+        if spec is None:
+            problems.append(f"unknown load key {key!r}")
+            continue
+        if value is None:
+            continue
+        kind, typ = spec
+        if not isinstance(value, typ) or (typ is int and isinstance(value, bool)):
+            problems.append(f"{key}: expected {typ.__name__}, got {type(value).__name__}")
+        elif key == "tito_chain_breaks":
+            for reason, n in value.items():  # type: ignore[union-attr]
+                if reason not in TITO_CHAIN_BREAK_REASONS:
+                    problems.append(f"tito_chain_breaks: unknown reason {reason!r}")
+                if not isinstance(n, int) or isinstance(n, bool):
+                    problems.append(f"tito_chain_breaks[{reason!r}]: expected int")
+    return problems
 
 
 def classify_load(sample: LoadSample) -> str:

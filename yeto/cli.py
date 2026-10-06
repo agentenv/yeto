@@ -340,6 +340,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None, metavar="S",
                     help="--rl-elastic: controller T_recovery, the REBUILD_OLD budget beyond the "
                     "transaction deadline (default 900)")
+    rl.add_argument("--rl-elastic-max-recovery-attempts", type=int, default=None, metavar="N",
+                    help="--rl-elastic: consecutive learner-restart recoveries of the committed "
+                    "membership that may stay unverified before the island is RECOVERY_REQUIRED "
+                    "(default 3)")
     rl.add_argument("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                     help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
                     "X6 cross-quorum runs only)")

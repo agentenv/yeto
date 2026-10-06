@@ -45,8 +45,9 @@ def test_printed_value_is_the_island_value():
 
 
 def test_both_paths_hash_the_same_launch_with_the_same_function():
-    island = inspect.getsource(entry.run_ports_island)
+    island = inspect.getsource(entry.preflight_stage)  # IR-1: pre-Ray stage of run_ports_island
     assert "fingerprint = ports_runtime_fingerprint(launch)" in island
+    assert "preflight_stage(" in inspect.getsource(entry.run_ports_island)
     run = inspect.getsource(rl_learner.run_miles)
     # printed right after the launch is built and verified, before anything else
     i_build = run.index("ports_launch = build_ports_launch(")
