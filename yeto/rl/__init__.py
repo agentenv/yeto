@@ -71,6 +71,20 @@ MILES_NEXT_IMAGE = (
     "37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
+# Nebius VM images whose /var/lib/docker already holds a docker image's
+# layers (scripts/bake_nebius_image.sh; COLDSTART-PLAN.md #3), keyed by that
+# image's digest, then region.  sky still runs `docker pull <digest>`, which
+# is then a no-op.  Only an exact digest match is used: a stale entry for an
+# older pin would just cost a full pull on top of a non-default base disk, so
+# the launcher warns and keeps the stock image instead.  Base disk: Nebius
+# public family ubuntu24.04-cuda13.0 (sky's own GPU default), so the NVIDIA
+# driver and container toolkit are unchanged.
+NEBIUS_BAKED_IMAGES: dict[str, dict[str, str]] = {
+    # MILES_NEXT_IMAGE c35702e-4e4148f; baked 2026-10-05 (cs2-bake.log).
+    "sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9": {
+        "eu-north1": "computeimage-e00xts577c333r08gv",
+    },
+}
 # Where MILES_NEXT_IMAGE installed the SGLang fork (editable).
 MILES_NEXT_IMAGE_SGLANG_ROOT = "/sgl-workspace/sglang"
 
