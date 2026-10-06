@@ -91,7 +91,8 @@ def sweep(run):
     args = rd('args.txt')
     import re
     steps = int(re.search(r'--total-steps (\d+)', args).group(1)) if '--total-steps' in args else None
-    want = 'H200' if 'h200' in args.lower() else 'H100' if 'h100' in args.lower() else 'L40S'
+    gtok = ((re.search(r'--gpu (\S+)', args) or [None, args])[1]).lower()   # --gpu token only (resources-1x4-h200.json is reused on H100)
+    want = 'H200' if 'h200' in gtok else 'H100' if 'h100' in gtok else 'L40S'
     cfg = (re.search(r'--rl-elastic-initial-config (\S+)', args) or [None, None])[1]
     seed = (re.search(r'--seed (\d+)', args) or [None, None])[1]
     rounds, last = {}, None
