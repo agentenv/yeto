@@ -168,3 +168,112 @@ def test_entry_preflight_refuses_partial_island_before_any_placement_group(tmp_p
     ctl.close()
     assert entry.refuse_partial_island_preflight(None, topology, miles_args) is None
     assert entry.refuse_partial_island_preflight(elastic, SimpleNamespace(nodes=1, gpus_per_node=1), miles_args) is None
+
+
+# ------------------------------------------------- Q4 (C5): parallel layout baseline
+def _layout(**kw):
+    base = {"tp": 1, "pp": 1, "cp": 1, "ep": 1, "trainer": 4, "nodes": 2, "gpus_per_node": 4,
+            "bundle_map": None}
+    base.update(kw)
+    return base
+
+
+def test_topology_record_carries_the_layout_and_same_shape_new_node_ids_pass(tmp_path):
+    kw = {"topology": (2, 4), "node_probe": _Nodes({"n0": 4, "n1": 4}),
+          "layout": {"pp": 2, "bundle_map": {"trainer": (0, 4), "rollout": (1, 5)}}}
+    _d, ctl, *_ = _island(tmp_path, controller_kw=kw)
+    topo = _journal(tmp_path, "topology")
+    assert topo[0]["layout"] == _layout(pp=2, bundle_map={"rollout": [1, 5], "trainer": [0, 4]})
+    assert topo[0]["layout_accepted"] is True and topo[0]["layout_error"] is None
+    assert ctl.layout_baseline() is None  # first incarnation: nothing to compare against
+    ctl.close()
+    # machine replaced: other node ids, same layout -> accepted, baseline is the first record
+    kw2 = dict(kw, node_probe=_Nodes({"m0": 4, "m1": 4}))
+    _d, ctl2, fork2, *_ = _island(tmp_path, controller_kw=kw2)
+    assert ctl2.inspect().health == "RUNNING" and ctl2.layout_rejection() is None
+    assert ctl2.layout_baseline() == topo[0]["layout"]
+    assert _journal(tmp_path, "topology")[1]["layout_accepted"] is True
+    ctl2.close()
+
+
+def test_changed_layout_is_refused_before_any_membership_call_and_is_not_a_journal_terminal(tmp_path):
+    kw = {"topology": (2, 4), "node_probe": _Nodes({"n0": 4, "n1": 4}), "layout": {"pp": 2}}
+    _d, ctl, *_ = _island(tmp_path, controller_kw=kw)
+    ctl.close()
+    # relaunch with PP1 TP2 (another cut layout) on the same journal
+    bad = dict(kw, layout={"tp": 2, "pp": 1})
+    _d, ctl2, fork2, *_ = _island(tmp_path, controller_kw=bad)
+    assert ctl2.inspect().health == "RECOVERY_REQUIRED" and not ctl2.admission_open
+    assert "layout changed: tp 1 -> 2, pp 2 -> 1" in ctl2.recovery_required
+    assert not [c for c in fork2.calls if c[0] in ("restore", "start", "stop")], fork2.calls
+    rec = _journal(tmp_path, "topology")[-1]
+    assert rec["layout_accepted"] is False and rec["layout_error"].startswith("layout changed")
+    assert not [r for r in _journal(tmp_path, "phase") if r["phase"] == "RECOVERY_REQUIRED"]
+    ctl2.close()
+    # the same shape again (operator fixed the recipe): the island opens
+    _d, ctl3, *_ = _island(tmp_path, controller_kw=kw)
+    assert ctl3.inspect().health == "RUNNING" and ctl3.layout_rejection() is None
+    ctl3.close()
+    # a bundle-map change (mixed placement moved) is a layout change too
+    moved = dict(kw, layout={"pp": 2, "bundle_map": {"trainer": (0, 1), "rollout": (4, 5)}})
+    _d, ctl4, *_ = _island(tmp_path, controller_kw=moved)
+    assert "bundle_map None -> {'rollout': [4, 5], 'trainer': [0, 1]}" in ctl4.recovery_required
+    ctl4.close()
+
+
+def test_restart_recovery_precondition_and_confirm_check_the_layout(tmp_path):
+    from yeto.rl.engine.controller import RecoveryRequired
+
+    nodes = _Nodes({"n0": 4, "n1": 4})
+    kw = {"topology": (2, 4), "node_probe": nodes, "layout": {"pp": 2}}
+    driver, ctl, *_ = _island(tmp_path, controller_kw=kw)
+    ctl.close()
+    # the restart precondition (recovery-design §2) refuses another layout
+    _d, ctl2, *_ = _island(tmp_path, controller_kw=dict(kw, layout={"pp": 1}))
+    assert ctl2._recovery_precondition(_d.rollout, frozenset(), frozenset()).startswith("layout changed")
+    ctl2.close()
+    # confirm_recovery: same layout -> checks.layout ok; a layout drift between the
+    # restart precondition and the first publication is a failed recovery
+    _d3, ctl3, *_ = _island(tmp_path, controller_kw=kw)
+    ctl3.recovery_pending = {"recovery_id": "r1", "members": frozenset(_d3.rollout.members()),
+                             "deadline_wall": 1e12}
+    ctl3.layout = dict(ctl3.layout, pp=4)
+    with pytest.raises(RecoveryRequired, match="layout changed: pp 2 -> 4"):
+        ctl3.confirm_recovery(_d3)
+    rec = [r for r in _journal(tmp_path, "recovery") if r["status"] == "failed"][-1]
+    assert rec["checks"]["layout"].startswith("layout changed")
+    ctl3.close()
+
+
+def test_entry_layout_from_megatron_args_and_placement(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.miles_adapter import entry
+
+    topology = SimpleNamespace(nodes=2, gpus_per_node=2)
+    miles_args = SimpleNamespace(tensor_model_parallel_size=1, pipeline_model_parallel_size=2,
+                                 context_parallel_size=1, expert_model_parallel_size=1,
+                                 actor_num_nodes=2, actor_num_gpus_per_node=1,
+                                 yeto_rl_event_tape=str(tmp_path / "events.jsonl"), yeto_rl_learner_id=0)
+    placement = SimpleNamespace(bundle_map={"trainer": (0, 2), "rollout": (1,), "standby": (3,)})
+    assert entry.island_layout_of(miles_args, topology, placement) == {
+        "tp": 1, "pp": 2, "cp": 1, "ep": 1, "nodes": 2, "gpus_per_node": 2, "trainer": 2,
+        "bundle_map": {"trainer": [0, 2], "rollout": [1], "standby": [3]}}
+    assert entry.island_layout_of(SimpleNamespace(), topology)["bundle_map"] is None
+    # preflight journals it; the next incarnation with PP1 is refused with the tape event
+    ctl = _ctl(tmp_path / "state", {"t": 1000.0})
+    monkeypatch.setattr(entry, "_ray_alive_nodes", lambda: {"head": 2, "w1": 2})
+    assert entry.refuse_partial_island_preflight(SimpleNamespace(controller=ctl), topology, miles_args,
+                                                 placement=placement) is None
+    assert _journal(tmp_path, "topology")[0]["layout"]["pp"] == 2
+    ctl.close()
+    ctl = _ctl(tmp_path / "state", {"t": 1001.0})
+    miles_args.pipeline_model_parallel_size = 1
+    miles_args.actor_num_gpus_per_node = 2
+    miles_args.actor_num_nodes = 1
+    with pytest.raises(RuntimeError, match="RECOVERY_REQUIRED: layout changed: pp 2 -> 1"):
+        entry.refuse_partial_island_preflight(SimpleNamespace(controller=ctl), topology, miles_args,
+                                              placement=SimpleNamespace(bundle_map=None))
+    ev = [e for e in _events(tmp_path) if e["event"] == "rl_reconfiguration"]
+    assert ev[-1]["result"] == "RECOVERY_REQUIRED" and "bundle_map" in ev[-1]["error"]
+    ctl.close()

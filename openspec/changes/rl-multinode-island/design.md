@@ -88,6 +88,9 @@
 - head 节点失联 = learner 失联，由外层（restart loop / sky job 失败）处理，与单节点语义相同。
 - 重启恢复（E1-D）：restart loop 只重启 learner 进程；若 `ray.nodes()` 的 alive 节点数 < N，则重启前置检查失败 → 直接 `RECOVERY_REQUIRED`，不进入差分恢复。恢复要求"同形"：`node_index → gpus_per_node` 结构一致（主机名可变）；journal 增加 `topology` 记录。
 - 节点重建（sky 自动恢复 spot 节点）不在本 change 自动处理：需要用户裁定 Q4。
+- **C5（用户裁定 2026-10-04 Q4）从一致 checkpoint 重建**：一致 checkpoint = elastic state dir（journal/epochs/cuts/ledger），默认在 node0 本地盘；`--rl-checkpoint-store <s3://|gs://|共享路径>` 让 controller 在每个提交点（启动 `topology` 基线、接受的 `gpu_pool`、`COMMITTED`/`SUCCEEDED` phase 记录）后把 state dir 复制到 store（最后写 `STORE-MANIFEST.json`，无 manifest 的副本不信任；复制失败只告警不阻塞提交）；bucket URI 由 launcher 以 sky Storage MOUNT 挂到 `~/yeto-checkpoint-store`，共享路径原样透传；新机器空 state dir 启动时先从 store 恢复（journal `checkpoint_store action=restore`），本地 journal 存在则本地优先。未指定时多节点打印 warning（fail open），单节点不变。
+- **并行布局核对（C5）**：`topology` 记录增加 `layout`（tp/pp/cp/ep、trainer 卡数、nodes×gpus_per_node、bundle_map）与 `layout_accepted`；新 incarnation 与最近被接受的基线不一致 → `RECOVERY_REQUIRED "layout changed: …"`（`refuse_partial_island` 在任何 fork 成员调用前、`_recovery_precondition`、`confirm_recovery` checks.layout）。不设覆盖 flag：重建必须同形（Megatron cut 换布局需转换，不在范围）。与 `gpu_pool` 一样是 incarnation 级拒绝，不写 journal 终态，按原 recipe 重启即可继续。
+- **换机重建流程（C5）**：失联 → `node_lost`/RECOVERY_REQUIRED（原地重启被预检拒绝）→ `yeto down` → 同 cfg/recipe `yeto launch` + `--rl-elastic-accept-rebind` → store 恢复 → layout 核对 → `gpu_pool` 重绑定记录 → 3.7 重启恢复（RECOVERING → confirm_recovery）→ 从已提交 epoch/最近 cut 续训。不支持原 rank 自动重入、部分节点续跑、换布局重建；Modal 岛无 sky Storage 挂载（只能用共享路径）。见 docs/MILES_RL.md「Node loss and rebuild (checkpoint store)」。
 
 ### D10 回收原子性
 - `sky down <island>` 对多节点集群是整体操作；现有"云端核实"改为对集群的**全部**实例 ID 逐个核实（launcher 在 up 后记录 `node_instance_ids[]`）。任一节点未确认 → 保留记录、非零退出、列出节点（与 `head-run-teardown` 规则一致）。
@@ -126,6 +129,7 @@
 - **Q4 节点失联后的自动重建**：方案 a）整岛 `RECOVERY_REQUIRED` 退出，由人工/外层 `yeto up` 重建（本 change 基线）；b）restart loop 等待 sky 自动恢复节点后重入恢复（需节点自愈检测，+1 天）。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：a) 整岛退出、人工重建。
   - **用户裁定 2026-10-04**：「节点失联时停止受影响的训练通信组，从一致 checkpoint 重建，暂不支持原 rank 自动重入」→ 保留整岛退出 + 预检拒绝；补『从一致 checkpoint 重建』路径（换机 = 新 incarnation + --load）；见 MULTINODE-GAP-S8.md §1.3。
+  - 实现（C5，2026-10-04，CPU 通过）：D9 新增三条（checkpoint store、layout 核对、换机流程）；`--rl-checkpoint-store`（cli→launcher `rl_checkpoint_store_plan`→learner `--rl-elastic-checkpoint-store`→`IslandController(checkpoint_store)`）；`controller.island_layout/layout_diff/layout_baseline/layout_rejection/sync_checkpoint_store/_restore_from_checkpoint_store`；`entry.island_layout_of`。换机不走 Megatron `--load`：恢复的是 journal + cuts（3.7 重启恢复路径），`--load` 仍未被 cut plugin 使用。GPU M4 未验。
 - **Q5 GPU 验证规格**：2×1×H100（≈$5/h，验证 Ray/PG/cell/故障域）还是 2×8×H100（≈$62/h，顺带验 Flash-Next 4 层变体跨节点）？建议前者，后者并入 S2。
   - 裁定（主 agent 默认，待用户复核，2026-10-01）：2×1×H100。
   - **用户裁定 2026-10-04**：「保留 2×1 基础验证，补充 trainer 自身跨节点的 EP、PP 测试；用明确预留 GPU 的 2×2 配置验证 rollout 弹性。G2 弹性边未测可标记为资源受限、继续保留 PARTIAL，不算功能失败，也不能算通过。真实多卡规格另验容量与性能。AWS 配额按实际实例 vCPU 总量及扩容余量计算，不固定为 48。」→ 测试矩阵与配额表见 MULTINODE-GAP-S8.md §3–§4。

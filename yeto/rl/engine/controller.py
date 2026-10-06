@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import shutil
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -84,6 +86,8 @@ CANCELLED = "CANCELLED"
 REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+STORE_MANIFEST = "STORE-MANIFEST.json"  # Q4 (C5): written last by sync_checkpoint_store
+LAYOUT_KEYS = ("tp", "pp", "cp", "ep", "trainer", "nodes", "gpus_per_node", "bundle_map")
 # 4.4: same-shape trainer rebuild behind the ports (cut saved, trainer being
 # disposed/rebuilt/restored). A restart that finds it cannot tell whether the
 # trainer was restored: RECOVERY_REQUIRED (4.5).
@@ -156,6 +160,37 @@ class Plan:
     @property
     def remove(self) -> int:
         return max(0, self.source_engines - self.target_engines)
+
+
+def island_layout(cfg: Any, topology: tuple[int, int],
+                  given: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Normalized parallel layout of a multi-node island (Q4, C5): ``tp/pp/cp/ep``
+    (startup config dims), ``trainer`` GPUs, ``nodes`` x ``gpus_per_node`` and the
+    role -> logical bundle ``bundle_map`` (None = leading-bundle layout). ``given``
+    overrides any key (the entry passes the Megatron args / placement it launched)."""
+    dims = dict(getattr(cfg, "dims", {}) or {})
+    layout: dict[str, Any] = {d: int(dims.get(d, 1) or 1) for d in ("tp", "pp", "cp", "ep")}
+    layout["trainer"] = int(getattr(cfg, "trainer", 0) or 0)
+    layout["nodes"], layout["gpus_per_node"] = int(topology[0]), int(topology[1])
+    layout["bundle_map"] = None
+    for key, value in dict(given or {}).items():
+        if key not in LAYOUT_KEYS:
+            raise Rejected(f"unknown layout key {key!r} (known: {LAYOUT_KEYS})")
+        if key == "bundle_map":
+            layout[key] = (None if value is None
+                           else {str(k): [int(b) for b in v] for k, v in sorted(dict(value).items())})
+        else:
+            layout[key] = int(value)
+    return layout
+
+
+def layout_diff(base: Mapping[str, Any], now: Mapping[str, Any]) -> dict[str, tuple[Any, Any]]:
+    """``{key: (baseline, current)}`` for every LAYOUT_KEYS entry that differs."""
+    def norm(v: Any) -> Any:
+        if isinstance(v, Mapping):
+            return {str(k): [int(b) for b in vv] for k, vv in sorted(v.items())}
+        return None if v is None else int(v)
+    return {k: (base.get(k), now.get(k)) for k in LAYOUT_KEYS if norm(base.get(k)) != norm(now.get(k))}
 
 
 def _failure_detail(exc: BaseException) -> dict[str, Any]:
@@ -240,6 +275,8 @@ class IslandController:
         max_recovery_attempts: int = 3,
         topology: tuple[int, int] | None = None,
         node_probe: Callable[[], Any] | None = None,
+        layout: Mapping[str, Any] | None = None,
+        checkpoint_store: str | Path | None = None,
     ) -> None:
         if initial_config not in configs:
             raise Rejected(f"initial config {initial_config!r} is unknown")
@@ -278,6 +315,14 @@ class IslandController:
         # {"spec", "args", "global_batch_size", "micro_batch_size", "ops"} where
         # ops is a trainer_transition.TrainerOps (miles_adapter.trainer_resize.MilesTrainerOps).
         self._trainer_edges = trainer_edges
+        # rl-multinode-island Q4 (C5): an off-island copy of the state dir (journal,
+        # epochs, cuts, ledger) kept by sync_checkpoint_store() after every commit
+        # point; a learner starting on an EMPTY state dir (machine replaced) restores
+        # it from there first. None = node0-local state only.
+        self.checkpoint_store = (Path(checkpoint_store).expanduser()
+                                 if checkpoint_store not in (None, "") else None)
+        self.last_store_sync: dict[str, Any] | None = None
+        restored = self._restore_from_checkpoint_store()
         self.journal = Journal(self.state_dir / "reconfig", wall_clock=wall_clock)
         if self.journal.epochs.config_id is None:
             self.journal.compare_and_swap(
@@ -304,7 +349,7 @@ class IslandController:
         self.topology: tuple[int, int] | None = None
         self._topology_checked = False
         self._node_probe: Callable[[], Any] | None = None
-        self.set_topology(topology, node_probe)
+        self.set_topology(topology, node_probe, layout=layout)
         self._recovery_unverified = 0  # consecutive planned recoveries never verified
         self._recovery_open_id: str | None = None  # planned, not verified/failed/superseded
         import uuid as _uuid
@@ -313,6 +358,9 @@ class IslandController:
                             "wall_time": self._wall()}
         self._watchdog_fired = threading.Event()
         self._replay()
+        if restored is not None:
+            self._record("checkpoint_store", tx_id=None, action="restore", store=str(self.checkpoint_store),
+                         incarnation=self.incarnation["id"], **restored)
 
     # ------------------------------------------------------------------ journal
     def close(self) -> None:
@@ -448,7 +496,8 @@ class IslandController:
 
     # ------------------------------------------------------------- node topology (D9)
     def set_topology(self, topology: tuple[int, int] | None,
-                     node_probe: Callable[[], Any] | None = None) -> None:
+                     node_probe: Callable[[], Any] | None = None, *,
+                     layout: Mapping[str, Any] | None = None) -> None:
         if topology is not None:
             nodes, per = int(topology[0]), int(topology[1])
             if nodes < 1 or per < 1:
@@ -458,6 +507,36 @@ class IslandController:
             self._topology_checked = False  # refuse_partial_island() ran for this topology
         self.topology = topology
         self._node_probe = node_probe
+        # Q4 (C5): the island's parallel layout; defaults come from the startup config
+        self.layout: dict[str, Any] | None = None
+        if topology is not None:
+            self.layout = island_layout(self.configs[self.initial_config], topology, layout)
+
+    # ------------------------------------------------------ parallel layout (Q4, C5)
+    def layout_baseline(self) -> dict[str, Any] | None:
+        """The ``layout`` of the last ``topology`` record written by an EARLIER
+        incarnation (what the journal's cuts/epochs were produced with), or None."""
+        mine = self.incarnation["id"]
+        for r in reversed(self.journal.records):
+            if (r.get("kind") == "topology" and r.get("layout") and r.get("incarnation") != mine
+                    and r.get("layout_accepted", True)):  # a refused incarnation sets no baseline
+                return dict(r["layout"])
+        return None
+
+    def layout_rejection(self) -> str | None:
+        """Why this incarnation's layout (tp/pp/cp/ep, trainer shape, bundle map) differs
+        from the journal baseline (None when equal, or without topology/baseline). A
+        rebuild from a consistent checkpoint must be same-shape: a Megatron cut written
+        under another parallel layout is not restorable without conversion."""
+        if self.layout is None:
+            return None
+        base = self.layout_baseline()
+        if base is None:
+            return None
+        diff = layout_diff(base, self.layout)
+        if not diff:
+            return None
+        return "layout changed: " + ", ".join(f"{k} {b!r} -> {n!r}" for k, (b, n) in diff.items())
 
     def _alive_nodes(self) -> tuple[list[Any], dict[Any, int] | None]:
         """``(alive node ids, {node: gpus} or None)`` from the probe (raises on failure)."""
@@ -501,14 +580,27 @@ class IslandController:
             alive: Any = [str(n) for n in self._alive_nodes()[0]]
         except Exception as exc:  # noqa: BLE001
             alive = f"probe failed: {exc!r}"
+        layout_why = self.layout_rejection()  # against the baseline BEFORE this record
         self._record("topology", tx_id=None, nodes=self.topology[0], gpus_per_node=self.topology[1],
-                     alive=alive, incarnation=self.incarnation["id"])
+                     alive=alive, incarnation=self.incarnation["id"], layout=self.layout,
+                     layout_accepted=layout_why is None, layout_error=layout_why)
         why = self.topology_rejection()
         if why is not None:
             # D9: never touch the fork's membership epoch on a partial island; the
             # restart precondition fails before any restore/start/stop call.
             self._enter_recovery(None, f"island topology: {why}; recovery refused on fewer nodes")
-        return why
+            return why
+        if layout_why is not None:
+            # Q4 (C5): fail closed for this incarnation (admission closed, the entry
+            # exits) but, like gpu_pool, NOT a journal terminal: the operator relaunches
+            # with the same cfg/recipe (same shape) and the island resumes; no flag
+            # overrides this, a rebuild must be same-shape.
+            self.recovery_required = (f"{layout_why}; a rebuild from this journal must keep "
+                                      "the parallel layout of the committed checkpoint")
+            self.admission_open = False
+            return layout_why
+        self.sync_checkpoint_store("topology")
+        return None
 
     def check_nodes(self) -> str | None:
         """Driver poll (D9): any node loss -> ``node_lost`` journal record and the
@@ -552,6 +644,7 @@ class IslandController:
                      mapping=dict(result.mapping), diffs=list(result.diffs),
                      accepted=bool(result.ok), error=result.error)
         if result.ok:
+            self.sync_checkpoint_store("gpu_pool")
             return None
         # Fail closed for this incarnation (admission closed, the entry exits), but NOT
         # a journal terminal: unlike node loss, a changed pool is bound by an explicit
@@ -561,6 +654,71 @@ class IslandController:
                                   "start on an unreconciled GPU pool")
         self.admission_open = False
         return result.error
+
+    # ------------------------------------------------ checkpoint store (Q4, C5)
+    def _restore_from_checkpoint_store(self) -> dict[str, Any] | None:
+        """Before the journal opens: with a store holding a complete copy
+        (``STORE-MANIFEST.json`` written last) and NO journal in the local state dir
+        (fresh machine), copy the store into the state dir. A local journal always
+        wins (an in-place restart is at least as new as its last sync; dropping
+        local records could hide a RECOVERY_REQUIRED terminal)."""
+        store = self.checkpoint_store
+        if store is None:
+            return None
+        local_journal = self.state_dir / "reconfig" / "journal.jsonl"
+        if local_journal.exists():
+            return None
+        manifest = store / STORE_MANIFEST
+        if not manifest.is_file():
+            return None
+        info = json.loads(manifest.read_text(encoding="utf-8"))
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        for child in store.iterdir():
+            if child.name == STORE_MANIFEST:
+                continue
+            target = self.state_dir / child.name
+            if child.is_dir():
+                shutil.copytree(child, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(child, target)
+        return {"restored_from": {k: info.get(k) for k in ("incarnation", "reason", "config_epoch",
+                                                              "wall_time", "seq")}}
+
+    def sync_checkpoint_store(self, reason: str) -> bool:
+        """Copy the state dir (journal, epochs, cuts, ledger, inbox...) to the store and
+        write ``STORE-MANIFEST.json`` last (a reader trusts the copy only with it). Runs
+        under the record lock so no journal line is torn by a concurrent append. A
+        failing sync is logged + remembered (``last_store_sync``), never fatal: the
+        store is a durability aid, the island's truth stays the local journal."""
+        store = self.checkpoint_store
+        if store is None:
+            return False
+        with self._record_lock:
+            info = {"incarnation": self.incarnation["id"], "reason": reason, "wall_time": self._wall(),
+                    "config_epoch": self.journal.epochs.config_epoch,
+                    "seq": int(self.journal.records[-1].get("seq", 0)) if self.journal.records else 0,
+                    "layout": self.layout, "state_dir": str(self.state_dir)}
+            try:
+                store.mkdir(parents=True, exist_ok=True)
+                for child in self.state_dir.iterdir():
+                    if child.name == STORE_MANIFEST:
+                        continue
+                    target = store / child.name
+                    if child.is_dir():
+                        shutil.copytree(child, target, dirs_exist_ok=True,
+                                        ignore=shutil.ignore_patterns("journal.lock"))
+                    elif child.name != "journal.lock":
+                        shutil.copy2(child, target)
+                tmp = store / (STORE_MANIFEST + ".tmp")
+                tmp.write_text(json.dumps(info, sort_keys=True), encoding="utf-8")
+                tmp.replace(store / STORE_MANIFEST)
+            except Exception as exc:  # noqa: BLE001 - never fail the commit on the copy
+                self.last_store_sync = {**info, "ok": False, "error": repr(exc)}
+                logging.getLogger(__name__).warning(
+                    "checkpoint store sync (%s) to %s failed: %r", reason, store, exc)
+                return False
+            self.last_store_sync = {**info, "ok": True}
+            return True
 
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler
@@ -575,6 +733,8 @@ class IslandController:
         self._record("phase", tx_id=tx.tx_id, request_id=tx.request_id, phase=phase,
                      config_epoch=self.journal.epochs.config_epoch,
                      fork_epoch=self._fork_epoch, **fields)
+        if phase in (COMMITTED, SUCCEEDED):
+            self.sync_checkpoint_store(phase)  # Q4 (C5): after the durable CAS / cut commit
         self._maybe_test_kill(phase)
 
     # ------------------------------------------------------------------ startup
@@ -682,6 +842,9 @@ class IslandController:
         topology_why = self.topology_rejection()  # D9: never recover onto fewer nodes
         if topology_why is not None:
             return f"island topology: {topology_why}"
+        layout_why = self.layout_rejection()  # Q4: never recover onto another layout
+        if layout_why is not None:
+            return layout_why
         cfg = self.configs.get(epochs.config_id)
         if cfg is None:
             return f"committed config {epochs.config_id!r} is unknown"
@@ -812,6 +975,10 @@ class IslandController:
             checks["nodes"] = "ok" if topology_why is None else topology_why
             if topology_why is not None:
                 failures.append(f"island topology: {topology_why}")
+            layout_why = self.layout_rejection()
+            checks["layout"] = "ok" if layout_why is None else layout_why
+            if layout_why is not None:
+                failures.append(layout_why)
         members = frozenset(pool.members())
         checks["members"] = sorted(members)
         if members != target:
