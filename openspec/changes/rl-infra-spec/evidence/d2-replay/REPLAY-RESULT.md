@@ -32,3 +32,18 @@
 - 首 step/恢复开销取 5.1 的 +2.5/+0.1 s；未建模后台 restore 与对其他岛的影响。
 - replay 窗口里 `gpu_busy_fraction` 只填 rollout 可扩展部分；而 `timeline.LoadSummary.gpu_busy_fraction` 含 trainer compute，直接送入 `predict_gain` 会高估 resize 收益（见回报中的配合需求）。
 - 单 seed、单次；GPU 验收需重复运行分布。
+
+## n=3（H100）
+
+脚本 `infra-drafts/tmp-logs/d2_replay_run_n3.py`，原始 JSON `infra-drafts/tmp-logs/d2-replay-result-n3.json`。纯 CPU 回放，模型与上节相同，只换输入：
+- 成本：`evidence/edge-costs.json`（经 `edge_costs_from_table` 读取）：up cost_upper 179.7 s + recovery_upper 2.7 s，down 6.4 + 1.7 s（H100 单节点分配 4 卡，n=3）。T2R2S0↔T1R3 边仍无实测，**假设**同 up/down 值。
+- 轮时：2.4 H100 扫描两 seed 合并稳态 mean，T2R1S1 11.918 s、T2R2S0 11.695 s → Δ=0.223 s/轮 → gen 0.446 s + train 11.472 s。该 Δ 是对切换最有利的口径（median 口径 seed29 方向相反）。
+
+| 场景 | 兼容默认 | 默认固定(目标模式) | 最佳固定(事后) | 动态 | 最佳固定配置 | 动态切换次数 | mode 收益 | resize 收益(最佳固定) | resize 收益(动态) | 动态 GPU-h | 动态 样本/s | 动态 等待 s | R1→R2 回本轮数 | R1→T1R3 回本 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| stable | 11920 | 11920 | 11697 | 11920 | T2R2S0 | 0 | 0 | 223 | 0 | 13.24 | 0.0839 | 0 | 818 | 无收益 |
+| changing | 12366 | 12366 | 11920 | 12366 | T2R2S0 | 0 | 0 | 446 | 0 | 13.74 | 0.0809 | 0 | 409 | 无收益 |
+| long_tail | 13563 | 13563 | 13340 | 13563 | T2R2S0 | 0 | 0 | 223 | 0 | 15.07 | 0.0737 | 1651 | 818 | 无收益 |
+| tool_wait | 16920 | 16920 | 16697 | 16920 | T2R2S0 | 0 | 0 | 223 | 0 | 18.80 | 0.0591 | 5000 | 818 | 无收益 |
+
+结论（n=3 成本，仍为 CPU 模拟）：与 n=1 一致且更保守——动态组四场景 0 次切换、等于默认固定（无回归）；up 边上界从 99.5 s 升到 182.4 s，回本轮数 663→818（changing 409）。"最佳固定"的 223–446 s/1000 轮（1.9%–3.6%）只是事后选择收益，且 2.4 实测中 T2R1S1/T2R2S0 差异随 seed 翻向、未达 10% 判据。**不存在可自动触发的净收益边**，6.4 auto 保持不启用。
