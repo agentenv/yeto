@@ -693,6 +693,10 @@ def compose_island(
 
         driver.elastic_hook = elastic_hook_for(miles_args, controller=elastic.controller,
                                                profile=profile, observe=observe)
+        # dashboard 5.1/5.2: controller cell-snapshot / reconfig-phase events; only when the
+        # observation path is on so the legacy (observe=False) tape stays byte-identical.
+        if observe:
+            elastic.controller.set_event_sink(driver.emit, journal=True)
     holder["driver"] = driver
     return driver
 
@@ -1638,6 +1642,10 @@ def run_ports_island(
             ),
             elastic=elastic,
         )
+        # fleet-dashboard 2.1/2.2: opt-in heartbeat / resource sampler periods
+        driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
+        driver.resource_sample_interval_s = getattr(
+            miles_args, "yeto_rl_resource_sample_interval_s", None)
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness
 
