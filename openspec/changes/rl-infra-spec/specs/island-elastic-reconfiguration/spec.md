@@ -230,6 +230,14 @@ GPU-hours MUST 按整个分配池计算，备用卡也 MUST 计入。
 - **WHEN** 人工批准时，建议已经超过有效期
 - **THEN** 执行被拒绝，并说明原因
 
+#### Scenario: 批准时 epoch 已变化
+- **WHEN** 人工批准时，岛的 config epoch 已不同于建议中的 expected_epoch
+- **THEN** 执行被拒绝（Rejected）并说明原因，不改投其他目标、不自动续批
+
+#### Scenario: 无成本表时保持当前配置
+- **WHEN** 成本表缺失，或其中没有当前 profile 对应的边
+- **THEN** 不产生切换建议，保持当前配置
+
 ### Requirement: 自动控制（D2）
 自动模式 SHALL 默认关闭。只有当前执行模式下至少有一条已认证、并且净收益可重复的边时，才 SHALL 允许开启。自动触发必须同时满足：
 - 持续失衡窗口；
@@ -247,3 +255,19 @@ GPU-hours MUST 按整个分配池计算，备用卡也 MUST 计入。
 #### Scenario: 没有净收益边
 - **WHEN** 基准测量显示当前模式下没有可重复净收益的边
 - **THEN** 自动模式无法开启，只提供手动和建议模式
+
+#### Scenario: auto 不可用于未声明能力的边
+- **WHEN** 某条边未在岛声明中出现，或未经认证（例如 trainer 边）
+- **THEN** 自动模式不把它作为候选，候选集合等于声明与认证的交集
+
+#### Scenario: 关闭自动模式不打断事务
+- **WHEN** 事务进行中，模式被切换为 disabled
+- **THEN** 该事务照常完成，模式变更写入 journal 并在重放后保持
+
+### Requirement: 单节点子集 GPU 的 placement 解析
+当岛只分配单节点上 M 张 GPU、且没有提供每节点 GPU 数拓扑时，控制器 SHALL 把 `n0:<g>` 槽位解析为逻辑 bundle g，并据此判断 rollout GPU 是否在池内。
+
+#### Scenario: 单节点分配 4 卡的 rollout 扩容
+- **WHEN** 单节点 8 卡机只分配 GPU 0–3，rollout 增加一个占用 `n0:2,n0:3` 的 engine
+- **THEN** 事务提交后正常 resume，不因 "outside the pool" 进入 RECOVERY_REQUIRED
+

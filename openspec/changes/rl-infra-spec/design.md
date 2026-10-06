@@ -244,6 +244,17 @@ D1先shadow再半自动：输出带expires_at的建议，包含source/target、e
 
 baseline 对比默认固定、测试范围内最佳固定、动态三组；相同模型/算法/数据与更新预算、硬件集合、后端版本和工具条件；目标固定分区与动态必须同一ExecutionProfile，兼容串行基线单列，不能把执行模式变化的收益归于resize。稳定负载、阶段性变化、长尾、工具等待四场景，记录 warmup 和重复运行分布。报告端到端时间、有效样本吞吐、GPU-hours、各类等待、切换税、恢复代价、学习曲线；固定池未释放实例时 allocated GPU-hours=整池卡数×wall time，减少 active engines 不能算省租卡。允许动态在稳定负载略逊最佳固定，但必须有预设回归预算、禁用/停留控制，不承诺提升比例。
 
+#### 实现备注（S11，2026-10-06）
+以下为 S11 实现后的现状，标注"源码已确认"的条目可在 integ-decl 代码中直接核对；"设计建议"为尚未实现的约束。
+- 模式开关（源码已确认）：`IslandController.recommend_mode` ∈ disabled/manual/recommend/auto，默认 disabled；`set_recommend_mode` 写入 journal、replay 恢复；inbox `mode` 动词与 CLI `mode` 子命令；切换不 cancel 进行中事务。
+- ElasticHook 接入点（源码已确认）：`miles_adapter/elastic_hook.py`，在 `IslandDriver.safe_point` 中、旧路径 `poll_commands` 之后调用；仅 ports + `--rl-elastic` + `--rl-observe-timeline` 且 mode ∈ {recommend, auto} 时工作，不传 hook 时与旧路径逐事件一致。
+- auto 状态持久化（源码已确认）：mode 经 journal 持久化；AutoController 的 dwell/cooldown/切换历史仅在内存，重启后从零（从宽）。设计建议：后续持久化这部分状态。
+- 候选边（源码已确认）：候选 = 声明 ∩ 认证（`candidate_edges_from_attestation`），当前仅 rollout-only 边；trainer 边未认证不可选。
+- 成本表（源码已确认）：`evidence/edge-costs.json`，列表项 `{profile_hash, source, target, cost_lower_s, cost_upper_s, recovery_upper_s, n, provenance}`，由 `edge_costs_from_table` 读取；文件缺失或无对应 profile → 空表 → 永远保持当前配置。
+- 单节点 placement（源码已确认，8443a8fd）：岛分配单节点 M 卡且未提供 `--rl-island-gpus-per-node`（无拓扑）时，`ElasticPlacement` 把 `n0:<g>` 解析为逻辑 bundle g；修复前 E1 COMMITTED 后误判 "outside the pool" 进入 RECOVERY_REQUIRED。
+- launcher 已知行为（源码已确认，未改）：job FAILED 时 launcher 进入恢复拆除，无视 `--keep` 拆集群；GPU 链因此对后续段重新 provision。
+- 实测状态：S11 H100 单节点（n=3）无净收益边（见 `evidence/d1/`），auto 按本节规则不可启用。
+
 ### D10. DiLoCo 与岛间边界
 
 暂停不会暂停 syncer。源码 fixed-roster round 超时等待/重发并不等于所有 finalization deadline 可暂停。严格同步会让其他岛等待；decoupled 可能积压广播、错过 attempt/变陈旧；budget gate/finalization 在首版一律 veto 切换。外层通信继续服务，但网络线程存活不能算模型状态已 apply。
