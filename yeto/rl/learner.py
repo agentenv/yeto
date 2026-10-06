@@ -2124,7 +2124,12 @@ def run_miles(
 
     from . import flash_next_provider as flash_next
 
+    native_lora_export = None
     if flash_next.is_flash_next(args, model_path):
+        # try24: no predicted LoRA layout (specs == ()); the ports state plugin
+        # exports through Miles' native qwen3_8_next exporter and the layout
+        # hash is learned from the first export (_run_ports).
+        native_lora_export = "qwen3_8_next"
         # try22: megatron.bridge AutoBridge cannot parse qwen4_exp (transformers
         # 5.12.1 has no such model type).  Miles registers the HF alias and
         # trains through its own plugin, so build a read-only provider view
@@ -2487,6 +2492,7 @@ def run_miles(
             specs=specs,
             canonical_targets=canonical_targets,
             yeto_policy_sync=yeto_policy_sync,
+            native_lora_export=native_lora_export,
         )
         # Last tape record: a rebuilt (no-sync) tape without it is incomplete.
         _append_ports_event(args, miles_args, {"event": "rl_learner_finalized"})
@@ -2584,21 +2590,40 @@ def _run_ports(
     specs,
     canonical_targets,
     yeto_policy_sync: bool,
+    native_lora_export: str | None = None,
 ) -> None:
-    """Ports path: yeto's IslandDriver over upstream Miles (design D2)."""
+    """Ports path: yeto's IslandDriver over upstream Miles (design D2).
+
+    ``native_lora_export`` (Flash-Next, S11 try24): the LoRA layout is not
+    predictable on the CPU side, so no hash is pinned here; the policy state
+    learns it from the first export (before any receipt) and pins it after.
+    """
 
     from .core import canonical_layout_hash, canonical_lora_config_hash
     from .engine.miles_adapter.entry import run_ports_island
 
-    layout_hash = canonical_layout_hash(specs)
     lora_config_hash = canonical_lora_config_hash(
         rank=args.lora_r, target_modules=canonical_targets
     )
-    print(
-        f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
-        + ", ".join(f"{s.name}{list(s.shape)}" for s in specs[:400]),
-        flush=True,
-    )
+    if native_lora_export is not None:
+        if specs:
+            raise ValueError("native LoRA export must not carry predicted specs")
+        if yeto_policy_sync:
+            raise ValueError("native LoRA export runs only without Yeto policy sync")
+        layout_hash = None
+        miles_args.yeto_rl_native_lora_export = native_lora_export
+        print(
+            f"[rl] LoRA layout: learned from the first {native_lora_export} "
+            f"native export (no predicted specs); targets={list(canonical_targets)}",
+            flush=True,
+        )
+    else:
+        layout_hash = canonical_layout_hash(specs)
+        print(
+            f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
+            + ", ".join(f"{s.name}{list(s.shape)}" for s in specs[:400]),
+            flush=True,
+        )
     # The event tape and island identity are needed even without outer sync.
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id

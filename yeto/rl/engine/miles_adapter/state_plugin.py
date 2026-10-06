@@ -445,10 +445,67 @@ def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
         return _export_state(actor, policy_version=policy_version)
 
 
+def is_native_flash_next(actor: Any) -> bool:
+    """Qwen3.8-Flash-Next (qwen4_exp) trains through Miles' native LoRA plugin.
+
+    The pinned Megatron-Bridge has no qwen4_exp bridge, so ``adapter_bindings``
+    cannot resolve its adapters; the learner marks the run explicitly
+    (``yeto_rl_native_lora_export``) and this module dispatches on that.
+    """
+
+    return getattr(getattr(actor, "args", None), "yeto_rl_native_lora_export", None) == "qwen3_8_next"
+
+
+def _flash_next_exporter() -> Callable[[Any], Iterable[Any]]:
+    from miles_plugins.models.qwen3_8_next.lora import export_qwen3_8_next_lora_hf_chunks
+
+    return export_qwen3_8_next_lora_hf_chunks
+
+
+def _export_flash_next(actor: Any, *, policy_version: int, exporter=None) -> dict[str, Any] | None:
+    """Fingerprint export for the no-sync Flash-Next island (S11 try24 fix).
+
+    Uses Miles' own collective HF export (every rank must call it: TP/EP
+    gathers). Names are Miles' SGLang adapter names (``model.language_model.
+    layers.N...lora_{A,B}.weight``, q/k/v share one A, expert tensors padded to
+    ``--lora-rank``) under the canonical prefix; values are the bf16 model
+    copies upcast to fp32. The layout is learned from the first export
+    (MilesPolicyState with ``expected_layout_hash=None``) and pinned after.
+    The state is never applied back (``apply_state`` refuses Flash-Next).
+    """
+
+    import torch
+
+    exporter = exporter or _flash_next_exporter()
+    retain = _is_main_rank(actor)
+    tensors: dict[str, Any] = {}
+    with torch.no_grad():
+        for chunk in exporter(actor.model):
+            for raw_name, value in chunk:
+                name = _canonical(raw_name)
+                if name in tensors:
+                    raise StatePluginError(f"duplicate Flash-Next LoRA tensor {name!r}")
+                tensors[name] = (
+                    value.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
+                    if retain
+                    else None
+                )
+    if not tensors:
+        raise StatePluginError("Flash-Next native LoRA export produced no tensors")
+    if not retain:
+        return None
+    for name, value in tensors.items():
+        if not torch.isfinite(value).all().item():
+            raise StatePluginError(f"{name!r} contains NaN or Inf")
+    return {"policy_version": int(policy_version), "tensors": dict(sorted(tensors.items()))}
+
+
 def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
 
     import torch
 
+    if is_native_flash_next(actor):
+        return _export_flash_next(actor, policy_version=policy_version)
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
     tensors: dict[str, Any] = {}
@@ -606,6 +663,10 @@ def _apply_state(
 
     if optimizer not in OPTIMIZER_MODES:
         raise StatePluginError(f"optimizer mode must be one of {OPTIMIZER_MODES}")
+    if is_native_flash_next(actor):
+        # The no-sync Flash-Next island never applies a state; its export is a
+        # lossy (bf16, tied q/k/v A, padded) fingerprint, not an apply contract.
+        raise StatePluginError("Flash-Next native LoRA has no apply_state contract (no-sync only)")
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
     local = {b.name for b in bindings}
