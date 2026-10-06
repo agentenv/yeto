@@ -688,6 +688,15 @@ def resolve_rl_run_config(
                 "<dir>/<megatron_model_type>_torch_dist (raw mode cannot load the HF snapshot)"
             )
         recipe_name, attention_backend = RECIPE_QWEN3_8_NEXT, "flash"
+        if getattr(args, "sglang_deterministic_inference", True):
+            # S11 try26: the recipe's GDN prefill backend is FlashInfer (Miles
+            # run_qwen3_8_next.py: --sglang-linear-attn-prefill-backend flashinfer),
+            # which SGLang rejects under --enable-deterministic-inference; Miles'
+            # validated recipe runs non-deterministic inference.
+            raise ValueError(
+                "the Qwen3.8-Flash-Next recipe needs --no-sglang-deterministic-inference "
+                "(FlashInfer GDN prefill is not supported with deterministic inference)"
+            )
     elif qwen35_recipe:
         recipe_name, attention_backend = RECIPE_QWEN3_5, "flash"
     else:

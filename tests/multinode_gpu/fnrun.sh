@@ -22,15 +22,17 @@ TD=/mnt/yeto-models/torch_dist
 MODEL="--model Qwen/Qwen3.8-Flash-Next --model-revision de4b8e4d43b917e7706784d8bb445c9af86a3540 --rl-megatron-ref-load $TD/qwen3.8-flash-next_torch_dist"
 LORA="--tuning lora --lora-r 16 --lora-targets all-linear --rl-lora-expert-rank 8"
 PAR="--tensor-parallel 2 --pipeline-parallel 8 --expert-parallel 2 --rollout-num-gpus-per-engine 8"
+# Flash-Next: Miles recipe runs non-deterministic SGLang (FlashInfer GDN prefill rejects --enable-deterministic-inference; S11 try26)
+FNDET="--no-sglang-deterministic-inference"
 OBS="--rl-observe-timeline --rl-recommend-mode recommend${COSTS:+ --rl-edge-costs-path $COSTS}${ATTEST:+ --rl-elastic-attestation $ATTEST}"
 case $C in
-  fn32s) GPU=nebius:4x8xh200@eu-north1; EX="--rl-placement fixed-partition --rl-rollout-gpus 8 --rl-standby-gpus 8 --rl-elastic --rl-elastic-resources $D/resources-fn-4x8.json --rl-elastic-initial-config FN-T16R8S8 $OBS";;
-  fn32b) GPU=nebius:4x8xh200@eu-north1; EX="--rl-placement fixed-partition --rl-rollout-gpus 16 --rl-elastic --rl-elastic-resources $D/resources-fn-4x8.json --rl-elastic-initial-config FN-T16R16S0 $OBS";;
+  fn32s) GPU=nebius:4x8xh200@eu-north1; EX="--rl-placement fixed-partition --rl-rollout-gpus 8 --rl-standby-gpus 8 --rl-elastic --rl-elastic-resources $D/resources-fn-4x8.json --rl-elastic-initial-config FN-T16R8S8 $OBS $FNDET";;
+  fn32b) GPU=nebius:4x8xh200@eu-north1; EX="--rl-placement fixed-partition --rl-rollout-gpus 16 --rl-elastic --rl-elastic-resources $D/resources-fn-4x8.json --rl-elastic-initial-config FN-T16R16S0 $OBS $FNDET";;
   fn8s) case ${FN_GPU:-h200} in h100|h200) ;; *) echo "abort: FN_GPU must be h100|h200" >&2; exit 64;; esac
         GPU=nebius:1x8x${FN_GPU:-h200}@eu-north1   # FN_GPU=h100: 80GB, see infra-drafts/FN-A-PRELAUNCH-REVIEW.md "H100 变体"
         MODEL="--model CharyZeng/Qwen3.8-Flash-Next-4layer --model-revision d19a6b60c0df8f90faf92c7c592b37df2e15b060 --rl-megatron-ref-load $TD/qwen3.8-flash-next-4layer_torch_dist"
         PAR="--tensor-parallel 2 --pipeline-parallel 2 --expert-parallel 4 --rollout-num-gpus-per-engine 4"
-        EX="--rl-placement colocated --rl-offload-train --sglang-mem-fraction-static 0.7 --rl-observe-timeline"
+        EX="--rl-placement colocated --rl-offload-train --sglang-mem-fraction-static 0.7 --rl-observe-timeline $FNDET"
         [ "${BOOT_ONLY:-0}" = 1 ] && EX="$EX --rl-boot-only";;
   *) echo "unknown case $C" >&2; exit 64;;
 esac

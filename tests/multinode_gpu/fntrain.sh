@@ -32,7 +32,7 @@ case $SHAPE in
   *) echo "unknown shape $SHAPE (s|b)" >&2; exit 64;;
 esac
 argv() {
-  echo "launch --controller local --training-mode rl --rl-engine ports --rl-single-island-no-sync --on-demand --gpu nebius:4x8xh200@eu-north1 --cluster-prefix ${PREFIX:-fnt} --no-island-relaunch --modal-retries 0 ${IMAGE:+--rl-image $IMAGE }$STORE $MODEL $DATA $LORA $PAR --fragments 1 --pipeline 1 $HYP --trust-remote-code --total-steps ${STEPS:-200} --rl-elastic --rl-elastic-resources $D/resources-fn-4x8.json $PLACE $CKPT $OBS"
+  echo "launch --controller local --training-mode rl --rl-engine ports --rl-single-island-no-sync --on-demand --gpu nebius:4x8xh200@eu-north1 --cluster-prefix ${PREFIX:-fnt} --no-island-relaunch --modal-retries 0 ${IMAGE:+--rl-image $IMAGE }$STORE $MODEL $DATA $LORA $PAR --fragments 1 --pipeline 1 $HYP --trust-remote-code --total-steps ${STEPS:-200} --rl-elastic --rl-elastic-resources $D/resources-fn-4x8.json $PLACE $CKPT $OBS --no-sglang-deterministic-inference"
 }
 case $MODE in
   print) argv;;
