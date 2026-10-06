@@ -1163,6 +1163,7 @@ class IslandDriver:
             **({"data_cursor": dict(batch.data_cursor)}
                if getattr(batch, "data_cursor", None) else {}),
         )
+        self._emit_critic_round(rollout_id)
         self.local_step += (
             int(self.profile.optimizer_steps_per_round) if self.profile is not None else 1
         )
@@ -1404,6 +1405,19 @@ class IslandDriver:
             )
         self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id,
                   data_cursor=dict(landed))
+
+    def _emit_critic_round(self, rollout_id: int) -> None:
+        """rl-algo-critic-family 4.4: per-round critic record on the tape (layout
+        hashes, param mode, init source, critic weight hash, value metrics).
+        Nothing for a critic-free algorithm, so its tape is unchanged."""
+
+        execution = getattr(self.algorithm, "execution", None)
+        probe = getattr(self.trainer, "critic_round_receipt", None)
+        if execution is None or not execution.needs_critic or not callable(probe):
+            return
+        receipt = probe(rollout_id)
+        if receipt is not None:
+            self.emit("rl_critic_round", **receipt.to_event())
 
     def _critic_run_problems(self) -> list[str]:
         """rl-algo-critic-family 2.3: critic run-level rejections of the

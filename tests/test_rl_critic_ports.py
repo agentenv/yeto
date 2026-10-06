@@ -19,6 +19,7 @@ from yeto.rl.engine.miles_adapter.entry import miles_capabilities, receipt_role_
 from yeto.rl.engine.miles_adapter.rollout import policy_token
 from yeto.rl.engine.miles_adapter.state_plugin import (
     CRITIC_RECORDERS,
+    CRITIC_STATE_SUMMARY,
     GRAD_NORM,
     STEP_LOSSES,
     explained_variance,
@@ -144,6 +145,11 @@ class _Group:
             return [list(self.losses)]
         if fn_path == CRITIC_RECORDERS:
             return [True]
+        if fn_path == CRITIC_STATE_SUMMARY:
+            return [{"rank": 1, "specs": [["0:module.output_layer.weight", [1, 4], "bf16"]],
+                     "weights_sha256": "1" * 64},
+                    {"rank": 0, "specs": [["0:module.embedding.weight", [8, 4], "bf16"]],
+                     "weights_sha256": "0" * 64}]
         if fn_path == GRAD_NORM:
             return [0.5]
         return [[1e-5]]
@@ -244,3 +250,23 @@ def test_local_learner_ppo_roles_and_role_lanes():
     with pytest.raises(ValueError, match="role-scoped"):
         ParameterLayout.create(algorithm="grpo", components=[_component("actor")],
                                specs=specs[:1], num_fragments=1, stream_role="actor")
+
+
+def test_critic_round_receipt_from_the_critic_processes():
+    log, released = [], []
+    critic = _Group("critic", log, losses=[{"metrics": {"value_loss": 0.4,
+                                                       "explained_variance": 0.2}}])
+    trainer = _trainer(log, critic, released)
+    trainer._args.yeto_rl_critic_init_sha256 = "c" * 64
+    trainer.train_step(_handle())
+    receipt = trainer.critic_round_receipt(3)
+    assert receipt.actor_layout_hash == H and receipt.critic_layout_hash != H
+    assert receipt.critic_param_mode == "full" and receipt.critic_init == "copy_actor_backbone"
+    assert receipt.critic_init_sha256 == "c" * 64
+    assert receipt.value_loss == pytest.approx(0.4)
+    assert receipt.explained_variance == pytest.approx(0.2)
+    assert len(receipt.critic_weights_sha256) == 64
+    grpo = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1), actor_model=_Group("actor", log),
+        learner_id=0, learner_generation=0, parameter_layout_hash=lambda: H)
+    assert grpo.critic_round_receipt(0) is None

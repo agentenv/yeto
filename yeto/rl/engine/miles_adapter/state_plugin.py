@@ -954,6 +954,30 @@ def install_value_metrics_recorder() -> bool:
     return True
 
 
+CRITIC_STATE_SUMMARY = f"{_PLUGIN_MODULE}.critic_state_summary"
+
+
+def critic_state_summary(actor: Any) -> dict[str, Any]:
+    """Plugin (critic process): this rank's trainable critic parameter specs and
+    the content hash of their values (rl-algo-critic-family 4.1/4.4)."""
+
+    import torch
+
+    from yeto.rl.critic_state import critic_weights_sha256
+
+    tensors: dict[str, Any] = {}
+    specs = []
+    for index, chunk in enumerate(actor.model):
+        for name, parameter in chunk.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            key = f"{index}:{name}"
+            specs.append((key, list(parameter.shape), str(parameter.dtype)))
+            tensors[key] = parameter.detach()
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    return {"rank": rank, "specs": specs, "weights_sha256": critic_weights_sha256(tensors)}
+
+
 def install_critic_recorders(actor: Any) -> bool:
     """Plugin: the per-step recorders in a critic process (idempotent)."""
 

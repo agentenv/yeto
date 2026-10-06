@@ -30,7 +30,13 @@ from yeto.rl.contracts import LocalStepReceipt
 from ..ports import RolloutBatchHandle
 from . import LoopRunner
 from .rollout import policy_token, require_policy_tokens
-from .state_plugin import APPLIED_LRS, CRITIC_RECORDERS, GRAD_NORM, STEP_LOSSES
+from .state_plugin import (
+    APPLIED_LRS,
+    CRITIC_RECORDERS,
+    CRITIC_STATE_SUMMARY,
+    GRAD_NORM,
+    STEP_LOSSES,
+)
 
 
 class TrainStepError(RuntimeError):
@@ -383,6 +389,45 @@ class MilesTrainerGroup:
             self._release_outputs(outputs)
             raise
         return outputs
+
+    def critic_round_receipt(self, rollout_id: int):
+        """rl-algo-critic-family 4.1/4.4: the critic record of the round just trained.
+
+        Every rank reports its critic parameter specs and weight hash; the
+        layout hash covers all ranks' specs (rank-tagged), the weight hash all
+        ranks' hashes. The value head is Miles' critic ``output_layer``
+        (model_provider.py:340-341).
+        """
+
+        if self._critic is None:
+            return None
+        import hashlib
+
+        from yeto.rl.critic_state import CriticRoundReceipt, critic_layout_hash
+
+        summaries = sorted(self._run(self._critic.run_plugin(CRITIC_STATE_SUMMARY, {})),
+                           key=lambda s: s["rank"])
+        specs = [(f"r{s['rank']}:{name}", shape, dtype)
+                 for s in summaries for name, shape, dtype in s["specs"]]
+        heads = [name for name, shape, _ in specs
+                 if name.endswith("output_layer.weight") and shape and shape[0] == 1]
+        critic = getattr(self._spec, "critic", None)
+        param_mode = getattr(critic, "param_mode", None) or "full"
+        weights = hashlib.sha256(
+            "".join(s["weights_sha256"] for s in summaries).encode()).hexdigest()
+        metrics = self.last_critic_metrics or {}
+        return CriticRoundReceipt(
+            rollout_id=rollout_id,
+            actor_layout_hash=self._layout_hash(),
+            critic_layout_hash=critic_layout_hash(
+                specs, value_head=heads[0] if heads else "", param_mode=param_mode),
+            critic_param_mode=param_mode,
+            critic_init=getattr(critic, "init", None) or "copy_actor_backbone",
+            critic_init_sha256=getattr(self._args, "yeto_rl_critic_init_sha256", None),
+            critic_weights_sha256=weights,
+            value_loss=metrics.get("critic/value_loss"),
+            explained_variance=metrics.get("critic/explained_variance"),
+        )
 
     def _reshard_guard(self, batch: RolloutBatchHandle) -> None:
         """After a DP change: refuse a batch the fork would split on its unscheduled path (4.6 review M2)."""

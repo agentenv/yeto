@@ -999,7 +999,13 @@ def translate_run_config(
         argv=tuple(values),
         placement=request,
         algorithm_sha256=algorithm.sha256(),
-        runtime_attrs=dict(algorithm.to_legacy_runtime_attrs()),
+        runtime_attrs={
+            **algorithm.to_legacy_runtime_attrs(),
+            # rl-algo-critic-family 4.1: receipt init source (warm-up product)
+            **({"yeto_rl_critic_init_sha256": config.algorithm.critic.init_sha256}
+               if getattr(config.algorithm, "critic", None) is not None
+               and algorithm.execution.needs_critic else {}),
+        },
         algorithm=algorithm,
         absorbed_flags=dict(absorbed),
     )

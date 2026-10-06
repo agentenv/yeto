@@ -27,10 +27,10 @@
 
 ## 4. critic 状态契约与两岛 G3
 
-- [ ] 4.1 LayoutHash/receipt 增加 critic layout 哈希、param_mode、初始化来源哈希（design D4）。验证：单测：receipt 含两个 layout 哈希；critic layout 不一致时拒绝。
+- [x] 4.1 LayoutHash/receipt 增加 critic layout 哈希、param_mode、初始化来源哈希（design D4）。验证：单测：receipt 含两个 layout 哈希；critic layout 不一致时拒绝。
 - [ ] 4.2 strict-avg 对 actor、critic 分别平均，两者成功才提交；decoupled 外层遇 critic 拒绝。验证：CPU 单测（fake 两岛）：哈希一致、critic 失败时整轮回滚。
 - [ ] 4.3 elastic checkpoint store 增加 critic 权重与优化器状态，恢复时轮次一致性校验。验证：CPU 单测：保存/恢复哈希一致、轮次不一致拒绝。
-- [ ] 4.4 tape/ledger 记录 critic 权重哈希、value_loss、EV。验证：单测读取 ledger 条目。
+- [x] 4.4 tape/ledger 记录 critic 权重哈希、value_loss、EV。验证：单测读取 ledger 条目。
 - [ ] 4.5 GPU G3：PPO 两岛 strict-avg 1+1×H100 3 轮 + 一次 kill/resume。**需用户批准预算与机型**，估 ~1.5 h×2 卡，≈$12（上限 $20）。验证：两岛 actor/critic 平均后哈希一致；resume 后哈希等于最后提交轮；结果写入 progress.md。
 
 ## 5. critic warm-up 初始化

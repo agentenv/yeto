@@ -74,3 +74,17 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 验证（CPU）：`tests/test_rl_critic_ports.py` 14 项：未放行拒绝且提示 `execution:critic`、Miles 适配器未声明 critic；带 `advantage_estimators:ppo` + `execution:critic` 放行时 fake 单岛跑 2 轮，事件中每轮 `train_metrics` 含有限的 `critic/value_loss` 与 `critic/explained_variance`；两岛或有外层同步时放行被拒；dry-run argv 快照；receipt 家族；critic 句柄替换；Miles 训练器调用顺序（critic 先训练并 offload，actor 收到 external_data）、失败时释放；GRPO 训练器调用不变；EV 数值；ppo 角色表与 role lane 哈希。修改的既有测试：`test_rl_engine_selection.py`（ppo 不再路由 legacy，原 ppo 例改为 gspo，并新增 ppo 放行用例）、`test_rl_round_accounting.py`（ppo+needs_critic → "ppo"）；`local_learner` 报错文案保留原前缀 "require an SAO role"。
 
 **未验证（需 GPU G1，3.3）**：真实 Miles 下 critic 训练顺序与 offload 是否与 shared PPO 生命周期兼容；`external_data` 与 ports 单 cell 训练的配合；EV 在 Miles loss dict 中跨 micro-batch 的归约方式（按 micro-batch 计算，归约语义未核实）；critic 进程中 `train_one_step` 记录器是否生效。
+
+### 第 4 组 CPU 部分（4.1、4.4 已实现并验证；4.2、4.3 只完成协议层，**未勾选**，见"设计问题"；4.5 GPU 未执行）
+
+实现：
+- 新模块 `yeto/rl/critic_state.py`：`critic_layout_hash`（critic 参数 specs + value head 形状 + param_mode + 预留 LoRA 形状，域分离 `yeto-rl-critic-layout-v1`，与 actor layout 分开）；`critic_weights_sha256`；`CriticRoundReceipt`（rollout_id、actor/critic 两个 layout 哈希、critic_param_mode、critic_init、critic_init_sha256、critic_weights_sha256、value_loss、explained_variance）；`check_critic_layouts`（任一岛 actor/critic layout 或 param_mode 不同即拒绝）；`TwoRoleStrictAvg`（同一轮先 actor 后 critic，二者都成功才提交，任一失败抛 `RoleAverageFailed` 且两 role 保持上一轮）；`CriticCheckpointStore`（`critic/round-N/` 权重 + 优化器状态 + 最后提交的 manifest；恢复时校验哈希，actor 轮次≠critic 轮次拒绝并报告两个轮次）。
+- 生产接线（4.1/4.4）：`state_plugin.critic_state_summary`（critic 进程内每个 rank 的可训练参数 specs 与权重哈希）；`MilesTrainerGroup.critic_round_receipt`（汇总各 rank，value head = Miles critic `output_layer.weight`，init 来源哈希取自 run config 经 `runtime_attrs` 设置的 `yeto_rl_critic_init_sha256`）；driver 每轮在 `rl_round_trained` 后写 `rl_critic_round` 事件（仅 critic 算法；GRPO 的 tape 不变）。fake 引擎 critic 模式提供 critic 张量与同样的 receipt。
+
+验证（CPU）：`tests/test_rl_critic_state.py` 11 项 + `test_rl_critic_ports.py::test_critic_round_receipt_from_the_critic_processes`：layout 哈希区分形状/LoRA；receipt 字段；layout 不一致拒绝；fake 两岛两 role 平均后哈希一致；critic 平均失败整轮回滚；layout 不一致在平均前拒绝；checkpoint 保存/恢复哈希一致、轮次不一致拒绝、篡改拒绝；fake 单岛 2 轮 tape 中 `rl_critic_round` 含每轮不同的 critic 权重哈希与有限 value_loss/EV；GRPO tape 无该事件。
+
+#### 设计问题（暂停点，需主 agent/用户决定）
+
+1. **4.2 生产 strict-avg 未接线**：ports 的 `StrictAvgSync` 经 `StrictRlBridge` 与 syncer 只交换 LoRA `CanonicalLoraState`（actor）。把全参数 critic 纳入 strict-avg 需要：(a) 第二条 syncer 通道（design D4"沿用 SAO 双 layout/双 syncer"，launcher 需为 critic 起第二个 syncer 与端口），或扩展单个 syncer 的 layout 同时容纳 LoRA actor 与全参数 critic；(b) Miles critic 进程内的 critic 张量导出/写回插件（全参数、可能经 distributed optimizer 分片）；(c) 两条通道之间的"同轮两者都成功才提交"——现有 syncer 每条通道各自提交，跨通道原子提交需要协议层（`TwoRoleStrictAvg` 只是该语义的 CPU 参照实现）。这超出 tasks 4.2 的 CPU 粒度，且选择 (a)/(b) 影响 launcher 与 syncer，故暂停。
+2. **4.3 生产 checkpoint 未接线**：`RoundCutCheckpoint`/`MilesTrainerGroup.save_cut` 只存 actor LoRA+优化器分片。critic 需同样的 Miles 进程内保存/恢复（全参数 + 优化器状态 + 调度器），并在 pointer 中记录 critic 轮次；`CriticCheckpointStore` 提供了存储格式与轮次一致性校验，但 critic 张量的取得依赖第 1 点 (b)。另：design 写"elastic checkpoint store"，而 critic 与 elastic 已在 2.3 互斥；实际可用的是 `--rl-elastic-checkpoint-store` 驱动的 round-cut（单岛无 sync 也可用），建议在 design 中改述。
+3. 4.1 的"critic layout 不一致时拒绝"目前在 `check_critic_layouts`/`TwoRoleStrictAvg` 中实现并测试；生产外层同步中的强制检查随第 1 点接线。
