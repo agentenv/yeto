@@ -519,6 +519,15 @@ _REWARD_RE = re.compile(r"YETO_TB2_REWARD=(\S*)")
 _RC_RE = re.compile(r"YETO_TB2_TESTSH_RC=(\d+)")
 
 
+VERIFIER_LOG_CHARS = 2000
+
+
+def verifier_log_excerpt(output: str, limit: int = VERIFIER_LOG_CHARS) -> str:
+    """Last ``limit`` chars of the verifier output (pytest prints its verdict last)."""
+    text = output if isinstance(output, str) else ""
+    return text if len(text) <= limit else "…" + text[-(limit - 1):]
+
+
 class Tb2Verifier:
     """Trusted-side verifier: ``tests/test.sh`` inside the sandbox, reward from ``reward.txt``."""
 
@@ -545,6 +554,9 @@ class Tb2Verifier:
             "passed": bool(reward) and reward.group(1) == "1",
             "testsh_rc": testsh_rc,
             "timed_out": result.timed_out,
+            # Observe only (S15 verifier probe): the tail of test.sh output
+            # (pytest summary / install errors); never part of the signed outcome.
+            "log": verifier_log_excerpt(result.output),
         }
 
 

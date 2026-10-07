@@ -378,6 +378,7 @@ async def finish_trusted(
     status = untrusted["status"]
     if status not in POLICY_STATUSES:
         raise ValueError(f"untrusted result has invalid status {status!r}")
+    evaluation: dict[str, Any] = {}
     if status == "timeout":
         passed, testsh_rc, verifier_name = False, None, TIMEOUT_VERIFIER
     else:
@@ -399,6 +400,8 @@ async def finish_trusted(
     )
     metadata["agent_metrics"] = dict(untrusted.get("metrics") or {})
     metadata["exit_status"] = status
+    if status != "timeout" and isinstance(evaluation.get("log"), str):
+        metadata["verifier_log"] = evaluation["log"]  # observe only, unsigned
     return metadata
 
 

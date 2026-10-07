@@ -198,6 +198,7 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     "last_completion_tokens": (int, type(None)),
     "last_content_head": (str,),
     "last_reasoning_tail": (str,),
+    "verifier_log": (str,),
 }
 
 

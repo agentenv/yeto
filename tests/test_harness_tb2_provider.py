@@ -138,7 +138,8 @@ def test_lease_relays_execute_submit_verifies_and_is_gone_after_destroy(tmp_path
             assert (await env.execute("ep-1", "echo ok > fixed.txt", timeout_seconds=10, output_bytes=64))["exit_code"] == 0
             assert (await env.submit("ep-1", {"evidence": "done"})) == {"accepted": True}
         evaluation = await lease.verifier.evaluate("ep-1")
-        assert evaluation == {"passed": True, "testsh_rc": 0, "timed_out": False}
+        assert {k: v for k, v in evaluation.items() if k != "log"} == {"passed": True, "testsh_rc": 0, "timed_out": False}
+        assert "YETO_TB2_REWARD=1" in evaluation["log"]
         assert lease.environment.commands[0].startswith("echo hello") and lease.environment.submitted
         await lease.destroy()
         assert await lease.describe() == "gone" and provider.destroyed == 1 and provider.live == {}
@@ -614,3 +615,18 @@ def test_last_completion_and_end_reason_reach_the_metrics(monkeypatch):
     assert len(d["last_completion"]["content_head"]) == harness.LAST_COMPLETION_HEAD_CHARS
     assert d["last_completion"]["completion_tokens"] == 77
     assert "end_reason" not in adapter._metrics_dict(harness.legacy.AgentMetrics())
+
+
+def test_verifier_log_tail_reaches_the_trajectory_metadata_and_tape(monkeypatch, tmp_path):
+    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+
+    provider = _provider(tmp_path)
+    _configure(monkeypatch, provider)
+    result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata(["echo nope > fixed.txt"])))
+    assert tbench_outcome.verified_outcome(result)[1] == 0.0
+    assert "YETO_TB2_REWARD=0" in result["verifier_log"]
+    diag = hook.trajectory_diagnostics(result)
+    assert diag["verifier_log"] == result["verifier_log"] and diag["testsh_rc"] == 1
+    long = "x" * 5000 + "TAIL"
+    excerpt = tb2_provider.verifier_log_excerpt(long)
+    assert len(excerpt) == tb2_provider.VERIFIER_LOG_CHARS and excerpt.endswith("TAIL")

@@ -554,6 +554,9 @@ def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
             tokens = last.get("completion_tokens")
             if tokens is None or (isinstance(tokens, int) and not isinstance(tokens, bool)):
                 out["last_completion_tokens"] = tokens
+    log = meta.get("verifier_log")
+    if isinstance(log, str):
+        out["verifier_log"] = log[-2000:]
     outcome = meta.get("tbench_trusted_outcome")
     if isinstance(outcome, dict) and "testsh_rc" in outcome:
         rc = outcome.get("testsh_rc")
