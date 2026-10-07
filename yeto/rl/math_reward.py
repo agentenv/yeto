@@ -11,6 +11,10 @@ all. Launch with
 `\\boxed{...}` answer, after any `</think>` block, is graded against the
 label with Miles' own math graders (mathd normalisation, then sympy
 equivalence). Reward is 1.0 for a correct answer and 0.0 otherwise.
+
+``reward_func`` also records ``sample.metadata["success"]`` (bool: the final
+answer is correct), the flag the critic fork's VAPO positive-example LM loss
+reads (``--positive-example-source success``). The score is unchanged.
 """
 
 from __future__ import annotations
@@ -35,5 +39,16 @@ def score(response: str, label) -> float:
     return 1.0 if grade_answer_mathd(answer, truth) or grade_answer_sympy(answer, truth) else 0.0
 
 
+def set_success(sample, success: bool) -> None:
+    """Write the boolean full-success flag into ``sample.metadata`` (in place)."""
+    metadata = getattr(sample, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        sample.metadata = metadata
+    metadata["success"] = bool(success)
+
+
 async def reward_func(args, sample, **kwargs) -> float:
-    return score(sample.response or "", sample.label)
+    value = score(sample.response or "", sample.label)
+    set_success(sample, value == 1.0)
+    return value

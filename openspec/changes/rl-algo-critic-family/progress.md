@@ -402,3 +402,24 @@ worktree `/home/michael/work/s13-tbwire`，分支 `s13-tbwire`（基于 integ-de
 - 未验证：真实 Miles session server 上 `DELETE /sessions/{id}`（按 pin 源码编写，CPU 用 aiohttp 假服务器）；Ray rollout worker 实际收到开关（只验证了 `worker_runtime_env` 转发函数）；Miles 实际解析出的 `miles_args.gae_variant` 属性名（按 `--gae-variant` 推断）；摘要 `tools=[]` 对 TITO 前缀复用的影响；`chain_judge` 尚未接入任何 GPU 采集脚本（GPU 9.2/9.4 时需对采到的 sample metadata 调用）；GPU 全部。
 - 仍可能泄漏：agent function 已返回元数据但 Miles 上游在调用 wrapper 收集前失败（不在 yeto 控制内）；进程被 SIGKILL 时 finally 不执行。
 - 待确认：(1) 对照臂在 Codex 上一律拒绝（含不开压缩）是否符合预期；(2) 启动环境显式 `YETO_CODEX_COMPACTIONRL=1` 而规格为 CompactionRL 时允许（冗余但一致）。
+
+## S13 success 字段与 SAO 缺口（2026-10-07，CPU；未上 GPU、未启动 Ray、未 push）
+
+### A. 奖励函数写 `sample.metadata["success"]`（yeto worktree `/home/michael/work/s13-succ`，分支 `s13-succ`，基于 d26111d4）
+- 成功定义（完整成功，分数不变，只加字段）：
+  - `yeto.rl.math_reward:reward_func`（`examples/math_reward.py` 再导出同一函数）：答案经 mathd/sympy 判定正确 ⇔ success=True（新 helper `set_success`，metadata 为 None 时建 dict）。
+  - gsm8k：`gsm8k_reward:score` 不在 yeto 包内——GPU 运行从工作目录加载仓外文件（`/home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py`，evidence 下为冻结副本，均未改）。新增包内 `yeto.rl.gsm8k_reward:score`：数值逻辑逐字相同（测试与 evidence 副本对拍），success = 抽出数字与 `####` 后金标相等。**旧名 `gsm8k_reward:score` 仍不写 success，VAPO 需改用新名**。
+  - `yeto.rl.algos.gdpo_reward`（`reward_func`/`correctness_reward`）：success = correctness 分量；format 分不算成功。
+  - Terminal-Bench（`harness/codex/tbench_reward.reward_func`）：success = HMAC 签名 outcome 中的 `passed`（= reward==1.0，全部测试通过）；不可信的预置 success 被覆盖；基础设施失败样本（ABORTED）删除 success 键。
+  - 未加：`length_reward`（无正确性概念）、`harness/codex/reward.py`（secrlenv，reward∈[0,1] 有部分分，"完整成功"定义待确认）。
+- 传递路径：Miles `rm_hub.async_rm` 直接以同一 `Sample` 调自定义奖励函数，原地写 metadata；fork `train_data_conversion.py:133` `sample_success_flag(s.metadata)` 读 `success`/`is_correct`（布尔/0-1，矛盾报错）→ `positive_example_success`。无需 rollout 侧转换。
+- 测试：新 `tests/test_rl_reward_success.py` 14 passed；引用这些模块的测试 + `test_rl_argv_snapshot.py`（未改）共 159 passed/1 skipped（`/tmp/s13-succ-pytest.log`）；`hash_compare.py` 与 `hash-critic.txt` 无差异。
+
+### B. SAO 缺口（fork `/home/michael/work/miles-critic`，分支 yeto-critic-family，`5182e37f05b06dddd01a5454cbb37f6ab8fe47f2`，基于 70e3d7761，本地）
+- (1) 已移植：`policy_objective=sao_dis` 且 `rollout_id >= num_critic_only_steps` 时，`_train_critic` 在 N 次 critic 更新后重建 iterator 再 `forward_only(get_values)`，新 value 交给 actor；value 目标/returns 仍用更新前的预测（与上游一致）。判定在新文件 `miles/backends/training_utils/sao_critic.py`，`actor.py` 只加一个 if 块和 import。ppo 缺省不变。上游另一条件 `offline_value_pretraining` 在 fork 不存在，略去。
+- (2) 不适用：上游按 epoch 计数的是 `megatron_utils/full_parameter_state.py`（full-parameter 外部状态追踪，scheduler 增量 ×num_critic_epochs），fork 没有这个文件/功能；fork 中对应语义（critic 调度器 train_iters ×N）已在 e07e51c07 的 `model.py` 中。
+- 测试（miles-next-venv）：新 `test_sao_value_refresh.py` 3 passed（独立参考对拍判定网格；AST 检查顺序 train 循环→refresh→发送 values）；`tests/fast/backends/training_utils` + `tests/fast/utils/test_arguments.py` 改前/改后均 13 failed/724 passed/1 error，失败集合相同。
+
+### 未验证 / 待确认
+- 未验证：actor.py 需 megatron，仅 py_compile + AST；真实运行中再前向的开销与正确性（GPU）；奖励字段在真实 Miles rollout 中经 Ray 传到 `train_data_conversion`。
+- 待确认：(1) VAPO gsm8k 运行改用 `yeto.rl.gsm8k_reward:score`；(2) secrlenv `reward.py` 的完整成功定义；(3) TB timeout 样本记 success=False（有签名 verdict，非基础设施失败）。
