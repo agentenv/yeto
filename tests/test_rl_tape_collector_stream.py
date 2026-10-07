@@ -132,3 +132,58 @@ def test_launcher_recovers_echo_tape_over_rsync(tmp_path):
     e = TapeCollector(tmp_path / "e.jsonl")
     e.close()
     assert _recover_echo_tape("isl-l0", e, run=failing_run) is False and e.incomplete_marker.exists()
+
+
+def test_settle_echo_tapes_completes_cut_never_streamed_and_modal_tapes(tmp_path):
+    """S14/A19 (-5r1 r7): a SUCCEEDED job's echo stream went silent after a learner
+    restart (58/146 records); the island's own file holds the finalized record,
+    so the tape is complete and the launcher must not exit 3. Also covers an
+    island that never streamed (now recovered too) and a Modal island (tape
+    pulled from its Volume). A file without the finalized record stays incomplete."""
+    from yeto.launcher import settle_echo_tapes
+
+    events = tmp_path / "events"
+    cut = TapeCollector(events / "sky-cut.jsonl")
+    cut.feed(f"{PREFIX}{_rec('rl_driver_phase')}\n")  # stream stopped here
+    bad = TapeCollector(events / "sky-bad.jsonl")
+    bad.feed(f"{PREFIX}{_rec('rl_driver_phase')}\n")
+    recovered = []
+
+    def fake_recover(name, collector):
+        recovered.append(name)
+        f = tmp_path / f"{name}-island.jsonl"
+        body = _rec("rl_driver_phase") + "\n" + _rec("rl_round_trained") + "\n"
+        if name != "sky-bad":
+            body += _rec(FINALIZED_EVENT) + "\n"
+        f.write_text(body)
+        return collector.recover_from_file(f)
+
+    modal_dir = tmp_path / "modal-tape"
+    (modal_dir / "modal-ok" / "rank0").mkdir(parents=True)
+    (modal_dir / "modal-ok" / "rank0" / "rl-island-0.jsonl").write_text(
+        _rec("rl_driver_phase") + "\n" + _rec(FINALIZED_EVENT) + "\n")
+    modal_cfgs = {"modal-ok": object(), "modal-none": object()}
+    names = ["sky-cut", "sky-bad", "sky-silent", "modal-ok", "modal-none"]
+    incomplete = settle_echo_tapes({"sky-cut": cut, "sky-bad": bad}, names, modal_cfgs, events,
+                                   recover_sky=fake_recover, modal_tape_dir=modal_dir)
+    assert incomplete == ["modal-none", "sky-bad"]
+    assert recovered == ["sky-bad", "sky-cut", "sky-silent"]
+    assert _tape(events / "sky-cut.jsonl") == ["rl_driver_phase", "rl_round_trained", FINALIZED_EVENT]
+    assert not (events / "sky-cut.jsonl.incomplete").exists()
+    assert _tape(events / "sky-silent.jsonl") == ["rl_driver_phase", "rl_round_trained", FINALIZED_EVENT]
+    assert _tape(events / "modal-ok.jsonl") == ["rl_driver_phase", FINALIZED_EVENT]
+    assert (events / "sky-bad.jsonl.incomplete").exists()
+    assert (events / "modal-none.jsonl.incomplete").exists()
+    assert cut.closed and bad.closed  # fail closed: nothing is written afterwards
+
+
+def test_settle_echo_tapes_finalized_stream_needs_no_recovery(tmp_path):
+    from yeto.launcher import settle_echo_tapes
+
+    c = TapeCollector(tmp_path / "l0.jsonl")
+    c.feed(f"{PREFIX}{_rec(FINALIZED_EVENT)}\n")
+
+    def never(name, collector):
+        raise AssertionError("recovery must not run for a finalized tape")
+
+    assert settle_echo_tapes({"l0": c}, ["l0"], {}, tmp_path, recover_sky=never) == []
