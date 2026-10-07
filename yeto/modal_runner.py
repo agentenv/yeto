@@ -219,6 +219,14 @@ class ModalIslandConfig:
     # container mirrors TAPE_SOURCE_DIR into <volume>/<tape_subdir>/rank<r>/.
     tape_volume_name: str | None = None
     tape_subdir: str | None = None
+    # Model Volume (None = off): mounted read-only at model_volume_mount
+    # (the Nebius model-store path, /mnt/yeto-models); holds HF snapshots
+    # under hf/<name>/<rev[:8]>/ and torch_dist checkpoints (Flash-Next).
+    model_volume_name: str | None = None
+    model_volume_mount: str | None = None
+    # Host resource overrides (None = per-GPU defaults below).
+    cpu_override: int | None = None
+    memory_gib_override: int | None = None
 
     @property
     def function_name(self) -> str:
@@ -231,10 +239,14 @@ class ModalIslandConfig:
 
     @property
     def cpu_request(self) -> int:
+        if self.cpu_override is not None:
+            return int(self.cpu_override)
         return MODAL_CPU_CORES_PER_GPU * self.gpus_per_node
 
     @property
     def memory_request_mib(self) -> int:
+        if self.memory_gib_override is not None:
+            return int(self.memory_gib_override) * 1024
         return MODAL_MEMORY_GIB_PER_GPU * self.gpus_per_node * 1024
 
     def validate(self) -> None:
@@ -255,6 +267,10 @@ class ModalIslandConfig:
             raise ValueError(f"tape_subdir {self.tape_subdir!r} must be relative, without '..'")
         if self.tape_volume_name and self.volume_name == self.tape_volume_name:
             raise ValueError("the tape volume must differ from the checkpoint volume")
+        if (self.model_volume_name is None) != (self.model_volume_mount is None):
+            raise ValueError("model_volume_name and model_volume_mount go together")
+        if self.model_volume_name and self.model_volume_name in (self.volume_name, self.tape_volume_name):
+            raise ValueError("the model volume must differ from the checkpoint/tape volumes")
         if (self.codex_dir is None) != (self.codex_mount is None):
             raise ValueError("codex_dir and codex_mount go together")
         if self.codex_dir is not None and not os.path.isdir(self.codex_dir):
@@ -436,6 +452,82 @@ def container_command(run_script: str) -> list[str]:
     return ["bash", "-lc", f"cd {shlex.quote(CONTAINER_WORKDIR)} && {run_script}"]
 
 
+def _host_mem_used_bytes() -> dict:
+    """Container-visible host memory: /proc/meminfo (MemTotal - MemAvailable)
+    plus cgroup memory.current/peak when readable (None otherwise)."""
+    out: dict = {}
+    try:
+        info = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                info[k] = int(v.split()[0]) * 1024
+        out["meminfo_total"] = info.get("MemTotal")
+        out["meminfo_used"] = info.get("MemTotal", 0) - info.get("MemAvailable", 0)
+    except Exception:  # noqa: BLE001 - advisory
+        pass
+    for key, path in (("cgroup_current", "/sys/fs/cgroup/memory.current"),
+                      ("cgroup_peak", "/sys/fs/cgroup/memory.peak")):
+        try:
+            with open(path) as f:
+                out[key] = int(f.read().strip())
+        except Exception:  # noqa: BLE001
+            out[key] = None
+    return out
+
+
+class HostMemSampler:
+    """Opt-in (env YETO_MODAL_HOSTMEM_SAMPLE_S): append host memory and
+    nvidia-smi memory.used every interval to a .jsonl in the tape dir (so the
+    tape Volume carries it home) and print the peaks at exit."""
+
+    def __init__(self, interval_s: float, path: str):
+        self.interval_s, self.path = max(1.0, interval_s), path
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.peak_host = 0
+        self.peak_gpu: list[int] = []
+
+    def sample(self) -> dict:
+        rec = {"event": "modal_host_sample", "time_unix": time.time(), **_host_mem_used_bytes()}
+        try:
+            res = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True, timeout=20)
+            rec["gpu_mem_used_mib"] = [int(x) for x in res.stdout.split()]
+        except Exception:  # noqa: BLE001
+            rec["gpu_mem_used_mib"] = None
+        used = max(v or 0 for v in (rec.get("meminfo_used"), rec.get("cgroup_current")))
+        self.peak_host = max(self.peak_host, used)
+        for i, v in enumerate(rec["gpu_mem_used_mib"] or []):
+            if i >= len(self.peak_gpu):
+                self.peak_gpu.append(0)
+            self.peak_gpu[i] = max(self.peak_gpu[i], v)
+        return rec
+
+    def _loop(self) -> None:
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        while True:
+            try:
+                rec = self.sample()
+                with open(self.path, "a") as f:
+                    f.write(json.dumps(rec) + "\n")
+            except Exception:  # noqa: BLE001
+                pass
+            if self._stop.wait(self.interval_s):
+                return
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="modal-hostmem")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=30)
+        print(f"[modal-hostmem] peak host used {self.peak_host / 2**30:.1f} GiB; "
+              f"peak gpu used MiB {self.peak_gpu}", flush=True)
+
+
 def island_main(cfg_json: str) -> int:
     """Body of the Modal function: runs in the container. Returns the run
     script's exit code (nonzero raises so Modal records the failure)."""
@@ -458,9 +550,16 @@ def island_main(cfg_json: str) -> int:
             TAPE_SOURCE_DIR, f"{TAPE_MOUNT}/{cfg.tape_subdir}/rank{rank}",
             _volume_commit(cfg.tape_volume_name),
         )
+    hostmem = None
+    if cfg.envs.get("YETO_MODAL_HOSTMEM_SAMPLE_S"):
+        hostmem = HostMemSampler(float(cfg.envs["YETO_MODAL_HOSTMEM_SAMPLE_S"]),
+                                 f"{TAPE_SOURCE_DIR}/modal-hostmem-rank{rank}.jsonl")
+        hostmem.start()
     try:
         return _island_body(cfg, rank, ips, all_ips, env, tape)
     finally:
+        if hostmem is not None:
+            hostmem.stop()
         if tape is not None:
             tape.stop()
             print(f"[modal-tape] rank {rank}: {tape.syncs} commit(s) to "
@@ -583,6 +682,9 @@ class ModalOps:
             volumes[cfg.volume_mount] = modal.Volume.from_name(cfg.volume_name, create_if_missing=True)
         if cfg.tape_volume_name:
             volumes[TAPE_MOUNT] = modal.Volume.from_name(cfg.tape_volume_name, create_if_missing=True)
+        if cfg.model_volume_name and cfg.model_volume_mount:
+            mvol = modal.Volume.from_name(cfg.model_volume_name)
+            volumes[cfg.model_volume_mount] = mvol.read_only() if hasattr(mvol, "read_only") else mvol
         if volumes:
             kwargs["volumes"] = volumes
         self._functions[cfg.function_name] = self._app.function(**kwargs)(fn)

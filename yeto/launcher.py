@@ -3228,6 +3228,32 @@ def model_store_env(model, revision, mount=MODEL_STORE_MOUNT):
     )
 
 
+def modal_volume_store_env(model, revision, mount=MODEL_STORE_MOUNT, cache="/root/yeto-hub"):
+    """Shell: serve ``model@revision`` from a Modal model Volume mounted at
+    ``mount`` (``hf/<name>/<rev[:8]>/`` + MANIFEST.json, written by
+    infra-drafts/fn-modal/dl_hf.py) through a symlinked HF hub cache, so the
+    learner's snapshot_download finds every file locally.  Never fails: on a
+    mismatch it WARNs and leaves the Hub download path untouched."""
+    if not revision or len(revision) != 40:
+        return (f"echo '[yeto-model-volume] WARNING: needs a full 40-hex --model-revision; "
+                f"downloading {model} from the Hub' >&2")
+    snap = f"{mount}/hf/{model.split('/')[-1]}/{revision[:8]}"
+    repo_dir = f"{cache}/models--{model.replace('/', '--')}"
+    check = (f"python3 -c \"import json,sys; m=json.load(open(sys.argv[1])); "
+             f"sys.exit(0 if m.get('revision')==sys.argv[2] and m.get('repo')==sys.argv[3] and m.get('all_ok') else 1)\" "
+             f"{shlex.quote(snap + '/MANIFEST.json')} {revision} {shlex.quote(model)}")
+    return (
+        f"if [ -f {shlex.quote(snap + '/MANIFEST.json')} ] && {check}; then "
+        f"mkdir -p {shlex.quote(repo_dir)}/snapshots {shlex.quote(repo_dir)}/refs && "
+        f"ln -sfn {shlex.quote(snap)} {shlex.quote(repo_dir + '/snapshots/' + revision)} && "
+        f"echo {revision} > {shlex.quote(repo_dir + '/refs/main')} && "
+        f"export HF_HUB_CACHE={cache} YETO_MODEL_STORE_HIT=1 && "
+        f"echo '[yeto-model-volume] serving {model}@{revision} from {snap}' >&2; "
+        f"else echo '[yeto-model-volume] WARNING: {snap} has no matching MANIFEST; "
+        "downloading from the Hub' >&2; fi"
+    )
+
+
 def nebius_baked_image_id(image, cloud, region, baked=None):
     """``image_id`` for an RL island: the docker image alone, or on Nebius a
     ``{region: computeimage-..., "docker": image}`` dict when a VM image with
@@ -3576,7 +3602,12 @@ def make_miles_island_task(
         setup_steps.append(MODAL_CLIENT_SETUP)
     store_fs = model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
     store_env = ""
-    if store_fs and not is_local_reference(model):
+    if (spec.cloud == "modal" and getattr(args, "modal_model_volume", None)
+            and not is_local_reference(model)):
+        store_env = modal_volume_store_env(model, args.model_revision) + "\n"
+        setup_steps.append(store_env.rstrip("\n"))
+        prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
+    elif store_fs and not is_local_reference(model):
         store_env = model_store_env(model, args.model_revision) + "\n"
         setup_steps.append(store_env.rstrip("\n"))
         prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
@@ -4514,6 +4545,10 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
         extra_mounts=extra_mounts,
         tape_volume_name=getattr(args, "modal_tape_volume", None) or None,
+        model_volume_name=(getattr(args, "modal_model_volume", None) or None) if rl else None,
+        model_volume_mount=MODEL_STORE_MOUNT if rl and getattr(args, "modal_model_volume", None) else None,
+        cpu_override=getattr(args, "modal_cpu", None),
+        memory_gib_override=getattr(args, "modal_memory_gib", None),
         tape_subdir=(modal_tape_subdir(args.cluster_prefix, learner_id)
                      if getattr(args, "modal_tape_volume", None) else None),
         workdir=str(REPO_ROOT),
