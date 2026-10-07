@@ -1,0 +1,2 @@
+(yeto-head-job, pid=2857) [s14-dlr-ports-20261007a-l1-modal] [modal-island 1] requested H100!:1, got ['NVIDIA H100 80GB HBM3']
+(yeto-head-job, pid=2857) [s14-dlr-ports-20261007a-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']
