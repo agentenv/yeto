@@ -28,11 +28,11 @@
 ## 4. critic 状态契约与两岛 G3
 
 - [x] 4.1 LayoutHash/receipt 增加 critic layout 哈希、param_mode、初始化来源哈希（design D4）。验证：单测：receipt 含两个 layout 哈希；critic layout 不一致时拒绝。
-- [ ] 4.2 strict-avg 双 syncer（design D4 方案 a）；decoupled 外层遇 critic 拒绝。拆为：
-  - [ ] 4.2.1 launcher 为 critic 起第二个 syncer 与独立端口/layout（critic_layout_hash），argv/配置快照。验证：dry-run 快照含两个 syncer；既有规格哈希不变。
-  - [ ] 4.2.2 Miles 进程内 critic 全参数张量导出/写回插件（按 layout 切 fragment，写回后校验哈希）。验证：CPU fake 张量往返哈希一致。
-  - [ ] 4.2.3 跨通道原子提交（两通道都得 v+1 才应用，否则回退上一提交轮）。验证：CPU fake 两岛：哈希一致；critic 通道失败时整轮回滚、actor 也不应用。
-- [ ] 4.3 round-cut checkpoint 增加 critic 权重、优化器、调度器状态，pointer 记录 critic 轮次，恢复时轮次一致性校验（critic 与 elastic 互斥，不用 elastic store）。验证：CPU 单测：保存/恢复哈希一致、轮次不一致拒绝。
+- [x] 4.2 strict-avg 双 syncer（design D4 方案 a）；decoupled 外层遇 critic 拒绝。拆为：
+  - [x] 4.2.1 launcher 为 critic 起第二个 syncer 与独立端口/layout（critic_layout_hash），argv/配置快照。验证：dry-run 快照含两个 syncer；既有规格哈希不变。
+  - [x] 4.2.2 Miles 进程内 critic 全参数张量导出/写回插件（按 layout 切 fragment，写回后校验哈希）。验证：CPU fake 张量往返哈希一致。
+  - [x] 4.2.3 跨通道原子提交（两通道都得 v+1 才应用，否则回退上一提交轮）。验证：CPU fake 两岛：哈希一致；critic 通道失败时整轮回滚、actor 也不应用。
+- [x] 4.3 round-cut checkpoint 增加 critic 权重、优化器、调度器状态，pointer 记录 critic 轮次，恢复时轮次一致性校验（critic 与 elastic 互斥，不用 elastic store）。验证：CPU 单测：保存/恢复哈希一致、轮次不一致拒绝。
 - [x] 4.4 tape/ledger 记录 critic 权重哈希、value_loss、EV。验证：单测读取 ledger 条目。
 - [ ] 4.5 GPU G3：PPO 两岛 strict-avg 1+1×H100 3 轮 + 一次 kill/resume。**需用户批准预算与机型**，估 ~1.5 h×2 卡，≈$12（上限 $20）。验证：两岛 actor/critic 平均后哈希一致；resume 后哈希等于最后提交轮；结果写入 progress.md。
 
