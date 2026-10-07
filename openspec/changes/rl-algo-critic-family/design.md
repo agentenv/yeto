@@ -49,13 +49,17 @@
 
 ### D4 critic 状态契约：critic 作为与 actor 并列的第二个 role
 - LayoutHash：新增 `ppo_family`（actor+critic），沿用 SAO 的双 layout 思路：critic layout 由 backbone layout + value head 形状决定，与 actor layout 分开哈希，receipt 中同时记录两者与 `critic.param_mode`。
-- 外层同步（决策 1）：strict-avg 对 actor 与 critic 分别做平均，同一轮内先 actor 后 critic，两者都完成才提交该轮；任一 role 失败整轮作废。decoupled 外层遇 critic 直接拒绝（后续探索）。
-- checkpoint/恢复：elastic checkpoint store 增加 critic 子目录与 critic 优化器状态；恢复时 actor/critic 必须来自同一轮，否则拒绝。
+- 外层同步（决策 1，用户已定方案 a：双 syncer）：critic 走第二条 syncer 通道，沿用 SAO 的双 layout/双 syncer 路径。launcher 为 critic 起第二个 syncer 进程与独立端口，layout 用 `critic_layout_hash`；actor 仍走原 LoRA syncer 通道。
+  - 跨通道原子提交：同一轮 v→v+1，actor 与 critic 两条通道都拿到 v+1 的平均结果后，才对 trainer 应用并写 round-cut；任一通道失败/超时，两者都不应用，回退到上一已提交轮（语义同 `TwoRoleStrictAvg`）。
+  - Miles 进程内需要 critic 全参数张量导出/写回插件（按 critic layout 切 fragment，写回后校验哈希）。
+  - decoupled 外层遇 critic 直接拒绝（后续探索）。
+  - 备选 b（单 syncer layout 同时容纳 actor LoRA 与 critic 全参数）：否决，改 syncer 协议/layout 影响面大。备选 c（只平均 actor）：违背决策 1。
+- checkpoint/恢复：critic 与 elastic 互斥，故使用 ports 的 round-cut checkpoint（`MilesTrainerGroup.save_cut/restore_cut`），经 critic 句柄保存 critic 权重、优化器与学习率调度器状态；pointer 记录 critic 轮次，复用 `CriticCheckpointStore` 轮次一致性校验，actor/critic 不同轮则拒绝恢复。
 - tape/ledger：每轮记录 critic 权重哈希、value_loss、explained variance。
 - 备选：把 critic 当 actor 的附属张量一起哈希。否决：critic LoRA（D9）与 SAO 双 syncer 都需要独立 role。
 
 ### D5 warm-up 初始化与 rebuild 模式冲突的解法（决策 3）
-Miles 的 `--num-critic-only-steps` 在 rebuild 模式下必须为 0（arguments.py:3212），而 ports 走 rebuild。解法：把 warm-up 拆成 yeto 编排的独立阶段。
+Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weight` 下生效，ports 不用该开关，因此它不是真正的阻碍；真正的阻碍是 yeto 外层每轮都训练并发布 actor，无法在主循环内插入不动 actor 的 critic-only 步。解法：把 warm-up 拆成 yeto 编排的独立阶段。
 1. 阶段 W（critic-only）：用非 rebuild 的单次 Miles 启动（与 Miles 原生 PPO 示例相同模式），`--critic-load` 指向初始 actor checkpoint（复制 backbone，value head 由 model_provider 新建），`--num-critic-only-steps=warmup_steps`，跑完 warm-up 后只保存 critic checkpoint，actor 权重不变（校验 actor 哈希前后一致）。
 2. 主阶段：ports rebuild 模式，`--num-critic-only-steps=0`，`--critic-load` 指向阶段 W 的输出。
 3. 阶段 W 产物以内容哈希进入 receipt（`critic.init=load` + 来源哈希）；两岛共用同一 W 产物，只做一次。
