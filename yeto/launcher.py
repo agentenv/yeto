@@ -4679,8 +4679,9 @@ def _recover_echo_tape(cluster: str, collector, *, run=None, timeout: float = EC
     island's own tape files (``~/yeto-output/rl-island-*.jsonl``, the source
     the echo mirrors) over the ssh alias sky wrote and complete the local tape
     from them. The S1 2x1 L40S runs (2026-10-03/04) showed ``sky.tail_logs``
-    delivering the setup lines but no run-phase line at all, so the stream
-    alone cannot be the only source. Returns whether the tape is finalized;
+    delivering the setup lines but no run-phase line at all (root cause: the
+    heartbeat ``None`` ended ``_tail``'s loop, see there; fixed, kept as the
+    fallback), so the stream alone cannot be the only source. Returns whether the tape is finalized;
     any fetch failure leaves it incomplete (fail closed) and is printed."""
     import tempfile
 
@@ -4768,14 +4769,28 @@ def settle_echo_tapes(collectors: dict, names, modal_cfgs, events_dir, *,
 
 
 def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
+    """Stream a sky job's log into the launcher output (and the tape collector).
+
+    Root cause of "sky.tail_logs delivers the setup lines but no run-phase
+    line" (S1 2x1 L40S 2026-10-03/04; -5r1 r7 stream silent after the learner
+    restart), read from skypilot 0.13.0: the API server's ``log_streamer``
+    appends a ``<heartbeat></heartbeat>`` control payload after every 30 s
+    without a new log line (sky/server/stream_utils.py, ``_HEARTBEAT_INTERVAL``),
+    and the client's ``decode_rich_status`` (sky/utils/rich_utils.py) yields
+    ``None`` for EVERY control payload when it runs off the main thread --
+    which this tail thread does. The sdk docstring says ``None`` means "the log
+    has been completely streamed", so the old loop broke on the first quiet
+    30 s (model load, generation) and the thread ended silently while the job
+    ran on. The end of the stream is the iterator being exhausted; ``None`` is
+    a control message and is skipped."""
     import sky
 
     while True:
         try:
             it = sky.tail_logs(cluster, job_id, follow=True, preload_content=False)
             for line in it:
-                if line is None:
-                    break
+                if line is None:  # rich-status/heartbeat control payload, not the end
+                    continue
                 print(f"[{prefix}] {line.rstrip()}", flush=True)
                 if collector is not None:
                     collector.feed(line)

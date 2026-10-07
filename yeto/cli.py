@@ -1885,8 +1885,8 @@ def _stream_head_logs(cluster: str, job_id: int, follow: bool = True) -> None:
     """Print a head job's log lines; KeyboardInterrupt passes through to
     the caller — Ctrl-C means "stop streaming", never "stop the run"."""
     for line in _sky_tail_logs(cluster, job_id, follow):
-        if line is None:
-            break
+        if line is None:  # sky rich-status/heartbeat control payload, not the end (see launcher._tail)
+            continue
         sys.stdout.write(line if line.endswith("\n") else line + "\n")
         sys.stdout.flush()
 

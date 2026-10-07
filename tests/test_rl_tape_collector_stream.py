@@ -187,3 +187,31 @@ def test_settle_echo_tapes_finalized_stream_needs_no_recovery(tmp_path):
         raise AssertionError("recovery must not run for a finalized tape")
 
     assert settle_echo_tapes({"l0": c}, ["l0"], {}, tmp_path, recover_sky=never) == []
+
+
+def test_tail_skips_sky_control_none_and_ends_when_the_stream_ends(monkeypatch, capsys):
+    """S14/A19 root cause of the missing run-phase lines: skypilot 0.13's client
+    yields None for every rich-status/heartbeat control payload off the main
+    thread (the API server heartbeats after 30 s of log silence); _tail took
+    the first None as end-of-stream. None is skipped; exhaustion is the end."""
+    import sys
+    from types import SimpleNamespace
+
+    from yeto.launcher import _tail
+
+    calls = []
+
+    def tail_logs(cluster, job_id, follow, preload_content):
+        calls.append((cluster, job_id, follow, preload_content))
+        return iter([f"{PREFIX}{_rec('rl_driver_phase')}\n", None, None,
+                     f"{PREFIX}{_rec(FINALIZED_EVENT)}\n"])
+
+    monkeypatch.setitem(sys.modules, "sky", SimpleNamespace(tail_logs=tail_logs))
+    import tempfile
+    from pathlib import Path
+
+    c = TapeCollector(Path(tempfile.mkdtemp()) / "t.jsonl")
+    assert _tail("isl-l0", 7, "isl-l0", c) == 0
+    assert calls == [("isl-l0", 7, True, False)]
+    assert c.finalized and c.count == 2
+    assert "[isl-l0] YETO_RL_EVENT" in capsys.readouterr().out
