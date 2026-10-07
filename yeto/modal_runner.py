@@ -35,6 +35,8 @@ import shlex
 import socket
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -85,6 +87,15 @@ MODAL_GPU_NAME_PATTERNS: dict[str, str] = {
 MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB": 8}
 # CPU / memory the runner reserves per GPU (Modal bills max(request,
 # usage)); the shape planner prices the same reservation.
+# Event tape on a Modal Volume: a Modal container's filesystem disappears
+# when it exits (there is no node to `scp` from afterwards), so the island
+# copies its ~/yeto-output tape files into a mounted Volume while it runs
+# and commits them; the launcher pulls them back into the local run dir.
+TAPE_MOUNT = "/yeto-tape"
+TAPE_SOURCE_DIR = "/root/yeto-output"
+TAPE_SYNC_INTERVAL_S = 30.0
+TAPE_SUFFIXES = (".jsonl", ".json", ".csv", ".log", ".txt")
+TAPE_MAX_FILE_BYTES = 256 * 1024 * 1024
 MODAL_CPU_CORES_PER_GPU = 4
 MODAL_MEMORY_GIB_PER_GPU = 32
 
@@ -204,6 +215,10 @@ class ModalIslandConfig:
     # Other sky file_mounts (container path -> local file or dir), mounted
     # read-only at start-up like the workdir.
     extra_mounts: dict[str, str] = field(default_factory=dict)
+    # Event tape Volume (None = off, the pre-existing behaviour): the
+    # container mirrors TAPE_SOURCE_DIR into <volume>/<tape_subdir>/rank<r>/.
+    tape_volume_name: str | None = None
+    tape_subdir: str | None = None
 
     @property
     def function_name(self) -> str:
@@ -232,6 +247,14 @@ class ModalIslandConfig:
                 )
         if (self.volume_name is None) != (self.volume_mount is None):
             raise ValueError("volume_name and volume_mount go together")
+        if (self.tape_volume_name is None) != (self.tape_subdir is None):
+            raise ValueError("tape_volume_name and tape_subdir go together")
+        if self.tape_subdir is not None and (
+            self.tape_subdir.startswith("/") or ".." in self.tape_subdir.split("/")
+        ):
+            raise ValueError(f"tape_subdir {self.tape_subdir!r} must be relative, without '..'")
+        if self.tape_volume_name and self.volume_name == self.tape_volume_name:
+            raise ValueError("the tape volume must differ from the checkpoint volume")
         if (self.codex_dir is None) != (self.codex_mount is None):
             raise ValueError("codex_dir and codex_mount go together")
         if self.codex_dir is not None and not os.path.isdir(self.codex_dir):
@@ -327,6 +350,87 @@ def visible_gpu_names() -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def cluster_rank_and_ips(info) -> tuple[int, list[str]]:
+    """Rank and node addresses from Modal's cluster info.  IPv4 first:
+    `container_ips` are IPv6 on Modal, and the sky scripts build
+    `"$MASTER_ADDR:6379"` (Ray) / torchrun endpoints that need a bare IPv4."""
+    ipv4 = list(getattr(info, "container_ipv4_ips", None) or [])
+    return int(info.rank), ipv4 or list(info.container_ips)
+
+
+class TapeSync:
+    """Mirror tape files of ``src`` into ``dst`` and commit the Volume,
+    every ``interval_s`` in a daemon thread and once more on ``stop()``.
+    Copies whole files that changed (size or mtime); never deletes."""
+
+    def __init__(self, src: str, dst: str, commit, interval_s: float = TAPE_SYNC_INTERVAL_S,
+                 extra: dict[str, str] | None = None) -> None:
+        self.src, self.dst, self.commit, self.interval_s = Path(src), Path(dst), commit, interval_s
+        self.extra = dict(extra or {})  # file name -> text written once
+        self._seen: dict[str, tuple[int, int]] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.syncs = 0
+        self.errors: list[str] = []
+
+    def sync_once(self) -> int:
+        self.dst.mkdir(parents=True, exist_ok=True)
+        for name, text in list(self.extra.items()):
+            (self.dst / name).write_text(text, encoding="utf-8")
+            del self.extra[name]
+        copied = 0
+        if self.src.is_dir():
+            for f in sorted(self.src.iterdir()):
+                if not f.is_file() or not f.name.endswith(TAPE_SUFFIXES):
+                    continue
+                st = f.stat()
+                if st.st_size > TAPE_MAX_FILE_BYTES:
+                    continue
+                key = (st.st_size, st.st_mtime_ns)
+                if self._seen.get(f.name) == key:
+                    continue
+                tmp = self.dst / f".{f.name}.tmp"
+                tmp.write_bytes(f.read_bytes())
+                os.replace(tmp, self.dst / f.name)
+                self._seen[f.name] = key
+                copied += 1
+        self.commit()
+        self.syncs += 1
+        return copied
+
+    def _safe_sync(self) -> None:
+        try:
+            self.sync_once()
+        except Exception as exc:  # noqa: BLE001 - the tape must never kill the island
+            self.errors.append(repr(exc))
+            print(f"[modal-tape] sync failed: {exc!r}", flush=True)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            self._safe_sync()
+
+    def start(self) -> "TapeSync":
+        self._safe_sync()
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="modal-tape")
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.interval_s + 60)
+        self._safe_sync()
+
+
+def _volume_commit(volume_name: str):
+    def commit() -> None:
+        import modal
+
+        modal.Volume.from_name(volume_name).commit()
+
+    return commit
+
+
 def container_command(run_script: str) -> list[str]:
     """How the island's run script is executed inside the container."""
     return ["bash", "-lc", f"cd {shlex.quote(CONTAINER_WORKDIR)} && {run_script}"]
@@ -340,11 +444,32 @@ def island_main(cfg_json: str) -> int:
         import modal.experimental
 
         info = modal.experimental.get_cluster_info()
-        rank, ips = int(info.rank), list(info.container_ips)
+        rank, ips = cluster_rank_and_ips(info)
+        all_ips = {"container_ips": list(getattr(info, "container_ips", []) or []),
+                   "container_ipv4_ips": list(getattr(info, "container_ipv4_ips", []) or [])}
     else:
-        rank, ips = 0, ["127.0.0.1"]
+        rank, ips, all_ips = 0, ["127.0.0.1"], {}
     env = {**os.environ, **cfg.envs, **skypilot_env(rank, ips, cfg.gpus_per_node), "HOME": "/root"}
-    print(f"[modal-island {cfg.learner_id}] rank {rank}/{len(ips)} starting", flush=True)
+    print(f"[modal-island {cfg.learner_id}] rank {rank}/{len(ips)} starting (node ips {ips})", flush=True)
+    tape = None
+    if cfg.tape_volume_name and cfg.tape_subdir:
+        os.makedirs(TAPE_SOURCE_DIR, exist_ok=True)
+        tape = TapeSync(
+            TAPE_SOURCE_DIR, f"{TAPE_MOUNT}/{cfg.tape_subdir}/rank{rank}",
+            _volume_commit(cfg.tape_volume_name),
+        )
+    try:
+        return _island_body(cfg, rank, ips, all_ips, env, tape)
+    finally:
+        if tape is not None:
+            tape.stop()
+            print(f"[modal-tape] rank {rank}: {tape.syncs} commit(s) to "
+                  f"{cfg.tape_volume_name}:{cfg.tape_subdir}/rank{rank}, errors {len(tape.errors)}",
+                  flush=True)
+
+
+def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dict,
+                 env: dict, tape: "TapeSync | None") -> int:
     try:
         names = visible_gpu_names()
     except (OSError, subprocess.SubprocessError) as exc:
@@ -352,6 +477,13 @@ def island_main(cfg_json: str) -> int:
             raise RuntimeError(f"island {cfg.learner_id}: cannot read GPU names: {exc}") from exc
         names = []
     print(f"[modal-island {cfg.learner_id}] requested {cfg.gpu_request}, got {names}", flush=True)
+    if tape is not None:
+        tape.extra["modal-node.json"] = json.dumps({
+            "rank": rank, "node_ips": ips, **all_ips, "hostname": socket.gethostname(),
+            "gpu_request": cfg.gpu_request, "gpu_names": names,
+            "start_unix": time.time(),
+        }, sort_keys=True) + "\n"
+        tape.start()
     if cfg.gpu_exact:
         check_gpu_names(cfg.gpu, names, cfg.gpus_per_node)
     if cfg.setup_script:
@@ -446,10 +578,13 @@ class ModalOps:
         )
         if cfg.region:
             kwargs["region"] = cfg.region
+        volumes = {}
         if cfg.volume_name and cfg.volume_mount:
-            kwargs["volumes"] = {
-                cfg.volume_mount: modal.Volume.from_name(cfg.volume_name, create_if_missing=True)
-            }
+            volumes[cfg.volume_mount] = modal.Volume.from_name(cfg.volume_name, create_if_missing=True)
+        if cfg.tape_volume_name:
+            volumes[TAPE_MOUNT] = modal.Volume.from_name(cfg.tape_volume_name, create_if_missing=True)
+        if volumes:
+            kwargs["volumes"] = volumes
         self._functions[cfg.function_name] = self._app.function(**kwargs)(fn)
         return self._functions[cfg.function_name]
 
@@ -531,6 +666,22 @@ class ModalOps:
         output = (proc.stdout + proc.stderr).strip()
         if proc.returncode != 0 or "Aborted" in output:
             raise RuntimeError(f"modal app stop {self.app_name} failed: {output or proc.returncode}")
+
+    def pull_tape(self, volume_name: str, remote: str, local_dir: str) -> None:
+        """Download ``<volume>/<remote>`` into ``local_dir`` (`modal volume
+        get`); raises on failure so the caller can report the tape missing."""
+        os.makedirs(local_dir, exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, "-m", "modal", "volume", "get", "--force", volume_name, remote, local_dir],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"modal volume get {volume_name} {remote} failed: "
+                f"{(proc.stdout + proc.stderr).strip() or proc.returncode}"
+            )
 
     def tail_logs(self, call_id: str, entries: int = 100):
         modal = self._modal()
