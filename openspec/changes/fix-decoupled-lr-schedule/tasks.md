@@ -17,7 +17,8 @@
 ## 3. 集成验证
 
 - [x] 3.1 CPU 全量回归：`python -m pytest -q tests/test_rl_*.py tests/test_provenance.py` 与修复前相比没有新增失败。验证：记录前后失败清单并逐条比对。
-- [ ] 3.2 GPU：两岛 decoupled（配置同 head 模式 `yeto-hp929d`：`--total-steps 4 --fragments 4 --pipeline 2 --local-rl-rounds-per-sync 2`）在 legacy 与 ports 上各跑一次。验证：两条路径每轮应用的学习率逐位一致且都等于配置值；最终 cut 之前 syncer 每个外层步的全局 delta 范数都不为 0；两岛最终 hash 一致。证据存入本 change 目录。
+- [x] 3.2 GPU：两岛 decoupled（配置同 head 模式 `yeto-hp929d`：`--total-steps 4 --fragments 4 --pipeline 2 --local-rl-rounds-per-sync 2`）在 legacy 与 ports 上各跑一次。验证：两条路径每轮应用的学习率逐位一致且都等于配置值；最终 cut 之前 syncer 每个外层步的全局 delta 范数都不为 0；两岛最终 hash 一致。证据存入本 change 目录。
+  - S14 用户裁定（2026-10-07）：legacy 引擎已弃用（docs/MILES_RL.md；rl-engine-ports 7.2 待删），且 legacy Miles 与 ports 镜像 Megatron core 0.19 不兼容，legacy 对照不再追。以 ports 两岛证据关闭：s14-dlr-ports-20261007a 两岛各 13 轮 applied_lr 全 1e-5、syncer 16 步 delta 非 0（修复前 hp929d 第 7–16 步为 0），evidence/2026-10-07-gpu-head/。
   - 进展记录（2026-09-29，未勾选）：已在 Modal 2×L40S 上用 `scripts/benchmark_rl.py` 以相同参数（`--global-rounds 4 --fragments 4 --pipeline 2 --local-horizon 2 --inner-lr 1e-5`）跑 legacy 与 ports 各一次，三条验证都成立：两条路径每轮 `applied_lrs` 逐位一致且均为 1e-05；syncer 8 个外层步 `global_delta_norm` 全非 0；两岛最终 hash 一致（legacy feebb2…，ports 150ea1…）。见 `evidence/2026-09-29-gpu/compare-dec.txt`。未勾选原因：benchmark 把 learner 预算固定为 `global_rounds`，每岛只跑 4 个本地轮，没有复现 head 模式 `yeto-hp929d` 的 run-until-stop（12 个本地轮、超过 `global_rounds × optimizer_steps`）这一真正的回归场景；需要 head 模式运行（Modal/Verda 目前不能当 head）才满足"配置同 head 模式"。
   - 补充（2026-09-29，仍未勾选）：`scripts/benchmark_rl.py` 新增 `--learner-budget-steps`（仅 decoupled），可让非 head 模式的本地轮数超过 `global_rounds`（学习率 horizon 仍为 `global_rounds × optimizer_steps`）。用 `--learner-budget-steps 8` 在 Modal 2×L40S 上补跑 legacy+ports 的尝试失败：ports sandbox 30 分钟内没能执行第一条命令（`nvidia-smi` 没有输出），legacy 运行未完成，两者都被 1900 s 费用上限 watchdog 终止，没有产出可用数据。见 `evidence/2026-09-29-gpu-budget8-aborted/`。这类补充运行即使成功也不满足"配置同 head 模式"。
   - GPU 复跑计划（2026-10-06，仅计划，未执行）：
