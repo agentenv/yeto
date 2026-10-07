@@ -40,6 +40,10 @@ from .gpu_spec import ClusterSpec, parse_gpu_spec
 from .models import MODEL_WEIGHT_GB
 
 SYNCER_PORT = 29400
+# rl-algo-critic-family 4.2.1 (design D4 plan a): a critic algorithm runs a
+# second syncer beside the actor's, on its own port, checkpoint and tape; its
+# layout is the critic layout (critic_layout_hash), never the actor LoRA one.
+CRITIC_SYNCER_PORT = 29401
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # WAN transport tuning applied to every node at setup: BBR keeps throughput
@@ -515,6 +519,44 @@ def build_syncer_binary() -> Path:
 # runs put it under the output dir they collect, so it varies by mode.
 SYNCER_EVENT_TAPE = "~/yeto-tape.jsonl"
 RL_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-tape.jsonl"
+RL_CRITIC_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-critic-tape.jsonl"
+RL_CRITIC_SYNCER_CHECKPOINT = "~/yeto-output/yeto-critic-state.ckpt"
+
+
+def rl_needs_critic(args) -> bool:
+    """True iff the prepared RL algorithm spec trains a critic (execution.needs_critic)."""
+    if getattr(args, "training_mode", "sft") != "rl":
+        return False
+    raw = getattr(args, "rl_algorithm_spec_json", None)
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    return bool(((payload or {}).get("execution") or {}).get("needs_critic"))
+
+
+def critic_syncer_address(syncer_addr: str) -> str:
+    """The critic syncer runs on the actor syncer's host, on CRITIC_SYNCER_PORT."""
+    if syncer_addr == "$SYNCER_ADDR":
+        return "$CRITIC_SYNCER_ADDR"
+    host, _, _port = syncer_addr.rpartition(":")
+    if not host:
+        raise ValueError(f"syncer address {syncer_addr!r} has no host:port")
+    return f"{host}:{CRITIC_SYNCER_PORT}"
+
+
+def critic_syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
+    """The critic channel: the same strict RL syncer invocation as the actor's
+    (rounds, quorum, outer optimizer), with its own port, checkpoint and tape."""
+    return (
+        syncer_command(args, num_learners, binary=binary, critic=False)
+        .replace(f" --port {SYNCER_PORT}", f" --port {CRITIC_SYNCER_PORT}", 1)
+        .replace("~/yeto-output/yeto-state.ckpt", RL_CRITIC_SYNCER_CHECKPOINT)
+        .replace(f" --event-tape {RL_SYNCER_EVENT_TAPE}", f" --event-tape {RL_CRITIC_SYNCER_EVENT_TAPE}", 1)
+        .replace("mkdir -p ~/yeto-output && ", "", 1)
+    )
 
 
 def syncer_event_tape(args) -> str:
@@ -549,15 +591,26 @@ def _syncer_quorum_timeout(args) -> str:
     return f" --quorum-timeout-s {int(value)}"
 
 
-def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
+def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
+                   critic: bool | None = None) -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
-    --resume makes any restart pick up from the on-disk checkpoint."""
+    --resume makes any restart pick up from the on-disk checkpoint.
+
+    A critic algorithm (4.2.1) backgrounds the critic syncer first; the actor
+    syncer stays the foreground process (the job's health)."""
     if getattr(args, "training_mode", "sft") == "rl":
         total_steps = getattr(args, "rl_total_fragment_steps", args.total_steps)
+        if critic is None:
+            critic = rl_needs_critic(args)
+        critic_prefix = (
+            f"{{ {critic_syncer_command(args, num_learners, binary=binary)} & }} && "
+            if critic else ""
+        )
         return (
             "mkdir -p ~/yeto-output && "
-            f"{binary}"
+            + critic_prefix
+            + f"{binary}"
             f" --port {SYNCER_PORT}"
             f" --learners {num_learners}"
             f" --quorum {args.quorum}"
@@ -682,7 +735,9 @@ def syncer_cloud(args) -> str:
 
 def syncer_ports(args) -> list[int] | None:
     """`ports=` for the syncer/head resources; None where sky can't open them."""
-    return None if syncer_cloud(args) in NO_OPEN_PORTS_CLOUDS else [SYNCER_PORT]
+    if syncer_cloud(args) in NO_OPEN_PORTS_CLOUDS:
+        return None
+    return [SYNCER_PORT, CRITIC_SYNCER_PORT] if rl_needs_critic(args) else [SYNCER_PORT]
 
 
 def ufw_setup(port: int = SYNCER_PORT) -> str:
@@ -3108,6 +3163,7 @@ def make_miles_island_task(
             " --rl-single-island-no-sync"
             if getattr(args, "rl_single_island_no_sync", False)
             else " --syncer $SYNCER_ADDR"
+            + (" --critic-syncer $CRITIC_SYNCER_ADDR" if rl_needs_critic(args) else "")
         )
         + (" --rl-echo-events" if _echoes_events(args, spec) else "")
         + " --learner-id $LEARNER_ID"
@@ -3311,6 +3367,8 @@ def make_miles_island_task(
         file_mounts.update(codex_mounts)
     envs = {
         "SYNCER_ADDR": syncer_addr,
+        **({"CRITIC_SYNCER_ADDR": critic_syncer_address(syncer_addr)}
+           if rl_needs_critic(args) and syncer_addr != "none" else {}),
         "LEARNER_ID": str(learner_id),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         # Megatron refuses TP>1 or CP>1 without this; it is exported before
@@ -6485,6 +6543,15 @@ def dry_run_plan(args) -> dict:
         "external_learners": external,
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
+        # 4.2.1: present only for a critic algorithm, so every critic-free plan is unchanged
+        **({"critic_syncer": {
+            "port": CRITIC_SYNCER_PORT,
+            "address": "$CRITIC_SYNCER_ADDR",
+            "layout": "critic_layout_hash",
+            "command": critic_syncer_command(args, len(specs) + external),
+            "checkpoint": RL_CRITIC_SYNCER_CHECKPOINT,
+            "event_tape": RL_CRITIC_SYNCER_EVENT_TAPE,
+        }} if rl and not no_sync and rl_needs_critic(args) else {}),
         "outer_sync": not no_sync,
         "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
         "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),

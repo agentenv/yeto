@@ -282,3 +282,78 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+# --------------------------------------------------------------------------
+# 4.2.2 critic fragments (the critic channel's wire unit)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CriticFragment:
+    """A contiguous run of critic tensors (sorted by name) with its content hash."""
+
+    index: int
+    layout_sha256: str
+    names: tuple[str, ...]
+    tensors: Mapping[str, torch.Tensor]
+    sha256: str
+
+
+def critic_fragments(tensors: Mapping[str, torch.Tensor], *, layout_sha256: str,
+                     max_fragment_bytes: int) -> list[CriticFragment]:
+    """Cut the critic state into fragments by the critic layout: names in sorted
+    order, a new fragment whenever the next tensor would exceed
+    ``max_fragment_bytes`` (a tensor larger than the budget is its own fragment;
+    full-parameter tensors are never split across fragments)."""
+
+    _sha("critic layout", layout_sha256)
+    if max_fragment_bytes <= 0:
+        raise ValueError("max_fragment_bytes must be positive")
+    if not tensors:
+        raise CriticStateError("critic state is empty")
+    groups: list[list[str]] = [[]]
+    used = 0
+    for name in sorted(tensors):
+        size = tensors[name].numel() * tensors[name].element_size()
+        if groups[-1] and used + size > max_fragment_bytes:
+            groups.append([])
+            used = 0
+        groups[-1].append(name)
+        used += size
+    out = []
+    for index, names in enumerate(groups):
+        part = {n: tensors[n].detach().to("cpu") for n in names}
+        out.append(CriticFragment(index, layout_sha256, tuple(names), part,
+                                  critic_weights_sha256(part)))
+    return out
+
+
+def assemble_critic_fragments(fragments: Sequence[CriticFragment], *, layout_sha256: str,
+                              expected_specs: Sequence[tuple[str, Sequence[int], str]] | None = None
+                              ) -> dict[str, torch.Tensor]:
+    """Reassemble fragments; refuses a foreign layout, a missing/duplicate
+    fragment, a fragment whose content differs from its hash, or tensors whose
+    specs differ from ``expected_specs``."""
+
+    indexes = sorted(f.index for f in fragments)
+    if indexes != list(range(len(fragments))):
+        raise CriticStateError(f"critic fragments {indexes} are not a complete 0..n-1 set")
+    out: dict[str, torch.Tensor] = {}
+    for fragment in sorted(fragments, key=lambda f: f.index):
+        if fragment.layout_sha256 != layout_sha256:
+            raise CriticLayoutMismatch(
+                f"critic fragment {fragment.index} has layout {fragment.layout_sha256[:12]}, "
+                f"expected {layout_sha256[:12]}")
+        if critic_weights_sha256(fragment.tensors) != fragment.sha256:
+            raise CriticStateError(f"critic fragment {fragment.index} fails its content hash")
+        for name in fragment.names:
+            if name in out:
+                raise CriticStateError(f"critic tensor {name!r} in two fragments")
+            out[name] = fragment.tensors[name]
+    if expected_specs is not None:
+        got = sorted((n, list(t.shape), str(t.dtype)) for n, t in out.items())
+        want = sorted((n, list(s), str(d)) for n, s, d in expected_specs)
+        if got != want:
+            raise CriticLayoutMismatch("reassembled critic tensors differ from the critic layout specs")
+    return out

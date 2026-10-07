@@ -55,6 +55,8 @@ def parse_args(argv=None):
     parser.add_argument("--eval-max-context-len", type=int, default=None)
     # Required unless --rl-single-island-no-sync (checked after parsing).
     parser.add_argument("--syncer", default=None)
+    # rl-algo-critic-family 4.2.1: the critic channel's syncer (critic algorithms only).
+    parser.add_argument("--critic-syncer", default=None)
     parser.add_argument(
         "--rl-echo-events",
         action="store_true",
@@ -2478,6 +2480,12 @@ def run_miles(
                 event_tape=args.event_tape,
                 audit_dir=args.audit_dir,
                 send_initial_params=not getattr(args, "eval_only", False),
+            )
+            # 4.2.1: the critic syncer (second channel); its BridgeConfig needs
+            # the critic specs/layout, built by build_sync once Miles created it.
+            miles_args.yeto_rl_critic_syncer_addr = (
+                _syncer_address(args.critic_syncer)
+                if getattr(args, "critic_syncer", None) else None
             )
 
     if yeto_policy_sync:
