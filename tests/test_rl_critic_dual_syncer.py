@@ -274,3 +274,117 @@ def test_critic_store_refuses_round_mismatch_on_the_rank(tmp_path, monkeypatch):
     monkeypatch.setattr(sp, "_rank", lambda: 0)
     out = sp.restore_critic_cut(actor, directory=str(tmp_path), actor_round=6, critic_round=5)
     assert "actor round 6 != critic round 5" in out["refused"]
+
+
+# -- 4.2.3 cross-channel atomic commit: fake two islands, two fake syncers -------------
+
+
+from yeto.rl.core import build_avg_layout  # noqa: E402
+from yeto.rl.engine.bridges import (  # noqa: E402
+    CrossChannelCommitError,
+    DualStrictAvgSync,
+    _CriticDriverView,
+)
+from yeto.rl.engine.driver import EventTape, IslandDriver  # noqa: E402
+from yeto.rl.engine.fake import FakeEngine, FakeStrictSyncer, fake_capabilities  # noqa: E402
+
+ALLOW = ("advantage_estimators:ppo", "execution:critic")
+NAME = "base_model.model.layer.lora_A.weight"
+
+
+def _ppo_engine(actor, critic):
+    return FakeEngine(tensors={NAME: torch.tensor([actor])}, critic=True,
+                      critic_tensors={"backbone.weight": torch.tensor([[critic, 1.0]]),
+                                      "output_layer.weight": torch.tensor([[critic, 2.0]])})
+
+
+def _critic_syncer(engine, learners, rounds):
+    view = _CriticDriverView(SimpleNamespace(trainer=engine.trainer),
+                             ("0" * 40, engine.trainer.critic_layout()))
+    return FakeStrictSyncer(build_avg_layout(view.critic_state(0).specs),
+                            learners=learners, total_steps=rounds)
+
+
+def _dual_islands(tmp_path, rounds, *, keep_committed=False):
+    import test_rl_engine_driver as td
+
+    engines = [_ppo_engine([1.0, 3.0], 1.0), _ppo_engine([3.0, 5.0], 5.0)]
+    actor_syncer = td._strict_syncer(engines[0], learners=2, rounds=rounds)
+    critic_syncer = _critic_syncer(engines[0], 2, rounds)
+    drivers, syncs = [], []
+    for island, engine in enumerate(engines):
+        config = td._strict_config(tmp_path, engine, learner_id=island, rounds=rounds,
+                                   tape=f"bridge-{island}.jsonl")
+        sync = DualStrictAvgSync(
+            config, critic_syncer_addr=("127.0.0.1", 29401), keep_committed=keep_committed,
+            client_factory=lambda _b, i=island: actor_syncer.client(i),
+            critic_client_factory=lambda _b, i=island: critic_syncer.client(i))
+        syncs.append(sync)
+        drivers.append(IslandDriver(
+            learner_id=island, rollout=engine.rollout, trainer=engine.trainer,
+            policy_state=engine.policy_state, publisher=engine.publisher,
+            placement=engine.placement, algorithm=PPO, sync=sync,
+            events=EventTape(tmp_path / f"i{island}.jsonl", island),
+            capabilities=fake_capabilities().with_unverified(ALLOW)))
+    return engines, drivers, syncs
+
+
+def test_two_islands_actor_and_critic_hashes_agree(tmp_path):
+    import test_rl_engine_driver as td
+
+    engines, drivers, _ = _dual_islands(tmp_path, rounds=2)
+    _, errors = td._run_threads(drivers)
+    assert errors == {}
+    actor = [cs.critic_weights_sha256(e.policy_state.export().to_lora().tensors) for e in engines]
+    critic = [cs.critic_weights_sha256(e.critic_tensors) for e in engines]
+    assert actor[0] == actor[1] and critic[0] == critic[1]
+    # islands started apart (1.0 / 5.0); the critic syncer's initial policy is island 0's,
+    # then each round trains the critic +0.5 before the average: 1.0 + 2 x 0.5
+    assert engines[0].critic_tensors["output_layer.weight"][0, 0].item() == pytest.approx(2.0)
+    for e in engines:
+        applies = [c for c in e.calls if c[0] in ("apply", "critic_apply")]
+        # initial + 2 committed rounds, critic applied before the actor each time
+        assert [c[0] for c in applies] == ["critic_apply", "apply"] * 3
+
+
+def test_critic_channel_failure_rolls_back_both_roles(tmp_path):
+    import test_rl_engine_driver as td
+
+    engines, drivers, syncs = _dual_islands(tmp_path, rounds=2, keep_committed=True)
+    committed = {}
+    for i, sync in enumerate(syncs):
+        original = sync.start
+
+        def start(driver, _orig=original, _i=i, _s=sync):
+            out = _orig(driver)
+            committed[_i] = (cs.critic_weights_sha256(_s.committed[1].to_lora().tensors),
+                             cs.critic_weights_sha256(_s.committed[2]))
+
+            def fail(*_a, **_k):
+                raise TimeoutError("critic syncer did not deliver v+1")
+            _s.critic._await = fail
+            return out
+        sync.start = start
+    _, errors = td._run_threads(drivers)
+    assert set(errors) == {0, 1}
+    for i, e in enumerate(engines):
+        error = errors[i]
+        assert isinstance(error, CrossChannelCommitError) and isinstance(error.__cause__, TimeoutError)
+        assert "neither actor nor critic applied" in str(error)
+        # neither role applied round 1: both are back at the committed round 0 content
+        assert cs.critic_weights_sha256(e.policy_state.export().to_lora().tensors) == committed[i][0]
+        assert cs.critic_weights_sha256(e.critic_tensors) == committed[i][1]
+        versions = [c[1] for c in e.calls if c[0] == "apply"]
+        assert 1 not in versions  # the actor's v+1 from its own channel was never applied
+
+
+def test_build_sync_selects_the_dual_channel_for_a_critic():
+    from yeto.rl.engine.miles_adapter.entry import build_sync
+
+    base = dict(yeto_rl_bridge_config=SimpleNamespace(), yeto_rl_sync_preset="strict-avg",
+                yeto_rl_completed_groups_path="/tmp/s13/none.pt")
+    sync, _ = build_sync(SimpleNamespace(**base, use_critic=True,
+                                         yeto_rl_critic_syncer_addr=("h", 29401)), yeto_policy_sync=True)
+    assert isinstance(sync, DualStrictAvgSync) and sync.OUTER_SYNC_KIND == "strict"
+    with pytest.raises(ValueError, match="--critic-syncer"):
+        build_sync(SimpleNamespace(**base, use_critic=True), yeto_policy_sync=True)

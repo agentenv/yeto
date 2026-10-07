@@ -521,6 +521,17 @@ def build_sync(miles_args: Any, *, yeto_policy_sync: bool) -> tuple[Any, Any]:
     if getattr(miles_args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
         return DecoupledSync(miles_args), DecoupledIslandProgress(miles_args)
     progress = StrictIslandProgress(miles_args)
+    critic_syncer = getattr(miles_args, "yeto_rl_critic_syncer_addr", None)
+    if critic_syncer is not None:
+        # rl-algo-critic-family 4.2.3 (design D4 plan a): second syncer channel for the
+        # critic, one atomic commit for both roles.
+        from ..bridges import DualStrictAvgSync
+
+        return DualStrictAvgSync(miles_args.yeto_rl_bridge_config, critic_syncer_addr=critic_syncer,
+                                 progress=progress), progress
+    if getattr(miles_args, "use_critic", False):
+        raise ValueError("strict-avg with a critic needs the critic syncer (--critic-syncer); "
+                         "the actor syncer alone would leave the critics unaveraged")
     return StrictAvgSync(miles_args.yeto_rl_bridge_config, progress=progress), progress
 
 

@@ -276,6 +276,25 @@ class FakeTrainerGroup:
     def round_metrics(self) -> dict[str, float]:
         return dict(getattr(self, "critic_metrics", None) or {})
 
+    # rl-algo-critic-family 4.2: the critic channel's export / write-back
+    def critic_layout(self) -> str:
+        return self.critic_round_receipt(0).critic_layout_hash
+
+    def export_critic_state(self) -> dict[str, torch.Tensor]:
+        e = self.engine
+        e.calls.append(("critic_export",))
+        return {n: t.detach().clone().float() for n, t in e.critic_tensors.items()}
+
+    def import_critic_state(self, tensors) -> str:
+        from yeto.rl.critic_state import critic_weights_sha256
+
+        e = self.engine
+        if set(tensors) != set(e.critic_tensors):
+            raise ValueError("critic tensor names differ")
+        e.calls.append(("critic_apply",))
+        e.critic_tensors = {n: t.detach().clone() for n, t in tensors.items()}
+        return critic_weights_sha256(e.critic_tensors)
+
     def critic_round_receipt(self, rollout_id: int):
         e = self.engine
         if not e.critic:
