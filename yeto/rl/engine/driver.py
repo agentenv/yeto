@@ -1081,11 +1081,12 @@ class IslandDriver:
         if not records:
             return
         from .timeline import (TRAJECTORY_REWARD_EVENT, TRAJECTORY_REWARD_MAX_PER_ROUND,
-                               TRAJECTORY_REWARD_SCHEMA)
+                               TRAJECTORY_REWARD_OPTIONAL, TRAJECTORY_REWARD_SCHEMA)
 
         for record in tuple(records)[:TRAJECTORY_REWARD_MAX_PER_ROUND]:
             fields = {k: record.get(k) for k in TRAJECTORY_REWARD_SCHEMA
                       if k not in ("rollout_id", "policy_version")}
+            fields.update({k: record[k] for k in TRAJECTORY_REWARD_OPTIONAL if k in record})
             self.emit(TRAJECTORY_REWARD_EVENT, rollout_id=rollout_id,
                       policy_version=int(getattr(batch, "policy_version", rollout_id)),
                       t=self.clock(), **self._labels(), **fields)

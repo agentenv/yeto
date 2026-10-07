@@ -241,3 +241,37 @@ def test_driver_tapes_trajectory_rewards_only_when_observing(tmp_path, observe):
         assert tl.validate_trajectory_reward(e) == []
     names = [e["event"] for e in events]
     assert names.index("rl_round_labels") < names.index(tl.TRAJECTORY_REWARD_EVENT)
+
+
+def test_trajectory_reward_records_carry_codex_exit_diagnostics_when_present():
+    s = _tsample(3, 1, "fix-git", 0.0, False, "t3")
+    s.metadata.update({
+        "exit_status": "max_seq_len",
+        "agent_metrics": {"turns": 7, "terminal_calls": 6, "submit_calls": 0, "parse_failures": 1,
+                          "max_seq_len_hit": 1, "timed_out": 0, "total_tool_time": 1.5, "x": True},
+        "tbench_trusted_outcome": {"testsh_rc": 1, "passed": False},
+    })
+    rec = hook.trajectory_reward_records(None, [[s]], None, limit=8)[0]
+    assert rec["exit_status"] == "max_seq_len" and rec["turns"] == 7 and rec["submit_calls"] == 0
+    assert rec["max_seq_len_hit"] == 1 and rec["testsh_rc"] == 1
+    assert "total_tool_time" not in rec and "x" not in rec
+    assert tl.validate_trajectory_reward({**rec, "rollout_id": 0, "policy_version": 0}) == []
+    assert tl.validate_trajectory_reward({**rec, "rollout_id": 0, "policy_version": 0, "turns": True})
+    # timeout outcomes carry no verdict: testsh_rc None is kept, not dropped
+    s.metadata["tbench_trusted_outcome"] = {"testsh_rc": None}
+    assert hook.trajectory_reward_records(None, [[s]], None, limit=8)[0]["testsh_rc"] is None
+
+
+def test_driver_tapes_optional_trajectory_diagnostics(tmp_path):
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0, placement_kind="fixed-partition")
+    rec = {**hook.trajectory_reward_records(None, [[_tsample(7, 2, "fix-git", 0.0, False)]], None, limit=8)[0],
+           "exit_status": "max_turns", "turns": 12, "testsh_rc": 1}
+    per_round = {0: (rec,), 1: None}
+    original = engine.rollout.generate
+    engine.rollout.generate = lambda r, **kw: dataclasses.replace(original(r, **kw), trajectory_rewards=per_round[r])
+    _driver(engine, tmp_path, True).run()
+    got = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    got = [e for e in got if e["event"] == tl.TRAJECTORY_REWARD_EVENT]
+    assert [(e["exit_status"], e["turns"], e["testsh_rc"]) for e in got] == [("max_turns", 12, 1)]
+    assert "terminal_calls" not in got[0]

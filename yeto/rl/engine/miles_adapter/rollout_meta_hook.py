@@ -517,7 +517,32 @@ def trajectory_reward_records(
                 "reward": float(reward) if math.isfinite(reward) else None,
                 "success": success if isinstance(success, bool) else None,
                 "aborted": _status(s) == "aborted",
+                **trajectory_diagnostics(meta),
             })
+    return out
+
+
+_DIAGNOSTIC_COUNTERS = ("turns", "terminal_calls", "submit_calls", "parse_failures",
+                        "max_seq_len_hit", "timed_out")
+
+
+def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
+    """S15 stage-2 follow-up: Codex exit status, agent counters and the signed
+    ``testsh_rc`` from the harness metadata; only the keys that are present."""
+    out: dict[str, Any] = {}
+    status = meta.get("exit_status")
+    if isinstance(status, str) and status:
+        out["exit_status"] = status[:64]
+    metrics = meta.get("agent_metrics")
+    if isinstance(metrics, dict):
+        for key in _DIAGNOSTIC_COUNTERS:
+            value = metrics.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                out[key] = value
+    outcome = meta.get("tbench_trusted_outcome")
+    if isinstance(outcome, dict) and "testsh_rc" in outcome:
+        rc = outcome.get("testsh_rc")
+        out["testsh_rc"] = rc if isinstance(rc, int) and not isinstance(rc, bool) else None
     return out
 
 
