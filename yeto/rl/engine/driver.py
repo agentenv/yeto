@@ -1041,6 +1041,23 @@ class IslandDriver:
         self.emit("rl_round_labels", rollout_id=rollout_id, t=self.clock(), **self._labels(),
                   **values)
 
+    def _emit_harness_mismatches(self, rollout_id: int, batch: Any) -> None:
+        """S14-M1 (observe only): one ``rl_harness_mismatch`` per TITO session
+        mismatch record the rollout reported (rollout_meta_hook truncated and
+        capped them; the cap is re-applied here for engines that do not)."""
+        records = getattr(batch, "tito_session_mismatch_records", None)
+        if not records:
+            return
+        from .timeline import (HARNESS_MISMATCH_EVENT, HARNESS_MISMATCH_MAX_PER_ROUND,
+                               HARNESS_MISMATCH_SCHEMA)
+
+        for record in tuple(records)[:HARNESS_MISMATCH_MAX_PER_ROUND]:
+            fields = {k: record.get(k) for k in HARNESS_MISMATCH_SCHEMA
+                      if k not in ("rollout_id", "policy_version")}
+            self.emit(HARNESS_MISMATCH_EVENT, rollout_id=rollout_id,
+                      policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                      t=self.clock(), **self._labels(), **fields)
+
     def _is_final_round(self, rollout_id: int) -> bool:
         probe = getattr(self.sync, "is_final_round", None)
         return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
@@ -1194,6 +1211,7 @@ class IslandDriver:
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)
+            self._emit_harness_mismatches(rollout_id, batch)
         # Zero-LR invariant: a non-final round must not commit a zero update.
         require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)

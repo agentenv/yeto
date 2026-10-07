@@ -118,6 +118,11 @@ class RolloutBatchHandle:
     # fleet-dashboard 1.3: trained-batch summary (adv_mean/adv_std,
     # resp_len_mean/p95, truncated_frac, reward_p10/p50/p90); None = not reported.
     batch_summary: Mapping[str, float | None] | None = field(default=None, compare=False)
+    # S14-M1 (observe only): per-record TITO session mismatches
+    # (rollout_meta_hook.harness_mismatch_records, truncated/capped); None = not
+    # reported (default path). The driver tapes them as ``rl_harness_mismatch``.
+    tito_session_mismatch_records: tuple[Mapping[str, Any], ...] | None = field(
+        default=None, compare=False)
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
