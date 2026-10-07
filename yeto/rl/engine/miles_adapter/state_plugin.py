@@ -969,10 +969,17 @@ CRITIC_STATE_SUMMARY = f"{_PLUGIN_MODULE}.critic_state_summary"
 
 def critic_state_summary(actor: Any) -> dict[str, Any]:
     """Plugin (critic process): this rank's trainable critic parameter specs and
-    the content hash of their values (rl-algo-critic-family 4.1/4.4)."""
+    the content hash of their values (rl-algo-critic-family 4.1/4.4).
 
-    import torch
+    The colocated critic is asleep (memory paused) between its train steps;
+    reading paused parameters fails with ``CUDA error: invalid argument``
+    (s13-g1-modal-20261007a), so wake it like the other plugins."""
 
+    with trainer_resident(actor):
+        return _critic_state_summary(actor)
+
+
+def _critic_state_summary(actor: Any) -> dict[str, Any]:
     from yeto.rl.critic_state import critic_weights_sha256
 
     tensors: dict[str, Any] = {}

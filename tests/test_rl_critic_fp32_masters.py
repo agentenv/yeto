@@ -294,3 +294,32 @@ def test_launcher_two_island_critic_strict_avg_passes_decoupled_refused(tmp_path
         _prepare_rl_args(args("strict-avg", None))  # still needs the explicit allowance
     with pytest.raises(Exception, match="decoupled"):
         _prepare_rl_args(args("decoupled", ["advantage_estimators:ppo", "execution:critic"]))
+
+
+def test_critic_state_summary_wakes_an_asleep_colocated_critic():
+    """s13-g1-modal-20261007a: the summary read paused critic memory (CUDA invalid argument)."""
+    import types
+
+    import torch
+
+    from yeto.rl.engine.miles_adapter import state_plugin
+
+    calls = []
+
+    class Actor:
+        def __init__(self):
+            self.args = types.SimpleNamespace(offload_train=True)
+            self._asleep = True
+            self.model = [torch.nn.Linear(2, 1)]
+
+        def wake_up(self):
+            calls.append("wake")
+            self._asleep = False
+
+        def sleep(self):
+            calls.append("sleep")
+            self._asleep = True
+
+    out = state_plugin.critic_state_summary(Actor())
+    assert calls == ["wake", "sleep"]
+    assert len(out["specs"]) == 2 and len(out["weights_sha256"]) == 64
