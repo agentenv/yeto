@@ -33,3 +33,4 @@
 - legacy `s14-dlr-legacy-20261007a`：**INCOMPLETE**，Modal 构建岛镜像时拉取私有 ghcr `MILES_NEXT_IMAGE` 未授权（ports 靠 Modal 构建缓存通过），0 轮，≈$0.02；按规则未重试。
 - 证据：`evidence/2026-10-07-gpu-head/`（SUMMARY.md、ports/judgment.json、ports/head-yeto-tape.jsonl、ports/syncer-key-lines.txt、legacy/judgment*.json、legacy/image-build-error.txt、脚本与复核文档）。
 - 3.2 **仍未勾选**：缺 legacy 一侧的 applied_lrs 序列与 `--compare` 逐位一致证据。下一步：为 Modal 配 ghcr 凭据或改用公开镜像后重跑 legacy 一次。
+- legacy `s14-dlr-legacy-20261007c`（S14 G5，代码 s14-legacypp，legacy 在 ports 镜像内也加 /root/Megatron-LM 到 PYTHONPATH）：**INCOMPLETE**，两岛 H100 确认后 Miles 启动在同一处再失败（`megatron.training.tokenizer` 缺失）。真正根因是 Megatron 版本不兼容：agentenv/miles（legacy）依赖旧 Megatron 的 `megatron.training.tokenizer`，ports 镜像的 Megatron-LM core 0.19 已移除（ports fork 用 `megatron.core.tokenizers`）。PYTHONPATH 修复必要但不充分；legacy 对照必须用 legacy 自己的 MILES_IMAGE（私有 ghcr.io/agentenv/miles，需 `--rl-image-private`）。≈$0.6（估算），未重试。证据 `evidence/2026-10-07-gpu-head/legacy-c/`。3.2 **仍未勾选**。
