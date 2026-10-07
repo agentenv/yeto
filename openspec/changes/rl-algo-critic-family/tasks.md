@@ -41,8 +41,8 @@
 
 ## 6. fork 共享 GAE 扩展点（需用户同意 fork 提交）
 
-- [ ] 6.1 新建 `tests/rl_gae_reference.py`：独立 torch 参考实现 vanilla、length_adaptive、decoupled、cross_segment GAE（注明论文公式），不 import 被测代码。验证：手算 3–5 个元素自检。
-- [ ] 6.2 fork `yeto/ports` 在 math_utils.py 加 `--gae-variant` 分派与 segment id 输入，arguments.py 加参数，缺省逐元素不变（design D6）。验证：fork CPU 测试对拍参考实现，覆盖无段边界退化、两段修正 (γλ)^{n_2}、α=1.5 λ 值；原有 fork 测试全过；结果写 progress.md。
+- [x] 6.1 新建 `tests/rl_gae_reference.py`：独立 torch 参考实现 vanilla、length_adaptive、decoupled、cross_segment GAE（注明论文公式），不 import 被测代码。验证：手算 3–5 个元素自检。
+- [x] 6.2 fork `yeto/ports` 在 math_utils.py 加 `--gae-variant` 分派与 segment id 输入，arguments.py 加参数，缺省逐元素不变（design D6）。验证：fork CPU 测试对拍参考实现，覆盖无段边界退化、两段修正 (γλ)^{n_2}、α=1.5 λ 值；原有 fork 测试全过；结果写 progress.md。
 - [ ] 6.3 经用户确认 push、更新 `MILES_NEXT_COMMIT` pin 与镜像；yeto 映射表登记新参数。验证：pin 指向新提交、镜像 digest 记录；parse_args 解析通过。
 - [ ] 6.4 GPU G1：length_adaptive 与 cross_segment（人造两段数据）各 1×H100 2 轮，可同容器串行。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）。验证：指标有限，通过后正式声明。
 

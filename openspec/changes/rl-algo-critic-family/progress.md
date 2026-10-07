@@ -88,3 +88,18 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 1. **4.2 生产 strict-avg 未接线**：ports 的 `StrictAvgSync` 经 `StrictRlBridge` 与 syncer 只交换 LoRA `CanonicalLoraState`（actor）。把全参数 critic 纳入 strict-avg 需要：(a) 第二条 syncer 通道（design D4"沿用 SAO 双 layout/双 syncer"，launcher 需为 critic 起第二个 syncer 与端口），或扩展单个 syncer 的 layout 同时容纳 LoRA actor 与全参数 critic；(b) Miles critic 进程内的 critic 张量导出/写回插件（全参数、可能经 distributed optimizer 分片）；(c) 两条通道之间的"同轮两者都成功才提交"——现有 syncer 每条通道各自提交，跨通道原子提交需要协议层（`TwoRoleStrictAvg` 只是该语义的 CPU 参照实现）。这超出 tasks 4.2 的 CPU 粒度，且选择 (a)/(b) 影响 launcher 与 syncer，故暂停。
 2. **4.3 生产 checkpoint 未接线**：`RoundCutCheckpoint`/`MilesTrainerGroup.save_cut` 只存 actor LoRA+优化器分片。critic 需同样的 Miles 进程内保存/恢复（全参数 + 优化器状态 + 调度器），并在 pointer 中记录 critic 轮次；`CriticCheckpointStore` 提供了存储格式与轮次一致性校验，但 critic 张量的取得依赖第 1 点 (b)。另：design 写"elastic checkpoint store"，而 critic 与 elastic 已在 2.3 互斥；实际可用的是 `--rl-elastic-checkpoint-store` 驱动的 round-cut（单岛无 sync 也可用），建议在 design 中改述。
 3. 4.1 的"critic layout 不一致时拒绝"目前在 `check_critic_layouts`/`TwoRoleStrictAvg` 中实现并测试；生产外层同步中的强制检查随第 1 点接线。
+
+## 第 6 组（来自分支 critic-gae）
+# rl-algo-critic-family progress
+
+## 6.1 参考实现（2026-10-06）
+- `tests/rl_gae_reference.py`：独立 torch 参考（不 import Miles）——vanilla、length_adaptive（λ=1−1/(αl)，α=1.5）、decoupled（A 用 λ_policy，R=GAE(λ_critic)+V）、cross_segment（段内局部 GAE、段尾 bootstrap 0、终局回报在末段段尾、乘 (γλ)^{N_{>s}}）。
+- `tests/test_rl_gae_reference.py`：8 passed（手算 3 元 vanilla、γ=λ=1 等于 MC、λ(100,1.5)=1−1/150、α→∞→λ=1、decoupled 手算、单段 cross_segment==vanilla、两段手算 ×(γλ)^{n_2}、三段因子）。
+
+## 6.2 fork 扩展点（本地提交，未 push）
+- 分支 `yeto-gae-variant`（worktree /home/michael/work/miles-gae，基于 `yeto/ports` 039471508），提交 `ce96fc060`。
+- 改动：loss_hub/math_utils.py（`segmented_gae`、`length_adaptive_lambda`、`get_advantages_and_returns_batch` 新 kwargs）、loss_hub/advantages.py（缺省不传任何新 kwarg）、loss.py（传 `rollout_data["segment_ids"]`）、arguments.py（`--gae-variant/--gae-lambd-mode/--gae-length-alpha/--gae-critic-lambd`）、ray/rollout/train_data_conversion.py（`sample.metadata["segment_ids"]` → train data → 分片）。
+- 语义：段与 N_{>s} 在可训练 token 子序列上计（与掩码 token 非 MDP 转移一致）；length_adaptive 的 l 用响应长度 R_i；returns = A + V（decoupled 时用 critic λ）。
+- 测试（/home/michael/work/miles-next-venv）：`test_ppo_gae_variants.py` 22 passed（对拍拷贝的参考实现；缺省/显式 vanilla 与冻结的原实现 `torch.equal` 逐元素一致，fp32/fp64、chunked/非 chunked、带掩码）；`test_segment_ids_conversion.py` 2 passed。
+- 定向回归（GAE/loss 相关文件 + tests/test_chunked_gae.py）：基线 039471508 13 failed/99 passed，新 13 failed/121 passed，失败集合完全相同（megatron.core 缺失等环境原因）。未跑 tests/fast/ray 全量（会启动 Ray，线程上限）。
+- yeto 全量回归：log /home/michael/work/infra-drafts/critic-gae-pytest.log，68 failed/26 errors，与 /tmp/base2.sorted 按用例 id 比对集合相同，新增失败 0。
