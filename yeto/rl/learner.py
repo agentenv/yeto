@@ -270,6 +270,18 @@ def parse_args(argv=None):
                         help="critic warm-up checkpoint (ports main stage --critic-load)")
     parser.add_argument("--rl-critic-init-sha256", default=None, metavar="HEX",
                         help="content SHA256 of --rl-critic-load (critic_warmup.checkpoint_sha256)")
+    # rl-algo-critic-family 5.3: without --rl-critic-load, a critic algorithm with
+    # a warm-up runs stage W itself before the main stage (critic_warmup.run_ports_warmup)
+    parser.add_argument("--rl-critic-warmup-dir", default="~/yeto-rl/critic-warmup",
+                        metavar="DIR",
+                        help="stage-W product cache (one product per algorithm + initial actor)")
+    parser.add_argument("--rl-critic-baseline-run", action="store_true",
+                        help=argparse.SUPPRESS)  # set by run_critic_baseline: no tape echo
+    parser.add_argument("--rl-critic-baseline-rounds", type=int, default=0, metavar="N",
+                        help="critic warm-up: first run N rounds of the same algorithm without "
+                             "the warm-up (randomly initialized value head) as the explained-"
+                             "variance baseline (own event tape / completed-groups path; "
+                             "--rl-single-island-no-sync only)")
     parser.add_argument("--miles-source-sha256", default=None)
     parser.add_argument("--megatron-ref-load", default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -291,6 +303,18 @@ def parse_args(argv=None):
             _require_ports_supported(args)
         except ValueError as error:
             parser.error(str(error))
+    if (args.rl_critic_load is None) != (args.rl_critic_init_sha256 is None):
+        parser.error("--rl-critic-load and --rl-critic-init-sha256 go together")
+    if args.rl_critic_baseline_rounds < 0:
+        parser.error("--rl-critic-baseline-rounds must be >= 0")
+    if args.rl_critic_baseline_run and not getattr(args, "rl_single_island_no_sync", False):
+        parser.error("--rl-critic-baseline-run needs --rl-single-island-no-sync")
+    if args.rl_critic_baseline_rounds and not (
+        args.rl_engine == "ports" and getattr(args, "rl_single_island_no_sync", False)
+        and args.rl_critic_load is None
+    ):
+        parser.error("--rl-critic-baseline-rounds needs --rl-engine ports, "
+                     "--rl-single-island-no-sync and no --rl-critic-load")
     try:
         _check_ports_infra_switches(args)
         _check_single_island_no_sync(args)
@@ -2021,7 +2045,10 @@ def run_miles(
     _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
     if rl_engine == "ports" and (
         getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_echo_events", False)
-    ):
+    ) and not getattr(args, "rl_critic_baseline_run", False):
+        # The critic baseline run (run_critic_baseline) keeps its records in its
+        # own tape file only: its rl_learner_finalized must not reach the
+        # launcher's log-stream tape while this island's main run is still ahead.
         install_event_echo()
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
@@ -2230,6 +2257,8 @@ def run_miles(
             # missing torch_dist must not stop the argv build.
             verify_ref_load=not boot_only,
         )
+        if not boot_only and not getattr(args, "rl_print_attestation_fingerprint", False):
+            run_config = _run_critic_warmup_stage(args, run_config, extra_argv)
         ports_launch = build_ports_launch(args, run_config, extra_argv)
         ports_algorithm = ports_launch.algorithm
         miles_argv = list(ports_launch.argv)
@@ -2597,6 +2626,79 @@ def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
     return True
 
 
+def _ports_spec(args, extra_argv: Sequence[str] = ()):
+    from .engine.algorithm import resolve_ports_algorithm
+    from .engine.miles_adapter.algorithm_flags import absorb_extra_argv
+
+    spec, _, _ = absorb_extra_argv(resolve_ports_algorithm(args, rl_engine="ports"),
+                                   tuple(extra_argv))
+    return spec
+
+
+def _run_critic_warmup_stage(args, run_config, extra_argv: Sequence[str] = ()):
+    """rl-algo-critic-family 5.3 (design D5): stage W before the ports main stage.
+
+    Only for a critic copied from the actor with ``warmup_steps > 0`` and no
+    ``--rl-critic-load``; every other run config is returned unchanged. The
+    stage-W argv is the main-stage argv (built with a placeholder product)
+    minus the driver hooks; the initial actor is the main stage's ``--ref-load``
+    (Miles' ``critic_load`` default in bridge mode, arguments.py:3485-3487/3607).
+    """
+
+    import dataclasses
+
+    from .critic_warmup import needs_warmup_stage, run_ports_warmup
+    from .engine.run_config import CriticRunConfig
+
+    spec = _ports_spec(args, extra_argv)
+    if not needs_warmup_stage(spec, getattr(args, "rl_critic_load", None)):
+        return run_config
+    def with_critic(critic):
+        return dataclasses.replace(
+            run_config, algorithm=dataclasses.replace(run_config.algorithm, critic=critic)
+        )
+
+    placeholder = with_critic(
+        CriticRunConfig(critic_load="<stage-W product>", init_sha256="0" * 64)
+    )
+    main_argv = build_ports_launch(args, placeholder, extra_argv).argv
+    product = run_ports_warmup(
+        spec,
+        main_argv=main_argv,
+        actor_checkpoint=str(run_config.ref_load),
+        cache_root=args.rl_critic_warmup_dir,
+        miles_root=str(Path(args.miles_root).expanduser().resolve()),
+    )
+    args.rl_critic_load = product.critic_checkpoint
+    args.rl_critic_init_sha256 = product.critic_sha256
+    return with_critic(product.critic_run_config())
+
+
+def run_critic_baseline(args, learner_argv: Sequence[str],
+                        run=subprocess.run) -> None:
+    """``--rl-critic-baseline-rounds N``: the no-warm-up baseline learner run
+    (critic_warmup.baseline_learner_argv) before this run's stage W."""
+
+    from .critic_warmup import baseline_learner_argv
+
+    rounds = int(getattr(args, "rl_critic_baseline_rounds", 0) or 0)
+    if not rounds:
+        return
+    spec = _ports_spec(args)
+    spec_path = Path("~/yeto-rl/critic-baseline/algorithm_spec.json").expanduser()
+    argv, base = baseline_learner_argv(learner_argv, spec, rounds=rounds,
+                                       spec_path=str(spec_path))
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(base.canonical_json())
+    command = [sys.executable, "-m", "yeto.rl.learner", *argv, "--rl-critic-baseline-run"]
+    print("[rl] critic baseline run (no warm-up, %d rounds, spec %s): %s"
+          % (rounds, base.sha256(), " ".join(command)), flush=True)
+    from .event_echo import ECHO_ENV
+
+    env = {k: v for k, v in os.environ.items() if k != ECHO_ENV}
+    run(command, check=True, env=env)
+
+
 def _run_ports(
     args,
     miles_args,
@@ -2664,6 +2766,7 @@ def _run_ports(
 
 
 def main(argv=None) -> None:
+    learner_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     from ..provenance import (
         is_immutable_commit,
@@ -2763,6 +2866,8 @@ def main(argv=None) -> None:
                 **columns,
             )
         )
+    if getattr(args, "rl_critic_baseline_rounds", 0):
+        run_critic_baseline(args, learner_argv)
     run_miles(
         args,
         model_path=model_path,

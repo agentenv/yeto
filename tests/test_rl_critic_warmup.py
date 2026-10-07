@@ -46,7 +46,8 @@ def test_stage_w_argv_from_the_main_stage():
                                  critic_save="/cache/w")
     for flag, value in (("--num-rollout", "50"), ("--num-critic-only-steps", "50"),
                         ("--critic-load", "/ckpt/actor"), ("--critic-save", "/cache/w"),
-                        ("--save-interval", "50")):
+                        ("--save", "/cache/w" + cw.STAGE_SAVE_SUFFIX), ("--save-interval", "50"),
+                        ("--lr-decay-style", "constant")):
         assert _values(stage, flag) == [value], flag
     for gone in ("--rollout-sample-filter-path", "--rollout-all-samples-process-path",
                  "--buffer-filter-path", "--eval-interval", "--eval-prompt-data",
@@ -77,8 +78,9 @@ def test_dry_run_snapshot_both_stages():
         "--critic-load", "<stage-W product>"]
     assert result["stage_w_argv"] == [
         "--advantage-estimator", "ppo", "--gamma", "1.0", "--lambd", "1.0", "--value-clip",
-        "0.2", "--critic-lr", "3e-06", "--num-rollout", "50", "--num-critic-only-steps", "50",
-        "--critic-load", "/ckpt/actor", "--critic-save", "/cache/w", "--save-interval", "50"]
+        "0.2", "--critic-lr", "3e-06", "--lr-decay-style", "constant", "--num-rollout", "50",
+        "--num-critic-only-steps", "50", "--critic-load", "/ckpt/actor", "--critic-save",
+        "/cache/w", "--save", "/cache/w.stage-w-save", "--save-interval", "50"]
     assert result["algorithm_spec_sha256"] == WARM.sha256()
     bad = cw.dry_run(["--dry-run", "--extra", "--advantage-estimator ppo",
                       "--actor-checkpoint", "/a", "--critic-save", "/w"])
@@ -158,3 +160,60 @@ def test_main_stage_receipt_source_is_the_product_hash():
     assert launch.runtime_attrs["yeto_rl_critic_init_sha256"] == "b" * 64
     assert "yeto_rl_critic_init_sha256" not in mc.translate_run_config(
         make_config(), AlgorithmSpec()).runtime_attrs
+
+
+# -- 5.3 wiring (ports learner runs stage W / the no-warm-up baseline) -----------------
+
+
+def test_needs_warmup_stage_only_for_a_warm_copied_critic_without_product():
+    assert cw.needs_warmup_stage(WARM, None)
+    assert not cw.needs_warmup_stage(WARM, "/w")
+    assert not cw.needs_warmup_stage(AlgorithmSpec(), None)
+    assert not cw.needs_warmup_stage(None, None)
+    cold = AlgorithmSpec(advantage={"estimator": "ppo"}, execution={"needs_critic": True})
+    assert not cw.needs_warmup_stage(cold, None)
+
+
+def test_run_ports_warmup_runs_plain_train_py_once_then_reuses(tmp_path):
+    actor = _checkpoint(tmp_path / "actor", b"actor")
+    main = ["train.py", *_main_argv(product="<p>")[1:]]
+    calls = []
+
+    def fake_run(command, cwd, check):
+        calls.append((command, cwd))
+        save = command[command.index("--critic-save") + 1]
+        _checkpoint(tmp_path / save, b"critic")
+
+    product = cw.run_ports_warmup(WARM, main_argv=main, actor_checkpoint=actor,
+                                  cache_root=tmp_path / "cache", miles_root="/m", run=fake_run)
+    (command, cwd), = calls
+    assert cwd == "/m" and command[1] == "/m/train.py" and "train.py" not in command[2:]
+    assert _values(command, "--critic-load") == [actor]
+    assert _values(command, "--num-critic-only-steps") == ["50"]
+    assert product.critic_sha256 == cw.checkpoint_sha256(product.critic_checkpoint)
+    again = cw.run_ports_warmup(WARM, main_argv=main, actor_checkpoint=actor,
+                                cache_root=tmp_path / "cache", miles_root="/m", run=fake_run)
+    assert len(calls) == 1 and again == product
+
+
+LEARNER = ["--model", "m", "--global-rounds", "2", "--fragments", "1",
+           "--total-fragment-steps", "2", "--completed-groups-path", "~/yeto-rl/island-checkpoint.pt",
+           "--event-tape", "~/yeto-output/rl-island-0.jsonl", "--rl-algorithm-spec", "/s.json",
+           "--rl-expected-algorithm-sha256", WARM.sha256(), "--rl-critic-baseline-rounds", "3",
+           "--rl-single-island-no-sync"]
+
+
+def test_baseline_learner_argv_has_own_state_and_cold_spec():
+    argv, base = cw.baseline_learner_argv(LEARNER, WARM, rounds=3, spec_path="/b.json")
+    assert base.critic.warmup_steps == 0 and base.sha256() != WARM.sha256()
+    assert base.critic.critic_lr == WARM.critic.critic_lr
+    assert "--rl-critic-baseline-rounds" not in argv
+    for flag, value in (("--global-rounds", "3"), ("--total-fragment-steps", "3"),
+                        ("--rl-algorithm-spec", "/b.json"),
+                        ("--rl-expected-algorithm-sha256", base.sha256()),
+                        ("--completed-groups-path", "~/yeto-rl/island-checkpoint.critic-baseline.pt"),
+                        ("--event-tape", "~/yeto-output/rl-island-0.critic-baseline.jsonl")):
+        assert _values(argv, flag) == [value], flag
+    assert "--rl-single-island-no-sync" in argv and _values(argv, "--model") == ["m"]
+    with pytest.raises(cw.CriticWarmupError):
+        cw.baseline_learner_argv(LEARNER, WARM, rounds=0, spec_path="/b.json")

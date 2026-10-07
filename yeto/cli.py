@@ -217,6 +217,33 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
             "sends each island its canonical form and expected hash"
         ),
     )
+    # rl-algo-critic-family 5.3 (design D5): critic warm-up stage on the island
+    rl.add_argument(
+        "--rl-critic-load",
+        default=None,
+        metavar="DIR",
+        help=(
+            "ports critic with a warm-up: an existing stage-W product directory on the "
+            "island (with --rl-critic-init-sha256); without it the island runs stage W "
+            "itself before the main stage"
+        ),
+    )
+    rl.add_argument(
+        "--rl-critic-init-sha256",
+        default=None,
+        metavar="HEX",
+        help="content SHA256 of --rl-critic-load (critic_warmup.checkpoint_sha256)",
+    )
+    rl.add_argument(
+        "--rl-critic-baseline-rounds",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "ports critic with a warm-up, --rl-single-island-no-sync: first run N rounds "
+            "of the same algorithm without the warm-up (explained-variance baseline)"
+        ),
+    )
     rl.add_argument(
         "--rl-placement",
         choices=["colocated", "fixed-partition"],
