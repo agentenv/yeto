@@ -134,6 +134,8 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
     sky = sys.modules["sky"]
     sky.launch = lambda task, **kw: f"rid-{kw.get('cluster_name')}"
     sky.stream_and_get = lambda rid: (1, types.SimpleNamespace(head_ip="10.0.0.1"))
+    # the launcher probes every syncer port before starting islands (s13-g3b)
+    monkeypatch.setattr(launcher, "tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
 
 
 @pytest.mark.parametrize("provider", ["modal", "sky"])

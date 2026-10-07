@@ -895,6 +895,7 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
     fake_sky = sys_modules_sky(monkeypatch)
     fake_sky.launch = lambda task, **kw: "rid-syncer"
     fake_sky.stream_and_get = lambda rid: (1, types.SimpleNamespace(head_ip="10.0.0.1"))
+    monkeypatch.setattr(launcher, "tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
     monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
     monkeypatch.setattr(modal_runner, "resolve_syncer_for_modal", lambda addr, public: addr)
     monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
