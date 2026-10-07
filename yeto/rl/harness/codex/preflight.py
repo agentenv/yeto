@@ -244,7 +244,10 @@ def configure_rollout_worker(env: Mapping[str, str] | None = None) -> bool:
         yeto_harness_environment_provider=None,
         yeto_rl_learner_id=int(env.get(LEARNER_ID_ENV) or 0),
         yeto_rl_member_id=None,
-        yeto_rl_cell_id=None,
+        # A16 (D5): the island entry exports its cell (publish_member_cell) and
+        # worker_runtime_env forwards it; read it back into the field so the
+        # worker resolves the same member key as the driver.
+        yeto_rl_cell_id=env.get(MEMBER_CELL_ENV) or None,
     )
     provider = resolve_environment_provider(miles_args, env)
     from . import codex_openenv_subprocess_agent_function as subprocess_agent

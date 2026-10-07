@@ -452,6 +452,34 @@ def resolve_harness_preflight(miles_args: Any, environ: Any = None) -> HarnessPr
     return hook
 
 
+# A16 / D5 (rl-fn-codex-rollout 0.6): the island publishes its own INFRA member cell
+# so the Codex harness admits sessions under ``rollout.member_id(cell_id)`` instead
+# of the global key.  Single-island (--rl-single-island-no-sync) islands publish 0.
+MEMBER_CELL_ENV = "YETO_RL_CELL_ID"
+
+
+def publish_member_cell(miles_args: Any, learner_id: int | None = None, environ: Any = None) -> str:
+    """Set ``miles_args.yeto_rl_cell_id`` and export ``YETO_RL_CELL_ID``; return the cell id.
+
+    Source, in order: an explicit ``miles_args.yeto_rl_cell_id`` (INFRA may pre-set it),
+    ``learner_id`` (the island number the launcher already assigns; ``island_id`` in the
+    ``rl_engine_selected`` event), ``miles_args.yeto_rl_learner_id``, else 0.  The env
+    export reaches rollout-worker subprocesses through ``worker_runtime_env`` and
+    ``preflight.configure_rollout_worker``; ``preflight.resolve_member`` then yields
+    ``engine:<cell>`` (``engine:0`` on a single island).
+    """
+    environ = os.environ if environ is None else environ
+    cell = getattr(miles_args, "yeto_rl_cell_id", None)
+    if cell is None or str(cell) == "":
+        if learner_id is None:
+            learner_id = getattr(miles_args, "yeto_rl_learner_id", None)
+        cell = int(learner_id or 0)
+    cell = str(cell)
+    miles_args.yeto_rl_cell_id = cell
+    environ[MEMBER_CELL_ENV] = cell
+    return cell
+
+
 def preflight_stage(
     miles_args: Any,
     launch: Any,
@@ -466,6 +494,7 @@ def preflight_stage(
     preflight (IR-1) runs last, after the contract preflight and the elastic
     wiring checks; a failure here means no allocate call ever happens.
     """
+    publish_member_cell(miles_args)  # A16: member cell before the harness preflight resolves it
     fingerprint = ports_runtime_fingerprint(launch)
     capabilities = with_partitioned_serial(
         miles_capabilities(
@@ -1555,6 +1584,7 @@ def run_ports_island(
     require_run_plugin()  # before any upstream component or model exists
     from ..overlap import loop_eval_starter
 
+    publish_member_cell(miles_args, learner_id)  # A16 (D5): island cell -> harness member key
     fingerprint, capabilities, profile, elastic = preflight_stage(
         miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync,
         harness_preflight=harness_preflight,
