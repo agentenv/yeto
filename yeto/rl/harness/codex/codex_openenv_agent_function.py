@@ -25,9 +25,17 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
-from yeto.rl.codex_backend import QWEN35_08B_MODEL, QWEN35_08B_REVISION, stock_codex_backend_profile
+from yeto.rl.codex_backend import (
+    QWEN35_08B_MODEL,
+    QWEN35_08B_REVISION,
+    QWEN38_NEXT_4LAYER_MODEL,
+    QWEN38_NEXT_4LAYER_REVISION,
+    QWEN38_NEXT_MODEL,
+    QWEN38_NEXT_REVISION,
+    stock_codex_backend_profile,
+)
 from yeto.rl.tbench_outcome import (
     NATIVE_VERIFIER,
     TEST_SH_VERIFIER,
@@ -39,23 +47,80 @@ from . import agent as legacy
 from . import codex_harness_agent as harness
 from . import compaction_bridge
 from .environment import TerminalEnvironment, TrustedVerifier
-from .pins import OPENENV_BACKEND_PROFILE
+from .pins import OPENENV_BACKEND_PROFILE, OPENENV_BACKEND_PROFILES
 
-BACKEND_PROFILE_NAME = OPENENV_BACKEND_PROFILE  # "qwen35_08b"
+# rl-fn-codex-rollout 1.0: the backend profile is no longer pinned to the
+# image default.  Two distinct notions:
+# * IMAGE_BACKEND_PROFILE_NAME -- the build-time default recorded in the image
+#   env (``YETO_CODEX_OPENENV_BACKEND_PROFILE`` / ``_MODEL_ID`` / ``_MODEL_REVISION``);
+# * BACKEND_PROFILE_NAME -- the runtime profile declared by the launch
+#   (``--codex-backend-profile``), which the learner publishes to the container
+#   as ``YETO_CODEX_CHAT_TEMPLATE`` (``stock_codex_backend_contract(profile)["chat_template"]``,
+#   the same declaration ``codex_harness_agent`` reads) and ``validate_stock_codex_fields``
+#   already checks against ``--model`` / ``--model-revision``.
+# Why no image rebuild: the adapter's tool surface (``*_SHA256`` pins) does not
+# depend on the model, so the image record only has to stay a faithful record of
+# the build; the model identity of the runtime profile is derived here from the
+# ``yeto.rl.codex_backend`` allowlist (``profile_identity``) instead of being
+# compared against the image env.  Boundary: the runtime profile must belong to
+# ``pins.OPENENV_BACKEND_PROFILES`` and declare the exact HF identity listed in
+# ``_PROFILE_IDENTITY``; anything else is refused at import / preflight.
+IMAGE_BACKEND_PROFILE_NAME = OPENENV_BACKEND_PROFILE  # "qwen35_08b"
+RUNTIME_PROFILE_ENV = "YETO_CODEX_CHAT_TEMPLATE"
+_PROFILE_IDENTITY: dict[str, tuple[str, str]] = {
+    "qwen35_08b": (QWEN35_08B_MODEL, QWEN35_08B_REVISION),
+    "qwen38_next": (QWEN38_NEXT_MODEL, QWEN38_NEXT_REVISION),
+    "qwen38_next_4layer": (QWEN38_NEXT_4LAYER_MODEL, QWEN38_NEXT_4LAYER_REVISION),
+}
+assert set(_PROFILE_IDENTITY) == set(OPENENV_BACKEND_PROFILES)
 INFRASTRUCTURE_STATUS = "infrastructure"
 POLICY_STATUSES = frozenset({"completed", "timeout", "max_turns", "max_seq_len"})
 REWARD_SCOPE = "trajectory"
+
+
+def profile_identity(profile_name: str) -> tuple[str, str]:
+    """``(model_identifier, model_revision)`` the adapter derives for one runtime profile.
+
+    Raises ``ValueError`` ("requires backend profile") for a profile outside
+    ``OPENENV_BACKEND_PROFILES`` and ``RuntimeError`` ("profile drifted") when
+    the allowlisted ``codex_backend`` profile no longer declares the identity
+    pinned here (the legacy module-level qwen35_08b assertion, per profile).
+    """
+    expected = _PROFILE_IDENTITY.get(profile_name)
+    if expected is None:
+        raise ValueError(
+            "the Codex OpenEnv adapter requires backend profile in "
+            + ", ".join(OPENENV_BACKEND_PROFILES) + f" (got {profile_name!r})"
+        )
+    profile = stock_codex_backend_profile(profile_name)
+    if (profile.get("model_identifier"), profile.get("model_revision")) != expected:
+        raise RuntimeError(f"the Codex OpenEnv {profile_name} profile drifted")
+    return expected
+
+
+def resolve_backend_profile(name: str | None = None, env: Mapping[str, str] | None = None) -> str:
+    """The runtime backend profile: explicit ``name``, else the launch declaration
+    ``YETO_CODEX_CHAT_TEMPLATE`` when it names an allowlisted profile (for every
+    member of ``OPENENV_BACKEND_PROFILES`` the chat template equals the profile
+    name), else the image default.  An explicit name is validated."""
+    if name is not None:
+        profile_identity(name)
+        return name
+    env = os.environ if env is None else env
+    declared = env.get(RUNTIME_PROFILE_ENV)
+    if declared in _PROFILE_IDENTITY:
+        return declared
+    return IMAGE_BACKEND_PROFILE_NAME
+
+
+BACKEND_PROFILE_NAME = resolve_backend_profile()
+profile_identity(BACKEND_PROFILE_NAME)  # import-time drift check, per selected profile
 
 stock = SimpleNamespace(
     _BACKEND_PROFILE=stock_codex_backend_profile(BACKEND_PROFILE_NAME),
     BACKEND_MODEL=stock_codex_backend_profile(BACKEND_PROFILE_NAME)["model"],
     _attest_runtime=harness._attest_runtime,
 )
-if (
-    stock._BACKEND_PROFILE.get("model_identifier") != QWEN35_08B_MODEL
-    or stock._BACKEND_PROFILE.get("model_revision") != QWEN35_08B_REVISION
-):
-    raise RuntimeError("the Codex OpenEnv qwen35_08b profile drifted")
 
 
 def codex_openenv_harness_identity() -> dict[str, str]:
@@ -64,10 +129,15 @@ def codex_openenv_harness_identity() -> dict[str, str]:
     return {key: value for key, value in live.items() if key.endswith("_sha256")}
 
 
+# Image record (what the image line bakes into the container env and
+# ``yeto.rl.CODEX_OPENENV_IDENTITY_ENV`` mirrors): the *build-time* profile and
+# its HF identity plus the profile-independent tool-surface hashes.  It is
+# deliberately NOT derived from BACKEND_PROFILE_NAME so the container env drift
+# check stays a check of the image, whichever runtime profile the launch declares.
 _OPENENV_IDENTITY_ENV: dict[str, str] = {
-    "YETO_CODEX_OPENENV_BACKEND_PROFILE": BACKEND_PROFILE_NAME,
-    "YETO_CODEX_OPENENV_MODEL_ID": QWEN35_08B_MODEL,
-    "YETO_CODEX_OPENENV_MODEL_REVISION": QWEN35_08B_REVISION,
+    "YETO_CODEX_OPENENV_BACKEND_PROFILE": IMAGE_BACKEND_PROFILE_NAME,
+    "YETO_CODEX_OPENENV_MODEL_ID": _PROFILE_IDENTITY[IMAGE_BACKEND_PROFILE_NAME][0],
+    "YETO_CODEX_OPENENV_MODEL_REVISION": _PROFILE_IDENTITY[IMAGE_BACKEND_PROFILE_NAME][1],
     **{
         f"YETO_CODEX_OPENENV_{name.upper()}": value
         for name, value in codex_openenv_harness_identity().items()
