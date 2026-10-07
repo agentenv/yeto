@@ -8,29 +8,29 @@
 
 ## 1. 决策确认与基线
 
-- [ ] 1.1 在 `progress.md` 记录 proposal 中 5 项用户决策原文与日期（2026-10-06）。验证：文件存在且 5 项齐全。
-- [ ] 1.2 在当前 pin 的 Miles 提交上复核 design Context 的行号（arguments.py shared 约束、:3212、GAE、LoRA critic 跳过）。验证：核对结果与行号写入 progress.md，差异处标注。
-- [ ] 1.3 记录 pytest 失败基线到 `baseline-failures.txt`。验证：条目数与 pytest 汇总一致。
+- [x] 1.1 在 `progress.md` 记录 proposal 中 5 项用户决策原文与日期（2026-10-06）。验证：文件存在且 5 项齐全。
+- [x] 1.2 在当前 pin 的 Miles 提交上复核 design Context 的行号（arguments.py shared 约束、:3212、GAE、LoRA critic 跳过）。验证：核对结果与行号写入 progress.md，差异处标注。
+- [x] 1.3 记录 pytest 失败基线到 `baseline-failures.txt`。验证：条目数与 pytest 汇总一致。
 
 ## 2. AlgorithmSpec critic 字段与翻译（CPU）
 
-- [ ] 2.1 在 `algorithm.py` 增加 advantage 组的 gamma/lambd/lambd_mode/alpha/gae_variant 与新 critic 组（含 `param_mode` 与预留的 lora 字段），仅在 needs_critic 时进入规范化（design D1、D9）。验证：新增 `tests/test_rl_critic_spec.py`：grpo golden 哈希不变、critic 字段改变哈希、非 critic 算法给 critic 字段被拒。
-- [ ] 2.2 v1 接受 ppo；`algorithm_flags.py` 把 `--gamma/--lambd/--value-clip/--num-critic-only-steps/--critic-load/--critic-lr` 移出 `_UNMAPPED`，做吸收与冲突检测。验证：翻译单测；miles-next-venv 中 upstream `parse_args` 解析生成 argv 通过。
-- [ ] 2.3 实现启动前拒绝：elastic/indep_dp、kl_coef≠0、critic GPU 数≠actor、`--deploy-component trainer`、decoupled 外层、`param_mode=lora`（design D2）。验证：参数化单测在 fake 组合根中、GPU 进程前失败。
-- [ ] 2.4 修正 `capabilities.py:321-324` 报错文案，`run_config.py` 增加 critic 字段。验证：单测断言文案不含"legacy"误导表述；`tests/test_rl_argv_snapshot.py` 不改即通过。
+- [x] 2.1 在 `algorithm.py` 增加 advantage 组的 gamma/lambd/lambd_mode/alpha/gae_variant 与新 critic 组（含 `param_mode` 与预留的 lora 字段），仅在 needs_critic 时进入规范化（design D1、D9）。验证：新增 `tests/test_rl_critic_spec.py`：grpo golden 哈希不变、critic 字段改变哈希、非 critic 算法给 critic 字段被拒。
+- [x] 2.2 v1 接受 ppo；`algorithm_flags.py` 把 `--gamma/--lambd/--value-clip/--num-critic-only-steps/--critic-load/--critic-lr` 移出 `_UNMAPPED`，做吸收与冲突检测。验证：翻译单测；miles-next-venv 中 upstream `parse_args` 解析生成 argv 通过。
+- [x] 2.3 实现启动前拒绝：elastic/indep_dp、kl_coef≠0、critic GPU 数≠actor、`--deploy-component trainer`、decoupled 外层、`param_mode=lora`（design D2）。验证：参数化单测在 fake 组合根中、GPU 进程前失败。
+- [x] 2.4 修正 `capabilities.py:321-324` 报错文案，`run_config.py` 增加 critic 字段。验证：单测断言文案不含"legacy"误导表述；`tests/test_rl_argv_snapshot.py` 不改即通过。
 
 ## 3. ports 单岛 colocated PPO
 
-- [ ] 3.1 放开 `entry.py:245-262` receipt family（新增 ppo family）、`entry.py:1590-1592`、`trainer_rebuild.py:253,358`，`selection.py:45,68` 不再把 ppo 路由到 legacy（design D3）。验证：fake engine 单测：未放行拒绝、带 `--rl-allow-unverified-mechanism` 单岛可启动；dry-run argv 快照含 `--advantage-estimator ppo` 与 critic 参数。
-- [ ] 3.2 `local_learner.py` 角色表增加 ppo→{actor,critic}；指标管线透传 value_loss 与 explained variance。验证：fake 运行的指标中出现这两项。
+- [x] 3.1 放开 `entry.py:245-262` receipt family（新增 ppo family）、`entry.py:1590-1592`、`trainer_rebuild.py:253,358`，`selection.py:45,68` 不再把 ppo 路由到 legacy（design D3）。验证：fake engine 单测：未放行拒绝、带 `--rl-allow-unverified-mechanism` 单岛可启动；dry-run argv 快照含 `--advantage-estimator ppo` 与 critic 参数。
+- [x] 3.2 `local_learner.py` 角色表增加 ppo→{actor,critic}；指标管线透传 value_loss 与 explained variance。验证：fake 运行的指标中出现这两项。
 - [ ] 3.3 GPU G1：PPO 1×H100 单岛 3 轮（0.5B 级小模型），对齐 Miles `test_qwen3_4B_ppo` 的指标项（value_loss、EV 有限；policy loss、grad_norm 有限）。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）。验证：运行 ID、指标摘要、GPU 名写入 progress.md；通过后 `entry.py:236`、`fake.py:70` 正式声明 critic=True。
 
 ## 4. critic 状态契约与两岛 G3
 
-- [ ] 4.1 LayoutHash/receipt 增加 critic layout 哈希、param_mode、初始化来源哈希（design D4）。验证：单测：receipt 含两个 layout 哈希；critic layout 不一致时拒绝。
+- [x] 4.1 LayoutHash/receipt 增加 critic layout 哈希、param_mode、初始化来源哈希（design D4）。验证：单测：receipt 含两个 layout 哈希；critic layout 不一致时拒绝。
 - [ ] 4.2 strict-avg 对 actor、critic 分别平均，两者成功才提交；decoupled 外层遇 critic 拒绝。验证：CPU 单测（fake 两岛）：哈希一致、critic 失败时整轮回滚。
 - [ ] 4.3 elastic checkpoint store 增加 critic 权重与优化器状态，恢复时轮次一致性校验。验证：CPU 单测：保存/恢复哈希一致、轮次不一致拒绝。
-- [ ] 4.4 tape/ledger 记录 critic 权重哈希、value_loss、EV。验证：单测读取 ledger 条目。
+- [x] 4.4 tape/ledger 记录 critic 权重哈希、value_loss、EV。验证：单测读取 ledger 条目。
 - [ ] 4.5 GPU G3：PPO 两岛 strict-avg 1+1×H100 3 轮 + 一次 kill/resume。**需用户批准预算与机型**，估 ~1.5 h×2 卡，≈$12（上限 $20）。验证：两岛 actor/critic 平均后哈希一致；resume 后哈希等于最后提交轮；结果写入 progress.md。
 
 ## 5. critic warm-up 初始化

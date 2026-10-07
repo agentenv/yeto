@@ -1242,6 +1242,9 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
             "rollout_max_response_len": getattr(args, "rollout_max_response_len", None),
             "context_parallel_size": 1,  # ports emits --context-parallel-size 1
             "multi_lora": False,
+            # rl-algo-critic-family 2.3 (critic run-level rejections)
+            "sync_preset": getattr(args, "rl_sync_preset", "strict-avg"),
+            "elastic": bool(getattr(args, "rl_elastic", False)),
         })
         if problems:
             raise AlgorithmSpecError("algorithm spec rejected: " + "; ".join(problems))

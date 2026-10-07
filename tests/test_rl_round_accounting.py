@@ -178,6 +178,10 @@ def test_receipt_label_is_the_role_family_matching_the_layout():
         assert label == "grpo" and label in _ROLES_BY_ALGORITHM
     with pytest.raises(ValueError, match="critic"):
         receipt_role_family(SimpleNamespace(advantage_estimator="ppo"))
+    # rl-algo-critic-family 3.1: a declared critic has its own role family
+    ppo = SimpleNamespace(advantage_estimator="ppo",
+                          execution=SimpleNamespace(needs_critic=True))
+    assert receipt_role_family(ppo) == "ppo" and "ppo" in _ROLES_BY_ALGORITHM
     from yeto.rl.contracts import _require_algorithm
 
     with pytest.raises(ValueError):

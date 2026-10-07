@@ -187,10 +187,10 @@ def test_fake_driver_nonfinite_grad_norm_fails_for_gspo(tmp_path):
 # -- 3.1 --gamma mapping -----------------------------------------------------------------
 
 
-def test_gamma_mapped_and_lambd_unmapped():
+def test_gamma_mapped_and_lambd_mapped_by_critic():
     assert "--gamma" in af.mapped_flags()
     assert "--gamma" not in af.UNMAPPED_OBJECTIVE_FLAGS
-    assert "--lambd" in af.UNMAPPED_OBJECTIVE_FLAGS and "--lambd" not in af.mapped_flags()
+    assert "--lambd" not in af.UNMAPPED_OBJECTIVE_FLAGS and "--lambd" in af.mapped_flags()
     assert af.MAPPINGS["--gamma"].field == "advantage.gamma"
 
 
@@ -204,8 +204,10 @@ def test_default_gamma_not_emitted_and_hash_unchanged():
 def test_gamma_absorbed_from_extra_argv():
     spec, rest, absorbed = af.absorb_extra_argv(rpp(), ["--gamma", "0.99", "--foo"])
     assert spec.advantage.gamma == 0.99 and rest == ("--foo",) and absorbed == {"--gamma": "0.99"}
-    with pytest.raises(af.UnmappedAlgorithmFlag, match="--lambd"):
-        af.absorb_extra_argv(rpp(), ["--lambd", "0.95"])
+    # rl-algo-critic-family 2.2: --lambd is mapped now (advantage.lambd), and a
+    # non-critic spec refuses it as a critic-only field.
+    spec, _, _ = af.absorb_extra_argv(rpp(), ["--lambd", "0.95"])
+    assert any("critic_fields_without_critic" in p for p in spec.rejections())
 
 
 # -- 3.2 gamma / whiten rules ---------------------------------------------------------------

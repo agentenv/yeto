@@ -322,6 +322,9 @@ class DecoupledSync:
     ``_append_event`` and ``snapshot``).
     """
 
+    # read by the driver handshake (rl-algo-critic-family 2.3: no critic here)
+    OUTER_SYNC_KIND = "decoupled"
+
     def __init__(
         self,
         args: Any,

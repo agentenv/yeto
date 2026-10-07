@@ -94,6 +94,27 @@ class SwappableActor:
         setattr(self._target, name, value)
 
 
+def _old_handles(trainer_id: str, actor: SwappableActor, critic: "SwappableActor | None",
+                 critic_trainer_id: str) -> dict[str, Any]:
+    handles = {trainer_id: actor.target}
+    if critic is not None:
+        handles[critic_trainer_id] = critic.target
+    return handles
+
+
+def swap_critic(critic: "SwappableActor | None", new_critic: Any) -> None:
+    """rl-algo-critic-family 3.1: a rebuilt trainer's critic replaces the critic
+    handle; a critic without a handle (or the reverse) is a contract break."""
+
+    if new_critic is None and critic is None:
+        return
+    if critic is None:
+        raise RuntimeError("rebuilt trainer has a critic but this run passed no critic handle")
+    if new_critic is None:
+        raise RuntimeError("rebuilt trainer has no critic but this run trains one")
+    critic.swap(new_critic)
+
+
 def live_cursor(rollout: Any, when: str) -> dict[str, int]:
     """The rollout data cursor, read live (INFRA-E1 f707dc3: ``data_cursor()`` is None
     when it cannot be read). Unknown -> fail closed, never compared."""
@@ -205,6 +226,8 @@ def rebuild_same_shape(
     worker_manager: Any = None,
     rebuild: Callable[..., Awaitable[tuple[Any, Any]]] | None = None,
     max_attempts: int = 2,
+    critic: SwappableActor | None = None,
+    critic_trainer_id: str = "critic",
 ) -> RebuildResult:
     """Dispose + rebuild the trainer (same shape) and restore the cut via ``restore()``.
 
@@ -226,11 +249,11 @@ def rebuild_same_shape(
     view = None
     for attempt in range(max_attempts):
         try:
-            new_actor, critic = run(
+            new_actor, new_critic = run(
                 rebuild(
                     args,
                     rollout_executor,
-                    old_handles={trainer_id: actor.target},
+                    old_handles=_old_handles(trainer_id, actor, critic, critic_trainer_id),
                     worker_manager=manager,
                     trainer_pg_view=view,
                 )
@@ -250,8 +273,7 @@ def rebuild_same_shape(
             continue
         # From here on a new trainer exists: every failure is RECOVERY_REQUIRED (review M1).
         try:
-            if critic is not None:
-                raise RuntimeError("rebuilt trainer has a critic (ports engine drives none)")
+            swap_critic(critic, new_critic)
             generation = actor.swap(new_actor)
             after = live_cursor(rollout, 'after the rebuild')
             if after != cursor:
@@ -331,6 +353,8 @@ def rebuild_resharded(
     trainer_id: str = "actor",
     worker_manager: Any = None,
     rebuild: Callable[..., Awaitable[tuple[Any, Any]]] | None = None,
+    critic: SwappableActor | None = None,
+    critic_trainer_id: str = "critic",
 ) -> RebuildResult:
     """Dispose the trainer, rebuild it with ``new_args`` on ``new_view`` and restore the cut resharded.
 
@@ -353,10 +377,14 @@ def rebuild_resharded(
     attempts: list[dict[str, Any]] = []
 
     def _attempt(stage: str, args: Any, view: Any, layout: Mapping[str, int], restore: Callable[[], Any]):
-        new_actor, critic = run(rebuild(args, rollout_executor, old_handles={trainer_id: actor.target},
-                                        worker_manager=manager, trainer_pg_view=view))
-        if critic is not None:
-            raise RecoveryRequired("rebuilt trainer has a critic (ports engine drives none)", attempts=attempts)
+        new_actor, new_critic = run(rebuild(
+            args, rollout_executor,
+            old_handles=_old_handles(trainer_id, actor, critic, critic_trainer_id),
+            worker_manager=manager, trainer_pg_view=view))
+        try:
+            swap_critic(critic, new_critic)
+        except RuntimeError as error:
+            raise RecoveryRequired(str(error), attempts=attempts) from error
         generation = actor.swap(new_actor)
         trainer.rebind_args(args)
         after = live_cursor(rollout, 'after the rebuild')

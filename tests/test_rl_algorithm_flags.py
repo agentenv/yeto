@@ -85,7 +85,7 @@ def test_mapping_table_is_subset_of_objective_list():
         assert row.flag == flag and flag.startswith("--")
         assert callable(row.parse) and callable(row.absorb) and callable(row.translate)
         assert row.field.split(".")[0] in {
-            "advantage", "loss", "kl", "correction", "sampling", "entropy_coef",
+            "advantage", "loss", "kl", "correction", "sampling", "entropy_coef", "critic",
         }
 
 

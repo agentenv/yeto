@@ -14,8 +14,8 @@
 
 **Miles c35702e（ports 镜像）**
 - 参数：`--critic-num-nodes/gpus`（arguments.py:270-273）、`--num-critic-only-steps`（:1597）、`--critic-load/save/lr/lr-warmup`（:1603-1613）、`--value-clip=0.2`（:1648）、`--gamma/--lambd` 默认 1.0（:1729-1730）；估计器有 ppo 无 vapo（:1682-1690）；`use_critic` 由 estimator=="ppo" 推导（:3591）。
-- Shared Actor/Critic 约束：不支持 indep_dp、只 megatron、kl_coef==0（:3592-3604）；critic GPU 数=actor（:3605-3606）；critic_load/lr 默认继承 actor，强制 offload_train（:3708-3716）；rebuild 模式要求 `num_critic_only_steps==0`（:3212）；`--deploy-component trainer` 禁 critic（:3058）。
-- 实现：placement_group.py:320,338 共卡；model_provider.py:340-341 1 维 value head；actor.py:227,604,635 value_loss；math_utils.py:647,705,875 vanilla_gae、:899 chunked_gae；losses.py:452 value loss；LoRA 下 critic 仍全参数（test_lora_model_branches.py:122-130）。示例 examples/ppo/、tests/e2e/megatron/test_qwen3_4B_ppo.py:76-86、test_shared_ppo_lifecycle.py。
+- Shared Actor/Critic 约束：不支持 indep_dp、只 megatron、kl_coef==0（:3592-3604）；critic GPU 数被赋值为 actor 的值（:3605-3606，静默覆盖而非断言，1.2 复核）；critic_load/lr 默认继承 actor（:3607-3610），强制 offload_train（:3708-3716）；rebuild 模式要求 `num_critic_only_steps==0`（:3212）；`--deploy-component trainer` 禁 critic（:3058）。
+- 实现：placement_group.py:320,338 共卡；model_provider.py:340-341 1 维 value head；actor.py:227,604,635 value_loss；loss_hub/math_utils.py:647,705 GAE 入口、:875 vanilla_gae、:899 chunked_gae；losses.py:452 value loss；LoRA 下 critic 仍全参数（test_lora_model_branches.py:122-130）。示例 examples/ppo/、tests/e2e/megatron/test_qwen3_4B_ppo.py:76-86、test_shared_ppo_lifecycle.py。
 - 没有：vapo、sao、hl_gauss、length_adaptive、decoupled_gae、value_pretrain、cross-segment GAE。CompactionRL 只有 rollout 侧 examples/experimental/terminus-compaction。
 
 **约束**：不重复实现引擎（数学放 Miles/fork，yeto 只声明、校验、翻译、编排）；fork 改动只进 `michaellchung/miles` `yeto/ports`（先例 rl-algo-loss-variants 路线 B）；新机制先经 `--rl-allow-unverified-mechanism` 做 G1（1 卡），通过后才在 adapter 正式声明，G3 两岛 strict-avg 只用正式声明。
