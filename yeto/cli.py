@@ -518,6 +518,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-island-post-cmd",
+        default=None,
+        metavar="CMD",
+        help=(
+            "ports single-island smoke only: shell command run on the island's "
+            "rank 0 after the learner exits (whatever its exit code), with "
+            "stdout+stderr in ~/yeto-output/post-cmd.txt (mirrored into the Modal "
+            "tape Volume); the learner's exit code is preserved (S14 A17: run the "
+            "fork's Ray tests in the same container)"
+        ),
+    )
+    rl.add_argument(
         "--rl-allow-unverified-mechanism",
         action="append",
         default=None,
