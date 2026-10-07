@@ -60,7 +60,7 @@
 - [x] 8.1 取得 agentenv/miles feat/sao-tbench21-e2e-validation@16a9bea409de（SAO 数学引入于 e25048edd；原写 ae475060 有误，那是 legacy MILES_COMMIT） 中 SAO 源码（sao_dis、HL-Gauss value loss），核对与 docs/TBENCH21_SAO_QWEN35_08B_VALIDATION_20260826.md 一致；取不到则暂停本组并报告。验证：progress.md 记录来源提交与文件清单。
 - [x] 8.2 移植到 fork `yeto/ports`（value_loss=hl_gauss 51-bin、sao_dis），缺省不变。验证：fork CPU 对拍测试。
 - [x] 8.3 yeto 声明 sao 并把 `sao_streaming_runtime.py` recipe 翻译为 AlgorithmSpec，保留双 layout、双 syncer、lockstep 成对 fragment；旧入口保留。验证：单测：新旧路径生成的 critic/actor 配置等价；旧入口回归测试不变。
-- [ ] 8.4 GPU：SAO on ports G1 1×H100 + G3 1+1×H100 各 3 轮（Qwen3.5-0.8B）。**需用户批准预算与机型**，估 ~2.5 h 卡时，≈$10（上限 $20）。验证：EV 与旧路径同量级（记录数值），两岛哈希一致。
+- [ ] 8.4 GPU：SAO on ports G1 1×H100 + G3 1+1×H100 各 3 轮（Qwen3.5-0.8B）。**需用户批准预算与机型**，估 ~2.5 h 卡时，≈$10（上限 $20）。验证：EV 与旧路径同量级（记录数值），两岛哈希一致。（S14：G1 PASS `s1-runs/s14-forkg1-sao-20261007a`，EV 全程 ≤0 未达旧路径量级，已记录；G3 未跑）
 
 ## 9. CompactionRL
 

@@ -524,6 +524,28 @@ SAO 重跑：需用新 overlay（sha256 64f69bbf…）+ `--lora-targets attentio
 - 主 agent 已在 b996392b 修复：fork 6574a9c82，overlay 64f69bbf，并加了 warmup<decay 预检。
 - 重跑计划：规格 e0716499 不变，12 轮，`--lora-targets attention`；本地预检确认 3 轮和 6 轮会被拒、12 轮通过。按指示**等待 FN 8×H200 冒烟结束后再启动**。
 
+### S14 G1 重跑结果（8.4，2026-10-07，子 agent B）
+- run `s1-runs/s13-forkg1-sao-20261007f`（代码 s13-forkg1 897cb26f，含 b996392b；规格 e0716499，12 轮，`--lora-targets attention`，Modal 1×H100! retries 0 timeout 4800 s）。判定 **INCOMPLETE**（`judgment.json`：missing = "1 trained rounds < 12"、"no rl_learner_finalized"、"round 0: grad_norm missing"；problems 为空）。rc=4，Modal app 10:23:22–10:37:35，≈ $1.04。
+- 已解除的阻断：overlay 64f69bbf 在真实镜像上 apply 成功（launch.log:39）；容器报 `NVIDIA H100 80GB HBM3`（:22）；Qwen3.5-0.8B tied-embedding critic 从 HF 加载成功，critic_lr_warmup 预检通过，**第 1 轮完整训练完成**（launch.log:5173 `rl_round_trained`，tape `tape-direct/yeto-s13-forkg1-sao-20261007f/l0/rank0/rl-island-0.jsonl`）。
+- 第 1 轮指标：critic/value_loss 6.4655、critic/explained_variance −0.0731（旧路径 +0.1365，任务不同仅记录）、critic/grad_norm 198.77、pg_loss 0.01229、ppo_kl 3.1e-4、sao_dis_ratio 1.00007、sao_dis_{low,high,}_rejectfrac 0、pg_clipfrac 0、entropy_loss 0、ess_ratio 0.9992。全部有限。train_metrics 中无 actor `grad_norm` 键（只有 `critic/grad_norm`），判定脚本因此报 grad_norm missing——原因未查（Qwen3-0.6B 的 run 有该键）。
+- **新阻断（yeto 侧 bug）**：第 1 轮训练后 `_emit_critic_round` → `trainer.critic_round_receipt` → `critic_state.critic_layout_hash` 抛 `ValueError: value head '' must be a [1, hidden] parameter of the layout`（launch.log:5272–5550）。原因：SAO 的 HL-Gauss 值头为 [51, hidden]（fork `model_provider.py:117 _value_head_output_size` 返回 value_num_bins=51），而 `yeto/rl/engine/miles_adapter/trainer.py:413` 只筛 `shape[0] == 1` 的 `output_layer.weight`，`yeto/rl/critic_state.py:92` 也断言 `head[0] != 1` 即拒绝。需改为接受 `shape[0] == value_num_bins`（分类值头）并把 bins 纳入 layout 身份；加单测后再重跑（估 ~$5）。
+- 旁证：SGLang `_freeze_gc_after_server_warmup` 线程对 :20000/freeze 连接失败一次（launch.log:4544–4607），不影响后续轮次。
+- 结论：8.4 仍未勾选；tasks.md 未改。
+
+### S14 第 2 次重跑结果（8.4 G1，2026-10-07，子 agent E）
+- 修复（yeto 侧，worktree `/home/michael/work/s14-saohead`，分支 s14-saohead @ **fb9a366f**，基于 integ-decl 649fb39b；897cb26f 是其祖先，s13-forkg1 无未合入提交）：`yeto/rl/critic_state.py` `critic_layout_hash(..., value_bins=1)` 要求值头为 `[value_bins, hidden]`，bins≠1 时写入 payload（bins=1 保持 schema-1 payload 逐字节不变，`[1,4]` 样例哈希 5939fb77… 前后一致，回归测试固定）；`yeto/rl/engine/miles_adapter/trainer.py` 新增 `_value_head_bins()`（Miles `value_loss_type=='classification'` 时取 `value_num_bins`，否则 1），收据筛头与哈希都按 bins。单测：`tests/test_rl_critic_state.py::test_critic_layout_hash_scalar_head_is_pinned_and_bins_are_identity`、`tests/test_rl_critic_ports.py::test_critic_round_receipt_accepts_hl_gauss_value_head`；`test_rl_critic_state.py + test_rl_critic_ports.py + test_rl_critic_dual_syncer.py` 38 passed（无 Ray）。
+- run `s1-runs/s14-forkg1-sao-20261007a`（代码 s14-saohead fb9a366f；其余同 f：规格 e0716499，12 轮，`--lora-targets attention`，overlay 64f69bbf，Modal 1×H100! retries 0 timeout 4800 s）。判定 **PASS**（`judgment.json`：missing、problems 均空；容器报 `NVIDIA H100 80GB HBM3`；`rl_learner_finalized` 已出）。rc=2，与 gae-la-b / gae-cs-b / vapo-e 等 PASS run 同模式（单岛无 syncer checkpoint，launcher 返回 2）。Modal app 10:45:44–11:07:31 ≈ 21.8 min ≈ **$1.59**。
+- 12 轮走势（轮 0→11；出处 `judgment.json` 与 tape `tape-direct/yeto-s14-forkg1-sao-20261007a/l0/rank0/rl-island-0.jsonl`）：
+  - critic/value_loss：6.464, 5.945, 5.422, 4.136, 2.158, 2.335, 3.256, 2.604, 4.245, 3.531, 2.282, 3.598（整体下降，后段随奖励波动）。
+  - critic/explained_variance：−0.073, −0.088, −0.240, −0.252, **−3.3e12**, −0.032, −0.041, −0.066, −0.002, −0.013, −0.084, −0.024。全程 ≤0；第 5 轮（rollout 4）奖励全 0（reward_std 0）→ EV 分母退化，属指标定义问题不是训练异常。旧路径 +0.1365 为 Terminal-Bench 不同任务，仅记录，未达同量级。
+  - reward_mean（gsm8k，4 组×8）：0.656, 0.281, 0.125, 0.281, 0.000, 0.156, 0.344, 0.219, 0.563, 0.406, 0.188, 0.406。
+  - actor grad_norm：0.349, 0.469, 0.531, 0.243, 0.122, 0.158, 0.434, 0.185, 0.639, 0.315, 0.263, 0.391（有限）。pg_loss −0.19…0.12；sao_dis_ratio 0.9994–1.0006；sao_dis_rejectfrac ≤1.2e-4；pg_clipfrac ≤1.2e-4；entropy_loss 0。
+  - critic_layout_hash 71e964d3fdd421e6… 12 轮一致；critic_init copy_actor_backbone，critic_init_sha256 None（无 warmup，warmup_steps 0）。
+- actor `grad_norm` 键：本次**存在**（`rl_local_round.grad_norm`，判定不再报 missing）。上次 f 缺失的原因：收据在 `_emit_critic_round` 抛错，`rl_local_round` 事件根本没发出（f 的 tape 只有 1 条 `rl_round_trained`、0 条 `rl_local_round`），不是 Qwen3.5 的差异。
+- 旁证：SGLang `post-warmup freeze_gc failed` 连接拒绝 traceback 仍出现 1 次（与 f 相同，无影响）；日志中 `trainer 'actor'/'critic' restored rollout 1 ... starts at 0` 表示镜像内旧 checkpoint 被忽略、从 0 起。
+- 脚本小修：`s1-runs/s13-forkg1-modal.sh` 结束时改为 `kill -- -$(cat watchdog.pid)` 杀 setsid 进程组（原只杀外壳，sleep+modal stop 残留），备份 `.bak`。
+- 结论：8.4 的 **G1 部分 PASS**；G3（1+1×H100 两岛哈希一致）未跑，tasks.md 8.4 按 7.3 先例不勾，行尾加注。
+
 ### 其他发现
 - `--modal-retries 0` 不能阻止 Modal 换容器。vapo-w0-b 首个容器的日志停在 07:56:20 的 actor wake_up，约 08:01:47 起了新容器（container list 与 exec 均可确认），但本地 launcher 看不到新容器的日志，也没有任何报错。该 run 已手动 stop 并判为不可用。建议 launcher 检测 container id 变化后 fail-closed。
 - 费用：本组 run 合计约 **$8.5**，按 Modal app 时间 × $4.39/h 估算，未查账单，明细见 gpu-spend.md。
