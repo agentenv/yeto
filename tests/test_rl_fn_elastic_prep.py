@@ -24,7 +24,11 @@ from yeto.rl.engine.miles_adapter.elastic_hook import elastic_hook_for
 from yeto.rl.profiles import qwen3_8_next as q
 
 MANIFEST = Path(__file__).resolve().parent / "multinode_gpu" / "resources-fn-4x8.json"
+MANIFEST_2X8 = MANIFEST.with_name("resources-fn-2x8.json")
 FN_GPU = "nebius:4x8xh200"
+FN_GPU_2X8 = "nebius:2x8xh200"
+TRAINER_PAR_2X8 = ("--tensor-parallel", "2", "--pipeline-parallel", "4", "--expert-parallel", "2",
+                   "--rollout-num-gpus-per-engine", "8")
 TRAINER_PAR = ("--tensor-parallel", "2", "--pipeline-parallel", "8", "--expert-parallel", "2",
                "--rollout-num-gpus-per-engine", "8")
 
@@ -65,6 +69,34 @@ def test_launcher_dry_shapes_both_fn_configs(monkeypatch, tmp_path, config, roll
         assert flag in task.run
     assert f"--rl-elastic-initial-config {config}" in task.run
     assert rollout // 8 == engines
+
+
+def test_2x8_manifest_matches_the_declaration_and_shapes_the_launch(monkeypatch, tmp_path):
+    """Formal 2x8 shape (user decision 2026-10-07): one config FN-T8R8S0, n0 = trainer
+    TP2 PP4 EP2, n1 = one TP8 engine, no standby, no edges (nothing to recommend)."""
+    raw = json.loads(MANIFEST_2X8.read_text())
+    decl = q.flash_next_elastic_declaration(nodes=2, trainer_gpus=8)
+    configs = parse_configs(raw)
+    assert set(configs) == set(decl["configs"]) == {"FN-T8R8S0"} and decl["initial_config"] == "FN-T8R8S0"
+    got, d = configs["FN-T8R8S0"], decl["configs"]["FN-T8R8S0"]
+    assert (got.trainer, got.rollout, got.standby, got.rollout_engine_gpus) == (8, 8, 0, 8) == \
+        (d.trainer, d.rollout, d.standby, d.rollout_engine_gpus)
+    assert dict(got.parallel) == dict(d.parallel) == {"tp": 2, "pp": 4, "cp": 1, "ep": 2}
+    assert validate_edges(raw, configs) == [] and decl["declared_edges"] == frozenset()
+    args, spec, task = _elastic_task(monkeypatch, tmp_path, FN_GPU_2X8, MANIFEST_2X8, "FN-T8R8S0",
+                                     rollout=8, extra=TRAINER_PAR_2X8)
+    assert spec.num_nodes == 2 and spec.gpus_per_node == 8
+    nodes, per_node, bundles = launcher.rl_island_layout(args, spec)
+    assert (nodes, per_node) == (1, 8)
+    assert bundles["trainer"] == tuple(range(8)) and bundles["rollout"] == tuple(range(8, 16))
+    assert bundles["standby"] == ()
+    assert task.num_nodes == 2
+    assert "--actor-num-nodes 1 --actor-num-gpus-per-node 8 --rl-island-gpus-per-node 8" in task.run
+    for flag in ("--tensor-parallel 2", "--pipeline-parallel 4", "--expert-parallel 2",
+                 "--rollout-num-gpus-per-engine 8", "--rollout-num-gpus 8",
+                 "--rl-elastic-initial-config FN-T8R8S0"):
+        assert flag in task.run, flag
+    assert "--rl-standby-gpus" not in task.run
 
 
 def test_launcher_refuses_a_flag_set_that_disagrees_with_the_cfg(monkeypatch, tmp_path):

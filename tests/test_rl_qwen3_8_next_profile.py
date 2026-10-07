@@ -72,8 +72,10 @@ def test_profile_defaults_match_miles_ci_4layer_shape():
 def test_profile_rejects_invalid_shapes_and_ranks():
     with pytest.raises(ValueError, match="4 or 8 GPUs"):
         q.Qwen38NextLoraProfile(num_gpus_per_node=6)
-    with pytest.raises(ValueError, match="32 GPUs"):
+    with pytest.raises(ValueError, match="16 or 32 GPUs"):
         q.Qwen38NextLoraProfile(variant="full")
+    with pytest.raises(ValueError, match="16 or 32 GPUs"):
+        q.Qwen38NextLoraProfile(variant="full", num_nodes=3)
     with pytest.raises(ValueError, match="r_e <= lora_rank"):
         q.Qwen38NextLoraProfile(lora_rank=8, lora_expert_rank=16)
     with pytest.raises(ValueError, match="positive"):
@@ -82,6 +84,10 @@ def test_profile_rejects_invalid_shapes_and_ranks():
         q.Qwen38NextLoraProfile(variant="8layer")
     full = q.Qwen38NextLoraProfile(variant="full", num_nodes=8, num_gpus_per_node=4)
     assert full.parallel["pp"] == 8 and full.parallel["ep"] == 4
+    # 2x8 formal shape (2026-10-07): 16 GPUs -> PP4, the torch_dist conversion split
+    full16 = q.Qwen38NextLoraProfile(variant="full", num_nodes=2)
+    assert full16.parallel["pp"] == 4 == full16.parallel["ep"] and full16.parallel["tp"] == 2
+    assert full16.parallel["rollout_num_gpus_per_engine"] == 8
     assert q.Qwen38NextLoraProfile(lora_expert_rank=0).effective_expert_rank == 32
 
 
