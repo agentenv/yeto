@@ -128,3 +128,49 @@ def test_runtime_manifest_flags_overlay(tmp_path, monkeypatch):
     monkeypatch.setattr(mo, "read_applied_record", lambda path=None: None)
     m = rm.collect(image=None)
     assert "miles_overlay" not in m and "+overlay" not in m["commit_source"]["miles"]
+
+
+def test_learner_accepts_dirty_miles_only_as_the_exact_overlay_tree(tmp_path, monkeypatch):
+    """S13 forkg1: verify_miles_revision's clean check refused the overlaid ~/miles."""
+    import json as _json
+    import subprocess as sp
+
+    from yeto.rl import miles as M
+    from yeto.rl import miles_overlay as O
+
+    repo = tmp_path / "miles"
+    repo.mkdir()
+    g = lambda *a: sp.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+    g("init", "-q"); (repo / "a.py").write_text("a = 1\n"); g("add", "-A")
+    g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    base = g("rev-parse", "HEAD")
+    (repo / "a.py").write_text("a = 2\n"); (repo / "new.py").write_text("n = 1\n")
+    g("add", "-A"); tree = g("write-tree"); g("reset", "-q")
+    record = tmp_path / "rec.json"
+    monkeypatch.setattr(O, "CRITIC_C357_BASE_COMMIT", base)
+    monkeypatch.setattr(O, "CRITIC_C357_RESULT_TREE", tree)
+    monkeypatch.setattr(O, "OVERLAY_RECORD_PATH", str(record))
+    monkeypatch.setattr(O, "read_applied_record", lambda path=str(record): O.__dict__["json"].loads(record.read_text()) if record.exists() else None)
+    assert not M._overlay_tree_matches(repo, base)  # no record
+    record.write_text(_json.dumps({"patch_sha256": O.CRITIC_C357_PATCH_SHA256}))
+    assert M._overlay_tree_matches(repo, base)
+    assert not M._overlay_tree_matches(repo, "f" * 40)
+    (repo / "stray.py").write_text("x\n")
+    assert not M._overlay_tree_matches(repo, base)
+    record.write_text(_json.dumps({"patch_sha256": "0" * 64}))
+    (repo / "stray.py").unlink()
+    assert not M._overlay_tree_matches(repo, base)
+
+
+def test_result_tree_pin_matches_fork_commit():
+    import subprocess as sp
+    from pathlib import Path
+
+    from yeto.rl import miles_overlay as O
+
+    fork = Path("/home/michael/work/miles-critic-c357")
+    if not fork.is_dir():
+        pytest.skip("fork checkout not present")
+    tree = sp.run(["git", "-C", str(fork), "rev-parse", f"{O.CRITIC_C357_RESULT_COMMIT}^{{tree}}"],
+                  check=True, capture_output=True, text=True).stdout.strip()
+    assert tree == O.CRITIC_C357_RESULT_TREE

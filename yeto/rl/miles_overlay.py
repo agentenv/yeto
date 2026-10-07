@@ -39,6 +39,8 @@ OVERLAY_CHOICES = ("auto", "off", CRITIC_C357)
 # The fork commit the patch reproduces (git diff --binary c35702e..this).
 CRITIC_C357_BASE_COMMIT = MILES_NEXT_COMMIT
 CRITIC_C357_RESULT_COMMIT = "6e7365b602ecf5d83d16169e87f4d78f4daf5f86"
+# git tree of CRITIC_C357_RESULT_COMMIT: the patched worktree must hash to exactly this.
+CRITIC_C357_RESULT_TREE = "3652ca1e4f381f1209b698a8438323e9c11ec45f"
 CRITIC_C357_PATCH = "yeto/rl/overlays/miles-critic-c357.patch"  # relative to the workdir
 CRITIC_C357_PATCH_SHA256 = "7cbc0a42c4880931f2dc1b2285b49907f7c67295d15774c0b885ddd50c6f766c"
 

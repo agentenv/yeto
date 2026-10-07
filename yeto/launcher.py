@@ -3075,7 +3075,15 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
 
     environ = os.environ if environ is None else environ
     custom_agent = getattr(args, "custom_agent_function_path", None)
-    compaction_env = compactionrl_launch_env(args, environ, custom_agent == CODEX_OPENENV_AGENT)
+    from .rl.synthetic_segments import SYNTHETIC_SEGMENTS_REWARD
+
+    # TEST ONLY (task 6.4 G1): the synthetic two-segment reward stands in for a
+    # compacting harness; it is accepted only with cross_segment_per_sample.
+    synthetic = getattr(args, "reward_function", None) == SYNTHETIC_SEGMENTS_REWARD
+    if synthetic and rl_gae_variant(args) != "cross_segment_per_sample":
+        raise ValueError(f"{SYNTHETIC_SEGMENTS_REWARD} is only valid with gae_variant cross_segment_per_sample")
+    compaction_env = compactionrl_launch_env(
+        args, environ, custom_agent == CODEX_OPENENV_AGENT or (synthetic and custom_agent is None))
     if custom_agent not in SIGNED_CODEX_AGENTS:
         return None
     if getattr(args, "rl_engine", "ports") != "ports":
