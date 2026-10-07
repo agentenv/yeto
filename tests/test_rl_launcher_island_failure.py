@@ -306,6 +306,27 @@ def test_stalled_run_exits_6_and_tears_down(monkeypatch, tmp_path, capsys):
     assert not [r for r in record if r[0] == "relaunch"]
 
 
+def test_modal_container_change_exits_7_and_stops_the_app(monkeypatch, tmp_path, capsys):
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
+
+    def moved(*args, **kwargs):  # Modal re-ran the island in a second container
+        guard = kwargs["guard"]
+        guard.feed("[modal-island 0] rank 0 container ta-A")
+        guard.feed("[modal-island 0] rank 0 container ta-B")
+
+    monkeypatch.setattr(launcher, "_tail_modal", moved)
+    args = _launcher_args("ports", ("--controller", "local", "--rl-image",
+                                    "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100,modal:1xa100")
+    args.keep, args.recover_timeout, args.controller_poll = False, 600.0, 30.0
+    args.rl_stall_timeout = 900.0
+    assert launcher.run(args) == launcher.CONTAINER_CHANGED_EXIT == 7
+    err = capsys.readouterr().err
+    assert "Modal container changed" in err and "ta-A -> ta-B" in err
+    assert ("stop_app",) in record
+
+
 def test_stall_detection_disabled_with_zero(monkeypatch, tmp_path):
     ctl = launcher.FleetController(
         learners={}, syncer=None, sky_ops=types.SimpleNamespace(now=lambda: 0.0),

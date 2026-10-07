@@ -543,6 +543,10 @@ def island_main(cfg_json: str) -> int:
         rank, ips, all_ips = 0, ["127.0.0.1"], {}
     env = {**os.environ, **cfg.envs, **skypilot_env(rank, ips, cfg.gpus_per_node), "HOME": "/root"}
     print(f"[modal-island {cfg.learner_id}] rank {rank}/{len(ips)} starting (node ips {ips})", flush=True)
+    # The launcher watches this line: a second, different id on the same call means Modal
+    # moved the island to a new container (preemption / reschedule) and re-ran the script.
+    print(f"[modal-island {cfg.learner_id}] rank {rank} container {os.environ.get('MODAL_TASK_ID', 'unknown')}",
+          flush=True)
     tape = None
     if cfg.tape_volume_name and cfg.tape_subdir:
         os.makedirs(TAPE_SOURCE_DIR, exist_ok=True)
@@ -794,6 +798,41 @@ class ModalOps:
         modal = self._modal()
         for entry in modal.FunctionCall.from_id(call_id).logs.stream():
             yield getattr(entry, "message", str(entry))
+
+
+CONTAINER_LINE_RE = re.compile(r"\[modal-island (\d+)\] rank (\d+) container (\S+)")
+
+
+class ContainerIdGuard:
+    """Watches one Modal call's log stream for container-id changes.
+
+    `--modal-retries 0` does not stop Modal from re-running the function in a new
+    container after a preemption/reschedule (double billing, mixed state). The island
+    prints its MODAL_TASK_ID; the first id per (island, rank) is remembered and a later
+    different one trips the guard. ``on_change(message)`` is called once per change."""
+
+    def __init__(self, on_change=None) -> None:
+        self.first: dict[tuple[str, str], str] = {}
+        self.changes: list[str] = []
+        self.on_change = on_change
+
+    @property
+    def tripped(self) -> bool:
+        return bool(self.changes)
+
+    def feed(self, text: str) -> None:
+        for part in str(text).split("\n"):
+            m = CONTAINER_LINE_RE.search(part)
+            if not m:
+                continue
+            key, cid = (m.group(1), m.group(2)), m.group(3)
+            seen = self.first.setdefault(key, cid)
+            if seen != cid:
+                msg = (f"Modal container changed for island {key[0]} rank {key[1]}: "
+                       f"{seen} -> {cid} (the run script was re-run in a new container)")
+                self.changes.append(msg)
+                if self.on_change is not None:
+                    self.on_change(msg)
 
 
 class _JobStatus:
