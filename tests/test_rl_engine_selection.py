@@ -189,6 +189,32 @@ def test_ports_island_puts_the_pinned_miles_checkout_first(monkeypatch):
     assert 'RAY_ADDRESS="$MASTER_ADDR:6379"' in ports_run
 
 
+def test_legacy_island_in_the_ports_image_gets_the_megatron_checkout(monkeypatch):
+    from yeto.rl import MILES_IMAGE, MILES_NEXT_IMAGE
+
+    # S14 G4/G5 (s14-dlr-legacy-20261007b/c): legacy in MILES_NEXT_IMAGE
+    # needs the image's editable Megatron-LM checkout on PYTHONPATH too (the
+    # run still fails there: that Megatron dropped megatron.training.tokenizer,
+    # which agentenv/miles imports; legacy belongs in MILES_IMAGE).
+    legacy = _cli(("--rl-engine", "legacy", "--rl-image", MILES_NEXT_IMAGE))
+    _prepare_rl_args(legacy)
+    assert launcher.island_uses_ports_megatron(legacy)
+    run = _island_task(legacy, monkeypatch).run
+    assert (
+        "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir:/root/Megatron-LM"
+        "${PYTHONPATH:+:$PYTHONPATH} " in run
+    )
+    assert "PYTHONPATH=$HOME/miles:" not in run  # legacy pip -e installs ~/miles
+    own = _cli(("--rl-engine", "legacy"))
+    _prepare_rl_args(own)
+    assert own.rl_image == MILES_IMAGE
+    assert not launcher.island_uses_ports_megatron(own)
+    assert "/root/Megatron-LM" not in _island_task(own, monkeypatch).run
+    other = _cli(("--rl-engine", "legacy", "--rl-image", "docker:example/miles@sha256:" + "e" * 64))
+    _prepare_rl_args(other)
+    assert not launcher.island_uses_ports_megatron(other)
+
+
 def test_modal_ports_island_does_not_request_the_external_router():
     from yeto.gpu_spec import parse_gpu_spec
 

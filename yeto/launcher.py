@@ -3358,6 +3358,23 @@ def rl_island_cpus(args, cloud: str | None = None):
     return RL_ISLAND_MIN_CPUS
 
 
+def island_uses_ports_megatron(args) -> bool:
+    """Whether the island image ships the editable Megatron-LM at
+    PORTS_MEGATRON_PATH: the ports engine always (its default and any
+    override are ports images), the legacy engine only when it is pointed at
+    the ports image (MILES_NEXT_IMAGE) instead of its own MILES_IMAGE."""
+    if getattr(args, "rl_engine", "ports") == "ports":
+        return True
+    from .rl import MILES_NEXT_IMAGE
+
+    image = (getattr(args, "rl_image", None) or "").strip()
+
+    def strip(ref):
+        return ref[len("docker:"):] if ref.startswith("docker:") else ref
+
+    return bool(image) and strip(image) == strip(MILES_NEXT_IMAGE)
+
+
 def make_miles_island_task(
     args,
     spec: ClusterSpec,
@@ -3685,8 +3702,17 @@ def make_miles_island_task(
     # launchers always put the checkout on PYTHONPATH; do the same, after
     # our own sources so it shadows nothing of ours.  The driver's
     # PYTHONPATH reaches every Ray actor through the job runtime_env.
+    # S14 G4/G5 (s14-dlr-legacy-20261007b/c): the legacy engine run in the
+    # ports image (--rl-image MILES_NEXT_IMAGE) needs the same checkout on
+    # PYTHONPATH, so it is added whenever the island image is the ports
+    # image, whatever the engine; legacy in its own MILES_IMAGE is unchanged.
+    # Necessary but NOT sufficient for legacy there: agentenv/miles imports
+    # megatron.training.tokenizer.tokenizer._vocab_size_with_padding, which
+    # the image's Megatron-LM (core 0.19, used by the ports fork via
+    # megatron.core.tokenizers.utils.build_tokenizer) no longer has (run c
+    # failed identically with the path present).  Legacy needs MILES_IMAGE.
     island_megatron_path = (
-        f":{PORTS_MEGATRON_PATH}" if getattr(args, "rl_engine", "ports") == "ports" else ""
+        f":{PORTS_MEGATRON_PATH}" if island_uses_ports_megatron(args) else ""
     )
     # Private --rl-image (registry_login_for: SKYPILOT_DOCKER_* in the
     # environment, or --rl-image-private): the login goes into the task SECRETS, SkyPilot's supported
