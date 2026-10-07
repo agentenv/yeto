@@ -803,3 +803,4 @@
 - 阶段 A / fnconv（B0-2 full 转换）：H200 容量阻塞，**未执行**（$0）。正式首跑（4×8 H200）按用户裁定暂缓。
 
 **费用**：本阶段 ≈$68（try12 $11、try13 $29、try15 $28）；H200 尝试均容量阻塞 ≈$0。明细见 `infra-drafts/gpu-spend.md`。
+- S14 勾选依据（2.3）：tasks.md 依赖 2.2（:51）与 1.7（:31）均已勾；A2（L-2.3）第三次三 arm 同 SHA 37155d8 判据 1–6 全过，证据 evidence/infra-v2-b1/a2/rerun3/RESULT.md（+RESULT-analysis.json）；X9 guard 见 round3-check.json（95203615 第三轮 C）。
