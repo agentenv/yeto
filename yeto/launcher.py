@@ -5205,6 +5205,7 @@ class FleetController:
         instance_guard=None,
         on_rename=None,
         fleet_log=None,
+        keep_abandoned: bool = False,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -5212,6 +5213,9 @@ class FleetController:
         `on_relaunch(name, new_job_id)` is called after every successful
         cluster relaunch (production spawns a new log tail)."""
         self.ops = sky_ops
+        # B12: True (--keep-abandoned) leaves an abandoned learner's cluster up for
+        # post-mortem instead of tearing it down; the final teardown still honors --keep.
+        self.keep_abandoned = keep_abandoned
         # Path of the run's STOP flag file (``runs.stop_flag_path``; ``yeto stop-run``
         # writes it): once it exists no island is relaunched any more.
         self.stop_flag = stop_flag
@@ -5632,7 +5636,8 @@ class FleetController:
                 # Abandoned while this attempt was in flight, but the
                 # relaunch re-provisioned the cluster anyway: tear it back
                 # down so nothing is left running unattended.
-                self._down(target, force=True)
+                if not self.keep_abandoned:
+                    self._down(target, force=True)
 
         thread = self.thread_cls(target=_run, daemon=True)
         attempt.thread = thread
@@ -5654,7 +5659,10 @@ class FleetController:
                 print(f"[launcher] WARN: relaunch of {rec['name']} still in flight after "
                       f"{RELAUNCH_JOIN_S:.0f}s; verify the provider for leftovers",
                       file=sys.stderr)
-        self._down(rec["name"])
+        if self.keep_abandoned:
+            print(f"[launcher] keeping abandoned cluster {rec['name']} (--keep-abandoned)")
+        else:
+            self._down(rec["name"])
         if self.fixed_roster:
             message = (
                 f"fixed-roster learner {rec['name']} could not recover"
@@ -6477,6 +6485,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             stall_timeout=float(
                 getattr(args, "rl_stall_timeout", None) or DEFAULT_RL_STALL_TIMEOUT_S
             ) if getattr(args, "rl_stall_timeout", None) != 0 else 0.0,
+            keep_abandoned=bool(getattr(args, "keep_abandoned", False)),
             no_recover=verda["no_recover"] if verda else (),
             instance_guard=verda["guard"] if verda else None,
             on_rename=_rename_hook(clusters, on_clusters, [] if head_mode else [syncer_cluster]),

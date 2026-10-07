@@ -99,7 +99,7 @@ class FakeOps:
 
 
 def make_controller(ops, learners, recover_timeout=100, poll=30, on_relaunch=None,
-                    stop_flag=None):
+                    stop_flag=None, keep_abandoned=False):
     ops.status_seq.setdefault(SYNCER, [RUNNING])
     return FleetController(
         stop_flag=stop_flag,
@@ -110,6 +110,7 @@ def make_controller(ops, learners, recover_timeout=100, poll=30, on_relaunch=Non
         recover_timeout=recover_timeout,
         on_relaunch=on_relaunch,
         thread_cls=ImmediateThread,
+        keep_abandoned=keep_abandoned,
     )
 
 
@@ -430,3 +431,18 @@ def test_stop_run_cli_only_writes_the_flag(tmp_path, monkeypatch, capsys):
     from yeto import launcher
 
     assert "stop_flag=runs.stop_flag_path(args.cluster_prefix)" in inspect.getsource(launcher)
+
+
+def test_keep_abandoned_leaves_failed_cluster_up(capsys):
+    # B12: with keep_abandoned the abandoned learner's cluster is NOT torn down.
+    ops = FakeOps()
+    ops.status_seq["l0"] = [FAILED]
+    ops.status_seq["l1"] = [RUNNING, SUCCEEDED]
+    ctl = make_controller(ops, {"l0": 1, "l1": 2}, recover_timeout=0, keep_abandoned=True)
+
+    exit_codes = ctl.run()
+
+    assert exit_codes["l0"].startswith("ABANDONED")
+    assert ops.down_calls == []
+    assert "l0" not in ctl.downed_clusters
+    assert "keeping abandoned cluster l0" in capsys.readouterr().out

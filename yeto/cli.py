@@ -1109,6 +1109,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     infra.add_argument("--cluster-prefix", default="yeto", help="cluster name prefix; also the run's name")
     infra.add_argument("--keep", action="store_true", help="do not tear down clusters at the end")
     infra.add_argument(
+        "--keep-abandoned", action="store_true",
+        help="leave a learner cluster up when the controller abandons it (default: tear it down, even with --keep)",
+    )
+    infra.add_argument(
         "--retry-until-up",
         action="store_true",
         help="keep retrying learner provisioning until capacity is found",
