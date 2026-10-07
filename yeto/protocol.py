@@ -380,6 +380,13 @@ class _Outbound:
     sent: threading.Event | None = None
 
 
+def _connect_log(message: str) -> None:
+    """Island-side connection progress on stderr (lands in the island log)."""
+    import sys
+
+    print(f"[yeto-syncer-client] {message}", file=sys.stderr, flush=True)
+
+
 class SyncerClient:
     """Non-blocking striped syncer connection owned by one learner process.
 
@@ -494,13 +501,26 @@ class SyncerClient:
     def _connect_one(self) -> socket.socket:
         last: OSError | None = None
         t0 = time.monotonic()
+        attempts = 0
+        next_report = 0.0
+        _connect_log(f"dialing syncer {self.addr[0]}:{self.addr[1]} "
+                     f"(learner {self.learner_id}, timeout {self.connect_timeout:.0f}s)")
         while time.monotonic() - t0 < self.connect_timeout:
+            attempts += 1
             try:
-                return self._dial(30)
+                sock = self._dial(30)
+                _connect_log(f"connected to syncer {self.addr[0]}:{self.addr[1]} after "
+                             f"{attempts} attempt(s), {time.monotonic() - t0:.1f}s")
+                return sock
             except OSError as e:  # syncer may not be up yet
                 last = e
+                waited = time.monotonic() - t0
+                if waited >= next_report:  # s13-g3b: a silent 900 s redial looked like a hang
+                    _connect_log(f"syncer {self.addr[0]}:{self.addr[1]} not reachable yet "
+                                 f"(attempt {attempts}, {waited:.0f}s): {type(e).__name__}: {e}")
+                    next_report = waited + 30.0
                 time.sleep(2.0)
-        raise ConnectionError(f"cannot reach syncer at {self.addr}: {last}")
+        raise ConnectionError(f"cannot reach syncer at {self.addr} after {attempts} attempt(s): {last}")
 
     def start(self) -> None:
         self._connect_group(patient=True)

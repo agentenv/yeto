@@ -795,6 +795,30 @@ def tcp_probe(host: str, port: int = SYNCER_PORT, *, expect: bytes | None = None
     return False, f"{host}:{port} unreachable after {attempts} attempt(s): {last}"
 
 
+def probe_syncer_ports(args, host: str, *, probe=None) -> list[str]:
+    """Fail fast, before any island is started, unless every syncer port
+    (actor 29400 and, for a critic algorithm, critic 29401) accepts a TCP
+    connection from this machine. On clouds where sky opens the ports
+    (security groups, e.g. Nebius) this is the only check that the rule
+    really took effect: s13-g3-modal-20261007b spent the 900 s stall timeout
+    with both islands silently redialing a Nebius syncer that never saw a
+    connection. A pass here does not prove the islands' egress (Modal), only
+    that the head side is open."""
+    probe = probe or tcp_probe
+    ports = [SYNCER_PORT, CRITIC_SYNCER_PORT] if rl_needs_critic(args) else [SYNCER_PORT]
+    details = []
+    for port in ports:
+        ok, detail = probe(host, port)
+        if not ok:
+            raise RuntimeError(
+                f"syncer port {port} not reachable from outside {syncer_cloud(args)} ({detail}); "
+                "no island was started"
+            )
+        print(f"[launcher] syncer probe: {detail}", flush=True)
+        details.append(detail)
+    return details
+
+
 def make_syncer_task(args, num_learners: int):
     import platform
 
@@ -6157,14 +6181,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             clusters.append(syncer_cluster)
             syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
             print(f"[launcher] syncer up at {syncer_addr}")
-            if syncer_ports(args) is None:
-                ok, detail = tcp_probe(str(syncer_handle.head_ip), SYNCER_PORT)
-                if not ok:
-                    raise RuntimeError(
-                        f"syncer port not reachable from outside {syncer_cloud(args)} ({detail}); "
-                        "no island was started"
-                    )
-                print(f"[launcher] syncer probe: {detail}")
+            probe_syncer_ports(args, str(syncer_handle.head_ip))
 
         if external:
             for x in range(external):
