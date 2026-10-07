@@ -9,8 +9,11 @@ sampling (16 samples per prompt; a run-level setting, not part of the spec).
 
 Translation: PPO (shared actor/critic, ``critic_argv``) + the fork's
 ``--gae-variant decoupled`` / ``--gae-lambd-mode length_adaptive`` +
-``--positive-example-lm-loss-coef``. Values not in the paper are not invented:
-see :data:`NOT_IN_PAPER`. Not a registration module (no fields/flags here);
+``--positive-example-lm-loss-coef`` / ``--positive-example-source success``
+(fork 70e3d7761: positives from the reward function's explicit boolean success
+field; NLL normalized by the global positive-token count, eq. 9). Values not in
+the paper are not invented: every configuration that differs from the paper or
+that the paper does not give is listed in :data:`DEVIATIONS` (design D7). Not a registration module (no fields/flags here);
 execution is not declared available before GPU G1 (task 7.3).
 """
 
@@ -45,15 +48,36 @@ PAPER_RUN_SETTINGS: dict[str, Any] = {
     "eval": "AIME24 avg@32, top_p 0.7, temperature 1.0",  # sec. 5.1
 }
 
-# Yeto choices the paper does not fix (need user confirmation).
-NOT_IN_PAPER: dict[str, str] = {
-    "loss.positive_lm_reward_threshold": "paper: 'correct answers'; yeto uses reward > 0.0",
-    "critic.init": "paper initializes the value model from a reward model; yeto copies the "
-                   "actor backbone (design D5) -- no reward model in this stack",
-    "critic.value_clip": "not given; Miles default 0.2",
-    "advantage.lambd": "unused under length_adaptive; filled with 1.0",
-    "kl": "not given for VAPO; Miles shared PPO requires kl_coef 0",
-}
+# Every configuration that differs from the paper or that the paper does not
+# give (user decision E, 2026-10-07; mirrored in design D7):
+# (item, yeto value, source of the value, relation to the paper).
+DEVIATIONS: tuple[tuple[str, str, str, str], ...] = (
+    ("critic.init", "copy_actor_backbone + 50-step warm-up (stage W) with value-quality "
+     "metrics (critic_warmup.value_quality)", "design D5; user decision B",
+     "differs: paper initializes the value model from a reward model; no RM in this stack"),
+    ("loss.positive_lm_source", "success (explicit boolean sample.metadata success/is_correct "
+     "from the reward function; missing -> error)", "user decision C",
+     "paper: 'correct answers' without a mechanism; reward>threshold only if the spec "
+     "declares the reward binary success (positive_lm_source='reward')"),
+    ("positive LM normalization", "sum over positive tokens / global positive-token count of "
+     "the optimizer step (all micro-batches and DP ranks)", "paper eq. 9; user decision D",
+     "matches eq. 9; the batch it is counted over = one Miles optimizer step"),
+    ("critic.value_clip", "0.2", "Miles default (engineering baseline)", "not given in paper"),
+    ("kl", "none (kl_coef 0)", "Miles shared PPO requires kl_coef 0 (engineering baseline)",
+     "not given in paper for VAPO"),
+    ("advantage.lambd", "1.0 (unused under length_adaptive)", "spec default fill",
+     "not applicable in paper"),
+    ("advantage.alpha", "0.05", "paper sec. 5.1 (user decision A: kept)",
+     "same as paper; differs from the fork default 1.5 (SAO / CompactionRL)"),
+    ("lr warmup steps", "run-level, not fixed", "-", "paper: 'warmup-constant', length not given"),
+    ("mini-batch 512 unit", "run-level", "-", "paper does not say prompts or samples"),
+    ("updates per batch", "1 actor / 1 critic (Miles default)", "Miles default",
+     "not given in paper"),
+    ("max response length", "run-level", "-", "not given in paper"),
+)
+# Back-compat summary view of DEVIATIONS.
+NOT_IN_PAPER: dict[str, str] = {item: f"{value} ({relation})"
+                                for item, value, _src, relation in DEVIATIONS}
 
 
 def vapo_spec(**overrides: Any) -> AlgorithmSpec:
@@ -63,7 +87,7 @@ def vapo_spec(**overrides: Any) -> AlgorithmSpec:
     groups: dict[str, dict[str, Any]] = {
         "advantage": {"estimator": "ppo"},
         "execution": {"needs_critic": True},
-        "loss": {"positive_lm_reward_threshold": 0.0},
+        "loss": {"positive_lm_source": "success"},
         "critic": {},
     }
     for path, value, _ in PAPER_PARAMETERS:

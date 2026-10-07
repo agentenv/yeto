@@ -230,6 +230,7 @@ _UNMAPPED = [
     "--gae-critic-lambd",
     "--positive-example-lm-loss-coef",
     "--positive-example-reward-threshold",
+    "--positive-example-source",
     "--critic-updates-per-step",  # fork e07e51c07 (CompactionRL 9.3)
     "--num-critic-epochs",  # same fork dest (SAO spelling)
     "--ref-update-interval",

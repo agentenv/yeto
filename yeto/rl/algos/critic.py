@@ -86,6 +86,7 @@ def critic_argv(spec: AlgorithmSpec) -> list[str]:
 FORK_FLAGS = frozenset({
     "--gae-variant", "--gae-lambd-mode", "--gae-length-alpha", "--gae-critic-lambd",
     "--positive-example-lm-loss-coef", "--positive-example-reward-threshold",
+    "--positive-example-source",
     # CompactionRL 2 / SAO 2 critic updates per policy update: fork e07e51c07
     # (yeto-critic-family), one dest; the mechanism stays undeclared until GPU G1.
     "--critic-updates-per-step", "--num-critic-epochs",
@@ -102,25 +103,33 @@ def gae_variant_argv(spec: AlgorithmSpec) -> list[str]:
     argv: list[str] = []
     if a.gae_variant == "decoupled":
         argv += ["--gae-variant", "decoupled", "--gae-critic-lambd", _num(a.critic_lambd)]
-    elif a.gae_variant == "cross_segment":
-        # CompactionRL per the paper (user decision 2026-10-07): one sample per
-        # compaction segment, local GAE x (gamma*lambda)^{tokens_after}. The fork's
-        # legacy ``cross_segment`` (one sample per rollout + segment_ids) is not used.
-        argv += ["--gae-variant", "cross_segment_per_sample"]
+    elif a.gae_variant in ("cross_segment_per_sample", "cross_segment_whole_rollout"):
+        # CompactionRL (design D8): per_sample = the paper's form (one sample per
+        # compaction segment, local GAE x (gamma*lambda)^{tokens_after});
+        # whole_rollout = explicit control mode for the 9.5 ablation. Same fork names.
+        argv += ["--gae-variant", a.gae_variant]
     if a.lambd_mode == "length_adaptive":
         argv += ["--gae-lambd-mode", "length_adaptive", "--gae-length-alpha", _num(a.alpha)]
     return argv
 
 
 def positive_lm_argv(spec: AlgorithmSpec) -> list[str]:
-    """VAPO positive-example LM loss (fork cbf8c4737); empty when unset."""
+    """VAPO positive-example LM loss (fork 70e3d7761); empty when unset.
+
+    ``--positive-example-source success`` reads the reward function's boolean
+    ``sample.metadata['success'/'is_correct']`` (missing -> fork error); ``reward``
+    (reward > threshold) only when the spec declares the reward binary success.
+    """
 
     coef = getattr(spec.loss, "positive_lm_coef", None)
     if coef is None:
         return []
-    return ["--positive-example-lm-loss-coef", _num(coef),
-            "--positive-example-reward-threshold",
-            _num(spec.loss.positive_lm_reward_threshold)]
+    argv = ["--positive-example-lm-loss-coef", _num(coef),
+            "--positive-example-source", spec.loss.positive_lm_source]
+    if spec.loss.positive_lm_source == "reward":
+        argv += ["--positive-example-reward-threshold",
+                 _num(spec.loss.positive_lm_reward_threshold)]
+    return argv
 
 
 def _none(spec: AlgorithmSpec) -> list[str]:
@@ -140,22 +149,12 @@ register_flag(FlagMapping("--num-critic-only-steps", "critic.warmup_steps", Fals
 register_flag(FlagMapping("--critic-load", "critic.load", False, _str,
                           lambda v: [("critic.init", "load"), ("critic.load", v)], _none))
 
-# Fork value -> spec value. The fork's legacy ``cross_segment`` (one sample per
-# rollout, earlier segments see no terminal reward) does not match CompactionRL
-# (arXiv 2607.05378 sec. 4.2) and is refused; spec ``cross_segment`` translates
-# to ``cross_segment_per_sample`` (fork ffe769c1e).
-_GAE_VARIANT_FROM_FORK = {"cross_segment_per_sample": "cross_segment", "cross_segment": None}
-
-
 def _parse_gae_variant(raw: str) -> str:
-    if raw in _GAE_VARIANT_FROM_FORK:
-        mapped = _GAE_VARIANT_FROM_FORK[raw]
-        if mapped is None:
-            raise _af.AlgorithmSpecError(
-                "--gae-variant cross_segment (legacy one-sample-per-rollout layout) is refused: "
-                "CompactionRL optimises each segment as its own sample; use "
-                "--gae-variant cross_segment_per_sample (spec advantage.gae_variant=cross_segment)")
-        return mapped
+    if raw == "cross_segment":
+        raise _af.AlgorithmSpecError(
+            "--gae-variant cross_segment is ambiguous and refused: use "
+            "--gae-variant cross_segment_per_sample (CompactionRL, one sample per segment) or "
+            "--gae-variant cross_segment_whole_rollout (explicit control mode)")
     return raw
 
 
@@ -180,23 +179,64 @@ def _positive_coef(path: str, value: Any) -> float | None:
 register_field("loss", "positive_lm_coef", default=None, parse=_positive_coef)
 register_field("loss", "positive_lm_reward_threshold", default=None,
                parse=lambda path, v: _alg._number(path, v))
+# How a sample is judged positive (user decision C, design D7): "success" = the
+# reward function's explicit boolean success field; "reward" = reward > threshold,
+# allowed only as a declaration that the reward is a binary success signal.
+POSITIVE_LM_SOURCES = ("success", "reward")
+register_field("loss", "positive_lm_source", default=None,
+               parse=lambda path, v: _alg._optional_choice(path, v, POSITIVE_LM_SOURCES))
 
 
 def _reject_positive_lm(spec: AlgorithmSpec) -> str | None:
     coef = spec.loss.positive_lm_coef
+    source = spec.loss.positive_lm_source
     threshold = spec.loss.positive_lm_reward_threshold
-    if coef is not None and threshold is None:
-        return (
-            "loss.positive_lm_coef needs loss.positive_lm_reward_threshold (a sample is a "
-            "positive example when its reward is strictly greater); set it explicitly so "
-            "both islands hash the same definition of 'correct'"
-        )
-    if coef is None and threshold is not None:
-        return "loss.positive_lm_reward_threshold only applies with loss.positive_lm_coef"
+    if coef is None:
+        if source is not None or threshold is not None:
+            return ("loss.positive_lm_source / positive_lm_reward_threshold only apply with "
+                    "loss.positive_lm_coef")
+        return None
+    if source is None:
+        return ("loss.positive_lm_coef needs loss.positive_lm_source: 'success' (explicit "
+                "success field from the reward function) or 'reward' (only when a positive "
+                "reward always means complete success)")
+    if source == "reward" and threshold is None:
+        return ("loss.positive_lm_source='reward' needs loss.positive_lm_reward_threshold "
+                "(positive when reward is strictly greater)")
+    if source == "success" and threshold is not None:
+        return ("loss.positive_lm_reward_threshold only applies with "
+                "loss.positive_lm_source='reward'")
     return None
 
 
 register_rejection("positive_lm_threshold", _reject_positive_lm)
+
+# --------------------------------------------------------------------------
+# Stage-W value-quality gate (user decision B, design D5/D7). Absent (None) =
+# record only, never block; absent from the canonical JSON while None, so no
+# existing spec hash changes. Checked by critic_warmup.finish_warmup/load_product.
+# --------------------------------------------------------------------------
+WARMUP_GATE_FIELDS = (
+    "warmup_max_value_mse", "warmup_max_value_rel_error",
+    "warmup_max_calibration_error", "warmup_min_explained_variance",
+)
+for _name in WARMUP_GATE_FIELDS[:3]:
+    register_field("critic", _name, default=None,
+                   parse=lambda path, v: _alg._number(path, v, low=0.0))
+register_field("critic", "warmup_min_explained_variance", default=None,
+               parse=lambda path, v: _alg._number(path, v))
+
+
+def _reject_warmup_gate(spec: AlgorithmSpec) -> str | None:
+    set_fields = [n for n in WARMUP_GATE_FIELDS if getattr(spec.critic, n, None) is not None]
+    if not set_fields:
+        return None
+    if not spec.execution.needs_critic or not spec.critic.warmup_steps:
+        return f"critic.{set_fields} only apply to a critic algorithm with critic.warmup_steps > 0"
+    return None
+
+
+register_rejection("critic_warmup_gate", _reject_warmup_gate)
 register_mechanism("features", "positive_example_lm_loss",
                    lambda s: s.loss.positive_lm_coef is not None)
 # Fork-only GAE variants: undeclared by the Miles adapter until GPU G1 (task 7.3).
@@ -206,7 +246,9 @@ register_mechanism("features", "gae_length_adaptive",
                    lambda s: s.advantage.lambd_mode == "length_adaptive")
 # CompactionRL (change 9.3): undeclared until GPU G1 (task 9.4).
 register_mechanism("features", "gae_cross_segment",
-                   lambda s: s.advantage.gae_variant == "cross_segment")
+                   lambda s: s.advantage.gae_variant == "cross_segment_per_sample")
+register_mechanism("features", "gae_cross_segment_whole_rollout",
+                   lambda s: s.advantage.gae_variant == "cross_segment_whole_rollout")
 register_mechanism("features", "critic_multi_update",
                    lambda s: s.execution.needs_critic
                    and s.critic.critic_updates_per_step not in (None, 1))
@@ -221,6 +263,8 @@ register_flag(FlagMapping("--positive-example-lm-loss-coef", "loss.positive_lm_c
 register_flag(FlagMapping("--positive-example-reward-threshold",
                           "loss.positive_lm_reward_threshold", False, _float,
                           lambda v: [("loss.positive_lm_reward_threshold", v)], _none))
+register_flag(FlagMapping("--positive-example-source", "loss.positive_lm_source", False, _str,
+                          lambda v: [("loss.positive_lm_source", v)], _none))
 
 # --gamma: seq_adv's row emits it for REINFORCE++; critic_argv owns it under a critic.
 _gamma_row = _af.MAPPINGS["--gamma"]

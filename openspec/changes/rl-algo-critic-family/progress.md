@@ -117,7 +117,7 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 - 定向回归（GAE/loss 相关文件 + tests/test_chunked_gae.py）：基线 039471508 13 failed/99 passed，新 13 failed/121 passed，失败集合完全相同（megatron.core 缺失等环境原因）。未跑 tests/fast/ray 全量（会启动 Ray，线程上限）。
 - yeto 全量回归：log /home/michael/work/infra-drafts/critic-gae-pytest.log，68 failed/26 errors，与 /tmp/base2.sorted 按用例 id 比对集合相同，新增失败 0。
 
-## S13 7.1 VAPO 参数（2026-10-07，待用户确认）
+## S13 7.1 VAPO 参数（2026-10-07，用户已确认，见"S13 VAPO/CompactionRL 用户决定落实"）
 
 出处：VAPO, arXiv 2504.05118v3（11 Apr 2025），取自 arXiv HTML 版（https://arxiv.org/html/2504.05118v3）。
 
@@ -298,3 +298,24 @@ yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
 ### 未验证 / 待确认
 - 未验证：真实 Miles 训练路径（loss.py 需 megatron，仅 CPU 函数级测试）、Ray 序列化下新键传输（只测了 split_train_data_by_dp_raw）、GPU 9.4/9.5。
 - 待用户确认：(1) 段尾 bootstrap 取 0；(2) l 取整条 rollout 被优化 token 数（备选：段长）；(3) critic 目标用局部优势（备选：校正后优势，会使前段目标趋近 V）；(4) 旧 fork `cross_segment` 是否从 fork 删除。
+
+## S13 VAPO/CompactionRL 用户决定落实（2026-10-07，CPU；未上 GPU、未启动 Ray、未 push）
+
+### fork（/home/michael/work/miles-critic，分支 yeto-critic-family，`70e3d7761`，基于 ffe769c1e，本地）
+- C 正例判定：`--positive-example-source {success,reward}`，缺省 success = 奖励函数给的布尔 `sample.metadata["success"]`/`["is_correct"]`（`train_data_conversion.sample_success_flag`：非布尔/0-1 值或两键矛盾报错；缺失记 -1，键 `positive_example_success` 入分片）；启用 LM loss 时任一样本缺字段即报错，不回退 reward。`--positive-example-reward-threshold` 缺省改为 None，仅 source=reward 时允许（`arguments.validate_positive_example_args`）。
+- D 归一化（式 9）：`loss.positive_example_lm_weights` 按 optimizer step 分组（与 `get_data_iterator` 同切分；有 `micro_batch_indices` 时按 `num_microbatches` 分组）统计本地 (正例 token 数 P, Miles step 归一量 D)，`_dp_all_reduce_sum` 在 effective-DP 组求和，样本权重 w_i=flag_i·D/P；`losses._positive_example_lm_loss` 用 w_i 做加权 token 求和（D 由 Miles 原有的 per-token 全局 token 数 / per-sample rollout 数归一抵消）。batch 键 `positive_example_flags` → `positive_example_lm_weights`（megatron/fsdp get_batch 键表同步）。coef=0 路径不变。
+- F 旧模式：更正后的决定为改名保留——`cross_segment` → `cross_segment_whole_rollout`（显式对照，help 注明与式 15 不同），`cross_segment` 被 argparse 与 math_utils 拒绝（提示两个明确取值）；`cross_segment_per_sample` 不变。
+- 测试（miles-next-venv，`-p no:cacheprovider`，单进程，OMP/OPENBLAS/MKL=1，均不用 ray_local_mode）：`test_positive_example_lm_loss.py` 重写（式 9 独立参考对拍 per-token/per-sample；2 rank×2 micro-batch 模拟：先收集各 rank 本地统计再求和作为 all_reduce，所有 micro-batch 项之和/D = 全 8 样本式 9；按 step 分组权重手算；无正例/coef=0 不变；success 缺省与缺失报错、reward 源阈值、参数校验、success 字段解析）、`test_ppo_gae_variants.py`（改名 + 含糊取值拒绝）、`test_segment_ids_conversion.py`（+2 success 字段透传）。定向集（loss/、sao_ports、gae_variants、gae_masks、cp_advantages、critic_updates_per_step、segment_ids_conversion）：新 13 failed/143 passed；基线 ffe769c1e（git archive /tmp/vapo2-base）13 failed/134 passed，失败集合 diff 为空。log /tmp/s13-vapo2-fork.log、/tmp/s13-vapo2-base.log。
+
+### yeto（/home/michael/work/s13-vapo2，分支 s13-vapo2，基于 03d0197c）
+- A：`vapo_spec` α=0.05 不变。
+- B：`critic_warmup.value_quality`（mse、relative_error、explained_variance、10 箱等量分箱校准误差/最大偏差/箱表）、`quality_gate_problems`；`WarmupProduct.value_quality` 写入 manifest；spec 扩展字段 `critic.warmup_max_value_mse/warmup_max_value_rel_error/warmup_max_calibration_error/warmup_min_explained_variance`（`algos/critic.py` 注册，None 不入 JSON；只在 critic+warmup_steps>0 时允许）；缺省只记录，设阈值则 `finish_warmup` 不达标报错且不写 manifest、`load_product` 复用重查。**接线点未实现**：阶段 W 的 value/returns 导出（fork 侧）与 `run_stage` 返回值，需 GPU 路径。
+- C：spec 新字段 `loss.positive_lm_source ∈ {success, reward}`；coef 必须配 source；reward 必须配阈值；success 不得带阈值；argv `--positive-example-lm-loss-coef 0.1 --positive-example-source success`（reward 时再加阈值）；`--positive-example-source` 入 FORK_FLAGS/`_UNMAPPED`。VAPO 哈希 7ee1dde4…386f → `5e9b38edb3eec5e160d221c7f62275e6ebd4a9e163d743ddca94a9b406922113`。
+- E：`vapo.py::DEVIATIONS`（项/值/来源/与论文关系，`NOT_IN_PAPER` 由其派生），design D7 同表。
+- F：spec `GAE_VARIANTS=(vanilla, decoupled, cross_segment_per_sample, cross_segment_whole_rollout)`，`cross_segment` 在字段解析与 `--gae-variant` 吸收时报错；翻译直译同名 fork 取值；机制 `features:gae_cross_segment`（per_sample）、新 `features:gae_cross_segment_whole_rollout`（均未声明）；`compactionrl_whole_rollout_control_spec()` 为 9.5 对照臂。CompactionRL 哈希 506b4ba4…c932 → `16fb68d50b365b0bf182ee1989b650da6601efe38ac0ab5c3ec7ba4526bf3c4f`。design D8 写入已确认项。
+- pin：`critic_fork.py` → `70e3d77618841235330fee2f4634b1ddd6b924da`。
+- 测试：新 `tests/test_rl_critic_warmup_quality.py` 8 passed（手算指标、偏置 critic 的校准、退化输入、哈希/JSON 不含阈值字段、记录不拦截、门控拦截不写 manifest、有阈值无指标拒绝）；`test_rl_vapo.py`（快照/哈希/拒绝矩阵更新 + reward 源声明 + DEVIATIONS 覆盖）、`test_rl_compactionrl.py`（新哈希、含糊值拒绝、对照臂快照与 dry-run）、`test_rl_critic_fork_pin.py`（PIN）。定向 23 文件（critic*/vapo/compaction*/sao_spec/algorithm*/gae_reference/argv_snapshot/loss_variants_spec/seq_adv*/miles_adapter_config）600 passed/7 skipped，log /tmp/s13-vapo2-yeto.log；未改动的 `test_rl_argv_snapshot.py` 通过；`hash_compare.py` 输出与 `evidence/hash-critic.txt` 17 行相同。
+
+### 未验证 / 待确认
+- 未验证（需 GPU）：fork 中 `_dp_all_reduce_sum` 的真实分布式行为（只在 CPU 上以注入函数模拟）、Megatron 是否确实按 Σ max(mask,1) 做 per-token 全局归一（据 `loss_function` 返回的 num_tokens 推断，未在 Megatron 内核对）、CP>1、动态 batch 下 step 分组与 `get_data_iterator` 一致性（只按代码阅读对齐）、FSDP 后端的归一语义；`positive_example_success` 经 Ray 序列化的传输（只测 `split_train_data_by_dp_raw`）；阶段 W 价值质量的真实数据导出。
+- 新待确认：(1) 定向 grep 未找到 yeto 奖励实现向 `sample.metadata` 写 `success`/`is_correct`——VAPO 上卡前需由具体任务的奖励函数提供，否则 fork 报错；(2) 式 9 的"批"取一个 optimizer step（若一个 rollout 分多 step，各 step 单独归一）；(3) 价值质量阈值的具体数值未定（缺省只记录）；(4) 对照臂 `cross_segment_whole_rollout` 的 rollout 侧拼单 sample 未接线。
