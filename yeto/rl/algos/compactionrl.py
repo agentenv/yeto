@@ -2,7 +2,7 @@
 
 CompactionRL (arXiv 2607.05378v1, sec. 4-5) = PPO with a critic, trained on
 compacted agent rollouts (rollout side: :mod:`yeto.rl.compaction`):
-cross-segment GAE (eq. 13-15), length-adaptive lambda with alpha 1.5,
+cross-segment GAE (eq. 13-15; ``cross_segment_per_sample``), length-adaptive lambda with alpha 1.5,
 token-level loss normalisation (eq. 12), critic lr 3e-6, 2 value updates per
 policy update, 50 steps of value pretraining from the policy checkpoint (run
 as warm-up stage W, design D5), one rollout per prompt (a run-level setting).
@@ -21,7 +21,8 @@ from yeto.rl.engine.algorithm import AlgorithmSpec, load_extensions
 
 # (spec path, value, source).
 PAPER_PARAMETERS: tuple[tuple[str, Any, str], ...] = (
-    ("advantage.gae_variant", "cross_segment", "sec. 4.2 eq. 13-15 (cross-trajectory GAE)"),
+    ("advantage.gae_variant", "cross_segment_per_sample",
+     "sec. 4.2 eq. 13-15 (cross-trajectory GAE, one sample per segment)"),
     ("advantage.lambd_mode", "length_adaptive", "sec. 5.1: lambda = 1 - 1/(alpha*l)"),
     ("advantage.alpha", 1.5, "sec. 5.1: alpha 1.5"),
     ("loss.aggregation", "token", "sec. 4.2 eq. 12: token-level normalisation"),
@@ -52,9 +53,22 @@ NOT_IN_PAPER: dict[str, str] = {
     "loss.eps_clip": "not given numerically; Miles default",
     "critic.value_clip": "not given; Miles default 0.2",
     "advantage.lambd": "unused under length_adaptive; filled with 1.0",
-    "length_adaptive l": "paper: 'response length'; per-segment vs whole rollout not stated",
+    "length_adaptive l": "paper: 'response length'; per-segment vs whole rollout not stated; "
+                         "confirmed (design D8): whole rollout's optimized-token count",
+    "segment-end bootstrap": "not stated; confirmed (design D8): V=0 at every segment end",
+    "critic target": "not stated; confirmed (design D8): local (uncorrected) return = local "
+                     "advantage + V",
     "summary template": "q_sum section names / <analysis> text / u_resume text not given",
 }
+
+
+def compactionrl_whole_rollout_control_spec(**overrides: Any) -> AlgorithmSpec:
+    """Ablation arm (task 9.5): the explicit control mode ``cross_segment_whole_rollout``
+    (one sample per rollout + per-token segment ids; earlier segments get no terminal
+    reward, unlike eq. 15). Everything else equals :func:`compactionrl_spec`."""
+
+    advantage = {"gae_variant": "cross_segment_whole_rollout", **overrides.pop("advantage", {})}
+    return compactionrl_spec(advantage=advantage, **overrides)
 
 
 def compactionrl_spec(**overrides: Any) -> AlgorithmSpec:

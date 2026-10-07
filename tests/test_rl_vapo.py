@@ -21,13 +21,14 @@ VAPO_ARGV = [
     "--num-critic-only-steps", "0",
     "--gae-variant", "decoupled", "--gae-critic-lambd", "1.0",
     "--gae-lambd-mode", "length_adaptive", "--gae-length-alpha", "0.05",
-    "--positive-example-lm-loss-coef", "0.1", "--positive-example-reward-threshold", "0.0",
+    "--positive-example-lm-loss-coef", "0.1", "--positive-example-source", "success",
 ]
-VAPO_SHA = "7ee1dde459c362f290fb86347819300338054a0379f91fbbda1bb4c1cad2386f"
+# 7ee1dde4...386f before user decision C (reward > 0.0 positives); now explicit success.
+VAPO_SHA = "5e9b38edb3eec5e160d221c7f62275e6ebd4a9e163d743ddca94a9b406922113"
 VAPO_EXTRA = (
     "--advantage-estimator ppo --gae-variant decoupled --gae-lambd-mode length_adaptive "
     "--gae-length-alpha 0.05 --eps-clip 0.2 --eps-clip-high 0.28 --calculate-per-token-loss "
-    "--positive-example-lm-loss-coef 0.1 --positive-example-reward-threshold 0 "
+    "--positive-example-lm-loss-coef 0.1 --positive-example-source success "
     "--critic-lr 2e-6 --num-critic-only-steps 50"
 )
 UNDECLARED = ("advantage_estimators:ppo", "execution:critic", "features:gae_decoupled",
@@ -44,7 +45,8 @@ def test_vapo_spec_carries_the_paper_values():
     assert spec.rejections() == []
     for path, value, _source in PAPER_PARAMETERS:
         assert spec.get_path(path) == value, path
-    assert spec.loss.positive_lm_reward_threshold == 0.0
+    assert spec.loss.positive_lm_source == "success"
+    assert spec.loss.positive_lm_reward_threshold is None
     assert spec.critic.init == "copy_actor_backbone"
     assert spec.sha256() == VAPO_SHA
 
@@ -87,7 +89,8 @@ def test_hash_distinguishes_the_vapo_components():
     base = vapo_spec().sha256()
     for change in (dict(advantage={"alpha": 1.5}), dict(advantage={"critic_lambd": 0.95}),
                    dict(loss={"positive_lm_coef": 0.2}),
-                   dict(loss={"positive_lm_reward_threshold": 0.5})):
+                   dict(loss={"positive_lm_source": "reward",
+                              "positive_lm_reward_threshold": 0.5})):
         assert vapo_spec(**change).sha256() != base, change
 
 
@@ -103,8 +106,13 @@ def test_decoupled_fills_the_critic_lambda_explicitly():
 @pytest.mark.parametrize("spec, message", [
     (lambda: _ppo(advantage={"critic_lambd": 0.9}), "critic_lambd"),
     (lambda: _ppo(critic={"value_loss": "hl_gauss"}), "hl_gauss"),
-    (lambda: _ppo(loss={"positive_lm_coef": 0.1}), "positive_lm_reward_threshold"),
-    (lambda: _ppo(loss={"positive_lm_reward_threshold": 0.0}), "only applies"),
+    (lambda: _ppo(loss={"positive_lm_coef": 0.1}), "positive_lm_source"),
+    (lambda: _ppo(loss={"positive_lm_coef": 0.1, "positive_lm_source": "reward"}),
+     "positive_lm_reward_threshold"),
+    (lambda: _ppo(loss={"positive_lm_coef": 0.1, "positive_lm_source": "success",
+                        "positive_lm_reward_threshold": 0.0}), "only applies"),
+    (lambda: _ppo(loss={"positive_lm_reward_threshold": 0.0}), "only apply"),
+    (lambda: _ppo(loss={"positive_lm_source": "success"}), "only apply"),
     (lambda: AlgorithmSpec(advantage={"gae_variant": "decoupled"}), "only apply to critic"),
 ])
 def test_rejections(spec, message):
@@ -115,3 +123,29 @@ def test_plain_ppo_and_grpo_argv_unchanged():
     assert af.algorithm_argv(_ppo()) == [
         "--gamma", "1.0", "--lambd", "1.0", "--value-clip", "0.2", "--num-critic-only-steps", "0"]
     assert af.algorithm_argv(AlgorithmSpec()) == []
+
+
+def test_reward_source_is_an_explicit_binary_success_declaration():
+    spec = vapo_spec(loss={"positive_lm_source": "reward", "positive_lm_reward_threshold": 0.0})
+    assert spec.rejections() == []
+    argv = af.algorithm_argv(spec)
+    assert argv[-6:] == ["--positive-example-lm-loss-coef", "0.1", "--positive-example-source",
+                         "reward", "--positive-example-reward-threshold", "0.0"]
+    extra = VAPO_EXTRA.replace("--positive-example-source success",
+                               "--positive-example-source reward --positive-example-reward-threshold 0")
+    flags = [x for name in UNDECLARED for x in ("--rl-allow-unverified-mechanism", name)]
+    result = af.dry_run(["--dry-run", "--extra", extra, *flags])
+    assert result["verdict"] == "accepted"
+    assert result["algorithm_spec_sha256"] == spec.sha256() != VAPO_SHA
+
+
+def test_deviation_list_covers_every_non_paper_choice():
+    from yeto.rl.algos.vapo import DEVIATIONS, NOT_IN_PAPER
+
+    items = {item for item, *_ in DEVIATIONS}
+    for needed in ("critic.init", "loss.positive_lm_source", "positive LM normalization",
+                   "critic.value_clip", "kl", "advantage.alpha"):
+        assert needed in items
+    assert all(len(row) == 4 and all(row) for row in DEVIATIONS)
+    assert set(NOT_IN_PAPER) == items
+    assert vapo_spec().advantage.alpha == 0.05  # decision A: paper value kept

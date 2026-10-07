@@ -68,6 +68,8 @@ Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weigh
 3. 阶段 W 产物以内容哈希进入 receipt（`critic.init=load` + 来源哈希）；两岛共用同一 W 产物，只做一次。
 - 备选 a：放宽 fork 上 :3212 约束。否决：rebuild 下 critic-only 步与 actor 同步节奏未定义，改动面大。备选 b：主阶段前若干轮把 actor lr 置 0。否决：仍会走 rollout 权重同步与优化器状态，哈希与成本都不干净。
 
+- **价值质量检查（用户决定 B，2026-10-07）**：50 步只是起点，阶段 W 结束必须看价值质量而非只看步数。`yeto/rl/critic_warmup.py::value_quality(values, returns)` 定义：回报拟合 `mse=mean((v−G)²)`、`relative_error=√mse/√mean(G²)`；explained variance `1−Var(G−v)/Var(G)`（Var(G)=0 时为 None）；校准：按 v 排序等量分 10 箱，每箱 |mean v − mean G|，`calibration_error`=按样本数加权平均、`calibration_max_gap`=最大值、`calibration_bins` 全记录。结果写入阶段 W 产物 manifest（`WarmupProduct.value_quality`，ledger 即该 manifest）。可选门控：spec 扩展字段 `critic.warmup_max_value_mse / warmup_max_value_rel_error / warmup_max_calibration_error / warmup_min_explained_variance`（缺省 None=只记录不拦截；None 时不进规范 JSON，17 个既有规格哈希不变；仅 critic 且 warmup_steps>0 时允许）；`finish_warmup` 不达标即报错且不写 manifest，`load_product` 复用时重查（设了阈值但无指标也拒绝）。**接线点（未实现，需 GPU 路径）**：阶段 W 需导出最后若干 warm-up rollout 的逐 token value 与 GAE 价值目标（returns），由 `run_stage` 返回 `{"values","returns"}`；fork 目前不导出。
+
 ### D6 fork 上唯一的 GAE 扩展点
 在 `yeto/ports` 分支 math_utils.py 现有 vanilla/chunked GAE 旁加一个按 `--gae-variant` 分派的入口：
 - `length_adaptive`：λ=1−1/(α·l)，l 为序列响应长度（VAPO、SAO、CompactionRL 共用，α 默认 1.5）。
@@ -75,19 +77,36 @@ Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weigh
 - `cross_segment`：段内局部 GAE `A^loc_{s,i}=∑_{ℓ=0}^{n_s−i}(γλ)^ℓ δ_{s,i+ℓ}`，再乘 `(γλ)^{N_{>s}}`，`N_{>s}=∑_{j>s} n_j`；终局回报放在最后一段段尾，不跨压缩边界自举（CompactionRL）。
 - 段边界作为样本元数据（每 token 的 segment id）随 batch 传入；无边界时退化为 vanilla。缺省参数下逐元素等于原实现。
 - **用户决定（2026-10-07）：cross_segment 按论文"每段单独优化"实现**，目的是把奖励传到正确的压缩 action。每段是独立 sample，各段段尾都放共享终局回报，段尾 bootstrap 0，局部 GAE（式 13）再乘 `(γλ)^{N_{>s}}`（式 14），使奖励项折扣等于其在拼接轨迹中到终局的距离（式 15）。fork 新取值 `--gae-variant cross_segment_per_sample`（yeto-critic-family ffe769c1e）：按 sample 读 `metadata.tokens_after`（=N_{>s}），可选 `metadata.gae_length` 作为 length-adaptive 的 l；critic 目标取局部优势+V（论文未写，待确认）。yeto 规格值仍为 `advantage.gae_variant=cross_segment`（规格哈希不变），翻译为 `cross_segment_per_sample`；yeto 的 compaction rollout 令 `gae_length=整条 rollout 被优化 token 数`，同一 rollout 各段共用一个 λ（论文"l 为响应长度"未说明按段还是整条，此为 yeto 选择，待确认）。
-- fork 旧取值 `cross_segment`（整条 rollout 一个 sample + 每 token segment_ids，前段不含终局回报）与论文不符：fork 中保留不动（缺省与旧语义逐元素不变），yeto 吸收 `--gae-variant cross_segment` 时拒绝。
+- fork 旧取值 `cross_segment`（整条 rollout 一个 sample + 每 token segment_ids，前段不含终局回报）与论文不符。**用户决定（2026-10-07 更正）**：不删除，改名为显式对照模式 `cross_segment_whole_rollout`（help 注明与式 15 不同；数值与旧实现逐元素相同），含糊取值 `cross_segment` 在 fork（argparse choices + math_utils）与 yeto（spec 字段解析、`--gae-variant` 吸收）均报错并提示两个明确取值。yeto spec `advantage.gae_variant` 取值相应改为 `cross_segment_per_sample` / `cross_segment_whole_rollout`，与 fork 同名直译（fork 70e3d7761）。
 - 先用 yeto 仓库内独立 torch 参考实现（不 import 被测代码）对拍，仿照 rl-algo-loss-variants D3。
 
 ### D7 VAPO 与 SAO
 - VAPO = PPO + length_adaptive + decoupled GAE + value pretrain（复用 D5 阶段 W）+ 论文中的其它组件；具体变体参数为开放问题，不影响结构。
-- **VAPO 参数补充（7.1，待用户确认）**：出处 arXiv 2504.05118v3（HTML 版）§4.1–4.3、§5.1、表 1；全表见 progress.md "S13 7.1 VAPO 参数"。论文值：γ=1.0；decoupled GAE，critic 目标 λ=1.0；policy λ=1−1/(α·l)，**α=0.05**（注意 D6 的缺省 α=1.5 来自 SAO，不是 VAPO 值）；ε_low=0.2、ε_high=0.28；token 级 PG loss；positive-example LM loss 权重 μ=0.1；value warm-up 50 步；critic lr 2e-6、actor lr 1e-6（warmup-constant）；group sampling 每 prompt 16 次、512 prompts/采样、mini-batch 512。与论文不一致/论文未给出（需确认）：论文 value 模型由奖励模型初始化，yeto 用 `copy_actor_backbone`（D5）；"正确样本"判据论文只说 correct answers，yeto 取 reward>0.0；value_clip、KL、warm-up 调度长度论文未给出。
+- **VAPO 参数补充（7.1，用户已确认 2026-10-07）**：出处 arXiv 2504.05118v3（HTML 版）§4.1–4.3、§5.1、表 1；全表见 progress.md "S13 7.1 VAPO 参数"。论文值：γ=1.0；decoupled GAE，critic 目标 λ=1.0；policy λ=1−1/(α·l)，**α=0.05**（注意 D6 的缺省 α=1.5 来自 SAO，不是 VAPO 值）；ε_low=0.2、ε_high=0.28；token 级 PG loss；positive-example LM loss 权重 μ=0.1；value warm-up 50 步；critic lr 2e-6、actor lr 1e-6（warmup-constant）；group sampling 每 prompt 16 次、512 prompts/采样、mini-batch 512。与论文不一致/论文未给出（需确认）：论文 value 模型由奖励模型初始化，yeto 用 `copy_actor_backbone`（D5）；"正确样本"判据论文只说 correct answers，yeto 取 reward>0.0；value_clip、KL、warm-up 调度长度论文未给出。
 - VAPO 声明（7.2）：`yeto/rl/algos/vapo.py::vapo_spec()`；新增 `advantage.critic_lambd`（decoupled 时填 1.0）、`loss.positive_lm_coef/positive_lm_reward_threshold`；fork `yeto-vapo` cbf8c4737 实现 `--positive-example-lm-loss-coef`。三项 fork 专有机制 `features:gae_decoupled/gae_length_adaptive/positive_example_lm_loss` 在 G1（7.3）前不声明。
+- **用户决定（2026-10-07）**：
+  - A. α 保持论文 0.05。
+  - B. critic 初始化沿用"actor 主干 + 阶段 W warm-up"适配方案，warm-up 结束检查价值质量（见 D5 末条，缺省只记录）。
+  - C. 正例判定：缺省用奖励函数给出的显式布尔成功字段（`sample.metadata["success"]` 或 `"is_correct"`）；spec `loss.positive_lm_source="success"`（VAPO 缺省）/ fork `--positive-example-source success`（fork 缺省）；缺失即报错，不回退到 reward。只有 spec 声明 `positive_lm_source="reward"`（即"正奖励必然意味着完整成功"）时才允许 `positive_lm_reward_threshold`（reward 严格大于阈值）。VAPO 规格哈希 7ee1dde4…→5e9b38ed…（不在 17 个既有规格中）。
+  - D. 正例 LM loss 按论文式 9 归一：项 = Σ_正例 token (−log π) / P，P = 该 optimizer step 全部 micro-batch 与 DP rank 的正例 token 总数，μ=0.1。实现（fork 70e3d7761）：Miles 自身会把求和 loss 除以 step 的全局归一量 D（per-token：Σ max(mask_i,1) 全局 token 数，与 `loss_function` 的 num_tokens 一致，由 Megatron 跨 micro-batch/DP 累加；per-sample：该 step 的 rollout 数），因此在 `compute_advantages_and_returns` 里按 step 分组（与 `get_data_iterator` 同一切分）统计本地 (P, D)，在 effective-DP 组 all_reduce 求和，给每个样本权重 w_i = flag_i·D/P，loss 中加 μ·Σ_i w_i Σ_t mask·(−log π)。coef=0 时不走该路径（逐元素不变）。
+  - E. 与论文不同/论文未给出的配置清单（`yeto/rl/algos/vapo.py::DEVIATIONS`，逐项值/来源/差异）：
+    | 项 | yeto 值 | 来源 | 与论文 |
+    |---|---|---|---|
+    | critic.init | actor 主干 + 50 步阶段 W + 价值质量记录 | D5、决定 B | 不同：论文由奖励模型初始化（本栈无 RM） |
+    | 正例判定 | 显式 success 字段，缺失报错 | 决定 C | 论文只说"正确答案"，未给机制 |
+    | 正例 NLL 归一 | 除以 step 全局正例 token 数 | 式 9、决定 D | 一致；"批"取 Miles 一个 optimizer step |
+    | value_clip | 0.2 | Miles 缺省（工程基线） | 论文未给出 |
+    | KL | none（kl_coef 0） | Miles shared PPO 要求（工程基线） | 论文未给出 |
+    | advantage.lambd | 1.0（length_adaptive 下不用） | 规格填充 | 不适用 |
+    | α | 0.05 | 论文 §5.1（决定 A） | 一致；不同于 fork 缺省 1.5 |
+    | lr warmup 步数 / mini-batch 512 单位 / 每批更新次数 / 最大响应长度 | 运行配置或 Miles 缺省（1/1） | — | 论文未给出 |
 - SAO 迁移：把 `sao_streaming_runtime.py` 的 recipe 翻译为 AlgorithmSpec（sao_dis、α=1.5、γ/λ=1/1、HL-Gauss 51-bin、critic 步数=actor×num_critic_epochs），保留双 layout、双 syncer、lockstep 成对 fragment 语义。SAO 特有数学（HL-Gauss value loss、sao_dis）需从 agentenv/miles feat/sao-tbench21-e2e-validation@16a9bea409de（SAO 数学引入于 e25048edd；原写 ae475060 有误，那是 legacy MILES_COMMIT） 移植到 `yeto/ports`；该源码本地未查到，第一步是取得并核对。迁移完成前现有 SAO streaming 入口保持可用。
 
 ### D8 CompactionRL（决策 5）
 - rollout 侧（yeto/agent 路径）：剩余上下文 `C−|h_t| < T_comp`（10,240）时触发；同一策略按 `<analysis>/<summary>` 9 节模板生成摘要；重建 `h̄_t = s ⊕ u_resume(S_t) ⊕ 最近 k=2 步`；每条最多 3 次压缩；摘要段与任务共享回报；每段输出 segment 元数据。尽量复用 Miles `examples/experimental/terminus-compaction` 的 rollout 代码。
 - 训练侧：PPO clip、token 级归一化（批内全部被优化 assistant token 平均）、KL=0、每提示 1 条 rollout、critic lr 3e-6、每批 2 次 critic 更新对 1 次策略更新（`critic_updates_per_step=2`）、50 步 warm-up（D5）、cross_segment GAE + length_adaptive λ（D6）。按用户决定（2026-10-07）走每段一 sample 形态：`yeto/rl/compaction.py::CompactionEpisode.samples()` 每段一个 sample（共享 reward、metadata `tokens_after`/`gae_length`），fork `--gae-variant cross_segment_per_sample` 训练；旧单 sample + segment_ids 形态拒绝（见 D6）。
-- 消融验收：关掉 cross_segment（退回 vanilla）作为对照臂，只在用户另批预算时跑。
+- **已确认（用户 2026-10-07）**：策略优势 = 段内局部 GAE（段尾 V=0，不跨压缩边界自举）× 论文跨段衰减 (γλ)^{N_{>s}}；length-adaptive 的 l = 整条 rollout 被优化 token 总数（同一 rollout 各段共用 λ）；α=1.5；critic 目标 = 未做跨段校正的局部 return（局部优势 + V）；rollout 侧 9 节摘要模板（yeto 草稿）与"3 次压缩用完后继续跑到上下文满再截断"。spec 值 `advantage.gae_variant=cross_segment_per_sample`（原含糊值 `cross_segment`；compactionrl 规格哈希 506b4ba4…c932 → 16fb68d5…c4f）。
+- 消融验收：关掉 cross_segment（退回 vanilla）作为对照臂；另可用显式对照模式 `compactionrl_whole_rollout_control_spec()`（`cross_segment_whole_rollout`，整条 rollout 一个 sample，前段无终局回报；机制 `features:gae_cross_segment_whole_rollout` 未声明）作为 9.5 消融臂。只在用户另批预算时跑；对照臂的 rollout 侧（`CompactionEpisode.segment_ids()` 拼成单 sample）未接线。
 
 ### D9 critic LoRA 开发计划（决策 2，首轮不实现）
 - 接口预留（首轮实现）：`critic.param_mode ∈ {full, lora}`，`lora` 下 `critic.lora_rank/alpha/target_modules`；首轮校验阶段对 `lora` 明确拒绝并提示"计划中"；receipt 与 critic layout 中写入 param_mode 与 LoRA 形状，使后续不改契约结构。

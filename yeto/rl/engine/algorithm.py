@@ -66,7 +66,11 @@ CRITIC_ESTIMATORS = frozenset({"ppo"})
 # rl-algo-critic-family (design D1/D9): critic vocabulary. Expressible is not
 # supported -- what the pinned Miles cannot run is refused by the rejection
 # matrix (``critic_not_at_pin``) until the fork's GAE extension point (group 6).
-GAE_VARIANTS = ("vanilla", "decoupled", "cross_segment")
+# CompactionRL (design D8): ``cross_segment_per_sample`` = the paper's form (one
+# sample per compaction segment, eq. 13-15); ``cross_segment_whole_rollout`` =
+# explicit control mode (one sample per rollout + per-token segment ids; earlier
+# segments see no terminal reward). The ambiguous ``cross_segment`` is refused.
+GAE_VARIANTS = ("vanilla", "decoupled", "cross_segment_per_sample", "cross_segment_whole_rollout")
 LAMBD_MODES = ("fixed", "length_adaptive")
 CRITIC_VALUE_LOSSES = ("mse", "hl_gauss")
 CRITIC_INITS = ("copy_actor_backbone", "load")
@@ -968,8 +972,16 @@ register_field("advantage", "lambd", default=None, parse=_critic_unit)
 register_field("advantage", "lambd_mode", default=None,
                parse=lambda path, v: _optional_choice(path, v, LAMBD_MODES))
 register_field("advantage", "alpha", default=None, parse=_critic_alpha)
-register_field("advantage", "gae_variant", default=None,
-               parse=lambda path, v: _optional_choice(path, v, GAE_VARIANTS))
+def _gae_variant(path: str, value: Any) -> str | None:
+    if value == "cross_segment":
+        raise AlgorithmSpecError(
+            f"{path}='cross_segment' is ambiguous and no longer accepted: use "
+            "'cross_segment_per_sample' (CompactionRL eq. 13-15, one sample per segment) or "
+            "'cross_segment_whole_rollout' (control/ablation mode, one sample per rollout)")
+    return _optional_choice(path, value, GAE_VARIANTS)
+
+
+register_field("advantage", "gae_variant", default=None, parse=_gae_variant)
 # VAPO decoupled GAE (change 7.2): lambda of the critic's value target; the
 # policy advantage keeps ``lambd`` / ``lambd_mode``. Filled (1.0) only when
 # gae_variant='decoupled'.
@@ -1600,8 +1612,8 @@ def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
         return None
     a, c = s.advantage, s.critic
     pending = []
-    # decoupled / length_adaptive / cross_segment run on the fork's --gae-variant /
-    # --gae-lambd-mode (yeto-gae-variant ce96fc060, change 6.2). cross_segment and
+    # decoupled / length_adaptive / cross_segment_* run on the fork's --gae-variant /
+    # --gae-lambd-mode (yeto-gae-variant ce96fc060, change 6.2). cross_segment_* and
     # critic_updates_per_step != 1 (CompactionRL, change 9.3) are translated but stay
     # undeclared mechanisms (features:gae_cross_segment / critic_multi_update) until
     # GPU G1 (9.4). --critic-updates-per-step (= --num-critic-epochs) and the

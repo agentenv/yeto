@@ -200,8 +200,9 @@ class CompactionEpisode:
     def segment_ids(self) -> list[int]:
         """Per optimised token segment ids over the concatenated rollout.
 
-        Diagnostic only. This is the legacy fork ``--gae-variant cross_segment``
-        layout (one sample per rollout), which yeto refuses; training uses
+        Input of the control mode ``--gae-variant cross_segment_whole_rollout``
+        (formerly the fork's ``cross_segment``, one sample per rollout; ablation
+        9.5 only, earlier segments get no terminal reward); training uses
         :meth:`samples` with ``--gae-variant cross_segment_per_sample``
         (progress.md "S13 cross_segment 每段 sample").
         """

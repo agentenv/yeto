@@ -22,7 +22,8 @@ CRL_ARGV = [
     "--gae-variant", "cross_segment_per_sample",
     "--gae-lambd-mode", "length_adaptive", "--gae-length-alpha", "1.5",
 ]
-CRL_SHA = "506b4ba45c0d2bcbee74513b321afe967a3b1f0bef4a2ca68a0233772492c932"
+# 506b4ba4...c932 while the spec value was the ambiguous 'cross_segment'.
+CRL_SHA = "16fb68d50b365b0bf182ee1989b650da6601efe38ac0ab5c3ec7ba4526bf3c4f"
 CRL_EXTRA = (
     "--advantage-estimator ppo --gae-variant cross_segment_per_sample --gae-lambd-mode length_adaptive "
     "--gae-length-alpha 1.5 --calculate-per-token-loss --critic-lr 3e-6 "
@@ -96,11 +97,35 @@ def test_single_update_and_plain_ppo_argv_unchanged():
     assert "--critic-updates-per-step" in critic.FORK_FLAGS
 
 
-def test_legacy_fork_cross_segment_is_refused():
-    # fork --gae-variant cross_segment = one sample per rollout + segment_ids
-    # (earlier segments get no terminal reward): not CompactionRL, refused.
+def test_ambiguous_cross_segment_is_refused():
     flags = [x for name in UNDECLARED for x in ("--rl-allow-unverified-mechanism", name)]
     legacy = CRL_EXTRA.replace("cross_segment_per_sample", "cross_segment")
     result = af.dry_run(["--dry-run", "--extra", legacy, *flags])
     assert result["verdict"] == "rejected"
     assert "cross_segment_per_sample" in result["error"]
+    assert "cross_segment_whole_rollout" in result["error"]
+    import pytest
+    from yeto.rl.engine.algorithm import AlgorithmSpecError
+
+    with pytest.raises(AlgorithmSpecError, match="ambiguous"):
+        compactionrl_spec(advantage={"gae_variant": "cross_segment"})
+
+
+def test_whole_rollout_control_arm_is_explicit():
+    from yeto.rl.algos.compactionrl import compactionrl_whole_rollout_control_spec
+
+    spec = compactionrl_whole_rollout_control_spec()
+    assert spec.rejections() == []
+    assert spec.sha256() != compactionrl_spec().sha256()
+    argv = af.algorithm_argv(spec)
+    assert argv == [("cross_segment_whole_rollout" if t == "cross_segment_per_sample" else t)
+                    for t in CRL_ARGV]
+    extra = CRL_EXTRA.replace("cross_segment_per_sample", "cross_segment_whole_rollout")
+    flags = [x for name in UNDECLARED if name != "features:gae_cross_segment"
+             for x in ("--rl-allow-unverified-mechanism", name)]
+    refused = af.dry_run(["--dry-run", "--extra", extra, *flags])
+    assert refused["verdict"] == "rejected" and "gae_cross_segment_whole_rollout" in refused["error"]
+    flags += ["--rl-allow-unverified-mechanism", "features:gae_cross_segment_whole_rollout"]
+    result = af.dry_run(["--dry-run", "--extra", extra, *flags])
+    assert result["verdict"] == "accepted"
+    assert result["algorithm_spec_sha256"] == spec.sha256()

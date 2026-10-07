@@ -62,6 +62,103 @@ class CriticWarmupError(RuntimeError):
     pass
 
 
+# --------------------------------------------------------------------------
+# Value quality at the end of stage W (user decision B, design D5/D7): the
+# 50 warm-up steps are only a starting point; the product records how well the
+# critic fits the returns and may be gated on it (spec critic.warmup_* fields,
+# registered by yeto.rl.algos.critic; None = record only).
+#
+# Wiring point (NOT implemented, needs the GPU path): stage W must dump the
+# critic's per-token values and the GAE value targets (returns) of its last
+# warm-up rollout(s); ``run_stage`` returns them as {"values": [...],
+# "returns": [...]} (flat lists over trainable tokens) and ensure_warmup passes
+# them to finish_warmup. The fork does not dump them yet.
+# --------------------------------------------------------------------------
+
+QUALITY_GATES = (
+    # (spec field, metric, comparison)
+    ("warmup_max_value_mse", "mse", "max"),
+    ("warmup_max_value_rel_error", "relative_error", "max"),
+    ("warmup_max_calibration_error", "calibration_error", "max"),
+    ("warmup_min_explained_variance", "explained_variance", "min"),
+)
+
+
+def value_quality(values: Sequence[float], returns: Sequence[float], *,
+                  num_bins: int = 10) -> dict[str, Any]:
+    """Return-fit, calibration and explained variance of critic values vs returns.
+
+    - ``mse`` = mean((v - G)^2); ``relative_error`` = sqrt(mse) / sqrt(mean(G^2))
+      (RMSE relative to the RMS return; inf when every return is 0 and mse > 0).
+    - ``explained_variance`` = 1 - Var(G - v) / Var(G) (population variances; None
+      when Var(G) == 0).
+    - calibration: tokens sorted by v and split into ``num_bins`` equal-count bins;
+      per bin |mean v - mean G|. ``calibration_error`` = count-weighted mean of the
+      per-bin gaps, ``calibration_max_gap`` = largest gap; ``calibration_bins`` lists
+      (count, mean_value, mean_return).
+    """
+
+    v = [float(x) for x in values]
+    g = [float(x) for x in returns]
+    if len(v) != len(g):
+        raise CriticWarmupError(f"values ({len(v)}) and returns ({len(g)}) differ in length")
+    if not v:
+        raise CriticWarmupError("value quality needs at least one (value, return) pair")
+    if num_bins < 1:
+        raise CriticWarmupError("num_bins must be >= 1")
+    n = len(v)
+    mse = sum((a - b) ** 2 for a, b in zip(v, g)) / n
+    mean_sq = sum(b * b for b in g) / n
+    if mean_sq > 0:
+        relative_error = (mse ** 0.5) / (mean_sq ** 0.5)
+    else:
+        relative_error = 0.0 if mse == 0 else float("inf")
+    mean_g = sum(g) / n
+    var_g = sum((b - mean_g) ** 2 for b in g) / n
+    resid = [b - a for a, b in zip(v, g)]
+    mean_r = sum(resid) / n
+    var_r = sum((x - mean_r) ** 2 for x in resid) / n
+    explained_variance = None if var_g == 0 else 1.0 - var_r / var_g
+    order = sorted(range(n), key=lambda i: v[i])
+    k = min(num_bins, n)
+    bins, weighted, max_gap = [], 0.0, 0.0
+    for b in range(k):
+        idx = order[b * n // k:(b + 1) * n // k]
+        mv = sum(v[i] for i in idx) / len(idx)
+        mg = sum(g[i] for i in idx) / len(idx)
+        gap = abs(mv - mg)
+        weighted += gap * len(idx)
+        max_gap = max(max_gap, gap)
+        bins.append([len(idx), mv, mg])
+    return {
+        "num_tokens": n, "mse": mse, "relative_error": relative_error,
+        "explained_variance": explained_variance,
+        "calibration_error": weighted / n, "calibration_max_gap": max_gap,
+        "calibration_bins": bins, "num_bins": k,
+    }
+
+
+def quality_gate_problems(spec: AlgorithmSpec, quality: dict[str, Any] | None) -> list[str]:
+    """Violations of the spec's stage-W value-quality thresholds (empty = pass / no gate)."""
+
+    problems = []
+    for field, metric, kind in QUALITY_GATES:
+        threshold = getattr(spec.critic, field, None)
+        if threshold is None:
+            continue
+        if quality is None:
+            problems.append(f"critic.{field}={threshold} set but no value-quality metrics recorded")
+            continue
+        value = quality.get(metric)
+        if value is None:
+            problems.append(f"{metric} undefined (e.g. constant returns); critic.{field}={threshold}")
+        elif kind == "max" and not value <= threshold:
+            problems.append(f"{metric}={value} > critic.{field}={threshold}")
+        elif kind == "min" and not value >= threshold:
+            problems.append(f"{metric}={value} < critic.{field}={threshold}")
+    return problems
+
+
 def _require_warmup(spec: AlgorithmSpec) -> int:
     critic = spec.critic
     if not spec.execution.needs_critic or critic.init != "copy_actor_backbone" \
@@ -173,6 +270,8 @@ class WarmupProduct:
     critic_checkpoint: str
     critic_sha256: str
     schema: str = SCHEMA
+    # value_quality() of the stage-W critic; None = not measured (GPU wiring pending)
+    value_quality: dict[str, Any] | None = None
 
     def critic_run_config(self) -> CriticRunConfig:
         return CriticRunConfig(critic_load=self.critic_checkpoint, init_sha256=self.critic_sha256)
@@ -185,8 +284,11 @@ def reuse_key(spec: AlgorithmSpec, actor_sha256: str) -> str:
 
 
 def finish_warmup(spec: AlgorithmSpec, *, actor_checkpoint: str, actor_sha256_before: str,
-                  critic_checkpoint: str) -> WarmupProduct:
-    """After stage W: verify the actor is unchanged, hash the critic, write the manifest."""
+                  critic_checkpoint: str,
+                  quality_samples: dict[str, Sequence[float]] | None = None) -> WarmupProduct:
+    """After stage W: verify the actor is unchanged, hash the critic, record the value
+    quality (when ``quality_samples`` = {"values", "returns"} is given), apply the spec's
+    optional quality gate, write the manifest. A gate failure writes no manifest."""
 
     steps = _require_warmup(spec)
     after = checkpoint_sha256(actor_checkpoint)
@@ -195,11 +297,18 @@ def finish_warmup(spec: AlgorithmSpec, *, actor_checkpoint: str, actor_sha256_be
             f"actor checkpoint changed during the critic warm-up ({actor_sha256_before} -> "
             f"{after}); stage W must not train or save the actor"
         )
+    quality = None
+    if quality_samples is not None:
+        quality = value_quality(quality_samples["values"], quality_samples["returns"])
+    gate = quality_gate_problems(spec, quality)
+    if gate:
+        raise CriticWarmupError(f"critic warm-up value quality below the spec gate: {gate}")
     product = WarmupProduct(
         algorithm_sha256=spec.sha256(), warmup_steps=steps,
         actor_checkpoint=str(actor_checkpoint), actor_sha256=after,
         critic_checkpoint=str(critic_checkpoint),
         critic_sha256=checkpoint_sha256(critic_checkpoint),
+        value_quality=quality,
     )
     target = Path(critic_checkpoint) / MANIFEST
     tmp = target.with_suffix(".tmp")
@@ -228,24 +337,27 @@ def load_product(critic_checkpoint: str | os.PathLike, spec: AlgorithmSpec, *,
         problems.append("initial actor checkpoint hash differs")
     if checkpoint_sha256(critic_checkpoint) != product.critic_sha256:
         problems.append("critic checkpoint content differs from its manifest")
+    problems += quality_gate_problems(spec, product.value_quality)
     if problems:
         raise CriticWarmupError(f"warm-up product {critic_checkpoint} rejected: {problems}")
     return product
 
 
 def ensure_warmup(spec: AlgorithmSpec, *, actor_checkpoint: str, cache_root: str | os.PathLike,
-                  run_stage: Callable[[str], None]) -> WarmupProduct:
+                  run_stage: Callable[[str], Any]) -> WarmupProduct:
     """The product for (algorithm, initial actor): reused when valid, else stage W
-    runs once (``run_stage(critic_save_dir)``) and the product is validated."""
+    runs once (``run_stage(critic_save_dir)``) and the product is validated.
+    ``run_stage`` may return {"values", "returns"} for the value-quality record."""
 
     actor_sha = checkpoint_sha256(actor_checkpoint)
     out = Path(cache_root) / reuse_key(spec, actor_sha)
     if (out / MANIFEST).exists():
         return load_product(out, spec, actor_sha256=actor_sha)
     out.mkdir(parents=True, exist_ok=True)
-    run_stage(str(out))
+    samples = run_stage(str(out))
     return finish_warmup(spec, actor_checkpoint=actor_checkpoint,
-                         actor_sha256_before=actor_sha, critic_checkpoint=str(out))
+                         actor_sha256_before=actor_sha, critic_checkpoint=str(out),
+                         quality_samples=samples if isinstance(samples, dict) else None)
 
 
 # --------------------------------------------------------------------------
