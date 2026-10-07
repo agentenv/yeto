@@ -231,6 +231,7 @@ GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180,
 # truncated as "network-interfa"; "eth0" made gloo fail with "Unable to find
 # address for: eth0" in the SGLang scheduler).  "" leaves NCCL/gloo to their
 # own detection.  NCCL_SOCKET_IFNAME in the environment always wins.
+MULTINODE_IB_CLOUDS = frozenset({"modal"})
 MULTINODE_SOCKET_IFNAME = {"nebius": "auto", "aws": "", "gcp": "", "ssh": ""}
 _DETECT_IFACE = (
     "YETO_IFACE=${NCCL_SOCKET_IFNAME:-$(for d in /sys/class/net/*; do n=$(basename \"$d\"); "
@@ -247,7 +248,10 @@ def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
     """Shell exports every island node runs before Ray starts; "" on one node."""
     if num_nodes <= 1:
         return ""
-    lines = ["export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}",
+    # Modal clustered islands request RDMA (ModalIslandConfig.rdma): leave
+    # NCCL's IB transport on there; other clouds run NCCL over TCP.
+    ib_default = 0 if cloud in MULTINODE_IB_CLOUDS else 1
+    lines = [f"export NCCL_IB_DISABLE=${{NCCL_IB_DISABLE:-{ib_default}}}",
              "export NCCL_DEBUG=${NCCL_DEBUG:-WARN}"]
     iface = MULTINODE_SOCKET_IFNAME.get(cloud, "")
     if iface == "auto":
@@ -4352,6 +4356,11 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         # Miles (ports) launches its router as a Ray worker with a 120 s
         # budget and has no external router mode.
         envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
+    for item in getattr(args, "modal_env", None) or []:
+        key, sep, value = str(item).partition("=")
+        if not sep or not key:
+            raise ValueError(f"--modal-env takes KEY=VALUE, got {item!r}")
+        envs[key] = value
     token_path = os.path.expanduser(HF_TOKEN_PATH)
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):
         with open(token_path, encoding="utf-8") as f:
@@ -4399,6 +4408,9 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         codex_dir=codex_dir,
         codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
         extra_mounts=extra_mounts,
+        tape_volume_name=getattr(args, "modal_tape_volume", None) or None,
+        tape_subdir=(modal_tape_subdir(args.cluster_prefix, learner_id)
+                     if getattr(args, "modal_tape_volume", None) else None),
         workdir=str(REPO_ROOT),
         # Opt-in overrides (default: Modal runner defaults, 10 retries / 24 h).
         # Acceptance runs pass --modal-retries 0 so a learner exit is final
@@ -4414,6 +4426,35 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         **({"timeout_s": int(args.modal_timeout_s)}
            if getattr(args, "modal_timeout_s", None) is not None else {}),
     )
+
+
+def modal_tape_subdir(cluster_prefix: str, learner_id: int) -> str:
+    """Per-run, per-island directory of the Modal tape Volume."""
+    from .modal_runner import modal_app_name
+
+    return f"{modal_app_name(cluster_prefix)}/l{learner_id}"
+
+
+def pull_modal_tapes(modal_ops, modal_cfgs: dict, run_dir) -> dict[str, str]:
+    """Copy each Modal island's tape Volume subdir into
+    ``<run_dir>/modal-tape/<island>/``; returns {island: "ok" | error}.
+    Never raises: a missing tape is reported, not fatal to teardown."""
+    out: dict[str, str] = {}
+    for name, cfg in modal_cfgs.items():
+        vol, sub = getattr(cfg, "tape_volume_name", None), getattr(cfg, "tape_subdir", None)
+        if not vol or not sub:
+            continue
+        dest = Path(run_dir) / "modal-tape" / name
+        try:
+            modal_ops.pull_tape(vol, sub, str(dest))
+            files = sorted(str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file())
+            out[name] = "ok" if files else "empty"
+            print(f"[launcher] Modal tape of {name}: {vol}:{sub} -> {dest} ({len(files)} file(s))")
+        except Exception as e:  # noqa: BLE001
+            out[name] = f"error: {e}"
+            print(f"[launcher] WARN: could not pull the Modal tape of {name} from "
+                  f"{vol}:{sub}: {e}", file=sys.stderr)
+    return out
 
 
 def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
@@ -6397,6 +6438,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         # the syncer after a total loss) are skipped — even with --keep.
         downed = controller.downed_clusters if controller is not None else set()
         remaining = [c for c in clusters if c not in downed]
+        if modal_ops is not None and modal_cfgs:
+            # Containers commit their tape every 30 s and at exit; pulled
+            # here (before the app stop) and again after it below.
+            pull_modal_tapes(modal_ops, modal_cfgs, runs.run_dir(args.cluster_prefix))
         if args.keep:
             print(f"[launcher] keeping clusters: {remaining}")
         else:
@@ -6426,6 +6471,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 if not _verify_modal_app_stopped(modal_ops, args,
                                                  run_started_unix=run_started_unix):
                     teardown_unverified = True
+                if modal_cfgs:
+                    # The final at-exit commits land once the containers are gone.
+                    pull_modal_tapes(modal_ops, modal_cfgs, runs.run_dir(args.cluster_prefix))
             if unverified:
                 # The head must NOT self-terminate: it is the only thing that
                 # can still reach these orphaned learner clusters via sky.

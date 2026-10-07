@@ -1001,6 +1001,21 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "runner's 10); acceptance runs use 0 so a learner exit is final",
     )
     infra.add_argument(
+        "--modal-tape-volume",
+        default=None,
+        metavar="NAME",
+        help="Modal islands: mirror each container's ~/yeto-output tape files into this "
+        "Modal Volume (subdir <app>/l<learner>/rank<r>, committed every 30 s and at exit) "
+        "and pull them into the local run dir (modal-tape/) when the run ends; default off",
+    )
+    infra.add_argument(
+        "--modal-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Modal islands: extra container environment (repeatable), e.g. NCCL_DEBUG=INFO",
+    )
+    infra.add_argument(
         "--modal-timeout-s",
         type=int,
         default=None,
