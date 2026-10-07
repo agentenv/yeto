@@ -777,7 +777,7 @@ before startup with a message pointing at `--rl-engine legacy`:
 | full-parameter / `dense-full` | `--parameter-mode full`, `--sync-preset dense-full`, `--tuning full` |
 | SAO streaming compaction | an `sao*` preset or `--sao-*` Miles arguments |
 | DeepSeek V4 recipe | `--rl-model-recipe deepseek-v4-flash`, `attention-routed-experts`, `--expert-full-count > 0` |
-| critic / non-GRPO | `--use-critic`, `--advantage-estimator` other than `grpo` |
+| critic / non-GRPO | `--use-critic`, `--advantage-estimator` other than `grpo` or `ppo` (PPO goes through the algorithm spec and the critic checks, see "Critic family") |
 | fixed partition | `--rollout-num-gpus` (dedicated rollout GPUs) |
 
 The ports Miles translation also rejects fork-only options with no upstream
@@ -839,6 +839,7 @@ mechanism dimension: `advantage_estimators`, `losses`, `loss_aggregations`,
 `kl_placements`, `corrections`, `reward_postprocessors`,
 `dynamic_sampling_filters` and `features`. It also declares an `execution`
 block: `critic=false`, `max_policy_staleness=0` and `rollout_logprobs=true`.
+(`critic=false` stays until the critic GPU smoke passes; see "Critic family".)
 
 Before any GPU process exists, the driver handshake refuses:
 
@@ -1372,6 +1373,270 @@ reviewed commit to `FORK_COMMITS` when Agent IMG moves `MILES_NEXT_COMMIT`
 and the image digest (this makes the single-island
 `--rl-allow-unverified-mechanism` smoke launchable), and declare a variant in
 `entry.MILES_DECLARED` only after its GPU smoke passed.
+
+### Critic family (`rl-algo-critic-family`): PPO, VAPO, SAO, CompactionRL
+
+> **Status: expressible, not declared; no GPU run yet.** Every critic mechanism
+> below is CPU-tested only (unit tests, fork function-level tests and dry-run
+> snapshots). The Miles adapter declares `execution.critic=false`
+> (`entry.py`, `fake.py`), so a critic algorithm runs only as a single-island
+> smoke without outer sync, with `--rl-allow-unverified-mechanism` naming
+> `advantage_estimators:ppo`, `execution:critic` and each fork feature it uses.
+> GPU tasks 3.3, 4.5, 5.3, 6.4, 7.3, 8.4, 9.4 and 9.5 have not run; nothing in
+> this section is GPU-verified, and no effect (EV, reward, pass@k) is claimed.
+> Status labels used here: **CPU-verified** = unit/fork CPU tests pass;
+> **unverified** = no GPU evidence; **in progress (not merged)** = work on a
+> side branch that is not on this branch yet.
+
+All four algorithms are the Miles shared actor/critic PPO (`--advantage-estimator
+ppo`; Miles derives `use_critic`) and differ only in the GAE variant, the value
+loss and a few loss terms. Yeto declares, validates, translates and orchestrates;
+the math lives in Miles or in the fork (`michaellchung/miles`).
+
+**Fork pin.** The GAE variants, the positive-example LM loss, the SAO math and
+`--critic-updates-per-step` exist only in the fork branch `yeto-critic-family`
+(local commits, not pushed). `yeto/rl/algos/critic_fork.py` pins it as
+`CRITIC_FORK_PIN = ffe769c1e` (`FORK_COMMITS`). This is a declaration pin only:
+the ports image still runs `MILES_NEXT_COMMIT` c35702e, which does not have
+these flags, and no launch gate checks the image against `CRITIC_FORK_PIN` yet.
+Moving `MILES_NEXT_COMMIT` and the image (task 6.3) needs the user's approval
+to push the fork. Until then a real Miles launch of any fork flag fails at
+Miles argument parsing.
+
+#### Spec fields and defaults
+
+The fields enter the canonical JSON and the hash only when
+`execution.needs_critic=true`; on any other algorithm a non-default critic
+field is refused (`[critic_fields_without_critic]`). GRPO hashes and the
+default argv are unchanged (`tests/test_rl_argv_snapshot.py` is untouched).
+
+| field | default on a critic spec | Miles / fork argv |
+| --- | --- | --- |
+| `advantage.gamma` | 1.0 | `--gamma` (always emitted) |
+| `advantage.lambd` | 1.0 | `--lambd` (always emitted) |
+| `advantage.lambd_mode` | `fixed` (`length_adaptive`: lambda = 1 - 1/(alpha*l)) | fork `--gae-lambd-mode` (only when not `fixed`) |
+| `advantage.alpha` | none; required with `length_adaptive` | fork `--gae-length-alpha` |
+| `advantage.gae_variant` | `vanilla` (`decoupled`, `cross_segment`) | fork `--gae-variant` (only when not `vanilla`) |
+| `advantage.critic_lambd` | 1.0, filled in automatically with `decoupled` | fork `--gae-critic-lambd` |
+| `critic.value_clip` | 0.2 | `--value-clip` |
+| `critic.critic_lr` | none = inherit the actor lr (Miles default) | `--critic-lr` |
+| `critic.critic_lr_warmup` | none | `--critic-lr-warmup-iters` |
+| `critic.critic_updates_per_step` | 1 | fork `--critic-updates-per-step` (alias `--num-critic-epochs`; only when != 1) |
+| `critic.value_loss` | `mse` (`hl_gauss`, SAO only) | fork `--value-loss-type classification ...` (SAO argv) |
+| `critic.init` | `copy_actor_backbone` (`load` when `critic.load` is set) | stage W, see below |
+| `critic.warmup_steps` | 0 | stage W `--num-critic-only-steps`; the main stage always gets `0` |
+| `critic.param_mode` | `full` (`lora` reserved, refused) | -- |
+| `loss.positive_lm_coef` / `positive_lm_reward_threshold` | none (both or neither) | fork `--positive-example-lm-loss-coef` / `--positive-example-reward-threshold` |
+
+`--gamma`, `--lambd`, `--value-clip`, `--num-critic-only-steps`,
+`--critic-load`, `--critic-lr` and the fork flags are adapter-owned: absorbed
+from the extra argv into the spec, refused on a value conflict, never passed
+through raw.
+
+#### Rejections (before any GPU process)
+
+Spec rules (`algorithm.py`, `algos/critic.py`, `algos/sao.py`):
+
+- `[critic_estimator]`: `ppo` without `execution.needs_critic=true`;
+- `[critic_fields_without_critic]`: critic fields on a critic-free algorithm;
+- `[critic_reward_kl]`: `kl.placement=reward` with `kl.coef != 0` (Miles shared
+  PPO asserts `kl_coef == 0`); use `kl.coef=0` or `placement=loss`;
+- `[critic_param_mode]`: `critic.param_mode=lora` ("planned, not implemented",
+  design D9) and `lora_*` fields without it;
+- `[critic_not_at_pin]`: `value_loss=hl_gauss` without `policy_objective=sao_dis`
+  (or without the fork pin); `alpha` without `length_adaptive`;
+  `critic_lambd` without `decoupled`; `hl_gauss_bins` without `hl_gauss`;
+- `[critic_init]`: `init=load` without `critic.load`; `critic.load` with
+  `copy_actor_backbone`; `warmup_steps > 0` with `init=load`;
+- `[positive_lm_threshold]`, `[sao_dis_fields]`, `[sao_not_at_pin]`;
+- absorbing `--gae-variant cross_segment` (the fork's one-sample-per-rollout
+  layout) is refused; see CompactionRL below.
+
+Run rules (launch check `critic_shared_ppo`, Miles shared PPO limits, user
+decision 4): elastic reconfiguration and `--indep-dp`; `--deploy-component
+trainer`; `--critic-num-nodes` / `--critic-num-gpus-per-node` different from
+the actor's (the critic shares the actor GPUs); `decoupled` outer sync. The
+driver also refuses strict-avg with a critic but no critic syncer.
+Undeclared mechanisms (`execution:critic` and the fork features) can only be
+allowed on a single island without outer sync, so every two-island critic run
+is refused today (see "Outer sync" below).
+
+#### Warm-up: two stages (design D5)
+
+`critic.init=copy_actor_backbone` builds the critic from the initial actor
+checkpoint with a new value head. `critic.warmup_steps=N > 0` adds stage W:
+
+1. **Stage W** (`yeto/rl/critic_warmup.py`): one plain Miles `train.py`
+   launch, not the ports driver: `--num-rollout N --num-critic-only-steps N
+   --critic-load <actor checkpoint> --critic-save <dir> --save-interval N`, with
+   the main stage's algorithm flags. The actor never trains; the product
+   manifest records the critic hash and checks the actor hash is unchanged.
+   One product is reused by every island (keyed by algorithm + initial actor).
+2. **Main stage** (ports): `--num-critic-only-steps 0 --critic-load <stage-W
+   product>`; the product hash enters the receipt (`CriticRunConfig.init_sha256`).
+
+Stage W argv and manifest checks are CPU-verified. Launching stage W on a
+cluster is **in progress (not merged)** (warm-up wiring); whether stage W starts
+on real Miles and whether the main stage loads its product are **unverified**
+(GPU 5.3). Before the main stage the warm-up is judged by an explicit success
+check on return fit, calibration and explained variance
+(**in progress, not merged**; thresholds and wording are set there).
+
+```bash
+python3 -m yeto.rl.critic_warmup --dry-run \
+  --extra "--advantage-estimator ppo --num-critic-only-steps 50" \
+  --actor-checkpoint /ckpt/actor --critic-save /ckpt/critic-w
+# verdict "accepted"
+# stage_w_argv: ... --num-rollout 50 --num-critic-only-steps 50
+#               --critic-load /ckpt/actor --critic-save /ckpt/critic-w --save-interval 50
+# main_argv:    ... --num-critic-only-steps 0 --critic-load <stage-W product>
+```
+
+#### GAE variants (fork `--gae-variant`, one extension point)
+
+| variant | meaning | used by | status |
+| --- | --- | --- | --- |
+| `vanilla` (default) | Miles GAE, element-wise unchanged | PPO | Miles native; ports PPO unverified (GPU 3.3) |
+| `length_adaptive` (`lambd_mode`) | lambda = 1 - 1/(alpha*l), l = response length | VAPO (alpha 0.05), SAO and CompactionRL (alpha 1.5) | CPU-verified (fork tests vs `tests/rl_gae_reference.py`); GPU unverified |
+| `decoupled` | advantage uses the policy lambda, value target = GAE(`critic_lambd`) + V | VAPO, SAO | CPU-verified; GPU unverified; not compared numerically with the upstream SAO `gae_adaptive` |
+| `cross_segment` -> fork `cross_segment_per_sample` | each compaction segment is its own sample, reward at each segment end, bootstrap 0; local GAE times (gamma*lambda)^N_{>s} (paper eq. 13-15) | CompactionRL | CPU-verified; GPU unverified |
+| fork `cross_segment` (old) | whole rollout as one sample with per-token `segment_ids`; earlier segments carry no terminal reward | -- | kept in the fork unchanged; refused by yeto today; to be kept as an explicit control mode (**in progress, not merged**) |
+
+#### Outer sync, round-cut, ledger
+
+- **Two syncers** (design D4 plan a): the launcher starts a second syncer for
+  the critic (port 29401, layout `critic_layout_hash`, its own checkpoint and
+  tape; `dry_run_plan` shows a `critic_syncer` block only for critic
+  algorithms). `DualStrictAvgSync` commits both channels atomically: a round
+  is applied only when actor and critic both reach v+1, otherwise neither
+  is applied (`CrossChannelCommitError`). CPU-verified with fake islands.
+- **fp32 master weights** (user decision): the critic channel averages and
+  writes back the fp32 master weights; the critic optimizer state is kept
+  across rounds (the actor's is reset as before). The fp32-master write-back
+  and opening the two-island gate are **in progress (not merged)**; on this
+  branch writing an fp32 average into bf16 parameters fails the post-write
+  hash check, and `check_unverified_allowance` still refuses any critic run
+  with outer sync.
+- **Round-cut checkpoint**: `save_cut` stores critic weights, optimizer and
+  scheduler state under `<cut>/critic/`; `restore_cut` refuses a critic round
+  that differs from the actor round, a missing pointer, or tampered weights;
+  resharded restore with a critic is refused. CPU-verified.
+- tape/ledger record critic weight hash, `value_loss` and explained variance.
+- Unverified (GPU 4.5): real Rust syncer pair, Megatron critic export/import
+  with TP/PP and offload, distributed-optimizer state round trip, bandwidth
+  of a full-parameter critic.
+
+#### Algorithms
+
+**PPO.** `advantage.estimator=ppo`, `execution.needs_critic=true`; defaults
+above. Status: CPU-verified; GPU G1/G3 unverified.
+
+```bash
+M="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags"
+A=--rl-allow-unverified-mechanism
+$M --dry-run --extra "--advantage-estimator ppo"
+# verdict "rejected": advantage estimator 'ppo' not supported (... expressible but not
+#   enabled ...); algorithm needs a critic, which engine 'miles-upstream' does not declare
+$M --dry-run --extra "--advantage-estimator ppo" $A advantage_estimators:ppo $A execution:critic
+# verdict "accepted"; miles_argv:
+#   --advantage-estimator ppo --gamma 1.0 --lambd 1.0 --value-clip 0.2 --num-critic-only-steps 0
+$M --dry-run --extra "--advantage-estimator ppo --kl-coef 0.1" $A advantage_estimators:ppo $A execution:critic
+# verdict "rejected": [critic_reward_kl] kl.placement='reward' with kl.coef=0.1 and a critic ...
+```
+
+**VAPO** (`yeto/rl/algos/vapo.py::vapo_spec()`, arXiv 2504.05118v3, spec
+sha256 `7ee1dde4...386f`). PPO + decoupled GAE (critic lambda 1.0) +
+length-adaptive policy lambda with **alpha = 0.05** (the paper value; the fork
+default 1.5 is SAO's) + clip-higher (0.2 / 0.28) + token-level loss +
+positive-example LM loss **mu = 0.1** + value warm-up 50 steps; critic lr 2e-6.
+User decisions (2026-10-07):
+
+- the critic is initialised from the actor backbone (`copy_actor_backbone`)
+  plus stage-W warm-up, and the warm-up is checked for return fit,
+  calibration and EV before the main stage;
+- "correct sample" uses an explicit success predicate rather than the
+  implicit `reward > 0.0` threshold;
+- the positive-example NLL is normalised by the number of positive-example
+  tokens (paper eq. 9).
+
+The last two are **in progress (not merged)**: on this branch the fork loss
+uses the PG-loss normalisation (effective weight ~ mu x positive-token share)
+and the threshold `reward > 0.0` (`--positive-example-reward-threshold 0.0`).
+Differences from the paper: value model initialised from the actor, not from
+the reward model; success predicate defined by yeto; value_clip (0.2), KL (0)
+and the warm-up schedule are not given by the paper; group sampling (16 per
+prompt, 512 prompts) is a run setting, not part of the hash. Status:
+CPU-verified; GPU 7.3 unverified.
+
+```bash
+$M --dry-run --extra "--advantage-estimator ppo --gae-variant decoupled --gae-lambd-mode length_adaptive \
+  --gae-length-alpha 0.05 --eps-clip 0.2 --eps-clip-high 0.28 --calculate-per-token-loss \
+  --positive-example-lm-loss-coef 0.1 --positive-example-reward-threshold 0 \
+  --critic-lr 2e-6 --num-critic-only-steps 50" \
+  $A advantage_estimators:ppo $A execution:critic $A features:gae_decoupled \
+  $A features:gae_length_adaptive $A features:positive_example_lm_loss
+# verdict "accepted", algorithm_spec_sha256 7ee1dde4...386f (= vapo_spec()); miles_argv ends with
+#   --num-critic-only-steps 0 --gae-variant decoupled --gae-critic-lambd 1.0
+#   --gae-lambd-mode length_adaptive --gae-length-alpha 0.05
+#   --positive-example-lm-loss-coef 0.1 --positive-example-reward-threshold 0.0
+# (--num-critic-only-steps 50 is the warm-up length: it goes to stage W, the main stage gets 0)
+```
+
+**SAO** (`yeto/rl/algos/sao.py::sao_algorithm_spec(recipe)`): the existing
+SAO streaming recipe as an AlgorithmSpec: `policy_objective=sao_dis`,
+gamma/lambda 1/1, decoupled + length-adaptive alpha 1.5, HL-Gauss value loss
+(51 bins), critic lr 5e-6, `critic_updates_per_step = num_critic_epochs = 2`,
+two roles with separate layouts and syncers. The fork port of the SAO math is
+CPU-verified against the upstream source (agentenv/miles
+`feat/sao-tbench21-e2e-validation@16a9bea4`). Not ported: re-forwarding the
+updated value to the actor, offline value pretrain; `critic_freeze_attention`
+is in the fork but not in the spec. The old SAO streaming entry is unchanged
+and stays the supported way to run SAO. SAO on ports: GPU 8.4 unverified.
+
+**CompactionRL** (`yeto/rl/algos/compactionrl.py::compactionrl_spec()`,
+arXiv 2607.05378, spec sha256 `506b4ba4...c932`). Rollout side
+`yeto/rl/compaction.py`: compaction when `C - |h_t| < 10240`, same-policy
+summary, rebuilt context with the last k=2 steps, at most 3 compactions; each
+segment is one sample with the shared reward and metadata `tokens_after`
+(N_{>s}) and `gae_length`. Training side, first version (user decisions
+2026-10-07): local GAE per segment times the cross-segment decay
+(gamma*lambda)^N_{>s}; the lambda length l = the **total optimised tokens of the
+whole rollout** (all segments share one lambda); alpha = 1.5; gamma = 1; KL 0;
+token-level loss; critic lr 3e-6; 2 critic updates per policy update; 50-step
+warm-up; the critic target is the **uncorrected local return** (local
+advantage + V); the old one-sample implementation stays as an explicit control
+(**in progress, not merged**; refused on this branch). Hooking compaction into
+the Codex / Terminal-Bench rollout path is **in progress (not merged)**; the
+9-section summary template is a yeto draft (the paper gives no section names).
+Status: CPU-verified; GPU 9.4/9.5 unverified.
+
+```bash
+$M --dry-run --extra "--advantage-estimator ppo --gae-variant cross_segment_per_sample \
+  --gae-lambd-mode length_adaptive --gae-length-alpha 1.5 --calculate-per-token-loss \
+  --critic-lr 3e-6 --critic-updates-per-step 2 --num-critic-only-steps 50" \
+  $A advantage_estimators:ppo $A execution:critic $A features:gae_cross_segment \
+  $A features:gae_length_adaptive $A features:critic_multi_update
+# verdict "accepted", algorithm_spec_sha256 506b4ba4...c932 (= compactionrl_spec()); miles_argv:
+#   --advantage-estimator ppo --calculate-per-token-loss --gamma 1.0 --lambd 1.0 --value-clip 0.2
+#   --critic-lr 3e-06 --critic-updates-per-step 2 --num-critic-only-steps 0
+#   --gae-variant cross_segment_per_sample --gae-lambd-mode length_adaptive --gae-length-alpha 1.5
+# the same with --gae-variant cross_segment: rejected ("legacy one-sample-per-rollout layout is
+#   refused ... use --gae-variant cross_segment_per_sample")
+```
+
+#### Verification status
+
+| mechanism | CPU | GPU |
+| --- | --- | --- |
+| spec fields, hash, absorb/translate, rejections | verified | n/a |
+| PPO single island (G1, 3.3) | fake engine verified | **unverified** |
+| stage W warm-up + main stage (5.3) | argv/manifest verified; launch wiring in progress | **unverified** |
+| GAE length_adaptive / decoupled / cross_segment_per_sample (6.4) | fork tests vs reference verified | **unverified** |
+| dual syncer + atomic commit, round-cut critic state (4.5) | fake islands verified; fp32 master write-back in progress | **unverified** |
+| VAPO (7.3) | verified (paper-normalised NLL and success predicate in progress) | **unverified** |
+| SAO on ports (8.4) | verified | **unverified** (the old SAO streaming path has its own 2026-08-26 validation) |
+| CompactionRL (9.4/9.5) | verified (control mode and Codex hookup in progress) | **unverified** |
+| critic LoRA (10.x) | not implemented (refused) | -- |
 
 ### Port responsibilities
 

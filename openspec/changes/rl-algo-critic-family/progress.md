@@ -298,3 +298,19 @@ yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
 ### 未验证 / 待确认
 - 未验证：真实 Miles 训练路径（loss.py 需 megatron，仅 CPU 函数级测试）、Ray 序列化下新键传输（只测了 split_train_data_by_dp_raw）、GPU 9.4/9.5。
 - 待用户确认：(1) 段尾 bootstrap 取 0；(2) l 取整条 rollout 被优化 token 数（备选：段长）；(3) critic 目标用局部优势（备选：校正后优势，会使前段目标趋近 V）；(4) 旧 fork `cross_segment` 是否从 fork 删除。
+
+## S13 文档（2026-10-07，分支 s13-docs，基于 integ-decl 03d0197c；仅 CPU，未上 GPU、未启动 Ray、未 push）
+
+### 11.1 docs/MILES_RL.md
+- 新小节 "Critic family (`rl-algo-critic-family`)"（位于 Policy-loss variants 之后）：状态声明（可表达未开放、GPU 全未验证）、fork pin（CRITIC_FORK_PIN ffe769c1e 仅声明层，镜像仍 c35702e）、字段/默认值/argv 表、拒绝规则（spec 规则 + `critic_shared_ppo` 启动检查 + 两岛被放行开关拒绝）、warm-up 两阶段、GAE 变体表（vanilla/length_adaptive/decoupled/cross_segment_per_sample/旧 cross_segment）、双 syncer 与 round-cut、四个算法（含用户 10-07 决定与 VAPO 论文差异）、验证状态表。
+- Ports boundary 表 critic 行与 "Capabilities and execution" 处加注指向新小节。
+- 用户决定中**本分支尚未实现**的项一律标 "in progress (not merged)"：warm-up 启动接线与回报拟合/校准/EV 成功判定；VAPO 显式成功判定与正例 token 数归一（本分支仍为 PG loss 归一 + reward>0.0）；CompactionRL 旧实现作显式对照（本分支吸收时拒绝）与 Codex 桥压缩接入；critic fp32 主权重写回与放开两岛门控（本分支 bf16 写回哈希校验会拒、`check_unverified_allowance` 拒绝有外层同步的 critic 运行）。
+- dry-run 核对（/tmp/yeto-venv，OMP/OPENBLAS/MKL=1；脚本 /tmp/s13-docs-dry/doc_cmds.sh 从文档代码块抽取执行，输出 /tmp/s13-docs-dry/doc_cmds.out）：warm-up accepted（stage W `--num-rollout 50 --num-critic-only-steps 50 --critic-load /ckpt/actor --critic-save /ckpt/critic-w --save-interval 50`，主阶段 `--num-critic-only-steps 0 --critic-load <stage-W product>`）；PPO 无放行 rejected、放行 accepted（argv 与文档一致）、`--kl-coef 0.1` rejected `[critic_reward_kl]`；VAPO accepted sha 7ee1dde4…（=vapo_spec()）；CompactionRL accepted sha 506b4ba4…，argv 与文档逐项一致；`--gae-variant cross_segment` rejected（另跑，/tmp/s13-docs-dry/crl_old.json）；`critic.param_mode=lora` 规格文件 rejected `[critic_param_mode]`。全部与文档描述一致。
+
+### 11.2 能力页 / P0 change
+- `openspec/changes/rl-algorithm-capabilities/proposal.md`：能力表 critic 行改为 ⚙（rl-algo-critic-family，可表达未开放，仅 CPU）；实施索引新增第 3 行；第 42 行加注。
+- `/home/michael/work/infra-drafts/rl-algo-capabilities.html`（不在 git）：矩阵 "PPO（critic）" 行替换为 "critic 家族" 11 行（9 行可表达未开放、2+1 行拒绝：旧 cross_segment、critic LoRA、两岛）；拒绝规则表 critic 规则 5 行；新增卡片 3（tasks 29/43）；`node --check` 通过。备份 /tmp/s13-docs-dry/rl-algo-capabilities.html.bak。
+- 单测：`tests/test_rl_algorithm_capabilities.py`（含 `test_miles_and_fake_declarations`、`test_critic_rejected_with_the_real_reason`）、critic_spec、vapo、compactionrl、critic_fork_pin、critic_warmup、sao_spec、argv_snapshot、critic_ports：136 passed（均不启动 Ray）。
+
+### 合入其它 S13 分支后需刷新
+docs/MILES_RL.md Critic family 中所有 "in progress (not merged)" 处（Warm-up 小节末段、GAE 表旧 cross_segment 行、Outer sync 的 fp32 条、VAPO 用户决定段与 dry-run 输出中的 `--positive-example-reward-threshold`、CompactionRL 段、验证状态表）；能力页对应矩阵行与卡片 3 的 dec/open；若 VAPO/CompactionRL 规格哈希或 argv 变化，需重跑文档 dry-run 并更新 sha 与 argv 注释。
