@@ -116,3 +116,26 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 - 测试（/home/michael/work/miles-next-venv）：`test_ppo_gae_variants.py` 22 passed（对拍拷贝的参考实现；缺省/显式 vanilla 与冻结的原实现 `torch.equal` 逐元素一致，fp32/fp64、chunked/非 chunked、带掩码）；`test_segment_ids_conversion.py` 2 passed。
 - 定向回归（GAE/loss 相关文件 + tests/test_chunked_gae.py）：基线 039471508 13 failed/99 passed，新 13 failed/121 passed，失败集合完全相同（megatron.core 缺失等环境原因）。未跑 tests/fast/ray 全量（会启动 Ray，线程上限）。
 - yeto 全量回归：log /home/michael/work/infra-drafts/critic-gae-pytest.log，68 failed/26 errors，与 /tmp/base2.sorted 按用例 id 比对集合相同，新增失败 0。
+
+### S13 4.2/4.3（worktree `/home/michael/work/s13-dual`，分支 `s13-dual`，基于 d398d443；仅 CPU）
+
+提交：`f90eab72`（4.2.1）、`b7589faa`（4.2.2 + 4.3 接线）、`b34bbb93`（4.3 测试）、`28ed832a`（4.2.3）。tasks.md 勾选由主 agent 负责。
+
+实现：
+- **4.2.1 launcher**（`yeto/launcher.py`）：`CRITIC_SYNCER_PORT=29401`；`rl_needs_critic(args)` 读 `rl_algorithm_spec_json.execution.needs_critic`；`critic_syncer_command` 与 actor RL syncer 参数相同，仅端口/检查点 `~/yeto-output/yeto-critic-state.ckpt`/事件 tape `yeto-critic-tape.jsonl` 不同；`syncer_command` 在 critic 算法下把 critic syncer 放后台、actor syncer 仍为前台进程（task 与 head 子进程共用）；`syncer_ports` 加开 29401；岛命令加 `--critic-syncer $CRITIC_SYNCER_ADDR`，env `CRITIC_SYNCER_ADDR`=actor syncer 主机:29401；`dry_run_plan` 仅 critic 算法时多出 `critic_syncer` 段（port/address/layout=critic_layout_hash/command/checkpoint/tape）。`yeto/rl/learner.py` 新增 `--critic-syncer` → `miles_args.yeto_rl_critic_syncer_addr`。无 critic 时所有字符串/计划不变。
+- **4.2.2 插件**（`state_plugin.py`）：`export_critic_tensors`（每 rank 可训练 critic 参数 fp32 CPU 拷贝 + 哈希）、`import_critic_tensors`（按 rank 写回；名称/形状不符写前拒绝；写后按 fp32 重哈希，不等则拒绝——例如 bf16 参数放不下 fp32 平均值）；均包在 `trainer_resident` 内。`critic_state.py` 新增 `critic_fragments`/`assemble_critic_fragments`（按名排序、按字节预算切 fragment，张量不跨 fragment；拼回时校验 layout、fragment 完整性、内容哈希与 specs）。`MilesTrainerGroup.critic_layout/export_critic_state/import_critic_state`（键 `r<rank>:<chunk>:<name>`）；`critic_state_summary` 的 rank 改用同一 `_rank()`（行为不变）。fake 引擎 trainer 加同名方法。
+- **4.2.3 原子提交**（`bridges.py`）：`StrictAvgSync.boundary` 拆为 `_submit/_await/_commit`（组合后行为与原实现逐步相同）；新 `DualStrictAvgSync`（`OUTER_SYNC_KIND="strict"`）：actor 通道=原 StrictAvgSync，critic 通道=第二个 StrictAvgSync 经 `_CriticDriverView` 连 critic syncer（张量名前缀 `critic.`；`core.py` 名称白名单加 `^critic\.`；通道 layout_hash=critic fp32 张量的 canonical 哈希，config 哈希位放 `critic_layout_hash`）。每轮先推两通道再等两通道，均得 v+1 才先 critic 后 actor 应用；任一失败抛 `CrossChannelCommitError`、两者都不应用，`keep_committed=True` 时把 actor/critic 恢复为上一提交轮内容，生产默认依赖 round-cut 恢复。critic 优化器状态不随 strict 轮重置（只替换权重）。`entry.build_sync`：有 `yeto_rl_critic_syncer_addr` 用 Dual；`use_critic` 但无 critic syncer 时拒绝。decoupled+critic 拒绝早已在 `critic_run_problems` 中（2.3），未改。
+- **4.3 round-cut**（`trainer.py`）：`save_cut` 在 actor 分片后、manifest 提交前经 critic 句柄 `SAVE_CRITIC_CUT` 写 `<cut>/critic/rank-<r>/critic/round-<v>/`（CriticCheckpointStore：权重 + {optimizer, scheduler} state_dict，manifest 最后写），manifest `runtime["critic"]={round, directory, ranks:[rank, weights_sha256, optimizer_sha256]}`（无 critic 时 runtime 不变）；`restore_cut` 在 actor 校验后：pointer 轮次≠actor policy_version 拒绝、有 critic 无 pointer / 无 critic 有 pointer 拒绝，各 rank 经 store 再次校验轮次与 manifest，恢复后权重哈希须等于 pointer。`restore_cut_resharded` 遇 critic 直接拒绝。
+
+验证（CPU，`PYTHONPATH=.:tests /tmp/yeto-venv/bin/python -m pytest`，OMP/OPENBLAS/MKL=1，未启动 Ray）：
+- `tests/test_rl_critic_dual_syncer.py` 12 项全过：dry-run 含两个 syncer/独立端口/检查点/tape、critic-free 计划与 syncer 命令不变、岛 env；fake 双 rank 张量经 fragment 往返哈希一致、写回后再导出哈希一致；fragment 篡改/外来 layout/重复/specs 不符拒绝；写回名称/形状/bf16 写后哈希拒绝；critic cut 保存→新 trainer 恢复后权重/优化器/调度器一致，轮次不一致、无 pointer、无 critic、权重篡改均拒绝；fake 两岛 2 轮 actor 与 critic 平均后哈希一致；critic 通道失败时两岛都抛 `CrossChannelCommitError`、actor 的 v+1 未应用、两 role 回到第 0 轮内容；build_sync 选择 Dual / 缺 critic syncer 拒绝。
+- 回归定向：driver/grpo_knobs/restart_data_cursor/selection/critic_state/critic_ports/core/ledger_faults/argv_snapshot/algorithm_provenance/trainer_cut 等 335 passed 5 skipped；trainer_cut/reshard/cut_plugin/distopt/transition 127 passed；reconfig_x6/rebuild_e1 34 passed。
+- 规格哈希：`evidence/hash_compare.py` 输出 `evidence/hash-s13.txt` 与 `hash-critic.txt` 17 项逐字节相同；`tests/test_rl_argv_snapshot.py` 未改动并通过。
+
+未验证（需 GPU 4.5）：真实 Rust syncer 双进程（同 VM 后台 critic syncer、29401 端口开放、head 模式 SYNCER_PUBLIC_IP 防火墙）；真实 Miles critic 进程内导出/写回（Megatron 参数、TP/PP 分片、offload 唤醒）；Megatron/DistributedOptimizer 的 `optimizer.state_dict()/load_state_dict` 往返（DP>1 分片优化器很可能需按 cut_plugin 方式处理）；全参数 critic 经 StrictRlBridge 的带宽/内存（7B fp32 ≈28 GB/轮）；critic 通道 bf16 参数写回 fp32 平均值必然哈希不等（见下）。
+
+设计问题：
+1. bf16 critic 参数无法精确承载 fp32 平均值：现实现写后按 fp32 重哈希会拒绝。需决定：critic 平均结果先量化到参数 dtype 再比较（哈希以参数 dtype 为准），或保持 fp32 主权重（DistOpt main params）写回。GPU 前需定。
+2. `check_unverified_allowance` 仍禁止 critic 两岛/外层同步（G3 前门控）；4.5 需要用户批准后放开或用专门 allowance。
+3. 跨通道原子性只在 trainer 应用层：actor syncer 已提交 v+1 而 critic 失败时，两个 syncer 的持久检查点可能分叉；恢复以 round-cut（critic 轮=actor 轮）为准，syncer 侧需同轮恢复（与 SAO 模块注释所述相同限制）。
+4. critic 优化器跨 strict 轮保留（actor 每轮 reset）；是否也 reset 待定。
