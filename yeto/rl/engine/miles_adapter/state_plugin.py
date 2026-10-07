@@ -1088,8 +1088,8 @@ def _restore_critic_cut(actor: Any, *, directory: str, actor_round: int,
     try:
         weights, state = CriticCheckpointStore(os.path.join(directory, f"rank-{rank}")).restore(
             actor_round=int(actor_round), critic_round=int(critic_round))
-    except CriticStateError as error:
-        return {"refused": str(error), "rank": rank}
+    except (CriticStateError, OSError, KeyError, ValueError) as error:
+        return {"refused": f"{type(error).__name__}: {error}", "rank": rank}
     params = _critic_parameters(actor)
     if set(params) != set(weights):
         return {"refused": "critic checkpoint tensor names differ from the running critic", "rank": rank}

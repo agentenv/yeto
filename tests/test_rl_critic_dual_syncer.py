@@ -197,3 +197,80 @@ def test_write_back_refusals():
     odd = {k: v + 1e-4 for k, v in bf16.export_critic_state().items()}
     with pytest.raises(cs.CriticStateError, match="written critic hash"):
         bf16.import_critic_state(odd)
+
+
+# -- 4.3 round-cut critic checkpoint (weights + optimizer + scheduler) ------------------
+
+
+def _opt_digest(actor):
+    import hashlib
+
+    state = actor.optimizer.state_dict()["state"]
+    d = hashlib.sha256()
+    for k in sorted(state):
+        for name in sorted(state[k]):
+            v = state[k][name]
+            d.update(torch.as_tensor(v).float().numpy().tobytes())
+    return d.hexdigest()
+
+
+def _manifest(round_id, pointer):
+    return SimpleNamespace(runtime={} if pointer is None else {"critic": pointer},
+                           progress=SimpleNamespace(policy_version=round_id))
+
+
+def test_critic_cut_save_restore_hash_equal(tmp_path):
+    from yeto.rl.engine.cut import CutError
+
+    ranks = [_rank_actor(0), _rank_actor(1)]
+    for actor in ranks:
+        _step(actor)
+    trainer = _critic_trainer(ranks)
+    saved_w = cs.critic_weights_sha256(trainer.export_critic_state())
+    saved_o = [_opt_digest(a) for a in ranks]
+    pointer = trainer._save_critic_cut(tmp_path / "critic", 3)
+    assert pointer["round"] == 3 and [r["rank"] for r in pointer["ranks"]] == [0, 1]
+    json.dumps(pointer)  # goes into the cut manifest runtime
+    # a fresh trainer (new weights, one more step, scheduler elsewhere) restores the cut
+    fresh = [_rank_actor(7), _rank_actor(8)]
+    for actor in fresh:
+        _step(actor)
+        _step(actor)
+    restored = _critic_trainer(fresh)
+    restored._restore_critic_cut(tmp_path / "critic", _manifest(3, pointer))
+    assert cs.critic_weights_sha256(restored.export_critic_state()) == saved_w
+    assert [_opt_digest(a) for a in fresh] == saved_o
+    assert [a.opt_param_scheduler.num_steps for a in fresh] == [8, 8]
+    # round inconsistency: actor round 4 vs critic round 3 is refused
+    with pytest.raises(CutError, match="actor round 4 != critic round 3"):
+        restored._restore_critic_cut(tmp_path / "critic", _manifest(4, pointer))
+    # the store itself also refuses a critic round != actor round (pointer tampered)
+    with pytest.raises(CutError, match="critic restore refused"):
+        restored._restore_critic_cut(tmp_path / "critic", _manifest(4, {**pointer, "round": 4}))
+    with pytest.raises(CutError, match="carries no critic state"):
+        restored._restore_critic_cut(tmp_path / "critic", _manifest(3, None))
+    grpo = MilesTrainerGroup(args=SimpleNamespace(num_steps_per_rollout=1), actor_model=SimpleNamespace(),
+                             learner_id=0, learner_generation=0, parameter_layout_hash=lambda: H)
+    assert grpo._save_critic_cut(tmp_path / "x", 1) is None
+    with pytest.raises(CutError, match="has no critic"):
+        grpo._restore_critic_cut(tmp_path / "critic", _manifest(3, pointer))
+
+
+def test_critic_cut_tampered_weights_refused(tmp_path):
+    from yeto.rl.engine.cut import CutError
+
+    trainer = _critic_trainer([_rank_actor(0)])
+    pointer = trainer._save_critic_cut(tmp_path / "critic", 2)
+    weights = tmp_path / "critic" / "rank-0" / "critic" / "round-2" / "weights.pt"
+    data = torch.load(weights, weights_only=True)
+    torch.save({k: v + 1 for k, v in data.items()}, weights)
+    with pytest.raises(CutError, match="fails its manifest"):
+        _critic_trainer([_rank_actor(1)])._restore_critic_cut(tmp_path / "critic", _manifest(2, pointer))
+
+
+def test_critic_store_refuses_round_mismatch_on_the_rank(tmp_path, monkeypatch):
+    actor = _rank_actor(0)
+    _critic_trainer([actor])._save_critic_cut(tmp_path, 5)
+    monkeypatch.setattr(sp, "_rank", lambda: 0)
+    out = sp.restore_critic_cut(actor, directory=str(tmp_path), actor_round=6, critic_round=5)
+    assert "actor round 6 != critic round 5" in out["refused"]
