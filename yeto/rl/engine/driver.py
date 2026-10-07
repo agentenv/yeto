@@ -744,9 +744,22 @@ class IslandDriver:
                       error=str(error), config_epoch=self.config_epoch)
             raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
         if pending is not None:
+            members = sorted(self.rollout.members())
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERED",
                       recovery_id=pending.get("recovery_id"), config_epoch=self.config_epoch,
-                      members=sorted(self.rollout.members()))
+                      members=members)
+            # S14/A19: a restart recovery re-serves the committed membership of an
+            # epoch whose ``rl_membership`` record went on the *previous*
+            # incarnation's tape (or never, when the learner died right at
+            # COMMITTED). Re-emit it here so a tape-only consumer gets the
+            # membership view of this epoch; the journal (epochs.json /
+            # ``recovery verified``) is unchanged and stays authoritative.
+            journal = getattr(self.controller, "journal", None)
+            epochs = getattr(journal, "epochs", None)
+            config_epoch = pending.get("config_epoch", self.config_epoch)
+            self.emit("rl_membership", config_epoch=config_epoch, members=members,
+                      tx_id=getattr(epochs, "last_tx_id", None), kind="recovered",
+                      round=rollout_id, recovery_id=pending.get("recovery_id"))
 
     def _offload_trainer(self, rollout_id: int) -> None:
         self.phase("offload", rollout_id=rollout_id)
