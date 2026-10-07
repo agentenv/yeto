@@ -52,7 +52,7 @@
 ## 7. VAPO
 
 - [ ] 7.1 按论文核定 VAPO 组件与参数（Open Question），写入 design 补充。验证：progress.md 记录论文出处与参数表，用户确认。
-- [ ] 7.2 fork 上补 VAPO 缺失部分（若有 GAE 外组件），yeto 声明 vapo 并翻译为 PPO+length_adaptive+decoupled+warm-up。验证：fork CPU 对拍测试；yeto 翻译单测与 dry-run 快照。
+- [x] 7.2 fork 上补 VAPO 缺失部分（若有 GAE 外组件），yeto 声明 vapo 并翻译为 PPO+length_adaptive+decoupled+warm-up。验证：fork CPU 对拍测试；yeto 翻译单测与 dry-run 快照。
 - [ ] 7.3 GPU G1 1×H100 3 轮 + G3 1+1×H100 3 轮。**需用户批准预算与机型**，估 G1 ~1 h + G3 ~1 h×2 卡，≈$12（上限 $20）。验证：G1 指标有限后正式声明；G3 哈希一致。
 
 ## 8. SAO 迁移到 ports
