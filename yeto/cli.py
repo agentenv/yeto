@@ -1020,6 +1020,28 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "and pull them into the local run dir (modal-tape/) when the run ends; default off",
     )
     infra.add_argument(
+        "--modal-model-volume",
+        default=None,
+        metavar="NAME",
+        help="Modal RL islands: mount this Modal Volume read-only at /mnt/yeto-models (the "
+        "model-store path) and serve --model@--model-revision from its hf/<name>/<rev[:8]>/ "
+        "snapshot (MANIFEST.json must carry that revision and all_ok); default off",
+    )
+    infra.add_argument(
+        "--modal-memory-gib",
+        type=int,
+        default=None,
+        metavar="GIB",
+        help="Modal islands: container memory request = limit in GiB (default 32 GiB per GPU)",
+    )
+    infra.add_argument(
+        "--modal-cpu",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Modal islands: container CPU cores (default 4 per GPU)",
+    )
+    infra.add_argument(
         "--modal-env",
         action="append",
         default=[],
